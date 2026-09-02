@@ -269,9 +269,10 @@ fn prepare_conversation_turn_from_source(
         .iter()
         .find(|model| model.id == model_id)
         .cloned()
-        .ok_or_else(|| format!("未找到模型配置：{model_id}"))?;
+        .ok_or_else(|| "所选模型配置已不存在，请重新选择模型。".to_string())?;
+    let model_label = model.display_label();
     if !model.enabled {
-        return Err(format!("模型未启用：{model_id}").into());
+        return Err(format!("模型未启用：{model_label}").into());
     }
     if let ConversationTurnInputSource::ExistingAgentProjection { model_snapshot, .. } = &source {
         if model_snapshot.model_config_id != model.id {
@@ -284,12 +285,12 @@ fn prepare_conversation_turn_from_source(
         .provider_connection_revisions
         .get(&model.id)
         .cloned()
-        .ok_or_else(|| format!("模型 {model_id} 的 Provider 连接身份缺失。"))?;
+        .ok_or_else(|| format!("模型 {model_label} 的 Provider 连接身份缺失。"))?;
     let provider_protocol_revision = settings_snapshot
         .provider_protocol_revisions
         .get(&model.id)
         .cloned()
-        .ok_or_else(|| format!("模型 {model_id} 的 Provider Protocol 身份缺失。"))?;
+        .ok_or_else(|| format!("模型 {model_label} 的 Provider Protocol 身份缺失。"))?;
     let context_window_tokens = model.effective_context_window_tokens();
     // Resolve the complete pair once and carry it through the run. Model-level credentials
     // take priority; otherwise both values come from global settings. This prevents a URL
@@ -298,7 +299,7 @@ fn prepare_conversation_turn_from_source(
     let provider_dialect = ProviderProtocolDialect::detect_from_api_url(&connection.api_url);
     let provider_profile_config = model
         .resolved_provider_profile_config(provider_dialect)
-        .map_err(|error| format!("模型 {model_id} 的 Provider Profile 无效：{error}"))?;
+        .map_err(|error| format!("模型 {model_label} 的 Provider Profile 无效：{error}"))?;
     if let ConversationTurnInputSource::ExistingAgentProjection {
         reasoning_effort_snapshot: Some(expected),
         ..
@@ -330,10 +331,10 @@ fn prepare_conversation_turn_from_source(
     let provider_protocol_key = ProviderProtocolKey::new(
         provider_dialect,
         &provider_profile_config,
-        model.id.clone(),
+        model.provider_model_id.clone(),
         Some(provider_protocol_revision.clone()),
     )
-    .map_err(|error| format!("模型 {model_id} 的 Provider Protocol 无效：{error}"))?;
+    .map_err(|error| format!("模型 {model_label} 的 Provider Protocol 无效：{error}"))?;
     if !model.supports_image
         && input
             .attachments
@@ -341,8 +342,7 @@ fn prepare_conversation_turn_from_source(
             .any(|attachment| attachment.kind == AgentInputAttachmentKind::Image)
     {
         return Err(format!(
-            "当前模型「{}」不支持图片输入，请切换支持图片的模型后再发送。",
-            model.display_name
+            "当前模型「{model_label}」不支持图片输入，请切换支持图片的模型后再发送。"
         )
         .into());
     }
@@ -721,7 +721,9 @@ fn prepare_conversation_turn_from_source(
             effective_before_message_id: &user_message_id,
             context: Some(&run_context),
             prompt_preferences: Some(&prompt_preferences),
-            model_id: &model.id,
+            // World State is model-visible. Project the exact provider wire selection, never the
+            // Host-owned local configuration UUID stored on the conversation.
+            model_id: &model.provider_model_id,
             model_capabilities,
             active_summary: context_compaction_summary.as_ref(),
             created_at: timestamp,
@@ -748,7 +750,8 @@ fn prepare_conversation_turn_from_source(
         search_connection_revision: Some(settings_snapshot.search_connection_revision),
         provider_profile_config: Some(provider_profile_config),
         provider_protocol_key: Some(provider_protocol_key),
-        model: model.id.clone(),
+        model_config_id: Some(model.id.clone()),
+        model: model.provider_model_id.clone(),
         model_capabilities,
         api_style: Some(provider_dialect.api_style()),
         context_window_tokens: Some(context_window_tokens),

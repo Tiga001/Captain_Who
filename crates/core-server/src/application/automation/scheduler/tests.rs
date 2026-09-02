@@ -36,6 +36,7 @@ fn model_settings() -> ModelSettingsRecord {
         tavily_api_key: String::new(),
         models: vec![ModelConfigRecord {
             id: TEST_MODEL_ID.to_string(),
+            provider_model_id: TEST_MODEL_ID.to_string(),
             display_name: "Model 1".to_string(),
             api_url_override: None,
             api_token_override: None,

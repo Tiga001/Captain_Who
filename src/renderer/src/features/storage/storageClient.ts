@@ -362,6 +362,7 @@ function mapModelSettingsToStorage(
 function mapModelFromStorage(model: StorageModelConfigRecord): ModelConfig {
   return {
     id: model.id,
+    providerModelId: model.providerModelId,
     displayName: model.displayName,
     apiUrlOverride: model.apiUrlOverride ?? undefined,
     apiTokenOverride: model.apiTokenOverride ?? undefined,
@@ -381,12 +382,12 @@ function mapModelToStorage(
 ): StorageModelSettingsUpdateRecord['models'][number] {
   return {
     id: model.id,
+    providerModelId: model.providerModelId,
     displayName: model.displayName,
     apiUrlOverride: model.apiUrlOverride ?? null,
     apiTokenOverride: model.apiTokenOverride ?? null,
     supportsImage: model.supportsImage,
     contextWindowTokens: model.contextWindowTokens ?? null,
-    previousModelId: model.previousModelId ?? null,
     providerProfileUpdate: model.providerProfileUpdate,
     inputPrice: model.inputPrice,
     cachedInputPrice: model.cachedInputPrice,

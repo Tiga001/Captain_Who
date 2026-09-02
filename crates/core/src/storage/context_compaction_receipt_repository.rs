@@ -222,7 +222,7 @@ pub fn provider_transition_failed_attempt_count(
             "SELECT COUNT(*)
              FROM context_compaction_receipts
              WHERE conversation_id = ?1
-               AND model = ?2
+               AND COALESCE(json_extract(receipt_json, '$.modelConfigId'), model) = ?2
                AND operation_id LIKE 'provider-transition-%'
                AND status IN ('failed', 'cancelled', 'interrupted')",
             params![conversation_id, target_model_id],
@@ -321,6 +321,7 @@ fn validate_transition(
         || existing.assistant_message_id != next.assistant_message_id
         || existing.request_index != next.request_index
         || existing.attempt_index != next.attempt_index
+        || existing.model_config_id != next.model_config_id
         || existing.model != next.model
         || existing.provider_transition_source_model_display_name
             != next.provider_transition_source_model_display_name
@@ -495,6 +496,7 @@ mod tests {
             assistant_message_id: "assistant-1".to_string(),
             request_index: 1,
             attempt_index: 1,
+            model_config_id: None,
             model: "test-model".to_string(),
             provider_transition_source_model_display_name: None,
             provider_transition_target_model_display_name: None,
@@ -589,7 +591,8 @@ mod tests {
             let mut receipt = planned_receipt();
             receipt.operation_id = operation_id.to_string();
             receipt.run_id = run_id.to_string();
-            receipt.model = "target-model".to_string();
+            receipt.model_config_id = Some("target-model-config".to_string());
+            receipt.model = "provider-wire-model".to_string();
             receipt.started_at = 5;
             receipt.updated_at = 5;
             record_receipt(&mut connection, &receipt, None).unwrap();
@@ -600,9 +603,45 @@ mod tests {
         }
 
         assert_eq!(
-            provider_transition_failed_attempt_count(&connection, "conversation-1", "target-model")
-                .unwrap(),
+            provider_transition_failed_attempt_count(
+                &connection,
+                "conversation-1",
+                "target-model-config"
+            )
+            .unwrap(),
             2
+        );
+        assert_eq!(
+            provider_transition_failed_attempt_count(
+                &connection,
+                "conversation-1",
+                "provider-wire-model"
+            )
+            .unwrap(),
+            0,
+            "current receipts are counted by local configuration identity, not provider wire ID"
+        );
+
+        let mut legacy = planned_receipt();
+        legacy.operation_id = "provider-transition-legacy".to_string();
+        legacy.run_id = "transition-run-legacy".to_string();
+        legacy.model = "legacy-shared-model-id".to_string();
+        legacy.started_at = 6;
+        legacy.updated_at = 6;
+        record_receipt(&mut connection, &legacy, None).unwrap();
+        legacy
+            .complete_error(&crate::AgentError::new("failed"), None, 6)
+            .unwrap();
+        record_receipt(&mut connection, &legacy, None).unwrap();
+        assert_eq!(
+            provider_transition_failed_attempt_count(
+                &connection,
+                "conversation-1",
+                "legacy-shared-model-id"
+            )
+            .unwrap(),
+            1,
+            "v1 receipts without modelConfigId retain the historical shared-ID fallback"
         );
     }
 

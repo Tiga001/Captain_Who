@@ -421,7 +421,13 @@ impl AgentService {
             last_access: self.next_conversation_context_state_access(),
         };
         self.insert_conversation_context_state(conversation_id, entry);
-        self.emit_derived_context_window_snapshot(notifications, run_id, conversation_id, snapshot);
+        self.emit_derived_context_window_snapshot(
+            notifications,
+            agent_input,
+            run_id,
+            conversation_id,
+            snapshot,
+        );
         Ok(runtime_baseline)
     }
 
@@ -504,6 +510,7 @@ impl AgentService {
         if changed && model_context_changed {
             self.emit_derived_context_window_snapshot(
                 notifications,
+                agent_input,
                 run_id,
                 conversation_id,
                 update.snapshot,
@@ -887,6 +894,7 @@ impl AgentService {
         ) {
             Ok(update) if trace_changed => self.emit_derived_context_window_snapshot(
                 notifications,
+                &record.agent_input,
                 run_id,
                 conversation_id,
                 update.snapshot,

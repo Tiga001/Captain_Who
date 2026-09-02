@@ -213,6 +213,7 @@ async fn runtime_tool_registry_bridge_manager_stdio_fixture_chain() {
         search_connection_revision: None,
         provider_profile_config: Some(provider_profile),
         provider_protocol_key: Some(provider_protocol_key),
+        model_config_id: None,
         model: "fixed-model-fixture".to_string(),
         model_capabilities: ModelCapabilities::default(),
         api_style: Some(AgentApiStyle::OpenAiCompatible),

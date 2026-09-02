@@ -640,6 +640,7 @@ mod tests {
             search_connection_revision: None,
             provider_profile_config: Some(provider_profile),
             provider_protocol_key: Some(provider_protocol_key),
+            model_config_id: None,
             model: "summary-model".to_string(),
             model_capabilities: crate::ModelCapabilities::default(),
             api_style: Some(api_style),

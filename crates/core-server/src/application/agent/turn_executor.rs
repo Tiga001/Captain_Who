@@ -1609,14 +1609,23 @@ impl AgentService {
         );
         let model_request_observer =
             self.model_request_observer(&run_id, &conversation_id, &assistant_message_id);
-        let context_window_observer = agent_input.context_window_indicator_enabled.then(|| {
-            self.context_window_observer(
-                &run_id,
-                &conversation_id,
-                &agent_input.model,
-                notifications.clone(),
-            )
-        });
+        let context_window_observer = agent_input
+            .context_window_indicator_enabled
+            .then(|| {
+                agent_input
+                    .model_config_id
+                    .as_deref()
+                    .map(|model_config_id| {
+                        self.context_window_observer(
+                            &run_id,
+                            &conversation_id,
+                            model_config_id,
+                            &agent_input.model,
+                            notifications.clone(),
+                        )
+                    })
+            })
+            .flatten();
         let mut host_services = AgentRuntimeHostServices::new()
             .with_host_actions(host_executor, self.storage.clone())
             .with_command_session_executor(Arc::new(self.command_sessions.clone()))

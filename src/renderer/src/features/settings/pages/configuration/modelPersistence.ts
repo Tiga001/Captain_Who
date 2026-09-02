@@ -10,9 +10,9 @@ export function modelConfigFromForm(
   values: ModelFormValues,
   editingModel?: ModelConfig
 ): ModelConfig | ModelConfigSaveDraft {
-  return {
-    id: values.id,
-    displayName: values.displayName || values.id,
+  const fields = {
+    providerModelId: values.providerModelId,
+    displayName: values.displayName,
     apiUrlOverride: values.apiUrlOverride || undefined,
     apiTokenOverride: values.apiTokenOverride || undefined,
     supportsImage: values.supportsImage,
@@ -20,13 +20,19 @@ export function modelConfigFromForm(
       values.contextWindowTokens.trim().length > 0
         ? Number(values.contextWindowTokens.replaceAll(',', ''))
         : undefined,
-    // The persisted config is read-only presentation state. Host consumes the explicit update,
-    // resolves its version/dialect, and returns the normalized authoritative config.
-    ...(editingModel ? { providerProfileConfig: editingModel.providerProfileConfig } : {}),
     providerProfileUpdate: values.providerProfileUpdate,
     inputPrice: values.inputPrice,
     cachedInputPrice: values.cachedInputPrice,
     outputPrice: values.outputPrice,
     enabled: editingModel?.enabled ?? true
+  }
+
+  if (!editingModel) return { ...fields, id: null }
+  return {
+    ...fields,
+    id: editingModel.id,
+    // The persisted config is read-only presentation state. Host consumes the explicit update,
+    // resolves its version/dialect, and returns the normalized authoritative config.
+    providerProfileConfig: editingModel.providerProfileConfig
   }
 }

@@ -30,6 +30,7 @@ const CUSTOM_PERMISSIONS: AgentPermissions = {
 
 interface HarnessProps {
   customPermissions?: AgentPermissions
+  eventModelConfigId?: string
   eventSnapshot?: AgentContextWindowSnapshot
   modelId?: string
   permissionMode?: ChatPermissionMode
@@ -39,6 +40,7 @@ interface HarnessProps {
 
 function Harness({
   customPermissions = CUSTOM_PERMISSIONS,
+  eventModelConfigId = 'model-1',
   eventSnapshot,
   modelId = 'model-1',
   permissionMode = 'default',
@@ -60,7 +62,10 @@ function Harness({
     <div>
       <output data-testid="input-tokens">{activeSnapshot?.inputTokens ?? 'none'}</output>
       {eventSnapshot ? (
-        <button onClick={() => recordSnapshot('conversation-1', eventSnapshot)} type="button">
+        <button
+          onClick={() => recordSnapshot('conversation-1', eventModelConfigId, eventSnapshot)}
+          type="button"
+        >
           record event
         </button>
       ) : null}
@@ -68,7 +73,7 @@ function Harness({
   )
 }
 
-function snapshot(inputTokens: number, model = 'model-1'): AgentContextWindowSnapshot {
+function snapshot(inputTokens: number, model = 'provider-model-1'): AgentContextWindowSnapshot {
   return {
     model,
     status: 'within_budget',
@@ -101,7 +106,18 @@ function deferred<Value>() {
 
 describe('useContextWindowSnapshots', () => {
   beforeEach(() => {
-    agentClient.getContextWindowSnapshot.mockReset().mockResolvedValue({ snapshot: null })
+    agentClient.getContextWindowSnapshot.mockReset().mockResolvedValue({ modelConfigId: 'model-1' })
+  })
+
+  it('indexes an inspection by Host-owned modelConfigId while retaining the provider wire model', async () => {
+    agentClient.getContextWindowSnapshot.mockResolvedValueOnce({
+      modelConfigId: 'model-1',
+      snapshot: snapshot(21_000, 'provider-wire-model')
+    })
+
+    const screen = await render(<Harness skills={[]} />)
+
+    await expect.element(screen.getByTestId('input-tokens')).toHaveTextContent('21000')
   })
 
   it('does not repeat the RPC when equivalent skills and permissions get new references', async () => {
@@ -181,14 +197,17 @@ describe('useContextWindowSnapshots', () => {
   it('keeps a running event snapshot when the older inspection request completes later', async () => {
     const inspection = deferred<AgentContextWindowSnapshotOutput>()
     agentClient.getContextWindowSnapshot.mockReturnValueOnce(inspection.promise)
-    const eventSnapshot = snapshot(42_000)
+    const eventSnapshot = snapshot(42_000, 'shared-provider-wire-model')
     const screen = await render(<Harness eventSnapshot={eventSnapshot} skills={[]} />)
     await expect.poll(() => agentClient.getContextWindowSnapshot.mock.calls.length).toBe(1)
 
     await screen.getByRole('button', { name: 'record event' }).click()
     await expect.element(screen.getByTestId('input-tokens')).toHaveTextContent('42000')
 
-    inspection.resolve({ snapshot: snapshot(10_000) })
+    inspection.resolve({
+      modelConfigId: 'model-1',
+      snapshot: snapshot(10_000, 'shared-provider-wire-model')
+    })
     await inspection.promise
     await expect.element(screen.getByTestId('input-tokens')).toHaveTextContent('42000')
   })

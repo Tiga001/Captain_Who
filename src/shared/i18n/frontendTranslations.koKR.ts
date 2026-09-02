@@ -2038,10 +2038,11 @@ export const koKRTranslations = {
   'configuration.confirmDelete': '이 모델을 삭제하시겠습니까?',
   'configuration.cancel': '취소',
   'configuration.done': '완료',
-  'configuration.modelId': '모델 ID',
-  'configuration.modelIdPlaceholder': '예: 클로드-오푸스-4-7',
+  'configuration.providerModelId': '제공자 모델 ID',
+  'configuration.providerModelIdPlaceholder': '예: deepseek-chat',
   'configuration.displayName': '표시 이름',
-  'configuration.displayNamePlaceholder': '모델 ID를 사용하려면 비워두세요.',
+  'configuration.displayNamePlaceholder': '예: Kimi K3 High',
+  'configuration.invalidDisplayName': '표시 이름은 UTF-8 기준 512바이트 이하여야 합니다.',
   'configuration.contextWindowTokens': '총 컨텍스트 창(토큰)',
   'configuration.contextWindowTokensPlaceholder': '공백은 기본값 128000을 사용합니다.',
   'configuration.invalidContextWindowTokens': '0보다 큰 정수를 입력하세요.',
@@ -2054,9 +2055,10 @@ export const koKRTranslations = {
   'configuration.loadFailed': '모델 설정을 로드하지 못했습니다.',
   'configuration.saveFailed': '모델 설정을 저장하지 못했습니다.',
   'configuration.saveFailedSafe':
-    '모델 설정을 저장할 수 없습니다. 마지막으로 성공적으로 저장된 설정이 복원되었습니다. 다시 시도해 주세요.',
-  'configuration.duplicateModelId':
-    'ID가 "{modelId}"인 모델이 이미 존재합니다. 다른 모델 ID를 사용해 주세요.',
+    '모델 설정을 저장할 수 없습니다. 편집 내용은 그대로 보존되었으니 확인 후 다시 시도하세요.',
+  'configuration.duplicateDisplayNameTitle': '표시 이름이 이미 있습니다',
+  'configuration.duplicateDisplayName':
+    '표시 이름이 "{displayName}"인 모델이 이미 있습니다. 다른 표시 이름을 사용하세요.',
   'configuration.saving': '저장 중…',
   'configuration.supportsImageInput': '이미지 입력 지원',
   'configuration.more': '더보기',

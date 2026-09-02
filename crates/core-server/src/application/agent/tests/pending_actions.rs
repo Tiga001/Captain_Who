@@ -245,6 +245,7 @@ fn freeze_provider_protocol(
         Some(format!("search-connection-v1:{}", uuid::Uuid::new_v4()));
     input.provider_profile_config = Some(config);
     input.provider_protocol_key = Some(key);
+    input.model_config_id = Some(input.model.clone());
 }
 
 #[tokio::test]
@@ -7380,6 +7381,7 @@ fn pending_resume_sqlite_row_contains_only_versioned_secret_free_projection() {
     edited.models[0].input_price = "1.5".to_string();
     edited.models.push(ModelConfigRecord {
         id: "unrelated-restart-model".to_string(),
+        provider_model_id: "unrelated-restart-model".to_string(),
         display_name: "Unrelated Restart Model".to_string(),
         api_url_override: Some("https://unrelated-restart.example/v1".to_string()),
         api_token_override: Some("unrelated-restart-token".to_string()),
@@ -7473,7 +7475,7 @@ fn frozen_provider_resume_input_with_profile(
         approval_status: AgentApprovalStatus::Required,
         reason: None,
     };
-    input.resume_checkpoint = Some(test_pending_resume_checkpoint_for_call(
+    let mut checkpoint = test_pending_resume_checkpoint_for_call(
         storage,
         "provider-resume-run",
         None,
@@ -7481,7 +7483,10 @@ fn frozen_provider_resume_input_with_profile(
         AgentToolIdentity::Builtin {
             tool_name: call.tool.clone(),
         },
-    ));
+    );
+    checkpoint.provider_profile_config = input.provider_profile_config.clone().unwrap();
+    checkpoint.provider_protocol_key = input.provider_protocol_key.clone().unwrap();
+    input.resume_checkpoint = Some(checkpoint);
     PersistedAgentResumeInput::decode(
         &PersistedAgentResumeInput::from_agent_input(&input)
             .unwrap()
@@ -7654,6 +7659,62 @@ fn pending_resume_rejects_provider_token_replacement_at_the_same_endpoint() {
 }
 
 #[test]
+fn pending_resume_selects_local_config_when_provider_model_id_is_shared() {
+    let fixture = tempdir().unwrap();
+    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let selected_endpoint = "https://selected-provider.example/v1";
+    let selected_token = "selected-provider-token";
+    save_test_pending_provider(
+        &storage,
+        "test-model",
+        "https://global-provider.example/v1",
+        "global-provider-token",
+        "disabled",
+        "",
+    );
+
+    let mut settings = storage.load_model_settings().unwrap().unwrap();
+    settings.models[0].api_url_override = Some(selected_endpoint.to_string());
+    settings.models[0].api_token_override = Some(selected_token.to_string());
+    let decoy = ModelConfigRecord {
+        id: "decoy-model-config".to_string(),
+        provider_model_id: "test-model".to_string(),
+        display_name: "Decoy model config".to_string(),
+        api_url_override: Some("https://decoy-provider.example/v1".to_string()),
+        api_token_override: Some("decoy-provider-token".to_string()),
+        supports_image: false,
+        context_window_tokens: Some(64_000),
+        provider_profile_config: mycopilot_core::ProviderProfileConfig::generic_for_dialect(
+            mycopilot_core::ProviderProtocolDialect::OpenAiChatCompletions,
+        ),
+        input_price: "0".to_string(),
+        cached_input_price: String::new(),
+        output_price: "0".to_string(),
+        enabled: true,
+    };
+    settings.models.insert(0, decoy);
+    storage.save_model_settings(settings).unwrap();
+
+    let frozen = frozen_provider_resume_input(
+        &storage,
+        selected_endpoint,
+        selected_token,
+        "disabled",
+        None,
+    );
+    assert_eq!(
+        frozen.agent_input.model_config_id.as_deref(),
+        Some("test-model")
+    );
+    assert_eq!(frozen.agent_input.model, "test-model");
+
+    let restored = restore_agent_input_secrets(&storage, frozen).unwrap();
+    assert_eq!(restored.api_url, selected_endpoint);
+    assert_eq!(restored.api_token, selected_token);
+    assert_ne!(restored.api_url, "https://decoy-provider.example/v1");
+}
+
+#[test]
 fn pending_resume_rejects_tokenless_to_token_presence_drift() {
     let fixture = tempdir().unwrap();
     let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
@@ -7696,6 +7757,7 @@ fn pending_resume_preserves_frozen_protocol_across_unrelated_model_settings_edit
     settings.models[0].input_price = "1.5".to_string();
     settings.models.push(ModelConfigRecord {
         id: "unrelated-model".to_string(),
+        provider_model_id: "unrelated-model".to_string(),
         display_name: "Unrelated Model".to_string(),
         api_url_override: Some("https://unrelated-provider.example/v1".to_string()),
         api_token_override: Some("unrelated-token".to_string()),
@@ -7778,7 +7840,6 @@ fn pending_resume_preserves_frozen_deepseek_profile_after_host_selects_generic()
         .as_object_mut()
         .unwrap()
         .remove("providerProfileConfig");
-    request["models"][0]["previousModelId"] = json!("test-model");
     request["models"][0]["providerProfileUpdate"] = json!({"kind": "select_generic"});
     storage
         .save_model_settings_request(
@@ -8102,6 +8163,7 @@ fn terminal_pending_action_persistence_redacts_run_scoped_skill_bodies() {
         Some(format!("provider-connection-v1:{}", uuid::Uuid::new_v4()));
     agent_input.search_connection_revision =
         Some(format!("search-connection-v1:{}", uuid::Uuid::new_v4()));
+    agent_input.model_config_id = Some("test-model-config".to_string());
     agent_input.provider_profile_config = Some(provider_profile_config.clone());
     agent_input.provider_protocol_key = Some(provider_protocol_key.clone());
     agent_input.skill_activation = Some(AgentSkillActivation {

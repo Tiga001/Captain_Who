@@ -1778,21 +1778,21 @@ fn image_artifact_read_contract_is_path_free_and_redacts_content_debug() {
 
 #[test]
 fn model_settings_validation_error_data_has_a_closed_stable_shape() {
-    let data = StorageModelSettingsValidationErrorData::duplicate_model_id("deepseek-v4-flash");
+    let data = StorageModelSettingsValidationErrorData::duplicate_display_name("DeepSeek V4 Flash");
     assert_eq!(
         serde_json::to_value(&data).unwrap(),
         serde_json::json!({
             "kind": "model_settings_validation",
-            "code": "duplicate_model_id",
-            "modelId": "deepseek-v4-flash",
+            "code": "duplicate_display_name",
+            "displayName": "DeepSeek V4 Flash",
         })
     );
 
     assert!(
         serde_json::from_value::<StorageModelSettingsValidationErrorData>(serde_json::json!({
             "kind": "model_settings_validation",
-            "code": "duplicate_model_id",
-            "modelId": "model-a",
+            "code": "duplicate_display_name",
+            "displayName": "Model A",
             "apiToken": "must-not-cross",
         }))
         .is_err()
@@ -1801,7 +1801,25 @@ fn model_settings_validation_error_data_has_a_closed_stable_shape() {
         serde_json::from_value::<StorageModelSettingsValidationErrorData>(serde_json::json!({
             "kind": "model_settings_validation",
             "code": "unknown",
-            "modelId": "model-a",
+            "displayName": "Model A",
+        }))
+        .is_err()
+    );
+
+    let boundary_name = "x".repeat(STORAGE_MODEL_DISPLAY_NAME_MAX_BYTES);
+    assert!(
+        serde_json::from_value::<StorageModelSettingsValidationErrorData>(serde_json::json!({
+            "kind": "model_settings_validation",
+            "code": "duplicate_display_name",
+            "displayName": boundary_name,
+        }))
+        .is_ok()
+    );
+    assert!(
+        serde_json::from_value::<StorageModelSettingsValidationErrorData>(serde_json::json!({
+            "kind": "model_settings_validation",
+            "code": "duplicate_display_name",
+            "displayName": "x".repeat(STORAGE_MODEL_DISPLAY_NAME_MAX_BYTES + 1),
         }))
         .is_err()
     );

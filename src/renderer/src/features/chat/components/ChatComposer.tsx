@@ -53,6 +53,7 @@ import { ComposerSelectedSkills, ComposerSkillPicker } from './ComposerSkillPick
 import { GuidanceQueue } from './GuidanceQueue'
 import { useImagePreview } from './ImagePreview'
 import { ModelConfigPicker } from '../../modelSelection/ModelConfigPicker'
+import { formatModelConfigLabel } from '../../modelSelection/modelConfigPresentation'
 import {
   CHAT_PERMISSION_PRESENTATIONS,
   getChatPermissionPresentation
@@ -887,7 +888,7 @@ export function ChatComposer({
                 : t('configuration.text'),
               capabilitySupported: model.supportsImage,
               id: model.id,
-              label: model.displayName
+              label: formatModelConfigLabel(model)
             }))}
             value={selectedModel?.id ?? null}
             variant="composer"

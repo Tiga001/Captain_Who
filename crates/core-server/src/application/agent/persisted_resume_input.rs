@@ -8,7 +8,7 @@ use mycopilot_core::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-const PERSISTED_AGENT_RESUME_INPUT_SCHEMA_VERSION: u32 = 10;
+const PERSISTED_AGENT_RESUME_INPUT_SCHEMA_VERSION: u32 = 11;
 
 fn deserialize_required_nullable<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
 where
@@ -43,6 +43,10 @@ pub(super) struct PersistedAgentResumeInput {
     /// Tokenless local providers remain supported, while a run that originally had a credential
     /// cannot silently resume without one.
     provider_credential_required: bool,
+    /// Stable local model-configuration identity. It owns settings revisions and Usage; it is
+    /// never sent to the Provider.
+    model_config_id: String,
+    /// Exact Provider wire model identifier.
     model: String,
     model_capabilities: ModelCapabilities,
     #[serde(deserialize_with = "deserialize_required_nullable")]
@@ -175,6 +179,14 @@ impl PersistedAgentResumeInput {
                 "pending Agent input Provider Protocol provenance is inconsistent".to_string(),
             );
         }
+        let model_config_id = input
+            .model_config_id
+            .as_deref()
+            .filter(|value| !value.trim().is_empty() && value.trim() == *value)
+            .ok_or_else(|| {
+                "pending Agent input is missing its local model configuration identity".to_string()
+            })?
+            .to_string();
         if input.resume_checkpoint.as_ref().is_some_and(|checkpoint| {
             checkpoint.provider_profile_config != provider_profile_config
                 || checkpoint.provider_protocol_key != provider_protocol_key
@@ -224,6 +236,7 @@ impl PersistedAgentResumeInput {
             provider_protocol_key,
             provider_endpoint_digest: sha256_hex(input.api_url.as_bytes()),
             provider_credential_required: !input.api_token.trim().is_empty(),
+            model_config_id,
             model: input.model.clone(),
             model_capabilities: input.model_capabilities,
             api_style: Some(
@@ -331,7 +344,10 @@ impl PersistedAgentResumeInput {
         {
             return Err(PersistedAgentResumeInputError::InvalidShape);
         }
-        if self.model.trim().is_empty() {
+        if self.model_config_id.trim().is_empty()
+            || self.model_config_id.trim() != self.model_config_id
+            || self.model.trim().is_empty()
+        {
             return Err(PersistedAgentResumeInputError::InvalidShape);
         }
         if self
@@ -361,6 +377,7 @@ impl PersistedAgentResumeInput {
                 search_connection_revision: Some(self.search_connection_revision),
                 provider_profile_config: Some(self.provider_profile_config),
                 provider_protocol_key: Some(self.provider_protocol_key),
+                model_config_id: Some(self.model_config_id),
                 model: self.model,
                 model_capabilities: self.model_capabilities,
                 api_style: self.api_style,
@@ -535,6 +552,7 @@ mod tests {
             Some(format!("search-connection-v1:{}", uuid::Uuid::new_v4()));
         input.provider_profile_config = Some(provider_profile_config);
         input.provider_protocol_key = Some(provider_protocol_key);
+        input.model_config_id = Some("model-config-test".to_string());
         input
     }
 
@@ -565,6 +583,8 @@ mod tests {
         assert!(!encoded.contains(SEARCH_KEY_CANARY));
         assert!(!encoded.contains("raw messages are checkpoint-owned"));
         let encoded_object = serde_json::from_str::<Value>(&encoded).unwrap();
+        assert_eq!(encoded_object["modelConfigId"], "model-config-test");
+        assert_eq!(encoded_object["model"], "test-model");
         assert_eq!(
             encoded_object
                 .get("resumeInputSchemaVersion")
@@ -593,6 +613,11 @@ mod tests {
         assert!(restored.provider_credential_required);
         assert!(restored.search_credential_required);
         let restored = restored.agent_input;
+        assert_eq!(
+            restored.model_config_id.as_deref(),
+            Some("model-config-test")
+        );
+        assert_eq!(restored.model, "test-model");
         assert_eq!(restored.api_style, Some(AgentApiStyle::OpenAiCompatible));
         assert!(restored.api_url.is_empty());
         assert!(restored.api_token.is_empty());
@@ -689,6 +714,15 @@ mod tests {
 
     #[test]
     fn incomplete_or_diverged_provider_freeze_fails_without_panicking() {
+        let mut missing_model_owner = input();
+        missing_model_owner.model_config_id = None;
+        assert_eq!(
+            PersistedAgentResumeInput::from_agent_input(&missing_model_owner)
+                .err()
+                .unwrap(),
+            "pending Agent input is missing its local model configuration identity"
+        );
+
         let mut missing_checkpoint = input();
         missing_checkpoint.resume_checkpoint = None;
         assert_eq!(
@@ -783,7 +817,7 @@ mod tests {
             PersistedAgentResumeInputError::UnsupportedOrMalformed
         );
 
-        for unsupported_version in [0, 5, 6, 7, 8] {
+        for unsupported_version in [0, 5, 6, 7, 8, 9, 10] {
             let mut old_version = serde_json::from_str::<Value>(&encoded).unwrap();
             old_version["resumeInputSchemaVersion"] = Value::from(unsupported_version);
             assert_eq!(

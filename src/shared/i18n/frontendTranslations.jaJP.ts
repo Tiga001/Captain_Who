@@ -2096,10 +2096,11 @@ export const jaJPTranslations = {
   'configuration.confirmDelete': 'このモデルを削除しますか?',
   'configuration.cancel': 'キャンセル',
   'configuration.done': '完了',
-  'configuration.modelId': 'モデルID',
-  'configuration.modelIdPlaceholder': '例: クロード作品-4-7',
+  'configuration.providerModelId': 'プロバイダーモデル ID',
+  'configuration.providerModelIdPlaceholder': '例: deepseek-chat',
   'configuration.displayName': '表示名',
-  'configuration.displayNamePlaceholder': 'モデル ID を使用するには空のままにしておきます',
+  'configuration.displayNamePlaceholder': '例: Kimi K3 High',
+  'configuration.invalidDisplayName': '表示名は 512 UTF-8 バイト以内にしてください',
   'configuration.contextWindowTokens': '合計コンテキスト ウィンドウ (トークン)',
   'configuration.contextWindowTokensPlaceholder':
     '空白の場合はデフォルト値 128000 が使用されます。',
@@ -2113,9 +2114,10 @@ export const jaJPTranslations = {
   'configuration.loadFailed': 'モデル設定のロードに失敗しました',
   'configuration.saveFailed': 'モデル設定の保存に失敗しました',
   'configuration.saveFailedSafe':
-    'モデル設定を保存できません。最後に正常に保存された設定が復元されました。もう一度試してください。',
-  'configuration.duplicateModelId':
-    'ID「{modelId}」のモデルはすでに存在します。別のモデル ID を使用してください。',
+    'モデル設定を保存できません。編集内容は保持されています。確認してもう一度お試しください。',
+  'configuration.duplicateDisplayNameTitle': '表示名はすでに存在します',
+  'configuration.duplicateDisplayName':
+    '表示名「{displayName}」のモデルはすでに存在します。別の表示名を使用してください。',
   'configuration.saving': '保存中…',
   'configuration.supportsImageInput': '画像入力をサポート',
   'configuration.more': 'もっと見る',

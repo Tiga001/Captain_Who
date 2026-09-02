@@ -13,13 +13,14 @@ fn connection() -> Connection {
     connection
         .execute_batch(
             "INSERT INTO models (
-                id, display_name, api_url_override, api_token_override,
+                id, provider_model_id, display_name, normalized_display_name,
+                api_url_override, api_token_override,
                 supports_image, context_window_tokens, provider_profile_config_json,
                 provider_connection_revision, provider_protocol_revision,
                 input_price, cached_input_price, output_price,
                 enabled, position, created_at, updated_at
              ) VALUES (
-                'model-a', 'Model A', NULL, NULL,
+                'model-a', 'model-a', 'Model A', 'model a', NULL, NULL,
                 0, 4096, '{}',
                 'provider-connection-v1:test', 'provider-protocol-v1:test',
                 '0', '', '0', 1, 0, 1, 1
@@ -705,6 +706,7 @@ fn saving_model_settings_updates_existing_ids_without_false_deletion_blocking() 
         tavily_api_key: String::new(),
         models: vec![ModelConfigRecord {
             id: "model-a".to_string(),
+            provider_model_id: "model-a".to_string(),
             display_name: "Renamed Model A".to_string(),
             api_url_override: None,
             api_token_override: None,

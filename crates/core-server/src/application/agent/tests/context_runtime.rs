@@ -167,6 +167,7 @@ async fn compaction_host_prepares_generates_commits_and_rebuilds_running_state()
         assistant_message_id: prepare_request.assistant_message_id.clone(),
         request_index: 1,
         attempt_index: 1,
+        model_config_id: None,
         model: "model-1".to_string(),
         provider_transition_source_model_display_name: None,
         provider_transition_target_model_display_name: None,
@@ -225,6 +226,7 @@ async fn compaction_host_prepares_generates_commits_and_rebuilds_running_state()
         assistant_message_id: prepare_request.assistant_message_id.clone(),
         request_index: 1,
         attempt_index: 1,
+        model_config_id: None,
         model: "model-1".to_string(),
         provider_transition_source_model_display_name: None,
         provider_transition_target_model_display_name: None,
@@ -308,6 +310,10 @@ async fn compaction_host_prepares_generates_commits_and_rebuilds_running_state()
     assert_eq!(
         context_event["params"]["type"].as_str(),
         Some("context_window_updated")
+    );
+    assert_eq!(
+        context_event["params"]["modelConfigId"].as_str(),
+        Some("model-1")
     );
     assert!(context_event["params"]["snapshot"]["inputTokens"]
         .as_u64()

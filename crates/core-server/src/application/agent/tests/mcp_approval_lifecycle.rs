@@ -264,6 +264,7 @@ fn save_deepseek_approval_provider(
             tavily_api_key: String::new(),
             models: vec![ModelConfigRecord {
                 id: model_id.to_string(),
+                provider_model_id: model_id.to_string(),
                 display_name: "DeepSeek approval continuation fixture".to_string(),
                 api_url_override: None,
                 api_token_override: None,
@@ -443,7 +444,6 @@ async fn run_deepseek_restart(
             .as_object_mut()
             .unwrap()
             .remove("providerProfileConfig");
-        changed_request["models"][0]["previousModelId"] = json!(model_id);
         changed_request["models"][0]["providerProfileUpdate"] = json!({"kind": "select_generic"});
         let changed_settings =
             storage
@@ -866,7 +866,6 @@ async fn pending_generic_run_stays_frozen_when_next_run_switches_to_deepseek() {
         .as_object_mut()
         .unwrap()
         .remove("providerProfileConfig");
-    update["models"][0]["previousModelId"] = json!(model_id);
     update["models"][0]["providerProfileUpdate"] = json!({
         "kind": "select_registered_profile",
         "profileId": "deepseek_v4_chat",

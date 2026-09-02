@@ -286,6 +286,7 @@ fn two_model_settings(
     let mut settings = test_model_settings();
     let mut target = settings.models[0].clone();
     target.id = "model-2".to_string();
+    target.provider_model_id = "model-2".to_string();
     target.display_name = "Model 2".to_string();
     target.provider_profile_config = target_profile.unwrap_or_else(|| {
         mycopilot_core::ProviderProfileConfig::generic_for_dialect(

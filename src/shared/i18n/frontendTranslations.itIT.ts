@@ -2158,10 +2158,11 @@ export const itITTranslations = {
   'configuration.confirmDelete': 'Eliminare questo modello?',
   'configuration.cancel': 'Annulla',
   'configuration.done': 'Fatto',
-  'configuration.modelId': 'ID modello',
-  'configuration.modelIdPlaceholder': 'Esempio: claude-opus-4-7',
+  'configuration.providerModelId': 'ID modello del fornitore',
+  'configuration.providerModelIdPlaceholder': 'Esempio: deepseek-chat',
   'configuration.displayName': 'Nome visualizzato',
-  'configuration.displayNamePlaceholder': "Lascia vuoto per utilizzare l'ID modello",
+  'configuration.displayNamePlaceholder': 'Esempio: Kimi K3 High',
+  'configuration.invalidDisplayName': 'Usa un nome visualizzato di massimo 512 byte UTF-8',
   'configuration.contextWindowTokens': 'Finestra di contesto totale (token)',
   'configuration.contextWindowTokensPlaceholder': 'Vuoto utilizza il valore predefinito 128000',
   'configuration.invalidContextWindowTokens': 'Immettere un numero intero maggiore di 0',
@@ -2174,9 +2175,10 @@ export const itITTranslations = {
   'configuration.loadFailed': 'Impossibile caricare le impostazioni del modello',
   'configuration.saveFailed': 'Impossibile salvare le impostazioni del modello',
   'configuration.saveFailedSafe':
-    'Impossibile salvare le impostazioni del modello. Sono state ripristinate le ultime impostazioni salvate con successo; per favore riprova.',
-  'configuration.duplicateModelId':
-    'Esiste già un modello con ID "{modelId}". Utilizza un ID modello diverso.',
+    'Impossibile salvare le impostazioni del modello. Le modifiche sono state conservate; controllale e riprova.',
+  'configuration.duplicateDisplayNameTitle': 'Il nome visualizzato esiste già',
+  'configuration.duplicateDisplayName':
+    'Esiste già un modello denominato "{displayName}". Utilizza un altro nome visualizzato.',
   'configuration.saving': 'Salvataggio…',
   'configuration.supportsImageInput': "Supporta l'input di immagini",
   'configuration.more': 'Di più',

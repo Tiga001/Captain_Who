@@ -4,6 +4,7 @@ import { ConfirmationDialog } from '../../../../components/dialog/ConfirmationDi
 import { useFrontendConfig } from '../../../../config/FrontendConfigProvider'
 import type { ModelConfig } from './configurationTypes'
 import { formatContextWindow } from './modelPresentation'
+import { formatModelConfigLabel } from '../../../modelSelection/modelConfigPresentation'
 import { SecretInput } from './SecretInput'
 
 interface ModelProviderSettingsProps {
@@ -94,12 +95,12 @@ export function ModelProviderSettings({
               type="checkbox"
               checked={model.enabled}
               onChange={() => onToggleModel(model.id)}
-              aria-label={`${t('configuration.enableModelPrefix')} ${model.displayName}`}
+              aria-label={`${t('configuration.enableModelPrefix')} ${formatModelConfigLabel(model)}`}
             />
             <span className="available-model-row__check" aria-hidden="true">
               <Check />
             </span>
-            <span className="available-model-row__name">{model.displayName}</span>
+            <span className="available-model-row__name">{formatModelConfigLabel(model)}</span>
             <span className="available-model-row__metadata">
               <span
                 className="model-context-pill"

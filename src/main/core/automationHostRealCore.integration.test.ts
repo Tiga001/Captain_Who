@@ -92,16 +92,16 @@ describe('Automation Renderer Host API to real core-server', () => {
 
   it('performs durable CRUD, CAS, runNow, history, and attention calls through the real stack', async () => {
     coreServer = new CoreServer({ appDataRoot })
-    await coreServer.saveModelSettings({
+    const savedModelSettings = await coreServer.saveModelSettings({
       apiUrl: 'https://example.invalid/v1/chat/completions',
       apiToken: 'automation-e2e-token',
       searchMode: 'auto',
       tavilyApiKey: '',
       models: [
         {
-          id: 'automation-e2e-model',
+          id: null,
+          providerModelId: 'automation-e2e-model',
           displayName: 'Automation E2E Model',
-          previousModelId: null,
           apiUrlOverride: null,
           apiTokenOverride: null,
           supportsImage: false,
@@ -114,6 +114,7 @@ describe('Automation Renderer Host API to real core-server', () => {
         }
       ]
     })
+    const modelConfigId = savedModelSettings.models[0].id
     const trustedIpc = {} as TrustedIpcMain
     const ipcRenderer = rendererTransport(trustedIpc)
     disposeAutomationIpc = registerAutomationIpc(trustedIpc, coreServer)
@@ -141,7 +142,7 @@ describe('Automation Renderer Host API to real core-server', () => {
         kind: 'new_chat',
         projectBinding: 'none',
         projectId: null,
-        modelId: 'automation-e2e-model'
+        modelId: modelConfigId
       },
       permissionMode: 'default',
       permissionModeVersion: 2,
@@ -172,7 +173,7 @@ describe('Automation Renderer Host API to real core-server', () => {
         kind: 'new_chat',
         projectBinding: 'none',
         projectId: null,
-        modelId: 'automation-e2e-model'
+        modelId: modelConfigId
       },
       permissionMode: 'default',
       permissionModeVersion: 2,

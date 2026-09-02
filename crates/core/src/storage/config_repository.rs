@@ -1,4 +1,6 @@
-use crate::storage::models::{ModelConfigRecord, ModelSettingsRecord, ModelSettingsSnapshot};
+use crate::storage::models::{
+    normalize_model_display_name, ModelConfigRecord, ModelSettingsRecord, ModelSettingsSnapshot,
+};
 use crate::storage::now_ms;
 use crate::{ProviderProfileConfig, ProviderProtocolDialect};
 use rusqlite::types::Type;
@@ -101,8 +103,12 @@ pub(crate) fn load_model_settings_snapshot_in_connection(
 
 pub fn save_model_settings(
     connection: &mut Connection,
-    settings: ModelSettingsRecord,
+    mut settings: ModelSettingsRecord,
 ) -> rusqlite::Result<()> {
+    for model in &mut settings.models {
+        model.provider_model_id = model.provider_model_id.trim().to_string();
+        model.display_name = model.display_name.trim().to_string();
+    }
     let (settings, _) = canonicalize_official_provider_profiles(settings);
     let previous = load_model_settings_snapshot(connection)?;
     let incoming_model_ids = settings
@@ -111,6 +117,20 @@ pub fn save_model_settings(
         .map(|model| model.id.as_str())
         .collect::<BTreeSet<_>>();
     if incoming_model_ids.len() != settings.models.len() {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    let normalized_display_names = settings
+        .models
+        .iter()
+        .map(|model| normalize_model_display_name(&model.display_name))
+        .collect::<BTreeSet<_>>();
+    if normalized_display_names.len() != settings.models.len()
+        || normalized_display_names.iter().any(String::is_empty)
+        || settings
+            .models
+            .iter()
+            .any(|model| model.provider_model_id.is_empty())
+    {
         return Err(rusqlite::Error::InvalidQuery);
     }
     let removed_model_ids = previous
@@ -227,7 +247,9 @@ pub fn save_model_settings(
             "
             INSERT INTO models (
                 id,
+                provider_model_id,
                 display_name,
+                normalized_display_name,
                 api_url_override,
                 api_token_override,
                 supports_image,
@@ -243,9 +265,14 @@ pub fn save_model_settings(
                 created_at,
                 updated_at
             )
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?15)
+            VALUES (
+                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
+                ?16, ?17, ?17
+            )
             ON CONFLICT(id) DO UPDATE SET
+                provider_model_id = excluded.provider_model_id,
                 display_name = excluded.display_name,
+                normalized_display_name = excluded.normalized_display_name,
                 api_url_override = excluded.api_url_override,
                 api_token_override = excluded.api_token_override,
                 supports_image = excluded.supports_image,
@@ -262,7 +289,9 @@ pub fn save_model_settings(
             ",
             params![
                 &model.id,
+                &model.provider_model_id,
                 &model.display_name,
+                normalize_model_display_name(&model.display_name),
                 &model.api_url_override,
                 &model.api_token_override,
                 model.supports_image,
@@ -317,7 +346,7 @@ fn canonicalize_official_provider_profiles(
         };
         if let Some(profile) = crate::provider_registration::normalize_official_provider_profile(
             effective_api_url,
-            &model.id,
+            &model.provider_model_id,
             &model.provider_profile_config,
         ) {
             model.provider_profile_config = profile;
@@ -325,21 +354,6 @@ fn canonicalize_official_provider_profiles(
         }
     }
     (settings, changed)
-}
-
-/// Idempotently upgrades only exact official endpoint/model pairs before storage is exposed.
-pub(crate) fn reconcile_official_provider_profiles(
-    connection: &mut Connection,
-) -> rusqlite::Result<bool> {
-    let Some(current) = load_model_settings(connection)? else {
-        return Ok(false);
-    };
-    let (normalized, changed) = canonicalize_official_provider_profiles(current);
-    if !changed {
-        return Ok(false);
-    }
-    save_model_settings(connection, normalized)?;
-    Ok(true)
 }
 
 struct LoadedModels {
@@ -353,7 +367,9 @@ fn load_models(connection: &Connection) -> rusqlite::Result<LoadedModels> {
         "
         SELECT
             id,
+            provider_model_id,
             display_name,
+            normalized_display_name,
             api_url_override,
             api_token_override,
             supports_image,
@@ -372,24 +388,29 @@ fn load_models(connection: &Connection) -> rusqlite::Result<LoadedModels> {
 
     let stored = statement
         .query_map([], |row| {
+            let display_name = row.get::<_, String>(2)?;
+            if normalize_model_display_name(&display_name) != row.get::<_, String>(3)? {
+                return Err(rusqlite::Error::InvalidQuery);
+            }
             let model = ModelConfigRecord {
                 id: row.get(0)?,
-                display_name: row.get(1)?,
-                api_url_override: row.get(2)?,
-                api_token_override: row.get(3)?,
-                supports_image: row.get(4)?,
-                context_window_tokens: row.get(5)?,
-                provider_profile_config: decode_provider_profile_config(row.get(6)?, 6)?,
-                input_price: row.get(9)?,
-                cached_input_price: row.get(10)?,
-                output_price: row.get(11)?,
-                enabled: row.get(12)?,
+                provider_model_id: row.get(1)?,
+                display_name,
+                api_url_override: row.get(4)?,
+                api_token_override: row.get(5)?,
+                supports_image: row.get(6)?,
+                context_window_tokens: row.get(7)?,
+                provider_profile_config: decode_provider_profile_config(row.get(8)?, 8)?,
+                input_price: row.get(11)?,
+                cached_input_price: row.get(12)?,
+                output_price: row.get(13)?,
+                enabled: row.get(14)?,
             };
-            let connection_revision = row.get::<_, String>(7)?;
+            let connection_revision = row.get::<_, String>(9)?;
             if !is_provider_connection_revision(&connection_revision) {
                 return Err(rusqlite::Error::InvalidQuery);
             }
-            let protocol_revision = row.get::<_, String>(8)?;
+            let protocol_revision = row.get::<_, String>(10)?;
             if !is_provider_protocol_revision(&protocol_revision) {
                 return Err(rusqlite::Error::InvalidQuery);
             }
@@ -468,7 +489,7 @@ fn same_effective_provider_protocol(
     current_settings: &ModelSettingsRecord,
     current_model: &ModelConfigRecord,
 ) -> bool {
-    if previous_model.id != current_model.id {
+    if previous_model.provider_model_id != current_model.provider_model_id {
         return false;
     }
     let Ok(previous_connection) = previous_settings.effective_connection_for(previous_model) else {

@@ -106,7 +106,7 @@ fn unsigned_development_bootstrap_persists_credentials_without_keychain_access()
             "id": 1,
             "method": "imageGeneration.updateConfiguration",
             "params": {
-                "schemaVersion": 1,
+                "schemaVersion": 2,
                 "expectedRevision": "image-generation:v1:0",
                 "adapterId": "smartmlSeedream",
                 "endpointUrl": "https://example.com/v1/images/generations",
@@ -279,7 +279,7 @@ fn production_bootstrap_serves_management_configuration_and_shuts_down_cleanly()
     );
     let image_generation = receive_response(&line_rx, 3);
     assert_eq!(image_generation["id"], 3);
-    assert_eq!(image_generation["result"]["schemaVersion"], 1);
+    assert_eq!(image_generation["result"]["schemaVersion"], 2);
     assert_eq!(
         image_generation["result"]["configuration"]["adapterId"],
         "smartmlSeedream"

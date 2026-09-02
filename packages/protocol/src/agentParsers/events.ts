@@ -277,7 +277,11 @@ export function parseAgentEventForHost(value: unknown): AgentEvent {
         fileChange: parseAgentFileChangeSnapshot(record.fileChange, `${context}.fileChange`)
       }
     case 'context_window_updated':
-      expectOnlyKeys(record, ['type', 'runId', 'conversationId', 'snapshot'] as const, context)
+      expectOnlyKeys(
+        record,
+        ['type', 'runId', 'conversationId', 'modelConfigId', 'snapshot'] as const,
+        context
+      )
       return {
         type,
         runId: expectOpaqueRunId(record.runId, `${context}.runId`),
@@ -286,6 +290,7 @@ export function parseAgentEventForHost(value: unknown): AgentEvent {
           : {
               conversationId: expectOpaqueRunId(record.conversationId, `${context}.conversationId`)
             }),
+        modelConfigId: expectOpaqueRunId(record.modelConfigId, `${context}.modelConfigId`),
         snapshot: parseAgentContextWindowSnapshot(record.snapshot, `${context}.snapshot`)
       }
     case 'context_compaction_started':

@@ -137,6 +137,7 @@ const formerlyDroppedEvents = [
     type: 'context_window_updated',
     runId,
     conversationId: 'conversation-child',
+    modelConfigId: 'model-config-1',
     snapshot: {
       model: 'model-1',
       status: 'within_budget',
@@ -451,6 +452,7 @@ describe('Agent observer event contract', () => {
           type: 'context_window_updated',
           runId,
           conversationId: 'conversation-forged',
+          modelConfigId: 'model-config-1',
           snapshot: {
             model: 'model-1',
             status: 'within_budget',

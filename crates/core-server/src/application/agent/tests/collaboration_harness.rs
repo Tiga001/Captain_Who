@@ -429,6 +429,7 @@ async fn fake_provider_drives_all_six_tools_through_runtime_host_and_server_serv
     settings.api_token = "must-not-enter-selector-directory".to_string();
     let mut second_model = settings.models[0].clone();
     second_model.id = "model-2".to_string();
+    second_model.provider_model_id = "model-2".to_string();
     second_model.display_name = "Model 2".to_string();
     second_model.supports_image = true;
     settings.models.push(second_model);

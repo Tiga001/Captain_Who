@@ -910,6 +910,8 @@ export interface AgentContextWindowSnapshotInput {
 }
 
 export interface AgentContextWindowSnapshotOutput {
+  /** Stable local configuration identity; `snapshot.model` remains the provider wire model. */
+  modelConfigId: string
   snapshot?: AgentContextWindowSnapshot
 }
 
@@ -2144,6 +2146,8 @@ export type AgentEvent =
       type: 'context_window_updated'
       runId: string
       conversationId?: string
+      /** Stable local configuration identity; never infer it from `snapshot.model`. */
+      modelConfigId: string
       snapshot: AgentContextWindowSnapshot
     }
   | {

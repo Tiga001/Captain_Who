@@ -1,4 +1,4 @@
-import { StrictMode } from 'react'
+import { StrictMode, useState } from 'react'
 import { HostInvocationError } from '@mycopilot/host-api'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { render } from 'vitest-browser-react'
@@ -27,7 +27,7 @@ vi.mock('../../components/toast/ToastContext', () => ({
 
 vi.mock('../../config/FrontendConfigProvider', () => ({
   useFrontendConfig: () => ({
-    t: (key: string) => (key === 'configuration.duplicateModelId' ? `${key}:{modelId}` : key)
+    t: (key: string) => key
   })
 }))
 
@@ -42,6 +42,7 @@ const storedSettings: ModelSettingsSnapshot = {
   models: [
     {
       id: 'stored-model',
+      providerModelId: 'provider-stored-model',
       displayName: 'Stored Model',
       supportsImage: false,
       inputPrice: '0',
@@ -108,11 +109,48 @@ function ModelRenameProbe() {
         onClick={() => {
           const source = models.find((model) => model.id === 'model-a')
           if (source) {
-            void upsertModel({ ...source, id: 'model-b' }, 'model-a').catch(() => undefined)
+            void upsertModel({ ...source, displayName: 'Model B' }).catch(() => undefined)
           }
         }}
       >
         rename model
+      </button>
+    </div>
+  )
+}
+
+function ModelCreateProbe() {
+  const { models, upsertModel } = useModelSettings()
+  const [savedId, setSavedId] = useState('')
+
+  return (
+    <div>
+      <span data-testid="created-model-ids">{models.map((model) => model.id).join(',')}</span>
+      <span data-testid="created-model-display-names">
+        {models.map((model) => model.displayName).join(',')}
+      </span>
+      <span data-testid="created-model-result">{savedId}</span>
+      <button
+        type="button"
+        onClick={() => {
+          void upsertModel({
+            id: null,
+            providerModelId: 'provider-stored-model',
+            displayName: 'New Model',
+            supportsImage: false,
+            inputPrice: '0',
+            cachedInputPrice: '',
+            outputPrice: '0',
+            providerProfileUpdate: { kind: 'select_generic' },
+            enabled: true
+          })
+            .then((savedModel) => setSavedId(savedModel.id))
+            .catch((error: unknown) =>
+              setSavedId(`error:${error instanceof Error ? error.message : 'unknown'}`)
+            )
+        }}
+      >
+        create model
       </button>
     </div>
   )
@@ -383,12 +421,20 @@ describe('ModelSettingsProvider hydration', () => {
     expect(JSON.stringify(service.showToast.mock.calls)).not.toContain('raw provider response')
   })
 
-  it('does not silently delete a colliding model during rename', async () => {
+  it('does not silently delete a model or toast when a display name edit collides', async () => {
     const settingsWithTwoModels: ModelSettingsSnapshot = {
       ...storedSettings,
       models: [
-        { ...storedSettings.models[0]!, id: 'model-a', displayName: 'Model A' },
-        { ...storedSettings.models[0]!, id: 'model-b', displayName: 'Model B' }
+        {
+          ...storedSettings.models[0]!,
+          id: 'model-a',
+          displayName: 'Model A'
+        },
+        {
+          ...storedSettings.models[0]!,
+          id: 'model-b',
+          displayName: 'Model B'
+        }
       ]
     }
     service.loadModelSettings.mockResolvedValue(settingsWithTwoModels)
@@ -398,8 +444,8 @@ describe('ModelSettingsProvider hydration', () => {
         code: -32000,
         data: {
           kind: 'model_settings_validation',
-          code: 'duplicate_model_id',
-          modelId: 'model-b'
+          code: 'duplicate_display_name',
+          displayName: 'Model B'
         }
       })
     )
@@ -415,13 +461,90 @@ describe('ModelSettingsProvider hydration', () => {
 
     await expect.poll(() => service.saveModelSettings.mock.calls.length).toBe(1)
     expect(service.saveModelSettings.mock.calls[0]?.[0].models).toEqual([
-      expect.objectContaining({ id: 'model-b', previousModelId: 'model-a' }),
+      expect.objectContaining({ id: 'model-a', displayName: 'Model B' }),
       expect.objectContaining({ id: 'model-b', displayName: 'Model B' })
     ])
     await expect.element(screen.getByTestId('model-ids')).toHaveTextContent('model-a,model-b')
-    expect(service.showToast).toHaveBeenCalledWith('configuration.duplicateModelId:model-b', {
-      durationMs: 5000
+    expect(service.showToast).not.toHaveBeenCalled()
+  })
+
+  it('allows a repeated provider model ID and adopts the immutable ID assigned by Host', async () => {
+    service.loadModelSettings.mockResolvedValue(storedSettings)
+    service.saveModelSettings.mockImplementation(async (settings) => ({
+      ...settings,
+      models: settings.models.map((model) =>
+        model.id === null
+          ? {
+              ...model,
+              id: 'host-generated-id',
+              displayName: 'New Model Normalized',
+              providerProfileConfig: {
+                schemaVersion: 1,
+                profile: { id: 'generic_openai_chat', version: 1 },
+                reasoning: { mode: 'provider_default', effort: 'provider_default' }
+              }
+            }
+          : model
+      )
+    }))
+
+    const screen = await render(
+      <ModelSettingsProvider>
+        <ModelCreateProbe />
+      </ModelSettingsProvider>
+    )
+    await expect.element(screen.getByTestId('created-model-ids')).toHaveTextContent('stored-model')
+
+    await screen.getByRole('button', { name: 'create model' }).click()
+
+    await expect.poll(() => service.saveModelSettings.mock.calls.length).toBe(1)
+    expect(service.saveModelSettings.mock.calls[0]![0].models.at(-1)).toMatchObject({
+      id: null,
+      displayName: 'New Model',
+      providerModelId: 'provider-stored-model'
     })
+    await expect
+      .element(screen.getByTestId('created-model-ids'))
+      .toHaveTextContent('stored-model,host-generated-id')
+    await expect
+      .element(screen.getByTestId('created-model-result'))
+      .toHaveTextContent('host-generated-id')
+    await expect
+      .element(screen.getByTestId('created-model-display-names'))
+      .toHaveTextContent('Stored Model,New Model Normalized')
+  })
+
+  it('rejects an ambiguous Host response containing more than one new immutable ID', async () => {
+    service.loadModelSettings.mockResolvedValue(storedSettings)
+    service.saveModelSettings.mockImplementation(async (settings) => {
+      const draft = settings.models.at(-1)!
+      const providerProfileConfig = {
+        schemaVersion: 1 as const,
+        profile: { id: 'generic_openai_chat', version: 1 },
+        reasoning: { mode: 'provider_default' as const, effort: 'provider_default' as const }
+      }
+      return {
+        ...settings,
+        models: [
+          ...settings.models.slice(0, -1),
+          { ...draft, id: 'host-generated-a', providerProfileConfig },
+          { ...draft, id: 'host-generated-b', displayName: 'Another Model', providerProfileConfig }
+        ]
+      }
+    })
+
+    const screen = await render(
+      <ModelSettingsProvider>
+        <ModelCreateProbe />
+      </ModelSettingsProvider>
+    )
+    await expect.element(screen.getByTestId('created-model-ids')).toHaveTextContent('stored-model')
+
+    await screen.getByRole('button', { name: 'create model' }).click()
+
+    await expect
+      .element(screen.getByTestId('created-model-result'))
+      .toHaveTextContent('error:Host did not return the saved model')
   })
 
   it('recovers from a transient core-server read failure', async () => {

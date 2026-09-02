@@ -71,6 +71,32 @@ function SlowConfirmHarness({ onConfirm }: { onConfirm: () => Promise<void> }) {
   )
 }
 
+function ExplicitRestoreHarness() {
+  const [open, setOpen] = useState(false)
+  const restoreRef = useRef<HTMLInputElement | null>(null)
+  return (
+    <>
+      <input aria-label="Display name" ref={restoreRef} />
+      <button type="button" onClick={() => setOpen(true)}>
+        Save model
+      </button>
+      {open ? (
+        <ConfirmationDialog
+          cancelLabel="Got it"
+          confirmLabel="Got it"
+          confirmVariant="primary"
+          dialogRole="alertdialog"
+          onCancel={() => setOpen(false)}
+          onConfirm={() => setOpen(false)}
+          restoreFocusRef={restoreRef}
+          showCancelButton={false}
+          title="Display name already exists"
+        />
+      ) : null}
+    </>
+  )
+}
+
 describe('ConfirmationDialog focus management', () => {
   it('moves focus into the dialog, traps keyboard focus, and restores the trigger', async () => {
     const screen = await render(<DialogHarness />)
@@ -128,5 +154,23 @@ describe('ConfirmationDialog focus management', () => {
     await userEvent.dblClick(confirm)
     expect(onConfirm).toHaveBeenCalledOnce()
     resolve()
+  })
+
+  it('uses an explicit restore target even while the opener remains connected', async () => {
+    const screen = await render(<ExplicitRestoreHarness />)
+    const opener = screen.getByRole('button', { name: 'Save model' })
+    const displayName = screen.getByRole('textbox', { name: 'Display name' })
+
+    await opener.click()
+    await expect.element(screen.getByRole('alertdialog')).toBeVisible()
+    const acknowledge = document.querySelector<HTMLButtonElement>(
+      '.app-confirm-dialog__button--primary'
+    )!
+    await expect.poll(() => document.activeElement).toBe(acknowledge)
+    await userEvent.click(acknowledge)
+
+    await expect.element(screen.getByRole('alertdialog')).not.toBeInTheDocument()
+    await expect.element(displayName).toHaveFocus()
+    await expect.element(opener).not.toHaveFocus()
   })
 })

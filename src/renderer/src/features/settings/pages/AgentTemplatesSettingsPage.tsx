@@ -7,6 +7,7 @@ import { getUserFacingErrorMessage } from '../../../errors/userFacingError'
 import { useModelSettings } from '../../../config/ModelSettingsProvider'
 import type { AppProject } from '../../../config/projectConfig'
 import { ModelConfigPicker } from '../../modelSelection/ModelConfigPicker'
+import { formatModelConfigLabel } from '../../modelSelection/modelConfigPresentation'
 import {
   createAgentTemplate,
   deleteAgentTemplate,
@@ -136,21 +137,24 @@ export function AgentTemplatesSettingsPage({
   }
 
   if (form) {
+    const configuredModel = models.find((model) => model.id === form.modelConfigId)
+    const storedModelLabel = form.template?.modelDisplayName?.trim() ?? ''
+    const unavailableModelBaseLabel = configuredModel
+      ? formatModelConfigLabel(configuredModel)
+      : storedModelLabel
     const unavailableModel =
       form.modelConfigId && !enabledModelIds.has(form.modelConfigId)
         ? {
             disabled: true,
             id: form.modelConfigId,
-            label: `${
-              form.template?.modelDisplayName ??
-              models.find((model) => model.id === form.modelConfigId)?.displayName ??
-              form.modelConfigId
-            } · ${t('agentTemplates.modelUnavailable')}`
+            label: unavailableModelBaseLabel
+              ? `${unavailableModelBaseLabel} · ${t('agentTemplates.modelUnavailable')}`
+              : t('agentTemplates.modelUnavailable')
           }
         : null
     const modelOptions = [
       ...(unavailableModel ? [unavailableModel] : []),
-      ...enabledModels.map((model) => ({ id: model.id, label: model.displayName }))
+      ...enabledModels.map((model) => ({ id: model.id, label: formatModelConfigLabel(model) }))
     ]
     const modelAvailable = Boolean(form.modelConfigId && enabledModelIds.has(form.modelConfigId))
     const canSave =
@@ -395,6 +399,11 @@ export function AgentTemplatesSettingsPage({
         {!loading && !loadError && templates.length > 0
           ? templates.map((template) => {
               const modelAvailable = enabledModelIds.has(template.modelConfigId)
+              const configuredModel = models.find((model) => model.id === template.modelConfigId)
+              const storedModelLabel = template.modelDisplayName?.trim() ?? ''
+              const visibleModelLabel = configuredModel
+                ? formatModelConfigLabel(configuredModel)
+                : storedModelLabel
               const busy = busyTemplateId === template.templateId
               return (
                 <article className="agent-template-row" key={template.templateId}>
@@ -410,10 +419,10 @@ export function AgentTemplatesSettingsPage({
                     {template.description ? <p>{template.description}</p> : null}
                     <small data-unavailable={!modelAvailable || undefined}>
                       {modelAvailable
-                        ? (template.modelDisplayName ?? template.modelConfigId)
-                        : `${template.modelDisplayName ?? template.modelConfigId} · ${t(
-                            'agentTemplates.modelUnavailable'
-                          )}`}
+                        ? visibleModelLabel || t('agentTemplates.modelUnavailable')
+                        : visibleModelLabel
+                          ? `${visibleModelLabel} · ${t('agentTemplates.modelUnavailable')}`
+                          : t('agentTemplates.modelUnavailable')}
                     </small>
                     <small>
                       {replaceTokens(t('agentTemplates.projectCount'), {

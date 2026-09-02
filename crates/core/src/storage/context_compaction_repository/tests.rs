@@ -151,6 +151,7 @@ fn planned_receipt() -> ContextCompactionReceipt {
         assistant_message_id: "assistant-2".to_string(),
         request_index: 1,
         attempt_index: 1,
+        model_config_id: None,
         model: "test-model".to_string(),
         provider_transition_source_model_display_name: None,
         provider_transition_target_model_display_name: None,
@@ -1724,10 +1725,12 @@ fn seed_provider_transition_target(connection: &Connection, target_model_id: &st
     connection
         .execute(
             "INSERT INTO models (
-                id, display_name, supports_image, provider_connection_revision,
+                id, provider_model_id, display_name, normalized_display_name,
+                supports_image, provider_connection_revision,
                 provider_protocol_revision, provider_profile_config_json,
                 input_price, output_price, enabled, position, created_at, updated_at
-             ) VALUES (?1, ?1, 0, 'provider-connection-v1:test-target', ?2, ?3,
+             ) VALUES (?1, ?1, ?1, ?1, 0,
+                       'provider-connection-v1:test-target', ?2, ?3,
                        '0', '0', 1, 0, 1, 1)",
             params![target_model_id, revision, provider_profile],
         )
@@ -1757,7 +1760,8 @@ fn conversation_revision(connection: &Connection) -> i64 {
 
 fn applied_provider_transition_receipt(
     prefix: &ContextCompactionPrefix,
-    target_model_id: &str,
+    target_model_config_id: &str,
+    provider_model_id: &str,
 ) -> (
     ContextCompactionSummaryDraft,
     ContextCompactionReceipt,
@@ -1771,7 +1775,8 @@ fn applied_provider_transition_receipt(
         "provider-transition-test-compaction",
         "conversation-1",
         "assistant-1",
-        target_model_id,
+        target_model_config_id,
+        provider_model_id,
         Some("Source".to_string()),
         Some("Target".to_string()),
         crate::AgentApiStyle::OpenAiCompatible,
@@ -1794,7 +1799,7 @@ fn applied_provider_transition_receipt(
         Some("provider-transition-test".to_string()),
         1,
         crate::ModelRequestPurpose::ContextCompaction,
-        target_model_id,
+        provider_model_id,
         crate::AgentApiStyle::OpenAiCompatible,
         None,
         22,
@@ -1872,7 +1877,10 @@ fn provider_transition_commit_is_atomic_and_preserves_existing_chat_usage() {
     )
     .unwrap();
     let (transition_draft, planned_receipt, receipt, observation) =
-        applied_provider_transition_receipt(&prefix, "target-model");
+        applied_provider_transition_receipt(&prefix, "target-model", "provider-wire-model");
+    assert_eq!(receipt.model_config_id.as_deref(), Some("target-model"));
+    assert_eq!(receipt.model, "provider-wire-model");
+    assert_eq!(observation.model, "provider-wire-model");
     crate::storage::context_compaction_receipt_repository::record_receipt(
         &mut connection,
         &planned_receipt,
@@ -2097,7 +2105,7 @@ fn provider_transition_releases_every_replayable_turn_before_switching_models() 
     )
     .unwrap();
     let (transition_draft, planned_receipt, receipt, observation) =
-        applied_provider_transition_receipt(&prefix, "target-model");
+        applied_provider_transition_receipt(&prefix, "target-model", "target-model");
     crate::storage::context_compaction_receipt_repository::record_receipt(
         &mut connection,
         &planned_receipt,
@@ -2172,7 +2180,7 @@ fn provider_transition_rolls_back_when_private_replay_is_not_covered_by_the_summ
     )
     .unwrap();
     let (transition_draft, planned_receipt, receipt, observation) =
-        applied_provider_transition_receipt(&prefix, "target-model");
+        applied_provider_transition_receipt(&prefix, "target-model", "target-model");
     crate::storage::context_compaction_receipt_repository::record_receipt(
         &mut connection,
         &planned_receipt,
@@ -2263,7 +2271,7 @@ fn stale_provider_transition_rolls_back_summary_model_draft_and_observation() {
     )
     .unwrap();
     let (transition_draft, planned_receipt, receipt, observation) =
-        applied_provider_transition_receipt(&prefix, "target-model");
+        applied_provider_transition_receipt(&prefix, "target-model", "target-model");
     crate::storage::context_compaction_receipt_repository::record_receipt(
         &mut connection,
         &planned_receipt,
@@ -2345,7 +2353,7 @@ fn compacting_provider_transition_rechecks_conversation_revision_without_half_st
     )
     .unwrap();
     let (transition_draft, planned_receipt, receipt, observation) =
-        applied_provider_transition_receipt(&prefix, "target-model");
+        applied_provider_transition_receipt(&prefix, "target-model", "target-model");
     crate::storage::context_compaction_receipt_repository::record_receipt(
         &mut connection,
         &planned_receipt,

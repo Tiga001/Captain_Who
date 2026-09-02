@@ -230,7 +230,7 @@ impl AgentService {
             .ok_or_else(|| "模型切换缺少可归属摘要的历史回复。".to_string())?;
         let source_input_tokens = estimate_provider_transition_compaction_source_tokens(
             prefix,
-            &prepared.target.model.id,
+            &prepared.target.model.provider_model_id,
             prepared.target.api_style,
         )
         .map_err(|_| "目标模型无法安全接收待压缩历史。".to_string())?;
@@ -242,6 +242,7 @@ impl AgentService {
             prepared.conversation.id.clone(),
             summary_owner_assistant_message_id.to_string(),
             prepared.target.model.id.clone(),
+            prepared.target.model.provider_model_id.clone(),
             prepared.source_model_display_name.clone(),
             prepared.target_model_display_name.clone(),
             prepared.target.api_style,
@@ -518,24 +519,21 @@ impl AgentService {
                 ));
             }
         };
-        let source_model_display_name = conversation.model_id.as_deref().map(|source_model_id| {
-            settings_snapshot
-                .settings
-                .models
-                .iter()
-                .find(|model| model.id == source_model_id)
-                .map(|model| model.display_name.trim())
-                .filter(|display_name| !display_name.is_empty())
-                .map(str::to_string)
-                .unwrap_or_else(|| source_model_id.to_string())
-        });
-        let target_model_display_name = source_model_display_name.as_ref().map(|_| {
-            if target.model.display_name.trim().is_empty() {
-                target.model.id.clone()
-            } else {
-                target.model.display_name.trim().to_string()
-            }
-        });
+        let source_model_display_name =
+            conversation
+                .model_id
+                .as_deref()
+                .and_then(|source_model_id| {
+                    settings_snapshot
+                        .settings
+                        .models
+                        .iter()
+                        .find(|model| model.id == source_model_id)
+                        .map(|model| model.display_label())
+                });
+        let target_model_display_name = source_model_display_name
+            .as_ref()
+            .map(|_| target.model.display_label());
 
         let (preview_input, traces) = self
             .persisted_conversation_context_state(&target.generator_input, conversation_id)
@@ -1061,7 +1059,7 @@ fn resolve_provider_transition_target(
     let protocol = ProviderProtocolKey::new(
         dialect,
         &profile,
-        model.id.clone(),
+        model.provider_model_id.clone(),
         Some(protocol_revision.clone()),
     )
     .map_err(|error| error.to_string())?;
@@ -1079,7 +1077,8 @@ fn resolve_provider_transition_target(
         search_connection_revision: Some(snapshot.search_connection_revision.clone()),
         provider_profile_config: Some(profile.clone()),
         provider_protocol_key: Some(protocol.clone()),
-        model: model.id.clone(),
+        model_config_id: Some(model.id.clone()),
+        model: model.provider_model_id.clone(),
         model_capabilities: ModelCapabilities {
             image_input: model.supports_image,
         },
@@ -1302,7 +1301,10 @@ fn provider_transition_operation_from_receipt(
         schema_version: PROVIDER_TRANSITION_OPERATION_SCHEMA_VERSION,
         operation_id: receipt.operation_id.clone(),
         conversation_id: receipt.conversation_id.clone(),
-        target_model_id: receipt.model.clone(),
+        target_model_id: receipt
+            .model_config_id
+            .clone()
+            .unwrap_or_else(|| receipt.model.clone()),
         source_model_display_name: receipt
             .provider_transition_source_model_display_name
             .clone(),
@@ -1314,8 +1316,12 @@ fn provider_transition_operation_from_receipt(
         completed_at: receipt.completed_at,
         conversation_updated_at: (status == AgentProviderTransitionOperationStatus::Completed)
             .then_some(receipt.updated_at),
-        model_id: (status == AgentProviderTransitionOperationStatus::Completed)
-            .then(|| receipt.model.clone()),
+        model_id: (status == AgentProviderTransitionOperationStatus::Completed).then(|| {
+            receipt
+                .model_config_id
+                .clone()
+                .unwrap_or_else(|| receipt.model.clone())
+        }),
         summary_id: receipt.summary_id.clone(),
         covered_through_message_id: Some(receipt.plan.covered_through.message_id().to_string()),
         error,
@@ -1364,6 +1370,24 @@ fn provider_transition_error_requires_compaction(code: Option<&str>) -> bool {
 mod provider_transition_unit_tests {
     use super::*;
 
+    fn transition_prefix() -> mycopilot_core::ContextCompactionPrefix {
+        mycopilot_core::ContextCompactionPrefix {
+            conversation_id: "conversation-transition-identity".to_string(),
+            source_revision: "source-transition-identity".to_string(),
+            covered_through: mycopilot_core::ContextJournalCursor::message("assistant-source"),
+            previous_summary: None,
+            source_items: vec![mycopilot_core::ContextCompactionSourceItem::Message {
+                cursor: mycopilot_core::ContextJournalCursor::message("assistant-source"),
+                role: "assistant".to_string(),
+                content: "source answer".to_string(),
+                created_at: 1,
+                status: Some("sent".to_string()),
+                terminal_status: None,
+                terminal_error: None,
+            }],
+        }
+    }
+
     #[test]
     fn opaque_vault_failures_require_a_new_text_only_epoch() {
         assert!(provider_transition_error_requires_compaction(Some(
@@ -1375,6 +1399,31 @@ mod provider_transition_unit_tests {
         assert!(!provider_transition_error_requires_compaction(Some(
             "provider_profile_unsupported"
         )));
+    }
+
+    #[test]
+    fn transition_receipt_projects_local_config_identity_not_provider_wire_model() {
+        let receipt = ContextCompactionReceipt::begin_provider_transition(
+            "provider-transition-identity",
+            "run-transition-identity",
+            "conversation-transition-identity",
+            "assistant-source",
+            "model-config-local",
+            "provider-wire-model",
+            Some("Source".to_string()),
+            Some("Target".to_string()),
+            mycopilot_core::AgentApiStyle::OpenAiCompatible,
+            &transition_prefix(),
+            100,
+            20,
+            1,
+        )
+        .unwrap();
+
+        let operation = provider_transition_operation_from_receipt(&receipt);
+        assert_eq!(operation.target_model_id, "model-config-local");
+        assert_eq!(operation.model_id, None);
+        assert_eq!(receipt.model, "provider-wire-model");
     }
 
     #[test]

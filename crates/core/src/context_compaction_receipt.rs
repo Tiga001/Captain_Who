@@ -208,6 +208,12 @@ pub struct ContextCompactionReceipt {
     pub assistant_message_id: String,
     pub request_index: u64,
     pub attempt_index: u64,
+    /// Stable local model-configuration identity when the Host owns one.
+    ///
+    /// `model` remains the exact Provider wire identifier. Older receipts omit this field because
+    /// the two identities were historically the same.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_config_id: Option<String>,
     pub model: String,
     /// Immutable, presentation-only model labels for Provider transition receipts.
     ///
@@ -249,6 +255,7 @@ impl ContextCompactionReceipt {
         run_id: impl Into<String>,
         conversation_id: impl Into<String>,
         assistant_message_id: impl Into<String>,
+        model_config_id: impl Into<String>,
         model: impl Into<String>,
         source_model_display_name: Option<String>,
         target_model_display_name: Option<String>,
@@ -297,6 +304,7 @@ impl ContextCompactionReceipt {
             assistant_message_id: assistant_message_id.into(),
             request_index: 1,
             attempt_index: 1,
+            model_config_id: Some(model_config_id.into()),
             model: model.into(),
             provider_transition_source_model_display_name: source_model_display_name,
             provider_transition_target_model_display_name: target_model_display_name,
@@ -338,6 +346,7 @@ impl ContextCompactionReceipt {
             assistant_message_id: assistant_message_id.into(),
             request_index,
             attempt_index,
+            model_config_id: None,
             model: model.into(),
             provider_transition_source_model_display_name: None,
             provider_transition_target_model_display_name: None,
@@ -375,6 +384,11 @@ impl ContextCompactionReceipt {
             if value.trim().is_empty() {
                 return Err(AgentError::new(format!("压缩 receipt 的{label}不能为空。")));
             }
+        }
+        if self.model_config_id.as_deref().is_some_and(|value| {
+            value.trim().is_empty() || value.trim() != value || value.len() > 512
+        }) {
+            return Err(AgentError::new("压缩 receipt 的本地模型配置 ID 无效。"));
         }
         match (
             self.provider_transition_source_model_display_name

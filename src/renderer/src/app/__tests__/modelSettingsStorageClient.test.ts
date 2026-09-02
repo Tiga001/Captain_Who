@@ -23,6 +23,7 @@ const authoritativeSettings: StorageModelSettingsRecord = {
   models: [
     {
       id: 'model-1',
+      providerModelId: 'provider-model-1',
       displayName: 'Model 1',
       apiUrlOverride: null,
       apiTokenOverride: null,
@@ -60,10 +61,10 @@ describe('model settings storage client', () => {
       models: [
         {
           id: 'model-1',
+          providerModelId: 'provider-model-1',
           displayName: 'Model 1',
           supportsImage: false,
           contextWindowTokens: 128_000,
-          previousModelId: 'model-before-rename',
           providerProfileConfig: {
             schemaVersion: 999,
             profile: { id: 'deepseek_v4_chat', version: 999 },
@@ -86,12 +87,12 @@ describe('model settings storage client', () => {
       models: [
         {
           id: 'model-1',
+          providerModelId: 'provider-model-1',
           displayName: 'Model 1',
           apiUrlOverride: null,
           apiTokenOverride: null,
           supportsImage: false,
           contextWindowTokens: 128_000,
-          previousModelId: 'model-before-rename',
           providerProfileUpdate: { kind: 'select_generic' },
           inputPrice: '0',
           cachedInputPrice: '',
@@ -122,11 +123,11 @@ describe('model settings storage client', () => {
     await expect(loadProviderProfileUiDescriptors()).resolves.toBe(descriptors)
   })
 
-  it('restores a typed duplicate-model error from the Host envelope', async () => {
+  it('restores a typed duplicate-display-name error from the Host envelope', async () => {
     const data = {
       kind: 'model_settings_validation',
-      code: 'duplicate_model_id',
-      modelId: 'deepseek-v4-flash'
+      code: 'duplicate_display_name',
+      displayName: 'DeepSeek V4'
     } as const
     storage.saveModelSettings.mockResolvedValue({
       ok: false,

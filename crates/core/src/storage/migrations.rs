@@ -1,22 +1,17 @@
-use rusqlite::{ffi, Connection, OptionalExtension, Transaction, TransactionBehavior};
+use rusqlite::{ffi, Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
 
-pub const STORAGE_SCHEMA_VERSION: i32 = 29;
+pub const STORAGE_SCHEMA_VERSION: i32 = 31;
 pub const DEVELOPMENT_STORAGE_SCHEMA_RESET_REQUIRED: &str =
     "development_storage_schema_reset_required";
 
 const CANONICAL_SCHEMA: &str = include_str!("canonical_schema.sql");
 const CANONICAL_SCHEMA_FINGERPRINT: &str =
-    "sha256:8065624c60174d68b16a376a7a341608e86a2dc8434c7239b41a98c0b3b5e5dd";
-const STORAGE_SCHEMA_V28_FINGERPRINT: &str =
-    "sha256:4baf84d4fb76094b9c3c889f0653db3d020203119ae593d6296f21c23684eced";
-
-const V28_TO_V29_SCHEMA_PATCH: &str = include_str!("migration_v28_to_v29.sql");
-
+    "sha256:27a35bfcc3c8db89b4e651eb244871d09447d9b5cedff13ba7efb441b9d9c916";
 /// Opens the single supported development schema.
 ///
-/// A brand-new database is initialized atomically. The one supported development upgrade removes
-/// the obsolete message-owned UI projection without carrying it into the dedicated UI-state table.
+/// A brand-new database is initialized atomically. Existing development databases must already
+/// use the one canonical schema; older versions are rebuilt only by the explicit reset utility.
 pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
     connection.execute_batch("PRAGMA foreign_keys = ON;")?;
 
@@ -27,16 +22,6 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
         return create_canonical_schema(connection);
     }
 
-    if schema_version == 28 {
-        if schema_fingerprint(connection)? != STORAGE_SCHEMA_V28_FINGERPRINT {
-            return Err(reset_required_error(
-                "schema 28 catalog fingerprint is not the supported canonical baseline",
-            ));
-        }
-        migrate_v28_to_v29(connection, false)?;
-        return validate_canonical_schema(connection);
-    }
-
     if schema_version != STORAGE_SCHEMA_VERSION {
         return Err(reset_required_error(format!(
             "expected schema version {STORAGE_SCHEMA_VERSION}, found {schema_version}"
@@ -44,20 +29,6 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
     }
 
     validate_canonical_schema(connection)
-}
-
-fn migrate_v28_to_v29(
-    connection: &Connection,
-    fail_after_schema_patch_for_test: bool,
-) -> rusqlite::Result<()> {
-    let transaction = Transaction::new_unchecked(connection, TransactionBehavior::Immediate)?;
-    transaction.execute_batch(V28_TO_V29_SCHEMA_PATCH)?;
-    if fail_after_schema_patch_for_test {
-        return Err(rusqlite::Error::InvalidQuery);
-    }
-    transaction.pragma_update(None, "user_version", STORAGE_SCHEMA_VERSION)?;
-    validate_canonical_schema(&transaction)?;
-    transaction.commit()
 }
 
 fn create_canonical_schema(connection: &Connection) -> rusqlite::Result<()> {
@@ -72,13 +43,18 @@ fn create_canonical_schema(connection: &Connection) -> rusqlite::Result<()> {
 }
 
 fn validate_canonical_schema(connection: &Connection) -> rusqlite::Result<()> {
-    let actual_fingerprint = schema_fingerprint(connection)?;
-    if actual_fingerprint != CANONICAL_SCHEMA_FINGERPRINT {
+    validate_schema_fingerprint(connection, CANONICAL_SCHEMA_FINGERPRINT)?;
+    ensure_foreign_keys_are_valid(connection)
+}
+
+fn validate_schema_fingerprint(connection: &Connection, expected: &str) -> rusqlite::Result<()> {
+    let actual = schema_fingerprint(connection)?;
+    if actual != expected {
         return Err(reset_required_error(format!(
-            "schema catalog fingerprint mismatch (expected {CANONICAL_SCHEMA_FINGERPRINT}, found {actual_fingerprint})"
+            "schema catalog fingerprint mismatch (expected {expected}, found {actual})"
         )));
     }
-    ensure_foreign_keys_are_valid(connection)
+    Ok(())
 }
 
 fn read_schema_version(connection: &Connection) -> rusqlite::Result<i32> {
@@ -159,9 +135,60 @@ mod tests {
         haystack.replacen(old, new, 1)
     }
 
-    fn canonical_schema_v28_for_test() -> String {
+    fn canonical_schema_v29_for_test() -> String {
         let schema = replace_once(
             CANONICAL_SCHEMA.to_string(),
+            r#"            provider_model_id TEXT NOT NULL,
+            display_name TEXT NOT NULL CHECK (
+                typeof(display_name) = 'text'
+                AND length(CAST(display_name AS BLOB)) BETWEEN 1 AND 512
+                AND display_name = trim(display_name)
+            ),
+            normalized_display_name TEXT NOT NULL,
+"#,
+            r#"            display_name TEXT NOT NULL,
+"#,
+        );
+        replace_once(
+            schema,
+            r#"CREATE UNIQUE INDEX idx_models_normalized_display_name
+            ON models(normalized_display_name);
+"#,
+            "",
+        )
+    }
+
+    fn canonical_schema_v30_for_test() -> String {
+        let schema = replace_once(
+            CANONICAL_SCHEMA.to_string(),
+            r#"            provider_model_id TEXT NOT NULL,
+            display_name TEXT NOT NULL CHECK (
+                typeof(display_name) = 'text'
+                AND length(CAST(display_name AS BLOB)) BETWEEN 1 AND 512
+                AND display_name = trim(display_name)
+            ),
+            normalized_display_name TEXT NOT NULL,
+"#,
+            r#"            display_id TEXT NOT NULL,
+            normalized_display_id TEXT NOT NULL,
+            provider_model_id TEXT NOT NULL,
+            display_name TEXT NOT NULL,
+"#,
+        );
+        replace_once(
+            schema,
+            r#"CREATE UNIQUE INDEX idx_models_normalized_display_name
+            ON models(normalized_display_name);
+"#,
+            r#"CREATE UNIQUE INDEX idx_models_normalized_display_id
+            ON models(normalized_display_id);
+"#,
+        )
+    }
+
+    fn canonical_schema_v28_for_test() -> String {
+        let schema = replace_once(
+            canonical_schema_v29_for_test(),
             r#"            agent_run_json TEXT CHECK (
                 agent_run_json IS NULL OR json_valid(agent_run_json)
             ),
@@ -218,10 +245,69 @@ mod tests {
             .execute_batch(&canonical_schema_v28_for_test())
             .unwrap();
         connection.pragma_update(None, "user_version", 28).unwrap();
-        assert_eq!(
-            schema_fingerprint(connection).unwrap(),
-            STORAGE_SCHEMA_V28_FINGERPRINT
-        );
+    }
+
+    fn create_v29_fixture(connection: &Connection) {
+        connection
+            .execute_batch(&canonical_schema_v29_for_test())
+            .unwrap();
+        connection.pragma_update(None, "user_version", 29).unwrap();
+    }
+
+    fn create_v30_fixture(connection: &Connection) {
+        connection
+            .execute_batch(&canonical_schema_v30_for_test())
+            .unwrap();
+        connection.pragma_update(None, "user_version", 30).unwrap();
+    }
+
+    fn seed_v29_model_identity_fixture(connection: &Connection) {
+        connection
+            .execute_batch(
+                r#"
+                INSERT INTO models (
+                    id, display_name, api_url_override, api_token_override,
+                    supports_image, context_window_tokens, provider_profile_config_json,
+                    provider_connection_revision, provider_protocol_revision,
+                    input_price, cached_input_price, output_price, enabled, position,
+                    created_at, updated_at
+                ) VALUES
+                (
+                    'Kimi-K3', 'First Kimi', NULL, NULL, 0, 128000,
+                    '{"schemaVersion":1,"profile":{"id":"generic_openai_chat","version":1},"reasoning":{"mode":"provider_default","effort":"provider_default"}}',
+                    'provider-connection-v1:first', 'provider-protocol-v1:first',
+                    '0', '', '0', 1, 0, 10, 10
+                ),
+                (
+                    'Ｋｉｍｉ－Ｋ３', 'Second Kimi', NULL, NULL, 0, 128000,
+                    '{"schemaVersion":1,"profile":{"id":"generic_openai_chat","version":1},"reasoning":{"mode":"provider_default","effort":"provider_default"}}',
+                    'provider-connection-v1:second', 'provider-protocol-v1:second',
+                    '0', '', '0', 1, 1, 11, 11
+                );
+                INSERT INTO conversations (
+                    id, project_id, model_id, title, created_at, updated_at,
+                    pinned_at, archived_at, unread_at
+                ) VALUES (
+                    'conversation-v29', NULL, 'Ｋｉｍｉ－Ｋ３', 'legacy model ref',
+                    12, 12, NULL, NULL, NULL
+                );
+                INSERT INTO automations (
+                    id, schema_version, create_request_id, title, prompt, status,
+                    health_state, destination_kind, project_binding_kind, model_id,
+                    permission_mode, permission_mode_version, permissions_json, reasoning_json,
+                    schedule_kind, schedule_json, rrule, timezone, anchor_at, next_run_at,
+                    notification_policy, revision, created_at, updated_at
+                ) VALUES (
+                    'automation-v29', 1, 'request-v29', 'v29 task', 'run it', 'active',
+                    'ok', 'new_chat', 'none', 'Ｋｉｍｉ－Ｋ３',
+                    'default', 1, '{}', '{}',
+                    'interval', '{}', 'FREQ=DAILY', 'UTC', 12, 13,
+                    'all_runs', 1, 12, 12
+                );
+                "#,
+            )
+            .unwrap();
+        ensure_foreign_keys_are_valid(connection).unwrap();
     }
 
     fn seed_v28_message_with_ui_state(connection: &Connection) {
@@ -274,157 +360,19 @@ mod tests {
     }
 
     #[test]
-    fn v28_to_v29_removes_legacy_ui_state_without_backfill() {
+    fn legacy_v28_schema_requires_explicit_development_reset_without_mutation() {
         let connection = Connection::open_in_memory().unwrap();
         create_v28_fixture(&connection);
         seed_v28_message_with_ui_state(&connection);
+        let fingerprint_before = schema_fingerprint(&connection).unwrap();
 
-        run_migrations(&connection).unwrap();
+        let error = run_migrations(&connection).unwrap_err();
 
-        assert_eq!(
-            read_schema_version(&connection).unwrap(),
-            STORAGE_SCHEMA_VERSION
-        );
-        assert_eq!(
-            schema_fingerprint(&connection).unwrap(),
-            CANONICAL_SCHEMA_FINGERPRINT
-        );
-        assert_eq!(
-            connection
-                .query_row(
-                    "SELECT content FROM messages WHERE id = 'message-v28'",
-                    [],
-                    |row| row.get::<_, String>(0),
-                )
-                .unwrap(),
-            "preserved"
-        );
-        assert_eq!(
-            connection
-                .query_row(
-                    "SELECT api_url, api_token, search_mode, tavily_api_key
-                     FROM model_provider_settings WHERE id = 'default'",
-                    [],
-                    |row| {
-                        Ok((
-                            row.get::<_, String>(0)?,
-                            row.get::<_, String>(1)?,
-                            row.get::<_, String>(2)?,
-                            row.get::<_, String>(3)?,
-                        ))
-                    },
-                )
-                .unwrap(),
-            (
-                "https://provider.example/v1".to_string(),
-                "token-sentinel".to_string(),
-                "tavily".to_string(),
-                "search-token-sentinel".to_string(),
-            )
-        );
-        assert_eq!(
-            connection
-                .query_row(
-                    "SELECT display_name, api_url_override, api_token_override,
-                            context_window_tokens, enabled
-                     FROM models WHERE id = 'language-model-v28'",
-                    [],
-                    |row| {
-                        Ok((
-                            row.get::<_, String>(0)?,
-                            row.get::<_, String>(1)?,
-                            row.get::<_, String>(2)?,
-                            row.get::<_, i64>(3)?,
-                            row.get::<_, i64>(4)?,
-                        ))
-                    },
-                )
-                .unwrap(),
-            (
-                "Language model v28".to_string(),
-                "https://model.example/v1".to_string(),
-                "model-token-sentinel".to_string(),
-                131072,
-                1,
-            )
-        );
-        assert_eq!(
-            connection
-                .query_row(
-                    "SELECT endpoint_url, model_id, credential_ref
-                     FROM image_generation_profiles WHERE id = 'image-profile-v28'",
-                    [],
-                    |row| {
-                        Ok((
-                            row.get::<_, String>(0)?,
-                            row.get::<_, String>(1)?,
-                            row.get::<_, String>(2)?,
-                        ))
-                    },
-                )
-                .unwrap(),
-            (
-                "https://image.example/generate".to_string(),
-                "image-model-v28".to_string(),
-                "image-credential-v28".to_string(),
-            )
-        );
-        assert!(!connection
-            .prepare("PRAGMA table_info(messages)")
-            .unwrap()
-            .query_map([], |row| row.get::<_, String>(1))
-            .unwrap()
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .unwrap()
-            .iter()
-            .any(|column| column == "ui_state_json"));
-        assert_eq!(
-            connection
-                .query_row("SELECT COUNT(*) FROM chat_message_ui_states", [], |row| {
-                    row.get::<_, i64>(0)
-                })
-                .unwrap(),
-            0
-        );
-
-        let revision_before = connection
-            .query_row(
-                "SELECT revision FROM conversations WHERE id = 'conversation-v28'",
-                [],
-                |row| row.get::<_, i64>(0),
-            )
-            .unwrap();
-        connection
-            .execute(
-                "INSERT INTO chat_message_ui_states (message_id, ui_state_json)
-                 VALUES ('message-v28', '{\"isBookmarked\":true}')",
-                [],
-            )
-            .unwrap();
-        let revision_after = connection
-            .query_row(
-                "SELECT revision FROM conversations WHERE id = 'conversation-v28'",
-                [],
-                |row| row.get::<_, i64>(0),
-            )
-            .unwrap();
-        assert_eq!(revision_after, revision_before);
-        ensure_foreign_keys_are_valid(&connection).unwrap();
-    }
-
-    #[test]
-    fn v28_to_v29_failure_rolls_back_schema_and_legacy_ui_state() {
-        let connection = Connection::open_in_memory().unwrap();
-        create_v28_fixture(&connection);
-        seed_v28_message_with_ui_state(&connection);
-
-        assert!(migrate_v28_to_v29(&connection, true).is_err());
-
+        assert!(error
+            .to_string()
+            .contains(DEVELOPMENT_STORAGE_SCHEMA_RESET_REQUIRED));
         assert_eq!(read_schema_version(&connection).unwrap(), 28);
-        assert_eq!(
-            schema_fingerprint(&connection).unwrap(),
-            STORAGE_SCHEMA_V28_FINGERPRINT
-        );
+        assert_eq!(schema_fingerprint(&connection).unwrap(), fingerprint_before);
         assert_eq!(
             connection
                 .query_row(
@@ -435,16 +383,81 @@ mod tests {
                 .unwrap(),
             "{\"isBookmarked\":true}"
         );
-        assert!(connection
-            .query_row(
-                "SELECT 1 FROM sqlite_schema
-                 WHERE type = 'table' AND name = 'chat_message_ui_states'",
-                [],
-                |_| Ok(()),
-            )
-            .optional()
+        ensure_foreign_keys_are_valid(&connection).unwrap();
+    }
+
+    #[test]
+    fn legacy_v29_schema_requires_explicit_development_reset_without_backfill() {
+        let connection = Connection::open_in_memory().unwrap();
+        create_v29_fixture(&connection);
+        seed_v29_model_identity_fixture(&connection);
+        let fingerprint_before = schema_fingerprint(&connection).unwrap();
+
+        let error = run_migrations(&connection).unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains(DEVELOPMENT_STORAGE_SCHEMA_RESET_REQUIRED));
+        assert_eq!(read_schema_version(&connection).unwrap(), 29);
+        assert_eq!(schema_fingerprint(&connection).unwrap(), fingerprint_before);
+        let columns = connection
+            .prepare("PRAGMA table_info(models)")
             .unwrap()
-            .is_none());
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert!(!columns.iter().any(|column| column == "display_id"));
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT model_id FROM conversations WHERE id = 'conversation-v29'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "Ｋｉｍｉ－Ｋ３"
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT model_id FROM automations WHERE id = 'automation-v29'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "Ｋｉｍｉ－Ｋ３"
+        );
+        ensure_foreign_keys_are_valid(&connection).unwrap();
+    }
+
+    #[test]
+    fn legacy_v30_schema_requires_explicit_development_reset_without_mutation() {
+        let connection = Connection::open_in_memory().unwrap();
+        create_v30_fixture(&connection);
+        let fingerprint_before = schema_fingerprint(&connection).unwrap();
+
+        let error = run_migrations(&connection).unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains(DEVELOPMENT_STORAGE_SCHEMA_RESET_REQUIRED));
+        assert!(error
+            .to_string()
+            .contains("expected schema version 31, found 30"));
+        assert_eq!(read_schema_version(&connection).unwrap(), 30);
+        assert_eq!(schema_fingerprint(&connection).unwrap(), fingerprint_before);
+        let columns = connection
+            .prepare("PRAGMA table_info(models)")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert!(columns.iter().any(|column| column == "display_id"));
+        assert!(!columns
+            .iter()
+            .any(|column| column == "normalized_display_name"));
         ensure_foreign_keys_are_valid(&connection).unwrap();
     }
 
@@ -463,6 +476,21 @@ mod tests {
             CANONICAL_SCHEMA_FINGERPRINT
         );
         ensure_foreign_keys_are_valid(&connection).unwrap();
+
+        let model_columns = connection
+            .prepare("PRAGMA table_info(models)")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert!(!model_columns.iter().any(|column| column == "display_id"));
+        assert!(!model_columns
+            .iter()
+            .any(|column| column == "normalized_display_id"));
+        assert!(model_columns
+            .iter()
+            .any(|column| column == "normalized_display_name"));
 
         for required_object in [
             "models",
@@ -764,6 +792,32 @@ mod tests {
             .unwrap()
             .is_some();
         assert!(!maintenance_table_exists);
+    }
+
+    #[test]
+    fn canonical_model_display_name_enforces_the_512_byte_trimmed_boundary() {
+        let connection = Connection::open_in_memory().unwrap();
+        run_migrations(&connection).unwrap();
+        let insert = |id: &str, display_name: &str| {
+            connection.execute(
+                "INSERT INTO models (
+                    id, provider_model_id, display_name, normalized_display_name,
+                    supports_image, provider_profile_config_json,
+                    provider_connection_revision, provider_protocol_revision,
+                    input_price, cached_input_price, output_price, enabled,
+                    position, created_at, updated_at
+                 ) VALUES (
+                    ?1, 'provider-model', ?2, ?2, 0, '{}',
+                    'provider-connection-v1:test', 'provider-protocol-v1:test',
+                    '0', '', '0', 1, 0, 1, 1
+                 )",
+                rusqlite::params![id, display_name],
+            )
+        };
+
+        assert_eq!(insert("boundary", &"x".repeat(512)).unwrap(), 1);
+        assert!(insert("oversized", &"x".repeat(513)).is_err());
+        assert!(insert("untrimmed", " Model ").is_err());
     }
 
     #[test]

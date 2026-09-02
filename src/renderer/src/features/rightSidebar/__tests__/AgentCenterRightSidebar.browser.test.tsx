@@ -89,6 +89,24 @@ describe('Agent Center right sidebar', () => {
     expect(screen.container.querySelector('.right-sidebar__module-badge')?.textContent).toBe('1')
   })
 
+  it('uses the localized unavailable label instead of exposing a model configuration ID', async () => {
+    const internalId = '0197f53a-24e8-7a61-b630-secret-agent-model'
+    const unavailableAgent = {
+      ...agent('root-a', 'child-unavailable', 'idle'),
+      model: { displayName: '   ', modelConfigId: internalId }
+    }
+    const screen = await render(
+      <NarrowSidebar
+        activeConversationId="root-a"
+        snapshot={snapshot('root-a', [unavailableAgent])}
+      />
+    )
+
+    await screen.getByRole('button', { name: 'Subagents' }).click()
+    await expect.element(screen.getByText('Model unavailable', { exact: true })).toBeVisible()
+    expect(screen.container.textContent).not.toContain(internalId)
+  })
+
   it('groups active and ended agents, opens observer detail, and fits the 280px floor', async () => {
     const longTask = 'visual-review-nju-images-with-a-long-readable-suffix'
     const childRunning = agent('root-a', 'child-running', 'running', longTask, 'kimi')

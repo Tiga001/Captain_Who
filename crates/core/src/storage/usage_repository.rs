@@ -859,11 +859,13 @@ mod tests {
             .execute(
                 "
                 INSERT INTO models (
-                    id, display_name, supports_image, provider_connection_revision,
+                    id, provider_model_id, display_name, normalized_display_name,
+                    supports_image, provider_connection_revision,
                     provider_protocol_revision, provider_profile_config_json,
                     input_price, output_price, enabled, position, created_at, updated_at
                 )
-                VALUES ('provider/model-a', 'Current model name', 0,
+                VALUES ('provider/model-a', 'provider/model-a', 'Current model name',
+                        'current model name', 0,
                         'provider-connection-v1:test-model-a',
                         'provider-protocol-v1:test-model-a',
                         ?1, '0.03', '0.04', 1, 0, 0, 0)
@@ -929,11 +931,13 @@ mod tests {
             .execute(
                 "
                 INSERT INTO models (
-                    id, display_name, supports_image, provider_connection_revision,
+                    id, provider_model_id, display_name, normalized_display_name,
+                    supports_image, provider_connection_revision,
                     provider_protocol_revision, provider_profile_config_json,
                     input_price, output_price, enabled, position, created_at, updated_at
                 )
-                VALUES ('provider/model-a', 'Restored model', 0,
+                VALUES ('provider/model-a', 'provider/model-a', 'Restored model',
+                        'restored model', 0,
                         'provider-connection-v1:test-restored-model',
                         'provider-protocol-v1:test-restored-model',
                         ?1, '0.05', '0.06', 1, 0, 3_000, 3_000)
@@ -947,6 +951,87 @@ mod tests {
         assert!(restored.models[0].is_configured);
         assert_eq!(restored.models[0].input_tokens, Some(300));
         assert_eq!(restored.models[0].estimated_cost, Some(1.0));
+    }
+
+    #[test]
+    fn same_provider_model_id_keeps_distinct_config_usage_and_display_names() {
+        let connection = in_memory_connection();
+        insert_conversation(&connection, "conversation-config-a");
+        insert_conversation(&connection, "conversation-config-b");
+        let provider_profile =
+            serde_json::to_string(&crate::ProviderProfileConfig::generic_for_dialect(
+                crate::ProviderProtocolDialect::OpenAiChatCompletions,
+            ))
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO models (
+                    id, provider_model_id, display_name, normalized_display_name,
+                    supports_image, provider_connection_revision,
+                    provider_protocol_revision, provider_profile_config_json,
+                    input_price, output_price, enabled, position, created_at, updated_at
+                 ) VALUES
+                    ('config-a', 'kimi-k3', 'Kimi Primary', 'kimi primary',
+                     0, 'provider-connection-v1:config-a',
+                     'provider-protocol-v1:config-a', ?1,
+                     '0.01', '0.02', 1, 0, 0, 0),
+                    ('config-b', 'kimi-k3', 'Kimi Secondary', 'kimi secondary',
+                     0, 'provider-connection-v1:config-b',
+                     'provider-protocol-v1:config-b', ?1,
+                     '0.10', '0.20', 1, 1, 0, 0)",
+                params![&provider_profile],
+            )
+            .unwrap();
+        let mut first = usage_record(
+            "conversation-config-a",
+            "message-config-a",
+            "historical-a",
+            1_000,
+            100,
+            Some(0.01),
+        );
+        first.model_id = "config-a".to_string();
+        first.input_price = Some("0.01".to_string());
+        let mut second = usage_record(
+            "conversation-config-b",
+            "message-config-b",
+            "historical-b",
+            1_001,
+            200,
+            Some(0.20),
+        );
+        second.model_id = "config-b".to_string();
+        second.input_price = Some("0.10".to_string());
+        upsert_test_usage_record(&connection, &first).unwrap();
+        upsert_test_usage_record(&connection, &second).unwrap();
+
+        let summary = usage_summary(
+            &connection,
+            &AgentUsageSummaryInput {
+                range: AgentUsageSummaryRange::All,
+                from: None,
+                to: None,
+            },
+            2_000,
+        )
+        .unwrap();
+        assert_eq!(summary.models.len(), 2);
+        let first_summary = summary
+            .models
+            .iter()
+            .find(|model| model.model_id == "config-a")
+            .unwrap();
+        let second_summary = summary
+            .models
+            .iter()
+            .find(|model| model.model_id == "config-b")
+            .unwrap();
+        assert_eq!(first_summary.model_name, "Kimi Primary");
+        assert_eq!(first_summary.input_tokens, Some(100));
+        assert_eq!(first_summary.estimated_cost, Some(0.01));
+        assert_eq!(second_summary.model_name, "Kimi Secondary");
+        assert_eq!(second_summary.input_tokens, Some(200));
+        assert_eq!(second_summary.estimated_cost, Some(0.20));
     }
 
     #[test]

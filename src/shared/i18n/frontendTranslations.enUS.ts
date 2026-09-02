@@ -2051,10 +2051,11 @@ export const enUSTranslations = {
   'configuration.confirmDelete': 'Delete this model?',
   'configuration.cancel': 'Cancel',
   'configuration.done': 'Done',
-  'configuration.modelId': 'Model ID',
-  'configuration.modelIdPlaceholder': 'Example: claude-opus-4-7',
+  'configuration.providerModelId': 'Provider model ID',
+  'configuration.providerModelIdPlaceholder': 'Example: deepseek-chat',
   'configuration.displayName': 'Display name',
-  'configuration.displayNamePlaceholder': 'Leave empty to use model ID',
+  'configuration.displayNamePlaceholder': 'Example: Kimi K3 High',
+  'configuration.invalidDisplayName': 'Use a display name no longer than 512 UTF-8 bytes',
   'configuration.contextWindowTokens': 'Total context window (tokens)',
   'configuration.contextWindowTokensPlaceholder': 'Blank uses the default value 128000',
   'configuration.invalidContextWindowTokens': 'Enter an integer greater than 0',
@@ -2067,9 +2068,10 @@ export const enUSTranslations = {
   'configuration.loadFailed': 'Failed to load model settings',
   'configuration.saveFailed': 'Failed to save model settings',
   'configuration.saveFailedSafe':
-    'Unable to save the model settings. The last successfully saved settings were restored; please try again.',
-  'configuration.duplicateModelId':
-    'A model with ID "{modelId}" already exists. Please use a different model ID.',
+    'Unable to save the model settings. Your edits have been kept; review them and try again.',
+  'configuration.duplicateDisplayNameTitle': 'Display name already exists',
+  'configuration.duplicateDisplayName':
+    'A model named "{displayName}" already exists. Use a different display name.',
   'configuration.saving': 'Saving…',
   'configuration.supportsImageInput': 'Supports image input',
   'configuration.more': 'More',

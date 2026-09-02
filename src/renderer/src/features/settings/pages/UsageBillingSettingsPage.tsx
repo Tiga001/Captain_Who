@@ -3,6 +3,9 @@ import type { FocusEvent, ReactElement } from 'react'
 import { Check, ChevronDown } from 'lucide-react'
 import type { AgentUsageModelSummary, AgentUsageSummaryOutput } from '@mycopilot/protocol'
 import { useFrontendConfig } from '../../../config/FrontendConfigProvider'
+import { useModelSettings } from '../../../config/ModelSettingsProvider'
+import type { ModelConfig } from '../../../config/modelConfig'
+import { formatModelConfigLabel } from '../../modelSelection/modelConfigPresentation'
 import { getUserFacingErrorMessage } from '../../../errors/userFacingError'
 import { clearAgentUsageRecords, getAgentUsageSummary } from '../../agent/agentClient'
 import type { UiPreferencesSnapshot } from '../../storage/storageClient'
@@ -122,17 +125,35 @@ function formatMonthLabel(timestamp: number): string {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`
 }
 
-function getModelSubtitle(model: AgentUsageModelSummary): string {
-  if (model.modelId !== model.modelName) return model.modelId
-  return ''
-}
-
 function getModelKey(model: AgentUsageModelSummary): string {
   return model.modelId
 }
 
-function getModelLabel(model: AgentUsageModelSummary, deletedLabel: string): string {
-  return model.isConfigured ? model.modelName : `${model.modelName} (${deletedLabel})`
+interface UsageModelPresentation {
+  label: string
+  subtitle: string
+}
+
+function getModelPresentation(
+  model: AgentUsageModelSummary,
+  configuredModel: ModelConfig | undefined
+): UsageModelPresentation {
+  const label = configuredModel?.displayName.trim() || model.modelName.trim() || '—'
+  return {
+    label,
+    subtitle: ''
+  }
+}
+
+function getModelLabel(
+  model: AgentUsageModelSummary,
+  configuredModel: ModelConfig | undefined,
+  deletedLabel: string
+): string {
+  const label = configuredModel
+    ? formatModelConfigLabel(configuredModel)
+    : getModelPresentation(model, configuredModel).label
+  return model.isConfigured ? label : `${label} (${deletedLabel})`
 }
 
 function getRangeDayCount(range: UsageChartRange): number {
@@ -248,6 +269,7 @@ export function UsageBillingSettingsPage({
   uiPreferences
 }: UsageBillingSettingsPageProps): ReactElement {
   const { language, t } = useFrontendConfig()
+  const { models } = useModelSettings()
   const [range, setRange] = useState<UsageChartRange>('last7Days')
   const [summary, setSummary] = useState<AgentUsageSummaryOutput | null>(null)
   const [chartBuckets, setChartBuckets] = useState<UsageChartBucket[]>([])
@@ -264,6 +286,10 @@ export function UsageBillingSettingsPage({
         (first, second) => second.requestCount - first.requestCount
       ),
     [summary?.models]
+  )
+  const configuredModelsById = useMemo(
+    () => new Map(models.map((model) => [model.id, model])),
+    [models]
   )
   const activeModelKey =
     selectedModelKey === ALL_MODELS_KEY ||
@@ -419,7 +445,11 @@ export function UsageBillingSettingsPage({
               >
                 <span>
                   {selectedModel
-                    ? getModelLabel(selectedModel, t('usageBilling.deletedModel'))
+                    ? getModelLabel(
+                        selectedModel,
+                        configuredModelsById.get(selectedModel.modelId),
+                        t('usageBilling.deletedModel')
+                      )
                     : t('usageBilling.allModels')}
                 </span>
                 <ChevronDown aria-hidden="true" />
@@ -464,7 +494,13 @@ export function UsageBillingSettingsPage({
                           setModelMenuOpen(false)
                         }}
                       >
-                        <span>{getModelLabel(model, t('usageBilling.deletedModel'))}</span>
+                        <span>
+                          {getModelLabel(
+                            model,
+                            configuredModelsById.get(model.modelId),
+                            t('usageBilling.deletedModel')
+                          )}
+                        </span>
                         {isSelected && <Check aria-hidden="true" />}
                       </button>
                     )
@@ -700,12 +736,15 @@ export function UsageBillingSettingsPage({
           {sortedModels.length > 0 ? (
             <div className="usage-model-list">
               {sortedModels.map((model) => {
-                const subtitle = getModelSubtitle(model)
+                const presentation = getModelPresentation(
+                  model,
+                  configuredModelsById.get(model.modelId)
+                )
                 return (
                   <div className="usage-model-row" key={model.modelId}>
                     <div className="usage-model-row__name">
-                      <strong>{model.modelName}</strong>
-                      {subtitle && <span>{subtitle}</span>}
+                      <strong>{presentation.label}</strong>
+                      {presentation.subtitle && <span>{presentation.subtitle}</span>}
                       {!model.isConfigured && (
                         <small className="usage-model-row__deleted">
                           {t('usageBilling.deletedModel')}

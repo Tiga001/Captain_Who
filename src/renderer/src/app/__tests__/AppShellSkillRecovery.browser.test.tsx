@@ -961,7 +961,7 @@ beforeEach(() => {
   testState.collaborationRootIds.length = 0
   testState.deleteChatMessages.mockReset().mockResolvedValue(undefined)
   testState.forkConversation.mockReset()
-  testState.getContextWindowSnapshot.mockReset().mockResolvedValue({ snapshot: null })
+  testState.getContextWindowSnapshot.mockReset().mockResolvedValue({ modelConfigId: 'model-1' })
   testState.getProviderTransitionStatus.mockReset().mockResolvedValue({ operations: [] })
   testState.getAgentCommandSession.mockReset()
   testState.listAgentCommandSessions.mockReset().mockResolvedValue({ sessions: [] })

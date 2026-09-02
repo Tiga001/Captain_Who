@@ -450,7 +450,11 @@ pub fn commit_provider_transition_with_receipt(
         || receipt.conversation_id != expected_prefix.conversation_id
         || receipt.source_revision.as_deref() != Some(expected_prefix.source_revision.as_str())
         || receipt.summary_id.as_deref() != Some(draft.id.as_str())
-        || receipt.model != target_model_id
+        || receipt
+            .model_config_id
+            .as_deref()
+            .unwrap_or(receipt.model.as_str())
+            != target_model_id
     {
         return Err(ContextCompactionRepositoryError::Invalid(
             "Provider transition receipt 与待提交的前缀、摘要或目标模型不一致。".to_string(),

@@ -413,10 +413,11 @@ mod tests {
         connection
             .execute(
                 "INSERT INTO models (
-                    id, display_name, supports_image, provider_connection_revision,
+                    id, provider_model_id, display_name, normalized_display_name,
+                    supports_image, provider_connection_revision,
                     provider_protocol_revision, provider_profile_config_json,
                     input_price, output_price, enabled, position, created_at, updated_at
-                 ) VALUES ('target-model', 'Target', 0,
+                 ) VALUES ('target-model', 'target-model', 'Target', 'target', 0,
                            'provider-connection-v1:target-connection',
                            'provider-protocol-v1:target-revision', ?1,
                            '0', '0', 1, 0, 1, 1)",

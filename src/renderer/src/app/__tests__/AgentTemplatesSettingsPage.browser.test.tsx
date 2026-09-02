@@ -169,7 +169,11 @@ describe('Agent template settings', () => {
       .getByRole('textbox', { name: 'agentTemplates.instructions' })
       .fill('Review the requested change.')
     await screen.getByRole('button', { name: 'agentTemplates.selectModel' }).click()
-    await screen.getByRole('option', { name: 'Model Two' }).click()
+    const modelTwoOption = screen.getByRole('option', {
+      name: 'Model Two'
+    })
+    await expect.element(modelTwoOption).toBeVisible()
+    await modelTwoOption.click()
     await screen.getByRole('button', { name: 'agentTemplates.save' }).click()
 
     await expect.poll(() => service.create).toHaveBeenCalledTimes(1)
@@ -272,7 +276,13 @@ describe('Agent template settings', () => {
       path: '__screenshots__/AgentTemplatesSettingsPage.browser.test.tsx/template-form-unavailable-model.png'
     })
     await screen.getByRole('button', { name: 'agentTemplates.selectModel' }).click()
-    await expect.element(screen.getByRole('option', { name: /Retired Model/ })).toBeDisabled()
+    await expect
+      .element(
+        screen.getByRole('option', {
+          name: /Retired Model/
+        })
+      )
+      .toBeDisabled()
     await screen.getByRole('option', { name: 'Model Two' }).click()
     await screen.getByRole('button', { name: 'agentTemplates.save' }).click()
 
@@ -284,6 +294,31 @@ describe('Agent template settings', () => {
         templateId: 'template-retired'
       })
     )
+  })
+
+  it('never exposes a missing model configuration ID when no visible snapshot label exists', async () => {
+    const internalId = '0197f53a-24e8-7a61-b630-secret-template-model'
+    inventory = [
+      {
+        ...template('template-missing', 'Missing model template', internalId, []),
+        modelDisplayName: '   '
+      }
+    ]
+    const screen = await render(
+      <AgentTemplatesSettingsPage initialProjectId="project-a" projects={PROJECTS} />
+    )
+
+    await expect
+      .element(screen.getByText('agentTemplates.modelUnavailable', { exact: true }))
+      .toBeVisible()
+    expect(screen.container.textContent).not.toContain(internalId)
+
+    await screen.getByRole('button', { name: 'agentTemplates.edit Missing model template' }).click()
+    await screen.getByRole('button', { name: 'agentTemplates.selectModel' }).click()
+    await expect
+      .element(screen.getByRole('option', { name: 'agentTemplates.modelUnavailable' }))
+      .toBeDisabled()
+    expect(screen.container.textContent).not.toContain(internalId)
   })
 
   it('reloads canonical state and shows an error when project assignment fails', async () => {
@@ -360,7 +395,13 @@ function cloneTemplate(template: AgentTemplate): AgentTemplate {
 }
 
 function model(id: string, displayName: string, enabled: boolean) {
-  return { displayName, enabled, id, supportsImage: false }
+  return {
+    displayName,
+    enabled,
+    id,
+    providerModelId: `provider-${id}`,
+    supportsImage: false
+  }
 }
 
 function deferred<T>() {

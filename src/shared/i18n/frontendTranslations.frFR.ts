@@ -2143,10 +2143,11 @@ export const frFRTranslations = {
   'configuration.confirmDelete': 'Supprimer ce modèle ?',
   'configuration.cancel': 'Annuler',
   'configuration.done': 'Terminé',
-  'configuration.modelId': 'ID du modèle',
-  'configuration.modelIdPlaceholder': 'Exemple : claude-opus-4-7',
+  'configuration.providerModelId': 'ID du modèle fournisseur',
+  'configuration.providerModelIdPlaceholder': 'Exemple : deepseek-chat',
   'configuration.displayName': "Nom d'affichage",
-  'configuration.displayNamePlaceholder': "Laissez vide pour utiliser l'ID du modèle",
+  'configuration.displayNamePlaceholder': 'Exemple : Kimi K3 High',
+  'configuration.invalidDisplayName': "Utilisez un nom d'affichage de 512 octets UTF-8 maximum",
   'configuration.contextWindowTokens': 'Fenêtre de contexte totale (jetons)',
   'configuration.contextWindowTokensPlaceholder': 'Blank utilise la valeur par défaut 128000',
   'configuration.invalidContextWindowTokens': 'Entrez un entier supérieur à 0',
@@ -2159,9 +2160,10 @@ export const frFRTranslations = {
   'configuration.loadFailed': 'Échec du chargement des paramètres du modèle',
   'configuration.saveFailed': "Échec de l'enregistrement des paramètres du modèle",
   'configuration.saveFailedSafe':
-    "Impossible d'enregistrer les paramètres du modèle. Les derniers paramètres enregistrés avec succès ont été restaurés ; veuillez réessayer.",
-  'configuration.duplicateModelId':
-    'Un modèle avec l\'ID "{modelId}" existe déjà. Veuillez utiliser un identifiant de modèle différent.',
+    'Impossible d’enregistrer les paramètres du modèle. Vos modifications ont été conservées ; vérifiez-les puis réessayez.',
+  'configuration.duplicateDisplayNameTitle': 'Ce nom d’affichage existe déjà',
+  'configuration.duplicateDisplayName':
+    'Un modèle nommé « {displayName} » existe déjà. Utilisez un autre nom d’affichage.',
   'configuration.saving': 'Sauvegarde…',
   'configuration.supportsImageInput': "Prend en charge la saisie d'images",
   'configuration.more': 'Plus',

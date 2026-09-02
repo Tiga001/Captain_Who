@@ -27,7 +27,7 @@ import {
 const MAX_CONVERSATION_ID_BYTES = 512 * 4
 const MAX_FORK_IDENTIFIER_BYTES = 512 * 4
 const MAX_ACTIVE_COMMAND_SESSIONS = 512
-const MAX_MODEL_ID_BYTES = 512 * 4
+const MAX_MODEL_DISPLAY_NAME_BYTES = 512
 const MAX_PROVIDER_DESCRIPTORS = 16
 const MAX_PROVIDER_VENDOR_ID_BYTES = 32
 
@@ -413,19 +413,19 @@ export function parseStorageModelSettingsValidationErrorData(
 ): StorageModelSettingsValidationErrorData {
   const context = 'storage model settings validation error data'
   const record = expectRecord(value, context)
-  expectOnlyKeys(record, ['kind', 'code', 'modelId'] as const, context)
+  expectOnlyKeys(record, ['kind', 'code', 'displayName'] as const, context)
 
-  const modelId = expectNonEmptyString(record.modelId, `${context}.modelId`)
-  if (new TextEncoder().encode(modelId).byteLength > MAX_MODEL_ID_BYTES) {
+  const displayName = expectNonEmptyString(record.displayName, `${context}.displayName`)
+  if (new TextEncoder().encode(displayName).byteLength > MAX_MODEL_DISPLAY_NAME_BYTES) {
     throw invalidProtocolValue(
-      `${context}.modelId`,
-      `must not exceed ${MAX_MODEL_ID_BYTES} UTF-8 bytes`
+      `${context}.displayName`,
+      `must not exceed ${MAX_MODEL_DISPLAY_NAME_BYTES} UTF-8 bytes`
     )
   }
 
   return {
     kind: expectEnum(record.kind, ['model_settings_validation'] as const, `${context}.kind`),
-    code: expectEnum(record.code, ['duplicate_model_id'] as const, `${context}.code`),
-    modelId
+    code: expectEnum(record.code, ['duplicate_display_name'] as const, `${context}.code`),
+    displayName
   }
 }

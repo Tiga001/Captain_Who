@@ -10,6 +10,7 @@ import type { AppProject } from '../../../config/projectConfig'
 import type { ChatPermissionMode, ChatConversation } from '../../chat/chatTypes'
 import { ModelConfigPicker } from '../../modelSelection/ModelConfigPicker'
 import type { ModelConfigPickerOption } from '../../modelSelection/ModelConfigPicker'
+import { formatModelConfigLabel } from '../../modelSelection/modelConfigPresentation'
 import type { AutomationDraft } from '../automationTypes'
 import { withSystemTimeZone } from '../automationSchedule'
 import { validateAutomationDraft as validateProtocolAutomationDraft } from '../automationValidation'
@@ -276,11 +277,13 @@ export function AutomationTaskForm({
     capabilityLabel: model.supportsImage ? t('configuration.image') : t('configuration.text'),
     capabilitySupported: model.supportsImage,
     id: model.id,
-    label: model.displayName
+    label: formatModelConfigLabel(model)
   }))
   const selectedModelId = newChatDestination?.modelId
   if (selectedModelId && !modelOptions.some((option) => option.id === selectedModelId)) {
     const unavailableModel = models.find((model) => model.id === selectedModelId)
+    const unavailableModelLabel = unavailableModel ? formatModelConfigLabel(unavailableModel) : ''
+    const storedModelLabel = task?.targetSnapshot.modelDisplayName?.trim() ?? ''
     modelOptions.push({
       capabilityLabel: unavailableModel
         ? unavailableModel.supportsImage
@@ -289,8 +292,7 @@ export function AutomationTaskForm({
         : undefined,
       capabilitySupported: unavailableModel?.supportsImage,
       id: selectedModelId,
-      label:
-        task?.targetSnapshot.modelDisplayName ?? unavailableModel?.displayName ?? selectedModelId,
+      label: unavailableModelLabel || storedModelLabel || t('automation.modelMissing'),
       disabled: true
     })
   }

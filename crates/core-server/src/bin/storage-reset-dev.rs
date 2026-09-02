@@ -43,12 +43,8 @@ const DATABASE_FILE_NAME: &str = "storage.sqlite";
 const BACKUP_DIRECTORY_NAME: &str = "storage-backups";
 const CONFIRM_RESET_FLAG: &str = "--confirm-reset";
 const APP_DATA_ROOT_FLAG: &str = "--app-data-root";
-const PREVIOUS_STORAGE_SCHEMA_VERSION: i32 =
-    mycopilot_core::storage::migrations::STORAGE_SCHEMA_VERSION - 1;
 const SQLITE_TRANSIENT_SUFFIXES: [&str; 3] = ["-journal", "-wal", "-shm"];
 const EXACT_CONFIGURATION_TABLES: &[&str] = &[
-    "model_provider_settings",
-    "models",
     "image_generation_profiles",
     "image_generation_credential_staging",
     "image_generation_credential_cleanup",
@@ -346,6 +342,7 @@ fn inspect_source(
     if !can_preserve_development_configuration(schema_version) {
         return Ok((None, count_all_business_rows(&connection)?));
     }
+    validate_model_configuration_schema(&connection)?;
     let exact_configuration_tables = load_exact_configuration_table_snapshots(&connection)?;
     let model_settings = load_model_settings_for_development_reset(&connection)?;
     let model_settings = model_settings.map(validate_model_profiles).transpose()?;
@@ -430,8 +427,30 @@ fn storage_schema_version(connection: &Connection) -> io::Result<i32> {
 }
 
 fn can_preserve_development_configuration(schema_version: i32) -> bool {
-    let current_schema_version = mycopilot_core::storage::migrations::STORAGE_SCHEMA_VERSION;
-    schema_version == current_schema_version || schema_version == PREVIOUS_STORAGE_SCHEMA_VERSION
+    schema_version == mycopilot_core::storage::migrations::STORAGE_SCHEMA_VERSION
+}
+
+fn validate_model_configuration_schema(source: &Connection) -> io::Result<()> {
+    let canonical = Connection::open_in_memory().map_err(redacted_storage_error)?;
+    mycopilot_core::storage::migrations::run_migrations(&canonical)
+        .map_err(redacted_storage_error)?;
+    let current_provider =
+        snapshot_exact_configuration_table(&canonical, "model_provider_settings")?;
+    let source_provider = snapshot_exact_configuration_table(source, "model_provider_settings")?;
+    if !source_provider.has_same_schema(&current_provider) {
+        return Err(invalid_data(
+            "configuration table schema differs for model provider settings",
+        ));
+    }
+
+    let current_models = snapshot_exact_configuration_table(&canonical, "models")?;
+    let source_models = snapshot_exact_configuration_table(source, "models")?;
+    if !source_models.has_same_schema(&current_models) {
+        return Err(invalid_data(
+            "configuration table schema differs for models",
+        ));
+    }
+    Ok(())
 }
 
 fn load_exact_configuration_table_snapshots(
@@ -591,13 +610,10 @@ fn restore_exact_configuration_tables(
     transaction.commit().map_err(redacted_storage_error)
 }
 
-/// Preserves only the UI configuration from the current or immediately previous development
-/// schema.
+/// Preserves UI configuration only from the current development schema.
 ///
 /// Conversation, checkpoint, pending-action, and Agent runtime records are intentionally never
-/// decoded or migrated by this reset utility. The immediately previous schema has the same UI
-/// preference projection, so it can be read through the current repository without introducing a
-/// general migration path.
+/// decoded or migrated by this reset utility.
 fn load_ui_preferences_for_development_reset(
     connection: &Connection,
 ) -> io::Result<UiPreferencesRecord> {
@@ -608,7 +624,7 @@ fn load_ui_preferences_for_development_reset(
     }
 
     Err(invalid_data(
-        "only the immediately previous development UI preference schema can be preserved",
+        "only the current development UI preference schema can be preserved",
     ))
 }
 
@@ -622,14 +638,14 @@ fn load_browser_download_settings_for_development_reset(
     }
 
     Err(invalid_data(
-        "only the immediately previous development browser download settings can be preserved",
+        "only the current development browser download settings can be preserved",
     ))
 }
 
 /// Reads only the configuration fields that the explicit development reset preserves.
 ///
-/// The source database must already use the current per-model Provider Protocol identity. The
-/// reset command rebuilds storage; it is not an importer for retired development formats.
+/// The current schema is copied semantically. Retired schemas are never decoded here or during
+/// application startup.
 fn load_model_settings_for_development_reset(
     connection: &Connection,
 ) -> io::Result<Option<ModelSettingsRecord>> {
@@ -659,10 +675,23 @@ fn load_model_settings_for_development_reset(
         return Ok(None);
     };
 
+    let models = load_current_model_settings_rows(connection)?;
+
+    Ok(Some(ModelSettingsRecord {
+        api_url,
+        api_token,
+        search_mode,
+        tavily_api_key,
+        models,
+    }))
+}
+
+fn load_current_model_settings_rows(connection: &Connection) -> io::Result<Vec<ModelConfigRecord>> {
     let mut statement = connection
         .prepare(
             "SELECT
                  id,
+                 provider_model_id,
                  display_name,
                  api_url_override,
                  api_token_override,
@@ -683,71 +712,80 @@ fn load_model_settings_for_development_reset(
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
-                row.get::<_, Option<String>>(2)?,
+                row.get::<_, String>(2)?,
                 row.get::<_, Option<String>>(3)?,
-                row.get::<_, bool>(4)?,
-                row.get::<_, Option<u32>>(5)?,
-                row.get::<_, String>(6)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, bool>(5)?,
+                row.get::<_, Option<u32>>(6)?,
                 row.get::<_, String>(7)?,
                 row.get::<_, String>(8)?,
                 row.get::<_, String>(9)?,
-                row.get::<_, bool>(10)?,
-                row.get::<_, String>(11)?,
+                row.get::<_, String>(10)?,
+                row.get::<_, bool>(11)?,
+                row.get::<_, String>(12)?,
             ))
         })
         .map_err(redacted_storage_error)?
         .collect::<rusqlite::Result<Vec<_>>>()
         .map_err(redacted_storage_error)?;
 
-    let mut models = Vec::with_capacity(raw_models.len());
-    for (
-        id,
-        display_name,
-        api_url_override,
-        api_token_override,
-        supports_image,
-        context_window_tokens,
-        profile_json,
-        input_price,
-        cached_input_price,
-        output_price,
-        enabled,
-        provider_protocol_revision,
-    ) in raw_models
-    {
-        if !is_provider_protocol_revision(&provider_protocol_revision) {
-            return Err(invalid_data(format!(
-                "model `{id}` does not use the current Provider Protocol revision"
-            )));
-        }
-        let provider_profile_config = serde_json::from_str::<ProviderProfileConfig>(&profile_json)
-            .map_err(|_| {
-                invalid_data(format!(
-                    "model `{id}` has an unreadable Provider Profile configuration"
-                ))
-            })?;
-        models.push(ModelConfigRecord {
-            id,
-            display_name,
-            api_url_override,
-            api_token_override,
-            supports_image,
-            context_window_tokens,
-            provider_profile_config,
-            input_price,
-            cached_input_price,
-            output_price,
-            enabled,
-        });
-    }
+    raw_models
+        .into_iter()
+        .map(
+            |(
+                id,
+                provider_model_id,
+                display_name,
+                api_url_override,
+                api_token_override,
+                supports_image,
+                context_window_tokens,
+                profile_json,
+                input_price,
+                cached_input_price,
+                output_price,
+                enabled,
+                provider_protocol_revision,
+            )| {
+                let provider_profile_config = decode_reset_provider_profile(
+                    &display_name,
+                    &profile_json,
+                    &provider_protocol_revision,
+                )?;
+                Ok(ModelConfigRecord {
+                    id,
+                    provider_model_id,
+                    display_name,
+                    api_url_override,
+                    api_token_override,
+                    supports_image,
+                    context_window_tokens,
+                    provider_profile_config,
+                    input_price,
+                    cached_input_price,
+                    output_price,
+                    enabled,
+                })
+            },
+        )
+        .collect()
+}
 
-    Ok(Some(ModelSettingsRecord {
-        api_url,
-        api_token,
-        search_mode,
-        tavily_api_key,
-        models,
-    }))
+fn decode_reset_provider_profile(
+    model_label: &str,
+    profile_json: &str,
+    provider_protocol_revision: &str,
+) -> io::Result<ProviderProfileConfig> {
+    if !is_provider_protocol_revision(provider_protocol_revision) {
+        return Err(invalid_data(format!(
+            "model `{model_label}` does not use the current Provider Protocol revision"
+        )));
+    }
+    serde_json::from_str::<ProviderProfileConfig>(profile_json).map_err(|_| {
+        invalid_data(format!(
+            "model `{model_label}` has an unreadable Provider Profile configuration"
+        ))
+    })
 }
 
 fn validate_model_profiles(settings: ModelSettingsRecord) -> io::Result<ModelSettingsRecord> {
@@ -815,6 +853,11 @@ fn build_fresh_database(
     let storage = StorageService::open_for_development_reset(database_path)
         .map_err(|_| io::Error::other("failed to create the canonical storage schema"))?;
     if let Some(configuration) = configuration {
+        if let Some(model_settings) = &configuration.model_settings {
+            storage
+                .save_model_settings(model_settings.clone())
+                .map_err(|_| io::Error::other("failed to restore model and search settings"))?;
+        }
         storage
             .save_ui_preferences(configuration.ui_preferences.clone())
             .map_err(|_| io::Error::other("failed to restore UI preferences"))?;
@@ -1036,7 +1079,7 @@ fn verify_fresh_database(
         match (&configuration.model_settings, restored) {
             (None, None) => {}
             (Some(expected), Some(restored))
-                if expected.models.len() == restored.settings.models.len() =>
+                if model_settings_values_match(expected, &restored.settings) =>
             {
                 if restored
                     .provider_protocol_revisions
@@ -1048,7 +1091,7 @@ fn verify_fresh_database(
                     ));
                 }
             }
-            _ => return Err(invalid_data("restored model settings count mismatch")),
+            _ => return Err(invalid_data("restored model settings values mismatch")),
         }
         if let Some(expected) = &configuration.image_generation_profile {
             let restored = storage
@@ -1071,7 +1114,7 @@ fn verify_fresh_database(
         let restored_configuration = snapshot_exact_configuration_tables(&connection)?;
         if restored_configuration != configuration.exact_configuration_tables {
             return Err(invalid_data(
-                "restored model, search, or image-generation configuration differs from its exact snapshot",
+                "restored image-generation configuration differs from its exact snapshot",
             ));
         }
     }
@@ -1155,6 +1198,34 @@ fn verify_fresh_database(
         )?;
     }
     Ok(())
+}
+
+fn model_settings_values_match(
+    expected: &ModelSettingsRecord,
+    restored: &ModelSettingsRecord,
+) -> bool {
+    expected.api_url == restored.api_url
+        && expected.api_token == restored.api_token
+        && expected.search_mode == restored.search_mode
+        && expected.tavily_api_key == restored.tavily_api_key
+        && expected.models.len() == restored.models.len()
+        && expected
+            .models
+            .iter()
+            .zip(&restored.models)
+            .all(|(expected, restored)| {
+                expected.id == restored.id
+                    && expected.provider_model_id == restored.provider_model_id
+                    && expected.display_name == restored.display_name
+                    && expected.api_url_override == restored.api_url_override
+                    && expected.api_token_override == restored.api_token_override
+                    && expected.supports_image == restored.supports_image
+                    && expected.context_window_tokens == restored.context_window_tokens
+                    && expected.input_price == restored.input_price
+                    && expected.cached_input_price == restored.cached_input_price
+                    && expected.output_price == restored.output_price
+                    && expected.enabled == restored.enabled
+            })
 }
 
 fn verify_table_count(connection: &Connection, table: &str, expected: usize) -> io::Result<()> {
@@ -1544,8 +1615,8 @@ mod tests {
     };
     use mycopilot_core::storage::image_generation_repository::IMAGE_GENERATION_PROFILE_SCHEMA_VERSION;
     use mycopilot_core::storage::models::{
-        BrowserDownloadLocationMode, BrowserDownloadSettingsUpdate, BrowserLinkOpenTarget,
-        ModelConfigRecord, ProjectRecord, BROWSER_DOWNLOAD_SCHEMA_VERSION,
+        BrowserDownloadLocationMode, BrowserDownloadSettingsUpdate, ModelConfigRecord,
+        ProjectRecord, BROWSER_DOWNLOAD_SCHEMA_VERSION,
     };
     use mycopilot_mcp_client::{
         McpApprovalMode, McpServerConfig, McpServerId, McpServerScope, McpStdioConfig,
@@ -1573,6 +1644,7 @@ mod tests {
             tavily_api_key: format!("search-{secret}"),
             models: vec![ModelConfigRecord {
                 id: "model-a".to_string(),
+                provider_model_id: "model-a".to_string(),
                 display_name: "Model A".to_string(),
                 api_url_override: Some(
                     "https://per-model.example.test/v1/chat/completions".to_string(),
@@ -2062,57 +2134,18 @@ mod tests {
     }
 
     #[test]
-    fn reset_preserves_immediately_previous_ui_configuration_without_runtime_history() {
-        let fixture = tempfile::tempdir().unwrap();
-        populated_storage(fixture.path(), "previous-schema-reset-test-token");
-        let database = fixture.path().join(DATABASE_FILE_NAME);
-
-        let storage = StorageService::open(&database).unwrap();
-        storage
-            .save_browser_preferences(BrowserPreferencesUpdate {
-                schema_version: BROWSER_DATA_SCHEMA_VERSION,
-                link_open_target: BrowserLinkOpenTarget::Builtin,
-                expected_revision: 0,
-                updated_at: 8,
-            })
-            .unwrap();
-        drop(storage);
-
-        let connection = Connection::open(&database).unwrap();
-        connection
-            .pragma_update(None, "user_version", PREVIOUS_STORAGE_SCHEMA_VERSION)
-            .unwrap();
-        drop(connection);
-
-        let report = execute(options(fixture.path(), true)).unwrap();
-        assert!(report.confirmed);
-
-        let storage = StorageService::open(&database).unwrap();
-        let preferences = storage.load_ui_preferences().unwrap();
-        assert_eq!(preferences.profile_display_name, "Reset Test");
-        assert_eq!(preferences.profile_handle, "USER");
-        assert!(
-            storage
-                .load_browser_download_settings()
-                .unwrap()
-                .ask_where_to_save
-        );
-        assert_eq!(
-            storage.load_browser_preferences().unwrap().link_open_target,
-            BrowserLinkOpenTarget::Builtin
-        );
-        assert!(storage.load_projects().unwrap().is_empty());
-    }
-
-    #[test]
-    fn confirmed_reset_rebuilds_older_schema_with_defaults_after_creating_a_backup() {
+    fn confirmed_reset_rebuilds_previous_schema_with_defaults_after_creating_a_backup() {
         let fixture = tempfile::tempdir().unwrap();
         populated_storage(fixture.path(), "older-schema-reset-test-token");
         let database = fixture.path().join(DATABASE_FILE_NAME);
 
         let connection = Connection::open(&database).unwrap();
         connection
-            .pragma_update(None, "user_version", PREVIOUS_STORAGE_SCHEMA_VERSION - 1)
+            .pragma_update(
+                None,
+                "user_version",
+                mycopilot_core::storage::migrations::STORAGE_SCHEMA_VERSION - 1,
+            )
             .unwrap();
         drop(connection);
 

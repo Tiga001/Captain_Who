@@ -3212,7 +3212,10 @@ fn validate_current_effective_provider_protocol(
     let current_profile = model
         .resolved_provider_profile_config(current_dialect)
         .map_err(|_| "frozen pending-action Provider Profile is unavailable".to_string())?;
-    if &current_profile != frozen_profile || frozen_key.dialect != current_dialect {
+    if &current_profile != frozen_profile
+        || frozen_key.dialect != current_dialect
+        || frozen_key.model_id != model.provider_model_id
+    {
         return Err("frozen pending-action Provider Protocol no longer matches".to_string());
     }
     Ok(())
@@ -3227,9 +3230,16 @@ pub(super) fn restore_agent_input_secrets(
         .load_model_settings_snapshot()
         .map_err(|_| "failed to resolve frozen pending-action provider settings".to_string())?
         .ok_or_else(|| "frozen pending-action provider settings are unavailable".to_string())?;
+    let model_config_id = agent_input
+        .model_config_id
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            "frozen pending-action local model configuration is unavailable".to_string()
+        })?;
     let current_provider_connection_revision = settings_snapshot
         .provider_connection_revisions
-        .get(&agent_input.model)
+        .get(model_config_id)
         .ok_or_else(|| "frozen pending-action provider connection is unavailable".to_string())?;
     if current_provider_connection_revision != &persisted.provider_connection_revision {
         return Err("frozen pending-action provider connection no longer matches".to_string());
@@ -3252,7 +3262,7 @@ pub(super) fn restore_agent_input_secrets(
     };
     if conversation_model_id
         .as_deref()
-        .is_some_and(|model_id| model_id != agent_input.model)
+        .is_some_and(|model_id| model_id != model_config_id)
     {
         return Err(
             "frozen pending-action model identity no longer matches its conversation".to_string(),
@@ -3261,7 +3271,7 @@ pub(super) fn restore_agent_input_secrets(
     let model = settings
         .models
         .iter()
-        .find(|model| model.id == agent_input.model)
+        .find(|model| model.id == model_config_id)
         .ok_or_else(|| "frozen pending-action model configuration is unavailable".to_string())?;
 
     // Pending actions deliberately persist without API tokens. On restoration, resolve the
@@ -3358,11 +3368,16 @@ fn bind_pending_provider_configuration(
             mycopilot_core::storage::config_repository::is_provider_protocol_revision(revision)
         })
         .ok_or_else(|| "pending-action Provider Protocol revision is unavailable".to_string())?;
+    let model_config_id = agent_input
+        .model_config_id
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| "pending-action local model configuration is unavailable".to_string())?;
     let model = snapshot
         .settings
         .models
         .iter()
-        .find(|model| model.id == agent_input.model)
+        .find(|model| model.id == model_config_id)
         .ok_or_else(|| "pending-action model configuration is unavailable".to_string())?;
     let connection = snapshot
         .settings

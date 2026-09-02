@@ -67,8 +67,9 @@ where
 
     match result {
         Ok(value) => response_success(id, value),
-        Err(ModelSettingsSaveError::DuplicateModelId { model_id }) => {
-            let data = StorageModelSettingsValidationErrorData::duplicate_model_id(model_id);
+        Err(ModelSettingsSaveError::DuplicateDisplayName { display_name }) => {
+            let data =
+                StorageModelSettingsValidationErrorData::duplicate_display_name(display_name);
             serde_json::to_value(error_with_data(
                 Some(id),
                 -32000,

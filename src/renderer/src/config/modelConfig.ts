@@ -5,9 +5,11 @@ import type {
 } from '@mycopilot/protocol'
 
 interface ModelConfigFields {
-  /** Opaque model identifier sent verbatim as the provider API's `model` value. */
+  /** Immutable local identity referenced by chats, automations, and Agent templates. */
   id: string
-  /** User-facing label. It never changes provider routing. */
+  /** Opaque provider identifier sent verbatim as the provider API's `model` value. */
+  providerModelId: string
+  /** Required, unique user-facing identity. It never changes provider routing. */
   displayName: string
   apiUrlOverride?: string
   apiTokenOverride?: string
@@ -15,8 +17,6 @@ interface ModelConfigFields {
   contextWindowTokens?: number
   /** One-shot, explicit profile mutation sent to the authoritative Host save boundary. */
   providerProfileUpdate: StorageProviderProfileUpdate
-  /** One-shot previous identity used by Host while saving an edited model rename. */
-  previousModelId?: string
   inputPrice: string
   /** Empty means cached input is billed at inputPrice. */
   cachedInputPrice: string
@@ -31,7 +31,9 @@ export interface ModelConfig extends ModelConfigFields {
 }
 
 /** A new model that has not yet received its versioned Profile from the Host. */
-export interface ModelConfigSaveDraft extends ModelConfigFields {
+export interface ModelConfigSaveDraft extends Omit<ModelConfigFields, 'id'> {
+  /** Host assigns the immutable local identity when a new model is first saved. */
+  id: null
   providerProfileConfig?: never
 }
 
@@ -40,7 +42,7 @@ export type SearchMode = 'auto' | 'disabled' | 'tavily'
 export const DEFAULT_MODEL_CONTEXT_WINDOW_TOKENS = 128_000
 
 export interface ModelFormValues {
-  id: string
+  providerModelId: string
   displayName: string
   apiUrlOverride: string
   apiTokenOverride: string

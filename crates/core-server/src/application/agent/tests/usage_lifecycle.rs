@@ -1320,3 +1320,60 @@ fn pending_approval_persists_full_run_checkpoint() {
     assert!(!record.agent_input.api_token.is_empty());
     assert_eq!(record.agent_input.context_window_tokens, Some(128_000));
 }
+
+#[test]
+fn pending_usage_restore_does_not_expose_missing_model_config_id() {
+    let fixture = tempdir().unwrap();
+    let storage = StorageService::open(&fixture.path().join("storage.sqlite")).unwrap();
+    let local_model_config_id = "019d2e91-3ec8-7a36-a3b8-private-model-config";
+    let provider_model_id = "provider-wire-model";
+    let mut agent_input = serde_json::from_value::<AgentChatInput>(json!({
+        "apiUrl": "https://example.test/v1/chat/completions",
+        "apiToken": "secret",
+        "model": provider_model_id,
+        "modelCapabilities": { "imageInput": false },
+        "messages": []
+    }))
+    .unwrap();
+    agent_input.model_config_id = Some(local_model_config_id.to_string());
+    agent_input.provider_profile_config = Some(crate::test_provider_profile_config());
+    agent_input.provider_protocol_key = Some(crate::test_provider_protocol_key(provider_model_id));
+
+    let action_id = "call-missing-model-config";
+    let run_id = "run-missing-model-config";
+    let pending_action = PendingActionRecord {
+        storage_id: pending_action_storage_id(run_id, action_id),
+        snapshot: PendingAgentActionSnapshot {
+            action_id: action_id.to_string(),
+            action_type: "tool_call".to_string(),
+            tool_name: "test_tool".to_string(),
+            tool_call_id: Some(action_id.to_string()),
+            run_id: run_id.to_string(),
+            conversation_id: Some("conversation-missing-model-config".to_string()),
+            assistant_message_id: Some("assistant-missing-model-config".to_string()),
+            action: AgentProposedAction::ToolCall {
+                call: AgentToolCall {
+                    id: action_id.to_string(),
+                    tool: "test_tool".to_string(),
+                    args: json!({}),
+                    approval_status: AgentApprovalStatus::Required,
+                    reason: None,
+                },
+            },
+            created_at: 1,
+            status: PendingActionStatus::Pending,
+        },
+        agent_input,
+    };
+
+    let restored = super::super::usage::restore_pending_usage_contexts(
+        &storage,
+        &HashMap::from([(pending_action.storage_id.clone(), pending_action)]),
+    )
+    .unwrap();
+    let usage = restored.get(run_id).unwrap();
+
+    assert_eq!(usage.context.model_id, local_model_config_id);
+    assert_eq!(usage.context.model_name, provider_model_id);
+    assert!(!usage.context.model_name.contains(local_model_config_id));
+}

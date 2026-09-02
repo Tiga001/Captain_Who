@@ -200,21 +200,16 @@ pub(crate) fn resolve_exact_agent_model(
     let protocol = crate::ProviderProtocolKey::new(
         dialect,
         &profile,
-        model.id.clone(),
+        model.provider_model_id.clone(),
         Some(provider_protocol_revision.clone()),
     )
     .map_err(|_| AgentModelUnavailableReason::InvalidProfile)?;
     crate::resolve_provider_runtime_capabilities(&protocol)
         .map_err(|_| AgentModelUnavailableReason::UnsupportedRuntime)?;
 
-    let display_name = model.display_name.trim();
     Ok(AgentModelSelectionSnapshot {
         model_config_id: model.id.clone(),
-        display_name: if display_name.is_empty() {
-            model.id.clone()
-        } else {
-            display_name.to_string()
-        },
+        display_name: model.display_label(),
         supports_image: model.supports_image,
         effective_context_window_tokens: model.effective_context_window_tokens(),
         model_settings_configuration_revision: snapshot.configuration_revision.clone(),
@@ -298,6 +293,7 @@ mod tests {
     fn model(model_id: &str, enabled: bool) -> ModelConfigRecord {
         ModelConfigRecord {
             id: model_id.to_string(),
+            provider_model_id: model_id.to_string(),
             display_name: format!("Display {model_id}"),
             api_url_override: None,
             api_token_override: None,
@@ -696,6 +692,39 @@ mod tests {
         assert_eq!(after.template.template_revision, 2);
         assert_eq!(after.template.name, "Renamed reviewer");
         assert_eq!(after.model.display_name, "New display");
+    }
+
+    #[test]
+    fn spawn_resolution_uses_provider_model_id_not_config_id_for_protocol_validation() {
+        let fixture = Fixture::new();
+        let service = &fixture.service;
+        let mut configured = model("config-moonshot", true);
+        configured.provider_model_id = "kimi-k3".to_string();
+        configured.provider_profile_config = crate::ProviderProfileConfig::from_family_settings(
+            crate::ProviderProfileRef::moonshot_k3_chat(),
+            crate::ProviderVendorId::Moonshot,
+            crate::ProviderFamilySettings::MoonshotK3Chat {
+                reasoning_effort: crate::ProviderReasoningEffort::Max,
+            },
+        );
+        service
+            .save_model_settings(settings(vec![configured]))
+            .unwrap();
+        service
+            .create_agent_template(&create_input(
+                "template-moonshot",
+                "project-a",
+                "moonshot_reviewer",
+                "Moonshot reviewer",
+                "config-moonshot",
+            ))
+            .unwrap();
+        assign(service, "project-a", "template-moonshot");
+
+        let resolved = service
+            .resolve_template_for_spawn("project-a", "moonshot_reviewer")
+            .unwrap();
+        assert_eq!(resolved.model.model_config_id, "config-moonshot");
     }
 
     #[test]

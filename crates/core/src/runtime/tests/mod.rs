@@ -115,6 +115,7 @@ fn conversation_context_input(messages: Vec<AgentChatMessage>) -> AgentChatInput
             ProviderProtocolDialect::OpenAiChatCompletions,
         )),
         provider_protocol_key: None,
+        model_config_id: None,
         model: "test-model".to_string(),
         model_capabilities: crate::ModelCapabilities::default(),
         api_style: Some(crate::protocol::AgentApiStyle::OpenAiCompatible),

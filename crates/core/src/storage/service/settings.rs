@@ -5,7 +5,7 @@ pub(super) const MAX_SKILL_ENABLEMENT_ID_BYTES: usize = 16 * 1024;
 pub(super) fn validate_model_settings(settings: &ModelSettingsRecord) -> Result<(), String> {
     validate_model_settings_fields(settings).map_err(|error| error.to_string())?;
     for model in &settings.models {
-        let model_id = model.id.trim();
+        let model_id = model.provider_model_id.trim();
         model
             .provider_profile_config
             .validate()
@@ -17,37 +17,58 @@ pub(super) fn validate_model_settings(settings: &ModelSettingsRecord) -> Result<
 fn validate_model_settings_fields(
     settings: &ModelSettingsRecord,
 ) -> Result<(), ModelSettingsSaveError> {
-    let mut model_ids = HashSet::new();
+    let mut config_ids = HashSet::new();
+    let mut normalized_display_names = HashSet::new();
     for model in &settings.models {
-        let model_id = model.id.trim();
-        if model_id.is_empty() {
-            return Err("模型 ID 不能为空。".to_string().into());
+        let config_id = model.id.trim();
+        if config_id.is_empty() {
+            return Err("模型配置 ID 不能为空。".to_string().into());
         }
-        if !model_ids.insert(model_id) {
-            return Err(ModelSettingsSaveError::DuplicateModelId {
-                model_id: model_id.to_string(),
+        if !config_ids.insert(model.id.as_str()) {
+            return Err("模型配置 ID 重复。".to_string().into());
+        }
+        let display_name = model.display_name.trim();
+        if display_name.len() > crate::storage::models::MODEL_DISPLAY_NAME_MAX_BYTES {
+            return Err(format!(
+                "模型显示名称不能超过 {} 字节。",
+                crate::storage::models::MODEL_DISPLAY_NAME_MAX_BYTES
+            )
+            .into());
+        }
+        let normalized_display_name =
+            crate::storage::models::normalize_model_display_name(display_name);
+        if normalized_display_name.is_empty() {
+            return Err("模型显示名称不能为空。".to_string().into());
+        }
+        if !normalized_display_names.insert(normalized_display_name) {
+            return Err(ModelSettingsSaveError::DuplicateDisplayName {
+                display_name: display_name.to_string(),
             });
         }
+        let provider_model_id = model.provider_model_id.trim();
+        if provider_model_id.is_empty() {
+            return Err(format!("模型 {display_name} 的厂商模型 ID 不能为空。").into());
+        }
         if model.context_window_tokens == Some(0) {
-            return Err(format!("模型 {model_id} 的上下文窗口必须大于 0。").into());
+            return Err(format!("模型 {display_name} 的上下文窗口必须大于 0。").into());
         }
         model.connection_override()?;
         if !usage_repository::is_valid_price_per_1k(&model.input_price) {
             return Err(
-                format!("模型 {model_id} 的输入价格必须是大于或等于 0 的有效数字。").into(),
+                format!("模型 {display_name} 的输入价格必须是大于或等于 0 的有效数字。").into(),
             );
         }
         if !model.cached_input_price.trim().is_empty()
             && !usage_repository::is_valid_price_per_1k(&model.cached_input_price)
         {
             return Err(format!(
-                "模型 {model_id} 的缓存命中输入价格必须留空，或填写大于或等于 0 的有效数字。"
+                "模型 {display_name} 的缓存命中输入价格必须留空，或填写大于或等于 0 的有效数字。"
             )
             .into());
         }
         if !usage_repository::is_valid_price_per_1k(&model.output_price) {
             return Err(
-                format!("模型 {model_id} 的输出价格必须是大于或等于 0 的有效数字。").into(),
+                format!("模型 {display_name} 的输出价格必须是大于或等于 0 的有效数字。").into(),
             );
         }
     }
@@ -184,31 +205,58 @@ impl StorageService {
             tavily_api_key,
             models: requested_models,
         } = request;
+        let mut requested_display_names = HashSet::new();
+        for requested in &requested_models {
+            let display_name = requested.display_name.trim();
+            if display_name.len() > crate::storage::models::MODEL_DISPLAY_NAME_MAX_BYTES {
+                return Err(format!(
+                    "模型显示名称不能超过 {} 字节。",
+                    crate::storage::models::MODEL_DISPLAY_NAME_MAX_BYTES
+                )
+                .into());
+            }
+            let normalized = crate::storage::models::normalize_model_display_name(display_name);
+            if normalized.is_empty() {
+                return Err("模型显示名称不能为空。".to_string().into());
+            }
+            if !requested_display_names.insert(normalized) {
+                return Err(ModelSettingsSaveError::DuplicateDisplayName {
+                    display_name: display_name.to_string(),
+                });
+            }
+        }
         let mut models = Vec::with_capacity(requested_models.len());
         let mut matched_existing_ids = HashSet::new();
 
-        for requested in requested_models {
-            let source_model_id = requested
-                .previous_model_id
-                .as_deref()
-                .unwrap_or(&requested.id)
-                .trim();
-            if source_model_id.is_empty() {
-                return Err("原模型 ID 不能为空。".to_string().into());
-            }
-            let existing_model = existing.as_ref().and_then(|settings| {
-                settings
-                    .models
-                    .iter()
-                    .find(|candidate| candidate.id == source_model_id)
-            });
-            if requested.previous_model_id.is_some() && existing_model.is_none() {
-                return Err(format!("未找到要编辑的原模型：{source_model_id}").into());
-            }
-            if existing_model.is_some() && !matched_existing_ids.insert(source_model_id.to_string())
-            {
-                return Err(format!("原模型 ID 被重复引用：{source_model_id}").into());
-            }
+        for mut requested in requested_models {
+            let requested_config_id = requested.id.as_deref();
+            let existing_model = match requested_config_id {
+                Some(config_id) => {
+                    if config_id.trim().is_empty() || config_id != config_id.trim() {
+                        return Err("模型配置 ID 无效。".to_string().into());
+                    }
+                    let model = existing
+                        .as_ref()
+                        .and_then(|settings| {
+                            settings
+                                .models
+                                .iter()
+                                .find(|candidate| candidate.id == config_id)
+                        })
+                        .ok_or_else(|| format!("未找到要编辑的模型配置：{config_id}"))?;
+                    if !matched_existing_ids.insert(config_id.to_string()) {
+                        return Err(format!("模型配置 ID 被重复引用：{config_id}").into());
+                    }
+                    Some(model)
+                }
+                None => None,
+            };
+            let config_id = requested
+                .id
+                .clone()
+                .unwrap_or_else(|| format!("model-config:{}", Uuid::new_v4()));
+            requested.display_name = requested.display_name.trim().to_string();
+            requested.provider_model_id = requested.provider_model_id.trim().to_string();
             let preserved = existing_model.map(|model| model.provider_profile_config.clone());
             let effective_api_url = requested
                 .api_url_override
@@ -221,10 +269,12 @@ impl StorageService {
                     let profile = preserved.as_ref().ok_or_else(|| {
                         format!(
                             "模型 {} 尚无可保留的 Provider Profile，请显式选择通用兼容或已注册 Profile。",
-                            requested.id
+                            requested.display_name
                         )
                     })?;
-                    let preview = requested.clone().into_record(profile.clone());
+                    let preview = requested
+                        .clone()
+                        .into_record(config_id.clone(), profile.clone());
                     validate_unchanged_profile(&preview, preserved.as_ref(), dialect)?;
                     profile.clone()
                 }
@@ -240,13 +290,16 @@ impl StorageService {
                             .map_err(|error| {
                                 format!(
                                     "模型 {} 的 Provider Profile 选择无效：{error}",
-                                    requested.id
+                                    requested.display_name
                                 )
                             })?;
                     registration
                         .config_from_public_settings(*public_settings)
                         .map_err(|error| {
-                            format!("模型 {} 的 Provider 设置无效：{error}", requested.id)
+                            format!(
+                                "模型 {} 的 Provider 设置无效：{error}",
+                                requested.display_name
+                            )
                         })?
                 }
                 ProviderProfileUpdate::SelectVendor {
@@ -255,20 +308,26 @@ impl StorageService {
                 } => {
                     let registration = crate::resolve_provider_vendor_registration(
                         *vendor_id,
-                        &requested.id,
+                        &requested.provider_model_id,
                         dialect,
                     )
                     .map_err(|error| {
-                        format!("模型 {} 的 Provider 厂商选择无效：{error}", requested.id)
+                        format!(
+                            "模型 {} 的 Provider 厂商选择无效：{error}",
+                            requested.display_name
+                        )
                     })?;
                     registration
                         .config_from_vendor_settings(*public_settings)
                         .map_err(|error| {
-                            format!("模型 {} 的 Provider 设置无效：{error}", requested.id)
+                            format!(
+                                "模型 {} 的 Provider 设置无效：{error}",
+                                requested.display_name
+                            )
                         })?
                 }
             };
-            models.push(requested.into_record(profile));
+            models.push(requested.into_record(config_id, profile));
         }
 
         let settings = ModelSettingsRecord {
@@ -515,17 +574,17 @@ fn validate_unchanged_profile(
 
     match config.validate() {
         Ok(()) => config
-            .validate_for_model(&model.id, dialect)
+            .validate_for_model(&model.provider_model_id, dialect)
             .map_err(|error| {
                 format!(
                     "模型 {} 的 Provider Profile 与当前接口协议不兼容：{error}",
-                    model.id
+                    model.display_name
                 )
             }),
         Err(_) if exactly_preserved => Ok(()),
         Err(error) => Err(format!(
             "模型 {} 的 Provider Profile 无效：{error}",
-            model.id
+            model.display_name
         )),
     }
 }

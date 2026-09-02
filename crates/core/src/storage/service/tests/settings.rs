@@ -8,6 +8,7 @@ fn revision_test_settings() -> ModelSettingsRecord {
         tavily_api_key: String::new(),
         models: vec![ModelConfigRecord {
             id: "revision-model".to_string(),
+            provider_model_id: "revision-model".to_string(),
             display_name: "Revision Model".to_string(),
             api_url_override: None,
             api_token_override: None,
@@ -27,15 +28,15 @@ fn revision_test_settings() -> ModelSettingsRecord {
 fn renderer_save_request(
     settings: &ModelSettingsRecord,
     update: serde_json::Value,
-    previous_model_id: Option<&str>,
+    config_id: Option<&str>,
 ) -> ModelSettingsSaveRequest {
     let mut value = serde_json::to_value(settings).unwrap();
     let model = value["models"][0].as_object_mut().unwrap();
     model.remove("providerProfileConfig");
     model.insert("providerProfileUpdate".to_string(), update);
     model.insert(
-        "previousModelId".to_string(),
-        previous_model_id
+        "id".to_string(),
+        config_id
             .map(|value| serde_json::Value::String(value.to_string()))
             .unwrap_or(serde_json::Value::Null),
     );
@@ -49,6 +50,7 @@ fn official_profile_test_model(
 ) -> ModelConfigRecord {
     ModelConfigRecord {
         id: id.to_string(),
+        provider_model_id: id.to_string(),
         display_name: format!("Test {id}"),
         api_url_override: api_url_override.map(ToString::to_string),
         api_token_override: api_token_override.map(ToString::to_string),
@@ -65,7 +67,7 @@ fn official_profile_test_model(
 }
 
 #[test]
-fn duplicate_model_id_is_a_typed_validation_error_with_the_trimmed_id() {
+fn duplicate_display_name_is_a_typed_validation_error_with_the_trimmed_name() {
     let fixture = StorageFixture::new();
     let service = fixture.service();
     let settings = revision_test_settings();
@@ -74,21 +76,58 @@ fn duplicate_model_id_is_a_typed_validation_error_with_the_trimmed_id() {
         serde_json::json!({"kind": "select_generic"}),
         None,
     );
-    request.models[0].id = "  duplicate-model  ".to_string();
+    request.models[0].display_name = "  Duplicate Model  ".to_string();
     request.models.push(request.models[0].clone());
 
     let error = service.save_model_settings_request(request).unwrap_err();
     assert_eq!(
         error,
-        ModelSettingsSaveError::DuplicateModelId {
-            model_id: "duplicate-model".to_string(),
+        ModelSettingsSaveError::DuplicateDisplayName {
+            display_name: "Duplicate Model".to_string(),
         }
     );
     assert!(service.load_model_settings().unwrap().is_none());
 }
 
 #[test]
-fn renaming_a_model_onto_an_existing_id_returns_the_typed_collision() {
+fn oversized_display_name_is_rejected_before_duplicate_error_projection() {
+    let fixture = StorageFixture::new();
+    let service = fixture.service();
+    let settings = revision_test_settings();
+    let mut request = renderer_save_request(
+        &settings,
+        serde_json::json!({"kind": "select_generic"}),
+        None,
+    );
+    request.models[0].display_name =
+        "x".repeat(crate::storage::models::MODEL_DISPLAY_NAME_MAX_BYTES + 1);
+    request.models.push(request.models[0].clone());
+
+    let error = service.save_model_settings_request(request).unwrap_err();
+    assert!(matches!(error, ModelSettingsSaveError::Other(_)));
+    assert!(service.load_model_settings().unwrap().is_none());
+}
+
+#[test]
+fn display_name_at_the_512_byte_boundary_is_accepted() {
+    let fixture = StorageFixture::new();
+    let service = fixture.service();
+    let settings = revision_test_settings();
+    let mut request = renderer_save_request(
+        &settings,
+        serde_json::json!({"kind": "select_generic"}),
+        None,
+    );
+    request.models[0].display_name =
+        "x".repeat(crate::storage::models::MODEL_DISPLAY_NAME_MAX_BYTES);
+
+    let saved = service.save_model_settings_request(request).unwrap();
+
+    assert_eq!(saved.models[0].display_name.len(), 512);
+}
+
+#[test]
+fn renaming_a_model_onto_an_existing_display_name_returns_the_typed_collision() {
     let fixture = StorageFixture::new();
     let service = fixture.service();
     let mut settings = revision_test_settings();
@@ -107,21 +146,155 @@ fn renaming_a_model_onto_an_existing_id_returns_the_typed_collision() {
             "providerProfileUpdate".to_string(),
             serde_json::json!({"kind": "select_generic"}),
         );
-        model.insert("previousModelId".to_string(), serde_json::Value::Null);
     }
-    models[0]["id"] = serde_json::json!("existing-model");
-    models[0]["previousModelId"] = serde_json::json!("revision-model");
+    models[0]["displayName"] = serde_json::json!("Existing Model");
     let request: ModelSettingsSaveRequest = serde_json::from_value(value).unwrap();
 
     assert_eq!(
         service.save_model_settings_request(request).unwrap_err(),
-        ModelSettingsSaveError::DuplicateModelId {
-            model_id: "existing-model".to_string(),
+        ModelSettingsSaveError::DuplicateDisplayName {
+            display_name: "Existing Model".to_string(),
         }
     );
     let unchanged = service.load_model_settings().unwrap().unwrap();
     assert_eq!(unchanged.models[0].id, "revision-model");
     assert_eq!(unchanged.models[1].id, "existing-model");
+}
+
+#[test]
+fn identical_provider_models_can_be_saved_as_distinct_configurations() {
+    let fixture = StorageFixture::new();
+    let service = fixture.service();
+    let mut settings = revision_test_settings();
+    let mut second = settings.models[0].clone();
+    second.id = "client-supplied-id-is-ignored".to_string();
+    second.display_name = "Secondary".to_string();
+    settings.models.push(second);
+
+    let mut value = serde_json::to_value(&settings).unwrap();
+    for model in value["models"].as_array_mut().unwrap() {
+        let model = model.as_object_mut().unwrap();
+        model.insert("id".to_string(), serde_json::Value::Null);
+        model.remove("providerProfileConfig");
+        model.insert(
+            "providerProfileUpdate".to_string(),
+            serde_json::json!({"kind": "select_generic"}),
+        );
+    }
+    let request: ModelSettingsSaveRequest = serde_json::from_value(value).unwrap();
+    let saved = service.save_model_settings_request(request).unwrap();
+
+    assert_eq!(saved.models.len(), 2);
+    assert_ne!(saved.models[0].id, saved.models[1].id);
+    assert!(saved
+        .models
+        .iter()
+        .all(|model| model.id.starts_with("model-config:")));
+    assert_eq!(
+        saved.models[0].provider_model_id,
+        saved.models[1].provider_model_id
+    );
+    assert_eq!(
+        saved.models[0].api_url_override,
+        saved.models[1].api_url_override
+    );
+    assert_eq!(
+        saved.models[0].api_token_override,
+        saved.models[1].api_token_override
+    );
+    assert_eq!(
+        saved.models[0].provider_profile_config,
+        saved.models[1].provider_profile_config
+    );
+}
+
+#[test]
+fn normalized_display_name_collision_is_typed_and_does_not_overwrite_storage() {
+    let fixture = StorageFixture::new();
+    let service = fixture.service();
+    let mut settings = revision_test_settings();
+    settings.models[0].display_name = "Kimi K3".to_string();
+    service.save_model_settings(settings.clone()).unwrap();
+
+    let mut colliding = settings.models[0].clone();
+    colliding.id = "new-client-placeholder".to_string();
+    colliding.display_name = "  ＫＩＭＩ　Ｋ３  ".to_string();
+    colliding.provider_model_id = "unrecognized-provider-model".to_string();
+    settings.models.push(colliding);
+    let mut value = serde_json::to_value(&settings).unwrap();
+    let models = value["models"].as_array_mut().unwrap();
+    for (index, model) in models.iter_mut().enumerate() {
+        let model = model.as_object_mut().unwrap();
+        model.insert(
+            "id".to_string(),
+            if index == 0 {
+                serde_json::json!("revision-model")
+            } else {
+                serde_json::Value::Null
+            },
+        );
+        model.remove("providerProfileConfig");
+        model.insert(
+            "providerProfileUpdate".to_string(),
+            if index == 0 {
+                serde_json::json!({"kind": "unchanged"})
+            } else {
+                serde_json::json!({
+                    "kind": "select_vendor",
+                    "vendorId": "moonshot",
+                    "settings": {
+                        "kind": "moonshot_k3_chat",
+                        "reasoningEffort": "max"
+                    }
+                })
+            },
+        );
+    }
+    let request: ModelSettingsSaveRequest = serde_json::from_value(value).unwrap();
+
+    assert_eq!(
+        service.save_model_settings_request(request).unwrap_err(),
+        ModelSettingsSaveError::DuplicateDisplayName {
+            display_name: "ＫＩＭＩ　Ｋ３".to_string(),
+        }
+    );
+    let unchanged = service.load_model_settings().unwrap().unwrap();
+    assert_eq!(unchanged.models.len(), 1);
+    assert_eq!(unchanged.models[0].id, "revision-model");
+    assert_eq!(unchanged.models[0].display_name, "Kimi K3");
+}
+
+#[test]
+fn editing_display_name_preserves_config_identity_and_conversation_reference() {
+    let fixture = StorageFixture::new();
+    let service = fixture.service();
+    let settings = revision_test_settings();
+    service.save_model_settings(settings.clone()).unwrap();
+    let mut stored_conversation = conversation("conversation-model-id", None, "message-model-id");
+    stored_conversation.model_id = Some("revision-model".to_string());
+    service.save_conversation(stored_conversation).unwrap();
+
+    let mut edited = settings;
+    edited.models[0].display_name = "Renamed display name".to_string();
+    let saved = service
+        .save_model_settings_request(renderer_save_request(
+            &edited,
+            serde_json::json!({"kind": "unchanged"}),
+            Some("revision-model"),
+        ))
+        .unwrap();
+
+    assert_eq!(saved.models[0].id, "revision-model");
+    assert_eq!(saved.models[0].display_name, "Renamed display name");
+    assert_eq!(
+        service
+            .load_conversation("conversation-model-id")
+            .unwrap()
+            .unwrap()
+            .model_id
+            .as_deref(),
+        Some("revision-model")
+    );
 }
 
 #[test]
@@ -165,7 +338,7 @@ fn vendor_selection_resolves_moonshot_family_and_persists_v2_settings() {
     let fixture = StorageFixture::new();
     let service = fixture.service();
     let mut settings = revision_test_settings();
-    settings.models[0].id = "kimi-k3".to_string();
+    settings.models[0].provider_model_id = "kimi-k3".to_string();
     settings.models[0].display_name = "Kimi K3".to_string();
 
     let saved = service
@@ -206,7 +379,7 @@ fn vendor_selection_fails_closed_for_unknown_model_and_mismatched_family_setting
     let fixture = StorageFixture::new();
     let service = fixture.service();
     let mut settings = revision_test_settings();
-    settings.models[0].id = "kimi-future".to_string();
+    settings.models[0].provider_model_id = "kimi-future".to_string();
 
     let unknown = renderer_save_request(
         &settings,
@@ -223,7 +396,7 @@ fn vendor_selection_fails_closed_for_unknown_model_and_mismatched_family_setting
     assert!(service.save_model_settings_request(unknown).is_err());
     assert!(service.load_model_settings().unwrap().is_none());
 
-    settings.models[0].id = "kimi-k3".to_string();
+    settings.models[0].provider_model_id = "kimi-k3".to_string();
     let mismatched = renderer_save_request(
         &settings,
         serde_json::json!({
@@ -245,7 +418,7 @@ fn generic_vendor_selection_keeps_custom_aliases_on_generic_compatibility() {
     let fixture = StorageFixture::new();
     let service = fixture.service();
     let mut settings = revision_test_settings();
-    settings.models[0].id = "private-company-alias".to_string();
+    settings.models[0].provider_model_id = "private-company-alias".to_string();
 
     let saved = service
         .save_model_settings_request(renderer_save_request(
@@ -380,45 +553,13 @@ fn save_boundary_does_not_correct_an_incomplete_global_connection() {
 }
 
 #[test]
-fn startup_reconciliation_corrects_only_profiles_and_is_idempotent() {
+fn startup_never_rewrites_historical_official_provider_profiles() {
     let fixture = StorageFixture::new();
     let service = fixture.service();
-    let mut deepseek = official_profile_test_model(
-        "deepseek-v4-flash",
-        Some("https://deepseek-proxy.example/v1/chat/completions"),
-        Some("deepseek-model-token"),
-    );
-    let mut deepseek_legacy = crate::ProviderProfileConfig::deepseek_v4_default();
-    let crate::ProviderProfileConfig::V1(config) = &mut deepseek_legacy else {
-        unreachable!("legacy DeepSeek constructor must produce schema v1")
-    };
-    config.reasoning.mode = crate::ReasoningMode::Enabled;
-    config.reasoning.effort = crate::ReasoningEffort::High;
-    deepseek.provider_profile_config = deepseek_legacy;
-
-    let mut moonshot = official_profile_test_model(
+    let model = official_profile_test_model(
         "kimi-k3",
         Some("https://moonshot-proxy.example/v1/chat/completions"),
         Some("moonshot-model-token"),
-    );
-    let mut moonshot_legacy = crate::ProviderProfileConfig::deepseek_v4_default();
-    let crate::ProviderProfileConfig::V1(config) = &mut moonshot_legacy else {
-        unreachable!("legacy DeepSeek constructor must produce schema v1")
-    };
-    config.reasoning.mode = crate::ReasoningMode::Enabled;
-    config.reasoning.effort = crate::ReasoningEffort::High;
-    moonshot.provider_profile_config = moonshot_legacy;
-    moonshot.supports_image = true;
-
-    let alias = official_profile_test_model(
-        "deepseek-v4-flash-latest",
-        Some("https://api.deepseek.com/chat/completions"),
-        Some("deepseek-alias-token"),
-    );
-    let custom = official_profile_test_model(
-        "company-private-model",
-        Some("https://api.moonshot.ai/v1/chat/completions"),
-        Some("custom-model-token"),
     );
     service
         .save_model_settings(ModelSettingsRecord {
@@ -426,7 +567,7 @@ fn startup_reconciliation_corrects_only_profiles_and_is_idempotent() {
             api_token: "global-provider-token".to_string(),
             search_mode: "tavily".to_string(),
             tavily_api_key: "search-provider-token".to_string(),
-            models: vec![deepseek, moonshot, alias, custom],
+            models: vec![model],
         })
         .unwrap();
 
@@ -434,102 +575,37 @@ fn startup_reconciliation_corrects_only_profiles_and_is_idempotent() {
         let connection = service.state.connection().unwrap();
         connection
             .execute(
-                "UPDATE models SET api_url_override = ?1 WHERE id = 'deepseek-v4-flash'",
-                ["https://api.deepseek.com/chat/completions"],
-            )
-            .unwrap();
-        connection
-            .execute(
                 "UPDATE models SET api_url_override = ?1 WHERE id = 'kimi-k3'",
                 ["https://api.moonshot.ai/v1/chat/completions"],
             )
             .unwrap();
     }
-
     let before = service.load_model_settings_snapshot().unwrap().unwrap();
     drop(service);
 
     let reopened = fixture.service();
     let after = reopened.load_model_settings_snapshot().unwrap().unwrap();
-    let mut expected = before.settings.clone();
-    expected.models[0].provider_profile_config = crate::ProviderProfileConfig::from_family_settings(
-        crate::ProviderProfileRef::deepseek_v4_chat(),
-        crate::ProviderVendorId::DeepSeek,
-        crate::ProviderFamilySettings::DeepseekV4Chat {
-            reasoning: crate::ProviderFamilyReasoningPolicy {
-                mode: crate::ReasoningMode::Enabled,
-                effort: crate::ProviderReasoningEffort::High,
-            },
-        },
-    );
-    expected.models[1].provider_profile_config = crate::ProviderProfileConfig::from_family_settings(
-        crate::ProviderProfileRef::moonshot_k3_chat(),
-        crate::ProviderVendorId::Moonshot,
-        crate::ProviderFamilySettings::MoonshotK3Chat {
-            reasoning_effort: crate::ProviderReasoningEffort::High,
-        },
-    );
-
     assert_eq!(
-        serde_json::to_value(&after.settings).unwrap(),
-        serde_json::to_value(expected).unwrap(),
-        "startup reconciliation must alter only the two exact official Profile configurations"
+        serde_json::to_value(after.settings).unwrap(),
+        serde_json::to_value(before.settings).unwrap()
     );
-    assert_ne!(after.configuration_revision, before.configuration_revision);
+    assert_eq!(after.configuration_revision, before.configuration_revision);
     assert_eq!(
-        after.provider_connection_revisions, before.provider_connection_revisions,
-        "a Profile-only correction must not rotate credentials/endpoints"
+        after.provider_connection_revisions,
+        before.provider_connection_revisions
     );
     assert_eq!(
-        after.search_connection_revision, before.search_connection_revision,
-        "provider Profile correction must not rotate search credentials"
-    );
-    for model_id in ["deepseek-v4-flash", "kimi-k3"] {
-        assert_ne!(
-            after.provider_protocol_revisions[model_id],
-            before.provider_protocol_revisions[model_id],
-            "the corrected model must receive a new protocol identity"
-        );
-    }
-    for model_id in ["deepseek-v4-flash-latest", "company-private-model"] {
-        assert_eq!(
-            after.provider_protocol_revisions[model_id],
-            before.provider_protocol_revisions[model_id],
-            "aliases and custom models must retain their protocol identity"
-        );
-    }
-
-    {
-        let mut connection = reopened.state.connection().unwrap();
-        assert!(
-            !crate::storage::config_repository::reconcile_official_provider_profiles(
-                &mut connection
-            )
-            .unwrap(),
-            "a second reconciliation must be a no-op"
-        );
-    }
-    let idempotent = reopened.load_model_settings_snapshot().unwrap().unwrap();
-    assert_eq!(
-        idempotent.configuration_revision,
-        after.configuration_revision
+        after.provider_protocol_revisions,
+        before.provider_protocol_revisions
     );
     assert_eq!(
-        idempotent.provider_connection_revisions,
-        after.provider_connection_revisions
-    );
-    assert_eq!(
-        idempotent.provider_protocol_revisions,
-        after.provider_protocol_revisions
-    );
-    assert_eq!(
-        idempotent.search_connection_revision,
-        after.search_connection_revision
+        after.search_connection_revision,
+        before.search_connection_revision
     );
 }
 
 #[test]
-fn exact_official_reconciliation_keeps_a_future_profile_opaque() {
+fn startup_and_unrelated_save_keep_a_future_profile_opaque() {
     let fixture = StorageFixture::new();
     let service = fixture.service();
     service
@@ -592,7 +668,7 @@ fn exact_official_reconciliation_keeps_a_future_profile_opaque() {
         .save_model_settings_request(renderer_save_request(
             &price_edit,
             serde_json::json!({"kind": "unchanged"}),
-            None,
+            Some(&price_edit.models[0].id),
         ))
         .unwrap();
     let after_save = reopened.load_model_settings_snapshot().unwrap().unwrap();
@@ -637,11 +713,12 @@ fn authoritative_profile_updates_rotate_only_effective_wire_changes() {
             None,
         ))
         .unwrap();
+    let initial_id = initial.models[0].id.clone();
     let initial_revision = service
         .load_model_settings_snapshot()
         .unwrap()
         .unwrap()
-        .provider_protocol_revisions["revision-model"]
+        .provider_protocol_revisions[&initial_id]
         .clone();
 
     let mut metadata = initial.clone();
@@ -652,7 +729,7 @@ fn authoritative_profile_updates_rotate_only_effective_wire_changes() {
         .save_model_settings_request(renderer_save_request(
             &metadata,
             serde_json::json!({"kind": "unchanged"}),
-            None,
+            Some(&metadata.models[0].id),
         ))
         .unwrap();
     assert_eq!(
@@ -660,7 +737,7 @@ fn authoritative_profile_updates_rotate_only_effective_wire_changes() {
             .load_model_settings_snapshot()
             .unwrap()
             .unwrap()
-            .provider_protocol_revisions["revision-model"],
+            .provider_protocol_revisions[&initial_id],
         initial_revision
     );
 
@@ -675,12 +752,12 @@ fn authoritative_profile_updates_rotate_only_effective_wire_changes() {
                     "reasoning": {"mode": "enabled", "effort": "max"}
                 }
             }),
-            None,
+            Some(&metadata.models[0].id),
         ))
         .unwrap();
     let changed_snapshot = service.load_model_settings_snapshot().unwrap().unwrap();
     assert_ne!(
-        changed_snapshot.provider_protocol_revisions["revision-model"],
+        changed_snapshot.provider_protocol_revisions[&initial_id],
         initial_revision
     );
     assert_eq!(
@@ -726,8 +803,11 @@ fn unchanged_explicit_generic_fails_on_dialect_change_until_generic_is_reselecte
     service.save_model_settings(settings.clone()).unwrap();
 
     settings.api_url = "https://api.anthropic.com/v1/messages".to_string();
-    let unchanged =
-        renderer_save_request(&settings, serde_json::json!({"kind": "unchanged"}), None);
+    let unchanged = renderer_save_request(
+        &settings,
+        serde_json::json!({"kind": "unchanged"}),
+        Some(&settings.models[0].id),
+    );
     assert!(service.save_model_settings_request(unchanged).is_err());
     assert_eq!(
         service.load_model_settings().unwrap().unwrap().api_url,
@@ -738,7 +818,7 @@ fn unchanged_explicit_generic_fails_on_dialect_change_until_generic_is_reselecte
         .save_model_settings_request(renderer_save_request(
             &settings,
             serde_json::json!({"kind": "select_generic"}),
-            None,
+            Some(&settings.models[0].id),
         ))
         .unwrap();
     assert_eq!(
@@ -805,6 +885,7 @@ fn provider_connection_revisions_follow_only_each_models_effective_connection() 
     let mut settings = revision_test_settings();
     settings.models.push(ModelConfigRecord {
         id: "override-model".to_string(),
+        provider_model_id: "override-model".to_string(),
         display_name: "Override Model".to_string(),
         api_url_override: Some("https://override.example/v1".to_string()),
         api_token_override: Some("override-token".to_string()),
@@ -907,6 +988,7 @@ fn provider_protocol_revision_tracks_only_the_selected_models_effective_wire_con
     let mut settings = revision_test_settings();
     settings.models.push(ModelConfigRecord {
         id: "other-model".to_string(),
+        provider_model_id: "other-model".to_string(),
         display_name: "Other Model".to_string(),
         api_url_override: Some("https://other.example/v1".to_string()),
         api_token_override: Some("other-token".to_string()),
@@ -992,14 +1074,11 @@ fn provider_protocol_revision_tracks_only_the_selected_models_effective_wire_con
         "changing the endpoint/dialect must rotate the protocol identity"
     );
 
-    settings.models[0].id = "revision-model-v2".to_string();
+    settings.models[0].provider_model_id = "revision-model-v2".to_string();
     service.save_model_settings(settings).unwrap();
     let wire_model_changed = service.load_model_settings_snapshot().unwrap().unwrap();
-    assert!(!wire_model_changed
-        .provider_protocol_revisions
-        .contains_key("revision-model"));
     assert_ne!(
-        wire_model_changed.provider_protocol_revisions["revision-model-v2"],
+        wire_model_changed.provider_protocol_revisions["revision-model"],
         endpoint_and_dialect_changed.provider_protocol_revisions["revision-model"],
         "changing the provider wire model id must create a new protocol identity"
     );
@@ -1036,7 +1115,7 @@ fn unchanged_save_preserves_the_legacy_v1_profile_shape() {
         .save_model_settings_request(renderer_save_request(
             &settings,
             serde_json::json!({"kind": "unchanged"}),
-            None,
+            Some(&settings.models[0].id),
         ))
         .unwrap();
 
@@ -1140,7 +1219,7 @@ fn unsupported_profile_survives_unrelated_save_and_model_id_rename() {
         .save_model_settings_request(renderer_save_request(
             &price_edit,
             serde_json::json!({"kind": "unchanged"}),
-            None,
+            Some(&price_edit.models[0].id),
         ))
         .unwrap();
     assert_eq!(
@@ -1162,7 +1241,7 @@ fn unsupported_profile_survives_unrelated_save_and_model_id_rename() {
     );
 
     let mut renamed = saved;
-    renamed.models[0].id = "renamed-model".to_string();
+    renamed.models[0].display_name = "Renamed model".to_string();
     let renamed = service
         .save_model_settings_request(renderer_save_request(
             &renamed,
@@ -1286,6 +1365,7 @@ fn rejects_invalid_model_prices_without_overwriting_saved_settings() {
         tavily_api_key: String::new(),
         models: vec![ModelConfigRecord {
             id: "model-a".to_string(),
+            provider_model_id: "model-a".to_string(),
             display_name: "Model A".to_string(),
             api_url_override: None,
             api_token_override: None,
@@ -1327,6 +1407,7 @@ fn rejects_zero_context_window_without_overwriting_saved_settings() {
         tavily_api_key: String::new(),
         models: vec![ModelConfigRecord {
             id: "model-a".to_string(),
+            provider_model_id: "model-a".to_string(),
             display_name: "Model A".to_string(),
             api_url_override: None,
             api_token_override: None,
@@ -1362,6 +1443,7 @@ fn requires_model_connection_overrides_to_be_saved_as_a_complete_pair() {
         tavily_api_key: String::new(),
         models: vec![ModelConfigRecord {
             id: "model-a".to_string(),
+            provider_model_id: "model-a".to_string(),
             display_name: "Model A".to_string(),
             api_url_override: Some("https://model.example/v1".to_string()),
             api_token_override: Some("model-token".to_string()),

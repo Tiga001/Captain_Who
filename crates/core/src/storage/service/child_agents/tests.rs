@@ -88,6 +88,7 @@ impl Fixture {
 fn model(id: &str, enabled: bool) -> ModelConfigRecord {
     ModelConfigRecord {
         id: id.to_string(),
+        provider_model_id: id.to_string(),
         display_name: format!("Display {id}"),
         api_url_override: None,
         api_token_override: None,
@@ -567,6 +568,7 @@ fn record_applied_member_compaction(
         assistant_message_id: assistant_message_id.to_string(),
         request_index: 1,
         attempt_index: 1,
+        model_config_id: None,
         model: model_id.to_string(),
         provider_transition_source_model_display_name: None,
         provider_transition_target_model_display_name: None,
@@ -641,6 +643,32 @@ fn record_applied_member_compaction(
     )
     .unwrap();
     receipt
+}
+
+#[test]
+fn explicit_child_model_uses_provider_model_id_not_config_id_for_protocol_validation() {
+    let fixture = Fixture::new(Some("model-a"));
+    let mut configured = model("config-moonshot", true);
+    configured.provider_model_id = "kimi-k3".to_string();
+    configured.provider_profile_config = ProviderProfileConfig::from_family_settings(
+        crate::ProviderProfileRef::moonshot_k3_chat(),
+        ProviderVendorId::Moonshot,
+        ProviderFamilySettings::MoonshotK3Chat {
+            reasoning_effort: ProviderReasoningEffort::Max,
+        },
+    );
+    fixture
+        .service
+        .save_model_settings(model_settings(vec![model("model-a", true), configured]))
+        .unwrap();
+    let mut input = spawn_input("create-moonshot-child", "moonshot-child");
+    input.explicit_model_id = Some("config-moonshot".to_string());
+
+    let child = fixture.service.create_child_agent(&input).unwrap();
+    assert_eq!(
+        child.agent.model_snapshot.unwrap().model_config_id,
+        "config-moonshot"
+    );
 }
 
 mod approval_resume;

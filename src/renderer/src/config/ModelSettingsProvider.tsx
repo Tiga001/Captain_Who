@@ -17,7 +17,6 @@ import {
 import type { ModelSettingsSnapshot } from '../features/storage/storageClient'
 import { useAppStartupStage } from '../features/startup/AppStartupContext'
 import { useFrontendConfig } from './FrontendConfigProvider'
-import { formatTranslation } from './translationFormat'
 import { classifyModelSettingsSaveError } from '../features/settings/pages/configuration/modelSettingsErrors'
 import {
   INITIAL_MODEL_SAVE_DRAFTS,
@@ -46,10 +45,7 @@ interface ModelSettingsContextValue {
   setSearchMode: (value: SearchMode) => void
   setTavilyApiKey: (value: string) => void
   toggleModel: (modelId: string) => void
-  upsertModel: (
-    model: ModelConfig | ModelConfigSaveDraft,
-    previousModelId?: string
-  ) => Promise<ModelConfig>
+  upsertModel: (model: ModelConfig | ModelConfigSaveDraft) => Promise<ModelConfig>
 }
 
 const ModelSettingsContext = createContext<ModelSettingsContextValue | null>(null)
@@ -129,13 +125,12 @@ export function ModelSettingsProvider({ children }: { children: ReactNode }) {
             }
             const { showToast: presentToast, t: translate } = loadFailurePresentationRef.current
             const classified = classifyModelSettingsSaveError(error)
-            const message =
-              classified.code === 'duplicate_model_id'
-                ? formatTranslation(translate, 'configuration.duplicateModelId', {
-                    modelId: classified.modelId
-                  })
-                : translate('configuration.saveFailed')
-            presentToast(message, { durationMs: 5000 })
+            // ModelForm owns the actionable duplicate-name recovery dialog. Emitting a toast
+            // here would show the same rejection twice and steal attention from the retained
+            // draft. Other failures keep the existing global notification behavior.
+            if (classified.code !== 'duplicate_display_name') {
+              presentToast(translate('configuration.saveFailed'), { durationMs: 5000 })
+            }
           }
           throw error
         })
@@ -231,37 +226,39 @@ export function ModelSettingsProvider({ children }: { children: ReactNode }) {
   )
 
   const upsertModel = useCallback(
-    async (
-      savedModel: ModelConfig | ModelConfigSaveDraft,
-      previousModelId?: string
-    ): Promise<ModelConfig> => {
+    async (savedModel: ModelConfig | ModelConfigSaveDraft): Promise<ModelConfig> => {
       if (hydrationStatus !== 'ready') {
         throw new Error('Model settings are not ready')
       }
-      const targetId = previousModelId ?? savedModel.id
-      const modelForSave =
-        previousModelId && previousModelId !== savedModel.id
-          ? { ...savedModel, previousModelId }
-          : savedModel
       const currentSettings = settingsRef.current
-      const existingIndex = currentSettings.models.findIndex((model) => model.id === targetId)
+      const existingIds = new Set(currentSettings.models.map((model) => model.id))
+      const existingIndex =
+        savedModel.id === null
+          ? -1
+          : currentSettings.models.findIndex((model) => model.id === savedModel.id)
       let nextModels: Array<ModelConfig | ModelConfigSaveDraft>
 
       if (existingIndex === -1) {
-        nextModels = [...currentSettings.models, modelForSave]
+        nextModels = [...currentSettings.models, savedModel]
       } else {
         const before = currentSettings.models.slice(0, existingIndex)
         const after = currentSettings.models.slice(existingIndex + 1)
-        nextModels = [...before, modelForSave, ...after]
+        nextModels = [...before, savedModel, ...after]
       }
 
       const authoritativeSettings = await persistSettings({
         ...currentSettings,
         models: nextModels
       })
-      const authoritativeModel = authoritativeSettings.models.find(
-        (model) => model.id === savedModel.id
-      )
+      const authoritativeModel =
+        savedModel.id === null
+          ? (() => {
+              const createdModels = authoritativeSettings.models.filter(
+                (model) => !existingIds.has(model.id)
+              )
+              return createdModels.length === 1 ? createdModels[0] : undefined
+            })()
+          : authoritativeSettings.models.find((model) => model.id === savedModel.id)
       if (!authoritativeModel) {
         throw new Error('Host did not return the saved model')
       }

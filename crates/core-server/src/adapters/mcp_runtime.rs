@@ -2097,6 +2097,7 @@ mod tests {
             search_connection_revision: None,
             provider_profile_config: Some(provider_profile_config),
             provider_protocol_key: Some(provider_protocol_key),
+            model_config_id: None,
             model: "owned-fixture-model".to_string(),
             model_capabilities: ModelCapabilities::default(),
             api_style: Some(AgentApiStyle::OpenAiCompatible),

@@ -11,7 +11,8 @@ import type { ModelConfig } from '../../config/modelConfig'
 
 vi.mock('../../config/FrontendConfigProvider', () => ({
   useFrontendConfig: () => ({
-    t: (key: string) => (key === 'configuration.duplicateModelId' ? `${key}:{modelId}` : key)
+    t: (key: string) =>
+      key === 'configuration.duplicateDisplayName' ? `${key}:{displayName}` : key
   })
 }))
 
@@ -178,7 +179,8 @@ function deferred<Value>() {
 }
 
 const model: ModelConfig = {
-  id: 'deepseek-v4-flash',
+  id: 'model-config-deepseek',
+  providerModelId: 'deepseek-v4-flash',
   displayName: 'Provider Model',
   supportsImage: false,
   contextWindowTokens: 128_000,
@@ -203,6 +205,53 @@ const commonProps = {
 }
 
 describe('ModelForm vendor controls', () => {
+  it('resolves provider policy from the provider model ID, not the editable display name', async () => {
+    const resolver = vi.fn(resolvePolicy)
+    const screen = await render(
+      <ModelForm
+        {...commonProps}
+        model={model}
+        resolveProviderVendorModelPolicy={resolver}
+        onSave={vi.fn()}
+      />
+    )
+
+    await expect.poll(() => resolver.mock.calls.length).toBe(1)
+    expect(resolver.mock.calls[0]![0]).toMatchObject({ modelId: 'deepseek-v4-flash' })
+
+    await screen.getByPlaceholder('configuration.displayNamePlaceholder').fill('Friendly alias')
+    await new Promise((resolve) => window.setTimeout(resolve, 0))
+    expect(resolver).toHaveBeenCalledTimes(1)
+
+    await screen
+      .getByPlaceholder('configuration.providerModelIdPlaceholder')
+      .fill('deepseek-v4-pro')
+    await expect.poll(() => resolver.mock.calls.length).toBe(2)
+    expect(resolver.mock.calls[1]![0]).toMatchObject({ modelId: 'deepseek-v4-pro' })
+  })
+
+  it('requires a display name and enforces the 512-byte downstream snapshot limit', async () => {
+    const onSave = vi.fn()
+    const screen = await render(<ModelForm {...commonProps} onSave={onSave} />)
+    const displayNameInput = screen.getByPlaceholder('configuration.displayNamePlaceholder')
+    const saveButton = screen.getByRole('button', { name: 'configuration.save' })
+
+    await expect.element(displayNameInput).toHaveAttribute('required')
+    await screen.getByPlaceholder('configuration.providerModelIdPlaceholder').fill('generic-model')
+    await displayNameInput.fill('😀'.repeat(129))
+    await expect.element(screen.getByText('configuration.invalidDisplayName')).toBeVisible()
+    await expect.element(saveButton).toBeDisabled()
+
+    await displayNameInput.fill('😀'.repeat(128))
+    await expect
+      .element(screen.getByText('configuration.invalidDisplayName'))
+      .not.toBeInTheDocument()
+    await expect.poll(() => (saveButton.element() as HTMLButtonElement).disabled).toBe(false)
+    await saveButton.click()
+    await expect.poll(() => onSave.mock.calls.length).toBe(1)
+    expect(onSave.mock.calls[0]![0].displayName).toBe('😀'.repeat(128))
+  })
+
   it('shows only localized vendor names and never projects family/profile identities', async () => {
     const screen = await render(<ModelForm {...commonProps} model={model} onSave={vi.fn()} />)
     await screen.getByRole('button', { name: 'configuration.more' }).click()
@@ -255,7 +304,7 @@ describe('ModelForm vendor controls', () => {
         {...commonProps}
         model={{
           ...model,
-          id: 'kimi-k3',
+          providerModelId: 'kimi-k3',
           providerProfileConfig: {
             schemaVersion: 2,
             vendorId: 'moonshot',
@@ -389,7 +438,7 @@ describe('ModelForm vendor controls', () => {
     const screen = await render(
       <ModelForm
         {...commonProps}
-        model={{ ...model, id: 'older-model' }}
+        model={{ ...model, providerModelId: 'older-model' }}
         resolveProviderVendorModelPolicy={resolver}
         onSave={vi.fn()}
       />
@@ -398,7 +447,7 @@ describe('ModelForm vendor controls', () => {
 
     await expect.poll(() => resolver.mock.calls.length).toBe(1)
     await expect.element(save).toBeDisabled()
-    await screen.getByPlaceholder('configuration.modelIdPlaceholder').fill('newer-model')
+    await screen.getByPlaceholder('configuration.providerModelIdPlaceholder').fill('newer-model')
     await expect.poll(() => resolver.mock.calls.length).toBe(2)
     await expect.element(save).toBeDisabled()
 
@@ -436,7 +485,7 @@ describe('ModelForm vendor controls', () => {
     const screen = await render(
       <ModelForm
         {...commonProps}
-        model={{ ...model, id: 'rejected-model' }}
+        model={{ ...model, providerModelId: 'rejected-model' }}
         resolveProviderVendorModelPolicy={resolver}
         onSave={vi.fn()}
       />
@@ -448,7 +497,9 @@ describe('ModelForm vendor controls', () => {
       .toBeVisible()
     await expect.element(save).toBeDisabled()
 
-    await screen.getByPlaceholder('configuration.modelIdPlaceholder').fill('recovered-model')
+    await screen
+      .getByPlaceholder('configuration.providerModelIdPlaceholder')
+      .fill('recovered-model')
     await expect.poll(() => resolver.mock.calls.length).toBe(2)
     await expect
       .element(screen.getByText('configuration.providerProfile.resolveFailed'))
@@ -459,7 +510,11 @@ describe('ModelForm vendor controls', () => {
   it('uses the K3 descriptor, enables image input, and saves Moonshot settings explicitly', async () => {
     const onSave = vi.fn().mockResolvedValue(undefined)
     const screen = await render(
-      <ModelForm {...commonProps} model={{ ...model, id: 'kimi-k3' }} onSave={onSave} />
+      <ModelForm
+        {...commonProps}
+        model={{ ...model, providerModelId: 'kimi-k3' }}
+        onSave={onSave}
+      />
     )
     await screen.getByRole('button', { name: 'configuration.more' }).click()
     await screen
@@ -500,7 +555,7 @@ describe('ModelForm vendor controls', () => {
     const onSave = vi.fn().mockResolvedValue(undefined)
     const k3Model: ModelConfig = {
       ...model,
-      id: 'kimi-k3',
+      providerModelId: 'kimi-k3',
       supportsImage: true,
       providerProfileConfig: {
         schemaVersion: 2,
@@ -510,7 +565,7 @@ describe('ModelForm vendor controls', () => {
       }
     }
     const screen = await render(<ModelForm {...commonProps} model={k3Model} onSave={onSave} />)
-    await screen.getByPlaceholder('configuration.modelIdPlaceholder').fill('kimi-k2.6')
+    await screen.getByPlaceholder('configuration.providerModelIdPlaceholder').fill('kimi-k2.6')
     await screen.getByRole('button', { name: 'configuration.more' }).click()
     await expect
       .element(screen.getByText('configuration.providerProfile.familyChanged'))
@@ -532,7 +587,7 @@ describe('ModelForm vendor controls', () => {
         globalApiUrl="https://proxy.example/v1/chat/completions"
         model={{
           ...model,
-          id: 'kimi-k3',
+          providerModelId: 'kimi-k3',
           providerProfileConfig: {
             schemaVersion: 1,
             profile: { id: 'deepseek_v4_chat', version: 1 },
@@ -559,7 +614,11 @@ describe('ModelForm vendor controls', () => {
   it('blocks an unknown Moonshot model and keeps the Host save rejection sanitized', async () => {
     const onSave = vi.fn().mockRejectedValue(new Error('raw provider payload'))
     const screen = await render(
-      <ModelForm {...commonProps} model={{ ...model, id: 'future-kimi' }} onSave={onSave} />
+      <ModelForm
+        {...commonProps}
+        model={{ ...model, providerModelId: 'future-kimi' }}
+        onSave={onSave}
+      />
     )
     await screen.getByRole('button', { name: 'configuration.more' }).click()
     await screen
@@ -596,19 +655,32 @@ describe('ModelForm vendor controls', () => {
     expect(document.body.textContent).not.toContain('raw provider payload')
   })
 
-  it('shows the bounded duplicate model id without exposing Core diagnostics', async () => {
-    const onSave = vi.fn().mockRejectedValue(
-      new HostInvocationError({
-        message: 'Model settings validation failed.',
-        code: -32000,
-        data: {
-          kind: 'model_settings_validation',
-          code: 'duplicate_model_id',
-          modelId: 'deepseek-v4-flash'
-        }
-      })
-    )
+  it('keeps the complete draft and focuses display name after the duplicate dialog closes', async () => {
+    const onSave = vi
+      .fn()
+      .mockRejectedValueOnce(
+        new HostInvocationError({
+          message: 'Model settings validation failed.',
+          code: -32000,
+          data: {
+            kind: 'model_settings_validation',
+            code: 'duplicate_display_name',
+            displayName: 'Conflicting display'
+          }
+        })
+      )
+      .mockResolvedValueOnce(undefined)
     const screen = await render(<ModelForm {...commonProps} model={model} onSave={onSave} />)
+    const displayNameInput = screen.getByPlaceholder('configuration.displayNamePlaceholder')
+
+    await displayNameInput.fill('Conflicting display')
+    await screen.getByRole('button', { name: 'configuration.more' }).click()
+    await screen
+      .getByRole('button', {
+        name: 'configuration.providerProfile.vendor: configuration.providerProfile.generic'
+      })
+      .click()
+    await screen.getByRole('option', { name: 'configuration.providerProfile.deepSeek' }).click()
     await expect
       .poll(
         () =>
@@ -619,10 +691,47 @@ describe('ModelForm vendor controls', () => {
           ).disabled
       )
       .toBe(false)
+    await screen.getByRole('button', { name: 'configuration.providerSettings.open' }).click()
+    await screen
+      .getByRole('button', {
+        name: 'configuration.deepSeekSettings.reasoningEffort: configuration.deepSeekSettings.effortProviderDefault'
+      })
+      .click()
+    await screen.getByRole('option', { name: 'configuration.deepSeekSettings.effortLow' }).click()
+    await screen.getByRole('button', { name: 'configuration.providerSettings.confirm' }).click()
     await screen.getByRole('button', { name: 'configuration.save' }).click()
+
     await expect
-      .element(screen.getByRole('alert'))
-      .toHaveTextContent('configuration.duplicateModelId:deepseek-v4-flash')
+      .element(screen.getByRole('alertdialog'))
+      .toHaveTextContent('configuration.duplicateDisplayName:Conflicting display')
+    await expect
+      .element(screen.getByRole('heading', { name: 'configuration.duplicateDisplayNameTitle' }))
+      .toBeVisible()
+    const acknowledge = document.querySelector<HTMLButtonElement>(
+      '.app-confirm-dialog__button--primary'
+    )!
+    await expect.poll(() => document.activeElement).toBe(acknowledge)
     expect(document.body.textContent).not.toContain('Model settings validation failed.')
+
+    acknowledge.click()
+    await expect.element(screen.getByRole('alertdialog')).not.toBeInTheDocument()
+    await expect.element(displayNameInput).toHaveFocus()
+    await expect.element(displayNameInput).toHaveValue('Conflicting display')
+    expect(onSave.mock.calls[0]![0].providerProfileUpdate).toEqual({
+      kind: 'select_vendor',
+      vendorId: 'deepseek',
+      settings: {
+        kind: 'deepseek_v4_chat',
+        reasoning: { mode: 'provider_default', effort: 'low' }
+      }
+    })
+
+    await displayNameInput.fill('Available display')
+    await screen.getByRole('button', { name: 'configuration.save' }).click()
+    await expect.poll(() => onSave.mock.calls.length).toBe(2)
+    expect(onSave.mock.calls[1]![0]).toMatchObject({
+      displayName: 'Available display',
+      providerModelId: 'deepseek-v4-flash'
+    })
   })
 })

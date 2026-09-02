@@ -165,8 +165,12 @@ describe('AutomationTaskForm', () => {
     expect(imageCapability?.dataset.supported).toBe('true')
 
     await imageTrigger.click()
-    const imageOption = screen.getByRole('option', { name: /Image Model configuration.image/ })
-    const textOption = screen.getByRole('option', { name: /Text Model configuration.text/ })
+    const imageOption = screen.getByRole('option', {
+      name: /Image Model configuration.image/
+    })
+    const textOption = screen.getByRole('option', {
+      name: /Text Model configuration.text/
+    })
     await expect.element(imageOption).toBeVisible()
     await expect.element(textOption).toBeVisible()
     await expect
@@ -531,6 +535,33 @@ describe('AutomationTaskForm', () => {
     await expect.element(screen.getByRole('button', { name: /Deleted project/ })).toBeVisible()
     await expect.element(screen.getByRole('button', { name: /Disabled model/ })).toBeVisible()
     await expect.element(screen.getByRole('button', { name: 'automation.save' })).toBeDisabled()
+  })
+
+  it('uses the localized unavailable label instead of exposing a missing model ID', async () => {
+    const internalId = '0197f53a-24e8-7a61-b630-secret-automation-model'
+    const missingDestination = {
+      kind: 'new_chat' as const,
+      projectBinding: 'none' as const,
+      projectId: null,
+      modelId: internalId
+    }
+    const screen = await render(
+      <AutomationTaskForm
+        {...commonProps}
+        initialDraft={makeAutomationDraft({ destination: missingDestination })}
+        mode="edit"
+      />
+    )
+
+    await expect
+      .element(screen.getByRole('button', { name: /automation.modelMissing/ }))
+      .toBeVisible()
+    expect(screen.container.textContent).not.toContain(internalId)
+    await screen.getByRole('button', { name: /automation.modelMissing/ }).click()
+    await expect
+      .element(screen.getByRole('option', { name: 'automation.modelMissing' }))
+      .toBeDisabled()
+    expect(screen.container.textContent).not.toContain(internalId)
   })
 
   it('preserves unsuccessful-only notifications across destination changes', async () => {

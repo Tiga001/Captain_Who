@@ -350,6 +350,7 @@ pub struct AgentContextWindowSnapshotInput {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentContextWindowSnapshotOutput {
+    pub model_config_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub snapshot: Option<AgentContextWindowSnapshot>,
 }

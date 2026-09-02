@@ -5,6 +5,7 @@ import { ConfirmationDialog } from '../../../../components/dialog/ConfirmationDi
 import { useFrontendConfig } from '../../../../config/FrontendConfigProvider'
 import type { ModelConfig } from './configurationTypes'
 import { formatContextWindow } from './modelPresentation'
+import { formatModelConfigLabel } from '../../../modelSelection/modelConfigPresentation'
 
 interface ModelManagerProps {
   models: ModelConfig[]
@@ -58,7 +59,7 @@ export function ModelManager({
         {models.map((model) => (
           <div className="model-manager-table__row" role="row" key={model.id}>
             <span className="model-manager-table__model" role="cell">
-              <strong>{model.displayName}</strong>
+              <strong>{formatModelConfigLabel(model)}</strong>
             </span>
             <span
               className="model-manager-table__context"
@@ -92,7 +93,7 @@ export function ModelManager({
                 className="model-manager-table__icon-button"
                 type="button"
                 title={t('configuration.edit')}
-                aria-label={`${t('configuration.edit')}: ${model.displayName}`}
+                aria-label={`${t('configuration.edit')}: ${formatModelConfigLabel(model)}`}
                 onClick={() => onEdit(model)}
               >
                 <Pencil aria-hidden="true" />
@@ -101,7 +102,7 @@ export function ModelManager({
                 className="model-manager-table__icon-button model-manager-table__icon-button--danger"
                 type="button"
                 title={t('configuration.delete')}
-                aria-label={`${t('configuration.delete')}: ${model.displayName}`}
+                aria-label={`${t('configuration.delete')}: ${formatModelConfigLabel(model)}`}
                 onClick={() => setPendingDeleteId(model.id)}
               >
                 <Trash2 aria-hidden="true" />
@@ -114,7 +115,7 @@ export function ModelManager({
       {pendingDeleteModel && (
         <ConfirmationDialog
           title={t('configuration.confirmDelete')}
-          description={pendingDeleteModel.displayName}
+          description={formatModelConfigLabel(pendingDeleteModel)}
           cancelLabel={t('configuration.cancel')}
           confirmLabel={t('configuration.delete')}
           onCancel={() => setPendingDeleteId(null)}

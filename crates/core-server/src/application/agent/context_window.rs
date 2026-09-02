@@ -44,33 +44,34 @@ impl AgentService {
             .iter()
             .find(|model| model.id == model_id)
             .cloned()
-            .ok_or_else(|| format!("未找到模型配置：{model_id}"))?;
+            .ok_or_else(|| "所选模型配置已不存在。".to_string())?;
+        let model_label = model.display_label();
         if !model.enabled {
-            return Err(format!("模型未启用：{model_id}").into());
+            return Err(format!("模型未启用：{model_label}").into());
         }
         let provider_connection_revision = settings_snapshot
             .provider_connection_revisions
             .get(&model.id)
             .cloned()
-            .ok_or_else(|| format!("模型 {model_id} 的 Provider 连接身份缺失。"))?;
+            .ok_or_else(|| format!("模型 {model_label} 的 Provider 连接身份缺失。"))?;
         let provider_protocol_revision = settings_snapshot
             .provider_protocol_revisions
             .get(&model.id)
             .cloned()
-            .ok_or_else(|| format!("模型 {model_id} 的 Provider Protocol 身份缺失。"))?;
+            .ok_or_else(|| format!("模型 {model_label} 的 Provider Protocol 身份缺失。"))?;
         let context_window_tokens = model.effective_context_window_tokens();
         let connection = settings.effective_connection_for(&model)?;
         let provider_dialect = ProviderProtocolDialect::detect_from_api_url(&connection.api_url);
         let provider_profile_config = model
             .resolved_provider_profile_config(provider_dialect)
-            .map_err(|error| format!("模型 {model_id} 的 Provider Profile 无效：{error}"))?;
+            .map_err(|error| format!("模型 {model_label} 的 Provider Profile 无效：{error}"))?;
         let provider_protocol_key = ProviderProtocolKey::new(
             provider_dialect,
             &provider_profile_config,
-            model.id.clone(),
+            model.provider_model_id.clone(),
             Some(provider_protocol_revision.clone()),
         )
-        .map_err(|error| format!("模型 {model_id} 的 Provider Protocol 无效：{error}"))?;
+        .map_err(|error| format!("模型 {model_label} 的 Provider Protocol 无效：{error}"))?;
 
         let conversation = match conversation_id.as_deref() {
             Some(conversation_id) => self.storage.load_conversation(conversation_id)?,
@@ -152,7 +153,8 @@ impl AgentService {
             search_connection_revision: Some(settings_snapshot.search_connection_revision),
             provider_profile_config: Some(provider_profile_config),
             provider_protocol_key: Some(provider_protocol_key),
-            model: model.id.clone(),
+            model_config_id: Some(model.id.clone()),
+            model: model.provider_model_id.clone(),
             model_capabilities: ModelCapabilities {
                 image_input: model.supports_image,
             },
@@ -215,7 +217,10 @@ impl AgentService {
                     .map(|capacity| i64::try_from(capacity).unwrap_or(i64::MAX));
             }
         }
-        Ok(AgentContextWindowSnapshotOutput { snapshot })
+        Ok(AgentContextWindowSnapshotOutput {
+            model_config_id: model.id,
+            snapshot,
+        })
     }
 
     pub(super) fn context_window_tool_projection(
@@ -344,12 +349,14 @@ impl AgentService {
         &self,
         run_id: &str,
         conversation_id: &str,
+        expected_model_config_id: &str,
         expected_model: &str,
         notifications: CoreServerNotificationSender,
     ) -> AgentContextWindowObserver {
         let service = self.clone();
         let run_id = run_id.to_string();
         let conversation_id = conversation_id.to_string();
+        let expected_model_config_id = expected_model_config_id.to_string();
         let expected_model = expected_model.to_string();
         Arc::new(move |snapshot| {
             if snapshot.model != expected_model {
@@ -368,6 +375,7 @@ impl AgentService {
                 &notifications,
                 &run_id,
                 &conversation_id,
+                &expected_model_config_id,
                 Some(snapshot),
             );
         })
@@ -681,12 +689,19 @@ impl AgentService {
         // A terminal snapshot measures the newly committed durable baseline without run overlays.
         // Retire the last pre-request exact snapshot before publishing that new authority.
         self.discard_exact_running_context_window_snapshot(run_id);
-        self.emit_context_window_snapshot(notifications, run_id, conversation_id, snapshot);
+        self.emit_context_window_snapshot(
+            notifications,
+            run_id,
+            conversation_id,
+            agent_input.model_config_id.as_deref().unwrap_or_default(),
+            snapshot,
+        );
     }
 
     pub(super) fn emit_derived_context_window_snapshot(
         &self,
         notifications: &CoreServerNotificationSender,
+        agent_input: &AgentChatInput,
         run_id: &str,
         conversation_id: &str,
         snapshot: Option<AgentContextWindowSnapshot>,
@@ -697,7 +712,13 @@ impl AgentService {
         if self.has_exact_running_context_window_snapshot(run_id) {
             return;
         }
-        self.emit_context_window_snapshot(notifications, run_id, conversation_id, snapshot);
+        self.emit_context_window_snapshot(
+            notifications,
+            run_id,
+            conversation_id,
+            agent_input.model_config_id.as_deref().unwrap_or_default(),
+            snapshot,
+        );
     }
 
     pub(super) fn emit_context_window_snapshot(
@@ -705,14 +726,22 @@ impl AgentService {
         notifications: &CoreServerNotificationSender,
         run_id: &str,
         conversation_id: &str,
+        model_config_id: &str,
         snapshot: Option<AgentContextWindowSnapshot>,
     ) {
+        if model_config_id.is_empty() || model_config_id.trim() != model_config_id {
+            eprintln!(
+                "ignored context-window snapshot because its frozen model configuration identity is missing or invalid"
+            );
+            return;
+        }
         let Some(snapshot) = snapshot else {
             return;
         };
         let _ = notifications.send(agent_event_notification(AgentEvent::ContextWindowUpdated {
             run_id: run_id.to_string(),
             conversation_id: Some(conversation_id.to_string()),
+            model_config_id: model_config_id.to_string(),
             snapshot,
         }));
     }

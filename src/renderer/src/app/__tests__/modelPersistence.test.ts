@@ -16,7 +16,8 @@ const deepSeekProfile: ProviderProfileConfig = {
 }
 
 const existingModel: ModelConfig = {
-  id: 'deepseek-v4',
+  id: 'model-config-1',
+  providerModelId: 'deepseek-chat',
   displayName: 'DeepSeek V4',
   supportsImage: false,
   contextWindowTokens: 128_000,
@@ -29,7 +30,7 @@ const existingModel: ModelConfig = {
 }
 
 const editedValues: ModelFormValues = {
-  id: 'deepseek-v4-new-alias',
+  providerModelId: 'deepseek-v4-flash',
   displayName: 'DeepSeek V4 edited',
   apiUrlOverride: '',
   apiTokenOverride: '',
@@ -46,13 +47,18 @@ describe('modelConfigFromForm', () => {
     const saved = modelConfigFromForm(editedValues, existingModel)
 
     expect(saved.providerProfileConfig).toEqual(deepSeekProfile)
+    expect(saved.id).toBe('model-config-1')
+    expect(saved.displayName).toBe('DeepSeek V4 edited')
+    expect(saved.providerModelId).toBe('deepseek-v4-flash')
     expect(saved.enabled).toBe(false)
     expect(saved.contextWindowTokens).toBe(256_000)
     expect(saved.cachedInputPrice).toBe('0.005')
   })
 
   it('does not invent a Provider Profile for a newly created model', () => {
-    expect(modelConfigFromForm(editedValues).providerProfileConfig).toBeUndefined()
+    const saved = modelConfigFromForm(editedValues)
+    expect(saved.id).toBeNull()
+    expect(saved.providerProfileConfig).toBeUndefined()
   })
 
   it('passes the explicit one-shot selection separately from the stored profile config', () => {

@@ -23,6 +23,7 @@ vi.mock('../../config/ModelSettingsProvider', () => ({
     enabledModels: [
       {
         id: 'model-1',
+        providerModelId: 'provider-model-one',
         displayName: 'Model One',
         supportsImage: true,
         inputPrice: '0',
@@ -31,6 +32,7 @@ vi.mock('../../config/ModelSettingsProvider', () => ({
       },
       ...Array.from({ length: 6 }, (_, index) => ({
         id: `model-${index + 2}`,
+        providerModelId: `provider-model-${index + 2}`,
         displayName: `Model ${index + 2}`,
         supportsImage: index % 2 === 0,
         inputPrice: '0',

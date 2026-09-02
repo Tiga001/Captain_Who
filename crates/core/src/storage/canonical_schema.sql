@@ -302,7 +302,13 @@ CREATE INDEX managed_artifact_grants_conversation_idx
             ON managed_artifact_grants (conversation_id, artifact_id);
 CREATE TABLE models (
             id TEXT PRIMARY KEY,
-            display_name TEXT NOT NULL,
+            provider_model_id TEXT NOT NULL,
+            display_name TEXT NOT NULL CHECK (
+                typeof(display_name) = 'text'
+                AND length(CAST(display_name AS BLOB)) BETWEEN 1 AND 512
+                AND display_name = trim(display_name)
+            ),
+            normalized_display_name TEXT NOT NULL,
             api_url_override TEXT,
             api_token_override TEXT,
             supports_image INTEGER NOT NULL,
@@ -3688,6 +3694,8 @@ CREATE TABLE conversation_context_adaptation_requirements (
             FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
         );
 CREATE INDEX idx_models_position ON models(position);
+CREATE UNIQUE INDEX idx_models_normalized_display_name
+            ON models(normalized_display_name);
 CREATE INDEX idx_projects_updated_at ON projects(updated_at);
 CREATE INDEX idx_conversations_project_id ON conversations(project_id);
 CREATE INDEX idx_conversations_pinned_at ON conversations(pinned_at);

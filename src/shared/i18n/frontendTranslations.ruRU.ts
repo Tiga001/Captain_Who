@@ -2095,11 +2095,11 @@ export const ruRUTranslations = {
   'configuration.confirmDelete': 'Удалить эту модель?',
   'configuration.cancel': 'Отмена',
   'configuration.done': 'Готово',
-  'configuration.modelId': 'Идентификатор модели',
-  'configuration.modelIdPlaceholder': 'Пример: Клод-опус-4-7',
+  'configuration.providerModelId': 'ID модели провайдера',
+  'configuration.providerModelIdPlaceholder': 'Пример: deepseek-chat',
   'configuration.displayName': 'Отображаемое имя',
-  'configuration.displayNamePlaceholder':
-    'Оставьте пустым, чтобы использовать идентификатор модели',
+  'configuration.displayNamePlaceholder': 'Пример: Kimi K3 High',
+  'configuration.invalidDisplayName': 'Имя должно быть не длиннее 512 байт UTF-8',
   'configuration.contextWindowTokens': 'Общее контекстное окно (токены)',
   'configuration.contextWindowTokensPlaceholder': 'Пусто использует значение по умолчанию 128000.',
   'configuration.invalidContextWindowTokens': 'Введите целое число больше 0',
@@ -2112,9 +2112,10 @@ export const ruRUTranslations = {
   'configuration.loadFailed': 'Не удалось загрузить настройки модели.',
   'configuration.saveFailed': 'Не удалось сохранить настройки модели.',
   'configuration.saveFailedSafe':
-    'Невозможно сохранить настройки модели. Восстановлены последние успешно сохраненные настройки; пожалуйста, попробуйте еще раз.',
-  'configuration.duplicateModelId':
-    'Модель с идентификатором «{modelId}» уже существует. Пожалуйста, используйте другой идентификатор модели.',
+    'Не удалось сохранить настройки модели. Изменения сохранены в форме; проверьте их и повторите попытку.',
+  'configuration.duplicateDisplayNameTitle': 'Отображаемое имя уже существует',
+  'configuration.duplicateDisplayName':
+    'Модель с именем «{displayName}» уже существует. Используйте другое отображаемое имя.',
   'configuration.saving': 'Сохранение…',
   'configuration.supportsImageInput': 'Поддерживает ввод изображений',
   'configuration.more': 'Подробнее',

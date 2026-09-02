@@ -200,7 +200,7 @@ describe('model settings IPC', () => {
     expect(coreServer.resolveProviderVendorModelPolicy).toHaveBeenCalledWith(input)
   })
 
-  it('projects only the bounded duplicate-model validation error', async () => {
+  it('projects only the bounded duplicate-display-name validation error', async () => {
     const handlers = new Map<string, (...args: unknown[]) => unknown>()
     const ipcMain = {
       handle: vi.fn((channel: string, handler: (...args: unknown[]) => unknown) => {
@@ -210,8 +210,8 @@ describe('model settings IPC', () => {
     }
     const data = {
       kind: 'model_settings_validation',
-      code: 'duplicate_model_id',
-      modelId: 'deepseek-v4-flash'
+      code: 'duplicate_display_name',
+      displayName: 'DeepSeek V4 Flash'
     }
     const coreServer = {
       saveModelSettings: vi.fn().mockRejectedValue(
@@ -241,8 +241,8 @@ describe('model settings IPC', () => {
       code: -32000,
       data: {
         kind: 'model_settings_validation',
-        code: 'duplicate_model_id',
-        modelId: 'model-a',
+        code: 'duplicate_display_name',
+        displayName: 'Model A',
         apiToken: 'private-token'
       }
     })

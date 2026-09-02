@@ -225,8 +225,11 @@ export type StorageProviderProfileUpdate =
     }
 
 export interface StorageModelConfigRecord {
-  /** Opaque model identifier sent verbatim as the provider API's `model` value. */
+  /** Stable opaque identity of this local model configuration. */
   id: string
+  /** Exact identifier sent verbatim as the provider API's `model` value. */
+  providerModelId: string
+  /** Required, user-facing identity. Unique within local settings. */
   displayName: string
   /** A model-level connection override is valid only when URL and token are both present. */
   apiUrlOverride: string | null
@@ -253,10 +256,10 @@ export interface StorageModelSettingsRecord {
 /** Model payload accepted by the authoritative Host save boundary. */
 export interface StorageModelConfigUpdateRecord extends Omit<
   StorageModelConfigRecord,
-  'providerProfileConfig'
+  'id' | 'providerProfileConfig'
 > {
-  /** Previous opaque model identity used to preserve profile state across an explicit rename. */
-  previousModelId: string | null
+  /** Existing local identity, or null when Host must allocate a new configuration identity. */
+  id: string | null
   providerProfileUpdate: StorageProviderProfileUpdate
 }
 
@@ -274,8 +277,8 @@ export interface StorageModelSettingsUpdateRecord extends Omit<
 /** Safe, renderer-visible rejection from the authoritative model-settings save boundary. */
 export interface StorageModelSettingsValidationErrorData {
   kind: 'model_settings_validation'
-  code: 'duplicate_model_id'
-  modelId: string
+  code: 'duplicate_display_name'
+  displayName: string
 }
 
 export interface StorageProjectRecord {

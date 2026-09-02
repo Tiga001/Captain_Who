@@ -496,6 +496,7 @@ mod tests {
         };
         let mut model = ModelConfigRecord {
             id: "deepseek-v4".to_string(),
+            provider_model_id: "deepseek-v4".to_string(),
             display_name: "DeepSeek V4".to_string(),
             api_url_override: None,
             api_token_override: None,

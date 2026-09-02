@@ -38,7 +38,9 @@ fn prepared_turn_uses_backend_model_capabilities() {
 fn conversation_world_state_persists_exact_full_and_anchored_diff_across_turns() {
     let fixture = tempdir().unwrap();
     let storage = StorageService::open(&fixture.path().join("storage.sqlite")).unwrap();
-    storage.save_model_settings(test_model_settings()).unwrap();
+    let mut settings = test_model_settings();
+    settings.models[0].provider_model_id = "provider-model-1".to_string();
+    storage.save_model_settings(settings).unwrap();
 
     let first = prepare_conversation_turn(
         &storage,
@@ -78,7 +80,8 @@ fn conversation_world_state_persists_exact_full_and_anchored_diff_across_turns()
         .render_sanitized_text();
     assert!(first_projection.contains("\"id\":\"environment\""));
     assert!(first_projection.contains("\"id\":\"model.selection\""));
-    assert!(first_projection.contains("\"configuredModelId\":\"model-1\""));
+    assert!(first_projection.contains("\"configuredModelId\":\"provider-model-1\""));
+    assert!(!first_projection.contains("\"configuredModelId\":\"model-1\""));
     assert!(first_projection.contains("\"imageInput\":false"));
     assert!(first_projection.contains("\"os\""));
     assert!(first_projection.contains("\"network\""));
@@ -153,10 +156,15 @@ fn model_switch_appends_visible_selection_diffs_even_when_modalities_match() {
     let fixture = tempdir().unwrap();
     let storage = StorageService::open(&fixture.path().join("storage.sqlite")).unwrap();
     let mut settings = test_model_settings();
+    settings.models[0].provider_model_id = "provider-model-1".to_string();
     let mut alternate = settings.models[0].clone();
     alternate.id = "model-2".to_string();
+    alternate.provider_model_id = "provider-model-2".to_string();
+    alternate.display_name = "Model 2".to_string();
     let mut vision = settings.models[0].clone();
     vision.id = "model-vision".to_string();
+    vision.provider_model_id = "provider-model-vision".to_string();
+    vision.display_name = "Vision model".to_string();
     vision.supports_image = true;
     settings.models.extend([alternate, vision]);
     storage.save_model_settings(settings).unwrap();
@@ -223,7 +231,7 @@ fn model_switch_appends_visible_selection_diffs_even_when_modalities_match() {
         .unwrap()
         .unwrap()
         .render_sanitized_text();
-    assert!(second_projection.contains("\"configuredModelId\":\"model-2\""));
+    assert!(second_projection.contains("\"configuredModelId\":\"provider-model-2\""));
     assert!(second_projection.contains("\"imageInput\":false"));
 
     let second_snapshot = mycopilot_core::WorldStateReducer::fold(
@@ -256,7 +264,7 @@ fn model_switch_appends_visible_selection_diffs_even_when_modalities_match() {
         .unwrap()
         .unwrap()
         .render_sanitized_text();
-    assert!(third_projection.contains("\"configuredModelId\":\"model-vision\""));
+    assert!(third_projection.contains("\"configuredModelId\":\"provider-model-vision\""));
     assert!(third_projection.contains("\"imageInput\":true"));
 }
 
@@ -1221,6 +1229,7 @@ fn context_window_snapshot_is_zero_until_first_user_message_then_counts_complete
             tavily_api_key: String::new(),
             models: vec![ModelConfigRecord {
                 id: "model-1".to_string(),
+                provider_model_id: "model-1".to_string(),
                 display_name: "Model 1".to_string(),
                 api_url_override: None,
                 api_token_override: None,

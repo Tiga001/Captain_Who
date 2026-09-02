@@ -594,6 +594,7 @@ fn test_model_settings() -> ModelSettingsRecord {
         tavily_api_key: String::new(),
         models: vec![ModelConfigRecord {
             id: "model-1".to_string(),
+            provider_model_id: "model-1".to_string(),
             display_name: "Model 1".to_string(),
             api_url_override: None,
             api_token_override: None,
@@ -717,6 +718,7 @@ fn save_test_pending_provider(
             tavily_api_key: tavily_api_key.to_string(),
             models: vec![ModelConfigRecord {
                 id: model_id.to_string(),
+                provider_model_id: model_id.to_string(),
                 display_name: "Pending provider fixture".to_string(),
                 api_url_override: None,
                 api_token_override: None,
@@ -768,6 +770,7 @@ fn save_test_pending_provider_for_input(storage: &StorageService, input: &mut Ag
             tavily_api_key: tavily_api_key.to_string(),
             models: vec![ModelConfigRecord {
                 id: input.model.clone(),
+                provider_model_id: input.model.clone(),
                 display_name: "Pending input fixture".to_string(),
                 api_url_override: None,
                 api_token_override: None,
@@ -796,13 +799,20 @@ fn freeze_test_pending_provider_configuration(
         .load_model_settings_snapshot()
         .unwrap()
         .expect("test Provider settings snapshot");
+    let model = snapshot
+        .settings
+        .models
+        .iter()
+        .find(|model| model.provider_model_id == input.model)
+        .expect("test Provider model");
     let (provider_protocol_revision, config, key) =
         test_frozen_provider_protocol(storage, &input.model, input.api_style);
+    input.model_config_id = Some(model.id.clone());
     input.provider_configuration_revision = Some(provider_protocol_revision);
     input.provider_connection_revision = Some(
         snapshot
             .provider_connection_revisions
-            .get(&input.model)
+            .get(&model.id)
             .expect("test Provider connection revision")
             .clone(),
     );
@@ -832,7 +842,7 @@ fn test_frozen_provider_protocol(
         .settings
         .models
         .iter()
-        .find(|model| model.id == model_id)
+        .find(|model| model.provider_model_id == model_id)
         .expect("test Provider model");
     let connection = snapshot
         .settings
@@ -848,13 +858,13 @@ fn test_frozen_provider_protocol(
         .expect("test Provider Profile");
     let provider_protocol_revision = snapshot
         .provider_protocol_revisions
-        .get(model_id)
+        .get(&model.id)
         .expect("test Provider protocol revision")
         .clone();
     let key = mycopilot_core::ProviderProtocolKey::new(
         dialect,
         &config,
-        model.id.clone(),
+        model.provider_model_id.clone(),
         Some(provider_protocol_revision.clone()),
     )
     .expect("test Provider Protocol key");

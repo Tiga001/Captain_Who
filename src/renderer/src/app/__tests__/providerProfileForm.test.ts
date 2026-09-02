@@ -293,6 +293,7 @@ describe('vendor-aware Provider form state', () => {
 describe('global API URL Generic rematch', () => {
   const baseModel: ModelConfig = {
     id: 'model',
+    providerModelId: 'provider-model',
     displayName: 'Model',
     supportsImage: false,
     inputPrice: '0',

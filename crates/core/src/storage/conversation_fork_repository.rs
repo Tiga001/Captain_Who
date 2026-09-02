@@ -2424,10 +2424,14 @@ fn resolve_fork_point(
                     .to_string()
                     .into());
             }
+            let target_model_config_id = receipt
+                .model_config_id
+                .clone()
+                .unwrap_or_else(|| receipt.model.clone());
             Ok(ResolvedConversationForkPoint {
                 assistant_message_id: receipt.assistant_message_id,
                 summary_id: Some(summary_id.to_string()),
-                model_id: Some(receipt.model),
+                model_id: Some(target_model_config_id),
             })
         }
     }

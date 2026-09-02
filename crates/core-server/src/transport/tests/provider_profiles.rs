@@ -21,9 +21,9 @@ fn generic_model_save_payload(models: Value) -> Value {
 
 fn generic_model(model_id: &str, input_price: &str) -> Value {
     serde_json::json!({
-        "id": model_id,
-        "previousModelId": null,
-        "displayName": "Generic Model",
+        "id": null,
+        "providerModelId": model_id,
+        "displayName": model_id,
         "apiUrlOverride": null,
         "apiTokenOverride": null,
         "supportsImage": false,
@@ -68,7 +68,11 @@ fn successful_model_settings_commit_emits_one_global_collaboration_resync() {
 }
 
 #[test]
-fn duplicate_model_id_is_returned_as_safe_stable_validation_data() {
+fn duplicate_display_name_is_returned_as_safe_stable_validation_data() {
+    assert_eq!(
+        mycopilot_core::storage::models::MODEL_DISPLAY_NAME_MAX_BYTES,
+        mycopilot_protocol_rs::STORAGE_MODEL_DISPLAY_NAME_MAX_BYTES
+    );
     let temp = tempfile::tempdir().unwrap();
     let storage = Arc::new(StorageService::open(&temp.path().join("storage.sqlite")).unwrap());
     let agent_service = AgentService::new(Arc::clone(&storage));
@@ -96,8 +100,8 @@ fn duplicate_model_id_is_returned_as_safe_stable_validation_data() {
         response["error"]["data"],
         serde_json::json!({
             "kind": "model_settings_validation",
-            "code": "duplicate_model_id",
-            "modelId": "deepseek-v4-flash",
+            "code": "duplicate_display_name",
+            "displayName": "deepseek-v4-flash",
         })
     );
     let encoded = response.to_string();
@@ -184,8 +188,8 @@ fn provider_profile_descriptor_projection_and_authoritative_save_are_strict() {
                 "searchMode": "disabled",
                 "tavilyApiKey": "",
                 "models": [{
-                    "id": "deepseek-chat",
-                    "previousModelId": null,
+                    "id": null,
+                    "providerModelId": "deepseek-chat",
                     "displayName": "DeepSeek Chat",
                     "apiUrlOverride": null,
                     "apiTokenOverride": null,

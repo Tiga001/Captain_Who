@@ -5,6 +5,7 @@ import type { ChatConversation } from '../../chat/chatTypes'
 
 export const testModel: ModelConfig = {
   id: 'model-1',
+  providerModelId: 'provider-model-1',
   displayName: 'Test Model',
   supportsImage: true,
   inputPrice: '0',

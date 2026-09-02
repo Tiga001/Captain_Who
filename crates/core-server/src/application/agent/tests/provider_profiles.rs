@@ -252,31 +252,46 @@ fn renderer_turn_input_rejects_host_only_collaboration_fields() {
 }
 
 #[test]
-fn current_model_freezes_the_generic_profile_for_the_resolved_dialect() {
+fn prepared_turn_keeps_local_usage_identity_separate_from_provider_wire_model() {
     let fixture = tempdir().unwrap();
     let storage = StorageService::open(&fixture.path().join("storage.sqlite")).unwrap();
-    storage.save_model_settings(test_model_settings()).unwrap();
+    let mut settings = test_model_settings();
+    settings.models[0].id = "model-config-local".to_string();
+    settings.models[0].display_name = "Model display name".to_string();
+    settings.models[0].provider_model_id = "provider-wire-model".to_string();
+    storage.save_model_settings(settings).unwrap();
     let revision = storage
         .load_model_settings_snapshot()
         .unwrap()
         .unwrap()
-        .provider_protocol_revisions["model-1"]
+        .provider_protocol_revisions["model-config-local"]
         .clone();
 
     let prepared = prepare_conversation_turn(
         &storage,
         &SkillsService::new(),
-        turn_input("model-1"),
+        turn_input("model-config-local"),
         "run-provider-profile-generic",
     )
     .unwrap();
 
     assert!(mycopilot_core::storage::config_repository::is_provider_protocol_revision(&revision));
-    let config = prepared.agent_input.provider_profile_config.unwrap();
-    let key = prepared.agent_input.provider_protocol_key.unwrap();
+    assert_eq!(
+        prepared.agent_input.model_config_id.as_deref(),
+        Some("model-config-local")
+    );
+    assert_eq!(prepared.agent_input.model, "provider-wire-model");
+    assert_eq!(prepared.usage_context.model_id, "model-config-local");
+    assert_eq!(prepared.usage_context.model_name, "Model display name");
+    let config = prepared
+        .agent_input
+        .provider_profile_config
+        .as_ref()
+        .unwrap();
+    let key = prepared.agent_input.provider_protocol_key.as_ref().unwrap();
     assert_eq!(
         config,
-        mycopilot_core::ProviderProfileConfig::generic_for_dialect(
+        &mycopilot_core::ProviderProfileConfig::generic_for_dialect(
             mycopilot_core::ProviderProtocolDialect::OpenAiChatCompletions,
         )
     );
@@ -285,7 +300,7 @@ fn current_model_freezes_the_generic_profile_for_the_resolved_dialect() {
         mycopilot_core::ProviderProtocolDialect::OpenAiChatCompletions
     );
     assert_eq!(key.profile, config.profile());
-    assert_eq!(key.model_id, "model-1");
+    assert_eq!(key.model_id, "provider-wire-model");
     assert_eq!(
         key.provider_configuration_revision.as_deref(),
         Some(revision.as_str())
@@ -304,8 +319,8 @@ fn renderer_profile_selection_round_trips_into_the_frozen_registration() {
                 "searchMode": "disabled",
                 "tavilyApiKey": "",
                 "models": [{
-                    "id": "model-1",
-                    "previousModelId": null,
+                    "id": null,
+                    "providerModelId": "model-1",
                     "displayName": "DeepSeek V4 Chat",
                     "apiUrlOverride": null,
                     "apiTokenOverride": null,
@@ -345,7 +360,7 @@ fn renderer_profile_selection_round_trips_into_the_frozen_registration() {
     let prepared = prepare_conversation_turn(
         &storage,
         &SkillsService::new(),
-        turn_input("model-1"),
+        turn_input(&authoritative.models[0].id),
         "run-provider-profile-renderer-selection",
     )
     .unwrap();
@@ -373,8 +388,8 @@ fn renderer_generic_selection_freezes_the_anthropic_generic_registration() {
                 "searchMode": "disabled",
                 "tavilyApiKey": "",
                 "models": [{
-                    "id": "model-1",
-                    "previousModelId": null,
+                    "id": null,
+                    "providerModelId": "model-1",
                     "displayName": "Anthropic-compatible",
                     "apiUrlOverride": null,
                     "apiTokenOverride": null,
@@ -389,12 +404,12 @@ fn renderer_generic_selection_freezes_the_anthropic_generic_registration() {
             }),
         )
         .unwrap();
-    storage.save_model_settings_request(request).unwrap();
+    let authoritative = storage.save_model_settings_request(request).unwrap();
 
     let prepared = prepare_conversation_turn(
         &storage,
         &SkillsService::new(),
-        turn_input("model-1"),
+        turn_input(&authoritative.models[0].id),
         "run-provider-profile-anthropic-selection",
     )
     .unwrap();
@@ -455,6 +470,7 @@ fn prepared_runs_bind_to_only_the_selected_models_effective_protocol_revision() 
         .models
         .push(mycopilot_core::storage::models::ModelConfigRecord {
             id: "model-2".to_string(),
+            provider_model_id: "model-2".to_string(),
             display_name: "Other model".to_string(),
             api_url_override: Some("https://other.example/v1".to_string()),
             api_token_override: Some("other-token".to_string()),
@@ -1087,6 +1103,7 @@ async fn reopened_assistant_and_provider_transition_forks_complete_human_turns()
         settings.api_token = "fork-transition-token".to_string();
         let mut target_model = settings.models[0].clone();
         target_model.id = "model-2".to_string();
+        target_model.provider_model_id = "model-2".to_string();
         target_model.display_name = "Model 2".to_string();
         target_model.provider_profile_config =
             mycopilot_core::ProviderProfileConfig::deepseek_v4_default();
@@ -1482,6 +1499,7 @@ async fn trusted_child_wake_uses_the_root_loop_without_duplicating_the_parent_ta
     let mut settings = storage.load_model_settings().unwrap().unwrap();
     let mut unrelated = settings.models[0].clone();
     unrelated.id = "unrelated-model".to_string();
+    unrelated.provider_model_id = "unrelated-model".to_string();
     unrelated.display_name = "Unrelated model".to_string();
     settings.models.push(unrelated);
     storage.save_model_settings(settings).unwrap();

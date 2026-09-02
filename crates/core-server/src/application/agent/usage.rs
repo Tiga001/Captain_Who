@@ -51,6 +51,23 @@ pub(super) fn restore_pending_usage_contexts(
                     record.snapshot.run_id
                 )
             })?;
+        if provider_protocol_key.model_id != record.agent_input.model {
+            return Err(format!(
+                "pending run {} usage Provider model identity mismatch",
+                record.snapshot.run_id
+            ));
+        }
+        let model_config_id = record
+            .agent_input
+            .model_config_id
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| {
+                format!(
+                    "pending run {} usage local model owner is unavailable",
+                    record.snapshot.run_id
+                )
+            })?;
         let usage_semantics =
             mycopilot_core::resolve_provider_runtime_capabilities(provider_protocol_key)
                 .map_err(|error| {
@@ -71,6 +88,21 @@ pub(super) fn restore_pending_usage_contexts(
             // with an explicitly unpriced, empty accumulator derived
             // only from the frozen owner/protocol; never borrow the current model Profile or
             // prices, which may have changed while approval was pending.
+            let fallback_model_name = storage
+                .load_model_settings()?
+                .and_then(|settings| {
+                    settings
+                        .models
+                        .into_iter()
+                        .find(|model| model.id == model_config_id)
+                        .map(|model| model.display_label())
+                })
+                .filter(|label| !label.trim().is_empty())
+                .or_else(|| {
+                    let provider_model_id = record.agent_input.model.trim();
+                    (!provider_model_id.is_empty()).then(|| provider_model_id.to_string())
+                })
+                .unwrap_or_else(|| "Model unavailable".to_string());
             let state = AgentRunUsageState {
                 context: AgentRunUsageContext {
                     conversation_id: conversation_id.to_string(),
@@ -81,8 +113,12 @@ pub(super) fn restore_pending_usage_contexts(
                         .context
                         .as_ref()
                         .and_then(|context| context.project_id.clone()),
-                    model_id: provider_protocol_key.model_id.clone(),
-                    model_name: provider_protocol_key.model_id.clone(),
+                    model_id: model_config_id.to_string(),
+                    // The authoritative Usage row normally freezes a user-visible model label
+                    // before approval. If a crash happened between the approval and Usage
+                    // commits, recover a visible label without ever projecting the private local
+                    // model-config identity.
+                    model_name: fallback_model_name,
                     provider_usage_semantics: usage_semantics,
                     input_price: None,
                     cached_input_price: None,
@@ -96,9 +132,7 @@ pub(super) fn restore_pending_usage_contexts(
             insert_restored_usage_state(&mut restored, &record.snapshot.run_id, state)?;
             continue;
         };
-        if persisted.model_id != provider_protocol_key.model_id
-            || persisted.model_id != record.agent_input.model
-        {
+        if persisted.model_id != model_config_id {
             return Err(format!(
                 "pending run {} usage model owner mismatch",
                 record.snapshot.run_id

@@ -1085,6 +1085,7 @@ async fn deepseek_runtime_persists_grouped_turns_before_tool_side_effects() {
         search_connection_revision: None,
         provider_profile_config: Some(provider_profile),
         provider_protocol_key: Some(provider_protocol.clone()),
+        model_config_id: None,
         model: MODEL_ID.to_string(),
         model_capabilities: crate::ModelCapabilities::default(),
         api_style: Some(crate::protocol::AgentApiStyle::OpenAiCompatible),

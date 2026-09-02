@@ -109,6 +109,13 @@ pub struct AgentChatInput {
     /// a run; current direct Core callers may omit the key and derive it from the required Profile.
     #[serde(skip)]
     pub provider_protocol_key: Option<ProviderProtocolKey>,
+    /// Host-only stable identity of the local model configuration selected for this run.
+    ///
+    /// This identity owns settings revisions, conversation selection and Usage attribution. It is
+    /// deliberately separate from `model`, which is the exact provider wire model identifier.
+    #[serde(skip)]
+    pub model_config_id: Option<String>,
+    /// Exact provider wire model identifier sent in the request payload.
     pub model: String,
     /// Resolved by the backend from the selected model configuration and kept
     /// immutable across approval pause/resume for this logical run.
@@ -3713,6 +3720,8 @@ pub enum AgentEvent {
         run_id: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         conversation_id: Option<String>,
+        /// Stable local model configuration identity. `snapshot.model` remains the Provider wire ID.
+        model_config_id: String,
         snapshot: AgentContextWindowSnapshot,
     },
     ContextCompactionStarted {

@@ -83,9 +83,9 @@ describe('CoreServer model settings client', () => {
       tavilyApiKey: '',
       models: [
         {
-          id: 'deepseek-chat',
+          id: null,
+          providerModelId: 'deepseek-chat',
           displayName: 'DeepSeek Chat',
-          previousModelId: null,
           apiUrlOverride: null,
           apiTokenOverride: null,
           supportsImage: false,
@@ -112,7 +112,8 @@ describe('CoreServer model settings client', () => {
       tavilyApiKey: input.tavilyApiKey,
       models: [
         {
-          id: 'deepseek-chat',
+          id: 'model-config-deepseek-chat',
+          providerModelId: 'deepseek-chat',
           displayName: 'DeepSeek Chat',
           apiUrlOverride: null,
           apiTokenOverride: null,

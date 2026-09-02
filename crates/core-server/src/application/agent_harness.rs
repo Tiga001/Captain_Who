@@ -181,7 +181,7 @@ impl AgentCollaborationHarnessAdapter {
                     })
                     .map(|model| AgentCollaborationModelSelector {
                         model_config_id: model.id.clone(),
-                        display_name: model.display_name.clone(),
+                        display_name: model.display_label(),
                         capabilities: mycopilot_core::ModelCapabilities {
                             image_input: model.supports_image,
                         },
@@ -863,6 +863,7 @@ mod tests {
                 tavily_api_key: String::new(),
                 models: vec![ModelConfigRecord {
                     id: "model-catalog".to_string(),
+                    provider_model_id: "model-catalog".to_string(),
                     display_name: "Catalog Model".to_string(),
                     api_url_override: None,
                     api_token_override: None,

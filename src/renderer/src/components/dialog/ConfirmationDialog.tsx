@@ -10,9 +10,11 @@ interface ConfirmationDialogProps {
   confirmLabel: string
   confirmVariant?: ConfirmationDialogVariant
   description?: string
+  dialogRole?: 'alertdialog' | 'dialog'
   fallbackFocusRef?: RefObject<HTMLElement | null>
   onCancel: () => void
   onConfirm: () => void | Promise<void>
+  restoreFocusRef?: RefObject<HTMLElement | null>
   showCancelButton?: boolean
   title: string
 }
@@ -22,9 +24,11 @@ export function ConfirmationDialog({
   confirmLabel,
   confirmVariant = 'danger',
   description,
+  dialogRole = 'dialog',
   fallbackFocusRef,
   onCancel,
   onConfirm,
+  restoreFocusRef,
   showCancelButton = true,
   title
 }: ConfirmationDialogProps) {
@@ -41,6 +45,7 @@ export function ConfirmationDialog({
     previouslyFocusedRef.current =
       document.activeElement instanceof HTMLElement ? document.activeElement : null
     const fallbackFocus = fallbackFocusRef?.current ?? null
+    const explicitRestoreTarget = restoreFocusRef?.current ?? null
     const frameId = window.requestAnimationFrame(() => {
       if (showCancelButton) {
         cancelButtonRef.current?.focus()
@@ -52,13 +57,15 @@ export function ConfirmationDialog({
     return () => {
       window.cancelAnimationFrame(frameId)
       const previous = previouslyFocusedRef.current
-      if (previous?.isConnected) {
+      if (explicitRestoreTarget?.isConnected) {
+        explicitRestoreTarget.focus()
+      } else if (previous?.isConnected) {
         previous.focus()
       } else {
         fallbackFocus?.focus()
       }
     }
-  }, [fallbackFocusRef, showCancelButton])
+  }, [fallbackFocusRef, restoreFocusRef, showCancelButton])
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -115,7 +122,7 @@ export function ConfirmationDialog({
       <section
         ref={cardRef}
         className="app-confirm-dialog__card"
-        role="dialog"
+        role={dialogRole}
         aria-modal="true"
         aria-busy={isConfirming || undefined}
         aria-labelledby={titleId}

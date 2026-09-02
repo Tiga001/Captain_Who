@@ -195,24 +195,25 @@ describe('storage protocol parsers', () => {
 describe('model settings validation error parser', () => {
   const duplicate = {
     kind: 'model_settings_validation',
-    code: 'duplicate_model_id',
-    modelId: 'deepseek-v4-flash'
+    code: 'duplicate_display_name',
+    displayName: 'DeepSeek V4 Flash'
   } as const
 
-  it('accepts only the bounded duplicate-model recovery contract', () => {
+  it('accepts only the bounded duplicate-name recovery contract', () => {
     expect(parseStorageModelSettingsValidationErrorData(duplicate)).toEqual(duplicate)
-    const maximumWidthId = '😀'.repeat(512)
+    const maximumWidthName = '😀'.repeat(128)
     expect(
-      parseStorageModelSettingsValidationErrorData({ ...duplicate, modelId: maximumWidthId })
-    ).toEqual({ ...duplicate, modelId: maximumWidthId })
+      parseStorageModelSettingsValidationErrorData({ ...duplicate, displayName: maximumWidthName })
+    ).toEqual({ ...duplicate, displayName: maximumWidthName })
   })
 
   it.each([
     null,
     { ...duplicate, kind: 'database_error' },
     { ...duplicate, code: 'invalid_price' },
-    { ...duplicate, modelId: '' },
-    { ...duplicate, modelId: '😀'.repeat(513) },
+    { ...duplicate, displayName: '' },
+    { ...duplicate, displayName: '😀'.repeat(129) },
+    { ...duplicate, legacyIdentity: 'retired-identity' },
     { ...duplicate, sql: 'private schema detail' }
   ])('rejects malformed, oversized, or expanded error data %#', (value) => {
     expect(() => parseStorageModelSettingsValidationErrorData(value)).toThrow(

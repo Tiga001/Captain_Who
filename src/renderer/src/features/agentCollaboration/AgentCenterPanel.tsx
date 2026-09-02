@@ -330,9 +330,7 @@ function statusLabel(status: AgentDisplayStatusView, t: Translate): string {
 
 function baseModelLabel(agent: AgentSummary, t: Translate): string {
   const displayName = agent.model?.displayName.trim()
-  if (displayName) return displayName
-  const modelConfigId = agent.model?.modelConfigId.trim()
-  return modelConfigId || t('agentCenter.modelUnavailable')
+  return displayName || t('agentCenter.modelUnavailable')
 }
 
 function formatRecentActivity(

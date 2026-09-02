@@ -296,6 +296,7 @@ interface UseAgentRunLifecycleOptions {
   flushConversationMessageStateSaves: (conversationId: string) => Promise<void>
   recordContextWindowSnapshot: (
     conversationId: string,
+    modelConfigId: string,
     snapshot: AgentContextWindowSnapshot
   ) => void
   reconcileFailedSkillActivation: (
@@ -1401,7 +1402,9 @@ export function useAgentRunLifecycle({
     return onAgentEvent((agentEvent) => {
       if (agentEvent.type === 'context_window_updated') {
         const conversationId = agentEvent.conversationId
-        if (conversationId) recordContextWindowSnapshot(conversationId, agentEvent.snapshot)
+        if (conversationId) {
+          recordContextWindowSnapshot(conversationId, agentEvent.modelConfigId, agentEvent.snapshot)
+        }
         return
       }
 

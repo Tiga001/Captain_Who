@@ -655,14 +655,9 @@ impl fmt::Display for ChildAgentSpawnError {
             Self::TemplateDisabled(key) => {
                 write!(formatter, "Agent template `{key}` is disabled")
             }
-            Self::ModelUnavailable {
-                model_config_id,
-                reason,
-            } => write!(
-                formatter,
-                "Agent model `{}` is unavailable: {reason:?}",
-                model_config_id.as_deref().unwrap_or("<default>")
-            ),
+            Self::ModelUnavailable { reason, .. } => {
+                write!(formatter, "selected Agent model is unavailable: {reason:?}")
+            }
             Self::UnsupportedReasoningEffort(effort) => write!(
                 formatter,
                 "reasoning effort constraint `{effort:?}` is unsupported by the selected model"
@@ -1200,12 +1195,9 @@ impl fmt::Display for AgentTemplateError {
                 "Agent template `{template_id}` is snapshotted by {agent_count} Agent(s)"
             ),
             Self::TemplateDisabled(key) => write!(formatter, "Agent template `{key}` is disabled"),
-            Self::ModelUnavailable {
-                model_config_id,
-                reason,
-            } => write!(
+            Self::ModelUnavailable { reason, .. } => write!(
                 formatter,
-                "Agent template model `{model_config_id}` is unavailable: {reason:?}"
+                "selected Agent template model is unavailable: {reason:?}"
             ),
             Self::CorruptRecord(reason) => write!(formatter, "corrupt Agent template: {reason}"),
             Self::StorageUnavailable(reason) => {
@@ -1216,3 +1208,52 @@ impl fmt::Display for AgentTemplateError {
 }
 
 impl std::error::Error for AgentTemplateError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn child_model_unavailable_display_does_not_expose_model_config_id() {
+        let model_config_id = "model-config:private-child-id";
+        let error = ChildAgentSpawnError::ModelUnavailable {
+            model_config_id: Some(model_config_id.to_string()),
+            reason: AgentModelUnavailableReason::Disabled,
+        };
+
+        assert!(matches!(
+            &error,
+            ChildAgentSpawnError::ModelUnavailable {
+                model_config_id: Some(actual_model_config_id),
+                reason: AgentModelUnavailableReason::Disabled,
+            } if actual_model_config_id == model_config_id
+        ));
+        assert_eq!(
+            error.to_string(),
+            "selected Agent model is unavailable: Disabled"
+        );
+        assert!(!error.to_string().contains(model_config_id));
+    }
+
+    #[test]
+    fn agent_template_model_unavailable_display_does_not_expose_model_config_id() {
+        let model_config_id = "model-config:private-template-id";
+        let error = AgentTemplateError::ModelUnavailable {
+            model_config_id: model_config_id.to_string(),
+            reason: AgentTemplateModelUnavailableReason::InvalidProfile,
+        };
+
+        assert!(matches!(
+            &error,
+            AgentTemplateError::ModelUnavailable {
+                model_config_id: actual_model_config_id,
+                reason: AgentTemplateModelUnavailableReason::InvalidProfile,
+            } if actual_model_config_id == model_config_id
+        ));
+        assert_eq!(
+            error.to_string(),
+            "selected Agent template model is unavailable: InvalidProfile"
+        );
+        assert!(!error.to_string().contains(model_config_id));
+    }
+}

@@ -9,6 +9,7 @@ import type {
 import { useFrontendConfig } from '../../../../config/FrontendConfigProvider'
 import { formatTranslation } from '../../../../config/translationFormat'
 import { DEFAULT_MODEL_CONTEXT_WINDOW_TOKENS } from '../../../../config/modelConfig'
+import { ConfirmationDialog } from '../../../../components/dialog/ConfirmationDialog'
 import { SettingsSelect } from '../../components/SettingsSelect'
 import type { SettingsSelectOption } from '../../components/SettingsSelect'
 import type { ModelConfig, ModelFormValues } from './configurationTypes'
@@ -45,6 +46,8 @@ type PolicyResolutionState =
   | { status: 'idle' | 'loading' | 'failed' | 'stored_unsupported' }
   | { status: 'resolved'; descriptor: ProviderVendorModelPolicyDescriptor }
 
+const MAX_MODEL_DISPLAY_NAME_BYTES = 512
+
 function isValidPriceInput(value: string): boolean {
   const normalized = value.trim().replaceAll(',', '')
   if (normalized.length === 0) return true
@@ -58,6 +61,13 @@ function isValidContextWindowInput(value: string): boolean {
   if (!/^\d+$/.test(normalized)) return false
   const parsed = Number(normalized)
   return Number.isSafeInteger(parsed) && parsed > 0 && parsed <= 4_294_967_295
+}
+
+function isDisplayNameWithinLimit(value: string): boolean {
+  return (
+    new TextEncoder().encode(value.trim().normalize('NFKC')).byteLength <=
+    MAX_MODEL_DISPLAY_NAME_BYTES
+  )
 }
 
 function isValidApiUrl(value: string): boolean {
@@ -74,7 +84,7 @@ function isValidApiUrl(value: string): boolean {
 
 function toFormValues(model?: ModelConfig): ModelFormValues {
   return {
-    id: model?.id ?? '',
+    providerModelId: model?.providerModelId ?? '',
     displayName: model?.displayName ?? '',
     apiUrlOverride: model?.apiUrlOverride ?? '',
     apiTokenOverride: model?.apiTokenOverride ?? '',
@@ -111,6 +121,7 @@ export function ModelForm({
     status: initialProviderProfile.selection === 'unsupported' ? 'stored_unsupported' : 'loading'
   })
   const policyRequestRef = useRef(0)
+  const displayNameInputRef = useRef<HTMLInputElement>(null)
   const [isProviderSettingsOpen, setProviderSettingsOpen] = useState(false)
   const [isSaving, setSaving] = useState(false)
   const [saveError, setSaveError] = useState<ModelSettingsSaveError | null>(null)
@@ -123,6 +134,7 @@ export function ModelForm({
   )
   const isEditing = Boolean(model)
   const isContextWindowValid = isValidContextWindowInput(values.contextWindowTokens)
+  const isDisplayNameValid = isDisplayNameWithinLimit(values.displayName)
   const isInputPriceValid = isValidPriceInput(values.inputPrice)
   const isCachedInputPriceValid = isValidPriceInput(values.cachedInputPrice)
   const isOutputPriceValid = isValidPriceInput(values.outputPrice)
@@ -134,7 +146,7 @@ export function ModelForm({
   const originalEffectiveApiUrl = model?.apiUrlOverride?.trim() || globalApiUrl
   const wireIdentityUnchanged =
     Boolean(model) &&
-    values.id.trim() === model?.id &&
+    values.providerModelId.trim() === model?.providerModelId &&
     effectiveApiUrl.trim() === originalEffectiveApiUrl.trim()
   const resolvedPolicy = policyResolution.status === 'resolved' ? policyResolution.descriptor : null
   const supportedPolicy =
@@ -154,7 +166,9 @@ export function ModelForm({
           : canPreserveUnchangedProfile
         : false
   const canSave =
-    values.id.trim().length > 0 &&
+    values.displayName.trim().length > 0 &&
+    isDisplayNameValid &&
+    values.providerModelId.trim().length > 0 &&
     isContextWindowValid &&
     isInputPriceValid &&
     isCachedInputPriceValid &&
@@ -165,7 +179,7 @@ export function ModelForm({
 
   useEffect(() => {
     const selection = providerProfile.selection
-    const modelId = values.id.trim()
+    const modelId = values.providerModelId.trim()
     if (selection === 'unsupported') {
       policyRequestRef.current += 1
       setPolicyResolution({ status: 'stored_unsupported' })
@@ -199,7 +213,12 @@ export function ModelForm({
       .catch(() => {
         if (policyRequestRef.current === requestId) setPolicyResolution({ status: 'failed' })
       })
-  }, [effectiveApiUrl, providerProfile.selection, resolveProviderVendorModelPolicy, values.id])
+  }, [
+    effectiveApiUrl,
+    providerProfile.selection,
+    resolveProviderVendorModelPolicy,
+    values.providerModelId
+  ])
 
   const selectableVendorOptions: SettingsSelectOption<ProviderProfileSelection>[] = []
   for (const descriptor of providerVendorDescriptors) {
@@ -267,7 +286,7 @@ export function ModelForm({
     try {
       await onSave({
         ...values,
-        id: values.id.trim(),
+        providerModelId: values.providerModelId.trim(),
         displayName: values.displayName.trim(),
         apiUrlOverride: values.apiUrlOverride.trim(),
         apiTokenOverride: values.apiTokenOverride.trim(),
@@ -282,11 +301,8 @@ export function ModelForm({
         providerProfileUpdate: providerProfile.update
       })
     } catch (error) {
-      // The settings provider restores the last Host-authoritative snapshot and presents the
-      // sanitized failure. Restore this local draft too, without reflecting raw Provider details.
-      setValues(initialValues)
-      setProviderProfile(initialProviderProfile)
-      setProviderSettingsOpen(false)
+      // Keep every local field and provider-owned setting intact. The settings provider already
+      // restores its Host-authoritative snapshot; this editable draft is the user's recovery path.
       setSaveError(classifyModelSettingsSaveError(error))
     } finally {
       setSaving(false)
@@ -306,14 +322,16 @@ export function ModelForm({
       <div className="model-form-page__fields settings-list" data-advanced-open={isAdvancedOpen}>
         <label className="configuration-field settings-list-row">
           <span className="settings-list-row__text">
-            <span className="settings-list-row__title">{t('configuration.modelId')}</span>
+            <span className="settings-list-row__title">{t('configuration.providerModelId')}</span>
           </span>
           <span className="settings-list-row__control">
             <input
               className="settings-list-control"
-              value={values.id}
-              placeholder={t('configuration.modelIdPlaceholder')}
-              onChange={(event) => setValues((current) => ({ ...current, id: event.target.value }))}
+              value={values.providerModelId}
+              placeholder={t('configuration.providerModelIdPlaceholder')}
+              onChange={(event) =>
+                setValues((current) => ({ ...current, providerModelId: event.target.value }))
+              }
             />
           </span>
         </label>
@@ -350,15 +368,23 @@ export function ModelForm({
           <span className="settings-list-row__text">
             <span className="settings-list-row__title">{t('configuration.displayName')}</span>
           </span>
-          <span className="settings-list-row__control">
+          <span className="settings-list-row__control model-form-price-control">
             <input
+              ref={displayNameInputRef}
               className="settings-list-control"
+              aria-invalid={!isDisplayNameValid}
+              required
               value={values.displayName}
               placeholder={t('configuration.displayNamePlaceholder')}
               onChange={(event) =>
                 setValues((current) => ({ ...current, displayName: event.target.value }))
               }
             />
+            {!isDisplayNameValid && (
+              <small className="model-form-field-error">
+                {t('configuration.invalidDisplayName')}
+              </small>
+            )}
           </span>
         </label>
 
@@ -606,13 +632,9 @@ export function ModelForm({
         </div>
       </div>
 
-      {saveError && (
+      {saveError?.code === 'unknown' && (
         <p className="model-form-field-error" role="alert">
-          {saveError.code === 'duplicate_model_id'
-            ? formatTranslation(t, 'configuration.duplicateModelId', {
-                modelId: saveError.modelId
-              })
-            : t('configuration.saveFailedSafe')}
+          {t('configuration.saveFailedSafe')}
         </p>
       )}
 
@@ -629,6 +651,23 @@ export function ModelForm({
           {isSaving ? t('configuration.saving') : t('configuration.save')}
         </button>
       </div>
+
+      {saveError?.code === 'duplicate_display_name' && (
+        <ConfirmationDialog
+          cancelLabel={t('configuration.acknowledge')}
+          confirmLabel={t('configuration.acknowledge')}
+          confirmVariant="primary"
+          description={formatTranslation(t, 'configuration.duplicateDisplayName', {
+            displayName: saveError.displayName
+          })}
+          dialogRole="alertdialog"
+          onCancel={() => setSaveError(null)}
+          onConfirm={() => setSaveError(null)}
+          restoreFocusRef={displayNameInputRef}
+          showCancelButton={false}
+          title={t('configuration.duplicateDisplayNameTitle')}
+        />
+      )}
 
       {isProviderSettingsOpen &&
         providerProfile.selection === 'deepseek' &&

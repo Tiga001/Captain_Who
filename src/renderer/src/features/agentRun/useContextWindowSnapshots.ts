@@ -107,13 +107,13 @@ export function useContextWindowSnapshots({
       skills: request.skills.length > 0 ? request.skills : undefined,
       permissions: request.permissions
     })
-      .then(({ snapshot }) => {
+      .then(({ modelConfigId, snapshot }) => {
         if (cancelled || requestSequenceRef.current !== requestSequence) return
         if ((eventSequenceRef.current.get(requestedSnapshotKey) ?? 0) !== eventSequenceAtRequest) {
           return
         }
         setSnapshots((current) => {
-          if (snapshot?.model === request.modelId) {
+          if (snapshot && modelConfigId === request.modelId) {
             return { ...current, [requestedSnapshotKey]: snapshot }
           }
           if (!(requestedSnapshotKey in current)) return current
@@ -132,9 +132,9 @@ export function useContextWindowSnapshots({
   }, [enabled, requestKey])
 
   const recordSnapshot = useCallback(
-    (eventScopeId: string, snapshot: AgentContextWindowSnapshot) => {
+    (eventScopeId: string, eventModelConfigId: string, snapshot: AgentContextWindowSnapshot) => {
       if (!enabled) return
-      const eventSnapshotKey = snapshotKey(eventScopeId, snapshot.model)
+      const eventSnapshotKey = snapshotKey(eventScopeId, eventModelConfigId)
       eventSequenceRef.current.set(
         eventSnapshotKey,
         (eventSequenceRef.current.get(eventSnapshotKey) ?? 0) + 1

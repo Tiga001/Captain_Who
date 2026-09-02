@@ -245,7 +245,7 @@ vi.mock('../../features/agent/agentClient', () => ({
   approveAgentAction: vi.fn(),
   cancelAgentAction: vi.fn(),
   cancelAgentRun: vi.fn().mockResolvedValue(true),
-  getContextWindowSnapshot: vi.fn().mockResolvedValue({ snapshot: null }),
+  getContextWindowSnapshot: vi.fn().mockResolvedValue({ modelConfigId: 'model-1' }),
   getProviderTransitionStatus: vi.fn().mockResolvedValue({ operations: [] }),
   getAgentCommandSession: vi.fn(),
   getAgentFileChangeDiff: vi.fn(),

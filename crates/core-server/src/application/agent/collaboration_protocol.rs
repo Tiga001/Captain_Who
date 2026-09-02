@@ -463,7 +463,7 @@ impl AgentService {
                         .find(|model| model.id == model_id)
                         .map(|model| AgentModelDisplayDto {
                             model_config_id: model.id.clone(),
-                            display_name: model.display_name.clone(),
+                            display_name: model.display_label(),
                         })
                 })
             }
@@ -638,7 +638,7 @@ fn template_dto(
     let model_display_name = models
         .iter()
         .find(|model| model.id == record.model_config_id)
-        .map(|model| model.display_name.clone());
+        .map(|model| model.display_label());
     AgentTemplateDto {
         schema_version: AGENT_COLLABORATION_SCHEMA_VERSION,
         template_id: record.template_id,

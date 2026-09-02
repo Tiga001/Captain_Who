@@ -632,7 +632,7 @@ fn validate_reasoning_effort(
     let protocol = crate::ProviderProtocolKey::new(
         dialect,
         &profile,
-        model.id.clone(),
+        model.provider_model_id.clone(),
         Some(protocol_revision),
     )
     .map_err(|_| ChildAgentSpawnError::ModelUnavailable {
