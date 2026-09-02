@@ -86,12 +86,25 @@ describe('LeftSidebar scheduled navigation', () => {
       .element()
     const sidebar = screen.getByRole('complementary').element()
     const brand = logo.closest<HTMLElement>('.left-sidebar__brand')
+    const scheduled = screen.getByRole('button', { name: 'Scheduled', exact: true }).element()
+    const scroll = sidebar.querySelector<HTMLElement>('.left-sidebar__scroll')!
+    const projects = sidebar.querySelector<HTMLElement>('.left-sidebar__projects')!
+    const sidebarBounds = sidebar.getBoundingClientRect()
+    const logoBounds = logo.getBoundingClientRect()
+    const newConversationBounds = newConversation.getBoundingClientRect()
+    const scheduledBounds = scheduled.getBoundingClientRect()
+    const scrollBounds = scroll.getBoundingClientRect()
+    const projectsBounds = projects.getBoundingClientRect()
 
     expect(brand).not.toBeNull()
     expect(getComputedStyle(brand!).pointerEvents).toBe('none')
-    expect(logo.getBoundingClientRect().bottom).toBeLessThanOrEqual(
-      newConversation.getBoundingClientRect().top
-    )
+    expect(brand!.getBoundingClientRect().top - sidebarBounds.top).toBeCloseTo(6, 0)
+    expect(newConversationBounds.top - sidebarBounds.top).toBeCloseTo(44, 0)
+    expect(newConversationBounds.top - logoBounds.bottom).toBeLessThanOrEqual(14)
+    expect(logoBounds.bottom).toBeLessThanOrEqual(newConversationBounds.top)
+    expect(scrollBounds.top - sidebarBounds.top).toBeCloseTo(149, 0)
+    expect(projectsBounds.top - scrollBounds.top).toBeCloseTo(24, 0)
+    expect(scheduledBounds.bottom).toBeLessThanOrEqual(scrollBounds.top)
     expect(sidebar.scrollWidth).toBeLessThanOrEqual(sidebar.clientWidth)
   })
 

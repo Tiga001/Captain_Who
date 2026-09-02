@@ -1,9 +1,10 @@
 /* Base layout, account, and shared controls for the left sidebar. */
 .left-sidebar {
+  --left-sidebar-brand-row-height: 44px;
   --left-sidebar-footer-height: 64px;
   --left-sidebar-header-height: calc(
-    var(--titlebar-height) + var(--mc-layout-sidebar-action-height) +
-      var(--mc-layout-sidebar-action-height) + var(--mc-layout-sidebar-action-height) + 30px
+    var(--left-sidebar-brand-row-height) + var(--mc-layout-sidebar-action-height) +
+      var(--mc-layout-sidebar-action-height) + var(--mc-layout-sidebar-action-height) + 18px
   );
   --left-sidebar-popover-z-index: 1100;
   position: relative;
@@ -28,13 +29,13 @@
   display: grid;
   align-content: start;
   height: var(--left-sidebar-header-height);
-  padding: calc(var(--titlebar-height) + 8px) 18px 14px;
+  padding: var(--left-sidebar-brand-row-height) 18px 10px;
   gap: 4px;
 }
 
 .left-sidebar__brand {
   position: absolute;
-  top: 14px;
+  top: 6px;
   left: 20px;
   width: min(140px, calc(100% - 40px));
   pointer-events: none;

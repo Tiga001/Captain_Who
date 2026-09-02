@@ -1,6 +1,6 @@
 /* Section headers, pinned groups, and section action menus for the left sidebar. */
 .left-sidebar__pinned {
-  margin-top: 34px;
+  margin-top: 24px;
 }
 
 .left-sidebar__section {
@@ -8,7 +8,7 @@
 }
 
 .left-sidebar__projects {
-  margin-top: 34px;
+  margin-top: 24px;
 }
 
 .left-sidebar__pinned + .left-sidebar__projects {

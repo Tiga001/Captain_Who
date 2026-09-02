@@ -73,36 +73,47 @@ export function CaptainWhoWordmark() {
           data-wordmark-gradient="light"
           id={lightGradientId}
           gradientUnits="userSpaceOnUse"
-          x1="1227"
-          x2="1701"
-          y1="169"
-          y2="734"
+          x1="70"
+          x2="2105"
+          y1="0"
+          y2="0"
         >
-          <stop offset="0%" stopColor="#061c4e" />
-          <stop offset="52%" stopColor="#0b4382" />
-          <stop offset="100%" stopColor="#1e79bf" />
+          <stop offset="0%" stopColor="#173a5e" />
+          <stop offset="58%" stopColor="#1e527b" />
+          <stop offset="100%" stopColor="#256f9f" />
         </linearGradient>
 
         <linearGradient
           data-wordmark-gradient="dark"
           id={darkGradientId}
           gradientUnits="userSpaceOnUse"
-          x1="1227"
-          x2="1945"
-          y1="169"
-          y2="567"
+          x1="70"
+          x2="2105"
+          y1="0"
+          y2="0"
         >
-          <stop offset="0%" stopColor="#002660" />
-          <stop offset="52%" stopColor="#023d88" />
-          <stop offset="100%" stopColor="#2370b6" />
+          <stop offset="0%" stopColor="#f4f7fb" />
+          <stop offset="58%" stopColor="#a9cde8" />
+          <stop offset="100%" stopColor="#4a94cd" />
         </linearGradient>
       </defs>
 
       <g mask={`url(#${alphaMaskId})`}>
         <rect
-          className="captain-who-wordmark__captain"
+          className="captain-who-wordmark__captain captain-who-wordmark__captain--light"
           clipPath={`url(#${captainClipId})`}
-          data-wordmark-layer="captain"
+          data-wordmark-layer="captain-light"
+          fill="#2b3540"
+          height={SOURCE_HEIGHT}
+          width={SOURCE_WIDTH}
+          x="0"
+          y="0"
+        />
+        <rect
+          className="captain-who-wordmark__captain captain-who-wordmark__captain--dark"
+          clipPath={`url(#${captainClipId})`}
+          data-wordmark-layer="captain-dark"
+          fill="#fefefe"
           height={SOURCE_HEIGHT}
           width={SOURCE_WIDTH}
           x="0"

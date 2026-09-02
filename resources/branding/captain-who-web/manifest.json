@@ -1,0 +1,58 @@
+{
+  "sourceViewBox": [
+    70,
+    155,
+    2035,
+    385
+  ],
+  "pngSizes": [
+    {
+      "width": 2035,
+      "height": 385,
+      "suffix": ""
+    },
+    {
+      "width": 814,
+      "height": 154,
+      "suffix": "-web"
+    }
+  ],
+  "variants": [
+    {
+      "id": "classic-light",
+      "label": "Classic Light",
+      "recommendedBackground": "#F7F7F5",
+      "captainFill": "#2B3540",
+      "accent": "#0169CC",
+      "gradient": [
+        "#173A5E",
+        "#1E527B",
+        "#256F9F"
+      ]
+    },
+    {
+      "id": "classic-dark",
+      "label": "Classic Dark",
+      "recommendedBackground": "#171717",
+      "captainFill": "#FEFEFE",
+      "accent": "#0169CC",
+      "gradient": [
+        "#F4F7FB",
+        "#A9CDE8",
+        "#4A94CD"
+      ]
+    },
+    {
+      "id": "crab-light",
+      "label": "Crab Light",
+      "recommendedBackground": "#ECE8E0",
+      "captainFill": "#2B3540",
+      "accent": "#A64B31",
+      "gradient": [
+        "#173A5E",
+        "#1E527B",
+        "#256F9F"
+      ]
+    }
+  ]
+}
