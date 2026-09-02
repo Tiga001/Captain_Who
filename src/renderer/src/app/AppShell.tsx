@@ -32,6 +32,10 @@ import type {
 } from '../features/rightSidebar/rightSidebarTypes'
 import { ChatConversationPage } from '../features/chat/ChatConversationPage'
 import { NewConversationPage } from '../features/chat/NewConversationPage'
+import {
+  getNextRandomNewConversationPromptIndex,
+  getRandomNewConversationPromptIndex
+} from '../features/chat/newConversationPrompts'
 import type {
   ChatComposerDraft,
   ChatConversation,
@@ -213,6 +217,9 @@ export function AppShell() {
   const [conversations, setConversations] = useState<ChatConversation[]>([])
   const conversationsRef = useRef<ChatConversation[]>([])
   const [activeConversationId, setActiveConversationId] = useState<string | null>(null)
+  const [newConversationPromptIndex, setNewConversationPromptIndex] = useState(() =>
+    getRandomNewConversationPromptIndex()
+  )
   const [primaryView, setPrimaryView] = useState<PrimaryView>('conversation')
   const [scheduledDrawerPreferredWidth, setScheduledDrawerPreferredWidth] = useState(
     AUTOMATION_DRAWER_DEFAULT_WIDTH
@@ -1489,6 +1496,9 @@ export function AppShell() {
     setRightSidebarAgentNavigationRequest(null)
     activeConversationIdRef.current = null
     setActiveConversationId(null)
+    setNewConversationPromptIndex((currentIndex) =>
+      getNextRandomNewConversationPromptIndex(currentIndex)
+    )
     setScrollTargetMessageId(null)
     setActiveConversationInitialScrollTop(null)
   }, [])
@@ -1515,11 +1525,22 @@ export function AppShell() {
   const openNewConversation = useCallback(
     (projectId: string | null = null) => {
       requestScheduledExit(() => {
+        const isAlreadyShowingRootNewConversation =
+          primaryView === 'conversation' &&
+          activeConversationIdRef.current === null &&
+          projectId === null &&
+          (draftsRef.current[NEW_CONVERSATION_DRAFT_ID]?.projectId ?? null) === null
+
         conversationOpenRequestKeyRef.current += 1
         setPrimaryView('conversation')
         setScheduledOpenRequest(null)
         activeConversationIdRef.current = null
         setActiveConversationId(null)
+        if (!isAlreadyShowingRootNewConversation) {
+          setNewConversationPromptIndex((currentIndex) =>
+            getNextRandomNewConversationPromptIndex(currentIndex)
+          )
+        }
         setScrollTargetMessageId(null)
         setActiveConversationInitialScrollTop(null)
 
@@ -1538,7 +1559,7 @@ export function AppShell() {
         }
       })
     },
-    [mutateDraft, requestScheduledExit]
+    [mutateDraft, primaryView, requestScheduledExit]
   )
 
   const {
@@ -2122,6 +2143,7 @@ export function AppShell() {
               contextWindowSnapshot={activeContextWindowSnapshot}
               draft={activeDraft}
               permissionModeAvailability={permissionModeAvailability}
+              promptIndex={newConversationPromptIndex}
               skillCatalogRefreshToken={activeSkillCatalogRefreshToken}
               onDraftChange={(draft) => updateDraft(NEW_CONVERSATION_DRAFT_ID, draft)}
               onDraftMessageChange={(draft) =>

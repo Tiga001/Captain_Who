@@ -74,12 +74,17 @@ vi.mock('../chatAttachments', () => ({
   stripAttachmentSummary: (content: string) => content
 }))
 
-const [{ NewConversationPage }, { createComposerDraft }] = await Promise.all([
+const [
+  { NewConversationPage },
+  { createComposerDraft },
+  { NEW_CONVERSATION_PROMPTS, getNewConversationPromptKeys }
+] = await Promise.all([
   import('../NewConversationPage'),
-  import('../../../app/chatMessageFactory')
+  import('../../../app/chatMessageFactory'),
+  import('../newConversationPrompts')
 ])
 
-function renderPage(projectId: string) {
+function renderPage(projectId: string | null, promptIndex = 0) {
   return render(
     <div data-testid="middle-panel" style={{ width: 480, height: 800 }}>
       <NewConversationPage
@@ -87,6 +92,7 @@ function renderPage(projectId: string) {
         onDraftChange={vi.fn()}
         onSubmitMessage={vi.fn()}
         permissionModeAvailability={{ custom: true, full: true }}
+        promptIndex={promptIndex}
       />
     </div>
   )
@@ -111,6 +117,39 @@ function expectEllipsis(element: HTMLElement) {
 
 afterEach(async () => {
   await page.viewport(1280, 720)
+})
+
+describe('NewConversationPage prompt pairing', () => {
+  it.each(NEW_CONVERSATION_PROMPTS.map((_, promptIndex) => promptIndex))(
+    'keeps root prompt title and placeholder paired for index %i',
+    async (promptIndex) => {
+      const screen = await renderPage(null, promptIndex)
+      const prompt = getNewConversationPromptKeys(promptIndex)
+
+      await expect
+        .element(screen.getByRole('heading', { level: 1, name: prompt.titleKey }))
+        .toBeVisible()
+      await expect
+        .element(screen.getByRole('textbox', { name: 'chat.inputAria' }))
+        .toHaveAttribute('placeholder', prompt.placeholderKey)
+    }
+  )
+
+  it('keeps the project-specific title and default placeholder instead of a root prompt pair', async () => {
+    const screen = await renderPage('project-short', NEW_CONVERSATION_PROMPTS.length - 1)
+
+    await expect
+      .element(
+        screen.getByRole('heading', {
+          level: 1,
+          name: new RegExp(`我们应该在\\s*${SHORT_PROJECT_NAME}\\s*中做些什么？`)
+        })
+      )
+      .toBeVisible()
+    await expect
+      .element(screen.getByRole('textbox', { name: 'chat.inputAria' }))
+      .toHaveAttribute('placeholder', 'chat.inputPlaceholder')
+  })
 })
 
 describe('NewConversationPage project-name containment', () => {

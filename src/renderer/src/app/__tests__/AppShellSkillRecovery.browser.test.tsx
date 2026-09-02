@@ -328,10 +328,17 @@ vi.mock('../AppShellSettingsView', () => ({
   AppShellSettingsView: () => <section data-testid="settings-view" />
 }))
 vi.mock('../../features/chat/NewConversationPage', () => ({
-  NewConversationPage: ({ draft }: { draft: ChatComposerDraft }) => (
+  NewConversationPage: ({
+    draft,
+    promptIndex
+  }: {
+    draft: ChatComposerDraft
+    promptIndex: number
+  }) => (
     <div>
       <output data-testid="new-conversation-draft">{draft.message}</output>
       <output data-testid="new-conversation-project">{draft.projectId ?? 'none'}</output>
+      <output data-testid="new-conversation-prompt-index">{promptIndex}</output>
       <output data-testid="new-conversation-payload">
         {JSON.stringify({
           attachments: draft.attachments,
@@ -1789,6 +1796,36 @@ describe('provider transition guard', () => {
 })
 
 describe('conversation startup loading', () => {
+  it('keeps the prompt stable when the global new-conversation action is repeated on the root page', async () => {
+    const screen = await render(<AppShell />)
+    const promptIndex = screen.getByTestId('new-conversation-prompt-index')
+    await expect.element(promptIndex).toBeVisible()
+    const initialPromptIndex = promptIndex.element().textContent
+
+    await screen.getByRole('button', { name: 'new-conversation', exact: true }).click()
+
+    await expect.element(promptIndex).toHaveTextContent(initialPromptIndex ?? '')
+    await expect.element(screen.getByTestId('new-conversation-project')).toHaveTextContent('none')
+  })
+
+  it('selects a different prompt when returning from an existing conversation', async () => {
+    const screen = await render(<AppShell />)
+    const promptIndex = screen.getByTestId('new-conversation-prompt-index')
+    await expect.element(promptIndex).toBeVisible()
+    const initialPromptIndex = promptIndex.element().textContent
+
+    await screen.getByRole('button', { name: 'select-conversation-a', exact: true }).click()
+    await expect
+      .element(screen.getByTestId('active-conversation-id'))
+      .toHaveTextContent('conversation-a')
+    await screen.getByRole('button', { name: 'new-conversation', exact: true }).click()
+
+    await expect.element(screen.getByTestId('new-conversation-prompt-index')).toBeVisible()
+    expect(screen.getByTestId('new-conversation-prompt-index').element().textContent).not.toBe(
+      initialPromptIndex
+    )
+  })
+
   it('starts on a new conversation and hydrates a stored conversation only after selection', async () => {
     const active = storedConversation()
     const archived = {

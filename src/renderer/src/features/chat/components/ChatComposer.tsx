@@ -70,6 +70,7 @@ interface ChatComposerProps {
   canGuideQueuedMessages?: boolean
   isGenerating?: boolean
   isModelTransitionRunning?: boolean
+  inputPlaceholder?: string
   messageSyncKey?: string
   onDraftChange: (draft: ChatComposerDraft) => void
   onDraftMessageChange?: (draft: ChatComposerDraft) => void
@@ -97,6 +98,7 @@ export function ChatComposer({
   canGuideQueuedMessages = false,
   isGenerating = false,
   isModelTransitionRunning = false,
+  inputPlaceholder,
   messageSyncKey,
   onDraftChange,
   onDraftMessageChange,
@@ -702,7 +704,7 @@ export function ChatComposer({
         <textarea
           ref={textareaRef}
           value={message}
-          placeholder={t('chat.inputPlaceholder')}
+          placeholder={inputPlaceholder ?? t('chat.inputPlaceholder')}
           aria-label={t('chat.inputAria')}
           disabled={isModelTransitionRunning}
           rows={1}

@@ -3,6 +3,7 @@ import { useFrontendConfig } from '../../config/FrontendConfigProvider'
 import { useProjectSettings } from '../../config/ProjectSettingsProvider'
 import { ChatComposer } from './components/ChatComposer'
 import type { ChatComposerDraft, ChatSubmitOptions } from './chatTypes'
+import { getNewConversationPromptKeys } from './newConversationPrompts'
 import './NewConversationPage.css'
 
 interface NewConversationPageProps {
@@ -20,6 +21,7 @@ interface NewConversationPageProps {
     custom: boolean
     full: boolean
   }
+  promptIndex: number
   skillCatalogRefreshToken?: number
 }
 
@@ -32,12 +34,14 @@ export function NewConversationPage({
   onDraftMessageChange,
   onSubmitMessage,
   permissionModeAvailability,
+  promptIndex,
   skillCatalogRefreshToken
 }: NewConversationPageProps) {
   const { t } = useFrontendConfig()
   const { projects } = useProjectSettings()
   const selectedProjectId = draft.projectId ?? defaultProjectId
   const selectedProject = projects.find((project) => project.id === selectedProjectId)
+  const promptKeys = getNewConversationPromptKeys(promptIndex)
   const projectTitleTemplate = t('chat.projectTitle')
   const projectNamePlaceholder = '{projectName}'
   const projectNamePlaceholderIndex = projectTitleTemplate.indexOf(projectNamePlaceholder)
@@ -63,7 +67,7 @@ export function NewConversationPage({
               {projectTitleSuffix}
             </>
           ) : (
-            t('chat.title')
+            t(promptKeys.titleKey)
           )}
         </h1>
         <ChatComposer
@@ -74,6 +78,7 @@ export function NewConversationPage({
           onDraftChange={onDraftChange}
           onDraftMessageChange={onDraftMessageChange}
           permissionModeAvailability={permissionModeAvailability}
+          inputPlaceholder={selectedProject ? undefined : t(promptKeys.placeholderKey)}
           resetKey={`new:${defaultProjectId ?? 'root'}`}
           skillCatalogRefreshToken={skillCatalogRefreshToken}
           showProjectSelector
