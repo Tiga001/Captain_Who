@@ -1,15 +1,15 @@
 ---
-title: MyCopilot 文档
-description: 从第一次使用到进阶理解，学习如何安全、有效地使用 MyCopilot。
+title: Captain Who 文档
+description: 从第一次使用到进阶理解，学习如何安全、有效地使用 Captain Who。
 status: current
 audience: public
 owner: product-docs
 last_verified: 2026-08-31
 ---
 
-# MyCopilot 文档
+# Captain Who 文档
 
-MyCopilot 是一款本地优先的桌面 AI 工作助手。它可以在你授权的范围内理解项目、处理文件、调用工具，并把复杂任务拆给多个 Agent 协作完成。
+Captain Who 是一款本地优先的桌面 AI 工作助手。它可以在你授权的范围内理解项目、处理文件、调用工具，并把复杂任务拆给多个 Agent 协作完成。
 
 ## 选择一条阅读路线
 

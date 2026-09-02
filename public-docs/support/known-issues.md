@@ -1,6 +1,6 @@
 ---
 title: 已知问题
-description: MyCopilot 当前已确认的产品限制与尚未完成的发布能力。
+description: Captain Who 当前已确认的产品限制与尚未完成的发布能力。
 status: current
 audience: user
 owner: product

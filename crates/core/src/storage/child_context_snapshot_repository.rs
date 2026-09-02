@@ -271,8 +271,8 @@ pub(crate) fn build_child_context_snapshot_plan(
                     created_at: source_message.created_at,
                     status: source_message.status.clone(),
                     attachments: Vec::new(),
-                    // The terminal trace is the durable execution fact. Run JSON also carries
-                    // Usage/checkpoints/UI state and is therefore deliberately not inherited.
+                    // The terminal trace is the durable execution fact. Mutable run projections
+                    // and frontend-owned UI state are deliberately not inherited.
                     agent_run_json: None,
                     ui_state_json: None,
                 },
@@ -440,8 +440,8 @@ pub(crate) fn apply_child_context_snapshot_in_transaction(
                 snapshot_source_conversation_id, snapshot_source_message_id,
                 snapshot_original_origin_kind, snapshot_original_agent_id,
                 snapshot_original_mailbox_message_id,
-                agent_run_json, ui_state_json, created_at, position
-             ) VALUES (?1, ?2, ?3, ?4, ?5, 'snapshot', ?6, ?7, ?8, ?9, ?10, ?11, NULL, ?12, ?13)",
+                agent_run_json, created_at, position
+             ) VALUES (?1, ?2, ?3, ?4, ?5, 'snapshot', ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
                 params![
                     &message.record.id,
                     &plan.target_conversation_id,
@@ -795,15 +795,22 @@ mod tests {
         connection.execute(
             "INSERT INTO messages (
                 id, conversation_id, role, content, status, input_origin_kind,
-                agent_run_json, ui_state_json, created_at, position
+                agent_run_json, created_at, position
              ) VALUES
-                ('source-user', 'source', 'user', 'question', 'sent', 'human', NULL, NULL, 10, 0),
+                ('source-user', 'source', 'user', 'question', 'sent', 'human', NULL, 10, 0),
                 ('source-assistant', 'source', 'assistant', 'answer', 'completed', NULL,
                  '{\"runId\":\"source-run\",\"status\":\"completed\",\"usage\":{\"totalTokens\":12}}',
-                 '{\"expanded\":true}', 11, 1),
-                ('source-active', 'source', 'user', 'active tail', 'sent', 'human', NULL, NULL, 12, 2)",
+                 11, 1),
+                ('source-active', 'source', 'user', 'active tail', 'sent', 'human', NULL, 12, 2)",
             [],
         ).unwrap();
+        connection
+            .execute(
+                "INSERT INTO chat_message_ui_states (message_id, ui_state_json)
+             VALUES ('source-assistant', '{\"expanded\":true}')",
+                [],
+            )
+            .unwrap();
         let archive = conversation_history_archive_repository::store_archive(
             &mut connection,
             &ConversationHistoryArchiveInput {
@@ -951,6 +958,24 @@ mod tests {
         assert!(target.messages.iter().all(|message| {
             message.agent_run_json.is_none() && message.ui_state_json.is_none()
         }));
+        let snapshot_message_id = target.messages[0].id.clone();
+        chat_repository::update_message_ui_state(
+            &connection,
+            "target",
+            &snapshot_message_id,
+            Some(r#"{"favorited":true}"#),
+        )
+        .unwrap();
+        chat_repository::save_conversation(&mut connection, target.clone()).unwrap();
+        assert_eq!(
+            chat_repository::get_conversation(&connection, "target")
+                .unwrap()
+                .unwrap()
+                .messages[0]
+                .ui_state_json
+                .as_deref(),
+            Some(r#"{"favorited":true}"#)
+        );
         let target_trace = conversation_trace_repository::get_trace_for_message(
             &connection,
             &target.messages[1].id,
@@ -1048,11 +1073,11 @@ mod tests {
                 "INSERT INTO messages (
                 id, conversation_id, role, content, status, input_origin_kind,
                 snapshot_source_conversation_id, snapshot_source_message_id,
-                snapshot_original_origin_kind, agent_run_json, ui_state_json,
+                snapshot_original_origin_kind, agent_run_json,
                 created_at, position
              ) VALUES (
                 'forged', 'target', 'user', 'forged', 'sent', 'snapshot',
-                'source', 'source-active', 'agent', NULL, NULL, 12, 0
+                'source', 'source-active', 'agent', NULL, 12, 0
              )",
                 [],
             )
@@ -1070,10 +1095,10 @@ mod tests {
             .execute(
                 "INSERT INTO messages (
                     id, conversation_id, role, content, status, input_origin_kind,
-                    agent_run_json, ui_state_json, created_at, position
+                    agent_run_json, created_at, position
                  ) VALUES (
                     'source-assistant-new', 'source', 'assistant', 'new answer', 'completed',
-                    NULL, NULL, NULL, 13, 3
+                    NULL, NULL, 13, 3
                  )",
                 [],
             )

@@ -1720,10 +1720,10 @@ mod tests {
                  ) VALUES ('conversation-1', NULL, NULL, 'test', 1, 1, NULL, NULL, NULL);
                  INSERT INTO messages (
                      id, conversation_id, role, content, status, agent_run_json,
-                     ui_state_json, created_at, position
+                     created_at, position
                  ) VALUES (
                      'assistant-1', 'conversation-1', 'assistant', '', 'pending',
-                     NULL, NULL, 1, 0
+                     NULL, 1, 0
                  );
                  INSERT INTO conversation_turn_traces (
                      assistant_message_id, conversation_id, run_id, schema_version,

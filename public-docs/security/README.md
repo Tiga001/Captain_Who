@@ -1,6 +1,6 @@
 ---
 title: 安全中心
-description: 了解 MyCopilot 当前实现的安全边界、数据流和安全使用方法。
+description: 了解 Captain Who 当前实现的安全边界、数据流和安全使用方法。
 status: current
 audience: user
 owner: security
@@ -9,7 +9,7 @@ last_verified: 2026-08-31
 
 # 安全中心
 
-MyCopilot 可以读取文件、运行命令、调用外部服务和操作受管浏览器。安全使用依赖应用边界，也依赖用户选择最小权限、审查扩展和保护本机账户。
+Captain Who 可以读取文件、运行命令、调用外部服务和操作受管浏览器。安全使用依赖应用边界，也依赖用户选择最小权限、审查扩展和保护本机账户。
 
 ## 文档
 

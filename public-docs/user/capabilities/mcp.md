@@ -9,7 +9,7 @@ last_verified: 2026-08-31
 
 # MCP
 
-MCP（Model Context Protocol）让 MyCopilot 连接外部工具服务。当前用户可配置的 MCP Server 仅支持在本机启动的 **stdio 进程**；HTTP、OAuth 和远程 MCP URL 尚未开放。
+MCP（Model Context Protocol）让 Captain Who 连接外部工具服务。当前用户可配置的 MCP Server 仅支持在本机启动的 **stdio 进程**；HTTP、OAuth 和远程 MCP URL 尚未开放。
 
 ## 使用前准备
 
@@ -40,7 +40,7 @@ MCP（Model Context Protocol）让 MyCopilot 连接外部工具服务。当前�
 1. 在列表中打开 Server 详情。
 2. 打开启用开关。
 3. 首次启用会显示启动信息核对，确认这会在本机启动指定进程。
-4. 授权后，MyCopilot 连接 Server 并发现工具。
+4. 授权后，Captain Who 连接 Server 并发现工具。
 5. 状态变为“已就绪”后，查看工具目录。
 
 如果之后修改可执行文件、参数或工作目录，旧连接会停止，启动授权会失效；下次启用时需要重新核对。可执行文件或相关代码被替换后，也可能要求重新授权。
@@ -66,7 +66,7 @@ MCP（Model Context Protocol）让 MyCopilot 连接外部工具服务。当前�
 
 只有完整且通过校验的工具目录才会交给 Agent。刷新目录不能修复 Server 自身的错误。
 
-停用会阻止新调用并关闭连接。删除只移除 MyCopilot 配置，不会卸载本地程序；活动调用的最终结果可能仍无法确认。
+停用会阻止新调用并关闭连接。删除只移除 Captain Who 配置，不会卸载本地程序；活动调用的最终结果可能仍无法确认。
 
 ## 受管 MCP 能力与外部 Server
 

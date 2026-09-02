@@ -9,7 +9,7 @@ last_verified: 2026-08-31
 
 # Office、PDF、表格、演示和图片
 
-MyCopilot 可以读取多种附件，并通过内置 Skill 和受管工具创建或处理 Word、Excel、PowerPoint、PDF 和图片。不同格式的“读取”“编辑”“预览”和“保存”能力并不相同。
+Captain Who 可以读取多种附件，并通过内置 Skill 和受管工具创建或处理 Word、Excel、PowerPoint、PDF 和图片。不同格式的“读取”“编辑”“预览”和“保存”能力并不相同。
 
 ## 支持范围概览
 

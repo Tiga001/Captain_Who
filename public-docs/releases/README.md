@@ -1,6 +1,6 @@
 ---
 title: 版本与发布
-description: 查看 MyCopilot 当前的构建目标、发布证据边界和升级注意事项。
+description: 查看 Captain Who 当前的构建目标、发布证据边界和升级注意事项。
 status: current
 audience: user
 owner: release-engineering

@@ -546,7 +546,6 @@ fn conversation_matches_previous_after_removing(
                     && current.created_at == previous.created_at
                     && current.status == previous.status
                     && current.agent_run_json == previous.agent_run_json
-                    && current.ui_state_json == previous.ui_state_json
             })
 }
 

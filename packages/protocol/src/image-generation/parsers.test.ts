@@ -22,15 +22,17 @@ const readyConfiguration = {
 } as const
 
 describe('image generation configuration protocol', () => {
-  it('accepts a complete secret-free configuration snapshot', () => {
+  it('accepts a complete editable configuration snapshot', () => {
     expect(
       parseImageGenerationGetConfigurationOutput({
         schemaVersion: IMAGE_GENERATION_CONFIGURATION_SCHEMA_VERSION,
-        configuration: readyConfiguration
+        configuration: readyConfiguration,
+        apiKey: 'existing-api-key'
       })
     ).toEqual({
       schemaVersion: IMAGE_GENERATION_CONFIGURATION_SCHEMA_VERSION,
-      configuration: readyConfiguration
+      configuration: readyConfiguration,
+      apiKey: 'existing-api-key'
     })
   })
 
@@ -47,7 +49,8 @@ describe('image generation configuration protocol', () => {
     expect(
       parseImageGenerationGetConfigurationOutput({
         schemaVersion: IMAGE_GENERATION_CONFIGURATION_SCHEMA_VERSION,
-        configuration
+        configuration,
+        apiKey: null
       }).configuration
     ).toEqual(configuration)
   })
@@ -62,13 +65,15 @@ describe('image generation configuration protocol', () => {
     expect(
       parseImageGenerationGetConfigurationOutput({
         schemaVersion: IMAGE_GENERATION_CONFIGURATION_SCHEMA_VERSION,
-        configuration
+        configuration,
+        apiKey: null
       }).configuration
     ).toEqual(configuration)
     expect(() =>
       parseImageGenerationGetConfigurationOutput({
         schemaVersion: IMAGE_GENERATION_CONFIGURATION_SCHEMA_VERSION,
-        configuration: { ...configuration, readiness: 'readyUnverified' }
+        configuration: { ...configuration, readiness: 'readyUnverified' },
+        apiKey: null
       })
     ).toThrow(/readiness.*credentialUnavailable/)
   })
@@ -80,7 +85,8 @@ describe('image generation configuration protocol', () => {
         configuration: {
           ...readyConfiguration,
           capabilities: { textToImage: false, imageToImage: true }
-        }
+        },
+        apiKey: 'existing-api-key'
       })
     ).toThrow(/textToImage.*literal true/)
   })
@@ -89,9 +95,31 @@ describe('image generation configuration protocol', () => {
     expect(() =>
       parseImageGenerationGetConfigurationOutput({
         schemaVersion: IMAGE_GENERATION_CONFIGURATION_SCHEMA_VERSION,
-        configuration: { ...readyConfiguration, endpointUrl: '', readiness: 'readyUnverified' }
+        configuration: { ...readyConfiguration, endpointUrl: '', readiness: 'readyUnverified' },
+        apiKey: 'existing-api-key'
       })
     ).toThrow(/readiness.*missingEndpoint/)
+  })
+
+  it('requires the editable API key to match the credential status', () => {
+    expect(() =>
+      parseImageGenerationGetConfigurationOutput({
+        schemaVersion: IMAGE_GENERATION_CONFIGURATION_SCHEMA_VERSION,
+        configuration: readyConfiguration,
+        apiKey: null
+      })
+    ).toThrow(/apiKey.*configured/)
+    expect(() =>
+      parseImageGenerationGetConfigurationOutput({
+        schemaVersion: IMAGE_GENERATION_CONFIGURATION_SCHEMA_VERSION,
+        configuration: {
+          ...readyConfiguration,
+          credentialStatus: 'missing',
+          readiness: 'missingCredential'
+        },
+        apiKey: 'unexpected-api-key'
+      })
+    ).toThrow(/apiKey.*configured/)
   })
 
   it('parses explicit credential mutations and never treats omission as keep', () => {
@@ -205,6 +233,20 @@ describe('image generation configuration protocol', () => {
       readiness: 'credentialUnavailable',
       credentialStatus: 'unavailable'
     })
+
+    expect(() =>
+      parseImageGenerationStatus({
+        schemaVersion: IMAGE_GENERATION_CONFIGURATION_SCHEMA_VERSION,
+        adapterId: readyConfiguration.adapterId,
+        configurationRevision: readyConfiguration.revision,
+        enabled: true,
+        readiness: 'readyUnverified',
+        credentialStatus: 'configured',
+        capabilities: readyConfiguration.capabilities,
+        defaults: readyConfiguration.defaults,
+        apiKey: 'must-remain-settings-only'
+      })
+    ).toThrow(/unexpected field apiKey/)
   })
 
   it('parses structured errors without accepting secret-shaped extra data', () => {

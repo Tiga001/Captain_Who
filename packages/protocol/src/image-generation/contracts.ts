@@ -1,4 +1,4 @@
-export const IMAGE_GENERATION_CONFIGURATION_SCHEMA_VERSION = 1 as const
+export const IMAGE_GENERATION_CONFIGURATION_SCHEMA_VERSION = 2 as const
 export const IMAGE_GENERATION_CONFIGURATION_ERROR_CODE = -32020 as const
 
 export const IMAGE_GENERATION_GET_CONFIGURATION_METHOD = 'imageGeneration.getConfiguration' as const
@@ -37,7 +37,7 @@ export interface ImageGenerationDefaults {
   watermark: boolean
 }
 
-/** Only secret-free availability state is observable; credential material is never returned. */
+/** Secret-free availability state used outside the explicit settings-edit response. */
 export type ImageGenerationCredentialStatus = 'missing' | 'configured' | 'unavailable'
 
 /**
@@ -69,6 +69,8 @@ export interface ImageGenerationConfiguration {
 export interface ImageGenerationGetConfigurationOutput {
   schemaVersion: typeof IMAGE_GENERATION_CONFIGURATION_SCHEMA_VERSION
   configuration: ImageGenerationConfiguration
+  /** Existing value exposed only to the user-initiated settings editor, matching other API fields. */
+  apiKey: string | null
 }
 
 /**

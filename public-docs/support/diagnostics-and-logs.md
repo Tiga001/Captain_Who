@@ -1,6 +1,6 @@
 ---
 title: 诊断信息与日志
-description: 安全收集 MyCopilot 问题所需的信息，并避免泄露敏感数据。
+description: 安全收集 Captain Who 问题所需的信息，并避免泄露敏感数据。
 status: current
 audience: user
 owner: support
@@ -13,7 +13,7 @@ last_verified: 2026-08-23
 
 ## 建议收集
 
-- MyCopilot 版本与安装包来源；
+- Captain Who 版本与安装包来源；
 - 操作系统版本和 CPU 架构；
 - 问题发生时间及所在时区；
 - 功能入口，例如模型、MCP、Skill、浏览器或 Scheduled；

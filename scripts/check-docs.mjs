@@ -82,6 +82,15 @@ const markdownFiles = [path.join(repositoryRoot, 'README.md'), ...documentationF
 const indexedTargets = new Set()
 const currentDocuments = []
 
+const rootReadme = path.join(repositoryRoot, 'README.md')
+const docsReadme = path.join(docsRoot, 'README.md')
+if (!readFileSync(rootReadme, 'utf8').includes('# Captain Who')) {
+  fail(rootReadme, 'missing canonical product heading “Captain Who”')
+}
+if (!readFileSync(docsReadme, 'utf8').includes('# Captain Who 开发文档')) {
+  fail(docsReadme, 'missing canonical development documentation heading “Captain Who 开发文档”')
+}
+
 for (const file of documentationFiles) {
   const basename = path.basename(file)
   if (basename !== 'README.md' && !/^[a-z0-9]+(?:-[a-z0-9]+)*\.md$/.test(basename)) {
@@ -99,6 +108,10 @@ for (const file of documentationFiles) {
 
 for (const file of markdownFiles) {
   const markdown = stripFencedCode(readFileSync(file, 'utf8'))
+  const prose = markdown.replace(/`[^`\n]+`/g, '')
+  if (/\bmy(?:\s+)?copilot(?:\s+next)?\b/i.test(prose)) {
+    fail(file, 'obsolete product name in prose; use “Captain Who”')
+  }
   for (const match of markdown.matchAll(/\]\(([^)]+)\)/g)) {
     const target = resolveMarkdownTarget(file, match[1])
     if (target && !existsSync(target)) fail(file, `local link does not exist: ${match[1]}`)

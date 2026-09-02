@@ -48,7 +48,7 @@ pnpm verify:artifact-runtime
 
 ## `development_storage_schema_reset_required`
 
-当前开发策略只接受规范 schema 及 catalog fingerprint，不对旧库原地迁移。完全退出 MyCopilot 后执行：
+当前开发策略只接受规范 schema 及 catalog fingerprint，不对旧库原地迁移。完全退出 Captain Who 后执行：
 
 ```bash
 pnpm storage:reset-dev

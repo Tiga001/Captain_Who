@@ -1188,7 +1188,7 @@ fn public_storage_canary_hits(database: &Path, canary: &str) -> u64 {
     [
         ("messages", "content"),
         ("messages", "agent_run_json"),
-        ("messages", "ui_state_json"),
+        ("chat_message_ui_states", "ui_state_json"),
         ("conversation_turn_traces", "trace_json"),
         ("conversation_model_context_logs", "item_json"),
         ("conversation_history_blobs", "content"),

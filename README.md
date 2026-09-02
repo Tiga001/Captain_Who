@@ -1,6 +1,6 @@
-# MyCopilot Next
+# Captain Who
 
-MyCopilot 是一个本地优先的桌面 AI 工作助手。界面由 Electron、React 和 TypeScript 构建，Agent、工具执行与本地存储由 Rust Core 负责。
+Captain Who 是一个本地优先的桌面 AI 工作助手。界面由 Electron、React 和 TypeScript 构建，Agent、工具执行与本地存储由 Rust Core 负责。
 
 目前已实现：
 
@@ -120,7 +120,7 @@ macOS、Windows 或 Linux 的目录。
 直接运行独立 `core-server` 时仍可通过 `MYCOPILOT_STORAGE_DB` 指定数据库路径；该变量是
 测试和独立诊断接口，Electron 启动的正式应用会使用 Host 传入的数据根覆盖它。
 
-开发期需要重建 SQLite 基线时，先完全退出 MyCopilot，再运行非破坏性预检：
+开发期需要重建 SQLite 基线时，先完全退出 Captain Who，再运行非破坏性预检：
 
 ```bash
 pnpm storage:reset-dev
@@ -154,7 +154,7 @@ Usage、审批、Continuation、Compaction、Fork 等状态不会恢复。
   私有文件凭据才位于数据根内。备份或卸载时应分别处理系统凭据。
 - 模型请求会发送到你配置的 API URL；启用联网搜索后，查询或目标 URL 会发送给 Tavily。
 - 内置浏览器默认拒绝网页申请摄像头、麦克风、定位、通知等系统权限。
-- “移除项目”会永久删除 MyCopilot 中该项目的本地对话、消息与附件，但不会修改项目目录中的文件。
+- “移除项目”会永久删除 Captain Who 中该项目的本地对话、消息与附件，但不会修改项目目录中的文件。
 - 费用只是按模型设置中的每 1k token 单价计算的本地估算，不代表服务商账单，也不区分币种。
 
 ## 文档与 Artifact 支持

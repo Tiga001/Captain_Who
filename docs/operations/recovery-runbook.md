@@ -15,7 +15,7 @@ Playwright 故障。优先原则是保护持久事实和外部副作用，不通
 | 现象                                                                 | 首要检查                                                                              | 不要先做                                      |
 | -------------------------------------------------------------------- | ------------------------------------------------------------------------------------- | --------------------------------------------- |
 | Core Server 无法启动，含 `development_storage_schema_reset_required` | schema version/fingerprint、数据根、完整错误码                                        | 手工改 `PRAGMA user_version` 或删表           |
-| 提示 exact DB 已被占用                                               | 是否有 MyCopilot/Core Server 进程仍运行；实例锁路径                                   | 删除 lock file 后继续运行两个 Core Server     |
+| 提示 exact DB 已被占用                                               | 是否有 Captain Who/Core Server 进程仍运行；实例锁路径                                 | 删除 lock file 后继续运行两个 Core Server     |
 | 子 Agent 长时间 queued/claimed                                       | Core Server 是否重启、Dispatcher 是否运行、lease deadline、数据库可写                 | 重复 spawn 同一任务或直接把 Wake 改 completed |
 | 子 Agent 显示 running，但进程已崩溃                                  | trace/checkpoint/pending action/lease                                                 | 盲重放可能已有外部副作用的 Turn               |
 | 子 Agent 等待审批                                                    | 根 Agent Approval projection、原 pending action、expiry                               | 从子 Agent 页面直接写 decision                |
@@ -49,7 +49,7 @@ crates/core/src/storage/canonical_schema.sql
 
 ### 预检
 
-完全退出 MyCopilot 后运行：
+完全退出 Captain Who 后运行：
 
 ```bash
 pnpm storage:reset-dev

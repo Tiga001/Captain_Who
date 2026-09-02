@@ -716,8 +716,8 @@ mod tests {
             "
             INSERT OR IGNORE INTO messages (
                 id, conversation_id, role, content, status,
-                agent_run_json, ui_state_json, created_at, position
-            ) VALUES (?1, ?2, 'assistant', 'done', 'sent', NULL, NULL, ?3, 0)
+                agent_run_json, created_at, position
+            ) VALUES (?1, ?2, 'assistant', 'done', 'sent', NULL, ?3, 0)
             ",
             params![record.message_id, record.conversation_id, record.created_at],
         )?;

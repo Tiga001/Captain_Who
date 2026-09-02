@@ -513,10 +513,10 @@ mod tests {
                  ) VALUES ('conversation-1', NULL, NULL, 'title', 1, 1, NULL, NULL, NULL);
                  INSERT INTO messages (
                     id, conversation_id, role, content, status, agent_run_json,
-                    ui_state_json, created_at, position
+                    created_at, position
                  ) VALUES (
                     'assistant-1', 'conversation-1', 'assistant', '', 'pending',
-                    NULL, NULL, 2, 0
+                    NULL, 2, 0
                  );
                  INSERT INTO attachments (
                     id, conversation_id, message_id, project_id, kind, original_name,

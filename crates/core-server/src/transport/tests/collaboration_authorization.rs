@@ -257,8 +257,7 @@ fn ordinary_user_rpc_cannot_read_or_mutate_a_child_conversation() {
                     "id": "forged-user",
                     "content": "forged",
                     "status": "sent",
-                    "agentRunJson": null,
-                    "uiStateJson": null
+                    "agentRunJson": null
                 }
             }),
         ),

@@ -243,7 +243,6 @@ struct StoredImmutableMessage {
     content: String,
     status: Option<String>,
     agent_run_json: Option<String>,
-    ui_state_json: Option<String>,
     created_at: i64,
 }
 
@@ -254,7 +253,7 @@ fn immutable_graph_message(
 ) -> rusqlite::Result<Option<StoredImmutableMessage>> {
     connection
         .query_row(
-            "SELECT role, content, status, agent_run_json, ui_state_json, created_at
+            "SELECT role, content, status, agent_run_json, created_at
              FROM messages
              WHERE conversation_id = ?1 AND id = ?2
                AND input_origin_kind IN ('agent', 'snapshot')",
@@ -265,8 +264,7 @@ fn immutable_graph_message(
                     content: row.get(1)?,
                     status: row.get(2)?,
                     agent_run_json: row.get(3)?,
-                    ui_state_json: row.get(4)?,
-                    created_at: row.get(5)?,
+                    created_at: row.get(4)?,
                 })
             },
         )
@@ -603,6 +601,7 @@ pub(crate) fn save_conversation_in_connection(
         {
             return Err(rusqlite::Error::InvalidQuery);
         }
+        let is_new_message = existing_identity.is_none();
         if let Some(existing) = immutable_graph_message(connection, &conversation.id, &message.id)?
         {
             if existing.role != message.role
@@ -610,7 +609,6 @@ pub(crate) fn save_conversation_in_connection(
                 || existing.status != message.status
                 || existing.created_at != message.created_at
                 || existing.agent_run_json != message.agent_run_json
-                || existing.ui_state_json != message.ui_state_json
             {
                 return Err(rusqlite::Error::InvalidQuery);
             }
@@ -637,17 +635,15 @@ pub(crate) fn save_conversation_in_connection(
                 content,
                 status,
                 agent_run_json,
-                ui_state_json,
                 created_at,
                 position
             )
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
             ON CONFLICT(id) DO UPDATE SET
                 role = excluded.role,
                 content = excluded.content,
                 status = excluded.status,
                 agent_run_json = excluded.agent_run_json,
-                ui_state_json = excluded.ui_state_json,
                 created_at = excluded.created_at,
                 position = excluded.position
             WHERE messages.conversation_id = excluded.conversation_id
@@ -659,13 +655,20 @@ pub(crate) fn save_conversation_in_connection(
                 &message.content,
                 &message.status,
                 &message.agent_run_json,
-                &message.ui_state_json,
                 message.created_at,
                 position
             ],
         )?;
         if affected != 1 {
             return Err(rusqlite::Error::InvalidQuery);
+        }
+        if is_new_message {
+            update_message_ui_state(
+                connection,
+                &conversation.id,
+                &message.id,
+                message.ui_state_json.as_deref(),
+            )?;
         }
         if message.role != "assistant" {
             connection.execute(
@@ -822,7 +825,6 @@ pub fn upsert_messages(
                 || existing.status != message.status
                 || existing.created_at != message.created_at
                 || existing.agent_run_json != message.agent_run_json
-                || existing.ui_state_json != message.ui_state_json
             {
                 return Err(rusqlite::Error::InvalidQuery);
             }
@@ -835,6 +837,7 @@ pub fn upsert_messages(
                 |row| row.get::<_, i64>(0),
             )
             .optional()?;
+        let is_new_message = existing_position.is_none();
         let position = if agent_bound {
             existing_position.unwrap_or_else(|| {
                 let position = next_agent_position;
@@ -853,17 +856,15 @@ pub fn upsert_messages(
                 content,
                 status,
                 agent_run_json,
-                ui_state_json,
                 created_at,
                 position
             )
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
             ON CONFLICT(id) DO UPDATE SET
                 role = excluded.role,
                 content = excluded.content,
                 status = excluded.status,
                 agent_run_json = excluded.agent_run_json,
-                ui_state_json = excluded.ui_state_json,
                 created_at = excluded.created_at,
                 position = excluded.position
             ",
@@ -874,11 +875,18 @@ pub fn upsert_messages(
                 &message.content,
                 &message.status,
                 &message.agent_run_json,
-                &message.ui_state_json,
                 message.created_at,
                 position
             ],
         )?;
+        if is_new_message {
+            update_message_ui_state(
+                &transaction,
+                conversation_id,
+                &message.id,
+                message.ui_state_json.as_deref(),
+            )?;
+        }
     }
 
     transaction.commit()
@@ -1461,15 +1469,13 @@ pub fn update_message_state(
         SET
             content = ?1,
             status = ?2,
-            agent_run_json = ?3,
-            ui_state_json = ?4
-        WHERE conversation_id = ?5 AND id = ?6
+            agent_run_json = ?3
+        WHERE conversation_id = ?4 AND id = ?5
         ",
         params![
             &content,
             &status,
             &agent_run_json,
-            &message.ui_state_json,
             conversation_id,
             &message.id
         ],
@@ -1483,14 +1489,29 @@ pub fn update_message_ui_state(
     message_id: &str,
     ui_state_json: Option<&str>,
 ) -> rusqlite::Result<()> {
-    connection.execute(
-        "
-        UPDATE messages
-        SET ui_state_json = ?1
-        WHERE conversation_id = ?2 AND id = ?3
-        ",
-        params![ui_state_json, conversation_id, message_id],
-    )?;
+    match ui_state_json {
+        Some(ui_state_json) => {
+            connection.execute(
+                "INSERT INTO chat_message_ui_states (message_id, ui_state_json)
+                 SELECT id, ?1
+                 FROM messages
+                 WHERE conversation_id = ?2 AND id = ?3
+                 ON CONFLICT(message_id) DO UPDATE SET
+                     ui_state_json = excluded.ui_state_json",
+                params![ui_state_json, conversation_id, message_id],
+            )?;
+        }
+        None => {
+            connection.execute(
+                "DELETE FROM chat_message_ui_states
+                 WHERE message_id IN (
+                     SELECT id FROM messages
+                     WHERE conversation_id = ?1 AND id = ?2
+                 )",
+                params![conversation_id, message_id],
+            )?;
+        }
+    }
     Ok(())
 }
 
@@ -1507,7 +1528,7 @@ fn list_messages(
             message.created_at,
             message.status,
             message.agent_run_json,
-            message.ui_state_json,
+            ui_state.ui_state_json,
             usage.run_id,
             usage.input_tokens,
             usage.output_tokens,
@@ -1523,6 +1544,8 @@ fn list_messages(
         LEFT JOIN agent_usage_records AS usage
           ON usage.conversation_id = message.conversation_id
          AND usage.message_id = message.id
+        LEFT JOIN chat_message_ui_states AS ui_state
+          ON ui_state.message_id = message.id
         LEFT JOIN conversation_turn_traces AS trace
           ON trace.conversation_id = message.conversation_id
          AND trace.assistant_message_id = message.id
@@ -1581,10 +1604,19 @@ fn list_persisted_messages(
     conversation_id: &str,
 ) -> rusqlite::Result<Vec<ChatMessageRecord>> {
     let mut statement = connection.prepare(
-        "SELECT id, role, content, created_at, status, agent_run_json, ui_state_json
-         FROM messages
-         WHERE conversation_id = ?1
-         ORDER BY position ASC, created_at ASC",
+        "SELECT
+             message.id,
+             message.role,
+             message.content,
+             message.created_at,
+             message.status,
+             message.agent_run_json,
+             ui_state.ui_state_json
+         FROM messages AS message
+         LEFT JOIN chat_message_ui_states AS ui_state
+           ON ui_state.message_id = message.id
+         WHERE message.conversation_id = ?1
+         ORDER BY message.position ASC, message.created_at ASC",
     )?;
 
     let messages = statement

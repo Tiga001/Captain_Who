@@ -799,7 +799,6 @@ fn reload_replaces_live_timeline_projections_with_one_durable_ordered_trace() {
                 content: assistant.content.clone(),
                 status: assistant.status.clone(),
                 agent_run_json: assistant.agent_run_json.clone(),
-                ui_state_json: assistant.ui_state_json.clone(),
             },
         )
         .unwrap();

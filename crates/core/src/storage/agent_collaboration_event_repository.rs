@@ -1577,10 +1577,10 @@ mod tests {
         connection
             .execute(
                 "INSERT INTO messages (
-                    id, conversation_id, role, content, status, agent_run_json, ui_state_json,
+                    id, conversation_id, role, content, status, agent_run_json,
                     created_at, position
                  ) VALUES ('assistant-1', 'conversation-child', 'assistant', '', 'pending',
-                           NULL, NULL, 7, 0)",
+                           NULL, 7, 0)",
                 [],
             )
             .unwrap();

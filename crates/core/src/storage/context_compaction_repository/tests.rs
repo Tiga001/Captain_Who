@@ -31,8 +31,8 @@ fn setup() -> Connection {
             .execute(
                 "INSERT INTO messages (
                         id, conversation_id, role, content, status, agent_run_json,
-                        ui_state_json, created_at, position
-                     ) VALUES (?1, 'conversation-1', ?2, ?3, ?4, NULL, NULL, ?5, ?5)",
+                        created_at, position
+                     ) VALUES (?1, 'conversation-1', ?2, ?3, ?4, NULL, ?5, ?5)",
                 params![id, role, content, status, position],
             )
             .unwrap();
@@ -713,10 +713,10 @@ fn multi_level_summary_rollback_stops_at_released_provider_boundary() {
         .execute(
             "INSERT INTO messages (
                 id, conversation_id, role, content, status, agent_run_json,
-                ui_state_json, created_at, position
+                created_at, position
              ) VALUES (
                 'user-3', 'conversation-1', 'user', 'later request', 'sent',
-                NULL, NULL, 5, 4
+                NULL, 5, 4
              )",
             [],
         )
@@ -772,10 +772,10 @@ fn trace_cursor_rebase_keeps_later_message_anchored_diff_in_the_new_epoch_tail()
         .execute(
             "INSERT INTO messages (
                 id, conversation_id, role, content, status, agent_run_json,
-                ui_state_json, created_at, position
+                created_at, position
              ) VALUES (
                 'user-3', 'conversation-1', 'user', 'future request', 'sent',
-                NULL, NULL, 4, 4
+                NULL, 4, 4
              )",
             [],
         )
@@ -998,10 +998,10 @@ fn command_session_lifecycle_stays_in_audit_but_out_of_the_compaction_journal() 
         .execute(
             "INSERT INTO messages (
                 id, conversation_id, role, content, status, agent_run_json,
-                ui_state_json, created_at, position
+                created_at, position
              ) VALUES (
                 'assistant-command', 'conversation-1', 'assistant',
-                'The managed command was handed off.', 'sent', NULL, NULL, 5, 5
+                'The managed command was handed off.', 'sent', NULL, 5, 5
              )",
             [],
         )

@@ -7,6 +7,7 @@ import type {
 import {
   IMAGE_GENERATION_ARTIFACT_ERROR_CODE,
   IMAGE_GENERATION_CONFIGURATION_ERROR_CODE,
+  IMAGE_GENERATION_CONFIGURATION_SCHEMA_VERSION,
   IMAGE_GENERATION_GET_CONFIGURATION_METHOD,
   IMAGE_GENERATION_GET_STATUS_METHOD,
   IMAGE_GENERATION_READ_ARTIFACT_METHOD,
@@ -38,7 +39,7 @@ const configuration = {
 } satisfies ImageGenerationConfiguration
 
 const updateInput = {
-  schemaVersion: 1,
+  schemaVersion: IMAGE_GENERATION_CONFIGURATION_SCHEMA_VERSION,
   expectedRevision: configuration.revision,
   adapterId: 'smartmlSeedream',
   endpointUrl: configuration.endpointUrl,
@@ -49,7 +50,7 @@ const updateInput = {
 } satisfies ImageGenerationUpdateConfigurationInput
 
 const setEnabledInput = {
-  schemaVersion: 1,
+  schemaVersion: IMAGE_GENERATION_CONFIGURATION_SCHEMA_VERSION,
   expectedRevision: configuration.revision,
   enabled: false
 } satisfies ImageGenerationSetEnabledInput
@@ -74,8 +75,16 @@ describe('CoreServer image generation configuration client', () => {
   beforeEach(() => rpcRequest.mockReset())
 
   it('uses stable methods and validates every successful response', async () => {
-    const getOutput = { schemaVersion: 1, configuration }
-    const updateOutput = { schemaVersion: 1, outcome: 'alreadyCurrent', configuration } as const
+    const getOutput = {
+      schemaVersion: IMAGE_GENERATION_CONFIGURATION_SCHEMA_VERSION,
+      configuration,
+      apiKey: 'existing-image-api-key'
+    }
+    const updateOutput = {
+      schemaVersion: IMAGE_GENERATION_CONFIGURATION_SCHEMA_VERSION,
+      outcome: 'alreadyCurrent',
+      configuration
+    } as const
     const disabledConfiguration = {
       ...configuration,
       enabled: false,
@@ -83,12 +92,12 @@ describe('CoreServer image generation configuration client', () => {
       revision: 'image-generation:v1:2'
     }
     const setEnabledOutput = {
-      schemaVersion: 1,
+      schemaVersion: IMAGE_GENERATION_CONFIGURATION_SCHEMA_VERSION,
       outcome: 'updated',
       configuration: disabledConfiguration
     } as const
     const status = {
-      schemaVersion: 1,
+      schemaVersion: IMAGE_GENERATION_CONFIGURATION_SCHEMA_VERSION,
       adapterId: configuration.adapterId,
       configurationRevision: configuration.revision,
       enabled: true,
@@ -135,8 +144,9 @@ describe('CoreServer image generation configuration client', () => {
 
   it('rejects malformed successful responses', async () => {
     rpcRequest.mockResolvedValue({
-      schemaVersion: 1,
-      configuration: { ...configuration, credential: 'must-never-cross-the-boundary' }
+      schemaVersion: IMAGE_GENERATION_CONFIGURATION_SCHEMA_VERSION,
+      configuration: { ...configuration, credential: 'must-never-cross-the-boundary' },
+      apiKey: 'existing-image-api-key'
     })
 
     await expect(new CoreServer().getImageGenerationConfiguration()).rejects.toThrow(

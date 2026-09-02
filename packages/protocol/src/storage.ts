@@ -329,7 +329,6 @@ export interface StorageChatMessageStateRecord {
   content: string
   status?: 'pending' | 'sent' | 'error' | null
   agentRunJson?: string | null
-  uiStateJson?: string | null
 }
 
 export interface StorageChatMessageUiStateRecord {

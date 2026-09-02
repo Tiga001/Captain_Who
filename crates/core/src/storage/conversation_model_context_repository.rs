@@ -311,9 +311,9 @@ mod tests {
                     ('conversation-2', NULL, NULL, 'Two', 1, 1, NULL, NULL, NULL);
                  INSERT INTO messages (
                     id, conversation_id, role, content, status, agent_run_json,
-                    ui_state_json, created_at, position
+                    created_at, position
                  ) VALUES
-                    ('assistant-1', 'conversation-1', 'assistant', '', 'pending', NULL, NULL, 2, 0);",
+                    ('assistant-1', 'conversation-1', 'assistant', '', 'pending', NULL, 2, 0);",
             )
             .unwrap();
         let trace = ConversationTurnTrace {

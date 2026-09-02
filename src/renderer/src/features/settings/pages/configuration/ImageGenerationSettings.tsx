@@ -6,8 +6,6 @@ import type { TranslationKey } from '../../../../config/frontendTranslations'
 import { useImageGenerationConfiguration } from '../../../imageGeneration/configuration/useImageGenerationConfiguration'
 import { SecretInput } from './SecretInput'
 
-const STORED_SECRET_PLACEHOLDER = '\u2022'.repeat(18)
-
 const ERROR_KEY: Partial<Record<ImageGenerationConfigurationErrorCode, TranslationKey>> = {
   revisionConflict: 'configuration.imageGeneration.error.revisionConflict',
   unsupportedAdapter: 'configuration.imageGeneration.error.unsupportedAdapter',
@@ -181,11 +179,6 @@ export function ImageGenerationSettings() {
                 ariaLabel={t('configuration.imageGeneration.apiKey')}
                 disabled={disabled}
                 onChange={workflow.setApiKeyDraft}
-                placeholder={
-                  configuration.credentialStatus === 'configured'
-                    ? STORED_SECRET_PLACEHOLDER
-                    : undefined
-                }
                 value={apiKeyDraft}
               />
             </span>

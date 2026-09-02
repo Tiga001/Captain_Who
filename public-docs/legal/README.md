@@ -1,6 +1,6 @@
 ---
 title: 第三方声明
-description: 查看 MyCopilot 当前可核实的第三方软件与许可证声明。
+description: 查看 Captain Who 当前可核实的第三方软件与许可证声明。
 status: current
 audience: user
 owner: legal

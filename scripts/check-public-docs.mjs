@@ -188,6 +188,15 @@ for (const forbidden of forbiddenPlaceholderDocuments) {
 const documentationFiles = walkMarkdown(publicDocsRoot).sort()
 const indexedTargets = new Set()
 
+const publicDocsReadme = path.join(publicDocsRoot, 'README.md')
+const publicDocsIndex = readFileSync(publicDocsReadme, 'utf8')
+if (
+  !publicDocsIndex.includes('title: Captain Who 文档') ||
+  !publicDocsIndex.includes('# Captain Who 文档')
+) {
+  fail(publicDocsReadme, 'missing canonical public documentation title “Captain Who 文档”')
+}
+
 for (const file of documentationFiles) {
   const basename = path.basename(file)
   if (basename !== 'README.md' && !/^[a-z0-9]+(?:-[a-z0-9]+)*\.md$/.test(basename)) {
@@ -197,6 +206,10 @@ for (const file of documentationFiles) {
   const markdown = readFileSync(file, 'utf8')
   parseFrontMatter(file, markdown)
   const withoutFences = stripFencedCode(markdown)
+  const prose = withoutFences.replace(/`[^`\n]+`/g, '')
+  if (/\bmy(?:\s+)?copilot(?:\s+next)?\b/i.test(prose)) {
+    fail(file, 'obsolete product name in prose; use “Captain Who”')
+  }
   const h1Count = (withoutFences.match(/^# /gm) ?? []).length
   if (h1Count !== 1) fail(file, `expected exactly one H1 heading, found ${h1Count}`)
 

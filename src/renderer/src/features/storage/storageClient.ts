@@ -517,8 +517,7 @@ function mapMessageStateToStorage(message: ChatMessage): StorageChatMessageState
     id: message.id,
     content: message.content,
     status: message.status ?? null,
-    agentRunJson: stringifyAgentRun(message.agentRun),
-    uiStateJson: stringifyJson(message.uiState)
+    agentRunJson: stringifyAgentRun(message.agentRun)
   }
 }
 

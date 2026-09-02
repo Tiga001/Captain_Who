@@ -1126,8 +1126,8 @@ mod tests {
             .execute(
                 "INSERT INTO messages (
                     id, conversation_id, role, content, status, agent_run_json,
-                    ui_state_json, created_at, position
-                 ) VALUES (?1, ?2, 'assistant', '', 'sent', NULL, NULL, 1, 0)",
+                    created_at, position
+                 ) VALUES (?1, ?2, 'assistant', '', 'sent', NULL, 1, 0)",
                 params![message_id, conversation_id],
             )
             .unwrap();

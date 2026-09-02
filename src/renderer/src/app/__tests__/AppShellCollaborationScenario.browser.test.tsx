@@ -54,6 +54,11 @@ const scenarioState = vi.hoisted<CollaborationScenarioState>(() => ({
   resyncListeners: new Set()
 }))
 
+const storagePersistenceSpies = vi.hoisted(() => ({
+  saveChatMessageState: vi.fn(),
+  saveChatMessageUiState: vi.fn()
+}))
+
 vi.mock('../../config/FrontendConfigProvider', () => {
   const t = (key: keyof typeof enUSTranslations) => enUSTranslations[key]
   const config = { language: 'en-US', t }
@@ -281,8 +286,8 @@ vi.mock('../../features/storage/storageClient', async (importOriginal) => {
       showContextWindowUsage: false,
       showTokenUsageDetails: true
     })),
-    saveChatMessageState: vi.fn(),
-    saveChatMessageUiState: vi.fn(),
+    saveChatMessageState: storagePersistenceSpies.saveChatMessageState,
+    saveChatMessageUiState: storagePersistenceSpies.saveChatMessageUiState,
     saveComposerDraft: vi.fn(),
     saveComposerDraftMessage: vi.fn().mockResolvedValue(true),
     saveConversationMeta: vi.fn(),
@@ -421,6 +426,8 @@ function resetScenario(): void {
   scenarioState.observerEventListeners.clear()
   scenarioState.observerLoadRequests.length = 0
   scenarioState.resyncListeners.clear()
+  storagePersistenceSpies.saveChatMessageState.mockClear()
+  storagePersistenceSpies.saveChatMessageUiState.mockClear()
   localStorage.clear()
   sessionStorage.clear()
 }
@@ -508,6 +515,33 @@ describe('AppShell deterministic collaboration scenario', () => {
     if (!approveButton) throw new Error('Missing approve button')
     await page.elementLocator(approveButton).click()
     await expect.poll(() => scenarioState.decisionInputs.length).toBe(1)
+
+    storagePersistenceSpies.saveChatMessageState.mockClear()
+    storagePersistenceSpies.saveChatMessageUiState.mockClear()
+    await screen.getByRole('button', { name: enUSTranslations['chat.favoriteMessage'] }).click()
+    await expect
+      .element(screen.getByRole('button', { name: enUSTranslations['chat.unfavoriteMessage'] }))
+      .toHaveAttribute('aria-pressed', 'true')
+    await expect
+      .poll(() => storagePersistenceSpies.saveChatMessageUiState.mock.calls)
+      .toEqual([['conversation-root', 'user-conversation-root', { favorited: true }]])
+    expect(storagePersistenceSpies.saveChatMessageState).not.toHaveBeenCalled()
+
+    const timelineDisclosure = screen.container.querySelector<HTMLButtonElement>(
+      '.agent-run__elapsed-button'
+    )
+    if (!timelineDisclosure) throw new Error('Missing root timeline disclosure')
+    await page.elementLocator(timelineDisclosure).click()
+    await expect
+      .element(page.elementLocator(timelineDisclosure))
+      .toHaveAttribute('aria-expanded', 'false')
+    await expect
+      .poll(() => storagePersistenceSpies.saveChatMessageUiState.mock.calls)
+      .toEqual([
+        ['conversation-root', 'user-conversation-root', { favorited: true }],
+        ['conversation-root', 'assistant-conversation-root', { timelineCollapsed: true }]
+      ])
+    expect(storagePersistenceSpies.saveChatMessageState).not.toHaveBeenCalled()
 
     // A fresh root projection (the same restart/remount path used below) exposes the second
     // pending action. The production list deliberately renders one actionable approval at a time.

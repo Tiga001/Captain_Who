@@ -9,7 +9,7 @@ last_verified: 2026-08-31
 
 # 连接模型 Provider
 
-MyCopilot 不附带可直接使用的模型账户，新安装的模型目录也为空。你需要提供自己有权使用的 API URL、Token 和模型标识，并显式新增、启用模型；相关费用、数据处理和可用性由所选服务商决定。
+Captain Who 不附带可直接使用的模型账户，新安装的模型目录也为空。你需要提供自己有权使用的 API URL、Token 和模型标识，并显式新增、启用模型；相关费用、数据处理和可用性由所选服务商决定。
 
 ## 当前适配类型
 
@@ -19,7 +19,7 @@ MyCopilot 不附带可直接使用的模型账户，新安装的模型目录也�
 | Generic Anthropic Messages | Anthropic-compatible 的 Messages 与 Tool Use 接口 |
 | DeepSeek V4 Chat           | 需要保留特定推理续接语义的 DeepSeek V4 Chat       |
 
-“兼容”指协议形状满足相应适配器要求，不代表 MyCopilot 对所有网关、代理或服务商版本作认证。
+“兼容”指协议形状满足相应适配器要求，不代表 Captain Who 对所有网关、代理或服务商版本作认证。
 
 ## 配置全局连接
 

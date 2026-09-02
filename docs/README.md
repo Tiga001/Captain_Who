@@ -5,9 +5,9 @@ owner: engineering
 last_verified: 2026-08-31
 ---
 
-# MyCopilot 开发文档
+# Captain Who 开发文档
 
-本目录是 MyCopilot 工程设计、开发流程和发布约束的权威文档入口。根目录
+本目录是 Captain Who 工程设计、开发流程和发布约束的权威文档入口。根目录
 [`README.md`](../README.md) 只负责项目简介和最短启动路径；实现细节以本目录及其链接的代码、契约
 fixture 和测试为准。
 

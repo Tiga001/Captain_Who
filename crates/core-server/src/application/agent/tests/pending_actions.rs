@@ -1661,8 +1661,8 @@ fn seed_tampered_provider_continuation(
         .execute(
             "INSERT INTO messages (
                 id, conversation_id, role, content, status, agent_run_json,
-                ui_state_json, created_at, position
-             ) VALUES (?1, ?2, 'assistant', 'visible', 'pending', NULL, NULL, 1, 0)",
+                created_at, position
+             ) VALUES (?1, ?2, 'assistant', 'visible', 'pending', NULL, 1, 0)",
             rusqlite::params![assistant_message_id, conversation_id],
         )
         .unwrap();

@@ -255,6 +255,40 @@ fn unsettled_assistant_state_cannot_enter_a_fork_snapshot() {
 }
 
 #[test]
+fn ordinary_fork_copies_message_ui_state_overlay() {
+    let mut connection = Connection::open_in_memory().unwrap();
+    migrations::run_migrations(&connection).unwrap();
+    let mut source = source_conversation();
+    source.messages[1].ui_state_json = Some(r#"{"favorited":true}"#.to_string());
+    chat_repository::save_conversation(&mut connection, source.clone()).unwrap();
+
+    let plan = build_assistant_reply_fork_plan(
+        &connection,
+        "fork-ui-state-overlay",
+        &source.id,
+        "assistant-a",
+        20,
+    )
+    .unwrap();
+    let target_message_id = plan.message_id_map["assistant-a"].clone();
+    commit_fork_plan(&mut connection, &plan).unwrap();
+
+    let target = chat_repository::get_conversation(&connection, &plan.target.id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        target
+            .messages
+            .iter()
+            .find(|message| message.id == target_message_id)
+            .unwrap()
+            .ui_state_json
+            .as_deref(),
+        Some(r#"{"favorited":true}"#)
+    );
+}
+
+#[test]
 fn fork_with_released_provider_history_is_marked_for_safe_adaptation() {
     let mut connection = Connection::open_in_memory().unwrap();
     migrations::run_migrations(&connection).unwrap();

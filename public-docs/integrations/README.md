@@ -1,6 +1,6 @@
 ---
 title: 扩展与集成
-description: 了解 MyCopilot 当前支持的模型、Skill 与 MCP 扩展方式。
+description: 了解 Captain Who 当前支持的模型、Skill 与 MCP 扩展方式。
 status: current
 audience: user
 owner: product
@@ -9,7 +9,7 @@ last_verified: 2026-08-23
 
 # 扩展与集成
 
-MyCopilot 可以通过模型 Provider、Skill 和 MCP Server 扩展能力。这三种方式解决的问题不同：
+Captain Who 可以通过模型 Provider、Skill 和 MCP Server 扩展能力。这三种方式解决的问题不同：
 
 | 方式          | 适合做什么                | 是否会运行外部程序                         |
 | ------------- | ------------------------- | ------------------------------------------ |
@@ -29,4 +29,4 @@ MyCopilot 可以通过模型 Provider、Skill 和 MCP Server 扩展能力。这�
 
 ## 安全提醒
 
-第三方 Skill、MCP Server 和模型服务均不由 MyCopilot 控制。安装或连接前应核对来源；不要把 Token、Cookie 或密码写入 Skill 文件、MCP 启动参数、问题截图或公开日志。扩展的名称和说明也不能替代权限与审批。
+第三方 Skill、MCP Server 和模型服务均不由 Captain Who 控制。安装或连接前应核对来源；不要把 Token、Cookie 或密码写入 Skill 文件、MCP 启动参数、问题截图或公开日志。扩展的名称和说明也不能替代权限与审批。

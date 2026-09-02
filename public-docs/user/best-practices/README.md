@@ -1,6 +1,6 @@
 ---
 title: 最佳实践
-description: 用更清楚、更安全、更易验证的方法组织 MyCopilot 任务。
+description: 用更清楚、更安全、更易验证的方法组织 Captain Who 任务。
 status: current
 audience: user
 owner: product-docs

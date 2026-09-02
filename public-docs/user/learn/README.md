@@ -9,7 +9,7 @@ last_verified: 2026-08-23
 
 # 学习 Agent 技术
 
-这一组文章解释 MyCopilot 为什么能“做事”，以及它为什么仍需要边界、证据和人工判断。阅读不要求编程经验。
+这一组文章解释 Captain Who 为什么能“做事”，以及它为什么仍需要边界、证据和人工判断。阅读不要求编程经验。
 
 ## 建议学习路线
 
@@ -22,4 +22,4 @@ last_verified: 2026-08-23
 7. [Scheduled Automation 原理](automation-principles.md)
 8. [通俗系统总览](system-overview.md)
 
-每篇文章都把“概念”和“当前产品行为”分开。Agent 行业中的通用设想不一定已经进入 MyCopilot；实际支持范围以[能力限制](../reference/capability-limits.md)为准。
+每篇文章都把“概念”和“当前产品行为”分开。Agent 行业中的通用设想不一定已经进入 Captain Who；实际支持范围以[能力限制](../reference/capability-limits.md)为准。

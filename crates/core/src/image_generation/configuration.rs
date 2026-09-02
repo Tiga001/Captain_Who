@@ -188,6 +188,26 @@ pub struct ImageGenerationConfigurationService {
     credentials: Arc<dyn CredentialStore>,
 }
 
+/// A revision-consistent snapshot for the configuration editor.
+///
+/// The API key remains wrapped in [`CredentialSecret`] until the transport serializes the
+/// dedicated configuration-read response. Mutation responses, status responses, errors, and
+/// execution metadata never receive this value.
+pub struct ImageGenerationConfigurationEditSnapshot {
+    pub configuration: ImageGenerationConfiguration,
+    pub api_key: Option<CredentialSecret>,
+}
+
+impl fmt::Debug for ImageGenerationConfigurationEditSnapshot {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ImageGenerationConfigurationEditSnapshot")
+            .field("configuration", &self.configuration)
+            .field("api_key", &self.api_key.as_ref().map(|_| "[REDACTED]"))
+            .finish()
+    }
+}
+
 /// A single-use, revision-consistent execution binding.
 ///
 /// This value is deliberately crate-private, non-cloneable, and non-serializable. The execution
@@ -230,6 +250,35 @@ impl ImageGenerationConfigurationService {
     ) -> Result<ImageGenerationConfiguration, ImageGenerationConfigurationError> {
         let record = self.load_record()?;
         self.configuration_from_record(record.as_ref())
+    }
+
+    /// Reads the configuration and its API key for the explicit configuration-editor endpoint.
+    ///
+    /// Native credential reads are not transactional with SQLite, so the profile is checked
+    /// again after reading the credential. A concurrent change is retried once rather than
+    /// returning a key paired with the wrong profile revision.
+    pub fn get_configuration_for_edit(
+        &self,
+    ) -> Result<ImageGenerationConfigurationEditSnapshot, ImageGenerationConfigurationError> {
+        for _ in 0..2 {
+            let before = self.load_record()?;
+            let (credential_status, api_key) =
+                self.credential_snapshot_for_edit(before.as_ref())?;
+            let after = self.load_record()?;
+            if after.as_ref() == before.as_ref() {
+                let configuration = self.configuration_from_record_with_credential_status(
+                    before.as_ref(),
+                    credential_status,
+                )?;
+                return Ok(ImageGenerationConfigurationEditSnapshot {
+                    configuration,
+                    api_key,
+                });
+            }
+            drop(api_key);
+        }
+        let current = self.load_record()?;
+        Err(revision_conflict(current.as_ref()))
     }
 
     /// Resolves a profile and credential that are proven to belong to the same configuration
@@ -679,18 +728,29 @@ impl ImageGenerationConfigurationService {
         &self,
         record: Option<&ImageGenerationProfileRecord>,
     ) -> Result<ImageGenerationCredentialStatus, ImageGenerationConfigurationError> {
+        self.credential_snapshot_for_edit(record)
+            .map(|(status, _)| status)
+    }
+
+    fn credential_snapshot_for_edit(
+        &self,
+        record: Option<&ImageGenerationProfileRecord>,
+    ) -> Result<
+        (ImageGenerationCredentialStatus, Option<CredentialSecret>),
+        ImageGenerationConfigurationError,
+    > {
         let Some(reference) = record.and_then(|record| record.credential_ref.as_deref()) else {
-            return Ok(ImageGenerationCredentialStatus::Missing);
+            return Ok((ImageGenerationCredentialStatus::Missing, None));
         };
         let reference = CredentialReference::parse(reference)
             .map_err(|_| ImageGenerationConfigurationError::InvalidConfiguration)?;
         if !self.credentials.supports_reference(&reference) {
-            return Ok(ImageGenerationCredentialStatus::Missing);
+            return Ok((ImageGenerationCredentialStatus::Missing, None));
         }
         Ok(match self.credentials.get(&reference) {
-            Ok(Some(_)) => ImageGenerationCredentialStatus::Configured,
-            Ok(None) => ImageGenerationCredentialStatus::Missing,
-            Err(_) => ImageGenerationCredentialStatus::Unavailable,
+            Ok(Some(secret)) => (ImageGenerationCredentialStatus::Configured, Some(secret)),
+            Ok(None) => (ImageGenerationCredentialStatus::Missing, None),
+            Err(_) => (ImageGenerationCredentialStatus::Unavailable, None),
         })
     }
 
@@ -1161,6 +1221,33 @@ mod tests {
     }
 
     #[test]
+    fn edit_snapshot_returns_the_configured_credential_and_redacts_debug() {
+        let (service, _credentials, _directory) = service();
+        let secret = "editor-visible-test-secret";
+        service
+            .update_configuration(update("image-generation:v1:0", secret))
+            .unwrap();
+
+        let snapshot = service.get_configuration_for_edit().unwrap();
+
+        assert_eq!(
+            snapshot.configuration.credential_status,
+            ImageGenerationCredentialStatus::Configured
+        );
+        assert_eq!(
+            snapshot
+                .api_key
+                .as_ref()
+                .unwrap()
+                .with_secret_bytes(|bytes| bytes.to_vec()),
+            secret.as_bytes()
+        );
+        let debug = format!("{snapshot:?}");
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains(secret));
+    }
+
+    #[test]
     fn replace_then_enable_publishes_a_ready_unverified_profile() {
         let (service, _credentials, _directory) = service();
         let configured = service
@@ -1293,7 +1380,9 @@ mod tests {
 
         let unavailable =
             ImageGenerationConfigurationService::new(storage, Arc::new(UnavailableCredentialStore));
-        let snapshot = unavailable.get_configuration().unwrap();
+        let edit_snapshot = unavailable.get_configuration_for_edit().unwrap();
+        assert!(edit_snapshot.api_key.is_none());
+        let snapshot = edit_snapshot.configuration;
         assert_eq!(snapshot.revision, enabled.revision);
         assert_eq!(
             snapshot.credential_status,

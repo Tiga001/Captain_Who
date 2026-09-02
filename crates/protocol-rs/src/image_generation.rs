@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-pub const IMAGE_GENERATION_CONFIGURATION_SCHEMA_VERSION: u32 = 1;
+pub const IMAGE_GENERATION_CONFIGURATION_SCHEMA_VERSION: u32 = 2;
 pub const IMAGE_GENERATION_CONFIGURATION_ERROR_CODE: i64 = -32020;
 pub const IMAGE_GENERATION_ARTIFACT_CONTENT_SCHEMA_VERSION: u32 = 1;
 pub const IMAGE_GENERATION_ARTIFACT_ERROR_CODE: i64 = -32021;
@@ -65,11 +65,23 @@ pub struct ImageGenerationConfigurationDto {
     pub revision: String,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ImageGenerationGetConfigurationResponse {
     pub schema_version: u32,
     pub configuration: ImageGenerationConfigurationDto,
+    pub api_key: Option<String>,
+}
+
+impl fmt::Debug for ImageGenerationGetConfigurationResponse {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ImageGenerationGetConfigurationResponse")
+            .field("schema_version", &self.schema_version)
+            .field("configuration", &self.configuration)
+            .field("api_key", &self.api_key.as_ref().map(|_| "[REDACTED]"))
+            .finish()
+    }
 }
 
 #[derive(Deserialize, PartialEq, Eq)]

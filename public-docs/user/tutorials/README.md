@@ -1,6 +1,6 @@
 ---
 title: 实战教程
-description: 跟随完整案例，用 MyCopilot 完成项目理解、开发、调研、扩展和自动化任务。
+description: 跟随完整案例，用 Captain Who 完成项目理解、开发、调研、扩展和自动化任务。
 status: current
 audience: user
 owner: product-docs

@@ -1,5 +1,6 @@
 // Browser coverage for image-generation configuration CAS, secrets, and recovery behavior.
 import { HostInvocationError } from '@mycopilot/host-api'
+import { IMAGE_GENERATION_CONFIGURATION_SCHEMA_VERSION } from '@mycopilot/protocol'
 import type {
   ImageGenerationConfiguration,
   ImageGenerationGetConfigurationOutput
@@ -38,6 +39,12 @@ function ReloadHarness() {
       <span>
         {workflow.state.status === 'ready' ? workflow.state.configuration.modelId : 'loading'}
       </span>
+      <input
+        aria-label="reload-api-key"
+        readOnly
+        type="password"
+        value={workflow.state.status === 'ready' ? workflow.state.apiKeyDraft : ''}
+      />
     </div>
   )
 }
@@ -60,9 +67,14 @@ function configuration(
 }
 
 function configurationOutput(
-  value: ImageGenerationConfiguration
+  value: ImageGenerationConfiguration,
+  apiKey: string | null = value.credentialStatus === 'configured' ? 'existing-api-key' : null
 ): ImageGenerationGetConfigurationOutput {
-  return { schemaVersion: 1, configuration: value }
+  return {
+    schemaVersion: IMAGE_GENERATION_CONFIGURATION_SCHEMA_VERSION,
+    configuration: value,
+    apiKey
+  }
 }
 
 function deferred<Value>() {
@@ -77,7 +89,7 @@ beforeEach(() => {
   vi.clearAllMocks()
   service.getConfiguration.mockResolvedValue(configurationOutput(configuration()))
   service.updateConfiguration.mockImplementation(async (input) => ({
-    schemaVersion: 1,
+    schemaVersion: IMAGE_GENERATION_CONFIGURATION_SCHEMA_VERSION,
     outcome: 'updated',
     configuration: configuration({
       endpointUrl: input.endpointUrl,
@@ -89,7 +101,7 @@ beforeEach(() => {
     })
   }))
   service.setEnabled.mockImplementation(async (input) => ({
-    schemaVersion: 1,
+    schemaVersion: IMAGE_GENERATION_CONFIGURATION_SCHEMA_VERSION,
     outcome: 'updated',
     configuration: configuration({
       enabled: input.enabled,
@@ -116,7 +128,7 @@ describe('ImageGenerationSettings', () => {
     expect(service.getConfiguration).toHaveBeenCalledTimes(2)
   })
 
-  it('shows loading state and never echoes an existing API Key', async () => {
+  it('loads an existing API Key as a masked value and lets the user reveal it', async () => {
     const pending = deferred<ImageGenerationGetConfigurationOutput>()
     service.getConfiguration.mockReturnValueOnce(pending.promise)
     const screen = await render(<ImageGenerationSettings />)
@@ -131,9 +143,13 @@ describe('ImageGenerationSettings', () => {
       'input[aria-label="configuration.imageGeneration.apiKey"]'
     )
     expect(secretInput?.type).toBe('password')
-    expect(secretInput?.value).toBe('')
-    expect(secretInput?.placeholder).toBe('\u2022'.repeat(18))
-    expect(screen.container.textContent).not.toContain('top-secret')
+    expect(secretInput?.value).toBe('existing-api-key')
+    expect(secretInput?.placeholder).toBe('')
+    await screen.getByRole('button', { name: 'configuration.showSecretValue' }).click()
+    expect(secretInput?.type).toBe('text')
+    expect(secretInput?.value).toBe('existing-api-key')
+    await screen.getByRole('button', { name: 'configuration.hideSecretValue' }).click()
+    expect(secretInput?.type).toBe('password')
     expect(screen.container.textContent).not.toContain(
       'configuration.imageGeneration.credential.configured'
     )
@@ -151,7 +167,7 @@ describe('ImageGenerationSettings', () => {
     await expect.element(textToImage).toHaveAttribute('aria-checked', 'true')
   })
 
-  it('replaces a credential only after explicit input and clears plaintext after saving', async () => {
+  it('replaces an edited credential, retains it after saving, then keeps the new baseline', async () => {
     const screen = await render(<ImageGenerationSettings />)
     await expect
       .element(screen.getByRole('heading', { name: 'configuration.imageGeneration.title' }))
@@ -166,15 +182,19 @@ describe('ImageGenerationSettings', () => {
         expect.objectContaining({ credentialMutation: { type: 'replace', value: 'top-secret' } })
       )
     })
-    await expect.element(secretInput).toHaveValue('')
-    await expect.element(secretInput).toHaveAttribute('placeholder', '\u2022'.repeat(18))
+    await expect.element(secretInput).toHaveValue('top-secret')
+    await screen.getByRole('button', { name: 'configuration.imageGeneration.save' }).click()
+    await vi.waitFor(() => expect(service.updateConfiguration).toHaveBeenCalledTimes(2))
+    expect(service.updateConfiguration).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({ credentialMutation: { type: 'keep' } })
+    )
     expect(
       screen.container.querySelector('.image-generation-settings__feedback')?.textContent
     ).toBe('')
-    expect(screen.container.textContent).not.toContain('top-secret')
   })
 
-  it('keeps the stored credential when the secret field stays empty', async () => {
+  it('keeps the stored credential when the loaded secret stays unchanged', async () => {
     const screen = await render(<ImageGenerationSettings />)
     await screen
       .getByRole('textbox', { name: 'configuration.imageGeneration.modelId' })
@@ -186,6 +206,39 @@ describe('ImageGenerationSettings', () => {
         expect.objectContaining({ credentialMutation: { type: 'keep' } })
       )
     })
+  })
+
+  it('clears an existing credential explicitly and treats the empty value as the new baseline', async () => {
+    service.updateConfiguration
+      .mockResolvedValueOnce({
+        schemaVersion: IMAGE_GENERATION_CONFIGURATION_SCHEMA_VERSION,
+        outcome: 'updated',
+        configuration: configuration({ credentialStatus: 'missing', revision: 'revision-2' })
+      })
+      .mockResolvedValueOnce({
+        schemaVersion: IMAGE_GENERATION_CONFIGURATION_SCHEMA_VERSION,
+        outcome: 'alreadyCurrent',
+        configuration: configuration({ credentialStatus: 'missing', revision: 'revision-2' })
+      })
+    const screen = await render(<ImageGenerationSettings />)
+    const secretInput = screen.getByLabelText('configuration.imageGeneration.apiKey')
+
+    await secretInput.fill('')
+    await screen.getByRole('button', { name: 'configuration.imageGeneration.save' }).click()
+    await vi.waitFor(() => {
+      expect(service.updateConfiguration).toHaveBeenNthCalledWith(
+        1,
+        expect.objectContaining({ credentialMutation: { type: 'clear' } })
+      )
+    })
+    await expect.element(secretInput).toHaveValue('')
+
+    await screen.getByRole('button', { name: 'configuration.imageGeneration.save' }).click()
+    await vi.waitFor(() => expect(service.updateConfiguration).toHaveBeenCalledTimes(2))
+    expect(service.updateConfiguration).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({ credentialMutation: { type: 'keep' } })
+    )
   })
 
   it('allows image-to-image configuration while keeping text-to-image mandatory', async () => {
@@ -207,12 +260,12 @@ describe('ImageGenerationSettings', () => {
   it('saves dirty fields before enabling and uses the returned revision serially', async () => {
     const updated = configuration({ endpointUrl: 'https://new.example/v1', revision: 'revision-2' })
     service.updateConfiguration.mockResolvedValueOnce({
-      schemaVersion: 1,
+      schemaVersion: IMAGE_GENERATION_CONFIGURATION_SCHEMA_VERSION,
       outcome: 'updated',
       configuration: updated
     })
     service.setEnabled.mockResolvedValueOnce({
-      schemaVersion: 1,
+      schemaVersion: IMAGE_GENERATION_CONFIGURATION_SCHEMA_VERSION,
       outcome: 'updated',
       configuration: configuration({
         ...updated,
@@ -230,13 +283,16 @@ describe('ImageGenerationSettings', () => {
     await vi.waitFor(() => expect(service.setEnabled).toHaveBeenCalledTimes(1))
     expect(service.updateConfiguration).toHaveBeenCalledTimes(1)
     expect(service.setEnabled).toHaveBeenCalledWith({
-      schemaVersion: 1,
+      schemaVersion: IMAGE_GENERATION_CONFIGURATION_SCHEMA_VERSION,
       expectedRevision: 'revision-2',
       enabled: true
     })
     expect(service.updateConfiguration.mock.invocationCallOrder[0]).toBeLessThan(
       service.setEnabled.mock.invocationCallOrder[0]
     )
+    await expect
+      .element(screen.getByLabelText('configuration.imageGeneration.apiKey'))
+      .toHaveValue('existing-api-key')
   })
 
   it.each([
@@ -331,14 +387,22 @@ describe('ImageGenerationSettings', () => {
     await screen.getByRole('button', { name: 'reload' }).click()
 
     newer.resolve(
-      configurationOutput(configuration({ modelId: 'newer-model', revision: 'revision-newer' }))
+      configurationOutput(
+        configuration({ modelId: 'newer-model', revision: 'revision-newer' }),
+        'newer-api-key'
+      )
     )
     await expect.element(screen.getByText('newer-model')).toBeVisible()
+    await expect.element(screen.getByLabelText('reload-api-key')).toHaveValue('newer-api-key')
     older.resolve(
-      configurationOutput(configuration({ modelId: 'older-model', revision: 'revision-older' }))
+      configurationOutput(
+        configuration({ modelId: 'older-model', revision: 'revision-older' }),
+        'older-api-key'
+      )
     )
 
     await expect.element(screen.getByText('newer-model')).toBeVisible()
+    await expect.element(screen.getByLabelText('reload-api-key')).toHaveValue('newer-api-key')
     expect(screen.container.textContent).not.toContain('older-model')
   })
 })

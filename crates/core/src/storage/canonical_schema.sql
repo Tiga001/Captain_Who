@@ -2391,9 +2391,6 @@ CREATE TABLE messages (
             agent_run_json TEXT CHECK (
                 agent_run_json IS NULL OR json_valid(agent_run_json)
             ),
-            ui_state_json TEXT CHECK (
-                ui_state_json IS NULL OR json_valid(ui_state_json)
-            ),
             created_at INTEGER NOT NULL,
             position INTEGER NOT NULL,
             FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE,
@@ -2449,6 +2446,11 @@ CREATE TABLE messages (
                     ))
             )
         );
+CREATE TABLE chat_message_ui_states (
+            message_id TEXT PRIMARY KEY NOT NULL,
+            ui_state_json TEXT NOT NULL CHECK (json_valid(ui_state_json)),
+            FOREIGN KEY (message_id) REFERENCES messages(id) ON DELETE CASCADE
+        );
 CREATE TRIGGER conversations_revision_after_message_insert
         AFTER INSERT ON messages
         BEGIN
@@ -2471,7 +2473,6 @@ CREATE TRIGGER conversations_revision_after_message_update
           OR NEW.snapshot_original_agent_id IS NOT OLD.snapshot_original_agent_id
           OR NEW.snapshot_original_mailbox_message_id IS NOT OLD.snapshot_original_mailbox_message_id
           OR NEW.agent_run_json IS NOT OLD.agent_run_json
-          OR NEW.ui_state_json IS NOT OLD.ui_state_json
           OR NEW.created_at IS NOT OLD.created_at
           OR NEW.position IS NOT OLD.position
         BEGIN
@@ -2680,14 +2681,12 @@ CREATE TRIGGER prevent_agent_message_projection_delete
         BEGIN
             SELECT RAISE(ABORT, 'Agent message projection is immutable');
         END;
-CREATE TRIGGER prevent_agent_message_projection_ui_rewrite
-        BEFORE UPDATE OF agent_run_json, ui_state_json ON messages
-        WHEN OLD.input_origin_kind = 'agent' AND (
-            NEW.agent_run_json IS NOT OLD.agent_run_json
-            OR NEW.ui_state_json IS NOT OLD.ui_state_json
-        )
+CREATE TRIGGER prevent_agent_message_projection_run_state_rewrite
+        BEFORE UPDATE OF agent_run_json ON messages
+        WHEN OLD.input_origin_kind = 'agent'
+          AND NEW.agent_run_json IS NOT OLD.agent_run_json
         BEGIN
-            SELECT RAISE(ABORT, 'Agent input projection cannot carry mutable run UI state');
+            SELECT RAISE(ABORT, 'Agent input projection cannot carry mutable run state');
         END;
 CREATE TRIGGER prevent_child_context_snapshot_message_rewrite
         BEFORE UPDATE ON messages

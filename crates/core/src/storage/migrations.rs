@@ -1,31 +1,22 @@
 use rusqlite::{ffi, Connection, OptionalExtension, Transaction, TransactionBehavior};
 use sha2::{Digest, Sha256};
 
-pub const STORAGE_SCHEMA_VERSION: i32 = 28;
+pub const STORAGE_SCHEMA_VERSION: i32 = 29;
 pub const DEVELOPMENT_STORAGE_SCHEMA_RESET_REQUIRED: &str =
     "development_storage_schema_reset_required";
 
 const CANONICAL_SCHEMA: &str = include_str!("canonical_schema.sql");
 const CANONICAL_SCHEMA_FINGERPRINT: &str =
+    "sha256:8065624c60174d68b16a376a7a341608e86a2dc8434c7239b41a98c0b3b5e5dd";
+const STORAGE_SCHEMA_V28_FINGERPRINT: &str =
     "sha256:4baf84d4fb76094b9c3c889f0653db3d020203119ae593d6296f21c23684eced";
-const STORAGE_SCHEMA_V27_FINGERPRINT: &str =
-    "sha256:b2ce395d684d40fa44f0c0274441c57606d4d2aa84f8e196f67cf4a291885942";
-const PROVIDER_CONTINUATION_LATE_INDEXES: &str = r#"
-CREATE INDEX idx_provider_continuations_replay_scope
-            ON provider_continuations(
-                conversation_id, assistant_message_id, run_id, request_index
-            );
-CREATE INDEX idx_provider_continuations_state
-            ON provider_continuations(state, updated_at);
-CREATE INDEX idx_provider_continuation_tool_calls_runtime
-            ON provider_continuation_tool_calls(runtime_call_id, continuation_id);
-"#;
+
+const V28_TO_V29_SCHEMA_PATCH: &str = include_str!("migration_v28_to_v29.sql");
 
 /// Opens the single supported development schema.
 ///
-/// A brand-new database is initialized atomically. The one supported development upgrade keeps
-/// all non-Conversation state in place while intentionally resetting disposable conversation and
-/// runtime history.
+/// A brand-new database is initialized atomically. The one supported development upgrade removes
+/// the obsolete message-owned UI projection without carrying it into the dedicated UI-state table.
 pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
     connection.execute_batch("PRAGMA foreign_keys = ON;")?;
 
@@ -36,13 +27,13 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
         return create_canonical_schema(connection);
     }
 
-    if schema_version == 27 {
-        if schema_fingerprint(connection)? != STORAGE_SCHEMA_V27_FINGERPRINT {
+    if schema_version == 28 {
+        if schema_fingerprint(connection)? != STORAGE_SCHEMA_V28_FINGERPRINT {
             return Err(reset_required_error(
-                "schema 27 catalog fingerprint is not the supported canonical baseline",
+                "schema 28 catalog fingerprint is not the supported canonical baseline",
             ));
         }
-        reset_v27_to_v28_preserving_configuration(connection, false)?;
+        migrate_v28_to_v29(connection, false)?;
         return validate_canonical_schema(connection);
     }
 
@@ -55,243 +46,18 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
     validate_canonical_schema(connection)
 }
 
-/// Complete transitive non-SET-NULL foreign-key child closure of `conversations` in schema 27.
-/// The parity test recomputes this closure so future schema work cannot silently leave history
-/// behind. Global settings, MCP, Skills, browser history, notification settings, models, projects
-/// and automations are intentionally outside this set. Conversation-owned notification facts are
-/// cleared separately because their string identities deliberately have no foreign keys.
-const CONVERSATION_HISTORY_TABLES: &[&str] = &[
-    "agent_collaboration_cursors",
-    "agent_collaboration_event_sequences",
-    "agent_collaboration_events",
-    "agent_command_session_lifecycle_events",
-    "agent_command_session_model_read_receipts",
-    "agent_command_session_output_chunks",
-    "agent_command_session_published_outputs",
-    "agent_command_sessions",
-    "agent_effective_permission_snapshots",
-    "agent_file_change_chunks",
-    "agent_file_change_operations",
-    "agent_file_change_run_grants",
-    "agent_file_changes",
-    "agent_interrupt_requests",
-    "agent_mailbox_messages",
-    "agent_member_conversation_forks",
-    "agent_model_batch_receipt_items",
-    "agent_model_batch_receipt_replays",
-    "agent_model_batch_receipt_targets",
-    "agent_model_batch_receipts",
-    "agent_nodes",
-    "agent_run_guidance_attachments",
-    "agent_run_guidances",
-    "agent_turn_diff_actions",
-    "agent_turn_diff_files",
-    "agent_turn_diffs",
-    "agent_usage_records",
-    "agent_wake_requests",
-    "attachments",
-    "child_context_snapshots",
-    "context_compaction_receipts",
-    "context_compaction_summaries",
-    "context_compaction_summary_lineage",
-    "conversation_context_adaptation_requirements",
-    "conversation_context_compaction_heads",
-    "conversation_forks",
-    "conversation_history_blob_chunks",
-    "conversation_history_blobs",
-    "conversation_model_context_items",
-    "conversation_turn_rewrites",
-    "conversation_turn_trace_items",
-    "conversation_turn_traces",
-    "conversation_world_state_epochs",
-    "conversation_world_state_records",
-    "managed_artifact_grants",
-    "messages",
-    "model_request_observations",
-    "provider_continuation_tool_calls",
-    "provider_continuations",
-    "provider_transition_terminal_records",
-];
-
-fn reset_v27_to_v28_preserving_configuration(
+fn migrate_v28_to_v29(
     connection: &Connection,
-    fail_after_rebuild_for_test: bool,
+    fail_after_schema_patch_for_test: bool,
 ) -> rusqlite::Result<()> {
-    connection.execute_batch("PRAGMA foreign_keys = OFF;")?;
-    let reset_result = (|| {
-        let transaction = Transaction::new_unchecked(connection, TransactionBehavior::Immediate)?;
-        let suspended_delete_guards = suspend_history_delete_guards(&transaction)?;
-
-        // These runtime tables intentionally lack foreign keys. Delete only rows with an exact
-        // old-Conversation owner; global/automation rows and the `new-conversation` draft survive.
-        transaction.execute(
-            "DELETE FROM mcp_approval_payload_envelopes
-             WHERE action_id IN (
-                 SELECT action_id FROM agent_pending_actions
-                 WHERE conversation_id IN (SELECT id FROM conversations)
-             )",
-            [],
-        )?;
-        transaction.execute(
-            "DELETE FROM agent_pending_actions
-             WHERE conversation_id IN (SELECT id FROM conversations)",
-            [],
-        )?;
-        transaction.execute(
-            "DELETE FROM agent_action_audit
-             WHERE conversation_id IN (SELECT id FROM conversations)",
-            [],
-        )?;
-        transaction.execute(
-            "DELETE FROM composer_drafts
-             WHERE scope_id IN (SELECT id FROM conversations)",
-            [],
-        )?;
-
-        // Notification facts intentionally use string identities instead of foreign keys. Remove
-        // the facts owned by discarded Conversations, their delivery batch, and the associated
-        // change-feed rows so the notification center cannot retain a dead Conversation target.
-        // Notification preferences remain untouched.
-        transaction.execute(
-            "DELETE FROM notification_change_events
-             WHERE notification_id IN (
-                 SELECT id FROM notification_events
-                 WHERE conversation_id IN (SELECT id FROM conversations)
-             )
-                OR batch_id IN (
-                    SELECT item.batch_id
-                    FROM notification_batch_items AS item
-                    INNER JOIN notification_events AS event
-                        ON event.id = item.notification_event_id
-                    WHERE event.conversation_id IN (SELECT id FROM conversations)
-                )",
-            [],
-        )?;
-        transaction.execute(
-            "DELETE FROM notification_events
-             WHERE conversation_id IN (SELECT id FROM conversations)",
-            [],
-        )?;
-        transaction.execute(
-            "DELETE FROM notification_batches
-             WHERE id IN (
-                 SELECT item.batch_id
-                 FROM notification_batch_items AS item
-                 LEFT JOIN notification_events AS event
-                     ON event.id = item.notification_event_id
-                 WHERE event.id IS NULL
-             )",
-            [],
-        )?;
-        transaction.execute(
-            "DELETE FROM notification_batch_items
-             WHERE notification_event_id NOT IN (SELECT id FROM notification_events)
-                OR batch_id NOT IN (SELECT id FROM notification_batches)",
-            [],
-        )?;
-
-        // Keep normal product-side effects for preserved automations. Foreign-key actions are
-        // replayed explicitly because enforcement is temporarily disabled.
-        transaction.execute("DELETE FROM conversations", [])?;
-        transaction.execute(
-            "UPDATE automations SET target_conversation_id = NULL
-             WHERE target_conversation_id IS NOT NULL",
-            [],
-        )?;
-        transaction.execute(
-            "UPDATE automation_runs
-             SET conversation_id = NULL, user_message_id = NULL, assistant_message_id = NULL
-             WHERE conversation_id IS NOT NULL
-                OR user_message_id IS NOT NULL
-                OR assistant_message_id IS NOT NULL",
-            [],
-        )?;
-        transaction.execute(
-            "UPDATE browser_downloads SET conversation_id = NULL
-             WHERE conversation_id IS NOT NULL",
-            [],
-        )?;
-        for table in CONVERSATION_HISTORY_TABLES {
-            transaction.execute(&format!("DELETE FROM {}", quote_identifier(table)), [])?;
-        }
-        restore_suspended_triggers(&transaction, &suspended_delete_guards)?;
-
-        transaction.execute_batch(
-            "DROP TABLE provider_continuation_tool_calls;
-             DROP TABLE provider_continuations;",
-        )?;
-        transaction.execute_batch(canonical_provider_continuation_schema()?)?;
-        transaction.execute_batch(PROVIDER_CONTINUATION_LATE_INDEXES)?;
-        if fail_after_rebuild_for_test {
-            return Err(rusqlite::Error::InvalidQuery);
-        }
-        transaction.pragma_update(None, "user_version", STORAGE_SCHEMA_VERSION)?;
-        validate_canonical_schema(&transaction)?;
-        transaction.commit()
-    })();
-    let restore_result = connection.execute_batch("PRAGMA foreign_keys = ON;");
-    match reset_result {
-        Ok(()) => restore_result,
-        Err(error) => {
-            let _ = restore_result;
-            Err(error)
-        }
+    let transaction = Transaction::new_unchecked(connection, TransactionBehavior::Immediate)?;
+    transaction.execute_batch(V28_TO_V29_SCHEMA_PATCH)?;
+    if fail_after_schema_patch_for_test {
+        return Err(rusqlite::Error::InvalidQuery);
     }
-}
-
-fn suspend_history_delete_guards(connection: &Connection) -> rusqlite::Result<Vec<String>> {
-    let triggers = {
-        let mut statement = connection.prepare(
-            "SELECT name, tbl_name, sql FROM sqlite_schema
-             WHERE type = 'trigger' AND sql IS NOT NULL ORDER BY name",
-        )?;
-        let rows = statement
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                ))
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        rows
-    };
-    let mut suspended = Vec::new();
-    for (name, table, sql) in triggers {
-        if table != "conversations"
-            && CONVERSATION_HISTORY_TABLES.contains(&table.as_str())
-            && sql.to_ascii_uppercase().contains("BEFORE DELETE")
-        {
-            connection.execute_batch(&format!("DROP TRIGGER {};", quote_identifier(&name)))?;
-            suspended.push(sql);
-        }
-    }
-    Ok(suspended)
-}
-
-fn restore_suspended_triggers(
-    connection: &Connection,
-    trigger_sql: &[String],
-) -> rusqlite::Result<()> {
-    for sql in trigger_sql {
-        connection.execute_batch(sql)?;
-    }
-    Ok(())
-}
-
-fn canonical_provider_continuation_schema() -> rusqlite::Result<&'static str> {
-    let start = CANONICAL_SCHEMA
-        .find("CREATE TABLE provider_continuations (")
-        .ok_or(rusqlite::Error::InvalidQuery)?;
-    let tail = &CANONICAL_SCHEMA[start..];
-    let end = tail
-        .find("CREATE TABLE agent_file_changes (")
-        .ok_or(rusqlite::Error::InvalidQuery)?;
-    Ok(&tail[..end])
-}
-
-fn quote_identifier(identifier: &str) -> String {
-    format!("\"{}\"", identifier.replace('"', "\"\""))
+    transaction.pragma_update(None, "user_version", STORAGE_SCHEMA_VERSION)?;
+    validate_canonical_schema(&transaction)?;
+    transaction.commit()
 }
 
 fn create_canonical_schema(connection: &Connection) -> rusqlite::Result<()> {
@@ -384,339 +150,101 @@ fn reset_required_error(detail: impl std::fmt::Display) -> rusqlite::Error {
 mod tests {
     use super::*;
 
-    const PRESERVED_SENTINEL_TABLES: &[&str] = &[
-        "model_provider_settings",
-        "models",
-        "image_generation_profiles",
-        "image_generation_credential_staging",
-        "image_generation_credential_cleanup",
-        "ui_preferences",
-        "agent_prompt_preferences",
-        "skill_enablement_overrides",
-        "notification_settings",
-        "browser_download_settings",
-        "browser_preferences",
-        "browser_history",
-        "mcp_registry_metadata",
-        "automations",
-        "automation_runs",
-        "automation_events",
-    ];
-
-    const PROVIDER_CONTINUATIONS_V27_SCHEMA: &str = r#"
-CREATE TABLE provider_continuations (
-            continuation_id TEXT PRIMARY KEY CHECK (
-                length(continuation_id) = 61
-                AND substr(continuation_id, 1, 25) = 'provider-continuation-v1:'
-            ),
-            schema_version INTEGER NOT NULL CHECK (schema_version = 1),
-            envelope_version INTEGER NOT NULL CHECK (envelope_version = 1),
-            conversation_id TEXT NOT NULL,
-            assistant_message_id TEXT NOT NULL,
-            run_id TEXT NOT NULL CHECK (
-                length(CAST(run_id AS BLOB)) BETWEEN 1 AND 2048
-            ),
-            request_index INTEGER NOT NULL CHECK (request_index >= 0),
-            assistant_turn_id TEXT NOT NULL CHECK (
-                length(assistant_turn_id) = 68
-                AND substr(assistant_turn_id, 1, 4) = 'at1_'
-                AND substr(assistant_turn_id, 5) NOT GLOB '*[^0-9a-f]*'
-            ),
-            assistant_turn_digest TEXT NOT NULL CHECK (
-                length(assistant_turn_digest) = 71
-                AND substr(assistant_turn_digest, 1, 7) = 'sha256:'
-                AND substr(assistant_turn_digest, 8) NOT GLOB '*[^0-9a-f]*'
-            ),
-            provider_protocol_digest TEXT NOT NULL CHECK (
-                length(provider_protocol_digest) = 71
-                AND substr(provider_protocol_digest, 1, 7) = 'sha256:'
-                AND substr(provider_protocol_digest, 8) NOT GLOB '*[^0-9a-f]*'
-            ),
-            state TEXT NOT NULL CHECK (state IN ('active', 'superseded', 'released')),
-            superseded_by TEXT,
-            compression TEXT,
-            encryption TEXT,
-            payload_digest TEXT,
-            nonce BLOB,
-            ciphertext BLOB,
-            decoded_bytes INTEGER,
-            compressed_bytes INTEGER,
-            created_at INTEGER NOT NULL CHECK (created_at >= 0),
-            updated_at INTEGER NOT NULL CHECK (updated_at >= created_at),
-            released_at INTEGER CHECK (released_at IS NULL OR released_at >= created_at),
-            activated_at INTEGER CHECK (activated_at IS NULL OR activated_at >= created_at),
-            UNIQUE (conversation_id, assistant_message_id, run_id, request_index),
-            CHECK (
-                (
-                    state IN ('active', 'superseded')
-                    AND compression = 'zstd_binary_v1'
-                    AND encryption = 'chacha20_poly1305_v1'
-                    AND payload_digest IS NOT NULL
-                    AND length(payload_digest) = 71
-                    AND substr(payload_digest, 1, 7) = 'sha256:'
-                    AND substr(payload_digest, 8) NOT GLOB '*[^0-9a-f]*'
-                    AND nonce IS NOT NULL
-                    AND length(nonce) = 12
-                    AND ciphertext IS NOT NULL
-                    AND length(ciphertext) > 16
-                    AND length(ciphertext) <= 2097152
-                    AND decoded_bytes BETWEEN 1 AND 8388608
-                    AND compressed_bytes BETWEEN 1 AND 2097152
-                    AND length(ciphertext) = compressed_bytes + 16
-                    AND released_at IS NULL
-                ) OR (
-                    state = 'released'
-                    AND superseded_by IS NULL
-                    AND compression = 'zstd_binary_v1'
-                    AND encryption = 'chacha20_poly1305_v1'
-                    AND payload_digest IS NULL
-                    AND nonce IS NULL
-                    AND ciphertext IS NULL
-                    AND decoded_bytes IS NULL
-                    AND compressed_bytes IS NULL
-                    AND released_at IS NOT NULL
-                )
-            ),
-            FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE,
-            FOREIGN KEY (assistant_message_id) REFERENCES messages(id) ON DELETE CASCADE
+    fn replace_once(haystack: String, old: &str, new: &str) -> String {
+        assert_eq!(
+            haystack.matches(old).count(),
+            1,
+            "schema fixture replacement must have exactly one match"
         );
-"#;
+        haystack.replacen(old, new, 1)
+    }
 
-    fn downgrade_fresh_schema_to_v27(connection: &Connection) {
-        connection.execute_batch(CANONICAL_SCHEMA).unwrap();
+    fn canonical_schema_v28_for_test() -> String {
+        let schema = replace_once(
+            CANONICAL_SCHEMA.to_string(),
+            r#"            agent_run_json TEXT CHECK (
+                agent_run_json IS NULL OR json_valid(agent_run_json)
+            ),
+            created_at INTEGER NOT NULL,"#,
+            r#"            agent_run_json TEXT CHECK (
+                agent_run_json IS NULL OR json_valid(agent_run_json)
+            ),
+            ui_state_json TEXT CHECK (
+                ui_state_json IS NULL OR json_valid(ui_state_json)
+            ),
+            created_at INTEGER NOT NULL,"#,
+        );
+        let schema = replace_once(
+            schema,
+            r#"CREATE TABLE chat_message_ui_states (
+            message_id TEXT PRIMARY KEY NOT NULL,
+            ui_state_json TEXT NOT NULL CHECK (json_valid(ui_state_json)),
+            FOREIGN KEY (message_id) REFERENCES messages(id) ON DELETE CASCADE
+        );
+"#,
+            "",
+        );
+        let schema = replace_once(
+            schema,
+            r#"          OR NEW.agent_run_json IS NOT OLD.agent_run_json
+          OR NEW.created_at IS NOT OLD.created_at"#,
+            r#"          OR NEW.agent_run_json IS NOT OLD.agent_run_json
+          OR NEW.ui_state_json IS NOT OLD.ui_state_json
+          OR NEW.created_at IS NOT OLD.created_at"#,
+        );
+        replace_once(
+            schema,
+            r#"CREATE TRIGGER prevent_agent_message_projection_run_state_rewrite
+        BEFORE UPDATE OF agent_run_json ON messages
+        WHEN OLD.input_origin_kind = 'agent'
+          AND NEW.agent_run_json IS NOT OLD.agent_run_json
+        BEGIN
+            SELECT RAISE(ABORT, 'Agent input projection cannot carry mutable run state');
+        END;"#,
+            r#"CREATE TRIGGER prevent_agent_message_projection_ui_rewrite
+        BEFORE UPDATE OF agent_run_json, ui_state_json ON messages
+        WHEN OLD.input_origin_kind = 'agent' AND (
+            NEW.agent_run_json IS NOT OLD.agent_run_json
+            OR NEW.ui_state_json IS NOT OLD.ui_state_json
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'Agent input projection cannot carry mutable run UI state');
+        END;"#,
+        )
+    }
+
+    fn create_v28_fixture(connection: &Connection) {
         connection
-            .pragma_update(None, "user_version", STORAGE_SCHEMA_VERSION)
+            .execute_batch(&canonical_schema_v28_for_test())
             .unwrap();
-        connection
-            .execute_batch("PRAGMA foreign_keys = OFF; PRAGMA legacy_alter_table = ON;")
-            .unwrap();
-        {
-            let transaction = connection.unchecked_transaction().unwrap();
-            transaction
-                .execute_batch(
-                    "DROP TRIGGER validate_provider_continuation_tool_call_projection;
-                     DROP INDEX idx_provider_continuation_tool_calls_runtime;",
-                )
-                .unwrap();
-            transaction
-                .execute_batch(
-                    "ALTER TABLE provider_continuations
-                         RENAME TO provider_continuations_v28;",
-                )
-                .unwrap();
-            transaction
-                .execute_batch(PROVIDER_CONTINUATIONS_V27_SCHEMA)
-                .unwrap();
-            transaction
-                .execute_batch(
-                    "INSERT INTO provider_continuations (
-                         continuation_id, schema_version, envelope_version,
-                         conversation_id, assistant_message_id, run_id, request_index,
-                         assistant_turn_id, assistant_turn_digest, provider_protocol_digest,
-                         state, superseded_by, compression, encryption,
-                         payload_digest, nonce, ciphertext, decoded_bytes, compressed_bytes,
-                         created_at, updated_at, released_at, activated_at
-                     )
-                     SELECT continuation_id, schema_version, envelope_version,
-                            conversation_id, assistant_message_id, run_id, request_index,
-                            assistant_turn_id, assistant_turn_digest, provider_protocol_digest,
-                            state, superseded_by, compression, encryption,
-                            payload_digest, nonce, ciphertext, decoded_bytes, compressed_bytes,
-                            created_at, updated_at, released_at, activated_at
-                     FROM provider_continuations_v28;
-                     DROP TABLE provider_continuations_v28;",
-                )
-                .unwrap();
-            transaction
-                .execute_batch(PROVIDER_CONTINUATION_LATE_INDEXES)
-                .unwrap();
-            transaction.pragma_update(None, "user_version", 27).unwrap();
-            transaction.commit().unwrap();
-        }
-        connection
-            .execute_batch("PRAGMA legacy_alter_table = OFF; PRAGMA foreign_keys = ON;")
-            .unwrap();
+        connection.pragma_update(None, "user_version", 28).unwrap();
         assert_eq!(
             schema_fingerprint(connection).unwrap(),
-            STORAGE_SCHEMA_V27_FINGERPRINT
+            STORAGE_SCHEMA_V28_FINGERPRINT
         );
     }
 
-    fn seed_v27_history(connection: &Connection) -> (String, String) {
+    fn seed_v28_message_with_ui_state(connection: &Connection) {
         connection
             .execute_batch(
                 "INSERT INTO conversations (
                      id, project_id, model_id, title, created_at, updated_at,
                      pinned_at, archived_at, unread_at
-                 ) VALUES ('conversation-v27', NULL, NULL, 'v27', 1, 1, NULL, NULL, NULL);
+                 ) VALUES ('conversation-v28', NULL, NULL, 'v28', 1, 1, NULL, NULL, NULL);
                  INSERT INTO messages (
                      id, conversation_id, role, content, status, agent_run_json,
                      ui_state_json, created_at, position
-                 ) VALUES
-                    ('assistant-v27-tool', 'conversation-v27', 'assistant', 'tool', 'sent',
-                     NULL, NULL, 1, 0),
-                    ('assistant-v27-ordinary', 'conversation-v27', 'assistant', 'ordinary', 'sent',
-                     NULL, NULL, 2, 1);
-                 INSERT INTO attachments (
-                     id, conversation_id, message_id, project_id, kind, original_name,
-                     mime_type, size_bytes, storage_rel_path, created_at
                  ) VALUES (
-                     'attachment-v27', 'conversation-v27', 'assistant-v27-ordinary', NULL,
-                     'image', 'history.png', 'image/png', 7, 'history/attachment-v27', 2
+                     'message-v28', 'conversation-v28', 'assistant', 'preserved', 'sent',
+                     NULL, '{\"isBookmarked\":true}', 2, 0
                  );
-                 INSERT INTO notification_events (
-                     id, schema_version, notification_kind, source_kind, source_id,
-                     run_id, automation_id, conversation_id, user_message_id,
-                     assistant_message_id, approval_action_id, subject_kind, subject_text,
-                     priority, dedupe_key, supersession_key, resource_revision, seen_at,
-                     resolved_at, superseded_at, occurred_at, expires_at
-                 ) VALUES (
-                     'notification-v27', 1, 'task_completed', 'human_root',
-                     'conversation-v27', 'run-v27-notification', NULL,
-                     'conversation-v27', NULL, 'assistant-v27-ordinary', NULL,
-                     'prompt_excerpt', 'historical notification', 'completed',
-                     'notification-v27-dedupe', 'notification-v27-supersession',
-                     1, NULL, 2, NULL, 2, 1000
-                 );
-                 INSERT INTO notification_batches (
-                     id, schema_version, status, revision, highest_priority,
-                     collect_until, replace_until, retry_at, claim_token,
-                     claim_expires_at, attempt_count, last_error_code,
-                     delivered_revision, delivered_priority, sound_level_played,
-                     disposition, created_at, updated_at, displayed_at, sealed_at,
-                     suppressed_at
-                 ) VALUES (
-                     'notification-batch-v27', 1, 'displayed', 1, 'completed',
-                     2, 1000, 2, NULL, NULL, 0, NULL, 1, 'completed', 'initial',
-                     'delivered', 2, 2, 2, NULL, NULL
-                 );
-                 INSERT INTO notification_batch_items (
-                     batch_id, notification_event_id, added_at
-                 ) VALUES ('notification-batch-v27', 'notification-v27', 2);
-                 INSERT INTO composer_drafts (
-                     scope_id, message, permission_mode, permission_mode_version,
-                     model_id, project_id, attachments_json, skills_json,
-                     queued_messages_json, updated_at
-                 ) VALUES (
-                     'conversation-v27', 'historical draft', 'default', 0,
-                     NULL, NULL, '[]', '[]', '[]', 2
-                 );
-                 INSERT INTO composer_drafts (
-                     scope_id, message, permission_mode, permission_mode_version,
-                     model_id, project_id, attachments_json, skills_json,
-                     queued_messages_json, updated_at
-                 ) VALUES (
-                     'new-conversation', 'global draft sentinel', 'default', 0,
-                     NULL, NULL, '[]', '[]', '[]', 3
-                 );
-                 INSERT INTO agent_pending_actions (
-                     action_id, run_id, conversation_id, assistant_message_id,
-                     action_type, tool_name, tool_call_id, status, target_status,
-                     action_json, agent_input_json, created_at, updated_at
-                 ) VALUES
-                    (
-                     'linked-action-v27', 'linked-run-v27', 'conversation-v27',
-                     'assistant-v27-ordinary', 'tool', 'linked_tool', NULL,
-                     'pending', NULL, '{}', '{}', 2, 2
-                    ),
-                    (
-                     'global-action-sentinel', 'global-run-sentinel', NULL, NULL,
-                     'tool', 'global_tool', NULL, 'pending', NULL, '{}', '{}', 3, 3
-                    );
-                 INSERT INTO agent_action_audit (
-                     action_id, run_id, conversation_id, assistant_message_id,
-                     action_type, tool_name, status, action_json, created_at
-                 ) VALUES
-                    (
-                     'linked-audit-v27', 'linked-run-v27', 'conversation-v27',
-                     'assistant-v27-ordinary', 'tool', 'linked_tool', 'pending', '{}', 2
-                    ),
-                    (
-                     'global-audit-sentinel', 'global-run-sentinel', NULL, NULL,
-                     'tool', 'global_tool', 'pending', '{}', 3
-                    );
-                 INSERT INTO mcp_approval_payload_envelopes (
-                     invocation_id, action_id, envelope_version, envelope_json,
-                     aad_digest, created_at, expires_at
-                 ) VALUES
-                    (
-                     'linked-invocation-v27', 'linked-action-v27', 1, '{}',
-                     'linked-aad', 2, 20
-                    ),
-                    (
-                     'global-invocation-sentinel', 'global-action-sentinel', 1, '{}',
-                     'global-aad', 3, 30
-                 );",
-            )
-            .unwrap();
-        let tool_id = format!(
-            "provider-continuation-v1:{}",
-            uuid::Uuid::new_v4().hyphenated()
-        );
-        let ordinary_id = format!(
-            "provider-continuation-v1:{}",
-            uuid::Uuid::new_v4().hyphenated()
-        );
-        for (continuation_id, assistant_message_id, run_id, request_index) in [
-            (&tool_id, "assistant-v27-tool", "run-v27-tool", 0_i64),
-            (
-                &ordinary_id,
-                "assistant-v27-ordinary",
-                "run-v27-ordinary",
-                0_i64,
-            ),
-        ] {
-            connection
-                .execute(
-                    "INSERT INTO provider_continuations (
-                         continuation_id, schema_version, envelope_version,
-                         conversation_id, assistant_message_id, run_id, request_index,
-                         assistant_turn_id, assistant_turn_digest, provider_protocol_digest,
-                         state, superseded_by, compression, encryption,
-                         payload_digest, nonce, ciphertext, decoded_bytes, compressed_bytes,
-                         created_at, updated_at, released_at, activated_at
-                     ) VALUES (
-                         ?1, 1, 1, 'conversation-v27', ?2, ?3, ?4,
-                         ?5, ?6, ?7, 'active', NULL, 'zstd_binary_v1',
-                         'chacha20_poly1305_v1', ?8, ?9, ?10, 1, 1, 2, 2, NULL, 2
-                     )",
-                    rusqlite::params![
-                        continuation_id,
-                        assistant_message_id,
-                        run_id,
-                        request_index,
-                        format!("at1_{}", "a".repeat(64)),
-                        format!("sha256:{}", "b".repeat(64)),
-                        format!("sha256:{}", "c".repeat(64)),
-                        format!("sha256:{}", "d".repeat(64)),
-                        vec![1_u8; 12],
-                        vec![2_u8; 17],
-                    ],
-                )
-                .unwrap();
-        }
-        connection
-            .execute(
-                "INSERT INTO provider_continuation_tool_calls (
-                     continuation_id, provider_tool_index, runtime_call_id
-                 ) VALUES (?1, 0, 'runtime-call-v27')",
-                [&tool_id],
-            )
-            .unwrap();
-        (tool_id, ordinary_id)
-    }
-
-    fn seed_v27_configuration(connection: &Connection) {
-        connection
-            .execute_batch(
-                "INSERT INTO model_provider_settings (
+                 INSERT INTO model_provider_settings (
                      id, api_url, api_token, search_mode, tavily_api_key,
                      configuration_revision, search_connection_revision, updated_at
                  ) VALUES (
-                     'default', 'https://global.example/v1', 'global-token-sentinel',
-                     'tavily', 'tavily-token-sentinel',
-                     'model-settings-v1:00000000-0000-4000-8000-000000000101',
-                     'search-connection-v1:00000000-0000-4000-8000-000000000102', 101
+                     'default', 'https://provider.example/v1', 'token-sentinel',
+                     'tavily', 'search-token-sentinel',
+                     'model-settings-v1:fixture', 'search-connection-v1:fixture', 3
                  );
                  INSERT INTO models (
                      id, display_name, api_url_override, api_token_override,
@@ -724,455 +252,199 @@ CREATE TABLE provider_continuations (
                      provider_connection_revision, provider_protocol_revision,
                      input_price, cached_input_price, output_price, enabled, position,
                      created_at, updated_at
-                 ) VALUES
-                    (
-                     'generic-model', 'Generic sentinel', NULL, NULL, 1, 131072,
+                 ) VALUES (
+                     'language-model-v28', 'Language model v28',
+                     'https://model.example/v1', 'model-token-sentinel', 1, 131072,
                      '{\"schemaVersion\":1,\"profile\":{\"id\":\"generic_openai_chat\",\"version\":1},\"reasoning\":{\"mode\":\"provider_default\",\"effort\":\"provider_default\"}}',
-                     'provider-connection-v1:00000000-0000-4000-8000-000000000103',
-                     'provider-protocol-v1:00000000-0000-4000-8000-000000000104',
-                     '1.25', '0.125', '5.5', 1, 4, 102, 103
-                    ),
-                    (
-                     'deepseek-model', 'DeepSeek sentinel',
-                     'https://model.example/v1', 'model-token-sentinel', 0, 65536,
-                     '{\"schemaVersion\":1,\"profile\":{\"id\":\"deepseek_v4_chat\",\"version\":1},\"reasoning\":{\"mode\":\"enabled\",\"effort\":\"high\"}}',
-                     'provider-connection-v1:00000000-0000-4000-8000-000000000105',
-                     'provider-protocol-v1:00000000-0000-4000-8000-000000000106',
-                     '2.0', '', '8.0', 0, 9, 104, 105
-                    );
+                     'provider-connection-v1:fixture', 'provider-protocol-v1:fixture',
+                     '1.25', '0.125', '5.5', 1, 7, 3, 4
+                 );
                  INSERT INTO image_generation_profiles (
                      id, schema_version, adapter_id, endpoint_url, model_id,
                      credential_ref, enabled, text_to_image, image_to_image,
                      default_size_preset, default_watermark, generation,
                      created_at, updated_at
                  ) VALUES (
-                     'image-profile-sentinel', 1, 'smartmlSeedream',
-                     'https://image.example/generate', 'seedream-sentinel',
-                     'credential-ref-sentinel', 0, 1, 1, '2K', 0, 17, 106, 107
-                 );
-                 INSERT INTO image_generation_credential_staging (
-                     credential_ref, profile_id, expected_generation, created_at
-                 ) VALUES (
-                     'staged-credential-sentinel', 'image-profile-sentinel', 18, 108
-                 );
-                 INSERT INTO image_generation_credential_cleanup (
-                     credential_ref, created_at
-                 ) VALUES ('cleanup-credential-sentinel', 109);",
-            )
-            .unwrap();
-        connection
-            .execute_batch(
-                "INSERT INTO ui_preferences (
-                     id, sidebar_conversation_sort, sidebar_project_sort,
-                     sidebar_section_order, sidebar_project_order_json,
-                     profile_display_name, profile_handle, custom_read_permission,
-                     custom_write_permission, custom_command_permission,
-                     custom_patch_permission, updated_at
-                 ) VALUES (
-                     'default', 'updated_desc', 'manual', 'projects_first',
-                     '[\"project-sentinel\"]', 'Sentinel User', 'SENTINEL',
-                     'workspace_only', 'workspace_only', 'require_approval',
-                     'require_approval', 110
-                 );
-                 INSERT INTO agent_prompt_preferences (
-                     id, work_mode, tone, detail_level, custom_instructions, updated_at
-                 ) VALUES (
-                     'default', 'agent', 'direct', 'detailed',
-                     'prompt preference sentinel', 111
-                 );
-                 INSERT INTO skill_enablement_overrides (
-                     skill_id, enabled, generation, updated_at
-                 ) VALUES ('skill-sentinel', 0, 7, 112);
-                 UPDATE notification_settings
-                 SET enabled = 0, sound_enabled = 0, show_task_content = 0,
-                     human_completed_enabled = 0, human_failed_enabled = 1,
-                     human_approval_enabled = 0, human_cancelled_enabled = 1,
-                     revision = 9, updated_at = 113
-                 WHERE singleton_id = 1;
-                 UPDATE browser_download_settings
-                 SET location_mode = 'custom', custom_directory = '/tmp/browser-sentinel',
-                     ask_where_to_save = 1, revision = 8, updated_at = 114
-                 WHERE id = 'default';
-                 UPDATE browser_preferences
-                 SET link_open_target = 'builtin', revision = 6, updated_at = 115
-                 WHERE id = 'default';
-                 INSERT INTO browser_history (
-                     history_id, schema_version, url, title, hostname, favicon_url, visited_at
-                 ) VALUES (
-                     'browser-history:00000000-0000-4000-8000-000000000001', 1,
-                     'https://browser.example/sentinel', 'Browser sentinel',
-                     'browser.example', 'https://browser.example/favicon.ico', 116
-                 );
-                 INSERT INTO mcp_registry_metadata (
-                     singleton, schema_version, revision_watermark, updated_at
-                 ) VALUES (1, 1, 23, 117);
-                 INSERT INTO automations (
-                     id, schema_version, create_request_id, title, prompt,
-                     status, health_state, blocked_code, blocked_message,
-                     destination_kind, target_conversation_id, project_binding_kind,
-                     project_id, model_id, permission_mode, permission_mode_version,
-                     permissions_json, reasoning_json, schedule_kind, schedule_json,
-                     rrule, timezone, anchor_at, next_run_at, last_scheduled_at,
-                     last_run_at, notification_policy, target_project_snapshot,
-                     target_conversation_snapshot, target_model_snapshot,
-                     target_project_id_snapshot, target_conversation_id_snapshot,
-                     target_model_id_snapshot, attention_required_at, attention_read_at,
-                     revision, created_at, updated_at, deleted_at
-                 ) VALUES (
-                     'automation-sentinel', 1, 'automation-create-sentinel',
-                     'Automation sentinel', 'Preserve this automation',
-                     'paused', 'ok', NULL, NULL, 'new_chat', NULL, 'none',
-                     NULL, 'generic-model', 'default', 1, '{}', '{}',
-                     'interval', '{\"intervalMs\":60000}',
-                     'FREQ=MINUTELY;INTERVAL=1', 'UTC', 118, NULL, NULL, NULL,
-                     'all_runs', NULL, NULL, 'Generic sentinel', NULL, NULL,
-                     'generic-model', NULL, NULL, 1, 118, 119, NULL
-                 );
-                 INSERT INTO automation_runs (
-                     id, schema_version, automation_id, config_revision,
-                     config_snapshot_json, trigger_kind, scheduled_for,
-                     manual_request_id, status, status_revision, retry_at,
-                     admission_attempt, admission_token, admission_expires_at,
-                     cancellation_requested_at, agent_run_id, conversation_id,
-                     user_message_id, assistant_message_id, report_kind,
-                     result_preview, error_code, error_message,
-                     attention_required_at, attention_read_at,
-                     created_at, started_at, completed_at, updated_at
-                 ) VALUES (
-                     'automation-run-sentinel', 1, 'automation-sentinel', 1, '{}',
-                     'scheduled', 120, NULL, 'completed', 1, NULL, 0, NULL,
-                     NULL, NULL, NULL, NULL, NULL, NULL, 'completed',
-                     'automation result sentinel', NULL, NULL, NULL, NULL,
-                     120, 121, 122, 122
+                     'image-profile-v28', 1, 'smartmlSeedream',
+                     'https://image.example/generate', 'image-model-v28',
+                     'image-credential-v28', 1, 1, 1, '2K', 0, 4, 3, 4
                  );",
             )
             .unwrap();
     }
 
-    fn snapshot_tables(
-        connection: &Connection,
-        tables: &[&str],
-    ) -> Vec<(String, Vec<Vec<rusqlite::types::Value>>)> {
-        tables
-            .iter()
-            .map(|table| {
-                let columns = {
-                    let mut statement = connection
-                        .prepare(&format!("PRAGMA table_info({})", quote_identifier(table)))
-                        .unwrap();
-                    statement
-                        .query_map([], |row| row.get::<_, String>(1))
-                        .unwrap()
-                        .collect::<rusqlite::Result<Vec<_>>>()
-                        .unwrap()
-                };
-                let projection = columns
-                    .iter()
-                    .map(|column| quote_identifier(column))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                let mut statement = connection
-                    .prepare(&format!(
-                        "SELECT {projection} FROM {} ORDER BY rowid",
-                        quote_identifier(table)
-                    ))
-                    .unwrap();
-                let rows = statement
-                    .query_map([], |row| {
-                        (0..columns.len())
-                            .map(|index| row.get::<_, rusqlite::types::Value>(index))
-                            .collect::<rusqlite::Result<Vec<_>>>()
-                    })
-                    .unwrap()
-                    .collect::<rusqlite::Result<Vec<_>>>()
-                    .unwrap();
-                ((*table).to_string(), rows)
-            })
-            .collect()
-    }
-
-    fn table_row_count(connection: &Connection, table: &str) -> i64 {
-        connection
-            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
-                row.get(0)
-            })
-            .unwrap()
-    }
-
     #[test]
-    fn conversation_history_table_list_matches_the_canonical_foreign_key_closure() {
+    fn v28_to_v29_removes_legacy_ui_state_without_backfill() {
         let connection = Connection::open_in_memory().unwrap();
+        create_v28_fixture(&connection);
+        seed_v28_message_with_ui_state(&connection);
+
         run_migrations(&connection).unwrap();
-        let actual = {
-            let mut statement = connection
-                .prepare(
-                    "WITH RECURSIVE
-                         foreign_keys(child, parent, on_delete) AS (
-                             SELECT schema.name, foreign_key.[table], upper(foreign_key.on_delete)
-                             FROM sqlite_schema AS schema
-                             JOIN pragma_foreign_key_list(schema.name) AS foreign_key
-                             WHERE schema.type = 'table'
-                         ),
-                         history(name) AS (
-                             VALUES ('conversations')
-                             UNION
-                             SELECT foreign_keys.child
-                             FROM foreign_keys
-                             JOIN history ON foreign_keys.parent = history.name
-                             WHERE foreign_keys.on_delete NOT IN ('SET NULL', 'SET DEFAULT')
-                         )
-                     SELECT name FROM history ORDER BY name",
-                )
-                .unwrap();
-            statement
-                .query_map([], |row| row.get::<_, String>(0))
-                .unwrap()
-                .collect::<rusqlite::Result<Vec<_>>>()
-                .unwrap()
-        };
-        let mut expected = CONVERSATION_HISTORY_TABLES
-            .iter()
-            .map(|table| (*table).to_string())
-            .chain(std::iter::once("conversations".to_string()))
-            .collect::<Vec<_>>();
-        expected.sort();
-        expected.dedup();
-        assert_eq!(actual, expected);
-    }
-
-    #[test]
-    fn v27_to_v28_selective_reset_preserves_configuration_and_clears_history() {
-        let fixture = tempfile::tempdir().unwrap();
-        let database_path = fixture.path().join("provider-continuation-v27.sqlite");
-        let connection = Connection::open(&database_path).unwrap();
-        downgrade_fresh_schema_to_v27(&connection);
-        seed_v27_configuration(&connection);
-        seed_v27_history(&connection);
-        let configuration_before = snapshot_tables(&connection, PRESERVED_SENTINEL_TABLES);
-        assert_eq!(table_row_count(&connection, "conversation_history_fts"), 2);
-        assert_eq!(table_row_count(&connection, "notification_events"), 1);
-        assert_eq!(table_row_count(&connection, "notification_batches"), 1);
-        assert_eq!(table_row_count(&connection, "notification_batch_items"), 1);
-        assert_eq!(
-            table_row_count(&connection, "notification_change_events"),
-            1
-        );
-        drop(connection);
-
-        let mut reopened = Connection::open(&database_path).unwrap();
-        run_migrations(&reopened).unwrap();
 
         assert_eq!(
-            read_schema_version(&reopened).unwrap(),
+            read_schema_version(&connection).unwrap(),
             STORAGE_SCHEMA_VERSION
         );
         assert_eq!(
-            schema_fingerprint(&reopened).unwrap(),
+            schema_fingerprint(&connection).unwrap(),
             CANONICAL_SCHEMA_FINGERPRINT
         );
-        ensure_foreign_keys_are_valid(&reopened).unwrap();
-        assert_eq!(
-            snapshot_tables(&reopened, PRESERVED_SENTINEL_TABLES),
-            configuration_before
-        );
-        assert_eq!(table_row_count(&reopened, "model_provider_settings"), 1);
-        assert_eq!(table_row_count(&reopened, "models"), 2);
-        let hydrated =
-            crate::storage::config_repository::load_model_settings_snapshot(&mut reopened)
-                .unwrap()
-                .unwrap();
-        assert_eq!(hydrated.settings.api_url, "https://global.example/v1");
-        assert_eq!(hydrated.settings.api_token, "global-token-sentinel");
-        assert_eq!(hydrated.settings.search_mode, "tavily");
-        assert_eq!(hydrated.settings.tavily_api_key, "tavily-token-sentinel");
-        assert_eq!(hydrated.settings.models.len(), 2);
-        assert_eq!(
-            hydrated.settings.models[0]
-                .provider_profile_config
-                .profile(),
-            crate::ProviderProfileRef::generic_for_dialect(
-                crate::ProviderProtocolDialect::OpenAiChatCompletions,
-            )
-        );
-        assert_eq!(
-            hydrated.settings.models[1]
-                .provider_profile_config
-                .profile(),
-            crate::ProviderProfileRef::deepseek_v4_chat()
-        );
-        assert_eq!(
-            hydrated.settings.models[1].api_url_override.as_deref(),
-            Some("https://model.example/v1")
-        );
-        assert_eq!(
-            hydrated.settings.models[1].api_token_override.as_deref(),
-            Some("model-token-sentinel")
-        );
-        assert_eq!(table_row_count(&reopened, "image_generation_profiles"), 1);
-        let image_profile =
-            crate::storage::image_generation_repository::load_image_generation_profile(
-                &reopened,
-                "image-profile-sentinel",
-            )
-            .unwrap()
-            .unwrap();
-        assert_eq!(image_profile.endpoint_url, "https://image.example/generate");
-        assert_eq!(image_profile.model_id, "seedream-sentinel");
-        assert_eq!(
-            image_profile.credential_ref.as_deref(),
-            Some("credential-ref-sentinel")
-        );
-        assert_eq!(
-            table_row_count(&reopened, "image_generation_credential_staging"),
-            1
-        );
-        assert_eq!(
-            table_row_count(&reopened, "image_generation_credential_cleanup"),
-            1
-        );
-        for history_table in [
-            "conversations",
-            "messages",
-            "attachments",
-            "provider_continuations",
-            "provider_continuation_tool_calls",
-            "conversation_history_fts",
-            "notification_events",
-            "notification_batches",
-            "notification_batch_items",
-            "notification_change_events",
-        ] {
-            assert_eq!(
-                table_row_count(&reopened, history_table),
-                0,
-                "{history_table} was not cleared"
-            );
-        }
-        for (table, global_id_column, global_id, linked_id) in [
-            (
-                "composer_drafts",
-                "scope_id",
-                "new-conversation",
-                "conversation-v27",
-            ),
-            (
-                "agent_pending_actions",
-                "action_id",
-                "global-action-sentinel",
-                "linked-action-v27",
-            ),
-            (
-                "agent_action_audit",
-                "action_id",
-                "global-audit-sentinel",
-                "linked-audit-v27",
-            ),
-            (
-                "mcp_approval_payload_envelopes",
-                "invocation_id",
-                "global-invocation-sentinel",
-                "linked-invocation-v27",
-            ),
-        ] {
-            assert_eq!(
-                reopened
-                    .query_row(
-                        &format!(
-                            "SELECT COUNT(*) FROM {} WHERE {} = ?1",
-                            quote_identifier(table),
-                            quote_identifier(global_id_column)
-                        ),
-                        [global_id],
-                        |row| row.get::<_, i64>(0),
-                    )
-                    .unwrap(),
-                1,
-                "global sentinel in {table} was not preserved"
-            );
-            assert_eq!(
-                reopened
-                    .query_row(
-                        &format!(
-                            "SELECT COUNT(*) FROM {} WHERE {} = ?1",
-                            quote_identifier(table),
-                            quote_identifier(global_id_column)
-                        ),
-                        [linked_id],
-                        |row| row.get::<_, i64>(0),
-                    )
-                    .unwrap(),
-                0,
-                "conversation-owned row in {table} was not cleared"
-            );
-        }
-    }
-
-    #[test]
-    fn v27_to_v28_selective_reset_failure_rolls_back_configuration_history_and_schema() {
-        let fixture = tempfile::tempdir().unwrap();
-        let database_path = fixture
-            .path()
-            .join("provider-continuation-v27-rollback.sqlite");
-        let connection = Connection::open(&database_path).unwrap();
-        downgrade_fresh_schema_to_v27(&connection);
-        seed_v27_configuration(&connection);
-        let (tool_id, ordinary_id) = seed_v27_history(&connection);
-        let configuration_before = snapshot_tables(&connection, PRESERVED_SENTINEL_TABLES);
-
-        assert!(reset_v27_to_v28_preserving_configuration(&connection, true).is_err());
-        assert!(connection
-            .pragma_query_value(None, "foreign_keys", |row| row.get::<_, bool>(0))
-            .unwrap());
-        assert_eq!(read_schema_version(&connection).unwrap(), 27);
-        assert_eq!(
-            schema_fingerprint(&connection).unwrap(),
-            STORAGE_SCHEMA_V27_FINGERPRINT
-        );
-        assert_eq!(
-            snapshot_tables(&connection, PRESERVED_SENTINEL_TABLES),
-            configuration_before
-        );
         assert_eq!(
             connection
                 .query_row(
-                    "SELECT COUNT(*) FROM provider_continuations
-                     WHERE continuation_id IN (?1, ?2)",
-                    rusqlite::params![tool_id, ordinary_id],
-                    |row| row.get::<_, i64>(0),
-                )
-                .unwrap(),
-            2
-        );
-        assert_eq!(
-            connection
-                .query_row(
-                    "SELECT runtime_call_id
-                     FROM provider_continuation_tool_calls
-                     WHERE continuation_id = ?1",
-                    [&tool_id],
+                    "SELECT content FROM messages WHERE id = 'message-v28'",
+                    [],
                     |row| row.get::<_, String>(0),
                 )
                 .unwrap(),
-            "runtime-call-v27"
+            "preserved"
         );
-        assert_eq!(table_row_count(&connection, "conversations"), 1);
-        assert_eq!(table_row_count(&connection, "messages"), 2);
-        assert_eq!(table_row_count(&connection, "attachments"), 1);
-        assert_eq!(table_row_count(&connection, "composer_drafts"), 2);
-        assert_eq!(table_row_count(&connection, "agent_pending_actions"), 2);
-        assert_eq!(table_row_count(&connection, "agent_action_audit"), 2);
         assert_eq!(
-            table_row_count(&connection, "mcp_approval_payload_envelopes"),
-            2
+            connection
+                .query_row(
+                    "SELECT api_url, api_token, search_mode, tavily_api_key
+                     FROM model_provider_settings WHERE id = 'default'",
+                    [],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, String>(3)?,
+                        ))
+                    },
+                )
+                .unwrap(),
+            (
+                "https://provider.example/v1".to_string(),
+                "token-sentinel".to_string(),
+                "tavily".to_string(),
+                "search-token-sentinel".to_string(),
+            )
         );
-        assert_eq!(table_row_count(&connection, "conversation_history_fts"), 2);
-        assert_eq!(table_row_count(&connection, "notification_events"), 1);
-        assert_eq!(table_row_count(&connection, "notification_batches"), 1);
-        assert_eq!(table_row_count(&connection, "notification_batch_items"), 1);
         assert_eq!(
-            table_row_count(&connection, "notification_change_events"),
-            1
+            connection
+                .query_row(
+                    "SELECT display_name, api_url_override, api_token_override,
+                            context_window_tokens, enabled
+                     FROM models WHERE id = 'language-model-v28'",
+                    [],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, i64>(3)?,
+                            row.get::<_, i64>(4)?,
+                        ))
+                    },
+                )
+                .unwrap(),
+            (
+                "Language model v28".to_string(),
+                "https://model.example/v1".to_string(),
+                "model-token-sentinel".to_string(),
+                131072,
+                1,
+            )
         );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT endpoint_url, model_id, credential_ref
+                     FROM image_generation_profiles WHERE id = 'image-profile-v28'",
+                    [],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                        ))
+                    },
+                )
+                .unwrap(),
+            (
+                "https://image.example/generate".to_string(),
+                "image-model-v28".to_string(),
+                "image-credential-v28".to_string(),
+            )
+        );
+        assert!(!connection
+            .prepare("PRAGMA table_info(messages)")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap()
+            .iter()
+            .any(|column| column == "ui_state_json"));
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM chat_message_ui_states", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap(),
+            0
+        );
+
+        let revision_before = connection
+            .query_row(
+                "SELECT revision FROM conversations WHERE id = 'conversation-v28'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO chat_message_ui_states (message_id, ui_state_json)
+                 VALUES ('message-v28', '{\"isBookmarked\":true}')",
+                [],
+            )
+            .unwrap();
+        let revision_after = connection
+            .query_row(
+                "SELECT revision FROM conversations WHERE id = 'conversation-v28'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap();
+        assert_eq!(revision_after, revision_before);
+        ensure_foreign_keys_are_valid(&connection).unwrap();
+    }
+
+    #[test]
+    fn v28_to_v29_failure_rolls_back_schema_and_legacy_ui_state() {
+        let connection = Connection::open_in_memory().unwrap();
+        create_v28_fixture(&connection);
+        seed_v28_message_with_ui_state(&connection);
+
+        assert!(migrate_v28_to_v29(&connection, true).is_err());
+
+        assert_eq!(read_schema_version(&connection).unwrap(), 28);
+        assert_eq!(
+            schema_fingerprint(&connection).unwrap(),
+            STORAGE_SCHEMA_V28_FINGERPRINT
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT ui_state_json FROM messages WHERE id = 'message-v28'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "{\"isBookmarked\":true}"
+        );
+        assert!(connection
+            .query_row(
+                "SELECT 1 FROM sqlite_schema
+                 WHERE type = 'table' AND name = 'chat_message_ui_states'",
+                [],
+                |_| Ok(()),
+            )
+            .optional()
+            .unwrap()
+            .is_none());
         ensure_foreign_keys_are_valid(&connection).unwrap();
     }
 
@@ -1300,7 +572,8 @@ CREATE TABLE provider_continuations (
             "validate_agent_message_projection_update",
             "prevent_agent_message_projection_rewrite",
             "prevent_agent_message_projection_delete",
-            "prevent_agent_message_projection_ui_rewrite",
+            "prevent_agent_message_projection_run_state_rewrite",
+            "chat_message_ui_states",
             "validate_agent_mailbox_acknowledgement",
             "prevent_agent_bound_conversation_fork_insert",
             "prevent_conversation_fork_update",
@@ -1935,10 +1208,10 @@ CREATE TABLE provider_continuations (
              ) VALUES ('conversation-active', NULL, NULL, 'Active', 1, 1, NULL, NULL, NULL);
              INSERT INTO messages (
                 id, conversation_id, role, content, status, agent_run_json,
-                ui_state_json, created_at, position
+                created_at, position
              ) VALUES
-                ('assistant-active-1', 'conversation-active', 'assistant', '', 'pending', NULL, NULL, 1, 0),
-                ('assistant-active-2', 'conversation-active', 'assistant', '', 'pending', NULL, NULL, 2, 1);
+                ('assistant-active-1', 'conversation-active', 'assistant', '', 'pending', NULL, 1, 0),
+                ('assistant-active-2', 'conversation-active', 'assistant', '', 'pending', NULL, 2, 1);
              INSERT INTO conversation_turn_traces (
                 assistant_message_id, conversation_id, run_id, schema_version,
                 terminal_status, terminal_error, truncated, created_at, updated_at, completed_at
@@ -2654,10 +1927,10 @@ CREATE TABLE provider_continuations (
             .execute(
                 "INSERT INTO messages (
                      id, conversation_id, role, content, status,
-                     agent_run_json, ui_state_json, created_at, position
+                     agent_run_json, created_at, position
                  ) VALUES (
                      'legacy-user', 'legacy-conversation', 'user', 'hello', 'sent',
-                     NULL, NULL, 1, 0
+                     NULL, 1, 0
                  )",
                 [],
             )

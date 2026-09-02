@@ -21,6 +21,7 @@ const COPY_VISIBLE_HISTORY_TABLES: &[&str] = &[
     "agent_turn_diff_files",
     "agent_turn_diffs",
     "attachments",
+    "chat_message_ui_states",
     "context_compaction_receipts",
     "context_compaction_summaries",
     "context_compaction_summary_lineage",
@@ -171,6 +172,10 @@ fn high_risk_fork_policies_stay_explicit() {
     assert_eq!(
         policies.get("composer_drafts"),
         Some(&ForkDataPolicy::Reinitialize)
+    );
+    assert_eq!(
+        policies.get("chat_message_ui_states"),
+        Some(&ForkDataPolicy::CopyVisibleHistory)
     );
     assert_eq!(
         policies.get("agent_action_audit"),

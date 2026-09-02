@@ -1,6 +1,6 @@
 ---
 title: 常见问答
-description: 关于 MyCopilot 数据、模型、权限、扩展和自动化的常见问题。
+description: 关于 Captain Who 数据、模型、权限、扩展和自动化的常见问题。
 status: current
 audience: user
 owner: support
@@ -9,7 +9,7 @@ last_verified: 2026-08-31
 
 # 常见问答
 
-## MyCopilot 能离线使用吗？
+## Captain Who 能离线使用吗？
 
 界面、项目历史和许多本地 Tool 是本地运行的，但语言模型请求通常需要连接你配置的 Provider。联网搜索、网页访问、图片生成、GitHub Skill 安装以及会联网的 MCP Server 也需要网络。
 
@@ -17,7 +17,7 @@ last_verified: 2026-08-31
 
 不必。当前支持 OpenAI-compatible、Anthropic-compatible 和 DeepSeek V4 Chat 对应的适配方式，但具体端点必须满足协议要求。兼容网关需要自行验证。
 
-## MyCopilot 会自动收费吗？
+## Captain Who 会自动收费吗？
 
 应用显示的费用是根据用户填写的每千 Token 单价计算的本地估算，不是服务商账单。模型、搜索、图片生成和第三方工具是否收费，由相应服务商决定。
 
@@ -39,7 +39,7 @@ Skill 主要告诉 Agent“怎样做”；MCP Server 主要提供“可以调用
 
 ## Scheduled Automation 会在应用退出后继续运行吗？
 
-不会。它不是操作系统后台服务，只有 MyCopilot 与 Core Server 运行时才会启动任务。离线期间错过的多个计划时间会在下次启动合并为一次恢复运行，而不是逐次补跑。
+不会。它不是操作系统后台服务，只有 Captain Who 与 Core Server 运行时才会启动任务。离线期间错过的多个计划时间会在下次启动合并为一次恢复运行，而不是逐次补跑。
 
 ## 暂停 Automation 会停止当前 Run 吗？
 
@@ -47,7 +47,7 @@ Skill 主要告诉 Agent“怎样做”；MCP Server 主要提供“可以调用
 
 ## 移除项目会删除项目文件吗？
 
-不会修改项目目录中的文件，但会永久移除 MyCopilot 中该项目的本地对话、消息和附件记录。操作前应确认不再需要这些历史。
+不会修改项目目录中的文件，但会永久移除 Captain Who 中该项目的本地对话、消息和附件记录。操作前应确认不再需要这些历史。
 
 ## 是否支持自动更新？
 

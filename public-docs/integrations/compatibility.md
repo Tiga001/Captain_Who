@@ -1,6 +1,6 @@
 ---
 title: 集成兼容性
-description: 查看 MyCopilot 当前对 Provider、Skill、MCP 和文件能力的支持范围。
+description: 查看 Captain Who 当前对 Provider、Skill、MCP 和文件能力的支持范围。
 status: current
 audience: user
 owner: product

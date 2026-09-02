@@ -1,6 +1,6 @@
 ---
 title: 连接 MCP Server
-description: 在 MyCopilot 中安全配置和使用本机 stdio MCP Server。
+description: 在 Captain Who 中安全配置和使用本机 stdio MCP Server。
 status: current
 audience: user
 owner: developer-relations
@@ -9,7 +9,7 @@ last_verified: 2026-08-23
 
 # 连接 MCP Server
 
-MCP（Model Context Protocol）让 Agent 使用外部 Server 提供的 Tool。MyCopilot 当前面向用户开放的是**本机 stdio MCP Server**：应用启动一个本地程序，并通过标准输入输出通信。
+MCP（Model Context Protocol）让 Agent 使用外部 Server 提供的 Tool。Captain Who 当前面向用户开放的是**本机 stdio MCP Server**：应用启动一个本地程序，并通过标准输入输出通信。
 
 ## 准备信息
 

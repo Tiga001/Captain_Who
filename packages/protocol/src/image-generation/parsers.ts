@@ -213,14 +213,26 @@ export function parseImageGenerationGetConfigurationOutput(
 ): ImageGenerationGetConfigurationOutput {
   const context = 'Image generation configuration response'
   const record = expectRecord(value, context)
-  expectOnlyKeys(record, ['schemaVersion', 'configuration'] as const, context)
+  expectOnlyKeys(record, ['schemaVersion', 'configuration', 'apiKey'] as const, context)
   expectSchemaVersion(record, IMAGE_GENERATION_CONFIGURATION_SCHEMA_VERSION, context)
+  const configuration = parseImageGenerationConfiguration(
+    record.configuration,
+    `${context}.configuration`
+  )
+  const apiKey =
+    record.apiKey === null
+      ? null
+      : parseImageGenerationCredentialValue(record.apiKey, `${context}.apiKey`)
+  if ((configuration.credentialStatus === 'configured') !== (apiKey !== null)) {
+    throw invalidProtocolValue(
+      `${context}.apiKey`,
+      'must be present exactly when credentialStatus is configured'
+    )
+  }
   return {
     schemaVersion: IMAGE_GENERATION_CONFIGURATION_SCHEMA_VERSION,
-    configuration: parseImageGenerationConfiguration(
-      record.configuration,
-      `${context}.configuration`
-    )
+    configuration,
+    apiKey
   }
 }
 
@@ -556,22 +568,27 @@ function parseImageGenerationCredentialMutation(
       return { type: 'clear' }
     case 'replace': {
       expectOnlyKeys(record, ['type', 'value'] as const, context)
-      const credential = expectBoundedNonEmptyString(
-        record.value,
-        IMAGE_GENERATION_CREDENTIAL_MAX_LENGTH,
-        `${context}.value`
-      )
-      if (credential !== credential.trim()) {
-        throw invalidProtocolValue(`${context}.value`, 'must not contain surrounding whitespace')
-      }
-      if (/\s/u.test(credential)) {
-        throw invalidProtocolValue(`${context}.value`, 'must not contain whitespace')
-      }
+      const credential = parseImageGenerationCredentialValue(record.value, `${context}.value`)
       return { type: 'replace', value: credential }
     }
     default:
       throw invalidProtocolValue(context, `unknown type ${String(record.type)}`)
   }
+}
+
+function parseImageGenerationCredentialValue(value: unknown, context: string): string {
+  const credential = expectBoundedNonEmptyString(
+    value,
+    IMAGE_GENERATION_CREDENTIAL_MAX_LENGTH,
+    context
+  )
+  if (credential !== credential.trim()) {
+    throw invalidProtocolValue(context, 'must not contain surrounding whitespace')
+  }
+  if (/\s/u.test(credential)) {
+    throw invalidProtocolValue(context, 'must not contain whitespace')
+  }
+  return credential
 }
 
 function expectAdapterId(value: unknown, context: string): 'smartmlSeedream' {

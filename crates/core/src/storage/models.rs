@@ -461,7 +461,6 @@ pub struct ChatMessageStateRecord {
     pub content: String,
     pub status: Option<String>,
     pub agent_run_json: Option<String>,
-    pub ui_state_json: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]

@@ -785,11 +785,11 @@ mod tests {
                     ('conversation-2', NULL, NULL, 'Two', 1, 1, NULL, NULL, NULL);
                  INSERT INTO messages (
                     id, conversation_id, role, content, status, agent_run_json,
-                    ui_state_json, created_at, position
+                    created_at, position
                  ) VALUES
-                    ('user-1', 'conversation-1', 'user', 'first exact request at 09:02', 'sent', NULL, NULL, 1000, 0),
-                    ('assistant-1', 'conversation-1', 'assistant', 'final answer', 'sent', NULL, NULL, 2000, 1),
-                    ('other-user', 'conversation-2', 'user', 'first exact request at 09:02', 'sent', NULL, NULL, 1000, 0);",
+                    ('user-1', 'conversation-1', 'user', 'first exact request at 09:02', 'sent', NULL, 1000, 0),
+                    ('assistant-1', 'conversation-1', 'assistant', 'final answer', 'sent', NULL, 2000, 1),
+                    ('other-user', 'conversation-2', 'user', 'first exact request at 09:02', 'sent', NULL, 1000, 0);",
             )
             .unwrap();
         let trace = ConversationTurnTrace {
@@ -864,10 +864,10 @@ mod tests {
             .execute(
                 "INSERT INTO messages (
                     id, conversation_id, role, content, status, agent_run_json,
-                    ui_state_json, created_at, position
+                    created_at, position
                  ) VALUES (
                     'assistant-command', 'conversation-1', 'assistant', 'started command',
-                    'sent', NULL, NULL, 4000, 2
+                    'sent', NULL, 4000, 2
                  )",
                 [],
             )

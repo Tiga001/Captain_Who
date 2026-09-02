@@ -623,6 +623,34 @@ fn image_generation_update_request_debug_redacts_credentials() {
 }
 
 #[test]
+fn image_generation_configuration_response_serializes_but_does_not_debug_the_api_key() {
+    let secret = "editor-visible-api-key";
+    let response =
+        serde_json::from_value::<ImageGenerationGetConfigurationResponse>(serde_json::json!({
+            "schemaVersion": IMAGE_GENERATION_CONFIGURATION_SCHEMA_VERSION,
+            "configuration": {
+                "adapterId": "smartmlSeedream",
+                "endpointUrl": "https://example.com/images/generations",
+                "modelId": "model",
+                "capabilities": { "textToImage": true, "imageToImage": false },
+                "defaults": { "sizePreset": "2K", "watermark": true },
+                "credentialStatus": "configured",
+                "enabled": true,
+                "readiness": "readyUnverified",
+                "revision": "image-generation:v1:1"
+            },
+            "apiKey": secret
+        }))
+        .unwrap();
+
+    assert_eq!(response.api_key.as_deref(), Some(secret));
+    assert_eq!(serde_json::to_value(&response).unwrap()["apiKey"], secret);
+    let debug = format!("{response:?}");
+    assert!(debug.contains("[REDACTED]"));
+    assert!(!debug.contains(secret));
+}
+
+#[test]
 fn skill_catalog_v4_serializes_explicit_source_and_trust_unions() {
     let response = SkillsListResponse {
         schema_version: SKILL_CATALOG_SCHEMA_VERSION,

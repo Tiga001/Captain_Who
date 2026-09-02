@@ -671,7 +671,6 @@ fn authoritative_usage_repairs_loaded_json_and_rejects_stale_renderer_usage() {
                 })
                 .to_string(),
             ),
-            ui_state_json: None,
         },
     )
     .unwrap();
@@ -721,8 +720,15 @@ fn ui_state_update_never_rewrites_canonical_message_or_agent_run() {
         Option<String>,
     ) = connection
         .query_row(
-            "SELECT content, status, agent_run_json, ui_state_json
-                 FROM messages WHERE id = 'assistant-1'",
+            "SELECT
+                 message.content,
+                 message.status,
+                 message.agent_run_json,
+                 ui_state.ui_state_json
+             FROM messages AS message
+             LEFT JOIN chat_message_ui_states AS ui_state
+               ON ui_state.message_id = message.id
+             WHERE message.id = 'assistant-1'",
             [],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )
@@ -738,6 +744,112 @@ fn ui_state_update_never_rewrites_canonical_message_or_agent_run() {
         ui_state_json.as_deref(),
         Some(r#"{"timelineCollapsed":false}"#)
     );
+}
+
+#[test]
+fn ui_state_overlay_initializes_once_and_stays_independent_from_message_saves() {
+    let mut connection = Connection::open_in_memory().unwrap();
+    migrations::run_migrations(&connection).unwrap();
+    let mut stored = conversation();
+    stored.messages[1].ui_state_json = Some(r#"{"favorited":true}"#.to_string());
+    save_conversation(&mut connection, stored.clone()).unwrap();
+
+    let loaded = get_conversation(&connection, "conversation-1")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        loaded.messages[1].ui_state_json.as_deref(),
+        Some(r#"{"favorited":true}"#)
+    );
+    let revision_before: i64 = connection
+        .query_row(
+            "SELECT revision FROM conversations WHERE id = 'conversation-1'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+
+    update_message_ui_state(
+        &connection,
+        "conversation-1",
+        "assistant-1",
+        Some(r#"{"timelineCollapsed":true}"#),
+    )
+    .unwrap();
+    let revision_after: i64 = connection
+        .query_row(
+            "SELECT revision FROM conversations WHERE id = 'conversation-1'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(revision_after, revision_before);
+
+    stored.messages[1].ui_state_json = Some(r#"{"favorited":false}"#.to_string());
+    save_conversation(&mut connection, stored).unwrap();
+    let loaded = get_conversation(&connection, "conversation-1")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        loaded.messages[1].ui_state_json.as_deref(),
+        Some(r#"{"timelineCollapsed":true}"#)
+    );
+
+    update_message_ui_state(
+        &connection,
+        "wrong-conversation",
+        "assistant-1",
+        Some(r#"{"favorited":false}"#),
+    )
+    .unwrap();
+    update_message_ui_state(
+        &connection,
+        "conversation-1",
+        "missing-message",
+        Some(r#"{"favorited":false}"#),
+    )
+    .unwrap();
+    assert_eq!(
+        get_conversation(&connection, "conversation-1")
+            .unwrap()
+            .unwrap()
+            .messages[1]
+            .ui_state_json
+            .as_deref(),
+        Some(r#"{"timelineCollapsed":true}"#)
+    );
+
+    assert!(
+        update_message_ui_state(&connection, "conversation-1", "assistant-1", Some("{")).is_err()
+    );
+    update_message_ui_state(&connection, "conversation-1", "assistant-1", None).unwrap();
+    assert!(get_conversation(&connection, "conversation-1")
+        .unwrap()
+        .unwrap()
+        .messages[1]
+        .ui_state_json
+        .is_none());
+    let overlay_count: i64 = connection
+        .query_row("SELECT COUNT(*) FROM chat_message_ui_states", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(overlay_count, 0);
+
+    update_message_ui_state(
+        &connection,
+        "conversation-1",
+        "user-1",
+        Some(r#"{"favorited":true}"#),
+    )
+    .unwrap();
+    delete_conversation(&connection, "conversation-1").unwrap();
+    let overlay_count: i64 = connection
+        .query_row("SELECT COUNT(*) FROM chat_message_ui_states", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(overlay_count, 0);
 }
 
 #[test]
@@ -901,7 +1013,6 @@ fn live_save_and_lifecycle_load_preserve_browser_tool_timeline_identity() {
             content: "working".to_string(),
             status: Some("pending".to_string()),
             agent_run_json: Some(current_browser_agent_run().to_string()),
-            ui_state_json: None,
         },
     )
     .unwrap();
@@ -1470,7 +1581,6 @@ fn renderer_live_save_cannot_reopen_a_cancelled_run() {
             content: String::new(),
             status: Some("pending".to_string()),
             agent_run_json: Some(live_running_agent_run().to_string()),
-            ui_state_json: None,
         },
     )
     .unwrap();
@@ -1502,7 +1612,6 @@ fn renderer_live_save_cannot_reopen_a_cancelled_run() {
             content: String::new(),
             status: Some("sent".to_string()),
             agent_run_json: Some(renderer_terminal.to_string()),
-            ui_state_json: None,
         },
     )
     .unwrap();
@@ -1562,7 +1671,6 @@ fn load_repairs_pending_message_when_trace_is_already_cancelled() {
             content: String::new(),
             status: Some("pending".to_string()),
             agent_run_json: Some(live_running_agent_run().to_string()),
-            ui_state_json: None,
         },
     )
     .unwrap();

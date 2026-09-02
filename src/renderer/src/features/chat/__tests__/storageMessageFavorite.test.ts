@@ -1,19 +1,25 @@
 import type { StorageChatConversationRecord } from '@mycopilot/protocol'
-import { expect, it, vi } from 'vitest'
+import { beforeEach, expect, it, vi } from 'vitest'
 import type { ChatMessage } from '../chatTypes'
 
 const storage = vi.hoisted(() => ({
   loadConversation: vi.fn(),
-  saveChatMessageState: vi.fn()
+  saveChatMessageState: vi.fn(),
+  saveChatMessageUiState: vi.fn()
 }))
 
 vi.mock('../../../host/hostClient', () => ({
   hostClient: { storage }
 }))
 
-const { loadConversation, saveChatMessageState } = await import('../../storage/storageClient')
+const { loadConversation, saveChatMessageState, saveChatMessageUiState } =
+  await import('../../storage/storageClient')
 
-it('persists and restores a user message favorite through uiStateJson', async () => {
+beforeEach(() => {
+  vi.clearAllMocks()
+})
+
+it('writes a favorite only through the dedicated UI-state API and restores its projection', async () => {
   const message: ChatMessage = {
     id: 'user-1',
     role: 'user',
@@ -32,7 +38,17 @@ it('persists and restores a user message favorite through uiStateJson', async ()
       id: 'user-1',
       content: 'Keep this request',
       status: 'sent',
-      agentRunJson: null,
+      agentRunJson: null
+    }
+  })
+
+  storage.saveChatMessageUiState.mockResolvedValueOnce(undefined)
+  await saveChatMessageUiState('conversation-1', message.id, message.uiState)
+
+  expect(storage.saveChatMessageUiState).toHaveBeenCalledWith({
+    conversationId: 'conversation-1',
+    message: {
+      id: 'user-1',
       uiStateJson: '{"favorited":true}'
     }
   })
@@ -61,4 +77,19 @@ it('persists and restores a user message favorite through uiStateJson', async ()
 
   const restored = await loadConversation('conversation-1')
   expect(restored?.messages[0]?.uiState).toEqual({ favorited: true })
+})
+
+it('writes timeline collapse changes only through the dedicated UI-state API', async () => {
+  storage.saveChatMessageUiState.mockResolvedValueOnce(undefined)
+
+  await saveChatMessageUiState('conversation-1', 'assistant-1', { timelineCollapsed: true })
+
+  expect(storage.saveChatMessageUiState).toHaveBeenCalledWith({
+    conversationId: 'conversation-1',
+    message: {
+      id: 'assistant-1',
+      uiStateJson: '{"timelineCollapsed":true}'
+    }
+  })
+  expect(storage.saveChatMessageState).not.toHaveBeenCalled()
 })

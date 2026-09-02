@@ -411,9 +411,9 @@ pub(super) fn acknowledge_message_in_transaction(
             "INSERT INTO messages (
                  id, conversation_id, role, content, status,
                  input_origin_kind, input_origin_agent_id, source_agent_message_id,
-                 agent_run_json, ui_state_json, created_at, position
+                 agent_run_json, created_at, position
              ) VALUES (?1, ?2, 'user', ?3, 'sent', 'agent', ?4, ?5,
-                       NULL, NULL, ?6, ?7)",
+                       NULL, ?6, ?7)",
             params![
                 &current.projection_message_id,
                 &recipient.conversation_id,

@@ -7,7 +7,7 @@ last_verified: 2026-08-31
 
 # Scheduled Automation 子系统
 
-本文定义 MyCopilot 的 Automation（定时任务）在配置、调度、Agent 执行、持久化、实时更新和原生通知
+本文定义 Captain Who 的 Automation（定时任务）在配置、调度、Agent 执行、持久化、实时更新和原生通知
 上的当前契约。产品入口名为 **Scheduled**；它与
 [Managed Playwright 浏览器自动化](browser-automation.md)是两个独立子系统。
 

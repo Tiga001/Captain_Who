@@ -5,6 +5,7 @@ import type {
   ImageGenerationSetEnabledInput,
   ImageGenerationUpdateConfigurationInput
 } from '@mycopilot/protocol'
+import { IMAGE_GENERATION_CONFIGURATION_SCHEMA_VERSION } from '@mycopilot/protocol'
 import { describe, expect, it, vi } from 'vitest'
 import {
   createImageGenerationIpcBridge,
@@ -40,7 +41,7 @@ describe('Image generation IPC bridge', () => {
       invoke
     } as unknown as ImageGenerationIpcRenderer)
     const updateInput = {
-      schemaVersion: 1,
+      schemaVersion: IMAGE_GENERATION_CONFIGURATION_SCHEMA_VERSION,
       expectedRevision: 'image-generation:v1:1',
       adapterId: 'smartmlSeedream',
       endpointUrl: 'https://example.test/userapi/v1/images/generations',
@@ -50,7 +51,7 @@ describe('Image generation IPC bridge', () => {
       credentialMutation: { type: 'replace', value: 'secret-that-must-remain-opaque' }
     } satisfies ImageGenerationUpdateConfigurationInput
     const setEnabledInput = {
-      schemaVersion: 1,
+      schemaVersion: IMAGE_GENERATION_CONFIGURATION_SCHEMA_VERSION,
       expectedRevision: 'image-generation:v1:2',
       enabled: true
     } satisfies ImageGenerationSetEnabledInput

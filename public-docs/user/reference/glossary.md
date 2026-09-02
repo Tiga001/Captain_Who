@@ -1,6 +1,6 @@
 ---
 title: 术语表
-description: 用简明语言解释 MyCopilot 用户文档中的核心概念。
+description: 用简明语言解释 Captain Who 用户文档中的核心概念。
 status: current
 audience: user
 owner: product-docs
@@ -63,7 +63,7 @@ Run 在审批或恢复边界保存的安全执行状态，使系统可以在重�
 
 ## Core Server
 
-MyCopilot 本机运行的核心服务，负责 Agent Loop、权限、Tool 编排、定时调度和 SQLite 数据。用户通常不直接操作它。
+Captain Who 本机运行的核心服务，负责 Agent Loop、权限、Tool 编排、定时调度和 SQLite 数据。用户通常不直接操作它。
 
 ## Destination（Scheduled Automation 目标）
 
@@ -87,7 +87,7 @@ Model Context Protocol，一种让应用发现并调用外部工具的协议。�
 
 ## Model / Provider
 
-Model 是具体模型标识；Provider/Profile 描述与模型服务通信的协议和连接配置。MyCopilot 可以为多个模型保存不同配置。
+Model 是具体模型标识；Provider/Profile 描述与模型服务通信的协议和连接配置。Captain Who 可以为多个模型保存不同配置。
 
 ## Multi-Agent
 
@@ -103,7 +103,7 @@ Model 是具体模型标识；Provider/Profile 描述与模型服务通信的协
 
 ## Project（项目）
 
-用户授权给 MyCopilot 的本地工作区及其应用内元数据。移除项目不会删除源目录，但会删除关联的本地应用数据。
+用户授权给 Captain Who 的本地工作区及其应用内元数据。移除项目不会删除源目录，但会删除关联的本地应用数据。
 
 ## 根 Agent（Root Agent）
 

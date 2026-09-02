@@ -2139,10 +2139,13 @@ fn build_message_only_history_plan(
     replacements.insert(source.id.clone(), target_conversation_id.to_string());
     let snapshot_origins =
         fork_snapshot_origins(connection, source, &source_messages, &message_id_map)?;
-    let target_messages = source_messages
+    let mut target_messages = source_messages
         .iter()
         .map(|message| clone_message(message, &message_id_map, &replacements))
         .collect::<Result<Vec<_>, _>>()?;
+    for message in &mut target_messages {
+        message.ui_state_json = None;
+    }
     let attachments = source_attachments
         .into_iter()
         .map(|source_attachment| {
@@ -2999,11 +3002,6 @@ fn clone_message(
         .as_deref()
         .map(|raw| clone_agent_run_json(raw, replacements))
         .transpose()?;
-    let ui_state_json = source
-        .ui_state_json
-        .as_deref()
-        .map(|raw| clone_structured_json(raw, replacements, "历史 UI 状态"))
-        .transpose()?;
     Ok(ChatMessageRecord {
         id: mapped_id(message_id_map, &source.id, "消息")?,
         role: source.role.clone(),
@@ -3012,7 +3010,8 @@ fn clone_message(
         status: source.status.clone(),
         attachments: Vec::new(),
         agent_run_json,
-        ui_state_json,
+        // Renderer-owned presentation state is opaque to the fork engine.
+        ui_state_json: source.ui_state_json.clone(),
     })
 }
 
@@ -3116,18 +3115,6 @@ fn clone_agent_run_json(
     serde_json::to_string(&value).map_err(|error| format!("无法序列化复制后的 agent 状态：{error}"))
 }
 
-fn clone_structured_json(
-    raw: &str,
-    replacements: &HashMap<String, String>,
-    label: &str,
-) -> Result<String, String> {
-    let mut value = serde_json::from_str::<Value>(raw)
-        .map_err(|error| format!("{label}不是有效 JSON：{error}"))?;
-    rewrite_exact_ids(&mut value, replacements);
-    rewrite_history_open_tokens(&mut value, replacements)?;
-    serde_json::to_string(&value).map_err(|error| format!("无法序列化复制后的{label}：{error}"))
-}
-
 fn rewrite_exact_ids(value: &mut Value, replacements: &HashMap<String, String>) {
     match value {
         Value::String(current) => {
@@ -3182,8 +3169,8 @@ fn insert_conversation(
             .execute(
                 "INSERT INTO messages (
                     id, conversation_id, role, content, status, agent_run_json,
-                    ui_state_json, created_at, position
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                    created_at, position
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                 params![
                     &message.id,
                     &target.id,
@@ -3191,12 +3178,18 @@ fn insert_conversation(
                     &message.content,
                     &message.status,
                     &message.agent_run_json,
-                    &message.ui_state_json,
                     message.created_at,
                     position as i64,
                 ],
             )
             .map_err(database_error)?;
+        chat_repository::update_message_ui_state(
+            connection,
+            &target.id,
+            &message.id,
+            message.ui_state_json.as_deref(),
+        )
+        .map_err(database_error)?;
     }
     Ok(())
 }
@@ -3330,10 +3323,10 @@ fn insert_snapshot_messages(
                      snapshot_source_conversation_id, snapshot_source_message_id,
                      snapshot_original_origin_kind, snapshot_original_agent_id,
                      snapshot_original_mailbox_message_id,
-                     agent_run_json, ui_state_json, created_at, position
+                     agent_run_json, created_at, position
                  ) VALUES (
                      ?1, ?2, ?3, ?4, ?5, 'snapshot', ?6, ?7, ?8, ?9, ?10,
-                     ?11, ?12, ?13, ?14
+                     ?11, ?12, ?13
                  )",
                 params![
                     &message.id,
@@ -3347,7 +3340,6 @@ fn insert_snapshot_messages(
                     &origin.original_agent_id,
                     &origin.original_mailbox_message_id,
                     &message.agent_run_json,
-                    &message.ui_state_json,
                     message.created_at,
                     position as i64,
                 ],
