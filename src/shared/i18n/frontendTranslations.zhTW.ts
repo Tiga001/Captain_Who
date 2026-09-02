@@ -9,8 +9,8 @@ export const zhTWTranslations = {
   'app.expandRightSidebar': '展開右側欄',
   'app.resizeLeftSidebar': '調整左側欄寬度',
   'app.resizeRightSidebar': '調整右側欄寬度',
-  'startup.loading': '正在啟動 MyCopilot',
-  'startup.failedTitle': '無法啟動 MyCopilot',
+  'startup.loading': '正在啟動 Captain Who',
+  'startup.failedTitle': '無法啟動 Captain Who',
   'startup.failedDescription': '必要服務未能完成加載，請重試。',
   'startup.retry': '重試',
   'startup.ambient.deepThinking': '正在深度思考',
@@ -136,7 +136,7 @@ export const zhTWTranslations = {
   'project.archiveAll': '全部歸檔',
   'project.removeTitle': '移除 {projectName}?',
   'project.removeDescription':
-    '這會從 MyCopilot 永久刪除該項目及其本機對話和附件；專案目錄中的檔案不會被修改。',
+    '這會從 Captain Who 永久刪除該項目及其本機對話和附件；專案目錄中的檔案不會被修改。',
   'project.confirmRemove': '移除',
   'project.removeFailed': '項目移除失敗，本地資料未被刪除。',
   'rightSidebar.newPanel': '新面板',
@@ -583,7 +583,7 @@ export const zhTWTranslations = {
   'mcp.detail.updatedAt': '更新時間',
   'mcp.detail.launchConfiguration': '啟動配置',
   'mcp.detail.technicalDetails': '技術詳情',
-  'mcp.detail.enabledHelp': 'MyCopilot 會在需要時連接此伺服器。',
+  'mcp.detail.enabledHelp': 'Captain Who 會在需要時連接此伺服器。',
   'mcp.detail.enableWithConfirmationHelp': '打開開關即可啟用；首次會由系統核對啟動資訊。',
   'mcp.detail.capabilities': '伺服器能力',
   'mcp.detail.none': '無',
@@ -627,7 +627,7 @@ export const zhTWTranslations = {
   'mcp.toast.deleteNeedsConfirmation': '刪除結果需要確認。已刷新權威伺服器列表，請勿盲目重複刪除。',
   'mcp.delete.title': '刪除 MCP 伺服器',
   'mcp.delete.description':
-    '這裡只會刪除 MyCopilot 配置，不會卸載本機程式。 Host 會先停止伺服器，活動呼叫的結果可能變成未知。',
+    '這裡只會刪除 Captain Who 配置，不會卸載本機程式。 Host 會先停止伺服器，活動呼叫的結果可能變成未知。',
   'skills.pageDescription': '安裝和管理 Agent 可使用的技能',
   'skills.install': '安裝技能',
   'skills.loading': '正在加載技能…',
@@ -831,7 +831,7 @@ export const zhTWTranslations = {
   'environment.deleteProject': '刪除項目',
   'environment.removeProjectTitle': '移除 {projectName}?',
   'environment.removeProjectDescription':
-    '這會從 MyCopilot 永久刪除該項目及其本機對話和附件；專案目錄中的檔案不會被修改。',
+    '這會從 Captain Who 永久刪除該項目及其本機對話和附件；專案目錄中的檔案不會被修改。',
   'environment.cancelRemoveProject': '取消',
   'environment.confirmRemoveProject': '移除',
   'usageBilling.tokenDetails': '對話 token 詳情',
@@ -1548,9 +1548,9 @@ export const zhTWTranslations = {
   'agent.builtinMcpApproval.resource': '資源範圍',
   'agent.builtinMcpApproval.resource.generic': '目前網頁中的受限資源',
   'agent.builtinMcpApproval.resource.managedBrowserProfile':
-    '整個 MyCopilot 受管瀏覽器配置（可能包含其他網站的登入資料）',
+    '整個 Captain Who 受管瀏覽器配置（可能包含其他網站的登入資料）',
   'agent.builtinMcpApproval.resource.managedSurface':
-    '目前 MyCopilot 受管瀏覽器標籤頁（包括其內嵌網頁）',
+    '目前 Captain Who 受管瀏覽器標籤頁（包括其內嵌網頁）',
   'agent.builtinMcpApproval.origin': '網頁來源',
   'agent.builtinMcpApproval.files': '文件',
   'agent.builtinMcpApproval.risks': '敏感權限',

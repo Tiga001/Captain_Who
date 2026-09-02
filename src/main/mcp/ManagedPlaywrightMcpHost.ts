@@ -2966,7 +2966,8 @@ function riskFailureResult(failure: BrowserRiskFailure | null): ManagedPlaywrigh
         : 'The user declined this browser destination or operation.'
       break
     case 'browser.unsupported_host_boundary':
-      text = 'This destination crosses a MyCopilot Host isolation boundary and cannot be approved.'
+      text =
+        'This destination crosses a Captain Who Host isolation boundary and cannot be approved.'
       break
     case 'browser.risk_expired':
       text = 'The browser risk approval expired before the request was dispatched.'

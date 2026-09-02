@@ -638,7 +638,7 @@ export function normalizeTranslucentSidebarTransparency(value: unknown): number 
 export function getTranslucentSidebarOpacityPercent(transparency: unknown): string {
   const requestedTintOpacity = 100 - normalizeTranslucentSidebarTransparency(transparency)
 
-  // Native macOS vibrancy only knows the system appearance, not the selected MyCopilot palette.
+  // Native macOS vibrancy only knows the system appearance, not the selected Captain Who palette.
   // Keep a perceptual theme floor above it so maximum transparency remains themed glass instead
   // of visually collapsing to the native gray sidebar material.
   const effectiveTintOpacity =

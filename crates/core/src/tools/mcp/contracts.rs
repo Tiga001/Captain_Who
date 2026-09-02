@@ -134,7 +134,7 @@ pub struct McpNormalizedInputSchemaIdentity {
     pub normalizer_version: u32,
 }
 
-/// Computes the versioned identity of the exact input schema MyCopilot would expose to a model.
+/// Computes the versioned identity of the exact input schema Captain Who would expose to a model.
 ///
 /// The raw Catalog digest is intentionally not accepted here: the same raw schema can produce a
 /// different Provider-facing schema when Host normalization rules evolve.

@@ -643,7 +643,7 @@ async function requestDownload(url, redirectsRemaining = ARTIFACT_RUNTIME_MAX_RE
       {
         headers: {
           Accept: 'application/octet-stream',
-          'User-Agent': 'MyCopilot-Artifact-Runtime-Preparer/1'
+          'User-Agent': 'CaptainWho-Artifact-Runtime-Preparer/1'
         }
       },
       (response) => {

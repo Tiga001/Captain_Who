@@ -158,7 +158,7 @@ function configureMainWindowWebviews(window: BrowserWindow): void {
 function createWindow(): void {
   const rendererEntryUrl = getRendererEntryUrl()
   const window = new BrowserWindow({
-    title: 'MyCopilot',
+    title: 'Captain Who',
     width: 1120,
     height: 760,
     minWidth: 920,
@@ -275,8 +275,8 @@ function activateMainWindow(): void {
 }
 
 async function initializeApplication(): Promise<void> {
-  app.setName('MyCopilot')
-  electronApp.setAppUserModelId('com.mycopilot.next')
+  app.setName('Captain Who')
+  electronApp.setAppUserModelId('io.github.tiga001.captainwho')
   disposeAdaptiveAppIcon = installAdaptiveAppIcon()
   app.on('browser-window-created', (_, window) => {
     optimizer.watchWindowShortcuts(window)

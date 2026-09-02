@@ -9,8 +9,8 @@ export const itITTranslations = {
   'app.expandRightSidebar': 'Espandi la barra laterale destra',
   'app.resizeLeftSidebar': 'Ridimensiona la barra laterale sinistra',
   'app.resizeRightSidebar': 'Ridimensiona la barra laterale destra',
-  'startup.loading': 'A partire dal MyCopilot',
-  'startup.failedTitle': 'Impossibile avviare MyCopilot',
+  'startup.loading': 'A partire dal Captain Who',
+  'startup.failedTitle': 'Impossibile avviare Captain Who',
   'startup.failedDescription':
     'Il caricamento dei servizi richiesti non è stato completato. Per favore riprova.',
   'startup.retry': 'Riprova',
@@ -137,7 +137,7 @@ export const itITTranslations = {
   'project.archiveAll': 'Archivia tutto',
   'project.removeTitle': 'Rimuovere {projectName}?',
   'project.removeDescription':
-    'Ciò rimuove permanentemente il progetto e le relative chat locali e allegati da MyCopilot. I file nella directory del progetto non vengono modificati.',
+    'Ciò rimuove permanentemente il progetto e le relative chat locali e allegati da Captain Who. I file nella directory del progetto non vengono modificati.',
   'project.confirmRemove': 'Rimuovi',
   'project.removeFailed':
     'Impossibile rimuovere il progetto. Non è stato eliminato nulla localmente.',
@@ -613,7 +613,7 @@ export const itITTranslations = {
   'mcp.detail.updatedAt': 'Aggiornato',
   'mcp.detail.launchConfiguration': 'Avvia la configurazione',
   'mcp.detail.technicalDetails': 'Dettagli tecnici',
-  'mcp.detail.enabledHelp': 'MyCopilot si connette a questo server quando è necessario.',
+  'mcp.detail.enabledHelp': 'Captain Who si connette a questo server quando è necessario.',
   'mcp.detail.enableWithConfirmationHelp':
     'Accendilo per abilitarlo. Il sistema conferma i dettagli del lancio la prima volta.',
   'mcp.detail.capabilities': 'Funzionalità del server',
@@ -663,7 +663,7 @@ export const itITTranslations = {
     "Il risultato dell'eliminazione richiede conferma. L'elenco dei server autorevoli è stato aggiornato; non ripetere l'azione alla cieca.",
   'mcp.delete.title': 'Elimina il server MCP',
   'mcp.delete.description':
-    "Questo rimuove la configurazione MyCopilot; non disinstalla il programma locale. L'Host arresta prima il server e le chiamate attive potrebbero avere un risultato sconosciuto.",
+    "Questo rimuove la configurazione Captain Who; non disinstalla il programma locale. L'Host arresta prima il server e le chiamate attive potrebbero avere un risultato sconosciuto.",
   'skills.pageDescription': 'Installa e gestisci le competenze disponibili per Agent',
   'skills.install': 'Installa abilità',
   'skills.loading': 'Caricamento abilità…',
@@ -904,7 +904,7 @@ export const itITTranslations = {
   'environment.deleteProject': 'Elimina progetto',
   'environment.removeProjectTitle': 'Rimuovere {projectName}?',
   'environment.removeProjectDescription':
-    'Ciò rimuove permanentemente il progetto e le relative chat locali e allegati da MyCopilot. I file nella directory del progetto non vengono modificati.',
+    'Ciò rimuove permanentemente il progetto e le relative chat locali e allegati da Captain Who. I file nella directory del progetto non vengono modificati.',
   'environment.cancelRemoveProject': 'Annulla',
   'environment.confirmRemoveProject': 'Rimuovi',
   'usageBilling.tokenDetails': 'Dettagli del token di conversazione',
@@ -1745,9 +1745,9 @@ export const itITTranslations = {
   'agent.builtinMcpApproval.resource': 'Ambito delle risorse',
   'agent.builtinMcpApproval.resource.generic': 'Dati riservati nella pagina corrente',
   'agent.builtinMcpApproval.resource.managedBrowserProfile':
-    "L'intero profilo del browser gestito MyCopilot (che potrebbe includere dati di accesso da altri siti)",
+    "L'intero profilo del browser gestito Captain Who (che potrebbe includere dati di accesso da altri siti)",
   'agent.builtinMcpApproval.resource.managedSurface':
-    'La scheda corrente del browser gestito MyCopilot, comprese le pagine incorporate',
+    'La scheda corrente del browser gestito Captain Who, comprese le pagine incorporate',
   'agent.builtinMcpApproval.origin': 'Origine della pagina',
   'agent.builtinMcpApproval.files': 'File',
   'agent.builtinMcpApproval.risks': 'Accesso sensibile',

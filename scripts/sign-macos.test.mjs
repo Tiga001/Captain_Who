@@ -7,6 +7,7 @@ import { join } from 'node:path'
 import test from 'node:test'
 
 import {
+  APP_CODE_SIGN_IDENTIFIER,
   CORE_SERVER_CODE_SIGN_IDENTIFIER,
   OFFICE_RENDERER_CODE_SIGN_IDENTIFIERS,
   OFFICECLI_CODE_SIGN_IDENTIFIER,
@@ -24,7 +25,7 @@ import {
   signOfficeRendererMachO
 } from './sign-macos.mjs'
 
-const APP_PATH = '/build/mac-arm64/MyCopilot.app'
+const APP_PATH = '/build/mac-arm64/Captain Who.app'
 const CORE_SERVER_PATH = join(APP_PATH, 'Contents', 'Resources', 'core-server')
 const OFFICE_BROWSER_DIRECTORY = 'browser/chrome-headless-shell-mac-arm64'
 
@@ -67,6 +68,16 @@ function signingConfiguration(overrides = {}) {
   }
 }
 
+test('managed native code-sign identifiers derive from the Captain Who application identity', () => {
+  assert.equal(APP_CODE_SIGN_IDENTIFIER, 'io.github.tiga001.captainwho')
+  assert.equal(CORE_SERVER_CODE_SIGN_IDENTIFIER, `${APP_CODE_SIGN_IDENTIFIER}.core-server`)
+  assert.equal(OFFICECLI_CODE_SIGN_IDENTIFIER, `${APP_CODE_SIGN_IDENTIFIER}.officecli`)
+  assert.equal(
+    OFFICE_RENDERER_CODE_SIGN_IDENTIFIERS['chrome-headless-shell'],
+    `${APP_CODE_SIGN_IDENTIFIER}.office-renderer.chrome-headless-shell`
+  )
+})
+
 test('core-server signing target uses the exact packaged helper path', () => {
   assert.equal(isCoreServerSigningTarget(APP_PATH, CORE_SERVER_PATH), true)
   assert.equal(
@@ -97,10 +108,10 @@ test('custom signer preserves inherited policy and freezes the helper identifier
     APP_PATH,
     'Contents',
     'Frameworks',
-    'MyCopilot Helper.app',
+    'Captain Who Helper.app',
     'Contents',
     'MacOS',
-    'MyCopilot Helper'
+    'Captain Who Helper'
   )
   assert.deepEqual(options.optionsForFile(electronHelper), {
     entitlements: '/build/entitlements.mac.plist',
@@ -163,7 +174,10 @@ test('frozen component signing targets use stable identifiers, dependency order,
   )
   assert.equal(new Set(targets.map(({ identifier }) => identifier)).size, targets.length)
   for (const target of targets) {
-    assert.match(target.identifier, /^com\.mycopilot\.next\.artifact-runtime\.[a-f0-9]{24}$/)
+    assert.match(
+      target.identifier,
+      /^io\.github\.tiga001\.captainwho\.artifact-runtime\.[a-f0-9]{24}$/
+    )
     assert.equal(target.identifier.includes(target.relativePath), false)
     if (target.relativePath === 'dependencies/node/bin/node') {
       assert.match(target.entitlements, /entitlements\.jit-runtime\.mac\.plist$/)
@@ -225,7 +239,7 @@ test('frozen Mach-O preflight accepts target-bearing universal binaries and reje
 
 test('Office renderer preflight discovers exactly four thin Mach-O files of the target arch', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'mycopilot-office-renderer-macho-'))
-  const appPath = join(directory, 'MyCopilot.app')
+  const appPath = join(directory, 'Captain Who.app')
   const receipt = officeRendererReceipt()
   const targets = officeRendererMacCodeSigningTargets(appPath, receipt)
   const outputDirectory = join(appPath, 'Contents', 'Resources', 'components', 'office-renderer')
@@ -457,7 +471,7 @@ test('custom signer rejects unsigned, ad-hoc, and malformed configurations', () 
     /requires darwin/
   )
   assert.throws(
-    () => createMacSignOptions(signingConfiguration({ app: '/build/MyCopilot' })),
+    () => createMacSignOptions(signingConfiguration({ app: '/build/Captain Who' })),
     /requires a macOS \.app path/
   )
 })

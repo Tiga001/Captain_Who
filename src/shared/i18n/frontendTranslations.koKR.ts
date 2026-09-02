@@ -9,8 +9,8 @@ export const koKRTranslations = {
   'app.expandRightSidebar': '오른쪽 사이드바 확장',
   'app.resizeLeftSidebar': '왼쪽 사이드바 크기 조정',
   'app.resizeRightSidebar': '오른쪽 사이드바 크기 조정',
-  'startup.loading': 'MyCopilot 시작 중',
-  'startup.failedTitle': 'MyCopilot를 시작할 수 없습니다.',
+  'startup.loading': 'Captain Who 시작 중',
+  'startup.failedTitle': 'Captain Who를 시작할 수 없습니다.',
   'startup.failedDescription': '필수 서비스 로드가 완료되지 않았습니다. 다시 시도해 주세요.',
   'startup.retry': '재시도',
   'startup.ambient.deepThinking': '깊이 생각하다',
@@ -136,7 +136,7 @@ export const koKRTranslations = {
   'project.archiveAll': '모두 보관',
   'project.removeTitle': '{projectName}를 제거하시겠습니까?',
   'project.removeDescription':
-    '이렇게 하면 MyCopilot에서 프로젝트와 해당 로컬 채팅 및 첨부 파일이 영구적으로 제거됩니다. 프로젝트 디렉터리의 파일은 변경되지 않습니다.',
+    '이렇게 하면 Captain Who에서 프로젝트와 해당 로컬 채팅 및 첨부 파일이 영구적으로 제거됩니다. 프로젝트 디렉터리의 파일은 변경되지 않습니다.',
   'project.confirmRemove': '제거',
   'project.removeFailed': '프로젝트를 제거할 수 없습니다. 로컬에서는 아무것도 삭제되지 않았습니다.',
   'rightSidebar.newPanel': '새 패널',
@@ -599,7 +599,7 @@ export const koKRTranslations = {
   'mcp.detail.updatedAt': '업데이트됨',
   'mcp.detail.launchConfiguration': '실행 구성',
   'mcp.detail.technicalDetails': '기술적인 세부사항',
-  'mcp.detail.enabledHelp': 'MyCopilot는 필요할 때 이 서버에 연결합니다.',
+  'mcp.detail.enabledHelp': 'Captain Who는 필요할 때 이 서버에 연결합니다.',
   'mcp.detail.enableWithConfirmationHelp':
     '활성화하려면 켜세요. 시스템은 처음으로 실행 세부 정보를 확인합니다.',
   'mcp.detail.capabilities': '서버 기능',
@@ -648,7 +648,7 @@ export const koKRTranslations = {
     '삭제 결과를 확인하려면 확인이 필요합니다. 권한 있는 서버 목록이 새로 고쳐졌습니다. 맹목적으로 행동을 반복하지 마십시오.',
   'mcp.delete.title': 'MCP 서버 삭제',
   'mcp.delete.description':
-    '이렇게 하면 MyCopilot 구성이 제거됩니다. 로컬 프로그램은 제거되지 않습니다. 호스트가 먼저 서버를 중지하고 활성 호출에 알 수 없는 결과가 있을 수 있습니다.',
+    '이렇게 하면 Captain Who 구성이 제거됩니다. 로컬 프로그램은 제거되지 않습니다. 호스트가 먼저 서버를 중지하고 활성 호출에 알 수 없는 결과가 있을 수 있습니다.',
   'skills.pageDescription': 'Agent에 사용 가능한 기술 설치 및 관리',
   'skills.install': '스킬 설치',
   'skills.loading': '스킬 로드 중…',
@@ -873,7 +873,7 @@ export const koKRTranslations = {
   'environment.deleteProject': '프로젝트 삭제',
   'environment.removeProjectTitle': '{projectName}를 제거하시겠습니까?',
   'environment.removeProjectDescription':
-    '이렇게 하면 MyCopilot에서 프로젝트와 해당 로컬 채팅 및 첨부 파일이 영구적으로 제거됩니다. 프로젝트 디렉터리의 파일은 변경되지 않습니다.',
+    '이렇게 하면 Captain Who에서 프로젝트와 해당 로컬 채팅 및 첨부 파일이 영구적으로 제거됩니다. 프로젝트 디렉터리의 파일은 변경되지 않습니다.',
   'environment.cancelRemoveProject': '취소',
   'environment.confirmRemoveProject': '제거',
   'usageBilling.tokenDetails': '대화 토큰 세부정보',
@@ -1645,9 +1645,9 @@ export const koKRTranslations = {
   'agent.builtinMcpApproval.resource': '자원 범위',
   'agent.builtinMcpApproval.resource.generic': '현재 페이지의 제한된 데이터',
   'agent.builtinMcpApproval.resource.managedBrowserProfile':
-    '전체 MyCopilot 관리 브라우저 프로필(다른 사이트의 로그인 데이터가 포함될 수 있음)',
+    '전체 Captain Who 관리 브라우저 프로필(다른 사이트의 로그인 데이터가 포함될 수 있음)',
   'agent.builtinMcpApproval.resource.managedSurface':
-    '포함된 페이지를 포함한 현재 MyCopilot 관리형 브라우저 탭',
+    '포함된 페이지를 포함한 현재 Captain Who 관리형 브라우저 탭',
   'agent.builtinMcpApproval.origin': '페이지 출처',
   'agent.builtinMcpApproval.files': '파일',
   'agent.builtinMcpApproval.risks': '민감한 액세스',

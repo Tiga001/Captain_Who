@@ -81,9 +81,10 @@ last_verified: YYYY-MM-DD
 产品名称保持原始拼写；`Subagents` 仅指设置 UI 名称，不替代架构中的“子 Agent”，`Scheduled` 仅指
 Automation 的产品入口名。
 
-软件的叙述性产品名称统一为 `Captain Who`。`mycopilot-*` crate/package、`@mycopilot/*`、
-`window.mycopilot`、`MYCOPILOT_*`、`com.mycopilot.next`、浏览器 partition/内部 URL 标记，以及构建配置
-当前生成的精确产物名属于实现兼容标识；除非执行专门的代码与数据迁移，不随文档品牌称谓做字符串替换。
+软件的叙述性产品名称统一为 `Captain Who`；根 package/data slug 为 `captain-who`，应用 Bundle ID 为
+`io.github.tiga001.captainwho`。`mycopilot-*` crate、`@mycopilot/*`、`window.mycopilot`、
+`MYCOPILOT_*`、仍保留的 `com.mycopilot.next.*` Keychain service、浏览器 partition/内部 URL 标记和摘要域
+属于实现兼容标识，不随产品称谓做字符串替换。精确发行文件名以当前构建配置为真源。
 
 首次出现的少数术语可以补充中文解释，例如“Artifact（制品）”，之后不要交替使用多个名称。SQLite
 schema version、DTO `schemaVersion`、领域 `revision` 是不同概念，必须明确限定。

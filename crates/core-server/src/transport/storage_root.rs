@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 
 const APP_DATA_ROOT_ENV: &str = "MYCOPILOT_APP_DATA_ROOT";
 const STORAGE_DATABASE_ENV: &str = "MYCOPILOT_STORAGE_DB";
+const APPLICATION_DATA_DIRECTORY_NAME: &str = "captain-who";
 const STORAGE_DATABASE_FILE_NAME: &str = "storage.sqlite";
 
 pub(crate) fn database_path() -> io::Result<PathBuf> {
@@ -83,7 +84,7 @@ pub(crate) fn default_database_path() -> Option<PathBuf> {
         return absolute_platform_directory(std::env::var_os("HOME")).map(|home| {
             home.join("Library")
                 .join("Application Support")
-                .join("mycopilot-next")
+                .join(APPLICATION_DATA_DIRECTORY_NAME)
                 .join(STORAGE_DATABASE_FILE_NAME)
         });
     }
@@ -91,7 +92,7 @@ pub(crate) fn default_database_path() -> Option<PathBuf> {
     if cfg!(target_os = "windows") {
         return absolute_platform_directory(std::env::var_os("APPDATA")).map(|app_data| {
             app_data
-                .join("mycopilot-next")
+                .join(APPLICATION_DATA_DIRECTORY_NAME)
                 .join(STORAGE_DATABASE_FILE_NAME)
         });
     }
@@ -99,14 +100,14 @@ pub(crate) fn default_database_path() -> Option<PathBuf> {
     if let Some(xdg_data_home) = absolute_platform_directory(std::env::var_os("XDG_DATA_HOME")) {
         return Some(
             xdg_data_home
-                .join("mycopilot-next")
+                .join(APPLICATION_DATA_DIRECTORY_NAME)
                 .join(STORAGE_DATABASE_FILE_NAME),
         );
     }
     absolute_platform_directory(std::env::var_os("HOME")).map(|home| {
         home.join(".local")
             .join("share")
-            .join("mycopilot-next")
+            .join(APPLICATION_DATA_DIRECTORY_NAME)
             .join(STORAGE_DATABASE_FILE_NAME)
     })
 }
@@ -115,4 +116,14 @@ fn absolute_platform_directory(value: Option<OsString>) -> Option<PathBuf> {
     value
         .map(PathBuf::from)
         .filter(|path| !path.as_os_str().is_empty() && path.is_absolute())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::APPLICATION_DATA_DIRECTORY_NAME;
+
+    #[test]
+    fn standalone_default_uses_the_current_application_data_identity() {
+        assert_eq!(APPLICATION_DATA_DIRECTORY_NAME, "captain-who");
+    }
 }

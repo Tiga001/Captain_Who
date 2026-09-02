@@ -227,7 +227,7 @@ fn execute(options: ResetOptions) -> io::Result<ResetReport> {
         io::Error::new(
             error.kind(),
             format!(
-                "close MyCopilot before resetting `{}`: {error}",
+                "close Captain Who before resetting `{}`: {error}",
                 database_path.display()
             ),
         )
@@ -795,7 +795,7 @@ fn ensure_no_image_credential_reconciliation(connection: &Connection) -> io::Res
     if staged != 0 || cleanup != 0 {
         return Err(io::Error::new(
             io::ErrorKind::WouldBlock,
-            "image-generation credential reconciliation is pending; start and cleanly close MyCopilot before resetting",
+            "image-generation credential reconciliation is pending; start and cleanly close Captain Who before resetting",
         ));
     }
     Ok(())

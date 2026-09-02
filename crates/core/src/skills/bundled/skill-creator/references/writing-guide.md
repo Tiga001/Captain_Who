@@ -4,7 +4,7 @@ Use this reference when drafting or substantially rewriting `SKILL.md`.
 
 ## Frontmatter
 
-MyCopilot currently relies on two fields:
+Captain Who currently relies on two fields:
 
 ```yaml
 ---

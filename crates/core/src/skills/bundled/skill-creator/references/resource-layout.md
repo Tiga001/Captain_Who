@@ -13,7 +13,7 @@ Read this reference when a Skill needs supporting files.
 └── scripts/      # Optional executable Python helpers
 ```
 
-MyCopilot packages the complete safe directory tree into an immutable revision. Resource kinds are
+Captain Who packages the complete safe directory tree into an immutable revision. Resource kinds are
 derived from paths:
 
 - `references/**` → `reference`

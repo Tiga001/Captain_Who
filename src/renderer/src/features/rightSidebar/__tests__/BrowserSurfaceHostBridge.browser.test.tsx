@@ -184,7 +184,7 @@ describe('browser surface Host bridge availability', () => {
     })
 
     expect(() => resolveBrowserSurfaceHostApi()).toThrow(
-      'MyCopilot browser surface API is malformed'
+      'Captain Who browser surface API is malformed'
     )
   })
 })

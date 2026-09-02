@@ -499,7 +499,7 @@ export class TerminalBridge {
 
 function forkTerminalUtility(): UtilityProcess {
   return utilityProcess.fork(join(__dirname, 'terminal-service.js'), [], {
-    serviceName: 'MyCopilot Terminal Service',
+    serviceName: 'Captain Who Terminal Service',
     stdio: 'pipe'
   })
 }

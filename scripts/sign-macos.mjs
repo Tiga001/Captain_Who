@@ -20,14 +20,15 @@ import {
   refreshOfficeCliReceiptAfterSigning
 } from './prepare-officecli.mjs'
 
-export const CORE_SERVER_CODE_SIGN_IDENTIFIER = 'com.mycopilot.next.core-server'
+export const APP_CODE_SIGN_IDENTIFIER = 'io.github.tiga001.captainwho'
+export const CORE_SERVER_CODE_SIGN_IDENTIFIER = `${APP_CODE_SIGN_IDENTIFIER}.core-server`
 export const OFFICE_RENDERER_CODE_SIGN_IDENTIFIERS = Object.freeze({
-  'libEGL.dylib': 'com.mycopilot.next.office-renderer.libegl',
-  'libGLESv2.dylib': 'com.mycopilot.next.office-renderer.libglesv2',
-  'libvk_swiftshader.dylib': 'com.mycopilot.next.office-renderer.libvk-swiftshader',
-  'chrome-headless-shell': 'com.mycopilot.next.office-renderer.chrome-headless-shell'
+  'libEGL.dylib': `${APP_CODE_SIGN_IDENTIFIER}.office-renderer.libegl`,
+  'libGLESv2.dylib': `${APP_CODE_SIGN_IDENTIFIER}.office-renderer.libglesv2`,
+  'libvk_swiftshader.dylib': `${APP_CODE_SIGN_IDENTIFIER}.office-renderer.libvk-swiftshader`,
+  'chrome-headless-shell': `${APP_CODE_SIGN_IDENTIFIER}.office-renderer.chrome-headless-shell`
 })
-export const OFFICECLI_CODE_SIGN_IDENTIFIER = 'com.mycopilot.next.officecli'
+export const OFFICECLI_CODE_SIGN_IDENTIFIER = `${APP_CODE_SIGN_IDENTIFIER}.officecli`
 
 const execFile = promisify(execFileCallback)
 const CORE_SERVER_RELATIVE_PATH = join('Contents', 'Resources', 'core-server')
@@ -57,10 +58,12 @@ function requireSigningConfiguration(configuration) {
     throw new Error('macOS signing configuration is required')
   }
   if (configuration.platform !== 'darwin') {
-    throw new Error(`MyCopilot distribution signing requires darwin, got ${configuration.platform}`)
+    throw new Error(
+      `Captain Who distribution signing requires darwin, got ${configuration.platform}`
+    )
   }
   if (typeof configuration.app !== 'string' || !configuration.app.endsWith('.app')) {
-    throw new Error('MyCopilot distribution signing requires a macOS .app path')
+    throw new Error('Captain Who distribution signing requires a macOS .app path')
   }
   if (
     typeof configuration.identity !== 'string' ||
@@ -68,7 +71,7 @@ function requireSigningConfiguration(configuration) {
     configuration.identity === '-'
   ) {
     throw new Error(
-      'MyCopilot distribution signing requires a real Developer ID Application identity; ad-hoc and unsigned identities are forbidden'
+      'Captain Who distribution signing requires a real Developer ID Application identity; ad-hoc and unsigned identities are forbidden'
     )
   }
 }
@@ -141,7 +144,7 @@ export function frozenMachOCodeSignIdentifier(component, relativePath) {
     throw new Error('Artifact Runtime code-sign path must be canonical and relative')
   }
   const digest = createHash('sha256').update(relativePath, 'utf8').digest('hex').slice(0, 24)
-  return `com.mycopilot.next.artifact-runtime.${digest}`
+  return `${APP_CODE_SIGN_IDENTIFIER}.artifact-runtime.${digest}`
 }
 
 export function artifactRuntimeMacCodeSigningTargets(targets) {

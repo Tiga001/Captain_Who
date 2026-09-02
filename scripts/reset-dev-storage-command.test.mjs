@@ -18,34 +18,34 @@ test('uses the workspace package identity before resolving the authoritative Ele
     },
     getPath(name) {
       requestedPaths.push(name)
-      assert.deepEqual(configuredNames, ['mycopilot-next'])
-      return '/electron-owned/mycopilot-next'
+      assert.deepEqual(configuredNames, ['captain-who'])
+      return '/electron-owned/captain-who'
     }
   }
 
   const root = resolveElectronAppDataRoot(
     app,
-    'mycopilot-next',
+    'captain-who',
     (path) => {
       canonicalizedPaths.push(path)
-      return '/canonical/mycopilot-next'
+      return '/canonical/captain-who'
     },
     (path, options) => {
       createdDirectories.push([path, options])
     }
   )
 
-  assert.equal(root, '/canonical/mycopilot-next')
-  assert.deepEqual(configuredNames, ['mycopilot-next'])
+  assert.equal(root, '/canonical/captain-who')
+  assert.deepEqual(configuredNames, ['captain-who'])
   assert.deepEqual(requestedPaths, ['userData'])
   assert.deepEqual(createdDirectories, [
-    ['/electron-owned/mycopilot-next', { recursive: true, mode: 0o700 }]
+    ['/electron-owned/captain-who', { recursive: true, mode: 0o700 }]
   ])
-  assert.deepEqual(canonicalizedPaths, ['/electron-owned/mycopilot-next'])
+  assert.deepEqual(canonicalizedPaths, ['/electron-owned/captain-who'])
 })
 
 test('reads the development Electron identity from workspace package metadata', () => {
-  assert.equal(readDevelopmentElectronAppName(), 'mycopilot-next')
+  assert.equal(readDevelopmentElectronAppName(), 'captain-who')
 })
 
 test('passes the exact Electron root and keeps reset dry-run unless explicitly confirmed', () => {

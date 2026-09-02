@@ -87,7 +87,7 @@ export class ElectronGuestCdpTransport implements ConnectOverCDPTransport {
     product: 'Chrome/0.0.0.0',
     protocolVersion: '1.3',
     revision: '',
-    userAgent: 'MyCopilot managed browser target'
+    userAgent: 'CaptainWho managed browser target'
   }
   private closeHandler?: (reason?: string) => void
   private closeNotificationDelivered = false
@@ -1366,7 +1366,7 @@ function normalizeBrowserVersion(value: unknown): CdpParams {
       product: 'Chrome/0.0.0.0',
       protocolVersion: '1.3',
       revision: '',
-      userAgent: 'MyCopilot managed browser target'
+      userAgent: 'CaptainWho managed browser target'
     }
   }
   return {
@@ -1374,7 +1374,7 @@ function normalizeBrowserVersion(value: unknown): CdpParams {
     product: boundedString(value.product) || 'Chrome/0.0.0.0',
     protocolVersion: boundedString(value.protocolVersion) || '1.3',
     revision: boundedString(value.revision),
-    userAgent: boundedString(value.userAgent) || 'MyCopilot managed browser target'
+    userAgent: boundedString(value.userAgent) || 'CaptainWho managed browser target'
   }
 }
 

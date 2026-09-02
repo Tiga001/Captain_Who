@@ -44,7 +44,7 @@ use zip::{CompressionMethod, ZipArchive};
 pub const GITHUB_SKILL_ORIGIN_PROVIDER: &str = "github";
 const GITHUB_PROVENANCE_SCHEMA_VERSION: u32 = 1;
 
-const GITHUB_USER_AGENT: &str = "MyCopilot-Skill-Acquisition/1";
+const GITHUB_USER_AGENT: &str = "CaptainWho-Skill-Acquisition/1";
 const GITHUB_API_VERSION: &str = "2022-11-28";
 const GITHUB_API_BODY_BYTES: usize = 256 * 1024;
 const GITHUB_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);

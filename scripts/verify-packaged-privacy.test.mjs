@@ -12,13 +12,13 @@ function context(appOutDir) {
   return {
     electronPlatformName: 'darwin',
     appOutDir,
-    packager: { appInfo: { productFilename: 'MyCopilot' } }
+    packager: { appInfo: { productFilename: 'Captain Who' } }
   }
 }
 
 async function fixture() {
   const directory = await mkdtemp(join(tmpdir(), 'mycopilot-packaged-privacy-'))
-  const app = join(directory, 'MyCopilot.app')
+  const app = join(directory, 'Captain Who.app')
   const asarPath = join(app, 'Contents', 'Resources', 'app.asar')
   await mkdir(dirname(asarPath), { recursive: true })
   await writeFile(asarPath, 'safe packaged application')

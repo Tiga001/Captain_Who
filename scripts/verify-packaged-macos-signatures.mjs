@@ -5,6 +5,7 @@ import { basename, join } from 'node:path'
 import { promisify } from 'node:util'
 
 import {
+  APP_CODE_SIGN_IDENTIFIER,
   CORE_SERVER_CODE_SIGN_IDENTIFIER,
   artifactRuntimeMacCodeSigningTargets,
   officeCliMacCodeSigningTargets,
@@ -13,7 +14,6 @@ import {
 import { collectFrozenMachOTargets } from './frozen-macho-signing.mjs'
 
 const execFile = promisify(execFileCallback)
-const APP_CODE_SIGN_IDENTIFIER = 'com.mycopilot.next'
 export function packagedMacApplicationPaths(context) {
   if (!context || typeof context !== 'object') {
     throw new Error('electron-builder pack context is required')
@@ -84,7 +84,7 @@ export function assertStableSignatureMetadata({
 }) {
   if (appMetadata.identifier !== APP_CODE_SIGN_IDENTIFIER) {
     throw new Error(
-      `MyCopilot application has unexpected code-sign identifier: ${String(appMetadata.identifier)}`
+      `Captain Who application has unexpected code-sign identifier: ${String(appMetadata.identifier)}`
     )
   }
   if (helperMetadata.identifier !== CORE_SERVER_CODE_SIGN_IDENTIFIER) {
@@ -93,7 +93,7 @@ export function assertStableSignatureMetadata({
     )
   }
   for (const [label, metadata] of [
-    ['MyCopilot application', appMetadata],
+    ['Captain Who application', appMetadata],
     ['core-server', helperMetadata]
   ]) {
     if (
@@ -117,11 +117,11 @@ export function assertStableSignatureMetadata({
   }
   if (appMetadata.teamIdentifier !== helperMetadata.teamIdentifier) {
     throw new Error(
-      `MyCopilot and core-server Team IDs differ: ${appMetadata.teamIdentifier} vs ${helperMetadata.teamIdentifier}`
+      `Captain Who and core-server Team IDs differ: ${appMetadata.teamIdentifier} vs ${helperMetadata.teamIdentifier}`
     )
   }
   if (appMetadata.authorities[0] !== helperMetadata.authorities[0]) {
-    throw new Error('MyCopilot and core-server are not signed by the same leaf identity')
+    throw new Error('Captain Who and core-server are not signed by the same leaf identity')
   }
   for (const { target, metadata } of officeRendererMetadata) {
     if (metadata.identifier !== target.identifier) {
@@ -145,7 +145,7 @@ export function assertStableSignatureMetadata({
       metadata.authorities[0] !== appMetadata.authorities[0]
     ) {
       throw new Error(
-        'MyCopilot and Office renderer are not signed by the same Developer ID identity'
+        'Captain Who and Office renderer are not signed by the same Developer ID identity'
       )
     }
   }
@@ -174,7 +174,9 @@ export function assertStableSignatureMetadata({
       metadata.teamIdentifier !== appMetadata.teamIdentifier ||
       metadata.authorities[0] !== appMetadata.authorities[0]
     ) {
-      throw new Error(`${component} and MyCopilot are not signed by the same Developer ID identity`)
+      throw new Error(
+        `${component} and Captain Who are not signed by the same Developer ID identity`
+      )
     }
     const entitlementMap = parseBooleanEntitlements(entitlements, component)
     const entitlementKeys = [...entitlementMap.keys()].sort()
@@ -322,6 +324,6 @@ export async function verifyPackagedMacSignatures(
   })
 
   console.log(
-    `Verified Developer ID signatures for MyCopilot and ${2 + officeRendererTargets.length + frozenTargets.length} managed native targets`
+    `Verified Developer ID signatures for Captain Who and ${2 + officeRendererTargets.length + frozenTargets.length} managed native targets`
   )
 }

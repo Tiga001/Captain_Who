@@ -24,8 +24,8 @@ export interface StartupReadinessController {
   markReady(): void
 }
 
-const STARTUP_FAILED_MESSAGE = 'MyCopilot application startup failed'
-const STARTUP_DISPOSED_MESSAGE = 'MyCopilot application startup was cancelled'
+const STARTUP_FAILED_MESSAGE = 'Captain Who application startup failed'
+const STARTUP_DISPOSED_MESSAGE = 'Captain Who application startup was cancelled'
 
 export function registerStartupReadiness(
   ipcMain: StartupIpcMain,

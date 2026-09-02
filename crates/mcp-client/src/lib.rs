@@ -1,4 +1,4 @@
-//! Stable MyCopilot-facing MCP client boundary.
+//! Stable Captain Who-facing MCP client boundary.
 //!
 //! The public API in this crate deliberately does not expose SDK-specific
 //! types. `rmcp` is an implementation detail confined to the connector and
@@ -72,7 +72,7 @@ pub use types::{
 
 /// Re-export the cancellation primitive as part of our stable API boundary.
 ///
-/// This is intentionally `tokio-util`, not MyCopilot Agent Runtime's
+/// This is intentionally `tokio-util`, not Captain Who Agent Runtime's
 /// cancellation type. A later adapter can bridge the two without coupling this
 /// protocol crate to the runtime.
 pub use tokio_util::sync::CancellationToken as McpCancellationToken;

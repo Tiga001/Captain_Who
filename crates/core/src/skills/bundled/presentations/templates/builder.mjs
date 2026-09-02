@@ -41,7 +41,7 @@ function mountedInput(mountPath) {
 }
 
 function addFooter(slide, pageNumber) {
-  slide.addText('MyCopilot', {
+  slide.addText('Captain Who', {
     x: 0.55,
     y: 7.05,
     w: 11.2,
@@ -67,10 +67,10 @@ function addFooter(slide, pageNumber) {
 function buildPresentation(title, images) {
   const deck = new pptxgen()
   deck.layout = 'LAYOUT_WIDE'
-  deck.author = 'MyCopilot'
+  deck.author = 'Captain Who'
   deck.subject = title
   deck.title = title
-  deck.company = 'MyCopilot'
+  deck.company = 'Captain Who'
   deck.lang = 'zh-CN'
   deck.theme = {
     headFontFace: 'Microsoft YaHei',

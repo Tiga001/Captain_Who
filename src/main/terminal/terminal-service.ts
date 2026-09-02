@@ -366,7 +366,7 @@ function createTerminalEnvironment(): Record<string, string | undefined> {
     ...process.env,
     COLORTERM: 'truecolor',
     TERM: 'xterm-256color',
-    TERM_PROGRAM: 'MyCopilot'
+    TERM_PROGRAM: 'CaptainWho'
   }
 }
 

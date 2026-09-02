@@ -243,7 +243,7 @@ export function useBrowserSurfaceCommand(openRightSidebar: () => void): BrowserS
   const surfaceReady = useCallback(
     async (input: BrowserSurfaceReadyInput): Promise<BrowserSurfaceReadyOutput> => {
       const browser = resolveBrowserSurfaceHostApi()
-      if (!browser) throw new Error('MyCopilot browser surface API is not available')
+      if (!browser) throw new Error('Captain Who browser surface API is not available')
       return await browser.surfaceReady(input)
     },
     []
@@ -274,7 +274,7 @@ export function resolveBrowserSurfaceHostApi(): BrowserHostApi | null {
     typeof browser.surfaceSelected !== 'function' ||
     typeof browser.surfaceState !== 'function'
   ) {
-    throw new Error('MyCopilot browser surface API is malformed')
+    throw new Error('Captain Who browser surface API is malformed')
   }
   return browser
 }

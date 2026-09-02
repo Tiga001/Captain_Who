@@ -10,8 +10,8 @@ export const zhCNTranslations = {
   'app.resizeLeftSidebar': '调整左侧栏宽度',
   'app.resizeRightSidebar': '调整右侧栏宽度',
 
-  'startup.loading': '正在启动 MyCopilot',
-  'startup.failedTitle': '无法启动 MyCopilot',
+  'startup.loading': '正在启动 Captain Who',
+  'startup.failedTitle': '无法启动 Captain Who',
   'startup.failedDescription': '必要服务未能完成加载，请重试。',
   'startup.retry': '重试',
   'startup.ambient.deepThinking': '正在深度思考',
@@ -138,7 +138,7 @@ export const zhCNTranslations = {
   'project.archiveAll': '全部归档',
   'project.removeTitle': '移除 {projectName}?',
   'project.removeDescription':
-    '这会从 MyCopilot 永久删除该项目及其本地对话和附件；项目目录中的文件不会被修改。',
+    '这会从 Captain Who 永久删除该项目及其本地对话和附件；项目目录中的文件不会被修改。',
   'project.confirmRemove': '移除',
   'project.removeFailed': '项目移除失败，本地数据未被删除。',
 
@@ -590,7 +590,7 @@ export const zhCNTranslations = {
   'mcp.detail.updatedAt': '更新时间',
   'mcp.detail.launchConfiguration': '启动配置',
   'mcp.detail.technicalDetails': '技术详情',
-  'mcp.detail.enabledHelp': 'MyCopilot 会在需要时连接此服务器。',
+  'mcp.detail.enabledHelp': 'Captain Who 会在需要时连接此服务器。',
   'mcp.detail.enableWithConfirmationHelp': '打开开关即可启用；首次会由系统核对启动信息。',
   'mcp.detail.capabilities': '服务器能力',
   'mcp.detail.none': '无',
@@ -634,7 +634,7 @@ export const zhCNTranslations = {
   'mcp.toast.deleteNeedsConfirmation': '删除结果需要确认。已刷新权威服务器列表，请勿盲目重复删除。',
   'mcp.delete.title': '删除 MCP 服务器',
   'mcp.delete.description':
-    '这里只会删除 MyCopilot 配置，不会卸载本地程序。Host 会先停止服务器，活动调用的结果可能变为未知。',
+    '这里只会删除 Captain Who 配置，不会卸载本地程序。Host 会先停止服务器，活动调用的结果可能变为未知。',
 
   'skills.pageDescription': '安装和管理 Agent 可使用的技能',
   'skills.install': '安装技能',
@@ -843,7 +843,7 @@ export const zhCNTranslations = {
   'environment.deleteProject': '删除项目',
   'environment.removeProjectTitle': '移除 {projectName}?',
   'environment.removeProjectDescription':
-    '这会从 MyCopilot 永久删除该项目及其本地对话和附件；项目目录中的文件不会被修改。',
+    '这会从 Captain Who 永久删除该项目及其本地对话和附件；项目目录中的文件不会被修改。',
   'environment.cancelRemoveProject': '取消',
   'environment.confirmRemoveProject': '移除',
   'usageBilling.tokenDetails': '对话 token 详情',
@@ -1561,9 +1561,9 @@ export const zhCNTranslations = {
   'agent.builtinMcpApproval.resource': '资源范围',
   'agent.builtinMcpApproval.resource.generic': '当前网页中的受限资源',
   'agent.builtinMcpApproval.resource.managedBrowserProfile':
-    '整个 MyCopilot 受管浏览器配置（可能包含其他网站的登录数据）',
+    '整个 Captain Who 受管浏览器配置（可能包含其他网站的登录数据）',
   'agent.builtinMcpApproval.resource.managedSurface':
-    '当前 MyCopilot 受管浏览器标签页（包括其内嵌网页）',
+    '当前 Captain Who 受管浏览器标签页（包括其内嵌网页）',
   'agent.builtinMcpApproval.origin': '网页来源',
   'agent.builtinMcpApproval.files': '文件',
   'agent.builtinMcpApproval.risks': '敏感权限',

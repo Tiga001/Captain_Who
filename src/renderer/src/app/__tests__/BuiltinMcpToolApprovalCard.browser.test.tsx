@@ -21,7 +21,7 @@ const translations = vi.hoisted(
         'agent.builtinMcpApproval.resource': 'Resource scope',
         'agent.builtinMcpApproval.resource.generic': 'Restricted data in the current page',
         'agent.builtinMcpApproval.resource.managedBrowserProfile':
-          'The entire MyCopilot managed browser profile',
+          'The entire Captain Who managed browser profile',
         'agent.builtinMcpApproval.resource.managedSurface': 'The current managed browser tab',
         'agent.builtinMcpApproval.origin': 'Page origin',
         'agent.builtinMcpApproval.files': 'Files',
@@ -45,8 +45,9 @@ const translations = vi.hoisted(
         'agent.builtinMcpApproval.operation': '操作类别',
         'agent.builtinMcpApproval.resource': '资源范围',
         'agent.builtinMcpApproval.resource.generic': '当前网页中的受限资源',
-        'agent.builtinMcpApproval.resource.managedBrowserProfile': '整个 MyCopilot 受管浏览器配置',
-        'agent.builtinMcpApproval.resource.managedSurface': '当前 MyCopilot 受管浏览器标签页',
+        'agent.builtinMcpApproval.resource.managedBrowserProfile':
+          '整个 Captain Who 受管浏览器配置',
+        'agent.builtinMcpApproval.resource.managedSurface': '当前 Captain Who 受管浏览器标签页',
         'agent.builtinMcpApproval.origin': '网页来源',
         'agent.builtinMcpApproval.files': '文件',
         'agent.builtinMcpApproval.risks': '敏感权限',
@@ -152,7 +153,7 @@ describe('BuiltinMcpToolApprovalCard', () => {
       <AgentApprovalDialog target={{ action: proposed, messageId: 'assistant-sensitive' }} />
     )
     expect(chinese.container.textContent).toContain('允许“浏览器自动化”执行“在网页中执行脚本”吗？')
-    expect(chinese.container.textContent).toContain('当前 MyCopilot 受管浏览器标签页')
+    expect(chinese.container.textContent).toContain('当前 Captain Who 受管浏览器标签页')
     expect(chinese.container.textContent).toContain('在当前网页执行脚本')
     await chinese.unmount()
   })
@@ -319,7 +320,7 @@ describe('BuiltinMcpToolApprovalCard', () => {
     const screen = await render(
       <AgentApprovalDialog target={{ action: proposed, messageId: 'assistant-sensitive' }} />
     )
-    expect(screen.container.textContent).toContain('The entire MyCopilot managed browser profile')
+    expect(screen.container.textContent).toContain('The entire Captain Who managed browser profile')
     expect(screen.container.textContent).not.toContain('MUST_NOT_RENDER_RAW_SCOPE_LABEL')
     await screen.unmount()
   })

@@ -369,7 +369,7 @@ pub(crate) fn load_playwright_browser_contract() -> AgentResult<PlaywrightBrowse
         BuiltinCapabilityDescriptor {
             id: BuiltinCapabilityId::parse(BROWSER_AUTOMATION_CAPABILITY_ID)?,
             display_name: "Browser automation".to_string(),
-            description: "Control MyCopilot's managed in-app browser for the current task."
+            description: "Control Captain Who's managed in-app browser for the current task."
                 .to_string(),
         },
         reviewed.managed_mcp_id,

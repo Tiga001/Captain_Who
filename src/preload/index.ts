@@ -46,5 +46,5 @@ const host: HostApi = {
 if (process.contextIsolated) {
   contextBridge.exposeInMainWorld('mycopilot', { host })
 } else {
-  throw new Error('MyCopilot preload requires context isolation')
+  throw new Error('Captain Who preload requires context isolation')
 }

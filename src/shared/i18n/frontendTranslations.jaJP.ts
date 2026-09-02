@@ -9,8 +9,8 @@ export const jaJPTranslations = {
   'app.expandRightSidebar': '右側のサイドバーを展開します',
   'app.resizeLeftSidebar': '左側のサイドバーのサイズを変更する',
   'app.resizeRightSidebar': '右サイドバーのサイズを変更する',
-  'startup.loading': 'MyCopilotを開始します',
-  'startup.failedTitle': 'MyCopilotを開始できません',
+  'startup.loading': 'Captain Whoを開始します',
+  'startup.failedTitle': 'Captain Whoを開始できません',
   'startup.failedDescription':
     '必要なサービスの読み込みが完了していません。もう一度試してください。',
   'startup.retry': '再試行',
@@ -137,7 +137,7 @@ export const jaJPTranslations = {
   'project.archiveAll': 'すべてをアーカイブする',
   'project.removeTitle': '{projectName}を削除しますか?',
   'project.removeDescription':
-    'これにより、プロジェクトとそのローカル チャットおよび添付ファイルが MyCopilot から完全に削除されます。プロジェクトディレクトリ内のファイルは変更されません。',
+    'これにより、プロジェクトとそのローカル チャットおよび添付ファイルが Captain Who から完全に削除されます。プロジェクトディレクトリ内のファイルは変更されません。',
   'project.confirmRemove': '削除',
   'project.removeFailed':
     'プロジェクトを削除できませんでした。ローカルでは何も削除されませんでした。',
@@ -608,7 +608,7 @@ export const jaJPTranslations = {
   'mcp.detail.updatedAt': '更新されました',
   'mcp.detail.launchConfiguration': '起動設定',
   'mcp.detail.technicalDetails': '技術的な詳細',
-  'mcp.detail.enabledHelp': 'MyCopilot は、必要なときにこのサーバーに接続します。',
+  'mcp.detail.enabledHelp': 'Captain Who は、必要なときにこのサーバーに接続します。',
   'mcp.detail.enableWithConfirmationHelp':
     '有効にするにはオンにします。システムは初回に起動の詳細を確認します。',
   'mcp.detail.capabilities': 'サーバーの機能',
@@ -657,7 +657,7 @@ export const jaJPTranslations = {
     '削除結果には確認が必要です。権限のあるサーバーのリストが更新されました。やみくもにその行動を繰り返さないでください。',
   'mcp.delete.title': 'MCPサーバーの削除',
   'mcp.delete.description':
-    'これにより、MyCopilot 構成が削除されます。ローカル プログラムはアンインストールされません。ホストが最初にサーバーを停止するため、アクティブな呼び出しの結果は不明になる可能性があります。',
+    'これにより、Captain Who 構成が削除されます。ローカル プログラムはアンインストールされません。ホストが最初にサーバーを停止するため、アクティブな呼び出しの結果は不明になる可能性があります。',
   'skills.pageDescription': 'Agent が利用できるスキルをインストールして管理する',
   'skills.install': 'スキルのインストール',
   'skills.loading': 'スキルを読み込み中…',
@@ -895,7 +895,7 @@ export const jaJPTranslations = {
   'environment.deleteProject': 'プロジェクトの削除',
   'environment.removeProjectTitle': '{projectName}を削除しますか?',
   'environment.removeProjectDescription':
-    'これにより、プロジェクトとそのローカル チャットおよび添付ファイルが MyCopilot から完全に削除されます。プロジェクトディレクトリ内のファイルは変更されません。',
+    'これにより、プロジェクトとそのローカル チャットおよび添付ファイルが Captain Who から完全に削除されます。プロジェクトディレクトリ内のファイルは変更されません。',
   'environment.cancelRemoveProject': 'キャンセル',
   'environment.confirmRemoveProject': '削除',
   'usageBilling.tokenDetails': '会話トークンの詳細',
@@ -1691,9 +1691,9 @@ export const jaJPTranslations = {
   'agent.builtinMcpApproval.resource': 'リソースの範囲',
   'agent.builtinMcpApproval.resource.generic': '現在のページの制限されたデータ',
   'agent.builtinMcpApproval.resource.managedBrowserProfile':
-    'MyCopilot 管理対象ブラウザ プロファイル全体 (他のサイトからのサインイン データが含まれる場合があります)',
+    'Captain Who 管理対象ブラウザ プロファイル全体 (他のサイトからのサインイン データが含まれる場合があります)',
   'agent.builtinMcpApproval.resource.managedSurface':
-    '現在の MyCopilot 管理対象ブラウザ タブ (埋め込みページを含む)',
+    '現在の Captain Who 管理対象ブラウザ タブ (埋め込みページを含む)',
   'agent.builtinMcpApproval.origin': 'ページの原点',
   'agent.builtinMcpApproval.files': 'ファイル',
   'agent.builtinMcpApproval.risks': '機密アクセス',

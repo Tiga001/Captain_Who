@@ -15,7 +15,7 @@ function context(appOutDir) {
   return {
     electronPlatformName: 'darwin',
     appOutDir,
-    packager: { appInfo: { productFilename: 'MyCopilot' } }
+    packager: { appInfo: { productFilename: 'Captain Who' } }
   }
 }
 

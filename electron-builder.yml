@@ -1,5 +1,7 @@
-appId: com.mycopilot.next
-productName: MyCopilot
+appId: io.github.tiga001.captainwho
+productName: Captain Who
+copyright: Copyright © 2026 ShenhuaJiao
+publish: null
 afterPack: ./scripts/verify-packaged-app.mjs
 afterSign: ./scripts/verify-packaged-app.mjs
 directories:
@@ -37,7 +39,8 @@ extraResources:
   - from: node_modules/electron/dist/LICENSES.chromium.html
     to: LICENSES.chromium.html
 win:
-  executableName: mycopilot
+  executableName: CaptainWho
+  artifactName: Captain-Who-${version}-${arch}.${ext}
   # Preserve the frozen renderer receipt. The application and its other executables are still
   # signed; only the application-managed Chromium binary is excluded from a second Authenticode
   # mutation after its bytes have been verified and frozen.
@@ -47,12 +50,16 @@ win:
     - from: target/release/core-server.exe
       to: core-server.exe
 nsis:
-  artifactName: ${name}-${version}-setup.${ext}
+  artifactName: Captain-Who-${version}-${arch}-Setup.${ext}
+  differentialPackage: false
   shortcutName: ${productName}
   uninstallDisplayName: ${productName}
   createDesktopShortcut: always
 mac:
   icon: build/icon.icns
+  # Auto-update is disabled, so avoid the default ZIP target and its mandatory blockmap.
+  target:
+    - dmg
   # build:mac additionally enables forceCodeSigning. This custom signer gives the Rust helper a
   # stable designated requirement while preserving electron-builder's normal recursive signing
   # policy for the application and Electron helpers.
@@ -74,17 +81,19 @@ mac:
     - from: target/release/core-server
       to: core-server
   extendInfo:
-    - NSDocumentsFolderUsageDescription: MyCopilot accesses files you select in Documents.
-    - NSDownloadsFolderUsageDescription: MyCopilot accesses files you select in Downloads.
+    NSDocumentsFolderUsageDescription: Captain Who accesses files you select in Documents.
+    NSDownloadsFolderUsageDescription: Captain Who accesses files you select in Downloads.
   # Signing is mandatory for build:mac. Notarization remains an independent release operation
   # until CI has an Apple notary credential contract; it must never be confused with signing.
   notarize: false
 dmg:
-  # Sign the distributable container itself before its block map is generated. The application
-  # inside already carries the complete hardened Developer ID signature chain.
+  # Sign the distributable container itself. The application inside already carries the complete
+  # hardened Developer ID signature chain; update metadata stays disabled independently.
   sign: true
-  artifactName: ${name}-${version}.${ext}
+  writeUpdateInfo: false
+  artifactName: Captain-Who-${version}-${arch}.${ext}
 linux:
+  artifactName: Captain-Who-${version}-${arch}.${ext}
   extraResources:
     - from: target/release/core-server
       to: core-server
@@ -92,8 +101,8 @@ linux:
     - AppImage
     - snap
     - deb
-  maintainer: MyCopilot Contributors
+  maintainer: ShenhuaJiao
   category: Utility
 appImage:
-  artifactName: ${name}-${version}.${ext}
+  artifactName: Captain-Who-${version}-${arch}.${ext}
 npmRebuild: false

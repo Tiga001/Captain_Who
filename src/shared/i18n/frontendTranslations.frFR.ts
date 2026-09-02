@@ -9,8 +9,8 @@ export const frFRTranslations = {
   'app.expandRightSidebar': 'Développer la barre latérale droite',
   'app.resizeLeftSidebar': 'Redimensionner la barre latérale gauche',
   'app.resizeRightSidebar': 'Redimensionner la barre latérale droite',
-  'startup.loading': 'À partir du MyCopilot',
-  'startup.failedTitle': 'Impossible de démarrer MyCopilot',
+  'startup.loading': 'À partir du Captain Who',
+  'startup.failedTitle': 'Impossible de démarrer Captain Who',
   'startup.failedDescription':
     "Les services requis n'ont pas fini de se charger. Veuillez réessayer.",
   'startup.retry': 'Réessayer',
@@ -137,7 +137,7 @@ export const frFRTranslations = {
   'project.archiveAll': 'Archiver tout',
   'project.removeTitle': 'Supprimer {projectName} ?',
   'project.removeDescription':
-    'Cela supprime définitivement le projet, ses discussions locales et ses pièces jointes de MyCopilot. Les fichiers du répertoire du projet ne sont pas modifiés.',
+    'Cela supprime définitivement le projet, ses discussions locales et ses pièces jointes de Captain Who. Les fichiers du répertoire du projet ne sont pas modifiés.',
   'project.confirmRemove': 'Supprimer',
   'project.removeFailed': "Impossible de supprimer le projet. Rien n'a été supprimé localement.",
   'rightSidebar.newPanel': 'Nouveau panneau',
@@ -617,7 +617,7 @@ export const frFRTranslations = {
   'mcp.detail.updatedAt': 'Mis à jour',
   'mcp.detail.launchConfiguration': 'Configuration de lancement',
   'mcp.detail.technicalDetails': 'Détails techniques',
-  'mcp.detail.enabledHelp': 'MyCopilot se connecte à ce serveur lorsque cela est nécessaire.',
+  'mcp.detail.enabledHelp': 'Captain Who se connecte à ce serveur lorsque cela est nécessaire.',
   'mcp.detail.enableWithConfirmationHelp':
     'Allumez-le pour l’activer. Le système confirme les détails du lancement pour la première fois.',
   'mcp.detail.capabilities': 'Capacités du serveur',
@@ -667,7 +667,7 @@ export const frFRTranslations = {
     'Le résultat de la suppression nécessite une confirmation. La liste des serveurs faisant autorité a été actualisée ; ne répétez pas l’action aveuglément.',
   'mcp.delete.title': 'Supprimer le serveur MCP',
   'mcp.delete.description':
-    "Cela supprime la configuration MyCopilot ; il ne désinstalle pas le programme local. L'hôte arrête d'abord le serveur et les appels actifs peuvent avoir un résultat inconnu.",
+    "Cela supprime la configuration Captain Who ; il ne désinstalle pas le programme local. L'hôte arrête d'abord le serveur et les appels actifs peuvent avoir un résultat inconnu.",
   'skills.pageDescription': 'Installer et gérer les compétences disponibles pour les Agent',
   'skills.install': 'Installer la compétence',
   'skills.loading': 'Chargement des compétences…',
@@ -910,7 +910,7 @@ export const frFRTranslations = {
   'environment.deleteProject': 'Supprimer le projet',
   'environment.removeProjectTitle': 'Supprimer {projectName} ?',
   'environment.removeProjectDescription':
-    'Cela supprime définitivement le projet, ses discussions locales et ses pièces jointes de MyCopilot. Les fichiers du répertoire du projet ne sont pas modifiés.',
+    'Cela supprime définitivement le projet, ses discussions locales et ses pièces jointes de Captain Who. Les fichiers du répertoire du projet ne sont pas modifiés.',
   'environment.cancelRemoveProject': 'Annuler',
   'environment.confirmRemoveProject': 'Supprimer',
   'usageBilling.tokenDetails': 'Détails du jeton de conversation',
@@ -1733,9 +1733,9 @@ export const frFRTranslations = {
   'agent.builtinMcpApproval.resource': 'Portée des ressources',
   'agent.builtinMcpApproval.resource.generic': 'Données restreintes dans la page actuelle',
   'agent.builtinMcpApproval.resource.managedBrowserProfile':
-    "L'intégralité du profil de navigateur géré MyCopilot (qui peut inclure des données de connexion provenant d'autres sites)",
+    "L'intégralité du profil de navigateur géré Captain Who (qui peut inclure des données de connexion provenant d'autres sites)",
   'agent.builtinMcpApproval.resource.managedSurface':
-    "L'onglet actuel du navigateur géré MyCopilot, y compris ses pages intégrées",
+    "L'onglet actuel du navigateur géré Captain Who, y compris ses pages intégrées",
   'agent.builtinMcpApproval.origin': 'Origine de la page',
   'agent.builtinMcpApproval.files': 'Fichiers',
   'agent.builtinMcpApproval.risks': 'Accès sensible',

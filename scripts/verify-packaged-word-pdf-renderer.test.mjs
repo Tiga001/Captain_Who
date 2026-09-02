@@ -12,11 +12,11 @@ test('resolves each packaged Word PDF component resource boundary', () => {
     packagedWordPdfRendererDirectory({
       electronPlatformName: 'darwin',
       appOutDir: '/build/mac-arm64',
-      packager: { appInfo: { productFilename: 'MyCopilot' } }
+      packager: { appInfo: { productFilename: 'Captain Who' } }
     }),
     join(
       '/build/mac-arm64',
-      'MyCopilot.app',
+      'Captain Who.app',
       'Contents',
       'Resources',
       'components',

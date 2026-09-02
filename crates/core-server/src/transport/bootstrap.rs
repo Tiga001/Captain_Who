@@ -957,7 +957,7 @@ pub(crate) fn image_generation_artifact_store_root(database_path: &std::path::Pa
 
 #[cfg(target_os = "macos")]
 const MACOS_CORE_SERVER_SIGNING_REQUIREMENT: &str =
-    r#"anchor apple generic and identifier "com.mycopilot.next.core-server""#;
+    r#"anchor apple generic and identifier "io.github.tiga001.captainwho.core-server""#;
 
 /// Selects a credential backend without ever probing a legacy Keychain item.
 ///

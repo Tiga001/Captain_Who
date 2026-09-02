@@ -12,10 +12,10 @@ import {
 
 test('process-table discovery follows only descendants of the exact packaged process', () => {
   const processes = parseProcessTable(`
-    10 1 /Applications/MyCopilot.app/Contents/MacOS/MyCopilot
-    11 10 /Applications/MyCopilot.app/Contents/Resources/core-server
-    12 10 /Applications/MyCopilot.app/Contents/Frameworks/Renderer --type=renderer
-    13 12 /Applications/MyCopilot.app/Contents/Frameworks/Utility --type=utility
+    10 1 /Applications/Captain Who.app/Contents/MacOS/Captain Who
+    11 10 /Applications/Captain Who.app/Contents/Resources/core-server
+    12 10 /Applications/Captain Who.app/Contents/Frameworks/Renderer --type=renderer
+    13 12 /Applications/Captain Who.app/Contents/Frameworks/Utility --type=utility
     20 1 /Applications/Unrelated.app/Contents/MacOS/Unrelated
   `)
   assert.deepEqual(

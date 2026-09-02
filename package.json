@@ -1,11 +1,11 @@
 {
-  "name": "mycopilot-next",
+  "name": "captain-who",
   "version": "1.0.0",
   "description": "A local-first AI desktop assistant powered by Electron, React, and Rust",
   "private": true,
   "license": "UNLICENSED",
   "main": "./out/main/index.js",
-  "author": "MyCopilot Contributors",
+  "author": "ShenhuaJiao",
   "packageManager": "pnpm@11.10.0",
   "engines": {
     "node": ">=22 <23"

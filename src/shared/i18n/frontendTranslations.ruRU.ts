@@ -9,8 +9,8 @@ export const ruRUTranslations = {
   'app.expandRightSidebar': 'Развернуть правую боковую панель',
   'app.resizeLeftSidebar': 'Изменить размер левой боковой панели',
   'app.resizeRightSidebar': 'Изменить размер правой боковой панели',
-  'startup.loading': 'Начало MyCopilot',
-  'startup.failedTitle': 'Невозможно запустить MyCopilot',
+  'startup.loading': 'Начало Captain Who',
+  'startup.failedTitle': 'Невозможно запустить Captain Who',
   'startup.failedDescription':
     'Требуемые службы не завершили загрузку. Пожалуйста, попробуйте еще раз.',
   'startup.retry': 'Повторить попытку',
@@ -137,7 +137,7 @@ export const ruRUTranslations = {
   'project.archiveAll': 'Архивировать все',
   'project.removeTitle': 'Удалить {projectName}?',
   'project.removeDescription':
-    'Это навсегда удалит проект, его локальные чаты и вложения из MyCopilot. Файлы в каталоге проекта не изменяются.',
+    'Это навсегда удалит проект, его локальные чаты и вложения из Captain Who. Файлы в каталоге проекта не изменяются.',
   'project.confirmRemove': 'Удалить',
   'project.removeFailed': 'Не удалось удалить проект. Локально ничего не удалялось.',
   'rightSidebar.newPanel': 'Новая панель',
@@ -611,7 +611,7 @@ export const ruRUTranslations = {
   'mcp.detail.updatedAt': 'Обновлено',
   'mcp.detail.launchConfiguration': 'Запустить конфигурацию',
   'mcp.detail.technicalDetails': 'Технические детали',
-  'mcp.detail.enabledHelp': 'MyCopilot подключается к этому серверу, когда это необходимо.',
+  'mcp.detail.enabledHelp': 'Captain Who подключается к этому серверу, когда это необходимо.',
   'mcp.detail.enableWithConfirmationHelp':
     'Включите его, чтобы включить. Система подтверждает детали запуска с первого раза.',
   'mcp.detail.capabilities': 'Возможности сервера',
@@ -661,7 +661,7 @@ export const ruRUTranslations = {
     'Результат удаления требует подтверждения. Список авторитетных серверов обновлен; не повторяйте действие вслепую.',
   'mcp.delete.title': 'Удалить MCP сервер',
   'mcp.delete.description':
-    'Это удалит конфигурацию MyCopilot; он не удаляет локальную программу. Хост сначала останавливает сервер, и активные вызовы могут иметь неизвестный результат.',
+    'Это удалит конфигурацию Captain Who; он не удаляет локальную программу. Хост сначала останавливает сервер, и активные вызовы могут иметь неизвестный результат.',
   'skills.pageDescription': 'Устанавливайте и управляйте навыками, доступными для Agent',
   'skills.install': 'Установить навык',
   'skills.loading': 'Загрузка навыков…',
@@ -897,7 +897,7 @@ export const ruRUTranslations = {
   'environment.deleteProject': 'Удалить проект',
   'environment.removeProjectTitle': 'Удалить {projectName}?',
   'environment.removeProjectDescription':
-    'Это навсегда удалит проект, его локальные чаты и вложения из MyCopilot. Файлы в каталоге проекта не изменяются.',
+    'Это навсегда удалит проект, его локальные чаты и вложения из Captain Who. Файлы в каталоге проекта не изменяются.',
   'environment.cancelRemoveProject': 'Отмена',
   'environment.confirmRemoveProject': 'Удалить',
   'usageBilling.tokenDetails': 'Подробности токена разговора',
@@ -1693,9 +1693,9 @@ export const ruRUTranslations = {
   'agent.builtinMcpApproval.resource': 'Объем ресурса',
   'agent.builtinMcpApproval.resource.generic': 'Ограниченные данные на текущей странице',
   'agent.builtinMcpApproval.resource.managedBrowserProfile':
-    'Весь управляемый профиль браузера MyCopilot (который может включать данные для входа с других сайтов)',
+    'Весь управляемый профиль браузера Captain Who (который может включать данные для входа с других сайтов)',
   'agent.builtinMcpApproval.resource.managedSurface':
-    'Текущая MyCopilot управляемая вкладка браузера, включая встроенные страницы.',
+    'Текущая Captain Who управляемая вкладка браузера, включая встроенные страницы.',
   'agent.builtinMcpApproval.origin': 'Происхождение страницы',
   'agent.builtinMcpApproval.files': 'Файлы',
   'agent.builtinMcpApproval.risks': 'Чувствительный доступ',

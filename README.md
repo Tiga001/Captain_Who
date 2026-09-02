@@ -106,7 +106,8 @@ pnpm build:linux
 `electron-builder.yml` 只把 `out/`、运行时资源、生产依赖和当前平台的 `core-server` 放入应用，不会再把源码或 Cargo `target/` 缓存打进 ASAR。
 
 macOS `build:mac` 已强制 Developer ID 签名、hardened runtime、受管原生组件与隐私门禁验签，DMG
-容器也会签名；Apple notarization 与自动更新发布地址尚未配置。`pnpm check` 也不包含全部专项发布门禁，对外分发前必须按
+容器也会签名；Apple notarization 尚未自动化，自动更新暂未启用且没有发布地址。`pnpm check`
+也不包含全部专项发布门禁，对外分发前必须按
 [构建与发布](docs/development/build-and-release.md)执行同一最终代码树上的平台验证。
 
 ## 本地数据与隐私

@@ -244,9 +244,9 @@ SUPPLEMENTAL THIRD-PARTY ATTRIBUTIONS
 Audit snapshot: 2026-08-23
 
 This section records principal third-party runtime components, visual assets,
-and adapted color palettes used by MyCopilot. It supplements the component
+and adapted color palettes used by Captain Who. It supplements the component
 notices elsewhere in this file. The licenses below apply only to the identified
-third-party materials; they do not change the license of MyCopilot as a whole.
+third-party materials; they do not change the license of Captain Who as a whole.
 
 Electron embeds Chromium and other third-party software. The authoritative,
 complete notices supplied with the Electron runtime are distributed alongside
@@ -259,7 +259,7 @@ VISUAL ASSETS AND ICONS
 
 DiceBear Core, Pixelbot, and Voxel Bot (10.5.0)
 
-MyCopilot bundles 48 Pixelbot and 48 Voxel Bot SVG avatars generated locally
+Captain Who bundles 48 Pixelbot and 48 Voxel Bot SVG avatars generated locally
 with deterministic seeds. The application uses these static files and does not
 call the DiceBear HTTP API at runtime.
 
@@ -289,7 +289,7 @@ and rights metadata supplied by DiceBear.
 
 Material Icon Theme (5.36.1)
 
-MyCopilot bundles a selected set of SVG file, language, and tool icons from
+Captain Who bundles a selected set of SVG file, language, and tool icons from
 Material Icon Theme for file-type identification, including the icons shown in
 the Git review diff UI.
 
@@ -299,7 +299,7 @@ Copyright (c) 2025 Material Extensions
 
 Fluent Emoji
 
-MyCopilot bundles selected Flat SVG assets from Fluent Emoji for the Image
+Captain Who bundles selected Flat SVG assets from Fluent Emoji for the Image
 Generation, Skill Installer, and Skill Creator application Skill icons. It also
 bundles 48 selected Color SVG assets depicting generic animals, fantasy
 creatures, and a robot for deterministic, local child-Agent avatars. The
@@ -316,7 +316,7 @@ Agent avatar assets:
 
 Lucide React (1.23.0)
 
-MyCopilot uses Lucide icons throughout the desktop UI, including the Git review,
+Captain Who uses Lucide icons throughout the desktop UI, including the Git review,
 browser, and terminal surfaces.
 
 Source: https://github.com/lucide-icons/lucide
@@ -410,19 +410,19 @@ regex-utilities:
 
 The language definitions loaded through @shikijs/langs are generated from
 third-party TextMate grammars. The complete upstream NOTICE blocks reachable
-from MyCopilot's current language loaders are distributed alongside this file
+from Captain Who's current language loaders are distributed alongside this file
 in a filtered, immutable snapshot:
 
   THIRD_PARTY_GRAMMAR_NOTICES.txt
   https://github.com/shikijs/textmate-grammars-themes/blob/022eed00a8dd29481123f08e1cccf5a5bfee23f9/packages/tm-grammars/NOTICE
 
-MyCopilot uses a bounded set of those language definitions and a project-defined
+Captain Who uses a bounded set of those language definitions and a project-defined
 worker theme mapping; it does not load an arbitrary Shiki theme at runtime.
 
 ADAPTED THEME PALETTES
 
-Some MyCopilot UI and Git review syntax palettes are adaptations of, or sample
-color values from, the following MIT-licensed themes. MyCopilot's theme
+Some Captain Who UI and Git review syntax palettes are adaptations of, or sample
+color values from, the following MIT-licensed themes. Captain Who's theme
 implementations are independent adaptations; the upstream editor extensions
 are not bundled as extensions.
 
@@ -476,7 +476,7 @@ registrations. The original theme sources and their notices are indexed at:
 Licenses for the adapted palettes above: MIT (license text below).
 
 The Classic, Crab, and ZJU palettes are not represented here as third-party
-open-source themes. Their presence in MyCopilot's theme registry must not be
+open-source themes. Their presence in Captain Who's theme registry must not be
 read as an attribution to any of the upstream projects listed above.
 
 DESKTOP AND RENDERER RUNTIME COMPONENTS
@@ -850,7 +850,7 @@ TRADEMARK NOTICE
 Third-party names, logos, product marks, and file-type symbols remain the
 property of their respective owners. They are used only to identify compatible
 file types, languages, tools, or the origin of a theme. Their inclusion does
-not imply affiliation with, sponsorship by, or endorsement of MyCopilot. The
+not imply affiliation with, sponsorship by, or endorsement of Captain Who. The
 open-source licenses above do not grant trademark rights except as expressly
 stated in those licenses.
 
@@ -914,15 +914,15 @@ SOFTWARE.
 
 The following software may be included in this product:
 
-  Anthropic skill-creator workflow (adapted for MyCopilot)
+  Anthropic skill-creator workflow (adapted for Captain Who)
 
 Copyright 2026 Anthropic, PBC.
 
 Source: https://github.com/anthropics/skills
 License: Apache License, Version 2.0 (reproduced earlier in this file)
 
-The bundled MyCopilot Skill is a modified adaptation. It replaces Claude-specific evaluation,
-packaging, and browser workflows with MyCopilot Workspace Skills, revision-bound resources,
+The bundled Captain Who Skill is a modified adaptation. It replaces Claude-specific evaluation,
+packaging, and browser workflows with Captain Who Workspace Skills, revision-bound resources,
 independent child Agent Runs, and the managed Skill installation workflow.
 
 ---

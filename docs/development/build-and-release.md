@@ -2,7 +2,7 @@
 status: current
 audience: developers/maintainers
 owner: engineering
-last_verified: 2026-08-31
+last_verified: 2026-09-02
 ---
 
 # 构建与发布
@@ -83,9 +83,9 @@ Electron Builder 将 `out/**`、`resources/**` 和所需 Node modules 放入应�
 
 平台产物：
 
-- macOS：`MyCopilot.app` 与 `${name}-${version}.dmg`
-- Windows：`${name}-${version}-setup.exe`（NSIS）
-- Linux：`${name}-${version}.AppImage`、snap、deb
+- macOS：`Captain Who.app` 与 `Captain-Who-${version}-${arch}.dmg`
+- Windows：`Captain-Who-${version}-${arch}-Setup.exe`（NSIS）
+- Linux：`Captain-Who-${version}-${arch}.AppImage`、snap、deb
 
 实际输出目录和 arch 后缀由 Electron Builder 决定，发布记录应枚举真实文件而不是依赖文档猜测。
 
@@ -120,8 +120,8 @@ Core Server 在打包前经过 native magic/execute 校验，正式 macOS afterS
 
 必须满足：
 
-- app code-sign identifier：`com.mycopilot.next`
-- Core Server helper identifier：`com.mycopilot.next.core-server`
+- app code-sign identifier：`io.github.tiga001.captainwho`
+- Core Server helper identifier：`io.github.tiga001.captainwho.core-server`
 - app 与 Core Server sidecar 使用同一 Team ID 和同一 Developer ID leaf identity
 - app 与 Core Server sidecar 都有 hardened runtime 和可信 timestamp
 - Core Server designated requirement 绑定稳定 identifier、Apple anchor 和 signer，不能绑定可变 cdhash
@@ -141,7 +141,11 @@ Artifact Runtime、OfficeCLI、Office renderer 和 Word/PDF renderer 目录都�
 notarize: false
 ```
 
-因此 macOS 发行包可以是 Developer ID 已签名，但**尚未经过 Apple notary service**。仓库也没有 stapling、notary credential、自动 publish 或 updater channel。任何发行说明必须如实区分这些状态。
+因此 macOS 发行包可以是 Developer ID 已签名，但**尚未经过 Apple notary service**。仓库没有自动
+stapling；notary credential 仍由发布者在本机钥匙串管理。构建配置显式使用 `publish: null`，应用也没有
+集成 `electron-updater`；macOS 目标仅生成 DMG，且 DMG update info 与 NSIS differential package
+均被关闭，所以普通构建不得生成或发布 `app-update.yml`、`latest*.yml`、`*.blockmap` 或 updater
+channel。任何发行说明必须如实区分签名、公证和发布状态。
 
 ## 7. 发布前门禁
 

@@ -1,6 +1,6 @@
 /* eslint-disable @typescript-eslint/explicit-function-return-type -- electron-builder loads this JavaScript module directly. */
 
-import { readFile } from 'node:fs/promises'
+import { lstat, readFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { basename, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -50,6 +50,51 @@ function packagedResourcesDirectory(context) {
 
 export function packagedApplicationAsarPath(context) {
   return join(packagedResourcesDirectory(context), 'app.asar')
+}
+
+export async function verifyPackagedAutoUpdateMetadataDisabled(context) {
+  // electron-builder 26 needs an explicit null to suppress repository inference and update
+  // manifests. Target-level switches below independently suppress differential artifacts.
+  const configuration = context?.packager?.config
+  if (configuration?.publish !== null) {
+    throw new Error('electron-builder publish must remain explicitly null while auto-update is off')
+  }
+
+  for (const scope of ['mac', 'win', 'linux', 'dmg', 'nsis', 'appImage']) {
+    const scopedPublish = configuration?.[scope]?.publish
+    if (scopedPublish !== undefined && scopedPublish !== null) {
+      throw new Error(
+        `electron-builder ${scope}.publish must remain unset while auto-update is off`
+      )
+    }
+  }
+
+  if (
+    !Array.isArray(configuration?.mac?.target) ||
+    configuration.mac.target.length !== 1 ||
+    configuration.mac.target[0] !== 'dmg'
+  ) {
+    throw new Error('electron-builder mac.target must remain DMG-only while auto-update is off')
+  }
+  if (configuration?.dmg?.writeUpdateInfo !== false) {
+    throw new Error(
+      'electron-builder dmg.writeUpdateInfo must remain false while auto-update is off'
+    )
+  }
+  if (configuration?.nsis?.differentialPackage !== false) {
+    throw new Error(
+      'electron-builder nsis.differentialPackage must remain false while auto-update is off'
+    )
+  }
+
+  const updateConfiguration = join(packagedResourcesDirectory(context), 'app-update.yml')
+  try {
+    await lstat(updateConfiguration)
+  } catch (error) {
+    if (error?.code === 'ENOENT') return
+    throw error
+  }
+  throw new Error('Packaged application unexpectedly contains app-update.yml')
 }
 
 function loadAsarApi() {
@@ -130,7 +175,7 @@ export async function verifyPackagedMacIcon(
     readFile(packagedMacIconPath(context))
   ])
   if (!packagedIcon.equals(sourceIcon)) {
-    throw new Error('Packaged MyCopilot icon does not match build/icon.icns')
+    throw new Error('Packaged Captain Who icon does not match build/icon.icns')
   }
 }
 
@@ -139,6 +184,7 @@ export function isMacCodeSigningExplicitlyDisabled(context) {
 }
 
 export async function afterPack(context) {
+  await verifyPackagedAutoUpdateMetadataDisabled(context)
   if (context.electronPlatformName === 'darwin') {
     await sanitizePackagedMacNativeCode(context)
     await verifyPackagedPrivacy(context)
@@ -153,6 +199,7 @@ export async function afterPack(context) {
 }
 
 export async function afterSign(context) {
+  await verifyPackagedAutoUpdateMetadataDisabled(context)
   const frozenComponents = await verifyPackagedFrozenComponentsAfterSign(context)
   const officeRenderer = await verifyOfficeRendererAfterSign(context)
   if (context.electronPlatformName === 'darwin' && !isMacCodeSigningExplicitlyDisabled(context)) {

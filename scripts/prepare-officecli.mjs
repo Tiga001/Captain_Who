@@ -287,7 +287,7 @@ async function requestDownload(url, redirectsRemaining = OFFICECLI_MAX_REDIRECTS
       {
         headers: {
           Accept: 'application/octet-stream',
-          'User-Agent': 'MyCopilot-OfficeCLI-Component-Preparer/1'
+          'User-Agent': 'CaptainWho-OfficeCLI-Component-Preparer/1'
         }
       },
       (response) => {

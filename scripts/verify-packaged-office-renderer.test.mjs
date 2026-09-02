@@ -13,11 +13,11 @@ test('packaged renderer resolves inside the platform resources directory', () =>
     packagedOfficeRendererDirectory({
       appOutDir: '/build/mac-arm64',
       electronPlatformName: 'darwin',
-      packager: { appInfo: { productFilename: 'MyCopilot' } }
+      packager: { appInfo: { productFilename: 'Captain Who' } }
     }),
     join(
       '/build/mac-arm64',
-      'MyCopilot.app',
+      'Captain Who.app',
       'Contents',
       'Resources',
       'components',
@@ -44,7 +44,7 @@ test('packaged renderer path resolution fails closed on malformed hook context',
       packagedOfficeRendererDirectory({
         appOutDir: '/build/mac-arm64',
         electronPlatformName: 'darwin',
-        packager: { appInfo: { productFilename: '../MyCopilot' } }
+        packager: { appInfo: { productFilename: '../Captain Who' } }
       }),
     /productFilename is required/
   )

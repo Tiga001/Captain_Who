@@ -18,7 +18,7 @@ function context(overrides = {}) {
     arch: 3,
     appOutDir: '/build/mac-arm64',
     packager: {
-      appInfo: { productFilename: 'MyCopilot' },
+      appInfo: { productFilename: 'Captain Who' },
       platformSpecificBuildOptions: {}
     },
     ...overrides
@@ -27,7 +27,13 @@ function context(overrides = {}) {
 
 test('packaged frozen component directories stay inside the exact application resources boundary', () => {
   const directories = packagedFrozenComponentDirectories(context())
-  const resources = join('/build/mac-arm64', 'MyCopilot.app', 'Contents', 'Resources', 'components')
+  const resources = join(
+    '/build/mac-arm64',
+    'Captain Who.app',
+    'Contents',
+    'Resources',
+    'components'
+  )
   assert.deepEqual(directories, {
     artifactRuntime: join(resources, 'artifact-runtime'),
     officeCli: join(resources, 'officecli')
@@ -80,7 +86,7 @@ test('afterSign preserves unsigned OfficeCLI semantics when signing is explicitl
   await verifyPackagedFrozenComponentsAfterSign(
     context({
       packager: {
-        appInfo: { productFilename: 'MyCopilot' },
+        appInfo: { productFilename: 'Captain Who' },
         platformSpecificBuildOptions: { identity: null }
       }
     }),

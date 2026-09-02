@@ -1,7 +1,7 @@
 /* eslint-disable @typescript-eslint/explicit-function-return-type -- Node's test runner infers fixture helper contracts. */
 
 import assert from 'node:assert/strict'
-import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -11,24 +11,142 @@ import {
   isMacCodeSigningExplicitlyDisabled,
   packagedApplicationAsarPath,
   packagedMacIconPath,
+  verifyPackagedAutoUpdateMetadataDisabled,
   verifyPackagedMacIcon,
   verifyPackagedManagedPlaywrightMcp
 } from './verify-packaged-app.mjs'
 
 const requireFromBuilder = createRequire(import.meta.resolve('electron-builder/package.json'))
 const { createPackage } = requireFromBuilder('@electron/asar')
+const { load: parseYaml } = requireFromBuilder('js-yaml')
 
 function createPackContext(appOutDir) {
   return {
     electronPlatformName: 'darwin',
     appOutDir,
     packager: {
+      config: {
+        publish: null,
+        mac: { target: ['dmg'] },
+        dmg: { writeUpdateInfo: false },
+        nsis: { differentialPackage: false }
+      },
       appInfo: {
-        productFilename: 'MyCopilot'
+        productFilename: 'Captain Who'
       }
     }
   }
 }
+
+test('electron-builder freezes the Captain Who release identity and disables update metadata', async () => {
+  const configuration = parseYaml(
+    await readFile(new URL('../electron-builder.yml', import.meta.url), 'utf8')
+  )
+
+  assert.equal(configuration.appId, 'io.github.tiga001.captainwho')
+  assert.equal(configuration.productName, 'Captain Who')
+  assert.equal(configuration.copyright, 'Copyright © 2026 ShenhuaJiao')
+  assert.equal(configuration.publish, null)
+  assert.equal(configuration.win.executableName, 'CaptainWho')
+  assert.equal(configuration.win.artifactName, 'Captain-Who-${version}-${arch}.${ext}')
+  assert.equal(configuration.nsis.artifactName, 'Captain-Who-${version}-${arch}-Setup.${ext}')
+  assert.equal(configuration.nsis.differentialPackage, false)
+  assert.deepEqual(configuration.mac.target, ['dmg'])
+  assert.equal(configuration.dmg.artifactName, 'Captain-Who-${version}-${arch}.${ext}')
+  assert.equal(configuration.dmg.writeUpdateInfo, false)
+  assert.equal(configuration.linux.artifactName, 'Captain-Who-${version}-${arch}.${ext}')
+  assert.equal(configuration.appImage.artifactName, 'Captain-Who-${version}-${arch}.${ext}')
+  assert.equal(configuration.linux.maintainer, 'ShenhuaJiao')
+  assert.deepEqual(configuration.mac.extendInfo, {
+    NSDocumentsFolderUsageDescription: 'Captain Who accesses files you select in Documents.',
+    NSDownloadsFolderUsageDescription: 'Captain Who accesses files you select in Downloads.'
+  })
+})
+
+test('packaged application refuses inferred or embedded auto-update metadata', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'captain-who-packaged-update-metadata-'))
+  const context = createPackContext(directory)
+  try {
+    await verifyPackagedAutoUpdateMetadataDisabled(context)
+    await assert.rejects(
+      () =>
+        verifyPackagedAutoUpdateMetadataDisabled({
+          ...context,
+          packager: { ...context.packager, config: { publish: [] } }
+        }),
+      /publish must remain explicitly null/
+    )
+    await assert.rejects(
+      () =>
+        verifyPackagedAutoUpdateMetadataDisabled({
+          ...context,
+          packager: {
+            ...context.packager,
+            config: { ...context.packager.config, mac: { publish: [] } }
+          }
+        }),
+      /mac\.publish must remain unset/
+    )
+    await assert.rejects(
+      () =>
+        verifyPackagedAutoUpdateMetadataDisabled({
+          ...context,
+          packager: {
+            ...context.packager,
+            config: {
+              ...context.packager.config,
+              dmg: { writeUpdateInfo: true }
+            }
+          }
+        }),
+      /dmg\.writeUpdateInfo must remain false/
+    )
+    await assert.rejects(
+      () =>
+        verifyPackagedAutoUpdateMetadataDisabled({
+          ...context,
+          packager: {
+            ...context.packager,
+            config: {
+              ...context.packager.config,
+              mac: { target: ['dmg', 'zip'] }
+            }
+          }
+        }),
+      /mac\.target must remain DMG-only/
+    )
+    await assert.rejects(
+      () =>
+        verifyPackagedAutoUpdateMetadataDisabled({
+          ...context,
+          packager: {
+            ...context.packager,
+            config: {
+              ...context.packager.config,
+              nsis: { differentialPackage: true }
+            }
+          }
+        }),
+      /nsis\.differentialPackage must remain false/
+    )
+
+    const updateConfiguration = join(
+      directory,
+      'Captain Who.app',
+      'Contents',
+      'Resources',
+      'app-update.yml'
+    )
+    await mkdir(dirname(updateConfiguration), { recursive: true })
+    await writeFile(updateConfiguration, 'provider: github\n')
+    await assert.rejects(
+      () => verifyPackagedAutoUpdateMetadataDisabled(context),
+      /unexpectedly contains app-update\.yml/
+    )
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
+})
 
 test('packaged macOS icon verification accepts the configured brand icon', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'mycopilot-packaged-icon-'))

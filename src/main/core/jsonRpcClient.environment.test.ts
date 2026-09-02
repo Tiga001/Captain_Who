@@ -83,7 +83,7 @@ describe('CoreJsonRpcClient application data root', () => {
       electronApp.isPackaged = isPackaged
       Object.defineProperty(process, 'resourcesPath', {
         configurable: true,
-        value: resolve('fixtures', 'MyCopilot.app', 'Contents', 'Resources')
+        value: resolve('fixtures', 'Captain Who.app', 'Contents', 'Resources')
       })
       process.env.MYCOPILOT_APP_DATA_ROOT = inheritedAppDataRoot
       process.env.MYCOPILOT_STORAGE_DB = inheritedStorageDatabase

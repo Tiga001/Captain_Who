@@ -10,8 +10,8 @@ export const enUSTranslations = {
   'app.resizeLeftSidebar': 'Resize left sidebar',
   'app.resizeRightSidebar': 'Resize right sidebar',
 
-  'startup.loading': 'Starting MyCopilot',
-  'startup.failedTitle': 'Unable to start MyCopilot',
+  'startup.loading': 'Starting Captain Who',
+  'startup.failedTitle': 'Unable to start Captain Who',
   'startup.failedDescription': 'Required services did not finish loading. Please try again.',
   'startup.retry': 'Retry',
   'startup.ambient.deepThinking': 'Thinking deeply',
@@ -138,7 +138,7 @@ export const enUSTranslations = {
   'project.archiveAll': 'Archive all',
   'project.removeTitle': 'Remove {projectName}?',
   'project.removeDescription':
-    'This permanently removes the project and its local chats and attachments from MyCopilot. Files in the project directory are not changed.',
+    'This permanently removes the project and its local chats and attachments from Captain Who. Files in the project directory are not changed.',
   'project.confirmRemove': 'Remove',
   'project.removeFailed': 'Could not remove the project. Nothing was deleted locally.',
 
@@ -605,7 +605,7 @@ export const enUSTranslations = {
   'mcp.detail.updatedAt': 'Updated',
   'mcp.detail.launchConfiguration': 'Launch configuration',
   'mcp.detail.technicalDetails': 'Technical details',
-  'mcp.detail.enabledHelp': 'MyCopilot connects to this server when it is needed.',
+  'mcp.detail.enabledHelp': 'Captain Who connects to this server when it is needed.',
   'mcp.detail.enableWithConfirmationHelp':
     'Turn it on to enable it. The system confirms launch details the first time.',
   'mcp.detail.capabilities': 'Server capabilities',
@@ -655,7 +655,7 @@ export const enUSTranslations = {
     'The delete result requires confirmation. The authoritative server list was refreshed; do not repeat the action blindly.',
   'mcp.delete.title': 'Delete MCP server',
   'mcp.delete.description':
-    'This removes the MyCopilot configuration; it does not uninstall the local program. The Host stops the server first, and active calls may have an unknown outcome.',
+    'This removes the Captain Who configuration; it does not uninstall the local program. The Host stops the server first, and active calls may have an unknown outcome.',
 
   'skills.pageDescription': 'Install and manage skills available to the Agent',
   'skills.install': 'Install skill',
@@ -887,7 +887,7 @@ export const enUSTranslations = {
   'environment.deleteProject': 'Delete project',
   'environment.removeProjectTitle': 'Remove {projectName}?',
   'environment.removeProjectDescription':
-    'This permanently removes the project and its local chats and attachments from MyCopilot. Files in the project directory are not changed.',
+    'This permanently removes the project and its local chats and attachments from Captain Who. Files in the project directory are not changed.',
   'environment.cancelRemoveProject': 'Cancel',
   'environment.confirmRemoveProject': 'Remove',
   'usageBilling.tokenDetails': 'Conversation token details',
@@ -1657,9 +1657,9 @@ export const enUSTranslations = {
   'agent.builtinMcpApproval.resource': 'Resource scope',
   'agent.builtinMcpApproval.resource.generic': 'Restricted data in the current page',
   'agent.builtinMcpApproval.resource.managedBrowserProfile':
-    'The entire MyCopilot managed browser profile (which may include sign-in data from other sites)',
+    'The entire Captain Who managed browser profile (which may include sign-in data from other sites)',
   'agent.builtinMcpApproval.resource.managedSurface':
-    'The current MyCopilot managed browser tab, including its embedded pages',
+    'The current Captain Who managed browser tab, including its embedded pages',
   'agent.builtinMcpApproval.origin': 'Page origin',
   'agent.builtinMcpApproval.files': 'Files',
   'agent.builtinMcpApproval.risks': 'Sensitive access',

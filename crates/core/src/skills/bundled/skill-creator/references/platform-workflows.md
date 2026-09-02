@@ -1,4 +1,4 @@
-# MyCopilot platform workflows
+# Captain Who platform workflows
 
 Use this reference for concrete Workspace, temporary-resource, child-review, and installation
 operations.

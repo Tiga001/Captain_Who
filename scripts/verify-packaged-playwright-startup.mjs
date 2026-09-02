@@ -45,7 +45,7 @@ export const PACKAGED_AGENT_MCP_DRIVE_ASSESSMENT = Object.freeze({
 
 export function defaultUnpackedMacAppBundle(repositoryRoot = resolve('.')) {
   const outputDirectory = process.arch === 'arm64' ? 'mac-arm64' : 'mac'
-  return join(repositoryRoot, 'dist', outputDirectory, 'MyCopilot.app')
+  return join(repositoryRoot, 'dist', outputDirectory, 'Captain Who.app')
 }
 
 export function assertNoBackdoorArguments(arguments_) {
@@ -115,10 +115,10 @@ export async function runPackagedPlaywrightStartupGate(options = {}) {
   const appBundle = await realpath(
     resolve(options.appBundlePath ?? defaultUnpackedMacAppBundle(options.repositoryRoot))
   )
-  if (basename(appBundle) !== 'MyCopilot.app' || !(await stat(appBundle)).isDirectory()) {
+  if (basename(appBundle) !== 'Captain Who.app' || !(await stat(appBundle)).isDirectory()) {
     throw new Error('packaged_playwright_invalid_app_bundle')
   }
-  const executable = join(appBundle, 'Contents', 'MacOS', 'MyCopilot')
+  const executable = join(appBundle, 'Contents', 'MacOS', 'Captain Who')
   const resources = join(appBundle, 'Contents', 'Resources')
   const coreServer = join(resources, 'core-server')
   await Promise.all([
@@ -129,7 +129,7 @@ export async function runPackagedPlaywrightStartupGate(options = {}) {
   await verifyPackagedManagedPlaywrightMcp({
     electronPlatformName: 'darwin',
     appOutDir: dirname(appBundle),
-    packager: { appInfo: { productFilename: 'MyCopilot' } }
+    packager: { appInfo: { productFilename: 'Captain Who' } }
   })
   const asar = requireFromBuilder('@electron/asar')
   validatePackagedProductionEntry(

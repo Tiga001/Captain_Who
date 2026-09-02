@@ -19,11 +19,11 @@ import {
 const CONTEXT = {
   appOutDir: '/build/mac-arm64',
   electronPlatformName: 'darwin',
-  packager: { appInfo: { productFilename: 'MyCopilot' } }
+  packager: { appInfo: { productFilename: 'Captain Who' } }
 }
 
-const APP_DETAILS = `Executable=/build/MyCopilot.app/Contents/MacOS/MyCopilot
-Identifier=com.mycopilot.next
+const APP_DETAILS = `Executable=/build/Captain Who.app/Contents/MacOS/Captain Who
+Identifier=io.github.tiga001.captainwho
 Format=app bundle with Mach-O thin (arm64)
 CodeDirectory v=20500 size=1024 flags=0x10000(runtime) hashes=20+7 location=embedded
 Signature size=9000
@@ -33,8 +33,8 @@ Authority=Apple Root CA
 Timestamp=Jul 23, 2026 at 14:00:00
 TeamIdentifier=TEAM123456`
 
-const HELPER_DETAILS = `Executable=/build/MyCopilot.app/Contents/Resources/core-server
-Identifier=com.mycopilot.next.core-server
+const HELPER_DETAILS = `Executable=/build/Captain Who.app/Contents/Resources/core-server
+Identifier=io.github.tiga001.captainwho.core-server
 Format=Mach-O thin (arm64)
 CodeDirectory v=20500 size=512 flags=0x10000(runtime) hashes=10+7 location=embedded
 Signature size=9000
@@ -45,7 +45,7 @@ Timestamp=Jul 23, 2026 at 14:00:00
 TeamIdentifier=TEAM123456`
 
 const DESIGNATED_REQUIREMENT =
-  'designated => identifier "com.mycopilot.next.core-server" and anchor apple generic and certificate leaf[subject.OU] = TEAM123456'
+  'designated => identifier "io.github.tiga001.captainwho.core-server" and anchor apple generic and certificate leaf[subject.OU] = TEAM123456'
 const OFFICE_BROWSER_DIRECTORY = 'browser/chrome-headless-shell-mac-arm64'
 const OFFICE_RENDERER_RECEIPT = {
   arch: 'arm64',
@@ -58,7 +58,7 @@ const OFFICE_RENDERER_RECEIPT = {
 }
 
 function officeRendererDetails(identifier, teamIdentifier = 'TEAM123456') {
-  return `Executable=/build/MyCopilot.app/Contents/Resources/components/office-renderer/code
+  return `Executable=/build/Captain Who.app/Contents/Resources/components/office-renderer/code
 Identifier=${identifier}
 Format=Mach-O thin (arm64)
 CodeDirectory v=20500 size=512 flags=0x10000(runtime) hashes=10+7 location=embedded
@@ -72,8 +72,8 @@ TeamIdentifier=${teamIdentifier}`
 
 test('packaged application paths fail closed and locate core-server exactly', () => {
   assert.deepEqual(packagedMacApplicationPaths(CONTEXT), {
-    app: join('/build/mac-arm64', 'MyCopilot.app'),
-    coreServer: join('/build/mac-arm64', 'MyCopilot.app', 'Contents', 'Resources', 'core-server')
+    app: join('/build/mac-arm64', 'Captain Who.app'),
+    coreServer: join('/build/mac-arm64', 'Captain Who.app', 'Contents', 'Resources', 'core-server')
   })
   assert.throws(
     () => packagedMacApplicationPaths({ ...CONTEXT, electronPlatformName: 'mas' }),
@@ -83,7 +83,7 @@ test('packaged application paths fail closed and locate core-server exactly', ()
     () =>
       packagedMacApplicationPaths({
         ...CONTEXT,
-        packager: { appInfo: { productFilename: '../MyCopilot' } }
+        packager: { appInfo: { productFilename: '../Captain Who' } }
       }),
     /productFilename is required/
   )
@@ -91,7 +91,7 @@ test('packaged application paths fail closed and locate core-server exactly', ()
 
 test('signature metadata parser extracts stable identity properties', () => {
   assert.deepEqual(parseCodeSignatureMetadata(HELPER_DETAILS), {
-    identifier: 'com.mycopilot.next.core-server',
+    identifier: 'io.github.tiga001.captainwho.core-server',
     teamIdentifier: 'TEAM123456',
     authorities: [
       'Developer ID Application: Example Company (TEAM123456)',
@@ -268,7 +268,7 @@ test('packaged verifier executes strict checks and inspects the frozen helper id
       return { stdout: '', stderr: '<plist><dict/></plist>' }
     }
     const path = argumentsList.at(-1)
-    if (path.endsWith('MyCopilot.app')) return { stdout: '', stderr: APP_DETAILS }
+    if (path.endsWith('Captain Who.app')) return { stdout: '', stderr: APP_DETAILS }
     if (path.endsWith('core-server')) return { stdout: '', stderr: HELPER_DETAILS }
     const entry = Object.entries(OFFICE_RENDERER_CODE_SIGN_IDENTIFIERS).find(([name]) =>
       path.endsWith(name)

@@ -697,7 +697,7 @@ export function getHostApi(): HostApi {
   const host = maybeGlobal.window?.mycopilot?.host
 
   if (!host) {
-    throw new Error('MyCopilot host API is not available')
+    throw new Error('Captain Who host API is not available')
   }
 
   return host

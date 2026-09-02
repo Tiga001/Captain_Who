@@ -1471,7 +1471,7 @@ export class BrowserSurfaceManager {
     }
   }
 
-  /** Requests removal of a Browser tab. It never closes the MyCopilot BrowserWindow. */
+  /** Requests removal of a Browser tab. It never closes the Captain Who BrowserWindow. */
   async closeSurface(surfaceId?: string): Promise<void> {
     this.assertUsable()
     const targetSurfaceId = surfaceId ?? this.activeSurfaceId

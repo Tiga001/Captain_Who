@@ -126,8 +126,8 @@ describe('application startup readiness', () => {
 
     readiness.markFailed()
 
-    await expect(waiting).rejects.toThrow('MyCopilot application startup failed')
-    await expect(ipcMain.invoke()).rejects.toThrow('MyCopilot application startup failed')
+    await expect(waiting).rejects.toThrow('Captain Who application startup failed')
+    await expect(ipcMain.invoke()).rejects.toThrow('Captain Who application startup failed')
   })
 
   it('disposes the exact handler and rejects outstanding waits', async () => {

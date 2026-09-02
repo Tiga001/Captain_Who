@@ -15,7 +15,7 @@ const FAVICON_HTML_MAX_BYTES = 512 * 1024
 const FAVICON_MAX_REDIRECTS = 3
 const FAVICON_CACHE_MAX_FILES = 256
 const FAVICON_CACHE_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000
-const FAVICON_USER_AGENT = 'MyCopilot/1.0 favicon resolver'
+const FAVICON_USER_AGENT = 'CaptainWho/1.0 favicon resolver'
 const PROXY_FAKE_IP_RANGES = new BlockList()
 
 PROXY_FAKE_IP_RANGES.addSubnet('198.18.0.0', 15, 'ipv4')

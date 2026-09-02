@@ -1,4 +1,4 @@
-MYCOPILOT FILTERED TEXTMATE GRAMMAR NOTICES
+CAPTAIN WHO FILTERED TEXTMATE GRAMMAR NOTICES
 
 Upstream commit: 022eed00a8dd29481123f08e1cccf5a5bfee23f9
 Immutable source: https://github.com/shikijs/textmate-grammars-themes/blob/022eed00a8dd29481123f08e1cccf5a5bfee23f9/packages/tm-grammars/NOTICE
@@ -10,7 +10,7 @@ No distinct upstream NOTICE block (covered by the package-level Shiki MIT notice
 Regenerate this filtered snapshot whenever the loader source changes.
 
 This file contains the complete upstream NOTICE blocks that intersect the
-grammar definitions reachable from MyCopilot Git review language loaders.
+grammar definitions reachable from Captain Who Git review language loaders.
 The upstream notice text below is reproduced verbatim by block.
 
 ---
