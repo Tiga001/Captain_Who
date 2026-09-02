@@ -32,6 +32,15 @@
   gap: 4px;
 }
 
+.left-sidebar__brand {
+  position: absolute;
+  top: 14px;
+  left: 20px;
+  width: min(140px, calc(100% - 40px));
+  pointer-events: none;
+  contain: layout paint;
+}
+
 .left-sidebar__scroll {
   position: absolute;
   top: var(--left-sidebar-header-height);

@@ -132,6 +132,254 @@ async fn write_text_stream(stream: &mut TcpStream, content: &str) {
         .unwrap();
 }
 
+struct ApprovedRunningHandoffCase {
+    label: &'static str,
+    initial_yield: Duration,
+    command: &'static str,
+}
+
+async fn assert_approved_running_command_handoff(case: ApprovedRunningHandoffCase) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let call_id = format!("provider-approved-running-{}", case.label);
+    let server_call_id = call_id.clone();
+    let command = case.command.to_string();
+    let server = tokio::spawn(async move {
+        let (mut approval_stream, _) = listener.accept().await.unwrap();
+        let _approval_request = read_json_request(&mut approval_stream).await;
+        write_tool_call_stream(
+            &mut approval_stream,
+            &server_call_id,
+            "run_command",
+            json!({
+                "command": command,
+                "reason": "exercise approved Running-receipt handoff"
+            }),
+            "Preparing the command for approval.",
+        )
+        .await;
+        drop(approval_stream);
+
+        let (mut continuation_stream, _) =
+            tokio::time::timeout(Duration::from_secs(5), listener.accept())
+                .await
+                .expect("approved Running receipt must resume the model")
+                .unwrap();
+        let continuation_request = read_json_request(&mut continuation_stream).await;
+        let running_receipt = continuation_request["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .rev()
+            .find(|message| message["role"] == "tool")
+            .and_then(|message| message["content"].as_str())
+            .and_then(|content| serde_json::from_str::<Value>(content).ok())
+            .expect("approval continuation must contain the run_command Running receipt");
+        assert_eq!(running_receipt["status"], "running");
+        let session_id = running_receipt["sessionId"]
+            .as_str()
+            .expect("Running receipt contains a Session identity")
+            .to_string();
+        assert_eq!(running_receipt["continueWith"]["tool"], "command_session");
+        assert_eq!(
+            running_receipt["continueWith"]["args"],
+            json!({
+                "sessionId": session_id,
+                "action": "wait"
+            })
+        );
+        write_text_stream(
+            &mut continuation_stream,
+            "The approved command was handed off and is still running.",
+        )
+        .await;
+        drop(continuation_stream);
+
+        (session_id, running_receipt)
+    });
+
+    let fixture = tempdir().unwrap();
+    let database_path = fixture.path().join(format!("{}.sqlite", case.label));
+    let workspace = fixture.path().join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let storage = Arc::new(StorageService::open(&database_path).unwrap());
+    let project_id = format!("project-approved-running-{}", case.label);
+    let conversation_id = format!("conversation-approved-running-{}", case.label);
+    let assistant_message_id = format!("assistant-approved-running-{}", case.label);
+    storage
+        .save_project(ProjectRecord {
+            id: project_id.clone(),
+            name: "Approved Running handoff".to_string(),
+            path: Some(workspace.to_string_lossy().into_owned()),
+            created_at: 1,
+            pinned_at: None,
+        })
+        .unwrap();
+    let mut settings = test_model_settings();
+    settings.api_url = format!("http://{address}/v1/chat/completions");
+    storage.save_model_settings(settings).unwrap();
+
+    let mut service = AgentService::new(Arc::clone(&storage));
+    service.command_sessions = AgentCommandSessionRegistry::with_manager(
+        Arc::clone(&storage),
+        CommandSessionManager::default(),
+        case.initial_yield,
+    );
+    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let turn = service
+        .start_conversation_turn(
+            AgentConversationTurnInput {
+                conversation_id: Some(conversation_id.clone()),
+                project_id: Some(project_id),
+                model_id: "model-1".to_string(),
+                context_window_indicator_enabled: true,
+                content: "Run the command after I approve it.".to_string(),
+                attachments: Vec::new(),
+                skills: Vec::new(),
+                title: None,
+                user_message_id: Some(format!("user-approved-running-{}", case.label)),
+                assistant_message_id: Some(assistant_message_id.clone()),
+                max_tokens: None,
+                temperature: None,
+                prompt_preferences: None,
+                permissions: AgentPermissions {
+                    write: AgentWritePermission::WorkspaceOnly,
+                    command: AgentCommandPermission::RequireApproval,
+                    command_safety: AgentCommandSafetyPolicy::FullAccess,
+                    ..AgentPermissions::default()
+                },
+            },
+            notifications.clone(),
+        )
+        .unwrap();
+
+    let mut saw_approval = false;
+    let mut saw_waiting_done = false;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !(saw_approval && saw_waiting_done) {
+            let notification = receiver.recv().await.unwrap();
+            assert_ne!(
+                notification["params"]["type"], "error",
+                "{} failed before approval: {notification}",
+                case.label
+            );
+            match notification["params"]["type"].as_str() {
+                Some("approval_required") => saw_approval = true,
+                Some("done") => saw_waiting_done = true,
+                _ => {}
+            }
+        }
+    })
+    .await
+    .unwrap();
+
+    let pending = service.list_pending_actions();
+    assert_eq!(pending.len(), 1);
+    let audited_call_id = pending[0]
+        .tool_call_id
+        .clone()
+        .expect("command approval keeps its Host ToolCall identity");
+    let action_id = pending[0].action_id.clone();
+    let decision = service
+        .approve_action(&turn.run_id, &action_id, notifications)
+        .unwrap();
+    assert_eq!(decision.agent_output.status, AgentRunStatus::Running);
+
+    let mut saw_completed_done = false;
+    let mut saw_command_exit = false;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !(saw_completed_done && saw_command_exit) {
+            let notification = receiver.recv().await.unwrap();
+            assert_ne!(
+                notification["params"]["type"], "error",
+                "{} emitted an error after approval: {notification}",
+                case.label
+            );
+            match notification["params"]["type"].as_str() {
+                Some("done") if notification["params"]["status"] == "completed" => {
+                    saw_completed_done = true;
+                }
+                Some("command_exited") => {
+                    assert_eq!(notification["params"]["exitCode"], 0);
+                    saw_command_exit = true;
+                }
+                _ => {}
+            }
+        }
+    })
+    .await
+    .unwrap();
+
+    let (session_id, running_receipt) = server.await.unwrap();
+    let audit = storage
+        .get_agent_action_audit(&pending_action_storage_id(&turn.run_id, &action_id))
+        .unwrap()
+        .expect("approved Running handoff must have a durable audit record");
+    assert_eq!(audit.status, "completed");
+    assert_eq!(audit.decision.as_deref(), Some("approved"));
+    assert!(audit.command_result_json.is_none());
+    let audited_tool_result = serde_json::from_str::<AgentToolResult>(
+        audit
+            .tool_result_json
+            .as_deref()
+            .expect("Running handoff audit contains its exact ToolResult"),
+    )
+    .unwrap();
+    assert_eq!(audited_tool_result.tool, "run_command");
+    assert_eq!(audited_tool_result.call_id, audited_call_id);
+    let audited_receipt = audited_tool_result
+        .result
+        .as_ref()
+        .and_then(Value::as_object)
+        .expect("Running handoff audit contains the strict object projection");
+    assert_eq!(audited_receipt.len(), 7);
+    assert_eq!(audited_receipt["status"], "running");
+    assert_eq!(audited_receipt["sessionId"], session_id);
+    assert_eq!(audited_receipt["output"], "");
+    assert_eq!(
+        audited_receipt["continueWith"],
+        running_receipt["continueWith"]
+    );
+    for key in [
+        "status",
+        "sessionId",
+        "startedAt",
+        "latestSequence",
+        "outputTruncated",
+    ] {
+        assert_eq!(audited_receipt[key], running_receipt[key]);
+    }
+
+    let durable_pending: (String, Option<String>) = Connection::open(&database_path)
+        .unwrap()
+        .query_row(
+            "SELECT status, target_status FROM agent_pending_actions WHERE action_id = ?1",
+            [pending_action_storage_id(&turn.run_id, &action_id)],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(durable_pending.0, "completed");
+    assert_eq!(durable_pending.1.as_deref(), Some("completed"));
+    assert!(service.list_pending_actions().is_empty());
+
+    let session = storage
+        .load_agent_command_session(&conversation_id, &session_id)
+        .unwrap()
+        .expect("handed-off command Session remains durably inspectable");
+    assert_eq!(session.snapshot.status, AgentCommandSessionStatus::Exited);
+    assert_eq!(session.snapshot.exit_code, Some(0));
+}
+
+#[tokio::test]
+async fn approved_running_receipt_is_strictly_audited_before_model_continuation() {
+    assert_approved_running_command_handoff(ApprovedRunningHandoffCase {
+        label: "well-past-yield",
+        initial_yield: Duration::from_millis(20),
+        command: "sleep 0.50",
+    })
+    .await;
+}
+
 #[tokio::test]
 async fn guidance_releases_a_running_command_wait_and_background_exit_never_wakes_model() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

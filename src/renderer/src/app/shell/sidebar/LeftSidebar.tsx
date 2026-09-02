@@ -19,6 +19,7 @@ import type {
   SidebarProjectSort
 } from '../../../features/storage/storageClient'
 import { useDismissOnOutsidePointer } from '../../../hooks/useDismissOnOutsidePointer'
+import { CaptainWhoWordmark } from './CaptainWhoWordmark'
 import { LeftSidebarAccountFooter } from './LeftSidebarAccountFooter'
 import { ConversationRow } from './LeftSidebarConversationRow'
 import { LeftSidebarDialogs } from './LeftSidebarDialogs'
@@ -1057,6 +1058,9 @@ const LeftSidebarView = memo(function LeftSidebarView({
       }}
     >
       <div className="left-sidebar__header">
+        <div className="left-sidebar__brand">
+          <CaptainWhoWordmark />
+        </div>
         <button
           className="left-sidebar__primary-action"
           type="button"

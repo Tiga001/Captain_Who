@@ -4506,19 +4506,28 @@ fn validate_manual_command_handoff_projection(tool_result: &AgentToolResult) -> 
         .as_ref()
         .and_then(serde_json::Value::as_object)
         .ok_or_else(|| "manual command handoff ToolResult lacks an object result".to_string())?;
-    const KEYS: [&str; 6] = [
+    const KEYS: [&str; 7] = [
         "status",
         "sessionId",
         "output",
         "startedAt",
         "latestSequence",
         "outputTruncated",
+        "continueWith",
     ];
     let session_id = result
         .get("sessionId")
         .and_then(serde_json::Value::as_str)
         .unwrap_or_default();
     let session_hex = session_id.strip_prefix("cmd_");
+    let continue_with = result
+        .get("continueWith")
+        .and_then(serde_json::Value::as_object);
+    let continue_with_args = continue_with
+        .and_then(|continuation| continuation.get("args"))
+        .and_then(serde_json::Value::as_object);
+    const CONTINUE_WITH_KEYS: [&str; 2] = ["tool", "args"];
+    const CONTINUE_WITH_ARG_KEYS: [&str; 2] = ["sessionId", "action"];
     if result.len() != KEYS.len()
         || KEYS.iter().any(|key| !result.contains_key(*key))
         || result.get("status").and_then(serde_json::Value::as_str) != Some("running")
@@ -4541,6 +4550,22 @@ fn validate_manual_command_handoff_projection(tool_result: &AgentToolResult) -> 
             .get("outputTruncated")
             .and_then(serde_json::Value::as_bool)
             .is_none()
+        || continue_with.is_none_or(|continuation| {
+            continuation.len() != CONTINUE_WITH_KEYS.len()
+                || CONTINUE_WITH_KEYS
+                    .iter()
+                    .any(|key| !continuation.contains_key(*key))
+                || continuation.get("tool").and_then(serde_json::Value::as_str)
+                    != Some("command_session")
+        })
+        || continue_with_args.is_none_or(|args| {
+            args.len() != CONTINUE_WITH_ARG_KEYS.len()
+                || CONTINUE_WITH_ARG_KEYS
+                    .iter()
+                    .any(|key| !args.contains_key(*key))
+                || args.get("sessionId").and_then(serde_json::Value::as_str) != Some(session_id)
+                || args.get("action").and_then(serde_json::Value::as_str) != Some("wait")
+        })
     {
         return Err("manual command handoff ToolResult is invalid".to_string());
     }
@@ -4799,6 +4824,93 @@ mod pending_action_identity_tests {
             assert_eq!(
                 renderer_action_id_from_pending_record(&pending_record(&malformed, run_id)),
                 Err("pending action durable identity is malformed".to_string())
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod manual_command_handoff_projection_tests {
+    use super::*;
+
+    const SESSION_ID: &str = "cmd_0123456789abcdef0123456789abcdef";
+
+    fn valid_tool_result_value() -> serde_json::Value {
+        serde_json::json!({
+            "status": "running",
+            "sessionId": SESSION_ID,
+            "output": "started\n",
+            "startedAt": 1,
+            "latestSequence": 2,
+            "outputTruncated": false,
+            "continueWith": {
+                "tool": "command_session",
+                "args": {
+                    "sessionId": SESSION_ID,
+                    "action": "wait"
+                }
+            }
+        })
+    }
+
+    fn tool_result(result: serde_json::Value) -> AgentToolResult {
+        AgentToolResult {
+            call_id: "call-1".to_string(),
+            tool: "run_command".to_string(),
+            ok: true,
+            result: Some(result),
+            error: None,
+            exact_archive_file: None,
+        }
+    }
+
+    #[test]
+    fn accepts_exact_command_session_wait_continuation() {
+        validate_manual_command_handoff_projection(&tool_result(valid_tool_result_value()))
+            .expect("canonical running handoff must validate");
+    }
+
+    #[test]
+    fn rejects_missing_or_noncanonical_command_session_wait_continuation() {
+        let mut invalid_results = Vec::new();
+
+        let mut missing = valid_tool_result_value();
+        missing.as_object_mut().unwrap().remove("continueWith");
+        invalid_results.push(missing);
+
+        let mut extra_result_field = valid_tool_result_value();
+        extra_result_field["unexpected"] = serde_json::json!(true);
+        invalid_results.push(extra_result_field);
+
+        let mut wrong_tool = valid_tool_result_value();
+        wrong_tool["continueWith"]["tool"] = serde_json::json!("run_command");
+        invalid_results.push(wrong_tool);
+
+        let mut extra_continuation_field = valid_tool_result_value();
+        extra_continuation_field["continueWith"]["unexpected"] = serde_json::json!(true);
+        invalid_results.push(extra_continuation_field);
+
+        let mut wrong_action = valid_tool_result_value();
+        wrong_action["continueWith"]["args"]["action"] = serde_json::json!("poll");
+        invalid_results.push(wrong_action);
+
+        let mut mismatched_session = valid_tool_result_value();
+        mismatched_session["continueWith"]["args"]["sessionId"] =
+            serde_json::json!("cmd_ffffffffffffffffffffffffffffffff");
+        invalid_results.push(mismatched_session);
+
+        let mut extra_arg = valid_tool_result_value();
+        extra_arg["continueWith"]["args"]["unexpected"] = serde_json::json!(true);
+        invalid_results.push(extra_arg);
+
+        let mut malformed_args = valid_tool_result_value();
+        malformed_args["continueWith"]["args"] = serde_json::json!(null);
+        invalid_results.push(malformed_args);
+
+        for result in invalid_results {
+            assert_eq!(
+                validate_manual_command_handoff_projection(&tool_result(result)),
+                Err("manual command handoff ToolResult is invalid".to_string())
             );
         }
     }

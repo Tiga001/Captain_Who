@@ -1,3 +1,4 @@
+import type { CSSProperties } from 'react'
 import { describe, expect, it, vi } from 'vitest'
 import { render } from 'vitest-browser-react'
 import { defaultUiPreferences } from '../../features/storage/storageClient'
@@ -27,7 +28,16 @@ function renderSidebar({
   selected?: boolean
 } = {}) {
   return render(
-    <div style={{ height: 640, width: 280 }}>
+    <div
+      style={
+        {
+          '--mc-layout-sidebar-action-height': '29px',
+          '--titlebar-height': '52px',
+          height: 640,
+          width: 280
+        } as CSSProperties
+      }
+    >
       <LeftSidebar
         activeConversationId={selected ? null : 'conversation-1'}
         conversations={[
@@ -68,6 +78,23 @@ function renderSidebar({
 }
 
 describe('LeftSidebar scheduled navigation', () => {
+  it('keeps the brand in the reserved header space above the existing navigation', async () => {
+    const screen = await renderSidebar()
+    const logo = screen.getByRole('img', { name: 'Captain Who' }).element()
+    const newConversation = screen
+      .getByRole('button', { name: 'sidebar.newConversation', exact: true })
+      .element()
+    const sidebar = screen.getByRole('complementary').element()
+    const brand = logo.closest<HTMLElement>('.left-sidebar__brand')
+
+    expect(brand).not.toBeNull()
+    expect(getComputedStyle(brand!).pointerEvents).toBe('none')
+    expect(logo.getBoundingClientRect().bottom).toBeLessThanOrEqual(
+      newConversation.getBoundingClientRect().top
+    )
+    expect(sidebar.scrollWidth).toBeLessThanOrEqual(sidebar.clientWidth)
+  })
+
   it('adds one selected navigation row without replacing projects or conversations', async () => {
     const onOpenScheduled = vi.fn()
     const screen = await renderSidebar({ attentionCount: 3, onOpenScheduled, selected: true })

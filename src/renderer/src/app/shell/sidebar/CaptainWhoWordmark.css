@@ -1,0 +1,44 @@
+.captain-who-wordmark {
+  display: block;
+  width: 100%;
+  height: auto;
+  overflow: visible;
+}
+
+.captain-who-wordmark__captain {
+  fill: #0b1c36;
+}
+
+.captain-who-wordmark__who--dark {
+  display: none;
+}
+
+.captain-who-wordmark__accents {
+  fill: var(--mc-color-text-accent, #315fca);
+}
+
+html[data-color-scheme='dark'] .captain-who-wordmark__captain {
+  fill: #fefefe;
+}
+
+html[data-color-scheme='dark'] .captain-who-wordmark__who--light {
+  display: none;
+}
+
+html[data-color-scheme='dark'] .captain-who-wordmark__who--dark {
+  display: block;
+}
+
+@media (prefers-color-scheme: dark) {
+  html:not([data-color-scheme]) .captain-who-wordmark__captain {
+    fill: #fefefe;
+  }
+
+  html:not([data-color-scheme]) .captain-who-wordmark__who--light {
+    display: none;
+  }
+
+  html:not([data-color-scheme]) .captain-who-wordmark__who--dark {
+    display: block;
+  }
+}
