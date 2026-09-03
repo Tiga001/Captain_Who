@@ -1,6 +1,104 @@
 use super::*;
 
+/// Outcome of publishing a Runtime's `WaitingForApproval` projection.
+///
+/// The two non-persisted outcomes are expected lifecycle races. Identity corruption, a missing
+/// action generation, and unrecognized durable lifecycle values remain hard errors.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentWaitingForApprovalPersistenceOutcome {
+    Persisted,
+    TurnTerminal,
+    PendingActionAdvanced,
+}
+
+/// Outcome of accounting for the Runtime segment which opened an approval boundary.
+///
+/// A terminal Turn is an expected race with cancellation or shutdown. Missing or mismatched
+/// owner identity, invalid lifecycle values, and malformed Waiting usage remain hard errors.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentWaitingSegmentUsagePersistenceOutcome {
+    Persisted,
+    TurnTerminal,
+}
+
 impl StorageService {
+    /// Persists a Runtime approval-boundary Usage snapshot only while its exact Turn is active.
+    ///
+    /// The immediate transaction serializes this write with terminal Turn persistence. If the
+    /// terminal transaction wins, a late Waiting snapshot cannot regress the durable Usage row
+    /// from `completed`, `failed`, or `cancelled` back to `waiting_for_approval`.
+    pub fn persist_waiting_segment_usage_if_run_in_progress(
+        &self,
+        usage: &AgentUsageRecordInsert,
+    ) -> Result<AgentWaitingSegmentUsagePersistenceOutcome, String> {
+        if usage.conversation_id.trim().is_empty()
+            || usage.message_id.trim().is_empty()
+            || usage.run_id.trim().is_empty()
+        {
+            return Err(
+                "waiting-segment usage persistence requires non-empty Turn identity".to_string(),
+            );
+        }
+        if usage.status.as_deref() != Some("waiting_for_approval") || usage.completed_at.is_some() {
+            return Err(
+                "waiting-segment usage persistence requires a nonterminal waiting_for_approval record"
+                    .to_string(),
+            );
+        }
+
+        let mut connection = self.state.connection()?;
+        let transaction = connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(storage_error)?;
+        let trace_identity = transaction
+            .query_row(
+                "
+                SELECT conversation_id, run_id, terminal_status
+                FROM conversation_turn_traces
+                WHERE assistant_message_id = ?1
+                ",
+                [&usage.message_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(storage_error)?;
+        let Some((trace_conversation_id, trace_run_id, terminal_status)) = trace_identity else {
+            return Err(format!(
+                "waiting-segment Turn trace `{}` does not exist",
+                usage.message_id
+            ));
+        };
+        if trace_conversation_id != usage.conversation_id || trace_run_id != usage.run_id {
+            return Err(format!(
+                "waiting-segment Turn trace `{}` is owned by another conversation or run",
+                usage.message_id
+            ));
+        }
+        match terminal_status.as_str() {
+            "in_progress" => {}
+            "completed" | "failed" | "cancelled" => {
+                transaction.commit().map_err(storage_error)?;
+                return Ok(AgentWaitingSegmentUsagePersistenceOutcome::TurnTerminal);
+            }
+            _ => {
+                return Err(format!(
+                    "waiting-segment Turn trace `{}` has an invalid terminal status",
+                    usage.message_id
+                ));
+            }
+        }
+
+        usage_repository::upsert_usage_record(&transaction, usage).map_err(storage_error)?;
+        transaction.commit().map_err(storage_error)?;
+        Ok(AgentWaitingSegmentUsagePersistenceOutcome::Persisted)
+    }
+
     pub fn upsert_chat_messages(
         &self,
         conversation_id: &str,
@@ -474,6 +572,221 @@ impl StorageService {
             updated_at,
         )
         .map_err(storage_error)
+    }
+
+    /// Commits a late `WaitingForApproval` projection only while its exact Turn is active.
+    ///
+    /// The immediate transaction is the serialization boundary with terminal Turn persistence:
+    /// once a matching trace becomes terminal, a retiring Runtime worker can no longer overwrite
+    /// the assistant message with stale pending content or publish its stale usage snapshot.
+    /// Missing or mismatched owner identities are errors rather than benign stale writes.
+    #[allow(clippy::too_many_arguments)]
+    pub fn persist_waiting_for_approval_if_run_in_progress(
+        &self,
+        conversation_id: &str,
+        assistant_message_id: &str,
+        run_id: &str,
+        pending_action_storage_id: &str,
+        content: &str,
+        message_status: Option<&str>,
+        updated_at: i64,
+        usage: Option<&AgentUsageRecordInsert>,
+    ) -> Result<AgentWaitingForApprovalPersistenceOutcome, String> {
+        if conversation_id.trim().is_empty()
+            || assistant_message_id.trim().is_empty()
+            || run_id.trim().is_empty()
+            || pending_action_storage_id.trim().is_empty()
+        {
+            return Err(
+                "waiting-for-approval persistence requires non-empty Turn and pending-action identity"
+                    .to_string(),
+            );
+        }
+        if let Some(usage) = usage {
+            if usage.conversation_id != conversation_id
+                || usage.message_id != assistant_message_id
+                || usage.run_id != run_id
+            {
+                return Err(
+                    "waiting-for-approval usage owner does not match the requested Turn"
+                        .to_string(),
+                );
+            }
+        }
+
+        let mut connection = self.state.connection()?;
+        let transaction = connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(storage_error)?;
+        let trace_identity = transaction
+            .query_row(
+                "
+                SELECT conversation_id, run_id, terminal_status
+                FROM conversation_turn_traces
+                WHERE assistant_message_id = ?1
+                ",
+                [assistant_message_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(storage_error)?;
+        let Some((trace_conversation_id, trace_run_id, terminal_status)) = trace_identity else {
+            return Err(format!(
+                "waiting-for-approval Turn trace `{assistant_message_id}` does not exist"
+            ));
+        };
+        if trace_conversation_id != conversation_id || trace_run_id != run_id {
+            return Err(format!(
+                "waiting-for-approval Turn trace `{assistant_message_id}` is owned by another conversation or run"
+            ));
+        }
+        match terminal_status.as_str() {
+            "in_progress" => {}
+            "completed" | "failed" | "cancelled" => {
+                transaction.commit().map_err(storage_error)?;
+                return Ok(AgentWaitingForApprovalPersistenceOutcome::TurnTerminal);
+            }
+            _ => {
+                return Err(format!(
+                    "waiting-for-approval Turn trace `{assistant_message_id}` has an invalid terminal status"
+                ));
+            }
+        }
+
+        let pending_identity = transaction
+            .query_row(
+                "
+                SELECT run_id, conversation_id, assistant_message_id, status, target_status
+                FROM agent_pending_actions
+                WHERE action_id = ?1
+                ",
+                [pending_action_storage_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(storage_error)?;
+        let Some((
+            pending_run_id,
+            pending_conversation_id,
+            pending_assistant_message_id,
+            pending_status,
+            pending_target_status,
+        )) = pending_identity
+        else {
+            return Err(format!(
+                "waiting-for-approval pending action `{pending_action_storage_id}` does not exist"
+            ));
+        };
+        if pending_run_id != run_id
+            || pending_conversation_id.as_deref() != Some(conversation_id)
+            || pending_assistant_message_id.as_deref() != Some(assistant_message_id)
+        {
+            return Err(format!(
+                "waiting-for-approval pending action `{pending_action_storage_id}` is owned by another Turn"
+            ));
+        }
+        if !matches!(
+            pending_status.as_str(),
+            "pending"
+                | "approved"
+                | "executing"
+                | "rejected"
+                | "cancelled"
+                | "completed"
+                | "failed"
+        ) {
+            return Err(format!(
+                "waiting-for-approval pending action `{pending_action_storage_id}` has an invalid status"
+            ));
+        }
+        if pending_target_status.as_deref().is_some_and(|status| {
+            !matches!(status, "rejected" | "cancelled" | "completed" | "failed")
+        }) {
+            return Err(format!(
+                "waiting-for-approval pending action `{pending_action_storage_id}` has an invalid target status"
+            ));
+        }
+        if pending_status != "pending" || pending_target_status.is_some() {
+            transaction.commit().map_err(storage_error)?;
+            return Ok(AgentWaitingForApprovalPersistenceOutcome::PendingActionAdvanced);
+        }
+
+        let message_role = transaction
+            .query_row(
+                "
+                SELECT role
+                FROM messages
+                WHERE id = ?1 AND conversation_id = ?2
+                ",
+                rusqlite::params![assistant_message_id, conversation_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(storage_error)?;
+        match message_role.as_deref() {
+            Some("assistant") => {}
+            Some(_) => {
+                return Err(format!(
+                    "waiting-for-approval message `{assistant_message_id}` is not an assistant message"
+                ));
+            }
+            None => {
+                return Err(format!(
+                    "waiting-for-approval message `{assistant_message_id}` does not exist in its conversation"
+                ));
+            }
+        }
+
+        let updated_messages = transaction
+            .execute(
+                "
+                UPDATE messages
+                SET content = ?1, status = ?2
+                WHERE conversation_id = ?3 AND id = ?4 AND role = 'assistant'
+                ",
+                rusqlite::params![
+                    content,
+                    message_status,
+                    conversation_id,
+                    assistant_message_id
+                ],
+            )
+            .map_err(storage_error)?;
+        if updated_messages != 1 {
+            return Err(format!(
+                "waiting-for-approval message `{assistant_message_id}` changed identity during persistence"
+            ));
+        }
+        let updated_conversations = transaction
+            .execute(
+                "UPDATE conversations SET updated_at = ?1 WHERE id = ?2",
+                rusqlite::params![updated_at, conversation_id],
+            )
+            .map_err(storage_error)?;
+        if updated_conversations != 1 {
+            return Err(format!(
+                "waiting-for-approval conversation `{conversation_id}` does not exist"
+            ));
+        }
+        if let Some(usage) = usage {
+            usage_repository::upsert_usage_record(&transaction, usage).map_err(storage_error)?;
+        }
+        transaction.commit().map_err(storage_error)?;
+        Ok(AgentWaitingForApprovalPersistenceOutcome::Persisted)
     }
 
     pub fn update_chat_message_run_terminal_state(

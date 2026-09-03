@@ -101,6 +101,7 @@ pub use context_compaction_receipt::{
 };
 pub use conversation_trace::{
     cancelled_conversation_trace_from_checkpoint, cancelled_conversation_trace_from_snapshot,
+    cancelled_conversation_trace_from_snapshot_with_terminal_error,
     cancelled_conversation_trace_without_items, completed_conversation_trace_without_items,
     conversation_trace_snapshot_from_checkpoint_and_continuation_with_projection,
     conversation_trace_snapshot_with_recovered_tool_result,

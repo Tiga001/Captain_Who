@@ -830,6 +830,7 @@ mod tests {
                 next_conversation_trace_sequence: 0,
                 conversation_trace_truncated: false,
             }),
+            segment_usage: None,
         };
 
         let serialized = serde_json::to_string(&event).unwrap();

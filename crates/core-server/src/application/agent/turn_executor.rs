@@ -2,6 +2,110 @@ use super::*;
 
 const TERMINAL_PERSISTENCE_RETRY_DELAYS_MS: [u64; 3] = [10, 50, 200];
 
+#[cfg(test)]
+type BeforePendingActionStoreHook = Arc<dyn Fn() + Send + Sync>;
+
+#[cfg(test)]
+type BeforeApprovalPublicationArbitrationHook = Arc<dyn Fn() + Send + Sync>;
+
+#[cfg(test)]
+type BeforeWaitingPublicationArbitrationHook = Arc<dyn Fn() + Send + Sync>;
+
+#[cfg(test)]
+static BEFORE_PENDING_ACTION_STORE_HOOKS: Mutex<Vec<(String, BeforePendingActionStoreHook)>> =
+    Mutex::new(Vec::new());
+
+#[cfg(test)]
+static BEFORE_APPROVAL_PUBLICATION_ARBITRATION_HOOKS: Mutex<
+    Vec<(String, BeforeApprovalPublicationArbitrationHook)>,
+> = Mutex::new(Vec::new());
+
+#[cfg(test)]
+static BEFORE_WAITING_PUBLICATION_ARBITRATION_HOOKS: Mutex<
+    Vec<(String, BeforeWaitingPublicationArbitrationHook)>,
+> = Mutex::new(Vec::new());
+
+#[cfg(test)]
+pub(super) fn install_before_pending_action_store_hook(
+    action_id: &str,
+    hook: BeforePendingActionStoreHook,
+) {
+    BEFORE_PENDING_ACTION_STORE_HOOKS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .push((action_id.to_string(), hook));
+}
+
+#[cfg(test)]
+pub(super) fn install_before_approval_publication_arbitration_hook(
+    action_id: &str,
+    hook: BeforeApprovalPublicationArbitrationHook,
+) {
+    BEFORE_APPROVAL_PUBLICATION_ARBITRATION_HOOKS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .push((action_id.to_string(), hook));
+}
+
+#[cfg(test)]
+pub(super) fn install_before_waiting_publication_arbitration_hook(
+    run_id: &str,
+    hook: BeforeWaitingPublicationArbitrationHook,
+) {
+    BEFORE_WAITING_PUBLICATION_ARBITRATION_HOOKS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .push((run_id.to_string(), hook));
+}
+
+#[cfg(test)]
+fn run_before_pending_action_store_hook(action_id: &str) {
+    let hook = {
+        let mut hooks = BEFORE_PENDING_ACTION_STORE_HOOKS
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        hooks
+            .iter()
+            .position(|(candidate, _)| candidate == action_id)
+            .map(|index| hooks.swap_remove(index).1)
+    };
+    if let Some(hook) = hook {
+        hook();
+    }
+}
+
+#[cfg(test)]
+fn run_before_approval_publication_arbitration_hook(action_id: &str) {
+    let hook = {
+        let mut hooks = BEFORE_APPROVAL_PUBLICATION_ARBITRATION_HOOKS
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        hooks
+            .iter()
+            .position(|(candidate, _)| candidate == action_id)
+            .map(|index| hooks.swap_remove(index).1)
+    };
+    if let Some(hook) = hook {
+        hook();
+    }
+}
+
+#[cfg(test)]
+fn run_before_waiting_publication_arbitration_hook(run_id: &str) {
+    let hook = {
+        let mut hooks = BEFORE_WAITING_PUBLICATION_ARBITRATION_HOOKS
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        hooks
+            .iter()
+            .position(|(candidate, _)| candidate == run_id)
+            .map(|index| hooks.swap_remove(index).1)
+    };
+    if let Some(hook) = hook {
+        hook();
+    }
+}
+
 /// Retries one immutable terminal settlement without weakening the durable in-progress fence.
 ///
 /// `persist` may stage logical-run Usage in memory before entering SQLite. A failed attempt must
@@ -835,6 +939,17 @@ impl AgentService {
                 Ok(output) if output.status == AgentRunStatus::WaitingForApproval
             );
 
+            // Test-only scheduling point before any persistence lock is acquired. This lets the
+            // approval handoff regression deterministically advance the newly published action
+            // while the retiring Runtime segment has not yet attempted its Waiting projection.
+            #[cfg(test)]
+            if matches!(
+                &result,
+                Ok(output) if output.status == AgentRunStatus::WaitingForApproval
+            ) {
+                super::run_lifecycle::run_before_waiting_persistence_hook(&worker_run_id);
+            }
+
             let input_is_deleting = service
                 .deletion_lifecycle
                 .lock()
@@ -1432,6 +1547,7 @@ impl AgentService {
         let emitter_conversation_id = conversation_id.clone();
         let emitter_assistant_message_id = assistant_message_id.clone();
         let emitter_agent_input = agent_input.clone();
+        let emitter_cancellation_token = cancellation_token.clone();
         let emitter_collaboration_identity = agent_input
             .context
             .as_ref()
@@ -1441,6 +1557,9 @@ impl AgentService {
         let emitter_terminal_event_gate = terminal_event_gate.clone();
         let pending_store_failure = Arc::new(Mutex::new(None::<String>));
         let emitter_pending_store_failure = Arc::clone(&pending_store_failure);
+        let waiting_pending_action_storage_id = Arc::new(Mutex::new(None::<String>));
+        let emitter_waiting_pending_action_storage_id =
+            Arc::clone(&waiting_pending_action_storage_id);
         let collaboration_stream_cutoffs = Arc::new(Mutex::new(HashMap::<String, u64>::new()));
         let emitter_collaboration_stream_cutoffs = Arc::clone(&collaboration_stream_cutoffs);
         let final_response_collaboration_cutoff = Arc::new(Mutex::new(None::<u64>));
@@ -1451,8 +1570,35 @@ impl AgentService {
                 run_id,
                 action,
                 checkpoint,
+                segment_usage,
             } = &event
             {
+                // The approval becomes externally actionable as soon as its pending row and
+                // notification commit. Account for the producing Runtime segment first so a fast
+                // approval continuation or interrupt cannot terminalize the shared logical Run
+                // without these tokens.
+                match emitter_service.stage_waiting_segment_usage(run_id, segment_usage.clone()) {
+                    Ok(AgentWaitingSegmentUsagePersistenceOutcome::Persisted) => {}
+                    Ok(AgentWaitingSegmentUsagePersistenceOutcome::TurnTerminal) => {
+                        if invalidate_mcp_payload_on_pending_store_failure {
+                            emitter_service.invalidate_mcp_pending_payload(action);
+                        }
+                        emitter_terminal_event_gate.discard();
+                        return;
+                    }
+                    Err(error) => {
+                        if invalidate_mcp_payload_on_pending_store_failure {
+                            emitter_service.invalidate_mcp_pending_payload(action);
+                        }
+                        emitter_terminal_event_gate.discard();
+                        *emitter_pending_store_failure
+                            .lock()
+                            .unwrap_or_else(|lock_error| lock_error.into_inner()) = Some(format!(
+                            "无法在发布待审批操作前持久化当前模型调用用量：{error}"
+                        ));
+                        return;
+                    }
+                }
                 if let Err(error) = emitter_service.close_active_run_steering(
                     run_id,
                     AgentSteerRunRejectionCode::RunNotSteerable,
@@ -1482,6 +1628,8 @@ impl AgentService {
                         .unwrap_or_else(|lock_error| lock_error.into_inner()) = Some(error);
                     return;
                 }
+                #[cfg(test)]
+                run_before_pending_action_store_hook(&action_id_for_action(action.as_ref()));
                 let pending_store = if let Some((predecessor, terminal_status)) =
                     pending_action_predecessor_settlement.as_ref()
                 {
@@ -1516,15 +1664,141 @@ impl AgentService {
                         return;
                     }
                 };
+                let action_id = action_id_for_action(action.as_ref());
+                *emitter_waiting_pending_action_storage_id
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner()) =
+                    Some(pending_action_storage_id(run_id, &action_id));
                 if !should_publish {
                     return;
                 }
+                #[cfg(test)]
+                run_before_approval_publication_arbitration_hook(&action_id);
+                // Cancellation and approval publication form a two-sided handoff. An interrupt
+                // may signal the Runtime after its last model-loop check but before this callback
+                // makes the pending action visible in memory. The cancellation registry mutex is
+                // also the publication linearization boundary: either this event is enqueued
+                // before an interrupt can return, or the publisher observes the cancelled token
+                // and terminalizes the newly visible action without emitting a stale approval.
+                let cancellation_publication_guard = emitter_service
+                    .cancellations
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner());
+                let owns_current_generation = cancellation_publication_guard
+                    .get(run_id)
+                    .is_some_and(|current| current.shares_state_with(&emitter_cancellation_token));
+                if !owns_current_generation {
+                    // A newer continuation now owns this logical run. The retiring emitter may
+                    // no longer publish, but it must never cancel the newer generation's action.
+                    drop(cancellation_publication_guard);
+                    emitter_terminal_event_gate.discard();
+                    return;
+                }
+                if emitter_cancellation_token.is_cancelled() {
+                    drop(cancellation_publication_guard);
+                    emitter_terminal_event_gate.discard();
+                    if let Err(error) = emitter_service.cancel_action_internal(run_id, &action_id) {
+                        *emitter_pending_store_failure
+                            .lock()
+                            .unwrap_or_else(|lock_error| lock_error.into_inner()) =
+                            Some(format!("无法结算取消期间刚发布的待审批操作：{error}"));
+                    }
+                    return;
+                }
+                let event = emitter_service.project_cumulative_usage_onto_event(event);
+                if let Some(event) = emitter_terminal_event_gate.route(event) {
+                    emit_agent_event_notifications(
+                        &emitter_notifications,
+                        emitter_collaboration_identity.as_ref(),
+                        &emitter_run_id,
+                        &emitter_assistant_message_id,
+                        event,
+                    );
+                }
+                drop(cancellation_publication_guard);
+                return;
             }
             if emitter_pending_store_failure
                 .lock()
                 .unwrap_or_else(|error| error.into_inner())
                 .is_some()
             {
+                return;
+            }
+            // The Runtime emits Waiting state immediately after ApprovalRequired. Route these
+            // cancellation-sensitive events under the same mutex as token signalling so an
+            // interrupt cannot return and then be followed by a stale Waiting notification.
+            let is_waiting_event = match &event {
+                AgentEvent::State { state, .. } => {
+                    state.status == AgentRunStatus::WaitingForApproval
+                }
+                AgentEvent::Done { status, .. } => {
+                    *status == Some(AgentRunStatus::WaitingForApproval)
+                }
+                _ => false,
+            };
+            if is_waiting_event {
+                #[cfg(test)]
+                run_before_waiting_publication_arbitration_hook(&emitter_run_id);
+                // ApprovalRequired already staged this Runtime segment exactly once. Waiting Done
+                // therefore projects the accumulator without merging the same provider usage a
+                // second time.
+                let mut event = event;
+                if let AgentEvent::Done { usage, .. } = &mut event {
+                    *usage = emitter_service.preview_cumulative_run_usage(&emitter_run_id, None);
+                }
+                let pending_action_storage_id = emitter_waiting_pending_action_storage_id
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .clone();
+                let Some(pending_action_storage_id) = pending_action_storage_id else {
+                    emitter_terminal_event_gate.discard();
+                    return;
+                };
+                // Fixed lock order: pending_actions -> cancellations. Approval advances the
+                // pending status while holding the first lock; cancellation token publication
+                // uses the second. Holding both through the non-blocking notification send makes
+                // Waiting linearizable with both operations, including the approved-to-spawn gap
+                // before an asynchronous command/MCP/Skill/Office worker registers its new token.
+                let pending_actions_guard = emitter_service
+                    .pending_actions
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner());
+                let pending_is_current = pending_actions_guard
+                    .get(&pending_action_storage_id)
+                    .is_some_and(|record| {
+                        record.snapshot.run_id == emitter_run_id
+                            && record.snapshot.status == PendingActionStatus::Pending
+                    });
+                if !pending_is_current {
+                    drop(pending_actions_guard);
+                    emitter_terminal_event_gate.discard();
+                    return;
+                }
+                let cancellation_publication_guard = emitter_service
+                    .cancellations
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner());
+                let owns_current_generation = cancellation_publication_guard
+                    .get(&emitter_run_id)
+                    .is_some_and(|current| current.shares_state_with(&emitter_cancellation_token));
+                if !owns_current_generation || emitter_cancellation_token.is_cancelled() {
+                    drop(cancellation_publication_guard);
+                    drop(pending_actions_guard);
+                    emitter_terminal_event_gate.discard();
+                    return;
+                }
+                if let Some(event) = emitter_terminal_event_gate.route(event) {
+                    emit_agent_event_notifications(
+                        &emitter_notifications,
+                        emitter_collaboration_identity.as_ref(),
+                        &emitter_run_id,
+                        &emitter_assistant_message_id,
+                        event,
+                    );
+                }
+                drop(cancellation_publication_guard);
+                drop(pending_actions_guard);
                 return;
             }
             match &event {

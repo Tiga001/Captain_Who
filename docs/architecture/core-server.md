@@ -172,7 +172,7 @@ EOF 或 request-loop 错误没有 shutdown response，但仍走同一幂等清�
 ## 8. Scheduled Automation 调度边界
 
 - application 真源是 `application/automation/{service,schedule,scheduler,notifications}.rs`；Renderer 缓存和进程内 `Notify` 都只是加速器。SQLite Task、Run、Event 是 Automation 恢复权威，legacy outbox 只作为 producer/兼容 ledger，原生投递以共享 Notification batch 为准。
-- Scheduler 每 30 秒或被唤醒时扫描，due/claim batch 均最多 3，Automation 专用并发为 2；每个 Automation HumanRoot Turn 还必须取得默认上限 4 的进程级 `AgentTurnConcurrencyGate`。
+- Scheduler 每 30 秒或被唤醒时扫描，due/claim batch 均最多 3，Automation 专用并发为 2；每个 Automation HumanRoot Turn 还必须取得默认上限 50 的进程级 `AgentTurnConcurrencyGate`。
 - 持久 Run 内部状态为 `queued → admitting → running ↔ waiting_for_approval → terminal`；协议把内部 `admitting` 投影为 public `starting`，不得在 Renderer 或文档中再暴露内部 lease token。
 - claim 的 admission lease 为 60 秒；容量不足或目标 Conversation 忙时回到 `queued` 并退避 5 秒。启动时旧进程留下的所有 `admitting` 都立即回队，不等待旧 lease；多个 missed occurrence 合并为一次 `recovery` Run。
 - HumanRoot admission 把 Conversation、message pair、空的 in-progress Trace 与 `admitting → running` 放在同一 `BEGIN IMMEDIATE` 事务中。事务提交后才允许 Provider/MCP 工作；重启后 `running`/`waiting_for_approval` 只从 Trace 和 pending action 恢复。

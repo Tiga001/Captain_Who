@@ -429,6 +429,7 @@ impl AgentService {
     /// a Renderer/user cancellation of an arbitrary collaboration run.
     pub(crate) fn cancel_automation_agent_run(&self, agent_run_id: &str) -> Result<bool, String> {
         self.interrupt_agent_wake_run(agent_run_id)
+            .map(AgentRunCancellationOutcome::any_effect)
     }
 }
 

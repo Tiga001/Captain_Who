@@ -3740,6 +3740,13 @@ pub enum AgentEvent {
         action: Box<AgentProposedAction>,
         #[serde(skip)]
         checkpoint: Box<AgentRunCheckpoint>,
+        /// Usage for the Runtime segment which produced this approval boundary.
+        ///
+        /// This stays inside Core/Host so the Host can account for the segment before the pending
+        /// action becomes externally actionable. Renderer continues to receive the existing
+        /// approval payload without any private accounting field.
+        #[serde(skip)]
+        segment_usage: Option<AgentUsage>,
     },
     FileChangeProposed {
         run_id: String,

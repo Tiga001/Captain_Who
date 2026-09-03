@@ -5,6 +5,7 @@
 //! interprets a Graph workflow and never invokes a second Agent loop: the production execution
 //! port below is backed by the shared [`AgentService`] Turn executor.
 
+use crate::application::agent::AgentRunCancellationOutcome;
 use mycopilot_core::storage::service::AgentWakeApprovalWaitOutcome;
 use mycopilot_core::{
     AgentGraphError, AgentResultArtifactReference, AgentWakeRecoveryAction, AgentWakeRecoveryBatch,
@@ -590,7 +591,7 @@ pub(crate) trait AgentWakeTurnExecutionPort: Send + Sync {
 
     fn retire_recovered_turn_after_settlement(&self, handle: &AgentWakeExecutionHandle);
 
-    fn interrupt(&self, run_id: &str) -> Result<bool, String>;
+    fn interrupt(&self, run_id: &str) -> Result<AgentRunCancellationOutcome, String>;
 }
 
 /// Production adapter for the shared `AgentService` executor. Its observer uses the durable
@@ -856,7 +857,7 @@ impl AgentWakeTurnExecutionPort for SharedAgentTurnExecutionPort {
         );
     }
 
-    fn interrupt(&self, run_id: &str) -> Result<bool, String> {
+    fn interrupt(&self, run_id: &str) -> Result<AgentRunCancellationOutcome, String> {
         self.service.interrupt_agent_wake_run(run_id)
     }
 }
@@ -1070,12 +1071,12 @@ impl AgentDispatcher {
                     "Only an active-Turn interrupt may require runtime dispatch".to_string(),
                 ));
             };
-            let interrupt_delivered = self
+            let interrupt_outcome = self
                 .shared
                 .executor
                 .interrupt(run_id)
                 .map_err(AgentDispatcherError::Manager)?;
-            if !interrupt_delivered {
+            if !interrupt_outcome.turn_termination_confirmed() {
                 let wake = self
                     .shared
                     .store
@@ -1156,7 +1157,12 @@ impl AgentDispatcher {
                 };
                 if !dispatch.waiting_for_approval
                     && !interrupted_runs.contains(run_id)
-                    && self.shared.executor.interrupt(run_id).unwrap_or(false)
+                    && self
+                        .shared
+                        .executor
+                        .interrupt(run_id)
+                        .map(AgentRunCancellationOutcome::any_effect)
+                        .unwrap_or(false)
                 {
                     interrupted_runs.insert(run_id.to_string());
                     cancellation_requested = cancellation_requested.saturating_add(1);
@@ -1313,7 +1319,7 @@ fn recover_undispatched_interrupts(
         .map_err(AgentDispatcherError::Storage)?;
     for interrupt in pending {
         match shared.executor.interrupt(&interrupt.run_id) {
-            Ok(true) => shared
+            Ok(outcome) if outcome.turn_termination_confirmed() => shared
                 .store
                 .mark_interrupt_dispatched(
                     &interrupt.caller_agent_id,
@@ -1321,7 +1327,7 @@ fn recover_undispatched_interrupts(
                     shared.clock.now_ms(),
                 )
                 .map_err(AgentDispatcherError::Storage)?,
-            Ok(false) => {
+            Ok(_) => {
                 let wake = shared
                     .store
                     .get_wake(&interrupt.wake_id)
@@ -2164,7 +2170,7 @@ mod tests {
         gates: Mutex<HashMap<String, oneshot::Receiver<()>>>,
         permits: Mutex<HashMap<String, AgentTurnConcurrencyPermit>>,
         interrupts: Mutex<Vec<String>>,
-        interrupt_result: AtomicBool,
+        interrupt_result: Mutex<AgentRunCancellationOutcome>,
         start_notify: Notify,
     }
 
@@ -2177,13 +2183,16 @@ mod tests {
                 gates: Mutex::new(HashMap::new()),
                 permits: Mutex::new(HashMap::new()),
                 interrupts: Mutex::new(Vec::new()),
-                interrupt_result: AtomicBool::new(true),
+                interrupt_result: Mutex::new(AgentRunCancellationOutcome::TurnTerminationConfirmed),
                 start_notify: Notify::new(),
             }
         }
 
-        fn set_interrupt_result(&self, delivered: bool) {
-            self.interrupt_result.store(delivered, Ordering::SeqCst);
+        fn set_interrupt_result(&self, outcome: AgentRunCancellationOutcome) {
+            *self
+                .interrupt_result
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()) = outcome;
         }
 
         fn gated() -> (Self, HashMap<String, oneshot::Sender<()>>) {
@@ -2209,7 +2218,9 @@ mod tests {
                     gates: Mutex::new(receivers),
                     permits: Mutex::new(HashMap::new()),
                     interrupts: Mutex::new(Vec::new()),
-                    interrupt_result: AtomicBool::new(true),
+                    interrupt_result: Mutex::new(
+                        AgentRunCancellationOutcome::TurnTerminationConfirmed,
+                    ),
                     start_notify: Notify::new(),
                 },
                 senders,
@@ -2311,12 +2322,15 @@ mod tests {
                 .remove(&handle.run_id);
         }
 
-        fn interrupt(&self, run_id: &str) -> Result<bool, String> {
+        fn interrupt(&self, run_id: &str) -> Result<AgentRunCancellationOutcome, String> {
             self.interrupts
                 .lock()
                 .unwrap_or_else(|error| error.into_inner())
                 .push(run_id.to_string());
-            Ok(self.interrupt_result.load(Ordering::SeqCst))
+            Ok(*self
+                .interrupt_result
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()))
         }
     }
 
@@ -2455,7 +2469,7 @@ mod tests {
     async fn interrupt_agent_runtime_miss_is_an_error_while_wake_remains_active() {
         let store = active_interrupt_store(AgentWakeStatus::Running);
         let executor = Arc::new(FakeExecutor::immediate());
-        executor.set_interrupt_result(false);
+        executor.set_interrupt_result(AgentRunCancellationOutcome::NoEffect);
         let dispatcher = start_interrupt_test_dispatcher(Arc::clone(&store), Arc::clone(&executor));
 
         let error = dispatcher
@@ -2471,7 +2485,7 @@ mod tests {
         );
         assert!(!store.state.lock().unwrap().interrupt_dispatched);
 
-        executor.set_interrupt_result(true);
+        executor.set_interrupt_result(AgentRunCancellationOutcome::TurnTerminationConfirmed);
         let retry = dispatcher
             .interrupt_agent("root", "agent-a", "interrupt-1")
             .unwrap();
@@ -2492,10 +2506,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn interrupt_agent_does_not_acknowledge_resource_cleanup_without_turn_termination() {
+        let store = active_interrupt_store(AgentWakeStatus::Running);
+        let executor = Arc::new(FakeExecutor::immediate());
+        executor.set_interrupt_result(AgentRunCancellationOutcome::ResourcesOnly);
+        let dispatcher = start_interrupt_test_dispatcher(Arc::clone(&store), Arc::clone(&executor));
+
+        let error = dispatcher
+            .interrupt_agent("root", "agent-a", "interrupt-resources-only")
+            .unwrap_err();
+
+        assert!(matches!(error, AgentDispatcherError::Manager(message) if
+            message.contains("interrupt did not reach active Turn run:wake-1")
+                && message.contains("durable Wake status remains running")));
+        assert_eq!(
+            executor.interrupts.lock().unwrap().as_slice(),
+            ["run:wake-1"]
+        );
+        assert!(
+            !store.state.lock().unwrap().interrupt_dispatched,
+            "resource cleanup alone must leave the durable interrupt receipt retryable"
+        );
+        dispatcher.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn interrupt_agent_runtime_miss_reports_no_active_turn_after_durable_settlement() {
         let store = active_interrupt_store(AgentWakeStatus::Completed);
         let executor = Arc::new(FakeExecutor::immediate());
-        executor.set_interrupt_result(false);
+        executor.set_interrupt_result(AgentRunCancellationOutcome::NoEffect);
         let dispatcher = start_interrupt_test_dispatcher(Arc::clone(&store), Arc::clone(&executor));
 
         let disposition = dispatcher
@@ -2657,9 +2696,9 @@ mod tests {
 
         fn retire_recovered_turn_after_settlement(&self, _handle: &AgentWakeExecutionHandle) {}
 
-        fn interrupt(&self, _run_id: &str) -> Result<bool, String> {
+        fn interrupt(&self, _run_id: &str) -> Result<AgentRunCancellationOutcome, String> {
             self.interrupts.fetch_add(1, Ordering::SeqCst);
-            Ok(true)
+            Ok(AgentRunCancellationOutcome::TurnTerminationConfirmed)
         }
     }
 

@@ -20,6 +20,12 @@ enum FileChangeApprovalRetry {
     Replay(Box<AgentActionExecutionOutput>),
 }
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct InternalActionCancellationOutcome {
+    affected: bool,
+    turn_termination_confirmed: bool,
+}
+
 fn file_change_run_grant_decision_error(
     error: mycopilot_core::storage::service::FileChangeRunGrantServiceError,
 ) -> AgentServiceError {
@@ -415,19 +421,15 @@ impl AgentService {
     /// Host-internal cancellation for one trusted child Wake run. A live Runtime uses the normal
     /// run token, any handed-off command Session is interrupted explicitly, and a durable approval
     /// with no live owner is atomically cancelled through the existing pending-action settlement
-    /// path. Once a live owner is signalled, that owner remains solely responsible for the Turn's
-    /// terminal settlement.
-    pub(crate) fn interrupt_agent_wake_run(&self, run_id: &str) -> Result<bool, String> {
+    /// path. Pending-action arbitration still runs after signalling a live token because a Turn
+    /// may have committed WaitingForApproval while its retiring Runtime token is briefly still
+    /// registered; treating that token alone as completion would strand the durable approval.
+    pub(crate) fn interrupt_agent_wake_run(
+        &self,
+        run_id: &str,
+    ) -> Result<AgentRunCancellationOutcome, String> {
         let conversation_id = self.conversation_id_for_run(run_id);
-        let runtime_interrupted = self.cancel_run_internal(run_id);
-        let command_sessions_interrupted =
-            conversation_id.as_deref().map_or(0, |conversation_id| {
-                self.command_sessions
-                    .interrupt_origin_run(conversation_id, run_id)
-            });
-        if runtime_interrupted || command_sessions_interrupted > 0 {
-            return Ok(true);
-        }
+        let mut cancellation = self.cancel_exact_run_execution(run_id, conversation_id.as_deref());
         let action_ids = self
             .pending_actions
             .lock()
@@ -445,11 +447,11 @@ impl AgentService {
             .map(|record| record.snapshot.action_id.clone())
             .collect::<Vec<_>>();
         for action_id in action_ids {
-            if self.cancel_action_internal(run_id, &action_id)? {
-                return Ok(true);
-            }
+            let action = self.cancel_action_internal_with_outcome(run_id, &action_id)?;
+            cancellation.record_resource_cleanup(action.affected);
+            cancellation.record_turn_termination(action.turn_termination_confirmed);
         }
-        Ok(false)
+        Ok(cancellation)
     }
 
     pub(super) fn validate_provider_continuations_before_dispatch(
@@ -1163,12 +1165,28 @@ impl AgentService {
         self.cancel_action_internal(run_id, action_id)
     }
 
-    fn cancel_action_internal(&self, run_id: &str, action_id: &str) -> Result<bool, String> {
+    pub(super) fn cancel_action_internal(
+        &self,
+        run_id: &str,
+        action_id: &str,
+    ) -> Result<bool, String> {
+        self.cancel_action_internal_with_outcome(run_id, action_id)
+            .map(|outcome| outcome.affected)
+    }
+
+    fn cancel_action_internal_with_outcome(
+        &self,
+        run_id: &str,
+        action_id: &str,
+    ) -> Result<InternalActionCancellationOutcome, String> {
         if self
             .try_cancel_recovered_approved_mcp_action(run_id, action_id)?
             .is_some()
         {
-            return Ok(true);
+            return Ok(InternalActionCancellationOutcome {
+                affected: true,
+                turn_termination_confirmed: true,
+            });
         }
         let deletion_lifecycle = self
             .deletion_lifecycle
@@ -1181,13 +1199,13 @@ impl AgentService {
         let Some(storage_id) =
             resolve_pending_action_storage_id(&pending_actions, run_id, action_id)
         else {
-            return Ok(false);
+            return Ok(InternalActionCancellationOutcome::default());
         };
         let record = pending_actions
             .get_mut(&storage_id)
             .expect("resolved pending action exists");
         if deletion_lifecycle.contains_input(&record.agent_input) {
-            return Ok(false);
+            return Ok(InternalActionCancellationOutcome::default());
         }
         let is_cancellable_process = matches!(
             record.snapshot.action,
@@ -1222,6 +1240,7 @@ impl AgentService {
                 .cancel_pre_handoff_for_action(&record.snapshot.run_id, &record.snapshot.action_id);
             let cancelled_process = self.process_runs.cancel(&record.storage_id);
             let cancelled = cancelled_sessions > 0 || cancelled_process;
+            let mut runtime_token_signalled = false;
             if cancelled {
                 if let Some(token) = self
                     .cancellations
@@ -1230,6 +1249,7 @@ impl AgentService {
                     .get(&record.snapshot.run_id)
                 {
                     token.cancel();
+                    runtime_token_signalled = true;
                 }
                 self.record_action_audit(
                     &record,
@@ -1249,10 +1269,13 @@ impl AgentService {
                     .revoke_nonterminal_file_change_run_grants(&record.snapshot.run_id)
                     .map_err(|error| error.to_string())?;
             }
-            return Ok(cancelled);
+            return Ok(InternalActionCancellationOutcome {
+                affected: cancelled,
+                turn_termination_confirmed: runtime_token_signalled,
+            });
         }
         if record.snapshot.status != PendingActionStatus::Pending {
-            return Ok(false);
+            return Ok(InternalActionCancellationOutcome::default());
         }
         let call = tool_call_for_pending_record(record)?;
         self.persist_pending_status(
@@ -1319,11 +1342,17 @@ impl AgentService {
         // `finalize_cancelled_pending_action` committed the assistant/trace terminal state and
         // the pending-action CAS above committed the matching action terminal state. Only after
         // both durable facts exist may the in-memory accelerator release this logical Turn.
+        if let Some(assistant_message_id) = record.snapshot.assistant_message_id.as_deref() {
+            self.notify_durable_turn_observers(assistant_message_id);
+        }
         if let Some(conversation_id) = record.snapshot.conversation_id.as_deref() {
             self.release_conversation_turn_if_current(conversation_id, &record.snapshot.run_id);
             self.release_turn_concurrency_permit(&record.snapshot.run_id);
         }
-        Ok(true)
+        Ok(InternalActionCancellationOutcome {
+            affected: true,
+            turn_termination_confirmed: true,
+        })
     }
 
     /// Atomically cancels an MCP approval which was durable `approved` across a process restart
@@ -1394,6 +1423,9 @@ impl AgentService {
         drop(deletion_lifecycle);
 
         self.invalidate_mcp_pending_payload(&record.snapshot.action);
+        if let Some(assistant_message_id) = record.snapshot.assistant_message_id.as_deref() {
+            self.notify_durable_turn_observers(assistant_message_id);
+        }
         if let Some(conversation_id) = record.snapshot.conversation_id.as_deref() {
             self.release_conversation_turn_if_current(conversation_id, &record.snapshot.run_id);
             self.release_turn_concurrency_permit(&record.snapshot.run_id);
@@ -1473,7 +1505,6 @@ impl AgentService {
                 &call,
                 &execution.tool_result,
                 &model_observation,
-                REASON,
             )?;
             let usage_record = self.prepare_run_usage_record(
                 &record.snapshot.run_id,

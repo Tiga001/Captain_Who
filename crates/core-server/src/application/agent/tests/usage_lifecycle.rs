@@ -107,6 +107,49 @@ fn persists_usage_for_failed_runs() {
 }
 
 #[test]
+fn non_error_usage_transition_clears_a_stale_error() {
+    let fixture = tempdir().unwrap();
+    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let service = AgentService::new(storage);
+    service.register_usage_context(
+        "run-clear-stale-error",
+        AgentRunUsageContext {
+            conversation_id: "conversation-clear-stale-error".to_string(),
+            assistant_message_id: "assistant-clear-stale-error".to_string(),
+            run_id: "run-clear-stale-error".to_string(),
+            project_id: None,
+            model_id: "model-1".to_string(),
+            model_name: "Model 1".to_string(),
+            provider_usage_semantics: ProviderUsageSemantics::StandardAdditive,
+            input_price: None,
+            cached_input_price: None,
+            output_price: None,
+            started_at: 1,
+        },
+    );
+
+    let stale = service
+        .prepare_run_usage_record(
+            "run-clear-stale-error",
+            AgentRunStatus::WaitingForApproval,
+            None,
+            Some("tool_calls".to_string()),
+        )
+        .unwrap();
+    assert_eq!(stale.error.as_deref(), Some("tool_calls"));
+
+    let completed = service
+        .prepare_run_usage_record(
+            "run-clear-stale-error",
+            AgentRunStatus::Completed,
+            None,
+            None,
+        )
+        .unwrap();
+    assert_eq!(completed.error, None);
+}
+
+#[test]
 fn moonshot_completion_usage_is_priced_persisted_and_summarized_as_output() {
     const CONVERSATION_ID: &str = "conversation-moonshot-usage";
     const ASSISTANT_MESSAGE_ID: &str = "assistant-moonshot-usage";
@@ -964,6 +1007,14 @@ fn approval_segments_project_one_cumulative_usage_snapshot_to_chat_history() {
         })
         .unwrap();
     let service = AgentService::new(storage.clone());
+    let in_progress_trace = ConversationTraceSnapshot::default().in_progress_trace(
+        "run-cumulative",
+        "conversation-cumulative",
+        "assistant-cumulative",
+    );
+    assert!(storage
+        .append_in_progress_conversation_turn_trace(&in_progress_trace, 1, 1)
+        .unwrap());
     service.register_usage_context(
         "run-cumulative",
         AgentRunUsageContext {
@@ -981,6 +1032,34 @@ fn approval_segments_project_one_cumulative_usage_snapshot_to_chat_history() {
         },
     );
 
+    let pending_call = AgentToolCall {
+        id: "call-cumulative".to_string(),
+        tool: "approval_tool".to_string(),
+        args: json!({ "path": "safe.txt" }),
+        approval_status: AgentApprovalStatus::Required,
+        reason: None,
+    };
+    let pending_action = AgentProposedAction::ToolCall {
+        call: pending_call.clone(),
+    };
+    storage
+        .store_pending_agent_action(AgentPendingActionRecord {
+            action_id: pending_action_storage_id("run-cumulative", &pending_call.id),
+            run_id: "run-cumulative".to_string(),
+            conversation_id: Some("conversation-cumulative".to_string()),
+            assistant_message_id: Some("assistant-cumulative".to_string()),
+            action_type: "tool_call".to_string(),
+            tool_name: pending_call.tool.clone(),
+            tool_call_id: Some(pending_call.id.clone()),
+            status: "pending".to_string(),
+            target_status: None,
+            action_json: serde_json::to_string(&pending_action).unwrap(),
+            agent_input_json: "{}".to_string(),
+            created_at: 1,
+            updated_at: 1,
+        })
+        .unwrap();
+
     let mut waiting = usage_output(
         AgentRunStatus::WaitingForApproval,
         AgentUsage {
@@ -993,6 +1072,10 @@ fn approval_segments_project_one_cumulative_usage_snapshot_to_chat_history() {
             billable_request_count: Some(2),
         },
     );
+    waiting.proposed_actions = vec![pending_action];
+    service
+        .stage_waiting_segment_usage("run-cumulative", waiting.usage.clone())
+        .unwrap();
     service
         .persist_final_assistant_output(
             "conversation-cumulative",
@@ -1020,19 +1103,22 @@ fn approval_segments_project_one_cumulative_usage_snapshot_to_chat_history() {
         finish_reason: Some("stop".to_string()),
         proposed_actions: Vec::new(),
     });
-    assert!(matches!(
-        projected,
-        AgentEvent::Done {
-            usage: Some(AgentUsage {
-                input_tokens: Some(160),
-                output_tokens: Some(30),
-                total_tokens: Some(190),
-                billable_request_count: Some(3),
+    assert!(
+        matches!(
+            &projected,
+            AgentEvent::Done {
+                usage: Some(AgentUsage {
+                    input_tokens: Some(160),
+                    output_tokens: Some(30),
+                    total_tokens: Some(190),
+                    billable_request_count: Some(3),
+                    ..
+                }),
                 ..
-            }),
-            ..
-        }
-    ));
+            }
+        ),
+        "unexpected cumulative usage projection: {projected:#?}"
+    );
 
     let mut completed = usage_output(AgentRunStatus::Completed, continuation_usage);
     service
@@ -1082,6 +1168,19 @@ fn approval_segments_project_one_cumulative_usage_snapshot_to_chat_history() {
     assert_eq!(run["usage"]["cacheCreationInputTokens"], 2);
     assert_eq!(run["usage"]["billableRequestCount"], 3);
     assert_eq!(run["timeline"][0]["id"], "keep-presentation");
+
+    let persisted_usage = storage
+        .load_agent_usage_for_owner(
+            "run-cumulative",
+            "conversation-cumulative",
+            "assistant-cumulative",
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        persisted_usage.error, None,
+        "normal Provider finish reasons must not be stored as Agent errors"
+    );
 }
 
 fn usage_output(status: AgentRunStatus, usage: AgentUsage) -> AgentChatOutput {

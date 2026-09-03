@@ -63,6 +63,7 @@ fn shared_mcp_renderer_contract_matches_rust_safe_event_serialization() {
         run_id: "run-owned".to_string(),
         action: Box::new(action.clone()),
         checkpoint: Box::new(checkpoint),
+        segment_usage: None,
     });
     assert_eq!(approval["params"], fixture["approvalRequired"]);
 

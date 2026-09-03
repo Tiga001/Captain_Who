@@ -11,6 +11,24 @@ fn call(id: &str) -> AgentToolCall {
     }
 }
 
+fn record_open_call(recorder: &mut ConversationTraceRecorder, call: &AgentToolCall) {
+    let sequence = recorder.record_tool_call(call).unwrap();
+    recorder
+        .record_model_message(
+            sequence,
+            0,
+            &LlmMessage::assistant(
+                "",
+                vec![crate::llm::LlmToolCall {
+                    id: call.id.clone(),
+                    name: call.tool.clone(),
+                    args: call.args.clone(),
+                }],
+            ),
+        )
+        .unwrap();
+}
+
 fn command_lifecycle(
     phase: ConversationCommandSessionLifecyclePhase,
     status: AgentCommandSessionStatus,
@@ -324,6 +342,85 @@ fn terminal_projection_closes_a_crashed_context_compaction_once() {
     let mut dangling = projection.trace.clone();
     dangling.items.pop();
     assert!(dangling.validate().is_err());
+}
+
+#[test]
+fn ordinary_cancelled_snapshot_keeps_tool_cancellation_separate_from_terminal_error() {
+    let mut recorder = ConversationTraceRecorder::default();
+    let unresolved = call("cancelled-call");
+    record_open_call(&mut recorder, &unresolved);
+
+    let projection = cancelled_conversation_trace_from_snapshot(
+        recorder.snapshot(),
+        "run-cancelled",
+        "conversation-cancelled",
+        "assistant-cancelled",
+        "Run cancelled before a verifiable tool result was available.",
+    )
+    .unwrap();
+
+    projection.trace.validate().unwrap();
+    assert_eq!(
+        projection.trace.terminal_status,
+        ConversationTurnTraceTerminalStatus::Cancelled
+    );
+    assert_eq!(projection.trace.terminal_error, None);
+    assert!(matches!(
+        projection.trace.items.last(),
+        Some(ConversationTurnTraceItem::ToolResult {
+            call_id,
+            status: ConversationTraceToolResultStatus::Cancelled,
+            success: false,
+            error: Some(error),
+            ..
+        }) if call_id == "cancelled-call"
+            && error == "Run cancelled before a verifiable tool result was available."
+    ));
+}
+
+#[test]
+fn abnormal_cancelled_snapshot_can_retain_a_distinct_terminal_error() {
+    let mut recorder = ConversationTraceRecorder::default();
+    record_open_call(&mut recorder, &call("forced-cancelled-call"));
+
+    let projection = cancelled_conversation_trace_from_snapshot_with_terminal_error(
+        recorder.snapshot(),
+        "run-forced-cancelled",
+        "conversation-forced-cancelled",
+        "assistant-forced-cancelled",
+        "No verifiable Tool result was available during forced cancellation.",
+        "Core shutdown timed out while cancelling the active run.",
+    )
+    .unwrap();
+
+    projection.trace.validate().unwrap();
+    assert_eq!(
+        projection.trace.terminal_error.as_deref(),
+        Some("Core shutdown timed out while cancelling the active run.")
+    );
+    assert!(matches!(
+        projection.trace.items.last(),
+        Some(ConversationTurnTraceItem::ToolResult {
+            status: ConversationTraceToolResultStatus::Cancelled,
+            error: Some(error),
+            ..
+        }) if error == "No verifiable Tool result was available during forced cancellation."
+    ));
+}
+
+#[test]
+fn item_free_cancellation_has_no_terminal_error() {
+    let ordinary = cancelled_conversation_trace_without_items(
+        "run-item-free-cancelled",
+        "conversation-item-free-cancelled",
+        "assistant-item-free-cancelled",
+    );
+    ordinary.validate().unwrap();
+    assert_eq!(
+        ordinary.terminal_status,
+        ConversationTurnTraceTerminalStatus::Cancelled
+    );
+    assert_eq!(ordinary.terminal_error, None);
 }
 
 #[test]

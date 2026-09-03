@@ -140,7 +140,7 @@ fn cancel_run_rpc_reports_tree_stop_persistence_failure_but_interrupts_root_loca
 }
 
 #[test]
-fn cancelling_pending_approval_commits_one_paired_cancelled_trace() {
+fn interrupting_pending_approval_ignores_retiring_runtime_token_and_commits_paired_trace() {
     let fixture = tempdir().unwrap();
     let database_path = fixture.path().join("storage.sqlite");
     let storage = Arc::new(StorageService::open(&database_path).unwrap());
@@ -272,7 +272,16 @@ fn cancelling_pending_approval_commits_one_paired_cancelled_trace() {
     assert_eq!(approval_event.subject_text, "Keep tracking this objective.");
     assert!(approval_event.resolved_at.is_none());
 
-    assert!(service.cancel_action("run-cancel", &call.id).unwrap());
+    // Reproduce the narrow handoff window after WaitingForApproval is durable but before the
+    // completed Runtime segment unregisters its token. Signalling this retiring token must not
+    // skip authoritative pending-action cancellation.
+    let retiring_runtime_cancellation = AgentCancellationToken::new();
+    service.register_cancellation("run-cancel", retiring_runtime_cancellation.clone());
+    assert!(service
+        .interrupt_agent_wake_run("run-cancel")
+        .unwrap()
+        .turn_termination_confirmed());
+    assert!(retiring_runtime_cancellation.is_cancelled());
 
     let trace = storage
         .get_conversation_turn_trace("assistant-cancel")
@@ -490,6 +499,180 @@ fn forced_cancellation_uses_backend_runtime_snapshot_instead_of_empty_trace() {
     assert!(serde_json::to_string(&trace)
         .unwrap()
         .contains("created.txt"));
+}
+
+#[test]
+fn cancelled_tool_call_finish_reason_is_not_projected_as_a_terminal_error() {
+    const RUN_ID: &str = "run-cancelled-tool-call-finish";
+    const CONVERSATION_ID: &str = "conversation-cancelled-tool-call-finish";
+    const ASSISTANT_MESSAGE_ID: &str = "assistant-cancelled-tool-call-finish";
+    const CALL_ID: &str = "call-cancelled-tool-call-finish";
+
+    let fixture = tempdir().unwrap();
+    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    storage
+        .save_conversation(ChatConversationRecord {
+            id: CONVERSATION_ID.to_string(),
+            project_id: None,
+            model_id: Some("model-1".to_string()),
+            title: "Cancelled tool-call finish reason".to_string(),
+            messages: vec![ChatMessageRecord {
+                id: ASSISTANT_MESSAGE_ID.to_string(),
+                role: "assistant".to_string(),
+                content: String::new(),
+                created_at: 1,
+                status: Some("streaming".to_string()),
+                attachments: Vec::new(),
+                agent_run_json: None,
+                ui_state_json: None,
+            }],
+            created_at: 1,
+            updated_at: 1,
+            pinned_at: None,
+            archived_at: None,
+            unread_at: None,
+        })
+        .unwrap();
+
+    let service = AgentService::new(Arc::clone(&storage));
+    service.register_usage_context(
+        RUN_ID,
+        AgentRunUsageContext {
+            conversation_id: CONVERSATION_ID.to_string(),
+            assistant_message_id: ASSISTANT_MESSAGE_ID.to_string(),
+            run_id: RUN_ID.to_string(),
+            project_id: None,
+            model_id: "model-1".to_string(),
+            model_name: "Model 1".to_string(),
+            provider_usage_semantics: ProviderUsageSemantics::StandardAdditive,
+            input_price: None,
+            cached_input_price: None,
+            output_price: None,
+            started_at: 1,
+        },
+    );
+    let call = AgentToolCall {
+        id: CALL_ID.to_string(),
+        tool: "run_command".to_string(),
+        args: json!({ "command": "sleep 120" }),
+        approval_status: AgentApprovalStatus::NotRequired,
+        reason: None,
+    };
+    service.trace_snapshots.lock().unwrap().insert(
+        RUN_ID.to_string(),
+        ConversationTraceSnapshot {
+            items: vec![ConversationTurnTraceItem::ToolCall {
+                sequence: 0,
+                call_id: call.id.clone(),
+                tool: call.tool.clone(),
+                operation: call.args.clone(),
+                provenance: AgentToolIdentity::Builtin {
+                    tool_name: call.tool.clone(),
+                },
+                approval_status: call.approval_status,
+                truncated: false,
+            }],
+            model_context_items: vec![pending_model_context_item(&call)],
+            next_sequence: 1,
+            truncated: false,
+        },
+    );
+
+    let mut output = AgentChatOutput {
+        content: String::new(),
+        status: AgentRunStatus::Cancelled,
+        run_id: RUN_ID.to_string(),
+        events: Vec::new(),
+        tool_definitions: Vec::new(),
+        todo: None,
+        usage: Some(AgentUsage {
+            input_tokens: Some(10),
+            output_tokens: Some(5),
+            output_thinking_tokens: None,
+            total_tokens: Some(15),
+            cached_input_tokens: None,
+            cache_creation_input_tokens: None,
+            billable_request_count: Some(1),
+        }),
+        // OpenAI-compatible providers use this normal finish reason to hand control to tools. It
+        // must remain provider metadata and must never become a user-visible cancellation error.
+        finish_reason: Some("tool_calls".to_string()),
+        proposed_actions: Vec::new(),
+        conversation_turn_trace: None,
+    };
+
+    service
+        .persist_final_assistant_output(CONVERSATION_ID, ASSISTANT_MESSAGE_ID, &mut output, None)
+        .unwrap();
+
+    assert_eq!(output.finish_reason.as_deref(), Some("tool_calls"));
+    let trace = storage
+        .get_conversation_turn_trace(ASSISTANT_MESSAGE_ID)
+        .unwrap()
+        .expect("cancelled Turn must keep its durable Trace");
+    assert_eq!(
+        trace.terminal_status,
+        ConversationTurnTraceTerminalStatus::Cancelled
+    );
+    assert_eq!(trace.terminal_error, None);
+    assert!(matches!(
+        trace.items.as_slice(),
+        [
+            ConversationTurnTraceItem::ToolCall { call_id, .. },
+            ConversationTurnTraceItem::ToolResult {
+                call_id: result_call_id,
+                status: ConversationTraceToolResultStatus::Cancelled,
+                success: false,
+                ..
+            }
+        ] if call_id == CALL_ID && result_call_id == CALL_ID
+    ));
+
+    let model_log = storage
+        .get_conversation_model_context_log(ASSISTANT_MESSAGE_ID)
+        .unwrap()
+        .expect("cancelled Turn must atomically store its paired model context");
+    trace
+        .validate_complete_model_context(&model_log.items)
+        .unwrap();
+    let usage = storage
+        .load_agent_usage_for_owner(RUN_ID, CONVERSATION_ID, ASSISTANT_MESSAGE_ID)
+        .unwrap()
+        .expect("cancelled Provider segment must retain its Usage record");
+    assert_eq!(usage.status.as_deref(), Some("cancelled"));
+    assert_eq!(
+        usage.error, None,
+        "normal Provider finish metadata must not contaminate Agent Usage errors"
+    );
+
+    let conversation = storage
+        .load_conversation(CONVERSATION_ID)
+        .unwrap()
+        .expect("cancelled conversation remains loadable");
+    let message = conversation
+        .messages
+        .iter()
+        .find(|message| message.id == ASSISTANT_MESSAGE_ID)
+        .expect("cancelled assistant message remains loadable");
+    assert_eq!(message.status.as_deref(), Some("sent"));
+    let run: Value = serde_json::from_str(
+        message
+            .agent_run_json
+            .as_deref()
+            .expect("durable Trace must project an AgentRun"),
+    )
+    .unwrap();
+    assert_eq!(run["status"], "cancelled");
+    assert!(run["lastError"].is_null());
+    let timeline = run["timeline"].as_array().unwrap();
+    assert!(timeline
+        .iter()
+        .any(|item| { item["type"] == "tool_call" && item["callId"].as_str() == Some(CALL_ID) }));
+    assert!(
+        timeline.iter().all(|item| item["type"] != "error"),
+        "normal provider finish metadata must not create a red error timeline item: {timeline:#?}"
+    );
+    assert!(timeline.iter().all(|item| item["id"] != "terminal-error"));
 }
 
 #[test]

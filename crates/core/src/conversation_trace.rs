@@ -1515,7 +1515,6 @@ pub fn cancelled_conversation_trace_from_checkpoint(
     call: &AgentToolCall,
     result: &AgentToolResult,
     model_observation: &str,
-    reason: &str,
 ) -> Result<TerminalConversationTraceProjection, String> {
     terminal_conversation_trace_from_checkpoint(
         checkpoint,
@@ -1525,7 +1524,7 @@ pub fn cancelled_conversation_trace_from_checkpoint(
         result,
         model_observation,
         ConversationTurnTraceTerminalStatus::Cancelled,
-        reason,
+        None,
     )
 }
 
@@ -1538,7 +1537,7 @@ pub(crate) fn terminal_conversation_trace_from_checkpoint(
     result: &AgentToolResult,
     model_observation: &str,
     terminal_status: ConversationTurnTraceTerminalStatus,
-    reason: &str,
+    terminal_error: Option<&str>,
 ) -> Result<TerminalConversationTraceProjection, String> {
     if !terminal_status.is_terminal() {
         return Err("terminal conversation projection requires a terminal status".to_string());
@@ -1563,7 +1562,7 @@ pub(crate) fn terminal_conversation_trace_from_checkpoint(
         conversation_id,
         assistant_message_id,
         terminal_status,
-        Some(reason),
+        terminal_error,
     );
     trace.validate_complete_model_context(&model_context_items)?;
     Ok(TerminalConversationTraceProjection {
@@ -1641,13 +1640,41 @@ pub fn cancelled_conversation_trace_from_snapshot(
     assistant_message_id: &str,
     reason: &str,
 ) -> Result<TerminalConversationTraceProjection, String> {
-    terminal_conversation_trace_from_snapshot(
+    terminal_conversation_trace_from_snapshot_with_terminal_details(
         snapshot,
         run_id,
         conversation_id,
         assistant_message_id,
         ConversationTurnTraceTerminalStatus::Cancelled,
         reason,
+        None,
+        None,
+    )
+}
+
+/// Closes a cancelled snapshot while retaining a distinct terminal failure diagnostic.
+///
+/// Most user-requested cancellations should use [`cancelled_conversation_trace_from_snapshot`],
+/// which deliberately leaves `terminal_error` empty. This explicit variant is reserved for
+/// abnormal cancellation paths such as a forced shutdown timeout. `unresolved_tool_error`
+/// describes only a ToolCall that had no verifiable result; `terminal_error` describes the Turn.
+pub fn cancelled_conversation_trace_from_snapshot_with_terminal_error(
+    snapshot: ConversationTraceSnapshot,
+    run_id: &str,
+    conversation_id: &str,
+    assistant_message_id: &str,
+    unresolved_tool_error: &str,
+    terminal_error: &str,
+) -> Result<TerminalConversationTraceProjection, String> {
+    terminal_conversation_trace_from_snapshot_with_terminal_details(
+        snapshot,
+        run_id,
+        conversation_id,
+        assistant_message_id,
+        ConversationTurnTraceTerminalStatus::Cancelled,
+        unresolved_tool_error,
+        Some(terminal_error),
+        None,
     )
 }
 
@@ -1659,13 +1686,14 @@ pub fn terminal_conversation_trace_from_snapshot(
     terminal_status: ConversationTurnTraceTerminalStatus,
     reason: &str,
 ) -> Result<TerminalConversationTraceProjection, String> {
-    terminal_conversation_trace_from_snapshot_with_tool_approval(
+    terminal_conversation_trace_from_snapshot_with_terminal_details(
         snapshot,
         run_id,
         conversation_id,
         assistant_message_id,
         terminal_status,
         reason,
+        Some(reason),
         None,
     )
 }
@@ -1727,6 +1755,31 @@ pub(crate) fn terminal_conversation_trace_from_snapshot_with_tool_approval(
     reason: &str,
     terminal_tool_approval_status: Option<AgentApprovalStatus>,
 ) -> Result<TerminalConversationTraceProjection, String> {
+    let terminal_error =
+        (terminal_status != ConversationTurnTraceTerminalStatus::Cancelled).then_some(reason);
+    terminal_conversation_trace_from_snapshot_with_terminal_details(
+        snapshot,
+        run_id,
+        conversation_id,
+        assistant_message_id,
+        terminal_status,
+        reason,
+        terminal_error,
+        terminal_tool_approval_status,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn terminal_conversation_trace_from_snapshot_with_terminal_details(
+    snapshot: ConversationTraceSnapshot,
+    run_id: &str,
+    conversation_id: &str,
+    assistant_message_id: &str,
+    terminal_status: ConversationTurnTraceTerminalStatus,
+    unresolved_tool_error: &str,
+    terminal_error: Option<&str>,
+    terminal_tool_approval_status: Option<AgentApprovalStatus>,
+) -> Result<TerminalConversationTraceProjection, String> {
     if !terminal_status.is_terminal() {
         return Err("terminal conversation projection requires a terminal status".to_string());
     }
@@ -1742,9 +1795,10 @@ pub(crate) fn terminal_conversation_trace_from_snapshot_with_tool_approval(
             ok: false,
             result: Some(json!({
                 "resultAvailable": false,
+                "status": terminal_status.as_str(),
                 "terminalStatus": terminal_status,
             })),
-            error: Some(reason.to_string()),
+            error: Some(unresolved_tool_error.to_string()),
         };
         record_model_tool_exchange_with_projection(
             &mut recorder,
@@ -1767,7 +1821,7 @@ pub(crate) fn terminal_conversation_trace_from_snapshot_with_tool_approval(
         conversation_id,
         assistant_message_id,
         terminal_status,
-        Some(reason),
+        terminal_error,
     );
     trace.validate_complete_model_context(&model_context_items)?;
     Ok(TerminalConversationTraceProjection {
@@ -1809,14 +1863,13 @@ pub fn cancelled_conversation_trace_without_items(
     run_id: &str,
     conversation_id: &str,
     assistant_message_id: &str,
-    reason: &str,
 ) -> ConversationTurnTrace {
     terminal_trace_without_items(
         run_id,
         conversation_id,
         assistant_message_id,
         ConversationTurnTraceTerminalStatus::Cancelled,
-        Some(reason),
+        None,
     )
 }
 

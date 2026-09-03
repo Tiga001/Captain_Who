@@ -2878,6 +2878,7 @@ impl AgentRuntime {
                             run_id: run_id.clone(),
                             action: Box::new(action.clone()),
                             checkpoint: Box::new(checkpoint),
+                            segment_usage: usage.clone(),
                         });
                         event_stream.emit(state_event(
                             &run_id,

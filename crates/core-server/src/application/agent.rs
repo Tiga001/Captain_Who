@@ -67,11 +67,13 @@ use mycopilot_core::storage::models::{
 use mycopilot_core::storage::pending_action_repository::PendingActionStoreOutcome;
 use mycopilot_core::storage::service::{
     AgentPendingActionSettlementInspection, AgentRunGuidanceStoreOutcome,
-    AgentRunGuidanceTransitionOutcome, McpActionTerminalizationRequest,
+    AgentRunGuidanceTransitionOutcome, AgentWaitingForApprovalPersistenceOutcome,
+    AgentWaitingSegmentUsagePersistenceOutcome, McpActionTerminalizationRequest,
     McpAutoActionJournalTerminalOutcome, McpStartupActionTerminalOutcome, StorageService,
 };
 use mycopilot_core::{
     cancelled_conversation_trace_from_checkpoint, cancelled_conversation_trace_from_snapshot,
+    cancelled_conversation_trace_from_snapshot_with_terminal_error,
     cancelled_conversation_trace_without_items, completed_conversation_trace_without_items,
     conversation_context_configuration_revision,
     conversation_trace_snapshot_from_checkpoint_and_continuation_with_projection,
@@ -107,7 +109,7 @@ use mycopilot_core::{
     ConversationTurnTrace, ConversationTurnTraceItem, ConversationTurnTraceTerminalStatus,
     McpApprovedToolInvocation, McpToolCatalogContext, McpToolInvocationEventUpdate, McpToolInvoker,
     McpToolRuntime, ModelCapabilities, ProviderContinuationVault, ProviderProtocolDialect,
-    ProviderProtocolKey,
+    ProviderProtocolKey, TerminalConversationTraceProjection,
 };
 #[cfg(test)]
 use mycopilot_core::{
@@ -153,6 +155,7 @@ use command_sessions::{
 use completion::*;
 use pending_action_store::*;
 use persisted_resume_input::*;
+pub(crate) use run_lifecycle::AgentRunCancellationOutcome;
 use run_lifecycle::{DeletionLifecycleState, FileEffectTracker};
 use turn_executor::*;
 pub(crate) use turn_executor::{AgentTurnStart, TrustedAgentWakeTurnStart};

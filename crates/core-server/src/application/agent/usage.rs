@@ -282,6 +282,40 @@ impl AgentService {
         event
     }
 
+    /// Accounts for the Runtime segment which opened a manual approval boundary before that
+    /// action becomes externally actionable.
+    ///
+    /// An approval continuation reuses the logical `run_id` and may finish before the retiring
+    /// Runtime worker persists its Waiting projection. Staging this segment first makes the shared
+    /// logical-run accumulator and its durable row authoritative for both approval and interrupt
+    /// races; the later Waiting projection therefore persists with `usage = None`.
+    pub(super) fn stage_waiting_segment_usage(
+        &self,
+        run_id: &str,
+        usage: Option<AgentUsage>,
+    ) -> Result<AgentWaitingSegmentUsagePersistenceOutcome, String> {
+        let Some(record) =
+            self.prepare_run_usage_record(run_id, AgentRunStatus::WaitingForApproval, usage, None)
+        else {
+            return Ok(AgentWaitingSegmentUsagePersistenceOutcome::Persisted);
+        };
+        match self
+            .storage
+            .persist_waiting_segment_usage_if_run_in_progress(&record)?
+        {
+            AgentWaitingSegmentUsagePersistenceOutcome::Persisted => {
+                Ok(AgentWaitingSegmentUsagePersistenceOutcome::Persisted)
+            }
+            AgentWaitingSegmentUsagePersistenceOutcome::TurnTerminal => {
+                // A shutdown/cancellation transaction won before this late approval-boundary
+                // snapshot. Its durable terminal Usage is authoritative; retaining this stale
+                // process-local accumulator could only let a retiring segment project it again.
+                self.discard_usage_context(run_id);
+                Ok(AgentWaitingSegmentUsagePersistenceOutcome::TurnTerminal)
+            }
+        }
+    }
+
     pub(super) fn persist_run_usage(
         &self,
         run_id: &str,
@@ -316,9 +350,7 @@ impl AgentService {
                 .provider_usage_semantics
                 .merge_usage(&mut state.usage, usage);
             state.status = status;
-            if let Some(error) = error {
-                state.error = Some(error);
-            }
+            state.error = error;
 
             let usage = state.usage.clone();
             let billable_request_count = usage

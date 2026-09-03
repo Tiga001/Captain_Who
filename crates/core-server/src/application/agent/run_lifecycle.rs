@@ -5,6 +5,40 @@ const FILE_EFFECT_DRAIN_TIMEOUT: Duration = Duration::from_millis(300);
 #[cfg(not(test))]
 const FILE_EFFECT_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 
+#[cfg(test)]
+type BeforeWaitingPersistenceHook = Arc<dyn Fn() + Send + Sync>;
+
+#[cfg(test)]
+static BEFORE_WAITING_PERSISTENCE_HOOKS: Mutex<Vec<(String, BeforeWaitingPersistenceHook)>> =
+    Mutex::new(Vec::new());
+
+#[cfg(test)]
+pub(super) fn install_before_waiting_persistence_hook(
+    run_id: &str,
+    hook: BeforeWaitingPersistenceHook,
+) {
+    BEFORE_WAITING_PERSISTENCE_HOOKS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .push((run_id.to_string(), hook));
+}
+
+#[cfg(test)]
+pub(super) fn run_before_waiting_persistence_hook(run_id: &str) {
+    let hook = {
+        let mut hooks = BEFORE_WAITING_PERSISTENCE_HOOKS
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        hooks
+            .iter()
+            .position(|(candidate, _)| candidate == run_id)
+            .map(|index| hooks.swap_remove(index).1)
+    };
+    if let Some(hook) = hook {
+        hook();
+    }
+}
+
 #[derive(Debug, Default)]
 pub(super) struct FileEffectTracker {
     state: Mutex<FileEffectState>,
@@ -34,6 +68,41 @@ struct AgentTreeWakeCancellationProgress {
     affected: bool,
     lost_ownership: bool,
     errors: Vec<String>,
+}
+
+/// Process-local result of cancelling one exact Agent Run.
+///
+/// A child interrupt is confirmed only when either the live Runtime owner received its token or
+/// the Turn was atomically terminalized without a live owner. Session/process cleanup remains
+/// observable by the root user-stop response, but cannot by itself prove the Turn has stopped.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AgentRunCancellationOutcome {
+    #[default]
+    NoEffect,
+    ResourcesOnly,
+    TurnTerminationConfirmed,
+}
+
+impl AgentRunCancellationOutcome {
+    pub(crate) fn turn_termination_confirmed(self) -> bool {
+        self == Self::TurnTerminationConfirmed
+    }
+
+    pub(crate) fn any_effect(self) -> bool {
+        self != Self::NoEffect
+    }
+
+    pub(super) fn record_turn_termination(&mut self, confirmed: bool) {
+        if confirmed {
+            *self = Self::TurnTerminationConfirmed;
+        }
+    }
+
+    pub(super) fn record_resource_cleanup(&mut self, affected: bool) {
+        if affected && *self == Self::NoEffect {
+            *self = Self::ResourcesOnly;
+        }
+    }
 }
 
 impl DeletionLifecycleState {
@@ -349,20 +418,14 @@ impl AgentService {
                         // A failed fence cannot truthfully be reported as a successful tree stop.
                         // Still interrupt process-local root work as an immediate best effort; the
                         // durable error is returned to the caller so it can surface/retry safely.
-                        self.cancel_run_internal(run_id);
-                        self.command_sessions
-                            .interrupt_origin_run(conversation_id, run_id);
+                        self.cancel_exact_run_execution(run_id, Some(conversation_id));
                         return Err(error);
                     }
                 }
             }
             None => None,
         };
-        let cancelled = self.cancel_run_internal(run_id);
-        let terminated_sessions = conversation_id.as_deref().map_or(0, |conversation_id| {
-            self.command_sessions
-                .interrupt_origin_run(conversation_id, run_id)
-        });
+        let cancellation = self.cancel_exact_run_execution(run_id, conversation_id.as_deref());
         let cancelled_agent_tree = if let Some(tree_stop) = tree_stop {
             let mut first = self.cancel_agent_tree_wake_batch(tree_stop.cancellation);
             // Repeat once after delivering runtime cancellation to accelerate convergence and to
@@ -389,7 +452,7 @@ impl AgentService {
         } else {
             false
         };
-        Ok(cancelled || terminated_sessions > 0 || cancelled_agent_tree)
+        Ok(cancellation.any_effect() || cancelled_agent_tree)
     }
 
     /// Propagates an explicit user stop from a human-driven root Turn to every currently queued
@@ -496,7 +559,7 @@ impl AgentService {
     ) -> Result<AgentTreeWakeCancellationProgress, AgentServiceError> {
         for attempt in 0..2 {
             let runtime_interrupt = self.interrupt_agent_wake_run(&wake.run_id);
-            if matches!(&runtime_interrupt, Ok(true)) {
+            if matches!(&runtime_interrupt, Ok(outcome) if outcome.any_effect()) {
                 return Ok(AgentTreeWakeCancellationProgress {
                     affected: true,
                     lost_ownership: false,
@@ -602,9 +665,29 @@ impl AgentService {
         unreachable!("tree-stop cancellation retry loop always returns")
     }
 
-    pub(super) fn cancel_run_internal(&self, run_id: &str) -> bool {
+    /// Cancels one exact Agent Run, including an adopted command Session only when the caller has
+    /// already resolved the Run's Conversation at an authorized explicit-stop boundary.
+    ///
+    /// Root user-stop and trusted child-Wake interruption share this primitive. Authorization,
+    /// durable tree fencing, pending-approval settlement, and Wake bookkeeping remain with their
+    /// respective callers.
+    pub(super) fn cancel_exact_run_execution(
+        &self,
+        run_id: &str,
+        conversation_id: Option<&str>,
+    ) -> AgentRunCancellationOutcome {
+        let mut outcome = self.cancel_run_internal(run_id);
+        let interrupted_sessions = conversation_id.map_or(0, |conversation_id| {
+            self.command_sessions
+                .interrupt_origin_run(conversation_id, run_id)
+        });
+        outcome.record_resource_cleanup(interrupted_sessions > 0);
+        outcome
+    }
+
+    pub(super) fn cancel_run_internal(&self, run_id: &str) -> AgentRunCancellationOutcome {
         self.retire_builtin_capability_run(run_id);
-        let cancelled_run = {
+        let runtime_token_signalled = {
             let cancellations = self
                 .cancellations
                 .lock()
@@ -622,7 +705,10 @@ impl AgentService {
         // Sessions alive.
         let cancelled_sessions = self.command_sessions.cancel_pre_handoff_for_run(run_id);
         let cancelled_processes = self.process_runs.cancel_run(run_id);
-        cancelled_run || cancelled_sessions > 0 || cancelled_processes > 0
+        let mut outcome = AgentRunCancellationOutcome::NoEffect;
+        outcome.record_resource_cleanup(cancelled_sessions > 0 || cancelled_processes > 0);
+        outcome.record_turn_termination(runtime_token_signalled);
+        outcome
     }
 
     fn retire_builtin_capability_run(&self, run_id: &str) {
@@ -1187,6 +1273,40 @@ impl AgentService {
         }
     }
 
+    fn cancelled_terminal_projection_from_latest_snapshot(
+        &self,
+        run_id: &str,
+        conversation_id: &str,
+        assistant_message_id: &str,
+        unresolved_tool_error: &str,
+        terminal_error: Option<&str>,
+    ) -> Result<TerminalConversationTraceProjection, String> {
+        let snapshot = self
+            .trace_snapshots
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(run_id)
+            .cloned()
+            .unwrap_or_default();
+        match terminal_error {
+            Some(terminal_error) => cancelled_conversation_trace_from_snapshot_with_terminal_error(
+                snapshot,
+                run_id,
+                conversation_id,
+                assistant_message_id,
+                unresolved_tool_error,
+                terminal_error,
+            ),
+            None => cancelled_conversation_trace_from_snapshot(
+                snapshot,
+                run_id,
+                conversation_id,
+                assistant_message_id,
+                unresolved_tool_error,
+            ),
+        }
+    }
+
     pub(super) fn persist_forced_cancelled_runs(&self, run_ids: &[String]) {
         const REASON: &str = "Core shutdown timed out while cancelling the active run.";
         let contexts = {
@@ -1203,19 +1323,14 @@ impl AgentService {
                 })
                 .collect::<Vec<_>>()
         };
-        let snapshots = self
-            .trace_snapshots
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .clone();
         let completed_at = now_ms();
         for context in contexts {
-            let terminal = match cancelled_conversation_trace_from_snapshot(
-                snapshots.get(&context.run_id).cloned().unwrap_or_default(),
+            let terminal = match self.cancelled_terminal_projection_from_latest_snapshot(
                 &context.run_id,
                 &context.conversation_id,
                 &context.assistant_message_id,
                 REASON,
+                Some(REASON),
             ) {
                 Ok(terminal) => terminal,
                 Err(error) => {
@@ -1367,41 +1482,74 @@ impl AgentService {
             output.status,
             AgentRunStatus::Completed | AgentRunStatus::Failed | AgentRunStatus::Cancelled
         ) {
-            let trace =
-                output
-                    .conversation_turn_trace
-                    .clone()
-                    .unwrap_or_else(|| match output.status {
-                        AgentRunStatus::Completed => completed_conversation_trace_without_items(
+            // Runtime cancellation may carry a terminal Trace produced from its private recorder,
+            // but AgentChatOutput does not carry the paired model-context projection. When the
+            // caller has not already supplied that pair, close the latest published Host snapshot
+            // and commit its Trace and model context together. Mixing the Runtime terminal Trace
+            // with the older durable context can leave an unresolved ToolCall and strand the Turn
+            // InProgress. Bounded root shutdown cancellation uses the same projection.
+            // Provider finish reasons (for example `tool_calls`) describe the previous model
+            // response. They are not cancellation diagnostics and must never become a visible
+            // terminal error or the error text of a synthetically settled ToolResult.
+            const CANCELLATION_TOOL_RESULT_ERROR: &str = "Agent run was cancelled.";
+            let cancelled_projection =
+                if output.status == AgentRunStatus::Cancelled && model_context_items.is_none() {
+                    Some(self.cancelled_terminal_projection_from_latest_snapshot(
+                        &output.run_id,
+                        conversation_id,
+                        assistant_message_id,
+                        CANCELLATION_TOOL_RESULT_ERROR,
+                        None,
+                    )?)
+                } else {
+                    None
+                };
+            let trace = cancelled_projection
+                .as_ref()
+                .map(|terminal| terminal.trace.clone())
+                .or_else(|| output.conversation_turn_trace.clone())
+                .or_else(|| {
+                    (output.status == AgentRunStatus::Cancelled).then(|| {
+                        cancelled_conversation_trace_without_items(
                             &output.run_id,
                             conversation_id,
                             assistant_message_id,
-                        ),
-                        AgentRunStatus::Cancelled => cancelled_conversation_trace_without_items(
-                            &output.run_id,
-                            conversation_id,
-                            assistant_message_id,
-                            output
-                                .finish_reason
-                                .as_deref()
-                                .unwrap_or("Agent run was cancelled."),
-                        ),
-                        AgentRunStatus::Failed => failed_conversation_trace_without_items(
-                            &output.run_id,
-                            conversation_id,
-                            assistant_message_id,
-                            output
-                                .finish_reason
-                                .as_deref()
-                                .unwrap_or("Agent run failed."),
-                        ),
-                        _ => unreachable!(),
-                    });
+                        )
+                    })
+                })
+                .unwrap_or_else(|| match output.status {
+                    AgentRunStatus::Completed => completed_conversation_trace_without_items(
+                        &output.run_id,
+                        conversation_id,
+                        assistant_message_id,
+                    ),
+                    AgentRunStatus::Cancelled => unreachable!(),
+                    AgentRunStatus::Failed => failed_conversation_trace_without_items(
+                        &output.run_id,
+                        conversation_id,
+                        assistant_message_id,
+                        output
+                            .finish_reason
+                            .as_deref()
+                            .unwrap_or("Agent run failed."),
+                    ),
+                    _ => unreachable!(),
+                });
+            let model_context_items = model_context_items.or_else(|| {
+                cancelled_projection
+                    .as_ref()
+                    .map(|terminal| terminal.model_context_items.as_slice())
+            });
+            let usage_error = match output.status {
+                AgentRunStatus::Failed => trace.terminal_error.clone(),
+                AgentRunStatus::Completed | AgentRunStatus::Cancelled => None,
+                _ => unreachable!(),
+            };
             let usage_record = self.prepare_run_usage_record(
                 &output.run_id,
                 output.status,
                 output.usage.clone(),
-                output.finish_reason.clone(),
+                usage_error,
             );
             let cumulative_usage = self.preview_cumulative_run_usage(&output.run_id, None);
             self.finalize_turn_with_human_root_notification(
@@ -1428,12 +1576,46 @@ impl AgentService {
             self.retire_builtin_capability_run(&output.run_id);
             return Ok(());
         }
-        self.persist_run_usage(
-            &output.run_id,
-            output.status,
-            output.usage.clone(),
-            output.finish_reason.clone(),
-        )?;
+        if output.status == AgentRunStatus::WaitingForApproval {
+            let [pending_action] = output.proposed_actions.as_slice() else {
+                return Err(
+                    "WaitingForApproval output must identify exactly one pending action"
+                        .to_string(),
+                );
+            };
+            let pending_action_storage_id =
+                pending_action_storage_id(&output.run_id, &action_id_for_action(pending_action));
+            // ApprovalRequired stages this segment's Usage before publishing the pending action.
+            // Reuse that cumulative state without adding the same provider response twice.
+            let usage_record =
+                self.prepare_run_usage_record(&output.run_id, output.status, None, None);
+            let cumulative_usage = self.preview_cumulative_run_usage(&output.run_id, None);
+            let persisted = self
+                .storage
+                .persist_waiting_for_approval_if_run_in_progress(
+                    conversation_id,
+                    assistant_message_id,
+                    &output.run_id,
+                    &pending_action_storage_id,
+                    &output.content,
+                    status_for_run(output.status),
+                    completed_at,
+                    usage_record.as_ref(),
+                )?;
+            replace_output_usage(output, cumulative_usage);
+            match persisted {
+                AgentWaitingForApprovalPersistenceOutcome::Persisted
+                | AgentWaitingForApprovalPersistenceOutcome::PendingActionAdvanced => {}
+                AgentWaitingForApprovalPersistenceOutcome::TurnTerminal => {
+                    // A cancellation terminalized the exact Turn while this Runtime segment was
+                    // retiring. Its durable state is authoritative; discard the stale
+                    // process-local Usage/Trace snapshot instead of recreating WaitingForApproval.
+                    self.discard_usage_context(&output.run_id);
+                }
+            }
+            return Ok(());
+        }
+        self.persist_run_usage(&output.run_id, output.status, output.usage.clone(), None)?;
         let cumulative_usage = self.preview_cumulative_run_usage(&output.run_id, None);
         replace_output_usage(output, cumulative_usage);
         self.storage.update_chat_message_status_and_content(

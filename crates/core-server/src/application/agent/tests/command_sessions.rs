@@ -2624,7 +2624,10 @@ fn trusted_child_interrupt_terminates_its_handed_off_command_session() {
     let (snapshot, _) = fixture.start(command, None);
     fixture.adopt(&snapshot, command);
 
-    assert!(service.interrupt_agent_wake_run(&fixture.run_id).unwrap());
+    assert!(service
+        .interrupt_agent_wake_run(&fixture.run_id)
+        .unwrap()
+        .any_effect());
     let terminal = wait_for_terminal_record(
         &fixture.storage,
         &fixture.conversation_id,

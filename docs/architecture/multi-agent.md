@@ -155,7 +155,7 @@ Host 给每个 Turn 冻结当前项目已关联的脱敏模板/模型目录：�
 
 | 参数                  | 默认值 | 代码真源                                  |
 | --------------------- | -----: | ----------------------------------------- |
-| 进程级 Turn 并发      |      4 | `DEFAULT_AGENT_GLOBAL_CONCURRENCY`        |
+| 进程级 Turn 并发      |     50 | `DEFAULT_AGENT_GLOBAL_CONCURRENCY`        |
 | Wake lease            |  60 秒 | Graph repository `WAKE_LEASE_DURATION_MS` |
 | lease 续租间隔        |  20 秒 | `DEFAULT_WAKE_LEASE_RENEW_INTERVAL`       |
 | durable fallback scan |   1 秒 | `DEFAULT_DISPATCH_IDLE_POLL_INTERVAL`     |

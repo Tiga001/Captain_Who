@@ -16,6 +16,7 @@ mod reconciliation;
 mod settings;
 mod trace_reconciliation;
 mod turn_rewrites;
+mod waiting_persistence;
 
 static TEST_COUNTER: AtomicU64 = AtomicU64::new(1);
 

@@ -85,6 +85,9 @@ pub use managed_artifacts::{
     AuthorizedManagedArtifactContent, ManagedArtifactAuthority, PublishedManagedArtifact,
     MAX_MANAGED_DOCUMENT_ARTIFACT_BYTES,
 };
+pub use messages::{
+    AgentWaitingForApprovalPersistenceOutcome, AgentWaitingSegmentUsagePersistenceOutcome,
+};
 pub(crate) use pending_actions::manual_file_effect_has_authoritative_settlement;
 pub use pending_actions::{
     AgentPendingActionJsonCommitOutcome, AgentPendingActionResultCommitOutcome,

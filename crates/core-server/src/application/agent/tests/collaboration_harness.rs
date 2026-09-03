@@ -1,4 +1,8 @@
 use super::*;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::Engine;
+use mycopilot_core::{AgentCommandPermission, AgentCommandSafetyPolicy};
+use sha2::{Digest, Sha256};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -7,6 +11,25 @@ use tokio::net::{TcpListener, TcpStream};
 
 const ROOT_CONVERSATION_ID: &str = "conversation-collaboration-harness";
 const PROJECT_ID: &str = "project-collaboration-harness";
+
+fn first_runtime_tool_call_id(run_id: &str, provider_call_id: &str) -> String {
+    const HASH_DOMAIN: &[u8] = b"mycopilot:model-tool-call-id:v1";
+    const RESPONSE_DOMAIN: &[u8] = b"model-response";
+
+    fn hash_field(hasher: &mut Sha256, value: &[u8]) {
+        hasher.update(u64::try_from(value.len()).unwrap_or(u64::MAX).to_be_bytes());
+        hasher.update(value);
+    }
+
+    let mut hasher = Sha256::new();
+    hash_field(&mut hasher, HASH_DOMAIN);
+    hash_field(&mut hasher, RESPONSE_DOMAIN);
+    hash_field(&mut hasher, run_id.as_bytes());
+    hash_field(&mut hasher, &0_u64.to_be_bytes());
+    hash_field(&mut hasher, &0_u64.to_be_bytes());
+    hash_field(&mut hasher, provider_call_id.as_bytes());
+    format!("tc1_{}", URL_SAFE_NO_PAD.encode(hasher.finalize()))
+}
 
 async fn read_provider_request(stream: &mut TcpStream) -> Value {
     let mut request = Vec::new();
@@ -319,7 +342,7 @@ async fn wait_for_terminal_wake(
     storage: &StorageService,
     wake_id: &str,
 ) -> mycopilot_core::AgentWakeRequestRecord {
-    tokio::time::timeout(Duration::from_secs(10), async {
+    let terminal = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             let wake = storage
                 .get_agent_wake(wake_id)
@@ -338,8 +361,31 @@ async fn wait_for_terminal_wake(
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
     })
-    .await
-    .expect("recovered durable Wake did not reach a terminal state")
+    .await;
+    match terminal {
+        Ok(wake) => wake,
+        Err(_) => {
+            let wake = storage
+                .get_agent_wake(wake_id)
+                .unwrap()
+                .expect("the timed-out Wake must remain queryable");
+            let trace = wake
+                .assistant_message_id
+                .as_deref()
+                .and_then(|message_id| storage.get_conversation_turn_trace(message_id).unwrap());
+            let sessions = trace
+                .as_ref()
+                .map(|trace| {
+                    storage
+                        .list_agent_command_sessions(&trace.conversation_id, 16)
+                        .unwrap()
+                })
+                .unwrap_or_default();
+            panic!(
+                "recovered durable Wake did not reach a terminal state: wake={wake:?}, trace={trace:?}, sessions={sessions:?}"
+            );
+        }
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1159,4 +1205,866 @@ async fn user_root_run_cancellation_stops_running_and_queued_descendants() {
         .is_some());
     let _ = stop_sender.send(());
     model_server.await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn interrupt_agent_stops_a_child_waiting_on_a_handed_off_command_session() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let requests = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let server_requests = Arc::clone(&requests);
+    let interrupt_gate = Arc::new(tokio::sync::Notify::new());
+    let server_interrupt_gate = Arc::clone(&interrupt_gate);
+    let (session_sender, session_receiver) = tokio::sync::oneshot::channel::<String>();
+    let session_sender = Arc::new(Mutex::new(Some(session_sender)));
+    let server_session_sender = Arc::clone(&session_sender);
+    let (stop_sender, mut stop_receiver) = tokio::sync::oneshot::channel::<()>();
+    let model_server = tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                _ = &mut stop_receiver => break,
+                accepted = listener.accept() => {
+                    let (mut stream, _) = accepted.unwrap();
+                    let requests = Arc::clone(&server_requests);
+                    let interrupt_gate = Arc::clone(&server_interrupt_gate);
+                    let session_sender = Arc::clone(&server_session_sender);
+                    tokio::spawn(async move {
+                        let request = read_provider_request(&mut stream).await;
+                        requests
+                            .lock()
+                            .unwrap_or_else(|error| error.into_inner())
+                            .push(request.clone());
+                        let results = tool_results(&request);
+                        if request_text(&request).contains("## 子 Agent 协作身份") {
+                            if results.is_empty() {
+                                write_tool_call(
+                                    &mut stream,
+                                    "call-child-long-command",
+                                    "run_command",
+                                    json!({
+                                        "command": "sleep 30",
+                                        "reason": "hold a real managed command Session open until interrupted"
+                                    }),
+                                )
+                                .await;
+                                return;
+                            }
+
+                            let running_receipt = results
+                                .iter()
+                                .find(|result| {
+                                    result["status"] == "running"
+                                        && result["continueWith"]["tool"] == "command_session"
+                                })
+                                .expect("child continuation must contain the running command receipt");
+                            let session_id = running_receipt["sessionId"]
+                                .as_str()
+                                .expect("running command receipt must own a Session")
+                                .to_string();
+                            session_sender
+                                .lock()
+                                .unwrap_or_else(|error| error.into_inner())
+                                .take()
+                                .expect("the child Session is reported exactly once")
+                                .send(session_id.clone())
+                                .expect("the test must still be waiting for the child Session");
+                            write_tool_call(
+                                &mut stream,
+                                "call-child-command-wait",
+                                "command_session",
+                                json!({ "sessionId": session_id, "action": "wait" }),
+                            )
+                            .await;
+                            return;
+                        }
+
+                        match results.len() {
+                            0 => {
+                                write_tool_call(
+                                    &mut stream,
+                                    "call-spawn-command-child",
+                                    "spawn_agent",
+                                    json!({
+                                        "task_name": "command_wait_child",
+                                        "message": "Start the requested long command, then wait for its Session result.",
+                                        "fork_turns": "none"
+                                    }),
+                                )
+                                .await;
+                            }
+                            1 => {
+                                let child_agent_id = results[0]["childAgentId"]
+                                    .as_str()
+                                    .expect("spawn result must contain the child Agent identity")
+                                    .to_string();
+                                interrupt_gate.notified().await;
+                                write_tool_call(
+                                    &mut stream,
+                                    "call-interrupt-command-child",
+                                    "interrupt_agent",
+                                    json!({ "target": child_agent_id }),
+                                )
+                                .await;
+                            }
+                            2 => {
+                                assert_eq!(results[1]["status"], "interrupt_requested");
+                                write_text(&mut stream, "The delegated command child was interrupted.")
+                                    .await;
+                            }
+                            count => panic!("unexpected root collaboration result count: {count}"),
+                        }
+                    });
+                }
+            }
+        }
+    });
+
+    let fixture = tempdir().unwrap();
+    let database_path = fixture
+        .path()
+        .join("collaboration-command-interrupt.sqlite");
+    let workspace = fixture.path().join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let storage = Arc::new(StorageService::open(&database_path).unwrap());
+    let project_id = "project-collaboration-command-interrupt";
+    let root_conversation_id = "conversation-collaboration-command-interrupt";
+    storage
+        .save_project(ProjectRecord {
+            id: project_id.to_string(),
+            name: "Collaboration command interrupt".to_string(),
+            path: Some(workspace.to_string_lossy().into_owned()),
+            created_at: 1,
+            pinned_at: None,
+        })
+        .unwrap();
+    let mut settings = test_model_settings();
+    settings.api_url = format!("http://{address}/v1/chat/completions");
+    storage.save_model_settings(settings).unwrap();
+
+    let mut service = AgentService::try_new_deferred_startup_reconciliation_with_agent_limit(
+        Arc::clone(&storage),
+        None,
+        2,
+    )
+    .unwrap();
+    service.command_sessions = AgentCommandSessionRegistry::with_manager(
+        Arc::clone(&storage),
+        CommandSessionManager::default(),
+        Duration::from_millis(20),
+    );
+    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let turn = service
+        .start_conversation_turn(
+            AgentConversationTurnInput {
+                conversation_id: Some(root_conversation_id.to_string()),
+                project_id: Some(project_id.to_string()),
+                model_id: "model-1".to_string(),
+                context_window_indicator_enabled: true,
+                content: "Delegate a command lifecycle check, then interrupt the child."
+                    .to_string(),
+                attachments: Vec::new(),
+                skills: Vec::new(),
+                title: Some("Command interruption root".to_string()),
+                user_message_id: Some("user-collaboration-command-interrupt".to_string()),
+                assistant_message_id: Some("assistant-collaboration-command-interrupt".to_string()),
+                max_tokens: None,
+                temperature: None,
+                prompt_preferences: None,
+                permissions: AgentPermissions {
+                    write: AgentWritePermission::WorkspaceOnly,
+                    command: AgentCommandPermission::AutoApprove,
+                    command_safety: AgentCommandSafetyPolicy::FullAccess,
+                    ..AgentPermissions::default()
+                },
+            },
+            notifications,
+        )
+        .unwrap();
+
+    let session_id = tokio::time::timeout(Duration::from_secs(10), session_receiver)
+        .await
+        .expect("child never handed off its long-running command")
+        .expect("child provider dropped the Session identity");
+    let child_run_id = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let notification = receiver.recv().await.expect("Agent event channel closed");
+            if notification["params"]["type"] == "tool_call"
+                && notification["params"]["call"]["tool"] == "command_session"
+            {
+                break notification["params"]["runId"]
+                    .as_str()
+                    .expect("child ToolCall carries its Run identity")
+                    .to_string();
+            }
+        }
+    })
+    .await
+    .expect("child never entered command_session wait");
+    let running_session: (String, String) = rusqlite::Connection::open(&database_path)
+        .unwrap()
+        .query_row(
+            "SELECT origin_run_id, status
+             FROM agent_command_sessions WHERE session_id = ?1",
+            [&session_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(running_session.0, child_run_id);
+    assert_eq!(running_session.1, "running");
+    let child_cancellation = service
+        .cancellations
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .get(&child_run_id)
+        .cloned()
+        .expect("the live child Runtime must retain its registered cancellation token");
+
+    interrupt_gate.notify_one();
+    let root_events = collect_root_until_done(&mut receiver, &turn.run_id).await;
+    let root_done = root_events
+        .iter()
+        .find(|event| event["params"]["type"] == "done" && event["params"]["runId"] == turn.run_id)
+        .expect("root Agent must complete after dispatching interrupt_agent");
+    assert_eq!(root_done["params"]["status"], "completed");
+    assert!(
+        child_cancellation.is_cancelled(),
+        "interrupt_agent must signal the exact live child Runtime token"
+    );
+
+    let root = storage
+        .get_agent_node_by_conversation(root_conversation_id)
+        .unwrap()
+        .expect("root Agent must exist");
+    let child = storage
+        .list_agent_tree(&root.agent_id)
+        .unwrap()
+        .into_iter()
+        .find(|agent| agent.task_name == "command_wait_child")
+        .expect("spawned command child must exist");
+    let child_wake_id: String = rusqlite::Connection::open(&database_path)
+        .unwrap()
+        .query_row(
+            "SELECT wake_id FROM agent_wake_requests
+             WHERE agent_id = ?1 AND run_id = ?2",
+            [&child.agent_id, &child_run_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let terminal_wake = wait_for_terminal_wake(&storage, &child_wake_id).await;
+    assert_eq!(
+        terminal_wake.status,
+        mycopilot_core::AgentWakeStatus::Interrupted,
+        "child Wake did not settle as interrupted: {:?}",
+        terminal_wake.terminal_error
+    );
+
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let session = storage
+                .load_agent_command_session(&child.conversation_id, &session_id)
+                .unwrap()
+                .expect("the handed-off Session remains durably inspectable");
+            let trace = storage
+                .get_conversation_turn_trace(
+                    terminal_wake
+                        .assistant_message_id
+                        .as_deref()
+                        .expect("admitted Wake owns an assistant message"),
+                )
+                .unwrap()
+                .expect("child Turn keeps its durable Trace");
+            if session.snapshot.status == AgentCommandSessionStatus::Interrupted
+                && trace.terminal_status == ConversationTurnTraceTerminalStatus::Cancelled
+                && service.turn_concurrency_gate().active() == 0
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("interrupt_agent did not settle Session, Trace, and concurrency ownership");
+
+    assert!(storage
+        .list_in_progress_conversation_turn_traces()
+        .unwrap()
+        .is_empty());
+    let parent_wake_count: i64 = rusqlite::Connection::open(&database_path)
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM agent_wake_requests WHERE agent_id = ?1",
+            [&root.agent_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        parent_wake_count, 0,
+        "child settlement must not wake the root"
+    );
+
+    let request_count_after_settlement = requests
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .len();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        requests
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .len(),
+        request_count_after_settlement,
+        "interrupted child settlement must not start another Provider request"
+    );
+    assert_eq!(request_count_after_settlement, 5);
+
+    assert!(service
+        .shutdown_collaboration_dispatcher()
+        .await
+        .unwrap()
+        .is_some());
+    let _ = stop_sender.send(());
+    model_server.await.unwrap();
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ChildApprovalInterruptWindow {
+    PendingStore,
+    PublicationArbitration,
+    WaitingPublication,
+    WaitingPersistence,
+}
+
+impl ChildApprovalInterruptWindow {
+    fn advances_approval(self) -> bool {
+        matches!(self, Self::WaitingPublication | Self::WaitingPersistence)
+    }
+}
+
+async fn assert_child_approval_handoff_linearizes(window: ChildApprovalInterruptWindow) {
+    const PROVIDER_CALL_ID: &str = "call-child-approval-handoff";
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let requests = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let server_requests = Arc::clone(&requests);
+    let (provider_arrived_sender, provider_arrived_receiver) = tokio::sync::oneshot::channel();
+    let (continuation_arrived_sender, continuation_arrived_receiver) =
+        tokio::sync::oneshot::channel();
+    let provider_release = Arc::new(tokio::sync::Notify::new());
+    let server_provider_release = Arc::clone(&provider_release);
+    let server_window = window;
+    let (stop_sender, mut stop_receiver) = tokio::sync::oneshot::channel::<()>();
+    let model_server = tokio::spawn(async move {
+        let mut provider_arrived_sender = Some(provider_arrived_sender);
+        let mut continuation_arrived_sender = Some(continuation_arrived_sender);
+        let mut request_index = 0_usize;
+        loop {
+            tokio::select! {
+                _ = &mut stop_receiver => break,
+                accepted = listener.accept() => {
+                    let (mut stream, _) = accepted.unwrap();
+                    let request = read_provider_request(&mut stream).await;
+                    assert!(request_text(&request).contains("## 子 Agent 协作身份"));
+                    server_requests
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .push(request.clone());
+                    match request_index {
+                        0 => {
+                            provider_arrived_sender
+                                .take()
+                                .expect("the approval child makes exactly one initial request")
+                                .send(())
+                                .expect("the test must still be waiting for the Provider request");
+                            server_provider_release.notified().await;
+                            let command = if server_window.advances_approval() {
+                                "printf 'approval advanced\\n'"
+                            } else {
+                                "sleep 30"
+                            };
+                            write_tool_call(
+                                &mut stream,
+                                PROVIDER_CALL_ID,
+                                "run_command",
+                                json!({
+                                    "command": command,
+                                    "reason": "hold the Runtime at the manual approval handoff"
+                                }),
+                            )
+                            .await;
+                        }
+                        1 if server_window.advances_approval() => {
+                            assert!(tool_results(&request).iter().any(|result| {
+                                result["status"] == "exited" && result["exitCode"] == 0
+                            }));
+                            continuation_arrived_sender
+                                .take()
+                                .expect("the approved child starts exactly one continuation")
+                                .send(())
+                                .expect("the test must still be waiting for the continuation");
+                            write_text(&mut stream, "Approved child continuation completed.").await;
+                        }
+                        count => panic!("unexpected approval child Provider request {count}"),
+                    }
+                    request_index += 1;
+                }
+            }
+        }
+    });
+
+    let fixture = tempdir().unwrap();
+    let database_path = fixture.path().join("collaboration-approval-handoff.sqlite");
+    let workspace = fixture.path().join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let storage = Arc::new(StorageService::open(&database_path).unwrap());
+    let project_id = "project-collaboration-approval-handoff";
+    let root_conversation_id = "conversation-collaboration-approval-handoff-root";
+    let root_agent_id = "agent-collaboration-approval-handoff-root";
+    storage
+        .save_project(ProjectRecord {
+            id: project_id.to_string(),
+            name: "Collaboration approval handoff".to_string(),
+            path: Some(workspace.to_string_lossy().into_owned()),
+            created_at: 1,
+            pinned_at: None,
+        })
+        .unwrap();
+    let mut settings = test_model_settings();
+    settings.api_url = format!("http://{address}/v1/chat/completions");
+    storage.save_model_settings(settings).unwrap();
+    storage
+        .save_conversation(ChatConversationRecord {
+            id: root_conversation_id.to_string(),
+            project_id: Some(project_id.to_string()),
+            model_id: Some("model-1".to_string()),
+            title: "Approval handoff root".to_string(),
+            messages: Vec::new(),
+            created_at: 1,
+            updated_at: 1,
+            pinned_at: None,
+            archived_at: None,
+            unread_at: None,
+        })
+        .unwrap();
+    storage
+        .ensure_root_agent(&mycopilot_core::EnsureRootAgentInput {
+            agent_id: root_agent_id.to_string(),
+            conversation_id: root_conversation_id.to_string(),
+            creation_request_id: "ensure-collaboration-approval-handoff-root".to_string(),
+            task_name: "Root".to_string(),
+        })
+        .unwrap();
+    seed_root_effective_permissions(
+        &storage,
+        root_agent_id,
+        root_conversation_id,
+        "approval-handoff",
+        AgentPermissions {
+            write: AgentWritePermission::WorkspaceOnly,
+            command: AgentCommandPermission::RequireApproval,
+            command_safety: AgentCommandSafetyPolicy::FullAccess,
+            ..AgentPermissions::default()
+        },
+    );
+    let child =
+        crate::application::agent_collaboration::ChildAgentFactory::new(Arc::clone(&storage))
+            .create_child(&mycopilot_core::CreateChildAgentInput {
+                parent_agent_id: root_agent_id.to_string(),
+                creation_request_id: "spawn-approval-handoff-child".to_string(),
+                task_name: "approval_handoff_child".to_string(),
+                task: "Request the command and wait for explicit approval.".to_string(),
+                template_machine_key: None,
+                explicit_model_id: None,
+                reasoning_effort: None,
+                fork_turns: mycopilot_core::AgentForkTurns::None,
+            })
+            .unwrap();
+
+    let service = AgentService::try_new_deferred_startup_reconciliation_with_agent_limit(
+        Arc::clone(&storage),
+        None,
+        1,
+    )
+    .unwrap();
+    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    service
+        .start_collaboration_dispatcher(notifications.clone())
+        .unwrap();
+
+    tokio::time::timeout(Duration::from_secs(10), provider_arrived_receiver)
+        .await
+        .expect("child Runtime never reached the fake Provider")
+        .expect("the Provider arrival sender was dropped");
+
+    let handoff_wake = storage
+        .get_agent_wake(&child.initial_wake.wake_id)
+        .unwrap()
+        .expect("the admitted child Wake remains durable");
+    let child_run_id = handoff_wake
+        .run_id
+        .clone()
+        .expect("the approval handoff must occur after exact Turn admission");
+    let assistant_message_id = handoff_wake
+        .assistant_message_id
+        .clone()
+        .expect("the admitted child Wake owns an assistant message");
+    let action_id = first_runtime_tool_call_id(&child_run_id, PROVIDER_CALL_ID);
+    let (hook_entered_sender, hook_entered_receiver) = std::sync::mpsc::sync_channel(0);
+    let (hook_release_sender, hook_release_receiver) = std::sync::mpsc::sync_channel(0);
+    let hook_release_receiver = Arc::new(Mutex::new(hook_release_receiver));
+    let hook_receiver = Arc::clone(&hook_release_receiver);
+    let hook = Arc::new(move || {
+        let _ = hook_entered_sender.send(());
+        let _ = hook_receiver
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .recv();
+    });
+    match window {
+        ChildApprovalInterruptWindow::PendingStore => {
+            super::super::turn_executor::install_before_pending_action_store_hook(&action_id, hook);
+        }
+        ChildApprovalInterruptWindow::PublicationArbitration => {
+            super::super::turn_executor::install_before_approval_publication_arbitration_hook(
+                &action_id, hook,
+            );
+        }
+        ChildApprovalInterruptWindow::WaitingPublication => {
+            super::super::turn_executor::install_before_waiting_publication_arbitration_hook(
+                &child_run_id,
+                hook,
+            );
+        }
+        ChildApprovalInterruptWindow::WaitingPersistence => {
+            super::super::run_lifecycle::install_before_waiting_persistence_hook(
+                &child_run_id,
+                hook,
+            );
+        }
+    }
+    provider_release.notify_one();
+    tokio::task::spawn_blocking(move || {
+        hook_entered_receiver.recv_timeout(Duration::from_secs(10))
+    })
+    .await
+    .expect("approval handoff observer task panicked")
+    .expect("child Runtime never reached the selected approval handoff");
+
+    let child_cancellation = service
+        .cancellations
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .get(&child_run_id)
+        .cloned()
+        .expect("the child Runtime token must remain registered during the handoff");
+    let events_before_cancellation =
+        std::iter::from_fn(|| receiver.try_recv().ok()).collect::<Vec<_>>();
+    let pending_was_visible_before_interrupt = service
+        .list_pending_actions()
+        .iter()
+        .any(|pending| pending.run_id == child_run_id && pending.action_id == action_id);
+
+    if window.advances_approval() {
+        assert!(
+            pending_was_visible_before_interrupt,
+            "the selected waiting hook must run after pending publication"
+        );
+        assert!(
+            events_before_cancellation.iter().any(|event| {
+                event["params"]["runId"] == child_run_id
+                    && event["params"]["type"] == "approval_required"
+            }),
+            "the approval must be published before advancing it: {events_before_cancellation:#?}"
+        );
+
+        let storage_id = pending_action_storage_id(&child_run_id, &action_id);
+        let decision = service
+            .decide_root_projected_approval(
+                root_conversation_id,
+                &storage_id,
+                ProjectedApprovalDecision::Approve,
+                None,
+                notifications,
+            )
+            .expect("the root must advance the real child approval");
+        assert!(decision.accepted);
+        tokio::time::timeout(Duration::from_secs(10), continuation_arrived_receiver)
+            .await
+            .expect("approved child continuation never reached the Provider")
+            .expect("approved child continuation sender was dropped");
+        hook_release_sender
+            .send(())
+            .expect("the old waiting segment hook must still await release");
+
+        let terminal_wake = wait_for_terminal_wake(&storage, &child.initial_wake.wake_id).await;
+        assert_eq!(
+            terminal_wake.status,
+            mycopilot_core::AgentWakeStatus::Completed,
+            "the approved continuation must own the final child outcome: {:?}",
+            terminal_wake.terminal_error
+        );
+        wait_for_dispatcher_idle(&database_path).await;
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if service.turn_concurrency_gate().active() == 0
+                    && storage
+                        .list_in_progress_conversation_turn_traces()
+                        .unwrap()
+                        .is_empty()
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("approved continuation did not release Trace and concurrency ownership");
+
+        let trace = storage
+            .get_conversation_turn_trace(&assistant_message_id)
+            .unwrap()
+            .expect("the approved child Turn keeps its durable Trace");
+        trace.validate().unwrap();
+        assert_eq!(
+            trace.terminal_status,
+            ConversationTurnTraceTerminalStatus::Completed
+        );
+        let conversation = storage
+            .load_conversations()
+            .unwrap()
+            .into_iter()
+            .find(|conversation| conversation.id == child.agent.conversation_id)
+            .expect("the approved child conversation remains queryable");
+        let assistant = conversation
+            .messages
+            .iter()
+            .find(|message| message.id == assistant_message_id)
+            .expect("the approved child assistant message remains queryable");
+        assert_eq!(assistant.status.as_deref(), Some("sent"));
+        assert_eq!(assistant.content, "Approved child continuation completed.");
+
+        let durable_pending: (String, Option<String>) = rusqlite::Connection::open(&database_path)
+            .unwrap()
+            .query_row(
+                "SELECT status, target_status FROM agent_pending_actions WHERE action_id = ?1",
+                [&storage_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(durable_pending.0, "completed");
+        assert_eq!(durable_pending.1.as_deref(), Some("completed"));
+        assert!(service.list_pending_actions().is_empty());
+
+        let usage = storage
+            .load_agent_usage_for_owner(
+                &child_run_id,
+                &child.agent.conversation_id,
+                &assistant_message_id,
+            )
+            .unwrap()
+            .expect("the approved child Turn keeps its Usage row");
+        assert_eq!(usage.status.as_deref(), Some("completed"));
+        assert!(usage.completed_at.is_some());
+        assert_eq!(usage.input_tokens, Some(20));
+        assert_eq!(usage.output_tokens, Some(10));
+        assert_eq!(usage.total_tokens, Some(30));
+        assert_eq!(usage.billable_request_count, 2);
+        assert_eq!(service.turn_concurrency_gate().active(), 0);
+        assert!(storage
+            .list_in_progress_conversation_turn_traces()
+            .unwrap()
+            .is_empty());
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let events_after_approval =
+            std::iter::from_fn(|| receiver.try_recv().ok()).collect::<Vec<_>>();
+        assert!(events_after_approval.iter().all(|event| {
+            let params = &event["params"];
+            params["runId"] != child_run_id
+                || !matches!(params["type"].as_str(), Some("state" | "done"))
+                || params["status"] != "waiting_for_approval"
+        }), "advanced approval published a stale WaitingForApproval event: {events_after_approval:#?}");
+        assert_eq!(
+            requests
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .len(),
+            2,
+            "the approved child must make exactly one continuation request"
+        );
+
+        assert!(service
+            .shutdown_collaboration_dispatcher()
+            .await
+            .unwrap()
+            .is_some());
+        let _ = stop_sender.send(());
+        model_server.await.unwrap();
+        return;
+    }
+
+    let interrupt = service.interrupt_agent_wake_run(&child_run_id);
+    let token_was_cancelled = child_cancellation.is_cancelled();
+    hook_release_sender
+        .send(())
+        .expect("the approval handoff hook must still be waiting for release");
+
+    assert_eq!(
+        handoff_wake.status,
+        mycopilot_core::AgentWakeStatus::Running,
+        "the interrupt must land before the Dispatcher observes WaitingForApproval"
+    );
+    assert_eq!(
+        pending_was_visible_before_interrupt,
+        window == ChildApprovalInterruptWindow::PublicationArbitration,
+        "the selected hook must prove its exact side of pending-action publication"
+    );
+    assert!(service.list_pending_actions().is_empty());
+    assert!(
+        interrupt
+            .expect("child interruption must not fail")
+            .turn_termination_confirmed(),
+        "the exact live child Runtime token must confirm the interruption"
+    );
+    assert!(token_was_cancelled);
+
+    let terminal_wake = wait_for_terminal_wake(&storage, &child.initial_wake.wake_id).await;
+    assert_eq!(
+        terminal_wake.status,
+        mycopilot_core::AgentWakeStatus::Interrupted,
+        "the cancelled approval handoff must not strand the child Wake: {:?}",
+        terminal_wake.terminal_error
+    );
+    wait_for_dispatcher_idle(&database_path).await;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if service.turn_concurrency_gate().active() == 0
+                && storage
+                    .list_in_progress_conversation_turn_traces()
+                    .unwrap()
+                    .is_empty()
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("approval cancellation did not release Trace and concurrency ownership");
+
+    let trace = storage
+        .get_conversation_turn_trace(&assistant_message_id)
+        .unwrap()
+        .expect("the interrupted child Turn keeps its durable Trace");
+    trace.validate().unwrap();
+    assert_eq!(
+        trace.terminal_status,
+        ConversationTurnTraceTerminalStatus::Cancelled
+    );
+    assert!(trace.items.iter().any(|item| matches!(
+        item,
+        ConversationTurnTraceItem::ToolResult {
+            call_id,
+            approval_status: AgentApprovalStatus::Rejected,
+            ..
+        } if call_id == &action_id
+    )));
+
+    let conversation = storage
+        .load_conversations()
+        .unwrap()
+        .into_iter()
+        .find(|conversation| conversation.id == child.agent.conversation_id)
+        .expect("the child conversation remains queryable");
+    let assistant = conversation
+        .messages
+        .iter()
+        .find(|message| message.id == assistant_message_id)
+        .expect("the child assistant message remains queryable");
+    assert_eq!(assistant.status.as_deref(), Some("sent"));
+    assert_eq!(assistant.content, "");
+
+    let durable_pending: (String, Option<String>) = rusqlite::Connection::open(&database_path)
+        .unwrap()
+        .query_row(
+            "SELECT status, target_status FROM agent_pending_actions WHERE action_id = ?1",
+            [pending_action_storage_id(&child_run_id, &action_id)],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(durable_pending.0, "cancelled");
+    assert_eq!(durable_pending.1.as_deref(), Some("cancelled"));
+    assert!(service.list_pending_actions().is_empty());
+
+    let usage = storage
+        .load_agent_usage_for_owner(
+            &child_run_id,
+            &child.agent.conversation_id,
+            &assistant_message_id,
+        )
+        .unwrap()
+        .expect("the child Turn keeps its Usage row");
+    assert_eq!(usage.status.as_deref(), Some("cancelled"));
+    assert!(usage.completed_at.is_some());
+    assert_eq!(service.turn_concurrency_gate().active(), 0);
+    assert!(storage
+        .list_in_progress_conversation_turn_traces()
+        .unwrap()
+        .is_empty());
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let events_after_cancellation =
+        std::iter::from_fn(|| receiver.try_recv().ok()).collect::<Vec<_>>();
+    assert!(events_before_cancellation.iter().all(|event| {
+        event["params"]["runId"] != child_run_id
+            || event["params"]["status"] != "waiting_for_approval"
+    }));
+    assert!(events_after_cancellation.iter().all(|event| {
+        let params = &event["params"];
+        params["runId"] != child_run_id
+            || !matches!(params["type"].as_str(), Some("state" | "done"))
+            || params["status"] != "waiting_for_approval"
+    }), "cancelled child published a stale WaitingForApproval event: {events_after_cancellation:#?}");
+    assert!(events_after_cancellation.iter().all(|event| {
+        event["params"]["runId"] != child_run_id || event["params"]["type"] != "approval_required"
+    }));
+    assert_eq!(
+        requests
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .len(),
+        1,
+        "the cancelled approval must not start a Provider continuation"
+    );
+
+    assert!(service
+        .shutdown_collaboration_dispatcher()
+        .await
+        .unwrap()
+        .is_some());
+    let _ = stop_sender.send(());
+    model_server.await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn interrupt_agent_closes_a_child_approval_handoff_before_pending_store() {
+    assert_child_approval_handoff_linearizes(ChildApprovalInterruptWindow::PendingStore).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn interrupt_agent_closes_a_child_approval_handoff_before_publication_arbitration() {
+    assert_child_approval_handoff_linearizes(ChildApprovalInterruptWindow::PublicationArbitration)
+        .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn advanced_child_approval_prevents_the_old_segment_from_rewriting_waiting() {
+    assert_child_approval_handoff_linearizes(ChildApprovalInterruptWindow::WaitingPersistence)
+        .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn advanced_child_approval_retires_obsolete_waiting_notifications() {
+    assert_child_approval_handoff_linearizes(ChildApprovalInterruptWindow::WaitingPublication)
+        .await;
 }
