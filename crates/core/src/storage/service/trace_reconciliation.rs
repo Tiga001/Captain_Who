@@ -23,8 +23,9 @@ impl StorageService {
     /// The caller supplies every run known to be active in the current process. Production calls
     /// this only after taking the database instance lock and reconciling interrupted approvals, so
     /// an empty set means no worker can still publish to these rows. A durable pending approval is
-    /// a resumable checkpoint and is deliberately excluded. Renderer state is used only to retain
-    /// an explicit cancellation; it can never promote an uncommitted trace to `completed`.
+    /// a resumable checkpoint and is deliberately excluded unless its exact Run is covered by a
+    /// durable Agent-tree stop. Renderer state and that stop fact are used only to retain an
+    /// explicit cancellation; neither can promote an uncommitted trace to `completed`.
     pub fn reconcile_orphaned_in_progress_conversation_turn_traces(
         &self,
         active_run_ids: &HashSet<String>,
@@ -77,8 +78,17 @@ impl StorageService {
 
         let mut reconciled = 0;
         for candidate in candidates {
+            let tree_stopped_at = transaction
+                .query_row(
+                    "SELECT stopped_at FROM agent_tree_run_stops WHERE run_id = ?1",
+                    [&candidate.run_id],
+                    |row| row.get::<_, i64>(0),
+                )
+                .optional()
+                .map_err(storage_error)?;
             if active_run_ids.contains(&candidate.run_id)
-                || has_resumable_pending_action(&transaction, &candidate)?
+                || (tree_stopped_at.is_none()
+                    && has_resumable_pending_action(&transaction, &candidate)?)
             {
                 continue;
             }
@@ -103,7 +113,13 @@ impl StorageService {
                 &candidate.run_id,
                 candidate.updated_at.max(candidate.created_at),
                 reconciled_at,
-            );
+            )
+            .or_else(|| {
+                tree_stopped_at.map(|stopped_at| {
+                    let earliest = candidate.updated_at.max(candidate.created_at);
+                    stopped_at.max(earliest).min(reconciled_at.max(earliest))
+                })
+            });
             let was_explicitly_cancelled = cancellation_completed_at.is_some();
             let (terminal_status, message_status, run_status, reason) = if was_explicitly_cancelled
             {

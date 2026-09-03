@@ -277,6 +277,20 @@ pub(crate) enum AgentInterruptDisposition {
     ActiveTurn { wake_id: String, run_id: String },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AgentInterruptRequest {
+    disposition: AgentInterruptDisposition,
+    requires_runtime_dispatch: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TreeStoppedWakeSettlement {
+    Interrupted,
+    AlreadyTerminal,
+    LostOwnership,
+    UnsafeActiveAction { count: u64 },
+}
+
 /// The durable coordination boundary used by the scheduler.
 ///
 /// `claim_next_dispatchable` must select globally by Wake sequence and atomically skip Agents
@@ -284,6 +298,10 @@ pub(crate) enum AgentInterruptDisposition {
 /// acquiring the process permit before this method establishes the fixed order
 /// `global permit -> durable per-Agent execution right`.
 pub(crate) trait AgentDispatcherStore: Send + Sync {
+    fn list_undispatched_interrupts(
+        &self,
+    ) -> Result<Vec<mycopilot_core::UndispatchedAgentInterrupt>, String>;
+
     fn recover_orphaned_wakes(
         &self,
         recovery_token: &str,
@@ -312,13 +330,26 @@ pub(crate) trait AgentDispatcherStore: Send + Sync {
 
     fn settle(&self, settlement: &AgentWakeSettlement, now_ms: i64) -> Result<(), String>;
 
+    fn settle_tree_stopped_wake(
+        &self,
+        wake: &mycopilot_core::ActiveAgentTreeWake,
+        now_ms: i64,
+    ) -> Result<TreeStoppedWakeSettlement, String>;
+
     fn interrupt_descendant(
         &self,
         caller_agent_id: &str,
         target_agent_id: &str,
         request_id: &str,
         now_ms: i64,
-    ) -> Result<AgentInterruptDisposition, String>;
+    ) -> Result<AgentInterruptRequest, String>;
+
+    fn mark_interrupt_dispatched(
+        &self,
+        caller_agent_id: &str,
+        request_id: &str,
+        now_ms: i64,
+    ) -> Result<(), String>;
 }
 
 /// Separates a candidate-level projection/lease race from a database failure. A transient
@@ -356,6 +387,14 @@ impl SqliteAgentDispatcherStore {
 }
 
 impl AgentDispatcherStore for SqliteAgentDispatcherStore {
+    fn list_undispatched_interrupts(
+        &self,
+    ) -> Result<Vec<mycopilot_core::UndispatchedAgentInterrupt>, String> {
+        self.storage
+            .list_undispatched_agent_interrupts()
+            .map_err(|error| error.to_string())
+    }
+
     fn recover_orphaned_wakes(
         &self,
         recovery_token: &str,
@@ -446,19 +485,56 @@ impl AgentDispatcherStore for SqliteAgentDispatcherStore {
         Ok(())
     }
 
+    fn settle_tree_stopped_wake(
+        &self,
+        wake: &mycopilot_core::ActiveAgentTreeWake,
+        now_ms: i64,
+    ) -> Result<TreeStoppedWakeSettlement, String> {
+        match self
+            .storage
+            .settle_tree_stopped_active_wake_at(wake, now_ms)
+            .map_err(|error| error.to_string())?
+        {
+            mycopilot_core::AgentTreeStoppedWakeSettlementOutcome::Interrupted(settlement) => {
+                self.wait_notifications
+                    .notify_caller(&settlement.result_message.recipient_agent_id);
+                Ok(TreeStoppedWakeSettlement::Interrupted)
+            }
+            mycopilot_core::AgentTreeStoppedWakeSettlementOutcome::AlreadyTerminal => {
+                Ok(TreeStoppedWakeSettlement::AlreadyTerminal)
+            }
+            mycopilot_core::AgentTreeStoppedWakeSettlementOutcome::LostOwnership => {
+                Ok(TreeStoppedWakeSettlement::LostOwnership)
+            }
+            mycopilot_core::AgentTreeStoppedWakeSettlementOutcome::UnsafeActiveAction { count } => {
+                Ok(TreeStoppedWakeSettlement::UnsafeActiveAction { count })
+            }
+        }
+    }
+
     fn interrupt_descendant(
         &self,
         caller_agent_id: &str,
         target_agent_id: &str,
         request_id: &str,
         now_ms: i64,
-    ) -> Result<AgentInterruptDisposition, String> {
-        let outcome = self
+    ) -> Result<AgentInterruptRequest, String> {
+        let receipt = self
             .storage
-            .interrupt_agent_execution_at(caller_agent_id, target_agent_id, request_id, now_ms)
+            .interrupt_agent_execution_with_receipt_at(
+                caller_agent_id,
+                target_agent_id,
+                request_id,
+                now_ms,
+            )
             .map_err(|error| error.to_string())?;
         self.wait_notifications.notify_caller(caller_agent_id);
-        Ok(match outcome {
+        let requires_runtime_dispatch = receipt.dispatched_at.is_none()
+            && matches!(
+                &receipt.outcome,
+                InterruptAgentExecutionOutcome::ActiveTurn { .. }
+            );
+        let disposition = match receipt.outcome {
             InterruptAgentExecutionOutcome::NoPendingExecution => {
                 AgentInterruptDisposition::NoPendingExecution
             }
@@ -468,7 +544,23 @@ impl AgentDispatcherStore for SqliteAgentDispatcherStore {
             InterruptAgentExecutionOutcome::ActiveTurn { wake_id, run_id } => {
                 AgentInterruptDisposition::ActiveTurn { wake_id, run_id }
             }
+        };
+        Ok(AgentInterruptRequest {
+            disposition,
+            requires_runtime_dispatch,
         })
+    }
+
+    fn mark_interrupt_dispatched(
+        &self,
+        caller_agent_id: &str,
+        request_id: &str,
+        now_ms: i64,
+    ) -> Result<(), String> {
+        self.storage
+            .mark_agent_interrupt_dispatched_at(caller_agent_id, request_id, now_ms)
+            .map(|_| ())
+            .map_err(|error| error.to_string())
     }
 }
 
@@ -961,7 +1053,7 @@ impl AgentDispatcher {
         target_agent_id: &str,
         request_id: &str,
     ) -> Result<AgentInterruptDisposition, AgentDispatcherError> {
-        let disposition = self
+        let interrupt_request = self
             .shared
             .store
             .interrupt_descendant(
@@ -971,11 +1063,50 @@ impl AgentDispatcher {
                 self.shared.clock.now_ms(),
             )
             .map_err(AgentDispatcherError::Storage)?;
-        if let AgentInterruptDisposition::ActiveTurn { run_id, .. } = &disposition {
-            self.shared
+        let mut disposition = interrupt_request.disposition;
+        if interrupt_request.requires_runtime_dispatch {
+            let AgentInterruptDisposition::ActiveTurn { wake_id, run_id } = &disposition else {
+                return Err(AgentDispatcherError::Storage(
+                    "Only an active-Turn interrupt may require runtime dispatch".to_string(),
+                ));
+            };
+            let interrupt_delivered = self
+                .shared
                 .executor
                 .interrupt(run_id)
                 .map_err(AgentDispatcherError::Manager)?;
+            if !interrupt_delivered {
+                let wake = self
+                    .shared
+                    .store
+                    .get_wake(wake_id)
+                    .map_err(AgentDispatcherError::Storage)?
+                    .ok_or_else(|| {
+                        AgentDispatcherError::Storage(format!(
+                            "Wake {wake_id} disappeared after interrupt missed Turn {run_id}"
+                        ))
+                    })?;
+                if wake.status.is_terminal() {
+                    // The Turn may settle between the durable interrupt lookup and the
+                    // process-local cancellation delivery. In that race there is no remaining
+                    // execution to interrupt, so report the existing no-active-Turn contract.
+                    disposition = AgentInterruptDisposition::NoPendingExecution;
+                } else {
+                    return Err(AgentDispatcherError::Manager(format!(
+                        "interrupt did not reach active Turn {run_id} for Wake {wake_id}; durable Wake status remains {}",
+                        wake.status.as_str()
+                    )));
+                }
+            } else {
+                self.shared
+                    .store
+                    .mark_interrupt_dispatched(
+                        caller_agent_id,
+                        request_id,
+                        self.shared.clock.now_ms(),
+                    )
+                    .map_err(AgentDispatcherError::Storage)?;
+            }
         }
         notify_dispatcher_work_available(&self.shared);
         Ok(disposition)
@@ -1083,6 +1214,7 @@ async fn run_agent_dispatcher(
         // process lease expires; the bounded fallback tick later reaches the deadline and
         // recovers it without requiring another restart or an in-memory notification.
         if !shared.shutdown_requested.load(Ordering::Acquire) {
+            recover_undispatched_interrupts(&shared)?;
             let recovery_token = format!(
                 "agent-recovery:{recovery_generation}:{}",
                 shared.clock.now_ms()
@@ -1170,6 +1302,58 @@ async fn run_agent_dispatcher(
             _ = tokio::time::sleep(shared.config.idle_poll_interval), if !shared.shutdown_requested.load(Ordering::Acquire) => {}
         }
     }
+}
+
+fn recover_undispatched_interrupts(
+    shared: &AgentDispatcherShared,
+) -> Result<(), AgentDispatcherError> {
+    let pending = shared
+        .store
+        .list_undispatched_interrupts()
+        .map_err(AgentDispatcherError::Storage)?;
+    for interrupt in pending {
+        match shared.executor.interrupt(&interrupt.run_id) {
+            Ok(true) => shared
+                .store
+                .mark_interrupt_dispatched(
+                    &interrupt.caller_agent_id,
+                    &interrupt.request_id,
+                    shared.clock.now_ms(),
+                )
+                .map_err(AgentDispatcherError::Storage)?,
+            Ok(false) => {
+                let wake = shared
+                    .store
+                    .get_wake(&interrupt.wake_id)
+                    .map_err(AgentDispatcherError::Storage)?
+                    .ok_or_else(|| {
+                        AgentDispatcherError::Storage(format!(
+                            "undispatched interrupt Wake {} disappeared",
+                            interrupt.wake_id
+                        ))
+                    })?;
+                if !wake.status.is_terminal()
+                    && (wake.agent_id != interrupt.target_agent_id
+                        || wake.run_id.as_deref() != Some(interrupt.run_id.as_str()))
+                {
+                    return Err(AgentDispatcherError::Storage(format!(
+                        "undispatched interrupt {} no longer owns Wake {} Run {}",
+                        interrupt.request_id, interrupt.wake_id, interrupt.run_id
+                    )));
+                }
+                // No process-local owner exists yet. Keep the receipt undispatched; pending
+                // approval restoration or lease recovery may make the next bounded scan
+                // actionable, while a terminal Wake needs no fabricated acknowledgement.
+            }
+            Err(error) => {
+                eprintln!(
+                    "failed to redeliver durable Agent interrupt {} for Run {}: {error}",
+                    interrupt.request_id, interrupt.run_id
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 fn begin_dispatcher_scan(shared: &AgentDispatcherShared) -> u64 {
@@ -1266,6 +1450,101 @@ async fn run_recovered_wake(
             }
             drop(retained_permit);
             settled
+        }
+        AgentWakeRecoveryAction::TreeStopped(wake) => {
+            let handle = shared
+                .executor
+                .recovered_handle(&wake)
+                .map_err(AgentDispatcherError::Manager)?;
+            let retained_permit = shared.executor.retain_recovered_permit(&handle.run_id);
+            // On a restarted Host there is normally no live token, but this also retires a
+            // durable pending approval if one was restored before Wake recovery.
+            let interrupt_error = shared.executor.interrupt(&handle.run_id).err();
+            let frozen = mycopilot_core::ActiveAgentTreeWake {
+                agent_id: wake.agent_id.clone(),
+                conversation_id: handle.conversation_id.clone(),
+                wake_id: wake.wake_id.clone(),
+                run_id: handle.run_id.clone(),
+                assistant_message_id: handle.assistant_message_id.clone(),
+                claim_token: wake.claim_token.clone().ok_or_else(|| {
+                    AgentDispatcherError::Storage(
+                        "recovered stopped Wake has no claim token".to_string(),
+                    )
+                })?,
+                status: wake.status,
+            };
+            let stopped = shared
+                .store
+                .settle_tree_stopped_wake(&frozen, shared.clock.now_ms())
+                .map_err(|error| {
+                    AgentDispatcherError::Storage(match interrupt_error.as_deref() {
+                        Some(interrupt_error) => {
+                            format!("{error}; runtime cancellation also failed: {interrupt_error}")
+                        }
+                        None => error,
+                    })
+                })?;
+            match stopped {
+                TreeStoppedWakeSettlement::Interrupted => {
+                    shared
+                        .executor
+                        .retire_recovered_turn_after_settlement(&handle);
+                    drop(retained_permit);
+                    Ok(())
+                }
+                TreeStoppedWakeSettlement::AlreadyTerminal => {
+                    shared
+                        .running
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .insert(
+                            wake.agent_id.clone(),
+                            RunningDispatch {
+                                wake_id: wake.wake_id.clone(),
+                                run_id: Some(handle.run_id.clone()),
+                                waiting_for_approval: wake.status
+                                    == AgentWakeStatus::WaitingForApproval,
+                            },
+                        );
+                    let _guard = RunningDispatchGuard {
+                        agent_id: wake.agent_id.clone(),
+                        shared: Arc::clone(&shared),
+                    };
+                    observe_and_settle(
+                        shared,
+                        wake.clone(),
+                        handle,
+                        wake.status == AgentWakeStatus::WaitingForApproval,
+                        retained_permit,
+                    )
+                    .await
+                }
+                TreeStoppedWakeSettlement::UnsafeActiveAction { count } => {
+                    let reason = format!(
+                        "Host 重启后发现 {count} 条可能已经产生外部副作用的未确认执行；系统拒绝伪装为安全中断。"
+                    );
+                    let settled = settle_recovery_without_replay(
+                        &shared,
+                        wake,
+                        AgentWakeStatus::OutcomeUnknown,
+                        "子 Agent Turn 的最终结果未知。",
+                        &reason,
+                    );
+                    if settled.is_ok() {
+                        shared
+                            .executor
+                            .retire_recovered_turn_after_settlement(&handle);
+                    }
+                    drop(retained_permit);
+                    settled
+                }
+                TreeStoppedWakeSettlement::LostOwnership => {
+                    drop(retained_permit);
+                    Err(AgentDispatcherError::Storage(
+                        "recovered stopped Wake changed ownership before settlement".to_string(),
+                    ))
+                }
+            }
         }
     }
 }
@@ -1429,6 +1708,46 @@ async fn observe_and_settle(
                             shared.clock.now_ms(),
                         )
                         .map_err(AgentDispatcherError::Storage)?;
+                    if let AgentWakeApprovalWaitOutcome::TreeStopped(stopped) = outcome {
+                        let interrupt_error = shared.executor.interrupt(&handle.run_id).err();
+                        let frozen = mycopilot_core::ActiveAgentTreeWake {
+                            agent_id: stopped.agent_id,
+                            conversation_id: handle.conversation_id.clone(),
+                            wake_id: stopped.wake_id,
+                            run_id: handle.run_id.clone(),
+                            assistant_message_id: handle.assistant_message_id.clone(),
+                            claim_token: claim_token.clone(),
+                            status: stopped.status,
+                        };
+                        let settlement = shared
+                            .store
+                            .settle_tree_stopped_wake(&frozen, shared.clock.now_ms())
+                            .map_err(|error| {
+                                AgentDispatcherError::Storage(match interrupt_error.as_deref() {
+                                    Some(interrupt_error) => format!(
+                                        "{error}; runtime cancellation also failed: {interrupt_error}"
+                                    ),
+                                    None => error,
+                                })
+                            })?;
+                        match settlement {
+                            TreeStoppedWakeSettlement::Interrupted => {}
+                            TreeStoppedWakeSettlement::AlreadyTerminal => continue,
+                            TreeStoppedWakeSettlement::LostOwnership => {
+                                return Err(AgentDispatcherError::Storage(
+                                    "stopped approval Wake changed ownership before settlement"
+                                        .to_string(),
+                                ));
+                            }
+                            TreeStoppedWakeSettlement::UnsafeActiveAction { count } => {
+                                return Err(AgentDispatcherError::Storage(format!(
+                                    "stopped approval Turn still has {count} unconfirmed external executions"
+                                )));
+                            }
+                        }
+                        notify_dispatcher_work_available(&shared);
+                        return Ok(());
+                    }
                     waiting_already_reported =
                         matches!(outcome, AgentWakeApprovalWaitOutcome::Waiting(_));
                     if let Some(running) = shared
@@ -1522,7 +1841,7 @@ fn notify_dispatcher_work_available(shared: &AgentDispatcherShared) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mycopilot_core::storage::models::ChatConversationRecord;
+    use mycopilot_core::storage::models::{ChatConversationRecord, ChatMessageRecord};
     use mycopilot_core::{EnsureRootAgentInput, SendAgentMessageRequest};
     use std::collections::{HashSet, VecDeque};
     use std::sync::atomic::{AtomicI64, AtomicUsize};
@@ -1551,7 +1870,14 @@ mod tests {
         max_active: usize,
         recoveries: usize,
         recovery_not_before_ms: Option<i64>,
+        recover_tree_stopped: bool,
+        mark_wait_tree_stopped: bool,
+        tree_stopped_settlement: Option<TreeStoppedWakeSettlement>,
         temporary_claim_failures: usize,
+        interrupt_disposition: Option<AgentInterruptDisposition>,
+        interrupt_dispatched: bool,
+        interrupt_dispatch_marks: Vec<(String, String, i64)>,
+        undispatched_interrupts: Vec<mycopilot_core::UndispatchedAgentInterrupt>,
     }
 
     #[derive(Default)]
@@ -1580,9 +1906,26 @@ mod tests {
                 .settled
                 .clone()
         }
+
+        fn set_interrupt_disposition(&self, disposition: AgentInterruptDisposition) {
+            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            state.interrupt_disposition = Some(disposition);
+            state.interrupt_dispatched = false;
+        }
     }
 
     impl AgentDispatcherStore for FakeStore {
+        fn list_undispatched_interrupts(
+            &self,
+        ) -> Result<Vec<mycopilot_core::UndispatchedAgentInterrupt>, String> {
+            Ok(self
+                .state
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .undispatched_interrupts
+                .clone())
+        }
+
         fn recover_orphaned_wakes(
             &self,
             recovery_token: &str,
@@ -1595,6 +1938,7 @@ mod tests {
                 .is_some_and(|deadline| now_ms >= deadline)
             {
                 state.recovery_not_before_ms = None;
+                let recover_tree_stopped = state.recover_tree_stopped;
                 if let Some(candidate) = state.wakes.iter_mut().find(|candidate| {
                     !candidate.terminal
                         && matches!(
@@ -1604,11 +1948,14 @@ mod tests {
                 }) {
                     candidate.record.claim_token = Some(recovery_token.to_string());
                     candidate.record.lease_expires_at = Some(now_ms + 60_000);
+                    let recovered = candidate.record.clone();
                     return Ok(AgentWakeRecoveryBatch {
                         requeued_before_dispatch: 0,
-                        actions: vec![AgentWakeRecoveryAction::OutcomeUnknown(
-                            candidate.record.clone(),
-                        )],
+                        actions: vec![if recover_tree_stopped {
+                            AgentWakeRecoveryAction::TreeStopped(recovered)
+                        } else {
+                            AgentWakeRecoveryAction::OutcomeUnknown(recovered)
+                        }],
                     });
                 }
             }
@@ -1666,6 +2013,17 @@ mod tests {
             _claim_token: &str,
             _now_ms: i64,
         ) -> Result<AgentWakeApprovalWaitOutcome, String> {
+            let tree_stopped = self
+                .state
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .mark_wait_tree_stopped;
+            if tree_stopped {
+                return self
+                    .get_wake(wake_id)?
+                    .ok_or_else(|| "missing Wake".to_string())
+                    .map(AgentWakeApprovalWaitOutcome::TreeStopped);
+            }
             mutate_wake(&self.state, wake_id, |wake| {
                 wake.status = AgentWakeStatus::WaitingForApproval;
                 Ok(())
@@ -1698,14 +2056,75 @@ mod tests {
             Ok(())
         }
 
+        fn settle_tree_stopped_wake(
+            &self,
+            wake: &mycopilot_core::ActiveAgentTreeWake,
+            now_ms: i64,
+        ) -> Result<TreeStoppedWakeSettlement, String> {
+            if let Some(outcome) = self
+                .state
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .tree_stopped_settlement
+            {
+                if outcome != TreeStoppedWakeSettlement::Interrupted {
+                    return Ok(outcome);
+                }
+            }
+            self.settle(
+                &AgentWakeSettlement {
+                    wake_id: wake.wake_id.clone(),
+                    expected_status: wake.status,
+                    claim_token: wake.claim_token.clone(),
+                    terminal_status: AgentWakeStatus::Interrupted,
+                    run_id: Some(wake.run_id.clone()),
+                    assistant_message_id: Some(wake.assistant_message_id.clone()),
+                    summary: "stopped tree".to_string(),
+                    artifact_refs: Vec::new(),
+                    terminal_error: Some("stopped tree".to_string()),
+                },
+                now_ms,
+            )?;
+            Ok(TreeStoppedWakeSettlement::Interrupted)
+        }
+
         fn interrupt_descendant(
             &self,
             _caller_agent_id: &str,
             _target_agent_id: &str,
             _request_id: &str,
             _now_ms: i64,
-        ) -> Result<AgentInterruptDisposition, String> {
-            Ok(AgentInterruptDisposition::NoPendingExecution)
+        ) -> Result<AgentInterruptRequest, String> {
+            let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            let disposition = state
+                .interrupt_disposition
+                .clone()
+                .unwrap_or(AgentInterruptDisposition::NoPendingExecution);
+            let requires_runtime_dispatch = !state.interrupt_dispatched
+                && matches!(&disposition, AgentInterruptDisposition::ActiveTurn { .. });
+            Ok(AgentInterruptRequest {
+                disposition,
+                requires_runtime_dispatch,
+            })
+        }
+
+        fn mark_interrupt_dispatched(
+            &self,
+            caller_agent_id: &str,
+            request_id: &str,
+            now_ms: i64,
+        ) -> Result<(), String> {
+            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            state.interrupt_dispatched = true;
+            state.interrupt_dispatch_marks.push((
+                caller_agent_id.to_string(),
+                request_id.to_string(),
+                now_ms,
+            ));
+            state.undispatched_interrupts.retain(|interrupt| {
+                interrupt.caller_agent_id != caller_agent_id || interrupt.request_id != request_id
+            });
+            Ok(())
         }
     }
 
@@ -1744,6 +2163,8 @@ mod tests {
         starts: Mutex<Vec<String>>,
         gates: Mutex<HashMap<String, oneshot::Receiver<()>>>,
         permits: Mutex<HashMap<String, AgentTurnConcurrencyPermit>>,
+        interrupts: Mutex<Vec<String>>,
+        interrupt_result: AtomicBool,
         start_notify: Notify,
     }
 
@@ -1755,8 +2176,14 @@ mod tests {
                 starts: Mutex::new(Vec::new()),
                 gates: Mutex::new(HashMap::new()),
                 permits: Mutex::new(HashMap::new()),
+                interrupts: Mutex::new(Vec::new()),
+                interrupt_result: AtomicBool::new(true),
                 start_notify: Notify::new(),
             }
+        }
+
+        fn set_interrupt_result(&self, delivered: bool) {
+            self.interrupt_result.store(delivered, Ordering::SeqCst);
         }
 
         fn gated() -> (Self, HashMap<String, oneshot::Sender<()>>) {
@@ -1781,6 +2208,8 @@ mod tests {
                     starts: Mutex::new(Vec::new()),
                     gates: Mutex::new(receivers),
                     permits: Mutex::new(HashMap::new()),
+                    interrupts: Mutex::new(Vec::new()),
+                    interrupt_result: AtomicBool::new(true),
                     start_notify: Notify::new(),
                 },
                 senders,
@@ -1882,8 +2311,12 @@ mod tests {
                 .remove(&handle.run_id);
         }
 
-        fn interrupt(&self, _run_id: &str) -> Result<bool, String> {
-            Ok(true)
+        fn interrupt(&self, run_id: &str) -> Result<bool, String> {
+            self.interrupts
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .push(run_id.to_string());
+            Ok(self.interrupt_result.load(Ordering::SeqCst))
         }
     }
 
@@ -1937,6 +2370,208 @@ mod tests {
             }
             notified.await;
         }
+    }
+
+    fn active_interrupt_store(status: AgentWakeStatus) -> Arc<FakeStore> {
+        let store = Arc::new(FakeStore::default());
+        store.push(1, "agent-a");
+        mutate_wake(&store.state, "wake-1", |wake| {
+            wake.status = status;
+            wake.run_id = Some("run:wake-1".to_string());
+            Ok(())
+        })
+        .unwrap();
+        store.set_interrupt_disposition(AgentInterruptDisposition::ActiveTurn {
+            wake_id: "wake-1".to_string(),
+            run_id: "run:wake-1".to_string(),
+        });
+        store
+    }
+
+    fn start_interrupt_test_dispatcher(
+        store: Arc<FakeStore>,
+        executor: Arc<FakeExecutor>,
+    ) -> AgentDispatcher {
+        AgentDispatcher::start_with_clock(
+            store,
+            executor,
+            Arc::new(TestClock::default()),
+            AgentTurnConcurrencyGate::new(1).unwrap(),
+            AgentDispatcherConfig {
+                global_concurrency_limit: 1,
+                idle_poll_interval: Duration::from_secs(60),
+                ..AgentDispatcherConfig::default()
+            },
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn interrupt_agent_reports_active_turn_only_after_runtime_delivery() {
+        let store = active_interrupt_store(AgentWakeStatus::Running);
+        let executor = Arc::new(FakeExecutor::immediate());
+        let dispatcher = start_interrupt_test_dispatcher(Arc::clone(&store), Arc::clone(&executor));
+
+        let disposition = dispatcher
+            .interrupt_agent("root", "agent-a", "interrupt-1")
+            .unwrap();
+
+        assert_eq!(
+            disposition,
+            AgentInterruptDisposition::ActiveTurn {
+                wake_id: "wake-1".to_string(),
+                run_id: "run:wake-1".to_string(),
+            }
+        );
+        assert_eq!(
+            executor.interrupts.lock().unwrap().as_slice(),
+            ["run:wake-1"]
+        );
+        {
+            let state = store.state.lock().unwrap();
+            assert!(state.interrupt_dispatched);
+            assert_eq!(state.interrupt_dispatch_marks.len(), 1);
+            assert_eq!(state.interrupt_dispatch_marks[0].0, "root");
+            assert_eq!(state.interrupt_dispatch_marks[0].1, "interrupt-1");
+        }
+
+        let retry = dispatcher
+            .interrupt_agent("root", "agent-a", "interrupt-1")
+            .unwrap();
+        assert_eq!(retry, disposition);
+        assert_eq!(
+            executor.interrupts.lock().unwrap().as_slice(),
+            ["run:wake-1"],
+            "a durably dispatched request must not hit the executor twice"
+        );
+        assert_eq!(
+            store.state.lock().unwrap().interrupt_dispatch_marks.len(),
+            1
+        );
+        dispatcher.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn interrupt_agent_runtime_miss_is_an_error_while_wake_remains_active() {
+        let store = active_interrupt_store(AgentWakeStatus::Running);
+        let executor = Arc::new(FakeExecutor::immediate());
+        executor.set_interrupt_result(false);
+        let dispatcher = start_interrupt_test_dispatcher(Arc::clone(&store), Arc::clone(&executor));
+
+        let error = dispatcher
+            .interrupt_agent("root", "agent-a", "interrupt-1")
+            .unwrap_err();
+
+        assert!(matches!(error, AgentDispatcherError::Manager(message) if
+            message.contains("interrupt did not reach active Turn run:wake-1")
+                && message.contains("durable Wake status remains running")));
+        assert_eq!(
+            executor.interrupts.lock().unwrap().as_slice(),
+            ["run:wake-1"]
+        );
+        assert!(!store.state.lock().unwrap().interrupt_dispatched);
+
+        executor.set_interrupt_result(true);
+        let retry = dispatcher
+            .interrupt_agent("root", "agent-a", "interrupt-1")
+            .unwrap();
+        assert_eq!(
+            retry,
+            AgentInterruptDisposition::ActiveTurn {
+                wake_id: "wake-1".to_string(),
+                run_id: "run:wake-1".to_string(),
+            }
+        );
+        assert_eq!(
+            executor.interrupts.lock().unwrap().as_slice(),
+            ["run:wake-1", "run:wake-1"],
+            "an undispatched durable receipt must remain retryable"
+        );
+        assert!(store.state.lock().unwrap().interrupt_dispatched);
+        dispatcher.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn interrupt_agent_runtime_miss_reports_no_active_turn_after_durable_settlement() {
+        let store = active_interrupt_store(AgentWakeStatus::Completed);
+        let executor = Arc::new(FakeExecutor::immediate());
+        executor.set_interrupt_result(false);
+        let dispatcher = start_interrupt_test_dispatcher(Arc::clone(&store), Arc::clone(&executor));
+
+        let disposition = dispatcher
+            .interrupt_agent("root", "agent-a", "interrupt-1")
+            .unwrap();
+
+        assert_eq!(disposition, AgentInterruptDisposition::NoPendingExecution);
+        assert_eq!(
+            executor.interrupts.lock().unwrap().as_slice(),
+            ["run:wake-1"]
+        );
+        assert!(!store.state.lock().unwrap().interrupt_dispatched);
+        dispatcher.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn startup_redelivers_an_unacknowledged_durable_interrupt() {
+        let store = Arc::new(FakeStore::default());
+        store
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .undispatched_interrupts
+            .push(mycopilot_core::UndispatchedAgentInterrupt {
+                caller_agent_id: "root".to_string(),
+                target_agent_id: "agent-a".to_string(),
+                request_id: "interrupt-before-crash".to_string(),
+                wake_id: "wake-before-crash".to_string(),
+                run_id: "run-before-crash".to_string(),
+            });
+        let executor = Arc::new(FakeExecutor::immediate());
+        let dispatcher = AgentDispatcher::start_with_clock(
+            store.clone(),
+            executor.clone(),
+            Arc::new(TestClock::default()),
+            AgentTurnConcurrencyGate::new(1).unwrap(),
+            AgentDispatcherConfig {
+                global_concurrency_limit: 1,
+                idle_poll_interval: Duration::from_millis(1),
+                ..AgentDispatcherConfig::default()
+            },
+        )
+        .unwrap();
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if store
+                    .state
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .interrupt_dispatch_marks
+                    .len()
+                    == 1
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("startup must redeliver the durable interrupt receipt");
+        assert_eq!(
+            executor
+                .interrupts
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .as_slice(),
+            ["run-before-crash"]
+        );
+        assert!(store
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .undispatched_interrupts
+            .is_empty());
+        dispatcher.shutdown().await.unwrap();
     }
 
     struct ApprovalResumeExecutor {
@@ -2093,6 +2728,42 @@ mod tests {
             AgentWakeStatus::Running,
             "shutdown must preserve the durable active Wake for restart recovery"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stop_winning_approval_wait_cas_settles_immediately_without_lease_recovery() {
+        let store = Arc::new(FakeStore::default());
+        store.push(1, "agent-a");
+        store
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .mark_wait_tree_stopped = true;
+        let executor = Arc::new(ApprovalResumeExecutor::new());
+        let dispatcher = AgentDispatcher::start_with_clock(
+            store.clone(),
+            executor.clone(),
+            Arc::new(TestClock::default()),
+            AgentTurnConcurrencyGate::new(1).unwrap(),
+            AgentDispatcherConfig {
+                global_concurrency_limit: 1,
+                wake_lease_renew_interval: Duration::from_secs(60),
+                idle_poll_interval: Duration::from_secs(60),
+                shutdown_grace: Duration::from_millis(5),
+            },
+        )
+        .unwrap();
+        dispatcher.notify_work_available();
+
+        tokio::time::timeout(Duration::from_secs(1), wait_for_settled(&store, 1))
+            .await
+            .expect("a stop-first approval race must settle without waiting for lease recovery");
+        assert_eq!(
+            store.get_wake("wake-1").unwrap().unwrap().status,
+            AgentWakeStatus::Interrupted
+        );
+        assert_eq!(executor.interrupts.load(Ordering::SeqCst), 1);
+        dispatcher.shutdown().await.unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2450,6 +3121,102 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stopped_tree_recovery_interrupts_local_approval_state_and_never_replays() {
+        let store = Arc::new(FakeStore::default());
+        store.push(1, "agent-a");
+        {
+            let mut state = store.state.lock().unwrap();
+            let wake = &mut state.wakes[0].record;
+            wake.status = AgentWakeStatus::WaitingForApproval;
+            wake.claim_token = Some("old-host".to_string());
+            wake.claimed_at = Some(1);
+            wake.started_at = Some(2);
+            wake.lease_expires_at = Some(3);
+            wake.run_id = Some("run:wake-1".to_string());
+            wake.assistant_message_id = Some("assistant:wake-1".to_string());
+            state.active_agents.insert("agent-a".to_string());
+            state.recovery_not_before_ms = Some(3);
+            state.recover_tree_stopped = true;
+        }
+        let executor = Arc::new(FakeExecutor::immediate());
+        let dispatcher = AgentDispatcher::start_with_clock(
+            store.clone(),
+            executor.clone(),
+            Arc::new(TestClock::default()),
+            AgentTurnConcurrencyGate::new(1).unwrap(),
+            AgentDispatcherConfig {
+                global_concurrency_limit: 1,
+                idle_poll_interval: Duration::from_millis(1),
+                ..AgentDispatcherConfig::default()
+            },
+        )
+        .unwrap();
+
+        tokio::time::timeout(Duration::from_secs(1), wait_for_settled(&store, 1))
+            .await
+            .expect("a durably stopped Wake must settle without being resumed");
+        assert_eq!(
+            store.state.lock().unwrap().wakes[0].record.status,
+            AgentWakeStatus::Interrupted
+        );
+        assert_eq!(
+            executor.interrupts.lock().unwrap().as_slice(),
+            ["run:wake-1"]
+        );
+        assert!(executor.starts.lock().unwrap().is_empty());
+        dispatcher.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stopped_tree_recovery_with_uncertain_external_action_becomes_outcome_unknown() {
+        let store = Arc::new(FakeStore::default());
+        store.push(1, "agent-a");
+        {
+            let mut state = store.state.lock().unwrap();
+            let wake = &mut state.wakes[0].record;
+            wake.status = AgentWakeStatus::WaitingForApproval;
+            wake.claim_token = Some("old-host".to_string());
+            wake.claimed_at = Some(1);
+            wake.started_at = Some(2);
+            wake.lease_expires_at = Some(3);
+            wake.run_id = Some("run:wake-1".to_string());
+            wake.assistant_message_id = Some("assistant:wake-1".to_string());
+            state.active_agents.insert("agent-a".to_string());
+            state.recovery_not_before_ms = Some(3);
+            state.recover_tree_stopped = true;
+            state.tree_stopped_settlement =
+                Some(TreeStoppedWakeSettlement::UnsafeActiveAction { count: 1 });
+        }
+        let executor = Arc::new(FakeExecutor::immediate());
+        let dispatcher = AgentDispatcher::start_with_clock(
+            store.clone(),
+            executor.clone(),
+            Arc::new(TestClock::default()),
+            AgentTurnConcurrencyGate::new(1).unwrap(),
+            AgentDispatcherConfig {
+                global_concurrency_limit: 1,
+                idle_poll_interval: Duration::from_millis(1),
+                ..AgentDispatcherConfig::default()
+            },
+        )
+        .unwrap();
+
+        tokio::time::timeout(Duration::from_secs(1), wait_for_settled(&store, 1))
+            .await
+            .expect("an uncertain external action must still converge to a safe terminal state");
+        assert_eq!(
+            store.state.lock().unwrap().wakes[0].record.status,
+            AgentWakeStatus::OutcomeUnknown
+        );
+        assert_eq!(
+            executor.interrupts.lock().unwrap().as_slice(),
+            ["run:wake-1"]
+        );
+        assert!(executor.starts.lock().unwrap().is_empty());
+        dispatcher.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn shutdown_stops_claiming_and_leaves_unfinished_wake_durable() {
         let store = Arc::new(FakeStore::default());
         store.push(1, "agent-a");
@@ -2593,6 +3360,151 @@ mod tests {
             .unwrap();
         assert_eq!(result.sender_agent_id, "agent-child");
         assert_eq!(result.recipient_agent_id, "agent-root");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn sqlite_dispatcher_redelivers_interrupt_receipt_left_before_runtime_dispatch() {
+        let fixture = tempfile::tempdir().unwrap();
+        let database_path = fixture.path().join("interrupt-recovery.sqlite");
+        let storage = Arc::new(
+            mycopilot_core::storage::service::StorageService::open(&database_path).unwrap(),
+        );
+        storage
+            .save_conversation(empty_conversation("conversation-root-interrupt"))
+            .unwrap();
+        storage
+            .save_conversation(empty_conversation("conversation-child-interrupt"))
+            .unwrap();
+        storage
+            .ensure_root_agent(&EnsureRootAgentInput {
+                agent_id: "agent-root-interrupt".to_string(),
+                conversation_id: "conversation-root-interrupt".to_string(),
+                creation_request_id: "ensure-root-interrupt".to_string(),
+                task_name: "Root".to_string(),
+            })
+            .unwrap();
+        let raw = rusqlite::Connection::open(&database_path).unwrap();
+        raw.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+        raw.execute(
+            "INSERT INTO agent_nodes (
+                 agent_id, schema_version, root_agent_id, root_conversation_id,
+                 parent_agent_id, conversation_id, project_id, creation_request_id,
+                 task_name, task_path, model_config_id_snapshot,
+                 model_display_name_snapshot, model_supports_image_snapshot,
+                 model_context_window_tokens_snapshot, model_settings_revision_snapshot,
+                 provider_connection_revision_snapshot, provider_protocol_revision_snapshot,
+                 model_selection_source_snapshot, lifecycle, revision, created_at, updated_at
+             ) VALUES (
+                 'agent-child-interrupt', 1, 'agent-root-interrupt',
+                 'conversation-root-interrupt', 'agent-root-interrupt',
+                 'conversation-child-interrupt', NULL, 'spawn-child-interrupt',
+                 'review', '/root/review', 'model-a', 'Model A', 0, 32000,
+                 'settings-v1', 'connection-v1', 'protocol-v1', 'explicit',
+                 'active', 1, 2, 2
+             )",
+            [],
+        )
+        .unwrap();
+        drop(raw);
+        let dispatch = storage
+            .follow_up_agent(&SendAgentMessageRequest {
+                sender_agent_id: "agent-root-interrupt".to_string(),
+                recipient_agent_id: "agent-child-interrupt".to_string(),
+                request_id: "followup-interrupt-recovery".to_string(),
+                content: "wait for interrupt recovery".to_string(),
+            })
+            .unwrap();
+        let wake_id = dispatch.deferred_wake.unwrap().wake_id;
+        let claimed_at = mycopilot_core::storage::now_ms();
+        let claimed = storage
+            .claim_next_dispatchable_agent_wake_at("claim-before-crash", claimed_at)
+            .unwrap()
+            .unwrap();
+        assert_eq!(claimed.wake_id, wake_id);
+        storage
+            .upsert_chat_messages(
+                "conversation-child-interrupt",
+                vec![ChatMessageRecord {
+                    id: "assistant-before-crash".to_string(),
+                    role: "assistant".to_string(),
+                    content: String::new(),
+                    created_at: claimed_at + 1,
+                    status: Some("streaming".to_string()),
+                    attachments: Vec::new(),
+                    agent_run_json: None,
+                    ui_state_json: None,
+                }],
+                1,
+            )
+            .unwrap();
+        let trace = mycopilot_core::ConversationTraceSnapshot::default().in_progress_trace(
+            "run-before-crash",
+            "conversation-child-interrupt",
+            "assistant-before-crash",
+        );
+        storage
+            .append_in_progress_conversation_turn_trace(&trace, claimed_at + 1, claimed_at + 1)
+            .unwrap();
+        let raw = rusqlite::Connection::open(&database_path).unwrap();
+        raw.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+        raw.execute(
+            "UPDATE agent_wake_requests
+             SET status = 'running', status_revision = status_revision + 1,
+                 run_id = 'run-before-crash', assistant_message_id = 'assistant-before-crash',
+                 started_at = ?1
+             WHERE wake_id = ?2 AND status = 'claimed' AND claim_token = 'claim-before-crash'",
+            rusqlite::params![claimed_at + 1, &wake_id],
+        )
+        .unwrap();
+        drop(raw);
+        let receipt = storage
+            .interrupt_agent_execution_with_receipt_at(
+                "agent-root-interrupt",
+                "agent-child-interrupt",
+                "interrupt-before-crash",
+                claimed_at + 2,
+            )
+            .unwrap();
+        assert_eq!(receipt.dispatched_at, None);
+
+        let store = Arc::new(SqliteAgentDispatcherStore::new(Arc::clone(&storage)));
+        let executor = Arc::new(FakeExecutor::immediate());
+        let dispatcher = AgentDispatcher::start_with_clock(
+            store,
+            executor.clone(),
+            Arc::new(TestClock(AtomicI64::new(claimed_at + 3))),
+            AgentTurnConcurrencyGate::new(1).unwrap(),
+            AgentDispatcherConfig {
+                global_concurrency_limit: 1,
+                idle_poll_interval: Duration::from_millis(1),
+                shutdown_grace: Duration::from_millis(2),
+                ..AgentDispatcherConfig::default()
+            },
+        )
+        .unwrap();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if storage
+                    .list_undispatched_agent_interrupts()
+                    .unwrap()
+                    .is_empty()
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the restarted Dispatcher must acknowledge the redelivered interrupt");
+        assert_eq!(
+            executor
+                .interrupts
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .as_slice(),
+            ["run-before-crash"]
+        );
+        dispatcher.shutdown().await.unwrap();
     }
 
     #[test]

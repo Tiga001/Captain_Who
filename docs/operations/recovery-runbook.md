@@ -2,7 +2,7 @@
 status: current
 audience: developers/maintainers
 owner: engineering
-last_verified: 2026-08-31
+last_verified: 2026-09-03
 ---
 
 # 恢复与故障处理 Runbook
@@ -38,7 +38,7 @@ Playwright 故障。优先原则是保护持久事实和外部副作用，不通
 
 ### 判断
 
-当前唯一可接受基线为 **schema v27 + exact catalog fingerprint + valid foreign keys**。真源：
+当前唯一可接受基线为 **schema v32 + exact catalog fingerprint + valid foreign keys**。真源：
 
 ```text
 crates/core/src/storage/migrations.rs
@@ -68,8 +68,8 @@ pnpm storage:reset-dev -- --confirm-reset
 确认流程：
 
 1. 在 `storage-backups/` 创建权限受限、时间戳命名的 verified SQLite snapshot。
-2. 只对当前 v27 或紧邻的 v26，从只读源或临时副本提取 allowlisted configuration；MCP 精确 identity/authorization 也要重新验证。更旧的 schema 不解码配置，报告会明确显示使用默认配置。
-3. 在 staging 文件创建 fresh v27 canonical DB。
+2. 只对当前 v32 或经逐表核验、配置表契约相同的紧邻 v31，从只读源或临时副本提取 allowlisted configuration；MCP 精确 identity/authorization 也要重新验证。该例外固定为 v31，不是“当前版本减一”的通用迁移规则；v30 及更旧 schema 不解码配置，报告会明确显示使用默认配置。
+3. 在 staging 文件创建 fresh v32 canonical DB。
 4. 通过当前 service 写路径恢复配置。
 5. 重开生产 storage，核对记录数、`PRAGMA quick_check` 和 `foreign_key_check`。
 6. 原子发布新数据库；失败时保留原数据库与恢复备份。
@@ -81,18 +81,18 @@ pnpm storage:reset-dev -- --confirm-reset
 - 通知设置；
 - Browser 链接打开位置、下载设置和偏好（仅在源 schema 支持对应表时）；
 - Skill enablement overrides；
-- 默认 image-generation profile；
-- MCP Registry、model namespace、仍有效的 launch authorization 与 enabled/trust 状态。
+- 全部 image-generation profile 及其 credential reference；credential secret 目录本身不搬动、不清空；
+- MCP Registry、model namespace、仍有效的 launch authorization 与 enabled/trust 状态，以及内建 Browser Automation 的用户允许策略。
 
 不恢复：Conversation、Project、message、draft、Usage、Approval、Continuation、Compaction、Fork、Agent
 tree/Mailbox/Wake；Scheduled Automation task/Run/attention；notification event/batch；Browser history/download
-record；全局 Agent 模板与 Project 分配；FileChange transaction/chunk/operation/run grant/history。附件、已安装
+record；全局 Agent 模板与 Project 分配；FileChange transaction/chunk/operation/run grant/history。即使来源是 v31，Conversation 与上述 runtime 记录也只计数并丢弃，不执行迁移。附件、已安装
 Skill、生成图片和 credential 目录不在 reset 事务中移动；没有数据库引用的附件可在后续正常启动时被孤儿清理。
 
 ### 备份处理
 
 - reset 失败时，优先保留原库；backup 是恢复/取证副本，不应被 reset 检查过程修改。
-- 不要直接把一个旧 schema backup 覆盖回运行路径并期待 v27 接受；旧库仍会触发 reset-required。
+- 不要直接把一个旧 schema backup 覆盖回运行路径并期待 v32 接受；旧库仍会触发 reset-required。
 - 如必须人工还原文件，先停止所有 Core Server、再次复制保存当前文件、在隔离位置验证 SQLite 完整性和 schema，再决定是否替换。仓库当前没有受支持的一键 backup restore 命令。
 - 不要把包含本机模型 Token/搜索 key 的 backup 上传到 issue、CI artifact 或公共对象存储。
 
@@ -102,16 +102,36 @@ SQLite 是 Wake、Turn、Mailbox、receipt、Approval 和 event 的恢复真相�
 
 ### Wake 分类
 
-| 持久状态                                      | 恢复动作                                                          |
-| --------------------------------------------- | ----------------------------------------------------------------- |
-| `queued`                                      | 按 FIFO 等待 Dispatcher claim                                     |
-| 过期 `claimed`，无 Run identity               | 安全重新排队/重新 claim；确定的 admission 前失败可结算 failed     |
-| `running`，已有 terminal trace                | 观察 terminal fact，完成 result outbox/owner 释放，不重跑 Runtime |
-| `waiting_for_approval` 且 pending action 存在 | 保持等待；根 Agent UI 从 durable projection 恢复                  |
-| `running` 且有合法 checkpoint                 | 按原 identity/permissions/capability snapshot 恢复                |
-| `running` 且无可证明安全的 checkpoint         | 结算 `outcome_unknown`，不重放 Tool/Provider 副作用               |
+| 持久状态                                               | 恢复动作                                                          |
+| ------------------------------------------------------ | ----------------------------------------------------------------- |
+| `queued`                                               | 按 FIFO 等待 Dispatcher claim                                     |
+| 过期 `claimed`，无 Run identity                        | 安全重新排队/重新 claim；确定的 admission 前失败可结算 failed     |
+| `running`，已有 terminal trace                         | 观察 terminal fact，完成 result outbox/owner 释放，不重跑 Runtime |
+| `waiting_for_approval` 且 pending action 存在          | 保持等待；根 Agent UI 从 durable projection 恢复                  |
+| `running` 且有合法 checkpoint                          | 按原 identity/permissions/capability snapshot 恢复                |
+| `running` 且无可证明安全的 checkpoint                  | 结算 `outcome_unknown`，不重放 Tool/Provider 副作用               |
+| exact run 被 durable tree fence 覆盖，且可证明未有副作用 | 取消未终态 action，将 Wake/Trace 安全结算为 `interrupted`          |
+| exact run 被 fence 覆盖，但外部副作用是否发生不确定    | 保留证据并结算 `outcome_unknown`；不得以“已停止”为由盲重放        |
 
 Wake lease 为 60 秒，Dispatcher 每 20 秒续租、每 1 秒 durable fallback scan。新 Core Server 启动时旧 lease 尚未过期属于正常窗口；周期扫描会在 deadline 后处理，不需要再次重启。
+
+### 树级停止与 `interrupt_agent` 排障
+
+Composer 停止仍通过既有 `cancelRun(runId)` 进入 Host，没有新增 Renderer 协议。排障时先核对该 ID 是否就是
+当时仍活跃的根 Run，再查询它建立的 durable tree fence 及冻结的 descendant run membership；不要按 Agent 节点或
+当前 display status 推测停止范围。fence 只覆盖停止时已接纳的 exact runs，不应吞掉之后显式创建的 Turn。冻结成员
+的 Spawn/Send/Followup 与 action dispatch 必须被持久 gate 拒绝；已完成或被 fence 覆盖的子 Run 可以留下可读
+result，但 settlement 不得再排队父 Agent Wake。
+
+显式 `interrupt_agent` 的 `interrupt_requested` 是“运行时取消已投递”的 receipt，不是 durable terminal receipt。
+短暂看到 `running` 可以是取消后的结算窗口，应继续观察 exact Wake/Trace，而不是重复创建任务。若进程在投递后、
+写入 `dispatched_at` 前崩溃，启动恢复会幂等重投该请求；已有 `dispatched_at` 时不重复调用运行时中断，而是继续观察
+或补齐结算。
+
+重启扫描遇到 tree-stopped Run 时，先尊重已有 terminal trace；仍为 `in_progress` 且能证明外部副作用尚未发生的
+Run 安全结算为 `interrupted`。如果 Command、MCP、Provider 或其他外部动作可能已经 dispatch、但缺少权威结果，
+必须按 `outcome_unknown` 处理，不能为了让 UI 退出 `running` 而伪造 `interrupted`。任何终态或停止覆盖下的子
+result 都只作为 Mailbox/observer 事实保留，不得重新唤醒父 Run。
 
 ### `outcome_unknown`
 

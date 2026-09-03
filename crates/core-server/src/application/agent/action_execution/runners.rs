@@ -1202,7 +1202,7 @@ impl AgentService {
             mycopilot_core::builtin_mcp_tool_cancelled_result(&approval)
         } else {
             if self
-                .transition_pending_status(&record, PendingActionStatus::Executing)
+                .transition_pending_status_for_dispatch(&record, PendingActionStatus::Executing)
                 .is_err()
             {
                 let _ = runtime.revoke_builtin_mcp_tool_grant(&grant.grant_id, &grant.approval_id);
@@ -1956,7 +1956,7 @@ impl AgentService {
         // TOCTOU defense.
         if preflight_result.is_ok() && !dispatch_already_claimed {
             if self
-                .transition_pending_status(&record, PendingActionStatus::Executing)
+                .transition_pending_status_for_dispatch(&record, PendingActionStatus::Executing)
                 .is_err()
             {
                 self.invalidate_mcp_pending_payload(&record.snapshot.action);
@@ -4112,6 +4112,22 @@ impl AgentService {
     ) {
         let run_id = record.snapshot.run_id.clone();
         let cancellation_token = existing_cancellation_token.unwrap_or_default();
+        match self.agent_tree_run_is_stopped(&run_id) {
+            Ok(true) => cancellation_token.cancel(),
+            Ok(false) => {}
+            Err(error) => {
+                self.finish_pre_runtime_action_continuation_failure(
+                    &record,
+                    &notifications,
+                    None,
+                    &cancellation_token,
+                    final_pending_status,
+                    "agent_tree_stop_state_unavailable",
+                    format!("审批续跑无法确认 Agent 树停止状态，已拒绝执行：{error}"),
+                );
+                return;
+            }
+        }
         let frozen_identity = record
             .agent_input
             .context
@@ -4175,6 +4191,32 @@ impl AgentService {
             return;
         }
         self.register_cancellation(&run_id, cancellation_token.clone());
+        match self.agent_tree_run_is_stopped(&run_id) {
+            Ok(true) => cancellation_token.cancel(),
+            Ok(false) => {}
+            Err(error) => {
+                self.finish_pre_runtime_action_continuation_failure(
+                    &record,
+                    &notifications,
+                    None,
+                    &cancellation_token,
+                    final_pending_status,
+                    "agent_tree_stop_state_unavailable",
+                    format!("审批续跑无法确认 Agent 树停止状态，已拒绝执行：{error}"),
+                );
+                return;
+            }
+        }
+        if cancellation_token.is_cancelled() {
+            self.finish_cancelled_action_continuation(
+                &record,
+                &notifications,
+                final_pending_status,
+                &cancellation_token,
+            )
+            .await;
+            return;
+        }
         if self.is_agent_input_scope_deleting(&record.agent_input) {
             cancellation_token.cancel();
             self.preserve_claimed_action_after_pre_runtime_refusal(

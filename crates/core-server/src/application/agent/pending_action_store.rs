@@ -293,7 +293,11 @@ impl AgentService {
         if record.snapshot.status != PendingActionStatus::Approved {
             return Err("automatic MCP journal is not ready for dispatch".to_string());
         }
-        self.transition_pending_status(record, PendingActionStatus::Executing)?;
+        self.persist_pending_dispatch_status(
+            record,
+            PendingActionStatus::Approved,
+            PendingActionStatus::Executing,
+        )?;
         record.snapshot.status = PendingActionStatus::Executing;
         Ok(())
     }
@@ -970,6 +974,32 @@ impl AgentService {
         Ok(())
     }
 
+    /// Claims dispatch authority while keeping the process-local pending projection in lockstep
+    /// with the guarded durable CAS. Callers must not update only their cloned `record`: terminal
+    /// settlement reads the shared map to derive its expected durable status.
+    pub(super) fn transition_pending_status_for_dispatch(
+        &self,
+        record: &PendingActionRecord,
+        status: PendingActionStatus,
+    ) -> Result<(), String> {
+        let action_id = &record.storage_id;
+        let mut pending_actions = self
+            .pending_actions
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let pending = pending_actions
+            .get_mut(action_id)
+            .ok_or_else(|| format!("待审批操作的内存状态不存在：{action_id}"))?;
+        let current = pending.snapshot.status;
+        if current == status {
+            return Ok(());
+        }
+        ensure_pending_status_transition(current, status)?;
+        self.persist_pending_dispatch_status(pending, current, status)?;
+        pending.snapshot.status = status;
+        Ok(())
+    }
+
     /// Commits the cancellation status and retires every remembered FileChange grant for the Run
     /// in one SQLite transaction before process-local state can report a terminal cancellation.
     pub(super) fn transition_pending_status_to_cancelled_and_revoke_run_grants(
@@ -1083,6 +1113,33 @@ impl AgentService {
         }
         self.storage
             .transition_pending_agent_action_and_resolve_notification(
+                &record.storage_id,
+                pending_status_label(expected_status),
+                pending_status_label(status),
+                &persisted_pending_agent_input_json(&record.agent_input, status)?,
+                &record.snapshot.run_id,
+                &record.snapshot.action_id,
+                now_ms(),
+            )
+    }
+
+    /// Persists a status transition which grants process, filesystem, transport, or model
+    /// continuation authority. Unlike terminal/cancellation bookkeeping, this CAS fails when the
+    /// exact Run is already covered by a durable Agent-tree stop.
+    pub(super) fn persist_pending_dispatch_status(
+        &self,
+        record: &PendingActionRecord,
+        expected_status: PendingActionStatus,
+        status: PendingActionStatus,
+    ) -> Result<(), String> {
+        #[cfg(test)]
+        if let Some(error) =
+            take_pending_status_transition_failure(&record.storage_id, pending_status_label(status))
+        {
+            return Err(error);
+        }
+        self.storage
+            .transition_pending_agent_action_for_dispatch_and_resolve_notification(
                 &record.storage_id,
                 pending_status_label(expected_status),
                 pending_status_label(status),
@@ -1280,16 +1337,27 @@ impl AgentService {
             Some(completed_at),
         );
         audit.decision_source = Some(decision_source.to_string());
-        let outcome = self
-            .storage
-            .commit_pending_agent_action_audited_result_trace_with_model_context(
-                &audit,
-                pending_status_label(record.snapshot.status),
-                status,
-                trace,
-                model_context_items,
-                completed_at,
-            )?;
+        let outcome = if decision == "rejected" {
+            self.storage
+                .commit_pending_agent_action_audited_result_trace_for_continuation(
+                    &audit,
+                    pending_status_label(record.snapshot.status),
+                    status,
+                    trace,
+                    model_context_items,
+                    completed_at,
+                )
+        } else {
+            self.storage
+                .commit_pending_agent_action_audited_result_trace_with_model_context(
+                    &audit,
+                    pending_status_label(record.snapshot.status),
+                    status,
+                    trace,
+                    model_context_items,
+                    completed_at,
+                )
+        }?;
         #[cfg(test)]
         let injected_post_commit_failure = if matches!(decision_source, "auto" | "run_grant") {
             take_auto_action_audit_post_commit_failure(

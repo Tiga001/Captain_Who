@@ -470,3 +470,55 @@ fn stale_dispatcher_wait_observation_cannot_reverse_an_approved_wake() {
     );
     drop(_directory);
 }
+
+#[test]
+fn stopped_tree_wait_observation_returns_terminalization_signal_without_waiting() {
+    let fixture = Fixture::new(Some("model-a"));
+    insert_active_root_trace(
+        &fixture,
+        "root-run-approval-stop",
+        "root-assistant-approval-stop",
+    );
+    let (wake_id, claim_token, conversation_id, _) =
+        active_waiting_child(&fixture, "approval-stop-action");
+    fixture
+        .service
+        .transition_agent_wake(
+            &wake_id,
+            AgentWakeStatus::WaitingForApproval,
+            AgentWakeStatus::Running,
+            Some(&claim_token),
+        )
+        .unwrap();
+    fixture
+        .service
+        .begin_agent_tree_run_stop_by_root_agent_at("agent-root", "root-run-approval-stop", 30)
+        .unwrap()
+        .unwrap();
+
+    let outcome = fixture
+        .service
+        .mark_agent_wake_waiting_for_pending_approval_at(
+            &wake_id,
+            "approval-run",
+            &conversation_id,
+            "approval-assistant",
+            &claim_token,
+            31,
+        )
+        .unwrap();
+    let AgentWakeApprovalWaitOutcome::TreeStopped(wake) = outcome else {
+        panic!("a stop-first approval race must request immediate terminalization");
+    };
+    assert_eq!(wake.status, AgentWakeStatus::Running);
+    assert_eq!(
+        fixture
+            .service
+            .get_agent_wake(&wake_id)
+            .unwrap()
+            .unwrap()
+            .status,
+        AgentWakeStatus::Running,
+        "the dispatcher owns the following Interrupted settlement"
+    );
+}

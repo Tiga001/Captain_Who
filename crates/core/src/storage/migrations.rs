@@ -1,13 +1,13 @@
 use rusqlite::{ffi, Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
 
-pub const STORAGE_SCHEMA_VERSION: i32 = 31;
+pub const STORAGE_SCHEMA_VERSION: i32 = 32;
 pub const DEVELOPMENT_STORAGE_SCHEMA_RESET_REQUIRED: &str =
     "development_storage_schema_reset_required";
 
 const CANONICAL_SCHEMA: &str = include_str!("canonical_schema.sql");
 const CANONICAL_SCHEMA_FINGERPRINT: &str =
-    "sha256:27a35bfcc3c8db89b4e651eb244871d09447d9b5cedff13ba7efb441b9d9c916";
+    "sha256:5cba1822cad4a40686115d27d828b110e001f5ffa33ac1acd2fee1ce077c13d7";
 /// Opens the single supported development schema.
 ///
 /// A brand-new database is initialized atomically. Existing development databases must already
@@ -444,7 +444,7 @@ mod tests {
             .contains(DEVELOPMENT_STORAGE_SCHEMA_RESET_REQUIRED));
         assert!(error
             .to_string()
-            .contains("expected schema version 31, found 30"));
+            .contains("expected schema version 32, found 30"));
         assert_eq!(read_schema_version(&connection).unwrap(), 30);
         assert_eq!(schema_fingerprint(&connection).unwrap(), fingerprint_before);
         let columns = connection
@@ -584,6 +584,15 @@ mod tests {
             "prevent_agent_wake_claim_time_rewrite",
             "prevent_agent_wake_start_time_rewrite",
             "prevent_agent_wake_terminal_rewrite",
+            "agent_tree_run_stops",
+            "agent_tree_run_stops_root",
+            "agent_tree_run_stop_members",
+            "agent_tree_run_stop_members_run",
+            "validate_agent_tree_run_stop_member_insert",
+            "prevent_agent_tree_run_stop_member_update",
+            "validate_agent_tree_run_stop_insert",
+            "prevent_agent_tree_run_stop_update",
+            "prevent_stopped_agent_run_pending_action_insert",
             "child_context_snapshots",
             "child_context_snapshots_source_idx",
             "validate_child_context_snapshot_insert",

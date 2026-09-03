@@ -392,6 +392,12 @@ fn delete_agent_tree_records(
         .map_err(storage_error)?;
     connection
         .execute(
+            "DELETE FROM agent_tree_run_stops WHERE root_agent_id = ?1",
+            [root_agent_id],
+        )
+        .map_err(storage_error)?;
+    connection
+        .execute(
             "DELETE FROM agent_wake_requests WHERE root_agent_id = ?1",
             [root_agent_id],
         )

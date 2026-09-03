@@ -2985,6 +2985,28 @@ async fn cancelling_a_dispatched_mcp_call_finishes_the_agent_run_without_model_r
         .unwrap();
     invoker.wait_until_invocation_started().await;
 
+    let storage_id = pending_action_storage_id(&turn.run_id, &pending[0].action_id);
+    {
+        let pending_actions = service
+            .pending_actions
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        assert_eq!(pending_actions.len(), 1);
+        assert_eq!(
+            pending_actions[&storage_id].snapshot.status,
+            PendingActionStatus::Executing,
+            "dispatch authority must update the shared pending projection before external execution"
+        );
+    }
+    assert_eq!(
+        storage
+            .get_pending_agent_action(&storage_id)
+            .unwrap()
+            .expect("executing MCP action remains durable")
+            .status,
+        "executing"
+    );
+
     assert!(service.cancel_run(&turn.run_id));
     let (done, seen) = wait_for_notification_matching_with_seen(&mut receiver, |notification| {
         notification["params"]["type"] == "done" && notification["params"]["status"] == "cancelled"

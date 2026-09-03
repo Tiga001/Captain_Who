@@ -10,6 +10,7 @@ mod node_records;
 mod nodes;
 mod permissions;
 mod settlement;
+mod tree_cancellation;
 mod wake_commands;
 mod wake_projection;
 mod wake_records;
@@ -19,8 +20,8 @@ mod wakes;
 pub use mailbox::{
     acknowledge_agent_message_with_projection, acknowledge_agent_task_with_projection_and_wake,
     claim_next_agent_message, conversation_message_origin, conversation_message_origins,
-    enqueue_agent_message, follow_up_agent, get_agent_message, renew_agent_message_lease,
-    send_agent_message,
+    enqueue_agent_message, follow_up_agent, follow_up_agent_from_run, get_agent_message,
+    renew_agent_message_lease, send_agent_message, send_agent_message_from_run,
 };
 pub(crate) use mailbox::{
     create_initial_agent_task_and_wake_in_transaction,
@@ -44,7 +45,16 @@ pub use permissions::{
 pub(crate) use permissions::{
     inherit_agent_permissions_in_transaction, record_agent_effective_permissions_in_transaction,
 };
-pub use settlement::{finish_agent_turn_with_result, finish_agent_wake_with_result};
+pub use settlement::{
+    finish_agent_turn_with_result, finish_agent_wake_with_result, settle_tree_stopped_active_wake,
+};
+pub(crate) use tree_cancellation::ensure_agent_tree_origin_run_can_schedule_in_transaction;
+pub use tree_cancellation::{
+    begin_agent_tree_run_stop_by_root_agent, begin_agent_tree_run_stop_by_root_conversation,
+    cancel_agent_tree_wakes_by_root_agent, cancel_agent_tree_wakes_by_root_conversation,
+    get_agent_tree_run_stop, reinforce_agent_tree_run_stop, ActiveAgentTreeWake,
+    AgentTreeRunStopCancellation, AgentTreeRunStopRecord, AgentTreeWakeCancellationBatch,
+};
 pub(crate) use wake_projection::project_agent_wake_source_in_transaction;
 pub(crate) use wake_resolution::{
     resolve_active_child_wake_bundle_by_identity, resolve_child_spawn_by_creation_request,
@@ -54,7 +64,9 @@ pub(crate) use wake_resolution::{
 pub(crate) use wakes::transition_agent_wake_in_connection;
 pub use wakes::{
     claim_next_agent_wake, claim_next_dispatchable_agent_wake, enqueue_agent_wake, get_agent_wake,
-    interrupt_agent_execution, recover_agent_wakes, renew_agent_wake_lease, transition_agent_wake,
+    interrupt_agent_execution, interrupt_agent_execution_with_receipt,
+    list_undispatched_agent_interrupts, mark_agent_interrupt_dispatched, recover_agent_wakes,
+    renew_agent_wake_lease, transition_agent_wake,
 };
 
 #[cfg(test)]

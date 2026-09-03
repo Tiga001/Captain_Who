@@ -103,14 +103,16 @@ pub(crate) fn handle_agent_cancel_run(
         Err(message) => return response_error(Some(id), -32602, message),
     };
 
-    let cancelled = agent_service.cancel_run(&input.run_id);
-    response_success(
-        id,
-        AgentCancelRunResponse {
-            run_id: input.run_id,
-            cancelled,
-        },
-    )
+    match agent_service.cancel_run_checked(&input.run_id) {
+        Ok(cancelled) => response_success(
+            id,
+            AgentCancelRunResponse {
+                run_id: input.run_id,
+                cancelled,
+            },
+        ),
+        Err(error) => agent_service_error_response(id, error),
+    }
 }
 
 pub(crate) fn handle_agent_list_command_sessions(

@@ -43,8 +43,13 @@ const DATABASE_FILE_NAME: &str = "storage.sqlite";
 const BACKUP_DIRECTORY_NAME: &str = "storage-backups";
 const CONFIRM_RESET_FLAG: &str = "--confirm-reset";
 const APP_DATA_ROOT_FLAG: &str = "--app-data-root";
+// v31 and v32 have identical configuration-table contracts. This is intentionally an exact,
+// short-lived development-reset exception, not a general migration range.
+const PREVIOUS_PRESERVABLE_CONFIGURATION_SCHEMA_VERSION: i32 = 31;
 const SQLITE_TRANSIENT_SUFFIXES: [&str; 3] = ["-journal", "-wal", "-shm"];
 const EXACT_CONFIGURATION_TABLES: &[&str] = &[
+    "mcp_builtin_capability_metadata",
+    "mcp_builtin_capability_policies",
     "image_generation_profiles",
     "image_generation_credential_staging",
     "image_generation_credential_cleanup",
@@ -62,6 +67,8 @@ const PRESERVED_CONFIGURATION_TABLES: &[&str] = &[
     "mcp_registry_metadata",
     "mcp_registry_servers",
     "mcp_registry_model_namespaces",
+    "mcp_builtin_capability_metadata",
+    "mcp_builtin_capability_policies",
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -428,6 +435,7 @@ fn storage_schema_version(connection: &Connection) -> io::Result<i32> {
 
 fn can_preserve_development_configuration(schema_version: i32) -> bool {
     schema_version == mycopilot_core::storage::migrations::STORAGE_SCHEMA_VERSION
+        || schema_version == PREVIOUS_PRESERVABLE_CONFIGURATION_SCHEMA_VERSION
 }
 
 fn validate_model_configuration_schema(source: &Connection) -> io::Result<()> {
@@ -610,7 +618,8 @@ fn restore_exact_configuration_tables(
     transaction.commit().map_err(redacted_storage_error)
 }
 
-/// Preserves UI configuration only from the current development schema.
+/// Preserves UI configuration only from the current development schema or the explicitly audited
+/// v31 configuration contract.
 ///
 /// Conversation, checkpoint, pending-action, and Agent runtime records are intentionally never
 /// decoded or migrated by this reset utility.
@@ -624,7 +633,7 @@ fn load_ui_preferences_for_development_reset(
     }
 
     Err(invalid_data(
-        "only the current development UI preference schema can be preserved",
+        "only the current or explicitly audited previous development UI preference schema can be preserved",
     ))
 }
 
@@ -638,14 +647,15 @@ fn load_browser_download_settings_for_development_reset(
     }
 
     Err(invalid_data(
-        "only the current development browser download settings can be preserved",
+        "only the current or explicitly audited previous development browser download settings schema can be preserved",
     ))
 }
 
 /// Reads only the configuration fields that the explicit development reset preserves.
 ///
-/// The current schema is copied semantically. Retired schemas are never decoded here or during
-/// application startup.
+/// The current schema and the explicitly audited v31 configuration contract are copied
+/// semantically. No conversation/runtime state is decoded or migrated here or during application
+/// startup.
 fn load_model_settings_for_development_reset(
     connection: &Connection,
 ) -> io::Result<Option<ModelSettingsRecord>> {
@@ -1221,6 +1231,7 @@ fn model_settings_values_match(
                     && expected.api_token_override == restored.api_token_override
                     && expected.supports_image == restored.supports_image
                     && expected.context_window_tokens == restored.context_window_tokens
+                    && expected.provider_profile_config == restored.provider_profile_config
                     && expected.input_price == restored.input_price
                     && expected.cached_input_price == restored.cached_input_price
                     && expected.output_price == restored.output_price
@@ -1615,8 +1626,12 @@ mod tests {
     };
     use mycopilot_core::storage::image_generation_repository::IMAGE_GENERATION_PROFILE_SCHEMA_VERSION;
     use mycopilot_core::storage::models::{
-        BrowserDownloadLocationMode, BrowserDownloadSettingsUpdate, ModelConfigRecord,
-        ProjectRecord, BROWSER_DOWNLOAD_SCHEMA_VERSION,
+        BrowserDownloadLocationMode, BrowserDownloadSettingsUpdate, BrowserLinkOpenTarget,
+        ChatConversationRecord, ChatMessageRecord, ModelConfigRecord, ProjectRecord,
+        BROWSER_DOWNLOAD_SCHEMA_VERSION,
+    };
+    use mycopilot_core::storage::notification_repository::{
+        NotificationSettingsUpdate, NotificationSettingsUpdateOutcome,
     };
     use mycopilot_mcp_client::{
         McpApprovalMode, McpServerConfig, McpServerId, McpServerScope, McpStdioConfig,
@@ -1673,6 +1688,9 @@ mod tests {
             .unwrap();
         let mut ui_preferences = storage.load_ui_preferences().unwrap();
         ui_preferences.profile_display_name = "Reset Test".to_string();
+        ui_preferences.profile_handle = "RESET_V31".to_string();
+        ui_preferences.translucent_sidebar = true;
+        ui_preferences.translucent_sidebar_transparency = 73;
         storage.save_ui_preferences(ui_preferences).unwrap();
         let mut prompt_preferences = storage.load_agent_prompt_preferences().unwrap();
         prompt_preferences.custom_instructions = "Preserve this preference".to_string();
@@ -1714,6 +1732,49 @@ mod tests {
                 pinned_at: None,
             })
             .unwrap();
+        storage
+            .save_conversation(ChatConversationRecord {
+                id: "disposable-conversation".to_string(),
+                project_id: Some("project-a".to_string()),
+                model_id: Some("model-a".to_string()),
+                title: "Disposable conversation".to_string(),
+                messages: vec![
+                    ChatMessageRecord {
+                        id: "disposable-user-message".to_string(),
+                        role: "user".to_string(),
+                        content: "discard this conversation".to_string(),
+                        created_at: 2,
+                        status: Some("sent".to_string()),
+                        attachments: Vec::new(),
+                        agent_run_json: None,
+                        ui_state_json: None,
+                    },
+                    ChatMessageRecord {
+                        id: "disposable-assistant-message".to_string(),
+                        role: "assistant".to_string(),
+                        content: "discard this runtime".to_string(),
+                        created_at: 3,
+                        status: Some("pending".to_string()),
+                        attachments: Vec::new(),
+                        agent_run_json: None,
+                        ui_state_json: None,
+                    },
+                ],
+                created_at: 2,
+                updated_at: 3,
+                pinned_at: None,
+                archived_at: None,
+                unread_at: None,
+            })
+            .unwrap();
+        let trace = mycopilot_core::ConversationTraceSnapshot::default().in_progress_trace(
+            "disposable-run",
+            "disposable-conversation",
+            "disposable-assistant-message",
+        );
+        storage
+            .append_in_progress_conversation_turn_trace(&trace, 3, 3)
+            .unwrap();
         let download_directory = root.join("Downloads");
         fs::create_dir_all(&download_directory).unwrap();
         storage
@@ -1726,7 +1787,53 @@ mod tests {
                 updated_at: 7,
             })
             .unwrap();
+        let browser_preferences = storage.load_browser_preferences().unwrap();
+        storage
+            .save_browser_preferences(BrowserPreferencesUpdate {
+                schema_version: BROWSER_DATA_SCHEMA_VERSION,
+                link_open_target: BrowserLinkOpenTarget::Builtin,
+                expected_revision: browser_preferences.revision,
+                updated_at: 8,
+            })
+            .unwrap();
+        let notification_settings = storage.load_notification_settings().unwrap();
+        assert!(matches!(
+            storage
+                .update_notification_settings(&NotificationSettingsUpdate {
+                    enabled: false,
+                    sound_enabled: false,
+                    show_task_content: false,
+                    human_completed_enabled: false,
+                    human_failed_enabled: true,
+                    human_approval_enabled: false,
+                    human_cancelled_enabled: true,
+                    expected_revision: notification_settings.revision,
+                    updated_at: 9,
+                })
+                .unwrap(),
+            NotificationSettingsUpdateOutcome::Updated(_)
+        ));
         drop(storage);
+
+        let connection = Connection::open(root.join(DATABASE_FILE_NAME)).unwrap();
+        connection
+            .execute(
+                "INSERT INTO mcp_builtin_capability_metadata (
+                     singleton, schema_version, revision_watermark
+                 ) VALUES (1, 1, 1)",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO mcp_builtin_capability_policies (
+                     schema_version, capability_id, user_allowed,
+                     policy_version, policy_revision
+                 ) VALUES (1, 'browser_automation', 1, 1, 1)",
+                [],
+            )
+            .unwrap();
+        drop(connection);
 
         let registry = SqliteMcpRegistry::open(root.join(DATABASE_FILE_NAME)).unwrap();
         registry
@@ -1750,6 +1857,52 @@ mod tests {
             .unwrap();
     }
 
+    fn mark_fixture_as_schema_v31(database: &Path) {
+        let connection = Connection::open(database).unwrap();
+        connection
+            .execute_batch(
+                "DROP TRIGGER prevent_stopped_agent_run_pending_action_insert;
+                 DROP TRIGGER prevent_agent_tree_run_stop_member_update;
+                 DROP TRIGGER validate_agent_tree_run_stop_member_insert;
+                 DROP TRIGGER validate_agent_tree_run_stop_insert;
+                 DROP TRIGGER prevent_agent_tree_run_stop_update;
+                 DROP INDEX agent_tree_run_stop_members_run;
+                 DROP INDEX agent_tree_run_stops_root;
+                 DROP TABLE agent_tree_run_stop_members;
+                 DROP TABLE agent_tree_run_stops;",
+            )
+            .unwrap();
+        connection
+            .pragma_update(
+                None,
+                "user_version",
+                PREVIOUS_PRESERVABLE_CONFIGURATION_SCHEMA_VERSION,
+            )
+            .unwrap();
+        assert_eq!(
+            storage_schema_version(&connection).unwrap(),
+            PREVIOUS_PRESERVABLE_CONFIGURATION_SCHEMA_VERSION
+        );
+        let v32_table = connection
+            .query_row(
+                "SELECT name FROM sqlite_schema WHERE type = 'table' AND name = 'agent_tree_run_stops'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .unwrap();
+        assert_eq!(v32_table, None, "the v31 fixture must omit v32-only DDL");
+    }
+
+    fn semantic_configuration_json(value: &impl serde::Serialize) -> serde_json::Value {
+        let mut value = serde_json::to_value(value).unwrap();
+        value
+            .as_object_mut()
+            .expect("configuration records serialize as JSON objects")
+            .remove("updatedAt");
+        value
+    }
+
     #[test]
     fn parser_requires_an_explicit_absolute_root() {
         let missing = parse_options(Vec::<OsString>::new()).unwrap_err();
@@ -1763,6 +1916,18 @@ mod tests {
         .unwrap();
         assert!(parsed.confirm_reset);
         assert!(parsed.app_data_root.is_absolute());
+    }
+
+    #[test]
+    fn configuration_preservation_is_limited_to_v32_and_v31() {
+        assert_eq!(
+            mycopilot_core::storage::migrations::STORAGE_SCHEMA_VERSION,
+            32
+        );
+        assert!(can_preserve_development_configuration(32));
+        assert!(can_preserve_development_configuration(31));
+        assert!(!can_preserve_development_configuration(30));
+        assert!(!can_preserve_development_configuration(33));
     }
 
     #[test]
@@ -1785,7 +1950,7 @@ mod tests {
     }
 
     #[test]
-    fn reset_preserves_non_default_image_profiles_exactly() {
+    fn reset_preserves_v31_non_default_image_profiles_exactly() {
         let fixture = tempfile::tempdir().unwrap();
         let storage = StorageService::open(&fixture.path().join(DATABASE_FILE_NAME)).unwrap();
         let extra_profile = ImageGenerationProfileRecord {
@@ -1815,6 +1980,8 @@ mod tests {
             .unwrap()
             .unwrap();
         drop(storage);
+
+        mark_fixture_as_schema_v31(&fixture.path().join(DATABASE_FILE_NAME));
 
         let report = execute(options(fixture.path(), true)).unwrap();
 
@@ -2069,7 +2236,7 @@ mod tests {
     }
 
     #[test]
-    fn confirmed_reset_preserves_a_development_image_credential_through_reconciliation() {
+    fn confirmed_reset_preserves_a_v31_image_credential_through_reconciliation() {
         let fixture = tempfile::tempdir().unwrap();
         let database = fixture.path().join(DATABASE_FILE_NAME);
         let storage = StorageService::open(&database).unwrap();
@@ -2117,6 +2284,8 @@ mod tests {
         drop(storage);
         assert!(credentials.get(&reference).unwrap().is_some());
 
+        mark_fixture_as_schema_v31(&database);
+
         execute(options(fixture.path(), true)).unwrap();
 
         let storage = Arc::new(StorageService::open(&database).unwrap());
@@ -2134,19 +2303,146 @@ mod tests {
     }
 
     #[test]
-    fn confirmed_reset_rebuilds_previous_schema_with_defaults_after_creating_a_backup() {
+    fn confirmed_reset_preserves_v31_configuration_and_discards_conversation_runtime() {
         let fixture = tempfile::tempdir().unwrap();
-        populated_storage(fixture.path(), "older-schema-reset-test-token");
+        let secret = "v31-preserved-model-token";
+        populated_storage(fixture.path(), secret);
         let database = fixture.path().join(DATABASE_FILE_NAME);
+        let storage = StorageService::open(&database).unwrap();
+        let expected_models = storage
+            .load_model_settings_snapshot()
+            .unwrap()
+            .unwrap()
+            .settings;
+        let expected_ui = semantic_configuration_json(&storage.load_ui_preferences().unwrap());
+        let expected_prompt =
+            semantic_configuration_json(&storage.load_agent_prompt_preferences().unwrap());
+        let expected_notifications = storage.load_notification_settings().unwrap();
+        let expected_downloads = storage.load_browser_download_settings().unwrap();
+        let expected_browser = storage.load_browser_preferences().unwrap();
+        let expected_image = storage
+            .load_image_generation_profile(DEFAULT_IMAGE_GENERATION_PROFILE_ID)
+            .unwrap()
+            .unwrap();
+        drop(storage);
+        let source = Connection::open(&database).unwrap();
+        let expected_exact_tables = snapshot_exact_configuration_tables(&source).unwrap();
+        drop(source);
+        let registry = SqliteMcpRegistry::open(&database).unwrap();
+        let expected_mcp = registry.list().unwrap();
+        assert_eq!(expected_mcp.len(), 1);
+        let expected_namespace = expected_mcp[0].model_namespace.clone();
+        drop(registry);
+
+        mark_fixture_as_schema_v31(&database);
+
+        let report = execute(options(fixture.path(), true)).unwrap();
+
+        assert!(report.confirmed);
+        assert!(report
+            .backup_path
+            .as_ref()
+            .is_some_and(|path| path.is_file()));
+        assert!(report.preserved_configuration);
+        assert_eq!(report.model_count, 1);
+        assert_eq!(report.skill_override_count, 1);
+        assert_eq!(report.mcp_server_count, 1);
+        assert_eq!(report.image_generation_profile_count, 1);
+        assert!(report.discarded_conversation_rows >= 4);
+        assert!(!report.render().contains(secret));
+
+        let storage = StorageService::open(&database).unwrap();
+        let restored_models = storage
+            .load_model_settings_snapshot()
+            .unwrap()
+            .unwrap()
+            .settings;
+        assert!(model_settings_values_match(
+            &expected_models,
+            &restored_models
+        ));
+        assert_eq!(restored_models.api_token, secret);
+        assert_eq!(restored_models.search_mode, "tavily");
+        assert_eq!(restored_models.tavily_api_key, format!("search-{secret}"));
+        assert_eq!(
+            semantic_configuration_json(&storage.load_ui_preferences().unwrap()),
+            expected_ui
+        );
+        assert_eq!(
+            semantic_configuration_json(&storage.load_agent_prompt_preferences().unwrap()),
+            expected_prompt
+        );
+        assert_eq!(
+            storage.load_notification_settings().unwrap(),
+            expected_notifications
+        );
+        assert_eq!(
+            storage.load_browser_download_settings().unwrap(),
+            expected_downloads
+        );
+        let restored_browser = storage.load_browser_preferences().unwrap();
+        assert_eq!(
+            restored_browser.link_open_target,
+            expected_browser.link_open_target
+        );
+        assert_eq!(
+            storage
+                .load_image_generation_profile(DEFAULT_IMAGE_GENERATION_PROFILE_ID)
+                .unwrap()
+                .as_ref(),
+            Some(&expected_image)
+        );
+        assert!(
+            !storage
+                .load_skill_enablement(&["skill-a".to_string()])
+                .unwrap()["skill-a"]
+        );
+        assert!(storage.load_projects().unwrap().is_empty());
+        assert!(storage.load_conversations().unwrap().is_empty());
+        drop(storage);
+
+        let registry = SqliteMcpRegistry::open(&database).unwrap();
+        let restored_mcp = registry.list().unwrap();
+        assert_eq!(restored_mcp.len(), 1);
+        assert_eq!(restored_mcp[0].config, expected_mcp[0].config);
+        assert_eq!(restored_mcp[0].model_namespace, expected_namespace);
+        drop(registry);
 
         let connection = Connection::open(&database).unwrap();
-        connection
-            .pragma_update(
-                None,
-                "user_version",
-                mycopilot_core::storage::migrations::STORAGE_SCHEMA_VERSION - 1,
-            )
-            .unwrap();
+        assert_eq!(
+            storage_schema_version(&connection).unwrap(),
+            mycopilot_core::storage::migrations::STORAGE_SCHEMA_VERSION
+        );
+        assert_eq!(
+            snapshot_exact_configuration_tables(&connection).unwrap(),
+            expected_exact_tables
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT user_allowed, policy_revision
+                     FROM mcp_builtin_capability_policies
+                     WHERE capability_id = 'browser_automation'",
+                    [],
+                    |row| Ok((row.get::<_, bool>(0)?, row.get::<_, u64>(1)?)),
+                )
+                .unwrap(),
+            (true, 1)
+        );
+        assert_eq!(
+            count_rows_if_table_exists(&connection, "conversation_turn_traces").unwrap(),
+            0
+        );
+        ensure_only_configuration_tables_have_rows(&connection).unwrap();
+    }
+
+    #[test]
+    fn confirmed_reset_rebuilds_v30_with_defaults_instead_of_decoding_configuration() {
+        let fixture = tempfile::tempdir().unwrap();
+        populated_storage(fixture.path(), "v30-must-not-be-decoded-token");
+        let database = fixture.path().join(DATABASE_FILE_NAME);
+        let connection = Connection::open(&database).unwrap();
+        connection.pragma_update(None, "user_version", 30).unwrap();
         drop(connection);
 
         let report = execute(options(fixture.path(), true)).unwrap();
@@ -2164,6 +2460,7 @@ mod tests {
         let storage = StorageService::open(&database).unwrap();
         assert!(storage.load_model_settings_snapshot().unwrap().is_none());
         assert!(storage.load_projects().unwrap().is_empty());
+        assert!(storage.load_conversations().unwrap().is_empty());
     }
 
     #[test]

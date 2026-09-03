@@ -2,7 +2,7 @@
 status: current
 audience: developers/maintainers
 owner: engineering
-last_verified: 2026-08-31
+last_verified: 2026-09-03
 ---
 
 # Multi-Agent 当前架构
@@ -118,7 +118,7 @@ Wake 表示“需要一次执行机会”，不是线程或可无条件重试的
 | `followup_task`   | 向严格后代分配、继续或返工      | 创建可靠执行机会，但不与目标现有 Turn 并发                                  |
 | `wait_agent`      | first-ready 等待消息/结果/状态  | 1–32 targets；默认 30 秒；0 为立即快照；最长 300 秒                         |
 | `list_agents`     | 返回授权范围内简洁树投影        | 只读，不泄漏内部 lease/checkpoint                                           |
-| `interrupt_agent` | 中断严格后代当前任务            | 不删除节点、Conversation 或历史；request receipt 保证幂等                   |
+| `interrupt_agent` | 中断严格后代当前任务            | 不删除节点、Conversation 或历史；回执与实际终态分离且可幂等恢复             |
 
 不存在 `wait_any` 或第七个协作工具。只有 Host 为本 Turn 注入可信协作 capability 时才整组注册六工具。
 
@@ -176,6 +176,27 @@ Agent Human Turn、Automation HumanRoot Turn、子 Agent Wake 和重启恢复都
 5. admission 后无可恢复 checkpoint 且副作用可能发生：写 `outcome_unknown`，绝不盲重放。
 6. recovery 不是只在启动时扫描一次；周期扫描覆盖“新进程启动时旧 lease 尚未过期”的窗口。
 
+### 取消与显式中断
+
+Renderer/Preload 的 `cancelRun(runId)` 契约不变。Host 将它解释为对**当前精确根 Run**的树级停止：先从受信
+Conversation 解析并授权 root identity，再在 SQLite 中写入 durable tree fence。只有请求时仍处于
+`in_progress` 的那个根 Run 可以建立 fence；迟到的旧 `runId` 不得停止同一根 Agent 后续显式启动的新 Turn。
+
+fence 在同一事务冻结根 Run 以及当时已接纳的活跃后代 Run。它不是对 Agent 节点的永久禁用，也不会在之后扩张
+成员范围；停止完成后，用户或模型仍可通过新的显式 Turn / `followup_task` 复用原节点。冻结成员的
+`spawn_agent`、`send_message`、`followup_task` 以及 pending action/Approval continuation dispatch 都必须以
+caller 的 exact run identity 查询 fence 并 fail closed，避免停止与新工作入队或外部副作用 dispatch 竞态。
+
+被 fence 覆盖的子 Run 无论最终由取消观察器还是终态竞态结算，都不得创建 deferred parent Wake。terminal result
+和 Mailbox 事实仍可持久化供 `wait_agent`、observer 与审计读取，但不能因为子节点晚到结算而重新唤醒已经停止的
+父 Run。
+
+`interrupt_agent` 是另一条、只面向一个严格后代当前执行的显式控制路径。返回
+`interrupt_requested` 只表示 Host 已命中该 exact run 的运行时取消入口，不表示 Wake/Trace 已经完成
+`interrupted` 结算；调用方和 UI 必须继续从持久状态观察终态。receipt 在运行时投递成功后写入
+`dispatched_at`：启动恢复只重投没有该标记的 receipt，已有标记的请求只观察/补齐 durable settlement，避免把同一
+中断当成新的业务动作。Agent 节点、Conversation 和历史均不因中断删除，后续新任务仍可显式唤醒它。
+
 ### Wait
 
 `AgentWaitKernel` 执行：检查停止信号 → 查 SQLite → 注册一次性通知 → 再检查 → 再查 SQLite。之后用 50ms durable poll 保证跨进程提交或通知丢失仍可见。
@@ -203,21 +224,21 @@ notification 只是失效信号。Renderer 通过 tree snapshot 与 `agent.colla
 
 ## 8. Schema
 
-当前 canonical storage 是 **v27**。唯一真源：
+当前 canonical storage 是 **v32**。唯一真源：
 
 ```rust
-pub const STORAGE_SCHEMA_VERSION: i32 = 27;
+pub const STORAGE_SCHEMA_VERSION: i32 = 32;
 ```
 
-版本不等于 27、catalog fingerprint 不匹配、非空未版本化库或外键违规都会返回 `development_storage_schema_reset_required`，原库不做原地改写。历史文档中的 v7/v8/v10/v11/v17/v19/v20/v22/v23/v24/v25/v26 只是 rollout 阶段标签，不是当前兼容声明；release runner 的 storage step 已标为 canonical v27。
+版本不等于 32、catalog fingerprint 不匹配、非空未版本化库或外键违规都会返回 `development_storage_schema_reset_required`，原库不做原地改写。历史文档中的 v7/v8/v10/v11/v17/v19/v20/v22/v23/v24/v25/v26 只是 rollout 阶段标签，不是当前兼容声明；release runner 的 storage step 已标为 canonical v32。
 
 ## 9. 代码真源
 
 - Tool/Host 契约：`crates/core/src/agent_collaboration_harness.rs`、`crates/core/src/tools/agent_collaboration.rs`
-- Graph 与配额：`crates/core/src/agent_graph.rs`、`crates/core/src/storage/agent_graph_repository.rs`
+- Graph、配额与 durable tree fence：`crates/core/src/agent_graph.rs`、`crates/core/src/storage/agent_graph_repository.rs`、`crates/core/src/storage/agent_graph_repository/tree_cancellation.rs`
 - canonical schema：`crates/core/src/storage/canonical_schema.sql`、`migrations.rs`
 - application service/Harness：`crates/core-server/src/application/agent_collaboration.rs`、`agent_harness.rs`
-- Dispatcher/Wait：`crates/core-server/src/application/agent_dispatcher.rs`、`agent_wait.rs`
+- Dispatcher/Wait/Host 取消：`crates/core-server/src/application/agent_dispatcher.rs`、`agent_wait.rs`、`agent/run_lifecycle.rs`
 - 授权：`crates/core-server/src/application/collaboration_authorization.rs`
 - RPC/DTO：`crates/protocol-rs/src/agent_collaboration.rs`、`packages/protocol/src/agentCollaboration.ts`
 - Renderer：`src/renderer/src/features/agentCollaboration` 与 `ConversationSurface`
@@ -265,5 +286,5 @@ pnpm exec vitest run --project browser src/renderer/src/features/agentCollaborat
 - [ ] 新 UI 状态是否来自持久 semantic event，而不是模型文本或时间戳？
 - [ ] 新 tree-shared 资源是否只从 Host-resolved root identity 授权，并覆盖 root/child/sibling 与跨树/普通 Conversation 负向测试？
 - [ ] terminal parent Timeline 是否在 final stream 开始处冻结，且后续事件只留在 event log/Agent Center？
-- [ ] 是否更新 schema v27 后继版本、fingerprint、reset、双语言 fixture 和 release gate？
+- [ ] 是否更新 schema v32 后继版本、fingerprint、reset、双语言 fixture 和 release gate？
 - [ ] 是否同步更新当前文档；历史轮次只在 archive 中追加注释？

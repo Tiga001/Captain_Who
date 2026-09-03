@@ -136,8 +136,9 @@ Renderer 尚未 ready，Main 只以 FIFO 保留最多 32 个 pending open reques
 
 SQLite 是大部分领域的恢复真源。关键副作用使用 receipt、CAS、lease、checkpoint、FileChange delete journal
 或 `outcome_unknown` 防止崩溃后盲目重放。通知只是失效信号，不能替代持久状态。schema/catalog 不匹配时
-fail closed 并要求显式开发重置，不在启动时偷偷改写旧库。开发 reset 只在当前/紧邻 schema 保留明确
-allowlist；notification facts、Browser history/download records、Agent templates 和 FileChange 运行/审计状态不会迁移。
+fail closed 并要求显式开发重置，不在启动时偷偷改写旧库。开发 reset 只在当前 v32 与配置契约经核验相同的
+固定 v31 保留明确 allowlist；该窗口不会随版本号自动滑动。notification facts、Browser history/download
+records、Agent templates 和 FileChange 运行/审计状态不会迁移。
 
 删除项目、Conversation 或 Agent 树时必须遵守领域所有权和外键规则；文件数据根中的孤儿对象只由受管
 清理策略处理，不根据 Renderer 猜测直接删除。

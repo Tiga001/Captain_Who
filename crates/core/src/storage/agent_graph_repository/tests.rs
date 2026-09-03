@@ -8,11 +8,12 @@ use crate::{
     AgentCommandSafetyPolicy, AgentDisplayStatus, AgentEffectivePermissionSnapshot,
     AgentGraphError, AgentLifecycle, AgentMailboxDeliveryStatus, AgentMailboxKind,
     AgentModelSelectionSnapshot, AgentNodeRecord, AgentPatchPermission, AgentPermissions,
-    AgentReadPermission, AgentWakeRecoveryAction, AgentWakeStatus, AgentWritePermission,
-    ConversationMessageOrigin, CreateAgentNodeInput, EnqueueAgentMessageInput,
-    EnqueueAgentWakeInput, EnsureRootAgentInput, FinishAgentTurnResultInput,
-    FinishAgentWakeWithResultInput, IdempotentCreate, InterruptAgentExecutionOutcome,
-    SendAgentMessageRequest, AGENT_EFFECTIVE_PERMISSION_SNAPSHOT_SCHEMA_VERSION,
+    AgentReadPermission, AgentTreeStoppedWakeSettlementOutcome, AgentWakeRecoveryAction,
+    AgentWakeStatus, AgentWritePermission, ConversationMessageOrigin, CreateAgentNodeInput,
+    EnqueueAgentMessageInput, EnqueueAgentWakeInput, EnsureRootAgentInput,
+    FinishAgentTurnResultInput, FinishAgentWakeWithResultInput, IdempotentCreate,
+    InterruptAgentExecutionOutcome, SendAgentMessageRequest, UndispatchedAgentInterrupt,
+    AGENT_EFFECTIVE_PERMISSION_SNAPSHOT_SCHEMA_VERSION,
 };
 use rusqlite::{params, Connection, TransactionBehavior};
 
@@ -251,3 +252,4 @@ mod delivery_lifecycle;
 mod mailbox_projection;
 mod nodes_permissions;
 mod result_recovery;
+mod tree_cancellation;

@@ -24,10 +24,10 @@ last_verified: 2026-08-31
 
 ## Schema 发布策略
 
-截至本次核验，当前唯一受支持的 canonical schema 是 **v27**（SQLite `PRAGMA user_version = 27`）：
+截至本次核验，当前唯一受支持的 canonical schema 是 **v32**（SQLite `PRAGMA user_version = 32`）：
 
-- `STORAGE_SCHEMA_VERSION = 27`；
-- canonical schema fingerprint 为 `sha256:b2ce395d684d40fa44f0c0274441c57606d4d2aa84f8e196f67cf4a291885942`，由编译期常量和测试固定；
+- `STORAGE_SCHEMA_VERSION = 32`；
+- canonical schema fingerprint 为 `sha256:a8609147a40ce63fce3f8344131f3aea6c204eb490f59a7439bb87a959390c90`，由编译期常量和测试固定；
 - 空数据库在一个原子流程中建立完整当前 schema；
 - 非空的旧版、未知版或结构被篡改的开发数据库返回 `development_storage_schema_reset_required`；
 - 当前没有受支持的原地升级链。
@@ -35,6 +35,8 @@ last_verified: 2026-08-31
 版本号和 fingerprint 可能变化，维护时必须读取 `crates/core/src/storage/migrations.rs`，不得从本文复制常量到运行逻辑。发布说明可以记录版本，但架构文档应强调策略而非长期维护一张迁移历史表。
 
 开发库重置前应先关闭应用并备份数据根；优先使用受管 `storage:reset-dev` 流程。不要只删除 `storage.sqlite` 而遗留 attachments、artifacts、spool 或 lock 文件。
+
+`storage:reset-dev` 不是 schema migration：它始终新建 v32 数据库，且不恢复 Conversation、Project 或任何 Agent/runtime 记录。配置提取仅允许当前 v32，以及配置表契约已核验为相同的固定 v31；v30 及更旧版本使用当前默认配置。这个 v31 例外必须显式维护，不能随版本号自动滑动。
 
 ## 领域数据地图
 
@@ -61,7 +63,7 @@ DDL 按领域大致分为：
 
 ## Scheduled Automation 表组
 
-Automation 在 canonical schema v27 中使用四张表，完整列、CHECK、索引和 trigger 仍以 DDL 为准：
+Automation 在 canonical schema v32 中使用四张表，完整列、CHECK、索引和 trigger 仍以 DDL 为准：
 
 | 表                               | 权威内容                                                                        | 关键不变量                                                                                                        |
 | -------------------------------- | ------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
@@ -98,7 +100,7 @@ Automation 还要求两个专用原子边界：
 
 ## 启动与崩溃恢复
 
-Bootstrap 大致执行：解析数据根与锁、打开/校验 canonical schema v27、构造 repositories/services、加载 MCP Server/Provider/Skills/Artifact Runtime、随后运行领域 reconciliation。
+Bootstrap 大致执行：解析数据根与锁、打开/校验 canonical schema v32、构造 repositories/services、加载 MCP Server/Provider/Skills/Artifact Runtime、随后运行领域 reconciliation。
 
 恢复必须按“数据库已提交状态”判断，不按 Renderer 缓存判断。当前需要关注：
 
@@ -135,7 +137,7 @@ Automation 启动恢复区分 admission 前后：旧进程遗留的全部 `admit
 
 ## 不变量
 
-1. `canonical_schema.sql`、canonical schema v27 的 version 与 fingerprint 必须一致。
+1. `canonical_schema.sql`、canonical schema v32 的 version 与 fingerprint 必须一致。
 2. 非空非当前 schema fail closed，不自动执行未审计迁移。
 3. 所有领域对象在 service SQL 边界校验 conversation/project/Run 归属。
 4. 外部副作用与数据库提交之间的崩溃窗口必须有明确恢复状态。
@@ -179,7 +181,7 @@ Automation 启动恢复区分 admission 前后：旧进程遗留的全部 `admit
 
 ## 变更检查表
 
-- [ ] 修改 `canonical_schema.sql` 后同步 canonical version、fingerprint 和 fresh-schema 测试；若版本不再是 v27，同时更新本文当前快照。
+- [ ] 修改 `canonical_schema.sql` 后同步 canonical version、fingerprint 和 fresh-schema 测试；若版本不再是 v32，同时更新本文当前快照。
 - [ ] 明确旧数据库行为；没有经批准的迁移链时保持 reset-required。
 - [ ] 新表/列定义 owner、FK、唯一键、索引、删除/保留和敏感分类。
 - [ ] 跨表操作在一个 service 事务中完成，并有冲突/幂等测试。

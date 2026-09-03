@@ -519,6 +519,46 @@ pub fn transition_pending_action(
     )
 }
 
+/// Claims authority to dispatch an approved action or model continuation only while its exact
+/// Run is not covered by a durable Agent-tree stop. Callers must execute this inside the same
+/// immediate transaction as any paired audit/Wake mutation.
+pub fn transition_pending_action_for_dispatch(
+    connection: &Connection,
+    action_id: &str,
+    expected_status: &str,
+    status: &str,
+    agent_input_json: &str,
+    updated_at: i64,
+) -> rusqlite::Result<usize> {
+    connection.execute(
+        "
+        UPDATE agent_pending_actions
+        SET status = ?3,
+            target_status = CASE WHEN ?3 = 'pending' THEN NULL ELSE target_status END,
+            agent_input_json = ?4,
+            updated_at = ?5
+        WHERE action_id = ?1
+          AND status = ?2
+          AND NOT EXISTS (
+              SELECT 1 FROM agent_tree_run_stops AS stop
+              WHERE stop.run_id = agent_pending_actions.run_id
+          )
+          AND (
+              ?3 = 'pending'
+              OR (?3 IN ('approved', 'executing') AND target_status IS NULL)
+              OR (?3 IN ('rejected', 'cancelled', 'completed', 'failed') AND target_status = ?3)
+          )
+        ",
+        params![
+            action_id,
+            expected_status,
+            status,
+            agent_input_json,
+            updated_at
+        ],
+    )
+}
+
 pub fn set_pending_action_target_status(
     connection: &Connection,
     action_id: &str,

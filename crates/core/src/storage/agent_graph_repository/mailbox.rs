@@ -38,7 +38,37 @@ pub fn send_agent_message(
     input: &SendAgentMessageRequest,
     created_at: i64,
 ) -> Result<AgentMessageDispatch, AgentGraphError> {
+    send_agent_message_internal(connection, input, None, created_at)
+}
+
+/// Run-bound application message used by collaboration Tool execution.
+///
+/// The durable stop check and Mailbox insert share one immediate transaction. A root-tree stop
+/// therefore either observes this committed message or prevents a stopped Turn from creating it.
+pub fn send_agent_message_from_run(
+    connection: &mut Connection,
+    input: &SendAgentMessageRequest,
+    origin_run_id: &str,
+    created_at: i64,
+) -> Result<AgentMessageDispatch, AgentGraphError> {
+    send_agent_message_internal(connection, input, Some(origin_run_id), created_at)
+}
+
+fn send_agent_message_internal(
+    connection: &mut Connection,
+    input: &SendAgentMessageRequest,
+    origin_run_id: Option<&str>,
+    created_at: i64,
+) -> Result<AgentMessageDispatch, AgentGraphError> {
     let transaction = immediate(connection)?;
+    let sender = ensure_active_agent(&transaction, &input.sender_agent_id)?;
+    if let Some(origin_run_id) = origin_run_id {
+        super::ensure_agent_tree_origin_run_can_schedule_in_transaction(
+            &transaction,
+            origin_run_id,
+            &sender.agent_id,
+        )?;
+    }
     let message = enqueue_application_message_in_transaction(
         &transaction,
         input,
@@ -59,8 +89,37 @@ pub fn follow_up_agent(
     input: &SendAgentMessageRequest,
     created_at: i64,
 ) -> Result<AgentMessageDispatch, AgentGraphError> {
+    follow_up_agent_internal(connection, input, None, created_at)
+}
+
+/// Run-bound application follow-up used by collaboration Tool execution.
+///
+/// The origin-run stop guard shares the same immediate transaction as the message and Wake, so a
+/// concurrent root-tree stop either rejects this entire write or observes and cancels its Wake.
+pub fn follow_up_agent_from_run(
+    connection: &mut Connection,
+    input: &SendAgentMessageRequest,
+    origin_run_id: &str,
+    created_at: i64,
+) -> Result<AgentMessageDispatch, AgentGraphError> {
+    follow_up_agent_internal(connection, input, Some(origin_run_id), created_at)
+}
+
+fn follow_up_agent_internal(
+    connection: &mut Connection,
+    input: &SendAgentMessageRequest,
+    origin_run_id: Option<&str>,
+    created_at: i64,
+) -> Result<AgentMessageDispatch, AgentGraphError> {
     let transaction = immediate(connection)?;
     let sender = ensure_active_agent(&transaction, &input.sender_agent_id)?;
+    if let Some(origin_run_id) = origin_run_id {
+        super::ensure_agent_tree_origin_run_can_schedule_in_transaction(
+            &transaction,
+            origin_run_id,
+            &sender.agent_id,
+        )?;
+    }
     let target = ensure_active_agent(&transaction, &input.recipient_agent_id)?;
     if !is_strict_descendant(&transaction, &sender.agent_id, &target.agent_id)? {
         return Err(conflict(

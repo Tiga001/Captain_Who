@@ -265,6 +265,11 @@ impl AgentCollaborationHarnessAdapter {
         invocation: AgentCollaborationInvocation,
         control: AgentCollaborationExecutionControl,
     ) -> Result<AgentCollaborationExecutionOutput, AgentError> {
+        let cancellation = control.cancellation();
+        // Reject work which reached the Host after its owning Turn was already stopped. This is
+        // deliberately before caller materialization and permission refresh so a cancelled Tool
+        // invocation cannot create new durable collaboration state.
+        cancellation.check()?;
         if invocation.conversation_id != invocation.caller.conversation_id {
             return Err(permission_denied());
         }
@@ -282,6 +287,7 @@ impl AgentCollaborationHarnessAdapter {
                 invocation.effective_permissions,
             )
             .map_err(graph_error)?;
+        cancellation.check()?;
         let request_id = stable_request_id(&invocation.run_id, &invocation.tool_call_id);
         let output = match invocation.action {
             AgentCollaborationAction::Spawn(request) => {
@@ -309,8 +315,9 @@ impl AgentCollaborationHarnessAdapter {
                     .authorize_spawn(&caller.agent_id)
                     .and_then(|_| self.authorizer.authorize_message_size(&request.message))
                     .map_err(authorizer_error)?;
-                let child = ChildAgentFactory::new(Arc::clone(&self.storage))
-                    .create_child_with_expected_selector(
+                self.check_scheduling_precommit(&invocation.run_id, &cancellation)?;
+                let child = match ChildAgentFactory::new(Arc::clone(&self.storage))
+                    .create_child_with_expected_selector_from_run(
                         &CreateChildAgentInput {
                             parent_agent_id: caller.agent_id.clone(),
                             creation_request_id: request_id,
@@ -323,8 +330,22 @@ impl AgentCollaborationHarnessAdapter {
                         },
                         expected_model_capabilities,
                         expected_template_identity,
-                    )
-                    .map_err(spawn_error)?;
+                        &invocation.run_id,
+                    ) {
+                    Ok(child) => child,
+                    Err(error) => {
+                        if cancellation.is_cancelled()
+                            || self
+                                .service
+                                .agent_tree_run_is_stopped(&invocation.run_id)
+                                .map_err(unavailable)?
+                        {
+                            return Err(AgentError::cancelled());
+                        }
+                        return Err(spawn_error(error));
+                    }
+                };
+                self.finish_scheduling_commit(&invocation.run_id, &cancellation)?;
                 self.notify_work_available()?;
                 let model = child.agent.model_snapshot.ok_or_else(|| {
                     collaboration_error(
@@ -347,14 +368,31 @@ impl AgentCollaborationHarnessAdapter {
                 self.authorizer
                     .authorize_send(&caller.agent_id, &request.target_agent_id, &request.message)
                     .map_err(authorizer_error)?;
-                let dispatch = AgentMessagingService::new(Arc::clone(&self.storage))
-                    .send_message(&SendAgentMessageRequest {
-                        sender_agent_id: caller.agent_id,
-                        recipient_agent_id: request.target_agent_id,
-                        request_id,
-                        content: request.message,
-                    })
-                    .map_err(graph_error)?;
+                self.check_scheduling_precommit(&invocation.run_id, &cancellation)?;
+                let dispatch = match AgentMessagingService::new(Arc::clone(&self.storage))
+                    .send_message_from_run(
+                        &SendAgentMessageRequest {
+                            sender_agent_id: caller.agent_id,
+                            recipient_agent_id: request.target_agent_id,
+                            request_id,
+                            content: request.message,
+                        },
+                        &invocation.run_id,
+                    ) {
+                    Ok(dispatch) => dispatch,
+                    Err(error) => {
+                        if cancellation.is_cancelled()
+                            || self
+                                .service
+                                .agent_tree_run_is_stopped(&invocation.run_id)
+                                .map_err(unavailable)?
+                        {
+                            return Err(AgentError::cancelled());
+                        }
+                        return Err(graph_error(error));
+                    }
+                };
+                self.finish_scheduling_commit(&invocation.run_id, &cancellation)?;
                 AgentCollaborationToolResult::MessageQueued {
                     message_id: dispatch.message.message_id,
                     delivery_state: AgentCollaborationDeliveryState::Queued,
@@ -371,14 +409,31 @@ impl AgentCollaborationHarnessAdapter {
                         )
                     })
                     .map_err(authorizer_error)?;
-                let dispatch = AgentMessagingService::new(Arc::clone(&self.storage))
-                    .follow_up(&SendAgentMessageRequest {
-                        sender_agent_id: caller.agent_id,
-                        recipient_agent_id: request.target_agent_id,
-                        request_id,
-                        content: request.message,
-                    })
-                    .map_err(graph_error)?;
+                self.check_scheduling_precommit(&invocation.run_id, &cancellation)?;
+                let dispatch = match AgentMessagingService::new(Arc::clone(&self.storage))
+                    .follow_up_from_run(
+                        &SendAgentMessageRequest {
+                            sender_agent_id: caller.agent_id,
+                            recipient_agent_id: request.target_agent_id,
+                            request_id,
+                            content: request.message,
+                        },
+                        &invocation.run_id,
+                    ) {
+                    Ok(dispatch) => dispatch,
+                    Err(error) => {
+                        if cancellation.is_cancelled()
+                            || self
+                                .service
+                                .agent_tree_run_is_stopped(&invocation.run_id)
+                                .map_err(unavailable)?
+                        {
+                            return Err(AgentError::cancelled());
+                        }
+                        return Err(graph_error(error));
+                    }
+                };
+                self.finish_scheduling_commit(&invocation.run_id, &cancellation)?;
                 self.notify_work_available()?;
                 AgentCollaborationToolResult::MessageQueued {
                     message_id: dispatch.message.message_id,
@@ -494,6 +549,51 @@ impl AgentCollaborationHarnessAdapter {
             persistence: AgentCollaborationResultPersistence::RuntimeCommits,
         })
     }
+
+    fn check_scheduling_precommit(
+        &self,
+        run_id: &str,
+        cancellation: &mycopilot_core::AgentCancellationToken,
+    ) -> Result<(), AgentError> {
+        cancellation.check()?;
+        if self
+            .service
+            .agent_tree_run_is_stopped(run_id)
+            .map_err(unavailable)?
+        {
+            return Err(AgentError::cancelled());
+        }
+        Ok(())
+    }
+
+    fn finish_scheduling_commit(
+        &self,
+        run_id: &str,
+        cancellation: &mycopilot_core::AgentCancellationToken,
+    ) -> Result<(), AgentError> {
+        finish_scheduling_commit(
+            cancellation,
+            self.service
+                .agent_tree_run_is_stopped(run_id)
+                .map_err(unavailable)?,
+            || self.service.reinforce_agent_tree_stop_for_run(run_id),
+        )
+    }
+}
+
+fn finish_scheduling_commit(
+    cancellation: &mycopilot_core::AgentCancellationToken,
+    tree_stop_requested: bool,
+    reinforce_tree_stop: impl FnOnce() -> bool,
+) -> Result<(), AgentError> {
+    if tree_stop_requested {
+        // Spawn/follow-up commits are authoritative once SQLite accepts them. If a user root-stop
+        // crossed that commit boundary, immediately repeat the durable tree sweep so the newly
+        // visible Wake cannot escape and restart after the process is relaunched.
+        let _ = reinforce_tree_stop();
+        return Err(AgentError::cancelled());
+    }
+    cancellation.check()
 }
 
 impl AgentCollaborationExecutor for AgentCollaborationHarnessAdapter {
@@ -752,6 +852,32 @@ mod tests {
     }
 
     #[test]
+    fn scheduling_post_commit_reinforces_only_an_explicit_tree_stop() {
+        let cancellation = AgentCancellationToken::new();
+        let reinforcements = std::cell::Cell::new(0);
+        let error = finish_scheduling_commit(&cancellation, true, || {
+            reinforcements.set(reinforcements.get() + 1);
+            true
+        })
+        .unwrap_err();
+
+        assert!(error.is_cancelled());
+        assert_eq!(reinforcements.get(), 1);
+    }
+
+    #[test]
+    fn scheduling_post_commit_does_not_cascade_a_single_turn_interrupt() {
+        let cancellation = AgentCancellationToken::new();
+        cancellation.cancel();
+        let error = finish_scheduling_commit(&cancellation, false, || {
+            panic!("a single-Agent interrupt must not reinforce a tree stop")
+        })
+        .unwrap_err();
+
+        assert!(error.is_cancelled());
+    }
+
+    #[test]
     fn bounded_model_visible_directory_is_the_exact_spawn_allow_list() {
         let directory = AgentCollaborationSelectorDirectory::bounded(
             (0..34)
@@ -914,6 +1040,34 @@ mod tests {
         assert!(before.selector_directory.templates.is_empty());
         assert_eq!(before.selector_directory.models.len(), 1);
         assert!(!before.selector_directory.models[0].capabilities.image_input);
+
+        let cancelled_before_host_entry = AgentCancellationToken::new();
+        cancelled_before_host_entry.cancel();
+        let cancelled_error = adapter
+            .execute(
+                AgentCollaborationInvocation {
+                    caller: before.caller.clone(),
+                    selector_authorization: before.selector_authorization(),
+                    caller_model_capabilities: mycopilot_core::ModelCapabilities {
+                        image_input: false,
+                    },
+                    effective_permissions: mycopilot_core::AgentPermissions::default(),
+                    conversation_id: "conversation-catalog".to_string(),
+                    run_id: "run-cancelled-before-host-entry".to_string(),
+                    assistant_message_id: "assistant-cancelled-before-host-entry".to_string(),
+                    model_batch_index: 1,
+                    tool_call_id: "call-cancelled-before-host-entry".to_string(),
+                    action: AgentCollaborationAction::List,
+                },
+                AgentCollaborationExecutionControl::new(cancelled_before_host_entry, None),
+            )
+            .await
+            .unwrap_err();
+        assert!(cancelled_error.is_cancelled());
+        assert!(storage
+            .get_agent_node_by_conversation("conversation-catalog")
+            .unwrap()
+            .is_none());
 
         let template = storage
             .create_agent_template(&CreateAgentTemplateInput {

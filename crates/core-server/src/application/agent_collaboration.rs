@@ -122,6 +122,22 @@ impl AgentMessagingService {
         &self,
         input: &mycopilot_core::SendAgentMessageRequest,
     ) -> Result<mycopilot_core::AgentMessageDispatch, AgentGraphError> {
+        self.send_message_internal(input, None)
+    }
+
+    pub(crate) fn send_message_from_run(
+        &self,
+        input: &mycopilot_core::SendAgentMessageRequest,
+        origin_run_id: &str,
+    ) -> Result<mycopilot_core::AgentMessageDispatch, AgentGraphError> {
+        self.send_message_internal(input, Some(origin_run_id))
+    }
+
+    fn send_message_internal(
+        &self,
+        input: &mycopilot_core::SendAgentMessageRequest,
+        origin_run_id: Option<&str>,
+    ) -> Result<mycopilot_core::AgentMessageDispatch, AgentGraphError> {
         self.authorizer
             .authorize_send(
                 &input.sender_agent_id,
@@ -129,7 +145,12 @@ impl AgentMessagingService {
                 &input.content,
             )
             .map_err(map_authorization_error)?;
-        let dispatch = self.storage.send_agent_message(input)?;
+        let dispatch = match origin_run_id {
+            Some(origin_run_id) => self
+                .storage
+                .send_agent_message_from_run(input, origin_run_id)?,
+            None => self.storage.send_agent_message(input)?,
+        };
         self.wait_notifications
             .notify_caller(&dispatch.message.recipient_agent_id);
         Ok(dispatch)
@@ -138,6 +159,22 @@ impl AgentMessagingService {
     pub(crate) fn follow_up(
         &self,
         input: &mycopilot_core::SendAgentMessageRequest,
+    ) -> Result<mycopilot_core::AgentMessageDispatch, AgentGraphError> {
+        self.follow_up_internal(input, None)
+    }
+
+    pub(crate) fn follow_up_from_run(
+        &self,
+        input: &mycopilot_core::SendAgentMessageRequest,
+        origin_run_id: &str,
+    ) -> Result<mycopilot_core::AgentMessageDispatch, AgentGraphError> {
+        self.follow_up_internal(input, Some(origin_run_id))
+    }
+
+    fn follow_up_internal(
+        &self,
+        input: &mycopilot_core::SendAgentMessageRequest,
+        origin_run_id: Option<&str>,
     ) -> Result<mycopilot_core::AgentMessageDispatch, AgentGraphError> {
         self.authorizer
             .authorize_message_size(&input.content)
@@ -151,7 +188,12 @@ impl AgentMessagingService {
                     .map(|_| ())
             })
             .map_err(map_authorization_error)?;
-        let dispatch = self.storage.follow_up_agent(input)?;
+        let dispatch = match origin_run_id {
+            Some(origin_run_id) => self
+                .storage
+                .follow_up_agent_from_run(input, origin_run_id)?,
+            None => self.storage.follow_up_agent(input)?,
+        };
         self.wait_notifications
             .notify_caller(&dispatch.message.recipient_agent_id);
         Ok(dispatch)
@@ -224,21 +266,64 @@ impl ChildAgentFactory {
         expected_model_capabilities: Option<mycopilot_core::ModelCapabilities>,
         expected_template_identity: Option<(&str, u64)>,
     ) -> Result<ChildAgentSpawnRecord, ChildAgentSpawnError> {
+        self.create_child_with_expected_selector_internal(
+            input,
+            expected_model_capabilities,
+            expected_template_identity,
+            None,
+        )
+    }
+
+    pub(crate) fn create_child_with_expected_selector_from_run(
+        &self,
+        input: &CreateChildAgentInput,
+        expected_model_capabilities: Option<mycopilot_core::ModelCapabilities>,
+        expected_template_identity: Option<(&str, u64)>,
+        origin_run_id: &str,
+    ) -> Result<ChildAgentSpawnRecord, ChildAgentSpawnError> {
+        self.create_child_with_expected_selector_internal(
+            input,
+            expected_model_capabilities,
+            expected_template_identity,
+            Some(origin_run_id),
+        )
+    }
+
+    fn create_child_with_expected_selector_internal(
+        &self,
+        input: &CreateChildAgentInput,
+        expected_model_capabilities: Option<mycopilot_core::ModelCapabilities>,
+        expected_template_identity: Option<(&str, u64)>,
+        origin_run_id: Option<&str>,
+    ) -> Result<ChildAgentSpawnRecord, ChildAgentSpawnError> {
         self.authorizer
             .authorize_spawn(&input.parent_agent_id)
             .map_err(map_spawn_authorization_error)?;
         let policy = self.authorizer.policy();
-        self.storage
-            .create_child_agent_with_limits_and_expected_selector(
-                input,
-                mycopilot_core::AgentTreeResourceLimits {
-                    max_depth: policy.max_tree_depth,
-                    max_nodes: policy.max_nodes_per_tree,
-                    max_task_bytes: policy.max_message_bytes,
-                },
-                expected_model_capabilities,
-                expected_template_identity,
-            )
+        let limits = mycopilot_core::AgentTreeResourceLimits {
+            max_depth: policy.max_tree_depth,
+            max_nodes: policy.max_nodes_per_tree,
+            max_task_bytes: policy.max_message_bytes,
+        };
+        match origin_run_id {
+            Some(origin_run_id) => self
+                .storage
+                .create_child_agent_with_limits_and_expected_selector_from_run(
+                    input,
+                    limits,
+                    expected_model_capabilities,
+                    expected_template_identity,
+                    origin_run_id,
+                ),
+            None => self
+                .storage
+                .create_child_agent_with_limits_and_expected_selector(
+                    input,
+                    limits,
+                    expected_model_capabilities,
+                    expected_template_identity,
+                ),
+        }
     }
 
     pub(crate) fn resolve_trusted_running_wake(

@@ -413,10 +413,19 @@ impl AgentService {
         }
     }
     /// Host-internal cancellation for one trusted child Wake run. A live Runtime uses the normal
-    /// run token; a durable approval has no worker, so its exact action is atomically cancelled
-    /// through the existing pending-action settlement path.
+    /// run token, any handed-off command Session is interrupted explicitly, and a durable approval
+    /// with no live owner is atomically cancelled through the existing pending-action settlement
+    /// path. Once a live owner is signalled, that owner remains solely responsible for the Turn's
+    /// terminal settlement.
     pub(crate) fn interrupt_agent_wake_run(&self, run_id: &str) -> Result<bool, String> {
-        if self.cancel_run_internal(run_id) {
+        let conversation_id = self.conversation_id_for_run(run_id);
+        let runtime_interrupted = self.cancel_run_internal(run_id);
+        let command_sessions_interrupted =
+            conversation_id.as_deref().map_or(0, |conversation_id| {
+                self.command_sessions
+                    .interrupt_origin_run(conversation_id, run_id)
+            });
+        if runtime_interrupted || command_sessions_interrupted > 0 {
             return Ok(true);
         }
         let action_ids = self
@@ -1586,7 +1595,7 @@ impl AgentService {
                 "MCP rejection was already settled by another approval decision.".to_string(),
             );
         }
-        self.persist_pending_status(pending, current, PendingActionStatus::Rejected)
+        self.persist_pending_dispatch_status(pending, current, PendingActionStatus::Rejected)
             .map_err(|_| {
                 "MCP rejection lost its durable status arbitration; continuation was stopped."
                     .to_string()
@@ -1849,7 +1858,7 @@ impl AgentService {
                             decided_at,
                         )?;
                 } else {
-                    self.persist_pending_status(
+                    self.persist_pending_dispatch_status(
                         record,
                         PendingActionStatus::Pending,
                         execution_status,
@@ -2910,7 +2919,10 @@ impl AgentService {
         // Approval is carried by the typed action journal and lifecycle, not by rewriting the
         // append-only call from `required` to `approved` after restart.
         let call = tool_call_for_pending_record(record)?;
-        self.persist_pending_status(
+        let guard = self
+            .process_runs
+            .register(&record.storage_id, &record.snapshot.run_id);
+        self.persist_pending_dispatch_status(
             record,
             PendingActionStatus::Approved,
             PendingActionStatus::Executing,
@@ -2920,9 +2932,6 @@ impl AgentService {
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .remove(&storage_id);
-        let guard = self
-            .process_runs
-            .register(&record.storage_id, &record.snapshot.run_id);
         let record = record.clone();
         drop(pending_actions);
         drop(deletion_lifecycle);

@@ -65,6 +65,45 @@ impl StorageService {
         expected_model_capabilities: Option<crate::ModelCapabilities>,
         expected_template_identity: Option<(&str, u64)>,
     ) -> Result<ChildAgentSpawnRecord, ChildAgentSpawnError> {
+        self.create_child_agent_with_limits_and_expected_selector_internal(
+            input,
+            limits,
+            expected_model_capabilities,
+            expected_template_identity,
+            None,
+        )
+    }
+
+    /// Run-bound Spawn entry point for collaboration Tool execution.
+    ///
+    /// The durable tree-stop guard executes inside the same immediate transaction that creates the
+    /// child identity, initial task, and Wake. A stop and Spawn therefore have a total SQLite
+    /// order, and neither order can leave runnable descendant work behind the stop boundary.
+    pub fn create_child_agent_with_limits_and_expected_selector_from_run(
+        &self,
+        input: &CreateChildAgentInput,
+        limits: AgentTreeResourceLimits,
+        expected_model_capabilities: Option<crate::ModelCapabilities>,
+        expected_template_identity: Option<(&str, u64)>,
+        origin_run_id: &str,
+    ) -> Result<ChildAgentSpawnRecord, ChildAgentSpawnError> {
+        self.create_child_agent_with_limits_and_expected_selector_internal(
+            input,
+            limits,
+            expected_model_capabilities,
+            expected_template_identity,
+            Some(origin_run_id),
+        )
+    }
+
+    fn create_child_agent_with_limits_and_expected_selector_internal(
+        &self,
+        input: &CreateChildAgentInput,
+        limits: AgentTreeResourceLimits,
+        expected_model_capabilities: Option<crate::ModelCapabilities>,
+        expected_template_identity: Option<(&str, u64)>,
+        origin_run_id: Option<&str>,
+    ) -> Result<ChildAgentSpawnRecord, ChildAgentSpawnError> {
         let limits = limits.validate()?;
         validate_spawn_input(input)?;
         if expected_template_identity.is_some() && input.template_machine_key.is_none() {
@@ -83,6 +122,14 @@ impl StorageService {
         let parent = agent_graph_repository::get_agent_node(&transaction, &input.parent_agent_id)
             .map_err(map_graph_error)?
             .ok_or_else(|| ChildAgentSpawnError::ParentNotFound(input.parent_agent_id.clone()))?;
+        if let Some(origin_run_id) = origin_run_id {
+            agent_graph_repository::ensure_agent_tree_origin_run_can_schedule_in_transaction(
+                &transaction,
+                origin_run_id,
+                &parent.agent_id,
+            )
+            .map_err(map_graph_error)?;
+        }
         if let Some(existing) = agent_graph_repository::resolve_child_spawn_by_creation_request(
             &transaction,
             &parent.agent_id,

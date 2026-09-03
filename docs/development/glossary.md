@@ -89,7 +89,7 @@ Capability，不能让读者误以为产品已支持用户 HTTP MCP Server。
 | projection               | 从权威状态生成的有界消费者视图；正文可写“投影”                            |
 | snapshot                 | 某个身份/revision 下的只读快照；不表示自动持续同步                        |
 | revision                 | 领域记录的并发/版本身份                                                   |
-| canonical schema version | SQLite canonical schema 版本；当前为 v27，真源是 `STORAGE_SCHEMA_VERSION` |
+| canonical schema version | SQLite canonical schema 版本；当前为 v32，真源是 `STORAGE_SCHEMA_VERSION` |
 | `schemaVersion`          | 某个 DTO/envelope 自身的协议版本；不能与 SQLite canonical schema 混用     |
 
 Artifact 首次出现可写“Artifact（制品）”，之后保持 `Artifact`。Generic Managed Artifact、Browser

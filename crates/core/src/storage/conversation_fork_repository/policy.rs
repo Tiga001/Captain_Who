@@ -64,6 +64,8 @@ const RUNTIME_ONLY_TABLES: &[&str] = &[
     "agent_effective_permission_snapshots",
     "agent_file_change_run_grants",
     "agent_interrupt_requests",
+    "agent_tree_run_stop_members",
+    "agent_tree_run_stops",
     "agent_model_batch_receipt_items",
     "agent_model_batch_receipt_replays",
     "agent_model_batch_receipt_targets",

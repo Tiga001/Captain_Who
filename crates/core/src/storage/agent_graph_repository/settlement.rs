@@ -8,16 +8,19 @@ use super::mailbox::{
 };
 use super::message_records::query_message;
 use super::node_records::query_node;
+use super::tree_cancellation::query_agent_tree_run_stop_in_connection;
 use super::wake_commands::enqueue_wake_in_transaction;
 use super::wake_records::{query_wake, query_wake_by_request};
 use crate::storage::{
     chat_repository, conversation_model_context_repository, conversation_trace_repository,
+    file_change_run_grant_repository, provider_continuation_repository,
 };
 use crate::{
-    AgentGraphError, AgentMailboxKind, AgentResultArtifactKind, AgentResultArtifactReference,
-    AgentTurnResultEnvelope, AgentTurnResultSettlement, AgentWakeRequestRecord, AgentWakeStatus,
-    EnqueueAgentMessageInput, EnqueueAgentWakeInput, FinishAgentTurnResultInput,
-    FinishAgentWakeWithResultInput, AGENT_RESULT_ENVELOPE_SCHEMA_VERSION,
+    ActiveAgentTreeWake, AgentGraphError, AgentMailboxKind, AgentResultArtifactKind,
+    AgentResultArtifactReference, AgentTreeStoppedWakeSettlementOutcome, AgentTurnResultEnvelope,
+    AgentTurnResultSettlement, AgentWakeRequestRecord, AgentWakeStatus, EnqueueAgentMessageInput,
+    EnqueueAgentWakeInput, FinishAgentTurnResultInput, FinishAgentWakeWithResultInput,
+    AGENT_RESULT_ENVELOPE_SCHEMA_VERSION,
 };
 use rusqlite::{params, Connection};
 
@@ -130,13 +133,28 @@ pub fn finish_agent_wake_with_result(
 }
 
 /// Atomically records a delegated Turn's durable terminal fact and its direct-parent result
-/// Outbox. Non-root parents receive a deferred Wake in the same transaction; root parents never
-/// start a background model Turn merely because a child reported a result.
+/// Outbox. Non-root parents normally receive a deferred Wake in the same transaction; an
+/// explicitly interrupted child only reports through the durable result mailbox and never starts
+/// a fresh parent Turn. A child Run covered by a durable root-tree stop follows the same rule even
+/// if its terminal result races in as completed or failed. Root parents likewise never start a
+/// background model Turn merely because a child reported a result.
 pub fn finish_agent_turn_with_result(
     connection: &mut Connection,
     input: &FinishAgentTurnResultInput,
     completed_at: i64,
 ) -> Result<AgentTurnResultSettlement, AgentGraphError> {
+    validate_finish_agent_turn_result_input(input, completed_at)?;
+    let transaction = immediate(connection)?;
+    let settlement =
+        finish_agent_turn_with_result_in_transaction(&transaction, input, completed_at, true)?;
+    transaction.commit().map_err(write_error)?;
+    Ok(settlement)
+}
+
+fn validate_finish_agent_turn_result_input(
+    input: &FinishAgentTurnResultInput,
+    completed_at: i64,
+) -> Result<(), AgentGraphError> {
     validate_time(completed_at)?;
     validate_id("wake_id", &input.wake_id)?;
     validate_id("claim_token", &input.claim_token)?;
@@ -174,17 +192,24 @@ pub fn finish_agent_turn_with_result(
             "a completed child Turn cannot carry a terminal error",
         ));
     }
+    Ok(())
+}
 
-    let transaction = immediate(connection)?;
-    let wake = query_wake(&transaction, &input.wake_id)?
+fn finish_agent_turn_with_result_in_transaction(
+    transaction: &Connection,
+    input: &FinishAgentTurnResultInput,
+    completed_at: i64,
+    require_live_lease: bool,
+) -> Result<AgentTurnResultSettlement, AgentGraphError> {
+    let wake = query_wake(transaction, &input.wake_id)?
         .ok_or_else(|| AgentGraphError::WakeNotFound(input.wake_id.clone()))?;
-    let child = query_node(&transaction, &wake.agent_id)?
+    let child = query_node(transaction, &wake.agent_id)?
         .ok_or_else(|| corrupt("settling Wake child Agent is missing"))?;
     let parent_id = child
         .parent_agent_id
         .as_deref()
         .ok_or_else(|| conflict("a root Agent Wake cannot emit a delegated child result"))?;
-    let parent = query_node(&transaction, parent_id)?
+    let parent = query_node(transaction, parent_id)?
         .ok_or_else(|| corrupt("settling Wake direct parent Agent is missing"))?;
     if wake.root_agent_id != child.root_agent_id || parent.root_agent_id != child.root_agent_id {
         return Err(corrupt("settling Wake does not belong to one Agent tree"));
@@ -194,13 +219,28 @@ pub fn finish_agent_turn_with_result(
             "result execution identity does not match the durable Wake",
         ));
     }
+    let tree_stop = input
+        .run_id
+        .as_deref()
+        .map(|run_id| query_agent_tree_run_stop_in_connection(transaction, run_id))
+        .transpose()?
+        .flatten();
+    if tree_stop.as_ref().is_some_and(|stop| {
+        stop.root_agent_id != wake.root_agent_id
+            || stop.root_conversation_id != child.root_conversation_id
+    }) {
+        return Err(corrupt(
+            "delegated Run tree-stop identity does not match its Wake",
+        ));
+    }
+    let tree_stop_covered = tree_stop.is_some();
 
     // Conservative crash recovery owns the exact child trace that generic startup reconciliation
     // deliberately skipped. Terminalize that trace and the result Outbox in this one transaction,
     // otherwise an `outcome_unknown` Wake would leave the Agent Conversation permanently busy.
     if matches!(
         input.terminal_status,
-        AgentWakeStatus::OutcomeUnknown | AgentWakeStatus::Failed
+        AgentWakeStatus::OutcomeUnknown | AgentWakeStatus::Failed | AgentWakeStatus::Interrupted
     ) {
         if let (Some(run_id), Some(assistant_message_id), Some(reason)) = (
             input.run_id.as_deref(),
@@ -208,10 +248,11 @@ pub fn finish_agent_turn_with_result(
             input.terminal_error.as_deref(),
         ) {
             terminalize_recovered_agent_trace_in_transaction(
-                &transaction,
+                transaction,
                 &child.conversation_id,
                 run_id,
                 assistant_message_id,
+                input.terminal_status,
                 reason,
                 completed_at,
             )?;
@@ -231,7 +272,7 @@ pub fn finish_agent_turn_with_result(
             .result_message_id
             .as_deref()
             .ok_or_else(|| corrupt("terminal delegated Wake is missing its result Outbox"))?;
-        let result_message = query_message(&transaction, result_id)?
+        let result_message = query_message(transaction, result_id)?
             .ok_or_else(|| corrupt("terminal delegated Wake result Outbox is missing"))?;
         let envelope: AgentTurnResultEnvelope = serde_json::from_str(&result_message.content)
             .map_err(|_| corrupt("terminal delegated Wake result envelope is invalid"))?;
@@ -258,16 +299,21 @@ pub fn finish_agent_turn_with_result(
         }
         validate_result_artifact_refs(&envelope.artifact_refs)?;
         let parent_wake = query_wake_by_request(
-            &transaction,
+            transaction,
             &child.agent_id,
             &format!("result-wake:{}", wake.wake_id),
         )?;
-        if parent.parent_agent_id.is_some() != parent_wake.is_some() {
+        // If the stop serialized after the original settlement, the already-created parent Wake
+        // remains an immutable fact (and the stop transaction cancelled or covered it). If the
+        // stop serialized first, no parent Wake exists. Both are valid idempotent replays.
+        if !tree_stop_covered
+            && should_enqueue_parent_result_wake(&parent, envelope.status, false)
+                != parent_wake.is_some()
+        {
             return Err(corrupt(
                 "terminal delegated result has an invalid direct-parent deferred Wake",
             ));
         }
-        transaction.commit().map_err(write_error)?;
         return Ok(AgentTurnResultSettlement {
             wake,
             result_message,
@@ -277,7 +323,7 @@ pub fn finish_agent_turn_with_result(
     }
 
     let artifact_refs = list_result_artifacts_for_run(
-        &transaction,
+        transaction,
         &child.conversation_id,
         input.run_id.as_deref(),
     )?;
@@ -314,9 +360,10 @@ pub fn finish_agent_turn_with_result(
             "Wake status or claim token does not match settlement",
         ));
     }
-    if wake
-        .lease_expires_at
-        .is_none_or(|deadline| completed_at >= deadline)
+    if require_live_lease
+        && wake
+            .lease_expires_at
+            .is_none_or(|deadline| completed_at >= deadline)
     {
         return Err(conflict("Wake lease has expired"));
     }
@@ -327,7 +374,7 @@ pub fn finish_agent_turn_with_result(
         });
     }
 
-    let result_message = enqueue_message_in_transaction(&transaction, &result_input, completed_at)?
+    let result_message = enqueue_message_in_transaction(transaction, &result_input, completed_at)?
         .record()
         .clone();
     transaction
@@ -347,30 +394,30 @@ pub fn finish_agent_turn_with_result(
             ],
         )
         .map_err(write_error)?;
-    let settled_wake = query_wake(&transaction, &wake.wake_id)?
+    let settled_wake = query_wake(transaction, &wake.wake_id)?
         .ok_or_else(|| corrupt("settled delegated Wake disappeared"))?;
 
-    let parent_wake = if parent.parent_agent_id.is_some() {
-        Some(
-            enqueue_wake_in_transaction(
-                &transaction,
-                &EnqueueAgentWakeInput {
-                    wake_id: stable_fact_id("wake-result", &[&wake.wake_id]),
-                    root_agent_id: wake.root_agent_id,
-                    agent_id: parent.agent_id,
-                    requester_agent_id: child.agent_id,
-                    request_id: format!("result-wake:{}", wake.wake_id),
-                    source_agent_message_id: Some(result_message.message_id.clone()),
-                },
-                completed_at,
-            )?
-            .record()
-            .clone(),
-        )
-    } else {
-        None
-    };
-    transaction.commit().map_err(write_error)?;
+    let parent_wake =
+        if should_enqueue_parent_result_wake(&parent, input.terminal_status, tree_stop_covered) {
+            Some(
+                enqueue_wake_in_transaction(
+                    transaction,
+                    &EnqueueAgentWakeInput {
+                        wake_id: stable_fact_id("wake-result", &[&wake.wake_id]),
+                        root_agent_id: wake.root_agent_id,
+                        agent_id: parent.agent_id,
+                        requester_agent_id: child.agent_id,
+                        request_id: format!("result-wake:{}", wake.wake_id),
+                        source_agent_message_id: Some(result_message.message_id.clone()),
+                    },
+                    completed_at,
+                )?
+                .record()
+                .clone(),
+            )
+        } else {
+            None
+        };
     Ok(AgentTurnResultSettlement {
         wake: settled_wake,
         result_message,
@@ -379,14 +426,151 @@ pub fn finish_agent_turn_with_result(
     })
 }
 
+/// Durably settles one stopped descendant whose process-local cancellation owner disappeared.
+///
+/// The root-tree stop is the authority for bypassing an expired Wake lease, but it is not
+/// authority to overwrite a real terminal trace or to guess the outcome of an active external
+/// action. All identity, trace, pending-action, and result writes therefore share this immediate
+/// transaction.
+pub fn settle_tree_stopped_active_wake(
+    connection: &mut Connection,
+    snapshot: &ActiveAgentTreeWake,
+    completed_at: i64,
+) -> Result<AgentTreeStoppedWakeSettlementOutcome, AgentGraphError> {
+    const SUMMARY: &str = "子 Agent 已随主任务停止。";
+    const REASON: &str = "用户已停止根任务；系统不会继续这个子 Agent Turn。";
+
+    let input = FinishAgentTurnResultInput {
+        wake_id: snapshot.wake_id.clone(),
+        expected_status: snapshot.status,
+        claim_token: snapshot.claim_token.clone(),
+        terminal_status: AgentWakeStatus::Interrupted,
+        run_id: Some(snapshot.run_id.clone()),
+        assistant_message_id: Some(snapshot.assistant_message_id.clone()),
+        summary: SUMMARY.to_string(),
+        terminal_error: Some(REASON.to_string()),
+    };
+    validate_finish_agent_turn_result_input(&input, completed_at)?;
+
+    let transaction = immediate(connection)?;
+    let wake = query_wake(&transaction, &snapshot.wake_id)?
+        .ok_or_else(|| AgentGraphError::WakeNotFound(snapshot.wake_id.clone()))?;
+    let child = query_node(&transaction, &wake.agent_id)?
+        .ok_or_else(|| corrupt("tree-stopped Wake child Agent is missing"))?;
+    let stop = query_agent_tree_run_stop_in_connection(&transaction, &snapshot.run_id)?
+        .ok_or_else(|| conflict("tree-stopped Wake is not covered by a durable stop"))?;
+    if wake.agent_id != snapshot.agent_id
+        || child.conversation_id != snapshot.conversation_id
+        || wake.root_agent_id != child.root_agent_id
+        || stop.root_agent_id != wake.root_agent_id
+        || stop.root_conversation_id != child.root_conversation_id
+    {
+        return Err(corrupt(
+            "tree-stopped Wake identity does not match its durable stop",
+        ));
+    }
+    if wake.run_id.as_deref() != Some(snapshot.run_id.as_str())
+        || wake.assistant_message_id.as_deref() != Some(snapshot.assistant_message_id.as_str())
+        || wake.claim_token.as_deref() != Some(snapshot.claim_token.as_str())
+    {
+        transaction.commit().map_err(write_error)?;
+        return Ok(AgentTreeStoppedWakeSettlementOutcome::LostOwnership);
+    }
+    if wake.status.is_terminal() {
+        transaction.commit().map_err(write_error)?;
+        return Ok(AgentTreeStoppedWakeSettlementOutcome::AlreadyTerminal);
+    }
+    if wake.status != snapshot.status {
+        transaction.commit().map_err(write_error)?;
+        return Ok(AgentTreeStoppedWakeSettlementOutcome::LostOwnership);
+    }
+
+    let trace = conversation_trace_repository::get_trace_for_message(
+        &transaction,
+        &snapshot.assistant_message_id,
+    )
+    .map_err(read_error)?
+    .ok_or_else(|| corrupt("tree-stopped admitted Wake is missing its Turn trace"))?;
+    if trace.run_id != snapshot.run_id || trace.conversation_id != snapshot.conversation_id {
+        return Err(corrupt(
+            "tree-stopped Wake trace identity does not match its admitted Turn",
+        ));
+    }
+    if trace.terminal_status != crate::ConversationTurnTraceTerminalStatus::InProgress {
+        transaction.commit().map_err(write_error)?;
+        return Ok(AgentTreeStoppedWakeSettlementOutcome::AlreadyTerminal);
+    }
+
+    let active_action_count = transaction
+        .query_row(
+            "SELECT
+                 (SELECT COUNT(*)
+                  FROM agent_pending_actions
+                  WHERE run_id = ?1
+                    AND status IN ('pending', 'approved', 'executing'))
+               + (SELECT COUNT(*)
+                  FROM agent_action_audit
+                  WHERE run_id = ?1
+                    AND status = 'executing')
+               + (SELECT COUNT(*)
+                  FROM agent_command_sessions
+                  WHERE origin_run_id = ?1
+                    AND status IN ('starting', 'running', 'outcome_unknown'))",
+            [&snapshot.run_id],
+            |row| row.get::<_, u64>(0),
+        )
+        .map_err(read_error)?;
+    if active_action_count > 0 {
+        transaction.commit().map_err(write_error)?;
+        return Ok(AgentTreeStoppedWakeSettlementOutcome::UnsafeActiveAction {
+            count: active_action_count,
+        });
+    }
+
+    let settlement =
+        finish_agent_turn_with_result_in_transaction(&transaction, &input, completed_at, false)?;
+    transaction.commit().map_err(write_error)?;
+    Ok(AgentTreeStoppedWakeSettlementOutcome::Interrupted(
+        Box::new(settlement),
+    ))
+}
+
+fn should_enqueue_parent_result_wake(
+    parent: &crate::AgentNodeRecord,
+    terminal_status: AgentWakeStatus,
+    tree_stop_covered: bool,
+) -> bool {
+    parent.parent_agent_id.is_some()
+        && terminal_status != AgentWakeStatus::Interrupted
+        && !tree_stop_covered
+}
+
 pub(super) fn terminalize_recovered_agent_trace_in_transaction(
     connection: &Connection,
     conversation_id: &str,
     run_id: &str,
     assistant_message_id: &str,
+    terminal_status: AgentWakeStatus,
     reason: &str,
     completed_at: i64,
 ) -> Result<(), AgentGraphError> {
+    let (trace_terminal_status, message_status, run_status) =
+        match terminal_status {
+            AgentWakeStatus::Interrupted => (
+                crate::ConversationTurnTraceTerminalStatus::Cancelled,
+                "sent",
+                "cancelled",
+            ),
+            AgentWakeStatus::Failed | AgentWakeStatus::OutcomeUnknown => (
+                crate::ConversationTurnTraceTerminalStatus::Failed,
+                "error",
+                "failed",
+            ),
+            _ => return Err(invalid(
+                "terminal_status",
+                "recovered trace terminalization requires failed, outcome_unknown, or interrupted",
+            )),
+        };
     let Some(trace) =
         conversation_trace_repository::get_trace_for_message(connection, assistant_message_id)
             .map_err(read_error)?
@@ -425,7 +609,7 @@ pub(super) fn terminalize_recovered_agent_trace_in_transaction(
         run_id,
         conversation_id,
         assistant_message_id,
-        crate::ConversationTurnTraceTerminalStatus::Failed,
+        trace_terminal_status,
         reason,
     )
     .map_err(|error| {
@@ -459,17 +643,35 @@ pub(super) fn terminalize_recovered_agent_trace_in_transaction(
         conversation_id,
         assistant_message_id,
         run_id,
-        "error",
-        "failed",
+        message_status,
+        run_status,
+        completed_at.max(created_at),
+    )
+    .map_err(write_error)?;
+    provider_continuation_repository::promote_staged_trace_projections_in_connection(
+        connection,
+        conversation_id,
+        assistant_message_id,
+        run_id,
+        completed_at.max(created_at),
+    )
+    .map_err(write_error)?;
+    provider_continuation_repository::settle_staged_conversation_message_in_connection(
+        connection,
+        conversation_id,
+        assistant_message_id,
+        run_id,
+        terminal.trace.terminal_status,
         completed_at.max(created_at),
     )
     .map_err(write_error)?;
     connection
         .execute(
             "UPDATE agent_usage_records
-             SET status = 'failed', error = ?1, completed_at = ?2
-             WHERE run_id = ?3 AND conversation_id = ?4 AND message_id = ?5",
+             SET status = ?1, error = ?2, completed_at = ?3
+             WHERE run_id = ?4 AND conversation_id = ?5 AND message_id = ?6",
             params![
+                run_status,
                 reason,
                 completed_at.max(created_at),
                 run_id,
@@ -478,6 +680,12 @@ pub(super) fn terminalize_recovered_agent_trace_in_transaction(
             ],
         )
         .map_err(write_error)?;
+    file_change_run_grant_repository::revoke_nonterminal_run_grants(
+        connection,
+        run_id,
+        completed_at.max(created_at),
+    )
+    .map_err(write_error)?;
     Ok(())
 }
 

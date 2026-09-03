@@ -39,18 +39,20 @@ impl AgentService {
         self.collaboration_authorizer.clone()
     }
 
-    /// Resolve the owner before any user stop/decision. Missing and unauthorized runs both
-    /// return `false` at the legacy cancel API, avoiding an existence oracle across trees.
-    pub(super) fn authorize_user_run_write(&self, run_id: &str) -> Result<bool, String> {
-        let conversation_id = self.conversation_id_for_run(run_id);
+    /// Authorizes the owner identity resolved once by the user-stop boundary. An unauthorized
+    /// Conversation returns `false`, avoiding an existence oracle across Agent trees.
+    pub(super) fn authorize_resolved_user_run_write(
+        &self,
+        conversation_id: Option<&str>,
+    ) -> Result<bool, String> {
         let Some(conversation_id) = conversation_id else {
             // Preserve the legacy behaviour for synthetic/unbound run controls used by the
             // single-Agent path. A real graph-bound run is always discoverable through the
-            // active, usage, pending-action, or command-session owner indexes below.
+            // active, usage, pending-action, or command-session owner indexes.
             return Ok(true);
         };
         self.collaboration_authorizer
-            .authorize_user_conversation_write(&conversation_id)
+            .authorize_user_conversation_write(conversation_id)
             .map(|_| true)
             .or_else(|error| match error {
                 crate::application::collaboration_authorization::CollaborationAuthorizationError::ReadOnlyChildConversation

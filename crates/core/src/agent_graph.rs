@@ -878,10 +878,26 @@ pub struct FinishAgentTurnResultInput {
 pub struct AgentTurnResultSettlement {
     pub wake: AgentWakeRequestRecord,
     pub result_message: AgentMailboxMessageRecord,
-    /// Non-root direct parents receive a deferred Wake. Root results remain pending for the next
-    /// user-driven Turn and therefore never create this value.
+    /// Non-root direct parents receive a deferred Wake for ordinary terminal results. Interrupted
+    /// results and results from Runs covered by a durable root-tree stop remain mailbox-only so
+    /// cancellation cannot resurrect a parent Turn; root results likewise remain pending for the
+    /// next user-driven Turn.
     pub parent_wake: Option<AgentWakeRequestRecord>,
     pub envelope: AgentTurnResultEnvelope,
+}
+
+/// Outcome of the durable fallback used when a stopped descendant Run has no process-local
+/// cancellation owner.
+///
+/// This is deliberately narrower than ordinary result settlement. The fallback may only write an
+/// interrupted result while the exact Wake/Run identity is still owned, its trace is still in
+/// progress, and no pending action could have an uncertain external effect.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AgentTreeStoppedWakeSettlementOutcome {
+    Interrupted(Box<AgentTurnResultSettlement>),
+    AlreadyTerminal,
+    LostOwnership,
+    UnsafeActiveAction { count: u64 },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -971,6 +987,9 @@ pub enum AgentWakeRecoveryAction {
     /// Execution crossed a durable dispatch boundary but its effects cannot be proven after the
     /// process disappeared. The only safe recovery is an explicit outcome-unknown result.
     OutcomeUnknown(AgentWakeRequestRecord),
+    /// A user root-stop durably covered this exact admitted Run before the Host exited. Recovery
+    /// must cancel any resumable approval and settle the child as interrupted without replay.
+    TreeStopped(AgentWakeRequestRecord),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -984,6 +1003,28 @@ pub enum InterruptAgentExecutionOutcome {
     NoPendingExecution,
     QueuedWakeCancelled { wake_id: String },
     ActiveTurn { wake_id: String, run_id: String },
+}
+
+/// Durable receipt for an idempotent Agent interrupt request.
+///
+/// `dispatched_at` is populated only after the Host confirms that cancellation reached the
+/// process-local executor for an active Turn. A persisted active-Turn receipt with no dispatch
+/// timestamp is therefore safe to retry after a crash before delivery.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InterruptAgentExecutionReceipt {
+    pub outcome: InterruptAgentExecutionOutcome,
+    pub dispatched_at: Option<i64>,
+}
+
+/// One active-Turn interrupt receipt which committed before runtime delivery was acknowledged.
+/// Startup recovery may redeliver only this exact immutable Wake/Run identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UndispatchedAgentInterrupt {
+    pub caller_agent_id: String,
+    pub target_agent_id: String,
+    pub request_id: String,
+    pub wake_id: String,
+    pub run_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

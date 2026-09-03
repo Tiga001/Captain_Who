@@ -11,7 +11,7 @@ use super::wake_records::{
 use crate::{
     AgentGraphError, AgentNodeRecord, AgentWakeRecoveryAction, AgentWakeRecoveryBatch,
     AgentWakeRequestRecord, AgentWakeStatus, EnqueueAgentWakeInput, IdempotentCreate,
-    InterruptAgentExecutionOutcome,
+    InterruptAgentExecutionOutcome, InterruptAgentExecutionReceipt, UndispatchedAgentInterrupt,
 };
 use rusqlite::{params, Connection, OptionalExtension};
 
@@ -265,20 +265,38 @@ pub fn recover_agent_wakes(
                 |row| row.get::<_, bool>(0),
             )
             .map_err(read_error)?;
-        let action = match trace_status.as_deref() {
-            None => AgentWakeRecoveryAction::FailBeforeRuntime(wake.clone()),
-            Some("completed" | "failed" | "cancelled") => {
+        let tree_stopped = transaction
+            .query_row(
+                "SELECT EXISTS(
+                     SELECT 1 FROM agent_tree_run_stops WHERE run_id = ?1
+                 )",
+                [run_id],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(read_error)?;
+        let action = match (tree_stopped, trace_status.as_deref()) {
+            // The Runtime may have committed its real terminal trace immediately before the Host
+            // exited but before the Dispatcher settled the Wake. Preserve that outcome; the
+            // durable tree stop will still suppress the parent Wake during result settlement.
+            (true, Some("completed" | "failed" | "cancelled")) => {
                 AgentWakeRecoveryAction::Observe(wake.clone())
             }
-            Some("in_progress") if has_pending_approval => {
-                AgentWakeRecoveryAction::Observe(wake.clone())
-            }
-            Some("in_progress") => AgentWakeRecoveryAction::OutcomeUnknown(wake.clone()),
-            Some(_) => {
-                return Err(corrupt(
-                    "active Wake references an invalid Turn trace status",
-                ))
-            }
+            (true, _) => AgentWakeRecoveryAction::TreeStopped(wake.clone()),
+            (false, trace_status) => match trace_status {
+                None => AgentWakeRecoveryAction::FailBeforeRuntime(wake.clone()),
+                Some("completed" | "failed" | "cancelled") => {
+                    AgentWakeRecoveryAction::Observe(wake.clone())
+                }
+                Some("in_progress") if has_pending_approval => {
+                    AgentWakeRecoveryAction::Observe(wake.clone())
+                }
+                Some("in_progress") => AgentWakeRecoveryAction::OutcomeUnknown(wake.clone()),
+                Some(_) => {
+                    return Err(corrupt(
+                        "active Wake references an invalid Turn trace status",
+                    ))
+                }
+            },
         };
         let recovery_token = stable_fact_id(
             "wake-recovery-claim",
@@ -316,6 +334,7 @@ pub fn recover_agent_wakes(
             AgentWakeRecoveryAction::OutcomeUnknown(_) => {
                 AgentWakeRecoveryAction::OutcomeUnknown(wake)
             }
+            AgentWakeRecoveryAction::TreeStopped(_) => AgentWakeRecoveryAction::TreeStopped(wake),
         });
     }
     transaction.commit().map_err(write_error)?;
@@ -336,6 +355,25 @@ pub fn interrupt_agent_execution(
     request_id: &str,
     interrupted_at: i64,
 ) -> Result<InterruptAgentExecutionOutcome, AgentGraphError> {
+    interrupt_agent_execution_with_receipt(
+        connection,
+        caller_agent_id,
+        target_agent_id,
+        request_id,
+        interrupted_at,
+    )
+    .map(|receipt| receipt.outcome)
+}
+
+/// Persists an idempotent interrupt request and returns both its frozen disposition and whether
+/// an active-Turn cancellation has already been delivered by the Host.
+pub fn interrupt_agent_execution_with_receipt(
+    connection: &mut Connection,
+    caller_agent_id: &str,
+    target_agent_id: &str,
+    request_id: &str,
+    interrupted_at: i64,
+) -> Result<InterruptAgentExecutionReceipt, AgentGraphError> {
     validate_id("caller_agent_id", caller_agent_id)?;
     validate_id("target_agent_id", target_agent_id)?;
     validate_request_id(request_id)?;
@@ -351,7 +389,7 @@ pub fn interrupt_agent_execution(
             "interrupt authority is limited to a caller's strict descendants",
         ));
     }
-    if let Some((persisted_target, disposition)) =
+    if let Some((persisted_target, receipt)) =
         query_interrupt_receipt(&transaction, caller_agent_id, request_id)?
     {
         if persisted_target != target_agent_id {
@@ -360,7 +398,7 @@ pub fn interrupt_agent_execution(
             ));
         }
         transaction.commit().map_err(write_error)?;
-        return Ok(disposition);
+        return Ok(receipt);
     }
 
     let active = query_wakes(
@@ -397,7 +435,10 @@ pub fn interrupt_agent_execution(
                 interrupted_at,
             )?;
             transaction.commit().map_err(write_error)?;
-            return Ok(outcome);
+            return Ok(InterruptAgentExecutionReceipt {
+                outcome,
+                dispatched_at: None,
+            });
         }
         let changed = transaction
             .execute(
@@ -423,7 +464,10 @@ pub fn interrupt_agent_execution(
             interrupted_at,
         )?;
         transaction.commit().map_err(write_error)?;
-        return Ok(outcome);
+        return Ok(InterruptAgentExecutionReceipt {
+            outcome,
+            dispatched_at: None,
+        });
     }
 
     let queued_id = transaction
@@ -446,7 +490,10 @@ pub fn interrupt_agent_execution(
             interrupted_at,
         )?;
         transaction.commit().map_err(write_error)?;
-        return Ok(InterruptAgentExecutionOutcome::NoPendingExecution);
+        return Ok(InterruptAgentExecutionReceipt {
+            outcome: InterruptAgentExecutionOutcome::NoPendingExecution,
+            dispatched_at: None,
+        });
     };
     let changed = transaction
         .execute(
@@ -470,17 +517,20 @@ pub fn interrupt_agent_execution(
         interrupted_at,
     )?;
     transaction.commit().map_err(write_error)?;
-    Ok(outcome)
+    Ok(InterruptAgentExecutionReceipt {
+        outcome,
+        dispatched_at: None,
+    })
 }
 
 pub(super) fn query_interrupt_receipt(
     connection: &Connection,
     caller_agent_id: &str,
     request_id: &str,
-) -> Result<Option<(String, InterruptAgentExecutionOutcome)>, AgentGraphError> {
+) -> Result<Option<(String, InterruptAgentExecutionReceipt)>, AgentGraphError> {
     let row = connection
         .query_row(
-            "SELECT target_agent_id, disposition, wake_id, run_id
+            "SELECT target_agent_id, disposition, wake_id, run_id, dispatched_at
              FROM agent_interrupt_requests
              WHERE caller_agent_id = ?1 AND request_id = ?2",
             params![caller_agent_id, request_id],
@@ -490,12 +540,13 @@ pub(super) fn query_interrupt_receipt(
                     row.get::<_, String>(1)?,
                     row.get::<_, Option<String>>(2)?,
                     row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<i64>>(4)?,
                 ))
             },
         )
         .optional()
         .map_err(read_error)?;
-    row.map(|(target, disposition, wake_id, run_id)| {
+    row.map(|(target, disposition, wake_id, run_id, dispatched_at)| {
         let outcome = match (disposition.as_str(), wake_id, run_id) {
             ("no_pending_execution", None, None) => {
                 InterruptAgentExecutionOutcome::NoPendingExecution
@@ -512,7 +563,20 @@ pub(super) fn query_interrupt_receipt(
                 ))
             }
         };
-        Ok((target, outcome))
+        if dispatched_at.is_some()
+            && !matches!(&outcome, InterruptAgentExecutionOutcome::ActiveTurn { .. })
+        {
+            return Err(corrupt(
+                "Only an active-Turn Agent interrupt receipt may be marked dispatched",
+            ));
+        }
+        Ok((
+            target,
+            InterruptAgentExecutionReceipt {
+                outcome,
+                dispatched_at,
+            },
+        ))
     })
     .transpose()
 }
@@ -553,6 +617,124 @@ pub(super) fn insert_interrupt_receipt(
         )
         .map_err(write_error)?;
     Ok(())
+}
+
+/// Marks a persisted active-Turn interrupt as delivered to the process-local executor.
+///
+/// The update is monotonic and idempotent: once set, later retries preserve the original
+/// timestamp and can skip a duplicate executor call.
+pub fn mark_agent_interrupt_dispatched(
+    connection: &mut Connection,
+    caller_agent_id: &str,
+    request_id: &str,
+    dispatched_at: i64,
+) -> Result<InterruptAgentExecutionReceipt, AgentGraphError> {
+    validate_id("caller_agent_id", caller_agent_id)?;
+    validate_request_id(request_id)?;
+    validate_time(dispatched_at)?;
+    let transaction = immediate(connection)?;
+    let (_, receipt) = query_interrupt_receipt(&transaction, caller_agent_id, request_id)?
+        .ok_or_else(|| conflict("Agent interrupt request receipt does not exist"))?;
+    if !matches!(
+        &receipt.outcome,
+        InterruptAgentExecutionOutcome::ActiveTurn { .. }
+    ) {
+        return Err(conflict(
+            "Only an active-Turn Agent interrupt can be marked dispatched",
+        ));
+    }
+    if receipt.dispatched_at.is_some() {
+        transaction.commit().map_err(write_error)?;
+        return Ok(receipt);
+    }
+    let changed = transaction
+        .execute(
+            "UPDATE agent_interrupt_requests
+             SET dispatched_at = ?1
+             WHERE caller_agent_id = ?2 AND request_id = ?3
+               AND disposition = 'active_turn' AND dispatched_at IS NULL",
+            params![dispatched_at, caller_agent_id, request_id],
+        )
+        .map_err(write_error)?;
+    if changed != 1 {
+        return Err(conflict(
+            "Agent interrupt dispatch acknowledgement lost its durable CAS",
+        ));
+    }
+    let (_, marked) = query_interrupt_receipt(&transaction, caller_agent_id, request_id)?
+        .ok_or_else(|| corrupt("Agent interrupt receipt disappeared after dispatch marking"))?;
+    transaction.commit().map_err(write_error)?;
+    Ok(marked)
+}
+
+/// Lists active-Turn interrupt receipts which committed before runtime delivery was acknowledged.
+///
+/// Immutable receipt facts are checked against the referenced Wake before they cross the storage
+/// boundary. Terminal Wakes need no runtime delivery and are excluded without pretending that a
+/// process-local cancellation signal was dispatched.
+pub fn list_undispatched_agent_interrupts(
+    connection: &Connection,
+) -> Result<Vec<UndispatchedAgentInterrupt>, AgentGraphError> {
+    let mut statement = connection
+        .prepare(
+            "SELECT interrupt.caller_agent_id, interrupt.target_agent_id,
+                    interrupt.request_id, interrupt.wake_id, interrupt.run_id,
+                    interrupt.root_agent_id, wake.agent_id, wake.root_agent_id, wake.run_id
+             FROM agent_interrupt_requests AS interrupt
+             JOIN agent_wake_requests AS wake ON wake.wake_id = interrupt.wake_id
+             WHERE interrupt.disposition = 'active_turn'
+               AND interrupt.dispatched_at IS NULL
+               AND wake.status IN ('claimed', 'running', 'waiting_for_approval')
+             ORDER BY interrupt.created_at, interrupt.caller_agent_id, interrupt.request_id",
+        )
+        .map_err(read_error)?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, String>(6)?,
+                row.get::<_, String>(7)?,
+                row.get::<_, Option<String>>(8)?,
+            ))
+        })
+        .map_err(read_error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(read_error)?;
+    let mut pending = Vec::with_capacity(rows.len());
+    for (
+        caller_agent_id,
+        target_agent_id,
+        request_id,
+        wake_id,
+        run_id,
+        receipt_root_agent_id,
+        wake_agent_id,
+        wake_root_agent_id,
+        wake_run_id,
+    ) in rows
+    {
+        if target_agent_id != wake_agent_id
+            || receipt_root_agent_id != wake_root_agent_id
+            || wake_run_id.as_deref() != Some(run_id.as_str())
+        {
+            return Err(corrupt(
+                "undispatched Agent interrupt no longer matches its immutable Wake identity",
+            ));
+        }
+        pending.push(UndispatchedAgentInterrupt {
+            caller_agent_id,
+            target_agent_id,
+            request_id,
+            wake_id,
+            run_id,
+        });
+    }
+    Ok(pending)
 }
 
 pub fn renew_agent_wake_lease(

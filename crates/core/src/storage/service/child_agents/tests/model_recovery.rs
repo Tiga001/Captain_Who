@@ -1,6 +1,57 @@
 use super::*;
 
 #[test]
+fn run_bound_spawn_is_rejected_atomically_after_durable_tree_stop() {
+    let fixture = Fixture::new(Some("model-a"));
+    insert_active_root_trace(&fixture, "run-stopped-spawn", "assistant-stopped-spawn");
+    fixture
+        .service
+        .begin_agent_tree_run_stop_by_root_conversation_at(
+            "root-conversation",
+            "run-stopped-spawn",
+            21,
+        )
+        .unwrap()
+        .unwrap();
+
+    let error = fixture
+        .service
+        .create_child_agent_with_limits_and_expected_selector_from_run(
+            &spawn_input("spawn-after-stop", "blocked_child"),
+            AgentTreeResourceLimits::default(),
+            None,
+            None,
+            "run-stopped-spawn",
+        )
+        .unwrap_err();
+    assert_eq!(
+        error,
+        ChildAgentSpawnError::Conflict("origin Agent Run has been stopped".to_string())
+    );
+
+    let connection = fixture.service.state.connection().unwrap();
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT COUNT(*) FROM agent_nodes WHERE parent_agent_id IS NOT NULL",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        connection
+            .query_row("SELECT COUNT(*) FROM agent_wake_requests", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+        0,
+        "the rejected Spawn must not leave a child, Conversation, task, or Wake"
+    );
+}
+
+#[test]
 fn retry_uses_frozen_bundle_after_template_and_model_catalog_change() {
     let fixture = Fixture::new(Some("model-a"));
     let mut input = spawn_input("spawn-frozen-retry", "frozen_review");

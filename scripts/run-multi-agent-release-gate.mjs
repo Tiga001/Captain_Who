@@ -216,7 +216,7 @@ const smokeSteps = [
     ]
   },
   {
-    label: 'storage: canonical v27, reset refusal, and migration failure recovery',
+    label: 'storage: canonical v32, reset refusal, and migration failure recovery',
     command: [
       'cargo',
       'test',

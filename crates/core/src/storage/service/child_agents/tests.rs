@@ -159,6 +159,34 @@ fn spawn_input(request_id: &str, task_name: &str) -> CreateChildAgentInput {
     }
 }
 
+fn insert_active_root_trace(fixture: &Fixture, run_id: &str, assistant_message_id: &str) {
+    let mut connection = fixture.service.state.connection().unwrap();
+    connection
+        .execute(
+            "INSERT INTO messages (
+                 id, conversation_id, role, content, status, created_at, position
+             ) VALUES (
+                 ?1, 'root-conversation', 'assistant', '', 'pending', 20,
+                 (SELECT COALESCE(MAX(position), -1) + 1 FROM messages
+                  WHERE conversation_id = 'root-conversation')
+             )",
+            [assistant_message_id],
+        )
+        .unwrap();
+    let trace = crate::ConversationTraceSnapshot::default().in_progress_trace(
+        run_id,
+        "root-conversation",
+        assistant_message_id,
+    );
+    crate::storage::conversation_trace_repository::append_in_progress_trace(
+        &mut connection,
+        &trace,
+        20,
+        20,
+    )
+    .unwrap();
+}
+
 fn save_settled_history(fixture: &Fixture, turn_count: usize, active_tail: bool) {
     let mut messages = Vec::new();
     for turn in 0..turn_count {

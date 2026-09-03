@@ -227,6 +227,7 @@ pub enum AgentPendingActionResultCommitOutcome {
 pub enum AgentWakeApprovalWaitOutcome {
     Waiting(crate::AgentWakeRequestRecord),
     RunningAfterApproval(crate::AgentWakeRequestRecord),
+    TreeStopped(crate::AgentWakeRequestRecord),
 }
 
 /// Authoritative durable state of one attempted manual-command settlement.
@@ -2115,9 +2116,27 @@ impl StorageService {
         &self,
         record: AgentActionAuditRecord,
     ) -> Result<agent_action_audit_repository::AgentActionAuditExecutionClaimOutcome, String> {
-        let connection = self.state.connection()?;
-        agent_action_audit_repository::claim_action_audit_execution(&connection, &record)
-            .map_err(storage_error)
+        let mut connection = self.state.connection()?;
+        let transaction = connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(storage_error)?;
+        let tree_stopped = transaction
+            .query_row(
+                "SELECT EXISTS(
+                     SELECT 1 FROM agent_tree_run_stops WHERE run_id = ?1
+                 )",
+                [&record.run_id],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(storage_error)?;
+        if tree_stopped {
+            return Err("stopped Agent Run cannot claim automatic action execution".to_string());
+        }
+        let outcome =
+            agent_action_audit_repository::claim_action_audit_execution(&transaction, &record)
+                .map_err(storage_error)?;
+        transaction.commit().map_err(storage_error)?;
+        Ok(outcome)
     }
 
     pub fn finalize_agent_action_audit_execution(
@@ -2410,7 +2429,7 @@ impl StorageService {
                 return Ok(false);
             }
         }
-        let pending_changed = pending_action_repository::transition_pending_action(
+        let pending_changed = pending_action_repository::transition_pending_action_for_dispatch(
             &transaction,
             &pending.action_id,
             "approved",
@@ -3168,18 +3187,78 @@ impl StorageService {
         renderer_action_id: &str,
         updated_at: i64,
     ) -> Result<(), String> {
-        let mut connection = self.state.connection()?;
-        let transaction = connection
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-            .map_err(storage_error)?;
-        let affected = pending_action_repository::transition_pending_action(
-            &transaction,
+        self.transition_pending_agent_action_and_resolve_notification_internal(
             action_id,
             expected_status,
             status,
             agent_input_json,
+            run_id,
+            renderer_action_id,
             updated_at,
+            false,
         )
+    }
+
+    /// Claims action/continuation dispatch authority only when the owning Agent Run has not been
+    /// durably stopped. The stop check and lifecycle CAS share one immediate transaction.
+    #[allow(clippy::too_many_arguments)]
+    pub fn transition_pending_agent_action_for_dispatch_and_resolve_notification(
+        &self,
+        action_id: &str,
+        expected_status: &str,
+        status: &str,
+        agent_input_json: &str,
+        run_id: &str,
+        renderer_action_id: &str,
+        updated_at: i64,
+    ) -> Result<(), String> {
+        self.transition_pending_agent_action_and_resolve_notification_internal(
+            action_id,
+            expected_status,
+            status,
+            agent_input_json,
+            run_id,
+            renderer_action_id,
+            updated_at,
+            true,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn transition_pending_agent_action_and_resolve_notification_internal(
+        &self,
+        action_id: &str,
+        expected_status: &str,
+        status: &str,
+        agent_input_json: &str,
+        run_id: &str,
+        renderer_action_id: &str,
+        updated_at: i64,
+        reject_stopped_run: bool,
+    ) -> Result<(), String> {
+        let mut connection = self.state.connection()?;
+        let transaction = connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(storage_error)?;
+        let affected = if reject_stopped_run {
+            pending_action_repository::transition_pending_action_for_dispatch(
+                &transaction,
+                action_id,
+                expected_status,
+                status,
+                agent_input_json,
+                updated_at,
+            )
+        } else {
+            pending_action_repository::transition_pending_action(
+                &transaction,
+                action_id,
+                expected_status,
+                status,
+                agent_input_json,
+                updated_at,
+            )
+        }
         .map_err(storage_error)?;
         if affected != 1 {
             return Err(format!(
@@ -3284,37 +3363,50 @@ impl StorageService {
                 "approval wait transition does not own the dispatched child Turn".to_string(),
             );
         }
-        let pending_count: i64 = transaction
+        let tree_stopped = transaction
             .query_row(
-                "SELECT COUNT(*)
-                 FROM agent_pending_actions
-                 WHERE run_id = ?1
-                   AND conversation_id = ?2
-                   AND assistant_message_id = ?3
-                   AND status = 'pending'
-                   AND target_status IS NULL",
-                rusqlite::params![run_id, conversation_id, assistant_message_id],
-                |row| row.get(0),
+                "SELECT EXISTS(
+                     SELECT 1 FROM agent_tree_run_stops WHERE run_id = ?1
+                 )",
+                [run_id],
+                |row| row.get::<_, bool>(0),
             )
             .map_err(storage_error)?;
-        let outcome = match pending_count {
-            0 => AgentWakeApprovalWaitOutcome::RunningAfterApproval(running),
-            1 => {
-                let waiting = agent_graph_repository::transition_agent_wake_in_connection(
-                    &transaction,
-                    wake_id,
-                    crate::AgentWakeStatus::Running,
-                    crate::AgentWakeStatus::WaitingForApproval,
-                    Some(claim_token),
-                    marked_at,
+        let outcome = if tree_stopped {
+            AgentWakeApprovalWaitOutcome::TreeStopped(running)
+        } else {
+            let pending_count: i64 = transaction
+                .query_row(
+                    "SELECT COUNT(*)
+                     FROM agent_pending_actions
+                     WHERE run_id = ?1
+                       AND conversation_id = ?2
+                       AND assistant_message_id = ?3
+                       AND status = 'pending'
+                       AND target_status IS NULL",
+                    rusqlite::params![run_id, conversation_id, assistant_message_id],
+                    |row| row.get(0),
                 )
-                .map_err(|error| error.to_string())?;
-                AgentWakeApprovalWaitOutcome::Waiting(waiting)
-            }
-            count => {
-                return Err(format!(
-                    "approval wait transition found {count} pending actions for one child Turn"
-                ));
+                .map_err(storage_error)?;
+            match pending_count {
+                0 => AgentWakeApprovalWaitOutcome::RunningAfterApproval(running),
+                1 => {
+                    let waiting = agent_graph_repository::transition_agent_wake_in_connection(
+                        &transaction,
+                        wake_id,
+                        crate::AgentWakeStatus::Running,
+                        crate::AgentWakeStatus::WaitingForApproval,
+                        Some(claim_token),
+                        marked_at,
+                    )
+                    .map_err(|error| error.to_string())?;
+                    AgentWakeApprovalWaitOutcome::Waiting(waiting)
+                }
+                count => {
+                    return Err(format!(
+                        "approval wait transition found {count} pending actions for one child Turn"
+                    ));
+                }
             }
         };
         transaction.commit().map_err(storage_error)?;
@@ -3374,7 +3466,7 @@ impl StorageService {
             }
         }
 
-        let changed = pending_action_repository::transition_pending_action(
+        let changed = pending_action_repository::transition_pending_action_for_dispatch(
             &transaction,
             action_id,
             "pending",
@@ -3709,6 +3801,50 @@ impl StorageService {
         model_context_items: &[ConversationModelContextItem],
         committed_at: i64,
     ) -> Result<AgentPendingActionResultCommitOutcome, String> {
+        self.commit_pending_agent_action_audited_result_trace_with_model_context_internal(
+            terminal_audit,
+            expected_pending_status,
+            target_status,
+            trace,
+            model_context_items,
+            committed_at,
+            false,
+        )
+    }
+
+    /// Commits a ToolResult that will authorize a model continuation only if the exact Run has
+    /// not been durably stopped. Terminal result bookkeeping uses the unguarded variant above.
+    pub fn commit_pending_agent_action_audited_result_trace_for_continuation(
+        &self,
+        terminal_audit: &AgentActionAuditRecord,
+        expected_pending_status: &str,
+        target_status: &str,
+        trace: &ConversationTurnTrace,
+        model_context_items: &[ConversationModelContextItem],
+        committed_at: i64,
+    ) -> Result<AgentPendingActionResultCommitOutcome, String> {
+        self.commit_pending_agent_action_audited_result_trace_with_model_context_internal(
+            terminal_audit,
+            expected_pending_status,
+            target_status,
+            trace,
+            model_context_items,
+            committed_at,
+            true,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn commit_pending_agent_action_audited_result_trace_with_model_context_internal(
+        &self,
+        terminal_audit: &AgentActionAuditRecord,
+        expected_pending_status: &str,
+        target_status: &str,
+        trace: &ConversationTurnTrace,
+        model_context_items: &[ConversationModelContextItem],
+        committed_at: i64,
+        require_active_run: bool,
+    ) -> Result<AgentPendingActionResultCommitOutcome, String> {
         validate_manual_file_effect_settlement_request(
             terminal_audit,
             expected_pending_status,
@@ -3739,6 +3875,22 @@ impl StorageService {
             target_status,
             trace,
         )?;
+        if require_active_run {
+            let tree_stopped = transaction
+                .query_row(
+                    "SELECT EXISTS(
+                         SELECT 1 FROM agent_tree_run_stops WHERE run_id = ?1
+                     )",
+                    [&pending.run_id],
+                    |row| row.get::<_, bool>(0),
+                )
+                .map_err(storage_error)?;
+            if tree_stopped {
+                return Err(
+                    "stopped Agent Run cannot commit model-continuation authority".to_string(),
+                );
+            }
+        }
 
         let audit_outcome = agent_action_audit_repository::settle_manual_terminal_action_audit(
             &transaction,

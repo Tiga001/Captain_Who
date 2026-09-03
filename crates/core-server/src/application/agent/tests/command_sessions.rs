@@ -2616,6 +2616,28 @@ fn explicit_run_cancel_releases_model_wait_and_interrupts_its_handed_off_process
 }
 
 #[test]
+fn trusted_child_interrupt_terminates_its_handed_off_command_session() {
+    let fixture = RunningFixture::new("child-interrupt-adopted-session");
+    let mut service = AgentService::new(Arc::clone(&fixture.storage));
+    service.command_sessions = fixture.registry.clone();
+    let command = "sleep 5";
+    let (snapshot, _) = fixture.start(command, None);
+    fixture.adopt(&snapshot, command);
+
+    assert!(service.interrupt_agent_wake_run(&fixture.run_id).unwrap());
+    let terminal = wait_for_terminal_record(
+        &fixture.storage,
+        &fixture.conversation_id,
+        &snapshot.session_id,
+    );
+    assert_eq!(
+        terminal.snapshot.status,
+        AgentCommandSessionStatus::Interrupted
+    );
+    assert_eq!(fixture.registry.retained_live_session_count(), 0);
+}
+
+#[test]
 fn queued_guidance_releases_a_noisy_running_wait_without_stopping_process() {
     let fixture = RunningFixture::new("guidance-releases-wait");
     let command = "printf 'noise-0\\n'; sleep 0.10; printf 'noise-1\\n'; sleep 0.10; \

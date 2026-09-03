@@ -44,6 +44,102 @@ fn pending_model_context_item(call: &AgentToolCall) -> ConversationModelContextI
 }
 
 #[test]
+fn cancel_run_rpc_reports_tree_stop_persistence_failure_but_interrupts_root_locally() {
+    let fixture = tempdir().unwrap();
+    let database_path = fixture.path().join("cancel-tree-stop-failure.sqlite");
+    let storage = Arc::new(StorageService::open(&database_path).unwrap());
+    let conversation_id = "conversation-cancel-tree-stop-failure";
+    let root_agent_id = "agent-cancel-tree-stop-failure";
+    let run_id = "run-cancel-tree-stop-failure";
+    let assistant_message_id = "assistant-cancel-tree-stop-failure";
+    storage
+        .save_conversation(ChatConversationRecord {
+            id: conversation_id.to_string(),
+            project_id: None,
+            model_id: Some("model-1".to_string()),
+            title: "Cancel tree stop failure".to_string(),
+            messages: vec![ChatMessageRecord {
+                id: assistant_message_id.to_string(),
+                role: "assistant".to_string(),
+                content: String::new(),
+                created_at: 1,
+                status: Some("streaming".to_string()),
+                attachments: Vec::new(),
+                agent_run_json: None,
+                ui_state_json: None,
+            }],
+            created_at: 1,
+            updated_at: 1,
+            pinned_at: None,
+            archived_at: None,
+            unread_at: None,
+        })
+        .unwrap();
+    storage
+        .ensure_root_agent(&mycopilot_core::EnsureRootAgentInput {
+            agent_id: root_agent_id.to_string(),
+            conversation_id: conversation_id.to_string(),
+            creation_request_id: "ensure-cancel-tree-stop-failure".to_string(),
+            task_name: "Root".to_string(),
+        })
+        .unwrap();
+    // Construct startup recovery before creating the live fixture Turn; otherwise the service
+    // correctly treats the synthetic in-progress trace as an orphan from an earlier Host.
+    let service = AgentService::new(Arc::clone(&storage));
+    assert!(storage
+        .append_in_progress_conversation_turn_trace(
+            &mycopilot_core::ConversationTurnTrace {
+                schema_version: CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
+                run_id: run_id.to_string(),
+                conversation_id: conversation_id.to_string(),
+                assistant_message_id: assistant_message_id.to_string(),
+                terminal_status: ConversationTurnTraceTerminalStatus::InProgress,
+                terminal_error: None,
+                truncated: false,
+                items: Vec::new(),
+            },
+            1,
+            1,
+        )
+        .unwrap());
+
+    let cancellation = AgentCancellationToken::new();
+    service.register_cancellation(run_id, cancellation.clone());
+    service.register_active_run_control(
+        run_id,
+        conversation_id,
+        assistant_message_id,
+        None,
+        ModelCapabilities::default(),
+        AgentPermissions::default(),
+    );
+    rusqlite::Connection::open(&database_path)
+        .unwrap()
+        .execute_batch(
+            "CREATE TRIGGER fail_test_agent_tree_run_stop
+             BEFORE INSERT ON agent_tree_run_stops
+             BEGIN
+               SELECT RAISE(ABORT, 'injected Agent tree stop failure');
+             END;",
+        )
+        .unwrap();
+
+    let response = crate::transport::handle_agent_cancel_run(
+        &service,
+        mycopilot_protocol_rs::JsonRpcId::Number(73),
+        Some(json!({ "runId": run_id })),
+    );
+
+    assert_eq!(response["error"]["code"], -32000);
+    assert!(response["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("Agent graph storage is unavailable"));
+    assert!(cancellation.is_cancelled());
+    assert!(storage.get_agent_tree_run_stop(run_id).unwrap().is_none());
+}
+
+#[test]
 fn cancelling_pending_approval_commits_one_paired_cancelled_trace() {
     let fixture = tempdir().unwrap();
     let database_path = fixture.path().join("storage.sqlite");

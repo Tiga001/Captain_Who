@@ -50,15 +50,16 @@ pub use agent_graph::{
     AgentMessageDispatch, AgentModelSelectionSnapshot, AgentModelSelectionSource,
     AgentModelUnavailableReason, AgentNodeRecord, AgentResultArtifactKind,
     AgentResultArtifactReference, AgentTemplateError, AgentTemplateModelUnavailableReason,
-    AgentTemplateRecord, AgentTemplateSnapshot, AgentTreeResourceLimits, AgentTurnPermissionSource,
-    AgentTurnResultEnvelope, AgentTurnResultSettlement, AgentWakeRecoveryAction,
-    AgentWakeRecoveryBatch, AgentWakeRequestRecord, AgentWakeStatus, ChildAgentSpawnError,
-    ChildAgentSpawnRecord, ConversationMessageOrigin, CreateAgentNodeInput,
-    CreateAgentTemplateInput, CreateChildAgentInput, EnqueueAgentMessageInput,
-    EnqueueAgentWakeInput, EnsureRootAgentInput, FinishAgentTurnResultInput,
-    FinishAgentWakeWithResultInput, IdempotentCreate, InterruptAgentExecutionOutcome,
-    ResolvedAgentTemplateForSpawn, SendAgentMessageRequest, TrustedActiveChildWakeBundle,
-    TrustedAgentWakeTurnAdmission, UpdateAgentTemplateInput,
+    AgentTemplateRecord, AgentTemplateSnapshot, AgentTreeResourceLimits,
+    AgentTreeStoppedWakeSettlementOutcome, AgentTurnPermissionSource, AgentTurnResultEnvelope,
+    AgentTurnResultSettlement, AgentWakeRecoveryAction, AgentWakeRecoveryBatch,
+    AgentWakeRequestRecord, AgentWakeStatus, ChildAgentSpawnError, ChildAgentSpawnRecord,
+    ConversationMessageOrigin, CreateAgentNodeInput, CreateAgentTemplateInput,
+    CreateChildAgentInput, EnqueueAgentMessageInput, EnqueueAgentWakeInput, EnsureRootAgentInput,
+    FinishAgentTurnResultInput, FinishAgentWakeWithResultInput, IdempotentCreate,
+    InterruptAgentExecutionOutcome, InterruptAgentExecutionReceipt, ResolvedAgentTemplateForSpawn,
+    SendAgentMessageRequest, TrustedActiveChildWakeBundle, TrustedAgentWakeTurnAdmission,
+    UndispatchedAgentInterrupt, UpdateAgentTemplateInput,
     AGENT_EFFECTIVE_PERMISSION_SNAPSHOT_SCHEMA_VERSION, AGENT_GRAPH_SCHEMA_VERSION,
     AGENT_RESULT_ENVELOPE_SCHEMA_VERSION, AGENT_RESULT_SUMMARY_MAX_BYTES,
     AGENT_RESULT_TERMINAL_ERROR_MAX_BYTES,
@@ -150,6 +151,10 @@ pub use provider_registration::{
     ProviderUsageSemantics, ProviderVendorDescriptor, ProviderVendorModelPolicyDescriptor,
     ProviderVendorModelPolicyInput, ProviderVendorModelUnsupportedReason,
     ProviderVendorResolutionError, ProviderVendorSettingsKind,
+};
+pub use storage::agent_graph_repository::{
+    ActiveAgentTreeWake, AgentTreeRunStopCancellation, AgentTreeRunStopRecord,
+    AgentTreeWakeCancellationBatch,
 };
 
 /// Rebuilds the model-only projection for a result restored from an approval checkpoint.

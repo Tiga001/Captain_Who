@@ -2740,6 +2740,112 @@ CREATE TABLE conversation_turn_traces (
 CREATE UNIQUE INDEX conversation_turn_traces_one_active_turn
             ON conversation_turn_traces (conversation_id)
             WHERE terminal_status = 'in_progress';
+CREATE TABLE agent_tree_run_stops (
+            run_id TEXT PRIMARY KEY CHECK (
+                typeof(run_id) = 'text'
+                AND length(CAST(run_id AS BLOB)) BETWEEN 1 AND 2048
+                AND run_id = trim(run_id)
+            ),
+            root_run_id TEXT NOT NULL CHECK (
+                length(CAST(root_run_id AS BLOB)) BETWEEN 1 AND 2048
+                AND root_run_id = trim(root_run_id)
+            ),
+            root_agent_id TEXT NOT NULL,
+            root_conversation_id TEXT NOT NULL,
+            stopped_at INTEGER NOT NULL CHECK (stopped_at >= 0),
+            UNIQUE (
+                run_id, root_agent_id, root_conversation_id, stopped_at
+            ),
+            FOREIGN KEY (
+                root_run_id, root_agent_id, root_conversation_id, stopped_at
+            ) REFERENCES agent_tree_run_stops(
+                run_id, root_agent_id, root_conversation_id, stopped_at
+            ) ON DELETE CASCADE,
+            FOREIGN KEY (root_agent_id)
+                REFERENCES agent_nodes(agent_id) ON DELETE CASCADE,
+            FOREIGN KEY (root_conversation_id)
+                REFERENCES conversations(id) ON DELETE CASCADE
+        );
+CREATE INDEX agent_tree_run_stops_root
+            ON agent_tree_run_stops(root_run_id, run_id);
+CREATE TABLE agent_tree_run_stop_members (
+            root_run_id TEXT NOT NULL,
+            run_id TEXT NOT NULL,
+            PRIMARY KEY (root_run_id, run_id),
+            FOREIGN KEY (root_run_id)
+                REFERENCES agent_tree_run_stops(run_id) ON DELETE CASCADE,
+            FOREIGN KEY (run_id)
+                REFERENCES agent_tree_run_stops(run_id) ON DELETE CASCADE
+        );
+CREATE INDEX agent_tree_run_stop_members_run
+            ON agent_tree_run_stop_members(run_id, root_run_id);
+CREATE TRIGGER validate_agent_tree_run_stop_member_insert
+        BEFORE INSERT ON agent_tree_run_stop_members
+        WHEN NOT EXISTS (
+            SELECT 1
+            FROM agent_tree_run_stops AS root
+            JOIN agent_tree_run_stops AS member ON member.run_id = NEW.run_id
+            WHERE root.run_id = NEW.root_run_id
+              AND root.root_run_id = root.run_id
+              AND member.root_agent_id = root.root_agent_id
+              AND member.root_conversation_id = root.root_conversation_id
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'invalid Agent-tree run stop membership');
+        END;
+CREATE TRIGGER prevent_agent_tree_run_stop_member_update
+        BEFORE UPDATE ON agent_tree_run_stop_members
+        BEGIN
+            SELECT RAISE(ABORT, 'Agent-tree run stop memberships are immutable');
+        END;
+CREATE TRIGGER validate_agent_tree_run_stop_insert
+        BEFORE INSERT ON agent_tree_run_stops
+        WHEN (
+            NEW.run_id = NEW.root_run_id
+            AND NOT EXISTS (
+                SELECT 1
+                FROM agent_nodes AS root
+                JOIN conversation_turn_traces AS trace
+                  ON trace.conversation_id = root.conversation_id
+                WHERE root.agent_id = NEW.root_agent_id
+                  AND root.root_agent_id = NEW.root_agent_id
+                  AND root.parent_agent_id IS NULL
+                  AND root.conversation_id = NEW.root_conversation_id
+                  AND root.root_conversation_id = NEW.root_conversation_id
+                  AND trace.run_id = NEW.run_id
+                  AND trace.terminal_status = 'in_progress'
+            )
+        ) OR (
+            NEW.run_id != NEW.root_run_id
+            AND NOT EXISTS (
+                SELECT 1
+                FROM agent_wake_requests AS wake
+                JOIN agent_nodes AS child ON child.agent_id = wake.agent_id
+                WHERE wake.run_id = NEW.run_id
+                  AND wake.root_agent_id = NEW.root_agent_id
+                  AND wake.status IN ('claimed', 'running', 'waiting_for_approval')
+                  AND child.root_agent_id = NEW.root_agent_id
+                  AND child.root_conversation_id = NEW.root_conversation_id
+            )
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'invalid Agent-tree run stop identity');
+        END;
+CREATE TRIGGER prevent_agent_tree_run_stop_update
+        BEFORE UPDATE ON agent_tree_run_stops
+        BEGIN
+            SELECT RAISE(ABORT, 'Agent-tree run stop facts are immutable');
+        END;
+CREATE TRIGGER prevent_stopped_agent_run_pending_action_insert
+        BEFORE INSERT ON agent_pending_actions
+        WHEN NEW.status IN ('approved', 'executing')
+          AND EXISTS (
+              SELECT 1 FROM agent_tree_run_stops AS stop
+              WHERE stop.run_id = NEW.run_id
+          )
+        BEGIN
+            SELECT RAISE(ABORT, 'stopped Agent Run cannot insert dispatch authority');
+        END;
 CREATE TABLE conversation_turn_rewrites (
             request_id TEXT PRIMARY KEY CHECK (
                 typeof(request_id) = 'text'

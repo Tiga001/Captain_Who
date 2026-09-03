@@ -351,7 +351,7 @@ async fn fake_provider_drives_all_six_tools_through_runtime_host_and_server_serv
     let child_arrivals = Arc::new(AtomicUsize::new(0));
     let active_children = Arc::new(AtomicUsize::new(0));
     let maximum_active_children = Arc::new(AtomicUsize::new(0));
-    let child_ready = Arc::new(tokio::sync::Notify::new());
+    let child_ready = Arc::new(tokio::sync::Barrier::new(2));
     let server_child_arrivals = Arc::clone(&child_arrivals);
     let server_active_children = Arc::clone(&active_children);
     let server_maximum_active_children = Arc::clone(&maximum_active_children);
@@ -378,12 +378,9 @@ async fn fake_provider_drives_all_six_tools_through_runtime_host_and_server_serv
                             let child_text = request_text(&request);
                             let current = active.fetch_add(1, Ordering::SeqCst) + 1;
                             maximum_active.fetch_max(current, Ordering::SeqCst);
-                            let notification = ready.notified();
                             let arrival = arrivals.fetch_add(1, Ordering::SeqCst) + 1;
-                            if arrival >= 2 {
-                                ready.notify_waiters();
-                            } else if arrivals.load(Ordering::SeqCst) < 2 {
-                                tokio::time::timeout(Duration::from_secs(5), notification)
+                            if arrival <= 2 {
+                                tokio::time::timeout(Duration::from_secs(5), ready.wait())
                                     .await
                                     .expect("two child samples must overlap through the real Dispatcher");
                             }
@@ -573,7 +570,11 @@ async fn fake_provider_drives_all_six_tools_through_runtime_host_and_server_serv
     ] {
         assert!(!first_root_text.contains(secret_key), "leaked {secret_key}");
     }
-    assert!(request_text(child_requests[0]).contains("PRIVATE_TEMPLATE_INSTRUCTION"));
+    let template_child_request = child_requests
+        .iter()
+        .find(|request| request_text(request).contains("security_review"))
+        .expect("the template-selected child request must be present");
+    assert!(request_text(template_child_request).contains("PRIVATE_TEMPLATE_INSTRUCTION"));
 
     let final_results = tool_results(root_requests.last().unwrap());
     assert_eq!(final_results.len(), 8, "root tool chain={final_results:#?}");
@@ -911,4 +912,251 @@ async fn process_start_dispatcher_recovers_a_queued_child_without_a_new_root_tur
         root_traces[0].terminal_status,
         ConversationTurnTraceTerminalStatus::Completed
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn user_root_run_cancellation_stops_running_and_queued_descendants() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (child_arrived_sender, child_arrived_receiver) = tokio::sync::oneshot::channel();
+    let (stop_sender, stop_receiver) = tokio::sync::oneshot::channel::<()>();
+    let model_server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let request = read_provider_request(&mut stream).await;
+        assert!(request_text(&request).contains("## 子 Agent 协作身份"));
+        let _ = child_arrived_sender.send(());
+        let _ = stop_receiver.await;
+    });
+
+    let fixture = tempdir().unwrap();
+    let database_path = fixture.path().join("collaboration-root-stop.sqlite");
+    let storage = Arc::new(StorageService::open(&database_path).unwrap());
+    storage
+        .save_project(ProjectRecord {
+            id: PROJECT_ID.to_string(),
+            name: "Collaboration root stop".to_string(),
+            path: Some(fixture.path().to_string_lossy().into_owned()),
+            created_at: 1,
+            pinned_at: None,
+        })
+        .unwrap();
+    let mut settings = test_model_settings();
+    settings.api_url = format!("http://{address}/v1/chat/completions");
+    storage.save_model_settings(settings).unwrap();
+    let root_conversation_id = "conversation-collaboration-root-stop";
+    let root_agent_id = "agent-collaboration-root-stop";
+    storage
+        .save_conversation(ChatConversationRecord {
+            id: root_conversation_id.to_string(),
+            project_id: Some(PROJECT_ID.to_string()),
+            model_id: Some("model-1".to_string()),
+            title: "Root stop".to_string(),
+            messages: Vec::new(),
+            created_at: 1,
+            updated_at: 1,
+            pinned_at: None,
+            archived_at: None,
+            unread_at: None,
+        })
+        .unwrap();
+    storage
+        .ensure_root_agent(&mycopilot_core::EnsureRootAgentInput {
+            agent_id: root_agent_id.to_string(),
+            conversation_id: root_conversation_id.to_string(),
+            creation_request_id: "ensure-collaboration-root-stop".to_string(),
+            task_name: "Root".to_string(),
+        })
+        .unwrap();
+    seed_root_effective_permissions(
+        &storage,
+        root_agent_id,
+        root_conversation_id,
+        "root-stop",
+        AgentPermissions::default(),
+    );
+    let root_run_id = "run-collaboration-root-stop";
+    let root_assistant_message_id = "assistant-collaboration-root-stop";
+    storage
+        .upsert_chat_messages(
+            root_conversation_id,
+            vec![ChatMessageRecord {
+                id: root_assistant_message_id.to_string(),
+                role: "assistant".to_string(),
+                content: String::new(),
+                created_at: 2,
+                status: Some("streaming".to_string()),
+                attachments: Vec::new(),
+                agent_run_json: None,
+                ui_state_json: None,
+            }],
+            0,
+        )
+        .unwrap();
+    assert!(storage
+        .append_in_progress_conversation_turn_trace(
+            &mycopilot_core::ConversationTurnTrace {
+                schema_version: CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
+                run_id: root_run_id.to_string(),
+                conversation_id: root_conversation_id.to_string(),
+                assistant_message_id: root_assistant_message_id.to_string(),
+                terminal_status: ConversationTurnTraceTerminalStatus::InProgress,
+                terminal_error: None,
+                truncated: false,
+                items: Vec::new(),
+            },
+            2,
+            2,
+        )
+        .unwrap());
+    let factory =
+        crate::application::agent_collaboration::ChildAgentFactory::new(Arc::clone(&storage));
+    let running_child = factory
+        .create_child_with_expected_selector_from_run(
+            &mycopilot_core::CreateChildAgentInput {
+                parent_agent_id: root_agent_id.to_string(),
+                creation_request_id: "spawn-running-before-root-stop".to_string(),
+                task_name: "running_child".to_string(),
+                task: "Remain inside the provider request until cancelled.".to_string(),
+                template_machine_key: None,
+                explicit_model_id: None,
+                reasoning_effort: None,
+                fork_turns: mycopilot_core::AgentForkTurns::None,
+            },
+            None,
+            None,
+            root_run_id,
+        )
+        .unwrap();
+    let queued_child = factory
+        .create_child_with_expected_selector_from_run(
+            &mycopilot_core::CreateChildAgentInput {
+                parent_agent_id: root_agent_id.to_string(),
+                creation_request_id: "spawn-queued-before-root-stop".to_string(),
+                task_name: "queued_child".to_string(),
+                task: "This Wake must be cancelled before admission.".to_string(),
+                template_machine_key: None,
+                explicit_model_id: None,
+                reasoning_effort: None,
+                fork_turns: mycopilot_core::AgentForkTurns::None,
+            },
+            None,
+            None,
+            root_run_id,
+        )
+        .unwrap();
+
+    let service = AgentService::try_new_deferred_startup_reconciliation_with_agent_limit(
+        Arc::clone(&storage),
+        None,
+        2,
+    )
+    .unwrap();
+    let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    service
+        .start_collaboration_dispatcher(notifications)
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(10), child_arrived_receiver)
+        .await
+        .expect("the first child never reached the Provider")
+        .expect("the child arrival signal was dropped");
+
+    let root_cancellation = AgentCancellationToken::new();
+    service.register_cancellation(root_run_id, root_cancellation.clone());
+    service.register_active_run_control(
+        root_run_id,
+        root_conversation_id,
+        root_assistant_message_id,
+        Some(PROJECT_ID),
+        ModelCapabilities::default(),
+        AgentPermissions::default(),
+    );
+
+    assert!(service.cancel_run(root_run_id));
+    assert!(root_cancellation.is_cancelled());
+    assert_eq!(
+        storage
+            .get_agent_wake(&queued_child.initial_wake.wake_id)
+            .unwrap()
+            .unwrap()
+            .status,
+        mycopilot_core::AgentWakeStatus::Cancelled
+    );
+    let durable_stop = storage
+        .get_agent_tree_run_stop(root_run_id)
+        .unwrap()
+        .expect("root stop must be durable");
+    assert_eq!(durable_stop.root_agent_id, root_agent_id);
+    assert_eq!(durable_stop.root_run_id, root_run_id);
+
+    // Stop-first scheduling is rejected inside the same SQLite write transaction. No child
+    // identity, message, or Wake can escape if the process exits immediately after this call.
+    assert!(factory
+        .create_child_with_expected_selector_from_run(
+            &mycopilot_core::CreateChildAgentInput {
+                parent_agent_id: root_agent_id.to_string(),
+                creation_request_id: "spawn-after-root-stop".to_string(),
+                task_name: "late_child".to_string(),
+                task: "This late Wake must never be committed.".to_string(),
+                template_machine_key: None,
+                explicit_model_id: None,
+                reasoning_effort: None,
+                fork_turns: mycopilot_core::AgentForkTurns::None,
+            },
+            None,
+            None,
+            root_run_id,
+        )
+        .is_err());
+
+    assert!(
+        crate::application::agent_collaboration::AgentMessagingService::new(Arc::clone(&storage))
+            .follow_up_from_run(
+                &mycopilot_core::SendAgentMessageRequest {
+                    sender_agent_id: root_agent_id.to_string(),
+                    recipient_agent_id: queued_child.agent.agent_id.clone(),
+                    request_id: "followup-after-root-stop".to_string(),
+                    content: "This late follow-up Wake must never be committed.".to_string(),
+                },
+                root_run_id,
+            )
+            .is_err()
+    );
+
+    let running_terminal =
+        wait_for_terminal_wake(&storage, &running_child.initial_wake.wake_id).await;
+    assert_eq!(
+        running_terminal.status,
+        mycopilot_core::AgentWakeStatus::Interrupted,
+        "running descendant cancellation failed: {:?}",
+        running_terminal.terminal_error
+    );
+    wait_for_dispatcher_idle(&database_path).await;
+    assert!(storage
+        .list_in_progress_conversation_turn_traces()
+        .unwrap()
+        .iter()
+        .all(|trace| trace.run_id == root_run_id));
+    storage
+        .reconcile_orphaned_in_progress_conversation_turn_traces(
+            &std::collections::HashSet::new(),
+            mycopilot_core::storage::now_ms(),
+        )
+        .unwrap();
+    assert!(storage
+        .list_in_progress_conversation_turn_traces()
+        .unwrap()
+        .is_empty());
+    service.unregister_cancellation_if_current(root_run_id, &root_cancellation);
+    assert!(service.agent_tree_run_is_stopped(root_run_id).unwrap());
+    assert!(!service
+        .agent_tree_run_is_stopped("run-collaboration-root-stop-future")
+        .unwrap());
+
+    assert!(service
+        .shutdown_collaboration_dispatcher()
+        .await
+        .unwrap()
+        .is_some());
+    let _ = stop_sender.send(());
+    model_server.await.unwrap();
 }

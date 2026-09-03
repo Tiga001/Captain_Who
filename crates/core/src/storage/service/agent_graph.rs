@@ -278,6 +278,120 @@ impl StorageService {
         )
     }
 
+    pub fn cancel_agent_tree_wakes_by_root_agent(
+        &self,
+        root_agent_id: &str,
+    ) -> Result<crate::AgentTreeWakeCancellationBatch, AgentGraphError> {
+        self.cancel_agent_tree_wakes_by_root_agent_at(root_agent_id, now_ms())
+    }
+
+    pub fn cancel_agent_tree_wakes_by_root_agent_at(
+        &self,
+        root_agent_id: &str,
+        cancelled_at: i64,
+    ) -> Result<crate::AgentTreeWakeCancellationBatch, AgentGraphError> {
+        let mut connection = self.state.connection().map_err(unavailable)?;
+        agent_graph_repository::cancel_agent_tree_wakes_by_root_agent(
+            &mut connection,
+            root_agent_id,
+            cancelled_at,
+        )
+    }
+
+    pub fn begin_agent_tree_run_stop_by_root_agent(
+        &self,
+        root_agent_id: &str,
+        root_run_id: &str,
+    ) -> Result<Option<crate::AgentTreeRunStopCancellation>, AgentGraphError> {
+        self.begin_agent_tree_run_stop_by_root_agent_at(root_agent_id, root_run_id, now_ms())
+    }
+
+    pub fn begin_agent_tree_run_stop_by_root_agent_at(
+        &self,
+        root_agent_id: &str,
+        root_run_id: &str,
+        stopped_at: i64,
+    ) -> Result<Option<crate::AgentTreeRunStopCancellation>, AgentGraphError> {
+        let mut connection = self.state.connection().map_err(unavailable)?;
+        agent_graph_repository::begin_agent_tree_run_stop_by_root_agent(
+            &mut connection,
+            root_agent_id,
+            root_run_id,
+            stopped_at,
+        )
+    }
+
+    pub fn cancel_agent_tree_wakes_by_root_conversation(
+        &self,
+        root_conversation_id: &str,
+    ) -> Result<crate::AgentTreeWakeCancellationBatch, AgentGraphError> {
+        self.cancel_agent_tree_wakes_by_root_conversation_at(root_conversation_id, now_ms())
+    }
+
+    pub fn cancel_agent_tree_wakes_by_root_conversation_at(
+        &self,
+        root_conversation_id: &str,
+        cancelled_at: i64,
+    ) -> Result<crate::AgentTreeWakeCancellationBatch, AgentGraphError> {
+        let mut connection = self.state.connection().map_err(unavailable)?;
+        agent_graph_repository::cancel_agent_tree_wakes_by_root_conversation(
+            &mut connection,
+            root_conversation_id,
+            cancelled_at,
+        )
+    }
+
+    pub fn begin_agent_tree_run_stop_by_root_conversation(
+        &self,
+        root_conversation_id: &str,
+        root_run_id: &str,
+    ) -> Result<Option<crate::AgentTreeRunStopCancellation>, AgentGraphError> {
+        self.begin_agent_tree_run_stop_by_root_conversation_at(
+            root_conversation_id,
+            root_run_id,
+            now_ms(),
+        )
+    }
+
+    pub fn begin_agent_tree_run_stop_by_root_conversation_at(
+        &self,
+        root_conversation_id: &str,
+        root_run_id: &str,
+        stopped_at: i64,
+    ) -> Result<Option<crate::AgentTreeRunStopCancellation>, AgentGraphError> {
+        let mut connection = self.state.connection().map_err(unavailable)?;
+        agent_graph_repository::begin_agent_tree_run_stop_by_root_conversation(
+            &mut connection,
+            root_conversation_id,
+            root_run_id,
+            stopped_at,
+        )
+    }
+
+    pub fn reinforce_agent_tree_run_stop(
+        &self,
+        run_id: &str,
+    ) -> Result<Option<crate::AgentTreeRunStopCancellation>, AgentGraphError> {
+        self.reinforce_agent_tree_run_stop_at(run_id, now_ms())
+    }
+
+    pub fn reinforce_agent_tree_run_stop_at(
+        &self,
+        run_id: &str,
+        cancelled_at: i64,
+    ) -> Result<Option<crate::AgentTreeRunStopCancellation>, AgentGraphError> {
+        let mut connection = self.state.connection().map_err(unavailable)?;
+        agent_graph_repository::reinforce_agent_tree_run_stop(&mut connection, run_id, cancelled_at)
+    }
+
+    pub fn get_agent_tree_run_stop(
+        &self,
+        run_id: &str,
+    ) -> Result<Option<crate::AgentTreeRunStopRecord>, AgentGraphError> {
+        let connection = self.state.connection().map_err(unavailable)?;
+        agent_graph_repository::get_agent_tree_run_stop(&connection, run_id)
+    }
+
     pub fn renew_agent_wake_lease(
         &self,
         wake_id: &str,
@@ -373,12 +487,40 @@ impl StorageService {
         agent_graph_repository::send_agent_message(&mut connection, input, now_ms())
     }
 
+    pub fn send_agent_message_from_run(
+        &self,
+        input: &crate::SendAgentMessageRequest,
+        origin_run_id: &str,
+    ) -> Result<crate::AgentMessageDispatch, AgentGraphError> {
+        let mut connection = self.state.connection().map_err(unavailable)?;
+        agent_graph_repository::send_agent_message_from_run(
+            &mut connection,
+            input,
+            origin_run_id,
+            now_ms(),
+        )
+    }
+
     pub fn follow_up_agent(
         &self,
         input: &crate::SendAgentMessageRequest,
     ) -> Result<crate::AgentMessageDispatch, AgentGraphError> {
         let mut connection = self.state.connection().map_err(unavailable)?;
         agent_graph_repository::follow_up_agent(&mut connection, input, now_ms())
+    }
+
+    pub fn follow_up_agent_from_run(
+        &self,
+        input: &crate::SendAgentMessageRequest,
+        origin_run_id: &str,
+    ) -> Result<crate::AgentMessageDispatch, AgentGraphError> {
+        let mut connection = self.state.connection().map_err(unavailable)?;
+        agent_graph_repository::follow_up_agent_from_run(
+            &mut connection,
+            input,
+            origin_run_id,
+            now_ms(),
+        )
     }
 
     pub fn finish_agent_turn_with_result(
@@ -397,6 +539,22 @@ impl StorageService {
         agent_graph_repository::finish_agent_turn_with_result(&mut connection, input, completed_at)
     }
 
+    pub fn settle_tree_stopped_active_wake(
+        &self,
+        wake: &crate::ActiveAgentTreeWake,
+    ) -> Result<crate::AgentTreeStoppedWakeSettlementOutcome, AgentGraphError> {
+        self.settle_tree_stopped_active_wake_at(wake, now_ms())
+    }
+
+    pub fn settle_tree_stopped_active_wake_at(
+        &self,
+        wake: &crate::ActiveAgentTreeWake,
+        completed_at: i64,
+    ) -> Result<crate::AgentTreeStoppedWakeSettlementOutcome, AgentGraphError> {
+        let mut connection = self.state.connection().map_err(unavailable)?;
+        agent_graph_repository::settle_tree_stopped_active_wake(&mut connection, wake, completed_at)
+    }
+
     pub fn interrupt_agent_execution_at(
         &self,
         caller_agent_id: &str,
@@ -412,6 +570,45 @@ impl StorageService {
             request_id,
             interrupted_at,
         )
+    }
+
+    pub fn interrupt_agent_execution_with_receipt_at(
+        &self,
+        caller_agent_id: &str,
+        target_agent_id: &str,
+        request_id: &str,
+        interrupted_at: i64,
+    ) -> Result<crate::InterruptAgentExecutionReceipt, AgentGraphError> {
+        let mut connection = self.state.connection().map_err(unavailable)?;
+        agent_graph_repository::interrupt_agent_execution_with_receipt(
+            &mut connection,
+            caller_agent_id,
+            target_agent_id,
+            request_id,
+            interrupted_at,
+        )
+    }
+
+    pub fn mark_agent_interrupt_dispatched_at(
+        &self,
+        caller_agent_id: &str,
+        request_id: &str,
+        dispatched_at: i64,
+    ) -> Result<crate::InterruptAgentExecutionReceipt, AgentGraphError> {
+        let mut connection = self.state.connection().map_err(unavailable)?;
+        agent_graph_repository::mark_agent_interrupt_dispatched(
+            &mut connection,
+            caller_agent_id,
+            request_id,
+            dispatched_at,
+        )
+    }
+
+    pub fn list_undispatched_agent_interrupts(
+        &self,
+    ) -> Result<Vec<crate::UndispatchedAgentInterrupt>, AgentGraphError> {
+        let connection = self.state.connection().map_err(unavailable)?;
+        agent_graph_repository::list_undispatched_agent_interrupts(&connection)
     }
 
     pub fn get_agent_display_status(
