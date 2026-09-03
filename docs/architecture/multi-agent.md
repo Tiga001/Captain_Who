@@ -128,7 +128,7 @@ Host 给每个 Turn 冻结当前项目已关联的脱敏模板/模型目录：�
 
 ## 5. 授权与配额
 
-- 默认树深度 8、每树 64 节点、Harness message 64 KiB、全局 Turn 并发 4。
+- 默认树深度 8、每树 64 节点、Harness message 64 KiB、全局 Turn 并发 50。
 - spawn 配额在同一 `BEGIN IMMEDIATE` 内核验；幂等 request 先返回原事实，不重复占配额。
 - `send_message` 的后端授权当前只校验消息大小、调用者 active、目标存在且同树；Tool 描述约定用于子 Agent → 父 Agent 报告，但 Authorizer 尚未强制方向，甚至同树其他目标也可通过。它不是方向性授权边界；工作指派必须使用 `followup_task`。
 - follow-up、wait、interrupt 只允许 caller 的严格后代。不存在、跨树、跨项目和越权 target 对调用方统一表现为 permission denied，避免存在性探测。
@@ -266,7 +266,7 @@ pnpm exec vitest run --project browser src/renderer/src/features/agentCollaborat
 - 不支持把 Automation destination 直接设为子 Agent Conversation。
 - 用户不能直接编辑或启动子 Agent Conversation；observer 是只读投影。
 - Agent-bound tree 的完整归档/物理删除需要专用生命周期事务，不能借旧单 Conversation 删除入口实现。
-- 并发 4、树深 8、节点 64 是产品默认硬边界，不是生产容量承诺。
+- 并发 50、树深 8、节点 64 是产品默认硬边界，不是生产容量承诺。
 - 内存 notification 不支持跨进程广播；正确性依赖 SQLite polling/event replay。
 - `outcome_unknown` 需要用户或维护者理解外部系统状态，当前没有通用自动补偿引擎。
 - `send_message` 的子 Agent → 父 Agent 方向目前只写在 Tool 描述中，后端 Authorizer 仅强制同树；需要把方向作为安全不变量时必须先补实现与负向测试。

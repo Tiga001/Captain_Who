@@ -162,7 +162,7 @@ EOF 或 request-loop 错误没有 shutdown response，但仍走同一幂等清�
 
 ## 7. Multi-Agent 调度边界
 
-- 根 Agent Human Turn 与子 Agent Wake Turn 共用一个 `AgentTurnConcurrencyGate`，默认全局并发 4。
+- 根 Agent Human Turn 与子 Agent Wake Turn 共用一个 `AgentTurnConcurrencyGate`，默认全局并发 50。
 - Dispatcher 默认每 20 秒续 Wake lease、每 1 秒作 durable fallback scan；单个 shutdown grace 为 5 秒，完整 shutdown 最多可经历两个 grace 阶段。
 - claimed 但未 admission 的过期 Wake 可安全重新排队；running 且缺少可恢复 checkpoint 的外部效果不能盲重放，结算为 `outcome_unknown`。
 - `AgentWaitKernel` 用 SQLite check/register/recheck 和 50ms durable polling 保证正确性；`Notify` 只降延迟。

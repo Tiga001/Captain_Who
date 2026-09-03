@@ -20,7 +20,7 @@ use std::time::Duration;
 use tokio::sync::Notify;
 use tokio::task::{JoinHandle, JoinSet};
 
-pub(crate) const DEFAULT_AGENT_GLOBAL_CONCURRENCY: usize = 4;
+pub(crate) const DEFAULT_AGENT_GLOBAL_CONCURRENCY: usize = 50;
 const DEFAULT_WAKE_LEASE_RENEW_INTERVAL: Duration = Duration::from_secs(20);
 const DEFAULT_DISPATCH_IDLE_POLL_INTERVAL: Duration = Duration::from_secs(1);
 const DEFAULT_DISPATCH_SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
@@ -2895,9 +2895,9 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn thirty_two_agents_respect_limit_four_fifo_and_leave_no_ghost_activity() {
-        const AGENT_COUNT: usize = 32;
-        const GLOBAL_LIMIT: usize = 4;
+    async fn one_hundred_agents_respect_limit_fifty_fifo_and_leave_no_ghost_activity() {
+        const AGENT_COUNT: usize = 100;
+        const GLOBAL_LIMIT: usize = DEFAULT_AGENT_GLOBAL_CONCURRENCY;
 
         let store = Arc::new(FakeStore::default());
         let agents = (0..AGENT_COUNT)

@@ -65,7 +65,7 @@ const profileSteps = [
     resourceProfile: true
   },
   {
-    label: 'dispatcher: thirty-two Agents at global concurrency four',
+    label: 'dispatcher: one hundred Agents at global concurrency fifty',
     expectedRustTests: 1,
     command: [
       'cargo',
@@ -75,7 +75,7 @@ const profileSteps = [
       'mycopilot-core-server',
       '--bin',
       'core-server',
-      'application::agent_dispatcher::tests::thirty_two_agents_respect_limit_four_fifo_and_leave_no_ghost_activity',
+      'application::agent_dispatcher::tests::one_hundred_agents_respect_limit_fifty_fifo_and_leave_no_ghost_activity',
       '--',
       '--exact',
       '--nocapture'

@@ -41,7 +41,7 @@ pnpm test:multi-agent-release -- --smoke-only
 | Step             | 固定边界                                                              | 主要证据                                                  |
 | ---------------- | --------------------------------------------------------------------- | --------------------------------------------------------- |
 | 持久化压力       | 树 64 节点成功、65 失败；10,000 facts；4 writers；20 crash recoveries | SQLite 原子性、Mailbox/Event 索引、无 busy 泄漏、重开延迟 |
-| Dispatcher       | 32 Agents；进程共享并发上限 4                                         | FIFO 进展、每 Agent 单 Turn、无 ghost capacity            |
+| Dispatcher       | 100 Agents；进程共享并发上限 50                                       | FIFO 进展、每 Agent 单 Turn、无 ghost capacity            |
 | Context          | 500 logical turns 后 durable compaction/reload                        | 长历史不会绕过 canonical context/compaction               |
 | Renderer/Preload | 1,000 subscribe/unsubscribe 生命周期                                  | 无重复 card/store、订阅可清理、Host bridge 对称           |
 
@@ -66,7 +66,7 @@ pnpm test:multi-agent-release -- --smoke-only
 | 维度                   |                                                                                当前 release profile |
 | ---------------------- | --------------------------------------------------------------------------------------------------: |
 | Tree boundary          |                                                      64 nodes accepted；node 65 atomically rejected |
-| Runtime fan-out        |                                                                     32 Agents；global concurrency 4 |
+| Runtime fan-out        |                                                                   100 Agents；global concurrency 50 |
 | Durable facts          | 10,000 ordinary Mailbox messages、每个 spawned 子 Agent 的 Result、超过 10,000 根 Agent 本地 events |
 | Logical turns          |                                                   500 completed turns + durable compaction + reload |
 | Crash/restart          |                                                             20 expired claimed-Wake recovery cycles |
