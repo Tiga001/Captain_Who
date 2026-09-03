@@ -35,15 +35,18 @@ const { ModelSettingsProvider, useModelSettings } =
   await import('../../config/ModelSettingsProvider')
 
 const storedSettings: ModelSettingsSnapshot = {
+  configurationRevision: 'model-settings-v1:00000000-0000-4000-8000-000000000001',
   apiUrl: 'https://provider.example/v1/chat/completions',
-  apiToken: 'stored-token',
+  apiTokenStatus: 'configured',
   searchMode: 'auto',
-  tavilyApiKey: '',
+  tavilyApiKeyStatus: 'missing',
   models: [
     {
       id: 'stored-model',
       providerModelId: 'provider-stored-model',
       displayName: 'Stored Model',
+      apiTokenOverrideStatus: 'missing',
+      apiTokenOverrideMutation: { type: 'keep' },
       supportsImage: false,
       inputPrice: '0',
       cachedInputPrice: '',
@@ -91,7 +94,12 @@ function ModelSettingsProbe() {
       >
         resolve vendor
       </button>
-      <button type="button" onClick={() => setApiUrl('https://api.anthropic.com/v1/messages')}>
+      <button
+        type="button"
+        onClick={() => {
+          void setApiUrl('https://api.anthropic.com/v1/messages').catch(() => undefined)
+        }}
+      >
         change URL
       </button>
     </div>
@@ -137,6 +145,8 @@ function ModelCreateProbe() {
             id: null,
             providerModelId: 'provider-stored-model',
             displayName: 'New Model',
+            apiTokenOverrideStatus: 'missing',
+            apiTokenOverrideMutation: { type: 'keep' },
             supportsImage: false,
             inputPrice: '0',
             cachedInputPrice: '',
@@ -151,6 +161,57 @@ function ModelCreateProbe() {
         }}
       >
         create model
+      </button>
+    </div>
+  )
+}
+
+function CredentialMutationProbe() {
+  const { apiTokenStatus, searchMode, tavilyApiKeyStatus, updateApiToken, updateTavilyApiKey } =
+    useModelSettings()
+
+  return (
+    <div>
+      <span data-testid="api-token-status">{apiTokenStatus}</span>
+      <span data-testid="tavily-status">{tavilyApiKeyStatus}</span>
+      <span data-testid="search-mode">{searchMode}</span>
+      <button type="button" onClick={() => void updateApiToken({ type: 'clear' }).catch(() => {})}>
+        clear API token
+      </button>
+      <button
+        type="button"
+        onClick={() => void updateTavilyApiKey({ type: 'clear' }).catch(() => {})}
+      >
+        clear Tavily key
+      </button>
+    </div>
+  )
+}
+
+function ModelOverrideCredentialProbe() {
+  const { enabledModels, models, upsertModel } = useModelSettings()
+  const target = models.find((model) => model.id === 'override-model')
+
+  return (
+    <div>
+      <span data-testid="override-status">{target?.apiTokenOverrideStatus}</span>
+      <span data-testid="override-url">{target?.apiUrlOverride}</span>
+      <span data-testid="override-enabled-models">
+        {enabledModels.map((model) => model.id).join(',')}
+      </span>
+      <button
+        type="button"
+        disabled={!target}
+        onClick={() => {
+          if (target) {
+            void upsertModel({
+              ...target,
+              apiTokenOverrideMutation: { type: 'clear' }
+            }).catch(() => {})
+          }
+        }}
+      >
+        clear model override
       </button>
     </div>
   )
@@ -176,7 +237,10 @@ beforeEach(() => {
       defaultSettings: { kind: 'moonshot_k3_chat', reasoningEffort: 'max' }
     }
   })
-  service.saveModelSettings.mockReset().mockImplementation(async (settings) => settings)
+  service.saveModelSettings.mockReset().mockImplementation(async (settings) => ({
+    ...settings,
+    configurationRevision: 'model-settings-v1:00000000-0000-4000-8000-000000000002'
+  }))
   service.showToast.mockReset()
 })
 
@@ -198,16 +262,21 @@ describe('ModelSettingsProvider hydration', () => {
 
     await screen.getByRole('button', { name: 'change URL' }).click()
     await expect.poll(() => service.saveModelSettings.mock.calls.length).toBe(1)
-    expect(service.saveModelSettings).toHaveBeenLastCalledWith({
-      ...storedSettings,
-      apiUrl: 'https://api.anthropic.com/v1/messages',
-      models: [
-        {
-          ...storedSettings.models[0],
-          providerProfileUpdate: { kind: 'unchanged' }
-        }
-      ]
-    })
+    expect(service.saveModelSettings).toHaveBeenLastCalledWith(
+      {
+        apiUrl: 'https://api.anthropic.com/v1/messages',
+        apiTokenMutation: { type: 'keep' },
+        searchMode: storedSettings.searchMode,
+        tavilyApiKeyMutation: { type: 'keep' },
+        models: [
+          {
+            ...storedSettings.models[0],
+            providerProfileUpdate: { kind: 'unchanged' }
+          }
+        ]
+      },
+      storedSettings.configurationRevision
+    )
   })
 
   it('atomically rematches only inherited known Generic models when the global URL changes', async () => {
@@ -227,7 +296,7 @@ describe('ModelSettingsProvider hydration', () => {
           ...storedSettings.models[0]!,
           id: 'generic-override',
           apiUrlOverride: 'https://override.example/v1',
-          apiTokenOverride: 'override-token',
+          apiTokenOverrideStatus: 'configured',
           providerProfileConfig: {
             schemaVersion: 1,
             profile: { id: 'generic_openai_chat', version: 1 },
@@ -296,6 +365,35 @@ describe('ModelSettingsProvider hydration', () => {
     expect(
       savedModels.find((model) => model.id === 'unknown-inherited')?.providerProfileUpdate
     ).toEqual({ kind: 'unchanged' })
+  })
+
+  it('serializes queued saves against the latest Host revision', async () => {
+    service.loadModelSettings.mockResolvedValue(storedSettings)
+    service.saveModelSettings
+      .mockImplementationOnce(async (draft) => ({
+        ...draft,
+        configurationRevision: 'model-settings-v1:00000000-0000-4000-8000-000000000002'
+      }))
+      .mockImplementationOnce(async (draft) => ({
+        ...draft,
+        configurationRevision: 'model-settings-v1:00000000-0000-4000-8000-000000000003'
+      }))
+
+    const screen = await render(
+      <ModelSettingsProvider>
+        <ModelSettingsProbe />
+      </ModelSettingsProvider>
+    )
+    await expect.element(screen.getByTestId('api-url')).toHaveTextContent(storedSettings.apiUrl)
+
+    await screen.getByRole('button', { name: 'change URL' }).click()
+    await screen.getByRole('button', { name: 'change URL' }).click()
+
+    await expect.poll(() => service.saveModelSettings.mock.calls.length).toBe(2)
+    expect(service.saveModelSettings.mock.calls[0]?.[1]).toBe(storedSettings.configurationRevision)
+    expect(service.saveModelSettings.mock.calls[1]?.[1]).toBe(
+      'model-settings-v1:00000000-0000-4000-8000-000000000002'
+    )
   })
 
   it('exposes only the Host-projected Provider Profile descriptors', async () => {
@@ -419,6 +517,145 @@ describe('ModelSettingsProvider hydration', () => {
     })
     expect(JSON.stringify(service.showToast.mock.calls)).not.toContain('private-token')
     expect(JSON.stringify(service.showToast.mock.calls)).not.toContain('raw provider response')
+  })
+
+  it('reloads a newer Host snapshot instead of restoring stale settings after a save conflict', async () => {
+    const concurrentlyUpdated = {
+      ...storedSettings,
+      configurationRevision: 'model-settings-v1:00000000-0000-4000-8000-000000000099',
+      apiUrl: 'https://newer-window.example/v1/chat/completions'
+    }
+    service.loadModelSettings
+      .mockResolvedValueOnce(storedSettings)
+      .mockResolvedValue(concurrentlyUpdated)
+    service.saveModelSettings.mockRejectedValue(new Error('model settings revision conflict'))
+
+    const screen = await render(
+      <ModelSettingsProvider>
+        <ModelSettingsProbe />
+      </ModelSettingsProvider>
+    )
+    await expect.element(screen.getByTestId('api-url')).toHaveTextContent(storedSettings.apiUrl)
+
+    await screen.getByRole('button', { name: 'change URL' }).click()
+
+    await expect
+      .element(screen.getByTestId('api-url'))
+      .toHaveTextContent(concurrentlyUpdated.apiUrl)
+    expect(service.loadModelSettings).toHaveBeenCalledTimes(2)
+  })
+
+  it('keeps a configured API token visible throughout a failed clear', async () => {
+    let rejectSave!: (error: Error) => void
+    service.loadModelSettings.mockResolvedValue(storedSettings)
+    service.saveModelSettings.mockImplementation(
+      () =>
+        new Promise((_resolve, reject) => {
+          rejectSave = reject
+        })
+    )
+
+    const screen = await render(
+      <ModelSettingsProvider>
+        <CredentialMutationProbe />
+      </ModelSettingsProvider>
+    )
+    await expect.element(screen.getByTestId('api-token-status')).toHaveTextContent('configured')
+    await screen.getByRole('button', { name: 'clear API token' }).click()
+    await expect.poll(() => service.saveModelSettings.mock.calls.length).toBe(1)
+    expect(service.saveModelSettings).toHaveBeenCalledWith(
+      expect.objectContaining({ apiTokenMutation: { type: 'clear' } }),
+      storedSettings.configurationRevision
+    )
+    await expect.element(screen.getByTestId('api-token-status')).toHaveTextContent('configured')
+
+    rejectSave(new Error('save failed'))
+    await expect.poll(() => service.showToast.mock.calls.length).toBe(1)
+    await expect.element(screen.getByTestId('api-token-status')).toHaveTextContent('configured')
+  })
+
+  it('keeps Tavily availability and search mode stable throughout a failed clear', async () => {
+    let rejectSave!: (error: Error) => void
+    service.loadModelSettings.mockResolvedValue({
+      ...storedSettings,
+      tavilyApiKeyStatus: 'configured'
+    })
+    service.saveModelSettings.mockImplementation(
+      () =>
+        new Promise((_resolve, reject) => {
+          rejectSave = reject
+        })
+    )
+
+    const screen = await render(
+      <ModelSettingsProvider>
+        <CredentialMutationProbe />
+      </ModelSettingsProvider>
+    )
+    await expect.element(screen.getByTestId('tavily-status')).toHaveTextContent('configured')
+    await expect.element(screen.getByTestId('search-mode')).toHaveTextContent('auto')
+    await screen.getByRole('button', { name: 'clear Tavily key' }).click()
+    await expect.poll(() => service.saveModelSettings.mock.calls.length).toBe(1)
+    expect(service.saveModelSettings).toHaveBeenCalledWith(
+      expect.objectContaining({
+        searchMode: 'disabled',
+        tavilyApiKeyMutation: { type: 'clear' }
+      }),
+      storedSettings.configurationRevision
+    )
+    await expect.element(screen.getByTestId('tavily-status')).toHaveTextContent('configured')
+    await expect.element(screen.getByTestId('search-mode')).toHaveTextContent('auto')
+
+    rejectSave(new Error('save failed'))
+    await expect.poll(() => service.showToast.mock.calls.length).toBe(1)
+    await expect.element(screen.getByTestId('tavily-status')).toHaveTextContent('configured')
+    await expect.element(screen.getByTestId('search-mode')).toHaveTextContent('auto')
+  })
+
+  it('keeps an override URL after clearing its credential and marks the model unavailable', async () => {
+    const overrideSettings: ModelSettingsSnapshot = {
+      ...storedSettings,
+      models: [
+        {
+          ...storedSettings.models[0]!,
+          id: 'override-model',
+          apiUrlOverride: 'https://override.example/v1/chat/completions',
+          apiTokenOverrideStatus: 'configured'
+        }
+      ]
+    }
+    service.loadModelSettings.mockResolvedValue(overrideSettings)
+    service.saveModelSettings.mockImplementation(async (draft) => ({
+      ...overrideSettings,
+      searchMode: draft.searchMode,
+      models: draft.models.map((savedModel) => ({
+        ...savedModel,
+        id: savedModel.id ?? 'unexpected-new-model',
+        apiTokenOverrideStatus: 'missing' as const,
+        apiTokenOverrideMutation: { type: 'keep' as const },
+        providerProfileConfig: overrideSettings.models[0]!.providerProfileConfig
+      }))
+    }))
+
+    const screen = await render(
+      <ModelSettingsProvider>
+        <ModelOverrideCredentialProbe />
+      </ModelSettingsProvider>
+    )
+    await expect
+      .element(screen.getByTestId('override-enabled-models'))
+      .toHaveTextContent('override-model')
+    await screen.getByRole('button', { name: 'clear model override' }).click()
+    await expect.poll(() => service.saveModelSettings.mock.calls.length).toBe(1)
+    expect(service.saveModelSettings.mock.calls[0]![0].models[0]).toMatchObject({
+      apiUrlOverride: 'https://override.example/v1/chat/completions',
+      apiTokenOverrideMutation: { type: 'clear' }
+    })
+    await expect.element(screen.getByTestId('override-status')).toHaveTextContent('missing')
+    await expect
+      .element(screen.getByTestId('override-url'))
+      .toHaveTextContent('https://override.example/v1/chat/completions')
+    await expect.element(screen.getByTestId('override-enabled-models')).toHaveTextContent('')
   })
 
   it('does not silently delete a model or toast when a display name edit collides', async () => {
@@ -576,10 +813,12 @@ describe('ModelSettingsProvider hydration', () => {
     await expect.poll(() => service.saveModelSettings.mock.calls.length).toBe(1)
     expect(service.saveModelSettings).toHaveBeenCalledWith(
       expect.objectContaining({
-        apiToken: '',
+        apiTokenMutation: { type: 'keep' },
         apiUrl: '',
+        tavilyApiKeyMutation: { type: 'keep' },
         models: []
-      })
+      }),
+      null
     )
     expect(service.showToast).not.toHaveBeenCalled()
   })

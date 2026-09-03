@@ -2179,7 +2179,18 @@ export const ruRUTranslations = {
   'configuration.modelApiTokenPlaceholder': 'Бланк использует глобальный API Token',
   'configuration.showSecretValue': 'Показать секретное значение',
   'configuration.hideSecretValue': 'Скрыть секретное значение',
-  'configuration.invalidApiUrl': 'Введите действительный http или https URL',
+  'configuration.credential.placeholder': 'Введите ключ API',
+  'configuration.credential.configured': 'Настроен',
+  'configuration.credential.replace': 'Заменить сохранённый ключ',
+  'configuration.credential.cancelReplace': 'Отменить замену',
+  'configuration.credential.clear': 'Удалить сохранённый ключ',
+  'configuration.credential.clearTitle': 'Удалить сохранённый ключ?',
+  'configuration.credential.clearDescription':
+    'После подтверждения ключ будет удалён из защищённого хранилища.',
+  'configuration.credential.clearConfirm': 'Удалить',
+  'configuration.credential.unavailable': 'Защищённое хранилище недоступно',
+  'configuration.invalidApiUrl':
+    'Используйте HTTPS URL без учётных данных, параметров запроса и фрагмента. В режиме разработки также разрешён loopback HTTP.',
   'configuration.modelConnectionPairRequired':
     'URL и API Token должны быть оба заполнены или оба оставлены пустыми.',
   'configuration.imageGeneration.title': 'Генерация изображений',

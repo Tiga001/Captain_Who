@@ -625,7 +625,7 @@ fn safe_models(
     storage: &StorageService,
 ) -> Result<Vec<mycopilot_core::storage::models::ModelConfigRecord>, AgentServiceError> {
     Ok(storage
-        .load_model_settings()
+        .load_model_settings_catalog()
         .map_err(AgentServiceError::from)?
         .map(|settings| settings.models)
         .unwrap_or_default())

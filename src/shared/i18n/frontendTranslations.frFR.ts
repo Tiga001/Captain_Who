@@ -2227,7 +2227,18 @@ export const frFRTranslations = {
   'configuration.modelApiTokenPlaceholder': 'Blank utilise le global API Token',
   'configuration.showSecretValue': 'Afficher la valeur secrète',
   'configuration.hideSecretValue': 'Masquer la valeur secrète',
-  'configuration.invalidApiUrl': 'Saisissez un http ou https URL valide',
+  'configuration.credential.placeholder': 'Saisir la clé API',
+  'configuration.credential.configured': 'Configurée',
+  'configuration.credential.replace': 'Remplacer la clé enregistrée',
+  'configuration.credential.cancelReplace': 'Annuler le remplacement',
+  'configuration.credential.clear': 'Effacer la clé enregistrée',
+  'configuration.credential.clearTitle': 'Effacer la clé enregistrée ?',
+  'configuration.credential.clearDescription':
+    'Après confirmation, cette clé sera supprimée du stockage sécurisé.',
+  'configuration.credential.clearConfirm': 'Effacer',
+  'configuration.credential.unavailable': 'Stockage sécurisé indisponible',
+  'configuration.invalidApiUrl':
+    'Utilisez une URL HTTPS sans identifiants, paramètres de requête ni fragment. Le développement autorise aussi HTTP en boucle locale.',
   'configuration.modelConnectionPairRequired':
     'URL et API Token doivent tous deux être remplis ou tous deux vides.',
   'configuration.imageGeneration.title': "Génération d'images",

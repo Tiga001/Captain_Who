@@ -589,7 +589,10 @@ async fn send_llm_request_with_stream_timeout(
 /// unnecessary trust boundary, this keeps loopback providers usable when macOS system proxy
 /// resolution is slow or does not carry the expected bypass list.
 fn provider_client_builder(api_url: &str) -> reqwest::ClientBuilder {
-    let builder = reqwest::Client::builder();
+    // Provider credentials are scoped to the exact endpoint selected by the Host. Never let an
+    // upstream 3xx response replay them to another URL (or downgrade an HTTPS request to HTTP).
+    // The Provider response remains visible to the normal status/error classifier instead.
+    let builder = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none());
     if provider_url_is_loopback(api_url) {
         // A loopback endpoint neither needs the system proxy nor enterprise Keychain roots. Keep
         // the bundled WebPKI roots available for an explicitly TLS-enabled local endpoint while

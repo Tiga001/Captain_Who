@@ -4,7 +4,7 @@ description: 在文件、命令、网页、MCP 和自动化任务中保持最小
 status: current
 audience: user
 owner: product-docs
-last_verified: 2026-08-31
+last_verified: 2026-09-03
 ---
 
 # 安全使用 Agent
@@ -35,7 +35,7 @@ Agent 的风险来自它能把模型建议变成真实动作。安全目标不�
 - 网页、项目文档和 MCP 工具描述都可能包含诱导模型越权的文字，应视为不可信输入；
 - 对外分享日志和截图前先去除路径、账号、查询和业务数据。
 
-当前模型 Token 与 Tavily Key 存在本机 SQLite 中，不是系统钥匙串。保护操作系统账号、磁盘和应用数据目录仍然重要。
+当前 SQLite 只保存模型、搜索和图片生成凭据的不透明引用与状态；密钥由独立 Credential Store 保存。操作系统凭据不会随 SQLite 备份恢复，旧版 SQLite 备份仍可能含明文。保护操作系统账号、磁盘、完整应用数据目录和备份仍然重要；怀疑泄露时应撤销或轮换密钥。
 
 ## 对破坏性或外部操作增加护栏
 

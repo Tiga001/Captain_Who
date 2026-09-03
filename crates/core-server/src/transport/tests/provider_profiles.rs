@@ -12,9 +12,9 @@ fn request(method: &str, params: Option<Value>) -> JsonRpcRequest {
 fn generic_model_save_payload(models: Value) -> Value {
     serde_json::json!({
         "apiUrl": "https://provider-secret.example/v1/chat/completions",
-        "apiToken": "fixed-secret-token-must-not-cross",
+        "apiTokenMutation": {"type": "replace", "value": "fixed-secret-token-must-not-cross"},
         "searchMode": "disabled",
-        "tavilyApiKey": "fixed-search-secret-must-not-cross",
+        "tavilyApiKeyMutation": {"type": "replace", "value": "fixed-search-secret-must-not-cross"},
         "models": models,
     })
 }
@@ -25,7 +25,7 @@ fn generic_model(model_id: &str, input_price: &str) -> Value {
         "providerModelId": model_id,
         "displayName": model_id,
         "apiUrlOverride": null,
-        "apiTokenOverride": null,
+        "apiTokenOverrideMutation": {"type": "clear"},
         "supportsImage": false,
         "contextWindowTokens": 128000,
         "providerProfileUpdate": {"kind": "select_generic"},
@@ -184,15 +184,15 @@ fn provider_profile_descriptor_projection_and_authoritative_save_are_strict() {
             STORAGE_SAVE_MODEL_SETTINGS_METHOD,
             Some(serde_json::json!({
                 "apiUrl": "https://api.deepseek.com/v1/chat/completions",
-                "apiToken": "test-only-token",
+                "apiTokenMutation": {"type": "replace", "value": "test-only-token"},
                 "searchMode": "disabled",
-                "tavilyApiKey": "",
+                "tavilyApiKeyMutation": {"type": "clear"},
                 "models": [{
                     "id": null,
                     "providerModelId": "deepseek-chat",
                     "displayName": "DeepSeek Chat",
                     "apiUrlOverride": null,
-                    "apiTokenOverride": null,
+                    "apiTokenOverrideMutation": {"type": "clear"},
                     "supportsImage": false,
                     "contextWindowTokens": 128000,
                     "providerProfileUpdate": {
@@ -318,9 +318,9 @@ fn renderer_cannot_submit_profile_version_revision_or_capabilities() {
             STORAGE_SAVE_MODEL_SETTINGS_METHOD,
             Some(serde_json::json!({
                 "apiUrl": "https://api.deepseek.com/v1/chat/completions",
-                "apiToken": "test-only-token",
+                "apiTokenMutation": {"type": "replace", "value": "test-only-token"},
                 "searchMode": "disabled",
-                "tavilyApiKey": "",
+                "tavilyApiKeyMutation": {"type": "clear"},
                 "providerConfigurationRevision": "forged",
                 "models": []
             })),

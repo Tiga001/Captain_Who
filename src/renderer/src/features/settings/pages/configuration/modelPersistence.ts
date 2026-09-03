@@ -14,7 +14,8 @@ export function modelConfigFromForm(
     providerModelId: values.providerModelId,
     displayName: values.displayName,
     apiUrlOverride: values.apiUrlOverride || undefined,
-    apiTokenOverride: values.apiTokenOverride || undefined,
+    apiTokenOverrideStatus: values.apiTokenOverrideStatus,
+    apiTokenOverrideMutation: values.apiTokenOverrideMutation,
     supportsImage: values.supportsImage,
     contextWindowTokens:
       values.contextWindowTokens.trim().length > 0

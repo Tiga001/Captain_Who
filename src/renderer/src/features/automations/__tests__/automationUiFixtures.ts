@@ -7,6 +7,8 @@ export const testModel: ModelConfig = {
   id: 'model-1',
   providerModelId: 'provider-model-1',
   displayName: 'Test Model',
+  apiTokenOverrideStatus: 'missing',
+  apiTokenOverrideMutation: { type: 'keep' },
   supportsImage: true,
   inputPrice: '0',
   cachedInputPrice: '',

@@ -9,6 +9,7 @@ use crate::provider_profile::{
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
+use std::net::IpAddr;
 use unicode_normalization::UnicodeNormalization;
 
 fn deserialize_required_nullable<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
@@ -25,9 +26,43 @@ where
 /// [`ModelConfigRecord::effective_context_window_tokens`] instead of interpreting `None` as an
 /// unconfigured runtime.
 pub const DEFAULT_MODEL_CONTEXT_WINDOW_TOKENS: u32 = 128_000;
+/// Maximum UTF-8 byte length accepted for a provider endpoint URL.
+pub const MODEL_PROVIDER_API_URL_MAX_BYTES: usize = 4_096;
 /// Matches the strict Renderer parser for typed model-settings validation errors. Keeping the
 /// source value bounded guarantees a duplicate-display-name rejection remains actionable.
 pub const MODEL_DISPLAY_NAME_MAX_BYTES: usize = 512;
+
+/// Renderer-safe status for a credential owned by the Host.
+///
+/// The status is intentionally lossy: neither the native-store reference nor any part of the
+/// secret crosses the Host boundary.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CredentialStatus {
+    Missing,
+    Configured,
+    Unavailable,
+}
+
+/// Explicit write-only credential operation accepted from the Renderer.
+#[cfg_attr(test, derive(Clone))]
+#[derive(Deserialize, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum CredentialMutation {
+    Keep,
+    Replace { value: String },
+    Clear,
+}
+
+impl std::fmt::Debug for CredentialMutation {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Keep => formatter.write_str("Keep"),
+            Self::Replace { .. } => formatter.write_str("Replace([REDACTED])"),
+            Self::Clear => formatter.write_str("Clear"),
+        }
+    }
+}
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct ModelConnectionConfig {
@@ -41,7 +76,8 @@ impl std::fmt::Debug for ModelConnectionConfig {
     }
 }
 
-#[derive(Deserialize, Serialize, Clone)]
+#[cfg_attr(test, derive(Serialize))]
+#[derive(Deserialize, Clone)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ModelConfigRecord {
     /// Immutable Host-owned identity of this configured model.
@@ -67,13 +103,32 @@ pub struct ModelConfigRecord {
     pub enabled: bool,
 }
 
+/// Credential-free model configuration returned to the Renderer settings editor.
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ModelConfigEditorRecord {
+    pub id: String,
+    pub provider_model_id: String,
+    pub display_name: String,
+    pub api_url_override: Option<String>,
+    pub api_token_override_status: CredentialStatus,
+    pub supports_image: bool,
+    pub context_window_tokens: Option<u32>,
+    pub provider_profile_config: ProviderProfileConfig,
+    pub input_price: String,
+    pub cached_input_price: String,
+    pub output_price: String,
+    pub enabled: bool,
+}
+
 impl std::fmt::Debug for ModelConfigRecord {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str("ModelConfigRecord([REDACTED])")
     }
 }
 
-#[derive(Deserialize, Serialize, Clone)]
+#[cfg_attr(test, derive(Serialize))]
+#[derive(Deserialize, Clone)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ModelSettingsRecord {
     pub api_url: String,
@@ -81,6 +136,73 @@ pub struct ModelSettingsRecord {
     pub search_mode: String,
     pub tavily_api_key: String,
     pub models: Vec<ModelConfigRecord>,
+}
+
+/// Credential-free model settings returned by the Host to Renderer.
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ModelSettingsEditorRecord {
+    /// Opaque compare-and-swap identity of this exact settings snapshot.
+    pub configuration_revision: String,
+    pub api_url: String,
+    pub api_token_status: CredentialStatus,
+    pub search_mode: String,
+    pub tavily_api_key_status: CredentialStatus,
+    pub models: Vec<ModelConfigEditorRecord>,
+}
+
+/// SQLite representation of model settings. Every credential field is an opaque native-store
+/// reference; this type is deliberately not serializable.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct StoredModelConfigRecord {
+    pub id: String,
+    pub provider_model_id: String,
+    pub display_name: String,
+    pub api_url_override: Option<String>,
+    pub api_token_override_ref: Option<String>,
+    pub supports_image: bool,
+    pub context_window_tokens: Option<u32>,
+    pub provider_profile_config: ProviderProfileConfig,
+    pub input_price: String,
+    pub cached_input_price: String,
+    pub output_price: String,
+    pub enabled: bool,
+}
+
+impl std::fmt::Debug for StoredModelConfigRecord {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("StoredModelConfigRecord([REDACTED])")
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct StoredModelSettingsRecord {
+    pub api_url: String,
+    pub api_token_ref: Option<String>,
+    pub search_mode: String,
+    pub tavily_api_key_ref: Option<String>,
+    pub models: Vec<StoredModelConfigRecord>,
+}
+
+impl std::fmt::Debug for StoredModelSettingsRecord {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("StoredModelSettingsRecord([REDACTED])")
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct StoredModelSettingsSnapshot {
+    pub settings: StoredModelSettingsRecord,
+    pub configuration_revision: String,
+    pub provider_connection_revisions: BTreeMap<String, String>,
+    pub provider_protocol_revisions: BTreeMap<String, String>,
+    pub search_connection_revision: String,
+}
+
+impl std::fmt::Debug for StoredModelSettingsSnapshot {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("StoredModelSettingsSnapshot([REDACTED])")
+    }
 }
 
 impl std::fmt::Debug for ModelSettingsRecord {
@@ -117,7 +239,8 @@ pub enum ProviderProfileUpdate {
 
 /// Wire-only model mutation DTO. It is converted into [`ModelConfigRecord`] before persistence,
 /// so update intent can never become a second stored fact.
-#[derive(Deserialize, Clone)]
+#[cfg_attr(test, derive(Clone))]
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ModelConfigSaveRequest {
     /// Existing immutable configuration identity, or null when creating a model. New identities
@@ -128,8 +251,7 @@ pub struct ModelConfigSaveRequest {
     pub display_name: String,
     #[serde(deserialize_with = "deserialize_required_nullable")]
     pub api_url_override: Option<String>,
-    #[serde(deserialize_with = "deserialize_required_nullable")]
-    pub api_token_override: Option<String>,
+    pub api_token_override_mutation: CredentialMutation,
     pub supports_image: bool,
     #[serde(deserialize_with = "deserialize_required_nullable")]
     pub context_window_tokens: Option<u32>,
@@ -145,13 +267,14 @@ impl ModelConfigSaveRequest {
         self,
         id: String,
         provider_profile_config: ProviderProfileConfig,
+        api_token_override: Option<String>,
     ) -> ModelConfigRecord {
         ModelConfigRecord {
             id,
             provider_model_id: self.provider_model_id,
             display_name: self.display_name,
             api_url_override: self.api_url_override,
-            api_token_override: self.api_token_override,
+            api_token_override,
             supports_image: self.supports_image,
             context_window_tokens: self.context_window_tokens,
             provider_profile_config,
@@ -177,13 +300,20 @@ pub fn normalize_model_display_name(value: &str) -> String {
         .to_string()
 }
 
-#[derive(Deserialize, Clone)]
+#[cfg_attr(test, derive(Clone))]
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ModelSettingsSaveRequest {
+    /// Opaque compare-and-swap identity returned by the settings editor. Current clients always
+    /// send this field; `None` is valid only for the first save into an empty database. The
+    /// default keeps direct legacy callers parseable, while an explicitly supplied stale revision
+    /// is always rejected by the Host.
+    #[serde(default)]
+    pub expected_revision: Option<String>,
     pub api_url: String,
-    pub api_token: String,
+    pub api_token_mutation: CredentialMutation,
     pub search_mode: String,
-    pub tavily_api_key: String,
+    pub tavily_api_key_mutation: CredentialMutation,
     pub models: Vec<ModelConfigSaveRequest>,
 }
 
@@ -222,11 +352,11 @@ impl From<String> for ModelSettingsSaveError {
     }
 }
 
-/// Host-only snapshot of model settings and the opaque identity of the exact saved revision.
-///
-/// `configuration_revision` is deliberately not part of [`ModelSettingsRecord`], which is also
-/// used by Renderer-facing settings APIs. A new random revision is generated for every successful
-/// settings save, including saves whose visible values happen to be identical.
+/// Host-only runtime snapshot of model settings and the opaque identity of the exact saved
+/// revision. A new random revision is generated for every successful settings save, including
+/// saves whose visible values happen to be identical. Renderer receives the same opaque identity
+/// only through [`ModelSettingsEditorRecord`] for compare-and-swap; runtime-only connection and
+/// protocol revisions remain private.
 #[derive(Clone)]
 pub struct ModelSettingsSnapshot {
     pub settings: ModelSettingsRecord,
@@ -271,19 +401,42 @@ pub struct ImageGenerationProfileRecord {
     pub updated_at: i64,
 }
 
-fn validated_connection(
+pub(crate) fn validated_connection(
     model_id: &str,
     source_label: &str,
     api_url: &str,
     api_token: &str,
 ) -> Result<ModelConnectionConfig, String> {
+    if api_url.len() > MODEL_PROVIDER_API_URL_MAX_BYTES || api_url.chars().any(char::is_control) {
+        return Err(format!(
+            "模型 {model_id} 的{source_label} URL 无效或超过 {MODEL_PROVIDER_API_URL_MAX_BYTES} 字节。"
+        ));
+    }
     let api_url = api_url.trim();
     let api_token = api_token.trim();
     let parsed_url =
         Url::parse(api_url).map_err(|_| format!("模型 {model_id} 的{source_label} URL 无效。"))?;
-    if !matches!(parsed_url.scheme(), "http" | "https") {
+    if parsed_url.username() != ""
+        || parsed_url.password().is_some()
+        || parsed_url.query().is_some()
+        || parsed_url.fragment().is_some()
+    {
         return Err(format!(
-            "模型 {model_id} 的{source_label} URL 只支持 http 或 https。"
+            "模型 {model_id} 的{source_label} URL 不得包含用户信息、查询参数或片段。"
+        ));
+    }
+    let secure = parsed_url.scheme() == "https";
+    let controlled_loopback = cfg!(debug_assertions)
+        && parsed_url.scheme() == "http"
+        && parsed_url.host_str().is_some_and(|host| {
+            host.eq_ignore_ascii_case("localhost")
+                || host
+                    .parse::<IpAddr>()
+                    .is_ok_and(|address| address.is_loopback())
+        });
+    if !secure && !controlled_loopback {
+        return Err(format!(
+            "模型 {model_id} 的{source_label} URL 必须使用 HTTPS；HTTP 仅允许本机回环地址。"
         ));
     }
 
@@ -440,6 +593,62 @@ mod model_connection_tests {
     fn partial_model_connection_never_mixes_with_global_settings() {
         let settings = settings(model(Some("https://model.example/v1"), None));
 
+        assert!(settings
+            .effective_connection_for(&settings.models[0])
+            .is_err());
+    }
+
+    #[test]
+    fn provider_urls_reject_unsafe_authority_and_url_components() {
+        for url in [
+            "http://provider.example/v1",
+            "https://user:password@provider.example/v1",
+            "https://provider.example/v1?token=secret",
+            "https://provider.example/v1#secret",
+        ] {
+            let settings = settings(model(Some(url), Some("model-token")));
+            assert!(settings
+                .effective_connection_for(&settings.models[0])
+                .is_err());
+        }
+    }
+
+    #[test]
+    fn provider_urls_enforce_utf8_byte_limit_and_reject_control_characters() {
+        let prefix = "https://provider.example/";
+        let maximum = format!(
+            "{prefix}{}",
+            "a".repeat(MODEL_PROVIDER_API_URL_MAX_BYTES - prefix.len())
+        );
+        assert_eq!(maximum.len(), MODEL_PROVIDER_API_URL_MAX_BYTES);
+        assert!(validated_connection("Model A", "专用", &maximum, "token").is_ok());
+
+        let overlong_unicode = format!("{prefix}{}", "界".repeat(1_400));
+        assert!(overlong_unicode.chars().count() < MODEL_PROVIDER_API_URL_MAX_BYTES);
+        assert!(overlong_unicode.len() > MODEL_PROVIDER_API_URL_MAX_BYTES);
+        assert!(validated_connection("Model A", "专用", &overlong_unicode, "token").is_err());
+
+        for url in [
+            "https://provider.example/v1\n",
+            "https://provider.example/\u{0001}v1",
+        ] {
+            assert!(validated_connection("Model A", "专用", url, "token").is_err());
+        }
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn development_build_allows_only_explicit_loopback_http() {
+        for url in ["http://localhost:11434/v1", "http://127.0.0.1:11434/v1"] {
+            let settings = settings(model(Some(url), Some("model-token")));
+            assert!(settings
+                .effective_connection_for(&settings.models[0])
+                .is_ok());
+        }
+        let settings = settings(model(
+            Some("http://192.168.1.20:11434/v1"),
+            Some("model-token"),
+        ));
         assert!(settings
             .effective_connection_for(&settings.models[0])
             .is_err());

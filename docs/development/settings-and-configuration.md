@@ -2,7 +2,7 @@
 status: current
 audience: developers
 owner: engineering
-last_verified: 2026-08-31
+last_verified: 2026-09-03
 ---
 
 # 设置与配置
@@ -17,7 +17,7 @@ last_verified: 2026-08-31
 | UI、Prompt、用量显示偏好       | SQLite                    | 通过 Host API 由 Rust Core 读写                                   |
 | 系统通知设置                   | SQLite                    | Rust Core 保存 schema v1 + revision；General 页面以 CAS 更新      |
 | 项目与项目元数据               | SQLite                    | 目录选择由 Main 原生对话框授权                                    |
-| Provider、Model、Tavily        | SQLite                    | 保存前由 Rust Core 严格校验                                       |
+| Provider、Model、Tavily        | SQLite + Credential Store | SQLite 保存配置/reference；secret 由凭据 backend 保存             |
 | 图片生成 Profile               | SQLite + Credential Store | 配置与凭据分离                                                    |
 | MCP Server                     | Core Server Registry      | launch authorization 与启用状态独立                               |
 | Skill 启用/安装状态            | SQLite + 受管 Skill 目录  | package revision 与来源受约束                                     |
@@ -49,7 +49,7 @@ App startup gate 分别等待项目、模型设置及其他权威状态加载。
 - Provider URL、模型标识、上下文窗口和价格字段由 Rust Core 校验，Renderer 校验只用于即时反馈。
 - MCP 的“保存配置”“授权启动”“启用连接”“调用审批”是独立操作；离开未保存表单前必须确认。
 - Skill 安装使用 prepare/commit 两阶段并绑定冻结候选，不把 UI 草稿当安装授权。
-- 图片生成凭据遵循 keep/replace/clear 意图，不能用空字符串隐式覆盖未知密钥。
+- 模型、Tavily 与图片生成凭据统一遵循 `keep | replace | clear` 意图，不能用空字符串隐式覆盖未知密钥。
 - General 的 Custom 权限除 read/write/command/FileChange 外，还包含 `builtinExecution` 审批开关；它控制符合条件的应用内置 capability/Tool 与 BrowserRisk 是否需要本次人工点击，但不会自行激活 capability，也不跳过 target、risk、来源、policy、audit 或执行前复核。
 - Agent 模板名称与 machine key 在工作区级模板库内唯一；启用状态和内容使用 revision/CAS，项目 assignment 独立且每个项目最多 32 个模板。未分配、已停用或模型不可用的模板不能用于 spawn。
 - Browser 的链接打开目标使用 `system | builtin`；下载目录与“每次询问”只影响用户手动下载，Agent 下载不会停在原生保存对话框中。Renderer 只接收安全 display path，不取得 Host 保存的真实 custom directory authority。
@@ -76,9 +76,19 @@ Automation 不是 Settings 页面中的第二份模型/权限配置。保存任�
 
 ## 敏感值
 
-模型 Token 与 Tavily Key 当前属于本地模型设置；任何读取接口都必须避免进入日志、Trace、Agent 模型
-上下文和错误字符串。图片生成及 MCP 审批密封数据使用独立 Credential Store 边界；后端不可用时按
-各领域的 fail-closed/进程内降级规则处理。
+模型 Token、Tavily Key 与图片生成 API Key 使用同一安全边界：SQLite 只保存不透明 credential reference、
+状态和非秘密配置；secret 由 Credential Store 保存。具备稳定签名身份的发行构建使用操作系统凭据
+存储，未签名 macOS 开发构建使用应用数据根内的私有文件 backend（目录 `0700`、文件 `0600`）。
+Renderer 只接收 `missing | configured | unavailable` 状态和用户本次新输入的替换值，既不能读回已有
+secret，也不能取得 reference。任何读取接口都必须避免让密钥进入日志、Trace、Agent 模型上下文和错误字符串。
+
+共享 `CredentialInput` 只有三种常规视觉形态：未配置时是空白写入框与可见性开关；已配置时显示固定
+掩码、配置状态、替换与清除图标；替换中显示新的空白输入、可见性开关与行内取消。`clear` 是 Host 协议
+中的显式 mutation，经现有确认弹窗提交，不是占用额外行高的第四种表单状态。模型、搜索与图片生成均
+使用该组件，图片生成配置同样支持清除已保存 Key。
+
+Credential Store 暂时不可用时，公开配置仍应可加载并显示 `unavailable`；只有需要该连接的运行 fail
+closed。数据库事务和 SQLite mutex 内不得执行操作系统凭据或开发凭据文件 I/O。
 
 禁止：
 
@@ -98,7 +108,7 @@ MCP、Browser、Subagents、Environment 和 Archived Conversations。Browser 页
 - 配置 DTO 与 parser 是否拒绝未知/无效字段；
 - 默认值是在 Renderer、Main、Core Server 还是 Rust Core 定义，是否只有一个权威来源；
 - revision/CAS、重复提交和重启后的行为是否有测试；
-- reset/backup 是否应保留该配置；当前 reset 只保留兼容 schema 的通知设置、Browser 偏好/下载设置，不保留通知事件、Browser history/download records 或 Agent template library；
+- reset/backup 是否应保留该配置；当前 reset 只从 exact current schema 保留 allowlisted 配置与 credential reference，不复制或恢复操作系统 secret。通知事件、Browser history/download records 或 Agent template library 不保留；
 - 删除项目是否应删除该配置或仅移除 Agent template assignment；
 - Automation 是否需要重建冻结 snapshot、阻断后续 Run 或使现有任务进入 blocked；
 - 敏感字段是否避开日志、Trace、IPC event 和 model projection；

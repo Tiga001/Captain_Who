@@ -623,8 +623,7 @@ fn image_generation_update_request_debug_redacts_credentials() {
 }
 
 #[test]
-fn image_generation_configuration_response_serializes_but_does_not_debug_the_api_key() {
-    let secret = "editor-visible-api-key";
+fn image_generation_configuration_response_has_no_api_key_field() {
     let response =
         serde_json::from_value::<ImageGenerationGetConfigurationResponse>(serde_json::json!({
             "schemaVersion": IMAGE_GENERATION_CONFIGURATION_SCHEMA_VERSION,
@@ -638,16 +637,16 @@ fn image_generation_configuration_response_serializes_but_does_not_debug_the_api
                 "enabled": true,
                 "readiness": "readyUnverified",
                 "revision": "image-generation:v1:1"
-            },
-            "apiKey": secret
+            }
         }))
         .unwrap();
 
-    assert_eq!(response.api_key.as_deref(), Some(secret));
-    assert_eq!(serde_json::to_value(&response).unwrap()["apiKey"], secret);
+    assert!(serde_json::to_value(&response)
+        .unwrap()
+        .get("apiKey")
+        .is_none());
     let debug = format!("{response:?}");
-    assert!(debug.contains("[REDACTED]"));
-    assert!(!debug.contains(secret));
+    assert!(!debug.contains("api_key"));
 }
 
 #[test]

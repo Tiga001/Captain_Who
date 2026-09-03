@@ -2,7 +2,7 @@
 status: current
 audience: developers
 owner: engineering
-last_verified: 2026-08-31
+last_verified: 2026-09-03
 ---
 
 # 威胁模型
@@ -114,9 +114,15 @@ receipt 枚举的精确 Mach-O 集，并只给 Chromium/OfficeCLI/managed Node �
 
 ### 凭据与敏感 payload
 
-不同凭据有不同持久化策略，不能统一假设都在 OS Keychain。MCP 审批和图片生成使用 Credential Store
-相关边界；某些本地模型/搜索配置仍保存在 SQLite。无论存储方式如何，敏感值不得进入模型上下文、
-Trace、普通日志、Renderer 事件、错误文案、命令行或测试 snapshot。
+模型、搜索和图片生成 secret 与 SQLite 配置分离：SQLite 只保存不透明 reference、状态与非秘密元数据。
+具备稳定签名身份的发行构建使用操作系统凭据存储；未签名 macOS 开发构建使用权限收紧的私有文件
+backend。Renderer 只收到状态和用户本次新输入的替换值，不收到旧 secret 或 reference。凭据解析不得在
+SQLite transaction/mutex 内进行；runtime 必须按所选连接的冻结 revision 解析，不能让一次不相关的失效
+reference 阻断全部 Provider catalog。无论存储方式如何，敏感值不得进入模型上下文、Trace、普通日志、
+Renderer 事件、错误文案、命令行或测试 snapshot。
+
+当前 schema 的 SQLite backup 不含当前模型/搜索 secret，但旧 schema backup 可能仍有明文。只恢复
+SQLite 不会恢复操作系统凭据；应用层清除也不承诺对 SSD、系统备份或系统凭据后端安全擦除。
 
 ### 原生通知
 
@@ -136,9 +142,9 @@ Renderer 尚未 ready，Main 只以 FIFO 保留最多 32 个 pending open reques
 
 SQLite 是大部分领域的恢复真源。关键副作用使用 receipt、CAS、lease、checkpoint、FileChange delete journal
 或 `outcome_unknown` 防止崩溃后盲目重放。通知只是失效信号，不能替代持久状态。schema/catalog 不匹配时
-fail closed 并要求显式开发重置，不在启动时偷偷改写旧库。开发 reset 只在当前 v32 与配置契约经核验相同的
-固定 v31 保留明确 allowlist；该窗口不会随版本号自动滑动。notification facts、Browser history/download
-records、Agent templates 和 FileChange 运行/审计状态不会迁移。
+fail closed 并要求显式开发重置，不在启动时偷偷改写旧库。正式开发 reset 只从 exact current v33 提取
+明确 allowlist；旧 schema 不保留永久兼容读取路径。notification facts、Browser history/download records、
+Agent templates 和 FileChange 运行/审计状态不会迁移。
 
 删除项目、Conversation 或 Agent 树时必须遵守领域所有权和外键规则；文件数据根中的孤儿对象只由受管
 清理策略处理，不根据 Renderer 猜测直接删除。

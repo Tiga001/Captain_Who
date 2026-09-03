@@ -114,7 +114,7 @@ FileChange 对不同消费者使用不同投影：
 
 ## 7. 持久化、历史 Diff 与分叉
 
-canonical schema v32 中的 FileChange 数据分为：
+canonical schema v33 中的 FileChange 数据分为：
 
 - `agent_file_changes`、`agent_file_change_chunks`、`agent_file_change_operations`：仅保存 Staged create/update 草稿、mutation receipt 与可见历史；Direct 不在这里伪造草稿。
 - `agent_file_change_run_grants`：Run-scoped runtime authority，不是聊天历史。

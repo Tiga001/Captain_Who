@@ -22,17 +22,15 @@ const readyConfiguration = {
 } as const
 
 describe('image generation configuration protocol', () => {
-  it('accepts a complete editable configuration snapshot', () => {
+  it('accepts a complete secret-free configuration snapshot', () => {
     expect(
       parseImageGenerationGetConfigurationOutput({
         schemaVersion: IMAGE_GENERATION_CONFIGURATION_SCHEMA_VERSION,
-        configuration: readyConfiguration,
-        apiKey: 'existing-api-key'
+        configuration: readyConfiguration
       })
     ).toEqual({
       schemaVersion: IMAGE_GENERATION_CONFIGURATION_SCHEMA_VERSION,
-      configuration: readyConfiguration,
-      apiKey: 'existing-api-key'
+      configuration: readyConfiguration
     })
   })
 
@@ -49,8 +47,7 @@ describe('image generation configuration protocol', () => {
     expect(
       parseImageGenerationGetConfigurationOutput({
         schemaVersion: IMAGE_GENERATION_CONFIGURATION_SCHEMA_VERSION,
-        configuration,
-        apiKey: null
+        configuration
       }).configuration
     ).toEqual(configuration)
   })
@@ -65,15 +62,13 @@ describe('image generation configuration protocol', () => {
     expect(
       parseImageGenerationGetConfigurationOutput({
         schemaVersion: IMAGE_GENERATION_CONFIGURATION_SCHEMA_VERSION,
-        configuration,
-        apiKey: null
+        configuration
       }).configuration
     ).toEqual(configuration)
     expect(() =>
       parseImageGenerationGetConfigurationOutput({
         schemaVersion: IMAGE_GENERATION_CONFIGURATION_SCHEMA_VERSION,
-        configuration: { ...configuration, readiness: 'readyUnverified' },
-        apiKey: null
+        configuration: { ...configuration, readiness: 'readyUnverified' }
       })
     ).toThrow(/readiness.*credentialUnavailable/)
   })
@@ -85,8 +80,7 @@ describe('image generation configuration protocol', () => {
         configuration: {
           ...readyConfiguration,
           capabilities: { textToImage: false, imageToImage: true }
-        },
-        apiKey: 'existing-api-key'
+        }
       })
     ).toThrow(/textToImage.*literal true/)
   })
@@ -95,20 +89,19 @@ describe('image generation configuration protocol', () => {
     expect(() =>
       parseImageGenerationGetConfigurationOutput({
         schemaVersion: IMAGE_GENERATION_CONFIGURATION_SCHEMA_VERSION,
-        configuration: { ...readyConfiguration, endpointUrl: '', readiness: 'readyUnverified' },
-        apiKey: 'existing-api-key'
+        configuration: { ...readyConfiguration, endpointUrl: '', readiness: 'readyUnverified' }
       })
     ).toThrow(/readiness.*missingEndpoint/)
   })
 
-  it('requires the editable API key to match the credential status', () => {
+  it('rejects any legacy API key projection regardless of credential status', () => {
     expect(() =>
       parseImageGenerationGetConfigurationOutput({
         schemaVersion: IMAGE_GENERATION_CONFIGURATION_SCHEMA_VERSION,
         configuration: readyConfiguration,
-        apiKey: null
+        apiKey: 'must-not-cross-the-boundary'
       })
-    ).toThrow(/apiKey.*configured/)
+    ).toThrow(/unexpected field apiKey/)
     expect(() =>
       parseImageGenerationGetConfigurationOutput({
         schemaVersion: IMAGE_GENERATION_CONFIGURATION_SCHEMA_VERSION,
@@ -117,9 +110,9 @@ describe('image generation configuration protocol', () => {
           credentialStatus: 'missing',
           readiness: 'missingCredential'
         },
-        apiKey: 'unexpected-api-key'
+        apiKey: null
       })
-    ).toThrow(/apiKey.*configured/)
+    ).toThrow(/unexpected field apiKey/)
   })
 
   it('parses explicit credential mutations and never treats omission as keep', () => {
@@ -173,13 +166,28 @@ describe('image generation configuration protocol', () => {
           value: 'x'.repeat(IMAGE_GENERATION_CREDENTIAL_MAX_LENGTH + 1)
         }
       })
-    ).toThrow(/at most/)
+    ).toThrow(/UTF-8 bytes/)
+    expect(() =>
+      parseImageGenerationUpdateConfigurationInput({
+        ...base,
+        credentialMutation: {
+          type: 'replace',
+          value: '密'.repeat(Math.floor(IMAGE_GENERATION_CREDENTIAL_MAX_LENGTH / 3) + 1)
+        }
+      })
+    ).toThrow(/UTF-8 bytes/)
     expect(() =>
       parseImageGenerationUpdateConfigurationInput({
         ...base,
         credentialMutation: { type: 'replace', value: 'secret token' }
       })
     ).toThrow(/must not contain whitespace/)
+    expect(() =>
+      parseImageGenerationUpdateConfigurationInput({
+        ...base,
+        credentialMutation: { type: 'replace', value: 'secret\u0000token' }
+      })
+    ).toThrow(/control data/)
   })
 
   it('keeps status compact and validates its typed capabilities', () => {

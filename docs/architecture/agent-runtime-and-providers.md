@@ -31,7 +31,7 @@ Rust Core 与 Core Server 的边界是有意的：Runtime 可以提出动作并�
 - `AgentRuntime`：一次逻辑 Run 的执行器。当前有 10,000 次 Tool 迭代保险上限，每个主请求最多尝试三次上下文压缩；这些是防失控边界，不是产品配额。
 - `AgentRuntimeHostServices`：注入 Storage、Trace/Context observer、Compaction、Provider continuation vault、Skills、Office、图像生成、MCP Server、Command Session、Steering 与协作服务。
 - `ProviderRegistration`：Provider 能力的唯一注册真源。UI 描述与运行时语义分开，禁止把 replay、checkpoint 或 usage 策略塞进 UI 配置。
-- `ProviderProfile`：用户可选的模型端点和设置，带 schema/revision；它不是运行时能力判定的真源。
+- `ProviderProfile`：用户可选的模型端点和设置，带 schema/revision；它不是运行时能力判定的真源。协议语义使用 `provider_protocol_revision`，URL/credential 等连接身份使用独立的 `provider_connection_revision`，两者不能互相替代。
 - `EffectiveToolSet`：在权限、运行时可用性、Skill/Capability 激活后冻结的本次请求 Tool 契约。
 - `AgentRunCheckpoint`：审批或恢复边界保存的安全状态。Checkpoint 的 schema 是版本化协议，不能直接序列化任意运行内存。
 
@@ -88,6 +88,8 @@ Checkpoint 至少绑定以下事实：
 FileChange 的恢复状态横跨两类私有存储：checkpoint 保存 pending/queued Observation、模型已观察的 successor 和可选 Run grant ref；Host pending action/audit/Staged store 保存 exact proposal binding 与待处理 transaction。Observation/run-grant ref 都不是独立 authority：恢复与 effect boundary 必须从 Host 持久 action/audit/grant 重新验证 owner、revision、scope 和 receipt；Event/Trace/Archive 不得提供这些字段。
 
 恢复时必须重新验证版本、归属、调用 ID、Tool 身份、权限和 Provider 能力。外部 MCP Server 调用与未知 Tool 不能仅凭普通 Checkpoint 保存其原始参数；它们需要各自的授权信封或明确失败。Tool 定义在暂停后变化时，应遵循冻结契约或返回结构化恢复错误，不能静默按新定义执行旧调用。
+
+模型请求只解析所选 connection 所需的 secret，并在 SQLite transaction/mutex 之外访问 Credential Store。Run、子 Agent Wake、Automation snapshot 和恢复输入必须冻结并复核 `provider_connection_revision`；凭据替换或清除会改变连接 revision，旧 Run 不得静默使用新密钥。catalog/usage/模板等只需元数据的路径不得批量解密凭据，也不能因一个不相关 reference 不可用而阻断全部模型。
 
 审批 ticket 与 sealed/process execution material 的生命周期分开：MCP Server、Browser risk、内置敏感 Tool 和 Skill 安装即使临时 payload 已过期，ticket 也不会因此自动结算；它仍等待用户决定或所属 Run 的取消/终态流程收口。晚批准时若 Host 已无法取得精确材料，continuation 必须接收 definitely-not-dispatched 的 failed Tool Result 并继续模型闭环，不能重新生成调用、自动 retry 或声称用户决定已过期。
 

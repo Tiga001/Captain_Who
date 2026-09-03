@@ -839,7 +839,12 @@ async fn approved_command_reuses_one_session_archive_across_restart_and_runtime_
     let database_path = fixture.path().join("approved-command-archive.sqlite");
     let workspace = fixture.path().join("workspace");
     std::fs::create_dir_all(&workspace).unwrap();
-    let storage = Arc::new(StorageService::open(&database_path).unwrap());
+    let model_credentials =
+        Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(&database_path, model_credentials.clone())
+            .unwrap(),
+    );
     storage
         .save_project(ProjectRecord {
             id: "project-approved-command-archive".to_string(),
@@ -968,7 +973,10 @@ async fn approved_command_reuses_one_session_archive_across_restart_and_runtime_
     drop(service);
     drop(storage);
 
-    let restarted_storage = Arc::new(StorageService::open(&database_path).unwrap());
+    let restarted_storage = Arc::new(
+        StorageService::open_with_model_credentials(&database_path, model_credentials.clone())
+            .unwrap(),
+    );
     let restarted =
         AgentService::try_new_deferred_startup_reconciliation(Arc::clone(&restarted_storage))
             .unwrap();
@@ -1170,7 +1178,8 @@ async fn approved_command_reuses_one_session_archive_across_restart_and_runtime_
 
     drop(restarted);
     drop(restarted_storage);
-    let after_second_restart = StorageService::open(&database_path).unwrap();
+    let after_second_restart =
+        StorageService::open_with_model_credentials(&database_path, model_credentials).unwrap();
     let restarted_trace = after_second_restart
         .get_conversation_turn_trace("assistant-approved-command-archive")
         .unwrap()
@@ -1247,7 +1256,12 @@ async fn rejected_command_after_restart_resumes_the_model_without_starting_a_ses
     let database_path = fixture.path().join("rejected-command-restart.sqlite");
     let workspace = fixture.path().join("workspace");
     std::fs::create_dir_all(&workspace).unwrap();
-    let storage = Arc::new(StorageService::open(&database_path).unwrap());
+    let model_credentials =
+        Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(&database_path, model_credentials.clone())
+            .unwrap(),
+    );
     storage
         .save_project(ProjectRecord {
             id: "project-rejected-command-restart".to_string(),
@@ -1341,7 +1355,10 @@ async fn rejected_command_after_restart_resumes_the_model_without_starting_a_ses
     drop(service);
     drop(storage);
 
-    let restarted_storage = Arc::new(StorageService::open(&database_path).unwrap());
+    let restarted_storage = Arc::new(
+        StorageService::open_with_model_credentials(&database_path, model_credentials.clone())
+            .unwrap(),
+    );
     let restarted =
         AgentService::try_new_deferred_startup_reconciliation(Arc::clone(&restarted_storage))
             .unwrap();
@@ -1411,7 +1428,9 @@ async fn rejected_command_after_restart_resumes_the_model_without_starting_a_ses
 
     drop(restarted);
     drop(restarted_storage);
-    let after_second_restart = Arc::new(StorageService::open(&database_path).unwrap());
+    let after_second_restart = Arc::new(
+        StorageService::open_with_model_credentials(&database_path, model_credentials).unwrap(),
+    );
     let reconciled =
         AgentService::try_new_deferred_startup_reconciliation(Arc::clone(&after_second_restart))
             .unwrap();

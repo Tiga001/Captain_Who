@@ -1,5 +1,5 @@
 use super::adapter::{deepseek_reasoning_content, ProviderAdapterRegistry};
-use super::payload::build_payload;
+use super::payload::{build_anthropic_headers, build_openai_headers, build_payload};
 use super::response::extract_tool_calls;
 use super::transport::*;
 use super::*;
@@ -43,6 +43,19 @@ fn llm_debug_projections_never_expose_provider_or_tool_payloads() {
     let rendered = format!("{request:?}{response:?}{message:?}{image:?}{tool_call:?}{stream:?}");
     assert!(!rendered.contains(CANARY));
     assert!(!rendered.contains("example.test"));
+}
+
+#[test]
+fn provider_credential_headers_are_marked_sensitive() {
+    let openai = build_openai_headers("openai-secret").unwrap();
+    assert!(openai
+        .get(reqwest::header::AUTHORIZATION)
+        .is_some_and(reqwest::header::HeaderValue::is_sensitive));
+
+    let anthropic = build_anthropic_headers("anthropic-secret").unwrap();
+    assert!(anthropic
+        .get("x-api-key")
+        .is_some_and(reqwest::header::HeaderValue::is_sensitive));
 }
 use crate::context::{
     format_message_created_at, ContextAssembler, ContextAssemblyInput, ContextAttachments,
@@ -163,7 +176,7 @@ async fn read_test_http_request(stream: &mut TcpStream) {
     let _ = read_test_http_request_json(stream).await;
 }
 
-async fn read_test_http_request_json(stream: &mut TcpStream) -> Value {
+async fn read_test_http_request_raw(stream: &mut TcpStream) -> Vec<u8> {
     let mut request = Vec::new();
     let mut content_length = None;
     let mut body_start = None;
@@ -191,10 +204,33 @@ async fn read_test_http_request_json(stream: &mut TcpStream) -> Value {
 
         if let (Some(start), Some(length)) = (body_start, content_length) {
             if request.len() >= start + length {
-                return serde_json::from_slice(&request[start..start + length]).unwrap();
+                return request;
             }
         }
     }
+}
+
+async fn read_test_http_request_json(stream: &mut TcpStream) -> Value {
+    let request = read_test_http_request_raw(stream).await;
+    let body_start = request
+        .windows(4)
+        .position(|part| part == b"\r\n\r\n")
+        .map(|index| index + 4)
+        .unwrap();
+    serde_json::from_slice(&request[body_start..]).unwrap()
+}
+
+fn test_http_request_has_header(request: &[u8], expected_name: &str) -> bool {
+    let header_end = request
+        .windows(4)
+        .position(|part| part == b"\r\n\r\n")
+        .unwrap();
+    std::str::from_utf8(&request[..header_end])
+        .unwrap()
+        .lines()
+        .skip(1)
+        .filter_map(|line| line.split_once(':'))
+        .any(|(name, value)| name.eq_ignore_ascii_case(expected_name) && !value.trim().is_empty())
 }
 
 async fn write_test_http_response(stream: &mut TcpStream, status: &str, body: Value) {

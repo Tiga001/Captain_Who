@@ -4,7 +4,7 @@ description: 关于 Captain Who 数据、模型、权限、扩展和自动化的
 status: current
 audience: user
 owner: support
-last_verified: 2026-08-31
+last_verified: 2026-09-03
 ---
 
 # 常见问答
@@ -27,7 +27,7 @@ last_verified: 2026-08-31
 
 ## Token 保存在哪里？
 
-模型 Token 和 Tavily Key 当前以明文保存在本机 SQLite 数据库中，不是系统钥匙串。图片生成凭据使用独立的凭据后端，具体方式因平台和构建身份而异。
+模型 Token、Tavily Key 和图片生成 API Key 与 SQLite 配置分离：SQLite 只保存不透明引用和状态。具备稳定签名身份的发行构建使用操作系统凭据存储；未签名 macOS 开发构建使用数据目录内权限收紧的私有文件。应用不会在设置页读回已有密钥。
 
 ## 为什么 Agent 会请求批准？
 

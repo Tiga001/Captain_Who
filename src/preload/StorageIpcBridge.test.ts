@@ -17,10 +17,19 @@ describe('Storage IPC bridge', () => {
       }
     ]
     const authoritativeSettings = {
+      configurationRevision: 'model-settings-v1:00000000-0000-4000-8000-000000000001',
       apiUrl: '',
-      apiToken: '',
+      apiTokenStatus: 'missing' as const,
       searchMode: 'auto',
-      tavilyApiKey: '',
+      tavilyApiKeyStatus: 'missing' as const,
+      models: []
+    }
+    const update = {
+      expectedRevision: null,
+      apiUrl: '',
+      apiTokenMutation: { type: 'keep' as const },
+      searchMode: 'auto',
+      tavilyApiKeyMutation: { type: 'keep' as const },
       models: []
     }
     const invoke = vi
@@ -29,17 +38,13 @@ describe('Storage IPC bridge', () => {
       .mockResolvedValueOnce({ ok: true, value: authoritativeSettings })
     const bridge = createStorageIpcBridge({ invoke } as unknown as Pick<IpcRenderer, 'invoke'>)
 
-    await expect(bridge.loadProviderProfileUiDescriptors()).resolves.toBe(descriptors)
-    await expect(bridge.saveModelSettings(authoritativeSettings)).resolves.toEqual({
+    await expect(bridge.loadProviderProfileUiDescriptors()).resolves.toEqual(descriptors)
+    await expect(bridge.saveModelSettings(update)).resolves.toEqual({
       ok: true,
       value: authoritativeSettings
     })
     expect(invoke).toHaveBeenNthCalledWith(1, 'host:storage.loadProviderProfileUiDescriptors')
-    expect(invoke).toHaveBeenNthCalledWith(
-      2,
-      'host:storage.saveModelSettings',
-      authoritativeSettings
-    )
+    expect(invoke).toHaveBeenNthCalledWith(2, 'host:storage.saveModelSettings', update)
   })
 
   it('routes the safe Provider vendor directory and model policy resolver', async () => {
@@ -68,14 +73,110 @@ describe('Storage IPC bridge', () => {
     const invoke = vi.fn().mockResolvedValueOnce(descriptors).mockResolvedValueOnce(policy)
     const bridge = createStorageIpcBridge({ invoke } as unknown as Pick<IpcRenderer, 'invoke'>)
 
-    await expect(bridge.loadProviderVendorDescriptors()).resolves.toBe(descriptors)
-    await expect(bridge.resolveProviderVendorModelPolicy(input)).resolves.toBe(policy)
+    await expect(bridge.loadProviderVendorDescriptors()).resolves.toEqual(descriptors)
+    await expect(bridge.resolveProviderVendorModelPolicy(input)).resolves.toEqual(policy)
     expect(invoke).toHaveBeenNthCalledWith(1, 'host:storage.loadProviderVendorDescriptors')
     expect(invoke).toHaveBeenNthCalledWith(
       2,
       'host:storage.resolveProviderVendorModelPolicy',
       input
     )
+  })
+
+  it('rejects private or unknown fields in Provider projections at the isolated bridge', async () => {
+    const invoke = vi
+      .fn()
+      .mockResolvedValueOnce([
+        {
+          profileId: 'deepseek_v4_chat',
+          profileVersion: 1,
+          displayName: 'DeepSeek',
+          compatibleDialects: ['openai_chat_completions'],
+          settingsKind: 'deepseek_v4_chat',
+          selectable: true,
+          credentialRef: 'private-reference'
+        }
+      ])
+      .mockResolvedValueOnce([
+        {
+          vendorId: 'moonshot',
+          displayName: 'Moonshot AI',
+          selectable: true,
+          apiToken: 'must-not-cross-the-boundary'
+        }
+      ])
+      .mockResolvedValueOnce({
+        status: 'unsupported',
+        vendorId: 'moonshot',
+        reason: 'unsupported_model',
+        credential_ref: 'private-reference'
+      })
+    const bridge = createStorageIpcBridge({ invoke } as unknown as Pick<IpcRenderer, 'invoke'>)
+
+    await expect(bridge.loadProviderProfileUiDescriptors()).rejects.toThrow(
+      /credential field credentialRef/
+    )
+    await expect(bridge.loadProviderVendorDescriptors()).rejects.toThrow(
+      /unexpected field apiToken/
+    )
+    await expect(
+      bridge.resolveProviderVendorModelPolicy({
+        vendorId: 'moonshot',
+        modelId: 'unknown',
+        dialect: 'openai_chat_completions'
+      })
+    ).rejects.toThrow(/unexpected field credential_ref/)
+  })
+
+  it('rejects legacy secret fields before they can cross the isolated bridge', async () => {
+    const invoke = vi.fn().mockResolvedValue({
+      apiUrl: '',
+      apiTokenStatus: 'configured',
+      apiToken: 'must-not-cross-the-boundary',
+      searchMode: 'auto',
+      tavilyApiKeyStatus: 'missing',
+      models: []
+    })
+    const bridge = createStorageIpcBridge({ invoke } as unknown as Pick<IpcRenderer, 'invoke'>)
+
+    await expect(bridge.loadModelSettings()).rejects.toThrow(/credential field apiToken/)
+    await expect(
+      bridge.saveModelSettings({
+        expectedRevision: null,
+        apiUrl: '',
+        apiTokenMutation: { type: 'replace', value: 'contains whitespace' },
+        searchMode: 'auto',
+        tavilyApiKeyMutation: { type: 'keep' },
+        models: []
+      })
+    ).rejects.toThrow(/apiTokenMutation/)
+    expect(invoke).toHaveBeenCalledOnce()
+  })
+
+  it('strictly parses a successful save response before returning it to Renderer', async () => {
+    const invoke = vi.fn().mockResolvedValue({
+      ok: true,
+      value: {
+        apiUrl: '',
+        apiTokenStatus: 'configured',
+        apiToken: 'must-not-cross-the-boundary',
+        searchMode: 'auto',
+        tavilyApiKeyStatus: 'missing',
+        models: []
+      }
+    })
+    const bridge = createStorageIpcBridge({ invoke } as unknown as Pick<IpcRenderer, 'invoke'>)
+
+    await expect(
+      bridge.saveModelSettings({
+        expectedRevision: null,
+        apiUrl: '',
+        apiTokenMutation: { type: 'keep' },
+        searchMode: 'auto',
+        tavilyApiKeyMutation: { type: 'keep' },
+        models: []
+      })
+    ).rejects.toThrow(/credential field apiToken/)
   })
 
   it('passes the structured conversation-fork result through without throwing', async () => {

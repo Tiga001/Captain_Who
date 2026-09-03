@@ -1,4 +1,4 @@
-//! Secure credential storage for image-generation provider secrets.
+//! Secure, provider-neutral application credential storage.
 //!
 //! This module deliberately keeps credential bytes out of configuration records,
 //! debug output, and error values. Persist only [`CredentialReference`] values in
@@ -30,8 +30,11 @@ pub use macos_keychain::NonInteractiveMacCredentialStore;
 /// service stable lets configuration records rotate references without changing
 /// the native-store namespace.
 pub const IMAGE_GENERATION_CREDENTIAL_SERVICE: &str = "com.mycopilot.next.image-generation.v2";
+/// Independent native-store namespace for language-model and search provider credentials.
+pub const MODEL_PROVIDER_CREDENTIAL_SERVICE: &str = "com.mycopilot.next.model-provider.v1";
 
-const OPAQUE_REFERENCE_PREFIX: &str = "image-generation/api-key/";
+const OPAQUE_REFERENCE_PREFIX: &str = "application-credential/v1/";
+const LEGACY_IMAGE_REFERENCE_PREFIX: &str = "image-generation/api-key/";
 const OPAQUE_REFERENCE_UUID_BYTES: usize = 32;
 const MAX_CREDENTIAL_SERVICE_BYTES: usize = 512;
 
@@ -166,10 +169,7 @@ impl CredentialReference {
 
 impl fmt::Debug for CredentialReference {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_tuple("CredentialReference")
-            .field(&self.value)
-            .finish()
+        formatter.write_str("CredentialReference([REDACTED])")
     }
 }
 
@@ -369,6 +369,13 @@ impl SystemCredentialStore {
         }
     }
 
+    #[must_use]
+    pub fn model_provider() -> Self {
+        Self {
+            service: MODEL_PROVIDER_CREDENTIAL_SERVICE.to_owned(),
+        }
+    }
+
     fn entry(&self, reference: &CredentialReference) -> Result<Entry, CredentialStoreError> {
         Entry::new(&self.service, reference.as_str())
             .map_err(|error| classify_keyring_error(CredentialStoreOperation::Open, error))
@@ -502,7 +509,10 @@ impl InMemoryCredentialStore {
 }
 
 fn parse_reference(value: &str) -> Result<(CredentialStoreBackend, &str), CredentialStoreError> {
-    let Some(suffix) = value.strip_prefix(OPAQUE_REFERENCE_PREFIX) else {
+    let Some(suffix) = value
+        .strip_prefix(OPAQUE_REFERENCE_PREFIX)
+        .or_else(|| value.strip_prefix(LEGACY_IMAGE_REFERENCE_PREFIX))
+    else {
         return Err(CredentialStoreError::InvalidReference);
     };
     let (backend, opaque_id) = match suffix.split_once('/') {
@@ -659,6 +669,16 @@ mod tests {
 
         assert_eq!(debug, "CredentialSecret([REDACTED])");
         assert!(!debug.contains(value));
+    }
+
+    #[test]
+    fn credential_reference_debug_output_is_always_redacted() {
+        let reference = CredentialReference::new_opaque();
+        let persisted_reference = reference.as_str().to_string();
+        let debug = format!("{reference:?}");
+
+        assert_eq!(debug, "CredentialReference([REDACTED])");
+        assert!(!debug.contains(&persisted_reference));
     }
 
     #[test]

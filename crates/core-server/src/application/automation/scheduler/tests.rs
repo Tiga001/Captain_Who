@@ -1,6 +1,7 @@
 use super::*;
 use crate::application::automation::permissions::resolve_automation_permissions;
 use crate::application::automation::AutomationService;
+use mycopilot_core::image_generation::InMemoryCredentialStore;
 use mycopilot_core::storage::automation_repository::{
     self, AutomationConfigRecord, AutomationCreateOutcome, AutomationRunAdmissionInput,
     AutomationRunAdmissionOutcome, AutomationRunEnqueueOutcome, NewAutomationRecord,
@@ -13,6 +14,7 @@ use mycopilot_core::storage::models::{
 use mycopilot_core::{
     AgentForkTurns, AgentProposedAction, ConversationTraceSnapshot,
     ConversationTurnTraceTerminalStatus, CreateChildAgentInput, EnsureRootAgentInput,
+    ProviderContinuationVaultFactory,
 };
 use mycopilot_protocol_rs::{
     AutomationBlockedCodeDto, AutomationGetInputDto, AutomationHealthDto,
@@ -1019,7 +1021,13 @@ async fn run_waiting_approval_restart_scenario(decision: RestartApprovalDecision
         .join(format!("approval-restart-{label}.sqlite"));
     let workspace = fixture.path().join(format!("workspace-{label}"));
     std::fs::create_dir_all(&workspace).unwrap();
-    let storage = Arc::new(StorageService::open(&database_path).unwrap());
+    // A process restart replaces StorageService and AgentService, but the production credential
+    // backend remains durable across that boundary. Reuse one deterministic in-memory backend so
+    // this fixture models that boundary without touching an OS credential store.
+    let credentials = Arc::new(InMemoryCredentialStore::default());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(&database_path, credentials.clone()).unwrap(),
+    );
     let project_id = format!("automation-approval-project-{label}");
     storage
         .save_project(ProjectRecord {
@@ -1063,8 +1071,19 @@ async fn run_waiting_approval_restart_scenario(decision: RestartApprovalDecision
         .expect("manual Automation run should be claimed");
     assert_eq!(claimed.id, queued.id);
 
+    let first_vault = Arc::new(
+        ProviderContinuationVaultFactory::open_or_provision(
+            Arc::clone(&storage),
+            credentials.clone(),
+        )
+        .unwrap(),
+    );
     let first_agent =
-        AgentService::try_new_deferred_startup_reconciliation(Arc::clone(&storage)).unwrap();
+        AgentService::try_new_deferred_startup_reconciliation_with_provider_continuation_vault(
+            Arc::clone(&storage),
+            Some(first_vault),
+        )
+        .unwrap();
     let (first_notifications, mut first_events) = tokio::sync::mpsc::unbounded_channel();
     let turn = first_agent
         .start_automation_human_root_turn(
@@ -1165,10 +1184,22 @@ async fn run_waiting_approval_restart_scenario(decision: RestartApprovalDecision
     drop(first_agent);
     drop(storage);
 
-    let restarted_storage = Arc::new(StorageService::open(&database_path).unwrap());
+    let restarted_storage = Arc::new(
+        StorageService::open_with_model_credentials(&database_path, credentials.clone()).unwrap(),
+    );
+    let restarted_vault = Arc::new(
+        ProviderContinuationVaultFactory::open_or_provision(
+            Arc::clone(&restarted_storage),
+            credentials,
+        )
+        .unwrap(),
+    );
     let restarted_agent =
-        AgentService::try_new_deferred_startup_reconciliation(Arc::clone(&restarted_storage))
-            .unwrap();
+        AgentService::try_new_deferred_startup_reconciliation_with_provider_continuation_vault(
+            Arc::clone(&restarted_storage),
+            Some(restarted_vault),
+        )
+        .unwrap();
     let restarted_pending = restarted_agent.list_pending_actions();
     assert_eq!(restarted_pending.len(), 1);
     assert_eq!(restarted_pending[0].run_id, turn.run_id);

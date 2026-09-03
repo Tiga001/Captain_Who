@@ -4,7 +4,7 @@ description: 用用户视角了解 Captain Who 的信任边界和残余风险。
 status: current
 audience: user
 owner: security
-last_verified: 2026-08-31
+last_verified: 2026-09-03
 ---
 
 # 安全概览
@@ -33,7 +33,7 @@ Captain Who 采用本地优先的桌面架构：应用状态主要保存在本�
 
 - 文件和命令限制是应用策略，不是进程容器；被授权的进程可能访问操作系统允许的其他资源。
 - 外部 MCP Server 是本机进程，其自身行为和供应链不由 Captain Who 保证。
-- 模型 Token 和 Tavily Key 当前以明文保存在本机数据库中。
+- 模型、搜索和图片生成密钥由独立凭据后端保存；SQLite 只保存引用和状态。系统凭据存储或未签名 macOS 开发构建的私有凭据文件仍依赖本机账户、磁盘和备份安全。
 - Full/Custom Automation 可以在用户不看屏幕时产生副作用，暂停任务也不会停止已开始的 Run。
 - 原生通知可能缺失、延迟或在极小崩溃窗口重复，并可能出现在锁屏通知中心；敏感任务应关闭内容预览。
 - 如果设备或用户账户已经被攻破，Captain Who 不能提供可信执行环境保证。

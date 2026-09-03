@@ -1,5 +1,6 @@
 // Renderer image-generation configuration state machine: serializes CAS mutations and secrets.
 import type {
+  ImageGenerationCredentialMutation,
   ImageGenerationConfiguration,
   ImageGenerationConfigurationErrorCode,
   ImageGenerationUpdateConfigurationInput
@@ -36,7 +37,7 @@ export type ImageGenerationConfigurationState =
       status: 'ready'
       configuration: ImageGenerationConfiguration
       form: ImageGenerationConfigurationForm
-      apiKeyDraft: string
+      credentialMutation: ImageGenerationCredentialMutation
       dirty: boolean
       feedback?: ImageGenerationConfigurationFeedback
       pendingOperation?: ImageGenerationConfigurationPendingOperation
@@ -56,31 +57,22 @@ function formFromConfiguration(
 function isFormDirty(
   form: ImageGenerationConfigurationForm,
   configuration: ImageGenerationConfiguration,
-  apiKeyDraft: string,
-  apiKeyBaseline: string
+  credentialMutation: ImageGenerationCredentialMutation
 ): boolean {
   return (
     form.endpointUrl.trim() !== configuration.endpointUrl ||
     form.modelId.trim() !== configuration.modelId ||
     form.imageToImage !== configuration.capabilities.imageToImage ||
     form.watermark !== configuration.defaults.watermark ||
-    apiKeyDraft !== apiKeyBaseline
+    credentialMutation.type !== 'keep'
   )
 }
 
 function updateInput(
   configuration: ImageGenerationConfiguration,
   form: ImageGenerationConfigurationForm,
-  apiKeyDraft: string,
-  apiKeyBaseline: string
+  credentialMutation: ImageGenerationCredentialMutation
 ): ImageGenerationUpdateConfigurationInput {
-  const credentialMutation: ImageGenerationUpdateConfigurationInput['credentialMutation'] =
-    apiKeyDraft === apiKeyBaseline
-      ? { type: 'keep' }
-      : apiKeyDraft.length === 0
-        ? { type: 'clear' }
-        : { type: 'replace', value: apiKeyDraft }
-
   return {
     schemaVersion: IMAGE_GENERATION_CONFIGURATION_SCHEMA_VERSION,
     expectedRevision: configuration.revision,
@@ -105,8 +97,9 @@ export function useImageGenerationConfiguration() {
   const mutationInFlightRef = useRef(false)
   const [configuration, setConfiguration] = useState<ImageGenerationConfiguration>()
   const [form, setForm] = useState<ImageGenerationConfigurationForm>()
-  const [apiKeyDraft, setApiKeyDraftState] = useState('')
-  const [apiKeyBaseline, setApiKeyBaseline] = useState('')
+  const [credentialMutation, setCredentialMutation] = useState<ImageGenerationCredentialMutation>({
+    type: 'keep'
+  })
   const [loadErrorCode, setLoadErrorCode] = useState<ImageGenerationConfigurationErrorCode>()
   const [isLoading, setLoading] = useState(true)
   const [pendingOperation, setPendingOperation] =
@@ -125,8 +118,7 @@ export function useImageGenerationConfiguration() {
       if (!mountedRef.current || requestSequenceRef.current !== sequence) return undefined
       setConfiguration(output.configuration)
       setForm(formFromConfiguration(output.configuration))
-      setApiKeyDraftState(output.apiKey ?? '')
-      setApiKeyBaseline(output.apiKey ?? '')
+      setCredentialMutation({ type: 'keep' })
       return output.configuration
     } catch (error) {
       if (!mountedRef.current || requestSequenceRef.current !== sequence) return undefined
@@ -148,11 +140,8 @@ export function useImageGenerationConfiguration() {
   }, [load])
 
   const dirty = useMemo(
-    () =>
-      Boolean(
-        configuration && form && isFormDirty(form, configuration, apiKeyDraft, apiKeyBaseline)
-      ),
-    [apiKeyBaseline, apiKeyDraft, configuration, form]
+    () => Boolean(configuration && form && isFormDirty(form, configuration, credentialMutation)),
+    [configuration, credentialMutation, form]
   )
 
   const handleMutationError = useCallback(
@@ -198,28 +187,25 @@ export function useImageGenerationConfiguration() {
     if (!configuration || !form) return
     const snapshotConfiguration = configuration
     const snapshotForm = form
-    const snapshotApiKey = apiKeyDraft
-    const snapshotApiKeyBaseline = apiKeyBaseline
+    const snapshotCredentialMutation = credentialMutation
 
     await runMutation('saving', async () => {
       const output = await updateImageGenerationConfiguration(
-        updateInput(snapshotConfiguration, snapshotForm, snapshotApiKey, snapshotApiKeyBaseline)
+        updateInput(snapshotConfiguration, snapshotForm, snapshotCredentialMutation)
       )
       if (!mountedRef.current) return
       setConfiguration(output.configuration)
       setForm(formFromConfiguration(output.configuration))
-      setApiKeyDraftState(snapshotApiKey)
-      setApiKeyBaseline(snapshotApiKey)
+      setCredentialMutation({ type: 'keep' })
     })
-  }, [apiKeyBaseline, apiKeyDraft, configuration, form, runMutation])
+  }, [configuration, credentialMutation, form, runMutation])
 
   const setEnabled = useCallback(
     async (enabled: boolean) => {
       if (!configuration || !form) return
       const snapshotConfiguration = configuration
       const snapshotForm = form
-      const snapshotApiKey = apiKeyDraft
-      const snapshotApiKeyBaseline = apiKeyBaseline
+      const snapshotCredentialMutation = credentialMutation
       const snapshotDirty = dirty
 
       await runMutation(enabled ? 'enabling' : 'disabling', async () => {
@@ -229,14 +215,13 @@ export function useImageGenerationConfiguration() {
         // enable. Running these requests concurrently would always make one revision stale.
         if (enabled && snapshotDirty) {
           const updated = await updateImageGenerationConfiguration(
-            updateInput(snapshotConfiguration, snapshotForm, snapshotApiKey, snapshotApiKeyBaseline)
+            updateInput(snapshotConfiguration, snapshotForm, snapshotCredentialMutation)
           )
           effectiveConfiguration = updated.configuration
           if (mountedRef.current) {
             setConfiguration(updated.configuration)
             setForm(formFromConfiguration(updated.configuration))
-            setApiKeyDraftState(snapshotApiKey)
-            setApiKeyBaseline(snapshotApiKey)
+            setCredentialMutation({ type: 'keep' })
           }
         }
 
@@ -250,15 +235,15 @@ export function useImageGenerationConfiguration() {
         setConfiguration(output.configuration)
         if (enabled || !snapshotDirty) {
           setForm(formFromConfiguration(output.configuration))
-          setApiKeyDraftState(snapshotApiKey)
+          setCredentialMutation({ type: 'keep' })
         } else {
           // Disabling is independent of unsaved field edits; preserve them for an explicit save.
           setForm(snapshotForm)
-          setApiKeyDraftState(snapshotApiKey)
+          setCredentialMutation(snapshotCredentialMutation)
         }
       })
     },
-    [apiKeyBaseline, apiKeyDraft, configuration, dirty, form, runMutation]
+    [configuration, credentialMutation, dirty, form, runMutation]
   )
 
   const updateForm = useCallback(
@@ -272,8 +257,8 @@ export function useImageGenerationConfiguration() {
     []
   )
 
-  const setApiKeyDraft = useCallback((value: string) => {
-    setApiKeyDraftState(value)
+  const updateCredentialMutation = useCallback((mutation: ImageGenerationCredentialMutation) => {
+    setCredentialMutation(mutation)
     setFeedback(undefined)
   }, [])
 
@@ -286,7 +271,7 @@ export function useImageGenerationConfiguration() {
             status: 'ready',
             configuration,
             form,
-            apiKeyDraft,
+            credentialMutation,
             dirty,
             ...(feedback ? { feedback } : {}),
             ...(pendingOperation ? { pendingOperation } : {})
@@ -295,7 +280,7 @@ export function useImageGenerationConfiguration() {
   return {
     load,
     save,
-    setApiKeyDraft,
+    updateCredentialMutation,
     setEnabled,
     state,
     updateForm

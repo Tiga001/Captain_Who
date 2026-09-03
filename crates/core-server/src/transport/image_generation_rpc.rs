@@ -68,24 +68,14 @@ pub(crate) fn handle_image_generation_configuration_request(
                     ImageGenerationConfigurationError::InvalidConfiguration,
                 );
             }
-            return match service.get_configuration_for_edit() {
-                Ok(snapshot) => {
-                    let api_key = snapshot.api_key.map(|secret| {
-                        secret.with_secret_bytes(|bytes| {
-                            std::str::from_utf8(bytes)
-                                .expect("CredentialSecret must contain UTF-8")
-                                .to_owned()
-                        })
-                    });
-                    response_success(
-                        id,
-                        ImageGenerationGetConfigurationResponse {
-                            schema_version: IMAGE_GENERATION_CONFIGURATION_SCHEMA_VERSION,
-                            configuration: configuration_dto(snapshot.configuration),
-                            api_key,
-                        },
-                    )
-                }
+            return match service.get_configuration() {
+                Ok(configuration) => response_success(
+                    id,
+                    ImageGenerationGetConfigurationResponse {
+                        schema_version: IMAGE_GENERATION_CONFIGURATION_SCHEMA_VERSION,
+                        configuration: configuration_dto(configuration),
+                    },
+                ),
                 Err(error) => image_generation_configuration_error_response(
                     id,
                     ImageGenerationConfigurationOperationDto::GetConfiguration,
@@ -946,7 +936,7 @@ mod tests {
     }
 
     #[test]
-    fn configuration_read_returns_the_credential_without_leaking_it_to_other_responses() {
+    fn configuration_reads_return_only_credential_status() {
         let fixture = Fixture::new();
         let initial = fixture.request(1, IMAGE_GENERATION_GET_CONFIGURATION_METHOD, None);
         assert_eq!(
@@ -954,7 +944,7 @@ mod tests {
             "image-generation:v1:0"
         );
         assert_eq!(initial["result"]["configuration"]["readiness"], "disabled");
-        assert!(initial["result"]["apiKey"].is_null());
+        assert!(initial["result"].get("apiKey").is_none());
 
         let secret = "provider-secret-visible-only-to-the-configuration-editor";
         let updated = fixture.request(
@@ -972,7 +962,12 @@ mod tests {
         assert!(!updated.to_string().contains(secret));
 
         let configured = fixture.request(3, IMAGE_GENERATION_GET_CONFIGURATION_METHOD, None);
-        assert_eq!(configured["result"]["apiKey"], secret);
+        assert!(configured["result"].get("apiKey").is_none());
+        assert_eq!(
+            configured["result"]["configuration"]["credentialStatus"],
+            "configured"
+        );
+        assert!(!configured.to_string().contains(secret));
 
         let enabled = fixture.request(
             4,

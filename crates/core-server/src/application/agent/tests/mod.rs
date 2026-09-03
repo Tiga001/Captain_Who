@@ -6,8 +6,9 @@ use mycopilot_core::skills::{
 };
 use mycopilot_core::storage::models::{
     AgentActionAuditRecord, AgentFileChangeRecord, AgentPendingActionRecord,
-    ChatConversationRecord, ChatMessageRecord, ModelConfigRecord, ModelSettingsRecord,
-    ProjectRecord,
+    ChatConversationRecord, ChatMessageRecord, CredentialMutation, ModelConfigRecord,
+    ModelConfigSaveRequest, ModelSettingsRecord, ModelSettingsSaveRequest, ProjectRecord,
+    ProviderProfileUpdate,
 };
 use mycopilot_core::{
     AgentActivatedSkill, AgentCommandRequest, AgentCommandRiskLevel, AgentCommandSessionListInput,
@@ -608,6 +609,42 @@ fn test_model_settings() -> ModelSettingsRecord {
             output_price: "0.02".to_string(),
             enabled: true,
         }],
+    }
+}
+
+fn renderer_model_settings_update(
+    storage: &StorageService,
+    settings: ModelSettingsRecord,
+    provider_profile_update: ProviderProfileUpdate,
+) -> ModelSettingsSaveRequest {
+    let expected_revision = storage
+        .load_model_settings_for_edit()
+        .unwrap()
+        .map(|settings| settings.configuration_revision);
+    ModelSettingsSaveRequest {
+        expected_revision,
+        api_url: settings.api_url,
+        api_token_mutation: CredentialMutation::Keep,
+        search_mode: settings.search_mode,
+        tavily_api_key_mutation: CredentialMutation::Keep,
+        models: settings
+            .models
+            .into_iter()
+            .map(|model| ModelConfigSaveRequest {
+                id: Some(model.id),
+                provider_model_id: model.provider_model_id,
+                display_name: model.display_name,
+                api_url_override: model.api_url_override,
+                api_token_override_mutation: CredentialMutation::Keep,
+                supports_image: model.supports_image,
+                context_window_tokens: model.context_window_tokens,
+                provider_profile_update: provider_profile_update.clone(),
+                input_price: model.input_price,
+                cached_input_price: model.cached_input_price,
+                output_price: model.output_price,
+                enabled: model.enabled,
+            })
+            .collect(),
     }
 }
 

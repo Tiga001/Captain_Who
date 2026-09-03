@@ -2121,7 +2121,17 @@ export const koKRTranslations = {
   'configuration.modelApiTokenPlaceholder': '공백은 전역 API Token를 사용합니다.',
   'configuration.showSecretValue': '비밀 값 표시',
   'configuration.hideSecretValue': '비밀 값 숨기기',
-  'configuration.invalidApiUrl': '유효한 http 또는 https URL를 입력하세요.',
+  'configuration.credential.placeholder': 'API 키 입력',
+  'configuration.credential.configured': '구성됨',
+  'configuration.credential.replace': '저장된 키 교체',
+  'configuration.credential.cancelReplace': '교체 취소',
+  'configuration.credential.clear': '저장된 키 삭제',
+  'configuration.credential.clearTitle': '저장된 키를 삭제할까요?',
+  'configuration.credential.clearDescription': '확인하면 보안 저장소에서 이 키가 삭제됩니다.',
+  'configuration.credential.clearConfirm': '삭제',
+  'configuration.credential.unavailable': '보안 저장소를 사용할 수 없음',
+  'configuration.invalidApiUrl':
+    '자격 증명, 쿼리 또는 조각이 없는 HTTPS URL을 사용하세요. 개발 환경에서는 루프백 HTTP도 허용됩니다.',
   'configuration.modelConnectionPairRequired':
     'URL 및 API Token는 둘 다 채워지거나 둘 다 비어 있어야 합니다.',
   'configuration.imageGeneration.title': '이미지 생성',

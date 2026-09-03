@@ -34,7 +34,7 @@ describe('CoreServer model settings client', () => {
     ]
     rpcRequest.mockResolvedValue(descriptors)
 
-    await expect(new CoreServer().loadProviderProfileUiDescriptors()).resolves.toBe(descriptors)
+    await expect(new CoreServer().loadProviderProfileUiDescriptors()).resolves.toEqual(descriptors)
     expect(rpcRequest).toHaveBeenCalledWith('storage.loadProviderProfileUiDescriptors')
   })
 
@@ -46,7 +46,7 @@ describe('CoreServer model settings client', () => {
     ]
     rpcRequest.mockResolvedValueOnce(descriptors)
 
-    await expect(new CoreServer().loadProviderVendorDescriptors()).resolves.toBe(descriptors)
+    await expect(new CoreServer().loadProviderVendorDescriptors()).resolves.toEqual(descriptors)
     expect(rpcRequest).toHaveBeenNthCalledWith(1, 'storage.loadProviderVendorDescriptors')
 
     const input: ProviderVendorModelPolicyInput = {
@@ -71,23 +71,79 @@ describe('CoreServer model settings client', () => {
     }
     rpcRequest.mockResolvedValueOnce(resolution)
 
-    await expect(new CoreServer().resolveProviderVendorModelPolicy(input)).resolves.toBe(resolution)
+    await expect(new CoreServer().resolveProviderVendorModelPolicy(input)).resolves.toEqual(
+      resolution
+    )
     expect(rpcRequest).toHaveBeenNthCalledWith(2, 'storage.resolveProviderVendorModelPolicy', input)
+  })
+
+  it('rejects private or unknown Provider descriptor fields returned by Core', async () => {
+    rpcRequest.mockResolvedValueOnce([
+      {
+        profileId: 'deepseek_v4_chat',
+        profileVersion: 1,
+        displayName: 'DeepSeek',
+        compatibleDialects: ['openai_chat_completions'],
+        settingsKind: 'deepseek_v4_chat',
+        selectable: true,
+        runtimeCapabilities: ['private']
+      }
+    ])
+    await expect(new CoreServer().loadProviderProfileUiDescriptors()).rejects.toThrow(
+      /unexpected field runtimeCapabilities/
+    )
+
+    rpcRequest.mockResolvedValueOnce([
+      {
+        vendorId: 'moonshot',
+        displayName: 'Moonshot AI',
+        selectable: true,
+        apiToken: 'must-not-cross-the-boundary'
+      }
+    ])
+    await expect(new CoreServer().loadProviderVendorDescriptors()).rejects.toThrow(
+      /unexpected field apiToken/
+    )
+
+    rpcRequest.mockResolvedValueOnce({
+      status: 'supported',
+      vendorId: 'moonshot',
+      modelFamily: 'moonshot_k3_chat',
+      settingsKind: 'moonshot',
+      imageInput: 'supported',
+      settings: {
+        kind: 'moonshot_k3_chat',
+        reasoningEfforts: ['provider_default', 'low', 'high', 'max'],
+        defaultSettings: {
+          kind: 'moonshot_k3_chat',
+          reasoningEffort: 'max',
+          credentialRef: 'private-reference'
+        }
+      }
+    })
+    await expect(
+      new CoreServer().resolveProviderVendorModelPolicy({
+        vendorId: 'moonshot',
+        modelId: 'kimi-k3',
+        dialect: 'openai_chat_completions'
+      })
+    ).rejects.toThrow(/unexpected field credentialRef/)
   })
 
   it('returns the Host-authoritative normalized settings after an explicit profile update', async () => {
     const input: StorageModelSettingsUpdateRecord = {
+      expectedRevision: null,
       apiUrl: 'https://api.example/v1/chat/completions',
-      apiToken: 'secret-token',
+      apiTokenMutation: { type: 'replace', value: 'secret-token' },
       searchMode: 'auto',
-      tavilyApiKey: '',
+      tavilyApiKeyMutation: { type: 'keep' },
       models: [
         {
           id: null,
           providerModelId: 'deepseek-chat',
           displayName: 'DeepSeek Chat',
           apiUrlOverride: null,
-          apiTokenOverride: null,
+          apiTokenOverrideMutation: { type: 'keep' },
           supportsImage: false,
           contextWindowTokens: null,
           providerProfileUpdate: {
@@ -106,17 +162,18 @@ describe('CoreServer model settings client', () => {
       ]
     }
     const output: StorageModelSettingsRecord = {
+      configurationRevision: 'model-settings-v1:00000000-0000-4000-8000-000000000001',
       apiUrl: input.apiUrl,
-      apiToken: input.apiToken,
+      apiTokenStatus: 'configured',
       searchMode: input.searchMode,
-      tavilyApiKey: input.tavilyApiKey,
+      tavilyApiKeyStatus: 'missing',
       models: [
         {
           id: 'model-config-deepseek-chat',
           providerModelId: 'deepseek-chat',
           displayName: 'DeepSeek Chat',
           apiUrlOverride: null,
-          apiTokenOverride: null,
+          apiTokenOverrideStatus: 'missing',
           supportsImage: false,
           contextWindowTokens: null,
           providerProfileConfig: {
@@ -133,7 +190,31 @@ describe('CoreServer model settings client', () => {
     }
     rpcRequest.mockResolvedValue(output)
 
-    await expect(new CoreServer().saveModelSettings(input)).resolves.toBe(output)
+    await expect(new CoreServer().saveModelSettings(input)).resolves.toEqual(output)
     expect(rpcRequest).toHaveBeenCalledWith('storage.saveModelSettings', input)
+  })
+
+  it('rejects legacy secret projections and malformed mutations at the Main boundary', async () => {
+    rpcRequest.mockResolvedValueOnce({
+      apiUrl: '',
+      apiTokenStatus: 'configured',
+      apiToken: 'must-not-cross-the-boundary',
+      searchMode: 'auto',
+      tavilyApiKeyStatus: 'missing',
+      models: []
+    })
+    await expect(new CoreServer().loadModelSettings()).rejects.toThrow(/credential field apiToken/)
+
+    expect(() =>
+      new CoreServer().saveModelSettings({
+        expectedRevision: null,
+        apiUrl: '',
+        apiTokenMutation: { type: 'keep', value: 'smuggled-secret' } as never,
+        searchMode: 'auto',
+        tavilyApiKeyMutation: { type: 'keep' },
+        models: []
+      })
+    ).toThrow(/apiTokenMutation/)
+    expect(rpcRequest).toHaveBeenCalledTimes(1)
   })
 })

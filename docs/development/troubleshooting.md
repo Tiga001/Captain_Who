@@ -55,8 +55,8 @@ pnpm storage:reset-dev
 pnpm storage:reset-dev -- --confirm-reset
 ```
 
-第一条是非破坏性预检，第二条才会备份并重建。当前 v32 和配置表契约已核验相同的固定 v31 会恢复
-allowlisted 配置；v30 及更旧 schema 会在输出中明确说明改用默认配置。通知设置、Browser 下载设置和链接偏好属于配置保留项，通知
+第一条是非破坏性预检，第二条才会备份并重建。正式工具只从 exact current v33 恢复 allowlisted 配置与
+credential reference；旧 schema fail closed，不保留永久兼容读取路径。通知设置、Browser 下载设置和链接偏好属于配置保留项，通知
 事实、浏览/下载记录、Agent 模板与分配、FileChange 事务和会话运行状态不会恢复。应用或 Core Server 仍持锁时
 命令会拒绝执行。不要删除原库或手工修改 `PRAGMA user_version`；详见
 [存储与数据生命周期](../architecture/storage-and-data-lifecycle.md)。

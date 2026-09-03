@@ -93,17 +93,18 @@ describe('Automation Renderer Host API to real core-server', () => {
   it('performs durable CRUD, CAS, runNow, history, and attention calls through the real stack', async () => {
     coreServer = new CoreServer({ appDataRoot })
     const savedModelSettings = await coreServer.saveModelSettings({
+      expectedRevision: null,
       apiUrl: 'https://example.invalid/v1/chat/completions',
-      apiToken: 'automation-e2e-token',
+      apiTokenMutation: { type: 'replace', value: 'automation-e2e-token' },
       searchMode: 'auto',
-      tavilyApiKey: '',
+      tavilyApiKeyMutation: { type: 'keep' },
       models: [
         {
           id: null,
           providerModelId: 'automation-e2e-model',
           displayName: 'Automation E2E Model',
           apiUrlOverride: null,
-          apiTokenOverride: null,
+          apiTokenOverrideMutation: { type: 'keep' },
           supportsImage: false,
           contextWindowTokens: 128_000,
           providerProfileUpdate: { kind: 'select_generic' },

@@ -4,7 +4,7 @@ import type { ImageGenerationConfigurationErrorCode } from '@mycopilot/protocol'
 import { useFrontendConfig } from '../../../../config/FrontendConfigProvider'
 import type { TranslationKey } from '../../../../config/frontendTranslations'
 import { useImageGenerationConfiguration } from '../../../imageGeneration/configuration/useImageGenerationConfiguration'
-import { SecretInput } from './SecretInput'
+import { CredentialInput } from './CredentialInput'
 
 const ERROR_KEY: Partial<Record<ImageGenerationConfigurationErrorCode, TranslationKey>> = {
   revisionConflict: 'configuration.imageGeneration.error.revisionConflict',
@@ -114,7 +114,7 @@ export function ImageGenerationSettings() {
     )
   }
 
-  const { configuration, form, apiKeyDraft, feedback, pendingOperation } = state
+  const { configuration, form, credentialMutation, feedback, pendingOperation } = state
   const disabled = Boolean(pendingOperation)
 
   return (
@@ -175,11 +175,13 @@ export function ImageGenerationSettings() {
               </span>
             </span>
             <span className="settings-list-row__control">
-              <SecretInput
+              <CredentialInput
                 ariaLabel={t('configuration.imageGeneration.apiKey')}
                 disabled={disabled}
-                onChange={workflow.setApiKeyDraft}
-                value={apiKeyDraft}
+                mutation={credentialMutation}
+                onMutationChange={workflow.updateCredentialMutation}
+                placeholder={t('configuration.credential.placeholder')}
+                status={configuration.credentialStatus}
               />
             </span>
           </div>

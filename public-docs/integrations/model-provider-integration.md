@@ -4,7 +4,7 @@ description: 配置兼容模型端点、模型资料和凭据，并验证 Tool �
 status: current
 audience: user
 owner: product
-last_verified: 2026-08-31
+last_verified: 2026-09-03
 ---
 
 # 连接模型 Provider
@@ -61,4 +61,4 @@ Captain Who 不附带可直接使用的模型账户，新安装的模型目录�
 
 模型请求可能包含当前对话、系统说明、为任务读取的文件内容以及 Tool 结果的必要投影。只连接你信任并已阅读其数据政策的 Provider。
 
-当前模型 Token 保存在本机数据库中，并未使用系统钥匙串。不要分享数据库、带 Token 的截图或完整配置导出。详情见[数据与权限](../security/data-and-permissions.md)。
+当前 SQLite 只保存模型凭据的不透明引用、状态和非秘密配置；密钥由独立 Credential Store 保存。具备稳定签名身份的发行构建使用操作系统凭据存储，未签名 macOS 开发构建使用权限收紧的私有文件。应用不会读回已有 Token；替换时只处理本次新输入。不要分享旧版数据库、完整数据目录或带 Token 的截图。详情见[数据与权限](../security/data-and-permissions.md)。

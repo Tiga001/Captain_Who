@@ -27,7 +27,7 @@ import {
   DeepSeekProviderSettingsEditor,
   MoonshotProviderSettingsEditor
 } from './providerSettingsEditors'
-import { SecretInput } from './SecretInput'
+import { CredentialInput } from './CredentialInput'
 import { classifyModelSettingsSaveError, type ModelSettingsSaveError } from './modelSettingsErrors'
 
 interface ModelFormProps {
@@ -70,13 +70,40 @@ function isDisplayNameWithinLimit(value: string): boolean {
   )
 }
 
+const MAX_PROVIDER_API_URL_BYTES = 4_096
+
+function isLoopbackHostname(hostname: string): boolean {
+  const normalized = hostname.toLowerCase().replace(/^\[|\]$/g, '')
+  if (normalized === 'localhost' || normalized === '::1') return true
+  const octets = normalized.split('.')
+  return (
+    octets.length === 4 &&
+    octets.every((octet) => /^\d{1,3}$/.test(octet) && Number(octet) <= 255) &&
+    Number(octets[0]) === 127
+  )
+}
+
 function isValidApiUrl(value: string): boolean {
   const normalized = value.trim()
   if (normalized.length === 0) return true
+  const containsControlCharacter = Array.from(value).some((character) => {
+    const codePoint = character.codePointAt(0) ?? 0
+    return codePoint <= 0x1f || (codePoint >= 0x7f && codePoint <= 0x9f)
+  })
+  if (
+    new TextEncoder().encode(value).byteLength > MAX_PROVIDER_API_URL_BYTES ||
+    containsControlCharacter ||
+    normalized.includes('?') ||
+    normalized.includes('#')
+  ) {
+    return false
+  }
 
   try {
     const parsed = new URL(normalized)
-    return parsed.protocol === 'http:' || parsed.protocol === 'https:'
+    if (parsed.username || parsed.password) return false
+    if (parsed.protocol === 'https:') return true
+    return import.meta.env.DEV && parsed.protocol === 'http:' && isLoopbackHostname(parsed.hostname)
   } catch {
     return false
   }
@@ -87,7 +114,8 @@ function toFormValues(model?: ModelConfig): ModelFormValues {
     providerModelId: model?.providerModelId ?? '',
     displayName: model?.displayName ?? '',
     apiUrlOverride: model?.apiUrlOverride ?? '',
-    apiTokenOverride: model?.apiTokenOverride ?? '',
+    apiTokenOverrideStatus: model?.apiTokenOverrideStatus ?? 'missing',
+    apiTokenOverrideMutation: { type: 'keep' },
     contextWindowTokens: model?.contextWindowTokens?.toString() ?? '',
     inputPrice: model?.inputPrice ?? '0',
     cachedInputPrice: model?.cachedInputPrice ?? '',
@@ -128,7 +156,7 @@ export function ModelForm({
   const [isAdvancedOpen, setIsAdvancedOpen] = useState(
     Boolean(
       initialValues.apiUrlOverride.trim() ||
-      initialValues.apiTokenOverride.trim() ||
+      initialValues.apiTokenOverrideStatus !== 'missing' ||
       initialProviderProfile.selection !== 'generic'
     )
   )
@@ -139,7 +167,15 @@ export function ModelForm({
   const isCachedInputPriceValid = isValidPriceInput(values.cachedInputPrice)
   const isOutputPriceValid = isValidPriceInput(values.outputPrice)
   const hasOverrideUrl = values.apiUrlOverride.trim().length > 0
-  const hasOverrideToken = values.apiTokenOverride.trim().length > 0
+  const effectiveOverrideTokenStatus =
+    values.apiTokenOverrideMutation.type === 'replace'
+      ? values.apiTokenOverrideMutation.value.length > 0
+        ? 'configured'
+        : 'missing'
+      : values.apiTokenOverrideMutation.type === 'clear'
+        ? 'missing'
+        : values.apiTokenOverrideStatus
+  const hasOverrideToken = effectiveOverrideTokenStatus === 'configured'
   const isConnectionPairComplete = hasOverrideUrl === hasOverrideToken
   const isOverrideUrlValid = isValidApiUrl(values.apiUrlOverride)
   const effectiveApiUrl = values.apiUrlOverride.trim() || globalApiUrl
@@ -173,7 +209,6 @@ export function ModelForm({
     isInputPriceValid &&
     isCachedInputPriceValid &&
     isOutputPriceValid &&
-    isConnectionPairComplete &&
     isOverrideUrlValid &&
     isProviderStateValid
 
@@ -289,7 +324,6 @@ export function ModelForm({
         providerModelId: values.providerModelId.trim(),
         displayName: values.displayName.trim(),
         apiUrlOverride: values.apiUrlOverride.trim(),
-        apiTokenOverride: values.apiTokenOverride.trim(),
         contextWindowTokens:
           values.contextWindowTokens.trim().replaceAll(',', '') ||
           DEFAULT_MODEL_CONTEXT_WINDOW_TOKENS.toString(),
@@ -534,15 +568,16 @@ export function ModelForm({
                 <span className="settings-list-row__title">{t('configuration.modelApiToken')}</span>
               </span>
               <span className="settings-list-row__control model-form-price-control">
-                <SecretInput
+                <CredentialInput
                   ariaLabel={t('configuration.modelApiToken')}
-                  value={values.apiTokenOverride}
+                  status={values.apiTokenOverrideStatus}
+                  mutation={values.apiTokenOverrideMutation}
                   placeholder={t('configuration.modelApiTokenPlaceholder')}
                   tabIndex={isAdvancedOpen ? 0 : -1}
-                  onChange={(value) =>
+                  onMutationChange={(mutation) =>
                     setValues((current) => ({
                       ...current,
-                      apiTokenOverride: value
+                      apiTokenOverrideMutation: mutation
                     }))
                   }
                 />

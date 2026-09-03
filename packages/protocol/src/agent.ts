@@ -661,7 +661,6 @@ export interface AgentRunContext {
 
 export interface AgentSearchConfig {
   mode: AgentSearchMode
-  tavilyApiKey?: string
 }
 
 export interface AgentApprovalDecision {

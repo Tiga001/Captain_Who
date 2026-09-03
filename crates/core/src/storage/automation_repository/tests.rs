@@ -14,7 +14,7 @@ fn connection() -> Connection {
         .execute_batch(
             "INSERT INTO models (
                 id, provider_model_id, display_name, normalized_display_name,
-                api_url_override, api_token_override,
+                api_url_override, api_token_override_ref,
                 supports_image, context_window_tokens, provider_profile_config_json,
                 provider_connection_revision, provider_protocol_revision,
                 input_price, cached_input_price, output_price,
@@ -722,8 +722,11 @@ fn saving_model_settings_updates_existing_ids_without_false_deletion_blocking() 
         }],
     };
 
-    crate::storage::config_repository::save_model_settings(&mut connection, settings.clone())
-        .unwrap();
+    crate::storage::config_repository::save_model_settings(
+        &mut connection,
+        crate::storage::config_repository::credential_free_fixture(settings.clone()),
+    )
+    .unwrap();
     let retained = get_automation(&connection, &task.id).unwrap().unwrap();
     assert_eq!(retained.config.health_state, "ok");
     assert_eq!(retained.config.model_id.as_deref(), Some("model-a"));
@@ -731,10 +734,10 @@ fn saving_model_settings_updates_existing_ids_without_false_deletion_blocking() 
 
     crate::storage::config_repository::save_model_settings(
         &mut connection,
-        ModelSettingsRecord {
+        crate::storage::config_repository::credential_free_fixture(ModelSettingsRecord {
             models: Vec::new(),
             ..settings
-        },
+        }),
     )
     .unwrap();
     let removed = get_automation(&connection, &task.id).unwrap().unwrap();

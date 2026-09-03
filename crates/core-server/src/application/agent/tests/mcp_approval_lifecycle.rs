@@ -347,7 +347,11 @@ async fn run_deepseek_restart(
 
     let fixture = tempdir().unwrap();
     let database_path = fixture.path().join("deepseek-approval-restart.sqlite");
-    let storage = Arc::new(StorageService::open(&database_path).unwrap());
+    let credentials =
+        Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(&database_path, credentials.clone()).unwrap(),
+    );
     let model_id = "deepseek-approval-restart-model";
     save_deepseek_approval_provider(
         &storage,
@@ -355,8 +359,6 @@ async fn run_deepseek_restart(
         &format!("http://{address}/v1/chat/completions"),
         reasoning_mode,
     );
-    let credentials =
-        Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default());
     let vault = Arc::new(
         mycopilot_core::ProviderContinuationVaultFactory::open_or_provision(
             Arc::clone(&storage),
@@ -439,21 +441,13 @@ async fn run_deepseek_restart(
     changed_settings.models[0].input_price = "999".to_string();
     changed_settings.models[0].output_price = "999".to_string();
     if switch_to_generic_while_pending {
-        let mut changed_request = serde_json::to_value(changed_settings).unwrap();
-        changed_request["models"][0]
-            .as_object_mut()
-            .unwrap()
-            .remove("providerProfileConfig");
-        changed_request["models"][0]["providerProfileUpdate"] = json!({"kind": "select_generic"});
-        let changed_settings =
-            storage
-                .save_model_settings_request(
-                    serde_json::from_value::<
-                        mycopilot_core::storage::models::ModelSettingsSaveRequest,
-                    >(changed_request)
-                    .unwrap(),
-                )
-                .unwrap();
+        let changed_settings = storage
+            .save_model_settings_request(renderer_model_settings_update(
+                &storage,
+                changed_settings,
+                mycopilot_core::storage::models::ProviderProfileUpdate::SelectGeneric,
+            ))
+            .unwrap();
         assert_eq!(
             changed_settings.models[0]
                 .provider_profile_config
@@ -517,7 +511,9 @@ async fn run_deepseek_restart(
     drop(service);
     drop(storage);
 
-    let reopened_storage = Arc::new(StorageService::open(&database_path).unwrap());
+    let reopened_storage = Arc::new(
+        StorageService::open_with_model_credentials(&database_path, credentials.clone()).unwrap(),
+    );
     let reopened_vault = Arc::new(
         mycopilot_core::ProviderContinuationVaultFactory::open_or_provision(
             Arc::clone(&reopened_storage),
@@ -814,7 +810,11 @@ async fn pending_generic_run_stays_frozen_when_next_run_switches_to_deepseek() {
     let database_path = fixture
         .path()
         .join("generic-to-deepseek-approval-restart.sqlite");
-    let storage = Arc::new(StorageService::open(&database_path).unwrap());
+    let credentials =
+        Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(&database_path, credentials.clone()).unwrap(),
+    );
     let model_id = "generic-to-deepseek-model";
     save_test_pending_provider(
         &storage,
@@ -861,33 +861,29 @@ async fn pending_generic_run_stays_frozen_when_next_run_switches_to_deepseek() {
     assert_eq!(service.list_pending_actions().len(), 1);
 
     let current = storage.load_model_settings().unwrap().unwrap();
-    let mut update = serde_json::to_value(current).unwrap();
-    update["models"][0]
-        .as_object_mut()
-        .unwrap()
-        .remove("providerProfileConfig");
-    update["models"][0]["providerProfileUpdate"] = json!({
+    let profile_update = serde_json::from_value(json!({
         "kind": "select_registered_profile",
         "profileId": "deepseek_v4_chat",
         "settings": {
             "kind": "deepseek_v4_chat",
             "reasoning": {"mode": "enabled", "effort": "provider_default"}
         }
-    });
+    }))
+    .unwrap();
     storage
-        .save_model_settings_request(
-            serde_json::from_value::<mycopilot_core::storage::models::ModelSettingsSaveRequest>(
-                update,
-            )
-            .unwrap(),
-        )
+        .save_model_settings_request(renderer_model_settings_update(
+            &storage,
+            current,
+            profile_update,
+        ))
         .unwrap();
     drop(notifications);
     drop(receiver);
     drop(service);
     drop(storage);
 
-    let reopened_storage = Arc::new(StorageService::open(&database_path).unwrap());
+    let reopened_storage =
+        Arc::new(StorageService::open_with_model_credentials(&database_path, credentials).unwrap());
     let restarted =
         AgentService::try_new_deferred_startup_reconciliation(Arc::clone(&reopened_storage))
             .unwrap()
@@ -965,7 +961,11 @@ async fn restarted_approval_rejects_swapped_valid_provider_refs_before_dispatch(
 
     let fixture = tempdir().unwrap();
     let database_path = fixture.path().join("deepseek-swapped-refs.sqlite");
-    let storage = Arc::new(StorageService::open(&database_path).unwrap());
+    let credentials =
+        Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(&database_path, credentials.clone()).unwrap(),
+    );
     let model_id = "deepseek-swapped-ref-model";
     save_deepseek_approval_provider(
         &storage,
@@ -973,8 +973,6 @@ async fn restarted_approval_rejects_swapped_valid_provider_refs_before_dispatch(
         &format!("http://{address}/v1/chat/completions"),
         mycopilot_core::ReasoningMode::Disabled,
     );
-    let credentials =
-        Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default());
     let vault = Arc::new(
         mycopilot_core::ProviderContinuationVaultFactory::open_or_provision(
             Arc::clone(&storage),
@@ -1119,7 +1117,9 @@ async fn restarted_approval_rejects_swapped_valid_provider_refs_before_dispatch(
     drop(service);
     drop(storage);
 
-    let reopened_storage = Arc::new(StorageService::open(&database_path).unwrap());
+    let reopened_storage = Arc::new(
+        StorageService::open_with_model_credentials(&database_path, credentials.clone()).unwrap(),
+    );
     let reopened_vault = Arc::new(
         mycopilot_core::ProviderContinuationVaultFactory::open_or_provision(
             Arc::clone(&reopened_storage),
@@ -1233,7 +1233,11 @@ async fn deepseek_grouped_two_approval_turn_survives_restart_and_pairs_both_prov
 
     let fixture = tempdir().unwrap();
     let database_path = fixture.path().join("deepseek-grouped-two-approvals.sqlite");
-    let storage = Arc::new(StorageService::open(&database_path).unwrap());
+    let credentials =
+        Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(&database_path, credentials.clone()).unwrap(),
+    );
     let conversation_id = "conversation-deepseek-grouped-two-approvals";
     let model_id = "deepseek-grouped-two-approvals-model";
     save_deepseek_approval_provider(
@@ -1242,8 +1246,6 @@ async fn deepseek_grouped_two_approval_turn_survives_restart_and_pairs_both_prov
         &format!("http://{address}/v1/chat/completions"),
         mycopilot_core::ReasoningMode::Disabled,
     );
-    let credentials =
-        Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default());
     let vault = Arc::new(
         mycopilot_core::ProviderContinuationVaultFactory::open_or_provision(
             Arc::clone(&storage),
@@ -1329,7 +1331,9 @@ async fn deepseek_grouped_two_approval_turn_survives_restart_and_pairs_both_prov
     drop(service);
     drop(storage);
 
-    let reopened_storage = Arc::new(StorageService::open(&database_path).unwrap());
+    let reopened_storage = Arc::new(
+        StorageService::open_with_model_credentials(&database_path, credentials.clone()).unwrap(),
+    );
     let reopened_vault = Arc::new(
         mycopilot_core::ProviderContinuationVaultFactory::open_or_provision(
             Arc::clone(&reopened_storage),

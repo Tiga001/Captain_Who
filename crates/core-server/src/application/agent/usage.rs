@@ -89,7 +89,7 @@ pub(super) fn restore_pending_usage_contexts(
             // only from the frozen owner/protocol; never borrow the current model Profile or
             // prices, which may have changed while approval was pending.
             let fallback_model_name = storage
-                .load_model_settings()?
+                .load_model_settings_catalog()?
                 .and_then(|settings| {
                     settings
                         .models

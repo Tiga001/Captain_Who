@@ -499,7 +499,7 @@ impl AgentService {
 
         let settings_snapshot = self
             .storage
-            .load_model_settings_snapshot()?
+            .load_model_settings_snapshot_for_model(target_model_id, true)?
             .ok_or_else(|| "请先配置模型。".to_string())?;
         let target = match resolve_provider_transition_target(
             &self.storage,
@@ -519,13 +519,16 @@ impl AgentService {
                 ));
             }
         };
+        let catalog = self
+            .storage
+            .load_model_settings_catalog()?
+            .ok_or_else(|| "请先配置模型。".to_string())?;
         let source_model_display_name =
             conversation
                 .model_id
                 .as_deref()
                 .and_then(|source_model_id| {
-                    settings_snapshot
-                        .settings
+                    catalog
                         .models
                         .iter()
                         .find(|model| model.id == source_model_id)
@@ -665,7 +668,7 @@ impl AgentService {
         let operation_id = provider_transition_operation_id(&transition_token);
         let reason = if requires_compaction {
             provider_transition_change_reason(
-                &settings_snapshot,
+                &catalog,
                 conversation.model_id.as_deref(),
                 &target.profile,
             )
@@ -1123,21 +1126,19 @@ fn resolve_provider_transition_target(
 }
 
 fn provider_transition_change_reason(
-    snapshot: &ModelSettingsSnapshot,
+    settings: &mycopilot_core::storage::models::ModelSettingsRecord,
     current_model_id: Option<&str>,
     target_profile: &ProviderProfileConfig,
 ) -> AgentProviderTransitionReason {
     let current_profile = current_model_id
         .and_then(|current_model_id| {
-            snapshot
-                .settings
+            settings
                 .models
                 .iter()
                 .find(|model| model.id == current_model_id)
         })
         .and_then(|model| {
-            snapshot
-                .settings
+            settings
                 .effective_connection_for(model)
                 .ok()
                 .map(|connection| ProviderProtocolDialect::detect_from_api_url(&connection.api_url))

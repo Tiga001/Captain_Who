@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use crate::command::{AgentCommandExecutionResult, ManagedCommandWorkspaceRegistry};
 use crate::storage::models::{
@@ -95,6 +96,7 @@ pub use pending_actions::{
     McpActionTerminalizationRequest, McpAutoActionJournalTerminalOutcome,
     McpStartupActionTerminalOutcome,
 };
+pub use settings::ModelProviderCredentialReconciliationReport;
 #[cfg(test)]
 use settings::MAX_SKILL_ENABLEMENT_ID_BYTES;
 

@@ -264,7 +264,7 @@ pub(crate) fn handle_request(
             storage_response(request.id, storage.search_chats(&input))
         }
         STORAGE_LOAD_MODEL_SETTINGS_METHOD => {
-            storage_response(request.id, storage.load_model_settings())
+            storage_response(request.id, storage.load_model_settings_for_edit())
         }
         STORAGE_LOAD_PROVIDER_PROFILE_UI_DESCRIPTORS_METHOD => response_success(
             request.id,

@@ -110,7 +110,7 @@ impl StorageService {
     ) -> Result<ResolvedAgentTemplateForSpawn, AgentTemplateError> {
         // Keep both reads under the single StorageState mutex. Model settings already use their own
         // SQLite read transaction, and no in-process settings/template mutation can interleave.
-        let mut connection = self.template_connection()?;
+        let connection = self.template_connection()?;
         let template = agent_template_repository::get_project_template_by_machine_key(
             &connection,
             project_id,
@@ -121,7 +121,8 @@ impl StorageService {
                 template.machine_key.clone(),
             ));
         }
-        let settings = config_repository::load_model_settings_snapshot(&mut connection)
+        let settings = self
+            .model_settings_catalog_snapshot_in_connection(&connection)
             .map_err(|_| template_storage_unavailable())?
             .ok_or_else(|| {
                 model_unavailable(

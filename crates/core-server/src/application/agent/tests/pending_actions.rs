@@ -1716,7 +1716,12 @@ async fn provider_continuation_preflight_accepts_decision_but_blocks_mcp_dispatc
         let database_path = fixture
             .path()
             .join(format!("provider-preflight-{scenario}.sqlite"));
-        let storage = Arc::new(StorageService::open(&database_path).unwrap());
+        let credentials =
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default());
+        let storage = Arc::new(
+            StorageService::open_with_model_credentials(&database_path, credentials.clone())
+                .unwrap(),
+        );
         save_test_pending_provider(
             &storage,
             "test-model",
@@ -1736,8 +1741,6 @@ async fn provider_continuation_preflight_accepts_decision_but_blocks_mcp_dispatc
         };
         provider_settings.models[0].provider_profile_config = deepseek_profile;
         storage.save_model_settings(provider_settings).unwrap();
-        let credentials =
-            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default());
         let vault = Arc::new(
             mycopilot_core::ProviderContinuationVaultFactory::open_or_provision(
                 Arc::clone(&storage),
@@ -1833,7 +1836,10 @@ async fn provider_continuation_preflight_accepts_decision_but_blocks_mcp_dispatc
         drop(service);
         drop(storage);
 
-        let reopened_storage = Arc::new(StorageService::open(&database_path).unwrap());
+        let reopened_storage = Arc::new(
+            StorageService::open_with_model_credentials(&database_path, credentials.clone())
+                .unwrap(),
+        );
         let reopened_vault = Arc::new(
             mycopilot_core::ProviderContinuationVaultFactory::open_or_provision(
                 Arc::clone(&reopened_storage),
@@ -7309,17 +7315,18 @@ fn pending_resume_sqlite_row_contains_only_versioned_secret_free_projection() {
     const SEARCH_CANARY: &str = "SQLITE_PENDING_SEARCH_CANARY_DO_NOT_PERSIST";
     let fixture = tempdir().unwrap();
     let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let sensitive_api_url = format!("https://example.test/{URL_CANARY}/v1");
     save_test_pending_provider(
         &storage,
         "test-model",
-        &format!("https://example.test/v1?authorization={URL_CANARY}"),
+        &sensitive_api_url,
         API_TOKEN_CANARY,
         "tavily",
         SEARCH_CANARY,
     );
     let service = AgentService::new(Arc::clone(&storage));
     let mut agent_input = serde_json::from_value::<AgentChatInput>(json!({
-        "apiUrl": format!("https://example.test/v1?authorization={URL_CANARY}"),
+        "apiUrl": sensitive_api_url.clone(),
         "apiToken": API_TOKEN_CANARY,
         "model": "test-model",
         "modelCapabilities": { "imageInput": false },
@@ -7410,9 +7417,7 @@ fn pending_resume_sqlite_row_contains_only_versioned_secret_free_projection() {
     assert_eq!(restored.provider_protocol_key.as_ref(), Some(&frozen_key));
     assert_eq!(
         persisted_endpoint_digest(&restored.api_url),
-        persisted_endpoint_digest(&format!(
-            "https://example.test/v1?authorization={URL_CANARY}"
-        ))
+        persisted_endpoint_digest(&sensitive_api_url)
     );
     assert!(!restored.api_token.is_empty());
     assert!(restored
@@ -7835,19 +7840,12 @@ fn pending_resume_preserves_frozen_deepseek_profile_after_host_selects_generic()
     let frozen_key = frozen.agent_input.provider_protocol_key.clone().unwrap();
 
     let current = storage.load_model_settings().unwrap().unwrap();
-    let mut request = serde_json::to_value(current).unwrap();
-    request["models"][0]
-        .as_object_mut()
-        .unwrap()
-        .remove("providerProfileConfig");
-    request["models"][0]["providerProfileUpdate"] = json!({"kind": "select_generic"});
     storage
-        .save_model_settings_request(
-            serde_json::from_value::<mycopilot_core::storage::models::ModelSettingsSaveRequest>(
-                request,
-            )
-            .unwrap(),
-        )
+        .save_model_settings_request(renderer_model_settings_update(
+            &storage,
+            current,
+            mycopilot_core::storage::models::ProviderProfileUpdate::SelectGeneric,
+        ))
         .unwrap();
 
     let current = storage.load_model_settings().unwrap().unwrap();

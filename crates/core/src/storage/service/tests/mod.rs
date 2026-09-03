@@ -22,6 +22,7 @@ static TEST_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 struct StorageFixture {
     root: PathBuf,
+    model_credentials: Arc<crate::image_generation::InMemoryCredentialStore>,
 }
 
 impl StorageFixture {
@@ -30,11 +31,18 @@ impl StorageFixture {
         let root = std::env::temp_dir().join(format!("mycopilot-storage-attachment-test-{unique}"));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();
-        Self { root }
+        Self {
+            root,
+            model_credentials: Arc::new(crate::image_generation::InMemoryCredentialStore::default()),
+        }
     }
 
     fn service(&self) -> StorageService {
-        let service = StorageService::open(&self.root.join("storage.sqlite")).unwrap();
+        let service = StorageService::open_with_model_credentials(
+            &self.root.join("storage.sqlite"),
+            self.model_credentials.clone(),
+        )
+        .unwrap();
         for project_id in ["project-1", "project-2"] {
             service
                 .save_project(ProjectRecord {

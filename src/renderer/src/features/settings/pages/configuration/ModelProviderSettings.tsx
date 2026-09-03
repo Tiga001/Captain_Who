@@ -1,36 +1,56 @@
 import { Check, CircleHelp } from 'lucide-react'
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
+import type { CredentialMutation, CredentialStatus } from '@mycopilot/protocol'
 import { ConfirmationDialog } from '../../../../components/dialog/ConfirmationDialog'
 import { useFrontendConfig } from '../../../../config/FrontendConfigProvider'
 import type { ModelConfig } from './configurationTypes'
 import { formatContextWindow } from './modelPresentation'
 import { formatModelConfigLabel } from '../../../modelSelection/modelConfigPresentation'
-import { SecretInput } from './SecretInput'
+import { CredentialInput } from './CredentialInput'
 
 interface ModelProviderSettingsProps {
   apiUrl: string
-  apiToken: string
+  apiTokenStatus: CredentialStatus
   models: ModelConfig[]
-  onApiTokenChange: (value: string) => void
-  onApiUrlChange: (value: string) => void
+  onApiTokenCommit: (mutation: CredentialMutation) => Promise<void>
+  onApiUrlChange: (value: string) => Promise<void>
   onManageModels: () => void
   onToggleModel: (modelId: string) => void
 }
 
 export function ModelProviderSettings({
   apiUrl,
-  apiToken,
+  apiTokenStatus,
   models,
-  onApiTokenChange,
+  onApiTokenCommit,
   onApiUrlChange,
   onManageModels,
   onToggleModel
 }: ModelProviderSettingsProps) {
   const { t } = useFrontendConfig()
+  const [apiUrlDraft, setApiUrlDraft] = useState(apiUrl)
+  const [isApiUrlCommitPending, setApiUrlCommitPending] = useState(false)
+  const [apiTokenMutation, setApiTokenMutation] = useState<CredentialMutation>({ type: 'keep' })
   const [isDefaultApiHelpOpen, setDefaultApiHelpOpen] = useState(false)
   const helpDescription = `${t('configuration.modelSettingsHelp.description')} ${t(
     'configuration.modelSettingsHelp.note'
   )}`
+
+  useEffect(() => {
+    if (!isApiUrlCommitPending) setApiUrlDraft(apiUrl)
+  }, [apiUrl, isApiUrlCommitPending])
+
+  const commitApiUrl = async () => {
+    if (isApiUrlCommitPending || apiUrlDraft === apiUrl) return
+    setApiUrlCommitPending(true)
+    try {
+      await onApiUrlChange(apiUrlDraft)
+    } catch {
+      setApiUrlDraft(apiUrl)
+    } finally {
+      setApiUrlCommitPending(false)
+    }
+  }
 
   return (
     <section
@@ -62,10 +82,19 @@ export function ModelProviderSettings({
             </span>
             <span className="settings-list-row__control">
               <input
+                aria-label="API URL"
                 className="settings-list-control"
+                disabled={isApiUrlCommitPending}
                 type="url"
-                value={apiUrl}
-                onChange={(event) => onApiUrlChange(event.target.value)}
+                value={apiUrlDraft}
+                onBlur={() => void commitApiUrl()}
+                onChange={(event) => setApiUrlDraft(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') {
+                    event.preventDefault()
+                    event.currentTarget.blur()
+                  }
+                }}
               />
             </span>
           </label>
@@ -75,7 +104,17 @@ export function ModelProviderSettings({
               <span className="settings-list-row__title">API Token</span>
             </span>
             <span className="settings-list-row__control">
-              <SecretInput ariaLabel="API Token" value={apiToken} onChange={onApiTokenChange} />
+              <CredentialInput
+                ariaLabel="API Token"
+                mutation={apiTokenMutation}
+                onCommit={async (mutation) => {
+                  await onApiTokenCommit(mutation)
+                  setApiTokenMutation({ type: 'keep' })
+                }}
+                onMutationChange={setApiTokenMutation}
+                placeholder={t('configuration.credential.placeholder')}
+                status={apiTokenStatus}
+              />
             </span>
           </div>
         </div>

@@ -2,7 +2,7 @@
 status: current
 audience: developers
 owner: engineering
-last_verified: 2026-08-23
+last_verified: 2026-09-03
 ---
 
 # 图片生成子系统
@@ -42,14 +42,14 @@ readiness 包括：
 
 配置保存在 SQLite，密钥保存在原生凭据后端，两者通过阶段化写入和启动期 reconciliation 保持一致。更新和启停都使用 `revision` 做 compare-and-swap；冲突时客户端必须重新读取，不得覆盖更新。
 
-凭据变更协议支持 `keep`、`replace` 和 `clear`。Renderer 的配置 hook 串行化写入：启用且表单有未保存内容时，先更新配置，接收新 revision，再发启用请求；禁用不会隐式提交未保存字段。明文密钥只保留在表单内存中，并在成功替换后清空。
+凭据变更协议支持 `keep`、`replace` 和 `clear`。图片生成使用与模型、搜索相同的 `CredentialInput`：未配置、已配置、替换中是三种常规视觉形态；清除通过已配置态的图标与标准确认弹窗提交，不增加“待清除”表单行。图片生成已支持清除已保存 API Key。Renderer 的配置 hook 串行化写入：启用且表单有未保存内容时，先更新配置，接收新 revision，再发启用请求；禁用不会隐式提交未保存字段。明文密钥只保留在表单内存中，并在成功替换或取消后清空。
 
 当前约束：endpoint 只接受 HTTPS，最长 2,048 字节；model 最长 512 字节；凭据最长 8,192 字节。启用前必须通过完整本地校验；凭据后端不可用时仍允许禁用，避免用户被锁在启用状态。
 
 ### 凭据后端
 
 - 签名且使用固定应用身份的 macOS 构建使用非交互式 Mac Keychain v2。
-- 未签名或开发态 macOS 构建使用应用私有文件凭据存储，避免 Keychain 身份漂移造成重复弹窗。
+- 未签名或开发态 macOS 构建使用应用私有文件凭据存储（目录 `0700`、文件 `0600`），避免 Keychain 身份漂移造成重复弹窗。
 - 其他平台使用系统凭据存储实现。
 
 SQLite 只保存带后端标签的不透明引用。读取时按标签 fail closed，不探测旧后端，也不把明文写入日志、协议响应或错误详情。
@@ -87,7 +87,7 @@ Core Server 将 Artifact 转换为传输数据，Main 在进入 Host API 前再�
 
 ## 状态与安全不变量
 
-1. API key、凭据引用、Provider URL 和图生图输入字节不得进入 Renderer 事件投影、Renderer 状态、持久化 Conversation 或日志。受管 `savedPath` 只允许存在于 Rust Core 内部持久 Tool 历史以支持模型恢复；进入 Renderer 前必须删除。
+1. 已保存 API key、凭据引用、图生图输入字节不得进入 Renderer 投影、持久化 Conversation 或日志；用户本次新输入的 Key 只可短暂存在于凭据表单状态，并在成功替换或取消后清空。Provider URL 只允许出现在受信配置编辑响应，不得进入 Tool 事件。受管 `savedPath` 只允许存在于 Rust Core 内部持久 Tool 历史以支持模型恢复；进入 Renderer 前必须删除。
 2. 配置写入必须携带 revision；冲突后重新读取，不能 last-write-wins。
 3. “可启用”只基于本地校验；`readyUnverified` 不能展示为远端验证成功。
 4. 图生图输入必须经过与文件 Tool 相同的工作区授权，不能直接读取模型提供的任意路径。

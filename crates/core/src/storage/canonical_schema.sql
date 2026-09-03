@@ -89,9 +89,19 @@ CREATE TABLE mcp_builtin_capability_policies (
 CREATE TABLE model_provider_settings (
             id TEXT PRIMARY KEY CHECK (id = 'default'),
             api_url TEXT NOT NULL,
-            api_token TEXT NOT NULL,
+            api_token_ref TEXT CHECK (
+                api_token_ref IS NULL OR (
+                    typeof(api_token_ref) = 'text'
+                    AND length(CAST(api_token_ref AS BLOB)) BETWEEN 1 AND 1024
+                )
+            ),
             search_mode TEXT NOT NULL,
-            tavily_api_key TEXT NOT NULL,
+            tavily_api_key_ref TEXT CHECK (
+                tavily_api_key_ref IS NULL OR (
+                    typeof(tavily_api_key_ref) = 'text'
+                    AND length(CAST(tavily_api_key_ref AS BLOB)) BETWEEN 1 AND 1024
+                )
+            ),
             configuration_revision TEXT NOT NULL CHECK (
                 configuration_revision GLOB 'model-settings-v1:?*'
             ),
@@ -99,6 +109,20 @@ CREATE TABLE model_provider_settings (
                 search_connection_revision GLOB 'search-connection-v1:?*'
             ),
             updated_at INTEGER NOT NULL
+        );
+CREATE TABLE model_provider_credential_staging (
+            credential_ref TEXT PRIMARY KEY CHECK (
+                typeof(credential_ref) = 'text'
+                AND length(CAST(credential_ref AS BLOB)) BETWEEN 1 AND 1024
+            ),
+            created_at INTEGER NOT NULL CHECK (created_at >= 0)
+        );
+CREATE TABLE model_provider_credential_cleanup (
+            credential_ref TEXT PRIMARY KEY CHECK (
+                typeof(credential_ref) = 'text'
+                AND length(CAST(credential_ref AS BLOB)) BETWEEN 1 AND 1024
+            ),
+            created_at INTEGER NOT NULL CHECK (created_at >= 0)
         );
 CREATE TABLE image_generation_profiles (
             id TEXT PRIMARY KEY CHECK (
@@ -310,7 +334,12 @@ CREATE TABLE models (
             ),
             normalized_display_name TEXT NOT NULL,
             api_url_override TEXT,
-            api_token_override TEXT,
+            api_token_override_ref TEXT CHECK (
+                api_token_override_ref IS NULL OR (
+                    typeof(api_token_override_ref) = 'text'
+                    AND length(CAST(api_token_override_ref AS BLOB)) BETWEEN 1 AND 1024
+                )
+            ),
             supports_image INTEGER NOT NULL,
             context_window_tokens INTEGER,
             provider_profile_config_json TEXT NOT NULL CHECK (

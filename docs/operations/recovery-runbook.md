@@ -38,7 +38,7 @@ Playwright 故障。优先原则是保护持久事实和外部副作用，不通
 
 ### 判断
 
-当前唯一可接受基线为 **schema v32 + exact catalog fingerprint + valid foreign keys**。真源：
+当前唯一可接受基线为 **schema v33 + exact catalog fingerprint + valid foreign keys**。真源：
 
 ```text
 crates/core/src/storage/migrations.rs
@@ -68,33 +68,46 @@ pnpm storage:reset-dev -- --confirm-reset
 确认流程：
 
 1. 在 `storage-backups/` 创建权限受限、时间戳命名的 verified SQLite snapshot。
-2. 只对当前 v32 或经逐表核验、配置表契约相同的紧邻 v31，从只读源或临时副本提取 allowlisted configuration；MCP 精确 identity/authorization 也要重新验证。该例外固定为 v31，不是“当前版本减一”的通用迁移规则；v30 及更旧 schema 不解码配置，报告会明确显示使用默认配置。
-3. 在 staging 文件创建 fresh v32 canonical DB。
+2. 只从 exact current v33 schema 提取 allowlisted configuration；MCP 精确 identity/authorization 也要重新验证。旧 schema fail closed，不保留“当前版本减一”或其他永久兼容窗口。
+3. 在 staging 文件创建 fresh v33 canonical DB。
 4. 通过当前 service 写路径恢复配置。
 5. 重开生产 storage，核对记录数、`PRAGMA quick_check` 和 `foreign_key_check`。
 6. 原子发布新数据库；失败时保留原数据库与恢复备份。
 
 保留内容：
 
-- model/provider settings（含当前代码仍以本机 SQLite 明文保存的模型 Token/Tavily key）；
+- model/provider/search settings 及其 opaque credential reference；secret 本身由现有 Credential Store 持有，不复制进 fresh SQLite；
 - UI preferences、Agent prompt preferences；
 - 通知设置；
 - Browser 链接打开位置、下载设置和偏好（仅在源 schema 支持对应表时）；
 - Skill enablement overrides；
-- 全部 image-generation profile 及其 credential reference；credential secret 目录本身不搬动、不清空；
+- 全部 image-generation profile 及其 credential reference；credential secret backend 本身不搬动、不清空；
 - MCP Registry、model namespace、仍有效的 launch authorization 与 enabled/trust 状态，以及内建 Browser Automation 的用户允许策略。
 
 不恢复：Conversation、Project、message、draft、Usage、Approval、Continuation、Compaction、Fork、Agent
 tree/Mailbox/Wake；Scheduled Automation task/Run/attention；notification event/batch；Browser history/download
-record；全局 Agent 模板与 Project 分配；FileChange transaction/chunk/operation/run grant/history。即使来源是 v31，Conversation 与上述 runtime 记录也只计数并丢弃，不执行迁移。附件、已安装
+record；全局 Agent 模板与 Project 分配；FileChange transaction/chunk/operation/run grant/history。Conversation 与上述 runtime 记录只计数并丢弃，不执行迁移。附件、已安装
 Skill、生成图片和 credential 目录不在 reset 事务中移动；没有数据库引用的附件可在后续正常启动时被孤儿清理。
 
 ### 备份处理
 
 - reset 失败时，优先保留原库；backup 是恢复/取证副本，不应被 reset 检查过程修改。
-- 不要直接把一个旧 schema backup 覆盖回运行路径并期待 v32 接受；旧库仍会触发 reset-required。
+- 不要直接把一个旧 schema backup 覆盖回运行路径并期待 v33 接受；旧库仍会触发 reset-required。
 - 如必须人工还原文件，先停止所有 Core Server、再次复制保存当前文件、在隔离位置验证 SQLite 完整性和 schema，再决定是否替换。仓库当前没有受支持的一键 backup restore 命令。
-- 不要把包含本机模型 Token/搜索 key 的 backup 上传到 issue、CI artifact 或公共对象存储。
+- 当前 v33 SQLite backup 不含当前模型/搜索 secret，只含 reference 与非秘密元数据；旧 schema backup 仍可能含明文 Token/Key，二者都不得上传到 issue、CI artifact 或公共对象存储。
+- 只恢复 SQLite 不会恢复操作系统凭据。跨设备、跨账户或凭据 backend 丢失后，保留的 reference 会显示为不可用，需要用户替换或清除。
+- 未签名 macOS 开发构建的私有凭据文件属于数据根；整根备份会包含这些 secret。删除 backup、reference 或凭据文件不等于对 SSD、系统快照或外部备份安全擦除；怀疑泄露时应撤销或轮换 Provider 凭据。
+
+### 旧开发库的一次性受控重建
+
+当本开发分支必须把旧 schema 的真实开发库改成 v33，不能把兼容读取长期留在产品中。维护者应：
+
+1. 完全退出 Captain Who 和所有 Core Server，确认 exact database instance lock 已释放；不得删除 lock file 绕过 owner。
+2. 先运行 `pnpm storage:reset-dev` 取得只读摘要，核对权威数据根、源 schema、fingerprint 和配置计数；输出中不得出现 Token、Key 或配置值。
+3. 只在代码审阅过的临时转换块明确绑定该 exact 旧 schema/fingerprint、固定字段清单和目标 v33 时，运行 `pnpm storage:reset-dev -- --confirm-reset`。转换块不得接受未知 schema、模糊列或任意历史版本。
+4. 让工具先生成权限受限、通过 SQLite 校验的备份，再把 allowlisted 设置写入 fresh staging v33；Provider secret 写入当前 Credential Store，SQLite 只落 reference。任一步失败都保留原库和备份，不发布半成品。
+5. 验证 `PRAGMA user_version = 33`、catalog fingerprint、`quick_check`、`foreign_key_check`，再启动应用逐项核对模型/搜索/图片凭据状态、UI/Prompt 偏好、Skill、MCP、通知和 Browser 设置；不得用真实付费请求作为唯一验证。
+6. 删除临时旧字段读取/转换块，恢复旧 schema fail-closed 测试，并以代码搜索确认生产代码不再出现旧明文字段。历史备份仍按敏感材料保管；不承诺安全擦除。
 
 ## 4. Multi-Agent 自动恢复
 
@@ -102,16 +115,16 @@ SQLite 是 Wake、Turn、Mailbox、receipt、Approval 和 event 的恢复真相�
 
 ### Wake 分类
 
-| 持久状态                                               | 恢复动作                                                          |
-| ------------------------------------------------------ | ----------------------------------------------------------------- |
-| `queued`                                               | 按 FIFO 等待 Dispatcher claim                                     |
-| 过期 `claimed`，无 Run identity                        | 安全重新排队/重新 claim；确定的 admission 前失败可结算 failed     |
-| `running`，已有 terminal trace                         | 观察 terminal fact，完成 result outbox/owner 释放，不重跑 Runtime |
-| `waiting_for_approval` 且 pending action 存在          | 保持等待；根 Agent UI 从 durable projection 恢复                  |
-| `running` 且有合法 checkpoint                          | 按原 identity/permissions/capability snapshot 恢复                |
-| `running` 且无可证明安全的 checkpoint                  | 结算 `outcome_unknown`，不重放 Tool/Provider 副作用               |
-| exact run 被 durable tree fence 覆盖，且可证明未有副作用 | 取消未终态 action，将 Wake/Trace 安全结算为 `interrupted`          |
-| exact run 被 fence 覆盖，但外部副作用是否发生不确定    | 保留证据并结算 `outcome_unknown`；不得以“已停止”为由盲重放        |
+| 持久状态                                                 | 恢复动作                                                          |
+| -------------------------------------------------------- | ----------------------------------------------------------------- |
+| `queued`                                                 | 按 FIFO 等待 Dispatcher claim                                     |
+| 过期 `claimed`，无 Run identity                          | 安全重新排队/重新 claim；确定的 admission 前失败可结算 failed     |
+| `running`，已有 terminal trace                           | 观察 terminal fact，完成 result outbox/owner 释放，不重跑 Runtime |
+| `waiting_for_approval` 且 pending action 存在            | 保持等待；根 Agent UI 从 durable projection 恢复                  |
+| `running` 且有合法 checkpoint                            | 按原 identity/permissions/capability snapshot 恢复                |
+| `running` 且无可证明安全的 checkpoint                    | 结算 `outcome_unknown`，不重放 Tool/Provider 副作用               |
+| exact run 被 durable tree fence 覆盖，且可证明未有副作用 | 取消未终态 action，将 Wake/Trace 安全结算为 `interrupted`         |
+| exact run 被 fence 覆盖，但外部副作用是否发生不确定      | 保留证据并结算 `outcome_unknown`；不得以“已停止”为由盲重放        |
 
 Wake lease 为 60 秒，Dispatcher 每 20 秒续租、每 1 秒 durable fallback scan。新 Core Server 启动时旧 lease 尚未过期属于正常窗口；周期扫描会在 deadline 后处理，不需要再次重启。
 
@@ -306,7 +319,7 @@ reset 变更必须覆盖 dry-run 只读、锁拒绝、备份不变、失败保�
 ## 13. 当前限制
 
 - 仅提供开发 reset，不提供生产原地迁移或通用 backup restore 工具。
-- 备份没有自动 retention、加密或异地复制；其中可能含明文本机模型/搜索凭据。
+- 备份没有自动 retention、加密或异地复制；当前 v33 SQLite snapshot 不含当前模型/搜索 secret，但旧 schema backup 或未签名 macOS 开发环境的整根备份可能含明文凭据。
 - `outcome_unknown` 没有通用自动补偿，需要核验外部状态后显式发起新任务。
 - Windows MCP stdio 没有 Job Object 进程树隔离保证。
 - 通知正确性依赖 SQLite replay/polling，当前没有外部运维 dashboard 或 alert；前台/disabled/不支持场景会终态 suppress，不能事后补发。

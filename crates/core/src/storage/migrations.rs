@@ -1,13 +1,13 @@
 use rusqlite::{ffi, Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
 
-pub const STORAGE_SCHEMA_VERSION: i32 = 32;
+pub const STORAGE_SCHEMA_VERSION: i32 = 33;
 pub const DEVELOPMENT_STORAGE_SCHEMA_RESET_REQUIRED: &str =
     "development_storage_schema_reset_required";
 
 const CANONICAL_SCHEMA: &str = include_str!("canonical_schema.sql");
 const CANONICAL_SCHEMA_FINGERPRINT: &str =
-    "sha256:5cba1822cad4a40686115d27d828b110e001f5ffa33ac1acd2fee1ce077c13d7";
+    "sha256:5e1e404d74af5ed899d88dc8b5051e673ecd5beb967579af8f328b07b640c948";
 /// Opens the single supported development schema.
 ///
 /// A brand-new database is initialized atomically. Existing development databases must already
@@ -135,6 +135,58 @@ mod tests {
         haystack.replacen(old, new, 1)
     }
 
+    fn with_legacy_model_credentials_for_test(schema: String) -> String {
+        let schema = replace_once(
+            schema,
+            r#"            api_token_ref TEXT CHECK (
+                api_token_ref IS NULL OR (
+                    typeof(api_token_ref) = 'text'
+                    AND length(CAST(api_token_ref AS BLOB)) BETWEEN 1 AND 1024
+                )
+            ),"#,
+            "            api_token TEXT NOT NULL,",
+        );
+        let schema = replace_once(
+            schema,
+            r#"            tavily_api_key_ref TEXT CHECK (
+                tavily_api_key_ref IS NULL OR (
+                    typeof(tavily_api_key_ref) = 'text'
+                    AND length(CAST(tavily_api_key_ref AS BLOB)) BETWEEN 1 AND 1024
+                )
+            ),"#,
+            "            tavily_api_key TEXT NOT NULL,",
+        );
+        let schema = replace_once(
+            schema,
+            r#"CREATE TABLE model_provider_credential_staging (
+            credential_ref TEXT PRIMARY KEY CHECK (
+                typeof(credential_ref) = 'text'
+                AND length(CAST(credential_ref AS BLOB)) BETWEEN 1 AND 1024
+            ),
+            created_at INTEGER NOT NULL CHECK (created_at >= 0)
+        );
+CREATE TABLE model_provider_credential_cleanup (
+            credential_ref TEXT PRIMARY KEY CHECK (
+                typeof(credential_ref) = 'text'
+                AND length(CAST(credential_ref AS BLOB)) BETWEEN 1 AND 1024
+            ),
+            created_at INTEGER NOT NULL CHECK (created_at >= 0)
+        );
+"#,
+            "",
+        );
+        replace_once(
+            schema,
+            r#"            api_token_override_ref TEXT CHECK (
+                api_token_override_ref IS NULL OR (
+                    typeof(api_token_override_ref) = 'text'
+                    AND length(CAST(api_token_override_ref AS BLOB)) BETWEEN 1 AND 1024
+                )
+            ),"#,
+            "            api_token_override TEXT,",
+        )
+    }
+
     fn canonical_schema_v29_for_test() -> String {
         let schema = replace_once(
             CANONICAL_SCHEMA.to_string(),
@@ -149,13 +201,14 @@ mod tests {
             r#"            display_name TEXT NOT NULL,
 "#,
         );
-        replace_once(
+        let schema = replace_once(
             schema,
             r#"CREATE UNIQUE INDEX idx_models_normalized_display_name
             ON models(normalized_display_name);
 "#,
             "",
-        )
+        );
+        with_legacy_model_credentials_for_test(schema)
     }
 
     fn canonical_schema_v30_for_test() -> String {
@@ -175,7 +228,7 @@ mod tests {
             display_name TEXT NOT NULL,
 "#,
         );
-        replace_once(
+        let schema = replace_once(
             schema,
             r#"CREATE UNIQUE INDEX idx_models_normalized_display_name
             ON models(normalized_display_name);
@@ -183,7 +236,8 @@ mod tests {
             r#"CREATE UNIQUE INDEX idx_models_normalized_display_id
             ON models(normalized_display_id);
 "#,
-        )
+        );
+        with_legacy_model_credentials_for_test(schema)
     }
 
     fn canonical_schema_v28_for_test() -> String {
@@ -444,7 +498,7 @@ mod tests {
             .contains(DEVELOPMENT_STORAGE_SCHEMA_RESET_REQUIRED));
         assert!(error
             .to_string()
-            .contains("expected schema version 32, found 30"));
+            .contains("expected schema version 33, found 30"));
         assert_eq!(read_schema_version(&connection).unwrap(), 30);
         assert_eq!(schema_fingerprint(&connection).unwrap(), fingerprint_before);
         let columns = connection

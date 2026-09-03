@@ -4,7 +4,7 @@ description: 区分 Captain Who 的构建目标、仓库验证范围和公开发
 status: current
 audience: user
 owner: release-engineering
-last_verified: 2026-08-31
+last_verified: 2026-09-03
 ---
 
 # 平台与构建状态
@@ -25,7 +25,7 @@ macOS 构建还会核对 Core Server、Office Renderer、OfficeCLI、Artifact Ru
 
 - 原生终端和本地 MCP Server 会启动平台进程，行为受操作系统和本机权限影响。
 - 旧版 `.doc` 读取当前只在 macOS 上通过系统转换能力提供；`.ppt` 和 `.xls` 不支持。
-- 图片生成凭据在签名 macOS 构建中使用 Mac Keychain；开发构建和其他平台采用不同的凭据后端。
+- 具备稳定签名身份的发行构建通过操作系统凭据存储保存模型、搜索和图片生成密钥；未签名 macOS 开发构建使用应用数据目录内权限收紧的私有文件 backend。
 - Windows 上外部 stdio MCP Server 的完整进程树隔离尚不能作为已验证保证。
 - Scheduled Automation 只有在应用与 Core Server 运行时才会执行，不是操作系统后台服务。
 - 原生通知能否显示取决于平台支持和用户的系统通知设置。

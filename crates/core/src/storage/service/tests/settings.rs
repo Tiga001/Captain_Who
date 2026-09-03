@@ -1,4 +1,68 @@
 use super::*;
+use crate::image_generation::{
+    CredentialDeleteOutcome, CredentialReference, CredentialSecret, CredentialStore,
+    CredentialStoreBackend, CredentialStoreError, CredentialStoreOperation,
+};
+use crate::storage::models::{CredentialMutation, CredentialStatus};
+use std::sync::atomic::{AtomicBool, Ordering};
+
+#[derive(Default)]
+struct FaultInjectingModelCredentialStore {
+    delegate: crate::image_generation::InMemoryCredentialStore,
+    fail_replace: AtomicBool,
+    fail_delete: AtomicBool,
+}
+
+impl CredentialStore for FaultInjectingModelCredentialStore {
+    fn backend(&self) -> CredentialStoreBackend {
+        CredentialStoreBackend::InMemoryV1
+    }
+
+    fn replace(
+        &self,
+        reference: &CredentialReference,
+        secret: CredentialSecret,
+    ) -> Result<(), CredentialStoreError> {
+        if self.fail_replace.load(Ordering::SeqCst) {
+            return Err(CredentialStoreError::BackendUnavailable {
+                operation: CredentialStoreOperation::Replace,
+            });
+        }
+        self.delegate.replace(reference, secret)
+    }
+
+    fn get(
+        &self,
+        reference: &CredentialReference,
+    ) -> Result<Option<CredentialSecret>, CredentialStoreError> {
+        self.delegate.get(reference)
+    }
+
+    fn delete(
+        &self,
+        reference: &CredentialReference,
+    ) -> Result<CredentialDeleteOutcome, CredentialStoreError> {
+        if self.fail_delete.load(Ordering::SeqCst) {
+            return Err(CredentialStoreError::BackendUnavailable {
+                operation: CredentialStoreOperation::Delete,
+            });
+        }
+        self.delegate.delete(reference)
+    }
+}
+
+fn model_credential_journal_count(service: &StorageService, table: &str) -> i64 {
+    assert!(matches!(
+        table,
+        "model_provider_credential_staging" | "model_provider_credential_cleanup"
+    ));
+    let connection = service.state.connection().unwrap();
+    connection
+        .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+            row.get(0)
+        })
+        .unwrap()
+}
 
 fn revision_test_settings() -> ModelSettingsRecord {
     ModelSettingsRecord {
@@ -25,12 +89,54 @@ fn revision_test_settings() -> ModelSettingsRecord {
     }
 }
 
-fn renderer_save_request(
-    settings: &ModelSettingsRecord,
+fn renderer_save_request_value<T: serde::Serialize>(settings: &T) -> serde_json::Value {
+    let mut value = serde_json::to_value(settings).unwrap();
+    let root = value.as_object_mut().unwrap();
+    let expected_revision = root
+        .remove("configurationRevision")
+        .unwrap_or(serde_json::Value::Null);
+    root.insert("expectedRevision".to_string(), expected_revision);
+    let api_token_mutation = root
+        .remove("apiToken")
+        .map(|value| match value.as_str().unwrap_or_default() {
+            "" => serde_json::json!({"type": "clear"}),
+            value => serde_json::json!({"type": "replace", "value": value}),
+        })
+        .unwrap_or_else(|| serde_json::json!({"type": "keep"}));
+    root.remove("apiTokenStatus");
+    root.insert("apiTokenMutation".to_string(), api_token_mutation);
+    let tavily_mutation = root
+        .remove("tavilyApiKey")
+        .map(|value| match value.as_str().unwrap_or_default() {
+            "" => serde_json::json!({"type": "clear"}),
+            value => serde_json::json!({"type": "replace", "value": value}),
+        })
+        .unwrap_or_else(|| serde_json::json!({"type": "keep"}));
+    root.remove("tavilyApiKeyStatus");
+    root.insert("tavilyApiKeyMutation".to_string(), tavily_mutation);
+    for model in value["models"].as_array_mut().unwrap() {
+        let model = model.as_object_mut().unwrap();
+        let override_mutation = model
+            .remove("apiTokenOverride")
+            .map(|value| match value.as_str() {
+                Some(value) if !value.is_empty() => {
+                    serde_json::json!({"type": "replace", "value": value})
+                }
+                _ => serde_json::json!({"type": "clear"}),
+            })
+            .unwrap_or_else(|| serde_json::json!({"type": "keep"}));
+        model.remove("apiTokenOverrideStatus");
+        model.insert("apiTokenOverrideMutation".to_string(), override_mutation);
+    }
+    value
+}
+
+fn renderer_save_request<T: serde::Serialize>(
+    settings: &T,
     update: serde_json::Value,
     config_id: Option<&str>,
 ) -> ModelSettingsSaveRequest {
-    let mut value = serde_json::to_value(settings).unwrap();
+    let mut value = renderer_save_request_value(settings);
     let model = value["models"][0].as_object_mut().unwrap();
     model.remove("providerProfileConfig");
     model.insert("providerProfileUpdate".to_string(), update);
@@ -41,6 +147,31 @@ fn renderer_save_request(
             .unwrap_or(serde_json::Value::Null),
     );
     serde_json::from_value(value).unwrap()
+}
+
+fn renderer_save_request_preserving_credentials<T: serde::Serialize>(
+    settings: &T,
+    update: serde_json::Value,
+    config_id: Option<&str>,
+) -> ModelSettingsSaveRequest {
+    let mut request = renderer_save_request(settings, update, config_id);
+    request.api_token_mutation = CredentialMutation::Keep;
+    request.tavily_api_key_mutation = CredentialMutation::Keep;
+    for model in &mut request.models {
+        model.api_token_override_mutation = CredentialMutation::Keep;
+    }
+    request
+}
+
+fn with_current_configuration_revision(
+    service: &StorageService,
+    mut request: ModelSettingsSaveRequest,
+) -> ModelSettingsSaveRequest {
+    request.expected_revision = service
+        .load_model_settings_snapshot()
+        .unwrap()
+        .map(|snapshot| snapshot.configuration_revision);
+    request
 }
 
 fn official_profile_test_model(
@@ -64,6 +195,22 @@ fn official_profile_test_model(
         output_price: "2.5".to_string(),
         enabled: true,
     }
+}
+
+fn delete_stored_credential(fixture: &StorageFixture, column: &str, model_id: Option<&str>) {
+    let connection = rusqlite::Connection::open(fixture.root.join("storage.sqlite")).unwrap();
+    let query = match model_id {
+        Some(_) => format!("SELECT {column} FROM models WHERE id = ?1"),
+        None => format!("SELECT {column} FROM model_provider_settings WHERE id = 'default'"),
+    };
+    let credential_ref: String = match model_id {
+        Some(model_id) => connection
+            .query_row(&query, [model_id], |row| row.get(0))
+            .unwrap(),
+        None => connection.query_row(&query, [], |row| row.get(0)).unwrap(),
+    };
+    let reference = CredentialReference::parse(&credential_ref).unwrap();
+    fixture.model_credentials.delete(&reference).unwrap();
 }
 
 #[test]
@@ -137,7 +284,7 @@ fn renaming_a_model_onto_an_existing_display_name_returns_the_typed_collision() 
     settings.models.push(second);
     service.save_model_settings(settings.clone()).unwrap();
 
-    let mut value = serde_json::to_value(&settings).unwrap();
+    let mut value = renderer_save_request_value(&settings);
     let models = value["models"].as_array_mut().unwrap();
     for model in models.iter_mut() {
         let model = model.as_object_mut().unwrap();
@@ -149,6 +296,7 @@ fn renaming_a_model_onto_an_existing_display_name_returns_the_typed_collision() 
     }
     models[0]["displayName"] = serde_json::json!("Existing Model");
     let request: ModelSettingsSaveRequest = serde_json::from_value(value).unwrap();
+    let request = with_current_configuration_revision(&service, request);
 
     assert_eq!(
         service.save_model_settings_request(request).unwrap_err(),
@@ -171,7 +319,7 @@ fn identical_provider_models_can_be_saved_as_distinct_configurations() {
     second.display_name = "Secondary".to_string();
     settings.models.push(second);
 
-    let mut value = serde_json::to_value(&settings).unwrap();
+    let mut value = renderer_save_request_value(&settings);
     for model in value["models"].as_array_mut().unwrap() {
         let model = model.as_object_mut().unwrap();
         model.insert("id".to_string(), serde_json::Value::Null);
@@ -182,6 +330,7 @@ fn identical_provider_models_can_be_saved_as_distinct_configurations() {
         );
     }
     let request: ModelSettingsSaveRequest = serde_json::from_value(value).unwrap();
+    let request = with_current_configuration_revision(&service, request);
     let saved = service.save_model_settings_request(request).unwrap();
 
     assert_eq!(saved.models.len(), 2);
@@ -199,8 +348,8 @@ fn identical_provider_models_can_be_saved_as_distinct_configurations() {
         saved.models[1].api_url_override
     );
     assert_eq!(
-        saved.models[0].api_token_override,
-        saved.models[1].api_token_override
+        saved.models[0].api_token_override_status,
+        saved.models[1].api_token_override_status
     );
     assert_eq!(
         saved.models[0].provider_profile_config,
@@ -221,7 +370,7 @@ fn normalized_display_name_collision_is_typed_and_does_not_overwrite_storage() {
     colliding.display_name = "  ＫＩＭＩ　Ｋ３  ".to_string();
     colliding.provider_model_id = "unrecognized-provider-model".to_string();
     settings.models.push(colliding);
-    let mut value = serde_json::to_value(&settings).unwrap();
+    let mut value = renderer_save_request_value(&settings);
     let models = value["models"].as_array_mut().unwrap();
     for (index, model) in models.iter_mut().enumerate() {
         let model = model.as_object_mut().unwrap();
@@ -251,6 +400,7 @@ fn normalized_display_name_collision_is_typed_and_does_not_overwrite_storage() {
         );
     }
     let request: ModelSettingsSaveRequest = serde_json::from_value(value).unwrap();
+    let request = with_current_configuration_revision(&service, request);
 
     assert_eq!(
         service.save_model_settings_request(request).unwrap_err(),
@@ -277,10 +427,13 @@ fn editing_display_name_preserves_config_identity_and_conversation_reference() {
     let mut edited = settings;
     edited.models[0].display_name = "Renamed display name".to_string();
     let saved = service
-        .save_model_settings_request(renderer_save_request(
-            &edited,
-            serde_json::json!({"kind": "unchanged"}),
-            Some("revision-model"),
+        .save_model_settings_request(with_current_configuration_revision(
+            &service,
+            renderer_save_request(
+                &edited,
+                serde_json::json!({"kind": "unchanged"}),
+                Some("revision-model"),
+            ),
         ))
         .unwrap();
 
@@ -534,7 +687,7 @@ fn save_boundary_does_not_infer_official_profiles_from_proxies_aliases_or_custom
 }
 
 #[test]
-fn save_boundary_does_not_correct_an_incomplete_global_connection() {
+fn save_boundary_preserves_an_incomplete_global_connection_but_execution_fails_closed() {
     let fixture = StorageFixture::new();
     let service = fixture.service();
     let settings = ModelSettingsRecord {
@@ -544,12 +697,140 @@ fn save_boundary_does_not_correct_an_incomplete_global_connection() {
         tavily_api_key: "preserved-search-token".to_string(),
         models: vec![official_profile_test_model("deepseek-v4-flash", None, None)],
     };
-    let expected = serde_json::to_value(&settings).unwrap();
-
     service.save_model_settings(settings).unwrap();
     let stored = service.load_model_settings().unwrap().unwrap();
+    assert_eq!(
+        stored.api_url,
+        "https://api.deepseek.com/v1/chat/completions"
+    );
+    assert!(stored.api_token.is_empty());
+    assert!(stored.effective_connection_for(&stored.models[0]).is_err());
+}
 
-    assert_eq!(serde_json::to_value(stored).unwrap(), expected);
+#[test]
+fn global_url_and_credential_can_be_edited_in_either_order_and_clear_keeps_url() {
+    let fixture = StorageFixture::new();
+    let service = fixture.service();
+    let mut settings = revision_test_settings();
+    settings.api_url.clear();
+    settings.api_token.clear();
+    service.save_model_settings(settings).unwrap();
+
+    let mut current = service.load_model_settings().unwrap().unwrap();
+    current.api_url = "https://provider.example/v1/chat/completions".to_string();
+    let model_id = current.models[0].id.clone();
+    service
+        .save_model_settings_request(with_current_configuration_revision(
+            &service,
+            renderer_save_request(
+                &current,
+                serde_json::json!({"kind": "unchanged"}),
+                Some(&model_id),
+            ),
+        ))
+        .unwrap();
+    assert!(service
+        .load_model_settings_snapshot_for_model(&model_id, false)
+        .unwrap()
+        .unwrap()
+        .settings
+        .effective_connection_for(
+            &service
+                .load_model_settings_snapshot_for_model(&model_id, false)
+                .unwrap()
+                .unwrap()
+                .settings
+                .models[0]
+        )
+        .is_err());
+
+    current = service.load_model_settings().unwrap().unwrap();
+    let mut add_token = with_current_configuration_revision(
+        &service,
+        renderer_save_request(
+            &current,
+            serde_json::json!({"kind": "unchanged"}),
+            Some(&model_id),
+        ),
+    );
+    add_token.api_token_mutation = CredentialMutation::Replace {
+        value: "provider-token".to_string(),
+    };
+    service.save_model_settings_request(add_token).unwrap();
+    let resolved = service
+        .load_model_settings_snapshot_for_model(&model_id, false)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        resolved
+            .settings
+            .effective_connection_for(&resolved.settings.models[0])
+            .unwrap()
+            .api_token,
+        "provider-token"
+    );
+
+    current = service.load_model_settings().unwrap().unwrap();
+    let mut clear = with_current_configuration_revision(
+        &service,
+        renderer_save_request(
+            &current,
+            serde_json::json!({"kind": "unchanged"}),
+            Some(&model_id),
+        ),
+    );
+    clear.api_token_mutation = CredentialMutation::Clear;
+    let cleared = service.save_model_settings_request(clear).unwrap();
+    assert_eq!(
+        cleared.api_url,
+        "https://provider.example/v1/chat/completions"
+    );
+    assert_eq!(cleared.api_token_status, CredentialStatus::Missing);
+
+    current = service.load_model_settings().unwrap().unwrap();
+    current.api_url.clear();
+    let mut token_first = with_current_configuration_revision(
+        &service,
+        renderer_save_request(
+            &current,
+            serde_json::json!({"kind": "unchanged"}),
+            Some(&model_id),
+        ),
+    );
+    token_first.api_token_mutation = CredentialMutation::Replace {
+        value: "second-token".to_string(),
+    };
+    service.save_model_settings_request(token_first).unwrap();
+    current = service.load_model_settings().unwrap().unwrap();
+    assert!(current.api_url.is_empty());
+    assert_eq!(current.api_token, "second-token");
+    assert!(current
+        .effective_connection_for(&current.models[0])
+        .is_err());
+
+    current.api_url = "https://second.example/v1/chat/completions".to_string();
+    let mut add_url = with_current_configuration_revision(
+        &service,
+        renderer_save_request(
+            &current,
+            serde_json::json!({"kind": "unchanged"}),
+            Some(&model_id),
+        ),
+    );
+    add_url.api_token_mutation = CredentialMutation::Keep;
+    service.save_model_settings_request(add_url).unwrap();
+    let resolved = service
+        .load_model_settings_snapshot_for_model(&model_id, false)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        resolved
+            .settings
+            .effective_connection_for(&resolved.settings.models[0])
+            .unwrap()
+            .api_url,
+        "https://second.example/v1/chat/completions"
+    );
 }
 
 #[test]
@@ -664,13 +945,13 @@ fn startup_and_unrelated_save_keep_a_future_profile_opaque() {
 
     let mut price_edit = after_startup.settings.clone();
     price_edit.models[0].input_price = "9.5".to_string();
-    reopened
-        .save_model_settings_request(renderer_save_request(
-            &price_edit,
-            serde_json::json!({"kind": "unchanged"}),
-            Some(&price_edit.models[0].id),
-        ))
-        .unwrap();
+    let mut request = renderer_save_request_preserving_credentials(
+        &price_edit,
+        serde_json::json!({"kind": "unchanged"}),
+        Some(&price_edit.models[0].id),
+    );
+    request.expected_revision = Some(after_startup.configuration_revision.clone());
+    reopened.save_model_settings_request(request).unwrap();
     let after_save = reopened.load_model_settings_snapshot().unwrap().unwrap();
     assert_eq!(
         serde_json::to_value(&after_save.settings.models[0].provider_profile_config).unwrap(),
@@ -725,8 +1006,8 @@ fn authoritative_profile_updates_rotate_only_effective_wire_changes() {
     metadata.models[0].display_name = "Metadata only".to_string();
     metadata.models[0].supports_image = true;
     metadata.models[0].input_price = "2".to_string();
-    service
-        .save_model_settings_request(renderer_save_request(
+    let metadata = service
+        .save_model_settings_request(renderer_save_request_preserving_credentials(
             &metadata,
             serde_json::json!({"kind": "unchanged"}),
             Some(&metadata.models[0].id),
@@ -742,7 +1023,7 @@ fn authoritative_profile_updates_rotate_only_effective_wire_changes() {
     );
 
     let changed = service
-        .save_model_settings_request(renderer_save_request(
+        .save_model_settings_request(renderer_save_request_preserving_credentials(
             &metadata,
             serde_json::json!({
                 "kind": "select_registered_profile",
@@ -803,10 +1084,13 @@ fn unchanged_explicit_generic_fails_on_dialect_change_until_generic_is_reselecte
     service.save_model_settings(settings.clone()).unwrap();
 
     settings.api_url = "https://api.anthropic.com/v1/messages".to_string();
-    let unchanged = renderer_save_request(
-        &settings,
-        serde_json::json!({"kind": "unchanged"}),
-        Some(&settings.models[0].id),
+    let unchanged = with_current_configuration_revision(
+        &service,
+        renderer_save_request(
+            &settings,
+            serde_json::json!({"kind": "unchanged"}),
+            Some(&settings.models[0].id),
+        ),
     );
     assert!(service.save_model_settings_request(unchanged).is_err());
     assert_eq!(
@@ -815,10 +1099,13 @@ fn unchanged_explicit_generic_fails_on_dialect_change_until_generic_is_reselecte
     );
 
     let saved = service
-        .save_model_settings_request(renderer_save_request(
-            &settings,
-            serde_json::json!({"kind": "select_generic"}),
-            Some(&settings.models[0].id),
+        .save_model_settings_request(with_current_configuration_revision(
+            &service,
+            renderer_save_request(
+                &settings,
+                serde_json::json!({"kind": "select_generic"}),
+                Some(&settings.models[0].id),
+            ),
         ))
         .unwrap();
     assert_eq!(
@@ -1112,10 +1399,13 @@ fn unchanged_save_preserves_the_legacy_v1_profile_shape() {
 
     settings.models[0].display_name = "Metadata edit".to_string();
     let saved = service
-        .save_model_settings_request(renderer_save_request(
-            &settings,
-            serde_json::json!({"kind": "unchanged"}),
-            Some(&settings.models[0].id),
+        .save_model_settings_request(with_current_configuration_revision(
+            &service,
+            renderer_save_request(
+                &settings,
+                serde_json::json!({"kind": "unchanged"}),
+                Some(&settings.models[0].id),
+            ),
         ))
         .unwrap();
 
@@ -1127,6 +1417,49 @@ fn unchanged_save_preserves_the_legacy_v1_profile_shape() {
             "reasoning": {"mode": "provider_default", "effort": "provider_default"}
         })
     );
+}
+
+#[test]
+fn renderer_save_rejects_an_explicit_stale_configuration_revision() {
+    let fixture = StorageFixture::new();
+    let service = fixture.service();
+    let settings = revision_test_settings();
+    service.save_model_settings(settings.clone()).unwrap();
+    let original = service.load_model_settings_for_edit().unwrap().unwrap();
+
+    let mut first_edit = settings.clone();
+    first_edit.models[0].display_name = "First committed edit".to_string();
+    let mut first_request = renderer_save_request(
+        &first_edit,
+        serde_json::json!({"kind": "unchanged"}),
+        Some(&first_edit.models[0].id),
+    );
+    first_request.expected_revision = Some(original.configuration_revision.clone());
+    let committed = service.save_model_settings_request(first_request).unwrap();
+    assert_ne!(
+        committed.configuration_revision,
+        original.configuration_revision
+    );
+
+    let mut stale_edit = settings;
+    stale_edit.models[0].display_name = "Stale edit".to_string();
+    let mut stale_request = renderer_save_request(
+        &stale_edit,
+        serde_json::json!({"kind": "unchanged"}),
+        Some(&stale_edit.models[0].id),
+    );
+    stale_request.expected_revision = Some(original.configuration_revision);
+    assert!(matches!(
+        service.save_model_settings_request(stale_request),
+        Err(ModelSettingsSaveError::Other(message)) if message == "model settings revision conflict"
+    ));
+
+    let current = service.load_model_settings_for_edit().unwrap().unwrap();
+    assert_eq!(
+        current.configuration_revision,
+        committed.configuration_revision
+    );
+    assert_eq!(current.models[0].display_name, "First committed edit");
 }
 
 #[test]
@@ -1216,10 +1549,13 @@ fn unsupported_profile_survives_unrelated_save_and_model_id_rename() {
     let mut price_edit = loaded.clone();
     price_edit.models[0].input_price = "3.5".to_string();
     let saved = service
-        .save_model_settings_request(renderer_save_request(
-            &price_edit,
-            serde_json::json!({"kind": "unchanged"}),
-            Some(&price_edit.models[0].id),
+        .save_model_settings_request(with_current_configuration_revision(
+            &service,
+            renderer_save_request_preserving_credentials(
+                &price_edit,
+                serde_json::json!({"kind": "unchanged"}),
+                Some(&price_edit.models[0].id),
+            ),
         ))
         .unwrap();
     assert_eq!(
@@ -1243,7 +1579,7 @@ fn unsupported_profile_survives_unrelated_save_and_model_id_rename() {
     let mut renamed = saved;
     renamed.models[0].display_name = "Renamed model".to_string();
     let renamed = service
-        .save_model_settings_request(renderer_save_request(
+        .save_model_settings_request(renderer_save_request_preserving_credentials(
             &renamed,
             serde_json::json!({"kind": "unchanged"}),
             Some("revision-model"),
@@ -1257,6 +1593,324 @@ fn unsupported_profile_survives_unrelated_save_and_model_id_rename() {
             .as_str(),
         "future_profile"
     );
+}
+
+#[test]
+fn selected_model_resolution_does_not_open_unrelated_override_credentials() {
+    let fixture = StorageFixture::new();
+    let service = fixture.service();
+    let mut first = official_profile_test_model(
+        "model-a",
+        Some("https://provider-a.example/v1/chat/completions"),
+        Some("provider-a-secret"),
+    );
+    first.display_name = "Provider A".to_string();
+    let mut second = official_profile_test_model(
+        "model-b",
+        Some("https://provider-b.example/v1/chat/completions"),
+        Some("provider-b-secret"),
+    );
+    second.display_name = "Provider B".to_string();
+    service
+        .save_model_settings(ModelSettingsRecord {
+            api_url: String::new(),
+            api_token: String::new(),
+            search_mode: "disabled".to_string(),
+            tavily_api_key: String::new(),
+            models: vec![first, second],
+        })
+        .unwrap();
+    delete_stored_credential(&fixture, "api_token_override_ref", Some("model-b"));
+
+    let selected = service
+        .load_model_settings_snapshot_for_model("model-a", false)
+        .unwrap()
+        .unwrap();
+    assert_eq!(selected.settings.models.len(), 1);
+    assert_eq!(selected.settings.models[0].id, "model-a");
+    assert_eq!(
+        selected.settings.models[0].api_token_override.as_deref(),
+        Some("provider-a-secret")
+    );
+    assert!(service
+        .load_model_settings_snapshot_for_model("model-b", false)
+        .is_err());
+}
+
+#[test]
+fn disabled_search_does_not_open_an_unavailable_tavily_credential() {
+    let fixture = StorageFixture::new();
+    let service = fixture.service();
+    let mut settings = revision_test_settings();
+    settings.tavily_api_key = "tavily-secret".to_string();
+    service.save_model_settings(settings).unwrap();
+    delete_stored_credential(&fixture, "tavily_api_key_ref", None);
+
+    let snapshot = service
+        .load_model_settings_snapshot_for_model("revision-model", true)
+        .unwrap()
+        .unwrap();
+    assert!(snapshot.settings.tavily_api_key.is_empty());
+    assert_eq!(snapshot.settings.api_token, "fixed-revision-test-token");
+}
+
+#[test]
+fn model_provider_secrets_never_enter_sqlite_or_debug_output() {
+    const GLOBAL: &str = "db-canary-global-18c9";
+    const SEARCH: &str = "db-canary-search-27da";
+    const OVERRIDE: &str = "db-canary-override-36eb";
+    let fixture = StorageFixture::new();
+    let service = fixture.service();
+    let mut model = official_profile_test_model(
+        "model-secret-test",
+        Some("https://provider.example/v1/chat/completions"),
+        Some(OVERRIDE),
+    );
+    model.display_name = "Secret storage test".to_string();
+    service
+        .save_model_settings(ModelSettingsRecord {
+            api_url: "https://global.example/v1/chat/completions".to_string(),
+            api_token: GLOBAL.to_string(),
+            search_mode: "tavily".to_string(),
+            tavily_api_key: SEARCH.to_string(),
+            models: vec![model],
+        })
+        .unwrap();
+    drop(service);
+
+    for path in [
+        fixture.root.join("storage.sqlite"),
+        fixture.root.join("storage.sqlite-wal"),
+    ] {
+        if let Ok(bytes) = std::fs::read(path) {
+            for secret in [GLOBAL, SEARCH, OVERRIDE] {
+                assert!(!bytes
+                    .windows(secret.len())
+                    .any(|window| window == secret.as_bytes()));
+            }
+        }
+    }
+
+    let request = renderer_save_request(
+        &revision_test_settings(),
+        serde_json::json!({"kind": "select_generic"}),
+        None,
+    );
+    let rendered = format!("{request:?}");
+    assert!(!rendered.contains("fixed-revision-test-token"));
+}
+
+#[test]
+fn failed_model_credential_publish_leaves_no_configuration_or_orphaned_staging() {
+    let fixture = StorageFixture::new();
+    let credentials = Arc::new(FaultInjectingModelCredentialStore::default());
+    credentials.fail_replace.store(true, Ordering::SeqCst);
+    let service = StorageService::open_with_model_credentials(
+        &fixture.root.join("storage.sqlite"),
+        credentials,
+    )
+    .unwrap();
+    let request = renderer_save_request(
+        &revision_test_settings(),
+        serde_json::json!({"kind": "select_generic"}),
+        None,
+    );
+
+    assert!(matches!(
+        service.save_model_settings_request(request),
+        Err(ModelSettingsSaveError::Other(message))
+            if message == "provider credential store is unavailable"
+    ));
+    assert!(service.load_model_settings_for_edit().unwrap().is_none());
+    assert_eq!(
+        model_credential_journal_count(&service, "model_provider_credential_staging"),
+        0
+    );
+    assert_eq!(
+        model_credential_journal_count(&service, "model_provider_credential_cleanup"),
+        0
+    );
+}
+
+#[test]
+fn failed_sqlite_publication_leaves_a_retryable_staging_receipt() {
+    let fixture = StorageFixture::new();
+    let credentials = Arc::new(FaultInjectingModelCredentialStore::default());
+    let service = StorageService::open_with_model_credentials(
+        &fixture.root.join("storage.sqlite"),
+        credentials.clone(),
+    )
+    .unwrap();
+    {
+        let connection = service.state.connection().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TRIGGER fail_model_settings_publication
+                 BEFORE INSERT ON models
+                 BEGIN
+                     SELECT RAISE(FAIL, 'injected publication failure');
+                 END;",
+            )
+            .unwrap();
+    }
+
+    let request = renderer_save_request(
+        &revision_test_settings(),
+        serde_json::json!({"kind": "select_generic"}),
+        None,
+    );
+    assert!(service.save_model_settings_request(request).is_err());
+    assert!(service.load_model_settings_for_edit().unwrap().is_none());
+    assert_eq!(
+        model_credential_journal_count(&service, "model_provider_credential_staging"),
+        1
+    );
+    let staged = {
+        let connection = service.state.connection().unwrap();
+        config_repository::list_model_provider_credential_staging(&connection)
+            .unwrap()
+            .pop()
+            .unwrap()
+            .credential_ref
+    };
+    let staged_reference = CredentialReference::parse(staged).unwrap();
+    assert!(credentials.get(&staged_reference).unwrap().is_some());
+
+    let report = service.reconcile_model_provider_credentials().unwrap();
+    assert_eq!(report.removed_orphaned_credentials, 1);
+    assert!(credentials.get(&staged_reference).unwrap().is_none());
+    assert_eq!(
+        model_credential_journal_count(&service, "model_provider_credential_staging"),
+        0
+    );
+}
+
+#[test]
+fn reconciliation_keeps_an_active_credential_after_an_ambiguous_commit_receipt() {
+    let fixture = StorageFixture::new();
+    let credentials = Arc::new(FaultInjectingModelCredentialStore::default());
+    let service = StorageService::open_with_model_credentials(
+        &fixture.root.join("storage.sqlite"),
+        credentials.clone(),
+    )
+    .unwrap();
+    service
+        .save_model_settings_request(renderer_save_request(
+            &revision_test_settings(),
+            serde_json::json!({"kind": "select_generic"}),
+            None,
+        ))
+        .unwrap();
+    let active_ref = {
+        let mut connection = service.state.connection().unwrap();
+        config_repository::load_model_settings(&mut connection)
+            .unwrap()
+            .unwrap()
+            .api_token_ref
+            .unwrap()
+    };
+    {
+        let mut connection = service.state.connection().unwrap();
+        config_repository::stage_model_provider_credentials(
+            &mut connection,
+            std::slice::from_ref(&active_ref),
+        )
+        .unwrap();
+    }
+    let active_reference = CredentialReference::parse(active_ref).unwrap();
+
+    let report = service.reconcile_model_provider_credentials().unwrap();
+    assert_eq!(report.completed_staging, 1);
+    assert_eq!(report.removed_orphaned_credentials, 0);
+    assert!(credentials.get(&active_reference).unwrap().is_some());
+    assert_eq!(
+        model_credential_journal_count(&service, "model_provider_credential_staging"),
+        0
+    );
+}
+
+#[test]
+fn failed_retired_credential_delete_keeps_a_retryable_cleanup_receipt() {
+    let fixture = StorageFixture::new();
+    let credentials = Arc::new(FaultInjectingModelCredentialStore::default());
+    let service = StorageService::open_with_model_credentials(
+        &fixture.root.join("storage.sqlite"),
+        credentials.clone(),
+    )
+    .unwrap();
+    let configured = service
+        .save_model_settings_request(renderer_save_request(
+            &revision_test_settings(),
+            serde_json::json!({"kind": "select_generic"}),
+            None,
+        ))
+        .unwrap();
+
+    credentials.fail_delete.store(true, Ordering::SeqCst);
+    let mut clear = renderer_save_request_preserving_credentials(
+        &configured,
+        serde_json::json!({"kind": "unchanged"}),
+        Some(&configured.models[0].id),
+    );
+    clear.api_token_mutation = CredentialMutation::Clear;
+    let cleared = service.save_model_settings_request(clear).unwrap();
+    assert_eq!(cleared.api_token_status, CredentialStatus::Missing);
+    assert_eq!(
+        model_credential_journal_count(&service, "model_provider_credential_cleanup"),
+        1
+    );
+
+    credentials.fail_delete.store(false, Ordering::SeqCst);
+    let report = service.reconcile_model_provider_credentials().unwrap();
+    assert_eq!(report.removed_retired_credentials, 1);
+    assert_eq!(
+        model_credential_journal_count(&service, "model_provider_credential_cleanup"),
+        0
+    );
+}
+
+#[test]
+fn startup_reconciliation_deletes_an_unpublished_model_credential() {
+    let fixture = StorageFixture::new();
+    let credentials = Arc::new(FaultInjectingModelCredentialStore::default());
+    let service = StorageService::open_with_model_credentials(
+        &fixture.root.join("storage.sqlite"),
+        credentials.clone(),
+    )
+    .unwrap();
+    let reference = credentials.new_reference();
+    {
+        let mut connection = service.state.connection().unwrap();
+        config_repository::stage_model_provider_credentials(
+            &mut connection,
+            &[reference.as_str().to_string()],
+        )
+        .unwrap();
+    }
+    credentials
+        .replace(
+            &reference,
+            CredentialSecret::new("unpublished-test-secret").unwrap(),
+        )
+        .unwrap();
+
+    let report = service.reconcile_model_provider_credentials().unwrap();
+    assert_eq!(report.removed_orphaned_credentials, 1);
+    assert_eq!(
+        model_credential_journal_count(&service, "model_provider_credential_staging"),
+        0
+    );
+    assert!(credentials.get(&reference).unwrap().is_none());
+}
+
+#[test]
+fn legacy_raw_secret_fields_are_rejected_by_the_save_wire() {
+    let mut value = renderer_save_request_value(&revision_test_settings());
+    value
+        .as_object_mut()
+        .unwrap()
+        .insert("apiToken".to_string(), serde_json::json!("legacy-secret"));
+    assert!(serde_json::from_value::<ModelSettingsSaveRequest>(value).is_err());
 }
 
 #[test]
@@ -1433,7 +2087,7 @@ fn rejects_zero_context_window_without_overwriting_saved_settings() {
 }
 
 #[test]
-fn requires_model_connection_overrides_to_be_saved_as_a_complete_pair() {
+fn incomplete_model_override_is_saved_for_editing_but_never_mixes_with_global_connection() {
     let fixture = StorageFixture::new();
     let service = fixture.service();
     let valid = ModelSettingsRecord {
@@ -1460,19 +2114,17 @@ fn requires_model_connection_overrides_to_be_saved_as_a_complete_pair() {
     };
     service.save_model_settings(valid.clone()).unwrap();
 
-    let mut invalid = valid;
-    invalid.models[0].api_token_override = None;
-    assert!(service.save_model_settings(invalid).is_err());
+    let mut incomplete = valid;
+    incomplete.models[0].api_token_override = None;
+    service.save_model_settings(incomplete).unwrap();
 
     let stored = service.load_model_settings().unwrap().unwrap();
     assert_eq!(
         stored.models[0].api_url_override.as_deref(),
         Some("https://model.example/v1")
     );
-    assert_eq!(
-        stored.models[0].api_token_override.as_deref(),
-        Some("model-token")
-    );
+    assert_eq!(stored.models[0].api_token_override.as_deref(), None);
+    assert!(stored.effective_connection_for(&stored.models[0]).is_err());
 }
 
 #[test]

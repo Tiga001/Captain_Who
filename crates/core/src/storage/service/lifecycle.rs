@@ -6,6 +6,9 @@ pub struct StorageService {
     pub(super) image_artifact_root: PathBuf,
     pub(super) managed_artifact_root: PathBuf,
     pub(super) managed_command_workspaces: ManagedCommandWorkspaceRegistry,
+    pub(super) model_credentials:
+        Arc<dyn crate::image_generation::credential_store::CredentialStore>,
+    pub(super) model_credential_lock: Mutex<()>,
 }
 
 impl StorageService {
@@ -17,7 +20,23 @@ impl StorageService {
     }
 
     pub fn open(database_path: &Path) -> Result<Self, Box<dyn std::error::Error>> {
-        Self::open_internal(database_path, true)
+        if !cfg!(debug_assertions) {
+            return Err("production storage requires an explicit model credential backend".into());
+        }
+        Self::open_with_model_credentials(
+            database_path,
+            Arc::new(crate::image_generation::credential_store::InMemoryCredentialStore::default()),
+        )
+    }
+
+    /// Opens storage with the Host-owned credential backend used for language-model and search
+    /// provider secrets. Production callers must inject a native store; tests and isolated tools
+    /// may use an in-memory store explicitly.
+    pub fn open_with_model_credentials(
+        database_path: &Path,
+        model_credentials: Arc<dyn crate::image_generation::credential_store::CredentialStore>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::open_internal(database_path, true, model_credentials)
     }
 
     /// Opens the strict storage boundary without touching sibling filesystem stores.
@@ -28,12 +47,23 @@ impl StorageService {
     pub fn open_for_development_reset(
         database_path: &Path,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        Self::open_internal(database_path, false)
+        Self::open_for_development_reset_with_model_credentials(
+            database_path,
+            Arc::new(crate::image_generation::credential_store::InMemoryCredentialStore::default()),
+        )
+    }
+
+    pub fn open_for_development_reset_with_model_credentials(
+        database_path: &Path,
+        model_credentials: Arc<dyn crate::image_generation::credential_store::CredentialStore>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::open_internal(database_path, false, model_credentials)
     }
 
     fn open_internal(
         database_path: &Path,
         run_startup_maintenance: bool,
+        model_credentials: Arc<dyn crate::image_generation::credential_store::CredentialStore>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let attachment_root = database_path
             .parent()
@@ -61,6 +91,8 @@ impl StorageService {
             managed_command_workspaces: ManagedCommandWorkspaceRegistry::new(
                 managed_command_workspace_root,
             ),
+            model_credentials,
+            model_credential_lock: Mutex::new(()),
         };
 
         if run_startup_maintenance {

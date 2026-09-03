@@ -182,6 +182,8 @@ const model: ModelConfig = {
   id: 'model-config-deepseek',
   providerModelId: 'deepseek-v4-flash',
   displayName: 'Provider Model',
+  apiTokenOverrideStatus: 'missing',
+  apiTokenOverrideMutation: { type: 'keep' },
   supportsImage: false,
   contextWindowTokens: 128_000,
   providerProfileConfig: {
@@ -250,6 +252,103 @@ describe('ModelForm vendor controls', () => {
     await saveButton.click()
     await expect.poll(() => onSave.mock.calls.length).toBe(1)
     expect(onSave.mock.calls[0]![0].displayName).toBe('😀'.repeat(128))
+  })
+
+  it('allows an override URL to be saved before its credential is configured', async () => {
+    const onSave = vi.fn().mockResolvedValue(undefined)
+    const screen = await render(<ModelForm {...commonProps} onSave={onSave} />)
+    await screen.getByPlaceholder('configuration.providerModelIdPlaceholder').fill('generic-model')
+    await screen.getByPlaceholder('configuration.displayNamePlaceholder').fill('Generic model')
+    await screen.getByRole('button', { name: 'configuration.more' }).click()
+    await screen
+      .getByPlaceholder('configuration.modelApiUrlPlaceholder')
+      .fill('https://override.example/v1/chat/completions')
+
+    await expect
+      .element(screen.getByText('configuration.modelConnectionPairRequired'))
+      .toBeVisible()
+    const saveButton = screen.getByRole('button', { name: 'configuration.save' })
+    await expect.poll(() => (saveButton.element() as HTMLButtonElement).disabled).toBe(false)
+    await saveButton.click()
+    await expect.poll(() => onSave.mock.calls.length).toBe(1)
+    expect(onSave.mock.calls[0]![0]).toMatchObject({
+      apiUrlOverride: 'https://override.example/v1/chat/completions',
+      apiTokenOverrideMutation: { type: 'keep' },
+      apiTokenOverrideStatus: 'missing'
+    })
+  })
+
+  it('rejects insecure or credential-bearing override URLs before Host submission', async () => {
+    const onSave = vi.fn().mockResolvedValue(undefined)
+    const screen = await render(<ModelForm {...commonProps} onSave={onSave} />)
+    await screen.getByPlaceholder('configuration.providerModelIdPlaceholder').fill('generic-model')
+    await screen.getByPlaceholder('configuration.displayNamePlaceholder').fill('Generic model')
+    await screen.getByRole('button', { name: 'configuration.more' }).click()
+    const url = screen.getByPlaceholder('configuration.modelApiUrlPlaceholder')
+    const saveButton = screen.getByRole('button', { name: 'configuration.save' })
+
+    await url.fill('http://provider.example/v1/chat/completions')
+    await expect.element(screen.getByText('configuration.invalidApiUrl')).toBeVisible()
+    await expect.element(saveButton).toBeDisabled()
+
+    await url.fill('https://user@provider.example/v1/chat/completions?token=secret')
+    await expect.element(screen.getByText('configuration.invalidApiUrl')).toBeVisible()
+    await expect.element(saveButton).toBeDisabled()
+
+    await url.fill('https://provider.example/v1/chat/completions')
+    await expect.element(screen.getByText('configuration.invalidApiUrl')).not.toBeInTheDocument()
+    await expect.poll(() => (saveButton.element() as HTMLButtonElement).disabled).toBe(false)
+  })
+
+  it('allows an override credential to be saved before its URL is configured', async () => {
+    const onSave = vi.fn().mockResolvedValue(undefined)
+    const screen = await render(<ModelForm {...commonProps} onSave={onSave} />)
+    await screen.getByPlaceholder('configuration.providerModelIdPlaceholder').fill('generic-model')
+    await screen.getByPlaceholder('configuration.displayNamePlaceholder').fill('Generic model')
+    await screen.getByRole('button', { name: 'configuration.more' }).click()
+    await screen.getByLabelText('configuration.modelApiToken').fill('override-key')
+
+    await expect
+      .element(screen.getByText('configuration.modelConnectionPairRequired'))
+      .toBeVisible()
+    const saveButton = screen.getByRole('button', { name: 'configuration.save' })
+    await expect.poll(() => (saveButton.element() as HTMLButtonElement).disabled).toBe(false)
+    await saveButton.click()
+    await expect.poll(() => onSave.mock.calls.length).toBe(1)
+    expect(onSave.mock.calls[0]![0]).toMatchObject({
+      apiUrlOverride: '',
+      apiTokenOverrideMutation: { type: 'replace', value: 'override-key' }
+    })
+  })
+
+  it('allows a configured override credential to be cleared while preserving its URL', async () => {
+    const onSave = vi.fn().mockResolvedValue(undefined)
+    const screen = await render(
+      <ModelForm
+        {...commonProps}
+        model={{
+          ...model,
+          apiUrlOverride: 'https://override.example/v1/chat/completions',
+          apiTokenOverrideStatus: 'configured'
+        }}
+        onSave={onSave}
+      />
+    )
+
+    await screen.getByRole('button', { name: 'configuration.credential.clear' }).click()
+    await screen.getByRole('button', { name: 'configuration.credential.clearConfirm' }).click()
+    await expect
+      .element(screen.getByText('configuration.modelConnectionPairRequired'))
+      .toBeVisible()
+    const saveButton = screen.getByRole('button', { name: 'configuration.save' })
+    await expect.poll(() => (saveButton.element() as HTMLButtonElement).disabled).toBe(false)
+    await saveButton.click()
+    await expect.poll(() => onSave.mock.calls.length).toBe(1)
+    expect(onSave.mock.calls[0]![0]).toMatchObject({
+      apiUrlOverride: 'https://override.example/v1/chat/completions',
+      apiTokenOverrideMutation: { type: 'clear' },
+      apiTokenOverrideStatus: 'configured'
+    })
   })
 
   it('shows only localized vendor names and never projects family/profile identities', async () => {

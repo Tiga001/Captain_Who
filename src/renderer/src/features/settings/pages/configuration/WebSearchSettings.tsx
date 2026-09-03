@@ -1,24 +1,33 @@
 import { useState } from 'react'
+import type { CredentialMutation, CredentialStatus } from '@mycopilot/protocol'
 import { useFrontendConfig } from '../../../../config/FrontendConfigProvider'
 import type { SearchMode } from './configurationTypes'
-import { SecretInput } from './SecretInput'
+import { CredentialInput } from './CredentialInput'
 
 interface WebSearchSettingsProps {
   searchMode: SearchMode
-  tavilyApiKey: string
+  tavilyApiKeyStatus: CredentialStatus
   onSearchModeChange: (value: SearchMode) => void
-  onTavilyApiKeyChange: (value: string) => void
+  onTavilyApiKeyCommit: (mutation: CredentialMutation) => Promise<void>
 }
 
 export function WebSearchSettings({
   searchMode,
-  tavilyApiKey,
+  tavilyApiKeyStatus,
   onSearchModeChange,
-  onTavilyApiKeyChange
+  onTavilyApiKeyCommit
 }: WebSearchSettingsProps) {
   const { t } = useFrontendConfig()
   const [isApiKeyRequiredDialogOpen, setApiKeyRequiredDialogOpen] = useState(false)
-  const hasTavilyApiKey = tavilyApiKey.trim().length > 0
+  const [tavilyApiKeyMutation, setTavilyApiKeyMutation] = useState<CredentialMutation>({
+    type: 'keep'
+  })
+  const hasTavilyApiKey =
+    tavilyApiKeyMutation.type === 'replace'
+      ? tavilyApiKeyMutation.value.length > 0
+      : tavilyApiKeyMutation.type === 'clear'
+        ? false
+        : tavilyApiKeyStatus === 'configured'
   const isSearchAllowed = searchMode !== 'disabled' && hasTavilyApiKey
 
   const toggleWebSearch = () => {
@@ -33,13 +42,6 @@ export function WebSearchSettings({
     }
 
     onSearchModeChange('auto')
-  }
-
-  const updateTavilyApiKey = (value: string) => {
-    onTavilyApiKeyChange(value)
-    if (searchMode !== 'disabled' && value.trim().length === 0) {
-      onSearchModeChange('disabled')
-    }
   }
 
   return (
@@ -78,10 +80,16 @@ export function WebSearchSettings({
               <span className="settings-list-row__title">{t('configuration.tavilyApiKey')}</span>
             </span>
             <span className="settings-list-row__control">
-              <SecretInput
+              <CredentialInput
                 ariaLabel={t('configuration.tavilyApiKey')}
-                value={tavilyApiKey}
-                onChange={updateTavilyApiKey}
+                mutation={tavilyApiKeyMutation}
+                onCommit={async (mutation) => {
+                  await onTavilyApiKeyCommit(mutation)
+                  setTavilyApiKeyMutation({ type: 'keep' })
+                }}
+                onMutationChange={setTavilyApiKeyMutation}
+                placeholder={t('configuration.credential.placeholder')}
+                status={tavilyApiKeyStatus}
               />
             </span>
           </div>

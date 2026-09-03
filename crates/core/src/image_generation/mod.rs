@@ -37,7 +37,7 @@ pub use credential_store::{
     CredentialDeleteOutcome, CredentialReference, CredentialSecret, CredentialStore,
     CredentialStoreBackend, CredentialStoreError, CredentialStoreOperation,
     DevelopmentFileCredentialStore, InMemoryCredentialStore, SystemCredentialStore,
-    IMAGE_GENERATION_CREDENTIAL_SERVICE,
+    IMAGE_GENERATION_CREDENTIAL_SERVICE, MODEL_PROVIDER_CREDENTIAL_SERVICE,
 };
 pub use execution::{
     ImageGenerationExecutionFailure, ImageGenerationExecutionFailureCode,

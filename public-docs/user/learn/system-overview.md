@@ -4,7 +4,7 @@ description: 从桌面界面到本地 Core、模型服务和外部工具，理�
 status: current
 audience: user
 owner: product-docs
-last_verified: 2026-08-23
+last_verified: 2026-09-03
 ---
 
 # 通俗系统总览
@@ -51,7 +51,7 @@ Multi-Agent 只是在这条链路上增加持久的父子任务树；Scheduled A
 
 应用使用操作系统分配的用户数据目录保存 SQLite 数据库和受管文件。项目源文件仍留在你选择的项目目录。移除项目会删除 Captain Who 中与该项目关联的本地对话、消息和附件记录，但不会修改项目目录里的源文件。
 
-模型 Token 与 Tavily Key 当前保存在本机数据库中，并非系统钥匙串；图片生成凭据有独立的凭据存储边界。不要把凭据写进 Prompt、MCP 参数、项目文件或截图。
+模型 Token、Tavily Key 和图片生成 API Key 与 SQLite 配置分离：数据库只保存不透明引用与状态，密钥由独立 Credential Store 保存。具备稳定签名身份的发行构建使用操作系统凭据存储，未签名 macOS 开发构建使用数据目录内权限收紧的私有文件。不要把凭据写进 Prompt、MCP 参数、项目文件或截图。
 
 ## 用户最重要的三个判断
 

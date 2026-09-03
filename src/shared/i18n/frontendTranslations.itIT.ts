@@ -2241,7 +2241,18 @@ export const itITTranslations = {
   'configuration.modelApiTokenPlaceholder': 'Lo spazio vuoto utilizza il API Token globale',
   'configuration.showSecretValue': 'Mostra valore segreto',
   'configuration.hideSecretValue': 'Nascondi valore segreto',
-  'configuration.invalidApiUrl': 'Inserisci un http o https valido URL',
+  'configuration.credential.placeholder': 'Inserisci la chiave API',
+  'configuration.credential.configured': 'Configurata',
+  'configuration.credential.replace': 'Sostituisci la chiave salvata',
+  'configuration.credential.cancelReplace': 'Annulla sostituzione',
+  'configuration.credential.clear': 'Cancella la chiave salvata',
+  'configuration.credential.clearTitle': 'Cancellare la chiave salvata?',
+  'configuration.credential.clearDescription':
+    'Dopo la conferma, questa chiave verrà rimossa dall’archivio sicuro.',
+  'configuration.credential.clearConfirm': 'Cancella',
+  'configuration.credential.unavailable': 'Archivio sicuro non disponibile',
+  'configuration.invalidApiUrl':
+    'Usa un URL HTTPS senza credenziali, parametri di query o frammenti. In sviluppo è consentito anche HTTP su loopback.',
   'configuration.modelConnectionPairRequired':
     'URL e API Token devono essere entrambi compilati o entrambi vuoti',
   'configuration.imageGeneration.title': 'Generazione di immagini',

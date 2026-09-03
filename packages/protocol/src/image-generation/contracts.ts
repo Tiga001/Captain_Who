@@ -1,3 +1,5 @@
+import type { CredentialMutation, CredentialStatus } from '../storage'
+
 export const IMAGE_GENERATION_CONFIGURATION_SCHEMA_VERSION = 2 as const
 export const IMAGE_GENERATION_CONFIGURATION_ERROR_CODE = -32020 as const
 
@@ -38,7 +40,7 @@ export interface ImageGenerationDefaults {
 }
 
 /** Secret-free availability state used outside the explicit settings-edit response. */
-export type ImageGenerationCredentialStatus = 'missing' | 'configured' | 'unavailable'
+export type ImageGenerationCredentialStatus = CredentialStatus
 
 /**
  * Backend-authoritative effective readiness. `readyUnverified` means configuration-complete, not
@@ -69,15 +71,12 @@ export interface ImageGenerationConfiguration {
 export interface ImageGenerationGetConfigurationOutput {
   schemaVersion: typeof IMAGE_GENERATION_CONFIGURATION_SCHEMA_VERSION
   configuration: ImageGenerationConfiguration
-  /** Existing value exposed only to the user-initiated settings editor, matching other API fields. */
-  apiKey: string | null
 }
 
 /**
  * Secrets use an explicit mutation union so omitted or stale form state can never erase a key.
  */
-export type ImageGenerationCredentialMutation =
-  { type: 'keep' } | { type: 'replace'; value: string } | { type: 'clear' }
+export type ImageGenerationCredentialMutation = CredentialMutation
 
 /**
  * Replaces all non-enablement fields in one compare-and-swap operation. Empty endpoint/model

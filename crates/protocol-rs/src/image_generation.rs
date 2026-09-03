@@ -70,7 +70,6 @@ pub struct ImageGenerationConfigurationDto {
 pub struct ImageGenerationGetConfigurationResponse {
     pub schema_version: u32,
     pub configuration: ImageGenerationConfigurationDto,
-    pub api_key: Option<String>,
 }
 
 impl fmt::Debug for ImageGenerationGetConfigurationResponse {
@@ -79,7 +78,6 @@ impl fmt::Debug for ImageGenerationGetConfigurationResponse {
             .debug_struct("ImageGenerationGetConfigurationResponse")
             .field("schema_version", &self.schema_version)
             .field("configuration", &self.configuration)
-            .field("api_key", &self.api_key.as_ref().map(|_| "[REDACTED]"))
             .finish()
     }
 }

@@ -1,11 +1,43 @@
 import { describe, expect, it } from 'vitest'
 import {
+  parseProviderProfileUiDescriptors,
   parseProviderVendorDescriptors,
   parseProviderVendorModelPolicyDescriptor,
   parseStorageForkConversationErrorData,
   parseStorageForkConversationRequest,
+  parseStorageModelSettingsRecord,
+  parseStorageModelSettingsUpdateRecord,
   parseStorageModelSettingsValidationErrorData
 } from './storageParsers'
+
+describe('Provider Profile UI descriptor parser', () => {
+  const descriptors = [
+    {
+      profileId: 'deepseek_v4_chat',
+      profileVersion: 1,
+      displayName: 'DeepSeek',
+      compatibleDialects: ['openai_chat_completions'],
+      settingsKind: 'deepseek_v4_chat',
+      selectable: true
+    }
+  ] as const
+
+  it('accepts only the bounded presentation-safe projection', () => {
+    expect(parseProviderProfileUiDescriptors(descriptors)).toEqual(descriptors)
+  })
+
+  it.each([
+    [{ ...descriptors[0], credentialRef: 'private-reference' }],
+    [{ ...descriptors[0], runtimeCapabilities: ['private'] }],
+    [{ ...descriptors[0], compatibleDialects: ['openai_chat_completions', 'unknown'] }],
+    [{ ...descriptors[0], displayName: 'x'.repeat(257) }],
+    [descriptors[0], descriptors[0]]
+  ])('rejects secret, runtime, malformed, oversized, and duplicate projections %#', (value) => {
+    expect(() => parseProviderProfileUiDescriptors(value)).toThrow(
+      'Invalid Provider Profile UI descriptors'
+    )
+  })
+})
 
 describe('Provider vendor descriptor parsers', () => {
   const vendors = [
@@ -218,6 +250,132 @@ describe('model settings validation error parser', () => {
   ])('rejects malformed, oversized, or expanded error data %#', (value) => {
     expect(() => parseStorageModelSettingsValidationErrorData(value)).toThrow(
       'Invalid storage model settings validation error data'
+    )
+  })
+})
+
+describe('secret-free model settings parsers', () => {
+  const model = {
+    id: 'model-1',
+    providerModelId: 'provider-model',
+    displayName: 'Model',
+    apiUrlOverride: null,
+    apiTokenOverrideStatus: 'missing',
+    supportsImage: false,
+    contextWindowTokens: 128_000,
+    providerProfileConfig: {
+      schemaVersion: 1,
+      profile: { id: 'generic_openai_chat', version: 1 },
+      reasoning: { mode: 'provider_default', effort: 'provider_default' }
+    },
+    inputPrice: '0',
+    cachedInputPrice: '',
+    outputPrice: '0',
+    enabled: true
+  } as const
+  const snapshot = {
+    configurationRevision: 'model-settings-v1:00000000-0000-4000-8000-000000000001',
+    apiUrl: 'https://provider.example/v1',
+    apiTokenStatus: 'configured',
+    searchMode: 'auto',
+    tavilyApiKeyStatus: 'missing',
+    models: [model]
+  } as const
+  const update = {
+    expectedRevision: snapshot.configurationRevision,
+    apiUrl: snapshot.apiUrl,
+    apiTokenMutation: { type: 'keep' },
+    searchMode: snapshot.searchMode,
+    tavilyApiKeyMutation: { type: 'replace', value: 'new-search-key' },
+    models: [
+      {
+        id: model.id,
+        providerModelId: model.providerModelId,
+        displayName: model.displayName,
+        apiUrlOverride: model.apiUrlOverride,
+        apiTokenOverrideMutation: { type: 'clear' },
+        supportsImage: model.supportsImage,
+        contextWindowTokens: model.contextWindowTokens,
+        providerProfileUpdate: { kind: 'unchanged' },
+        inputPrice: model.inputPrice,
+        cachedInputPrice: model.cachedInputPrice,
+        outputPrice: model.outputPrice,
+        enabled: model.enabled
+      }
+    ]
+  } as const
+
+  it('accepts only status projections and explicit mutation unions', () => {
+    expect(parseStorageModelSettingsRecord(snapshot)).toEqual(snapshot)
+    expect(parseStorageModelSettingsUpdateRecord(update)).toEqual(update)
+    expect(parseStorageModelSettingsUpdateRecord({ ...update, expectedRevision: null })).toEqual({
+      ...update,
+      expectedRevision: null
+    })
+  })
+
+  it.each([
+    { ...snapshot, apiToken: 'legacy-secret' },
+    { ...snapshot, tavilyApiKey: 'legacy-secret' },
+    {
+      ...snapshot,
+      models: [{ ...model, apiTokenOverride: 'legacy-secret' }]
+    },
+    {
+      ...snapshot,
+      models: [{ ...model, credentialRef: 'private-reference' }]
+    },
+    {
+      ...snapshot,
+      models: [
+        {
+          ...model,
+          providerProfileConfig: {
+            ...model.providerProfileConfig,
+            privateRuntimeCapability: true
+          }
+        }
+      ]
+    }
+  ])('rejects legacy secrets and private references in a load projection %#', (value) => {
+    expect(() => parseStorageModelSettingsRecord(value)).toThrow(
+      /credential field|unexpected field/
+    )
+  })
+
+  it('rejects a malformed Host model-settings revision', () => {
+    expect(() =>
+      parseStorageModelSettingsRecord({
+        ...snapshot,
+        configurationRevision: 'not-a-model-settings-revision'
+      })
+    ).toThrow(/configurationRevision/)
+  })
+
+  it.each([
+    { ...update, expectedRevision: 'not-a-model-settings-revision' },
+    { ...update, apiTokenMutation: { type: 'replace' } },
+    { ...update, apiTokenMutation: { type: 'replace', value: '' } },
+    { ...update, apiTokenMutation: { type: 'keep', value: 'smuggled-secret' } },
+    { ...update, tavilyApiKeyMutation: { type: 'unknown' } },
+    { ...update, apiTokenMutation: { type: 'replace', value: 'contains whitespace' } },
+    {
+      ...update,
+      models: [{ ...update.models[0], apiTokenOverrideMutation: { type: 'clear', value: 'x' } }]
+    },
+    {
+      ...update,
+      models: [
+        {
+          ...update.models[0],
+          providerProfileUpdate: { kind: 'unchanged', profileVersion: 1 }
+        }
+      ]
+    },
+    { ...update, apiToken: 'legacy-secret' }
+  ])('rejects malformed mutations and legacy update fields %#', (value) => {
+    expect(() => parseStorageModelSettingsUpdateRecord(value)).toThrow(
+      /storage model settings update request/
     )
   })
 })

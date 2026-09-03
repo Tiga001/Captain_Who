@@ -6,6 +6,7 @@ use super::{LlmChatRequest, LlmMessage, LlmMessagePlacement, LlmMessageRole, Llm
 use crate::protocol::{AgentError, AgentResult, AgentToolDefinition};
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 use serde_json::{json, Map, Value};
+use zeroize::Zeroizing;
 
 #[cfg(test)]
 pub(super) fn build_payload(request: &LlmChatRequest) -> Value {
@@ -377,21 +378,20 @@ fn build_anthropic_tools(tools: &[AgentToolDefinition]) -> Vec<Value> {
 
 pub(super) fn build_openai_headers(api_token: &str) -> AgentResult<HeaderMap> {
     let mut headers = json_headers();
-    let bearer = format!("Bearer {api_token}");
-    headers.insert(
-        AUTHORIZATION,
-        HeaderValue::from_str(&bearer).map_err(|_| AgentError::new("API Token 包含非法字符。"))?,
-    );
+    let bearer = Zeroizing::new(format!("Bearer {api_token}"));
+    let mut authorization =
+        HeaderValue::from_str(&bearer).map_err(|_| AgentError::new("API Token 包含非法字符。"))?;
+    authorization.set_sensitive(true);
+    headers.insert(AUTHORIZATION, authorization);
     Ok(headers)
 }
 
 pub(super) fn build_anthropic_headers(api_token: &str) -> AgentResult<HeaderMap> {
     let mut headers = json_headers();
-    headers.insert(
-        "x-api-key",
-        HeaderValue::from_str(api_token)
-            .map_err(|_| AgentError::new("API Token 包含非法字符。"))?,
-    );
+    let mut api_key = HeaderValue::from_str(api_token)
+        .map_err(|_| AgentError::new("API Token 包含非法字符。"))?;
+    api_key.set_sensitive(true);
+    headers.insert("x-api-key", api_key);
     headers.insert("anthropic-version", HeaderValue::from_static("2023-06-01"));
     Ok(headers)
 }

@@ -1,7 +1,11 @@
 import type {
+  CredentialMutation,
+  CredentialStatus,
   ProviderFamilySettings,
   ProviderFamilySettingsDescriptor,
+  ProviderProfileConfig,
   ProviderModelFamilyId,
+  ProviderProfileUiDescriptor,
   ProviderReasoningEffort,
   ProviderReasoningMode,
   ProviderVendorDescriptor,
@@ -10,6 +14,9 @@ import type {
   StorageConversationForkPoint,
   StorageForkConversationErrorData,
   StorageForkConversationRequest,
+  StorageModelSettingsRecord,
+  StorageModelSettingsUpdateRecord,
+  StorageProviderProfileUpdate,
   StorageModelSettingsValidationErrorData
 } from './storage'
 import {
@@ -20,6 +27,7 @@ import {
   expectOnlyKeys,
   expectRecord,
   expectSafeInteger,
+  expectString,
   invalidProtocolValue
 } from './skills/validation'
 
@@ -28,8 +36,355 @@ const MAX_CONVERSATION_ID_BYTES = 512 * 4
 const MAX_FORK_IDENTIFIER_BYTES = 512 * 4
 const MAX_ACTIVE_COMMAND_SESSIONS = 512
 const MAX_MODEL_DISPLAY_NAME_BYTES = 512
+const MAX_MODEL_SETTINGS_REVISION_BYTES = 128
 const MAX_PROVIDER_DESCRIPTORS = 16
+const MAX_PROVIDER_DESCRIPTOR_DISPLAY_NAME_BYTES = 256
 const MAX_PROVIDER_VENDOR_ID_BYTES = 32
+const MAX_CREDENTIAL_LENGTH = 8_192
+const CREDENTIAL_STATUSES = ['missing', 'configured', 'unavailable'] as const
+const PROVIDER_PROFILE_IDS = [
+  'generic_openai_chat',
+  'generic_anthropic_messages',
+  'deepseek_v4_chat',
+  'deepseek_v4_vision',
+  'moonshot_k3_chat',
+  'moonshot_k2_7_code_chat',
+  'moonshot_k2_6_chat'
+] as const
+const PROVIDER_DIALECTS = ['openai_chat_completions', 'anthropic_messages'] as const
+const FORBIDDEN_CREDENTIAL_PROJECTION_KEYS = new Set([
+  'apiKey',
+  'apiToken',
+  'apiTokenOverride',
+  'credentialRef',
+  'credential_ref',
+  'tavilyApiKey'
+])
+
+export function parseCredentialStatus(value: unknown, context: string): CredentialStatus {
+  return expectEnum(value, CREDENTIAL_STATUSES, context)
+}
+
+export function parseCredentialMutation(value: unknown, context: string): CredentialMutation {
+  const record = expectRecord(value, context)
+  const type = expectEnum(record.type, ['keep', 'replace', 'clear'] as const, `${context}.type`)
+  if (type === 'replace') {
+    expectOnlyKeys(record, ['type', 'value'] as const, context)
+    const credential = expectString(record.value, `${context}.value`)
+    const credentialBytes = new TextEncoder().encode(credential).byteLength
+    if (credentialBytes === 0 || credentialBytes > MAX_CREDENTIAL_LENGTH) {
+      throw invalidProtocolValue(
+        `${context}.value`,
+        `must contain between 1 and ${MAX_CREDENTIAL_LENGTH} UTF-8 bytes`
+      )
+    }
+    if (/[\p{White_Space}\p{Cc}]/u.test(credential)) {
+      throw invalidProtocolValue(`${context}.value`, 'must not contain whitespace or control data')
+    }
+    return { type, value: credential }
+  }
+  expectOnlyKeys(record, ['type'] as const, context)
+  return { type }
+}
+
+function assertSecretFreeProjection(value: unknown, context: string): void {
+  if (Array.isArray(value)) {
+    value.forEach((item, index) => assertSecretFreeProjection(item, `${context}[${index}]`))
+    return
+  }
+  if (typeof value !== 'object' || value === null) return
+  for (const [key, nested] of Object.entries(value)) {
+    if (FORBIDDEN_CREDENTIAL_PROJECTION_KEYS.has(key)) {
+      throw invalidProtocolValue(context, `forbidden credential field ${key}`)
+    }
+    assertSecretFreeProjection(nested, `${context}.${key}`)
+  }
+}
+
+function expectNullableString(value: unknown, context: string): string | null {
+  return value === null ? null : expectString(value, context)
+}
+
+function parseModelSettingsRevision(value: unknown, context: string): string {
+  const revision = expectNonEmptyString(value, context)
+  if (
+    new TextEncoder().encode(revision).byteLength > MAX_MODEL_SETTINGS_REVISION_BYTES ||
+    !/^model-settings-v1:[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(
+      revision
+    )
+  ) {
+    throw invalidProtocolValue(context, 'must be a canonical model settings revision')
+  }
+  return revision
+}
+
+function parseProviderProfileIdentity(value: unknown, context: string) {
+  const profile = expectRecord(value, context)
+  expectOnlyKeys(profile, ['id', 'version'] as const, context)
+  return {
+    id: expectNonEmptyString(profile.id, `${context}.id`),
+    version: expectSafeInteger(profile.version, `${context}.version`, 1)
+  }
+}
+
+function parseProviderProfileConfig(value: unknown, context: string): ProviderProfileConfig {
+  const record = expectRecord(value, context)
+  if (record.schemaVersion === 1) {
+    expectOnlyKeys(record, ['schemaVersion', 'profile', 'reasoning'] as const, context)
+    const reasoningContext = `${context}.reasoning`
+    const reasoning = expectRecord(record.reasoning, reasoningContext)
+    expectOnlyKeys(reasoning, ['mode', 'effort'] as const, reasoningContext)
+    return {
+      schemaVersion: 1,
+      profile: parseProviderProfileIdentity(record.profile, `${context}.profile`),
+      reasoning: {
+        mode: expectEnum(reasoning.mode, REASONING_MODES, `${reasoningContext}.mode`),
+        effort: expectEnum(
+          reasoning.effort,
+          ['provider_default', 'high', 'max'] as const,
+          `${reasoningContext}.effort`
+        )
+      }
+    }
+  }
+  if (record.schemaVersion === 2) {
+    expectOnlyKeys(record, ['schemaVersion', 'vendorId', 'profile', 'settings'] as const, context)
+    return {
+      schemaVersion: 2,
+      vendorId: parseProviderVendorId(record.vendorId, `${context}.vendorId`),
+      profile: parseProviderProfileIdentity(record.profile, `${context}.profile`),
+      settings:
+        record.settings &&
+        typeof record.settings === 'object' &&
+        !Array.isArray(record.settings) &&
+        (record.settings as Record<string, unknown>).kind === 'generic'
+          ? parseGenericSettings(record.settings, `${context}.settings`)
+          : parseProviderFamilySettings(record.settings, `${context}.settings`)
+    }
+  }
+  throw invalidProtocolValue(`${context}.schemaVersion`, 'must be 1 or 2')
+}
+
+function parseStorageProviderProfileUpdate(
+  value: unknown,
+  context: string
+): StorageProviderProfileUpdate {
+  const record = expectRecord(value, context)
+  const kind = expectEnum(
+    record.kind,
+    ['unchanged', 'select_generic', 'select_registered_profile', 'select_vendor'] as const,
+    `${context}.kind`
+  )
+  if (kind === 'unchanged' || kind === 'select_generic') {
+    expectOnlyKeys(record, ['kind'] as const, context)
+    return { kind }
+  }
+  if (kind === 'select_vendor') {
+    expectOnlyKeys(record, ['kind', 'vendorId', 'settings'] as const, context)
+    const settings =
+      record.settings &&
+      typeof record.settings === 'object' &&
+      !Array.isArray(record.settings) &&
+      (record.settings as Record<string, unknown>).kind === 'generic'
+        ? parseGenericSettings(record.settings, `${context}.settings`)
+        : parseProviderFamilySettings(record.settings, `${context}.settings`)
+    return {
+      kind,
+      vendorId: parseProviderVendorId(record.vendorId, `${context}.vendorId`),
+      settings
+    }
+  }
+
+  expectOnlyKeys(record, ['kind', 'profileId', 'settings'] as const, context)
+  const settingsContext = `${context}.settings`
+  const settings = expectRecord(record.settings, settingsContext)
+  expectOnlyKeys(settings, ['kind', 'reasoning'] as const, settingsContext)
+  if (settings.kind !== 'deepseek_v4_chat') {
+    throw invalidProtocolValue(`${settingsContext}.kind`, 'must be deepseek_v4_chat')
+  }
+  const reasoningContext = `${settingsContext}.reasoning`
+  const reasoning = expectRecord(settings.reasoning, reasoningContext)
+  expectOnlyKeys(reasoning, ['mode', 'effort'] as const, reasoningContext)
+  return {
+    kind,
+    profileId: expectNonEmptyString(record.profileId, `${context}.profileId`),
+    settings: {
+      kind: 'deepseek_v4_chat',
+      reasoning: {
+        mode: expectEnum(reasoning.mode, REASONING_MODES, `${reasoningContext}.mode`),
+        effort: expectEnum(
+          reasoning.effort,
+          ['provider_default', 'high', 'max'] as const,
+          `${reasoningContext}.effort`
+        )
+      }
+    }
+  }
+}
+
+export function parseStorageModelSettingsRecord(value: unknown): StorageModelSettingsRecord {
+  const context = 'storage model settings response'
+  assertSecretFreeProjection(value, context)
+  const record = expectRecord(value, context)
+  expectOnlyKeys(
+    record,
+    [
+      'configurationRevision',
+      'apiUrl',
+      'apiTokenStatus',
+      'searchMode',
+      'tavilyApiKeyStatus',
+      'models'
+    ] as const,
+    context
+  )
+  const models = expectArray(record.models, `${context}.models`).map((value, index) => {
+    const modelContext = `${context}.models[${index}]`
+    const model = expectRecord(value, modelContext)
+    expectOnlyKeys(
+      model,
+      [
+        'id',
+        'providerModelId',
+        'displayName',
+        'apiUrlOverride',
+        'apiTokenOverrideStatus',
+        'supportsImage',
+        'contextWindowTokens',
+        'providerProfileConfig',
+        'inputPrice',
+        'cachedInputPrice',
+        'outputPrice',
+        'enabled'
+      ] as const,
+      modelContext
+    )
+    return {
+      id: expectNonEmptyString(model.id, `${modelContext}.id`),
+      providerModelId: expectNonEmptyString(
+        model.providerModelId,
+        `${modelContext}.providerModelId`
+      ),
+      displayName: expectNonEmptyString(model.displayName, `${modelContext}.displayName`),
+      apiUrlOverride: expectNullableString(model.apiUrlOverride, `${modelContext}.apiUrlOverride`),
+      apiTokenOverrideStatus: parseCredentialStatus(
+        model.apiTokenOverrideStatus,
+        `${modelContext}.apiTokenOverrideStatus`
+      ),
+      supportsImage: expectBoolean(model.supportsImage, `${modelContext}.supportsImage`),
+      contextWindowTokens:
+        model.contextWindowTokens === null
+          ? null
+          : expectSafeInteger(model.contextWindowTokens, `${modelContext}.contextWindowTokens`, 1),
+      providerProfileConfig: parseProviderProfileConfig(
+        model.providerProfileConfig,
+        `${modelContext}.providerProfileConfig`
+      ),
+      inputPrice: expectString(model.inputPrice, `${modelContext}.inputPrice`),
+      cachedInputPrice: expectString(model.cachedInputPrice, `${modelContext}.cachedInputPrice`),
+      outputPrice: expectString(model.outputPrice, `${modelContext}.outputPrice`),
+      enabled: expectBoolean(model.enabled, `${modelContext}.enabled`)
+    }
+  })
+  return {
+    configurationRevision: parseModelSettingsRevision(
+      record.configurationRevision,
+      `${context}.configurationRevision`
+    ),
+    apiUrl: expectString(record.apiUrl, `${context}.apiUrl`),
+    apiTokenStatus: parseCredentialStatus(record.apiTokenStatus, `${context}.apiTokenStatus`),
+    searchMode: expectString(record.searchMode, `${context}.searchMode`),
+    tavilyApiKeyStatus: parseCredentialStatus(
+      record.tavilyApiKeyStatus,
+      `${context}.tavilyApiKeyStatus`
+    ),
+    models
+  }
+}
+
+export function parseStorageModelSettingsUpdateRecord(
+  value: unknown
+): StorageModelSettingsUpdateRecord {
+  const context = 'storage model settings update request'
+  const record = expectRecord(value, context)
+  expectOnlyKeys(
+    record,
+    [
+      'expectedRevision',
+      'apiUrl',
+      'apiTokenMutation',
+      'searchMode',
+      'tavilyApiKeyMutation',
+      'models'
+    ] as const,
+    context
+  )
+  const models = expectArray(record.models, `${context}.models`).map((value, index) => {
+    const modelContext = `${context}.models[${index}]`
+    const model = expectRecord(value, modelContext)
+    expectOnlyKeys(
+      model,
+      [
+        'id',
+        'providerModelId',
+        'displayName',
+        'apiUrlOverride',
+        'apiTokenOverrideMutation',
+        'supportsImage',
+        'contextWindowTokens',
+        'providerProfileUpdate',
+        'inputPrice',
+        'cachedInputPrice',
+        'outputPrice',
+        'enabled'
+      ] as const,
+      modelContext
+    )
+    return {
+      id: model.id === null ? null : expectNonEmptyString(model.id, `${modelContext}.id`),
+      providerModelId: expectNonEmptyString(
+        model.providerModelId,
+        `${modelContext}.providerModelId`
+      ),
+      displayName: expectNonEmptyString(model.displayName, `${modelContext}.displayName`),
+      apiUrlOverride: expectNullableString(model.apiUrlOverride, `${modelContext}.apiUrlOverride`),
+      apiTokenOverrideMutation: parseCredentialMutation(
+        model.apiTokenOverrideMutation,
+        `${modelContext}.apiTokenOverrideMutation`
+      ),
+      supportsImage: expectBoolean(model.supportsImage, `${modelContext}.supportsImage`),
+      contextWindowTokens:
+        model.contextWindowTokens === null
+          ? null
+          : expectSafeInteger(model.contextWindowTokens, `${modelContext}.contextWindowTokens`, 1),
+      providerProfileUpdate: parseStorageProviderProfileUpdate(
+        model.providerProfileUpdate,
+        `${modelContext}.providerProfileUpdate`
+      ),
+      inputPrice: expectString(model.inputPrice, `${modelContext}.inputPrice`),
+      cachedInputPrice: expectString(model.cachedInputPrice, `${modelContext}.cachedInputPrice`),
+      outputPrice: expectString(model.outputPrice, `${modelContext}.outputPrice`),
+      enabled: expectBoolean(model.enabled, `${modelContext}.enabled`)
+    }
+  })
+  return {
+    expectedRevision:
+      record.expectedRevision === null
+        ? null
+        : parseModelSettingsRevision(record.expectedRevision, `${context}.expectedRevision`),
+    apiUrl: expectString(record.apiUrl, `${context}.apiUrl`),
+    apiTokenMutation: parseCredentialMutation(
+      record.apiTokenMutation,
+      `${context}.apiTokenMutation`
+    ),
+    searchMode: expectString(record.searchMode, `${context}.searchMode`),
+    tavilyApiKeyMutation: parseCredentialMutation(
+      record.tavilyApiKeyMutation,
+      `${context}.tavilyApiKeyMutation`
+    ),
+    models
+  }
+}
 
 const PROVIDER_MODEL_FAMILIES = [
   'generic_openai_chat',
@@ -256,6 +611,60 @@ export function parseProviderVendorDescriptors(value: unknown): ProviderVendorDe
   })
   if (new Set(result.map(({ vendorId }) => vendorId)).size !== result.length) {
     throw invalidProtocolValue(context, 'must not contain duplicate vendor ids')
+  }
+  return result
+}
+
+export function parseProviderProfileUiDescriptors(value: unknown): ProviderProfileUiDescriptor[] {
+  const context = 'Provider Profile UI descriptors'
+  assertSecretFreeProjection(value, context)
+  const records = expectArray(value, context)
+  if (records.length > MAX_PROVIDER_DESCRIPTORS) {
+    throw invalidProtocolValue(context, `must not exceed ${MAX_PROVIDER_DESCRIPTORS} entries`)
+  }
+  const result = records.map((value, index) => {
+    const itemContext = `${context}[${index}]`
+    const record = expectRecord(value, itemContext)
+    expectOnlyKeys(
+      record,
+      [
+        'profileId',
+        'profileVersion',
+        'displayName',
+        'compatibleDialects',
+        'settingsKind',
+        'selectable'
+      ] as const,
+      itemContext
+    )
+    const displayName = expectNonEmptyString(record.displayName, `${itemContext}.displayName`)
+    if (
+      new TextEncoder().encode(displayName).byteLength > MAX_PROVIDER_DESCRIPTOR_DISPLAY_NAME_BYTES
+    ) {
+      throw invalidProtocolValue(
+        `${itemContext}.displayName`,
+        `must not exceed ${MAX_PROVIDER_DESCRIPTOR_DISPLAY_NAME_BYTES} UTF-8 bytes`
+      )
+    }
+    return {
+      profileId: expectEnum(record.profileId, PROVIDER_PROFILE_IDS, `${itemContext}.profileId`),
+      profileVersion: expectSafeInteger(record.profileVersion, `${itemContext}.profileVersion`, 1),
+      displayName,
+      compatibleDialects: expectUniqueEnumArray(
+        record.compatibleDialects,
+        PROVIDER_DIALECTS,
+        `${itemContext}.compatibleDialects`
+      ),
+      settingsKind: expectEnum(
+        record.settingsKind,
+        ['none', 'deepseek_v4_chat'] as const,
+        `${itemContext}.settingsKind`
+      ),
+      selectable: expectBoolean(record.selectable, `${itemContext}.selectable`)
+    }
+  })
+  if (new Set(result.map(({ profileId }) => profileId)).size !== result.length) {
+    throw invalidProtocolValue(context, 'must not contain duplicate Profile ids')
   }
   return result
 }

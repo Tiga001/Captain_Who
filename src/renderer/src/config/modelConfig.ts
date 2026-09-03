@@ -1,4 +1,6 @@
 import type {
+  CredentialMutation,
+  CredentialStatus,
   ProviderProfileConfig,
   ProviderProfileUiDescriptor,
   StorageProviderProfileUpdate
@@ -12,7 +14,8 @@ interface ModelConfigFields {
   /** Required, unique user-facing identity. It never changes provider routing. */
   displayName: string
   apiUrlOverride?: string
-  apiTokenOverride?: string
+  apiTokenOverrideStatus: CredentialStatus
+  apiTokenOverrideMutation: CredentialMutation
   supportsImage: boolean
   contextWindowTokens?: number
   /** One-shot, explicit profile mutation sent to the authoritative Host save boundary. */
@@ -45,7 +48,8 @@ export interface ModelFormValues {
   providerModelId: string
   displayName: string
   apiUrlOverride: string
-  apiTokenOverride: string
+  apiTokenOverrideStatus: CredentialStatus
+  apiTokenOverrideMutation: CredentialMutation
   contextWindowTokens: string
   inputPrice: string
   cachedInputPrice: string
@@ -54,9 +58,9 @@ export interface ModelFormValues {
   providerProfileUpdate: StorageProviderProfileUpdate
 }
 
-function hasCompleteConnectionPair(apiUrl: string | undefined, apiToken: string | undefined) {
+function hasCompleteConnectionPair(apiUrl: string | undefined, credentialStatus: CredentialStatus) {
   const normalizedUrl = apiUrl?.trim() ?? ''
-  if (!normalizedUrl || !apiToken?.trim()) return false
+  if (!normalizedUrl || credentialStatus !== 'configured') return false
 
   try {
     const parsed = new URL(normalizedUrl)
@@ -69,23 +73,22 @@ function hasCompleteConnectionPair(apiUrl: string | undefined, apiToken: string 
 export function isModelConnectionAvailable(
   model: ModelConfig,
   globalApiUrl: string,
-  globalApiToken: string
+  globalApiTokenStatus: CredentialStatus
 ): boolean {
   const overrideUrl = model.apiUrlOverride?.trim() ?? ''
-  const overrideToken = model.apiTokenOverride?.trim() ?? ''
 
   // A model either supplies a complete override or inherits the complete global pair.
   // Never mix one model-level value with one global value, because that can target the
   // wrong provider with the wrong credential.
-  if (overrideUrl.length > 0 || overrideToken.length > 0) {
-    return hasCompleteConnectionPair(overrideUrl, overrideToken)
+  if (overrideUrl.length > 0 || model.apiTokenOverrideStatus !== 'missing') {
+    return hasCompleteConnectionPair(overrideUrl, model.apiTokenOverrideStatus)
   }
 
-  return hasCompleteConnectionPair(globalApiUrl, globalApiToken)
+  return hasCompleteConnectionPair(globalApiUrl, globalApiTokenStatus)
 }
 
 function inheritsGlobalConnection(model: ModelConfig): boolean {
-  return !model.apiUrlOverride?.trim() && !model.apiTokenOverride?.trim()
+  return !model.apiUrlOverride?.trim() && model.apiTokenOverrideStatus === 'missing'
 }
 
 function hasRegisteredGenericProfile(
@@ -135,12 +138,10 @@ export function prepareModelsForGlobalApiUrlChange(
 
 export const modelConfig = {
   api: {
-    defaultUrl: '',
-    defaultToken: ''
+    defaultUrl: ''
   },
   webSearch: {
-    defaultMode: 'auto' satisfies SearchMode,
-    defaultTavilyApiKey: ''
+    defaultMode: 'auto' satisfies SearchMode
   },
   defaults: {
     selectedModelId: ''

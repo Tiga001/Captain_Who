@@ -1,19 +1,43 @@
 import type { IpcRenderer } from 'electron'
-import { HOST_CHANNELS, type StorageHostApi } from '@mycopilot/host-api'
+import { HOST_CHANNELS, type HostInvocationResult, type StorageHostApi } from '@mycopilot/host-api'
+import {
+  parseProviderVendorDescriptors,
+  parseProviderVendorModelPolicyDescriptor,
+  parseProviderProfileUiDescriptors,
+  parseStorageModelSettingsRecord,
+  parseStorageModelSettingsUpdateRecord,
+  type StorageModelSettingsRecord
+} from '@mycopilot/protocol'
 
 type StorageIpcRenderer = Pick<IpcRenderer, 'invoke'>
 
 export function createStorageIpcBridge(ipcRenderer: StorageIpcRenderer): StorageHostApi {
   return {
-    loadModelSettings: () => ipcRenderer.invoke(HOST_CHANNELS.storage.loadModelSettings),
-    loadProviderProfileUiDescriptors: () =>
-      ipcRenderer.invoke(HOST_CHANNELS.storage.loadProviderProfileUiDescriptors),
-    loadProviderVendorDescriptors: () =>
-      ipcRenderer.invoke(HOST_CHANNELS.storage.loadProviderVendorDescriptors),
-    resolveProviderVendorModelPolicy: (input) =>
-      ipcRenderer.invoke(HOST_CHANNELS.storage.resolveProviderVendorModelPolicy, input),
-    saveModelSettings: (settings) =>
-      ipcRenderer.invoke(HOST_CHANNELS.storage.saveModelSettings, settings),
+    loadModelSettings: async () => {
+      const value: unknown = await ipcRenderer.invoke(HOST_CHANNELS.storage.loadModelSettings)
+      return value === null ? null : parseStorageModelSettingsRecord(value)
+    },
+    loadProviderProfileUiDescriptors: async () =>
+      parseProviderProfileUiDescriptors(
+        await ipcRenderer.invoke(HOST_CHANNELS.storage.loadProviderProfileUiDescriptors)
+      ),
+    loadProviderVendorDescriptors: async () =>
+      parseProviderVendorDescriptors(
+        await ipcRenderer.invoke(HOST_CHANNELS.storage.loadProviderVendorDescriptors)
+      ),
+    resolveProviderVendorModelPolicy: async (input) =>
+      parseProviderVendorModelPolicyDescriptor(
+        await ipcRenderer.invoke(HOST_CHANNELS.storage.resolveProviderVendorModelPolicy, input)
+      ),
+    saveModelSettings: async (settings) => {
+      const result: HostInvocationResult<unknown> = await ipcRenderer.invoke(
+        HOST_CHANNELS.storage.saveModelSettings,
+        parseStorageModelSettingsUpdateRecord(settings)
+      )
+      return result.ok
+        ? { ok: true, value: parseStorageModelSettingsRecord(result.value) }
+        : (result as HostInvocationResult<StorageModelSettingsRecord>)
+    },
     loadAgentPromptPreferences: () =>
       ipcRenderer.invoke(HOST_CHANNELS.storage.loadAgentPromptPreferences),
     saveAgentPromptPreferences: (preferences) =>

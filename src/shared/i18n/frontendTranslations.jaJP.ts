@@ -2180,7 +2180,17 @@ export const jaJPTranslations = {
   'configuration.modelApiTokenPlaceholder': '空白はグローバル API Token を使用します',
   'configuration.showSecretValue': 'シークレット値を表示',
   'configuration.hideSecretValue': 'シークレット値を非表示にする',
-  'configuration.invalidApiUrl': '有効な http または https URL を入力してください',
+  'configuration.credential.placeholder': 'API キーを入力',
+  'configuration.credential.configured': '設定済み',
+  'configuration.credential.replace': '保存済みキーを置き換える',
+  'configuration.credential.cancelReplace': '置き換えをキャンセル',
+  'configuration.credential.clear': '保存済みキーを削除',
+  'configuration.credential.clearTitle': '保存済みキーを削除しますか？',
+  'configuration.credential.clearDescription': '確認すると安全なストレージから削除されます。',
+  'configuration.credential.clearConfirm': '削除',
+  'configuration.credential.unavailable': '安全なストレージを利用できません',
+  'configuration.invalidApiUrl':
+    '認証情報、クエリ、フラグメントを含まない HTTPS URL を使用してください。開発時のみループバック HTTP も使用できます。',
   'configuration.modelConnectionPairRequired':
     'URL および API Token は両方とも入力するか、両方とも空白にする必要があります',
   'configuration.imageGeneration.title': '画像生成',

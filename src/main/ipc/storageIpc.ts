@@ -5,8 +5,13 @@ import {
   type HostInvocationResult
 } from '@mycopilot/host-api'
 import {
+  parseProviderVendorDescriptors,
+  parseProviderVendorModelPolicyDescriptor,
+  parseProviderProfileUiDescriptors,
   parseStorageForkConversationErrorData,
   parseStorageForkConversationRequest,
+  parseStorageModelSettingsRecord,
+  parseStorageModelSettingsUpdateRecord,
   parseStorageModelSettingsValidationErrorData,
   type StorageImageFileRecord,
   type StorageProjectRecord
@@ -33,18 +38,27 @@ export function registerStorageIpc(
   coreServer: CoreServer,
   actions: StorageIpcPlatformActions
 ): void {
-  ipcMain.handle(HOST_CHANNELS.storage.loadModelSettings, () => coreServer.loadModelSettings())
+  ipcMain.handle(HOST_CHANNELS.storage.loadModelSettings, async () => {
+    const settings = await coreServer.loadModelSettings()
+    return settings === null ? null : parseStorageModelSettingsRecord(settings)
+  })
   ipcMain.handle(HOST_CHANNELS.storage.loadProviderProfileUiDescriptors, () =>
-    coreServer.loadProviderProfileUiDescriptors()
+    coreServer.loadProviderProfileUiDescriptors().then(parseProviderProfileUiDescriptors)
   )
   ipcMain.handle(HOST_CHANNELS.storage.loadProviderVendorDescriptors, () =>
-    coreServer.loadProviderVendorDescriptors()
+    coreServer.loadProviderVendorDescriptors().then(parseProviderVendorDescriptors)
   )
   ipcMain.handle(HOST_CHANNELS.storage.resolveProviderVendorModelPolicy, (_event, input) =>
-    coreServer.resolveProviderVendorModelPolicy(input)
+    coreServer
+      .resolveProviderVendorModelPolicy(input)
+      .then(parseProviderVendorModelPolicyDescriptor)
   )
   ipcMain.handle(HOST_CHANNELS.storage.saveModelSettings, (_event, settings) =>
-    captureModelSettingsSaveInvocation(() => coreServer.saveModelSettings(settings))
+    captureModelSettingsSaveInvocation(() =>
+      coreServer
+        .saveModelSettings(parseStorageModelSettingsUpdateRecord(settings))
+        .then(parseStorageModelSettingsRecord)
+    )
   )
   ipcMain.handle(HOST_CHANNELS.storage.loadAgentPromptPreferences, () =>
     coreServer.loadAgentPromptPreferences()

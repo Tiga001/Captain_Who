@@ -84,4 +84,30 @@ describe('Image generation IPC bridge', () => {
       [IMAGE_GENERATION_READ_ARTIFACT_CHANNEL, artifactInput]
     ])
   })
+
+  it('rejects a legacy API key in a successful configuration projection', async () => {
+    const invoke = vi.fn().mockResolvedValue({
+      ok: true,
+      value: {
+        schemaVersion: IMAGE_GENERATION_CONFIGURATION_SCHEMA_VERSION,
+        configuration: {
+          adapterId: 'smartmlSeedream',
+          endpointUrl: 'https://example.test/v1/images/generations',
+          modelId: 'image-model',
+          capabilities: { textToImage: true, imageToImage: true },
+          defaults: { sizePreset: '2K', watermark: true },
+          credentialStatus: 'configured',
+          enabled: true,
+          readiness: 'readyUnverified',
+          revision: 'revision-1'
+        },
+        apiKey: 'must-not-cross-the-boundary'
+      }
+    })
+    const bridge = createImageGenerationIpcBridge({
+      invoke
+    } as unknown as ImageGenerationIpcRenderer)
+
+    await expect(bridge.getConfiguration()).rejects.toThrow(/unexpected field apiKey/)
+  })
 })

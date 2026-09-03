@@ -39,12 +39,11 @@ function ReloadHarness() {
       <span>
         {workflow.state.status === 'ready' ? workflow.state.configuration.modelId : 'loading'}
       </span>
-      <input
-        aria-label="reload-api-key"
-        readOnly
-        type="password"
-        value={workflow.state.status === 'ready' ? workflow.state.apiKeyDraft : ''}
-      />
+      <span data-testid="reload-credential-status">
+        {workflow.state.status === 'ready'
+          ? workflow.state.configuration.credentialStatus
+          : 'loading'}
+      </span>
     </div>
   )
 }
@@ -67,13 +66,11 @@ function configuration(
 }
 
 function configurationOutput(
-  value: ImageGenerationConfiguration,
-  apiKey: string | null = value.credentialStatus === 'configured' ? 'existing-api-key' : null
+  value: ImageGenerationConfiguration
 ): ImageGenerationGetConfigurationOutput {
   return {
     schemaVersion: IMAGE_GENERATION_CONFIGURATION_SCHEMA_VERSION,
-    configuration: value,
-    apiKey
+    configuration: value
   }
 }
 
@@ -128,7 +125,7 @@ describe('ImageGenerationSettings', () => {
     expect(service.getConfiguration).toHaveBeenCalledTimes(2)
   })
 
-  it('loads an existing API Key as a masked value and lets the user reveal it', async () => {
+  it('loads only a configured status and never exposes the existing API key', async () => {
     const pending = deferred<ImageGenerationGetConfigurationOutput>()
     service.getConfiguration.mockReturnValueOnce(pending.promise)
     const screen = await render(<ImageGenerationSettings />)
@@ -139,26 +136,26 @@ describe('ImageGenerationSettings', () => {
       .element(screen.getByRole('textbox', { name: 'configuration.imageGeneration.endpointUrl' }))
       .toBeVisible()
 
-    const secretInput = screen.container.querySelector<HTMLInputElement>(
-      'input[aria-label="configuration.imageGeneration.apiKey"]'
-    )
-    expect(secretInput?.type).toBe('password')
-    expect(secretInput?.value).toBe('existing-api-key')
-    expect(secretInput?.placeholder).toBe('')
+    expect(
+      screen.container.querySelector('input[aria-label="configuration.imageGeneration.apiKey"]')
+    ).toBeNull()
+    expect(screen.container.textContent).toContain('configuration.credential.configured')
+    expect(screen.container.textContent).not.toContain('existing-api-key')
+    await screen.getByRole('button', { name: 'configuration.credential.replace' }).click()
+    const secretInput = screen.getByLabelText('configuration.imageGeneration.apiKey')
+    await expect.element(secretInput).toHaveValue('')
     await screen.getByRole('button', { name: 'configuration.showSecretValue' }).click()
-    expect(secretInput?.type).toBe('text')
-    expect(secretInput?.value).toBe('existing-api-key')
-    await screen.getByRole('button', { name: 'configuration.hideSecretValue' }).click()
-    expect(secretInput?.type).toBe('password')
-    expect(screen.container.textContent).not.toContain(
-      'configuration.imageGeneration.credential.configured'
-    )
+    await expect.element(secretInput).toHaveAttribute('type', 'text')
     expect(screen.container.textContent).not.toContain(
       'configuration.imageGeneration.enabledDescription'
     )
     expect(screen.container.textContent).not.toContain('configuration.imageGeneration.outputSize')
     expect(screen.container.textContent).not.toContain('configuration.imageGeneration.status')
-    expect(secretInput?.closest('.settings-list-row__control')?.children).toHaveLength(1)
+    expect(
+      screen.container
+        .querySelector('input[aria-label="configuration.imageGeneration.apiKey"]')
+        ?.closest('.settings-list-row__control')?.children
+    ).toHaveLength(1)
 
     const textToImage = screen.getByRole('switch', {
       name: 'configuration.imageGeneration.textToImage'
@@ -173,6 +170,7 @@ describe('ImageGenerationSettings', () => {
       .element(screen.getByRole('heading', { name: 'configuration.imageGeneration.title' }))
       .toBeVisible()
 
+    await screen.getByRole('button', { name: 'configuration.credential.replace' }).click()
     const secretInput = screen.getByLabelText('configuration.imageGeneration.apiKey')
     await secretInput.fill('top-secret')
     await screen.getByRole('button', { name: 'configuration.imageGeneration.save' }).click()
@@ -182,7 +180,8 @@ describe('ImageGenerationSettings', () => {
         expect.objectContaining({ credentialMutation: { type: 'replace', value: 'top-secret' } })
       )
     })
-    await expect.element(secretInput).toHaveValue('top-secret')
+    expect(screen.container.textContent).not.toContain('top-secret')
+    expect(screen.container.textContent).toContain('configuration.credential.configured')
     await screen.getByRole('button', { name: 'configuration.imageGeneration.save' }).click()
     await vi.waitFor(() => expect(service.updateConfiguration).toHaveBeenCalledTimes(2))
     expect(service.updateConfiguration).toHaveBeenNthCalledWith(
@@ -221,9 +220,8 @@ describe('ImageGenerationSettings', () => {
         configuration: configuration({ credentialStatus: 'missing', revision: 'revision-2' })
       })
     const screen = await render(<ImageGenerationSettings />)
-    const secretInput = screen.getByLabelText('configuration.imageGeneration.apiKey')
-
-    await secretInput.fill('')
+    await screen.getByRole('button', { name: 'configuration.credential.clear' }).click()
+    await screen.getByRole('button', { name: 'configuration.credential.clearConfirm' }).click()
     await screen.getByRole('button', { name: 'configuration.imageGeneration.save' }).click()
     await vi.waitFor(() => {
       expect(service.updateConfiguration).toHaveBeenNthCalledWith(
@@ -231,7 +229,9 @@ describe('ImageGenerationSettings', () => {
         expect.objectContaining({ credentialMutation: { type: 'clear' } })
       )
     })
-    await expect.element(secretInput).toHaveValue('')
+    await expect
+      .element(screen.getByLabelText('configuration.imageGeneration.apiKey'))
+      .toHaveValue('')
 
     await screen.getByRole('button', { name: 'configuration.imageGeneration.save' }).click()
     await vi.waitFor(() => expect(service.updateConfiguration).toHaveBeenCalledTimes(2))
@@ -290,9 +290,8 @@ describe('ImageGenerationSettings', () => {
     expect(service.updateConfiguration.mock.invocationCallOrder[0]).toBeLessThan(
       service.setEnabled.mock.invocationCallOrder[0]
     )
-    await expect
-      .element(screen.getByLabelText('configuration.imageGeneration.apiKey'))
-      .toHaveValue('existing-api-key')
+    expect(screen.container.textContent).toContain('configuration.credential.configured')
+    expect(screen.container.textContent).not.toContain('existing-api-key')
   })
 
   it.each([
@@ -387,22 +386,20 @@ describe('ImageGenerationSettings', () => {
     await screen.getByRole('button', { name: 'reload' }).click()
 
     newer.resolve(
-      configurationOutput(
-        configuration({ modelId: 'newer-model', revision: 'revision-newer' }),
-        'newer-api-key'
-      )
+      configurationOutput(configuration({ modelId: 'newer-model', revision: 'revision-newer' }))
     )
     await expect.element(screen.getByText('newer-model')).toBeVisible()
-    await expect.element(screen.getByLabelText('reload-api-key')).toHaveValue('newer-api-key')
+    await expect
+      .element(screen.getByTestId('reload-credential-status'))
+      .toHaveTextContent('configured')
     older.resolve(
-      configurationOutput(
-        configuration({ modelId: 'older-model', revision: 'revision-older' }),
-        'older-api-key'
-      )
+      configurationOutput(configuration({ modelId: 'older-model', revision: 'revision-older' }))
     )
 
     await expect.element(screen.getByText('newer-model')).toBeVisible()
-    await expect.element(screen.getByLabelText('reload-api-key')).toHaveValue('newer-api-key')
+    await expect
+      .element(screen.getByTestId('reload-credential-status'))
+      .toHaveTextContent('configured')
     expect(screen.container.textContent).not.toContain('older-model')
   })
 })

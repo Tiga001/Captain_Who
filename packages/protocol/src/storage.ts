@@ -205,6 +205,13 @@ export interface DeepSeekV4ChatProviderSettings {
 /** Public settings accepted by a registered Provider Profile. */
 export type ProviderProfileSettings = DeepSeekV4ChatProviderSettings
 
+/** Presentation-safe state for a secret held by the Host credential store. */
+export type CredentialStatus = 'missing' | 'configured' | 'unavailable'
+
+/** Explicit write intent for a secret. Existing values are never returned to Renderer. */
+export type CredentialMutation =
+  { type: 'keep' } | { type: 'replace'; value: string } | { type: 'clear' }
+
 /**
  * Explicit profile mutation intent. Renderer never submits a profile version, protocol revision,
  * or runtime capability.
@@ -233,7 +240,7 @@ export interface StorageModelConfigRecord {
   displayName: string
   /** A model-level connection override is valid only when URL and token are both present. */
   apiUrlOverride: string | null
-  apiTokenOverride: string | null
+  apiTokenOverrideStatus: CredentialStatus
   supportsImage: boolean
   contextWindowTokens: number | null
   /** Hidden provider wire configuration; settings UIs preserve this Host-owned current value. */
@@ -246,20 +253,23 @@ export interface StorageModelConfigRecord {
 }
 
 export interface StorageModelSettingsRecord {
+  /** Opaque Host revision used only to reject stale full-catalog saves. */
+  configurationRevision: string
   apiUrl: string
-  apiToken: string
+  apiTokenStatus: CredentialStatus
   searchMode: string
-  tavilyApiKey: string
+  tavilyApiKeyStatus: CredentialStatus
   models: StorageModelConfigRecord[]
 }
 
 /** Model payload accepted by the authoritative Host save boundary. */
 export interface StorageModelConfigUpdateRecord extends Omit<
   StorageModelConfigRecord,
-  'id' | 'providerProfileConfig'
+  'id' | 'providerProfileConfig' | 'apiTokenOverrideStatus'
 > {
   /** Existing local identity, or null when Host must allocate a new configuration identity. */
   id: string | null
+  apiTokenOverrideMutation: CredentialMutation
   providerProfileUpdate: StorageProviderProfileUpdate
 }
 
@@ -269,8 +279,12 @@ export interface StorageModelConfigUpdateRecord extends Omit<
  */
 export interface StorageModelSettingsUpdateRecord extends Omit<
   StorageModelSettingsRecord,
-  'models'
+  'configurationRevision' | 'apiTokenStatus' | 'tavilyApiKeyStatus' | 'models'
 > {
+  /** Null is accepted only when creating the first settings record. */
+  expectedRevision: string | null
+  apiTokenMutation: CredentialMutation
+  tavilyApiKeyMutation: CredentialMutation
   models: StorageModelConfigUpdateRecord[]
 }
 

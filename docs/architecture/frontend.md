@@ -2,7 +2,7 @@
 status: current
 audience: developers
 owner: engineering
-last_verified: 2026-08-31
+last_verified: 2026-09-03
 ---
 
 # 前端架构
@@ -109,7 +109,7 @@ Projects 标题栏的新增按钮直接调用 Main 的原生文件夹选择器�
 | 语言、明暗偏好、主题 id                          | `localStorage` 的 frontend config                                        | 启动前容错读取；规范化；同步 DOM 属性和 Electron native theme      |
 | 模型设置、项目、会话、消息、草稿、UI preferences | Rust Core 管理的 SQLite，经 Storage Host API                             | hydration、局部编辑、按规定顺序写回；不能绕过协议直接访问数据库    |
 | 图片生成、MCP、Skill、Agent 模板等管理状态       | Rust Core 或 Electron Main service 的权威快照与 revision                 | 使用 CAS/precondition；冲突后刷新，不在前端合并猜测                |
-| 图片生成凭据                                     | Rust Core 选择的凭据存储                                                 | 只暂存用户当前输入，成功后立即清空；从不回读明文                   |
+| 模型、搜索与图片生成凭据                         | Rust Core 选择的凭据存储                                                 | 只接收状态并暂存用户当前输入；成功/取消后清空；从不回读明文或引用  |
 | 活动 Run、pending action、command session        | Rust Core 事件和存储记录                                                 | 绑定权威 id、缓冲早到事件、reload 时重新 hydrate/reconcile         |
 | Automation task、Automation Run、attention       | Core Server/Rust Core 管理的 SQLite Automation task/Run/event            | 按 `revision`、事件 `sequence` 和请求身份合并；通知只触发刷新      |
 | 通知事实、批次、设置和投递 disposition           | Core Server/Rust Core；原生显示由 Electron Main                          | settings 使用 CAS；event/resync 只触发刷新；点击只执行 typed 导航  |
@@ -162,13 +162,15 @@ ScheduledPage
 
 Scheduled drawer 的展开、最大化、dirty guard、焦点恢复和宽度都是 Renderer 交互状态。布局以 Scheduled 容器自身宽度而非 viewport 为准；当前默认宽度 440 px、可调整范围 380–640 px、列表至少保留 360 px，容器小于 760 px 时 drawer 覆盖列表。宽度偏好只保存在当前 AppShell 会话，应用重启后恢复默认值。
 
-Automation 共享 DTO 使用 `AUTOMATION_SCHEMA_VERSION = 1`，permission mode 使用独立的 v2；它们不是 SQLite canonical schema。当前 SQLite schema 是 v32，Renderer 不读取或协商该数据库版本。
+Automation 共享 DTO 使用 `AUTOMATION_SCHEMA_VERSION = 1`，permission mode 使用独立的 v2；它们不是 SQLite canonical schema。当前 SQLite schema 是 v33，Renderer 不读取或协商该数据库版本。
 
 ## 设置架构
 
 设置页的页面 id 和导航清单以 `features/settings/SettingsPage.tsx` 为准。当前精确 id 为 `general`、`profile`、`appearance`、`configuration`、`personalization`、`usageBilling`、`skills`、`browser`、`agentTemplates`、`mcp`、`environment` 和 `archivedConversations`。
 
 设置不是单一存储域：外观中的语言/主题在 localStorage，其他 UI preferences 多数通过 Storage API，MCP/Skill/图片生成、Browser 和通知使用各自的权威服务。Browser 独立页组合 automation capability、app-owned link 目标、下载设置/历史、浏览历史与清除数据；MCP 页只维护 MCP Server 列表。General 页的普通任务通知 preset 使用 Rust Core revision/CAS；Never 只关闭四个普通任务开关，不连带关闭 Automation 通知。页面组件应调用所属领域 hook/client，不应建立第二份通用设置对象。
+
+Configuration 页的模型、Tavily 与图片生成密钥共用 `CredentialInput` 外观，但保留各自的保存事务。组件只有未配置、已配置、替换中三种常规视觉形态；Host mutation 仍是严格的 `keep | replace | clear`。已配置态的清除走标准确认弹窗，替换态用行内取消恢复 keep，不添加“待清除”第四行。`unavailable` 是凭据 backend 恢复状态，不是已有 secret 的投影；Renderer 只能替换或按允许的流程清除，不能尝试读回旧值。图片生成同样支持 clear。
 
 Agent Templates 页展示 workspace-wide template library；定义 CRUD 与 project assignment 是分开的 Host mutation。表单可以一次勾选多个 project，保存时逐项对账 assignment；任一步失败都重新加载 canonical 列表，不能在本地假定部分 mutation 已回滚。模板使用不可用模型时可查看/编辑，但必须重新选择 enabled model 后才能保存或重新启用。
 
@@ -185,8 +187,9 @@ MCP 编辑器有未保存变更保护；离开 MCP 页面或返回工作区前�
 7. 大文本、diff、PDF、图片和流式事件均需先经过领域预算，再进入 DOM/解码器。
 8. Automation event/resync 只用于失效通知和排序，不能替代 task、Automation Run、attention 的权威快照。
 9. Scheduled 页面中的权限、health、Run 终态和通知状态都不得由 Renderer 文案或本地时钟推断。
-10. Automation DTO schema v1、permission mode v2 与 SQLite schema v32 必须分开命名和演进。
+10. Automation DTO schema v1、permission mode v2 与 SQLite schema v33 必须分开命名和演进。
 11. FileChange diff 卡片、Browser 下载中心和原生通知点击只消费安全投影；UI 中可见的路径、卡片或按钮不授予文件/Browser/通知权限。
+12. 凭据查询只允许返回状态；credential reference 和已有 secret 都不得进入 Renderer DTO、store、错误或测试 snapshot。
 
 ## 代码真源
 

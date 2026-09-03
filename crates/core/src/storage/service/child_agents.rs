@@ -165,8 +165,9 @@ impl StorageService {
 
         let (template_snapshot, selected_model_id, model_selection_source) =
             select_model_identity(&transaction, &parent, input, expected_template_identity)?;
-        let settings = config_repository::load_model_settings_snapshot_in_connection(&transaction)
-            .map_err(spawn_database_error)?
+        let settings = self
+            .model_settings_catalog_snapshot_in_connection(&transaction)
+            .map_err(ChildAgentSpawnError::StorageUnavailable)?
             .ok_or_else(|| ChildAgentSpawnError::ModelUnavailable {
                 model_config_id: Some(selected_model_id.clone()),
                 reason: crate::AgentModelUnavailableReason::SettingsMissing,
@@ -328,7 +329,7 @@ impl StorageService {
             claim_token,
             now_ms(),
         )?;
-        validate_frozen_reasoning_for_wake(&connection, &spawn)?;
+        validate_frozen_reasoning_for_wake(self, &connection, &spawn)?;
         Ok(spawn)
     }
 
@@ -346,7 +347,7 @@ impl StorageService {
             identity,
             now_ms(),
         )?;
-        validate_frozen_reasoning_for_wake(&connection, &bundle.spawn)?;
+        validate_frozen_reasoning_for_wake(self, &connection, &bundle.spawn)?;
         Ok(bundle)
     }
 
@@ -743,6 +744,7 @@ fn ensure_expected_template_identity(
 }
 
 fn validate_frozen_reasoning_for_wake(
+    storage: &StorageService,
     connection: &rusqlite::Connection,
     spawn: &ChildAgentSpawnRecord,
 ) -> Result<(), AgentGraphError> {
@@ -759,8 +761,9 @@ fn validate_frozen_reasoning_for_wake(
                 "child reasoning snapshot has no model selection snapshot".to_string(),
             )
         })?;
-    let settings = config_repository::load_model_settings_snapshot_in_connection(connection)
-        .map_err(|error| AgentGraphError::StorageUnavailable(error.to_string()))?
+    let settings = storage
+        .model_settings_catalog_snapshot_in_connection(connection)
+        .map_err(AgentGraphError::StorageUnavailable)?
         .ok_or_else(|| {
             AgentGraphError::Conflict(
                 "child reasoning constraint cannot resolve current model settings".to_string(),

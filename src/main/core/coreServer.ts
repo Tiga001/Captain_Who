@@ -434,6 +434,11 @@ import {
   parseImageGenerationStatus,
   parseImageGenerationUpdateConfigurationInput,
   parseImageGenerationUpdateConfigurationOutput,
+  parseProviderVendorDescriptors,
+  parseProviderProfileUiDescriptors,
+  parseProviderVendorModelPolicyDescriptor,
+  parseStorageModelSettingsRecord,
+  parseStorageModelSettingsUpdateRecord,
   SKILLS_CANCEL_PREPARATION_METHOD,
   SKILLS_CANCEL_SOURCE_RESOLUTION_METHOD,
   SKILLS_CHANGED_NOTIFICATION_METHOD,
@@ -2324,37 +2329,43 @@ export class CoreServer {
   }
 
   loadModelSettings(): Promise<StorageModelSettingsRecord | null> {
-    return this.rpc.request<StorageModelSettingsRecord | null>(STORAGE_LOAD_MODEL_SETTINGS_METHOD)
+    return this.rpc
+      .request<unknown>(STORAGE_LOAD_MODEL_SETTINGS_METHOD)
+      .then((value) => (value === null ? null : parseStorageModelSettingsRecord(value)))
   }
 
   loadProviderProfileUiDescriptors(): Promise<ProviderProfileUiDescriptor[]> {
-    return this.rpc.request<ProviderProfileUiDescriptor[]>(
-      STORAGE_LOAD_PROVIDER_PROFILE_UI_DESCRIPTORS_METHOD
-    )
+    return this.rpc
+      .request<unknown>(STORAGE_LOAD_PROVIDER_PROFILE_UI_DESCRIPTORS_METHOD)
+      .then(parseProviderProfileUiDescriptors)
   }
 
   loadProviderVendorDescriptors(): Promise<ProviderVendorDescriptor[]> {
-    return this.rpc.request<ProviderVendorDescriptor[]>(
-      STORAGE_LOAD_PROVIDER_VENDOR_DESCRIPTORS_METHOD
-    )
+    return this.rpc
+      .request<unknown>(STORAGE_LOAD_PROVIDER_VENDOR_DESCRIPTORS_METHOD)
+      .then(parseProviderVendorDescriptors)
   }
 
   resolveProviderVendorModelPolicy(
     input: ProviderVendorModelPolicyInput
   ): Promise<ProviderVendorModelPolicyDescriptor> {
-    return this.rpc.request<ProviderVendorModelPolicyDescriptor, ProviderVendorModelPolicyInput>(
-      STORAGE_RESOLVE_PROVIDER_VENDOR_MODEL_POLICY_METHOD,
-      input
-    )
+    return this.rpc
+      .request<unknown, ProviderVendorModelPolicyInput>(
+        STORAGE_RESOLVE_PROVIDER_VENDOR_MODEL_POLICY_METHOD,
+        input
+      )
+      .then(parseProviderVendorModelPolicyDescriptor)
   }
 
   saveModelSettings(
     settings: StorageModelSettingsUpdateRecord
   ): Promise<StorageModelSettingsRecord> {
-    return this.rpc.request<StorageModelSettingsRecord, StorageModelSettingsUpdateRecord>(
-      STORAGE_SAVE_MODEL_SETTINGS_METHOD,
-      settings
-    )
+    return this.rpc
+      .request<unknown, StorageModelSettingsUpdateRecord>(
+        STORAGE_SAVE_MODEL_SETTINGS_METHOD,
+        parseStorageModelSettingsUpdateRecord(settings)
+      )
+      .then(parseStorageModelSettingsRecord)
   }
 
   loadAgentPromptPreferences(): Promise<StorageAgentPromptPreferencesRecord> {

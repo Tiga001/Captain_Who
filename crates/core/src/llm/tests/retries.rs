@@ -1,5 +1,67 @@
 use super::*;
 
+#[tokio::test]
+async fn provider_http_client_does_not_follow_redirects_or_replay_authorization() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let first_request = read_test_http_request_raw(&mut stream).await;
+        let first_had_authorization = test_http_request_has_header(&first_request, "authorization");
+        let location = format!("http://{address}/redirect-target");
+        write_test_http_response_with_headers(
+            &mut stream,
+            "302 Found",
+            &[("Location", location.as_str())],
+            json!({"redirect": true}),
+        )
+        .await;
+
+        let second_authorization =
+            match tokio::time::timeout(Duration::from_millis(250), listener.accept()).await {
+                Ok(Ok((mut stream, _))) => {
+                    let request = read_test_http_request_raw(&mut stream).await;
+                    let had_authorization = test_http_request_has_header(&request, "authorization");
+                    write_test_http_response(
+                        &mut stream,
+                        "200 OK",
+                        json!({
+                            "choices": [{
+                                "message": {"role": "assistant", "content": "redirected"},
+                                "finish_reason": "stop"
+                            }]
+                        }),
+                    )
+                    .await;
+                    Some(had_authorization)
+                }
+                Ok(Err(error)) => panic!("redirect test listener failed: {error}"),
+                Err(_) => None,
+            };
+        (first_had_authorization, second_authorization)
+    });
+    let mut request = request_with_messages(vec![message(LlmMessageRole::User, "Hello")]);
+    request.api_url = format!("http://{address}/v1/chat/completions");
+    request.api_token = "redirect-test-token".to_string();
+    request.stream = false;
+
+    let error = send_llm_request(&request, AgentCancellationToken::new())
+        .await
+        .unwrap_err();
+    let (first_had_authorization, second_authorization) = server.await.unwrap();
+
+    assert_eq!(error.code(), Some(PROVIDER_FAILURE_ERROR_CODE));
+    assert_eq!(
+        error
+            .details()
+            .and_then(|details| details.get("httpStatus"))
+            .and_then(Value::as_u64),
+        Some(u64::from(reqwest::StatusCode::FOUND.as_u16()))
+    );
+    assert!(first_had_authorization);
+    assert_eq!(second_authorization, None);
+}
+
 #[test]
 fn retry_delay_uses_capped_exponential_backoff() {
     assert_eq!(retry_delay(1), Duration::from_millis(350));

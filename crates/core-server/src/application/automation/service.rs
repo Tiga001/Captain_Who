@@ -575,7 +575,7 @@ impl<'a> AutomationService<'a> {
             .map_err(AutomationServiceError::internal)?;
         let models = self
             .storage
-            .load_model_settings()
+            .load_model_settings_catalog()
             .map_err(AutomationServiceError::internal)?
             .map(|settings| settings.models)
             .unwrap_or_default();
@@ -639,7 +639,7 @@ impl<'a> AutomationService<'a> {
             .map_err(AutomationServiceError::internal)?;
         let models = self
             .storage
-            .load_model_settings()
+            .load_model_settings_catalog()
             .map_err(AutomationServiceError::internal)?
             .map(|settings| settings.models)
             .unwrap_or_default();

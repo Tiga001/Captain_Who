@@ -4,7 +4,7 @@ description: Captain Who 当前已确认的产品限制与尚未完成的发布�
 status: current
 audience: user
 owner: product
-last_verified: 2026-08-31
+last_verified: 2026-09-03
 ---
 
 # 已知问题
@@ -20,7 +20,7 @@ last_verified: 2026-08-31
 
 ## 数据与凭据
 
-- 模型 Token 和 Tavily Key 当前以明文保存在本机 SQLite 数据库中，不使用系统钥匙串。
+- 模型、搜索和图片生成密钥不进入当前 SQLite，但系统凭据不会随 SQLite 备份恢复；跨设备、跨账户或凭据后端不可用时需要替换或清除。旧版本 SQLite 备份仍可能含明文凭据。
 - 没有面向用户的一键数据导出、诊断包或完整备份/恢复向导。
 - 移除项目会永久删除应用内的项目对话与附件记录；项目目录文件不会被删除。
 - 当前没有统一的 Automation 历史/Event 与通用 Notification event/batch 保留或清理策略。

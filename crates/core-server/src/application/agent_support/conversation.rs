@@ -260,7 +260,7 @@ fn prepare_conversation_turn_from_source(
     }
 
     let settings_snapshot = storage
-        .load_model_settings_snapshot()?
+        .load_model_settings_snapshot_for_model(&model_id, true)?
         .ok_or_else(|| "请先配置模型 API。".to_string())?;
     let settings = settings_snapshot.settings;
 
@@ -274,13 +274,6 @@ fn prepare_conversation_turn_from_source(
     if !model.enabled {
         return Err(format!("模型未启用：{model_label}").into());
     }
-    if let ConversationTurnInputSource::ExistingAgentProjection { model_snapshot, .. } = &source {
-        if model_snapshot.model_config_id != model.id {
-            return Err("可信 Wake 的模型选择与 Agent 创建快照不一致。"
-                .to_string()
-                .into());
-        }
-    }
     let provider_connection_revision = settings_snapshot
         .provider_connection_revisions
         .get(&model.id)
@@ -291,6 +284,16 @@ fn prepare_conversation_turn_from_source(
         .get(&model.id)
         .cloned()
         .ok_or_else(|| format!("模型 {model_label} 的 Provider Protocol 身份缺失。"))?;
+    if let ConversationTurnInputSource::ExistingAgentProjection { model_snapshot, .. } = &source {
+        if model_snapshot.model_config_id != model.id
+            || model_snapshot.provider_connection_revision != provider_connection_revision
+            || model_snapshot.provider_protocol_revision != provider_protocol_revision
+        {
+            return Err("可信 Wake 的模型连接或协议已在 Agent 创建后发生变化。"
+                .to_string()
+                .into());
+        }
+    }
     let context_window_tokens = model.effective_context_window_tokens();
     // Resolve the complete pair once and carry it through the run. Model-level credentials
     // take priority; otherwise both values come from global settings. This prevents a URL

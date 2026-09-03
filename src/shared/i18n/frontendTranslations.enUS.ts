@@ -2133,7 +2133,17 @@ export const enUSTranslations = {
   'configuration.modelApiTokenPlaceholder': 'Blank uses the global API Token',
   'configuration.showSecretValue': 'Show secret value',
   'configuration.hideSecretValue': 'Hide secret value',
-  'configuration.invalidApiUrl': 'Enter a valid http or https URL',
+  'configuration.credential.placeholder': 'Enter API key',
+  'configuration.credential.configured': 'Configured',
+  'configuration.credential.replace': 'Replace saved key',
+  'configuration.credential.cancelReplace': 'Cancel replacement',
+  'configuration.credential.clear': 'Clear saved key',
+  'configuration.credential.clearTitle': 'Clear saved key?',
+  'configuration.credential.clearDescription': 'This credential will be removed when you confirm.',
+  'configuration.credential.clearConfirm': 'Clear',
+  'configuration.credential.unavailable': 'Secure storage unavailable',
+  'configuration.invalidApiUrl':
+    'Use an HTTPS URL without credentials, query parameters, or fragments. Development also allows loopback HTTP.',
   'configuration.modelConnectionPairRequired':
     'URL and API Token must both be filled in or both be blank',
   'configuration.imageGeneration.title': 'Image generation',

@@ -188,26 +188,6 @@ pub struct ImageGenerationConfigurationService {
     credentials: Arc<dyn CredentialStore>,
 }
 
-/// A revision-consistent snapshot for the configuration editor.
-///
-/// The API key remains wrapped in [`CredentialSecret`] until the transport serializes the
-/// dedicated configuration-read response. Mutation responses, status responses, errors, and
-/// execution metadata never receive this value.
-pub struct ImageGenerationConfigurationEditSnapshot {
-    pub configuration: ImageGenerationConfiguration,
-    pub api_key: Option<CredentialSecret>,
-}
-
-impl fmt::Debug for ImageGenerationConfigurationEditSnapshot {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("ImageGenerationConfigurationEditSnapshot")
-            .field("configuration", &self.configuration)
-            .field("api_key", &self.api_key.as_ref().map(|_| "[REDACTED]"))
-            .finish()
-    }
-}
-
 /// A single-use, revision-consistent execution binding.
 ///
 /// This value is deliberately crate-private, non-cloneable, and non-serializable. The execution
@@ -250,35 +230,6 @@ impl ImageGenerationConfigurationService {
     ) -> Result<ImageGenerationConfiguration, ImageGenerationConfigurationError> {
         let record = self.load_record()?;
         self.configuration_from_record(record.as_ref())
-    }
-
-    /// Reads the configuration and its API key for the explicit configuration-editor endpoint.
-    ///
-    /// Native credential reads are not transactional with SQLite, so the profile is checked
-    /// again after reading the credential. A concurrent change is retried once rather than
-    /// returning a key paired with the wrong profile revision.
-    pub fn get_configuration_for_edit(
-        &self,
-    ) -> Result<ImageGenerationConfigurationEditSnapshot, ImageGenerationConfigurationError> {
-        for _ in 0..2 {
-            let before = self.load_record()?;
-            let (credential_status, api_key) =
-                self.credential_snapshot_for_edit(before.as_ref())?;
-            let after = self.load_record()?;
-            if after.as_ref() == before.as_ref() {
-                let configuration = self.configuration_from_record_with_credential_status(
-                    before.as_ref(),
-                    credential_status,
-                )?;
-                return Ok(ImageGenerationConfigurationEditSnapshot {
-                    configuration,
-                    api_key,
-                });
-            }
-            drop(api_key);
-        }
-        let current = self.load_record()?;
-        Err(revision_conflict(current.as_ref()))
     }
 
     /// Resolves a profile and credential that are proven to belong to the same configuration
@@ -728,29 +679,17 @@ impl ImageGenerationConfigurationService {
         &self,
         record: Option<&ImageGenerationProfileRecord>,
     ) -> Result<ImageGenerationCredentialStatus, ImageGenerationConfigurationError> {
-        self.credential_snapshot_for_edit(record)
-            .map(|(status, _)| status)
-    }
-
-    fn credential_snapshot_for_edit(
-        &self,
-        record: Option<&ImageGenerationProfileRecord>,
-    ) -> Result<
-        (ImageGenerationCredentialStatus, Option<CredentialSecret>),
-        ImageGenerationConfigurationError,
-    > {
         let Some(reference) = record.and_then(|record| record.credential_ref.as_deref()) else {
-            return Ok((ImageGenerationCredentialStatus::Missing, None));
+            return Ok(ImageGenerationCredentialStatus::Missing);
         };
         let reference = CredentialReference::parse(reference)
             .map_err(|_| ImageGenerationConfigurationError::InvalidConfiguration)?;
         if !self.credentials.supports_reference(&reference) {
-            return Ok((ImageGenerationCredentialStatus::Missing, None));
+            return Ok(ImageGenerationCredentialStatus::Unavailable);
         }
         Ok(match self.credentials.get(&reference) {
-            Ok(Some(secret)) => (ImageGenerationCredentialStatus::Configured, Some(secret)),
-            Ok(None) => (ImageGenerationCredentialStatus::Missing, None),
-            Err(_) => (ImageGenerationCredentialStatus::Unavailable, None),
+            Ok(Some(_)) => ImageGenerationCredentialStatus::Configured,
+            Ok(None) | Err(_) => ImageGenerationCredentialStatus::Unavailable,
         })
     }
 
@@ -774,11 +713,14 @@ impl ImageGenerationConfigurationService {
             }
             let reference = CredentialReference::parse(cleanup_record.credential_ref.clone())
                 .map_err(|_| ImageGenerationConfigurationError::InvalidConfiguration)?;
-            if self.credentials.supports_reference(&reference) {
-                self.credentials
-                    .delete(&reference)
-                    .map_err(map_credential_error)?;
+            // A receipt owned by another backend is not evidence that deletion succeeded. Keep
+            // it durable so a compatible backend or explicit recovery can retry it later.
+            if !self.credentials.supports_reference(&reference) {
+                return Err(ImageGenerationConfigurationError::CredentialStoreUnavailable);
             }
+            self.credentials
+                .delete(&reference)
+                .map_err(map_credential_error)?;
             self.storage
                 .complete_image_generation_credential_cleanup(&cleanup_record.credential_ref)
                 .map_err(|_| ImageGenerationConfigurationError::StorageUnavailable)?;
@@ -1221,29 +1163,20 @@ mod tests {
     }
 
     #[test]
-    fn edit_snapshot_returns_the_configured_credential_and_redacts_debug() {
+    fn configuration_snapshot_never_returns_the_configured_credential() {
         let (service, _credentials, _directory) = service();
         let secret = "editor-visible-test-secret";
         service
             .update_configuration(update("image-generation:v1:0", secret))
             .unwrap();
 
-        let snapshot = service.get_configuration_for_edit().unwrap();
+        let snapshot = service.get_configuration().unwrap();
 
         assert_eq!(
-            snapshot.configuration.credential_status,
+            snapshot.credential_status,
             ImageGenerationCredentialStatus::Configured
         );
-        assert_eq!(
-            snapshot
-                .api_key
-                .as_ref()
-                .unwrap()
-                .with_secret_bytes(|bytes| bytes.to_vec()),
-            secret.as_bytes()
-        );
         let debug = format!("{snapshot:?}");
-        assert!(debug.contains("[REDACTED]"));
         assert!(!debug.contains(secret));
     }
 
@@ -1380,9 +1313,7 @@ mod tests {
 
         let unavailable =
             ImageGenerationConfigurationService::new(storage, Arc::new(UnavailableCredentialStore));
-        let edit_snapshot = unavailable.get_configuration_for_edit().unwrap();
-        assert!(edit_snapshot.api_key.is_none());
-        let snapshot = edit_snapshot.configuration;
+        let snapshot = unavailable.get_configuration().unwrap();
         assert_eq!(snapshot.revision, enabled.revision);
         assert_eq!(
             snapshot.credential_status,
@@ -1553,7 +1484,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_references_never_reach_the_active_backend_during_migration() {
+    fn foreign_references_are_unavailable_and_cleanup_receipts_remain_retryable() {
         let directory = tempdir().unwrap();
         let storage = Arc::new(StorageService::open(&directory.path().join("app.db")).unwrap());
         let legacy_active = "image-generation/api-key/0123456789abcdef0123456789abcdef".to_string();
@@ -1561,7 +1492,7 @@ mod tests {
         let mut record = default_record();
         record.endpoint_url = "https://example.com/images/generations".to_string();
         record.model_id = "seedream-model".to_string();
-        record.credential_ref = Some(legacy_active);
+        record.credential_ref = Some(legacy_active.clone());
         let published = storage
             .compare_and_set_image_generation_profile(
                 DEFAULT_IMAGE_GENERATION_PROFILE_ID,
@@ -1588,7 +1519,7 @@ mod tests {
         let snapshot = service.get_configuration().unwrap();
         assert_eq!(
             snapshot.credential_status,
-            ImageGenerationCredentialStatus::Missing
+            ImageGenerationCredentialStatus::Unavailable
         );
         let report = service.reconcile_credentials().unwrap();
         assert_eq!(report.removed_orphaned_credentials, 1);
@@ -1604,10 +1535,20 @@ mod tests {
             cleared.credential_status,
             ImageGenerationCredentialStatus::Missing
         );
-        assert!(storage
-            .list_image_generation_credential_cleanup()
-            .unwrap()
-            .is_empty());
+        let cleanup = storage.list_image_generation_credential_cleanup().unwrap();
+        assert_eq!(cleanup.len(), 1);
+        assert_eq!(cleanup[0].credential_ref, legacy_active);
+        assert_eq!(
+            service.reconcile_credentials().unwrap_err(),
+            ImageGenerationConfigurationError::CredentialStoreUnavailable
+        );
+        assert_eq!(
+            storage
+                .list_image_generation_credential_cleanup()
+                .unwrap()
+                .len(),
+            1
+        );
 
         let result = service
             .update_configuration(update(&cleared.revision, "replacement-secret"))
@@ -1629,6 +1570,13 @@ mod tests {
         assert!(credentials.delegate.get(&reference).unwrap().is_some());
         assert_eq!(credentials.foreign_gets.load(Ordering::SeqCst), 0);
         assert_eq!(credentials.foreign_deletes.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            storage
+                .list_image_generation_credential_cleanup()
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     #[test]

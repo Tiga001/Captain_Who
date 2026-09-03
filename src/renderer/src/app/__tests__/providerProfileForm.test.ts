@@ -295,6 +295,8 @@ describe('global API URL Generic rematch', () => {
     id: 'model',
     providerModelId: 'provider-model',
     displayName: 'Model',
+    apiTokenOverrideStatus: 'missing',
+    apiTokenOverrideMutation: { type: 'keep' },
     supportsImage: false,
     inputPrice: '0',
     cachedInputPrice: '',

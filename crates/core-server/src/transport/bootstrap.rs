@@ -140,10 +140,19 @@ impl CoreServerBootstrap {
         let database_instance_lock = acquire_database_instance_lock(&database_path)?;
         let uses_development_credentials = uses_development_image_generation_credentials();
         let skill_store_root = skill_store_root(&database_path);
-        let storage =
-            Arc::new(StorageService::open(&database_path).map_err(|error| {
-                io::Error::other(format!("failed to initialize storage: {error}"))
-            })?);
+        let model_credentials =
+            model_provider_credential_store(&database_path, uses_development_credentials)?;
+        let storage = Arc::new(
+            StorageService::open_with_model_credentials(&database_path, model_credentials)
+                .map_err(|error| {
+                    io::Error::other(format!("failed to initialize storage: {error}"))
+                })?,
+        );
+        if storage.reconcile_model_provider_credentials().is_err() {
+            // Keep settings available so the user can replace or clear an unavailable key. Any
+            // provider execution still fails closed when its exact credential cannot resolve.
+            eprintln!("failed to reconcile model provider credentials safely");
+        }
         let mcp_registry =
             Arc::new(SqliteMcpRegistry::open(&database_path).map_err(|_| {
                 io::Error::other("failed to initialize the persistent MCP Registry")
@@ -996,6 +1005,33 @@ fn image_generation_credential_store(
     }
 }
 
+/// Selects the independent credential backend for language-model and search provider keys.
+fn model_provider_credential_store(
+    database_path: &Path,
+    uses_development_credentials: bool,
+) -> io::Result<Arc<dyn CredentialStore>> {
+    #[cfg(target_os = "macos")]
+    {
+        if !uses_development_credentials {
+            return Ok(Arc::new(NonInteractiveMacCredentialStore::model_provider()));
+        }
+
+        DevelopmentFileCredentialStore::new(model_provider_development_credential_store_root(
+            database_path,
+        ))
+        .map(|store| Arc::new(store) as Arc<dyn CredentialStore>)
+        .map_err(|_| {
+            io::Error::other("failed to initialize development model-provider credential store")
+        })
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (database_path, uses_development_credentials);
+        Ok(Arc::new(SystemCredentialStore::model_provider()))
+    }
+}
+
 /// Selects a credential backend dedicated to the provider-continuation master key.
 ///
 /// This namespace is distinct from model API tokens and image-generation credentials.
@@ -1096,6 +1132,13 @@ pub(crate) fn image_generation_development_credential_store_root(database_path: 
         .parent()
         .map(|parent| parent.join("image-generation-development-credentials-v1"))
         .unwrap_or_else(|| PathBuf::from("image-generation-development-credentials-v1"))
+}
+
+pub(crate) fn model_provider_development_credential_store_root(database_path: &Path) -> PathBuf {
+    database_path
+        .parent()
+        .map(|parent| parent.join("model-provider-development-credentials-v1"))
+        .unwrap_or_else(|| PathBuf::from("model-provider-development-credentials-v1"))
 }
 
 #[cfg(target_os = "macos")]

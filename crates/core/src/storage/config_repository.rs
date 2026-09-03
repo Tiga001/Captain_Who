@@ -1,5 +1,6 @@
 use crate::storage::models::{
-    normalize_model_display_name, ModelConfigRecord, ModelSettingsRecord, ModelSettingsSnapshot,
+    normalize_model_display_name, StoredModelConfigRecord, StoredModelSettingsRecord,
+    StoredModelSettingsSnapshot,
 };
 use crate::storage::now_ms;
 use crate::{ProviderProfileConfig, ProviderProtocolDialect};
@@ -13,15 +14,105 @@ const PROVIDER_CONNECTION_REVISION_PREFIX: &str = "provider-connection-v1:";
 const PROVIDER_PROTOCOL_REVISION_PREFIX: &str = "provider-protocol-v1:";
 const SEARCH_CONNECTION_REVISION_PREFIX: &str = "search-connection-v1:";
 
-pub fn load_model_settings(
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ModelProviderCredentialJournalRecord {
+    pub credential_ref: String,
+    pub is_active: bool,
+}
+
+pub(crate) fn stage_model_provider_credentials(
     connection: &mut Connection,
-) -> rusqlite::Result<Option<ModelSettingsRecord>> {
+    credential_refs: &[String],
+) -> rusqlite::Result<()> {
+    let transaction = connection.transaction()?;
+    for credential_ref in credential_refs {
+        transaction.execute(
+            "INSERT INTO model_provider_credential_staging (credential_ref, created_at)
+             VALUES (?1, ?2)",
+            params![credential_ref, now_ms()],
+        )?;
+    }
+    transaction.commit()
+}
+
+pub(crate) fn remove_model_provider_credential_staging(
+    connection: &Connection,
+    credential_ref: &str,
+) -> rusqlite::Result<bool> {
+    connection
+        .execute(
+            "DELETE FROM model_provider_credential_staging WHERE credential_ref = ?1",
+            [credential_ref],
+        )
+        .map(|changed| changed > 0)
+}
+
+pub(crate) fn list_model_provider_credential_staging(
+    connection: &Connection,
+) -> rusqlite::Result<Vec<ModelProviderCredentialJournalRecord>> {
+    list_model_provider_credential_journal(connection, "model_provider_credential_staging")
+}
+
+pub(crate) fn list_model_provider_credential_cleanup(
+    connection: &Connection,
+) -> rusqlite::Result<Vec<ModelProviderCredentialJournalRecord>> {
+    list_model_provider_credential_journal(connection, "model_provider_credential_cleanup")
+}
+
+fn list_model_provider_credential_journal(
+    connection: &Connection,
+    table: &str,
+) -> rusqlite::Result<Vec<ModelProviderCredentialJournalRecord>> {
+    debug_assert!(matches!(
+        table,
+        "model_provider_credential_staging" | "model_provider_credential_cleanup"
+    ));
+    let sql = format!(
+        "SELECT journal.credential_ref,
+                EXISTS (
+                    SELECT 1 FROM model_provider_settings AS settings
+                    WHERE settings.api_token_ref = journal.credential_ref
+                       OR settings.tavily_api_key_ref = journal.credential_ref
+                    UNION ALL
+                    SELECT 1 FROM models AS model
+                    WHERE model.api_token_override_ref = journal.credential_ref
+                ) AS is_active
+         FROM {table} AS journal
+         ORDER BY journal.created_at ASC, journal.credential_ref ASC"
+    );
+    let mut statement = connection.prepare(&sql)?;
+    let records = statement
+        .query_map([], |row| {
+            Ok(ModelProviderCredentialJournalRecord {
+                credential_ref: row.get(0)?,
+                is_active: row.get(1)?,
+            })
+        })?
+        .collect();
+    records
+}
+
+pub(crate) fn remove_model_provider_credential_cleanup(
+    connection: &Connection,
+    credential_ref: &str,
+) -> rusqlite::Result<bool> {
+    connection
+        .execute(
+            "DELETE FROM model_provider_credential_cleanup WHERE credential_ref = ?1",
+            [credential_ref],
+        )
+        .map(|changed| changed > 0)
+}
+
+pub(crate) fn load_model_settings(
+    connection: &mut Connection,
+) -> rusqlite::Result<Option<StoredModelSettingsRecord>> {
     Ok(load_model_settings_snapshot(connection)?.map(|snapshot| snapshot.settings))
 }
 
-pub fn load_model_settings_snapshot(
+pub(crate) fn load_model_settings_snapshot(
     connection: &mut Connection,
-) -> rusqlite::Result<Option<ModelSettingsSnapshot>> {
+) -> rusqlite::Result<Option<StoredModelSettingsSnapshot>> {
     let transaction = connection.transaction()?;
     let snapshot = load_model_settings_snapshot_in_connection(&transaction)?;
     transaction.commit()?;
@@ -35,15 +126,15 @@ pub fn load_model_settings_snapshot(
 /// revisions. Ordinary callers should continue to use [`load_model_settings_snapshot`].
 pub(crate) fn load_model_settings_snapshot_in_connection(
     connection: &Connection,
-) -> rusqlite::Result<Option<ModelSettingsSnapshot>> {
+) -> rusqlite::Result<Option<StoredModelSettingsSnapshot>> {
     let settings = connection
         .query_row(
             "
             SELECT
                 api_url,
-                api_token,
+                api_token_ref,
                 search_mode,
-                tavily_api_key,
+                tavily_api_key_ref,
                 configuration_revision,
                 search_connection_revision
             FROM model_provider_settings
@@ -53,9 +144,9 @@ pub(crate) fn load_model_settings_snapshot_in_connection(
             |row| {
                 Ok((
                     row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(1)?,
                     row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
+                    row.get::<_, Option<String>>(3)?,
                     row.get::<_, String>(4)?,
                     row.get::<_, String>(5)?,
                 ))
@@ -65,9 +156,9 @@ pub(crate) fn load_model_settings_snapshot_in_connection(
 
     let Some((
         api_url,
-        api_token,
+        api_token_ref,
         search_mode,
-        tavily_api_key,
+        tavily_api_key_ref,
         configuration_revision,
         search_connection_revision,
     )) = settings
@@ -86,12 +177,12 @@ pub(crate) fn load_model_settings_snapshot_in_connection(
         provider_connection_revisions,
         provider_protocol_revisions,
     } = load_models(connection)?;
-    Ok(Some(ModelSettingsSnapshot {
-        settings: ModelSettingsRecord {
+    Ok(Some(StoredModelSettingsSnapshot {
+        settings: StoredModelSettingsRecord {
             api_url,
-            api_token,
+            api_token_ref,
             search_mode,
-            tavily_api_key,
+            tavily_api_key_ref,
             models,
         },
         configuration_revision,
@@ -101,10 +192,50 @@ pub(crate) fn load_model_settings_snapshot_in_connection(
     }))
 }
 
-pub fn save_model_settings(
+#[cfg(test)]
+pub(crate) fn save_model_settings(
     connection: &mut Connection,
-    mut settings: ModelSettingsRecord,
+    settings: StoredModelSettingsRecord,
 ) -> rusqlite::Result<()> {
+    save_model_settings_with_credential_journal(connection, settings, &[], &[]).map(|_| ())
+}
+
+#[cfg(test)]
+pub(crate) fn credential_free_fixture(
+    settings: crate::storage::models::ModelSettingsRecord,
+) -> StoredModelSettingsRecord {
+    StoredModelSettingsRecord {
+        api_url: settings.api_url,
+        api_token_ref: None,
+        search_mode: settings.search_mode,
+        tavily_api_key_ref: None,
+        models: settings
+            .models
+            .into_iter()
+            .map(|model| StoredModelConfigRecord {
+                id: model.id,
+                provider_model_id: model.provider_model_id,
+                display_name: model.display_name,
+                api_url_override: model.api_url_override,
+                api_token_override_ref: None,
+                supports_image: model.supports_image,
+                context_window_tokens: model.context_window_tokens,
+                provider_profile_config: model.provider_profile_config,
+                input_price: model.input_price,
+                cached_input_price: model.cached_input_price,
+                output_price: model.output_price,
+                enabled: model.enabled,
+            })
+            .collect(),
+    }
+}
+
+pub(crate) fn save_model_settings_with_credential_journal(
+    connection: &mut Connection,
+    mut settings: StoredModelSettingsRecord,
+    published_staging_refs: &[String],
+    retired_credential_refs: &[String],
+) -> rusqlite::Result<StoredModelSettingsSnapshot> {
     for model in &mut settings.models {
         model.provider_model_id = model.provider_model_id.trim().to_string();
         model.display_name = model.display_name.trim().to_string();
@@ -162,11 +293,9 @@ pub fn save_model_settings(
                     .models
                     .iter()
                     .find(|candidate| candidate.id == model.id)?;
-                let previous_connection = snapshot
-                    .settings
-                    .effective_connection_for(previous_model)
-                    .ok()?;
-                let current_connection = settings.effective_connection_for(model).ok()?;
+                let previous_connection =
+                    effective_connection_identity(&snapshot.settings, previous_model)?;
+                let current_connection = effective_connection_identity(&settings, model)?;
                 (previous_connection == current_connection)
                     .then(|| {
                         snapshot
@@ -214,9 +343,9 @@ pub fn save_model_settings(
         INSERT INTO model_provider_settings (
             id,
             api_url,
-            api_token,
+            api_token_ref,
             search_mode,
-            tavily_api_key,
+            tavily_api_key_ref,
             configuration_revision,
             search_connection_revision,
             updated_at
@@ -224,18 +353,18 @@ pub fn save_model_settings(
         VALUES ('default', ?1, ?2, ?3, ?4, ?5, ?6, ?7)
         ON CONFLICT(id) DO UPDATE SET
             api_url = excluded.api_url,
-            api_token = excluded.api_token,
+            api_token_ref = excluded.api_token_ref,
             search_mode = excluded.search_mode,
-            tavily_api_key = excluded.tavily_api_key,
+            tavily_api_key_ref = excluded.tavily_api_key_ref,
             configuration_revision = excluded.configuration_revision,
             search_connection_revision = excluded.search_connection_revision,
             updated_at = excluded.updated_at
         ",
         params![
             &settings.api_url,
-            &settings.api_token,
+            &settings.api_token_ref,
             &settings.search_mode,
-            &settings.tavily_api_key,
+            &settings.tavily_api_key_ref,
             configuration_revision,
             search_connection_revision,
             timestamp
@@ -251,7 +380,7 @@ pub fn save_model_settings(
                 display_name,
                 normalized_display_name,
                 api_url_override,
-                api_token_override,
+                api_token_override_ref,
                 supports_image,
                 context_window_tokens,
                 provider_profile_config_json,
@@ -274,7 +403,7 @@ pub fn save_model_settings(
                 display_name = excluded.display_name,
                 normalized_display_name = excluded.normalized_display_name,
                 api_url_override = excluded.api_url_override,
-                api_token_override = excluded.api_token_override,
+                api_token_override_ref = excluded.api_token_override_ref,
                 supports_image = excluded.supports_image,
                 context_window_tokens = excluded.context_window_tokens,
                 provider_profile_config_json = excluded.provider_profile_config_json,
@@ -293,7 +422,7 @@ pub fn save_model_settings(
                 &model.display_name,
                 normalize_model_display_name(&model.display_name),
                 &model.api_url_override,
-                &model.api_token_override,
+                &model.api_token_override_ref,
                 model.supports_image,
                 model.context_window_tokens,
                 encode_provider_profile_config(&model.provider_profile_config)?,
@@ -317,29 +446,48 @@ pub fn save_model_settings(
         transaction.execute("DELETE FROM models WHERE id = ?1", params![model_id])?;
     }
 
-    transaction.commit()
+    for credential_ref in published_staging_refs {
+        transaction.execute(
+            "DELETE FROM model_provider_credential_staging WHERE credential_ref = ?1",
+            [credential_ref],
+        )?;
+    }
+    for credential_ref in retired_credential_refs {
+        transaction.execute(
+            "INSERT OR IGNORE INTO model_provider_credential_cleanup (credential_ref, created_at)
+             VALUES (?1, ?2)",
+            params![credential_ref, timestamp],
+        )?;
+    }
+
+    transaction.commit()?;
+    Ok(StoredModelSettingsSnapshot {
+        settings,
+        configuration_revision,
+        provider_connection_revisions,
+        provider_protocol_revisions,
+        search_connection_revision,
+    })
 }
 
 fn canonicalize_official_provider_profiles(
-    mut settings: ModelSettingsRecord,
-) -> (ModelSettingsRecord, bool) {
+    mut settings: StoredModelSettingsRecord,
+) -> (StoredModelSettingsRecord, bool) {
     let global_api_url = settings.api_url.clone();
-    let global_api_token = settings.api_token.clone();
+    let global_api_token_ref = settings.api_token_ref.clone();
     let mut changed = false;
     for model in &mut settings.models {
         let override_url = model
             .api_url_override
             .as_deref()
             .filter(|value| !value.trim().is_empty());
-        let override_token = model
-            .api_token_override
+        let override_token_ref = model
+            .api_token_override_ref
             .as_deref()
             .filter(|value| !value.trim().is_empty());
-        let effective_api_url = match (override_url, override_token) {
+        let effective_api_url = match (override_url, override_token_ref) {
             (Some(url), Some(_)) => url,
-            (None, None)
-                if !global_api_url.trim().is_empty() && !global_api_token.trim().is_empty() =>
-            {
+            (None, None) if !global_api_url.trim().is_empty() && global_api_token_ref.is_some() => {
                 global_api_url.as_str()
             }
             _ => continue,
@@ -357,7 +505,7 @@ fn canonicalize_official_provider_profiles(
 }
 
 struct LoadedModels {
-    models: Vec<ModelConfigRecord>,
+    models: Vec<StoredModelConfigRecord>,
     provider_connection_revisions: BTreeMap<String, String>,
     provider_protocol_revisions: BTreeMap<String, String>,
 }
@@ -371,7 +519,7 @@ fn load_models(connection: &Connection) -> rusqlite::Result<LoadedModels> {
             display_name,
             normalized_display_name,
             api_url_override,
-            api_token_override,
+            api_token_override_ref,
             supports_image,
             context_window_tokens,
             provider_profile_config_json,
@@ -392,12 +540,12 @@ fn load_models(connection: &Connection) -> rusqlite::Result<LoadedModels> {
             if normalize_model_display_name(&display_name) != row.get::<_, String>(3)? {
                 return Err(rusqlite::Error::InvalidQuery);
             }
-            let model = ModelConfigRecord {
+            let model = StoredModelConfigRecord {
                 id: row.get(0)?,
                 provider_model_id: row.get(1)?,
                 display_name,
                 api_url_override: row.get(4)?,
-                api_token_override: row.get(5)?,
+                api_token_override_ref: row.get(5)?,
                 supports_image: row.get(6)?,
                 context_window_tokens: row.get(7)?,
                 provider_profile_config: decode_provider_profile_config(row.get(8)?, 8)?,
@@ -471,11 +619,11 @@ fn new_search_connection_revision() -> String {
 }
 
 fn same_effective_search_connection(
-    previous: &ModelSettingsRecord,
-    current: &ModelSettingsRecord,
+    previous: &StoredModelSettingsRecord,
+    current: &StoredModelSettingsRecord,
 ) -> bool {
     canonical_search_mode(&previous.search_mode) == canonical_search_mode(&current.search_mode)
-        && previous.tavily_api_key.trim() == current.tavily_api_key.trim()
+        && previous.tavily_api_key_ref == current.tavily_api_key_ref
 }
 
 /// Compares the complete provider-owned wire identity for one configured model.
@@ -484,40 +632,69 @@ fn same_effective_search_connection(
 /// dialect, Profile/version and reasoning policy are all equivalent. Renderer-only metadata,
 /// pricing, capacity and search settings do not participate.
 fn same_effective_provider_protocol(
-    previous_settings: &ModelSettingsRecord,
-    previous_model: &ModelConfigRecord,
-    current_settings: &ModelSettingsRecord,
-    current_model: &ModelConfigRecord,
+    previous_settings: &StoredModelSettingsRecord,
+    previous_model: &StoredModelConfigRecord,
+    current_settings: &StoredModelSettingsRecord,
+    current_model: &StoredModelConfigRecord,
 ) -> bool {
     if previous_model.provider_model_id != current_model.provider_model_id {
         return false;
     }
-    let Ok(previous_connection) = previous_settings.effective_connection_for(previous_model) else {
+    let Some(previous_connection) =
+        effective_connection_identity(previous_settings, previous_model)
+    else {
         return false;
     };
-    let Ok(current_connection) = current_settings.effective_connection_for(current_model) else {
+    let Some(current_connection) = effective_connection_identity(current_settings, current_model)
+    else {
         return false;
     };
     if previous_connection != current_connection {
         return false;
     }
 
-    let previous_dialect =
-        ProviderProtocolDialect::detect_from_api_url(&previous_connection.api_url);
-    let current_dialect = ProviderProtocolDialect::detect_from_api_url(&current_connection.api_url);
+    let previous_dialect = ProviderProtocolDialect::detect_from_api_url(previous_connection.0);
+    let current_dialect = ProviderProtocolDialect::detect_from_api_url(current_connection.0);
     if previous_dialect != current_dialect {
         return false;
     }
 
     match (
-        previous_model.resolved_provider_profile_config(previous_dialect),
-        current_model.resolved_provider_profile_config(current_dialect),
+        previous_model
+            .provider_profile_config
+            .validate_for_model(&previous_model.provider_model_id, previous_dialect),
+        current_model
+            .provider_profile_config
+            .validate_for_model(&current_model.provider_model_id, current_dialect),
     ) {
-        (Ok(previous), Ok(current)) => previous == current,
+        (Ok(()), Ok(())) => {
+            previous_model.provider_profile_config == current_model.provider_profile_config
+        }
         // Unsupported persisted profiles remain visible and replaceable without becoming a
         // runtime capability. If the exact opaque configuration is preserved, unrelated edits do
         // not manufacture a wire change; any Run still fails at exact Registration resolution.
         _ => previous_model.provider_profile_config == current_model.provider_profile_config,
+    }
+}
+
+fn effective_connection_identity<'a>(
+    settings: &'a StoredModelSettingsRecord,
+    model: &'a StoredModelConfigRecord,
+) -> Option<(&'a str, &'a str)> {
+    match (
+        model
+            .api_url_override
+            .as_deref()
+            .filter(|value| !value.trim().is_empty()),
+        model.api_token_override_ref.as_deref(),
+    ) {
+        (Some(url), Some(reference)) => Some((url.trim(), reference)),
+        (None, None) => settings
+            .api_token_ref
+            .as_deref()
+            .filter(|_| !settings.api_url.trim().is_empty())
+            .map(|reference| (settings.api_url.trim(), reference)),
+        _ => None,
     }
 }
 

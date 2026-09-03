@@ -384,6 +384,11 @@ fn whole_settings_revision_marker_is_confined_to_the_current_document_identity()
                 "crates/core/src/storage/config_repository.rs".to_string(),
                 "const MODEL_SETTINGS_REVISION_PREFIX: &str = \"model-settings-v1:\";".to_string(),
             ),
+            (
+                "packages/protocol/src/storageParsers.ts".to_string(),
+                "!/^model-settings-v1:[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test("
+                    .to_string(),
+            ),
         ],
         "the whole-settings revision must never be accepted as Provider protocol provenance",
     );

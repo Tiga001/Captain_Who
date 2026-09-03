@@ -3294,10 +3294,6 @@ pub(super) fn restore_agent_input_secrets(
     persisted: DecodedPersistedAgentResumeInput,
 ) -> Result<AgentChatInput, String> {
     let mut agent_input = persisted.agent_input;
-    let settings_snapshot = storage
-        .load_model_settings_snapshot()
-        .map_err(|_| "failed to resolve frozen pending-action provider settings".to_string())?
-        .ok_or_else(|| "frozen pending-action provider settings are unavailable".to_string())?;
     let model_config_id = agent_input
         .model_config_id
         .as_deref()
@@ -3305,6 +3301,13 @@ pub(super) fn restore_agent_input_secrets(
         .ok_or_else(|| {
             "frozen pending-action local model configuration is unavailable".to_string()
         })?;
+    let settings_snapshot = storage
+        .load_model_settings_snapshot_for_model(
+            model_config_id,
+            agent_input.search_config.is_some(),
+        )
+        .map_err(|_| "failed to resolve frozen pending-action provider settings".to_string())?
+        .ok_or_else(|| "frozen pending-action provider settings are unavailable".to_string())?;
     let current_provider_connection_revision = settings_snapshot
         .provider_connection_revisions
         .get(model_config_id)
@@ -3425,10 +3428,6 @@ fn bind_pending_provider_configuration(
     storage: &Arc<StorageService>,
     agent_input: AgentChatInput,
 ) -> Result<AgentChatInput, String> {
-    let snapshot = storage
-        .load_model_settings_snapshot()
-        .map_err(|_| "failed to freeze pending-action provider configuration".to_string())?
-        .ok_or_else(|| "pending-action provider configuration is unavailable".to_string())?;
     let provider_configuration_revision = agent_input
         .provider_configuration_revision
         .as_deref()
@@ -3441,6 +3440,13 @@ fn bind_pending_provider_configuration(
         .as_deref()
         .filter(|value| !value.trim().is_empty())
         .ok_or_else(|| "pending-action local model configuration is unavailable".to_string())?;
+    let snapshot = storage
+        .load_model_settings_snapshot_for_model(
+            model_config_id,
+            agent_input.search_config.is_some(),
+        )
+        .map_err(|_| "failed to freeze pending-action provider configuration".to_string())?
+        .ok_or_else(|| "pending-action provider configuration is unavailable".to_string())?;
     let model = snapshot
         .settings
         .models

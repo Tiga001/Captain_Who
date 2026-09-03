@@ -1,6 +1,8 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import type {
+  CredentialMutation,
+  CredentialStatus,
   ProviderProfileUiDescriptor,
   ProviderVendorDescriptor,
   ProviderVendorModelPolicyDescriptor,
@@ -29,7 +31,7 @@ import type { ModelSettingsSaveDraft } from '../features/storage/storageClient'
 
 interface ModelSettingsContextValue {
   apiUrl: string
-  apiToken: string
+  apiTokenStatus: CredentialStatus
   enabledModels: ModelConfig[]
   models: ModelConfig[]
   providerProfileDescriptors: ProviderProfileUiDescriptor[]
@@ -38,12 +40,12 @@ interface ModelSettingsContextValue {
     input: ProviderVendorModelPolicyInput
   ) => Promise<ProviderVendorModelPolicyDescriptor>
   searchMode: SearchMode
-  tavilyApiKey: string
+  tavilyApiKeyStatus: CredentialStatus
   deleteModel: (modelId: string) => void
-  setApiToken: (value: string) => void
-  setApiUrl: (value: string) => void
+  updateApiToken: (mutation: CredentialMutation) => Promise<void>
+  setApiUrl: (value: string) => Promise<void>
   setSearchMode: (value: SearchMode) => void
-  setTavilyApiKey: (value: string) => void
+  updateTavilyApiKey: (mutation: CredentialMutation) => Promise<void>
   toggleModel: (modelId: string) => void
   upsertModel: (model: ModelConfig | ModelConfigSaveDraft) => Promise<ModelConfig>
 }
@@ -60,6 +62,25 @@ function waitForModelSettingsRetry(delayMs: number): Promise<void> {
   return new Promise((resolve) => window.setTimeout(resolve, delayMs))
 }
 
+function credentialStatusAfterMutation(
+  current: CredentialStatus,
+  mutation: CredentialMutation
+): CredentialStatus {
+  if (mutation.type === 'replace') return 'configured'
+  if (mutation.type === 'clear') return 'missing'
+  return current
+}
+
+function keepSaveDraft(settings: ModelSettingsSnapshot): ModelSettingsSaveDraft {
+  return {
+    apiUrl: settings.apiUrl,
+    apiTokenMutation: { type: 'keep' },
+    searchMode: settings.searchMode,
+    tavilyApiKeyMutation: { type: 'keep' },
+    models: settings.models
+  }
+}
+
 export function ModelSettingsProvider({ children }: { children: ReactNode }) {
   const { t } = useFrontendConfig()
   const { showToast } = useToast()
@@ -70,10 +91,11 @@ export function ModelSettingsProvider({ children }: { children: ReactNode }) {
     markReady: markStartupReady
   } = useAppStartupStage('modelSettings')
   const [settings, setSettings] = useState<ModelSettingsSnapshot>(() => ({
+    configurationRevision: null,
     apiUrl: modelConfig.api.defaultUrl,
-    apiToken: modelConfig.api.defaultToken,
+    apiTokenStatus: 'missing',
     searchMode: modelConfig.webSearch.defaultMode,
-    tavilyApiKey: modelConfig.webSearch.defaultTavilyApiKey,
+    tavilyApiKeyStatus: 'missing',
     models: []
   }))
   const [providerProfileDescriptors, setProviderProfileDescriptors] = useState<
@@ -109,7 +131,12 @@ export function ModelSettingsProvider({ children }: { children: ReactNode }) {
 
       const save = saveQueueRef.current
         .catch(() => undefined)
-        .then(() => saveModelSettings(saveDraft))
+        .then(() =>
+          saveModelSettings(
+            saveDraft,
+            lastSuccessfulSettingsRef.current?.configurationRevision ?? null
+          )
+        )
         .then((authoritativeSettings) => {
           lastSuccessfulSettingsRef.current = authoritativeSettings
           if (latestSaveRevisionRef.current === revision) {
@@ -117,11 +144,20 @@ export function ModelSettingsProvider({ children }: { children: ReactNode }) {
           }
           return authoritativeSettings
         })
-        .catch((error: unknown) => {
+        .catch(async (error: unknown) => {
           if (latestSaveRevisionRef.current === revision) {
-            const lastSuccessfulSettings = lastSuccessfulSettingsRef.current
-            if (lastSuccessfulSettings) {
-              applySettings(lastSuccessfulSettings)
+            let recoverySettings = lastSuccessfulSettingsRef.current
+            try {
+              const latestSettings = await loadModelSettings()
+              if (latestSettings) {
+                recoverySettings = latestSettings
+                lastSuccessfulSettingsRef.current = latestSettings
+              }
+            } catch {
+              // Preserve the last known-good snapshot when the recovery read also fails.
+            }
+            if (recoverySettings) {
+              applySettings(recoverySettings)
             }
             const { showToast: presentToast, t: translate } = loadFailurePresentationRef.current
             const classified = classifyModelSettingsSaveError(error)
@@ -177,9 +213,9 @@ export function ModelSettingsProvider({ children }: { children: ReactNode }) {
           } else {
             const bootstrapDraft: ModelSettingsSaveDraft = {
               apiUrl: modelConfig.api.defaultUrl,
-              apiToken: modelConfig.api.defaultToken,
+              apiTokenMutation: { type: 'keep' },
               searchMode: modelConfig.webSearch.defaultMode,
-              tavilyApiKey: modelConfig.webSearch.defaultTavilyApiKey,
+              tavilyApiKeyMutation: { type: 'keep' },
               models: INITIAL_MODEL_SAVE_DRAFTS
             }
             await persistSettings(bootstrapDraft)
@@ -220,7 +256,7 @@ export function ModelSettingsProvider({ children }: { children: ReactNode }) {
     (update: (current: ModelSettingsSnapshot) => ModelSettingsSnapshot): void => {
       if (hydrationStatus !== 'ready') return
       const nextSettings = update(settingsRef.current)
-      void persistSettings(nextSettings, nextSettings).catch(() => undefined)
+      void persistSettings(keepSaveDraft(nextSettings), nextSettings).catch(() => undefined)
     },
     [hydrationStatus, persistSettings]
   )
@@ -247,7 +283,7 @@ export function ModelSettingsProvider({ children }: { children: ReactNode }) {
       }
 
       const authoritativeSettings = await persistSettings({
-        ...currentSettings,
+        ...keepSaveDraft(currentSettings),
         models: nextModels
       })
       const authoritativeModel =
@@ -268,37 +304,67 @@ export function ModelSettingsProvider({ children }: { children: ReactNode }) {
   )
 
   const value = useMemo<ModelSettingsContextValue>(() => {
-    const { apiToken, apiUrl, models, searchMode, tavilyApiKey } = settings
+    const { apiTokenStatus, apiUrl, models, searchMode, tavilyApiKeyStatus } = settings
     const enabledModels = settings.models.filter(
-      (model) => model.enabled && isModelConnectionAvailable(model, apiUrl, apiToken)
+      (model) => model.enabled && isModelConnectionAvailable(model, apiUrl, apiTokenStatus)
     )
 
     return {
       apiUrl,
-      apiToken,
+      apiTokenStatus,
       enabledModels,
       models,
       providerProfileDescriptors,
       providerVendorDescriptors,
       resolveProviderVendorModelPolicy: resolveProviderVendorModelPolicyFromStorage,
       searchMode,
-      tavilyApiKey,
+      tavilyApiKeyStatus,
       deleteModel: (modelId) => {
         updateSettings((current) => ({
           ...current,
           models: current.models.filter((model) => model.id !== modelId)
         }))
       },
-      setApiToken: (value) => updateSettings((current) => ({ ...current, apiToken: value })),
-      setApiUrl: (value) =>
-        updateSettings((current) => ({
+      updateApiToken: async (mutation) => {
+        const current = settingsRef.current
+        const optimistic = {
+          ...current,
+          apiTokenStatus: credentialStatusAfterMutation(current.apiTokenStatus, mutation)
+        }
+        await persistSettings(
+          { ...keepSaveDraft(current), apiTokenMutation: mutation },
+          mutation.type === 'clear' ? undefined : optimistic
+        )
+      },
+      setApiUrl: async (value) => {
+        const current = settingsRef.current
+        const nextSettings = {
           ...current,
           apiUrl: value,
           models: prepareModelsForGlobalApiUrlChange(current.models, providerProfileDescriptors)
-        })),
+        }
+        await persistSettings(keepSaveDraft(nextSettings), nextSettings)
+      },
       setSearchMode: (value) => updateSettings((current) => ({ ...current, searchMode: value })),
-      setTavilyApiKey: (value) =>
-        updateSettings((current) => ({ ...current, tavilyApiKey: value })),
+      updateTavilyApiKey: async (mutation) => {
+        const current = settingsRef.current
+        const nextStatus = credentialStatusAfterMutation(current.tavilyApiKeyStatus, mutation)
+        const nextSearchMode =
+          mutation.type === 'clear' ? ('disabled' as const) : current.searchMode
+        const optimistic = {
+          ...current,
+          tavilyApiKeyStatus: nextStatus,
+          searchMode: nextSearchMode
+        }
+        await persistSettings(
+          {
+            ...keepSaveDraft(current),
+            searchMode: nextSearchMode,
+            tavilyApiKeyMutation: mutation
+          },
+          mutation.type === 'clear' ? undefined : optimistic
+        )
+      },
       toggleModel: (modelId) => {
         updateSettings((current) => ({
           ...current,
@@ -309,7 +375,14 @@ export function ModelSettingsProvider({ children }: { children: ReactNode }) {
       },
       upsertModel
     }
-  }, [providerProfileDescriptors, providerVendorDescriptors, settings, updateSettings, upsertModel])
+  }, [
+    persistSettings,
+    providerProfileDescriptors,
+    providerVendorDescriptors,
+    settings,
+    updateSettings,
+    upsertModel
+  ])
 
   return <ModelSettingsContext.Provider value={value}>{children}</ModelSettingsContext.Provider>
 }

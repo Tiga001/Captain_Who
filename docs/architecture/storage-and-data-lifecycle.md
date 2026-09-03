@@ -2,7 +2,7 @@
 status: current
 audience: developers
 owner: engineering
-last_verified: 2026-08-31
+last_verified: 2026-09-03
 ---
 
 # SQLite 存储与数据生命周期
@@ -14,7 +14,7 @@ last_verified: 2026-08-31
 - `StorageService` 向 application 层提供领域操作；repository 负责单一表组的 SQL 与映射。
 - Core Server 负责把一次业务结算组合成事务，不允许 Renderer 直接写数据库。
 - SQLite 保存元数据、消息、Trace、审批、Run 恢复、设置和索引；大型附件、受管 Artifact、命令 spool 等内容保存在受管文件目录，SQLite 保存身份、hash、授权和生命周期。
-- 模型 Token 与 Tavily Key 当前以明文保存在 SQLite；签名发行版的图片生成凭据使用 OS Keychain/受保护 credential backend，开发构建使用应用私有文件 backend。所有凭据都不得进入日志、Trace 或普通 Renderer 投影。
+- 模型 Token、Tavily Key 与图片生成 API Key 和普通配置分离。SQLite 只保存不透明 credential reference、状态与非秘密元数据；具备稳定签名身份的发行构建使用操作系统凭据存储，未签名 macOS 开发构建使用应用数据根内的私有文件 backend（目录 `0700`、文件 `0600`）。所有凭据都不得进入日志、Trace 或普通 Renderer 投影。
 
 ## 数据库定位与单实例
 
@@ -24,10 +24,10 @@ last_verified: 2026-08-31
 
 ## Schema 发布策略
 
-截至本次核验，当前唯一受支持的 canonical schema 是 **v32**（SQLite `PRAGMA user_version = 32`）：
+截至本次核验，当前唯一受支持的 canonical schema 是 **v33**（SQLite `PRAGMA user_version = 33`）：
 
-- `STORAGE_SCHEMA_VERSION = 32`；
-- canonical schema fingerprint 为 `sha256:a8609147a40ce63fce3f8344131f3aea6c204eb490f59a7439bb87a959390c90`，由编译期常量和测试固定；
+- `STORAGE_SCHEMA_VERSION = 33`；
+- canonical schema fingerprint 为 `sha256:5e1e404d74af5ed899d88dc8b5051e673ecd5beb967579af8f328b07b640c948`，由编译期常量和测试固定；
 - 空数据库在一个原子流程中建立完整当前 schema；
 - 非空的旧版、未知版或结构被篡改的开发数据库返回 `development_storage_schema_reset_required`；
 - 当前没有受支持的原地升级链。
@@ -36,7 +36,7 @@ last_verified: 2026-08-31
 
 开发库重置前应先关闭应用并备份数据根；优先使用受管 `storage:reset-dev` 流程。不要只删除 `storage.sqlite` 而遗留 attachments、artifacts、spool 或 lock 文件。
 
-`storage:reset-dev` 不是 schema migration：它始终新建 v32 数据库，且不恢复 Conversation、Project 或任何 Agent/runtime 记录。配置提取仅允许当前 v32，以及配置表契约已核验为相同的固定 v31；v30 及更旧版本使用当前默认配置。这个 v31 例外必须显式维护，不能随版本号自动滑动。
+`storage:reset-dev` 不是 schema migration：它始终新建 v33 数据库，且不恢复 Conversation、Project 或任何 Agent/runtime 记录。正式工具只从 exact current v33 schema 提取 allowlisted configuration；旧 schema fail closed，不保留永久兼容读取或明文字段恢复路径。开发期跨 schema 重建若确有必要，必须作为一次性、代码审阅过的受控操作执行，并在验证目标库后删除临时转换代码。
 
 ## 领域数据地图
 
@@ -63,7 +63,7 @@ DDL 按领域大致分为：
 
 ## Scheduled Automation 表组
 
-Automation 在 canonical schema v32 中使用四张表，完整列、CHECK、索引和 trigger 仍以 DDL 为准：
+Automation 在 canonical schema v33 中使用四张表，完整列、CHECK、索引和 trigger 仍以 DDL 为准：
 
 | 表                               | 权威内容                                                                        | 关键不变量                                                                                                        |
 | -------------------------------- | ------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
@@ -100,7 +100,7 @@ Automation 还要求两个专用原子边界：
 
 ## 启动与崩溃恢复
 
-Bootstrap 大致执行：解析数据根与锁、打开/校验 canonical schema v32、构造 repositories/services、加载 MCP Server/Provider/Skills/Artifact Runtime、随后运行领域 reconciliation。
+Bootstrap 大致执行：解析数据根与锁、打开/校验 canonical schema v33、构造 repositories/services、加载凭据 backend、MCP Server/Provider/Skills/Artifact Runtime、随后运行领域 reconciliation。持久凭据 backend 不可用或 credential reference 无法解析时必须保留公开配置并报告 `unavailable`/配置错误，不能把缺失凭据当作空值覆盖；只有实际需要该连接的运行应被阻断。
 
 恢复必须按“数据库已提交状态”判断，不按 Renderer 缓存判断。当前需要关注：
 
@@ -122,6 +122,8 @@ Automation 启动恢复区分 admission 前后：旧进程遗留的全部 `admit
 ## 敏感数据与文件生命周期
 
 - API key、Provider credential、continuation 加密主密钥不进入日志、Trace 或普通配置行。
+- Renderer 只接收 `missing`、`configured`、`unavailable` 等状态，以及用户本次新输入的替换值；Host 永不回传已有 secret 或不透明 credential reference。
+- runtime 在开始请求前按冻结的连接 revision 解析所选模型需要的凭据；事务和 SQLite mutex 内不得执行 OS Keychain、Secret Service、Credential Manager 或开发凭据文件 I/O。
 - Provider continuation payload 加密后存储，元数据仍必须最小化并绑定归属。
 - Attachment、Artifact、Browser download、Skill package 和 command workspace 通过统一 locator/service 解析 URI/ID；数据库路径不是 Renderer/模型 API。未知 `scheme:` 或 `@namespace` fail closed；需要同名本地文件时用显式 `./...` 消歧。
 - Artifact 使用内容 hash 标识与 conversation grant 分离；Browser download 以 `browser-download:<uuid>` 暴露且不含宿主路径。当前 Conversation 之外的访问必须由 Host 从 Project 或 `agent_nodes` 中的 exact `root_agent_id + root_conversation_id` 推导，模型/Renderer 自报 root 无效。
@@ -133,11 +135,15 @@ Automation 启动恢复区分 admission 前后：旧进程遗留的全部 `admit
 
 当前开发策略以整套数据根备份/重置为主。复制在线 SQLite 文件并不等价于一致备份；应在应用关闭、锁释放后复制数据库及其配套文件目录，或使用受支持的 SQLite snapshot/backup 流程。
 
+当前 v33 SQLite snapshot 只含模型/搜索 credential reference 与非秘密元数据，不含这些连接的当前 secret 字节；旧 schema 生成的历史备份仍可能含明文 Token/Key，必须继续按秘密材料保护。只恢复 `storage.sqlite` 不会恢复操作系统凭据，跨设备、跨系统账户、签名身份变化或凭据 backend 丢失后，界面可能显示凭据不可用，此时只能由用户替换或清除。未签名 macOS 开发构建的私有凭据文件位于数据根，因此“整根复制”仍会复制 secret，不能当作普通诊断包。
+
+删除 SQLite reference、清除凭据或移除私有文件只表达应用层删除意图；文件系统、SSD、系统备份和操作系统凭据后端可能保留副本，产品不承诺安全擦除。怀疑泄露时应在 Provider 侧撤销或轮换凭据。
+
 错误日志可包含 schema version、fingerprint、record identity、phase 和 recovery code，但不得打印消息正文、原始 Tool 参数、continuation 密文解密结果、密钥或私有绝对路径。
 
 ## 不变量
 
-1. `canonical_schema.sql`、canonical schema v32 的 version 与 fingerprint 必须一致。
+1. `canonical_schema.sql`、canonical schema v33 的 version 与 fingerprint 必须一致。
 2. 非空非当前 schema fail closed，不自动执行未审计迁移。
 3. 所有领域对象在 service SQL 边界校验 conversation/project/Run 归属。
 4. 外部副作用与数据库提交之间的崩溃窗口必须有明确恢复状态。
@@ -181,7 +187,7 @@ Automation 启动恢复区分 admission 前后：旧进程遗留的全部 `admit
 
 ## 变更检查表
 
-- [ ] 修改 `canonical_schema.sql` 后同步 canonical version、fingerprint 和 fresh-schema 测试；若版本不再是 v32，同时更新本文当前快照。
+- [ ] 修改 `canonical_schema.sql` 后同步 canonical version、fingerprint 和 fresh-schema 测试；若版本不再是 v33，同时更新本文当前快照。
 - [ ] 明确旧数据库行为；没有经批准的迁移链时保持 reset-required。
 - [ ] 新表/列定义 owner、FK、唯一键、索引、删除/保留和敏感分类。
 - [ ] 跨表操作在一个 service 事务中完成，并有冲突/幂等测试。

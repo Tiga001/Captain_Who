@@ -167,7 +167,10 @@ impl AgentCollaborationHarnessAdapter {
         &self,
         project_id: Option<&str>,
     ) -> Result<AgentCollaborationSelectorDirectory, AgentError> {
-        let settings = self.storage.load_model_settings().map_err(storage_error)?;
+        let settings = self
+            .storage
+            .load_model_settings_catalog()
+            .map_err(storage_error)?;
         let models = settings
             .as_ref()
             .map(|settings| {

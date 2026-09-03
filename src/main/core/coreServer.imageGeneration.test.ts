@@ -77,8 +77,7 @@ describe('CoreServer image generation configuration client', () => {
   it('uses stable methods and validates every successful response', async () => {
     const getOutput = {
       schemaVersion: IMAGE_GENERATION_CONFIGURATION_SCHEMA_VERSION,
-      configuration,
-      apiKey: 'existing-image-api-key'
+      configuration
     }
     const updateOutput = {
       schemaVersion: IMAGE_GENERATION_CONFIGURATION_SCHEMA_VERSION,
@@ -145,12 +144,12 @@ describe('CoreServer image generation configuration client', () => {
   it('rejects malformed successful responses', async () => {
     rpcRequest.mockResolvedValue({
       schemaVersion: IMAGE_GENERATION_CONFIGURATION_SCHEMA_VERSION,
-      configuration: { ...configuration, credential: 'must-never-cross-the-boundary' },
-      apiKey: 'existing-image-api-key'
+      configuration,
+      apiKey: 'must-never-cross-the-boundary'
     })
 
     await expect(new CoreServer().getImageGenerationConfiguration()).rejects.toThrow(
-      'Image generation configuration response.configuration'
+      'unexpected field apiKey'
     )
   })
 

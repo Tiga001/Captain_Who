@@ -36,7 +36,7 @@ impl AgentService {
         }
         let settings_snapshot = self
             .storage
-            .load_model_settings_snapshot()?
+            .load_model_settings_snapshot_for_model(model_id, false)?
             .ok_or_else(|| "请先配置模型。".to_string())?;
         let settings = settings_snapshot.settings;
         let model = settings

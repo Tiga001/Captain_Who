@@ -26,14 +26,14 @@ vi.mock('../../config/FrontendConfigProvider', () => ({
 const { ModelProviderSettings } =
   await import('../../features/settings/pages/configuration/ModelProviderSettings')
 
-function renderSettings() {
+function renderSettings(onApiUrlChange = vi.fn().mockResolvedValue(undefined)) {
   return render(
     <ModelProviderSettings
-      apiToken=""
+      apiTokenStatus="missing"
       apiUrl=""
       models={[]}
-      onApiTokenChange={vi.fn()}
-      onApiUrlChange={vi.fn()}
+      onApiTokenCommit={vi.fn()}
+      onApiUrlChange={onApiUrlChange}
       onManageModels={vi.fn()}
       onToggleModel={vi.fn()}
     />
@@ -41,6 +41,25 @@ function renderSettings() {
 }
 
 describe('ModelProviderSettings default API help', () => {
+  it('keeps URL keystrokes local and commits only on blur or Enter', async () => {
+    const onApiUrlChange = vi.fn().mockResolvedValue(undefined)
+    const screen = await renderSettings(onApiUrlChange)
+    const input = screen.getByRole('textbox', { name: 'API URL' })
+
+    await input.fill('https://provider.example/v1')
+    expect(onApiUrlChange).not.toHaveBeenCalled()
+    await input.click()
+    await userEvent.keyboard('{Enter}')
+    await expect.poll(() => onApiUrlChange.mock.calls).toEqual([['https://provider.example/v1']])
+
+    await input.fill('https://second.example/v1')
+    expect(onApiUrlChange).toHaveBeenCalledTimes(1)
+    await screen.getByRole('heading', { name: '模型配置' }).click()
+    await expect
+      .poll(() => onApiUrlChange.mock.calls)
+      .toEqual([['https://provider.example/v1'], ['https://second.example/v1']])
+  })
+
   it('is hidden by default and exposes an accessible compact help trigger', async () => {
     const screen = await renderSettings()
     const trigger = screen.getByRole('button', { name: '查看配置说明' })

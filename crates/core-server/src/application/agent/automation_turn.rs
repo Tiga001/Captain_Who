@@ -238,7 +238,7 @@ impl AgentService {
             .map_err(AutomationHumanRootStartError::Fatal)?;
         let models = self
             .storage
-            .load_model_settings()
+            .load_model_settings_catalog()
             .map_err(AutomationHumanRootStartError::Fatal)?
             .map(|settings| settings.models)
             .unwrap_or_default();

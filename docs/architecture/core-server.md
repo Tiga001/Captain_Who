@@ -2,7 +2,7 @@
 status: current
 audience: developers/maintainers
 owner: engineering
-last_verified: 2026-08-31
+last_verified: 2026-09-03
 ---
 
 # Core Server 架构与运行时
@@ -117,7 +117,7 @@ request loop 当前按风险与阻塞特征分流：
 
 1. 将数据库路径规范化为绝对路径，并取得 exact DB instance lock；锁必须比所有 service/connection 活得更久。
 2. 打开 `StorageService`、MCP Registry、内置能力 policy store、图片生成、Skill、Git 和 `AgentService`。
-3. 初始化凭据能力。可选凭据后端不可用时相应持久续跑能力 fail closed，但不应泄漏具体秘密错误。
+3. 初始化模型、搜索与图片生成凭据能力。凭据 backend 或某个 reference 不可用时仍加载公开 catalog，并把受影响项投影为 `unavailable`；只有实际选择该连接的运行 fail closed，不能让一条不相关的坏 reference 阻断 Core Server 启动或其他 Provider。错误不得包含 secret、reference 或底层敏感详情。
 4. 执行启动对账：中断的图片执行、MCP actions/人工票据、FileChange executing audit/Staged commit/delete journal/Run grant、内置能力审批和 orphaned Conversation traces。
 5. 连接 MCP Manager/Registry，并挂载内部 `ManagedPlaywrightMcpRuntime` 与 `BrowserRiskCoordinator`。
 6. 在任何请求或 Dispatcher 可能写入事件前，分别冻结 collaboration global event cursor、Automation event cursor 与 shared Notification event cursor；连接 notifier，发送 `agent.collaboration.resync`、`automation.resync` 和 `notification.resync`。

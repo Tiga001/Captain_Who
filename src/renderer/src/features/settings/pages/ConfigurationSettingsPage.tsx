@@ -22,7 +22,7 @@ export function ConfigurationSettingsPage({
 }: ConfigurationSettingsPageProps) {
   const { t } = useFrontendConfig()
   const {
-    apiToken,
+    apiTokenStatus,
     apiUrl,
     deleteModel,
     models,
@@ -30,12 +30,12 @@ export function ConfigurationSettingsPage({
     providerVendorDescriptors,
     resolveProviderVendorModelPolicy,
     searchMode,
-    setApiToken,
     setApiUrl,
     setSearchMode,
-    setTavilyApiKey,
-    tavilyApiKey,
+    tavilyApiKeyStatus,
     toggleModel,
+    updateApiToken,
+    updateTavilyApiKey,
     upsertModel
   } = useModelSettings()
   const [view, setView] = useState<ConfigurationView>('settings')
@@ -136,9 +136,9 @@ export function ConfigurationSettingsPage({
     <div className="configuration-page">
       <ModelProviderSettings
         apiUrl={apiUrl}
-        apiToken={apiToken}
+        apiTokenStatus={apiTokenStatus}
         models={models}
-        onApiTokenChange={setApiToken}
+        onApiTokenCommit={updateApiToken}
         onApiUrlChange={setApiUrl}
         onManageModels={() => setView('manager')}
         onToggleModel={toggleModel}
@@ -146,9 +146,9 @@ export function ConfigurationSettingsPage({
 
       <WebSearchSettings
         searchMode={searchMode}
-        tavilyApiKey={tavilyApiKey}
+        tavilyApiKeyStatus={tavilyApiKeyStatus}
         onSearchModeChange={setSearchMode}
-        onTavilyApiKeyChange={setTavilyApiKey}
+        onTavilyApiKeyCommit={updateTavilyApiKey}
       />
 
       <ImageGenerationSettings />

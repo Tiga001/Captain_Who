@@ -18,7 +18,7 @@ use super::{
     ensure_supported_reference, lock_system_credentials, validate_service_name,
     CredentialDeleteOutcome, CredentialReference, CredentialSecret, CredentialStore,
     CredentialStoreBackend, CredentialStoreError, CredentialStoreOperation,
-    IMAGE_GENERATION_CREDENTIAL_SERVICE,
+    IMAGE_GENERATION_CREDENTIAL_SERVICE, MODEL_PROVIDER_CREDENTIAL_SERVICE,
 };
 
 // Security.framework declares this value in SecBase.h, but the sys crate does
@@ -44,6 +44,13 @@ impl NonInteractiveMacCredentialStore {
     pub fn image_generation() -> Self {
         Self {
             service: IMAGE_GENERATION_CREDENTIAL_SERVICE.to_owned(),
+        }
+    }
+
+    #[must_use]
+    pub fn model_provider() -> Self {
+        Self {
+            service: MODEL_PROVIDER_CREDENTIAL_SERVICE.to_owned(),
         }
     }
 

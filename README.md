@@ -114,7 +114,7 @@ macOS `build:mac` 已强制 Developer ID 签名、hardened runtime、受管原�
 
 Electron 应用以 `app.getPath('userData')` 返回的位置作为唯一权威数据根目录，并在启动
 Core Server 时显式传入该目录。数据库位于数据根的 `storage.sqlite`，附件、已安装 Skill、
-生成图片和开发环境凭据分别保存在同级的受管子目录中；启动时会清理无数据库引用的孤立
+生成图片和未签名 macOS 开发环境凭据分别保存在同级的受管子目录中；启动时会清理无数据库引用的孤立
 附件文件。具体路径由 Electron 按当前操作系统和应用身份解析，业务代码不再分别猜测
 macOS、Windows 或 Linux 的目录。
 
@@ -150,9 +150,14 @@ Usage、审批、Continuation、Compaction、Fork 等状态不会恢复。
 
 请注意：
 
-- 模型 Token 与 Tavily Key 当前以明文保存在本机 SQLite 数据库中，不是系统钥匙串。
-- 签名发行版的图片生成 API Key 使用操作系统凭据存储，不属于文件数据根；开发版使用的
-  私有文件凭据才位于数据根内。备份或卸载时应分别处理系统凭据。
+- 模型 Token、Tavily Key 与图片生成 API Key 都与普通配置分离；当前 v33 SQLite 只保存
+  credential reference、配置状态和非秘密元数据。Renderer 只取得凭据状态和用户本次新输入的值，
+  不会读回已有密钥或 reference。
+- 具备稳定签名身份的发行构建使用操作系统凭据存储；未签名 macOS 开发构建使用数据根内
+  目录权限 `0700`、文件权限 `0600` 的私有文件 backend。完整数据根仍应视为敏感数据。
+- 当前 SQLite 备份不包含当前模型/搜索 secret，但旧 schema 的历史备份可能仍含明文凭据；
+  只恢复 SQLite 不会恢复操作系统凭据。清除/删除不承诺对 SSD、系统备份或系统凭据后端安全擦除，
+  怀疑泄露时应在 Provider 侧撤销或轮换密钥。
 - 模型请求会发送到你配置的 API URL；启用联网搜索后，查询或目标 URL 会发送给 Tavily。
 - 内置浏览器默认拒绝网页申请摄像头、麦克风、定位、通知等系统权限。
 - “移除项目”会永久删除 Captain Who 中该项目的本地对话、消息与附件，但不会修改项目目录中的文件。

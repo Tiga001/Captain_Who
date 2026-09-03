@@ -123,6 +123,15 @@ describe('conversation fork IPC', () => {
 })
 
 describe('model settings IPC', () => {
+  const update = {
+    expectedRevision: null,
+    apiUrl: '',
+    apiTokenMutation: { type: 'keep' as const },
+    searchMode: 'auto',
+    tavilyApiKeyMutation: { type: 'keep' as const },
+    models: []
+  }
+
   it('routes the safe descriptor projection and returns the authoritative save result', async () => {
     const handlers = new Map<string, (...args: unknown[]) => unknown>()
     const ipcMain = {
@@ -131,12 +140,22 @@ describe('model settings IPC', () => {
       }),
       on: vi.fn()
     }
-    const descriptors = [{ profileId: 'deepseek_v4_chat', profileVersion: 1 }]
+    const descriptors = [
+      {
+        profileId: 'deepseek_v4_chat',
+        profileVersion: 1,
+        displayName: 'DeepSeek',
+        compatibleDialects: ['openai_chat_completions'],
+        settingsKind: 'deepseek_v4_chat',
+        selectable: true
+      }
+    ]
     const settings = {
+      configurationRevision: 'model-settings-v1:00000000-0000-4000-8000-000000000001',
       apiUrl: '',
-      apiToken: '',
+      apiTokenStatus: 'missing',
       searchMode: 'auto',
-      tavilyApiKey: '',
+      tavilyApiKeyStatus: 'missing',
       models: []
     }
     const coreServer = {
@@ -145,17 +164,17 @@ describe('model settings IPC', () => {
     }
     registerStorageIpc(ipcMain as never, coreServer as never, {} as never)
 
-    await expect(handlers.get('host:storage.loadProviderProfileUiDescriptors')?.({})).resolves.toBe(
-      descriptors
-    )
-    await expect(handlers.get('host:storage.saveModelSettings')?.({}, settings)).resolves.toEqual({
+    await expect(
+      handlers.get('host:storage.loadProviderProfileUiDescriptors')?.({})
+    ).resolves.toEqual(descriptors)
+    await expect(handlers.get('host:storage.saveModelSettings')?.({}, update)).resolves.toEqual({
       ok: true,
       value: settings
     })
-    expect(coreServer.saveModelSettings).toHaveBeenCalledWith(settings)
+    expect(coreServer.saveModelSettings).toHaveBeenCalledWith(update)
   })
 
-  it('routes Provider vendor descriptors and model policy resolution without reshaping them', async () => {
+  it('routes and validates Provider vendor descriptors and model policy resolution', async () => {
     const handlers = new Map<string, (...args: unknown[]) => unknown>()
     const ipcMain = {
       handle: vi.fn((channel: string, handler: (...args: unknown[]) => unknown) => {
@@ -191,13 +210,68 @@ describe('model settings IPC', () => {
     }
     registerStorageIpc(ipcMain as never, coreServer as never, {} as never)
 
-    await expect(handlers.get('host:storage.loadProviderVendorDescriptors')?.({})).resolves.toBe(
+    await expect(handlers.get('host:storage.loadProviderVendorDescriptors')?.({})).resolves.toEqual(
       descriptors
     )
     await expect(
       handlers.get('host:storage.resolveProviderVendorModelPolicy')?.({}, input)
-    ).resolves.toBe(policy)
+    ).resolves.toEqual(policy)
     expect(coreServer.resolveProviderVendorModelPolicy).toHaveBeenCalledWith(input)
+  })
+
+  it('rejects Provider descriptor and policy fields that Core must not project', async () => {
+    const handlers = new Map<string, (...args: unknown[]) => unknown>()
+    const ipcMain = {
+      handle: vi.fn((channel: string, handler: (...args: unknown[]) => unknown) => {
+        handlers.set(channel, handler)
+      }),
+      on: vi.fn()
+    }
+    const coreServer = {
+      loadProviderProfileUiDescriptors: vi.fn().mockResolvedValue([
+        {
+          profileId: 'deepseek_v4_chat',
+          profileVersion: 1,
+          displayName: 'DeepSeek',
+          compatibleDialects: ['openai_chat_completions'],
+          settingsKind: 'deepseek_v4_chat',
+          selectable: true,
+          credentialRef: 'private-reference'
+        }
+      ]),
+      loadProviderVendorDescriptors: vi.fn().mockResolvedValue([
+        {
+          vendorId: 'moonshot',
+          displayName: 'Moonshot AI',
+          selectable: true,
+          credentialRef: 'private-reference'
+        }
+      ]),
+      resolveProviderVendorModelPolicy: vi.fn().mockResolvedValue({
+        status: 'unsupported',
+        vendorId: 'moonshot',
+        reason: 'unsupported_model',
+        runtimeCapabilities: ['private']
+      })
+    }
+    registerStorageIpc(ipcMain as never, coreServer as never, {} as never)
+
+    await expect(
+      handlers.get('host:storage.loadProviderProfileUiDescriptors')?.({})
+    ).rejects.toThrow(/credential field credentialRef/)
+    await expect(handlers.get('host:storage.loadProviderVendorDescriptors')?.({})).rejects.toThrow(
+      /unexpected field credentialRef/
+    )
+    await expect(
+      handlers.get('host:storage.resolveProviderVendorModelPolicy')?.(
+        {},
+        {
+          vendorId: 'moonshot',
+          modelId: 'unknown',
+          dialect: 'openai_chat_completions'
+        }
+      )
+    ).rejects.toThrow(/unexpected field runtimeCapabilities/)
   })
 
   it('projects only the bounded duplicate-display-name validation error', async () => {
@@ -223,9 +297,7 @@ describe('model settings IPC', () => {
     }
     registerStorageIpc(ipcMain as never, coreServer as never, {} as never)
 
-    await expect(
-      handlers.get('host:storage.saveModelSettings')?.({}, { models: [] })
-    ).resolves.toEqual({
+    await expect(handlers.get('host:storage.saveModelSettings')?.({}, update)).resolves.toEqual({
       ok: false,
       error: {
         message: 'Model settings validation failed.',
@@ -257,9 +329,7 @@ describe('model settings IPC', () => {
     const coreServer = { saveModelSettings: vi.fn().mockRejectedValue(failure) }
     registerStorageIpc(ipcMain as never, coreServer as never, {} as never)
 
-    await expect(
-      handlers.get('host:storage.saveModelSettings')?.({}, { models: [] })
-    ).resolves.toEqual({
+    await expect(handlers.get('host:storage.saveModelSettings')?.({}, update)).resolves.toEqual({
       ok: false,
       error: { message: 'Model settings save failed.' }
     })

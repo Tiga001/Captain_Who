@@ -16,17 +16,18 @@ const { loadProviderProfileUiDescriptors, saveModelSettings } =
   await import('../../features/storage/storageClient')
 
 const authoritativeSettings: StorageModelSettingsRecord = {
+  configurationRevision: 'model-settings-v1:00000000-0000-4000-8000-000000000002',
   apiUrl: 'https://api.example/v1/chat/completions',
-  apiToken: 'secret-token',
+  apiTokenStatus: 'configured',
   searchMode: 'auto',
-  tavilyApiKey: '',
+  tavilyApiKeyStatus: 'missing',
   models: [
     {
       id: 'model-1',
       providerModelId: 'provider-model-1',
       displayName: 'Model 1',
       apiUrlOverride: null,
-      apiTokenOverride: null,
+      apiTokenOverrideStatus: 'missing',
       supportsImage: false,
       contextWindowTokens: 128_000,
       providerProfileConfig: {
@@ -53,44 +54,50 @@ beforeEach(() => {
 
 describe('model settings storage client', () => {
   it('sends only an explicit profile update and accepts the Host-authoritative profile config', async () => {
-    const saved = await saveModelSettings({
-      apiUrl: authoritativeSettings.apiUrl,
-      apiToken: authoritativeSettings.apiToken,
-      searchMode: 'auto',
-      tavilyApiKey: '',
-      models: [
-        {
-          id: 'model-1',
-          providerModelId: 'provider-model-1',
-          displayName: 'Model 1',
-          supportsImage: false,
-          contextWindowTokens: 128_000,
-          providerProfileConfig: {
-            schemaVersion: 999,
-            profile: { id: 'deepseek_v4_chat', version: 999 },
-            reasoning: { mode: 'enabled', effort: 'max' }
-          } as unknown as ProviderProfileConfig,
-          providerProfileUpdate: { kind: 'select_generic' },
-          inputPrice: '0',
-          cachedInputPrice: '',
-          outputPrice: '0',
-          enabled: true
-        }
-      ]
-    })
+    const saved = await saveModelSettings(
+      {
+        apiUrl: authoritativeSettings.apiUrl,
+        apiTokenMutation: { type: 'keep' },
+        searchMode: 'auto',
+        tavilyApiKeyMutation: { type: 'keep' },
+        models: [
+          {
+            id: 'model-1',
+            providerModelId: 'provider-model-1',
+            displayName: 'Model 1',
+            apiTokenOverrideStatus: 'missing',
+            apiTokenOverrideMutation: { type: 'keep' },
+            supportsImage: false,
+            contextWindowTokens: 128_000,
+            providerProfileConfig: {
+              schemaVersion: 999,
+              profile: { id: 'deepseek_v4_chat', version: 999 },
+              reasoning: { mode: 'enabled', effort: 'max' }
+            } as unknown as ProviderProfileConfig,
+            providerProfileUpdate: { kind: 'select_generic' },
+            inputPrice: '0',
+            cachedInputPrice: '',
+            outputPrice: '0',
+            enabled: true
+          }
+        ]
+      },
+      'model-settings-v1:00000000-0000-4000-8000-000000000001'
+    )
 
     expect(storage.saveModelSettings).toHaveBeenCalledWith({
+      expectedRevision: 'model-settings-v1:00000000-0000-4000-8000-000000000001',
       apiUrl: authoritativeSettings.apiUrl,
-      apiToken: authoritativeSettings.apiToken,
+      apiTokenMutation: { type: 'keep' },
       searchMode: 'auto',
-      tavilyApiKey: '',
+      tavilyApiKeyMutation: { type: 'keep' },
       models: [
         {
           id: 'model-1',
           providerModelId: 'provider-model-1',
           displayName: 'Model 1',
           apiUrlOverride: null,
-          apiTokenOverride: null,
+          apiTokenOverrideMutation: { type: 'keep' },
           supportsImage: false,
           contextWindowTokens: 128_000,
           providerProfileUpdate: { kind: 'select_generic' },
@@ -139,13 +146,16 @@ describe('model settings storage client', () => {
     })
 
     try {
-      await saveModelSettings({
-        apiUrl: '',
-        apiToken: '',
-        searchMode: 'disabled',
-        tavilyApiKey: '',
-        models: []
-      })
+      await saveModelSettings(
+        {
+          apiUrl: '',
+          apiTokenMutation: { type: 'keep' },
+          searchMode: 'disabled',
+          tavilyApiKeyMutation: { type: 'keep' },
+          models: []
+        },
+        null
+      )
       expect.fail('a failed Host envelope must reject the Renderer client')
     } catch (error) {
       expect(error).toBeInstanceOf(HostInvocationError)

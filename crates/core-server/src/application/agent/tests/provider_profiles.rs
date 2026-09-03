@@ -314,16 +314,20 @@ fn renderer_profile_selection_round_trips_into_the_frozen_registration() {
     let request =
         serde_json::from_value::<mycopilot_core::storage::models::ModelSettingsSaveRequest>(
             json!({
+                "expectedRevision": null,
                 "apiUrl": "https://api.deepseek.com/v1/chat/completions",
-                "apiToken": "provider-profile-token",
+                "apiTokenMutation": {
+                    "type": "replace",
+                    "value": "provider-profile-token"
+                },
                 "searchMode": "disabled",
-                "tavilyApiKey": "",
+                "tavilyApiKeyMutation": {"type": "clear"},
                 "models": [{
                     "id": null,
                     "providerModelId": "model-1",
                     "displayName": "DeepSeek V4 Chat",
                     "apiUrlOverride": null,
-                    "apiTokenOverride": null,
+                    "apiTokenOverrideMutation": {"type": "clear"},
                     "supportsImage": false,
                     "contextWindowTokens": 128000,
                     "providerProfileUpdate": {
@@ -383,16 +387,20 @@ fn renderer_generic_selection_freezes_the_anthropic_generic_registration() {
     let request =
         serde_json::from_value::<mycopilot_core::storage::models::ModelSettingsSaveRequest>(
             json!({
+                "expectedRevision": null,
                 "apiUrl": "https://api.anthropic.com/v1/messages",
-                "apiToken": "provider-profile-token",
+                "apiTokenMutation": {
+                    "type": "replace",
+                    "value": "provider-profile-token"
+                },
                 "searchMode": "disabled",
-                "tavilyApiKey": "",
+                "tavilyApiKeyMutation": {"type": "clear"},
                 "models": [{
                     "id": null,
                     "providerModelId": "model-1",
                     "displayName": "Anthropic-compatible",
                     "apiUrlOverride": null,
-                    "apiTokenOverride": null,
+                    "apiTokenOverrideMutation": {"type": "clear"},
                     "supportsImage": false,
                     "contextWindowTokens": 128000,
                     "providerProfileUpdate": {"kind": "select_generic"},
@@ -1096,8 +1104,13 @@ async fn reopened_assistant_and_provider_transition_forks_complete_human_turns()
     let database_path = fixture.path().join("storage.sqlite");
     let source_conversation_id = "conversation-root-fork-source";
     let source_assistant_message_id = "assistant-root-fork-source";
+    let model_credentials =
+        Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default());
     let (assistant_fork_id, divider_fork_id) = {
-        let storage = Arc::new(StorageService::open(&database_path).unwrap());
+        let storage = Arc::new(
+            StorageService::open_with_model_credentials(&database_path, model_credentials.clone())
+                .unwrap(),
+        );
         let mut settings = test_model_settings();
         settings.api_url = format!("http://{address}/v1/chat/completions");
         settings.api_token = "fork-transition-token".to_string();
@@ -1354,7 +1367,9 @@ async fn reopened_assistant_and_provider_transition_forks_complete_human_turns()
 
     // A new Host process uses the raw admission snapshot and must not feed the reconstructed
     // renderer Timeline back through the immutable snapshot guard.
-    let storage = Arc::new(StorageService::open(&database_path).unwrap());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(&database_path, model_credentials).unwrap(),
+    );
     let service =
         AgentService::try_new_with_startup_reconciliation(Arc::clone(&storage), false, None)
             .unwrap();

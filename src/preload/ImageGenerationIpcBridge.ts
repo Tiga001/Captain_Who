@@ -1,5 +1,18 @@
 import type { IpcRenderer } from 'electron'
-import { HOST_CHANNELS, type ImageGenerationHostApi } from '@mycopilot/host-api'
+import {
+  HOST_CHANNELS,
+  type HostInvocationResult,
+  type ImageGenerationHostApi
+} from '@mycopilot/host-api'
+import {
+  parseImageGenerationArtifactReadInput,
+  parseImageGenerationGetConfigurationOutput,
+  parseImageGenerationSetEnabledInput,
+  parseImageGenerationSetEnabledOutput,
+  parseImageGenerationStatus,
+  parseImageGenerationUpdateConfigurationInput,
+  parseImageGenerationUpdateConfigurationOutput
+} from '@mycopilot/protocol'
 
 export const IMAGE_GENERATION_GET_CONFIGURATION_CHANNEL =
   HOST_CHANNELS.imageGeneration.getConfiguration
@@ -11,20 +24,55 @@ export const IMAGE_GENERATION_READ_ARTIFACT_CHANNEL = HOST_CHANNELS.imageGenerat
 
 type ImageGenerationIpcRenderer = Pick<IpcRenderer, 'invoke'>
 
+async function parseSuccessfulInvocation<T>(
+  invocation: Promise<HostInvocationResult<unknown>>,
+  parseValue: (value: unknown) => T
+): Promise<HostInvocationResult<T>> {
+  const result = await invocation
+  return result.ok
+    ? { ok: true, value: parseValue(result.value) }
+    : (result as HostInvocationResult<T>)
+}
+
 /**
- * Transport-only preload bridge. Main owns the Host invocation envelope and CoreServer owns
- * strict request/response validation, so secret-bearing configuration updates are never
- * interpreted or logged in the renderer-facing preload process.
+ * The isolated bridge validates both mutation requests and successful Host projections. This
+ * deliberately duplicates the Core boundary so an accidental legacy secret field cannot reach
+ * Renderer even if an upstream regression reintroduces it.
  */
 export function createImageGenerationIpcBridge(
   ipcRenderer: ImageGenerationIpcRenderer
 ): ImageGenerationHostApi {
   return {
-    getConfiguration: () => ipcRenderer.invoke(IMAGE_GENERATION_GET_CONFIGURATION_CHANNEL),
+    getConfiguration: () =>
+      parseSuccessfulInvocation(
+        ipcRenderer.invoke(IMAGE_GENERATION_GET_CONFIGURATION_CHANNEL),
+        parseImageGenerationGetConfigurationOutput
+      ),
     updateConfiguration: (input) =>
-      ipcRenderer.invoke(IMAGE_GENERATION_UPDATE_CONFIGURATION_CHANNEL, input),
-    setEnabled: (input) => ipcRenderer.invoke(IMAGE_GENERATION_SET_ENABLED_CHANNEL, input),
-    getStatus: () => ipcRenderer.invoke(IMAGE_GENERATION_GET_STATUS_CHANNEL),
-    readArtifact: (input) => ipcRenderer.invoke(IMAGE_GENERATION_READ_ARTIFACT_CHANNEL, input)
+      parseSuccessfulInvocation(
+        ipcRenderer.invoke(
+          IMAGE_GENERATION_UPDATE_CONFIGURATION_CHANNEL,
+          parseImageGenerationUpdateConfigurationInput(input)
+        ),
+        parseImageGenerationUpdateConfigurationOutput
+      ),
+    setEnabled: (input) =>
+      parseSuccessfulInvocation(
+        ipcRenderer.invoke(
+          IMAGE_GENERATION_SET_ENABLED_CHANNEL,
+          parseImageGenerationSetEnabledInput(input)
+        ),
+        parseImageGenerationSetEnabledOutput
+      ),
+    getStatus: () =>
+      parseSuccessfulInvocation(
+        ipcRenderer.invoke(IMAGE_GENERATION_GET_STATUS_CHANNEL),
+        parseImageGenerationStatus
+      ),
+    readArtifact: (input) =>
+      ipcRenderer.invoke(
+        IMAGE_GENERATION_READ_ARTIFACT_CHANNEL,
+        parseImageGenerationArtifactReadInput(input)
+      )
   }
 }

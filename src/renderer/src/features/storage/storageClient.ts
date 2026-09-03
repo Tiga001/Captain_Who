@@ -1,9 +1,13 @@
 import type {
+  CredentialMutation,
+  CredentialStatus,
   AgentInputAttachment,
   AgentPermissions,
   AgentPromptPreferences
 } from '@mycopilot/protocol'
 import {
+  parseStorageModelSettingsRecord,
+  parseStorageModelSettingsUpdateRecord,
   parseProviderVendorDescriptors,
   parseProviderVendorModelPolicyDescriptor
 } from '@mycopilot/protocol'
@@ -50,14 +54,19 @@ import {
 } from './composerPermissionModePersistence'
 
 export interface ModelSettingsSnapshot {
+  configurationRevision: string | null
   apiUrl: string
-  apiToken: string
+  apiTokenStatus: CredentialStatus
   searchMode: SearchMode
-  tavilyApiKey: string
+  tavilyApiKeyStatus: CredentialStatus
   models: ModelConfig[]
 }
 
-export interface ModelSettingsSaveDraft extends Omit<ModelSettingsSnapshot, 'models'> {
+export interface ModelSettingsSaveDraft {
+  apiUrl: string
+  apiTokenMutation: CredentialMutation
+  searchMode: SearchMode
+  tavilyApiKeyMutation: CredentialMutation
   models: Array<ModelConfig | ModelConfigSaveDraft>
 }
 
@@ -98,7 +107,10 @@ export interface UiPreferencesSnapshot {
 }
 
 export async function loadModelSettings(): Promise<ModelSettingsSnapshot | null> {
-  return mapModelSettingsFromStorage(await hostClient.storage.loadModelSettings())
+  const settings = await hostClient.storage.loadModelSettings()
+  return mapModelSettingsFromStorage(
+    settings === null ? null : parseStorageModelSettingsRecord(settings)
+  )
 }
 
 export async function loadProviderProfileUiDescriptors(): Promise<ProviderProfileUiDescriptor[]> {
@@ -118,12 +130,15 @@ export async function resolveProviderVendorModelPolicy(
 }
 
 export async function saveModelSettings(
-  settings: ModelSettingsSaveDraft
+  settings: ModelSettingsSaveDraft,
+  expectedRevision: string | null
 ): Promise<ModelSettingsSnapshot> {
   const saved = unwrapHostInvocation(
-    await hostClient.storage.saveModelSettings(mapModelSettingsToStorage(settings))
+    await hostClient.storage.saveModelSettings(
+      parseStorageModelSettingsUpdateRecord(mapModelSettingsToStorage(settings, expectedRevision))
+    )
   )
-  const normalized = mapModelSettingsFromStorage(saved)
+  const normalized = mapModelSettingsFromStorage(parseStorageModelSettingsRecord(saved))
   if (!normalized) {
     throw new Error('Host returned an empty model settings snapshot after save')
   }
@@ -342,19 +357,25 @@ function mapModelSettingsFromStorage(
 ): ModelSettingsSnapshot | null {
   if (!settings) return null
   return {
+    configurationRevision: settings.configurationRevision,
     apiUrl: settings.apiUrl,
-    apiToken: settings.apiToken,
+    apiTokenStatus: settings.apiTokenStatus,
     searchMode: isSearchMode(settings.searchMode) ? settings.searchMode : 'auto',
-    tavilyApiKey: settings.tavilyApiKey,
+    tavilyApiKeyStatus: settings.tavilyApiKeyStatus,
     models: settings.models.map(mapModelFromStorage)
   }
 }
 
 function mapModelSettingsToStorage(
-  settings: ModelSettingsSaveDraft
+  settings: ModelSettingsSaveDraft,
+  expectedRevision: string | null
 ): StorageModelSettingsUpdateRecord {
   return {
-    ...settings,
+    expectedRevision,
+    apiUrl: settings.apiUrl,
+    apiTokenMutation: settings.apiTokenMutation,
+    searchMode: settings.searchMode,
+    tavilyApiKeyMutation: settings.tavilyApiKeyMutation,
     models: settings.models.map(mapModelToStorage)
   }
 }
@@ -365,7 +386,8 @@ function mapModelFromStorage(model: StorageModelConfigRecord): ModelConfig {
     providerModelId: model.providerModelId,
     displayName: model.displayName,
     apiUrlOverride: model.apiUrlOverride ?? undefined,
-    apiTokenOverride: model.apiTokenOverride ?? undefined,
+    apiTokenOverrideStatus: model.apiTokenOverrideStatus,
+    apiTokenOverrideMutation: { type: 'keep' },
     supportsImage: model.supportsImage,
     contextWindowTokens: model.contextWindowTokens ?? undefined,
     providerProfileConfig: model.providerProfileConfig,
@@ -385,7 +407,7 @@ function mapModelToStorage(
     providerModelId: model.providerModelId,
     displayName: model.displayName,
     apiUrlOverride: model.apiUrlOverride ?? null,
-    apiTokenOverride: model.apiTokenOverride ?? null,
+    apiTokenOverrideMutation: model.apiTokenOverrideMutation,
     supportsImage: model.supportsImage,
     contextWindowTokens: model.contextWindowTokens ?? null,
     providerProfileUpdate: model.providerProfileUpdate,

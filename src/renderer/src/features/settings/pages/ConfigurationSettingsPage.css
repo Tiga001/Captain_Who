@@ -256,6 +256,37 @@
   padding-right: 42px;
 }
 
+.configuration-credential-input:has(.configuration-credential-input__actions > :nth-child(2))
+  .settings-list-control {
+  padding-right: 76px;
+}
+
+.configuration-credential-input__configured {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--settings-content-muted-color);
+  user-select: none;
+}
+
+.configuration-credential-input__mask {
+  color: var(--mc-color-text-primary);
+  letter-spacing: 1px;
+}
+
+.configuration-credential-input__actions {
+  position: absolute;
+  top: 50%;
+  right: 5px;
+  display: flex;
+  transform: translateY(-50%);
+}
+
+.configuration-credential-input__actions .configuration-secret-input__toggle {
+  position: static;
+  transform: none;
+}
+
 .configuration-secret-input__toggle {
   position: absolute;
   top: 50%;

@@ -8,6 +8,7 @@
 mod sqlite_registry;
 
 use mycopilot_core::durable_fs::{atomic_replace, sync_directory};
+use mycopilot_core::image_generation::{CredentialStore, DevelopmentFileCredentialStore};
 use mycopilot_core::storage::agent_prompt_preferences_repository;
 use mycopilot_core::storage::browser_data_repository;
 use mycopilot_core::storage::browser_download_repository;
@@ -17,14 +18,14 @@ use mycopilot_core::storage::image_generation_repository::{
 };
 use mycopilot_core::storage::models::{
     AgentPromptPreferencesRecord, BrowserDownloadSettingsRecord, BrowserPreferencesRecord,
-    BrowserPreferencesUpdate, ImageGenerationProfileRecord, ModelConfigRecord, ModelSettingsRecord,
-    UiPreferencesRecord, BROWSER_DATA_SCHEMA_VERSION,
+    BrowserPreferencesUpdate, ImageGenerationProfileRecord, UiPreferencesRecord,
+    BROWSER_DATA_SCHEMA_VERSION,
 };
 use mycopilot_core::storage::notification_repository::{self, NotificationSettingsRecord};
 use mycopilot_core::storage::preferences_repository;
 use mycopilot_core::storage::service::StorageService;
 use mycopilot_core::storage::{acquire_database_instance_lock, create_verified_sqlite_snapshot};
-use mycopilot_core::{ProviderProfileConfig, ProviderProtocolDialect};
+use mycopilot_core::ProviderProfileConfig;
 use mycopilot_mcp_client::{McpRegistry, McpTrustLevel};
 use rusqlite::types::Value as SqliteValue;
 use rusqlite::{params, params_from_iter, Connection, OpenFlags, OptionalExtension};
@@ -37,17 +38,19 @@ use std::ffi::{OsStr, OsString};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const DATABASE_FILE_NAME: &str = "storage.sqlite";
 const BACKUP_DIRECTORY_NAME: &str = "storage-backups";
 const CONFIRM_RESET_FLAG: &str = "--confirm-reset";
 const APP_DATA_ROOT_FLAG: &str = "--app-data-root";
-// v31 and v32 have identical configuration-table contracts. This is intentionally an exact,
-// short-lived development-reset exception, not a general migration range.
-const PREVIOUS_PRESERVABLE_CONFIGURATION_SCHEMA_VERSION: i32 = 31;
 const SQLITE_TRANSIENT_SUFFIXES: [&str; 3] = ["-journal", "-wal", "-shm"];
 const EXACT_CONFIGURATION_TABLES: &[&str] = &[
+    "model_provider_settings",
+    "models",
+    "model_provider_credential_staging",
+    "model_provider_credential_cleanup",
     "mcp_builtin_capability_metadata",
     "mcp_builtin_capability_policies",
     "image_generation_profiles",
@@ -77,9 +80,9 @@ struct ResetOptions {
     confirm_reset: bool,
 }
 
-#[derive(Debug)]
 struct PreservedConfiguration {
-    model_settings: Option<ModelSettingsRecord>,
+    model_count: usize,
+    has_model_provider_settings: bool,
     exact_configuration_tables: Vec<ExactConfigurationTableSnapshot>,
     ui_preferences: UiPreferencesRecord,
     agent_prompt_preferences: AgentPromptPreferencesRecord,
@@ -91,6 +94,12 @@ struct PreservedConfiguration {
     browser_preferences: Option<BrowserPreferencesRecord>,
     mcp_records: Vec<McpPersistedRegistryRecord>,
     mcp_server_count: usize,
+}
+
+impl std::fmt::Debug for PreservedConfiguration {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("PreservedConfiguration([REDACTED])")
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -349,10 +358,15 @@ fn inspect_source(
     if !can_preserve_development_configuration(schema_version) {
         return Ok((None, count_all_business_rows(&connection)?));
     }
+    validate_source_database_integrity(&connection)?;
+    mycopilot_core::storage::migrations::run_migrations(&connection)
+        .map_err(|_| invalid_data("current development storage schema is not exactly canonical"))?;
     validate_model_configuration_schema(&connection)?;
+    validate_model_profile_rows_without_credentials(&connection)?;
     let exact_configuration_tables = load_exact_configuration_table_snapshots(&connection)?;
-    let model_settings = load_model_settings_for_development_reset(&connection)?;
-    let model_settings = model_settings.map(validate_model_profiles).transpose()?;
+    let model_count = count_rows_if_table_exists(&connection, "models")? as usize;
+    let has_model_provider_settings =
+        count_rows_if_table_exists(&connection, "model_provider_settings")? == 1;
     let ui_preferences = load_ui_preferences_for_development_reset(&connection)?;
     let agent_prompt_preferences =
         agent_prompt_preferences_repository::load_agent_prompt_preferences(&connection)
@@ -366,6 +380,7 @@ fn inspect_source(
     let image_generation_profile_count =
         count_rows_if_table_exists(&connection, "image_generation_profiles")? as usize;
     ensure_no_image_credential_reconciliation(&connection)?;
+    ensure_no_model_provider_credential_reconciliation(&connection)?;
     let notification_settings =
         if count_rows_if_table_exists(&connection, "notification_settings")? == 1 {
             Some(
@@ -411,7 +426,8 @@ fn inspect_source(
         expected_mcp_count as usize
     };
     let configuration = PreservedConfiguration {
-        model_settings,
+        model_count,
+        has_model_provider_settings,
         exact_configuration_tables,
         ui_preferences,
         agent_prompt_preferences,
@@ -433,9 +449,43 @@ fn storage_schema_version(connection: &Connection) -> io::Result<i32> {
         .map_err(redacted_storage_error)
 }
 
+fn validate_source_database_integrity(connection: &Connection) -> io::Result<()> {
+    let quick_check = pragma_rows(connection, "PRAGMA quick_check")?;
+    if quick_check.as_slice() != ["ok"] {
+        return Err(invalid_data("source database failed SQLite quick_check"));
+    }
+    if !pragma_rows(connection, "PRAGMA foreign_key_check")?.is_empty() {
+        return Err(invalid_data("source database failed foreign_key_check"));
+    }
+    Ok(())
+}
+
+fn validate_model_profile_rows_without_credentials(connection: &Connection) -> io::Result<()> {
+    let mut statement = connection
+        .prepare(
+            "SELECT display_name, provider_profile_config_json, provider_protocol_revision
+             FROM models ORDER BY position ASC, created_at ASC",
+        )
+        .map_err(redacted_storage_error)?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })
+        .map_err(redacted_storage_error)?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(redacted_storage_error)?;
+    for (label, profile, revision) in rows {
+        decode_reset_provider_profile(&label, &profile, &revision)?;
+    }
+    Ok(())
+}
+
 fn can_preserve_development_configuration(schema_version: i32) -> bool {
     schema_version == mycopilot_core::storage::migrations::STORAGE_SCHEMA_VERSION
-        || schema_version == PREVIOUS_PRESERVABLE_CONFIGURATION_SCHEMA_VERSION
 }
 
 fn validate_model_configuration_schema(source: &Connection) -> io::Result<()> {
@@ -443,17 +493,17 @@ fn validate_model_configuration_schema(source: &Connection) -> io::Result<()> {
     mycopilot_core::storage::migrations::run_migrations(&canonical)
         .map_err(redacted_storage_error)?;
     let current_provider =
-        snapshot_exact_configuration_table(&canonical, "model_provider_settings")?;
-    let source_provider = snapshot_exact_configuration_table(source, "model_provider_settings")?;
-    if !source_provider.has_same_schema(&current_provider) {
+        snapshot_configuration_table_schema(&canonical, "model_provider_settings")?;
+    let source_provider = snapshot_configuration_table_schema(source, "model_provider_settings")?;
+    if source_provider != current_provider {
         return Err(invalid_data(
             "configuration table schema differs for model provider settings",
         ));
     }
 
-    let current_models = snapshot_exact_configuration_table(&canonical, "models")?;
-    let source_models = snapshot_exact_configuration_table(source, "models")?;
-    if !source_models.has_same_schema(&current_models) {
+    let current_models = snapshot_configuration_table_schema(&canonical, "models")?;
+    let source_models = snapshot_configuration_table_schema(source, "models")?;
+    if source_models != current_models {
         return Err(invalid_data(
             "configuration table schema differs for models",
         ));
@@ -464,11 +514,13 @@ fn validate_model_configuration_schema(source: &Connection) -> io::Result<()> {
 fn load_exact_configuration_table_snapshots(
     source: &Connection,
 ) -> io::Result<Vec<ExactConfigurationTableSnapshot>> {
-    let source_snapshots = snapshot_exact_configuration_tables(source)?;
+    let source_snapshots =
+        snapshot_exact_configuration_tables_named(source, EXACT_CONFIGURATION_TABLES)?;
     let canonical = Connection::open_in_memory().map_err(redacted_storage_error)?;
     mycopilot_core::storage::migrations::run_migrations(&canonical)
         .map_err(redacted_storage_error)?;
-    let canonical_snapshots = snapshot_exact_configuration_tables(&canonical)?;
+    let canonical_snapshots =
+        snapshot_exact_configuration_tables_named(&canonical, EXACT_CONFIGURATION_TABLES)?;
     if source_snapshots.len() != canonical_snapshots.len()
         || source_snapshots
             .iter()
@@ -482,10 +534,18 @@ fn load_exact_configuration_table_snapshots(
     Ok(source_snapshots)
 }
 
+#[cfg(test)]
 fn snapshot_exact_configuration_tables(
     connection: &Connection,
 ) -> io::Result<Vec<ExactConfigurationTableSnapshot>> {
-    EXACT_CONFIGURATION_TABLES
+    snapshot_exact_configuration_tables_named(connection, EXACT_CONFIGURATION_TABLES)
+}
+
+fn snapshot_exact_configuration_tables_named(
+    connection: &Connection,
+    tables: &[&str],
+) -> io::Result<Vec<ExactConfigurationTableSnapshot>> {
+    tables
         .iter()
         .map(|table| snapshot_exact_configuration_table(connection, table))
         .collect()
@@ -495,6 +555,40 @@ fn snapshot_exact_configuration_table(
     connection: &Connection,
     table: &str,
 ) -> io::Result<ExactConfigurationTableSnapshot> {
+    let (create_sql, columns) = snapshot_configuration_table_schema(connection, table)?;
+    let projection = columns
+        .iter()
+        .map(|column| quote_sqlite_identifier(&column.name))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let table_identifier = quote_sqlite_identifier(table);
+    let mut statement = connection
+        .prepare(&format!(
+            "SELECT {projection} FROM {table_identifier} ORDER BY rowid"
+        ))
+        .map_err(redacted_storage_error)?;
+    let column_count = columns.len();
+    let rows = statement
+        .query_map([], |row| {
+            (0..column_count)
+                .map(|index| row.get::<_, SqliteValue>(index))
+                .collect::<rusqlite::Result<Vec<_>>>()
+        })
+        .map_err(redacted_storage_error)?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(redacted_storage_error)?;
+    Ok(ExactConfigurationTableSnapshot {
+        name: table.to_string(),
+        create_sql,
+        columns,
+        rows,
+    })
+}
+
+fn snapshot_configuration_table_schema(
+    connection: &Connection,
+    table: &str,
+) -> io::Result<(String, Vec<ConfigurationColumnSignature>)> {
     let create_sql = connection
         .query_row(
             "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = ?1",
@@ -531,33 +625,7 @@ fn snapshot_exact_configuration_table(
             "configuration table {table} has no columns"
         )));
     }
-    let projection = columns
-        .iter()
-        .map(|column| quote_sqlite_identifier(&column.name))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let table_identifier = quote_sqlite_identifier(table);
-    let mut statement = connection
-        .prepare(&format!(
-            "SELECT {projection} FROM {table_identifier} ORDER BY rowid"
-        ))
-        .map_err(redacted_storage_error)?;
-    let column_count = columns.len();
-    let rows = statement
-        .query_map([], |row| {
-            (0..column_count)
-                .map(|index| row.get::<_, SqliteValue>(index))
-                .collect::<rusqlite::Result<Vec<_>>>()
-        })
-        .map_err(redacted_storage_error)?
-        .collect::<rusqlite::Result<Vec<_>>>()
-        .map_err(redacted_storage_error)?;
-    Ok(ExactConfigurationTableSnapshot {
-        name: table.to_string(),
-        create_sql,
-        columns,
-        rows,
-    })
+    Ok((create_sql, columns))
 }
 
 fn quote_sqlite_identifier(identifier: &str) -> String {
@@ -618,8 +686,7 @@ fn restore_exact_configuration_tables(
     transaction.commit().map_err(redacted_storage_error)
 }
 
-/// Preserves UI configuration only from the current development schema or the explicitly audited
-/// v31 configuration contract.
+/// Preserves UI configuration only from the current development schema.
 ///
 /// Conversation, checkpoint, pending-action, and Agent runtime records are intentionally never
 /// decoded or migrated by this reset utility.
@@ -633,7 +700,7 @@ fn load_ui_preferences_for_development_reset(
     }
 
     Err(invalid_data(
-        "only the current or explicitly audited previous development UI preference schema can be preserved",
+        "only the current development UI preference schema can be preserved",
     ))
 }
 
@@ -647,138 +714,8 @@ fn load_browser_download_settings_for_development_reset(
     }
 
     Err(invalid_data(
-        "only the current or explicitly audited previous development browser download settings schema can be preserved",
+        "only the current development browser download settings schema can be preserved",
     ))
-}
-
-/// Reads only the configuration fields that the explicit development reset preserves.
-///
-/// The current schema and the explicitly audited v31 configuration contract are copied
-/// semantically. No conversation/runtime state is decoded or migrated here or during application
-/// startup.
-fn load_model_settings_for_development_reset(
-    connection: &Connection,
-) -> io::Result<Option<ModelSettingsRecord>> {
-    let provider_settings = connection
-        .query_row(
-            "SELECT api_url, api_token, search_mode, tavily_api_key
-             FROM model_provider_settings
-             WHERE id = 'default'",
-            [],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                ))
-            },
-        )
-        .optional()
-        .map_err(redacted_storage_error)?;
-    let Some((api_url, api_token, search_mode, tavily_api_key)) = provider_settings else {
-        if count_rows_if_table_exists(connection, "models")? != 0 {
-            return Err(invalid_data(
-                "models exist without the default provider settings record",
-            ));
-        }
-        return Ok(None);
-    };
-
-    let models = load_current_model_settings_rows(connection)?;
-
-    Ok(Some(ModelSettingsRecord {
-        api_url,
-        api_token,
-        search_mode,
-        tavily_api_key,
-        models,
-    }))
-}
-
-fn load_current_model_settings_rows(connection: &Connection) -> io::Result<Vec<ModelConfigRecord>> {
-    let mut statement = connection
-        .prepare(
-            "SELECT
-                 id,
-                 provider_model_id,
-                 display_name,
-                 api_url_override,
-                 api_token_override,
-                 supports_image,
-                 context_window_tokens,
-                 provider_profile_config_json,
-                 input_price,
-                 cached_input_price,
-                 output_price,
-                 enabled,
-                 provider_protocol_revision
-             FROM models
-             ORDER BY position ASC, created_at ASC",
-        )
-        .map_err(redacted_storage_error)?;
-    let raw_models = statement
-        .query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, Option<String>>(3)?,
-                row.get::<_, Option<String>>(4)?,
-                row.get::<_, bool>(5)?,
-                row.get::<_, Option<u32>>(6)?,
-                row.get::<_, String>(7)?,
-                row.get::<_, String>(8)?,
-                row.get::<_, String>(9)?,
-                row.get::<_, String>(10)?,
-                row.get::<_, bool>(11)?,
-                row.get::<_, String>(12)?,
-            ))
-        })
-        .map_err(redacted_storage_error)?
-        .collect::<rusqlite::Result<Vec<_>>>()
-        .map_err(redacted_storage_error)?;
-
-    raw_models
-        .into_iter()
-        .map(
-            |(
-                id,
-                provider_model_id,
-                display_name,
-                api_url_override,
-                api_token_override,
-                supports_image,
-                context_window_tokens,
-                profile_json,
-                input_price,
-                cached_input_price,
-                output_price,
-                enabled,
-                provider_protocol_revision,
-            )| {
-                let provider_profile_config = decode_reset_provider_profile(
-                    &display_name,
-                    &profile_json,
-                    &provider_protocol_revision,
-                )?;
-                Ok(ModelConfigRecord {
-                    id,
-                    provider_model_id,
-                    display_name,
-                    api_url_override,
-                    api_token_override,
-                    supports_image,
-                    context_window_tokens,
-                    provider_profile_config,
-                    input_price,
-                    cached_input_price,
-                    output_price,
-                    enabled,
-                })
-            },
-        )
-        .collect()
 }
 
 fn decode_reset_provider_profile(
@@ -796,33 +733,6 @@ fn decode_reset_provider_profile(
             "model `{model_label}` has an unreadable Provider Profile configuration"
         ))
     })
-}
-
-fn validate_model_profiles(settings: ModelSettingsRecord) -> io::Result<ModelSettingsRecord> {
-    for model in &settings.models {
-        let api_url = model
-            .api_url_override
-            .as_deref()
-            .filter(|value| !value.trim().is_empty())
-            .unwrap_or(&settings.api_url);
-        let dialect = ProviderProtocolDialect::detect_from_api_url(api_url);
-        model.provider_profile_config.validate().map_err(|_| {
-            invalid_data(format!(
-                "model `{}` has an invalid Provider Profile; select a supported profile before resetting",
-                model.id
-            ))
-        })?;
-        model
-            .provider_profile_config
-            .validate_for_dialect(dialect)
-            .map_err(|_| {
-                invalid_data(format!(
-                    "model `{}` has a Provider Profile incompatible with its API dialect",
-                    model.id
-                ))
-            })?;
-    }
-    Ok(settings)
 }
 
 fn load_skill_enablement_overrides(connection: &Connection) -> io::Result<Vec<(String, bool)>> {
@@ -849,10 +759,38 @@ fn ensure_no_image_credential_reconciliation(connection: &Connection) -> io::Res
     Ok(())
 }
 
+fn ensure_no_model_provider_credential_reconciliation(connection: &Connection) -> io::Result<()> {
+    let staged = count_rows_if_table_exists(connection, "model_provider_credential_staging")?;
+    let cleanup = count_rows_if_table_exists(connection, "model_provider_credential_cleanup")?;
+    if staged != 0 || cleanup != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::WouldBlock,
+            "model-provider credential reconciliation is pending; start and cleanly close Captain Who before resetting",
+        ));
+    }
+    Ok(())
+}
+
 fn load_mcp_records(database_path: &Path) -> io::Result<Vec<McpPersistedRegistryRecord>> {
     let registry = SqliteMcpRegistry::open(database_path).map_err(redacted_mcp_error)?;
     let (_, records) = registry.snapshot().map_err(redacted_mcp_error)?;
     Ok(records)
+}
+
+fn development_model_credential_store(
+    database_path: &Path,
+) -> io::Result<Arc<dyn CredentialStore>> {
+    let root = development_model_credential_root(database_path);
+    DevelopmentFileCredentialStore::new(root)
+        .map(|store| Arc::new(store) as Arc<dyn CredentialStore>)
+        .map_err(|_| io::Error::other("failed to initialize development model credential store"))
+}
+
+fn development_model_credential_root(database_path: &Path) -> PathBuf {
+    database_path
+        .parent()
+        .map(|parent| parent.join("model-provider-development-credentials-v1"))
+        .unwrap_or_else(|| PathBuf::from("model-provider-development-credentials-v1"))
 }
 
 fn build_fresh_database(
@@ -860,14 +798,13 @@ fn build_fresh_database(
     configuration: Option<&PreservedConfiguration>,
 ) -> io::Result<()> {
     create_private_empty_file(database_path)?;
-    let storage = StorageService::open_for_development_reset(database_path)
-        .map_err(|_| io::Error::other("failed to create the canonical storage schema"))?;
+    let model_credentials = development_model_credential_store(database_path)?;
+    let storage = StorageService::open_for_development_reset_with_model_credentials(
+        database_path,
+        model_credentials,
+    )
+    .map_err(|_| io::Error::other("failed to create the canonical storage schema"))?;
     if let Some(configuration) = configuration {
-        if let Some(model_settings) = &configuration.model_settings {
-            storage
-                .save_model_settings(model_settings.clone())
-                .map_err(|_| io::Error::other("failed to restore model and search settings"))?;
-        }
         storage
             .save_ui_preferences(configuration.ui_preferences.clone())
             .map_err(|_| io::Error::other("failed to restore UI preferences"))?;
@@ -1079,29 +1016,24 @@ fn verify_fresh_database(
     // Reopen through the exact Core production boundary after MCP restoration. This proves the
     // Core canonical catalog and the independently owned MCP Registry schema can coexist across
     // an application restart.
-    let storage = StorageService::open_for_development_reset(database_path).map_err(|_| {
+    let storage = StorageService::open_for_development_reset_with_model_credentials(
+        database_path,
+        development_model_credential_store(database_path)?,
+    )
+    .map_err(|_| {
         io::Error::other("fresh database was rejected by the canonical storage boundary")
     })?;
     if let Some(configuration) = configuration {
-        let restored = storage
-            .load_model_settings_snapshot()
+        let restored_editor = storage
+            .load_model_settings_for_edit()
             .map_err(|_| io::Error::other("restored model settings could not be verified"))?;
-        match (&configuration.model_settings, restored) {
-            (None, None) => {}
-            (Some(expected), Some(restored))
-                if model_settings_values_match(expected, &restored.settings) =>
-            {
-                if restored
-                    .provider_protocol_revisions
-                    .values()
-                    .any(|revision| !revision.starts_with("provider-protocol-v1:"))
-                {
-                    return Err(invalid_data(
-                        "restored models do not have explicit Profiles and current protocol revisions",
-                    ));
-                }
-            }
-            _ => return Err(invalid_data("restored model settings values mismatch")),
+        if restored_editor
+            .as_ref()
+            .map_or(0, |settings| settings.models.len())
+            != configuration.model_count
+            || restored_editor.is_some() != configuration.has_model_provider_settings
+        {
+            return Err(invalid_data("restored model settings count mismatch"));
         }
         if let Some(expected) = &configuration.image_generation_profile {
             let restored = storage
@@ -1121,7 +1053,13 @@ fn verify_fresh_database(
     drop(storage);
     let connection = open_read_only(database_path)?;
     if let Some(configuration) = configuration {
-        let restored_configuration = snapshot_exact_configuration_tables(&connection)?;
+        let table_names = configuration
+            .exact_configuration_tables
+            .iter()
+            .map(|table| table.name.as_str())
+            .collect::<Vec<_>>();
+        let restored_configuration =
+            snapshot_exact_configuration_tables_named(&connection, &table_names)?;
         if restored_configuration != configuration.exact_configuration_tables {
             return Err(invalid_data(
                 "restored image-generation configuration differs from its exact snapshot",
@@ -1139,14 +1077,11 @@ fn verify_fresh_database(
     ensure_only_configuration_tables_have_rows(&connection)?;
     if let Some(configuration) = configuration {
         let model_count = count_rows_if_table_exists(&connection, "models")? as usize;
-        let expected_models = configuration
-            .model_settings
-            .as_ref()
-            .map_or(0, |settings| settings.models.len());
+        let expected_models = configuration.model_count;
         if model_count != expected_models {
             return Err(invalid_data("fresh database model count mismatch"));
         }
-        let expected_settings_rows = usize::from(configuration.model_settings.is_some());
+        let expected_settings_rows = usize::from(configuration.has_model_provider_settings);
         verify_table_count(
             &connection,
             "model_provider_settings",
@@ -1208,35 +1143,6 @@ fn verify_fresh_database(
         )?;
     }
     Ok(())
-}
-
-fn model_settings_values_match(
-    expected: &ModelSettingsRecord,
-    restored: &ModelSettingsRecord,
-) -> bool {
-    expected.api_url == restored.api_url
-        && expected.api_token == restored.api_token
-        && expected.search_mode == restored.search_mode
-        && expected.tavily_api_key == restored.tavily_api_key
-        && expected.models.len() == restored.models.len()
-        && expected
-            .models
-            .iter()
-            .zip(&restored.models)
-            .all(|(expected, restored)| {
-                expected.id == restored.id
-                    && expected.provider_model_id == restored.provider_model_id
-                    && expected.display_name == restored.display_name
-                    && expected.api_url_override == restored.api_url_override
-                    && expected.api_token_override == restored.api_token_override
-                    && expected.supports_image == restored.supports_image
-                    && expected.context_window_tokens == restored.context_window_tokens
-                    && expected.provider_profile_config == restored.provider_profile_config
-                    && expected.input_price == restored.input_price
-                    && expected.cached_input_price == restored.cached_input_price
-                    && expected.output_price == restored.output_price
-                    && expected.enabled == restored.enabled
-            })
 }
 
 fn verify_table_count(connection: &Connection, table: &str, expected: usize) -> io::Result<()> {
@@ -1449,9 +1355,7 @@ fn report_from_configuration(
         backup_path,
         confirmed,
         source_existed,
-        model_count: configuration
-            .and_then(|configuration| configuration.model_settings.as_ref())
-            .map_or(0, |settings| settings.models.len()),
+        model_count: configuration.map_or(0, |configuration| configuration.model_count),
         skill_override_count: configuration.map_or(0, |configuration| {
             configuration.skill_enablement_overrides.len()
         }),
@@ -1621,18 +1525,19 @@ fn invalid_data(message: impl Into<String>) -> io::Error {
 mod tests {
     use super::*;
     use mycopilot_core::image_generation::{
-        CredentialSecret, CredentialStore, DevelopmentFileCredentialStore,
+        CredentialReference, CredentialSecret, CredentialStore, DevelopmentFileCredentialStore,
         ImageGenerationConfigurationService,
     };
     use mycopilot_core::storage::image_generation_repository::IMAGE_GENERATION_PROFILE_SCHEMA_VERSION;
     use mycopilot_core::storage::models::{
         BrowserDownloadLocationMode, BrowserDownloadSettingsUpdate, BrowserLinkOpenTarget,
-        ChatConversationRecord, ChatMessageRecord, ModelConfigRecord, ProjectRecord,
-        BROWSER_DOWNLOAD_SCHEMA_VERSION,
+        ChatConversationRecord, ChatMessageRecord, ModelConfigRecord, ModelSettingsRecord,
+        ProjectRecord, BROWSER_DOWNLOAD_SCHEMA_VERSION,
     };
     use mycopilot_core::storage::notification_repository::{
         NotificationSettingsUpdate, NotificationSettingsUpdateOutcome,
     };
+    use mycopilot_core::ProviderProtocolDialect;
     use mycopilot_mcp_client::{
         McpApprovalMode, McpServerConfig, McpServerId, McpServerScope, McpStdioConfig,
         McpTransportConfig,
@@ -1649,6 +1554,14 @@ mod tests {
             app_data_root: root.to_path_buf(),
             confirm_reset,
         }
+    }
+
+    fn open_test_storage(database: &Path) -> StorageService {
+        StorageService::open_with_model_credentials(
+            database,
+            development_model_credential_store(database).unwrap(),
+        )
+        .unwrap()
     }
 
     fn model_settings_with_secret(secret: &str) -> ModelSettingsRecord {
@@ -1679,7 +1592,7 @@ mod tests {
     }
 
     fn populated_storage(root: &Path, secret: &str) {
-        let storage = StorageService::open(&root.join(DATABASE_FILE_NAME)).unwrap();
+        let storage = open_test_storage(&root.join(DATABASE_FILE_NAME));
         storage
             .save_model_settings(model_settings_with_secret(secret))
             .unwrap();
@@ -1688,7 +1601,7 @@ mod tests {
             .unwrap();
         let mut ui_preferences = storage.load_ui_preferences().unwrap();
         ui_preferences.profile_display_name = "Reset Test".to_string();
-        ui_preferences.profile_handle = "RESET_V31".to_string();
+        ui_preferences.profile_handle = "RESET_CURRENT".to_string();
         ui_preferences.translucent_sidebar = true;
         ui_preferences.translucent_sidebar_transparency = 73;
         storage.save_ui_preferences(ui_preferences).unwrap();
@@ -1857,52 +1770,6 @@ mod tests {
             .unwrap();
     }
 
-    fn mark_fixture_as_schema_v31(database: &Path) {
-        let connection = Connection::open(database).unwrap();
-        connection
-            .execute_batch(
-                "DROP TRIGGER prevent_stopped_agent_run_pending_action_insert;
-                 DROP TRIGGER prevent_agent_tree_run_stop_member_update;
-                 DROP TRIGGER validate_agent_tree_run_stop_member_insert;
-                 DROP TRIGGER validate_agent_tree_run_stop_insert;
-                 DROP TRIGGER prevent_agent_tree_run_stop_update;
-                 DROP INDEX agent_tree_run_stop_members_run;
-                 DROP INDEX agent_tree_run_stops_root;
-                 DROP TABLE agent_tree_run_stop_members;
-                 DROP TABLE agent_tree_run_stops;",
-            )
-            .unwrap();
-        connection
-            .pragma_update(
-                None,
-                "user_version",
-                PREVIOUS_PRESERVABLE_CONFIGURATION_SCHEMA_VERSION,
-            )
-            .unwrap();
-        assert_eq!(
-            storage_schema_version(&connection).unwrap(),
-            PREVIOUS_PRESERVABLE_CONFIGURATION_SCHEMA_VERSION
-        );
-        let v32_table = connection
-            .query_row(
-                "SELECT name FROM sqlite_schema WHERE type = 'table' AND name = 'agent_tree_run_stops'",
-                [],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()
-            .unwrap();
-        assert_eq!(v32_table, None, "the v31 fixture must omit v32-only DDL");
-    }
-
-    fn semantic_configuration_json(value: &impl serde::Serialize) -> serde_json::Value {
-        let mut value = serde_json::to_value(value).unwrap();
-        value
-            .as_object_mut()
-            .expect("configuration records serialize as JSON objects")
-            .remove("updatedAt");
-        value
-    }
-
     #[test]
     fn parser_requires_an_explicit_absolute_root() {
         let missing = parse_options(Vec::<OsString>::new()).unwrap_err();
@@ -1919,15 +1786,16 @@ mod tests {
     }
 
     #[test]
-    fn configuration_preservation_is_limited_to_v32_and_v31() {
+    fn configuration_preservation_is_limited_to_the_current_schema() {
         assert_eq!(
             mycopilot_core::storage::migrations::STORAGE_SCHEMA_VERSION,
-            32
+            33
         );
-        assert!(can_preserve_development_configuration(32));
-        assert!(can_preserve_development_configuration(31));
+        assert!(can_preserve_development_configuration(33));
+        assert!(!can_preserve_development_configuration(32));
+        assert!(!can_preserve_development_configuration(31));
         assert!(!can_preserve_development_configuration(30));
-        assert!(!can_preserve_development_configuration(33));
+        assert!(!can_preserve_development_configuration(34));
     }
 
     #[test]
@@ -1941,7 +1809,7 @@ mod tests {
         assert_eq!(report.backup_path, None);
         assert!(report.database_path.is_file());
         assert!(!fixture.path().join(BACKUP_DIRECTORY_NAME).exists());
-        StorageService::open(&report.database_path).unwrap();
+        open_test_storage(&report.database_path);
         let connection = open_read_only(&report.database_path).unwrap();
         assert!(pragma_rows(&connection, "PRAGMA foreign_key_check")
             .unwrap()
@@ -1950,9 +1818,9 @@ mod tests {
     }
 
     #[test]
-    fn reset_preserves_v31_non_default_image_profiles_exactly() {
+    fn reset_preserves_current_non_default_image_profiles_exactly() {
         let fixture = tempfile::tempdir().unwrap();
-        let storage = StorageService::open(&fixture.path().join(DATABASE_FILE_NAME)).unwrap();
+        let storage = open_test_storage(&fixture.path().join(DATABASE_FILE_NAME));
         let extra_profile = ImageGenerationProfileRecord {
             id: "future-profile".to_string(),
             schema_version: IMAGE_GENERATION_PROFILE_SCHEMA_VERSION,
@@ -1981,12 +1849,10 @@ mod tests {
             .unwrap();
         drop(storage);
 
-        mark_fixture_as_schema_v31(&fixture.path().join(DATABASE_FILE_NAME));
-
         let report = execute(options(fixture.path(), true)).unwrap();
 
         assert_eq!(report.image_generation_profile_count, 1);
-        let storage = StorageService::open(&fixture.path().join(DATABASE_FILE_NAME)).unwrap();
+        let storage = open_test_storage(&fixture.path().join(DATABASE_FILE_NAME));
         assert_eq!(
             storage
                 .load_image_generation_profile("future-profile")
@@ -2015,6 +1881,54 @@ mod tests {
         assert_eq!(fs::read(database).unwrap(), before);
         assert!(!fixture.path().join(BACKUP_DIRECTORY_NAME).exists());
         assert!(!report.render().contains(&secret));
+    }
+
+    #[test]
+    fn current_schema_reset_rejects_an_extra_schema_object() {
+        let fixture = tempfile::tempdir().unwrap();
+        populated_storage(fixture.path(), "current-schema-tamper-secret");
+        let database = fixture.path().join(DATABASE_FILE_NAME);
+        let connection = Connection::open(&database).unwrap();
+        connection
+            .execute_batch("CREATE TABLE injected_reset_table(value TEXT NOT NULL);")
+            .unwrap();
+        drop(connection);
+
+        let error = execute(options(fixture.path(), false)).unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("exactly canonical"));
+        assert!(!fixture.path().join(BACKUP_DIRECTORY_NAME).exists());
+    }
+
+    #[test]
+    fn current_schema_reset_rejects_foreign_key_corruption() {
+        let fixture = tempfile::tempdir().unwrap();
+        populated_storage(fixture.path(), "current-foreign-key-secret");
+        let database = fixture.path().join(DATABASE_FILE_NAME);
+        let connection = Connection::open(&database).unwrap();
+        connection
+            .pragma_update(None, "foreign_keys", false)
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO attachments (
+                     id, conversation_id, message_id, project_id, kind,
+                     original_name, mime_type, size_bytes, storage_rel_path, created_at
+                 ) VALUES (
+                     'orphan-attachment', 'missing-conversation', 'missing-message', NULL,
+                     'file', 'orphan.txt', 'text/plain', 1, 'orphan.txt', 0
+                 )",
+                [],
+            )
+            .unwrap();
+        drop(connection);
+
+        let error = execute(options(fixture.path(), false)).unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("foreign_key_check"));
+        assert!(!fixture.path().join(BACKUP_DIRECTORY_NAME).exists());
     }
 
     #[test]
@@ -2058,9 +1972,7 @@ mod tests {
         let error = execute(options(fixture.path(), false)).unwrap_err();
 
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
-        assert!(error
-            .to_string()
-            .contains("configuration table schema differs"));
+        assert!(error.to_string().contains("exactly canonical"));
         assert_eq!(file_digest(&database).unwrap(), source_digest);
         assert!(!fixture.path().join(BACKUP_DIRECTORY_NAME).exists());
     }
@@ -2121,16 +2033,18 @@ mod tests {
                 .unwrap(),
             i64::from(mycopilot_core::storage::migrations::STORAGE_SCHEMA_VERSION)
         );
-        assert_eq!(
-            backup
-                .query_row(
-                    "SELECT api_token FROM model_provider_settings WHERE id = 'default'",
-                    [],
-                    |row| row.get::<_, String>(0),
-                )
-                .unwrap(),
-            secret
-        );
+        let credential_ref = backup
+            .query_row(
+                "SELECT api_token_ref FROM model_provider_settings WHERE id = 'default'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap();
+        assert!(CredentialReference::parse(&credential_ref).is_ok());
+        assert!(!fs::read(&recovered_database)
+            .unwrap()
+            .windows(secret.len())
+            .any(|window| window == secret.as_bytes()));
         drop(backup);
         remove_database_files(&recovered_database);
 
@@ -2167,7 +2081,7 @@ mod tests {
                 0o600
             );
         }
-        let storage = StorageService::open(&fixture.path().join(DATABASE_FILE_NAME)).unwrap();
+        let storage = open_test_storage(&fixture.path().join(DATABASE_FILE_NAME));
         let snapshot = storage.load_model_settings_snapshot().unwrap().unwrap();
         assert_eq!(snapshot.settings.api_token, secret);
         assert_eq!(snapshot.settings.search_mode, "tavily");
@@ -2236,10 +2150,10 @@ mod tests {
     }
 
     #[test]
-    fn confirmed_reset_preserves_a_v31_image_credential_through_reconciliation() {
+    fn confirmed_reset_preserves_a_current_image_credential_through_reconciliation() {
         let fixture = tempfile::tempdir().unwrap();
         let database = fixture.path().join(DATABASE_FILE_NAME);
-        let storage = StorageService::open(&database).unwrap();
+        let storage = open_test_storage(&database);
         let credentials = Arc::new(
             DevelopmentFileCredentialStore::new(
                 fixture
@@ -2284,11 +2198,9 @@ mod tests {
         drop(storage);
         assert!(credentials.get(&reference).unwrap().is_some());
 
-        mark_fixture_as_schema_v31(&database);
-
         execute(options(fixture.path(), true)).unwrap();
 
-        let storage = Arc::new(StorageService::open(&database).unwrap());
+        let storage = Arc::new(open_test_storage(&database));
         let restored = storage
             .load_image_generation_profile(DEFAULT_IMAGE_GENERATION_PROFILE_ID)
             .unwrap()
@@ -2300,140 +2212,6 @@ mod tests {
         );
         configuration.reconcile_credentials().unwrap();
         assert!(credentials.get(&reference).unwrap().is_some());
-    }
-
-    #[test]
-    fn confirmed_reset_preserves_v31_configuration_and_discards_conversation_runtime() {
-        let fixture = tempfile::tempdir().unwrap();
-        let secret = "v31-preserved-model-token";
-        populated_storage(fixture.path(), secret);
-        let database = fixture.path().join(DATABASE_FILE_NAME);
-        let storage = StorageService::open(&database).unwrap();
-        let expected_models = storage
-            .load_model_settings_snapshot()
-            .unwrap()
-            .unwrap()
-            .settings;
-        let expected_ui = semantic_configuration_json(&storage.load_ui_preferences().unwrap());
-        let expected_prompt =
-            semantic_configuration_json(&storage.load_agent_prompt_preferences().unwrap());
-        let expected_notifications = storage.load_notification_settings().unwrap();
-        let expected_downloads = storage.load_browser_download_settings().unwrap();
-        let expected_browser = storage.load_browser_preferences().unwrap();
-        let expected_image = storage
-            .load_image_generation_profile(DEFAULT_IMAGE_GENERATION_PROFILE_ID)
-            .unwrap()
-            .unwrap();
-        drop(storage);
-        let source = Connection::open(&database).unwrap();
-        let expected_exact_tables = snapshot_exact_configuration_tables(&source).unwrap();
-        drop(source);
-        let registry = SqliteMcpRegistry::open(&database).unwrap();
-        let expected_mcp = registry.list().unwrap();
-        assert_eq!(expected_mcp.len(), 1);
-        let expected_namespace = expected_mcp[0].model_namespace.clone();
-        drop(registry);
-
-        mark_fixture_as_schema_v31(&database);
-
-        let report = execute(options(fixture.path(), true)).unwrap();
-
-        assert!(report.confirmed);
-        assert!(report
-            .backup_path
-            .as_ref()
-            .is_some_and(|path| path.is_file()));
-        assert!(report.preserved_configuration);
-        assert_eq!(report.model_count, 1);
-        assert_eq!(report.skill_override_count, 1);
-        assert_eq!(report.mcp_server_count, 1);
-        assert_eq!(report.image_generation_profile_count, 1);
-        assert!(report.discarded_conversation_rows >= 4);
-        assert!(!report.render().contains(secret));
-
-        let storage = StorageService::open(&database).unwrap();
-        let restored_models = storage
-            .load_model_settings_snapshot()
-            .unwrap()
-            .unwrap()
-            .settings;
-        assert!(model_settings_values_match(
-            &expected_models,
-            &restored_models
-        ));
-        assert_eq!(restored_models.api_token, secret);
-        assert_eq!(restored_models.search_mode, "tavily");
-        assert_eq!(restored_models.tavily_api_key, format!("search-{secret}"));
-        assert_eq!(
-            semantic_configuration_json(&storage.load_ui_preferences().unwrap()),
-            expected_ui
-        );
-        assert_eq!(
-            semantic_configuration_json(&storage.load_agent_prompt_preferences().unwrap()),
-            expected_prompt
-        );
-        assert_eq!(
-            storage.load_notification_settings().unwrap(),
-            expected_notifications
-        );
-        assert_eq!(
-            storage.load_browser_download_settings().unwrap(),
-            expected_downloads
-        );
-        let restored_browser = storage.load_browser_preferences().unwrap();
-        assert_eq!(
-            restored_browser.link_open_target,
-            expected_browser.link_open_target
-        );
-        assert_eq!(
-            storage
-                .load_image_generation_profile(DEFAULT_IMAGE_GENERATION_PROFILE_ID)
-                .unwrap()
-                .as_ref(),
-            Some(&expected_image)
-        );
-        assert!(
-            !storage
-                .load_skill_enablement(&["skill-a".to_string()])
-                .unwrap()["skill-a"]
-        );
-        assert!(storage.load_projects().unwrap().is_empty());
-        assert!(storage.load_conversations().unwrap().is_empty());
-        drop(storage);
-
-        let registry = SqliteMcpRegistry::open(&database).unwrap();
-        let restored_mcp = registry.list().unwrap();
-        assert_eq!(restored_mcp.len(), 1);
-        assert_eq!(restored_mcp[0].config, expected_mcp[0].config);
-        assert_eq!(restored_mcp[0].model_namespace, expected_namespace);
-        drop(registry);
-
-        let connection = Connection::open(&database).unwrap();
-        assert_eq!(
-            storage_schema_version(&connection).unwrap(),
-            mycopilot_core::storage::migrations::STORAGE_SCHEMA_VERSION
-        );
-        assert_eq!(
-            snapshot_exact_configuration_tables(&connection).unwrap(),
-            expected_exact_tables
-        );
-        assert_eq!(
-            connection
-                .query_row(
-                    "SELECT user_allowed, policy_revision
-                     FROM mcp_builtin_capability_policies
-                     WHERE capability_id = 'browser_automation'",
-                    [],
-                    |row| Ok((row.get::<_, bool>(0)?, row.get::<_, u64>(1)?)),
-                )
-                .unwrap(),
-            (true, 1)
-        );
-        assert_eq!(
-            count_rows_if_table_exists(&connection, "conversation_turn_traces").unwrap(),
-            0
-        );
-        ensure_only_configuration_tables_have_rows(&connection).unwrap();
     }
 
     #[test]
@@ -2457,7 +2235,7 @@ mod tests {
             .render()
             .contains("configuration preservation: skipped (unsupported schema; defaults used)"));
         assert_eq!(report.model_count, 0);
-        let storage = StorageService::open(&database).unwrap();
+        let storage = open_test_storage(&database);
         assert!(storage.load_model_settings_snapshot().unwrap().is_none());
         assert!(storage.load_projects().unwrap().is_empty());
         assert!(storage.load_conversations().unwrap().is_empty());
@@ -2467,7 +2245,7 @@ mod tests {
     fn reset_preserves_the_exact_mcp_model_namespace_after_a_display_name_change() {
         let fixture = tempfile::tempdir().unwrap();
         let database = fixture.path().join(DATABASE_FILE_NAME);
-        StorageService::open(&database).unwrap();
+        open_test_storage(&database);
         let registry = SqliteMcpRegistry::open(&database).unwrap();
         let server_id = McpServerId::new();
         let original = registry
