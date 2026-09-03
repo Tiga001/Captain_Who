@@ -949,8 +949,7 @@
 }
 
 .provider-settings-dialog__notice,
-.model-provider-policy-message,
-.model-form-capability-note {
+.model-provider-policy-message {
   margin: 0;
   color: var(--settings-content-muted-color);
   font-size: var(--mc-font-size-xs);
@@ -971,11 +970,6 @@
 
 .model-provider-policy-message p {
   margin: 0;
-}
-
-.model-form-capability-note {
-  grid-column: 2;
-  justify-self: end;
 }
 
 .provider-settings-dialog__close {

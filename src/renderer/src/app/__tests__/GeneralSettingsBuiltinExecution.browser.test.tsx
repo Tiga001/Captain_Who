@@ -55,8 +55,8 @@ describe('GeneralSettingsPage built-in execution permission', () => {
     await screen.getByRole('button', { name: 'general.languageAria' }).click()
 
     for (const label of [
-      '中文（中国）',
-      '繁體中文',
+      '简体中文（中国）',
+      '繁體中文（中國）',
       'English (United States)',
       'English (United Kingdom)',
       '한국어',

@@ -506,13 +506,6 @@ export function ModelForm({
             <span className="settings-switch__thumb" aria-hidden="true" />
             <span className="sr-only">{t('configuration.supportsImageInput')}</span>
           </button>
-          {supportedPolicy?.imageInput !== 'user_configurable' && supportedPolicy && (
-            <small className="model-form-capability-note">
-              {supportedPolicy.imageInput === 'supported'
-                ? t('configuration.providerProfile.imageSupportedByProvider')
-                : t('configuration.providerProfile.imageUnsupportedByProvider')}
-            </small>
-          )}
         </div>
 
         <div className="model-form-more-row">

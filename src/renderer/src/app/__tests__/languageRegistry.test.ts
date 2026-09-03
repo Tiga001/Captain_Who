@@ -10,8 +10,8 @@ import {
 import type { AppLanguage, TranslationKey } from '../../config/languageRegistry'
 
 const EXPECTED_LANGUAGE_OPTIONS = [
-  { label: '中文（中国）', value: 'zh-CN' },
-  { label: '繁體中文', value: 'zh-TW' },
+  { label: '简体中文（中国）', value: 'zh-CN' },
+  { label: '繁體中文（中國）', value: 'zh-TW' },
   { label: 'English (United States)', value: 'en-US' },
   { label: 'English (United Kingdom)', value: 'en-GB' },
   { label: '한국어', value: 'ko-KR' },

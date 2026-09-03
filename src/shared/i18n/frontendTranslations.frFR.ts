@@ -2184,10 +2184,6 @@ export const frFRTranslations = {
     'Utilisez la compatibilité générique ou attendez une adaptation dédiée avant d’enregistrer.',
   'configuration.providerProfile.familyChanged':
     'La famille de modèles a changé. Les réglages incompatibles ont été réinitialisés.',
-  'configuration.providerProfile.imageSupportedByProvider':
-    'L’entrée d’image est activée par cette famille',
-  'configuration.providerProfile.imageUnsupportedByProvider':
-    'Cette famille ne prend pas en charge les images',
   'configuration.providerSettings.title': 'Provider réglages',
   'configuration.providerSettings.open': 'Ouvrir les paramètres',
   'configuration.providerSettings.cancel': 'Annuler',

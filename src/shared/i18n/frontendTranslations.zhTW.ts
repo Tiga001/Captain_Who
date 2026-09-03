@@ -1963,8 +1963,6 @@ export const zhTWTranslations = {
     '請改用通用相容，或等待模型獲得專用支援後再儲存廠商設定。',
   'configuration.providerProfile.familyChanged':
     '模型系列已變更，不相容的廠商設定已重設為 API 預設值。',
-  'configuration.providerProfile.imageSupportedByProvider': '目前模型系列已啟用圖片輸入',
-  'configuration.providerProfile.imageUnsupportedByProvider': '目前模型系列不支援圖片輸入',
   'configuration.providerSettings.title': '廠商設定',
   'configuration.providerSettings.open': '開啟設定',
   'configuration.providerSettings.cancel': '取消',

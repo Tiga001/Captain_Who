@@ -2198,10 +2198,6 @@ export const itITTranslations = {
     'Usa la compatibilità generica o attendi il supporto dedicato prima di salvare.',
   'configuration.providerProfile.familyChanged':
     'La famiglia di modelli è cambiata. Le impostazioni incompatibili sono state reimpostate.',
-  'configuration.providerProfile.imageSupportedByProvider':
-    'L’input di immagini è abilitato da questa famiglia',
-  'configuration.providerProfile.imageUnsupportedByProvider':
-    'Questa famiglia non supporta immagini',
   'configuration.providerSettings.title': 'Impostazioni Provider',
   'configuration.providerSettings.open': 'Apri le impostazioni',
   'configuration.providerSettings.cancel': 'Annulla',

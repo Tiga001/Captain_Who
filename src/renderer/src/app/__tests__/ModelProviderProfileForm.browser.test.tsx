@@ -442,6 +442,7 @@ describe('ModelForm vendor controls', () => {
           ).disabled
       )
       .toBe(false)
+    expect(document.querySelector('.model-form-capability-note')).toBeNull()
     await screen.getByRole('button', { name: 'configuration.providerSettings.open' }).click()
     await screen
       .getByRole('button', {

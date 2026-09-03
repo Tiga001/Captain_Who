@@ -2136,10 +2136,6 @@ export const ruRUTranslations = {
     'Используйте общую совместимость или дождитесь специальной поддержки модели.',
   'configuration.providerProfile.familyChanged':
     'Семейство модели изменилось. Несовместимые настройки сброшены к значениям API.',
-  'configuration.providerProfile.imageSupportedByProvider':
-    'Это семейство поддерживает ввод изображений',
-  'configuration.providerProfile.imageUnsupportedByProvider':
-    'Это семейство не поддерживает изображения',
   'configuration.providerSettings.title': 'Provider настройки',
   'configuration.providerSettings.open': 'Открыть настройки',
   'configuration.providerSettings.cancel': 'Отмена',

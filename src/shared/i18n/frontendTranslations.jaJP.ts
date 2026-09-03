@@ -2138,10 +2138,6 @@ export const jaJPTranslations = {
     '汎用互換を使用するか、専用サポートを待ってから保存してください。',
   'configuration.providerProfile.familyChanged':
     'モデルファミリーが変わったため、互換性のない設定を API の既定値に戻しました。',
-  'configuration.providerProfile.imageSupportedByProvider':
-    'このモデルファミリーでは画像入力が有効です',
-  'configuration.providerProfile.imageUnsupportedByProvider':
-    'このモデルファミリーは画像入力をサポートしません',
   'configuration.providerSettings.title': 'Provider設定',
   'configuration.providerSettings.open': '設定を開く',
   'configuration.providerSettings.cancel': 'キャンセル',

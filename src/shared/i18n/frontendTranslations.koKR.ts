@@ -2079,10 +2079,6 @@ export const koKRTranslations = {
     '일반 호환을 사용하거나 전용 지원을 기다린 후 저장하세요.',
   'configuration.providerProfile.familyChanged':
     '모델 제품군이 변경되어 호환되지 않는 설정을 API 기본값으로 재설정했습니다.',
-  'configuration.providerProfile.imageSupportedByProvider':
-    '이 모델 제품군에서 이미지 입력을 지원합니다',
-  'configuration.providerProfile.imageUnsupportedByProvider':
-    '이 모델 제품군은 이미지 입력을 지원하지 않습니다',
   'configuration.providerSettings.title': 'Provider 설정',
   'configuration.providerSettings.open': '설정 열기',
   'configuration.providerSettings.cancel': '취소',

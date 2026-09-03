@@ -2091,10 +2091,6 @@ export const enUSTranslations = {
     'Use Generic compatible, or wait for dedicated model support before saving provider settings.',
   'configuration.providerProfile.familyChanged':
     'The model family changed. Incompatible provider settings were reset to API defaults.',
-  'configuration.providerProfile.imageSupportedByProvider':
-    'Image input is enabled by this model family',
-  'configuration.providerProfile.imageUnsupportedByProvider':
-    'This model family does not support image input',
   'configuration.providerSettings.title': 'Provider settings',
   'configuration.providerSettings.open': 'Open settings',
   'configuration.providerSettings.cancel': 'Cancel',

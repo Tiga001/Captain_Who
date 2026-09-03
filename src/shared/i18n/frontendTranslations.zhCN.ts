@@ -1977,8 +1977,6 @@ export const zhCNTranslations = {
     '请改用通用兼容，或等待该模型获得专项适配后再保存厂商设置。',
   'configuration.providerProfile.familyChanged':
     '模型族已变化，不兼容的厂商设置已重置为接口默认值。',
-  'configuration.providerProfile.imageSupportedByProvider': '图片能力由当前模型族开启',
-  'configuration.providerProfile.imageUnsupportedByProvider': '当前模型族不支持图片输入',
   'configuration.providerSettings.title': '厂商设置',
   'configuration.providerSettings.open': '打开设置',
   'configuration.providerSettings.cancel': '取消',

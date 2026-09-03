@@ -22,12 +22,12 @@ export interface LanguageDefinition {
 export const languageRegistry = {
   'zh-CN': {
     direction: 'ltr',
-    displayName: '中文（中国）',
+    displayName: '简体中文（中国）',
     translations: zhCNTranslations
   },
   'zh-TW': {
     direction: 'ltr',
-    displayName: '繁體中文',
+    displayName: '繁體中文（中國）',
     translations: zhTWTranslations
   },
   'en-US': {
