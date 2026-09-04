@@ -1479,6 +1479,30 @@ fn save_wire_requires_an_explicit_profile_update() {
 }
 
 #[test]
+fn save_wire_requires_expected_revision_but_accepts_explicit_null() {
+    let settings = revision_test_settings();
+    let mut payload = renderer_save_request_value(&settings);
+    let model = payload["models"][0].as_object_mut().unwrap();
+    model.insert("id".to_string(), serde_json::Value::Null);
+    model.remove("providerProfileConfig");
+    model.insert(
+        "providerProfileUpdate".to_string(),
+        serde_json::json!({"kind": "select_generic"}),
+    );
+
+    let mut missing_revision = payload.clone();
+    missing_revision
+        .as_object_mut()
+        .unwrap()
+        .remove("expectedRevision");
+    assert!(serde_json::from_value::<ModelSettingsSaveRequest>(missing_revision).is_err());
+
+    payload["expectedRevision"] = serde_json::Value::Null;
+    let request = serde_json::from_value::<ModelSettingsSaveRequest>(payload).unwrap();
+    assert_eq!(request.expected_revision, None);
+}
+
+#[test]
 fn explicit_generic_profile_can_replace_a_provider_specific_profile() {
     let fixture = StorageFixture::new();
     let service = fixture.service();

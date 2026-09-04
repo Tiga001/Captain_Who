@@ -4,7 +4,10 @@
 //! snapshots as JSON documents. Application code owns their versioned domain interpretation;
 //! SQLite owns idempotency, compare-and-set revisions, non-overlap, and durable event ordering.
 
-use crate::storage::now_ms;
+use crate::storage::{
+    notification_repository::{self, NewNotificationEventRecord, NotificationEventRecord},
+    now_ms,
+};
 use rusqlite::{params, Connection, OptionalExtension, Row, Transaction, TransactionBehavior};
 
 pub const AUTOMATION_SCHEMA_VERSION: i64 = 1;
@@ -285,28 +288,6 @@ pub struct AutomationRunSettlementInput {
     pub error_code: Option<String>,
     pub error_message: Option<String>,
     pub settled_at: i64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AutomationNotificationRecord {
-    pub id: String,
-    pub automation_id: String,
-    pub automation_run_id: Option<String>,
-    pub resource_revision: i64,
-    pub notification_kind: String,
-    pub title: String,
-    pub body: String,
-    pub status: String,
-    pub retry_at: i64,
-    pub claim_token: Option<String>,
-    pub claim_expires_at: Option<i64>,
-    pub attempt_count: i64,
-    pub last_error_code: Option<String>,
-    pub created_at: i64,
-    pub delivered_at: Option<i64>,
-    pub conversation_id: Option<String>,
-    pub user_message_id: Option<String>,
-    pub assistant_message_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -654,13 +635,10 @@ pub fn replace_automation_config(
     let updated =
         query_automation(&transaction, automation_id, false)?.expect("updated automation");
     if existing.config.health_state == "blocked" && updated.config.health_state == "ok" {
-        transaction.execute(
-            "UPDATE automation_notification_outbox
-             SET status = 'suppressed', claim_token = NULL, claim_expires_at = NULL
-             WHERE automation_id = ?1 AND automation_run_id IS NULL
-               AND notification_kind = 'configuration_blocked'
-               AND status IN ('pending', 'projected')",
-            [automation_id],
+        notification_repository::resolve_notification_events_by_supersession_key_in_transaction(
+            &transaction,
+            &format!("automation-configuration:{automation_id}"),
+            timestamp,
         )?;
     }
     insert_event(
@@ -1095,12 +1073,10 @@ fn terminalize_automation_runs_for_resource_deletion(
                 timestamp,
             )?;
         }
-        transaction.execute(
-            "UPDATE automation_notification_outbox
-             SET status = 'suppressed', claim_token = NULL, claim_expires_at = NULL
-             WHERE automation_run_id = ?1 AND notification_kind = 'approval_required'
-               AND status IN ('pending', 'projected')",
-            [&run.id],
+        notification_repository::resolve_automation_approval_notification_in_transaction(
+            transaction,
+            &run.id,
+            timestamp,
         )?;
         let task_is_live = transaction
             .query_row(
@@ -1361,12 +1337,6 @@ pub fn tombstone_automation(
             timestamp,
         )?;
     }
-    transaction.execute(
-        "UPDATE automation_notification_outbox
-         SET status = 'suppressed', claim_token = NULL, claim_expires_at = NULL
-         WHERE automation_id = ?1 AND status IN ('pending', 'projected')",
-        [automation_id],
-    )?;
     crate::storage::notification_repository::invalidate_notification_events_by_automation_id_in_transaction(
         &transaction,
         automation_id,
@@ -2275,12 +2245,10 @@ pub fn set_automation_run_waiting_for_approval(
             )?;
         }
     } else {
-        transaction.execute(
-            "UPDATE automation_notification_outbox
-             SET status = 'suppressed', claim_token = NULL, claim_expires_at = NULL
-             WHERE automation_run_id = ?1 AND notification_kind = 'approval_required'
-               AND status IN ('pending', 'projected')",
-            [&run.id],
+        notification_repository::resolve_automation_approval_notification_in_transaction(
+            &transaction,
+            &run.id,
+            changed_at,
         )?;
     }
     transaction.commit()?;
@@ -2452,12 +2420,10 @@ pub fn settle_automation_run_from_trace(
             )?;
         }
     }
-    transaction.execute(
-        "UPDATE automation_notification_outbox
-         SET status = 'suppressed', claim_token = NULL, claim_expires_at = NULL
-         WHERE automation_run_id = ?1 AND notification_kind = 'approval_required'
-           AND status IN ('pending', 'projected')",
-        [&run.id],
+    notification_repository::resolve_automation_approval_notification_in_transaction(
+        &transaction,
+        &run.id,
+        settled_at,
     )?;
     transaction.commit()?;
     Ok(AutomationRunMutationOutcome::Updated(run))
@@ -2513,20 +2479,10 @@ pub fn list_cancellation_requested_automation_runs(
     records
 }
 
-pub fn enqueue_automation_notification(
-    connection: &mut Connection,
-    input: &NewAutomationNotificationRecord,
-) -> rusqlite::Result<AutomationNotificationRecord> {
-    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let record = enqueue_automation_notification_in_transaction(&transaction, input)?;
-    transaction.commit()?;
-    Ok(record)
-}
-
 pub fn enqueue_automation_notification_in_transaction(
     transaction: &Transaction<'_>,
     input: &NewAutomationNotificationRecord,
-) -> rusqlite::Result<AutomationNotificationRecord> {
+) -> rusqlite::Result<NotificationEventRecord> {
     if input.resource_revision <= 0
         || input.title.is_empty()
         || input.title.len() > 512
@@ -2541,10 +2497,87 @@ pub fn enqueue_automation_notification_in_transaction(
     {
         return Err(rusqlite::Error::InvalidQuery);
     }
-    let notification_id = format!("automation-notification:{}", uuid::Uuid::new_v4());
+    let run = input
+        .automation_run_id
+        .as_deref()
+        .map(|run_id| query_run(transaction, run_id))
+        .transpose()?
+        .flatten();
+    if input.automation_run_id.is_some() && run.is_none() {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    let notification_kind = match input.notification_kind.as_str() {
+        "approval_required" => "approval_required",
+        "configuration_blocked" => "automation_configuration_blocked",
+        "run_result" => match run.as_ref().map(|record| record.status) {
+            Some(StoredAutomationRunStatus::Failed) => "automation_failed",
+            Some(StoredAutomationRunStatus::Cancelled) => "automation_cancelled",
+            Some(StoredAutomationRunStatus::Completed)
+                if run
+                    .as_ref()
+                    .and_then(|record| record.report_kind.as_deref())
+                    == Some("important_update") =>
+            {
+                "automation_important_update"
+            }
+            Some(StoredAutomationRunStatus::Completed) => "automation_completed",
+            _ => return Err(rusqlite::Error::InvalidQuery),
+        },
+        _ => return Err(rusqlite::Error::InvalidQuery),
+    };
+    let identity = input
+        .automation_run_id
+        .as_deref()
+        .unwrap_or(&input.automation_id);
+    let dedupe_key = format!(
+        "automation:{}:{}:{}",
+        input.notification_kind, identity, input.resource_revision
+    );
+    let supersession_key = input.automation_run_id.as_deref().map_or_else(
+        || format!("automation-configuration:{}", input.automation_id),
+        |run_id| format!("automation-run:{run_id}"),
+    );
+    let event = NewNotificationEventRecord {
+        notification_kind: notification_kind.to_string(),
+        source_kind: "automation".to_string(),
+        source_id: input.automation_id.clone(),
+        run_id: input.automation_run_id.clone(),
+        automation_id: Some(input.automation_id.clone()),
+        conversation_id: run
+            .as_ref()
+            .and_then(|record| record.conversation_id.clone()),
+        user_message_id: run
+            .as_ref()
+            .and_then(|record| record.user_message_id.clone()),
+        assistant_message_id: run
+            .as_ref()
+            .and_then(|record| record.assistant_message_id.clone()),
+        approval_action_id: None,
+        subject_kind: "automation_title".to_string(),
+        subject_text: input.title.clone(),
+        dedupe_key: dedupe_key.clone(),
+        supersession_key,
+        resource_revision: Some(input.resource_revision),
+        occurred_at: input.created_at,
+        expires_at: input.created_at.saturating_add(
+            if matches!(
+                input.notification_kind.as_str(),
+                "approval_required" | "configuration_blocked"
+            ) {
+                2_592_000_000
+            } else {
+                604_800_000
+            },
+        ),
+    };
+    let existed = transaction.query_row(
+        "SELECT EXISTS(SELECT 1 FROM notification_events WHERE dedupe_key = ?1)",
+        [&dedupe_key],
+        |row| row.get::<_, bool>(0),
+    )?;
     // Agent-tree deletion deliberately disables every SQLite trigger for the destructive graph
     // mutation. Notification projection is nevertheless part of this durable write: enable
-    // triggers only for the outbox INSERT, then restore the caller's connection setting before
+    // triggers only for the notification INSERT, then restore the caller's connection setting before
     // any resource row is deleted. This keeps the generic application outbox atomic without
     // re-enabling the unrelated deletion triggers around the destructive statements.
     let triggers_were_enabled =
@@ -2555,279 +2588,43 @@ pub fn enqueue_automation_notification_in_transaction(
             true,
         )?;
     }
-    let insert_result = transaction.execute(
-        "INSERT OR IGNORE INTO automation_notification_outbox (
-            id, schema_version, automation_id, automation_run_id, resource_revision,
-            notification_kind, title, body, status, retry_at, claim_token,
-            claim_expires_at, attempt_count, last_error_code, created_at, delivered_at
-         ) VALUES (
-            ?1, 1, ?2, ?3, ?4, ?5, ?6, ?7, 'pending', ?8,
-            NULL, NULL, 0, NULL, ?8, NULL
-         )",
-        params![
-            notification_id,
-            &input.automation_id,
-            input.automation_run_id.as_deref(),
-            input.resource_revision,
-            &input.notification_kind,
-            &input.title,
-            &input.body,
-            input.created_at,
-        ],
-    );
+    let insert_result =
+        notification_repository::enqueue_notification_event_in_transaction(transaction, &event);
     if !triggers_were_enabled {
         transaction.set_db_config(
             rusqlite::config::DbConfig::SQLITE_DBCONFIG_ENABLE_TRIGGER,
             false,
         )?;
     }
-    let inserted = insert_result?;
-    let record = query_automation_notification_by_identity(transaction, input)?
-        .ok_or(rusqlite::Error::InvalidQuery)?;
-    if inserted == 1 {
+    let record = insert_result?;
+    let inserted_notification_id = (!existed)
+        .then(|| {
+            transaction
+                .query_row(
+                    "SELECT id FROM notification_events WHERE dedupe_key = ?1",
+                    [&dedupe_key],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()
+        })
+        .transpose()?
+        .flatten();
+    if let Some(notification_id) = inserted_notification_id {
         let payload = serde_json::json!({
-            "notificationId": record.id,
-            "notificationKind": record.notification_kind,
+            "notificationId": notification_id,
+            "notificationKind": input.notification_kind,
         });
         insert_event(
             transaction,
             "notification_requested",
-            &record.automation_id,
-            record.automation_run_id.as_deref(),
-            Some(record.resource_revision),
+            &input.automation_id,
+            input.automation_run_id.as_deref(),
+            Some(input.resource_revision),
             &payload.to_string(),
             input.created_at,
         )?;
     }
     Ok(record)
-}
-
-/// Atomically leases a small pending-notification batch. Replaying the same live claim token
-/// returns the original batch; an expired process lease is recoverable after restart.
-pub fn claim_pending_automation_notifications(
-    connection: &mut Connection,
-    claim_token: &str,
-    now: i64,
-    lease_duration_ms: i64,
-    limit: usize,
-) -> rusqlite::Result<Vec<AutomationNotificationRecord>> {
-    if claim_token.is_empty() || claim_token.len() > 256 || now < 0 || lease_duration_ms < 5_000 {
-        return Err(rusqlite::Error::InvalidQuery);
-    }
-    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let existing = list_automation_notifications_by_claim(&transaction, claim_token, now)?;
-    if !existing.is_empty() {
-        transaction.rollback()?;
-        return Ok(existing);
-    }
-    let limit = limit.clamp(1, 10);
-    let lease_expires_at = now.saturating_add(lease_duration_ms.clamp(5_000, 300_000));
-    let ids = {
-        let mut statement = transaction.prepare(
-            "SELECT outbox.id
-             FROM automation_notification_outbox AS outbox
-             INNER JOIN automations AS task ON task.id = outbox.automation_id
-             WHERE outbox.status = 'pending'
-               AND outbox.retry_at <= ?1
-               AND (outbox.claim_token IS NULL OR outbox.claim_expires_at <= ?1)
-               AND task.deleted_at IS NULL
-             ORDER BY outbox.created_at ASC, outbox.id ASC
-             LIMIT ?2",
-        )?;
-        let records = statement
-            .query_map(params![now, limit as i64], |row| row.get::<_, String>(0))?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        records
-    };
-    for notification_id in ids {
-        transaction.execute(
-            "UPDATE automation_notification_outbox
-             SET claim_token = ?1, claim_expires_at = ?2,
-                 attempt_count = attempt_count + 1, last_error_code = NULL
-             WHERE id = ?3 AND status = 'pending' AND retry_at <= ?4
-               AND (claim_token IS NULL OR claim_expires_at <= ?4)",
-            params![claim_token, lease_expires_at, notification_id, now],
-        )?;
-    }
-    let claimed = list_automation_notifications_by_claim(&transaction, claim_token, now)?;
-    transaction.commit()?;
-    Ok(claimed)
-}
-
-/// Revalidates a claimed delivery at the last Host-owned boundary before native display. A claim
-/// is only a lease; task deletion or approval settlement may suppress it after the batch was
-/// returned. Stale semantic claims are durably suppressed here so no later Host can replay them.
-pub fn validate_claimed_automation_notification(
-    connection: &mut Connection,
-    notification_id: &str,
-    claim_token: &str,
-    now: i64,
-) -> rusqlite::Result<Option<AutomationNotificationRecord>> {
-    if notification_id.is_empty()
-        || notification_id.len() > 256
-        || claim_token.is_empty()
-        || claim_token.len() > 256
-        || now < 0
-    {
-        return Err(rusqlite::Error::InvalidQuery);
-    }
-    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let Some(record) = query_automation_notification(&transaction, notification_id)? else {
-        transaction.rollback()?;
-        return Ok(None);
-    };
-    let owns_live_claim = record.status == "pending"
-        && record.claim_token.as_deref() == Some(claim_token)
-        && record
-            .claim_expires_at
-            .is_some_and(|expires_at| expires_at > now);
-    if !owns_live_claim {
-        transaction.rollback()?;
-        return Ok(None);
-    }
-    let task_is_live = transaction
-        .query_row(
-            "SELECT deleted_at IS NULL FROM automations WHERE id = ?1",
-            [&record.automation_id],
-            |row| row.get::<_, bool>(0),
-        )
-        .optional()?
-        .unwrap_or(false);
-    let semantically_current = match record.notification_kind.as_str() {
-        "configuration_blocked" => {
-            task_is_live
-                && transaction
-                    .query_row(
-                        "SELECT health_state = 'blocked' AND revision = ?2
-                         FROM automations WHERE id = ?1 AND deleted_at IS NULL",
-                        params![&record.automation_id, record.resource_revision],
-                        |row| row.get::<_, bool>(0),
-                    )
-                    .optional()?
-                    .unwrap_or(false)
-        }
-        "approval_required" => {
-            if !task_is_live {
-                false
-            } else if let Some(run_id) = record.automation_run_id.as_deref() {
-                transaction
-                    .query_row(
-                        "SELECT status = 'waiting_for_approval'
-                                AND status_revision = ?2
-                                AND EXISTS (
-                                    SELECT 1 FROM agent_pending_actions AS pending
-                                    WHERE pending.run_id = automation_runs.agent_run_id
-                                      AND pending.status = 'pending'
-                                )
-                         FROM automation_runs WHERE id = ?1",
-                        params![run_id, record.resource_revision],
-                        |row| row.get::<_, bool>(0),
-                    )
-                    .optional()?
-                    .unwrap_or(false)
-            } else {
-                false
-            }
-        }
-        "run_result" => {
-            if !task_is_live {
-                false
-            } else if let Some(run_id) = record.automation_run_id.as_deref() {
-                transaction
-                    .query_row(
-                        "SELECT status IN ('completed', 'failed', 'cancelled')
-                                AND status_revision = ?2
-                         FROM automation_runs WHERE id = ?1",
-                        params![run_id, record.resource_revision],
-                        |row| row.get::<_, bool>(0),
-                    )
-                    .optional()?
-                    .unwrap_or(false)
-            } else {
-                false
-            }
-        }
-        _ => false,
-    };
-    if !semantically_current {
-        transaction.execute(
-            "UPDATE automation_notification_outbox
-             SET status = 'suppressed', claim_token = NULL, claim_expires_at = NULL,
-                 last_error_code = NULL
-             WHERE id = ?1 AND status = 'pending' AND claim_token = ?2",
-            params![notification_id, claim_token],
-        )?;
-        transaction.commit()?;
-        return Ok(None);
-    }
-    transaction.rollback()?;
-    Ok(Some(record))
-}
-
-pub fn acknowledge_automation_notification_delivered(
-    connection: &mut Connection,
-    notification_id: &str,
-    claim_token: &str,
-    delivered_at: i64,
-) -> rusqlite::Result<Option<AutomationNotificationRecord>> {
-    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    if let Some(existing) = query_automation_notification(&transaction, notification_id)? {
-        if existing.status == "delivered" {
-            transaction.rollback()?;
-            return Ok(Some(existing));
-        }
-    }
-    let changed = transaction.execute(
-        "UPDATE automation_notification_outbox
-         SET status = 'delivered', delivered_at = MAX(created_at, ?1),
-             claim_token = NULL, claim_expires_at = NULL, last_error_code = NULL
-         WHERE id = ?2 AND status = 'pending' AND claim_token = ?3",
-        params![delivered_at, notification_id, claim_token],
-    )?;
-    let record = query_automation_notification(&transaction, notification_id)?;
-    transaction.commit()?;
-    Ok((changed == 1).then_some(record).flatten())
-}
-
-pub fn release_automation_notification(
-    connection: &mut Connection,
-    notification_id: &str,
-    claim_token: &str,
-    retry_at: i64,
-    error_code: &str,
-) -> rusqlite::Result<Option<AutomationNotificationRecord>> {
-    if error_code.is_empty() || error_code.len() > 128 {
-        return Err(rusqlite::Error::InvalidQuery);
-    }
-    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let changed = transaction.execute(
-        "UPDATE automation_notification_outbox
-         SET retry_at = MAX(retry_at, ?1), claim_token = NULL, claim_expires_at = NULL,
-             last_error_code = ?2
-         WHERE id = ?3 AND status = 'pending' AND claim_token = ?4",
-        params![retry_at, error_code, notification_id, claim_token],
-    )?;
-    let record = query_automation_notification(&transaction, notification_id)?;
-    transaction.commit()?;
-    Ok((changed == 1).then_some(record).flatten())
-}
-
-pub fn suppress_automation_notification(
-    connection: &mut Connection,
-    notification_id: &str,
-    suppressed_at: i64,
-) -> rusqlite::Result<Option<AutomationNotificationRecord>> {
-    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let changed = transaction.execute(
-        "UPDATE automation_notification_outbox
-         SET status = 'suppressed', claim_token = NULL, claim_expires_at = NULL,
-             last_error_code = NULL
-         WHERE id = ?1 AND status IN ('pending', 'projected') AND created_at <= ?2",
-        params![notification_id, suppressed_at],
-    )?;
-    let record = query_automation_notification(&transaction, notification_id)?;
-    transaction.commit()?;
-    Ok((changed == 1).then_some(record).flatten())
 }
 
 pub fn list_automation_runs(
@@ -3526,97 +3323,6 @@ fn row_to_run(row: &Row<'_>) -> rusqlite::Result<AutomationRunRecord> {
         completed_at: row.get(27)?,
         updated_at: row.get(28)?,
     })
-}
-
-fn automation_notification_select_sql(filter: &str) -> String {
-    format!(
-        "SELECT
-            outbox.id, outbox.automation_id, outbox.automation_run_id,
-            outbox.resource_revision, outbox.notification_kind, outbox.title, outbox.body,
-            outbox.status, outbox.retry_at, outbox.claim_token, outbox.claim_expires_at,
-            outbox.attempt_count, outbox.last_error_code, outbox.created_at,
-            outbox.delivered_at, run.conversation_id, run.user_message_id,
-            run.assistant_message_id
-         FROM automation_notification_outbox AS outbox
-         LEFT JOIN automation_runs AS run ON run.id = outbox.automation_run_id
-         {filter}"
-    )
-}
-
-fn row_to_automation_notification(row: &Row<'_>) -> rusqlite::Result<AutomationNotificationRecord> {
-    Ok(AutomationNotificationRecord {
-        id: row.get(0)?,
-        automation_id: row.get(1)?,
-        automation_run_id: row.get(2)?,
-        resource_revision: row.get(3)?,
-        notification_kind: row.get(4)?,
-        title: row.get(5)?,
-        body: row.get(6)?,
-        status: row.get(7)?,
-        retry_at: row.get(8)?,
-        claim_token: row.get(9)?,
-        claim_expires_at: row.get(10)?,
-        attempt_count: row.get(11)?,
-        last_error_code: row.get(12)?,
-        created_at: row.get(13)?,
-        delivered_at: row.get(14)?,
-        conversation_id: row.get(15)?,
-        user_message_id: row.get(16)?,
-        assistant_message_id: row.get(17)?,
-    })
-}
-
-fn query_automation_notification(
-    connection: &Connection,
-    notification_id: &str,
-) -> rusqlite::Result<Option<AutomationNotificationRecord>> {
-    connection
-        .query_row(
-            &automation_notification_select_sql("WHERE outbox.id = ?1"),
-            [notification_id],
-            row_to_automation_notification,
-        )
-        .optional()
-}
-
-fn query_automation_notification_by_identity(
-    connection: &Connection,
-    input: &NewAutomationNotificationRecord,
-) -> rusqlite::Result<Option<AutomationNotificationRecord>> {
-    connection
-        .query_row(
-            &automation_notification_select_sql(
-                "WHERE outbox.automation_id = ?1
-                   AND outbox.automation_run_id IS ?2
-                   AND outbox.notification_kind = ?3
-                   AND outbox.resource_revision = ?4
-                 ORDER BY outbox.created_at ASC LIMIT 1",
-            ),
-            params![
-                &input.automation_id,
-                input.automation_run_id.as_deref(),
-                &input.notification_kind,
-                input.resource_revision,
-            ],
-            row_to_automation_notification,
-        )
-        .optional()
-}
-
-fn list_automation_notifications_by_claim(
-    connection: &Connection,
-    claim_token: &str,
-    now: i64,
-) -> rusqlite::Result<Vec<AutomationNotificationRecord>> {
-    let mut statement = connection.prepare(&automation_notification_select_sql(
-        "WHERE outbox.status = 'pending' AND outbox.claim_token = ?1
-           AND outbox.claim_expires_at > ?2
-         ORDER BY outbox.created_at ASC, outbox.id ASC",
-    ))?;
-    let records = statement
-        .query_map(params![claim_token, now], row_to_automation_notification)?
-        .collect();
-    records
 }
 
 pub fn list_nonterminal_automation_agent_run_ids_for_project(

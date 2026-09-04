@@ -305,10 +305,9 @@ pub fn normalize_model_display_name(value: &str) -> String {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ModelSettingsSaveRequest {
     /// Opaque compare-and-swap identity returned by the settings editor. Current clients always
-    /// send this field; `None` is valid only for the first save into an empty database. The
-    /// default keeps direct legacy callers parseable, while an explicitly supplied stale revision
-    /// is always rejected by the Host.
-    #[serde(default)]
+    /// send this field; `None` is valid only for the first save into an empty database, while an
+    /// explicitly supplied stale revision is always rejected by the Host.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
     pub expected_revision: Option<String>,
     pub api_url: String,
     pub api_token_mutation: CredentialMutation,

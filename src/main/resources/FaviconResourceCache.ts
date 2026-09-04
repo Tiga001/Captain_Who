@@ -15,6 +15,9 @@ const FAVICON_HTML_MAX_BYTES = 512 * 1024
 const FAVICON_MAX_REDIRECTS = 3
 const FAVICON_CACHE_MAX_FILES = 256
 const FAVICON_CACHE_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000
+const FAVICON_MAX_CONCURRENT_RESOLUTIONS = 6
+const FAVICON_NEGATIVE_CACHE_TTL_MS = 5 * 60 * 1000
+const FAVICON_NEGATIVE_CACHE_MAX_ENTRIES = 512
 const FAVICON_USER_AGENT = 'CaptainWho/1.0 favicon resolver'
 const PROXY_FAKE_IP_RANGES = new BlockList()
 
@@ -58,6 +61,7 @@ export type FaviconNetworkSession = Pick<Session, 'fetch' | 'resolveHost' | 'res
 export interface FaviconResourceCacheOptions {
   cacheDirectory?: string
   networkSession: FaviconNetworkSession
+  now?: () => number
 }
 
 export function registerResourceSchemes(): void {
@@ -75,14 +79,19 @@ export function registerResourceSchemes(): void {
 
 export class FaviconResourceCache {
   private readonly pending = new Map<string, Promise<ResourceFaviconResponse>>()
+  private readonly negativeFailures = new Map<string, number>()
+  private readonly networkResolutionWaiters: Array<() => void> = []
   private readonly cacheRootDirectory: string | undefined
   private readonly networkSession: FaviconNetworkSession
+  private readonly now: () => number
+  private activeNetworkResolutions = 0
   private cacheGeneration = 0
   private mutationQueue: Promise<void> = Promise.resolve()
 
   constructor(options: FaviconResourceCacheOptions) {
     this.cacheRootDirectory = options.cacheDirectory
     this.networkSession = options.networkSession
+    this.now = options.now ?? Date.now
   }
 
   registerProtocol(): void {
@@ -93,6 +102,7 @@ export class FaviconResourceCache {
   async clear(): Promise<void> {
     this.cacheGeneration += 1
     this.pending.clear()
+    this.negativeFailures.clear()
     await this.enqueueMutation(() =>
       rm(this.cacheDirectoryPath(), { force: true, recursive: true })
     )
@@ -105,20 +115,37 @@ export class FaviconResourceCache {
     const cacheKey = cacheKeyForPage(pageUrl)
     const cached = await this.findCachedFile(cacheKey)
     if (cached) {
+      this.negativeFailures.delete(cacheKey)
       return { url: faviconProtocolUrl(cacheKey) }
     }
 
     const pending = this.pending.get(cacheKey)
     if (pending) return pending
+    if (this.hasFreshNegativeFailure(cacheKey)) return { url: null }
 
     const generation = this.cacheGeneration
-    const task: Promise<ResourceFaviconResponse> = this.resolveAndCacheFavicon(
-      cacheKey,
-      pageUrl,
-      input.faviconUrl,
-      generation
-    )
-      .catch(() => ({ url: null }))
+    const task: Promise<ResourceFaviconResponse> = this.withNetworkResolutionPermit(async () => {
+      if (generation !== this.cacheGeneration) return { url: null }
+
+      const result = await this.resolveAndCacheFavicon(
+        cacheKey,
+        pageUrl,
+        input.faviconUrl,
+        generation
+      )
+      if (generation !== this.cacheGeneration) return { url: null }
+
+      if (result.url) {
+        this.negativeFailures.delete(cacheKey)
+      } else {
+        this.rememberNegativeFailure(cacheKey)
+      }
+      return result
+    })
+      .catch(() => {
+        if (generation === this.cacheGeneration) this.rememberNegativeFailure(cacheKey)
+        return { url: null }
+      })
       .finally(() => {
         if (this.pending.get(cacheKey) === task) this.pending.delete(cacheKey)
       })
@@ -135,7 +162,13 @@ export class FaviconResourceCache {
   ): Promise<ResourceFaviconResponse> {
     const attempted = new Set<string>()
     const cacheCandidate = async (candidate: URL | null): Promise<boolean> => {
-      if (!candidate || attempted.has(candidate.toString())) return false
+      if (
+        generation !== this.cacheGeneration ||
+        !candidate ||
+        attempted.has(candidate.toString())
+      ) {
+        return false
+      }
       attempted.add(candidate.toString())
 
       const favicon = await fetchFavicon(candidate, this.networkSession).catch(() => null)
@@ -151,14 +184,18 @@ export class FaviconResourceCache {
     if (await cacheCandidate(normalizeHttpUrl(rawFaviconUrl))) {
       return { url: faviconProtocolUrl(cacheKey) }
     }
+    if (generation !== this.cacheGeneration) return { url: null }
 
     const htmlCandidates = await fetchHtmlFaviconCandidates(pageUrl, this.networkSession).catch(
       () => []
     )
+    if (generation !== this.cacheGeneration) return { url: null }
     for (const candidate of htmlCandidates) {
+      if (generation !== this.cacheGeneration) return { url: null }
       if (await cacheCandidate(candidate)) return { url: faviconProtocolUrl(cacheKey) }
     }
 
+    if (generation !== this.cacheGeneration) return { url: null }
     return (await cacheCandidate(originFaviconUrl(pageUrl)))
       ? { url: faviconProtocolUrl(cacheKey) }
       : { url: null }
@@ -265,6 +302,61 @@ export class FaviconResourceCache {
       () => undefined
     )
     return result
+  }
+
+  private hasFreshNegativeFailure(cacheKey: string): boolean {
+    const expiresAt = this.negativeFailures.get(cacheKey)
+    if (expiresAt === undefined) return false
+    if (expiresAt <= this.now()) {
+      this.negativeFailures.delete(cacheKey)
+      return false
+    }
+    return true
+  }
+
+  private rememberNegativeFailure(cacheKey: string): void {
+    const now = this.now()
+    for (const [key, expiresAt] of this.negativeFailures) {
+      if (expiresAt <= now) this.negativeFailures.delete(key)
+    }
+
+    this.negativeFailures.delete(cacheKey)
+    while (this.negativeFailures.size >= FAVICON_NEGATIVE_CACHE_MAX_ENTRIES) {
+      const oldestCacheKey = this.negativeFailures.keys().next().value
+      if (oldestCacheKey === undefined) break
+      this.negativeFailures.delete(oldestCacheKey)
+    }
+    this.negativeFailures.set(cacheKey, now + FAVICON_NEGATIVE_CACHE_TTL_MS)
+  }
+
+  private async withNetworkResolutionPermit<T>(operation: () => Promise<T>): Promise<T> {
+    await this.acquireNetworkResolutionPermit()
+    try {
+      return await operation()
+    } finally {
+      this.releaseNetworkResolutionPermit()
+    }
+  }
+
+  private acquireNetworkResolutionPermit(): Promise<void> {
+    if (this.activeNetworkResolutions < FAVICON_MAX_CONCURRENT_RESOLUTIONS) {
+      this.activeNetworkResolutions += 1
+      return Promise.resolve()
+    }
+
+    return new Promise<void>((resolve) => {
+      this.networkResolutionWaiters.push(resolve)
+    })
+  }
+
+  private releaseNetworkResolutionPermit(): void {
+    const next = this.networkResolutionWaiters.shift()
+    if (next) {
+      next()
+      return
+    }
+
+    this.activeNetworkResolutions -= 1
   }
 }
 

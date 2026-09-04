@@ -6,7 +6,7 @@ import {
   parseAgentObserverEventEnvelope,
   type AgentObserverEventEnvelope
 } from './agentCollaboration'
-import { parseAgentEventForHost } from './agentMcpParsers'
+import { parseAgentEventForHost } from './agentParsers/events'
 
 const runId = 'run-owned'
 

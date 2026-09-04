@@ -11,6 +11,7 @@ fn request(method: &str, params: Option<Value>) -> JsonRpcRequest {
 
 fn generic_model_save_payload(models: Value) -> Value {
     serde_json::json!({
+        "expectedRevision": null,
         "apiUrl": "https://provider-secret.example/v1/chat/completions",
         "apiTokenMutation": {"type": "replace", "value": "fixed-secret-token-must-not-cross"},
         "searchMode": "disabled",
@@ -183,6 +184,7 @@ fn provider_profile_descriptor_projection_and_authoritative_save_are_strict() {
         request(
             STORAGE_SAVE_MODEL_SETTINGS_METHOD,
             Some(serde_json::json!({
+                "expectedRevision": null,
                 "apiUrl": "https://api.deepseek.com/v1/chat/completions",
                 "apiTokenMutation": {"type": "replace", "value": "test-only-token"},
                 "searchMode": "disabled",

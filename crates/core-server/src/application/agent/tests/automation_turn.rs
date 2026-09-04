@@ -626,9 +626,9 @@ async fn permission_revoked_after_precheck_is_blocked_atomically_before_humanroo
                  (SELECT COUNT(*) FROM automation_events
                   WHERE automation_id = ?1 AND automation_run_id IS NULL
                     AND event_kind = 'notification_requested'),
-                 (SELECT COUNT(*) FROM automation_notification_outbox
-                  WHERE automation_id = ?1 AND automation_run_id IS NULL
-                    AND notification_kind = 'configuration_blocked' AND status = 'projected')",
+                 (SELECT COUNT(*) FROM notification_events
+                  WHERE automation_id = ?1 AND run_id IS NULL
+                    AND notification_kind = 'automation_configuration_blocked')",
             rusqlite::params![&task.id, &run.id],
             |row| {
                 Ok((
@@ -1095,8 +1095,8 @@ async fn destructive_resource_mutations_terminalize_live_automation_runs_before_
     ] {
         let projected = connection
             .query_row(
-                "SELECT COUNT(*) FROM automation_notification_outbox
-                 WHERE automation_id = ?1 AND status = 'projected'",
+                "SELECT COUNT(*) FROM notification_events
+                 WHERE source_kind = 'automation' AND automation_id = ?1",
                 [automation_id],
                 |row| row.get::<_, i64>(0),
             )

@@ -9,10 +9,6 @@ import {
   AUTOMATION_EVENT_NOTIFICATION_METHOD,
   AUTOMATION_GET_METHOD,
   AUTOMATION_LIST_METHOD,
-  AUTOMATION_NOTIFICATIONS_ACKNOWLEDGE_METHOD,
-  AUTOMATION_NOTIFICATIONS_CLAIM_METHOD,
-  AUTOMATION_NOTIFICATIONS_RELEASE_METHOD,
-  AUTOMATION_NOTIFICATIONS_VALIDATE_METHOD,
   AUTOMATION_PERMISSION_MODE_VERSION,
   AUTOMATION_RESYNC_NOTIFICATION_METHOD,
   AUTOMATION_RUN_NOW_METHOD,
@@ -22,8 +18,6 @@ import {
   parseAutomationCreateInput,
   parseAutomationEvent,
   parseAutomationListInput,
-  parseAutomationNotificationsClaimOutput,
-  parseAutomationNotificationValidateOutput,
   parseAutomationResync,
   parseAutomationScheduleInput,
   parseAutomationTask,
@@ -38,8 +32,6 @@ interface AutomationContractFixture {
   permissionModes: string[]
   nullableListInput: unknown
   nullableCustomSchedule: unknown
-  notificationClaimOutput: unknown
-  notificationValidateOutput: unknown
   methods: Record<string, string>
   notifications: Record<string, string>
   createInput: AutomationCreateInput
@@ -67,11 +59,7 @@ describe('Automation cross-language protocol', () => {
       delete: AUTOMATION_DELETE_METHOD,
       listRuns: AUTOMATION_RUNS_LIST_METHOD,
       attentionSummary: AUTOMATION_ATTENTION_SUMMARY_METHOD,
-      acknowledgeAttention: AUTOMATION_ATTENTION_ACKNOWLEDGE_METHOD,
-      claimNotifications: AUTOMATION_NOTIFICATIONS_CLAIM_METHOD,
-      validateNotification: AUTOMATION_NOTIFICATIONS_VALIDATE_METHOD,
-      acknowledgeNotification: AUTOMATION_NOTIFICATIONS_ACKNOWLEDGE_METHOD,
-      releaseNotification: AUTOMATION_NOTIFICATIONS_RELEASE_METHOD
+      acknowledgeAttention: AUTOMATION_ATTENTION_ACKNOWLEDGE_METHOD
     })
     expect(fixture.notifications).toEqual({
       event: AUTOMATION_EVENT_NOTIFICATION_METHOD,
@@ -81,17 +69,11 @@ describe('Automation cross-language protocol', () => {
     expect(fixture.permissionModes).toEqual(['default', 'full', 'custom'])
   })
 
-  it('strictly parses inputs, task projections, and notification envelopes', () => {
+  it('strictly parses inputs, task projections, and event envelopes', () => {
     expect(parseAutomationCreateInput(fixture.createInput)).toEqual(fixture.createInput)
     expect(parseAutomationTask(fixture.task)).toEqual(fixture.task)
     expect(parseAutomationEvent(fixture.event)).toEqual(fixture.event)
     expect(parseAutomationResync(fixture.resync)).toEqual(fixture.resync)
-    expect(parseAutomationNotificationsClaimOutput(fixture.notificationClaimOutput)).toEqual(
-      fixture.notificationClaimOutput
-    )
-    expect(parseAutomationNotificationValidateOutput(fixture.notificationValidateOutput)).toEqual(
-      fixture.notificationValidateOutput
-    )
   })
 
   it('accepts the versioned provider low reasoning effort in model-owned snapshots', () => {
@@ -189,43 +171,5 @@ describe('Automation cross-language protocol', () => {
         runId: ''
       })
     ).toThrow(/1 to 256 UTF-8 bytes/)
-    const claim = fixture.notificationClaimOutput as {
-      notifications: Array<Record<string, unknown>>
-    }
-    expect(() =>
-      parseAutomationNotificationsClaimOutput({
-        ...claim,
-        notifications: [{ ...claim.notifications[0], runId: null }]
-      })
-    ).toThrow(/run notifications must identify one/)
-    const validation = fixture.notificationValidateOutput as {
-      notification: Record<string, unknown>
-    }
-    expect(() =>
-      parseAutomationNotificationValidateOutput({
-        ...validation,
-        notification: {
-          ...validation.notification,
-          notificationId: 'another-notification'
-        }
-      })
-    ).toThrow(/must match notificationId/)
-    expect(() =>
-      parseAutomationNotificationValidateOutput({
-        ...validation,
-        internalClaimState: 'must-not-cross'
-      })
-    ).toThrow(/unexpected field internalClaimState/)
-    expect(
-      parseAutomationNotificationValidateOutput({
-        schemaVersion: 1,
-        notificationId: 'notification-stale',
-        notification: null
-      })
-    ).toEqual({
-      schemaVersion: 1,
-      notificationId: 'notification-stale',
-      notification: null
-    })
   })
 })

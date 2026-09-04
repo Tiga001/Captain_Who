@@ -10,8 +10,6 @@ pub(in crate::tools) struct McpAgentTool {
     risk: AgentMcpToolRisk,
     caller: McpToolCatalogContext,
     definition: AgentToolDefinition,
-    #[allow(dead_code)]
-    output_schema: Option<Value>,
 }
 
 impl McpAgentTool {
@@ -78,7 +76,6 @@ impl McpAgentTool {
             risk,
             caller,
             definition,
-            output_schema: descriptor.output_schema,
         })
     }
 }

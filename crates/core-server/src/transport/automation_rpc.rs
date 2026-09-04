@@ -1,14 +1,11 @@
 use super::*;
 use crate::application::automation::{
-    AutomationNotificationService, AutomationSchedulerWake, AutomationService,
-    AutomationServiceError,
+    AutomationSchedulerWake, AutomationService, AutomationServiceError,
 };
 use mycopilot_protocol_rs::{
     AutomationAttentionAcknowledgeInputDto, AutomationAttentionSummaryInputDto,
     AutomationCreateInputDto, AutomationDeleteInputDto, AutomationGetInputDto,
-    AutomationListInputDto, AutomationNotificationAcknowledgeInputDto,
-    AutomationNotificationReleaseInputDto, AutomationNotificationValidateInputDto,
-    AutomationNotificationsClaimInputDto, AutomationRunNowInputDto, AutomationRunsListInputDto,
+    AutomationListInputDto, AutomationRunNowInputDto, AutomationRunsListInputDto,
     AutomationSetEnabledInputDto, AutomationUpdateInputDto, AUTOMATION_ERROR_CODE,
 };
 
@@ -25,10 +22,6 @@ pub(crate) fn is_automation_request_method(method: &str) -> bool {
             | mycopilot_protocol_rs::AUTOMATION_RUNS_LIST_METHOD
             | mycopilot_protocol_rs::AUTOMATION_ATTENTION_SUMMARY_METHOD
             | mycopilot_protocol_rs::AUTOMATION_ATTENTION_ACKNOWLEDGE_METHOD
-            | mycopilot_protocol_rs::AUTOMATION_NOTIFICATIONS_CLAIM_METHOD
-            | mycopilot_protocol_rs::AUTOMATION_NOTIFICATIONS_VALIDATE_METHOD
-            | mycopilot_protocol_rs::AUTOMATION_NOTIFICATIONS_ACKNOWLEDGE_METHOD
-            | mycopilot_protocol_rs::AUTOMATION_NOTIFICATIONS_RELEASE_METHOD
     )
 }
 
@@ -49,7 +42,6 @@ pub(crate) fn handle_automation_request_with_wake(
         || AutomationService::new(storage),
         |wake| AutomationService::with_scheduler_wake(storage, wake),
     );
-    let notification_service = AutomationNotificationService::new(storage);
     match request.method.as_str() {
         mycopilot_protocol_rs::AUTOMATION_LIST_METHOD => {
             parse_and_run(id, request.params, |input| service.list(input))
@@ -81,26 +73,6 @@ pub(crate) fn handle_automation_request_with_wake(
         mycopilot_protocol_rs::AUTOMATION_ATTENTION_ACKNOWLEDGE_METHOD => {
             parse_and_run(id, request.params, |input| {
                 service.acknowledge_attention(input)
-            })
-        }
-        mycopilot_protocol_rs::AUTOMATION_NOTIFICATIONS_CLAIM_METHOD => {
-            parse_and_run(id, request.params, |input| {
-                notification_service.claim(input)
-            })
-        }
-        mycopilot_protocol_rs::AUTOMATION_NOTIFICATIONS_VALIDATE_METHOD => {
-            parse_and_run(id, request.params, |input| {
-                notification_service.validate(input)
-            })
-        }
-        mycopilot_protocol_rs::AUTOMATION_NOTIFICATIONS_ACKNOWLEDGE_METHOD => {
-            parse_and_run(id, request.params, |input| {
-                notification_service.acknowledge(input)
-            })
-        }
-        mycopilot_protocol_rs::AUTOMATION_NOTIFICATIONS_RELEASE_METHOD => {
-            parse_and_run(id, request.params, |input| {
-                notification_service.release(input)
             })
         }
         _ => response_error(Some(id), -32601, "Method not found"),
@@ -155,15 +127,11 @@ const _: fn(AutomationDeleteInputDto) = |_| {};
 const _: fn(AutomationRunsListInputDto) = |_| {};
 const _: fn(AutomationAttentionSummaryInputDto) = |_| {};
 const _: fn(AutomationAttentionAcknowledgeInputDto) = |_| {};
-const _: fn(AutomationNotificationsClaimInputDto) = |_| {};
-const _: fn(AutomationNotificationValidateInputDto) = |_| {};
-const _: fn(AutomationNotificationAcknowledgeInputDto) = |_| {};
-const _: fn(AutomationNotificationReleaseInputDto) = |_| {};
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mycopilot_core::storage::automation_repository::NewAutomationNotificationRecord;
+    use mycopilot_core::storage::automation_repository::{self, NewAutomationNotificationRecord};
     use mycopilot_core::storage::models::{
         ChatConversationRecord, ModelConfigRecord, ModelSettingsRecord, ProjectRecord,
     };
@@ -210,6 +178,19 @@ mod tests {
                 params: Some(serde_json::to_value(input).unwrap()),
             },
         )
+    }
+
+    fn enqueue_automation_notification(
+        database_path: &std::path::Path,
+        input: &NewAutomationNotificationRecord,
+    ) {
+        let mut connection = rusqlite::Connection::open(database_path).unwrap();
+        let transaction = connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .unwrap();
+        automation_repository::enqueue_automation_notification_in_transaction(&transaction, input)
+            .unwrap();
+        transaction.commit().unwrap();
     }
 
     fn model_settings() -> ModelSettingsRecord {
@@ -286,7 +267,8 @@ mod tests {
     #[test]
     fn host_notification_rpc_claims_and_acknowledges_the_durable_outbox() {
         let temporary = tempfile::tempdir().unwrap();
-        let storage = StorageService::open(&temporary.path().join("storage.sqlite")).unwrap();
+        let database_path = temporary.path().join("storage.sqlite");
+        let storage = StorageService::open(&database_path).unwrap();
         storage.save_model_settings(model_settings()).unwrap();
         let project_id = "project-notification".to_string();
         let project = ProjectRecord {
@@ -307,8 +289,9 @@ mod tests {
         )
         .unwrap();
         let created_at = mycopilot_core::storage::now_ms();
-        storage
-            .enqueue_automation_notification(&NewAutomationNotificationRecord {
+        enqueue_automation_notification(
+            &database_path,
+            &NewAutomationNotificationRecord {
                 automation_id: created.automation_id.clone(),
                 automation_run_id: None,
                 resource_revision: i64::try_from(created.revision).unwrap(),
@@ -316,8 +299,8 @@ mod tests {
                 title: "Scheduled task needs attention".to_string(),
                 body: "Select a valid target.".to_string(),
                 created_at,
-            })
-            .unwrap();
+            },
+        );
 
         let claim_input = NotificationBatchesClaimInputDto {
             schema_version: NOTIFICATION_SCHEMA_VERSION,
@@ -384,8 +367,9 @@ mod tests {
         assert!(next_claim.batches.is_empty());
 
         let retry_created_at = mycopilot_core::storage::now_ms();
-        storage
-            .enqueue_automation_notification(&NewAutomationNotificationRecord {
+        enqueue_automation_notification(
+            &database_path,
+            &NewAutomationNotificationRecord {
                 automation_id: created.automation_id,
                 automation_run_id: None,
                 resource_revision: i64::try_from(created.revision).unwrap() + 1,
@@ -393,8 +377,8 @@ mod tests {
                 title: "Retry notification".to_string(),
                 body: "Native delivery failed.".to_string(),
                 created_at: retry_created_at,
-            })
-            .unwrap();
+            },
+        );
         let retry_claim_token = "host-claim-retry".to_string();
         let retry_claim: NotificationBatchesClaimOutputDto = serde_json::from_value(
             notification_request(

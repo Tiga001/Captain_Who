@@ -43,8 +43,8 @@ export interface BrowserSurfaceCloseCommand {
   kind: 'closeSurface'
   requestId: string
   surfaceId: string
-  /** Main-generated exact retired incarnation. Optional only for legacy payload parsing. */
-  surfaceInstanceId?: string
+  /** Main-generated exact retired incarnation. */
+  surfaceInstanceId: string
 }
 
 export type BrowserSurfaceCommand =
@@ -58,11 +58,8 @@ export interface BrowserSurfaceReadyInput {
   schemaVersion: typeof BROWSER_SURFACE_SCHEMA_VERSION
   requestId: string
   surfaceId: string
-  /**
-   * Main-generated binding for the exact Renderer webview. Optional only for legacy payload
-   * parsing; a live pending command is not accepted without the matching identity.
-   */
-  surfaceInstanceId?: string
+  /** Main-generated binding for the exact Renderer webview. */
+  surfaceInstanceId: string
   viewport?: { height: number; width: number }
 }
 
@@ -297,9 +294,7 @@ export function parseBrowserSurfaceCommand(value: unknown): BrowserSurfaceComman
     kind,
     requestId: expectRequestId(record.requestId),
     surfaceId: parseBrowserSurfaceId(record.surfaceId),
-    ...(record.surfaceInstanceId === undefined
-      ? {}
-      : { surfaceInstanceId: parseBrowserSurfaceInstanceId(record.surfaceInstanceId) })
+    surfaceInstanceId: parseBrowserSurfaceInstanceId(record.surfaceInstanceId)
   }
 }
 
@@ -332,9 +327,7 @@ export function parseBrowserSurfaceReadyInput(value: unknown): BrowserSurfaceRea
     schemaVersion: expectSchemaVersion(record.schemaVersion),
     requestId: expectRequestId(record.requestId),
     surfaceId: parseBrowserSurfaceId(record.surfaceId),
-    ...(record.surfaceInstanceId === undefined
-      ? {}
-      : { surfaceInstanceId: parseBrowserSurfaceInstanceId(record.surfaceInstanceId) }),
+    surfaceInstanceId: parseBrowserSurfaceInstanceId(record.surfaceInstanceId),
     ...(viewport ? { viewport } : {})
   }
 }

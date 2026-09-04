@@ -5,13 +5,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use mycopilot_mcp_client::{
-    InMemoryMcpRegistry, McpCancellationToken, McpCatalogCompleteness, McpCatalogIssue,
-    McpCatalogToolCall, McpConnectionManager, McpConnectionState, McpConnector, McpContentBlock,
-    McpDispatchCertainty, McpDispatchPhase, McpDispatchTracker, McpEnvBinding, McpErrorKind,
-    McpEvent, McpLifecycleKind, McpManagerPolicy, McpOutcomeUnknownReason, McpPeer,
-    McpPeerNotificationState, McpRegistry, McpServerConfig, McpServerId, McpServerScope,
-    McpServerState, McpStdioConfig, McpStdioConnector, McpStdioPolicy, McpToolCall,
-    McpTransportConfig, McpTrustLevel,
+    InMemoryMcpRegistry, McpActiveCallId, McpCancellationToken, McpCatalogCompleteness,
+    McpCatalogIssue, McpCatalogToolCall, McpConnectionManager, McpConnectionState, McpConnector,
+    McpContentBlock, McpDispatchCertainty, McpDispatchPhase, McpDispatchTracker, McpEnvBinding,
+    McpError, McpErrorKind, McpEvent, McpInvocationId, McpLifecycleKind, McpManagerPolicy,
+    McpModelCallId, McpOutcomeUnknownReason, McpPeer, McpPeerNotificationState, McpRegistry,
+    McpServerConfig, McpServerId, McpServerScope, McpServerState, McpStdioConfig,
+    McpStdioConnector, McpStdioPolicy, McpToolCall, McpToolResult, McpTransportConfig,
+    McpTrustLevel,
 };
 use rmcp::handler::server::{router::tool::ToolRouter, wrapper::Parameters};
 use rmcp::model::{
@@ -56,6 +57,30 @@ const ENV_PROBE: &str = "--fixture-env-probe";
 const FORBIDDEN_TEST_ENV: &str = "MYCOPILOT_MCP_FORBIDDEN_TEST_VALUE";
 const STRESS_SUITE: &str = "--stress-suite";
 const NOTIFICATION_STORM_COUNT: usize = 512;
+
+/// Supplies the current required call identities to integration fixtures without restoring the
+/// removed no-identity production API.
+trait IdentifiedCatalogCallForTest {
+    async fn call_catalog_tool(
+        &self,
+        request: McpCatalogToolCall,
+        cancellation: McpCancellationToken,
+    ) -> Result<McpToolResult, McpError>;
+}
+
+impl IdentifiedCatalogCallForTest for McpConnectionManager {
+    async fn call_catalog_tool(
+        &self,
+        request: McpCatalogToolCall,
+        cancellation: McpCancellationToken,
+    ) -> Result<McpToolResult, McpError> {
+        let invocation_id = McpInvocationId::new();
+        let model_call_id = McpModelCallId::new(format!("test-{invocation_id}"))?;
+        let id = McpActiveCallId::new(request.tool_id.server_id, invocation_id, model_call_id);
+        self.call_catalog_tool_identified(id, request, cancellation)
+            .await
+    }
+}
 
 #[cfg(unix)]
 static TERM_RECEIVED: AtomicBool = AtomicBool::new(false);

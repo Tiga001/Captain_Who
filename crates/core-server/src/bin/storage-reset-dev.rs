@@ -1787,15 +1787,11 @@ mod tests {
 
     #[test]
     fn configuration_preservation_is_limited_to_the_current_schema() {
-        assert_eq!(
-            mycopilot_core::storage::migrations::STORAGE_SCHEMA_VERSION,
-            33
-        );
-        assert!(can_preserve_development_configuration(33));
-        assert!(!can_preserve_development_configuration(32));
-        assert!(!can_preserve_development_configuration(31));
-        assert!(!can_preserve_development_configuration(30));
-        assert!(!can_preserve_development_configuration(34));
+        let current = mycopilot_core::storage::migrations::STORAGE_SCHEMA_VERSION;
+        assert!(can_preserve_development_configuration(current));
+        assert!(!can_preserve_development_configuration(current - 1));
+        assert!(!can_preserve_development_configuration(current - 2));
+        assert!(!can_preserve_development_configuration(current + 1));
     }
 
     #[test]

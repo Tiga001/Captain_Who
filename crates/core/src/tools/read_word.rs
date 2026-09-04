@@ -30,11 +30,10 @@ impl AgentTool for ReadWordTool {
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "path": { "type": "string", "description": "Workspace-relative .docx path, legacy .doc path on macOS, or @attachments/... readPath." },
-                    "filePath": { "type": "string", "description": "Alias for path." },
-                    "maxChars": { "type": "integer", "minimum": 1, "description": "Deprecated soft compatibility hint. Exact History capture is never limited by this value; model output uses the shared 10K gate." }
+                    "path": { "type": "string", "minLength": 1, "description": "Workspace-relative .docx path, legacy .doc path on macOS, or @attachments/... readPath." }
                 },
-                "required": ["path"]
+                "required": ["path"],
+                "additionalProperties": false
             }),
             safety: AgentToolSafety::ReadOnly,
             requires_workspace: false,
@@ -47,7 +46,6 @@ impl AgentTool for ReadWordTool {
         context.check_cancelled()?;
         let args: ReadWordArgs = serde_json::from_value(args)
             .map_err(|error| AgentError::new(format!("read_word 参数无效：{error}")))?;
-        let _requested_max_chars = args.max_chars;
         let path = args.path()?;
         let resolved = resolve_document_path(context, path, &["docx", "doc"])?;
         let cancellation_token = context.cancellation_token();
@@ -107,27 +105,26 @@ impl AgentTool for ReadWordTool {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ReadWordArgs {
-    path: Option<String>,
-    file_path: Option<String>,
-    max_chars: Option<usize>,
+    path: String,
 }
 
 impl ReadWordArgs {
     fn path(&self) -> AgentResult<&str> {
-        self.path
-            .as_deref()
-            .or(self.file_path.as_deref())
-            .map(str::trim)
-            .filter(|path| !path.is_empty())
-            .ok_or_else(|| AgentError::new("read_word.path 不能为空。"))
+        let path = self.path.trim();
+        if path.is_empty() {
+            Err(AgentError::new("read_word.path 不能为空。"))
+        } else {
+            Ok(path)
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::super::{ToolExecutionContext, ToolRegistry};
+    use super::{AgentTool, ReadWordArgs, ReadWordTool};
     use crate::protocol::{
         AgentApprovalStatus, AgentRunContext, AgentToolCall, AgentWorkspaceContext,
     };
@@ -149,7 +146,7 @@ mod tests {
         let call = AgentToolCall {
             id: "call-1".to_string(),
             tool: "read_word".to_string(),
-            args: json!({ "path": "sample.docx", "maxChars": 1 }),
+            args: json!({ "path": "sample.docx" }),
             approval_status: AgentApprovalStatus::NotRequired,
             reason: None,
         };
@@ -176,6 +173,29 @@ mod tests {
         assert!(value["text"].as_str().unwrap().contains("Hello from docx"));
         assert_eq!(value["truncatedAtSource"], false);
         assert_eq!(value["omittedBytes"], 0);
+    }
+
+    #[test]
+    fn schema_and_wire_accept_only_current_path() {
+        let definition = ReadWordTool.definition();
+        assert_eq!(definition.input_schema["required"], json!(["path"]));
+        assert_eq!(definition.input_schema["additionalProperties"], false);
+        assert_eq!(
+            definition.input_schema["properties"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .collect::<Vec<_>>(),
+            vec!["path"]
+        );
+        for value in [
+            json!({}),
+            json!({ "path": null }),
+            json!({ "filePath": "legacy.docx" }),
+            json!({ "path": "sample.docx", "maxChars": 1 }),
+        ] {
+            assert!(serde_json::from_value::<ReadWordArgs>(value).is_err());
+        }
     }
 
     struct TestWorkspace {

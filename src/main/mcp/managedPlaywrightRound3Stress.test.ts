@@ -34,9 +34,9 @@ import {
   ManagedPlaywrightMcpHostError,
   type ManagedMcpClient,
   type ManagedPlaywrightConnectionFactory,
-  type ManagedPlaywrightMcpHostOptions,
   type ManagedPlaywrightProtocolSnapshot,
   type ManagedPlaywrightSurfaceGroupAdapter,
+  type ManagedPlaywrightToolSurfaceLease,
   type ManagedPlaywrightSurfaceView
 } from './ManagedPlaywrightMcpHost'
 import { MANAGED_PLAYWRIGHT_CATALOG_LOCK } from './managedPlaywrightCatalog'
@@ -363,7 +363,6 @@ describe('managed Playwright Round 3 deterministic stress gate', () => {
     const harness = createHostHarness({
       artifactBroker: broker,
       callTool: upstream,
-      getActiveSurfaceIdentity: () => ({ surfaceId: 'surface-storage', generation: 1 }),
       getBrowserContext: async () => context.asBrowserContext(),
       surfaceGroup: new SurfaceGroupHarness()
     })
@@ -522,7 +521,6 @@ describe('managed Playwright Round 3 deterministic stress gate', () => {
 interface HostHarnessOptions {
   artifactBroker?: BrowserArtifactBroker
   callTool?: ManagedMcpClient['callTool']
-  getActiveSurfaceIdentity?: ManagedPlaywrightMcpHostOptions['getActiveSurfaceIdentity']
   getBrowserContext?: () => Promise<BrowserContext>
   listTools?: ManagedMcpClient['listTools']
   surfaceGroup?: ManagedPlaywrightSurfaceGroupAdapter
@@ -535,6 +533,7 @@ function createHostHarness(options: HostHarnessOptions = {}): {
   listTools: ManagedMcpClient['listTools'] & ReturnType<typeof vi.fn>
   outputDirectories: string[]
 } {
+  const usesDefaultSurfaceGroup = options.surfaceGroup === undefined
   const outputDirectories: string[] = []
   const detachAutomation = vi.fn(async () => undefined)
   const listTools =
@@ -555,16 +554,16 @@ function createHostHarness(options: HostHarnessOptions = {}): {
       close: vi.fn(async () => undefined)
     }
   }
+  const surfaceGroup = options.surfaceGroup ?? new SurfaceGroupHarness()
   const host = new ManagedPlaywrightMcpHost({
     artifactBroker: options.artifactBroker,
-    getActiveSurfaceIdentity: options.getActiveSurfaceIdentity,
     getBrowserContext:
       options.getBrowserContext ??
       (async () => {
         throw new Error('browser context must stay lazy in this fixture')
       }),
-    surfaceGroup: options.surfaceGroup,
-    sensitiveTargetBindings: fakeSensitiveTargetBindings(options.surfaceGroup),
+    surfaceGroup,
+    sensitiveTargetBindings: fakeSensitiveTargetBindings(surfaceGroup),
     closeSurface: vi.fn(async () => undefined),
     detachAutomation,
     createOfficialConnection,
@@ -572,7 +571,19 @@ function createHostHarness(options: HostHarnessOptions = {}): {
       connect: vi.fn(async () => undefined),
       close: vi.fn(async () => undefined),
       listTools,
-      callTool
+      callTool: async (request, resultSchema, requestOptions) => {
+        if (
+          usesDefaultSurfaceGroup &&
+          request.name === 'browser_tabs' &&
+          (request.arguments.action === 'list' || request.arguments.action === 'select')
+        ) {
+          return {
+            content: [{ type: 'text', text: 'fixture surface synchronized' }],
+            isError: false
+          }
+        }
+        return await callTool(request, resultSchema, requestOptions)
+      }
     })
   })
   return {
@@ -676,6 +687,24 @@ class SurfaceGroupHarness implements ManagedPlaywrightSurfaceGroupAdapter {
     }
   })
 
+  readonly beginExistingToolSurfaceLease = vi.fn(async () => {
+    const index = this.surfaces.findIndex((surface) => surface.isActive)
+    return index < 0 ? null : this.leaseAt(index)
+  })
+
+  readonly beginTargetCreationIntent = vi.fn(() => vi.fn())
+
+  readonly beginToolSurfaceLease = vi.fn(async () => {
+    let index = this.surfaces.findIndex((surface) => surface.isActive)
+    if (index < 0) {
+      await this.createSurface()
+      index = this.surfaces.findIndex((surface) => surface.isActive)
+    }
+    return this.leaseAt(index)
+  })
+
+  readonly beginToolSurfaceLeaseByIndex = vi.fn(async (index: number) => this.leaseAt(index))
+
   snapshot(): { active: number; surfaces: number } {
     return {
       active: this.surfaces.filter((surface) => surface.isActive).length,
@@ -692,6 +721,28 @@ class SurfaceGroupHarness implements ManagedPlaywrightSurfaceGroupAdapter {
       url: url ?? `http://127.0.0.1/tab-${index}`,
       isActive,
       generation
+    }
+  }
+
+  private leaseAt(index: number): ManagedPlaywrightToolSurfaceLease {
+    const surface = this.surfaces[index]
+    if (!surface) throw new ManagedPlaywrightMcpHostError('browser.target_closed')
+    return {
+      closeSurface: async () => this.closeSurfaceByIndex(index),
+      finish: vi.fn(),
+      generation: surface.generation,
+      index,
+      resolveIndex: async () => {
+        const current = this.surfaces.findIndex(
+          (candidate) =>
+            candidate.surfaceId === surface.surfaceId && candidate.generation === surface.generation
+        )
+        if (current < 0) throw new ManagedPlaywrightMcpHostError('browser.target_closed')
+        return current
+      },
+      resizeSurface: async (input) => input,
+      selectionRevision: 1,
+      surfaceId: surface.surfaceId
     }
   }
 }

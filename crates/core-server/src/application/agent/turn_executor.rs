@@ -157,10 +157,6 @@ pub(super) fn restore_run_usage_state(
 ///
 /// Neither this enum nor the wake request implements `Deserialize`: collaboration identity is a
 /// Host fact reconstructed from the Agent graph, never a renderer/model supplied parameter.
-// Round 2 exposes this Host-only branch to deterministic application tests. The first production
-// caller is the Round 3 Dispatcher; keeping it crate-private is more important than fabricating a
-// renderer route merely to satisfy dead-code analysis.
-#[cfg_attr(not(test), allow(dead_code))]
 #[allow(clippy::large_enum_variant)]
 pub(crate) enum AgentTurnStart {
     HumanRoot(HumanRootTurnStart),
@@ -195,7 +191,6 @@ pub(crate) struct TrustedAgentWakeTurnStart {
 }
 
 impl TrustedAgentWakeTurnStart {
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn new(
         wake_id: String,
         agent_id: String,

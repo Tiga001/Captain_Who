@@ -1114,30 +1114,6 @@ pub(crate) fn validate_tool_identity(
                 );
             }
         }
-        AgentToolIdentity::LegacyBuiltinCapability {
-            capability_id,
-            managed_mcp_id,
-            manifest_digest,
-            tool_id,
-            model_name,
-        } => {
-            let valid_digest = manifest_digest.len() == "sha256:".len() + 64
-                && manifest_digest.starts_with("sha256:")
-                && manifest_digest["sha256:".len()..]
-                    .bytes()
-                    .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase());
-            if crate::BuiltinCapabilityId::parse(capability_id.clone()).is_err()
-                || crate::BuiltinCapabilityId::parse(managed_mcp_id.clone()).is_err()
-                || crate::BuiltinCapabilityId::parse(tool_id.clone()).is_err()
-                || !valid_digest
-                || model_name.as_ref() != trace_tool
-            {
-                return Err(
-                    "conversation trace legacy built-in capability provenance is invalid"
-                        .to_string(),
-                );
-            }
-        }
         AgentToolIdentity::Mcp { provenance } => {
             let config_epoch_is_valid =
                 uuid::Uuid::parse_str(&provenance.config_epoch).is_ok_and(|epoch| {

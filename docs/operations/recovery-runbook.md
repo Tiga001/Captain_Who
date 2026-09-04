@@ -38,7 +38,7 @@ Playwright 故障。优先原则是保护持久事实和外部副作用，不通
 
 ### 判断
 
-当前唯一可接受基线为 **schema v33 + exact catalog fingerprint + valid foreign keys**。真源：
+当前唯一可接受基线为 **schema v34 + exact catalog fingerprint + valid foreign keys**。真源：
 
 ```text
 crates/core/src/storage/migrations.rs

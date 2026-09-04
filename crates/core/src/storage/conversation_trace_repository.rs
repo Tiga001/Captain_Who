@@ -1,12 +1,10 @@
 use crate::storage::agent_command_session_repository;
 use crate::{
-    AgentApprovalStatus, AgentToolIdentity, ConversationCommandSessionLifecycle,
-    ConversationTurnTrace, ConversationTurnTraceItem, ConversationTurnTraceTerminalStatus,
+    ConversationCommandSessionLifecycle, ConversationTurnTrace, ConversationTurnTraceItem,
+    ConversationTurnTraceTerminalStatus,
 };
 use rusqlite::types::Type;
 use rusqlite::{params, Connection, OptionalExtension};
-use serde::Deserialize;
-use serde_json::Value;
 use std::collections::HashMap;
 use std::io::{Error as IoError, ErrorKind};
 
@@ -18,32 +16,6 @@ struct TraceHeader {
     schema_version: u32,
     terminal_status: ConversationTurnTraceTerminalStatus,
     terminal_error: Option<String>,
-    truncated: bool,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct LegacyBuiltinCapabilityIdentity {
-    #[serde(rename = "type")]
-    kind: String,
-    capability_id: Box<str>,
-    managed_mcp_id: Box<str>,
-    manifest_digest: Box<str>,
-    tool_id: Box<str>,
-    model_name: Box<str>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct LegacyBuiltinCapabilityToolCall {
-    #[serde(rename = "type")]
-    kind: String,
-    sequence: u64,
-    call_id: String,
-    tool: String,
-    provenance: LegacyBuiltinCapabilityIdentity,
-    operation: Value,
-    approval_status: AgentApprovalStatus,
     truncated: bool,
 }
 
@@ -606,7 +578,7 @@ fn trace_from_stored_items(
 ) -> rusqlite::Result<ConversationTurnTrace> {
     let mut items = Vec::with_capacity(rows.len());
     for (stored_sequence, stored_kind, raw_item) in rows {
-        let item = decode_trace_item(&raw_item).map_err(|error| {
+        let item: ConversationTurnTraceItem = serde_json::from_str(&raw_item).map_err(|error| {
             rusqlite::Error::FromSqlConversionFailure(2, Type::Text, Box::new(error))
         })?;
         let item_sequence = i64::try_from(item.sequence()).map_err(|_| {
@@ -640,35 +612,6 @@ fn trace_from_stored_items(
         .validate()
         .map_err(|message| corrupt_trace_data(0, Type::Text, message))?;
     Ok(trace)
-}
-
-/// Decodes the one shipped pre-Catalog built-in-capability provenance shape for historical display.
-///
-/// The ordinary `ConversationTurnTraceItem` deserializer intentionally remains strict and rejects
-/// this payload everywhere else. `deny_unknown_fields` on both helper structs makes the exception
-/// exact: neither a partially-current identity nor a legacy identity with an added authority field
-/// can enter this presentation-only variant.
-fn decode_trace_item(raw_item: &str) -> serde_json::Result<ConversationTurnTraceItem> {
-    if let Ok(legacy) = serde_json::from_str::<LegacyBuiltinCapabilityToolCall>(raw_item) {
-        if legacy.kind == "tool_call" && legacy.provenance.kind == "builtin_capability" {
-            return Ok(ConversationTurnTraceItem::ToolCall {
-                sequence: legacy.sequence,
-                call_id: legacy.call_id,
-                tool: legacy.tool,
-                provenance: AgentToolIdentity::LegacyBuiltinCapability {
-                    capability_id: legacy.provenance.capability_id,
-                    managed_mcp_id: legacy.provenance.managed_mcp_id,
-                    manifest_digest: legacy.provenance.manifest_digest,
-                    tool_id: legacy.provenance.tool_id,
-                    model_name: legacy.provenance.model_name,
-                },
-                operation: legacy.operation,
-                approval_status: legacy.approval_status,
-                truncated: legacy.truncated,
-            });
-        }
-    }
-    serde_json::from_str(raw_item)
 }
 
 fn lifecycle_phase_as_str(phase: crate::ConversationCommandSessionLifecyclePhase) -> &'static str {
@@ -903,90 +846,6 @@ mod tests {
             list_traces_for_conversation(&connection, "conversation-1").unwrap(),
             vec![earlier, later]
         );
-    }
-
-    #[test]
-    fn historical_trace_loads_exact_legacy_builtin_capability_as_display_only_identity() {
-        let mut connection = test_connection();
-        insert_conversation(&connection, "conversation-legacy-browser");
-        insert_message(
-            &connection,
-            "conversation-legacy-browser",
-            "assistant-legacy-browser",
-            1,
-        );
-        let original = trace(
-            "conversation-legacy-browser",
-            "assistant-legacy-browser",
-            "run-legacy-browser",
-        );
-        replace_trace(&mut connection, &original, 10, 20).unwrap();
-
-        let legacy_item = json!({
-            "type": "tool_call",
-            "sequence": 1,
-            "callId": "call-1",
-            "tool": "read_file",
-            "provenance": {
-                "type": "builtin_capability",
-                "capabilityId": "browser_automation",
-                "managedMcpId": "builtin.browser_automation.mcp",
-                "manifestDigest": format!("sha256:{}", "a".repeat(64)),
-                "toolId": "read_file",
-                "modelName": "read_file"
-            },
-            "operation": {"path": "src/lib.rs", "startLine": 1, "endLine": 20},
-            "approvalStatus": "not_required",
-            "truncated": false
-        });
-        // The general wire/checkpoint decoder stays strict; only repository history loading has the
-        // exact legacy exception.
-        assert!(serde_json::from_value::<ConversationTurnTraceItem>(legacy_item.clone()).is_err());
-        connection
-            .execute(
-                "UPDATE conversation_turn_trace_items SET item_json = ?1
-                 WHERE assistant_message_id = ?2 AND sequence = 1",
-                params![legacy_item.to_string(), "assistant-legacy-browser"],
-            )
-            .unwrap();
-
-        let loaded = get_trace_for_message(&connection, "assistant-legacy-browser")
-            .unwrap()
-            .expect("legacy history trace");
-        assert!(matches!(
-            &loaded.items[1],
-            ConversationTurnTraceItem::ToolCall {
-                provenance: crate::AgentToolIdentity::LegacyBuiltinCapability {
-                    capability_id,
-                    managed_mcp_id,
-                    manifest_digest,
-                    tool_id,
-                    model_name,
-                },
-                ..
-            } if capability_id.as_ref() == "browser_automation"
-                && managed_mcp_id.as_ref() == "builtin.browser_automation.mcp"
-                && manifest_digest.as_ref() == format!("sha256:{}", "a".repeat(64))
-                && tool_id.as_ref() == "read_file"
-                && model_name.as_ref() == "read_file"
-        ));
-        assert_eq!(
-            list_traces_for_conversation(&connection, "conversation-legacy-browser")
-                .unwrap()
-                .len(),
-            1
-        );
-
-        let mut forged = legacy_item;
-        forged["provenance"]["upstreamCatalogDigest"] = json!(format!("sha256:{}", "b".repeat(64)));
-        connection
-            .execute(
-                "UPDATE conversation_turn_trace_items SET item_json = ?1
-                 WHERE assistant_message_id = ?2 AND sequence = 1",
-                params![forged.to_string(), "assistant-legacy-browser"],
-            )
-            .unwrap();
-        assert!(get_trace_for_message(&connection, "assistant-legacy-browser").is_err());
     }
 
     #[test]

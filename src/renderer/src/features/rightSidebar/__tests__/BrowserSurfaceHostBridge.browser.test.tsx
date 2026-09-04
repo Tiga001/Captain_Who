@@ -202,7 +202,8 @@ function Harness({ openRightSidebar }: { openRightSidebar: () => void }) {
             .surfaceReady({
               schemaVersion: 1,
               requestId: '22222222-2222-4222-8222-222222222222',
-              surfaceId: 'right-sidebar-browser-test'
+              surfaceId: 'right-sidebar-browser-test',
+              surfaceInstanceId: 'instance-00000001'
             })
             .then(() => setReadyState('ready'))
         }}

@@ -86,8 +86,7 @@ pub(crate) use presentation_editor::{
 };
 pub(crate) use process_control::{
     configure_command_process_group, force_terminate_command_process_group,
-    interrupt_command_process_group, terminate_command_process_group,
-    try_wait_command_process_group, ManagedCommandChild,
+    interrupt_command_process_group, try_wait_command_process_group, ManagedCommandChild,
 };
 use risk::*;
 #[cfg(test)]

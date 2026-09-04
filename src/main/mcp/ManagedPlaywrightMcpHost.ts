@@ -275,7 +275,6 @@ export interface ManagedPlaywrightMcpHostOptions {
     onApprovalWaitChange?: (waiting: boolean) => void
   }) => Promise<BrowserNetworkOperationLease>
   getBrowserContext: () => Promise<BrowserContext>
-  getActiveSurfaceIdentity?: () => { surfaceId: string; generation: number } | null
   getAgentDownloadSnapshot?: (input: {
     runId: string
     activationId: string
@@ -287,7 +286,7 @@ export interface ManagedPlaywrightMcpHostOptions {
   finalizeBrowserRun?: (runId: string) => Promise<void>
   releaseBrowserCapability?: (activationId: string) => Promise<void>
   releaseBrowserToolCall?: (input: { runId: string; toolCallId: string }) => Promise<void>
-  surfaceGroup?: ManagedPlaywrightSurfaceGroupAdapter
+  surfaceGroup: ManagedPlaywrightSurfaceGroupAdapter
   closeSurface: () => Promise<void>
   detachAutomation: () => Promise<void>
   toolTimeoutMs?: number
@@ -316,13 +315,13 @@ export interface ManagedPlaywrightSurfaceGroupAdapter {
   selectSurface(input: { index: number }): Promise<ManagedPlaywrightSurfaceView>
   closeSurfaceByIndex(index?: number): Promise<void>
   /** Freezes the trusted UI-selected surface for one serialized Tool dispatch. */
-  beginToolSurfaceLease?(): Promise<ManagedPlaywrightToolSurfaceLease>
+  beginToolSurfaceLease(): Promise<ManagedPlaywrightToolSurfaceLease>
   /** Locks the selected existing surface without creating or revealing a tab. */
-  beginExistingToolSurfaceLease?(): Promise<ManagedPlaywrightToolSurfaceLease | null>
+  beginExistingToolSurfaceLease(): Promise<ManagedPlaywrightToolSurfaceLease | null>
   /** Locks one exact model-visible tab index without selecting or revealing it. */
-  beginToolSurfaceLeaseByIndex?(index: number): Promise<ManagedPlaywrightToolSurfaceLease>
+  beginToolSurfaceLeaseByIndex(index: number): Promise<ManagedPlaywrightToolSurfaceLease>
   /** Narrows Browser-level target creation to the reviewed Tool's expected UX. */
-  beginTargetCreationIntent?(
+  beginTargetCreationIntent(
     intent: 'background' | 'interactive',
     authority?: BrowserTargetCreationAuthority
   ): () => void
@@ -486,10 +485,9 @@ export class ManagedPlaywrightMcpHost {
   private readonly createOfficialConnection: ManagedPlaywrightConnectionFactory
   private readonly detachAutomation: () => Promise<void>
   private readonly getBrowserContext: () => Promise<BrowserContext>
-  private readonly getActiveSurfaceIdentity?: ManagedPlaywrightMcpHostOptions['getActiveSurfaceIdentity']
   private readonly getAgentDownloadSnapshot?: ManagedPlaywrightMcpHostOptions['getAgentDownloadSnapshot']
   private readonly fileBroker?: BrowserFileBroker
-  private readonly surfaceGroup?: ManagedPlaywrightSurfaceGroupAdapter
+  private readonly surfaceGroup: ManagedPlaywrightSurfaceGroupAdapter
   private readonly sensitiveTargetBindings?: ManagedPlaywrightSensitiveTargetBindingStore
   private readonly finalizeBrowserRun?: ManagedPlaywrightMcpHostOptions['finalizeBrowserRun']
   private readonly releaseBrowserCapability?: ManagedPlaywrightMcpHostOptions['releaseBrowserCapability']
@@ -520,7 +518,6 @@ export class ManagedPlaywrightMcpHost {
     this.beginNetworkOperation = options.beginNetworkOperation
     this.beginTargetCreationOperation = options.beginTargetCreationOperation
     this.getBrowserContext = options.getBrowserContext
-    this.getActiveSurfaceIdentity = options.getActiveSurfaceIdentity
     this.getAgentDownloadSnapshot = options.getAgentDownloadSnapshot
     this.fileBroker = options.fileBroker
     this.finalizeBrowserRun = options.finalizeBrowserRun
@@ -701,8 +698,7 @@ export class ManagedPlaywrightMcpHost {
               if (
                 name === 'browser_tabs' &&
                 modelArguments.action === 'new' &&
-                this.beginTargetCreationOperation &&
-                this.surfaceGroup?.beginTargetCreationIntent
+                this.beginTargetCreationOperation
               ) {
                 const result = await this.executeManagedTargetCreatingTool({
                   arguments: serverArguments,
@@ -729,8 +725,7 @@ export class ManagedPlaywrightMcpHost {
               if (
                 name === 'browser_navigate' &&
                 !surfaceLease &&
-                this.beginTargetCreationOperation &&
-                this.surfaceGroup?.beginTargetCreationIntent
+                this.beginTargetCreationOperation
               ) {
                 // Fixed Playwright implicitly creates its first Page for browser_navigate. That
                 // Target.createTarget must receive the same one-shot Main authority as an
@@ -754,8 +749,7 @@ export class ManagedPlaywrightMcpHost {
                 name === 'browser_tabs' &&
                 modelArguments.action === 'list' &&
                 !surfaceLease &&
-                this.beginTargetCreationOperation &&
-                this.surfaceGroup?.beginTargetCreationIntent
+                this.beginTargetCreationOperation
               ) {
                 // The last visible tab may close between the model-visible list snapshot and the
                 // optional exact lease. Fixed browser_tabs list then creates one blank page; give
@@ -775,7 +769,6 @@ export class ManagedPlaywrightMcpHost {
               }
               if (
                 sensitiveGrant?.target &&
-                this.surfaceGroup?.beginToolSurfaceLease &&
                 (!surfaceLease ||
                   surfaceLease.surfaceId !== sensitiveGrant.target.surfaceId ||
                   surfaceLease.generation !== sensitiveGrant.target.generation)
@@ -787,7 +780,7 @@ export class ManagedPlaywrightMcpHost {
                 modelArguments,
                 Boolean(surfaceLease)
               )
-              if (targetCreationIntent && this.surfaceGroup?.beginTargetCreationIntent) {
+              if (targetCreationIntent) {
                 finishTargetCreationIntent =
                   this.surfaceGroup.beginTargetCreationIntent(targetCreationIntent)
               }
@@ -856,7 +849,7 @@ export class ManagedPlaywrightMcpHost {
                     name,
                     modelArguments,
                     Boolean(surfaceLease),
-                    Boolean(this.surfaceGroup?.beginToolSurfaceLease)
+                    true
                   )
                 ) {
                   if (!options.authorizationContext || !options.parentRequestId) {
@@ -1232,7 +1225,6 @@ export class ManagedPlaywrightMcpHost {
     name: string,
     modelArguments: Readonly<Record<string, unknown>>
   ): Promise<ManagedPlaywrightToolSurfaceLease | undefined> {
-    if (!this.surfaceGroup) return undefined
     if (
       name === 'browser_tabs' &&
       (modelArguments.action === 'select' || modelArguments.action === 'close') &&
@@ -1241,20 +1233,13 @@ export class ManagedPlaywrightMcpHost {
       if (!Number.isSafeInteger(modelArguments.index) || (modelArguments.index as number) < 0) {
         throw new ManagedPlaywrightMcpHostError('browser.target_closed')
       }
-      if (!this.surfaceGroup.beginToolSurfaceLeaseByIndex) {
-        // Compatibility for isolated Host unit adapters predating SurfaceGroup leasing. The
-        // production BrowserSurfaceGroup always provides the exact-index CAS API.
-        if (!this.surfaceGroup.beginToolSurfaceLease) return undefined
-        throw new ManagedPlaywrightMcpHostError('browser.target_closed')
-      }
       return await this.surfaceGroup.beginToolSurfaceLeaseByIndex(modelArguments.index as number)
     }
     const mode = toolSurfaceLeaseMode(name, modelArguments)
     if (mode === 'none') return undefined
     if (mode === 'creating') {
-      return await this.surfaceGroup.beginToolSurfaceLease?.()
+      return await this.surfaceGroup.beginToolSurfaceLease()
     }
-    if (!this.surfaceGroup.beginExistingToolSurfaceLease) return undefined
     const lease = await this.surfaceGroup.beginExistingToolSurfaceLease()
     if (!lease && mode === 'optional_existing') {
       const retainedSurfaces = this.surfaceGroup.listSurfaces()
@@ -1266,7 +1251,7 @@ export class ManagedPlaywrightMcpHost {
       // Rebind only when one live page is uniquely identifiable. With multiple pages and no
       // trusted selection, fail closed instead of guessing a target or calling ensureSurface(),
       // which could reveal or create a page while trying to recover selection.
-      if (retainedSurfaces.length !== 1 || !this.surfaceGroup.beginToolSurfaceLeaseByIndex) {
+      if (retainedSurfaces.length !== 1) {
         throw new ManagedPlaywrightMcpHostError('browser.surface_unavailable')
       }
       return await this.surfaceGroup.beginToolSurfaceLeaseByIndex(retainedSurfaces[0]!.index)
@@ -1292,12 +1277,7 @@ export class ManagedPlaywrightMcpHost {
     const parentRequestId = input.options.parentRequestId
     const beginTargetCreationOperation = this.beginTargetCreationOperation
     const surfaceGroup = this.surfaceGroup
-    if (
-      !authorization ||
-      !parentRequestId ||
-      !beginTargetCreationOperation ||
-      !surfaceGroup?.beginTargetCreationIntent
-    ) {
+    if (!authorization || !parentRequestId || !beginTargetCreationOperation) {
       throw new ManagedPlaywrightMcpHostError('mcp.builtin_playwright.invalid_arguments')
     }
     const toolName = input.toolName ?? 'browser_tabs'
@@ -1393,23 +1373,15 @@ export class ManagedPlaywrightMcpHost {
   private async getExactManagedPage(
     surfaceLease: ManagedPlaywrightToolSurfaceLease | undefined
   ): Promise<Page> {
+    if (!surfaceLease) {
+      throw new ManagedPlaywrightMcpHostError('browser.surface_unavailable')
+    }
     const context = await this.getManagedBrowserContext()
-    if (surfaceLease) {
-      const page = context.pages()[await surfaceLease.resolveIndex()]
-      if (!page || (typeof page.isClosed === 'function' && page.isClosed())) {
-        throw new ManagedPlaywrightMcpHostError('browser.target_closed')
-      }
-      return page
+    const page = context.pages()[await surfaceLease.resolveIndex()]
+    if (!page || (typeof page.isClosed === 'function' && page.isClosed())) {
+      throw new ManagedPlaywrightMcpHostError('browser.target_closed')
     }
-    // Unit-only/legacy adapters may omit SurfaceGroup. Fail closed on ambiguity instead of
-    // silently applying a page operation to context.pages()[0] in a multi-target context.
-    const pages = context
-      .pages()
-      .filter((page) => typeof page.isClosed !== 'function' || !page.isClosed())
-    if ((!this.surfaceGroup || !this.surfaceGroup.beginToolSurfaceLease) && pages.length === 1) {
-      return pages[0]!
-    }
-    throw new ManagedPlaywrightMcpHostError('browser.surface_unavailable')
+    return page
   }
 
   private async callOfficialTool(
@@ -1891,7 +1863,7 @@ export class ManagedPlaywrightMcpHost {
     lease: ManagedPlaywrightToolSurfaceLease
   ): ManagedPlaywrightSurfaceView | undefined {
     const surface = this.surfaceGroup
-      ?.listSurfaces()
+      .listSurfaces()
       .find(
         (candidate) =>
           candidate.surfaceId === lease.surfaceId && candidate.generation === lease.generation
@@ -1905,9 +1877,6 @@ export class ManagedPlaywrightMcpHost {
     navigationEpoch: number
     origin: string
   } {
-    if (!this.surfaceGroup) {
-      throw new ManagedPlaywrightMcpHostError('browser.surface_unavailable')
-    }
     const target = this.surfaceGroup.getSensitiveTargetIdentity()
     if (!target) throw new ManagedPlaywrightSensitiveGrantError('origin_drifted')
     return target
@@ -1939,18 +1908,11 @@ export class ManagedPlaywrightMcpHost {
       case 'browser_resize': {
         const width = expectPositiveDimension(input.arguments.width)
         const height = expectPositiveDimension(input.arguments.height)
-        const resize = input.surfaceLease?.resizeSurface
-          ? (dimensions: { width: number; height: number }) =>
-              input.surfaceLease!.resizeSurface!(dimensions)
-          : !this.surfaceGroup?.beginToolSurfaceLease && this.surfaceGroup?.resizeActiveSurface
-            ? (dimensions: { width: number; height: number }) =>
-                this.surfaceGroup!.resizeActiveSurface!(dimensions)
-            : undefined
-        if (!resize) {
+        if (!input.surfaceLease?.resizeSurface) {
           throw new ManagedPlaywrightMcpHostError('browser.surface_unavailable')
         }
         await input.markDispatched()
-        const actual = await resize({ width, height })
+        const actual = await input.surfaceLease.resizeSurface({ width, height })
         return {
           content: [
             {
@@ -2356,9 +2318,7 @@ export class ManagedPlaywrightMcpHost {
         ? { surfaceId: 'managed-browser-profile', generation: 1 }
         : surfaceLease
           ? { surfaceId: surfaceLease.surfaceId, generation: surfaceLease.generation }
-          : !this.surfaceGroup?.beginToolSurfaceLease
-            ? this.getActiveSurfaceIdentity?.()
-            : undefined
+          : undefined
     if (!identity) throw new ManagedPlaywrightMcpHostError('browser.surface_unavailable')
     return {
       runId: authorization.runId,

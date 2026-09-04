@@ -21,6 +21,7 @@ import {
   type ManagedPlaywrightMcpHostOptions,
   type ManagedPlaywrightSurfaceView,
   type ManagedPlaywrightSurfaceGroupAdapter,
+  type ManagedPlaywrightToolSurfaceLease,
   type ManagedMcpClient
 } from './ManagedPlaywrightMcpHost'
 import {
@@ -70,6 +71,7 @@ describe('ManagedPlaywrightMcpHost', () => {
     const detachAutomation = vi.fn(async () => undefined)
     const host = new ManagedPlaywrightMcpHost({
       getBrowserContext,
+      surfaceGroup: singleSurfaceGroup(),
       closeSurface: vi.fn(async () => undefined),
       detachAutomation
     })
@@ -256,7 +258,7 @@ describe('ManagedPlaywrightMcpHost', () => {
       content: [{ type: 'text', text: 'host-origin-authoritative' }],
       isError: false
     }))
-    const host = fakeHost({ callTool, surfaceGroup: singleSurfaceGroup() })
+    const host = fakeHost({ callTool })
     const argumentsValue = {
       function: '() => document.title',
       call_reason: 'Exercise the managed fixture origin binding.'
@@ -406,10 +408,6 @@ describe('ManagedPlaywrightMcpHost', () => {
     const host = fakeHost({
       artifactBroker,
       callTool: upstream,
-      getActiveSurfaceIdentity: () => ({
-        generation: surface.generation,
-        surfaceId: surface.surfaceId
-      }),
       getBrowserContext: async () => fakeBrowserContext(),
       surfaceGroup
     })
@@ -518,6 +516,7 @@ describe('ManagedPlaywrightMcpHost', () => {
       }
     })
     const surfaceGroup: ManagedPlaywrightSurfaceGroupAdapter = {
+      ...testSurfaceLeaseApi(() => surfaces),
       getSensitiveTargetIdentity: () => sensitiveTargetFromSurfaces(surfaces),
       ensureActiveSurface: vi.fn(async () => surfaces[0]),
       listSurfaces: () => surfaces,
@@ -565,7 +564,7 @@ describe('ManagedPlaywrightMcpHost', () => {
       content: [{ type: 'text', text: 'fixture-result' }],
       isError: false
     }))
-    const host = fakeHost({ callTool, surfaceGroup: singleSurfaceGroup() })
+    const host = fakeHost({ callTool })
     const args = {
       function: '() => document.title',
       call_reason: 'Read the fixture title.'
@@ -617,7 +616,6 @@ describe('ManagedPlaywrightMcpHost', () => {
       callTool,
       createOfficialConnection,
       detachAutomation,
-      surfaceGroup: singleSurfaceGroup(),
       toolTimeoutMs: 25
     })
     const args = {
@@ -666,7 +664,7 @@ describe('ManagedPlaywrightMcpHost', () => {
       content: [{ type: 'text', text: 'ok' }],
       isError: false
     }))
-    const host = fakeHost({ callTool, surfaceGroup: singleSurfaceGroup() })
+    const host = fakeHost({ callTool })
     for (const [index, target] of [
       'e17',
       'f1e2',
@@ -722,8 +720,7 @@ describe('ManagedPlaywrightMcpHost', () => {
     }))
     const host = fakeHost({
       callTool,
-      createOfficialConnection,
-      surfaceGroup: singleSurfaceGroup()
+      createOfficialConnection
     })
     const argumentsValue = {
       index: 1,
@@ -774,7 +771,6 @@ describe('ManagedPlaywrightMcpHost', () => {
     const host = fakeHost({
       callTool: callTool as ManagedMcpClient['callTool'],
       createOfficialConnection,
-      surfaceGroup: singleSurfaceGroup(),
       toolTimeoutMs: 500
     })
     await host.callTool(
@@ -992,8 +988,7 @@ describe('ManagedPlaywrightMcpHost', () => {
     const host = fakeHost({
       callTool: callTool as ManagedMcpClient['callTool'],
       fileBroker,
-      getBrowserContext: vi.fn(async () => context),
-      surfaceGroup: singleSurfaceGroup()
+      getBrowserContext: vi.fn(async () => context)
     })
     try {
       const [uploadReference] = await fileBroker.freezeResolvedForRead({
@@ -1132,8 +1127,7 @@ describe('ManagedPlaywrightMcpHost', () => {
     const host = fakeHost({
       callTool,
       fileBroker,
-      preparedFileHandles: [reference.handle],
-      surfaceGroup: singleSurfaceGroup()
+      preparedFileHandles: [reference.handle]
     })
     const argumentsValue = {
       paths: [source],
@@ -1210,8 +1204,7 @@ describe('ManagedPlaywrightMcpHost', () => {
     const host = fakeHost({
       callTool: callTool as ManagedMcpClient['callTool'],
       fileBroker,
-      getBrowserContext: vi.fn(async () => context),
-      surfaceGroup: singleSurfaceGroup()
+      getBrowserContext: vi.fn(async () => context)
     })
     try {
       const [reference] = await fileBroker.freezeResolvedForRead({
@@ -1442,7 +1435,9 @@ describe('ManagedPlaywrightMcpHost', () => {
       )
     ).resolves.toMatchObject({ isError: false })
     expect(element.fill).toHaveBeenCalledWith('你好')
-    expect(upstream).toHaveBeenCalledTimes(1)
+    expect(
+      upstream.mock.calls.filter(([request]) => request.name === 'browser_snapshot')
+    ).toHaveLength(1)
 
     const secondSnapshot = await host.callTool(
       'browser_snapshot',
@@ -1593,68 +1588,32 @@ describe('ManagedPlaywrightMcpHost', () => {
     expect(callTool).toHaveBeenCalledOnce()
   })
 
-  it('delegates tab semantics to the fixed official group connection while Host owns resize', async () => {
-    let surfaces = [surfaceView(0, true)]
+  it('routes browser_resize through the exact current surface lease', async () => {
+    const surface = surfaceView(0, true)
+    const resizeSurface = vi.fn(async (input: { height: number; width: number }) => input)
     const surfaceGroup: ManagedPlaywrightSurfaceGroupAdapter = {
-      getSensitiveTargetIdentity: () => sensitiveTargetFromSurfaces(surfaces),
-      ensureActiveSurface: vi.fn(async () => surfaces[0]),
-      listSurfaces: () => surfaces,
-      createSurface: vi.fn(async () => {
-        surfaces = surfaces.map((surface) => ({ ...surface, isActive: false }))
-        const created = surfaceView(surfaces.length, true)
-        surfaces.push(created)
-        return created
-      }),
-      selectSurface: vi.fn(async ({ index }) => {
-        surfaces = surfaces.map((surface) => ({ ...surface, isActive: surface.index === index }))
-        return surfaces[index]
-      }),
-      closeSurfaceByIndex: vi.fn(async (index) => {
-        const selected = index ?? surfaces.find((surface) => surface.isActive)?.index ?? 0
-        surfaces = surfaces
-          .filter((surface) => surface.index !== selected)
-          .map((surface, nextIndex) => ({ ...surface, index: nextIndex }))
-        if (surfaces.length > 0 && !surfaces.some((surface) => surface.isActive)) {
-          surfaces[0] = { ...surfaces[0], isActive: true }
-        }
-      }),
-      resizeActiveSurface: vi.fn(async ({ width, height }) => ({ width, height }))
+      ...singleSurfaceGroup([surface]),
+      beginToolSurfaceLease: vi.fn(async () => ({
+        closeSurface: vi.fn(async () => undefined),
+        finish: vi.fn(),
+        generation: surface.generation,
+        index: surface.index,
+        resolveIndex: vi.fn(async () => surface.index),
+        resizeSurface,
+        selectionRevision: 1,
+        surfaceId: surface.surfaceId
+      }))
     }
-    const callTool = vi.fn<ManagedMcpClient['callTool']>().mockResolvedValue({
-      content: [{ type: 'text', text: '- 0: Fixture (current)' }],
-      isError: false
-    })
-    const host = fakeHost({ callTool, surfaceGroup })
-
-    const listed = await host.callTool('browser_tabs', {
-      action: 'list',
-      call_reason: 'List tabs.'
-    })
-    expect(surfaceGroup.ensureActiveSurface).not.toHaveBeenCalled()
-    expect(JSON.stringify(listed)).not.toMatch(/surface-0|generation|webContents|target/i)
+    const host = fakeHost({ surfaceGroup })
 
     await expect(
-      host.callTool('browser_tabs', { action: 'new', call_reason: 'Open a new tab.' })
-    ).resolves.toMatchObject({ isError: false })
-    await expect(
-      host.callTool('browser_tabs', { action: 'select', index: 0, call_reason: 'Select a tab.' })
-    ).resolves.toMatchObject({ isError: false })
-    await expect(
-      host.callTool('browser_tabs', { action: 'close', index: 1, call_reason: 'Close a tab.' })
-    ).resolves.toMatchObject({ isError: false })
-    expect(callTool.mock.calls.map(([request]) => request)).toEqual([
-      { name: 'browser_tabs', arguments: { action: 'list' } },
-      { name: 'browser_tabs', arguments: { action: 'new' } },
-      { name: 'browser_tabs', arguments: { action: 'select', index: 0 } },
-      { name: 'browser_tabs', arguments: { action: 'close', index: 1 } }
-    ])
-    expect(surfaceGroup.createSurface).not.toHaveBeenCalled()
-    expect(surfaceGroup.selectSurface).not.toHaveBeenCalled()
-    expect(surfaceGroup.closeSurfaceByIndex).not.toHaveBeenCalled()
-    await expect(
-      host.callTool('browser_resize', { width: 960, height: 640, call_reason: 'Resize.' })
+      host.callTool('browser_resize', {
+        width: 960,
+        height: 640,
+        call_reason: 'Resize the exact managed surface.'
+      })
     ).resolves.toMatchObject({ structuredContent: { width: 960, height: 640 } })
-    expect(surfaceGroup.resizeActiveSurface).toHaveBeenCalledWith({ width: 960, height: 640 })
+    expect(resizeSurface).toHaveBeenCalledWith({ width: 960, height: 640 })
   })
 
   it('lets fixed official browser_tabs create exactly one first tab under targetless run authority', async () => {
@@ -1693,6 +1652,7 @@ describe('ManagedPlaywrightMcpHost', () => {
     } as unknown as BrowserNetworkOperationLease
     const finishIntent = vi.fn(() => authority.finish())
     const surfaceGroup: ManagedPlaywrightSurfaceGroupAdapter = {
+      ...testSurfaceLeaseApi(() => surfaces),
       getSensitiveTargetIdentity: () => sensitiveTargetFromSurfaces(surfaces),
       ensureActiveSurface: vi.fn(async () => surfaces[0]),
       listSurfaces: () => surfaces,
@@ -1796,6 +1756,7 @@ describe('ManagedPlaywrightMcpHost', () => {
     const beginExistingToolSurfaceLease = vi.fn(async () => null)
     const finishIntent = vi.fn(() => authority.finish())
     const surfaceGroup: ManagedPlaywrightSurfaceGroupAdapter = {
+      ...testSurfaceLeaseApi(() => surfaces),
       getSensitiveTargetIdentity: () => sensitiveTargetFromSurfaces(surfaces),
       ensureActiveSurface: vi.fn(async () => {
         throw new Error('the context must remain empty until fixed Playwright creates its Page')
@@ -2144,6 +2105,7 @@ describe('ManagedPlaywrightMcpHost', () => {
       finish: vi.fn()
     } as unknown as BrowserNetworkOperationLease
     const surfaceGroup: ManagedPlaywrightSurfaceGroupAdapter = {
+      ...testSurfaceLeaseApi(() => surfaces),
       getSensitiveTargetIdentity: () => sensitiveTargetFromSurfaces(surfaces),
       ensureActiveSurface: vi.fn(async () => surfaces[0]),
       listSurfaces: () => surfaces,
@@ -2239,6 +2201,7 @@ describe('ManagedPlaywrightMcpHost', () => {
       finish: vi.fn()
     } as unknown as BrowserNetworkOperationLease
     const surfaceGroup: ManagedPlaywrightSurfaceGroupAdapter = {
+      ...testSurfaceLeaseApi(() => []),
       getSensitiveTargetIdentity: () => null,
       ensureActiveSurface: vi.fn(async () => {
         throw new Error('must remain empty')
@@ -2391,6 +2354,7 @@ describe('ManagedPlaywrightMcpHost', () => {
       finish: vi.fn()
     }
     const surfaceGroup: ManagedPlaywrightSurfaceGroupAdapter = {
+      ...testSurfaceLeaseApi(() => [surfaceView(0, true), surface]),
       getSensitiveTargetIdentity: () => null,
       ensureActiveSurface: vi.fn(async () => surface),
       listSurfaces: () => [surfaceView(0, true), surface],
@@ -2468,6 +2432,7 @@ describe('ManagedPlaywrightMcpHost', () => {
       finish: vi.fn()
     }
     const surfaceGroup: ManagedPlaywrightSurfaceGroupAdapter = {
+      ...testSurfaceLeaseApi(() => [surface]),
       getSensitiveTargetIdentity: () => sensitiveTargetFromSurfaces([surface]),
       ensureActiveSurface: vi.fn(async () => surface),
       listSurfaces: () => [surface],
@@ -2696,7 +2661,6 @@ describe('ManagedPlaywrightMcpHost', () => {
     const host = fakeHost({
       artifactBroker: broker,
       callTool: callTool as ManagedMcpClient['callTool'],
-      getActiveSurfaceIdentity: () => ({ surfaceId: 'surface-1', generation: 1 }),
       getBrowserContext: async () => context
     })
     try {
@@ -2770,7 +2734,6 @@ describe('ManagedPlaywrightMcpHost', () => {
     const host = fakeHost({
       artifactBroker: broker,
       callTool: callTool as ManagedMcpClient['callTool'],
-      getActiveSurfaceIdentity: () => ({ surfaceId: 'surface-1', generation: 1 }),
       getBrowserContext: async () => context
     })
     try {
@@ -2832,6 +2795,7 @@ describe('ManagedPlaywrightMcpHost', () => {
       finish: vi.fn()
     }
     const surfaceGroup: ManagedPlaywrightSurfaceGroupAdapter = {
+      ...testSurfaceLeaseApi(() => surfaces),
       getSensitiveTargetIdentity: () => sensitiveTargetFromSurfaces(surfaces),
       ensureActiveSurface: vi.fn(async () => exactSurface),
       listSurfaces: () => surfaces,
@@ -2851,10 +2815,6 @@ describe('ManagedPlaywrightMcpHost', () => {
     const host = fakeHost({
       artifactBroker: broker,
       callTool: upstream,
-      getActiveSurfaceIdentity: () => {
-        const active = surfaces.find((surface) => surface.isActive)!
-        return { surfaceId: active.surfaceId, generation: active.generation }
-      },
       getBrowserContext: async () => fakeBrowserContext(),
       surfaceGroup
     })
@@ -2908,6 +2868,7 @@ describe('ManagedPlaywrightMcpHost', () => {
       finish: vi.fn()
     }
     const surfaceGroup: ManagedPlaywrightSurfaceGroupAdapter = {
+      ...testSurfaceLeaseApi(() => [surfaceView(0, true)]),
       getSensitiveTargetIdentity: () => ({
         surfaceId: 'surface-0',
         generation: 1,
@@ -2939,7 +2900,6 @@ describe('ManagedPlaywrightMcpHost', () => {
     const host = fakeHost({
       artifactBroker: broker,
       callTool: upstreamCall,
-      getActiveSurfaceIdentity: () => ({ surfaceId: 'surface-1', generation: 1 }),
       getBrowserContext: async () => fakeBrowserContext(),
       surfaceGroup
     })
@@ -3004,6 +2964,7 @@ describe('ManagedPlaywrightMcpHost', () => {
       finish: vi.fn()
     }
     const surfaceGroup: ManagedPlaywrightSurfaceGroupAdapter = {
+      ...testSurfaceLeaseApi(() => [surfaceView(0, true)]),
       getSensitiveTargetIdentity: () => ({
         surfaceId: exactLease.surfaceId,
         generation: exactLease.generation,
@@ -3033,10 +2994,6 @@ describe('ManagedPlaywrightMcpHost', () => {
     const host = fakeHost({
       artifactBroker: broker,
       callTool: upstreamCall,
-      getActiveSurfaceIdentity: () => ({
-        surfaceId: exactLease.surfaceId,
-        generation: exactLease.generation
-      }),
       getBrowserContext: async () => fakeBrowserContext(),
       surfaceGroup
     })
@@ -3101,7 +3058,6 @@ describe('ManagedPlaywrightMcpHost', () => {
     const host = fakeHost({
       artifactBroker: broker,
       callTool: callTool as ManagedMcpClient['callTool'],
-      getActiveSurfaceIdentity: () => ({ surfaceId: 'surface-1', generation: 1 }),
       getBrowserContext: async () => fakeBrowserContext()
     })
     try {
@@ -4235,6 +4191,7 @@ describe('ManagedPlaywrightMcpHost', () => {
   })
 
   it('retires a rejected zero-tab target creation call before the next independent tool', async () => {
+    const surfaces: ReturnType<typeof surfaceView>[] = []
     const authority = {
       action: 'new' as const,
       claim: vi.fn(async () => undefined),
@@ -4251,11 +4208,12 @@ describe('ManagedPlaywrightMcpHost', () => {
       finish: vi.fn()
     } as unknown as BrowserNetworkOperationLease
     const surfaceGroup: ManagedPlaywrightSurfaceGroupAdapter = {
+      ...testSurfaceLeaseApi(() => surfaces),
       getSensitiveTargetIdentity: () => null,
       ensureActiveSurface: vi.fn(async () => {
         throw new Error('no surface')
       }),
-      listSurfaces: () => [],
+      listSurfaces: () => surfaces,
       createSurface: vi.fn(async () => {
         throw new Error('official target creation owns this fixture')
       }),
@@ -4265,13 +4223,14 @@ describe('ManagedPlaywrightMcpHost', () => {
       closeSurfaceByIndex: vi.fn(async () => undefined),
       beginTargetCreationIntent: vi.fn(() => () => authority.finish())
     }
-    const callTool = vi
-      .fn<ManagedMcpClient['callTool']>()
-      .mockRejectedValueOnce(new Error('fixture target attach rejected'))
-      .mockResolvedValueOnce({
-        content: [{ type: 'text', text: 'fresh snapshot' }],
-        isError: false
-      })
+    let rejectTargetCreation = true
+    const callTool = vi.fn<ManagedMcpClient['callTool']>(async ({ name, arguments: args }) => {
+      if (name === 'browser_tabs' && args.action === 'new' && rejectTargetCreation) {
+        rejectTargetCreation = false
+        throw new Error('fixture target attach rejected')
+      }
+      return { content: [{ type: 'text', text: 'fresh snapshot' }], isError: false }
+    })
     const createOfficialConnection = vi.fn(async () => ({
       connect: vi.fn(async () => undefined),
       close: vi.fn(async () => undefined)
@@ -4299,13 +4258,24 @@ describe('ManagedPlaywrightMcpHost', () => {
         }
       )
     ).rejects.toMatchObject({ dispatchCertainty: 'possibly_dispatched' })
-    expect(callTool).toHaveBeenCalledOnce()
+    expect(
+      callTool.mock.calls.filter(
+        ([request]) => request.name === 'browser_tabs' && request.arguments.action === 'new'
+      )
+    ).toHaveLength(1)
     expect(detachAutomation).toHaveBeenCalledOnce()
 
     await expect(
       host.callTool('browser_snapshot', { call_reason: 'Read a fresh local fixture context.' })
     ).resolves.toMatchObject({ isError: false })
-    expect(callTool).toHaveBeenCalledTimes(2)
+    expect(
+      callTool.mock.calls.filter(([request]) => request.name === 'browser_snapshot')
+    ).toHaveLength(1)
+    expect(
+      callTool.mock.calls.filter(
+        ([request]) => request.name === 'browser_tabs' && request.arguments.action === 'new'
+      )
+    ).toHaveLength(1)
     expect(createOfficialConnection).toHaveBeenCalledTimes(2)
   })
 
@@ -4529,6 +4499,7 @@ describe('ManagedPlaywrightMcpHost', () => {
   })
 
   it('preserves a resolved terminal zero-tab result and reconnects only the next call', async () => {
+    const surfaces: ReturnType<typeof surfaceView>[] = []
     const authority = {
       action: 'new' as const,
       claim: vi.fn(async () => undefined),
@@ -4545,11 +4516,12 @@ describe('ManagedPlaywrightMcpHost', () => {
       finish: vi.fn()
     } as unknown as BrowserNetworkOperationLease
     const surfaceGroup: ManagedPlaywrightSurfaceGroupAdapter = {
+      ...testSurfaceLeaseApi(() => surfaces),
       getSensitiveTargetIdentity: () => null,
       ensureActiveSurface: vi.fn(async () => {
         throw new Error('no surface')
       }),
-      listSurfaces: () => [],
+      listSurfaces: () => surfaces,
       createSurface: vi.fn(async () => {
         throw new Error('official target creation owns this fixture')
       }),
@@ -4559,17 +4531,18 @@ describe('ManagedPlaywrightMcpHost', () => {
       closeSurfaceByIndex: vi.fn(async () => undefined),
       beginTargetCreationIntent: vi.fn(() => () => authority.finish())
     }
-    const callTool = vi
-      .fn<ManagedMcpClient['callTool']>()
-      .mockResolvedValueOnce({
-        content: [{ type: 'text', text: 'Target page, context or browser has been closed' }],
-        structuredContent: { errorCode: 'target_closed' },
-        isError: true
-      })
-      .mockResolvedValueOnce({
-        content: [{ type: 'text', text: 'fresh snapshot' }],
-        isError: false
-      })
+    let terminalTargetCreation = true
+    const callTool = vi.fn<ManagedMcpClient['callTool']>(async ({ name, arguments: args }) => {
+      if (name === 'browser_tabs' && args.action === 'new' && terminalTargetCreation) {
+        terminalTargetCreation = false
+        return {
+          content: [{ type: 'text', text: 'Target page, context or browser has been closed' }],
+          structuredContent: { errorCode: 'target_closed' },
+          isError: true
+        }
+      }
+      return { content: [{ type: 'text', text: 'fresh snapshot' }], isError: false }
+    })
     const createOfficialConnection = vi.fn(async () => ({
       connect: vi.fn(async () => undefined),
       close: vi.fn(async () => undefined)
@@ -4600,13 +4573,24 @@ describe('ManagedPlaywrightMcpHost', () => {
       structuredContent: { errorCode: 'target_closed' },
       isError: true
     })
-    expect(callTool).toHaveBeenCalledOnce()
+    expect(
+      callTool.mock.calls.filter(
+        ([request]) => request.name === 'browser_tabs' && request.arguments.action === 'new'
+      )
+    ).toHaveLength(1)
     expect(detachAutomation).toHaveBeenCalledOnce()
 
     await expect(
       host.callTool('browser_snapshot', { call_reason: 'Read a fresh local fixture context.' })
     ).resolves.toMatchObject({ isError: false })
-    expect(callTool).toHaveBeenCalledTimes(2)
+    expect(
+      callTool.mock.calls.filter(([request]) => request.name === 'browser_snapshot')
+    ).toHaveLength(1)
+    expect(
+      callTool.mock.calls.filter(
+        ([request]) => request.name === 'browser_tabs' && request.arguments.action === 'new'
+      )
+    ).toHaveLength(1)
     expect(createOfficialConnection).toHaveBeenCalledTimes(2)
   })
 
@@ -4661,8 +4645,7 @@ describe('ManagedPlaywrightMcpHost', () => {
       createOfficialConnection,
       detachAutomation,
       fileBroker,
-      getBrowserContext: vi.fn(async () => context),
-      surfaceGroup: singleSurfaceGroup()
+      getBrowserContext: vi.fn(async () => context)
     })
     const freezeDropHandle = async (callId: string): Promise<string> => {
       const [reference] = await fileBroker.freezeResolvedForRead({
@@ -4790,6 +4773,7 @@ function singleSurfaceGroup(
   surfaces: ReturnType<typeof surfaceView>[] = [surfaceView(0, true)]
 ): ManagedPlaywrightSurfaceGroupAdapter {
   return {
+    ...testSurfaceLeaseApi(() => surfaces),
     getSensitiveTargetIdentity: () => sensitiveTargetFromSurfaces(surfaces),
     ensureActiveSurface: vi.fn(async () => {
       const active = surfaces.find((surface) => surface.isActive)
@@ -4808,6 +4792,55 @@ function singleSurfaceGroup(
       return surfaces[index]
     }),
     closeSurfaceByIndex: vi.fn(async () => undefined)
+  }
+}
+
+function testSurfaceLeaseApi(
+  getSurfaces: () => ReturnType<typeof surfaceView>[]
+): Pick<
+  ManagedPlaywrightSurfaceGroupAdapter,
+  | 'beginExistingToolSurfaceLease'
+  | 'beginTargetCreationIntent'
+  | 'beginToolSurfaceLease'
+  | 'beginToolSurfaceLeaseByIndex'
+> {
+  const leaseAt = (requestedIndex: number): ManagedPlaywrightToolSurfaceLease => {
+    const surface = getSurfaces()[requestedIndex]
+    if (!surface) throw new ManagedPlaywrightMcpHostError('browser.target_closed')
+    return {
+      closeSurface: vi.fn(async () => undefined),
+      finish: vi.fn(),
+      generation: surface.generation,
+      index: requestedIndex,
+      resolveIndex: vi.fn(async () => {
+        const currentIndex = getSurfaces().findIndex(
+          (candidate) =>
+            candidate.surfaceId === surface.surfaceId && candidate.generation === surface.generation
+        )
+        if (currentIndex < 0) throw new ManagedPlaywrightMcpHostError('browser.target_closed')
+        return currentIndex
+      }),
+      resizeSurface: vi.fn(async (input) => input),
+      selectionRevision: 1,
+      surfaceId: surface.surfaceId
+    }
+  }
+  const activeIndex = (): number => getSurfaces().findIndex((surface) => surface.isActive)
+  return {
+    beginExistingToolSurfaceLease: vi.fn(async () => {
+      const index = activeIndex()
+      return index < 0 ? null : leaseAt(index)
+    }),
+    beginTargetCreationIntent: vi.fn(() => vi.fn()),
+    beginToolSurfaceLease: vi.fn(async () => {
+      let index = activeIndex()
+      if (index < 0 && getSurfaces().length === 0) {
+        getSurfaces().push(surfaceView(0, true))
+        index = 0
+      }
+      return leaseAt(index)
+    }),
+    beginToolSurfaceLeaseByIndex: vi.fn(async (index) => leaseAt(index))
   }
 }
 
@@ -4912,7 +4945,6 @@ function fakeHost(overrides: {
   createClient?: () => ManagedMcpClient
   createOfficialConnection?: ManagedPlaywrightConnectionFactory
   detachAutomation?: () => Promise<void>
-  getActiveSurfaceIdentity?: ManagedPlaywrightMcpHostOptions['getActiveSurfaceIdentity']
   getAgentDownloadSnapshot?: ManagedPlaywrightMcpHostOptions['getAgentDownloadSnapshot']
   getBrowserContext?: () => Promise<BrowserContext>
   listTools?: ManagedMcpClient['listTools']
@@ -4926,41 +4958,64 @@ function fakeHost(overrides: {
     inputSchema: structuredClone(tool.inputSchema),
     annotations: structuredClone(tool.annotations ?? {})
   }))
+  const usesDefaultSurfaceGroup = overrides.surfaceGroup === undefined
+  const surfaceGroup = overrides.surfaceGroup ?? singleSurfaceGroup()
+  const getBrowserContext = overrides.getBrowserContext ?? (async () => fakeBrowserContext())
+  const createOfficialConnection =
+    overrides.createOfficialConnection ??
+    (usesDefaultSurfaceGroup
+      ? async (
+          _config: Parameters<ManagedPlaywrightConnectionFactory>[0],
+          contextGetter: Parameters<ManagedPlaywrightConnectionFactory>[1]
+        ) => {
+          await contextGetter()
+          return {
+            connect: vi.fn(async () => undefined),
+            close: vi.fn(async () => undefined)
+          }
+        }
+      : async () => ({
+          connect: vi.fn(async () => undefined),
+          close: vi.fn(async () => undefined)
+        }))
+  const callTool =
+    overrides.callTool ??
+    vi.fn(async () => ({ content: [{ type: 'text', text: 'ok' }], isError: false }))
   const host = new ManagedPlaywrightMcpHost({
     artifactBroker: overrides.artifactBroker,
     fileBroker: overrides.fileBroker,
     beginNetworkOperation: overrides.beginNetworkOperation,
     beginTargetCreationOperation: overrides.beginTargetCreationOperation,
-    getActiveSurfaceIdentity: overrides.getActiveSurfaceIdentity,
     getAgentDownloadSnapshot: overrides.getAgentDownloadSnapshot,
-    getBrowserContext:
-      overrides.getBrowserContext ??
-      (async () => {
-        throw new Error('not needed by fake MCP client')
-      }),
-    surfaceGroup: overrides.surfaceGroup,
+    getBrowserContext,
+    surfaceGroup,
     sensitiveTargetBindings: fakeSensitiveTargetBindings(
-      overrides.surfaceGroup,
+      surfaceGroup,
       overrides.preparedFileHandles
     ),
     toolTimeoutMs: overrides.toolTimeoutMs,
     closeSurface: overrides.closeSurface ?? vi.fn(async () => undefined),
     detachAutomation: overrides.detachAutomation ?? vi.fn(async () => undefined),
-    createOfficialConnection:
-      overrides.createOfficialConnection ??
-      (async () => ({
-        connect: vi.fn(async () => undefined),
-        close: vi.fn(async () => undefined)
-      })),
+    createOfficialConnection,
     createClient:
       overrides.createClient ??
       (() => ({
         connect: vi.fn(async () => undefined),
         close: vi.fn(async () => undefined),
         listTools: overrides.listTools ?? vi.fn(async () => ({ tools: upstreamTools })),
-        callTool:
-          overrides.callTool ??
-          vi.fn(async () => ({ content: [{ type: 'text', text: 'ok' }], isError: false }))
+        callTool: async (request, resultSchema, options) => {
+          if (
+            usesDefaultSurfaceGroup &&
+            request.name === 'browser_tabs' &&
+            (request.arguments.action === 'list' || request.arguments.action === 'select')
+          ) {
+            return {
+              content: [{ type: 'text', text: 'fixture surface synchronized' }],
+              isError: false
+            }
+          }
+          return await callTool(request, resultSchema, options)
+        }
       }))
   })
   trackedHosts.add(host)

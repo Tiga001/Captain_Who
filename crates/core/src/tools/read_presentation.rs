@@ -30,11 +30,10 @@ impl AgentTool for ReadPresentationTool {
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "path": { "type": "string", "description": "Workspace-relative .pptx path or @attachments/... readPath." },
-                    "filePath": { "type": "string", "description": "Alias for path." },
-                    "maxChars": { "type": "integer", "minimum": 1, "description": "Deprecated soft compatibility hint. Exact History capture is never limited by this value; model output uses the shared 10K gate." }
+                    "path": { "type": "string", "minLength": 1, "description": "Workspace-relative .pptx path or @attachments/... readPath." }
                 },
-                "required": ["path"]
+                "required": ["path"],
+                "additionalProperties": false
             }),
             safety: AgentToolSafety::ReadOnly,
             requires_workspace: false,
@@ -47,7 +46,6 @@ impl AgentTool for ReadPresentationTool {
         context.check_cancelled()?;
         let args: ReadPresentationArgs = serde_json::from_value(args)
             .map_err(|error| AgentError::new(format!("read_presentation 参数无效：{error}")))?;
-        let _requested_max_chars = args.max_chars;
         let path = args.path()?;
         let resolved = resolve_document_path(context, path, &["pptx"])?;
         let cancellation_token = context.cancellation_token();
@@ -104,21 +102,19 @@ impl AgentTool for ReadPresentationTool {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ReadPresentationArgs {
-    path: Option<String>,
-    file_path: Option<String>,
-    max_chars: Option<usize>,
+    path: String,
 }
 
 impl ReadPresentationArgs {
     fn path(&self) -> AgentResult<&str> {
-        self.path
-            .as_deref()
-            .or(self.file_path.as_deref())
-            .map(str::trim)
-            .filter(|path| !path.is_empty())
-            .ok_or_else(|| AgentError::new("read_presentation.path 不能为空。"))
+        let path = self.path.trim();
+        if path.is_empty() {
+            Err(AgentError::new("read_presentation.path 不能为空。"))
+        } else {
+            Ok(path)
+        }
     }
 }
 
@@ -136,6 +132,7 @@ fn sort_slide_parts(slides: &mut [NamedText]) {
 #[cfg(test)]
 mod tests {
     use super::super::{ToolExecutionContext, ToolRegistry};
+    use super::{AgentTool, ReadPresentationArgs, ReadPresentationTool};
     use crate::protocol::{
         AgentApprovalStatus, AgentRunContext, AgentToolCall, AgentWorkspaceContext,
     };
@@ -157,7 +154,7 @@ mod tests {
         let call = AgentToolCall {
             id: "call-1".to_string(),
             tool: "read_presentation".to_string(),
-            args: json!({ "path": "deck.pptx", "maxChars": 1 }),
+            args: json!({ "path": "deck.pptx" }),
             approval_status: AgentApprovalStatus::NotRequired,
             reason: None,
         };
@@ -169,6 +166,29 @@ mod tests {
         assert!(value["text"].as_str().unwrap().contains("Slide text"));
         assert_eq!(value["truncatedAtSource"], false);
         assert_eq!(value["omittedBytes"], 0);
+    }
+
+    #[test]
+    fn schema_and_wire_accept_only_current_path() {
+        let definition = ReadPresentationTool.definition();
+        assert_eq!(definition.input_schema["required"], json!(["path"]));
+        assert_eq!(definition.input_schema["additionalProperties"], false);
+        assert_eq!(
+            definition.input_schema["properties"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .collect::<Vec<_>>(),
+            vec!["path"]
+        );
+        for value in [
+            json!({}),
+            json!({ "path": null }),
+            json!({ "filePath": "legacy.pptx" }),
+            json!({ "path": "deck.pptx", "maxChars": 1 }),
+        ] {
+            assert!(serde_json::from_value::<ReadPresentationArgs>(value).is_err());
+        }
     }
 
     struct TestWorkspace {

@@ -325,7 +325,7 @@ mod tests {
     }
 
     #[test]
-    fn document_tool_schemas_keep_only_an_unbounded_compatibility_hint() {
+    fn document_tool_schemas_accept_only_one_required_path() {
         let registry = ToolRegistry::defaults_with_search(None);
         for tool in ["read_word", "read_spreadsheet", "read_presentation"] {
             let definition = registry
@@ -333,15 +333,11 @@ mod tests {
                 .into_iter()
                 .find(|definition| definition.name == tool)
                 .unwrap();
-            let max_chars = &definition.input_schema["properties"]["maxChars"];
-            assert!(
-                max_chars["maximum"].is_null(),
-                "{tool} must not turn the compatibility hint into a source limit"
-            );
-            assert!(max_chars["description"]
-                .as_str()
-                .unwrap()
-                .contains("shared 10K gate"));
+            let properties = definition.input_schema["properties"].as_object().unwrap();
+            assert_eq!(properties.len(), 1, "{tool} must expose only path");
+            assert_eq!(properties["path"]["type"], "string");
+            assert_eq!(definition.input_schema["required"], json!(["path"]));
+            assert_eq!(definition.input_schema["additionalProperties"], false);
         }
     }
 

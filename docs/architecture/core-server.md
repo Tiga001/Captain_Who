@@ -171,13 +171,13 @@ EOF 或 request-loop 错误没有 shutdown response，但仍走同一幂等清�
 
 ## 8. Scheduled Automation 调度边界
 
-- application 真源是 `application/automation/{service,schedule,scheduler,notifications}.rs`；Renderer 缓存和进程内 `Notify` 都只是加速器。SQLite Task、Run、Event 是 Automation 恢复权威，legacy outbox 只作为 producer/兼容 ledger，原生投递以共享 Notification batch 为准。
+- application 真源是 `application/automation/{service,schedule,scheduler}.rs`；Renderer 缓存和进程内 `Notify` 都只是加速器。SQLite Task、Run、Event 是 Automation 恢复权威，Automation producer 在业务事务中直接写共享 Notification event，原生投递以共享 Notification batch 为准。
 - Scheduler 每 30 秒或被唤醒时扫描，due/claim batch 均最多 3，Automation 专用并发为 2；每个 Automation HumanRoot Turn 还必须取得默认上限 50 的进程级 `AgentTurnConcurrencyGate`。
 - 持久 Run 内部状态为 `queued → admitting → running ↔ waiting_for_approval → terminal`；协议把内部 `admitting` 投影为 public `starting`，不得在 Renderer 或文档中再暴露内部 lease token。
 - claim 的 admission lease 为 60 秒；容量不足或目标 Conversation 忙时回到 `queued` 并退避 5 秒。启动时旧进程留下的所有 `admitting` 都立即回队，不等待旧 lease；多个 missed occurrence 合并为一次 `recovery` Run。
 - HumanRoot admission 把 Conversation、message pair、空的 in-progress Trace 与 `admitting → running` 放在同一 `BEGIN IMMEDIATE` 事务中。事务提交后才允许 Provider/MCP 工作；重启后 `running`/`waiting_for_approval` 只从 Trace 和 pending action 恢复。
 - 事件 notifier 每 100ms 读取一批最多 256 条 `automation_events`，按全局 sequence 发送 `automation.event`；启动 `automation.resync.lastSequence` 是完整 refetch cut，不是事件内容快照。
-- Automation 的 `automation_notification_outbox` 是 producer/兼容 ledger；canonical trigger 把新行原子投影到 HumanRoot/Automation 共用的 `notification_events`/`notification_batches`。Main 原生投递走 `notifications.*`，不是旧 `automation.notifications.*`。
+- Automation 与 HumanRoot 共用 `notification_events`/`notification_batches`；Automation 业务事务直接写入当前通用通知管线。Main 原生投递只走 `notifications.*`。
 
 完整 Task/Run 状态机、权限与通知策略见 [Scheduled Automation 子系统](../subsystems/scheduled-automations.md)。
 

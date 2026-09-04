@@ -314,6 +314,16 @@ describe('secret-free model settings parsers', () => {
     })
   })
 
+  it('requires expectedRevision while accepting an explicit null for the initial save', () => {
+    const missingRevision: Record<string, unknown> = { ...update }
+    Reflect.deleteProperty(missingRevision, 'expectedRevision')
+    expect(() => parseStorageModelSettingsUpdateRecord(missingRevision)).toThrow(/expectedRevision/)
+    expect(parseStorageModelSettingsUpdateRecord({ ...update, expectedRevision: null })).toEqual({
+      ...update,
+      expectedRevision: null
+    })
+  })
+
   it.each([
     { ...snapshot, apiToken: 'legacy-secret' },
     { ...snapshot, tavilyApiKey: 'legacy-secret' },

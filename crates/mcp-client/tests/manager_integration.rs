@@ -20,6 +20,30 @@ use serde_json::json;
 
 const SECRET_SENTINEL: &str = "ROUND2_SECRET_MUST_NOT_ESCAPE";
 
+/// Keeps integration fixtures concise while still exercising the production API's required
+/// Host-owned invocation and model-call identities.
+trait IdentifiedCatalogCallForTest {
+    async fn call_catalog_tool(
+        &self,
+        request: McpCatalogToolCall,
+        cancellation: McpCancellationToken,
+    ) -> Result<McpToolResult, McpError>;
+}
+
+impl IdentifiedCatalogCallForTest for McpConnectionManager {
+    async fn call_catalog_tool(
+        &self,
+        request: McpCatalogToolCall,
+        cancellation: McpCancellationToken,
+    ) -> Result<McpToolResult, McpError> {
+        let invocation_id = McpInvocationId::new();
+        let model_call_id = McpModelCallId::new(format!("test-{invocation_id}"))?;
+        let id = McpActiveCallId::new(request.tool_id.server_id, invocation_id, model_call_id);
+        self.call_catalog_tool_identified(id, request, cancellation)
+            .await
+    }
+}
+
 type PageScript = BTreeMap<Option<String>, Result<McpToolPage, McpError>>;
 
 struct MockServer {

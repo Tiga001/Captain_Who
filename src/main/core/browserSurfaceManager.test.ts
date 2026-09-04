@@ -320,21 +320,26 @@ function probeSurfaceInstance(
 function attachSurface(
   manager: BrowserSurfaceManager,
   host: WebContents,
-  input: Parameters<BrowserSurfaceManager['attach']>[1]
+  input: Omit<Parameters<BrowserSurfaceManager['attach']>[1], 'surfaceInstanceId'> & {
+    surfaceInstanceId?: string
+  }
 ): ReturnType<BrowserSurfaceManager['attach']> {
-  if (input.surfaceInstanceId !== undefined) return manager.attach(host, input)
+  if (typeof input.surfaceInstanceId === 'string') {
+    return manager.attach(host, { ...input, surfaceInstanceId: input.surfaceInstanceId })
+  }
   const probe = manager.selectManualSurface(host, {
     schemaVersion: 1,
     surfaceId: input.surfaceId,
     surfaceInstanceId: null,
     selectionRevision: Number.MAX_SAFE_INTEGER
   })
-  return manager.attach(host, {
-    ...input,
-    ...(probe.reason === 'instance_required' && probe.surfaceInstanceId
-      ? { surfaceInstanceId: probe.surfaceInstanceId }
-      : {})
-  })
+  if (probe.reason !== 'instance_required' || !probe.surfaceInstanceId) {
+    return manager.attach(host, {
+      ...input,
+      surfaceInstanceId: 'instance-unregistered-0001'
+    })
+  }
+  return manager.attach(host, { ...input, surfaceInstanceId: probe.surfaceInstanceId })
 }
 
 afterEach(async () => {
@@ -919,7 +924,8 @@ describe('BrowserSurfaceManager', () => {
       manager.attach(host.asWebContents(), {
         schemaVersion: 1,
         requestId: command.requestId,
-        surfaceId: command.surfaceId
+        surfaceId: command.surfaceId,
+        surfaceInstanceId: 'instance-mismatch-0001'
       })
     ).toEqual(
       expect.objectContaining({
@@ -1295,6 +1301,12 @@ describe('BrowserSurfaceManager', () => {
       partition: BROWSER_WEBVIEW_PARTITION,
       surfaceId: command.surfaceId
     })
+    const surfaceInstanceId = probeSurfaceInstance(
+      manager,
+      host,
+      command.surfaceId,
+      Number.MAX_SAFE_INTEGER
+    )
     guest.destroy()
     await vi.advanceTimersByTimeAsync(100)
     await rejection
@@ -1303,7 +1315,8 @@ describe('BrowserSurfaceManager', () => {
       attachSurface(manager, host.asWebContents(), {
         schemaVersion: 1,
         requestId: command.requestId,
-        surfaceId: command.surfaceId
+        surfaceId: command.surfaceId,
+        surfaceInstanceId
       })
     ).toEqual({
       schemaVersion: 1,
@@ -1312,7 +1325,8 @@ describe('BrowserSurfaceManager', () => {
       reason: 'target_closed',
       retryable: false,
       requestId: command.requestId,
-      surfaceId: command.surfaceId
+      surfaceId: command.surfaceId,
+      surfaceInstanceId
     })
     expect(manager.snapshot()).toMatchObject({ pendingEnsure: false, surfaces: 0 })
 
@@ -1521,7 +1535,7 @@ describe('BrowserSurfaceManager', () => {
     const firstContext = manager.getBrowserContext()
     const ensure = commands.at(-1)
     if (!ensure || ensure.kind !== 'ensureAttached') throw new Error('ensure command missing')
-    const firstGuest = attachGuest(manager, host, 2, ensure.surfaceId)
+    attachGuest(manager, host, 2, ensure.surfaceId)
     attachSurface(manager, host.asWebContents(), {
       schemaVersion: 1,
       requestId: ensure.requestId,
@@ -1580,11 +1594,6 @@ describe('BrowserSurfaceManager', () => {
       viewport: { height: 720, width: 1280 }
     })
     await expect(resized).resolves.toEqual({ height: 720, width: 1280 })
-    await expect(manager.printActiveSurfaceToPdf()).resolves.toEqual(
-      Uint8Array.from(Buffer.from('%PDF-1.7\nfixture\n%%EOF\n'))
-    )
-    expect(firstGuest.printToPDF).toHaveBeenCalledWith({ printBackground: false })
-
     const clipped = manager.resizeActiveSurface({ height: 720, width: 1280 })
     const clippedAssertion = expect(clipped).rejects.toEqual(
       expect.objectContaining({ code: 'browser.surface_unavailable' })
@@ -2991,7 +3000,7 @@ describe('BrowserSurfaceManager', () => {
     await contextPromise
 
     expect(manager.getActiveSurfaceIdentity()).toEqual({ generation: 1, surfaceId: SURFACE_ID })
-    await manager.closeAutomation()
+    await manager.detachAutomation()
     expect(guest.isDestroyed()).toBe(false)
     expect(browsers[0]?.browser.isConnected()).toBe(false)
     expect(manager.getActiveSurfaceIdentity()).toBeNull()

@@ -565,51 +565,6 @@ fn tombstone_hides_task_without_deleting_an_existing_target_chat() {
 }
 
 #[test]
-fn notification_outbox_supports_deduplicated_configuration_attention_without_a_run() {
-    let mut connection = connection();
-    create(&mut connection, "automation-a", "request-a");
-    connection
-        .execute(
-            "INSERT INTO automation_notification_outbox (
-                id, schema_version, automation_id, automation_run_id, resource_revision,
-                notification_kind, title, body, status, created_at, delivered_at
-             ) VALUES (
-                'notification-a', 1, 'automation-a', NULL, 1,
-                'configuration_blocked', 'Needs repair', 'Select a new target',
-                'pending', 1, NULL
-             )",
-            [],
-        )
-        .unwrap();
-    assert!(connection
-        .execute(
-            "INSERT INTO automation_notification_outbox (
-                id, schema_version, automation_id, automation_run_id, resource_revision,
-                notification_kind, title, body, status, created_at, delivered_at
-             ) VALUES (
-                'notification-b', 1, 'automation-a', NULL, 1,
-                'configuration_blocked', 'Duplicate', 'Must be rejected',
-                'pending', 2, NULL
-             )",
-            [],
-        )
-        .is_err());
-    assert!(connection
-        .execute(
-            "INSERT INTO automation_notification_outbox (
-                id, schema_version, automation_id, automation_run_id, resource_revision,
-                notification_kind, title, body, status, created_at, delivered_at
-             ) VALUES (
-                'notification-c', 1, 'automation-a', NULL, 1,
-                'run_result', 'Invalid', 'A run result requires a run',
-                'pending', 3, NULL
-             )",
-            [],
-        )
-        .is_err());
-}
-
-#[test]
 fn configuration_block_notifications_follow_all_user_visible_policies() {
     for policy in ["all_runs", "unsuccessful_only", "important_updates"] {
         let mut connection = connection();
@@ -1295,14 +1250,6 @@ fn terminal_trace_settlement_persists_unknown_report_attention_and_deduplicated_
         notifications[0].run_id.as_deref(),
         Some(claimed.id.as_str())
     );
-    let legacy_statuses = connection
-        .prepare("SELECT status FROM automation_notification_outbox")
-        .unwrap()
-        .query_map([], |row| row.get::<_, String>(0))
-        .unwrap()
-        .collect::<rusqlite::Result<Vec<_>>>()
-        .unwrap();
-    assert_eq!(legacy_statuses, vec!["projected"]);
 }
 
 #[test]
@@ -1649,12 +1596,15 @@ fn structured_report_is_bounded_and_notification_policy_is_not_keyword_based() {
 }
 
 #[test]
-fn legacy_notification_projection_uses_the_generic_durable_delivery_queue() {
+fn automation_notifications_use_the_generic_durable_delivery_queue() {
     let mut connection = connection();
     let task = create(&mut connection, "automation-a", "request-a");
     let now = now_ms() + 1_000;
-    let notification = enqueue_automation_notification(
-        &mut connection,
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .unwrap();
+    let notification = enqueue_automation_notification_in_transaction(
+        &transaction,
         &NewAutomationNotificationRecord {
             automation_id: task.id.clone(),
             automation_run_id: None,
@@ -1666,8 +1616,8 @@ fn legacy_notification_projection_uses_the_generic_durable_delivery_queue() {
         },
     )
     .unwrap();
-    let replay = enqueue_automation_notification(
-        &mut connection,
+    let replay = enqueue_automation_notification_in_transaction(
+        &transaction,
         &NewAutomationNotificationRecord {
             automation_id: task.id,
             automation_run_id: None,
@@ -1680,18 +1630,11 @@ fn legacy_notification_projection_uses_the_generic_durable_delivery_queue() {
     )
     .unwrap();
     assert_eq!(replay.id, notification.id);
-    assert_eq!(notification.status, "projected");
     assert_eq!(
-        connection
-            .query_row(
-                "SELECT COUNT(*) FROM automation_notification_outbox WHERE status = 'pending'",
-                [],
-                |row| row.get::<_, i64>(0),
-            )
-            .unwrap(),
-        0,
-        "the retired automation pump must not retain projected pending work",
+        notification.notification_kind,
+        "automation_configuration_blocked"
     );
+    transaction.commit().unwrap();
 
     let first = crate::storage::notification_repository::claim_pending_notification_batches(
         &mut connection,

@@ -103,24 +103,6 @@ describe('RightSidebar browser automation surface bridge', () => {
     expect(getSurface(screen.container)).toBe(surface)
     expect(surfaceLifecycle.mock.calls.filter(([event]) => event === 'mount')).toHaveLength(1)
 
-    const generationlessClose: BrowserSurfaceCommand = {
-      schemaVersion: 1,
-      kind: 'closeSurface',
-      requestId: '33333333-3333-4333-8333-333333333332',
-      surfaceId: surfaceId!
-    }
-    await screen.rerender(
-      <RightSidebar
-        browserSurfaceCommand={generationlessClose}
-        isMaximized={false}
-        isOpen
-        modules={[BROWSER_MODULE]}
-        onBrowserSurfaceReady={ready}
-        onToggleMaximized={NOOP}
-      />
-    )
-    expect(getSurface(screen.container)).toBe(surface)
-
     const staleClose: BrowserSurfaceCommand = {
       schemaVersion: 1,
       kind: 'closeSurface',

@@ -44,9 +44,6 @@ export interface ProviderProfileConfigV1 {
   }
 }
 
-/** Explicit legacy name for consumers that project only the original Profile shape. */
-export type LegacyProviderProfileConfigV1 = ProviderProfileConfigV1
-
 export interface GenericProviderSettingsV1 {
   kind: 'generic'
 }

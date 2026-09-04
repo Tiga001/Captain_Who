@@ -5,20 +5,9 @@ import type { TrustedIpcMain } from '../ipc/trustedIpc'
 
 const getAllWindows = vi.hoisted(() => vi.fn())
 const fromWebContents = vi.hoisted(() => vi.fn())
-const isNotificationSupported = vi.hoisted(() => vi.fn())
-const createNativeNotification = vi.hoisted(() => vi.fn())
 
 vi.mock('electron', () => ({
-  BrowserWindow: { getAllWindows, fromWebContents },
-  Notification: class {
-    static isSupported(): boolean {
-      return isNotificationSupported()
-    }
-
-    constructor(options: unknown) {
-      return createNativeNotification(options)
-    }
-  }
+  BrowserWindow: { getAllWindows, fromWebContents }
 }))
 
 import { registerAutomationIpc } from '../ipc/automationIpc'
@@ -80,12 +69,6 @@ function createCore(overrides: Record<string, unknown> = {}) {
     listAutomationRuns: vi.fn(),
     getAutomationAttentionSummary: vi.fn(),
     acknowledgeAutomationAttention: vi.fn(),
-    claimAutomationNotifications: vi.fn((input: { claimToken: string }) =>
-      Promise.resolve({ schemaVersion: 1, claimToken: input.claimToken, notifications: [] })
-    ),
-    validateAutomationNotification: vi.fn(),
-    acknowledgeAutomationNotification: vi.fn(),
-    releaseAutomationNotification: vi.fn(),
     ...overrides
   }
 }
@@ -94,8 +77,6 @@ describe('Main Automation IPC', () => {
   beforeEach(() => {
     getAllWindows.mockReset().mockReturnValue([])
     fromWebContents.mockReset().mockReturnValue(null)
-    isNotificationSupported.mockReset().mockReturnValue(false)
-    createNativeNotification.mockReset()
   })
 
   it('registers the exact invocation allowlist and parses both sides strictly', async () => {
@@ -214,17 +195,5 @@ describe('Main Automation IPC', () => {
     ready?.({ sender: { isDestroyed: () => false, send } })
 
     expect(send).toHaveBeenCalledWith(HOST_CHANNELS.automations.resync, payload)
-  })
-
-  it('does not start the removed Automation-only native notification pump', async () => {
-    isNotificationSupported.mockReturnValue(true)
-    const core = createCore()
-    const trusted = createTrustedIpc()
-    const cleanup = registerAutomationIpc(trusted.ipc, core as never)
-    for (let index = 0; index < 8; index += 1) await Promise.resolve()
-
-    expect(core.claimAutomationNotifications).not.toHaveBeenCalled()
-    expect(createNativeNotification).not.toHaveBeenCalled()
-    cleanup()
   })
 })

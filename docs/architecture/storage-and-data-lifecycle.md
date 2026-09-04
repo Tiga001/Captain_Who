@@ -24,10 +24,10 @@ last_verified: 2026-09-03
 
 ## Schema 发布策略
 
-截至本次核验，当前唯一受支持的 canonical schema 是 **v33**（SQLite `PRAGMA user_version = 33`）：
+截至本次核验，当前唯一受支持的 canonical schema 是 **v34**（SQLite `PRAGMA user_version = 34`）：
 
-- `STORAGE_SCHEMA_VERSION = 33`；
-- canonical schema fingerprint 为 `sha256:5e1e404d74af5ed899d88dc8b5051e673ecd5beb967579af8f328b07b640c948`，由编译期常量和测试固定；
+- `STORAGE_SCHEMA_VERSION = 34`；
+- canonical schema fingerprint 为 `sha256:10c4053e2800f3f3d81acf76b03c0492248bc7c3724e8d58a9a4b6af05789c92`，由编译期常量和测试固定；
 - 空数据库在一个原子流程中建立完整当前 schema；
 - 非空的旧版、未知版或结构被篡改的开发数据库返回 `development_storage_schema_reset_required`；
 - 当前没有受支持的原地升级链。
@@ -36,7 +36,7 @@ last_verified: 2026-09-03
 
 开发库重置前应先关闭应用并备份数据根；优先使用受管 `storage:reset-dev` 流程。不要只删除 `storage.sqlite` 而遗留 attachments、artifacts、spool 或 lock 文件。
 
-`storage:reset-dev` 不是 schema migration：它始终新建 v33 数据库，且不恢复 Conversation、Project 或任何 Agent/runtime 记录。正式工具只从 exact current v33 schema 提取 allowlisted configuration；旧 schema fail closed，不保留永久兼容读取或明文字段恢复路径。开发期跨 schema 重建若确有必要，必须作为一次性、代码审阅过的受控操作执行，并在验证目标库后删除临时转换代码。
+`storage:reset-dev` 不是 schema migration：它始终新建 v34 数据库，且不恢复 Conversation、Project 或任何 Agent/runtime 记录。正式工具只从 exact current v34 schema 提取 allowlisted configuration；旧 schema fail closed，不保留永久兼容读取或明文字段恢复路径。开发期跨 schema 重建若确有必要，必须作为一次性、代码审阅过的受控操作执行，并在验证目标库后删除临时转换代码。
 
 ## 领域数据地图
 
@@ -63,14 +63,13 @@ DDL 按领域大致分为：
 
 ## Scheduled Automation 表组
 
-Automation 在 canonical schema v33 中使用四张表，完整列、CHECK、索引和 trigger 仍以 DDL 为准：
+Automation 在 canonical schema v34 中使用当前通用通知表和自动化领域表，完整列、CHECK、索引和 trigger 仍以 DDL 为准：
 
-| 表                               | 权威内容                                                                        | 关键不变量                                                                                                        |
-| -------------------------------- | ------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
-| `automations`                    | Task 配置、状态/健康、目标快照、权限/推理/schedule JSON、next/last、CAS         | `active` / `paused` 与 `ok` / `blocked` 正交；revision 单调；paused/blocked/tombstone 时没有未来 `next_run_at`    |
-| `automation_runs`                | 不可变配置快照、trigger、admission lease、Agent/消息绑定、报告与终态            | 同 Task 只允许一个非终态 Run；scheduled occurrence 和 manual request 各自唯一；内部 `admitting` 对外为 `starting` |
-| `automation_events`              | 全局有序的失效/refetch 事件                                                     | AUTOINCREMENT sequence；Task/Run revision 与事件绑定；公开通知不携带内部 payload JSON                             |
-| `automation_notification_outbox` | `run_result`、`approval_required`、`configuration_blocked` 的 producer/兼容状态 | 新行原子投影 shared event 并转 `projected`；按 Run/Task revision 去重；不是当前 Main native claim authority       |
+| 表                  | 权威内容                                                                | 关键不变量                                                                                                        |
+| ------------------- | ----------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| `automations`       | Task 配置、状态/健康、目标快照、权限/推理/schedule JSON、next/last、CAS | `active` / `paused` 与 `ok` / `blocked` 正交；revision 单调；paused/blocked/tombstone 时没有未来 `next_run_at`    |
+| `automation_runs`   | 不可变配置快照、trigger、admission lease、Agent/消息绑定、报告与终态    | 同 Task 只允许一个非终态 Run；scheduled occurrence 和 manual request 各自唯一；内部 `admitting` 对外为 `starting` |
+| `automation_events` | 全局有序的失效/refetch 事件                                             | AUTOINCREMENT sequence；Task/Run revision 与事件绑定；公开通知不携带内部 payload JSON                             |
 
 Task 的权限、destination、schedule 和 reasoning 使用版本化 JSON；Run 在排队时保存最多 128 KiB 的 `config_snapshot_json`，worker 不得从更新后的 Task 重建 authority。数据库唯一索引负责 manual request 幂等、同一 scheduled occurrence 去重和每 Task 单非终态 Run，进程内集合或 Renderer 缓存不承担这些约束。
 
@@ -79,8 +78,8 @@ Automation 删除当前是 tombstone，不物理删除 Task/Run/Event；pending 
 HumanRoot 与 Automation 共用 `notification_settings`、`notification_events`、
 `notification_batches`、`notification_batch_items`、`notification_change_events`。event 是不可变事实，
 seen/resolved/superseded 是其 projection；batch 负责 collecting/pending/claimed/displayed/sealed/suppressed
-原生投递生命周期。legacy Automation outbox 的 trigger 在同一 transaction 生成 generic event，因此
-`automation.notifications.*` 与 `notifications.*` 不能被实现成两套独立投递真源。
+原生投递生命周期。Automation producer 在同一业务事务中直接写入 generic event；不得重新引入独立的
+Automation notification outbox、投递 RPC 或第二套 claim/acknowledge authority。
 
 ## 事务原则
 
@@ -100,7 +99,7 @@ Automation 还要求两个专用原子边界：
 
 ## 启动与崩溃恢复
 
-Bootstrap 大致执行：解析数据根与锁、打开/校验 canonical schema v33、构造 repositories/services、加载凭据 backend、MCP Server/Provider/Skills/Artifact Runtime、随后运行领域 reconciliation。持久凭据 backend 不可用或 credential reference 无法解析时必须保留公开配置并报告 `unavailable`/配置错误，不能把缺失凭据当作空值覆盖；只有实际需要该连接的运行应被阻断。
+Bootstrap 大致执行：解析数据根与锁、打开/校验 canonical schema v34、构造 repositories/services、加载凭据 backend、MCP Server/Provider/Skills/Artifact Runtime、随后运行领域 reconciliation。持久凭据 backend 不可用或 credential reference 无法解析时必须保留公开配置并报告 `unavailable`/配置错误，不能把缺失凭据当作空值覆盖；只有实际需要该连接的运行应被阻断。
 
 恢复必须按“数据库已提交状态”判断，不按 Renderer 缓存判断。当前需要关注：
 
@@ -135,7 +134,7 @@ Automation 启动恢复区分 admission 前后：旧进程遗留的全部 `admit
 
 当前开发策略以整套数据根备份/重置为主。复制在线 SQLite 文件并不等价于一致备份；应在应用关闭、锁释放后复制数据库及其配套文件目录，或使用受支持的 SQLite snapshot/backup 流程。
 
-当前 v33 SQLite snapshot 只含模型/搜索 credential reference 与非秘密元数据，不含这些连接的当前 secret 字节；旧 schema 生成的历史备份仍可能含明文 Token/Key，必须继续按秘密材料保护。只恢复 `storage.sqlite` 不会恢复操作系统凭据，跨设备、跨系统账户、签名身份变化或凭据 backend 丢失后，界面可能显示凭据不可用，此时只能由用户替换或清除。未签名 macOS 开发构建的私有凭据文件位于数据根，因此“整根复制”仍会复制 secret，不能当作普通诊断包。
+当前 v34 SQLite snapshot 只含模型/搜索 credential reference 与非秘密元数据，不含这些连接的当前 secret 字节；旧 schema 生成的历史备份仍可能含明文 Token/Key，必须继续按秘密材料保护。只恢复 `storage.sqlite` 不会恢复操作系统凭据，跨设备、跨系统账户、签名身份变化或凭据 backend 丢失后，界面可能显示凭据不可用，此时只能由用户替换或清除。未签名 macOS 开发构建的私有凭据文件位于数据根，因此“整根复制”仍会复制 secret，不能当作普通诊断包。
 
 删除 SQLite reference、清除凭据或移除私有文件只表达应用层删除意图；文件系统、SSD、系统备份和操作系统凭据后端可能保留副本，产品不承诺安全擦除。怀疑泄露时应在 Provider 侧撤销或轮换凭据。
 
@@ -143,7 +142,7 @@ Automation 启动恢复区分 admission 前后：旧进程遗留的全部 `admit
 
 ## 不变量
 
-1. `canonical_schema.sql`、canonical schema v33 的 version 与 fingerprint 必须一致。
+1. `canonical_schema.sql`、canonical schema v34 的 version 与 fingerprint 必须一致。
 2. 非空非当前 schema fail closed，不自动执行未审计迁移。
 3. 所有领域对象在 service SQL 边界校验 conversation/project/Run 归属。
 4. 外部副作用与数据库提交之间的崩溃窗口必须有明确恢复状态。
@@ -187,7 +186,7 @@ Automation 启动恢复区分 admission 前后：旧进程遗留的全部 `admit
 
 ## 变更检查表
 
-- [ ] 修改 `canonical_schema.sql` 后同步 canonical version、fingerprint 和 fresh-schema 测试；若版本不再是 v33，同时更新本文当前快照。
+- [ ] 修改 `canonical_schema.sql` 后同步 canonical version、fingerprint 和 fresh-schema 测试；若版本不再是 v34，同时更新本文当前快照。
 - [ ] 明确旧数据库行为；没有经批准的迁移链时保持 reset-required。
 - [ ] 新表/列定义 owner、FK、唯一键、索引、删除/保留和敏感分类。
 - [ ] 跨表操作在一个 service 事务中完成，并有冲突/幂等测试。

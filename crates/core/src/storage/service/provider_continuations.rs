@@ -56,7 +56,7 @@ impl StorageService {
         .map_err(storage_error)
     }
 
-    #[allow(dead_code)] // Exact-ref Vault API; normal hydration uses conversation-wide loading.
+    #[allow(dead_code)] // Exact-ref integrity lookup; normal hydration uses conversation-wide loading.
     pub(crate) fn load_provider_continuation(
         &self,
         continuation_id: &str,
@@ -135,7 +135,6 @@ impl StorageService {
         .map_err(storage_error)
     }
 
-    #[allow(dead_code)] // Exact-ref Vault API; transactional lifecycle paths bypass this wrapper.
     pub(crate) fn release_provider_continuation(
         &self,
         continuation_id: &str,

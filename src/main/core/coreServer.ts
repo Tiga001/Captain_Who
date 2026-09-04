@@ -74,14 +74,6 @@ import type {
   AutomationGetInput,
   AutomationListInput,
   AutomationListOutput,
-  AutomationNotificationAcknowledgeInput,
-  AutomationNotificationAcknowledgeOutput,
-  AutomationNotificationReleaseInput,
-  AutomationNotificationReleaseOutput,
-  AutomationNotificationValidateInput,
-  AutomationNotificationValidateOutput,
-  AutomationNotificationsClaimInput,
-  AutomationNotificationsClaimOutput,
   AutomationResync,
   AutomationRun,
   AutomationRunNowInput,
@@ -220,6 +212,22 @@ import type {
   StorageUiPreferencesRecord
 } from '@mycopilot/protocol'
 import {
+  AGENT_COLLABORATION_APPROVALS_DECIDE_METHOD,
+  AGENT_COLLABORATION_APPROVALS_LIST_METHOD,
+  AGENT_COLLABORATION_EVENT_NOTIFICATION_METHOD,
+  AGENT_COLLABORATION_GET_AGENT_METHOD,
+  AGENT_COLLABORATION_GET_TREE_METHOD,
+  AGENT_COLLABORATION_LIST_EVENTS_METHOD,
+  AGENT_COLLABORATION_LOAD_OBSERVER_CONVERSATION_METHOD,
+  AGENT_COLLABORATION_LOCATE_CONVERSATION_METHOD,
+  AGENT_COLLABORATION_OBSERVER_EVENT_NOTIFICATION_METHOD,
+  AGENT_COLLABORATION_RESYNC_NOTIFICATION_METHOD,
+  AGENT_COLLABORATION_TEMPLATES_CREATE_METHOD,
+  AGENT_COLLABORATION_TEMPLATES_DELETE_METHOD,
+  AGENT_COLLABORATION_TEMPLATES_LIST_METHOD,
+  AGENT_COLLABORATION_TEMPLATES_SET_ENABLED_METHOD,
+  AGENT_COLLABORATION_TEMPLATES_SET_PROJECT_ASSIGNMENT_METHOD,
+  AGENT_COLLABORATION_TEMPLATES_UPDATE_METHOD,
   AUTOMATION_ATTENTION_ACKNOWLEDGE_METHOD,
   AUTOMATION_ATTENTION_SUMMARY_METHOD,
   AUTOMATION_CREATE_METHOD,
@@ -228,10 +236,6 @@ import {
   AUTOMATION_EVENT_NOTIFICATION_METHOD,
   AUTOMATION_GET_METHOD,
   AUTOMATION_LIST_METHOD,
-  AUTOMATION_NOTIFICATIONS_ACKNOWLEDGE_METHOD,
-  AUTOMATION_NOTIFICATIONS_CLAIM_METHOD,
-  AUTOMATION_NOTIFICATIONS_RELEASE_METHOD,
-  AUTOMATION_NOTIFICATIONS_VALIDATE_METHOD,
   AUTOMATION_RESYNC_NOTIFICATION_METHOD,
   AUTOMATION_RUN_NOW_METHOD,
   AUTOMATION_RUNS_LIST_METHOD,
@@ -285,14 +289,6 @@ import {
   parseAutomationGetInput,
   parseAutomationListInput,
   parseAutomationListOutput,
-  parseAutomationNotificationAcknowledgeInput,
-  parseAutomationNotificationAcknowledgeOutput,
-  parseAutomationNotificationReleaseInput,
-  parseAutomationNotificationReleaseOutput,
-  parseAutomationNotificationValidateInput,
-  parseAutomationNotificationValidateOutput,
-  parseAutomationNotificationsClaimInput,
-  parseAutomationNotificationsClaimOutput,
   parseAutomationResync,
   parseAutomationRun,
   parseAutomationRunNowInput,
@@ -538,24 +534,6 @@ const STORAGE_DELETE_BROWSER_HISTORY_METHOD = 'storage.deleteBrowserHistory'
 const STORAGE_SUMMARIZE_BROWSER_OWNED_DATA_METHOD = 'storage.summarizeBrowserOwnedData'
 const STORAGE_CLEAR_BROWSER_OWNED_DATA_METHOD = 'storage.clearBrowserOwnedData'
 const AGENT_REWRITE_CONVERSATION_TURN_METHOD = 'agent.rewriteConversationTurn'
-const AGENT_COLLABORATION_GET_TREE_METHOD = 'agent.collaboration.getTree'
-const AGENT_COLLABORATION_GET_AGENT_METHOD = 'agent.collaboration.getAgent'
-const AGENT_COLLABORATION_LOCATE_CONVERSATION_METHOD = 'agent.collaboration.locateConversation'
-const AGENT_COLLABORATION_LOAD_OBSERVER_CONVERSATION_METHOD =
-  'agent.collaboration.loadObserverConversation'
-const AGENT_COLLABORATION_LIST_EVENTS_METHOD = 'agent.collaboration.listEvents'
-const AGENT_COLLABORATION_TEMPLATES_LIST_METHOD = 'agent.collaboration.templates.list'
-const AGENT_COLLABORATION_TEMPLATES_CREATE_METHOD = 'agent.collaboration.templates.create'
-const AGENT_COLLABORATION_TEMPLATES_UPDATE_METHOD = 'agent.collaboration.templates.update'
-const AGENT_COLLABORATION_TEMPLATES_SET_ENABLED_METHOD = 'agent.collaboration.templates.setEnabled'
-const AGENT_COLLABORATION_TEMPLATES_SET_PROJECT_ASSIGNMENT_METHOD =
-  'agent.collaboration.templates.setProjectAssignment'
-const AGENT_COLLABORATION_TEMPLATES_DELETE_METHOD = 'agent.collaboration.templates.delete'
-const AGENT_COLLABORATION_APPROVALS_LIST_METHOD = 'agent.collaboration.approvals.list'
-const AGENT_COLLABORATION_APPROVALS_DECIDE_METHOD = 'agent.collaboration.approvals.decide'
-const AGENT_COLLABORATION_EVENT_NOTIFICATION_METHOD = 'agent.collaboration.event'
-const AGENT_COLLABORATION_OBSERVER_EVENT_NOTIFICATION_METHOD = 'agent.collaboration.observerEvent'
-const AGENT_COLLABORATION_RESYNC_NOTIFICATION_METHOD = 'agent.collaboration.resync'
 
 function validateProviderTransitionResponseIdentity(
   request: { conversationId: string; targetModelId: string },
@@ -1029,94 +1007,6 @@ export class CoreServer {
         const output = parseAutomationAttentionAcknowledgeOutput(value)
         if (output.attention.attentionId !== request.attentionId)
           throw new Error('Invalid Automation attention response identity')
-        return output
-      })
-      .catch(rethrowValidatedAutomationError)
-  }
-
-  /** Host-only durable native-notification delivery; never exposed as a Renderer invoke. */
-  claimAutomationNotifications(
-    input: AutomationNotificationsClaimInput
-  ): Promise<AutomationNotificationsClaimOutput> {
-    const request = parseAutomationNotificationsClaimInput(input)
-    return this.rpc
-      .request<unknown, AutomationNotificationsClaimInput>(
-        AUTOMATION_NOTIFICATIONS_CLAIM_METHOD,
-        request
-      )
-      .then((value) => {
-        const output = parseAutomationNotificationsClaimOutput(value)
-        if (output.claimToken !== request.claimToken) {
-          throw new Error('Invalid Automation notification claim response identity')
-        }
-        const notificationIds = new Set(
-          output.notifications.map((notification) => notification.notificationId)
-        )
-        if (notificationIds.size !== output.notifications.length) {
-          throw new Error('Invalid duplicate Automation notification claim response')
-        }
-        return output
-      })
-      .catch(rethrowValidatedAutomationError)
-  }
-
-  /** Host-only final authority check immediately before Electron native display. */
-  validateAutomationNotification(
-    input: AutomationNotificationValidateInput
-  ): Promise<AutomationNotificationValidateOutput> {
-    const request = parseAutomationNotificationValidateInput(input)
-    return this.rpc
-      .request<unknown, AutomationNotificationValidateInput>(
-        AUTOMATION_NOTIFICATIONS_VALIDATE_METHOD,
-        request
-      )
-      .then((value) => {
-        const output = parseAutomationNotificationValidateOutput(value)
-        if (
-          output.notificationId !== request.notificationId ||
-          (output.notification !== null &&
-            output.notification.notificationId !== request.notificationId)
-        ) {
-          throw new Error('Invalid Automation notification validation response identity')
-        }
-        return output
-      })
-      .catch(rethrowValidatedAutomationError)
-  }
-
-  acknowledgeAutomationNotification(
-    input: AutomationNotificationAcknowledgeInput
-  ): Promise<AutomationNotificationAcknowledgeOutput> {
-    const request = parseAutomationNotificationAcknowledgeInput(input)
-    return this.rpc
-      .request<unknown, AutomationNotificationAcknowledgeInput>(
-        AUTOMATION_NOTIFICATIONS_ACKNOWLEDGE_METHOD,
-        request
-      )
-      .then((value) => {
-        const output = parseAutomationNotificationAcknowledgeOutput(value)
-        if (output.notificationId !== request.notificationId) {
-          throw new Error('Invalid Automation notification acknowledge response identity')
-        }
-        return output
-      })
-      .catch(rethrowValidatedAutomationError)
-  }
-
-  releaseAutomationNotification(
-    input: AutomationNotificationReleaseInput
-  ): Promise<AutomationNotificationReleaseOutput> {
-    const request = parseAutomationNotificationReleaseInput(input)
-    return this.rpc
-      .request<unknown, AutomationNotificationReleaseInput>(
-        AUTOMATION_NOTIFICATIONS_RELEASE_METHOD,
-        request
-      )
-      .then((value) => {
-        const output = parseAutomationNotificationReleaseOutput(value)
-        if (output.notificationId !== request.notificationId || output.retryAt < request.retryAt) {
-          throw new Error('Invalid Automation notification release response identity')
-        }
         return output
       })
       .catch(rethrowValidatedAutomationError)

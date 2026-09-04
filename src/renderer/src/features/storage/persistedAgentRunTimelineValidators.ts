@@ -59,8 +59,11 @@ export function parseTimelineItem(value: unknown): ChatAgentTimelineItem | undef
   ) {
     let identity: AgentToolIdentity | undefined
     if (hasOwn(value, 'identity')) {
-      identity = parsePersistedTimelineToolIdentity(value.identity)
-      if (identity === undefined) return undefined
+      try {
+        identity = parseAgentToolIdentityForHost(value.identity)
+      } catch {
+        return undefined
+      }
     }
     return {
       ...(value as unknown as Extract<ChatAgentTimelineItem, { type: 'tool_call' }>),
@@ -114,41 +117,4 @@ export function parseTimelineItem(value: unknown): ChatAgentTimelineItem | undef
     return value as unknown as ChatAgentTimelineItem
   }
   return undefined
-}
-
-/**
- * Historical AgentRun JSON may contain the exact pre-Catalog built-in capability identity. That
- * shape is useful only to label an old timeline row, so collapse it to the generic, non-authority
- * identity used by presentation. The live Host parser above remains strict for every current wire
- * event, and an added/missing legacy field fails closed here.
- */
-function parsePersistedTimelineToolIdentity(value: unknown): AgentToolIdentity | undefined {
-  try {
-    return parseAgentToolIdentityForHost(value)
-  } catch {
-    // Continue only for the one exact durable shape shipped before the Catalog identity binding.
-  }
-  if (
-    !isRecord(value) ||
-    !hasExactKeys(value, [
-      'type',
-      'capabilityId',
-      'managedMcpId',
-      'manifestDigest',
-      'toolId',
-      'modelName'
-    ]) ||
-    value.type !== 'builtin_capability' ||
-    value.capabilityId !== 'browser_automation' ||
-    value.managedMcpId !== 'builtin.browser_automation.mcp' ||
-    !isBoundedString(value.manifestDigest, 71) ||
-    !/^sha256:[a-f0-9]{64}$/.test(value.manifestDigest) ||
-    !isBoundedString(value.toolId, 128) ||
-    !/^[A-Za-z0-9_.-]+$/.test(value.toolId) ||
-    !isBoundedString(value.modelName, 64) ||
-    !/^[A-Za-z0-9_-]+$/.test(value.modelName)
-  ) {
-    return undefined
-  }
-  return { type: 'unregistered', toolName: value.modelName }
 }

@@ -775,7 +775,6 @@ async function main(): Promise<void> {
       artifactBroker,
       fileBroker,
       finalizeBrowserRun: (runId) => networkGuard.finalizeRun(runId),
-      getActiveSurfaceIdentity: () => manager.getActiveSurfaceIdentity(),
       getAgentDownloadSnapshot: (input) => networkGuard.agentDownloadSnapshot(input),
       sensitiveTargetBindings,
       releaseBrowserCapability: (activationId) => networkGuard.releaseCapability(activationId),

@@ -3,10 +3,9 @@ use crate::storage::automation_repository::{
     AutomationAttentionListCursor, AutomationAttentionListPage, AutomationAttentionRecord,
     AutomationAttentionSummary, AutomationCompareAndSetOutcome, AutomationConfigRecord,
     AutomationCreateOutcome, AutomationEventRecord, AutomationListInput, AutomationListPage,
-    AutomationNotificationRecord, AutomationRecord, AutomationRunEnqueueOutcome,
-    AutomationRunListCursor, AutomationRunListPage, AutomationRunMutationOutcome,
-    AutomationRunRecord, AutomationRunRecoveryRecord, AutomationRunSettlementInput,
-    NewAutomationNotificationRecord, NewAutomationRecord, NewManualAutomationRunRecord,
+    AutomationRecord, AutomationRunEnqueueOutcome, AutomationRunListCursor, AutomationRunListPage,
+    AutomationRunMutationOutcome, AutomationRunRecord, AutomationRunRecoveryRecord,
+    AutomationRunSettlementInput, NewAutomationRecord, NewManualAutomationRunRecord,
     NewScheduledAutomationRunRecord, ScheduledAutomationRunEnqueueOutcome, StoredAutomationStatus,
 };
 
@@ -280,97 +279,6 @@ impl StorageService {
         let connection = self.state.connection()?;
         automation_repository::list_cancellation_requested_automation_runs(&connection)
             .map_err(storage_error)
-    }
-
-    pub fn enqueue_automation_notification(
-        &self,
-        input: &NewAutomationNotificationRecord,
-    ) -> Result<AutomationNotificationRecord, String> {
-        let mut connection = self.state.connection()?;
-        automation_repository::enqueue_automation_notification(&mut connection, input)
-            .map_err(storage_error)
-    }
-
-    pub fn claim_pending_automation_notifications(
-        &self,
-        claim_token: &str,
-        now: i64,
-        lease_duration_ms: i64,
-        limit: usize,
-    ) -> Result<Vec<AutomationNotificationRecord>, String> {
-        let mut connection = self.state.connection()?;
-        automation_repository::claim_pending_automation_notifications(
-            &mut connection,
-            claim_token,
-            now,
-            lease_duration_ms,
-            limit,
-        )
-        .map_err(storage_error)
-    }
-
-    pub fn acknowledge_automation_notification_delivered(
-        &self,
-        notification_id: &str,
-        claim_token: &str,
-        delivered_at: i64,
-    ) -> Result<Option<AutomationNotificationRecord>, String> {
-        let mut connection = self.state.connection()?;
-        automation_repository::acknowledge_automation_notification_delivered(
-            &mut connection,
-            notification_id,
-            claim_token,
-            delivered_at,
-        )
-        .map_err(storage_error)
-    }
-
-    pub fn validate_claimed_automation_notification(
-        &self,
-        notification_id: &str,
-        claim_token: &str,
-        now: i64,
-    ) -> Result<Option<AutomationNotificationRecord>, String> {
-        let mut connection = self.state.connection()?;
-        automation_repository::validate_claimed_automation_notification(
-            &mut connection,
-            notification_id,
-            claim_token,
-            now,
-        )
-        .map_err(storage_error)
-    }
-
-    pub fn release_automation_notification(
-        &self,
-        notification_id: &str,
-        claim_token: &str,
-        retry_at: i64,
-        error_code: &str,
-    ) -> Result<Option<AutomationNotificationRecord>, String> {
-        let mut connection = self.state.connection()?;
-        automation_repository::release_automation_notification(
-            &mut connection,
-            notification_id,
-            claim_token,
-            retry_at,
-            error_code,
-        )
-        .map_err(storage_error)
-    }
-
-    pub fn suppress_automation_notification(
-        &self,
-        notification_id: &str,
-        suppressed_at: i64,
-    ) -> Result<Option<AutomationNotificationRecord>, String> {
-        let mut connection = self.state.connection()?;
-        automation_repository::suppress_automation_notification(
-            &mut connection,
-            notification_id,
-            suppressed_at,
-        )
-        .map_err(storage_error)
     }
 
     pub fn list_automation_runs(

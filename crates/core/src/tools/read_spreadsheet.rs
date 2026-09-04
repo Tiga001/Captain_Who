@@ -32,11 +32,10 @@ impl AgentTool for ReadSpreadsheetTool {
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "path": { "type": "string", "description": "Workspace-relative .xlsx/.csv/.tsv path or @attachments/... readPath." },
-                    "filePath": { "type": "string", "description": "Alias for path." },
-                    "maxChars": { "type": "integer", "minimum": 1, "description": "Deprecated soft compatibility hint. Exact History capture is never limited by this value; model output uses the shared 10K gate." }
+                    "path": { "type": "string", "minLength": 1, "description": "Workspace-relative .xlsx/.csv/.tsv path or @attachments/... readPath." }
                 },
-                "required": ["path"]
+                "required": ["path"],
+                "additionalProperties": false
             }),
             safety: AgentToolSafety::ReadOnly,
             requires_workspace: false,
@@ -49,7 +48,6 @@ impl AgentTool for ReadSpreadsheetTool {
         context.check_cancelled()?;
         let args: ReadSpreadsheetArgs = serde_json::from_value(args)
             .map_err(|error| AgentError::new(format!("read_spreadsheet 参数无效：{error}")))?;
-        let _requested_max_chars = args.max_chars;
         let path = args.path()?;
         let resolved = resolve_document_path(context, path, &["xlsx", "csv", "tsv"])?;
         let cancellation_token = context.cancellation_token();
@@ -107,21 +105,19 @@ impl AgentTool for ReadSpreadsheetTool {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ReadSpreadsheetArgs {
-    path: Option<String>,
-    file_path: Option<String>,
-    max_chars: Option<usize>,
+    path: String,
 }
 
 impl ReadSpreadsheetArgs {
     fn path(&self) -> AgentResult<&str> {
-        self.path
-            .as_deref()
-            .or(self.file_path.as_deref())
-            .map(str::trim)
-            .filter(|path| !path.is_empty())
-            .ok_or_else(|| AgentError::new("read_spreadsheet.path 不能为空。"))
+        let path = self.path.trim();
+        if path.is_empty() {
+            Err(AgentError::new("read_spreadsheet.path 不能为空。"))
+        } else {
+            Ok(path)
+        }
     }
 }
 
@@ -277,6 +273,7 @@ fn collect_node_text(node: Node<'_, '_>) -> String {
 #[cfg(test)]
 mod tests {
     use super::super::{ToolExecutionContext, ToolRegistry};
+    use super::{AgentTool, ReadSpreadsheetArgs, ReadSpreadsheetTool};
     use crate::protocol::{
         AgentApprovalStatus, AgentRunContext, AgentToolCall, AgentWorkspaceContext,
     };
@@ -298,7 +295,7 @@ mod tests {
         let call = AgentToolCall {
             id: "call-1".to_string(),
             tool: "read_spreadsheet".to_string(),
-            args: json!({ "path": "sheet.xlsx", "maxChars": 1 }),
+            args: json!({ "path": "sheet.xlsx" }),
             approval_status: AgentApprovalStatus::NotRequired,
             reason: None,
         };
@@ -312,6 +309,29 @@ mod tests {
         assert!(text.contains("B1=42"));
         assert_eq!(value["truncatedAtSource"], false);
         assert_eq!(value["omittedBytes"], 0);
+    }
+
+    #[test]
+    fn schema_and_wire_accept_only_current_path() {
+        let definition = ReadSpreadsheetTool.definition();
+        assert_eq!(definition.input_schema["required"], json!(["path"]));
+        assert_eq!(definition.input_schema["additionalProperties"], false);
+        assert_eq!(
+            definition.input_schema["properties"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .collect::<Vec<_>>(),
+            vec!["path"]
+        );
+        for value in [
+            json!({}),
+            json!({ "path": null }),
+            json!({ "filePath": "legacy.xlsx" }),
+            json!({ "path": "sheet.xlsx", "maxChars": 1 }),
+        ] {
+            assert!(serde_json::from_value::<ReadSpreadsheetArgs>(value).is_err());
+        }
     }
 
     struct TestWorkspace {

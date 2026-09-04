@@ -46,7 +46,6 @@ const REINITIALIZE_TABLES: &[&str] = &[
 const DO_NOT_COPY_TABLES: &[&str] = &[
     "agent_usage_records",
     "automation_events",
-    "automation_notification_outbox",
     "automation_runs",
     "automations",
     "browser_downloads",

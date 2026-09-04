@@ -212,7 +212,9 @@ fn validate_new_event(input: &NewNotificationEventRecord) -> rusqlite::Result<&'
             .is_some_and(|value| !valid_id(value))
         || (input.source_kind == "automation" && input.automation_id.is_none())
         || (input.source_kind == "human_root" && input.automation_id.is_some())
-        || (input.notification_kind == "approval_required" && input.approval_action_id.is_none())
+        || (input.notification_kind == "approval_required"
+            && input.source_kind == "human_root"
+            && input.approval_action_id.is_none())
     {
         return Err(rusqlite::Error::InvalidQuery);
     }
@@ -324,6 +326,24 @@ pub fn resolve_notification_events_by_supersession_key_in_transaction(
         connection,
         "supersession_key = ?1",
         params![supersession_key],
+        resolved_at,
+    )
+}
+
+/// Resolves only the transient approval fact for an Automation run. A terminal run-result fact
+/// shares the same supersession key and must remain untouched so failed runs can still notify.
+pub fn resolve_automation_approval_notification_in_transaction(
+    connection: &Connection,
+    automation_run_id: &str,
+    resolved_at: i64,
+) -> rusqlite::Result<usize> {
+    if !valid_id(automation_run_id) || resolved_at < 0 {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    resolve_where(
+        connection,
+        "source_kind = 'automation' AND run_id = ?1 AND notification_kind = 'approval_required'",
+        params![automation_run_id],
         resolved_at,
     )
 }

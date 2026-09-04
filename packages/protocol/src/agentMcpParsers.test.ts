@@ -17,7 +17,7 @@ import {
   parseAgentMcpToolInvocationEvent,
   parseAgentToolIdentityForHost,
   parsePendingAgentActionSnapshotsForHost
-} from './agentMcpParsers'
+} from './index'
 
 const serverId = 'ce18d23c-e74f-4e89-8695-ce1e7c60ec92'
 const actionId = '94c2f39c-ddaa-49bb-a3ef-8756053d68c8'

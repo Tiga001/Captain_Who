@@ -224,13 +224,13 @@ notification 只是失效信号。Renderer 通过 tree snapshot 与 `agent.colla
 
 ## 8. Schema
 
-当前 canonical storage 是 **v33**。唯一真源：
+当前 canonical storage 是 **v34**。唯一真源：
 
 ```rust
-pub const STORAGE_SCHEMA_VERSION: i32 = 33;
+pub const STORAGE_SCHEMA_VERSION: i32 = 34;
 ```
 
-版本不等于 33、catalog fingerprint 不匹配、非空未版本化库或外键违规都会返回 `development_storage_schema_reset_required`，原库不做原地改写。历史文档中的 v7/v8/v10/v11/v17/v19/v20/v22/v23/v24/v25/v26 只是 rollout 阶段标签，不是当前兼容声明；release runner 的 storage step 已标为 canonical v33。
+版本不等于 34、catalog fingerprint 不匹配、非空未版本化库或外键违规都会返回 `development_storage_schema_reset_required`，原库不做原地改写。历史文档中的 v7/v8/v10/v11/v17/v19/v20/v22/v23/v24/v25/v26 只是 rollout 阶段标签，不是当前兼容声明；release runner 的 storage step 已标为 canonical v34。
 
 ## 9. 代码真源
 
@@ -286,5 +286,5 @@ pnpm exec vitest run --project browser src/renderer/src/features/agentCollaborat
 - [ ] 新 UI 状态是否来自持久 semantic event，而不是模型文本或时间戳？
 - [ ] 新 tree-shared 资源是否只从 Host-resolved root identity 授权，并覆盖 root/child/sibling 与跨树/普通 Conversation 负向测试？
 - [ ] terminal parent Timeline 是否在 final stream 开始处冻结，且后续事件只留在 event log/Agent Center？
-- [ ] 是否更新 schema v33 后继版本、fingerprint、reset、双语言 fixture 和 release gate？
+- [ ] 是否更新 schema v34 后继版本、fingerprint、reset、双语言 fixture 和 release gate？
 - [ ] 是否同步更新当前文档；历史轮次只在 archive 中追加注释？

@@ -48,11 +48,7 @@
     "delete": "automation.delete",
     "listRuns": "automation.runs.list",
     "attentionSummary": "automation.attention.summary",
-    "acknowledgeAttention": "automation.attention.acknowledge",
-    "claimNotifications": "automation.notifications.claim",
-    "validateNotification": "automation.notifications.validate",
-    "acknowledgeNotification": "automation.notifications.acknowledge",
-    "releaseNotification": "automation.notifications.release"
+    "acknowledgeAttention": "automation.attention.acknowledge"
   },
   "notifications": {
     "event": "automation.event",
@@ -76,42 +72,6 @@
     "months": null,
     "anchorAt": 1787414400000,
     "timezone": "Asia/Shanghai"
-  },
-  "notificationClaimOutput": {
-    "schemaVersion": 1,
-    "claimToken": "notification-claim-1",
-    "notifications": [
-      {
-        "schemaVersion": 1,
-        "notificationId": "automation-notification-1",
-        "automationId": "automation-1",
-        "runId": "automation-run-1",
-        "kind": "run_result",
-        "title": "Daily brief completed",
-        "body": "The scheduled task finished.",
-        "conversationId": "conversation-1",
-        "userMessageId": "message-user-1",
-        "assistantMessageId": "message-assistant-1",
-        "createdAt": 1787414400000
-      }
-    ]
-  },
-  "notificationValidateOutput": {
-    "schemaVersion": 1,
-    "notificationId": "automation-notification-1",
-    "notification": {
-      "schemaVersion": 1,
-      "notificationId": "automation-notification-1",
-      "automationId": "automation-1",
-      "runId": "automation-run-1",
-      "kind": "run_result",
-      "title": "Daily brief completed",
-      "body": "The scheduled task finished.",
-      "conversationId": "conversation-1",
-      "userMessageId": "message-user-1",
-      "assistantMessageId": "message-assistant-1",
-      "createdAt": 1787414400000
-    }
   },
   "createInput": {
     "schemaVersion": 1,

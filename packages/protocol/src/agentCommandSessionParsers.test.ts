@@ -7,7 +7,7 @@ import {
   parseAgentCommandSessionTranscript
 } from './agentCommandSessionParsers'
 import { AGENT_COMMAND_SESSION_MAX_TRANSCRIPT_CHUNKS } from './agent'
-import { parseAgentEventForHost } from './agentMcpParsers'
+import { parseAgentEventForHost } from './agentParsers/events'
 
 const sessionId = 'cmd_1234567890abcdef1234567890abcdef'
 const publishedImage = {

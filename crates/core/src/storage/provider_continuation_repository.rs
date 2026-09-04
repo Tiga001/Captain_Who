@@ -166,7 +166,6 @@ pub(crate) enum ProviderContinuationStoreOutcome {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)] // Exact-ref lifecycle result consumed by the controlled Vault release API.
 pub(crate) enum ProviderContinuationReleaseOutcome {
     Released,
     AlreadyReleased,
@@ -495,7 +494,7 @@ fn load_runtime_tool_identities(
     identities
 }
 
-#[allow(dead_code)] // Exact-ref Vault restore; normal hydration uses the ordered conversation list.
+#[allow(dead_code)] // Exact-ref integrity lookup; normal hydration uses the ordered conversation list.
 pub(crate) fn load(
     connection: &Connection,
     continuation_id: &str,
@@ -1230,7 +1229,6 @@ pub(crate) fn reconcile_staged_projections_at_startup(
     })
 }
 
-#[allow(dead_code)] // Exact-ref Vault release; compaction/edit use caller-owned transactions.
 pub(crate) fn release(
     connection: &Connection,
     continuation_id: &str,

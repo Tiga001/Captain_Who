@@ -257,7 +257,6 @@ impl OfficeTool {
         context.check_cancelled()?;
         let args = parse_args_with_context(context, value, self.tool_name())?;
         if args.is_status() {
-            args.validate_status_call(self.tool_name())?;
             return serde_json::to_value(self.engine.status(context.cancellation_token())).map_err(
                 |error| AgentError::new(format!("cannot serialize Office status: {error}")),
             );
@@ -298,7 +297,6 @@ impl OfficeTool {
         context.check_cancelled()?;
         let args = parse_args_with_context(context, call.args.clone(), self.tool_name())?;
         if args.is_status() {
-            args.validate_status_call(self.tool_name())?;
             return Err(AgentError::new(
                 "The Office status operation is read-only and does not create an approval action.",
             ));
@@ -368,7 +366,7 @@ impl OfficeTool {
             return true;
         };
         if args.is_status() {
-            return args.validate_status_call(self.tool_name()).is_err();
+            return false;
         }
         let Ok(request) = args.into_request() else {
             return true;
@@ -1501,10 +1499,6 @@ fn reject_semantic_extras<const N: usize>(
 impl OfficeToolArgs {
     fn is_status(&self) -> bool {
         matches!(self.request, OfficeParsedRequest::Status)
-    }
-
-    fn validate_status_call(&self, _tool_name: &str) -> AgentResult<()> {
-        Ok(())
     }
 
     fn into_request(self) -> AgentResult<OfficeExecutionRequest> {

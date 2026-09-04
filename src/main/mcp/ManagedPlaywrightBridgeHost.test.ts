@@ -462,6 +462,7 @@ describe('ManagedPlaywrightBridgeHost', () => {
   it('delegates tab creation to the fixed official group transport', async () => {
     const core = new FakeCore()
     const surfaceGroup: ManagedPlaywrightSurfaceGroupAdapter = {
+      ...singleSurfaceGroupAdapter(),
       getSensitiveTargetIdentity: () => ({
         surfaceId: 'surface-1',
         generation: 1,
@@ -883,7 +884,7 @@ function hostWith(options: {
     },
     closeSurface: vi.fn(async () => undefined),
     detachAutomation: options.detachAutomation ?? vi.fn(async () => undefined),
-    surfaceGroup: options.surfaceGroup,
+    surfaceGroup: options.surfaceGroup ?? singleSurfaceGroupAdapter(),
     createOfficialConnection:
       options.createOfficialConnection ??
       (async () => ({
@@ -914,7 +915,21 @@ function surfaceView(): Awaited<ReturnType<ManagedPlaywrightSurfaceGroupAdapter[
 
 function singleSurfaceGroupAdapter(): ManagedPlaywrightSurfaceGroupAdapter {
   const surface = surfaceView()
+  const lease = () => ({
+    closeSurface: vi.fn(async () => undefined),
+    finish: vi.fn(),
+    generation: surface.generation,
+    index: surface.index,
+    resolveIndex: vi.fn(async () => surface.index),
+    resizeSurface: vi.fn(async (input: { height: number; width: number }) => input),
+    selectionRevision: 1,
+    surfaceId: surface.surfaceId
+  })
   return {
+    beginExistingToolSurfaceLease: vi.fn(async () => lease()),
+    beginTargetCreationIntent: vi.fn(() => vi.fn()),
+    beginToolSurfaceLease: vi.fn(async () => lease()),
+    beginToolSurfaceLeaseByIndex: vi.fn(async () => lease()),
     getSensitiveTargetIdentity: () => ({
       surfaceId: surface.surfaceId,
       generation: surface.generation,

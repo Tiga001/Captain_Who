@@ -375,18 +375,6 @@ fn continuation_projection_rejects_untrusted_or_mismatched_approval_identity() {
             true,
         ),
         (
-            "legacy_builtin_capability",
-            AgentToolIdentity::LegacyBuiltinCapability {
-                capability_id: "browser_automation".into(),
-                managed_mcp_id: "builtin.browser_automation.mcp".into(),
-                manifest_digest: format!("sha256:{}", "a".repeat(64)).into(),
-                tool_id: "activate_capability".into(),
-                model_name: "activate_capability".into(),
-            },
-            false,
-            true,
-        ),
-        (
             "wrong_extension",
             AgentToolIdentity::RuntimeExtension {
                 extension_id: "another.extension".to_string(),

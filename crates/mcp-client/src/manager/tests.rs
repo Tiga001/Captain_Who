@@ -2,7 +2,7 @@
 
 use super::invocation::{normalize_dispatched_result, settle_interrupted_call};
 use super::*;
-use crate::{InMemoryMcpRegistry, McpContentBlock};
+use crate::{InMemoryMcpRegistry, McpContentBlock, McpInvocationId, McpModelCallId};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::PathBuf;
 

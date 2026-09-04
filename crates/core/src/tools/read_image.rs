@@ -240,46 +240,15 @@ fn is_bounded_thumbnail_data_url(value: &str) -> bool {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ReadImageArgs {
-    source: Option<AgentFileInputRef>,
-    path: Option<String>,
-    file_path: Option<String>,
+    path: String,
 }
 
 impl ReadImageArgs {
     fn source(&self, context: &ToolExecutionContext) -> AgentResult<AgentFileInputRef> {
-        let path = self
-            .path
-            .as_deref()
-            .map(str::trim)
-            .filter(|v| !v.is_empty());
-        let file_path = self
-            .file_path
-            .as_deref()
-            .map(str::trim)
-            .filter(|v| !v.is_empty());
-
-        if self.source.is_some() && (path.is_some() || file_path.is_some()) {
-            return Err(AgentError::new(
-                "read_image.source 不能与旧版 path/filePath 同时提供。",
-            ));
+        let path = self.path.trim();
+        if path.is_empty() {
+            return Err(AgentError::new("read_image.path 不能为空。"));
         }
-        if let Some(source) = &self.source {
-            return Ok(source.clone());
-        }
-        let legacy = match (path, file_path) {
-            (Some(path), Some(file_path)) if path == file_path => path,
-            (Some(_), Some(_)) => {
-                return Err(AgentError::new(
-                    "read_image.path 与 read_image.filePath 不能指向不同文件。",
-                ))
-            }
-            (Some(path), None) | (None, Some(path)) => path,
-            (None, None) => {
-                return Err(AgentError::new(
-                    "read_image 需要 source、path 或 filePath。",
-                ))
-            }
-        };
         let file_inputs = AgentFileInputExecutionContext::new(
             context.attachment_library().cloned(),
             context.skill_resources_optional(),
@@ -287,7 +256,7 @@ impl ReadImageArgs {
         .with_storage(context.storage_optional())
         .with_conversation_id(context.conversation_id_optional())
         .with_permissions(context.permissions());
-        agent_file_input_ref_from_model_path(&file_inputs, legacy).map_err(AgentError::from)
+        agent_file_input_ref_from_model_path(&file_inputs, path).map_err(AgentError::from)
     }
 }
 
@@ -598,7 +567,7 @@ mod tests {
     }
 
     #[test]
-    fn schema_exposes_one_required_path_and_hides_compatibility_inputs() {
+    fn schema_exposes_one_required_path() {
         let definition = ReadImageTool.definition();
         let properties = definition.input_schema["properties"].as_object().unwrap();
         assert_eq!(properties.len(), 1);
@@ -612,18 +581,13 @@ mod tests {
     }
 
     #[test]
-    fn reads_workspace_source_by_content_even_without_an_extension() {
+    fn reads_workspace_path_by_content_even_without_an_extension() {
         let workspace = tempfile::tempdir().unwrap();
         let bytes = valid_test_png();
         fs::write(workspace.path().join("preview.bin"), &bytes).unwrap();
         let result = execute(
             &context(Some(workspace.path()), AgentPermissions::default()),
-            json!({
-                "source": {
-                    "type": "workspace",
-                    "path": "preview.bin"
-                }
-            }),
+            json!({ "path": "preview.bin" }),
         )
         .unwrap();
 
@@ -655,7 +619,7 @@ mod tests {
     }
 
     #[test]
-    fn consumes_an_office_render_source_without_path_reconstruction() {
+    fn consumes_an_office_render_read_path() {
         let workspace = tempfile::tempdir().unwrap();
         let bytes = valid_test_png();
         fs::create_dir_all(workspace.path().join("outputs")).unwrap();
@@ -683,7 +647,7 @@ mod tests {
 
         let result = execute(
             &context(Some(workspace.path()), AgentPermissions::default()),
-            json!({ "source": published.source }),
+            json!({ "path": published.read_path }),
         )
         .unwrap();
 
@@ -717,28 +681,10 @@ mod tests {
     }
 
     #[test]
-    fn hidden_legacy_file_path_alias_remains_executable() {
-        let args: ReadImageArgs =
-            serde_json::from_value(json!({ "filePath": "legacy.png" })).unwrap();
-        assert_eq!(
-            args.source(&context(None, AgentPermissions::default()))
-                .unwrap(),
-            AgentFileInputRef::Workspace {
-                path: "legacy.png".to_string()
-            }
-        );
-    }
-
-    #[test]
-    fn workspace_source_requires_a_selected_workspace() {
+    fn workspace_path_requires_a_selected_workspace() {
         let error = execute(
             &context(None, AgentPermissions::default()),
-            json!({
-                "source": {
-                    "type": "workspace",
-                    "path": "preview.png"
-                }
-            }),
+            json!({ "path": "preview.png" }),
         )
         .unwrap_err();
 
@@ -846,12 +792,7 @@ mod tests {
         fs::write(&attachment_path, [0_u8; 4]).unwrap();
         let mismatch = execute(
             &context,
-            json!({
-                "source": {
-                    "type": "attachment",
-                    "readPath": "@attachments/image-1/pixel.png"
-                }
-            }),
+            json!({ "path": "@attachments/image-1/pixel.png" }),
         )
         .unwrap_err();
         assert_eq!(mismatch.code(), Some("agent.fileInput.integrityMismatch"));
@@ -866,12 +807,6 @@ mod tests {
         let context = context(None, AgentPermissions::default())
             .with_runtime_services("run-generated-image".to_string(), Some(storage));
         let uri = format!("image-artifact://sha256/{sha256}");
-        let source = json!({
-            "type": "generated_artifact",
-            "uri": uri,
-            "path": path.clone()
-        });
-
         let result = execute(&context, json!({ "path": uri })).unwrap();
         assert_eq!(result["source"]["type"], "generated_artifact");
         assert_eq!(result["path"], format!("image-artifact://sha256/{sha256}"));
@@ -912,17 +847,10 @@ mod tests {
             format!("image-artifact://sha256/{sha256}")
         );
 
-        let forged = root.join("forged.png");
-        fs::write(&forged, &bytes).unwrap();
-        let mut forged_source = source.clone();
-        forged_source["path"] = json!(forged);
-        let error = execute(&context, json!({ "source": forged_source })).unwrap_err();
-        assert_eq!(error.code(), Some("agent.fileInput.integrityMismatch"));
-
         let mut tampered = bytes;
         tampered[0] ^= 0xff;
         fs::write(&path, tampered).unwrap();
-        let error = execute(&context, json!({ "source": source })).unwrap_err();
+        let error = execute(&context, json!({ "path": uri })).unwrap_err();
         assert_eq!(error.code(), Some("agent.fileInput.integrityMismatch"));
     }
 
@@ -988,24 +916,14 @@ mod tests {
     }
 
     #[test]
-    fn rejects_ambiguous_or_incomplete_input_contracts() {
+    fn rejects_non_current_or_incomplete_input_contracts() {
         for args in [
             json!({}),
-            json!({ "path": "a.png", "filePath": "b.png" }),
-            json!({
-                "source": { "type": "workspace", "path": "a.png" },
-                "path": "a.png"
-            }),
-            json!({ "source": { "type": "attachment" } }),
-            json!({ "source": { "type": "workspace" } }),
-            json!({ "source": { "type": "external" } }),
-            json!({
-                "source": {
-                    "type": "generated_artifact",
-                    "uri": format!("image-artifact://sha256/{}", "a".repeat(64))
-                }
-            }),
-            json!({ "source": { "type": "skill_resource" } }),
+            json!({ "path": null }),
+            json!({ "path": "" }),
+            json!({ "filePath": "legacy.png" }),
+            json!({ "source": { "type": "workspace", "path": "a.png" } }),
+            json!({ "path": "a.png", "extra": true }),
         ] {
             let error = execute(&context(None, AgentPermissions::default()), args).unwrap_err();
             assert!(error.to_string().contains("read_image"));

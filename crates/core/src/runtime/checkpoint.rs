@@ -1974,12 +1974,8 @@ pub(super) fn checkpoint_continuation_projection(
         {
             Ok(CheckpointContinuationProjection::Standard)
         }
-        (
-            AgentToolIdentity::Unregistered { .. }
-            | AgentToolIdentity::LegacyBuiltinCapability { .. },
-            _,
-        ) => Err(AgentError::new(
-            "无法恢复运行检查点：未注册或旧版工具身份不能获得续跑权限。",
+        (AgentToolIdentity::Unregistered { .. }, _) => Err(AgentError::new(
+            "无法恢复运行检查点：未注册工具身份不能获得续跑权限。",
         )),
         (
             AgentToolIdentity::Builtin { .. }

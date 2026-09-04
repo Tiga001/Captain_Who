@@ -11,9 +11,10 @@ use super::{
     SkillResourceUriError, SkillSourceKind, SkillTrust,
 };
 use crate::command::{
-    configure_command_process_group, join_process_output_capture, spawn_process_output_capture,
-    terminate_command_process_group, try_wait_command_process_group, ProcessOutputCaptureBudget,
-    ProcessOutputCaptureMetadata, ProcessOutputCapturePolicy, ProcessOutputSpool,
+    configure_command_process_group, force_terminate_command_process_group,
+    join_process_output_capture, spawn_process_output_capture, try_wait_command_process_group,
+    ProcessOutputCaptureBudget, ProcessOutputCaptureMetadata, ProcessOutputCapturePolicy,
+    ProcessOutputSpool,
 };
 use crate::{
     AgentCancellationToken, AgentSkillDependencyCheck, AgentSkillDependencyKind,
@@ -28,7 +29,7 @@ use std::ffi::OsStr;
 use std::fmt;
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -1064,7 +1065,7 @@ fn run_bounded_process(
     let status = loop {
         if cancellation_requested(cancellation, action_cancel_flag) {
             cancelled = true;
-            terminate_command_process_group(&mut child);
+            force_terminate_command_process_group(&mut child);
             break wait_for_child(&mut child, "cancelled")?;
         }
         match try_wait_command_process_group(&mut child)
@@ -1073,7 +1074,7 @@ fn run_bounded_process(
             Some(status) => break status,
             None if started.elapsed() >= timeout => {
                 timed_out = true;
-                terminate_command_process_group(&mut child);
+                force_terminate_command_process_group(&mut child);
                 break wait_for_child(&mut child, "timed out")?;
             }
             None => thread::sleep(Duration::from_millis(25)),
@@ -1272,25 +1273,6 @@ fn process_error(message: impl Into<String>) -> SkillScriptRuntimeError {
         SkillScriptRuntimeRecovery::Retry,
         message,
     )
-}
-
-// Avoid accepting future path-bearing cwd extensions without an explicit
-// containment review.
-#[allow(dead_code)]
-fn clean_workspace_relative_path(value: &str) -> Result<PathBuf, SkillScriptRuntimeError> {
-    let mut output = PathBuf::new();
-    for component in Path::new(value).components() {
-        match component {
-            Component::Normal(value) => output.push(value),
-            Component::CurDir => {}
-            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
-                return Err(invalid_request(
-                    "Skill script cwd must stay inside the workspace.",
-                ));
-            }
-        }
-    }
-    Ok(output)
 }
 
 #[cfg(all(test, unix))]

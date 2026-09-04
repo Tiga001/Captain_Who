@@ -1,13 +1,13 @@
 use rusqlite::{ffi, Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
 
-pub const STORAGE_SCHEMA_VERSION: i32 = 33;
+pub const STORAGE_SCHEMA_VERSION: i32 = 34;
 pub const DEVELOPMENT_STORAGE_SCHEMA_RESET_REQUIRED: &str =
     "development_storage_schema_reset_required";
 
 const CANONICAL_SCHEMA: &str = include_str!("canonical_schema.sql");
 const CANONICAL_SCHEMA_FINGERPRINT: &str =
-    "sha256:5e1e404d74af5ed899d88dc8b5051e673ecd5beb967579af8f328b07b640c948";
+    "sha256:10c4053e2800f3f3d81acf76b03c0492248bc7c3724e8d58a9a4b6af05789c92";
 /// Opens the single supported development schema.
 ///
 /// A brand-new database is initialized atomically. Existing development databases must already
@@ -498,7 +498,7 @@ CREATE TABLE model_provider_credential_cleanup (
             .contains(DEVELOPMENT_STORAGE_SCHEMA_RESET_REQUIRED));
         assert!(error
             .to_string()
-            .contains("expected schema version 33, found 30"));
+            .contains("expected schema version 34, found 30"));
         assert_eq!(read_schema_version(&connection).unwrap(), 30);
         assert_eq!(schema_fingerprint(&connection).unwrap(), fingerprint_before);
         let columns = connection
@@ -769,12 +769,6 @@ CREATE TABLE model_provider_credential_cleanup (
             "notification_change_events_sequence_idx",
             "resolve_superseded_notification_before_insert",
             "aggregate_notification_event_after_insert",
-            "automation_notification_outbox",
-            "automation_notification_outbox_run_kind",
-            "automation_notification_outbox_task_configuration_kind",
-            "automation_notification_outbox_pending_idx",
-            "project_automation_notification_to_application_outbox",
-            "resolve_projected_automation_notification_after_legacy_suppress",
             "block_automations_before_conversation_delete",
             "block_automations_after_conversation_archive",
             "block_automations_before_project_delete",

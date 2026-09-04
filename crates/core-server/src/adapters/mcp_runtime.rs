@@ -92,20 +92,6 @@ impl McpRuntimeBridge {
         .expect("the built-in MCP runtime projection policy must remain valid")
     }
 
-    #[allow(dead_code)] // Exercised by binary-side Host policy tests.
-    pub(crate) fn with_payload_store_and_projection_limits(
-        manager: Arc<McpConnectionManager>,
-        payloads: Arc<dyn McpApprovalPayloadStore>,
-        projection_limits: McpRuntimeProjectionLimits,
-    ) -> AgentResult<Self> {
-        Self::with_payload_store_projection_limits_and_security_gate(
-            manager,
-            payloads,
-            projection_limits,
-            Arc::new(OpenMcpRegistrySecurityGate),
-        )
-    }
-
     fn with_payload_store_projection_limits_and_security_gate(
         manager: Arc<McpConnectionManager>,
         payloads: Arc<dyn McpApprovalPayloadStore>,

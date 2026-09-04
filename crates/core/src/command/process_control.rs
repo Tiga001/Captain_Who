@@ -134,8 +134,3 @@ pub(crate) fn force_terminate_command_process_group(child: &mut Child) {
 pub(crate) fn force_terminate_command_process_group(child: &mut Child) {
     let _ = child.kill();
 }
-
-/// Compatibility name used by the existing managed-runtime and Office paths.
-pub(crate) fn terminate_command_process_group(child: &mut Child) {
-    force_terminate_command_process_group(child);
-}

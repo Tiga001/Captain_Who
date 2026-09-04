@@ -47,37 +47,4 @@ describe('persisted Tool timeline identity', () => {
       })
     ).toBeUndefined()
   })
-
-  it('loads only the exact legacy identity as generic display-only provenance', () => {
-    const legacyIdentity = {
-      type: 'builtin_capability',
-      capabilityId: 'browser_automation',
-      managedMcpId: 'builtin.browser_automation.mcp',
-      manifestDigest: `sha256:${'a'.repeat(64)}`,
-      toolId: 'browser_snapshot',
-      modelName: 'browser_snapshot'
-    }
-    expect(
-      parseTimelineItem({
-        id: 'tool-call-browser-legacy',
-        type: 'tool_call',
-        callId: 'call-browser-legacy',
-        identity: legacyIdentity
-      })
-    ).toEqual({
-      id: 'tool-call-browser-legacy',
-      type: 'tool_call',
-      callId: 'call-browser-legacy',
-      identity: { type: 'unregistered', toolName: 'browser_snapshot' }
-    })
-
-    expect(
-      parseTimelineItem({
-        id: 'tool-call-browser-legacy-forged',
-        type: 'tool_call',
-        callId: 'call-browser-legacy-forged',
-        identity: { ...legacyIdentity, upstreamCatalogDigest: `sha256:${'b'.repeat(64)}` }
-      })
-    ).toBeUndefined()
-  })
 })

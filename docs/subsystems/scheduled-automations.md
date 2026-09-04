@@ -161,16 +161,14 @@ Automation 通知 policy 按 destination 收窄：
 | `new_chat`      | `all_runs`、`unsuccessful_only`          | 每次终态，或仅失败/取消                                                                |
 | `existing_chat` | `important_updates`、`unsuccessful_only` | 失败/取消，以及报告为 `important_update`、`completed` 或 `unknown`；`no_change` 不通知 |
 
-Approval 和配置 blocked 可产生对应通知。Automation 业务事务先写
-`automation_notification_outbox`；canonical trigger 在同一提交中把它投影为 shared
-`notification_events`，并把旧行标记为 `projected`。因此该表仍是 Automation producer/兼容 ledger，
-不是 Main 的原生投递 authority；不可变 notification event 与 `notification_batches` 才是 Notification
-Center 和 native delivery 的权威事实。
+Approval 和配置 blocked 可产生对应通知。Automation producer 在业务事务内直接写入不可变的 shared
+`notification_events`；同一通用通知管线生成并维护 `notification_batches`。前者是 Notification Center
+的事件事实，后者是 native delivery 的权威事实，不再经过 Automation 专用 outbox 或兼容投影层。
 
 shared pipeline 同时接收 HumanRoot 与 Automation：approval/configuration-blocked 的收集窗口为 500 ms，
 failed 为 1 秒，其他为 2 秒；一个 batch 最长收集 5 秒、最多 100 项，并可在 60 秒 replacement window
 内升级。Main 每次通过 `notifications.claim` 领取最多 10 个 batch，lease 为 60 秒，默认每 30 秒扫描；
-`notification.event`、`notification.resync` 和旧 Automation invalidation 只用于降延迟/重读。Main 显示前
+`notification.event`、`notification.resync` 和 Automation invalidation 只用于降延迟/重读。Main 显示前
 再次 `notifications.validate`，收到 Electron `show` 后才 acknowledge；展示失败或 15 秒未确认则 release，
 最多尝试 5 次且单次 retry delay 不超过 60 秒。Renderer 不能调用 claim/validate/acknowledge/release/
 suppress 这些 Host-only delivery RPC。
@@ -184,17 +182,15 @@ ready 时以 FIFO 暂存最多 32 个请求，并在 `openRequestedReady` 后恢
 
 ## 7. 持久化、恢复与删除联动
 
-SQLite canonical schema 当前为 **v33**；Automation DTO 与 Automation 表记录的 `schemaVersion` 各为 **v1**，permission mode v2，shared Notification contract 为 v1；这些版本域不能混用。Automation 专属四组数据为：
+SQLite canonical schema 当前为 **v34**；Automation DTO 与 Automation 表记录的 `schemaVersion` 各为 **v1**，permission mode v2，shared Notification contract 为 v1；这些版本域不能混用。Automation 专属三组数据为：
 
 - `automations`：配置、schedule、目标/权限 snapshot、revision、health、attention 和 tombstone；
 - `automation_runs`：不可变配置 snapshot、admission lease、Agent/Conversation 绑定、终态和结果投影；
-- `automation_events`：单调 sequence 的失效/重同步日志；
-- `automation_notification_outbox`：Automation producer/兼容 ledger；新事实原子投影到 shared notification，并转为 `projected`。
+- `automation_events`：单调 sequence 的失效/重同步日志。
 
 共享通知另使用 `notification_settings`、`notification_events`、`notification_batches`、
 `notification_batch_items`、`notification_change_events`。event 是不可变通知事实及 list/summary 投影输入，
-batch 是 native delivery authority；旧 `automation.notifications.*` 方法保留兼容用途，当前 Main 原生
-投递必须走 `notifications.*`。
+batch 是 native delivery authority；Main 原生投递只走当前 `notifications.*` 方法。
 
 启动时 Core Server 回收全部上一进程遗留的 `admitting`（不等待旧 lease 过期）、把离线期间到期的 occurrence 标为 `recovery`、恢复
 `running`/`waiting_for_approval` Run 的 Trace observer，再启动 Scheduler。持久 Trace 是 Agent Turn

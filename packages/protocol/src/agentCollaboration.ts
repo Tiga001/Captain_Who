@@ -1,10 +1,10 @@
 import type { AgentEvent, AgentProposedAction } from './agent'
 import {
   parseAgentBrowserRiskProposedAction,
-  parseAgentBuiltinCapabilityActivationProposedAction,
-  parseAgentEventForHost,
-  parsePendingAgentActionSnapshotsForHost
-} from './agentMcpParsers'
+  parseAgentBuiltinCapabilityActivationProposedAction
+} from './agentParsers/builtinApprovals'
+import { parseAgentEventForHost } from './agentParsers/events'
+import { parsePendingAgentActionSnapshotsForHost } from './agentParsers/pendingActions'
 
 export const AGENT_COLLABORATION_SCHEMA_VERSION = 1 as const
 export const AGENT_COLLABORATION_EVENT_SCHEMA_VERSION = 2 as const

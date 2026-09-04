@@ -723,16 +723,6 @@ export class BrowserSurfaceManager {
     }
   }
 
-  /** Reveals and creates/reuses a page without attaching Playwright. */
-  async reveal(): Promise<void> {
-    await this.ensureSurface()
-  }
-
-  /** Product-semantic alias used by the managed provider before an initial connection. */
-  async createOrReusePage(): Promise<void> {
-    await this.reveal()
-  }
-
   /**
    * Opens/reuses the exact managed target and serializes one risk-aware tool dispatch on it.
    * Discovery never calls this method.
@@ -1000,11 +990,6 @@ export class BrowserSurfaceManager {
     }
     // The group transport already detached each per-guest debugger. Keep Broker claims bound to
     // their live surface generations so a later task can reconnect without widening admission.
-  }
-
-  /** Alias used by the managed Playwright host lifecycle. It never closes the manual page. */
-  async closeAutomation(): Promise<void> {
-    await this.detachAutomation()
   }
 
   getActiveSurfaceIdentity(): { generation: number; surfaceId: string } | null {
@@ -1416,19 +1401,6 @@ export class BrowserSurfaceManager {
     const dimensions = normalizeViewportSize(input)
     await this.requestSurface(host, 'resizeSurface', surface.surfaceId, dimensions)
     return dimensions
-  }
-
-  /**
-   * Renders the selected managed guest through Electron's native print pipeline.
-   *
-   * This compatibility method remains available to legacy/unit adapters. Production managed
-   * Playwright routes browser_pdf_save through fixed page.pdf() and the private group transport.
-   */
-  async printActiveSurfaceToPdf(): Promise<Uint8Array> {
-    this.assertUsable()
-    const identity = this.getActiveSurfaceIdentity()
-    if (!identity) throw new BrowserSurfaceManagerError('browser.target_closed')
-    return await this.printExactSurfaceToPdf(identity)
   }
 
   private async printExactSurfaceToPdf(identity: {
@@ -3558,9 +3530,6 @@ export class BrowserSurfaceManager {
     }
   }
 }
-
-/** Round-2 product name; the compatibility export keeps existing Main wiring source-stable. */
-export { BrowserSurfaceManager as BrowserSurfaceGroupManager }
 
 function normalizeTimeout(value: number | undefined, fallback: number): number {
   return Number.isSafeInteger(value) && value !== undefined && value > 0

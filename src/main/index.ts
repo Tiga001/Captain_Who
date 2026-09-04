@@ -380,7 +380,6 @@ async function initializeApplication(): Promise<void> {
     createHost: createManagedPlaywrightHostFactory({
       getBrowserContext: () =>
         getBrowserSurfaceManager().getBrowserContext({ createVisiblePage: false }),
-      getActiveSurfaceIdentity: () => getBrowserSurfaceManager().getActiveSurfaceIdentity(),
       getAgentDownloadSnapshot: (input) => {
         const guard = browserNetworkGuard
         if (!guard) throw new Error('browser.surface_unavailable')

@@ -254,9 +254,38 @@ const FORBIDDEN_MARKERS: &[ForbiddenMarker] = &[
         value: "format!(\"legacy:",
         allowed_files: &[],
     },
+    ForbiddenMarker {
+        value: "automation_notification_outbox",
+        allowed_files: &[],
+    },
+    ForbiddenMarker {
+        value: "automation.notifications.claim",
+        allowed_files: &[],
+    },
+    ForbiddenMarker {
+        value: "automation.notifications.validate",
+        allowed_files: &[],
+    },
+    ForbiddenMarker {
+        value: "automation.notifications.acknowledge",
+        allowed_files: &[],
+    },
+    ForbiddenMarker {
+        value: "automation.notifications.release",
+        allowed_files: &[],
+    },
+    ForbiddenMarker {
+        value: "agentMcpParsers",
+        allowed_files: &[],
+    },
+    ForbiddenMarker {
+        value: "LegacyBuiltinCapability",
+        allowed_files: &[],
+    },
 ];
 
-const FORBIDDEN_IDENTIFIERS: &[&str] = &["SkillUninstallRequest"];
+const FORBIDDEN_IDENTIFIERS: &[&str] =
+    &["SkillUninstallRequest", "terminate_command_process_group"];
 
 #[test]
 fn retired_development_compatibility_interfaces_cannot_reenter_production() {
@@ -463,6 +492,63 @@ fn mcp_approval_mode_remains_a_required_current_configuration_field() {
     assert!(
         config.contains("pub approval_mode: McpApprovalMode"),
         "current MCP server config must explicitly carry approval_mode"
+    );
+}
+
+#[test]
+fn retired_agent_mcp_parser_facade_stays_deleted() {
+    let facade = workspace_root().join("packages/protocol/src/agentMcpParsers.ts");
+    assert!(
+        !facade.exists(),
+        "the retired agentMcpParsers.ts re-export facade must not be recreated; import the owning parser module"
+    );
+}
+
+#[test]
+fn read_image_model_input_remains_one_strict_path() {
+    let path = workspace_root().join("crates/core/src/tools/read_image.rs");
+    let source = std::fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+    let args_start = source
+        .find("struct ReadImageArgs {")
+        .expect("read_image input DTO must exist");
+    let args_end = source[args_start..]
+        .find("\n}")
+        .map(|offset| args_start + offset)
+        .expect("read_image input DTO must terminate");
+    let args = &source[args_start..args_end];
+    assert!(
+        args.contains("path: String"),
+        "read_image must keep path as its required model input"
+    );
+    for retired in ["source", "file_path", "filePath", "alias"] {
+        assert!(
+            !args.contains(retired),
+            "read_image input DTO contains retired alias marker `{retired}`"
+        );
+    }
+
+    let definition_start = source
+        .find("    fn definition(&self) -> AgentToolDefinition {")
+        .expect("read_image definition must exist");
+    let definition_end = source[definition_start..]
+        .find("    fn execute(&self")
+        .map(|offset| definition_start + offset)
+        .expect("read_image definition must precede execute");
+    let definition = &source[definition_start..definition_end];
+    for retired_property in ["\"source\":", "\"filePath\":"] {
+        assert!(
+            !definition.contains(retired_property),
+            "read_image schema contains retired property `{retired_property}`"
+        );
+    }
+    assert!(
+        definition.contains("\"required\": [\"path\"]"),
+        "read_image schema must require path"
+    );
+    assert!(
+        definition.contains("\"additionalProperties\": false"),
+        "read_image schema must reject extra model input"
     );
 }
 

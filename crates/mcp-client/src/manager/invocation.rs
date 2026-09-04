@@ -82,24 +82,6 @@ impl McpConnectionManager {
         Ok(resolved)
     }
 
-    /// Invoke a tool only if the caller's catalog and configuration snapshot
-    /// still identify the active, complete catalog.
-    ///
-    /// All routing checks happen while briefly holding the per-server state
-    /// lock. The peer and raw call are cloned out before the protocol request
-    /// is awaited.
-    pub async fn call_catalog_tool(
-        &self,
-        request: McpCatalogToolCall,
-        cancellation: McpCancellationToken,
-    ) -> Result<McpToolResult, McpError> {
-        let invocation_id = McpInvocationId::new();
-        let model_call_id = McpModelCallId::new(format!("legacy-{invocation_id}"))?;
-        let id = McpActiveCallId::new(request.tool_id.server_id, invocation_id, model_call_id);
-        self.call_catalog_tool_identified(id, request, cancellation)
-            .await
-    }
-
     /// Invoke a catalog-bound tool using the Host/Runtime identity that will
     /// also appear in approval records, traces and checkpoints.
     pub async fn call_catalog_tool_identified(

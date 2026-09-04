@@ -539,45 +539,6 @@ impl SqliteMcpRegistry {
         Ok(authorization)
     }
 
-    #[allow(dead_code)] // Reserved for an explicit future deauthorize management operation.
-    pub(crate) fn revoke_launch_authorization(
-        &self,
-        precondition: &McpRegistryMutationPrecondition,
-    ) -> Result<McpRegistryEntry, McpRegistryPersistenceError> {
-        let (entry, change) = {
-            let mut connection = self.lock_connection()?;
-            let transaction = connection
-                .transaction_with_behavior(TransactionBehavior::Immediate)
-                .map_err(|_| McpRegistryPersistenceError::StorageUnavailable)?;
-            let existing = load_record(&transaction, precondition.server_id)?
-                .ok_or(McpRegistryPersistenceError::NotFound)?;
-            ensure_precondition(&existing.entry, precondition)?;
-            if existing.launch_authorization.is_none()
-                && existing.entry.config.trust == McpTrustLevel::Untrusted
-                && !existing.entry.config.enabled
-            {
-                transaction
-                    .commit()
-                    .map_err(|_| McpRegistryPersistenceError::StorageUnavailable)?;
-                (existing.entry, None)
-            } else {
-                let mut config = existing.entry.config.clone();
-                config.trust = McpTrustLevel::Untrusted;
-                config.enabled = false;
-                let record = commit_updated_record(&transaction, &existing, config, None, None)?;
-                let change = registry_change(McpRegistryChangeKind::Updated, &record.entry);
-                transaction
-                    .commit()
-                    .map_err(|_| McpRegistryPersistenceError::StorageUnavailable)?;
-                (record.entry, Some(change))
-            }
-        };
-        if let Some(change) = change {
-            self.publish(change);
-        }
-        Ok(entry)
-    }
-
     pub(crate) fn remove_with_precondition(
         &self,
         precondition: &McpRegistryMutationPrecondition,

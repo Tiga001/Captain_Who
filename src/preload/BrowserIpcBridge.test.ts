@@ -228,12 +228,13 @@ describe('Browser IPC bridge', () => {
       requestId: '2fd21ed7-4255-4f4d-8f74-23a4c95ee895',
       surfaceId: 'right-sidebar-browser-fixture'
     })
-    expect(handler).toHaveBeenCalledTimes(3)
+    expect(handler).toHaveBeenCalledTimes(2)
     expect(handler).toHaveBeenLastCalledWith({
       schemaVersion: 1,
       kind: 'closeSurface',
       requestId: '2fd21ed7-4255-4f4d-8f74-23a4c95ee895',
-      surfaceId: 'right-sidebar-browser-fixture'
+      surfaceId: 'right-sidebar-browser-fixture',
+      surfaceInstanceId: 'instance-00000001'
     })
 
     unsubscribe()

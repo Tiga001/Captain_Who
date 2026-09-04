@@ -2,6 +2,7 @@ import { EventEmitter } from 'node:events'
 import { resolve } from 'node:path'
 import { PassThrough } from 'node:stream'
 import type { ChildProcessWithoutNullStreams } from 'node:child_process'
+import { NOTIFICATION_BATCHES_CLAIM_METHOD } from '@mycopilot/protocol'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const electronApp = vi.hoisted(() => ({
@@ -165,7 +166,7 @@ describe('CoreJsonRpcClient application data root', () => {
     client.stop()
 
     expect(() => client.start()).toThrow('core-server request admission is closed')
-    await expect(client.request('automation.notifications.claim', {})).rejects.toThrow(
+    await expect(client.request(NOTIFICATION_BATCHES_CLAIM_METHOD, {})).rejects.toThrow(
       'core-server request admission is closed'
     )
     expect(spawnProcess).toHaveBeenCalledOnce()

@@ -10,11 +10,6 @@ pub const AUTOMATION_DELETE_METHOD: &str = "automation.delete";
 pub const AUTOMATION_RUNS_LIST_METHOD: &str = "automation.runs.list";
 pub const AUTOMATION_ATTENTION_SUMMARY_METHOD: &str = "automation.attention.summary";
 pub const AUTOMATION_ATTENTION_ACKNOWLEDGE_METHOD: &str = "automation.attention.acknowledge";
-pub const AUTOMATION_NOTIFICATIONS_CLAIM_METHOD: &str = "automation.notifications.claim";
-pub const AUTOMATION_NOTIFICATIONS_VALIDATE_METHOD: &str = "automation.notifications.validate";
-pub const AUTOMATION_NOTIFICATIONS_ACKNOWLEDGE_METHOD: &str =
-    "automation.notifications.acknowledge";
-pub const AUTOMATION_NOTIFICATIONS_RELEASE_METHOD: &str = "automation.notifications.release";
 pub const AUTOMATION_EVENT_NOTIFICATION_METHOD: &str = "automation.event";
 pub const AUTOMATION_RESYNC_NOTIFICATION_METHOD: &str = "automation.resync";
 pub const NOTIFICATION_BATCHES_CLAIM_METHOD: &str = "notifications.claim";

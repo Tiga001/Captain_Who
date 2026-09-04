@@ -1228,8 +1228,9 @@ async fn run_waiting_approval_restart_scenario(decision: RestartApprovalDecision
         rusqlite::Connection::open(&database_path)
             .unwrap()
             .query_row(
-                "SELECT COUNT(*) FROM automation_notification_outbox
-                 WHERE automation_run_id = ?1 AND notification_kind = 'approval_required'",
+                "SELECT COUNT(*) FROM notification_events
+                 WHERE source_kind = 'automation' AND run_id = ?1
+                   AND notification_kind = 'approval_required'",
                 [&queued.id],
                 |row| row.get::<_, i64>(0),
             )
@@ -1310,16 +1311,17 @@ async fn run_waiting_approval_restart_scenario(decision: RestartApprovalDecision
         .unwrap()
         .items
         .is_empty());
-    let approval_outbox_status: String = rusqlite::Connection::open(&database_path)
+    let approval_resolved_at: Option<i64> = rusqlite::Connection::open(&database_path)
         .unwrap()
         .query_row(
-            "SELECT status FROM automation_notification_outbox
-             WHERE automation_run_id = ?1 AND notification_kind = 'approval_required'",
+            "SELECT resolved_at FROM notification_events
+             WHERE source_kind = 'automation' AND run_id = ?1
+               AND notification_kind = 'approval_required'",
             [&queued.id],
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(approval_outbox_status, "suppressed");
+    assert!(approval_resolved_at.is_some());
 
     let (first_request, continuation_request) = provider.await.unwrap();
     let assert_execution_context = |request: &Value| {

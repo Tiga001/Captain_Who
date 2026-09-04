@@ -196,7 +196,7 @@ pub(super) fn run_process_with_options(
     let status = loop {
         if cancellation_requested(cancellation, action_cancel_flag) {
             cancelled = true;
-            terminate_command_process_group(&mut child);
+            force_terminate_command_process_group(&mut child);
             break wait_for_child(&mut child, "cancelled", options.process_name)?;
         }
         match try_wait_command_process_group(&mut child).map_err(|error| {
@@ -205,7 +205,7 @@ pub(super) fn run_process_with_options(
             Some(status) => break status,
             None if started.elapsed() >= timeout => {
                 timed_out = true;
-                terminate_command_process_group(&mut child);
+                force_terminate_command_process_group(&mut child);
                 break wait_for_child(&mut child, "timed out", options.process_name)?;
             }
             None => thread::sleep(Duration::from_millis(25)),
@@ -366,7 +366,7 @@ fn verify_browser_proxy_alias(alias: &Path, private_home: &Path) -> Result<(), O
                 ))
             }
             None if started.elapsed() >= BROWSER_PROXY_SELF_TEST_TIMEOUT => {
-                terminate_command_process_group(&mut child);
+                force_terminate_command_process_group(&mut child);
                 let _ = child.wait();
                 return Err(OfficeEngineError::new(
                     OfficeEngineErrorCode::RenderBackendUnavailable,

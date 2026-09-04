@@ -137,7 +137,6 @@ impl std::fmt::Debug for ProviderContinuationBinding<'_> {
 }
 
 #[derive(Clone, Copy)]
-#[allow(dead_code)] // Controlled per-owner lifecycle API; transactional GC uses repository paths.
 pub(crate) struct ProviderContinuationOwner<'a> {
     pub(crate) conversation_id: &'a str,
     pub(crate) assistant_message_id: &'a str,
@@ -150,9 +149,9 @@ impl std::fmt::Debug for ProviderContinuationOwner<'_> {
     }
 }
 
-#[allow(dead_code)] // Owner metadata is retained for replay selection and future diagnostics.
 pub(crate) struct LoadedProviderAssistantTurn {
     pub(crate) continuation_ref: ProviderContinuationRef,
+    #[allow(dead_code)] // Exact-ref audits expose the authenticated owner already scoped by load.
     pub(crate) conversation_id: String,
     pub(crate) assistant_message_id: String,
     pub(crate) run_id: String,
@@ -365,7 +364,7 @@ impl ProviderContinuationVault {
         }
     }
 
-    #[allow(dead_code)] // Exact-ref restore API; conversation hydration currently batches loads.
+    #[allow(dead_code)] // Exact-ref integrity API exercised independently of batch hydration.
     pub(crate) fn load(
         &self,
         continuation_ref: &ProviderContinuationRef,
@@ -524,7 +523,6 @@ impl ProviderContinuationVault {
             .collect()
     }
 
-    #[allow(dead_code)] // Exact-ref release API; compaction/edit paths release in their DB txn.
     pub(crate) fn release(
         &self,
         continuation_ref: &ProviderContinuationRef,
@@ -917,7 +915,7 @@ fn runtime_tool_identities(
     Ok(identities)
 }
 
-#[allow(dead_code)] // Validation boundary for the exact-ref load API above.
+#[allow(dead_code)] // Validation boundary owned by the exact-ref integrity API above.
 fn validate_record_binding(
     record: &StoredProviderContinuationRecord,
     expected: ProviderContinuationBinding<'_>,

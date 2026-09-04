@@ -31,11 +31,14 @@ afterEach(async () => {
   )
 })
 
-async function createCache(networkSession: FaviconNetworkSession) {
+async function createCache(
+  networkSession: FaviconNetworkSession,
+  options: { now?: () => number } = {}
+) {
   const cacheDirectory = await mkdtemp(join(tmpdir(), 'mycopilot-favicon-cache-'))
   cacheDirectories.push(cacheDirectory)
   return {
-    cache: new FaviconResourceCache({ cacheDirectory, networkSession }),
+    cache: new FaviconResourceCache({ cacheDirectory, networkSession, ...options }),
     cacheDirectory
   }
 }
@@ -73,6 +76,74 @@ function imageResponse(bytes = [0x89, 0x50, 0x4e, 0x47]): Response {
 }
 
 describe('FaviconResourceCache', () => {
+  it('limits concurrent network resolution across different origins', async () => {
+    let activeFetches = 0
+    let peakFetches = 0
+    let releaseFetches!: () => void
+    const fetchGate = new Promise<void>((resolve) => {
+      releaseFetches = resolve
+    })
+    const harness = createNetworkSession({
+      fetch: async () => {
+        activeFetches += 1
+        peakFetches = Math.max(peakFetches, activeFetches)
+        await fetchGate
+        activeFetches -= 1
+        return new Response(null, { status: 404 })
+      }
+    })
+    const { cache } = await createCache(harness.networkSession)
+
+    const resolutions = Array.from({ length: 12 }, (_, index) =>
+      cache.resolveFavicon({
+        faviconUrl: `https://icons-${index}.public-site.com/favicon.png`,
+        pageUrl: `https://page-${index}.public-site.com/`
+      })
+    )
+
+    await vi.waitFor(() => expect(harness.fetch).toHaveBeenCalledTimes(6))
+    expect(activeFetches).toBe(6)
+    expect(peakFetches).toBe(6)
+
+    releaseFetches()
+    await expect(Promise.all(resolutions)).resolves.toEqual(
+      Array.from({ length: 12 }, () => ({ url: null }))
+    )
+    expect(peakFetches).toBe(6)
+  })
+
+  it('negative-caches complete failures for five minutes and clears them explicitly', async () => {
+    let now = 1_000_000
+    const harness = createNetworkSession({
+      fetch: async () => new Response(null, { status: 404 })
+    })
+    const { cache } = await createCache(harness.networkSession, { now: () => now })
+    const input = {
+      faviconUrl: 'https://cdn.public-site.com/missing.png',
+      pageUrl: 'https://www.public-site.com/docs'
+    }
+
+    await expect(cache.resolveFavicon(input)).resolves.toEqual({ url: null })
+    const fetchesAfterFailure = harness.fetch.mock.calls.length
+    const resolutionsAfterFailure = harness.resolveHost.mock.calls.length
+    expect(fetchesAfterFailure).toBeGreaterThan(0)
+
+    await expect(cache.resolveFavicon(input)).resolves.toEqual({ url: null })
+    now += 5 * 60 * 1_000 - 1
+    await expect(cache.resolveFavicon(input)).resolves.toEqual({ url: null })
+    expect(harness.fetch).toHaveBeenCalledTimes(fetchesAfterFailure)
+    expect(harness.resolveHost).toHaveBeenCalledTimes(resolutionsAfterFailure)
+
+    now += 1
+    await expect(cache.resolveFavicon(input)).resolves.toEqual({ url: null })
+    expect(harness.fetch.mock.calls.length).toBeGreaterThan(fetchesAfterFailure)
+    const fetchesAfterExpiry = harness.fetch.mock.calls.length
+
+    await cache.clear()
+    await expect(cache.resolveFavicon(input)).resolves.toEqual({ url: null })
+    expect(harness.fetch.mock.calls.length).toBeGreaterThan(fetchesAfterExpiry)
+  })
+
   it('uses an exclusive proxy for standard Fake-IP ranges and repopulates after clear', async () => {
     const pageUrl = 'https://www.public-site.com/'
     const iconUrl = 'https://www.public-site.com/assets/favicon.png'

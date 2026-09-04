@@ -5766,170 +5766,6 @@ BEGIN
     );
 END;
 
-CREATE TABLE automation_notification_outbox (
-    id TEXT PRIMARY KEY CHECK (
-        length(CAST(id AS BLOB)) BETWEEN 1 AND 256
-    ),
-    schema_version INTEGER NOT NULL CHECK (schema_version = 1),
-    automation_id TEXT NOT NULL,
-    automation_run_id TEXT,
-    resource_revision INTEGER NOT NULL CHECK (resource_revision > 0),
-    notification_kind TEXT NOT NULL CHECK (
-        notification_kind IN ('run_result', 'approval_required', 'configuration_blocked')
-    ),
-    title TEXT NOT NULL CHECK (
-        length(CAST(title AS BLOB)) BETWEEN 1 AND 512
-    ),
-    body TEXT NOT NULL CHECK (
-        length(CAST(body AS BLOB)) BETWEEN 1 AND 4096
-    ),
-    status TEXT NOT NULL CHECK (status IN ('pending', 'projected', 'delivered', 'suppressed')),
-    retry_at INTEGER NOT NULL DEFAULT 0 CHECK (retry_at >= 0),
-    claim_token TEXT CHECK (
-        claim_token IS NULL
-        OR length(CAST(claim_token AS BLOB)) BETWEEN 1 AND 256
-    ),
-    claim_expires_at INTEGER CHECK (
-        claim_expires_at IS NULL OR claim_expires_at >= 0
-    ),
-    attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
-    last_error_code TEXT CHECK (
-        last_error_code IS NULL
-        OR length(CAST(last_error_code AS BLOB)) BETWEEN 1 AND 128
-    ),
-    created_at INTEGER NOT NULL CHECK (created_at >= 0),
-    delivered_at INTEGER CHECK (delivered_at IS NULL OR delivered_at >= created_at),
-    FOREIGN KEY (automation_id) REFERENCES automations(id) ON DELETE CASCADE,
-    FOREIGN KEY (automation_run_id) REFERENCES automation_runs(id) ON DELETE CASCADE,
-    CHECK (
-        (status = 'delivered' AND delivered_at IS NOT NULL)
-        OR (status != 'delivered' AND delivered_at IS NULL)
-    ),
-    CHECK (
-        status = 'pending'
-        OR (claim_token IS NULL AND claim_expires_at IS NULL)
-    ),
-    CHECK (
-        (claim_token IS NULL AND claim_expires_at IS NULL)
-        OR (claim_token IS NOT NULL AND claim_expires_at IS NOT NULL)
-    ),
-    CHECK (
-        (notification_kind = 'configuration_blocked' AND automation_run_id IS NULL)
-        OR (notification_kind != 'configuration_blocked' AND automation_run_id IS NOT NULL)
-    )
-);
-CREATE UNIQUE INDEX automation_notification_outbox_run_kind
-    ON automation_notification_outbox (automation_run_id, notification_kind, resource_revision)
-    WHERE automation_run_id IS NOT NULL;
-CREATE UNIQUE INDEX automation_notification_outbox_task_configuration_kind
-    ON automation_notification_outbox (automation_id, notification_kind, resource_revision)
-    WHERE automation_run_id IS NULL AND notification_kind = 'configuration_blocked';
-CREATE INDEX automation_notification_outbox_pending_idx
-    ON automation_notification_outbox (retry_at, claim_expires_at, created_at, id)
-    WHERE status = 'pending';
-
--- Temporary compatibility bridge for the existing automation producer. The application-wide
--- outbox is the new delivery authority; this trigger projects every legacy durable fact into it.
-CREATE TRIGGER project_automation_notification_to_application_outbox
-AFTER INSERT ON automation_notification_outbox
-BEGIN
-    INSERT OR IGNORE INTO notification_events (
-        id, schema_version, notification_kind, source_kind, source_id, run_id, automation_id,
-        conversation_id, user_message_id, assistant_message_id, approval_action_id,
-        subject_kind, subject_text, priority, dedupe_key, supersession_key,
-        resource_revision, seen_at, resolved_at, occurred_at, expires_at
-    ) VALUES (
-        'notification-event:' || NEW.id,
-        1,
-        CASE
-            WHEN NEW.notification_kind = 'approval_required' THEN 'approval_required'
-            WHEN NEW.notification_kind = 'configuration_blocked' THEN 'automation_configuration_blocked'
-            WHEN (SELECT status FROM automation_runs WHERE id = NEW.automation_run_id) = 'failed'
-                THEN 'automation_failed'
-            WHEN (SELECT status FROM automation_runs WHERE id = NEW.automation_run_id) = 'cancelled'
-                THEN 'automation_cancelled'
-            WHEN (SELECT report_kind FROM automation_runs WHERE id = NEW.automation_run_id) = 'important_update'
-                THEN 'automation_important_update'
-            ELSE 'automation_completed'
-        END,
-        'automation',
-        NEW.automation_id,
-        NEW.automation_run_id,
-        NEW.automation_id,
-        (SELECT conversation_id FROM automation_runs WHERE id = NEW.automation_run_id),
-        (SELECT user_message_id FROM automation_runs WHERE id = NEW.automation_run_id),
-        (SELECT assistant_message_id FROM automation_runs WHERE id = NEW.automation_run_id),
-        NULL,
-        'automation_title',
-        NEW.title,
-        CASE
-            WHEN NEW.notification_kind = 'approval_required' THEN 'approval_required'
-            WHEN NEW.notification_kind = 'configuration_blocked' THEN 'configuration_blocked'
-            WHEN (SELECT status FROM automation_runs WHERE id = NEW.automation_run_id) = 'failed'
-                THEN 'failed'
-            WHEN (SELECT status FROM automation_runs WHERE id = NEW.automation_run_id) = 'cancelled'
-                THEN 'cancelled'
-            WHEN (SELECT report_kind FROM automation_runs WHERE id = NEW.automation_run_id) = 'important_update'
-                THEN 'important_update'
-            ELSE 'completed'
-        END,
-        'automation:' || NEW.id,
-        CASE WHEN NEW.automation_run_id IS NULL
-            THEN 'automation-configuration:' || NEW.automation_id
-            ELSE 'automation-run:' || NEW.automation_run_id
-        END,
-        NEW.resource_revision,
-        NULL,
-        CASE
-            WHEN NEW.notification_kind = 'run_result'
-             AND COALESCE((SELECT status FROM automation_runs WHERE id = NEW.automation_run_id), '')
-                 NOT IN ('failed')
-                THEN NEW.created_at
-            WHEN (SELECT report_kind FROM automation_runs WHERE id = NEW.automation_run_id)
-                 = 'important_update'
-                THEN NEW.created_at
-            ELSE NULL
-        END,
-        NEW.created_at,
-        NEW.created_at + CASE
-            WHEN NEW.notification_kind IN ('approval_required', 'configuration_blocked')
-                THEN 2592000000
-            ELSE 604800000
-        END
-    );
-
-    -- Generic notification_batches are the only native-delivery authority. Keep the legacy row
-    -- as a durable compatibility/audit projection without leaving work for the retired pump.
-    UPDATE automation_notification_outbox
-    SET status = 'projected', claim_token = NULL, claim_expires_at = NULL
-    WHERE id = NEW.id AND status = 'pending';
-END;
-
-CREATE TRIGGER resolve_projected_automation_notification_after_legacy_suppress
-AFTER UPDATE OF status ON automation_notification_outbox
-WHEN NEW.status = 'suppressed' AND OLD.status != 'suppressed'
-BEGIN
-    INSERT INTO notification_change_events (
-        schema_version, event_id, event_kind, notification_id, batch_id,
-        resource_revision, occurred_at
-    )
-    SELECT
-        1,
-        'notification-change:' || lower(hex(randomblob(16))),
-        'resolved',
-        event.id,
-        (SELECT batch_id FROM notification_batch_items WHERE notification_event_id = event.id),
-        event.resource_revision,
-        MAX(event.occurred_at, NEW.created_at)
-    FROM notification_events AS event
-    WHERE event.id = 'notification-event:' || NEW.id
-      AND event.resolved_at IS NULL;
-
-    UPDATE notification_events
-    SET resolved_at = COALESCE(resolved_at, MAX(occurred_at, NEW.created_at))
-    WHERE id = 'notification-event:' || NEW.id;
-END;
-
 -- Parent resources may be removed by existing product flows. Preserve the scheduled task as a
 -- repairable active+blocked record instead of cascading deletion or silently changing targets.
 CREATE TRIGGER block_automations_before_conversation_delete
@@ -6091,7 +5927,7 @@ BEGIN
     );
 END;
 
--- Configuration invalidation can originate from legacy project/model/conversation mutation paths.
+-- Configuration invalidation can originate from project/model/conversation mutation paths.
 -- Persist the notification in the same transaction as the blocking update so a process crash
 -- cannot lose it. The unique task/revision key makes repeated reconciliation idempotent.
 CREATE TRIGGER emit_automation_blocked_notification_after_block
@@ -6106,27 +5942,33 @@ WHEN NEW.deleted_at IS NULL
     OR OLD.attention_required_at IS NOT NEW.attention_required_at
  )
 BEGIN
-    INSERT OR IGNORE INTO automation_notification_outbox (
-        id, schema_version, automation_id, automation_run_id, resource_revision,
-        notification_kind, title, body, status, retry_at, claim_token,
-        claim_expires_at, attempt_count, last_error_code, created_at, delivered_at
+    INSERT OR IGNORE INTO notification_events (
+        id, schema_version, notification_kind, source_kind, source_id, run_id, automation_id,
+        conversation_id, user_message_id, assistant_message_id, approval_action_id,
+        subject_kind, subject_text, priority, dedupe_key, supersession_key,
+        resource_revision, seen_at, resolved_at, occurred_at, expires_at
     ) VALUES (
-        'automation-notification:' || lower(hex(randomblob(16))),
+        'notification-event:' || lower(hex(randomblob(16))),
         1,
+        'automation_configuration_blocked',
+        'automation',
         NEW.id,
         NULL,
-        NEW.revision,
-        'configuration_blocked',
+        NEW.id,
+        NULL,
+        NULL,
+        NULL,
+        NULL,
+        'automation_title',
         NEW.title,
-        COALESCE(NEW.blocked_message, 'This scheduled task needs attention.'),
-        'pending',
+        'configuration_blocked',
+        'automation:configuration_blocked:' || NEW.id || ':' || NEW.revision,
+        'automation-configuration:' || NEW.id,
+        NEW.revision,
+        NULL,
+        NULL,
         NEW.updated_at,
-        NULL,
-        NULL,
-        0,
-        NULL,
-        NEW.updated_at,
-        NULL
+        NEW.updated_at + 2592000000
     );
     INSERT INTO automation_events (
         schema_version, event_id, event_kind, automation_id, automation_run_id,

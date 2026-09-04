@@ -208,19 +208,21 @@ describe('browser surface protocol', () => {
         surfaceInstanceId: SURFACE_INSTANCE_ID
       })
     ).toThrow('request identity')
-    expect(
+    expect(() =>
       parseBrowserSurfaceCommand({
         schemaVersion: 1,
         kind: 'closeSurface',
         requestId: REQUEST_ID,
         surfaceId: SURFACE_ID
       })
-    ).toEqual({
-      schemaVersion: 1,
-      kind: 'closeSurface',
-      requestId: REQUEST_ID,
-      surfaceId: SURFACE_ID
-    })
+    ).toThrow('instance identity')
+    expect(() =>
+      parseBrowserSurfaceReadyInput({
+        schemaVersion: 1,
+        requestId: REQUEST_ID,
+        surfaceId: SURFACE_ID
+      })
+    ).toThrow('instance identity')
     expect(() =>
       parseBrowserSurfaceReadyInput({
         schemaVersion: 1,

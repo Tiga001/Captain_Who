@@ -22,9 +22,10 @@ use super::types::{
 };
 use crate::artifact_runtime::{ArtifactRuntimeInvocation, ArtifactRuntimeKind};
 use crate::command::{
-    configure_command_process_group, join_process_output_capture, spawn_process_output_capture,
-    terminate_command_process_group, try_wait_command_process_group, ProcessOutputCaptureBudget,
-    ProcessOutputCaptureMetadata, ProcessOutputCapturePolicy, ProcessOutputSpool,
+    configure_command_process_group, force_terminate_command_process_group,
+    join_process_output_capture, spawn_process_output_capture, try_wait_command_process_group,
+    ProcessOutputCaptureBudget, ProcessOutputCaptureMetadata, ProcessOutputCapturePolicy,
+    ProcessOutputSpool,
 };
 use crate::file_input::{
     materialize_agent_file_inputs, normalize_agent_file_input_specs,

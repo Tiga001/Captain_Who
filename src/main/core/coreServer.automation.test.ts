@@ -124,50 +124,6 @@ describe('CoreServer Automation notifications', () => {
     ).rejects.toThrow('Invalid Automation run response identity')
   })
 
-  it('strictly fences Host-only notification claims, validation, and acknowledgements', async () => {
-    rpcRequest.mockResolvedValueOnce({
-      schemaVersion: 1,
-      claimToken: 'another-claim',
-      notifications: []
-    })
-    const server = new CoreServer()
-    await expect(
-      server.claimAutomationNotifications({
-        schemaVersion: 1,
-        claimToken: 'claim-1',
-        leaseDurationMs: 60_000,
-        limit: 10
-      })
-    ).rejects.toThrow('Invalid Automation notification claim response identity')
-
-    rpcRequest.mockResolvedValueOnce({
-      schemaVersion: 1,
-      notificationId: 'notification-other',
-      notification: null
-    })
-    await expect(
-      server.validateAutomationNotification({
-        schemaVersion: 1,
-        notificationId: 'notification-1',
-        claimToken: 'claim-1'
-      })
-    ).rejects.toThrow('Invalid Automation notification validation response identity')
-
-    rpcRequest.mockResolvedValueOnce({
-      schemaVersion: 1,
-      notificationId: 'notification-other',
-      status: 'delivered',
-      deliveredAt: 100
-    })
-    await expect(
-      server.acknowledgeAutomationNotification({
-        schemaVersion: 1,
-        notificationId: 'notification-1',
-        claimToken: 'claim-1'
-      })
-    ).rejects.toThrow('Invalid Automation notification acknowledge response identity')
-  })
-
   it('closes lazy Core request admission even when shutdown finds no live child', async () => {
     const server = new CoreServer()
 
