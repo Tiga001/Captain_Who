@@ -103,7 +103,7 @@ use application::agent::{
     AgentProviderTransitionGetStatusInput, AgentProviderTransitionPreflightInput,
     AgentProviderTransitionStartInput, AgentService, AgentServiceError,
 };
-use mycopilot_core::git_review::{GitReviewFileMutationAction, GitReviewScope, GitReviewService};
+use mycopilot_core::git_review::{GitReviewFileMutationAction, GitReviewService, GitReviewTarget};
 #[cfg(test)]
 use mycopilot_core::image_generation::InMemoryCredentialStore;
 #[cfg(not(target_os = "macos"))]
@@ -150,8 +150,9 @@ use mycopilot_protocol_rs::{
     AgentTemplateSetEnabledRequest, AgentTemplateUpdateRequest, AgentTreeRequest,
     CollaborationApprovalDecisionRequest, CollaborationApprovalListRequest,
     CollaborationEventsRequest, CorePingRequest, CorePingResponse, CoreShutdownResponse,
-    GitRepositoryInspectRequest, GitReviewFileContentRequest, GitReviewFileDiffRequest,
-    GitReviewFileMutationRequest, GitReviewSummaryRequest, GitTurnDiffSummariesRequest, JsonRpcId,
+    GitRepositoryInspectRequest, GitReviewCommitListRequest, GitReviewFileContentRequest,
+    GitReviewFileDiffRequest, GitReviewFileMutationRequest, GitReviewRepositoryContextRequest,
+    GitReviewSummaryRequest, GitReviewTargetRequest, GitTurnDiffSummariesRequest, JsonRpcId,
     JsonRpcRequest, SkillsCancelPreparationRequest, SkillsCancelSourceResolutionRequest,
     SkillsChangedNotification, SkillsChangedReasonDto, SkillsCommitInstallationRequest,
     SkillsInspectInstallationRequest, SkillsInstallLocalRequest, SkillsListManagementRequest,
@@ -174,8 +175,9 @@ use mycopilot_protocol_rs::{
     AGENT_REWRITE_CONVERSATION_TURN_METHOD, AGENT_START_CONVERSATION_TURN_METHOD,
     AGENT_START_PROVIDER_TRANSITION_METHOD, AGENT_STEER_RUN_METHOD, CORE_PING_METHOD,
     CORE_SHUTDOWN_METHOD, GIT_GET_REVIEW_FILE_CONTENT_METHOD, GIT_GET_REVIEW_FILE_DIFF_METHOD,
-    GIT_GET_REVIEW_SUMMARY_METHOD, GIT_GET_TURN_DIFF_SUMMARIES_METHOD,
-    GIT_INSPECT_REPOSITORY_METHOD, GIT_MUTATE_REVIEW_FILE_METHOD,
+    GIT_GET_REVIEW_REPOSITORY_CONTEXT_METHOD, GIT_GET_REVIEW_SUMMARY_METHOD,
+    GIT_GET_TURN_DIFF_SUMMARIES_METHOD, GIT_INSPECT_REPOSITORY_METHOD,
+    GIT_LIST_REVIEW_COMMITS_METHOD, GIT_MUTATE_REVIEW_FILE_METHOD,
     IMAGE_GENERATION_GET_CONFIGURATION_METHOD, IMAGE_GENERATION_GET_STATUS_METHOD,
     IMAGE_GENERATION_READ_ARTIFACT_METHOD, IMAGE_GENERATION_SET_ENABLED_METHOD,
     IMAGE_GENERATION_UPDATE_CONFIGURATION_METHOD, OFFICE_GET_STATUS_METHOD,

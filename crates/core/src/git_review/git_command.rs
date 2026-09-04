@@ -12,6 +12,15 @@ pub(super) fn run_git(
     args: &[String],
     stdout_limit: usize,
 ) -> Result<GitOutput, String> {
+    run_git_with_input(cwd, args, stdout_limit, None)
+}
+
+pub(super) fn run_git_with_input(
+    cwd: &Path,
+    args: &[String],
+    stdout_limit: usize,
+    stdin: Option<&[u8]>,
+) -> Result<GitOutput, String> {
     let mut command = Command::new("git");
     command
         .arg("--no-pager")
@@ -26,7 +35,11 @@ pub(super) fn run_git(
         .arg("-C")
         .arg(cwd)
         .args(args)
-        .stdin(Stdio::null())
+        .stdin(if stdin.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .env("LC_ALL", "C")
@@ -65,6 +78,15 @@ pub(super) fn run_git(
     let mut child = command
         .spawn()
         .map_err(|error| format!("Unable to start Git: {error}"))?;
+    if let Some(input) = stdin {
+        let mut child_stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| "Git stdin was not captured.".to_string())?;
+        child_stdin
+            .write_all(input)
+            .map_err(|error| format!("Unable to write Git input: {error}"))?;
+    }
     let stdout = child
         .stdout
         .take()

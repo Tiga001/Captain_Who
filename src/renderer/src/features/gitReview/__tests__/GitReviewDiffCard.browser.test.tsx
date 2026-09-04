@@ -112,7 +112,7 @@ function StickyCardsFixture(): ReactNode {
               onRequestDiff={noop}
               onRestore={noop}
               onToggle={noop}
-              scope="unstaged"
+              targetKind="unstaged"
               scrollRootRef={scrollRootRef}
               t={translate}
               viewMode="unified"
@@ -158,7 +158,7 @@ function WindowedCardFixture({
           onRestore={noop}
           onToggle={noop}
           reviewSnapshotId="snapshot-1"
-          scope="unstaged"
+          targetKind="unstaged"
           scrollRootRef={scrollRootRef}
           t={translate}
           viewMode={viewMode}
@@ -194,7 +194,7 @@ function LastTurnCardFixture({
           onRequestDiff={noop}
           onRestore={noop}
           onToggle={noop}
-          scope="lastTurn"
+          targetKind="lastTurn"
           scrollRootRef={scrollRootRef}
           t={translate}
           viewMode="unified"
@@ -265,7 +265,7 @@ function ExpansionAnchorFixture(): ReactNode {
           onRequestDiff={noop}
           onRestore={noop}
           onToggle={noop}
-          scope="unstaged"
+          targetKind="unstaged"
           scrollRootRef={scrollRootRef}
           t={translate}
           viewMode="unified"

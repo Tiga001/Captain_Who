@@ -11,15 +11,70 @@ export interface GitRepositoryInspection {
   message?: string
 }
 
-export type GitReviewScope = 'unstaged' | 'staged' | 'lastTurn'
+export type GitReviewTarget =
+  | { kind: 'lastTurn'; conversationId: string }
+  | { kind: 'uncommitted' }
+  | { kind: 'unstaged' }
+  | { kind: 'staged' }
+  | { kind: 'commit'; commitSha: string }
+  | { kind: 'branch'; baseRef: string }
+
+export type GitReviewBranchKind = 'local' | 'remote'
+
+export interface GitReviewBranch {
+  name: string
+  ref: string
+  kind: GitReviewBranchKind
+  isDefault: boolean
+}
+
+export interface GitReviewRepositoryContextInput {
+  projectId: string
+}
+
+export interface GitReviewRepositoryContext {
+  repositoryId: string
+  currentBranch?: string
+  headSha?: string
+  defaultBaseRef?: string
+  branches: GitReviewBranch[]
+  truncated: boolean
+}
+
+export interface GitReviewCommit {
+  sha: string
+  parents: string[]
+  subject: string
+  message: string
+  committedAt: string
+  stats: GitReviewStats
+}
+
+export interface GitReviewCommitListInput {
+  projectId: string
+}
+
+export interface GitReviewCommitList {
+  repositoryId: string
+  commits: GitReviewCommit[]
+  truncated: boolean
+}
 
 export type GitReviewFileStatus =
   'modified' | 'added' | 'deleted' | 'renamed' | 'copied' | 'untracked' | 'conflicted'
 
 export interface GitReviewSummaryInput {
-  conversationId?: string
   projectId: string
-  scope: GitReviewScope
+  target: GitReviewTarget
+}
+
+export interface GitReviewContext {
+  currentBranch?: string
+  headSha?: string
+  baseRef?: string
+  baseSha?: string
+  mergeBaseSha?: string
+  commit?: GitReviewCommit
 }
 
 export interface GitReviewFile {
@@ -47,7 +102,8 @@ export interface GitReviewStats {
 export interface GitReviewSummary {
   repositoryId: string
   snapshotId: string
-  scope: GitReviewScope
+  target: GitReviewTarget
+  context: GitReviewContext
   stats: GitReviewStats
   files: GitReviewFile[]
   truncated: boolean

@@ -116,11 +116,13 @@ export const HOST_CHANNELS = {
     surfaceStateChanged: 'host:browser.surfaceStateChanged'
   },
   git: {
+    getReviewRepositoryContext: 'host:git.getReviewRepositoryContext',
     getReviewFileContent: 'host:git.getReviewFileContent',
     getReviewFileDiff: 'host:git.getReviewFileDiff',
     getReviewSummary: 'host:git.getReviewSummary',
     getTurnDiffSummaries: 'host:git.getTurnDiffSummaries',
     inspectRepository: 'host:git.inspectRepository',
+    listReviewCommits: 'host:git.listReviewCommits',
     mutateReviewFile: 'host:git.mutateReviewFile'
   },
   imageGeneration: {

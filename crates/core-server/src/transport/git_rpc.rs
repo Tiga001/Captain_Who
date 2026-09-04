@@ -25,34 +25,55 @@ pub(crate) fn handle_git_request(
                 Ok(input) => input,
                 Err(message) => return response_error(Some(request.id), -32602, message),
             };
-            let scope = match GitReviewScope::parse(&input.scope) {
-                Ok(scope) => scope,
+            let project_path = match resolve_project_path(storage, &input.project_id) {
+                Ok(path) => path,
+                Err(message) => return response_error(Some(request.id), -32000, message),
+            };
+            let summary = match input.target {
+                GitReviewTargetRequest::LastTurn { conversation_id } => {
+                    match storage.load_latest_agent_turn_diff(&conversation_id, &input.project_id) {
+                        Ok(turn) => git_review_service.review_last_turn_summary(
+                            &project_path,
+                            &conversation_id,
+                            turn.as_ref(),
+                        ),
+                        Err(message) => Err(message),
+                    }
+                }
+                target => {
+                    git_review_service.review_summary(&project_path, core_review_target(target))
+                }
+            };
+            match summary {
+                Ok(summary) => response_success(request.id, summary),
+                Err(message) => response_error(Some(request.id), -32000, message),
+            }
+        }
+        GIT_GET_REVIEW_REPOSITORY_CONTEXT_METHOD => {
+            let input = match parse_params::<GitReviewRepositoryContextRequest>(request.params) {
+                Ok(input) => input,
                 Err(message) => return response_error(Some(request.id), -32602, message),
             };
             let project_path = match resolve_project_path(storage, &input.project_id) {
                 Ok(path) => path,
                 Err(message) => return response_error(Some(request.id), -32000, message),
             };
-            let summary = if scope == GitReviewScope::LastTurn {
-                let turn = input
-                    .conversation_id
-                    .as_deref()
-                    .map(|conversation_id| {
-                        storage.load_latest_agent_turn_diff(conversation_id, &input.project_id)
-                    })
-                    .transpose();
-                match turn {
-                    Ok(turn) => git_review_service.review_last_turn_summary(
-                        &project_path,
-                        turn.as_ref().and_then(Option::as_ref),
-                    ),
-                    Err(message) => Err(message),
-                }
-            } else {
-                git_review_service.review_summary(&project_path, scope)
+            match git_review_service.review_repository_context(&project_path) {
+                Ok(context) => response_success(request.id, context),
+                Err(message) => response_error(Some(request.id), -32000, message),
+            }
+        }
+        GIT_LIST_REVIEW_COMMITS_METHOD => {
+            let input = match parse_params::<GitReviewCommitListRequest>(request.params) {
+                Ok(input) => input,
+                Err(message) => return response_error(Some(request.id), -32602, message),
             };
-            match summary {
-                Ok(summary) => response_success(request.id, summary),
+            let project_path = match resolve_project_path(storage, &input.project_id) {
+                Ok(path) => path,
+                Err(message) => return response_error(Some(request.id), -32000, message),
+            };
+            match git_review_service.review_commits(&project_path) {
+                Ok(commits) => response_success(request.id, commits),
                 Err(message) => response_error(Some(request.id), -32000, message),
             }
         }
@@ -118,6 +139,19 @@ pub(crate) fn handle_git_request(
             }
         }
         _ => response_error(Some(request.id), -32601, "Method not found"),
+    }
+}
+
+fn core_review_target(target: GitReviewTargetRequest) -> GitReviewTarget {
+    match target {
+        GitReviewTargetRequest::LastTurn { conversation_id } => {
+            GitReviewTarget::LastTurn { conversation_id }
+        }
+        GitReviewTargetRequest::Uncommitted => GitReviewTarget::Uncommitted,
+        GitReviewTargetRequest::Unstaged => GitReviewTarget::Unstaged,
+        GitReviewTargetRequest::Staged => GitReviewTarget::Staged,
+        GitReviewTargetRequest::Commit { commit_sha } => GitReviewTarget::Commit { commit_sha },
+        GitReviewTargetRequest::Branch { base_ref } => GitReviewTarget::Branch { base_ref },
     }
 }
 

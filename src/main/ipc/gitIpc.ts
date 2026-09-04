@@ -6,6 +6,12 @@ export function registerGitIpc(ipcMain: TrustedIpcMain, coreServer: CoreServer):
   ipcMain.handle(HOST_CHANNELS.git.inspectRepository, (_event, input) =>
     coreServer.inspectGitRepository(input)
   )
+  ipcMain.handle(HOST_CHANNELS.git.getReviewRepositoryContext, (_event, input) =>
+    coreServer.getGitReviewRepositoryContext(input)
+  )
+  ipcMain.handle(HOST_CHANNELS.git.listReviewCommits, (_event, input) =>
+    coreServer.listGitReviewCommits(input)
+  )
   ipcMain.handle(HOST_CHANNELS.git.getReviewSummary, (_event, input) =>
     coreServer.getGitReviewSummary(input)
   )

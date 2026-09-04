@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
-import type { GitReviewFile, GitReviewScope } from '@mycopilot/protocol'
+import type { GitReviewFile, GitReviewTarget } from '@mycopilot/protocol'
 import {
   AlertCircle,
   Check,
@@ -28,7 +28,7 @@ import { loadGitReviewPreferences, saveGitReviewPreferences } from './gitReviewP
 import { projectGitReviewSummary } from './gitReviewSummaryProjection'
 import { getTargetGitReviewViewMode } from './gitReviewViewMode'
 import type { GitReviewViewMode } from './gitReviewViewMode'
-import { useGitReview } from './useGitReview'
+import { gitReviewTargetKey, useGitReview } from './useGitReview'
 import './GitReviewPanel.css'
 
 interface GitReviewPanelProps {
@@ -36,12 +36,14 @@ interface GitReviewPanelProps {
   isActive: boolean
   onOpenFile: (path: string) => void
   projectId: string
-  scopeNavigation?: {
+  targetNavigation?: {
     filePath?: string
     requestId: number
-    scope: GitReviewScope
+    target: GitReviewTarget
   }
 }
+
+type VisibleGitReviewTargetKind = 'lastTurn' | 'unstaged' | 'staged'
 
 type OpenMenu = 'scope' | 'options' | null
 
@@ -53,7 +55,7 @@ interface PendingFileAlignment {
 interface PendingReviewFileNavigation {
   filePath: string
   requestId: number
-  scope: GitReviewScope
+  targetKey: string
 }
 
 interface GitReviewFileVisibility {
@@ -92,7 +94,7 @@ export function GitReviewPanel({
   isActive,
   onOpenFile,
   projectId,
-  scopeNavigation
+  targetNavigation
 }: GitReviewPanelProps): ReactNode {
   const { t } = useFrontendConfig()
   const [reviewPreferences, setReviewPreferences] = useState(loadGitReviewPreferences)
@@ -109,12 +111,14 @@ export function GitReviewPanel({
     pendingFileId,
     refresh,
     retryFileDiff,
-    scope,
+    target,
     setHotDiffFileIds,
     setHotFullContentFileIds,
-    setScope,
+    setTarget,
     summaryState: sourceSummaryState
-  } = useGitReview(projectId, isActive, conversationId, scopeNavigation?.scope)
+  } = useGitReview(projectId, isActive, targetNavigation?.target)
+  const targetKey = gitReviewTargetKey(target)
+  const targetKind = target.kind
   const projectedSummary = useMemo(() => {
     if (!sourceSummaryState.value) return undefined
     return projectGitReviewSummary(sourceSummaryState.value, {
@@ -138,7 +142,7 @@ export function GitReviewPanel({
       ...(projectedSummary ? { value: projectedSummary } : {})
     }
   }, [projectedSummary, sourceSummaryState.status, sourceSummaryState.value, summaryError])
-  const handledScopeNavigationRequestRef = useRef<number | null>(null)
+  const handledTargetNavigationRequestRef = useRef<number | null>(null)
   const [expandedFileIds, setExpandedFileIds] = useState<Set<string>>(() => new Set())
   const [selectedFileId, setSelectedFileId] = useState<string | null>(null)
   const [pendingReviewFileNavigation, setPendingReviewFileNavigation] =
@@ -168,24 +172,32 @@ export function GitReviewPanel({
 
   useLayoutEffect(() => {
     if (
-      !scopeNavigation ||
-      handledScopeNavigationRequestRef.current === scopeNavigation.requestId
+      !targetNavigation ||
+      handledTargetNavigationRequestRef.current === targetNavigation.requestId
     ) {
       return
     }
-    handledScopeNavigationRequestRef.current = scopeNavigation.requestId
-    const filePath = scopeNavigation.filePath?.trim()
+    handledTargetNavigationRequestRef.current = targetNavigation.requestId
+    const filePath = targetNavigation.filePath?.trim()
     setPendingReviewFileNavigation(
       filePath
         ? {
             filePath,
-            requestId: scopeNavigation.requestId,
-            scope: scopeNavigation.scope
+            requestId: targetNavigation.requestId,
+            targetKey: gitReviewTargetKey(targetNavigation.target)
           }
         : null
     )
-    if (scope !== scopeNavigation.scope) setScope(scopeNavigation.scope)
-  }, [scope, scopeNavigation, setScope])
+    if (targetKey !== gitReviewTargetKey(targetNavigation.target)) {
+      setTarget(targetNavigation.target)
+    }
+  }, [setTarget, targetKey, targetNavigation])
+
+  useEffect(() => {
+    if (target.kind === 'lastTurn' && conversationId && target.conversationId !== conversationId) {
+      setTarget({ kind: 'lastTurn', conversationId })
+    }
+  }, [conversationId, setTarget, target])
 
   useEffect(() => {
     diffStatesRef.current = diffStates
@@ -202,7 +214,7 @@ export function GitReviewPanel({
   useEffect(() => {
     setRestoreCandidate(null)
     cancelPendingFileAlignment()
-  }, [cancelPendingFileAlignment, projectId, scope])
+  }, [cancelPendingFileAlignment, projectId, targetKey])
 
   useEffect(() => {
     if (!openMenu) return
@@ -241,9 +253,9 @@ export function GitReviewPanel({
   }, [])
 
   useEffect(() => {
-    if (!summaryState.value || summaryState.value.scope !== scope) return
+    if (!summaryState.value || gitReviewTargetKey(summaryState.value.target) !== targetKey) return
     const fileIds = new Set(files.map((file) => file.id))
-    const queryKey = `${projectId}:${scope}`
+    const queryKey = `${projectId}:${targetKey}`
     const initializeQuery = initializedQueryRef.current !== queryKey
     initializedQueryRef.current = queryKey
 
@@ -256,7 +268,7 @@ export function GitReviewPanel({
       if (current && fileIds.has(current)) return current
       return files[0]?.id ?? null
     })
-  }, [files, projectId, scope, summaryState.value])
+  }, [files, projectId, summaryState.value, targetKey])
 
   const normalizedQuery = searchQuery.trim().toLocaleLowerCase()
   const filteredFiles = useMemo(() => {
@@ -505,7 +517,7 @@ export function GitReviewPanel({
       !pending ||
       !isActive ||
       summaryState.status !== 'ready' ||
-      summaryState.value.scope !== pending.scope
+      gitReviewTargetKey(summaryState.value.target) !== pending.targetKey
     ) {
       return
     }
@@ -544,13 +556,17 @@ export function GitReviewPanel({
     return () => cancelAnimationFrame(animationFrame)
   }, [alignFileHeader, diffStates])
 
-  const handleScopeChange = useCallback(
-    (nextScope: GitReviewScope) => {
+  const handleTargetChange = useCallback(
+    (nextKind: VisibleGitReviewTargetKind) => {
       setPendingReviewFileNavigation(null)
-      if (nextScope !== scope) setScope(nextScope)
+      const nextTarget: GitReviewTarget =
+        nextKind === 'lastTurn'
+          ? { kind: 'lastTurn', conversationId: conversationId ?? '' }
+          : { kind: nextKind }
+      if (gitReviewTargetKey(nextTarget) !== targetKey) setTarget(nextTarget)
       setOpenMenu(null)
     },
-    [scope, setScope]
+    [conversationId, setTarget, targetKey]
   )
 
   const toggleSearch = useCallback(() => {
@@ -562,12 +578,15 @@ export function GitReviewPanel({
   }, [])
 
   const scopeLabel =
-    scope === 'lastTurn'
+    targetKind === 'lastTurn'
       ? t('gitReview.scope.lastTurn')
-      : scope === 'unstaged'
+      : targetKind === 'unstaged'
         ? t('gitReview.scope.unstaged')
         : t('gitReview.scope.staged')
-  const stats = summaryState.value?.scope === scope ? summaryState.value.stats : null
+  const stats =
+    summaryState.value && gitReviewTargetKey(summaryState.value.target) === targetKey
+      ? summaryState.value.stats
+      : null
   const statsLabel = stats
     ? formatTranslation(
         t,
@@ -602,19 +621,19 @@ export function GitReviewPanel({
             {openMenu === 'scope' && (
               <div className="git-review__menu git-review__scope-menu" role="menu">
                 <ScopeMenuItem
-                  checked={scope === 'lastTurn'}
+                  checked={targetKind === 'lastTurn'}
                   label={t('gitReview.scope.lastTurn')}
-                  onSelect={() => handleScopeChange('lastTurn')}
+                  onSelect={() => handleTargetChange('lastTurn')}
                 />
                 <ScopeMenuItem
-                  checked={scope === 'unstaged'}
+                  checked={targetKind === 'unstaged'}
                   label={t('gitReview.scope.unstaged')}
-                  onSelect={() => handleScopeChange('unstaged')}
+                  onSelect={() => handleTargetChange('unstaged')}
                 />
                 <ScopeMenuItem
-                  checked={scope === 'staged'}
+                  checked={targetKind === 'staged'}
                   label={t('gitReview.scope.staged')}
-                  onSelect={() => handleScopeChange('staged')}
+                  onSelect={() => handleTargetChange('staged')}
                 />
               </div>
             )}
@@ -828,7 +847,7 @@ export function GitReviewPanel({
             onOpenFile={onOpenFile}
             onRestore={setRestoreCandidate}
             nearFileIds={fileVisibility.near}
-            scope={scope}
+            targetKind={targetKind}
             scrollRootRef={contentRef}
             selectedFileId={selectedFileId}
             retryFileDiff={retryFileDiff}
@@ -985,7 +1004,7 @@ interface GitReviewContentProps {
   onRestore: (file: GitReviewFile) => void
   onRefresh: ReviewHook['refresh']
   pendingFileId: string | null
-  scope: GitReviewScope
+  targetKind: GitReviewTarget['kind']
   scrollRootRef: React.RefObject<HTMLDivElement | null>
   selectedFileId: string | null
   retryFileDiff: ReviewHook['retryFileDiff']
@@ -1014,7 +1033,7 @@ function GitReviewContent({
   onRestore,
   onRefresh,
   pendingFileId,
-  scope,
+  targetKind,
   scrollRootRef,
   selectedFileId,
   retryFileDiff,
@@ -1054,15 +1073,15 @@ function GitReviewContent({
 
   if (summaryState.value && summaryState.value.files.length === 0) {
     const title =
-      scope === 'lastTurn'
+      targetKind === 'lastTurn'
         ? t('gitReview.empty.lastTurn.title')
-        : scope === 'unstaged'
+        : targetKind === 'unstaged'
           ? t('gitReview.empty.unstaged.title')
           : t('gitReview.empty.staged.title')
     const description =
-      scope === 'lastTurn'
+      targetKind === 'lastTurn'
         ? t('gitReview.empty.lastTurn.description')
-        : scope === 'unstaged'
+        : targetKind === 'unstaged'
           ? t('gitReview.empty.unstaged.description')
           : t('gitReview.empty.staged.description')
     return (
@@ -1111,7 +1130,7 @@ function GitReviewContent({
             onRequestDiff={retryFileDiff}
             onRestore={onRestore}
             onToggle={toggleFile}
-            scope={scope}
+            targetKind={targetKind}
             scrollRootRef={scrollRootRef}
             reviewSnapshotId={reviewSnapshotId}
             t={t}

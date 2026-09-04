@@ -20,8 +20,9 @@ function summary(): GitReviewSummary {
       },
       { id: 'office', path: 'report.docx', status: 'added' }
     ],
+    context: {},
     repositoryId: 'repository-1',
-    scope: 'unstaged',
+    target: { kind: 'unstaged' },
     snapshotId: 'snapshot-1',
     stats: {
       additions: 12,

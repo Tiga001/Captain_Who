@@ -29,8 +29,9 @@ vi.mock('../useGitReview', async () => {
         status: 'added' as const
       }
     ],
+    context: {},
     repositoryId: 'repository-1',
-    scope: 'unstaged',
+    target: { kind: 'unstaged' },
     snapshotId: 'snapshot-1',
     stats: {
       additions: 999,
@@ -45,6 +46,7 @@ vi.mock('../useGitReview', async () => {
   const emptyFileContentStates = {}
 
   return {
+    gitReviewTargetKey: (target: { kind: string }) => target.kind,
     useGitReview: () => {
       const [diffStates, setDiffStates] = useState<Record<string, object>>({})
       const diffStatesRef = useRef(diffStates)
@@ -101,8 +103,8 @@ vi.mock('../useGitReview', async () => {
         retryFileDiff: loadFileDiff,
         setHotDiffFileIds: noop,
         setHotFullContentFileIds: noop,
-        scope: 'unstaged',
-        setScope: noop,
+        setTarget: noop,
+        target: { kind: 'unstaged' as const },
         summaryState: { status: 'ready', value: summary }
       }
     }

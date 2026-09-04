@@ -14,8 +14,9 @@ pub(super) struct Snapshot {
     pub(super) id: String,
     pub(super) created_at: Instant,
     pub(super) repository: RepositoryContext,
-    pub(super) scope: GitReviewScope,
-    pub(super) head_oid: String,
+    pub(super) target: GitReviewTarget,
+    pub(super) comparison: SnapshotComparison,
+    pub(super) has_head: bool,
     pub(super) index_stamp: FileStamp,
     pub(super) files: HashMap<String, SnapshotFile>,
 }
@@ -135,9 +136,14 @@ pub(super) fn snapshot_file_is_current(
         (None, None) => true,
         _ => false,
     };
-    Ok(read_head_oid(&snapshot.repository)? == snapshot.head_oid
-        && file_stamp(&snapshot.repository.git_dir.join("index")) == snapshot.index_stamp
-        && (snapshot.scope != GitReviewScope::Unstaged
-            || (file_stamp(&snapshot.repository.root.join(&file.path)) == file.stamp
-                && previous_path_is_current)))
+    let index_is_current =
+        file_stamp(&snapshot.repository.git_dir.join("index")) == snapshot.index_stamp;
+    let worktree_is_current = file_stamp(&snapshot.repository.root.join(&file.path)) == file.stamp
+        && previous_path_is_current;
+    Ok(match &snapshot.comparison {
+        SnapshotComparison::IndexToWorktree => index_is_current && worktree_is_current,
+        SnapshotComparison::TreeToIndex { .. } => index_is_current,
+        SnapshotComparison::TreeToWorktree { .. } => index_is_current && worktree_is_current,
+        SnapshotComparison::TreeToTree { .. } => true,
+    })
 }

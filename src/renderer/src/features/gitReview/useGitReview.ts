@@ -3,7 +3,7 @@ import type {
   GitReviewFileContent,
   GitReviewFileDiff,
   GitReviewFileMutationAction,
-  GitReviewScope,
+  GitReviewTarget,
   GitReviewSummary
 } from '@mycopilot/protocol'
 import {
@@ -60,10 +60,22 @@ interface DiffRequestRecord extends GitReviewDiffQueueItem {
 }
 
 interface RequestableSnapshot {
-  conversationId: string | null
   projectId: string
-  scope: GitReviewScope
+  targetKey: string
   summary: GitReviewSummary
+}
+
+export function gitReviewTargetKey(target: GitReviewTarget): string {
+  switch (target.kind) {
+    case 'lastTurn':
+      return `lastTurn:${target.conversationId}`
+    case 'commit':
+      return `commit:${target.commitSha}`
+    case 'branch':
+      return `branch:${target.baseRef}`
+    default:
+      return target.kind
+  }
 }
 
 function errorMessage(error: unknown): string {
@@ -73,11 +85,10 @@ function errorMessage(error: unknown): string {
 export function useGitReview(
   projectId: string,
   isActive: boolean,
-  conversationId?: string | null,
-  initialScope: GitReviewScope = 'unstaged'
+  initialTarget: GitReviewTarget = { kind: 'unstaged' }
 ) {
-  const [scope, setScope] = useState<GitReviewScope>(initialScope)
-  const lastTurnConversationId = scope === 'lastTurn' ? (conversationId ?? null) : null
+  const [target, setTarget] = useState<GitReviewTarget>(initialTarget)
+  const targetKey = gitReviewTargetKey(target)
   const [summaryState, setSummaryState] = useState<GitReviewSummaryState>({ status: 'idle' })
   const [diffStates, setDiffStates] = useState<Record<string, GitReviewDiffState>>({})
   const [fileContentStates, setFileContentStates] = useState<
@@ -123,13 +134,12 @@ export function useGitReview(
     if (
       requestableSnapshotRef.current &&
       (requestableSnapshotRef.current.projectId !== projectId ||
-        requestableSnapshotRef.current.scope !== scope ||
-        requestableSnapshotRef.current.conversationId !== lastTurnConversationId)
+        requestableSnapshotRef.current.targetKey !== targetKey)
     ) {
       requestableSnapshotRef.current = null
       refreshFallbackRef.current = null
     }
-  }, [isActive, lastTurnConversationId, projectId, scope])
+  }, [isActive, projectId, targetKey])
 
   useEffect(
     () => () => {
@@ -162,7 +172,7 @@ export function useGitReview(
     mutationRequestRef.current = null
     setMutationError(null)
     setPendingFileId(null)
-  }, [lastTurnConversationId, projectId, scope])
+  }, [projectId, targetKey])
 
   const resetReviewData = useCallback(() => {
     setDiffStates({})
@@ -198,7 +208,7 @@ export function useGitReview(
   const refresh = useCallback(async () => {
     if (!projectId) return
     const requestId = summaryRequestRef.current + 1
-    const queryKey = `${projectId}:${scope}:${lastTurnConversationId ?? ''}`
+    const queryKey = `${projectId}:${targetKey}`
     const sameQuery = summaryQueryRef.current === queryKey
     const fallbackSnapshot = sameQuery
       ? (requestableSnapshotRef.current ?? refreshFallbackRef.current)
@@ -216,17 +226,15 @@ export function useGitReview(
 
     try {
       const summary = await getGitReviewSummary({
-        ...(lastTurnConversationId ? { conversationId: lastTurnConversationId } : {}),
         projectId,
-        scope
+        target
       })
       if (summaryRequestRef.current !== requestId) return
       if (preserveCurrentReview) resetReviewData()
       refreshFallbackRef.current = null
       requestableSnapshotRef.current = {
-        conversationId: lastTurnConversationId,
         projectId,
-        scope,
+        targetKey,
         summary
       }
       setSummaryState({ status: 'ready', value: summary })
@@ -244,7 +252,7 @@ export function useGitReview(
         drainFullContentQueueRef.current()
       }
     }
-  }, [lastTurnConversationId, projectId, resetReviewData, scope])
+  }, [projectId, resetReviewData, target, targetKey])
 
   const drainFullContentQueue = useCallback(() => {
     while (
@@ -336,8 +344,7 @@ export function useGitReview(
       if (
         !requestable ||
         requestable.projectId !== projectId ||
-        requestable.scope !== scope ||
-        requestable.conversationId !== lastTurnConversationId
+        requestable.targetKey !== targetKey
       ) {
         return
       }
@@ -367,7 +374,7 @@ export function useGitReview(
       fullContentQueueRef.current.push(item)
       drainFullContentQueueRef.current()
     },
-    [lastTurnConversationId, projectId, scope]
+    [projectId, targetKey]
   )
 
   const cancelQueuedFileContentsExcept = useCallback((keepFileIds: ReadonlySet<string>) => {
@@ -506,8 +513,7 @@ export function useGitReview(
       if (
         !requestable ||
         requestable.projectId !== projectId ||
-        requestable.scope !== scope ||
-        requestable.conversationId !== lastTurnConversationId
+        requestable.targetKey !== targetKey
       ) {
         return
       }
@@ -553,7 +559,7 @@ export function useGitReview(
       setDiffStates(nextStates)
       drainDiffQueueRef.current()
     },
-    [lastTurnConversationId, projectId, scope]
+    [projectId, targetKey]
   )
 
   const loadFileDiff = useCallback(
@@ -612,9 +618,8 @@ export function useGitReview(
       if (
         !requestable ||
         requestable.projectId !== projectId ||
-        requestable.scope !== scope ||
-        requestable.conversationId !== lastTurnConversationId ||
-        scope === 'lastTurn' ||
+        requestable.targetKey !== targetKey ||
+        (target.kind !== 'unstaged' && target.kind !== 'staged') ||
         mutationRequestRef.current
       ) {
         return
@@ -644,7 +649,7 @@ export function useGitReview(
         }
       }
     },
-    [lastTurnConversationId, projectId, refresh, scope]
+    [projectId, refresh, target.kind, targetKey]
   )
 
   useEffect(() => {
@@ -680,9 +685,9 @@ export function useGitReview(
     retryFileDiff,
     setHotDiffFileIds,
     setHotFullContentFileIds,
-    scope,
-    setScope,
-    summaryState
+    setTarget,
+    summaryState,
+    target
   }
 }
 

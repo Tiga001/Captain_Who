@@ -1,7 +1,7 @@
 import type {
   GitReviewFileContent,
   GitReviewFileDiff,
-  GitReviewScope,
+  GitReviewTarget,
   GitReviewSummary
 } from '@mycopilot/protocol'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
@@ -33,8 +33,9 @@ function summary(snapshotId: string): GitReviewSummary {
         status: 'modified'
       }
     ],
+    context: {},
     repositoryId: 'repository-1',
-    scope: 'unstaged',
+    target: { kind: 'unstaged' },
     snapshotId,
     stats: {
       additions: 1,
@@ -67,15 +68,15 @@ function readyContent(snapshotId = 'snapshot-1'): GitReviewFileContent {
 
 function ReviewHarness({
   active,
-  initialScope
+  initialTarget
 }: {
   active: boolean
-  initialScope?: GitReviewScope
+  initialTarget?: GitReviewTarget
 }) {
-  const review = useGitReview('project-1', active, 'conversation-1', initialScope)
+  const review = useGitReview('project-1', active, initialTarget)
   return (
     <div>
-      <output data-testid="scope">{review.scope}</output>
+      <output data-testid="target">{review.target.kind}</output>
       <output data-testid="summary-status">
         {review.summaryState.status}:{review.summaryState.value?.snapshotId ?? 'none'}:
         {review.summaryState.status === 'error' ? review.summaryState.error : 'ok'}
@@ -96,7 +97,10 @@ function ReviewHarness({
       <button type="button" onClick={() => void review.refresh()}>
         refresh
       </button>
-      <button type="button" onClick={() => review.setScope('lastTurn')}>
+      <button
+        type="button"
+        onClick={() => review.setTarget({ kind: 'lastTurn', conversationId: 'conversation-1' })}
+      >
         last turn
       </button>
       <button type="button" onClick={() => void review.mutateFile('file-1', 'stage')}>
@@ -117,15 +121,19 @@ beforeEach(() => {
 })
 
 describe('useGitReview request lifecycle', () => {
-  it('uses a requested last-turn scope for the first review request', async () => {
-    const screen = await render(<ReviewHarness active initialScope="lastTurn" />)
+  it('uses a requested last-turn target for the first review request', async () => {
+    const screen = await render(
+      <ReviewHarness
+        active
+        initialTarget={{ kind: 'lastTurn', conversationId: 'conversation-1' }}
+      />
+    )
 
-    await expect.element(screen.getByTestId('scope')).toHaveTextContent('lastTurn')
+    await expect.element(screen.getByTestId('target')).toHaveTextContent('lastTurn')
     await expect.poll(() => summarySpy.mock.calls.length).toBe(1)
     expect(summarySpy).toHaveBeenCalledWith({
-      conversationId: 'conversation-1',
       projectId: 'project-1',
-      scope: 'lastTurn'
+      target: { kind: 'lastTurn', conversationId: 'conversation-1' }
     })
   })
 
@@ -221,9 +229,8 @@ describe('useGitReview request lifecycle', () => {
     await screen.getByRole('button', { name: 'last turn' }).click()
     await expect.poll(() => summarySpy.mock.calls.length).toBeGreaterThan(1)
     expect(summarySpy).toHaveBeenLastCalledWith({
-      conversationId: 'conversation-1',
       projectId: 'project-1',
-      scope: 'lastTurn'
+      target: { kind: 'lastTurn', conversationId: 'conversation-1' }
     })
 
     await screen.getByRole('button', { name: 'mutate' }).click()

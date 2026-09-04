@@ -203,7 +203,7 @@ describe('RightSidebar workspace lifecycle', () => {
                 kind: 'git-review',
                 projectId: workspace.workspaceKey,
                 requestId,
-                scope: 'lastTurn',
+                target: { kind: 'lastTurn', conversationId: 'conversation-1' },
                 ...(filePath ? { filePath } : {})
               }
         }
@@ -612,7 +612,7 @@ function TrackedSurface({
         moduleState?.kind === 'git-review' ? String(moduleState.requestId) : undefined
       }
       data-review-file-path={moduleState?.kind === 'git-review' ? moduleState.filePath : undefined}
-      data-review-scope={moduleState?.kind === 'git-review' ? moduleState.scope : undefined}
+      data-review-scope={moduleState?.kind === 'git-review' ? moduleState.target.kind : undefined}
       data-selected={isSelected ? 'true' : 'false'}
       data-testid={`${moduleId}-surface`}
       data-workspace-key={workspaceKey ?? 'global'}

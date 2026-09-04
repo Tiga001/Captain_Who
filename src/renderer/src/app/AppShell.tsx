@@ -353,18 +353,19 @@ export function AppShell() {
   const openLastTurnReview = useCallback(
     (filePath?: string) => {
       const projectId = rightSidebarWorkspaceProject?.id
-      if (!projectId) return
+      const conversationId = activeConversation?.id
+      if (!projectId || !conversationId) return
       rightSidebarReviewNavigationRequestIdRef.current += 1
       setRightSidebarReviewNavigationRequest({
         kind: 'git-review',
         projectId,
         requestId: rightSidebarReviewNavigationRequestIdRef.current,
-        scope: 'lastTurn',
+        target: { kind: 'lastTurn', conversationId },
         ...(filePath ? { filePath } : {})
       })
       openRightSidebar()
     },
-    [openRightSidebar, rightSidebarWorkspaceProject?.id]
+    [activeConversation?.id, openRightSidebar, rightSidebarWorkspaceProject?.id]
   )
   const openAgentCenter = useCallback(
     (agentId: string) => {

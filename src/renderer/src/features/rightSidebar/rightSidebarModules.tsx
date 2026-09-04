@@ -271,12 +271,12 @@ function GitReviewModuleSurface({
   projectId: string
 }) {
   const { activeConversationId, activeWorkspaceKey } = useRightSidebarRuntimeContext()
-  const scopeNavigation =
+  const targetNavigation =
     pageState?.kind === 'git-review' && pageState.projectId === projectId
       ? {
           filePath: pageState.filePath,
           requestId: pageState.requestId,
-          scope: pageState.scope
+          target: pageState.target
         }
       : undefined
   return (
@@ -285,7 +285,7 @@ function GitReviewModuleSurface({
       isActive={isActive}
       onOpenFile={onOpenFile}
       projectId={projectId}
-      scopeNavigation={scopeNavigation}
+      targetNavigation={targetNavigation}
     />
   )
 }

@@ -2,7 +2,7 @@ import type { LucideIcon } from 'lucide-react'
 import type { ReactNode } from 'react'
 import type { TranslationKey } from '../../config/frontendTranslations'
 import type { Translate } from '../../config/translationFormat'
-import type { AgentSummary } from '@mycopilot/protocol'
+import type { AgentSummary, GitReviewTarget } from '@mycopilot/protocol'
 
 export type RightSidebarModuleId = 'terminal' | 'browser' | 'files' | 'git-review' | 'agent-center'
 
@@ -85,7 +85,7 @@ export type RightSidebarModulePageState =
       filePath?: string
       projectId: string
       requestId: number
-      scope: 'lastTurn'
+      target: Extract<GitReviewTarget, { kind: 'lastTurn' }>
     }
   | {
       agentId?: string

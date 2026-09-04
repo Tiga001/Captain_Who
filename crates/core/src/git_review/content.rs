@@ -11,13 +11,6 @@ pub(super) enum LoadedReviewContent {
     Unsupported,
 }
 
-#[derive(Debug, Clone, Copy)]
-pub(super) enum SideRequirement {
-    Absent,
-    Optional,
-    Required,
-}
-
 #[derive(Debug)]
 pub(super) enum SideContent {
     Missing,
@@ -49,46 +42,46 @@ pub(super) fn load_review_file_content(
     } else {
         &file.path
     };
-    let before_requirement = match (snapshot.scope, file.status) {
-        (_, GitReviewFileStatus::Untracked)
-        | (GitReviewScope::Staged, GitReviewFileStatus::Added) => SideRequirement::Absent,
-        (GitReviewScope::Unstaged, GitReviewFileStatus::Added) => SideRequirement::Optional,
-        (GitReviewScope::LastTurn, _) => SideRequirement::Absent,
-        _ => SideRequirement::Required,
-    };
-    let after_requirement = if file.status == GitReviewFileStatus::Deleted {
-        SideRequirement::Absent
-    } else {
-        SideRequirement::Required
-    };
+    let before_absent = matches!(
+        file.status,
+        GitReviewFileStatus::Untracked | GitReviewFileStatus::Added
+    );
+    let after_absent = file.status == GitReviewFileStatus::Deleted;
 
-    // Git's review boundary is HEAD -> index for staged changes and index -> worktree for
-    // unstaged changes. Object sides are read by validated OID; the worktree side is read without
-    // following repository-controlled symlinks.
-    let before = match (snapshot.scope, before_requirement) {
-        (_, SideRequirement::Absent) => SideContent::Missing,
-        (GitReviewScope::Staged, requirement) => {
-            let entry = if snapshot.head_oid.is_empty() {
-                None
-            } else {
-                head_entry(&snapshot.repository, &snapshot.head_oid, before_path)?
-            };
-            load_repository_entry(&snapshot.repository, entry, requirement)?
+    // Object references are resolved when the snapshot is created. All later reads use those
+    // immutable IDs; worktree reads refuse repository-controlled symlink traversal.
+    let before = if before_absent {
+        SideContent::Missing
+    } else {
+        match &snapshot.comparison {
+            SnapshotComparison::IndexToWorktree => load_repository_entry(
+                &snapshot.repository,
+                index_entry(&snapshot.repository, before_path)?,
+            )?,
+            SnapshotComparison::TreeToIndex { before_oid }
+            | SnapshotComparison::TreeToWorktree { before_oid }
+            | SnapshotComparison::TreeToTree { before_oid, .. } => load_repository_entry(
+                &snapshot.repository,
+                tree_entry(&snapshot.repository, before_oid, before_path)?,
+            )?,
         }
-        (GitReviewScope::Unstaged, requirement) => {
-            let entry = index_entry(&snapshot.repository, before_path)?;
-            load_repository_entry(&snapshot.repository, entry, requirement)?
-        }
-        (GitReviewScope::LastTurn, _) => SideContent::Unsupported,
     };
-    let after = match (snapshot.scope, after_requirement) {
-        (_, SideRequirement::Absent) => SideContent::Missing,
-        (GitReviewScope::Staged, requirement) => {
-            let entry = index_entry(&snapshot.repository, &file.path)?;
-            load_repository_entry(&snapshot.repository, entry, requirement)?
+    let after = if after_absent {
+        SideContent::Missing
+    } else {
+        match &snapshot.comparison {
+            SnapshotComparison::IndexToWorktree | SnapshotComparison::TreeToWorktree { .. } => {
+                read_worktree_content(&snapshot.repository, &file.path)
+            }
+            SnapshotComparison::TreeToIndex { .. } => load_repository_entry(
+                &snapshot.repository,
+                index_entry(&snapshot.repository, &file.path)?,
+            )?,
+            SnapshotComparison::TreeToTree { after_oid, .. } => load_repository_entry(
+                &snapshot.repository,
+                tree_entry(&snapshot.repository, after_oid, &file.path)?,
+            )?,
         }
-        (GitReviewScope::Unstaged, _) => read_worktree_content(&snapshot.repository, &file.path),
-        (GitReviewScope::LastTurn, _) => SideContent::Unsupported,
     };
 
     Ok(normalize_review_content(before, after))
@@ -97,28 +90,26 @@ pub(super) fn load_review_file_content(
 pub(super) fn load_repository_entry(
     repository: &RepositoryContext,
     entry: Option<RepositoryEntry>,
-    requirement: SideRequirement,
 ) -> Result<SideContent, String> {
     match entry {
         Some(RepositoryEntry::Blob(oid)) => read_blob_content(repository, &oid),
         Some(RepositoryEntry::Gitlink | RepositoryEntry::Unsupported) => {
             Ok(SideContent::Unsupported)
         }
-        None if matches!(requirement, SideRequirement::Optional) => Ok(SideContent::Missing),
         None => Ok(SideContent::Unsupported),
     }
 }
 
-pub(super) fn head_entry(
+pub(super) fn tree_entry(
     repository: &RepositoryContext,
-    head_oid: &str,
+    treeish_oid: &str,
     path: &str,
 ) -> Result<Option<RepositoryEntry>, String> {
     let args = vec![
         "ls-tree".to_string(),
         "-z".to_string(),
         "--full-tree".to_string(),
-        head_oid.to_string(),
+        treeish_oid.to_string(),
         "--".to_string(),
         literal_pathspec(path),
     ];

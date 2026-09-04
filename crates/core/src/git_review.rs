@@ -3,7 +3,7 @@ use serde::Serialize;
 use similar::TextDiff;
 use std::collections::{HashMap, VecDeque};
 use std::fs::{self, File, OpenOptions};
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::sync::Mutex;
@@ -13,6 +13,7 @@ use uuid::Uuid;
 mod content;
 mod diff;
 mod git_command;
+mod metadata;
 mod mutation;
 mod repository;
 mod snapshot;
@@ -21,6 +22,7 @@ mod turn;
 use content::*;
 use diff::*;
 use git_command::*;
+use metadata::*;
 use mutation::*;
 use repository::*;
 use snapshot::*;
@@ -41,6 +43,9 @@ const MAX_FULL_CONTENT_SIDE_LINES: usize = 100_000;
 const MAX_FULL_CONTENT_TOTAL_BYTES: usize = 2 * 1024 * 1024;
 const MAX_STDERR_BYTES: usize = 64 * 1024;
 const MAX_REVIEW_FILES: usize = 500;
+const MAX_REVIEW_BRANCHES: usize = 500;
+const MAX_REVIEW_COMMITS: usize = 50;
+const MAX_METADATA_BYTES: usize = 4 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -62,31 +67,68 @@ pub struct GitRepositoryInspection {
     pub message: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub enum GitReviewScope {
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind")]
+pub enum GitReviewTarget {
+    #[serde(rename = "lastTurn")]
+    LastTurn {
+        #[serde(rename = "conversationId")]
+        conversation_id: String,
+    },
+    #[serde(rename = "uncommitted")]
+    Uncommitted,
+    #[serde(rename = "unstaged")]
     Unstaged,
+    #[serde(rename = "staged")]
     Staged,
-    LastTurn,
+    #[serde(rename = "commit")]
+    Commit {
+        #[serde(rename = "commitSha")]
+        commit_sha: String,
+    },
+    #[serde(rename = "branch")]
+    Branch {
+        #[serde(rename = "baseRef")]
+        base_ref: String,
+    },
 }
 
-impl GitReviewScope {
-    pub fn parse(value: &str) -> Result<Self, String> {
-        match value {
-            "unstaged" => Ok(Self::Unstaged),
-            "staged" => Ok(Self::Staged),
-            "lastTurn" => Ok(Self::LastTurn),
-            _ => Err("Unsupported Git review scope.".to_string()),
+impl GitReviewTarget {
+    fn identity(&self) -> String {
+        match self {
+            Self::LastTurn { conversation_id } => format!("lastTurn\0{conversation_id}"),
+            Self::Uncommitted => "uncommitted".to_string(),
+            Self::Unstaged => "unstaged".to_string(),
+            Self::Staged => "staged".to_string(),
+            Self::Commit { commit_sha } => format!("commit\0{commit_sha}"),
+            Self::Branch { base_ref } => format!("branch\0{base_ref}"),
         }
     }
 
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Unstaged => "unstaged",
-            Self::Staged => "staged",
-            Self::LastTurn => "lastTurn",
-        }
+    fn is_mutable(&self) -> bool {
+        matches!(self, Self::Unstaged | Self::Staged)
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StatusSelection {
+    Unstaged,
+    Staged,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SnapshotComparison {
+    IndexToWorktree,
+    TreeToIndex {
+        before_oid: String,
+    },
+    TreeToWorktree {
+        before_oid: String,
+    },
+    TreeToTree {
+        before_oid: String,
+        after_oid: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -129,12 +171,80 @@ pub struct GitReviewStats {
     pub line_counts_complete: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum GitReviewBranchKind {
+    Local,
+    Remote,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitReviewBranch {
+    pub name: String,
+    #[serde(rename = "ref")]
+    pub ref_name: String,
+    pub kind: GitReviewBranchKind,
+    pub is_default: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitReviewRepositoryContext {
+    pub repository_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_branch: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub head_sha: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_base_ref: Option<String>,
+    pub branches: Vec<GitReviewBranch>,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitReviewCommit {
+    pub sha: String,
+    pub parents: Vec<String>,
+    pub subject: String,
+    pub message: String,
+    pub committed_at: String,
+    pub stats: GitReviewStats,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitReviewCommitList {
+    pub repository_id: String,
+    pub commits: Vec<GitReviewCommit>,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitReviewContext {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_branch: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub head_sha: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base_ref: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base_sha: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub merge_base_sha: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub commit: Option<GitReviewCommit>,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GitReviewSummary {
     pub repository_id: String,
     pub snapshot_id: String,
-    pub scope: GitReviewScope,
+    pub target: GitReviewTarget,
+    pub context: GitReviewContext,
     pub stats: GitReviewStats,
     pub files: Vec<GitReviewFile>,
     pub truncated: bool,
@@ -296,46 +406,29 @@ impl GitReviewService {
     pub fn review_summary(
         &self,
         project_path: &Path,
-        scope: GitReviewScope,
+        target: GitReviewTarget,
     ) -> Result<GitReviewSummary, String> {
-        if scope == GitReviewScope::LastTurn {
-            return Err("Last-turn review requires an agent turn record.".to_string());
-        }
         let repository = resolve_repository(project_path).map_err(|error| error.message())?;
-        let args = vec![
-            "status".to_string(),
-            "--porcelain=v1".to_string(),
-            "-z".to_string(),
-            "--untracked-files=all".to_string(),
-            "--".to_string(),
-            repository.pathspec.clone(),
-        ];
-
-        let output = run_git(&repository.root, &args, MAX_STATUS_BYTES)?;
-        if !output.status.success() {
-            return Err(git_failure("Unable to read Git status.", &output));
-        }
-        if output.stdout_truncated {
-            return Err("Git status is too large to review safely.".to_string());
-        }
-
-        let parsed_files = parse_porcelain_status(&output.stdout, scope)?;
-        let (stats, file_stats) = calculate_review_stats(&repository, scope, &parsed_files);
+        let resolved = resolve_review_target(&repository, target)?;
+        let collected = collect_review_files(&repository, &resolved.target, &resolved.comparison)?;
+        let parsed_files = collected.files;
+        let stats = collected.stats;
+        let file_stats = collected.file_stats;
         let truncated = parsed_files.len() > MAX_REVIEW_FILES;
         let files = parsed_files
             .into_iter()
             .take(MAX_REVIEW_FILES)
             .collect::<Vec<_>>();
-        let head_oid = read_head_oid(&repository)?;
         let index_stamp = file_stamp(&repository.git_dir.join("index"));
         let snapshot_id = Uuid::new_v4().to_string();
+        let target_identity = resolved.target.identity();
         let mut snapshot_files = HashMap::with_capacity(files.len());
         let public_files = files
             .into_iter()
             .map(|file| -> Result<GitReviewFile, String> {
                 let id_material = format!(
                     "{}\0{}\0{}",
-                    scope.as_str(),
+                    target_identity,
                     file.path,
                     file.previous_path.as_deref().unwrap_or_default()
                 );
@@ -380,16 +473,23 @@ impl GitReviewService {
                 id: snapshot_id.clone(),
                 created_at: Instant::now(),
                 repository: repository.clone(),
-                scope,
-                head_oid,
+                target: resolved.target.clone(),
+                comparison: resolved.comparison,
+                has_head: resolved.context.head_sha.is_some(),
                 index_stamp,
                 files: snapshot_files,
             });
 
+        let mut context = resolved.context;
+        if let Some(commit) = context.commit.as_mut() {
+            commit.stats = stats.clone();
+        }
+
         Ok(GitReviewSummary {
             repository_id: repository.repository_id,
             snapshot_id,
-            scope,
+            target: resolved.target,
+            context,
             stats,
             files: public_files,
             truncated,
@@ -399,15 +499,30 @@ impl GitReviewService {
     pub fn review_last_turn_summary(
         &self,
         project_path: &Path,
+        conversation_id: &str,
         record: Option<&crate::AgentTurnDiffRecord>,
     ) -> Result<GitReviewSummary, String> {
         let repository = resolve_repository(project_path).map_err(|error| error.message())?;
-        let (summary, snapshot) = build_last_turn_review(&repository, project_path, record);
+        let (summary, snapshot) =
+            build_last_turn_review(&repository, project_path, conversation_id, record);
         self.turn_snapshots
             .lock()
             .map_err(|_| "Last-turn review snapshot cache is unavailable.".to_string())?
             .insert(snapshot);
         Ok(summary)
+    }
+
+    pub fn review_repository_context(
+        &self,
+        project_path: &Path,
+    ) -> Result<GitReviewRepositoryContext, String> {
+        let repository = resolve_repository(project_path).map_err(|error| error.message())?;
+        load_review_repository_context(&repository)
+    }
+
+    pub fn review_commits(&self, project_path: &Path) -> Result<GitReviewCommitList, String> {
+        let repository = resolve_repository(project_path).map_err(|error| error.message())?;
+        load_review_commits(&repository)
     }
 
     pub fn turn_diff_summaries(
@@ -461,9 +576,7 @@ impl GitReviewService {
             return Ok(expired_diff(snapshot_id, file_id));
         }
 
-        if snapshot.scope == GitReviewScope::Unstaged
-            && file.status == GitReviewFileStatus::Untracked
-        {
+        if file.status == GitReviewFileStatus::Untracked {
             let diff = untracked_file_diff(snapshot_id, file_id, &snapshot.repository, &file.path)?;
             return if snapshot_file_is_current(&snapshot, &file)? {
                 Ok(diff)
@@ -478,9 +591,7 @@ impl GitReviewService {
             "--no-textconv".to_string(),
             "--find-renames".to_string(),
         ];
-        if snapshot.scope == GitReviewScope::Staged {
-            args.push("--cached".to_string());
-        }
+        append_comparison_diff_args(&mut args, &snapshot.comparison);
         args.extend(["--".to_string(), literal_pathspec(&file.path)]);
 
         let output = run_git(&snapshot.repository.root, &args, MAX_DIFF_BYTES)?;
@@ -585,13 +696,17 @@ impl GitReviewService {
             return Ok(expired_mutation(snapshot_id, file_id, action));
         };
 
+        if !snapshot.target.is_mutable() {
+            return Err("This Git review target is read-only.".to_string());
+        }
+
         if !snapshot_file_is_current(&snapshot, &file)? {
             return Ok(expired_mutation(snapshot_id, file_id, action));
         }
 
         match action {
             GitReviewFileMutationAction::Stage => {
-                if snapshot.scope != GitReviewScope::Unstaged {
+                if snapshot.target != GitReviewTarget::Unstaged {
                     return Err("Only unstaged files can be staged.".to_string());
                 }
                 ensure_no_external_filter(&snapshot.repository, &file)?;
@@ -606,13 +721,13 @@ impl GitReviewService {
                 )?;
             }
             GitReviewFileMutationAction::Unstage => {
-                if snapshot.scope != GitReviewScope::Staged {
+                if snapshot.target != GitReviewTarget::Staged {
                     return Err("Only staged files can be unstaged.".to_string());
                 }
-                unstage_file(&snapshot.repository, &file, !snapshot.head_oid.is_empty())?;
+                unstage_file(&snapshot.repository, &file, snapshot.has_head)?;
             }
             GitReviewFileMutationAction::Restore => {
-                if snapshot.scope != GitReviewScope::Unstaged {
+                if snapshot.target != GitReviewTarget::Unstaged {
                     return Err("Unstage the file before restoring it.".to_string());
                 }
                 if file.status == GitReviewFileStatus::Untracked {

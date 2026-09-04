@@ -37,10 +37,15 @@ fn last_turn_review_reuses_read_only_diff_and_content_surfaces() {
     };
     let service = GitReviewService::new();
     let summary = service
-        .review_last_turn_summary(repo.path(), Some(&record))
+        .review_last_turn_summary(repo.path(), "conversation-1", Some(&record))
         .unwrap();
 
-    assert_eq!(summary.scope, GitReviewScope::LastTurn);
+    assert_eq!(
+        summary.target,
+        GitReviewTarget::LastTurn {
+            conversation_id: "conversation-1".to_string()
+        }
+    );
     assert_eq!(summary.files.len(), 3);
     assert!(!summary.stats.line_counts_complete);
     let created = summary
@@ -101,7 +106,7 @@ fn last_turn_review_ignores_records_from_a_different_workspace() {
         truncated: false,
     };
     let summary = GitReviewService::new()
-        .review_last_turn_summary(repo.path(), Some(&record))
+        .review_last_turn_summary(repo.path(), "conversation-1", Some(&record))
         .unwrap();
     assert!(summary.files.is_empty());
 }
@@ -129,7 +134,7 @@ fn turn_diff_summary_uses_the_exact_same_net_diff_as_last_turn_review() {
     };
     let service = GitReviewService::new();
     let review = service
-        .review_last_turn_summary(repo.path(), Some(&record))
+        .review_last_turn_summary(repo.path(), "conversation-1", Some(&record))
         .unwrap();
     let summaries =
         service.turn_diff_summaries("conversation-1", repo.path(), std::slice::from_ref(&record));
@@ -175,7 +180,7 @@ fn generated_untracked_patch_is_rechecked_after_prefix_expansion() {
 
     let service = GitReviewService::new();
     let summary = service
-        .review_summary(repo.path(), GitReviewScope::Unstaged)
+        .review_summary(repo.path(), GitReviewTarget::Unstaged)
         .unwrap();
     let file = summary
         .files
@@ -193,8 +198,8 @@ fn generated_untracked_patch_is_rechecked_after_prefix_expansion() {
 #[test]
 fn parses_staged_unstaged_and_untracked_entries() {
     let output = b"M  staged.txt\0 M unstaged.txt\0?? new.txt\0";
-    let staged = parse_porcelain_status(output, GitReviewScope::Staged).unwrap();
-    let unstaged = parse_porcelain_status(output, GitReviewScope::Unstaged).unwrap();
+    let staged = parse_porcelain_status(output, StatusSelection::Staged).unwrap();
+    let unstaged = parse_porcelain_status(output, StatusSelection::Unstaged).unwrap();
 
     assert_eq!(staged.len(), 1);
     assert_eq!(staged[0].path, "staged.txt");
@@ -206,7 +211,7 @@ fn parses_staged_unstaged_and_untracked_entries() {
 #[test]
 fn parses_rename_source_from_nul_entry() {
     let output = b"R  renamed.txt\0original.txt\0";
-    let files = parse_porcelain_status(output, GitReviewScope::Staged).unwrap();
+    let files = parse_porcelain_status(output, StatusSelection::Staged).unwrap();
 
     assert_eq!(files.len(), 1);
     assert_eq!(files[0].path, "renamed.txt");
@@ -266,7 +271,7 @@ fn staged_and_untracked_diffs_are_loaded_from_snapshots() {
     let service = GitReviewService::new();
 
     let staged = service
-        .review_summary(repo.path(), GitReviewScope::Staged)
+        .review_summary(repo.path(), GitReviewTarget::Staged)
         .unwrap();
     assert_eq!(staged.stats.file_count, 1);
     assert_eq!(staged.stats.additions, 1);
@@ -286,7 +291,7 @@ fn staged_and_untracked_diffs_are_loaded_from_snapshots() {
     assert!(staged_diff.patch.unwrap().contains("+staged"));
 
     let unstaged = service
-        .review_summary(repo.path(), GitReviewScope::Unstaged)
+        .review_summary(repo.path(), GitReviewTarget::Unstaged)
         .unwrap();
     assert_eq!(unstaged.stats.file_count, 1);
     assert_eq!(unstaged.stats.additions, 1);
@@ -325,7 +330,7 @@ fn full_content_uses_head_index_and_worktree_for_the_selected_scope() {
     let service = GitReviewService::new();
 
     let staged = service
-        .review_summary(repo.path(), GitReviewScope::Staged)
+        .review_summary(repo.path(), GitReviewTarget::Staged)
         .unwrap();
     let staged_content = service
         .review_file_content(&staged.snapshot_id, &staged.files[0].id)
@@ -341,7 +346,7 @@ fn full_content_uses_head_index_and_worktree_for_the_selected_scope() {
     );
 
     let unstaged = service
-        .review_summary(repo.path(), GitReviewScope::Unstaged)
+        .review_summary(repo.path(), GitReviewTarget::Unstaged)
         .unwrap();
     let unstaged_content = service
         .review_file_content(&unstaged.snapshot_id, &unstaged.files[0].id)
@@ -370,7 +375,7 @@ fn full_content_represents_staged_additions_and_deletions_with_a_missing_side() 
     git(repo.path(), &["add", "--all"]);
     let service = GitReviewService::new();
     let summary = service
-        .review_summary(repo.path(), GitReviewScope::Staged)
+        .review_summary(repo.path(), GitReviewTarget::Staged)
         .unwrap();
 
     let added = summary
@@ -414,7 +419,7 @@ fn full_content_follows_staged_rename_paths_without_guessing_from_the_worktree()
     git(repo.path(), &["add", "after.txt"]);
     let service = GitReviewService::new();
     let summary = service
-        .review_summary(repo.path(), GitReviewScope::Staged)
+        .review_summary(repo.path(), GitReviewTarget::Staged)
         .unwrap();
     let renamed = summary
         .files
@@ -451,7 +456,7 @@ fn full_content_rejects_gitlinks() {
     );
     let service = GitReviewService::new();
     let summary = service
-        .review_summary(repo.path(), GitReviewScope::Staged)
+        .review_summary(repo.path(), GitReviewTarget::Staged)
         .unwrap();
     let gitlink = summary
         .files
@@ -479,7 +484,7 @@ fn full_content_safely_classifies_binary_non_utf8_and_oversized_files() {
     fs::write(repo.path().join("tracked.bin"), b"binary\0content").unwrap();
     let service = GitReviewService::new();
     let summary = service
-        .review_summary(repo.path(), GitReviewScope::Unstaged)
+        .review_summary(repo.path(), GitReviewTarget::Unstaged)
         .unwrap();
     let content = service
         .review_file_content(&summary.snapshot_id, &summary.files[0].id)
@@ -490,7 +495,7 @@ fn full_content_safely_classifies_binary_non_utf8_and_oversized_files() {
 
     fs::write(repo.path().join("tracked.bin"), [0xff, 0xfe]).unwrap();
     let summary = service
-        .review_summary(repo.path(), GitReviewScope::Unstaged)
+        .review_summary(repo.path(), GitReviewTarget::Unstaged)
         .unwrap();
     let content = service
         .review_file_content(&summary.snapshot_id, &summary.files[0].id)
@@ -503,7 +508,7 @@ fn full_content_safely_classifies_binary_non_utf8_and_oversized_files() {
     )
     .unwrap();
     let summary = service
-        .review_summary(repo.path(), GitReviewScope::Unstaged)
+        .review_summary(repo.path(), GitReviewTarget::Unstaged)
         .unwrap();
     let content = service
         .review_file_content(&summary.snapshot_id, &summary.files[0].id)
@@ -516,7 +521,7 @@ fn full_content_safely_classifies_binary_non_utf8_and_oversized_files() {
     )
     .unwrap();
     let summary = service
-        .review_summary(repo.path(), GitReviewScope::Unstaged)
+        .review_summary(repo.path(), GitReviewTarget::Unstaged)
         .unwrap();
     let content = service
         .review_file_content(&summary.snapshot_id, &summary.files[0].id)
@@ -535,7 +540,7 @@ fn changing_a_file_expires_a_full_content_request() {
     fs::write(repo.path().join("tracked.txt"), "first change\n").unwrap();
     let service = GitReviewService::new();
     let summary = service
-        .review_summary(repo.path(), GitReviewScope::Unstaged)
+        .review_summary(repo.path(), GitReviewTarget::Unstaged)
         .unwrap();
 
     thread::sleep(Duration::from_millis(5));
@@ -563,7 +568,7 @@ fn unstaged_totals_keep_tracked_and_untracked_line_counts() {
     fs::write(repo.path().join("untracked.txt"), "first\nsecond\n").unwrap();
 
     let summary = GitReviewService::new()
-        .review_summary(repo.path(), GitReviewScope::Unstaged)
+        .review_summary(repo.path(), GitReviewTarget::Unstaged)
         .unwrap();
 
     assert_eq!(summary.stats.file_count, 2);
@@ -604,7 +609,7 @@ fn changing_a_file_expires_an_unstaged_snapshot() {
     fs::write(repo.path().join("tracked.txt"), "first change\n").unwrap();
     let service = GitReviewService::new();
     let summary = service
-        .review_summary(repo.path(), GitReviewScope::Unstaged)
+        .review_summary(repo.path(), GitReviewTarget::Unstaged)
         .unwrap();
     let file = summary.files.first().unwrap();
 
@@ -632,7 +637,7 @@ fn project_subdirectory_limits_the_review_scope() {
 
     let service = GitReviewService::new();
     let summary = service
-        .review_summary(&repo.path().join("selected"), GitReviewScope::Staged)
+        .review_summary(&repo.path().join("selected"), GitReviewTarget::Staged)
         .unwrap();
 
     assert_eq!(summary.files.len(), 1);
@@ -667,7 +672,7 @@ fn untracked_symlink_diff_does_not_follow_the_target() {
     .unwrap();
     let service = GitReviewService::new();
     let summary = service
-        .review_summary(repo.path(), GitReviewScope::Unstaged)
+        .review_summary(repo.path(), GitReviewTarget::Unstaged)
         .unwrap();
     let link = summary
         .files
@@ -695,7 +700,7 @@ fn full_content_reads_an_untracked_symlink_itself_without_following_it() {
     symlink("missing-secret-target", repo.path().join("link.txt")).unwrap();
     let service = GitReviewService::new();
     let summary = service
-        .review_summary(repo.path(), GitReviewScope::Unstaged)
+        .review_summary(repo.path(), GitReviewTarget::Unstaged)
         .unwrap();
     let link = summary
         .files
@@ -739,7 +744,7 @@ fn configured_external_diff_is_not_executed() {
     );
     let service = GitReviewService::new();
     let summary = service
-        .review_summary(repo.path(), GitReviewScope::Unstaged)
+        .review_summary(repo.path(), GitReviewTarget::Unstaged)
         .unwrap();
     let tracked = summary
         .files
@@ -767,7 +772,7 @@ fn stages_and_unstages_a_current_snapshot_file() {
     let service = GitReviewService::new();
 
     let unstaged = service
-        .review_summary(repo.path(), GitReviewScope::Unstaged)
+        .review_summary(repo.path(), GitReviewTarget::Unstaged)
         .unwrap();
     let mutation = service
         .mutate_review_file(
@@ -779,7 +784,7 @@ fn stages_and_unstages_a_current_snapshot_file() {
     assert_eq!(mutation.status, GitReviewFileMutationStatus::Applied);
 
     let staged = service
-        .review_summary(repo.path(), GitReviewScope::Staged)
+        .review_summary(repo.path(), GitReviewTarget::Staged)
         .unwrap();
     assert_eq!(staged.files.len(), 1);
     let mutation = service
@@ -792,7 +797,7 @@ fn stages_and_unstages_a_current_snapshot_file() {
     assert_eq!(mutation.status, GitReviewFileMutationStatus::Applied);
     assert_eq!(
         service
-            .review_summary(repo.path(), GitReviewScope::Unstaged)
+            .review_summary(repo.path(), GitReviewTarget::Unstaged)
             .unwrap()
             .files
             .len(),
@@ -811,7 +816,7 @@ fn stale_snapshot_does_not_stage_a_changed_file() {
     fs::write(repo.path().join("tracked.txt"), "first change\n").unwrap();
     let service = GitReviewService::new();
     let summary = service
-        .review_summary(repo.path(), GitReviewScope::Unstaged)
+        .review_summary(repo.path(), GitReviewTarget::Unstaged)
         .unwrap();
 
     thread::sleep(Duration::from_millis(5));
@@ -833,7 +838,7 @@ fn stale_snapshot_does_not_stage_a_changed_file() {
         GitReviewFileMutationStatus::SnapshotExpired
     );
     assert!(service
-        .review_summary(repo.path(), GitReviewScope::Staged)
+        .review_summary(repo.path(), GitReviewTarget::Staged)
         .unwrap()
         .files
         .is_empty());
@@ -851,7 +856,7 @@ fn restores_tracked_and_removes_untracked_files() {
     fs::write(repo.path().join("untracked.txt"), "new\n").unwrap();
     let service = GitReviewService::new();
     let summary = service
-        .review_summary(repo.path(), GitReviewScope::Unstaged)
+        .review_summary(repo.path(), GitReviewTarget::Unstaged)
         .unwrap();
     let tracked = summary
         .files
@@ -871,7 +876,7 @@ fn restores_tracked_and_removes_untracked_files() {
     );
 
     let summary = service
-        .review_summary(repo.path(), GitReviewScope::Unstaged)
+        .review_summary(repo.path(), GitReviewTarget::Unstaged)
         .unwrap();
     let untracked = summary
         .files
@@ -927,7 +932,7 @@ fn repository_filters_and_hooks_are_not_executed_by_stage() {
     fs::write(repo.path().join("safe.md"), "content\n").unwrap();
     let service = GitReviewService::new();
     let summary = service
-        .review_summary(repo.path(), GitReviewScope::Unstaged)
+        .review_summary(repo.path(), GitReviewTarget::Unstaged)
         .unwrap();
     let filtered = summary
         .files
@@ -957,6 +962,264 @@ fn repository_filters_and_hooks_are_not_executed_by_stage() {
         .unwrap();
     assert_eq!(result.status, GitReviewFileMutationStatus::Applied);
     assert!(!hook_marker.exists());
+}
+
+#[test]
+fn uncommitted_review_combines_index_worktree_and_untracked_changes() {
+    let Some(repo) = test_repository() else {
+        return;
+    };
+    fs::write(repo.path().join("staged.txt"), "before staged\n").unwrap();
+    fs::write(repo.path().join("unstaged.txt"), "before unstaged\n").unwrap();
+    fs::write(repo.path().join("both.txt"), "before both\n").unwrap();
+    git(repo.path(), &["add", "."]);
+    git(repo.path(), &["commit", "--quiet", "-m", "baseline"]);
+
+    fs::write(repo.path().join("staged.txt"), "after staged\n").unwrap();
+    git(repo.path(), &["add", "staged.txt"]);
+    fs::write(repo.path().join("unstaged.txt"), "after unstaged\n").unwrap();
+    fs::write(repo.path().join("both.txt"), "staged both\n").unwrap();
+    git(repo.path(), &["add", "both.txt"]);
+    fs::write(repo.path().join("both.txt"), "worktree both\n").unwrap();
+    fs::write(repo.path().join("untracked.txt"), "new file\n").unwrap();
+
+    let service = GitReviewService::new();
+    let summary = service
+        .review_summary(repo.path(), GitReviewTarget::Uncommitted)
+        .unwrap();
+    assert_eq!(summary.target, GitReviewTarget::Uncommitted);
+    assert_eq!(summary.stats.file_count, 4);
+    assert_eq!(
+        summary
+            .files
+            .iter()
+            .map(|file| file.path.as_str())
+            .collect::<Vec<_>>(),
+        vec!["both.txt", "staged.txt", "unstaged.txt", "untracked.txt"]
+    );
+
+    let staged = summary
+        .files
+        .iter()
+        .find(|file| file.path == "staged.txt")
+        .unwrap();
+    let content = service
+        .review_file_content(&summary.snapshot_id, &staged.id)
+        .unwrap();
+    assert_eq!(content.before_text.as_deref(), Some("before staged\n"));
+    assert_eq!(content.after_text.as_deref(), Some("after staged\n"));
+    let both = summary
+        .files
+        .iter()
+        .find(|file| file.path == "both.txt")
+        .unwrap();
+    let both_content = service
+        .review_file_content(&summary.snapshot_id, &both.id)
+        .unwrap();
+    assert_eq!(both_content.before_text.as_deref(), Some("before both\n"));
+    assert_eq!(both_content.after_text.as_deref(), Some("worktree both\n"));
+    assert_eq!(
+        service
+            .mutate_review_file(
+                &summary.snapshot_id,
+                &staged.id,
+                GitReviewFileMutationAction::Stage,
+            )
+            .unwrap_err(),
+        "This Git review target is read-only."
+    );
+}
+
+#[test]
+fn uncommitted_review_uses_an_empty_tree_before_the_first_commit() {
+    let Some(repo) = test_repository() else {
+        return;
+    };
+    fs::write(repo.path().join("staged.txt"), "staged\n").unwrap();
+    git(repo.path(), &["add", "staged.txt"]);
+    fs::write(repo.path().join("untracked.txt"), "untracked\n").unwrap();
+
+    let service = GitReviewService::new();
+    let summary = service
+        .review_summary(repo.path(), GitReviewTarget::Uncommitted)
+        .unwrap();
+    assert_eq!(summary.context.head_sha, None);
+    assert_eq!(summary.files.len(), 2);
+    let staged = summary
+        .files
+        .iter()
+        .find(|file| file.path == "staged.txt")
+        .unwrap();
+    assert_eq!(staged.status, GitReviewFileStatus::Added);
+    let content = service
+        .review_file_content(&summary.snapshot_id, &staged.id)
+        .unwrap();
+    assert_eq!(content.before_text, None);
+    assert_eq!(content.after_text.as_deref(), Some("staged\n"));
+}
+
+#[test]
+fn commit_review_handles_root_and_first_parent_without_worktree_coupling() {
+    let Some(repo) = test_repository() else {
+        return;
+    };
+    fs::write(repo.path().join("tracked.txt"), "root\n").unwrap();
+    git(repo.path(), &["add", "tracked.txt"]);
+    git(repo.path(), &["commit", "--quiet", "-m", "root commit"]);
+    let root_sha = git_stdout(repo.path(), &["rev-parse", "HEAD"]);
+
+    fs::write(repo.path().join("tracked.txt"), "second\n").unwrap();
+    git(repo.path(), &["add", "tracked.txt"]);
+    git(repo.path(), &["commit", "--quiet", "-m", "second commit"]);
+    let second_sha = git_stdout(repo.path(), &["rev-parse", "HEAD"]);
+    let service = GitReviewService::new();
+
+    let root = service
+        .review_summary(
+            repo.path(),
+            GitReviewTarget::Commit {
+                commit_sha: root_sha.clone(),
+            },
+        )
+        .unwrap();
+    let root_file = &root.files[0];
+    assert_eq!(root_file.status, GitReviewFileStatus::Added);
+    let root_content = service
+        .review_file_content(&root.snapshot_id, &root_file.id)
+        .unwrap();
+    assert_eq!(root_content.before_text, None);
+    assert_eq!(root_content.after_text.as_deref(), Some("root\n"));
+
+    let second = service
+        .review_summary(
+            repo.path(),
+            GitReviewTarget::Commit {
+                commit_sha: second_sha.clone(),
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        second
+            .context
+            .commit
+            .as_ref()
+            .map(|commit| commit.sha.as_str()),
+        Some(second_sha.as_str())
+    );
+    let second_file = &second.files[0];
+    fs::write(repo.path().join("tracked.txt"), "later committed change\n").unwrap();
+    git(repo.path(), &["add", "tracked.txt"]);
+    git(repo.path(), &["commit", "--quiet", "-m", "later commit"]);
+    let second_content = service
+        .review_file_content(&second.snapshot_id, &second_file.id)
+        .unwrap();
+    assert_eq!(second_content.before_text.as_deref(), Some("root\n"));
+    assert_eq!(second_content.after_text.as_deref(), Some("second\n"));
+}
+
+#[test]
+fn branch_review_uses_merge_base_and_includes_current_worktree_changes() {
+    let Some(repo) = test_repository() else {
+        return;
+    };
+    git(repo.path(), &["branch", "-m", "main"]);
+    fs::write(repo.path().join("base.txt"), "base\n").unwrap();
+    git(repo.path(), &["add", "base.txt"]);
+    git(repo.path(), &["commit", "--quiet", "-m", "base"]);
+    let merge_base_sha = git_stdout(repo.path(), &["rev-parse", "HEAD"]);
+    git(repo.path(), &["switch", "--quiet", "-c", "feature"]);
+    git(repo.path(), &["switch", "--quiet", "main"]);
+    fs::write(repo.path().join("main-only.txt"), "main only\n").unwrap();
+    git(repo.path(), &["add", "main-only.txt"]);
+    git(repo.path(), &["commit", "--quiet", "-m", "main work"]);
+    let base_sha = git_stdout(repo.path(), &["rev-parse", "HEAD"]);
+    git(repo.path(), &["switch", "--quiet", "feature"]);
+    fs::write(repo.path().join("committed.txt"), "committed\n").unwrap();
+    git(repo.path(), &["add", "committed.txt"]);
+    git(repo.path(), &["commit", "--quiet", "-m", "feature work"]);
+    fs::write(repo.path().join("working.txt"), "working\n").unwrap();
+
+    let service = GitReviewService::new();
+    let summary = service
+        .review_summary(
+            repo.path(),
+            GitReviewTarget::Branch {
+                base_ref: "refs/heads/main".to_string(),
+            },
+        )
+        .unwrap();
+    assert_eq!(summary.context.base_ref.as_deref(), Some("refs/heads/main"));
+    assert_eq!(summary.context.base_sha.as_deref(), Some(base_sha.as_str()));
+    assert_eq!(
+        summary.context.merge_base_sha.as_deref(),
+        Some(merge_base_sha.as_str())
+    );
+    assert_eq!(
+        summary
+            .files
+            .iter()
+            .map(|file| file.path.as_str())
+            .collect::<Vec<_>>(),
+        vec!["committed.txt", "working.txt"]
+    );
+}
+
+#[test]
+fn repository_context_prefers_remote_head_and_commit_history_is_local_and_bounded() {
+    let Some(repo) = test_repository() else {
+        return;
+    };
+    git(repo.path(), &["branch", "-m", "main"]);
+    fs::write(repo.path().join("tracked.txt"), "one\n").unwrap();
+    git(repo.path(), &["add", "tracked.txt"]);
+    git(repo.path(), &["commit", "--quiet", "-m", "first"]);
+    fs::write(repo.path().join("tracked.txt"), "two\n").unwrap();
+    git(repo.path(), &["add", "tracked.txt"]);
+    git(repo.path(), &["commit", "--quiet", "-m", "second"]);
+    git(
+        repo.path(),
+        &["update-ref", "refs/remotes/origin/trunk", "HEAD"],
+    );
+    git(
+        repo.path(),
+        &[
+            "symbolic-ref",
+            "refs/remotes/origin/HEAD",
+            "refs/remotes/origin/trunk",
+        ],
+    );
+    git(
+        repo.path(),
+        &["update-ref", "refs/remotes/upstream/develop", "HEAD"],
+    );
+    git(
+        repo.path(),
+        &[
+            "symbolic-ref",
+            "refs/remotes/upstream/HEAD",
+            "refs/remotes/upstream/develop",
+        ],
+    );
+    git(repo.path(), &["config", "branch.main.remote", "upstream"]);
+
+    let service = GitReviewService::new();
+    let context = service.review_repository_context(repo.path()).unwrap();
+    assert_eq!(context.current_branch.as_deref(), Some("main"));
+    assert_eq!(
+        context.default_base_ref.as_deref(),
+        Some("refs/remotes/upstream/develop")
+    );
+    assert!(context
+        .branches
+        .iter()
+        .any(|branch| branch.name == "upstream/develop" && branch.is_default));
+    assert!(!context.branches.iter().any(|branch| branch.name == "main"));
+
+    let history = service.review_commits(repo.path()).unwrap();
+    assert_eq!(history.commits.len(), 2);
+    assert_eq!(history.commits[0].subject, "second");
+    assert_eq!(history.commits[0].stats.file_count, 1);
+    assert!(!history.truncated);
 }
 
 fn test_repository() -> Option<TempDir> {

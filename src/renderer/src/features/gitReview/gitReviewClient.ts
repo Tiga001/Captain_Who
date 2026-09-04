@@ -1,5 +1,7 @@
 import type {
   GitRepositoryInspection,
+  GitReviewCommitList,
+  GitReviewCommitListInput,
   GitReviewFileContent,
   GitReviewFileContentInput,
   GitReviewFileDiff,
@@ -8,6 +10,8 @@ import type {
   GitReviewFileMutationInput,
   GitReviewSummary,
   GitReviewSummaryInput,
+  GitReviewRepositoryContext,
+  GitReviewRepositoryContextInput,
   GitTurnDiffSummaries,
   GitTurnDiffSummariesInput
 } from '@mycopilot/protocol'
@@ -19,6 +23,18 @@ export function inspectGitRepository(projectId: string): Promise<GitRepositoryIn
 
 export function getGitReviewSummary(input: GitReviewSummaryInput): Promise<GitReviewSummary> {
   return hostClient.git.getReviewSummary(input)
+}
+
+export function getGitReviewRepositoryContext(
+  input: GitReviewRepositoryContextInput
+): Promise<GitReviewRepositoryContext> {
+  return hostClient.git.getReviewRepositoryContext(input)
+}
+
+export function listGitReviewCommits(
+  input: GitReviewCommitListInput
+): Promise<GitReviewCommitList> {
+  return hostClient.git.listReviewCommits(input)
 }
 
 export function getGitTurnDiffSummaries(

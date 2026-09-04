@@ -1,10 +1,10 @@
 import { describe, expect, it, vi } from 'vitest'
 import { render } from 'vitest-browser-react'
-import type { GitReviewScope } from '@mycopilot/protocol'
+import type { GitReviewTarget } from '@mycopilot/protocol'
 import '../GitReviewPanel.css'
 
-const { setScopeSpy } = vi.hoisted(() => ({
-  setScopeSpy: vi.fn()
+const { setTargetSpy } = vi.hoisted(() => ({
+  setTargetSpy: vi.fn()
 }))
 
 vi.mock('../../../config/FrontendConfigProvider', () => ({
@@ -45,24 +45,26 @@ vi.mock('../useGitReview', async () => {
   }
 
   return {
+    gitReviewTargetKey: (target: GitReviewTarget) =>
+      target.kind === 'lastTurn' ? `${target.kind}:${target.conversationId}` : target.kind,
     useGitReview: (
       _projectId: string,
       _isActive: boolean,
-      _conversationId?: string | null,
-      initialScope: GitReviewScope = 'unstaged'
+      initialTarget: GitReviewTarget = { kind: 'unstaged' }
     ) => {
-      const [scope, setScopeState] = useState<GitReviewScope>(initialScope)
-      const setScope = useCallback((nextScope: GitReviewScope) => {
-        setScopeSpy(nextScope)
-        setScopeState(nextScope)
+      const [target, setTargetState] = useState<GitReviewTarget>(initialTarget)
+      const setTarget = useCallback((nextTarget: GitReviewTarget) => {
+        setTargetSpy(nextTarget)
+        setTargetState(nextTarget)
       }, [])
       const summaryState = useMemo(
         () => ({
           status: 'ready' as const,
           value: {
             files,
+            context: {},
             repositoryId: 'repository-1',
-            scope,
+            target,
             snapshotId: 'snapshot-1',
             stats: {
               additions: 1,
@@ -73,7 +75,7 @@ vi.mock('../useGitReview', async () => {
             truncated: false
           }
         }),
-        [scope]
+        [target]
       )
 
       return {
@@ -89,11 +91,11 @@ vi.mock('../useGitReview', async () => {
         pendingFileId: null,
         refresh: noopAsync,
         retryFileDiff: noop,
-        scope,
         setHotDiffFileIds: noop,
         setHotFullContentFileIds: noop,
-        setScope,
-        summaryState
+        setTarget,
+        summaryState,
+        target
       }
     }
   }
@@ -104,7 +106,7 @@ const NOOP = (): void => undefined
 
 describe('Git Review scope navigation', () => {
   it('switches an existing review page to last turn once', async () => {
-    setScopeSpy.mockClear()
+    setTargetSpy.mockClear()
     const screen = await render(<GitReviewPanel isActive onOpenFile={NOOP} projectId="project-1" />)
 
     await expect
@@ -115,24 +117,32 @@ describe('Git Review scope navigation', () => {
         isActive
         onOpenFile={NOOP}
         projectId="project-1"
-        scopeNavigation={{ requestId: 1, scope: 'lastTurn' }}
+        targetNavigation={{
+          requestId: 1,
+          target: { kind: 'lastTurn', conversationId: 'conversation-1' }
+        }}
       />
     )
 
     await expect
       .element(screen.getByRole('button', { name: 'gitReview.scope.lastTurn' }))
       .toBeVisible()
-    expect(setScopeSpy.mock.calls).toEqual([['lastTurn']])
+    expect(setTargetSpy.mock.calls).toEqual([
+      [{ kind: 'lastTurn', conversationId: 'conversation-1' }]
+    ])
   })
 
   it('keeps expanded state when an already-open last-turn page is activated again', async () => {
-    setScopeSpy.mockClear()
+    setTargetSpy.mockClear()
     const renderPanel = (requestId: number) => (
       <GitReviewPanel
         isActive
         onOpenFile={NOOP}
         projectId="project-1"
-        scopeNavigation={{ requestId, scope: 'lastTurn' }}
+        targetNavigation={{
+          requestId,
+          target: { kind: 'lastTurn', conversationId: 'conversation-1' }
+        }}
       />
     )
     const screen = await render(renderPanel(1))
@@ -148,19 +158,19 @@ describe('Git Review scope navigation', () => {
     await screen.rerender(renderPanel(2))
 
     await expect.poll(() => card.dataset.expanded).toBe('true')
-    expect(setScopeSpy).not.toHaveBeenCalled()
+    expect(setTargetSpy).not.toHaveBeenCalled()
   })
 
   it('expands a requested file only when it exists in the last-turn summary', async () => {
-    setScopeSpy.mockClear()
+    setTargetSpy.mockClear()
     const renderPanel = (requestId: number, filePath?: string) => (
       <GitReviewPanel
         isActive
         onOpenFile={NOOP}
         projectId="project-1"
-        scopeNavigation={{
+        targetNavigation={{
           requestId,
-          scope: 'lastTurn',
+          target: { kind: 'lastTurn', conversationId: 'conversation-1' },
           ...(filePath ? { filePath } : {})
         }}
       />
@@ -185,15 +195,15 @@ describe('Git Review scope navigation', () => {
   })
 
   it('leaves ordinary last-turn review state unchanged when the path is absent', async () => {
-    setScopeSpy.mockClear()
+    setTargetSpy.mockClear()
     const renderPanel = (requestId: number, filePath?: string) => (
       <GitReviewPanel
         isActive
         onOpenFile={NOOP}
         projectId="project-1"
-        scopeNavigation={{
+        targetNavigation={{
           requestId,
-          scope: 'lastTurn',
+          target: { kind: 'lastTurn', conversationId: 'conversation-1' },
           ...(filePath ? { filePath } : {})
         }}
       />

@@ -18,6 +18,8 @@ import type {
   ChatSearchResult,
   GitRepositoryInspectInput,
   GitRepositoryInspection,
+  GitReviewCommitList,
+  GitReviewCommitListInput,
   GitReviewFileContent,
   GitReviewFileContentInput,
   GitReviewFileDiff,
@@ -26,6 +28,8 @@ import type {
   GitReviewFileMutationInput,
   GitReviewSummary,
   GitReviewSummaryInput,
+  GitReviewRepositoryContext,
+  GitReviewRepositoryContextInput,
   GitTurnDiffSummaries,
   GitTurnDiffSummariesInput,
   ProviderProfileUiDescriptor,
@@ -127,6 +131,8 @@ import { CoreJsonRpcClient } from './jsonRpcClient'
 const SEARCH_SEARCH_CHATS_METHOD = 'search.searchChats'
 const SKILLS_LIST_METHOD = 'skills.list'
 const GIT_INSPECT_REPOSITORY_METHOD = 'git.inspectRepository'
+const GIT_GET_REVIEW_REPOSITORY_CONTEXT_METHOD = 'git.getReviewRepositoryContext'
+const GIT_LIST_REVIEW_COMMITS_METHOD = 'git.listReviewCommits'
 const GIT_GET_REVIEW_SUMMARY_METHOD = 'git.getReviewSummary'
 const GIT_GET_TURN_DIFF_SUMMARIES_METHOD = 'git.getTurnDiffSummaries'
 const GIT_GET_REVIEW_FILE_DIFF_METHOD = 'git.getReviewFileDiff'
@@ -350,6 +356,22 @@ export class CoreServerStorageApi {
   inspectGitRepository(input: GitRepositoryInspectInput): Promise<GitRepositoryInspection> {
     return this.rpc.request<GitRepositoryInspection, GitRepositoryInspectInput>(
       GIT_INSPECT_REPOSITORY_METHOD,
+      input
+    )
+  }
+
+  getGitReviewRepositoryContext(
+    input: GitReviewRepositoryContextInput
+  ): Promise<GitReviewRepositoryContext> {
+    return this.rpc.request<GitReviewRepositoryContext, GitReviewRepositoryContextInput>(
+      GIT_GET_REVIEW_REPOSITORY_CONTEXT_METHOD,
+      input
+    )
+  }
+
+  listGitReviewCommits(input: GitReviewCommitListInput): Promise<GitReviewCommitList> {
+    return this.rpc.request<GitReviewCommitList, GitReviewCommitListInput>(
+      GIT_LIST_REVIEW_COMMITS_METHOD,
       input
     )
   }

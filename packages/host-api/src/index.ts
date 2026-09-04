@@ -124,6 +124,8 @@ import type {
   CorePingResponse,
   GitRepositoryInspectInput,
   GitRepositoryInspection,
+  GitReviewCommitList,
+  GitReviewCommitListInput,
   GitReviewFileContent,
   GitReviewFileContentInput,
   GitReviewFileDiff,
@@ -132,6 +134,8 @@ import type {
   GitReviewFileMutationInput,
   GitReviewSummary,
   GitReviewSummaryInput,
+  GitReviewRepositoryContext,
+  GitReviewRepositoryContextInput,
   GitTurnDiffSummaries,
   GitTurnDiffSummariesInput,
   ManagedArtifactReadIdentity,
@@ -482,6 +486,10 @@ export interface McpHostApi {
 
 export interface GitHostApi {
   inspectRepository(input: GitRepositoryInspectInput): Promise<GitRepositoryInspection>
+  getReviewRepositoryContext(
+    input: GitReviewRepositoryContextInput
+  ): Promise<GitReviewRepositoryContext>
+  listReviewCommits(input: GitReviewCommitListInput): Promise<GitReviewCommitList>
   getReviewSummary(input: GitReviewSummaryInput): Promise<GitReviewSummary>
   getTurnDiffSummaries(input: GitTurnDiffSummariesInput): Promise<GitTurnDiffSummaries>
   getReviewFileDiff(input: GitReviewFileDiffInput): Promise<GitReviewFileDiff>

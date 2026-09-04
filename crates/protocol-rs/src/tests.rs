@@ -3,6 +3,40 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 #[test]
+fn git_review_summary_requires_the_structured_target_contract() {
+    let request = serde_json::from_value::<GitReviewSummaryRequest>(serde_json::json!({
+        "projectId": "project-1",
+        "target": {
+            "kind": "lastTurn",
+            "conversationId": "conversation-1"
+        }
+    }))
+    .unwrap();
+    match request.target {
+        GitReviewTargetRequest::LastTurn { conversation_id } => {
+            assert_eq!(conversation_id, "conversation-1")
+        }
+        _ => panic!("unexpected Git review target"),
+    }
+
+    assert!(
+        serde_json::from_value::<GitReviewSummaryRequest>(serde_json::json!({
+            "projectId": "project-1",
+            "scope": "unstaged"
+        }))
+        .is_err()
+    );
+    assert!(
+        serde_json::from_value::<GitReviewSummaryRequest>(serde_json::json!({
+            "projectId": "project-1",
+            "scope": "unstaged",
+            "target": { "kind": "unstaged" }
+        }))
+        .is_err()
+    );
+}
+
+#[test]
 fn automation_contract_matches_typescript_and_rejects_unknown_union_fields() {
     let fixture: Value = serde_json::from_str(include_str!(
         "../../../packages/protocol/fixtures/automation-contract-v1.json"

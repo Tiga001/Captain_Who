@@ -13,6 +13,7 @@ struct TurnReviewProjection<'a> {
 pub(super) fn build_last_turn_review(
     repository: &RepositoryContext,
     project_path: &Path,
+    conversation_id: &str,
     record: Option<&AgentTurnDiffRecord>,
 ) -> (GitReviewSummary, TurnSnapshot) {
     let projection = project_turn_review(project_path, record);
@@ -32,7 +33,10 @@ pub(super) fn build_last_turn_review(
     let summary = GitReviewSummary {
         repository_id: repository.repository_id.clone(),
         snapshot_id: snapshot_id.clone(),
-        scope: GitReviewScope::LastTurn,
+        target: GitReviewTarget::LastTurn {
+            conversation_id: conversation_id.to_string(),
+        },
+        context: GitReviewContext::default(),
         stats: projection.stats,
         files: projection.files.into_iter().map(|(_, file)| file).collect(),
         truncated: projection.truncated,
@@ -93,9 +97,7 @@ fn project_turn_review<'a>(
         } else {
             line_counts_complete = false;
         }
-        let id = content_revision(
-            format!("{}\0{}\0", GitReviewScope::LastTurn.as_str(), change.path).as_bytes(),
-        );
+        let id = content_revision(format!("lastTurn\0{}\0", change.path).as_bytes());
         files.push((
             change,
             GitReviewFile {

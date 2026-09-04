@@ -12,7 +12,7 @@ import {
 import type {
   GitReviewFile,
   GitReviewFileMutationAction,
-  GitReviewScope
+  GitReviewTarget
 } from '@mycopilot/protocol'
 import {
   ChevronDown,
@@ -55,7 +55,7 @@ interface GitReviewDiffCardProps {
   onRequestDiff: (fileId: string) => void
   onRestore: (file: GitReviewFile) => void
   onToggle: (fileId: string) => void
-  scope: GitReviewScope
+  targetKind: GitReviewTarget['kind']
   scrollRootRef: RefObject<HTMLDivElement | null>
   reviewSnapshotId?: string
   t: Translate
@@ -82,7 +82,7 @@ export const GitReviewDiffCard = memo(function GitReviewDiffCard({
   onRequestDiff,
   onRestore,
   onToggle,
-  scope,
+  targetKind,
   scrollRootRef,
   reviewSnapshotId,
   t,
@@ -231,7 +231,7 @@ export const GitReviewDiffCard = memo(function GitReviewDiffCard({
           <FileActionButton label={t('gitReview.file.open')} onClick={() => onOpenFile(file.path)}>
             <ExternalLink aria-hidden="true" />
           </FileActionButton>
-          {scope === 'unstaged' && (
+          {targetKind === 'unstaged' && (
             <FileActionButton
               disabled={mutationLocked}
               label={t('gitReview.file.restore')}
@@ -240,15 +240,17 @@ export const GitReviewDiffCard = memo(function GitReviewDiffCard({
               <Undo2 aria-hidden="true" />
             </FileActionButton>
           )}
-          {scope !== 'lastTurn' && (
+          {(targetKind === 'unstaged' || targetKind === 'staged') && (
             <FileActionButton
               disabled={mutationLocked}
-              label={scope === 'unstaged' ? t('gitReview.file.stage') : t('gitReview.file.unstage')}
-              onClick={() => onMutate(file.id, scope === 'unstaged' ? 'stage' : 'unstage')}
+              label={
+                targetKind === 'unstaged' ? t('gitReview.file.stage') : t('gitReview.file.unstage')
+              }
+              onClick={() => onMutate(file.id, targetKind === 'unstaged' ? 'stage' : 'unstage')}
             >
               {mutationPending ? (
                 <LoaderCircle className="git-review__spinner" aria-hidden="true" />
-              ) : scope === 'unstaged' ? (
+              ) : targetKind === 'unstaged' ? (
                 <Plus aria-hidden="true" />
               ) : (
                 <Minus aria-hidden="true" />
