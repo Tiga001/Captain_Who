@@ -9,7 +9,6 @@ import {
   parseBrowserSurfaceId,
   type BrowserSurfaceActionInput,
   type BrowserSurfaceCommand,
-  type BrowserSurfacePresentation,
   type BrowserSurfacePublicCrashError,
   type BrowserSurfacePublicLoadError,
   type BrowserSurfaceReadyInput,
@@ -24,12 +23,12 @@ import type { ManagedTargetCreationIntent } from './ElectronSurfaceGroupCdpTrans
 import type { ElectronSurfaceGroupCdpTransport } from './ElectronSurfaceGroupCdpTransport'
 import {
   BrowserNetworkGuard,
-  type BrowserInternalNavigationLease,
   type BrowserMainFrameNavigationFence,
   type BrowserNetworkOperationLease,
   type BrowserTargetCreationAuthority
 } from './BrowserNetworkGuard'
 import type { BrowserRiskOperationInput } from './BrowserRiskCoordinator'
+import { BrowserInternalPageLifecycle } from './BrowserInternalPageLifecycle'
 import type { BrowserInternalPageStoreLike } from './BrowserInternalPageStore'
 import {
   createBrowserSurfaceLoadError,
@@ -40,262 +39,78 @@ import {
   type BrowserSurfaceCrashError,
   type BrowserSurfaceLoadError
 } from './BrowserLoadErrorPage'
+import {
+  boundedWaitFor,
+  browserNavigationErrorDescription,
+  DEFAULT_ATTACH_TIMEOUT_MS,
+  DEFAULT_CLOSE_TIMEOUT_MS,
+  fallbackBrowserSurfaceCrashError,
+  fallbackSurfaceTitle,
+  haveSameHttpOrigin,
+  INTERNAL_ERROR_PAGE_MAX_ATTEMPTS,
+  INTERNAL_ERROR_PAGE_RETRY_DELAY_MS,
+  isIgnoredBrowserLoadFailure,
+  isManagedBlankSurfaceUrl,
+  isNavigationAlreadyPendingError,
+  isSafeManagedPageUrl,
+  loadManagedBlankSurface,
+  loadManagedSurface,
+  MAX_PENDING_RENDERER_COMMANDS,
+  MAX_POPUPS_PER_SECOND,
+  MAX_SETTLED_SURFACE_REQUESTS,
+  nextEventLoopTurn,
+  normalizeRendererGoneReason,
+  normalizeSurfaceCapacity,
+  normalizeSurfaceIndex,
+  normalizeTimeout,
+  normalizeViewportSize,
+  runGuestHistoryAction,
+  safeGuestHistoryBoolean,
+  safeHttpOrigin,
+  safeLogicalSurfaceUrl,
+  safeRemoteResourceUrl,
+  safeSurfaceTitle,
+  safeSurfaceUrl,
+  sameSensitiveTarget,
+  settleWithin,
+  STRICT_MODE_SURFACE_HANDOFF_MS,
+  waitForInitialDocumentReady
+} from './BrowserSurfaceHelpers'
+import {
+  BrowserSurfaceManagerError,
+  type ActiveAttachment,
+  type ActiveSensitiveDispatchFence,
+  type ActiveTargetCreationIntent,
+  type BrowserInternalDocument,
+  type BrowserSensitiveDispatchFence,
+  type BrowserSensitiveTargetIdentity,
+  type BrowserSurfaceDiagnostic,
+  type BrowserSurfaceHistoryEvent,
+  type BrowserSurfaceManagerOptions,
+  type BrowserSurfaceManagerErrorCode,
+  type BrowserSurfaceView,
+  type BrowserToolSurfaceLease,
+  type InternalPageLoad,
+  type ManagedSurface,
+  type PendingClose,
+  type PendingEnsure,
+  type PendingSurfaceGroupAdmission,
+  type PendingSurfaceHandoff,
+  type SettledSurfaceReadyReason,
+  type SettledSurfaceRequest
+} from './BrowserSurfaceTypes'
 
-const DEFAULT_ATTACH_TIMEOUT_MS = 10_000
-const DEFAULT_CLOSE_TIMEOUT_MS = 2_000
-const DEFAULT_MAX_MANAGED_SURFACES = 8
-const MAX_CONFIGURED_MANAGED_SURFACES = 16
-const MAX_POPUPS_PER_SECOND = 4
-const MAX_PENDING_RENDERER_COMMANDS = 64
-const STRICT_MODE_SURFACE_HANDOFF_MS = 100
-const MAX_SETTLED_SURFACE_REQUESTS = 256
-const INTERNAL_ERROR_PAGE_MAX_ATTEMPTS = 4
-const INTERNAL_ERROR_PAGE_RETRY_DELAY_MS = 40
-const INTERNAL_ERROR_PAGE_LOAD_TIMEOUT_MS = 750
-const MAX_INTERNAL_DOCUMENTS_PER_SURFACE = 64
-
-export type BrowserSurfaceManagerErrorCode =
-  | 'browser.surface_unavailable'
-  | 'browser.surface_capacity_exceeded'
-  | 'browser.target_closed'
-  | 'browser.manager_shutdown'
-
-export class BrowserSurfaceManagerError extends Error {
-  readonly name = 'BrowserSurfaceManagerError'
-
-  constructor(readonly code: BrowserSurfaceManagerErrorCode) {
-    super(code)
-  }
-}
-
-export interface BrowserSurfaceManagerOptions {
-  attachTimeoutMs?: number
-  broker: BrowserTargetBroker
-  networkGuard?: BrowserNetworkGuard
-  closeTimeoutMs?: number
-  connectOverCdp?: (transport: ConnectOverCDPTransport) => Promise<Browser>
-  createSurfaceId?: () => string
-  getLocale?: () => string
-  internalPageStore: BrowserInternalPageStoreLike
-  onHistoryMetadata?: (event: BrowserSurfaceHistoryEvent) => void
-  onHistoryNavigation?: (event: BrowserSurfaceHistoryEvent) => void
-  releaseSurfaceResources?: (input: { surfaceId: string; generation: number }) => Promise<void>
-  resolveHost: () => WebContents | null
-  sendCommand: (host: WebContents, command: BrowserSurfaceCommand) => void
-  sendState?: (host: WebContents, state: BrowserSurfaceState) => void
-  maxSurfaces?: number
-  recordDiagnostic?: (diagnostic: BrowserSurfaceDiagnostic) => void
-}
-
-export interface BrowserSurfaceHistoryEvent {
-  faviconUrl: string | null
-  generation: number
-  surfaceId: string
-  title: string | null
-  url: string
-  visitedAt: number
-}
-
-export interface BrowserSurfaceDiagnostic {
-  generation: number
-  kind: 'renderer_process_gone' | 'renderer_unresponsive'
-  reason: string
-  surfaceId: string
-}
-
-export interface BrowserSurfaceView {
-  crashError: BrowserSurfacePublicCrashError | null
-  generation: number
-  index: number
-  isActive: boolean
-  loadError: BrowserSurfacePublicLoadError | null
-  presentation: BrowserSurfacePresentation
-  surfaceId: string
-  title: string
-  url: string
-}
-
-/** Main-only document identity. This type must never cross Renderer IPC. */
-export interface BrowserSensitiveTargetIdentity {
-  generation: number
-  navigationEpoch: number
-  origin: string
-  surfaceId: string
-}
-
-export interface BrowserSensitiveDispatchFence {
-  finish(): void
-}
-
-export interface BrowserToolSurfaceLease {
-  closeSurface(): Promise<void>
-  finish(): void
-  generation: number
-  index: number
-  printToPdf(): Promise<Uint8Array>
-  resolveIndex(): Promise<number>
-  resizeSurface(input: { height: number; width: number }): Promise<{
-    height: number
-    width: number
-  }>
-  selectionRevision: number
-  surfaceId: string
-}
-
-interface ActiveSensitiveDispatchFence {
-  finishSilently(): boolean
-}
-
-interface ManagedSurface {
-  createdSequence: number
-  dispatchFence?: ActiveSensitiveDispatchFence
-  generation: number
-  guest: WebContents
-  handleBeforeInputEvent: (event: Event, input: Input) => void
-  handleInitialDocumentReady: () => void
-  handleDidFailLoad: (
-    event: Event,
-    errorCode: number,
-    errorDescription: string,
-    validatedURL: string,
-    isMainFrame: boolean
-  ) => void
-  handleDidNavigate: (event: Event, url: string) => void
-  handleDidRedirectNavigation: (
-    event: Event,
-    url: string,
-    isInPlace: boolean,
-    isMainFrame: boolean
-  ) => void
-  handleDidNavigateInPage: (event: Event, url: string, isMainFrame: boolean) => void
-  handleDidStartNavigation: (
-    event: Event,
-    url: string,
-    isInPlace: boolean,
-    isMainFrame: boolean
-  ) => void
-  handleDidStopLoading: () => void
-  handleDestroyed: () => void
-  handleFaviconUpdated: (event: Event, favicons: string[]) => void
-  handleRenderProcessGone: (event: Event, details: RenderProcessGoneDetails) => void
-  handleResponsive: () => void
-  handleUnresponsive: () => void
-  host: WebContents
-  initialDocumentReady: boolean
-  initialDocumentReadyPromise: Promise<void>
-  initialDocumentReadyTimer?: ReturnType<typeof setTimeout>
-  internalPageLoad?: InternalPageLoad
-  internalDocuments: Map<string, BrowserInternalDocument>
-  crashError?: BrowserSurfaceCrashError
-  loadError?: BrowserSurfaceLoadError
-  logicalFaviconUrl: string | null
-  logicalTitle: string | null
-  logicalUrl: string | null
-  navigationEpoch: number
-  navigationInProgress: boolean
-  navigationUrls: Set<string>
-  pendingHistoryRemovals: PhysicalHistoryEntry[]
-  pendingNavigationUrl: string | null
-  preparedNavigationUrl: string | null
-  presentation: BrowserSurfacePresentation
-  releaseInitialDocumentReady: () => void
-  /** Opaque Renderer-visible binding for this exact Main-owned generation. */
-  surfaceInstanceId: string
-  surfaceId: string
-  stateRevision: number
-  lastPublishedStateKey?: string
-  handleTitleUpdated: (event: Event, title: string) => void
-}
-
-interface InternalPageLoad {
-  attempt: number
-  document: BrowserInternalDocument
-  lease?: BrowserInternalNavigationLease
-  retryTimer?: ReturnType<typeof setTimeout>
-}
-
-interface PhysicalHistoryEntry {
-  index: number
-  url: string
-}
-
-interface BrowserInternalDocument {
-  actionUrl: string
-  createdSequence: number
-  crashError?: BrowserSurfaceCrashError
-  generation: number
-  internalPageUrl: string
-  loadError?: BrowserSurfaceLoadError
-  logicalUrl: string | null
-  navigationEpoch: number
-}
-
-class InternalPageLoadAttemptTimeoutError extends Error {}
-
-interface ActiveAttachment {
-  browser: Browser
-  context: BrowserContext
-  transport: ElectronSurfaceGroupCdpTransport
-}
-
-interface PendingEnsure {
-  activate?: boolean
-  host: WebContents
-  kind: 'ensureAttached' | 'createSurface' | 'selectSurface' | 'resizeSurface'
-  dimensions?: { height: number; width: number }
-  promise: Promise<ManagedSurface>
-  surfaceId: string
-  reject: (error: BrowserSurfaceManagerError) => void
-  requestId: string
-  /** Main-issued binding echoed by the exact Renderer webview that acknowledged this request. */
-  rendererReadySurfaceInstanceId?: string
-  resolve: (surface: ManagedSurface) => void
-  settled: boolean
-  timer: ReturnType<typeof setTimeout>
-}
-
-interface PendingClose {
-  generation: number
-  reject: (error: BrowserSurfaceManagerError) => void
-  resolve: () => void
-  timer: ReturnType<typeof setTimeout>
-}
-
-type SettledSurfaceReadyReason =
-  'already_ready' | 'request_expired' | 'request_superseded' | 'request_cancelled' | 'target_closed'
-
-interface SettledSurfaceRequest {
-  dimensions?: { height: number; width: number }
-  host: WebContents
-  kind: PendingEnsure['kind']
-  reason: SettledSurfaceReadyReason
-  requestId: string
-  surfaceInstanceId?: string
-  surfaceId: string
-}
-
-interface PendingSurfaceHandoff {
-  generation: number
-  host: WebContents
-  phase: 'waiting' | 'expired'
-  requestIds: ReadonlySet<string>
-  timer: ReturnType<typeof setTimeout>
-}
-
-interface PendingSurfaceGroupAdmission {
-  attachment: ActiveAttachment
-  attempt: Promise<void>
-  deferred: boolean
-  release(): void
-  released: boolean
-}
-
-interface ActiveTargetCreationIntent {
-  authority?: BrowserTargetCreationAuthority
-  finished: boolean
-  intent: ManagedTargetCreationIntent
-  transportFinish?: () => void
-}
+export { BrowserSurfaceManagerError } from './BrowserSurfaceTypes'
+export type {
+  BrowserSensitiveDispatchFence,
+  BrowserSensitiveTargetIdentity,
+  BrowserSurfaceDiagnostic,
+  BrowserSurfaceHistoryEvent,
+  BrowserSurfaceManagerErrorCode,
+  BrowserSurfaceManagerOptions,
+  BrowserSurfaceView,
+  BrowserToolSurfaceLease
+} from './BrowserSurfaceTypes'
 
 /**
  * Main-owned coordinator for the one browser guest exposed to managed automation.
@@ -310,6 +125,7 @@ export class BrowserSurfaceManager {
   private readonly connectOverCdp: (transport: ConnectOverCDPTransport) => Promise<Browser>
   private readonly createSurfaceId: () => string
   private readonly getLocale: () => string
+  private readonly internalPages: BrowserInternalPageLifecycle
   private readonly internalPageStore: BrowserInternalPageStoreLike
   private readonly onHistoryMetadata?: BrowserSurfaceManagerOptions['onHistoryMetadata']
   private readonly onHistoryNavigation?: BrowserSurfaceManagerOptions['onHistoryNavigation']
@@ -339,7 +155,6 @@ export class BrowserSurfaceManager {
   private readonly settledSurfaceRequests = new Map<string, SettledSurfaceRequest>()
   private readonly pendingSurfaceHandoffs = new Map<string, PendingSurfaceHandoff>()
   private createSequence = 0
-  private internalDocumentSequence = 0
   private popupWindowStartedAt = 0
   private popupCount = 0
   private needsReveal = false
@@ -374,6 +189,13 @@ export class BrowserSurfaceManager {
     this.sendState = options.sendState ?? (() => undefined)
     this.getLocale = options.getLocale ?? (() => 'zh-CN')
     this.internalPageStore = options.internalPageStore
+    this.internalPages = new BrowserInternalPageLifecycle({
+      isManagedSurfaceCurrent: (surface) =>
+        !this.disposed && this.surfaces.get(surface.surfaceId) === surface,
+      networkGuard: this.networkGuard,
+      publishSurfaceState: (surface) => this.publishSurfaceState(surface),
+      store: this.internalPageStore
+    })
     this.onHistoryMetadata = options.onHistoryMetadata
     this.onHistoryNavigation = options.onHistoryNavigation
     this.connectOverCdp =
@@ -3103,252 +2925,52 @@ export class BrowserSurfaceManager {
   }
 
   private beginInternalPageLoad(surface: ManagedSurface, document: BrowserInternalDocument): void {
-    this.cancelInternalPageLoad(surface)
-    const load: InternalPageLoad = { attempt: 0, document }
-    surface.internalPageLoad = load
-    this.scheduleInternalPageAttempt(surface, load, 0)
-  }
-
-  private scheduleInternalPageAttempt(
-    surface: ManagedSurface,
-    load: InternalPageLoad,
-    delayMs: number
-  ): void {
-    if (!this.isCurrentInternalPageLoad(surface, load)) return
-    if (load.retryTimer) clearTimeout(load.retryTimer)
-    load.retryTimer = setTimeout(() => {
-      load.retryTimer = undefined
-      void this.tryLoadInternalPage(surface, load).catch(() => {
-        this.failInternalPage(surface, load)
-      })
-    }, delayMs)
-  }
-
-  private async tryLoadInternalPage(
-    surface: ManagedSurface,
-    load: InternalPageLoad
-  ): Promise<void> {
-    if (!this.isCurrentInternalPageLoad(surface, load)) return
-    load.attempt += 1
-    if (safeGuestBoolean(surface.guest, 'isLoadingMainFrame')) {
-      if (load.attempt < INTERNAL_ERROR_PAGE_MAX_ATTEMPTS) {
-        this.scheduleInternalPageAttempt(surface, load, INTERNAL_ERROR_PAGE_RETRY_DELAY_MS)
-      } else {
-        this.failInternalPage(surface, load)
-      }
-      return
-    }
-
-    try {
-      load.lease = this.networkGuard?.beginInternalNavigation({
-        generation: surface.generation,
-        guest: surface.guest,
-        url: load.document.internalPageUrl
-      })
-      let timeout: ReturnType<typeof setTimeout> | undefined
-      try {
-        await Promise.race([
-          surface.guest.loadURL(load.document.internalPageUrl),
-          new Promise<never>((_resolve, reject) => {
-            timeout = setTimeout(
-              () => reject(new InternalPageLoadAttemptTimeoutError()),
-              INTERNAL_ERROR_PAGE_LOAD_TIMEOUT_MS
-            )
-          })
-        ])
-      } finally {
-        if (timeout) clearTimeout(timeout)
-      }
-      if (
-        this.isCurrentInternalPageLoad(surface, load) &&
-        surface.guest.getURL() === load.document.internalPageUrl
-      ) {
-        this.finishInternalPageLoad(surface, load)
-        surface.navigationInProgress = false
-        this.activateInternalDocument(surface, load.document)
-        this.settlePendingHistoryRemoval(surface)
-        this.pruneInternalDocuments(surface)
-        this.publishSurfaceState(surface)
-      }
-    } catch (error) {
-      load.lease?.finish()
-      load.lease = undefined
-      if (!this.isCurrentInternalPageLoad(surface, load)) return
-      if (
-        load.attempt < INTERNAL_ERROR_PAGE_MAX_ATTEMPTS &&
-        (error instanceof InternalPageLoadAttemptTimeoutError ||
-          isNavigationAlreadyPendingError(error) ||
-          isAbortedBrowserNavigationError(error))
-      ) {
-        this.scheduleInternalPageAttempt(surface, load, INTERNAL_ERROR_PAGE_RETRY_DELAY_MS)
-        return
-      }
-      this.failInternalPage(surface, load)
-    }
-  }
-
-  private failInternalPage(surface: ManagedSurface, load: InternalPageLoad): void {
-    if (!this.isCurrentInternalPageLoad(surface, load)) return
-    this.finishInternalPageLoad(surface, load)
-    surface.navigationInProgress = false
-    surface.presentation = 'host-fallback'
-    this.publishSurfaceState(surface)
+    this.internalPages.begin(surface, document)
   }
 
   private finishInternalPageLoad(surface: ManagedSurface, load: InternalPageLoad): void {
-    if (load.retryTimer) clearTimeout(load.retryTimer)
-    load.retryTimer = undefined
-    load.lease?.finish()
-    load.lease = undefined
-    if (surface.internalPageLoad === load) surface.internalPageLoad = undefined
+    this.internalPages.finish(surface, load)
   }
 
   private cancelInternalPageLoad(surface: ManagedSurface): void {
-    const load = surface.internalPageLoad
-    if (load) this.finishInternalPageLoad(surface, load)
-  }
-
-  private isCurrentInternalPageLoad(surface: ManagedSurface, load: InternalPageLoad): boolean {
-    return Boolean(
-      !this.disposed &&
-      this.surfaces.get(surface.surfaceId) === surface &&
-      !surface.guest.isDestroyed() &&
-      surface.internalPageLoad === load &&
-      surface.internalDocuments.get(load.document.internalPageUrl) === load.document &&
-      surface.generation === load.document.generation &&
-      surface.navigationEpoch === load.document.navigationEpoch
-    )
-  }
-
-  private materializeInternalDocument(html: string): { url: string } {
-    return this.internalPageStore.register(html)
+    this.internalPages.cancel(surface)
   }
 
   private registerInternalLoadError(
     surface: ManagedSurface,
     loadError: BrowserSurfaceLoadError
   ): BrowserInternalDocument {
-    const materialized = this.materializeInternalDocument(loadError.internalPageHtml)
-    return this.registerInternalDocument(surface, {
-      actionUrl: loadError.internalActionUrl,
-      createdSequence: ++this.internalDocumentSequence,
-      generation: surface.generation,
-      internalPageUrl: materialized.url,
-      loadError,
-      logicalUrl: loadError.failedUrl,
-      navigationEpoch: surface.navigationEpoch
-    })
+    return this.internalPages.registerLoadError(surface, loadError)
   }
 
   private registerInternalCrashError(
     surface: ManagedSurface,
     crashError: BrowserSurfaceCrashError
   ): BrowserInternalDocument {
-    const materialized = this.materializeInternalDocument(crashError.internalPageHtml)
-    return this.registerInternalDocument(surface, {
-      actionUrl: crashError.internalActionUrl,
-      crashError,
-      createdSequence: ++this.internalDocumentSequence,
-      generation: surface.generation,
-      internalPageUrl: materialized.url,
-      logicalUrl: surface.logicalUrl,
-      navigationEpoch: surface.navigationEpoch
-    })
-  }
-
-  private registerInternalDocument(
-    surface: ManagedSurface,
-    document: BrowserInternalDocument
-  ): BrowserInternalDocument {
-    surface.internalDocuments.set(document.internalPageUrl, document)
-    return document
+    return this.internalPages.registerCrashError(surface, crashError)
   }
 
   private activateInternalDocument(
     surface: ManagedSurface,
     document: BrowserInternalDocument
   ): void {
-    surface.logicalUrl = document.logicalUrl
-    surface.pendingNavigationUrl = document.logicalUrl
-    surface.logicalFaviconUrl = null
-    if (document.loadError) {
-      surface.loadError = { ...document.loadError, navigationEpoch: surface.navigationEpoch }
-      surface.crashError = undefined
-      surface.logicalTitle = document.loadError.title
-      surface.presentation = 'error-page'
-      return
-    }
-    if (document.crashError) {
-      surface.loadError = undefined
-      surface.crashError = { ...document.crashError, navigationEpoch: surface.navigationEpoch }
-      surface.logicalTitle = document.crashError.title
-      surface.presentation = 'crash-page'
-    }
+    this.internalPages.activate(surface, document)
   }
 
   private rememberReplaceableHistoryEntry(surface: ManagedSurface, expectedUrl: string): void {
-    const entry = safeActiveHistoryEntry(surface.guest)
-    if (!entry || entry.url !== expectedUrl) return
-    if (
-      surface.pendingHistoryRemovals.some(
-        (pending) => pending.index === entry.index && pending.url === entry.url
-      )
-    ) {
-      return
-    }
-    surface.pendingHistoryRemovals.push(entry)
+    this.internalPages.rememberReplaceableHistoryEntry(surface, expectedUrl)
   }
 
   private settlePendingHistoryRemoval(surface: ManagedSurface): void {
-    if (surface.pendingHistoryRemovals.length === 0) return
-    const pendingEntries = surface.pendingHistoryRemovals
-      .splice(0)
-      .sort((left, right) => right.index - left.index)
-    for (const pending of pendingEntries) {
-      const activeIndex = safeActiveHistoryIndex(surface.guest)
-      const entries = safeHistoryEntries(surface.guest)
-      let exactIndex = entries[pending.index]?.url === pending.url ? pending.index : -1
-      if (exactIndex < 0 && surface.internalDocuments.has(pending.url)) {
-        exactIndex = entries.findIndex(
-          (entry, index) => index !== activeIndex && entry.url === pending.url
-        )
-      }
-      if (exactIndex < 0 || exactIndex === activeIndex) continue
-      if (
-        safeRemoveHistoryEntry(surface.guest, exactIndex) &&
-        surface.internalDocuments.has(pending.url)
-      ) {
-        this.forgetInternalDocument(surface, pending.url)
-      }
-    }
+    this.internalPages.settlePendingHistoryRemoval(surface)
   }
 
   private pruneInternalDocuments(surface: ManagedSurface): void {
-    if (surface.internalDocuments.size <= MAX_INTERNAL_DOCUMENTS_PER_SURFACE) return
-    const retainedUrls = new Set(safeHistoryEntries(surface.guest).map((entry) => entry.url))
-    retainedUrls.add(surface.guest.getURL())
-    if (surface.internalPageLoad)
-      retainedUrls.add(surface.internalPageLoad.document.internalPageUrl)
-    const oldest = [...surface.internalDocuments.values()].sort(
-      (left, right) => left.createdSequence - right.createdSequence
-    )
-    for (const document of oldest) {
-      if (surface.internalDocuments.size <= MAX_INTERNAL_DOCUMENTS_PER_SURFACE) break
-      if (document.internalPageUrl === surface.guest.getURL()) continue
-      if (
-        retainedUrls.has(document.internalPageUrl) &&
-        !safeRemoveHistoryEntryByUrl(surface.guest, document.internalPageUrl)
-      ) {
-        continue
-      }
-      this.forgetInternalDocument(surface, document.internalPageUrl)
-    }
+    this.internalPages.prune(surface)
   }
 
   private forgetInternalDocument(surface: ManagedSurface, url: string): void {
-    surface.internalDocuments.delete(url)
-    this.networkGuard?.forgetInternalNavigation(surface.guest, url)
-    this.internalPageStore.release(url)
+    this.internalPages.forget(surface, url)
   }
 
   private resolveEventSurface(
@@ -3528,428 +3150,5 @@ export class BrowserSurfaceManager {
     if (expectedEpoch !== this.automationEpoch) {
       throw new BrowserSurfaceManagerError('browser.surface_unavailable')
     }
-  }
-}
-
-function normalizeTimeout(value: number | undefined, fallback: number): number {
-  return Number.isSafeInteger(value) && value !== undefined && value > 0
-    ? Math.min(value, 60_000)
-    : fallback
-}
-
-function normalizeSurfaceCapacity(value: number | undefined): number {
-  return Number.isSafeInteger(value) && value !== undefined && value > 0
-    ? Math.min(value, MAX_CONFIGURED_MANAGED_SURFACES)
-    : DEFAULT_MAX_MANAGED_SURFACES
-}
-
-function normalizeSurfaceIndex(value: number): number {
-  if (!Number.isSafeInteger(value) || value < 0) {
-    throw new BrowserSurfaceManagerError('browser.surface_unavailable')
-  }
-  return value
-}
-
-function normalizeViewportSize(input: { height: number; width: number }): {
-  height: number
-  width: number
-} {
-  if (
-    !Number.isSafeInteger(input.width) ||
-    !Number.isSafeInteger(input.height) ||
-    input.width < 240 ||
-    input.width > 4_096 ||
-    input.height < 240 ||
-    input.height > 4_096
-  ) {
-    throw new BrowserSurfaceManagerError('browser.surface_unavailable')
-  }
-  return { height: input.height, width: input.width }
-}
-
-function safeSurfaceTitle(value: string): string {
-  const normalized = value.replace(/\p{Cc}/gu, ' ').trim()
-  return normalized.slice(0, 256) || 'New tab'
-}
-
-function fallbackSurfaceTitle(value: string): string {
-  try {
-    return new URL(value).hostname.slice(0, 256) || 'New tab'
-  } catch {
-    return 'New tab'
-  }
-}
-
-function safeLogicalSurfaceUrl(value: string): string | null {
-  if (!value || value.length > 16_384) return null
-  try {
-    const parsed = new URL(value)
-    if (
-      !['http:', 'https:'].includes(parsed.protocol) ||
-      parsed.username !== '' ||
-      parsed.password !== ''
-    ) {
-      return null
-    }
-    return parsed.toString()
-  } catch {
-    return null
-  }
-}
-
-function safeRemoteResourceUrl(value: string): string | null {
-  if (!value || value.length > 4_096) return null
-  try {
-    const parsed = new URL(value)
-    if (
-      !['http:', 'https:'].includes(parsed.protocol) ||
-      parsed.username !== '' ||
-      parsed.password !== ''
-    ) {
-      return null
-    }
-    return parsed.toString()
-  } catch {
-    return null
-  }
-}
-
-function isManagedBlankSurfaceUrl(value: string): boolean {
-  return value === 'about:blank' || parseBrowserSurfaceBootstrapUrl(value) !== null
-}
-
-function haveSameHttpOrigin(left: string | null, right: string | null): boolean {
-  if (!left || !right) return false
-  try {
-    return new URL(left).origin === new URL(right).origin
-  } catch {
-    return false
-  }
-}
-
-function safeGuestBoolean(guest: WebContents, method: 'isLoadingMainFrame'): boolean {
-  try {
-    return Boolean(guest[method]())
-  } catch {
-    return false
-  }
-}
-
-function safeGuestHistoryBoolean(
-  guest: WebContents,
-  method: 'canGoBack' | 'canGoForward'
-): boolean {
-  try {
-    const history = guest.navigationHistory
-    if (history && typeof history[method] === 'function') return Boolean(history[method]())
-    return Boolean(guest[method]())
-  } catch {
-    return false
-  }
-}
-
-function runGuestHistoryAction(guest: WebContents, action: 'goBack' | 'goForward'): void {
-  const history = guest.navigationHistory
-  if (history && typeof history[action] === 'function') {
-    history[action]()
-    return
-  }
-  guest[action]()
-}
-
-interface SafeNavigationHistory {
-  getActiveIndex?: () => number
-  getAllEntries?: () => Array<{ title?: string; url: string }>
-  removeEntryAtIndex?: (index: number) => boolean
-}
-
-function safeNavigationHistory(guest: WebContents): SafeNavigationHistory | null {
-  try {
-    return (guest.navigationHistory as unknown as SafeNavigationHistory) ?? null
-  } catch {
-    return null
-  }
-}
-
-function safeActiveHistoryIndex(guest: WebContents): number {
-  try {
-    const index = safeNavigationHistory(guest)?.getActiveIndex?.()
-    return Number.isSafeInteger(index) && index !== undefined && index >= 0 ? index : -1
-  } catch {
-    return -1
-  }
-}
-
-function safeHistoryEntries(guest: WebContents): Array<{ title?: string; url: string }> {
-  try {
-    const entries = safeNavigationHistory(guest)?.getAllEntries?.()
-    if (!Array.isArray(entries)) return []
-    return entries.filter((entry): entry is { title?: string; url: string } =>
-      Boolean(entry && typeof entry.url === 'string')
-    )
-  } catch {
-    return []
-  }
-}
-
-function safeActiveHistoryEntry(guest: WebContents): PhysicalHistoryEntry | null {
-  const index = safeActiveHistoryIndex(guest)
-  if (index < 0) return null
-  const entry = safeHistoryEntries(guest)[index]
-  return entry ? { index, url: entry.url } : null
-}
-
-function safeRemoveHistoryEntry(guest: WebContents, index: number): boolean {
-  if (index < 0) return false
-  try {
-    return safeNavigationHistory(guest)?.removeEntryAtIndex?.(index) === true
-  } catch {
-    // History compaction is best effort; logical state and internal-page admission remain exact.
-    return false
-  }
-}
-
-function safeRemoveHistoryEntryByUrl(guest: WebContents, url: string): boolean {
-  const activeIndex = safeActiveHistoryIndex(guest)
-  const index = safeHistoryEntries(guest).findIndex(
-    (entry, candidateIndex) => candidateIndex !== activeIndex && entry.url === url
-  )
-  return safeRemoveHistoryEntry(guest, index)
-}
-
-function isIgnoredBrowserLoadFailure(errorCode: number, errorDescription: string): boolean {
-  const normalized = errorDescription
-    .trim()
-    .toUpperCase()
-    .replace(/^NET::/u, '')
-  return errorCode === -3 || normalized === 'ERR_ABORTED' || normalized === 'ERR_BLOCKED_BY_CLIENT'
-}
-
-function browserNavigationErrorDescription(error: unknown): string {
-  const message = error instanceof Error ? error.message : String(error)
-  return message.match(/(?:ERR_[A-Z0-9_]+|DNS_PROBE_POSSIBLE)/u)?.[0] ?? 'ERR_FAILED'
-}
-
-function isNavigationAlreadyPendingError(error: unknown): boolean {
-  const message = error instanceof Error ? error.message : String(error)
-  return message.toLowerCase().includes('navigation is already pending')
-}
-
-function isAbortedBrowserNavigationError(error: unknown): boolean {
-  return browserNavigationErrorDescription(error) === 'ERR_ABORTED'
-}
-
-function fallbackBrowserSurfaceCrashError(input: {
-  generation: number
-  kind: 'renderer_crashed' | 'renderer_unresponsive'
-  navigationEpoch: number
-}): BrowserSurfaceCrashError {
-  const unresponsive = input.kind === 'renderer_unresponsive'
-  const title = unresponsive ? 'Page is not responding' : 'Page renderer stopped'
-  return {
-    actionLabel: unresponsive ? 'Reload page' : 'Recreate page',
-    generation: input.generation,
-    heading: title,
-    internalActionUrl: '',
-    internalPageHtml: '',
-    kind: input.kind,
-    navigationEpoch: input.navigationEpoch,
-    summary: unresponsive
-      ? 'The page stopped responding. Reload it to continue.'
-      : 'The page renderer exited unexpectedly. Recreate it to continue.',
-    title
-  }
-}
-
-function normalizeRendererGoneReason(reason: string): string {
-  const allowed = new Set([
-    'clean-exit',
-    'abnormal-exit',
-    'killed',
-    'crashed',
-    'oom',
-    'launch-failed',
-    'integrity-failure'
-  ])
-  return allowed.has(reason) ? reason : 'unknown'
-}
-
-function safeSurfaceUrl(value: string): string {
-  try {
-    const parsed = new URL(value)
-    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return 'about:blank'
-    if (parsed.username !== '' || parsed.password !== '') return 'about:blank'
-    return parsed.toString().slice(0, 16_384)
-  } catch {
-    return 'about:blank'
-  }
-}
-
-function safeHttpOrigin(value: string): string | null {
-  try {
-    const parsed = new URL(value)
-    if (
-      !['http:', 'https:'].includes(parsed.protocol) ||
-      parsed.username !== '' ||
-      parsed.password !== ''
-    ) {
-      return null
-    }
-    return parsed.origin
-  } catch {
-    return null
-  }
-}
-
-function sameSensitiveTarget(
-  left: BrowserSensitiveTargetIdentity | null,
-  right: BrowserSensitiveTargetIdentity
-): boolean {
-  return Boolean(
-    left &&
-    left.surfaceId === right.surfaceId &&
-    left.generation === right.generation &&
-    left.navigationEpoch === right.navigationEpoch &&
-    left.origin === right.origin
-  )
-}
-
-function isSafeManagedPageUrl(value: string): boolean {
-  try {
-    const protocol = new URL(value).protocol
-    return protocol === 'http:' || protocol === 'https:'
-  } catch {
-    return false
-  }
-}
-
-async function loadManagedSurface(
-  surface: ManagedSurface,
-  url: string,
-  timeoutMs: number
-): Promise<void> {
-  if (!isSafeManagedPageUrl(url)) {
-    throw new BrowserSurfaceManagerError('browser.surface_unavailable')
-  }
-  await loadExactManagedSurfaceUrl(surface, url, timeoutMs)
-}
-
-async function loadManagedBlankSurface(surface: ManagedSurface, timeoutMs: number): Promise<void> {
-  await loadExactManagedSurfaceUrl(surface, 'about:blank', timeoutMs)
-}
-
-async function loadExactManagedSurfaceUrl(
-  surface: ManagedSurface,
-  url: string,
-  timeoutMs: number
-): Promise<void> {
-  await waitForInitialDocumentReady(surface, timeoutMs)
-  await waitForInitialNavigationToSettle(surface, timeoutMs)
-  if (surface.guest.isDestroyed()) {
-    throw new BrowserSurfaceManagerError('browser.surface_unavailable')
-  }
-  let timer: ReturnType<typeof setTimeout> | undefined
-  try {
-    await Promise.race([
-      surface.guest.loadURL(url),
-      new Promise<never>((_resolve, reject) => {
-        timer = setTimeout(
-          () => reject(new BrowserSurfaceManagerError('browser.surface_unavailable')),
-          timeoutMs
-        )
-      })
-    ])
-  } catch (error) {
-    if (surface.guest.isDestroyed()) {
-      throw new BrowserSurfaceManagerError('browser.target_closed')
-    }
-    if (error instanceof BrowserSurfaceManagerError) throw error
-    throw new BrowserSurfaceManagerError('browser.surface_unavailable')
-  } finally {
-    if (timer) clearTimeout(timer)
-  }
-}
-
-async function waitForInitialNavigationToSettle(
-  surface: ManagedSurface,
-  timeoutMs: number
-): Promise<void> {
-  const settled = await boundedWaitFor(() => {
-    if (surface.guest.isDestroyed()) return true
-    const nativeMainFrameLoading =
-      typeof surface.guest.isLoadingMainFrame === 'function' && surface.guest.isLoadingMainFrame()
-    return !surface.navigationInProgress && !nativeMainFrameLoading
-  }, timeoutMs)
-  if (surface.guest.isDestroyed()) {
-    throw new BrowserSurfaceManagerError('browser.target_closed')
-  }
-  if (!settled) throw new BrowserSurfaceManagerError('browser.surface_unavailable')
-}
-
-async function waitForInitialDocumentReady(
-  surface: ManagedSurface,
-  timeoutMs: number
-): Promise<void> {
-  if (surface.initialDocumentReady) return
-  let timer: ReturnType<typeof setTimeout> | undefined
-  try {
-    await Promise.race([
-      surface.initialDocumentReadyPromise,
-      new Promise<never>((_resolve, reject) => {
-        timer = setTimeout(
-          () => reject(new BrowserSurfaceManagerError('browser.surface_unavailable')),
-          timeoutMs
-        )
-      })
-    ])
-  } finally {
-    if (timer) clearTimeout(timer)
-  }
-  if (surface.guest.isDestroyed()) {
-    throw new BrowserSurfaceManagerError('browser.target_closed')
-  }
-}
-
-async function boundedWaitFor(predicate: () => boolean, timeoutMs: number): Promise<boolean> {
-  if (predicate()) return true
-  return await new Promise<boolean>((resolve) => {
-    const deadline = Date.now() + timeoutMs
-    const poll = (): void => {
-      if (predicate()) {
-        resolve(true)
-        return
-      }
-      if (Date.now() >= deadline) {
-        resolve(false)
-        return
-      }
-      setTimeout(poll, 10)
-    }
-    poll()
-  })
-}
-
-async function nextEventLoopTurn(): Promise<void> {
-  await new Promise<void>((resolve) => setImmediate(resolve))
-}
-
-async function settleWithin<T>(
-  promise: Promise<T> | undefined,
-  timeoutMs: number
-): Promise<boolean> {
-  if (!promise) return true
-  let timer: ReturnType<typeof setTimeout> | undefined
-  try {
-    return await Promise.race([
-      promise.then(
-        () => true,
-        () => true
-      ),
-      new Promise<false>((resolve) => {
-        timer = setTimeout(() => resolve(false), timeoutMs)
-      })
-    ])
-  } finally {
-    if (timer) clearTimeout(timer)
   }
 }

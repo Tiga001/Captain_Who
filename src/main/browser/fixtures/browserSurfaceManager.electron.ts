@@ -115,7 +115,9 @@ async function main(): Promise<void> {
     surfaceId: string,
     exactGuest: WebContents
   ): Promise<string> => {
-    await waitForFixtureGuestDocumentReady(exactGuest, FIXTURE_READINESS_TIMEOUT_MS)
+    // Initial callers arrive only after ensureFixtureSurface observed both did-attach and the
+    // exact webview's document-ready event; later callers use that already-acknowledged guest.
+    // Re-subscribing through WebContents here can miss the completed event and race Host expiry.
     const deadline = Date.now() + FIXTURE_READINESS_TIMEOUT_MS
     while (Date.now() < deadline) {
       if (exactGuest.isDestroyed() || guests.get(surfaceId) !== exactGuest) {
@@ -477,39 +479,6 @@ async function applyFixtureSurfaceCommand(
       width: Math.round(Math.max(0, Math.min(bounds.right, window.innerWidth) - Math.max(bounds.left, 0)))
     }
   })()`)
-}
-
-async function waitForFixtureGuestDocumentReady(
-  guest: WebContents,
-  timeoutMs: number
-): Promise<void> {
-  if (guest.isDestroyed()) throw new Error('fixture surface was destroyed before document-ready')
-  if (!guest.isLoadingMainFrame() && guest.getURL() !== '') return
-
-  await new Promise<void>((resolve, reject) => {
-    let settled = false
-    const finish = (error?: Error): void => {
-      if (settled) return
-      settled = true
-      clearTimeout(timer)
-      guest.removeListener('dom-ready', handleReady)
-      guest.removeListener('did-finish-load', handleReady)
-      guest.removeListener('destroyed', handleDestroyed)
-      if (error) reject(error)
-      else resolve()
-    }
-    const handleReady = (): void => finish()
-    const handleDestroyed = (): void =>
-      finish(new Error('fixture surface was destroyed before document-ready'))
-    const timer = setTimeout(
-      () => finish(new Error('fixture surface document-ready timed out')),
-      timeoutMs
-    )
-    guest.once('dom-ready', handleReady)
-    guest.once('did-finish-load', handleReady)
-    guest.once('destroyed', handleDestroyed)
-    if (!guest.isLoadingMainFrame() && guest.getURL() !== '') finish()
-  })
 }
 
 async function waitForFixtureTurn(delayMs: number): Promise<void> {

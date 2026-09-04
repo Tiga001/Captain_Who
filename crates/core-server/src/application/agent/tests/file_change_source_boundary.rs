@@ -64,7 +64,7 @@ const UNSUPPORTED_TOOL_DIAGNOSTIC_ALLOWANCE: CurrentSemanticAllowance =
     };
 
 const FLAT_WIRE_REJECTION_ALLOWANCE: CurrentSemanticAllowance = CurrentSemanticAllowance {
-    file: "crates/core/src/tools/apply_patch.rs",
+    file: "crates/core/src/tools/apply_patch/tests.rs",
     line_marker: "args: json!({\"action\":\"apply\",\"content\":\"PRIVATE_FLAT_CANARY\"})",
     expected_occurrences: 1,
     reason: "One test-only malformed call proves the retired flat Wire is rejected and redacted before any public projection.",
@@ -99,13 +99,13 @@ const CURRENT_FILE_WRITE_RISK_ALLOWLIST: &[CurrentSemanticAllowance] = &[
         reason: "The Office Tool prepares current write-risk operations for FileChange authorization.",
     },
     CurrentSemanticAllowance {
-        file: "crates/core-server/src/application/agent/action_execution/runners.rs",
+        file: "crates/core-server/src/application/agent/action_execution/runners/dispatch.rs",
         line_marker: "OfficeOperationAccess::FileWrite",
         expected_occurrences: 2,
         reason: "The Core Server revalidates the current Office write-risk classification before execution.",
     },
     CurrentSemanticAllowance {
-        file: "crates/core/src/protocol.rs",
+        file: "crates/core/src/protocol/skills.rs",
         line_marker: "FileWrite,",
         expected_occurrences: 1,
         reason: "AgentBuiltinMcpToolRiskKind retains the current Builtin MCP file-write risk variant.",
@@ -129,7 +129,7 @@ const CURRENT_FILE_WRITE_RISK_ALLOWLIST: &[CurrentSemanticAllowance] = &[
         reason: "The signed Managed Playwright manifest declares current file-write risk.",
     },
     CurrentSemanticAllowance {
-        file: "packages/protocol/src/agent.ts",
+        file: "packages/protocol/src/agent/approvals.ts",
         line_marker: "'file_write'",
         expected_occurrences: 1,
         reason: "The strict Agent Builtin MCP risk union retains its current wire value.",
@@ -207,7 +207,7 @@ const CURRENT_FILE_WRITE_RISK_ALLOWLIST: &[CurrentSemanticAllowance] = &[
         reason: "Traditional Chinese UI copy names the current Builtin MCP file-write risk classification.",
     },
     CurrentSemanticAllowance {
-        file: "packages/protocol/src/agent.ts",
+        file: "packages/protocol/src/agent/office.ts",
         line_marker: "| 'fileWrite'",
         expected_occurrences: 1,
         reason: "The current strict Office access DTO retains its lower-camel write-risk value.",
@@ -225,7 +225,7 @@ const CURRENT_FILE_WRITE_RISK_ALLOWLIST: &[CurrentSemanticAllowance] = &[
         reason: "The current Renderer Office projection validates the strict Office access risk value.",
     },
     CurrentSemanticAllowance {
-        file: "crates/core/src/storage/chat_repository/agent_run_projection.rs",
+        file: "crates/core/src/storage/chat_repository/agent_run_projection/validation/skills_office.rs",
         line_marker: "Some(\"readOnly\" | \"fileWrite\")",
         expected_occurrences: 1,
         reason: "The current durable chat projection validates the strict Office access risk value before retaining it.",
@@ -514,17 +514,21 @@ fn raw_unified_patch_is_a_view_not_a_model_execution_authority() {
             "retired writer source path `{relative}` must not be recreated"
         );
     }
-    let apply_patch = rust_without_cfg_test_modules(
-        &std::fs::read_to_string(root.join("crates/core/src/tools/apply_patch.rs")).unwrap(),
+    let apply_patch_schema = rust_without_cfg_test_modules(
+        &std::fs::read_to_string(root.join("crates/core/src/tools/apply_patch/schema.rs")).unwrap(),
     );
     assert_section_excludes(
-        &apply_patch,
+        &apply_patch_schema,
         "fn patch_input_schema() -> Value {",
-        "#[derive(Debug, Deserialize)]",
+        "fn structured_edits_schema() -> Value {",
         "\"patch\"",
     );
+    let apply_patch_request = rust_without_cfg_test_modules(
+        &std::fs::read_to_string(root.join("crates/core/src/tools/apply_patch/request.rs"))
+            .unwrap(),
+    );
     assert_section_excludes(
-        &apply_patch,
+        &apply_patch_request,
         "enum ApplyPatchArgs {",
         "fn parse_args(",
         "patch:",

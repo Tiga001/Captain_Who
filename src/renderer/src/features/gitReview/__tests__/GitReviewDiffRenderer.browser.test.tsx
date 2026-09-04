@@ -813,10 +813,20 @@ describe('GitReviewDiffRenderer syntax highlighting', () => {
     )
 
     await expect
-      .poll(() => screen.container.querySelectorAll('[data-syntax-highlighted="true"]').length, {
-        timeout: 5_000
-      })
-      .toBeGreaterThan(0)
+      .poll(
+        () => {
+          const target = Array.from(
+            screen.container.querySelectorAll<HTMLElement>('.git-review__diff-line--addition')
+          ).find(
+            (line) =>
+              line.querySelector('.git-review__diff-content')?.textContent ===
+              'const answer: number = 42'
+          )
+          return target?.querySelectorAll('[data-syntax-token="true"]').length ?? 0
+        },
+        { timeout: 5_000 }
+      )
+      .toBeGreaterThan(1)
 
     const addedLine = Array.from(
       screen.container.querySelectorAll<HTMLElement>('.git-review__diff-line--addition')

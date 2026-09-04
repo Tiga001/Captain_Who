@@ -41,7 +41,13 @@ const requirementsPath = join(
   'resources',
   'artifact-runtime-python-requirements.txt'
 )
-const builderPath = join(repositoryRoot, 'scripts', 'prepare-artifact-runtime.mjs')
+const pythonRuntimeBuilderPath = join(
+  repositoryRoot,
+  'scripts',
+  'artifact-runtime',
+  'python-runtime.mjs'
+)
+const receiptBuilderPath = join(repositoryRoot, 'scripts', 'artifact-runtime', 'receipt.mjs')
 const bootstrapPath = join(repositoryRoot, 'resources', 'artifact-runtime', 'node-bootstrap.mjs')
 const loaderPath = join(repositoryRoot, 'resources', 'artifact-runtime', 'node-loader.mjs')
 const presentationSdkPath = join(
@@ -296,13 +302,15 @@ test('managed Python requirements freeze the reviewed dependency closure and bin
     6
   )
 
-  const builder = await readFile(builderPath, 'utf8')
-  assert.match(builder, /'--require-hashes'/)
-  assert.match(builder, /'--only-binary=:all:'/)
-  assert.match(builder, /'--no-cache-dir'/)
-  assert.match(builder, /'--no-compile'/)
-  assert.match(builder, /'-B',\s*'-m',\s*'pip'/)
-  assert.match(builder, /\['-I', '-B', '-c', pythonProbe\]/)
+  const pythonRuntimeBuilder = await readFile(pythonRuntimeBuilderPath, 'utf8')
+  assert.match(pythonRuntimeBuilder, /'--require-hashes'/)
+  assert.match(pythonRuntimeBuilder, /'--only-binary=:all:'/)
+  assert.match(pythonRuntimeBuilder, /'--no-cache-dir'/)
+  assert.match(pythonRuntimeBuilder, /'--no-compile'/)
+  assert.match(pythonRuntimeBuilder, /'-B',\s*'-m',\s*'pip'/)
+
+  const receiptBuilder = await readFile(receiptBuilderPath, 'utf8')
+  assert.match(receiptBuilder, /\['-I', '-B', '-c', pythonProbe\]/)
 })
 
 test('manifest and download policy fail closed on mutable or foreign supply-chain inputs', async () => {

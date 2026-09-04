@@ -427,13 +427,13 @@ fn whole_settings_revision_marker_is_confined_to_the_current_document_identity()
 fn llm_retry_wire_has_no_provider_authored_reason_field() {
     let root = workspace_root();
     assert_section_excludes(
-        &root.join("crates/core/src/protocol.rs"),
+        &root.join("crates/core/src/protocol/events.rs"),
         "    LlmRetry {",
         "    ToolInputProgress {",
         "reason",
     );
     assert_section_excludes(
-        &root.join("packages/protocol/src/agent.ts"),
+        &root.join("packages/protocol/src/agent/events.ts"),
         "      type: 'llm_retry'",
         "      type: 'tool_input_progress'",
         "reason",

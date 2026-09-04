@@ -388,7 +388,7 @@ const protocolVersionGroups = [
   {
     label: 'FileChange schema',
     sources: [
-      ['packages/protocol/src/agent.ts', /AGENT_FILE_CHANGE_SCHEMA_VERSION\s*=\s*(\d+)/],
+      ['packages/protocol/src/agent/fileChange.ts', /AGENT_FILE_CHANGE_SCHEMA_VERSION\s*=\s*(\d+)/],
       [
         'crates/core/src/protocol.rs',
         /AGENT_FILE_CHANGE_PROTOCOL_SCHEMA_VERSION:\s*u32\s*=\s*(\d+)/

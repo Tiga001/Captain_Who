@@ -5,7 +5,43 @@
   "buildInputs": {
     "builder": {
       "path": "scripts/prepare-artifact-runtime.mjs",
-      "sha256": "110ca504e1cfd5da02b4c3f2e17f614784243fc6bf239569b2f9bce7421243db"
+      "sha256": "ef32622372c889cb82b0fb1653373dc22061ecd35fc66d151f8e9ad03a8ffae1"
+    },
+    "artifactRuntimeContract": {
+      "path": "scripts/artifact-runtime/contract.mjs",
+      "sha256": "bd941f294693388b16ffaeb70b3d1635d05aa6ccfd6d9df1a4cadccf032bd59b"
+    },
+    "artifactRuntimeFilesystem": {
+      "path": "scripts/artifact-runtime/filesystem.mjs",
+      "sha256": "47b2fd4675c14d3acda2ab5e3d2f7628b32aabf2d6f7a57bb98ce47d58676086"
+    },
+    "artifactRuntimeArchive": {
+      "path": "scripts/artifact-runtime/archive.mjs",
+      "sha256": "6e34afa37c0dc50189273c112d81c93caf3007e370ab43f01ac1a9f456e1e27e"
+    },
+    "artifactRuntimeNodeDependencies": {
+      "path": "scripts/artifact-runtime/node-dependencies.mjs",
+      "sha256": "0d1b9693e39fc0d0e3f494418941034e536a3c1ff758738c86de1659596249ab"
+    },
+    "artifactRuntimePythonRuntime": {
+      "path": "scripts/artifact-runtime/python-runtime.mjs",
+      "sha256": "59bc648e80525b123175f144859a645833c63edefb3ff371c6d919facd144049"
+    },
+    "artifactRuntimeLegalEvidence": {
+      "path": "scripts/artifact-runtime/legal-evidence.mjs",
+      "sha256": "520da8ed3957ba1d294208b7d36754b2faf7651ad2e20d063fe8dcadd44085c5"
+    },
+    "artifactRuntimeReceipt": {
+      "path": "scripts/artifact-runtime/receipt.mjs",
+      "sha256": "8fed43f749f0c9bfe2ba262979380a0f1b2cd3f07374afa7b8f3a19ed0180924"
+    },
+    "artifactRuntimeSigning": {
+      "path": "scripts/artifact-runtime/signing.mjs",
+      "sha256": "316743ef682b6baf8d8450f24fffee22463cf251e69a31029de1609aa678e436"
+    },
+    "artifactRuntimePrepare": {
+      "path": "scripts/artifact-runtime/prepare.mjs",
+      "sha256": "d5ebc1c4d5245d300808d33c0f14b84190ef51b03b5160ebf83629644d4303a8"
     },
     "frozenMachOSigning": {
       "path": "scripts/frozen-macho-signing.mjs",
