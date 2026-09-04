@@ -3,6 +3,7 @@ import { Bot, FileDiff, FolderOpen, Globe2, TerminalSquare } from 'lucide-react'
 import { getFileTypeIconSource } from '../../components/files/FileTypeIcon'
 import type { BrowserPageMetadata } from '../browser/browserTypes'
 import { browserSurfaceIdForPage } from '../browser/browserSurface'
+import { isWorkspaceMarkdownFile } from '../files/workspaceFilePreviewTypes'
 import { useRightSidebarRuntimeContext } from './RightSidebarRuntimeContext'
 import type {
   RightSidebarModuleCreateContext,
@@ -301,7 +302,8 @@ function renderFilesModule({
   if (availability === 'unavailable' || !page.workspaceKey) return null
   const fileState = page.moduleState?.kind === 'workspace-file' ? page.moduleState : null
   const filePath = fileState?.path ?? null
-  const markdownView = fileState?.preview?.markdownView ?? 'source'
+  const markdownAnchor = fileState?.preview?.markdownAnchor
+  const markdownView = fileState?.preview?.markdownView ?? 'preview'
   const pdfPage = fileState?.preview?.pdfPage ?? 1
   const wrapLines = fileState?.preview?.wrapLines ?? false
 
@@ -310,6 +312,7 @@ function renderFilesModule({
       <FilesPanel
         filePath={filePath}
         isActive={activity === 'foreground'}
+        markdownAnchor={markdownAnchor}
         markdownView={markdownView}
         onMarkdownViewChange={(nextMarkdownView) => {
           if (!fileState) return
@@ -320,8 +323,8 @@ function renderFilesModule({
             }
           })
         }}
-        onOpenFile={(path) => {
-          onOpenPage(createWorkspaceFileOpenRequest(path))
+        onOpenFile={(path, anchor) => {
+          onOpenPage(createWorkspaceFileOpenRequest(path, anchor))
         }}
         onPdfPageChange={(nextPdfPage) => {
           if (!fileState) return
@@ -365,11 +368,17 @@ function renderAgentCenterModule({ onPageUpdate, page, t }: RightSidebarModuleRe
   )
 }
 
-function createWorkspaceFileOpenRequest(path: string): RightSidebarPageOpenRequest {
+function createWorkspaceFileOpenRequest(
+  path: string,
+  markdownAnchor?: string
+): RightSidebarPageOpenRequest {
+  const preview = isWorkspaceMarkdownFile(path)
+    ? { markdownAnchor, markdownView: 'preview' as const }
+    : undefined
   return {
     disposition: 'preview',
     iconUrl: getFileTypeIconSource(path),
-    moduleState: { kind: 'workspace-file', path, tabState: 'transient' },
+    moduleState: { kind: 'workspace-file', path, preview, tabState: 'transient' },
     resourceKey: `workspace-file:${path}`,
     targetModuleId: 'files',
     title: path.split('/').at(-1) ?? path

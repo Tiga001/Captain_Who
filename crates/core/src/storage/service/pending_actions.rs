@@ -1447,6 +1447,500 @@ fn validate_file_change_action_json_pair(
 }
 
 impl StorageService {
+    /// Adopts the exact terminal `outcome_unknown` ToolResult when the MCP dispatch journal
+    /// lagged behind an already-completed conversation trace.
+    ///
+    /// This is deliberately narrower than normal startup terminalization. It never manufactures
+    /// a result, changes the terminal Assistant/run, or accepts an arbitrary failed ToolResult.
+    /// The pending row, frozen action, audit identity, MCP provenance, paired Trace, and complete
+    /// model-context projection must all agree before the stale journal is scrubbed.
+    pub fn adopt_terminal_mcp_agent_action_on_startup(
+        &self,
+        action_id: &str,
+        expected_status: &str,
+        updated_at: i64,
+    ) -> Result<bool, String> {
+        if expected_status != "executing" {
+            return Ok(false);
+        }
+
+        let mut connection = self.state.connection()?;
+        let transaction = connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(storage_error)?;
+        let Some(record) = pending_action_repository::load_pending_action(&transaction, action_id)
+            .map_err(storage_error)?
+        else {
+            return Ok(false);
+        };
+        if record.status != expected_status || record.target_status.is_some() {
+            return Ok(false);
+        }
+        if record.action_type != "mcp_tool_call" {
+            return Err("terminal MCP journal adoption rejected a non-MCP action".to_string());
+        }
+
+        let conversation_id = record
+            .conversation_id
+            .as_deref()
+            .ok_or_else(|| "terminal MCP journal requires a conversation owner".to_string())?;
+        let assistant_message_id = record
+            .assistant_message_id
+            .as_deref()
+            .ok_or_else(|| "terminal MCP journal requires an Assistant owner".to_string())?;
+        let Some(trace) = conversation_trace_repository::get_trace_for_message(
+            &transaction,
+            assistant_message_id,
+        )
+        .map_err(storage_error)?
+        else {
+            return Ok(false);
+        };
+        trace
+            .validate()
+            .map_err(|_| "terminal MCP journal ConversationTurnTrace is invalid".to_string())?;
+        if trace.terminal_status != crate::ConversationTurnTraceTerminalStatus::Completed
+            || trace.terminal_error.is_some()
+        {
+            return Ok(false);
+        }
+        if trace.run_id != record.run_id
+            || trace.conversation_id != conversation_id
+            || trace.assistant_message_id != assistant_message_id
+        {
+            return Err("terminal MCP journal trace owner identity is inconsistent".to_string());
+        }
+
+        let model_context_items = conversation_model_context_repository::get_log_for_message(
+            &transaction,
+            assistant_message_id,
+        )
+        .map_err(storage_error)?
+        .map(|log| log.items)
+        .ok_or_else(|| "terminal MCP journal requires a durable model-context log".to_string())?;
+        trace
+            .validate_complete_model_context(&model_context_items)
+            .map_err(|_| "terminal MCP journal model-context log is invalid".to_string())?;
+
+        let row_call_id = record
+            .tool_call_id
+            .as_deref()
+            .ok_or_else(|| "terminal MCP journal requires a ToolCall identity".to_string())?;
+        let matching_calls = trace
+            .items
+            .iter()
+            .filter(|item| {
+                matches!(item, ConversationTurnTraceItem::ToolCall { call_id, .. } if call_id == row_call_id)
+            })
+            .collect::<Vec<_>>();
+        let matching_results = trace
+            .items
+            .iter()
+            .filter(|item| {
+                matches!(item, ConversationTurnTraceItem::ToolResult { call_id, .. } if call_id == row_call_id)
+            })
+            .collect::<Vec<_>>();
+        let [ConversationTurnTraceItem::ToolCall {
+            sequence: call_sequence,
+            call_id,
+            tool,
+            provenance,
+            operation,
+            approval_status: call_approval_status,
+            ..
+        }] = matching_calls.as_slice()
+        else {
+            return Err("terminal MCP journal requires exactly one matching ToolCall".to_string());
+        };
+        let [ConversationTurnTraceItem::ToolResult {
+            sequence: result_sequence,
+            tool: result_tool,
+            status: result_status,
+            success,
+            observation,
+            approval_status: result_approval_status,
+            error,
+            truncated,
+            archive,
+            ..
+        }] = matching_results.as_slice()
+        else {
+            return Err(
+                "terminal MCP journal requires exactly one matching ToolResult".to_string(),
+            );
+        };
+        let crate::AgentToolIdentity::Mcp {
+            provenance: mcp_provenance,
+        } = provenance
+        else {
+            return Err("terminal MCP journal requires durable MCP Tool provenance".to_string());
+        };
+        if tool != &record.tool_name
+            || result_tool != tool
+            || result_sequence <= call_sequence
+            || *call_approval_status != crate::AgentApprovalStatus::Approved
+            || result_approval_status != call_approval_status
+            || *result_status != crate::ConversationTraceToolResultStatus::Failed
+            || *success
+            || *truncated
+            || archive != &crate::ConversationHistoryArchiveTraceMetadata::default()
+        {
+            return Err(
+                "terminal MCP journal ToolCall/ToolResult pair is inconsistent".to_string(),
+            );
+        }
+
+        let durable_result = AgentToolResult {
+            call_id: call_id.clone(),
+            tool: tool.clone(),
+            ok: *success,
+            result: Some(observation.clone()),
+            error: error.clone(),
+            exact_archive_file: None,
+        };
+        validate_durable_mcp_tool_result(&durable_result, "failed")?;
+        let observation = observation.as_object().ok_or_else(|| {
+            "terminal MCP outcome-unknown observation must be an object".to_string()
+        })?;
+        if observation
+            .get("status")
+            .and_then(serde_json::Value::as_str)
+            != Some("outcome_unknown")
+            || observation
+                .get("outcome")
+                .and_then(serde_json::Value::as_str)
+                != Some("outcome_unknown")
+            || observation.get("code").and_then(serde_json::Value::as_str)
+                != Some("mcp.tool_outcome_unknown")
+            || observation
+                .get("dispatchCertainty")
+                .and_then(serde_json::Value::as_str)
+                != Some("possibly_dispatched")
+            || observation
+                .get("retryable")
+                .and_then(serde_json::Value::as_bool)
+                != Some(false)
+        {
+            return Err(
+                "terminal MCP journal only adopts the canonical outcome-unknown result".to_string(),
+            );
+        }
+
+        let call_model_items = model_context_items
+            .iter()
+            .filter(|item| item.sequence == *call_sequence)
+            .collect::<Vec<_>>();
+        let result_model_items = model_context_items
+            .iter()
+            .filter(|item| item.sequence == *result_sequence)
+            .collect::<Vec<_>>();
+        let [call_model_item] = call_model_items.as_slice() else {
+            return Err("terminal MCP journal requires the exact ToolCall model item".to_string());
+        };
+        let [result_model_item] = result_model_items.as_slice() else {
+            return Err(
+                "terminal MCP journal requires the exact ToolResult model item".to_string(),
+            );
+        };
+        if call_model_item.ordinal != 0
+            || call_model_item.tool_calls.len() != 1
+            || call_model_item.tool_calls[0].args != *operation
+            || result_model_item.ordinal != 0
+            || result_model_item.content
+                != crate::conversation_trace::render_tool_observation(&durable_result)
+        {
+            return Err("terminal MCP journal exact model projection is inconsistent".to_string());
+        }
+
+        let durable = DurablePendingTraceSnapshot {
+            snapshot: crate::ConversationTraceSnapshot {
+                items: trace.items.clone(),
+                model_context_items: model_context_items.clone(),
+                next_sequence: trace
+                    .items
+                    .last()
+                    .map(ConversationTurnTraceItem::sequence)
+                    .unwrap_or(0)
+                    .checked_add(1)
+                    .ok_or_else(|| {
+                        "terminal MCP journal trace sequence is exhausted".to_string()
+                    })?,
+                truncated: trace.truncated,
+            },
+            call: AgentToolCall {
+                id: call_id.clone(),
+                tool: tool.clone(),
+                args: operation.clone(),
+                approval_status: *call_approval_status,
+                reason: operation
+                    .get("reason")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string),
+            },
+            provenance: crate::AgentToolIdentity::Mcp {
+                provenance: mcp_provenance.clone(),
+            },
+        };
+        let approval =
+            validated_mcp_approval_for_durable_call(&record, &durable).ok_or_else(|| {
+                "terminal MCP journal frozen action identity is inconsistent".to_string()
+            })?;
+        if approval.call.approval_status != crate::AgentApprovalStatus::Approved {
+            return Err("terminal MCP journal frozen call is inconsistent".to_string());
+        }
+        if approval.call.args != *operation
+            || !operation.as_object().is_some_and(serde_json::Map::is_empty)
+        {
+            return Err(
+                "terminal MCP journal durable call is not the exact safe MCP projection"
+                    .to_string(),
+            );
+        }
+
+        let owner = transaction
+            .query_row(
+                "SELECT role, status, agent_run_json
+                 FROM messages
+                 WHERE conversation_id = ?1 AND id = ?2",
+                rusqlite::params![conversation_id, assistant_message_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(storage_error)?
+            .ok_or_else(|| "terminal MCP journal requires its owning message".to_string())?;
+        let (owner_role, owner_status, owner_run_json) = owner;
+        if owner_role != "assistant" || owner_status.as_deref() != Some("sent") {
+            return Err("terminal MCP journal owning message is not completed".to_string());
+        }
+        let owner_run = owner_run_json
+            .as_deref()
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+            .and_then(|value| value.as_object().cloned())
+            .ok_or_else(|| "terminal MCP journal requires a current owning run".to_string())?;
+        if !chat_repository::current_agent_run_projection_is_safe(&owner_run, &record.run_id)
+            || owner_run.get("runId").and_then(serde_json::Value::as_str)
+                != Some(record.run_id.as_str())
+            || owner_run.get("status").and_then(serde_json::Value::as_str) != Some("completed")
+            || owner_run
+                .get("completedAt")
+                .and_then(serde_json::Value::as_i64)
+                .is_none()
+            || owner_run.contains_key("error")
+        {
+            return Err("terminal MCP journal owning run is not completed".to_string());
+        }
+        let owner_state = owner_run
+            .get("state")
+            .and_then(serde_json::Value::as_object)
+            .ok_or_else(|| "terminal MCP journal requires a completed run state".to_string())?;
+        if owner_state
+            .get("status")
+            .and_then(serde_json::Value::as_str)
+            != Some("completed")
+            || !owner_state
+                .get("activeRunId")
+                .is_some_and(serde_json::Value::is_null)
+            || !owner_state
+                .get("lastError")
+                .is_some_and(serde_json::Value::is_null)
+        {
+            return Err("terminal MCP journal owning run state is not completed".to_string());
+        }
+        let matching_invocations = owner_run
+            .get("mcpInvocations")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| "terminal MCP journal requires an MCP lifecycle".to_string())?
+            .iter()
+            .filter(|invocation| {
+                invocation
+                    .get("actionId")
+                    .and_then(serde_json::Value::as_str)
+                    == Some(approval.identity.action_id.as_str())
+            })
+            .collect::<Vec<_>>();
+        let [invocation] = matching_invocations.as_slice() else {
+            return Err(
+                "terminal MCP journal requires exactly one matching MCP lifecycle".to_string(),
+            );
+        };
+        let expected_scope = serde_json::to_value(&approval.identity.provenance.scope)
+            .map_err(|_| "terminal MCP journal scope is invalid".to_string())?;
+        if invocation
+            .get("invocationId")
+            .and_then(serde_json::Value::as_str)
+            != Some(approval.identity.invocation_id.as_str())
+            || invocation.get("callId").and_then(serde_json::Value::as_str)
+                != Some(approval.identity.call_id.as_str())
+            || invocation
+                .get("serverId")
+                .and_then(serde_json::Value::as_str)
+                != Some(approval.identity.provenance.server_id.as_str())
+            || invocation
+                .get("serverDisplayName")
+                .and_then(serde_json::Value::as_str)
+                != Some(approval.summary.server_display_name.as_str())
+            || invocation
+                .get("rawToolName")
+                .and_then(serde_json::Value::as_str)
+                != Some(approval.identity.provenance.raw_tool_name.as_str())
+            || invocation
+                .get("modelToolName")
+                .and_then(serde_json::Value::as_str)
+                != Some(approval.identity.provenance.model_tool_name.as_str())
+            || invocation
+                .get("scope")
+                .is_some_and(|scope| scope != &expected_scope)
+            || invocation
+                .get("external")
+                .and_then(serde_json::Value::as_bool)
+                != Some(true)
+            || invocation.get("state").and_then(serde_json::Value::as_str)
+                != Some("outcome_unknown")
+            || invocation
+                .get("dispatchCertainty")
+                .and_then(serde_json::Value::as_str)
+                != Some("possibly_dispatched")
+            || invocation
+                .get("outcome")
+                .and_then(serde_json::Value::as_str)
+                != Some("outcome_unknown")
+            || invocation
+                .get("errorCode")
+                .and_then(serde_json::Value::as_str)
+                != Some("mcp.tool_outcome_unknown")
+            || invocation.get("isError").is_some()
+            || invocation.get("rejectionReason").is_some()
+            || invocation
+                .get("durationMs")
+                .and_then(serde_json::Value::as_u64)
+                .is_none()
+            || invocation
+                .get("outputTruncated")
+                .and_then(serde_json::Value::as_bool)
+                != Some(false)
+        {
+            return Err("terminal MCP journal lifecycle is inconsistent".to_string());
+        }
+        let usage = usage_repository::load_usage_record_for_owner(
+            &transaction,
+            &record.run_id,
+            conversation_id,
+            assistant_message_id,
+        )
+        .map_err(storage_error)?
+        .ok_or_else(|| "terminal MCP journal requires a durable usage record".to_string())?;
+        if usage.status.as_deref() != Some("completed")
+            || usage.completed_at.is_none()
+            || usage.error.is_some()
+        {
+            return Err("terminal MCP journal usage is not completed".to_string());
+        }
+
+        let audit = agent_action_audit_repository::load_action_audit_record(
+            &transaction,
+            &record.action_id,
+        )
+        .map_err(storage_error)?
+        .ok_or_else(|| "terminal MCP journal requires a durable action audit".to_string())?;
+        if approval.approval_mode != crate::AgentMcpApprovalMode::Auto {
+            return Err(
+                "terminal MCP journal adoption requires an automatically authorized action"
+                    .to_string(),
+            );
+        }
+        // Older current producers mislabeled some hidden Auto journals as `manual`. Exact
+        // terminal adoption is the one safe point where that projection can be normalized: the
+        // frozen Auto action, dispatch boundary, and outcome-unknown result are already proven.
+        let decision_source_is_valid =
+            matches!(audit.decision_source.as_deref(), Some("auto" | "manual"));
+        let normalized_decision_source = "auto";
+        if audit.action_id != record.action_id
+            || audit.run_id != record.run_id
+            || audit.conversation_id != record.conversation_id
+            || audit.assistant_message_id != record.assistant_message_id
+            || audit.action_type != record.action_type
+            || audit.tool_name != record.tool_name
+            || audit.status != "approved"
+            || audit.decision.as_deref() != Some("approved")
+            || !decision_source_is_valid
+            || audit.action_json != record.action_json
+            || audit.file_change_result_json.is_some()
+            || audit.command_result_json.is_some()
+            || audit.completed_at.is_some()
+            || audit.tool_result_json.is_some()
+            || audit.error.is_some()
+            || audit.created_at != record.created_at
+            || audit.decided_at != Some(record.created_at)
+            || audit.effective_permissions_json.is_none()
+            || audit.path_scope.is_some()
+            || audit.command_cwd_scope.is_some()
+            || audit.blocked_reason.is_some()
+        {
+            return Err("terminal MCP journal durable audit identity is inconsistent".to_string());
+        }
+
+        let affected = transaction
+            .execute(
+                "UPDATE agent_pending_actions
+                 SET status = 'failed',
+                     target_status = 'failed',
+                     action_json = '{}',
+                     agent_input_json = '{}',
+                     updated_at = ?3
+                 WHERE action_id = ?1
+                   AND status = ?2
+                   AND target_status IS NULL
+                   AND action_type = 'mcp_tool_call'",
+                rusqlite::params![record.action_id, expected_status, updated_at],
+            )
+            .map_err(storage_error)?;
+        if affected != 1 {
+            return Err("terminal MCP journal adoption lost its pending status CAS".to_string());
+        }
+        resolve_pending_approval_notification_in_transaction(&transaction, &record, updated_at)?;
+        let audit_affected = transaction
+            .execute(
+                "UPDATE agent_action_audit
+                 SET status = 'failed',
+                     action_json = '{}',
+                     file_change_result_json = NULL,
+                     command_result_json = NULL,
+                     tool_result_json = NULL,
+                     error = ?2,
+                     blocked_reason = ?3,
+                     completed_at = ?4,
+                     decision_source = ?5
+                 WHERE action_id = ?1
+                   AND status = 'approved'
+                   AND completed_at IS NULL",
+                rusqlite::params![
+                    record.action_id,
+                    McpStartupActionTerminalOutcome::OutcomeUnknown.error_code(),
+                    McpStartupActionTerminalOutcome::OutcomeUnknown.safe_reason(),
+                    updated_at,
+                    normalized_decision_source
+                ],
+            )
+            .map_err(storage_error)?;
+        if audit_affected != 1 {
+            return Err("terminal MCP journal adoption lost its audit status CAS".to_string());
+        }
+        transaction
+            .execute(
+                "DELETE FROM mcp_approval_payload_envelopes WHERE action_id = ?1",
+                [&record.action_id],
+            )
+            .map_err(storage_error)?;
+        transaction.commit().map_err(storage_error)?;
+        Ok(true)
+    }
+
     /// Settles the hidden dispatch journal for one automatically authorized MCP invocation.
     ///
     /// `approved` is a definitely-not-dispatched preparation state. `executing` is the durable

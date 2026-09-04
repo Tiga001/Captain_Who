@@ -369,6 +369,160 @@ fn model_request_interruption_settles_visible_message_without_losing_failed_audi
     assert_eq!(persisted_usage.error.as_deref(), Some(DIAGNOSTIC));
 }
 
+#[test]
+fn failed_terminal_settlement_closes_a_durable_open_tool_call_with_paired_context() {
+    const CONVERSATION_ID: &str = "conversation-failed-open-tool";
+    const ASSISTANT_MESSAGE_ID: &str = "assistant-failed-open-tool";
+    const RUN_ID: &str = "run-failed-open-tool";
+    const CALL_ID: &str = "call-failed-open-tool";
+    const FAILURE: &str = "tool worker stopped before returning a result";
+
+    let fixture = tempdir().unwrap();
+    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    storage
+        .save_conversation(ChatConversationRecord {
+            id: CONVERSATION_ID.to_string(),
+            project_id: None,
+            model_id: Some("model-1".to_string()),
+            title: "Failed open tool".to_string(),
+            messages: vec![ChatMessageRecord {
+                id: ASSISTANT_MESSAGE_ID.to_string(),
+                role: "assistant".to_string(),
+                content: String::new(),
+                created_at: 1,
+                status: Some("pending".to_string()),
+                attachments: Vec::new(),
+                agent_run_json: None,
+                ui_state_json: None,
+            }],
+            created_at: 1,
+            updated_at: 1,
+            pinned_at: None,
+            archived_at: None,
+            unread_at: None,
+        })
+        .unwrap();
+    let call = AgentToolCall {
+        id: CALL_ID.to_string(),
+        tool: "attachments_list_project".to_string(),
+        args: json!({}),
+        approval_status: AgentApprovalStatus::NotRequired,
+        reason: None,
+    };
+    let snapshot = ConversationTraceSnapshot {
+        items: vec![ConversationTurnTraceItem::ToolCall {
+            sequence: 0,
+            call_id: call.id.clone(),
+            tool: call.tool.clone(),
+            provenance: AgentToolIdentity::Builtin {
+                tool_name: call.tool.clone(),
+            },
+            operation: call.args.clone(),
+            approval_status: call.approval_status,
+            truncated: false,
+        }],
+        model_context_items: vec![ConversationModelContextItem {
+            sequence: 0,
+            ordinal: 0,
+            role: "assistant".to_string(),
+            content: String::new(),
+            tool_call_id: None,
+            tool_calls: vec![AgentContextCheckpointToolCall {
+                id: call.id.clone(),
+                name: call.tool.clone(),
+                args: call.args.clone(),
+                provider_identity: AgentProviderToolCallIdentity {
+                    provider_tool_index: 0,
+                    provider_call_id: call.id.clone(),
+                    runtime_call_id: call.id.clone(),
+                },
+            }],
+            is_error: false,
+        }],
+        next_sequence: 1,
+        truncated: false,
+    };
+    let service = AgentService::new(Arc::clone(&storage));
+    storage
+        .append_in_progress_conversation_turn_trace_and_apply_guidances(
+            &snapshot.in_progress_audit_trace(RUN_ID, CONVERSATION_ID, ASSISTANT_MESSAGE_ID),
+            &snapshot.model_context_items,
+            1,
+            2,
+        )
+        .unwrap();
+
+    let durable_trace = storage
+        .get_conversation_turn_trace(ASSISTANT_MESSAGE_ID)
+        .unwrap()
+        .unwrap();
+    let durable_model_context = storage
+        .get_conversation_model_context_log(ASSISTANT_MESSAGE_ID)
+        .unwrap()
+        .unwrap()
+        .items;
+    let snapshot = ConversationTraceSnapshot {
+        items: durable_trace.items,
+        model_context_items: durable_model_context,
+        next_sequence: 1,
+        truncated: durable_trace.truncated,
+    };
+    service
+        .trace_snapshots
+        .lock()
+        .unwrap()
+        .insert(RUN_ID.to_string(), snapshot.clone());
+    let runtime_terminal_trace = terminal_conversation_trace_from_snapshot(
+        snapshot,
+        RUN_ID,
+        CONVERSATION_ID,
+        ASSISTANT_MESSAGE_ID,
+        ConversationTurnTraceTerminalStatus::Failed,
+        FAILURE,
+    )
+    .unwrap()
+    .trace;
+    service
+        .persist_assistant_error(
+            CONVERSATION_ID,
+            ASSISTANT_MESSAGE_ID,
+            FAILURE,
+            None,
+            &runtime_terminal_trace,
+        )
+        .unwrap();
+
+    let trace = storage
+        .get_conversation_turn_trace(ASSISTANT_MESSAGE_ID)
+        .unwrap()
+        .unwrap();
+    let model_context = storage
+        .get_conversation_model_context_log(ASSISTANT_MESSAGE_ID)
+        .unwrap()
+        .unwrap()
+        .items;
+    trace
+        .validate_complete_model_context(&model_context)
+        .unwrap();
+    assert_eq!(
+        trace.terminal_status,
+        ConversationTurnTraceTerminalStatus::Failed
+    );
+    assert!(matches!(
+        trace.items.as_slice(),
+        [
+            ConversationTurnTraceItem::ToolCall { call_id, .. },
+            ConversationTurnTraceItem::ToolResult {
+                call_id: result_call_id,
+                status: ConversationTraceToolResultStatus::Failed,
+                success: false,
+                ..
+            }
+        ] if call_id == CALL_ID && result_call_id == CALL_ID
+    ));
+    assert_eq!(model_context.len(), 2);
+}
+
 #[tokio::test]
 async fn terminal_transaction_retry_reloads_sqlite_and_counts_usage_once() {
     const CONVERSATION_ID: &str = "conversation-terminal-retry";

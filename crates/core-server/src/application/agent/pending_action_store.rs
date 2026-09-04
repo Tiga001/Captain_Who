@@ -258,8 +258,13 @@ impl AgentService {
             }
         }
         drop(pending_actions);
-        if self
-            .persist_action_audit(
+        let audit_result = if matches!(
+            &record.snapshot.action,
+            AgentProposedAction::McpToolCall { .. }
+        ) {
+            self.persist_auto_external_mcp_journal_audit(&record)
+        } else {
+            self.persist_action_audit(
                 &record,
                 Some("approved"),
                 "approved",
@@ -270,8 +275,8 @@ impl AgentService {
                 Some(record.snapshot.created_at),
                 None,
             )
-            .is_err()
-        {
+        };
+        if audit_result.is_err() {
             let _ = self.settle_auto_mcp_action_journal(
                 &record,
                 McpAutoActionJournalTerminalOutcome::Failed,
@@ -1238,6 +1243,49 @@ impl AgentService {
             decided_at,
             completed_at,
         ))
+    }
+
+    /// Persists the pre-dispatch receipt for the current automatically authorized external MCP
+    /// path. Manual approvals continue to use `persist_action_audit`; this narrow producer must
+    /// retain `decision_source=auto` so startup reconciliation can distinguish its hidden journal
+    /// from a user-approved action without guessing from later state.
+    fn persist_auto_external_mcp_journal_audit(
+        &self,
+        record: &PendingActionRecord,
+    ) -> Result<(), String> {
+        if !matches!(
+            &record.snapshot.action,
+            AgentProposedAction::McpToolCall { approval }
+                if approval.approval_mode == mycopilot_core::AgentMcpApprovalMode::Auto
+                    && approval.call.approval_status == AgentApprovalStatus::Approved
+        ) {
+            return Err(
+                "automatic external MCP audit requires a Host-authorized MCP action".to_string(),
+            );
+        }
+        #[cfg(test)]
+        if let Some(error) = take_auto_action_audit_failure(
+            &record.snapshot.run_id,
+            &record.snapshot.action_id,
+            "approved",
+        ) {
+            return Err(error);
+        }
+        self.storage
+            .upsert_agent_action_audit(auto_action_audit_record(
+                &record.snapshot.run_id,
+                record.snapshot.conversation_id.as_deref(),
+                record.snapshot.assistant_message_id.as_deref(),
+                &record.agent_input,
+                &record.snapshot.action,
+                "approved",
+                None,
+                None,
+                None,
+                None,
+                record.snapshot.created_at,
+                None,
+            ))
     }
 
     /// Atomically commits the terminal audit, pending target and paired ToolResult trace for any

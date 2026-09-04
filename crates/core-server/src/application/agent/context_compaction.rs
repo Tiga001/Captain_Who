@@ -1,5 +1,55 @@
 use super::*;
 
+#[derive(Debug)]
+pub(super) enum InProgressTraceSnapshotError {
+    NotCommitted(String),
+    DerivedContextAfterCommit(String),
+}
+
+impl InProgressTraceSnapshotError {
+    fn into_agent_error(self, run_id: &str, conversation_id: &str) -> AgentError {
+        match self {
+            Self::NotCommitted(error) => {
+                eprintln!(
+                    "failed to append in-progress conversation trace for run {run_id}: {error}"
+                );
+                AgentError::structured(
+                    "conversation_trace_persistence_failed",
+                    "无法保存运行中的会话轨迹。",
+                    serde_json::json!({
+                        "type": "conversationTraceObserver",
+                        "durableAppendCommitted": false,
+                        "recovery": "retrySafely"
+                    }),
+                )
+            }
+            Self::DerivedContextAfterCommit(error) => {
+                eprintln!(
+                    "failed to refresh derived context after durable trace append for run {run_id} in conversation {conversation_id}: {error}"
+                );
+                AgentError::structured(
+                    "conversation_trace_derived_context_failed",
+                    "会话轨迹已经保存，但无法刷新派生上下文状态。",
+                    serde_json::json!({
+                        "type": "conversationTraceObserver",
+                        "durableAppendCommitted": true,
+                        "recovery": "settleCurrentToolCall"
+                    }),
+                )
+            }
+        }
+    }
+
+    fn into_internal_string(self) -> String {
+        match self {
+            Self::NotCommitted(error) => error,
+            Self::DerivedContextAfterCommit(error) => {
+                format!("会话轨迹已提交，但派生上下文刷新失败：{error}")
+            }
+        }
+    }
+}
+
 pub(super) struct RebuildRunningContextAfterCompactionRequest<'a> {
     agent_input: &'a AgentChatInput,
     run_id: &'a str,
@@ -60,7 +110,7 @@ impl AgentService {
                     configuration_revision,
                     tool_projection.as_ref(),
                 )
-                .map_err(|error| AgentError::new(format!("无法增量持久化运行中会话轨迹：{error}")))
+                .map_err(|error| error.into_agent_error(&run_id, &conversation_id))
         })
     }
 
@@ -443,7 +493,7 @@ impl AgentService {
         snapshot: &ConversationTraceSnapshot,
         configuration_revision: &str,
         tool_projection: Option<&AgentContextWindowToolProjection>,
-    ) -> Result<Option<AgentContextBaseline>, String> {
+    ) -> Result<Option<AgentContextBaseline>, InProgressTraceSnapshotError> {
         // Persist the complete audit view and the exact staged ToolCall identity so startup can
         // close an interrupted exchange without decoding a separate resume envelope. Context
         // rendering still consumes only `committed_snapshot`, so the open exchange never reaches
@@ -453,31 +503,14 @@ impl AgentService {
             committed_snapshot.in_progress_trace(run_id, conversation_id, assistant_message_id);
         let previous_trace = self
             .storage
-            .get_conversation_turn_trace(assistant_message_id)?;
+            .get_conversation_turn_trace(assistant_message_id)
+            .map_err(InProgressTraceSnapshotError::NotCommitted)?;
         let previous_model_context_items = self
             .storage
-            .get_conversation_model_context_log(assistant_message_id)?
+            .get_conversation_model_context_log(assistant_message_id)
+            .map_err(InProgressTraceSnapshotError::NotCommitted)?
             .map(|log| log.items)
             .unwrap_or_default();
-        let previous_activity_items = previous_trace
-            .as_ref()
-            .map(|trace| {
-                AgentConversationContextState::rendered_trace_activity_count(
-                    trace,
-                    &previous_model_context_items,
-                )
-                .map_err(|error| error.to_string())
-            })
-            .transpose()?
-            .unwrap_or_default();
-        let next_activity_items = AgentConversationContextState::rendered_trace_activity_count(
-            &context_trace,
-            &committed_snapshot.model_context_items,
-        )
-        .map_err(|error| error.to_string())?;
-        let model_context_changed = previous_trace.is_none()
-            || previous_activity_items != next_activity_items
-            || previous_model_context_items.len() != committed_snapshot.model_context_items.len();
         let audit_trace =
             snapshot.in_progress_audit_trace(run_id, conversation_id, assistant_message_id);
         let changed = self
@@ -487,15 +520,53 @@ impl AgentService {
                 &snapshot.model_context_items,
                 created_at,
                 now_ms(),
-            )?;
-        if provider_native_tool_trace_is_in_progress(agent_input, &context_trace)? {
+            )
+            .map_err(InProgressTraceSnapshotError::NotCommitted)?;
+
+        // Everything below is a rebuildable projection over the durable Trace/ModelContext
+        // append above. Preserve the commit boundary in the error type so Runtime can settle the
+        // already-published ToolCall instead of treating it as an unpublished call.
+        let previous_activity_items = previous_trace
+            .as_ref()
+            .map(|trace| {
+                AgentConversationContextState::rendered_trace_activity_count(
+                    trace,
+                    &previous_model_context_items,
+                )
+                .map_err(|error| error.to_string())
+            })
+            .transpose()
+            .map_err(InProgressTraceSnapshotError::DerivedContextAfterCommit)?
+            .unwrap_or_default();
+        let next_activity_items = AgentConversationContextState::rendered_trace_activity_count(
+            &context_trace,
+            &committed_snapshot.model_context_items,
+        )
+        .map_err(|error| error.to_string())
+        .map_err(InProgressTraceSnapshotError::DerivedContextAfterCommit)?;
+        let model_context_changed = previous_trace.is_none()
+            || previous_activity_items != next_activity_items
+            || previous_model_context_items.len() != committed_snapshot.model_context_items.len();
+        let provider_native_tool_trace_is_in_progress =
+            match provider_native_tool_trace_is_in_progress(agent_input, &context_trace) {
+                Ok(provider_native_tool_trace_is_in_progress) => {
+                    provider_native_tool_trace_is_in_progress
+                }
+                Err(error) => {
+                    self.invalidate_derived_context_after_durable_trace(conversation_id);
+                    return Err(InProgressTraceSnapshotError::DerivedContextAfterCommit(
+                        error,
+                    ));
+                }
+            };
+        if provider_native_tool_trace_is_in_progress {
             // The Runtime already owns the exact grouped Provider turn in memory/checkpoint.
             // Returning no replacement baseline prevents a partial durable approval prefix from
             // splitting that turn or requiring later queued calls before they are published.
             self.invalidate_conversation_context_state(conversation_id);
             return Ok(None);
         }
-        let update = self.update_running_conversation_context_state(
+        let update = match self.update_running_conversation_context_state(
             UpdateRunningConversationContextStateRequest {
                 agent_input,
                 run_id,
@@ -506,7 +577,15 @@ impl AgentService {
                 configuration_revision,
                 tool_projection,
             },
-        )?;
+        ) {
+            Ok(update) => update,
+            Err(error) => {
+                self.invalidate_derived_context_after_durable_trace(conversation_id);
+                return Err(InProgressTraceSnapshotError::DerivedContextAfterCommit(
+                    error,
+                ));
+            }
+        };
         if changed && model_context_changed {
             self.emit_derived_context_window_snapshot(
                 notifications,
@@ -722,6 +801,7 @@ impl AgentService {
             Some(&tool_projection),
         )
         .map(|_| ())
+        .map_err(InProgressTraceSnapshotError::into_internal_string)
     }
 
     /// Commits a manually approved command's terminal audit and paired continuation as one fact.

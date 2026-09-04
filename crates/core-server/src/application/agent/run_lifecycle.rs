@@ -1307,6 +1307,33 @@ impl AgentService {
         }
     }
 
+    fn failed_terminal_projection_from_latest_snapshot(
+        &self,
+        run_id: &str,
+        conversation_id: &str,
+        assistant_message_id: &str,
+        terminal_error: &str,
+    ) -> Result<Option<TerminalConversationTraceProjection>, String> {
+        let snapshot = self
+            .trace_snapshots
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(run_id)
+            .cloned();
+        snapshot
+            .map(|snapshot| {
+                terminal_conversation_trace_from_snapshot(
+                    snapshot,
+                    run_id,
+                    conversation_id,
+                    assistant_message_id,
+                    ConversationTurnTraceTerminalStatus::Failed,
+                    terminal_error,
+                )
+            })
+            .transpose()
+    }
+
     pub(super) fn persist_forced_cancelled_runs(&self, run_ids: &[String]) {
         const REASON: &str = "Core shutdown timed out while cancelling the active run.";
         let contexts = {
@@ -1504,9 +1531,31 @@ impl AgentService {
                 } else {
                     None
                 };
+            let failed_projection =
+                if output.status == AgentRunStatus::Failed && model_context_items.is_none() {
+                    let terminal_error = output
+                        .conversation_turn_trace
+                        .as_ref()
+                        .and_then(|trace| trace.terminal_error.as_deref())
+                        .or(output.finish_reason.as_deref())
+                        .unwrap_or("Agent run failed.");
+                    self.failed_terminal_projection_from_latest_snapshot(
+                        &output.run_id,
+                        conversation_id,
+                        assistant_message_id,
+                        terminal_error,
+                    )?
+                } else {
+                    None
+                };
             let trace = cancelled_projection
                 .as_ref()
                 .map(|terminal| terminal.trace.clone())
+                .or_else(|| {
+                    failed_projection
+                        .as_ref()
+                        .map(|terminal| terminal.trace.clone())
+                })
                 .or_else(|| output.conversation_turn_trace.clone())
                 .or_else(|| {
                     (output.status == AgentRunStatus::Cancelled).then(|| {
@@ -1535,11 +1584,17 @@ impl AgentService {
                     ),
                     _ => unreachable!(),
                 });
-            let model_context_items = model_context_items.or_else(|| {
-                cancelled_projection
-                    .as_ref()
-                    .map(|terminal| terminal.model_context_items.as_slice())
-            });
+            let model_context_items = model_context_items
+                .or_else(|| {
+                    cancelled_projection
+                        .as_ref()
+                        .map(|terminal| terminal.model_context_items.as_slice())
+                })
+                .or_else(|| {
+                    failed_projection
+                        .as_ref()
+                        .map(|terminal| terminal.model_context_items.as_slice())
+                });
             let usage_error = match output.status {
                 AgentRunStatus::Failed => trace.terminal_error.clone(),
                 AgentRunStatus::Completed | AgentRunStatus::Cancelled => None,
@@ -1719,6 +1774,25 @@ impl AgentService {
         conversation_turn_trace: &ConversationTurnTrace,
         model_context_items: Option<&[ConversationModelContextItem]>,
     ) -> Result<Option<AgentUsage>, String> {
+        let failed_projection = if model_context_items.is_none() {
+            self.failed_terminal_projection_from_latest_snapshot(
+                &conversation_turn_trace.run_id,
+                conversation_id,
+                assistant_message_id,
+                diagnostic_message,
+            )?
+        } else {
+            None
+        };
+        let conversation_turn_trace = failed_projection
+            .as_ref()
+            .map(|terminal| &terminal.trace)
+            .unwrap_or(conversation_turn_trace);
+        let model_context_items = model_context_items.or_else(|| {
+            failed_projection
+                .as_ref()
+                .map(|terminal| terminal.model_context_items.as_slice())
+        });
         let run_id = self.find_usage_run_id(conversation_id, assistant_message_id);
         let fallback_usage = usage.clone();
         let completed_at = now_ms();

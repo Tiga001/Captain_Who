@@ -108,6 +108,55 @@ describe('right sidebar platform context lifecycle', () => {
     expect(reopened.pages.map((page) => page.id)).toEqual(['files-page', 'file-stable.ts'])
   })
 
+  it('applies a Markdown anchor to an existing file page without replacing its view mode', () => {
+    const initial = openPages(WORKSPACE_A, ['files'])
+    const withTarget = openFilePage(initial, 'docs/target.md')
+    const configured = {
+      ...withTarget,
+      activePageId: 'files-page',
+      pages: withTarget.pages.map((page) =>
+        page.resourceKey === 'workspace-file:docs/target.md'
+          ? {
+              ...page,
+              moduleState: {
+                kind: 'workspace-file' as const,
+                path: 'docs/target.md',
+                preview: { markdownView: 'source' as const }
+              }
+            }
+          : page
+      )
+    }
+
+    const reopened = reduceRightSidebarPlatform(configured, {
+      pageId: 'unused-target-page',
+      request: {
+        disposition: 'preview',
+        moduleState: {
+          kind: 'workspace-file',
+          path: 'docs/target.md',
+          preview: { markdownAnchor: 'details', markdownView: 'preview' }
+        },
+        resourceKey: 'workspace-file:docs/target.md',
+        title: 'target.md'
+      },
+      sourceModule: getModule('files'),
+      sourcePageId: 'files-page',
+      t: translate,
+      targetModule: getModule('files'),
+      type: 'open-related-page'
+    })
+
+    expect(reopened.activePageId).toBe('file-docs/target.md')
+    expect(
+      reopened.pages.find((page) => page.resourceKey === 'workspace-file:docs/target.md')
+    ).toMatchObject({
+      moduleState: {
+        preview: { markdownAnchor: 'details', markdownView: 'source' }
+      }
+    })
+  })
+
   it('opens related resources as independent pages and reuses an existing resource page', () => {
     const initial = openPages(WORKSPACE_A, ['files'])
     const opened = reduceRightSidebarPlatform(initial, {

@@ -573,6 +573,324 @@ fn running_trace_commits_drive_monotonic_context_window_events() {
 }
 
 #[test]
+fn durable_trace_append_is_distinguished_from_a_failed_derived_context_refresh() {
+    let fixture = tempdir().unwrap();
+    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    storage.save_model_settings(test_model_settings()).unwrap();
+    storage
+        .save_conversation(ChatConversationRecord {
+            id: "conversation-derived-refresh-failure".to_string(),
+            project_id: None,
+            model_id: Some("model-1".to_string()),
+            title: "Derived refresh failure".to_string(),
+            messages: vec![
+                ChatMessageRecord {
+                    id: "user-corrupt-history".to_string(),
+                    role: "user".to_string(),
+                    content: "Earlier request".to_string(),
+                    created_at: 1,
+                    status: Some("sent".to_string()),
+                    attachments: Vec::new(),
+                    agent_run_json: None,
+                    ui_state_json: None,
+                },
+                // A terminal Assistant without its required Trace represents durable history
+                // corruption. It is deliberately introduced here so only the rebuildable
+                // context projection fails after the current run's append commits.
+                ChatMessageRecord {
+                    id: "assistant-corrupt-history".to_string(),
+                    role: "assistant".to_string(),
+                    content: "Earlier answer".to_string(),
+                    created_at: 2,
+                    status: Some("sent".to_string()),
+                    attachments: Vec::new(),
+                    agent_run_json: None,
+                    ui_state_json: None,
+                },
+                ChatMessageRecord {
+                    id: "user-derived-refresh-failure".to_string(),
+                    role: "user".to_string(),
+                    content: "Continue".to_string(),
+                    created_at: 3,
+                    status: Some("sent".to_string()),
+                    attachments: Vec::new(),
+                    agent_run_json: None,
+                    ui_state_json: None,
+                },
+                ChatMessageRecord {
+                    id: "assistant-derived-refresh-failure".to_string(),
+                    role: "assistant".to_string(),
+                    content: String::new(),
+                    created_at: 4,
+                    status: Some("pending".to_string()),
+                    attachments: Vec::new(),
+                    agent_run_json: None,
+                    ui_state_json: None,
+                },
+            ],
+            created_at: 1,
+            updated_at: 4,
+            pinned_at: None,
+            archived_at: None,
+            unread_at: None,
+        })
+        .unwrap();
+    let service = AgentService::new(storage.clone());
+    let mut agent_input = serde_json::from_value::<AgentChatInput>(json!({
+        "apiUrl": "https://example.test/v1/chat/completions",
+        "apiToken": "secret",
+        "model": "model-1",
+        "modelCapabilities": { "imageInput": false },
+        "contextWindowTokens": 128000,
+        "contextWindowIndicatorEnabled": true,
+        "maxTokens": 30000,
+        "context": {
+            "conversationId": "conversation-derived-refresh-failure",
+            "projectId": null,
+            "workspace": null,
+            "permissions": {
+                "read": "workspace_only",
+                "write": "denied",
+                "command": "require_approval",
+                "commandSafety": "guarded",
+                "patch": "require_approval",
+                "builtinExecution": "require_approval"
+            }
+        },
+        "messages": []
+    }))
+    .unwrap();
+    freeze_test_pending_provider_configuration(&storage, &mut agent_input);
+    let exact_request_snapshot = serde_json::from_value::<AgentContextWindowSnapshot>(json!({
+        "model": "model-1",
+        "status": "within_budget",
+        "contextWindowTokens": 128000,
+        "reservedOutputTokens": 30000,
+        "safetyMarginTokens": 1024,
+        "inputCapacityTokens": 96976,
+        "inputTokens": 321,
+        "costBreakdown": {
+            "systemTokens": 0,
+            "toolSchemaTokens": 0,
+            "summaryTokens": 0,
+            "worldStateTokens": 0,
+            "todoTokens": 0,
+            "providerContinuationTokens": 0,
+            "recentHistoryTokens": 321,
+            "totalInputTokens": 321
+        },
+        "remainingInputTokens": 96655
+    }))
+    .unwrap();
+    service
+        .running_context_window_snapshots
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .insert(
+            "run-derived-refresh-failure".to_string(),
+            exact_request_snapshot.clone(),
+        );
+    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let observer = service.trace_observer(
+        "run-derived-refresh-failure",
+        "conversation-derived-refresh-failure",
+        "assistant-derived-refresh-failure",
+        4,
+        agent_input,
+        RunContextToolProjection::pending(),
+        notifications,
+    );
+    let call_id = format!("tc1_{}", "D".repeat(43));
+    let call = ConversationTurnTraceItem::ToolCall {
+        sequence: 0,
+        call_id: call_id.clone(),
+        tool: "skills_prepare_install".to_string(),
+        provenance: AgentToolIdentity::Builtin {
+            tool_name: "skills_prepare_install".to_string(),
+        },
+        operation: json!({ "source": ".agents/skills/social" }),
+        approval_status: AgentApprovalStatus::NotRequired,
+        truncated: false,
+    };
+    let call_context = ConversationModelContextItem {
+        sequence: 0,
+        ordinal: 0,
+        role: "assistant".to_string(),
+        content: String::new(),
+        tool_call_id: None,
+        tool_calls: vec![AgentContextCheckpointToolCall {
+            id: call_id.clone(),
+            name: "skills_prepare_install".to_string(),
+            args: json!({ "source": ".agents/skills/social" }),
+            provider_identity: AgentProviderToolCallIdentity {
+                provider_tool_index: 0,
+                provider_call_id: call_id.clone(),
+                runtime_call_id: call_id,
+            },
+        }],
+        is_error: false,
+    };
+
+    let error = observer(ConversationTraceSnapshot {
+        items: vec![call.clone()],
+        model_context_items: vec![call_context.clone()],
+        next_sequence: 1,
+        truncated: false,
+    })
+    .unwrap_err();
+
+    assert_eq!(
+        error.code(),
+        Some("conversation_trace_derived_context_failed")
+    );
+    assert_eq!(
+        error
+            .details()
+            .and_then(|details| details.get("durableAppendCommitted"))
+            .and_then(serde_json::Value::as_bool),
+        Some(true)
+    );
+    let trace = storage
+        .get_conversation_turn_trace("assistant-derived-refresh-failure")
+        .unwrap()
+        .expect("the authoritative trace append must remain committed");
+    assert_eq!(trace.items, vec![call]);
+    let model_context = storage
+        .get_conversation_model_context_log("assistant-derived-refresh-failure")
+        .unwrap()
+        .expect("the authoritative model-context append must remain committed");
+    assert_eq!(model_context.items, vec![call_context]);
+    assert!(!service
+        .conversation_context_states
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .contains_key("conversation-derived-refresh-failure"));
+    assert_eq!(
+        service
+            .running_context_window_snapshots
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get("run-derived-refresh-failure"),
+        Some(&exact_request_snapshot),
+        "a failed approximation must not erase the last exact Provider request accounting"
+    );
+    assert!(
+        receiver.try_recv().is_err(),
+        "a failed derived refresh must not publish a misleading context-window update"
+    );
+}
+
+#[test]
+fn trace_observer_still_fails_closed_when_the_authoritative_append_does_not_commit() {
+    let fixture = tempdir().unwrap();
+    let database_path = fixture.path().join("storage.sqlite");
+    let storage = Arc::new(StorageService::open(&database_path).unwrap());
+    storage.save_model_settings(test_model_settings()).unwrap();
+    storage
+        .save_conversation(ChatConversationRecord {
+            id: "conversation-trace-append-failure".to_string(),
+            project_id: None,
+            model_id: Some("model-1".to_string()),
+            title: "Trace append failure".to_string(),
+            messages: vec![
+                ChatMessageRecord {
+                    id: "user-trace-append-failure".to_string(),
+                    role: "user".to_string(),
+                    content: "Continue".to_string(),
+                    created_at: 1,
+                    status: Some("sent".to_string()),
+                    attachments: Vec::new(),
+                    agent_run_json: None,
+                    ui_state_json: None,
+                },
+                ChatMessageRecord {
+                    id: "assistant-trace-append-failure".to_string(),
+                    role: "assistant".to_string(),
+                    content: String::new(),
+                    created_at: 2,
+                    status: Some("pending".to_string()),
+                    attachments: Vec::new(),
+                    agent_run_json: None,
+                    ui_state_json: None,
+                },
+            ],
+            created_at: 1,
+            updated_at: 2,
+            pinned_at: None,
+            archived_at: None,
+            unread_at: None,
+        })
+        .unwrap();
+    let service = AgentService::new(storage.clone());
+    let mut agent_input = serde_json::from_value::<AgentChatInput>(json!({
+        "apiUrl": "https://example.test/v1/chat/completions",
+        "apiToken": "secret",
+        "model": "model-1",
+        "modelCapabilities": { "imageInput": false },
+        "contextWindowTokens": 128000,
+        "contextWindowIndicatorEnabled": true,
+        "maxTokens": 30000,
+        "context": {
+            "conversationId": "conversation-trace-append-failure",
+            "projectId": null,
+            "workspace": null,
+            "permissions": {
+                "read": "workspace_only",
+                "write": "denied",
+                "command": "require_approval",
+                "commandSafety": "guarded",
+                "patch": "require_approval",
+                "builtinExecution": "require_approval"
+            }
+        },
+        "messages": []
+    }))
+    .unwrap();
+    freeze_test_pending_provider_configuration(&storage, &mut agent_input);
+    rusqlite::Connection::open(&database_path)
+        .unwrap()
+        .execute_batch(
+            "CREATE TRIGGER fail_test_in_progress_trace_append
+             BEFORE INSERT ON conversation_turn_traces
+             BEGIN
+               SELECT RAISE(ABORT, 'injected trace append failure');
+             END;",
+        )
+        .unwrap();
+    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let observer = service.trace_observer(
+        "run-trace-append-failure",
+        "conversation-trace-append-failure",
+        "assistant-trace-append-failure",
+        2,
+        agent_input,
+        RunContextToolProjection::pending(),
+        notifications,
+    );
+
+    let error = observer(ConversationTraceSnapshot::default()).unwrap_err();
+
+    assert_eq!(error.code(), Some("conversation_trace_persistence_failed"));
+    assert_eq!(
+        error
+            .details()
+            .and_then(|details| details.get("durableAppendCommitted"))
+            .and_then(serde_json::Value::as_bool),
+        Some(false)
+    );
+    assert!(storage
+        .get_conversation_turn_trace("assistant-trace-append-failure")
+        .unwrap()
+        .is_none());
+    assert!(!service
+        .conversation_context_states
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .contains_key("conversation-trace-append-failure"));
+    assert!(receiver.try_recv().is_err());
+}
+
+#[test]
 fn terminal_cache_rebuild_drops_the_completed_run_skill_overlay() {
     let fixture = tempdir().unwrap();
     let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());

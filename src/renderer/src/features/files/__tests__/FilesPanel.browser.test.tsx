@@ -10,6 +10,7 @@ const {
   createPdfLoadingTaskSpy,
   getPdfPageSpy,
   listDirectorySpy,
+  openExternalSpy,
   openFileSpy,
   pdfDocumentDestroySpy,
   pdfLoadingTaskDestroySpy,
@@ -22,6 +23,7 @@ const {
   createPdfLoadingTaskSpy: vi.fn(),
   getPdfPageSpy: vi.fn(),
   listDirectorySpy: vi.fn(),
+  openExternalSpy: vi.fn(),
   openFileSpy: vi.fn(),
   pdfDocumentDestroySpy: vi.fn(),
   pdfLoadingTaskDestroySpy: vi.fn(),
@@ -38,7 +40,7 @@ vi.mock('../../../config/FrontendConfigProvider', () => ({
 vi.mock('../filesClient', () => ({
   copyWorkspaceFilePath: copyPathSpy,
   listWorkspaceDirectory: listDirectorySpy,
-  openWorkspaceExternalLink: vi.fn(),
+  openWorkspaceExternalLink: openExternalSpy,
   readWorkspaceFilePreview: readPreviewSpy,
   revealWorkspaceFile: vi.fn()
 }))
@@ -67,10 +69,10 @@ type TestFilesPanelProps = Omit<
   | 'onWrapLinesChange'
   | 'pdfPage'
   | 'wrapLines'
->
+> & { initialMarkdownView?: 'preview' | 'source' }
 
-function TestFilesPanel(props: TestFilesPanelProps) {
-  const [markdownView, setMarkdownView] = useState<'preview' | 'source'>('source')
+function TestFilesPanel({ initialMarkdownView = 'preview', ...props }: TestFilesPanelProps) {
+  const [markdownView, setMarkdownView] = useState<'preview' | 'source'>(initialMarkdownView)
   const [pdfPage, setPdfPage] = useState(1)
   const [wrapLines, setWrapLines] = useState(false)
   return (
@@ -95,6 +97,8 @@ beforeEach(() => {
   copyPathSpy.mockReset()
   copyPathSpy.mockResolvedValue(undefined)
   listDirectorySpy.mockReset()
+  openExternalSpy.mockReset()
+  openExternalSpy.mockResolvedValue(undefined)
   openFileSpy.mockReset()
   createPdfLoadingTaskSpy.mockReset()
   getPdfPageSpy.mockReset()
@@ -211,6 +215,7 @@ describe('FilesPanel', () => {
       <div style={{ height: 620, width: 620 }}>
         <TestFilesPanel
           filePath="README.md"
+          initialMarkdownView="source"
           isActive
           onOpenFile={openFileSpy}
           onSurfaceFocus={() => undefined}
@@ -246,6 +251,120 @@ describe('FilesPanel', () => {
       .toContain('# Workspace')
     expect(screen.container.querySelector('.files-panel__markdown')).toBeNull()
     expect(readPreviewSpy).toHaveBeenCalledTimes(1)
+  })
+
+  it('renders front matter, rich Markdown, workspace links, and local images', async () => {
+    const markdownPath = 'guides/context.md'
+    const markdown = `---
+status: current
+audience:
+  - developers
+  - maintainers
+owner: engineering
+metadata:
+  version: 2.2.0
+---
+# Context Management
+
+See [Conversation Trace](../docs/conversation-trace.md#details) and [OpenAI](https://openai.com/).
+
+![Architecture](./assets/architecture.png)
+
+## Responsibilities
+
+- Keep context bounded
+- Preserve sources
+`
+    readPreviewSpy.mockImplementation(async ({ path }: { path: string }) => {
+      if (path === 'guides/assets/architecture.png') {
+        return {
+          image: {
+            data: 'iVBORw==',
+            mimeType: 'image/png',
+            modifiedAtMs: 1,
+            path,
+            sizeBytes: 4
+          },
+          metadata: {
+            kind: 'file',
+            mimeType: 'image/png',
+            modifiedAtMs: 1,
+            path,
+            previewKind: 'image',
+            sizeBytes: 4
+          }
+        }
+      }
+      return {
+        metadata: {
+          kind: 'file',
+          mimeType: 'text/plain; charset=utf-8',
+          modifiedAtMs: 1,
+          path: markdownPath,
+          previewKind: 'text',
+          sizeBytes: markdown.length
+        },
+        text: {
+          content: markdown,
+          modifiedAtMs: 1,
+          path: markdownPath,
+          sizeBytes: markdown.length
+        }
+      }
+    })
+
+    const screen = await render(
+      <div style={{ height: 620, width: 620 }}>
+        <TestFilesPanel
+          filePath={markdownPath}
+          isActive
+          onOpenFile={openFileSpy}
+          onSurfaceFocus={() => undefined}
+          projectId="project-1"
+          projectName="Workspace"
+        />
+      </div>
+    )
+
+    await expect
+      .poll(() => screen.container.querySelector<HTMLElement>('.files-panel__markdown h1'))
+      .not.toBeNull()
+    const heading = screen.container.querySelector<HTMLElement>('.files-panel__markdown h1')
+    expect(heading?.textContent).toBe('Context Management')
+    expect(heading?.id).toBe('context-management')
+
+    const metadata = screen.container.querySelector<HTMLElement>('.files-panel__markdown-metadata')
+    expect(metadata?.textContent).toContain('files.markdown.metadata')
+    expect(metadata?.textContent).toContain('status')
+    expect(metadata?.textContent).toContain('current')
+    expect(metadata?.textContent).toContain('developers')
+    expect(metadata?.textContent).toContain('metadata.version')
+    expect(metadata?.textContent).toContain('2.2.0')
+    expect(screen.container.querySelector('.files-panel__markdown')?.textContent).not.toContain(
+      'status:'
+    )
+
+    await screen.getByRole('link', { name: 'Conversation Trace' }).click()
+    expect(openFileSpy).toHaveBeenCalledWith('docs/conversation-trace.md', 'details')
+
+    await screen.getByRole('link', { name: 'OpenAI' }).click()
+    expect(openExternalSpy).toHaveBeenCalledWith('https://openai.com/')
+
+    await expect
+      .poll(() => screen.container.querySelector<HTMLImageElement>('img[alt="Architecture"]'))
+      .not.toBeNull()
+    const image = screen.container.querySelector<HTMLImageElement>('img[alt="Architecture"]')
+    expect(image?.getAttribute('src')).toBe('data:image/png;base64,iVBORw==')
+    expect(readPreviewSpy).toHaveBeenCalledWith({
+      path: 'guides/assets/architecture.png',
+      projectId: 'project-1'
+    })
+
+    await screen.getByRole('button', { name: 'files.options' }).click()
+    await screen.getByRole('menuitemradio', { name: 'files.markdown.source' }).click()
+    await expect
+      .poll(() => screen.container.querySelector('.files-panel__code')?.textContent)
+      .toContain('status: current')
   })
 
   it('renders one PDF page at a time and persists pager changes without reloading the document', async () => {
@@ -319,6 +438,7 @@ describe('FilesPanel', () => {
       <div style={{ height: 620, width: 620 }}>
         <TestFilesPanel
           filePath="README.md"
+          initialMarkdownView="source"
           isActive
           onOpenFile={openFileSpy}
           onSurfaceFocus={() => undefined}

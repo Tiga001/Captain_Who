@@ -168,6 +168,17 @@ export const itITTranslations = {
   'files.options': 'Altre azioni sui file',
   'files.markdown.source': 'Visualizza fonte',
   'files.markdown.preview': "Visualizza l'anteprima",
+  'files.markdown.metadata': 'Metadati',
+  'files.markdown.metadataInvalid':
+    'Impossibile analizzare i metadati. Visualizza il sorgente per correggerli.',
+  'files.markdown.metadataTooLarge':
+    "I metadati sono troppo grandi per essere mostrati nell'anteprima.",
+  'files.markdown.metadataTruncated': 'Vengono mostrati solo i primi 100 campi dei metadati.',
+  'files.markdown.showMore': 'Mostra altro',
+  'files.markdown.showLess': 'Mostra meno',
+  'files.markdown.linkUnavailable': 'Impossibile aprire questo link',
+  'files.markdown.imageLoading': 'Caricamento immagine…',
+  'files.markdown.imageUnavailable': 'Anteprima immagine non disponibile',
   'files.wrapLines': 'Avvolgere le linee',
   'files.copyPath': 'Copia il percorso del file',
   'files.reveal': 'Rivela il file nella cartella',

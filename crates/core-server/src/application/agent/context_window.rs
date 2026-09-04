@@ -783,6 +783,17 @@ impl AgentService {
             .remove(conversation_id);
     }
 
+    /// Retires only the rebuildable context derivation after its authoritative Trace and model
+    /// context append has committed. The observer must acknowledge that durable append to Runtime
+    /// instead of turning a cache/budget-preview failure into a false ToolCall publication error.
+    ///
+    /// The exact running context-window snapshot intentionally remains intact: it accounts for
+    /// the last Provider request and is more authoritative than a failed trace-derived estimate.
+    /// A later sendable request or terminal commit replaces it through the normal observer path.
+    pub(super) fn invalidate_derived_context_after_durable_trace(&self, conversation_id: &str) {
+        self.invalidate_conversation_context_state(conversation_id);
+    }
+
     pub fn invalidate_all_conversation_context_states(&self) {
         self.conversation_context_states
             .lock()

@@ -74,6 +74,7 @@ export type RightSidebarModulePageState =
       path: string
       tabState?: 'stable' | 'transient'
       preview?: {
+        markdownAnchor?: string
         markdownView?: 'preview' | 'source'
         pdfPage?: number
         wrapLines?: boolean

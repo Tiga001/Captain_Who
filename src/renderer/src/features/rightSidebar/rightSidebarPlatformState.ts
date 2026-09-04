@@ -169,7 +169,7 @@ function openRelatedPage(
     )
     if (existingPage) {
       if (request.disposition === 'preview') {
-        return reopenPreviewPage(state, sourcePage, existingPage)
+        return reopenPreviewPage(state, sourcePage, existingPage, request)
       }
       return state.activePageId === existingPage.id
         ? state
@@ -215,7 +215,8 @@ function openRelatedPage(
 function reopenPreviewPage(
   state: RightSidebarPlatformState,
   sourcePage: RightSidebarPage,
-  existingPage: RightSidebarPage
+  existingPage: RightSidebarPage,
+  request: RightSidebarPageOpenRequest
 ): RightSidebarPlatformState {
   const sourceIsReplaceable =
     sourcePage.id !== existingPage.id &&
@@ -223,26 +224,44 @@ function reopenPreviewPage(
     sourcePage.workspaceSessionKey === existingPage.workspaceSessionKey &&
     isTransientWorkspaceFilePage(sourcePage)
   const existingIsTransient = isTransientWorkspaceFilePage(existingPage)
+  const requestedFileState =
+    request.moduleState?.kind === 'workspace-file' ? request.moduleState : null
+  const hasMarkdownAnchorRequest = Boolean(
+    requestedFileState?.preview &&
+    Object.prototype.hasOwnProperty.call(requestedFileState.preview, 'markdownAnchor')
+  )
   const pages = state.pages
     .filter((page) => !sourceIsReplaceable || page.id !== sourcePage.id)
     .map((page) => {
-      if (
-        page.id !== existingPage.id ||
-        !existingIsTransient ||
-        page.moduleState?.kind !== 'workspace-file'
-      ) {
+      if (page.id !== existingPage.id || page.moduleState?.kind !== 'workspace-file') {
+        return page
+      }
+      if (!existingIsTransient && !hasMarkdownAnchorRequest) {
         return page
       }
       return {
         ...page,
         moduleState: {
           ...page.moduleState,
-          tabState: 'stable' as const
+          ...(hasMarkdownAnchorRequest
+            ? {
+                preview: {
+                  ...page.moduleState.preview,
+                  markdownAnchor: requestedFileState?.preview?.markdownAnchor
+                }
+              }
+            : {}),
+          tabState: existingIsTransient ? ('stable' as const) : page.moduleState.tabState
         }
       }
     })
 
-  if (!sourceIsReplaceable && !existingIsTransient && state.activePageId === existingPage.id) {
+  if (
+    !sourceIsReplaceable &&
+    !existingIsTransient &&
+    !hasMarkdownAnchorRequest &&
+    state.activePageId === existingPage.id
+  ) {
     return state
   }
   return { ...state, activePageId: existingPage.id, pages }

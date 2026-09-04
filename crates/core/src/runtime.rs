@@ -2275,10 +2275,9 @@ impl AgentRuntime {
                     }
                     let trace_call = tool_registry.trace_call_projection(&call);
                     let checkpoint_call = tool_registry.checkpoint_call_projection(&call);
-                    let call_sequence = {
-                        let mut recorder = conversation_trace
-                            .lock()
-                            .unwrap_or_else(|error| error.into_inner());
+                    let call_sequence = update_trace_atomically(
+                        &conversation_trace,
+                        |recorder| {
                         let sequence = recorder
                             .record_tool_call_with_identity(&trace_call, tool_identity.clone());
                         if let Some(sequence) = sequence {
@@ -2294,8 +2293,9 @@ impl AgentRuntime {
                                 recorder.mark_truncated();
                             }
                         }
-                        sequence
-                    };
+                        Ok(sequence)
+                    },
+                    )?;
                     if let Some((live_message, checkpoint_message, batch_group)) =
                         pending_assistant_context.take()
                     {
@@ -2320,54 +2320,58 @@ impl AgentRuntime {
                     if let Err(error) =
                         publish_trace_snapshot(&conversation_trace, trace_observer.as_ref())
                     {
-                        if settles_entire_provider_tool_batch_on_terminal {
-                            settle_aborted_grouped_tool_batch(
-                                &error,
-                                Some(TerminalToolCallSettlement {
-                                    queued: cancellation_queued_tool_call.clone(),
-                                    call: Some(call.clone()),
-                                    announced: false,
-                                    dispatch_started: false,
-                                    outcome: TerminalToolCallOutcome::Synthetic,
-                                }),
-                                &mut tool_batch,
-                                &mut pending_assistant_context,
-                                &mut active_context,
-                                &conversation_trace,
-                                None,
-                                &mut event_stream,
-                                tool_registry.as_ref(),
-                                &model_tool_result_gate,
-                                trace_assistant_message_id.as_deref(),
-                                &run_id,
-                            )?;
-                        }
+                        settle_aborted_current_tool_call(
+                            &error,
+                            TerminalToolCallSettlement {
+                                queued: cancellation_queued_tool_call.clone(),
+                                call: Some(call.clone()),
+                                announced: false,
+                                dispatch_started: false,
+                                outcome: TerminalToolCallOutcome::Synthetic,
+                            },
+                            settles_entire_provider_tool_batch_on_terminal,
+                            &mut tool_batch,
+                            &mut pending_assistant_context,
+                            &mut active_context,
+                            &conversation_trace,
+                            // The observer just failed after it may already have committed the
+                            // ToolCall snapshot. Repair the in-memory Trace without invoking that
+                            // failing boundary a second time; terminal persistence will publish
+                            // the now-paired Trace authoritatively.
+                            None,
+                            &mut event_stream,
+                            tool_registry.as_ref(),
+                            &model_tool_result_gate,
+                            trace_assistant_message_id.as_deref(),
+                            &run_id,
+                        )?;
                         return Err(error);
                     }
                     if let Err(error) = promote_pending_provider_continuation(
                         &mut pending_provider_continuation_handoff,
                     ) {
+                        settle_aborted_current_tool_call(
+                            &error,
+                            TerminalToolCallSettlement {
+                                queued: cancellation_queued_tool_call.clone(),
+                                call: Some(call.clone()),
+                                announced: false,
+                                dispatch_started: false,
+                                outcome: TerminalToolCallOutcome::Synthetic,
+                            },
+                            settles_entire_provider_tool_batch_on_terminal,
+                            &mut tool_batch,
+                            &mut pending_assistant_context,
+                            &mut active_context,
+                            &conversation_trace,
+                            trace_observer.as_ref(),
+                            &mut event_stream,
+                            tool_registry.as_ref(),
+                            &model_tool_result_gate,
+                            trace_assistant_message_id.as_deref(),
+                            &run_id,
+                        )?;
                         if settles_entire_provider_tool_batch_on_terminal {
-                            settle_aborted_grouped_tool_batch(
-                                &error,
-                                Some(TerminalToolCallSettlement {
-                                    queued: cancellation_queued_tool_call.clone(),
-                                    call: Some(call.clone()),
-                                    announced: false,
-                                    dispatch_started: false,
-                                    outcome: TerminalToolCallOutcome::Synthetic,
-                                }),
-                                &mut tool_batch,
-                                &mut pending_assistant_context,
-                                &mut active_context,
-                                &conversation_trace,
-                                trace_observer.as_ref(),
-                                &mut event_stream,
-                                tool_registry.as_ref(),
-                                &model_tool_result_gate,
-                                trace_assistant_message_id.as_deref(),
-                                &run_id,
-                            )?;
                             promote_pending_provider_continuation(
                                 &mut pending_provider_continuation_handoff,
                             )?;
@@ -2385,27 +2389,26 @@ impl AgentRuntime {
                         });
                     }
                     if cancellation_token.is_cancelled() {
-                        if settles_entire_provider_tool_batch_on_terminal {
-                            settle_cancelled_grouped_tool_batch(
-                                Some(TerminalToolCallSettlement {
-                                    queued: cancellation_queued_tool_call.clone(),
-                                    call: Some(call.clone()),
-                                    announced: true,
-                                    dispatch_started: false,
-                                    outcome: TerminalToolCallOutcome::Synthetic,
-                                }),
-                                &mut tool_batch,
-                                &mut pending_assistant_context,
-                                &mut active_context,
-                                &conversation_trace,
-                                trace_observer.as_ref(),
-                                &mut event_stream,
-                                tool_registry.as_ref(),
-                                &model_tool_result_gate,
-                                trace_assistant_message_id.as_deref(),
-                                &run_id,
-                            )?;
-                        }
+                        settle_cancelled_current_tool_call(
+                            TerminalToolCallSettlement {
+                                queued: cancellation_queued_tool_call.clone(),
+                                call: Some(call.clone()),
+                                announced: true,
+                                dispatch_started: false,
+                                outcome: TerminalToolCallOutcome::Synthetic,
+                            },
+                            settles_entire_provider_tool_batch_on_terminal,
+                            &mut tool_batch,
+                            &mut pending_assistant_context,
+                            &mut active_context,
+                            &conversation_trace,
+                            trace_observer.as_ref(),
+                            &mut event_stream,
+                            tool_registry.as_ref(),
+                            &model_tool_result_gate,
+                            trace_assistant_message_id.as_deref(),
+                            &run_id,
+                        )?;
                         return Ok(cancelled_output(
                             run_id,
                             event_stream,
@@ -2444,28 +2447,27 @@ impl AgentRuntime {
                                     trace_observer.as_ref(),
                                 ) {
                                     let _ = tool_registry.invalidate_proposed_action(&action);
-                                    if settles_entire_provider_tool_batch_on_terminal {
-                                        settle_aborted_grouped_tool_batch(
-                                            &error,
-                                            Some(TerminalToolCallSettlement {
-                                                queued: cancellation_queued_tool_call.clone(),
-                                                call: Some(call.clone()),
-                                                announced: true,
-                                                dispatch_started: false,
-                                                outcome: TerminalToolCallOutcome::Synthetic,
-                                            }),
-                                            &mut tool_batch,
-                                            &mut pending_assistant_context,
-                                            &mut active_context,
-                                            &conversation_trace,
-                                            None,
-                                            &mut event_stream,
-                                            tool_registry.as_ref(),
-                                            &model_tool_result_gate,
-                                            trace_assistant_message_id.as_deref(),
-                                            &run_id,
-                                        )?;
-                                    }
+                                    settle_aborted_current_tool_call(
+                                        &error,
+                                        TerminalToolCallSettlement {
+                                            queued: cancellation_queued_tool_call.clone(),
+                                            call: Some(call.clone()),
+                                            announced: true,
+                                            dispatch_started: false,
+                                            outcome: TerminalToolCallOutcome::Synthetic,
+                                        },
+                                        settles_entire_provider_tool_batch_on_terminal,
+                                        &mut tool_batch,
+                                        &mut pending_assistant_context,
+                                        &mut active_context,
+                                        &conversation_trace,
+                                        None,
+                                        &mut event_stream,
+                                        tool_registry.as_ref(),
+                                        &model_tool_result_gate,
+                                        trace_assistant_message_id.as_deref(),
+                                        &run_id,
+                                    )?;
                                     return Err(error);
                                 }
                                 action
@@ -2483,7 +2485,7 @@ impl AgentRuntime {
                                 let archive_result = tool_registry.archive_projection(&result);
                                 let archive_metadata =
                                     if tool_registry.archives_result(&call.tool) {
-                                        archive_tool_result(ToolResultArchiveRequest {
+                                        match archive_tool_result(ToolResultArchiveRequest {
                                             storage: exact_history_storage.as_ref(),
                                             conversation_id: trace_conversation_id.as_deref(),
                                             assistant_message_id:
@@ -2494,7 +2496,37 @@ impl AgentRuntime {
                                             model_result: &llm_result,
                                             model_result_for_archive_comparison: &llm_result,
                                             model_tool_result_gate: &model_tool_result_gate,
-                                        })?
+                                        }) {
+                                            Ok(metadata) => metadata,
+                                            Err(error) => {
+                                                settle_aborted_current_tool_call(
+                                                    &error,
+                                                    TerminalToolCallSettlement {
+                                                        queued:
+                                                            cancellation_queued_tool_call.clone(),
+                                                        call: Some(call.clone()),
+                                                        announced: true,
+                                                        dispatch_started: false,
+                                                        outcome:
+                                                            TerminalToolCallOutcome::Authoritative(
+                                                                result.clone(),
+                                                            ),
+                                                    },
+                                                    settles_entire_provider_tool_batch_on_terminal,
+                                                    &mut tool_batch,
+                                                    &mut pending_assistant_context,
+                                                    &mut active_context,
+                                                    &conversation_trace,
+                                                    trace_observer.as_ref(),
+                                                    &mut event_stream,
+                                                    tool_registry.as_ref(),
+                                                    &model_tool_result_gate,
+                                                    trace_assistant_message_id.as_deref(),
+                                                    &run_id,
+                                                )?;
+                                                return Err(error);
+                                            }
+                                        }
                                     } else {
                                         ConversationHistoryArchiveTraceMetadata::default()
                                     };
@@ -2507,35 +2539,35 @@ impl AgentRuntime {
                                 ) {
                                     Ok(observation) => observation,
                                     Err(error) => {
-                                        if settles_entire_provider_tool_batch_on_terminal {
-                                            settle_aborted_grouped_tool_batch(
-                                                &error,
-                                                Some(TerminalToolCallSettlement {
-                                                    queued: cancellation_queued_tool_call.clone(),
-                                                    call: Some(call.clone()),
-                                                    announced: true,
-                                                    dispatch_started: false,
-                                                    outcome: TerminalToolCallOutcome::Synthetic,
-                                                }),
-                                                &mut tool_batch,
-                                                &mut pending_assistant_context,
-                                                &mut active_context,
-                                                &conversation_trace,
-                                                trace_observer.as_ref(),
-                                                &mut event_stream,
-                                                tool_registry.as_ref(),
-                                                &model_tool_result_gate,
-                                                trace_assistant_message_id.as_deref(),
-                                                &run_id,
-                                            )?;
-                                        }
+                                        settle_aborted_current_tool_call(
+                                            &error,
+                                            TerminalToolCallSettlement {
+                                                queued: cancellation_queued_tool_call.clone(),
+                                                call: Some(call.clone()),
+                                                announced: true,
+                                                dispatch_started: false,
+                                                outcome: TerminalToolCallOutcome::Authoritative(
+                                                    result.clone(),
+                                                ),
+                                            },
+                                            settles_entire_provider_tool_batch_on_terminal,
+                                            &mut tool_batch,
+                                            &mut pending_assistant_context,
+                                            &mut active_context,
+                                            &conversation_trace,
+                                            trace_observer.as_ref(),
+                                            &mut event_stream,
+                                            tool_registry.as_ref(),
+                                            &model_tool_result_gate,
+                                            trace_assistant_message_id.as_deref(),
+                                            &run_id,
+                                        )?;
                                         return Err(error);
                                     }
                                 };
-                                let recorded_result_sequence = {
-                                    let mut recorder = conversation_trace
-                                        .lock()
-                                        .unwrap_or_else(|error| error.into_inner());
+                                let recorded_result_sequence = match update_trace_atomically(
+                                    &conversation_trace,
+                                    |recorder| {
                                     let sequence = recorder.record_tool_result_with_archive(
                                         &call,
                                         &checkpoint_result,
@@ -2554,7 +2586,36 @@ impl AgentRuntime {
                                         )
                                             .map_err(AgentError::new)?;
                                     }
-                                    sequence
+                                    Ok(sequence)
+                                },
+                                ) {
+                                    Ok(sequence) => sequence,
+                                    Err(error) => {
+                                        settle_aborted_current_tool_call(
+                                            &error,
+                                            TerminalToolCallSettlement {
+                                                queued: cancellation_queued_tool_call.clone(),
+                                                call: Some(call.clone()),
+                                                announced: true,
+                                                dispatch_started: false,
+                                                outcome: TerminalToolCallOutcome::Authoritative(
+                                                    result.clone(),
+                                                ),
+                                            },
+                                            settles_entire_provider_tool_batch_on_terminal,
+                                            &mut tool_batch,
+                                            &mut pending_assistant_context,
+                                            &mut active_context,
+                                            &conversation_trace,
+                                            None,
+                                            &mut event_stream,
+                                            tool_registry.as_ref(),
+                                            &model_tool_result_gate,
+                                            trace_assistant_message_id.as_deref(),
+                                            &run_id,
+                                        )?;
+                                        return Err(error);
+                                    }
                                 };
                                 if let Err(error) = publish_trace_snapshot(
                                     &conversation_trace,
@@ -2626,27 +2687,26 @@ impl AgentRuntime {
                         };
                         if cancellation_token.is_cancelled() {
                             let _ = tool_registry.invalidate_proposed_action(&action);
-                            if settles_entire_provider_tool_batch_on_terminal {
-                                settle_cancelled_grouped_tool_batch(
-                                    Some(TerminalToolCallSettlement {
-                                        queued: cancellation_queued_tool_call.clone(),
-                                        call: Some(call.clone()),
-                                        announced: true,
-                                        dispatch_started: false,
-                                        outcome: TerminalToolCallOutcome::Synthetic,
-                                    }),
-                                    &mut tool_batch,
-                                    &mut pending_assistant_context,
-                                    &mut active_context,
-                                    &conversation_trace,
-                                    trace_observer.as_ref(),
-                                    &mut event_stream,
-                                    tool_registry.as_ref(),
-                                    &model_tool_result_gate,
-                                    trace_assistant_message_id.as_deref(),
-                                    &run_id,
-                                )?;
-                            }
+                            settle_cancelled_current_tool_call(
+                                TerminalToolCallSettlement {
+                                    queued: cancellation_queued_tool_call.clone(),
+                                    call: Some(call.clone()),
+                                    announced: true,
+                                    dispatch_started: false,
+                                    outcome: TerminalToolCallOutcome::Synthetic,
+                                },
+                                settles_entire_provider_tool_batch_on_terminal,
+                                &mut tool_batch,
+                                &mut pending_assistant_context,
+                                &mut active_context,
+                                &conversation_trace,
+                                trace_observer.as_ref(),
+                                &mut event_stream,
+                                tool_registry.as_ref(),
+                                &model_tool_result_gate,
+                                trace_assistant_message_id.as_deref(),
+                                &run_id,
+                            )?;
                             return Ok(cancelled_output(
                                 run_id,
                                 event_stream,
@@ -2670,54 +2730,81 @@ impl AgentRuntime {
                             && !provider_runtime_capabilities
                                 .allows_encrypted_checkpoint_rehydration()
                         {
-                            let deferred_calls = tool_batch.defer_external_calls(|queued| {
-                                queued.checkpoint_persistence
-                                    != crate::tools::AgentToolCallCheckpointPersistence::Allowed
-                                    || queued.checkpoint_call.args != queued.call.args
-                            });
-                            let deferred_call_ids = deferred_calls
-                                .into_iter()
-                                .map(|deferred| deferred.call.id)
-                                .collect::<std::collections::BTreeSet<_>>();
-                            active_context.omit_runtime_tool_calls_from_group(
-                                &tool_exchange_group,
-                                &deferred_call_ids,
-                            )?;
-                            conversation_trace
-                                .lock()
-                                .unwrap_or_else(|error| error.into_inner())
-                                .omit_model_tool_calls(&deferred_call_ids);
-                            publish_trace_snapshot(
-                                &conversation_trace,
-                                trace_observer.as_ref(),
-                            )?;
+                            let defer_result = (|| -> AgentResult<()> {
+                                let deferred_calls = tool_batch.defer_external_calls(|queued| {
+                                    queued.checkpoint_persistence
+                                        != crate::tools::AgentToolCallCheckpointPersistence::Allowed
+                                        || queued.checkpoint_call.args != queued.call.args
+                                });
+                                let deferred_call_ids = deferred_calls
+                                    .into_iter()
+                                    .map(|deferred| deferred.call.id)
+                                    .collect::<std::collections::BTreeSet<_>>();
+                                active_context.omit_runtime_tool_calls_from_group(
+                                    &tool_exchange_group,
+                                    &deferred_call_ids,
+                                )?;
+                                conversation_trace
+                                    .lock()
+                                    .unwrap_or_else(|error| error.into_inner())
+                                    .omit_model_tool_calls(&deferred_call_ids);
+                                publish_trace_snapshot(
+                                    &conversation_trace,
+                                    trace_observer.as_ref(),
+                                )?;
+                                Ok(())
+                            })();
+                            if let Err(error) = defer_result {
+                                let _ = tool_registry.invalidate_proposed_action(&action);
+                                settle_aborted_current_tool_call(
+                                    &error,
+                                    TerminalToolCallSettlement {
+                                        queued: cancellation_queued_tool_call.clone(),
+                                        call: Some(call.clone()),
+                                        announced: true,
+                                        dispatch_started: false,
+                                        outcome: TerminalToolCallOutcome::Synthetic,
+                                    },
+                                    settles_entire_provider_tool_batch_on_terminal,
+                                    &mut tool_batch,
+                                    &mut pending_assistant_context,
+                                    &mut active_context,
+                                    &conversation_trace,
+                                    None,
+                                    &mut event_stream,
+                                    tool_registry.as_ref(),
+                                    &model_tool_result_gate,
+                                    trace_assistant_message_id.as_deref(),
+                                    &run_id,
+                                )?;
+                                return Err(error);
+                            }
                         }
                         let extension_snapshots = match runtime_extensions.snapshots() {
                             Ok(snapshots) => snapshots,
                             Err(error) => {
                                 let _ = tool_registry.invalidate_proposed_action(&action);
-                                if settles_entire_provider_tool_batch_on_terminal {
-                                    settle_aborted_grouped_tool_batch(
-                                        &error,
-                                        Some(TerminalToolCallSettlement {
-                                            queued: cancellation_queued_tool_call.clone(),
-                                            call: Some(call.clone()),
-                                            announced: true,
-                                            dispatch_started: false,
-                                            outcome: TerminalToolCallOutcome::Synthetic,
-                                        }),
-                                        &mut tool_batch,
-                                        &mut pending_assistant_context,
-                                        &mut active_context,
-                                        &conversation_trace,
-                                        trace_observer.as_ref(),
-                                        &mut event_stream,
-                                        tool_registry.as_ref(),
-                                        &model_tool_result_gate,
-                                        trace_assistant_message_id.as_deref(),
-                                        &run_id,
-                                    )?;
-                                }
+                                settle_aborted_current_tool_call(
+                                    &error,
+                                    TerminalToolCallSettlement {
+                                        queued: cancellation_queued_tool_call.clone(),
+                                        call: Some(call.clone()),
+                                        announced: true,
+                                        dispatch_started: false,
+                                        outcome: TerminalToolCallOutcome::Synthetic,
+                                    },
+                                    settles_entire_provider_tool_batch_on_terminal,
+                                    &mut tool_batch,
+                                    &mut pending_assistant_context,
+                                    &mut active_context,
+                                    &conversation_trace,
+                                    trace_observer.as_ref(),
+                                    &mut event_stream,
+                                    tool_registry.as_ref(),
+                                    &model_tool_result_gate,
+                                    trace_assistant_message_id.as_deref(),
+                                    &run_id,
+                                )?;
                                 return Err(error);
                             }
                         };
@@ -2752,42 +2839,16 @@ impl AgentRuntime {
                             Ok(checkpoint) => checkpoint,
                             Err(error) => {
                                 let _ = tool_registry.invalidate_proposed_action(&action);
-                                if settles_entire_provider_tool_batch_on_terminal {
-                                    settle_aborted_grouped_tool_batch(
-                                        &error,
-                                        Some(TerminalToolCallSettlement {
-                                            queued: cancellation_queued_tool_call.clone(),
-                                            call: Some(call.clone()),
-                                            announced: true,
-                                            dispatch_started: false,
-                                            outcome: TerminalToolCallOutcome::Synthetic,
-                                        }),
-                                        &mut tool_batch,
-                                        &mut pending_assistant_context,
-                                        &mut active_context,
-                                        &conversation_trace,
-                                        trace_observer.as_ref(),
-                                        &mut event_stream,
-                                        tool_registry.as_ref(),
-                                        &model_tool_result_gate,
-                                        trace_assistant_message_id.as_deref(),
-                                        &run_id,
-                                    )?;
-                                }
-                                return Err(error);
-                            }
-                        };
-                        if cancellation_token.is_cancelled() {
-                            let _ = tool_registry.invalidate_proposed_action(&action);
-                            if settles_entire_provider_tool_batch_on_terminal {
-                                settle_cancelled_grouped_tool_batch(
-                                    Some(TerminalToolCallSettlement {
+                                settle_aborted_current_tool_call(
+                                    &error,
+                                    TerminalToolCallSettlement {
                                         queued: cancellation_queued_tool_call.clone(),
                                         call: Some(call.clone()),
                                         announced: true,
                                         dispatch_started: false,
                                         outcome: TerminalToolCallOutcome::Synthetic,
-                                    }),
+                                    },
+                                    settles_entire_provider_tool_batch_on_terminal,
                                     &mut tool_batch,
                                     &mut pending_assistant_context,
                                     &mut active_context,
@@ -2799,7 +2860,31 @@ impl AgentRuntime {
                                     trace_assistant_message_id.as_deref(),
                                     &run_id,
                                 )?;
+                                return Err(error);
                             }
+                        };
+                        if cancellation_token.is_cancelled() {
+                            let _ = tool_registry.invalidate_proposed_action(&action);
+                            settle_cancelled_current_tool_call(
+                                TerminalToolCallSettlement {
+                                    queued: cancellation_queued_tool_call.clone(),
+                                    call: Some(call.clone()),
+                                    announced: true,
+                                    dispatch_started: false,
+                                    outcome: TerminalToolCallOutcome::Synthetic,
+                                },
+                                settles_entire_provider_tool_batch_on_terminal,
+                                &mut tool_batch,
+                                &mut pending_assistant_context,
+                                &mut active_context,
+                                &conversation_trace,
+                                trace_observer.as_ref(),
+                                &mut event_stream,
+                                tool_registry.as_ref(),
+                                &model_tool_result_gate,
+                                trace_assistant_message_id.as_deref(),
+                                &run_id,
+                            )?;
                             return Ok(cancelled_output(
                                 run_id,
                                 event_stream,
@@ -2829,28 +2914,27 @@ impl AgentRuntime {
                                 Ok(invocation) => invocation,
                                 Err(error) => {
                                     let _ = tool_registry.invalidate_proposed_action(&action);
-                                    if settles_entire_provider_tool_batch_on_terminal {
-                                        settle_aborted_grouped_tool_batch(
-                                            &error,
-                                            Some(TerminalToolCallSettlement {
-                                                queued: cancellation_queued_tool_call.clone(),
-                                                call: Some(call.clone()),
-                                                announced: true,
-                                                dispatch_started: false,
-                                                outcome: TerminalToolCallOutcome::Synthetic,
-                                            }),
-                                            &mut tool_batch,
-                                            &mut pending_assistant_context,
-                                            &mut active_context,
-                                            &conversation_trace,
-                                            trace_observer.as_ref(),
-                                            &mut event_stream,
-                                            tool_registry.as_ref(),
-                                            &model_tool_result_gate,
-                                            trace_assistant_message_id.as_deref(),
-                                            &run_id,
-                                        )?;
-                                    }
+                                    settle_aborted_current_tool_call(
+                                        &error,
+                                        TerminalToolCallSettlement {
+                                            queued: cancellation_queued_tool_call.clone(),
+                                            call: Some(call.clone()),
+                                            announced: true,
+                                            dispatch_started: false,
+                                            outcome: TerminalToolCallOutcome::Synthetic,
+                                        },
+                                        settles_entire_provider_tool_batch_on_terminal,
+                                        &mut tool_batch,
+                                        &mut pending_assistant_context,
+                                        &mut active_context,
+                                        &conversation_trace,
+                                        trace_observer.as_ref(),
+                                        &mut event_stream,
+                                        tool_registry.as_ref(),
+                                        &model_tool_result_gate,
+                                        trace_assistant_message_id.as_deref(),
+                                        &run_id,
+                                    )?;
                                     return Err(error);
                                 }
                             };
@@ -2947,28 +3031,27 @@ impl AgentRuntime {
                                     &conversation_trace,
                                     trace_observer.as_ref(),
                                 ) {
-                                    if settles_entire_provider_tool_batch_on_terminal {
-                                        settle_aborted_grouped_tool_batch(
-                                            &error,
-                                            Some(TerminalToolCallSettlement {
-                                                queued: cancellation_queued_tool_call.clone(),
-                                                call: Some(call.clone()),
-                                                announced: true,
-                                                dispatch_started: false,
-                                                outcome: TerminalToolCallOutcome::Synthetic,
-                                            }),
-                                            &mut tool_batch,
-                                            &mut pending_assistant_context,
-                                            &mut active_context,
-                                            &conversation_trace,
-                                            None,
-                                            &mut event_stream,
-                                            tool_registry.as_ref(),
-                                            &model_tool_result_gate,
-                                            trace_assistant_message_id.as_deref(),
-                                            &run_id,
-                                        )?;
-                                    }
+                                    settle_aborted_current_tool_call(
+                                        &error,
+                                        TerminalToolCallSettlement {
+                                            queued: cancellation_queued_tool_call.clone(),
+                                            call: Some(call.clone()),
+                                            announced: true,
+                                            dispatch_started: false,
+                                            outcome: TerminalToolCallOutcome::Synthetic,
+                                        },
+                                        settles_entire_provider_tool_batch_on_terminal,
+                                        &mut tool_batch,
+                                        &mut pending_assistant_context,
+                                        &mut active_context,
+                                        &conversation_trace,
+                                        None,
+                                        &mut event_stream,
+                                        tool_registry.as_ref(),
+                                        &model_tool_result_gate,
+                                        trace_assistant_message_id.as_deref(),
+                                        &run_id,
+                                    )?;
                                     return Err(error);
                                 }
                                 if let AgentProposedAction::FileChange { file_change } = &action {
@@ -3094,27 +3177,26 @@ impl AgentRuntime {
                     let result = match result_result {
                         Ok(result) => result,
                         Err(error) if error.is_cancelled() => {
-                            if settles_entire_provider_tool_batch_on_terminal {
-                                settle_cancelled_grouped_tool_batch(
-                                    Some(TerminalToolCallSettlement {
-                                        queued: cancellation_queued_tool_call.clone(),
-                                        call: Some(call.clone()),
-                                        announced: true,
-                                        dispatch_started: true,
-                                        outcome: TerminalToolCallOutcome::Synthetic,
-                                    }),
-                                    &mut tool_batch,
-                                    &mut pending_assistant_context,
-                                    &mut active_context,
-                                    &conversation_trace,
-                                    trace_observer.as_ref(),
-                                    &mut event_stream,
-                                    tool_registry.as_ref(),
-                                    &model_tool_result_gate,
-                                    trace_assistant_message_id.as_deref(),
-                                    &run_id,
-                                )?;
-                            }
+                            settle_cancelled_current_tool_call(
+                                TerminalToolCallSettlement {
+                                    queued: cancellation_queued_tool_call.clone(),
+                                    call: Some(call.clone()),
+                                    announced: true,
+                                    dispatch_started: true,
+                                    outcome: TerminalToolCallOutcome::Synthetic,
+                                },
+                                settles_entire_provider_tool_batch_on_terminal,
+                                &mut tool_batch,
+                                &mut pending_assistant_context,
+                                &mut active_context,
+                                &conversation_trace,
+                                trace_observer.as_ref(),
+                                &mut event_stream,
+                                tool_registry.as_ref(),
+                                &model_tool_result_gate,
+                                trace_assistant_message_id.as_deref(),
+                                &run_id,
+                            )?;
                             return Ok(cancelled_output(
                                 run_id,
                                 event_stream,
@@ -3125,54 +3207,52 @@ impl AgentRuntime {
                             ));
                         }
                         Err(error) => {
-                            if settles_entire_provider_tool_batch_on_terminal {
-                                let failed_result = failed_tool_call_result(&call, error.clone());
-                                settle_aborted_grouped_tool_batch(
-                                    &error,
-                                    Some(TerminalToolCallSettlement {
-                                        queued: cancellation_queued_tool_call.clone(),
-                                        call: Some(call.clone()),
-                                        announced: true,
-                                        dispatch_started: true,
-                                        outcome: TerminalToolCallOutcome::Authoritative(
-                                            failed_result,
-                                        ),
-                                    }),
-                                    &mut tool_batch,
-                                    &mut pending_assistant_context,
-                                    &mut active_context,
-                                    &conversation_trace,
-                                    trace_observer.as_ref(),
-                                    &mut event_stream,
-                                    tool_registry.as_ref(),
-                                    &model_tool_result_gate,
-                                    trace_assistant_message_id.as_deref(),
-                                    &run_id,
-                                )?;
-                            }
+                            // A task/join failure can arrive after the implementation crossed a
+                            // side-effect boundary. Close the Trace, but never turn that uncertainty
+                            // into an authoritative failed result.
+                            settle_aborted_current_tool_call(
+                                &error,
+                                TerminalToolCallSettlement {
+                                    queued: cancellation_queued_tool_call.clone(),
+                                    call: Some(call.clone()),
+                                    announced: true,
+                                    dispatch_started: true,
+                                    outcome: TerminalToolCallOutcome::Synthetic,
+                                },
+                                settles_entire_provider_tool_batch_on_terminal,
+                                &mut tool_batch,
+                                &mut pending_assistant_context,
+                                &mut active_context,
+                                &conversation_trace,
+                                trace_observer.as_ref(),
+                                &mut event_stream,
+                                tool_registry.as_ref(),
+                                &model_tool_result_gate,
+                                trace_assistant_message_id.as_deref(),
+                                &run_id,
+                            )?;
                             return Err(error);
                         }
                     };
-                    if settles_entire_provider_tool_batch_on_terminal
-                        && cancellation_preempts_tool_result(
-                            auto_execute_host_action,
-                            if authoritative_tool_settlement {
-                                crate::tools::AgentToolCancellationSettlement::Authoritative
-                            } else {
-                                crate::tools::AgentToolCancellationSettlement::Interruptible
-                            },
-                            cancellation_token.is_cancelled(),
-                            &result,
-                        )
-                    {
-                        settle_cancelled_grouped_tool_batch(
-                            Some(TerminalToolCallSettlement {
+                    if cancellation_preempts_tool_result(
+                        auto_execute_host_action,
+                        if authoritative_tool_settlement {
+                            crate::tools::AgentToolCancellationSettlement::Authoritative
+                        } else {
+                            crate::tools::AgentToolCancellationSettlement::Interruptible
+                        },
+                        cancellation_token.is_cancelled(),
+                        &result,
+                    ) {
+                        settle_cancelled_current_tool_call(
+                            TerminalToolCallSettlement {
                                 queued: cancellation_queued_tool_call.clone(),
                                 call: Some(call.clone()),
                                 announced: true,
                                 dispatch_started: true,
                                 outcome: TerminalToolCallOutcome::Synthetic,
-                            }),
+                            },
+                            settles_entire_provider_tool_batch_on_terminal,
                             &mut tool_batch,
                             &mut pending_assistant_context,
                             &mut active_context,
@@ -3237,7 +3317,7 @@ impl AgentRuntime {
                         );
                     }
                     let archive_metadata = if tool_registry.archives_result(&call.tool) {
-                        archive_tool_result(ToolResultArchiveRequest {
+                        match archive_tool_result(ToolResultArchiveRequest {
                             storage: exact_history_storage.as_ref(),
                             conversation_id: trace_conversation_id.as_deref(),
                             assistant_message_id: trace_assistant_message_id.as_deref(),
@@ -3250,7 +3330,38 @@ impl AgentRuntime {
                             model_result: &canonical_model_result,
                             model_result_for_archive_comparison: &canonical_model_result,
                             model_tool_result_gate: &model_tool_result_gate,
-                        })?
+                        }) {
+                            Ok(metadata) => metadata,
+                            Err(error) => {
+                                settle_aborted_current_tool_call(
+                                    &error,
+                                    TerminalToolCallSettlement {
+                                        queued: cancellation_queued_tool_call.clone(),
+                                        call: Some(call.clone()),
+                                        announced: true,
+                                        dispatch_started: true,
+                                        // The Tool implementation returned an authoritative result.
+                                        // Archive failure must not rewrite a success as failure or
+                                        // guess that a known failure was outcome-unknown.
+                                        outcome: TerminalToolCallOutcome::Authoritative(
+                                            result.clone(),
+                                        ),
+                                    },
+                                    settles_entire_provider_tool_batch_on_terminal,
+                                    &mut tool_batch,
+                                    &mut pending_assistant_context,
+                                    &mut active_context,
+                                    &conversation_trace,
+                                    trace_observer.as_ref(),
+                                    &mut event_stream,
+                                    tool_registry.as_ref(),
+                                    &model_tool_result_gate,
+                                    trace_assistant_message_id.as_deref(),
+                                    &run_id,
+                                )?;
+                                return Err(error);
+                            }
+                        }
                     } else {
                         ConversationHistoryArchiveTraceMetadata::default()
                     };
@@ -3269,36 +3380,27 @@ impl AgentRuntime {
                         ) {
                             Ok(observations) => observations,
                             Err(error) => {
-                                if settles_entire_provider_tool_batch_on_terminal {
-                                    conversation_trace
-                                        .lock()
-                                        .unwrap_or_else(|poison| poison.into_inner())
-                                        .record_tool_result_with_archive(
-                                            &call,
-                                            &durable_result,
-                                            archive_metadata,
-                                        );
-                                    settle_aborted_grouped_tool_batch(
-                                        &error,
-                                        Some(TerminalToolCallSettlement {
-                                            queued: cancellation_queued_tool_call.clone(),
-                                            call: Some(call.clone()),
-                                            announced: true,
-                                            dispatch_started: true,
-                                            outcome: TerminalToolCallOutcome::Synthetic,
-                                        }),
-                                        &mut tool_batch,
-                                        &mut pending_assistant_context,
-                                        &mut active_context,
-                                        &conversation_trace,
-                                        trace_observer.as_ref(),
-                                        &mut event_stream,
-                                        tool_registry.as_ref(),
-                                        &model_tool_result_gate,
-                                        trace_assistant_message_id.as_deref(),
-                                        &run_id,
-                                    )?;
-                                }
+                                settle_aborted_current_tool_call(
+                                    &error,
+                                    TerminalToolCallSettlement {
+                                        queued: cancellation_queued_tool_call.clone(),
+                                        call: Some(call.clone()),
+                                        announced: true,
+                                        dispatch_started: true,
+                                        outcome: TerminalToolCallOutcome::Synthetic,
+                                    },
+                                    settles_entire_provider_tool_batch_on_terminal,
+                                    &mut tool_batch,
+                                    &mut pending_assistant_context,
+                                    &mut active_context,
+                                    &conversation_trace,
+                                    trace_observer.as_ref(),
+                                    &mut event_stream,
+                                    tool_registry.as_ref(),
+                                    &model_tool_result_gate,
+                                    trace_assistant_message_id.as_deref(),
+                                    &run_id,
+                                )?;
                                 return Err(error);
                             }
                         };
@@ -3307,10 +3409,9 @@ impl AgentRuntime {
                         checkpoint: checkpoint_observation,
                         durable: durable_observation,
                     } = observations;
-                    let recorded_result_sequence = {
-                        let mut recorder = conversation_trace
-                            .lock()
-                            .unwrap_or_else(|error| error.into_inner());
+                    let recorded_result_sequence = match update_trace_atomically(
+                        &conversation_trace,
+                        |recorder| {
                         let sequence = recorder.record_tool_result_with_archive(
                             &call,
                             &durable_result,
@@ -3329,7 +3430,34 @@ impl AgentRuntime {
                             )
                                 .map_err(AgentError::new)?;
                         }
-                        sequence
+                        Ok(sequence)
+                    },
+                    ) {
+                        Ok(sequence) => sequence,
+                        Err(error) => {
+                            settle_aborted_current_tool_call(
+                                &error,
+                                TerminalToolCallSettlement {
+                                    queued: cancellation_queued_tool_call.clone(),
+                                    call: Some(call.clone()),
+                                    announced: true,
+                                    dispatch_started: true,
+                                    outcome: TerminalToolCallOutcome::Synthetic,
+                                },
+                                settles_entire_provider_tool_batch_on_terminal,
+                                &mut tool_batch,
+                                &mut pending_assistant_context,
+                                &mut active_context,
+                                &conversation_trace,
+                                None,
+                                &mut event_stream,
+                                tool_registry.as_ref(),
+                                &model_tool_result_gate,
+                                trace_assistant_message_id.as_deref(),
+                                &run_id,
+                            )?;
+                            return Err(error);
+                        }
                     };
                     let trace_publish = if tool_result_persistence
                         == crate::tools::AgentToolResultPersistence::PrecommittedTrace
@@ -3899,14 +4027,16 @@ fn aborted_tool_call_result(
     dispatch_started: bool,
     cause_code: &str,
 ) -> AgentToolResult {
-    let (outcome, dispatch_certainty, recovery) = if dispatch_started {
+    let (status, outcome, dispatch_certainty, recovery) = if dispatch_started {
         (
-            "failed",
+            "outcome_unknown",
+            "outcome_unknown",
             "possiblyDispatched",
             "inspectAuthoritativeStateBeforeRetry",
         )
     } else {
         (
+            "failed",
             "skipped",
             "definitelyNotDispatched",
             "retryFromSafeContextBoundary",
@@ -3915,7 +4045,7 @@ fn aborted_tool_call_result(
     let mut details = json!({
         "type": "runtimeGuard",
         "code": "groupedTurnAborted",
-        "status": "failed",
+        "status": status,
         "outcome": outcome,
         "dispatchCertainty": dispatch_certainty,
         "retryable": false,
@@ -3953,9 +4083,10 @@ fn settle_cancelled_grouped_tool_batch(
     trace_assistant_message_id: Option<&str>,
     run_id: &str,
 ) -> AgentResult<()> {
-    settle_terminal_grouped_tool_batch(
+    settle_terminal_tool_batch(
         GroupedToolBatchTerminalCause::Cancelled,
         current,
+        true,
         tool_batch,
         pending_assistant_context,
         active_context,
@@ -3984,11 +4115,51 @@ fn settle_aborted_grouped_tool_batch(
     trace_assistant_message_id: Option<&str>,
     run_id: &str,
 ) -> AgentResult<()> {
-    settle_terminal_grouped_tool_batch(
+    settle_terminal_tool_batch(
         GroupedToolBatchTerminalCause::Aborted {
             cause_code: cause.code().unwrap_or("agent.runtime_abort").to_string(),
         },
         current,
+        true,
+        tool_batch,
+        pending_assistant_context,
+        active_context,
+        conversation_trace,
+        trace_observer,
+        event_stream,
+        tool_registry,
+        model_tool_result_gate,
+        trace_assistant_message_id,
+        run_id,
+    )
+}
+
+/// Closes the Tool Call that has already entered the durable Trace. The current call is never
+/// conditional on Provider grouping: once its ToolCall item is visible, every terminal Runtime
+/// path must append the matching ToolResult. Grouped providers additionally close the queued
+/// suffix because their one Assistant turn cannot be replayed with unresolved sibling calls.
+#[allow(clippy::too_many_arguments)]
+fn settle_aborted_current_tool_call(
+    cause: &AgentError,
+    current: TerminalToolCallSettlement,
+    settle_queued_suffix: bool,
+    tool_batch: &mut ToolCallBatch,
+    pending_assistant_context: &mut Option<PendingAssistantToolContext>,
+    active_context: &mut ContextFrame,
+    conversation_trace: &Arc<Mutex<ConversationTraceRecorder>>,
+    trace_observer: Option<&AgentConversationTraceObserver>,
+    event_stream: &mut AgentEventStream,
+    tool_registry: &ToolRegistry,
+    model_tool_result_gate: &ModelToolResultGate,
+    trace_assistant_message_id: Option<&str>,
+    run_id: &str,
+) -> AgentResult<()> {
+    settle_terminal_tool_batch(
+        GroupedToolBatchTerminalCause::Aborted {
+            cause_code: cause.code().unwrap_or("agent.runtime_abort").to_string(),
+        },
+        Some(current),
+        settle_queued_suffix,
         tool_batch,
         pending_assistant_context,
         active_context,
@@ -4003,9 +4174,42 @@ fn settle_aborted_grouped_tool_batch(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn settle_terminal_grouped_tool_batch(
+fn settle_cancelled_current_tool_call(
+    current: TerminalToolCallSettlement,
+    settle_queued_suffix: bool,
+    tool_batch: &mut ToolCallBatch,
+    pending_assistant_context: &mut Option<PendingAssistantToolContext>,
+    active_context: &mut ContextFrame,
+    conversation_trace: &Arc<Mutex<ConversationTraceRecorder>>,
+    trace_observer: Option<&AgentConversationTraceObserver>,
+    event_stream: &mut AgentEventStream,
+    tool_registry: &ToolRegistry,
+    model_tool_result_gate: &ModelToolResultGate,
+    trace_assistant_message_id: Option<&str>,
+    run_id: &str,
+) -> AgentResult<()> {
+    settle_terminal_tool_batch(
+        GroupedToolBatchTerminalCause::Cancelled,
+        Some(current),
+        settle_queued_suffix,
+        tool_batch,
+        pending_assistant_context,
+        active_context,
+        conversation_trace,
+        trace_observer,
+        event_stream,
+        tool_registry,
+        model_tool_result_gate,
+        trace_assistant_message_id,
+        run_id,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn settle_terminal_tool_batch(
     terminal_cause: GroupedToolBatchTerminalCause,
     current: Option<TerminalToolCallSettlement>,
+    settle_queued_suffix: bool,
     tool_batch: &mut ToolCallBatch,
     pending_assistant_context: &mut Option<PendingAssistantToolContext>,
     active_context: &mut ContextFrame,
@@ -4024,18 +4228,30 @@ fn settle_terminal_grouped_tool_batch(
         .lock()
         .unwrap_or_else(|error| error.into_inner())
         .clone();
+    let omitted_independent_suffix = if settle_queued_suffix {
+        None
+    } else {
+        let group = staged_batch.context_group();
+        let mut queued = staged_batch.clone();
+        let call_ids = std::iter::from_fn(|| queued.pop_front())
+            .map(|queued| queued.call.id)
+            .collect::<std::collections::BTreeSet<_>>();
+        group.map(|group| (group, call_ids))
+    };
     let mut settlements = Vec::with_capacity(staged_batch.len().saturating_add(1));
     if let Some(current) = current {
         settlements.push(current);
     }
-    while let Some(queued) = staged_batch.pop_front() {
-        settlements.push(TerminalToolCallSettlement {
-            queued,
-            call: None,
-            announced: false,
-            dispatch_started: false,
-            outcome: TerminalToolCallOutcome::Synthetic,
-        });
+    if settle_queued_suffix {
+        while let Some(queued) = staged_batch.pop_front() {
+            settlements.push(TerminalToolCallSettlement {
+                queued,
+                call: None,
+                announced: false,
+                dispatch_started: false,
+                outcome: TerminalToolCallOutcome::Synthetic,
+            });
+        }
     }
 
     let mut staged_events = Vec::with_capacity(settlements.len().saturating_mul(2));
@@ -4218,6 +4434,15 @@ fn settle_terminal_grouped_tool_batch(
             )
             .with_checkpoint_tool_result(call.id, checkpoint_observation, is_error),
         );
+    }
+    // Generic split projections treat sibling calls independently. On a terminal Runtime error
+    // those siblings were never announced or dispatched, so remove them from the live Assistant
+    // turn instead of fabricating ToolResults. Exact grouped providers keep the full turn and
+    // settle every suffix call above.
+    if let Some((group, call_ids)) = omitted_independent_suffix {
+        if !call_ids.is_empty() {
+            staged_context.omit_runtime_tool_calls_from_group(&group, &call_ids)?;
+        }
     }
     staged_context.validate_complete_tool_protocol()?;
 

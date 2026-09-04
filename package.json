@@ -112,6 +112,7 @@
     "react-dom": "^19.2.1",
     "react-markdown": "^10.1.0",
     "rehype-katex": "^7.0.1",
+    "rehype-slug": "^6.0.0",
     "remark-breaks": "^4.0.0",
     "remark-gfm": "^4.0.1",
     "remark-math": "^6.0.0",
@@ -120,6 +121,7 @@
     "typescript": "^5.9.3",
     "vite": "^7.2.6",
     "vitest": "4.1.10",
-    "vitest-browser-react": "2.2.0"
+    "vitest-browser-react": "2.2.0",
+    "yaml": "^2.9.0"
   }
 }

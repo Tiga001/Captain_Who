@@ -776,6 +776,133 @@ fn deepseek_cancellation_closes_current_and_queued_calls_in_original_order() {
 }
 
 #[test]
+fn generic_trace_publish_failure_closes_recorded_current_call_without_grouped_flag() {
+    let registry = ToolRegistry::defaults_with_search(None);
+    let call_id =
+        crate::llm::model_response_tool_call_id("run-generic-publish-failure", 0, 0, "call-1");
+    let queued_call_id =
+        crate::llm::model_response_tool_call_id("run-generic-publish-failure", 0, 1, "call-2");
+    let mut batch = ToolCallBatch::from_model_response(
+        "run-generic-publish-failure",
+        0,
+        String::new(),
+        vec![
+            LlmToolCall {
+                id: call_id.clone(),
+                name: "read_file".to_string(),
+                args: json!({ "path": "example.txt" }),
+            },
+            LlmToolCall {
+                id: queued_call_id.clone(),
+                name: "read_file".to_string(),
+                args: json!({ "path": "never-dispatched.txt" }),
+            },
+        ],
+        false,
+        |call| (call.clone(), registry.checkpoint_persistence(&call.name)),
+    );
+    let mut pending_assistant_context = take_pending_assistant_tool_context(&mut batch).unwrap();
+    let current = batch.pop_front().expect("current call");
+    let current_call = AgentToolCall {
+        id: current.call.id.clone(),
+        tool: current.call.name.clone(),
+        args: current.call.args.clone(),
+        approval_status: AgentApprovalStatus::NotRequired,
+        reason: None,
+    };
+    let recorder = Arc::new(Mutex::new(ConversationTraceRecorder::default()));
+    let trace_call = registry.trace_call_projection(&current_call);
+    let identity = registry
+        .identity(&current_call.tool)
+        .cloned()
+        .expect("registered tool identity");
+    let sequence = {
+        let mut trace = recorder.lock().unwrap();
+        let sequence = trace
+            .record_tool_call_with_identity(&trace_call, identity)
+            .expect("first trace call");
+        trace
+            .record_model_tool_call_message(
+                sequence,
+                0,
+                &LlmMessage::assistant(
+                    current.assistant_content.clone(),
+                    vec![current.checkpoint_call.clone()],
+                ),
+                current.provider_identity().unwrap(),
+            )
+            .unwrap();
+        sequence
+    };
+    assert_eq!(sequence, 0);
+
+    let mut context = ContextFrame::new(Vec::new());
+    let mut events = AgentEventStream::new(None);
+    let gate = ContextCapacityDetector::for_model(
+        "generic-publish-failure-test",
+        crate::protocol::AgentApiStyle::OpenAiCompatible,
+        &registry.definitions(),
+    )
+    .model_tool_result_gate();
+    let failure = AgentError::structured(
+        "agent.trace_observer_failed",
+        "trace observer failed after commit",
+        json!({ "type": "test" }),
+    );
+
+    settle_aborted_current_tool_call(
+        &failure,
+        TerminalToolCallSettlement {
+            queued: current,
+            call: Some(current_call),
+            announced: false,
+            dispatch_started: false,
+            outcome: TerminalToolCallOutcome::Synthetic,
+        },
+        false,
+        &mut batch,
+        &mut pending_assistant_context,
+        &mut context,
+        &recorder,
+        None,
+        &mut events,
+        &registry,
+        &gate,
+        Some("assistant-generic-publish-failure"),
+        "run-generic-publish-failure",
+    )
+    .unwrap();
+
+    assert!(
+        !batch.is_empty(),
+        "independent queued suffix remains unexecuted"
+    );
+    context.validate_complete_tool_protocol().unwrap();
+    let trace = recorder.lock().unwrap().finish(
+        "run-generic-publish-failure",
+        "conversation-generic-publish-failure",
+        "assistant-generic-publish-failure",
+        ConversationTurnTraceTerminalStatus::Failed,
+        Some("trace observer failed"),
+    );
+    let pairs = trace
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            ConversationTurnTraceItem::ToolCall { call_id, .. } => Some(("call", call_id)),
+            ConversationTurnTraceItem::ToolResult { call_id, .. } => Some(("result", call_id)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(pairs, vec![("call", &call_id), ("result", &call_id)]);
+    assert!(trace.items.iter().all(|item| match item {
+        ConversationTurnTraceItem::ToolCall { call_id, .. }
+        | ConversationTurnTraceItem::ToolResult { call_id, .. } => call_id != &queued_call_id,
+        _ => true,
+    }));
+}
+
+#[test]
 fn exact_history_archive_precedes_model_and_checkpoint_projection() {
     use crate::conversation_trace::ConversationTraceRecorder;
     use crate::protocol::{AgentApprovalStatus, AgentToolCall, AgentToolResult};

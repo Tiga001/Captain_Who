@@ -1,5 +1,19 @@
 use super::*;
 
+/// Applies a multi-item Trace mutation to a private clone and publishes it to the live recorder
+/// only after every invariant check succeeds. ToolCall/ToolResult and their model-context item
+/// must never become partially visible to later terminal settlement.
+pub(super) fn update_trace_atomically<T>(
+    recorder: &Arc<Mutex<ConversationTraceRecorder>>,
+    update: impl FnOnce(&mut ConversationTraceRecorder) -> AgentResult<T>,
+) -> AgentResult<T> {
+    let mut recorder = recorder.lock().unwrap_or_else(|error| error.into_inner());
+    let mut staged = recorder.clone();
+    let value = update(&mut staged)?;
+    *recorder = staged;
+    Ok(value)
+}
+
 pub(super) fn publish_trace_recorder_snapshot(
     recorder: &ConversationTraceRecorder,
     observer: Option<&AgentConversationTraceObserver>,

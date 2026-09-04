@@ -28,9 +28,10 @@ import './FilesPanel.css'
 interface FilesPanelProps {
   filePath: string | null
   isActive: boolean
+  markdownAnchor?: string
   markdownView: WorkspaceMarkdownView
   onMarkdownViewChange: (view: WorkspaceMarkdownView) => void
-  onOpenFile: (path: string) => void
+  onOpenFile: (path: string, anchor?: string) => void
   onPdfPageChange: (page: number) => void
   onWrapLinesChange: (wrapLines: boolean) => void
   onSurfaceFocus: () => void
@@ -59,6 +60,7 @@ const TREE_STYLE = {
 export function FilesPanel({
   filePath,
   isActive,
+  markdownAnchor,
   markdownView,
   onMarkdownViewChange,
   onOpenFile,
@@ -354,7 +356,9 @@ export function FilesPanel({
         <main className="files-panel__preview">
           <WorkspaceFilePreview
             isActive={isActive}
+            markdownAnchor={markdownAnchor}
             markdownView={markdownView}
+            onOpenFile={onOpenFile}
             onPdfPageChange={onPdfPageChange}
             path={filePath}
             pdfPage={pdfPage}

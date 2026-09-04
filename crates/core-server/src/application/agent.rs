@@ -1029,28 +1029,56 @@ impl AgentService {
                 continue;
             };
             let expected_status = pending_status_label(record.snapshot.status);
-            let terminalized = if is_builtin {
+            // An automatic external MCP invocation can finish its exact ToolCall/ToolResult and
+            // later finish the owning turn after its hidden dispatch journal failed to settle.
+            // Adopt that already-authoritative terminal boundary before attempting to synthesize
+            // startup outcome-unknown; the latter deliberately requires an open durable call.
+            let should_adopt_terminal_auto_journal = record.snapshot.status
+                == PendingActionStatus::Executing
+                && matches!(
+                    &record.snapshot.action,
+                    AgentProposedAction::McpToolCall { approval }
+                        if approval.approval_mode
+                            == mycopilot_core::AgentMcpApprovalMode::Auto
+                );
+            let adopted_terminal = if should_adopt_terminal_auto_journal {
                 self.storage
-                    .terminalize_builtin_mcp_tool_agent_action_on_startup(
+                    .adopt_terminal_mcp_agent_action_on_startup(&storage_id, expected_status, now)
+                    .map_err(|_| {
+                        format!(
+                            "failed to reconcile MCP startup action {}",
+                            record.snapshot.action_id
+                        )
+                    })?
+            } else {
+                false
+            };
+            let terminalized = if adopted_terminal {
+                true
+            } else {
+                let terminalization = if is_builtin {
+                    self.storage
+                        .terminalize_builtin_mcp_tool_agent_action_on_startup(
+                            &storage_id,
+                            expected_status,
+                            terminal_outcome,
+                            now,
+                        )
+                } else {
+                    self.storage.terminalize_mcp_agent_action_on_startup(
                         &storage_id,
                         expected_status,
                         terminal_outcome,
                         now,
                     )
-            } else {
-                self.storage.terminalize_mcp_agent_action_on_startup(
-                    &storage_id,
-                    expected_status,
-                    terminal_outcome,
-                    now,
-                )
-            }
-            .map_err(|_| {
-                format!(
-                    "failed to reconcile MCP startup action {}",
-                    record.snapshot.action_id
-                )
-            })?;
+                };
+                terminalization.map_err(|_| {
+                    format!(
+                        "failed to reconcile MCP startup action {}",
+                        record.snapshot.action_id
+                    )
+                })?
+            };
             if terminalized {
                 self.pending_actions
                     .lock()
