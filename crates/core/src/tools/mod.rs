@@ -13,6 +13,7 @@ mod file_change_staged;
 mod file_change_stream;
 mod filesystem;
 mod git_diff;
+pub(crate) mod human_interaction;
 mod image_generation;
 mod input_stream;
 mod limits;

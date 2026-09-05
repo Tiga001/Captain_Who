@@ -36,7 +36,7 @@ last_verified: 2026-09-05
 
 ## 用量、存储和分支
 
-SQLite v35 新增操作表和独立用量表，仅对 exact v34 schema 提供事务升级，原始历史与费用完整保留。未知版本和校验不通过的库仍 fail closed。`/fork` 和成功分割线的分支入口复用现有持久数据，不引入额外 schema 升级。详见[存储生命周期](../architecture/storage-and-data-lifecycle.md)。
+当前 SQLite canonical v36 包含操作表和独立用量表。开发期直接新建当前 schema，不提供旧库保历史升级；旧版、未知版本和校验不通过的库返回 reset-required。`/fork` 和成功分割线的分支入口复用现有持久数据，不引入额外 schema 升级。详见[存储生命周期](../architecture/storage-and-data-lifecycle.md)。
 
 用量以 operation 为 owner，冻结请求模型价格，不覆盖上一条助手回复、不增加聊天消息数。失败或取消后已知的实际用量仍计入；未知 token 数量保持未知。清理用量保留幂等凭证，删除聊天前汇入日汇总。请求已在远端处理但本地尚未收到响应时崩溃，无法从本地准确补出厂商账单。
 
@@ -52,6 +52,6 @@ SQLite v35 新增操作表和独立用量表，仅对 exact v34 schema 提供事
 - `src/renderer/src/app/__tests__/useManualContextCompaction.browser.test.tsx`：持久状态恢复、迟到通知、取消结果与聊天切换。
 - `packages/protocol/src/manualContextCompaction.test.ts` 与 `src/main/core/coreServer.manualCompaction.test.ts`：身份和安全字段边界。
 - `crates/core-server/src/application/agent/tests/manual_context_compaction.rs`：独立请求、取消/提交竞态、费用、失败和“压缩 → latest fork → 下一轮发送”。
-- `crates/core/src/storage/manual_context_compaction_repository/tests.rs`、`crates/core/src/storage/migrations.rs` 与 fork/storage 测试：幂等、重启、升级、历史可见性、清理与删除汇总。
+- `crates/core/src/storage/manual_context_compaction_repository/tests.rs`、`crates/core/src/storage/migrations.rs` 与 fork/storage 测试：幂等、重启、新库与旧库拒绝、历史可见性、清理与删除汇总。
 
 所有模型链路测试使用本地模拟服务，存储测试使用临时数据库，不访问实际用户数据或付费模型。

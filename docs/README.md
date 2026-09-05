@@ -46,6 +46,7 @@ fixture 和测试为准。
 | 文档                                                              | 内容                                                     |
 | ----------------------------------------------------------------- | -------------------------------------------------------- |
 | [工具、权限与审批](subsystems/tools-permissions-and-approvals.md) | 工具注册、权限、审批、取消和恢复                         |
+| [向用户提问](subsystems/human-interaction.md)                     | 双工具契约、独立设置、问题与回应存储、五轮进度           |
 | [FileChange](subsystems/file-change.md)                           | `apply_patch`、Observation、审批、提交、审计和历史 Diff  |
 | [Scheduled Automation](subsystems/scheduled-automations.md)       | 定时任务、调度、Run、恢复、attention 与通知事实          |
 | [通用通知](subsystems/notifications.md)                           | 普通任务与 Automation 的事实、批次、原生投递和点击导航   |

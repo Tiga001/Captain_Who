@@ -61,6 +61,7 @@ mod conversations;
 mod file_change_run_grants;
 mod file_changes;
 mod guidance;
+mod human_interaction;
 mod image_generation;
 mod lifecycle;
 mod managed_artifacts;

@@ -54,6 +54,10 @@ App startup gate 分别等待项目、模型设置及其他权威状态加载。
 - Agent 模板名称与 machine key 在工作区级模板库内唯一；启用状态和内容使用 revision/CAS，项目 assignment 独立且每个项目最多 32 个模板。未分配、已停用或模型不可用的模板不能用于 spawn。
 - Browser 的链接打开目标使用 `system | builtin`；下载目录与“每次询问”只影响用户手动下载，Agent 下载不会停在原生保存对话框中。Renderer 只接收安全 display path，不取得 Host 保存的真实 custom directory authority。
 
+### 人机交互设置
+
+“允许智能体向人类提问”默认开启，由 Host 独立保存 enabled/revision，使用 `host.humanInteraction` 读取、CAS 更新和接收变更通知。它不属于 Prompt Preferences，个性化整页保存不能覆盖此项。关闭只阻止新提问，已有问题仍能回答或忽略。第 1 轮完成存储和接口；个性化中的“人机交互”开关页面在第 4 轮接入，当前未完成执行链路的工具不会对模型暴露。完整设计见[向用户提问](../subsystems/human-interaction.md)。
+
 ### 系统通知设置
 
 Rust Core 的 `notification_settings` 保存全局启用、声音、是否显示安全任务摘要，以及普通根任务完成/失败/需批准/取消四类开关。General 页面提供“从不、全部、仅必要、自定义”预设；这些预设只组合普通任务字段，不能被理解为逐项控制 Automation 通知。更新必须带 `expectedRevision`，冲突后重新加载再保存。
@@ -108,7 +112,7 @@ MCP、Browser、Subagents、Environment 和 Archived Conversations。Browser 页
 - 配置 DTO 与 parser 是否拒绝未知/无效字段；
 - 默认值是在 Renderer、Main、Core Server 还是 Rust Core 定义，是否只有一个权威来源；
 - revision/CAS、重复提交和重启后的行为是否有测试；
-- reset/backup 是否应保留该配置；当前 reset 只从 exact current schema 保留 allowlisted 配置与 credential reference，不复制或恢复操作系统 secret。通知事件、Browser history/download records 或 Agent template library 不保留；
+- reset/backup 是否应保留该配置；当前 reset 从 exact current v36 或 exact v35 保留 allowlisted 配置与 credential reference，v36 还保留人机交互设置及 revision，不复制或恢复操作系统 secret。通知事件、Browser history/download records 或 Agent template library 不保留；
 - 删除项目是否应删除该配置或仅移除 Agent template assignment；
 - Automation 是否需要重建冻结 snapshot、阻断后续 Run 或使现有任务进入 blocked；
 - 敏感字段是否避开日志、Trace、IPC event 和 model projection；

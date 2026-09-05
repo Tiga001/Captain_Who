@@ -20,6 +20,7 @@ import { WorkspaceFilesService } from './workspaceFiles/WorkspaceFilesService'
 import { registerAgentIpc } from './ipc/agentIpc'
 import { registerAutomationIpc } from './ipc/automationIpc'
 import { registerNotificationIpc } from './ipc/notificationIpc'
+import { registerHumanInteractionIpc } from './ipc/humanInteractionIpc'
 import {
   createVolatileNotificationLocaleMirror,
   type NotificationLocaleMirror
@@ -333,6 +334,7 @@ export function registerHostIpc(
 
   registerCoreServiceIpc(ipcMain, coreServer)
   registerAgentIpc(ipcMain, coreServer)
+  const disposeHumanInteractionIpc = registerHumanInteractionIpc(ipcMain, coreServer)
   const disposeAutomationIpc = registerAutomationIpc(ipcMain, coreServer)
   const disposeNotificationIpc = registerNotificationIpc(ipcMain, coreServer, {
     localeMirror: notificationLocaleMirror,
@@ -384,6 +386,7 @@ export function registerHostIpc(
   const dispose = (): void => {
     rendererQuitFlush.dispose()
     disposeNotificationIpc()
+    disposeHumanInteractionIpc()
     disposeAutomationIpc()
     disposeMcpIpc()
     disposeBrowserDataIpc()

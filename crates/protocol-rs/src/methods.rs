@@ -1,5 +1,12 @@
 pub const CORE_PING_METHOD: &str = "core.ping";
 pub const CORE_SHUTDOWN_METHOD: &str = "core.shutdown";
+pub const HUMAN_INTERACTION_GET_SETTINGS_METHOD: &str = "humanInteraction.getSettings";
+pub const HUMAN_INTERACTION_UPDATE_SETTINGS_METHOD: &str = "humanInteraction.updateSettings";
+pub const HUMAN_INTERACTION_LIST_REQUESTS_METHOD: &str = "humanInteraction.listRequests";
+pub const HUMAN_INTERACTION_SUBMIT_METHOD: &str = "humanInteraction.submit";
+pub const HUMAN_INTERACTION_IGNORE_METHOD: &str = "humanInteraction.ignore";
+pub const HUMAN_INTERACTION_SETTINGS_CHANGED_METHOD: &str = "humanInteraction.settingsChanged";
+pub const HUMAN_INTERACTION_REQUEST_CHANGED_METHOD: &str = "humanInteraction.requestChanged";
 pub const AUTOMATION_LIST_METHOD: &str = "automation.list";
 pub const AUTOMATION_GET_METHOD: &str = "automation.get";
 pub const AUTOMATION_CREATE_METHOD: &str = "automation.create";

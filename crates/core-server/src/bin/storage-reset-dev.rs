@@ -48,9 +48,12 @@ const APP_DATA_ROOT_FLAG: &str = "--app-data-root";
 const CONFIGURATION_SOURCE_FLAG: &str = "--configuration-source";
 const SQLITE_TRANSIENT_SUFFIXES: [&str; 3] = ["-journal", "-wal", "-shm"];
 const RECOVERABLE_CONFIGURATION_SOURCE_SCHEMA_VERSION: i32 = 33;
-const RECOVERABLE_CONFIGURATION_TARGET_SCHEMA_VERSION: i32 = 35;
+const RECOVERABLE_CONFIGURATION_TARGET_SCHEMA_VERSION: i32 = 36;
 const RECOVERABLE_CONFIGURATION_SOURCE_FINGERPRINT: &str =
     "sha256:5e1e404d74af5ed899d88dc8b5051e673ecd5beb967579af8f328b07b640c948";
+const PREVIOUS_CONFIGURATION_SOURCE_SCHEMA_VERSION: i32 = 35;
+const PREVIOUS_CONFIGURATION_SOURCE_FINGERPRINT: &str =
+    "sha256:794df50e6e2db70432cb0a233befa5cda47ff7069e98dd3ae53d94fd87a45c4b";
 const EXACT_CONFIGURATION_TABLES: &[&str] = &[
     "model_provider_settings",
     "models",
@@ -72,6 +75,7 @@ const PRESERVED_CONFIGURATION_TABLES: &[&str] = &[
     "notification_settings",
     "browser_download_settings",
     "browser_preferences",
+    "human_interaction_settings",
     "mcp_registry_metadata",
     "mcp_registry_servers",
     "mcp_registry_model_namespaces",
@@ -104,6 +108,7 @@ struct PreservedConfiguration {
     notification_settings: Option<NotificationSettingsRecord>,
     browser_download_settings: Option<BrowserDownloadSettingsRecord>,
     browser_preferences: Option<BrowserPreferencesRecord>,
+    human_interaction_settings: Option<mycopilot_core::human_interaction::HumanInteractionSettings>,
     mcp_records: Vec<McpPersistedRegistryRecord>,
     mcp_server_count: usize,
 }
@@ -467,8 +472,25 @@ fn inspect_source(
     let schema_version = storage_schema_version(&connection)?;
     match source_policy {
         ConfigurationSourcePolicy::CurrentDatabase
-            if schema_version != mycopilot_core::storage::migrations::STORAGE_SCHEMA_VERSION =>
+            if schema_version != mycopilot_core::storage::migrations::STORAGE_SCHEMA_VERSION
+                && schema_version != PREVIOUS_CONFIGURATION_SOURCE_SCHEMA_VERSION =>
         {
+            // Unknown schemas must never silently discard configuration. Even an empty table
+            // may have an incompatible layout; do not interpret it as a missing preference.
+            for table in PRESERVED_CONFIGURATION_TABLES {
+                let exists: bool = connection
+                    .query_row(
+                        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name = ?1)",
+                        [table],
+                        |row| row.get(0),
+                    )
+                    .map_err(redacted_storage_error)?;
+                if exists {
+                    return Err(invalid_data(
+                        "unsupported storage schema contains configuration; reset refused to avoid discarding it",
+                    ));
+                }
+            }
             return Ok((None, count_all_business_rows(&connection)?));
         }
         ConfigurationSourcePolicy::ExplicitBackup | ConfigurationSourcePolicy::CurrentDatabase => {}
@@ -478,9 +500,22 @@ fn inspect_source(
         ConfigurationSourcePolicy::ExplicitBackup => {
             validate_explicit_configuration_source_schema(&connection, schema_version)?;
         }
+        ConfigurationSourcePolicy::CurrentDatabase
+            if schema_version == PREVIOUS_CONFIGURATION_SOURCE_SCHEMA_VERSION =>
+        {
+            if storage_catalog_fingerprint(&connection)?
+                != PREVIOUS_CONFIGURATION_SOURCE_FINGERPRINT
+            {
+                return Err(invalid_data(
+                    "previous development storage schema is not exactly canonical",
+                ));
+            }
+        }
         ConfigurationSourcePolicy::CurrentDatabase => {}
     }
-    if source_policy == ConfigurationSourcePolicy::CurrentDatabase {
+    if source_policy == ConfigurationSourcePolicy::CurrentDatabase
+        && schema_version == mycopilot_core::storage::migrations::STORAGE_SCHEMA_VERSION
+    {
         mycopilot_core::storage::migrations::run_migrations(&connection).map_err(|_| {
             invalid_data("current development storage schema is not exactly canonical")
         })?;
@@ -532,6 +567,12 @@ fn inspect_source(
         } else {
             None
         };
+    let human_interaction_settings =
+        if schema_version == mycopilot_core::storage::migrations::STORAGE_SCHEMA_VERSION {
+            Some(load_human_interaction_settings_for_reset(&connection)?)
+        } else {
+            None
+        };
     let discarded_conversation_rows = count_discarded_conversation_rows(&connection)?;
     let expected_mcp_count = count_rows_if_table_exists(&connection, "mcp_registry_servers")?;
     drop(connection);
@@ -562,6 +603,7 @@ fn inspect_source(
         notification_settings,
         browser_download_settings,
         browser_preferences,
+        human_interaction_settings,
         mcp_records,
         mcp_server_count: mcp_count,
     };
@@ -625,8 +667,30 @@ fn validate_explicit_configuration_source_schema(
 fn is_supported_explicit_configuration_source(schema_version: i32, fingerprint: &str) -> bool {
     mycopilot_core::storage::migrations::STORAGE_SCHEMA_VERSION
         == RECOVERABLE_CONFIGURATION_TARGET_SCHEMA_VERSION
-        && schema_version == RECOVERABLE_CONFIGURATION_SOURCE_SCHEMA_VERSION
-        && fingerprint == RECOVERABLE_CONFIGURATION_SOURCE_FINGERPRINT
+        && ((schema_version == RECOVERABLE_CONFIGURATION_SOURCE_SCHEMA_VERSION
+            && fingerprint == RECOVERABLE_CONFIGURATION_SOURCE_FINGERPRINT)
+            || (schema_version == PREVIOUS_CONFIGURATION_SOURCE_SCHEMA_VERSION
+                && fingerprint == PREVIOUS_CONFIGURATION_SOURCE_FINGERPRINT))
+}
+
+fn load_human_interaction_settings_for_reset(
+    connection: &Connection,
+) -> io::Result<mycopilot_core::human_interaction::HumanInteractionSettings> {
+    let settings = connection.query_row(
+        "SELECT enabled, revision, updated_at FROM human_interaction_settings WHERE singleton = 1",
+        [],
+        |row| Ok(mycopilot_core::human_interaction::HumanInteractionSettings {
+            enabled: row.get(0)?, revision: row.get(1)?, updated_at: row.get(2)?,
+        }),
+    ).map_err(redacted_storage_error)?;
+    let maximum = mycopilot_core::human_interaction::HUMAN_INTERACTION_MAX_SAFE_INTEGER;
+    if settings.revision > maximum
+        || settings.updated_at < 0
+        || settings.updated_at as u64 > maximum
+    {
+        return Err(invalid_data("human interaction settings are invalid"));
+    }
+    Ok(settings)
 }
 
 fn storage_catalog_fingerprint(connection: &Connection) -> io::Result<String> {
@@ -654,13 +718,18 @@ fn storage_catalog_fingerprint(connection: &Connection) -> io::Result<String> {
 }
 
 fn validate_preserved_configuration_table_schemas(source: &Connection) -> io::Result<()> {
-    let source_snapshots =
-        snapshot_exact_configuration_tables_named(source, PRESERVED_CONFIGURATION_TABLES)?;
+    let has_human_settings = storage_schema_version(source)?
+        == mycopilot_core::storage::migrations::STORAGE_SCHEMA_VERSION;
+    let tables = PRESERVED_CONFIGURATION_TABLES
+        .iter()
+        .copied()
+        .filter(|table| *table != "human_interaction_settings" || has_human_settings)
+        .collect::<Vec<_>>();
+    let source_snapshots = snapshot_exact_configuration_tables_named(source, &tables)?;
     let canonical = Connection::open_in_memory().map_err(redacted_storage_error)?;
     mycopilot_core::storage::migrations::run_migrations(&canonical)
         .map_err(redacted_storage_error)?;
-    let canonical_snapshots =
-        snapshot_exact_configuration_tables_named(&canonical, PRESERVED_CONFIGURATION_TABLES)?;
+    let canonical_snapshots = snapshot_exact_configuration_tables_named(&canonical, &tables)?;
     if source_snapshots.len() != canonical_snapshots.len()
         || source_snapshots
             .iter()
@@ -1012,6 +1081,20 @@ fn build_fresh_database(
     {
         restore_browser_download_settings(database_path, settings)?;
     }
+    if let Some(settings) =
+        configuration.and_then(|value| value.human_interaction_settings.as_ref())
+    {
+        let connection = Connection::open(database_path).map_err(redacted_storage_error)?;
+        let changed = connection.execute(
+            "UPDATE human_interaction_settings SET enabled = ?1, revision = ?2, updated_at = ?3 WHERE singleton = 1",
+            params![settings.enabled, settings.revision, settings.updated_at],
+        ).map_err(redacted_storage_error)?;
+        if changed != 1 || load_human_interaction_settings_for_reset(&connection)? != *settings {
+            return Err(invalid_data(
+                "failed to restore human interaction settings exactly",
+            ));
+        }
+    }
 
     if let Some(configuration) = configuration {
         restore_mcp_records(database_path, &configuration.mcp_records)?;
@@ -1262,6 +1345,18 @@ fn verify_fresh_database(
         verify_table_count(&connection, "notification_settings", 1)?;
         verify_table_count(&connection, "browser_download_settings", 1)?;
         verify_table_count(&connection, "browser_preferences", 1)?;
+        verify_table_count(&connection, "human_interaction_settings", 1)?;
+        let restored_human_settings = load_human_interaction_settings_for_reset(&connection)?;
+        if restored_human_settings
+            != configuration
+                .human_interaction_settings
+                .clone()
+                .unwrap_or_default()
+        {
+            return Err(invalid_data(
+                "restored human interaction settings differ from preserved configuration",
+            ));
+        }
         if let Some(expected) = &configuration.notification_settings {
             let restored = notification_repository::load_notification_settings(&connection)
                 .map_err(redacted_storage_error)?;
@@ -1737,6 +1832,25 @@ mod tests {
         .unwrap()
     }
 
+    fn downgrade_fixture_to_exact_v35(database: &Path) {
+        let connection = Connection::open(database).unwrap();
+        connection
+            .execute_batch(
+                "PRAGMA foreign_keys = OFF;
+             DROP TABLE human_interaction_suspensions;
+             DROP TABLE human_interaction_deliveries;
+             DROP TABLE human_interaction_responses;
+             DROP TABLE human_interaction_requests;
+             DROP TABLE human_interaction_settings;
+             PRAGMA user_version = 35;",
+            )
+            .unwrap();
+        assert_eq!(
+            storage_catalog_fingerprint(&connection).unwrap(),
+            PREVIOUS_CONFIGURATION_SOURCE_FINGERPRINT
+        );
+    }
+
     fn model_settings_with_secret(secret: &str) -> ModelSettingsRecord {
         ModelSettingsRecord {
             api_url: "https://api.example.test/v1/chat/completions".to_string(),
@@ -2009,7 +2123,7 @@ mod tests {
     }
 
     #[test]
-    fn explicit_configuration_source_is_pinned_to_schema_33_catalog_for_schema_35() {
+    fn explicit_configuration_sources_are_pinned_to_known_catalogs_for_schema_36() {
         assert!(is_supported_explicit_configuration_source(
             RECOVERABLE_CONFIGURATION_SOURCE_SCHEMA_VERSION,
             RECOVERABLE_CONFIGURATION_SOURCE_FINGERPRINT,
@@ -2021,6 +2135,14 @@ mod tests {
         assert!(!is_supported_explicit_configuration_source(
             RECOVERABLE_CONFIGURATION_SOURCE_SCHEMA_VERSION,
             "sha256:tampered",
+        ));
+        assert!(is_supported_explicit_configuration_source(
+            PREVIOUS_CONFIGURATION_SOURCE_SCHEMA_VERSION,
+            PREVIOUS_CONFIGURATION_SOURCE_FINGERPRINT,
+        ));
+        assert!(!is_supported_explicit_configuration_source(
+            35,
+            "sha256:tampered"
         ));
     }
 
@@ -2355,6 +2477,7 @@ mod tests {
         let secret = "reset-test-api-token";
         populated_storage(fixture.path(), secret);
         let source = Connection::open(fixture.path().join(DATABASE_FILE_NAME)).unwrap();
+        source.execute("UPDATE human_interaction_settings SET enabled = 0, revision = 37, updated_at = 123456 WHERE singleton = 1", []).unwrap();
         let exact_configuration_before = snapshot_exact_configuration_tables(&source).unwrap();
         drop(source);
 
@@ -2428,6 +2551,14 @@ mod tests {
         assert_eq!(
             snapshot_exact_configuration_tables(&connection).unwrap(),
             exact_configuration_before
+        );
+        assert_eq!(
+            load_human_interaction_settings_for_reset(&connection).unwrap(),
+            mycopilot_core::human_interaction::HumanInteractionSettings {
+                enabled: false,
+                revision: 37,
+                updated_at: 123456,
+            }
         );
         assert_eq!(
             count_rows_if_table_exists(&connection, "projects").unwrap(),
@@ -2505,30 +2636,111 @@ mod tests {
     }
 
     #[test]
-    fn confirmed_reset_rebuilds_v30_with_defaults_instead_of_decoding_configuration() {
+    fn unsupported_schema_with_configuration_refuses_reset_without_losing_the_source() {
         let fixture = tempfile::tempdir().unwrap();
-        populated_storage(fixture.path(), "v30-must-not-be-decoded-token");
+        populated_storage(fixture.path(), "v30-must-not-be-discarded-token");
         let database = fixture.path().join(DATABASE_FILE_NAME);
         let connection = Connection::open(&database).unwrap();
         connection.pragma_update(None, "user_version", 30).unwrap();
         drop(connection);
+        let before = fs::read(&database).unwrap();
+        for confirm in [false, true] {
+            let error = execute(options(fixture.path(), confirm)).unwrap_err();
+            assert!(error.to_string().contains("avoid discarding"));
+            assert_eq!(fs::read(&database).unwrap(), before);
+        }
+    }
+
+    #[test]
+    fn unsupported_empty_configuration_layout_is_not_treated_as_missing() {
+        let fixture = tempfile::tempdir().unwrap();
+        let database = fixture.path().join(DATABASE_FILE_NAME);
+        let connection = Connection::open(&database).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE models(unknown_credential_layout BLOB); PRAGMA user_version = 30;",
+            )
+            .unwrap();
+        drop(connection);
+        let before = fs::read(&database).unwrap();
+        assert!(execute(options(fixture.path(), true)).is_err());
+        assert_eq!(fs::read(database).unwrap(), before);
+    }
+
+    #[test]
+    fn exact_v35_reset_preserves_configuration_and_credentials_without_migrating_history() {
+        let fixture = tempfile::tempdir().unwrap();
+        let secret = "previous-schema-reset-test-token";
+        populated_storage(fixture.path(), secret);
+        let database = fs::canonicalize(fixture.path().join(DATABASE_FILE_NAME)).unwrap();
+        downgrade_fixture_to_exact_v35(&database);
+        let before = fs::read(&database).unwrap();
+        let connection = open_read_only(&database).unwrap();
+        let exact_before = snapshot_exact_configuration_tables(&connection).unwrap();
+        let old_conversations = count_rows_if_table_exists(&connection, "conversations").unwrap();
+        assert!(old_conversations > 0);
+        drop(connection);
+        let preview = execute(options(fixture.path(), false)).unwrap();
+        assert!(preview.preserved_configuration);
+        assert_eq!(fs::read(&database).unwrap(), before);
 
         let report = execute(options(fixture.path(), true)).unwrap();
-
-        assert!(report.confirmed);
-        assert!(report
-            .backup_path
-            .as_ref()
-            .is_some_and(|path| path.is_file()));
-        assert!(!report.preserved_configuration);
-        assert!(report
-            .render()
-            .contains("configuration preservation: skipped (unsupported schema; defaults used)"));
-        assert_eq!(report.model_count, 0);
         let storage = open_test_storage(&database);
-        assert!(storage.load_model_settings_snapshot().unwrap().is_none());
-        assert!(storage.load_projects().unwrap().is_empty());
+        let settings = storage
+            .load_model_settings_snapshot()
+            .unwrap()
+            .unwrap()
+            .settings;
+        assert_eq!(settings.api_token, secret);
+        assert_eq!(
+            settings.models[0].api_token_override.as_deref(),
+            Some(format!("model-{secret}").as_str())
+        );
+        assert_eq!(
+            storage.load_ui_preferences().unwrap().profile_display_name,
+            "Reset Test"
+        );
         assert!(storage.load_conversations().unwrap().is_empty());
+        drop(storage);
+        let connection = open_read_only(&database).unwrap();
+        assert_eq!(storage_schema_version(&connection).unwrap(), 36);
+        assert_eq!(
+            snapshot_exact_configuration_tables(&connection).unwrap(),
+            exact_before
+        );
+        assert_eq!(
+            load_human_interaction_settings_for_reset(&connection).unwrap(),
+            Default::default()
+        );
+        let backup = open_read_only(report.backup_path.as_ref().unwrap()).unwrap();
+        assert_eq!(storage_schema_version(&backup).unwrap(), 35);
+        assert_eq!(
+            count_rows_if_table_exists(&backup, "conversations").unwrap(),
+            old_conversations
+        );
+        assert_eq!(
+            storage_catalog_fingerprint(&backup).unwrap(),
+            PREVIOUS_CONFIGURATION_SOURCE_FINGERPRINT
+        );
+    }
+
+    #[test]
+    fn tampered_v35_reset_refuses_before_configuration_is_replaced() {
+        let fixture = tempfile::tempdir().unwrap();
+        populated_storage(fixture.path(), "preserve-tampered-previous-config");
+        let database = fixture.path().join(DATABASE_FILE_NAME);
+        downgrade_fixture_to_exact_v35(&database);
+        let connection = Connection::open(&database).unwrap();
+        connection
+            .execute("CREATE TABLE unexpected(value TEXT)", [])
+            .unwrap();
+        drop(connection);
+        let before = fs::read(&database).unwrap();
+        assert!(execute(options(fixture.path(), true))
+            .unwrap_err()
+            .to_string()
+            .contains("not exactly canonical"));
+        assert_eq!(fs::read(database).unwrap(), before);
     }
 
     #[test]

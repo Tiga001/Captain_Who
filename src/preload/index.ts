@@ -10,6 +10,7 @@ import { createOfficeIpcBridge } from './OfficeIpcBridge'
 import { createImageGenerationIpcBridge } from './ImageGenerationIpcBridge'
 import { createMcpIpcBridge } from './McpIpcBridge'
 import { createNotificationIpcBridge } from './NotificationIpcBridge'
+import { createHumanInteractionIpcBridge } from './HumanInteractionIpcBridge'
 import { createStorageIpcBridge } from './StorageIpcBridge'
 import { createTerminalIpcBridge } from './TerminalIpcBridge'
 import { createWorkspaceFilesIpcBridge } from './WorkspaceFilesIpcBridge'
@@ -27,6 +28,7 @@ const host: HostApi = {
   },
   browser: createBrowserIpcBridge(ipcRenderer),
   git: createGitIpcBridge(ipcRenderer),
+  humanInteraction: createHumanInteractionIpcBridge(ipcRenderer),
   imageGeneration: createImageGenerationIpcBridge(ipcRenderer),
   mcp: createMcpIpcBridge(ipcRenderer),
   notifications: createNotificationIpcBridge(ipcRenderer),

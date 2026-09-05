@@ -6101,3 +6101,84 @@ CREATE TABLE manual_context_compaction_usage_records (
         );
 CREATE INDEX idx_manual_context_compaction_usage_created_at
             ON manual_context_compaction_usage_records(created_at, model_id);
+
+-- Human interaction schema v36. Earlier catalogs require an explicit development reset.
+CREATE TABLE human_interaction_settings (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    enabled INTEGER NOT NULL CHECK (typeof(enabled) = 'integer' AND enabled IN (0, 1)),
+    revision INTEGER NOT NULL CHECK (typeof(revision) = 'integer' AND revision BETWEEN 0 AND 9007199254740991),
+    updated_at INTEGER NOT NULL CHECK (typeof(updated_at) = 'integer' AND updated_at BETWEEN 0 AND 9007199254740991)
+);
+INSERT INTO human_interaction_settings(singleton, enabled, revision, updated_at) VALUES (1, 1, 0, 0);
+CREATE TABLE human_interaction_requests (
+    sequence INTEGER PRIMARY KEY AUTOINCREMENT CHECK (sequence BETWEEN 1 AND 9007199254740991),
+    request_id TEXT NOT NULL UNIQUE,
+    conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+    agent_id TEXT NOT NULL REFERENCES agent_nodes(agent_id) ON DELETE CASCADE,
+    run_id TEXT NOT NULL,
+    assistant_message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+    tool_call_id TEXT NOT NULL,
+    mode TEXT NOT NULL CHECK (mode IN ('sync', 'async')),
+    status TEXT NOT NULL CHECK (status IN ('open', 'submitted', 'ignored', 'cancelled')),
+    revision INTEGER NOT NULL CHECK (typeof(revision) = 'integer' AND revision BETWEEN 0 AND 9007199254740991),
+    policy_revision INTEGER NOT NULL CHECK (typeof(policy_revision) = 'integer' AND policy_revision BETWEEN 0 AND 9007199254740991),
+    questions_json TEXT NOT NULL CHECK (json_valid(questions_json) AND json_type(questions_json) = 'array' AND length(CAST(questions_json AS BLOB)) <= 1048576),
+    created_at INTEGER NOT NULL CHECK (typeof(created_at) = 'integer' AND created_at BETWEEN 0 AND 9007199254740991),
+    updated_at INTEGER NOT NULL CHECK (typeof(updated_at) = 'integer' AND updated_at BETWEEN created_at AND 9007199254740991),
+    UNIQUE (run_id, tool_call_id),
+    CHECK (status != 'ignored' OR mode = 'async')
+);
+CREATE INDEX idx_human_interaction_requests_conversation
+    ON human_interaction_requests(conversation_id, sequence DESC);
+CREATE UNIQUE INDEX idx_human_interaction_sync_open
+    ON human_interaction_requests(conversation_id) WHERE mode = 'sync' AND status = 'open';
+CREATE TRIGGER human_interaction_requests_immutable_identity
+BEFORE UPDATE ON human_interaction_requests
+WHEN NEW.sequence IS NOT OLD.sequence OR NEW.request_id IS NOT OLD.request_id OR NEW.conversation_id IS NOT OLD.conversation_id
+    OR NEW.agent_id IS NOT OLD.agent_id OR NEW.run_id IS NOT OLD.run_id
+    OR NEW.assistant_message_id IS NOT OLD.assistant_message_id OR NEW.tool_call_id IS NOT OLD.tool_call_id
+    OR NEW.mode IS NOT OLD.mode OR NEW.policy_revision IS NOT OLD.policy_revision
+    OR NEW.questions_json IS NOT OLD.questions_json OR NEW.created_at IS NOT OLD.created_at
+BEGIN
+    SELECT RAISE(ABORT, 'human interaction request identity is immutable');
+END;
+CREATE TRIGGER human_interaction_requests_terminal
+BEFORE UPDATE ON human_interaction_requests
+WHEN OLD.status != 'open' AND NEW.status IS NOT OLD.status
+BEGIN
+    SELECT RAISE(ABORT, 'human interaction request is already settled');
+END;
+CREATE TABLE human_interaction_responses (
+    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+    response_id TEXT NOT NULL UNIQUE,
+    request_id TEXT NOT NULL UNIQUE REFERENCES human_interaction_requests(request_id) ON DELETE CASCADE,
+    submission_id TEXT NOT NULL,
+    base_revision INTEGER NOT NULL CHECK (typeof(base_revision) = 'integer' AND base_revision BETWEEN 0 AND 9007199254740991),
+    kind TEXT NOT NULL CHECK (kind IN ('submitted', 'ignored')),
+    answers_json TEXT NOT NULL CHECK (json_valid(answers_json) AND json_type(answers_json) = 'array' AND length(CAST(answers_json AS BLOB)) <= 262144),
+    created_at INTEGER NOT NULL CHECK (typeof(created_at) = 'integer' AND created_at BETWEEN 0 AND 9007199254740991)
+);
+CREATE TRIGGER human_interaction_responses_immutable
+BEFORE UPDATE ON human_interaction_responses
+BEGIN
+    SELECT RAISE(ABORT, 'human interaction response is immutable');
+END;
+CREATE TABLE human_interaction_deliveries (
+    response_id TEXT PRIMARY KEY REFERENCES human_interaction_responses(response_id) ON DELETE CASCADE,
+    status TEXT NOT NULL CHECK (status IN ('pending', 'bound', 'applied', 'cancelled', 'failed')),
+    revision INTEGER NOT NULL CHECK (typeof(revision) = 'integer' AND revision BETWEEN 0 AND 9007199254740991),
+    target_run_id TEXT,
+    user_message_id TEXT REFERENCES messages(id) ON DELETE SET NULL,
+    error_code TEXT
+);
+CREATE TABLE human_interaction_suspensions (
+    request_id TEXT PRIMARY KEY REFERENCES human_interaction_requests(request_id) ON DELETE CASCADE,
+    run_id TEXT NOT NULL,
+    assistant_message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+    tool_call_id TEXT NOT NULL,
+    checkpoint_json TEXT NOT NULL CHECK (json_valid(checkpoint_json) AND json_type(checkpoint_json) = 'object' AND length(CAST(checkpoint_json AS BLOB)) <= 1048576),
+    status TEXT NOT NULL CHECK (status IN ('waiting', 'cancelled')),
+    revision INTEGER NOT NULL CHECK (typeof(revision) = 'integer' AND revision BETWEEN 0 AND 9007199254740991),
+    created_at INTEGER NOT NULL CHECK (typeof(created_at) = 'integer' AND created_at BETWEEN 0 AND 9007199254740991),
+    updated_at INTEGER NOT NULL CHECK (typeof(updated_at) = 'integer' AND updated_at BETWEEN created_at AND 9007199254740991)
+);

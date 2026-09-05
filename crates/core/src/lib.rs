@@ -18,6 +18,7 @@ pub mod file_change;
 pub mod file_change_support;
 pub mod file_input;
 pub mod git_review;
+pub mod human_interaction;
 pub mod image_generation;
 mod llm;
 mod model_request_observation;
@@ -344,8 +345,9 @@ pub use runtime::{
     AgentRuntimeHostServices, AgentSamplingBoundaryDelivery, AgentSamplingBoundaryInbox,
     AgentSamplingBoundaryMessage, AgentSamplingBoundaryRequest, AgentSkillActivationResolver,
     AgentSkillCheckpointAuthority, AgentSteerEnqueueOutcome, AgentSteerInputQueue,
-    AGENT_COMMAND_SESSION_DEFAULT_WAIT_MS, AGENT_COMMAND_SESSION_INTERRUPT_WAIT_MS,
-    AGENT_COMMAND_SESSION_MAX_WAIT_MS, AGENT_COMMAND_SESSION_MODEL_OUTPUT_BYTES,
+    HumanInteractionPolicySource, AGENT_COMMAND_SESSION_DEFAULT_WAIT_MS,
+    AGENT_COMMAND_SESSION_INTERRUPT_WAIT_MS, AGENT_COMMAND_SESSION_MAX_WAIT_MS,
+    AGENT_COMMAND_SESSION_MODEL_OUTPUT_BYTES,
 };
 pub use system_paths::expand_system_path;
 pub use tools::{

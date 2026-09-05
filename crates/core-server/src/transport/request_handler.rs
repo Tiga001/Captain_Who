@@ -16,6 +16,9 @@ pub(crate) fn handle_request(
     if is_notification_request_method(&request.method) {
         return handle_notification_request(storage, request);
     }
+    if is_human_interaction_method(&request.method) {
+        return handle_human_interaction_request(storage, agent_service, notification_tx, request);
+    }
 
     match request.method.as_str() {
         CORE_PING_METHOD => handle_core_ping(request.id, request.params),

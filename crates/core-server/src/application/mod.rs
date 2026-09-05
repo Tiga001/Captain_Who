@@ -12,5 +12,6 @@ pub(crate) mod agent_support;
 pub(crate) mod agent_wait;
 pub(crate) mod automation;
 pub(crate) mod collaboration_authorization;
+pub(crate) mod human_interaction;
 pub(crate) mod mcp;
 pub(crate) mod notification;

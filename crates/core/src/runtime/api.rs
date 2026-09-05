@@ -403,11 +403,30 @@ pub struct AgentRuntimeHostServices {
     pub(super) collaboration_inbox: Option<Arc<dyn AgentSamplingBoundaryInbox>>,
     pub(super) agent_collaboration: Option<crate::AgentCollaborationRuntimeServices>,
     pub(super) automation_report_sink: Option<Arc<dyn crate::AutomationReportSink>>,
+    pub(super) human_interaction_policy: Option<Arc<dyn HumanInteractionPolicySource>>,
+}
+
+/// Live Host-owned policy for human questions. This is not model/Renderer input and is never
+/// restored from a checkpoint as authorization. The runtime freezes one snapshot per request;
+/// future question execution must read it again before creating a new durable request.
+/// Supplying policy does not enable execution: readiness belongs to the runtime implementation.
+pub trait HumanInteractionPolicySource: Send + Sync {
+    fn snapshot(&self) -> AgentResult<crate::human_interaction::HumanInteractionSettings>;
 }
 
 impl AgentRuntimeHostServices {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Installs the policy source for a human-owned root run. Capability preparation additionally
+    /// excludes child and automation inputs, even if a Host accidentally passes this service.
+    pub fn with_human_interaction_policy(
+        mut self,
+        policy: Arc<dyn HumanInteractionPolicySource>,
+    ) -> Self {
+        self.human_interaction_policy = Some(policy);
+        self
     }
 
     pub fn with_host_actions(
@@ -772,6 +791,7 @@ pub fn prepare_context_window_tool_projection(
             builtin_capabilities: host_services.builtin_capabilities.clone(),
             agent_collaboration_enabled: host_services.agent_collaboration.is_some(),
             automation_report_sink: host_services.automation_report_sink.clone(),
+            human_interaction_policy: host_services.human_interaction_policy.clone(),
         },
     )?;
     let initial_run_world_state = RunWorldStateTracker::new_with_extension_sections(

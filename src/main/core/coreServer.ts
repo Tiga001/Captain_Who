@@ -114,7 +114,7 @@ import {
   parseNotificationSummaryOutput
 } from '@mycopilot/protocol'
 
-import { CoreServerManagementApi } from './coreServerManagementApi'
+import { CoreServerHumanInteractionApi } from './coreServerHumanInteractionApi'
 import { CoreJsonRpcClient } from './jsonRpcClient'
 
 const CORE_PING_METHOD = 'core.ping'
@@ -149,7 +149,7 @@ export interface CoreServerOptions {
 }
 
 /** Sole owner of the Core JSON-RPC process lifecycle; request families live in stateless bases. */
-export class CoreServer extends CoreServerManagementApi {
+export class CoreServer extends CoreServerHumanInteractionApi {
   private readonly automationResyncHandlers = new Set<(event: AutomationResync) => void>()
   private automationResyncSubscription: (() => void) | null = null
   private latestAutomationResync: AutomationResync | null = null

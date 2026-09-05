@@ -388,6 +388,16 @@ impl AgentService {
             .with_trace_observer(trace_observer)
             .with_model_request_observer(model_request_observer)
             .with_context_compaction(context_compaction_services);
+        if agent_input.context.as_ref().is_some_and(|context| {
+            context.collaboration_identity.is_none()
+                && context.conversation_id.as_deref() == Some(conversation_id.as_str())
+        }) && agent_input.prompt_preferences.as_ref().is_none_or(|preferences| {
+            preferences.automation_execution_context.is_none()
+        }) {
+            host_services = host_services.with_human_interaction_policy(Arc::new(
+                crate::application::human_interaction::StoredHumanInteractionPolicy(self.storage.clone()),
+            ));
+        }
         if let Some(sink) = automation_report_sink {
             host_services = host_services.with_automation_report_sink(sink);
         }

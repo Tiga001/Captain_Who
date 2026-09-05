@@ -1,4 +1,12 @@
 import type {
+  HumanInteractionSettings,
+  HumanInteractionSettingsGetInput,
+  HumanInteractionSettingsUpdate,
+  HumanInteractionListInput,
+  HumanInteractionListOutput,
+  HumanInteractionSubmitInput,
+  HumanInteractionIgnoreInput,
+  HumanInteractionRequestSnapshot,
   AgentActionExecutionOutput,
   AgentActionIdRequest,
   AgentApproveActionRequest,
@@ -340,6 +348,26 @@ export interface OfficeHostApi {
   getStatus(): Promise<OfficeEngineStatus>
 }
 
+export interface HumanInteractionHostApi {
+  getSettings(
+    input: HumanInteractionSettingsGetInput
+  ): Promise<HostInvocationResult<HumanInteractionSettings>>
+  updateSettings(
+    input: HumanInteractionSettingsUpdate
+  ): Promise<HostInvocationResult<HumanInteractionSettings>>
+  listRequests(
+    input: HumanInteractionListInput
+  ): Promise<HostInvocationResult<HumanInteractionListOutput>>
+  submit(
+    input: HumanInteractionSubmitInput
+  ): Promise<HostInvocationResult<HumanInteractionRequestSnapshot>>
+  ignore(
+    input: HumanInteractionIgnoreInput
+  ): Promise<HostInvocationResult<HumanInteractionRequestSnapshot>>
+  onSettingsChanged(handler: (settings: HumanInteractionSettings) => void): () => void
+  onRequestChanged(handler: (request: HumanInteractionRequestSnapshot) => void): () => void
+}
+
 export interface StorageHostApi {
   loadModelSettings(): Promise<StorageModelSettingsRecord | null>
   loadProviderProfileUiDescriptors(): Promise<ProviderProfileUiDescriptor[]>
@@ -644,6 +672,7 @@ export interface HostApi {
   automations: AutomationsHostApi
   browser: BrowserHostApi
   git: GitHostApi
+  humanInteraction: HumanInteractionHostApi
   imageGeneration: ImageGenerationHostApi
   mcp: McpHostApi
   notifications: NotificationsHostApi

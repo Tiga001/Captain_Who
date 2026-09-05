@@ -1,6 +1,10 @@
 use super::*;
 use crate::tools::AgentToolExposure;
 
+#[cfg(test)]
+#[path = "preparation/human_interaction_tests.rs"]
+mod human_interaction_tests;
+
 pub(super) struct RuntimeCapabilityServices {
     pub(super) host_actions_available: bool,
     pub(super) office_engine: Option<Arc<dyn crate::office::OfficeEngine>>,
@@ -16,6 +20,7 @@ pub(super) struct RuntimeCapabilityServices {
     pub(super) builtin_capabilities: Option<crate::BuiltinCapabilityRuntime>,
     pub(super) agent_collaboration_enabled: bool,
     pub(super) automation_report_sink: Option<Arc<dyn crate::AutomationReportSink>>,
+    pub(super) human_interaction_policy: Option<Arc<dyn HumanInteractionPolicySource>>,
 }
 
 pub(super) struct DurableConversationTimeline {
@@ -47,6 +52,7 @@ pub(super) fn prepare_runtime_capabilities(
             builtin_capabilities: None,
             agent_collaboration_enabled: false,
             automation_report_sink: None,
+            human_interaction_policy: None,
         },
     )
 }
@@ -69,16 +75,33 @@ pub(super) fn prepare_runtime_capabilities_with_skills(
         builtin_capabilities,
         agent_collaboration_enabled,
         automation_report_sink,
+        human_interaction_policy,
     } = services;
-    let runtime_extensions = RuntimeExtensions::for_run_with_capabilities(
+    let human_root = input.context.as_ref().is_some_and(|context| {
+        context.collaboration_identity.is_none()
+            && context
+                .conversation_id
+                .as_deref()
+                .is_some_and(|id| !id.trim().is_empty())
+    }) && automation_report_sink.is_none()
+        && input
+            .prompt_preferences
+            .as_ref()
+            .is_none_or(|preferences| preferences.automation_execution_context.is_none());
+    let mut runtime_extensions = RuntimeExtensions::for_run_with_capabilities(
         run_id,
         input.skill_discovery.clone(),
         input.skill_activation.as_ref(),
         skill_activation_resolver,
         skill_resources,
-        builtin_capabilities,
+        extensions::RuntimeExtensionHostServices {
+            builtin_capabilities,
+            human_interaction_policy: human_root.then_some(human_interaction_policy).flatten(),
+            human_root,
+        },
         extension_snapshots,
     )?;
+    runtime_extensions.prepare_model_request()?;
     let mut tool_registry = ToolRegistry::defaults_with_search_office_and_image(
         input.search_config.as_ref(),
         office_engine,
@@ -667,6 +690,7 @@ mod approval_identity_tests {
             builtin_capabilities: None,
             agent_collaboration_enabled,
             automation_report_sink: None,
+            human_interaction_policy: None,
         }
     }
 

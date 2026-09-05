@@ -1,0 +1,56 @@
+{
+  "settings": { "enabled": true, "revision": 0, "updatedAt": 0 },
+  "settingsUpdate": { "enabled": false, "expectedRevision": 0 },
+  "settingsUpdated": { "enabled": false, "revision": 1, "updatedAt": 10 },
+  "toolInput": {
+    "questions": [
+      { "title": "选择发布方式", "options": ["分阶段发布", "同时发布"] },
+      { "title": "还有其他约束吗？" }
+    ]
+  },
+  "request": {
+    "schemaVersion": 1,
+    "requestId": "question-request-1",
+    "sequence": 1,
+    "conversationId": "conversation-1",
+    "runId": "run-1",
+    "assistantMessageId": "assistant-1",
+    "toolCallId": "tool-call-1",
+    "mode": "async",
+    "status": "open",
+    "revision": 0,
+    "policyRevision": 0,
+    "questions": [
+      {
+        "id": "question-1",
+        "title": "选择发布方式",
+        "options": [
+          { "id": "option-1", "label": "分阶段发布" },
+          { "id": "option-2", "label": "同时发布" }
+        ]
+      },
+      { "id": "question-2", "title": "还有其他约束吗？", "options": null }
+    ],
+    "response": null,
+    "delivery": null,
+    "createdAt": 10,
+    "updatedAt": 10
+  },
+  "listInput": { "conversationId": "conversation-1", "cursor": null, "limit": 50 },
+  "submit": {
+    "conversationId": "conversation-1",
+    "requestId": "question-request-1",
+    "expectedRevision": 0,
+    "submissionId": "submission-1",
+    "answers": [
+      { "kind": "option", "questionId": "question-1", "optionId": "option-1" },
+      { "kind": "text", "questionId": "question-2", "text": "请保留回滚入口。" }
+    ]
+  },
+  "ignore": {
+    "conversationId": "conversation-1",
+    "requestId": "question-request-1",
+    "expectedRevision": 0,
+    "submissionId": "submission-ignored-1"
+  }
+}

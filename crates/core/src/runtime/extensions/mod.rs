@@ -13,6 +13,7 @@
 //! compaction-generation request, but they never control that restart.
 
 mod builtin_capability;
+mod human_interaction;
 mod skills;
 mod todo;
 
@@ -135,6 +136,12 @@ pub(super) enum RuntimeEffect {
 trait RuntimeExtension: Send {
     fn descriptor(&self) -> ExtensionDescriptor;
 
+    /// Freezes any live policy once, before schema/capabilities, World State and request context
+    /// are projected. Those projections must not independently re-read mutable Host state.
+    fn prepare_model_request(&mut self) -> AgentResult<()> {
+        Ok(())
+    }
+
     fn tools(&self) -> Vec<Box<dyn AgentTool>> {
         Vec::new()
     }
@@ -177,6 +184,13 @@ pub(super) struct RuntimeExtensions {
     todo: Option<TodoStateHandle>,
 }
 
+#[derive(Default)]
+pub(super) struct RuntimeExtensionHostServices {
+    pub(super) builtin_capabilities: Option<crate::BuiltinCapabilityRuntime>,
+    pub(super) human_interaction_policy: Option<Arc<dyn crate::HumanInteractionPolicySource>>,
+    pub(super) human_root: bool,
+}
+
 impl RuntimeExtensions {
     #[cfg(test)]
     pub(super) fn for_run(run_id: &str, snapshots: &[AgentExtensionSnapshot]) -> AgentResult<Self> {
@@ -198,7 +212,7 @@ impl RuntimeExtensions {
             initial_activation,
             activation_resolver,
             skill_resources,
-            None,
+            RuntimeExtensionHostServices::default(),
             snapshots,
         )
     }
@@ -209,7 +223,7 @@ impl RuntimeExtensions {
         initial_activation: Option<&AgentSkillActivation>,
         activation_resolver: Option<AgentSkillActivationResolver>,
         skill_resources: Option<Arc<SkillResourceSession>>,
-        builtin_capabilities: Option<crate::BuiltinCapabilityRuntime>,
+        host_services: RuntimeExtensionHostServices,
         snapshots: &[AgentExtensionSnapshot],
     ) -> AgentResult<Self> {
         // A checkpoint is the authority for the logical run. Resume payloads may be rebuilt from
@@ -238,10 +252,20 @@ impl RuntimeExtensions {
         };
         let (todo, todo_handle) = TodoExtension::new(run_id.to_string());
         let mut extensions: Vec<Box<dyn RuntimeExtension>> = vec![Box::new(skills)];
-        if let Some(runtime) = builtin_capabilities {
+        if let Some(runtime) = host_services.builtin_capabilities {
             extensions.push(Box::new(BuiltinCapabilityExtension::new(
                 run_id.to_string(),
                 runtime,
+            )));
+        }
+        if host_services.human_root
+            && (host_services.human_interaction_policy.is_some()
+                || snapshots.iter().any(|snapshot| {
+                    snapshot.extension_id == human_interaction::HUMAN_INTERACTION_EXTENSION_ID
+                }))
+        {
+            extensions.push(Box::new(human_interaction::HumanInteractionExtension::new(
+                host_services.human_interaction_policy,
             )));
         }
         extensions.push(Box::new(todo));
@@ -294,6 +318,13 @@ impl RuntimeExtensions {
             for tool in extension.tools() {
                 registry.register_extension_tool(descriptor.id, tool)?;
             }
+        }
+        Ok(())
+    }
+
+    pub(super) fn prepare_model_request(&mut self) -> AgentResult<()> {
+        for extension in &mut self.extensions {
+            extension.prepare_model_request()?;
         }
         Ok(())
     }

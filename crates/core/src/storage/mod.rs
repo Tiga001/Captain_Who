@@ -31,6 +31,7 @@ mod database_snapshot;
 pub mod file_change_repository;
 pub mod file_change_run_grant_repository;
 pub mod guidance_repository;
+pub mod human_interaction_repository;
 pub mod image_generation_execution_repository;
 pub mod image_generation_repository;
 pub mod managed_artifact_repository;

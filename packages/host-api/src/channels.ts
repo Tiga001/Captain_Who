@@ -90,6 +90,15 @@ export const HOST_CHANNELS = {
     openRequestedReady: 'host:notifications.openRequestedReady',
     openRequested: 'host:notifications.openRequested'
   },
+  humanInteraction: {
+    getSettings: 'host:humanInteraction.getSettings',
+    updateSettings: 'host:humanInteraction.updateSettings',
+    listRequests: 'host:humanInteraction.listRequests',
+    submit: 'host:humanInteraction.submit',
+    ignore: 'host:humanInteraction.ignore',
+    settingsChanged: 'host:humanInteraction.settingsChanged',
+    requestChanged: 'host:humanInteraction.requestChanged'
+  },
   browser: {
     artifactExport: 'host:browser.artifact.export',
     artifactReadPreview: 'host:browser.artifact.readPreview',

@@ -1,21 +1,17 @@
 use rusqlite::{ffi, Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
 
-pub const STORAGE_SCHEMA_VERSION: i32 = 35;
+pub const STORAGE_SCHEMA_VERSION: i32 = 36;
 pub const DEVELOPMENT_STORAGE_SCHEMA_RESET_REQUIRED: &str =
     "development_storage_schema_reset_required";
 
 const CANONICAL_SCHEMA: &str = include_str!("canonical_schema.sql");
 const CANONICAL_SCHEMA_FINGERPRINT: &str =
-    "sha256:794df50e6e2db70432cb0a233befa5cda47ff7069e98dd3ae53d94fd87a45c4b";
-const PREVIOUS_SCHEMA_VERSION: i32 = 34;
-const PREVIOUS_SCHEMA_FINGERPRINT: &str =
-    "sha256:10c4053e2800f3f3d81acf76b03c0492248bc7c3724e8d58a9a4b6af05789c92";
-const SCHEMA_UPGRADE: &str = include_str!("schema_upgrade_v35.sql");
-/// Opens the canonical schema, preserving the explicitly supported v34 predecessor.
+    "sha256:e11e09c7ea7a36fa1df8e7d47c5caaba8cb812158d84c82900e76a568ac170a1";
+/// Opens the canonical schema without migrating historical development databases.
 ///
 /// A brand-new database is initialized atomically. Existing development databases must already
-/// match the canonical catalog or the exact v34 catalog. Other versions require an explicit reset.
+/// match the canonical catalog. Other versions require an explicit reset.
 pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
     connection.execute_batch("PRAGMA foreign_keys = ON;")?;
 
@@ -24,16 +20,6 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
 
     if schema_version == 0 && object_count == 0 {
         return create_canonical_schema(connection);
-    }
-
-    if schema_version == PREVIOUS_SCHEMA_VERSION {
-        validate_schema_fingerprint(connection, PREVIOUS_SCHEMA_FINGERPRINT)?;
-        ensure_foreign_keys_are_valid(connection)?;
-        let transaction = connection.unchecked_transaction()?;
-        transaction.execute_batch(SCHEMA_UPGRADE)?;
-        transaction.pragma_update(None, "user_version", STORAGE_SCHEMA_VERSION)?;
-        validate_canonical_schema(&transaction)?;
-        return transaction.commit();
     }
 
     if schema_version != STORAGE_SCHEMA_VERSION {
@@ -141,119 +127,158 @@ mod tests {
     use super::*;
 
     #[test]
-    fn exact_v34_upgrade_preserves_history_and_is_idempotent() {
-        let fixture = tempfile::tempdir().unwrap();
-        let path = fixture.path().join("v34.sqlite");
-        let connection = Connection::open(&path).unwrap();
-        connection
-            .execute_batch(CANONICAL_SCHEMA.strip_suffix(SCHEMA_UPGRADE).unwrap())
-            .unwrap();
-        connection.pragma_update(None, "user_version", 34).unwrap();
-        validate_schema_fingerprint(&connection, PREVIOUS_SCHEMA_FINGERPRINT).unwrap();
-        connection.execute_batch(
-            "INSERT INTO conversations(id,title,created_at,updated_at) VALUES ('upgrade-history','保存历史',10,20);
-             INSERT INTO messages(id,conversation_id,role,content,status,created_at,position)
-             VALUES ('upgrade-user','upgrade-history','user','原始问题 /路径/中文','sent',10,0),
-                    ('upgrade-assistant','upgrade-history','assistant','原始回复','sent',20,1);
-             INSERT INTO chat_message_ui_states(message_id,ui_state_json)
-             VALUES ('upgrade-assistant','{\"favorited\":true}');
-             INSERT INTO agent_usage_records(id,conversation_id,message_id,run_id,model_id,model_name,created_at,input_tokens,output_tokens,billable_request_count)
-             VALUES ('upgrade-usage','upgrade-history','upgrade-assistant','upgrade-run','old-model','旧模型',20,100,20,1);"
-        ).unwrap();
-        let before = connection.query_row("SELECT group_concat(id || ':' || content, '|') FROM (SELECT id,content FROM messages ORDER BY position)", [], |row| row.get::<_,String>(0)).unwrap();
-        run_migrations(&connection).unwrap();
-        assert_eq!(
-            read_schema_version(&connection).unwrap(),
-            STORAGE_SCHEMA_VERSION
-        );
-        drop(connection);
-        let connection = Connection::open(path).unwrap();
-        run_migrations(&connection).unwrap();
-        let after = connection.query_row("SELECT group_concat(id || ':' || content, '|') FROM (SELECT id,content FROM messages ORDER BY position)", [], |row| row.get::<_,String>(0)).unwrap();
-        assert_eq!(before, after);
-        assert_eq!(
+    fn previous_development_versions_require_reset_without_any_write() {
+        for (version, suffix) in [
+            (34, "CREATE TABLE manual_context_compaction_operations ("),
+            (35, "-- Human interaction schema v36."),
+        ] {
+            let fixture = tempfile::tempdir().unwrap();
+            let path = fixture.path().join(format!("v{version}.sqlite"));
+            let connection = Connection::open(&path).unwrap();
             connection
-                .query_row(
-                    "SELECT input_tokens FROM agent_usage_records WHERE id='upgrade-usage'",
-                    [],
-                    |row| row.get::<_, i64>(0)
-                )
-                .unwrap(),
-            100
-        );
-        assert_eq!(connection.query_row("SELECT ui_state_json FROM chat_message_ui_states WHERE message_id='upgrade-assistant'", [], |row| row.get::<_,String>(0)).unwrap(), "{\"favorited\":true}");
-        ensure_foreign_keys_are_valid(&connection).unwrap();
-    }
-
-    #[test]
-    fn tampered_v34_is_rejected_before_any_upgrade_write() {
-        let connection = Connection::open_in_memory().unwrap();
-        connection
-            .execute_batch(CANONICAL_SCHEMA.strip_suffix(SCHEMA_UPGRADE).unwrap())
-            .unwrap();
-        connection.pragma_update(None, "user_version", 34).unwrap();
-        connection
-            .execute_batch("DROP INDEX idx_models_normalized_display_name")
-            .unwrap();
-        let before = schema_fingerprint(&connection).unwrap();
-        assert!(run_migrations(&connection).is_err());
-        assert_eq!(read_schema_version(&connection).unwrap(), 34);
-        assert_eq!(schema_fingerprint(&connection).unwrap(), before);
-        assert_eq!(connection.query_row("SELECT count(*) FROM sqlite_schema WHERE name='manual_context_compaction_operations'", [], |row| row.get::<_,i64>(0)).unwrap(), 0);
-    }
-
-    #[test]
-    fn v34_upgrade_rolls_back_catalog_when_a_later_ddl_fails() {
-        use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
-        let connection = Connection::open_in_memory().unwrap();
-        connection
-            .execute_batch(CANONICAL_SCHEMA.strip_suffix(SCHEMA_UPGRADE).unwrap())
-            .unwrap();
-        connection.pragma_update(None, "user_version", 34).unwrap();
-        connection.authorizer(Some(|context: AuthContext<'_>| {
-            if matches!(
-                context.action,
-                AuthAction::CreateIndex {
-                    index_name: "idx_manual_context_compaction_active",
-                    ..
-                }
-            ) {
-                Authorization::Deny
-            } else {
-                Authorization::Allow
+                .execute_batch(CANONICAL_SCHEMA.split_once(suffix).unwrap().0)
+                .unwrap();
+            connection
+                .pragma_update(None, "user_version", version)
+                .unwrap();
+            connection.execute_batch(
+                "INSERT INTO conversations(id,title,created_at,updated_at) VALUES ('old-history','保存历史',10,20);
+                 INSERT INTO messages(id,conversation_id,role,content,status,created_at,position)
+                 VALUES ('old-user','old-history','user','原始问题 /路径/中文','sent',10,0);
+                 INSERT INTO agent_usage_records(id,conversation_id,message_id,run_id,model_id,model_name,created_at,input_tokens,output_tokens,billable_request_count)
+                 VALUES ('old-usage','old-history','old-user','old-run','old-model','旧模型',20,100,20,1);"
+            ).unwrap();
+            drop(connection);
+            let before = std::fs::read(&path).unwrap();
+            for _ in 0..2 {
+                let connection = Connection::open(&path).unwrap();
+                let error = run_migrations(&connection).unwrap_err();
+                assert!(error
+                    .to_string()
+                    .contains(DEVELOPMENT_STORAGE_SCHEMA_RESET_REQUIRED));
+                assert_eq!(read_schema_version(&connection).unwrap(), version);
+                assert_eq!(
+                    connection
+                        .query_row(
+                            "SELECT content FROM messages WHERE id='old-user'",
+                            [],
+                            |row| row.get::<_, String>(0)
+                        )
+                        .unwrap(),
+                    "原始问题 /路径/中文"
+                );
+                assert_eq!(
+                    connection
+                        .query_row(
+                            "SELECT input_tokens FROM agent_usage_records WHERE id='old-usage'",
+                            [],
+                            |row| row.get::<_, i64>(0)
+                        )
+                        .unwrap(),
+                    100
+                );
+                assert_eq!(connection.query_row("SELECT count(*) FROM sqlite_schema WHERE name='human_interaction_settings'", [], |row| row.get::<_,i64>(0)).unwrap(), 0);
             }
-        }));
-        assert!(run_migrations(&connection).is_err());
-        connection.authorizer(None::<fn(AuthContext<'_>) -> Authorization>);
-        assert_eq!(read_schema_version(&connection).unwrap(), 34);
-        validate_schema_fingerprint(&connection, PREVIOUS_SCHEMA_FINGERPRINT).unwrap();
-        run_migrations(&connection).unwrap();
+            assert_eq!(std::fs::read(path).unwrap(), before);
+        }
     }
 
     #[test]
-    fn v34_foreign_key_violation_is_rejected_without_catalog_changes() {
+    fn human_interaction_schema_enforces_settlement_and_safe_storage_values() {
         let connection = Connection::open_in_memory().unwrap();
-        connection
-            .execute_batch(CANONICAL_SCHEMA.strip_suffix(SCHEMA_UPGRADE).unwrap())
-            .unwrap();
-        connection.pragma_update(None, "user_version", 34).unwrap();
+        run_migrations(&connection).unwrap();
+        assert_eq!(connection.query_row(
+            "SELECT enabled,revision,updated_at FROM human_interaction_settings WHERE singleton=1",
+            [], |row| Ok((row.get::<_,i64>(0)?,row.get::<_,i64>(1)?,row.get::<_,i64>(2)?))
+        ).unwrap(), (1,0,0));
+        for value in ["0.5", "-1", "9007199254740992"] {
+            for column in ["revision", "updated_at"] {
+                assert!(connection
+                    .execute(
+                        &format!("UPDATE human_interaction_settings SET {column}={value}"),
+                        []
+                    )
+                    .is_err());
+            }
+        }
+        // Exercise local constraints without fabricating the separately validated root graph.
         connection
             .pragma_update(None, "foreign_keys", false)
             .unwrap();
-        connection.execute("INSERT INTO messages(id,conversation_id,role,content,created_at,position) VALUES ('orphan','missing','user','preserve orphan evidence',1,0)", []).unwrap();
-        assert!(run_migrations(&connection).is_err());
-        assert_eq!(read_schema_version(&connection).unwrap(), 34);
-        validate_schema_fingerprint(&connection, PREVIOUS_SCHEMA_FINGERPRINT).unwrap();
+        connection.execute_batch(
+            "INSERT INTO human_interaction_requests(request_id,conversation_id,agent_id,run_id,assistant_message_id,tool_call_id,mode,status,revision,policy_revision,questions_json,created_at,updated_at) VALUES ('request','conversation','agent','run','assistant','tool','async','open',0,0,'[]',1,1);
+             UPDATE human_interaction_requests SET status='submitted',revision=1,updated_at=2 WHERE request_id='request';"
+        ).unwrap();
+        assert!(connection
+            .execute("UPDATE human_interaction_requests SET status='open'", [])
+            .is_err());
+        assert!(connection
+            .execute(
+                "UPDATE human_interaction_requests SET questions_json='[{}]'",
+                []
+            )
+            .is_err());
+        assert!(connection
+            .execute("UPDATE human_interaction_requests SET revision=0.5", [])
+            .is_err());
+        connection.execute("INSERT INTO human_interaction_responses(response_id,request_id,submission_id,base_revision,kind,answers_json,created_at) VALUES ('response','request','submit',0,'submitted','[]',2)", []).unwrap();
+        assert!(connection
+            .execute(
+                "UPDATE human_interaction_responses SET answers_json='[{}]'",
+                []
+            )
+            .is_err());
+        let oversize_answers = format!("[\"{}\"]", "a".repeat(262144));
+        assert!(connection.execute("INSERT INTO human_interaction_responses(response_id,request_id,submission_id,base_revision,kind,answers_json,created_at) VALUES ('large','other','large',0,'submitted',?1,2)", [oversize_answers]).is_err());
+        let oversize_checkpoint = format!("{{\"value\":\"{}\"}}", "a".repeat(1048576));
+        assert!(connection.execute("INSERT INTO human_interaction_suspensions VALUES ('request','run','assistant','tool',?1,'waiting',0,1,1)", [oversize_checkpoint]).is_err());
+    }
+
+    #[test]
+    fn human_interaction_request_sequence_orders_equal_timestamps_and_never_reuses_ids() {
+        let connection = Connection::open_in_memory().unwrap();
+        run_migrations(&connection).unwrap();
+        connection
+            .pragma_update(None, "foreign_keys", false)
+            .unwrap();
+        let insert = |sequence: Option<i64>, id: &str| {
+            connection.execute(
+            "INSERT INTO human_interaction_requests(sequence,request_id,conversation_id,agent_id,run_id,assistant_message_id,tool_call_id,mode,status,revision,policy_revision,questions_json,created_at,updated_at)
+             VALUES (?1,?2,'conversation','agent','run','assistant',?2,'async','open',0,0,'[]',1,1)",
+            rusqlite::params![sequence,id],
+        )
+        };
+        insert(None, "z-first").unwrap();
+        insert(None, "a-second").unwrap();
+        assert_eq!(connection.query_row(
+            "SELECT request_id FROM human_interaction_requests ORDER BY sequence DESC LIMIT 1",
+            [], |row| row.get::<_,String>(0),
+        ).unwrap(), "a-second");
+        assert!(connection
+            .execute(
+                "UPDATE human_interaction_requests SET sequence=99 WHERE request_id='z-first'",
+                []
+            )
+            .is_err());
+        connection
+            .execute(
+                "DELETE FROM human_interaction_requests WHERE request_id='a-second'",
+                [],
+            )
+            .unwrap();
+        insert(None, "m-third").unwrap();
         assert_eq!(
             connection
                 .query_row(
-                    "SELECT count(*) FROM messages WHERE id='orphan'",
+                    "SELECT sequence FROM human_interaction_requests WHERE request_id='m-third'",
                     [],
-                    |row| row.get::<_, i64>(0)
+                    |row| row.get::<_, i64>(0),
                 )
                 .unwrap(),
-            1
+            3
         );
+        assert!(insert(Some(0), "invalid-zero").is_err());
+        assert!(insert(Some(9_007_199_254_740_992), "invalid-overflow").is_err());
     }
 
     fn replace_once(haystack: String, old: &str, new: &str) -> String {
@@ -628,7 +653,7 @@ CREATE TABLE model_provider_credential_cleanup (
             .contains(DEVELOPMENT_STORAGE_SCHEMA_RESET_REQUIRED));
         assert!(error
             .to_string()
-            .contains("expected schema version 35, found 30"));
+            .contains("expected schema version 36, found 30"));
         assert_eq!(read_schema_version(&connection).unwrap(), 30);
         assert_eq!(schema_fingerprint(&connection).unwrap(), fingerprint_before);
         let columns = connection

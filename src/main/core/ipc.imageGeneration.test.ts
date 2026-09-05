@@ -42,7 +42,9 @@ function automationCoreStubs() {
     onAutomationEvent: vi.fn(() => vi.fn()),
     onAutomationResync: vi.fn(() => vi.fn()),
     onNotificationEvent: vi.fn(() => vi.fn()),
-    onNotificationResync: vi.fn(() => vi.fn())
+    onNotificationResync: vi.fn(() => vi.fn()),
+    onHumanInteractionSettingsChanged: vi.fn(() => vi.fn()),
+    onHumanInteractionRequestChanged: vi.fn(() => vi.fn())
   }
 }
 

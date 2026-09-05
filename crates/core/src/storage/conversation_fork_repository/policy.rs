@@ -72,6 +72,10 @@ const RUNTIME_ONLY_TABLES: &[&str] = &[
     "agent_model_batch_receipts",
     "agent_pending_actions",
     "agent_wake_requests",
+    "human_interaction_requests",
+    "human_interaction_responses",
+    "human_interaction_deliveries",
+    "human_interaction_suspensions",
 ];
 
 const DEDICATED_FORK_LOGIC_TABLES: &[&str] = &[
@@ -196,4 +200,12 @@ fn high_risk_fork_policies_stay_explicit() {
         policies.get("agent_usage_records"),
         Some(&ForkDataPolicy::DoNotCopy)
     );
+    for table in [
+        "human_interaction_requests",
+        "human_interaction_responses",
+        "human_interaction_deliveries",
+        "human_interaction_suspensions",
+    ] {
+        assert_eq!(policies.get(table), Some(&ForkDataPolicy::RuntimeOnly));
+    }
 }

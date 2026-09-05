@@ -49,6 +49,7 @@ impl AgentRuntime {
             collaboration_inbox,
             mut agent_collaboration,
             automation_report_sink,
+            human_interaction_policy,
         } = host_services.unwrap_or_default();
         let _steer_input_close_guard = AgentSteerInputCloseGuard::new(steer_input.clone());
         let run_id = run_id.unwrap_or_else(generate_run_id);
@@ -194,6 +195,7 @@ impl AgentRuntime {
                 builtin_capabilities,
                 agent_collaboration_enabled: agent_collaboration.is_some(),
                 automation_report_sink,
+                human_interaction_policy,
             },
         )
         .map_err(|error| {
@@ -562,6 +564,7 @@ impl AgentRuntime {
                     }
                     let model_request_index = next_model_request_index;
                     next_model_request_index = next_model_request_index.saturating_add(1);
+                    runtime_extensions.prepare_model_request()?;
                     effective_tool_set = tool_registry.effective_tool_set(
                         permitted_tool_definitions.iter().cloned(),
                         &runtime_extensions.active_tool_capabilities()?,
@@ -3242,4 +3245,3 @@ impl AgentRuntime {
         )
     }
 }
-
