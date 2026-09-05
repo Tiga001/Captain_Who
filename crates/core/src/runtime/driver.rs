@@ -28,6 +28,7 @@ impl AgentRuntime {
         host_services: Option<AgentRuntimeHostServices>,
     ) -> AgentResult<AgentChatOutput> {
         let AgentRuntimeHostServices {
+            web_search_policy,
             host_executor,
             storage,
             trace_observer,
@@ -200,6 +201,7 @@ impl AgentRuntime {
             &run_id,
             extension_snapshots,
             RuntimeCapabilityServices {
+                web_search_policy,
                 host_actions_available: host_executor.is_some(),
                 office_engine,
                 image_generation_execution,

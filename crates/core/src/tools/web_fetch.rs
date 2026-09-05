@@ -10,6 +10,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::net::{IpAddr, Ipv4Addr};
 use std::time::Duration;
+use std::sync::Arc;
 
 const TAVILY_EXTRACT_ENDPOINT: &str = "https://api.tavily.com/extract";
 const DEFAULT_EVENT_CONTENT_CHARS: usize = 40_000;
@@ -21,19 +22,27 @@ const MAX_CHUNKS_PER_SOURCE: usize = 5;
 const MAX_IMAGES: usize = 30;
 const MAX_FAILED_RESULTS: usize = 10;
 
-pub(super) struct WebFetchTool {
-    api_key: String,
+pub(crate) struct WebFetchTool {
+    policy: Arc<dyn crate::WebSearchPolicySource>,
 }
 
 impl WebFetchTool {
     pub fn new(api_key: String) -> Self {
-        Self { api_key }
+        Self::with_policy(Arc::new(crate::FrozenWebSearchPolicySource::from_search_config(Some(
+            &crate::AgentSearchConfig { mode: crate::AgentSearchMode::Auto, tavily_api_key: Some(api_key) },
+        ))))
+    }
+
+    pub(crate) fn with_policy(policy: Arc<dyn crate::WebSearchPolicySource>) -> Self {
+        Self { policy }
     }
 }
 
 impl AgentTool for WebFetchTool {
     fn exposure(&self) -> super::AgentToolExposure {
-        super::AgentToolExposure::Stable
+        super::AgentToolExposure::RequiresCapability(super::ToolCapabilityId::application_owned(
+            super::tool_set::WEB_SEARCH_CAPABILITY,
+        ))
     }
 
     fn permission_policy(&self) -> super::AgentToolPermissionPolicy {
@@ -77,8 +86,9 @@ impl AgentTool for WebFetchTool {
         let request = TavilyExtractRequest::from_args(args)?;
         let cancellation_token = context.cancellation_token();
         cancellation_token.check()?;
+        let api_key = self.policy.authorize_execution()?.into_secret();
         let response = block_on_tool_future(
-            TavilyExtractClient::new(self.api_key.clone())
+            TavilyExtractClient::new(api_key)
                 .extract(&request, cancellation_token.clone()),
         )?;
 

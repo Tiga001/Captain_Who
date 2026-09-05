@@ -13,7 +13,9 @@ use tokio::net::TcpListener;
 #[derive(Clone)]
 struct PayloadCapabilityProvider {
     manifest: BuiltinCapabilityManifest,
+    policy: Arc<Mutex<BuiltinCapabilityPolicy>>,
     grant: Arc<Mutex<Option<CapabilityGrant>>>,
+    invocations: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl BuiltinCapabilityProvider for PayloadCapabilityProvider {
@@ -22,10 +24,7 @@ impl BuiltinCapabilityProvider for PayloadCapabilityProvider {
     }
 
     fn policy(&self, _: &BuiltinCapabilityId) -> AgentResult<BuiltinCapabilityPolicy> {
-        Ok(BuiltinCapabilityPolicy {
-            user_allowed: true,
-            revision: 11,
-        })
+        Ok(self.policy.lock().unwrap().clone())
     }
 
     fn grant(&self, _: &str, _: &BuiltinCapabilityId) -> AgentResult<Option<CapabilityGrant>> {
@@ -74,6 +73,8 @@ impl BuiltinCapabilityProvider for PayloadCapabilityProvider {
         _: CapabilityGrant,
         _: AgentCancellationToken,
     ) -> BuiltinCapabilityFuture<'a, Value> {
+        self.invocations
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Box::pin(async { Err(AgentError::new("not invoked by payload projection test")) })
     }
 }
@@ -100,7 +101,12 @@ fn payload_capability_runtime() -> (BuiltinCapabilityRuntime, PayloadCapabilityP
     .unwrap();
     let provider = PayloadCapabilityProvider {
         manifest,
+        policy: Arc::new(Mutex::new(BuiltinCapabilityPolicy {
+            user_allowed: true,
+            revision: 11,
+        })),
         grant: Arc::new(Mutex::new(None)),
+        invocations: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
     };
     (
         BuiltinCapabilityRuntime::new(Arc::new(provider.clone())).unwrap(),
@@ -217,7 +223,7 @@ async fn run_payload_case(api_style: crate::protocol::AgentApiStyle) {
     let captured = Arc::new(Mutex::new(Vec::new()));
     let captured_for_server = Arc::clone(&captured);
     let server = tokio::spawn(async move {
-        for _ in 0..2 {
+        for _ in 0..5 {
             let (mut stream, _) = listener.accept().await.unwrap();
             let request = read_runtime_test_json_request(&mut stream).await;
             captured_for_server.lock().unwrap().push(request);
@@ -238,7 +244,17 @@ async fn run_payload_case(api_style: crate::protocol::AgentApiStyle) {
     });
 
     let run_id = "builtin-capability-provider-payload-run";
-    for activated in [false, true] {
+    for (allowed, revision, activated) in [
+        (false, 11, false),
+        (true, 12, false),
+        (true, 12, true),
+        (false, 13, false),
+        (true, 14, false),
+    ] {
+        *provider.policy.lock().unwrap() = BuiltinCapabilityPolicy {
+            user_allowed: allowed,
+            revision,
+        };
         if activated {
             let now = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -252,7 +268,7 @@ async fn run_payload_case(api_style: crate::protocol::AgentApiStyle) {
                 manifest_digest: manifest.manifest_digest.clone(),
                 upstream_catalog_digest: manifest.provider_contract.upstream_catalog_digest.clone(),
                 provider_policy_digest: manifest.provider_contract.policy_digest.clone(),
-                policy_revision: 11,
+                policy_revision: revision,
                 created_at: now,
                 expires_at: now + 60,
             });
@@ -285,23 +301,154 @@ async fn run_payload_case(api_style: crate::protocol::AgentApiStyle) {
     server.await.unwrap();
 
     let requests = captured.lock().unwrap();
-    let before = provider_tool_names(&requests[0], api_style);
+    for index in [0, 3] {
+        let disabled = provider_tool_names(&requests[index], api_style);
+        assert!(!disabled.contains(&"activate_capability"));
+        assert!(!disabled.contains(&"browser_snapshot"));
+        assert!(disabled.iter().all(|name| !name.starts_with("browser_")));
+        let payload = serde_json::to_string(&requests[index]).unwrap();
+        assert!(payload.contains("disabled_by_user"));
+        assert!(!payload.contains("Control the managed in-app browser"));
+        assert!(!payload.contains("Enabled built-in capabilities"));
+    }
+    let before = provider_tool_names(&requests[1], api_style);
     assert!(before.contains(&"activate_capability"));
     assert!(!before.contains(&"browser_snapshot"));
-    let after = provider_tool_names(&requests[1], api_style);
+    let after = provider_tool_names(&requests[2], api_style);
     assert!(after.contains(&"activate_capability"));
     assert!(after.contains(&"browser_snapshot"));
     assert_eq!(
-        provider_tool_schema(&requests[1], api_style, "browser_snapshot"),
+        provider_tool_schema(&requests[2], api_style, "browser_snapshot"),
         &reviewed_browser_schema(),
         "required/properties/items must survive the Provider-specific projection"
     );
+    let reenabled = provider_tool_names(&requests[4], api_style);
+    assert!(reenabled.contains(&"activate_capability"));
+    assert!(!reenabled.contains(&"browser_snapshot"));
+    assert!(serde_json::to_string(&requests[4])
+        .unwrap()
+        .contains("waiting_approval"));
+    assert!(!serde_json::to_string(provider_tool_schema(
+        &requests[4],
+        api_style,
+        "activate_capability"
+    ))
+    .unwrap()
+    .contains("browser"));
+
+    let system_prefix = |payload: &Value| match api_style {
+        crate::protocol::AgentApiStyle::OpenAiCompatible => payload["messages"][0].clone(),
+        crate::protocol::AgentApiStyle::AnthropicCompatible => payload["system"].clone(),
+    };
+    let prefix = system_prefix(&requests[0]);
+    assert!(!prefix.is_null());
+    for request in requests.iter().skip(1) {
+        assert_eq!(
+            prefix,
+            system_prefix(request),
+            "switches must not alter the stable system prefix"
+        );
+    }
 }
 
 #[tokio::test]
 async fn reviewed_dynamic_tool_enters_openai_and_anthropic_payload_only_after_grant() {
     run_payload_case(crate::protocol::AgentApiStyle::OpenAiCompatible).await;
     run_payload_case(crate::protocol::AgentApiStyle::AnthropicCompatible).await;
+}
+
+#[tokio::test]
+async fn disable_after_model_dispatch_rejects_late_call_and_cleans_next_request() {
+    let (runtime, provider) = payload_capability_runtime();
+    let run_id = "builtin-late-call-run";
+    let manifest = &runtime.manifests()[0];
+    let now = crate::builtin_capabilities::unix_timestamp();
+    *provider.grant.lock().unwrap() = Some(CapabilityGrant {
+        run_id: run_id.to_string(),
+        capability_id: manifest.descriptor.id.clone(),
+        activation_id: CapabilityActivationId::generate(),
+        manifest_digest: manifest.manifest_digest.clone(),
+        upstream_catalog_digest: manifest.provider_contract.upstream_catalog_digest.clone(),
+        provider_policy_digest: manifest.provider_contract.policy_digest.clone(),
+        policy_revision: 11,
+        created_at: now,
+        expires_at: now + 60,
+    });
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server_provider = provider.clone();
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let first = read_runtime_test_json_request(&mut stream).await;
+        assert!(
+            provider_tool_names(&first, crate::protocol::AgentApiStyle::OpenAiCompatible)
+                .contains(&"browser_snapshot")
+        );
+        *server_provider.policy.lock().unwrap() = BuiltinCapabilityPolicy {
+            user_allowed: false,
+            revision: 12,
+        };
+        write_runtime_test_json_response(
+            &mut stream,
+            json!({
+                "choices": [{
+                    "message": {"role":"assistant", "content":null, "tool_calls":[{
+                        "id":"late-browser-call", "type":"function", "function":{
+                            "name":"browser_snapshot",
+                            "arguments":r#"{"target":"current","options":{"wait_for":"ready"}}"#,
+                        }
+                    }]},
+                    "finish_reason":"tool_calls"
+                }]
+            }),
+        )
+        .await;
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let second = read_runtime_test_json_request(&mut stream).await;
+        let names = provider_tool_names(&second, crate::protocol::AgentApiStyle::OpenAiCompatible);
+        assert!(!names.contains(&"browser_snapshot"));
+        assert!(!names.contains(&"activate_capability"));
+        let next_payload = serde_json::to_string(&second).unwrap();
+        assert!(next_payload.contains("disabled_by_user"));
+        assert!(!next_payload.contains("Enabled built-in capabilities"));
+        assert!(!next_payload.contains("Control the managed in-app browser"));
+        assert!(
+            next_payload.contains("browser_snapshot"),
+            "the historical call must remain in context"
+        );
+        assert_eq!(first["messages"][0], second["messages"][0]);
+        write_runtime_test_json_response(&mut stream, json!({
+            "choices":[{"message":{"role":"assistant","content":"Capability disabled."},"finish_reason":"stop"}]
+        })).await;
+    });
+    let mut input = conversation_context_input(vec![message("user", "Inspect the page")]);
+    input.api_url = format!("http://{address}/v1/chat/completions");
+    input.api_token = "test-token".to_string();
+    input.stream = Some(false);
+    freeze_runtime_test_generic_provider(&mut input, "builtin-late-call");
+    let output = AgentRuntime::default()
+        .send_chat_with_events_and_cancellation(
+            input,
+            Some(run_id.to_string()),
+            None,
+            AgentCancellationToken::new(),
+            Some(AgentRuntimeHostServices::new().with_builtin_capabilities(runtime)),
+        )
+        .await
+        .unwrap();
+    server.await.unwrap();
+    assert_eq!(output.status, AgentRunStatus::Completed);
+    assert_eq!(
+        provider
+            .invocations
+            .load(std::sync::atomic::Ordering::SeqCst),
+        0
+    );
+    assert!(output.events.iter().any(|event| matches!(event, AgentEvent::ToolResult { result, .. } if result.tool == "browser_snapshot" && !result.ok)));
+    assert!(!output
+        .events
+        .iter()
+        .any(|event| matches!(event, AgentEvent::ApprovalRequired { .. })));
 }
 
 #[tokio::test]

@@ -1233,12 +1233,28 @@ impl BuiltinCapabilityRuntime {
         run_id: &str,
         capability_id: &BuiltinCapabilityId,
     ) -> AgentResult<Option<CapabilityGrant>> {
-        let Some(manifest) = self.manifest(capability_id) else {
+        if self.manifest(capability_id).is_none() {
             return Ok(None);
-        };
+        }
+        Ok(self.policy_and_live_grant(run_id, capability_id)?.1)
+    }
+
+    /// Capture policy once and validate its grant against that exact revision. Request-facing
+    /// schema, instructions and World State must share the returned snapshot; execution still
+    /// calls `live_grant` again and the Host revalidates at its final dispatch boundary.
+    pub(crate) fn policy_and_live_grant(
+        &self,
+        run_id: &str,
+        capability_id: &BuiltinCapabilityId,
+    ) -> AgentResult<(BuiltinCapabilityPolicy, Option<CapabilityGrant>)> {
         let policy = self.policy(capability_id)?;
+        let Some(manifest) = self.manifest(capability_id) else {
+            return Ok((policy, None));
+        };
         let grant = self.provider.grant(run_id, capability_id)?;
-        Ok(grant.filter(|grant| grant.is_live_for(run_id, manifest, &policy, unix_timestamp())))
+        let live_grant =
+            grant.filter(|grant| grant.is_live_for(run_id, manifest, &policy, unix_timestamp()));
+        Ok((policy, live_grant))
     }
 
     pub fn approve_activation(

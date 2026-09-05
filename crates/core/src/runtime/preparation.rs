@@ -6,6 +6,7 @@ use crate::tools::AgentToolExposure;
 mod human_interaction_tests;
 
 pub(super) struct RuntimeCapabilityServices {
+    pub(super) web_search_policy: Option<Arc<dyn crate::WebSearchPolicySource>>,
     pub(super) host_actions_available: bool,
     pub(super) office_engine: Option<Arc<dyn crate::office::OfficeEngine>>,
     pub(super) image_generation_execution:
@@ -43,6 +44,7 @@ pub(super) fn prepare_runtime_capabilities(
         run_id,
         extension_snapshots,
         RuntimeCapabilityServices {
+            web_search_policy: None,
             host_actions_available,
             office_engine,
             image_generation_execution: None,
@@ -68,6 +70,7 @@ pub(super) fn prepare_runtime_capabilities_with_skills(
     services: RuntimeCapabilityServices,
 ) -> AgentResult<PreparedRuntimeCapabilities> {
     let RuntimeCapabilityServices {
+        web_search_policy,
         host_actions_available,
         office_engine,
         image_generation_execution,
@@ -83,6 +86,11 @@ pub(super) fn prepare_runtime_capabilities_with_skills(
         human_interaction_execution_ready,
         human_interaction_async_execution_ready,
     } = services;
+    let web_search_policy = web_search_policy.unwrap_or_else(|| {
+        Arc::new(crate::FrozenWebSearchPolicySource::from_search_config(
+            input.search_config.as_ref(),
+        ))
+    });
     let human_root = input.context.as_ref().is_some_and(|context| {
         context.collaboration_identity.is_none()
             && context
@@ -101,6 +109,7 @@ pub(super) fn prepare_runtime_capabilities_with_skills(
         skill_activation_resolver,
         skill_resources,
         extensions::RuntimeExtensionHostServices {
+            web_search_policy: Some(web_search_policy),
             builtin_capabilities,
             human_interaction_policy: human_root.then_some(human_interaction_policy).flatten(),
             human_interaction_execution_ready: human_root && human_interaction_execution_ready,
@@ -112,7 +121,7 @@ pub(super) fn prepare_runtime_capabilities_with_skills(
     )?;
     runtime_extensions.prepare_model_request()?;
     let mut tool_registry = ToolRegistry::defaults_with_search_office_and_image(
-        input.search_config.as_ref(),
+        None,
         office_engine,
         image_generation_execution,
     );
@@ -867,6 +876,7 @@ mod approval_identity_tests {
 
     fn services(agent_collaboration_enabled: bool) -> RuntimeCapabilityServices {
         RuntimeCapabilityServices {
+            web_search_policy: None,
             host_actions_available: false,
             office_engine: None,
             image_generation_execution: None,

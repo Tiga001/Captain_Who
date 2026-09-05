@@ -61,7 +61,7 @@ pub use automation_report::{AutomationReportKind, AutomationReportSink};
 pub use builtin_capability::builtin_capability_tool_result_persistence_projection;
 pub(crate) use builtin_capability::{
     tool_capability_id as builtin_tool_capability_id, ActivateCapabilityTool,
-    BuiltinCapabilityAgentTool,
+    BuiltinCapabilityAgentTool, BUILTIN_ACTIVATION_CAPABILITY,
 };
 use command_session::CommandSessionTool;
 use conversation_history::ConversationHistoryTool;
@@ -110,8 +110,9 @@ pub(crate) use tool_set::{
     SKILL_RESOURCES_MATERIALIZE_CAPABILITY, SKILL_RESOURCES_READ_CAPABILITY,
     SKILL_SCRIPTS_CAPABILITY,
 };
-use web_fetch::WebFetchTool;
-use web_search::WebSearchTool;
+pub(crate) use web_fetch::WebFetchTool;
+pub(crate) use web_search::WebSearchTool;
+pub(crate) use tool_set::WEB_SEARCH_CAPABILITY;
 use workspace_map::WorkspaceMapTool;
 
 /// Reprojects a durable Trace call into the same presentation-safe shape emitted live.

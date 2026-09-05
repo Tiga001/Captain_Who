@@ -18,6 +18,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 const ACTIVATE_CAPABILITY_TOOL_NAME: &str = "activate_capability";
+pub(crate) const BUILTIN_ACTIVATION_CAPABILITY: &str = "builtin.activation.available";
 const BUILTIN_TOOL_ARGUMENT_MAX_BYTES: usize = 64 * 1024;
 const BUILTIN_TOOL_RESULT_MAX_BYTES: usize = 4 * 1024 * 1024;
 const BUILTIN_TOOL_MODEL_RESULT_MAX_BYTES: usize = 64 * 1024;
@@ -71,35 +72,15 @@ impl ActivateCapabilityTool {
 
 impl AgentTool for ActivateCapabilityTool {
     fn definition(&self) -> AgentToolDefinition {
-        let capabilities = self
-            .runtime
-            .manifests()
-            .iter()
-            .map(|manifest| Value::String(manifest.descriptor.id.as_str().to_string()))
-            .collect::<Vec<_>>();
-        let descriptions = self
-            .runtime
-            .manifests()
-            .iter()
-            .map(|manifest| {
-                format!(
-                    "{} (`{}`): {}",
-                    manifest.descriptor.display_name,
-                    manifest.descriptor.id.as_str(),
-                    manifest.descriptor.description
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
         AgentToolDefinition {
             name: ACTIVATE_CAPABILITY_TOOL_NAME.to_string(),
-            description: format!(
-                "Request task-scoped access to a built-in capability. Approval applies only to this task and the reviewed manifest. Available capabilities:\n{descriptions}"
-            ),
+            // The request-only catalog is projected from the same policy snapshot as exposure.
+            // A static manifest enumeration here would advertise capabilities the user disabled.
+            description: "Request task-scoped access to an enabled built-in capability listed in the current request's capability catalog. Approval applies only to this task and the reviewed manifest.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "capability": {"type": "string", "enum": capabilities},
+                    "capability": {"type": "string"},
                     "reason": {"type": "string", "minLength": 1, "maxLength": 4096}
                 },
                 "required": ["capability", "reason"],
@@ -136,7 +117,9 @@ impl AgentTool for ActivateCapabilityTool {
     }
 
     fn exposure(&self) -> AgentToolExposure {
-        AgentToolExposure::Stable
+        AgentToolExposure::RequiresCapability(ToolCapabilityId::application_owned(
+            BUILTIN_ACTIVATION_CAPABILITY,
+        ))
     }
 
     fn proposed_action(
@@ -1294,8 +1277,89 @@ mod tests {
         let (runtime, _) = harness(false);
         let tool = ActivateCapabilityTool::new("run-1".to_string(), runtime);
         assert!(!tool.requires_approval_for_call(&activation_call().args));
+        assert!(tool
+            .proposed_action(&context(), &activation_call())
+            .is_err());
         let result = tool.execute(&context(), activation_call().args).unwrap();
         assert_eq!(result["status"], "disabled_by_user");
+    }
+
+    #[test]
+    fn activation_schema_is_generic_and_hidden_without_enabled_capability_gate() {
+        let (runtime, _) = harness(true);
+        let tool = ActivateCapabilityTool::new("run-1".to_string(), runtime);
+        let schema = serde_json::to_string(&tool.definition()).unwrap();
+        assert!(!schema.to_lowercase().contains("browser"));
+        assert!(tool.definition().input_schema["properties"]["capability"]
+            .get("enum")
+            .is_none());
+        let mut registry = ToolRegistry::empty();
+        registry
+            .register_extension_tool(
+                crate::builtin_capabilities::BUILTIN_CAPABILITY_RUNTIME_EXTENSION_ID,
+                Box::new(tool),
+            )
+            .unwrap();
+        let disabled = registry
+            .effective_tool_set(registry.definitions(), &BTreeSet::new())
+            .unwrap();
+        assert!(!disabled.contains(ACTIVATE_CAPABILITY_TOOL_NAME));
+        assert!(disabled.stable_definitions().is_empty());
+        let enabled = registry
+            .effective_tool_set(
+                registry.definitions(),
+                &BTreeSet::from([ToolCapabilityId::application_owned(
+                    BUILTIN_ACTIVATION_CAPABILITY,
+                )]),
+            )
+            .unwrap();
+        assert!(enabled.contains(ACTIVATE_CAPABILITY_TOOL_NAME));
+        assert!(enabled.stable_definitions().is_empty());
+    }
+
+    #[test]
+    fn pending_activation_cannot_survive_disable_and_reenable() {
+        let (runtime, provider) = harness(true);
+        let tool = ActivateCapabilityTool::new("run-1".to_string(), runtime.clone());
+        let AgentProposedAction::BuiltinCapabilityActivation { mut approval } = tool
+            .proposed_action(&context(), &activation_call())
+            .unwrap()
+        else {
+            panic!("expected activation approval");
+        };
+        approval.approval_status = AgentApprovalStatus::Approved;
+        *provider.policy.lock().unwrap() = BuiltinCapabilityPolicy {
+            user_allowed: false,
+            revision: 8,
+        };
+        assert!(runtime.approve_activation(&approval).is_err());
+        assert!(!tool.requires_approval_for_call(&activation_call().args));
+        assert!(tool
+            .proposed_action(&context(), &activation_call())
+            .is_err());
+        assert_eq!(
+            tool.execute(&context(), activation_call().args).unwrap()["status"],
+            "disabled_by_user"
+        );
+
+        *provider.policy.lock().unwrap() = BuiltinCapabilityPolicy {
+            user_allowed: true,
+            revision: 9,
+        };
+        assert!(runtime.approve_activation(&approval).is_err());
+        assert!(tool.requires_approval_for_call(&activation_call().args));
+        assert!(tool.execute(&context(), activation_call().args).is_err());
+        let AgentProposedAction::BuiltinCapabilityActivation {
+            approval: new_approval,
+        } = tool
+            .proposed_action(&context(), &activation_call())
+            .unwrap()
+        else {
+            panic!("expected a fresh activation approval");
+        };
+        assert_eq!(new_approval.policy_revision, 9);
+        assert_ne!(new_approval.activation_id, approval.activation_id);
+        assert!(provider.grant.lock().unwrap().is_none());
     }
 
     #[test]
@@ -1387,7 +1451,15 @@ mod tests {
             assert_eq!(invocations[0].capability_id.as_str(), "browser.automation");
         }
 
-        provider.policy.lock().unwrap().revision = 8;
+        // The model may have received a tool schema before the user disabled its capability.
+        // The execution boundary must reject that late call even while its grant still exists.
+        provider.policy.lock().unwrap().user_allowed = false;
+        assert!(tool.execute_async(&context(), json!({})).await.is_err());
+        assert_eq!(provider.invocations.lock().unwrap().len(), 1);
+        *provider.policy.lock().unwrap() = BuiltinCapabilityPolicy {
+            user_allowed: true,
+            revision: 8,
+        };
         let error = match tool.execute_async(&context(), json!({})).await {
             Ok(_) => panic!("drifted grant must fail closed"),
             Err(error) => error,

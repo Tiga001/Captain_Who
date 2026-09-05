@@ -1,10 +1,16 @@
-use super::{ExtensionDescriptor, RuntimeExtension};
-use crate::builtin_capabilities::BuiltinCapabilityRuntime;
+use super::{ExtensionDescriptor, ModelRequestContext, ModelRequestPurpose, RuntimeExtension};
+use crate::builtin_capabilities::{
+    BuiltinCapabilityDescriptor, BuiltinCapabilityPolicy, BuiltinCapabilityRuntime,
+    CapabilityActivationState,
+};
+use crate::context::{ContextItem, ContextRetention, ContextScope, ContextSource};
+use crate::llm::LlmMessageRole;
 use crate::protocol::{AgentError, AgentResult};
 use crate::tools::{
     builtin_tool_capability_id, ActivateCapabilityTool, AgentTool, BuiltinCapabilityAgentTool,
-    ToolCapabilityId, ToolRegistry,
+    ToolCapabilityId, ToolRegistry, BUILTIN_ACTIVATION_CAPABILITY,
 };
+use crate::world_state::{WorldStateLifetime, WorldStateSectionEnvelope, WorldStateSectionId};
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
 
@@ -15,11 +21,35 @@ const BUILTIN_CAPABILITY_EXTENSION_VERSION: u32 = 1;
 pub(super) struct BuiltinCapabilityExtension {
     run_id: String,
     runtime: BuiltinCapabilityRuntime,
+    request: Vec<BuiltinCapabilityRequestState>,
+}
+
+/// Presentation facts only. Authority remains in the Host and is never restored from a checkpoint.
+struct BuiltinCapabilityRequestState {
+    descriptor: BuiltinCapabilityDescriptor,
+    policy: BuiltinCapabilityPolicy,
+    active: bool,
+}
+
+impl BuiltinCapabilityRequestState {
+    fn status(&self) -> CapabilityActivationState {
+        if !self.policy.user_allowed {
+            CapabilityActivationState::DisabledByUser
+        } else if self.active {
+            CapabilityActivationState::Active
+        } else {
+            CapabilityActivationState::WaitingApproval
+        }
+    }
 }
 
 impl BuiltinCapabilityExtension {
     pub(super) fn new(run_id: String, runtime: BuiltinCapabilityRuntime) -> Self {
-        Self { run_id, runtime }
+        Self {
+            run_id,
+            runtime,
+            request: Vec::new(),
+        }
     }
 
     pub(super) fn register_manifest_tools(&self, registry: &mut ToolRegistry) -> AgentResult<()> {
@@ -45,6 +75,29 @@ impl RuntimeExtension for BuiltinCapabilityExtension {
         }
     }
 
+    fn prepare_model_request(&mut self) -> AgentResult<()> {
+        // Build all projections from one frozen policy/grant pair per capability. Do not leave
+        // the previous request's contract usable if reading fresh authority fails.
+        self.request.clear();
+        let request = self
+            .runtime
+            .manifests()
+            .iter()
+            .map(|manifest| {
+                let (policy, grant) = self
+                    .runtime
+                    .policy_and_live_grant(&self.run_id, &manifest.descriptor.id)?;
+                Ok(BuiltinCapabilityRequestState {
+                    descriptor: manifest.descriptor.clone(),
+                    policy,
+                    active: grant.is_some(),
+                })
+            })
+            .collect::<AgentResult<Vec<_>>>()?;
+        self.request = request;
+        Ok(())
+    }
+
     fn tools(&self) -> Vec<Box<dyn AgentTool>> {
         vec![Box::new(ActivateCapabilityTool::new(
             self.run_id.clone(),
@@ -58,16 +111,81 @@ impl RuntimeExtension for BuiltinCapabilityExtension {
 
     fn active_tool_capabilities(&self) -> AgentResult<BTreeSet<ToolCapabilityId>> {
         let mut active = BTreeSet::new();
-        for manifest in self.runtime.manifests() {
-            if self
-                .runtime
-                .live_grant(&self.run_id, &manifest.descriptor.id)?
-                .is_some()
-            {
-                active.insert(builtin_tool_capability_id(&manifest.descriptor.id)?);
+        for capability in &self.request {
+            if capability.policy.user_allowed {
+                active.insert(ToolCapabilityId::application_owned(
+                    BUILTIN_ACTIVATION_CAPABILITY,
+                ));
+            }
+            if capability.active {
+                active.insert(builtin_tool_capability_id(&capability.descriptor.id)?);
             }
         }
         Ok(active)
+    }
+
+    fn request_context(&self, request: &ModelRequestContext) -> AgentResult<Vec<ContextItem>> {
+        if request.purpose != ModelRequestPurpose::AgentWork {
+            return Ok(Vec::new());
+        }
+        let available = self
+            .request
+            .iter()
+            .filter(|capability| capability.policy.user_allowed)
+            .map(|capability| {
+                format!(
+                    "- {} (`{}`): {} [{}]",
+                    capability.descriptor.display_name,
+                    capability.descriptor.id.as_str(),
+                    capability.descriptor.description,
+                    if capability.active {
+                        "active"
+                    } else {
+                        "awaiting approval"
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+        if available.is_empty() {
+            return Ok(Vec::new());
+        }
+        Ok(vec![ContextItem::text(
+            LlmMessageRole::System,
+            format!(
+                "## Enabled built-in capabilities\nUse activate_capability to request task-scoped approval before using a capability awaiting approval. Enabling a capability in settings does not grant this task access.\n{}",
+                available.join("\n"),
+            ),
+            ContextSource::RuntimeGuard,
+            ContextScope::Run,
+            ContextRetention::RequestOnly,
+        )])
+    }
+
+    fn world_state_sections(&self) -> AgentResult<Vec<WorldStateSectionEnvelope>> {
+        let id = WorldStateSectionId::extension(BUILTIN_CAPABILITY_EXTENSION_ID)
+            .map_err(|error| AgentError::new(error.to_string()))?;
+        let capabilities = self
+            .request
+            .iter()
+            .map(|capability| {
+                // A disabled capability remains an explicit current fact, without a tool
+                // description or an activation hint. Previous journal entries remain history.
+                json!({
+                    "capabilityId": capability.descriptor.id,
+                    "status": capability.status(),
+                    "policyRevision": capability.policy.revision,
+                })
+            })
+            .collect::<Vec<_>>();
+        let state = json!({"capabilities": capabilities});
+        let section = WorldStateSectionEnvelope::model_visible(
+            id,
+            WorldStateLifetime::Run,
+            state.clone(),
+            state,
+        )
+        .map_err(|error| AgentError::new(error.to_string()))?;
+        Ok(vec![section])
     }
 
     /// Grants are deliberately absent: they live only in the Host process-memory provider.
@@ -83,6 +201,7 @@ impl RuntimeExtension for BuiltinCapabilityExtension {
                 "无法恢复内置能力扩展：checkpoint 状态版本无效。",
             ));
         }
+        self.request.clear();
         Ok(())
     }
 }
@@ -96,34 +215,43 @@ mod tests {
         BuiltinCapabilityProvider, CapabilityActivationId, CapabilityGrant,
     };
     use crate::{AgentBuiltinCapabilityActivationApproval, AgentCancellationToken};
-    use std::sync::Arc;
+    use std::collections::BTreeMap;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
 
     struct GrantedProvider {
-        manifest: BuiltinCapabilityManifest,
-        grant: CapabilityGrant,
+        manifests: Vec<BuiltinCapabilityManifest>,
+        policies: Mutex<BTreeMap<BuiltinCapabilityId, BuiltinCapabilityPolicy>>,
+        grants: Mutex<BTreeMap<BuiltinCapabilityId, CapabilityGrant>>,
+        policy_reads: AtomicUsize,
+        grant_reads: AtomicUsize,
     }
 
     impl BuiltinCapabilityProvider for GrantedProvider {
         fn manifests(&self) -> AgentResult<Vec<BuiltinCapabilityManifest>> {
-            Ok(vec![self.manifest.clone()])
+            Ok(self.manifests.clone())
         }
 
-        fn policy(&self, _: &BuiltinCapabilityId) -> AgentResult<BuiltinCapabilityPolicy> {
-            Ok(BuiltinCapabilityPolicy {
-                user_allowed: true,
-                revision: 3,
-            })
+        fn policy(&self, id: &BuiltinCapabilityId) -> AgentResult<BuiltinCapabilityPolicy> {
+            self.policy_reads.fetch_add(1, Ordering::SeqCst);
+            self.policies
+                .lock()
+                .unwrap()
+                .get(id)
+                .cloned()
+                .ok_or_else(|| AgentError::new("fixture policy unavailable"))
         }
 
-        fn grant(&self, _: &str, _: &BuiltinCapabilityId) -> AgentResult<Option<CapabilityGrant>> {
-            Ok(Some(self.grant.clone()))
+        fn grant(&self, _: &str, id: &BuiltinCapabilityId) -> AgentResult<Option<CapabilityGrant>> {
+            self.grant_reads.fetch_add(1, Ordering::SeqCst);
+            Ok(self.grants.lock().unwrap().get(id).cloned())
         }
 
         fn approve_activation(
             &self,
             _: &AgentBuiltinCapabilityActivationApproval,
         ) -> AgentResult<CapabilityGrant> {
-            Ok(self.grant.clone())
+            Err(AgentError::new("not used"))
         }
 
         fn revoke_grants(&self, _: &BuiltinCapabilityId) -> AgentResult<()> {
@@ -144,21 +272,31 @@ mod tests {
         }
     }
 
-    #[test]
-    fn checkpoint_snapshot_contains_no_task_grant() {
-        let manifest = BuiltinCapabilityManifest::new(
+    fn manifest(id: &str, label: &str) -> BuiltinCapabilityManifest {
+        BuiltinCapabilityManifest::new(
             BuiltinCapabilityDescriptor {
-                id: BuiltinCapabilityId::parse("browser.automation").unwrap(),
-                display_name: "Browser".to_string(),
-                description: "Managed browser".to_string(),
+                id: BuiltinCapabilityId::parse(id).unwrap(),
+                display_name: label.to_string(),
+                description: format!("Managed {label} operations"),
             },
-            "builtin.browser_automation.mcp",
+            format!("builtin.{id}.mcp"),
             "1",
-            Vec::new(),
+            vec![crate::BuiltinCapabilityToolDescriptor::new(
+                format!("{id}.snapshot"),
+                format!("{}_snapshot", id.replace('.', "_")),
+                format!("Read the managed {label}"),
+                json!({"type":"object","properties":{},"additionalProperties":false}),
+                crate::AgentToolSafety::ReadOnly,
+                false,
+            )
+            .unwrap()],
         )
-        .unwrap();
+        .unwrap()
+    }
+
+    fn grant(manifest: &BuiltinCapabilityManifest) -> CapabilityGrant {
         let now = crate::builtin_capabilities::unix_timestamp();
-        let grant = CapabilityGrant {
+        CapabilityGrant {
             run_id: "run-secret-authority".to_string(),
             capability_id: manifest.descriptor.id.clone(),
             activation_id: CapabilityActivationId::generate(),
@@ -168,16 +306,226 @@ mod tests {
             policy_revision: 3,
             created_at: now,
             expires_at: now + 60,
-        };
-        let runtime =
-            crate::BuiltinCapabilityRuntime::new(Arc::new(GrantedProvider { manifest, grant }))
-                .unwrap();
+        }
+    }
+
+    fn fixture(
+        manifests: Vec<BuiltinCapabilityManifest>,
+    ) -> (
+        BuiltinCapabilityExtension,
+        Arc<GrantedProvider>,
+        ToolRegistry,
+    ) {
+        let provider = Arc::new(GrantedProvider {
+            policies: Mutex::new(
+                manifests
+                    .iter()
+                    .map(|manifest| {
+                        (
+                            manifest.descriptor.id.clone(),
+                            BuiltinCapabilityPolicy {
+                                user_allowed: true,
+                                revision: 3,
+                            },
+                        )
+                    })
+                    .collect(),
+            ),
+            grants: Mutex::new(
+                manifests
+                    .iter()
+                    .map(|manifest| (manifest.descriptor.id.clone(), grant(manifest)))
+                    .collect(),
+            ),
+            manifests,
+            policy_reads: AtomicUsize::new(0),
+            grant_reads: AtomicUsize::new(0),
+        });
+        let runtime = BuiltinCapabilityRuntime::new(provider.clone()).unwrap();
         let extension =
             BuiltinCapabilityExtension::new("run-secret-authority".to_string(), runtime);
-        assert_eq!(extension.active_tool_capabilities().unwrap().len(), 1);
+        let mut registry = ToolRegistry::empty();
+        extension.register_manifest_tools(&mut registry).unwrap();
+        for tool in extension.tools() {
+            registry
+                .register_extension_tool(BUILTIN_CAPABILITY_EXTENSION_ID, tool)
+                .unwrap();
+        }
+        (extension, provider, registry)
+    }
+
+    fn effective_tools(
+        extension: &BuiltinCapabilityExtension,
+        registry: &ToolRegistry,
+    ) -> crate::tools::EffectiveToolSet {
+        registry
+            .effective_tool_set(
+                registry.definitions(),
+                &extension.active_tool_capabilities().unwrap(),
+            )
+            .unwrap()
+    }
+
+    fn request_text(extension: &BuiltinCapabilityExtension) -> String {
+        crate::context::ContextFrame::new(
+            extension
+                .request_context(&ModelRequestContext::agent_work())
+                .unwrap(),
+        )
+        .into_messages()
+        .iter()
+        .map(|message| message.content())
+        .collect::<Vec<_>>()
+        .join("\n")
+    }
+
+    #[test]
+    fn checkpoint_snapshot_contains_no_task_grant() {
+        let (mut extension, provider, _) = fixture(vec![manifest("browser.automation", "Browser")]);
+        extension.prepare_model_request().unwrap();
+        assert_eq!(extension.active_tool_capabilities().unwrap().len(), 2);
         let encoded = serde_json::to_string(&extension.snapshot_state().unwrap()).unwrap();
         assert_eq!(encoded, r#"{"schemaVersion":1}"#);
         assert!(!encoded.contains("run-secret-authority"));
         assert!(!encoded.contains("browser.automation"));
+        extension
+            .restore_state(1, serde_json::from_str(&encoded).unwrap())
+            .unwrap();
+        assert!(extension.active_tool_capabilities().unwrap().is_empty());
+        provider.grants.lock().unwrap().clear();
+        extension.prepare_model_request().unwrap();
+        let state = extension.world_state_sections().unwrap().remove(0);
+        assert_eq!(
+            state.model_projection.unwrap()["capabilities"][0]["status"],
+            "waiting_approval"
+        );
+    }
+
+    #[test]
+    fn settings_switch_freezes_one_contract_and_preserves_disabled_world_state_fact() {
+        let (mut extension, provider, registry) =
+            fixture(vec![manifest("browser.automation", "Browser")]);
+        extension.prepare_model_request().unwrap();
+        let enabled = effective_tools(&extension, &registry);
+        let enabled_context = request_text(&extension);
+        let enabled_state = extension.world_state_sections().unwrap();
+        assert!(enabled.contains("activate_capability"));
+        assert!(enabled.contains("browser_automation_snapshot"));
+        assert!(enabled_context.contains("Managed Browser operations"));
+        assert_eq!(
+            enabled_state[0].model_projection.as_ref().unwrap()["capabilities"][0]["status"],
+            "active"
+        );
+
+        let id = BuiltinCapabilityId::parse("browser.automation").unwrap();
+        *provider.policies.lock().unwrap().get_mut(&id).unwrap() = BuiltinCapabilityPolicy {
+            user_allowed: false,
+            revision: 4,
+        };
+        // A setting changed after preparation cannot tear the current schema/context/state apart.
+        assert_eq!(
+            serde_json::to_value(enabled.all_definitions()).unwrap(),
+            serde_json::to_value(effective_tools(&extension, &registry).all_definitions()).unwrap()
+        );
+        assert_eq!(enabled_context, request_text(&extension));
+        assert_eq!(enabled_state, extension.world_state_sections().unwrap());
+        assert_eq!(provider.policy_reads.load(Ordering::SeqCst), 1);
+        assert_eq!(provider.grant_reads.load(Ordering::SeqCst), 1);
+
+        extension.prepare_model_request().unwrap();
+        let disabled = effective_tools(&extension, &registry);
+        assert!(!disabled.contains("activate_capability"));
+        assert!(!disabled.contains("browser_automation_snapshot"));
+        assert_eq!(
+            serde_json::to_value(enabled.stable_definitions()).unwrap(),
+            serde_json::to_value(disabled.stable_definitions()).unwrap(),
+        );
+        assert_eq!(enabled.stable_revision(), disabled.stable_revision());
+        assert!(extension
+            .request_context(&ModelRequestContext::agent_work())
+            .unwrap()
+            .is_empty());
+        let state = extension.world_state_sections().unwrap();
+        assert_eq!(
+            state[0].model_projection.as_ref().unwrap()["capabilities"][0]["status"],
+            "disabled_by_user"
+        );
+        assert!(!serde_json::to_string(&state)
+            .unwrap()
+            .contains("Managed Browser operations"));
+        assert!(!serde_json::to_string(&state)
+            .unwrap()
+            .contains("activate_capability"));
+
+        // Turning settings back on cannot reuse the old revision's task authority.
+        *provider.policies.lock().unwrap().get_mut(&id).unwrap() = BuiltinCapabilityPolicy {
+            user_allowed: true,
+            revision: 5,
+        };
+        extension.prepare_model_request().unwrap();
+        let awaiting = effective_tools(&extension, &registry);
+        assert!(awaiting.contains("activate_capability"));
+        assert!(!awaiting.contains("browser_automation_snapshot"));
+        assert_eq!(
+            extension.world_state_sections().unwrap()[0]
+                .model_projection
+                .as_ref()
+                .unwrap()["capabilities"][0]["status"],
+            "waiting_approval"
+        );
+    }
+
+    #[test]
+    fn enabled_catalog_omits_disabled_capabilities_and_empty_catalog_has_no_activation_tool() {
+        let (mut extension, provider, registry) = fixture(vec![
+            manifest("browser.automation", "Browser"),
+            manifest("documents.reader", "Documents"),
+        ]);
+        provider
+            .policies
+            .lock()
+            .unwrap()
+            .get_mut(&BuiltinCapabilityId::parse("browser.automation").unwrap())
+            .unwrap()
+            .user_allowed = false;
+        extension.prepare_model_request().unwrap();
+        let tools = effective_tools(&extension, &registry);
+        let schema = serde_json::to_string(&tools.all_definitions()).unwrap();
+        assert!(tools.contains("activate_capability"));
+        assert!(!schema.to_lowercase().contains("browser"));
+        let context = request_text(&extension);
+        assert!(context.contains("Documents"));
+        assert!(!context.to_lowercase().contains("browser"));
+        assert!(extension
+            .request_context(&ModelRequestContext {
+                purpose: ModelRequestPurpose::ContextCompaction
+            })
+            .unwrap()
+            .is_empty());
+
+        let (mut empty, _, registry) = fixture(Vec::new());
+        empty.prepare_model_request().unwrap();
+        assert!(!effective_tools(&empty, &registry).contains("activate_capability"));
+        assert!(empty
+            .request_context(&ModelRequestContext::agent_work())
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn failed_policy_refresh_clears_previous_contract() {
+        let (mut extension, provider, registry) =
+            fixture(vec![manifest("browser.automation", "Browser")]);
+        extension.prepare_model_request().unwrap();
+        assert!(effective_tools(&extension, &registry).contains("browser_automation_snapshot"));
+        provider.policies.lock().unwrap().clear();
+        assert!(extension.prepare_model_request().is_err());
+        assert!(effective_tools(&extension, &registry)
+            .all_definitions()
+            .is_empty());
+        assert!(extension
+            .request_context(&ModelRequestContext::agent_work())
+            .unwrap()
+            .is_empty());
     }
 }

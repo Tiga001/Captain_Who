@@ -378,6 +378,7 @@ impl std::fmt::Debug for AgentResolvedSkillActivation {
 /// positional parameter for every durable-state or orchestration capability.
 #[derive(Clone, Default)]
 pub struct AgentRuntimeHostServices {
+    pub(super) web_search_policy: Option<Arc<dyn crate::WebSearchPolicySource>>,
     pub(super) host_executor: Option<AgentHostActionExecutor>,
     pub(super) storage: Option<Arc<StorageService>>,
     pub(super) trace_observer: Option<AgentConversationTraceObserver>,
@@ -493,6 +494,13 @@ pub trait HumanInteractionPolicySource: Send + Sync {
 impl AgentRuntimeHostServices {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Supplies live trusted web settings for every request and new execution. When present,
+    /// model/Renderer-provided search configuration cannot replace this authority.
+    pub fn with_web_search_policy(mut self, source: Arc<dyn crate::WebSearchPolicySource>) -> Self {
+        self.web_search_policy = Some(source);
+        self
     }
 
     pub fn with_human_interaction_runtime(
@@ -869,6 +877,7 @@ pub fn prepare_context_window_tool_projection(
         "context-window-tool-preview",
         extension_snapshots,
         RuntimeCapabilityServices {
+            web_search_policy: host_services.web_search_policy.clone(),
             host_actions_available,
             office_engine: host_services.office_engine.clone(),
             image_generation_execution: host_services.image_generation_execution.clone(),

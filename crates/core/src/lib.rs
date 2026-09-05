@@ -39,6 +39,12 @@ mod tools;
 mod turn_diff;
 mod usage;
 pub mod world_state;
+pub mod web_search;
+
+pub use web_search::{
+    FrozenWebSearchPolicySource, WebSearchExecutionCredential, WebSearchPolicySnapshot,
+    WebSearchPolicySource,
+};
 
 pub use agent_collaboration_event::*;
 pub use agent_collaboration_harness::*;

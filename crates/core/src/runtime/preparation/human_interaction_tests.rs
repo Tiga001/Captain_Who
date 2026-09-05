@@ -56,6 +56,7 @@ fn policy(enabled: bool) -> Arc<Policy> {
 
 fn services(policy: Option<Arc<Policy>>) -> RuntimeCapabilityServices {
     RuntimeCapabilityServices {
+        web_search_policy: None,
         host_actions_available: false,
         office_engine: None,
         image_generation_execution: None,

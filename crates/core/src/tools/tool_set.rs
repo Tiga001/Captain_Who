@@ -13,6 +13,7 @@ pub(crate) const OFFICE_DOCUMENTS_CAPABILITY: &str = "office.documents";
 pub(crate) const OFFICE_SPREADSHEETS_CAPABILITY: &str = "office.spreadsheets";
 pub(crate) const OFFICE_PRESENTATIONS_CAPABILITY: &str = "office.presentations";
 pub(crate) const IMAGE_GENERATION_CAPABILITY: &str = "image.generation";
+pub(crate) const WEB_SEARCH_CAPABILITY: &str = "web.search";
 pub(crate) const SKILL_RESOURCES_READ_CAPABILITY: &str = "skill.resources.read";
 pub(crate) const SKILL_RESOURCES_MATERIALIZE_CAPABILITY: &str = "skill.resources.materialize";
 pub(crate) const SKILL_SCRIPTS_CAPABILITY: &str = "skill.scripts";
@@ -278,6 +279,13 @@ impl EffectiveToolSet {
 
         if let Some(required_capability) = expected_capability {
             if !self.active_capabilities.contains(&required_capability) {
+                if required_capability.as_str() == WEB_SEARCH_CAPABILITY
+                    || required_capability.as_str() == super::BUILTIN_ACTIVATION_CAPABILITY
+                {
+                    return Some(ToolUnavailability::RuntimeCapabilityUnavailable {
+                        required_capability,
+                    });
+                }
                 if matches!(
                     self.registered_identities.get(tool_name),
                     Some(AgentToolIdentity::BuiltinCapability { .. })
@@ -348,9 +356,10 @@ impl EffectiveToolSet {
             .cloned()
             .map(ToolCapabilityId::parse)
             .collect::<AgentResult<BTreeSet<_>>>()?;
-        // Existing questions remain answerable after policy is disabled. The registry still owns
-        // the exact question schemas, and the Host independently arbitrates every new question.
-        let retired_question_capabilities = [
+        // Existing batches retain their exact schemas after live policy is disabled. The registry
+        // still owns the implementations, and execution independently checks current Host policy.
+        let live_policy_capabilities = [
+            ToolCapabilityId::application_owned(WEB_SEARCH_CAPABILITY),
             ToolCapabilityId::application_owned(
                 super::human_interaction::HUMAN_INTERACTION_CAPABILITY,
             ),
@@ -360,7 +369,21 @@ impl EffectiveToolSet {
         ];
         if frozen_capabilities
             .difference(&self.active_capabilities)
-            .any(|capability| !retired_question_capabilities.contains(capability))
+            .any(|capability| {
+                !live_policy_capabilities.contains(capability)
+                    && !self.registered_exposures.iter().any(|(name, exposure)| {
+                        matches!(exposure, AgentToolExposure::RequiresCapability(required) if required == capability)
+                            && match self.registered_identities.get(name) {
+                                Some(AgentToolIdentity::BuiltinCapability { .. }) => true,
+                                Some(AgentToolIdentity::RuntimeExtension { extension_id, tool_name }) => {
+                                    extension_id == crate::builtin_capabilities::BUILTIN_CAPABILITY_RUNTIME_EXTENSION_ID
+                                        && tool_name == "activate_capability"
+                                        && capability.as_str() == super::BUILTIN_ACTIVATION_CAPABILITY
+                                }
+                                _ => false,
+                            }
+                    })
+            })
         {
             return Err(tool_set_checkpoint_mismatch(checkpoint, self));
         }

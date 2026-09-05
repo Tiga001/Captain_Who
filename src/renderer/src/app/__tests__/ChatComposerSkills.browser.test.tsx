@@ -306,9 +306,11 @@ describe('ChatComposer model picker', () => {
 
     expect(options).toHaveLength(7)
     expect(getComputedStyle(menu).overflowY).toBe('auto')
-    expect(menu.clientHeight).toBe(198)
     expect(menu.scrollHeight).toBeGreaterThan(menu.clientHeight)
-    expect(options[0]?.getBoundingClientRect().height).toBeLessThanOrEqual(36)
+    const visibleBottom = menu.getBoundingClientRect().bottom
+    expect(options[4].getBoundingClientRect().bottom).toBeLessThanOrEqual(visibleBottom)
+    expect(options[5].getBoundingClientRect().bottom).toBeGreaterThan(visibleBottom)
+    expect(options[0]?.getBoundingClientRect().height).toBeLessThanOrEqual(32)
   })
 
   it('updates only the composer draft when a model is selected', async () => {

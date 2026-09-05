@@ -16,6 +16,7 @@ mod builtin_capability;
 mod human_interaction;
 mod skills;
 mod todo;
+mod web_search;
 
 use crate::context::{ContextFrame, ContextItem, ContextTextBudget};
 use crate::protocol::{
@@ -186,6 +187,7 @@ pub(super) struct RuntimeExtensions {
 
 #[derive(Default)]
 pub(super) struct RuntimeExtensionHostServices {
+    pub(super) web_search_policy: Option<Arc<dyn crate::WebSearchPolicySource>>,
     pub(super) builtin_capabilities: Option<crate::BuiltinCapabilityRuntime>,
     pub(super) human_interaction_policy: Option<Arc<dyn crate::HumanInteractionPolicySource>>,
     pub(super) human_interaction_execution_ready: bool,
@@ -254,6 +256,9 @@ impl RuntimeExtensions {
         };
         let (todo, todo_handle) = TodoExtension::new(run_id.to_string());
         let mut extensions: Vec<Box<dyn RuntimeExtension>> = vec![Box::new(skills)];
+        if let Some(source) = host_services.web_search_policy {
+            extensions.push(Box::new(web_search::WebSearchExtension::new(source)));
+        }
         if let Some(runtime) = host_services.builtin_capabilities {
             extensions.push(Box::new(BuiltinCapabilityExtension::new(
                 run_id.to_string(),

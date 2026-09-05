@@ -8,6 +8,7 @@ use reqwest::Client;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::time::Duration;
+use std::sync::Arc;
 
 const TAVILY_SEARCH_ENDPOINT: &str = "https://api.tavily.com/search";
 const DEFAULT_MAX_RESULTS: usize = 5;
@@ -15,19 +16,27 @@ const MAX_RESULTS: usize = 8;
 const TAVILY_MAX_CHUNKS_PER_SOURCE: usize = 3;
 const TAVILY_CHUNK_MAX_CHARS: usize = 500;
 
-pub(super) struct WebSearchTool {
-    api_key: String,
+pub(crate) struct WebSearchTool {
+    policy: Arc<dyn crate::WebSearchPolicySource>,
 }
 
 impl WebSearchTool {
     pub fn new(api_key: String) -> Self {
-        Self { api_key }
+        Self::with_policy(Arc::new(crate::FrozenWebSearchPolicySource::from_search_config(Some(
+            &crate::AgentSearchConfig { mode: crate::AgentSearchMode::Auto, tavily_api_key: Some(api_key) },
+        ))))
+    }
+
+    pub(crate) fn with_policy(policy: Arc<dyn crate::WebSearchPolicySource>) -> Self {
+        Self { policy }
     }
 }
 
 impl AgentTool for WebSearchTool {
     fn exposure(&self) -> super::AgentToolExposure {
-        super::AgentToolExposure::Stable
+        super::AgentToolExposure::RequiresCapability(super::ToolCapabilityId::application_owned(
+            super::tool_set::WEB_SEARCH_CAPABILITY,
+        ))
     }
 
     fn permission_policy(&self) -> super::AgentToolPermissionPolicy {
@@ -66,8 +75,9 @@ impl AgentTool for WebSearchTool {
             .with_model_output_budget(context.text_output_budget());
         let cancellation_token = context.cancellation_token();
         cancellation_token.check()?;
+        let api_key = self.policy.authorize_execution()?.into_secret();
         let response = block_on_tool_future(
-            TavilySearchClient::new(self.api_key.clone())
+            TavilySearchClient::new(api_key)
                 .search(&request, cancellation_token.clone()),
         )?;
 
