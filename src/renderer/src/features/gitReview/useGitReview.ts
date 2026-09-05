@@ -85,9 +85,9 @@ function errorMessage(error: unknown): string {
 export function useGitReview(
   projectId: string,
   isActive: boolean,
-  initialTarget: GitReviewTarget = { kind: 'unstaged' }
+  initialTarget: GitReviewTarget = { kind: 'uncommitted' }
 ) {
-  const [target, setTarget] = useState<GitReviewTarget>(initialTarget)
+  const [target, setTargetState] = useState<GitReviewTarget>(initialTarget)
   const targetKey = gitReviewTargetKey(target)
   const [summaryState, setSummaryState] = useState<GitReviewSummaryState>({ status: 'idle' })
   const [diffStates, setDiffStates] = useState<Record<string, GitReviewDiffState>>({})
@@ -126,20 +126,13 @@ export function useGitReview(
   const drainFullContentQueueRef = useRef<() => void>(() => undefined)
   const mutationRequestRef = useRef<string | null>(null)
   const isActiveRef = useRef(isActive)
+  const reviewIdentityRef = useRef(`${projectId}:${targetKey}`)
 
   // Commit activity/context before the panel's passive demand reconciliation without mutating
   // transport ownership from a React render that may later be interrupted.
   useLayoutEffect(() => {
     isActiveRef.current = isActive
-    if (
-      requestableSnapshotRef.current &&
-      (requestableSnapshotRef.current.projectId !== projectId ||
-        requestableSnapshotRef.current.targetKey !== targetKey)
-    ) {
-      requestableSnapshotRef.current = null
-      refreshFallbackRef.current = null
-    }
-  }, [isActive, projectId, targetKey])
+  }, [isActive])
 
   useEffect(
     () => () => {
@@ -168,12 +161,6 @@ export function useGitReview(
     fileContentStatesRef.current = fileContentStates
   }, [fileContentStates])
 
-  useEffect(() => {
-    mutationRequestRef.current = null
-    setMutationError(null)
-    setPendingFileId(null)
-  }, [projectId, targetKey])
-
   const resetReviewData = useCallback(() => {
     setDiffStates({})
     diffStatesRef.current = {}
@@ -188,6 +175,38 @@ export function useGitReview(
     fullContentCacheBudgetRef.current.clear()
     hotFullContentFileIdsRef.current = new Set()
   }, [])
+
+  const invalidateReviewIdentity = useCallback(
+    (nextIdentity: string): void => {
+      if (reviewIdentityRef.current === nextIdentity) return
+      reviewIdentityRef.current = nextIdentity
+      summaryRequestRef.current += 1
+      summaryQueryRef.current = ''
+      requestableSnapshotRef.current = null
+      refreshFallbackRef.current = null
+      mutationRequestRef.current = null
+      setSummaryState({ status: 'idle' })
+      setMutationError(null)
+      setPendingFileId(null)
+      resetReviewData()
+    },
+    [resetReviewData]
+  )
+
+  useLayoutEffect(() => {
+    invalidateReviewIdentity(`${projectId}:${targetKey}`)
+  }, [invalidateReviewIdentity, projectId, targetKey])
+
+  const setTarget = useCallback(
+    (nextTarget: GitReviewTarget): void => {
+      const nextTargetKey = gitReviewTargetKey(nextTarget)
+      invalidateReviewIdentity(`${projectId}:${nextTargetKey}`)
+      setTargetState((current) =>
+        gitReviewTargetKey(current) === nextTargetKey ? current : nextTarget
+      )
+    },
+    [invalidateReviewIdentity, projectId]
+  )
 
   const discardOrphanedDiffLoadingState = useCallback((fileId: string) => {
     if (diffStatesRef.current[fileId]?.status !== 'loading') return

@@ -1,10 +1,14 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
-import type { ReactNode } from 'react'
-import type { GitReviewFile, GitReviewTarget } from '@mycopilot/protocol'
+import type { ReactNode, Ref } from 'react'
+import type {
+  GitReviewBranch,
+  GitReviewCommit,
+  GitReviewFile,
+  GitReviewTarget
+} from '@mycopilot/protocol'
 import {
   AlertCircle,
   Check,
-  ChevronDown,
   Ellipsis,
   FileSearch,
   FileText,
@@ -22,13 +26,21 @@ import { formatTranslation } from '../../config/translationFormat'
 import { ConfirmationDialog } from '../../components/dialog/ConfirmationDialog'
 import { dismissActiveTooltip, Tooltip } from '../../components/overlay/Tooltip'
 import { GitReviewDiffCard } from './GitReviewDiffCard'
+import { GitReviewContextRow } from './GitReviewContextRow'
 import { GitReviewFileIcon } from './GitReviewFileIcon'
+import { GitReviewMenuPortal } from './GitReviewMenuPortal'
+import { GitReviewSourceSelector } from './GitReviewSourceSelector'
 import { canHydrateGitReviewFile } from './gitReviewFileCapabilities'
 import { loadGitReviewPreferences, saveGitReviewPreferences } from './gitReviewPreferences'
 import { projectGitReviewSummary } from './gitReviewSummaryProjection'
+import {
+  getGitReviewTargetCapabilities,
+  type GitReviewTargetCapabilities
+} from './gitReviewTargetCapabilities'
 import { getTargetGitReviewViewMode } from './gitReviewViewMode'
 import type { GitReviewViewMode } from './gitReviewViewMode'
 import { gitReviewTargetKey, useGitReview } from './useGitReview'
+import { useGitReviewRepositoryContext } from './useGitReviewRepositoryContext'
 import './GitReviewPanel.css'
 
 interface GitReviewPanelProps {
@@ -43,9 +55,7 @@ interface GitReviewPanelProps {
   }
 }
 
-type VisibleGitReviewTargetKind = 'lastTurn' | 'unstaged' | 'staged'
-
-type OpenMenu = 'scope' | 'options' | null
+type OpenMenu = 'source' | 'options' | null
 
 interface PendingFileAlignment {
   fileId: string
@@ -96,7 +106,7 @@ export function GitReviewPanel({
   projectId,
   targetNavigation
 }: GitReviewPanelProps): ReactNode {
-  const { t } = useFrontendConfig()
+  const { language, t } = useFrontendConfig()
   const [reviewPreferences, setReviewPreferences] = useState(loadGitReviewPreferences)
   const {
     cancelQueuedFileContentsExcept,
@@ -117,8 +127,11 @@ export function GitReviewPanel({
     setTarget,
     summaryState: sourceSummaryState
   } = useGitReview(projectId, isActive, targetNavigation?.target)
+  const { load: loadRepositoryContext, state: repositoryState } =
+    useGitReviewRepositoryContext(projectId)
   const targetKey = gitReviewTargetKey(target)
   const targetKind = target.kind
+  const capabilities = getGitReviewTargetCapabilities(targetKind)
   const projectedSummary = useMemo(() => {
     if (!sourceSummaryState.value) return undefined
     return projectGitReviewSummary(sourceSummaryState.value, {
@@ -153,17 +166,37 @@ export function GitReviewPanel({
   const [showSearch, setShowSearch] = useState(false)
   const [searchQuery, setSearchQuery] = useState('')
   const [openMenu, setOpenMenu] = useState<OpenMenu>(null)
+  const [commitPreview, setCommitPreview] = useState<GitReviewCommit | undefined>()
+  const [rememberedBranchBaseRef, setRememberedBranchBaseRef] = useState<string | undefined>()
   const [restoreCandidate, setRestoreCandidate] = useState<GitReviewFile | null>(null)
   const [fileVisibility, setFileVisibility] = useState<GitReviewFileVisibility>(emptyFileVisibility)
   const [diffLayoutWidth, setDiffLayoutWidth] = useState(0)
   const contentRef = useRef<HTMLDivElement>(null)
   const searchInputRef = useRef<HTMLInputElement>(null)
+  const optionsButtonRef = useRef<HTMLButtonElement>(null)
   const fileElementsRef = useRef(new Map<string, HTMLElement>())
   const diffStatesRef = useRef(diffStates)
   const initializedQueryRef = useRef<string | null>(null)
   const pendingFileAlignmentRef = useRef<PendingFileAlignment | null>(null)
   const fileAlignmentSequenceRef = useRef(0)
   const files = useMemo(() => summaryState.value?.files ?? [], [summaryState.value])
+  const repositoryDefaultBaseRef = useMemo(() => {
+    if (repositoryState.status !== 'ready') return undefined
+    return (
+      repositoryState.value.defaultBaseRef ??
+      repositoryState.value.branches.find((branch) => branch.isDefault)?.ref ??
+      repositoryState.value.branches[0]?.ref
+    )
+  }, [repositoryState])
+  const branchBaseRef =
+    target.kind === 'branch'
+      ? target.baseRef
+      : (rememberedBranchBaseRef ?? repositoryDefaultBaseRef)
+  const matchingSummary =
+    summaryState.value && gitReviewTargetKey(summaryState.value.target) === targetKey
+      ? summaryState.value
+      : undefined
+  const hasContextRow = targetKind === 'commit' || targetKind === 'branch'
 
   const cancelPendingFileAlignment = useCallback(() => {
     pendingFileAlignmentRef.current = null
@@ -213,8 +246,21 @@ export function GitReviewPanel({
 
   useEffect(() => {
     setRestoreCandidate(null)
+    setExpandedFileIds(new Set())
+    setSelectedFileId(null)
+    setSearchQuery('')
+    setFileVisibility(emptyFileVisibility())
     cancelPendingFileAlignment()
   }, [cancelPendingFileAlignment, projectId, targetKey])
+
+  useEffect(() => {
+    setCommitPreview(undefined)
+    setRememberedBranchBaseRef(undefined)
+  }, [projectId])
+
+  useEffect(() => {
+    if (target.kind === 'branch') void loadRepositoryContext()
+  }, [loadRepositoryContext, target.kind])
 
   useEffect(() => {
     if (!openMenu) return
@@ -223,7 +269,7 @@ export function GitReviewPanel({
       if (!(target instanceof Element)) return
       if (
         target.closest('.git-review__menu') ||
-        target.closest('.git-review__scope-control') ||
+        target.closest('.git-review__source-control') ||
         target.closest('.git-review__options-control')
       ) {
         return
@@ -557,17 +603,40 @@ export function GitReviewPanel({
   }, [alignFileHeader, diffStates])
 
   const handleTargetChange = useCallback(
-    (nextKind: VisibleGitReviewTargetKind) => {
+    (nextTarget: GitReviewTarget) => {
       setPendingReviewFileNavigation(null)
-      const nextTarget: GitReviewTarget =
-        nextKind === 'lastTurn'
-          ? { kind: 'lastTurn', conversationId: conversationId ?? '' }
-          : { kind: nextKind }
       if (gitReviewTargetKey(nextTarget) !== targetKey) setTarget(nextTarget)
       setOpenMenu(null)
     },
-    [conversationId, setTarget, targetKey]
+    [setTarget, targetKey]
   )
+
+  const handleCommitSelect = useCallback(
+    (commit: GitReviewCommit) => {
+      setCommitPreview(commit)
+      handleTargetChange({ kind: 'commit', commitSha: commit.sha })
+    },
+    [handleTargetChange]
+  )
+
+  const handleBranchSourceSelect = useCallback(() => {
+    if (!branchBaseRef) return
+    setRememberedBranchBaseRef(branchBaseRef)
+    handleTargetChange({ kind: 'branch', baseRef: branchBaseRef })
+  }, [branchBaseRef, handleTargetChange])
+
+  const handleBranchSelect = useCallback(
+    (branch: GitReviewBranch) => {
+      setRememberedBranchBaseRef(branch.ref)
+      handleTargetChange({ kind: 'branch', baseRef: branch.ref })
+    },
+    [handleTargetChange]
+  )
+
+  const closeOptionsMenu = useCallback(() => {
+    setOpenMenu(null)
+    window.requestAnimationFrame(() => optionsButtonRef.current?.focus())
+  }, [])
 
   const toggleSearch = useCallback(() => {
     setShowSearch((current) => {
@@ -577,16 +646,7 @@ export function GitReviewPanel({
     setOpenMenu(null)
   }, [])
 
-  const scopeLabel =
-    targetKind === 'lastTurn'
-      ? t('gitReview.scope.lastTurn')
-      : targetKind === 'unstaged'
-        ? t('gitReview.scope.unstaged')
-        : t('gitReview.scope.staged')
-  const stats =
-    summaryState.value && gitReviewTargetKey(summaryState.value.target) === targetKey
-      ? summaryState.value.stats
-      : null
+  const stats = matchingSummary?.stats ?? null
   const statsLabel = stats
     ? formatTranslation(
         t,
@@ -604,40 +664,24 @@ export function GitReviewPanel({
 
   return (
     <div className="git-review">
-      <header className="git-review__toolbar">
+      <header className="git-review__toolbar" data-has-context={hasContextRow ? 'true' : undefined}>
         <div className="git-review__toolbar-summary">
-          <div className="git-review__scope-control">
-            <button
-              className="git-review__scope-button"
-              type="button"
-              aria-expanded={openMenu === 'scope'}
-              aria-haspopup="menu"
-              onClick={() => setOpenMenu((current) => (current === 'scope' ? null : 'scope'))}
-            >
-              <span className="git-review__scope-label">{scopeLabel}</span>
-              {stats && <span className="git-review__file-count">{stats.fileCount}</span>}
-              <ChevronDown aria-hidden="true" />
-            </button>
-            {openMenu === 'scope' && (
-              <div className="git-review__menu git-review__scope-menu" role="menu">
-                <ScopeMenuItem
-                  checked={targetKind === 'lastTurn'}
-                  label={t('gitReview.scope.lastTurn')}
-                  onSelect={() => handleTargetChange('lastTurn')}
-                />
-                <ScopeMenuItem
-                  checked={targetKind === 'unstaged'}
-                  label={t('gitReview.scope.unstaged')}
-                  onSelect={() => handleTargetChange('unstaged')}
-                />
-                <ScopeMenuItem
-                  checked={targetKind === 'staged'}
-                  label={t('gitReview.scope.staged')}
-                  onSelect={() => handleTargetChange('staged')}
-                />
-              </div>
-            )}
-          </div>
+          <GitReviewSourceSelector
+            branchBaseRef={branchBaseRef}
+            conversationId={conversationId}
+            fileCount={stats?.fileCount}
+            isOpen={openMenu === 'source'}
+            language={language}
+            onOpenChange={(open) => setOpenMenu(open ? 'source' : null)}
+            onRequestRepositoryContext={(force) => void loadRepositoryContext(force)}
+            onSelectBranch={handleBranchSourceSelect}
+            onSelectCommit={handleCommitSelect}
+            onSelectTarget={handleTargetChange}
+            projectId={projectId}
+            repositoryState={repositoryState}
+            t={t}
+            target={target}
+          />
           {stats && statsLabel && (
             <div className="git-review__line-stats" aria-label={statsLabel}>
               <span className="git-review__line-stats-addition" aria-hidden="true">
@@ -654,18 +698,28 @@ export function GitReviewPanel({
           <div className="git-review__options-control">
             <ToolbarButton
               active={openMenu === 'options'}
+              ariaExpanded={openMenu === 'options'}
+              ariaHasPopup="menu"
+              buttonRef={optionsButtonRef}
               label={t('gitReview.options')}
               onClick={() => setOpenMenu((current) => (current === 'options' ? null : 'options'))}
             >
               <Ellipsis aria-hidden="true" />
             </ToolbarButton>
             {openMenu === 'options' && (
-              <div className="git-review__menu git-review__options-menu" role="menu">
+              <GitReviewMenuPortal
+                anchorRef={optionsButtonRef}
+                ariaLabel={t('gitReview.options')}
+                autoFocus="first"
+                className="git-review__options-menu"
+                onEscape={closeOptionsMenu}
+                placement="bottom-end"
+              >
                 <button
                   type="button"
                   role="menuitem"
                   onClick={() => {
-                    setOpenMenu(null)
+                    closeOptionsMenu()
                     void refresh()
                   }}
                 >
@@ -678,7 +732,7 @@ export function GitReviewPanel({
                   aria-checked={wrapLines}
                   onClick={() => {
                     setWrapLines((current) => !current)
-                    setOpenMenu(null)
+                    closeOptionsMenu()
                   }}
                 >
                   <WrapText aria-hidden="true" />
@@ -697,7 +751,7 @@ export function GitReviewPanel({
                       saveGitReviewPreferences(next)
                       return next
                     })
-                    setOpenMenu(null)
+                    closeOptionsMenu()
                   }}
                 >
                   <Files aria-hidden="true" />
@@ -715,7 +769,7 @@ export function GitReviewPanel({
                       saveGitReviewPreferences(next)
                       return next
                     })
-                    setOpenMenu(null)
+                    closeOptionsMenu()
                   }}
                 >
                   <FileText aria-hidden="true" />
@@ -723,7 +777,7 @@ export function GitReviewPanel({
                     ? t('gitReview.dontLoadFullFiles')
                     : t('gitReview.loadFullFiles')}
                 </button>
-              </div>
+              </GitReviewMenuPortal>
             )}
           </div>
 
@@ -752,6 +806,20 @@ export function GitReviewPanel({
             <FolderOpen aria-hidden="true" />
           </ToolbarButton>
         </div>
+
+        {hasContextRow && (
+          <GitReviewContextRow
+            commitPreview={commitPreview}
+            isActive={isActive}
+            language={language}
+            onRetryBranches={() => void loadRepositoryContext(true)}
+            onSelectBranch={handleBranchSelect}
+            repositoryState={repositoryState}
+            summaryContext={matchingSummary?.context}
+            t={t}
+            target={target}
+          />
+        )}
       </header>
 
       {showSearch && (
@@ -833,6 +901,7 @@ export function GitReviewPanel({
           onWheelCapture={cancelPendingFileAlignment}
         >
           <GitReviewContent
+            capabilities={capabilities}
             diffStates={diffStates}
             diffLayoutWidth={diffLayoutWidth}
             expandedFileIds={expandedFileIds}
@@ -891,13 +960,25 @@ export function GitReviewPanel({
 
 interface ToolbarButtonProps {
   active?: boolean
+  ariaExpanded?: boolean
+  ariaHasPopup?: 'menu'
+  buttonRef?: Ref<HTMLButtonElement>
   children: ReactNode
   disabled?: boolean
   label: string
   onClick: () => void
 }
 
-function ToolbarButton({ active, children, disabled, label, onClick }: ToolbarButtonProps) {
+function ToolbarButton({
+  active,
+  ariaExpanded,
+  ariaHasPopup,
+  buttonRef,
+  children,
+  disabled,
+  label,
+  onClick
+}: ToolbarButtonProps) {
   return (
     <Tooltip
       anchorClassName="git-review__toolbar-button-wrap"
@@ -907,11 +988,14 @@ function ToolbarButton({ active, children, disabled, label, onClick }: ToolbarBu
       <button
         className="git-review__toolbar-button"
         type="button"
+        aria-expanded={ariaExpanded}
+        aria-haspopup={ariaHasPopup}
         aria-label={label}
         aria-pressed={active === undefined ? undefined : active}
         data-active={active ? 'true' : undefined}
         disabled={disabled}
         onClick={onClick}
+        ref={buttonRef}
       >
         {children}
       </button>
@@ -925,23 +1009,6 @@ function DiffLayoutIcon({ targetMode }: { targetMode: GitReviewViewMode }): Reac
       <span />
       <span />
     </span>
-  )
-}
-
-function ScopeMenuItem({
-  checked,
-  label,
-  onSelect
-}: {
-  checked: boolean
-  label: string
-  onSelect: () => void
-}): ReactNode {
-  return (
-    <button type="button" role="menuitemradio" aria-checked={checked} onClick={onSelect}>
-      <span>{label}</span>
-      {checked && <Check className="git-review__menu-check" aria-hidden="true" />}
-    </button>
   )
 }
 
@@ -989,6 +1056,7 @@ function FileList({ files, onSelect, selectedFileId, t }: FileListProps): ReactN
 type ReviewHook = ReturnType<typeof useGitReview>
 
 interface GitReviewContentProps {
+  capabilities: GitReviewTargetCapabilities
   diffLayoutWidth: number
   diffStates: ReviewHook['diffStates']
   expandedFileIds: Set<string>
@@ -1018,6 +1086,7 @@ interface GitReviewContentProps {
 }
 
 function GitReviewContent({
+  capabilities,
   diffLayoutWidth,
   diffStates,
   expandedFileIds,
@@ -1072,18 +1141,7 @@ function GitReviewContent({
   }
 
   if (summaryState.value && summaryState.value.files.length === 0) {
-    const title =
-      targetKind === 'lastTurn'
-        ? t('gitReview.empty.lastTurn.title')
-        : targetKind === 'unstaged'
-          ? t('gitReview.empty.unstaged.title')
-          : t('gitReview.empty.staged.title')
-    const description =
-      targetKind === 'lastTurn'
-        ? t('gitReview.empty.lastTurn.description')
-        : targetKind === 'unstaged'
-          ? t('gitReview.empty.unstaged.description')
-          : t('gitReview.empty.staged.description')
+    const { description, title } = gitReviewEmptyStateCopy(targetKind, t)
     return (
       <div className="git-review__center-state git-review__center-state--empty">
         <h2>{title}</h2>
@@ -1113,6 +1171,7 @@ function GitReviewContent({
           }}
         >
           <GitReviewDiffCard
+            capabilities={capabilities}
             diffState={diffStates[file.id]}
             file={file}
             fileContentState={fileContentStates[file.id]}
@@ -1130,7 +1189,6 @@ function GitReviewContent({
             onRequestDiff={retryFileDiff}
             onRestore={onRestore}
             onToggle={toggleFile}
-            targetKind={targetKind}
             scrollRootRef={scrollRootRef}
             reviewSnapshotId={reviewSnapshotId}
             t={t}
@@ -1141,6 +1199,44 @@ function GitReviewContent({
       ))}
     </div>
   )
+}
+
+function gitReviewEmptyStateCopy(
+  kind: GitReviewTarget['kind'],
+  t: ReturnType<typeof useFrontendConfig>['t']
+): { description: string; title: string } {
+  switch (kind) {
+    case 'lastTurn':
+      return {
+        description: t('gitReview.empty.lastTurn.description'),
+        title: t('gitReview.empty.lastTurn.title')
+      }
+    case 'uncommitted':
+      return {
+        description: t('gitReview.empty.uncommitted.description'),
+        title: t('gitReview.empty.uncommitted.title')
+      }
+    case 'unstaged':
+      return {
+        description: t('gitReview.empty.unstaged.description'),
+        title: t('gitReview.empty.unstaged.title')
+      }
+    case 'staged':
+      return {
+        description: t('gitReview.empty.staged.description'),
+        title: t('gitReview.empty.staged.title')
+      }
+    case 'commit':
+      return {
+        description: t('gitReview.empty.commit.description'),
+        title: t('gitReview.empty.commit.title')
+      }
+    case 'branch':
+      return {
+        description: t('gitReview.empty.branch.description'),
+        title: t('gitReview.empty.branch.title')
+      }
+  }
 }
 
 function setsEqual(left: Set<string>, right: Set<string>): boolean {

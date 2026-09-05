@@ -7,9 +7,15 @@ const { loadFileContentSpy } = vi.hoisted(() => ({ loadFileContentSpy: vi.fn() }
 
 vi.mock('../../../config/FrontendConfigProvider', () => ({
   useFrontendConfig: () => ({
+    language: 'en-US',
     resolvedThemeId: 'classic-light',
     t: (key: string) => key
   })
+}))
+
+vi.mock('../gitReviewClient', () => ({
+  getGitReviewRepositoryContext: vi.fn(),
+  listGitReviewCommits: vi.fn()
 }))
 
 vi.mock('../useGitReview', async () => {
@@ -128,6 +134,9 @@ describe('GitReviewPanel interactions', () => {
     )
 
     expect(screen.container.querySelectorAll('.git-review__diff-card')).toHaveLength(3)
+    expect(
+      screen.container.querySelector('.git-review__toolbar')?.hasAttribute('data-has-context')
+    ).toBe(false)
     expect(screen.container.textContent).not.toContain('assets/preview.png')
     expect(screen.container.querySelector('.git-review__file-count')?.textContent).toBe('3')
     expect(screen.container.querySelector('.git-review__line-stats')?.textContent).toBe('+3-0')

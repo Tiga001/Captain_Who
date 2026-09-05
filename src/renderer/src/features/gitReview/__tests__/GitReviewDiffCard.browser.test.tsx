@@ -9,6 +9,7 @@ import type { Translate } from '../../../config/translationFormat'
 import '../../../styles/global.css'
 import { GitReviewDiffCard } from '../GitReviewDiffCard'
 import '../GitReviewPanel.css'
+import { getGitReviewTargetCapabilities } from '../gitReviewTargetCapabilities'
 import type { GitReviewDiffState, GitReviewFileContentState } from '../useGitReview'
 
 const translate: Translate = (key) => key
@@ -96,6 +97,7 @@ function StickyCardsFixture(): ReactNode {
         <div className="git-review__diff-list">
           {['first', 'second', 'third'].map((fileId) => (
             <GitReviewDiffCard
+              capabilities={getGitReviewTargetCapabilities('unstaged')}
               diffState={createDiffState(fileId)}
               file={createFile(fileId)}
               isExpanded
@@ -112,7 +114,6 @@ function StickyCardsFixture(): ReactNode {
               onRequestDiff={noop}
               onRestore={noop}
               onToggle={noop}
-              targetKind="unstaged"
               scrollRootRef={scrollRootRef}
               t={translate}
               viewMode="unified"
@@ -141,6 +142,7 @@ function WindowedCardFixture({
     <div className="git-review" style={{ display: 'block', height: 420, width: 440 }}>
       <div className="git-review__content" ref={scrollRootRef} style={{ height: 420 }}>
         <GitReviewDiffCard
+          capabilities={getGitReviewTargetCapabilities('unstaged')}
           diffState={createDiffState('windowed')}
           file={createFile('windowed')}
           isExpanded
@@ -158,7 +160,6 @@ function WindowedCardFixture({
           onRestore={noop}
           onToggle={noop}
           reviewSnapshotId="snapshot-1"
-          targetKind="unstaged"
           scrollRootRef={scrollRootRef}
           t={translate}
           viewMode={viewMode}
@@ -179,6 +180,7 @@ function LastTurnCardFixture({
     <div className="git-review" style={{ display: 'block', height: 300, width: 440 }}>
       <div className="git-review__content" ref={scrollRootRef}>
         <GitReviewDiffCard
+          capabilities={getGitReviewTargetCapabilities('lastTurn')}
           diffState={createDiffState('last-turn')}
           file={createFile('last-turn')}
           isExpanded={false}
@@ -194,7 +196,6 @@ function LastTurnCardFixture({
           onRequestDiff={noop}
           onRestore={noop}
           onToggle={noop}
-          targetKind="lastTurn"
           scrollRootRef={scrollRootRef}
           t={translate}
           viewMode="unified"
@@ -249,6 +250,7 @@ function ExpansionAnchorFixture(): ReactNode {
         style={{ height: 220 }}
       >
         <GitReviewDiffCard
+          capabilities={getGitReviewTargetCapabilities('unstaged')}
           diffState={diffState}
           file={createFile('anchor')}
           fileContentState={fileContentState}
@@ -265,7 +267,6 @@ function ExpansionAnchorFixture(): ReactNode {
           onRequestDiff={noop}
           onRestore={noop}
           onToggle={noop}
-          targetKind="unstaged"
           scrollRootRef={scrollRootRef}
           t={translate}
           viewMode="unified"
@@ -282,6 +283,20 @@ async function nextPaint(): Promise<void> {
 }
 
 describe('GitReviewDiffCard browser layout', () => {
+  it('exposes file mutations only for unstaged and staged targets', () => {
+    expect(getGitReviewTargetCapabilities('unstaged')).toEqual({
+      mutation: 'stage',
+      restore: true
+    })
+    expect(getGitReviewTargetCapabilities('staged')).toEqual({
+      mutation: 'unstage',
+      restore: false
+    })
+    for (const kind of ['lastTurn', 'uncommitted', 'commit', 'branch'] as const) {
+      expect(getGitReviewTargetCapabilities(kind)).toEqual({ mutation: null, restore: false })
+    }
+  })
+
   it('keeps last-turn file cards read-only while preserving review controls', async () => {
     const screen = await render(<LastTurnCardFixture />)
     const actions = screen.container.querySelector('.git-review__file-actions')

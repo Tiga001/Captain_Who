@@ -9,11 +9,7 @@ import {
   type ReactNode,
   type RefObject
 } from 'react'
-import type {
-  GitReviewFile,
-  GitReviewFileMutationAction,
-  GitReviewTarget
-} from '@mycopilot/protocol'
+import type { GitReviewFile, GitReviewFileMutationAction } from '@mycopilot/protocol'
 import {
   ChevronDown,
   ChevronRight,
@@ -32,12 +28,14 @@ import { GitReviewFileIcon } from './GitReviewFileIcon'
 import { canHydrateGitReviewFile } from './gitReviewFileCapabilities'
 import type { GitReviewViewMode } from './gitReviewViewMode'
 import type { GitReviewDiffState, GitReviewFileContentState } from './useGitReview'
+import type { GitReviewTargetCapabilities } from './gitReviewTargetCapabilities'
 
 const EMPTY_EXPANSION_STATE: GitDiffExpansionState = new Map()
 const DEFAULT_DIFF_BODY_HEIGHT = 87
 const DIFF_BODY_UNMOUNT_DELAY_MS = 400
 
 interface GitReviewDiffCardProps {
+  capabilities: GitReviewTargetCapabilities
   diffState?: GitReviewDiffState
   file: GitReviewFile
   fileContentState?: GitReviewFileContentState
@@ -55,7 +53,6 @@ interface GitReviewDiffCardProps {
   onRequestDiff: (fileId: string) => void
   onRestore: (file: GitReviewFile) => void
   onToggle: (fileId: string) => void
-  targetKind: GitReviewTarget['kind']
   scrollRootRef: RefObject<HTMLDivElement | null>
   reviewSnapshotId?: string
   t: Translate
@@ -65,6 +62,7 @@ interface GitReviewDiffCardProps {
 
 /** Owns file-level review UX; patch parsing and line rendering live behind a separate boundary. */
 export const GitReviewDiffCard = memo(function GitReviewDiffCard({
+  capabilities,
   diffState,
   file,
   fileContentState,
@@ -82,7 +80,6 @@ export const GitReviewDiffCard = memo(function GitReviewDiffCard({
   onRequestDiff,
   onRestore,
   onToggle,
-  targetKind,
   scrollRootRef,
   reviewSnapshotId,
   t,
@@ -203,6 +200,7 @@ export const GitReviewDiffCard = memo(function GitReviewDiffCard({
   const actionLabel = isExpanded ? t('gitReview.file.collapse') : t('gitReview.file.expand')
   const statusLabel = t(`gitReview.status.${file.status}`)
   const statsLabel = file.stats ? `, +${file.stats.additions} -${file.stats.deletions}` : ''
+  const mutationAction = capabilities.mutation
 
   return (
     <section
@@ -231,7 +229,7 @@ export const GitReviewDiffCard = memo(function GitReviewDiffCard({
           <FileActionButton label={t('gitReview.file.open')} onClick={() => onOpenFile(file.path)}>
             <ExternalLink aria-hidden="true" />
           </FileActionButton>
-          {targetKind === 'unstaged' && (
+          {capabilities.restore && (
             <FileActionButton
               disabled={mutationLocked}
               label={t('gitReview.file.restore')}
@@ -240,17 +238,17 @@ export const GitReviewDiffCard = memo(function GitReviewDiffCard({
               <Undo2 aria-hidden="true" />
             </FileActionButton>
           )}
-          {(targetKind === 'unstaged' || targetKind === 'staged') && (
+          {mutationAction && (
             <FileActionButton
               disabled={mutationLocked}
               label={
-                targetKind === 'unstaged' ? t('gitReview.file.stage') : t('gitReview.file.unstage')
+                mutationAction === 'stage' ? t('gitReview.file.stage') : t('gitReview.file.unstage')
               }
-              onClick={() => onMutate(file.id, targetKind === 'unstaged' ? 'stage' : 'unstage')}
+              onClick={() => onMutate(file.id, mutationAction)}
             >
               {mutationPending ? (
                 <LoaderCircle className="git-review__spinner" aria-hidden="true" />
-              ) : targetKind === 'unstaged' ? (
+              ) : mutationAction === 'stage' ? (
                 <Plus aria-hidden="true" />
               ) : (
                 <Minus aria-hidden="true" />

@@ -9,9 +9,15 @@ const { setTargetSpy } = vi.hoisted(() => ({
 
 vi.mock('../../../config/FrontendConfigProvider', () => ({
   useFrontendConfig: () => ({
+    language: 'en-US',
     resolvedThemeId: 'classic-light',
     t: (key: string) => key
   })
+}))
+
+vi.mock('../gitReviewClient', () => ({
+  getGitReviewRepositoryContext: vi.fn(),
+  listGitReviewCommits: vi.fn()
 }))
 
 vi.mock('../useGitReview', async () => {
@@ -50,7 +56,7 @@ vi.mock('../useGitReview', async () => {
     useGitReview: (
       _projectId: string,
       _isActive: boolean,
-      initialTarget: GitReviewTarget = { kind: 'unstaged' }
+      initialTarget: GitReviewTarget = { kind: 'uncommitted' }
     ) => {
       const [target, setTargetState] = useState<GitReviewTarget>(initialTarget)
       const setTarget = useCallback((nextTarget: GitReviewTarget) => {
@@ -110,7 +116,7 @@ describe('Git Review scope navigation', () => {
     const screen = await render(<GitReviewPanel isActive onOpenFile={NOOP} projectId="project-1" />)
 
     await expect
-      .element(screen.getByRole('button', { name: 'gitReview.scope.unstaged' }))
+      .element(screen.getByRole('button', { name: 'gitReview.scope.uncommitted' }))
       .toBeVisible()
     await screen.rerender(
       <GitReviewPanel

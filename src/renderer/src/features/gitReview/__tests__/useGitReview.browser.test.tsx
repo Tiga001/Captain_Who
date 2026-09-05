@@ -21,9 +21,12 @@ vi.mock('../gitReviewClient', () => ({
   mutateGitReviewFile: mutateSpy
 }))
 
-const { useGitReview } = await import('../useGitReview')
+const { gitReviewTargetKey, useGitReview } = await import('../useGitReview')
 
-function summary(snapshotId: string): GitReviewSummary {
+function summary(
+  snapshotId: string,
+  target: GitReviewTarget = { kind: 'uncommitted' }
+): GitReviewSummary {
   return {
     files: [
       {
@@ -35,7 +38,7 @@ function summary(snapshotId: string): GitReviewSummary {
     ],
     context: {},
     repositoryId: 'repository-1',
-    target: { kind: 'unstaged' },
+    target,
     snapshotId,
     stats: {
       additions: 1,
@@ -103,6 +106,12 @@ function ReviewHarness({
       >
         last turn
       </button>
+      <button
+        type="button"
+        onClick={() => review.setTarget({ kind: 'commit', commitSha: 'commit-b' })}
+      >
+        commit b
+      </button>
       <button type="button" onClick={() => void review.mutateFile('file-1', 'stage')}>
         mutate
       </button>
@@ -115,12 +124,33 @@ beforeEach(() => {
   diffSpy.mockReset()
   mutateSpy.mockReset()
   summarySpy.mockReset()
-  summarySpy.mockResolvedValue(summary('snapshot-1'))
+  summarySpy.mockImplementation(({ target }: { target: GitReviewTarget }) =>
+    Promise.resolve(summary('snapshot-1', target))
+  )
   diffSpy.mockResolvedValue(readyDiff())
   contentSpy.mockResolvedValue(readyContent())
 })
 
 describe('useGitReview request lifecycle', () => {
+  it('keys commits and branch comparisons by their complete target', () => {
+    expect(gitReviewTargetKey({ kind: 'commit', commitSha: 'commit-a' })).not.toBe(
+      gitReviewTargetKey({ kind: 'commit', commitSha: 'commit-b' })
+    )
+    expect(gitReviewTargetKey({ kind: 'branch', baseRef: 'refs/heads/main' })).not.toBe(
+      gitReviewTargetKey({ kind: 'branch', baseRef: 'refs/heads/release' })
+    )
+  })
+
+  it('uses the uncommitted target for an ordinary review request', async () => {
+    render(<ReviewHarness active />)
+
+    await expect.poll(() => summarySpy.mock.calls.length).toBe(1)
+    expect(summarySpy).toHaveBeenCalledWith({
+      projectId: 'project-1',
+      target: { kind: 'uncommitted' }
+    })
+  })
+
   it('uses a requested last-turn target for the first review request', async () => {
     const screen = await render(
       <ReviewHarness
@@ -235,6 +265,35 @@ describe('useGitReview request lifecycle', () => {
 
     await screen.getByRole('button', { name: 'mutate' }).click()
     expect(mutateSpy).not.toHaveBeenCalled()
+  })
+
+  it('isolates summary results by the complete target when switching commits', async () => {
+    const commitA = deferred<GitReviewSummary>()
+    const commitB = deferred<GitReviewSummary>()
+    summarySpy.mockReset()
+    summarySpy.mockReturnValueOnce(commitA.promise).mockReturnValueOnce(commitB.promise)
+    const screen = await render(
+      <ReviewHarness active initialTarget={{ kind: 'commit', commitSha: 'commit-a' }} />
+    )
+
+    await expect.poll(() => summarySpy.mock.calls.length).toBe(1)
+    await screen.getByRole('button', { name: 'commit b' }).click()
+    await expect.poll(() => summarySpy.mock.calls.length).toBe(2)
+    expect(summarySpy.mock.calls.map(([input]) => input.target)).toEqual([
+      { kind: 'commit', commitSha: 'commit-a' },
+      { kind: 'commit', commitSha: 'commit-b' }
+    ])
+
+    commitB.resolve(summary('snapshot-b', { kind: 'commit', commitSha: 'commit-b' }))
+    await expect
+      .element(screen.getByTestId('summary-status'))
+      .toHaveTextContent('ready:snapshot-b:ok')
+
+    commitA.resolve(summary('snapshot-a', { kind: 'commit', commitSha: 'commit-a' }))
+    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
+    await expect
+      .element(screen.getByTestId('summary-status'))
+      .toHaveTextContent('ready:snapshot-b:ok')
   })
 })
 
