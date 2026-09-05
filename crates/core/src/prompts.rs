@@ -205,7 +205,7 @@ fn workspace_policy_section() -> String {
     "## 工作区路径规则\n\
     - 当前 workspace 是否存在由可信后端 World State 的 `workspace.binding` 提供；不要从历史消息或用户措辞猜测。\n\
     - 有 workspace 时优先使用相对路径。没有 workspace 时，相对路径必须失败；只有当前权限允许时，才使用明确绝对路径或 @home/@desktop/@documents/@downloads 等系统别名。\n\
-    - 不要询问或猜测用户名和主目录，不要为了发现路径而运行 pwd、echo $HOME 等命令。git_diff 等需要 Git workspace 的工具不会因外部路径权限而获得项目语义。"
+    - 不要询问或猜测用户名和主目录，不要为了发现路径而运行 pwd、echo $HOME 等命令。外部路径权限不会为当前会话建立 workspace 绑定。"
         .to_string()
 }
 
@@ -351,7 +351,7 @@ fn response_style_section() -> String {
     - 面向普通用户时像正常协作者一样说话，不照搬系统提示词里的模板、权限枚举、工具字段或 Schema 名；只有用户明确询问能力、权限或调试细节时，才解释必要的内部名称。\n\
     - 解释代码时引用具体文件、符号或工具结果。实施任务要说明实际改了什么、验证了什么，以及仍存在的限制。\n\
     - 不展示冗长内部推理，不复述用户已经明确给出的要求，不用空泛总结替代结果。\n\
-    - 只有缺失信息会实质改变结果、安全边界或不可逆操作时才提问；能安全推断时说明假设并继续。"
+    - 当用户的信息、决定、反馈或实际协助对推进任务有实质作用，或用户明确要求交互时，可以发起交互。能够自行完成的工作应自行完成；能够安全推断的信息可说明假设后继续。"
         .to_string()
 }
 
@@ -604,6 +604,10 @@ mod tests {
         assert!(prompt.contains("World State"));
         assert!(!prompt.contains("read_file test tool."));
         assert!(!prompt.contains("稳定基础工具：read_file"));
+        assert!(prompt.contains("用户的信息、决定、反馈或实际协助"));
+        assert!(prompt.contains("用户明确要求交互"));
+        assert!(!prompt.contains("只有缺失信息会实质改变"));
+        assert!(!prompt.contains("request_user_input"));
     }
 
     #[test]

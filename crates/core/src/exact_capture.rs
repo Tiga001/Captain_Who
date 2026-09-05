@@ -10,8 +10,8 @@ use tempfile::NamedTempFile;
 
 /// Maximum safely retained textual payload for one Tool call.
 ///
-/// Process stdout and stderr share this allowance. Document parsers, Web Fetch, and Git Diff use
-/// the same product constant at their source boundary.
+/// Process stdout and stderr share this allowance. Document parsers and Web Fetch use the same
+/// product constant at their source boundary.
 pub const EXACT_TEXT_CAPTURE_MAX_BYTES: u64 = 64 * 1024 * 1024;
 
 /// Stable stop reason emitted whenever the shared hard capture ceiling discards source bytes.

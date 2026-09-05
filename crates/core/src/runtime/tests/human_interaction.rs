@@ -418,6 +418,12 @@ fn human_interaction_ignored_snapshot_is_bounded_request_only_runtime_context() 
     assert_eq!(manifest.entries[0].role, "system");
     assert_eq!(manifest.entries[0].sources, ["runtime_guard"]);
     assert_eq!(manifest.entries[0].retention, "request_only");
+    let messages = frame.to_messages();
+    let status_text = messages[0].content();
+    assert!(status_text.contains("## 异步交互状态"));
+    assert!(status_text.contains("没有提交回应"));
+    assert!(status_text.contains("不要重复请求"));
+    assert!(status_text.contains("所请求事项已经发生"));
     for ignored in [
         vec![],
         vec![" ".into()],
@@ -982,20 +988,41 @@ async fn human_interaction_provider_requests_use_one_policy_snapshot_for_both_to
     for (request, available) in requests.iter().zip([false, true, false]) {
         let tools = request["tools"].as_array().unwrap();
         for tool in ["request_user_input", "request_user_input_async"] {
-            assert_eq!(
-                tools.iter().any(|entry| entry["function"]["name"] == tool),
-                available
-            );
+            let definition = tools.iter().find(|entry| entry["function"]["name"] == tool);
+            assert_eq!(definition.is_some(), available);
+            if let Some(definition) = definition {
+                let description = definition["function"]["description"].as_str().unwrap();
+                for purpose in ["assistance", "feedback", "actions that require the human"] {
+                    assert!(description.contains(purpose), "{tool}: {purpose}");
+                }
+                assert!(!description.contains("Use only for information or preferences"));
+            }
+        }
+        let message_texts = request["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|message| message["content"].as_str())
+            .collect::<Vec<_>>();
+        let instructions = message_texts
+            .iter()
+            .find(|text| text.contains("## 人机交互"));
+        assert_eq!(instructions.is_some(), available);
+        for principle in [
+            "需要用户亲自参与的操作",
+            "不要求套用固定模板",
+            "只作回应能够支持的判断",
+        ] {
+            if let Some(instructions) = instructions {
+                assert!(instructions.contains(principle), "{principle}");
+            }
         }
         assert_eq!(
-            request["messages"]
-                .as_array()
-                .unwrap()
+            message_texts
                 .iter()
-                .any(|message| message["content"]
-                    .as_str()
-                    .is_some_and(|text| text.contains("## 人机交互"))),
-            available
+                .any(|text| text.contains("不要求套用固定模板")),
+            available,
+            "interaction guidance must disappear with the corresponding tools"
         );
     }
     let results = output

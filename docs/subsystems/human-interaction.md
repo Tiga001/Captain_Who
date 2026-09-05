@@ -2,7 +2,7 @@
 status: current
 audience: developers
 owner: engineering
-last_verified: 2026-09-05
+last_verified: 2026-09-06
 ---
 
 # 向用户提问：设计与实施进度
@@ -11,6 +11,7 @@ last_verified: 2026-09-05
 
 ## 产品契约
 
+- 人机交互支持补充信息、表达偏好、判断/决策、反馈，以及需要用户亲自参与的操作；用户明确要求交互时也可使用。选项按具体事项组织，没有固定回应模板。
 - `request_user_input` 挂起当前根智能体，整批回答作为原工具调用的唯一结果恢复同一逻辑 Run。
 - `request_user_input_async` 接纳后立即返回，继续独立工作；整批回答随后作为用户消息投递。
 - 两工具只属于直接面向用户的根智能体。普通单 Agent 聊天属于根聊天；所有层级子 Agent，
@@ -48,8 +49,29 @@ last_verified: 2026-09-05
 子 Agent/Automation 身份。未完成执行链路时 execution readiness 关闭，即使设置开启也不得向
 真实模型提供不可执行的 Schema 或专项提示词。设置开关与实现 readiness 是不同事实。
 
-后续工具描述必须区分“必须等答案才可继续”和“仍有独立工作可做”；缺失信息能够安全推断时
-避免反复提问；沉默、不回答和忽略都不等于同意。问题不能替代正式权限审批。
+工具描述区分“必须等待用户参与才可继续”和“仍有独立工作可做”。能够自行处理的事情自行处理，
+需要用户独有信息、判断或实际协助时清楚请求。回应必须结合原交互含义解释，偏好不是授权，意向不是行动结果，
+用户陈述不能写成智能体执行或验证所得的事实；拒绝、跳过、忽略和沉默均不表示同意或请求事项已发生。交互不能替代正式权限审批。
+
+## 交互提示词（2026-09-06）
+
+两项工具从仅用于信息/偏好问答扩展为请求用户参与任务，包括判断、决策、反馈和实际协助。
+不新增工具、数据库状态或参数字段，继续使用 `questions[].title/options` 和 `option/text/skipped`；
+标题可表达问题或协助请求，选项随事项变化，不预设固定的完成、拒绝等回应模板。
+
+- 英文模型工具描述及字段说明位于 [`tools/human_interaction.rs`](../../crates/core/src/tools/human_interaction.rs)。
+- 中文专项提示位于 [`runtime/extensions/human_interaction.rs`](../../crates/core/src/runtime/extensions/human_interaction.rs)，共享交互组织和回应解释规则，仅路由段依据同步/异步 readiness 组合命名可用工具；依旧按当次能力快照注入 RequestOnly System 上下文，关闭时撤下，压缩采样不注入。
+- 稳定系统提示 [`prompts.rs`](../../crates/core/src/prompts.rs) 的交互原则允许实际协助及用户明确要求交互，不硬编码动态工具名称。权限规则继续要求正式审批/有效设置，不允许通过用户代做绕过受限操作。
+- 下一次自然采样的忽略说明在 [`runtime/preparation.rs`](../../crates/core/src/runtime/preparation.rs) 中统一为“异步交互状态”，明确没有提交回应，也不能把忽略解释为请求事项已发生。它不会额外调用模型。
+
+回应解释以原事项和用户实际表达为依据；只作回应能够支持的判断，不将偏好扩大为授权、意向视为行动结果、用户陈述视为自身执行证据。后续依赖可核验外部状态时，在现有授权能力内进行必要核验；不能核验时说明事实来源及不确定性。
+
+本次验证（2026-09-06）：
+
+- `cargo test --locked -p mycopilot-core human_interaction --lib`：77 项通过。包括可控 Provider 的真实请求内容、开关与 schema/专项提示同快照、同步/异步单独可用的提示词裁剪、根/后代/Automation 边界及原有回应投递回归。
+- `cargo test --locked -p mycopilot-core prompts::tests --lib`：18 项通过，通用交互规则不再限于缺失信息，且不硬编码动态工具名。
+- 首次编译被联网扩展测试访问私有字段阻挡；仅将该测试改用现有 ContextFrame 投影和 AgentError 访问接口，联网执行行为未改。`cargo test --locked -p mycopilot-core runtime::extensions::web_search --lib`：4 项通过。
+- `cargo clippy --locked -p mycopilot-core --lib --tests -- -D warnings`、本次提示词 Rust 文件的 rustfmt、开发/用户文档及 diff whitespace 检查通过。未调用商业模型、未修改数据库版本或重置数据；测试验证提示词传递与契约，未将其表述为商业模型行为评测。
 
 ## 数据与状态
 
@@ -296,8 +318,8 @@ Host 校验当前执行 segment、根节点、Run/assistant/toolCall 和实时�
 
 同步和异步 readiness 独立；`human.interaction` 与 `human.interaction.async` 动态能力共享一次
 设置快照，工具 Schema、RequestOnly 提示词及能力状态保持一致，稳定前缀不变。
-专项说明要求同步用于必须等待的必要信息，异步只能继续不依赖答案的工作，不重复问同一问题，
-跳过、忽略和沉默均不是同意，提问不能替代权限审批。
+专项说明要求同步用于必须等待用户参与的工作，异步只能继续不依赖回应的工作，不重复请求。
+请求内容可包含信息、偏好、决策、反馈或人工操作；选项不使用固定状态模板，回应解释与验证保持事实边界，交互不能替代权限审批。
 `natural_sampling_state` 只在本来就要发生的合法模型采样边界读取已忽略 requestId；它不创建持久
 User/guidance、队列消息或 Wake，不要求 Provider 为忽略状态再推理一次。各 Provider 沿用现有
 RuntimeGuard 的线协议角色转换；内部状态仍是 RequestOnly 运行信息，不是正式用户回答。

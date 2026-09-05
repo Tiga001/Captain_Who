@@ -111,7 +111,6 @@ export type AgentToolName =
   | 'search_code'
   | 'web_search'
   | 'web_fetch'
-  | 'git_diff'
   | 'todo_update'
   | 'apply_patch'
   | 'run_command'

@@ -17,7 +17,6 @@ import { AttachmentListToolActivity } from './AttachmentListToolActivity'
 import { FileChangeToolActivity } from './FileChangeToolActivity'
 import { ConversationHistoryToolActivity } from './ConversationHistoryToolActivity'
 import { GenericToolActivity } from './GenericToolActivity'
-import { GitDiffToolActivity } from './GitDiffToolActivity'
 import { ReadToolActivity } from './ReadToolActivity'
 import { RunCommandToolActivity } from './RunCommandToolActivity'
 import { SearchToolActivity } from './SearchToolActivity'
@@ -178,17 +177,6 @@ export function AgentToolActivity({
   if (call.tool === 'search_files' || call.tool === 'search_code') {
     return (
       <SearchToolActivity
-        cancelled={cancelled && !result}
-        call={call}
-        result={result}
-        settledStatus={settledStatus}
-      />
-    )
-  }
-
-  if (call.tool === 'git_diff') {
-    return (
-      <GitDiffToolActivity
         cancelled={cancelled && !result}
         call={call}
         result={result}

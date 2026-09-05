@@ -92,9 +92,9 @@ function activityMessage({
   const calls = Array.from({ length: commandCount }, (_, index) =>
     commandCall(index + 1, longReason && index === 0 ? LONG_REASON : undefined)
   )
-  const diffCall: AgentToolCall = {
-    id: 'git-diff',
-    tool: 'git_diff',
+  const attachmentListCall: AgentToolCall = {
+    id: 'attachment-list',
+    tool: 'attachments_list',
     args: {},
     approvalStatus: 'not_required',
     reason: null
@@ -113,16 +113,21 @@ function activityMessage({
       firstResponseAt: 2,
       completedAt: running ? undefined : 25_001,
       toolDefinitions: [],
-      toolCalls: [diffCall, ...calls],
+      toolCalls: [attachmentListCall, ...calls],
       toolResults: [
-        { callId: diffCall.id, tool: diffCall.tool, ok: true, result: { patch: '' } },
+        {
+          callId: attachmentListCall.id,
+          tool: attachmentListCall.tool,
+          ok: true,
+          result: { attachments: [], total: 0 }
+        },
         ...calls.map(commandResult)
       ],
       approvals: [],
       fileChangeProposals: [],
       timeline: [
         ...(narration ? [{ id: 'narration', type: 'message' as const, content: narration }] : []),
-        ...[diffCall, ...calls].map((call) => ({
+        ...[attachmentListCall, ...calls].map((call) => ({
           id: `timeline-${call.id}`,
           type: 'tool_call' as const,
           callId: call.id
@@ -220,7 +225,7 @@ describe('Chat activity density in the real timeline', () => {
     )
     const run = requiredElement(screen.container, '.agent-run')
     const elapsed = requiredElement(run, '.agent-run__elapsed')
-    const diff = requiredElement(run, '.agent-activity--git-diff')
+    const attachmentList = requiredElement(run, '.agent-activity--attachment-list')
     const commandGroup = requiredElement<HTMLDetailsElement>(run, '.agent-activity--run-command')
     const summary = requiredElement(commandGroup, ':scope > summary')
     const parentLabel = requiredElement(summary, '.agent-activity__label')
@@ -228,11 +233,12 @@ describe('Chat activity density in the real timeline', () => {
     expect(getComputedStyle(elapsed).rowGap).toBe('6px')
     expect(getComputedStyle(parentLabel).fontWeight).toBe('400')
     expect(summary.getBoundingClientRect().height).toBe(28)
-    expect(commandGroup.getBoundingClientRect().top - diff.getBoundingClientRect().bottom).toBe(4)
-    expect(diff.getBoundingClientRect().top - elapsed.getBoundingClientRect().bottom).toBeCloseTo(
-      14,
-      1
-    )
+    expect(
+      commandGroup.getBoundingClientRect().top - attachmentList.getBoundingClientRect().bottom
+    ).toBe(4)
+    expect(
+      attachmentList.getBoundingClientRect().top - elapsed.getBoundingClientRect().bottom
+    ).toBeCloseTo(14, 1)
 
     await userEvent.click(summary)
     const children = commandGroup.querySelectorAll<HTMLElement>(

@@ -20,7 +20,6 @@ export function getToolDisplayName(tool: string, t: Translate) {
     attachments_list: 'tool.attachmentsList',
     attachments_list_project: 'tool.attachmentsListProject',
     conversation_history: 'tool.conversationHistory',
-    git_diff: 'tool.gitDiff',
     read_file: 'tool.readFile',
     read_image: 'tool.readImage',
     read_presentation: 'tool.readPresentation',

@@ -1,4 +1,4 @@
-//! Reviewed model-facing contracts for human questions.
+//! Reviewed model-facing contracts for human input and assistance.
 //!
 //! Synchronous execution yields an internal suspension which only the runtime driver may settle.
 //! Asynchronous execution returns only after Host admission, then continues through normal tool
@@ -100,11 +100,30 @@ pub(crate) fn human_interaction_tool_definitions() -> Vec<AgentToolDefinition> {
     [
         (
             HUMAN_INTERACTION_TOOL_NAMES[0],
-            "Ask the human a batch of questions when further useful work depends on the answers. This pauses the current run until the entire batch is submitted; its answers, including explicitly skipped questions, return as this tool's single result. Each question has a title and optional suggested options; the interface also supports custom text or skipping a question. Use only for information or preferences, never permission or tool approval. Do not split one decision across duplicate requests.",
+            concat!(
+                "Request human input or assistance when further progress requires waiting for the human. ",
+                "Use it to clarify information, learn preferences, request judgment or decisions, collect feedback, ",
+                "or request actions that require the human's personal participation. Items may be questions or concrete requests for assistance.\n\n",
+                "Each call creates one batch and pauses the current run until the human submits the entire batch. ",
+                "Responses, including explicitly skipped items, return through this call's single tool result.\n\n",
+                "Each item should clearly state what participation is needed. Suggested responses are optional and should fit the situation; ",
+                "the interface always supports custom text or skipping. This tool does not replace the application's execution permission approval."
+            ),
         ),
         (
             HUMAN_INTERACTION_TOOL_NAMES[1],
-            "Ask the human a batch of questions while continuing independent work. An accepted result with requestId means only that the questions were recorded, not that the human answered. This tool does not wait or pause the run. Submitted answers arrive later as authenticated human input, never a second result of this call. Continue work that does not depend on the answers; do not poll, repeat questions, guess answers, or treat silence, skipping, or ignoring as agreement. The human may minimize or ignore the entire batch; ignoring does not start another run. Each question has a title and optional suggested options, with custom text and skipping provided by the interface. Never use this for permission or tool approval.",
+            concat!(
+                "Request human input or assistance while there is still work to advance independently of the response. ",
+                "Use it to clarify information, learn preferences, request judgment or decisions, collect feedback, ",
+                "or request actions that require the human's personal participation.\n\n",
+                "Each call creates one batch and returns immediately after it is recorded; the current run continues. ",
+                "accepted/requestId only means the request was recorded: it contains no human response and does not establish that any requested event has occurred. ",
+                "Submitted responses arrive later as human input, never as a second tool result of this call.\n\n",
+                "While waiting, advance only work that does not depend on the response. Do not poll or duplicate the same request. ",
+                "The human may minimize the panel, skip items, or ignore the entire batch; ignoring itself does not trigger a new run. ",
+                "Suggested responses should fit the situation, and the interface also supports custom text. ",
+                "This tool does not replace the application's execution permission approval."
+            ),
         ),
     ]
     .into_iter()
@@ -116,13 +135,19 @@ pub(crate) fn human_interaction_tool_definitions() -> Vec<AgentToolDefinition> {
             "properties": {
                 "questions": {
                     "type": "array",
+                    "description": "A batch of questions or requests for human participation, submitted together.",
                     "minItems": 1,
                     "items": {
                         "type": "object",
                         "properties": {
-                            "title": { "type": "string", "minLength": 1 },
+                            "title": {
+                                "type": "string",
+                                "description": "Clearly state the question or assistance requested, with enough context for the human to respond.",
+                                "minLength": 1
+                            },
                             "options": {
                                 "type": "array",
+                                "description": "Optional, context-specific suggested responses. Use meaningful alternatives without a fixed response template; omit for open-ended input. The interface also supports custom text and skipping.",
                                 "minItems": 1,
                                 "items": { "type": "string", "minLength": 1 }
                             }

@@ -20,6 +20,19 @@ use std::sync::Arc;
 pub(super) const HUMAN_INTERACTION_EXTENSION_ID: &str = "human.interaction";
 const HUMAN_INTERACTION_EXTENSION_VERSION: u32 = 1;
 
+// Shared guidance stays identical for sync-only, async-only and combined capability snapshots.
+// Only the routing paragraph below names the tools available at this model request boundary.
+const HUMAN_INTERACTION_GUIDANCE: &str = "## 人机交互\n\n\
+你可以通过人机交互工具邀请用户参与任务，包括补充信息、表达偏好、作出判断或决定、提供反馈，以及完成需要用户亲自参与的操作。用户明确要求发起交互时，也可使用这些工具。\n\n\
+在交互前，先明确需要用户参与的具体事项。已有信息或当前可用能力足以解决的事情，应自行处理；需要用户提供独有信息、主观判断或实际协助时，清楚提出请求。\n\n\
+每个条目围绕一个明确事项，提供足够的上下文，让用户能够理解并回应。请求实际协助时，说明需要做什么，以及希望用户反馈什么；必要时简短说明原因。\n\n\
+选项应根据当前事项设计，准确表达有意义的不同回应，措辞简洁、清晰，避免诱导或预设用户立场。可以提供选择、判断、反馈或行动结果等不同形式的选项，不要求套用固定模板。开放式事项可以只提供文字输入，不必强行设计选项。\n\n\
+一次批次中的条目由用户整批提交。提交前的选择和草稿都不是正式回应，不据此推进依赖用户回应的工作。";
+
+const HUMAN_INTERACTION_RESPONSE_GUIDANCE: &str = "收到回应后，结合原交互内容理解用户实际表达的意思，并据此决定下一步。只作回应能够支持的判断：不要将偏好扩大为授权，将意向视为行动结果，或将用户陈述写成自己执行、观察或验证所得的事实。后续工作若依赖可核验的外部状态，使用当前可用且获授权的能力进行必要核验；无法核验时明确事实来源和仍存在的不确定性。\n\n\
+用户的拒绝、跳过或忽略都应得到尊重，不能被解释为同意或所请求事项已经发生。根据已有信息调整方案；确实无法继续时说明缺少的条件，不反复催促。\n\n\
+人机交互不替代应用的执行权限审批，也不能用于绕过已有权限限制。";
+
 pub(super) struct HumanInteractionExtension {
     source: Option<Arc<dyn HumanInteractionPolicySource>>,
     execution_ready: bool,
@@ -101,13 +114,16 @@ impl HumanInteractionRequestContract {
         if !self.available() || purpose != ModelRequestPurpose::AgentWork {
             return Vec::new();
         }
-        let instructions = if self.async_execution_ready && self.execution_ready {
-            "## 人机交互\n只有缺失信息会实质改变任务结果时才提问；能安全推断时说明假设并继续。后续工作必须等待回答时使用 request_user_input；仍有独立工作可做时使用 request_user_input_async 并继续独立工作。异步 accepted/requestId 只证明已记录问题，不代表用户回答；整批回答稍后作为用户输入送达，不会再次返回此工具的结果。不要轮询、重复提问、猜测答案或把沉默、不回答、忽略当作同意。每题可提供选项，用户也可自由输入或不回答，整批统一提交；异步忽略不触发新运行。两种工具均不能用于权限或工具审批，用户回答不授予执行权限。"
+        let routing = if self.async_execution_ready && self.execution_ready {
+            "后续推进必须等待用户参与时，使用 request_user_input；期间仍有独立工作可做时，使用 request_user_input_async。同步回应通过原工具调用的唯一结果返回；异步调用返回 accepted/requestId 仅表示请求已记录，回应随后作为用户输入送达，不会产生本次调用的第二个工具结果。应继续独立工作，等待正式回应，不轮询或重复请求。异步忽略本身不触发新的运行。"
         } else if self.async_execution_ready {
-            "## 人机交互\n只有缺失信息会实质改变任务结果且仍有独立工作可做时，才使用 request_user_input_async 并继续独立工作；能安全推断时说明假设并继续。accepted/requestId只证明已记录问题，整批回答稍后作为用户输入送达，不会再次返回此工具的结果。不要轮询、重复提问、猜测答案或把沉默、不回答、忽略当作同意。每题可提供选项，用户也可自由输入或不回答；忽略不触发新运行。问题不能用于权限或工具审批，回答不授予执行权限。"
+            "需要用户参与且期间仍有独立工作可做时，使用 request_user_input_async。调用返回 accepted/requestId 仅表示请求已记录，回应随后作为用户输入送达，不会产生本次调用的第二个工具结果。应继续不依赖回应的工作，等待正式回应，不轮询或重复请求。忽略本身不触发新的运行。"
         } else {
-            "## 人机交互\n只有缺失信息会实质改变任务结果且后续工作必须等待回答时，才使用 request_user_input 等待整批回答；能安全推断时说明假设并继续。每题可提供可选选项；界面允许自由文本或不回答，整批处理后一次提交。不要重复提问、猜测答案或把沉默、不回答当作同意。问题不能替代权限或工具审批，用户回答不授予任何执行权限。"
+            "后续推进必须等待用户参与时，使用 request_user_input。当前运行暂停至用户整批提交，回应通过原工具调用的唯一结果返回，再继续后续工作。等待正式回应，不轮询或重复请求。"
         };
+        let instructions = format!(
+            "{HUMAN_INTERACTION_GUIDANCE}\n\n{routing}\n\n{HUMAN_INTERACTION_RESPONSE_GUIDANCE}"
+        );
         vec![ContextItem::text(
             LlmMessageRole::System,
             instructions,
@@ -332,6 +348,48 @@ mod tests {
             4
         );
         assert_eq!(policy.reads.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn human_interaction_guidance_names_only_the_available_tools() {
+        for enabled in [false, true] {
+            for execution_ready in [false, true] {
+                for async_execution_ready in [false, true] {
+                    let request = HumanInteractionRequestContract {
+                        settings: settings(enabled, 1),
+                        execution_ready,
+                        async_execution_ready,
+                    };
+                    let frame = crate::context::ContextFrame::new(
+                        request.context(ModelRequestPurpose::AgentWork),
+                    );
+                    let messages = frame.to_messages();
+                    let definitions = request.tool_definitions();
+                    if definitions.is_empty() {
+                        assert!(messages.is_empty());
+                        continue;
+                    }
+                    assert_eq!(messages.len(), 1);
+                    let text = messages[0].content();
+                    let named_tools = text
+                        .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+                        .filter(|word| word.starts_with("request_user_input"))
+                        .collect::<BTreeSet<_>>();
+                    let exposed_tools = definitions
+                        .iter()
+                        .map(|definition| definition.name.as_str())
+                        .collect::<BTreeSet<_>>();
+                    assert_eq!(named_tools, exposed_tools);
+                    assert!(text.contains("不要求套用固定模板"));
+                    assert!(text.contains("需要用户亲自参与的操作"));
+                    assert!(!text.contains("已完成"));
+                    assert!(request
+                        .context(ModelRequestPurpose::ContextCompaction)
+                        .is_empty());
+                    assert_eq!(frame.manifest().entries[0].retention, "request_only");
+                }
+            }
+        }
     }
 
     #[test]

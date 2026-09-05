@@ -715,6 +715,40 @@ mod tests {
     }
 
     #[test]
+    fn removing_a_stable_tool_rejects_the_frozen_checkpoint() {
+        let before_registry = registry();
+        let before = EffectiveToolSet::from_permitted_definitions(
+            &before_registry,
+            before_registry.definitions(),
+            &BTreeSet::new(),
+        )
+        .unwrap();
+
+        let mut after_registry = ToolRegistry::empty();
+        after_registry.register(TestTool {
+            name: "a_dynamic",
+            exposure: AgentToolExposure::RequiresCapability(ToolCapabilityId::application_owned(
+                OFFICE_DOCUMENTS_CAPABILITY,
+            )),
+        });
+        after_registry.register(TestTool {
+            name: "b_stable",
+            exposure: AgentToolExposure::Stable,
+        });
+        let after = EffectiveToolSet::from_permitted_definitions(
+            &after_registry,
+            after_registry.definitions(),
+            &BTreeSet::new(),
+        )
+        .unwrap();
+
+        let error = after
+            .restore_frozen_checkpoint(&before.checkpoint())
+            .unwrap_err();
+        assert_eq!(error.code(), Some("agent.checkpoint_tool_set_mismatch"));
+    }
+
+    #[test]
     fn inactive_capabilities_and_permission_filtering_do_not_change_stable_revision() {
         let registry = registry();
         let permitted = registry
@@ -881,7 +915,6 @@ mod tests {
             ("attachments_list", AgentToolExposure::Stable),
             ("attachments_list_project", AgentToolExposure::Stable),
             ("command_session", AgentToolExposure::Stable),
-            ("git_diff", AgentToolExposure::Stable),
             ("read_file", AgentToolExposure::Stable),
             ("read_image", AgentToolExposure::Stable),
             (

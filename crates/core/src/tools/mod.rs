@@ -12,7 +12,6 @@ mod file_change_round6_acceptance;
 mod file_change_staged;
 mod file_change_stream;
 mod filesystem;
-mod git_diff;
 pub(crate) mod human_interaction;
 mod image_generation;
 mod input_stream;
@@ -65,7 +64,6 @@ pub(crate) use builtin_capability::{
 };
 use command_session::CommandSessionTool;
 use conversation_history::ConversationHistoryTool;
-use git_diff::GitDiffTool;
 use image_generation::ImageGenerationTool;
 pub use image_generation::{
     agent_image_generation_execution_id, agent_image_generation_tool_result_from_execution,
@@ -596,7 +594,6 @@ impl ToolRegistry {
             registry.register(WebSearchTool::new(api_key.clone()));
             registry.register(WebFetchTool::new(api_key));
         }
-        registry.register(GitDiffTool);
         registry.register(ApplyPatchTool);
         registry.register(RunCommandTool);
         registry.register_async(CommandSessionTool);
@@ -2060,6 +2057,30 @@ mod tests {
         assert!(!result.ok);
         assert_eq!(result.tool, "write_file");
         assert_eq!(result.error.as_deref(), Some("未知工具：write_file"));
+    }
+
+    #[test]
+    fn git_diff_is_not_registered_or_executable() {
+        let registry = ToolRegistry::defaults_with_search(None);
+        assert!(registry.definition_for("git_diff").is_none());
+        let effective = registry
+            .effective_tool_set(registry.definitions(), &Default::default())
+            .unwrap();
+        assert!(!effective.contains("git_diff"));
+
+        let result = registry.execute(
+            &ToolExecutionContext::from_run_context(None),
+            &AgentToolCall {
+                id: "removed-git-diff".to_string(),
+                tool: "git_diff".to_string(),
+                args: json!({}),
+                approval_status: AgentApprovalStatus::NotRequired,
+                reason: None,
+            },
+        );
+        assert!(!result.ok);
+        assert_eq!(result.tool, "git_diff");
+        assert_eq!(result.error.as_deref(), Some("未知工具：git_diff"));
     }
 
     #[test]

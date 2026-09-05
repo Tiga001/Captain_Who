@@ -33,7 +33,7 @@ last_verified: 2026-08-31
 
 当前注册面可按以下族理解：
 
-- 文件与检索：attachments、`read_*`、workspace/search、web、Git；
+- 文件与检索：attachments、`read_*`、workspace/search、web；
 - 写入与执行：唯一专用结构化文本文件修改 Tool `apply_patch`，以及可能产生独立副作用的 `run_command`、`command_session`；
 - Office 与图像：三个 Office Tool、`image_generation`；
 - Skills：resource list/read/materialize、script preflight/run、install prepare/commit，以及运行扩展 `skills_activate`；
@@ -42,7 +42,9 @@ last_verified: 2026-08-31
 - 内置能力：`activate_capability` 和激活后的 Managed Playwright Browser Tool；
 - 外部扩展：MCP Server Tool 与其他 Runtime Extension。
 
-基础 Registry 总是注册文件/搜索/Git/写入/命令、Command Session 及 Skill Resource/Script Tool；Office、图像生成、Web Tool 仅在对应 engine/execution/API key 可用时注册。历史、Skill 安装、协作、Runtime Extension、Managed Playwright 和外部 MCP Server Tool 由 Core Server 在构造 Run 时追加。上述族列表不是可执行 allowlist；完整真源是 `ToolRegistry` 的注册调用、`EffectiveToolSet` 契约和相关测试，新增 Tool 必须让自动化检查发现，而不是只修改本文。
+基础 Registry 总是注册文件/搜索/写入/命令、Command Session 及 Skill Resource/Script Tool；Office、图像生成、Web Tool 仅在对应 engine/execution/API key 可用时注册。历史、Skill 安装、协作、Runtime Extension、Managed Playwright 和外部 MCP Server Tool 由 Core Server 在构造 Run 时追加。上述族列表不是可执行 allowlist；完整真源是 `ToolRegistry` 的注册调用、`EffectiveToolSet` 契约和相关测试，新增 Tool 必须让自动化检查发现，而不是只修改本文。
+
+Git 差异通过 `run_command` 执行普通 Git 命令，沿用命令权限与审批规则。
 
 ## 权限模型
 

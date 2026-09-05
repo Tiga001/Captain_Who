@@ -961,10 +961,6 @@ impl ToolExecutionContext {
             .unwrap_or(&[])
     }
 
-    pub(super) fn validate_relative_path_for_git(&self, input_path: &str) -> AgentResult<PathBuf> {
-        clean_relative_path(input_path)
-    }
-
     pub(super) fn attachment_reference_for_path(
         &self,
         input_path: &str,

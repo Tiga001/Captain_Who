@@ -187,9 +187,11 @@ mod tests {
         assert_eq!(on.dynamic_definitions().len(), 2);
         let instructions = extension.request_context(&ModelRequestContext::agent_work()).unwrap();
         assert_eq!(instructions.len(), 1);
-        assert_eq!(instructions[0].metadata.retention(), ContextRetention::RequestOnly);
-        assert!(instructions[0].message.content.contains("web_search"));
-        assert!(instructions[0].message.content.contains("web_fetch"));
+        let frame = crate::context::ContextFrame::new(instructions);
+        assert_eq!(frame.manifest().entries[0].retention, "request_only");
+        let messages = frame.to_messages();
+        assert!(messages[0].content().contains("web_search"));
+        assert!(messages[0].content().contains("web_fetch"));
         assert!(extension.request_context(&ModelRequestContext { purpose: ModelRequestPurpose::ContextCompaction }).unwrap().is_empty());
         assert_eq!(extension.world_state_sections().unwrap()[0].state["reason"], "available");
         assert_eq!(source.reads.load(Ordering::SeqCst), 2);
@@ -238,7 +240,7 @@ mod tests {
                 json!({ "url": "https://example.com/owned-test" })
             };
             let error = tool.execute(&context, args).unwrap_err();
-            assert_eq!(error.code.as_deref(), Some("web_search.disabled_by_user"));
+            assert_eq!(error.code(), Some("web_search.disabled_by_user"));
         }
         assert_eq!(source.executions.load(Ordering::SeqCst), 2);
         assert!(extension.available(), "already accepted request stays frozen");

@@ -639,7 +639,7 @@ pub(super) fn human_interaction_ignored_context(
     }
     Some(ContextItem::text(
         LlmMessageRole::System,
-        format!("## 异步提问状态\n{}\n这些批次已被用户忽略，没有提交答案。不要重新追问、假定答案或把忽略视作同意。", json!({"type":"human_interaction_status","schemaVersion":1,"ignoredRequestIds":state.ignored_request_ids})),
+        format!("## 异步交互状态\n{}\n这些批次已被用户忽略，没有提交回应。尊重用户选择，不要重复请求、假定回应，或把忽略视作同意或所请求事项已经发生。", json!({"type":"human_interaction_status","schemaVersion":1,"ignoredRequestIds":state.ignored_request_ids})),
         ContextSource::RuntimeGuard, ContextScope::Run, ContextRetention::RequestOnly,
     ))
 }

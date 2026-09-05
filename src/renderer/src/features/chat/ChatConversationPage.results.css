@@ -1059,55 +1059,6 @@ button.attachment-list-activity__item:focus-visible {
   font-weight: var(--mc-font-weight-medium);
 }
 
-.git-diff-activity__details {
-  display: block;
-  max-width: min(100%, 720px);
-  padding-top: 8px;
-}
-
-.git-diff-activity__scope {
-  display: inline-flex;
-  align-items: center;
-  max-width: 100%;
-  gap: 8px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.git-diff-activity__items {
-  display: grid;
-  max-width: min(100%, 720px);
-  max-height: 260px;
-  gap: 7px;
-  overflow: auto;
-  padding-right: 2px;
-}
-
-.git-diff-activity__item {
-  min-width: 0;
-  overflow: hidden;
-  color: var(--mc-color-text-muted);
-  font-size: var(--mc-font-size-chat-activity);
-  font-weight: var(--mc-font-weight-medium);
-  line-height: var(--mc-line-height-relaxed);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.git-diff-activity__error {
-  margin: 0 0 8px;
-  color: var(--mc-color-text-danger);
-  font-size: var(--mc-font-size-chat-activity-detail);
-  font-weight: var(--mc-font-weight-medium);
-}
-
-.git-diff-activity__truncated {
-  margin-top: 8px;
-  color: var(--mc-color-text-subtle);
-  font-size: var(--mc-font-size-chat-activity-detail);
-}
-
 .web-search-sources-list {
   display: grid;
   max-width: 100%;
