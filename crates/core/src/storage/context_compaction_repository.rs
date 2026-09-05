@@ -623,7 +623,7 @@ fn apply_provider_transition_model_selection(
     Ok(())
 }
 
-fn validate_commit_inputs(
+pub(crate) fn validate_commit_inputs(
     expected_prefix: &ContextCompactionPrefix,
     draft: &ContextCompactionSummaryDraft,
 ) -> Result<(), ContextCompactionRepositoryError> {
@@ -641,7 +641,7 @@ fn validate_commit_inputs(
     Ok(())
 }
 
-fn commit_prefix_replacement_in_transaction(
+pub(crate) fn commit_prefix_replacement_in_transaction(
     transaction: &Transaction<'_>,
     expected_prefix: &ContextCompactionPrefix,
     draft: ContextCompactionSummaryDraft,

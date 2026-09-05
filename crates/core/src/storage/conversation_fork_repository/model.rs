@@ -716,6 +716,7 @@ fn authoritative_fork_cutoff_at(
     fork_point: &ConversationForkPoint,
 ) -> Result<i64, ConversationForkError> {
     match fork_point {
+        ConversationForkPoint::Latest {} => Ok(i64::MAX),
         ConversationForkPoint::AssistantReply {
             assistant_message_id,
         } => connection

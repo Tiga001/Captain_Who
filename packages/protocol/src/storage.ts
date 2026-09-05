@@ -374,6 +374,7 @@ export interface StorageChatConversationRecord extends StorageChatConversationMe
 }
 
 export type StorageConversationForkPoint =
+  | { kind: 'latest' }
   | {
       kind: 'assistant_reply'
       assistantMessageId: string

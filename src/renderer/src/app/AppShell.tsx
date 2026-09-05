@@ -1,3 +1,6 @@
+import { TextInputDialog } from '../components/dialog/TextInputDialog'
+import { useManualContextCompaction } from '../features/chat/useManualContextCompaction'
+import type { ComposerCommand } from '../features/chat/components/ComposerCommands'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import type {
@@ -310,6 +313,21 @@ export function AppShell() {
         : activeDraftSelectedModel,
     [activeDraftSelectedModel, activeRunModelId, models]
   )
+  const manualCompaction = useManualContextCompaction(
+    activeConversation?.messagesLoaded === false ? undefined : activeConversation?.id
+  )
+  const [renamingChat, setRenamingChat] = useState<{ id: string; value: string } | null>(null)
+  const requestChatRename = useCallback(
+    (id: string) => {
+      const conversation = conversationsRef.current.find((candidate) => candidate.id === id)
+      if (conversation) setRenamingChat({ id, value: conversation.title })
+    },
+    [conversationsRef]
+  )
+  const manualCompactionRefreshKey = manualCompaction.operations
+    .filter((operation) => operation.status === 'completed')
+    .map((operation) => operation.operationId)
+    .join(',')
   const activeContextWindowKey = activeConversation?.id ?? NEW_CONVERSATION_DRAFT_ID
   const contextWindowModelId = contextWindowModel?.id ?? null
   const contextWindowIndicatorEnabled =
@@ -318,6 +336,7 @@ export function AppShell() {
     activeSnapshot: activeContextWindowSnapshot,
     recordSnapshot: recordContextWindowSnapshot
   } = useContextWindowSnapshots({
+    refreshKey: manualCompactionRefreshKey,
     conversationId: activeConversation?.id,
     customPermissions: uiPreferences.customPermissions,
     enabled: contextWindowIndicatorEnabled,
@@ -796,6 +815,93 @@ export function AppShell() {
     [activeProviderTransitionConversationId, providerTransitionStore]
   )
 
+  const conversationCommands = useMemo<ComposerCommand[]>(() => {
+    const id = activeConversation?.id
+    const unavailable = !id ? t('chat.commands.savedOnly') : undefined
+    const busy =
+      manualCompaction.isRunning ||
+      activeProviderTransitionOperations.some((operation) => operation.status === 'running')
+    const compactDisabled =
+      unavailable ??
+      (!manualCompaction.ready
+        ? t('chat.commands.restoring')
+        : busy
+          ? t('chat.commands.compacting')
+          : activeRunModelId || activeProviderTransitionConfirmation
+            ? t('chat.commands.idleOnly')
+            : activeConversation?.archivedAt
+              ? t('chat.commands.archived')
+              : undefined)
+    return [
+      {
+        id: 'compact',
+        label: t('chat.commands.compact'),
+        description: t('chat.commands.compactDescription'),
+        disabledReason: compactDisabled,
+        execute: async () => {
+          if (id) {
+            await waitForConversationSaves(id)
+            await manualCompaction.start(id)
+          }
+        }
+      },
+      {
+        id: 'new',
+        label: t('chat.commands.new'),
+        description: t('chat.commands.newDescription'),
+        execute: () => openNewConversation(activeConversation?.projectId ?? activeDraft.projectId)
+      },
+      {
+        id: 'usage',
+        label: t('chat.commands.usage'),
+        description: t('chat.commands.usageDescription'),
+        execute: () => openSettings('usageBilling')
+      },
+      {
+        id: 'pin',
+        label: t(activeConversation?.pinnedAt ? 'chat.commands.unpin' : 'chat.commands.pin'),
+        description: t('chat.commands.pinDescription'),
+        disabledReason: unavailable,
+        execute: () => {
+          if (id)
+            patchConversation(id, { pinnedAt: activeConversation?.pinnedAt ? null : Date.now() })
+        }
+      },
+      {
+        id: 'rename',
+        label: t('conversation.renameConversation'),
+        description: t('chat.commands.renameDescription'),
+        disabledReason: unavailable,
+        execute: () => {
+          if (id) requestChatRename(id)
+        }
+      },
+      {
+        id: 'archive',
+        label: t('conversation.archiveConversation'),
+        description: t('chat.commands.archiveDescription'),
+        disabledReason: unavailable ?? (busy ? t('chat.commands.compacting') : undefined),
+        execute: async () => {
+          if (id) await archiveConversation(id)
+        }
+      }
+    ]
+  }, [
+    activeConversation,
+    activeDraft.projectId,
+    activeProviderTransitionConfirmation,
+    activeProviderTransitionOperations,
+    activeRunModelId,
+    archiveConversation,
+    manualCompaction,
+    openNewConversation,
+    openSettings,
+    patchConversation,
+    requestChatRename,
+    t,
+    waitForConversationSaves
+  ])
+
   const cancelActiveProviderTransition = useCallback(() => {
     const conversationId = activeConversationIdRef.current
     if (!conversationId) return
@@ -894,6 +1000,24 @@ export function AppShell() {
       settingsOpen={settingsOpen}
       style={getAppShellPanelStyle(leftOpen, leftWidth, rightOpen, rightWidth, uiPreferences)}
     >
+      {renamingChat && (
+        <TextInputDialog
+          title={t('conversation.renameTitle')}
+          description={t('conversation.renameDescription')}
+          value={renamingChat.value}
+          confirmDisabled={!renamingChat.value.trim()}
+          cancelLabel={t('project.cancel')}
+          confirmLabel={t('project.save')}
+          onCancel={() => setRenamingChat(null)}
+          onConfirm={() => {
+            patchConversation(renamingChat.id, { title: renamingChat.value.trim() })
+            setRenamingChat(null)
+          }}
+          onValueChange={(value) =>
+            setRenamingChat((current) => (current ? { ...current, value } : null))
+          }
+        />
+      )}
       <header className="window-toolbar" data-drag-region />
 
       <aside className="side-panel side-panel--left">
@@ -927,6 +1051,7 @@ export function AppShell() {
             onNewProject={selectProjectDirectory}
             onOpenSettings={() => openSettings('general')}
             onRemoveProject={removeProject}
+            onRequestRenameConversation={requestChatRename}
             onRenameConversation={(conversationId, title) =>
               patchConversation(conversationId, { title })
             }
@@ -996,6 +1121,9 @@ export function AppShell() {
               </div>
             ) : (
               <ChatConversationPage
+                commands={conversationCommands}
+                isManualCompactionRunning={manualCompaction.isRunning || !manualCompaction.ready}
+                manualCompactionOperations={manualCompaction.operations}
                 collaborationContent={collaborationContent}
                 collaborationTimelineActivities={collaborationSnapshot?.activities ?? []}
                 composerDraft={activeDraft}
@@ -1052,6 +1180,7 @@ export function AppShell() {
             )
           ) : (
             <NewConversationPage
+              commands={conversationCommands}
               contextWindowIndicatorEnabled={contextWindowIndicatorEnabled}
               contextWindowSnapshot={activeContextWindowSnapshot}
               draft={activeDraft}

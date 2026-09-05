@@ -58,6 +58,13 @@ pub const AGENT_PREFLIGHT_PROVIDER_TRANSITION_METHOD: &str = "agent.preflightPro
 pub const AGENT_START_PROVIDER_TRANSITION_METHOD: &str = "agent.startProviderTransition";
 pub const AGENT_GET_PROVIDER_TRANSITION_STATUS_METHOD: &str = "agent.getProviderTransitionStatus";
 pub const AGENT_PROVIDER_TRANSITION_NOTIFICATION_METHOD: &str = "agent.providerTransition";
+pub const AGENT_START_MANUAL_CONTEXT_COMPACTION_METHOD: &str = "agent.startManualContextCompaction";
+pub const AGENT_GET_MANUAL_CONTEXT_COMPACTION_STATUS_METHOD: &str =
+    "agent.getManualContextCompactionStatus";
+pub const AGENT_CANCEL_MANUAL_CONTEXT_COMPACTION_METHOD: &str =
+    "agent.cancelManualContextCompaction";
+pub const AGENT_MANUAL_CONTEXT_COMPACTION_NOTIFICATION_METHOD: &str =
+    "agent.manualContextCompaction";
 pub const AGENT_COMMAND_SESSIONS_LIST_METHOD: &str = "agent.commandSessions.list";
 pub const AGENT_COMMAND_SESSIONS_GET_METHOD: &str = "agent.commandSessions.get";
 pub const AGENT_LIST_PENDING_ACTIONS_METHOD: &str = "agent.listPendingActions";

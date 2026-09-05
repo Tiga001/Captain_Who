@@ -13,6 +13,7 @@ impl AgentService {
                     .into(),
             );
         }
+        self.ensure_no_manual_context_compaction(conversation_id)?;
         let mut active_turns = self
             .active_conversation_turns
             .lock()
@@ -65,6 +66,9 @@ impl AgentService {
         &self,
         conversation_id: &str,
     ) -> Result<bool, String> {
+        if self.ensure_no_manual_context_compaction(conversation_id).is_err() {
+            return Ok(true);
+        }
         if self
             .active_conversation_turns
             .lock()

@@ -45,6 +45,7 @@ const REINITIALIZE_TABLES: &[&str] = &[
 
 const DO_NOT_COPY_TABLES: &[&str] = &[
     "agent_usage_records",
+    "manual_context_compaction_usage_records",
     "automation_events",
     "automation_runs",
     "automations",
@@ -84,6 +85,7 @@ const DEDICATED_FORK_LOGIC_TABLES: &[&str] = &[
     "conversation_turn_rewrites",
     "conversations",
     "managed_artifact_grants",
+    "manual_context_compaction_operations",
     "model_request_observations",
     "provider_continuation_tool_calls",
     "provider_continuations",

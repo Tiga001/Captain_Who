@@ -23,13 +23,13 @@ const PROVIDER_TRANSITION_OPERATION_PREFIX: &str = "provider-transition-";
 const PROVIDER_TRANSITION_STATUS_LIMIT: usize = 50;
 
 #[derive(Clone)]
-struct ProviderTransitionTarget {
-    model: ModelConfigRecord,
+pub(super) struct ProviderTransitionTarget {
+    pub(super) model: ModelConfigRecord,
     profile: ProviderProfileConfig,
-    protocol: ProviderProtocolKey,
-    protocol_revision: String,
-    api_style: mycopilot_core::AgentApiStyle,
-    generator_input: AgentChatInput,
+    pub(super) protocol: ProviderProtocolKey,
+    pub(super) protocol_revision: String,
+    pub(super) api_style: mycopilot_core::AgentApiStyle,
+    pub(super) generator_input: AgentChatInput,
 }
 
 struct PreparedProviderTransition {
@@ -1028,7 +1028,7 @@ impl AgentService {
     }
 }
 
-fn resolve_provider_transition_target(
+pub(super) fn resolve_provider_transition_target(
     storage: &StorageService,
     conversation: &ChatConversationRecord,
     snapshot: &ModelSettingsSnapshot,

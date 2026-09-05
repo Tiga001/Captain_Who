@@ -195,6 +195,29 @@ fn clone_context_compaction_receipts_for_history(
         }
         receipt.validate().map_err(|error| error.to_string())?;
         record_cloned_compaction_receipt(connection, &receipt, observation.as_ref())?;
+        if let Some(mut operation) = crate::storage::manual_context_compaction_repository::get(
+            connection,
+            &source.conversation_id,
+            Some(&source.operation_id),
+        )? {
+            // Copy the historical divider and boundary identity; billing remains exclusively
+            // owned by the source operation and is deliberately absent from the child.
+            if operation.status == "completed" {
+                operation.operation_id = receipt.operation_id.clone();
+                operation.request_id = receipt.operation_id.clone();
+                operation.conversation_id = history.target.id.clone();
+                operation.assistant_message_id = Some(target_assistant_message_id.clone());
+                operation.covered_through_message_id = operation
+                    .covered_through_message_id
+                    .as_ref()
+                    .map(|id| mapped_id(history.message_id_map, id, "手动压缩显示边界"))
+                    .transpose()?;
+                operation.summary_id = receipt.summary_id.clone();
+                crate::storage::manual_context_compaction_repository::insert_cloned_completed(
+                    connection, &operation,
+                )?;
+            }
+        }
     }
     Ok(())
 }

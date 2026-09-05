@@ -284,9 +284,9 @@ fn roll_up_deleted_usage(
             model_id,
             model_name,
             COALESCE(SUM(billable_request_count), 0),
-            COUNT(*),
+            SUM(usage_message_count),
             SUM(CASE
-                WHEN estimated_cost IS NULL AND (input_tokens IS NOT NULL OR output_tokens IS NOT NULL) THEN 1
+                WHEN estimated_cost IS NULL AND (input_tokens IS NOT NULL OR output_tokens IS NOT NULL) THEN usage_message_count
                 ELSE 0
             END),
             SUM(input_tokens),
@@ -298,7 +298,18 @@ fn roll_up_deleted_usage(
             SUM(estimated_cost),
             ?{now_parameter},
             ?{now_parameter}
-        FROM agent_usage_records
+        FROM (
+            SELECT conversation_id, message_id, created_at, model_id, model_name,
+                   billable_request_count, input_tokens, output_tokens,
+                   output_thinking_tokens, total_tokens, cached_input_tokens,
+                   cache_creation_input_tokens, estimated_cost, 1 AS usage_message_count
+            FROM agent_usage_records
+            UNION ALL
+            SELECT conversation_id, NULL, created_at, model_id, model_name, billable_request_count,
+                   input_tokens, output_tokens, output_thinking_tokens, total_tokens,
+                   cached_input_tokens, cache_creation_input_tokens, estimated_cost, 0
+            FROM manual_context_compaction_usage_records WHERE cleared_at IS NULL
+        )
         WHERE {usage_filter_sql}
         GROUP BY
             CAST(created_at / ?{day_parameter} AS INTEGER) * ?{day_parameter},
@@ -350,6 +361,14 @@ pub fn clear_usage_records(
         ",
         params![input.from, input.to],
     )?;
+    // Keep the immutable operation-owned receipt as an idempotency tombstone. Clearing the
+    // visible ledger must not let a delayed duplicate response recreate a charge.
+    let changed_manual = connection.execute(
+        "UPDATE manual_context_compaction_usage_records SET cleared_at = created_at
+         WHERE cleared_at IS NULL AND (?1 IS NULL OR created_at >= ?1)
+           AND (?2 IS NULL OR created_at <= ?2)",
+        params![input.from, input.to],
+    )?;
     let (rollup_from, rollup_to) = rollup_window(input.from, input.to);
     let changed_rollups = connection.execute(
         "
@@ -361,7 +380,7 @@ pub fn clear_usage_records(
     )?;
 
     Ok(AgentUsageClearOutput {
-        deleted_records: (changed_records + changed_rollups) as u64,
+        deleted_records: (changed_records + changed_rollups + changed_manual) as u64,
     })
 }
 
@@ -451,6 +470,13 @@ fn query_usage_totals(
             WHERE (?1 IS NULL OR created_at >= ?1)
               AND (?2 IS NULL OR created_at <= ?2)
             UNION ALL
+            SELECT billable_request_count, 0, 0, input_tokens, output_tokens,
+                   output_thinking_tokens, total_tokens, cached_input_tokens,
+                   cache_creation_input_tokens, estimated_cost
+            FROM manual_context_compaction_usage_records
+            WHERE cleared_at IS NULL AND (?1 IS NULL OR created_at >= ?1)
+              AND (?2 IS NULL OR created_at <= ?2)
+            UNION ALL
             SELECT
                 request_count,
                 message_count,
@@ -513,6 +539,13 @@ fn query_usage_models(
                 estimated_cost
             FROM agent_usage_records
             WHERE (?1 IS NULL OR created_at >= ?1)
+              AND (?2 IS NULL OR created_at <= ?2)
+            UNION ALL
+            SELECT model_id, model_name, created_at, billable_request_count,
+                   0, 0, input_tokens, output_tokens, output_thinking_tokens, total_tokens,
+                   cached_input_tokens, cache_creation_input_tokens, estimated_cost
+            FROM manual_context_compaction_usage_records
+            WHERE cleared_at IS NULL AND (?1 IS NULL OR created_at >= ?1)
               AND (?2 IS NULL OR created_at <= ?2)
             UNION ALL
             SELECT

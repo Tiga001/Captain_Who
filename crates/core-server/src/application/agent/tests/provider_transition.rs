@@ -1,6 +1,9 @@
 use super::*;
 
-fn conversation_with_completed_history(id: &str, model_id: Option<&str>) -> ChatConversationRecord {
+pub(super) fn conversation_with_completed_history(
+    id: &str,
+    model_id: Option<&str>,
+) -> ChatConversationRecord {
     ChatConversationRecord {
         id: id.to_string(),
         project_id: None,
@@ -85,7 +88,7 @@ fn completed_history_model_context() -> Vec<ConversationModelContextItem> {
     ]
 }
 
-fn persist_completed_history(
+pub(super) fn persist_completed_history(
     storage: &StorageService,
     conversation_id: &str,
     assistant_message_id: &str,
@@ -280,7 +283,7 @@ fn provider_transition_rejects_inactive_roots_and_child_observer_conversations_w
     );
 }
 
-fn two_model_settings(
+pub(super) fn two_model_settings(
     target_profile: Option<mycopilot_core::ProviderProfileConfig>,
 ) -> ModelSettingsRecord {
     let mut settings = test_model_settings();
@@ -297,7 +300,9 @@ fn two_model_settings(
     settings
 }
 
-fn provider_transition_generator(model: &'static str) -> ContextCompactionSummaryGenerator {
+pub(super) fn provider_transition_generator(
+    model: &'static str,
+) -> ContextCompactionSummaryGenerator {
     Arc::new(move |request, cancellation| {
         Box::pin(async move {
             cancellation.check()?;

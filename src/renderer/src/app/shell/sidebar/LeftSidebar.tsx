@@ -173,6 +173,7 @@ const LeftSidebarView = memo(function LeftSidebarView({
   onNewProject,
   onOpenSettings,
   onRemoveProject,
+  onRequestRenameConversation,
   onRenameConversation,
   onRenameProject,
   onOpenScheduled,
@@ -387,10 +388,17 @@ const LeftSidebarView = memo(function LeftSidebarView({
     setRenameValue('')
   }
 
-  const startRenamingConversation = useCallback((conversation: SidebarConversation) => {
-    setConversationRenameValue(conversation.title)
-    setRenamingConversation(conversation)
-  }, [])
+  const startRenamingConversation = useCallback(
+    (conversation: SidebarConversation) => {
+      if (onRequestRenameConversation) {
+        onRequestRenameConversation(conversation.id)
+        return
+      }
+      setConversationRenameValue(conversation.title)
+      setRenamingConversation(conversation)
+    },
+    [onRequestRenameConversation]
+  )
 
   const confirmRenameConversation = () => {
     if (!renamingConversation) return

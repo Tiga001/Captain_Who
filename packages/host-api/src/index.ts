@@ -45,6 +45,12 @@ import type {
   AgentFileChangeHistoryDiffInput,
   AgentFileChangeHistoryDiffPage,
   AgentFileChangeReadInput,
+  AgentManualContextCompactionStartInput,
+  AgentManualContextCompactionStatusInput,
+  AgentManualContextCompactionCancelInput,
+  AgentManualContextCompactionOperation,
+  AgentManualContextCompactionStatusOutput,
+  AgentManualContextCompactionNotification,
   AgentProviderTransitionNotification,
   AgentProviderTransitionOperation,
   AgentProviderTransitionPreflightInput,
@@ -561,6 +567,18 @@ export interface AgentHostApi {
   onCollaborationEvent(handler: (event: CollaborationEventEnvelope) => void): () => void
   onCollaborationObserverEvent(handler: (event: AgentObserverEventEnvelope) => void): () => void
   onCollaborationResync(handler: (event: CollaborationResyncEnvelope) => void): () => void
+  startManualContextCompaction(
+    input: AgentManualContextCompactionStartInput
+  ): Promise<HostInvocationResult<AgentManualContextCompactionOperation>>
+  getManualContextCompactionStatus(
+    input: AgentManualContextCompactionStatusInput
+  ): Promise<HostInvocationResult<AgentManualContextCompactionStatusOutput>>
+  cancelManualContextCompaction(
+    input: AgentManualContextCompactionCancelInput
+  ): Promise<HostInvocationResult<AgentManualContextCompactionOperation>>
+  onManualContextCompaction(
+    handler: (event: AgentManualContextCompactionNotification) => void
+  ): () => void
   preflightProviderTransition(
     input: AgentProviderTransitionPreflightInput
   ): Promise<HostInvocationResult<AgentProviderTransitionPreflightOutput>>

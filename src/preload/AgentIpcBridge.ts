@@ -56,6 +56,18 @@ export function createAgentIpcBridge(ipcRenderer: AgentIpcRenderer): AgentHostAp
       ipcRenderer.on(HOST_CHANNELS.agent.collaborationResync, listener)
       return () => ipcRenderer.removeListener(HOST_CHANNELS.agent.collaborationResync, listener)
     },
+    startManualContextCompaction: (input) =>
+      ipcRenderer.invoke(HOST_CHANNELS.agent.startManualContextCompaction, input),
+    getManualContextCompactionStatus: (input) =>
+      ipcRenderer.invoke(HOST_CHANNELS.agent.getManualContextCompactionStatus, input),
+    cancelManualContextCompaction: (input) =>
+      ipcRenderer.invoke(HOST_CHANNELS.agent.cancelManualContextCompaction, input),
+    onManualContextCompaction: (handler) => {
+      const listener = (_event: IpcRendererEvent, payload: Parameters<typeof handler>[0]): void =>
+        handler(payload)
+      ipcRenderer.on(HOST_CHANNELS.agent.manualContextCompaction, listener)
+      return () => ipcRenderer.removeListener(HOST_CHANNELS.agent.manualContextCompaction, listener)
+    },
     preflightProviderTransition: (input) =>
       ipcRenderer.invoke(HOST_CHANNELS.agent.preflightProviderTransition, input),
     startProviderTransition: (input) =>

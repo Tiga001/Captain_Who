@@ -18,6 +18,7 @@ interface UseContextWindowSnapshotsOptions {
   conversationId?: string
   customPermissions: UiPreferencesSnapshot['customPermissions']
   enabled: boolean
+  refreshKey?: string
   modelId: string | null
   permissionMode: ChatPermissionMode
   projectId: string | null
@@ -42,7 +43,7 @@ function requestDescriptorKey({
   projectId,
   scopeId,
   skills
-}: Omit<UseContextWindowSnapshotsOptions, 'enabled'>): string {
+}: Omit<UseContextWindowSnapshotsOptions, 'enabled' | 'refreshKey'>): string {
   const permissions = resolveChatPermissions(permissionMode, customPermissions)
   const descriptor: ContextWindowSnapshotRequestDescriptor = {
     conversationId: conversationId ?? null,
@@ -66,6 +67,7 @@ export function useContextWindowSnapshots({
   conversationId,
   customPermissions,
   enabled,
+  refreshKey,
   modelId,
   permissionMode,
   projectId,
@@ -129,7 +131,7 @@ export function useContextWindowSnapshots({
     return () => {
       cancelled = true
     }
-  }, [enabled, requestKey])
+  }, [enabled, refreshKey, requestKey])
 
   const recordSnapshot = useCallback(
     (eventScopeId: string, eventModelConfigId: string, snapshot: AgentContextWindowSnapshot) => {

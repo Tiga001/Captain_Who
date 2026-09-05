@@ -244,6 +244,39 @@ pub struct ContextCompactionReceipt {
 }
 
 impl ContextCompactionReceipt {
+    /// Builds a manual maintenance receipt from a Host-frozen safe journal prefix. The historical
+    /// assistant is only a lineage anchor; the maintenance operation owns its request and billing.
+    #[allow(clippy::too_many_arguments)]
+    pub fn begin_manual_context_compaction(
+        operation_id: impl Into<String>,
+        conversation_id: impl Into<String>,
+        assistant_message_id: impl Into<String>,
+        model_config_id: impl Into<String>,
+        model: impl Into<String>,
+        api_style: AgentApiStyle,
+        prefix: &ContextCompactionPrefix,
+        source_input_tokens: u64,
+        target_replacement_tokens: u64,
+        started_at: i64,
+    ) -> AgentResult<Self> {
+        let operation_id = operation_id.into();
+        Self::begin_provider_transition(
+            operation_id.clone(),
+            format!("{operation_id}:request"),
+            conversation_id,
+            assistant_message_id,
+            model_config_id,
+            model,
+            None,
+            None,
+            api_style,
+            prefix,
+            source_input_tokens,
+            target_replacement_tokens,
+            started_at,
+        )
+    }
+
     /// Starts a Host-requested Provider transition compaction without manufacturing an Agent run.
     ///
     /// The normal capacity-triggered path derives this data from `ContextCompactionPlan`. A

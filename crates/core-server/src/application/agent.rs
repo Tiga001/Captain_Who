@@ -129,9 +129,14 @@ mod completion;
 mod context_compaction;
 mod context_window;
 mod human_root_notifications;
+mod manual_context_compaction;
 mod pending_action_store;
 mod persisted_resume_input;
 mod provider_transition;
+pub use manual_context_compaction::{
+    AgentManualContextCompactionCancelInput, AgentManualContextCompactionStartInput,
+    AgentManualContextCompactionStatusInput,
+};
 mod run_lifecycle;
 mod steering;
 mod turn;
@@ -597,6 +602,7 @@ pub struct AgentService {
     conversation_admission: Arc<Mutex<()>>,
     provider_transitions: Arc<Mutex<HashMap<String, String>>>,
     provider_transition_operations: Arc<Mutex<HashMap<String, AgentProviderTransitionOperation>>>,
+    manual_context_compaction_cancellations: Arc<Mutex<HashMap<String, AgentCancellationToken>>>,
     office_engine: Arc<dyn OfficeEngine>,
     image_generation_execution: Option<Arc<ImageGenerationExecutionService>>,
     skill_installation_prepare: Option<Arc<dyn AgentSkillInstallationPrepareExecutor>>,
@@ -790,6 +796,7 @@ impl AgentService {
             conversation_admission: Arc::new(Mutex::new(())),
             provider_transitions: Arc::new(Mutex::new(HashMap::new())),
             provider_transition_operations: Arc::new(Mutex::new(HashMap::new())),
+            manual_context_compaction_cancellations: Arc::new(Mutex::new(HashMap::new())),
             office_engine,
             image_generation_execution: None,
             skill_installation_prepare: None,
@@ -835,12 +842,20 @@ impl AgentService {
         mycopilot_core::storage::models::ChatConversationViewRecord,
         mycopilot_core::storage::conversation_fork_repository::ConversationForkError,
     > {
+        let _admission = self
+            .conversation_admission
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         self.authorize_user_conversation_write(&input.source_conversation_id)
             .map_err(|error| {
                 mycopilot_core::storage::conversation_fork_repository::ConversationForkError::Other(
                     error.to_string(),
                 )
             })?;
+        self.ensure_no_manual_context_compaction(&input.source_conversation_id)
+            .map_err(
+                mycopilot_core::storage::conversation_fork_repository::ConversationForkError::Other,
+            )?;
         match self.provider_continuation_vault.as_deref() {
             Some(vault) => self
                 .storage

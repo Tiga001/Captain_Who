@@ -817,6 +817,7 @@ pub struct ForkConversationRequest {
     deny_unknown_fields
 )]
 pub enum ConversationForkPoint {
+    Latest {},
     AssistantReply { assistant_message_id: String },
     ProviderTransitionBoundary { operation_id: String },
 }
@@ -1229,6 +1230,53 @@ pub struct AgentUsageRecordInsert {
     pub conversation_id: String,
     pub message_id: String,
     pub run_id: String,
+    pub project_id: Option<String>,
+    pub model_id: String,
+    pub model_name: String,
+    pub started_at: Option<i64>,
+    pub completed_at: Option<i64>,
+    pub status: Option<String>,
+    pub error: Option<String>,
+    pub created_at: i64,
+    pub input_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+    pub output_thinking_tokens: Option<u64>,
+    pub total_tokens: Option<u64>,
+    pub cached_input_tokens: Option<u64>,
+    pub cache_creation_input_tokens: Option<u64>,
+    pub billable_request_count: u64,
+    pub input_price: Option<String>,
+    pub cached_input_price: Option<String>,
+    pub output_price: Option<String>,
+    pub estimated_cost: Option<f64>,
+}
+
+/// A maintenance operation owns its lifecycle and billing independently of chat messages.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ManualContextCompactionOperation {
+    pub operation_id: String,
+    pub request_id: String,
+    pub conversation_id: String,
+    pub status: String,
+    pub phase: String,
+    pub assistant_message_id: Option<String>,
+    pub covered_through_message_id: Option<String>,
+    pub model_id: Option<String>,
+    pub summary_id: Option<String>,
+    pub source_input_tokens: Option<u64>,
+    pub replacement_input_tokens: Option<u64>,
+    pub error: Option<String>,
+    pub started_at: i64,
+    pub updated_at: i64,
+    pub completed_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ManualContextCompactionUsageRecord {
+    pub operation_id: String,
+    pub conversation_id: String,
     pub project_id: Option<String>,
     pub model_id: String,
     pub model_name: String,

@@ -44,6 +44,42 @@ pub(crate) fn handle_request(
         AGENT_GET_PROVIDER_TRANSITION_STATUS_METHOD => {
             handle_agent_get_provider_transition_status(agent_service, request.id, request.params)
         }
+        mycopilot_protocol_rs::AGENT_START_MANUAL_CONTEXT_COMPACTION_METHOD => {
+            let input =
+                match parse_params::<agent::AgentManualContextCompactionStartInput>(request.params)
+                {
+                    Ok(input) => input,
+                    Err(message) => return response_error(Some(request.id), -32602, message),
+                };
+            match agent_service.start_manual_context_compaction(input, notification_tx) {
+                Ok(output) => response_success(request.id, output),
+                Err(error) => agent_service_error_response(request.id, error),
+            }
+        }
+        mycopilot_protocol_rs::AGENT_GET_MANUAL_CONTEXT_COMPACTION_STATUS_METHOD => {
+            let input = match parse_params::<agent::AgentManualContextCompactionStatusInput>(
+                request.params,
+            ) {
+                Ok(input) => input,
+                Err(message) => return response_error(Some(request.id), -32602, message),
+            };
+            match agent_service.get_manual_context_compaction_status(input) {
+                Ok(output) => response_success(request.id, output),
+                Err(error) => agent_service_error_response(request.id, error),
+            }
+        }
+        mycopilot_protocol_rs::AGENT_CANCEL_MANUAL_CONTEXT_COMPACTION_METHOD => {
+            let input = match parse_params::<agent::AgentManualContextCompactionCancelInput>(
+                request.params,
+            ) {
+                Ok(input) => input,
+                Err(message) => return response_error(Some(request.id), -32602, message),
+            };
+            match agent_service.cancel_manual_context_compaction(input, notification_tx) {
+                Ok(output) => response_success(request.id, output),
+                Err(error) => agent_service_error_response(request.id, error),
+            }
+        }
         AGENT_GET_CONTEXT_WINDOW_SNAPSHOT_METHOD => {
             let input = match parse_params::<agent::AgentContextWindowSnapshotInput>(request.params)
             {
@@ -486,10 +522,8 @@ pub(crate) fn handle_request(
                 Ok(conversation) => conversation,
                 Err(message) => return response_error(Some(request.id), -32602, message),
             };
-            match agent_service.authorize_user_conversation_write(&conversation.id) {
-                Ok(()) => {
-                    storage_response(request.id, storage.save_conversation_meta(conversation))
-                }
+            match agent_service.save_conversation_meta_checked(conversation) {
+                Ok(conversation) => storage_response(request.id, Ok(conversation)),
                 Err(error) => agent_service_error_response(request.id, error),
             }
         }

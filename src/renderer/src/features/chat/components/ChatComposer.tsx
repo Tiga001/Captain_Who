@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react'
+import { useCallback, useEffect, useId, useMemo, useRef, useState, type KeyboardEvent } from 'react'
 import type { AgentContextWindowSnapshot, SkillDescriptor } from '@mycopilot/protocol'
 import {
   ArrowUp,
@@ -58,12 +58,15 @@ import {
   CHAT_PERMISSION_PRESENTATIONS,
   getChatPermissionPresentation
 } from '../chatPermissionPresentation'
+import { ComposerCommands, filterComposerCommands, type ComposerCommand } from './ComposerCommands'
 import './ChatComposer.css'
 import './GuidanceQueue.css'
 
 const TEXTAREA_MAX_HEIGHT = 220
 
 interface ChatComposerProps {
+  commands?: readonly ComposerCommand[]
+  isManualCompactionRunning?: boolean
   contextWindowIndicatorEnabled?: boolean
   contextWindowSnapshot?: AgentContextWindowSnapshot
   draft: ChatComposerDraft
@@ -91,7 +94,11 @@ interface ChatComposerProps {
   showProjectSelector?: boolean
 }
 
+const EMPTY_COMMANDS: readonly ComposerCommand[] = []
+
 export function ChatComposer({
+  commands = EMPTY_COMMANDS,
+  isManualCompactionRunning = false,
   contextWindowIndicatorEnabled = false,
   contextWindowSnapshot,
   draft,
@@ -116,6 +123,13 @@ export function ChatComposer({
   const { enabledModels } = useModelSettings()
   const { projects, selectProjectDirectory } = useProjectSettings()
   const openImagePreview = useImagePreview()
+  const commandListId = useId()
+  const [isCommandMenuOpen, setIsCommandMenuOpen] = useState(false)
+  const [isCommandSession, setIsCommandSession] = useState(false)
+  const [commandIndex, setCommandIndex] = useState(0)
+  const commandTriggerRef = useRef(false)
+  const commandExecutingRef = useRef(false)
+  const commandMenuRef = useRef<HTMLDivElement>(null)
   const draftRef = useRef(draft)
   const composerRef = useRef<HTMLFormElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
@@ -135,6 +149,10 @@ export function ChatComposer({
   const [projectSearch, setProjectSearch] = useState('')
   const [skillSearch, setSkillSearch] = useState('')
   const [message, setMessage] = useState(draft.message)
+  const filteredCommands = isCommandSession ? filterComposerCommands(commands, message) : []
+  const selectedCommandIndex = Math.min(commandIndex, Math.max(0, filteredCommands.length - 1))
+  const selectedCommand = filteredCommands[selectedCommandIndex]
+  const hasCommandSelection = isCommandSession && filteredCommands.length > 0
   const previousSkillScopeRef = useRef({ projectId: draft.projectId, resetKey })
   const previousResetKeyRef = useRef(resetKey)
   const previousMessageSyncKeyRef = useRef(messageSyncKey)
@@ -210,16 +228,21 @@ export function ChatComposer({
     !hasUnsupportedImageAttachment &&
     !hasInvalidSkillSelection &&
     !isModelTransitionRunning &&
+    !isManualCompactionRunning &&
     Boolean(selectedModel)
-  const submitButtonState = isModelTransitionRunning
-    ? 'disabled'
-    : isGenerating
-      ? canSend
-        ? 'ready'
-        : 'stop'
-      : canSend
-        ? 'ready'
-        : 'disabled'
+  const submitButtonState = hasCommandSelection
+    ? selectedCommand?.disabledReason
+      ? 'disabled'
+      : 'ready'
+    : isModelTransitionRunning || isManualCompactionRunning
+      ? 'disabled'
+      : isGenerating
+        ? canSend
+          ? 'ready'
+          : 'stop'
+        : canSend
+          ? 'ready'
+          : 'disabled'
   const isConfirmingImeInput = (event: KeyboardEvent<HTMLTextAreaElement>) => {
     const nativeEvent = event.nativeEvent
     const keyCode = 'keyCode' in nativeEvent ? nativeEvent.keyCode : 0
@@ -230,6 +253,17 @@ export function ChatComposer({
       Date.now() - lastCompositionEndAtRef.current < 120
     )
   }
+
+  useDismissOnOutsidePointer(
+    commandMenuRef,
+    isCommandMenuOpen,
+    () => setIsCommandMenuOpen(false),
+    (target) => Boolean(textareaRef.current?.contains(target))
+  )
+  useEffect(() => {
+    if (isAttachmentMenuOpen || isSkillMenuOpen || isPermissionMenuOpen || isProjectMenuOpen)
+      setIsCommandMenuOpen(false)
+  }, [isAttachmentMenuOpen, isSkillMenuOpen, isPermissionMenuOpen, isProjectMenuOpen])
 
   useDismissOnOutsidePointer(
     attachmentPickerRef,
@@ -249,6 +283,9 @@ export function ChatComposer({
       previousResetKeyRef.current = resetKey
       previousMessageSyncKeyRef.current = messageSyncKey
       lastExternalMessageRef.current = draft.message
+      setIsCommandSession(false)
+      setIsCommandMenuOpen(false)
+      commandTriggerRef.current = false
       setMessage(draft.message)
       draftRef.current = draft
       return
@@ -262,6 +299,9 @@ export function ChatComposer({
     if (previousMessageSyncKeyRef.current !== messageSyncKey) {
       previousMessageSyncKeyRef.current = messageSyncKey
       lastExternalMessageRef.current = draft.message
+      setIsCommandSession(false)
+      setIsCommandMenuOpen(false)
+      commandTriggerRef.current = false
       setMessage(draft.message)
       draftRef.current = draft
       return
@@ -269,6 +309,12 @@ export function ChatComposer({
 
     if (draft.message !== lastExternalMessageRef.current) {
       lastExternalMessageRef.current = draft.message
+      // A parent may mirror keystrokes synchronously. Only a different external value restores a draft.
+      if (draft.message !== message) {
+        setIsCommandSession(false)
+        setIsCommandMenuOpen(false)
+        commandTriggerRef.current = false
+      }
       setMessage(draft.message)
       draftRef.current = draft
       return
@@ -403,9 +449,36 @@ export function ChatComposer({
     textarea.style.overflowY = textarea.scrollHeight > TEXTAREA_MAX_HEIGHT ? 'auto' : 'hidden'
   }, [message])
 
+  const executeCommand = async (command: ComposerCommand) => {
+    if (command.disabledReason || commandExecutingRef.current) return
+    commandExecutingRef.current = true
+    setIsCommandMenuOpen(false)
+    setIsCommandSession(false)
+    updateDraft({ message: '' })
+    try {
+      await command.execute()
+    } catch (error) {
+      setAttachmentError(getUserFacingErrorMessage(error, t, 'chat.commands.failed'))
+    } finally {
+      commandExecutingRef.current = false
+    }
+  }
+
   const submitMessage = async () => {
+    if (
+      isComposingRef.current ||
+      Date.now() - lastCompositionEndAtRef.current < 120 ||
+      commandExecutingRef.current
+    )
+      return
+    if (hasCommandSelection && selectedCommand) {
+      await executeCommand(selectedCommand)
+      return
+    }
     if (!canSend) return
 
+    setIsCommandMenuOpen(false)
+    setIsCommandSession(false)
     const trimmedMessage = message.trim()
     const attachmentSummary = createAttachmentSummary(attachments)
     const messageContent = [trimmedMessage, attachmentSummary].filter(Boolean).join('\n\n')
@@ -588,6 +661,21 @@ export function ChatComposer({
 
   return (
     <div className="chat-composer-shell">
+      <div ref={commandMenuRef}>
+        {isCommandMenuOpen && (
+          <ComposerCommands
+            commands={filteredCommands}
+            query={message.slice(1)}
+            selectedIndex={selectedCommandIndex}
+            onSelect={setCommandIndex}
+            onExecute={(command) => {
+              void executeCommand(command)
+            }}
+            emptyLabel={t('chat.commands.noMatch')}
+            listId={commandListId}
+          />
+        )}
+      </div>
       <GuidanceQueue
         guideEnabled={canGuideQueuedMessages}
         messages={draft.queuedMessages}
@@ -627,6 +715,9 @@ export function ChatComposer({
           void addDroppedOrPastedFiles(event.dataTransfer.files)
         }}
         onPaste={(event) => {
+          commandTriggerRef.current = false
+          setIsCommandSession(false)
+          setIsCommandMenuOpen(false)
           if (isModelTransitionRunning) return
           if (event.clipboardData.files.length === 0) return
           event.preventDefault()
@@ -709,7 +800,41 @@ export function ChatComposer({
           aria-label={t('chat.inputAria')}
           disabled={isModelTransitionRunning}
           rows={1}
-          onChange={(event) => updateDraftMessage(event.target.value)}
+          aria-controls={isCommandMenuOpen ? commandListId : undefined}
+          aria-activedescendant={
+            isCommandMenuOpen && selectedCommand
+              ? `${commandListId}-${selectedCommandIndex}`
+              : undefined
+          }
+          aria-autocomplete="list"
+          onChange={(event) => {
+            const nextMessage = event.target.value
+            const native = event.nativeEvent as InputEvent
+            const typedSlash =
+              commandTriggerRef.current ||
+              (native.inputType === 'insertText' && native.data === '/')
+            if (
+              commands.length > 0 &&
+              message === '' &&
+              nextMessage === '/' &&
+              typedSlash &&
+              !isComposingRef.current &&
+              !native.isComposing
+            ) {
+              setIsCommandSession(true)
+              setIsCommandMenuOpen(true)
+              setIsAttachmentMenuOpen(false)
+              setIsSkillMenuOpen(false)
+              setIsPermissionMenuOpen(false)
+              setIsProjectMenuOpen(false)
+            } else if (!nextMessage.startsWith('/') || nextMessage.includes('\n')) {
+              setIsCommandSession(false)
+              setIsCommandMenuOpen(false)
+            }
+            commandTriggerRef.current = false
+            setCommandIndex(0)
+            updateDraftMessage(nextMessage)
+          }}
           onCompositionStart={() => {
             isComposingRef.current = true
           }}
@@ -718,6 +843,27 @@ export function ChatComposer({
             lastCompositionEndAtRef.current = Date.now()
           }}
           onKeyDown={(event) => {
+            if (isConfirmingImeInput(event)) return
+            commandTriggerRef.current =
+              event.key === '/' &&
+              message === '' &&
+              !event.ctrlKey &&
+              !event.metaKey &&
+              !event.altKey
+            if (isCommandMenuOpen && event.key === 'Escape') {
+              event.preventDefault()
+              setIsCommandMenuOpen(false)
+              return
+            }
+            if (isCommandMenuOpen && (event.key === 'ArrowDown' || event.key === 'ArrowUp')) {
+              event.preventDefault()
+              const count = filteredCommands.length
+              if (count > 0)
+                setCommandIndex(
+                  (selectedCommandIndex + (event.key === 'ArrowDown' ? 1 : count - 1)) % count
+                )
+              return
+            }
             if (event.key !== 'Enter' || event.shiftKey || isConfirmingImeInput(event)) return
 
             event.preventDefault()
@@ -812,7 +958,7 @@ export function ChatComposer({
             <button
               type="button"
               className="composer-permission-button"
-              disabled={isGenerating || isModelTransitionRunning}
+              disabled={isGenerating || isModelTransitionRunning || isManualCompactionRunning}
               data-permission={selectedPermission.id}
               aria-haspopup="listbox"
               aria-expanded={isPermissionMenuOpen}
@@ -874,7 +1020,7 @@ export function ChatComposer({
 
           <ModelConfigPicker
             ariaLabel={t('chat.selectModel')}
-            disabled={isGenerating || isModelTransitionRunning}
+            disabled={isGenerating || isModelTransitionRunning || isManualCompactionRunning}
             emptyLabel={t('chat.noEnabledModels')}
             onChange={(modelId) => {
               setIsAttachmentMenuOpen(false)
@@ -895,20 +1041,26 @@ export function ChatComposer({
           />
 
           <button
-            type={isModelTransitionRunning || (isGenerating && !canSend) ? 'button' : 'submit'}
+            type={submitButtonState === 'stop' ? 'button' : 'submit'}
             className="composer-submit-button"
             data-state={submitButtonState}
-            disabled={isModelTransitionRunning || (!isGenerating && !canSend)}
+            disabled={submitButtonState === 'disabled'}
             aria-label={
-              isGenerating ? (canSend ? t('chat.queueMessage') : t('chat.stop')) : t('chat.send')
+              hasCommandSelection
+                ? selectedCommand?.label
+                : isGenerating
+                  ? canSend
+                    ? t('chat.queueMessage')
+                    : t('chat.stop')
+                  : t('chat.send')
             }
             onClick={() => {
-              if (isGenerating && !canSend) {
+              if (submitButtonState === 'stop') {
                 onStopGenerating?.()
               }
             }}
           >
-            {isGenerating && !canSend ? (
+            {submitButtonState === 'stop' ? (
               <span className="composer-stop-square" aria-hidden="true" />
             ) : (
               <ArrowUp aria-hidden="true" />

@@ -27,6 +27,12 @@ import type {
   AgentObserverConversation,
   AgentObserverConversationRequest,
   AgentObserverEventEnvelope,
+  AgentManualContextCompactionStartInput,
+  AgentManualContextCompactionStatusInput,
+  AgentManualContextCompactionCancelInput,
+  AgentManualContextCompactionOperation,
+  AgentManualContextCompactionStatusOutput,
+  AgentManualContextCompactionNotification,
   AgentProviderTransitionNotification,
   AgentProviderTransitionOperation,
   AgentProviderTransitionPreflightInput,
@@ -91,6 +97,16 @@ import {
   AGENT_GET_PROVIDER_TRANSITION_STATUS_METHOD,
   AGENT_GET_USAGE_SUMMARY_METHOD,
   AGENT_LIST_PENDING_ACTIONS_METHOD,
+  AGENT_START_MANUAL_CONTEXT_COMPACTION_METHOD,
+  AGENT_GET_MANUAL_CONTEXT_COMPACTION_STATUS_METHOD,
+  AGENT_CANCEL_MANUAL_CONTEXT_COMPACTION_METHOD,
+  AGENT_MANUAL_CONTEXT_COMPACTION_NOTIFICATION_METHOD,
+  parseAgentManualContextCompactionStartInput,
+  parseAgentManualContextCompactionStatusInput,
+  parseAgentManualContextCompactionCancelInput,
+  parseAgentManualContextCompactionOperation,
+  parseAgentManualContextCompactionStatusOutput,
+  parseAgentManualContextCompactionNotification,
   AGENT_PREFLIGHT_PROVIDER_TRANSITION_METHOD,
   AGENT_PROVIDER_TRANSITION_NOTIFICATION_METHOD,
   AGENT_READ_FILE_CHANGE_METHOD,
@@ -247,6 +263,105 @@ export class CoreServerAgentApi extends CoreServerStorageApi {
         ? 'Ignored invalid Agent observer event'
         : 'Agent observer handler failed',
       warning
+    )
+  }
+
+  async startManualContextCompaction(
+    input: AgentManualContextCompactionStartInput
+  ): Promise<AgentManualContextCompactionOperation> {
+    const request = parseAgentManualContextCompactionStartInput(input)
+    try {
+      const output = parseAgentManualContextCompactionOperation(
+        await this.rpc.request<unknown, AgentManualContextCompactionStartInput>(
+          AGENT_START_MANUAL_CONTEXT_COMPACTION_METHOD,
+          request
+        )
+      )
+      const operations = [output]
+      if (
+        operations.some(
+          (operation) =>
+            operation.conversationId !== request.conversationId ||
+            ('operationId' in request &&
+              request.operationId !== undefined &&
+              operation.operationId !== request.operationId) ||
+            ('requestId' in request && operation.requestId !== request.requestId)
+        )
+      )
+        throw new Error('Invalid operation identity')
+      return output
+    } catch {
+      throw new Error('Unable to complete this compaction request. Please try again.')
+    }
+  }
+  async getManualContextCompactionStatus(
+    input: AgentManualContextCompactionStatusInput
+  ): Promise<AgentManualContextCompactionStatusOutput> {
+    const request = parseAgentManualContextCompactionStatusInput(input)
+    try {
+      const output = parseAgentManualContextCompactionStatusOutput(
+        await this.rpc.request<unknown, AgentManualContextCompactionStatusInput>(
+          AGENT_GET_MANUAL_CONTEXT_COMPACTION_STATUS_METHOD,
+          request
+        )
+      )
+      const operations = output.operations
+      if (
+        operations.some(
+          (operation) =>
+            operation.conversationId !== request.conversationId ||
+            ('operationId' in request &&
+              request.operationId !== undefined &&
+              operation.operationId !== request.operationId) ||
+            ('requestId' in request && operation.requestId !== request.requestId)
+        )
+      )
+        throw new Error('Invalid operation identity')
+      return output
+    } catch {
+      throw new Error('Unable to restore compaction status. Please try again.')
+    }
+  }
+  async cancelManualContextCompaction(
+    input: AgentManualContextCompactionCancelInput
+  ): Promise<AgentManualContextCompactionOperation> {
+    const request = parseAgentManualContextCompactionCancelInput(input)
+    try {
+      const output = parseAgentManualContextCompactionOperation(
+        await this.rpc.request<unknown, AgentManualContextCompactionCancelInput>(
+          AGENT_CANCEL_MANUAL_CONTEXT_COMPACTION_METHOD,
+          request
+        )
+      )
+      const operations = [output]
+      if (
+        operations.some(
+          (operation) =>
+            operation.conversationId !== request.conversationId ||
+            ('operationId' in request &&
+              request.operationId !== undefined &&
+              operation.operationId !== request.operationId) ||
+            ('requestId' in request && operation.requestId !== request.requestId)
+        )
+      )
+        throw new Error('Invalid operation identity')
+      return output
+    } catch {
+      throw new Error('Unable to complete this compaction request. Please try again.')
+    }
+  }
+  onManualContextCompaction(
+    handler: (event: AgentManualContextCompactionNotification) => void
+  ): () => void {
+    return this.rpc.onNotification(
+      AGENT_MANUAL_CONTEXT_COMPACTION_NOTIFICATION_METHOD,
+      (params) => {
+        try {
+          handler(parseAgentManualContextCompactionNotification(params))
+        } catch {
+          console.warn('Ignored invalid manual compaction notification')
+        }
+      }
     )
   }
 

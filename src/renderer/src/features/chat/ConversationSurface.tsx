@@ -1,3 +1,4 @@
+import type { ComposerCommand } from './components/ComposerCommands'
 import {
   Fragment,
   memo,
@@ -15,6 +16,7 @@ import type {
   AgentContextWindowSnapshot,
   AgentProposedAction,
   AgentProviderTransitionOperation,
+  AgentManualContextCompactionOperation,
   GitTurnDiffSummary,
   StorageConversationForkPoint
 } from '@mycopilot/protocol'
@@ -26,6 +28,7 @@ import { ChatMessageItem } from './components/ChatMessageItem'
 import { ConversationTurnNavigationRail } from './components/ConversationTurnNavigationRail'
 import {
   ConversationModelTransitionDivider,
+  ConversationManualCompactionDivider,
   ModelTransitionConfirmationDialog
 } from './components/ConversationModelTransition'
 import type {
@@ -63,6 +66,8 @@ interface ConversationSurfaceCommonProps {
 
 export interface InteractiveConversationSurfaceProps extends ConversationSurfaceCommonProps {
   mode: 'interactive'
+  commands?: readonly ComposerCommand[]
+  isManualCompactionRunning?: boolean
   /** Root-only semantic collaboration activity supplied by the durable tree/event projection. */
   collaborationContent?: ReactNode
   /** Typed durable semantic activity; generic Tool/Mailbox/model text never enters this path. */
@@ -73,6 +78,7 @@ export interface InteractiveConversationSurfaceProps extends ConversationSurface
   editSelectedModelAvailable: boolean
   editSelectedModelSupportsImage: boolean
   modelTransitionConfirmation?: ModelTransitionConfirmation
+  manualCompactionOperations?: AgentManualContextCompactionOperation[]
   modelTransitionOperations?: AgentProviderTransitionOperation[]
   onApproveAgentAction?: (
     messageId: string,
@@ -126,6 +132,7 @@ export type ConversationSurfaceProps =
   InteractiveConversationSurfaceProps | ObserverConversationSurfaceProps
 
 const EMPTY_COLLABORATION_TIMELINE_ACTIVITIES: readonly CollaborationTimelineActivity[] = []
+const EMPTY_MANUAL_COMPACTION_OPERATIONS: AgentManualContextCompactionOperation[] = []
 const EMPTY_MODEL_TRANSITION_OPERATIONS: AgentProviderTransitionOperation[] = []
 
 function useLatestCallback<Args extends unknown[], Result>(
@@ -213,6 +220,7 @@ interface ChatMessageListProps {
   editableLastUserMessageId: string | null
   lastAssistantMessageId?: string
   mode?: 'interactive' | 'observer'
+  manualCompactionOperations?: AgentManualContextCompactionOperation[]
   modelTransitionOperations?: AgentProviderTransitionOperation[]
   onApproveAgentAction?: (
     messageId: string,
@@ -247,6 +255,7 @@ export const ChatMessageList = memo(function ChatMessageList({
   editableLastUserMessageId,
   lastAssistantMessageId,
   mode = 'interactive',
+  manualCompactionOperations = EMPTY_MANUAL_COMPACTION_OPERATIONS,
   modelTransitionOperations = EMPTY_MODEL_TRANSITION_OPERATIONS,
   onApproveAgentAction,
   onCancelAgentAction,
@@ -403,26 +412,50 @@ export const ChatMessageList = memo(function ChatMessageList({
               }
             />
           )}
-          {(modelTransitions.completedByMessageId.get(message.id) ?? []).map((operation) => (
-            <ConversationModelTransitionDivider
-              key={operation.operationId}
-              onContinueInNewTask={
-                mode === 'interactive' &&
-                operation.status === 'completed' &&
-                operation.summaryId &&
-                onContinueInNewTask
-                  ? () =>
-                      continueInNewTask({
-                        kind: 'provider_transition_boundary',
-                        operationId: operation.operationId
-                      })
-                  : undefined
-              }
-              operation={operation}
-            />
-          ))}
+          {[
+            ...manualCompactionOperations
+              .filter((operation) => operation.coveredThroughMessageId === message.id)
+              .map((operation) => ({
+                at: operation.startedAt,
+                id: operation.operationId,
+                element: <ConversationManualCompactionDivider operation={operation} />
+              })),
+            ...(modelTransitions.completedByMessageId.get(message.id) ?? []).map((operation) => ({
+              at: operation.startedAt,
+              id: operation.operationId,
+              element: (
+                <ConversationModelTransitionDivider
+                  operation={operation}
+                  onContinueInNewTask={
+                    mode === 'interactive' &&
+                    operation.status === 'completed' &&
+                    operation.summaryId &&
+                    onContinueInNewTask
+                      ? () =>
+                          continueInNewTask({
+                            kind: 'provider_transition_boundary',
+                            operationId: operation.operationId
+                          })
+                      : undefined
+                  }
+                />
+              )
+            }))
+          ]
+            .sort((a, b) => a.at - b.at || a.id.localeCompare(b.id))
+            .map(({ id, element }) => (
+              <Fragment key={id}>{element}</Fragment>
+            ))}
         </Fragment>
       ))}
+      {manualCompactionOperations
+        .filter(
+          (operation) =>
+            !operation.coveredThroughMessageId || !messageIds.has(operation.coveredThroughMessageId)
+        )
+        .map((operation) => (
+          <ConversationManualCompactionDivider key={operation.operationId} operation={operation} />
+        ))}
       {modelTransitions.trailing.map((operation) => (
         <ConversationModelTransitionDivider
           key={operation.operationId}
@@ -649,11 +682,18 @@ export function ConversationSurface(props: ConversationSurfaceProps) {
             editableLastUserMessageId={editableLastUserMessageId}
             lastAssistantMessageId={lastAssistantMessageId}
             mode={props.mode}
+            manualCompactionOperations={interactive?.manualCompactionOperations}
             modelTransitionOperations={interactive?.modelTransitionOperations}
             onApproveAgentAction={interactive?.onApproveAgentAction}
             onCancelAgentAction={interactive?.onCancelAgentAction}
-            onContinueInNewTask={interactive?.onContinueInNewTask}
-            onEditLastUserMessage={interactive?.onEditLastUserMessage}
+            onContinueInNewTask={
+              interactive?.isManualCompactionRunning ? undefined : interactive?.onContinueInNewTask
+            }
+            onEditLastUserMessage={
+              interactive?.isManualCompactionRunning
+                ? undefined
+                : interactive?.onEditLastUserMessage
+            }
             onOpenContinuationOrigin={interactive?.onOpenContinuationOrigin}
             onMessageUiStateChange={interactive?.onMessageUiStateChange}
             onModelTransitionRetry={interactive?.onModelTransitionRetry}
@@ -694,6 +734,8 @@ export function ConversationSurface(props: ConversationSurfaceProps) {
             />
           ) : (
             <ChatComposer
+              commands={interactive.commands}
+              isManualCompactionRunning={interactive.isManualCompactionRunning}
               canGuideQueuedMessages={canGuideQueuedMessages}
               contextWindowIndicatorEnabled={interactive.contextWindowIndicatorEnabled}
               contextWindowSnapshot={interactive.contextWindowSnapshot}

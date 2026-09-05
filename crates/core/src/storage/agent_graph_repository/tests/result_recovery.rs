@@ -872,3 +872,70 @@ fn child_binding_requires_a_fresh_matching_conversation_and_freezes_only_its_mod
         Some("model-b")
     );
 }
+
+#[test]
+fn manual_root_maintenance_leaves_child_wake_queued_until_terminal() {
+    use crate::storage::manual_context_compaction_repository as manual;
+    use crate::storage::models::ManualContextCompactionOperation;
+    let mut connection = setup_tree();
+    let mut operation = ManualContextCompactionOperation {
+        operation_id: "root-maintenance".into(),
+        request_id: "root-maintenance".into(),
+        conversation_id: "conversation-root".into(),
+        status: "running".into(),
+        phase: "preparing".into(),
+        assistant_message_id: None,
+        covered_through_message_id: None,
+        model_id: None,
+        summary_id: None,
+        source_input_tokens: None,
+        replacement_input_tokens: None,
+        error: None,
+        started_at: 20,
+        updated_at: 20,
+        completed_at: None,
+    };
+    manual::claim(&mut connection, &operation).unwrap();
+    let followup = follow_up_agent(
+        &mut connection,
+        &SendAgentMessageRequest {
+            sender_agent_id: "agent-root".into(),
+            recipient_agent_id: "agent-child".into(),
+            request_id: "during-maintenance".into(),
+            content: "check after maintenance".into(),
+        },
+        21,
+    )
+    .unwrap();
+    let wake_id = followup.deferred_wake.unwrap().wake_id;
+    assert!(
+        claim_next_dispatchable_agent_wake(&mut connection, "global-claim-maintenance", 22)
+            .unwrap()
+            .is_none()
+    );
+    assert!(claim_next_agent_wake(
+        &mut connection,
+        "agent-child",
+        "direct-claim-maintenance",
+        22
+    )
+    .unwrap()
+    .is_none());
+    assert_eq!(
+        get_agent_wake(&connection, &wake_id)
+            .unwrap()
+            .unwrap()
+            .status,
+        AgentWakeStatus::Queued
+    );
+    operation.status = "cancelled".into();
+    operation.updated_at = 23;
+    operation.completed_at = Some(23);
+    manual::update(&connection, &operation).unwrap();
+    let claimed =
+        claim_next_dispatchable_agent_wake(&mut connection, "global-claim-after-maintenance", 24)
+            .unwrap()
+            .unwrap();
+    assert_eq!(claimed.wake_id, wake_id);
+    assert_eq!(claimed.status, AgentWakeStatus::Claimed);
+}

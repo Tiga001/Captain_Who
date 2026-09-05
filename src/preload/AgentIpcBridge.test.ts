@@ -314,3 +314,31 @@ describe('Agent IPC bridge collaboration', () => {
     expect(removeListener).toHaveBeenCalledWith('host:agent.collaboration.resync', listener)
   })
 })
+
+describe('manual context compaction IPC', () => {
+  it('uses dedicated start, status, cancel and notification channels', async () => {
+    const invoke = vi.fn().mockResolvedValue({ ok: true, value: {} })
+    const on = vi.fn()
+    const removeListener = vi.fn()
+    const bridge = createAgentIpcBridge({ invoke, on, removeListener } as unknown as Pick<
+      IpcRenderer,
+      'invoke' | 'on' | 'removeListener'
+    >)
+    await bridge.startManualContextCompaction({ conversationId: 'chat', requestId: 'request' })
+    await bridge.getManualContextCompactionStatus({ conversationId: 'chat' })
+    await bridge.cancelManualContextCompaction({ conversationId: 'chat', operationId: 'operation' })
+    expect(invoke.mock.calls.map(([channel]) => channel)).toEqual([
+      'host:agent.startManualContextCompaction',
+      'host:agent.getManualContextCompactionStatus',
+      'host:agent.cancelManualContextCompaction'
+    ])
+    const handler = vi.fn()
+    const unsubscribe = bridge.onManualContextCompaction(handler)
+    const listener = on.mock.calls[0]![1]
+    const event = { conversationId: 'chat', operationId: 'operation', status: 'running' }
+    listener({}, event)
+    expect(handler).toHaveBeenCalledWith(event)
+    unsubscribe()
+    expect(removeListener).toHaveBeenCalledWith('host:agent.manualContextCompaction', listener)
+  })
+})

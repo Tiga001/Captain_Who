@@ -5,6 +5,24 @@ fn resolve_fork_point(
     active_chain: &[context_compaction_repository::ContextCompactionSummaryVersion],
 ) -> Result<ResolvedConversationForkPoint, ConversationForkError> {
     match fork_point {
+        ConversationForkPoint::Latest {} => {
+            let message = source
+                .messages
+                .last()
+                .ok_or_else(|| "当前聊天没有可分支的历史。".to_string())?;
+            if message.role != "assistant" {
+                return Err("最新位置尚未形成完整回复，暂时无法创建分支。"
+                    .to_string()
+                    .into());
+            }
+            Ok(ResolvedConversationForkPoint {
+                assistant_message_id: message.id.clone(),
+                summary_id: active_chain
+                    .last()
+                    .map(|version| version.summary.id.clone()),
+                model_id: source.model_id.clone(),
+            })
+        }
         ConversationForkPoint::AssistantReply {
             assistant_message_id,
         } => Ok(ResolvedConversationForkPoint {
@@ -175,6 +193,9 @@ fn ensure_agent_tree_stable(
                      UNION ALL
                      SELECT 1 FROM context_compaction_receipts
                      WHERE conversation_id = ?1 AND status = 'in_progress'
+                     UNION ALL
+                     SELECT 1 FROM manual_context_compaction_operations
+                     WHERE conversation_id = ?1 AND status = 'running'
                  )",
                 [conversation_id],
                 |row| row.get::<_, bool>(0),
@@ -221,6 +242,7 @@ pub(crate) fn validate_fork_point_input(
         }
     }
     let (label, value, maximum) = match fork_point {
+        ConversationForkPoint::Latest {} => return Ok(()),
         ConversationForkPoint::AssistantReply {
             assistant_message_id,
         } => ("回复 ID", assistant_message_id.as_str(), 512),
@@ -301,7 +323,12 @@ fn summaries_visible_at_assistant_reply(
             // A Provider-transition summary owned by this reply is displayed after the reply's
             // Fork action. Once crossed, every later summary belongs after that timeline point,
             // even if it happens to reuse the same owner message.
-            if transition.is_some() || crossed_cutoff {
+            let manual = connection.query_row(
+                "SELECT EXISTS(SELECT 1 FROM manual_context_compaction_operations WHERE conversation_id = ?1 AND summary_id = ?2 AND status = 'completed')",
+                params![conversation_id, &version.summary.id],
+                |row| row.get::<_, bool>(0),
+            ).map_err(database_error)?;
+            if transition.is_some() || manual || crossed_cutoff {
                 crossed_cutoff = true;
                 continue;
             }

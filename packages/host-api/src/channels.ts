@@ -50,6 +50,11 @@ export const HOST_CHANNELS = {
     rejectAction: 'host:agent.rejectAction',
     preflightProviderTransition: 'host:agent.preflightProviderTransition',
     providerTransition: 'host:agent.providerTransition',
+    startManualContextCompaction: 'host:agent.startManualContextCompaction',
+    getManualContextCompactionStatus: 'host:agent.getManualContextCompactionStatus',
+    cancelManualContextCompaction: 'host:agent.cancelManualContextCompaction',
+    manualContextCompaction: 'host:agent.manualContextCompaction',
+
     startProviderTransition: 'host:agent.startProviderTransition',
     startConversationTurn: 'host:agent.startConversationTurn',
     rewriteConversationTurn: 'host:agent.rewriteConversationTurn',

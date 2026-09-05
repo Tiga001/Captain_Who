@@ -39,6 +39,7 @@ mod historical_compatibility_boundary;
 mod human_root_notifications;
 mod image_generation;
 mod managed_command_loop;
+mod manual_context_compaction;
 mod mcp_approval_expiry;
 mod mcp_approval_lifecycle;
 mod office;

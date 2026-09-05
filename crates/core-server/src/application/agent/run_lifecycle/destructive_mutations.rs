@@ -1,5 +1,9 @@
 impl AgentService {
     pub fn delete_project(&self, project_id: &str) -> Result<(), String> {
+        let _admission = self.conversation_admission.lock().unwrap_or_else(|error|error.into_inner());
+        for conversation in self.storage.load_conversations()?.iter().filter(|conversation| conversation.project_id.as_deref() == Some(project_id)) {
+            self.ensure_no_manual_context_compaction(&conversation.id)?;
+        }
         // Agent-bound projects are deletable: after this layer drains live execution and file
         // effects, StorageService removes every owned Agent tree in the same deletion transaction.
         // A graph-presence precheck here would bypass that authoritative cascade entirely.
@@ -171,6 +175,8 @@ impl AgentService {
     }
 
     pub fn delete_conversation(&self, conversation_id: &str) -> Result<(), String> {
+        let _admission = self.conversation_admission.lock().unwrap_or_else(|error|error.into_inner());
+        self.ensure_no_manual_context_compaction(conversation_id)?;
         self.authorize_user_conversation_write(conversation_id)
             .map_err(|error| error.to_string())?;
         // Root Agent conversations follow the same graph-aware storage transaction as project
@@ -272,6 +278,8 @@ impl AgentService {
         conversation_id: &str,
         message_ids: &[String],
     ) -> Result<(), String> {
+        let _admission = self.conversation_admission.lock().unwrap_or_else(|error|error.into_inner());
+        self.ensure_no_manual_context_compaction(conversation_id)?;
         self.authorize_user_conversation_write(conversation_id)
             .map_err(|error| error.to_string())?;
         if message_ids.is_empty() {

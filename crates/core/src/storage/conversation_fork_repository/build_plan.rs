@@ -39,6 +39,13 @@ fn build_single_conversation_fork_plan_at_point(
         }
     };
     ensure_no_active_command_sessions(connection, source_conversation_id)?;
+    let manual_running = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM manual_context_compaction_operations WHERE conversation_id=?1 AND status='running')",
+        [source_conversation_id], |row| row.get::<_, bool>(0),
+    ).map_err(database_error)?;
+    if manual_running {
+        return Err("上下文仍在压缩，结束后才能创建分支。".to_string().into());
+    }
     let source = chat_repository::get_active_conversation(connection, source_conversation_id)
         .map_err(database_error)?
         .ok_or_else(|| "原任务不存在。".to_string())?;

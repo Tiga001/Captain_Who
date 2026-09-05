@@ -157,12 +157,22 @@ describe('storage protocol parsers', () => {
       requestId: 'request-2',
       sourceConversationId: 'conversation-1',
       forkPoint: { kind: 'provider_transition_boundary', operationId: 'operation-1' }
+    },
+    {
+      requestId: 'latest-request',
+      sourceConversationId: 'conversation-1',
+      forkPoint: { kind: 'latest' }
     }
   ] as const)('parses an explicit timeline fork point %#', (request) => {
     expect(parseStorageForkConversationRequest(request)).toEqual(request)
   })
 
   it.each([
+    {
+      requestId: 'request-1',
+      sourceConversationId: 'conversation-1',
+      forkPoint: { kind: 'latest', assistantMessageId: 'untrusted-cursor' }
+    },
     null,
     {
       requestId: 'request-1',

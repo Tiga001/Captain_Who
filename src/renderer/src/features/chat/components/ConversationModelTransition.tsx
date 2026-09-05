@@ -4,7 +4,10 @@ import { ConfirmationDialog } from '../../../components/dialog/ConfirmationDialo
 import { Tooltip } from '../../../components/overlay/Tooltip'
 import { useFrontendConfig } from '../../../config/FrontendConfigProvider'
 import { formatTranslation } from '../../../config/translationFormat'
-import type { AgentProviderTransitionOperation } from '@mycopilot/protocol'
+import type {
+  AgentProviderTransitionOperation,
+  AgentManualContextCompactionOperation
+} from '@mycopilot/protocol'
 import type { ModelTransitionConfirmation } from '../modelTransitionUiState'
 
 export function ModelTransitionConfirmationDialog({
@@ -136,6 +139,35 @@ export function ConversationModelTransitionDivider({
             </button>
           </Tooltip>
         )}
+      </div>
+      <span aria-hidden="true" />
+    </div>
+  )
+}
+
+/** Same timeline divider and running animation as provider compaction. No chat message is created. */
+export function ConversationManualCompactionDivider({
+  operation
+}: {
+  operation: AgentManualContextCompactionOperation
+}) {
+  const { t } = useFrontendConfig()
+  const content = t(`chat.manualCompaction.${operation.status}`)
+  return (
+    <div
+      className="conversation-continuation-divider conversation-model-transition"
+      data-status={operation.status}
+      data-testid="manual-compaction-divider"
+      role="status"
+    >
+      <span aria-hidden="true" />
+      <div className="conversation-model-transition__content">
+        <button type="button" disabled aria-label={content} title={operation.error}>
+          <FoldVertical aria-hidden="true" />
+          <span className={operation.status === 'running' ? 'agent-running-text' : undefined}>
+            {content}
+          </span>
+        </button>
       </div>
       <span aria-hidden="true" />
     </div>

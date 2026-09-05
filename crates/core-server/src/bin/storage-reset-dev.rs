@@ -48,7 +48,7 @@ const APP_DATA_ROOT_FLAG: &str = "--app-data-root";
 const CONFIGURATION_SOURCE_FLAG: &str = "--configuration-source";
 const SQLITE_TRANSIENT_SUFFIXES: [&str; 3] = ["-journal", "-wal", "-shm"];
 const RECOVERABLE_CONFIGURATION_SOURCE_SCHEMA_VERSION: i32 = 33;
-const RECOVERABLE_CONFIGURATION_TARGET_SCHEMA_VERSION: i32 = 34;
+const RECOVERABLE_CONFIGURATION_TARGET_SCHEMA_VERSION: i32 = 35;
 const RECOVERABLE_CONFIGURATION_SOURCE_FINGERPRINT: &str =
     "sha256:5e1e404d74af5ed899d88dc8b5051e673ecd5beb967579af8f328b07b640c948";
 const EXACT_CONFIGURATION_TABLES: &[&str] = &[
@@ -2009,7 +2009,7 @@ mod tests {
     }
 
     #[test]
-    fn explicit_configuration_source_is_pinned_to_schema_33_catalog_for_schema_34() {
+    fn explicit_configuration_source_is_pinned_to_schema_33_catalog_for_schema_35() {
         assert!(is_supported_explicit_configuration_source(
             RECOVERABLE_CONFIGURATION_SOURCE_SCHEMA_VERSION,
             RECOVERABLE_CONFIGURATION_SOURCE_FINGERPRINT,

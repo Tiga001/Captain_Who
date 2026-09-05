@@ -2,7 +2,7 @@
 status: current
 audience: developers/maintainers
 owner: engineering
-last_verified: 2026-08-31
+last_verified: 2026-09-05
 ---
 
 # Multi-Agent 发布门禁
@@ -59,7 +59,7 @@ pnpm test:multi-agent-release -- --smoke-only
 | cross-language protocol                | Rust 消费协作 fixture，与 TypeScript 契约对齐                                                        |
 | AppShell browser scenarios             | activity、Approval、observer、live stream、重启和根 Agent switching                                  |
 
-脚本的 storage step 当前明确标为 “canonical v34”。实际版本的唯一真源仍是 `crates/core/src/storage/migrations.rs`；修改 schema 时必须同步 runner label 与本门禁，不能仅凭日志文字判断兼容性。
+脚本的 storage step 当前明确标为 “canonical v35”。实际版本的唯一真源仍是 `crates/core/src/storage/migrations.rs`；修改 schema 时必须同步 runner label 与本门禁，不能仅凭日志文字判断兼容性。
 
 ## 3. 固定压力阈值
 
@@ -116,14 +116,14 @@ Renderer/Core Server 的协作 RPC 精确为 `agent.collaboration.getTree`、`ag
 
 ## 6. Schema 与 reset 门禁
 
-当前 canonical storage 为 **v34**，且只有 normalized SQLite catalog fingerprint 完全匹配才接受。以下输入必须 fail closed 且不修改源库：
+当前 canonical storage 为 **v35**，当前版本须通过 exact SQLite catalog fingerprint 校验；exact v34 可在事务内保数据升级到 v35。升级失败必须回滚。以下输入必须 fail closed 且不修改源库：
 
 - v15 或更早的开发库；
 - 非空但 `user_version=0` 的库；
 - 当前版本但 schema object 缺失/额外/被篡改；
 - foreign key violation。
 
-稳定错误标识为 `development_storage_schema_reset_required`。开发 reset 必须先 dry-run、取得 exact DB lock、创建并验证私有备份、构造 fresh v34；正式工具只从 exact current v34 恢复 allowlisted 配置与 credential reference，旧 schema fail closed。随后执行 `quick_check`/`foreign_key_check` 并原子发布。开发期一次性旧库重建只能使用审阅过、绑定 exact schema/fingerprint 且完成后删除的临时转换块。详见 [恢复 Runbook](recovery-runbook.md)。
+稳定错误标识为 `development_storage_schema_reset_required`。开发 reset 必须先 dry-run、取得 exact DB lock、创建并验证私有备份、构造 fresh v35；正式工具从 exact current v35 恢复 allowlisted 配置与 credential reference；受限的 v33 私有备份配置恢复绑定固定 fingerprint。正常 v34 → v35 升级不经过 reset。随后执行 `quick_check`/`foreign_key_check` 并原子发布。开发期一次性旧库重建只能使用审阅过、绑定 exact schema/fingerprint 且完成后删除的临时转换块。详见 [恢复 Runbook](recovery-runbook.md)。
 
 ## 7. 发布所需的组合证据
 

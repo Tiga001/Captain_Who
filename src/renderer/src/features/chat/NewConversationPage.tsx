@@ -1,3 +1,4 @@
+import type { ComposerCommand } from './components/ComposerCommands'
 import type { AgentContextWindowSnapshot } from '@mycopilot/protocol'
 import { useFrontendConfig } from '../../config/FrontendConfigProvider'
 import { useProjectSettings } from '../../config/ProjectSettingsProvider'
@@ -7,6 +8,7 @@ import { getNewConversationPromptKeys } from './newConversationPrompts'
 import './NewConversationPage.css'
 
 interface NewConversationPageProps {
+  commands?: readonly ComposerCommand[]
   contextWindowIndicatorEnabled?: boolean
   contextWindowSnapshot?: AgentContextWindowSnapshot
   draft: ChatComposerDraft
@@ -26,6 +28,7 @@ interface NewConversationPageProps {
 }
 
 export function NewConversationPage({
+  commands,
   contextWindowIndicatorEnabled = false,
   contextWindowSnapshot,
   defaultProjectId = null,
@@ -71,6 +74,7 @@ export function NewConversationPage({
           )}
         </h1>
         <ChatComposer
+          commands={commands}
           contextWindowIndicatorEnabled={contextWindowIndicatorEnabled}
           contextWindowSnapshot={contextWindowSnapshot}
           defaultProjectId={defaultProjectId}

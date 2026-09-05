@@ -10,6 +10,12 @@ import type {
   AgentConversationTurnRewriteInput,
   AgentContextWindowSnapshotInput,
   AgentContextWindowSnapshotOutput,
+  AgentManualContextCompactionStartInput,
+  AgentManualContextCompactionStatusInput,
+  AgentManualContextCompactionCancelInput,
+  AgentManualContextCompactionOperation,
+  AgentManualContextCompactionStatusOutput,
+  AgentManualContextCompactionNotification,
   AgentProviderTransitionNotification,
   AgentProviderTransitionOperation,
   AgentProviderTransitionPreflightInput,
@@ -52,6 +58,27 @@ export async function getContextWindowSnapshot(
   input: AgentContextWindowSnapshotInput
 ): Promise<AgentContextWindowSnapshotOutput> {
   return unwrapHostInvocation(await hostClient.agent.getContextWindowSnapshot(input))
+}
+
+export async function startManualContextCompaction(
+  input: AgentManualContextCompactionStartInput
+): Promise<AgentManualContextCompactionOperation> {
+  return unwrapHostInvocation(await hostClient.agent.startManualContextCompaction(input))
+}
+export async function getManualContextCompactionStatus(
+  input: AgentManualContextCompactionStatusInput
+): Promise<AgentManualContextCompactionStatusOutput> {
+  return unwrapHostInvocation(await hostClient.agent.getManualContextCompactionStatus(input))
+}
+export async function cancelManualContextCompaction(
+  input: AgentManualContextCompactionCancelInput
+): Promise<AgentManualContextCompactionOperation> {
+  return unwrapHostInvocation(await hostClient.agent.cancelManualContextCompaction(input))
+}
+export function onManualContextCompaction(
+  handler: (event: AgentManualContextCompactionNotification) => void
+): () => void {
+  return hostClient.agent.onManualContextCompaction(handler)
 }
 
 export async function preflightProviderTransition(

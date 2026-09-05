@@ -9,6 +9,18 @@ use mycopilot_core::storage::models::{
 use mycopilot_core::{AgentCommandSessionSnapshot, AgentCommandSessionStatus};
 
 #[test]
+fn latest_fork_request_is_host_resolved_and_rejects_client_cursor() {
+    let request = serde_json::from_value::<ForkConversationRequest>(serde_json::json!({
+        "requestId":"latest", "sourceConversationId":"source", "forkPoint":{"kind":"latest"}
+    }))
+    .unwrap();
+    assert_eq!(request.fork_point, ConversationForkPoint::Latest {});
+    assert!(serde_json::from_value::<ForkConversationRequest>(serde_json::json!({
+        "requestId":"latest", "sourceConversationId":"source", "forkPoint":{"kind":"latest", "assistantMessageId":"untrusted"}
+    })).is_err());
+}
+
+#[test]
 fn fork_request_accepts_camel_case_assistant_reply_point() {
     let temp = tempfile::tempdir().unwrap();
     let storage = Arc::new(StorageService::open(&temp.path().join("storage.sqlite")).unwrap());

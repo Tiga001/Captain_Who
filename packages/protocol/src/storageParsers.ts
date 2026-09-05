@@ -741,9 +741,14 @@ function parseStorageConversationForkPoint(value: unknown): StorageConversationF
   const record = expectRecord(value, context)
   const kind = expectEnum(
     record.kind,
-    ['assistant_reply', 'provider_transition_boundary'] as const,
+    ['assistant_reply', 'provider_transition_boundary', 'latest'] as const,
     `${context}.kind`
   )
+
+  if (kind === 'latest') {
+    expectOnlyKeys(record, ['kind'], context)
+    return { kind }
+  }
 
   if (kind === 'assistant_reply') {
     expectOnlyKeys(record, ['kind', 'assistantMessageId'] as const, context)

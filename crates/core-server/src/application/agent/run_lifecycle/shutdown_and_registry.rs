@@ -1,5 +1,7 @@
 impl AgentService {
     pub async fn shutdown_active_runs(&self, timeout: Duration) -> (usize, bool) {
+        let manual_tokens = self.manual_context_compaction_cancellations.lock().unwrap_or_else(|error|error.into_inner()).values().cloned().collect::<Vec<_>>();
+        for token in &manual_tokens { token.cancel(); }
         let active_runs = {
             let cancellations = self
                 .cancellations
@@ -41,8 +43,9 @@ impl AgentService {
             if let Ok(settled) = session_result_rx.try_recv() {
                 sessions_settled = settled;
             }
-            if active_runs_settled && sessions_settled {
-                return (active_runs.len(), false);
+            let manual_settled = self.manual_context_compaction_cancellations.lock().unwrap_or_else(|error|error.into_inner()).is_empty();
+            if active_runs_settled && sessions_settled && manual_settled {
+                return (active_runs.len() + manual_tokens.len(), false);
             }
             if tokio::time::Instant::now() >= deadline {
                 if !active_runs_settled {
@@ -55,7 +58,7 @@ impl AgentService {
                         .collect::<Vec<_>>();
                     self.persist_forced_cancelled_runs(&remaining_run_ids);
                 }
-                return (active_runs.len(), true);
+                return (active_runs.len() + manual_tokens.len(), true);
             }
 
             tokio::time::sleep(Duration::from_millis(20)).await;

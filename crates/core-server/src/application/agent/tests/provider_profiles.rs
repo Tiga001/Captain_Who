@@ -3,7 +3,7 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
-async fn read_provider_request(stream: &mut TcpStream) -> Value {
+pub(super) async fn read_provider_request(stream: &mut TcpStream) -> Value {
     let mut request = Vec::new();
     let mut buffer = [0_u8; 4_096];
     let mut body_start = None;
@@ -37,7 +37,11 @@ async fn read_provider_request(stream: &mut TcpStream) -> Value {
     serde_json::from_slice(&request[body_start.unwrap()..expected_length.unwrap()]).unwrap()
 }
 
-async fn write_provider_stream(stream: &mut TcpStream, delta: Value, finish_reason: &str) {
+pub(super) async fn write_provider_stream(
+    stream: &mut TcpStream,
+    delta: Value,
+    finish_reason: &str,
+) {
     stream
         .write_all(
             b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n",
@@ -56,7 +60,7 @@ async fn write_provider_stream(stream: &mut TcpStream, delta: Value, finish_reas
         .unwrap();
 }
 
-async fn collect_until_done(
+pub(super) async fn collect_until_done(
     receiver: &mut tokio::sync::mpsc::UnboundedReceiver<Value>,
 ) -> Vec<Value> {
     tokio::time::timeout(Duration::from_secs(5), async {
@@ -149,7 +153,7 @@ fn provider_request_message_text(request: &Value) -> String {
         .join("\n")
 }
 
-fn save_provider_profile_fixture(
+pub(super) fn save_provider_profile_fixture(
     storage: &StorageService,
     api_url: &str,
     profile: Option<mycopilot_core::ProviderProfileConfig>,
@@ -210,7 +214,7 @@ fn fork_transition_summary_generator() -> ContextCompactionSummaryGenerator {
     })
 }
 
-fn turn_input(model_id: &str) -> AgentConversationTurnInput {
+pub(super) fn turn_input(model_id: &str) -> AgentConversationTurnInput {
     AgentConversationTurnInput {
         conversation_id: None,
         project_id: None,

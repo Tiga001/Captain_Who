@@ -49,6 +49,7 @@ export interface LeftSidebarProps {
   onNewProject: () => Promise<AppProject | null>
   onOpenSettings: () => void
   onRemoveProject: (projectId: string) => Promise<boolean>
+  onRequestRenameConversation?: (conversationId: string) => void
   onRenameConversation: (conversationId: string, title: string) => void
   onRenameProject: (projectId: string, name: string) => void
   onOpenScheduled: () => void

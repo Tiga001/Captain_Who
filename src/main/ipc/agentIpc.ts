@@ -17,6 +17,14 @@ export function registerAgentIpc(ipcMain: TrustedIpcMain, coreServer: CoreServer
     }
   })
 
+  coreServer.onManualContextCompaction?.((event) => {
+    for (const window of BrowserWindow.getAllWindows()) {
+      if (!window.isDestroyed() && !window.webContents.isDestroyed()) {
+        window.webContents.send(HOST_CHANNELS.agent.manualContextCompaction, event)
+      }
+    }
+  })
+
   coreServer.onProviderTransition((event) => {
     for (const window of BrowserWindow.getAllWindows()) {
       if (!window.isDestroyed() && !window.webContents.isDestroyed()) {
@@ -89,6 +97,24 @@ export function registerAgentIpc(ipcMain: TrustedIpcMain, coreServer: CoreServer
     captureHostInvocation(() => coreServer.decideCollaborationApproval(input))
   )
 
+  ipcMain.handle(HOST_CHANNELS.agent.startManualContextCompaction, (_event, input) =>
+    captureProviderTransitionInvocation(
+      () => coreServer.startManualContextCompaction(input),
+      'Unable to complete this compaction request. Please try again.'
+    )
+  )
+  ipcMain.handle(HOST_CHANNELS.agent.getManualContextCompactionStatus, (_event, input) =>
+    captureProviderTransitionInvocation(
+      () => coreServer.getManualContextCompactionStatus(input),
+      'Unable to complete this compaction request. Please try again.'
+    )
+  )
+  ipcMain.handle(HOST_CHANNELS.agent.cancelManualContextCompaction, (_event, input) =>
+    captureProviderTransitionInvocation(
+      () => coreServer.cancelManualContextCompaction(input),
+      'Unable to complete this compaction request. Please try again.'
+    )
+  )
   ipcMain.handle(HOST_CHANNELS.agent.preflightProviderTransition, (_event, input) =>
     captureProviderTransitionInvocation(
       () => coreServer.preflightProviderTransition(input),

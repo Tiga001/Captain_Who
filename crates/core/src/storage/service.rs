@@ -65,6 +65,7 @@ mod image_generation;
 mod lifecycle;
 mod managed_artifacts;
 mod managed_command_workspaces;
+mod manual_compaction;
 mod mcp_approval_envelopes;
 mod messages;
 mod notifications;

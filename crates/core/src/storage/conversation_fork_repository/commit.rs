@@ -58,10 +58,25 @@ pub(crate) fn commit_fork_plan_with_provider_continuations(
                 .map(|member| member.source_agent.agent_id.clone()),
         )
         .collect::<Vec<_>>();
-    if plan.collaboration_root.is_some() {
-        ensure_agent_tree_stable(&transaction, &source_conversation_ids, &source_agent_ids)?;
-    } else {
-        ensure_no_active_command_sessions(&transaction, &plan.source_conversation_id)?;
+    ensure_agent_tree_stable(&transaction, &source_conversation_ids, &source_agent_ids)?;
+    if matches!(plan.source_fork_point, ConversationForkPoint::Latest {}) {
+        let source =
+            chat_repository::get_active_conversation(&transaction, &plan.source_conversation_id)
+                .map_err(database_error)?
+                .ok_or_else(|| "原任务已不存在。".to_string())?;
+        let head = context_compaction_repository::get_active_summary(&transaction, &source.id)
+            .map_err(|error| error.to_string())?;
+        if source.messages.last().map(|message| message.id.as_str())
+            != Some(plan.source_message_id.as_str())
+            || source.model_id != plan.target.model_id
+            || head.as_ref().map(|summary| summary.id.as_str())
+                != plan
+                    .summaries
+                    .last()
+                    .map(|version| version.summary.id.as_str())
+        {
+            return Err("最新分支边界已变化，请重试。".to_string().into());
+        }
     }
     insert_conversation(&transaction, &plan.target)?;
     if let Some(collaboration) = &plan.collaboration_root {

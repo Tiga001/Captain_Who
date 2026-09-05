@@ -212,6 +212,7 @@ impl AgentService {
                 .to_string()
                 .into());
         }
+        self.ensure_no_manual_context_compaction(&conversation_id)?;
         let (previous_conversation, expected_revision) =
             self.storage.load_conversation_for_turn(&conversation_id)?;
         if rewrite.is_some()

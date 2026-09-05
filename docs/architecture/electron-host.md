@@ -106,7 +106,7 @@ SQLite notification facts / batches
 
 通知点击不会直接操作 React state。Main 把经过共享 parser 校验的 `NotificationOpenRequest` 交给最近一个已通过 `openRequestedReady` 握手、尚未销毁的受信 Renderer；必要时恢复、显示并聚焦主窗口。Renderer 尚未 ready 时，Main 以 FIFO 暂存最多 32 个请求，溢出时丢弃最早请求。单项点击打开 application、精确 Conversation/message/approval 或 Automation/run；Main 只把用户实际看到且仍有效的 event ids 标为 seen。请求不包含原生 Notification 对象、绝对路径或任意导航 URL。
 
-Notification DTO 使用 schema v1，Automation DTO 使用独立 schema v1/permission mode v2；它们与 SQLite canonical schema v34 是三条独立版本线。Main 不解析 SQLite schema，也不把数据库版本暴露给 Renderer。
+Notification DTO 使用 schema v1，Automation DTO 使用独立 schema v1/permission mode v2；它们与 SQLite canonical schema v35 是三条独立版本线。Main 不解析 SQLite schema，也不把数据库版本暴露给 Renderer。
 
 ## 应用数据与环境权威
 
@@ -145,7 +145,7 @@ Core Server 的 Main 包装层为 graceful shutdown 设置硬超时，终端 ser
 7. 开发与打包可以使用不同的可执行文件位置，但不能改变上述权限边界。
 8. Renderer 无权 claim、validate、acknowledge、release、suppress、list 或 summary 原生通知；这些方法仅属于 Main ↔ Core Server 的 Host-only JSON-RPC。
 9. Notification/Automation event、resync 和本机定时器只能触发重新读取 notification batch 或业务快照，不能被当作通知已显示或业务 Run 已终结的证据。
-10. Notification schema v1、Automation schema v1/permission mode v2 与 SQLite schema v34 不得由 Main 合并为单一版本。
+10. Notification schema v1、Automation schema v1/permission mode v2 与 SQLite schema v35 不得由 Main 合并为单一版本。
 
 ## 代码真源
 

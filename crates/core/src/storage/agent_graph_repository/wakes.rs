@@ -52,7 +52,16 @@ pub fn claim_next_agent_wake(
         transaction.commit().map_err(write_error)?;
         return Ok(Some(existing));
     }
-    ensure_active_agent(&transaction, agent_id)?;
+    let agent = ensure_active_agent(&transaction, agent_id)?;
+    let maintenance_running = transaction.query_row(
+        "SELECT EXISTS(SELECT 1 FROM manual_context_compaction_operations WHERE conversation_id=?1 AND status='running'
+         UNION ALL SELECT 1 FROM context_compaction_receipts WHERE conversation_id=?1 AND status='in_progress')",
+        [&agent.root_conversation_id], |row| row.get::<_, bool>(0),
+    ).map_err(read_error)?;
+    if maintenance_running {
+        transaction.commit().map_err(write_error)?;
+        return Ok(None);
+    }
     let lease_expires_at = claimed_at
         .checked_add(WAKE_LEASE_DURATION_MS)
         .ok_or_else(|| invalid("claimed_at", "cannot compute the Wake lease deadline"))?;
@@ -143,6 +152,15 @@ pub fn claim_next_dispatchable_agent_wake(
              JOIN agent_nodes AS agent ON agent.agent_id = wake.agent_id
              WHERE wake.status = 'queued'
                AND agent.lifecycle = 'active'
+               AND NOT EXISTS (
+                   SELECT 1 FROM manual_context_compaction_operations AS maintenance
+                   WHERE maintenance.conversation_id = agent.root_conversation_id
+                     AND maintenance.status = 'running'
+                   UNION ALL
+                   SELECT 1 FROM context_compaction_receipts AS receipt
+                   WHERE receipt.conversation_id = agent.root_conversation_id
+                     AND receipt.status = 'in_progress'
+               )
                AND NOT EXISTS (
                    SELECT 1 FROM agent_wake_requests AS active
                    WHERE active.agent_id = wake.agent_id

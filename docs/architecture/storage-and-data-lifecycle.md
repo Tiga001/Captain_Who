@@ -2,7 +2,7 @@
 status: current
 audience: developers
 owner: engineering
-last_verified: 2026-09-03
+last_verified: 2026-09-05
 ---
 
 # SQLite 存储与数据生命周期
@@ -24,19 +24,19 @@ last_verified: 2026-09-03
 
 ## Schema 发布策略
 
-截至本次核验，当前唯一受支持的 canonical schema 是 **v34**（SQLite `PRAGMA user_version = 34`）：
+截至本次核验，当前唯一受支持的 canonical schema 是 **v35**（SQLite `PRAGMA user_version = 35`）：
 
-- `STORAGE_SCHEMA_VERSION = 34`；
-- canonical schema fingerprint 为 `sha256:10c4053e2800f3f3d81acf76b03c0492248bc7c3724e8d58a9a4b6af05789c92`，由编译期常量和测试固定；
+- `STORAGE_SCHEMA_VERSION = 35`；
+- canonical schema fingerprint 为 `sha256:794df50e6e2db70432cb0a233befa5cda47ff7069e98dd3ae53d94fd87a45c4b`，由编译期常量和测试固定；
 - 空数据库在一个原子流程中建立完整当前 schema；
-- 非空的旧版、未知版或结构被篡改的开发数据库返回 `development_storage_schema_reset_required`；
-- 当前没有受支持的原地升级链。
+- exact v34 catalog、fingerprint 与外键均通过检查时，在一个事务内追加手动压缩操作和独立用量表并升级到 v35；升级后再次校验完整 catalog 与外键，失败回滚，保留所有原始历史；
+- 其他旧版、未知版、非空未版本化或结构被篡改的数据库返回 `development_storage_schema_reset_required`，不自动重置。
 
 版本号和 fingerprint 可能变化，维护时必须读取 `crates/core/src/storage/migrations.rs`，不得从本文复制常量到运行逻辑。发布说明可以记录版本，但架构文档应强调策略而非长期维护一张迁移历史表。
 
 开发库重置前应先关闭应用并备份数据根；优先使用受管 `storage:reset-dev` 流程。不要只删除 `storage.sqlite` 而遗留 attachments、artifacts、spool 或 lock 文件。
 
-`storage:reset-dev` 不是 schema migration：它始终新建 v34 数据库，且不恢复 Conversation、Project 或任何 Agent/runtime 记录。正式工具只从 exact current v34 schema 提取 allowlisted configuration；旧 schema fail closed，不保留永久兼容读取或明文字段恢复路径。开发期跨 schema 重建若确有必要，必须作为一次性、代码审阅过的受控操作执行，并在验证目标库后删除临时转换代码。
+`storage:reset-dev` 与正常 v34 → v35 保数据升级是不同操作：reset 始终新建 v35，不恢复 Conversation、Project 或 Agent/runtime 历史。它只保留 exact current schema 的 allowlisted 配置；已有的受限恢复选项也可从绑定 exact v33 fingerprint 的私有备份读取 allowlisted 设置，并把凭据转换为 reference。未知历史库仍拒绝，不能把 reset 当作正常升级步骤。
 
 ## 领域数据地图
 
@@ -63,7 +63,7 @@ DDL 按领域大致分为：
 
 ## Scheduled Automation 表组
 
-Automation 在 canonical schema v34 中使用当前通用通知表和自动化领域表，完整列、CHECK、索引和 trigger 仍以 DDL 为准：
+Automation 在 canonical schema v35 中使用当前通用通知表和自动化领域表，完整列、CHECK、索引和 trigger 仍以 DDL 为准：
 
 | 表                  | 权威内容                                                                | 关键不变量                                                                                                        |
 | ------------------- | ----------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
@@ -80,6 +80,12 @@ HumanRoot 与 Automation 共用 `notification_settings`、`notification_events`�
 seen/resolved/superseded 是其 projection；batch 负责 collecting/pending/claimed/displayed/sealed/suppressed
 原生投递生命周期。Automation producer 在同一业务事务中直接写入 generic event；不得重新引入独立的
 Automation notification outbox、投递 RPC 或第二套 claim/acknowledge authority。
+
+## 手动压缩与独立用量
+
+`manual_context_compaction_operations` 保存稳定 request/operation identity、冻结模型与历史锚点、状态和时间。`manual_context_compaction_usage_records` 以 operation 为唯一计费 owner，使用请求开始时的价格，不覆盖 `agent_usage_records` 中上一条回复。已收到响应的真实用量先独立落盘，再原子提交摘要、receipt、active head 和操作终态。失败或取消也保留已经观察到的费用；未返回的 token 数据为未知。
+
+用量汇总增加请求数、tokens 和估算费用，不增加聊天消息数。清理用量隐藏计费行但保留幂等凭证，迟到重放不会重新计费；删除聊天前汇入删除后的日汇总。latest fork 克隆摘要、continuation 与展示边界，不克隆费用。
 
 ## 事务原则
 
@@ -99,11 +105,12 @@ Automation 还要求两个专用原子边界：
 
 ## 启动与崩溃恢复
 
-Bootstrap 大致执行：解析数据根与锁、打开/校验 canonical schema v34、构造 repositories/services、加载凭据 backend、MCP Server/Provider/Skills/Artifact Runtime、随后运行领域 reconciliation。持久凭据 backend 不可用或 credential reference 无法解析时必须保留公开配置并报告 `unavailable`/配置错误，不能把缺失凭据当作空值覆盖；只有实际需要该连接的运行应被阻断。
+Bootstrap 大致执行：解析数据根与锁、打开/校验 canonical schema v35、构造 repositories/services、加载凭据 backend、MCP Server/Provider/Skills/Artifact Runtime、随后运行领域 reconciliation。持久凭据 backend 不可用或 credential reference 无法解析时必须保留公开配置并报告 `unavailable`/配置错误，不能把缺失凭据当作空值覆盖；只有实际需要该连接的运行应被阻断。
 
 恢复必须按“数据库已提交状态”判断，不按 Renderer 缓存判断。当前需要关注：
 
 - orphaned `in_progress` Trace 和未终结 assistant Run；
+- 未完成手动压缩标记为 interrupted，不自动重放模型请求；已观察用量保留，已提交摘要仍以事务事实为准；
 - interrupted pending action、approval successor 和 action audit；
 - Provider continuation prepared/promoted/released 状态；
 - Command Session 进程已消失、transcript/receipt 尚未结算；
@@ -134,7 +141,7 @@ Automation 启动恢复区分 admission 前后：旧进程遗留的全部 `admit
 
 当前开发策略以整套数据根备份/重置为主。复制在线 SQLite 文件并不等价于一致备份；应在应用关闭、锁释放后复制数据库及其配套文件目录，或使用受支持的 SQLite snapshot/backup 流程。
 
-当前 v34 SQLite snapshot 只含模型/搜索 credential reference 与非秘密元数据，不含这些连接的当前 secret 字节；旧 schema 生成的历史备份仍可能含明文 Token/Key，必须继续按秘密材料保护。只恢复 `storage.sqlite` 不会恢复操作系统凭据，跨设备、跨系统账户、签名身份变化或凭据 backend 丢失后，界面可能显示凭据不可用，此时只能由用户替换或清除。未签名 macOS 开发构建的私有凭据文件位于数据根，因此“整根复制”仍会复制 secret，不能当作普通诊断包。
+当前 v35 SQLite snapshot 只含模型/搜索 credential reference 与非秘密元数据，不含这些连接的当前 secret 字节；旧 schema 生成的历史备份仍可能含明文 Token/Key，必须继续按秘密材料保护。只恢复 `storage.sqlite` 不会恢复操作系统凭据，跨设备、跨系统账户、签名身份变化或凭据 backend 丢失后，界面可能显示凭据不可用，此时只能由用户替换或清除。未签名 macOS 开发构建的私有凭据文件位于数据根，因此“整根复制”仍会复制 secret，不能当作普通诊断包。
 
 删除 SQLite reference、清除凭据或移除私有文件只表达应用层删除意图；文件系统、SSD、系统备份和操作系统凭据后端可能保留副本，产品不承诺安全擦除。怀疑泄露时应在 Provider 侧撤销或轮换凭据。
 
@@ -142,7 +149,7 @@ Automation 启动恢复区分 admission 前后：旧进程遗留的全部 `admit
 
 ## 不变量
 
-1. `canonical_schema.sql`、canonical schema v34 的 version 与 fingerprint 必须一致。
+1. `canonical_schema.sql`、canonical schema v35 的 version 与 fingerprint 必须一致。
 2. 非空非当前 schema fail closed，不自动执行未审计迁移。
 3. 所有领域对象在 service SQL 边界校验 conversation/project/Run 归属。
 4. 外部副作用与数据库提交之间的崩溃窗口必须有明确恢复状态。
@@ -186,7 +193,7 @@ Automation 启动恢复区分 admission 前后：旧进程遗留的全部 `admit
 
 ## 变更检查表
 
-- [ ] 修改 `canonical_schema.sql` 后同步 canonical version、fingerprint 和 fresh-schema 测试；若版本不再是 v34，同时更新本文当前快照。
+- [ ] 修改 `canonical_schema.sql` 后同步 canonical version、fingerprint 和 fresh-schema 测试；若版本不再是 v35，同时更新本文当前快照。
 - [ ] 明确旧数据库行为；没有经批准的迁移链时保持 reset-required。
 - [ ] 新表/列定义 owner、FK、唯一键、索引、删除/保留和敏感分类。
 - [ ] 跨表操作在一个 service 事务中完成，并有冲突/幂等测试。
@@ -201,7 +208,7 @@ Automation 启动恢复区分 admission 前后：旧进程遗留的全部 `admit
 
 ## 当前限制
 
-- 当前没有面向用户数据的原地 schema 升级承诺，旧开发库需要整根重置。
+- 仅支持经过 fingerprint 和外键验证的 v34 → v35 升级，没有任意旧版升级链，也没有自动降级。
 - 单连接 Mutex 设计偏向桌面本地一致性，不适合多进程或高并发服务端部署。
 - 自动保留期限、跨设备同步、在线增量备份和用户级导出策略尚未形成统一公共契约。
 - Automation 当前没有 history/Event/outbox retention 或物理 GC 公共流程；tombstone 与事件日志会随使用增长。

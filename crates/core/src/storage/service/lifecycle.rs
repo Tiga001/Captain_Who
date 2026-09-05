@@ -117,6 +117,14 @@ impl StorageService {
             match service.state.connection() {
                 Ok(mut connection) => {
                     if let Err(error) =
+                        crate::storage::manual_context_compaction_repository::interrupt_running(
+                            &mut connection,
+                            now_ms(),
+                        )
+                    {
+                        eprintln!("failed to mark interrupted manual compactions: {error}");
+                    }
+                    if let Err(error) =
                         context_compaction_receipt_repository::mark_in_progress_receipts_interrupted(
                             &mut connection,
                             now_ms(),
