@@ -56,6 +56,7 @@ pub(crate) struct HumanConversationTurnRewrite {
 
 enum ConversationTurnInputSource {
     Human,
+    HumanResponse(Box<mycopilot_core::storage::human_interaction_repository::HumanInteractionAsyncTurnAdmission>),
     ExistingAgentProjection {
         collaboration_identity: Box<AgentCollaborationIdentity>,
         model_snapshot: Box<AgentModelSelectionSnapshot>,
@@ -101,6 +102,36 @@ pub(crate) fn prepare_conversation_turn(
             Err("prepare-only Turn cannot replay an edit request"
                 .to_string()
                 .into())
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn prepare_reserved_human_response_turn(
+    storage: &StorageService,
+    skills_service: &SkillsService,
+    input: AgentConversationTurnInput,
+    run_id: &str,
+    existing: Option<ChatConversationRecord>,
+    expected_revision: Option<i64>,
+    response: mycopilot_core::storage::human_interaction_repository::HumanInteractionAsyncTurnAdmission,
+) -> Result<PreparedConversationTurn, AgentServiceError> {
+    match prepare_conversation_turn_from_source(
+        storage,
+        skills_service,
+        input,
+        run_id,
+        ConversationTurnInputSource::HumanResponse(Box::new(response)),
+        TurnReservationMode::CommitDurableLease,
+        existing,
+        expected_revision,
+        None,
+        None,
+        None,
+    )? {
+        PreparedConversationTurnOutcome::Prepared(prepared) => Ok(*prepared),
+        PreparedConversationTurnOutcome::Replayed(_) => {
+            Err("human response cannot replay a rewrite".to_string().into())
         }
     }
 }
@@ -469,16 +500,18 @@ fn prepare_conversation_turn_from_source(
     )?;
 
     let user_message = match &source {
-        ConversationTurnInputSource::Human => ChatMessageRecord {
-            id: user_message_id.clone(),
-            role: "user".to_string(),
-            content: content.clone(),
-            created_at: timestamp,
-            status: Some("sent".to_string()),
-            attachments: message_attachments_from_input(&input.attachments, timestamp),
-            agent_run_json: None,
-            ui_state_json: None,
-        },
+        ConversationTurnInputSource::Human | ConversationTurnInputSource::HumanResponse(_) => {
+            ChatMessageRecord {
+                id: user_message_id.clone(),
+                role: "user".to_string(),
+                content: content.clone(),
+                created_at: timestamp,
+                status: Some("sent".to_string()),
+                attachments: message_attachments_from_input(&input.attachments, timestamp),
+                agent_run_json: None,
+                ui_state_json: None,
+            }
+        }
         ConversationTurnInputSource::ExistingAgentProjection {
             collaboration_identity,
             ..
@@ -509,6 +542,16 @@ fn prepare_conversation_turn_from_source(
             }
             projected
         }
+    };
+    let user_message = if matches!(&source, ConversationTurnInputSource::HumanResponse(_)) {
+        conversation
+            .messages
+            .iter()
+            .find(|message| message.id == user_message_id)
+            .cloned()
+            .unwrap_or(user_message)
+    } else {
+        user_message
     };
     let assistant_created_at = timestamp.max(user_message.created_at.saturating_add(1));
     let assistant_message = ChatMessageRecord {
@@ -544,7 +587,10 @@ fn prepare_conversation_turn_from_source(
         .filter_preloaded_agent_message_ids(&conversation_id, &model_input_projection_ids)
         .map_err(|error| error.to_string())?;
 
-    if matches!(&source, ConversationTurnInputSource::Human) {
+    if matches!(
+        &source,
+        ConversationTurnInputSource::Human | ConversationTurnInputSource::HumanResponse(_)
+    ) {
         upsert_message(&mut conversation.messages, user_message.clone());
     }
     upsert_message(&mut conversation.messages, assistant_message.clone());
@@ -568,13 +614,15 @@ fn prepare_conversation_turn_from_source(
             let initial_trace = mycopilot_core::ConversationTraceSnapshot::default()
                 .in_progress_trace(run_id, &conversation_id, &assistant_message_id);
             let trusted_wake = match &source {
-                ConversationTurnInputSource::Human => None,
+                ConversationTurnInputSource::Human
+                | ConversationTurnInputSource::HumanResponse(_) => None,
                 ConversationTurnInputSource::ExistingAgentProjection { wake_admission, .. } => {
                     Some(wake_admission.as_ref())
                 }
             };
             let permission_source = match &source {
-                ConversationTurnInputSource::Human => {
+                ConversationTurnInputSource::Human
+                | ConversationTurnInputSource::HumanResponse(_) => {
                     mycopilot_core::AgentTurnPermissionSource::HostAuthenticatedRoot(
                         input.permissions,
                     )
@@ -629,6 +677,19 @@ fn prepare_conversation_turn_from_source(
                     return Ok(PreparedConversationTurnOutcome::Replayed(Box::new(output)));
                 }
                 permissions
+            } else if let ConversationTurnInputSource::HumanResponse(response) = &source {
+                storage
+                    .save_human_interaction_conversation_and_begin_turn(
+                        conversation,
+                        expected_revision,
+                        permission_source,
+                        &preloaded_agent_message_ids,
+                        &initial_trace,
+                        assistant_created_at,
+                        now_ms().max(assistant_created_at),
+                        response,
+                    )?
+                    .1
             } else if let Some(automation_admission) = automation_admission {
                 match storage
                     .save_automation_conversation_and_begin_turn_with_preloaded_agent_messages(
@@ -685,7 +746,11 @@ fn prepare_conversation_turn_from_source(
             }
         }
     }
-    if matches!(&source, ConversationTurnInputSource::Human) && rewrite.is_none() {
+    if matches!(
+        &source,
+        ConversationTurnInputSource::Human | ConversationTurnInputSource::HumanResponse(_)
+    ) && rewrite.is_none()
+    {
         storage.save_input_attachments(
             &conversation_id,
             &user_message_id,
@@ -710,7 +775,9 @@ fn prepare_conversation_turn_from_source(
         attachment_library: Some(attachment_library),
         permissions: input.permissions,
         collaboration_identity: match &source {
-            ConversationTurnInputSource::Human => None,
+            ConversationTurnInputSource::Human | ConversationTurnInputSource::HumanResponse(_) => {
+                None
+            }
             ConversationTurnInputSource::ExistingAgentProjection {
                 collaboration_identity,
                 ..

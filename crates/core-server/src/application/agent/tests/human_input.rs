@@ -406,7 +406,7 @@ async fn assert_sync_scenario(question_batches: usize, skip_all: bool, approval_
     assert!(first_tools
         .iter()
         .any(|tool| tool["function"]["name"] == "request_user_input"));
-    assert!(!first_tools
+    assert!(first_tools
         .iter()
         .any(|tool| tool["function"]["name"] == "request_user_input_async"));
     let response_ids = submitted

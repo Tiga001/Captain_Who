@@ -202,6 +202,17 @@ impl AgentService {
             finish_reason: output.finish_reason,
             proposed_actions: Vec::new(),
         }));
+        drop(deletion_lifecycle);
+        if let Err(error) = self
+            .storage
+            .settle_async_human_interaction_start_failure(run_id)
+        {
+            eprintln!("failed to settle refused async answer continuation: {error}");
+        }
+        if let Some(conversation_id) = record.snapshot.conversation_id.as_deref() {
+            self.publish_human_delivery_changes(conversation_id, notifications);
+        }
+        self.schedule_human_input_deliveries(notifications.clone());
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -406,6 +417,16 @@ impl AgentService {
             finish_reason: None,
             proposed_actions: Vec::new(),
         }));
+        if let Err(error) = self
+            .storage
+            .settle_async_human_interaction_start_failure(run_id)
+        {
+            eprintln!("failed to settle refused async answer continuation: {error}");
+        }
+        if let Some(conversation_id) = record.snapshot.conversation_id.as_deref() {
+            self.publish_human_delivery_changes(conversation_id, notifications);
+        }
+        self.schedule_human_input_deliveries(notifications.clone());
     }
 
     /// Stops an approval continuation before Runtime without inventing a terminal outcome.

@@ -15,6 +15,22 @@ struct StoredBlockingHumanInput {
 }
 
 impl mycopilot_core::AgentHumanInteractionRuntimeHost for StoredBlockingHumanInput {
+    fn async_execution_ready(&self) -> bool {
+        true
+    }
+    fn accept_async(
+        &self,
+        request: mycopilot_core::AgentAsyncUserInputRequest,
+    ) -> AgentResult<mycopilot_core::AgentAsyncUserInputAccepted> {
+        self.accept_async_question(request)
+    }
+    fn natural_sampling_state(
+        &self,
+        request: mycopilot_core::AgentSamplingBoundaryRequest,
+    ) -> AgentResult<mycopilot_core::AgentHumanInteractionSamplingState> {
+        self.ignored_questions_at_sampling(request)
+    }
+
     fn suspend(&self, suspension: mycopilot_core::AgentUserInputSuspension) -> AgentResult<()> {
         let fail = |error: String| AgentError::new(format!("无法持久化用户提问：{error}"));
         let context = self

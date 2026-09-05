@@ -1,6 +1,10 @@
 use super::*;
 use crate::human_interaction::HumanInteractionSettings;
-use crate::{AgentHumanInteractionRuntimeHost, AgentUserInputResume, AgentUserInputSuspension};
+use crate::{
+    AgentAsyncUserInputAccepted, AgentAsyncUserInputRequest, AgentHumanInteractionRuntimeHost,
+    AgentHumanInteractionSamplingState, AgentSamplingBoundaryRequest, AgentUserInputResume,
+    AgentUserInputSuspension,
+};
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -9,6 +13,12 @@ use tokio::net::{TcpListener, TcpStream};
 struct HumanHost {
     enabled: AtomicBool,
     pauses: Mutex<Vec<AgentUserInputSuspension>>,
+    async_ready: bool,
+    accepted: Mutex<Vec<AgentAsyncUserInputRequest>>,
+    ignored: Mutex<Vec<String>>,
+    natural_samples: Mutex<Vec<AgentSamplingBoundaryRequest>>,
+    answer_queue: Option<AgentSteerInputQueue>,
+    cancel_after_accept: Option<AgentCancellationToken>,
 }
 
 impl HumanHost {
@@ -46,6 +56,54 @@ impl HumanInteractionPolicySource for HumanHost {
 }
 
 impl AgentHumanInteractionRuntimeHost for HumanHost {
+    fn async_execution_ready(&self) -> bool {
+        self.async_ready
+    }
+
+    fn accept_async(
+        &self,
+        request: AgentAsyncUserInputRequest,
+    ) -> AgentResult<AgentAsyncUserInputAccepted> {
+        if !self.enabled.load(Ordering::SeqCst) {
+            return Err(AgentError::new("questions disabled"));
+        }
+        assert_eq!(request.conversation_id, "conversation-human");
+        assert_eq!(request.run_id, "run-human");
+        assert_eq!(request.assistant_message_id, "assistant-human");
+        assert_eq!(
+            request.call.approval_status,
+            AgentApprovalStatus::NotRequired
+        );
+        let mut accepted = self.accepted.lock().unwrap();
+        let request_id = format!("async-request-{}", accepted.len() + 1);
+        if let Some(queue) = &self.answer_queue {
+            let response_id = format!("async-response-{}", accepted.len() + 1);
+            queue.enqueue(crate::AgentSteerInput {
+                guidance_id: response_id.clone(),
+                client_message_id: response_id.clone(),
+                content: async_answer(&request_id, &response_id),
+                created_at: 1,
+                attachments: Vec::new(),
+                attachment_library: None,
+            })?;
+        }
+        accepted.push(request);
+        if let Some(cancellation) = &self.cancel_after_accept {
+            cancellation.cancel();
+        }
+        Ok(AgentAsyncUserInputAccepted { request_id })
+    }
+
+    fn natural_sampling_state(
+        &self,
+        request: AgentSamplingBoundaryRequest,
+    ) -> AgentResult<AgentHumanInteractionSamplingState> {
+        self.natural_samples.lock().unwrap().push(request);
+        Ok(AgentHumanInteractionSamplingState {
+            ignored_request_ids: self.ignored.lock().unwrap().clone(),
+        })
+    }
+
     fn suspend(&self, suspension: AgentUserInputSuspension) -> AgentResult<()> {
         if !self.enabled.load(Ordering::SeqCst) {
             return Err(AgentError::new("questions disabled"));
@@ -119,6 +177,22 @@ fn question(id: &str) -> Value {
         "request_user_input",
         json!({"questions":[{"title":"Which direction?","options":["A","B"]}]}),
     )
+}
+
+fn async_question(id: &str) -> Value {
+    tool(
+        id,
+        "request_user_input_async",
+        json!({"questions":[{"title":"Which direction?","options":["A","B"]}]}),
+    )
+}
+
+fn async_answer(request_id: &str, response_id: &str) -> String {
+    json!({"type":"human_interaction_response", "schemaVersion":1,
+        "requestId":request_id,"responseId":response_id,
+        "answers":[{"questionId":format!("{request_id}-question"),"question":"Which direction?",
+            "kind":"text","answer":"My full answer. ".repeat(1000)}]})
+    .to_string()
 }
 
 fn tool_response(calls: Vec<Value>) -> Value {
@@ -197,6 +271,353 @@ fn assert_paused(output: &AgentChatOutput) {
     let public = serde_json::to_string(output).unwrap();
     assert!(!public.contains("pauseReason"));
     assert!(!public.contains("providerContinuationRefs"));
+}
+
+#[tokio::test]
+async fn human_interaction_async_accepts_multiple_batches_and_continues_without_answers() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("evidence.txt"), "independent evidence").unwrap();
+    let (url, server) = provider(vec![
+        tool_response(vec![
+            async_question("q1"),
+            tool("read", "read_file", json!({"path":"evidence.txt"})),
+            async_question("q2"),
+        ]),
+        tool_response(vec![async_question("q3")]),
+        completed_response(),
+    ])
+    .await;
+    let host = Arc::new(HumanHost {
+        enabled: AtomicBool::new(true),
+        async_ready: true,
+        ..HumanHost::default()
+    });
+    let event_host = host.clone();
+    let output = AgentRuntime::default()
+        .send_chat_with_events_and_cancellation(
+            input(url, dir.path()),
+            Some("run-human".into()),
+            Some(Arc::new(move |event| {
+                if matches!(event, AgentEvent::ToolResult { result, .. } if result.result.as_ref().is_some_and(|value| value["requestId"] == "async-request-1"))
+                {
+                    event_host
+                        .ignored
+                        .lock()
+                        .unwrap()
+                        .push("async-request-1".into());
+                }
+            })),
+            AgentCancellationToken::new(),
+            Some(host.services()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(output.status, AgentRunStatus::Completed);
+    let accepted_ids = host
+        .accepted
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|v| v.call.id.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(accepted_ids.len(), 3);
+    assert_eq!(
+        accepted_ids
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
+        3
+    );
+    assert!(host.pauses.lock().unwrap().is_empty());
+    let results = output
+        .events
+        .iter()
+        .filter_map(|v| match v {
+            AgentEvent::ToolResult { result, .. } => Some(result),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        results.iter().map(|v| v.tool.as_str()).collect::<Vec<_>>(),
+        [
+            "request_user_input_async",
+            "read_file",
+            "request_user_input_async",
+            "request_user_input_async"
+        ]
+    );
+    for (index, result) in results
+        .iter()
+        .filter(|v| v.tool == "request_user_input_async")
+        .enumerate()
+    {
+        assert!(result.ok);
+        assert_eq!(result.call_id, accepted_ids[index]);
+        assert_eq!(
+            result.result,
+            Some(
+                json!({"type":"human_interaction_accepted","schemaVersion":1,"status":"accepted","requestId":format!("async-request-{}", index + 1)})
+            )
+        );
+    }
+    let requests = server.await.unwrap();
+    assert_eq!(requests.len(), 3);
+    let names = requests[0]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v["function"]["name"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert!(names.contains(&"request_user_input"));
+    assert!(names.contains(&"request_user_input_async"));
+    assert!(!requests[0].to_string().contains("ignoredRequestIds"));
+    assert!(requests[1].to_string().contains("independent evidence"));
+    for request in requests.iter().skip(1) {
+        let messages = request["messages"].as_array().unwrap();
+        // The generic provider transports dynamic System context with its existing user-role
+        // adapter. It remains request-only runtime state, never persisted human guidance.
+        assert_eq!(
+            messages
+                .iter()
+                .filter(|v| v["content"]
+                    .as_str()
+                    .is_some_and(|text| text.contains("ignoredRequestIds")
+                        && text.contains("async-request-1")))
+                .count(),
+            1
+        );
+    }
+    assert_eq!(host.natural_samples.lock().unwrap().len(), 3);
+    assert!(output
+        .conversation_turn_trace
+        .as_ref()
+        .unwrap()
+        .items
+        .iter()
+        .all(|v| !matches!(v, ConversationTurnTraceItem::UserGuidance { .. })));
+    host.ignored.lock().unwrap().push("async-request-2".into());
+    assert_eq!(host.natural_samples.lock().unwrap().len(), 3);
+}
+
+#[test]
+fn human_interaction_ignored_snapshot_is_bounded_request_only_runtime_context() {
+    let host = HumanHost::default();
+    let request = AgentSamplingBoundaryRequest {
+        conversation_id: "conversation-human".into(),
+        run_id: "run-human".into(),
+        assistant_message_id: "assistant-human".into(),
+        model_batch_index: 2,
+        expected_next_trace_sequence: 3,
+    };
+    host.ignored.lock().unwrap().push("ignored-request".into());
+    let item =
+        crate::runtime::preparation::human_interaction_ignored_context(&host, request.clone())
+            .unwrap();
+    let frame = crate::context::ContextFrame::new(vec![item]);
+    let manifest = frame.manifest();
+    assert_eq!(manifest.entries[0].role, "system");
+    assert_eq!(manifest.entries[0].sources, ["runtime_guard"]);
+    assert_eq!(manifest.entries[0].retention, "request_only");
+    for ignored in [
+        vec![],
+        vec![" ".into()],
+        vec!["duplicate".into(), "duplicate".into()],
+        (0..2000)
+            .map(|i| format!("{i}-{}", "a".repeat(200)))
+            .collect(),
+    ] {
+        *host.ignored.lock().unwrap() = ignored;
+        assert!(
+            crate::runtime::preparation::human_interaction_ignored_context(&host, request.clone())
+                .is_none()
+        );
+    }
+}
+
+#[tokio::test]
+async fn human_interaction_async_answers_enter_guidance_once_after_complete_tool_batch() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("evidence.txt"), "independent evidence").unwrap();
+    let (url, server) = provider(vec![
+        tool_response(vec![
+            async_question("q1"),
+            tool("read", "read_file", json!({"path":"evidence.txt"})),
+            async_question("q2"),
+        ]),
+        completed_response(),
+    ])
+    .await;
+    let queue = AgentSteerInputQueue::new();
+    let host = Arc::new(HumanHost {
+        enabled: AtomicBool::new(true),
+        async_ready: true,
+        answer_queue: Some(queue.clone()),
+        ..HumanHost::default()
+    });
+    let initial_answer = async_answer("prior-request", "prior-response");
+    queue
+        .enqueue(runtime_steer_input(
+            "prior-response",
+            "prior-response",
+            &initial_answer,
+        ))
+        .unwrap();
+    let output = run(
+        input(url, dir.path()),
+        host.services().with_steer_input(queue),
+    )
+    .await;
+    assert_eq!(output.status, AgentRunStatus::Completed);
+    assert!(host.pauses.lock().unwrap().is_empty());
+    let requests = server.await.unwrap();
+    assert_eq!(requests.len(), 2);
+    assert!(requests[0]["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|v| v["role"] == "user" && v["content"] == initial_answer));
+    let messages = requests[1]["messages"].as_array().unwrap();
+    let final_tool_index = messages.iter().rposition(|v| v["role"] == "tool").unwrap();
+    for index in 1..=2 {
+        let content = async_answer(
+            &format!("async-request-{index}"),
+            &format!("async-response-{index}"),
+        );
+        let matches = messages
+            .iter()
+            .enumerate()
+            .filter(|(_, v)| v["role"] == "user" && v["content"] == content)
+            .collect::<Vec<_>>();
+        assert_eq!(matches.len(), 1);
+        assert!(matches[0].0 > final_tool_index);
+        let call_id = host.accepted.lock().unwrap()[index - 1].call.id.clone();
+        assert_eq!(output.events.iter().filter(|v| matches!(v, AgentEvent::ToolResult { result, .. } if result.call_id == call_id)).count(), 1);
+    }
+    let trace = output.conversation_turn_trace.as_ref().unwrap();
+    let guidance = trace
+        .items
+        .iter()
+        .filter_map(|v| match v {
+            ConversationTurnTraceItem::UserGuidance { content, .. } => Some(content),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(guidance.len(), 3);
+    assert_eq!(guidance[0], &initial_answer);
+    assert_eq!(
+        guidance[1],
+        &async_answer("async-request-1", "async-response-1")
+    );
+    assert_eq!(
+        guidance[2],
+        &async_answer("async-request-2", "async-response-2")
+    );
+}
+
+#[tokio::test]
+async fn human_interaction_async_stop_after_admission_preserves_one_accepted_fact() {
+    let dir = tempfile::tempdir().unwrap();
+    let (url, server) = provider(vec![tool_response(vec![async_question("q1")])]).await;
+    let cancellation = AgentCancellationToken::new();
+    let host = Arc::new(HumanHost {
+        enabled: AtomicBool::new(true),
+        async_ready: true,
+        cancel_after_accept: Some(cancellation.clone()),
+        ..HumanHost::default()
+    });
+    let output = AgentRuntime::default()
+        .send_chat_with_events_and_cancellation(
+            input(url, dir.path()),
+            Some("run-human".into()),
+            None,
+            cancellation,
+            Some(host.services()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(output.status, AgentRunStatus::Cancelled);
+    assert_eq!(host.accepted.lock().unwrap().len(), 1);
+    assert!(host.pauses.lock().unwrap().is_empty());
+    let results = output
+        .events
+        .iter()
+        .filter_map(|v| match v {
+            AgentEvent::ToolResult { result, .. } if result.tool == "request_user_input_async" => {
+                Some(result)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(results.len(), 1);
+    assert!(results[0].ok);
+    assert_eq!(results[0].result.as_ref().unwrap()["status"], "accepted");
+    assert_eq!(server.await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn human_interaction_async_answer_waits_through_sync_pause_and_restored_tool_queue() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("after.txt"), "work after sync answer").unwrap();
+    let (url, server) = provider(vec![
+        tool_response(vec![
+            async_question("async"),
+            question("sync"),
+            tool("after", "read_file", json!({"path":"after.txt"})),
+        ]),
+        completed_response(),
+    ])
+    .await;
+    let queue = AgentSteerInputQueue::new();
+    let host = Arc::new(HumanHost {
+        enabled: AtomicBool::new(true),
+        async_ready: true,
+        answer_queue: Some(queue.clone()),
+        ..HumanHost::default()
+    });
+    let base = input(url, dir.path());
+    let paused = run(
+        base.clone(),
+        host.services().with_steer_input(queue.clone()),
+    )
+    .await;
+    assert_eq!(paused.status, AgentRunStatus::WaitingForUserInput);
+    let suspension = host.take_pause();
+    assert_eq!(suspension.checkpoint.queued_tool_calls.len(), 1);
+    assert!(!paused
+        .events
+        .iter()
+        .any(|v| matches!(v, AgentEvent::GuidanceApplied { .. })));
+    let output = run(
+        base,
+        host.services()
+            .with_steer_input(queue)
+            .with_user_input_resume(answer(suspension, 1)),
+    )
+    .await;
+    assert_eq!(output.status, AgentRunStatus::Completed);
+    assert_eq!(host.accepted.lock().unwrap().len(), 1);
+    let requests = server.await.unwrap();
+    assert_eq!(requests.len(), 2);
+    let messages = requests[1]["messages"].as_array().unwrap();
+    assert!(messages
+        .iter()
+        .any(|v| v.to_string().contains("work after sync answer")));
+    let content = async_answer("async-request-1", "async-response-1");
+    let guidance_index = messages
+        .iter()
+        .position(|v| v["role"] == "user" && v["content"] == content)
+        .unwrap();
+    assert!(guidance_index > messages.iter().rposition(|v| v["role"] == "tool").unwrap());
+    let trace = output.conversation_turn_trace.as_ref().unwrap();
+    assert_eq!(trace.items.iter().filter(|v| matches!(v, ConversationTurnTraceItem::ToolResult { tool, .. } if tool == "request_user_input_async")).count(), 1);
+    assert_eq!(
+        trace
+            .items
+            .iter()
+            .filter(|v| matches!(v, ConversationTurnTraceItem::UserGuidance { .. }))
+            .count(),
+        1
+    );
 }
 
 #[tokio::test]
@@ -404,30 +825,64 @@ async fn human_interaction_questions_and_real_approval_alternate_on_one_frozen_b
 
 #[tokio::test]
 async fn human_interaction_setting_close_at_dispatch_rejects_new_question_without_waiting() {
-    let dir = tempfile::tempdir().unwrap();
-    let (url, server) = provider(vec![
-        tool_response(vec![question("question")]),
-        completed_response(),
-    ])
-    .await;
-    let host = HumanHost::enabled();
-    let event_host = host.clone();
-    let output = AgentRuntime::default().send_chat_with_events_and_cancellation(
-        input(url, dir.path()), Some("run-human".into()), Some(Arc::new(move |event| {
-            if matches!(event, AgentEvent::ToolCall { call, .. } if call.tool == "request_user_input") {
-                event_host.enabled.store(false, Ordering::SeqCst);
-            }
-        })), AgentCancellationToken::new(), Some(host.services()),
-    ).await.unwrap();
-    assert_eq!(output.status, AgentRunStatus::Completed);
-    assert!(host.pauses.lock().unwrap().is_empty());
-    assert!(output.events.iter().any(|v| matches!(v, AgentEvent::ToolResult { result, .. } if result.tool == "request_user_input" && !result.ok)));
-    let requests = server.await.unwrap();
-    assert!(!requests[1]["tools"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|v| v["function"]["name"] == "request_user_input"));
+    for async_ready in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let tool_name = if async_ready {
+            "request_user_input_async"
+        } else {
+            "request_user_input"
+        };
+        let (url, server) = provider(vec![
+            tool_response(vec![if async_ready {
+                async_question("question")
+            } else {
+                question("question")
+            }]),
+            completed_response(),
+        ])
+        .await;
+        let host = Arc::new(HumanHost {
+            enabled: AtomicBool::new(true),
+            async_ready,
+            ..HumanHost::default()
+        });
+        let event_host = host.clone();
+        let output = AgentRuntime::default()
+            .send_chat_with_events_and_cancellation(
+                input(url, dir.path()),
+                Some("run-human".into()),
+                Some(Arc::new(move |event| {
+                    if matches!(event, AgentEvent::ToolCall { call, .. } if call.tool == tool_name)
+                    {
+                        event_host.enabled.store(false, Ordering::SeqCst);
+                    }
+                })),
+                AgentCancellationToken::new(),
+                Some(host.services()),
+            )
+            .await
+            .unwrap();
+        assert_eq!(output.status, AgentRunStatus::Completed);
+        assert!(host.pauses.lock().unwrap().is_empty());
+        assert!(host.accepted.lock().unwrap().is_empty());
+        assert!(output.events.iter().any(|v| matches!(v, AgentEvent::ToolResult { result, .. } if result.tool == tool_name && !result.ok)));
+        let requests = server.await.unwrap();
+        assert!(!requests[1]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| matches!(
+                v["function"]["name"].as_str(),
+                Some("request_user_input" | "request_user_input_async")
+            )));
+        assert!(!requests[1]["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| v["content"]
+                .as_str()
+                .is_some_and(|text| text.contains("## 人机交互"))));
+    }
 }
 
 #[tokio::test]

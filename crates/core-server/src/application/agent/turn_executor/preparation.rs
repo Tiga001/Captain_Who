@@ -132,6 +132,14 @@ impl AgentService {
                 previous.as_ref(),
                 *previous_world_state_was_empty,
             ),
+            PreparedTurnRollback::HumanResponse => provisional_run_id
+                .map(|run_id| {
+                    self.storage
+                        .settle_async_human_interaction_start_failure(run_id)
+                        .map(|_| ())
+                        .map_err(|e| e.to_string())
+                })
+                .unwrap_or(Ok(())),
             PreparedTurnRollback::AgentWake => Ok(()),
             PreparedTurnRollback::Automation { automation_run_id } => {
                 self.settle_automation_start_failure(automation_run_id, &cause)

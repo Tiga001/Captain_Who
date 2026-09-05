@@ -616,3 +616,6 @@ mod tests;
 
 mod sync;
 pub use sync::*;
+
+mod asynchronous;
+pub use asynchronous::*;

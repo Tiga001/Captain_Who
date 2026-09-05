@@ -6211,3 +6211,83 @@ BEGIN
     UPDATE human_interaction_suspensions SET status='cancelled',revision=revision+1,updated_at=MAX(updated_at,NEW.stopped_at)
       WHERE run_id=NEW.run_id AND status IN ('waiting','claimed','executing','model_in_flight');
 END;
+
+-- Nonblocking human input v38: submission order, durable route claims and stop scope.
+CREATE TABLE human_interaction_async_bindings (
+    response_id TEXT PRIMARY KEY REFERENCES human_interaction_responses(response_id) ON DELETE CASCADE,
+    stop_scope_run_id TEXT,
+    route TEXT CHECK (route IS NULL OR route IN ('guidance','new_turn')),
+    status TEXT NOT NULL CHECK (status IN ('pending','bound','executing','applied','failed','cancelled')),
+    claim_id TEXT,
+    target_run_id TEXT,
+    assistant_message_id TEXT REFERENCES messages(id) ON DELETE SET NULL,
+    user_message_id TEXT,
+    guidance_id TEXT UNIQUE REFERENCES agent_run_guidances(guidance_id) ON DELETE SET NULL,
+    created_at INTEGER NOT NULL CHECK (created_at >= 0),
+    updated_at INTEGER NOT NULL CHECK (updated_at >= created_at)
+);
+CREATE INDEX idx_human_interaction_async_target ON human_interaction_async_bindings(target_run_id,status);
+CREATE TRIGGER human_interaction_async_submission_scope
+AFTER INSERT ON human_interaction_deliveries
+WHEN EXISTS(SELECT 1 FROM human_interaction_responses a JOIN human_interaction_requests r ON r.request_id=a.request_id WHERE a.response_id=NEW.response_id AND r.mode='async')
+BEGIN
+    INSERT INTO human_interaction_async_bindings(response_id,stop_scope_run_id,status,created_at,updated_at)
+    SELECT a.response_id,(SELECT t.run_id FROM conversation_turn_traces t WHERE t.conversation_id=r.conversation_id AND t.terminal_status='in_progress' AND NOT EXISTS(SELECT 1 FROM agent_tree_run_stops s WHERE s.run_id=t.run_id)), 'pending', a.created_at,a.created_at
+    FROM human_interaction_responses a JOIN human_interaction_requests r ON r.request_id=a.request_id WHERE a.response_id=NEW.response_id;
+END;
+CREATE TRIGGER human_interaction_async_identity
+BEFORE UPDATE ON human_interaction_async_bindings
+WHEN NEW.response_id IS NOT OLD.response_id OR NEW.stop_scope_run_id IS NOT OLD.stop_scope_run_id OR NEW.created_at IS NOT OLD.created_at
+BEGIN SELECT RAISE(ABORT,'async human delivery identity is immutable'); END;
+CREATE TRIGGER human_interaction_async_terminal
+BEFORE UPDATE ON human_interaction_async_bindings
+WHEN OLD.status IN ('applied','failed','cancelled') AND NEW.status IS NOT OLD.status
+BEGIN SELECT RAISE(ABORT,'async human delivery is terminal'); END;
+CREATE TRIGGER human_interaction_async_guidance_proof
+BEFORE UPDATE OF status ON agent_run_guidances
+WHEN NEW.status='applied' AND EXISTS(SELECT 1 FROM human_interaction_async_bindings WHERE guidance_id=NEW.guidance_id)
+AND (EXISTS(SELECT 1 FROM agent_tree_run_stops WHERE run_id=NEW.run_id) OR NOT EXISTS(
+    SELECT 1 FROM conversation_turn_trace_items i JOIN conversation_turn_traces t ON t.assistant_message_id=i.assistant_message_id
+    WHERE t.run_id=NEW.run_id AND t.conversation_id=NEW.conversation_id AND i.assistant_message_id=NEW.assistant_message_id AND i.sequence=NEW.applied_trace_sequence AND i.item_kind='user_guidance'
+      AND json_extract(i.item_json,'$.guidanceId')=NEW.guidance_id AND json_extract(i.item_json,'$.content')=NEW.content
+      AND EXISTS(SELECT 1 FROM conversation_model_context_items c WHERE c.assistant_message_id=i.assistant_message_id AND c.sequence=i.sequence)))
+BEGIN SELECT RAISE(ABORT,'async human guidance requires its exact committed trace'); END;
+CREATE TRIGGER human_interaction_async_guidance_applied
+AFTER UPDATE OF status ON agent_run_guidances
+WHEN NEW.status='applied'
+BEGIN
+    UPDATE human_interaction_deliveries SET status='applied',revision=revision+1
+    WHERE status='bound' AND response_id IN (SELECT response_id FROM human_interaction_async_bindings WHERE guidance_id=NEW.guidance_id AND status='bound');
+    UPDATE human_interaction_async_bindings SET status='applied',updated_at=MAX(updated_at,NEW.updated_at)
+    WHERE guidance_id=NEW.guidance_id AND status='bound';
+END;
+CREATE TRIGGER human_interaction_async_guidance_unconsumed
+AFTER UPDATE OF status ON agent_run_guidances
+WHEN NEW.status IN ('rejected','abandoned')
+BEGIN
+    UPDATE human_interaction_deliveries SET status='pending',target_run_id=NULL,user_message_id=NULL,error_code=NULL,revision=revision+1
+    WHERE status='bound' AND response_id IN (SELECT response_id FROM human_interaction_async_bindings WHERE guidance_id=NEW.guidance_id AND status='bound');
+    UPDATE human_interaction_async_bindings SET status='pending',route=NULL,claim_id=NULL,target_run_id=NULL,assistant_message_id=NULL,guidance_id=NULL,updated_at=MAX(updated_at,NEW.updated_at)
+    WHERE guidance_id=NEW.guidance_id AND status='bound' AND EXISTS(SELECT 1 FROM human_interaction_deliveries d WHERE d.response_id=human_interaction_async_bindings.response_id AND d.status='pending');
+END;
+CREATE TRIGGER human_interaction_async_model_consumed
+AFTER INSERT ON model_request_observations
+WHEN NEW.purpose='agent_loop' AND NEW.status='completed' AND NOT EXISTS(SELECT 1 FROM agent_tree_run_stops WHERE run_id=NEW.run_id)
+BEGIN
+    UPDATE human_interaction_deliveries SET status='applied',revision=revision+1
+    WHERE status='bound' AND response_id IN (SELECT b.response_id FROM human_interaction_async_bindings b JOIN human_interaction_responses a ON a.response_id=b.response_id JOIN human_interaction_requests r ON r.request_id=a.request_id
+       WHERE b.route='new_turn' AND b.status='executing' AND b.target_run_id=NEW.run_id AND b.assistant_message_id=NEW.assistant_message_id AND r.conversation_id=NEW.conversation_id);
+    UPDATE human_interaction_async_bindings SET status='applied',updated_at=MAX(updated_at,NEW.completed_at)
+    WHERE route='new_turn' AND status='executing' AND target_run_id=NEW.run_id AND assistant_message_id=NEW.assistant_message_id
+      AND EXISTS(SELECT 1 FROM human_interaction_deliveries d WHERE d.response_id=human_interaction_async_bindings.response_id AND d.status='applied');
+END;
+CREATE TRIGGER human_interaction_async_stop_fence
+AFTER INSERT ON agent_tree_run_stops
+BEGIN
+    UPDATE human_interaction_deliveries SET status='cancelled',error_code='run_cancelled',revision=revision+1
+    WHERE status IN ('pending','bound') AND response_id IN (SELECT response_id FROM human_interaction_async_bindings WHERE stop_scope_run_id=NEW.run_id OR target_run_id=NEW.run_id);
+    UPDATE human_interaction_async_bindings SET status='cancelled',updated_at=MAX(updated_at,NEW.stopped_at)
+    WHERE status IN ('pending','bound','executing') AND (stop_scope_run_id=NEW.run_id OR target_run_id=NEW.run_id);
+    UPDATE agent_run_guidances SET status='abandoned',terminal_reason='Agent run was stopped before the answer was applied.',updated_at=MAX(updated_at,NEW.stopped_at)
+    WHERE status='queued' AND guidance_id IN (SELECT guidance_id FROM human_interaction_async_bindings WHERE status='cancelled' AND (stop_scope_run_id=NEW.run_id OR target_run_id=NEW.run_id));
+END;

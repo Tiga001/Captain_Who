@@ -785,6 +785,7 @@ impl AgentService {
             .insert(operation_id.clone(), operation.clone());
         self.release_provider_transition_claim(&conversation.id, &operation_id);
         emit_provider_transition_notification(&notifications, &operation);
+        self.schedule_async_human_input_deliveries(notifications.clone());
     }
 
     async fn execute_provider_transition_compaction(

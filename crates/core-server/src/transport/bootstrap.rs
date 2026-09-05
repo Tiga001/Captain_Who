@@ -483,7 +483,7 @@ pub(crate) async fn run_core_server(bootstrap: &CoreServerBootstrap) -> io::Resu
     agent_service
         .start_collaboration_dispatcher(outbound_tx.clone())
         .map_err(io::Error::other)?;
-    agent_service.schedule_ready_human_input_resumes(outbound_tx.clone());
+    agent_service.schedule_human_input_deliveries(outbound_tx.clone());
     let (image_artifact_outbound_tx, image_artifact_outbound_rx) =
         mpsc::channel::<ImageArtifactOutbound>(DEFAULT_MAX_CONCURRENT_IMAGE_ARTIFACT_READS);
     let (finish_outbound_tx, finish_outbound_rx) = oneshot::channel();

@@ -48,7 +48,7 @@ const APP_DATA_ROOT_FLAG: &str = "--app-data-root";
 const CONFIGURATION_SOURCE_FLAG: &str = "--configuration-source";
 const SQLITE_TRANSIENT_SUFFIXES: [&str; 3] = ["-journal", "-wal", "-shm"];
 const RECOVERABLE_CONFIGURATION_SOURCE_SCHEMA_VERSION: i32 = 33;
-const RECOVERABLE_CONFIGURATION_TARGET_SCHEMA_VERSION: i32 = 37;
+const RECOVERABLE_CONFIGURATION_TARGET_SCHEMA_VERSION: i32 = 38;
 const RECOVERABLE_CONFIGURATION_SOURCE_FINGERPRINT: &str =
     "sha256:5e1e404d74af5ed899d88dc8b5051e673ecd5beb967579af8f328b07b640c948";
 const PREVIOUS_CONFIGURATION_SOURCE_SCHEMA_VERSION: i32 = 35;
@@ -57,6 +57,9 @@ const PREVIOUS_CONFIGURATION_SOURCE_FINGERPRINT: &str =
 const BLOCKING_INPUT_CONFIGURATION_SOURCE_SCHEMA_VERSION: i32 = 36;
 const BLOCKING_INPUT_CONFIGURATION_SOURCE_FINGERPRINT: &str =
     "sha256:e11e09c7ea7a36fa1df8e7d47c5caaba8cb812158d84c82900e76a568ac170a1";
+const SYNC_INPUT_CONFIGURATION_SOURCE_SCHEMA_VERSION: i32 = 37;
+const SYNC_INPUT_CONFIGURATION_SOURCE_FINGERPRINT: &str =
+    "sha256:3f9d66722cd1e6c7ee26512a166a906fa8471a05083522d084ba2182b8fc4a36";
 const EXACT_CONFIGURATION_TABLES: &[&str] = &[
     "model_provider_settings",
     "models",
@@ -477,7 +480,8 @@ fn inspect_source(
         ConfigurationSourcePolicy::CurrentDatabase
             if schema_version != mycopilot_core::storage::migrations::STORAGE_SCHEMA_VERSION
                 && schema_version != PREVIOUS_CONFIGURATION_SOURCE_SCHEMA_VERSION
-                && schema_version != BLOCKING_INPUT_CONFIGURATION_SOURCE_SCHEMA_VERSION =>
+                && schema_version != BLOCKING_INPUT_CONFIGURATION_SOURCE_SCHEMA_VERSION
+                && schema_version != SYNC_INPUT_CONFIGURATION_SOURCE_SCHEMA_VERSION =>
         {
             // Unknown schemas must never silently discard configuration. Even an empty table
             // may have an incompatible layout; do not interpret it as a missing preference.
@@ -509,6 +513,7 @@ fn inspect_source(
                 schema_version,
                 PREVIOUS_CONFIGURATION_SOURCE_SCHEMA_VERSION
                     | BLOCKING_INPUT_CONFIGURATION_SOURCE_SCHEMA_VERSION
+                    | SYNC_INPUT_CONFIGURATION_SOURCE_SCHEMA_VERSION
             ) =>
         {
             if !is_supported_explicit_configuration_source(
@@ -579,6 +584,7 @@ fn inspect_source(
     let human_interaction_settings = if schema_version
         == mycopilot_core::storage::migrations::STORAGE_SCHEMA_VERSION
         || schema_version == BLOCKING_INPUT_CONFIGURATION_SOURCE_SCHEMA_VERSION
+        || schema_version == SYNC_INPUT_CONFIGURATION_SOURCE_SCHEMA_VERSION
     {
         Some(load_human_interaction_settings_for_reset(&connection)?)
     } else {
@@ -683,7 +689,9 @@ fn is_supported_explicit_configuration_source(schema_version: i32, fingerprint: 
             || (schema_version == PREVIOUS_CONFIGURATION_SOURCE_SCHEMA_VERSION
                 && fingerprint == PREVIOUS_CONFIGURATION_SOURCE_FINGERPRINT)
             || (schema_version == BLOCKING_INPUT_CONFIGURATION_SOURCE_SCHEMA_VERSION
-                && fingerprint == BLOCKING_INPUT_CONFIGURATION_SOURCE_FINGERPRINT))
+                && fingerprint == BLOCKING_INPUT_CONFIGURATION_SOURCE_FINGERPRINT)
+            || (schema_version == SYNC_INPUT_CONFIGURATION_SOURCE_SCHEMA_VERSION
+                && fingerprint == SYNC_INPUT_CONFIGURATION_SOURCE_FINGERPRINT))
 }
 
 fn load_human_interaction_settings_for_reset(
@@ -734,6 +742,7 @@ fn validate_preserved_configuration_table_schemas(source: &Connection) -> io::Re
     let has_human_settings = matches!(
         storage_schema_version(source)?,
         BLOCKING_INPUT_CONFIGURATION_SOURCE_SCHEMA_VERSION
+            | SYNC_INPUT_CONFIGURATION_SOURCE_SCHEMA_VERSION
     ) || storage_schema_version(source)?
         == mycopilot_core::storage::migrations::STORAGE_SCHEMA_VERSION;
     let tables = PRESERVED_CONFIGURATION_TABLES
@@ -1850,6 +1859,7 @@ mod tests {
 
     fn downgrade_fixture_to_exact_v35(database: &Path) {
         let connection = Connection::open(database).unwrap();
+        drop_async_fixture_schema(&connection);
         connection
             .execute_batch(
                 "PRAGMA foreign_keys = OFF;
@@ -2140,7 +2150,7 @@ mod tests {
     }
 
     #[test]
-    fn explicit_configuration_sources_are_pinned_to_known_catalogs_for_schema_37() {
+    fn explicit_configuration_sources_are_pinned_to_known_catalogs_for_schema_38() {
         assert!(is_supported_explicit_configuration_source(
             RECOVERABLE_CONFIGURATION_SOURCE_SCHEMA_VERSION,
             RECOVERABLE_CONFIGURATION_SOURCE_FINGERPRINT,
@@ -2688,8 +2698,70 @@ mod tests {
         assert_eq!(fs::read(database).unwrap(), before);
     }
 
+    fn drop_async_fixture_schema(connection: &Connection) {
+        connection.execute_batch("PRAGMA foreign_keys=OFF").unwrap();
+        let names = connection.prepare("SELECT name FROM sqlite_schema WHERE type='trigger' AND name LIKE 'human_interaction_async_%'").unwrap().query_map([], |r| r.get::<_, String>(0)).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
+        for name in names {
+            connection
+                .execute_batch(&format!("DROP TRIGGER {name}"))
+                .unwrap();
+        }
+        connection
+            .execute_batch("DROP TABLE human_interaction_async_bindings")
+            .unwrap();
+    }
+
+    fn downgrade_fixture_to_exact_v37(database: &Path) {
+        let connection = Connection::open(database).unwrap();
+        drop_async_fixture_schema(&connection);
+        connection.pragma_update(None, "user_version", 37).unwrap();
+        assert_eq!(
+            storage_catalog_fingerprint(&connection).unwrap(),
+            SYNC_INPUT_CONFIGURATION_SOURCE_FINGERPRINT
+        );
+    }
+
+    #[test]
+    fn exact_v37_reset_preserves_credentials_and_policy_without_history_migration() {
+        let fixture = tempfile::tempdir().unwrap();
+        let secret = "round-three-reset-test-token";
+        populated_storage(fixture.path(), secret);
+        let database = fs::canonicalize(fixture.path().join(DATABASE_FILE_NAME)).unwrap();
+        downgrade_fixture_to_exact_v37(&database);
+        let connection = Connection::open(&database).unwrap();
+        connection
+            .execute(
+                "UPDATE human_interaction_settings SET enabled=0,revision=9,updated_at=99",
+                [],
+            )
+            .unwrap();
+        let expected = load_human_interaction_settings_for_reset(&connection).unwrap();
+        drop(connection);
+        let bytes = fs::read(&database).unwrap();
+        assert!(mycopilot_core::storage::migrations::run_migrations(
+            &Connection::open(&database).unwrap()
+        )
+        .is_err());
+        assert_eq!(fs::read(&database).unwrap(), bytes);
+        execute(options(fixture.path(), true)).unwrap();
+        let storage = open_test_storage(&database);
+        let settings = storage
+            .load_model_settings_snapshot()
+            .unwrap()
+            .unwrap()
+            .settings;
+        assert_eq!(settings.api_token, secret);
+        assert_eq!(
+            settings.models[0].api_token_override.as_deref(),
+            Some(format!("model-{secret}").as_str())
+        );
+        assert_eq!(storage.load_human_interaction_settings().unwrap(), expected);
+        assert!(storage.load_conversations().unwrap().is_empty());
+    }
+
     fn downgrade_fixture_to_exact_v36(database: &Path) {
         let connection = Connection::open(database).unwrap();
+        drop_async_fixture_schema(&connection);
         let schema = include_str!("../../../core/src/storage/canonical_schema.sql");
         let suspension = schema
             .split_once("CREATE TABLE human_interaction_suspensions (")
@@ -2780,7 +2852,7 @@ mod tests {
         assert!(storage.load_conversations().unwrap().is_empty());
         drop(storage);
         let connection = open_read_only(&database).unwrap();
-        assert_eq!(storage_schema_version(&connection).unwrap(), 37);
+        assert_eq!(storage_schema_version(&connection).unwrap(), 38);
         assert_eq!(
             snapshot_exact_configuration_tables(&connection).unwrap(),
             exact_before

@@ -1,0 +1,27 @@
+{
+  "type": "human_interaction_response",
+  "schemaVersion": 1,
+  "requestId": "question-request-1",
+  "responseId": "question-response-1",
+  "answers": [
+    {
+      "kind": "option",
+      "questionId": "question-1",
+      "question": "选择输出格式",
+      "optionId": "option-1",
+      "answer": "CSV"
+    },
+    {
+      "kind": "text",
+      "questionId": "question-2",
+      "question": "补充约束",
+      "answer": "保留现有公共接口。"
+    },
+    {
+      "kind": "skipped",
+      "questionId": "question-3",
+      "question": "可选信息",
+      "answer": "已跳过"
+    }
+  ]
+}

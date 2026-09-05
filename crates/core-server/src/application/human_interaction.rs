@@ -1,12 +1,10 @@
 //! Host entry points for durable human questions. Submission acknowledges an immutable response
-//! before the blocking continuation dispatcher claims it. Asynchronous delivery remains unmounted.
+//! before the Host chooses blocking continuation, active steering, or a normal follow-up Turn.
 
 use crate::application::agent::{AgentService, CoreServerNotificationSender};
 use mycopilot_core::human_interaction::*;
 use mycopilot_core::storage::service::StorageService;
-use mycopilot_protocol_rs::{
-    HUMAN_INTERACTION_REQUEST_CHANGED_METHOD, HUMAN_INTERACTION_SETTINGS_CHANGED_METHOD,
-};
+use mycopilot_protocol_rs::HUMAN_INTERACTION_SETTINGS_CHANGED_METHOD;
 use serde::Serialize;
 use std::sync::Arc;
 
@@ -82,7 +80,7 @@ impl<'a> HumanInteractionService<'a> {
             .agent
             .accept_human_input_response(&input, notifications)?;
         self.agent
-            .schedule_ready_human_input_resumes(notifications.clone());
+            .schedule_human_input_deliveries(notifications.clone());
         Ok(snapshot)
     }
 
@@ -97,13 +95,7 @@ impl<'a> HumanInteractionService<'a> {
             input.expected_revision,
             &input.submission_id,
         )?;
-        let snapshot = self.storage.ignore_human_interaction(&input)?;
-        emit(
-            notifications,
-            HUMAN_INTERACTION_REQUEST_CHANGED_METHOD,
-            &snapshot,
-        );
-        Ok(snapshot)
+        self.agent.accept_human_input_ignore(&input, notifications)
     }
 
     fn authorize(&self, conversation_id: &str) -> Result<(), HumanInteractionError> {

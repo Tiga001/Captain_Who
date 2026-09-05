@@ -523,6 +523,23 @@ impl AgentService {
             )
             .map_err(InProgressTraceSnapshotError::NotCommitted)?;
 
+        // Delivery receipts commit with the guidance Trace/ModelContext append, never merely
+        // with queue admission. Notify the answer projection only for newly committed guidance.
+        let previous_sequence = previous_trace
+            .as_ref()
+            .and_then(|trace| trace.items.last())
+            .map(|item| item.sequence());
+        if changed
+            && audit_trace.items.iter().any(|item| {
+                matches!(
+                    item,
+                    mycopilot_core::ConversationTurnTraceItem::UserGuidance { .. }
+                ) && previous_sequence.is_none_or(|sequence| item.sequence() > sequence)
+            })
+        {
+            self.publish_human_delivery_changes(conversation_id, notifications);
+        }
+
         // Everything below is a rebuildable projection over the durable Trace/ModelContext
         // append above. Preserve the commit boundary in the error type so Runtime can settle the
         // already-published ToolCall instead of treating it as an unpublished call.

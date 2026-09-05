@@ -101,6 +101,35 @@ describe('Core human interaction transport', () => {
     await expect(server.getHumanInteractionSettings({})).rejects.toThrow('Core unavailable')
   })
 
+  it('preserves asynchronous delivery routing independently of a submitted question', async () => {
+    const server = new CoreServer()
+    const changed = vi.fn()
+    server.onHumanInteractionRequestChanged(changed)
+    const submitted = { ...responseSnapshot('submitted'), mode: 'async' }
+    const deliveries = [
+      submitted.delivery,
+      { ...submitted.delivery, status: 'bound', revision: 1, targetRunId: 'active-run' },
+      { ...submitted.delivery, status: 'applied', revision: 2, targetRunId: 'active-run' },
+      {
+        ...submitted.delivery,
+        status: 'applied',
+        revision: 2,
+        targetRunId: 'later-human-root-run',
+        userMessageId: 'human-response-message'
+      },
+      { ...submitted.delivery, status: 'cancelled', revision: 1, errorCode: 'run_stopped' }
+    ]
+    for (const delivery of deliveries) {
+      const snapshot = { ...submitted, delivery }
+      request.mockResolvedValueOnce(snapshot)
+      await expect(server.submitHumanInteractionRequest(fixture.submit)).resolves.toEqual(snapshot)
+      onNotification.mock.calls[0][1](snapshot)
+      expect(changed).toHaveBeenLastCalledWith(snapshot)
+    }
+    expect(request.mock.calls.every(([method]) => method === 'humanInteraction.submit')).toBe(true)
+    expect(changed).toHaveBeenCalledTimes(deliveries.length)
+  })
+
   it('rejects a cross-conversation page and a response for a different submission', async () => {
     const server = new CoreServer()
     request.mockResolvedValue({

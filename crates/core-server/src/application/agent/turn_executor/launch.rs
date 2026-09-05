@@ -154,6 +154,41 @@ impl AgentService {
             steering_close_error_context: "无法关闭用户引导通道并持久化剩余引导",
         };
 
+        if matches!(rollback, PreparedTurnRollback::HumanResponse) {
+            let started = self
+                .storage
+                .load_async_human_interaction_binding_for_run(&worker_run_id)
+                .and_then(|binding| match binding {
+                    Some(binding) if !cancellation_token.is_cancelled() => self
+                        .storage
+                        .mark_async_human_interaction_turn_started(&binding),
+                    _ => Ok(false),
+                });
+            if !matches!(started, Ok(true)) {
+                self.release_conversation_turn_if_current(&worker_conversation_id, &worker_run_id);
+                self.release_turn_concurrency_permit(&worker_run_id);
+                self.unregister_cancellation_if_current(&worker_run_id, &cancellation_token);
+                self.discard_usage_context(&worker_run_id);
+                let _ = self.unregister_active_run_control(
+                    &worker_run_id,
+                    &segment.steer_input,
+                    AgentSteerRunRejectionCode::RunNotSteerable,
+                    "Human answer startup was fenced.",
+                    &notifications,
+                );
+                return Err(self.rollback_prepared_initial_turn(
+                    &worker_conversation_id,
+                    &worker_assistant_message_id,
+                    Some(&worker_run_id),
+                    &rollback,
+                    started
+                        .err()
+                        .map(|e| e.to_string())
+                        .unwrap_or_else(|| "human answer startup was cancelled".into()),
+                ));
+            }
+        }
+
         tokio::spawn(async move {
             service
                 .complete_runtime_segment(segment, notifications)
@@ -464,8 +499,19 @@ impl AgentService {
         if waiting_for_user_input && cancellation_token.is_cancelled() {
             service.cancel_waiting_human_input_run(&worker_run_id);
         }
+        if durable_terminal {
+            // A failed first sample has no completed model-consumption observation. Retire its
+            // executing answer receipt now, so it cannot strand later submissions until restart.
+            if let Err(error) = service
+                .storage
+                .settle_async_human_interaction_start_failure(&worker_run_id)
+            {
+                eprintln!("failed to settle terminal async answer receipt: {error}");
+            }
+        }
         if (waiting_for_user_input && persistence_committed) || durable_terminal {
-            service.schedule_ready_human_input_resumes(notifications.clone());
+            service.publish_human_delivery_changes(&worker_conversation_id, &notifications);
+            service.schedule_human_input_deliveries(notifications.clone());
         }
         if durable_terminal {
             if let Some(binding) = human_binding.as_ref() {

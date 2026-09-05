@@ -310,6 +310,7 @@ pub(super) struct RuntimeTurnSegmentOutcome {
 
 #[allow(clippy::large_enum_variant)]
 pub(super) enum PreparedTurnRollback {
+    HumanResponse,
     Human {
         user_message_id: String,
         previous: Option<mycopilot_core::storage::models::ChatConversationRecord>,

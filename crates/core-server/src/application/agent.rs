@@ -600,6 +600,7 @@ pub struct AgentService {
     conversation_context_state_clock: Arc<AtomicU64>,
     context_compaction_summary_generator: Option<ContextCompactionSummaryGenerator>,
     conversation_admission: Arc<Mutex<()>>,
+    human_input_delivery_dispatch: Arc<Mutex<()>>,
     provider_transitions: Arc<Mutex<HashMap<String, String>>>,
     provider_transition_operations: Arc<Mutex<HashMap<String, AgentProviderTransitionOperation>>>,
     manual_context_compaction_cancellations: Arc<Mutex<HashMap<String, AgentCancellationToken>>>,
@@ -726,6 +727,9 @@ impl AgentService {
         storage
             .reconcile_sync_human_interactions()
             .map_err(|error| error.to_string())?;
+        storage
+            .reconcile_async_human_interaction_deliveries()
+            .map_err(|error| error.to_string())?;
         reconcile_file_change_run_grants_on_startup(&storage, &pending_actions)?;
         let usage_contexts = usage::restore_pending_usage_contexts(&storage, &pending_actions)?;
         let office_engine = resolve_default_office_engine();
@@ -797,6 +801,7 @@ impl AgentService {
             conversation_context_state_clock: Arc::new(AtomicU64::new(1)),
             context_compaction_summary_generator: None,
             conversation_admission: Arc::new(Mutex::new(())),
+            human_input_delivery_dispatch: Arc::new(Mutex::new(())),
             provider_transitions: Arc::new(Mutex::new(HashMap::new())),
             provider_transition_operations: Arc::new(Mutex::new(HashMap::new())),
             manual_context_compaction_cancellations: Arc::new(Mutex::new(HashMap::new())),

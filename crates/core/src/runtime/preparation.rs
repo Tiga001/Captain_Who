@@ -22,6 +22,7 @@ pub(super) struct RuntimeCapabilityServices {
     pub(super) automation_report_sink: Option<Arc<dyn crate::AutomationReportSink>>,
     pub(super) human_interaction_policy: Option<Arc<dyn HumanInteractionPolicySource>>,
     pub(super) human_interaction_execution_ready: bool,
+    pub(super) human_interaction_async_execution_ready: bool,
 }
 
 pub(super) struct DurableConversationTimeline {
@@ -55,6 +56,7 @@ pub(super) fn prepare_runtime_capabilities(
             automation_report_sink: None,
             human_interaction_policy: None,
             human_interaction_execution_ready: false,
+            human_interaction_async_execution_ready: false,
         },
     )
 }
@@ -79,6 +81,7 @@ pub(super) fn prepare_runtime_capabilities_with_skills(
         automation_report_sink,
         human_interaction_policy,
         human_interaction_execution_ready,
+        human_interaction_async_execution_ready,
     } = services;
     let human_root = input.context.as_ref().is_some_and(|context| {
         context.collaboration_identity.is_none()
@@ -101,6 +104,8 @@ pub(super) fn prepare_runtime_capabilities_with_skills(
             builtin_capabilities,
             human_interaction_policy: human_root.then_some(human_interaction_policy).flatten(),
             human_interaction_execution_ready: human_root && human_interaction_execution_ready,
+            human_interaction_async_execution_ready: human_root
+                && human_interaction_async_execution_ready,
             human_root,
         },
         extension_snapshots,
@@ -600,6 +605,77 @@ pub(super) fn suppressed_narration_context_item() -> ContextItem {
     )
 }
 
+/// Optional, read-only status on a naturally reached model boundary. Invalid/unavailable status
+/// must not interrupt ordinary work, inject an answer, or create a persistent message.
+pub(super) fn human_interaction_ignored_context(
+    host: &dyn AgentHumanInteractionRuntimeHost,
+    request: AgentSamplingBoundaryRequest,
+) -> Option<ContextItem> {
+    let state = host.natural_sampling_state(request).ok()?;
+    if state.ignored_request_ids.is_empty()
+        || state
+            .ignored_request_ids
+            .iter()
+            .any(|id| crate::human_interaction::validate_human_interaction_id(id).is_err())
+        || state
+            .ignored_request_ids
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len()
+            != state.ignored_request_ids.len()
+        || serde_json::to_vec(&state.ignored_request_ids).ok()?.len()
+            > crate::human_interaction::HUMAN_INTERACTION_MAX_INPUT_BYTES
+    {
+        return None;
+    }
+    Some(ContextItem::text(
+        LlmMessageRole::System,
+        format!("## 异步提问状态\n{}\n这些批次已被用户忽略，没有提交答案。不要重新追问、假定答案或把忽略视作同意。", json!({"type":"human_interaction_status","schemaVersion":1,"ignoredRequestIds":state.ignored_request_ids})),
+        ContextSource::RuntimeGuard, ContextScope::Run, ContextRetention::RequestOnly,
+    ))
+}
+
+pub(super) fn accept_async_human_question(
+    host: Option<&dyn AgentHumanInteractionRuntimeHost>,
+    context: Option<&AgentRunContext>,
+    assistant_message_id: Option<&str>,
+    run_id: &str,
+    call: &AgentToolCall,
+) -> AgentToolResult {
+    let admission = (|| -> AgentResult<String> {
+        let host = host
+            .filter(|host| host.async_execution_ready())
+            .ok_or_else(|| AgentError::new("Async question runtime is unavailable."))?;
+        let context = context
+            .filter(|context| context.collaboration_identity.is_none())
+            .ok_or_else(|| AgentError::new("Async questions require an interactive root."))?;
+        let conversation_id = context
+            .conversation_id
+            .as_deref()
+            .filter(|id| !id.trim().is_empty())
+            .ok_or_else(|| AgentError::new("Async question conversation is missing."))?;
+        let assistant_message_id = assistant_message_id
+            .filter(|id| !id.trim().is_empty())
+            .ok_or_else(|| AgentError::new("Async question message is missing."))?;
+        let questions = crate::tools::human_interaction::parse_human_interaction_input(&call.args)?;
+        let accepted = host.accept_async(AgentAsyncUserInputRequest {
+            conversation_id: conversation_id.to_string(),
+            run_id: run_id.to_string(),
+            assistant_message_id: assistant_message_id.to_string(),
+            call: call.clone(),
+            questions,
+        })?;
+        crate::human_interaction::validate_human_interaction_id(&accepted.request_id)
+            .map_err(|_| AgentError::new("Invalid admitted question identity."))?;
+        Ok(accepted.request_id)
+    })();
+    match admission {
+        Ok(request_id) => AgentToolResult { exact_archive_file: None, call_id: call.id.clone(), tool: call.tool.clone(), ok: true,
+            result: Some(json!({"type":"human_interaction_accepted","schemaVersion":1,"requestId":request_id,"status":"accepted"})), error: None },
+        Err(_) => failed_tool_call_result(call, AgentError::new("The question was not acknowledged. Check the question format and current availability; no answer was received.")),
+    }
+}
+
 pub(super) fn deferred_external_tool_calls_context_item(count: u32) -> ContextItem {
     ContextItem::text(
         LlmMessageRole::System,
@@ -804,6 +880,7 @@ mod approval_identity_tests {
             automation_report_sink: None,
             human_interaction_policy: None,
             human_interaction_execution_ready: false,
+            human_interaction_async_execution_ready: false,
         }
     }
 

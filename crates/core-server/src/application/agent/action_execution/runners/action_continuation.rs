@@ -672,8 +672,17 @@ impl AgentService {
         if waiting_for_user_input && cancellation_token.is_cancelled() {
             self.cancel_waiting_human_input_run(&run_id);
         }
+        if durable_turn_terminal {
+            if let Err(error) = self
+                .storage
+                .settle_async_human_interaction_start_failure(&run_id)
+            {
+                eprintln!("failed to settle terminal async answer receipt: {error}");
+            }
+        }
         if (waiting_for_user_input && settlement_committed) || durable_turn_terminal {
-            self.schedule_ready_human_input_resumes(notifications);
+            self.publish_human_delivery_changes(&turn_conversation_id, &notifications);
+            self.schedule_human_input_deliveries(notifications);
         }
     }
 }

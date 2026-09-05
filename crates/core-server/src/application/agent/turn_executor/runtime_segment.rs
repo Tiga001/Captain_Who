@@ -537,6 +537,7 @@ impl AgentService {
             host_services = host_services.with_mcp_tools(mcp_tools);
         }
 
+        self.schedule_async_human_input_deliveries(notifications.clone());
         let mut runtime_input = agent_input;
         if let Some((resume, _)) = human_input_resume {
             host_services = host_services.with_user_input_resume(resume);

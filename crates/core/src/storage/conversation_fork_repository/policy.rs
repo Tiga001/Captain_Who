@@ -76,6 +76,7 @@ const RUNTIME_ONLY_TABLES: &[&str] = &[
     "human_interaction_responses",
     "human_interaction_deliveries",
     "human_interaction_suspensions",
+    "human_interaction_async_bindings",
 ];
 
 const DEDICATED_FORK_LOGIC_TABLES: &[&str] = &[
@@ -205,6 +206,7 @@ fn high_risk_fork_policies_stay_explicit() {
         "human_interaction_responses",
         "human_interaction_deliveries",
         "human_interaction_suspensions",
+        "human_interaction_async_bindings",
     ] {
         assert_eq!(policies.get(table), Some(&ForkDataPolicy::RuntimeOnly));
     }

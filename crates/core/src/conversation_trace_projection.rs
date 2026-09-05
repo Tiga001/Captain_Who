@@ -58,6 +58,12 @@ pub(crate) fn project_narration(value: &str) -> (String, bool) {
 }
 
 pub(crate) fn project_user_guidance(value: &str) -> (String, bool) {
+    if value.len() <= crate::human_interaction::HUMAN_INTERACTION_MAX_DISPLAY_BYTES
+        && serde_json::from_str::<crate::human_interaction::HumanInteractionResponseDisplay>(value)
+            .is_ok_and(|display| display.validate().is_ok())
+    {
+        return (value.to_string(), false);
+    }
     sanitize_and_bound_text(
         value,
         DurableTraceProjectionLimits::USER_GUIDANCE_CHARS,
@@ -1332,6 +1338,35 @@ mod tests {
     fn human_display(answers: Vec<Value>) -> Value {
         json!({"type":"human_interaction_response", "schemaVersion":1,
             "requestId":"r".repeat(256), "responseId":"s".repeat(256), "answers":answers})
+    }
+
+    #[test]
+    fn human_interaction_guidance_preserves_complete_bounded_answers_only_for_valid_display() {
+        let display = human_display(
+            (0..42)
+                .map(|i| {
+                    json!({
+                        "questionId":format!("q-{i}"), "question":"Q".repeat(1000),
+                        "kind":"text", "answer":"data:text/plain;base64,SGVsbG8=".repeat(150),
+                    })
+                })
+                .collect(),
+        );
+        let content = serde_json::to_string(&display).unwrap();
+        assert!(content.len() > 12_000);
+        assert_eq!(project_user_guidance(&content), (content.clone(), false));
+        let overlong = format!(
+            "{}{}",
+            " ".repeat(crate::human_interaction::HUMAN_INTERACTION_MAX_DISPLAY_BYTES),
+            content
+        );
+        assert!(project_user_guidance(&overlong).1);
+        let mut invalid = display;
+        invalid["extra"] = json!("untrusted extra field");
+        let (sanitized, truncated) = project_user_guidance(&invalid.to_string());
+        assert!(truncated);
+        assert!(sanitized.len() < content.len());
+        assert!(project_user_guidance(&"ordinary guidance ".repeat(2000)).1);
     }
 
     #[test]

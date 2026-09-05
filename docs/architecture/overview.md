@@ -91,7 +91,7 @@ transport/application → adapters → core/protocol
 - `storage.sqlite` 是 Conversation、Agent、模板与项目分配、Mailbox、Wake、Approval、FileChange
   audit/run grant、Automation task/Run/event、Notification fact/batch、Browser history/preferences/download
   等持久事实来源。
-- 当前 canonical schema 为 **v37**；版本与 catalog fingerprint 的唯一真源是 `crates/core/src/storage/migrations.rs`。
+- 当前 canonical schema 为 **v38**；版本与 catalog fingerprint 的唯一真源是 `crates/core/src/storage/migrations.rs`。
 - 内存 channel、`Notify`、Renderer store 和 notification 只用于降延迟或失效通知。间隙、重启和丢通知必须从 SQLite snapshot/event log 恢复。
 - 开发库不做原地迁移。版本、fingerprint 或外键不匹配时 fail closed，返回 `development_storage_schema_reset_required`，再由显式开发重建流程处理。
 

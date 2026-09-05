@@ -349,13 +349,18 @@ impl EffectiveToolSet {
             .map(ToolCapabilityId::parse)
             .collect::<AgentResult<BTreeSet<_>>>()?;
         // Existing questions remain answerable after policy is disabled. The registry still owns
-        // the exact synchronous schema, and the Host independently arbitrates every new question.
-        let retired_question_capability = ToolCapabilityId::application_owned(
-            super::human_interaction::HUMAN_INTERACTION_CAPABILITY,
-        );
+        // the exact question schemas, and the Host independently arbitrates every new question.
+        let retired_question_capabilities = [
+            ToolCapabilityId::application_owned(
+                super::human_interaction::HUMAN_INTERACTION_CAPABILITY,
+            ),
+            ToolCapabilityId::application_owned(
+                super::human_interaction::HUMAN_INTERACTION_ASYNC_CAPABILITY,
+            ),
+        ];
         if frozen_capabilities
             .difference(&self.active_capabilities)
-            .any(|capability| capability != &retired_question_capability)
+            .any(|capability| !retired_question_capabilities.contains(capability))
         {
             return Err(tool_set_checkpoint_mismatch(checkpoint, self));
         }

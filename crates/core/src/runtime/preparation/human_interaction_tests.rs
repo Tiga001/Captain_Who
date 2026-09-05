@@ -70,6 +70,7 @@ fn services(policy: Option<Arc<Policy>>) -> RuntimeCapabilityServices {
         human_interaction_policy: policy
             .map(|policy| policy as Arc<dyn HumanInteractionPolicySource>),
         human_interaction_execution_ready: false,
+        human_interaction_async_execution_ready: false,
     }
 }
 
@@ -174,13 +175,12 @@ fn child_input() -> AgentChatInput {
 #[test]
 fn human_interaction_child_never_mounts_or_reads_accidentally_supplied_root_policy() {
     let source = policy(true);
-    let capabilities = prepare_runtime_capabilities_with_skills(
-        &child_input(),
-        "run-child",
-        &[],
-        services(Some(source.clone())),
-    )
-    .unwrap();
+    let mut ready_services = services(Some(source.clone()));
+    ready_services.human_interaction_execution_ready = true;
+    ready_services.human_interaction_async_execution_ready = true;
+    let capabilities =
+        prepare_runtime_capabilities_with_skills(&child_input(), "run-child", &[], ready_services)
+            .unwrap();
     assert_no_human_tools(&capabilities);
     assert!(!has_human_shell(&capabilities));
     assert_eq!(source.reads.load(Ordering::SeqCst), 0);
@@ -206,6 +206,8 @@ fn human_interaction_automation_metadata_or_report_sink_each_exclude_the_module(
         let source = policy(true);
         let mut input = root_input();
         let mut host = services(Some(source.clone()));
+        host.human_interaction_execution_ready = true;
+        host.human_interaction_async_execution_ready = true;
         if through_sink {
             host.automation_report_sink = Some(Arc::new(NoReports));
         } else {
@@ -306,9 +308,51 @@ fn human_interaction_ready_automation_remains_unmounted() {
     let source = policy(true);
     let mut host = services(Some(source.clone()));
     host.human_interaction_execution_ready = true;
+    host.human_interaction_async_execution_ready = true;
     host.automation_report_sink = Some(Arc::new(NoReports));
     let capabilities =
         prepare_runtime_capabilities_with_skills(&root_input(), "automation", &[], host).unwrap();
     assert_no_human_tools(&capabilities);
     assert_eq!(source.reads.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn human_interaction_both_ready_share_policy_and_do_not_change_stable_prefix() {
+    let baseline =
+        prepare_runtime_capabilities_with_skills(&root_input(), "root", &[], services(None))
+            .unwrap();
+    let mut host = services(Some(policy(true)));
+    host.human_interaction_execution_ready = true;
+    host.human_interaction_async_execution_ready = true;
+    let ready = prepare_runtime_capabilities_with_skills(&root_input(), "root", &[], host).unwrap();
+    for name in HUMAN_INTERACTION_TOOL_NAMES {
+        assert!(ready.initial_tool_set.contains(name));
+        assert!(ready.tool_registry.contains_tool(name));
+    }
+    assert_eq!(
+        baseline.initial_tool_set.stable_revision(),
+        ready.initial_tool_set.stable_revision()
+    );
+    for task_path in [
+        "/root/child",
+        "/root/child/grandchild",
+        "/root/child/grandchild/greatgrandchild",
+    ] {
+        let mut child = child_input();
+        child
+            .context
+            .as_mut()
+            .unwrap()
+            .collaboration_identity
+            .as_mut()
+            .unwrap()
+            .task_path = task_path.into();
+        let source = policy(true);
+        let mut host = services(Some(source.clone()));
+        host.human_interaction_execution_ready = true;
+        host.human_interaction_async_execution_ready = true;
+        let child = prepare_runtime_capabilities_with_skills(&child, "child", &[], host).unwrap();
+        assert_no_human_tools(&child);
+        assert_eq!(source.reads.load(Ordering::SeqCst), 0);
+    }
 }

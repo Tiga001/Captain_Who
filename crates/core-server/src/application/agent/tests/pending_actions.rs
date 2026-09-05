@@ -1149,6 +1149,7 @@ fn test_mcp_resume_checkpoint(
         test_frozen_provider_protocol(storage, "test-model", None);
     serde_json::from_value(json!({
         "version": AGENT_RUN_CHECKPOINT_SCHEMA_VERSION,
+        "pauseReason": "approval",
         "runId": run_id,
         "contextItems": [{
             "role": "assistant",

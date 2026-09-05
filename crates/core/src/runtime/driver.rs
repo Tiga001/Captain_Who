@@ -213,6 +213,9 @@ impl AgentRuntime {
                 automation_report_sink,
                 human_interaction_policy,
                 human_interaction_execution_ready: human_interaction_runtime.is_some(),
+                human_interaction_async_execution_ready: human_interaction_runtime
+                    .as_ref()
+                    .is_some_and(|host| host.async_execution_ready()),
             },
         )
         .map_err(|error| {
@@ -432,7 +435,6 @@ impl AgentRuntime {
         let mut finish_reason = None;
         let mut response_fence_corrections = 0_usize;
         let mut empty_model_action_repair_pending = false;
-        let mut can_drain_steer_input = false;
         let context_capacity_detector = context_window_configured.then_some(capacity_detector);
         let context_compaction_executor = context_compaction_services
             .map(ContextCompactionExecutor::new)
@@ -529,8 +531,10 @@ impl AgentRuntime {
                 }
                 if tool_batch.is_empty() {
                     active_context.validate_complete_tool_protocol()?;
-                    if can_drain_steer_input {
-                        if let Some(steer_input) = &steer_input {
+                    // The initial sample is already a complete protocol boundary. This also
+                    // consumes answers queued while a prior segment was paused, after its frozen
+                    // tool batch has finished and before asking the provider to continue.
+                    if let Some(steer_input) = &steer_input {
                             let pending = steer_input.drain_pending();
                             if !pending.is_empty() {
                                 apply_steer_inputs(
@@ -547,7 +551,6 @@ impl AgentRuntime {
                                     &mut run_context,
                                 )?;
                             }
-                        }
                     }
                     if let (Some(inbox), Some(conversation_id), Some(assistant_message_id)) = (
                         collaboration_inbox.as_ref(),
@@ -632,6 +635,21 @@ impl AgentRuntime {
                             &ModelRequestContext::agent_work(),
                             &mut request_context,
                         )?;
+                        if tool_registry.contains_tool("request_user_input_async") {
+                            if let (Some(host), Some(conversation_id), Some(assistant_message_id)) = (
+                                human_interaction_runtime.as_ref(), trace_conversation_id.as_deref(), trace_assistant_message_id.as_deref(),
+                            ) {
+                                let expected_next_trace_sequence = conversation_trace.lock().unwrap_or_else(|error| error.into_inner()).next_sequence();
+                                if let Some(context) = human_interaction_ignored_context(host.as_ref(), AgentSamplingBoundaryRequest {
+                                    conversation_id: conversation_id.to_string(), run_id: run_id.clone(),
+                                    assistant_message_id: assistant_message_id.to_string(),
+                                    model_batch_index: u64::try_from(model_request_index + 1).unwrap_or(u64::MAX),
+                                    expected_next_trace_sequence,
+                                }) {
+                                    request_context.push(context);
+                                }
+                            }
+                        }
                         if empty_model_action_repair_pending {
                             request_context.push(empty_model_action_repair_context_item());
                         }
@@ -1061,7 +1079,6 @@ impl AgentRuntime {
                     );
                     finish_reason = llm_response.finish_reason;
                     let mut assistant_turn = llm_response.assistant_turn;
-                    can_drain_steer_input = true;
 
                     let tool_bindings = tool_call_bindings_from_response(
                         provider_tool_calls,
@@ -1910,6 +1927,18 @@ impl AgentRuntime {
                         ));
                     }
 
+                    let mut human_async_result = None;
+                    if policy_preflight_failure.is_none()
+                        && matches!(&tool_identity,
+                            AgentToolIdentity::RuntimeExtension { extension_id, tool_name }
+                                if extension_id == "human.interaction" && tool_name == "request_user_input_async")
+                    {
+                        human_async_result = Some(accept_async_human_question(
+                            human_interaction_runtime.as_deref(), run_context.as_ref(),
+                            trace_assistant_message_id.as_deref(), &run_id, &call,
+                        ));
+                    }
+
                     if policy_preflight_failure.is_none()
                         && matches!(&tool_identity,
                             AgentToolIdentity::RuntimeExtension { extension_id, tool_name }
@@ -2579,7 +2608,7 @@ impl AgentRuntime {
                     let mut tool_result_persistence =
                         crate::tools::AgentToolResultPersistence::RuntimeCommits;
                     let mut settled_file_change_proposal = None;
-                    let result_result = if let Some(result) = policy_preflight_failure {
+                    let result_result = if let Some(result) = human_async_result.or(policy_preflight_failure) {
                         Ok(result)
                     } else if auto_execute_host_action {
                         let action_result = if prepared_policy_action.is_some() {

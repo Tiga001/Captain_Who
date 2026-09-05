@@ -1,13 +1,13 @@
 use rusqlite::{ffi, Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
 
-pub const STORAGE_SCHEMA_VERSION: i32 = 37;
+pub const STORAGE_SCHEMA_VERSION: i32 = 38;
 pub const DEVELOPMENT_STORAGE_SCHEMA_RESET_REQUIRED: &str =
     "development_storage_schema_reset_required";
 
 const CANONICAL_SCHEMA: &str = include_str!("canonical_schema.sql");
 const CANONICAL_SCHEMA_FINGERPRINT: &str =
-    "sha256:3f9d66722cd1e6c7ee26512a166a906fa8471a05083522d084ba2182b8fc4a36";
+    "sha256:03332e3251b0660eeff21c26300cec499009aee56b68d3d92556a8c22f047a67";
 /// Opens the canonical schema without migrating historical development databases.
 ///
 /// A brand-new database is initialized atomically. Existing development databases must already
@@ -653,7 +653,7 @@ CREATE TABLE model_provider_credential_cleanup (
             .contains(DEVELOPMENT_STORAGE_SCHEMA_RESET_REQUIRED));
         assert!(error
             .to_string()
-            .contains("expected schema version 37, found 30"));
+            .contains("expected schema version 38, found 30"));
         assert_eq!(read_schema_version(&connection).unwrap(), 30);
         assert_eq!(schema_fingerprint(&connection).unwrap(), fingerprint_before);
         let columns = connection

@@ -15,6 +15,7 @@ export const HUMAN_INTERACTION_MAX_INPUT_BYTES = 262_144
 export const HUMAN_INTERACTION_MAX_TITLE_BYTES = 8_192
 export const HUMAN_INTERACTION_MAX_OPTION_BYTES = 2_048
 export const HUMAN_INTERACTION_MAX_ANSWER_BYTES = 32_768
+export const HUMAN_INTERACTION_MAX_DISPLAY_BYTES = 1_048_576
 export const HUMAN_INTERACTION_GET_SETTINGS_METHOD = 'humanInteraction.getSettings'
 export const HUMAN_INTERACTION_UPDATE_SETTINGS_METHOD = 'humanInteraction.updateSettings'
 export const HUMAN_INTERACTION_LIST_REQUESTS_METHOD = 'humanInteraction.listRequests'
@@ -66,6 +67,18 @@ export interface HumanInteractionResponse {
   answers: HumanInteractionAnswer[]
   createdAt: number
 }
+/** Immutable history material shared by synchronous ToolResults and asynchronous answers. */
+export interface HumanInteractionResponseDisplay {
+  type: 'human_interaction_response'
+  schemaVersion: typeof HUMAN_INTERACTION_SCHEMA_VERSION
+  requestId: string
+  responseId: string
+  answers: HumanInteractionAnswerDisplay[]
+}
+export type HumanInteractionAnswerDisplay =
+  | { kind: 'option'; questionId: string; question: string; optionId: string; answer: string }
+  | { kind: 'text'; questionId: string; question: string; answer: string }
+  | { kind: 'skipped'; questionId: string; question: string; answer: '已跳过' }
 export interface HumanInteractionDelivery {
   responseId: string
   status: HumanInteractionDeliveryStatus
@@ -158,8 +171,12 @@ function unique(values: readonly string[], context: string): void {
   }
 }
 
-function boundedPayload(value: unknown, context: string): void {
-  if (encoder.encode(JSON.stringify(value)).length > HUMAN_INTERACTION_MAX_INPUT_BYTES) {
+function boundedPayload(
+  value: unknown,
+  context: string,
+  maxBytes = HUMAN_INTERACTION_MAX_INPUT_BYTES
+): void {
+  if (encoder.encode(JSON.stringify(value)).length > maxBytes) {
     throw invalidProtocolValue(context, 'payload exceeds the byte limit')
   }
 }
@@ -321,6 +338,91 @@ export function parseHumanInteractionResponse(
     answers: parsedAnswers,
     createdAt: expectSafeInteger(record.createdAt, `${context}.createdAt`, 0)
   }
+}
+
+export function parseHumanInteractionResponseDisplay(
+  value: unknown,
+  context = 'human interaction response display'
+): HumanInteractionResponseDisplay {
+  const record = expectRecord(value, context)
+  expectOnlyKeys(record, ['type', 'schemaVersion', 'requestId', 'responseId', 'answers'], context)
+  expectSchemaVersion(record, HUMAN_INTERACTION_SCHEMA_VERSION, context)
+  const parsed: HumanInteractionResponseDisplay = {
+    type: expectEnum(record.type, ['human_interaction_response'] as const, `${context}.type`),
+    schemaVersion: HUMAN_INTERACTION_SCHEMA_VERSION,
+    requestId: identifier(record.requestId, `${context}.requestId`),
+    responseId: identifier(record.responseId, `${context}.responseId`),
+    answers: expectArray(record.answers, `${context}.answers`).map((value, index) => {
+      const answerContext = `${context}.answers[${index}]`
+      const answer = expectRecord(value, answerContext)
+      const kind = expectEnum(
+        answer.kind,
+        ['option', 'text', 'skipped'] as const,
+        `${answerContext}.kind`
+      )
+      expectOnlyKeys(
+        answer,
+        ['kind', 'questionId', 'question', 'answer', ...(kind === 'option' ? ['optionId'] : [])],
+        answerContext
+      )
+      const common = {
+        questionId: identifier(answer.questionId, `${answerContext}.questionId`),
+        question: boundedText(
+          answer.question,
+          `${answerContext}.question`,
+          HUMAN_INTERACTION_MAX_TITLE_BYTES
+        )
+      }
+      if (kind === 'skipped') {
+        return {
+          ...common,
+          kind,
+          answer: expectEnum(answer.answer, ['已跳过'] as const, `${answerContext}.answer`)
+        }
+      }
+      if (kind === 'option') {
+        return {
+          ...common,
+          kind,
+          optionId: identifier(answer.optionId, `${answerContext}.optionId`),
+          answer: boundedText(
+            answer.answer,
+            `${answerContext}.answer`,
+            HUMAN_INTERACTION_MAX_OPTION_BYTES
+          )
+        }
+      }
+      return {
+        ...common,
+        kind,
+        answer: boundedText(
+          answer.answer,
+          `${answerContext}.answer`,
+          HUMAN_INTERACTION_MAX_ANSWER_BYTES
+        )
+      }
+    })
+  }
+  // Match Rust's independent question and answer budgets; the combined display can exceed
+  // the request limit because it contains both immutable titles and resolved answers.
+  parseHumanInteractionToolInput({
+    questions: parsed.answers.map((answer) => ({
+      title: answer.question,
+      ...(answer.kind === 'option' ? { options: [answer.answer] } : {})
+    }))
+  })
+  answers(
+    parsed.answers.map((answer) =>
+      answer.kind === 'option'
+        ? { kind: answer.kind, questionId: answer.questionId, optionId: answer.optionId }
+        : answer.kind === 'text'
+          ? { kind: answer.kind, questionId: answer.questionId, text: answer.answer }
+          : { kind: answer.kind, questionId: answer.questionId }
+    ),
+    `${context}.answers`
+  )
+  boundedPayload(parsed, context, HUMAN_INTERACTION_MAX_DISPLAY_BYTES)
+  return parsed
 }
 
 export function parseHumanInteractionDelivery(

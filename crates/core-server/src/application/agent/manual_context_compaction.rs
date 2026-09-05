@@ -498,6 +498,7 @@ impl AgentService {
             operation = stored;
         }
         emit_manual_notification(&notifications, &self.project_manual_operation(operation));
+        self.schedule_async_human_input_deliveries(notifications.clone());
     }
 
     async fn execute_manual_context_compaction(

@@ -2,9 +2,13 @@ use super::{ExtensionDescriptor, ModelRequestContext, ModelRequestPurpose, Runti
 use crate::context::{ContextItem, ContextRetention, ContextScope, ContextSource};
 use crate::human_interaction::{HumanInteractionSettings, HUMAN_INTERACTION_MAX_SAFE_INTEGER};
 use crate::llm::LlmMessageRole;
-use crate::protocol::{AgentError, AgentResult, AgentToolDefinition};
+#[cfg(test)]
+use crate::protocol::AgentToolDefinition;
+use crate::protocol::{AgentError, AgentResult};
+#[cfg(test)]
+use crate::tools::human_interaction::human_interaction_tool_definitions;
 use crate::tools::human_interaction::{
-    human_interaction_tool_definitions, HUMAN_INTERACTION_CAPABILITY,
+    HUMAN_INTERACTION_ASYNC_CAPABILITY, HUMAN_INTERACTION_CAPABILITY,
 };
 use crate::tools::ToolCapabilityId;
 use crate::world_state::{WorldStateLifetime, WorldStateSectionEnvelope, WorldStateSectionId};
@@ -19,6 +23,7 @@ const HUMAN_INTERACTION_EXTENSION_VERSION: u32 = 1;
 pub(super) struct HumanInteractionExtension {
     source: Option<Arc<dyn HumanInteractionPolicySource>>,
     execution_ready: bool,
+    async_execution_ready: bool,
     request: HumanInteractionRequestContract,
 }
 
@@ -27,6 +32,7 @@ pub(super) struct HumanInteractionExtension {
 struct HumanInteractionRequestContract {
     settings: HumanInteractionSettings,
     execution_ready: bool,
+    async_execution_ready: bool,
 }
 
 impl HumanInteractionRequestContract {
@@ -34,6 +40,7 @@ impl HumanInteractionRequestContract {
         Self {
             settings: unavailable_policy(),
             execution_ready: false,
+            async_execution_ready: false,
         }
     }
 
@@ -47,18 +54,28 @@ impl HumanInteractionRequestContract {
         Ok(Self {
             settings,
             execution_ready: false,
+            async_execution_ready: false,
         })
     }
 
     fn available(&self) -> bool {
-        self.settings.enabled && self.execution_ready
+        self.settings.enabled && (self.execution_ready || self.async_execution_ready)
     }
 
+    #[cfg(test)]
     fn tool_definitions(&self) -> Vec<AgentToolDefinition> {
         if self.available() {
             human_interaction_tool_definitions()
                 .into_iter()
-                .take(1)
+                .enumerate()
+                .filter(|(index, _)| {
+                    if *index == 0 {
+                        self.execution_ready
+                    } else {
+                        self.async_execution_ready
+                    }
+                })
+                .map(|(_, definition)| definition)
                 .collect()
         } else {
             Vec::new()
@@ -66,22 +83,34 @@ impl HumanInteractionRequestContract {
     }
 
     fn capabilities(&self) -> BTreeSet<ToolCapabilityId> {
-        if self.tool_definitions().is_empty() {
-            BTreeSet::new()
-        } else {
-            BTreeSet::from([ToolCapabilityId::application_owned(
+        let mut capabilities = BTreeSet::new();
+        if self.settings.enabled && self.execution_ready {
+            capabilities.insert(ToolCapabilityId::application_owned(
                 HUMAN_INTERACTION_CAPABILITY,
-            )])
+            ));
         }
+        if self.settings.enabled && self.async_execution_ready {
+            capabilities.insert(ToolCapabilityId::application_owned(
+                HUMAN_INTERACTION_ASYNC_CAPABILITY,
+            ));
+        }
+        capabilities
     }
 
     fn context(&self, purpose: ModelRequestPurpose) -> Vec<ContextItem> {
         if !self.available() || purpose != ModelRequestPurpose::AgentWork {
             return Vec::new();
         }
+        let instructions = if self.async_execution_ready && self.execution_ready {
+            "## 人机交互\n只有缺失信息会实质改变任务结果时才提问；能安全推断时说明假设并继续。后续工作必须等待回答时使用 request_user_input；仍有独立工作可做时使用 request_user_input_async 并继续独立工作。异步 accepted/requestId 只证明已记录问题，不代表用户回答；整批回答稍后作为用户输入送达，不会再次返回此工具的结果。不要轮询、重复提问、猜测答案或把沉默、不回答、忽略当作同意。每题可提供选项，用户也可自由输入或不回答，整批统一提交；异步忽略不触发新运行。两种工具均不能用于权限或工具审批，用户回答不授予执行权限。"
+        } else if self.async_execution_ready {
+            "## 人机交互\n只有缺失信息会实质改变任务结果且仍有独立工作可做时，才使用 request_user_input_async 并继续独立工作；能安全推断时说明假设并继续。accepted/requestId只证明已记录问题，整批回答稍后作为用户输入送达，不会再次返回此工具的结果。不要轮询、重复提问、猜测答案或把沉默、不回答、忽略当作同意。每题可提供选项，用户也可自由输入或不回答；忽略不触发新运行。问题不能用于权限或工具审批，回答不授予执行权限。"
+        } else {
+            "## 人机交互\n只有缺失信息会实质改变任务结果且后续工作必须等待回答时，才使用 request_user_input 等待整批回答；能安全推断时说明假设并继续。每题可提供可选选项；界面允许自由文本或不回答，整批处理后一次提交。不要重复提问、猜测答案或把沉默、不回答当作同意。问题不能替代权限或工具审批，用户回答不授予任何执行权限。"
+        };
         vec![ContextItem::text(
             LlmMessageRole::System,
-            "## 人机交互\n只有缺失信息会实质改变任务结果且后续工作必须等待回答时，才使用 request_user_input 等待整批回答；能安全推断时说明假设并继续。每题可提供可选选项；界面允许自由文本或不回答，整批处理后一次提交。不要重复提问、猜测答案或把沉默、不回答当作同意。问题不能替代权限或工具审批，用户回答不授予任何执行权限。",
+            instructions,
             ContextSource::RuntimeGuard,
             ContextScope::Run,
             ContextRetention::RequestOnly,
@@ -96,6 +125,8 @@ impl HumanInteractionRequestContract {
             "policyRevision": self.settings.revision,
             "enabled": self.settings.enabled,
             "executionReady": self.execution_ready,
+            "asyncExecutionReady": self.async_execution_ready,
+            "asyncAvailable": self.settings.enabled && self.async_execution_ready,
             "available": self.available(),
         });
         let section = if self.available() {
@@ -118,12 +149,18 @@ impl HumanInteractionExtension {
         Self {
             source,
             execution_ready: false,
+            async_execution_ready: false,
             request: HumanInteractionRequestContract::unavailable(),
         }
     }
 
     pub(super) fn with_execution_ready(mut self, execution_ready: bool) -> Self {
         self.execution_ready = execution_ready;
+        self
+    }
+
+    pub(super) fn with_async_execution_ready(mut self, execution_ready: bool) -> Self {
+        self.async_execution_ready = execution_ready;
         self
     }
 }
@@ -157,17 +194,23 @@ impl RuntimeExtension for HumanInteractionExtension {
             .and_then(|policy| HumanInteractionRequestContract::new(policy).ok())
             .unwrap_or_else(HumanInteractionRequestContract::unavailable);
         self.request.execution_ready = self.execution_ready && self.source.is_some();
+        self.request.async_execution_ready = self.async_execution_ready && self.source.is_some();
         Ok(())
     }
 
     fn tools(&self) -> Vec<Box<dyn crate::tools::AgentTool>> {
+        let mut tools: Vec<Box<dyn crate::tools::AgentTool>> = Vec::new();
         if self.execution_ready {
-            vec![Box::new(
+            tools.push(Box::new(
                 crate::tools::human_interaction::RequestUserInputTool,
-            )]
-        } else {
-            Vec::new()
+            ));
         }
+        if self.async_execution_ready {
+            tools.push(Box::new(
+                crate::tools::human_interaction::RequestUserInputAsyncTool,
+            ));
+        }
+        tools
     }
     fn active_tool_capabilities(&self) -> AgentResult<BTreeSet<ToolCapabilityId>> {
         Ok(self.request.capabilities())
@@ -256,14 +299,15 @@ mod tests {
             settings: Mutex::new(settings(true, 3)),
             reads: AtomicUsize::new(0),
         });
-        let mut extension =
-            HumanInteractionExtension::new(Some(policy.clone())).with_execution_ready(true);
+        let mut extension = HumanInteractionExtension::new(Some(policy.clone()))
+            .with_execution_ready(true)
+            .with_async_execution_ready(true);
         extension.prepare_model_request().unwrap();
         *policy.settings.lock().unwrap() = settings(false, 4);
         // The executable tool, schema, prompt and World State share the frozen request snapshot.
-        assert_eq!(extension.tools().len(), 1);
-        assert_eq!(extension.request.tool_definitions().len(), 1);
-        assert_eq!(extension.active_tool_capabilities().unwrap().len(), 1);
+        assert_eq!(extension.tools().len(), 2);
+        assert_eq!(extension.request.tool_definitions().len(), 2);
+        assert_eq!(extension.active_tool_capabilities().unwrap().len(), 2);
         assert_eq!(
             extension
                 .request_context(&ModelRequestContext::agent_work())
@@ -295,6 +339,7 @@ mod tests {
         let request = HumanInteractionRequestContract {
             settings: settings(true, 1),
             execution_ready: true,
+            async_execution_ready: false,
         };
         assert!(!request.context(ModelRequestPurpose::AgentWork).is_empty());
         assert!(request

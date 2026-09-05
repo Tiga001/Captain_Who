@@ -189,6 +189,7 @@ pub(super) struct RuntimeExtensionHostServices {
     pub(super) builtin_capabilities: Option<crate::BuiltinCapabilityRuntime>,
     pub(super) human_interaction_policy: Option<Arc<dyn crate::HumanInteractionPolicySource>>,
     pub(super) human_interaction_execution_ready: bool,
+    pub(super) human_interaction_async_execution_ready: bool,
     pub(super) human_root: bool,
 }
 
@@ -269,7 +270,8 @@ impl RuntimeExtensions {
                 human_interaction::HumanInteractionExtension::new(
                     host_services.human_interaction_policy,
                 )
-                .with_execution_ready(host_services.human_interaction_execution_ready),
+                .with_execution_ready(host_services.human_interaction_execution_ready)
+                .with_async_execution_ready(host_services.human_interaction_async_execution_ready),
             ));
         }
         extensions.push(Box::new(todo));

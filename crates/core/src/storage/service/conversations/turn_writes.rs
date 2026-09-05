@@ -1,3 +1,11 @@
+type ConversationTurnAdmissionResult = (
+    ChatConversationRecord,
+    crate::AgentPermissions,
+    super::ConversationTurnRewriteBeginOutcome,
+    Option<automation_repository::AutomationRunAdmissionOutcome>,
+    Option<crate::storage::human_interaction_repository::HumanInteractionAsyncBinding>,
+);
+
 impl StorageService {
     pub fn save_conversation(
         &self,
@@ -48,7 +56,7 @@ impl StorageService {
         trace_created_at: i64,
         trace_updated_at: i64,
     ) -> Result<(ChatConversationRecord, crate::AgentPermissions), String> {
-        let (conversation, permissions, outcome, automation_outcome) = self
+        let (conversation, permissions, outcome, automation_outcome, _) = self
             .save_conversation_and_begin_turn_internal(
                 conversation,
                 expected_revision,
@@ -58,6 +66,7 @@ impl StorageService {
                 trace,
                 trace_created_at,
                 trace_updated_at,
+                None,
                 None,
                 None,
                 None,
@@ -100,7 +109,7 @@ impl StorageService {
         ),
         String,
     > {
-        let (conversation, permissions, rewrite_outcome, automation_outcome) = self
+        let (conversation, permissions, rewrite_outcome, automation_outcome, _) = self
             .save_conversation_and_begin_turn_internal(
                 conversation,
                 expected_revision,
@@ -113,6 +122,7 @@ impl StorageService {
                 None,
                 None,
                 Some(automation_admission),
+                None,
             )?;
         if !matches!(
             rewrite_outcome,
@@ -152,7 +162,7 @@ impl StorageService {
         ),
         String,
     > {
-        let (conversation, permissions, outcome, automation_outcome) = self
+        let (conversation, permissions, outcome, automation_outcome, _) = self
             .save_conversation_and_begin_turn_internal(
                 conversation,
                 expected_revision,
@@ -164,6 +174,7 @@ impl StorageService {
                 trace_updated_at,
                 Some(rewrite),
                 Some(prepared_attachments),
+                None,
                 None,
             )?;
         if automation_outcome.is_some() {
@@ -186,15 +197,10 @@ impl StorageService {
         rewrite: Option<&conversation_turn_rewrite_repository::ConversationTurnRewriteAdmission>,
         prepared_attachments: Option<&super::PreparedConversationTurnRewriteAttachments>,
         automation_admission: Option<&automation_repository::AutomationRunAdmissionInput>,
-    ) -> Result<
-        (
-            ChatConversationRecord,
-            crate::AgentPermissions,
-            super::ConversationTurnRewriteBeginOutcome,
-            Option<automation_repository::AutomationRunAdmissionOutcome>,
-        ),
-        String,
-    > {
+        human_interaction_admission: Option<
+            &crate::storage::human_interaction_repository::HumanInteractionAsyncTurnAdmission,
+        >,
+    ) -> Result<ConversationTurnAdmissionResult, String> {
         let mut connection = self.state.connection()?;
         ensure_project_reference_exists(&connection, conversation.project_id.as_deref())?;
         let transaction = connection
@@ -279,6 +285,7 @@ impl StorageService {
                     conversation,
                     effective_permissions,
                     super::ConversationTurnRewriteBeginOutcome::Replayed(Box::new(existing)),
+                    None,
                     None,
                 ));
             }
@@ -419,6 +426,11 @@ impl StorageService {
                 }
             }
         }
+        if let Some(admission) = human_interaction_admission {
+            crate::storage::human_interaction_repository::validate_async_new_turn_user_in_transaction(
+                &transaction, &conversation, trace, admission,
+            ).map_err(|error| error.to_string())?;
+        }
         chat_repository::save_conversation_in_connection(&transaction, &conversation)
             .map_err(storage_error)?;
         if let Some(prepared) = prepared_attachments {
@@ -548,12 +560,77 @@ impl StorageService {
         } else {
             None
         };
+        let human_interaction_binding = if let Some(admission) = human_interaction_admission {
+            if trusted_wake.is_some() || rewrite.is_some() || automation_admission.is_some() {
+                return Err(
+                    "human answer admission cannot be combined with another trigger".into(),
+                );
+            }
+            Some(
+                crate::storage::human_interaction_repository::bind_async_new_turn_in_transaction(
+                    &transaction,
+                    &conversation,
+                    trace,
+                    admission,
+                    trace_updated_at,
+                )
+                .map_err(|error| error.to_string())?,
+            )
+        } else {
+            None
+        };
         transaction.commit().map_err(storage_error)?;
         Ok((
             conversation,
             effective_permissions,
             super::ConversationTurnRewriteBeginOutcome::Started,
             automation_outcome,
+            human_interaction_binding,
+        ))
+    }
+}
+
+impl StorageService {
+    /// Atomically publishes the immutable answer User, initial Run, and delivery claim.
+    #[allow(clippy::too_many_arguments)]
+    pub fn save_human_interaction_conversation_and_begin_turn(
+        &self,
+        conversation: ChatConversationRecord,
+        expected_revision: Option<i64>,
+        permission_source: crate::AgentTurnPermissionSource,
+        preloaded_agent_message_ids: &[String],
+        trace: &ConversationTurnTrace,
+        trace_created_at: i64,
+        trace_updated_at: i64,
+        admission: &crate::storage::human_interaction_repository::HumanInteractionAsyncTurnAdmission,
+    ) -> Result<
+        (
+            ChatConversationRecord,
+            crate::AgentPermissions,
+            crate::storage::human_interaction_repository::HumanInteractionAsyncBinding,
+        ),
+        String,
+    > {
+        let (conversation, permissions, _, _, binding) = self
+            .save_conversation_and_begin_turn_internal(
+                conversation,
+                expected_revision,
+                None,
+                permission_source,
+                preloaded_agent_message_ids,
+                trace,
+                trace_created_at,
+                trace_updated_at,
+                None,
+                None,
+                None,
+                Some(admission),
+            )?;
+        Ok((
+            conversation,
+            permissions,
+            binding
+                .ok_or_else(|| "human answer admission did not bind its response".to_string())?,
         ))
     }
 }

@@ -179,3 +179,65 @@ impl StorageService {
         repository::load_sync_for_run(&connection, run_id)
     }
 }
+
+impl StorageService {
+    pub fn admit_async_human_interaction(
+        &self,
+        owner: &repository::HostHumanInteractionOwner,
+        input: &HumanInteractionToolInput,
+    ) -> Result<HumanInteractionRequestSnapshot, HumanInteractionError> {
+        let mut connection = self.state.connection().map_err(repository::unavailable)?;
+        repository::admit_async(&mut connection, owner, input, now_ms())
+    }
+}
+
+impl StorageService {
+    pub fn list_pending_async_human_interaction_deliveries(
+        &self,
+    ) -> Result<Vec<repository::HumanInteractionAsyncPending>, HumanInteractionError> {
+        let connection = self.state.connection().map_err(repository::unavailable)?;
+        repository::list_pending_async(&connection)
+    }
+    pub fn bind_async_human_interaction_to_guidance(
+        &self,
+        response_id: &str,
+        record: &crate::storage::models::AgentRunGuidanceRecord,
+        expected_delivery_revision: u64,
+    ) -> Result<Option<repository::HumanInteractionAsyncBinding>, HumanInteractionError> {
+        let mut connection = self.state.connection().map_err(repository::unavailable)?;
+        repository::bind_async_to_guidance(
+            &mut connection,
+            response_id,
+            record,
+            expected_delivery_revision,
+            now_ms(),
+        )
+    }
+    pub fn load_async_human_interaction_binding_for_run(
+        &self,
+        run_id: &str,
+    ) -> Result<Option<repository::HumanInteractionAsyncBinding>, HumanInteractionError> {
+        let connection = self.state.connection().map_err(repository::unavailable)?;
+        repository::load_async_binding_for_run(&connection, run_id)
+    }
+    pub fn mark_async_human_interaction_turn_started(
+        &self,
+        binding: &repository::HumanInteractionAsyncBinding,
+    ) -> Result<bool, HumanInteractionError> {
+        let mut connection = self.state.connection().map_err(repository::unavailable)?;
+        repository::start_async_turn(&mut connection, binding, now_ms())
+    }
+    pub fn settle_async_human_interaction_start_failure(
+        &self,
+        run_id: &str,
+    ) -> Result<Option<HumanInteractionRequestSnapshot>, HumanInteractionError> {
+        let mut connection = self.state.connection().map_err(repository::unavailable)?;
+        repository::settle_async_start_failure(&mut connection, run_id, now_ms())
+    }
+    pub fn reconcile_async_human_interaction_deliveries(
+        &self,
+    ) -> Result<Vec<HumanInteractionRequestSnapshot>, HumanInteractionError> {
+        let mut connection = self.state.connection().map_err(repository::unavailable)?;
+        repository::reconcile_async(&mut connection, now_ms())
+    }
+}

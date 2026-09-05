@@ -213,9 +213,12 @@ impl ToolCallBatch {
     }
 
     pub(super) fn claim(&mut self, call: &LlmToolCall) -> ToolCallBatchClaim {
-        // Distinct question call identities each await their own answer, including identical
+        // Distinct question call identities each create their own batch, including identical
         // question text. Storage deduplicates the exact call; semantic side-effect guards do not.
-        if call.name == "request_user_input" {
+        if matches!(
+            call.name.as_str(),
+            "request_user_input" | "request_user_input_async"
+        ) {
             return ToolCallBatchClaim::Execute;
         }
         let semantic_fingerprint = semantic_tool_call_fingerprint(&call.name, &call.args);

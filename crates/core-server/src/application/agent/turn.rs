@@ -113,9 +113,20 @@ impl AgentService {
 
     pub(super) fn start_human_root_turn_internal(
         &self,
+        input: AgentConversationTurnInput,
+        rewrite: Option<HumanConversationTurnRewrite>,
+        automation: Option<AutomationHumanRootAdmission>,
+        notifications: CoreServerNotificationSender,
+    ) -> Result<AgentConversationTurnOutput, AgentServiceError> {
+        self.start_human_root_turn_with_response(input, rewrite, automation, None, notifications)
+    }
+
+    pub(super) fn start_human_root_turn_with_response(
+        &self,
         mut input: AgentConversationTurnInput,
         rewrite: Option<HumanConversationTurnRewrite>,
         mut automation: Option<AutomationHumanRootAdmission>,
+        response: Option<mycopilot_core::storage::human_interaction_repository::HumanInteractionAsyncTurnAdmission>,
         notifications: CoreServerNotificationSender,
     ) -> Result<AgentConversationTurnOutput, AgentServiceError> {
         let automation_execution_context = automation
@@ -236,10 +247,10 @@ impl AgentService {
                 .into());
         }
         if previous_conversation.as_ref().is_some_and(|conversation| {
-            conversation
-                .messages
-                .iter()
-                .any(|message| message.id == user_message_id || message.id == assistant_message_id)
+            conversation.messages.iter().any(|message| {
+                (message.id == user_message_id && response.is_none())
+                    || message.id == assistant_message_id
+            })
         }) {
             return Err("本轮消息 ID 已存在，不能覆盖既有 Conversation 历史。"
                 .to_string()
@@ -279,27 +290,40 @@ impl AgentService {
                 admitted_at: now_ms(),
             }
         });
-        let prepared_outcome = match rewrite.clone() {
-            Some(rewrite) => prepare_reserved_human_rewrite_turn(
+        let prepared_outcome = if let Some(response) = response.clone() {
+            prepare_reserved_human_response_turn(
                 &self.storage,
                 &self.skills,
                 input,
                 &run_id,
                 previous_conversation.clone(),
                 expected_revision,
-                rewrite,
-            ),
-            None => prepare_reserved_human_turn(
-                &self.storage,
-                &self.skills,
-                input,
-                &run_id,
-                previous_conversation.clone(),
-                expected_revision,
-                automation_admission.as_ref(),
-                automation_execution_context,
+                response,
             )
-            .map(|prepared| PreparedConversationTurnOutcome::Prepared(Box::new(prepared))),
+            .map(|prepared| PreparedConversationTurnOutcome::Prepared(Box::new(prepared)))
+        } else {
+            match rewrite.clone() {
+                Some(rewrite) => prepare_reserved_human_rewrite_turn(
+                    &self.storage,
+                    &self.skills,
+                    input,
+                    &run_id,
+                    previous_conversation.clone(),
+                    expected_revision,
+                    rewrite,
+                ),
+                None => prepare_reserved_human_turn(
+                    &self.storage,
+                    &self.skills,
+                    input,
+                    &run_id,
+                    previous_conversation.clone(),
+                    expected_revision,
+                    automation_admission.as_ref(),
+                    automation_execution_context,
+                )
+                .map(|prepared| PreparedConversationTurnOutcome::Prepared(Box::new(prepared))),
+            }
         };
         let prepared = match prepared_outcome {
             Ok(PreparedConversationTurnOutcome::Prepared(prepared)) => *prepared,
@@ -310,6 +334,18 @@ impl AgentService {
                 return Ok(*output);
             }
             Err(error) => {
+                if response.is_some() {
+                    let settlement = self
+                        .storage
+                        .settle_async_human_interaction_start_failure(&run_id);
+                    self.release_turn_concurrency_permit(&run_id);
+                    self.release_conversation_turn_if_current(&conversation_id, &run_id);
+                    self.unregister_cancellation_if_current(&run_id, &cancellation_token);
+                    return Err(match settlement {
+                        Ok(_) => error,
+                        Err(settlement_error) => format!("{error}; human response preparation settlement failed: {settlement_error}").into(),
+                    });
+                }
                 if let Some(rewrite) = &rewrite {
                     let cause = error.to_string();
                     return match self.settle_prepared_rewrite_failure(
@@ -401,7 +437,9 @@ impl AgentService {
             }
         };
 
-        let rollback = if let Some(rewrite) = &rewrite {
+        let rollback = if response.is_some() {
+            PreparedTurnRollback::HumanResponse
+        } else if let Some(rewrite) = &rewrite {
             PreparedTurnRollback::Rewrite {
                 request_id: rewrite.request_id.clone(),
             }

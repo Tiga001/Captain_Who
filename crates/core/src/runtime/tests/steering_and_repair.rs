@@ -191,6 +191,13 @@ async fn concurrent_steer_during_sampling_is_fifo_and_turns_a_terminal_response_
 
     assert_eq!(output.content, "Final answer after guidance.");
     let requests = requests.lock().unwrap();
+    assert!(requests[0]["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|message| {
+            message["role"] == "user" && message["content"] == "Include the pre-stream constraint."
+        }));
     let second_messages = requests[1]["messages"].as_array().unwrap();
     let intermediate_index = second_messages
         .iter()
@@ -218,7 +225,7 @@ async fn concurrent_steer_during_sampling_is_fifo_and_turns_a_terminal_response_
                 && message["content"] == "Keep the rollout steps in chronological order."
         })
         .unwrap();
-    assert!(intermediate_index < before_stream_guidance_index);
+    assert!(before_stream_guidance_index < intermediate_index);
     assert!(before_stream_guidance_index < first_guidance_index);
     assert!(first_guidance_index < second_guidance_index);
     drop(requests);
@@ -227,12 +234,12 @@ async fn concurrent_steer_during_sampling_is_fifo_and_turns_a_terminal_response_
     assert!(matches!(
         &trace.items[..],
         [
-            ConversationTurnTraceItem::AssistantNarration { content, .. },
             ConversationTurnTraceItem::UserGuidance {
                 guidance_id,
                 client_message_id,
                 ..
             },
+            ConversationTurnTraceItem::AssistantNarration { content, .. },
             ConversationTurnTraceItem::UserGuidance {
                 guidance_id: second_guidance_id,
                 client_message_id: second_client_message_id,
@@ -255,7 +262,7 @@ async fn concurrent_steer_during_sampling_is_fifo_and_turns_a_terminal_response_
         event,
         AgentEvent::GuidanceApplied {
             guidance_id,
-            sequence: 1,
+            sequence: 0,
             ..
         } if guidance_id == "guidance-before-stream"
     )));

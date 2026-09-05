@@ -7,7 +7,7 @@ last_verified: 2026-09-05
 
 # 向用户提问：设计与实施进度
 
-本文记录完整产品契约及分轮交付状态。第 1 轮完成基础设施，第 2 轮接入阻塞式提问、同一 Run 恢复与生命周期。异步投递、设置页面和答题面板仍属于后续轮次；不得以成功占位代替未实现链路。
+本文记录完整产品契约及分轮交付状态。前两轮完成基础设施与阻塞式提问；第 3 轮接入异步工具、多批次回答及可靠投递。设置页面、答题面板和气泡渲染留在第 4 轮。
 
 ## 产品契约
 
@@ -59,9 +59,11 @@ last_verified: 2026-09-05
 - Response：一次不可变的整批回应及提交身份。正式回应按原题序归一化；忽略不包含草稿。
 - Delivery：与 Response 一对一的回答投递事实，区分 pending/bound/applied/cancelled/failed。
 - Suspension：同步恢复所需的私有检查点和绑定，不进入公开快照或普通 IPC。
+- Async binding：异步回应的私有路由、领取身份、停止范围与执行阶段，不允许 Renderer 指定。
 
-对应五张表为 `human_interaction_settings`、`human_interaction_requests`、
+基础五张表为 `human_interaction_settings`、`human_interaction_requests`、
 `human_interaction_responses`、`human_interaction_deliveries`、`human_interaction_suspensions`。
+第 3 轮增加 `human_interaction_async_bindings`，与既有 guidance journal、Turn admission 和模型请求记录协作。
 Request 的公开 sequence 固定批次创建顺序，列表及分页游标按它倒序；同毫秒创建、重连或删除
 部分历史后也能确定最新批次。Response 的独立数据库 sequence 固定回答接纳顺序，不能用批次
 展示次序、前端页码或毫秒时间猜测投递次序。两个序号均由 Host 生成，提交输入不能指定。
@@ -113,9 +115,9 @@ Fork 只复制边界内历史，不复制活跃提问权限和投递任务；异
 不新增旧数据迁移 SQL，不提供旧 checkpoint/resume envelope 兼容。新版本自身的持久化、
 重启恢复与防重仍必须实现。测试使用临时数据库，不清空真实开发数据或凭据。
 
-Canonical SQLite 版本为 v37。正常打开旧库只返回 reset-required，不改写旧库。
-受管 reset 可从受支持的 exact 旧指纹读取配置白名单后新建 v37，丢弃聊天/运行历史，保留模型配置和凭据
-引用；exact v36 与 current v37 reset 还保留人机交互设置及 revision。无法安全识别且含配置的旧库拒绝
+Canonical SQLite 版本为 v38。正常打开旧库只返回 reset-required，不改写旧库。
+受管 reset 可从受支持的 exact 旧指纹读取配置白名单后新建 v38，丢弃聊天/运行历史，保留模型配置和凭据
+引用；受支持的 exact v36/v37 与 current v38 reset 还保留人机交互设置及 revision。无法安全识别且含配置的旧库拒绝
 重置，不能默默用默认值替换配置。既有 exact v33 私有备份配置恢复仍受 fingerprint 限制。
 
 ## 代码接续入口
@@ -134,12 +136,12 @@ Canonical SQLite 版本为 v37。正常打开旧库只返回 reset-required，�
 | ---- | ----------------------------------------------------- | -------------------- |
 | 1    | 公共协议、独立设置、存储事务、Host 契约、模块挂载基础 | 已完成（2026-09-05） |
 | 2    | 阻塞工具、暂停恢复、用量、取消与重启                  | 已完成（2026-09-05） |
-| 3    | 异步工具、多批次投递、空闲续接、忽略                  | 未开始               |
+| 3    | 异步工具、多批次投递、空闲续接、忽略                  | 已完成（2026-09-05） |
 | 4    | 个性化开关、分页面板、抢占、最小化与问答气泡          | 未开始               |
 | 5    | 跨层验收、修整、开发及用户文档                        | 未开始               |
 
-当前提交接口先保存回答，再由 Host 领取并恢复同步 Run；返回 submitted 不代表已 applied。
-异步工具仍未暴露，设置页与答题面板属于第 4 轮；前端不能直接 startTurn 绕过投递协调。
+当前提交接口先保存回答，再由 Host 选择原同步调用恢复、异步 steering 或正常后续 Run；返回 submitted 不代表已 applied。
+两个工具均已接入真实 Host。设置页与答题面板属于第 4 轮；前端不能直接 startTurn 绕过投递协调。
 
 ## 第 1 轮交付与验证
 
@@ -272,3 +274,133 @@ API token、带秘密的 endpoint、不可持久化 MCP 原始参数不进入新
 
 本轮已结束。没有接入异步投递、设置页或答题面板；第 3 轮从上述异步接入点继续。
 结果未知的执行按持久围栏保守失败，公开 delivery 标记失败/取消而不伪称已投递。普通上下文大小和私有工具检查点约束仍适用。
+
+## 第 3 轮：异步工具与回答投递
+
+### 接纳与提示词
+
+`AgentHumanInteractionRuntimeHost::accept_async` 接收可信的 `AgentAsyncUserInputRequest`。
+Host 校验当前执行 segment、根节点、Run/assistant/toolCall 和实时设置，在写事务中创建独立批次。
+同一原调用只能创建一次；成功后返回 requestId，Harness 立即生成一个普通工具结果：
+
+```json
+{
+  "type": "human_interaction_accepted",
+  "schemaVersion": 1,
+  "requestId": "Host request ID",
+  "status": "accepted"
+}
+```
+
+该结果正常完成原 ToolCall。回答不会再次补 ToolResult，也不让该工具 Future 等待人类。
+原工具调用的模型用量继续按普通 segment 结算；回答记录、入队和显示本身不产生模型用量。
+
+同步和异步 readiness 独立；`human.interaction` 与 `human.interaction.async` 动态能力共享一次
+设置快照，工具 Schema、RequestOnly 提示词及能力状态保持一致，稳定前缀不变。
+专项说明要求同步用于必须等待的必要信息，异步只能继续不依赖答案的工作，不重复问同一问题，
+跳过、忽略和沉默均不是同意，提问不能替代权限审批。
+`natural_sampling_state` 只在本来就要发生的合法模型采样边界读取已忽略 requestId；它不创建持久
+User/guidance、队列消息或 Wake，不要求 Provider 为忽略状态再推理一次。各 Provider 沿用现有
+RuntimeGuard 的线协议角色转换；内部状态仍是 RequestOnly 运行信息，不是正式用户回答。
+
+### Host 仲裁与持久化路径
+
+`submit` 先提交不可变 Response 和 pending Delivery，再调用
+`AgentService::schedule_human_input_deliveries`。同步恢复优先，异步按 Response.sequence 扫描。
+Host 的 dispatcher 串行选择路径；SQLite 的 revision/CAS、停止范围和逻辑 Turn 占用是最终依据。
+
+| 场景                        | 路径与结算点                                                                                            |
+| --------------------------- | ------------------------------------------------------------------------------------------------------- |
+| 合法活跃 segment 可接收引导 | 同事务绑定 Response、目标 Run 与 guidance journal，然后放入现有 steering 队列                           |
+| 完整工具批次结束            | Runtime 按队列顺序加入 UserGuidance；Trace、ModelContext、guidance applied 与 Delivery applied 原子提交 |
+| 审批或同步等待              | 先保存 pending 回答；合法恢复 segment 注册队列后接入，仍等完整工具批次结束                              |
+| 手动压缩或厂商切换占用      | 保持 pending；操作释放占用后由 Host 再次调度                                                            |
+| 同聊天真正空闲              | 复用正常 HumanRoot Turn 准备与权限路径；User、assistant、Run lease、回答绑定和回执在同事务保存          |
+| 新回答 Run 执行             | 进入 Runtime 前持久 executing 围栏；绑定目标的已完成 agent_loop 模型请求事实确认 applied                |
+
+初始 Run 的预排队引导也在第一次合法采样前应用；审批或同步恢复必须先完成被冻结的剩余工具队列。
+队列在终结或暂停时关闭，尚未应用的异步 guidance 可以回到 pending。重新绑定使用新的 guidance
+及 clientMessageId，避免旧 rejected journal 与同逻辑 Run 恢复冲突；正式回应身份始终是 responseId。
+如果旧队列已关闭但旧 Run 还没有持久终结，Host 不会把“无 worker”当作空闲另开 Run。
+
+运行中只投影 UserGuidance，不另插 messages User；空闲续接只插一次普通 User，不另投 guidance。
+两者携带相同 `HumanInteractionResponseDisplay` JSON。同步依然只投原 ToolResult。
+完整有界问答材料不会被通用 guidance 的 12000 字符限额截断；普通 guidance 的限额不变。
+
+调度由提交、segment 启动/恢复、Run 释放、压缩结束和启动恢复驱动，不轮询等待人类的问题。
+暂时不能投递时答案保持 submitted，原问题不能重开。新 Run 准备从当前聊天模型和可信持久权限
+构造输入，不能借答案继承无人值守身份、子 Agent 身份或提升权限；模型配置和凭据仍由原路径解析。
+
+### 停止、重启及未知执行
+
+每次正式提交在同事务冻结当时占用聊天的 stopScopeRunId。显式 Stop 取消此前接纳、尚未应用且
+属于该停止范围或目标 Run 的回答，并关闭对应排队 guidance；迟到队列、结束回调和重启不能
+把它们重新投递。自然完成和 Stop 都不撤销仍 open 的异步批次；Stop 后用户新的明确提交是新输入。
+关闭提问设置同样不影响既有问题结算及回答投递。
+
+同版本重启先对账 guidance，再恢复问答事实：
+
+- 未提交问题保持 open，已提交 pending 按原 Response.sequence 继续仲裁。
+- 未跨越持久应用边界的 queued guidance 可安全重新选择路径，applied guidance 由模型历史继续承载，不能再次入队。
+- 新回答 Run 已绑定但尚未执行时，确认没有模型请求或 Trace 副作用后终结空 assistant，撤下未消费的 provisional User，
+  保留其稳定消息 ID，回答恢复 pending。后续重建相同 ID，防止未消费的 User 被普通下一轮历史提前读取。
+- executing 后没有可靠模型消费证明属于结果未知：Delivery 标 failed，禁止盲目重放模型或工具。
+  applied、failed、cancelled 均不会因重启回到可编辑问题。原回答事实始终保持 immutable。
+
+非阻塞 `ignore` 与 submit 共用 revision/CAS 和 publication 锁，仅结束指定批次；不创建 Delivery，
+不调用 dispatcher，不发送草稿或用户输入。全部 skipped 后 submit 仍走完整正式回应路径。
+
+### 第 4 轮前端接续契约
+
+本轮不添加答题页面。前端通过已有 Host API 实现产品契约，不能直接选择 Run 或模拟工具结果：
+
+1. `listRequests` 与 `requestChanged` 提供完整批次；分页按 Request.sequence 倒序。提交顺序由 Host Response.sequence 决定。
+2. 使用 Host 的 request/question/option ID，提交 `expectedRevision`、稳定 `submissionId` 和完整答案联合数组。
+   网络重试复用原 submissionId 与同一 payload；不能生成新身份反复提交。
+3. submit 返回 submitted 即关闭卡片及该批入口；delivery 仍可能 pending/bound。相同 request revision 下 delivery revision
+   可以继续增长，Renderer 应独立比较两者，不得忽略较新的投递快照或据此恢复编辑。
+4. 公共 `HumanInteractionResponseDisplay` 和 `parseHumanInteractionResponseDisplay` 提供问题＋答案展示结构。
+   从可信 Request/Response 事实按题序构造即时用户气泡，再与同步 ToolResult、活跃 UserGuidance 或普通 UserMessage
+   的 responseId 合并为一个展示；不能仅凭任意普通消息包含 JSON 标记就给予问答权限。
+   历史/分支可以直接渲染冻结完整材料，但没有重新回答入口或投递动作。
+5. active 路径 delivery.targetRunId 指向被引导 Run，userMessageId 为空；idle 路径两者都存在。
+   收到新的目标绑定后重读同聊天消息和 Run 状态，载入 Host 自动创建的普通 User/assistant；通知丢失时从查询重建。
+6. `ignored` 不展示正式回答气泡；`submitted` 且所有 skipped 显示逐题“已跳过”。最小化、翻页和草稿只在前端保存，
+   不调用 ignore/submit；审批抢占不能丢草稿。关闭设置后已有批次继续可提交/忽略。
+7. 文本框 Enter 和 Escape 不得隐式提交、跳过或取消运行；中文输入法的组合确认只作用于输入框。
+   所有分页、优先级、灰色问题文本及审批框视觉复用按前述完整产品契约完成。
+
+### 第 3 轮实际验证
+
+以下检查已执行通过，筛选范围部分重叠，不相加为独立总数：
+
+- `cargo test --locked -p mycopilot-core-server application::agent::tests::human_input --bin core-server`：27 项，
+  其中第 2 轮同步 10 项和第 3 轮异步/共享协议 17 项。可控本地 Provider 经真实 Host/Harness 验证：
+  多批次按提交顺序、active→idle、自然结束后回答、全部 skipped、ignore 无 Wake、同版本重启、
+  审批/同步等待及旧 guidance 重绑、真实手动压缩占用结束自动投递、Stop 前后竞争、
+  失败首样和审批续跑前失败后的结算/后续投递、同一答案唯一历史投影、精确模型请求数与用量。
+- Rust Core `runtime::tests::human_interaction`：9 项；`runtime::preparation::human_interaction_tests`：9 项；
+  `runtime::extensions::human_interaction`：6 项；`conversation_trace_projection` 中问答投影专项：4 项；
+  `runtime::tests::steering_and_repair`：6 项。包含真实 Provider 的 accepted 后续工具顺序、async→sync
+  冻结队列→恢复后 guidance、自然 ignored 状态、根/所有子级/Automation 隔离、动态快照及长答复不截断。
+- `cargo test --locked -p mycopilot-core human_interaction_repository --lib`：36 项（包含 9 项新增存储验证）；
+  `storage::migrations::tests`：30 项；`storage-reset-dev`：59 项；fork 表分类专项：1 项。
+  验证 CAS/幂等、submit 与 Stop 并发、Trace/ModelContext 与回执同事务、绑定前启动失败回滚、
+  未执行/执行未知/完成消费三种重启情况、停止围栏及 exact v37 配置保留 reset。
+- Core Server 既有 `application::agent::tests::steering`：13 项；`application::agent::tests::pending_actions`：71 项。
+  后者共享 fixture 曾遗漏第 2 轮新增的必填 `pauseReason`，已更新为当前协议的 `approval` 后全部通过；
+  没有降低生产校验或加入旧检查点兼容。
+- TypeScript：协议/display/Main RPC 专项共 35 项，含跨语言 fixture 和约 480 KiB 的完整 queued/applied 问答内容；
+  `pnpm typecheck:node`、`pnpm typecheck:web` 及变更 TS/脚本 ESLint 通过。
+- `cargo clippy --locked --workspace --all-targets -- -D warnings`、Rust/Prettier 格式、
+  `pnpm check:docs`、`pnpm check:public-docs`、`pnpm check:test-layout` 及 `git diff --check` 通过。
+
+独立审查发现并已修复：首个模型请求失败后 receipt 长期 bound、审批续跑在 Runtime 前失败遗漏调度、
+以及新增取消续跑调度可能重入 deletion lock。相应终态出口现在先完成持久结算并释放锁，再调度合法待投递回应。
+
+Canonical SQLite 为 v38，fingerprint 为 `sha256:03332e3251b0660eeff21c26300cec499009aee56b68d3d92556a8c22f047a67`。
+本轮使用临时数据库和可控本地 Provider，未清空实际开发数据库，未调用付费模型或改写 API 凭据。
+没有旧聊天/旧运行/旧检查点迁移；只更新当前 schema 和现有开发 reset 配置保留路径。
+
+第 3 轮已结束。结果未知的执行保守标记失败，不自动重放；前端页面、分页草稿、最小化与视觉渲染留待第 4 轮，
+按上述完整 Host 契约接入，不由 Renderer 新建或选择回答目标 Run。

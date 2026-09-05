@@ -423,6 +423,53 @@ pub struct AgentUserInputSuspension {
 
 pub trait AgentHumanInteractionRuntimeHost: Send + Sync {
     fn suspend(&self, suspension: AgentUserInputSuspension) -> AgentResult<()>;
+
+    /// Only a Host with durable admission and answer delivery may expose the asynchronous tool.
+    /// Synchronous-only hosts keep this closed regardless of the user's question setting.
+    fn async_execution_ready(&self) -> bool {
+        false
+    }
+
+    /// Commit admission before returning the generated request ID. Exact owner/call retries must
+    /// resolve to the original batch; a successful return is the sole authoritative ToolResult.
+    /// The Host rechecks the current setting in its admission transaction.
+    fn accept_async(
+        &self,
+        _request: AgentAsyncUserInputRequest,
+    ) -> AgentResult<AgentAsyncUserInputAccepted> {
+        Err(AgentError::new(
+            "Asynchronous human questions are unavailable.",
+        ))
+    }
+
+    /// Read-only snapshot at an already planned request. Never claim answers, create guidance,
+    /// signal a Wake, or schedule inference here.
+    fn natural_sampling_state(
+        &self,
+        _request: AgentSamplingBoundaryRequest,
+    ) -> AgentResult<AgentHumanInteractionSamplingState> {
+        Ok(AgentHumanInteractionSamplingState::default())
+    }
+}
+
+/// Native ownership is injected by the runtime; the model authored only `questions`.
+#[derive(Debug, Clone)]
+pub struct AgentAsyncUserInputRequest {
+    pub conversation_id: String,
+    pub run_id: String,
+    pub assistant_message_id: String,
+    pub call: AgentToolCall,
+    pub questions: crate::human_interaction::HumanInteractionToolInput,
+}
+
+#[derive(Debug, Clone)]
+pub struct AgentAsyncUserInputAccepted {
+    pub request_id: String,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct AgentHumanInteractionSamplingState {
+    pub ignored_request_ids: Vec<String>,
 }
 
 /// A Host-authenticated response already claimed for this exact suspended call. Deliberately
@@ -835,6 +882,10 @@ pub fn prepare_context_window_tool_projection(
             automation_report_sink: host_services.automation_report_sink.clone(),
             human_interaction_policy: host_services.human_interaction_policy.clone(),
             human_interaction_execution_ready: host_services.human_interaction_runtime.is_some(),
+            human_interaction_async_execution_ready: host_services
+                .human_interaction_runtime
+                .as_ref()
+                .is_some_and(|host| host.async_execution_ready()),
         },
     )?;
     let initial_run_world_state = RunWorldStateTracker::new_with_extension_sections(
