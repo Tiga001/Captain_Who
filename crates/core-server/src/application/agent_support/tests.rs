@@ -32,6 +32,7 @@ fn shared_mcp_renderer_contract_matches_rust_safe_event_serialization() {
         .expect("fixture action id")
         .to_string();
     let checkpoint = AgentRunCheckpoint {
+        pause_reason: mycopilot_core::AgentRunCheckpointPauseReason::Approval,
         version: AGENT_RUN_CHECKPOINT_SCHEMA_VERSION,
         run_id: "run-owned".to_string(),
         context_items: Vec::new(),
@@ -437,6 +438,7 @@ fn pending_continuation_uses_original_model_args_not_backend_bound_builder_field
     }))
     .unwrap();
     agent_input.resume_checkpoint = Some(AgentRunCheckpoint {
+        pause_reason: mycopilot_core::AgentRunCheckpointPauseReason::Approval,
         version: AGENT_RUN_CHECKPOINT_SCHEMA_VERSION,
         run_id: "run-backend-bound".to_string(),
         pending_action_id: None,

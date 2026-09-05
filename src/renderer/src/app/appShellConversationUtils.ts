@@ -58,7 +58,8 @@ export function getActiveRunModelId(conversation: ChatConversation | null) {
     latestAssistantMessage.status === 'pending' ||
     runStatus === 'starting' ||
     runStatus === 'running' ||
-    runStatus === 'waiting_for_approval'
+    runStatus === 'waiting_for_approval' ||
+    runStatus === 'waiting_for_user_input'
 
   return runIsActive ? conversation.modelId : null
 }

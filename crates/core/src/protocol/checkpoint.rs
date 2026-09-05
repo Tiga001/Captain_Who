@@ -10,6 +10,8 @@ pub struct AgentExtensionSnapshot {
 
 /// Current durable Agent run checkpoint schema.
 ///
+/// Version 14 distinguishes approval and human-input suspension authority. Human answers arrive
+/// exclusively through a native Host resume port and never carry an ApprovalDecision.
 /// Version 13 carries the consumed predecessor observation for the exact pending FileChange so a
 /// successful approval continuation can renew the same run-scoped id without weakening replay
 /// protection. Version 12 carried the exact private reference for a Host-owned Run-scoped
@@ -23,7 +25,15 @@ pub struct AgentExtensionSnapshot {
 /// The referenced payload remains encrypted in the Host vault; raw Provider continuation and
 /// reasoning are never serialized into the checkpoint. Any other schema version is rejected at
 /// the approval boundary.
-pub const AGENT_RUN_CHECKPOINT_SCHEMA_VERSION: u32 = 13;
+pub const AGENT_RUN_CHECKPOINT_SCHEMA_VERSION: u32 = 14;
+
+/// Suspension sources are separate authority domains. A user answer never grants approval.
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentRunCheckpointPauseReason {
+    Approval,
+    UserInput,
+}
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -42,6 +52,7 @@ pub struct AgentRunToolSetCheckpoint {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgentRunCheckpoint {
     pub version: u32,
+    pub pause_reason: AgentRunCheckpointPauseReason,
     pub run_id: String,
     pub context_items: Vec<AgentContextCheckpointItem>,
     pub next_model_request_index: usize,

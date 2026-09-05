@@ -3435,7 +3435,7 @@ describe('activation failure recovery', () => {
 })
 
 describe('edited turn Skill recovery', () => {
-  it.each(['running', 'waiting_for_approval'] as const)(
+  it.each(['running', 'waiting_for_approval', 'waiting_for_user_input'] as const)(
     'rejects edit while the source Turn is %s',
     async (status) => {
       const active = storedConversation()
@@ -3864,6 +3864,76 @@ describe('transient LLM retry lifecycle', () => {
 })
 
 describe('authoritative run cancellation and conversation forking', () => {
+  it('retains a suspended Run binding until the same Run resumes and completes', async () => {
+    mockSuccessfulTurnStarts()
+    const screen = await renderSelectedConversation()
+    await screen.getByRole('button', { name: 'submit-without-skill' }).click()
+    await expect.poll(() => testState.startConversationTurn.mock.calls.length).toBe(1)
+    const readsBeforeWaiting = testState.loadConversation.mock.calls.length
+
+    emitAgentEvent({
+      type: 'done',
+      runId: 'run-1',
+      success: true,
+      status: 'waiting_for_user_input',
+      usage: { totalTokens: 12, billableRequestCount: 1 }
+    })
+    await expect
+      .element(screen.getByTestId('agent-run-status'))
+      .toHaveTextContent('waiting_for_user_input')
+    await expect.element(screen.getByTestId('last-assistant-status')).toHaveTextContent('pending')
+    await expect.element(screen.getByRole('button', { name: 'command-compact' })).toBeDisabled()
+    await expect.element(screen.getByRole('button', { name: 'command-fork' })).toBeDisabled()
+    expect(testState.loadConversation.mock.calls.length).toBe(readsBeforeWaiting)
+
+    await screen.getByRole('button', { name: 'submit-without-skill' }).click()
+    await screen.getByRole('button', { name: 'continue-in-new-task' }).click()
+    expect(testState.startConversationTurn).toHaveBeenCalledTimes(1)
+    expect(testState.forkConversation).not.toHaveBeenCalled()
+
+    emitAgentEvent({ type: 'started', runId: 'run-1', toolDefinitions: [] })
+    await expect.element(screen.getByTestId('agent-run-status')).toHaveTextContent('running')
+    emitAgentEvent({
+      type: 'done',
+      runId: 'run-1',
+      success: true,
+      status: 'completed',
+      content: 'Continued with the submitted answer.',
+      usage: { totalTokens: 25, billableRequestCount: 2 }
+    })
+    await expect.element(screen.getByTestId('agent-run-status')).toHaveTextContent('completed')
+    await expect.element(screen.getByTestId('last-assistant-status')).toHaveTextContent('sent')
+    expect(testState.startConversationTurn).toHaveBeenCalledTimes(1)
+  })
+
+  it('rehydrates a waiting Run binding and lets Stop settle it authoritatively', async () => {
+    const stored = storedConversation()
+    const assistant = stored.messages.at(-1)
+    if (!assistant?.agentRun) throw new Error('missing human-input Run fixture')
+    assistant.status = 'pending'
+    assistant.agentRun.status = 'waiting_for_user_input'
+    testState.persistedConversations.set(stored.id, stored)
+    const screen = await renderSelectedConversation()
+
+    await expect.element(screen.getByRole('button', { name: 'command-compact' })).toBeDisabled()
+    await expect.element(screen.getByRole('button', { name: 'command-fork' })).toBeDisabled()
+    await screen.getByRole('button', { name: 'stop-generating' }).click()
+    expect(testState.cancelAgentRun).toHaveBeenCalledWith('run-old')
+    await expect
+      .element(screen.getByTestId('agent-run-status'))
+      .toHaveTextContent('waiting_for_user_input')
+    emitAgentEvent({
+      type: 'done',
+      runId: 'run-old',
+      success: false,
+      status: 'cancelled',
+      content: ''
+    })
+    await expect.element(screen.getByTestId('agent-run-status')).toHaveTextContent('cancelled')
+    await expect.element(screen.getByTestId('last-assistant-status')).toHaveTextContent('sent')
+    expect(testState.startConversationTurn).not.toHaveBeenCalled()
+  })
+
   it('keeps a stopped run command event routed to its original Timeline item', async () => {
     mockSuccessfulTurnStarts()
     const screen = await renderSelectedConversation()

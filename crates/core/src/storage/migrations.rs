@@ -1,13 +1,13 @@
 use rusqlite::{ffi, Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
 
-pub const STORAGE_SCHEMA_VERSION: i32 = 36;
+pub const STORAGE_SCHEMA_VERSION: i32 = 37;
 pub const DEVELOPMENT_STORAGE_SCHEMA_RESET_REQUIRED: &str =
     "development_storage_schema_reset_required";
 
 const CANONICAL_SCHEMA: &str = include_str!("canonical_schema.sql");
 const CANONICAL_SCHEMA_FINGERPRINT: &str =
-    "sha256:e11e09c7ea7a36fa1df8e7d47c5caaba8cb812158d84c82900e76a568ac170a1";
+    "sha256:3f9d66722cd1e6c7ee26512a166a906fa8471a05083522d084ba2182b8fc4a36";
 /// Opens the canonical schema without migrating historical development databases.
 ///
 /// A brand-new database is initialized atomically. Existing development databases must already
@@ -231,7 +231,7 @@ mod tests {
         let oversize_answers = format!("[\"{}\"]", "a".repeat(262144));
         assert!(connection.execute("INSERT INTO human_interaction_responses(response_id,request_id,submission_id,base_revision,kind,answers_json,created_at) VALUES ('large','other','large',0,'submitted',?1,2)", [oversize_answers]).is_err());
         let oversize_checkpoint = format!("{{\"value\":\"{}\"}}", "a".repeat(1048576));
-        assert!(connection.execute("INSERT INTO human_interaction_suspensions VALUES ('request','run','assistant','tool',?1,'waiting',0,1,1)", [oversize_checkpoint]).is_err());
+        assert!(connection.execute("INSERT INTO human_interaction_suspensions(request_id,run_id,assistant_message_id,tool_call_id,checkpoint_json,status,revision,created_at,updated_at) VALUES ('request','run','assistant','tool',?1,'waiting',0,1,1)", [oversize_checkpoint]).is_err());
     }
 
     #[test]
@@ -653,7 +653,7 @@ CREATE TABLE model_provider_credential_cleanup (
             .contains(DEVELOPMENT_STORAGE_SCHEMA_RESET_REQUIRED));
         assert!(error
             .to_string()
-            .contains("expected schema version 36, found 30"));
+            .contains("expected schema version 37, found 30"));
         assert_eq!(read_schema_version(&connection).unwrap(), 30);
         assert_eq!(schema_fingerprint(&connection).unwrap(), fingerprint_before);
         let columns = connection

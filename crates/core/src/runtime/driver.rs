@@ -50,6 +50,8 @@ impl AgentRuntime {
             mut agent_collaboration,
             automation_report_sink,
             human_interaction_policy,
+            human_interaction_runtime,
+            user_input_resume,
         } = host_services.unwrap_or_default();
         let _steer_input_close_guard = AgentSteerInputCloseGuard::new(steer_input.clone());
         let run_id = run_id.unwrap_or_else(generate_run_id);
@@ -71,6 +73,19 @@ impl AgentRuntime {
                 .and_then(|context| context.project_id.clone()),
             cancellation_token.clone(),
         );
+        let trusted_user_input = user_input_resume.is_some();
+        if let Some(resume) = user_input_resume {
+            install_trusted_user_input_resume(&mut input, &run_id, resume)?;
+        }
+        if !trusted_user_input
+            && input.resume_checkpoint.as_ref().is_some_and(|checkpoint| {
+                checkpoint.pause_reason == crate::AgentRunCheckpointPauseReason::UserInput
+            })
+        {
+            return Err(AgentError::new(
+                "Human input requires the trusted Host resume port.",
+            ));
+        }
         let restore_trace_conversation_id = input
             .context
             .as_ref()
@@ -110,11 +125,12 @@ impl AgentRuntime {
         })?;
         let shared_context_baseline =
             publish_trace_recorder_snapshot(&setup_conversation_trace, trace_observer.as_ref())?;
-        let restored_checkpoint = restore_input_checkpoint(
+        let restored_checkpoint = restore_input_checkpoint_with_user_input(
             &mut input,
             &run_id,
             &checkpoint_model_tool_result_gate,
             &continuation_archive_metadata,
+            trusted_user_input,
         )
         .map_err(|error| {
             attach_failed_runtime_trace(
@@ -196,6 +212,7 @@ impl AgentRuntime {
                 agent_collaboration_enabled: agent_collaboration.is_some(),
                 automation_report_sink,
                 human_interaction_policy,
+                human_interaction_execution_ready: human_interaction_runtime.is_some(),
             },
         )
         .map_err(|error| {
@@ -1891,6 +1908,96 @@ impl AgentRuntime {
                             usage,
                             finish_reason,
                         ));
+                    }
+
+                    if policy_preflight_failure.is_none()
+                        && matches!(&tool_identity,
+                            AgentToolIdentity::RuntimeExtension { extension_id, tool_name }
+                                if extension_id == "human.interaction" && tool_name == "request_user_input")
+                    {
+                        let suspended = (|| -> AgentResult<AgentUserInputSuspension> {
+                            let crate::tools::human_interaction::HumanInteractionToolOutcome::Suspended(questions) =
+                                crate::tools::human_interaction::prepare_user_input_suspension(&call.args)?;
+                            let conversation_id = trace_conversation_id.as_ref().ok_or_else(|| {
+                                AgentError::new("Human questions require an interactive root conversation.")
+                            })?;
+                            let assistant_message_id = trace_assistant_message_id.as_ref().ok_or_else(|| {
+                                AgentError::new("Human questions require an assistant message owner.")
+                            })?;
+                            if run_context.as_ref().is_none_or(|context| context.collaboration_identity.is_some()) {
+                                return Err(AgentError::new("Human questions require an interactive root conversation."));
+                            }
+                            let extension_snapshots = runtime_extensions.snapshots()?;
+                            let trace = conversation_trace.lock().unwrap_or_else(|error| error.into_inner());
+                            let mut checkpoint = create_run_checkpoint_with_file_observations(
+                                &run_id,
+                                RunCheckpointState {
+                                    context: &active_context,
+                                    next_model_request_index,
+                                    tool_batch: &tool_batch,
+                                    extension_snapshots,
+                                    pending_tool_call_id: &call.id,
+                                    conversation_trace: &trace,
+                                    tool_set: &effective_tool_set,
+                                    run_context: run_context.as_ref(),
+                                    collaboration_run_snapshot: agent_collaboration.as_ref().map(AgentCollaborationRuntimeServices::run_snapshot),
+                                    model_capabilities,
+                                    run_world_state: run_world_state.snapshot(),
+                                    provider_profile_config: &llm_request.provider_profile_config,
+                                    provider_protocol_key: &llm_request.provider_protocol_key,
+                                },
+                                tool_context.file_observation_registry(),
+                                None,
+                            )?;
+                            checkpoint.pause_reason = crate::AgentRunCheckpointPauseReason::UserInput;
+                            Ok(AgentUserInputSuspension {
+                                conversation_id: conversation_id.clone(),
+                                run_id: run_id.clone(),
+                                assistant_message_id: assistant_message_id.clone(),
+                                call: call.clone(),
+                                questions,
+                                checkpoint,
+                                segment_usage: usage.clone(),
+                            })
+                        })();
+                        let admission = suspended.and_then(|suspension| {
+                            human_interaction_runtime.as_ref().ok_or_else(|| {
+                                AgentError::new("The human question runtime is unavailable.")
+                            })?.suspend(suspension)
+                        });
+                        match admission {
+                            Ok(()) => {
+                                // The Host has now committed question, checkpoint and segment usage.
+                                // Release this execution segment with the original tool still open.
+                                file_transaction_guard.preserve_for_suspension();
+                                event_stream.emit(state_event(
+                                    &run_id, AgentRunStatus::WaitingForUserInput, Some(run_id.clone()), None,
+                                ));
+                                event_stream.emit(done_event(
+                                    &run_id, true, AgentRunStatus::WaitingForUserInput, None,
+                                    usage.clone(), finish_reason.clone(), Vec::new(),
+                                ));
+                                return Ok(AgentChatOutput {
+                                    content: String::new(),
+                                    status: AgentRunStatus::WaitingForUserInput,
+                                    run_id,
+                                    events: event_stream.into_events(),
+                                    tool_definitions,
+                                    todo: runtime_extensions.todo_state(),
+                                    usage,
+                                    finish_reason,
+                                    proposed_actions: Vec::new(),
+                                    conversation_turn_trace: None,
+                                });
+                            }
+                            Err(_) => {
+                                // Admission is transactional. Do not expose Host database details or
+                                // claim that the question is pending when no durable pause exists.
+                                policy_preflight_failure = Some(failed_tool_call_result(&call,
+                                    AgentError::new("The question could not be created. Check the question format and current availability; no answer was received."),
+                                ));
+                            }
+                        }
                     }
 
                     if requires_approval {

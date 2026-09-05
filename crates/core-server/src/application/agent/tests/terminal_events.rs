@@ -1801,6 +1801,7 @@ fn restart_conservatively_blocks_interrupted_manual_command_deletion() {
     };
     let call = checkpoint_call_for_command(command);
     let mut checkpoint = AgentRunCheckpoint {
+        pause_reason: mycopilot_core::AgentRunCheckpointPauseReason::Approval,
         version: AGENT_RUN_CHECKPOINT_SCHEMA_VERSION,
         run_id: run_id.to_string(),
         pending_action_id: None,
@@ -2004,6 +2005,7 @@ fn manually_approved_command_reconciles_two_post_commit_errors_and_keeps_observa
         .unwrap();
     let call = checkpoint_call_for_command(&command);
     let mut checkpoint = AgentRunCheckpoint {
+        pause_reason: mycopilot_core::AgentRunCheckpointPauseReason::Approval,
         version: AGENT_RUN_CHECKPOINT_SCHEMA_VERSION,
         run_id: run_id.to_string(),
         pending_action_id: None,

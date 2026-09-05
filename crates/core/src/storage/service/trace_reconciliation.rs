@@ -88,7 +88,8 @@ impl StorageService {
                 .map_err(storage_error)?;
             if active_run_ids.contains(&candidate.run_id)
                 || (tree_stopped_at.is_none()
-                    && has_resumable_pending_action(&transaction, &candidate)?)
+                    && (has_resumable_pending_action(&transaction, &candidate)?
+                        || transaction.query_row("SELECT EXISTS(SELECT 1 FROM human_interaction_suspensions WHERE run_id=?1 AND assistant_message_id=?2 AND status IN ('waiting','claimed'))", rusqlite::params![candidate.run_id,candidate.assistant_message_id], |row| row.get::<_,bool>(0)).map_err(storage_error)?))
             {
                 continue;
             }

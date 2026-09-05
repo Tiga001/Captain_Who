@@ -38,6 +38,10 @@ impl FileTransactionRunGuard {
     }
 
     pub(super) fn preserve_for_approval(&mut self) {
+        self.preserve_for_suspension();
+    }
+
+    pub(super) fn preserve_for_suspension(&mut self) {
         self.preserve_run_grant = true;
         self.preserve_unsettled = true;
     }

@@ -1649,7 +1649,12 @@ fn is_terminal_run_status(status: &str) -> bool {
 fn is_live_run_status(status: &str) -> bool {
     matches!(
         status,
-        "starting" | "queued" | "running" | "waiting_for_approval" | "idle"
+        "starting"
+            | "queued"
+            | "running"
+            | "waiting_for_approval"
+            | "waiting_for_user_input"
+            | "idle"
     )
 }
 

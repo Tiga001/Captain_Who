@@ -2367,6 +2367,7 @@ fn attach_current_manual_file_effect_checkpoint(
     )
     .unwrap();
     let checkpoint = crate::AgentRunCheckpoint {
+        pause_reason: crate::AgentRunCheckpointPauseReason::Approval,
         version: crate::AGENT_RUN_CHECKPOINT_SCHEMA_VERSION,
         run_id: pending.run_id.clone(),
         context_items: Vec::new(),

@@ -18,7 +18,8 @@ function isAssistantReplySettled(message: ChatMessage) {
     runStatus === 'starting' ||
     runStatus === 'queued' ||
     runStatus === 'running' ||
-    runStatus === 'waiting_for_approval'
+    runStatus === 'waiting_for_approval' ||
+    runStatus === 'waiting_for_user_input'
   ) {
     return false
   }

@@ -6,7 +6,7 @@ fn checkpoint_tool_result_trace_item(
     let status = result_status(result);
     let success = status == ConversationTraceToolResultStatus::Succeeded;
     let (observation, result_redacted) =
-        sanitize_runtime_value(result.result.as_ref().unwrap_or(&Value::Null));
+        sanitize_runtime_tool_result(&call.tool, result.result.as_ref().unwrap_or(&Value::Null));
     let (error, error_redacted) = result
         .error
         .as_deref()
@@ -317,7 +317,7 @@ pub(crate) fn projected_tool_result_trace_item(
 pub(crate) fn canonical_tool_result_for_context(result: &AgentToolResult) -> AgentToolResult {
     let mut canonical = result.clone();
     if let Some(value) = canonical.result.as_mut() {
-        *value = sanitize_runtime_value(value).0;
+        *value = sanitize_runtime_tool_result(&canonical.tool, value).0;
     }
     if let Some(error) = canonical.error.as_mut() {
         *error = sanitize_runtime_text(error).0;

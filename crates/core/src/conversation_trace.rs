@@ -9,7 +9,7 @@
 use crate::conversation_trace_projection::{
     is_repeat_failure_eligible, project_attachment_text, project_narration, project_terminal_error,
     project_tool_call, project_tool_result, project_user_guidance, sanitize_runtime_text,
-    sanitize_runtime_value, DurableTraceProjectionLimits,
+    sanitize_runtime_tool_result, sanitize_runtime_value, DurableTraceProjectionLimits,
 };
 use crate::llm::{validate_provider_tool_call_id, LlmMessage};
 use crate::protocol::{

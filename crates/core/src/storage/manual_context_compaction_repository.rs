@@ -98,6 +98,7 @@ pub fn claim(
     let busy = transaction.query_row("WITH scope(conversation_id) AS (SELECT ?1 UNION SELECT conversation_id FROM agent_nodes WHERE root_conversation_id=?1) SELECT EXISTS(
         SELECT 1 FROM conversation_turn_traces WHERE conversation_id IN (SELECT conversation_id FROM scope) AND terminal_status = 'in_progress'
         UNION ALL SELECT 1 FROM agent_command_sessions WHERE conversation_id IN (SELECT conversation_id FROM scope) AND status IN ('starting','running')
+        UNION ALL SELECT 1 FROM human_interaction_suspensions s JOIN human_interaction_requests r ON r.request_id=s.request_id WHERE r.conversation_id IN (SELECT conversation_id FROM scope) AND s.status IN ('waiting','claimed','executing','model_in_flight')
         UNION ALL SELECT 1 FROM agent_pending_actions WHERE conversation_id IN (SELECT conversation_id FROM scope) AND status IN ('pending','approved','executing')
         UNION ALL SELECT 1 FROM context_compaction_receipts WHERE conversation_id IN (SELECT conversation_id FROM scope) AND status = 'in_progress'
         UNION ALL SELECT 1 FROM manual_context_compaction_operations WHERE conversation_id IN (SELECT conversation_id FROM scope) AND status = 'running'

@@ -63,7 +63,8 @@ pub(super) fn finalize_runtime_trace(
                 AgentRunStatus::Cancelled => Some(ConversationTurnTraceTerminalStatus::Cancelled),
                 AgentRunStatus::Idle
                 | AgentRunStatus::Running
-                | AgentRunStatus::WaitingForApproval => None,
+                | AgentRunStatus::WaitingForApproval
+                | AgentRunStatus::WaitingForUserInput => None,
             };
             if let Some(terminal_status) = terminal_status {
                 output.conversation_turn_trace = Some(finish_trace(

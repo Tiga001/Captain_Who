@@ -41,6 +41,7 @@ const RUN_STATUSES = new Set<ChatAgentRunView['status']>([
   'queued',
   'running',
   'waiting_for_approval',
+  'waiting_for_user_input',
   'completed',
   'failed',
   'cancelled'

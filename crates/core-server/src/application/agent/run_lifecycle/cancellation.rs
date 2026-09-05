@@ -327,6 +327,11 @@ impl AgentService {
         let mut outcome = AgentRunCancellationOutcome::NoEffect;
         outcome.record_resource_cleanup(cancelled_sessions > 0 || cancelled_processes > 0);
         outcome.record_turn_termination(runtime_token_signalled);
+        if !runtime_token_signalled {
+            outcome.record_turn_termination(self.cancel_waiting_human_input_run(run_id));
+        } else {
+            let _ = self.storage.cancel_sync_human_interactions_for_run(run_id);
+        }
         outcome
     }
 

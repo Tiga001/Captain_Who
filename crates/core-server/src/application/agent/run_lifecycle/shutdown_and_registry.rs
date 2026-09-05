@@ -1,7 +1,15 @@
 impl AgentService {
     pub async fn shutdown_active_runs(&self, timeout: Duration) -> (usize, bool) {
-        let manual_tokens = self.manual_context_compaction_cancellations.lock().unwrap_or_else(|error|error.into_inner()).values().cloned().collect::<Vec<_>>();
-        for token in &manual_tokens { token.cancel(); }
+        let manual_tokens = self
+            .manual_context_compaction_cancellations
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        for token in &manual_tokens {
+            token.cancel();
+        }
         let active_runs = {
             let cancellations = self
                 .cancellations
@@ -43,7 +51,11 @@ impl AgentService {
             if let Ok(settled) = session_result_rx.try_recv() {
                 sessions_settled = settled;
             }
-            let manual_settled = self.manual_context_compaction_cancellations.lock().unwrap_or_else(|error|error.into_inner()).is_empty();
+            let manual_settled = self
+                .manual_context_compaction_cancellations
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .is_empty();
             if active_runs_settled && sessions_settled && manual_settled {
                 return (active_runs.len() + manual_tokens.len(), false);
             }
@@ -127,7 +139,13 @@ impl AgentService {
     }
 
     pub(super) fn persist_forced_cancelled_runs(&self, run_ids: &[String]) {
-        const REASON: &str = "Core shutdown timed out while cancelling the active run.";
+        self.persist_cancelled_runs_with_reason(
+            run_ids,
+            "Core shutdown timed out while cancelling the active run.",
+        );
+    }
+
+    pub(super) fn persist_cancelled_runs_with_reason(&self, run_ids: &[String], reason: &str) {
         let contexts = {
             let usage_contexts = self
                 .usage_contexts
@@ -148,8 +166,8 @@ impl AgentService {
                 &context.run_id,
                 &context.conversation_id,
                 &context.assistant_message_id,
-                REASON,
-                Some(REASON),
+                reason,
+                Some(reason),
             ) {
                 Ok(terminal) => terminal,
                 Err(error) => {
@@ -165,7 +183,7 @@ impl AgentService {
                 &context.run_id,
                 AgentRunStatus::Cancelled,
                 None,
-                Some(REASON.to_string()),
+                Some(reason.to_string()),
             );
             let persisted = self.finalize_turn_with_human_root_notification(
                 &context.run_id,

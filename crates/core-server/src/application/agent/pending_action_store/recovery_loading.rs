@@ -141,6 +141,22 @@ pub(super) fn reconcile_file_change_run_grants_on_startup(
                 .map_err(|error| error.to_string())?;
         }
     }
+    let human_waits = storage
+        .list_sync_human_interaction_waits()
+        .map_err(|e| e.to_string())?;
+    let human_inputs = human_waits
+        .iter()
+        .filter_map(|(request, envelope)| {
+            let encoded = serde_json::to_string(envelope).ok()?;
+            let decoded = PersistedAgentResumeInput::decode(&encoded).ok()?;
+            let checkpoint = decoded.agent_input.resume_checkpoint.as_ref()?;
+            (checkpoint.run_id == request.run_id
+                && checkpoint.pending_tool_call_id == request.tool_call_id
+                && checkpoint.pause_reason
+                    == mycopilot_core::AgentRunCheckpointPauseReason::UserInput)
+                .then_some(decoded.agent_input)
+        })
+        .collect::<Vec<_>>();
     for grant in storage
         .list_active_file_change_run_grant_records()
         .map_err(|error| error.to_string())?
@@ -176,7 +192,19 @@ pub(super) fn reconcile_file_change_run_grants_on_startup(
                 && context.conversation_id.as_deref() == Some(grant.conversation_id.as_str())
                 && context.project_id.as_deref() == grant.project_id.as_deref()
         });
-        if !receipt_is_authoritative || !run_is_recoverable {
+        let human_run_is_recoverable = human_inputs.iter().any(|input| {
+            input
+                .resume_checkpoint
+                .as_ref()
+                .is_some_and(|checkpoint| checkpoint.run_id == grant.run_id)
+                && input.context.as_ref().is_some_and(|context| {
+                    context.collaboration_identity.is_none()
+                        && context.conversation_id.as_deref()
+                            == Some(grant.conversation_id.as_str())
+                        && context.project_id.as_deref() == grant.project_id.as_deref()
+                })
+        });
+        if !receipt_is_authoritative || !(run_is_recoverable || human_run_is_recoverable) {
             storage
                 .revoke_active_file_change_run_grant(&grant.run_id)
                 .map_err(|error| error.to_string())?;

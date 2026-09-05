@@ -173,6 +173,7 @@ pub enum AgentRunStatus {
     Idle,
     Running,
     WaitingForApproval,
+    WaitingForUserInput,
     Completed,
     Failed,
     Cancelled,

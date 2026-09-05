@@ -37,7 +37,14 @@ export const AGENT_CLEAR_USAGE_RECORDS_METHOD = 'agent.clearUsageRecords'
 export type AgentMessageRole = 'system' | 'user' | 'assistant'
 
 export type AgentRunStatus =
-  'idle' | 'queued' | 'running' | 'waiting_for_approval' | 'completed' | 'failed' | 'cancelled'
+  | 'idle'
+  | 'queued'
+  | 'running'
+  | 'waiting_for_approval'
+  | 'waiting_for_user_input'
+  | 'completed'
+  | 'failed'
+  | 'cancelled'
 
 export type AgentApiStyle = 'openai_compatible' | 'anthropic_compatible'
 

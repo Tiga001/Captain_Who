@@ -832,6 +832,7 @@ fn current_checkpoint_schema_round_trips_and_rejects_missing_or_extra_fields() {
     assert_eq!(decoded, checkpoint);
 
     for field in [
+        "pauseReason",
         "deferredExternalToolCallCount",
         "providerContinuationRefs",
         "runContext",

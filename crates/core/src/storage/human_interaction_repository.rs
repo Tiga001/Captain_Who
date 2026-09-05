@@ -10,7 +10,7 @@ use crate::human_interaction::*;
 type Result<T> = std::result::Result<T, HumanInteractionError>;
 
 /// Native Host ownership, deliberately not serializable/deserializable as model or IPC input.
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct HostHumanInteractionOwner {
     pub agent_id: String,
     pub conversation_id: String,
@@ -135,6 +135,21 @@ pub fn create_request(
     input: &HumanInteractionToolInput,
     now: i64,
 ) -> Result<HumanInteractionRequestSnapshot> {
+    let tx = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(unavailable)?;
+    let result = create_request_in_transaction(&tx, owner, mode, input, now)?;
+    tx.commit().map_err(unavailable)?;
+    Ok(result)
+}
+
+fn create_request_in_transaction(
+    tx: &Connection,
+    owner: &HostHumanInteractionOwner,
+    mode: HumanInteractionMode,
+    input: &HumanInteractionToolInput,
+    now: i64,
+) -> Result<HumanInteractionRequestSnapshot> {
     validate_human_interaction_tool_input(input)?;
     valid_time(now)?;
     let questions: Vec<_> = input
@@ -167,11 +182,8 @@ pub fn create_request(
     if questions_json.len() > 1_048_576 {
         return Err(HumanInteractionError::invalid());
     }
-    let tx = connection
-        .transaction_with_behavior(TransactionBehavior::Immediate)
-        .map_err(unavailable)?;
-    validate_owner(&tx, owner)?;
-    let settings = load_settings(&tx)?;
+    validate_owner(tx, owner)?;
+    let settings = load_settings(tx)?;
     if !settings.enabled {
         return Err(HumanInteractionError::new(
             "disabled",
@@ -189,9 +201,7 @@ pub fn create_request(
     tx.execute("INSERT INTO human_interaction_requests(request_id,conversation_id,agent_id,run_id,assistant_message_id,tool_call_id,mode,status,revision,policy_revision,questions_json,created_at,updated_at)
         VALUES(?1,?2,?3,?4,?5,?6,?7,'open',0,?8,?9,?10,?10)",
         params![request_id, owner.conversation_id, owner.agent_id, owner.run_id, owner.assistant_message_id, owner.tool_call_id, enum_name(mode)?, settings.revision, questions_json, now]).map_err(unavailable)?;
-    let result = load_request(&tx, &owner.conversation_id, &request_id)?;
-    tx.commit().map_err(unavailable)?;
-    Ok(result)
+    load_request(tx, &owner.conversation_id, &request_id)
 }
 
 fn load_request(
@@ -504,6 +514,17 @@ fn settle(
         }
         return Err(conflict());
     }
+    if request.mode == HumanInteractionMode::Sync
+        && tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM agent_tree_run_stops WHERE run_id=?1)",
+                [&request.run_id],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(unavailable)?
+    {
+        return Err(conflict());
+    }
     if request.status != HumanInteractionRequestStatus::Open
         || request.revision != expected_revision
         || request.revision == HUMAN_INTERACTION_MAX_SAFE_INTEGER
@@ -592,3 +613,6 @@ pub(crate) fn load_suspension(
 
 #[cfg(test)]
 mod tests;
+
+mod sync;
+pub use sync::*;

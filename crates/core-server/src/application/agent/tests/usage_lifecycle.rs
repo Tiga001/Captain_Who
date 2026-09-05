@@ -1444,6 +1444,7 @@ fn pending_approval_persists_full_run_checkpoint() {
         AgentApprovalStatus::Required,
     );
     let run_checkpoint = AgentRunCheckpoint {
+        pause_reason: mycopilot_core::AgentRunCheckpointPauseReason::Approval,
         version: AGENT_RUN_CHECKPOINT_SCHEMA_VERSION,
         run_id: "run-checkpoint".to_string(),
         pending_action_id: Some(pending_action_storage_id(

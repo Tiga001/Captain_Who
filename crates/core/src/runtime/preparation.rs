@@ -21,6 +21,7 @@ pub(super) struct RuntimeCapabilityServices {
     pub(super) agent_collaboration_enabled: bool,
     pub(super) automation_report_sink: Option<Arc<dyn crate::AutomationReportSink>>,
     pub(super) human_interaction_policy: Option<Arc<dyn HumanInteractionPolicySource>>,
+    pub(super) human_interaction_execution_ready: bool,
 }
 
 pub(super) struct DurableConversationTimeline {
@@ -53,6 +54,7 @@ pub(super) fn prepare_runtime_capabilities(
             agent_collaboration_enabled: false,
             automation_report_sink: None,
             human_interaction_policy: None,
+            human_interaction_execution_ready: false,
         },
     )
 }
@@ -76,6 +78,7 @@ pub(super) fn prepare_runtime_capabilities_with_skills(
         agent_collaboration_enabled,
         automation_report_sink,
         human_interaction_policy,
+        human_interaction_execution_ready,
     } = services;
     let human_root = input.context.as_ref().is_some_and(|context| {
         context.collaboration_identity.is_none()
@@ -97,6 +100,7 @@ pub(super) fn prepare_runtime_capabilities_with_skills(
         extensions::RuntimeExtensionHostServices {
             builtin_capabilities,
             human_interaction_policy: human_root.then_some(human_interaction_policy).flatten(),
+            human_interaction_execution_ready: human_root && human_interaction_execution_ready,
             human_root,
         },
         extension_snapshots,
@@ -433,18 +437,40 @@ pub(super) fn append_attachment_context(
     ));
 }
 
-pub(super) fn restore_input_checkpoint(
+pub(super) fn restore_input_checkpoint_with_user_input(
     input: &mut AgentChatInput,
     run_id: &str,
     model_tool_result_gate: &ModelToolResultGate,
     archive_metadata: &ConversationHistoryArchiveTraceMetadata,
+    trusted_user_input: bool,
 ) -> AgentResult<Option<RestoredRunCheckpoint>> {
     let checkpoint = input.resume_checkpoint.take();
     let continuation = input.tool_continuation.take();
     let approval_decision = input.approval_decision.take();
     match (checkpoint, continuation, approval_decision) {
         (None, None, None) => Ok(None),
-        (Some(checkpoint), Some(continuation), Some(decision)) => {
+        (Some(checkpoint), Some(continuation), None) if trusted_user_input => {
+            if checkpoint.pause_reason != crate::AgentRunCheckpointPauseReason::UserInput {
+                return Err(AgentError::new(
+                    "A user answer cannot resume an approval checkpoint.",
+                ));
+            }
+            restore_run_checkpoint_with_model_projection(
+                checkpoint,
+                run_id,
+                &continuation,
+                input.assistant_message_id.as_deref(),
+                model_tool_result_gate,
+                archive_metadata,
+            )
+            .map(Some)
+        }
+        (Some(checkpoint), Some(continuation), Some(decision)) if !trusted_user_input => {
+            if checkpoint.pause_reason != crate::AgentRunCheckpointPauseReason::Approval {
+                return Err(AgentError::new(
+                    "An approval cannot resume a human question.",
+                ));
+            }
             let expected_action_id = expected_approval_action_id(
                 checkpoint.pending_action_id.as_deref(),
                 &checkpoint.pending_tool_call_id,
@@ -476,6 +502,92 @@ fn expected_approval_action_id<'a>(
     pending_tool_call_id: &'a str,
 ) -> &'a str {
     pending_action_id.unwrap_or(pending_tool_call_id)
+}
+
+/// Install only a native Host port response. The public input envelope remains approval-only.
+pub(super) fn install_trusted_user_input_resume(
+    input: &mut AgentChatInput,
+    run_id: &str,
+    resume: AgentUserInputResume,
+) -> AgentResult<()> {
+    use crate::human_interaction::validate_human_interaction_id;
+    let invalid = || AgentError::new("The trusted human input resume binding is invalid.");
+    validate_human_interaction_id(&resume.request_id).map_err(|_| invalid())?;
+    validate_human_interaction_id(&resume.response_id).map_err(|_| invalid())?;
+    if input.resume_checkpoint.is_some()
+        || input.tool_continuation.is_some()
+        || input.approval_decision.is_some()
+        || resume.checkpoint.run_id != run_id
+        || resume.checkpoint.pause_reason != crate::AgentRunCheckpointPauseReason::UserInput
+        || resume.continuation.call.tool != "request_user_input"
+        || resume.continuation.call.approval_status != AgentApprovalStatus::NotRequired
+        || !resume.continuation.result.ok
+        || resume.continuation.result.result.is_none()
+        || resume.continuation.result.error.is_some()
+        || input
+            .prompt_preferences
+            .as_ref()
+            .is_some_and(|preferences| preferences.automation_execution_context.is_some())
+    {
+        return Err(invalid());
+    }
+    let frozen_context = resume.checkpoint.run_context.as_ref().ok_or_else(invalid)?;
+    let current_context = input.context.as_ref().ok_or_else(invalid)?;
+    if frozen_context.collaboration_identity.is_some()
+        || current_context.collaboration_identity.is_some()
+        || frozen_context.conversation_id.is_none()
+        || frozen_context.conversation_id != current_context.conversation_id
+        || input
+            .assistant_message_id
+            .as_deref()
+            .is_none_or(|id| id.trim().is_empty())
+    {
+        return Err(invalid());
+    }
+    checkpoint_continuation_projection(&resume.checkpoint)?;
+    let frozen_call = resume
+        .checkpoint
+        .context_items
+        .iter()
+        .flat_map(|item| &item.tool_calls)
+        .find(|call| call.id == resume.checkpoint.pending_tool_call_id)
+        .ok_or_else(invalid)?;
+    if frozen_call.id != resume.continuation.call.id
+        || frozen_call.name != resume.continuation.call.tool
+        || frozen_call.args != resume.continuation.call.args
+        || resume.continuation.result.call_id != frozen_call.id
+        || resume.continuation.result.tool != frozen_call.name
+    {
+        return Err(invalid());
+    }
+    let crate::tools::human_interaction::HumanInteractionToolOutcome::Suspended(questions) =
+        crate::tools::human_interaction::prepare_user_input_suspension(
+            &resume.continuation.call.args,
+        )?;
+    let display: crate::human_interaction::HumanInteractionResponseDisplay =
+        serde_json::from_value(
+            resume
+                .continuation
+                .result
+                .result
+                .clone()
+                .ok_or_else(invalid)?,
+        )
+        .map_err(|_| invalid())?;
+    display.validate().map_err(|_| invalid())?;
+    if display.request_id != resume.request_id || display.response_id != resume.response_id
+        || display.answers.len() != questions.questions.len()
+        || display.answers.iter().zip(&questions.questions).any(|(answer, question)| {
+            answer.question() != question.title
+                || matches!(answer, crate::human_interaction::HumanInteractionAnswerDisplay::Option { answer, .. }
+                    if question.options.as_ref().is_none_or(|options| !options.contains(answer)))
+        })
+    {
+        return Err(invalid());
+    }
+    input.resume_checkpoint = Some(resume.checkpoint);
+    input.tool_continuation = Some(resume.continuation);
+    Ok(())
 }
 
 pub(super) fn suppressed_narration_context_item() -> ContextItem {
@@ -691,6 +803,7 @@ mod approval_identity_tests {
             agent_collaboration_enabled,
             automation_report_sink: None,
             human_interaction_policy: None,
+            human_interaction_execution_ready: false,
         }
     }
 

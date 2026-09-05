@@ -138,7 +138,10 @@ export function useAppShellMessageSubmission({
         targetConversationId !== null &&
         (!targetConversation ||
           targetConversation.archivedAt ||
-          targetConversation.pendingArchivedAt !== undefined)
+          targetConversation.pendingArchivedAt !== undefined ||
+          targetConversation.messages.some(
+            (message) => message.agentRun?.status === 'waiting_for_user_input'
+          ))
       ) {
         return false
       }
@@ -353,7 +356,13 @@ export function useAppShellMessageSubmission({
       const activeConversation = conversationsRef.current.find(
         (conversation) => conversation.id === conversationId
       )
-      if (activeConversation?.archivedAt || activeConversation?.pendingArchivedAt !== undefined) {
+      if (
+        activeConversation?.archivedAt ||
+        activeConversation?.pendingArchivedAt !== undefined ||
+        activeConversation?.messages.some(
+          (message) => message.agentRun?.status === 'waiting_for_user_input'
+        )
+      ) {
         return false
       }
 

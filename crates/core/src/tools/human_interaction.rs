@@ -1,7 +1,7 @@
 //! Reviewed model-facing contracts for human questions.
 //!
-//! These are specifications, not executable Tools. The runtime must not register them until the
-//! corresponding durable suspension/delivery implementations are available.
+//! Synchronous execution yields an internal suspension which only the runtime driver may settle.
+//! The asynchronous specification remains unregistered until its delivery implementation exists.
 
 use crate::protocol::{AgentToolApprovalMode, AgentToolDefinition, AgentToolSafety};
 use serde_json::json;
@@ -9,6 +9,49 @@ use serde_json::json;
 pub(crate) const HUMAN_INTERACTION_CAPABILITY: &str = "human.interaction";
 pub(crate) const HUMAN_INTERACTION_TOOL_NAMES: [&str; 2] =
     ["request_user_input", "request_user_input_async"];
+
+pub(crate) struct RequestUserInputTool;
+
+/// A suspension is not a tool result. No pending acknowledgement enters model context.
+pub(crate) enum HumanInteractionToolOutcome {
+    Suspended(crate::human_interaction::HumanInteractionToolInput),
+}
+
+pub(crate) fn prepare_user_input_suspension(
+    args: &serde_json::Value,
+) -> crate::AgentResult<HumanInteractionToolOutcome> {
+    let input = serde_json::from_value(args.clone())
+        .map_err(|_| crate::AgentError::new("The human interaction input is invalid."))?;
+    crate::human_interaction::validate_human_interaction_tool_input(&input)
+        .map_err(|_| crate::AgentError::new("The human interaction input is invalid."))?;
+    Ok(HumanInteractionToolOutcome::Suspended(input))
+}
+
+impl super::AgentTool for RequestUserInputTool {
+    fn definition(&self) -> AgentToolDefinition {
+        human_interaction_tool_definitions().remove(0)
+    }
+
+    fn execute(
+        &self,
+        _context: &super::ToolExecutionContext,
+        _args: serde_json::Value,
+    ) -> crate::AgentResult<serde_json::Value> {
+        Err(crate::AgentError::new(
+            "Human input must be suspended by the runtime driver.",
+        ))
+    }
+
+    fn permission_policy(&self) -> super::AgentToolPermissionPolicy {
+        super::AgentToolPermissionPolicy::Default
+    }
+
+    fn exposure(&self) -> super::AgentToolExposure {
+        super::AgentToolExposure::RequiresCapability(super::ToolCapabilityId::application_owned(
+            HUMAN_INTERACTION_CAPABILITY,
+        ))
+    }
+}
 
 pub(crate) fn human_interaction_tool_definitions() -> Vec<AgentToolDefinition> {
     [

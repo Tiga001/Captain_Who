@@ -73,7 +73,12 @@ export function isCompletedAgentRunStatus(status: ChatAgentRunView['status'] | u
 }
 
 export function isFinishedAgentOutputStatus(status: ChatAgentRunView['status'] | undefined) {
-  return status !== 'starting' && status !== 'running' && status !== 'waiting_for_approval'
+  return status !== 'starting' && status !== 'running' && !isSuspendedAgentRunStatus(status)
+}
+
+/** Suspensions end a worker segment while retaining the same logical Run and chat occupancy. */
+export function isSuspendedAgentRunStatus(status: ChatAgentRunView['status'] | undefined) {
+  return status === 'waiting_for_approval' || status === 'waiting_for_user_input'
 }
 
 export function getSettledActivityStatus(

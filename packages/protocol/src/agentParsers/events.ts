@@ -402,6 +402,7 @@ export function parseAgentEventForHost(value: unknown): AgentEvent {
                   'idle',
                   'running',
                   'waiting_for_approval',
+                  'waiting_for_user_input',
                   'completed',
                   'failed',
                   'cancelled'

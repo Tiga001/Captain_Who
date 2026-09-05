@@ -127,7 +127,10 @@ impl RunWorldStateTracker {
             .current
             .sections
             .iter()
-            .filter(|section| !dynamic_ids.contains(&section.id))
+            .filter(|section| {
+                !dynamic_ids.contains(&section.id)
+                    && !matches!(section.id, WorldStateSectionId::Extension(_))
+            })
             .cloned()
             .collect::<Vec<_>>();
         sections.push(effective_tools_section(tool_set)?);
@@ -482,6 +485,59 @@ mod tests {
         assert!(rendered.contains("tools.effective"));
         assert!(rendered.contains("skills_read_resource"));
         assert!(!rendered.contains("effective-tool-set-v"));
+    }
+
+    #[test]
+    fn human_interaction_world_state_replaces_extension_snapshots_without_duplicates() {
+        let input: AgentChatInput = serde_json::from_value(json!({
+            "apiUrl":"https://example.test/v1/chat/completions", "apiToken":"unused",
+            "model":"test-model", "modelCapabilities":{"imageInput":false}, "messages":[],
+        }))
+        .unwrap();
+        let capabilities =
+            prepare_runtime_capabilities(&input, "extension-state", &[], false, None).unwrap();
+        let section = |enabled| {
+            WorldStateSectionEnvelope::model_visible(
+                WorldStateSectionId::extension("human.interaction").unwrap(),
+                WorldStateLifetime::Run,
+                json!({"available":enabled}),
+                json!({"available":enabled}),
+            )
+            .unwrap()
+        };
+        let mut tracker = RunWorldStateTracker::new_with_extension_sections(
+            "extension-state",
+            &input,
+            &capabilities.initial_tool_set,
+            vec![section(true)],
+        )
+        .unwrap();
+        assert!(tracker
+            .reconcile(&capabilities.initial_tool_set, vec![section(true)], None)
+            .unwrap()
+            .is_none());
+        assert!(tracker
+            .reconcile(&capabilities.initial_tool_set, vec![section(false)], None)
+            .unwrap()
+            .is_some());
+        assert_eq!(
+            tracker
+                .snapshot()
+                .sections
+                .iter()
+                .filter(|s| s.id.as_str() == "human.interaction")
+                .count(),
+            1
+        );
+        assert!(tracker
+            .reconcile(&capabilities.initial_tool_set, Vec::new(), None)
+            .unwrap()
+            .is_some());
+        assert!(!tracker
+            .snapshot()
+            .sections
+            .iter()
+            .any(|s| s.id.as_str() == "human.interaction"));
     }
 
     #[test]

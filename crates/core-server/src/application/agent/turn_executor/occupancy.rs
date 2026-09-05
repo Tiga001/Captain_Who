@@ -66,7 +66,10 @@ impl AgentService {
         &self,
         conversation_id: &str,
     ) -> Result<bool, String> {
-        if self.ensure_no_manual_context_compaction(conversation_id).is_err() {
+        if self
+            .ensure_no_manual_context_compaction(conversation_id)
+            .is_err()
+        {
             return Ok(true);
         }
         if self
@@ -176,7 +179,13 @@ impl AgentService {
             // Startup may find more durable Turns than a newly lowered limit. Recovered permits
             // count every survivor, deliberately blocking new root and child admission until the
             // active count falls below the configured process limit.
-            permits.insert(run_id, self.turn_concurrency_gate.adopt_recovered());
+            if !self
+                .storage
+                .is_sync_human_interaction_run_waiting(&run_id)
+                .map_err(|e| e.to_string())?
+            {
+                permits.insert(run_id, self.turn_concurrency_gate.adopt_recovered());
+            }
         }
         Ok(())
     }

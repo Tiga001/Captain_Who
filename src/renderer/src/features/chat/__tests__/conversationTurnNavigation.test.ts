@@ -99,16 +99,19 @@ it('does not create a key for a final user message that has no assistant reply',
   expect(items.map((item) => item.userMessageId)).toEqual(['user-1'])
 })
 
-it('does not create a key while the reply is waiting for approval', () => {
-  const items = getConversationTurnNavigationItems([
-    userMessage('user-1', 'Please edit the file'),
-    assistantMessage('assistant-1', 'Waiting for approval', {
-      runStatus: 'waiting_for_approval'
-    })
-  ])
+it.each(['waiting_for_approval', 'waiting_for_user_input'] as const)(
+  'does not create a key while the reply is %s',
+  (runStatus) => {
+    const items = getConversationTurnNavigationItems([
+      userMessage('user-1', 'Please edit the file'),
+      assistantMessage('assistant-1', 'Waiting for approval', {
+        runStatus
+      })
+    ])
 
-  expect(items).toEqual([])
-})
+    expect(items).toEqual([])
+  }
+)
 
 it('does not create a key when a newer assistant reply is still running', () => {
   const items = getConversationTurnNavigationItems([

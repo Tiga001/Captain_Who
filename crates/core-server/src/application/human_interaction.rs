@@ -1,5 +1,5 @@
-//! Host entry points for durable human questions. This layer only acknowledges stored facts;
-//! synchronous continuation and asynchronous delivery are intentionally not implemented in round 1.
+//! Host entry points for durable human questions. Submission acknowledges an immutable response
+//! before the blocking continuation dispatcher claims it. Asynchronous delivery remains unmounted.
 
 use crate::application::agent::{AgentService, CoreServerNotificationSender};
 use mycopilot_core::human_interaction::*;
@@ -78,12 +78,11 @@ impl<'a> HumanInteractionService<'a> {
             input.expected_revision,
             &input.submission_id,
         )?;
-        let snapshot = self.storage.submit_human_interaction(&input)?;
-        emit(
-            notifications,
-            HUMAN_INTERACTION_REQUEST_CHANGED_METHOD,
-            &snapshot,
-        );
+        let snapshot = self
+            .agent
+            .accept_human_input_response(&input, notifications)?;
+        self.agent
+            .schedule_ready_human_input_resumes(notifications.clone());
         Ok(snapshot)
     }
 

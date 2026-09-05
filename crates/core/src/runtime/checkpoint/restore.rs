@@ -364,6 +364,7 @@ pub(super) fn restore_run_checkpoint_with_model_projection(
         // must not append a second authoritative assistant message.
         assistant_turn: None,
         assistant_turn_identity: Some(assistant_turn_identity),
+        restored_identity_validated: true,
         deferred_external_tool_call_count: checkpoint.deferred_external_tool_call_count,
         suppressed_narration: checkpoint.suppressed_narration,
         seen_semantic_fingerprints: restored_batch_fingerprints,
@@ -599,6 +600,31 @@ pub(super) fn checkpoint_continuation_projection(
         return Err(AgentError::new(
             "无法恢复运行检查点：待审批调用存在重复的工具来源身份。",
         ));
+    }
+    let is_user_input = matches!(provenance,
+        AgentToolIdentity::RuntimeExtension { extension_id, tool_name }
+            if extension_id == "human.interaction" && tool_name == "request_user_input"
+    );
+    match checkpoint.pause_reason {
+        crate::AgentRunCheckpointPauseReason::UserInput => {
+            if !is_user_input
+                || frozen_approval_status != AgentApprovalStatus::NotRequired
+                || checkpoint.pending_action_id.is_some()
+                || checkpoint.file_change_run_grant_ref.is_some()
+                || checkpoint.pending_file_observation.is_some()
+            {
+                return Err(AgentError::new(
+                    "Human input checkpoint authority is invalid.",
+                ));
+            }
+            return Ok(CheckpointContinuationProjection::Standard);
+        }
+        crate::AgentRunCheckpointPauseReason::Approval if is_user_input => {
+            return Err(AgentError::new(
+                "A human question cannot carry approval authority.",
+            ));
+        }
+        crate::AgentRunCheckpointPauseReason::Approval => {}
     }
     match (provenance, checkpoint.pending_action_id.as_deref()) {
         (AgentToolIdentity::Mcp { .. }, Some(_)) => {

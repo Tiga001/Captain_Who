@@ -254,9 +254,10 @@ pub(crate) fn upsert_message(messages: &mut Vec<ChatMessageRecord>, next: ChatMe
 pub(crate) fn status_for_run(status: AgentRunStatus) -> Option<&'static str> {
     match status {
         AgentRunStatus::Completed | AgentRunStatus::Cancelled => Some("sent"),
-        AgentRunStatus::WaitingForApproval | AgentRunStatus::Running | AgentRunStatus::Idle => {
-            Some("pending")
-        }
+        AgentRunStatus::WaitingForApproval
+        | AgentRunStatus::WaitingForUserInput
+        | AgentRunStatus::Running
+        | AgentRunStatus::Idle => Some("pending"),
         AgentRunStatus::Failed => Some("error"),
     }
 }
@@ -266,6 +267,7 @@ pub(crate) fn run_status_label(status: AgentRunStatus) -> &'static str {
         AgentRunStatus::Idle => "idle",
         AgentRunStatus::Running => "running",
         AgentRunStatus::WaitingForApproval => "waiting_for_approval",
+        AgentRunStatus::WaitingForUserInput => "waiting_for_user_input",
         AgentRunStatus::Completed => "completed",
         AgentRunStatus::Failed => "failed",
         AgentRunStatus::Cancelled => "cancelled",

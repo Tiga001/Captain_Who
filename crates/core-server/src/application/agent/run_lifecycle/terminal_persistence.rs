@@ -39,6 +39,15 @@ impl AgentService {
         model_context_items: Option<&[ConversationModelContextItem]>,
         collaboration_cutoff: Option<u64>,
     ) -> Result<(), String> {
+        if output.status == AgentRunStatus::WaitingForUserInput {
+            // The native suspend admission already committed checkpoint, usage and waiting CAS.
+            // A retiring segment cannot rewrite an answer/Stop/new segment that advanced it.
+            replace_output_usage(
+                output,
+                self.preview_cumulative_run_usage(&output.run_id, None),
+            );
+            return Ok(());
+        }
         let completed_at = now_ms();
         if matches!(
             output.status,

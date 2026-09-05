@@ -932,3 +932,6 @@ fn corrupt_persisted_response_delivery_combinations_are_sanitized() {
         "storage_unavailable"
     );
 }
+
+#[path = "sync_tests.rs"]
+mod sync_tests;

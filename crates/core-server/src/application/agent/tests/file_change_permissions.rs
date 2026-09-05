@@ -108,6 +108,7 @@ fn direct_execution_input_with_workspace(
     input.provider_profile_config = Some(profile.clone());
     input.provider_protocol_key = Some(protocol_key.clone());
     input.resume_checkpoint = Some(AgentRunCheckpoint {
+        pause_reason: mycopilot_core::AgentRunCheckpointPauseReason::Approval,
         version: AGENT_RUN_CHECKPOINT_SCHEMA_VERSION,
         run_id: run_id.to_string(),
         context_items: vec![mycopilot_core::AgentContextCheckpointItem {

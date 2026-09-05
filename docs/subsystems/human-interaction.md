@@ -7,8 +7,7 @@ last_verified: 2026-09-05
 
 # 向用户提问：设计与实施进度
 
-本文记录已经确定的完整产品契约及分轮交付状态。**第 1 轮只建设基础设施；模型侧提问执行、
-暂停恢复、回答投递及页面尚未交付。** 不得用工具调用成功占位或假送达状态替代后续实现。
+本文记录完整产品契约及分轮交付状态。第 1 轮完成基础设施，第 2 轮接入阻塞式提问、同一 Run 恢复与生命周期。异步投递、设置页面和答题面板仍属于后续轮次；不得以成功占位代替未实现链路。
 
 ## 产品契约
 
@@ -66,8 +65,7 @@ last_verified: 2026-09-05
 Request 的公开 sequence 固定批次创建顺序，列表及分页游标按它倒序；同毫秒创建、重连或删除
 部分历史后也能确定最新批次。Response 的独立数据库 sequence 固定回答接纳顺序，不能用批次
 展示次序、前端页码或毫秒时间猜测投递次序。两个序号均由 Host 生成，提交输入不能指定。
-同步挂起表在本轮只提供有界不透明对象和归属校验；没有真实运行写入挂起记录，可执行检查点的
-冻结、验证与恢复在第 2 轮接入，不能把成功保存 JSON 解释为已经安全暂停。
+同步挂起表保存 Host allowlist 恢复信封、原调用绑定、领取身份与执行阶段。第 2 轮使用真实检查点驱动恢复，详情见下文。
 
 批次只能从 open 进入 submitted/ignored/cancelled。只有异步支持 ignored。
 submitted 不等于 applied；后续投递失败不能使问题重新变回可编辑。提交与忽略通过同一 revision
@@ -115,9 +113,9 @@ Fork 只复制边界内历史，不复制活跃提问权限和投递任务；异
 不新增旧数据迁移 SQL，不提供旧 checkpoint/resume envelope 兼容。新版本自身的持久化、
 重启恢复与防重仍必须实现。测试使用临时数据库，不清空真实开发数据或凭据。
 
-Canonical SQLite 版本为 v36。正常打开 v34/v35 等旧库只返回 reset-required，不改写旧库。
-受管 reset 可从 exact v35 读取配置白名单后新建 v36，丢弃聊天/运行历史，保留模型配置和凭据
-引用；current v36 reset 还保留人机交互设置及 revision。无法安全识别且含配置的旧库拒绝
+Canonical SQLite 版本为 v37。正常打开旧库只返回 reset-required，不改写旧库。
+受管 reset 可从受支持的 exact 旧指纹读取配置白名单后新建 v37，丢弃聊天/运行历史，保留模型配置和凭据
+引用；exact v36 与 current v37 reset 还保留人机交互设置及 revision。无法安全识别且含配置的旧库拒绝
 重置，不能默默用默认值替换配置。既有 exact v33 私有备份配置恢复仍受 fingerprint 限制。
 
 ## 代码接续入口
@@ -127,7 +125,7 @@ Canonical SQLite 版本为 v36。正常打开 v34/v35 等旧库只返回 reset-r
 | 公共协议      | [`human_interaction.rs`](../../crates/core/src/human_interaction.rs)、[`humanInteraction.ts`](../../packages/protocol/src/humanInteraction.ts)                                                               | 输入、答案、公开快照、校验；共享 fixture 防止跨语言字段漂移 |
 | 持久化        | [`human_interaction_repository.rs`](../../crates/core/src/storage/human_interaction_repository.rs)、[`service/human_interaction.rs`](../../crates/core/src/storage/service/human_interaction.rs)             | 原子创建、结算、独立设置、Host 私有挂起材料                 |
 | Harness       | [`extensions/human_interaction.rs`](../../crates/core/src/runtime/extensions/human_interaction.rs)、[`tools/human_interaction.rs`](../../crates/core/src/tools/human_interaction.rs)                         | 每请求策略快照、根身份过滤、未就绪能力关闭                  |
-| Core Server   | [`application/human_interaction.rs`](../../crates/core-server/src/application/human_interaction.rs)、[`transport/human_interaction_rpc.rs`](../../crates/core-server/src/transport/human_interaction_rpc.rs) | 会话访问校验、独立 API、提交后通知；不调度模型              |
+| Core Server   | [`application/human_interaction.rs`](../../crates/core-server/src/application/human_interaction.rs)、[`transport/human_interaction_rpc.rs`](../../crates/core-server/src/transport/human_interaction_rpc.rs) | 会话访问校验、独立 API、同步回答领取与恢复                  |
 | Electron Host | [`coreServerHumanInteractionApi.ts`](../../src/main/core/coreServerHumanInteractionApi.ts)、[`HumanInteractionIpcBridge.ts`](../../src/preload/HumanInteractionIpcBridge.ts)                                 | RPC/IPC 校验与订阅；前端页面尚未接入                        |
 
 ## 五轮进度
@@ -135,13 +133,13 @@ Canonical SQLite 版本为 v36。正常打开 v34/v35 等旧库只返回 reset-r
 | 轮次 | 内容                                                  | 状态                 |
 | ---- | ----------------------------------------------------- | -------------------- |
 | 1    | 公共协议、独立设置、存储事务、Host 契约、模块挂载基础 | 已完成（2026-09-05） |
-| 2    | 阻塞工具、暂停恢复、用量、取消与重启                  | 未开始               |
+| 2    | 阻塞工具、暂停恢复、用量、取消与重启                  | 已完成（2026-09-05） |
 | 3    | 异步工具、多批次投递、空闲续接、忽略                  | 未开始               |
 | 4    | 个性化开关、分页面板、抢占、最小化与问答气泡          | 未开始               |
 | 5    | 跨层验收、修整、开发及用户文档                        | 未开始               |
 
-第 1 轮提供的提交接口只接收并持久化回答，不宣称已恢复或送达；生产工具暂不暴露，前端设置页
-和答题面板属于第 4 轮。后续实现必须使用这里的事实模型，不能靠前端直接 startTurn 绕过投递协调。
+当前提交接口先保存回答，再由 Host 领取并恢复同步 Run；返回 submitted 不代表已 applied。
+异步工具仍未暴露，设置页与答题面板属于第 4 轮；前端不能直接 startTurn 绕过投递协调。
 
 ## 第 1 轮交付与验证
 
@@ -177,4 +175,100 @@ Settings 默认为开启，但生产 `executionReady` 固定关闭，两个工�
 第 2 轮从 `HumanInteractionExtension` 的真实 Host 执行服务接入开始：实现调用去重与暂停的
 原子绑定、独立恢复来源、用量和停止围栏、启动对账，然后才开放阻塞工具。同步回应须唯一通过
 原 ToolResult 进入模型；完成用户气泡投影时，不得同时注入普通 User。异步 handler、投递协调
-和空闲续接保持第 3 轮范围。本次到第 1 轮结束，未进入后续轮次。
+和空闲续接保持第 3 轮范围。以上为第 1 轮交付时的历史状态；第 2 轮变更见下文。
+
+## 第 2 轮：阻塞式工具
+
+### 执行与恢复
+
+- `AgentHumanInteractionRuntimeHost::suspend` 接受 Runtime 生成的 native `AgentUserInputSuspension`。
+  driver 识别内部 `Suspended`，冻结原调用、前序结果、后序队列、Provider continuation 引用、模型上下文、World State 与扩展。
+  Host 在同一写事务保存问题、v14 检查点的 allowlist 信封、累计用量及 `waiting_for_user_input`；成功后才通知用户。
+- Host 执行 segment 退出并释放执行许可、模型调用与引导队列。Conversation 的 in-progress trace 和逻辑 Run 身份继续占用聊天。
+  根聊天不能借此开始新 Run、切换模型、手动压缩或分支。子 Agent 和无人值守 Automation 没有同步工具或 native 执行入口。
+- 提交仅形成一条不可变 Response。Host 在提交完成、旧 segment 退出及启动时事件驱动扫描待投递事实，不轮询人类。
+  领取使用持久 claimId，并在进入 Runtime 前执行 `claimed → executing` CAS。可信 `AgentUserInputResume`
+  带 requestId、responseId、原 checkpoint 与精确 continuation；没有 ApprovalDecision，也不授予权限。
+- 完成的工具不重跑，答案只生成原调用的一个 ToolResult，剩余工具按原顺序继续。
+  同响应中的多个同步调用顺序暂停。同步后出现真实审批，由现有审批路径处理。
+  sync→sync 和 approval→sync 交接将新检查点与前记录结算放入同一事务；sync→approval
+  保存审批检查点后确认消费，重启能由该精确检查点核验交接。
+- 关闭提问设置不撤销既有回答。新采样边界重新冻结设置/工具/提示词一致快照；新的提问创建再次校验实时设置。
+  异步执行 readiness 继续关闭，任何同步暂停/停止均不取消其他异步批次。
+
+### 用量、重启与停止
+
+逻辑 Run 的 `usage-{runId}` 记录保存累计值。发布问题前合并本 segment 一次；waiting State/Done 及旧 segment 收尾只读取累计值。
+重启从原 Usage 行恢复冻结价格、Provider 用量语义和累计值，不借用当前模型价格。正式答复即使全部 skipped 也恢复原调用。
+
+同版本 `waiting` 可继续等待；已回答但未领取可继续投递；`claimed` 且尚未开始执行可重新领取。
+`executing` 是进入 Runtime 前的未知副作用围栏，覆盖剩余工具和模型请求；`model_in_flight` 是存储预留的细分状态，当前不据它推断请求已知完成。
+启动发现已进入执行但没有可靠后继检查点或终态原结果证明时保守失败，不自动重跑工具或结果未知的模型请求。
+已有后继审批/同步检查点或终态中精确匹配的 ToolResult 时按事实结算。停止围栏优先于迟到回答和领取。
+
+恢复信封沿用 `PersistedAgentResumeInput` v11 的显式字段白名单，内部 checkpoint 只接受 v14。
+API token、带秘密的 endpoint、不可持久化 MCP 原始参数不进入新表；恢复时校验冻结 Provider 身份后才重新读取凭据。
+文件事务和 MCP 的已有安全约束继续有效：若剩余工具无法通过现有安全检查点规则保存，问题发布前拒绝本次暂停，返回失败工具结果，不存原始私有参数。
+未完成的文件事务保持原有只允许对应提交工具的边界。
+
+### 问答展示、历史、压缩与分支
+
+同步不创建 `messages.role=user` 行。唯一原 ToolResult 的 `result` 使用固定投影：
+
+```json
+{
+  "type": "human_interaction_response",
+  "schemaVersion": 1,
+  "requestId": "Host request ID",
+  "responseId": "Host response ID",
+  "answers": [
+    {
+      "questionId": "Host question ID",
+      "question": "冻结问题",
+      "kind": "text",
+      "answer": "用户回答"
+    }
+  ]
+}
+```
+
+`option` 包含 `optionId` 和解析后的选项文字；`skipped` 的 answer 为“已跳过”。题目顺序来自不可变 Request。
+这个事实随原 ToolResult 的 Trace/ModelContext 保存，第 4 轮以用户外观气泡渲染它；不把展示结果再次拼入模型 User 历史。
+历史恢复和压缩沿用原工具交换，分支只复制边界内历史 ToolResult，不复制问题的活动权限、suspension 或 delivery。
+一般大小与文本合法性约束继续生效，不以产品题数上限截断已正式回答的问题。
+
+### 第 3 轮接入点
+
+实现 `request_user_input_async` 的独立动态 readiness、原子批次接纳及投递协调。共用已有 Request/Response/CAS 和设置策略。
+运行中答复须选择可引导边界；审批和同步等待持有聊天占用时保留 pending 回应，真正空闲时才创建同聊天新 Run。
+明确异步每批忽略无 User/guidance/Wake；不能复用同步的“原 ToolResult 恢复”途径，也不能在 submit RPC 中直接绕过占用 startTurn。
+多批次前端抢占、分页草稿、最小化与气泡渲染仍留在第 4 轮，本轮不实现这些页面。
+
+### 第 2 轮验证记录
+
+已实际执行并通过以下检查。筛选范围有交集，不能直接相加作为独立测试总数：
+
+- `cargo test --locked -p mycopilot-core human_interaction --lib`：56 项；含真实 Harness 顺序执行、
+  连续暂停、真实审批交替、根/子/Automation 隔离、实时关闭设置，以及完整有界问答投影。
+- `cargo test --locked -p mycopilot-core-server application::agent::tests::human_input --bin core-server -- --nocapture`：10 项。
+  可控本地 Provider 经过真实 Harness/Host：混合回答、全部 skipped、重复提交、同 Run 连续提问、
+  提问→命令审批→提问、等待跨重启、回答已保存但未领取跨重启、等待 Stop、重启后 Stop，
+  以及两个明确调度钩子的快速回答/旧 segment 迟到收尾和 open→submitted 通知顺序竞态。
+  验证原调用唯一 ToolResult、无额外 User 行或答案 User 投影、原 Run 身份及精确累计用量。
+- Rust Core `runtime::checkpoint`：40 项；`approval_resume`：2 项，覆盖冻结 Provider 身份、队列顺序、
+  文件观察证明、私有 MCP 参数拒绝/脱敏和加密恢复。
+- 存储问答 repository：27 项（含 11 项同步事务/重启/领取状态测试）；migration：30 项；
+  `storage-reset-dev`：58 项；trace reconciliation：11 项。未知执行阶段不重放，停止/CAS 与交接事务保持原子。
+- Core Server 既有 `usage_lifecycle`：13 项；`cancellation`：9 项；`terminal_events`：29 项。
+- TypeScript 相关单元测试：首批 7 文件 162 项，追加回归 5 文件 34 项；浏览器 5 项。
+  覆盖新状态的解析、等待占用、用量、重读/重启、停止、禁止新消息/压缩/fork，及迟到审批 RPC 不覆盖新等待状态。
+- `pnpm typecheck:node`、`pnpm typecheck:web`、变更 TS/脚本 ESLint、Prettier、
+  `cargo clippy --locked --workspace --all-targets -- -D warnings`、Rust 格式、
+  `check:docs`、`check:public-docs`、`check:test-layout` 与 `git diff --check` 均通过。
+
+测试使用临时 SQLite 与可控本地 Provider，未调用真实付费模型、未重置实际开发数据库或改写凭据。
+数据库采用 canonical v37，fingerprint 为 `sha256:3f9d66722cd1e6c7ee26512a166a906fa8471a05083522d084ba2182b8fc4a36`。
+旧库通过既有受管开发 reset 流程处理，不提供旧聊天迁移。
+
+本轮已结束。没有接入异步投递、设置页或答题面板；第 3 轮从上述异步接入点继续。
+结果未知的执行按持久围栏保守失败，公开 delivery 标记失败/取消而不伪称已投递。普通上下文大小和私有工具检查点约束仍适用。

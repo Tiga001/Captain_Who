@@ -1,9 +1,9 @@
-//! Durable agent-loop checkpoints used at approval boundaries.
+//! Durable agent-loop checkpoints used at approval and human-input suspension boundaries.
 //!
 //! A checkpoint owns every piece of in-memory state needed to resume the same logical run. The
 //! pending tool call already appears as the final, unresolved exchange in `context`; queued calls
-//! belong to the same model response but have not started yet. On resume, the approved/rejected
-//! result closes the pending exchange before queued calls continue.
+//! belong to the same model response but have not started yet. On resume, the authenticated
+//! approval result or human answer closes the pending exchange before queued calls continue.
 
 use super::tool_failure_guard::semantic_tool_call_fingerprint;
 #[cfg(test)]

@@ -212,6 +212,7 @@ fn interrupting_pending_approval_ignores_retiring_runtime_token_and_commits_pair
     }))
     .unwrap();
     agent_input.resume_checkpoint = Some(AgentRunCheckpoint {
+        pause_reason: mycopilot_core::AgentRunCheckpointPauseReason::Approval,
         version: AGENT_RUN_CHECKPOINT_SCHEMA_VERSION,
         run_id: "run-cancel".to_string(),
         pending_action_id: None,
@@ -380,6 +381,7 @@ fn forced_cancellation_uses_backend_runtime_snapshot_instead_of_empty_trace() {
         },
     );
     let checkpoint = AgentRunCheckpoint {
+        pause_reason: mycopilot_core::AgentRunCheckpointPauseReason::Approval,
         version: AGENT_RUN_CHECKPOINT_SCHEMA_VERSION,
         run_id: "run-forced".to_string(),
         pending_action_id: None,
@@ -924,6 +926,7 @@ async fn cancelling_immediately_after_approval_prevents_command_side_effects() {
     };
     let call = checkpoint_call_for_command(&command);
     let mut checkpoint = AgentRunCheckpoint {
+        pause_reason: mycopilot_core::AgentRunCheckpointPauseReason::Approval,
         version: AGENT_RUN_CHECKPOINT_SCHEMA_VERSION,
         run_id: "run-cancel-before-spawn".to_string(),
         pending_action_id: None,
@@ -1078,6 +1081,7 @@ async fn message_deletion_cancels_a_rejected_actions_pre_spawn_continuation() {
         reason: Some("exercise the pre-spawn continuation lease".to_string()),
     };
     let mut checkpoint = AgentRunCheckpoint {
+        pause_reason: mycopilot_core::AgentRunCheckpointPauseReason::Approval,
         version: AGENT_RUN_CHECKPOINT_SCHEMA_VERSION,
         run_id: run_id.to_string(),
         pending_action_id: None,
@@ -1284,6 +1288,7 @@ async fn cancelling_run_during_approved_command_finishes_cancelled_without_resum
     };
     let call = checkpoint_call_for_command(&command);
     let mut checkpoint = AgentRunCheckpoint {
+        pause_reason: mycopilot_core::AgentRunCheckpointPauseReason::Approval,
         version: AGENT_RUN_CHECKPOINT_SCHEMA_VERSION,
         run_id: "run-command-cancel".to_string(),
         pending_action_id: None,

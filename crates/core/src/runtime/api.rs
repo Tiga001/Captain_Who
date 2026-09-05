@@ -404,12 +404,41 @@ pub struct AgentRuntimeHostServices {
     pub(super) agent_collaboration: Option<crate::AgentCollaborationRuntimeServices>,
     pub(super) automation_report_sink: Option<Arc<dyn crate::AutomationReportSink>>,
     pub(super) human_interaction_policy: Option<Arc<dyn HumanInteractionPolicySource>>,
+    pub(super) human_interaction_runtime: Option<Arc<dyn AgentHumanInteractionRuntimeHost>>,
+    pub(super) user_input_resume: Option<AgentUserInputResume>,
+}
+
+/// Private segment boundary. The Host must atomically save the question, checkpoint and usage
+/// before returning success. Neither this payload nor its checkpoint is a Renderer event.
+#[derive(Debug, Clone)]
+pub struct AgentUserInputSuspension {
+    pub conversation_id: String,
+    pub run_id: String,
+    pub assistant_message_id: String,
+    pub call: AgentToolCall,
+    pub questions: crate::human_interaction::HumanInteractionToolInput,
+    pub checkpoint: AgentRunCheckpoint,
+    pub segment_usage: Option<crate::AgentUsage>,
+}
+
+pub trait AgentHumanInteractionRuntimeHost: Send + Sync {
+    fn suspend(&self, suspension: AgentUserInputSuspension) -> AgentResult<()>;
+}
+
+/// A Host-authenticated response already claimed for this exact suspended call. Deliberately
+/// has no serde implementation: model input and Renderer RPC cannot manufacture resume authority.
+#[derive(Debug, Clone)]
+pub struct AgentUserInputResume {
+    pub request_id: String,
+    pub response_id: String,
+    pub checkpoint: AgentRunCheckpoint,
+    pub continuation: crate::AgentToolContinuation,
 }
 
 /// Live Host-owned policy for human questions. This is not model/Renderer input and is never
 /// restored from a checkpoint as authorization. The runtime freezes one snapshot per request;
-/// future question execution must read it again before creating a new durable request.
-/// Supplying policy does not enable execution: readiness belongs to the runtime implementation.
+/// the Host independently checks current policy in the durable admission transaction.
+/// Supplying policy does not enable execution: the durable runtime port is also required.
 pub trait HumanInteractionPolicySource: Send + Sync {
     fn snapshot(&self) -> AgentResult<crate::human_interaction::HumanInteractionSettings>;
 }
@@ -417,6 +446,19 @@ pub trait HumanInteractionPolicySource: Send + Sync {
 impl AgentRuntimeHostServices {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn with_human_interaction_runtime(
+        mut self,
+        host: Arc<dyn AgentHumanInteractionRuntimeHost>,
+    ) -> Self {
+        self.human_interaction_runtime = Some(host);
+        self
+    }
+
+    pub fn with_user_input_resume(mut self, resume: AgentUserInputResume) -> Self {
+        self.user_input_resume = Some(resume);
+        self
     }
 
     /// Installs the policy source for a human-owned root run. Capability preparation additionally
@@ -792,6 +834,7 @@ pub fn prepare_context_window_tool_projection(
             agent_collaboration_enabled: host_services.agent_collaboration.is_some(),
             automation_report_sink: host_services.automation_report_sink.clone(),
             human_interaction_policy: host_services.human_interaction_policy.clone(),
+            human_interaction_execution_ready: host_services.human_interaction_runtime.is_some(),
         },
     )?;
     let initial_run_world_state = RunWorldStateTracker::new_with_extension_sections(

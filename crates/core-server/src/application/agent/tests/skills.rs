@@ -678,6 +678,7 @@ fn installed_skill_crosses_the_production_turn_boundary_without_instruction_leak
         .clone()
         .expect("managed Skills must have a discovery snapshot");
     dynamically_activated_input.resume_checkpoint = Some(AgentRunCheckpoint {
+        pause_reason: mycopilot_core::AgentRunCheckpointPauseReason::Approval,
         version: AGENT_RUN_CHECKPOINT_SCHEMA_VERSION,
         run_id: "run-dynamic-installed-skill".to_string(),
         pending_action_id: None,
@@ -1290,6 +1291,7 @@ fn conversation_turn_and_pending_restore_use_the_model_connection_override() {
         provider_identity: provider_identity.clone(),
     };
     prepared.agent_input.resume_checkpoint = Some(AgentRunCheckpoint {
+        pause_reason: mycopilot_core::AgentRunCheckpointPauseReason::Approval,
         version: AGENT_RUN_CHECKPOINT_SCHEMA_VERSION,
         run_id: "run-model-override".to_string(),
         pending_action_id: None,

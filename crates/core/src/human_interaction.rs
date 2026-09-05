@@ -11,6 +11,154 @@ pub const HUMAN_INTERACTION_MAX_TITLE_BYTES: usize = 8_192;
 pub const HUMAN_INTERACTION_MAX_OPTION_BYTES: usize = 2_048;
 pub const HUMAN_INTERACTION_MAX_ANSWER_BYTES: usize = 32_768;
 pub const HUMAN_INTERACTION_MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
+pub const HUMAN_INTERACTION_MAX_DISPLAY_BYTES: usize = 1_048_576;
+
+/// Bounded, self-contained history material for one submitted synchronous question batch.
+/// Kept in its original ToolResult, including when a completed turn is copied into a fork.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct HumanInteractionResponseDisplay {
+    #[serde(rename = "type")]
+    pub result_type: String,
+    pub schema_version: u32,
+    pub request_id: String,
+    pub response_id: String,
+    pub answers: Vec<HumanInteractionAnswerDisplay>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(
+    tag = "kind",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
+pub enum HumanInteractionAnswerDisplay {
+    Option {
+        question_id: String,
+        question: String,
+        option_id: String,
+        answer: String,
+    },
+    Text {
+        question_id: String,
+        question: String,
+        answer: String,
+    },
+    Skipped {
+        question_id: String,
+        question: String,
+        answer: String,
+    },
+}
+
+impl HumanInteractionAnswerDisplay {
+    pub fn question(&self) -> &str {
+        match self {
+            Self::Option { question, .. }
+            | Self::Text { question, .. }
+            | Self::Skipped { question, .. } => question,
+        }
+    }
+}
+
+impl HumanInteractionResponseDisplay {
+    pub fn validate(&self) -> Result<(), HumanInteractionError> {
+        let invalid = HumanInteractionError::invalid;
+        if self.result_type != "human_interaction_response"
+            || self.schema_version != HUMAN_INTERACTION_SCHEMA_VERSION
+            || serde_json::to_vec(self).map_err(|_| invalid())?.len()
+                > HUMAN_INTERACTION_MAX_DISPLAY_BYTES
+        {
+            return Err(invalid());
+        }
+        validate_human_interaction_id(&self.request_id)?;
+        validate_human_interaction_id(&self.response_id)?;
+        let mut question_ids = BTreeSet::new();
+        let mut questions = Vec::with_capacity(self.answers.len());
+        let mut answers = Vec::with_capacity(self.answers.len());
+        for entry in &self.answers {
+            let (question_id, question, options, answer) = match entry {
+                HumanInteractionAnswerDisplay::Option {
+                    question_id,
+                    question,
+                    option_id,
+                    answer,
+                } => {
+                    validate_human_interaction_id(option_id)?;
+                    if !valid_text(answer, HUMAN_INTERACTION_MAX_OPTION_BYTES) {
+                        return Err(invalid());
+                    }
+                    (
+                        question_id,
+                        question,
+                        Some(vec![answer.clone()]),
+                        HumanInteractionAnswer::Option {
+                            question_id: question_id.clone(),
+                            option_id: option_id.clone(),
+                        },
+                    )
+                }
+                HumanInteractionAnswerDisplay::Text {
+                    question_id,
+                    question,
+                    answer,
+                } => {
+                    if !valid_text(answer, HUMAN_INTERACTION_MAX_ANSWER_BYTES) {
+                        return Err(invalid());
+                    }
+                    (
+                        question_id,
+                        question,
+                        None,
+                        HumanInteractionAnswer::Text {
+                            question_id: question_id.clone(),
+                            text: answer.clone(),
+                        },
+                    )
+                }
+                HumanInteractionAnswerDisplay::Skipped {
+                    question_id,
+                    question,
+                    answer,
+                } => {
+                    if answer != "已跳过" {
+                        return Err(invalid());
+                    }
+                    (
+                        question_id,
+                        question,
+                        None,
+                        HumanInteractionAnswer::Skipped {
+                            question_id: question_id.clone(),
+                        },
+                    )
+                }
+            };
+            validate_human_interaction_id(question_id)?;
+            if !question_ids.insert(question_id) {
+                return Err(invalid());
+            }
+            questions.push(HumanInteractionQuestionInput {
+                title: question.clone(),
+                options,
+            });
+            answers.push(answer);
+        }
+        validate_human_interaction_tool_input(&HumanInteractionToolInput { questions })?;
+        if serde_json::to_vec(&answers).map_err(|_| invalid())?.len()
+            > HUMAN_INTERACTION_MAX_INPUT_BYTES
+        {
+            return Err(invalid());
+        }
+        Ok(())
+    }
+
+    pub(crate) fn valid_value(value: &serde_json::Value) -> bool {
+        serde_json::from_value::<Self>(value.clone())
+            .is_ok_and(|display| display.validate().is_ok())
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HumanInteractionError {

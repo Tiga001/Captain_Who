@@ -8525,6 +8525,7 @@ fn terminal_pending_action_persistence_redacts_run_scoped_skill_bodies() {
     });
     let checkpoint_discovery = agent_input.skill_discovery.clone().unwrap();
     agent_input.resume_checkpoint = Some(AgentRunCheckpoint {
+        pause_reason: mycopilot_core::AgentRunCheckpointPauseReason::Approval,
         version: AGENT_RUN_CHECKPOINT_SCHEMA_VERSION,
         run_id: "run-skill-redaction".to_string(),
         pending_action_id: None,
@@ -10664,6 +10665,7 @@ fn invalid_checkpoint_tool_call_is_rejected_before_pending_publication() {
     }))
     .unwrap();
     agent_input.resume_checkpoint = Some(AgentRunCheckpoint {
+        pause_reason: mycopilot_core::AgentRunCheckpointPauseReason::Approval,
         version: AGENT_RUN_CHECKPOINT_SCHEMA_VERSION,
         run_id: "run-invalid-checkpoint".to_string(),
         pending_action_id: None,

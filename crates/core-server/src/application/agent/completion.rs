@@ -73,9 +73,10 @@ impl AgentTerminalEventGate {
 pub(super) fn should_defer_until_terminal_commit(event: &AgentEvent) -> bool {
     match event {
         AgentEvent::State { state, .. } => is_terminal_run_status(state.status),
-        AgentEvent::Done { status, .. } => {
-            !matches!(status, Some(AgentRunStatus::WaitingForApproval))
-        }
+        AgentEvent::Done { status, .. } => !matches!(
+            status,
+            Some(AgentRunStatus::WaitingForApproval | AgentRunStatus::WaitingForUserInput)
+        ),
         AgentEvent::Error { recoverable, .. } => !recoverable,
         _ => false,
     }

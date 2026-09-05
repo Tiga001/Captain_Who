@@ -723,6 +723,9 @@ impl AgentService {
                 })?;
         }
         let pending_actions = load_persisted_pending_actions(&storage)?;
+        storage
+            .reconcile_sync_human_interactions()
+            .map_err(|error| error.to_string())?;
         reconcile_file_change_run_grants_on_startup(&storage, &pending_actions)?;
         let usage_contexts = usage::restore_pending_usage_contexts(&storage, &pending_actions)?;
         let office_engine = resolve_default_office_engine();

@@ -12,6 +12,7 @@ impl AgentService {
             assistant_message_id,
             assistant_created_at,
             agent_input,
+            human_input_resume,
             skill_resources,
             mcp_tools,
             automation_report_sink,
@@ -23,6 +24,11 @@ impl AgentService {
             steering_close_error_context,
         } = segment;
 
+        let human_binding = human_input_resume
+            .as_ref()
+            .map(|(_, binding)| binding.clone());
+        let emitter_human_binding = human_binding.clone();
+        let human_approval_predecessor = pending_action_predecessor_settlement.clone();
         let emitter_notifications = notifications.clone();
         let emitter_service = self.clone();
         let emitter_conversation_id = conversation_id.clone();
@@ -145,6 +151,14 @@ impl AgentService {
                         return;
                     }
                 };
+                if let Some(binding) = emitter_human_binding.as_ref() {
+                    if let Err(error) = emitter_service
+                        .storage
+                        .mark_sync_human_interaction_applied(binding)
+                    {
+                        eprintln!("failed to acknowledge question/approval handoff: {error}");
+                    }
+                }
                 let action_id = action_id_for_action(action.as_ref());
                 *emitter_waiting_pending_action_storage_id
                     .lock()
@@ -204,6 +218,42 @@ impl AgentService {
                 .unwrap_or_else(|error| error.into_inner())
                 .is_some()
             {
+                return;
+            }
+            let human_waiting = matches!(&event,
+                AgentEvent::State { state, .. } if state.status == AgentRunStatus::WaitingForUserInput)
+                || matches!(
+                    &event,
+                    AgentEvent::Done {
+                        status: Some(AgentRunStatus::WaitingForUserInput),
+                        ..
+                    }
+                );
+            if human_waiting {
+                let cancellations = emitter_service
+                    .cancellations
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                if emitter_cancellation_token.is_cancelled()
+                    || !cancellations
+                        .get(&emitter_run_id)
+                        .is_some_and(|token| token.shares_state_with(&emitter_cancellation_token))
+                {
+                    return;
+                }
+                let mut event = event;
+                if let AgentEvent::Done { usage, .. } = &mut event {
+                    *usage = emitter_service.preview_cumulative_run_usage(&emitter_run_id, None);
+                }
+                if let Some(event) = emitter_terminal_event_gate.route(event) {
+                    emit_agent_event_notifications(
+                        &emitter_notifications,
+                        emitter_collaboration_identity.as_ref(),
+                        &emitter_run_id,
+                        &emitter_assistant_message_id,
+                        event,
+                    );
+                }
                 return;
             }
             // The Runtime emits Waiting state immediately after ApprovalRequired. Route these
@@ -391,11 +441,24 @@ impl AgentService {
         if agent_input.context.as_ref().is_some_and(|context| {
             context.collaboration_identity.is_none()
                 && context.conversation_id.as_deref() == Some(conversation_id.as_str())
-        }) && agent_input.prompt_preferences.as_ref().is_none_or(|preferences| {
-            preferences.automation_execution_context.is_none()
-        }) {
+        }) && agent_input
+            .prompt_preferences
+            .as_ref()
+            .is_none_or(|preferences| preferences.automation_execution_context.is_none())
+        {
+            host_services =
+                host_services.with_human_interaction_runtime(Arc::new(StoredBlockingHumanInput {
+                    service: self.clone(),
+                    input: agent_input.clone(),
+                    token: cancellation_token.clone(),
+                    notifications: notifications.clone(),
+                    predecessor: human_binding.clone(),
+                    approval_predecessor: human_approval_predecessor,
+                }));
             host_services = host_services.with_human_interaction_policy(Arc::new(
-                crate::application::human_interaction::StoredHumanInteractionPolicy(self.storage.clone()),
+                crate::application::human_interaction::StoredHumanInteractionPolicy(
+                    self.storage.clone(),
+                ),
             ));
         }
         if let Some(sink) = automation_report_sink {
@@ -474,8 +537,15 @@ impl AgentService {
             host_services = host_services.with_mcp_tools(mcp_tools);
         }
 
+        let mut runtime_input = agent_input;
+        if let Some((resume, _)) = human_input_resume {
+            host_services = host_services.with_user_input_resume(resume);
+            runtime_input.resume_checkpoint = None;
+            runtime_input.tool_continuation = None;
+            runtime_input.approval_decision = None;
+        }
         let result = send_chat_with_host_services(
-            agent_input,
+            runtime_input,
             run_id.clone(),
             emitter,
             cancellation_token,

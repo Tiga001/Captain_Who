@@ -94,6 +94,17 @@ pub(crate) fn sanitize_runtime_value(value: &Value) -> (Value, bool) {
     sanitize_runtime_value_inner(value)
 }
 
+/// Human answers are bounded text supplied by the trusted resume port. Their exact display facts
+/// must survive runtime, checkpoint and history projection; unrelated tool sanitization is intact.
+pub(crate) fn sanitize_runtime_tool_result(tool: &str, value: &Value) -> (Value, bool) {
+    if tool == "request_user_input"
+        && crate::human_interaction::HumanInteractionResponseDisplay::valid_value(value)
+    {
+        return (value.clone(), false);
+    }
+    sanitize_runtime_value(value)
+}
+
 pub(crate) fn project_tool_call(tool: &str, operation: &Value) -> ProjectedValue {
     let projected = match tool {
         "web_fetch" => project_selected_object(
@@ -168,6 +179,7 @@ pub(crate) fn project_tool_result(
     error: Option<&str>,
 ) -> (ProjectedValue, Option<String>, bool) {
     let projected = match tool {
+        "request_user_input" => project_human_interaction_response(observation),
         "web_fetch" => project_web_fetch_result(observation),
         "web_search" => project_web_search_result(observation),
         "apply_patch" => project_apply_patch_result(operation, observation),
@@ -189,6 +201,14 @@ pub(crate) fn project_tool_result(
         error,
         error_truncated,
     )
+}
+
+fn project_human_interaction_response(value: &Value) -> (Value, bool) {
+    if crate::human_interaction::HumanInteractionResponseDisplay::valid_value(value) {
+        (value.clone(), false)
+    } else {
+        project_generic_value(value)
+    }
 }
 
 pub(crate) fn project_conversation_history_result(value: &Value) -> (Value, bool) {
@@ -1308,6 +1328,104 @@ fn structured_edit_stats(edits: &[Value]) -> (u64, u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn human_display(answers: Vec<Value>) -> Value {
+        json!({"type":"human_interaction_response", "schemaVersion":1,
+            "requestId":"r".repeat(256), "responseId":"s".repeat(256), "answers":answers})
+    }
+
+    #[test]
+    fn human_interaction_history_preserves_whole_large_batch_and_bound_response_identity() {
+        let mut answers = (0..40)
+            .map(|index| {
+                json!({
+                    "questionId":format!("question-{index}"), "question":"问题".repeat(600),
+                    "kind":"text", "answer":"答案".repeat(700),
+                })
+            })
+            .collect::<Vec<_>>();
+        answers.push(json!({"questionId":"option", "question":"Option?", "kind":"option", "optionId":"choice", "answer":"Choice label"}));
+        answers.push(
+            json!({"questionId":"skip", "question":"Skip?", "kind":"skipped", "answer":"已跳过"}),
+        );
+        let display = human_display(answers);
+        let (projected, _, _) = project_tool_result("request_user_input", None, &display, None);
+        assert_eq!(projected.value, display);
+        assert!(!projected.truncated);
+        assert_eq!(projected.value["answers"].as_array().unwrap().len(), 42);
+        assert_eq!(projected.value["requestId"].as_str().unwrap().len(), 256);
+        let (again, _, _) = project_tool_result("request_user_input", None, &projected.value, None);
+        assert_eq!(again.value, display);
+        assert!(!again.truncated);
+        let (other_tool, _, _) = project_tool_result("unknown_tool", None, &display, None);
+        assert!(other_tool.truncated);
+        assert_eq!(
+            other_tool.value["answers"].as_array().unwrap().len(),
+            DurableTraceProjectionLimits::GENERIC_ARRAY_ITEMS
+        );
+    }
+
+    #[test]
+    fn human_interaction_history_invalid_shapes_and_byte_overflow_use_generic_projection() {
+        let valid = human_display(vec![
+            json!({"questionId":"q", "question":"Question", "kind":"text", "answer":"answer"}),
+        ]);
+        let mut invalid = Vec::new();
+        let mut extra = valid.clone();
+        extra["answers"][0]["optionId"] = json!("unexpected");
+        invalid.push(extra);
+        let mut duplicate = valid.clone();
+        duplicate["answers"] = json!([valid["answers"][0].clone(), valid["answers"][0].clone()]);
+        invalid.push(duplicate);
+        let mut skipped = valid.clone();
+        skipped["answers"][0]["kind"] = json!("skipped");
+        invalid.push(skipped);
+        let mut id = valid.clone();
+        id["requestId"] = json!("x".repeat(257));
+        invalid.push(id);
+        let mut title = valid.clone();
+        title["answers"][0]["question"] = json!("q".repeat(8193));
+        invalid.push(title);
+        let mut answer = valid.clone();
+        answer["answers"][0]["answer"] = json!("a".repeat(32769));
+        invalid.push(answer);
+        invalid.push(human_display((0..9).map(|i| json!({"questionId":format!("q-{i}"), "question":"Q", "kind":"text", "answer":"a".repeat(32700)})).collect()));
+        invalid.push(human_display((0..40).map(|i| json!({"questionId":format!("q-{i}"), "question":"q".repeat(7000), "kind":"skipped", "answer":"已跳过"})).collect()));
+        invalid.push(human_display((0..300).map(|i| json!({"questionId":format!("q-{i}"), "question":"q".repeat(4000), "kind":"skipped", "answer":"已跳过"})).collect()));
+        for value in invalid {
+            assert!(
+                !crate::human_interaction::HumanInteractionResponseDisplay::valid_value(&value)
+            );
+            assert_eq!(
+                project_human_interaction_response(&value),
+                project_generic_value(&value)
+            );
+        }
+    }
+
+    #[test]
+    fn human_interaction_runtime_canonical_projection_keeps_submitted_text_exact() {
+        let display = human_display(vec![
+            json!({"questionId":"q", "question":"A textual data URL?", "kind":"text", "answer":"data:text/plain;base64,SGVsbG8="}),
+        ]);
+        let result = crate::AgentToolResult {
+            call_id: "call".into(),
+            tool: "request_user_input".into(),
+            ok: true,
+            result: Some(display.clone()),
+            error: None,
+            exact_archive_file: None,
+        };
+        assert_eq!(
+            crate::conversation_trace::canonical_tool_result_for_context(&result).result,
+            Some(display.clone())
+        );
+        assert_eq!(
+            sanitize_runtime_tool_result("request_user_input", &display),
+            (display.clone(), false)
+        );
+        assert!(sanitize_runtime_tool_result("mcp_tool", &display).1);
+    }
 
     #[test]
     fn apply_patch_call_projection_keeps_only_current_direct_metadata() {

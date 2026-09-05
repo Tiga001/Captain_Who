@@ -13,6 +13,10 @@ export function isAssistantReplySettled(message: ChatMessage | undefined): boole
 }
 
 export function isAssistantMessageGenerating(message: ChatMessage): boolean {
-  if (message.role !== 'assistant' || message.status !== 'pending') return false
+  if (
+    message.role !== 'assistant' ||
+    (message.status !== 'pending' && message.agentRun?.status !== 'waiting_for_user_input')
+  )
+    return false
   return !isCompletedAgentRunStatus(message.agentRun?.status)
 }

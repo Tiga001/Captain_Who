@@ -16,12 +16,9 @@ use std::sync::Arc;
 pub(super) const HUMAN_INTERACTION_EXTENSION_ID: &str = "human.interaction";
 const HUMAN_INTERACTION_EXTENSION_VERSION: u32 = 1;
 
-// Deliberately closed during the foundation phase. Neither settings nor checkpoint data can
-// claim that the durable synchronous suspension and asynchronous delivery paths are implemented.
-const HUMAN_INTERACTION_EXECUTION_READY: bool = false;
-
 pub(super) struct HumanInteractionExtension {
     source: Option<Arc<dyn HumanInteractionPolicySource>>,
+    execution_ready: bool,
     request: HumanInteractionRequestContract,
 }
 
@@ -49,7 +46,7 @@ impl HumanInteractionRequestContract {
         }
         Ok(Self {
             settings,
-            execution_ready: HUMAN_INTERACTION_EXECUTION_READY,
+            execution_ready: false,
         })
     }
 
@@ -60,6 +57,9 @@ impl HumanInteractionRequestContract {
     fn tool_definitions(&self) -> Vec<AgentToolDefinition> {
         if self.available() {
             human_interaction_tool_definitions()
+                .into_iter()
+                .take(1)
+                .collect()
         } else {
             Vec::new()
         }
@@ -81,7 +81,7 @@ impl HumanInteractionRequestContract {
         }
         vec![ContextItem::text(
             LlmMessageRole::System,
-            "## 人机交互\n只有缺失信息会实质改变任务结果时才提问，能安全推断时说明假设并继续。使用 request_user_input 等待整批回答；还有独立工作可继续时，使用 request_user_input_async。异步 pending 只表示问题已记录，不代表用户回答；不要轮询、重复提问、猜测答案或把沉默当作同意。每题可提供可选选项；界面允许自由文本或不回答，整批处理后一次提交，提交后不可补答。异步批次可被忽略，忽略不会启动新运行；各题不回答后提交仍是正式提交。两种工具均不能用于权限或工具审批，用户回答不授予任何执行权限。",
+            "## 人机交互\n只有缺失信息会实质改变任务结果且后续工作必须等待回答时，才使用 request_user_input 等待整批回答；能安全推断时说明假设并继续。每题可提供可选选项；界面允许自由文本或不回答，整批处理后一次提交。不要重复提问、猜测答案或把沉默、不回答当作同意。问题不能替代权限或工具审批，用户回答不授予任何执行权限。",
             ContextSource::RuntimeGuard,
             ContextScope::Run,
             ContextRetention::RequestOnly,
@@ -117,8 +117,14 @@ impl HumanInteractionExtension {
     pub(super) fn new(source: Option<Arc<dyn HumanInteractionPolicySource>>) -> Self {
         Self {
             source,
+            execution_ready: false,
             request: HumanInteractionRequestContract::unavailable(),
         }
+    }
+
+    pub(super) fn with_execution_ready(mut self, execution_ready: bool) -> Self {
+        self.execution_ready = execution_ready;
+        self
     }
 }
 
@@ -150,11 +156,19 @@ impl RuntimeExtension for HumanInteractionExtension {
             .and_then(|source| source.snapshot().ok())
             .and_then(|policy| HumanInteractionRequestContract::new(policy).ok())
             .unwrap_or_else(HumanInteractionRequestContract::unavailable);
+        self.request.execution_ready = self.execution_ready && self.source.is_some();
         Ok(())
     }
 
-    // No Tool implementation is registered in this phase. Merely supplying a policy source or
-    // restoring this shell must never expose a Tool that acknowledges without durable execution.
+    fn tools(&self) -> Vec<Box<dyn crate::tools::AgentTool>> {
+        if self.execution_ready {
+            vec![Box::new(
+                crate::tools::human_interaction::RequestUserInputTool,
+            )]
+        } else {
+            Vec::new()
+        }
+    }
     fn active_tool_capabilities(&self) -> AgentResult<BTreeSet<ToolCapabilityId>> {
         Ok(self.request.capabilities())
     }
@@ -242,13 +256,13 @@ mod tests {
             settings: Mutex::new(settings(true, 3)),
             reads: AtomicUsize::new(0),
         });
-        let mut extension = HumanInteractionExtension::new(Some(policy.clone()));
+        let mut extension =
+            HumanInteractionExtension::new(Some(policy.clone())).with_execution_ready(true);
         extension.prepare_model_request().unwrap();
         *policy.settings.lock().unwrap() = settings(false, 4);
-        // Contract-only test: no executable handler or service is installed. Future ready
-        // implementations must use this same snapshot for schema, prompt and World State.
-        extension.request.execution_ready = true;
-        assert_eq!(extension.request.tool_definitions().len(), 2);
+        // The executable tool, schema, prompt and World State share the frozen request snapshot.
+        assert_eq!(extension.tools().len(), 1);
+        assert_eq!(extension.request.tool_definitions().len(), 1);
         assert_eq!(extension.active_tool_capabilities().unwrap().len(), 1);
         assert_eq!(
             extension
@@ -263,7 +277,6 @@ mod tests {
         );
         assert_eq!(policy.reads.load(Ordering::SeqCst), 1);
         extension.prepare_model_request().unwrap();
-        extension.request.execution_ready = true;
         assert!(extension.request.tool_definitions().is_empty());
         assert!(extension.active_tool_capabilities().unwrap().is_empty());
         assert!(extension

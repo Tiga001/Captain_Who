@@ -69,6 +69,7 @@ fn services(policy: Option<Arc<Policy>>) -> RuntimeCapabilityServices {
         automation_report_sink: None,
         human_interaction_policy: policy
             .map(|policy| policy as Arc<dyn HumanInteractionPolicySource>),
+        human_interaction_execution_ready: false,
     }
 }
 
@@ -266,4 +267,48 @@ fn human_interaction_policy_read_failure_does_not_prevent_ordinary_root_preparat
         .prepare_model_request()
         .unwrap();
     assert_no_human_tools(&capabilities);
+}
+
+#[test]
+fn human_interaction_ready_root_exposes_only_sync_and_keeps_stable_prefix() {
+    let baseline =
+        prepare_runtime_capabilities_with_skills(&root_input(), "root", &[], services(None))
+            .unwrap();
+    let mut host = services(Some(policy(true)));
+    host.human_interaction_execution_ready = true;
+    let capabilities =
+        prepare_runtime_capabilities_with_skills(&root_input(), "root", &[], host).unwrap();
+    assert!(capabilities.initial_tool_set.contains("request_user_input"));
+    assert!(!capabilities
+        .initial_tool_set
+        .contains("request_user_input_async"));
+    assert_eq!(
+        baseline.initial_tool_set.stable_revision(),
+        capabilities.initial_tool_set.stable_revision()
+    );
+    for input in [child_input(), {
+        let mut input = root_input();
+        input.context = None;
+        input
+    }] {
+        let source = policy(true);
+        let mut host = services(Some(source.clone()));
+        host.human_interaction_execution_ready = true;
+        let capabilities =
+            prepare_runtime_capabilities_with_skills(&input, "descendant", &[], host).unwrap();
+        assert_no_human_tools(&capabilities);
+        assert_eq!(source.reads.load(Ordering::SeqCst), 0);
+    }
+}
+
+#[test]
+fn human_interaction_ready_automation_remains_unmounted() {
+    let source = policy(true);
+    let mut host = services(Some(source.clone()));
+    host.human_interaction_execution_ready = true;
+    host.automation_report_sink = Some(Arc::new(NoReports));
+    let capabilities =
+        prepare_runtime_capabilities_with_skills(&root_input(), "automation", &[], host).unwrap();
+    assert_no_human_tools(&capabilities);
+    assert_eq!(source.reads.load(Ordering::SeqCst), 0);
 }

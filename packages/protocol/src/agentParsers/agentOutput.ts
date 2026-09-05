@@ -86,7 +86,15 @@ export function parseMcpAgentChatOutput(value: unknown, context: string): AgentC
     ),
     status: expectEnum(
       record.status,
-      ['idle', 'running', 'waiting_for_approval', 'completed', 'failed', 'cancelled'] as const,
+      [
+        'idle',
+        'running',
+        'waiting_for_approval',
+        'waiting_for_user_input',
+        'completed',
+        'failed',
+        'cancelled'
+      ] as const,
       `${context}.status`
     ),
     runId,

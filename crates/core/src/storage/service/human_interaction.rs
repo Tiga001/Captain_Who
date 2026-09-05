@@ -72,3 +72,110 @@ impl StorageService {
         repository::load_suspension(&connection, request_id)
     }
 }
+
+impl StorageService {
+    pub fn admit_sync_human_interaction(
+        &self,
+        input: &repository::HumanInteractionSyncAdmission,
+    ) -> Result<HumanInteractionRequestSnapshot, HumanInteractionError> {
+        let mut connection = self.state.connection().map_err(repository::unavailable)?;
+        repository::admit_sync(&mut connection, input, now_ms())
+    }
+    pub fn claim_sync_human_interaction(
+        &self,
+        request_id: &str,
+    ) -> Result<Option<repository::HumanInteractionSyncResume>, HumanInteractionError> {
+        let mut connection = self.state.connection().map_err(repository::unavailable)?;
+        repository::claim_sync(&mut connection, request_id, now_ms())
+    }
+    pub fn mark_sync_human_interaction_execution_started(
+        &self,
+        binding: &repository::HumanInteractionSyncBinding,
+    ) -> Result<bool, HumanInteractionError> {
+        self.advance_sync_human_interaction(
+            binding,
+            repository::HumanInteractionSyncTransition::ExecutionStarted,
+        )
+    }
+    pub fn mark_sync_human_interaction_model_in_flight(
+        &self,
+        binding: &repository::HumanInteractionSyncBinding,
+    ) -> Result<bool, HumanInteractionError> {
+        self.advance_sync_human_interaction(
+            binding,
+            repository::HumanInteractionSyncTransition::ModelInFlight,
+        )
+    }
+    pub fn mark_sync_human_interaction_applied(
+        &self,
+        binding: &repository::HumanInteractionSyncBinding,
+    ) -> Result<bool, HumanInteractionError> {
+        self.advance_sync_human_interaction(
+            binding,
+            repository::HumanInteractionSyncTransition::Applied,
+        )
+    }
+    fn advance_sync_human_interaction(
+        &self,
+        binding: &repository::HumanInteractionSyncBinding,
+        transition: repository::HumanInteractionSyncTransition,
+    ) -> Result<bool, HumanInteractionError> {
+        let mut connection = self.state.connection().map_err(repository::unavailable)?;
+        repository::advance_sync(&mut connection, binding, transition, now_ms())
+    }
+    pub fn cancel_sync_human_interactions_for_run(
+        &self,
+        run_id: &str,
+    ) -> Result<Vec<HumanInteractionRequestSnapshot>, HumanInteractionError> {
+        let mut connection = self.state.connection().map_err(repository::unavailable)?;
+        repository::cancel_sync_for_run(&mut connection, run_id, now_ms())
+    }
+    pub fn reconcile_sync_human_interactions(
+        &self,
+    ) -> Result<Vec<HumanInteractionRequestSnapshot>, HumanInteractionError> {
+        let mut connection = self.state.connection().map_err(repository::unavailable)?;
+        repository::reconcile_sync(&mut connection, now_ms())
+    }
+    pub fn list_sync_human_interaction_ready_resumes(
+        &self,
+    ) -> Result<Vec<HumanInteractionRequestSnapshot>, HumanInteractionError> {
+        let connection = self.state.connection().map_err(repository::unavailable)?;
+        repository::list_sync_ready(&connection)
+    }
+    pub fn has_sync_human_interaction_wait(
+        &self,
+        conversation_id: &str,
+    ) -> Result<bool, HumanInteractionError> {
+        let connection = self.state.connection().map_err(repository::unavailable)?;
+        repository::has_sync_wait(&connection, conversation_id)
+    }
+    pub fn is_sync_human_interaction_run_waiting(
+        &self,
+        run_id: &str,
+    ) -> Result<bool, HumanInteractionError> {
+        let connection = self.state.connection().map_err(repository::unavailable)?;
+        repository::is_sync_run_waiting(&connection, run_id)
+    }
+}
+
+impl StorageService {
+    pub fn list_sync_human_interaction_waits(
+        &self,
+    ) -> Result<Vec<(HumanInteractionRequestSnapshot, serde_json::Value)>, HumanInteractionError>
+    {
+        let connection = self.state.connection().map_err(repository::unavailable)?;
+        repository::list_sync_waits(&connection)
+    }
+}
+
+impl StorageService {
+    /// Cancellation may already have committed its stop trigger; retain access to its checkpoint.
+    pub fn load_sync_human_interaction_for_run(
+        &self,
+        run_id: &str,
+    ) -> Result<Option<(HumanInteractionRequestSnapshot, serde_json::Value)>, HumanInteractionError>
+    {
+        let connection = self.state.connection().map_err(repository::unavailable)?;
+        repository::load_sync_for_run(&connection, run_id)
+    }
+}

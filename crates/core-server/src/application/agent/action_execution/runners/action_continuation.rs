@@ -279,6 +279,7 @@ impl AgentService {
                     assistant_message_id: turn_assistant_message_id.clone(),
                     assistant_created_at: record.snapshot.created_at,
                     agent_input,
+                    human_input_resume: None,
                     skill_resources,
                     mcp_tools,
                     automation_report_sink,
@@ -295,9 +296,11 @@ impl AgentService {
                 notifications.clone(),
             )
             .await;
+        let waiting_for_user_input =
+            matches!(&result, Ok(output) if output.status == AgentRunStatus::WaitingForUserInput);
         let keep_trace_snapshot = matches!(
             &result,
-            Ok(output) if output.status == AgentRunStatus::WaitingForApproval
+            Ok(output) if matches!(output.status, AgentRunStatus::WaitingForApproval | AgentRunStatus::WaitingForUserInput)
         );
 
         if self.is_agent_input_scope_deleting(&record.agent_input) {
@@ -657,11 +660,20 @@ impl AgentService {
             self.discard_trace_snapshot(&run_id);
             self.discard_exact_running_context_window_snapshot(&run_id);
         }
+        if waiting_for_user_input && settlement_committed {
+            self.release_turn_concurrency_permit(&run_id);
+        }
         if durable_turn_terminal
             || deletion_cleanup
             || (keep_trace_snapshot && settlement_committed)
         {
             self.unregister_cancellation_if_current(&run_id, &cancellation_token);
+        }
+        if waiting_for_user_input && cancellation_token.is_cancelled() {
+            self.cancel_waiting_human_input_run(&run_id);
+        }
+        if (waiting_for_user_input && settlement_committed) || durable_turn_terminal {
+            self.schedule_ready_human_input_resumes(notifications);
         }
     }
 }

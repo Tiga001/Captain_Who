@@ -188,6 +188,7 @@ pub(super) struct RuntimeExtensions {
 pub(super) struct RuntimeExtensionHostServices {
     pub(super) builtin_capabilities: Option<crate::BuiltinCapabilityRuntime>,
     pub(super) human_interaction_policy: Option<Arc<dyn crate::HumanInteractionPolicySource>>,
+    pub(super) human_interaction_execution_ready: bool,
     pub(super) human_root: bool,
 }
 
@@ -264,9 +265,12 @@ impl RuntimeExtensions {
                     snapshot.extension_id == human_interaction::HUMAN_INTERACTION_EXTENSION_ID
                 }))
         {
-            extensions.push(Box::new(human_interaction::HumanInteractionExtension::new(
-                host_services.human_interaction_policy,
-            )));
+            extensions.push(Box::new(
+                human_interaction::HumanInteractionExtension::new(
+                    host_services.human_interaction_policy,
+                )
+                .with_execution_ready(host_services.human_interaction_execution_ready),
+            ));
         }
         extensions.push(Box::new(todo));
         Self::from_extensions(extensions, Some(todo_handle), snapshots)
@@ -797,6 +801,7 @@ mod tests {
                 },
             }),
             checkpoint: Box::new(crate::protocol::AgentRunCheckpoint {
+                pause_reason: crate::AgentRunCheckpointPauseReason::Approval,
                 version: crate::protocol::AGENT_RUN_CHECKPOINT_SCHEMA_VERSION,
                 run_id: "run-1".to_string(),
                 context_items: Vec::new(),

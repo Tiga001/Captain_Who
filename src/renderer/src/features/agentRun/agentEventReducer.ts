@@ -90,6 +90,7 @@ import {
   getSettledActivityStatus,
   isCompletedAgentRunStatus,
   isFinishedAgentOutputStatus,
+  isSuspendedAgentRunStatus,
   upsertById
 } from './agentEventReducerShared'
 
@@ -207,9 +208,13 @@ export function shouldTouchConversationForAgentEvent(agentEvent: AgentEvent) {
   if (agentEvent.type === 'error' && !agentEvent.recoverable) return true
 
   if (agentEvent.type === 'state') {
-    return ['waiting_for_approval', 'completed', 'failed', 'cancelled'].includes(
-      agentEvent.state.status
-    )
+    return [
+      'waiting_for_approval',
+      'waiting_for_user_input',
+      'completed',
+      'failed',
+      'cancelled'
+    ].includes(agentEvent.state.status)
   }
 
   return false
@@ -218,7 +223,7 @@ export function shouldTouchConversationForAgentEvent(agentEvent: AgentEvent) {
 function getChatMessageStatusFromAgentStatus(
   status: AgentChatOutput['status']
 ): ChatMessage['status'] {
-  if (status === 'running' || status === 'waiting_for_approval') return 'pending'
+  if (status === 'running' || isSuspendedAgentRunStatus(status)) return 'pending'
   if (status === 'failed') return 'error'
   return 'sent'
 }
@@ -749,7 +754,7 @@ export function applyAgentEventToChatMessage(
       status: 'pending',
       agentRun: {
         ...runWithProposal,
-        status: currentRun.status === 'waiting_for_approval' ? currentRun.status : 'running',
+        status: isSuspendedAgentRunStatus(currentRun.status) ? currentRun.status : 'running',
         timeline: call ? appendToolCallToTimeline(runWithProposal, call.id) : currentRun.timeline
       }
     }
@@ -1015,12 +1020,11 @@ export function applyAgentEventToChatMessage(
   return {
     ...message,
     content: finalContent,
-    status:
-      nextStatus === 'waiting_for_approval'
-        ? 'pending'
-        : nextStatus === 'cancelled' || agentEvent.success || safelyInterrupted
-          ? 'sent'
-          : 'error',
+    status: isSuspendedAgentRunStatus(nextStatus)
+      ? 'pending'
+      : nextStatus === 'cancelled' || agentEvent.success || safelyInterrupted
+        ? 'sent'
+        : 'error',
     agentRun: nextRun
   }
 }
@@ -1119,7 +1123,7 @@ export function applyAgentActionDecisionToChatMessage(
       : (currentRun.mcpInvocations ?? [])
   const runWithDecision = normalizeAgentRunToolActivities({
     ...currentRun,
-    status: 'running',
+    status: currentRun.status === 'waiting_for_user_input' ? currentRun.status : 'running',
     approvals: removeAgentAction(currentRun.approvals, actionId),
     skillInstallations: applySkillInstallationDecision(
       currentRun.skillInstallations,
@@ -1186,9 +1190,14 @@ export function applyAgentActionExecutionToChatMessage(
   // tombstone: the late RPC may still settle approval and process child state below, but it must
   // never reopen the assistant message or replace the terminal Run status/content.
   const parentIsTerminal = isCompletedAgentRunStatus(message.agentRun?.status)
-  const messageWithAgentOutput = parentIsTerminal
-    ? message
-    : applyAgentOutputToChatMessage(message, execution.agentOutput)
+  // An approval response may arrive after its resumed worker has reached a human-input pause.
+  // Only the independent human-input continuation may advance that pause; an older approval RPC
+  // may settle its own action, but cannot replace this newer Run state or cumulative usage.
+  const parentIsWaitingForUserInput = message.agentRun?.status === 'waiting_for_user_input'
+  const messageWithAgentOutput =
+    parentIsTerminal || parentIsWaitingForUserInput
+      ? message
+      : applyAgentOutputToChatMessage(message, execution.agentOutput)
   const outputRun = ensureAgentRun(messageWithAgentOutput.agentRun, execution.agentOutput.runId)
   const currentRun: ChatAgentRunView =
     message.agentRun?.status === 'waiting_for_approval' &&

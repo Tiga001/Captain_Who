@@ -6177,8 +6177,37 @@ CREATE TABLE human_interaction_suspensions (
     assistant_message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
     tool_call_id TEXT NOT NULL,
     checkpoint_json TEXT NOT NULL CHECK (json_valid(checkpoint_json) AND json_type(checkpoint_json) = 'object' AND length(CAST(checkpoint_json AS BLOB)) <= 1048576),
-    status TEXT NOT NULL CHECK (status IN ('waiting', 'cancelled')),
+    status TEXT NOT NULL CHECK (status IN ('waiting', 'claimed', 'executing', 'model_in_flight', 'applied', 'failed', 'cancelled')),
+    claim_id TEXT,
     revision INTEGER NOT NULL CHECK (typeof(revision) = 'integer' AND revision BETWEEN 0 AND 9007199254740991),
     created_at INTEGER NOT NULL CHECK (typeof(created_at) = 'integer' AND created_at BETWEEN 0 AND 9007199254740991),
     updated_at INTEGER NOT NULL CHECK (typeof(updated_at) = 'integer' AND updated_at BETWEEN created_at AND 9007199254740991)
 );
+
+-- Blocking human input v37 uses private checkpoint claims, never approval authority.
+CREATE INDEX idx_human_interaction_suspensions_run ON human_interaction_suspensions(run_id, status);
+CREATE TRIGGER human_interaction_suspensions_immutable_identity
+BEFORE UPDATE ON human_interaction_suspensions
+WHEN NEW.request_id IS NOT OLD.request_id OR NEW.run_id IS NOT OLD.run_id
+  OR NEW.assistant_message_id IS NOT OLD.assistant_message_id OR NEW.tool_call_id IS NOT OLD.tool_call_id
+  OR NEW.checkpoint_json IS NOT OLD.checkpoint_json OR NEW.created_at IS NOT OLD.created_at
+BEGIN SELECT RAISE(ABORT, 'human interaction suspension identity is immutable'); END;
+CREATE TRIGGER human_interaction_suspensions_terminal
+BEFORE UPDATE ON human_interaction_suspensions
+WHEN OLD.status IN ('applied','failed','cancelled') AND NEW.status IS NOT OLD.status
+BEGIN SELECT RAISE(ABORT, 'human interaction suspension is terminal'); END;
+CREATE TRIGGER human_interaction_deliveries_terminal
+BEFORE UPDATE ON human_interaction_deliveries
+WHEN OLD.status IN ('applied','failed','cancelled') AND NEW.status IS NOT OLD.status
+BEGIN SELECT RAISE(ABORT, 'human interaction delivery is terminal'); END;
+CREATE TRIGGER human_interaction_sync_stop_fence
+AFTER INSERT ON agent_tree_run_stops
+BEGIN
+    UPDATE human_interaction_requests SET status='cancelled',revision=revision+1,updated_at=MAX(updated_at,NEW.stopped_at)
+      WHERE run_id=NEW.run_id AND mode='sync' AND status='open';
+    UPDATE human_interaction_deliveries SET status='cancelled',revision=revision+1,error_code='run_cancelled'
+      WHERE status IN ('pending','bound') AND response_id IN (
+        SELECT a.response_id FROM human_interaction_responses a JOIN human_interaction_requests r ON r.request_id=a.request_id WHERE r.run_id=NEW.run_id AND r.mode='sync');
+    UPDATE human_interaction_suspensions SET status='cancelled',revision=revision+1,updated_at=MAX(updated_at,NEW.stopped_at)
+      WHERE run_id=NEW.run_id AND status IN ('waiting','claimed','executing','model_in_flight');
+END;

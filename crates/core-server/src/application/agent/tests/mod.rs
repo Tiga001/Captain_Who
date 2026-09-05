@@ -36,6 +36,7 @@ mod deletion;
 mod file_change_permissions;
 mod file_change_source_boundary;
 mod historical_compatibility_boundary;
+mod human_input;
 mod human_root_notifications;
 mod image_generation;
 mod managed_command_loop;

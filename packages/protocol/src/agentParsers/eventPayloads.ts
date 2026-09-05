@@ -89,7 +89,15 @@ export function parseAgentStateSnapshot(value: unknown, context: string): AgentS
   return {
     status: expectEnum(
       item.status,
-      ['idle', 'running', 'waiting_for_approval', 'completed', 'failed', 'cancelled'] as const,
+      [
+        'idle',
+        'running',
+        'waiting_for_approval',
+        'waiting_for_user_input',
+        'completed',
+        'failed',
+        'cancelled'
+      ] as const,
       `${context}.status`
     ),
     activeRunId:

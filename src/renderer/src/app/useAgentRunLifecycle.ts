@@ -19,6 +19,7 @@ import {
   shouldTouchConversationForAgentEvent
 } from '../features/agentRun/agentEventReducer'
 import { shouldHydratePendingAgentAction } from '../features/agentRun/agentActionUtils'
+import { isSuspendedAgentRunStatus } from '../features/agentRun/agentEventReducerShared'
 import { hostClient } from '../host/hostClient'
 import { createComposerDraft } from './chatMessageFactory'
 import type { ActiveRunBinding } from './appTypes'
@@ -853,7 +854,7 @@ export function useAgentRunLifecycle({
           persist:
             agentEvent.type !== 'llm_retry' &&
             (!isCommandSessionEvent || isTerminalCommandSessionEvent) &&
-            !(agentEvent.type === 'done' && agentEvent.status !== 'waiting_for_approval'),
+            !(agentEvent.type === 'done' && !isSuspendedAgentRunStatus(agentEvent.status)),
           touchConversation:
             !isCommandSessionEvent && shouldTouchConversationForAgentEvent(agentEvent)
         }
@@ -861,10 +862,10 @@ export function useAgentRunLifecycle({
 
       if (agentEvent.type === 'done') {
         stopRequestedRunIdSet.delete(agentEvent.runId)
-        if (agentEvent.status !== 'waiting_for_approval') {
+        if (!isSuspendedAgentRunStatus(agentEvent.status)) {
           reconcileTerminalRunFromStorage(conversationId, assistantMessageId, agentEvent.runId)
         }
-        if (agentEvent.success && agentEvent.status !== 'waiting_for_approval') {
+        if (agentEvent.success && !isSuspendedAgentRunStatus(agentEvent.status)) {
           const completedAt = Date.now()
           let conversationToSave: ChatConversation | null = null
           const nextConversations = conversationsRef.current.map((conversation) => {
@@ -890,7 +891,7 @@ export function useAgentRunLifecycle({
           }
         }
 
-        if (agentEvent.status !== 'waiting_for_approval') {
+        if (!isSuspendedAgentRunStatus(agentEvent.status)) {
           cleanupRunBinding(agentEvent.runId)
         }
         if (agentEvent.status === 'completed' || agentEvent.status === 'cancelled') {
@@ -939,7 +940,7 @@ export function useAgentRunLifecycle({
           (run.status !== 'queued' &&
             run.status !== 'starting' &&
             run.status !== 'running' &&
-            run.status !== 'waiting_for_approval')
+            !isSuspendedAgentRunStatus(run.status))
         ) {
           continue
         }

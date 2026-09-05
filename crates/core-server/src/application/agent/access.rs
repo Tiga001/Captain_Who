@@ -121,5 +121,12 @@ impl AgentService {
                     .and_then(|record| record.snapshot.conversation_id.clone())
             })
             .or_else(|| self.command_sessions.conversation_for_origin_run(run_id))
+            .or_else(|| {
+                self.storage
+                    .load_sync_human_interaction_for_run(run_id)
+                    .ok()
+                    .flatten()
+                    .map(|(request, _)| request.conversation_id)
+            })
     }
 }

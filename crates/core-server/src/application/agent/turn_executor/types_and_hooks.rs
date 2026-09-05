@@ -277,6 +277,10 @@ pub(super) struct PreparedRuntimeTurnSegment {
     pub(super) assistant_message_id: String,
     pub(super) assistant_created_at: i64,
     pub(super) agent_input: AgentChatInput,
+    pub(super) human_input_resume: Option<(
+        mycopilot_core::AgentUserInputResume,
+        mycopilot_core::storage::human_interaction_repository::HumanInteractionSyncBinding,
+    )>,
     pub(super) skill_resources: Option<Arc<mycopilot_core::skills::SkillResourceSession>>,
     pub(super) mcp_tools: Option<McpToolRuntime>,
     pub(super) automation_report_sink: Option<Arc<dyn AutomationReportSink>>,

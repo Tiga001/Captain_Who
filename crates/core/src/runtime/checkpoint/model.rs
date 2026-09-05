@@ -41,6 +41,9 @@ pub(super) struct ToolCallBatch {
     /// and results refer to its bindings; no per-call assistant copies are retained.
     assistant_turn: Option<LlmAssistantTurn>,
     assistant_turn_identity: Option<AgentAssistantTurnCheckpointIdentity>,
+    /// Generic restored turns retain the fully validated call mapping but reconstruct a local
+    /// synthetic turn digest. This in-memory fact permits another pause in the same frozen batch.
+    restored_identity_validated: bool,
     deferred_external_tool_call_count: u32,
     suppressed_narration: bool,
     /// Semantic calls already accepted from this one model response.
@@ -201,6 +204,7 @@ impl ToolCallBatch {
             queue,
             assistant_turn: Some(assistant_turn),
             assistant_turn_identity: Some(assistant_turn_identity),
+            restored_identity_validated: false,
             deferred_external_tool_call_count: 0,
             suppressed_narration,
             seen_semantic_fingerprints: BTreeSet::new(),
@@ -209,6 +213,11 @@ impl ToolCallBatch {
     }
 
     pub(super) fn claim(&mut self, call: &LlmToolCall) -> ToolCallBatchClaim {
+        // Distinct question call identities each await their own answer, including identical
+        // question text. Storage deduplicates the exact call; semantic side-effect guards do not.
+        if call.name == "request_user_input" {
+            return ToolCallBatchClaim::Execute;
+        }
         let semantic_fingerprint = semantic_tool_call_fingerprint(&call.name, &call.args);
         if !self
             .seen_semantic_fingerprints
@@ -522,7 +531,8 @@ pub(super) fn create_run_checkpoint_with_file_observations(
         &assistant_turn_identity,
         pending_tool_call_id,
         &queued_tool_call_ids,
-        true,
+        !tool_batch.restored_identity_validated
+            || provider_runtime_capabilities.allows_encrypted_checkpoint_rehydration(),
     )?;
     // The checkpoint and the durable in-progress Trace are two views of the same frozen prefix.
     // Persist the canonical/redacted Trace projection here as well; retaining the private raw
@@ -579,6 +589,7 @@ pub(super) fn create_run_checkpoint_with_file_observations(
     )?;
     Ok(AgentRunCheckpoint {
         version: AGENT_RUN_CHECKPOINT_SCHEMA_VERSION,
+        pause_reason: crate::AgentRunCheckpointPauseReason::Approval,
         run_id: run_id.to_string(),
         context_items,
         next_model_request_index,
