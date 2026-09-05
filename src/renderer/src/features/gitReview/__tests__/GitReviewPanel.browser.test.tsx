@@ -1,9 +1,15 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { render } from 'vitest-browser-react'
+import type { ReactNode } from 'react'
+import { render as renderComponent } from 'vitest-browser-react'
+import { ToastProvider } from '../../../components/toast/ToastProvider'
 import '../../../styles/global.css'
 import '../GitReviewPanel.css'
 
-const { loadFileContentSpy } = vi.hoisted(() => ({ loadFileContentSpy: vi.fn() }))
+const { copyFilePathSpy, loadFileContentSpy } = vi.hoisted(() => ({
+  copyFilePathSpy: vi.fn(),
+  loadFileContentSpy: vi.fn()
+}))
+const render = (component: ReactNode) => renderComponent(component, { wrapper: ToastProvider })
 
 vi.mock('../../../config/FrontendConfigProvider', () => ({
   useFrontendConfig: () => ({
@@ -14,6 +20,7 @@ vi.mock('../../../config/FrontendConfigProvider', () => ({
 }))
 
 vi.mock('../gitReviewClient', () => ({
+  copyGitReviewFilePath: copyFilePathSpy,
   getGitReviewRepositoryContext: vi.fn(),
   listGitReviewCommits: vi.fn()
 }))
@@ -23,8 +30,9 @@ vi.mock('../useGitReview', async () => {
   const files = ['first', 'second', 'third'].map((name) => ({
     id: name,
     path: `src/${name}.ts`,
+    ...(name === 'first' ? { previousPath: 'src/old-first.ts' } : {}),
     stats: { additions: 1, deletions: 0 },
-    status: 'modified' as const
+    status: name === 'first' ? ('renamed' as const) : ('modified' as const)
   }))
   const summary = {
     files: [
@@ -121,11 +129,76 @@ const { GitReviewPanel } = await import('../GitReviewPanel')
 const openFile = (): void => undefined
 
 beforeEach(() => {
+  copyFilePathSpy.mockReset().mockResolvedValue(undefined)
   loadFileContentSpy.mockClear()
   window.localStorage.removeItem('mycopilot.gitReview.preferences.v1')
 })
 
 describe('GitReviewPanel interactions', () => {
+  it('copies a renamed file using its current path and current project', async () => {
+    const onOpenFile = vi.fn()
+    const screen = await render(
+      <div style={{ height: 500, width: 440 }}>
+        <GitReviewPanel isActive onOpenFile={onOpenFile} projectId="project-1" />
+      </div>
+    )
+    const clickFirstCopyButton = (): void => {
+      const button = screen.container.querySelector<HTMLButtonElement>(
+        '.git-review__diff-card[data-file-id="first"] [aria-label="gitReview.file.copyPath"]'
+      )
+      if (!button) throw new Error('Copy action did not render')
+      button.click()
+    }
+
+    clickFirstCopyButton()
+
+    await expect.poll(() => copyFilePathSpy.mock.calls.length).toBe(1)
+    expect(copyFilePathSpy).toHaveBeenLastCalledWith({
+      projectId: 'project-1',
+      path: 'src/first.ts'
+    })
+    expect(onOpenFile).not.toHaveBeenCalled()
+    expect(
+      screen.container.querySelector('.git-review__diff-card[data-expanded="true"]')
+    ).toBeNull()
+    expect(loadFileContentSpy).not.toHaveBeenCalled()
+
+    await screen.rerender(
+      <div style={{ height: 500, width: 440 }}>
+        <GitReviewPanel isActive onOpenFile={onOpenFile} projectId="project-2" />
+      </div>
+    )
+    clickFirstCopyButton()
+
+    await expect.poll(() => copyFilePathSpy.mock.calls.length).toBe(2)
+    expect(copyFilePathSpy).toHaveBeenLastCalledWith({
+      projectId: 'project-2',
+      path: 'src/first.ts'
+    })
+  })
+
+  it('reports a rejected host file path copy without opening or expanding the file', async () => {
+    copyFilePathSpy.mockRejectedValueOnce(new Error('File does not exist'))
+    const onOpenFile = vi.fn()
+    const screen = await render(
+      <div style={{ height: 500, width: 440 }}>
+        <GitReviewPanel isActive onOpenFile={onOpenFile} projectId="project-1" />
+      </div>
+    )
+    const copyButton = screen.container.querySelector<HTMLButtonElement>(
+      '.git-review__diff-card[data-file-id="first"] [aria-label="gitReview.file.copyPath"]'
+    )
+    if (!copyButton) throw new Error('Copy action did not render')
+
+    copyButton.click()
+
+    await expect.element(screen.getByRole('status')).toHaveTextContent('gitReview.copy.failed')
+    expect(onOpenFile).not.toHaveBeenCalled()
+    expect(
+      screen.container.querySelector('.git-review__diff-card[data-expanded="true"]')
+    ).toBeNull()
+  })
+
   it('shows and totals only files with concrete line statistics', async () => {
     const screen = await render(
       <div style={{ height: 500, width: 440 }}>

@@ -141,20 +141,19 @@
 
 .right-sidebar__tab-close {
   position: absolute;
-  right: 6px;
+  right: 1px;
   display: grid;
-  width: 14px;
-  height: 14px;
+  width: 24px;
+  height: 24px;
   padding: 0;
   place-items: center;
   color: var(--mc-color-text-inverse);
-  background: var(--mc-color-text-primary);
+  background: transparent;
   border: 0;
   border-radius: 999px;
   cursor: pointer;
   opacity: 0;
   pointer-events: none;
-  transform: scale(0.86);
   visibility: hidden;
   z-index: 2;
   -webkit-app-region: no-drag;
@@ -162,23 +161,30 @@
     background-color 120ms ease,
     color 120ms ease,
     opacity 120ms ease,
-    transform 120ms ease,
     visibility 0ms linear 120ms;
 }
 
-.right-sidebar__tab-shell[data-active='true']:hover .right-sidebar__tab-close,
-.right-sidebar__tab-shell[data-active='true']:focus-within .right-sidebar__tab-close,
+.right-sidebar__tab-shell:hover .right-sidebar__tab-close,
+.right-sidebar__tab-shell:focus-within .right-sidebar__tab-close,
 .right-sidebar__tab-close:focus-visible {
   pointer-events: auto;
   opacity: 1;
-  transform: scale(1);
   visibility: visible;
   transition-delay: 0ms;
 }
 
 .right-sidebar__tab-close:hover {
   color: var(--mc-color-text-inverse);
+}
+
+.right-sidebar__tab-close-icon {
+  display: grid;
+  width: 14px;
+  height: 14px;
+  place-items: center;
   background: var(--mc-color-text-primary);
+  border-radius: 999px;
+  pointer-events: none;
 }
 
 .right-sidebar__tab-close svg {

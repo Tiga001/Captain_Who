@@ -8,6 +8,12 @@ import {
 } from './appConstants'
 import { getSidebarResizeMaximum, resolveShellLayout } from './shellLayoutPolicy'
 import type { SidebarResizeMetrics, SidebarSide } from '../lib/sidebarResize'
+import {
+  BOTTOM_PANEL_DEFAULT_HEIGHT,
+  BOTTOM_PANEL_MIN_HEIGHT,
+  resolveBottomPanelLayout,
+  type BottomPanelResizeMetrics
+} from './bottomPanelLayout'
 
 function readShellWidth(element: HTMLDivElement | null): number {
   return element?.clientWidth || window.innerWidth
@@ -16,12 +22,36 @@ function readShellWidth(element: HTMLDivElement | null): number {
 export function useShellLayout() {
   const shellRef = useRef<HTMLDivElement>(null)
   const [shellWidth, setShellWidth] = useState(() => window.innerWidth)
+  const [shellHeight, setShellHeight] = useState(() => window.innerHeight)
   const [leftPreferredWidth, setLeftPreferredWidth] = useState(LEFT_DEFAULT_WIDTH)
   const [rightPreferredWidth, setRightPreferredWidth] = useState(RIGHT_DEFAULT_WIDTH)
   const [leftRequestedOpen, setLeftRequestedOpen] = useState(true)
   const [rightRequestedOpen, setRightRequestedOpen] = useState(false)
   const [preferredSide, setPreferredSide] = useState<SidebarSide | undefined>()
   const [rightMaximized, setRightMaximized] = useState(false)
+  const [bottomRequestedOpen, setBottomRequestedOpen] = useState(false)
+  const [bottomPreferredHeight, setBottomPreferredHeight] = useState(BOTTOM_PANEL_DEFAULT_HEIGHT)
+  const bottomLayout = resolveBottomPanelLayout(
+    shellHeight,
+    bottomRequestedOpen,
+    bottomPreferredHeight
+  )
+  const bottomResizeMetrics: BottomPanelResizeMetrics = {
+    height: bottomLayout.height,
+    maximum: bottomLayout.maximum,
+    minimum: BOTTOM_PANEL_MIN_HEIGHT
+  }
+  const closeBottomPanel = useCallback(() => setBottomRequestedOpen(false), [])
+  const toggleBottomPanel = useCallback(
+    () => setBottomRequestedOpen(!bottomLayout.open),
+    [bottomLayout.open]
+  )
+  const commitBottomPanelResize = useCallback(
+    (_side: 'bottom', height: number) => {
+      setBottomPreferredHeight(clamp(height, BOTTOM_PANEL_MIN_HEIGHT, bottomLayout.maximum))
+    },
+    [bottomLayout.maximum]
+  )
 
   const layout = useMemo(
     () =>
@@ -115,8 +145,12 @@ export function useShellLayout() {
     const shell = shellRef.current
     const updateShellWidth = () => {
       const nextWidth = readShellWidth(shell)
+      const nextHeight = shell?.clientHeight || window.innerHeight
       setShellWidth((currentWidth) =>
         Math.abs(currentWidth - nextWidth) > 0.5 ? nextWidth : currentWidth
+      )
+      setShellHeight((currentHeight) =>
+        Math.abs(currentHeight - nextHeight) > 0.5 ? nextHeight : currentHeight
       )
     }
 
@@ -133,6 +167,11 @@ export function useShellLayout() {
   }, [])
 
   return {
+    bottomHeight: bottomLayout.height,
+    bottomOpen: bottomLayout.open,
+    bottomResizeMetrics,
+    closeBottomPanel,
+    commitBottomPanelResize,
     commitSidebarResize,
     leftResizeMetrics,
     leftOpen: layout.leftOpen,
@@ -144,6 +183,7 @@ export function useShellLayout() {
     rightWidth: layout.rightWidth,
     shellRef,
     toggleLeftSidebar,
+    toggleBottomPanel,
     toggleRightSidebar,
     toggleRightSidebarMaximized
   }

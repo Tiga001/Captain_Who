@@ -12,13 +12,24 @@ import {
   type SidebarSide
 } from '../../lib/sidebarResize'
 
-interface ResizeHandleProps {
+interface SidebarResizeHandleProps {
   metrics: SidebarResizeMetrics
   onCollapse: () => void
   onResizeCommit: (side: SidebarSide, width: number) => void
   resizeTargetRef: RefObject<HTMLElement | null>
   side: SidebarSide
 }
+
+interface BottomResizeHandleProps {
+  metrics: { height: number; minimum: number; maximum: number }
+  onCollapse: () => void
+  onResizeCommit: (side: 'bottom', height: number) => void
+  resizeTargetRef: RefObject<HTMLElement | null>
+  side: 'bottom'
+}
+
+type ResizeHandleProps = SidebarResizeHandleProps | BottomResizeHandleProps
+type ResizeSide = ResizeHandleProps['side']
 
 type ResizeSession = {
   collapsed: boolean
@@ -36,21 +47,29 @@ const KEYBOARD_RESIZE_STEP = 8
 const KEYBOARD_RESIZE_LARGE_STEP = 32
 const SIDEBAR_TOGGLE_TRANSITION_MS = 180
 
-function liveWidthProperty(side: SidebarSide): string {
+function liveWidthProperty(side: ResizeSide): string {
+  if (side === 'bottom') return '--bottom-panel-live-height'
   return side === 'left' ? '--left-panel-live-width' : '--right-panel-live-width'
 }
 
-function dragCollapsedAttribute(side: SidebarSide): string {
+function dragCollapsedAttribute(side: ResizeSide): string {
+  if (side === 'bottom') return 'data-bottom-panel-drag-collapsed'
   return side === 'left' ? 'data-left-sidebar-drag-collapsed' : 'data-right-sidebar-drag-collapsed'
 }
 
-export function ResizeHandle({
-  metrics,
-  onCollapse,
-  onResizeCommit,
-  resizeTargetRef,
-  side
-}: ResizeHandleProps) {
+export function ResizeHandle(props: ResizeHandleProps) {
+  const { onCollapse, resizeTargetRef, side } = props
+  const metrics = {
+    minimum: props.metrics.minimum,
+    maximum: props.metrics.maximum,
+    width: props.side === 'bottom' ? props.metrics.height : props.metrics.width
+  }
+  const commitSize = (size: number) => {
+    if (props.side === 'bottom') props.onResizeCommit('bottom', size)
+    else props.onResizeCommit(props.side, size)
+  }
+  const pointerPosition = (event: { clientX: number; clientY: number }) =>
+    side === 'bottom' ? event.clientY : event.clientX
   const { t } = useFrontendConfig()
   const handleRef = useRef<HTMLDivElement>(null)
   const sessionRef = useRef<ResizeSession | null>(null)
@@ -71,7 +90,7 @@ export function ResizeHandle({
       sessionRef.current = null
       resizeTargetRef.current?.style.removeProperty(property)
       resizeTargetRef.current?.removeAttribute(collapsedAttribute)
-      if (session) document.body.classList.remove('is-resizing')
+      if (session) document.body.classList.remove('is-resizing', 'is-resizing-vertically')
     },
     [collapsedAttribute, property, resizeTargetRef]
   )
@@ -95,7 +114,7 @@ export function ResizeHandle({
 
   const intentForClientX = (session: ResizeSession, clientX: number) =>
     resolveSidebarResizeDragIntent(
-      side,
+      side === 'bottom' ? 'right' : side,
       session.startWidth,
       session.startClientX,
       clientX,
@@ -148,7 +167,7 @@ export function ResizeHandle({
     if (session.transitionTimerId !== null) window.clearTimeout(session.transitionTimerId)
     const intent = intentForClientX(session, clientX)
     sessionRef.current = null
-    document.body.classList.remove('is-resizing')
+    document.body.classList.remove('is-resizing', 'is-resizing-vertically')
 
     if (element.hasPointerCapture(session.pointerId)) {
       element.releasePointerCapture(session.pointerId)
@@ -168,7 +187,7 @@ export function ResizeHandle({
 
     // Keep the transient CSS width until React commits the matching preferred width.
     // This prevents unrelated streaming renders from snapping the panel back mid-drag.
-    onResizeCommit(side, finalWidth)
+    commitSize(finalWidth)
     if (finalWidth === metrics.width) resizeTargetRef.current?.style.removeProperty(property)
   }
 
@@ -181,13 +200,14 @@ export function ResizeHandle({
       frameId: null,
       maximum: metrics.maximum,
       minimum: metrics.minimum,
-      pendingClientX: event.clientX,
+      pendingClientX: pointerPosition(event),
       pointerId: event.pointerId,
-      startClientX: event.clientX,
+      startClientX: pointerPosition(event),
       startWidth: metrics.width,
       transitionTimerId: null
     }
     document.body.classList.add('is-resizing')
+    if (side === 'bottom') document.body.classList.add('is-resizing-vertically')
     applyVisualWidth(metrics.width)
     event.currentTarget.setPointerCapture(event.pointerId)
   }
@@ -195,12 +215,12 @@ export function ResizeHandle({
   const handlePointerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
     const session = sessionRef.current
     if (event.pointerId !== session?.pointerId) return
-    scheduleVisualFrame(event.clientX)
+    scheduleVisualFrame(pointerPosition(event))
   }
 
   const handlePointerEnd = (event: ReactPointerEvent<HTMLDivElement>) => {
     if (event.pointerId !== sessionRef.current?.pointerId) return
-    finishResize(event.currentTarget, event.clientX)
+    finishResize(event.currentTarget, pointerPosition(event))
   }
 
   const handleKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
@@ -209,16 +229,16 @@ export function ResizeHandle({
 
     if (event.key === 'Home') nextWidth = metrics.minimum
     if (event.key === 'End') nextWidth = metrics.maximum
-    if (event.key === 'ArrowLeft') {
+    if (event.key === (side === 'bottom' ? 'ArrowUp' : 'ArrowLeft')) {
       nextWidth = metrics.width + (side === 'left' ? -step : step)
     }
-    if (event.key === 'ArrowRight') {
+    if (event.key === (side === 'bottom' ? 'ArrowDown' : 'ArrowRight')) {
       nextWidth = metrics.width + (side === 'left' ? step : -step)
     }
     if (nextWidth === undefined) return
 
     event.preventDefault()
-    onResizeCommit(side, Math.min(Math.max(nextWidth, metrics.minimum), metrics.maximum))
+    commitSize(Math.min(Math.max(nextWidth, metrics.minimum), metrics.maximum))
   }
 
   return (
@@ -226,8 +246,14 @@ export function ResizeHandle({
       ref={handleRef}
       className={`resize-handle resize-handle--${side}`}
       role="separator"
-      aria-label={side === 'left' ? t('app.resizeLeftSidebar') : t('app.resizeRightSidebar')}
-      aria-orientation="vertical"
+      aria-label={
+        side === 'bottom'
+          ? t('app.resizeBottomPanel')
+          : side === 'left'
+            ? t('app.resizeLeftSidebar')
+            : t('app.resizeRightSidebar')
+      }
+      aria-orientation={side === 'bottom' ? 'horizontal' : 'vertical'}
       aria-valuemax={Math.round(metrics.maximum)}
       aria-valuemin={Math.round(metrics.minimum)}
       aria-valuenow={Math.round(metrics.width)}

@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { render } from 'vitest-browser-react'
 import type { GitReviewTarget } from '@mycopilot/protocol'
+import { ToastProvider } from '../../../components/toast/ToastProvider'
 import '../GitReviewPanel.css'
 
 const { setTargetSpy } = vi.hoisted(() => ({
@@ -16,6 +17,7 @@ vi.mock('../../../config/FrontendConfigProvider', () => ({
 }))
 
 vi.mock('../gitReviewClient', () => ({
+  copyGitReviewFilePath: vi.fn(),
   getGitReviewRepositoryContext: vi.fn(),
   listGitReviewCommits: vi.fn()
 }))
@@ -107,7 +109,14 @@ vi.mock('../useGitReview', async () => {
   }
 })
 
-const { GitReviewPanel } = await import('../GitReviewPanel')
+const { GitReviewPanel: ReviewPanel } = await import('../GitReviewPanel')
+function GitReviewPanel(props: React.ComponentProps<typeof ReviewPanel>) {
+  return (
+    <ToastProvider>
+      <ReviewPanel {...props} />
+    </ToastProvider>
+  )
+}
 const NOOP = (): void => undefined
 
 describe('Git Review scope navigation', () => {

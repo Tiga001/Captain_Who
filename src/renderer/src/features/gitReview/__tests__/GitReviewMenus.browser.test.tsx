@@ -2,19 +2,28 @@ import { useState, type ReactNode } from 'react'
 import type {
   GitReviewBranch,
   GitReviewCommit,
+  GitReviewContext,
   GitReviewRepositoryContext,
   GitReviewTarget
 } from '@mycopilot/protocol'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { render } from 'vitest-browser-react'
 import type { Translate } from '../../../config/translationFormat'
+import { ToastProvider } from '../../../components/toast/ToastProvider'
 import '../../../styles/global.css'
 import { GitReviewBranchPicker } from '../GitReviewBranchPicker'
 import { GitReviewContextRow } from '../GitReviewContextRow'
 import { GitReviewSourceSelector } from '../GitReviewSourceSelector'
 import '../GitReviewPanel.css'
 
-const { listCommitsSpy } = vi.hoisted(() => ({ listCommitsSpy: vi.fn() }))
+const { copyTextSpy, listCommitsSpy } = vi.hoisted(() => ({
+  copyTextSpy: vi.fn<(text: string) => Promise<void>>(),
+  listCommitsSpy: vi.fn()
+}))
+
+vi.mock('../../../components/clipboard', () => ({
+  copyTextToClipboard: copyTextSpy
+}))
 
 vi.mock('../gitReviewClient', () => ({
   listGitReviewCommits: listCommitsSpy
@@ -88,6 +97,8 @@ function dispatchKey(target: Element, key: string): void {
 }
 
 beforeEach(() => {
+  copyTextSpy.mockReset()
+  copyTextSpy.mockResolvedValue(undefined)
   listCommitsSpy.mockReset()
   listCommitsSpy.mockResolvedValue({
     commits: [commit],
@@ -262,20 +273,7 @@ describe('Git review branch picker', () => {
 
 describe('Git review context rows', () => {
   it('shows commit and branch context only for their new review targets', async () => {
-    const commitScreen = await render(
-      <div className="git-review">
-        <GitReviewContextRow
-          commitPreview={commit}
-          isActive
-          language="en-US"
-          onRetryBranches={vi.fn()}
-          onSelectBranch={vi.fn()}
-          repositoryState={{ status: 'idle' }}
-          t={t}
-          target={{ kind: 'commit', commitSha: commit.sha }}
-        />
-      </div>
-    )
+    const commitScreen = await render(<CommitContextFixture commitPreview={commit} />)
     expect(commitScreen.container.textContent).toContain(commit.subject)
     await commitScreen.unmount()
 
@@ -297,4 +295,104 @@ describe('Git review context rows', () => {
       .element(branchScreen.getByRole('button', { name: 'gitReview.branch.select' }))
       .toBeVisible()
   })
+
+  it('copies every line from the commit tooltip with the same localized formatting', async () => {
+    const screen = await render(<CommitContextFixture commitPreview={commit} language="zh-CN" />)
+    await screen.getByText(commit.subject, { exact: true }).hover()
+    await expect.element(screen.getByRole('tooltip')).toBeVisible()
+    const tooltip = screen.getByRole('tooltip').element()
+    const lines = Array.from(
+      tooltip.querySelectorAll('.git-review__commit-tooltip > *'),
+      (line) => line.textContent
+    )
+    expect(lines).toEqual([
+      commit.subject,
+      commit.sha.slice(0, 12),
+      new Intl.DateTimeFormat('zh-CN', { dateStyle: 'medium', timeStyle: 'short' }).format(
+        Date.parse(commit.committedAt)
+      ),
+      '+4 -2'
+    ])
+
+    await screen.getByRole('button', { name: 'gitReview.commit.copyInfo' }).click()
+    expect(copyTextSpy).toHaveBeenCalledExactlyOnceWith(lines.join('\n'))
+  })
+
+  it('briefly reports clipboard failure and allows retrying', async () => {
+    copyTextSpy.mockRejectedValueOnce(new Error('Clipboard unavailable'))
+    const screen = await render(<CommitContextFixture commitPreview={commit} />)
+    const copyButton = screen.getByRole('button', { name: 'gitReview.commit.copyInfo' })
+    await copyButton.click()
+
+    await expect.element(screen.getByRole('status')).toHaveTextContent('gitReview.copy.failed')
+    await expect.poll(() => document.querySelector('.toast-message'), { timeout: 3000 }).toBeNull()
+    await copyButton.click()
+    expect(copyTextSpy).toHaveBeenCalledTimes(2)
+  })
+
+  it('disables copying while details are loading and never copies an old selected commit', async () => {
+    const screen = await render(<CommitContextFixture />)
+    const copyButton = screen.getByRole('button', { name: 'gitReview.commit.copyInfo' })
+    await expect.element(copyButton).toBeDisabled()
+
+    await screen.rerender(<CommitContextFixture commitPreview={commit} />)
+    await expect.element(copyButton).toBeEnabled()
+    await copyButton.click()
+    expect(copyTextSpy).toHaveBeenCalledTimes(1)
+
+    const nextCommit = {
+      ...commit,
+      sha: '123456abcdef7890',
+      subject: 'Review the next commit'
+    }
+    const target: GitReviewTarget = { kind: 'commit', commitSha: nextCommit.sha }
+    await screen.rerender(
+      <CommitContextFixture commitPreview={commit} summaryContext={{ commit }} target={target} />
+    )
+    await expect.element(copyButton).toBeDisabled()
+    expect(screen.container.textContent).not.toContain(commit.subject)
+    expect(copyTextSpy).toHaveBeenCalledTimes(1)
+
+    await screen.rerender(
+      <CommitContextFixture
+        commitPreview={nextCommit}
+        summaryContext={{ commit }}
+        target={target}
+      />
+    )
+    await expect.element(copyButton).toBeEnabled()
+    await copyButton.click()
+    expect(copyTextSpy).toHaveBeenCalledTimes(2)
+    expect(copyTextSpy.mock.calls[1]?.[0]).toMatch(/^Review the next commit\n123456abcdef\n/)
+  })
 })
+
+function CommitContextFixture({
+  commitPreview,
+  language = 'en-US',
+  summaryContext,
+  target = { kind: 'commit', commitSha: commit.sha }
+}: {
+  commitPreview?: GitReviewCommit
+  language?: string
+  summaryContext?: GitReviewContext
+  target?: GitReviewTarget
+}): ReactNode {
+  return (
+    <ToastProvider>
+      <div className="git-review" style={{ width: 440 }}>
+        <GitReviewContextRow
+          commitPreview={commitPreview}
+          isActive
+          language={language}
+          onRetryBranches={vi.fn()}
+          onSelectBranch={vi.fn()}
+          repositoryState={{ status: 'idle' }}
+          summaryContext={summaryContext}
+          t={t}
+          target={target}
+        />
+      </div>
+    </ToastProvider>
+  )
+}

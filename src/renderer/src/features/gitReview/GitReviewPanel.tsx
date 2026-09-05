@@ -31,6 +31,7 @@ import { GitReviewFileIcon } from './GitReviewFileIcon'
 import { GitReviewMenuPortal } from './GitReviewMenuPortal'
 import { GitReviewSourceSelector } from './GitReviewSourceSelector'
 import { canHydrateGitReviewFile } from './gitReviewFileCapabilities'
+import { copyGitReviewFilePath } from './gitReviewClient'
 import { loadGitReviewPreferences, saveGitReviewPreferences } from './gitReviewPreferences'
 import { projectGitReviewSummary } from './gitReviewSummaryProjection'
 import {
@@ -587,6 +588,11 @@ export function GitReviewPanel({
     [mutateFile]
   )
 
+  const handleCopyFile = useCallback(
+    (path: string) => copyGitReviewFilePath({ projectId, path }),
+    [projectId]
+  )
+
   useEffect(() => {
     const pending = pendingFileAlignmentRef.current
     if (!pending) return undefined
@@ -913,6 +919,7 @@ export function GitReviewPanel({
             loadFullFiles={reviewPreferences.loadFullFiles}
             mutateFile={handleMutateFile}
             pendingFileId={pendingFileId}
+            onCopyFile={handleCopyFile}
             onOpenFile={onOpenFile}
             onRestore={setRestoreCandidate}
             nearFileIds={fileVisibility.near}
@@ -1068,6 +1075,7 @@ interface GitReviewContentProps {
   loadFullFiles: boolean
   mutateFile: (fileId: string, action: Parameters<ReviewHook['mutateFile']>[1]) => void
   nearFileIds: Set<string>
+  onCopyFile: (path: string) => Promise<void>
   onOpenFile: (path: string) => void
   onRestore: (file: GitReviewFile) => void
   onRefresh: ReviewHook['refresh']
@@ -1098,6 +1106,7 @@ function GitReviewContent({
   loadFullFiles,
   mutateFile,
   nearFileIds,
+  onCopyFile,
   onOpenFile,
   onRestore,
   onRefresh,
@@ -1184,6 +1193,7 @@ function GitReviewContent({
             loadFullFiles={loadFullFiles}
             mutationLocked={pendingFileId !== null}
             mutationPending={pendingFileId === file.id}
+            onCopyFile={onCopyFile}
             onMutate={mutateFile}
             onOpenFile={onOpenFile}
             onRequestDiff={retryFileDiff}

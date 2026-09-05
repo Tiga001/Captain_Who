@@ -1,7 +1,6 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
-import { createPortal } from 'react-dom'
-import { Maximize, Plus, X } from 'lucide-react'
+import { Maximize } from 'lucide-react'
 import type {
   BrowserSurfaceCommand,
   BrowserSurfaceReadyInput,
@@ -10,11 +9,13 @@ import type {
 import { useFrontendConfig } from '../../config/FrontendConfigProvider'
 import { WorkspaceFileTreeSessionsProvider } from '../files/WorkspaceFileTreeSessions'
 import { RightSidebarHome } from './RightSidebarHome'
-import { RightSidebarModulePicker } from './RightSidebarModulePicker'
+import { RightSidebarTabStrip } from './RightSidebarTabStrip'
 import { RightSidebarPageStack } from './RightSidebarPageStack'
 import { RightSidebarRuntimeContext } from './RightSidebarRuntimeContext'
 import { useRightSidebarDocumentVisibility } from './rightSidebarActivity'
-import { AGENT_CENTER_RIGHT_SIDEBAR_MODULE, RIGHT_SIDEBAR_MODULES } from './rightSidebarModules'
+import { RIGHT_SIDEBAR_MODULES } from './rightSidebarModules'
+import { useRightSidebarModules } from './useRightSidebarModules'
+import { createRightSidebarWorkspaceSessionKey } from './rightSidebarWorkspace'
 import type { CollaborationStoreSnapshot } from '../agentCollaboration/collaborationStore'
 import type {
   RightSidebarCapabilities,
@@ -22,6 +23,7 @@ import type {
   RightSidebarAgentNavigationRequest,
   RightSidebarModuleDefinition,
   RightSidebarModuleId,
+  RightSidebarModuleNavigationRequest,
   RightSidebarReviewNavigationRequest
 } from './rightSidebarTypes'
 import { useRightSidebarPlatform } from './useRightSidebarPlatform'
@@ -43,6 +45,7 @@ interface RightSidebarProps {
   isWorkspaceVisible?: boolean
   maximizedToolbarControls?: ReactNode
   modules?: RightSidebarModuleDefinition[]
+  moduleNavigationRequest?: RightSidebarModuleNavigationRequest | null
   onBrowserSurfaceReady?: (input: BrowserSurfaceReadyInput) => Promise<BrowserSurfaceReadyOutput>
   onOpenAgentTemplates?: () => void
   onOpenBrowserSettings?: (destination: 'settings' | 'downloads' | 'history') => void
@@ -99,6 +102,7 @@ export const RightSidebar = memo(function RightSidebar({
   isWorkspaceVisible = true,
   maximizedToolbarControls,
   modules: configuredModules = RIGHT_SIDEBAR_MODULES,
+  moduleNavigationRequest,
   onBrowserSurfaceReady,
   onOpenAgentTemplates,
   onOpenBrowserSettings,
@@ -115,12 +119,11 @@ export const RightSidebar = memo(function RightSidebar({
   const handledReviewNavigationRequestIdRef = useRef<number | null>(null)
   const handledAgentNavigationRequestIdRef = useRef<number | null>(null)
   const handledBrowserSurfaceRequestIdRef = useRef<string | null>(null)
+  const handledModuleNavigationRequestIdRef = useRef<number | null>(null)
   const submittedBrowserSurfaceRequestRef = useRef<{
     requestId: string
     surfaceInstanceId: string
   } | null>(null)
-  const moduleMenuRef = useRef<HTMLDivElement>(null)
-  const moduleMenuButtonRef = useRef<HTMLButtonElement>(null)
   const [isModuleMenuOpen, setIsModuleMenuOpen] = useState(false)
   const [browserSurfaceRequest, setBrowserSurfaceRequest] = useState<{
     pageId: string
@@ -131,24 +134,11 @@ export const RightSidebar = memo(function RightSidebar({
     ReadonlyMap<string, string>
   >(() => new Map())
   const browserSurfaceInstancesRef = useRef(browserSurfaceInstances)
-  const [moduleMenuPosition, setModuleMenuPosition] = useState({ top: 0, left: 0 })
-  const childAgents = useMemo(() => {
-    const tree = collaborationSnapshot?.tree
-    if (!activeConversationId || tree?.rootConversationId !== activeConversationId) return []
-    return tree.agents.filter((agent) => agent.parentAgentId !== null)
-  }, [activeConversationId, collaborationSnapshot?.tree])
-  const activeChildCount = childAgents.filter((agent) =>
-    ['queued', 'running', 'waiting_approval'].includes(agent.displayStatus)
-  ).length
-  const modules = useMemo(() => {
-    const withoutAgentCenter = configuredModules.filter((module) => module.id !== 'agent-center')
-    return childAgents.length > 0
-      ? [
-          ...withoutAgentCenter,
-          { ...AGENT_CENTER_RIGHT_SIDEBAR_MODULE, badge: activeChildCount || undefined }
-        ]
-      : withoutAgentCenter
-  }, [activeChildCount, childAgents.length, configuredModules])
+  const { childAgents, modules } = useRightSidebarModules({
+    activeConversationId,
+    collaborationSnapshot,
+    configuredModules
+  })
   const {
     activatePage,
     activePageId,
@@ -414,36 +404,6 @@ export const RightSidebar = memo(function RightSidebar({
     clearCurrentBrowserSelection()
   }, [clearCurrentBrowserSelection, hasForegroundBrowser])
 
-  useEffect(() => {
-    if (!isModuleMenuOpen) return
-
-    const handlePointerDown = (event: PointerEvent): void => {
-      const target = event.target
-      if (!(target instanceof Node)) return
-      if (moduleMenuRef.current?.contains(target)) return
-      if (moduleMenuButtonRef.current?.contains(target)) return
-
-      closeTransientUi()
-    }
-
-    document.addEventListener('pointerdown', handlePointerDown, true)
-    return () => document.removeEventListener('pointerdown', handlePointerDown, true)
-  }, [closeTransientUi, isModuleMenuOpen])
-
-  const updateModuleMenuPosition = useCallback(() => {
-    const button = moduleMenuButtonRef.current
-    if (!button) return
-
-    const rect = button.getBoundingClientRect()
-    const menuWidth = 280
-    const left = Math.min(Math.max(12, rect.left), Math.max(12, window.innerWidth - menuWidth - 12))
-
-    setModuleMenuPosition({
-      top: rect.bottom + 8,
-      left
-    })
-  }, [])
-
   const openModule = useCallback(
     (moduleId: RightSidebarModuleId) => {
       if (moduleId === 'agent-center') {
@@ -460,6 +420,36 @@ export const RightSidebar = memo(function RightSidebar({
     },
     [activeConversationId, childAgents.length, closeTransientUi, openPlatformModule]
   )
+
+  useEffect(() => {
+    const request = moduleNavigationRequest
+    if (
+      !request ||
+      (handledModuleNavigationRequestIdRef.current !== null &&
+        request.requestId <= handledModuleNavigationRequestIdRef.current)
+    )
+      return
+    const contextMatches =
+      createRightSidebarWorkspaceSessionKey(request.workspaceKey, request.workspacePath) ===
+        createRightSidebarWorkspaceSessionKey(workspaceKey, workspacePath) &&
+      (request.conversationId === undefined ||
+        (request.conversationId ?? null) === (activeConversationId ?? null))
+    if (!contextMatches) {
+      handledModuleNavigationRequestIdRef.current = request.requestId
+      return
+    }
+    const availability = moduleAvailability[request.moduleId]
+    if (availability === 'checking') return
+    handledModuleNavigationRequestIdRef.current = request.requestId
+    if (availability === 'available') openModule(request.moduleId)
+  }, [
+    activeConversationId,
+    moduleAvailability,
+    moduleNavigationRequest,
+    openModule,
+    workspaceKey,
+    workspacePath
+  ])
 
   useEffect(() => {
     if (
@@ -535,121 +525,33 @@ export const RightSidebar = memo(function RightSidebar({
         data-drag-region
       >
         {hasOpenPages ? (
-          <div className="right-sidebar__tab-scroll" data-drag-region>
-            <div
-              className="right-sidebar__tabs"
-              role="tablist"
-              aria-label={t('rightSidebar.openTabs')}
-            >
-              {pages.map((page) => {
-                const module = modules.find((candidate) => candidate.id === page.moduleId)
-                const Icon = module?.icon
-                const isSelected = page.id === activePageId
-                const iconUrl = page.iconUrl?.trim()
-                const isTransientFilePreview =
-                  page.moduleId === 'files' &&
-                  page.moduleState?.kind === 'workspace-file' &&
-                  page.moduleState.tabState === 'transient'
-
-                return (
-                  <div
-                    className="right-sidebar__tab-shell"
-                    data-active={isSelected ? 'true' : undefined}
-                    data-automation-active={
-                      page.moduleId === 'browser' &&
-                      (page.moduleState?.kind === 'browser-surface'
-                        ? page.moduleState.surfaceId
-                        : browserSurfaceIdForPage(page.id)) === agentBrowserSurfaceId
-                        ? 'true'
-                        : undefined
-                    }
-                    key={page.id}
-                  >
-                    <button
-                      className="right-sidebar__tab"
-                      type="button"
-                      role="tab"
-                      aria-selected={isSelected}
-                      data-active={isSelected ? 'true' : undefined}
-                      data-file-preview-state={isTransientFilePreview ? 'transient' : undefined}
-                      onClick={() => {
-                        if (page.id !== activePageId && hasForegroundBrowser) {
-                          clearCurrentBrowserSelection()
-                        }
-                        activatePage(page.id)
-                      }}
-                    >
-                      {iconUrl ? (
-                        <img
-                          className="right-sidebar__tab-favicon"
-                          src={iconUrl}
-                          alt=""
-                          aria-hidden="true"
-                          onError={(event) => {
-                            event.currentTarget.style.display = 'none'
-                          }}
-                        />
-                      ) : (
-                        Icon && <Icon aria-hidden="true" />
-                      )}
-                      <span>{page.title}</span>
-                    </button>
-                    <button
-                      className="right-sidebar__tab-close"
-                      type="button"
-                      aria-label={t('rightSidebar.closeTab')}
-                      title={t('rightSidebar.closeTab')}
-                      onClick={(event) => {
-                        event.stopPropagation()
-                        if (page.id === activePageId && hasForegroundBrowser) {
-                          clearCurrentBrowserSelection()
-                        }
-                        closePage(page.id)
-                      }}
-                    >
-                      <X aria-hidden="true" />
-                    </button>
-                  </div>
-                )
-              })}
-
-              <div className="right-sidebar__module-menu-anchor">
-                <button
-                  ref={moduleMenuButtonRef}
-                  className="right-sidebar__new-tab-button"
-                  type="button"
-                  aria-label={t('rightSidebar.newPanel')}
-                  aria-expanded={isModuleMenuOpen}
-                  onMouseDown={(event) => {
-                    event.preventDefault()
-                    event.stopPropagation()
-                  }}
-                  onPointerDown={(event) => {
-                    event.stopPropagation()
-                  }}
-                  onClick={(event) => {
-                    event.preventDefault()
-                    event.stopPropagation()
-                    updateModuleMenuPosition()
-                    setIsModuleMenuOpen((isOpen) => !isOpen)
-                  }}
-                >
-                  <Plus aria-hidden="true" />
-                </button>
-                {isModuleMenuOpen &&
-                  createPortal(
-                    <div ref={moduleMenuRef}>
-                      <RightSidebarModulePicker
-                        modules={availableModules}
-                        onOpenModule={openModule}
-                        style={moduleMenuPosition}
-                      />
-                    </div>,
-                    document.body
-                  )}
-              </div>
-            </div>
-          </div>
+          <RightSidebarTabStrip
+            activePageId={activePageId}
+            automationPageId={
+              pages.find(
+                (page) =>
+                  page.moduleId === 'browser' &&
+                  (page.moduleState?.kind === 'browser-surface'
+                    ? page.moduleState.surfaceId
+                    : browserSurfaceIdForPage(page.id)) === agentBrowserSurfaceId
+              )?.id
+            }
+            availableModules={availableModules}
+            isMenuOpen={isModuleMenuOpen}
+            modules={modules}
+            onActivatePage={(pageId) => {
+              if (pageId !== activePageId && hasForegroundBrowser) clearCurrentBrowserSelection()
+              activatePage(pageId)
+            }}
+            onClosePage={(pageId) => {
+              if (pageId === activePageId && hasForegroundBrowser) clearCurrentBrowserSelection()
+              closePage(pageId)
+            }}
+            onMenuOpenChange={setIsModuleMenuOpen}
+            onOpenModule={openModule}
+            pages={pages}
+            t={t}
+          />
         ) : (
           <div className="right-sidebar__toolbar-spacer" data-drag-region />
         )}

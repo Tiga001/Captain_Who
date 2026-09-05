@@ -1,5 +1,6 @@
 const gitReviewTests = 'src/renderer/src/features/gitReview/__tests__'
 const rightSidebarTests = 'src/renderer/src/features/rightSidebar/__tests__'
+const bottomPanelTests = 'src/renderer/src/features/bottomPanel/__tests__'
 const filesTests = 'src/renderer/src/features/files/__tests__'
 const mainWindowLifecycleTest = 'src/main/mainWindowLifecycle.test.ts'
 const workspaceFilesTests = 'src/main/workspaceFiles'
@@ -58,6 +59,8 @@ export const vitestProjectFileRules = {
       `${mcpTests}/**/*.browser.test.tsx`,
       `${gitReviewTests}/**/*.browser.test.tsx`,
       `${rightSidebarTests}/**/*.browser.test.tsx`,
+      `${bottomPanelTests}/**/*.browser.test.tsx`,
+      `${terminalRendererTests}/**/*.browser.test.tsx`,
       `${filesTests}/**/*.browser.test.tsx`,
       `${agentCollaborationTests}/**/*.browser.test.tsx`
     ],

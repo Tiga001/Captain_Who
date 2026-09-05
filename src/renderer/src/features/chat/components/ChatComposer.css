@@ -68,13 +68,15 @@
   gap: 8px;
 }
 
-.chat-composer__toolbar button {
+.chat-composer__toolbar button,
+.chat-composer-menu-popover button {
   flex: 0 0 auto;
   border: 0;
   cursor: pointer;
 }
 
-.chat-composer__toolbar button:disabled {
+.chat-composer__toolbar button:disabled,
+.chat-composer-menu-popover button:disabled {
   cursor: default;
 }
 
@@ -90,7 +92,8 @@
     var(--mc-radius-composer);
 }
 
-.chat-composer__toolbar svg {
+.chat-composer__toolbar svg,
+.chat-composer-menu-popover svg {
   width: var(--mc-icon-size-lg);
   height: var(--mc-icon-size-lg);
   stroke-width: var(--mc-icon-stroke-thin);
@@ -1211,7 +1214,8 @@
   background: var(--mc-color-state-hover);
 }
 
-.chat-composer__toolbar button:focus-visible {
+.chat-composer__toolbar button:focus-visible,
+.chat-composer-menu-popover button:focus-visible {
   outline: 2px solid var(--mc-color-focus-ring);
   outline-offset: 2px;
 }

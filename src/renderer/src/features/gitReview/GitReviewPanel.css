@@ -464,6 +464,14 @@
   overflow: hidden;
 }
 
+.git-review__context-copy {
+  display: inline-grid;
+  flex: 0 0 auto;
+  width: 24px;
+  height: 28px;
+  place-items: center;
+}
+
 .git-review__context-current-anchor,
 .git-review__branch-picker-anchor {
   min-width: 0;
@@ -868,7 +876,7 @@
   top: 0;
   z-index: 4;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 110px;
+  grid-template-columns: minmax(0, 1fr) 136px;
   width: 100%;
   min-height: 34px;
   align-items: center;
@@ -907,10 +915,10 @@
 
 .git-review__file-actions {
   display: grid;
-  width: 110px;
+  width: 136px;
   height: 34px;
   align-items: center;
-  grid-template-columns: repeat(4, 24px);
+  grid-template-columns: repeat(5, 24px);
   gap: 2px;
   padding-right: 8px;
   opacity: 0;
@@ -919,7 +927,7 @@
 }
 
 .git-review__file-actions > .git-review__file-action-wrap:last-child {
-  grid-column: 4;
+  grid-column: 5;
 }
 
 .git-review__diff-card-header:hover .git-review__file-actions,
@@ -1561,7 +1569,7 @@
   }
 
   .git-review__diff-card-header {
-    grid-template-columns: minmax(0, 1fr) 102px;
+    grid-template-columns: minmax(0, 1fr) 126px;
     min-height: 32px;
   }
 
@@ -1574,9 +1582,9 @@
   }
 
   .git-review__file-actions {
-    width: 102px;
+    width: 126px;
     height: 32px;
-    grid-template-columns: repeat(4, 23px);
+    grid-template-columns: repeat(5, 23px);
     gap: 1px;
     padding-right: 6px;
   }

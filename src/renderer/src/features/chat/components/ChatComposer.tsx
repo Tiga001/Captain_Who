@@ -17,6 +17,7 @@ import { useModelSettings } from '../../../config/ModelSettingsProvider'
 import { useProjectSettings } from '../../../config/ProjectSettingsProvider'
 import { getUserFacingErrorMessage } from '../../../errors/userFacingError'
 import { ConfirmationDialog } from '../../../components/dialog/ConfirmationDialog'
+import { AnchoredPopover } from '../../../components/overlay/AnchoredPopover'
 import { useDismissOnOutsidePointer } from '../../../hooks/useDismissOnOutsidePointer'
 import {
   buildAgentInputAttachments,
@@ -89,6 +90,7 @@ interface ChatComposerProps {
     custom: boolean
     full: boolean
   }
+  portalMenus?: boolean
   resetKey?: string
   skillCatalogRefreshToken?: number
   showProjectSelector?: boolean
@@ -115,6 +117,7 @@ export function ChatComposer({
   onSubmitMessage,
   onStopGenerating,
   permissionModeAvailability = { custom: true, full: true },
+  portalMenus = false,
   resetKey,
   skillCatalogRefreshToken = 0,
   showProjectSelector = false
@@ -130,6 +133,7 @@ export function ChatComposer({
   const commandTriggerRef = useRef(false)
   const commandExecutingRef = useRef(false)
   const commandMenuRef = useRef<HTMLDivElement>(null)
+  const commandPopoverRef = useRef<HTMLDivElement>(null)
   const draftRef = useRef(draft)
   const composerRef = useRef<HTMLFormElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
@@ -137,8 +141,13 @@ export function ChatComposer({
   const lastCompositionEndAtRef = useRef(0)
   const attachmentPickerRef = useRef<HTMLDivElement>(null)
   const attachmentTriggerRef = useRef<HTMLButtonElement>(null)
+  const attachmentPopoverRef = useRef<HTMLDivElement>(null)
   const permissionPickerRef = useRef<HTMLDivElement>(null)
+  const permissionTriggerRef = useRef<HTMLButtonElement>(null)
+  const permissionPopoverRef = useRef<HTMLDivElement>(null)
   const projectPickerRef = useRef<HTMLDivElement>(null)
+  const projectTriggerRef = useRef<HTMLButtonElement>(null)
+  const projectPopoverRef = useRef<HTMLDivElement>(null)
   const [isAttachmentMenuOpen, setIsAttachmentMenuOpen] = useState(false)
   const [isSkillMenuOpen, setIsSkillMenuOpen] = useState(false)
   const [isPermissionMenuOpen, setIsPermissionMenuOpen] = useState(false)
@@ -258,7 +267,8 @@ export function ChatComposer({
     commandMenuRef,
     isCommandMenuOpen,
     () => setIsCommandMenuOpen(false),
-    (target) => Boolean(textareaRef.current?.contains(target))
+    (target) =>
+      Boolean(textareaRef.current?.contains(target) || commandPopoverRef.current?.contains(target))
   )
   useEffect(() => {
     if (isAttachmentMenuOpen || isSkillMenuOpen || isPermissionMenuOpen || isProjectMenuOpen)
@@ -271,12 +281,21 @@ export function ChatComposer({
     useCallback(() => {
       setIsAttachmentMenuOpen(false)
       setIsSkillMenuOpen(false)
-    }, [])
+    }, []),
+    (target) => Boolean(attachmentPopoverRef.current?.contains(target))
   )
-  useDismissOnOutsidePointer(permissionPickerRef, isPermissionMenuOpen, () =>
-    setIsPermissionMenuOpen(false)
+  useDismissOnOutsidePointer(
+    permissionPickerRef,
+    isPermissionMenuOpen,
+    () => setIsPermissionMenuOpen(false),
+    (target) => Boolean(permissionPopoverRef.current?.contains(target))
   )
-  useDismissOnOutsidePointer(projectPickerRef, isProjectMenuOpen, () => setIsProjectMenuOpen(false))
+  useDismissOnOutsidePointer(
+    projectPickerRef,
+    isProjectMenuOpen,
+    () => setIsProjectMenuOpen(false),
+    (target) => Boolean(projectPopoverRef.current?.contains(target))
+  )
 
   useEffect(() => {
     if (previousResetKeyRef.current !== resetKey) {
@@ -663,17 +682,26 @@ export function ChatComposer({
     <div className="chat-composer-shell">
       <div ref={commandMenuRef}>
         {isCommandMenuOpen && (
-          <ComposerCommands
-            commands={filteredCommands}
-            query={message.slice(1)}
-            selectedIndex={selectedCommandIndex}
-            onSelect={setCommandIndex}
-            onExecute={(command) => {
-              void executeCommand(command)
-            }}
-            emptyLabel={t('chat.commands.noMatch')}
-            listId={commandListId}
-          />
+          <AnchoredPopover
+            anchorRef={textareaRef}
+            enabled={portalMenus}
+            matchAnchorWidth
+            onClose={() => setIsCommandMenuOpen(false)}
+            popoverRef={commandPopoverRef}
+          >
+            <ComposerCommands
+              commands={filteredCommands}
+              query={message.slice(1)}
+              selectedIndex={selectedCommandIndex}
+              onSelect={setCommandIndex}
+              onExecute={(command) => {
+                void executeCommand(command)
+              }}
+              emptyLabel={t('chat.commands.noMatch')}
+              listId={commandListId}
+              scrollContainerRef={portalMenus ? commandPopoverRef : undefined}
+            />
+          </AnchoredPopover>
         )}
       </div>
       <GuidanceQueue
@@ -908,49 +936,69 @@ export function ChatComposer({
             </button>
 
             {isAttachmentMenuOpen && (
-              <div className="composer-add-menu" role="menu" aria-label={t('chat.addMenuTitle')}>
-                <p>{t('chat.addMenuTitle')}</p>
-                <button type="button" role="menuitem" onClick={() => void addAttachments('file')}>
-                  <Paperclip aria-hidden="true" />
-                  <span>{t('chat.addFile')}</span>
-                </button>
-                <button type="button" role="menuitem" onClick={() => void addAttachments('image')}>
-                  <ImageIcon aria-hidden="true" />
-                  <span>{t('chat.addImage')}</span>
-                </button>
-                {!isGenerating && (
+              <AnchoredPopover
+                anchorRef={attachmentTriggerRef}
+                className="chat-composer-menu-popover"
+                enabled={portalMenus}
+                onClose={() => setIsAttachmentMenuOpen(false)}
+                popoverRef={attachmentPopoverRef}
+              >
+                <div className="composer-add-menu" role="menu" aria-label={t('chat.addMenuTitle')}>
+                  <p>{t('chat.addMenuTitle')}</p>
+                  <button type="button" role="menuitem" onClick={() => void addAttachments('file')}>
+                    <Paperclip aria-hidden="true" />
+                    <span>{t('chat.addFile')}</span>
+                  </button>
                   <button
                     type="button"
                     role="menuitem"
-                    onClick={() => {
-                      setIsAttachmentMenuOpen(false)
-                      setIsSkillMenuOpen(true)
-                      setSkillSearch('')
-                    }}
+                    onClick={() => void addAttachments('image')}
                   >
-                    <Sparkles aria-hidden="true" />
-                    <span>{t('chat.skills')}</span>
+                    <ImageIcon aria-hidden="true" />
+                    <span>{t('chat.addImage')}</span>
                   </button>
-                )}
-              </div>
+                  {!isGenerating && (
+                    <button
+                      type="button"
+                      role="menuitem"
+                      onClick={() => {
+                        setIsAttachmentMenuOpen(false)
+                        setIsSkillMenuOpen(true)
+                        setSkillSearch('')
+                      }}
+                    >
+                      <Sparkles aria-hidden="true" />
+                      <span>{t('chat.skills')}</span>
+                    </button>
+                  )}
+                </div>
+              </AnchoredPopover>
             )}
 
             {isSkillMenuOpen && (
-              <ComposerSkillPicker
-                catalogState={skillCatalogState}
-                projectId={selectedProjectId}
-                search={skillSearch}
-                selections={draft.skills}
-                onClose={() => {
-                  setIsSkillMenuOpen(false)
-                  setSkillSearch('')
-                  window.requestAnimationFrame(() => attachmentTriggerRef.current?.focus())
-                }}
-                onRefresh={refreshSkillCatalog}
-                onSearchChange={setSkillSearch}
-                onToggle={toggleSkill}
-                onUseLatest={useLatestSkill}
-              />
+              <AnchoredPopover
+                anchorRef={attachmentTriggerRef}
+                className="chat-composer-menu-popover"
+                enabled={portalMenus}
+                onClose={() => setIsSkillMenuOpen(false)}
+                popoverRef={attachmentPopoverRef}
+              >
+                <ComposerSkillPicker
+                  catalogState={skillCatalogState}
+                  projectId={selectedProjectId}
+                  search={skillSearch}
+                  selections={draft.skills}
+                  onClose={() => {
+                    setIsSkillMenuOpen(false)
+                    setSkillSearch('')
+                    window.requestAnimationFrame(() => attachmentTriggerRef.current?.focus())
+                  }}
+                  onRefresh={refreshSkillCatalog}
+                  onSearchChange={setSkillSearch}
+                  onToggle={toggleSkill}
+                  onUseLatest={useLatestSkill}
+                />
+              </AnchoredPopover>
             )}
           </div>
 
@@ -958,6 +1006,7 @@ export function ChatComposer({
             <button
               type="button"
               className="composer-permission-button"
+              ref={permissionTriggerRef}
               disabled={isGenerating || isModelTransitionRunning || isManualCompactionRunning}
               data-permission={selectedPermission.id}
               aria-haspopup="listbox"
@@ -980,35 +1029,43 @@ export function ChatComposer({
             </button>
 
             {isPermissionMenuOpen && (
-              <div
-                className="composer-permission-menu"
-                role="listbox"
-                aria-label={t('chat.selectPermission')}
+              <AnchoredPopover
+                anchorRef={permissionTriggerRef}
+                className="chat-composer-menu-popover"
+                enabled={portalMenus}
+                onClose={() => setIsPermissionMenuOpen(false)}
+                popoverRef={permissionPopoverRef}
               >
-                {permissionOptions.map((option) => {
-                  const OptionIcon = option.icon
-                  const isSelected = option.id === permissionMode
+                <div
+                  className="composer-permission-menu"
+                  role="listbox"
+                  aria-label={t('chat.selectPermission')}
+                >
+                  {permissionOptions.map((option) => {
+                    const OptionIcon = option.icon
+                    const isSelected = option.id === permissionMode
 
-                  return (
-                    <button
-                      type="button"
-                      role="option"
-                      aria-selected={isSelected}
-                      className="composer-permission-option"
-                      data-permission={option.id}
-                      data-selected={isSelected || undefined}
-                      key={option.id}
-                      onClick={() => selectPermissionMode(option.id)}
-                    >
-                      <OptionIcon aria-hidden="true" />
-                      <span>{t(option.labelKey)}</span>
-                      {isSelected && (
-                        <Check className="composer-permission-option__check" aria-hidden="true" />
-                      )}
-                    </button>
-                  )
-                })}
-              </div>
+                    return (
+                      <button
+                        type="button"
+                        role="option"
+                        aria-selected={isSelected}
+                        className="composer-permission-option"
+                        data-permission={option.id}
+                        data-selected={isSelected || undefined}
+                        key={option.id}
+                        onClick={() => selectPermissionMode(option.id)}
+                      >
+                        <OptionIcon aria-hidden="true" />
+                        <span>{t(option.labelKey)}</span>
+                        {isSelected && (
+                          <Check className="composer-permission-option__check" aria-hidden="true" />
+                        )}
+                      </button>
+                    )
+                  })}
+                </div>
+              </AnchoredPopover>
             )}
           </div>
 
@@ -1022,6 +1079,7 @@ export function ChatComposer({
             ariaLabel={t('chat.selectModel')}
             disabled={isGenerating || isModelTransitionRunning || isManualCompactionRunning}
             emptyLabel={t('chat.noEnabledModels')}
+            portalMenu={portalMenus}
             onChange={(modelId) => {
               setIsAttachmentMenuOpen(false)
               setIsSkillMenuOpen(false)
@@ -1073,6 +1131,7 @@ export function ChatComposer({
             <div className="composer-project-picker" ref={projectPickerRef}>
               <button
                 className="composer-project-button"
+                ref={projectTriggerRef}
                 type="button"
                 disabled={isModelTransitionRunning}
                 aria-haspopup="listbox"
@@ -1091,81 +1150,88 @@ export function ChatComposer({
               </button>
 
               {isProjectMenuOpen && (
-                <div
-                  className="composer-project-menu"
-                  role="listbox"
-                  aria-label={t('project.chooseProject')}
+                <AnchoredPopover
+                  anchorRef={projectTriggerRef}
+                  enabled={portalMenus}
+                  onClose={() => setIsProjectMenuOpen(false)}
+                  popoverRef={projectPopoverRef}
                 >
-                  <label className="composer-project-menu__search">
-                    <Search aria-hidden="true" />
-                    <input
-                      value={projectSearch}
-                      placeholder={t('project.searchProject')}
-                      onChange={(event) => setProjectSearch(event.target.value)}
-                    />
-                  </label>
+                  <div
+                    className="composer-project-menu"
+                    role="listbox"
+                    aria-label={t('project.chooseProject')}
+                  >
+                    <label className="composer-project-menu__search">
+                      <Search aria-hidden="true" />
+                      <input
+                        value={projectSearch}
+                        placeholder={t('project.searchProject')}
+                        onChange={(event) => setProjectSearch(event.target.value)}
+                      />
+                    </label>
 
-                  <div className="composer-project-menu__items">
-                    {filteredProjects.map((project) => {
-                      const isSelected = project.id === selectedProjectId
+                    <div className="composer-project-menu__items">
+                      {filteredProjects.map((project) => {
+                        const isSelected = project.id === selectedProjectId
 
-                      return (
-                        <button
-                          className="composer-project-option"
-                          data-selected={isSelected || undefined}
-                          type="button"
-                          role="option"
-                          aria-selected={isSelected}
-                          key={project.id}
-                          onClick={() => {
-                            updateDraft({
-                              projectId: project.id,
-                              skills:
-                                draftRef.current.projectId === project.id
-                                  ? draftRef.current.skills
-                                  : retainGlobalSkillSelections(draftRef.current.skills)
-                            })
-                            setProjectSearch('')
-                            setIsProjectMenuOpen(false)
-                          }}
-                        >
-                          <Folder aria-hidden="true" />
-                          <span>{project.name}</span>
-                          {isSelected && <Check aria-hidden="true" />}
-                        </button>
-                      )
-                    })}
+                        return (
+                          <button
+                            className="composer-project-option"
+                            data-selected={isSelected || undefined}
+                            type="button"
+                            role="option"
+                            aria-selected={isSelected}
+                            key={project.id}
+                            onClick={() => {
+                              updateDraft({
+                                projectId: project.id,
+                                skills:
+                                  draftRef.current.projectId === project.id
+                                    ? draftRef.current.skills
+                                    : retainGlobalSkillSelections(draftRef.current.skills)
+                              })
+                              setProjectSearch('')
+                              setIsProjectMenuOpen(false)
+                            }}
+                          >
+                            <Folder aria-hidden="true" />
+                            <span>{project.name}</span>
+                            {isSelected && <Check aria-hidden="true" />}
+                          </button>
+                        )
+                      })}
+                    </div>
+
+                    <div className="composer-project-menu__divider" />
+
+                    <button
+                      className="composer-project-command"
+                      type="button"
+                      onClick={() => {
+                        void handleSelectProjectDirectory()
+                      }}
+                    >
+                      <Plus aria-hidden="true" />
+                      <span>{t('project.newProject')}</span>
+                    </button>
+
+                    <button
+                      className="composer-project-command"
+                      type="button"
+                      onClick={() => {
+                        updateDraft({
+                          projectId: null,
+                          skills: retainGlobalSkillSelections(draftRef.current.skills)
+                        })
+                        setProjectSearch('')
+                        setIsProjectMenuOpen(false)
+                      }}
+                    >
+                      <X aria-hidden="true" />
+                      <span>{t('project.noProject')}</span>
+                    </button>
                   </div>
-
-                  <div className="composer-project-menu__divider" />
-
-                  <button
-                    className="composer-project-command"
-                    type="button"
-                    onClick={() => {
-                      void handleSelectProjectDirectory()
-                    }}
-                  >
-                    <Plus aria-hidden="true" />
-                    <span>{t('project.newProject')}</span>
-                  </button>
-
-                  <button
-                    className="composer-project-command"
-                    type="button"
-                    onClick={() => {
-                      updateDraft({
-                        projectId: null,
-                        skills: retainGlobalSkillSelections(draftRef.current.skills)
-                      })
-                      setProjectSearch('')
-                      setIsProjectMenuOpen(false)
-                    }}
-                  >
-                    <X aria-hidden="true" />
-                    <span>{t('project.noProject')}</span>
-                  </button>
-                </div>
+                </AnchoredPopover>
               )}
             </div>
           </div>

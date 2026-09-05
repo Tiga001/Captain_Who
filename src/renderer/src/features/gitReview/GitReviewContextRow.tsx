@@ -7,8 +7,10 @@ import type {
 } from '@mycopilot/protocol'
 import { ArrowRight, GitBranch, GitCommitHorizontal } from 'lucide-react'
 import type { Translate } from '../../config/translationFormat'
+import { copyTextToClipboard } from '../../components/clipboard'
 import { Tooltip } from '../../components/overlay/Tooltip'
 import { GitReviewBranchPicker, middleEllipsis } from './GitReviewBranchPicker'
+import { GitReviewCopyButton } from './GitReviewCopyButton'
 import type { GitReviewRepositoryContextState } from './useGitReviewRepositoryContext'
 
 interface GitReviewContextRowProps {
@@ -41,19 +43,28 @@ export function GitReviewContextRow({
         : commitPreview?.sha === target.commitSha
           ? commitPreview
           : undefined
-    const title = commit?.subject || target.commitSha.slice(0, 12)
+    const commitInfo = commit ? formatCommitInfo(commit, language) : undefined
+    const title = commitInfo?.[0] || target.commitSha.slice(0, 12)
     return (
       <div className="git-review__context-row" data-kind="commit">
         <GitCommitHorizontal aria-hidden="true" />
         <Tooltip
           anchorClassName="git-review__context-commit-anchor"
-          content={
-            commit ? <CommitTooltip commit={commit} language={language} /> : target.commitSha
-          }
+          content={commitInfo ? <CommitTooltip lines={commitInfo} /> : target.commitSha}
           preferredPlacement="bottom"
         >
           <span className="git-review__context-commit-title">{title}</span>
         </Tooltip>
+        <GitReviewCopyButton
+          key={target.commitSha}
+          anchorClassName="git-review__context-copy"
+          disabled={!commitInfo}
+          label={t('gitReview.commit.copyInfo')}
+          onCopy={async () => {
+            if (commitInfo) await copyTextToClipboard(commitInfo.join('\n'))
+          }}
+          t={t}
+        />
       </div>
     )
   }
@@ -87,21 +98,31 @@ export function GitReviewContextRow({
   )
 }
 
-function CommitTooltip({ commit, language }: { commit: GitReviewCommit; language: string }) {
+function formatCommitInfo(
+  commit: GitReviewCommit,
+  language: string
+): [string, string, string, string] {
   const timestamp = Date.parse(commit.committedAt)
   const date = Number.isFinite(timestamp)
     ? new Intl.DateTimeFormat(language, { dateStyle: 'medium', timeStyle: 'short' }).format(
         timestamp
       )
     : commit.committedAt
+  return [
+    commit.subject || commit.sha.slice(0, 12),
+    commit.sha.slice(0, 12),
+    date,
+    `+${commit.stats.additions} -${commit.stats.deletions}`
+  ]
+}
+
+function CommitTooltip({ lines }: { lines: [string, string, string, string] }) {
   return (
     <span className="git-review__commit-tooltip">
-      <strong>{commit.subject || commit.sha.slice(0, 12)}</strong>
-      <span>{commit.sha.slice(0, 12)}</span>
-      <span>{date}</span>
-      <span>
-        +{commit.stats.additions} -{commit.stats.deletions}
-      </span>
+      <strong>{lines[0]}</strong>
+      <span>{lines[1]}</span>
+      <span>{lines[2]}</span>
+      <span>{lines[3]}</span>
     </span>
   )
 }

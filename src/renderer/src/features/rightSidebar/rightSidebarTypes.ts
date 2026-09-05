@@ -150,6 +150,14 @@ export interface RightSidebarAgentNavigationRequest {
   rootConversationId: string
 }
 
+export interface RightSidebarModuleNavigationRequest {
+  conversationId?: string | null
+  moduleId: RightSidebarModuleId
+  requestId: number
+  workspaceKey?: string | null
+  workspacePath?: string
+}
+
 export interface RightSidebarPage {
   iconUrl?: string | null
   id: string

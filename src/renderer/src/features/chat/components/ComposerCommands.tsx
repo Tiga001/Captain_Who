@@ -8,7 +8,7 @@ import {
   Split,
   type LucideIcon
 } from 'lucide-react'
-import { useEffect } from 'react'
+import { useEffect, type RefObject } from 'react'
 
 export type ComposerCommandId = 'compact' | 'new' | 'fork' | 'usage' | 'pin' | 'rename' | 'archive'
 export interface ComposerCommand {
@@ -45,7 +45,8 @@ export function ComposerCommands({
   onSelect,
   onExecute,
   emptyLabel,
-  listId
+  listId,
+  scrollContainerRef
 }: {
   commands: readonly ComposerCommand[]
   query: string
@@ -54,10 +55,29 @@ export function ComposerCommands({
   onExecute: (command: ComposerCommand) => void
   emptyLabel: string
   listId: string
+  scrollContainerRef?: RefObject<HTMLDivElement | null>
 }) {
   useEffect(() => {
-    document.getElementById(`${listId}-${selectedIndex}`)?.scrollIntoView({ block: 'nearest' })
-  }, [listId, selectedIndex])
+    const selected = document.getElementById(`${listId}-${selectedIndex}`)
+    if (!selected) return
+    const boundary = scrollContainerRef?.current
+    if (!boundary) {
+      selected.scrollIntoView({ block: 'nearest' })
+      return
+    }
+    // Reveal the selected command inside the menu and its portal viewport without letting
+    // scrollIntoView move the new-conversation page or the application shell.
+    for (let container = selected.parentElement; container; container = container.parentElement) {
+      const selectedRect = selected.getBoundingClientRect()
+      const containerRect = container.getBoundingClientRect()
+      if (selectedRect.top < containerRect.top) {
+        container.scrollTop += selectedRect.top - containerRect.top
+      } else if (selectedRect.bottom > containerRect.bottom) {
+        container.scrollTop += selectedRect.bottom - containerRect.bottom
+      }
+      if (container === boundary) break
+    }
+  }, [listId, scrollContainerRef, selectedIndex])
   return (
     <div className="composer-commands" id={listId} role="listbox">
       {commands.length === 0 ? (

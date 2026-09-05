@@ -1,9 +1,18 @@
 // Renderer UI regression test: collapsed navigation must not overlap macOS traffic lights.
 import { describe, expect, it } from 'vitest'
 import { render } from 'vitest-browser-react'
+import type { CSSProperties } from 'react'
 import '../../styles/global.css'
 import '../../features/rightSidebar/RightSidebar.css'
 import '../../features/automations/ScheduledPage.css'
+
+// Match the shell's resolved geometry when navigation is closed.
+const shellStyle = {
+  '--left-panel-width': '0px',
+  '--right-panel-width': '0px',
+  height: 720,
+  width: 1280
+} as CSSProperties
 
 function MaximizedScheduledDrawer() {
   return (
@@ -32,6 +41,7 @@ describe('macOS window control safe area', () => {
         data-left-open="false"
         data-macos-window-controls="true"
         data-window-maximized="true"
+        style={shellStyle}
       >
         <main className="main-panel">
           <div className="main-panel__toolbar">
@@ -60,7 +70,7 @@ describe('macOS window control safe area', () => {
 
   it('does not reserve the macOS traffic-light area on other platforms', async () => {
     const screen = await render(
-      <div className="app-shell" data-left-open="false">
+      <div className="app-shell" data-left-open="false" style={shellStyle}>
         <main className="main-panel">
           <div className="main-panel__toolbar">
             <button className="panel-toggle panel-toggle--left" data-testid="left-toggle" />

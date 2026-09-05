@@ -1,0 +1,23 @@
+.mc-anchored-popover {
+  position: fixed;
+  z-index: 1000;
+  top: 0;
+  left: 0;
+  width: max-content;
+  max-width: calc(100vw - 16px);
+  max-height: calc(100vh - 16px);
+  overflow: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  border-radius: var(--mc-radius-popover);
+  box-shadow: var(--mc-shadow-popover-large);
+  opacity: 0;
+  -webkit-app-region: no-drag;
+}
+
+.mc-anchored-popover.mc-anchored-popover > * {
+  position: relative;
+  inset: auto;
+  max-width: 100%;
+  box-shadow: none;
+}

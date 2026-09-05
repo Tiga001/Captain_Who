@@ -61,16 +61,23 @@ button {
 .app-shell {
   --left-panel-render-width: var(--left-panel-live-width, var(--left-panel-width));
   --right-panel-render-width: var(--right-panel-live-width, var(--right-panel-width));
+  --bottom-panel-render-height: min(
+    var(--bottom-panel-live-height, var(--bottom-panel-height, 0px)),
+    50%
+  );
   position: relative;
   display: grid;
   grid-template-columns: var(--left-panel-render-width) minmax(0, 1fr) var(
       --right-panel-render-width
     );
+  grid-template-rows: minmax(0, 1fr) var(--bottom-panel-render-height);
   width: 100%;
   height: 100%;
   min-width: 520px;
   background: var(--main-panel);
-  transition: grid-template-columns 180ms ease;
+  transition:
+    grid-template-columns 180ms ease,
+    grid-template-rows 180ms ease;
 }
 
 .app-shell[data-settings-open='true'] {
@@ -154,6 +161,8 @@ html[data-theme='zju-light'] .settings-page__drag-region::before {
 }
 
 .side-panel--left {
+  grid-column: 1;
+  grid-row: 1 / -1;
   z-index: 50;
   overflow: visible;
   background: var(--left-panel);
@@ -180,11 +189,13 @@ html[data-theme='zju-light'] .settings-page__drag-region::before {
   z-index: 45;
   top: 0;
   right: 0;
-  bottom: 0;
+  bottom: var(--bottom-panel-render-height);
+  height: calc(100% - var(--bottom-panel-render-height));
   width: var(--right-panel-render-width);
   background: var(--right-panel);
   border-left: 1px solid var(--hairline);
   transition:
+    height 180ms ease,
     width 180ms ease,
     opacity 120ms ease,
     visibility 0ms linear 120ms,
@@ -196,6 +207,7 @@ html[data-theme='zju-light'] .settings-page__drag-region::before {
   visibility: visible;
   opacity: 1;
   transition:
+    height 180ms ease,
     width 180ms ease,
     opacity 120ms ease,
     visibility 0ms,
@@ -209,10 +221,27 @@ html[data-theme='zju-light'] .settings-page__drag-region::before {
 .app-shell[data-right-open='false'] .side-panel--right {
   width: 0;
   transition:
+    height 180ms ease,
     width 180ms ease,
     opacity 120ms ease,
     visibility 0ms linear 180ms,
     border-color 120ms ease;
+}
+
+.side-panel--bottom {
+  z-index: 46;
+  grid-column: 2 / -1;
+  grid-row: 2;
+  min-height: 0;
+  background: var(--right-panel);
+  border-top: 1px solid var(--hairline);
+}
+
+.app-shell[data-bottom-open='false'] .side-panel--bottom,
+.app-shell[data-bottom-panel-drag-collapsed='true'] .side-panel--bottom {
+  visibility: hidden;
+  opacity: 0;
+  pointer-events: none;
 }
 
 .app-shell[data-left-open='false'] .side-panel--left,
@@ -238,6 +267,9 @@ html[data-theme='zju-light'] .settings-page__drag-region::before {
 }
 
 .main-panel {
+  grid-column: 2;
+  grid-row: 1;
+  min-height: 0;
   background: var(--main-panel);
 }
 
@@ -279,7 +311,7 @@ html[data-theme='zju-light'] .settings-page__drag-region::before {
 .main-panel__title {
   position: absolute;
   top: 0;
-  right: 64px;
+  right: 104px;
   left: 64px;
   overflow: hidden;
   margin: 0;
@@ -346,6 +378,10 @@ html[data-theme='zju-light'] .settings-page__drag-region::before {
   right: 20px;
 }
 
+.panel-toggle--bottom {
+  right: 60px;
+}
+
 .app-shell[data-macos-window-controls='true'][data-left-open='false'] .panel-toggle--left {
   left: var(--mac-window-control-safe-width);
 }
@@ -403,6 +439,21 @@ html[data-theme='zju-light'] .settings-page__drag-region::before {
   --panel-toggle-divider-x: 65%;
 }
 
+.panel-toggle__icon[data-side='bottom']::after {
+  top: calc(100% - var(--panel-toggle-divider-edge-offset));
+  left: 50%;
+  width: calc(var(--panel-toggle-icon-width) - 5.5px);
+  height: 1.5px;
+  transition:
+    top 140ms ease,
+    width 140ms ease;
+}
+
+.panel-toggle__icon[data-side='bottom'][data-open='false']::after {
+  top: 65%;
+  width: calc(var(--panel-toggle-icon-width) - 4px);
+}
+
 .resize-handle {
   position: absolute;
   z-index: 40;
@@ -432,6 +483,7 @@ html[data-theme='zju-light'] .settings-page__drag-region::before {
 }
 
 .resize-handle--left {
+  z-index: 49;
   left: var(--left-panel-render-width);
 }
 
@@ -446,8 +498,35 @@ html[data-theme='zju-light'] .settings-page__drag-region::before {
 }
 
 .resize-handle--right {
+  bottom: var(--bottom-panel-render-height);
   right: var(--right-panel-render-width);
   transform: translateX(50%);
+}
+
+.resize-handle--bottom {
+  z-index: 47;
+  top: auto;
+  right: 0;
+  bottom: var(--bottom-panel-render-height);
+  left: var(--left-panel-render-width);
+  width: auto;
+  height: 13px;
+  transform: translateY(50%);
+  cursor: row-resize;
+}
+
+.resize-handle--bottom::after {
+  top: 50%;
+  right: 0;
+  bottom: auto;
+  left: 0;
+  width: auto;
+  height: 1px;
+  transform: translateY(-50%);
+}
+
+.is-resizing.is-resizing-vertically {
+  cursor: row-resize;
 }
 
 .is-resizing {
@@ -461,8 +540,15 @@ html[data-theme='zju-light'] .settings-page__drag-region::before {
 
 /* Threshold crossings reuse the regular sidebar collapse/expand animation. */
 .is-resizing .app-shell[data-left-sidebar-drag-collapsed],
-.is-resizing .app-shell[data-right-sidebar-drag-collapsed] {
-  transition: grid-template-columns 180ms ease;
+.is-resizing .app-shell[data-right-sidebar-drag-collapsed],
+.is-resizing .app-shell[data-bottom-panel-drag-collapsed] {
+  transition:
+    grid-template-columns 180ms ease,
+    grid-template-rows 180ms ease;
+}
+
+.is-resizing .app-shell[data-bottom-panel-drag-collapsed] .side-panel--right {
+  transition: height 180ms ease;
 }
 
 .is-resizing .side-panel--right {
@@ -486,6 +572,8 @@ html[data-theme='zju-light'] .settings-page__drag-region::before {
 
   .is-resizing .app-shell[data-left-sidebar-drag-collapsed],
   .is-resizing .app-shell[data-right-sidebar-drag-collapsed],
+  .is-resizing .app-shell[data-bottom-panel-drag-collapsed],
+  .is-resizing .app-shell[data-bottom-panel-drag-collapsed] .side-panel--right,
   .is-resizing .app-shell[data-right-sidebar-drag-collapsed] .side-panel--right {
     transition: none;
   }

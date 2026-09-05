@@ -2,6 +2,7 @@ import { Check, ChevronDown } from 'lucide-react'
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import type { FocusEvent, KeyboardEvent } from 'react'
 import { useDismissOnOutsidePointer } from '../../hooks/useDismissOnOutsidePointer'
+import { AnchoredPopover } from '../../components/overlay/AnchoredPopover'
 import './ModelConfigPicker.css'
 
 export interface ModelConfigPickerOption {
@@ -19,6 +20,7 @@ interface ModelConfigPickerProps {
   emptyLabel: string
   onChange: (modelConfigId: string) => void
   options: readonly ModelConfigPickerOption[]
+  portalMenu?: boolean
   showSelectedCapability?: boolean
   value: string | null
   variant: 'composer' | 'settings'
@@ -35,6 +37,7 @@ export function ModelConfigPicker({
   emptyLabel,
   onChange,
   options,
+  portalMenu = false,
   showSelectedCapability = false,
   value,
   variant
@@ -42,6 +45,7 @@ export function ModelConfigPicker({
   const [isOpen, setOpen] = useState(false)
   const rootRef = useRef<HTMLDivElement>(null)
   const triggerRef = useRef<HTMLButtonElement>(null)
+  const popoverRef = useRef<HTMLDivElement>(null)
   const optionRefs = useRef<Array<HTMLButtonElement | null>>([])
   const listboxId = useId()
   const selectedIndex = useMemo(
@@ -53,7 +57,9 @@ export function ModelConfigPicker({
   const effectivelyDisabled = disabled || enabledOptions.length === 0
   const closeMenu = useCallback(() => setOpen(false), [])
 
-  useDismissOnOutsidePointer(rootRef, isOpen, closeMenu)
+  useDismissOnOutsidePointer(rootRef, isOpen, closeMenu, (target) =>
+    Boolean(popoverRef.current?.contains(target))
+  )
 
   useEffect(() => {
     if (effectivelyDisabled) closeMenu()
@@ -123,7 +129,12 @@ export function ModelConfigPicker({
   }
 
   const handleBlur = (event: FocusEvent<HTMLDivElement>) => {
-    if (!event.currentTarget.contains(event.relatedTarget)) closeMenu()
+    if (
+      !event.currentTarget.contains(event.relatedTarget) &&
+      !popoverRef.current?.contains(event.relatedTarget)
+    ) {
+      closeMenu()
+    }
   }
 
   const rootClassName = [
@@ -174,57 +185,67 @@ export function ModelConfigPicker({
       </button>
 
       {isOpen && (
-        <div aria-label={ariaLabel} className={menuClassName} id={listboxId} role="listbox">
-          {options.map((option, index) => {
-            const isSelected = option.id === selectedOption?.id
-            return (
-              <button
-                aria-disabled={option.disabled || undefined}
-                aria-selected={isSelected}
-                className={optionClassName}
-                data-selected={isSelected || undefined}
-                disabled={option.disabled}
-                key={option.id}
-                onClick={() => {
-                  if (option.disabled) return
-                  onChange(option.id)
-                  closeMenuAndRestoreFocus()
-                }}
-                onKeyDown={(event) => handleOptionKeyDown(event, index)}
-                ref={(node) => {
-                  optionRefs.current[index] = node
-                }}
-                role="option"
-                tabIndex={!option.disabled && isSelected ? 0 : -1}
-                type="button"
-              >
-                <span
-                  className={
-                    variant === 'composer'
-                      ? 'composer-model-option__name'
-                      : 'model-config-picker__option-name'
-                  }
+        <AnchoredPopover
+          align="end"
+          anchorRef={triggerRef}
+          className={variant === 'composer' ? 'chat-composer-menu-popover' : undefined}
+          enabled={portalMenu}
+          matchAnchorWidth={variant === 'settings'}
+          onClose={closeMenu}
+          popoverRef={popoverRef}
+        >
+          <div aria-label={ariaLabel} className={menuClassName} id={listboxId} role="listbox">
+            {options.map((option, index) => {
+              const isSelected = option.id === selectedOption?.id
+              return (
+                <button
+                  aria-disabled={option.disabled || undefined}
+                  aria-selected={isSelected}
+                  className={optionClassName}
+                  data-selected={isSelected || undefined}
+                  disabled={option.disabled}
+                  key={option.id}
+                  onClick={() => {
+                    if (option.disabled) return
+                    onChange(option.id)
+                    closeMenuAndRestoreFocus()
+                  }}
+                  onKeyDown={(event) => handleOptionKeyDown(event, index)}
+                  ref={(node) => {
+                    optionRefs.current[index] = node
+                  }}
+                  role="option"
+                  tabIndex={!option.disabled && isSelected ? 0 : -1}
+                  type="button"
                 >
-                  {option.label}
-                </span>
-                {option.capabilityLabel ? (
                   <span
-                    className={`model-config-picker__capability ${
+                    className={
                       variant === 'composer'
-                        ? 'composer-model-option__capability'
-                        : 'model-config-picker__option-capability'
-                    }`}
-                    data-supported={option.capabilitySupported || undefined}
+                        ? 'composer-model-option__name'
+                        : 'model-config-picker__option-name'
+                    }
                   >
-                    {option.capabilityLabel}
+                    {option.label}
                   </span>
-                ) : isSelected ? (
-                  <Check aria-hidden="true" />
-                ) : null}
-              </button>
-            )
-          })}
-        </div>
+                  {option.capabilityLabel ? (
+                    <span
+                      className={`model-config-picker__capability ${
+                        variant === 'composer'
+                          ? 'composer-model-option__capability'
+                          : 'model-config-picker__option-capability'
+                      }`}
+                      data-supported={option.capabilitySupported || undefined}
+                    >
+                      {option.capabilityLabel}
+                    </span>
+                  ) : isSelected ? (
+                    <Check aria-hidden="true" />
+                  ) : null}
+                </button>
+              )
+            })}
+          </div>
+        </AnchoredPopover>
       )}
     </div>
   )

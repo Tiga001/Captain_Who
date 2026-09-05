@@ -26,7 +26,8 @@ interface UseTerminalSessionResult {
   status: TerminalSessionStatus
 }
 
-const MIN_TERMINAL_FIT_HEIGHT = 120
+// A 165px bottom panel leaves 111px after its tab strip and terminal padding.
+const MIN_TERMINAL_FIT_HEIGHT = 100
 const MIN_TERMINAL_FIT_WIDTH = 220
 const TERMINAL_RESIZE_SETTLE_MS = 140
 

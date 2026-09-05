@@ -12,6 +12,7 @@ import type {
 import { ResizeHandle } from '../components/layout/ResizeHandle'
 import { LeftSidebar } from './shell/sidebar/LeftSidebar'
 import { RightSidebar } from '../features/rightSidebar/RightSidebar'
+import { BottomPanel } from '../features/bottomPanel/BottomPanel'
 import { useToast } from '../components/toast/ToastContext'
 import { useModelSettings } from '../config/ModelSettingsProvider'
 import { useProjectSettings } from '../config/ProjectSettingsProvider'
@@ -22,6 +23,8 @@ import { useAppStartupStage } from '../features/startup/AppStartupContext'
 import type {
   RightSidebarAgentNavigationRequest,
   RightSidebarCapabilities,
+  RightSidebarModuleId,
+  RightSidebarModuleNavigationRequest,
   RightSidebarReviewNavigationRequest
 } from '../features/rightSidebar/rightSidebarTypes'
 import { ChatConversationPage } from '../features/chat/ChatConversationPage'
@@ -147,6 +150,11 @@ export function AppShell() {
     togglePinProject
   } = useProjectSettings()
   const {
+    bottomHeight,
+    bottomOpen,
+    bottomResizeMetrics,
+    closeBottomPanel,
+    commitBottomPanelResize,
     commitSidebarResize,
     leftResizeMetrics,
     leftOpen,
@@ -158,9 +166,13 @@ export function AppShell() {
     rightWidth,
     shellRef,
     toggleLeftSidebar,
+    toggleBottomPanel,
     toggleRightSidebar,
     toggleRightSidebarMaximized
   } = useShellLayout()
+  const [rightSidebarModuleNavigationRequest, setRightSidebarModuleNavigationRequest] =
+    useState<RightSidebarModuleNavigationRequest | null>(null)
+  const rightSidebarModuleNavigationRequestIdRef = useRef(0)
   const browserSurfaceBridge = useBrowserSurfaceCommand(openRightSidebar)
   const [rightSidebarReviewNavigationRequest, setRightSidebarReviewNavigationRequest] =
     useState<RightSidebarReviewNavigationRequest | null>(null)
@@ -365,6 +377,25 @@ export function AppShell() {
   }, [rightSidebarWorkspaceProjectId, projects])
   const rightSidebarWorkspaceKeys = useMemo(() => projects.map((project) => project.id), [projects])
   const rightSidebarWorkspacePath = rightSidebarWorkspaceProject?.path?.trim() || undefined
+  const openRightSidebarModule = useCallback(
+    (moduleId: RightSidebarModuleId) => {
+      rightSidebarModuleNavigationRequestIdRef.current += 1
+      setRightSidebarModuleNavigationRequest({
+        moduleId,
+        requestId: rightSidebarModuleNavigationRequestIdRef.current,
+        workspaceKey: rightSidebarWorkspaceProject?.id,
+        workspacePath: rightSidebarWorkspacePath,
+        conversationId: activeConversation?.id ?? null
+      })
+      openRightSidebar()
+    },
+    [
+      activeConversation?.id,
+      openRightSidebar,
+      rightSidebarWorkspacePath,
+      rightSidebarWorkspaceProject?.id
+    ]
+  )
   const gitRepositoryCapability = useGitRepositoryCapability(
     rightSidebarWorkspaceProject?.id,
     rightSidebarWorkspacePath
@@ -448,6 +479,8 @@ export function AppShell() {
     () =>
       rightMaximized ? (
         <MaximizedSidebarControls
+          bottomOpen={bottomOpen}
+          onToggleBottomPanel={toggleBottomPanel}
           hasUnreadConversations={hasUnreadConversations}
           leftOpen={leftOpen}
           onToggleLeftSidebar={toggleLeftSidebar}
@@ -457,6 +490,8 @@ export function AppShell() {
         />
       ) : null,
     [
+      bottomOpen,
+      toggleBottomPanel,
       hasUnreadConversations,
       leftOpen,
       rightMaximized,
@@ -1048,6 +1083,7 @@ export function AppShell() {
       ref={shellRef}
       className="app-shell"
       data-left-open={leftOpen ? 'true' : 'false'}
+      data-bottom-open={bottomOpen ? 'true' : 'false'}
       data-macos-window-controls={HAS_MACOS_WINDOW_CONTROLS ? 'true' : undefined}
       data-native-font-smoothing={
         SUPPORTS_NATIVE_FONT_SMOOTHING && uiPreferences.nativeFontSmoothing ? 'true' : undefined
@@ -1058,7 +1094,15 @@ export function AppShell() {
       data-translucent-sidebar={uiPreferences.translucentSidebar ? 'true' : undefined}
       data-window-maximized={appWindowMaximized ? 'true' : undefined}
       settingsOpen={settingsOpen}
-      style={getAppShellPanelStyle(leftOpen, leftWidth, rightOpen, rightWidth, uiPreferences)}
+      style={getAppShellPanelStyle(
+        leftOpen,
+        leftWidth,
+        rightOpen,
+        rightWidth,
+        uiPreferences,
+        bottomOpen,
+        bottomHeight
+      )}
     >
       {renamingChat && (
         <TextInputDialog
@@ -1149,9 +1193,11 @@ export function AppShell() {
         as="main"
         className="main-panel"
         aria-label={t('app.mainWorkspace')}
-        covered={primaryView === 'scheduled'}
+        covered={primaryView === 'scheduled' || (rightOpen && rightMaximized)}
       >
         <MainPanelToolbar
+          bottomOpen={bottomOpen}
+          onToggleBottomPanel={toggleBottomPanel}
           hasUnreadConversations={hasUnreadConversations}
           leftOpen={leftOpen}
           onToggleLeftSidebar={toggleLeftSidebar}
@@ -1279,7 +1325,8 @@ export function AppShell() {
           collaborationSnapshot={collaborationSnapshot}
           isMaximized={rightMaximized}
           isOpen={rightOpen}
-          isWorkspaceVisible={!settingsOpen}
+          isWorkspaceVisible={!settingsOpen && primaryView === 'conversation'}
+          moduleNavigationRequest={rightSidebarModuleNavigationRequest}
           workspaceKey={rightSidebarWorkspaceProject?.id}
           workspaceKeys={rightSidebarWorkspaceKeys}
           workspaceName={rightSidebarWorkspaceProject?.name}
@@ -1300,6 +1347,34 @@ export function AppShell() {
           reviewNavigationRequest={rightSidebarReviewNavigationRequest}
           renderAgentObserver={renderAgentObserver}
           maximizedToolbarControls={rightSidebarMaximizedToolbarControls}
+        />
+      </AppShellCoveredRegion>
+      {primaryView === 'conversation' && bottomOpen && (
+        <ResizeHandle
+          metrics={bottomResizeMetrics}
+          onCollapse={closeBottomPanel}
+          onResizeCommit={commitBottomPanelResize}
+          resizeTargetRef={shellRef}
+          side="bottom"
+        />
+      )}
+      <AppShellCoveredRegion
+        as="aside"
+        className="side-panel side-panel--bottom"
+        covered={primaryView === 'scheduled' || !bottomOpen}
+      >
+        <BottomPanel
+          activeConversationId={activeConversation?.id}
+          capabilities={rightSidebarCapabilities}
+          collaborationSnapshot={collaborationSnapshot}
+          isOpen={bottomOpen}
+          isWorkspaceVisible={!settingsOpen && primaryView === 'conversation'}
+          onClose={closeBottomPanel}
+          onOpenRightModule={openRightSidebarModule}
+          workspaceKey={rightSidebarWorkspaceProject?.id}
+          workspaceKeys={rightSidebarWorkspaceKeys}
+          workspaceName={rightSidebarWorkspaceProject?.name}
+          workspacePath={rightSidebarWorkspacePath}
         />
       </AppShellCoveredRegion>
       {primaryView === 'scheduled' && (

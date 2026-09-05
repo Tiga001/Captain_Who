@@ -85,6 +85,7 @@ export function NewConversationPage({
           inputPlaceholder={selectedProject ? undefined : t(promptKeys.placeholderKey)}
           resetKey={`new:${defaultProjectId ?? 'root'}`}
           skillCatalogRefreshToken={skillCatalogRefreshToken}
+          portalMenus
           showProjectSelector
           onSubmitMessage={onSubmitMessage}
         />

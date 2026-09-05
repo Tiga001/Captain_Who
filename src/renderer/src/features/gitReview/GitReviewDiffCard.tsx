@@ -22,6 +22,7 @@ import {
 import { Tooltip } from '../../components/overlay/Tooltip'
 import type { Translate } from '../../config/translationFormat'
 import { GitReviewDiffRenderer } from './GitReviewDiffRenderer'
+import { GitReviewCopyButton } from './GitReviewCopyButton'
 import type { GitReviewDiffExpandHandler } from './GitReviewDiffRenderer'
 import { reduceGitDiffExpansion, type GitDiffExpansionState } from './diff'
 import { GitReviewFileIcon } from './GitReviewFileIcon'
@@ -48,6 +49,7 @@ interface GitReviewDiffCardProps {
   loadFullFiles: boolean
   mutationLocked: boolean
   mutationPending: boolean
+  onCopyFile: (path: string) => Promise<void>
   onMutate: (fileId: string, action: GitReviewFileMutationAction) => void
   onOpenFile: (path: string) => void
   onRequestDiff: (fileId: string) => void
@@ -75,6 +77,7 @@ export const GitReviewDiffCard = memo(function GitReviewDiffCard({
   loadFullFiles,
   mutationLocked,
   mutationPending,
+  onCopyFile,
   onMutate,
   onOpenFile,
   onRequestDiff,
@@ -223,6 +226,11 @@ export const GitReviewDiffCard = memo(function GitReviewDiffCard({
           {file.stats && <GitReviewFileStats file={file} />}
         </button>
         <div className="git-review__file-actions" aria-label={t('gitReview.file.actions')}>
+          <GitReviewCopyButton
+            label={t('gitReview.file.copyPath')}
+            onCopy={() => onCopyFile(file.path)}
+            t={t}
+          />
           <FileActionButton label={actionLabel} onClick={() => onToggle(file.id)}>
             {isExpanded ? <ChevronDown aria-hidden="true" /> : <ChevronRight aria-hidden="true" />}
           </FileActionButton>

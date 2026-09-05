@@ -13,9 +13,14 @@ import type {
   GitReviewRepositoryContext,
   GitReviewRepositoryContextInput,
   GitTurnDiffSummaries,
-  GitTurnDiffSummariesInput
+  GitTurnDiffSummariesInput,
+  WorkspaceFileRequest
 } from '@mycopilot/protocol'
 import { hostClient } from '../../host/hostClient'
+
+export function copyGitReviewFilePath(input: WorkspaceFileRequest): Promise<void> {
+  return hostClient.workspaceFiles.copyPath(input)
+}
 
 export function inspectGitRepository(projectId: string): Promise<GitRepositoryInspection> {
   return hostClient.git.inspectRepository({ projectId })

@@ -1,8 +1,9 @@
-import type { GitReviewFile } from '@mycopilot/protocol'
+import type { GitReviewFile, GitReviewTarget } from '@mycopilot/protocol'
 import { useRef, type CSSProperties, type ReactNode } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { render } from 'vitest-browser-react'
+import { render as renderComponent } from 'vitest-browser-react'
 import { Tooltip } from '../../../components/overlay/Tooltip'
+import { ToastProvider } from '../../../components/toast/ToastProvider'
 import { getFrontendTheme } from '../../../config/frontendTheme'
 import { getGitReviewCssVariables } from '../../../config/themes/gitReviewTheme'
 import type { Translate } from '../../../config/translationFormat'
@@ -14,6 +15,8 @@ import type { GitReviewDiffState, GitReviewFileContentState } from '../useGitRev
 
 const translate: Translate = (key) => key
 const noop = (): void => undefined
+const noopAsync = async (): Promise<void> => undefined
+const render = (component: ReactNode) => renderComponent(component, { wrapper: ToastProvider })
 const themeVariables = {
   ...getGitReviewCssVariables(getFrontendTheme('classic-dark').tokens.colors.gitReview),
   '--mc-color-border-default': 'rgb(75, 78, 84)',
@@ -109,6 +112,7 @@ function StickyCardsFixture(): ReactNode {
               key={fileId}
               mutationLocked={false}
               mutationPending={false}
+              onCopyFile={noopAsync}
               onMutate={noop}
               onOpenFile={noop}
               onRequestDiff={noop}
@@ -154,6 +158,7 @@ function WindowedCardFixture({
           loadFullFiles={false}
           mutationLocked={false}
           mutationPending={false}
+          onCopyFile={noopAsync}
           onMutate={noop}
           onOpenFile={noop}
           onRequestDiff={noop}
@@ -170,19 +175,33 @@ function WindowedCardFixture({
   )
 }
 
-function LastTurnCardFixture({
-  onOpenFile = noop
+function ReviewActionCardFixture({
+  file = createFile('last-turn'),
+  onCopyFile = noopAsync,
+  onMutate = noop,
+  onOpenFile = noop,
+  onRestore = noop,
+  onToggle = noop,
+  targetKind = 'lastTurn',
+  width = 440
 }: {
+  file?: GitReviewFile
+  onCopyFile?: (path: string) => Promise<void>
+  onMutate?: () => void
   onOpenFile?: (path: string) => void
+  onRestore?: () => void
+  onToggle?: () => void
+  targetKind?: GitReviewTarget['kind']
+  width?: number
 }): ReactNode {
   const scrollRootRef = useRef<HTMLDivElement>(null)
   return (
-    <div className="git-review" style={{ display: 'block', height: 300, width: 440 }}>
+    <div className="git-review" style={{ display: 'block', height: 300, width }}>
       <div className="git-review__content" ref={scrollRootRef}>
         <GitReviewDiffCard
-          capabilities={getGitReviewTargetCapabilities('lastTurn')}
+          capabilities={getGitReviewTargetCapabilities(targetKind)}
           diffState={createDiffState('last-turn')}
-          file={createFile('last-turn')}
+          file={file}
           isExpanded={false}
           isNearViewport
           isReviewActive
@@ -191,11 +210,12 @@ function LastTurnCardFixture({
           loadFullFiles={false}
           mutationLocked={false}
           mutationPending={false}
-          onMutate={noop}
+          onCopyFile={onCopyFile}
+          onMutate={onMutate}
           onOpenFile={onOpenFile}
           onRequestDiff={noop}
-          onRestore={noop}
-          onToggle={noop}
+          onRestore={onRestore}
+          onToggle={onToggle}
           scrollRootRef={scrollRootRef}
           t={translate}
           viewMode="unified"
@@ -262,6 +282,7 @@ function ExpansionAnchorFixture(): ReactNode {
           loadFullFiles
           mutationLocked={false}
           mutationPending={false}
+          onCopyFile={noopAsync}
           onMutate={noop}
           onOpenFile={noop}
           onRequestDiff={noop}
@@ -298,7 +319,7 @@ describe('GitReviewDiffCard browser layout', () => {
   })
 
   it('keeps last-turn file cards read-only while preserving review controls', async () => {
-    const screen = await render(<LastTurnCardFixture />)
+    const screen = await render(<ReviewActionCardFixture />)
     const actions = screen.container.querySelector('.git-review__file-actions')
     expect(actions).not.toBeNull()
     expect(actions?.querySelector('[aria-label="gitReview.file.restore"]')).toBeNull()
@@ -310,12 +331,90 @@ describe('GitReviewDiffCard browser layout', () => {
 
   it('opens the selected review file through the tab action', async () => {
     const onOpenFile = vi.fn()
-    const screen = await render(<LastTurnCardFixture onOpenFile={onOpenFile} />)
+    const screen = await render(<ReviewActionCardFixture onOpenFile={onOpenFile} />)
 
     await screen.getByRole('button', { name: 'gitReview.file.open' }).click()
 
     expect(onOpenFile).toHaveBeenCalledOnce()
     expect(onOpenFile).toHaveBeenCalledWith('src/last-turn.ts')
+  })
+
+  it.each(['lastTurn', 'uncommitted', 'unstaged', 'staged', 'commit', 'branch'] as const)(
+    'copies the current file path before the expand action in %s review',
+    async (targetKind) => {
+      const onCopyFile = vi.fn().mockResolvedValue(undefined)
+      const onOpenFile = vi.fn()
+      const onMutate = vi.fn()
+      const onRestore = vi.fn()
+      const onToggle = vi.fn()
+      const screen = await render(
+        <ReviewActionCardFixture
+          file={{ ...createFile('renamed'), previousPath: 'src/old.ts', status: 'renamed' }}
+          onCopyFile={onCopyFile}
+          onMutate={onMutate}
+          onOpenFile={onOpenFile}
+          onRestore={onRestore}
+          onToggle={onToggle}
+          targetKind={targetKind}
+        />
+      )
+      const actions = screen.container.querySelector('.git-review__file-actions')
+      expect(actions?.children[0]?.querySelector('button')?.getAttribute('aria-label')).toBe(
+        'gitReview.file.copyPath'
+      )
+      expect(actions?.children[1]?.querySelector('button')?.getAttribute('aria-label')).toBe(
+        'gitReview.file.expand'
+      )
+
+      await screen.getByRole('button', { name: 'gitReview.file.copyPath' }).click()
+
+      expect(onCopyFile).toHaveBeenCalledExactlyOnceWith('src/renamed.ts')
+      expect(onOpenFile).not.toHaveBeenCalled()
+      expect(onMutate).not.toHaveBeenCalled()
+      expect(onRestore).not.toHaveBeenCalled()
+      expect(onToggle).not.toHaveBeenCalled()
+      await expect.element(screen.getByRole('status')).toHaveTextContent('gitReview.copy.success')
+    }
+  )
+
+  it('reports a failed file path copy', async () => {
+    const onCopyFile = vi.fn().mockRejectedValueOnce(new Error('File does not exist'))
+    const screen = await render(
+      <ReviewActionCardFixture
+        file={{ ...createFile('deleted'), status: 'deleted' }}
+        onCopyFile={onCopyFile}
+      />
+    )
+    const copyButton = screen.getByRole('button', { name: 'gitReview.file.copyPath' })
+
+    await copyButton.click()
+
+    expect(onCopyFile).toHaveBeenCalledExactlyOnceWith('src/deleted.ts')
+    await expect.element(screen.getByRole('status')).toHaveTextContent('gitReview.copy.failed')
+    await expect.element(copyButton).toBeEnabled()
+  })
+
+  it('keeps all five file actions on one row within a narrow review panel', async () => {
+    const screen = await render(<ReviewActionCardFixture targetKind="unstaged" width={320} />)
+    const header = screen.container.querySelector<HTMLElement>('.git-review__diff-card-header')
+    const buttons = Array.from(
+      screen.container.querySelectorAll<HTMLButtonElement>('.git-review__file-actions button')
+    )
+    if (!header) throw new Error('File header did not render')
+    expect(buttons).toHaveLength(5)
+
+    const headerRect = header.getBoundingClientRect()
+    const buttonRects = buttons.map((button) => button.getBoundingClientRect())
+    for (const [index, rect] of buttonRects.entries()) {
+      expect(Math.abs(rect.top - buttonRects[0].top)).toBeLessThanOrEqual(1)
+      expect(rect.left).toBeGreaterThanOrEqual(headerRect.left)
+      expect(rect.right).toBeLessThanOrEqual(headerRect.right)
+      if (index > 0) expect(rect.left).toBeGreaterThanOrEqual(buttonRects[index - 1].right)
+    }
+    expect(buttons[0].getAttribute('aria-label')).toBe('gitReview.file.copyPath')
+    expect(buttons[1].getAttribute('aria-label')).toBe('gitReview.file.expand')
+    expect(buttonRects[1].left - buttonRects[0].right).toBeLessThanOrEqual(4)
+    expect(header.scrollWidth).toBeLessThanOrEqual(header.clientWidth)
   })
 
   it('keeps the following hunk anchored while expanding omitted lines upward', async () => {

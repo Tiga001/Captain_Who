@@ -29,11 +29,14 @@ export function getAppShellPanelStyle(
   leftWidth: number,
   rightOpen: boolean,
   rightWidth: number,
-  uiPreferences: UiPreferencesSnapshot
+  uiPreferences: UiPreferencesSnapshot,
+  bottomOpen = false,
+  bottomHeight = 0
 ): CSSProperties {
   return {
     '--left-panel-width': `${leftOpen ? leftWidth : 0}px`,
     '--right-panel-width': `${rightOpen ? rightWidth : 0}px`,
+    '--bottom-panel-height': `${bottomOpen ? bottomHeight : 0}px`,
     '--mc-sidebar-translucent-opacity': getTranslucentSidebarOpacityPercent(
       uiPreferences.translucentSidebarTransparency
     )
@@ -47,7 +50,7 @@ export function getPermissionModeAvailability(uiPreferences: UiPreferencesSnapsh
   }
 }
 
-type SidebarToggleSide = 'left' | 'right'
+type SidebarToggleSide = 'left' | 'right' | 'bottom'
 
 function SidebarToggleIcon({ open, side }: { open: boolean; side: SidebarToggleSide }) {
   return (
@@ -79,8 +82,18 @@ export function PanelToggleButton({
   showTitle = false,
   t
 }: PanelToggleButtonProps) {
-  const collapseKey = side === 'left' ? 'app.collapseLeftSidebar' : 'app.collapseRightSidebar'
-  const expandKey = side === 'left' ? 'app.expandLeftSidebar' : 'app.expandRightSidebar'
+  const collapseKey =
+    side === 'bottom'
+      ? 'app.collapseBottomPanel'
+      : side === 'left'
+        ? 'app.collapseLeftSidebar'
+        : 'app.collapseRightSidebar'
+  const expandKey =
+    side === 'bottom'
+      ? 'app.expandBottomPanel'
+      : side === 'left'
+        ? 'app.expandLeftSidebar'
+        : 'app.expandRightSidebar'
   const label = open ? t(collapseKey) : t(expandKey)
 
   return (
@@ -99,6 +112,8 @@ export function PanelToggleButton({
 }
 
 interface SidebarToggleControlsProps {
+  bottomOpen: boolean
+  onToggleBottomPanel: () => void
   hasUnreadConversations: boolean
   leftOpen: boolean
   onToggleLeftSidebar: () => void
@@ -112,6 +127,8 @@ interface MainPanelToolbarProps extends SidebarToggleControlsProps {
 }
 
 export function MainPanelToolbar({
+  bottomOpen,
+  onToggleBottomPanel,
   hasUnreadConversations,
   leftOpen,
   onToggleLeftSidebar,
@@ -131,6 +148,13 @@ export function MainPanelToolbar({
         t={t}
       />
       <PanelToggleButton
+        className="panel-toggle panel-toggle--bottom"
+        onClick={onToggleBottomPanel}
+        open={bottomOpen}
+        side="bottom"
+        t={t}
+      />
+      <PanelToggleButton
         className="panel-toggle panel-toggle--right"
         onClick={onToggleRightSidebar}
         open={rightOpen}
@@ -143,6 +167,8 @@ export function MainPanelToolbar({
 }
 
 export function MaximizedSidebarControls({
+  bottomOpen,
+  onToggleBottomPanel,
   hasUnreadConversations,
   leftOpen,
   onToggleLeftSidebar,
@@ -159,6 +185,14 @@ export function MaximizedSidebarControls({
         open={leftOpen}
         showTitle
         side="left"
+        t={t}
+      />
+      <PanelToggleButton
+        className="right-sidebar__icon-button"
+        onClick={onToggleBottomPanel}
+        open={bottomOpen}
+        showTitle
+        side="bottom"
         t={t}
       />
       <PanelToggleButton
