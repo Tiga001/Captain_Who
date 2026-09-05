@@ -352,18 +352,3 @@
   margin: 0 auto;
   gap: 8px;
 }
-
-@media (max-width: 760px) {
-  .chat-conversation-page__messages {
-    padding-right: 24px;
-    padding-left: 24px;
-  }
-
-  .chat-message--user {
-    max-width: 100%;
-  }
-
-  .chat-message--user .chat-message__body {
-    max-width: min(82%, 620px);
-  }
-}

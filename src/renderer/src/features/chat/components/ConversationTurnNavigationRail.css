@@ -1,16 +1,19 @@
 /* Read-only conversation-turn navigation rail beside the chat viewport. */
 .conversation-turn-navigation {
+  display: flex;
+  flex-direction: column;
   position: absolute;
   z-index: 18;
   top: 50%;
-  left: 10px;
+  left: 4px;
   max-height: min(70%, 640px);
   transform: translateY(-50%);
 }
 
 .conversation-turn-navigation__list {
   display: flex;
-  max-height: min(70vh, 640px);
+  min-height: 0;
+  max-height: 100%;
   flex-direction: column;
   padding: 14px 0;
   overflow-x: hidden;
@@ -39,7 +42,7 @@
 
 .conversation-turn-navigation__row {
   display: flex;
-  width: 36px;
+  width: 30px;
   height: 10px;
   min-height: 10px;
   padding: 0;
@@ -144,7 +147,17 @@
   -webkit-line-clamp: 3;
 }
 
-@media (max-width: 680px) {
+@container chat-messages (max-width: 760px) {
+  .conversation-turn-navigation {
+    left: 2px;
+  }
+
+  .conversation-turn-navigation__row {
+    width: 26px;
+  }
+}
+
+@container chat-messages (max-width: 680px) {
   .conversation-turn-navigation {
     display: none;
   }

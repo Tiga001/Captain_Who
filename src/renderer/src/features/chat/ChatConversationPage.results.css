@@ -786,7 +786,7 @@
   display: grid;
   max-width: min(100%, 820px);
   min-width: 0;
-  padding: 4px 0 0 28px;
+  padding: 4px 0 0 var(--agent-activity-hanging-indent);
   gap: 2px;
 }
 

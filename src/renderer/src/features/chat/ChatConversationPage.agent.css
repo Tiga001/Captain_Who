@@ -1,7 +1,7 @@
 /* Agent run status, activity disclosure, command, and patch activity styles. */
 .agent-run {
   display: grid;
-  gap: 18px;
+  gap: 14px;
 }
 
 .agent-run__elapsed {
@@ -10,11 +10,11 @@
   width: 100%;
   min-height: 0;
   column-gap: 8px;
-  row-gap: 12px;
+  row-gap: 6px;
   flex-wrap: wrap;
   color: var(--mc-color-text-muted);
   font-size: var(--mc-font-size-chat-activity);
-  font-weight: var(--mc-font-weight-strong);
+  font-weight: var(--mc-font-weight-regular);
 }
 
 .agent-run__elapsed::after {
@@ -126,10 +126,10 @@
 .agent-thinking {
   display: inline-flex;
   align-items: center;
-  min-height: 30px;
+  min-height: 28px;
   color: var(--mc-color-text-muted);
   font-size: var(--mc-font-size-chat-activity);
-  font-weight: var(--mc-font-weight-strong);
+  font-weight: var(--mc-font-weight-regular);
 }
 
 @keyframes mc-agent-running-shimmer {
@@ -333,7 +333,7 @@
 }
 
 .agent-activity {
-  --agent-activity-icon-gap: 10px;
+  --agent-activity-icon-gap: 6px;
   --agent-activity-hanging-indent: calc(var(--mc-icon-size-base) + var(--agent-activity-icon-gap));
 
   display: block;
@@ -341,7 +341,7 @@
   max-width: 100%;
   color: var(--mc-color-text-muted);
   font-size: var(--mc-font-size-chat-activity);
-  font-weight: var(--mc-font-weight-strong);
+  font-weight: var(--mc-font-weight-regular);
   line-height: var(--mc-line-height-relaxed);
 }
 
@@ -355,7 +355,7 @@
   width: fit-content;
   max-width: 100%;
   min-width: 0;
-  min-height: 30px;
+  min-height: 28px;
   padding-left: var(--agent-activity-hanging-indent);
   text-indent: calc(-1 * var(--agent-activity-hanging-indent));
   color: var(--mc-color-text-muted);
@@ -508,11 +508,11 @@
   display: grid;
   max-width: min(100%, 780px);
   min-width: 0;
-  padding: 4px 0 0 28px;
+  padding: 4px 0 0 var(--agent-activity-hanging-indent);
   gap: 8px;
   color: var(--mc-color-text-muted);
   font-size: var(--mc-font-size-chat-activity-detail);
-  font-weight: var(--mc-font-weight-medium);
+  font-weight: var(--mc-font-weight-regular);
   line-height: var(--mc-line-height-relaxed);
 }
 
@@ -524,7 +524,7 @@
 .agent-activity__details span {
   color: var(--mc-color-text-subtle);
   font-size: var(--mc-font-size-chat-metadata);
-  font-weight: var(--mc-font-weight-heavy);
+  font-weight: var(--mc-font-weight-regular);
 }
 
 .agent-activity__details pre {
@@ -638,6 +638,10 @@
 .run-command-activity__details--group > .agent-activity {
   margin: 0;
   font-size: var(--mc-font-size-chat-activity);
+}
+
+.run-command-activity__details--group > .agent-activity > summary {
+  min-height: 26px;
 }
 
 .run-command-activity__details--group > .agent-activity > summary .agent-activity__label {
