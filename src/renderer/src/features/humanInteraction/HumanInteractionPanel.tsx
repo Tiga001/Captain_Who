@@ -1,5 +1,11 @@
 import type { HumanInteractionAnswer, HumanInteractionRequestSnapshot } from '@mycopilot/protocol'
-import { ChevronLeft, ChevronRight, Minus, PencilLine } from 'lucide-react'
+import {
+  ChevronLeft,
+  ChevronRight,
+  MessageCircleQuestionMark,
+  Minus,
+  PencilLine
+} from 'lucide-react'
 import { useId } from 'react'
 import { useFrontendConfig } from '../../config/FrontendConfigProvider'
 import './HumanInteractionPanel.css'
@@ -48,14 +54,33 @@ export function HumanInteractionPanel({
 
   const answer = answers[question.id]
   const editingDisabled = isSubmitting || isDraftLocked
-  const complete = request.questions.every((item) => {
+  const answered = request.questions.map((item) => {
     const value = answers[item.id]
     if (!value || value.questionId !== item.id) return false
     if (value.kind === 'text') return value.text.trim().length > 0
     if (value.kind === 'option') return item.options?.some((option) => option.id === value.optionId)
     return value.kind === 'skipped'
   })
-  const submitDisabled = isSubmitting || !canSubmit || !complete
+  const complete = answered.every(Boolean)
+  const primaryDisabled = complete
+    ? isSubmitting || !canSubmit
+    : editingDisabled || !answered[currentPage]
+
+  const handlePrimaryAction = () => {
+    if (primaryDisabled) return
+    if (complete) {
+      onSubmit()
+      return
+    }
+    // Find the next unanswered question, including one skipped over with the top arrows.
+    for (let offset = 1; offset < total; offset += 1) {
+      const nextPage = (currentPage + offset) % total
+      if (!answered[nextPage]) {
+        onPageChange(nextPage)
+        return
+      }
+    }
+  }
 
   return (
     <section
@@ -66,7 +91,7 @@ export function HumanInteractionPanel({
       data-request-id={request.requestId}
       onKeyDown={(event) => {
         // Do not let composer/global bubble handlers interpret Enter, IME confirmation or Escape
-        // as send, skip, approval or Stop. A textarea's normal Enter still inserts a newline.
+        // as send, skip, approval or Stop.
         event.stopPropagation()
         if (event.key === 'Escape') event.preventDefault()
       }}
@@ -74,7 +99,10 @@ export function HumanInteractionPanel({
       role="dialog"
     >
       <header className="human-interaction-panel__header">
-        <h2 id={titleId}>{t('humanInteraction.panel.title')}</h2>
+        <h2 id={titleId}>
+          <MessageCircleQuestionMark aria-hidden="true" />
+          {t('humanInteraction.panel.title')}
+        </h2>
         <nav
           aria-label={t('humanInteraction.panel.title')}
           className="human-interaction-panel__pages"
@@ -149,23 +177,28 @@ export function HumanInteractionPanel({
             <PencilLine aria-hidden="true" />
             {t('humanInteraction.panel.customAnswer')}
           </label>
-          <textarea
+          <input
             aria-describedby={questionId}
             disabled={editingDisabled}
             id={textId}
             onChange={(event) =>
               onAnswerChange({ kind: 'text', questionId: question.id, text: event.target.value })
             }
+            onKeyDown={(event) => {
+              if (
+                event.key === 'Enter' &&
+                !event.nativeEvent.isComposing &&
+                event.nativeEvent.keyCode !== 229
+              ) {
+                // A single-line input must not implicitly submit an enclosing form.
+                event.preventDefault()
+              }
+            }}
             placeholder={t('humanInteraction.panel.customPlaceholder')}
-            rows={2}
+            type="text"
             value={answer?.kind === 'text' ? answer.text : ''}
           />
         </div>
-        {answer?.kind === 'skipped' ? (
-          <p className="human-interaction-panel__hint" role="status">
-            {t('humanInteraction.panel.skipped')}
-          </p>
-        ) : null}
       </div>
 
       {request.mode === 'async' && sourceRunEnded ? (
@@ -196,18 +229,20 @@ export function HumanInteractionPanel({
             onClick={() => onAnswerChange({ kind: 'skipped', questionId: question.id })}
             type="button"
           >
-            {t('humanInteraction.panel.skip')}
+            {t(
+              answer?.kind === 'skipped'
+                ? 'humanInteraction.panel.skipped'
+                : 'humanInteraction.panel.skip'
+            )}
           </button>
           <button
             className="human-interaction-panel__submit"
-            data-state={submitDisabled ? 'disabled' : 'ready'}
-            disabled={submitDisabled}
-            onClick={() => {
-              if (!submitDisabled) onSubmit()
-            }}
+            data-state={primaryDisabled ? 'disabled' : 'ready'}
+            disabled={primaryDisabled}
+            onClick={handlePrimaryAction}
             type="button"
           >
-            {t('humanInteraction.panel.submit')}
+            {t(complete ? 'humanInteraction.panel.submit' : 'humanInteraction.panel.next')}
           </button>
         </div>
       </footer>

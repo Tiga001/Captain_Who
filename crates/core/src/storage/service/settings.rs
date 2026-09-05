@@ -218,6 +218,15 @@ pub(super) fn validate_skill_enablement_id(skill_id: &str) -> Result<(), String>
     Ok(())
 }
 
+fn validate_independent_skill_enablement(skill_id: &str) -> Result<(), String> {
+    if skill_id == crate::skills::IMAGE_GENERATION_SKILL_ID {
+        return Err(
+            "The image-generation Skill is controlled by its provider configuration.".into(),
+        );
+    }
+    Ok(())
+}
+
 impl StorageService {
     pub fn load_image_generation_profile(
         &self,
@@ -1215,32 +1224,19 @@ impl StorageService {
 
     /// Loads effective enablement for a batch of complete, opaque Skill ids.
     ///
-    /// An absent override is intentionally enabled by default. The returned
-    /// map contains one entry for every distinct requested id.
+    /// An absent override is enabled by default, except the bundled image Skill,
+    /// whose sole authority is its provider profile (disabled when absent).
+    /// The returned map contains one entry for every distinct requested id.
     pub fn load_skill_enablement(
         &self,
         skill_ids: &[String],
     ) -> Result<BTreeMap<String, bool>, String> {
-        for skill_id in skill_ids {
-            validate_skill_enablement_id(skill_id)?;
-        }
-        let mut enablement = skill_ids
-            .iter()
-            .cloned()
-            .map(|skill_id| (skill_id, true))
-            .collect::<BTreeMap<_, _>>();
-        if enablement.is_empty() {
-            return Ok(enablement);
-        }
-
-        let mut connection = self.state.connection()?;
-        let overrides = skill_enablement_repository::load_skill_enablement_overrides(
-            &mut connection,
-            skill_ids,
-        )
-        .map_err(storage_error)?;
-        enablement.extend(overrides);
-        Ok(enablement)
+        self.load_skill_enablement_states(skill_ids).map(|states| {
+            states
+                .into_iter()
+                .map(|(id, state)| (id, state.enabled))
+                .collect()
+        })
     }
 
     /// Loads effective enablement together with its monotonic mutation
@@ -1264,6 +1260,7 @@ impl StorageService {
         enabled: bool,
     ) -> Result<bool, String> {
         validate_skill_enablement_id(skill_id)?;
+        validate_independent_skill_enablement(skill_id)?;
         let connection = self.state.connection()?;
         skill_enablement_repository::set_skill_enablement_override(&connection, skill_id, enabled)
             .map_err(storage_error)
@@ -1280,6 +1277,7 @@ impl StorageService {
         target: bool,
     ) -> Result<skill_enablement_repository::SkillEnablementCompareAndSetOutcome, String> {
         validate_skill_enablement_id(skill_id)?;
+        validate_independent_skill_enablement(skill_id)?;
         let mut connection = self.state.connection()?;
         skill_enablement_repository::compare_and_set_skill_enablement(
             &mut connection,
@@ -1294,6 +1292,7 @@ impl StorageService {
     /// Removes an explicit override, restoring the default enabled state.
     pub fn delete_skill_enablement_override(&self, skill_id: &str) -> Result<bool, String> {
         validate_skill_enablement_id(skill_id)?;
+        validate_independent_skill_enablement(skill_id)?;
         let connection = self.state.connection()?;
         skill_enablement_repository::delete_skill_enablement_override(&connection, skill_id)
             .map_err(storage_error)

@@ -698,7 +698,8 @@ fn source_conversation() -> ChatConversationRecord {
     ]
     .into_iter()
     .map(|(id, role, created_at)| ChatMessageRecord {
-        id: id.to_string(),
+                human_interaction_response: None,
+id: id.to_string(),
         role: role.to_string(),
         content: format!("content {id}"),
         created_at,

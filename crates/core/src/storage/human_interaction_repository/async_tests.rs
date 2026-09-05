@@ -74,6 +74,7 @@ fn new_turn(
     conversation
         .messages
         .push(crate::storage::models::ChatMessageRecord {
+            human_interaction_response: None,
             id: user.into(),
             role: "user".into(),
             content: if corrupt {
@@ -90,6 +91,7 @@ fn new_turn(
     conversation
         .messages
         .push(crate::storage::models::ChatMessageRecord {
+            human_interaction_response: None,
             id: assistant.into(),
             role: "assistant".into(),
             content: String::new(),
@@ -305,10 +307,41 @@ fn async_new_turn_atomic_ownership_rollback_and_safe_prestart_recovery() {
         binding
     );
     assert_eq!(count(&fixture.connect(), "messages"), 3);
+    assert_eq!(
+        count(&fixture.connect(), "human_interaction_message_projections"),
+        1
+    );
+    let loaded = chat_repository::get_conversation(&fixture.connect(), "chat")
+        .unwrap()
+        .unwrap();
+    let answer = loaded
+        .messages
+        .iter()
+        .find(|message| message.id == "answer-user")
+        .unwrap();
+    let display = human_interaction_answer_display(&request).unwrap();
+    assert_eq!(answer.human_interaction_response.as_ref(), Some(&display));
+    let incoming: crate::storage::models::ChatMessageRecord =
+        serde_json::from_value(serde_json::to_value(answer).unwrap()).unwrap();
+    assert!(
+        incoming.human_interaction_response.is_none(),
+        "Renderer input cannot certify its own answer proof"
+    );
+    assert!(fixture
+        .connect()
+        .execute(
+            "UPDATE messages SET content='different answer' WHERE id='answer-user'",
+            []
+        )
+        .is_err());
     reconcile_async(&mut fixture.connect(), 35).unwrap();
     let pending = list_pending_async(&fixture.connect()).unwrap().remove(0);
     assert_eq!(pending.user_message_id.as_deref(), Some("answer-user"));
     assert_eq!(count(&fixture.connect(), "messages"), 2);
+    assert_eq!(
+        count(&fixture.connect(), "human_interaction_message_projections"),
+        0
+    );
     assert_eq!(
         conversation_trace_repository::get_trace_for_message(&fixture.connect(), "next-assistant")
             .unwrap()
@@ -477,4 +510,95 @@ fn async_submit_stop_race_records_the_commit_order_without_reopening() {
         assert_eq!(count(&fixture.connect(), "human_interaction_responses"), 1);
         assert_eq!(count(&fixture.connect(), "agent_run_guidances"), 0);
     }
+}
+
+#[test]
+fn async_answer_fork_copies_verified_history_without_live_questions_permissions_or_usage() {
+    let fixture = Fixture::new();
+    let request = accepted(&fixture, "answered-call");
+    let open = fixture.request(HumanInteractionMode::Async, "still-open-call");
+    finish_source(&fixture);
+    let binding = new_turn(
+        &fixture,
+        &request,
+        "answer-run",
+        "answer-assistant",
+        "answer-user",
+        false,
+    )
+    .unwrap();
+    assert!(start_async_turn(&mut fixture.connect(), &binding, 31).unwrap());
+    let mut connection = fixture.connect();
+    connection.execute("INSERT INTO model_request_observations(id,schema_version,run_id,conversation_id,assistant_message_id,request_index,purpose,model,api_style,status,observation_json,started_at,completed_at) VALUES('answer-observation',3,'answer-run','chat','answer-assistant',1,'agent_loop','model','open_ai_compatible','completed','{}',31,33)",[]).unwrap();
+    connection
+        .execute(
+            "UPDATE conversation_turn_traces SET schema_version=?1",
+            [crate::CONVERSATION_TURN_TRACE_SCHEMA_VERSION],
+        )
+        .unwrap();
+    let mut trace = empty_trace("answer-run", "answer-assistant");
+    trace.terminal_status = crate::ConversationTurnTraceTerminalStatus::Completed;
+    conversation_trace_repository::commit_trace_in_connection(&connection, &trace, 30, 34).unwrap();
+    connection.execute("INSERT INTO agent_usage_records(id,conversation_id,message_id,run_id,model_id,model_name,created_at,input_tokens,total_tokens,billable_request_count) VALUES('answer-usage','chat','answer-assistant','answer-run','model','model',30,11,11,1)",[]).unwrap();
+    assert!(count(&connection, "agent_effective_permission_snapshots") > 0);
+    let plan = crate::storage::conversation_fork_repository::build_fork_plan_at_point(
+        &connection,
+        "fork-actual-answer",
+        "chat",
+        &crate::storage::models::ConversationForkPoint::AssistantReply {
+            assistant_message_id: "answer-assistant".into(),
+        },
+        40,
+    )
+    .unwrap();
+    crate::storage::conversation_fork_repository::commit_fork_plan(&mut connection, &plan).unwrap();
+    let copied = chat_repository::get_conversation(&connection, &plan.target.id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        copied
+            .messages
+            .iter()
+            .filter(|message| message.human_interaction_response.is_some())
+            .count(),
+        1
+    );
+    assert_eq!(
+        copied
+            .messages
+            .iter()
+            .find_map(|message| message.human_interaction_response.as_ref()),
+        Some(&human_interaction_answer_display(&request).unwrap())
+    );
+    for table in [
+        "human_interaction_requests",
+        "agent_effective_permission_snapshots",
+        "agent_usage_records",
+    ] {
+        let sql = format!("SELECT COUNT(*) FROM {table} WHERE conversation_id=?1");
+        assert_eq!(
+            connection
+                .query_row(&sql, [&plan.target.id], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            0,
+            "{table}"
+        );
+    }
+    assert_eq!(count(&connection, "human_interaction_responses"), 1);
+    assert_eq!(count(&connection, "human_interaction_deliveries"), 1);
+    assert_eq!(count(&connection, "human_interaction_async_bindings"), 1);
+    assert_eq!(
+        reload(&fixture, &open).status,
+        HumanInteractionRequestStatus::Open
+    );
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT SUM(billable_request_count) FROM agent_usage_records",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+        1
+    );
 }

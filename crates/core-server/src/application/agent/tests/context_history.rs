@@ -375,6 +375,7 @@ fn next_turn_loads_backend_trace_and_never_parses_agent_run_json() {
             title: "Trace history".to_string(),
             messages: vec![
                 ChatMessageRecord {
+                    human_interaction_response: None,
                     id: "user-history".to_string(),
                     role: "user".to_string(),
                     content: "Create the file".to_string(),
@@ -385,6 +386,7 @@ fn next_turn_loads_backend_trace_and_never_parses_agent_run_json() {
                     ui_state_json: None,
                 },
                 ChatMessageRecord {
+                    human_interaction_response: None,
                     id: "assistant-history".to_string(),
                     role: "assistant".to_string(),
                     content: "Created src/history.rs.".to_string(),
@@ -472,6 +474,7 @@ fn next_turn_loads_active_summary_and_only_the_uncovered_tail() {
             title: "Summary history".to_string(),
             messages: vec![
                 ChatMessageRecord {
+                    human_interaction_response: None,
                     id: "user-old".to_string(),
                     role: "user".to_string(),
                     content: "Old request".to_string(),
@@ -482,6 +485,7 @@ fn next_turn_loads_active_summary_and_only_the_uncovered_tail() {
                     ui_state_json: None,
                 },
                 ChatMessageRecord {
+                    human_interaction_response: None,
                     id: "assistant-old".to_string(),
                     role: "assistant".to_string(),
                     content: "Old answer".to_string(),
@@ -563,6 +567,7 @@ fn terminal_assistant_without_trace_is_rejected_and_current_failed_trace_is_acce
         title: "Legacy".to_string(),
         messages: vec![
             ChatMessageRecord {
+                human_interaction_response: None,
                 id: "assistant-legacy".to_string(),
                 role: "assistant".to_string(),
                 content: "Legacy final answer".to_string(),
@@ -573,6 +578,7 @@ fn terminal_assistant_without_trace_is_rejected_and_current_failed_trace_is_acce
                 ui_state_json: None,
             },
             ChatMessageRecord {
+                human_interaction_response: None,
                 id: "assistant-error".to_string(),
                 role: "assistant".to_string(),
                 content: "Legacy error".to_string(),
@@ -620,6 +626,7 @@ fn next_turn_keeps_committed_prefix_from_an_interrupted_pending_run() {
         model_id: None,
         title: "Interrupted".to_string(),
         messages: vec![ChatMessageRecord {
+            human_interaction_response: None,
             id: "assistant-interrupted".to_string(),
             role: "assistant".to_string(),
             content: "duplicated pending narration".to_string(),
@@ -698,6 +705,7 @@ fn next_turn_carries_the_uncompressed_model_projection_beside_the_durable_trace(
         model_id: None,
         title: "Exact history".to_string(),
         messages: vec![ChatMessageRecord {
+            human_interaction_response: None,
             id: "assistant-exact-history".to_string(),
             role: "assistant".to_string(),
             content: "Final answer".to_string(),
@@ -757,6 +765,7 @@ fn compaction_projection_hides_covered_prefix_but_keeps_raw_conversation_intact(
         title: "Compacted".to_string(),
         messages: vec![
             ChatMessageRecord {
+                human_interaction_response: None,
                 id: "user-old".to_string(),
                 role: "user".to_string(),
                 content: "old request".to_string(),
@@ -767,6 +776,7 @@ fn compaction_projection_hides_covered_prefix_but_keeps_raw_conversation_intact(
                 ui_state_json: None,
             },
             ChatMessageRecord {
+                human_interaction_response: None,
                 id: "assistant-old".to_string(),
                 role: "assistant".to_string(),
                 content: "old answer".to_string(),
@@ -777,6 +787,7 @@ fn compaction_projection_hides_covered_prefix_but_keeps_raw_conversation_intact(
                 ui_state_json: None,
             },
             ChatMessageRecord {
+                human_interaction_response: None,
                 id: "user-tail".to_string(),
                 role: "user".to_string(),
                 content: "new request".to_string(),
@@ -856,6 +867,7 @@ fn mid_run_projection_keeps_latest_user_exact_and_only_the_uncovered_trace_tail(
         title: "Mid run".to_string(),
         messages: vec![
             ChatMessageRecord {
+                human_interaction_response: None,
                 id: "user-current".to_string(),
                 role: "user".to_string(),
                 content: "LATEST_USER_MARKER".to_string(),
@@ -866,6 +878,7 @@ fn mid_run_projection_keeps_latest_user_exact_and_only_the_uncovered_trace_tail(
                 ui_state_json: None,
             },
             ChatMessageRecord {
+                human_interaction_response: None,
                 id: "assistant-current".to_string(),
                 role: "assistant".to_string(),
                 content: String::new(),
@@ -991,6 +1004,7 @@ fn compaction_projection_drops_command_session_audit_that_references_the_covered
         title: "Command audit tail".to_string(),
         messages: vec![
             ChatMessageRecord {
+                human_interaction_response: None,
                 id: "user-command-audit-tail".to_string(),
                 role: "user".to_string(),
                 content: "Run the command.".to_string(),
@@ -1001,6 +1015,7 @@ fn compaction_projection_drops_command_session_audit_that_references_the_covered
                 ui_state_json: None,
             },
             ChatMessageRecord {
+                human_interaction_response: None,
                 id: "assistant-command-audit-tail".to_string(),
                 role: "assistant".to_string(),
                 content: "The command completed.".to_string(),
@@ -1281,6 +1296,7 @@ fn context_window_snapshot_is_zero_until_first_user_message_then_counts_complete
             model_id: Some("model-1".to_string()),
             title: "Started window".to_string(),
             messages: vec![ChatMessageRecord {
+                human_interaction_response: None,
                 id: "user-started-window".to_string(),
                 role: "user".to_string(),
                 content: "你好".to_string(),
@@ -1344,6 +1360,7 @@ fn cached_context_preview_measures_skill_without_polluting_durable_revision() {
             model_id: Some("model-1".to_string()),
             title: "Preview".to_string(),
             messages: vec![ChatMessageRecord {
+                human_interaction_response: None,
                 id: "user-preview-skill".to_string(),
                 role: "user".to_string(),
                 content: "Review the repository.".to_string(),
@@ -1408,6 +1425,7 @@ fn committed_test_summary_rebuilds_the_shared_durable_snapshot() {
             title: "Capacity summary".to_string(),
             messages: vec![
                 ChatMessageRecord {
+                    human_interaction_response: None,
                     id: "user-long".to_string(),
                     role: "user".to_string(),
                     content: "u".repeat(12_000),
@@ -1418,6 +1436,7 @@ fn committed_test_summary_rebuilds_the_shared_durable_snapshot() {
                     ui_state_json: None,
                 },
                 ChatMessageRecord {
+                    human_interaction_response: None,
                     id: "assistant-long".to_string(),
                     role: "assistant".to_string(),
                     content: "a".repeat(12_000),
@@ -1518,6 +1537,7 @@ fn five_hundred_turn_context_compaction_release_profile() {
         let user_created_at = i64::try_from(turn * 2 + 1).unwrap();
         let assistant_created_at = user_created_at + 1;
         messages.push(ChatMessageRecord {
+            human_interaction_response: None,
             id: format!("user-profile-{turn:03}"),
             role: "user".to_string(),
             content: format!("turn {turn:03} request {}", "u".repeat(MESSAGE_BODY_BYTES)),
@@ -1528,6 +1548,7 @@ fn five_hundred_turn_context_compaction_release_profile() {
             ui_state_json: None,
         });
         messages.push(ChatMessageRecord {
+            human_interaction_response: None,
             id: format!("assistant-profile-{turn:03}"),
             role: "assistant".to_string(),
             content: format!("turn {turn:03} response {}", "a".repeat(MESSAGE_BODY_BYTES)),

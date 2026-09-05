@@ -1,6 +1,174 @@
 use super::*;
 
 #[tokio::test]
+async fn image_skill_discloses_only_catalog_metadata_until_model_activation() {
+    use crate::image_generation::{
+        ImageArtifactStoreConfig, ImageGenerationAdapterRegistry,
+        ImageGenerationConfigurationService, ImageGenerationExecutionLimits,
+        ImageGenerationExecutionService, InMemoryCredentialStore,
+        ManagedImageGenerationArtifactStore, SmartMlSeedreamProviderFactory,
+    };
+    use crate::skills::{AgentSkillDiscoverySnapshot, SkillsService};
+    use crate::storage::service::StorageService;
+    use tempfile::tempdir;
+    use tokio::net::TcpListener;
+
+    let skills = SkillsService::new().with_bundled_source().unwrap();
+    let descriptor = skills
+        .list()
+        .unwrap()
+        .skills()
+        .iter()
+        .find(|skill| skill.id().as_str() == "bundled:application:image-generation")
+        .unwrap()
+        .clone();
+    let activated = skills.activate(&[descriptor.selection()]).unwrap();
+    let instructions = activated.skills()[0].instructions().to_string();
+    let discovery = AgentSkillDiscoverySnapshot::from_descriptors(
+        "image-skill-disclosure-test",
+        [&descriptor],
+        Some(128_000),
+        8,
+        512 * 1024,
+    )
+    .unwrap();
+
+    // A real execution service keeps image_generation in the private registry, even when its
+    // Skill is absent. No image-provider call is made; only the language-model API is scripted.
+    let fixture = tempdir().unwrap();
+    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let mut adapters = ImageGenerationAdapterRegistry::new();
+    adapters
+        .register(Arc::new(SmartMlSeedreamProviderFactory::default()))
+        .unwrap();
+    let execution = Arc::new(
+        ImageGenerationExecutionService::new(
+            Arc::new(ImageGenerationConfigurationService::new(
+                Arc::clone(&storage),
+                Arc::new(InMemoryCredentialStore::default()),
+            )),
+            Arc::new(adapters),
+            Arc::new(
+                ManagedImageGenerationArtifactStore::new(
+                    fixture.path().join("artifacts"),
+                    ImageArtifactStoreConfig::default(),
+                )
+                .unwrap(),
+            ),
+            storage,
+            ImageGenerationExecutionLimits::default(),
+        )
+        .unwrap(),
+    );
+
+    for enabled in [false, true] {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let activation_ref = discovery.skills[0].activation_ref.clone();
+        let server = tokio::spawn(async move {
+            let mut requests = Vec::new();
+            for index in 0..if enabled { 2 } else { 1 } {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                requests.push(read_runtime_test_json_request(&mut stream).await);
+                let message = if enabled && index == 0 {
+                    json!({
+                        "role": "assistant", "content": null,
+                        "tool_calls": [{
+                            "id": "activate-image-skill", "type": "function",
+                            "function": {
+                                "name": "skills_activate",
+                                "arguments": json!({
+                                    "skillRef": activation_ref,
+                                    "reason": "Load the requested drawing workflow"
+                                }).to_string()
+                            }
+                        }]
+                    })
+                } else {
+                    json!({"role": "assistant", "content": "Ready."})
+                };
+                write_runtime_test_json_response(&mut stream, json!({
+                    "choices": [{
+                        "message": message,
+                        "finish_reason": if enabled && index == 0 { "tool_calls" } else { "stop" }
+                    }]
+                })).await;
+            }
+            requests
+        });
+        let entry = discovery.skills[0].clone();
+        let skill_instructions = instructions.clone();
+        let resolver: AgentSkillActivationResolver = Arc::new(move |selection| {
+            assert_eq!(selection.skill_id().as_str(), entry.id);
+            assert_eq!(selection.expected_revision().as_str(), entry.revision);
+            let resources = crate::skills::memory_resource_session_for_test(
+                selection.skill_id().clone(),
+                selection.expected_revision().clone(),
+                selection.skill_id().source_id().clone(),
+                Vec::new(),
+            )
+            .unwrap();
+            Ok(AgentResolvedSkillActivation {
+                skill: AgentActivatedSkill {
+                    id: entry.id.clone(),
+                    name: entry.name.clone(),
+                    revision: entry.revision.clone(),
+                    source: "bundled:application".to_string(),
+                    instructions: skill_instructions.clone(),
+                    source_bytes: skill_instructions.len() as u64,
+                    resources: None,
+                },
+                resources: Arc::new(resources),
+            })
+        });
+        let mut input = conversation_context_input(vec![message("user", "Please draw a tree")]);
+        input.api_url = format!("http://{address}/v1/chat/completions");
+        input.api_token = "test-token".to_string();
+        input.stream = Some(false);
+        input.skill_discovery = enabled.then(|| discovery.clone());
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            AgentRuntime::default().send_chat_with_events_and_cancellation(
+                input,
+                Some(format!("image-disclosure-{enabled}")),
+                None,
+                AgentCancellationToken::new(),
+                Some(
+                    AgentRuntimeHostServices::new()
+                        .with_skill_activation_resolver(resolver)
+                        .with_skill_resources(
+                            Arc::new(crate::skills::SkillResourceSession::empty()),
+                        )
+                        .with_image_generation_execution(Arc::clone(&execution)),
+                ),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let requests = server.await.unwrap();
+        let first = serde_json::to_string(&requests[0]).unwrap();
+        assert!(!first.contains("image_generation"));
+        assert!(!first.contains("## Product watermark"));
+        assert!(!first.contains("图片生成"));
+        assert!(!first.contains("visualInputDelivery"));
+        assert_eq!(first.contains("image-generation"), enabled);
+        if enabled {
+            assert!(first.contains(descriptor.description()));
+            let second = serde_json::to_string(&requests[1]).unwrap();
+            assert!(second.contains("## Product watermark"));
+            assert!(second.contains("visualInputDelivery"));
+            assert!(requests[1]["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|tool| tool["function"]["name"] == "image_generation"));
+            assert_eq!(requests[0]["messages"][0], requests[1]["messages"][0]);
+        }
+    }
+}
+
+#[tokio::test]
 async fn model_activation_preserves_exposed_siblings_and_discloses_new_tools_next_request() {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -399,6 +567,7 @@ async fn run_skill_activation_approval_resume_case(case: SkillApprovalResumeProv
             model_id: Some(model_id.clone()),
             title: format!("Skill Approval {label}"),
             messages: vec![ChatMessageRecord {
+                human_interaction_response: None,
                 id: assistant_message_id.clone(),
                 role: "assistant".to_string(),
                 content: String::new(),
@@ -837,6 +1006,7 @@ async fn deepseek_grouped_activation_failure_settles_exposed_sibling_without_bou
             model_id: Some(MODEL_ID.to_string()),
             title: "DeepSeek Skill co-call".to_string(),
             messages: vec![ChatMessageRecord {
+                human_interaction_response: None,
                 id: ASSISTANT_MESSAGE_ID.to_string(),
                 role: "assistant".to_string(),
                 content: String::new(),

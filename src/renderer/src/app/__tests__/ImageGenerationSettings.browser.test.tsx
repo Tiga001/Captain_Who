@@ -10,13 +10,11 @@ import { render } from 'vitest-browser-react'
 
 const service = vi.hoisted(() => ({
   getConfiguration: vi.fn(),
-  setEnabled: vi.fn(),
   updateConfiguration: vi.fn()
 }))
 
 vi.mock('../../features/imageGeneration/configuration/imageGenerationClient', () => ({
   getImageGenerationConfiguration: service.getConfiguration,
-  setImageGenerationEnabled: service.setEnabled,
   updateImageGenerationConfiguration: service.updateConfiguration
 }))
 
@@ -95,15 +93,6 @@ beforeEach(() => {
       defaults: input.defaults,
       credentialStatus: input.credentialMutation.type === 'clear' ? 'missing' : 'configured',
       revision: 'revision-2'
-    })
-  }))
-  service.setEnabled.mockImplementation(async (input) => ({
-    schemaVersion: IMAGE_GENERATION_CONFIGURATION_SCHEMA_VERSION,
-    outcome: 'updated',
-    configuration: configuration({
-      enabled: input.enabled,
-      readiness: input.enabled ? 'readyUnverified' : 'disabled',
-      revision: 'revision-3'
     })
   }))
 })
@@ -257,42 +246,47 @@ describe('ImageGenerationSettings', () => {
     })
   })
 
-  it('saves dirty fields before enabling and uses the returned revision serially', async () => {
-    const updated = configuration({ endpointUrl: 'https://new.example/v1', revision: 'revision-2' })
-    service.updateConfiguration.mockResolvedValueOnce({
-      schemaVersion: IMAGE_GENERATION_CONFIGURATION_SCHEMA_VERSION,
-      outcome: 'updated',
-      configuration: updated
-    })
-    service.setEnabled.mockResolvedValueOnce({
-      schemaVersion: IMAGE_GENERATION_CONFIGURATION_SCHEMA_VERSION,
-      outcome: 'updated',
-      configuration: configuration({
-        ...updated,
-        enabled: true,
-        readiness: 'readyUnverified',
-        revision: 'revision-3'
-      })
-    })
-    const screen = await render(<ImageGenerationSettings />)
-    await screen
-      .getByRole('textbox', { name: 'configuration.imageGeneration.endpointUrl' })
-      .fill('https://new.example/v1')
-    await screen.getByRole('switch', { name: 'configuration.imageGeneration.enabled' }).click()
+  it.each([false, true])(
+    'saves provider fields without an enablement control when enabled=%s',
+    async (enabled) => {
+      service.getConfiguration.mockResolvedValueOnce(
+        configurationOutput(
+          configuration({
+            enabled,
+            readiness: enabled ? 'readyUnverified' : 'disabled'
+          })
+        )
+      )
+      const screen = await render(<ImageGenerationSettings />)
+      await screen
+        .getByRole('textbox', { name: 'configuration.imageGeneration.endpointUrl' })
+        .fill('https://new.example/v1')
+      await screen
+        .getByRole('textbox', { name: 'configuration.imageGeneration.modelId' })
+        .fill('new-model')
+      await screen.getByRole('switch', { name: 'configuration.imageGeneration.watermark' }).click()
+      expect(
+        screen.getByRole('switch', { name: 'configuration.imageGeneration.enabled' }).elements()
+      ).toHaveLength(0)
+      expect(
+        screen.container.querySelector('[data-setting-id="configuration.image.enabled"]')
+      ).toBeNull()
+      await screen.getByRole('button', { name: 'configuration.imageGeneration.save' }).click()
 
-    await vi.waitFor(() => expect(service.setEnabled).toHaveBeenCalledTimes(1))
-    expect(service.updateConfiguration).toHaveBeenCalledTimes(1)
-    expect(service.setEnabled).toHaveBeenCalledWith({
-      schemaVersion: IMAGE_GENERATION_CONFIGURATION_SCHEMA_VERSION,
-      expectedRevision: 'revision-2',
-      enabled: true
-    })
-    expect(service.updateConfiguration.mock.invocationCallOrder[0]).toBeLessThan(
-      service.setEnabled.mock.invocationCallOrder[0]
-    )
-    expect(screen.container.textContent).toContain('configuration.credential.configured')
-    expect(screen.container.textContent).not.toContain('existing-api-key')
-  })
+      await vi.waitFor(() => expect(service.updateConfiguration).toHaveBeenCalledTimes(1))
+      expect(service.updateConfiguration).toHaveBeenCalledWith({
+        schemaVersion: IMAGE_GENERATION_CONFIGURATION_SCHEMA_VERSION,
+        expectedRevision: 'revision-1',
+        adapterId: 'smartmlSeedream',
+        endpointUrl: 'https://new.example/v1',
+        modelId: 'new-model',
+        capabilities: { textToImage: true, imageToImage: false },
+        defaults: { sizePreset: '2K', watermark: true },
+        credentialMutation: { type: 'keep' }
+      })
+      expect(screen.container.textContent).toContain('configuration.credential.configured')
+    }
+  )
 
   it.each([
     ['revisionConflict', false],

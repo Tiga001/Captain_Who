@@ -1,3 +1,9 @@
+import { renderSettingsNodes, settingLabel, settingDescription } from '../settingsDefinition'
+import {
+  personalizationSettingsNodes,
+  WORK_MODE_OPTIONS,
+  TONE_OPTIONS
+} from './PersonalizationSettingsPage.definition'
 import { useEffect, useMemo, useState } from 'react'
 import { Check, ChevronDown, MessageCircle, Terminal } from 'lucide-react'
 import { useFrontendConfig } from '../../../config/FrontendConfigProvider'
@@ -9,48 +15,6 @@ import {
 import type { AgentPromptPreferencesSnapshot } from '../../storage/storageClient'
 import { HumanInteractionSettingsSection } from './HumanInteractionSettingsSection'
 import './PersonalizationSettingsPage.css'
-
-type PromptWorkMode = AgentPromptPreferencesSnapshot['workMode']
-type PromptTone = AgentPromptPreferencesSnapshot['tone']
-
-const WORK_MODE_OPTIONS: Array<{
-  value: PromptWorkMode
-  titleKey: 'personalization.workModeCoding' | 'personalization.workModeGeneral'
-  descriptionKey:
-    'personalization.workModeCodingDescription' | 'personalization.workModeGeneralDescription'
-  icon: typeof Terminal
-}> = [
-  {
-    value: 'coding',
-    titleKey: 'personalization.workModeCoding',
-    descriptionKey: 'personalization.workModeCodingDescription',
-    icon: Terminal
-  },
-  {
-    value: 'general',
-    titleKey: 'personalization.workModeGeneral',
-    descriptionKey: 'personalization.workModeGeneralDescription',
-    icon: MessageCircle
-  }
-]
-
-const TONE_OPTIONS: Array<{
-  value: PromptTone
-  titleKey: 'personalization.toneFriendly' | 'personalization.tonePragmatic'
-  descriptionKey:
-    'personalization.toneFriendlyDescription' | 'personalization.tonePragmaticDescription'
-}> = [
-  {
-    value: 'friendly',
-    titleKey: 'personalization.toneFriendly',
-    descriptionKey: 'personalization.toneFriendlyDescription'
-  },
-  {
-    value: 'pragmatic',
-    titleKey: 'personalization.tonePragmatic',
-    descriptionKey: 'personalization.tonePragmaticDescription'
-  }
-]
 
 function getComparablePreferences(preferences: AgentPromptPreferencesSnapshot) {
   return {
@@ -137,125 +101,140 @@ export function PersonalizationSettingsPage() {
     <article className="settings-list-page personalization-settings-page">
       <h1>{t('settings.page.personalization')}</h1>
 
-      <section
-        className="personalization-work-mode"
-        aria-labelledby="personalization-work-mode-heading"
-      >
-        <div className="personalization-section-heading">
-          <h2 id="personalization-work-mode-heading">{t('personalization.workMode')}</h2>
-          <p>{t('personalization.workModeDescription')}</p>
-        </div>
-
-        <div className="personalization-work-mode__grid">
-          {WORK_MODE_OPTIONS.map((option) => {
-            const Icon = option.icon
-            const isSelected = preferences.workMode === option.value
-
+      {renderSettingsNodes(personalizationSettingsNodes, (node) => {
+        switch (node.id) {
+          case 'personalization.workMode':
             return (
-              <button
-                className="personalization-work-mode-card"
-                data-selected={isSelected || undefined}
-                type="button"
-                key={option.value}
-                onClick={() => updatePreferences({ workMode: option.value })}
+              <section
+                className="personalization-work-mode"
+                aria-labelledby="personalization-work-mode-heading"
               >
-                <Icon aria-hidden="true" />
-                <span className="personalization-work-mode-card__text">
-                  <strong>{t(option.titleKey)}</strong>
-                  <span>{t(option.descriptionKey)}</span>
-                </span>
-                <span
-                  className="personalization-radio"
-                  data-selected={isSelected || undefined}
-                  aria-hidden="true"
-                />
-              </button>
-            )
-          })}
-        </div>
-      </section>
+                <div className="personalization-section-heading">
+                  <h2 id="personalization-work-mode-heading">{settingLabel(node, t)}</h2>
+                  <p>{settingDescription(node, t)}</p>
+                </div>
 
-      <section
-        className="settings-list-section personalization-tone-section"
-        aria-labelledby="personalization-tone-heading"
-      >
-        <div className="settings-list personalization-tone-list">
-          <div className="settings-list-row personalization-tone-row">
-            <span className="settings-list-row__text">
-              <span className="settings-list-row__title" id="personalization-tone-heading">
-                {t('personalization.tone')}
-              </span>
-              <span className="settings-list-row__description">
-                {t('personalization.toneDescription')}
-              </span>
-            </span>
+                <div className="personalization-work-mode__grid">
+                  {WORK_MODE_OPTIONS.map((option) => {
+                    const Icon = option.value === 'coding' ? Terminal : MessageCircle
+                    const isSelected = preferences.workMode === option.value
 
-            <span className="settings-list-row__control personalization-tone-control">
-              <button
-                className="personalization-tone-button"
-                type="button"
-                aria-haspopup="listbox"
-                aria-expanded={isToneOpen}
-                onClick={() => setToneOpen((current) => !current)}
-              >
-                <span>{t(selectedTone.titleKey)}</span>
-                <ChevronDown aria-hidden="true" />
-              </button>
-
-              {isToneOpen && (
-                <div
-                  className="personalization-tone-menu"
-                  role="listbox"
-                  aria-label={t('personalization.tone')}
-                >
-                  {TONE_OPTIONS.map((option) => {
-                    const isSelected = preferences.tone === option.value
                     return (
                       <button
-                        className="personalization-tone-option"
+                        className="personalization-work-mode-card"
                         data-selected={isSelected || undefined}
                         type="button"
-                        role="option"
-                        aria-selected={isSelected}
                         key={option.value}
-                        onClick={() => {
-                          updatePreferences({ tone: option.value })
-                          setToneOpen(false)
-                        }}
+                        onClick={() => updatePreferences({ workMode: option.value })}
                       >
-                        <span>
+                        <Icon aria-hidden="true" />
+                        <span className="personalization-work-mode-card__text">
                           <strong>{t(option.titleKey)}</strong>
-                          <small>{t(option.descriptionKey)}</small>
+                          <span>{t(option.descriptionKey)}</span>
                         </span>
-                        {isSelected && <Check aria-hidden="true" />}
+                        <span
+                          className="personalization-radio"
+                          data-selected={isSelected || undefined}
+                          aria-hidden="true"
+                        />
                       </button>
                     )
                   })}
                 </div>
-              )}
-            </span>
-          </div>
-        </div>
-      </section>
+              </section>
+            )
+          case 'personalization.tone':
+            return (
+              <section
+                className="settings-list-section personalization-tone-section"
+                aria-labelledby="personalization-tone-heading"
+              >
+                <div className="settings-list personalization-tone-list">
+                  <div className="settings-list-row personalization-tone-row">
+                    <span className="settings-list-row__text">
+                      <span className="settings-list-row__title" id="personalization-tone-heading">
+                        {settingLabel(node, t)}
+                      </span>
+                      <span className="settings-list-row__description">
+                        {settingDescription(node, t)}
+                      </span>
+                    </span>
 
-      <HumanInteractionSettingsSection />
+                    <span className="settings-list-row__control personalization-tone-control">
+                      <button
+                        className="personalization-tone-button"
+                        type="button"
+                        aria-haspopup="listbox"
+                        aria-expanded={isToneOpen}
+                        onClick={() => setToneOpen((current) => !current)}
+                      >
+                        <span>{t(selectedTone.titleKey)}</span>
+                        <ChevronDown aria-hidden="true" />
+                      </button>
 
-      <section
-        className="personalization-custom-instructions"
-        aria-labelledby="personalization-custom-heading"
-      >
-        <div className="personalization-section-heading">
-          <h2 id="personalization-custom-heading">{t('personalization.customInstructions')}</h2>
-          <p>{t('personalization.customInstructionsDescription')}</p>
-        </div>
+                      {isToneOpen && (
+                        <div
+                          className="personalization-tone-menu"
+                          role="listbox"
+                          aria-label={settingLabel(node, t)}
+                        >
+                          {TONE_OPTIONS.map((option) => {
+                            const isSelected = preferences.tone === option.value
+                            return (
+                              <button
+                                className="personalization-tone-option"
+                                data-selected={isSelected || undefined}
+                                type="button"
+                                role="option"
+                                aria-selected={isSelected}
+                                key={option.value}
+                                onClick={() => {
+                                  updatePreferences({ tone: option.value })
+                                  setToneOpen(false)
+                                }}
+                              >
+                                <span>
+                                  <strong>{t(option.titleKey)}</strong>
+                                  <small>{t(option.descriptionKey)}</small>
+                                </span>
+                                {isSelected && <Check aria-hidden="true" />}
+                              </button>
+                            )
+                          })}
+                        </div>
+                      )}
+                    </span>
+                  </div>
+                </div>
+              </section>
+            )
+          case 'personalization.customInstructions':
+            return (
+              <section
+                className="personalization-custom-instructions"
+                aria-labelledby="personalization-custom-heading"
+              >
+                <div className="personalization-section-heading">
+                  <h2 id="personalization-custom-heading">{settingLabel(node, t)}</h2>
+                  <p>{settingDescription(node, t)}</p>
+                </div>
 
-        <textarea
-          className="personalization-custom-instructions__textarea"
-          value={preferences.customInstructions}
-          placeholder={t('personalization.customInstructionsPlaceholder')}
-          onChange={(event) => updatePreferences({ customInstructions: event.target.value })}
-        />
-      </section>
+                <textarea
+                  className="personalization-custom-instructions__textarea"
+                  value={preferences.customInstructions}
+                  placeholder={t('personalization.customInstructionsPlaceholder')}
+                  onChange={(event) =>
+                    updatePreferences({ customInstructions: event.target.value })
+                  }
+                />
+              </section>
+            )
+          case 'personalization.humanInteraction':
+            return <HumanInteractionSettingsSection />
+          default:
+            return null
+        }
+      })}
 
       <div className="personalization-actions">
         {statusMessage && <p className="personalization-status">{statusMessage}</p>}

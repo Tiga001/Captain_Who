@@ -1,3 +1,10 @@
+import {
+  renderSettingsNodes,
+  settingLabel,
+  settingDescription
+} from '../settings/settingsDefinition'
+import { useSettingsPageNavigation } from '../settings/settingsSearchNavigation'
+import { mcpHeaderSettings, mcpManagementSettings } from './McpSettings.definition'
 import { AlertTriangle, LoaderCircle, Plus, RefreshCw, Server } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { McpServerDetailsView, McpServerListItem } from '@mycopilot/protocol'
@@ -6,7 +13,7 @@ import { useToast } from '../../components/toast/ToastContext'
 import { useFrontendConfig } from '../../config/FrontendConfigProvider'
 import { SettingsBreadcrumbs } from '../settings/components/SettingsBreadcrumbs'
 import { McpServerEditor } from './McpServerEditor'
-import { McpServerList, McpServerListRefreshButton } from './McpServerList'
+import { McpServerList } from './McpServerList'
 import {
   getMcpManagementErrorDetails,
   mcpOperationNeedsAuthoritativeConfirmation,
@@ -260,6 +267,16 @@ export function McpSettingsPage({ onDirtyChange, onNavigateSettingsRoot }: McpSe
     }
   }
 
+  useSettingsPageNavigation('mcp', (target) => {
+    // A field search keeps an existing editor and its draft intact. Outside an
+    // editor the server list remains the prerequisite; search never picks a server.
+    if (target.view !== 'list' || view === 'list') return
+    setEditorDirty(false)
+    setEditingServerSnapshot(null)
+    setSelectedServerId(null)
+    setView('list')
+  })
+
   const output = management.state.output
 
   const returnToList = (): void => {
@@ -277,7 +294,7 @@ export function McpSettingsPage({ onDirtyChange, onNavigateSettingsRoot }: McpSe
           t('mcp.edit.title'))
         : null
 
-  return (
+  return renderSettingsNodes(mcpManagementSettings, (node) => (
     <article className="settings-list-page mcp-settings-page">
       {subpageLabel && (
         <SettingsBreadcrumbs
@@ -296,27 +313,44 @@ export function McpSettingsPage({ onDirtyChange, onNavigateSettingsRoot }: McpSe
       <header className="mcp-settings-header">
         <div>
           <h1 ref={pageTitleRef} tabIndex={-1}>
-            {t('settings.page.mcp')}
+            {settingLabel(node, t)}
           </h1>
-          <p className="settings-list-page__description">{t('mcp.page.description')}</p>
+          <p className="settings-list-page__description">{settingDescription(node, t)}</p>
         </div>
         {view === 'list' && (
           <div className="mcp-settings-header__actions">
-            <McpServerListRefreshButton
-              disabled={management.state.isRefreshing}
-              onRefresh={() => void management.refresh()}
-            />
-            <button
-              className="mcp-secondary-button"
-              onClick={() => {
-                setSelectedServerId(null)
-                setView('add')
-              }}
-              type="button"
-            >
-              <Plus aria-hidden="true" />
-              {t('mcp.actions.addServer')}
-            </button>
+            {renderSettingsNodes(mcpHeaderSettings, (node) => {
+              switch (node.id) {
+                case 'mcp-refresh':
+                  return (
+                    <button
+                      aria-label={settingLabel(node, t)}
+                      className="mcp-icon-button"
+                      disabled={management.state.isRefreshing}
+                      onClick={() => void management.refresh()}
+                      type="button"
+                    >
+                      <RefreshCw aria-hidden="true" />
+                    </button>
+                  )
+                case 'mcp-add-server':
+                  return (
+                    <button
+                      className="mcp-secondary-button"
+                      onClick={() => {
+                        setSelectedServerId(null)
+                        setView('add')
+                      }}
+                      type="button"
+                    >
+                      <Plus aria-hidden="true" />
+                      {settingLabel(node, t)}
+                    </button>
+                  )
+                default:
+                  return null
+              }
+            })}
           </div>
         )}
       </header>
@@ -454,7 +488,7 @@ export function McpSettingsPage({ onDirtyChange, onNavigateSettingsRoot }: McpSe
         />
       )}
     </article>
-  )
+  ))
 }
 
 type Translate = ReturnType<typeof useFrontendConfig>['t']

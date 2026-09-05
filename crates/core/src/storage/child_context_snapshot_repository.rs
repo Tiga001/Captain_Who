@@ -265,6 +265,7 @@ pub(crate) fn build_child_context_snapshot_plan(
         .map(|source_message| {
             Ok(SnapshotMessage {
                 record: ChatMessageRecord {
+                    human_interaction_response: source_message.human_interaction_response.clone(),
                     id: mapped(&message_id_map, &source_message.id, "message")?,
                     role: source_message.role.clone(),
                     content: source_message.content.clone(),
@@ -460,6 +461,16 @@ pub(crate) fn apply_child_context_snapshot_in_transaction(
             )
             .map_err(database_error)?;
     }
+    for message in &plan.messages {
+        if let Some(display) = &message.record.human_interaction_response {
+            super::human_interaction_repository::store_message_projection(
+                connection,
+                &message.record.id,
+                display,
+            )
+            .map_err(|error| ConversationForkError::Other(error.to_string()))?;
+        }
+    }
     for archive in &plan.archives {
         conversation_history_archive_repository::clone_archive_in_connection(connection, archive)
             .map_err(database_error)?;
@@ -625,29 +636,12 @@ fn rewrite_json_ids<T: serde::Serialize + serde::de::DeserializeOwned>(
 ) -> Result<(), ConversationForkError> {
     let mut json = serde_json::to_value(&*value)
         .map_err(|error| ConversationForkError::Other(error.to_string()))?;
-    rewrite_exact_ids(&mut json, replacements);
+    super::conversation_fork_repository::rewrite_exact_ids(&mut json, replacements);
     super::conversation_fork_repository::rewrite_history_open_tokens(&mut json, replacements)
         .map_err(ConversationForkError::Other)?;
     *value = serde_json::from_value(json)
         .map_err(|error| ConversationForkError::Other(error.to_string()))?;
     Ok(())
-}
-
-fn rewrite_exact_ids(value: &mut Value, replacements: &HashMap<String, String>) {
-    match value {
-        Value::String(current) => {
-            if let Some(replacement) = replacements.get(current) {
-                *current = replacement.clone();
-            }
-        }
-        Value::Array(values) => values
-            .iter_mut()
-            .for_each(|value| rewrite_exact_ids(value, replacements)),
-        Value::Object(values) => values
-            .values_mut()
-            .for_each(|value| rewrite_exact_ids(value, replacements)),
-        Value::Null | Value::Bool(_) | Value::Number(_) => {}
-    }
 }
 
 fn agent_run_status(raw: Option<&str>) -> Result<Option<String>, ConversationForkError> {
@@ -941,6 +935,80 @@ mod tests {
     }
 
     #[test]
+    fn child_snapshot_inherits_verified_answer_history_without_question_authority() {
+        let connection = fixture();
+        let display: crate::human_interaction::HumanInteractionResponseDisplay =
+            serde_json::from_value(serde_json::json!({
+                "type":"human_interaction_response", "schemaVersion":1,
+                "requestId":"source-request", "responseId":"source-response",
+                "answers":[{"questionId":"source-question", "question":"source-run",
+                    "kind":"text", "answer":"source-call"}]
+            }))
+            .unwrap();
+        let content = serde_json::to_string(&display).unwrap();
+        connection
+            .execute(
+                "UPDATE messages SET content=?1 WHERE id='source-user'",
+                [&content],
+            )
+            .unwrap();
+        crate::storage::human_interaction_repository::store_message_projection(
+            &connection,
+            "source-user",
+            &display,
+        )
+        .unwrap();
+        let plan = build_child_context_snapshot_plan(
+            &connection,
+            "source",
+            "target",
+            &AgentForkTurns::All,
+            20,
+        )
+        .unwrap();
+        apply_child_context_snapshot_in_transaction(&connection, &plan).unwrap();
+        let child = chat_repository::get_conversation(&connection, "target")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            child.messages.len(),
+            2,
+            "the open parent tail is not inherited"
+        );
+        assert_eq!(child.messages[0].content, content);
+        assert_eq!(
+            child.messages[0].human_interaction_response.as_ref(),
+            Some(&display)
+        );
+        assert_ne!(child.messages[0].id, "source-user");
+        for table in [
+            "human_interaction_requests",
+            "human_interaction_responses",
+            "human_interaction_deliveries",
+            "human_interaction_suspensions",
+            "agent_usage_records",
+        ] {
+            let count: i64 = connection
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(count, 0, "pure inherited history must not create {table}");
+        }
+        let mut envelope = serde_json::json!({"callId":"source-call", "result":display});
+        rewrite_json_ids(
+            &mut envelope,
+            &HashMap::from([
+                ("source-call".into(), "child-call".into()),
+                ("source-run".into(), "child-run".into()),
+            ]),
+        )
+        .unwrap();
+        assert_eq!(envelope["callId"], "child-call");
+        assert_eq!(envelope["result"], serde_json::to_value(display).unwrap());
+    }
+
+    #[test]
     fn snapshot_messages_are_exact_noops_for_generic_save_and_reject_mutation() {
         let mut connection = fixture();
         let plan = build_child_context_snapshot_plan(
@@ -1015,6 +1083,7 @@ mod tests {
         .unwrap()
         .is_some());
         target.messages.push(ChatMessageRecord {
+            human_interaction_response: None,
             id: "new-assistant".into(),
             role: "assistant".into(),
             content: "new".into(),

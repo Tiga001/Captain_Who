@@ -155,6 +155,27 @@ describe('independent human interaction controller', () => {
     expect(controller.getSnapshot().requests.question.status).toBe('submitted')
     expect(controller.getSnapshot().operations.question.error).toBeNull()
   })
+  it('does not accept a terminal receipt bound to a different immutable Run and permits an exact retry', async () => {
+    const request = question(),
+      host = fakeHost([request]),
+      controller = new HumanInteractionController(host.api)
+    controller.merge(request)
+    fill(controller, request)
+    host.api.submit.mockResolvedValueOnce({
+      ok: true,
+      value: { ...submitted(request), runId: 'foreign-run' }
+    })
+    await controller.submit(request.requestId)
+    expect(controller.getSnapshot().requests.question.status).toBe('open')
+    expect(controller.getSnapshot().operations.question).toMatchObject({
+      isSubmitting: false,
+      isDraftLocked: true,
+      error: 'outcome_unknown'
+    })
+    await controller.submit(request.requestId)
+    expect(host.api.submit.mock.calls[0][0]).toEqual(host.api.submit.mock.calls[1][0])
+    expect(controller.getSnapshot().requests.question.status).toBe('submitted')
+  })
   it('a definitive rejection retains draft/page and a corrected submission gets a new identity', async () => {
     const request = question(),
       host = fakeHost([request])

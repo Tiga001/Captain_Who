@@ -1,3 +1,12 @@
+import { renderSettingsNodes, settingLabel, settingDescription } from '../settingsDefinition'
+import { useSettingsPageNavigation } from '../settingsSearchNavigation'
+import {
+  agentTemplateCreateSettings,
+  agentTemplateEditorSettings,
+  agentTemplateLibrarySettings,
+  agentTemplateFormSettings,
+  agentTemplateRowSettings
+} from './managementSettings.definition'
 import type { AgentTemplate } from '@mycopilot/protocol'
 import { Bot, Pencil, Plus, RefreshCw, Trash2 } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
@@ -48,8 +57,15 @@ export function AgentTemplatesSettingsPage({
   const [operationError, setOperationError] = useState<string | null>(null)
   const [busyTemplateId, setBusyTemplateId] = useState<string | null>(null)
   const [form, setForm] = useState<TemplateFormState | null>(null)
+  const [editorHidden, setEditorHidden] = useState(false)
   const [pendingDelete, setPendingDelete] = useState<AgentTemplate | null>(null)
   const loadRequestRef = useRef(0)
+
+  useSettingsPageNavigation('agentTemplates', (target) => {
+    // Search changes the presentation while retaining an existing unsaved draft.
+    if (target.view === 'templates') setEditorHidden(true)
+    if (target.view === 'editor') setEditorHidden(false)
+  })
 
   const reload = useCallback(async (): Promise<AgentTemplate[] | null> => {
     const requestId = ++loadRequestRef.current
@@ -84,6 +100,7 @@ export function AgentTemplatesSettingsPage({
 
   const startCreate = () => {
     setOperationError(null)
+    setEditorHidden(false)
     setForm({
       description: '',
       instructions: '',
@@ -100,6 +117,7 @@ export function AgentTemplatesSettingsPage({
 
   const startEdit = (template: AgentTemplate) => {
     setOperationError(null)
+    setEditorHidden(false)
     setForm({
       description: template.description,
       instructions: template.instructions,
@@ -136,7 +154,7 @@ export function AgentTemplatesSettingsPage({
     }
   }
 
-  if (form) {
+  if (form && !editorHidden) {
     const configuredModel = models.find((model) => model.id === form.modelConfigId)
     const storedModelLabel = form.template?.modelDisplayName?.trim() ?? ''
     const unavailableModelBaseLabel = configuredModel
@@ -189,162 +207,191 @@ export function AgentTemplatesSettingsPage({
         </h1>
         <p className="agent-templates-page__intro">{t('agentTemplates.snapshotHint')}</p>
 
-        <form
-          className="agent-template-form"
-          onSubmit={(event) => {
-            event.preventDefault()
-            if (!canSave || !form.modelConfigId || busyTemplateId !== null) return
-            const templateId = form.template?.templateId ?? crypto.randomUUID()
-            setBusyTemplateId(templateId)
-            setOperationError(null)
-            void (async () => {
-              try {
-                const savedDefinition =
-                  form.kind === 'create'
-                    ? await createAgentTemplate({
-                        description: form.description,
-                        enabled: true,
-                        instructions: form.instructions,
-                        machineKey: createTemplateMachineKey(
-                          form.name,
-                          templateId,
-                          templates.map((template) => template.machineKey)
-                        ),
-                        modelConfigId: form.modelConfigId!,
-                        name: form.name,
-                        templateId
-                      })
-                    : await updateAgentTemplate({
-                        description: form.description,
-                        expectedRevision: form.template!.revision,
-                        instructions: form.instructions,
-                        modelConfigId: form.modelConfigId!,
-                        name: form.name,
-                        templateId
-                      })
-                const saved = await reconcileProjectAssignments(savedDefinition, form.projectIds)
-                setTemplates((current) => upsertTemplate(current, saved))
-                setForm(null)
-              } catch (mutationError) {
-                const message = getUserFacingErrorMessage(
-                  mutationError,
-                  t,
-                  'agentTemplates.operationFailed'
-                )
-                const refreshed = await reload()
-                const canonical = refreshed?.find((template) => template.templateId === templateId)
-                if (canonical) {
-                  setForm((current) =>
-                    current
-                      ? {
-                          ...current,
-                          kind: 'edit',
-                          template: canonical
-                        }
-                      : current
-                  )
-                }
-                setOperationError(message)
-              } finally {
-                setBusyTemplateId(null)
-              }
-            })()
-          }}
-        >
-          <label>
-            <span>{t('agentTemplates.name')}</span>
-            <input
-              autoFocus
-              maxLength={256}
-              onChange={(event) => setForm({ ...form, name: event.currentTarget.value })}
-              required
-              value={form.name}
-            />
-          </label>
-          <fieldset className="agent-template-form__projects">
-            <legend>{t('agentTemplates.projects')}</legend>
-            <p>{t('agentTemplates.projectsHint')}</p>
-            {projects.length > 0 ? (
-              <div className="agent-template-form__project-list">
-                {projects.map((project) => (
-                  <label key={project.id}>
-                    <input
-                      checked={form.projectIds.includes(project.id)}
-                      onChange={(event) => {
-                        const checked = event.currentTarget.checked
-                        setForm({
-                          ...form,
-                          projectIds: checked
-                            ? [...form.projectIds, project.id]
-                            : form.projectIds.filter((projectId) => projectId !== project.id)
+        {renderSettingsNodes(agentTemplateEditorSettings, () => (
+          <form
+            className="agent-template-form"
+            onSubmit={(event) => {
+              event.preventDefault()
+              if (!canSave || !form.modelConfigId || busyTemplateId !== null) return
+              const templateId = form.template?.templateId ?? crypto.randomUUID()
+              setBusyTemplateId(templateId)
+              setOperationError(null)
+              void (async () => {
+                try {
+                  const savedDefinition =
+                    form.kind === 'create'
+                      ? await createAgentTemplate({
+                          description: form.description,
+                          enabled: true,
+                          instructions: form.instructions,
+                          machineKey: createTemplateMachineKey(
+                            form.name,
+                            templateId,
+                            templates.map((template) => template.machineKey)
+                          ),
+                          modelConfigId: form.modelConfigId!,
+                          name: form.name,
+                          templateId
                         })
-                      }}
-                      type="checkbox"
-                    />
-                    <span>{project.name}</span>
-                  </label>
-                ))}
-              </div>
-            ) : (
-              <span className="agent-template-form__no-projects">
-                {t('agentTemplates.noProjectsAvailable')}
-              </span>
-            )}
-          </fieldset>
-          <label>
-            <span>{t('agentTemplates.description')}</span>
-            <textarea
-              maxLength={4096}
-              onChange={(event) => setForm({ ...form, description: event.currentTarget.value })}
-              placeholder={t('agentTemplates.descriptionPlaceholder')}
-              rows={3}
-              value={form.description}
-            />
-          </label>
-          <label>
-            <span>{t('agentTemplates.instructions')}</span>
-            <textarea
-              maxLength={65536}
-              onChange={(event) => setForm({ ...form, instructions: event.currentTarget.value })}
-              placeholder={t('agentTemplates.instructionsPlaceholder')}
-              required
-              rows={8}
-              value={form.instructions}
-            />
-          </label>
-          <label>
-            <span>{t('agentTemplates.model')}</span>
-            <ModelConfigPicker
-              ariaLabel={t('agentTemplates.selectModel')}
-              emptyLabel={t('chat.noEnabledModels')}
-              onChange={(modelConfigId) => setForm({ ...form, modelConfigId })}
-              options={modelOptions}
-              value={form.modelConfigId}
-              variant="settings"
-            />
-          </label>
-          {!modelAvailable && form.modelConfigId ? (
-            <p className="agent-template-form__warning" role="alert">
-              {t('agentTemplates.reselectModel')}
-            </p>
-          ) : null}
-          <div className="agent-template-form__actions">
-            <button
-              className="secondary-settings-button"
-              onClick={() => setForm(null)}
-              type="button"
-            >
-              {t('agentTemplates.cancel')}
-            </button>
-            <button
-              className="primary-settings-button"
-              disabled={!canSave || busyTemplateId !== null}
-              type="submit"
-            >
-              {t('agentTemplates.save')}
-            </button>
-          </div>
-        </form>
+                      : await updateAgentTemplate({
+                          description: form.description,
+                          expectedRevision: form.template!.revision,
+                          instructions: form.instructions,
+                          modelConfigId: form.modelConfigId!,
+                          name: form.name,
+                          templateId
+                        })
+                  const saved = await reconcileProjectAssignments(savedDefinition, form.projectIds)
+                  setTemplates((current) => upsertTemplate(current, saved))
+                  setForm(null)
+                } catch (mutationError) {
+                  const message = getUserFacingErrorMessage(
+                    mutationError,
+                    t,
+                    'agentTemplates.operationFailed'
+                  )
+                  const refreshed = await reload()
+                  const canonical = refreshed?.find(
+                    (template) => template.templateId === templateId
+                  )
+                  if (canonical) {
+                    setForm((current) =>
+                      current
+                        ? {
+                            ...current,
+                            kind: 'edit',
+                            template: canonical
+                          }
+                        : current
+                    )
+                  }
+                  setOperationError(message)
+                } finally {
+                  setBusyTemplateId(null)
+                }
+              })()
+            }}
+          >
+            {renderSettingsNodes(agentTemplateFormSettings, (node) => {
+              switch (node.id) {
+                case 'agent-template-name':
+                  return (
+                    <label>
+                      <span>{settingLabel(node, t)}</span>
+                      <input
+                        autoFocus
+                        maxLength={256}
+                        onChange={(event) => setForm({ ...form, name: event.currentTarget.value })}
+                        required
+                        value={form.name}
+                      />
+                    </label>
+                  )
+                case 'agent-template-projects':
+                  return (
+                    <fieldset className="agent-template-form__projects">
+                      <legend>{settingLabel(node, t)}</legend>
+                      <p>{settingDescription(node, t)}</p>
+                      {projects.length > 0 ? (
+                        <div className="agent-template-form__project-list">
+                          {projects.map((project) => (
+                            <label key={project.id}>
+                              <input
+                                checked={form.projectIds.includes(project.id)}
+                                onChange={(event) => {
+                                  const checked = event.currentTarget.checked
+                                  setForm({
+                                    ...form,
+                                    projectIds: checked
+                                      ? [...form.projectIds, project.id]
+                                      : form.projectIds.filter(
+                                          (projectId) => projectId !== project.id
+                                        )
+                                  })
+                                }}
+                                type="checkbox"
+                              />
+                              <span>{project.name}</span>
+                            </label>
+                          ))}
+                        </div>
+                      ) : (
+                        <span className="agent-template-form__no-projects">
+                          {t('agentTemplates.noProjectsAvailable')}
+                        </span>
+                      )}
+                    </fieldset>
+                  )
+                case 'agent-template-description':
+                  return (
+                    <label>
+                      <span>{settingLabel(node, t)}</span>
+                      <textarea
+                        maxLength={4096}
+                        onChange={(event) =>
+                          setForm({ ...form, description: event.currentTarget.value })
+                        }
+                        placeholder={settingDescription(node, t)}
+                        rows={3}
+                        value={form.description}
+                      />
+                    </label>
+                  )
+                case 'agent-template-instructions':
+                  return (
+                    <label>
+                      <span>{settingLabel(node, t)}</span>
+                      <textarea
+                        maxLength={65536}
+                        onChange={(event) =>
+                          setForm({ ...form, instructions: event.currentTarget.value })
+                        }
+                        placeholder={settingDescription(node, t)}
+                        required
+                        rows={8}
+                        value={form.instructions}
+                      />
+                    </label>
+                  )
+                case 'agent-template-model':
+                  return (
+                    <label>
+                      <span>{settingLabel(node, t)}</span>
+                      <ModelConfigPicker
+                        ariaLabel={t('agentTemplates.selectModel')}
+                        emptyLabel={t('chat.noEnabledModels')}
+                        onChange={(modelConfigId) => setForm({ ...form, modelConfigId })}
+                        options={modelOptions}
+                        value={form.modelConfigId}
+                        variant="settings"
+                      />
+                    </label>
+                  )
+              }
+            })}
+            {!modelAvailable && form.modelConfigId ? (
+              <p className="agent-template-form__warning" role="alert">
+                {t('agentTemplates.reselectModel')}
+              </p>
+            ) : null}
+            <div className="agent-template-form__actions">
+              <button
+                className="secondary-settings-button"
+                onClick={() => setForm(null)}
+                type="button"
+              >
+                {t('agentTemplates.cancel')}
+              </button>
+              <button
+                className="primary-settings-button"
+                disabled={!canSave || busyTemplateId !== null}
+                type="submit"
+              >
+                {t('agentTemplates.save')}
+              </button>
+            </div>
+          </form>
+        ))}
         {operationError ? (
           <p className="agent-templates-page__error" role="alert">
             {operationError}
@@ -361,15 +408,17 @@ export function AgentTemplatesSettingsPage({
           <h1>{t('settings.page.agentTemplates')}</h1>
           <p className="settings-list-page__description">{t('agentTemplates.descriptionText')}</p>
         </div>
-        <button
-          className="agent-templates-create-button"
-          disabled={enabledModels.length === 0}
-          onClick={startCreate}
-          type="button"
-        >
-          <Plus aria-hidden="true" />
-          <span>{t('agentTemplates.create')}</span>
-        </button>
+        {renderSettingsNodes(agentTemplateCreateSettings, (node) => (
+          <button
+            className="agent-templates-create-button"
+            disabled={enabledModels.length === 0}
+            onClick={startCreate}
+            type="button"
+          >
+            <Plus aria-hidden="true" />
+            <span>{settingLabel(node, t)}</span>
+          </button>
+        ))}
       </header>
 
       {operationError ? (
@@ -378,101 +427,115 @@ export function AgentTemplatesSettingsPage({
         </p>
       ) : null}
 
-      <section aria-label={t('agentTemplates.list')} className="agent-templates-page__list">
-        {loading ? <p role="status">{t('agentTemplates.loading')}</p> : null}
-        {!loading && loadError ? (
-          <div className="agent-templates-page__load-error" role="alert">
-            <span>{loadError}</span>
-            <button onClick={() => void reload()} type="button">
-              <RefreshCw aria-hidden="true" />
-              {t('agentTemplates.retry')}
-            </button>
-          </div>
-        ) : null}
-        {!loading && !loadError && templates.length === 0 ? (
-          <div className="agent-templates-page__empty">
-            <Bot aria-hidden="true" />
-            <strong>{t('agentTemplates.empty')}</strong>
-            <span>{t('agentTemplates.emptyHint')}</span>
-          </div>
-        ) : null}
-        {!loading && !loadError && templates.length > 0
-          ? templates.map((template) => {
-              const modelAvailable = enabledModelIds.has(template.modelConfigId)
-              const configuredModel = models.find((model) => model.id === template.modelConfigId)
-              const storedModelLabel = template.modelDisplayName?.trim() ?? ''
-              const visibleModelLabel = configuredModel
-                ? formatModelConfigLabel(configuredModel)
-                : storedModelLabel
-              const busy = busyTemplateId === template.templateId
-              return (
-                <article className="agent-template-row" key={template.templateId}>
-                  <div className="agent-template-row__copy">
-                    <div className="agent-template-row__title">
-                      <strong>{template.name}</strong>
-                      <span data-status={template.enabled ? 'enabled' : 'disabled'}>
-                        {template.enabled
-                          ? t('agentTemplates.enabled')
-                          : t('agentTemplates.disabled')}
-                      </span>
+      {renderSettingsNodes(agentTemplateLibrarySettings, (node) => (
+        <section aria-label={settingLabel(node, t)} className="agent-templates-page__list">
+          {loading ? <p role="status">{t('agentTemplates.loading')}</p> : null}
+          {!loading && loadError ? (
+            <div className="agent-templates-page__load-error" role="alert">
+              <span>{loadError}</span>
+              <button onClick={() => void reload()} type="button">
+                <RefreshCw aria-hidden="true" />
+                {t('agentTemplates.retry')}
+              </button>
+            </div>
+          ) : null}
+          {!loading && !loadError && templates.length === 0 ? (
+            <div className="agent-templates-page__empty">
+              <Bot aria-hidden="true" />
+              <strong>{t('agentTemplates.empty')}</strong>
+              <span>{t('agentTemplates.emptyHint')}</span>
+            </div>
+          ) : null}
+          {!loading && !loadError && templates.length > 0
+            ? templates.map((template) => {
+                const modelAvailable = enabledModelIds.has(template.modelConfigId)
+                const configuredModel = models.find((model) => model.id === template.modelConfigId)
+                const storedModelLabel = template.modelDisplayName?.trim() ?? ''
+                const visibleModelLabel = configuredModel
+                  ? formatModelConfigLabel(configuredModel)
+                  : storedModelLabel
+                const busy = busyTemplateId === template.templateId
+                return (
+                  <article className="agent-template-row" key={template.templateId}>
+                    <div className="agent-template-row__copy">
+                      <div className="agent-template-row__title">
+                        <strong>{template.name}</strong>
+                        <span data-status={template.enabled ? 'enabled' : 'disabled'}>
+                          {template.enabled
+                            ? t('agentTemplates.enabled')
+                            : t('agentTemplates.disabled')}
+                        </span>
+                      </div>
+                      {template.description ? <p>{template.description}</p> : null}
+                      <small data-unavailable={!modelAvailable || undefined}>
+                        {modelAvailable
+                          ? visibleModelLabel || t('agentTemplates.modelUnavailable')
+                          : visibleModelLabel
+                            ? `${visibleModelLabel} · ${t('agentTemplates.modelUnavailable')}`
+                            : t('agentTemplates.modelUnavailable')}
+                      </small>
+                      <small>
+                        {replaceTokens(t('agentTemplates.projectCount'), {
+                          count: String(template.projectIds.length)
+                        })}
+                      </small>
+                      {!modelAvailable ? (
+                        <span className="agent-template-row__warning">
+                          {t('agentTemplates.reselectModel')}
+                        </span>
+                      ) : null}
                     </div>
-                    {template.description ? <p>{template.description}</p> : null}
-                    <small data-unavailable={!modelAvailable || undefined}>
-                      {modelAvailable
-                        ? visibleModelLabel || t('agentTemplates.modelUnavailable')
-                        : visibleModelLabel
-                          ? `${visibleModelLabel} · ${t('agentTemplates.modelUnavailable')}`
-                          : t('agentTemplates.modelUnavailable')}
-                    </small>
-                    <small>
-                      {replaceTokens(t('agentTemplates.projectCount'), {
-                        count: String(template.projectIds.length)
+                    <div className="agent-template-row__actions">
+                      <button
+                        aria-label={`${t('agentTemplates.edit')} ${template.name}`}
+                        disabled={busy}
+                        onClick={() => startEdit(template)}
+                        type="button"
+                      >
+                        <Pencil aria-hidden="true" />
+                      </button>
+                      {renderSettingsNodes(agentTemplateRowSettings, (node) => {
+                        switch (node.id) {
+                          case 'agent-templates-enabled':
+                            return (
+                              <button
+                                disabled={busy || (!modelAvailable && !template.enabled)}
+                                onClick={() => {
+                                  void runTemplateMutation(template.templateId, () =>
+                                    setAgentTemplateEnabled({
+                                      enabled: !template.enabled,
+                                      expectedRevision: template.revision,
+                                      templateId: template.templateId
+                                    })
+                                  )
+                                }}
+                                type="button"
+                              >
+                                {template.enabled
+                                  ? t('agentTemplates.disable')
+                                  : settingLabel(node, t)}
+                              </button>
+                            )
+                          case 'agent-templates-delete':
+                            return (
+                              <button
+                                aria-label={`${settingLabel(node, t)} ${template.name}`}
+                                disabled={busy}
+                                onClick={() => setPendingDelete(template)}
+                                type="button"
+                              >
+                                <Trash2 aria-hidden="true" />
+                              </button>
+                            )
+                        }
                       })}
-                    </small>
-                    {!modelAvailable ? (
-                      <span className="agent-template-row__warning">
-                        {t('agentTemplates.reselectModel')}
-                      </span>
-                    ) : null}
-                  </div>
-                  <div className="agent-template-row__actions">
-                    <button
-                      aria-label={`${t('agentTemplates.edit')} ${template.name}`}
-                      disabled={busy}
-                      onClick={() => startEdit(template)}
-                      type="button"
-                    >
-                      <Pencil aria-hidden="true" />
-                    </button>
-                    <button
-                      disabled={busy || (!modelAvailable && !template.enabled)}
-                      onClick={() => {
-                        void runTemplateMutation(template.templateId, () =>
-                          setAgentTemplateEnabled({
-                            enabled: !template.enabled,
-                            expectedRevision: template.revision,
-                            templateId: template.templateId
-                          })
-                        )
-                      }}
-                      type="button"
-                    >
-                      {template.enabled ? t('agentTemplates.disable') : t('agentTemplates.enable')}
-                    </button>
-                    <button
-                      aria-label={`${t('agentTemplates.delete')} ${template.name}`}
-                      disabled={busy}
-                      onClick={() => setPendingDelete(template)}
-                      type="button"
-                    >
-                      <Trash2 aria-hidden="true" />
-                    </button>
-                  </div>
-                </article>
-              )
-            })
-          : null}
-      </section>
+                    </div>
+                  </article>
+                )
+              })
+            : null}
+        </section>
+      ))}
 
       {pendingDelete ? (
         <ConfirmationDialog

@@ -10,6 +10,7 @@ import {
 import { HostInvocationError } from '@mycopilot/host-api'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { render } from 'vitest-browser-react'
+import { SettingsSearchNavigationProvider } from '../../settings/settingsSearchNavigation'
 
 const service = vi.hoisted(() => ({
   addServer: vi.fn(),
@@ -330,6 +331,164 @@ beforeEach(() => {
 })
 
 describe('MCP and Browser settings pages', () => {
+  it('locates browser data options in the existing dialog without changing its choices or clearing data', async () => {
+    const onNavigateSettingsRoot = vi.fn()
+    const screen = await render(
+      <SettingsSearchNavigationProvider
+        target={{ page: 'browser', id: 'browser-data-cookies', view: 'clearData', revision: 1 }}
+      >
+        <BrowserAutomationSettingsPage onNavigateSettingsRoot={onNavigateSettingsRoot} />
+      </SettingsSearchNavigationProvider>
+    )
+    const dialog = screen.getByRole('dialog', { name: 'browser.clearBrowsingData' })
+    await expect.element(dialog).toBeVisible()
+    await expect.poll(() => service.getBrowserDataSummary).toHaveBeenCalledWith('allTime')
+    await expect
+      .element(dialog.getByRole('checkbox', { name: /mcp.browserData.cookies/ }))
+      .toBeChecked()
+    const option = document.querySelector('[data-setting-id="browser-data-cookies"]')
+    expect(option?.tagName).toBe('LABEL')
+    await dialog
+      .getByRole('button', { name: 'mcp.browserData.range.lastHour', exact: true })
+      .click()
+    await expect
+      .element(dialog.getByRole('checkbox', { name: /mcp.browserData.cookies/ }))
+      .not.toBeChecked()
+
+    await screen.rerender(
+      <SettingsSearchNavigationProvider
+        target={{
+          page: 'browser',
+          id: 'browser-data-range-last-week',
+          view: 'clearData',
+          revision: 2
+        }}
+      >
+        <BrowserAutomationSettingsPage onNavigateSettingsRoot={onNavigateSettingsRoot} />
+      </SettingsSearchNavigationProvider>
+    )
+    await expect
+      .element(dialog.getByRole('button', { name: 'mcp.browserData.range.lastHour', exact: true }))
+      .toHaveAttribute('aria-pressed', 'true')
+    await expect
+      .element(dialog.getByRole('button', { name: 'mcp.browserData.range.last7Days', exact: true }))
+      .toHaveAttribute('data-setting-id', 'browser-data-range-last-week')
+    expect(service.clearBrowserData).not.toHaveBeenCalled()
+    expect(service.updateBrowserPreferences).not.toHaveBeenCalled()
+    await dialog.getByRole('button', { name: 'mcp.actions.cancel', exact: true }).first().click()
+    await expect
+      .element(screen.getByRole('heading', { name: 'settings.nav.browser' }))
+      .toBeVisible()
+  })
+
+  it('navigates between browser search targets without changing a preference', async () => {
+    const onNavigateSettingsRoot = vi.fn()
+    const screen = await render(
+      <SettingsSearchNavigationProvider
+        target={{ page: 'browser', id: 'browser-history-search', view: 'history', revision: 1 }}
+      >
+        <BrowserAutomationSettingsPage onNavigateSettingsRoot={onNavigateSettingsRoot} />
+      </SettingsSearchNavigationProvider>
+    )
+    await expect.element(screen.getByRole('heading', { name: 'browser.history' })).toBeVisible()
+    expect(
+      screen.container.querySelector('[data-setting-id="browser-history-search"]')
+    ).not.toBeNull()
+
+    await screen.rerender(
+      <SettingsSearchNavigationProvider
+        target={{ page: 'browser', id: 'browser-download-location', view: 'settings', revision: 2 }}
+      >
+        <BrowserAutomationSettingsPage onNavigateSettingsRoot={onNavigateSettingsRoot} />
+      </SettingsSearchNavigationProvider>
+    )
+    await expect.element(screen.getByText('mcp.browserDownloads.location')).toBeVisible()
+    expect(
+      screen.container.querySelector('[data-setting-id="browser-download-location"]')?.className
+    ).toBe('browser-download-preference-row')
+
+    await screen.rerender(
+      <SettingsSearchNavigationProvider
+        target={{
+          page: 'browser',
+          id: 'browser-download-history-search',
+          view: 'downloadHistory',
+          revision: 3
+        }}
+      >
+        <BrowserAutomationSettingsPage onNavigateSettingsRoot={onNavigateSettingsRoot} />
+      </SettingsSearchNavigationProvider>
+    )
+    await expect
+      .element(screen.getByRole('heading', { name: 'mcp.browserDownloads.history' }))
+      .toBeVisible()
+    expect(
+      screen.container.querySelector('[data-setting-id="browser-download-history-search"]')
+    ).not.toBeNull()
+    expect(service.updateBrowserPreferences).not.toHaveBeenCalled()
+    expect(service.setBrowserDownloadAskWhereToSave).not.toHaveBeenCalled()
+    expect(service.chooseBrowserDownloadDirectory).not.toHaveBeenCalled()
+    expect(service.builtinSetAllowed).not.toHaveBeenCalled()
+  })
+
+  it('waits for a server selection and preserves its draft when searching another editor field', async () => {
+    const server = details()
+    service.hook.mockReturnValue(
+      management(
+        {
+          status: 'ready',
+          output: output([server]),
+          errorMessage: null,
+          isRefreshing: false
+        },
+        [server]
+      )
+    )
+    const onDirtyChange = vi.fn()
+    const screen = await render(
+      <SettingsSearchNavigationProvider
+        target={{
+          page: 'mcp',
+          id: 'mcp-server-executable',
+          view: 'editor',
+          prerequisiteId: 'mcp-servers',
+          revision: 1
+        }}
+      >
+        <McpSettingsPage onDirtyChange={onDirtyChange} />
+      </SettingsSearchNavigationProvider>
+    )
+    await expect
+      .element(screen.getByRole('button', { name: 'mcp.actions.edit: fixture' }))
+      .toBeVisible()
+    expect(screen.container.querySelector('.mcp-editor')).toBeNull()
+    expect(service.loadDetails).not.toHaveBeenCalled()
+    await screen.getByRole('button', { name: 'mcp.actions.edit: fixture' }).click()
+    await screen.getByLabelText('mcp.form.name').fill('unsaved server name')
+    await expect.poll(() => onDirtyChange.mock.lastCall?.[0]).toBe(true)
+
+    await screen.rerender(
+      <SettingsSearchNavigationProvider
+        target={{
+          page: 'mcp',
+          id: 'mcp-server-arguments',
+          view: 'editor',
+          prerequisiteId: 'mcp-servers',
+          revision: 2
+        }}
+      >
+        <McpSettingsPage onDirtyChange={onDirtyChange} />
+      </SettingsSearchNavigationProvider>
+    )
+    await expect.element(screen.getByLabelText('mcp.form.name')).toHaveValue('unsaved server name')
+    expect(
+      screen.container.querySelector('[data-setting-id="mcp-server-arguments"]')?.tagName
+    ).toBe('FIELDSET')
+    expect(onDirtyChange.mock.lastCall?.[0]).toBe(true)
+    expect(service.addServer).not.toHaveBeenCalled()
+    expect(service.updateServer).not.toHaveBeenCalled()
+  })
+
   it('shows only external MCP servers without built-in or external grouping', async () => {
     service.hook.mockReturnValue(
       management({

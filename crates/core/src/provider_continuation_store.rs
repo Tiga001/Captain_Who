@@ -1418,6 +1418,7 @@ mod tests {
                 model_id: Some("deepseek-v4-flash".to_string()),
                 title: "Provider vault fixture".to_string(),
                 messages: vec![ChatMessageRecord {
+                    human_interaction_response: None,
                     id: ASSISTANT_MESSAGE_ID.to_string(),
                     role: "assistant".to_string(),
                     content: "visible durable projection".to_string(),

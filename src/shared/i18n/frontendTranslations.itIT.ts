@@ -836,6 +836,7 @@ export const itITTranslations = {
     'Questa selezione della fonte di abilità è scaduta. Risolvi di nuovo la fonte.',
   'skills.error.acknowledgementRequired':
     'Confermare tutti gli avvisi di sicurezza richiesti prima di continuare.',
+  'skills.error.configurationRequired': 'Prima di abilitare questa abilità, salva un endpoint API, un modello e una chiave validi in Impostazioni → Configurazione → Generazione immagini.',
   'skills.error.notManageable': 'Questa abilità non può essere gestita in questa pagina.',
   'skills.error.operationConflict': "Lo stato operativo è cambiato. Riavviare l'operazione.",
   'skills.error.cancelled': "L'operazione è stata annullata.",

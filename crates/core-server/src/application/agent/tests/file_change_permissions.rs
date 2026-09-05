@@ -222,6 +222,7 @@ pub(super) fn seed_durable_direct_file_change_owner(
         .any(|message| message.id == assistant_message_id)
     {
         conversation.messages.push(ChatMessageRecord {
+            human_interaction_response: None,
             id: assistant_message_id.to_string(),
             role: "assistant".to_string(),
             content: String::new(),
@@ -3043,6 +3044,7 @@ fn seed_file_change_history_owner(
             model_id: Some("test-model".to_string()),
             title: "FileChange history".to_string(),
             messages: vec![ChatMessageRecord {
+                human_interaction_response: None,
                 id: assistant_message_id.to_string(),
                 role: "assistant".to_string(),
                 content: "done".to_string(),

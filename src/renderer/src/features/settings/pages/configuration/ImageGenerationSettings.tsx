@@ -1,3 +1,5 @@
+import { renderSettingsNodes, settingLabel, settingDescription } from '../../settingsDefinition'
+import { imageConfigurationSection } from './configuration.definition'
 // Renderer settings UI for the backend-owned image-generation provider profile.
 import { AlertTriangle, ImagePlus, LoaderCircle, RefreshCw } from 'lucide-react'
 import type { ImageGenerationConfigurationErrorCode } from '@mycopilot/protocol'
@@ -70,7 +72,11 @@ function SettingsSwitch({
   )
 }
 
-export function ImageGenerationSettings() {
+export function ImageGenerationSettings({
+  definition = imageConfigurationSection
+}: {
+  definition?: typeof imageConfigurationSection
+}) {
   const { t } = useFrontendConfig()
   const workflow = useImageGenerationConfiguration()
   const { state } = workflow
@@ -79,9 +85,10 @@ export function ImageGenerationSettings() {
     return (
       <section
         aria-labelledby="image-generation-heading"
+        data-setting-id={definition.id}
         className="configuration-section image-generation-settings settings-list-page"
       >
-        <h1 id="image-generation-heading">{t('configuration.imageGeneration.title')}</h1>
+        <h1 id="image-generation-heading">{settingLabel(definition, t)}</h1>
         <div className="image-generation-settings__skeleton" role="status">
           <LoaderCircle aria-hidden="true" />
           <span>{t('configuration.imageGeneration.loading')}</span>
@@ -94,9 +101,10 @@ export function ImageGenerationSettings() {
     return (
       <section
         aria-labelledby="image-generation-heading"
+        data-setting-id={definition.id}
         className="configuration-section image-generation-settings settings-list-page"
       >
-        <h1 id="image-generation-heading">{t('configuration.imageGeneration.title')}</h1>
+        <h1 id="image-generation-heading">{settingLabel(definition, t)}</h1>
         <div className="image-generation-settings__error" role="alert">
           <AlertTriangle aria-hidden="true" />
           <span>
@@ -120,130 +128,116 @@ export function ImageGenerationSettings() {
   return (
     <section
       aria-labelledby="image-generation-heading"
+      data-setting-id={definition.id}
       className="configuration-section image-generation-settings settings-list-page"
     >
       <div className="image-generation-settings__heading">
         <div>
-          <h1 id="image-generation-heading">{t('configuration.imageGeneration.title')}</h1>
-          <p className="settings-list-page__description">
-            {t('configuration.imageGeneration.description')}
-          </p>
+          <h1 id="image-generation-heading">{settingLabel(definition, t)}</h1>
+          <p className="settings-list-page__description">{settingDescription(definition, t)}</p>
         </div>
         <ImagePlus aria-hidden="true" />
       </div>
 
       <div className="settings-list-section">
         <div className="settings-list">
-          <div className="settings-list-row">
-            <div className="settings-list-row__text">
-              <h2 className="settings-list-row__title">
-                {t('configuration.imageGeneration.enabled')}
-              </h2>
-            </div>
-            <SettingsSwitch
-              ariaLabel={t('configuration.imageGeneration.enabled')}
-              checked={configuration.enabled}
-              disabled={disabled}
-              onClick={() => void workflow.setEnabled(!configuration.enabled)}
-            />
-          </div>
-
-          <label className="configuration-field settings-list-row">
-            <span className="settings-list-row__text">
-              <span className="settings-list-row__title">
-                {t('configuration.imageGeneration.endpointUrl')}
-              </span>
-            </span>
-            <span className="settings-list-row__control">
-              <input
-                className="settings-list-control"
-                disabled={disabled}
-                inputMode="url"
-                onChange={(event) => workflow.updateForm('endpointUrl', event.target.value)}
-                placeholder={t('configuration.imageGeneration.endpointUrlPlaceholder')}
-                spellCheck={false}
-                type="url"
-                value={form.endpointUrl}
-              />
-            </span>
-          </label>
-
-          <div className="configuration-field settings-list-row">
-            <span className="settings-list-row__text">
-              <span className="settings-list-row__title">
-                {t('configuration.imageGeneration.apiKey')}
-              </span>
-            </span>
-            <span className="settings-list-row__control">
-              <CredentialInput
-                ariaLabel={t('configuration.imageGeneration.apiKey')}
-                disabled={disabled}
-                mutation={credentialMutation}
-                onMutationChange={workflow.updateCredentialMutation}
-                placeholder={t('configuration.credential.placeholder')}
-                status={configuration.credentialStatus}
-              />
-            </span>
-          </div>
-
-          <label className="configuration-field settings-list-row">
-            <span className="settings-list-row__text">
-              <span className="settings-list-row__title">
-                {t('configuration.imageGeneration.modelId')}
-              </span>
-            </span>
-            <span className="settings-list-row__control">
-              <input
-                className="settings-list-control"
-                disabled={disabled}
-                onChange={(event) => workflow.updateForm('modelId', event.target.value)}
-                placeholder={t('configuration.imageGeneration.modelIdPlaceholder')}
-                spellCheck={false}
-                value={form.modelId}
-              />
-            </span>
-          </label>
-
-          <div className="settings-list-row">
-            <div className="settings-list-row__text">
-              <h2 className="settings-list-row__title">
-                {t('configuration.imageGeneration.textToImage')}
-              </h2>
-            </div>
-            <SettingsSwitch
-              ariaLabel={t('configuration.imageGeneration.textToImage')}
-              checked
-              disabled
-            />
-          </div>
-
-          <div className="settings-list-row">
-            <div className="settings-list-row__text">
-              <h2 className="settings-list-row__title">
-                {t('configuration.imageGeneration.imageToImage')}
-              </h2>
-            </div>
-            <SettingsSwitch
-              ariaLabel={t('configuration.imageGeneration.imageToImage')}
-              checked={form.imageToImage}
-              disabled={disabled}
-              onClick={() => workflow.updateForm('imageToImage', !form.imageToImage)}
-            />
-          </div>
-
-          <div className="settings-list-row">
-            <div className="settings-list-row__text">
-              <h2 className="settings-list-row__title">
-                {t('configuration.imageGeneration.watermark')}
-              </h2>
-            </div>
-            <SettingsSwitch
-              ariaLabel={t('configuration.imageGeneration.watermark')}
-              checked={form.watermark}
-              disabled={disabled}
-              onClick={() => workflow.updateForm('watermark', !form.watermark)}
-            />
-          </div>
+          {renderSettingsNodes(definition.children, (node) => {
+            switch (node.id) {
+              case 'configuration.image.endpointUrl':
+                return (
+                  <label className="configuration-field settings-list-row">
+                    <span className="settings-list-row__text">
+                      <span className="settings-list-row__title">{settingLabel(node, t)}</span>
+                    </span>
+                    <span className="settings-list-row__control">
+                      <input
+                        className="settings-list-control"
+                        disabled={disabled}
+                        inputMode="url"
+                        onChange={(event) => workflow.updateForm('endpointUrl', event.target.value)}
+                        placeholder={t('configuration.imageGeneration.endpointUrlPlaceholder')}
+                        spellCheck={false}
+                        type="url"
+                        value={form.endpointUrl}
+                      />
+                    </span>
+                  </label>
+                )
+              case 'configuration.image.apiKey':
+                return (
+                  <div className="configuration-field settings-list-row">
+                    <span className="settings-list-row__text">
+                      <span className="settings-list-row__title">{settingLabel(node, t)}</span>
+                    </span>
+                    <span className="settings-list-row__control">
+                      <CredentialInput
+                        ariaLabel={settingLabel(node, t)}
+                        disabled={disabled}
+                        mutation={credentialMutation}
+                        onMutationChange={workflow.updateCredentialMutation}
+                        placeholder={t('configuration.credential.placeholder')}
+                        status={configuration.credentialStatus}
+                      />
+                    </span>
+                  </div>
+                )
+              case 'configuration.image.modelId':
+                return (
+                  <label className="configuration-field settings-list-row">
+                    <span className="settings-list-row__text">
+                      <span className="settings-list-row__title">{settingLabel(node, t)}</span>
+                    </span>
+                    <span className="settings-list-row__control">
+                      <input
+                        className="settings-list-control"
+                        disabled={disabled}
+                        onChange={(event) => workflow.updateForm('modelId', event.target.value)}
+                        placeholder={t('configuration.imageGeneration.modelIdPlaceholder')}
+                        spellCheck={false}
+                        value={form.modelId}
+                      />
+                    </span>
+                  </label>
+                )
+              case 'configuration.image.textToImage':
+                return (
+                  <div className="settings-list-row">
+                    <div className="settings-list-row__text">
+                      <h2 className="settings-list-row__title">{settingLabel(node, t)}</h2>
+                    </div>
+                    <SettingsSwitch ariaLabel={settingLabel(node, t)} checked disabled />
+                  </div>
+                )
+              case 'configuration.image.imageToImage':
+                return (
+                  <div className="settings-list-row">
+                    <div className="settings-list-row__text">
+                      <h2 className="settings-list-row__title">{settingLabel(node, t)}</h2>
+                    </div>
+                    <SettingsSwitch
+                      ariaLabel={settingLabel(node, t)}
+                      checked={form.imageToImage}
+                      disabled={disabled}
+                      onClick={() => workflow.updateForm('imageToImage', !form.imageToImage)}
+                    />
+                  </div>
+                )
+              case 'configuration.image.watermark':
+                return (
+                  <div className="settings-list-row">
+                    <div className="settings-list-row__text">
+                      <h2 className="settings-list-row__title">{settingLabel(node, t)}</h2>
+                    </div>
+                    <SettingsSwitch
+                      ariaLabel={settingLabel(node, t)}
+                      checked={form.watermark}
+                      disabled={disabled}
+                      onClick={() => workflow.updateForm('watermark', !form.watermark)}
+                    />
+                  </div>
+                )
+            }
+          })}
         </div>
       </div>
 

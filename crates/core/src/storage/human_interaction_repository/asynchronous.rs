@@ -98,9 +98,17 @@ pub struct HumanInteractionAsyncBinding {
 pub fn async_human_interaction_answer_content(
     request: &HumanInteractionRequestSnapshot,
 ) -> Result<String> {
-    if request.mode != HumanInteractionMode::Async
-        || request.status != HumanInteractionRequestStatus::Submitted
-    {
+    if request.mode != HumanInteractionMode::Async {
+        return Err(conflict());
+    }
+    json(&human_interaction_answer_display(request)?)
+}
+
+/// Builds complete immutable display material from accepted Host facts for either delivery mode.
+pub fn human_interaction_answer_display(
+    request: &HumanInteractionRequestSnapshot,
+) -> Result<HumanInteractionResponseDisplay> {
+    if request.status != HumanInteractionRequestStatus::Submitted {
         return Err(conflict());
     }
     let response = request.response.as_ref().ok_or_else(conflict)?;
@@ -152,7 +160,7 @@ pub fn async_human_interaction_answer_content(
         answers,
     };
     display.validate()?;
-    json(&display)
+    Ok(display)
 }
 
 pub fn list_pending_async(connection: &Connection) -> Result<Vec<HumanInteractionAsyncPending>> {
@@ -301,6 +309,11 @@ pub(crate) fn bind_async_new_turn_in_transaction(
     let claim_id = Uuid::new_v4().to_string();
     connection.execute("UPDATE human_interaction_async_bindings SET route='new_turn',status='bound',claim_id=?1,target_run_id=?2,assistant_message_id=?3,user_message_id=?4,guidance_id=NULL,updated_at=MAX(updated_at,?5) WHERE response_id=?6 AND status='pending'",params![claim_id,trace.run_id,trace.assistant_message_id,admission.user_message_id,now,admission.response_id]).map_err(unavailable)?;
     connection.execute("UPDATE human_interaction_deliveries SET status='bound',revision=revision+1,target_run_id=?1,user_message_id=?2 WHERE response_id=?3 AND status='pending'",params![trace.run_id,admission.user_message_id,admission.response_id]).map_err(unavailable)?;
+    store_message_projection(
+        connection,
+        &admission.user_message_id,
+        &human_interaction_answer_display(&request)?,
+    )?;
     load_async_binding(connection, &admission.response_id)?.ok_or_else(conflict)
 }
 

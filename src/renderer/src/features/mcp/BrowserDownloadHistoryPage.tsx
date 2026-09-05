@@ -1,3 +1,5 @@
+import { renderSettingsNodes, settingLabel } from '../settings/settingsDefinition'
+import { browserDownloadHistorySettings } from './BrowserAutomationSettings.definition'
 import { Download, FolderOpen, LoaderCircle, RefreshCw, Search, Trash2 } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type {
@@ -140,40 +142,52 @@ export function BrowserDownloadHistoryPage({
 
       <h1>{t('mcp.browserDownloads.history')}</h1>
 
-      <label className="browser-download-search">
-        <Search aria-hidden="true" />
-        <span className="sr-only">{t('mcp.browserDownloads.search')}</span>
-        <input
-          onChange={(event) => setQuery(event.currentTarget.value)}
-          placeholder={t('mcp.browserDownloads.search')}
-          value={query}
-        />
-      </label>
-
-      <div className="browser-download-history__heading">
-        <h2>{t('mcp.browserDownloads.allHistory')}</h2>
-        <div>
-          <button
-            aria-label={t('mcp.browserDownloads.refresh')}
-            className="mcp-icon-button"
-            disabled={refreshing}
-            onClick={() => void refresh()}
-            title={t('mcp.browserDownloads.refresh')}
-            type="button"
-          >
-            <RefreshCw aria-hidden="true" className={refreshing ? 'mcp-spinner' : undefined} />
-          </button>
-          <button
-            className="mcp-secondary-button"
-            disabled={mutating || !history?.downloads.length}
-            onClick={() => void clearHistory()}
-            type="button"
-          >
-            <Trash2 aria-hidden="true" />
-            {t('mcp.browserDownloads.clearHistory')}
-          </button>
-        </div>
-      </div>
+      {renderSettingsNodes(browserDownloadHistorySettings, (node) => {
+        switch (node.id) {
+          case 'browser-download-history-search':
+            return (
+              <label className="browser-download-search">
+                <Search aria-hidden="true" />
+                <span className="sr-only">{settingLabel(node, t)}</span>
+                <input
+                  onChange={(event) => setQuery(event.currentTarget.value)}
+                  placeholder={settingLabel(node, t)}
+                  value={query}
+                />
+              </label>
+            )
+          case 'browser-download-history-clear':
+            return (
+              <div className="browser-download-history__heading">
+                <h2>{t('mcp.browserDownloads.allHistory')}</h2>
+                <div>
+                  <button
+                    aria-label={t('mcp.browserDownloads.refresh')}
+                    className="mcp-icon-button"
+                    disabled={refreshing}
+                    onClick={() => void refresh()}
+                    title={t('mcp.browserDownloads.refresh')}
+                    type="button"
+                  >
+                    <RefreshCw
+                      aria-hidden="true"
+                      className={refreshing ? 'mcp-spinner' : undefined}
+                    />
+                  </button>
+                  <button
+                    className="mcp-secondary-button"
+                    disabled={mutating || !history?.downloads.length}
+                    onClick={() => void clearHistory()}
+                    type="button"
+                  >
+                    <Trash2 aria-hidden="true" />
+                    {settingLabel(node, t)}
+                  </button>
+                </div>
+              </div>
+            )
+        }
+      })}
 
       {!history ? (
         <div className="mcp-page-state" role="status">

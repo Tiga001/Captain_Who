@@ -59,6 +59,7 @@ impl MoonshotRecoveryFamily {
 
 fn pending_assistant(id: &str, created_at: i64) -> ChatMessageRecord {
     ChatMessageRecord {
+        human_interaction_response: None,
         id: id.to_string(),
         role: "assistant".to_string(),
         content: String::new(),

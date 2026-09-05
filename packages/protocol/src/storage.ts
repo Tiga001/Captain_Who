@@ -1,4 +1,5 @@
 import type { AgentInputAttachment, AgentPermissions, AgentPromptPreferences } from './agent'
+import type { HumanInteractionResponseDisplay } from './humanInteraction'
 
 export type KnownProviderProfileId =
   | 'generic_openai_chat'
@@ -328,6 +329,8 @@ export interface StorageImageFileRecord {
 }
 
 export interface StorageChatMessageRecord {
+  /** Host-derived immutable display proof. It is never accepted by a message write API. */
+  readonly humanInteractionResponse?: HumanInteractionResponseDisplay | null
   id: string
   role: 'user' | 'assistant' | (string & {})
   content: string
@@ -337,6 +340,11 @@ export interface StorageChatMessageRecord {
   agentRunJson?: string | null
   uiStateJson?: string | null
 }
+
+export type StorageChatMessageWriteRecord = Omit<
+  StorageChatMessageRecord,
+  'humanInteractionResponse'
+>
 
 export interface StorageChatMessageStateRecord {
   id: string

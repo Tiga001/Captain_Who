@@ -1,4 +1,9 @@
 use super::*;
+use mycopilot_core::image_generation::{
+    ImageGenerationConfigurationError, ImageGenerationConfigurationMutationOutcome,
+    ImageGenerationConfigurationService,
+};
+use mycopilot_core::skills::IMAGE_GENERATION_SKILL_ID;
 
 /// Builds the global settings-page inventory. Workspace Skills deliberately
 /// remain outside this view because their lifetime and identity are scoped to
@@ -9,7 +14,23 @@ pub(crate) fn management_response(
     installations: &SkillInstallationService,
     workflow: Option<&SkillInstallationWorkflow>,
 ) -> Result<SkillsListManagementResponse, SkillManagementFailure> {
-    let (response, _) = management_snapshot(storage, catalog, installations, workflow)?;
+    management_response_with_image_configuration(storage, catalog, installations, workflow, None)
+}
+
+pub(crate) fn management_response_with_image_configuration(
+    storage: &StorageService,
+    catalog: &SkillCatalog,
+    installations: &SkillInstallationService,
+    workflow: Option<&SkillInstallationWorkflow>,
+    image_configuration: Option<&ImageGenerationConfigurationService>,
+) -> Result<SkillsListManagementResponse, SkillManagementFailure> {
+    let (response, _) = management_snapshot(
+        storage,
+        catalog,
+        installations,
+        workflow,
+        image_configuration,
+    )?;
     Ok(response)
 }
 
@@ -18,6 +39,7 @@ pub(super) fn management_snapshot(
     catalog: &SkillCatalog,
     installations: &SkillInstallationService,
     workflow: Option<&SkillInstallationWorkflow>,
+    image_configuration: Option<&ImageGenerationConfigurationService>,
 ) -> Result<
     (
         SkillsListManagementResponse,
@@ -38,9 +60,23 @@ pub(super) fn management_snapshot(
         .iter()
         .map(|skill| skill.id().as_str().to_string())
         .collect::<Vec<_>>();
-    let enablement = storage
+    let mut enablement = storage
         .load_skill_enablement_states(&ids)
         .map_err(|_| SkillManagementFailure::list_unavailable())?;
+    let image_configuration = image_configuration
+        .filter(|_| ids.iter().any(|id| id == IMAGE_GENERATION_SKILL_ID))
+        .map(ImageGenerationConfigurationService::get_configuration)
+        .transpose()
+        .map_err(|_| SkillManagementFailure::list_unavailable())?;
+    if let Some(configuration) = image_configuration.as_ref() {
+        enablement.insert(
+            IMAGE_GENERATION_SKILL_ID.to_string(),
+            SkillEnablementState {
+                enabled: configuration.enabled,
+                generation: configuration.generation,
+            },
+        );
+    }
     let skills = catalog
         .skills()
         .iter()
@@ -59,13 +95,18 @@ pub(super) fn management_snapshot(
                         enabled: false,
                         generation: 0,
                     });
-            management_entry(
+            let mut entry = management_entry(
                 skill,
                 state.enabled,
                 state.generation,
                 installed_records.get(skill.id().as_str()).copied(),
                 workflow,
-            )
+            )?;
+            if entry.id == IMAGE_GENERATION_SKILL_ID && !entry.enabled
+                && image_configuration.as_ref().is_none_or(|configuration| configuration.validate_enablement().is_err()) {
+                entry.enablement_block = Some(mycopilot_protocol_rs::SkillEnablementBlockDto::ImageGenerationConfigurationRequired);
+            }
+            Ok::<_, String>(entry)
         })
         .collect::<Result<Vec<_>, _>>()
         .map_err(|_| SkillManagementFailure::list_unavailable())?;
@@ -104,6 +145,7 @@ pub(crate) fn set_enabled_response(
     catalog: &SkillCatalog,
     installations: &SkillInstallationService,
     workflow: Option<&SkillInstallationWorkflow>,
+    image_configuration: Option<&ImageGenerationConfigurationService>,
     request: &SkillsSetEnabledRequest,
 ) -> Result<(SkillsSetEnabledResponse, bool), SkillManagementFailure> {
     let descriptor = catalog
@@ -139,8 +181,14 @@ pub(crate) fn set_enabled_response(
         ));
     }
 
-    let (current, enablement) = management_snapshot(storage, catalog, installations, workflow)
-        .map_err(|_| SkillManagementFailure::set_enabled_unavailable())?;
+    let (current, enablement) = management_snapshot(
+        storage,
+        catalog,
+        installations,
+        workflow,
+        image_configuration,
+    )
+    .map_err(|_| SkillManagementFailure::set_enabled_unavailable())?;
     let current_state = enablement
         .get(request.skill_id.as_str())
         .copied()
@@ -177,24 +225,38 @@ pub(crate) fn set_enabled_response(
         ));
     }
 
-    let outcome = storage
-        .compare_and_set_skill_enablement(
-            &request.skill_id,
-            current_enabled,
-            current_state.generation,
-            request.enabled,
+    let (changed, target_generation) = if request.skill_id == IMAGE_GENERATION_SKILL_ID {
+        let service =
+            image_configuration.ok_or_else(SkillManagementFailure::set_enabled_unavailable)?;
+        let result = service
+            .set_skill_enabled(current_state.generation, request.enabled)
+            .map_err(image_enablement_failure)?;
+        (
+            result.outcome == ImageGenerationConfigurationMutationOutcome::Updated,
+            result.configuration.generation,
         )
-        .map_err(|_| SkillManagementFailure::set_enabled_unavailable())?;
-    let (changed, target_generation) = match outcome {
-        SkillEnablementCompareAndSetOutcome::Updated { generation } => (true, generation),
-        SkillEnablementCompareAndSetOutcome::AlreadyCurrent { generation } => (false, generation),
-        SkillEnablementCompareAndSetOutcome::Conflict => {
-            return Err(SkillManagementFailure::new(
-                SkillManagementOperationDto::SetEnabled,
-                SkillManagementErrorCodeDto::StateConflict,
-                SkillManagementRecoveryDto::RefreshManagement,
-                "The Skill state changed. Refresh the Skill management list before retrying.",
-            ));
+    } else {
+        let outcome = storage
+            .compare_and_set_skill_enablement(
+                &request.skill_id,
+                current_enabled,
+                current_state.generation,
+                request.enabled,
+            )
+            .map_err(|_| SkillManagementFailure::set_enabled_unavailable())?;
+        match outcome {
+            SkillEnablementCompareAndSetOutcome::Updated { generation } => (true, generation),
+            SkillEnablementCompareAndSetOutcome::AlreadyCurrent { generation } => {
+                (false, generation)
+            }
+            SkillEnablementCompareAndSetOutcome::Conflict => {
+                return Err(SkillManagementFailure::new(
+                    SkillManagementOperationDto::SetEnabled,
+                    SkillManagementErrorCodeDto::StateConflict,
+                    SkillManagementRecoveryDto::RefreshManagement,
+                    "The Skill state changed. Refresh the Skill management list before retrying.",
+                ));
+            }
         }
     };
 
@@ -233,6 +295,30 @@ pub(crate) fn set_enabled_response(
     ))
 }
 
+fn image_enablement_failure(error: ImageGenerationConfigurationError) -> SkillManagementFailure {
+    use ImageGenerationConfigurationError::*;
+    match error {
+        RevisionConflict { .. } | InvalidRevision => SkillManagementFailure::new(
+            SkillManagementOperationDto::SetEnabled,
+            SkillManagementErrorCodeDto::StateConflict,
+            SkillManagementRecoveryDto::RefreshManagement,
+            "The image-generation configuration changed. Refresh Skill management before retrying.",
+        ),
+        MissingEndpoint | InvalidEndpoint | InsecureEndpoint | MissingModel | InvalidModelId
+        | MissingCredential | InvalidCredential | ConfigurationIncomplete(_)
+        | CredentialStoreUnavailable | InvalidConfiguration | UnsupportedAdapter
+        | TextToImageRequired | CredentialReplacementRequired => SkillManagementFailure::new(
+            SkillManagementOperationDto::SetEnabled,
+            SkillManagementErrorCodeDto::ConfigurationRequired,
+            SkillManagementRecoveryDto::ConfigureImageGeneration,
+            "Configure the image-generation endpoint, model and available API credential before enabling this Skill.",
+        ),
+        StorageUnavailable | CommitIndeterminate | Unavailable => {
+            SkillManagementFailure::set_enabled_unavailable()
+        }
+    }
+}
+
 pub(super) fn management_entry(
     descriptor: &SkillDescriptor,
     enabled: bool,
@@ -269,6 +355,7 @@ pub(super) fn management_entry(
             generation,
         ),
         enabled,
+        enablement_block: None,
         actions: SkillManagementActionsDto {
             can_set_enabled: true,
             can_update,

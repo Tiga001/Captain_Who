@@ -804,6 +804,7 @@ export const koKRTranslations = {
   'skills.error.sourceAuthorityExpired':
     '이 스킬 소스 선택이 만료되었습니다. 소스를 다시 해결하세요.',
   'skills.error.acknowledgementRequired': '계속하기 전에 필요한 모든 안전 주의사항을 확인하세요.',
+  'skills.error.configurationRequired': '이 스킬을 켜기 전에 설정 → 구성 → 이미지 생성에서 유효한 API 주소, 모델 및 키를 저장하세요.',
   'skills.error.notManageable': '이 스킬은 이 페이지에서 관리할 수 없습니다.',
   'skills.error.operationConflict': '작동 상태가 변경되었습니다. 작업을 다시 시작하십시오.',
   'skills.error.cancelled': '작업이 취소되었습니다.',

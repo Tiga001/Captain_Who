@@ -10,6 +10,40 @@ type BeforeApprovalPublicationArbitrationHook = Arc<dyn Fn() + Send + Sync>;
 type BeforeWaitingPublicationArbitrationHook = Arc<dyn Fn() + Send + Sync>;
 
 #[cfg(test)]
+type BeforeHumanResumeExecutionHook = Arc<dyn Fn() + Send + Sync>;
+
+#[cfg(test)]
+static BEFORE_HUMAN_RESUME_EXECUTION_HOOKS: Mutex<Vec<(String, BeforeHumanResumeExecutionHook)>> =
+    Mutex::new(Vec::new());
+
+#[cfg(test)]
+pub(super) fn install_before_human_resume_execution_hook(
+    run_id: &str,
+    hook: BeforeHumanResumeExecutionHook,
+) {
+    BEFORE_HUMAN_RESUME_EXECUTION_HOOKS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .push((run_id.to_string(), hook));
+}
+
+#[cfg(test)]
+fn run_before_human_resume_execution_hook(run_id: &str) {
+    let hook = {
+        let mut hooks = BEFORE_HUMAN_RESUME_EXECUTION_HOOKS
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        hooks
+            .iter()
+            .position(|(candidate, _)| candidate == run_id)
+            .map(|index| hooks.swap_remove(index).1)
+    };
+    if let Some(hook) = hook {
+        hook();
+    }
+}
+
+#[cfg(test)]
 static BEFORE_PENDING_ACTION_STORE_HOOKS: Mutex<Vec<(String, BeforePendingActionStoreHook)>> =
     Mutex::new(Vec::new());
 

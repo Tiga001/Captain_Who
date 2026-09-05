@@ -31,6 +31,7 @@
     "test:browser": "pnpm prepare:office-renderer && vitest run --project browser",
     "test:electron": "vitest run --project electron-fixtures && vitest run --project managed-playwright-e2e",
     "test:web": "pnpm test:unit && pnpm test:electron && pnpm test:browser",
+    "test:human-interaction-core-e2e": "pnpm prepare:office-renderer && vitest run --project human-interaction-core-e2e",
     "test:automation-core-e2e": "vitest run --project automation-core-e2e",
     "test:multi-agent-release": "node scripts/run-multi-agent-release-gate.mjs",
     "generate:playwright-conformance-report": "node scripts/playwright-conformance-report.mjs --write",

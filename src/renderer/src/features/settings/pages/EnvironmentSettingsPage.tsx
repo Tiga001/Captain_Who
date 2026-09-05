@@ -1,3 +1,9 @@
+import { renderSettingsNodes, settingLabel } from '../settingsDefinition'
+import {
+  environmentSettings,
+  environmentAddProjectSettings,
+  environmentProjectActions
+} from './managementSettings.definition'
 import { NotebookText, Trash2 } from 'lucide-react'
 import { useState } from 'react'
 import { ConfirmationDialog } from '../../../components/dialog/ConfirmationDialog'
@@ -23,41 +29,47 @@ export function EnvironmentSettingsPage({
     <article className="settings-list-page environment-settings-page">
       <h1>{t('settings.page.environment')}</h1>
 
-      <section
-        className="settings-list-section environment-projects"
-        aria-labelledby="environment-projects-heading"
-      >
-        <div className="settings-list-section__header environment-projects__header">
-          <h2 id="environment-projects-heading">{t('environment.selectProject')}</h2>
-          <button
-            className="environment-projects__add-button"
-            type="button"
-            onClick={addProjectFromFolder}
-          >
-            {t('environment.addProject')}
-          </button>
-        </div>
-
-        <div className="settings-list environment-projects__list">
-          {projects.map((project) => (
-            <div className="environment-project-card" key={project.id}>
-              <NotebookText aria-hidden="true" />
-              <span className="environment-project-card__name">{project.name}</span>
-              {project.path && (
-                <span className="environment-project-card__detail">{project.path}</span>
-              )}
+      {renderSettingsNodes(environmentSettings, (node) => (
+        <section
+          className="settings-list-section environment-projects"
+          aria-labelledby="environment-projects-heading"
+        >
+          <div className="settings-list-section__header environment-projects__header">
+            <h2 id="environment-projects-heading">{settingLabel(node, t)}</h2>
+            {renderSettingsNodes(environmentAddProjectSettings, (item) => (
               <button
-                className="environment-project-card__delete"
+                className="environment-projects__add-button"
                 type="button"
-                aria-label={`${t('environment.deleteProject')} ${project.name}`}
-                onClick={() => setPendingDeleteProject(project)}
+                onClick={addProjectFromFolder}
               >
-                <Trash2 aria-hidden="true" />
+                {settingLabel(item, t)}
               </button>
-            </div>
-          ))}
-        </div>
-      </section>
+            ))}
+          </div>
+
+          <div className="settings-list environment-projects__list">
+            {projects.map((project) => (
+              <div className="environment-project-card" key={project.id}>
+                <NotebookText aria-hidden="true" />
+                <span className="environment-project-card__name">{project.name}</span>
+                {project.path && (
+                  <span className="environment-project-card__detail">{project.path}</span>
+                )}
+                {renderSettingsNodes(environmentProjectActions, (item) => (
+                  <button
+                    className="environment-project-card__delete"
+                    type="button"
+                    aria-label={`${settingLabel(item, t)} ${project.name}`}
+                    onClick={() => setPendingDeleteProject(project)}
+                  >
+                    <Trash2 aria-hidden="true" />
+                  </button>
+                ))}
+              </div>
+            ))}
+          </div>
+        </section>
+      ))}
 
       {pendingDeleteProject && (
         <ConfirmationDialog

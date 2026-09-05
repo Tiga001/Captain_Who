@@ -1,4 +1,5 @@
 use super::*;
+use crate::adapters::skills_adapter::management_response_with_image_configuration;
 
 pub(crate) struct ParsedSkillsRequest {
     pub(crate) id: JsonRpcId,
@@ -214,18 +215,24 @@ pub(crate) fn handle_skills_request(
             None,
             None,
             None,
+            None,
             request,
         ),
         Err(response) => response,
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "The transport boundary wires independently owned Host services explicitly."
+)]
 pub(crate) fn handle_parsed_skills_request(
     storage: &StorageService,
     skills_service: &SkillsService,
     skill_installation_service: &SkillInstallationService,
     skill_installation_workflow: Option<&SkillInstallationWorkflow>,
     skill_source_resolution: Option<&SkillSourceResolutionService>,
+    image_configuration: Option<&ImageGenerationConfigurationService>,
     notification_tx: Option<&mpsc::UnboundedSender<Value>>,
     request: ParsedSkillsRequest,
 ) -> Value {
@@ -254,11 +261,12 @@ pub(crate) fn handle_parsed_skills_request(
                 .list()
                 .map_err(|_| SkillManagementFailure::list_unavailable())
                 .and_then(|catalog| {
-                    management_response(
+                    management_response_with_image_configuration(
                         storage,
                         &catalog,
                         skill_installation_service,
                         skill_installation_workflow,
+                        image_configuration,
                     )
                 });
             match result {
@@ -276,6 +284,7 @@ pub(crate) fn handle_parsed_skills_request(
                         &catalog,
                         skill_installation_service,
                         skill_installation_workflow,
+                        image_configuration,
                         &input,
                     )
                 });

@@ -2,6 +2,8 @@ import { useState } from 'react'
 import { useModelSettings } from '../../../config/ModelSettingsProvider'
 import { useFrontendConfig } from '../../../config/FrontendConfigProvider'
 import { SettingsBreadcrumbs } from '../components/SettingsBreadcrumbs'
+import { renderSettingsNodes } from '../settingsDefinition'
+import { useSettingsPageNavigation } from '../settingsSearchNavigation'
 import { ModelForm } from './configuration/ModelForm'
 import { ModelManager } from './configuration/ModelManager'
 import { ModelProviderSettings } from './configuration/ModelProviderSettings'
@@ -9,6 +11,7 @@ import { WebSearchSettings } from './configuration/WebSearchSettings'
 import { ImageGenerationSettings } from './configuration/ImageGenerationSettings'
 import type { ModelConfig, ModelFormValues } from './configuration/configurationTypes'
 import { modelConfigFromForm } from './configuration/modelPersistence'
+import { configurationSettings } from './configuration/configuration.definition'
 import './ConfigurationSettingsPage.css'
 
 type ConfigurationView = 'settings' | 'manager' | 'createModel' | 'editModel'
@@ -40,6 +43,17 @@ export function ConfigurationSettingsPage({
   } = useModelSettings()
   const [view, setView] = useState<ConfigurationView>('settings')
   const [editingModel, setEditingModel] = useState<ModelConfig | undefined>()
+
+  useSettingsPageNavigation('configuration', (target) => {
+    if (target.id === 'configuration.models') {
+      setView('manager')
+    } else if (target.view?.startsWith('model')) {
+      // Search never chooses or creates a model on the user's behalf.
+      if (view !== 'editModel' && view !== 'createModel') setView('manager')
+    } else {
+      setView('settings')
+    }
+  })
 
   const openCreateModel = () => {
     setEditingModel(undefined)
@@ -134,24 +148,35 @@ export function ConfigurationSettingsPage({
 
   return (
     <div className="configuration-page">
-      <ModelProviderSettings
-        apiUrl={apiUrl}
-        apiTokenStatus={apiTokenStatus}
-        models={models}
-        onApiTokenCommit={updateApiToken}
-        onApiUrlChange={setApiUrl}
-        onManageModels={() => setView('manager')}
-        onToggleModel={toggleModel}
-      />
-
-      <WebSearchSettings
-        searchMode={searchMode}
-        tavilyApiKeyStatus={tavilyApiKeyStatus}
-        onSearchModeChange={setSearchMode}
-        onTavilyApiKeyCommit={updateTavilyApiKey}
-      />
-
-      <ImageGenerationSettings />
+      {renderSettingsNodes(configurationSettings, (node) => {
+        switch (node.id) {
+          case 'configuration.model':
+            return (
+              <ModelProviderSettings
+                definition={node}
+                apiUrl={apiUrl}
+                apiTokenStatus={apiTokenStatus}
+                models={models}
+                onApiTokenCommit={updateApiToken}
+                onApiUrlChange={setApiUrl}
+                onManageModels={() => setView('manager')}
+                onToggleModel={toggleModel}
+              />
+            )
+          case 'configuration.webSearch':
+            return (
+              <WebSearchSettings
+                definition={node}
+                searchMode={searchMode}
+                tavilyApiKeyStatus={tavilyApiKeyStatus}
+                onSearchModeChange={setSearchMode}
+                onTavilyApiKeyCommit={updateTavilyApiKey}
+              />
+            )
+          case 'configuration.image':
+            return <ImageGenerationSettings definition={node} />
+        }
+      })}
     </div>
   )
 }

@@ -754,6 +754,7 @@ async fn existing_chat_with_active_human_root_turn_is_retryable_without_admissio
             title: "Busy automation target".to_string(),
             messages: vec![
                 ChatMessageRecord {
+                    human_interaction_response: None,
                     id: "active-human-root-user".to_string(),
                     role: "user".to_string(),
                     content: "Existing active turn".to_string(),
@@ -764,6 +765,7 @@ async fn existing_chat_with_active_human_root_turn_is_retryable_without_admissio
                     ui_state_json: None,
                 },
                 ChatMessageRecord {
+                    human_interaction_response: None,
                     id: ACTIVE_ASSISTANT_ID.to_string(),
                     role: "assistant".to_string(),
                     content: String::new(),

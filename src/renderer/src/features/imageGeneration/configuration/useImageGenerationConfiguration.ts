@@ -9,7 +9,6 @@ import { IMAGE_GENERATION_CONFIGURATION_SCHEMA_VERSION } from '@mycopilot/protoc
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   getImageGenerationConfiguration,
-  setImageGenerationEnabled,
   updateImageGenerationConfiguration
 } from './imageGenerationClient'
 import {
@@ -24,7 +23,7 @@ export interface ImageGenerationConfigurationForm {
   watermark: boolean
 }
 
-export type ImageGenerationConfigurationPendingOperation = 'saving' | 'enabling' | 'disabling'
+export type ImageGenerationConfigurationPendingOperation = 'saving'
 
 export type ImageGenerationConfigurationFeedback =
   | { kind: 'authoritativeRefresh'; code?: ImageGenerationConfigurationErrorCode }
@@ -164,10 +163,10 @@ export function useImageGenerationConfiguration() {
   )
 
   const runMutation = useCallback(
-    async (operation: ImageGenerationConfigurationPendingOperation, task: () => Promise<void>) => {
+    async (task: () => Promise<void>) => {
       if (mutationInFlightRef.current) return false
       mutationInFlightRef.current = true
-      setPendingOperation(operation)
+      setPendingOperation('saving')
       setFeedback(undefined)
       try {
         await task()
@@ -189,7 +188,7 @@ export function useImageGenerationConfiguration() {
     const snapshotForm = form
     const snapshotCredentialMutation = credentialMutation
 
-    await runMutation('saving', async () => {
+    await runMutation(async () => {
       const output = await updateImageGenerationConfiguration(
         updateInput(snapshotConfiguration, snapshotForm, snapshotCredentialMutation)
       )
@@ -199,52 +198,6 @@ export function useImageGenerationConfiguration() {
       setCredentialMutation({ type: 'keep' })
     })
   }, [configuration, credentialMutation, form, runMutation])
-
-  const setEnabled = useCallback(
-    async (enabled: boolean) => {
-      if (!configuration || !form) return
-      const snapshotConfiguration = configuration
-      const snapshotForm = form
-      const snapshotCredentialMutation = credentialMutation
-      const snapshotDirty = dirty
-
-      await runMutation(enabled ? 'enabling' : 'disabling', async () => {
-        let effectiveConfiguration = snapshotConfiguration
-
-        // Enabling uses one serialized CAS chain: persist dirty fields, adopt its revision, then
-        // enable. Running these requests concurrently would always make one revision stale.
-        if (enabled && snapshotDirty) {
-          const updated = await updateImageGenerationConfiguration(
-            updateInput(snapshotConfiguration, snapshotForm, snapshotCredentialMutation)
-          )
-          effectiveConfiguration = updated.configuration
-          if (mountedRef.current) {
-            setConfiguration(updated.configuration)
-            setForm(formFromConfiguration(updated.configuration))
-            setCredentialMutation({ type: 'keep' })
-          }
-        }
-
-        const output = await setImageGenerationEnabled({
-          schemaVersion: IMAGE_GENERATION_CONFIGURATION_SCHEMA_VERSION,
-          expectedRevision: effectiveConfiguration.revision,
-          enabled
-        })
-        if (!mountedRef.current) return
-
-        setConfiguration(output.configuration)
-        if (enabled || !snapshotDirty) {
-          setForm(formFromConfiguration(output.configuration))
-          setCredentialMutation({ type: 'keep' })
-        } else {
-          // Disabling is independent of unsaved field edits; preserve them for an explicit save.
-          setForm(snapshotForm)
-          setCredentialMutation(snapshotCredentialMutation)
-        }
-      })
-    },
-    [configuration, credentialMutation, dirty, form, runMutation]
-  )
 
   const updateForm = useCallback(
     <Key extends keyof ImageGenerationConfigurationForm>(
@@ -281,7 +234,6 @@ export function useImageGenerationConfiguration() {
     load,
     save,
     updateCredentialMutation,
-    setEnabled,
     state,
     updateForm
   }

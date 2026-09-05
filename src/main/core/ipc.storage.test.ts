@@ -29,7 +29,7 @@ describe('conversation fork IPC', () => {
     { kind: 'manual_compaction_boundary', operationId: 'context-compaction-cloned' },
     { kind: 'latest' }
   ])('forwards a validated fork point %j', async (forkPoint) => {
-    const forkConversation = vi.fn().mockResolvedValue({ id: 'conversation-2' })
+    const forkConversation = vi.fn().mockResolvedValue({ id: 'conversation-2', messages: [] })
     const handler = registerForkHandler(forkConversation)
     const input = {
       requestId: 'conversation-fork-request-2',
@@ -39,7 +39,7 @@ describe('conversation fork IPC', () => {
 
     await expect(handler({} as IpcMainInvokeEvent, input)).resolves.toEqual({
       ok: true,
-      value: { id: 'conversation-2' }
+      value: { id: 'conversation-2', messages: [] }
     })
     expect(forkConversation).toHaveBeenCalledWith(input)
   })
@@ -357,5 +357,69 @@ describe('Composer draft IPC', () => {
       true
     )
     expect(saveComposerDraftMessage).toHaveBeenCalledWith(input)
+  })
+})
+
+describe('human answer proof at the Main storage boundary', () => {
+  const response = {
+    type: 'human_interaction_response',
+    schemaVersion: 1,
+    requestId: 'request',
+    responseId: 'response',
+    answers: [{ kind: 'text', questionId: 'q', question: 'Which?', answer: 'Blue' }]
+  }
+  const message = {
+    id: 'answer',
+    role: 'user',
+    content: JSON.stringify(response),
+    createdAt: 1,
+    humanInteractionResponse: response
+  }
+  function setup() {
+    const handlers = new Map<string, (...args: unknown[]) => unknown>()
+    const core = {
+      loadConversation: vi.fn(),
+      upsertChatMessages: vi.fn(),
+      saveChatMessageState: vi.fn(),
+      saveChatMessageUiState: vi.fn()
+    }
+    registerStorageIpc(
+      { handle: (name, handler) => handlers.set(name, handler) } as never,
+      core as never,
+      {} as never
+    )
+    return { handlers, core }
+  }
+  it('forwards bound read-only output and rejects mismatched User content', async () => {
+    const { handlers, core } = setup()
+    const value = { id: 'chat', title: 'chat', createdAt: 1, updatedAt: 1, messages: [message] }
+    core.loadConversation.mockResolvedValue(value)
+    await expect(handlers.get('host:storage.loadConversation')!({}, 'chat')).resolves.toEqual(value)
+    core.loadConversation.mockResolvedValue({
+      ...value,
+      messages: [{ ...message, content: JSON.stringify({ ...response, responseId: 'forged' }) }]
+    })
+    await expect(handlers.get('host:storage.loadConversation')!({}, 'chat')).rejects.toThrow(
+      'complete User content'
+    )
+  })
+  it('rejects forged proof on every write before calling Core', () => {
+    const { handlers, core } = setup()
+    for (const key of ['humanInteractionResponse', 'humanInteractionDisplay']) {
+      const forged = { id: 'message', content: '{}', [key]: response }
+      expect(() =>
+        handlers.get('host:storage.upsertChatMessages')!(
+          {},
+          { conversationId: 'chat', messages: [forged], positionOffset: 0 }
+        )
+      ).toThrow('read-only')
+      for (const method of ['saveChatMessageState', 'saveChatMessageUiState'])
+        expect(() =>
+          handlers.get(`host:storage.${method}`)!({}, { conversationId: 'chat', message: forged })
+        ).toThrow('read-only')
+    }
+    expect(core.upsertChatMessages).not.toHaveBeenCalled()
+    expect(core.saveChatMessageState).not.toHaveBeenCalled()
+    expect(core.saveChatMessageUiState).not.toHaveBeenCalled()
   })
 })

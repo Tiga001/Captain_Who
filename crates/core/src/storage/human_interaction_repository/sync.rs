@@ -460,9 +460,9 @@ fn has_approval_handoff(
     connection: &Connection,
     request: &HumanInteractionRequestSnapshot,
 ) -> Result<bool> {
-    let Some(response) = request.response.as_ref() else {
+    if request.response.is_none() {
         return Ok(false);
-    };
+    }
     let mut statement = connection.prepare("SELECT agent_input_json FROM agent_pending_actions WHERE run_id=?1 AND conversation_id=?2 AND assistant_message_id=?3 AND status IN ('pending','approved','executing') AND target_status IS NULL").map_err(unavailable)?;
     let envelopes = statement
         .query_map(
@@ -494,7 +494,13 @@ fn has_approval_handoff(
         {
             continue;
         }
-        if checkpoint.conversation_trace_items.iter().any(|item| matches!(item,crate::ConversationTurnTraceItem::ToolResult {call_id,tool,success:true,observation,..} if call_id==&request.tool_call_id && tool=="request_user_input" && observation.get("type").and_then(serde_json::Value::as_str)==Some("human_interaction_response") && observation.get("schemaVersion").and_then(serde_json::Value::as_u64)==Some(1) && observation.get("requestId").and_then(serde_json::Value::as_str)==Some(&request.request_id) && observation.get("responseId").and_then(serde_json::Value::as_str)==Some(&response.response_id))) { return Ok(true); }
+        if has_exact_answer_projection(
+            request,
+            &checkpoint.conversation_trace_items,
+            &checkpoint.conversation_model_context_items,
+        )? {
+            return Ok(true);
+        }
     }
     Ok(false)
 }
@@ -503,9 +509,9 @@ fn has_terminal_consumption(
     connection: &Connection,
     request: &HumanInteractionRequestSnapshot,
 ) -> Result<bool> {
-    let Some(response) = request.response.as_ref() else {
+    if request.response.is_none() {
         return Ok(false);
-    };
+    }
     let stopped: bool = connection
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM agent_tree_run_stops WHERE run_id=?1)",
@@ -538,7 +544,15 @@ fn has_terminal_consumption(
     {
         return Ok(false);
     }
-    Ok(trace.items.iter().any(|item| matches!(item,crate::ConversationTurnTraceItem::ToolResult {call_id,tool,success:true,observation,..} if call_id==&request.tool_call_id && tool=="request_user_input" && observation.get("type").and_then(serde_json::Value::as_str)==Some("human_interaction_response") && observation.get("schemaVersion").and_then(serde_json::Value::as_u64)==Some(1) && observation.get("requestId").and_then(serde_json::Value::as_str)==Some(&request.request_id) && observation.get("responseId").and_then(serde_json::Value::as_str)==Some(&response.response_id))))
+    let Some(context) = crate::storage::conversation_model_context_repository::get_log_for_message(
+        connection,
+        &request.assistant_message_id,
+    )
+    .map_err(unavailable)?
+    else {
+        return Ok(false);
+    };
+    has_exact_answer_projection(request, &trace.items, &context.items)
 }
 
 /// Private immutable checkpoints for cancellation and startup; this never claims execution.
@@ -574,4 +588,46 @@ pub fn load_sync_for_run(
         ))
     })
     .transpose()
+}
+
+/// A matching ID cannot certify delivery of a different or missing answer. Recovery requires the
+/// full frozen response in both the durable ToolResult and its replay-safe model projection.
+fn has_exact_answer_projection(
+    request: &HumanInteractionRequestSnapshot,
+    trace: &[crate::ConversationTurnTraceItem],
+    context: &[crate::ConversationModelContextItem],
+) -> Result<bool> {
+    let expected =
+        serde_json::to_value(human_interaction_answer_display(request)?).map_err(unavailable)?;
+    Ok(trace.iter().any(|item| {
+        let crate::ConversationTurnTraceItem::ToolResult {
+            sequence,
+            call_id,
+            tool,
+            status,
+            success,
+            observation,
+            truncated,
+            ..
+        } = item
+        else {
+            return false;
+        };
+        call_id == &request.tool_call_id
+            && tool == "request_user_input"
+            && *success
+            && *status == crate::ConversationTraceToolResultStatus::Succeeded
+            && !truncated
+            && observation == &expected
+            && context.iter().any(|message| {
+                message.sequence == *sequence
+                    && message.role == "tool"
+                    && !message.is_error
+                    && message.tool_call_id.as_deref() == Some(request.tool_call_id.as_str())
+                    && serde_json::from_str::<serde_json::Value>(&message.content)
+                        .ok()
+                        .as_ref()
+                        == Some(&expected)
+            })
+    }))
 }

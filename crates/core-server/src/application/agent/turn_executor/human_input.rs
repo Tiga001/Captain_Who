@@ -307,7 +307,8 @@ impl AgentService {
                     }
                     Err(error) => {
                         eprintln!("refused human input continuation: {error}");
-                        service.cancel_waiting_human_input_run(&claim.binding.run_id);
+                        let durable_terminal =
+                            service.cancel_waiting_human_input_run(&claim.binding.run_id);
                         service.unregister_cancellation_if_current(&claim.binding.run_id, &token);
                         if let Ok(Some((snapshot, _))) = service
                             .storage
@@ -320,6 +321,16 @@ impl AgentService {
                             message: "用户回答已保存，但原运行无法安全恢复。请检查当前模型设置后开始新的运行。".into(),
                             recoverable: false, code: Some("human_input_resume_failed".into()), details: None,
                         }));
+                        if durable_terminal {
+                            // Preparation cannot consume the queued answers. Once the failed
+                            // suspended Turn has durably released its lease, give earlier saved
+                            // async responses a new route without requiring another user event.
+                            service.publish_human_delivery_changes(
+                                &claim.binding.conversation_id,
+                                &notifications,
+                            );
+                            service.schedule_human_input_deliveries(notifications);
+                        }
                     }
                 }
             });
@@ -374,6 +385,25 @@ impl AgentService {
             mcp_tools.clone(),
             None,
         )?;
+        let assistant_created_at = self
+            .storage
+            .get_assistant_message_created_at(
+                &binding.conversation_id,
+                &binding.assistant_message_id,
+            )?
+            .ok_or_else(|| "original assistant missing".to_string())?;
+        // Fence before any resumed queued tool or Provider call can execute; claimed-only is restartable.
+        #[cfg(test)]
+        run_before_human_resume_execution_hook(&binding.run_id);
+        if !self
+            .storage
+            .mark_sync_human_interaction_execution_started(binding)
+            .map_err(|e| e.to_string())?
+        {
+            return Err("human response execution claim was revoked".into());
+        }
+        // Publish accepting control only after every fallible preparation step and the durable
+        // execution CAS. A refused claim otherwise leaves a queue with no worker to drain it.
         let steer_input = self.register_active_run_control(
             &binding.run_id,
             &binding.conversation_id,
@@ -382,21 +412,6 @@ impl AgentService {
             input.model_capabilities,
             context.permissions,
         );
-        // Fence before any resumed queued tool or Provider call can execute; claimed-only is restartable.
-        if !self
-            .storage
-            .mark_sync_human_interaction_execution_started(binding)
-            .map_err(|e| e.to_string())?
-        {
-            return Err("human response execution claim was revoked".into());
-        }
-        let assistant_created_at = self
-            .storage
-            .get_assistant_message_created_at(
-                &binding.conversation_id,
-                &binding.assistant_message_id,
-            )?
-            .ok_or_else(|| "original assistant missing".to_string())?;
         Ok(PreparedRuntimeTurnSegment {
             run_id: binding.run_id.clone(),
             conversation_id: binding.conversation_id.clone(),

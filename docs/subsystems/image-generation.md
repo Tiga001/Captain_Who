@@ -2,7 +2,7 @@
 status: current
 audience: developers
 owner: engineering
-last_verified: 2026-09-03
+last_verified: 2026-09-05
 ---
 
 # 图片生成子系统
@@ -20,6 +20,18 @@ last_verified: 2026-09-03
 | Renderer           | 编辑配置、展示可用性、解析 Tool 活动、按需读取图片、管理 Blob URL 生命周期                 | 信任模型输出或任意远程图片链接                   |
 
 Bundled Skill `bundled:application:image-generation` 负责向模型说明 Tool 使用方式；真正的参数验证、授权、计费副作用防重和 Artifact 安全仍由代码负责。
+
+### 单一启用状态与渐进加载
+
+图片生成只保留“设置 → 技能”中的内置 Skill 开关，配置页只编辑 API、模型、能力与水印。该 Skill 的管理、发现和激活准入使用图片配置记录的 `enabled` 与 generation；不另存一份可独立控制执行的 Skill override。其他 Skill 的启用规则不变。图片配置默认关闭，统一状态时不因普通 Skill 默认开启而自动打开图片生成。
+
+- 关闭：新 Run 的发现目录不包含图片生成 Skill；迟到激活与新的图片执行仍校验后端当前状态。
+- 开启、尚未激活：模型仅看到简短 Skill 发现元数据，不提供 `image_generation` Schema 或图片生成专项指令。
+- 激活后：沿用现有 Skill 激活流程加载完整指令和动态工具。水印规则、生成结果读取方式等专项说明保存在该 Skill 中，不写入基础系统提示词。
+
+开关开启前复用图片配置完整性与凭据可用性判断；界面消费 Host 派生的禁选状态，并在点击时提示先完成配置。配置异常不阻止关闭。已有 Run 的冻结 Skill 历史沿用原生命周期，不改写已发生的工具调用、图片或历史消息；关闭不自动撤回已接纳的 Provider 请求。
+
+`skills.listManagement` 对配置不足的未启用图片 Skill 返回 `enablementBlock: "imageGenerationConfigurationRequired"`；开关提交仍重新校验同一 `validate_enablement` 规则，不能依赖旧 UI 状态授予执行资格。配置保存成功复用 `skills.changed` 通知刷新其他页面/窗口的启用状态与禁选状态。无需数据库迁移或重置；既有图片配置、凭据和 Artifact 保持原样。
 
 ## 配置与凭据
 
@@ -42,7 +54,7 @@ readiness 包括：
 
 配置保存在 SQLite，密钥保存在原生凭据后端，两者通过阶段化写入和启动期 reconciliation 保持一致。更新和启停都使用 `revision` 做 compare-and-swap；冲突时客户端必须重新读取，不得覆盖更新。
 
-凭据变更协议支持 `keep`、`replace` 和 `clear`。图片生成使用与模型、搜索相同的 `CredentialInput`：未配置、已配置、替换中是三种常规视觉形态；清除通过已配置态的图标与标准确认弹窗提交，不增加“待清除”表单行。图片生成已支持清除已保存 API Key。Renderer 的配置 hook 串行化写入：启用且表单有未保存内容时，先更新配置，接收新 revision，再发启用请求；禁用不会隐式提交未保存字段。明文密钥只保留在表单内存中，并在成功替换或取消后清空。
+凭据变更协议支持 `keep`、`replace` 和 `clear`。图片生成使用与模型、搜索相同的 `CredentialInput`：未配置、已配置、替换中是三种常规视觉形态；清除通过已配置态的图标与标准确认弹窗提交，不增加“待清除”表单行。图片生成已支持清除已保存 API Key。Renderer 的配置 hook 串行化保存；Skill 开关只修改启用状态，不隐式保存配置页草稿。明文密钥只保留在表单内存中，并在成功替换或取消后清空。
 
 当前约束：endpoint 只接受 HTTPS，最长 2,048 字节；model 最长 512 字节；凭据最长 8,192 字节。启用前必须通过完整本地校验；凭据后端不可用时仍允许禁用，避免用户被锁在启用状态。
 
@@ -56,7 +68,7 @@ SQLite 只保存带后端标签的不透明引用。读取时按标签 fail clos
 
 ## Agent 执行流程
 
-1. Renderer 启动 Agent Run；Rust Core 根据当前 Tool 集和 bundled Skill 向模型暴露 `image_generation`。
+1. Renderer 启动 Agent Run；Rust Core 按统一开关决定是否提供图片生成 Skill 的简短描述。模型激活后，下一次模型请求才包含完整 Skill 指令与 `image_generation`。
 2. Tool 解析 `generate` 或 `edit` 参数。prompt 最长 32 KiB；图生图输入最大 20 MiB，并必须通过现有文件授权边界解析 `inputPath`。
 3. Rust Core 创建配置执行快照：读取配置与 revision、解析凭据，再复读配置；若中途变化只重试一次，最终执行绑定到一个精确 revision。
 4. 调度器按 Run/call 身份准入。默认最多并发 2 个请求、总计接纳 8 个执行（包含正在运行和等待中的请求）；配置步骤默认 15 秒，完整执行默认 5 分钟。
@@ -146,7 +158,7 @@ Core Server 将 Artifact 转换为传输数据，Main 在进入 Host API 前再�
 
 - 只有一个配置档和 `smartmlSeedream` 适配器。
 - 默认输出尺寸固定为 `2K` 预设；没有通用的任意宽高协议。
-- 设置 UI 支持保留或替换密钥；协议虽支持 `clear`，当前界面未提供独立清除入口。
+- 设置 UI 支持保留、替换和清除密钥；启用状态只通过内置图片生成 Skill 开关操作。
 - `readyUnverified` 不执行 Provider 连通或凭据有效性探测，首次真实执行才会暴露远端错误。
 - 默认最多同时执行 2 个图片请求，总计最多准入 8 个；容量满时新请求以 `busy` 拒绝。
 - Artifact 只支持 PNG、JPEG 和 WebP，并受下载、尺寸、像素和内存预算限制。

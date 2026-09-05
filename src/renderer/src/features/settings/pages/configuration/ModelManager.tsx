@@ -27,7 +27,11 @@ export function ModelManager({
   const pendingDeleteModel = models.find((model) => model.id === pendingDeleteId)
 
   return (
-    <section className="model-manager-page" aria-labelledby="model-manager-heading">
+    <section
+      className="model-manager-page"
+      aria-labelledby="model-manager-heading"
+      data-setting-id="configuration.models"
+    >
       <div className="model-manager-page__header">
         <h1 id="model-manager-heading">{t('configuration.modelManager')}</h1>
 

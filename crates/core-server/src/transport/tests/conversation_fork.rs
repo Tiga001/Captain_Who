@@ -143,6 +143,7 @@ fn fork_request_reports_active_command_as_structured_domain_error() {
             title: "fork rpc".to_string(),
             messages: vec![
                 ChatMessageRecord {
+                    human_interaction_response: None,
                     id: "user-fork-rpc".to_string(),
                     role: "user".to_string(),
                     content: "run it".to_string(),
@@ -153,6 +154,7 @@ fn fork_request_reports_active_command_as_structured_domain_error() {
                     ui_state_json: None,
                 },
                 ChatMessageRecord {
+                    human_interaction_response: None,
                     id: "assistant-fork-rpc".to_string(),
                     role: "assistant".to_string(),
                     content: "running".to_string(),

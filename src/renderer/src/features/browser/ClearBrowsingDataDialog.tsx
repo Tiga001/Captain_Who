@@ -10,6 +10,11 @@ import type {
 import { useFrontendConfig } from '../../config/FrontendConfigProvider'
 import { formatTranslation } from '../../config/translationFormat'
 import { clearBrowserData, getBrowserDataSummary } from './browserDataClient'
+import { renderSettingsNodes, settingLabel } from '../settings/settingsDefinition'
+import {
+  browserClearCategorySettings,
+  browserClearTimeRangeSettings
+} from '../mcp/BrowserAutomationSettings.definition'
 import './ClearBrowsingDataDialog.css'
 
 interface ClearBrowsingDataDialogProps {
@@ -17,20 +22,9 @@ interface ClearBrowsingDataDialogProps {
   onCleared?: () => void
 }
 
-const TIME_RANGES: BrowserDataTimeRange[] = [
-  'lastHour',
-  'last24Hours',
-  'last7Days',
-  'last4Weeks',
-  'allTime'
-]
-
-const ALL_CATEGORIES: BrowserDataCategory[] = [
-  'history',
-  'cookiesAndSiteData',
-  'cache',
-  'downloadHistory'
-]
+const ALL_CATEGORIES: BrowserDataCategory[] = browserClearCategorySettings.map(
+  (node) => node.category
+)
 
 export function ClearBrowsingDataDialog({ onClose, onCleared }: ClearBrowsingDataDialogProps) {
   const { language, t } = useFrontendConfig()
@@ -103,39 +97,31 @@ export function ClearBrowsingDataDialog({ onClose, onCleared }: ClearBrowsingDat
   }, [clearing, onClose])
 
   const rows = useMemo(
-    () => [
-      {
-        category: 'history' as const,
+    () => ({
+      history: {
         icon: Globe2,
-        label: t('mcp.browserData.history'),
         summary: formatTranslation(t, 'mcp.browserData.historySummary', {
           count: summary?.historyCount ?? 0,
           sites: summary?.historySiteCount ?? 0
         })
       },
-      {
-        category: 'cookiesAndSiteData' as const,
+      cookiesAndSiteData: {
         icon: Cookie,
-        label: t('mcp.browserData.cookies'),
         summary: formatTranslation(t, 'mcp.browserData.cookiesSummary', {
           count: summary?.cookieSiteCount ?? 0
         })
       },
-      {
-        category: 'cache' as const,
+      cache: {
         icon: Images,
-        label: t('mcp.browserData.cache'),
         summary: formatBytes(summary?.cacheBytes ?? 0, language)
       },
-      {
-        category: 'downloadHistory' as const,
+      downloadHistory: {
         icon: Download,
-        label: t('mcp.browserData.downloadHistory'),
         summary: formatTranslation(t, 'mcp.browserData.downloadSummary', {
           count: summary?.downloadCount ?? 0
         })
       }
-    ],
+    }),
     [language, summary, t]
   )
 
@@ -206,30 +192,30 @@ export function ClearBrowsingDataDialog({ onClose, onCleared }: ClearBrowsingDat
         </header>
 
         <div className="browser-data-dialog__ranges" role="group">
-          {TIME_RANGES.map((range) => (
+          {renderSettingsNodes(browserClearTimeRangeSettings, (node) => (
             <button
-              aria-pressed={timeRange === range}
-              data-active={timeRange === range || undefined}
+              aria-pressed={timeRange === node.range}
+              data-active={timeRange === node.range || undefined}
               disabled={clearing}
-              key={range}
-              onClick={() => selectRange(range)}
+              onClick={() => selectRange(node.range)}
               type="button"
             >
-              {t(`mcp.browserData.range.${range}`)}
+              {settingLabel(node, t)}
             </button>
           ))}
         </div>
 
         <div className="browser-data-dialog__categories">
-          {rows.map((row) => {
-            const allTimeOnly = row.category === 'cookiesAndSiteData' || row.category === 'cache'
+          {renderSettingsNodes(browserClearCategorySettings, (node) => {
+            const row = rows[node.category]
+            const allTimeOnly = node.category === 'cookiesAndSiteData' || node.category === 'cache'
             const disabled = clearing || (allTimeOnly && timeRange !== 'allTime')
             const Icon = row.icon
             return (
-              <label aria-disabled={disabled || undefined} key={row.category}>
+              <label aria-disabled={disabled || undefined}>
                 <Icon aria-hidden="true" />
                 <span>
-                  <strong>{row.label}</strong>
+                  <strong>{settingLabel(node, t)}</strong>
                   <small>
                     {allTimeOnly && timeRange !== 'allTime'
                       ? t('mcp.browserData.allTimeOnly')
@@ -237,9 +223,9 @@ export function ClearBrowsingDataDialog({ onClose, onCleared }: ClearBrowsingDat
                   </small>
                 </span>
                 <input
-                  checked={categories.has(row.category)}
+                  checked={categories.has(node.category)}
                   disabled={disabled}
-                  onChange={() => toggleCategory(row.category)}
+                  onChange={() => toggleCategory(node.category)}
                   type="checkbox"
                 />
               </label>

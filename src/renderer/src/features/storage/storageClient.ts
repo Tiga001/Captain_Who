@@ -6,6 +6,7 @@ import type {
   AgentPromptPreferences
 } from '@mycopilot/protocol'
 import {
+  parseStorageHumanInteractionResponse,
   parseStorageModelSettingsRecord,
   parseStorageModelSettingsUpdateRecord,
   parseProviderVendorDescriptors,
@@ -21,6 +22,7 @@ import type {
   StorageChatConversationMetaRecord,
   StorageChatConversationRecord,
   StorageChatMessageRecord,
+  StorageChatMessageWriteRecord,
   StorageChatMessageStateRecord,
   StorageChatMessageUiStateRecord,
   StorageComposerDraftRecord,
@@ -513,6 +515,7 @@ function mapMessageFromStorage(message: StorageChatMessageRecord): ChatMessage {
   return {
     id: message.id,
     role: message.role === 'user' ? 'user' : 'assistant',
+    humanInteractionDisplay: parseStorageHumanInteractionResponse(message),
     content: message.content,
     createdAt: message.createdAt,
     status: normalizeMessageStatus(message.status),
@@ -522,7 +525,7 @@ function mapMessageFromStorage(message: StorageChatMessageRecord): ChatMessage {
   }
 }
 
-function mapMessageToStorage(message: ChatMessage): StorageChatMessageRecord {
+function mapMessageToStorage(message: ChatMessage): StorageChatMessageWriteRecord {
   return {
     id: message.id,
     role: message.role,

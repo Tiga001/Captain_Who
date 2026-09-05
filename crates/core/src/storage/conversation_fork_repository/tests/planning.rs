@@ -68,7 +68,8 @@ fn cloned_agent_usage_is_zero_and_ids_are_rewritten() {
 #[test]
 fn unsettled_assistant_state_cannot_enter_a_fork_snapshot() {
     let mut message = ChatMessageRecord {
-        id: "assistant-running".to_string(),
+                human_interaction_response: None,
+id: "assistant-running".to_string(),
         role: "assistant".to_string(),
         content: "partial".to_string(),
         created_at: 1,

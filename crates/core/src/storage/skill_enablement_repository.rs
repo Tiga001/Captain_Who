@@ -1,3 +1,7 @@
+use crate::skills::IMAGE_GENERATION_SKILL_ID;
+use crate::storage::image_generation_repository::{
+    load_image_generation_profile, DEFAULT_IMAGE_GENERATION_PROFILE_ID,
+};
 use crate::storage::now_ms;
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use std::collections::{BTreeMap, BTreeSet};
@@ -43,8 +47,9 @@ pub fn load_skill_enablement_overrides(
     Ok(overrides)
 }
 
-/// Loads durable state tokens for requested Skill ids. Missing overrides use
-/// the product default (`enabled = true`) at generation zero.
+/// Loads durable state tokens for requested Skill ids. Image generation uses its
+/// provider profile as its sole enablement authority; other missing overrides
+/// use the product default (`enabled = true`) at generation zero.
 pub fn load_skill_enablement_states(
     connection: &mut Connection,
     skill_ids: &[String],
@@ -59,6 +64,18 @@ pub fn load_skill_enablement_states(
     )?;
     let mut states = BTreeMap::new();
     for skill_id in requested {
+        if skill_id == IMAGE_GENERATION_SKILL_ID {
+            let profile =
+                load_image_generation_profile(&transaction, DEFAULT_IMAGE_GENERATION_PROFILE_ID)?;
+            states.insert(
+                skill_id.to_string(),
+                SkillEnablementState {
+                    enabled: profile.as_ref().is_some_and(|profile| profile.enabled),
+                    generation: profile.as_ref().map_or(0, |profile| profile.generation),
+                },
+            );
+            continue;
+        }
         let stored = statement
             .query_row(params![skill_id], |row| {
                 Ok((row.get::<_, bool>(0)?, row.get::<_, i64>(1)?))

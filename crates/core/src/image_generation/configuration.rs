@@ -61,6 +61,17 @@ pub struct ImageGenerationConfiguration {
 }
 
 impl ImageGenerationConfiguration {
+    /// Shared admission rule for the Skill switch and its presentation. Disabled
+    /// configurations may still be ready to enable without changing any fields.
+    pub fn validate_enablement(&self) -> Result<(), ImageGenerationConfigurationError> {
+        validate_enabled_configuration(
+            true,
+            &self.endpoint_url,
+            &self.model_id,
+            self.credential_status,
+        )
+    }
+
     pub fn provider_profile(
         &self,
     ) -> Result<ImageGenerationProviderProfile, ImageGenerationConfigurationError> {
@@ -416,17 +427,22 @@ impl ImageGenerationConfigurationService {
             credential_status,
         )?;
         if enabled {
-            validate_enabled_configuration(
-                true,
-                &current_configuration.endpoint_url,
-                &current_configuration.model_id,
-                current_configuration.credential_status,
-            )?;
+            current_configuration.validate_enablement()?;
         }
 
         let mut replacement = current_record.unwrap_or_else(default_record);
         replacement.enabled = enabled;
         self.commit_record(expected_generation, &replacement, credential_status)
+    }
+
+    /// The Skill management token covers this profile's generation. Keep its
+    /// mutation on the same credential validation and CAS path as configuration.
+    pub fn set_skill_enabled(
+        &self,
+        expected_generation: u64,
+        enabled: bool,
+    ) -> Result<ImageGenerationConfigurationMutationResult, ImageGenerationConfigurationError> {
+        self.set_enabled(&revision(expected_generation), enabled)
     }
 
     /// Finishes credential mutations interrupted between SQLite and the native credential store.
@@ -1163,6 +1179,102 @@ mod tests {
     }
 
     #[test]
+    fn image_skill_uses_one_authority_for_enablement_cas_and_execution() {
+        use crate::skills::IMAGE_GENERATION_SKILL_ID;
+        let (service, credentials, directory) = service();
+        let ids = vec![IMAGE_GENERATION_SKILL_ID.to_string()];
+        let initial = service.storage.load_skill_enablement_states(&ids).unwrap();
+        assert!(!initial[IMAGE_GENERATION_SKILL_ID].enabled);
+        assert_eq!(initial[IMAGE_GENERATION_SKILL_ID].generation, 0);
+        assert!(service
+            .get_configuration()
+            .unwrap()
+            .validate_enablement()
+            .is_err());
+        assert!(matches!(
+            service.set_skill_enabled(0, true),
+            Err(ImageGenerationConfigurationError::MissingEndpoint)
+        ));
+        assert!(service
+            .storage
+            .set_skill_enablement_override(IMAGE_GENERATION_SKILL_ID, true)
+            .is_err());
+        assert!(service
+            .storage
+            .compare_and_set_skill_enablement(IMAGE_GENERATION_SKILL_ID, false, 0, true)
+            .is_err());
+
+        // A pre-unification override is inert, even if it disagrees with the profile.
+        let connection = rusqlite::Connection::open(directory.path().join("app.db")).unwrap();
+        connection.execute(
+            "INSERT INTO skill_enablement_overrides (skill_id, enabled, generation, updated_at) VALUES (?1, 1, 99, 1)",
+            [IMAGE_GENERATION_SKILL_ID],
+        ).unwrap();
+        assert!(!service.storage.load_skill_enablement(&ids).unwrap()[IMAGE_GENERATION_SKILL_ID]);
+        let configured = service
+            .update_configuration(update("image-generation:v1:0", "retained-secret"))
+            .unwrap()
+            .configuration;
+        assert!(configured.validate_enablement().is_ok());
+        assert!(!service.storage.load_skill_enablement(&ids).unwrap()[IMAGE_GENERATION_SKILL_ID]);
+        let enabled = service
+            .set_skill_enabled(configured.generation, true)
+            .unwrap()
+            .configuration;
+        let state =
+            service.storage.load_skill_enablement_states(&ids).unwrap()[IMAGE_GENERATION_SKILL_ID];
+        assert!(state.enabled);
+        assert_eq!(state.generation, enabled.generation);
+        assert!(service.resolve_execution_snapshot().is_ok());
+
+        // Configuration and Skill writes compete on the same profile generation.
+        assert!(matches!(
+            service.set_enabled(&configured.revision, false),
+            Err(ImageGenerationConfigurationError::RevisionConflict { .. })
+        ));
+        let before = service.load_record().unwrap().unwrap();
+        let disabled = service
+            .set_skill_enabled(enabled.generation, false)
+            .unwrap()
+            .configuration;
+        let after = service.load_record().unwrap().unwrap();
+        assert_eq!(before.credential_ref, after.credential_ref);
+        assert_eq!(before.endpoint_url, after.endpoint_url);
+        assert_eq!(before.model_id, after.model_id);
+        assert!(credentials
+            .get(&CredentialReference::parse(after.credential_ref.clone().unwrap()).unwrap())
+            .unwrap()
+            .is_some());
+        assert!(matches!(
+            service.resolve_execution_snapshot(),
+            Err(ImageGenerationConfigurationError::ConfigurationIncomplete(
+                ImageGenerationReadiness::Disabled
+            ))
+        ));
+        assert!(matches!(
+            service.set_skill_enabled(enabled.generation, true),
+            Err(ImageGenerationConfigurationError::RevisionConflict { .. })
+        ));
+        assert!(!service.storage.load_skill_enablement(&ids).unwrap()[IMAGE_GENERATION_SKILL_ID]);
+        let reopened = Arc::new(StorageService::open(&directory.path().join("app.db")).unwrap());
+        let reopened_configuration =
+            ImageGenerationConfigurationService::new(Arc::clone(&reopened), credentials);
+        assert!(!reopened.load_skill_enablement(&ids).unwrap()[IMAGE_GENERATION_SKILL_ID]);
+        assert_eq!(
+            reopened_configuration
+                .get_configuration()
+                .unwrap()
+                .generation,
+            disabled.generation
+        );
+        assert!(reopened_configuration
+            .get_configuration()
+            .unwrap()
+            .validate_enablement()
+            .is_ok());
+    }
+
+    #[test]
     fn configuration_snapshot_never_returns_the_configured_credential() {
         let (service, _credentials, _directory) = service();
         let secret = "editor-visible-test-secret";
@@ -1323,6 +1435,10 @@ mod tests {
             snapshot.readiness,
             ImageGenerationReadiness::CredentialUnavailable
         );
+        assert_eq!(
+            snapshot.validate_enablement(),
+            Err(ImageGenerationConfigurationError::CredentialStoreUnavailable)
+        );
         let disabled = unavailable
             .set_enabled(&snapshot.revision, false)
             .unwrap()
@@ -1333,6 +1449,14 @@ mod tests {
         assert_eq!(
             disabled.credential_status,
             ImageGenerationCredentialStatus::Unavailable
+        );
+        assert_eq!(
+            disabled.validate_enablement(),
+            Err(ImageGenerationConfigurationError::CredentialStoreUnavailable)
+        );
+        assert_eq!(
+            unavailable.set_skill_enabled(disabled.generation, true),
+            Err(ImageGenerationConfigurationError::CredentialStoreUnavailable)
         );
         let mut clear = update(&disabled.revision, "unused");
         clear.credential_mutation = ImageGenerationCredentialMutation::Clear;

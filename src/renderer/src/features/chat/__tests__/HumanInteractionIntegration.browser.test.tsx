@@ -136,11 +136,13 @@ function conversation(
 function Workspace({
   value,
   observer = false,
-  hasCollaborationApproval = false
+  hasCollaborationApproval = false,
+  initialAttachments = []
 }: {
   value: ChatConversation
   observer?: boolean
   hasCollaborationApproval?: boolean
+  initialAttachments?: ChatComposerDraft['attachments']
 }) {
   // The real shell persists text through a ref-only callback. Keep the prop stale until an explicit
   // commit, so an unintended messageSyncKey reset is observable in the real Composer.
@@ -149,7 +151,7 @@ function Workspace({
     permissionMode: 'default',
     modelId: 'model-1',
     projectId: null,
-    attachments: [],
+    attachments: initialAttachments,
     skills: [],
     queuedMessages: [],
     updatedAt: 0
@@ -209,17 +211,17 @@ describe('Human interaction in the real conversation surface', () => {
       host = fakeHost([old])
     boundary.api = host.api
     const screen = await render(<Workspace value={conversation([old])} />)
-    const panel = screen.getByRole('dialog', { name: '问题', exact: true })
+    const panel = screen.getByRole('dialog', { name: '交互', exact: true })
     await expect.element(panel).toHaveAttribute('data-request-id', 'old')
-    await panel.getByRole('button', { name: '下一题' }).click()
+    await panel.getByRole('navigation').getByRole('button', { name: '下一题' }).click()
     await panel.getByRole('textbox').fill('保留这份旧草稿')
-    await panel.getByRole('button', { name: '最小化提问' }).click()
+    await panel.getByRole('button', { name: '最小化交互' }).click()
     await expect.poll(() => panel.elements().length).toBe(0)
     const newest = batch('newest', 2)
     host.notify(newest)
     await expect.element(panel).toHaveAttribute('data-request-id', 'newest')
     await expect
-      .element(screen.getByRole('button', { name: '回答问题 · 共 2 题' }).first())
+      .element(screen.getByRole('button', { name: '交互 · 共 2 题' }).first())
       .toBeVisible()
     screen.container.querySelector<HTMLButtonElement>('[data-human-request-id="old"]')!.click()
     await expect.element(panel).toHaveAttribute('data-request-id', 'old')
@@ -239,7 +241,7 @@ describe('Human interaction in the real conversation surface', () => {
       host = fakeHost([request])
     boundary.api = host.api
     const screen = await render(<Workspace value={conversation([request])} />)
-    const panel = screen.getByRole('dialog', { name: '问题', exact: true })
+    const panel = screen.getByRole('dialog', { name: '交互', exact: true })
     await expect.element(panel).toBeVisible()
     await panel.getByRole('textbox').fill('审批前填写的内容')
     await screen.rerender(<Workspace value={conversation([request], 'waiting_for_approval')} />)
@@ -263,6 +265,40 @@ describe('Human interaction in the real conversation surface', () => {
     expect(host.api.ignore).not.toHaveBeenCalled()
   })
 
+  it('isolates pending IME and button events from the batch that preempts their original question', async () => {
+    const old = batch('ime-old'),
+      host = fakeHost([old])
+    boundary.api = host.api
+    const screen = await render(<Workspace value={conversation([old])} />)
+    const panel = screen.getByRole('dialog', { name: '交互', exact: true })
+    await panel.getByRole('textbox').fill('尚未发送的中文草稿')
+    const input = panel.getByRole('textbox').element()
+    const submit = panel
+      .getByRole('button', { name: '下一题', exact: true })
+      .last()
+      .element() as HTMLButtonElement
+    input.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true }))
+    host.notify(batch('ime-new', 2))
+    await expect.element(panel).toHaveAttribute('data-request-id', 'ime-new')
+    expect(input.isConnected).toBe(false)
+    expect(submit.isConnected).toBe(false)
+    input.dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'Enter', isComposing: true, keyCode: 229, bubbles: true })
+    )
+    input.dispatchEvent(
+      new CompositionEvent('compositionend', { data: '迟到的输入法确认', bubbles: true })
+    )
+    input.dispatchEvent(new KeyboardEvent('keyup', { key: 'Escape', bubbles: true }))
+    submit.click()
+    await expect.element(panel.getByRole('textbox')).toHaveValue('')
+    screen.container.querySelector<HTMLButtonElement>('[data-human-request-id="ime-old"]')!.click()
+    await expect.element(panel.getByRole('textbox')).toHaveValue('尚未发送的中文草稿')
+    expect(host.api.submit).not.toHaveBeenCalled()
+    expect(host.api.ignore).not.toHaveBeenCalled()
+    expect(boundary.send).not.toHaveBeenCalled()
+    expect(boundary.stop).not.toHaveBeenCalled()
+  })
+
   it('prioritizes blocking batches and ignores only the selected async batch without sending its draft', async () => {
     const old = batch('old'),
       newer = batch('newer', 2),
@@ -270,10 +306,10 @@ describe('Human interaction in the real conversation surface', () => {
     const host = fakeHost([old, newer, blocking])
     boundary.api = host.api
     const screen = await render(<Workspace value={conversation([old, newer, blocking])} />)
-    const panel = screen.getByRole('dialog', { name: '问题', exact: true })
+    const panel = screen.getByRole('dialog', { name: '交互', exact: true })
     await expect.element(panel).toHaveAttribute('data-request-id', 'blocking')
     expect(panel.getByRole('button', { name: '忽略全部' }).elements()).toHaveLength(0)
-    for (const entry of screen.getByRole('button', { name: '回答问题 · 共 2 题' }).elements())
+    for (const entry of screen.getByRole('button', { name: '交互 · 共 2 题' }).elements())
       expect(entry).toBeDisabled()
     host.notify({ ...blocking, status: 'cancelled', revision: 1, updatedAt: 4 })
     await expect.element(panel).toHaveAttribute('data-request-id', 'newer')
@@ -301,10 +337,10 @@ describe('Human interaction in the real conversation surface', () => {
     boundary.api = host.api
     const value = conversation([request])
     const screen = await render(<Workspace value={value} />)
-    const panel = screen.getByRole('dialog', { name: '问题', exact: true })
+    const panel = screen.getByRole('dialog', { name: '交互', exact: true })
     await panel.getByRole('button', { name: 'submit 明亮外观' }).click()
-    await panel.getByRole('button', { name: '下一题' }).click()
-    await panel.getByRole('button', { name: '不回答', exact: true }).click()
+    await panel.getByRole('navigation').getByRole('button', { name: '下一题' }).click()
+    await panel.getByRole('button', { name: '跳过', exact: true }).click()
     await panel.getByRole('button', { name: '提交', exact: true }).click()
     await expect.element(panel).toHaveAttribute('aria-busy', 'true')
     const busy = panel.getByRole('button', { name: '提交' })
@@ -329,7 +365,7 @@ describe('Human interaction in the real conversation surface', () => {
     await expect
       .poll(() => screen.container.querySelectorAll('.human-interaction-answer').length)
       .toBe(1)
-    expect(screen.getByRole('button', { name: '回答问题 · 共 2 题' }).elements()).toHaveLength(0)
+    expect(screen.getByRole('button', { name: '交互 · 共 2 题' }).elements()).toHaveLength(0)
     expect(screen.container.querySelector('.human-interaction-answer')!.textContent).toContain(
       'submit：选择外观submit 明亮外观submit：补充需求已跳过'
     )
@@ -354,79 +390,166 @@ describe('Human interaction in the real conversation surface', () => {
     expect(boundary.stop).not.toHaveBeenCalled()
   })
 
-  it('preserves the real Composer fast-path draft when an idle answer starts a new User and Assistant pair', async () => {
-    const request = batch('idle'),
-      host = fakeHost([request])
+  it.each(['before', 'after'] as const)(
+    'preserves the Composer draft and attachments when the answer receipt arrives %s its Host User pair',
+    async (receiptOrder) => {
+      const request = batch('idle'),
+        host = fakeHost([request])
+      boundary.api = host.api
+      const initial = conversation([request], 'completed')
+      const screen = await render(
+        <Workspace
+          value={initial}
+          initialAttachments={[
+            {
+              id: 'draft-file',
+              kind: 'file',
+              name: 'requirements.txt',
+              sizeBytes: 10,
+              mimeType: 'text/plain',
+              encoding: 'utf8',
+              data: 'keep draft'
+            }
+          ]}
+        />
+      )
+      const panel = screen.getByRole('dialog', { name: '交互', exact: true })
+      await expect.element(panel.getByText('本轮已结束，提交回答后继续')).toBeVisible()
+      const composer = page.elementLocator(
+        screen.container.querySelector<HTMLTextAreaElement>('.chat-composer textarea')!
+      )
+      await expect.element(composer).not.toBeVisible()
+      await panel.getByRole('button', { name: '最小化交互' }).click()
+      await expect.element(composer).toBeVisible()
+      await composer.fill('正在起草的下一条普通消息')
+      expect(boundary.draft).toHaveBeenLastCalledWith(
+        expect.objectContaining({ message: '正在起草的下一条普通消息' })
+      )
+      screen.container.querySelector<HTMLButtonElement>('[data-human-request-id="idle"]')!.click()
+      await expect.element(panel).toBeVisible()
+      await expect.element(composer).not.toBeVisible()
+      const accepted = submitted(request)
+      accepted.delivery = {
+        ...accepted.delivery!,
+        targetRunId: 'next-run',
+        userMessageId: 'answer-user'
+      }
+      const answer: ChatMessage = {
+        id: 'answer-user',
+        role: 'user',
+        humanInteractionDisplay: humanInteractionResponseDisplay(accepted)!,
+        content: JSON.stringify(humanInteractionResponseDisplay(accepted)),
+        createdAt: 4,
+        status: 'sent'
+      }
+      const nextAssistant: ChatMessage = {
+        id: 'next-assistant',
+        role: 'assistant',
+        content: '',
+        createdAt: 5,
+        status: 'pending',
+        agentRun: {
+          runId: 'next-run',
+          status: 'running',
+          toolDefinitions: [],
+          toolCalls: [],
+          toolResults: [],
+          approvals: [],
+          fileChangeProposals: [],
+          timeline: []
+        }
+      }
+      if (receiptOrder === 'before') host.notify(accepted)
+      await screen.rerender(
+        <Workspace value={{ ...initial, messages: [...initial.messages, answer, nextAssistant] }} />
+      )
+      await expect.element(composer).toHaveValue('正在起草的下一条普通消息')
+      expect(screen.container.querySelector('.composer-attachment__name')?.textContent).toBe(
+        'requirements.txt'
+      )
+      if (receiptOrder === 'after') host.notify(accepted)
+      await expect
+        .poll(() => screen.container.querySelectorAll('.human-interaction-answer').length)
+        .toBe(1)
+      expect(panel.elements()).toHaveLength(0)
+      await expect.element(composer).toBeVisible()
+      expect(boundary.send).not.toHaveBeenCalled()
+
+      // A normal user can type the same JSON. Without the Host delivery binding it is an ordinary
+      // committed message and must still acknowledge/clear the Composer fast-path draft.
+      await screen.rerender(
+        <Workspace
+          value={{
+            ...initial,
+            messages: [
+              ...initial.messages,
+              answer,
+              nextAssistant,
+              { ...answer, humanInteractionDisplay: undefined, id: 'ordinary-json', createdAt: 6 }
+            ]
+          }}
+        />
+      )
+      await expect.element(composer).toHaveValue('')
+      expect(screen.container.querySelectorAll('.human-interaction-answer')).toHaveLength(1)
+    }
+  )
+
+  it('replaces the Composer, keeps its local draft across question and approval preemption, and fits a short window', async () => {
+    const request = batch('layout'),
+      host = fakeHost([])
     boundary.api = host.api
-    const initial = conversation([request], 'completed')
-    const screen = await render(<Workspace value={initial} />)
-    const panel = screen.getByRole('dialog', { name: '问题', exact: true })
-    await expect.element(panel.getByText('本轮已结束，提交回答后继续')).toBeVisible()
+    const screen = await render(<Workspace value={conversation([])} />)
     const composer = page.elementLocator(
       screen.container.querySelector<HTMLTextAreaElement>('.chat-composer textarea')!
     )
-    await composer.fill('正在起草的下一条普通消息')
-    expect(boundary.draft).toHaveBeenLastCalledWith(
-      expect.objectContaining({ message: '正在起草的下一条普通消息' })
+    await composer.fill('尚未发送的输入框草稿')
+    host.notify(request)
+    await screen.rerender(<Workspace value={conversation([request])} />)
+    const panel = screen.getByRole('dialog', { name: '交互', exact: true })
+    await expect.element(panel).toBeVisible()
+    await expect.element(composer).not.toBeVisible()
+    expect(screen.container.querySelector('.conversation-composer-slot')).toHaveAttribute('inert')
+    await panel.getByRole('textbox').fill('尚未提交的答案')
+    const surface = screen.container.querySelector<HTMLElement>('.conversation-surface')!
+    surface.style.height = '350px'
+    const footer = screen.container.querySelector<HTMLElement>('.chat-conversation-page__composer')!
+    expect(footer.getBoundingClientRect().bottom).toBeLessThanOrEqual(
+      surface.getBoundingClientRect().bottom + 1
     )
-    const accepted = submitted(request)
-    accepted.delivery = {
-      ...accepted.delivery!,
-      targetRunId: 'next-run',
-      userMessageId: 'answer-user'
-    }
-    const answer: ChatMessage = {
-      id: 'answer-user',
-      role: 'user',
-      content: JSON.stringify(humanInteractionResponseDisplay(accepted)),
-      createdAt: 4,
-      status: 'sent'
-    }
-    const nextAssistant: ChatMessage = {
-      id: 'next-assistant',
-      role: 'assistant',
-      content: '',
-      createdAt: 5,
-      status: 'pending',
-      agentRun: {
-        runId: 'next-run',
-        status: 'running',
-        toolDefinitions: [],
-        toolCalls: [],
-        toolResults: [],
-        approvals: [],
-        fileChangeProposals: [],
-        timeline: []
-      }
-    }
-    host.notify(accepted)
-    await screen.rerender(
-      <Workspace value={{ ...initial, messages: [...initial.messages, answer, nextAssistant] }} />
-    )
-    await expect.element(composer).toHaveValue('正在起草的下一条普通消息')
-    await expect
-      .poll(() => screen.container.querySelectorAll('.human-interaction-answer').length)
-      .toBe(1)
-    expect(panel.elements()).toHaveLength(0)
+    expect(footer.clientHeight).toBeGreaterThan(100)
+    await screen.rerender(<Workspace value={conversation([request], 'waiting_for_approval')} />)
+    await expect.poll(() => panel.elements().length).toBe(0)
+    await expect.element(composer).not.toBeVisible()
+    await screen.rerender(<Workspace value={conversation([request])} />)
+    await expect.element(panel.getByRole('textbox')).toHaveValue('尚未提交的答案')
+    await panel.getByRole('button', { name: '最小化交互' }).click()
+    await expect.element(composer).toBeVisible()
+    await expect.element(composer).toHaveValue('尚未发送的输入框草稿')
     expect(boundary.send).not.toHaveBeenCalled()
+    expect(boundary.stop).not.toHaveBeenCalled()
+  })
 
-    // A normal user can type the same JSON. Without the Host delivery binding it is an ordinary
-    // committed message and must still acknowledge/clear the Composer fast-path draft.
-    await screen.rerender(
-      <Workspace
-        value={{
-          ...initial,
-          messages: [
-            ...initial.messages,
-            answer,
-            nextAssistant,
-            { ...answer, id: 'ordinary-json', createdAt: 6 }
-          ]
-        }}
-      />
-    )
-    await expect.element(composer).toHaveValue('')
-    expect(screen.container.querySelectorAll('.human-interaction-answer')).toHaveLength(1)
+  it('uses strong chat text while retaining gray questions in the submitted answer bubble', async () => {
+    const accepted = submitted(batch('contrast')),
+      host = fakeHost([accepted])
+    boundary.api = host.api
+    const screen = await render(<Workspace value={conversation([accepted], 'completed')} />)
+    await expect
+      .poll(() => screen.container.querySelectorAll('.human-interaction-answer__value').length)
+      .toBeGreaterThan(0)
+    const value = screen.container.querySelector<HTMLElement>('.human-interaction-answer__value')!
+    expect(getComputedStyle(value).color).toBe('rgb(26, 28, 31)')
+    const questionText = screen.container.querySelector<HTMLElement>(
+      '.human-interaction-answer__question'
+    )!
+    expect(getComputedStyle(questionText).color).toBe('rgb(79, 86, 96)')
+    const userText = screen.container.querySelector<HTMLElement>(
+      '.chat-message--user .chat-markdown'
+    )!
+    const assistantText = screen.container.querySelector<HTMLElement>('.chat-agent-text')!
+    expect(getComputedStyle(userText).color).toBe('rgb(26, 28, 31)')
+    expect(getComputedStyle(assistantText).color).toBe('rgb(26, 28, 31)')
   })
 
   it('does not query or expose question controls in a child observer conversation', async () => {

@@ -507,6 +507,7 @@ fn bundled_pdf_freezes_a_conversation_artifact_without_a_workspace() {
             model_id: Some("test-model".to_string()),
             title: "PDF Artifact input".to_string(),
             messages: vec![ChatMessageRecord {
+                human_interaction_response: None,
                 id: "assistant-pdf-artifact".to_string(),
                 role: "assistant".to_string(),
                 content: String::new(),

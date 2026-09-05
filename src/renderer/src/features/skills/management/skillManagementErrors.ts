@@ -133,6 +133,8 @@ export function getSkillOperationErrorKey(
     case 'installationRetired':
     case 'notFound':
       return 'skills.stateChanged'
+    case 'configurationRequired':
+      return 'skills.error.configurationRequired'
     case 'notManageable':
       return 'skills.error.notManageable'
     case 'idempotencyConflict':
@@ -152,6 +154,7 @@ export function getSkillOperationErrorKey(
 export function shouldRefreshSkillsAfterError(details: SkillOperationErrorDetails): boolean {
   return (
     details.commitMayHaveSucceeded ||
+    details.code === 'configurationRequired' ||
     details.code === 'stateConflict' ||
     details.code === 'revisionConflict' ||
     details.code === 'installationRevisionConflict' ||

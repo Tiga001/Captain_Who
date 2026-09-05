@@ -10,6 +10,7 @@ fn seed_human_question_root(storage: &StorageService) {
             model_id: None,
             title: "Questions".into(),
             messages: vec![ChatMessageRecord {
+                human_interaction_response: None,
                 id: "question-assistant".into(),
                 role: "assistant".into(),
                 content: "正在工作".into(),

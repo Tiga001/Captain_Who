@@ -42,6 +42,7 @@ fn persists_usage_for_failed_runs() {
             model_id: Some("model-1".to_string()),
             title: "Usage test".to_string(),
             messages: vec![ChatMessageRecord {
+                human_interaction_response: None,
                 id: "assistant-1".to_string(),
                 role: "assistant".to_string(),
                 content: String::new(),
@@ -164,6 +165,7 @@ fn moonshot_completion_usage_is_priced_persisted_and_summarized_as_output() {
             model_id: Some("kimi-k3".to_string()),
             title: "Moonshot usage".to_string(),
             messages: vec![ChatMessageRecord {
+                human_interaction_response: None,
                 id: ASSISTANT_MESSAGE_ID.to_string(),
                 role: "assistant".to_string(),
                 content: "done".to_string(),
@@ -275,6 +277,7 @@ fn model_request_interruption_settles_visible_message_without_losing_failed_audi
             model_id: Some("model-1".to_string()),
             title: "Model interruption".to_string(),
             messages: vec![ChatMessageRecord {
+                human_interaction_response: None,
                 id: ASSISTANT_MESSAGE_ID.to_string(),
                 role: "assistant".to_string(),
                 content: "provisional failed sampling".to_string(),
@@ -386,6 +389,7 @@ fn failed_terminal_settlement_closes_a_durable_open_tool_call_with_paired_contex
             model_id: Some("model-1".to_string()),
             title: "Failed open tool".to_string(),
             messages: vec![ChatMessageRecord {
+                human_interaction_response: None,
                 id: ASSISTANT_MESSAGE_ID.to_string(),
                 role: "assistant".to_string(),
                 content: String::new(),
@@ -539,6 +543,7 @@ async fn terminal_transaction_retry_reloads_sqlite_and_counts_usage_once() {
             model_id: Some("model-1".to_string()),
             title: "Terminal retry".to_string(),
             messages: vec![ChatMessageRecord {
+                human_interaction_response: None,
                 id: ASSISTANT_MESSAGE_ID.to_string(),
                 role: "assistant".to_string(),
                 content: String::new(),
@@ -776,6 +781,7 @@ async fn terminal_error_transaction_retry_reloads_sqlite_and_counts_usage_once()
             model_id: Some("model-1".to_string()),
             title: "Terminal error retry".to_string(),
             messages: vec![ChatMessageRecord {
+                human_interaction_response: None,
                 id: ASSISTANT_MESSAGE_ID.to_string(),
                 role: "assistant".to_string(),
                 content: String::new(),
@@ -1007,6 +1013,7 @@ fn sibling_conversation_usage_owners_remain_independent() {
                 model_id: Some(model_id.to_string()),
                 title: conversation_id.to_string(),
                 messages: vec![ChatMessageRecord {
+                    human_interaction_response: None,
                     id: assistant_message_id.to_string(),
                     role: "assistant".to_string(),
                     content: String::new(),
@@ -1110,6 +1117,7 @@ fn approval_segments_project_one_cumulative_usage_snapshot_to_chat_history() {
             model_id: Some("model-1".to_string()),
             title: "Cumulative usage".to_string(),
             messages: vec![ChatMessageRecord {
+                human_interaction_response: None,
                 id: "assistant-cumulative".to_string(),
                 role: "assistant".to_string(),
                 content: String::new(),

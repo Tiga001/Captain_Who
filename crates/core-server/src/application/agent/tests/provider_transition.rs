@@ -11,6 +11,7 @@ pub(super) fn conversation_with_completed_history(
         title: "Provider transition".to_string(),
         messages: vec![
             ChatMessageRecord {
+                human_interaction_response: None,
                 id: format!("{id}-user"),
                 role: "user".to_string(),
                 content: "查找资料".to_string(),
@@ -21,6 +22,7 @@ pub(super) fn conversation_with_completed_history(
                 ui_state_json: None,
             },
             ChatMessageRecord {
+                human_interaction_response: None,
                 id: format!("{id}-assistant"),
                 role: "assistant".to_string(),
                 content: "已完成".to_string(),
@@ -123,6 +125,7 @@ fn durable_turn_occupancy_blocks_provider_transition_after_runtime_is_gone() {
     let mut conversation = conversation_with_completed_history(conversation_id, Some("model-1"));
     let completed_assistant = conversation.messages[1].id.clone();
     conversation.messages.push(ChatMessageRecord {
+        human_interaction_response: None,
         id: "assistant-durable-active".to_string(),
         role: "assistant".to_string(),
         content: String::new(),

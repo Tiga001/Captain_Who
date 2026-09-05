@@ -27,6 +27,7 @@ async fn restart_pairs_a_durable_image_call_with_its_terminal_journal_receipt() 
             model_id: Some("test-model".to_string()),
             title: "Image recovery".to_string(),
             messages: vec![ChatMessageRecord {
+                human_interaction_response: None,
                 id: assistant_message_id.to_string(),
                 role: "assistant".to_string(),
                 content: String::new(),

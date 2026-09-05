@@ -420,6 +420,7 @@ fn seed_conversation(storage: &StorageService, conversation_id: &str, assistant_
             model_id: Some("test-model".to_string()),
             title: "Managed command session test".to_string(),
             messages: vec![ChatMessageRecord {
+                human_interaction_response: None,
                 id: assistant_message_id.to_string(),
                 role: "assistant".to_string(),
                 content: String::new(),
@@ -3079,6 +3080,7 @@ fn explicit_run_interrupt_stops_every_session_owned_by_the_turn() {
         .upsert_chat_messages(
             &fixture.conversation_id,
             vec![ChatMessageRecord {
+                human_interaction_response: None,
                 id: second_assistant_message_id.clone(),
                 role: "assistant".to_string(),
                 content: String::new(),
@@ -4399,6 +4401,7 @@ fn every_restart_restores_outcome_unknown_conversation_and_project_fences() {
             model_id: Some("test-model".to_string()),
             title: "Managed command session restart".to_string(),
             messages: vec![ChatMessageRecord {
+                human_interaction_response: None,
                 id: assistant_message_id.to_string(),
                 role: "assistant".to_string(),
                 content: String::new(),

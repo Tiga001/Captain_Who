@@ -181,6 +181,7 @@ fn save_projection_conversation(
 ) {
     let mut stored = conversation(conversation_id, None, "message-user");
     stored.messages.push(ChatMessageRecord {
+        human_interaction_response: None,
         id: assistant_message_id.to_string(),
         role: "assistant".to_string(),
         content: "pending".to_string(),
@@ -218,6 +219,7 @@ fn seed_batched_conversation_projection(
     let mut stored = conversation(conversation_id, None, &format!("{conversation_id}-user"));
     for index in 0..assistant_count {
         stored.messages.push(ChatMessageRecord {
+            human_interaction_response: None,
             id: format!("{conversation_id}-assistant-{index}"),
             role: "assistant".to_string(),
             content: format!("answer {index}"),
@@ -373,7 +375,7 @@ fn conversation_detail_projection_query_count_is_independent_of_history_length()
     );
     assert_eq!(
         many_selects.len(),
-        13,
+        14,
         "unexpected detail SQL: {many_selects:#?}"
     );
     for table in [
@@ -538,6 +540,7 @@ fn loading_a_backend_owned_turn_projects_durable_tool_activity_without_renderer_
     let service = fixture.service();
     let mut stored = conversation("conversation-observer-trace", None, "message-user");
     stored.messages.push(ChatMessageRecord {
+        human_interaction_response: None,
         id: "message-assistant".to_string(),
         role: "assistant".to_string(),
         content: "Done".to_string(),
@@ -790,6 +793,7 @@ fn loading_a_durable_image_generation_result_restores_the_live_renderer_contract
     }]);
     let mut stored = conversation(conversation_id, None, "message-user");
     stored.messages.push(ChatMessageRecord {
+        human_interaction_response: None,
         id: assistant_message_id.to_string(),
         role: "assistant".to_string(),
         content: "Done".to_string(),
@@ -877,6 +881,7 @@ fn collaboration_root_fork_reopens_with_raw_snapshot_and_accepts_a_new_turn() {
     let source_assistant_message_id = "assistant-fork-continue-source";
     let mut source = conversation(source_conversation_id, None, "user-fork-continue-source");
     source.messages.push(ChatMessageRecord {
+        human_interaction_response: None,
         id: source_assistant_message_id.to_string(),
         role: "assistant".to_string(),
         content: "Durable source answer".to_string(),
@@ -1034,6 +1039,7 @@ fn collaboration_root_fork_reopens_with_raw_snapshot_and_accepts_a_new_turn() {
     candidate.updated_at = next_created_at.saturating_add(1);
     candidate.messages.extend([
         ChatMessageRecord {
+            human_interaction_response: None,
             id: "user-fork-continue-next".to_string(),
             role: "user".to_string(),
             content: "Continue after the fork".to_string(),
@@ -1044,6 +1050,7 @@ fn collaboration_root_fork_reopens_with_raw_snapshot_and_accepts_a_new_turn() {
             ui_state_json: None,
         },
         ChatMessageRecord {
+            human_interaction_response: None,
             id: "assistant-fork-continue-next".to_string(),
             role: "assistant".to_string(),
             content: "Thinking...".to_string(),
@@ -1177,6 +1184,7 @@ fn loading_a_backend_owned_turn_joins_terminal_command_session_and_artifact_proj
     });
     let mut stored = conversation(conversation_id, None, "message-command-user");
     stored.messages.push(ChatMessageRecord {
+        human_interaction_response: None,
         id: assistant_message_id.to_string(),
         role: "assistant".to_string(),
         content: "Report ready".to_string(),
@@ -1297,6 +1305,7 @@ fn rollback_turn_preparation_removes_only_the_exact_empty_provisional_trace_and_
     prepared.updated_at = 10;
     prepared.messages.extend([
         ChatMessageRecord {
+            human_interaction_response: None,
             id: "message-provisional-user".to_string(),
             role: "user".to_string(),
             content: "provisional".to_string(),
@@ -1307,6 +1316,7 @@ fn rollback_turn_preparation_removes_only_the_exact_empty_provisional_trace_and_
             ui_state_json: None,
         },
         ChatMessageRecord {
+            human_interaction_response: None,
             id: "message-provisional-assistant".to_string(),
             role: "assistant".to_string(),
             content: "Thinking...".to_string(),
@@ -1362,6 +1372,7 @@ fn rollback_turn_preparation_refuses_to_delete_a_nonempty_or_foreign_trace() {
     service.save_conversation(previous.clone()).unwrap();
     let mut prepared = previous.clone();
     prepared.messages.push(ChatMessageRecord {
+        human_interaction_response: None,
         id: "assistant-foreign".to_string(),
         role: "assistant".to_string(),
         content: "Thinking...".to_string(),
@@ -1421,6 +1432,7 @@ fn rollback_removes_only_provisional_facts_and_preserves_concurrent_metadata() {
     prepared.updated_at = 10;
     prepared.messages.extend([
         ChatMessageRecord {
+            human_interaction_response: None,
             id: "message-provisional-meta-user".to_string(),
             role: "user".to_string(),
             content: "provisional".to_string(),
@@ -1431,6 +1443,7 @@ fn rollback_removes_only_provisional_facts_and_preserves_concurrent_metadata() {
             ui_state_json: None,
         },
         ChatMessageRecord {
+            human_interaction_response: None,
             id: "message-provisional-meta-assistant".to_string(),
             role: "assistant".to_string(),
             content: "Thinking...".to_string(),
@@ -1506,6 +1519,7 @@ fn stale_full_conversation_snapshot_cannot_delete_an_active_turn_before_unique_c
     let mut candidate_a = base.clone();
     candidate_a.messages.extend([
         ChatMessageRecord {
+            human_interaction_response: None,
             id: "user-candidate-a".to_string(),
             role: "user".to_string(),
             content: "candidate a".to_string(),
@@ -1516,6 +1530,7 @@ fn stale_full_conversation_snapshot_cannot_delete_an_active_turn_before_unique_c
             ui_state_json: None,
         },
         ChatMessageRecord {
+            human_interaction_response: None,
             id: "assistant-candidate-a".to_string(),
             role: "assistant".to_string(),
             content: "Thinking...".to_string(),
@@ -1554,6 +1569,7 @@ fn stale_full_conversation_snapshot_cannot_delete_an_active_turn_before_unique_c
     let mut candidate_b = base;
     candidate_b.messages.extend([
         ChatMessageRecord {
+            human_interaction_response: None,
             id: "user-candidate-b".to_string(),
             role: "user".to_string(),
             content: "candidate b".to_string(),
@@ -1564,6 +1580,7 @@ fn stale_full_conversation_snapshot_cannot_delete_an_active_turn_before_unique_c
             ui_state_json: None,
         },
         ChatMessageRecord {
+            human_interaction_response: None,
             id: "assistant-candidate-b".to_string(),
             role: "assistant".to_string(),
             content: "Thinking...".to_string(),
@@ -1645,6 +1662,7 @@ fn completed_turn_revision_fences_a_cross_host_stale_full_snapshot() {
     let mut candidate_a = base.clone();
     candidate_a.messages.extend([
         ChatMessageRecord {
+            human_interaction_response: None,
             id: "user-completed-a".to_string(),
             role: "user".to_string(),
             content: "candidate a".to_string(),
@@ -1655,6 +1673,7 @@ fn completed_turn_revision_fences_a_cross_host_stale_full_snapshot() {
             ui_state_json: None,
         },
         ChatMessageRecord {
+            human_interaction_response: None,
             id: "assistant-completed-a".to_string(),
             role: "assistant".to_string(),
             content: "Thinking...".to_string(),
@@ -1719,6 +1738,7 @@ fn completed_turn_revision_fences_a_cross_host_stale_full_snapshot() {
     let mut stale_candidate_b = base;
     stale_candidate_b.messages.extend([
         ChatMessageRecord {
+            human_interaction_response: None,
             id: "user-stale-b".to_string(),
             role: "user".to_string(),
             content: "candidate b".to_string(),
@@ -1729,6 +1749,7 @@ fn completed_turn_revision_fences_a_cross_host_stale_full_snapshot() {
             ui_state_json: None,
         },
         ChatMessageRecord {
+            human_interaction_response: None,
             id: "assistant-stale-b".to_string(),
             role: "assistant".to_string(),
             content: "Thinking...".to_string(),
@@ -1796,6 +1817,7 @@ fn turn_commit_rechecks_graph_identity_and_lifecycle_inside_the_write_transactio
     let (snapshot, revision) = service.load_conversation_for_turn(conversation_id).unwrap();
     let mut candidate = snapshot.unwrap();
     candidate.messages.push(ChatMessageRecord {
+        human_interaction_response: None,
         id: "assistant-graph-fence".to_string(),
         role: "assistant".to_string(),
         content: "Thinking...".to_string(),
@@ -1871,6 +1893,7 @@ fn root_permission_snapshot_is_atomic_with_turn_admission_and_survives_reopen() 
     let (candidate, revision) = service.load_conversation_for_turn(conversation_id).unwrap();
     let mut candidate = candidate.unwrap();
     candidate.messages.push(ChatMessageRecord {
+        human_interaction_response: None,
         id: "assistant-permission-reopen".to_string(),
         role: "assistant".to_string(),
         content: "Thinking...".to_string(),
@@ -2224,6 +2247,7 @@ fn conversation_fork_clones_exact_history_archives_and_rewrites_trace_refs() {
             title: "archive source".to_string(),
             messages: vec![
                 ChatMessageRecord {
+                    human_interaction_response: None,
                     id: "user-archive-source".to_string(),
                     role: "user".to_string(),
                     content: "read it".to_string(),
@@ -2234,6 +2258,7 @@ fn conversation_fork_clones_exact_history_archives_and_rewrites_trace_refs() {
                     ui_state_json: None,
                 },
                 ChatMessageRecord {
+                    human_interaction_response: None,
                     id: "assistant-archive-source".to_string(),
                     role: "assistant".to_string(),
                     content: "done".to_string(),
@@ -2970,6 +2995,7 @@ fn agent_tree_fork_rejects_an_active_member_command_without_partial_target_state
             title: "active member tree".to_string(),
             messages: vec![
                 ChatMessageRecord {
+                    human_interaction_response: None,
                     id: "user-active-member-tree-root".to_string(),
                     role: "user".to_string(),
                     content: "start the root task".to_string(),
@@ -2980,6 +3006,7 @@ fn agent_tree_fork_rejects_an_active_member_command_without_partial_target_state
                     ui_state_json: None,
                 },
                 ChatMessageRecord {
+                    human_interaction_response: None,
                     id: "assistant-active-member-tree-root".to_string(),
                     role: "assistant".to_string(),
                     content: "fork boundary".to_string(),
@@ -3357,6 +3384,7 @@ fn save_forkable_command_conversation(service: &StorageService, conversation_id:
             ]
             .into_iter()
             .map(|(role, suffix, created_at)| ChatMessageRecord {
+                human_interaction_response: None,
                 id: format!(
                     "{role}-{conversation_id_suffix}-{suffix}",
                     conversation_id_suffix = conversation_id.trim_start_matches("conversation-")
@@ -3482,6 +3510,7 @@ fn conversation_fork_clones_all_visible_turn_diffs_and_supports_recursive_forks(
     ]
     .into_iter()
     .map(|(id, role, created_at, run_id)| ChatMessageRecord {
+        human_interaction_response: None,
         id: id.to_string(),
         role: role.to_string(),
         content: format!("content {id}"),
@@ -3947,6 +3976,7 @@ fn deleting_messages_keeps_usage_totals_via_rollup() {
     let service = fixture.service();
     let mut record = conversation("conversation-usage-delete", Some("project-1"), "message-1");
     record.messages.push(ChatMessageRecord {
+        human_interaction_response: None,
         id: "message-2".to_string(),
         role: "assistant".to_string(),
         content: "done".to_string(),

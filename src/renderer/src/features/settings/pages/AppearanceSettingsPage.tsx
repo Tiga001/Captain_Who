@@ -1,6 +1,7 @@
+import { renderSettingsNodes, settingLabel, settingDescription } from '../settingsDefinition'
+import { appearanceSettingsNodes, COLOR_SCHEME_OPTIONS } from './AppearanceSettingsPage.definition'
 import type { CSSProperties } from 'react'
 import { useFrontendConfig } from '../../../config/FrontendConfigProvider'
-import { isMacOS } from '../../../lib/platform'
 import { getFrontendTheme } from '../../../config/frontendTheme'
 import type {
   ColorScheme,
@@ -8,7 +9,6 @@ import type {
   FrontendTheme,
   ThemeIdsByColorScheme
 } from '../../../config/frontendTheme'
-import type { TranslationKey } from '../../../config/frontendTranslations'
 import type { UiPreferencesSnapshot } from '../../storage/storageClient'
 import {
   MAX_TRANSLUCENT_SIDEBAR_TRANSPARENCY,
@@ -18,22 +18,6 @@ import {
 import { AppearanceThemeSelect } from './AppearanceThemeSelect'
 import { AppearanceDiffPreview } from './AppearanceDiffPreview'
 import './AppearanceSettingsPage.css'
-
-const COLOR_SCHEME_OPTIONS: Array<{
-  id: ColorSchemePreference
-  labelKey: TranslationKey
-}> = [
-  { id: 'system', labelKey: 'appearance.theme.system' },
-  { id: 'light', labelKey: 'appearance.theme.light' },
-  { id: 'dark', labelKey: 'appearance.theme.dark' }
-]
-
-const THEME_VARIANT_LABELS: Record<ColorScheme, TranslationKey> = {
-  light: 'appearance.themeVariant.light',
-  dark: 'appearance.themeVariant.dark'
-}
-
-const SUPPORTS_NATIVE_FONT_SMOOTHING = isMacOS()
 
 type ThemePreviewStyle = CSSProperties & {
   '--preview-divider': string
@@ -104,169 +88,224 @@ export function AppearanceSettingsPage({
   const sidebarTransparency = normalizeTranslucentSidebarTransparency(
     uiPreferences.translucentSidebarTransparency
   )
-  const visibleThemeVariants: ColorScheme[] =
-    colorSchemePreference === 'system' ? ['light', 'dark'] : [colorSchemePreference]
 
   return (
     <article className="settings-list-page appearance-settings-page">
       <h1>{t('settings.page.appearance')}</h1>
 
-      <section
-        className="settings-list-section appearance-theme-section"
-        aria-labelledby="appearance-theme-heading"
-      >
-        <h2 id="appearance-theme-heading">{t('appearance.theme')}</h2>
-
-        <div className="appearance-theme-grid" role="group" aria-label={t('appearance.theme')}>
-          {COLOR_SCHEME_OPTIONS.map((option) => (
-            <button
-              aria-pressed={colorSchemePreference === option.id}
-              className="appearance-theme-option"
-              data-active={colorSchemePreference === option.id || undefined}
-              key={option.id}
-              onClick={() => setColorSchemePreference(option.id)}
-              type="button"
-            >
-              <span
-                aria-hidden="true"
-                className="appearance-theme-preview"
-                style={getThemePreviewStyle(option.id, themeIdsByColorScheme)}
-              >
-                <span className="appearance-theme-preview__window" />
-                <span className="appearance-theme-preview__header">
-                  <span />
-                  <span />
-                </span>
-                <span className="appearance-theme-preview__panel">
-                  <span />
-                  <span />
-                  <span />
-                </span>
-              </span>
-              <span className="appearance-theme-option__label">{t(option.labelKey)}</span>
-            </button>
-          ))}
-        </div>
-
-        <AppearanceDiffPreview label={t('appearance.diffPreview')} themeId={resolvedThemeId} />
-
-        <div className="settings-list appearance-theme-variant-list">
-          {visibleThemeVariants.map((colorScheme) => {
-            const labelKey = THEME_VARIANT_LABELS[colorScheme]
-            const labelId = `appearance-${colorScheme}-theme-heading`
+      {renderSettingsNodes(appearanceSettingsNodes, (section) => {
+        switch (section.id) {
+          case 'appearance.theme':
             return (
-              <div className="settings-list-row appearance-theme-variant-row" key={colorScheme}>
-                <span className="settings-list-row__text">
-                  <span className="settings-list-row__title" id={labelId}>
-                    {t(labelKey)}
-                  </span>
-                </span>
-
-                <span className="settings-list-row__control">
-                  <AppearanceThemeSelect
-                    colorScheme={colorScheme}
-                    labelId={labelId}
-                    onChange={(themeId) => setThemeForColorScheme(colorScheme, themeId)}
-                    value={themeIdsByColorScheme[colorScheme]}
-                  />
-                </span>
-              </div>
-            )
-          })}
-        </div>
-      </section>
-
-      <section className="settings-list-section" aria-labelledby="appearance-preferences-heading">
-        <h2 id="appearance-preferences-heading">{t('appearance.preferences')}</h2>
-
-        <div className="settings-list">
-          {SUPPORTS_NATIVE_FONT_SMOOTHING && (
-            <div className="settings-list-row">
-              <div className="settings-list-row__text">
-                <h2 className="settings-list-row__title" id="native-font-smoothing-heading">
-                  {t('appearance.nativeFontSmoothing')}
-                </h2>
-                <p className="settings-list-row__description">
-                  {t('appearance.nativeFontSmoothingDescription')}
-                </p>
-              </div>
-
-              <button
-                className="settings-switch appearance-settings-switch"
-                type="button"
-                role="switch"
-                aria-checked={uiPreferences.nativeFontSmoothing}
-                data-state={uiPreferences.nativeFontSmoothing ? 'on' : 'off'}
-                onClick={() =>
-                  onUiPreferencesChange({ nativeFontSmoothing: !uiPreferences.nativeFontSmoothing })
-                }
+              <section
+                className="settings-list-section appearance-theme-section"
+                aria-labelledby="appearance-theme-heading"
               >
-                <span className="settings-switch__thumb" />
-              </button>
-            </div>
-          )}
+                <h2 id="appearance-theme-heading">{settingLabel(section, t)}</h2>
 
-          <div className="settings-list-row">
-            <div className="settings-list-row__text">
-              <h2 className="settings-list-row__title" id="translucent-sidebar-heading">
-                {t('appearance.translucentSidebar')}
-              </h2>
-              <p className="settings-list-row__description">
-                {t('appearance.translucentSidebarDescription')}
-              </p>
-            </div>
-
-            <button
-              className="settings-switch appearance-settings-switch"
-              type="button"
-              role="switch"
-              aria-checked={uiPreferences.translucentSidebar}
-              data-state={uiPreferences.translucentSidebar ? 'on' : 'off'}
-              onClick={() =>
-                onUiPreferencesChange({ translucentSidebar: !uiPreferences.translucentSidebar })
-              }
-            >
-              <span className="settings-switch__thumb" />
-            </button>
-          </div>
-
-          <div
-            className="appearance-translucency-drawer"
-            data-open={uiPreferences.translucentSidebar ? 'true' : 'false'}
-            aria-hidden={!uiPreferences.translucentSidebar}
-          >
-            <div className="settings-list-row appearance-translucency-row">
-              <div className="settings-list-row__text">
-                <h2
-                  className="settings-list-row__title"
-                  id="translucent-sidebar-transparency-heading"
+                <div
+                  className="appearance-theme-grid"
+                  role="group"
+                  aria-label={settingLabel(section, t)}
                 >
-                  {t('appearance.translucentSidebarTransparency')}
-                </h2>
-              </div>
+                  {COLOR_SCHEME_OPTIONS.map((option) => (
+                    <button
+                      aria-pressed={colorSchemePreference === option.id}
+                      className="appearance-theme-option"
+                      data-active={colorSchemePreference === option.id || undefined}
+                      key={option.id}
+                      onClick={() => setColorSchemePreference(option.id)}
+                      type="button"
+                    >
+                      <span
+                        aria-hidden="true"
+                        className="appearance-theme-preview"
+                        style={getThemePreviewStyle(option.id, themeIdsByColorScheme)}
+                      >
+                        <span className="appearance-theme-preview__window" />
+                        <span className="appearance-theme-preview__header">
+                          <span />
+                          <span />
+                        </span>
+                        <span className="appearance-theme-preview__panel">
+                          <span />
+                          <span />
+                          <span />
+                        </span>
+                      </span>
+                      <span className="appearance-theme-option__label">{t(option.labelKey)}</span>
+                    </button>
+                  ))}
+                </div>
 
-              <label className="appearance-translucency-control">
-                <input
-                  type="range"
-                  min={MIN_TRANSLUCENT_SIDEBAR_TRANSPARENCY}
-                  max={MAX_TRANSLUCENT_SIDEBAR_TRANSPARENCY}
-                  step={1}
-                  value={sidebarTransparency}
-                  aria-labelledby="translucent-sidebar-transparency-heading"
-                  disabled={!uiPreferences.translucentSidebar}
-                  onChange={(event) =>
-                    onUiPreferencesChange({
-                      translucentSidebarTransparency: normalizeTranslucentSidebarTransparency(
-                        Number(event.currentTarget.value)
-                      )
-                    })
-                  }
+                <AppearanceDiffPreview
+                  label={t('appearance.diffPreview')}
+                  themeId={resolvedThemeId}
                 />
-              </label>
-            </div>
-          </div>
-        </div>
-      </section>
+
+                <div className="settings-list appearance-theme-variant-list">
+                  {renderSettingsNodes(
+                    section.children.filter(
+                      (node) =>
+                        colorSchemePreference === 'system' ||
+                        node.id ===
+                          (colorSchemePreference === 'light'
+                            ? 'appearance.lightTheme'
+                            : 'appearance.darkTheme')
+                    ),
+                    (node) => {
+                      const colorScheme: ColorScheme =
+                        node.id === 'appearance.lightTheme' ? 'light' : 'dark'
+                      const labelId = `appearance-${colorScheme}-theme-heading`
+                      return (
+                        <div
+                          className="settings-list-row appearance-theme-variant-row"
+                          key={colorScheme}
+                        >
+                          <span className="settings-list-row__text">
+                            <span className="settings-list-row__title" id={labelId}>
+                              {settingLabel(node, t)}
+                            </span>
+                          </span>
+
+                          <span className="settings-list-row__control">
+                            <AppearanceThemeSelect
+                              colorScheme={colorScheme}
+                              labelId={labelId}
+                              onChange={(themeId) => setThemeForColorScheme(colorScheme, themeId)}
+                              value={themeIdsByColorScheme[colorScheme]}
+                            />
+                          </span>
+                        </div>
+                      )
+                    }
+                  )}
+                </div>
+              </section>
+            )
+          case 'appearance.preferences':
+            return (
+              <section
+                className="settings-list-section"
+                aria-labelledby="appearance-preferences-heading"
+              >
+                <h2 id="appearance-preferences-heading">{settingLabel(section, t)}</h2>
+
+                <div className="settings-list">
+                  {renderSettingsNodes(section.children, (node) => {
+                    switch (node.id) {
+                      case 'appearance.nativeFontSmoothing':
+                        return (
+                          <div className="settings-list-row">
+                            <div className="settings-list-row__text">
+                              <h2
+                                className="settings-list-row__title"
+                                id="native-font-smoothing-heading"
+                              >
+                                {settingLabel(node, t)}
+                              </h2>
+                              <p className="settings-list-row__description">
+                                {settingDescription(node, t)}
+                              </p>
+                            </div>
+
+                            <button
+                              className="settings-switch appearance-settings-switch"
+                              type="button"
+                              role="switch"
+                              aria-checked={uiPreferences.nativeFontSmoothing}
+                              data-state={uiPreferences.nativeFontSmoothing ? 'on' : 'off'}
+                              onClick={() =>
+                                onUiPreferencesChange({
+                                  nativeFontSmoothing: !uiPreferences.nativeFontSmoothing
+                                })
+                              }
+                            >
+                              <span className="settings-switch__thumb" />
+                            </button>
+                          </div>
+                        )
+                      case 'appearance.translucentSidebar':
+                        return (
+                          <div className="settings-list-row">
+                            <div className="settings-list-row__text">
+                              <h2
+                                className="settings-list-row__title"
+                                id="translucent-sidebar-heading"
+                              >
+                                {settingLabel(node, t)}
+                              </h2>
+                              <p className="settings-list-row__description">
+                                {settingDescription(node, t)}
+                              </p>
+                            </div>
+
+                            <button
+                              className="settings-switch appearance-settings-switch"
+                              type="button"
+                              role="switch"
+                              aria-checked={uiPreferences.translucentSidebar}
+                              data-state={uiPreferences.translucentSidebar ? 'on' : 'off'}
+                              onClick={() =>
+                                onUiPreferencesChange({
+                                  translucentSidebar: !uiPreferences.translucentSidebar
+                                })
+                              }
+                            >
+                              <span className="settings-switch__thumb" />
+                            </button>
+                          </div>
+                        )
+                      case 'appearance.translucentSidebarTransparency':
+                        return (
+                          <div
+                            className="appearance-translucency-drawer"
+                            data-open={uiPreferences.translucentSidebar ? 'true' : 'false'}
+                            aria-hidden={!uiPreferences.translucentSidebar}
+                          >
+                            <div className="settings-list-row appearance-translucency-row">
+                              <div className="settings-list-row__text">
+                                <h2
+                                  className="settings-list-row__title"
+                                  id="translucent-sidebar-transparency-heading"
+                                >
+                                  {settingLabel(node, t)}
+                                </h2>
+                              </div>
+
+                              <label className="appearance-translucency-control">
+                                <input
+                                  type="range"
+                                  min={MIN_TRANSLUCENT_SIDEBAR_TRANSPARENCY}
+                                  max={MAX_TRANSLUCENT_SIDEBAR_TRANSPARENCY}
+                                  step={1}
+                                  value={sidebarTransparency}
+                                  aria-labelledby="translucent-sidebar-transparency-heading"
+                                  disabled={!uiPreferences.translucentSidebar}
+                                  onChange={(event) =>
+                                    onUiPreferencesChange({
+                                      translucentSidebarTransparency:
+                                        normalizeTranslucentSidebarTransparency(
+                                          Number(event.currentTarget.value)
+                                        )
+                                    })
+                                  }
+                                />
+                              </label>
+                            </div>
+                          </div>
+                        )
+                      default:
+                        return null
+                    }
+                  })}
+                </div>
+              </section>
+            )
+          default:
+            return null
+        }
+      })}
     </article>
   )
 }

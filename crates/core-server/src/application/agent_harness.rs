@@ -1118,6 +1118,7 @@ mod tests {
             .unwrap();
         let mut conversation = conversation.unwrap();
         conversation.messages.push(ChatMessageRecord {
+            human_interaction_response: None,
             id: "assistant-stale-after-sampling".to_string(),
             role: "assistant".to_string(),
             content: "Thinking...".to_string(),

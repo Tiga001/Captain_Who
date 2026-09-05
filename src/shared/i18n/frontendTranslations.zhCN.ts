@@ -779,6 +779,7 @@ export const zhCNTranslations = {
   'skills.error.sourceChanged': '检查期间技能来源发生了变化，请重新检查。',
   'skills.error.sourceAuthorityExpired': '该技能来源选择已经失效，请重新解析来源。',
   'skills.error.acknowledgementRequired': '请先确认所有必要的安全提示。',
+  'skills.error.configurationRequired': '请先完成图片生成配置后再开启',
   'skills.error.notManageable': '该技能不能在此页面管理。',
   'skills.error.operationConflict': '该操作已发生变化，请重新开始。',
   'skills.error.cancelled': '操作已取消。',

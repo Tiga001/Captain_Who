@@ -489,11 +489,31 @@ where
             if let Some(operation) = image_generation_configuration_operation(&request.method) {
                 let request_id = request.id.clone();
                 let request_service = Arc::clone(&image_generation_configuration);
+                let request_storage = Arc::clone(&storage);
+                let request_catalog = Arc::clone(&skill_services.catalog);
+                let request_installations = Arc::clone(&skill_services.installations);
+                let request_workflow = Arc::clone(&skill_services.workflow);
+                let request_outbound = outbound.clone();
                 let kind = ImageGenerationConfigurationJobKind::for_operation(operation);
                 if dispatchers
                     .image_generation_configuration
                     .try_submit(request_id.clone(), kind, move || {
-                        handle_image_generation_configuration_request(&request_service, request)
+                        let response = handle_image_generation_configuration_request(
+                            &request_service,
+                            request,
+                        );
+                        if response["result"]["outcome"] == "updated" {
+                            notify_skills_changed(
+                                &request_storage,
+                                &request_catalog,
+                                &request_installations,
+                                Some(&request_workflow),
+                                Some(&request_outbound),
+                                SkillsChangedReasonDto::EnablementChanged,
+                                Some(mycopilot_core::skills::IMAGE_GENERATION_SKILL_ID.to_string()),
+                            );
+                        }
+                        response
                     })
                     .is_err()
                 {
@@ -632,6 +652,7 @@ where
                 let request_installations = Arc::clone(&skill_services.installations);
                 let request_workflow = Arc::clone(&skill_services.workflow);
                 let request_source_resolution = Arc::clone(&skill_services.source_resolution);
+                let request_image_configuration = Arc::clone(&image_generation_configuration);
                 let request_outbound = outbound.clone();
                 let acquisition_lane = request.uses_acquisition_lane();
                 let source_resolution_request = request.is_source_resolution();
@@ -649,6 +670,7 @@ where
                                 &request_installations,
                                 Some(&request_workflow),
                                 Some(&request_source_resolution),
+                                Some(&request_image_configuration),
                                 Some(&request_outbound),
                                 request,
                             )
@@ -667,6 +689,7 @@ where
                                     &request_installations,
                                     Some(&request_workflow),
                                     Some(&request_source_resolution),
+                                    Some(&request_image_configuration),
                                     Some(&request_outbound),
                                     request,
                                 )
@@ -681,6 +704,7 @@ where
                                     &request_installations,
                                     Some(&request_workflow),
                                     Some(&request_source_resolution),
+                                    Some(&request_image_configuration),
                                     Some(&request_outbound),
                                     request,
                                 )
@@ -693,6 +717,7 @@ where
                                 &request_installations,
                                 Some(&request_workflow),
                                 Some(&request_source_resolution),
+                                Some(&request_image_configuration),
                                 Some(&request_outbound),
                                 request,
                             )

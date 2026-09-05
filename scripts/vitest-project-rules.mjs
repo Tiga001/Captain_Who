@@ -7,6 +7,7 @@ const workspaceFilesTests = 'src/main/workspaceFiles'
 const coreMainTests = 'src/main/core'
 const electronFixtureTests = `${coreMainTests}/**/*.electron.test.ts`
 const managedPlaywrightElectronE2e = 'src/main/core/managedPlaywrightBridge.electron.test.ts'
+const humanInteractionCoreE2e = 'src/main/core/humanInteractionRealCore.integration.test.ts'
 const automationCoreE2e = 'src/main/core/automationHostRealCore.integration.test.ts'
 const mcpMainTests = 'src/main/mcp'
 const terminalMainTests = 'src/main/terminal'
@@ -14,6 +15,7 @@ const terminalPreloadTests = 'src/preload'
 const terminalRendererTests = 'src/renderer/src/features/terminal/__tests__'
 const skillsTests = 'src/renderer/src/features/skills/__tests__'
 const mcpTests = 'src/renderer/src/features/mcp/__tests__'
+const settingsTests = 'src/renderer/src/features/settings/__tests__'
 const appTests = 'src/renderer/src/app/__tests__'
 const chatTests = 'src/renderer/src/features/chat/__tests__'
 const automationsTests = 'src/renderer/src/features/automations/__tests__'
@@ -41,6 +43,7 @@ export const vitestProjectFileRules = {
       `${terminalRendererTests}/**/*.test.ts`,
       `${skillsTests}/**/*.test.ts`,
       `${mcpTests}/**/*.test.ts`,
+      `${settingsTests}/**/*.test.{ts,tsx}`,
       `${appTests}/**/*.test.ts`,
       `${chatTests}/**/*.test.ts`,
       `${automationsTests}/**/*.test.ts`,
@@ -49,7 +52,12 @@ export const vitestProjectFileRules = {
       `${agentCollaborationTests}/**/*.test.ts`,
       `${protocolTests}/**/*.test.ts`
     ],
-    exclude: [electronFixtureTests, automationCoreE2e]
+    exclude: [
+      electronFixtureTests,
+      automationCoreE2e,
+      humanInteractionCoreE2e,
+      `${settingsTests}/**/*.browser.test.tsx`
+    ]
   },
   browser: {
     include: [
@@ -60,6 +68,7 @@ export const vitestProjectFileRules = {
       `${humanInteractionTests}/**/*.browser.test.tsx`,
       `${skillsTests}/**/*.browser.test.tsx`,
       `${mcpTests}/**/*.browser.test.tsx`,
+      `${settingsTests}/**/*.browser.test.tsx`,
       `${gitReviewTests}/**/*.browser.test.tsx`,
       `${rightSidebarTests}/**/*.browser.test.tsx`,
       `${bottomPanelTests}/**/*.browser.test.tsx`,
@@ -75,6 +84,10 @@ export const vitestProjectFileRules = {
   },
   'managed-playwright-e2e': {
     include: [managedPlaywrightElectronE2e],
+    exclude: []
+  },
+  'human-interaction-core-e2e': {
+    include: [humanInteractionCoreE2e],
     exclude: []
   },
   'automation-core-e2e': {

@@ -1,6 +1,8 @@
 import type { IpcRenderer } from 'electron'
 import { HOST_CHANNELS, type HostInvocationResult, type StorageHostApi } from '@mycopilot/host-api'
 import {
+  assertNoHumanInteractionMessageProof,
+  validateStorageHumanInteractionResponses,
   parseProviderVendorDescriptors,
   parseProviderVendorModelPolicyDescriptor,
   parseProviderProfileUiDescriptors,
@@ -52,22 +54,37 @@ export function createStorageIpcBridge(ipcRenderer: StorageIpcRenderer): Storage
     revealProjectFile: (input) =>
       ipcRenderer.invoke(HOST_CHANNELS.storage.revealProjectFile, input),
     loadConversationMetas: () => ipcRenderer.invoke(HOST_CHANNELS.storage.loadConversationMetas),
-    loadConversation: (conversationId) =>
-      ipcRenderer.invoke(HOST_CHANNELS.storage.loadConversation, conversationId),
-    loadConversations: () => ipcRenderer.invoke(HOST_CHANNELS.storage.loadConversations),
-    forkConversation: (input) => ipcRenderer.invoke(HOST_CHANNELS.storage.forkConversation, input),
+    loadConversation: async (conversationId) => {
+      const value = await ipcRenderer.invoke(HOST_CHANNELS.storage.loadConversation, conversationId)
+      return value === null ? null : validateStorageHumanInteractionResponses(value)
+    },
+    loadConversations: async () =>
+      (await ipcRenderer.invoke(HOST_CHANNELS.storage.loadConversations)).map(
+        validateStorageHumanInteractionResponses
+      ),
+    forkConversation: async (input) => {
+      const result = await ipcRenderer.invoke(HOST_CHANNELS.storage.forkConversation, input)
+      if (result.ok) validateStorageHumanInteractionResponses(result.value)
+      return result
+    },
     saveConversationMeta: (conversation) =>
       ipcRenderer.invoke(HOST_CHANNELS.storage.saveConversationMeta, conversation),
     deleteConversation: (conversationId) =>
       ipcRenderer.invoke(HOST_CHANNELS.storage.deleteConversation, conversationId),
     deleteChatMessages: (input) =>
       ipcRenderer.invoke(HOST_CHANNELS.storage.deleteChatMessages, input),
-    upsertChatMessages: (input) =>
-      ipcRenderer.invoke(HOST_CHANNELS.storage.upsertChatMessages, input),
-    saveChatMessageState: (input) =>
-      ipcRenderer.invoke(HOST_CHANNELS.storage.saveChatMessageState, input),
-    saveChatMessageUiState: (input) =>
-      ipcRenderer.invoke(HOST_CHANNELS.storage.saveChatMessageUiState, input),
+    upsertChatMessages: (input) => {
+      for (const message of input.messages) assertNoHumanInteractionMessageProof(message)
+      return ipcRenderer.invoke(HOST_CHANNELS.storage.upsertChatMessages, input)
+    },
+    saveChatMessageState: (input) => {
+      assertNoHumanInteractionMessageProof(input.message)
+      return ipcRenderer.invoke(HOST_CHANNELS.storage.saveChatMessageState, input)
+    },
+    saveChatMessageUiState: (input) => {
+      assertNoHumanInteractionMessageProof(input.message)
+      return ipcRenderer.invoke(HOST_CHANNELS.storage.saveChatMessageUiState, input)
+    },
     loadComposerDrafts: () => ipcRenderer.invoke(HOST_CHANNELS.storage.loadComposerDrafts),
     saveComposerDraft: (draft) =>
       ipcRenderer.invoke(HOST_CHANNELS.storage.saveComposerDraft, draft),

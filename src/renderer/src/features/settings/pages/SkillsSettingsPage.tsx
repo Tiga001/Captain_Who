@@ -1,3 +1,5 @@
+import { renderSettingsNodes, settingLabel, settingDescription } from '../settingsDefinition'
+import { skillInstallSettings, skillManagementSettings } from './managementSettings.definition'
 // Renderer settings page: manages globally bundled and installed Agent Skills through Host API.
 import { AlertTriangle, LoaderCircle, RefreshCw, WandSparkles } from 'lucide-react'
 import { useCallback, useMemo, useState } from 'react'
@@ -56,6 +58,10 @@ export function SkillsSettingsPage() {
   }, [installation.activeUpdateSkillId, pendingOperations])
 
   const changeEnabled = async (entry: SkillManagementEntry, enabled: boolean) => {
+    if (enabled && entry.enablementBlock === 'imageGenerationConfigurationRequired') {
+      showToast(t('skills.error.configurationRequired'), { durationMs: 3200 })
+      return
+    }
     try {
       await setEnabled(entry, enabled)
     } catch (error) {
@@ -85,21 +91,23 @@ export function SkillsSettingsPage() {
     )
   )
 
-  return (
+  return renderSettingsNodes(skillManagementSettings, (node) => (
     <article className="settings-list-page skills-settings-page">
       <header className="skills-settings-header">
         <div>
           <h1>{t('settings.page.skills')}</h1>
-          <p className="settings-list-page__description">{t('skills.pageDescription')}</p>
+          <p className="settings-list-page__description">{settingDescription(node, t)}</p>
         </div>
-        <button
-          className="skills-install-button"
-          onClick={(event) => installation.startInstall(event.currentTarget)}
-          type="button"
-        >
-          <WandSparkles aria-hidden="true" />
-          <span>{t('skills.install')}</span>
-        </button>
+        {renderSettingsNodes(skillInstallSettings, (node) => (
+          <button
+            className="skills-install-button"
+            onClick={(event) => installation.startInstall(event.currentTarget)}
+            type="button"
+          >
+            <WandSparkles aria-hidden="true" />
+            <span>{settingLabel(node, t)}</span>
+          </button>
+        ))}
       </header>
 
       {state.status === 'loading' && (
@@ -186,7 +194,7 @@ export function SkillsSettingsPage() {
         />
       )}
     </article>
-  )
+  ))
 }
 
 function replaceTokens(template: string, values: Record<string, string>): string {

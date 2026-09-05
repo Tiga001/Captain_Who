@@ -93,6 +93,20 @@ describe('Skill installation workflow protocol', () => {
     }
   })
 
+  it('accepts the actionable image configuration requirement without widening error fields', () => {
+    const error = {
+      type: 'skillManagement',
+      operation: 'setEnabled',
+      code: 'configurationRequired',
+      recovery: 'configureImageGeneration',
+      message: 'Configure image generation before enabling its Skill.'
+    }
+    expect(parseSkillManagementErrorData(error)).toEqual(error)
+    expect(() => parseSkillManagementErrorData({ ...error, credential: 'private' })).toThrow(
+      'unexpected field credential'
+    )
+  })
+
   it('accepts the current unsupported tool reference diagnostic and rejects drift', () => {
     const response = structuredClone(golden.management.listResponse) as {
       diagnostics: unknown[]
@@ -116,6 +130,18 @@ describe('Skill installation workflow protocol', () => {
     expect(() => parseSkillsListManagementOutput(extraField)).toThrow(
       /unexpected field internalCause/
     )
+  })
+
+  it('preserves Host image enablement eligibility and rejects unknown block reasons', () => {
+    const response = structuredClone(golden.management.listResponse) as {
+      skills: Array<Record<string, unknown>>
+    }
+    response.skills[0].enablementBlock = 'imageGenerationConfigurationRequired'
+    expect(parseSkillsListManagementOutput(response).skills[0].enablementBlock).toBe(
+      'imageGenerationConfigurationRequired'
+    )
+    response.skills[0].enablementBlock = 'untrustedFutureReason'
+    expect(() => parseSkillsListManagementOutput(response)).toThrow(/enablementBlock/)
   })
 
   it('keeps the golden aligned with backend installation identity and source semantics', () => {

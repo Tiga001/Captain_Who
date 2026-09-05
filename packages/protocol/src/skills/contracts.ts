@@ -460,9 +460,9 @@ export interface SkillsListManagementInput {
 export type SkillManagementOperation = 'list' | 'setEnabled'
 
 export type SkillManagementErrorCode =
-  'notFound' | 'notManageable' | 'stateConflict' | 'storageUnavailable'
+  'notFound' | 'notManageable' | 'stateConflict' | 'configurationRequired' | 'storageUnavailable'
 
-export type SkillManagementRecovery = 'refreshManagement' | 'retry'
+export type SkillManagementRecovery = 'refreshManagement' | 'configureImageGeneration' | 'retry'
 
 export interface SkillManagementErrorData {
   type: 'skillManagement'
@@ -487,6 +487,7 @@ export interface SkillManagementEntry {
   installationRevision?: string
   stateRevision: string
   enabled: boolean
+  enablementBlock?: 'imageGenerationConfigurationRequired'
   actions: SkillManagementActions
   acquisition?: SkillPreviewSource
   compatibility: SkillCompatibilityReport

@@ -155,6 +155,7 @@ jobs:
         run: rustup toolchain install stable --profile minimal
       - run: pnpm install --frozen-lockfile
       - run: pnpm test:electron
+      - run: pnpm test:human-interaction-core-e2e
 
   automation-real-core:
     name: Automation real-core tests

@@ -1026,6 +1026,7 @@ async fn user_root_run_cancellation_stops_running_and_queued_descendants() {
         .upsert_chat_messages(
             root_conversation_id,
             vec![ChatMessageRecord {
+                human_interaction_response: None,
                 id: root_assistant_message_id.to_string(),
                 role: "assistant".to_string(),
                 content: String::new(),

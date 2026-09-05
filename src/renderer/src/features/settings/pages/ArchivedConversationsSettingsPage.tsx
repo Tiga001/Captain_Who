@@ -1,3 +1,11 @@
+import { renderSettingsNodes, settingLabel } from '../settingsDefinition'
+import {
+  archiveDeleteSettings,
+  archiveProjectFilterSettings,
+  archiveConversationListSettings,
+  archiveConversationDeleteSettings,
+  archiveConversationRestoreSettings
+} from './managementSettings.definition'
 import { Archive, Folder, RotateCcw, Trash2 } from 'lucide-react'
 import { useMemo, useState } from 'react'
 import { ConfirmationDialog } from '../../../components/dialog/ConfirmationDialog'
@@ -111,95 +119,105 @@ export function ArchivedConversationsSettingsPage({
     <article className="archived-conversations-page">
       <div className="archived-conversations-page__header">
         <h1>{t('settings.page.archivedConversations')}</h1>
-        <button
-          className="archived-conversations-page__delete-all"
-          type="button"
-          disabled={filteredConversations.length === 0}
-          onClick={() => {
-            setPendingDeleteConfirmation(
-              projectFilter === 'all'
-                ? {
-                    conversationIds: archivedConversations.map((conversation) => conversation.id),
-                    type: 'all'
-                  }
-                : {
-                    conversationIds: filteredConversations.map((conversation) => conversation.id),
-                    scopeName: getProjectFilterName(
-                      projectFilter,
-                      projects,
-                      t('archive.noProject')
-                    ),
-                    type: 'filtered'
-                  }
-            )
-          }}
-        >
-          <Trash2 aria-hidden="true" />
-          <span>{t('archive.deleteAll')}</span>
-        </button>
+        {renderSettingsNodes(archiveDeleteSettings, (node) => (
+          <button
+            className="archived-conversations-page__delete-all"
+            type="button"
+            disabled={filteredConversations.length === 0}
+            onClick={() => {
+              setPendingDeleteConfirmation(
+                projectFilter === 'all'
+                  ? {
+                      conversationIds: archivedConversations.map((conversation) => conversation.id),
+                      type: 'all'
+                    }
+                  : {
+                      conversationIds: filteredConversations.map((conversation) => conversation.id),
+                      scopeName: getProjectFilterName(
+                        projectFilter,
+                        projects,
+                        t('archive.noProject')
+                      ),
+                      type: 'filtered'
+                    }
+              )
+            }}
+          >
+            <Trash2 aria-hidden="true" />
+            <span>{settingLabel(node, t)}</span>
+          </button>
+        ))}
       </div>
 
       <section
         className="archived-conversations-panel"
         aria-label={t('settings.page.archivedConversations')}
       >
-        <div className="archived-conversations-panel__toolbar">
-          <SettingsSelect
-            ariaLabel={t('archive.projectFilter')}
-            className="archived-conversations-project-filter"
-            leadingIcon={<Folder />}
-            onChange={setProjectFilter}
-            options={projectFilterOptions}
-            value={projectFilter}
-          />
-        </div>
+        {renderSettingsNodes(archiveProjectFilterSettings, (node) => (
+          <div className="archived-conversations-panel__toolbar">
+            <SettingsSelect
+              ariaLabel={settingLabel(node, t)}
+              className="archived-conversations-project-filter"
+              leadingIcon={<Folder />}
+              onChange={setProjectFilter}
+              options={projectFilterOptions}
+              value={projectFilter}
+            />
+          </div>
+        ))}
 
-        <div className="archived-conversations-list">
-          {filteredConversations.length === 0 ? (
-            <div className="archived-conversations-empty">
-              <Archive aria-hidden="true" />
-              <span>{t('archive.empty')}</span>
-            </div>
-          ) : (
-            filteredConversations.map((conversation) => (
-              <div className="archived-conversation-row" key={conversation.id}>
-                <div className="archived-conversation-row__main">
-                  <strong>{conversation.title}</strong>
-                  <span>
-                    {formatArchivedDate(conversation.updatedAt, language)}
-                    {' · '}
-                    {getProjectName(conversation.projectId, projects, t('archive.noProject'))}
-                  </span>
-                </div>
-
-                <div className="archived-conversation-row__actions">
-                  <button
-                    className="archived-conversation-row__icon-button"
-                    type="button"
-                    aria-label={t('archive.deleteConversation')}
-                    title={t('archive.deleteConversation')}
-                    onClick={() =>
-                      setPendingDeleteConfirmation({
-                        conversationId: conversation.id,
-                        type: 'single'
-                      })
-                    }
-                  >
-                    <Trash2 aria-hidden="true" />
-                  </button>
-                  <button
-                    className="archived-conversation-row__restore-button"
-                    type="button"
-                    onClick={() => onUnarchiveConversation(conversation.id)}
-                  >
-                    <RotateCcw aria-hidden="true" />
-                    <span>{t('archive.unarchive')}</span>
-                  </button>
-                </div>
+        {renderSettingsNodes(archiveConversationListSettings, () => (
+          <div className="archived-conversations-list">
+            {filteredConversations.length === 0 ? (
+              <div className="archived-conversations-empty">
+                <Archive aria-hidden="true" />
+                <span>{t('archive.empty')}</span>
               </div>
-            ))
-          )}
-        </div>
+            ) : (
+              filteredConversations.map((conversation) => (
+                <div className="archived-conversation-row" key={conversation.id}>
+                  <div className="archived-conversation-row__main">
+                    <strong>{conversation.title}</strong>
+                    <span>
+                      {formatArchivedDate(conversation.updatedAt, language)}
+                      {' · '}
+                      {getProjectName(conversation.projectId, projects, t('archive.noProject'))}
+                    </span>
+                  </div>
+
+                  <div className="archived-conversation-row__actions">
+                    {renderSettingsNodes(archiveConversationDeleteSettings, (item) => (
+                      <button
+                        className="archived-conversation-row__icon-button"
+                        type="button"
+                        aria-label={settingLabel(item, t)}
+                        title={settingLabel(item, t)}
+                        onClick={() =>
+                          setPendingDeleteConfirmation({
+                            conversationId: conversation.id,
+                            type: 'single'
+                          })
+                        }
+                      >
+                        <Trash2 aria-hidden="true" />
+                      </button>
+                    ))}
+                    {renderSettingsNodes(archiveConversationRestoreSettings, (item) => (
+                      <button
+                        className="archived-conversation-row__restore-button"
+                        type="button"
+                        onClick={() => onUnarchiveConversation(conversation.id)}
+                      >
+                        <RotateCcw aria-hidden="true" />
+                        <span>{settingLabel(item, t)}</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
+        ))}
       </section>
 
       {pendingDeleteConfirmation && (

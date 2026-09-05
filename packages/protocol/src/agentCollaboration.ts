@@ -1,4 +1,6 @@
 import type { AgentEvent, AgentProposedAction } from './agent'
+import type { HumanInteractionResponseDisplay } from './humanInteraction'
+import { parseStorageHumanInteractionResponse } from './storageHumanInteraction'
 import {
   parseAgentBrowserRiskProposedAction,
   parseAgentBuiltinCapabilityActivationProposedAction
@@ -130,6 +132,7 @@ export interface AgentObserverInputOrigin {
 }
 
 export interface AgentObserverMessage {
+  readonly humanInteractionResponse?: HumanInteractionResponseDisplay | null
   messageId: string
   role: string
   content: string
@@ -805,7 +808,8 @@ export function parseAgentObserverConversation(value: unknown): AgentObserverCon
           'inputOrigin',
           'attachments',
           'agentRunJson',
-          'uiStateJson'
+          'uiStateJson',
+          ...('humanInteractionResponse' in message ? ['humanInteractionResponse'] : [])
         ],
         context
       )
@@ -826,6 +830,15 @@ export function parseAgentObserverConversation(value: unknown): AgentObserverCon
         throw new Error(`Invalid ${context}.attachments`)
       }
       return {
+        ...(message.humanInteractionResponse == null
+          ? {}
+          : {
+              humanInteractionResponse: parseStorageHumanInteractionResponse({
+                role,
+                content: message.content,
+                humanInteractionResponse: message.humanInteractionResponse
+              })
+            }),
         messageId: text(message.messageId, `${context}.messageId`),
         role,
         content: message.content,

@@ -3,6 +3,24 @@
 @import './ChatConversationPage.results.css';
 @import './ChatConversationPage.approvals.css';
 
+.conversation-composer-slot:not([hidden]) {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.chat-conversation-page[data-interaction-pending='true'] {
+  grid-template-rows: minmax(64px, 1fr) minmax(0, auto);
+}
+
+.chat-conversation-page[data-interaction-pending='true'] > .chat-conversation-page__composer {
+  min-height: 0;
+  padding-block: 10px 16px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+}
+
 .guidance-side-chat-placeholder {
   position: absolute;
   z-index: 30;

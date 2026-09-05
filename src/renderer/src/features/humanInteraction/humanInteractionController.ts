@@ -290,7 +290,8 @@ export class HumanInteractionController {
         if (
           snapshot.requestId !== requestId ||
           snapshot.conversationId !== request.conversationId ||
-          snapshot.status === 'open'
+          snapshot.status === 'open' ||
+          mergeHumanInteractionRequest(request, snapshot).status === 'open'
         )
           throw new Error('Invalid settlement receipt')
         this.merge(snapshot)

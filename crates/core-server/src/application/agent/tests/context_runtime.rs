@@ -13,6 +13,7 @@ async fn compaction_host_prepares_generates_commits_and_rebuilds_running_state()
             title: "Compaction host".to_string(),
             messages: vec![
                 ChatMessageRecord {
+                    human_interaction_response: None,
                     id: "user-old".to_string(),
                     role: "user".to_string(),
                     content: "An old request with substantial detail.".repeat(200),
@@ -23,6 +24,7 @@ async fn compaction_host_prepares_generates_commits_and_rebuilds_running_state()
                     ui_state_json: None,
                 },
                 ChatMessageRecord {
+                    human_interaction_response: None,
                     id: "assistant-old".to_string(),
                     role: "assistant".to_string(),
                     content: "The old request was completed with detailed results.".repeat(200),
@@ -33,6 +35,7 @@ async fn compaction_host_prepares_generates_commits_and_rebuilds_running_state()
                     ui_state_json: None,
                 },
                 ChatMessageRecord {
+                    human_interaction_response: None,
                     id: "user-current".to_string(),
                     role: "user".to_string(),
                     content: "Continue the work.".to_string(),
@@ -43,6 +46,7 @@ async fn compaction_host_prepares_generates_commits_and_rebuilds_running_state()
                     ui_state_json: None,
                 },
                 ChatMessageRecord {
+                    human_interaction_response: None,
                     id: "assistant-current".to_string(),
                     role: "assistant".to_string(),
                     content: String::new(),
@@ -333,6 +337,7 @@ fn running_trace_commits_drive_monotonic_context_window_events() {
             title: "Live trace".to_string(),
             messages: vec![
                 ChatMessageRecord {
+                    human_interaction_response: None,
                     id: "user-live".to_string(),
                     role: "user".to_string(),
                     content: "Inspect the project".to_string(),
@@ -343,6 +348,7 @@ fn running_trace_commits_drive_monotonic_context_window_events() {
                     ui_state_json: None,
                 },
                 ChatMessageRecord {
+                    human_interaction_response: None,
                     id: "assistant-live".to_string(),
                     role: "assistant".to_string(),
                     content: String::new(),
@@ -585,6 +591,7 @@ fn durable_trace_append_is_distinguished_from_a_failed_derived_context_refresh()
             title: "Derived refresh failure".to_string(),
             messages: vec![
                 ChatMessageRecord {
+                    human_interaction_response: None,
                     id: "user-corrupt-history".to_string(),
                     role: "user".to_string(),
                     content: "Earlier request".to_string(),
@@ -598,6 +605,7 @@ fn durable_trace_append_is_distinguished_from_a_failed_derived_context_refresh()
                 // corruption. It is deliberately introduced here so only the rebuildable
                 // context projection fails after the current run's append commits.
                 ChatMessageRecord {
+                    human_interaction_response: None,
                     id: "assistant-corrupt-history".to_string(),
                     role: "assistant".to_string(),
                     content: "Earlier answer".to_string(),
@@ -608,6 +616,7 @@ fn durable_trace_append_is_distinguished_from_a_failed_derived_context_refresh()
                     ui_state_json: None,
                 },
                 ChatMessageRecord {
+                    human_interaction_response: None,
                     id: "user-derived-refresh-failure".to_string(),
                     role: "user".to_string(),
                     content: "Continue".to_string(),
@@ -618,6 +627,7 @@ fn durable_trace_append_is_distinguished_from_a_failed_derived_context_refresh()
                     ui_state_json: None,
                 },
                 ChatMessageRecord {
+                    human_interaction_response: None,
                     id: "assistant-derived-refresh-failure".to_string(),
                     role: "assistant".to_string(),
                     content: String::new(),
@@ -794,6 +804,7 @@ fn trace_observer_still_fails_closed_when_the_authoritative_append_does_not_comm
             title: "Trace append failure".to_string(),
             messages: vec![
                 ChatMessageRecord {
+                    human_interaction_response: None,
                     id: "user-trace-append-failure".to_string(),
                     role: "user".to_string(),
                     content: "Continue".to_string(),
@@ -804,6 +815,7 @@ fn trace_observer_still_fails_closed_when_the_authoritative_append_does_not_comm
                     ui_state_json: None,
                 },
                 ChatMessageRecord {
+                    human_interaction_response: None,
                     id: "assistant-trace-append-failure".to_string(),
                     role: "assistant".to_string(),
                     content: String::new(),
@@ -903,6 +915,7 @@ fn terminal_cache_rebuild_drops_the_completed_run_skill_overlay() {
             title: "Terminal Skill".to_string(),
             messages: vec![
                 ChatMessageRecord {
+                    human_interaction_response: None,
                     id: "user-terminal-skill".to_string(),
                     role: "user".to_string(),
                     content: "Review the completed run.".to_string(),
@@ -913,6 +926,7 @@ fn terminal_cache_rebuild_drops_the_completed_run_skill_overlay() {
                     ui_state_json: None,
                 },
                 ChatMessageRecord {
+                    human_interaction_response: None,
                     id: "assistant-terminal-skill".to_string(),
                     role: "assistant".to_string(),
                     content: String::new(),
@@ -1013,6 +1027,7 @@ fn disabled_indicator_still_builds_runtime_context_baseline() {
             title: "Hidden indicator".to_string(),
             messages: vec![
                 ChatMessageRecord {
+                    human_interaction_response: None,
                     id: "user-hidden-indicator".to_string(),
                     role: "user".to_string(),
                     content: "Inspect the durable context".to_string(),
@@ -1023,6 +1038,7 @@ fn disabled_indicator_still_builds_runtime_context_baseline() {
                     ui_state_json: None,
                 },
                 ChatMessageRecord {
+                    human_interaction_response: None,
                     id: "assistant-hidden-indicator".to_string(),
                     role: "assistant".to_string(),
                     content: String::new(),
@@ -1116,6 +1132,7 @@ fn deleting_messages_invalidates_the_conversation_context_state() {
             model_id: Some("model-1".to_string()),
             title: "Delete context".to_string(),
             messages: vec![ChatMessageRecord {
+                human_interaction_response: None,
                 id: "user-delete-context".to_string(),
                 role: "user".to_string(),
                 content: "Old durable content".to_string(),

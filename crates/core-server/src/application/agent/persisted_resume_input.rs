@@ -453,6 +453,7 @@ mod tests {
     fn checkpoint(provider_configuration_revision: &str) -> AgentRunCheckpoint {
         serde_json::from_value(json!({
             "version": mycopilot_core::AGENT_RUN_CHECKPOINT_SCHEMA_VERSION,
+            "pauseReason": "approval",
             "runId": "run-persisted-resume",
             "contextItems": [{
                 "role": "assistant",

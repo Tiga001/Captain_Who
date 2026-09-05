@@ -67,4 +67,18 @@ describe('skill management error presentation', () => {
     expect(getSkillOperationErrorKey(details)).toBe('skills.operationFailed')
     expect(details).not.toHaveProperty('message')
   })
+
+  it('explains where to configure image generation without showing backend details', () => {
+    const details = getSkillOperationErrorDetails(
+      skillError({
+        type: 'skillManagement',
+        operation: 'setEnabled',
+        code: 'configurationRequired',
+        recovery: 'configureImageGeneration'
+      })
+    )
+    expect(details.kind).toBe('management')
+    expect(getSkillOperationErrorKey(details)).toBe('skills.error.configurationRequired')
+    expect(details).not.toHaveProperty('message')
+  })
 })

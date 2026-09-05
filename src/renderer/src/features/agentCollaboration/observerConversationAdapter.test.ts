@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import {
   AGENT_COLLABORATION_SCHEMA_VERSION,
+  parseAgentObserverConversation,
+  type HumanInteractionResponseDisplay,
   type AgentObserverConversation
 } from '@mycopilot/protocol'
 import { mapObserverConversationToChat } from './observerConversationAdapter'
@@ -61,6 +63,35 @@ function fixture(): AgentObserverConversation {
 }
 
 describe('observer conversation adapter', () => {
+  it('preserves only verified inherited answer proof and rejects mismatched observer DTO content', () => {
+    const response: HumanInteractionResponseDisplay = {
+      type: 'human_interaction_response',
+      schemaVersion: 1,
+      requestId: 'request',
+      responseId: 'response',
+      answers: [{ kind: 'text', questionId: 'q', question: 'Which?', answer: 'Blue' }]
+    }
+    const observer = fixture()
+    observer.messages[0] = {
+      ...observer.messages[0],
+      content: JSON.stringify(response),
+      humanInteractionResponse: response
+    }
+    const parsed = parseAgentObserverConversation(observer)!
+    expect(mapObserverConversationToChat(parsed).messages[0].humanInteractionDisplay).toEqual(
+      response
+    )
+    observer.messages[0] = { ...observer.messages[0], humanInteractionResponse: undefined }
+    expect(
+      mapObserverConversationToChat(parseAgentObserverConversation(observer)!).messages[0]
+        .humanInteractionDisplay
+    ).toBeUndefined()
+    observer.messages[0] = {
+      ...observer.messages[0],
+      humanInteractionResponse: { ...response, requestId: 'foreign' }
+    }
+    expect(() => parseAgentObserverConversation(observer)).toThrow('complete User content')
+  })
   it('maps the exact observer DTO into the existing chat projection without creating draft state', () => {
     const conversation = mapObserverConversationToChat(fixture())
 

@@ -447,6 +447,7 @@ fn provider_profile_context_boundaries_fail_closed_without_translating_private_s
             model_id: Some("deepseek-boundary-a".to_string()),
             title: "Provider boundary".to_string(),
             messages: vec![ChatMessageRecord {
+                human_interaction_response: None,
                 id: ASSISTANT_MESSAGE_ID.to_string(),
                 role: "assistant".to_string(),
                 content: String::new(),
@@ -909,6 +910,7 @@ fn exact_history_archive_precedes_model_and_checkpoint_projection() {
             model_id: None,
             title: "archive".to_string(),
             messages: vec![ChatMessageRecord {
+                human_interaction_response: None,
                 id: "assistant-archive".to_string(),
                 role: "assistant".to_string(),
                 content: String::new(),
@@ -1076,6 +1078,7 @@ fn process_spool_is_archived_exactly_and_forces_a_recovery_route() {
             model_id: None,
             title: "process".to_string(),
             messages: vec![ChatMessageRecord {
+                human_interaction_response: None,
                 id: "assistant-process".to_string(),
                 role: "assistant".to_string(),
                 content: String::new(),
@@ -1211,6 +1214,7 @@ fn command_session_archive_route_is_reused_without_preview_rearchive() {
             model_id: None,
             title: "command archive".to_string(),
             messages: vec![ChatMessageRecord {
+                human_interaction_response: None,
                 id: "assistant-command-authoritative".to_string(),
                 role: "assistant".to_string(),
                 content: String::new(),

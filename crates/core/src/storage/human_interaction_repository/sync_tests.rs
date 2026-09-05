@@ -357,7 +357,11 @@ fn sync_approval_predecessor_requires_durable_settlement_and_rolls_back_on_confl
     );
 }
 
-fn terminal_trace(fixture: &Fixture, request: &HumanInteractionRequestSnapshot) {
+fn terminal_trace(fixture: &Fixture, request: &HumanInteractionRequestSnapshot, proof: &str) {
+    let expected =
+        serde_json::to_value(human_interaction_answer_display(request).unwrap()).unwrap();
+    let mut altered = expected.clone();
+    altered["answers"] = serde_json::json!([]);
     let trace = crate::ConversationTurnTrace {
         schema_version: crate::CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
         run_id: "run".into(),
@@ -384,7 +388,11 @@ fn terminal_trace(fixture: &Fixture, request: &HumanInteractionRequestSnapshot) 
                 tool: "request_user_input".into(),
                 status: crate::ConversationTraceToolResultStatus::Succeeded,
                 success: true,
-                observation: serde_json::json!({"type":"human_interaction_response","schemaVersion":1,"requestId":request.request_id,"responseId":request.response.as_ref().unwrap().response_id,"answers":[]}),
+                observation: if proof == "wrong_trace" {
+                    altered.clone()
+                } else {
+                    expected.clone()
+                },
                 approval_status: crate::AgentApprovalStatus::NotRequired,
                 error: None,
                 truncated: false,
@@ -406,6 +414,49 @@ fn terminal_trace(fixture: &Fixture, request: &HumanInteractionRequestSnapshot) 
         20,
     )
     .unwrap();
+    if proof != "trace_only" {
+        let items = vec![
+            crate::ConversationModelContextItem {
+                sequence: 0,
+                ordinal: 0,
+                role: "assistant".into(),
+                content: String::new(),
+                tool_call_id: None,
+                is_error: false,
+                tool_calls: vec![crate::AgentContextCheckpointToolCall {
+                    id: request.tool_call_id.clone(),
+                    name: "request_user_input".into(),
+                    args: serde_json::json!({"questions":[]}),
+                    provider_identity: crate::AgentProviderToolCallIdentity {
+                        provider_tool_index: 0,
+                        provider_call_id: request.tool_call_id.clone(),
+                        runtime_call_id: request.tool_call_id.clone(),
+                    },
+                }],
+            },
+            crate::ConversationModelContextItem {
+                sequence: 1,
+                ordinal: 0,
+                role: "tool".into(),
+                content: (if proof == "wrong_context" {
+                    altered
+                } else {
+                    expected
+                })
+                .to_string(),
+                tool_call_id: Some(request.tool_call_id.clone()),
+                tool_calls: vec![],
+                is_error: false,
+            },
+        ];
+        crate::storage::conversation_model_context_repository::commit_items_in_connection(
+            &fixture.connect(),
+            "chat",
+            "assistant",
+            &items,
+        )
+        .unwrap();
+    }
 }
 
 #[test]
@@ -423,7 +474,7 @@ fn sync_terminal_consumption_is_applied_after_terminal_commit_and_during_restart
             13,
         )
         .unwrap();
-        terminal_trace(&fixture, &request);
+        terminal_trace(&fixture, &request, "complete");
         if restart {
             reconcile_sync(&mut fixture.connect(), 21).unwrap();
         } else {
@@ -438,6 +489,38 @@ fn sync_terminal_consumption_is_applied_after_terminal_commit_and_during_restart
         assert_eq!(
             status(&fixture, &request).delivery.unwrap().status,
             HumanInteractionDeliveryStatus::Applied
+        );
+    }
+}
+
+#[test]
+fn sync_recovery_requires_complete_frozen_answer_and_matching_model_projection() {
+    for proof in ["trace_only", "wrong_trace", "wrong_context"] {
+        let fixture = Fixture::new();
+        let request = accepted(&fixture);
+        let resume = claim_sync(&mut fixture.connect(), &request.request_id, 12)
+            .unwrap()
+            .unwrap();
+        assert!(advance_sync(
+            &mut fixture.connect(),
+            &resume.binding,
+            HumanInteractionSyncTransition::ExecutionStarted,
+            13
+        )
+        .unwrap());
+        terminal_trace(&fixture, &request, proof);
+        assert!(!advance_sync(
+            &mut fixture.connect(),
+            &resume.binding,
+            HumanInteractionSyncTransition::Applied,
+            21
+        )
+        .unwrap());
+        reconcile_sync(&mut fixture.connect(), 22).unwrap();
+        assert_ne!(
+            status(&fixture, &request).delivery.unwrap().status,
+            HumanInteractionDeliveryStatus::Applied,
+            "{proof}"
         );
     }
 }

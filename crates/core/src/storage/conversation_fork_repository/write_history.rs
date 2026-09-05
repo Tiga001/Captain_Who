@@ -9,6 +9,7 @@ fn clone_message(
         .map(|raw| clone_agent_run_json(raw, replacements))
         .transpose()?;
     Ok(ChatMessageRecord {
+        human_interaction_response: source.human_interaction_response.clone(),
         id: mapped_id(message_id_map, &source.id, "消息")?,
         role: source.role.clone(),
         content: source.content.clone(),
@@ -121,7 +122,12 @@ fn clone_agent_run_json(
     serde_json::to_string(&value).map_err(|error| format!("无法序列化复制后的 agent 状态：{error}"))
 }
 
-fn rewrite_exact_ids(value: &mut Value, replacements: &HashMap<String, String>) {
+pub(crate) fn rewrite_exact_ids(value: &mut Value, replacements: &HashMap<String, String>) {
+    // Frozen question/answer text is user-authored history, including strings that happen to
+    // equal a Run/message/call ID. Only the enclosing ToolResult identity is fork-local.
+    if is_frozen_human_answer(value) {
+        return;
+    }
     match value {
         Value::String(current) => {
             if let Some(replacement) = replacements.get(current) {
@@ -134,12 +140,30 @@ fn rewrite_exact_ids(value: &mut Value, replacements: &HashMap<String, String>) 
             }
         }
         Value::Object(values) => {
-            for value in values.values_mut() {
+            let human_questions = ["tool", "name"].iter().any(|key| {
+                matches!(
+                    values.get(*key).and_then(Value::as_str),
+                    Some("request_user_input" | "request_user_input_async")
+                )
+            });
+            for (key, value) in values.iter_mut() {
+                if human_questions && matches!(key.as_str(), "args" | "operation")
+                    && serde_json::from_value::<crate::human_interaction::HumanInteractionToolInput>(value.clone())
+                        .is_ok_and(|input| crate::human_interaction::validate_human_interaction_tool_input(&input).is_ok())
+                { continue; }
                 rewrite_exact_ids(value, replacements);
             }
         }
         Value::Null | Value::Bool(_) | Value::Number(_) => {}
     }
+}
+
+fn is_frozen_human_answer(value: &Value) -> bool {
+    value.get("type").and_then(Value::as_str) == Some("human_interaction_response")
+        && serde_json::from_value::<crate::human_interaction::HumanInteractionResponseDisplay>(
+            value.clone(),
+        )
+        .is_ok_and(|display| display.validate().is_ok())
 }
 
 fn agent_run_id(raw: Option<&str>) -> Option<String> {
@@ -359,6 +383,16 @@ fn apply_history_facts(
     connection: &Connection,
     history: ConversationHistoryForkPlanRef<'_>,
 ) -> Result<(), ConversationForkError> {
+    for message in &history.target.messages {
+        if let Some(display) = &message.human_interaction_response {
+            crate::storage::human_interaction_repository::store_message_projection(
+                connection,
+                &message.id,
+                display,
+            )
+            .map_err(|error| ConversationForkError::Other(error.to_string()))?;
+        }
+    }
     for archive in history.archives {
         conversation_history_archive_repository::clone_archive_in_connection(connection, archive)
             .map_err(database_error)?;

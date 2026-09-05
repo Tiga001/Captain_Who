@@ -117,6 +117,7 @@ fn conversation(id: &str, project_id: Option<&str>, message_id: &str) -> ChatCon
         model_id: Some("model-1".to_string()),
         title: id.to_string(),
         messages: vec![ChatMessageRecord {
+            human_interaction_response: None,
             id: message_id.to_string(),
             role: "user".to_string(),
             content: "hello".to_string(),

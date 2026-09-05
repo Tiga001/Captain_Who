@@ -46,6 +46,7 @@ async fn deepseek_cancellation_during_result_publication_closes_grouped_suffix()
             model_id: Some(MODEL_ID.to_string()),
             title: "DeepSeek result publication cancel".to_string(),
             messages: vec![ChatMessageRecord {
+                human_interaction_response: None,
                 id: ASSISTANT_ID.to_string(),
                 role: "assistant".to_string(),
                 content: String::new(),
@@ -267,6 +268,7 @@ async fn deepseek_commit_unknown_trace_publish_recovers_staged_turn_without_tool
             model_id: Some(MODEL_ID.to_string()),
             title: "DeepSeek commit-unknown handoff".to_string(),
             messages: vec![ChatMessageRecord {
+                human_interaction_response: None,
                 id: ASSISTANT_ID.to_string(),
                 role: "assistant".to_string(),
                 content: String::new(),
@@ -486,6 +488,7 @@ async fn deepseek_checkpoint_abort_closes_unknown_suffix_and_replays_next_run() 
             title: "DeepSeek checkpoint abort".to_string(),
             messages: vec![
                 ChatMessageRecord {
+                    human_interaction_response: None,
                     id: FIRST_ASSISTANT_ID.to_string(),
                     role: "assistant".to_string(),
                     content: String::new(),
@@ -496,6 +499,7 @@ async fn deepseek_checkpoint_abort_closes_unknown_suffix_and_replays_next_run() 
                     ui_state_json: None,
                 },
                 ChatMessageRecord {
+                    human_interaction_response: None,
                     id: SECOND_ASSISTANT_ID.to_string(),
                     role: "assistant".to_string(),
                     content: String::new(),
@@ -916,6 +920,7 @@ async fn deepseek_runtime_persists_grouped_turns_before_tool_side_effects() {
             model_id: Some(MODEL_ID.to_string()),
             title: "DeepSeek Runtime E2E".to_string(),
             messages: vec![ChatMessageRecord {
+                human_interaction_response: None,
                 id: ASSISTANT_MESSAGE_ID.to_string(),
                 role: "assistant".to_string(),
                 content: String::new(),
@@ -1193,6 +1198,7 @@ async fn deepseek_runtime_persists_grouped_turns_before_tool_side_effects() {
             model_id: Some(MODEL_ID.to_string()),
             title: "DeepSeek missing reasoning".to_string(),
             messages: vec![ChatMessageRecord {
+                human_interaction_response: None,
                 id: MISSING_ASSISTANT_MESSAGE_ID.to_string(),
                 role: "assistant".to_string(),
                 content: String::new(),
@@ -1330,6 +1336,7 @@ async fn deepseek_ordinary_reasoning_survives_restart_for_a_future_tools_request
 
     fn pending_assistant(id: &str, created_at: i64) -> ChatMessageRecord {
         ChatMessageRecord {
+            human_interaction_response: None,
             id: id.to_string(),
             role: "assistant".to_string(),
             content: String::new(),

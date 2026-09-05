@@ -183,6 +183,7 @@ fn forked_conversation_owns_independent_attachment_files_and_is_idempotent() {
     let service = fixture.service();
     let mut source = conversation("conversation-source", Some("project-1"), "message-user");
     source.messages.push(ChatMessageRecord {
+        human_interaction_response: None,
         id: "message-assistant".to_string(),
         role: "assistant".to_string(),
         content: "done".to_string(),
@@ -306,6 +307,7 @@ fn fork_clones_applied_guidance_attachments_but_not_abandoned_ones() {
         "message-user-guidance-fork",
     );
     source.messages.push(ChatMessageRecord {
+        human_interaction_response: None,
         id: "message-assistant-guidance-fork".to_string(),
         role: "assistant".to_string(),
         content: "done".to_string(),

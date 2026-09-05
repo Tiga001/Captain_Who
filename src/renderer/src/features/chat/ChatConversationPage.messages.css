@@ -223,7 +223,7 @@
   max-width: min(78%, 760px);
   min-width: 0;
   padding: 7px 17px;
-  color: var(--mc-color-text-primary);
+  color: var(--mc-color-text-strong);
   background: var(--mc-color-surface-muted);
   border: 0;
   border-radius: var(--mc-radius-message);
@@ -233,7 +233,7 @@
 
 .chat-message--user .chat-message__body > p,
 .chat-message--user .chat-markdown {
-  color: var(--mc-color-text-primary);
+  color: var(--mc-color-text-strong);
   font-size: var(--mc-font-size-chat-assistant);
   font-weight: var(--mc-font-weight-medium);
   line-height: var(--mc-line-height-chat, 1.55);
@@ -696,7 +696,7 @@ button.chat-message-attachment:focus-visible {
 }
 
 .chat-agent-text {
-  color: var(--mc-color-text-primary);
+  color: var(--mc-color-text-strong);
   font-size: var(--mc-font-size-chat-assistant);
   font-weight: var(--mc-font-weight-medium);
   line-height: var(--mc-line-height-chat, 1.55);

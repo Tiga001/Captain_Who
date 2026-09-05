@@ -1,3 +1,12 @@
+import { renderSettingsNodes, settingLabel, settingDescription } from '../../settingsDefinition'
+import {
+  deepSeekProviderSettings,
+  moonshotProviderSettings,
+  deepSeekThinkingModeLabels,
+  deepSeekEffortLabels,
+  moonshotThinkingModeLabels,
+  moonshotEffortLabels
+} from './configuration.definition'
 import { useState } from 'react'
 import type {
   ProviderFamilySettingsDescriptor,
@@ -19,6 +28,7 @@ type MoonshotDescriptor = Extract<
 >
 
 interface DeepSeekProviderSettingsEditorProps {
+  definition?: typeof deepSeekProviderSettings
   descriptor: DeepSeekDescriptor
   initialSettings: DeepSeekFamilySettings
   onCancel: () => void
@@ -46,6 +56,7 @@ function normalizeDeepSeekDraft(
 }
 
 export function DeepSeekProviderSettingsEditor({
+  definition = deepSeekProviderSettings,
   descriptor,
   initialSettings,
   onCancel,
@@ -57,18 +68,18 @@ export function DeepSeekProviderSettingsEditor({
   )
   const modeLabel = (mode: ProviderReasoningMode) =>
     mode === 'provider_default'
-      ? t('configuration.deepSeekSettings.thinkingProviderDefault')
+      ? t(deepSeekThinkingModeLabels.provider_default)
       : mode === 'enabled'
-        ? t('configuration.deepSeekSettings.thinkingEnabled')
-        : t('configuration.deepSeekSettings.thinkingDisabled')
+        ? t(deepSeekThinkingModeLabels.enabled)
+        : t(deepSeekThinkingModeLabels.disabled)
   const effortLabel = (effort: ProviderReasoningEffort) =>
     effort === 'provider_default'
-      ? t('configuration.deepSeekSettings.effortProviderDefault')
+      ? t(deepSeekEffortLabels.provider_default)
       : effort === 'low'
-        ? t('configuration.deepSeekSettings.effortLow')
+        ? t(deepSeekEffortLabels.low)
         : effort === 'high'
-          ? t('configuration.deepSeekSettings.effortHigh')
-          : t('configuration.deepSeekSettings.effortMax')
+          ? t(deepSeekEffortLabels.high)
+          : t(deepSeekEffortLabels.max)
   const thinkingModeOptions: ReadonlyArray<SettingsSelectOption<ProviderReasoningMode>> =
     descriptor.reasoningModes.map((value) => ({ value, label: modeLabel(value) }))
   const reasoningEffortOptions: ReadonlyArray<SettingsSelectOption<ProviderReasoningEffort>> =
@@ -76,49 +87,61 @@ export function DeepSeekProviderSettingsEditor({
 
   return (
     <ProviderSettingsDialogShell
-      title={t('configuration.deepSeekSettings.title')}
-      description={t('configuration.deepSeekSettings.defaultThinkingDescription')}
+      title={settingLabel(definition, t)}
+      settingId={definition.id}
+      description={settingDescription(definition, t) ?? ''}
       onCancel={onCancel}
       onConfirm={() => onConfirm(normalizeDeepSeekDraft(settings, descriptor))}
     >
-      <div className="provider-settings-dialog__field">
-        <span>{t('configuration.deepSeekSettings.thinkingMode')}</span>
-        <SettingsSelect
-          ariaLabel={t('configuration.deepSeekSettings.thinkingMode')}
-          className="provider-settings-dialog__select"
-          options={thinkingModeOptions}
-          value={settings.reasoning.mode}
-          onChange={(mode) =>
-            setSettings((current) =>
-              normalizeDeepSeekDraft(
-                { ...current, reasoning: { ...current.reasoning, mode } },
-                descriptor
-              )
+      {renderSettingsNodes(definition.children, (node) => {
+        switch (node.id) {
+          case 'configuration.model.deepseek.thinkingMode':
+            return (
+              <div className="provider-settings-dialog__field">
+                <span>{settingLabel(node, t)}</span>
+                <SettingsSelect
+                  ariaLabel={settingLabel(node, t)}
+                  className="provider-settings-dialog__select"
+                  options={thinkingModeOptions}
+                  value={settings.reasoning.mode}
+                  onChange={(mode) =>
+                    setSettings((current) =>
+                      normalizeDeepSeekDraft(
+                        { ...current, reasoning: { ...current.reasoning, mode } },
+                        descriptor
+                      )
+                    )
+                  }
+                />
+              </div>
             )
-          }
-        />
-      </div>
-      <div className="provider-settings-dialog__field">
-        <span>{t('configuration.deepSeekSettings.reasoningEffort')}</span>
-        <SettingsSelect
-          ariaLabel={t('configuration.deepSeekSettings.reasoningEffort')}
-          className="provider-settings-dialog__select"
-          options={reasoningEffortOptions}
-          value={settings.reasoning.effort}
-          disabled={settings.reasoning.mode === 'disabled'}
-          onChange={(effort) =>
-            setSettings((current) => ({
-              ...current,
-              reasoning: { ...current.reasoning, effort }
-            }))
-          }
-        />
-      </div>
+          case 'configuration.model.deepseek.reasoningEffort':
+            return (
+              <div className="provider-settings-dialog__field">
+                <span>{settingLabel(node, t)}</span>
+                <SettingsSelect
+                  ariaLabel={settingLabel(node, t)}
+                  className="provider-settings-dialog__select"
+                  options={reasoningEffortOptions}
+                  value={settings.reasoning.effort}
+                  disabled={settings.reasoning.mode === 'disabled'}
+                  onChange={(effort) =>
+                    setSettings((current) => ({
+                      ...current,
+                      reasoning: { ...current.reasoning, effort }
+                    }))
+                  }
+                />
+              </div>
+            )
+        }
+      })}
     </ProviderSettingsDialogShell>
   )
 }
 
 interface MoonshotProviderSettingsEditorProps {
+  definition?: typeof moonshotProviderSettings
   descriptor: MoonshotDescriptor
   initialSettings: MoonshotFamilySettings
   onCancel: () => void
@@ -150,6 +173,7 @@ function normalizeMoonshotDraft(
 }
 
 export function MoonshotProviderSettingsEditor({
+  definition = moonshotProviderSettings,
   descriptor,
   initialSettings,
   onCancel,
@@ -161,12 +185,12 @@ export function MoonshotProviderSettingsEditor({
   )
   const effortLabel = (effort: ProviderReasoningEffort) =>
     effort === 'provider_default'
-      ? t('configuration.moonshotSettings.effortProviderDefault')
+      ? t(moonshotEffortLabels.provider_default)
       : effort === 'low'
-        ? t('configuration.moonshotSettings.effortLow')
+        ? t(moonshotEffortLabels.low)
         : effort === 'high'
-          ? t('configuration.moonshotSettings.effortHigh')
-          : t('configuration.moonshotSettings.effortMax')
+          ? t(moonshotEffortLabels.high)
+          : t(moonshotEffortLabels.max)
   const description =
     descriptor.kind === 'moonshot_k3_chat'
       ? t('configuration.moonshotSettings.k3Description')
@@ -176,59 +200,75 @@ export function MoonshotProviderSettingsEditor({
 
   return (
     <ProviderSettingsDialogShell
-      title={t('configuration.moonshotSettings.title')}
+      title={settingLabel(definition, t)}
+      settingId={definition.id}
       description={description}
       onCancel={onCancel}
       onConfirm={() => onConfirm(normalizeMoonshotDraft(settings, descriptor))}
     >
-      {descriptor.kind === 'moonshot_k3_chat' && settings.kind === 'moonshot_k3_chat' && (
-        <>
-          <div className="provider-settings-dialog__field">
-            <span>{t('configuration.moonshotSettings.reasoningEffort')}</span>
-            <SettingsSelect
-              ariaLabel={t('configuration.moonshotSettings.reasoningEffort')}
-              className="provider-settings-dialog__select"
-              options={descriptor.reasoningEfforts.map((value) => ({
-                value,
-                label: effortLabel(value)
-              }))}
-              value={settings.reasoningEffort}
-              onChange={(reasoningEffort) =>
-                setSettings({ kind: 'moonshot_k3_chat', reasoningEffort })
-              }
-            />
-          </div>
-          <p className="provider-settings-dialog__notice" role="note">
-            {t('configuration.moonshotSettings.alwaysPreservedThinking')}
-          </p>
-        </>
-      )}
+      {renderSettingsNodes(definition.children, (node) => {
+        switch (node.id) {
+          case 'configuration.model.moonshot.reasoningEffort':
+            return (
+              (descriptor.kind === 'moonshot_k3_chat' && settings.kind === 'moonshot_k3_chat' && (
+                <>
+                  <div className="provider-settings-dialog__field" data-setting-id={node.id}>
+                    <span>{settingLabel(node, t)}</span>
+                    <SettingsSelect
+                      ariaLabel={settingLabel(node, t)}
+                      className="provider-settings-dialog__select"
+                      options={descriptor.reasoningEfforts.map((value) => ({
+                        value,
+                        label: effortLabel(value)
+                      }))}
+                      value={settings.reasoningEffort}
+                      onChange={(reasoningEffort) =>
+                        setSettings({ kind: 'moonshot_k3_chat', reasoningEffort })
+                      }
+                    />
+                  </div>
+                  <p className="provider-settings-dialog__notice" role="note">
+                    {t('configuration.moonshotSettings.alwaysPreservedThinking')}
+                  </p>
+                </>
+              )) ||
+              null
+            )
+          case 'configuration.model.moonshot.thinkingMode':
+            return (
+              (descriptor.kind === 'moonshot_k2_6_chat' &&
+                settings.kind === 'moonshot_k2_6_chat' && (
+                  <div className="provider-settings-dialog__field">
+                    <span>{settingLabel(node, t)}</span>
+                    <SettingsSelect
+                      ariaLabel={settingLabel(node, t)}
+                      className="provider-settings-dialog__select"
+                      options={descriptor.thinkingModes.map((value) => ({
+                        value,
+                        label:
+                          value === 'provider_default'
+                            ? t(moonshotThinkingModeLabels.provider_default)
+                            : value === 'enabled'
+                              ? t(moonshotThinkingModeLabels.enabled)
+                              : value === 'disabled'
+                                ? t(moonshotThinkingModeLabels.disabled)
+                                : t(moonshotThinkingModeLabels.enabled_keep_all)
+                      }))}
+                      value={settings.thinkingMode}
+                      onChange={(thinkingMode) =>
+                        setSettings({ kind: 'moonshot_k2_6_chat', thinkingMode })
+                      }
+                    />
+                  </div>
+                )) ||
+              null
+            )
+        }
+      })}
       {descriptor.kind === 'moonshot_k2_7_code_chat' && (
         <p className="provider-settings-dialog__notice" role="note">
           {t('configuration.moonshotSettings.alwaysPreservedThinking')}
         </p>
-      )}
-      {descriptor.kind === 'moonshot_k2_6_chat' && settings.kind === 'moonshot_k2_6_chat' && (
-        <div className="provider-settings-dialog__field">
-          <span>{t('configuration.moonshotSettings.thinkingMode')}</span>
-          <SettingsSelect
-            ariaLabel={t('configuration.moonshotSettings.thinkingMode')}
-            className="provider-settings-dialog__select"
-            options={descriptor.thinkingModes.map((value) => ({
-              value,
-              label:
-                value === 'provider_default'
-                  ? t('configuration.moonshotSettings.thinkingProviderDefault')
-                  : value === 'enabled'
-                    ? t('configuration.moonshotSettings.thinkingEnabled')
-                    : value === 'disabled'
-                      ? t('configuration.moonshotSettings.thinkingDisabled')
-                      : t('configuration.moonshotSettings.thinkingEnabledKeepAll')
-            }))}
-            value={settings.thinkingMode}
-            onChange={(thinkingMode) => setSettings({ kind: 'moonshot_k2_6_chat', thinkingMode })}
-          />
-        </div>
       )}
     </ProviderSettingsDialogShell>
   )

@@ -1,3 +1,5 @@
+import { renderSettingsNodes, settingLabel } from '../settings/settingsDefinition'
+import { browserHistorySettings } from './BrowserAutomationSettings.definition'
 import {
   ChevronDown,
   ChevronUp,
@@ -179,37 +181,46 @@ export function BrowserHistoryPage({
 
       <h1>{t('browser.history')}</h1>
 
-      <label className="browser-download-search">
-        <Search aria-hidden="true" />
-        <span className="sr-only">{t('mcp.browserData.searchHistory')}</span>
-        <input
-          onChange={(event) => setQuery(event.currentTarget.value)}
-          placeholder={t('mcp.browserData.searchHistory')}
-          value={query}
-        />
-      </label>
-
-      <div className="browser-download-history__heading">
-        <h2>{t('mcp.browserDownloads.allHistory')}</h2>
-        {selected.size > 0 ? (
-          <button
-            className="mcp-secondary-button"
-            disabled={mutating}
-            onClick={() => void removeEntries([...selected])}
-            type="button"
-          >
-            {t('mcp.browserData.removeSelected')}
-          </button>
-        ) : (
-          <button
-            className="mcp-secondary-button"
-            onClick={() => setClearDialogOpen(true)}
-            type="button"
-          >
-            {t('browser.clearBrowsingData')}
-          </button>
-        )}
-      </div>
+      {renderSettingsNodes(browserHistorySettings, (node) => {
+        switch (node.id) {
+          case 'browser-history-search':
+            return (
+              <label className="browser-download-search">
+                <Search aria-hidden="true" />
+                <span className="sr-only">{settingLabel(node, t)}</span>
+                <input
+                  onChange={(event) => setQuery(event.currentTarget.value)}
+                  placeholder={settingLabel(node, t)}
+                  value={query}
+                />
+              </label>
+            )
+          case 'browser-history-clear':
+            return (
+              <div className="browser-download-history__heading">
+                <h2>{t('mcp.browserDownloads.allHistory')}</h2>
+                {selected.size > 0 ? (
+                  <button
+                    className="mcp-secondary-button"
+                    disabled={mutating}
+                    onClick={() => void removeEntries([...selected])}
+                    type="button"
+                  >
+                    {t('mcp.browserData.removeSelected')}
+                  </button>
+                ) : (
+                  <button
+                    className="mcp-secondary-button"
+                    onClick={() => setClearDialogOpen(true)}
+                    type="button"
+                  >
+                    {settingLabel(node, t)}
+                  </button>
+                )}
+              </div>
+            )
+        }
+      })}
 
       {!history ? (
         <div className="mcp-page-state" role="status">

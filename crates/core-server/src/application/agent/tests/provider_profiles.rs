@@ -807,6 +807,7 @@ async fn rewrite_turn_is_atomic_replayable_and_runs_with_only_the_active_context
             model_id: Some("model-1".to_string()),
             title: "Peer".to_string(),
             messages: vec![ChatMessageRecord {
+                human_interaction_response: None,
                 id: "rewrite-peer-user".to_string(),
                 role: "user".to_string(),
                 content: "peer".to_string(),
@@ -873,6 +874,7 @@ fn rewrite_pre_runtime_failure_is_fail_closed_then_replays_the_failed_terminal()
             model_id: Some("model-1".to_string()),
             title: "source".to_string(),
             messages: vec![ChatMessageRecord {
+                human_interaction_response: None,
                 id: "rewrite-failure-source-user".to_string(),
                 role: "user".to_string(),
                 content: "source".to_string(),
@@ -902,6 +904,7 @@ fn rewrite_pre_runtime_failure_is_fail_closed_then_replays_the_failed_terminal()
         .unwrap();
     let mut source = source.take().unwrap();
     source.messages.push(ChatMessageRecord {
+        human_interaction_response: None,
         id: "rewrite-failure-source-assistant".to_string(),
         role: "assistant".to_string(),
         content: "Thinking...".to_string(),
@@ -955,6 +958,7 @@ fn rewrite_pre_runtime_failure_is_fail_closed_then_replays_the_failed_terminal()
         .unwrap();
     let mut replacement = replacement.take().unwrap();
     let replacement_user = ChatMessageRecord {
+        human_interaction_response: None,
         id: "rewrite-failure-user".to_string(),
         role: "user".to_string(),
         content: "replacement".to_string(),
@@ -965,6 +969,7 @@ fn rewrite_pre_runtime_failure_is_fail_closed_then_replays_the_failed_terminal()
         ui_state_json: None,
     };
     let replacement_assistant = ChatMessageRecord {
+        human_interaction_response: None,
         id: "rewrite-failure-assistant".to_string(),
         role: "assistant".to_string(),
         content: "Thinking...".to_string(),
@@ -1134,6 +1139,7 @@ async fn reopened_assistant_and_provider_transition_forks_complete_human_turns()
                 title: "Fork continuation source".to_string(),
                 messages: vec![
                     ChatMessageRecord {
+                        human_interaction_response: None,
                         id: "user-root-fork-source".to_string(),
                         role: "user".to_string(),
                         content: "Inspect the source file".to_string(),
@@ -1144,6 +1150,7 @@ async fn reopened_assistant_and_provider_transition_forks_complete_human_turns()
                         ui_state_json: None,
                     },
                     ChatMessageRecord {
+                        human_interaction_response: None,
                         id: source_assistant_message_id.to_string(),
                         role: "assistant".to_string(),
                         content: "Source inspection complete.".to_string(),
@@ -2014,6 +2021,7 @@ async fn recovered_unknown_child_releases_startup_permit_and_accepts_a_later_fol
     let run_id = "run-crashed-after-runtime-admission";
     let assistant_message_id = "assistant-crashed-after-runtime-admission";
     conversation.messages.push(ChatMessageRecord {
+        human_interaction_response: None,
         id: assistant_message_id.to_string(),
         role: "assistant".to_string(),
         content: "Work may have crossed an external side-effect boundary.".to_string(),

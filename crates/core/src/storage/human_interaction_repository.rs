@@ -619,3 +619,6 @@ pub use sync::*;
 
 mod asynchronous;
 pub use asynchronous::*;
+
+mod message_projection;
+pub(crate) use message_projection::*;

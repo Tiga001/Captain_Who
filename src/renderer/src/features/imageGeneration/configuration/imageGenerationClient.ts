@@ -2,15 +2,11 @@
 import { HostInvocationError } from '@mycopilot/host-api'
 import type {
   ImageGenerationGetConfigurationOutput,
-  ImageGenerationSetEnabledInput,
-  ImageGenerationSetEnabledOutput,
   ImageGenerationUpdateConfigurationInput,
   ImageGenerationUpdateConfigurationOutput
 } from '@mycopilot/protocol'
 import {
   parseImageGenerationGetConfigurationOutput,
-  parseImageGenerationSetEnabledInput,
-  parseImageGenerationSetEnabledOutput,
   parseImageGenerationUpdateConfigurationInput,
   parseImageGenerationUpdateConfigurationOutput
 } from '@mycopilot/protocol'
@@ -30,14 +26,4 @@ export async function updateImageGenerationConfiguration(
   )
   if (!result.ok) throw new HostInvocationError(result.error)
   return parseImageGenerationUpdateConfigurationOutput(result.value)
-}
-
-export async function setImageGenerationEnabled(
-  input: ImageGenerationSetEnabledInput
-): Promise<ImageGenerationSetEnabledOutput> {
-  const result = await hostClient.imageGeneration.setEnabled(
-    parseImageGenerationSetEnabledInput(input)
-  )
-  if (!result.ok) throw new HostInvocationError(result.error)
-  return parseImageGenerationSetEnabledOutput(result.value)
 }

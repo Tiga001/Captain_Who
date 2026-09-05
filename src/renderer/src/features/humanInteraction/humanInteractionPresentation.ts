@@ -48,10 +48,47 @@ export function humanInteractionUserDisplay(
       request.status === 'submitted' &&
       request.response?.responseId === display.responseId &&
       request.requestId === display.requestId &&
-      request.delivery?.userMessageId === message.id
+      request.delivery?.userMessageId === message.id &&
+      JSON.stringify(readHumanInteractionDisplay(humanInteractionResponseDisplay(request))) ===
+        JSON.stringify(display)
   )
-  // Forks retain frozen display material and explicit snapshot provenance, never live operations.
-  return bound || message.inputOrigin?.kind === 'historical_snapshot' ? display : null
+  // A generic historical origin also belongs to ordinary User JSON. Only Host-verified output
+  // metadata proves an idle answer, including after a fork or deletion of its source conversation.
+  const proven = readHumanInteractionDisplay(message.humanInteractionDisplay)
+  return bound || (proven && JSON.stringify(proven) === JSON.stringify(display)) ? display : null
+}
+
+export function humanInteractionRequestsForMessage(
+  message: ChatMessage,
+  requests: readonly HumanInteractionRequestSnapshot[]
+): HumanInteractionRequestSnapshot[] {
+  return requests.filter(
+    (request) =>
+      request.status === 'open' &&
+      request.assistantMessageId === message.id &&
+      request.runId === message.agentRun?.runId &&
+      !message.agentRun.toolCalls.some(
+        (call) =>
+          call.id === request.toolCallId &&
+          call.tool !==
+            (request.mode === 'sync' ? 'request_user_input' : 'request_user_input_async')
+      )
+  )
+}
+
+/** Independent request notifications can precede their owning message/trace snapshot. */
+export function getUnanchoredHumanInteractionRequests(
+  conversation: ChatConversation,
+  requests: readonly HumanInteractionRequestSnapshot[]
+) {
+  const anchoredIds = new Set(
+    conversation.messages.flatMap((message) =>
+      humanInteractionRequestsForMessage(message, requests).map((request) => request.requestId)
+    )
+  )
+  return requests.filter(
+    (request) => request.status === 'open' && !anchoredIds.has(request.requestId)
+  )
 }
 
 function displayItem(
@@ -107,6 +144,7 @@ export function projectHumanInteractionConversation(
     }
   }
   const fallback = new Map<string, ChatGuidanceTimelineItem[]>()
+  const syncCallFallbacks = new Map<string, ChatGuidanceTimelineItem>()
   for (const request of [...requests].sort(
     (a, b) => (a.response?.createdAt ?? 0) - (b.response?.createdAt ?? 0) || a.sequence - b.sequence
   )) {
@@ -118,6 +156,25 @@ export function projectHumanInteractionConversation(
           request.delivery?.targetRunId && message.agentRun?.runId === request.delivery.targetRunId
       ) ?? conversation.messages.find((message) => message.id === request.assistantMessageId)
     if (!anchor?.agentRun) continue
+    // Resume installs the synchronous result in the Harness checkpoint/trace before its next
+    // model request; a live ToolResult notification need not arrive before resumed deltas. The
+    // admitted response therefore replaces its original call already, never the moving tail.
+    const hasSyncCallBoundary =
+      request.mode === 'sync' &&
+      anchor.id === request.assistantMessageId &&
+      anchor.agentRun.runId === request.runId &&
+      anchor.agentRun.timeline.some(
+        (item) => item.type === 'tool_call' && item.callId === request.toolCallId
+      ) &&
+      !anchor.agentRun.toolCalls.some(
+        (call) => call.id === request.toolCallId && call.tool !== 'request_user_input'
+      )
+    if (hasSyncCallBoundary) {
+      const location = `${anchor.id}:call:${request.toolCallId}`
+      offer(display, location)
+      syncCallFallbacks.set(location, displayItem(display, request.response!.createdAt, location))
+      continue
+    }
     const location = `${anchor.id}:response:${display.responseId}`
     offer(display, location)
     fallback.set(anchor.id, [
@@ -140,6 +197,8 @@ export function projectHumanInteractionConversation(
       continue
     }
     const emittedCalls = new Set<string>()
+    const openRequests = humanInteractionRequestsForMessage(message, requests)
+    const openRequestsByCall = new Map(openRequests.map((request) => [request.toolCallId, request]))
     const timeline = run.timeline.flatMap<ChatAgentTimelineItem>((item) => {
       if (item.type === 'user_guidance') {
         const display = readHumanInteractionGuidanceDisplay(item)
@@ -150,24 +209,62 @@ export function projectHumanInteractionConversation(
       }
       if (item.type === 'tool_call') {
         const call = run.toolCalls.find((call) => call.id === item.callId)
-        if (call?.tool === 'request_user_input' || call?.tool === 'request_user_input_async') {
+        const syncFallback = syncCallFallbacks.get(`${message.id}:call:${item.callId}`)
+        if (
+          call?.tool === 'request_user_input' ||
+          call?.tool === 'request_user_input_async' ||
+          openRequestsByCall.has(item.callId) ||
+          syncFallback
+        ) {
+          if (emittedCalls.has(item.callId)) return []
           emittedCalls.add(item.callId)
-          const display = readHumanInteractionDisplay(
-            run.toolResults.find((result) => result.callId === item.callId)?.result
-          )
+          const display =
+            readHumanInteractionDisplay(
+              run.toolResults.find((result) => result.callId === item.callId)?.result
+            ) ?? readHumanInteractionDisplay(syncFallback?.content)
           return display &&
             locations.get(display.responseId) === `${message.id}:call:${item.callId}`
             ? [
                 {
-                  ...displayItem(display, message.createdAt, item.id),
+                  ...displayItem(display, syncFallback?.createdAt ?? message.createdAt, item.id),
                   traceSequence: item.traceSequence
                 }
               ]
-            : []
+            : !display && openRequestsByCall.has(item.callId)
+              ? [item]
+              : []
         }
       }
       return [item]
     })
+    // A question snapshot is durable before the corresponding live trace notification. Keep a
+    // single temporary entry until that call arrives; the canonical trace then supplies its exact
+    // position and sequence. This is a rendering-only copy, never another model Tool invocation.
+    const toolCalls = [...run.toolCalls]
+    for (const request of openRequests.sort((a, b) => a.sequence - b.sequence)) {
+      if (
+        readHumanInteractionDisplay(
+          run.toolResults.find((result) => result.callId === request.toolCallId)?.result
+        )
+      )
+        continue
+      if (!toolCalls.some((call) => call.id === request.toolCallId)) {
+        toolCalls.push({
+          id: request.toolCallId,
+          tool: request.mode === 'sync' ? 'request_user_input' : 'request_user_input_async',
+          args: {},
+          approvalStatus: 'not_required',
+          reason: null
+        })
+      }
+      if (emittedCalls.has(request.toolCallId)) continue
+      timeline.push({
+        id: `human-request:${request.requestId}`,
+        type: 'tool_call',
+        callId: request.toolCallId
+      })
+      emittedCalls.add(request.toolCallId)
+    }
     // Restored checkpoints may contain a result before its timeline item has arrived.
     for (const result of run.toolResults) {
       if (emittedCalls.has(result.callId)) continue
@@ -178,9 +275,10 @@ export function projectHumanInteractionConversation(
     timeline.push(...(fallback.get(message.id) ?? []))
     messages.push(
       timeline.length === run.timeline.length &&
+        toolCalls.length === run.toolCalls.length &&
         timeline.every((item, index) => item === run.timeline[index])
         ? message
-        : { ...message, agentRun: { ...run, timeline } }
+        : { ...message, agentRun: { ...run, timeline, toolCalls } }
     )
   }
   return { ...conversation, messages }

@@ -572,6 +572,7 @@ async fn busy_existing_chat_is_retryable_and_preserves_exact_message_history() {
             title: "Busy target".to_string(),
             messages: vec![
                 ChatMessageRecord {
+                    human_interaction_response: None,
                     id: "scheduler-active-user".to_string(),
                     role: "user".to_string(),
                     content: "Already running".to_string(),
@@ -582,6 +583,7 @@ async fn busy_existing_chat_is_retryable_and_preserves_exact_message_history() {
                     ui_state_json: None,
                 },
                 ChatMessageRecord {
+                    human_interaction_response: None,
                     id: ACTIVE_ASSISTANT_ID.to_string(),
                     role: "assistant".to_string(),
                     content: String::new(),
@@ -795,6 +797,7 @@ async fn terminal_trace_is_compensated_without_restarting_or_duplicating_the_tur
             title: "Recovered automation".to_string(),
             messages: vec![
                 ChatMessageRecord {
+                    human_interaction_response: None,
                     id: USER_ID.to_string(),
                     role: "user".to_string(),
                     content: task.config.prompt.clone(),
@@ -805,6 +808,7 @@ async fn terminal_trace_is_compensated_without_restarting_or_duplicating_the_tur
                     ui_state_json: None,
                 },
                 ChatMessageRecord {
+                    human_interaction_response: None,
                     id: ASSISTANT_ID.to_string(),
                     role: "assistant".to_string(),
                     content: "Recovered result".to_string(),

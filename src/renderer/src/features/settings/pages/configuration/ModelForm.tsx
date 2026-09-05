@@ -1,3 +1,10 @@
+import { renderSettingsNodes, settingLabel } from '../../settingsDefinition'
+import { useSettingsPageNavigation } from '../../settingsSearchNavigation'
+import {
+  modelFormSettings,
+  providerSettings,
+  providerVendorLabels
+} from './configuration.definition'
 import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import { ChevronDown } from 'lucide-react'
 import type {
@@ -151,6 +158,7 @@ export function ModelForm({
   const policyRequestRef = useRef(0)
   const displayNameInputRef = useRef<HTMLInputElement>(null)
   const [isProviderSettingsOpen, setProviderSettingsOpen] = useState(false)
+  const [requestedProviderSettings, setRequestedProviderSettings] = useState<string | null>(null)
   const [isSaving, setSaving] = useState(false)
   const [saveError, setSaveError] = useState<ModelSettingsSaveError | null>(null)
   const [isAdvancedOpen, setIsAdvancedOpen] = useState(
@@ -260,17 +268,17 @@ export function ModelForm({
     if (!descriptor.selectable) continue
     if (descriptor.vendorId === 'generic') {
       selectableVendorOptions.push({
-        label: t('configuration.providerProfile.generic'),
+        label: t(providerVendorLabels.generic),
         value: 'generic'
       })
     } else if (descriptor.vendorId === 'deepseek') {
       selectableVendorOptions.push({
-        label: t('configuration.providerProfile.deepSeek'),
+        label: t(providerVendorLabels.deepseek),
         value: 'deepseek'
       })
     } else if (descriptor.vendorId === 'moonshot') {
       selectableVendorOptions.push({
-        label: t('configuration.providerProfile.moonshot'),
+        label: t(providerVendorLabels.moonshot),
         value: 'moonshot'
       })
     }
@@ -281,10 +289,10 @@ export function ModelForm({
   ) {
     const label =
       providerProfile.selection === 'generic'
-        ? t('configuration.providerProfile.generic')
+        ? t(providerVendorLabels.generic)
         : providerProfile.selection === 'deepseek'
-          ? t('configuration.providerProfile.deepSeek')
-          : t('configuration.providerProfile.moonshot')
+          ? t(providerVendorLabels.deepseek)
+          : t(providerVendorLabels.moonshot)
     selectableVendorOptions.unshift({ disabled: true, label, value: providerProfile.selection })
   }
   const providerProfileOptions: SettingsSelectOption<ProviderProfileSelection>[] = [
@@ -312,6 +320,39 @@ export function ModelForm({
       supportedPolicy.settings.kind === 'moonshot_k2_6_chat')
       ? supportedPolicy.settings
       : null
+
+  useSettingsPageNavigation(
+    'configuration',
+    (target) => {
+      if (target.view && target.view !== 'model' && target.view.startsWith('model')) {
+        setIsAdvancedOpen(true)
+      }
+      setRequestedProviderSettings(
+        target.view === 'model-deepseek'
+          ? 'deepseek'
+          : target.view === 'model-moonshot'
+            ? 'moonshot'
+            : null
+      )
+    },
+    () => setRequestedProviderSettings(null)
+  )
+
+  useEffect(() => {
+    if (
+      requestedProviderSettings === providerProfile.selection &&
+      ((requestedProviderSettings === 'deepseek' && deepSeekSettingsDescriptor) ||
+        (requestedProviderSettings === 'moonshot' && moonshotSettingsDescriptor))
+    ) {
+      setProviderSettingsOpen(true)
+      setRequestedProviderSettings(null)
+    }
+  }, [
+    deepSeekSettingsDescriptor,
+    moonshotSettingsDescriptor,
+    providerProfile.selection,
+    requestedProviderSettings
+  ])
 
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
@@ -354,310 +395,376 @@ export function ModelForm({
       </h1>
 
       <div className="model-form-page__fields settings-list" data-advanced-open={isAdvancedOpen}>
-        <label className="configuration-field settings-list-row">
-          <span className="settings-list-row__text">
-            <span className="settings-list-row__title">{t('configuration.providerModelId')}</span>
-          </span>
-          <span className="settings-list-row__control">
-            <input
-              className="settings-list-control"
-              value={values.providerModelId}
-              placeholder={t('configuration.providerModelIdPlaceholder')}
-              onChange={(event) =>
-                setValues((current) => ({ ...current, providerModelId: event.target.value }))
-              }
-            />
-          </span>
-        </label>
-
-        <label className="configuration-field settings-list-row">
-          <span className="settings-list-row__text">
-            <span className="settings-list-row__title">
-              {t('configuration.contextWindowTokens')}
-            </span>
-          </span>
-          <span className="settings-list-row__control model-form-price-control">
-            <input
-              className="settings-list-control"
-              inputMode="numeric"
-              aria-invalid={!isContextWindowValid}
-              value={values.contextWindowTokens}
-              placeholder={t('configuration.contextWindowTokensPlaceholder')}
-              onChange={(event) =>
-                setValues((current) => ({
-                  ...current,
-                  contextWindowTokens: event.target.value
-                }))
-              }
-            />
-            {!isContextWindowValid && (
-              <small className="model-form-field-error">
-                {t('configuration.invalidContextWindowTokens')}
-              </small>
-            )}
-          </span>
-        </label>
-
-        <label className="configuration-field settings-list-row">
-          <span className="settings-list-row__text">
-            <span className="settings-list-row__title">{t('configuration.displayName')}</span>
-          </span>
-          <span className="settings-list-row__control model-form-price-control">
-            <input
-              ref={displayNameInputRef}
-              className="settings-list-control"
-              aria-invalid={!isDisplayNameValid}
-              required
-              value={values.displayName}
-              placeholder={t('configuration.displayNamePlaceholder')}
-              onChange={(event) =>
-                setValues((current) => ({ ...current, displayName: event.target.value }))
-              }
-            />
-            {!isDisplayNameValid && (
-              <small className="model-form-field-error">
-                {t('configuration.invalidDisplayName')}
-              </small>
-            )}
-          </span>
-        </label>
-
-        <div className="configuration-field settings-list-row">
-          <span className="settings-list-row__text">
-            <span className="settings-list-row__title">{t('configuration.inputPrice')}</span>
-          </span>
-          <span className="settings-list-row__control model-form-input-price-grid">
-            <label className="model-form-input-price-field">
-              <span>{t('configuration.inputPriceCacheMiss')}</span>
-              <input
-                className="settings-list-control"
-                inputMode="decimal"
-                aria-invalid={!isInputPriceValid}
-                value={values.inputPrice}
-                onChange={(event) =>
-                  setValues((current) => ({ ...current, inputPrice: event.target.value }))
-                }
-              />
-              {!isInputPriceValid && (
-                <small className="model-form-field-error">{t('configuration.invalidPrice')}</small>
-              )}
-            </label>
-            <label className="model-form-input-price-field">
-              <span>{t('configuration.inputPriceCacheHit')}</span>
-              <input
-                className="settings-list-control"
-                inputMode="decimal"
-                aria-invalid={!isCachedInputPriceValid}
-                value={values.cachedInputPrice}
-                placeholder={t('configuration.inputPriceCacheHitPlaceholder')}
-                onChange={(event) =>
-                  setValues((current) => ({
-                    ...current,
-                    cachedInputPrice: event.target.value
-                  }))
-                }
-              />
-              {!isCachedInputPriceValid && (
-                <small className="model-form-field-error">{t('configuration.invalidPrice')}</small>
-              )}
-            </label>
-          </span>
-        </div>
-
-        <label className="configuration-field settings-list-row">
-          <span className="settings-list-row__text">
-            <span className="settings-list-row__title">{t('configuration.outputPrice')}</span>
-          </span>
-          <span className="settings-list-row__control model-form-price-control">
-            <input
-              className="settings-list-control"
-              inputMode="decimal"
-              aria-invalid={!isOutputPriceValid}
-              value={values.outputPrice}
-              onChange={(event) =>
-                setValues((current) => ({ ...current, outputPrice: event.target.value }))
-              }
-            />
-            {!isOutputPriceValid && (
-              <small className="model-form-field-error">{t('configuration.invalidPrice')}</small>
-            )}
-          </span>
-        </label>
-
-        <div className="configuration-field settings-list-row">
-          <span className="settings-list-row__text">
-            <span className="settings-list-row__title">
-              {t('configuration.supportsImageInput')}
-            </span>
-          </span>
-          <button
-            className="settings-switch"
-            type="button"
-            role="switch"
-            aria-checked={values.supportsImage}
-            disabled={
-              supportedPolicy?.imageInput !== 'user_configurable' && Boolean(supportedPolicy)
-            }
-            data-state={values.supportsImage ? 'on' : 'off'}
-            onClick={() =>
-              setValues((current) => ({ ...current, supportsImage: !current.supportsImage }))
-            }
-          >
-            <span className="settings-switch__thumb" aria-hidden="true" />
-            <span className="sr-only">{t('configuration.supportsImageInput')}</span>
-          </button>
-        </div>
-
-        <div className="model-form-more-row">
-          <button
-            className="model-form-more-button"
-            type="button"
-            aria-expanded={isAdvancedOpen}
-            aria-controls="model-form-advanced-settings"
-            data-invalid={!isConnectionPairComplete || !isOverrideUrlValid || undefined}
-            onClick={() => setIsAdvancedOpen((isOpen) => !isOpen)}
-          >
-            {t('configuration.more')}
-            <ChevronDown aria-hidden="true" />
-          </button>
-        </div>
-
-        <div
-          className="model-form-advanced"
-          id="model-form-advanced-settings"
-          data-open={isAdvancedOpen}
-          aria-hidden={!isAdvancedOpen}
-        >
-          <div className="model-form-advanced__inner">
-            <label className="configuration-field settings-list-row">
-              <span className="settings-list-row__text">
-                <span className="settings-list-row__title">{t('configuration.modelApiUrl')}</span>
-              </span>
-              <span className="settings-list-row__control model-form-price-control">
-                <input
-                  className="settings-list-control"
-                  type="url"
-                  aria-invalid={!isOverrideUrlValid}
-                  value={values.apiUrlOverride}
-                  placeholder={t('configuration.modelApiUrlPlaceholder')}
-                  tabIndex={isAdvancedOpen ? 0 : -1}
-                  onChange={(event) =>
-                    setValues((current) => ({
-                      ...current,
-                      apiUrlOverride: event.target.value
-                    }))
-                  }
-                />
-                {!isOverrideUrlValid && (
-                  <small className="model-form-field-error">
-                    {t('configuration.invalidApiUrl')}
-                  </small>
-                )}
-              </span>
-            </label>
-
-            <div className="configuration-field settings-list-row">
-              <span className="settings-list-row__text">
-                <span className="settings-list-row__title">{t('configuration.modelApiToken')}</span>
-              </span>
-              <span className="settings-list-row__control model-form-price-control">
-                <CredentialInput
-                  ariaLabel={t('configuration.modelApiToken')}
-                  status={values.apiTokenOverrideStatus}
-                  mutation={values.apiTokenOverrideMutation}
-                  placeholder={t('configuration.modelApiTokenPlaceholder')}
-                  tabIndex={isAdvancedOpen ? 0 : -1}
-                  onMutationChange={(mutation) =>
-                    setValues((current) => ({
-                      ...current,
-                      apiTokenOverrideMutation: mutation
-                    }))
-                  }
-                />
-                {!isConnectionPairComplete && (
-                  <small className="model-form-field-error">
-                    {t('configuration.modelConnectionPairRequired')}
-                  </small>
-                )}
-              </span>
-            </div>
-
-            <div className="configuration-field settings-list-row">
-              <span className="settings-list-row__text">
-                <span className="settings-list-row__title">
-                  {t('configuration.providerProfile.vendor')}
-                </span>
-              </span>
-              <span className="settings-list-row__control model-provider-profile-control">
-                <SettingsSelect
-                  ariaLabel={t('configuration.providerProfile.vendor')}
-                  className="model-provider-profile-select"
-                  options={providerProfileOptions}
-                  tabIndex={isAdvancedOpen ? 0 : -1}
-                  value={providerProfile.selection}
-                  onChange={(selection) => {
-                    if (selection === 'unsupported') return
-                    setProviderSettingsOpen(false)
-                    setProviderProfile((current) => {
-                      const selected = selectProviderVendor(current, selection)
-                      return supportedPolicy?.vendorId === selection
-                        ? applyResolvedProviderPolicy(selected, supportedPolicy)
-                        : selected
-                    })
-                  }}
-                />
-              </span>
-            </div>
-
-            {(providerProfile.selection === 'deepseek' ||
-              providerProfile.selection === 'moonshot') && (
-              <div className="configuration-field settings-list-row">
-                <span className="settings-list-row__text">
-                  <span className="settings-list-row__title">
-                    {t('configuration.providerSettings.title')}
+        {renderSettingsNodes(modelFormSettings, (node) => {
+          switch (node.id) {
+            case 'configuration.model.providerModelId':
+              return (
+                <label className="configuration-field settings-list-row">
+                  <span className="settings-list-row__text">
+                    <span className="settings-list-row__title">{settingLabel(node, t)}</span>
                   </span>
-                </span>
-                <button
-                  className="secondary-settings-button model-provider-settings-button"
-                  type="button"
-                  disabled={!deepSeekSettingsDescriptor && !moonshotSettingsDescriptor}
-                  tabIndex={isAdvancedOpen ? 0 : -1}
-                  onClick={() => setProviderSettingsOpen(true)}
-                >
-                  {t('configuration.providerSettings.open')}
-                </button>
-              </div>
-            )}
+                  <span className="settings-list-row__control">
+                    <input
+                      className="settings-list-control"
+                      value={values.providerModelId}
+                      placeholder={t('configuration.providerModelIdPlaceholder')}
+                      onChange={(event) =>
+                        setValues((current) => ({
+                          ...current,
+                          providerModelId: event.target.value
+                        }))
+                      }
+                    />
+                  </span>
+                </label>
+              )
+            case 'configuration.model.contextWindowTokens':
+              return (
+                <label className="configuration-field settings-list-row">
+                  <span className="settings-list-row__text">
+                    <span className="settings-list-row__title">{settingLabel(node, t)}</span>
+                  </span>
+                  <span className="settings-list-row__control model-form-price-control">
+                    <input
+                      className="settings-list-control"
+                      inputMode="numeric"
+                      aria-invalid={!isContextWindowValid}
+                      value={values.contextWindowTokens}
+                      placeholder={t('configuration.contextWindowTokensPlaceholder')}
+                      onChange={(event) =>
+                        setValues((current) => ({
+                          ...current,
+                          contextWindowTokens: event.target.value
+                        }))
+                      }
+                    />
+                    {!isContextWindowValid && (
+                      <small className="model-form-field-error">
+                        {t('configuration.invalidContextWindowTokens')}
+                      </small>
+                    )}
+                  </span>
+                </label>
+              )
+            case 'configuration.model.displayName':
+              return (
+                <label className="configuration-field settings-list-row">
+                  <span className="settings-list-row__text">
+                    <span className="settings-list-row__title">{settingLabel(node, t)}</span>
+                  </span>
+                  <span className="settings-list-row__control model-form-price-control">
+                    <input
+                      ref={displayNameInputRef}
+                      className="settings-list-control"
+                      aria-invalid={!isDisplayNameValid}
+                      required
+                      value={values.displayName}
+                      placeholder={t('configuration.displayNamePlaceholder')}
+                      onChange={(event) =>
+                        setValues((current) => ({ ...current, displayName: event.target.value }))
+                      }
+                    />
+                    {!isDisplayNameValid && (
+                      <small className="model-form-field-error">
+                        {t('configuration.invalidDisplayName')}
+                      </small>
+                    )}
+                  </span>
+                </label>
+              )
+            case 'configuration.model.inputPrices':
+              return (
+                <div className="configuration-field settings-list-row">
+                  <span className="settings-list-row__text">
+                    <span className="settings-list-row__title">{settingLabel(node, t)}</span>
+                  </span>
+                  <span className="settings-list-row__control model-form-input-price-grid">
+                    {renderSettingsNodes(node.children, (node) => {
+                      switch (node.id) {
+                        case 'configuration.model.inputPrice':
+                          return (
+                            <label className="model-form-input-price-field">
+                              <span>{settingLabel(node, t)}</span>
+                              <input
+                                className="settings-list-control"
+                                inputMode="decimal"
+                                aria-invalid={!isInputPriceValid}
+                                value={values.inputPrice}
+                                onChange={(event) =>
+                                  setValues((current) => ({
+                                    ...current,
+                                    inputPrice: event.target.value
+                                  }))
+                                }
+                              />
+                              {!isInputPriceValid && (
+                                <small className="model-form-field-error">
+                                  {t('configuration.invalidPrice')}
+                                </small>
+                              )}
+                            </label>
+                          )
+                        case 'configuration.model.cachedInputPrice':
+                          return (
+                            <label className="model-form-input-price-field">
+                              <span>{settingLabel(node, t)}</span>
+                              <input
+                                className="settings-list-control"
+                                inputMode="decimal"
+                                aria-invalid={!isCachedInputPriceValid}
+                                value={values.cachedInputPrice}
+                                placeholder={t('configuration.inputPriceCacheHitPlaceholder')}
+                                onChange={(event) =>
+                                  setValues((current) => ({
+                                    ...current,
+                                    cachedInputPrice: event.target.value
+                                  }))
+                                }
+                              />
+                              {!isCachedInputPriceValid && (
+                                <small className="model-form-field-error">
+                                  {t('configuration.invalidPrice')}
+                                </small>
+                              )}
+                            </label>
+                          )
+                      }
+                    })}
+                  </span>
+                </div>
+              )
+            case 'configuration.model.outputPrice':
+              return (
+                <label className="configuration-field settings-list-row">
+                  <span className="settings-list-row__text">
+                    <span className="settings-list-row__title">{settingLabel(node, t)}</span>
+                  </span>
+                  <span className="settings-list-row__control model-form-price-control">
+                    <input
+                      className="settings-list-control"
+                      inputMode="decimal"
+                      aria-invalid={!isOutputPriceValid}
+                      value={values.outputPrice}
+                      onChange={(event) =>
+                        setValues((current) => ({ ...current, outputPrice: event.target.value }))
+                      }
+                    />
+                    {!isOutputPriceValid && (
+                      <small className="model-form-field-error">
+                        {t('configuration.invalidPrice')}
+                      </small>
+                    )}
+                  </span>
+                </label>
+              )
+            case 'configuration.model.supportsImage':
+              return (
+                <div className="configuration-field settings-list-row">
+                  <span className="settings-list-row__text">
+                    <span className="settings-list-row__title">{settingLabel(node, t)}</span>
+                  </span>
+                  <button
+                    className="settings-switch"
+                    type="button"
+                    role="switch"
+                    aria-checked={values.supportsImage}
+                    disabled={
+                      supportedPolicy?.imageInput !== 'user_configurable' &&
+                      Boolean(supportedPolicy)
+                    }
+                    data-state={values.supportsImage ? 'on' : 'off'}
+                    onClick={() =>
+                      setValues((current) => ({
+                        ...current,
+                        supportsImage: !current.supportsImage
+                      }))
+                    }
+                  >
+                    <span className="settings-switch__thumb" aria-hidden="true" />
+                    <span className="sr-only">{settingLabel(node, t)}</span>
+                  </button>
+                </div>
+              )
+            case 'configuration.model.advanced':
+              return (
+                <>
+                  <div className="model-form-more-row" data-setting-id={node.id}>
+                    <button
+                      className="model-form-more-button"
+                      type="button"
+                      aria-expanded={isAdvancedOpen}
+                      aria-controls="model-form-advanced-settings"
+                      data-invalid={!isConnectionPairComplete || !isOverrideUrlValid || undefined}
+                      onClick={() => setIsAdvancedOpen((isOpen) => !isOpen)}
+                    >
+                      {settingLabel(node, t)}
+                      <ChevronDown aria-hidden="true" />
+                    </button>
+                  </div>
+                  <div
+                    className="model-form-advanced"
+                    id="model-form-advanced-settings"
+                    data-open={isAdvancedOpen}
+                    aria-hidden={!isAdvancedOpen}
+                  >
+                    <div className="model-form-advanced__inner">
+                      {renderSettingsNodes(node.children, (node) => {
+                        switch (node.id) {
+                          case 'configuration.model.apiUrl':
+                            return (
+                              <label className="configuration-field settings-list-row">
+                                <span className="settings-list-row__text">
+                                  <span className="settings-list-row__title">
+                                    {settingLabel(node, t)}
+                                  </span>
+                                </span>
+                                <span className="settings-list-row__control model-form-price-control">
+                                  <input
+                                    className="settings-list-control"
+                                    type="url"
+                                    aria-invalid={!isOverrideUrlValid}
+                                    value={values.apiUrlOverride}
+                                    placeholder={t('configuration.modelApiUrlPlaceholder')}
+                                    tabIndex={isAdvancedOpen ? 0 : -1}
+                                    onChange={(event) =>
+                                      setValues((current) => ({
+                                        ...current,
+                                        apiUrlOverride: event.target.value
+                                      }))
+                                    }
+                                  />
+                                  {!isOverrideUrlValid && (
+                                    <small className="model-form-field-error">
+                                      {t('configuration.invalidApiUrl')}
+                                    </small>
+                                  )}
+                                </span>
+                              </label>
+                            )
+                          case 'configuration.model.apiToken':
+                            return (
+                              <div className="configuration-field settings-list-row">
+                                <span className="settings-list-row__text">
+                                  <span className="settings-list-row__title">
+                                    {settingLabel(node, t)}
+                                  </span>
+                                </span>
+                                <span className="settings-list-row__control model-form-price-control">
+                                  <CredentialInput
+                                    ariaLabel={settingLabel(node, t)}
+                                    status={values.apiTokenOverrideStatus}
+                                    mutation={values.apiTokenOverrideMutation}
+                                    placeholder={t('configuration.modelApiTokenPlaceholder')}
+                                    tabIndex={isAdvancedOpen ? 0 : -1}
+                                    onMutationChange={(mutation) =>
+                                      setValues((current) => ({
+                                        ...current,
+                                        apiTokenOverrideMutation: mutation
+                                      }))
+                                    }
+                                  />
+                                  {!isConnectionPairComplete && (
+                                    <small className="model-form-field-error">
+                                      {t('configuration.modelConnectionPairRequired')}
+                                    </small>
+                                  )}
+                                </span>
+                              </div>
+                            )
+                          case 'configuration.model.vendor':
+                            return (
+                              <div className="configuration-field settings-list-row">
+                                <span className="settings-list-row__text">
+                                  <span className="settings-list-row__title">
+                                    {settingLabel(node, t)}
+                                  </span>
+                                </span>
+                                <span className="settings-list-row__control model-provider-profile-control">
+                                  <SettingsSelect
+                                    ariaLabel={settingLabel(node, t)}
+                                    className="model-provider-profile-select"
+                                    options={providerProfileOptions}
+                                    tabIndex={isAdvancedOpen ? 0 : -1}
+                                    value={providerProfile.selection}
+                                    onChange={(selection) => {
+                                      if (selection === 'unsupported') return
+                                      setProviderSettingsOpen(false)
+                                      setProviderProfile((current) => {
+                                        const selected = selectProviderVendor(current, selection)
+                                        return supportedPolicy?.vendorId === selection
+                                          ? applyResolvedProviderPolicy(selected, supportedPolicy)
+                                          : selected
+                                      })
+                                    }}
+                                  />
+                                </span>
+                              </div>
+                            )
+                          case 'configuration.model.providerSettings':
+                            if (
+                              providerProfile.selection !== 'deepseek' &&
+                              providerProfile.selection !== 'moonshot'
+                            )
+                              return null
+                            return (
+                              <div className="configuration-field settings-list-row">
+                                <span className="settings-list-row__text">
+                                  <span className="settings-list-row__title">
+                                    {settingLabel(node, t)}
+                                  </span>
+                                </span>
+                                <button
+                                  className="secondary-settings-button model-provider-settings-button"
+                                  type="button"
+                                  disabled={
+                                    !deepSeekSettingsDescriptor && !moonshotSettingsDescriptor
+                                  }
+                                  tabIndex={isAdvancedOpen ? 0 : -1}
+                                  onClick={() => setProviderSettingsOpen(true)}
+                                >
+                                  {t('configuration.providerSettings.open')}
+                                </button>
+                              </div>
+                            )
+                        }
+                      })}
 
-            {policyResolution.status === 'loading' && (
-              <p className="model-provider-policy-message" role="status">
-                {t('configuration.providerProfile.resolving')}
-              </p>
-            )}
-            {policyResolution.status === 'failed' && (
-              <p className="model-provider-policy-message model-form-field-error" role="alert">
-                {t('configuration.providerProfile.resolveFailed')}
-              </p>
-            )}
-            {resolvedPolicy?.status === 'unsupported' && (
-              <div className="model-provider-policy-message" role="alert">
-                <p>
-                  {resolvedPolicy.reason === 'unsupported_model'
-                    ? t('configuration.providerProfile.unsupportedModel')
-                    : resolvedPolicy.reason === 'unsupported_dialect'
-                      ? t('configuration.providerProfile.unsupportedDialect')
-                      : t('configuration.providerProfile.unsupportedVendor')}
-                </p>
-                <p>{t('configuration.providerProfile.unsupportedGuidance')}</p>
-              </div>
-            )}
-            {providerProfile.familyChanged && (
-              <p className="model-provider-policy-message" role="status">
-                {t('configuration.providerProfile.familyChanged')}
-              </p>
-            )}
-          </div>
-        </div>
+                      {policyResolution.status === 'loading' && (
+                        <p className="model-provider-policy-message" role="status">
+                          {t('configuration.providerProfile.resolving')}
+                        </p>
+                      )}
+                      {policyResolution.status === 'failed' && (
+                        <p
+                          className="model-provider-policy-message model-form-field-error"
+                          role="alert"
+                        >
+                          {t('configuration.providerProfile.resolveFailed')}
+                        </p>
+                      )}
+                      {resolvedPolicy?.status === 'unsupported' && (
+                        <div className="model-provider-policy-message" role="alert">
+                          <p>
+                            {resolvedPolicy.reason === 'unsupported_model'
+                              ? t('configuration.providerProfile.unsupportedModel')
+                              : resolvedPolicy.reason === 'unsupported_dialect'
+                                ? t('configuration.providerProfile.unsupportedDialect')
+                                : t('configuration.providerProfile.unsupportedVendor')}
+                          </p>
+                          <p>{t('configuration.providerProfile.unsupportedGuidance')}</p>
+                        </div>
+                      )}
+                      {providerProfile.familyChanged && (
+                        <p className="model-provider-policy-message" role="status">
+                          {t('configuration.providerProfile.familyChanged')}
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                </>
+              )
+          }
+        })}
       </div>
 
       {saveError?.code === 'unknown' && (
@@ -697,34 +804,52 @@ export function ModelForm({
         />
       )}
 
-      {isProviderSettingsOpen &&
-        providerProfile.selection === 'deepseek' &&
-        providerProfile.settings &&
-        deepSeekSettingsDescriptor && (
-          <DeepSeekProviderSettingsEditor
-            descriptor={deepSeekSettingsDescriptor}
-            initialSettings={providerProfile.settings}
-            onCancel={() => setProviderSettingsOpen(false)}
-            onConfirm={(settings) => {
-              setProviderProfile((current) => updateDeepSeekProviderSettings(current, settings))
-              setProviderSettingsOpen(false)
-            }}
-          />
-        )}
-      {isProviderSettingsOpen &&
-        providerProfile.selection === 'moonshot' &&
-        providerProfile.settings &&
-        moonshotSettingsDescriptor && (
-          <MoonshotProviderSettingsEditor
-            descriptor={moonshotSettingsDescriptor}
-            initialSettings={providerProfile.settings}
-            onCancel={() => setProviderSettingsOpen(false)}
-            onConfirm={(settings) => {
-              setProviderProfile((current) => updateMoonshotProviderSettings(current, settings))
-              setProviderSettingsOpen(false)
-            }}
-          />
-        )}
+      {renderSettingsNodes(providerSettings, (node) => {
+        switch (node.id) {
+          case 'configuration.model.deepseek':
+            return (
+              (isProviderSettingsOpen &&
+                providerProfile.selection === 'deepseek' &&
+                providerProfile.settings &&
+                deepSeekSettingsDescriptor && (
+                  <DeepSeekProviderSettingsEditor
+                    definition={node}
+                    descriptor={deepSeekSettingsDescriptor}
+                    initialSettings={providerProfile.settings}
+                    onCancel={() => setProviderSettingsOpen(false)}
+                    onConfirm={(settings) => {
+                      setProviderProfile((current) =>
+                        updateDeepSeekProviderSettings(current, settings)
+                      )
+                      setProviderSettingsOpen(false)
+                    }}
+                  />
+                )) ||
+              null
+            )
+          case 'configuration.model.moonshot':
+            return (
+              (isProviderSettingsOpen &&
+                providerProfile.selection === 'moonshot' &&
+                providerProfile.settings &&
+                moonshotSettingsDescriptor && (
+                  <MoonshotProviderSettingsEditor
+                    definition={node}
+                    descriptor={moonshotSettingsDescriptor}
+                    initialSettings={providerProfile.settings}
+                    onCancel={() => setProviderSettingsOpen(false)}
+                    onConfirm={(settings) => {
+                      setProviderProfile((current) =>
+                        updateMoonshotProviderSettings(current, settings)
+                      )
+                      setProviderSettingsOpen(false)
+                    }}
+                  />
+                )) ||
+              null
+            )
+        }
+      })}
     </form>
   )
 }

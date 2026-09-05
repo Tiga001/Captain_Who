@@ -8,6 +8,10 @@ import type {
   ProviderVendorModelPolicyInput
 } from '@mycopilot/protocol'
 import type { ModelConfig } from '../../config/modelConfig'
+import {
+  SettingsSearchNavigationProvider,
+  type SettingsNavigationTarget
+} from '../../features/settings/settingsSearchNavigation'
 
 vi.mock('../../config/FrontendConfigProvider', () => ({
   useFrontendConfig: () => ({
@@ -207,6 +211,113 @@ const commonProps = {
 }
 
 describe('ModelForm vendor controls', () => {
+  it('locates advanced settings without discarding a draft, changing vendors or saving', async () => {
+    const onSave = vi.fn()
+    const resolver = vi.fn(resolvePolicy)
+    const renderForm = (target: SettingsNavigationTarget | null) => (
+      <SettingsSearchNavigationProvider target={target}>
+        <ModelForm
+          {...commonProps}
+          model={model}
+          resolveProviderVendorModelPolicy={resolver}
+          onSave={onSave}
+        />
+      </SettingsSearchNavigationProvider>
+    )
+    const screen = await render(renderForm(null))
+    await expect.poll(() => resolver.mock.calls.length).toBe(1)
+    await screen.getByPlaceholder('configuration.displayNamePlaceholder').fill('Unsaved name')
+
+    await screen.rerender(
+      renderForm({
+        page: 'configuration',
+        id: 'configuration.model.apiUrl',
+        view: 'model-advanced',
+        revision: 1
+      })
+    )
+    await expect
+      .element(screen.getByRole('button', { name: 'configuration.more' }))
+      .toHaveAttribute('aria-expanded', 'true')
+    await expect
+      .element(screen.getByPlaceholder('configuration.displayNamePlaceholder'))
+      .toHaveValue('Unsaved name')
+    expect(document.querySelector('[data-setting-id="configuration.model.apiUrl"]')).not.toBeNull()
+
+    await screen.rerender(
+      renderForm({
+        page: 'configuration',
+        id: 'configuration.model.deepseek.reasoningEffort',
+        view: 'model-deepseek',
+        revision: 2
+      })
+    )
+    await expect.element(screen.getByRole('dialog')).not.toBeInTheDocument()
+    await expect
+      .element(
+        screen.getByRole('button', {
+          name: 'configuration.providerProfile.vendor: configuration.providerProfile.generic'
+        })
+      )
+      .toBeVisible()
+    expect(resolver).toHaveBeenCalledTimes(1)
+    expect(onSave).not.toHaveBeenCalled()
+  })
+
+  it('waits for provider policy before exposing the requested provider field in its existing dialog', async () => {
+    const onSave = vi.fn()
+    const pendingPolicy = deferred<ProviderVendorModelPolicyDescriptor>()
+    const resolver = vi.fn(() => pendingPolicy.promise)
+    const configuredModel: ModelConfig = {
+      ...model,
+      providerProfileConfig: {
+        schemaVersion: 1,
+        profile: { id: 'deepseek_v4_chat', version: 1 },
+        reasoning: { mode: 'enabled', effort: 'high' }
+      }
+    }
+    const screen = await render(
+      <SettingsSearchNavigationProvider
+        target={{
+          page: 'configuration',
+          id: 'configuration.model.deepseek.reasoningEffort',
+          view: 'model-deepseek',
+          revision: 1
+        }}
+      >
+        <ModelForm
+          {...commonProps}
+          model={configuredModel}
+          resolveProviderVendorModelPolicy={resolver}
+          onSave={onSave}
+        />
+      </SettingsSearchNavigationProvider>
+    )
+    await expect.poll(() => resolver.mock.calls.length).toBe(1)
+    await expect.element(screen.getByRole('dialog')).not.toBeInTheDocument()
+    pendingPolicy.resolve(
+      await resolvePolicy({
+        vendorId: 'deepseek',
+        modelId: configuredModel.providerModelId,
+        dialect: 'openai_chat_completions'
+      })
+    )
+    await expect
+      .element(screen.getByRole('dialog', { name: 'configuration.deepSeekSettings.title' }))
+      .toBeVisible()
+    expect(
+      document.querySelector('[data-setting-id="configuration.model.deepseek.reasoningEffort"]')
+    ).not.toBeNull()
+    await expect
+      .element(
+        screen.getByRole('button', {
+          name: 'configuration.deepSeekSettings.reasoningEffort: configuration.deepSeekSettings.effortHigh'
+        })
+      )
+      .toBeVisible()
+    expect(onSave).not.toHaveBeenCalled()
+  })
+
   it('resolves provider policy from the provider model ID, not the editable display name', async () => {
     const resolver = vi.fn(resolvePolicy)
     const screen = await render(

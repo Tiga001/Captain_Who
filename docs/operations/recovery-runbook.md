@@ -38,14 +38,14 @@ Playwright 故障。优先原则是保护持久事实和外部副作用，不通
 
 ### 判断
 
-当前基线为 **schema v38 + exact catalog fingerprint + valid foreign keys**；开发期只新建当前 schema，不迁移旧聊天、运行和检查点。真源：
+当前基线为 **schema v39 + exact catalog fingerprint + valid foreign keys**；开发期只新建当前 schema，不迁移旧聊天、运行和检查点。真源：
 
 ```text
 crates/core/src/storage/migrations.rs
 crates/core/src/storage/canonical_schema.sql
 ```
 
-旧版本（含 v34/v35/v36/v37）、非空未版本化库、catalog 漂移或外键违规均返回 `development_storage_schema_reset_required`，不改写原库，不自动 reset。v38 不支持直接交给旧应用打开。
+旧版本（含 v34/v35/v36/v37/v38）、非空未版本化库、catalog 漂移或外键违规均返回 `development_storage_schema_reset_required`，不改写原库，不自动 reset。v39 不支持直接交给旧应用打开。
 
 手动压缩在重启后显示 interrupted 时，可直接继续聊天；旧 active head 保持有效。不得重放原付费请求来“恢复进度”。如果请求已到达厂商但尚未收到响应就崩溃，实际账单可能只有厂商可确认，本地不能编造 token 数量。
 
@@ -70,8 +70,8 @@ pnpm storage:reset-dev -- --confirm-reset
 确认流程：
 
 1. 在 `storage-backups/` 创建权限受限、时间戳命名的 verified SQLite snapshot。
-2. 从 exact current v38、exact v37、exact v36 或 exact v35 schema 提取 allowlisted configuration；现有受限选项也支持绑定 exact v33 fingerprint 的私有备份设置恢复。MCP 精确 identity/authorization 必须重新验证；未知配置结构拒绝重置，不能用默认值默默替换模型配置。
-3. 在 staging 文件创建 fresh v38 canonical DB。
+2. 从 exact current v39、exact v38、exact v37、exact v36 或 exact v35 schema 提取 allowlisted configuration；现有受限选项也支持绑定 exact v33 fingerprint 的私有备份设置恢复。MCP 精确 identity/authorization 必须重新验证；未知配置结构拒绝重置，不能用默认值默默替换模型配置。
+3. 在 staging 文件创建 fresh v39 canonical DB。
 4. 通过当前 service 写路径恢复配置。
 5. 重开生产 storage，核对记录数、`PRAGMA quick_check` 和 `foreign_key_check`。
 6. 原子发布新数据库；失败时保留原数据库与恢复备份。
@@ -80,7 +80,7 @@ pnpm storage:reset-dev -- --confirm-reset
 
 - model/provider/search settings 及其 opaque credential reference；secret 本身由现有 Credential Store 持有，不复制进 fresh SQLite；
 - UI preferences、Agent prompt preferences；
-- 通知设置；来自 exact v36/v37 或 current v38 时还保留人机交互 enabled/revision/updatedAt；
+- 通知设置；来自 exact v36/v37/v38 或 current v39 时还保留人机交互 enabled/revision/updatedAt；
 - Browser 链接打开位置、下载设置和偏好（仅在源 schema 支持对应表时）；
 - Skill enablement overrides；
 - 全部 image-generation profile 及其 credential reference；credential secret backend 本身不搬动、不清空；
@@ -94,17 +94,17 @@ Skill、生成图片和 credential 目录不在 reset 事务中移动；没有�
 ### 备份处理
 
 - reset 失败时，优先保留原库；backup 是恢复/取证副本，不应被 reset 检查过程修改。
-- 不要直接把一个旧 schema backup 覆盖回运行路径并期待 v38 接受；旧库仍会触发 reset-required。
+- 不要直接把一个旧 schema backup 覆盖回运行路径并期待 v39 接受；旧库仍会触发 reset-required。
 - 如必须人工还原文件，先停止所有 Core Server、再次复制保存当前文件、在隔离位置验证 SQLite 完整性和 schema，再决定是否替换。仓库当前没有受支持的一键 backup restore 命令。
-- 当前 v38 SQLite backup 不含当前模型/搜索 secret，只含 reference 与非秘密元数据；旧 schema backup 仍可能含明文 Token/Key，二者都不得上传到 issue、CI artifact 或公共对象存储。
+- 当前 v39 SQLite backup 不含当前模型/搜索 secret，只含 reference 与非秘密元数据；旧 schema backup 仍可能含明文 Token/Key，二者都不得上传到 issue、CI artifact 或公共对象存储。
 - 只恢复 SQLite 不会恢复操作系统凭据。跨设备、跨账户或凭据 backend 丢失后，保留的 reference 会显示为不可用，需要用户替换或清除。
 - 未签名 macOS 开发构建的私有凭据文件属于数据根；整根备份会包含这些 secret。删除 backup、reference 或凭据文件不等于对 SSD、系统快照或外部备份安全擦除；怀疑泄露时应撤销或轮换 Provider 凭据。
 
 ### 旧开发库的配置保留边界
 
-exact v35/v36/v37 使用上述受管 reset 流程提取白名单配置并新建 v38；既有 exact v33 私有备份恢复仍绑定固定 fingerprint。未支持的旧结构若包含任何配置表，工具拒绝重置并保留原库。不要修改版本号骗过检查，也不要临时写聊天、运行或检查点迁移绕过开发期数据策略。
+exact v35/v36/v37/v38 使用上述受管 reset 流程提取白名单配置并新建 v39；既有 exact v33 私有备份恢复仍绑定固定 fingerprint。未支持的旧结构若包含任何配置表，工具拒绝重置并保留原库。不要修改版本号骗过检查，也不要临时写聊天、运行或检查点迁移绕过开发期数据策略。
 
-重建后验证 `PRAGMA user_version = 38`、catalog fingerprint、`quick_check`、`foreign_key_check`，再核对模型、搜索和图片凭据状态，以及 UI/Prompt、Skill、MCP、通知、Browser 和人机交互设置。无需真实付费请求来验证配置保留；历史备份继续按敏感材料保管。
+重建后验证 `PRAGMA user_version = 39`、catalog fingerprint、`quick_check`、`foreign_key_check`，再核对模型、搜索和图片凭据状态，以及 UI/Prompt、Skill、MCP、通知、Browser 和人机交互设置。无需真实付费请求来验证配置保留；历史备份继续按敏感材料保管。
 
 ## 4. Multi-Agent 自动恢复
 
@@ -316,7 +316,7 @@ reset 变更必须覆盖 dry-run 只读、锁拒绝、备份不变、失败保�
 ## 13. 当前限制
 
 - 仅提供开发 reset，不提供生产原地迁移或通用 backup restore 工具。
-- 备份没有自动 retention、加密或异地复制；当前 v38 SQLite snapshot 不含当前模型/搜索 secret，但旧 schema backup 或未签名 macOS 开发环境的整根备份可能含明文凭据。
+- 备份没有自动 retention、加密或异地复制；当前 v39 SQLite snapshot 不含当前模型/搜索 secret，但旧 schema backup 或未签名 macOS 开发环境的整根备份可能含明文凭据。
 - `outcome_unknown` 没有通用自动补偿，需要核验外部状态后显式发起新任务。
 - Windows MCP stdio 没有 Job Object 进程树隔离保证。
 - 通知正确性依赖 SQLite replay/polling，当前没有外部运维 dashboard 或 alert；前台/disabled/不支持场景会终态 suppress，不能事后补发。
@@ -342,3 +342,20 @@ reset 变更必须覆盖 dry-run 只读、锁拒绝、备份不变、失败保�
 - [ ] shutdown 是否停止 admission、有界收口并保留未完成事实供重启恢复？
 - [ ] 是否补充故障注入、重启、锁、跨进程与目标平台测试？
 - [ ] 是否更新本 Runbook、发布门禁和相应子系统文档？
+
+## 15. 人机交互等待与回答投递
+
+问题状态和投递状态必须分别检查。`submitted` 表示不可变答案已保存，不保证模型已消费；等待合法安全边界时不要重新开放问题或生成另一条用户消息。
+
+- `waiting_for_user_input`：保持同逻辑 Run 占用。客户端从独立问题查询恢复入口；不能用审批 Approved、普通 User 或轮询模型替代原工具恢复。
+- 同步 `waiting` 与已保存未领取回答可恢复；`claimed` 未执行可重新领取。`executing` 后只有原 ToolResult 在 trace 和模型上下文中的完整证明、可靠后继检查点或终态事实才允许结算；没有证明时保守失败，禁止盲重放工具或付费请求。
+- 异步 `open`：自然完成后继续保留；通过原 requestId 整批提交才是新用户意图。`pending/bound` 的已提交回答由 Host 重新选择合法投递路径，Renderer 不 startRun。
+- 审批、同步提问和压缩期间：没有 worker 也不等于聊天空闲。答案先落库，等待这些操作释放聊天后调度。
+- Stop：取消停止范围内此前接纳且尚未应用的回应，迟到工作和重启不得重新启动。Stop 后用户主动提交此前未答的异步批次属于新的明确输入。
+- 忽略：只结束当前异步批次，没有 User、guidance、Wake 或模型请求；不能为通知“已忽略”额外启动推理。
+- 多窗口、重连：重新查询完整分页，Request/Delivery 各自按 revision 收敛。终态批次不能因迟到通知重新开放；输入草稿只在原窗口内存中保存，窗口重载后不恢复草稿。
+- 答案展示：只读 `human_interaction_message_projections` 是冻结历史证明，不能作为提交或恢复权限。Fork 可以复制边界内的此证明，但不能复制 request/delivery/suspension。不要从普通 User JSON 或通用 `historical_snapshot` 身份手工生成证明。
+
+若提交结果未知，前端保留原 payload 和 submissionId，重试必须使用同一身份；已结算批次不可编辑。已保存但恢复失败时保留权威回答和错误事实，先排查原 Provider 身份、凭据、检查点及停止围栏，再由用户明确继续。
+
+验证入口为 `pnpm test:human-interaction-core-e2e` 和[人机交互子系统验收矩阵](../subsystems/human-interaction.md)。上述恢复仅适用于同版本 canonical schema；旧开发库按第 3 节 reset，不迁移旧聊天或检查点。

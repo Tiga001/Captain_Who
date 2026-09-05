@@ -2,6 +2,7 @@ use super::*;
 
 fn assistant_message(id: &str, created_at: i64) -> ChatMessageRecord {
     ChatMessageRecord {
+        human_interaction_response: None,
         id: id.to_string(),
         role: "assistant".to_string(),
         content: format!("answer from {id}"),

@@ -502,6 +502,7 @@ fn prepare_conversation_turn_from_source(
     let user_message = match &source {
         ConversationTurnInputSource::Human | ConversationTurnInputSource::HumanResponse(_) => {
             ChatMessageRecord {
+                human_interaction_response: None,
                 id: user_message_id.clone(),
                 role: "user".to_string(),
                 content: content.clone(),
@@ -555,6 +556,7 @@ fn prepare_conversation_turn_from_source(
     };
     let assistant_created_at = timestamp.max(user_message.created_at.saturating_add(1));
     let assistant_message = ChatMessageRecord {
+        human_interaction_response: None,
         id: assistant_message_id.clone(),
         role: "assistant".to_string(),
         // Lifecycle labels belong to structured run state; message content is model-authored only.

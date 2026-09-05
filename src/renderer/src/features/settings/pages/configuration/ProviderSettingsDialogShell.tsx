@@ -4,6 +4,7 @@ import { createPortal } from 'react-dom'
 import { useFrontendConfig } from '../../../../config/FrontendConfigProvider'
 
 interface ProviderSettingsDialogShellProps {
+  settingId?: string
   title: string
   description: string
   children: ReactNode
@@ -13,6 +14,7 @@ interface ProviderSettingsDialogShellProps {
 }
 
 export function ProviderSettingsDialogShell({
+  settingId,
   title,
   description,
   children,
@@ -79,6 +81,7 @@ export function ProviderSettingsDialogShell({
       }}
     >
       <section
+        data-setting-id={settingId}
         ref={cardRef}
         className="provider-settings-dialog__card"
         role="dialog"

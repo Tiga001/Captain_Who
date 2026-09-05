@@ -1,7 +1,9 @@
 import { expect, it, vi } from 'vitest'
 import { render } from 'vitest-browser-react'
 import type { HumanInteractionHostApi } from '@mycopilot/host-api'
-import { fakeHost, question } from './humanInteractionFixtures'
+import { deferred, fakeHost, question } from './humanInteractionFixtures'
+import type { HostInvocationResult } from '@mycopilot/host-api'
+import type { HumanInteractionListOutput } from '@mycopilot/protocol'
 vi.mock('../../../host/hostClient', () => ({ hostClient: {} }))
 vi.mock('../../../config/FrontendConfigProvider', () => ({
   useFrontendConfig: () => ({ t: (key: string) => key })
@@ -189,5 +191,71 @@ it('a previously captured async callback cannot mutate after sync preemption arr
   await oldIgnore('question')
   expect(host.api.submit).not.toHaveBeenCalled()
   expect(host.api.ignore).not.toHaveBeenCalled()
+  await screen.unmount()
+})
+
+it('Core reconnect recovers a failed post-approval refresh without requiring window focus', async () => {
+  const host = fakeHost([question()])
+  let result!: HumanInteractionControllerView
+  const onRender = (value: HumanInteractionControllerView) => {
+    result = value
+  }
+  const screen = await render(<Harness api={host.api} onRender={onRender} />)
+  await expect.poll(() => result.activeBatch?.requestId).toBe('question')
+  await screen.rerender(<Harness api={host.api} onRender={onRender} hasApproval />)
+  host.api.listRequests.mockRejectedValueOnce(new Error('Core disconnected'))
+  await screen.rerender(<Harness api={host.api} onRender={onRender} />)
+  await expect.poll(() => result.status).toBe('error')
+  expect(result.canInteract).toBe(false)
+  for (const resync of host.resyncListeners) resync()
+  await expect.poll(() => result.activeBatch?.requestId).toBe('question')
+  expect(result.canInteract).toBe(true)
+  await screen.unmount()
+})
+
+it('a detached callback cannot submit, ignore or overwrite a draft after a newer async batch takes focus', async () => {
+  const host = fakeHost([question('old')])
+  let result!: HumanInteractionControllerView
+  const screen = await render(
+    <Harness
+      api={host.api}
+      onRender={(value) => {
+        result = value
+      }}
+    />
+  )
+  await expect.poll(() => result.activeBatch?.requestId).toBe('old')
+  for (const q of question('old').questions)
+    result.setAnswer('old', { kind: 'skipped', questionId: q.id })
+  const old = result
+  host.notify(question('new', 2))
+  await old.submit('old')
+  await old.ignore('old')
+  old.setAnswer('old', { kind: 'text', questionId: 'old-two', text: 'late DOM input' })
+  expect(host.api.submit).not.toHaveBeenCalled()
+  expect(host.api.ignore).not.toHaveBeenCalled()
+  await expect.poll(() => result.activeBatch?.requestId).toBe('new')
+  result.open('old')
+  await expect.poll(() => result.activeBatch?.requestId).toBe('old')
+  expect(result.activeDraft.answers['old-two']).toEqual({ kind: 'skipped', questionId: 'old-two' })
+  await screen.unmount()
+})
+
+it('does not authorize a replacement Host from a late success belonging to the previous Host', async () => {
+  const oldHost = fakeHost([question('old')]),
+    nextHost = fakeHost([question('next')])
+  const pending = deferred<HostInvocationResult<HumanInteractionListOutput>>()
+  oldHost.api.listRequests.mockReturnValueOnce(pending.promise)
+  nextHost.api.listRequests.mockRejectedValue(new Error('new Host unavailable'))
+  let result!: HumanInteractionControllerView
+  const onRender = (value: HumanInteractionControllerView) => {
+    result = value
+  }
+  const screen = await render(<Harness api={oldHost.api} onRender={onRender} />)
+  await screen.rerender(<Harness api={nextHost.api} onRender={onRender} />)
+  await expect.poll(() => result.status).toBe('error')
+  pending.resolve({ ok: true, value: { items: [question('old')], nextCursor: null } })
+  await expect.poll(() => result.canInteract).toBe(false)
+  expect(result.activeBatch).toBeNull()
   await screen.unmount()
 })

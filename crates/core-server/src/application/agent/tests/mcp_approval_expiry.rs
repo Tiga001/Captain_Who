@@ -147,6 +147,7 @@ fn resume_checkpoint(
     let pending_tool_call_id = call_id(action_id);
     let mut checkpoint: AgentRunCheckpoint = serde_json::from_value(json!({
         "version": AGENT_RUN_CHECKPOINT_SCHEMA_VERSION,
+            "pauseReason": "approval",
         "runId": run_id,
         "contextItems": [{
             "role": "assistant",
@@ -263,6 +264,7 @@ fn store_action(
             model_id: Some("expiry-test-model".to_string()),
             title: "MCP approval expiry".to_string(),
             messages: vec![ChatMessageRecord {
+                human_interaction_response: None,
                 id: assistant_message_id.clone(),
                 role: "assistant".to_string(),
                 content: String::new(),

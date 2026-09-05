@@ -18,7 +18,8 @@ import {
 import {
   EMPTY_HUMAN_INTERACTION_DRAFT,
   humanInteractionAnswers,
-  humanInteractionResponseDisplay
+  humanInteractionResponseDisplay,
+  selectHumanInteractionRequest
 } from './humanInteractionState'
 
 export interface UseHumanInteractionOptions {
@@ -60,7 +61,12 @@ export function useHumanInteraction({
     controller?.subscribe ?? emptySubscribe,
     controller?.getSnapshot ?? getEmptySnapshot
   )
-  const [approvalRefreshed, setApprovalRefreshed] = useState(false)
+  const [refreshedScope, setRefreshedScope] = useState<{
+    controller: HumanInteractionController
+    conversationId: string
+  } | null>(null)
+  const approvalRefreshed =
+    refreshedScope?.controller === controller && refreshedScope?.conversationId === conversationId
   const mountedRef = useRef(false)
   useLayoutEffect(() => {
     mountedRef.current = true
@@ -68,10 +74,10 @@ export function useHumanInteraction({
       mountedRef.current = false
     }
   }, [])
-  const accessRef = useRef({ conversationId, hasApproval, readOnly, approvalRefreshed })
+  const accessRef = useRef({ controller, conversationId, hasApproval, readOnly, approvalRefreshed })
   useLayoutEffect(() => {
-    accessRef.current = { conversationId, hasApproval, readOnly, approvalRefreshed }
-  }, [conversationId, hasApproval, readOnly, approvalRefreshed])
+    accessRef.current = { controller, conversationId, hasApproval, readOnly, approvalRefreshed }
+  }, [controller, conversationId, hasApproval, readOnly, approvalRefreshed])
   useEffect(() => controller?.connect(), [controller])
   const refresh = useCallback(async () => {
     if (controller && conversationId && !readOnly) {
@@ -80,30 +86,33 @@ export function useHumanInteraction({
       if (
         mountedRef.current &&
         succeeded &&
+        access.controller === controller &&
         access.conversationId === conversationId &&
         !access.hasApproval &&
         !access.readOnly
       )
-        setApprovalRefreshed(true)
+        setRefreshedScope({ controller, conversationId })
     }
   }, [controller, conversationId, readOnly])
   useEffect(() => {
-    setApprovalRefreshed(false)
+    setRefreshedScope(null)
     if (!hasApproval) void refresh()
   }, [hasApproval, refresh])
   useEffect(() => {
     const refreshVisible = () => {
       if (document.visibilityState !== 'hidden') void refresh()
     }
+    const unsubscribeResync = api?.onResync(() => void refresh())
     window.addEventListener('focus', refreshVisible)
     window.addEventListener('online', refreshVisible)
     document.addEventListener('visibilitychange', refreshVisible)
     return () => {
+      unsubscribeResync?.()
       window.removeEventListener('focus', refreshVisible)
       window.removeEventListener('online', refreshVisible)
       document.removeEventListener('visibilitychange', refreshVisible)
     }
-  }, [refresh])
+  }, [api, refresh])
   const requests = useMemo(
     () =>
       Object.values(state.requests)
@@ -113,23 +122,18 @@ export function useHumanInteraction({
   )
   const openRequests = requests.filter((request) => request.status === 'open')
   const blockingBatch = openRequests.find((request) => request.mode === 'sync') ?? null
-  const selectedId = conversationId ? state.selected[conversationId] : null
-  const selected = openRequests.find((request) => request.requestId === selectedId)
-  const asyncBatch = selected
-    ? state.minimized[selected.requestId]
-      ? null
-      : selected
-    : (openRequests.find(
-        (request) => request.mode === 'async' && !state.minimized[request.requestId]
-      ) ?? null)
-  const activeBatch =
-    readOnly || hasApproval || !approvalRefreshed ? null : (blockingBatch ?? asyncBatch)
+  const selectedBatch = selectHumanInteractionRequest(
+    requests,
+    conversationId ? state.selected[conversationId] : null,
+    state.minimized
+  )
+  const activeBatch = readOnly || hasApproval || !approvalRefreshed ? null : selectedBatch
   const activeDraft = activeBatch
     ? (state.drafts[activeBatch.requestId] ?? EMPTY_HUMAN_INTERACTION_DRAFT)
     : EMPTY_HUMAN_INTERACTION_DRAFT
   const operation = activeBatch ? state.operations[activeBatch.requestId] : null
   const canAccess = useCallback(
-    (requestId: string): boolean => {
+    (requestId: string, requireActive = true): boolean => {
       const current = controller?.getSnapshot()
       const access = accessRef.current
       const request = current?.requests[requestId]
@@ -141,9 +145,20 @@ export function useHumanInteraction({
             candidate.mode === 'sync' &&
             candidate.status === 'open'
         )
+      const selected =
+        current &&
+        selectHumanInteractionRequest(
+          Object.values(current.requests).filter(
+            (candidate) => candidate.conversationId === access.conversationId
+          ),
+          access.conversationId ? current.selected[access.conversationId] : null,
+          current.minimized
+        )
       return Boolean(
+        (!requireActive || selected?.requestId === requestId) &&
         mountedRef.current &&
         controller &&
+        access.controller === controller &&
         access.conversationId &&
         !access.readOnly &&
         !access.hasApproval &&
@@ -181,7 +196,7 @@ export function useHumanInteraction({
   )
   const open = useCallback(
     (requestId: string) => {
-      if (canAccess(requestId) && !blockingBatch) controller?.open(requestId)
+      if (canAccess(requestId, false) && !blockingBatch) controller?.open(requestId)
     },
     [canAccess, controller, blockingBatch]
   )

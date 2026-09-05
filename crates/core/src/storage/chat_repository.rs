@@ -1554,7 +1554,7 @@ fn list_messages(
         ",
     )?;
 
-    let messages = statement
+    let mut messages: Vec<ChatMessageRecord> = statement
         .query_map(params![conversation_id], |row| {
             let authoritative_usage = match row.get::<_, Option<String>>(7)? {
                 Some(run_id) => Some(AuthoritativeMessageUsage {
@@ -1584,6 +1584,7 @@ fn list_messages(
                 row.get::<_, Option<i64>>(16)?,
             );
             Ok(ChatMessageRecord {
+                human_interaction_response: None,
                 id: row.get(0)?,
                 role: row.get(1)?,
                 content,
@@ -1594,9 +1595,14 @@ fn list_messages(
                 ui_state_json: row.get(6)?,
             })
         })?
-        .collect();
+        .collect::<rusqlite::Result<_>>()?;
 
-    messages
+    super::human_interaction_repository::attach_message_projections(
+        connection,
+        conversation_id,
+        &mut messages,
+    )?;
+    Ok(messages)
 }
 
 fn list_persisted_messages(
@@ -1619,9 +1625,10 @@ fn list_persisted_messages(
          ORDER BY message.position ASC, message.created_at ASC",
     )?;
 
-    let messages = statement
+    let mut messages: Vec<ChatMessageRecord> = statement
         .query_map(params![conversation_id], |row| {
             Ok(ChatMessageRecord {
+                human_interaction_response: None,
                 id: row.get(0)?,
                 role: row.get(1)?,
                 content: row.get(2)?,
@@ -1632,8 +1639,13 @@ fn list_persisted_messages(
                 ui_state_json: row.get(6)?,
             })
         })?
-        .collect();
-    messages
+        .collect::<rusqlite::Result<_>>()?;
+    super::human_interaction_repository::attach_message_projections(
+        connection,
+        conversation_id,
+        &mut messages,
+    )?;
+    Ok(messages)
 }
 
 struct DurableTerminalRun {

@@ -281,6 +281,7 @@ async fn auto_mcp_invokes_only_after_hidden_durable_executing_journal_and_scrubs
             model_id: Some("test-model".to_string()),
             title: "Backend-owned automatic MCP".to_string(),
             messages: vec![ChatMessageRecord {
+                human_interaction_response: None,
                 id: "auto-mcp-assistant".to_string(),
                 role: "assistant".to_string(),
                 content: String::new(),
@@ -1306,6 +1307,7 @@ fn seed_durable_pending_owner(
             model_id: Some("test-model".to_string()),
             title: "Pending action recovery".to_string(),
             messages: vec![ChatMessageRecord {
+                human_interaction_response: None,
                 id: assistant_message_id.to_string(),
                 role: "assistant".to_string(),
                 content: String::new(),
@@ -1871,6 +1873,7 @@ fn seed_durable_mcp_pending_owner(
             model_id: Some("test-model".to_string()),
             title: "MCP pending action recovery".to_string(),
             messages: vec![ChatMessageRecord {
+                human_interaction_response: None,
                 id: assistant_message_id.to_string(),
                 role: "assistant".to_string(),
                 content: String::new(),
@@ -8269,6 +8272,7 @@ fn startup_reconciliation_failure_prevents_agent_service_startup() {
             model_id: Some("model-1".to_string()),
             title: "bad reconciliation".to_string(),
             messages: vec![ChatMessageRecord {
+                human_interaction_response: None,
                 id: "assistant-bad-reconciliation".to_string(),
                 role: "assistant".to_string(),
                 content: String::new(),
@@ -8383,6 +8387,7 @@ fn agent_service_startup_retires_an_orphaned_cancelled_conversation_trace() {
             model_id: Some("model-1".to_string()),
             title: "orphaned trace".to_string(),
             messages: vec![ChatMessageRecord {
+                human_interaction_response: None,
                 id: "assistant-orphaned-trace".to_string(),
                 role: "assistant".to_string(),
                 content: "partial response".to_string(),
@@ -9317,6 +9322,7 @@ async fn projected_child_skill_approval_atomically_resumes_wake_before_worker_ru
         }
     });
     conversation.messages.push(ChatMessageRecord {
+        human_interaction_response: None,
         id: assistant_message_id.to_string(),
         role: "assistant".to_string(),
         content: String::new(),
@@ -9865,6 +9871,7 @@ async fn child_approval_continuation_persists_waiting_to_running_before_runtime(
         .unwrap();
     let mut conversation = conversation.unwrap();
     conversation.messages.push(ChatMessageRecord {
+        human_interaction_response: None,
         id: assistant_message_id.to_string(),
         role: "assistant".to_string(),
         content: String::new(),
@@ -10823,6 +10830,7 @@ fn cancel_usage_failure_rolls_back_message_trace_and_action_together() {
             model_id: Some("model-1".to_string()),
             title: "Cancel usage failure".to_string(),
             messages: vec![ChatMessageRecord {
+                human_interaction_response: None,
                 id: "assistant-cancel-usage-failure".to_string(),
                 role: "assistant".to_string(),
                 content: String::new(),
@@ -10927,6 +10935,7 @@ fn cancelled_file_change_with_durable_abort_never_rolls_back_to_pending() {
             model_id: Some("model-1".to_string()),
             title: "FileChange cancel failure".to_string(),
             messages: vec![ChatMessageRecord {
+                human_interaction_response: None,
                 id: "assistant-file-change-cancel-failure".to_string(),
                 role: "assistant".to_string(),
                 content: String::new(),

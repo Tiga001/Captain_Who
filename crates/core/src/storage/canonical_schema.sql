@@ -6291,3 +6291,23 @@ BEGIN
     UPDATE agent_run_guidances SET status='abandoned',terminal_reason='Agent run was stopped before the answer was applied.',updated_at=MAX(updated_at,NEW.stopped_at)
     WHERE status='queued' AND guidance_id IN (SELECT guidance_id FROM human_interaction_async_bindings WHERE status='cancelled' AND (stop_scope_run_id=NEW.run_id OR target_run_id=NEW.run_id));
 END;
+
+-- v39 keeps answer display provenance independently of live delivery and source branches.
+CREATE TABLE human_interaction_message_projections (
+    message_id TEXT PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
+    request_id TEXT NOT NULL,
+    response_id TEXT NOT NULL,
+    content_json TEXT NOT NULL CHECK (json_valid(content_json))
+);
+CREATE TRIGGER human_interaction_message_projection_identity
+BEFORE UPDATE ON human_interaction_message_projections
+BEGIN SELECT RAISE(ABORT, 'human answer history proof is immutable'); END;
+CREATE TRIGGER human_interaction_message_projection_content
+BEFORE INSERT ON human_interaction_message_projections
+WHEN NOT EXISTS(SELECT 1 FROM messages WHERE id=NEW.message_id AND role='user' AND content=NEW.content_json)
+BEGIN SELECT RAISE(ABORT, 'human answer history proof requires its exact User message'); END;
+CREATE TRIGGER human_interaction_message_projection_message_immutable
+BEFORE UPDATE OF role,content ON messages
+WHEN (NEW.role IS NOT OLD.role OR NEW.content IS NOT OLD.content)
+ AND EXISTS(SELECT 1 FROM human_interaction_message_projections WHERE message_id=OLD.id)
+BEGIN SELECT RAISE(ABORT, 'human answer User content is immutable'); END;

@@ -10,6 +10,7 @@ fn guidance_conversation(
         model_id: Some("model-1".to_string()),
         title: "guidance".to_string(),
         messages: vec![ChatMessageRecord {
+            human_interaction_response: None,
             id: assistant_message_id.to_string(),
             role: "assistant".to_string(),
             content: "pending".to_string(),

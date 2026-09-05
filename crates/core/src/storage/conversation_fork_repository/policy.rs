@@ -32,6 +32,7 @@ const COPY_VISIBLE_HISTORY_TABLES: &[&str] = &[
     "conversation_turn_traces",
     "conversation_world_state_records",
     "messages",
+    "human_interaction_message_projections",
 ];
 
 const REINITIALIZE_TABLES: &[&str] = &[

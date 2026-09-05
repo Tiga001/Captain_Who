@@ -214,3 +214,52 @@ describe('Storage IPC bridge', () => {
     expect(invoke).toHaveBeenCalledWith('host:storage.saveComposerDraftMessage', input)
   })
 })
+
+describe('human answer proof at the isolated storage bridge', () => {
+  const response = {
+    type: 'human_interaction_response',
+    schemaVersion: 1,
+    requestId: 'request',
+    responseId: 'response',
+    answers: [{ kind: 'text', questionId: 'q', question: 'Which?', answer: 'Blue' }]
+  }
+  const message = {
+    id: 'answer',
+    role: 'user',
+    content: JSON.stringify(response),
+    createdAt: 1,
+    humanInteractionResponse: response
+  }
+  it('preserves verified output and rejects a malformed or foreign display receipt', async () => {
+    const value = { id: 'chat', title: 'chat', createdAt: 1, updatedAt: 1, messages: [message] }
+    const invoke = vi.fn().mockResolvedValue(value)
+    const bridge = createStorageIpcBridge({ invoke } as unknown as Pick<IpcRenderer, 'invoke'>)
+    await expect(bridge.loadConversation('chat')).resolves.toEqual(value)
+    invoke.mockResolvedValue({
+      ...value,
+      messages: [{ ...message, humanInteractionResponse: { ...response, responseId: 'foreign' } }]
+    })
+    await expect(bridge.loadConversation('chat')).rejects.toThrow('complete User content')
+  })
+  it('refuses caller-made proof on write before entering IPC', () => {
+    const invoke = vi.fn()
+    const bridge = createStorageIpcBridge({ invoke } as unknown as Pick<IpcRenderer, 'invoke'>)
+    for (const key of ['humanInteractionResponse', 'humanInteractionDisplay']) {
+      const message = { id: 'message', content: '{}', role: 'user', createdAt: 1, [key]: response }
+      expect(() =>
+        bridge.upsertChatMessages({
+          conversationId: 'chat',
+          messages: [message],
+          positionOffset: 0
+        })
+      ).toThrow('read-only')
+      expect(() => bridge.saveChatMessageState({ conversationId: 'chat', message })).toThrow(
+        'read-only'
+      )
+      expect(() => bridge.saveChatMessageUiState({ conversationId: 'chat', message })).toThrow(
+        'read-only'
+      )
+    }
+    expect(invoke).not.toHaveBeenCalled()
+  })
+})

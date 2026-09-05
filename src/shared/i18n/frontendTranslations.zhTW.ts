@@ -771,6 +771,7 @@ export const zhTWTranslations = {
   'skills.error.sourceChanged': '檢查期間技能來源發生了變化，請重新檢查。',
   'skills.error.sourceAuthorityExpired': '此技能來源選擇已失效，請重新解析來源。',
   'skills.error.acknowledgementRequired': '請先確認所有必要的安全提示。',
+  'skills.error.configurationRequired': '請先在「設定 → 配置 → 圖片生成」中儲存有效的 API 位址、模型和金鑰，再啟用此技能。',
   'skills.error.notManageable': '該技能不能在此頁面管理。',
   'skills.error.operationConflict': '該操作已發生變化，請重新開始。',
   'skills.error.cancelled': '操作已取消。',

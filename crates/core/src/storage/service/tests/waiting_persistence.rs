@@ -12,6 +12,7 @@ fn setup_waiting_turn(service: &StorageService) {
         "user-waiting-persistence",
     );
     record.messages.push(ChatMessageRecord {
+        human_interaction_response: None,
         id: ASSISTANT_MESSAGE_ID.to_string(),
         role: "assistant".to_string(),
         content: "original pending content".to_string(),

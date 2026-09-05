@@ -1,3 +1,8 @@
+import { renderSettingsNodes, settingLabel } from '../../settings/settingsDefinition'
+import {
+  skillManagementActions,
+  skillEnablementSettings
+} from '../../settings/pages/managementSettings.definition'
 // Renderer skills management UI: renders backend-authorized actions without inferring permissions.
 import { AlertTriangle, LoaderCircle, RefreshCw, Trash2 } from 'lucide-react'
 import type { SkillManagementEntry } from '@mycopilot/protocol'
@@ -28,6 +33,8 @@ export function SkillManagementList({
     <div className="skill-management-list">
       {orderedEntries.map((entry) => {
         const pendingOperation = pendingOperations.get(entry.id)
+        const enablementBlocked =
+          !entry.enabled && entry.enablementBlock === 'imageGenerationConfigurationRequired'
         const missingUpdateRevision = entry.actions.canUpdate && !entry.installationRevision
         const missingUninstallRevision = entry.actions.canUninstall && !entry.installationRevision
         const hasCompatibilityWarning =
@@ -75,32 +82,42 @@ export function SkillManagementList({
 
             <div className="skill-management-row__controls">
               <div className="skill-management-row__actions">
-                {entry.actions.canUpdate && (
-                  <button
-                    aria-label={replaceTokens(t('skills.updateNamed'), { name: presentation.name })}
-                    className="skill-row-action"
-                    disabled={Boolean(pendingOperation) || missingUpdateRevision}
-                    onClick={(event) => onUpdate(entry, event.currentTarget)}
-                    type="button"
-                  >
-                    <RefreshCw aria-hidden="true" />
-                    <span>{t('skills.update')}</span>
-                  </button>
-                )}
-                {entry.actions.canUninstall && (
-                  <button
-                    aria-label={replaceTokens(t('skills.uninstallNamed'), {
-                      name: presentation.name
-                    })}
-                    className="skill-row-action skill-row-action--danger"
-                    disabled={Boolean(pendingOperation) || missingUninstallRevision}
-                    onClick={() => onUninstall(entry)}
-                    type="button"
-                  >
-                    <Trash2 aria-hidden="true" />
-                    <span>{t('skills.uninstall')}</span>
-                  </button>
-                )}
+                {renderSettingsNodes(skillManagementActions, (node) => {
+                  switch (node.id) {
+                    case 'skills-update':
+                      return entry.actions.canUpdate ? (
+                        <button
+                          aria-label={replaceTokens(t('skills.updateNamed'), {
+                            name: presentation.name
+                          })}
+                          className="skill-row-action"
+                          disabled={Boolean(pendingOperation) || missingUpdateRevision}
+                          onClick={(event) => onUpdate(entry, event.currentTarget)}
+                          type="button"
+                        >
+                          <RefreshCw aria-hidden="true" />
+                          <span>{settingLabel(node, t)}</span>
+                        </button>
+                      ) : null
+                    case 'skills-uninstall':
+                      return entry.actions.canUninstall ? (
+                        <button
+                          aria-label={replaceTokens(t('skills.uninstallNamed'), {
+                            name: presentation.name
+                          })}
+                          className="skill-row-action skill-row-action--danger"
+                          disabled={Boolean(pendingOperation) || missingUninstallRevision}
+                          onClick={() => onUninstall(entry)}
+                          type="button"
+                        >
+                          <Trash2 aria-hidden="true" />
+                          <span>{settingLabel(node, t)}</span>
+                        </button>
+                      ) : null
+                    default:
+                      return null
+                  }
+                })}
               </div>
               {pendingOperation && (
                 <span
@@ -117,20 +134,23 @@ export function SkillManagementList({
                   <LoaderCircle aria-hidden="true" />
                 </span>
               )}
-              <button
-                aria-checked={entry.enabled}
-                aria-label={replaceTokens(t('skills.toggleEnabledNamed'), {
-                  name: presentation.name
-                })}
-                className="settings-switch"
-                data-state={entry.enabled ? 'on' : 'off'}
-                disabled={!entry.actions.canSetEnabled || Boolean(pendingOperation)}
-                onClick={() => onSetEnabled(entry, !entry.enabled)}
-                role="switch"
-                type="button"
-              >
-                <span className="settings-switch__thumb" aria-hidden="true" />
-              </button>
+              {renderSettingsNodes(skillEnablementSettings, (node) => (
+                <button
+                  aria-checked={entry.enabled}
+                  aria-disabled={enablementBlocked || undefined}
+                  aria-label={replaceTokens(settingLabel(node, t), {
+                    name: presentation.name
+                  })}
+                  className="settings-switch"
+                  data-state={entry.enabled ? 'on' : 'off'}
+                  disabled={!entry.actions.canSetEnabled || Boolean(pendingOperation)}
+                  onClick={() => onSetEnabled(entry, !entry.enabled)}
+                  role="switch"
+                  type="button"
+                >
+                  <span className="settings-switch__thumb" aria-hidden="true" />
+                </button>
+              ))}
             </div>
           </article>
         )

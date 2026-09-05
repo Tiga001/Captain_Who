@@ -1,3 +1,9 @@
+import {
+  renderSettingsNodes,
+  settingLabel,
+  settingDescription
+} from '../settings/settingsDefinition'
+import { mcpEditorSettings, mcpEditorSectionSettings } from './McpSettings.definition'
 import { FolderOpen, Plus, Trash2 } from 'lucide-react'
 import { useEffect, useId, useRef, useState } from 'react'
 import { MCP_MANAGEMENT_LIMITS, type McpServerDetailsView } from '@mycopilot/protocol'
@@ -92,156 +98,175 @@ export function McpServerEditor({
     setShowDiscard(true)
   }
 
-  return (
+  return renderSettingsNodes(mcpEditorSectionSettings, () => (
     <section aria-busy={busy || undefined} className="mcp-editor">
-      <div className="mcp-editor__field">
-        <label htmlFor={`${id}-name`}>{t('mcp.form.name')}</label>
-        <input
-          autoFocus
-          autoComplete="off"
-          id={`${id}-name`}
-          maxLength={MCP_MANAGEMENT_LIMITS.displayNameBytes}
-          onChange={(event) => {
-            const displayName = event.currentTarget.value
-            setDraft((current) => ({ ...current, displayName }))
-          }}
-          value={draft.displayName}
-        />
-      </div>
-
-      <div className="mcp-editor__field">
-        <span className="mcp-editor__label">{t('mcp.form.transport')}</span>
-        <div className="mcp-readonly-value">STDIO · {t('mcp.form.localProcess')}</div>
-      </div>
-
-      <div className="mcp-editor__field">
-        <label htmlFor={`${id}-executable`}>{t('mcp.form.executable')}</label>
-        <div className="mcp-path-field">
-          <input
-            autoComplete="off"
-            id={`${id}-executable`}
-            onChange={(event) => {
-              const executable = event.currentTarget.value
-              setDraft((current) => ({ ...current, executable }))
-            }}
-            spellCheck={false}
-            value={draft.executable}
-          />
-          <button
-            aria-label={t('mcp.form.chooseExecutable')}
-            disabled={busy}
-            onClick={() => void chooseExecutable()}
-            type="button"
-          >
-            <FolderOpen aria-hidden="true" />
-          </button>
-        </div>
-      </div>
-
-      <fieldset className="mcp-arguments-field">
-        <legend>{t('mcp.form.arguments')}</legend>
-        <div className="mcp-argument-list">
-          {draft.arguments.map((argument, index) => (
-            <div className="mcp-argument-row" key={index}>
-              <label className="mcp-visually-hidden" htmlFor={`${id}-argument-${index}`}>
-                {t('mcp.form.argument')} {index + 1}
-              </label>
-              <input
-                id={`${id}-argument-${index}`}
-                onChange={(event) => {
-                  const value = event.currentTarget.value
-                  setDraft((current) => ({
-                    ...current,
-                    arguments: current.arguments.map((item, itemIndex) =>
-                      itemIndex === index ? value : item
-                    )
-                  }))
-                }}
-                spellCheck={false}
-                value={argument}
-              />
-              <button
-                aria-label={`${t('mcp.form.removeArgument')} ${index + 1}`}
-                disabled={busy}
-                onClick={() =>
-                  setDraft((current) => ({
-                    ...current,
-                    arguments: current.arguments.filter((_, itemIndex) => itemIndex !== index)
-                  }))
-                }
-                type="button"
-              >
-                <Trash2 aria-hidden="true" />
-              </button>
-            </div>
-          ))}
-        </div>
-        <button
-          className="mcp-add-argument"
-          disabled={busy || draft.arguments.length >= MCP_MANAGEMENT_LIMITS.arguments}
-          onClick={() =>
-            setDraft((current) => ({ ...current, arguments: [...current.arguments, ''] }))
-          }
-          type="button"
-        >
-          <Plus aria-hidden="true" />
-          {t('mcp.form.addArgument')}
-        </button>
-      </fieldset>
-
-      <div className="mcp-editor__field">
-        <label htmlFor={`${id}-cwd`}>{t('mcp.form.cwd')}</label>
-        <div className="mcp-path-field">
-          <input
-            autoComplete="off"
-            id={`${id}-cwd`}
-            onChange={(event) => {
-              const cwd = event.currentTarget.value
-              setDraft((current) => ({ ...current, cwd }))
-            }}
-            spellCheck={false}
-            value={draft.cwd}
-          />
-          <button
-            aria-label={t('mcp.form.chooseCwd')}
-            disabled={busy}
-            onClick={() => void chooseWorkingDirectory()}
-            type="button"
-          >
-            <FolderOpen aria-hidden="true" />
-          </button>
-        </div>
-      </div>
-
-      <div className="mcp-auto-execute-row">
-        <div className="mcp-auto-execute-copy">
-          <label htmlFor={`${id}-auto-execute`}>
-            {t('mcp.form.autoExecute')}
-            {draft.approvalMode === 'deny' ? (
-              <small>{t('mcp.form.callsCurrentlyDenied')}</small>
-            ) : null}
-          </label>
-          <small>{t('mcp.form.toolApprovalHelp')}</small>
-        </div>
-        <button
-          aria-checked={draft.approvalMode === 'auto'}
-          aria-label={t('mcp.form.autoExecute')}
-          className="settings-switch"
-          data-state={draft.approvalMode === 'auto' ? 'on' : 'off'}
-          disabled={busy}
-          id={`${id}-auto-execute`}
-          onClick={() =>
-            setDraft((current) => ({
-              ...current,
-              approvalMode: current.approvalMode === 'auto' ? 'prompt' : 'auto'
-            }))
-          }
-          role="switch"
-          type="button"
-        >
-          <span aria-hidden="true" className="settings-switch__thumb" />
-        </button>
-      </div>
+      {renderSettingsNodes(mcpEditorSettings, (node) => {
+        switch (node.id) {
+          case 'mcp-server-name':
+            return (
+              <div className="mcp-editor__field">
+                <label htmlFor={`${id}-name`}>{settingLabel(node, t)}</label>
+                <input
+                  autoFocus
+                  autoComplete="off"
+                  id={`${id}-name`}
+                  maxLength={MCP_MANAGEMENT_LIMITS.displayNameBytes}
+                  onChange={(event) => {
+                    const displayName = event.currentTarget.value
+                    setDraft((current) => ({ ...current, displayName }))
+                  }}
+                  value={draft.displayName}
+                />
+              </div>
+            )
+          case 'mcp-server-transport':
+            return (
+              <div className="mcp-editor__field">
+                <span className="mcp-editor__label">{settingLabel(node, t)}</span>
+                <div className="mcp-readonly-value">STDIO · {t('mcp.form.localProcess')}</div>
+              </div>
+            )
+          case 'mcp-server-executable':
+            return (
+              <div className="mcp-editor__field">
+                <label htmlFor={`${id}-executable`}>{settingLabel(node, t)}</label>
+                <div className="mcp-path-field">
+                  <input
+                    autoComplete="off"
+                    id={`${id}-executable`}
+                    onChange={(event) => {
+                      const executable = event.currentTarget.value
+                      setDraft((current) => ({ ...current, executable }))
+                    }}
+                    spellCheck={false}
+                    value={draft.executable}
+                  />
+                  <button
+                    aria-label={t('mcp.form.chooseExecutable')}
+                    disabled={busy}
+                    onClick={() => void chooseExecutable()}
+                    type="button"
+                  >
+                    <FolderOpen aria-hidden="true" />
+                  </button>
+                </div>
+              </div>
+            )
+          case 'mcp-server-arguments':
+            return (
+              <fieldset className="mcp-arguments-field">
+                <legend>{settingLabel(node, t)}</legend>
+                <div className="mcp-argument-list">
+                  {draft.arguments.map((argument, index) => (
+                    <div className="mcp-argument-row" key={index}>
+                      <label className="mcp-visually-hidden" htmlFor={`${id}-argument-${index}`}>
+                        {t('mcp.form.argument')} {index + 1}
+                      </label>
+                      <input
+                        id={`${id}-argument-${index}`}
+                        onChange={(event) => {
+                          const value = event.currentTarget.value
+                          setDraft((current) => ({
+                            ...current,
+                            arguments: current.arguments.map((item, itemIndex) =>
+                              itemIndex === index ? value : item
+                            )
+                          }))
+                        }}
+                        spellCheck={false}
+                        value={argument}
+                      />
+                      <button
+                        aria-label={`${t('mcp.form.removeArgument')} ${index + 1}`}
+                        disabled={busy}
+                        onClick={() =>
+                          setDraft((current) => ({
+                            ...current,
+                            arguments: current.arguments.filter(
+                              (_, itemIndex) => itemIndex !== index
+                            )
+                          }))
+                        }
+                        type="button"
+                      >
+                        <Trash2 aria-hidden="true" />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+                <button
+                  className="mcp-add-argument"
+                  disabled={busy || draft.arguments.length >= MCP_MANAGEMENT_LIMITS.arguments}
+                  onClick={() =>
+                    setDraft((current) => ({ ...current, arguments: [...current.arguments, ''] }))
+                  }
+                  type="button"
+                >
+                  <Plus aria-hidden="true" />
+                  {t('mcp.form.addArgument')}
+                </button>
+              </fieldset>
+            )
+          case 'mcp-server-cwd':
+            return (
+              <div className="mcp-editor__field">
+                <label htmlFor={`${id}-cwd`}>{settingLabel(node, t)}</label>
+                <div className="mcp-path-field">
+                  <input
+                    autoComplete="off"
+                    id={`${id}-cwd`}
+                    onChange={(event) => {
+                      const cwd = event.currentTarget.value
+                      setDraft((current) => ({ ...current, cwd }))
+                    }}
+                    spellCheck={false}
+                    value={draft.cwd}
+                  />
+                  <button
+                    aria-label={t('mcp.form.chooseCwd')}
+                    disabled={busy}
+                    onClick={() => void chooseWorkingDirectory()}
+                    type="button"
+                  >
+                    <FolderOpen aria-hidden="true" />
+                  </button>
+                </div>
+              </div>
+            )
+          case 'mcp-server-auto-execute':
+            return (
+              <div className="mcp-auto-execute-row">
+                <div className="mcp-auto-execute-copy">
+                  <label htmlFor={`${id}-auto-execute`}>
+                    {settingLabel(node, t)}
+                    {draft.approvalMode === 'deny' ? (
+                      <small>{t('mcp.form.callsCurrentlyDenied')}</small>
+                    ) : null}
+                  </label>
+                  <small>{settingDescription(node, t)}</small>
+                </div>
+                <button
+                  aria-checked={draft.approvalMode === 'auto'}
+                  aria-label={settingLabel(node, t)}
+                  className="settings-switch"
+                  data-state={draft.approvalMode === 'auto' ? 'on' : 'off'}
+                  disabled={busy}
+                  id={`${id}-auto-execute`}
+                  onClick={() =>
+                    setDraft((current) => ({
+                      ...current,
+                      approvalMode: current.approvalMode === 'auto' ? 'prompt' : 'auto'
+                    }))
+                  }
+                  role="switch"
+                  type="button"
+                >
+                  <span aria-hidden="true" className="settings-switch__thumb" />
+                </button>
+              </div>
+            )
+        }
+      })}
 
       {launchChanged && (
         <div className="mcp-reauthorization-warning" role="alert">
@@ -306,7 +331,7 @@ export function McpServerEditor({
         />
       )}
     </section>
-  )
+  ))
 }
 
 function draftFromServer(server?: McpServerDetailsView): McpServerDraft {

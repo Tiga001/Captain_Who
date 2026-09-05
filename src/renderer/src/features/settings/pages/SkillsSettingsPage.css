@@ -200,6 +200,11 @@
   opacity: 0.48;
 }
 
+.skill-management-row .settings-switch[aria-disabled='true'] {
+  cursor: not-allowed;
+  opacity: 0.48;
+}
+
 .skill-row-pending {
   display: grid;
   width: 20px;

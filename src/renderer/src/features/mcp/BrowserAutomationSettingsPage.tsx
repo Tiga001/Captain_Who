@@ -1,3 +1,15 @@
+import {
+  renderSettingsNodes,
+  settingLabel,
+  settingDescription
+} from '../settings/settingsDefinition'
+import { useSettingsPageNavigation } from '../settings/settingsSearchNavigation'
+import {
+  browserSettings,
+  browserAutomationSettings,
+  browserGeneralSettings,
+  browserDownloadSettings
+} from './BrowserAutomationSettings.definition'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type {
   BrowserDownloadSettingsView,
@@ -55,7 +67,7 @@ export function BrowserAutomationSettingsPage({
     (capability) => capability.capabilityId === 'browser_automation'
   )
   const browserAutomationPending = pendingBuiltinCapabilities.has('browser_automation')
-  const browserAutomationName = t('mcp.builtin.browserAutomation.name')
+  const browserAutomationName = settingLabel(browserAutomationSettings[0], t)
   const browserAutomationError = builtinState.errorMessage
     ? toSafeMcpDisplayText(builtinState.errorMessage, 256)
     : builtinState.status === 'error'
@@ -75,6 +87,21 @@ export function BrowserAutomationSettingsPage({
   )
 
   useEffect(() => setView(initialView), [initialView])
+
+  useSettingsPageNavigation('browser', (target) => {
+    if (target.view === 'clearData') {
+      setView('settings')
+      setClearDialogOpen(true)
+      return
+    }
+    if (
+      target.view === 'history' ||
+      target.view === 'downloadHistory' ||
+      target.view === 'settings'
+    ) {
+      setView(target.view)
+    }
+  })
 
   useEffect(() => {
     if (initialLoadStarted.current) return
@@ -169,186 +196,225 @@ export function BrowserAutomationSettingsPage({
         <p className="settings-list-page__description">{t('mcp.browserDownloads.description')}</p>
       </header>
 
-      <section aria-label={browserAutomationName} className="browser-automation-preference">
-        <div className="browser-download-preferences">
-          <div
-            aria-busy={browserAutomationPending || undefined}
-            className="browser-download-preference-row browser-download-preference-row--compact"
-          >
-            <div className="browser-download-preference-row__copy">
-              <strong>{browserAutomationName}</strong>
-              <p data-error={browserAutomationError ? 'true' : undefined}>
-                {browserAutomationError ??
-                  (builtinState.status === 'loading'
-                    ? t('mcp.builtin.loading')
-                    : t('mcp.builtin.browserAutomation.description'))}
-              </p>
-            </div>
-            <div className="browser-automation-preference__actions">
-              {browserAutomationError && (
-                <button
-                  className="mcp-secondary-button"
-                  onClick={() => void refreshBuiltinCapabilities(true)}
-                  type="button"
-                >
-                  {t('mcp.actions.retry')}
-                </button>
-              )}
-              <button
-                aria-checked={browserAutomationCapability?.userAllowed ?? false}
-                aria-label={t('mcp.builtin.toggleNamed').replaceAll(
-                  '{name}',
-                  browserAutomationName
-                )}
-                className="settings-switch"
-                data-state={browserAutomationCapability?.userAllowed ? 'on' : 'off'}
-                disabled={!browserAutomationCapability || browserAutomationPending}
-                onClick={() => void setBrowserAutomationAllowed()}
-                role="switch"
-                type="button"
-              >
-                <span aria-hidden="true" className="settings-switch__thumb" />
-              </button>
-            </div>
-          </div>
-        </div>
-      </section>
-
-      <section className="mcp-settings-section" aria-labelledby="browser-general-section">
-        <h2 id="browser-general-section">{t('mcp.browserData.general')}</h2>
-        <div className="browser-download-preferences">
-          <div className="browser-download-preference-row">
-            <div className="browser-download-preference-row__copy">
-              <strong>{t('mcp.browserData.linkTarget')}</strong>
-              <p>{t('mcp.browserData.linkTargetDescription')}</p>
-            </div>
-            <SettingsSelect
-              ariaLabel={t('mcp.browserData.linkTarget')}
-              className="browser-link-target-select"
-              disabled={browserMutating || !browserPreferences}
-              onChange={(value) => void setLinkTarget(value)}
-              options={linkTargetOptions}
-              value={browserPreferences?.linkOpenTarget ?? 'system'}
-            />
-          </div>
-
-          <div className="browser-download-preference-row">
-            <div className="browser-download-preference-row__copy">
-              <strong>{t('mcp.browserData.data')}</strong>
-              <p>{t('mcp.browserData.dataDescription')}</p>
-            </div>
-            <button
-              className="mcp-secondary-button"
-              onClick={() => setClearDialogOpen(true)}
-              type="button"
-            >
-              {t('browser.clearBrowsingData')}
-            </button>
-          </div>
-
-          <div className="browser-download-preference-row">
-            <div className="browser-download-preference-row__copy">
-              <strong>{t('browser.history')}</strong>
-              <p>{t('mcp.browserData.historyDescription')}</p>
-            </div>
-            <button
-              className="mcp-secondary-button"
-              onClick={() => setView('history')}
-              type="button"
-            >
-              {t('mcp.browserDownloads.manage')}
-            </button>
-          </div>
-        </div>
-      </section>
-
-      <section className="mcp-settings-section" aria-labelledby="browser-download-section">
-        <h2 id="browser-download-section">{t('mcp.browserDownloads.section')}</h2>
-        <div className="browser-download-preferences">
-          <div className="browser-download-preference-row">
-            <div className="browser-download-preference-row__copy">
-              <strong>{t('mcp.browserDownloads.location')}</strong>
-              <p
-                className={
-                  downloadSettings?.locationMode === 'custom'
-                    ? 'browser-download-preference-row__location browser-download-preference-row__location--custom'
-                    : 'browser-download-preference-row__location'
-                }
-                title={
-                  downloadSettings?.locationMode === 'custom'
-                    ? downloadSettings.displayPath
-                    : undefined
-                }
-              >
-                {downloadSettings ? (
-                  downloadSettings.locationMode === 'custom' ? (
-                    <bdi dir="ltr">{downloadSettings.displayPath}</bdi>
-                  ) : (
-                    t('mcp.browserDownloads.systemLocation')
-                  )
-                ) : (
-                  t('mcp.browserDownloads.loading')
-                )}
-              </p>
-            </div>
-            <div className="browser-download-preference-row__actions">
-              {downloadSettings?.locationMode === 'custom' && (
-                <button
-                  className="mcp-secondary-button"
-                  disabled={downloadMutating}
-                  onClick={() => void mutateDownloadSettings(resetBrowserDownloadDirectory)}
-                  type="button"
-                >
-                  {t('mcp.browserDownloads.useSystemLocation')}
-                </button>
-              )}
-              <button
-                className="mcp-secondary-button"
-                disabled={downloadMutating}
-                onClick={() => void mutateDownloadSettings(chooseBrowserDownloadDirectory)}
-                type="button"
-              >
-                {t('mcp.browserDownloads.changeLocation')}
-              </button>
-            </div>
-          </div>
-
-          <div className="browser-download-preference-row browser-download-preference-row--compact">
-            <div className="browser-download-preference-row__copy">
-              <strong>{t('mcp.browserDownloads.askWhereToSave')}</strong>
-            </div>
-            <button
-              aria-checked={downloadSettings?.askWhereToSave ?? false}
-              aria-label={t('mcp.browserDownloads.askWhereToSave')}
-              className="settings-switch"
-              data-state={downloadSettings?.askWhereToSave ? 'on' : 'off'}
-              disabled={downloadMutating || !downloadSettings}
-              onClick={() =>
-                void mutateDownloadSettings(() =>
-                  setBrowserDownloadAskWhereToSave(!downloadSettings?.askWhereToSave)
-                )
-              }
-              role="switch"
-              type="button"
-            >
-              <span aria-hidden="true" className="settings-switch__thumb" />
-            </button>
-          </div>
-
-          <div className="browser-download-preference-row browser-download-preference-row--compact">
-            <div className="browser-download-preference-row__copy">
-              <strong>{t('mcp.browserDownloads.history')}</strong>
-            </div>
-            <button
-              className="mcp-secondary-button"
-              onClick={() => setView('downloadHistory')}
-              type="button"
-            >
-              {t('mcp.browserDownloads.manage')}
-            </button>
-          </div>
-        </div>
-      </section>
+      {renderSettingsNodes(browserSettings, (node) => {
+        switch (node.id) {
+          case 'browser-automation':
+            return (
+              <section aria-label={browserAutomationName} className="browser-automation-preference">
+                <div className="browser-download-preferences">
+                  <div
+                    aria-busy={browserAutomationPending || undefined}
+                    className="browser-download-preference-row browser-download-preference-row--compact"
+                  >
+                    <div className="browser-download-preference-row__copy">
+                      <strong>{browserAutomationName}</strong>
+                      <p data-error={browserAutomationError ? 'true' : undefined}>
+                        {browserAutomationError ??
+                          (builtinState.status === 'loading'
+                            ? t('mcp.builtin.loading')
+                            : settingDescription(node, t))}
+                      </p>
+                    </div>
+                    <div className="browser-automation-preference__actions">
+                      {browserAutomationError && (
+                        <button
+                          className="mcp-secondary-button"
+                          onClick={() => void refreshBuiltinCapabilities(true)}
+                          type="button"
+                        >
+                          {t('mcp.actions.retry')}
+                        </button>
+                      )}
+                      <button
+                        aria-checked={browserAutomationCapability?.userAllowed ?? false}
+                        aria-label={t('mcp.builtin.toggleNamed').replaceAll(
+                          '{name}',
+                          browserAutomationName
+                        )}
+                        className="settings-switch"
+                        data-state={browserAutomationCapability?.userAllowed ? 'on' : 'off'}
+                        disabled={!browserAutomationCapability || browserAutomationPending}
+                        onClick={() => void setBrowserAutomationAllowed()}
+                        role="switch"
+                        type="button"
+                      >
+                        <span aria-hidden="true" className="settings-switch__thumb" />
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </section>
+            )
+          case 'browser-general':
+            return (
+              <section className="mcp-settings-section" aria-labelledby="browser-general-section">
+                <h2 id="browser-general-section">{settingLabel(node, t)}</h2>
+                <div className="browser-download-preferences">
+                  {renderSettingsNodes(browserGeneralSettings, (item) => {
+                    switch (item.id) {
+                      case 'browser-link-target':
+                        return (
+                          <div className="browser-download-preference-row">
+                            <div className="browser-download-preference-row__copy">
+                              <strong>{settingLabel(item, t)}</strong>
+                              <p>{settingDescription(item, t)}</p>
+                            </div>
+                            <SettingsSelect
+                              ariaLabel={settingLabel(item, t)}
+                              className="browser-link-target-select"
+                              disabled={browserMutating || !browserPreferences}
+                              onChange={(value) => void setLinkTarget(value)}
+                              options={linkTargetOptions}
+                              value={browserPreferences?.linkOpenTarget ?? 'system'}
+                            />
+                          </div>
+                        )
+                      case 'browser-data':
+                        return (
+                          <div className="browser-download-preference-row">
+                            <div className="browser-download-preference-row__copy">
+                              <strong>{settingLabel(item, t)}</strong>
+                              <p>{settingDescription(item, t)}</p>
+                            </div>
+                            <button
+                              className="mcp-secondary-button"
+                              onClick={() => setClearDialogOpen(true)}
+                              type="button"
+                            >
+                              {t('browser.clearBrowsingData')}
+                            </button>
+                          </div>
+                        )
+                      case 'browser-history':
+                        return (
+                          <div className="browser-download-preference-row">
+                            <div className="browser-download-preference-row__copy">
+                              <strong>{settingLabel(item, t)}</strong>
+                              <p>{settingDescription(item, t)}</p>
+                            </div>
+                            <button
+                              className="mcp-secondary-button"
+                              onClick={() => setView('history')}
+                              type="button"
+                            >
+                              {t('mcp.browserDownloads.manage')}
+                            </button>
+                          </div>
+                        )
+                    }
+                  })}
+                </div>
+              </section>
+            )
+          case 'browser-downloads':
+            return (
+              <section className="mcp-settings-section" aria-labelledby="browser-download-section">
+                <h2 id="browser-download-section">{settingLabel(node, t)}</h2>
+                <div className="browser-download-preferences">
+                  {renderSettingsNodes(browserDownloadSettings, (item) => {
+                    switch (item.id) {
+                      case 'browser-download-location':
+                        return (
+                          <div className="browser-download-preference-row">
+                            <div className="browser-download-preference-row__copy">
+                              <strong>{settingLabel(item, t)}</strong>
+                              <p
+                                className={
+                                  downloadSettings?.locationMode === 'custom'
+                                    ? 'browser-download-preference-row__location browser-download-preference-row__location--custom'
+                                    : 'browser-download-preference-row__location'
+                                }
+                                title={
+                                  downloadSettings?.locationMode === 'custom'
+                                    ? downloadSettings.displayPath
+                                    : undefined
+                                }
+                              >
+                                {downloadSettings ? (
+                                  downloadSettings.locationMode === 'custom' ? (
+                                    <bdi dir="ltr">{downloadSettings.displayPath}</bdi>
+                                  ) : (
+                                    t('mcp.browserDownloads.systemLocation')
+                                  )
+                                ) : (
+                                  t('mcp.browserDownloads.loading')
+                                )}
+                              </p>
+                            </div>
+                            <div className="browser-download-preference-row__actions">
+                              {downloadSettings?.locationMode === 'custom' && (
+                                <button
+                                  className="mcp-secondary-button"
+                                  disabled={downloadMutating}
+                                  onClick={() =>
+                                    void mutateDownloadSettings(resetBrowserDownloadDirectory)
+                                  }
+                                  type="button"
+                                >
+                                  {t('mcp.browserDownloads.useSystemLocation')}
+                                </button>
+                              )}
+                              <button
+                                className="mcp-secondary-button"
+                                disabled={downloadMutating}
+                                onClick={() =>
+                                  void mutateDownloadSettings(chooseBrowserDownloadDirectory)
+                                }
+                                type="button"
+                              >
+                                {t('mcp.browserDownloads.changeLocation')}
+                              </button>
+                            </div>
+                          </div>
+                        )
+                      case 'browser-download-ask-where':
+                        return (
+                          <div className="browser-download-preference-row browser-download-preference-row--compact">
+                            <div className="browser-download-preference-row__copy">
+                              <strong>{settingLabel(item, t)}</strong>
+                            </div>
+                            <button
+                              aria-checked={downloadSettings?.askWhereToSave ?? false}
+                              aria-label={settingLabel(item, t)}
+                              className="settings-switch"
+                              data-state={downloadSettings?.askWhereToSave ? 'on' : 'off'}
+                              disabled={downloadMutating || !downloadSettings}
+                              onClick={() =>
+                                void mutateDownloadSettings(() =>
+                                  setBrowserDownloadAskWhereToSave(
+                                    !downloadSettings?.askWhereToSave
+                                  )
+                                )
+                              }
+                              role="switch"
+                              type="button"
+                            >
+                              <span aria-hidden="true" className="settings-switch__thumb" />
+                            </button>
+                          </div>
+                        )
+                      case 'browser-download-history':
+                        return (
+                          <div className="browser-download-preference-row browser-download-preference-row--compact">
+                            <div className="browser-download-preference-row__copy">
+                              <strong>{settingLabel(item, t)}</strong>
+                            </div>
+                            <button
+                              className="mcp-secondary-button"
+                              onClick={() => setView('downloadHistory')}
+                              type="button"
+                            >
+                              {t('mcp.browserDownloads.manage')}
+                            </button>
+                          </div>
+                        )
+                    }
+                  })}
+                </div>
+              </section>
+            )
+        }
+      })}
 
       {clearDialogOpen && <ClearBrowsingDataDialog onClose={() => setClearDialogOpen(false)} />}
     </article>

@@ -696,6 +696,10 @@ pub struct ProjectRecord {
 #[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct ChatMessageRecord {
+    /// Output-only history proof. Only native answer admission and fork copying may create it.
+    #[serde(default, skip_deserializing, skip_serializing_if = "Option::is_none")]
+    pub human_interaction_response:
+        Option<crate::human_interaction::HumanInteractionResponseDisplay>,
     pub id: String,
     pub role: String,
     pub content: String,

@@ -7,7 +7,7 @@ last_verified: 2026-09-05
 
 # 向用户提问：设计与实施进度
 
-本文记录完整产品契约及分轮交付状态。前两轮完成基础设施与阻塞式提问；第 3 轮接入异步工具、多批次回答及可靠投递。第 4 轮接入独立设置、分页面板、抢占协调和问答气泡；第 5 轮待做整体验收。
+本文记录完整产品契约及分轮交付状态。前两轮完成基础设施与阻塞式提问；第 3 轮接入异步工具、多批次回答及可靠投递。第 4 轮接入独立设置、分页面板、抢占协调和问答气泡；第 5 轮完成跨层验收、问题修复、schema v39 和开发/用户文档交付；实际测试与未验证边界见文末。
 
 ## 产品契约
 
@@ -20,9 +20,8 @@ last_verified: 2026-09-05
 - 关闭只阻止新提问，已有问题仍可提交或忽略。创建问题与关闭设置在同一数据库写事务边界裁定先后。
 - 每题一页，不设置产品题数上限。允许多个未结束的异步批次，一次工具调用对应一批问题。
   整体请求字节数、字段长度和输入合法性仍有技术限制。
-- 每题在选项、非空自由文字、“不回答”之间选择；提交前可以修改，全部处理后统一提交。
-- 顶部前后箭头翻页。底部“不回答”取代原“上一题”位置，右侧始终为“提交”，
-  条件未满足时置灰，满足时采用消息发送按钮的可点击样式。翻页只更新草稿。
+- 每题在选项、非空自由文字、“跳过”之间选择；选择跳过后按钮显示“已跳过”。提交前可以修改，全部处理后统一提交。
+- 顶部前后箭头翻页。底部“跳过”只标记当前题，右侧未完成整批时为“下一题”，当前题有效后定位下一个未处理题（可回绕）；全部有效后切换“提交”。翻页只更新草稿。
 - 展示优先级为审批 > 阻塞提问 > 非阻塞提问。审批期间不允许切回提问；结束后读取权威状态，
   恢复尚未提交批次的页码与草稿。阻塞提问抢占异步；新的异步批次优先展示，旧批次保留。
 - 非阻塞面板右上角可以最小化。Timeline 每个批次只有一个重开入口，不按题创建入口。
@@ -115,9 +114,9 @@ Fork 只复制边界内历史，不复制活跃提问权限和投递任务；异
 不新增旧数据迁移 SQL，不提供旧 checkpoint/resume envelope 兼容。新版本自身的持久化、
 重启恢复与防重仍必须实现。测试使用临时数据库，不清空真实开发数据或凭据。
 
-Canonical SQLite 版本为 v38。正常打开旧库只返回 reset-required，不改写旧库。
-受管 reset 可从受支持的 exact 旧指纹读取配置白名单后新建 v38，丢弃聊天/运行历史，保留模型配置和凭据
-引用；受支持的 exact v36/v37 与 current v38 reset 还保留人机交互设置及 revision。无法安全识别且含配置的旧库拒绝
+Canonical SQLite 版本为 v39。正常打开旧库只返回 reset-required，不改写旧库。
+受管 reset 可从受支持的 exact 旧指纹读取配置白名单后新建 v39，丢弃聊天/运行历史，保留模型配置和凭据
+引用；受支持的 exact v36/v37/v38 与 current v39 reset 还保留人机交互设置及 revision。无法安全识别且含配置的旧库拒绝
 重置，不能默默用默认值替换配置。既有 exact v33 私有备份配置恢复仍受 fingerprint 限制。
 
 ## 代码接续入口
@@ -138,7 +137,7 @@ Canonical SQLite 版本为 v38。正常打开旧库只返回 reset-required，�
 | 2    | 阻塞工具、暂停恢复、用量、取消与重启                  | 已完成（2026-09-05） |
 | 3    | 异步工具、多批次投递、空闲续接、忽略                  | 已完成（2026-09-05） |
 | 4    | 个性化开关、分页面板、抢占、最小化与问答气泡          | 已完成（2026-09-05） |
-| 5    | 跨层验收、修整、开发及用户文档                        | 未开始               |
+| 5    | 跨层验收、修整、开发及用户文档                        | 已完成（2026-09-05） |
 
 当前提交接口先保存回答，再由 Host 选择原同步调用恢复、异步 steering 或正常后续 Run；返回 submitted 不代表已 applied。
 两个工具及设置页、答题面板均已接入真实 Host；前端不能直接 startTurn 绕过投递协调。
@@ -434,14 +433,14 @@ Main 将 Core Server 启动/重连生命周期转为独立 `humanInteraction.onR
 是纯受控展示组件，不调用模型或伪造 Host 成功。字号、边框、颜色、圆角、间距与当前审批框变量一致，
 没有修改审批框原样式。长问题和选项在面板内容区滚动，页数不做产品上限。
 
-顶部箭头翻页；异步右上角是最小化；底部异步左侧“忽略全部”，右侧“不回答”和“提交”。
-三种答案互斥，整批完整时提交才可用；翻页不发送答案。输入框保留 Enter 换行、IME 确认，Escape 不上冒到
+顶部箭头翻页；异步右上角是最小化；底部异步左侧“忽略全部”，右侧“跳过／已跳过”和“下一题／提交”。
+三种答案互斥，整批完整时才切换为提交；翻页不发送答案。自定义回答为同行单行输入，Enter 不提交，IME 正常确认，Escape 不上冒到
 停止/审批处理。进行中的结算禁用重复动作，未知结果保持原答案用于安全重试。
 
 [`ConversationSurface.tsx`](../../src/renderer/src/features/chat/ConversationSurface.tsx)
 协调根审批和协作审批 > 同步提问 > 异步提问。审批独占时所有问题入口不可操作；同步提问也阻止异步入口抢占。
 异步按创建 sequence 后来者优先，手动打开旧批次只改变面板选择；提交顺序仍完全由 Host 接纳序号决定。
-每批在其所属 assistant 时间线旁只有一个入口，折叠运行详情也可以找到；成功提交或忽略后入口立即撤下。
+每批在所属 assistant 原工具调用位置有一个“交互 · 共 N 题”入口，位于调用前后正文之间，折叠运行详情不改变顺序；成功提交或忽略后入口立即撤下。
 子 Agent observer 不查询待答批次、不展示操作入口。
 
 [`humanInteractionPresentation.ts`](../../src/renderer/src/features/humanInteraction/humanInteractionPresentation.ts)
@@ -486,10 +485,86 @@ Host 回答被拒收或需要重新选择投递路径时，不进入原 Composer
 两张 PNG 分别与当前工作区失败输出具有完全相同的 SHA-256，因此记录为已有问题；没有修改其测试断言或审批样式。
 临时 checkout 已清理，测试覆盖写入的既有截图已恢复。此项不计入上述通过的本轮专项检查。
 
-本轮已停止于前端交付，没有执行打包 Electron 的全套人工验收。第 5 轮仍未开始，待验收：
+本轮已停止于前端交付，没有执行打包 Electron 的全套人工验收。以下是进入第 5 轮时的待验收清单，最终结果见文末：
 
 1. 打包 Electron 窗口中的完整父智能体工具调用→审批/提问交替→提交→正常后续运行；跨 Provider 的工具与专项提示词动态一致。
 2. 多窗口、Core Server 重启和客户端重开组合验收：未答批次、已提交未投递、恢复领取中、Stop 围栏与删除竞争。
 3. 同步/异步答案经过压缩、latest fork、重启历史恢复后仍唯一进入模型；独立用量及 Run 用量不重复。
 4. 子 Agent 所有层级和无人值守任务继续无提问能力；关闭开关后旧问题仍可结算。
 5. 整体验收发现的问题修整，更新面向用户的操作说明和最终验收矩阵。
+
+## 第 5 轮：最终验收与修复
+
+本轮从实际代码和测试重新验收，沿用前四轮产品契约。全部验证使用临时数据库、本地可控 Provider 或测试专用 transport；未打开或重置实际开发聊天库，也未修改真实模型配置或 API 凭据。
+
+### 实际修复
+
+1. **同步恢复领取失效后的无 worker 接收队列**：将活跃控制注册移动到所有可失败准备和持久执行 CAS 成功后。准备失败且已确认原 Run 持久终结时，调度其他已经保存的异步回答，避免答案被遗留在无 worker 的队列。可控断点在修复前明确复现失败，修复后覆盖领取撤销和真实 Stop。
+2. **问答历史的可信展示来源**：新增纯历史 `human_interaction_message_projections`。空闲异步答案 User 与证明同事务写入；消息读取返回只读 `humanInteractionResponse`，内容必须与原 User JSON 一致。Main/Preload 拒绝在消息保存接口提交证明，native 写入也不能授予该来源。普通用户碰巧输入问答 JSON、通用历史 snapshot、伪造元数据均不能成为正式答复。
+3. **分支保留权威文字与来源**：仅复制可见消息对应的纯历史证明并重映射外围消息身份，不复制待答问题、投递、挂起、权限或用量。完整冻结问答对象不参与通用字符串 ID 替换，答案恰好等于旧 Run/message/call ID 时仍保持原文。
+4. **恢复和前端迟到状态**：独立重连查询成功后再恢复操作；Host 切换和新批次抢占后的旧回调不能改写已失去控制权的批次。Host 创建 User 已到达而投递回执尚未到达时，仍以可信历史证明渲染并保留普通 Composer 草稿、附件。
+5. **保留回答标识与子历史继承**：公开 `steerRun` 拒绝 `human-answer-` 保留前缀，拒绝时不发布可被误认成正式回答的 Guidance 事件。内部回答仍经可信投递路径正常入队；所有子 Agent 的上下文快照只复制已验证的历史证明，不复制提问权限。
+6. **同一回答的恢复证明**：同步消费证明同时核对原调用的 trace、模型上下文和完整问答结果；仅有相似工具名或缺少正文对应关系不算已投递。
+
+Canonical schema 升为 **v39**，fingerprint 为 `sha256:993ab20442c1e258798e8d07bec6922cc46d11bf6a633ceb3cac2a6b80b23078`。
+开发 reset 支持 exact v38 配置提取到全新 v39，保留模型/凭据引用和独立人机交互设置，丢弃旧聊天/运行/问答。没有旧聊天迁移和旧检查点兼容链路。
+
+### 验收分层与实际边界
+
+| 范围                        | 实际验证入口                                                              | 覆盖的关键条件                                                                                                                                                                    |
+| --------------------------- | ------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Harness 工具与能力          | `runtime::tests::human_interaction`                                       | 同请求 schema/提示词/能力一致；开关开关再开；普通根可用，直接子、深层子、拥有后代的子及 Automation 均拒绝                                                                         |
+| Core Server 与真实 Provider | `application::agent::tests::human_input`                                  | 同步唯一 ToolResult/原 Run/有序剩余工具；连续同步与真实审批交替；快速回答/停止/重启/领取竞态；异步多批、safe steering、active→idle、忽略与独立用量                                |
+| Storage/历史                | `human_interaction_repository`、fork/context/reset 专项及 workspace tests | CAS/幂等、完整答案证明、历史分支和压缩、源删除/嵌套分支、新库与 exact 旧开发配置 reset                                                                                            |
+| 真实跨进程 UI 链路          | `pnpm test:human-interaction-core-e2e`                                    | locked Chromium 的生产面板与 Preload → Main RPC → 真正 stdio Core Server/Harness → 本地 HTTP Provider；浏览器同步提交、动态关闭、多异步批次、重启、忽略、空闲续接及双窗口撤下入口 |
+| Renderer                    | 问答、审批、ConversationSurface、会话同步、observer browser tests         | 分页和草稿、IME/Enter/Escape、提交禁用、审批独占恢复、同步优先/后来优先、最小化/唯一入口、单气泡、乱序通知、Composer 与观察模式                                                   |
+| Host 与协议                 | TypeScript unit、Rust protocol、Main/Preload tests                        | 输入联合类型、只读证明、防伪、通知/查询边界、存储序列化、重复结算与设置 revision                                                                                                  |
+
+新增跨层专项使用生产 Preload bridge 和 Main registrar，只适配 Electron IPC 传输；问答结果全部来自真实 Rust Core，不用页面回调假成功。该专项没有启动打包 Electron、原生 contextBridge 或 OS 窗口，不能把它计为打包应用人工测试。已接入 CI macOS job，独立命令不在 `pnpm check` 聚合中。
+
+审批恢复和 MCP expiry 旧测试夹具缺少当前 v14 必填 `pauseReason` 的 9 项失败，本轮补齐当前版本夹具；生产校验保持严格。新历史证明增加一个按聊天批量读取的固定查询，恒定查询数量回归同步更新，未引入按消息循环查库。
+
+### 使用与恢复限制
+
+- 未提交草稿和页码只保留在当前窗口内存；最小化、批次抢占、聊天切换保留，关闭窗口/完整重载不恢复草稿。未答问题与已经提交的回应由 Host 持久化。
+- 每批没有题数产品上限，仍有通用 JSON、文本长度和内容合法性上限；本阶段不支持答题附件和提交后修改。
+- Provider/工具已进入执行但结局未知时保守失败，不重放可能收费或有副作用的工作。已提交回答保持不可变；用户需在核对实际状态后明确继续。
+- Stop 围栏阻止此前已接纳回应的迟到续跑；用户在 Stop 后明确提交仍 open 的异步批次是新的输入。
+- 只有根聊天有工具；所有子 Agent 和无人值守定时运行没有提问权限。问答不代替权限审批。
+- 本轮没有商业 Provider 联网验收、真实 macOS 输入法候选窗人工操作、OS 休眠唤醒或打包 Electron 全套人工测试；可控 Provider 和各层生产链路覆盖不能外推为所有服务商版本均已实测。
+
+用户操作说明见[回答智能体的问题](../../public-docs/user/everyday-use/answering-questions.md)、[设置参考](../../public-docs/user/reference/settings.md)与[状态说明](../../public-docs/user/reference/statuses.md)。开发验证与恢复说明同步更新于[测试策略](../development/testing.md)和[恢复 Runbook](../operations/recovery-runbook.md)。
+
+### 最终执行记录
+
+最终执行结果如下，筛选运行与全量运行有重叠，不能相加为独立测试总数：
+
+- `cargo test --locked --workspace`：退出码 0；标准 Rust 测试报告合计 **3,545 passed / 0 failed / 14 ignored**。包括 Rust Core 2,456、Core Server 847、开发 reset 60、Rust 协议 37，另有集成及 doctests。14 项仍按现有 ignored registry 属于独立/组件/压力专项，本轮没有执行，不能计为通过。
+- 核心定向验证包括真实 Provider 的同步/异步 Host/Harness 31 项、动态能力/身份 11 项、Observer 展示 1 项；新增 Host 保留前缀拒绝与子继承纯历史测试也在最终 workspace 内通过。新 query-count、源删除后二次 fork、压缩前完整问答来源和 exact v38 reset 均已进入最终测试。
+- `pnpm test:unit`：**204 文件，1,779 项通过**。
+- 受管 Chromium browser 专项：**9 文件，147 项通过**。涵盖问答 controller/panel、设置、真实 ConversationSurface 与 Composer、会话同步、ApprovalDensity、Guidance、observer 和 AppShellSkillRecovery。组合输入事件不等于真实 macOS 输入法候选窗人工验收。
+- `pnpm exec vitest run --project human-interaction-core-e2e`：**1 文件，2 项通过**。真实 stdio Core Server 与临时 SQLite 经生产 Preload/Main 到浏览器；受控模型请求确认原 ToolResult/下一轮唯一答案、关闭设置、保留前缀防伪、两批异步、重启后恢复、忽略无请求、一次后续 Run 和另一窗口结算。Vite 使用独立临时 cache，最终 browser 复跑无测试中途重载。
+- `pnpm typecheck`、`pnpm lint`、`pnpm format:check`、workspace all-targets Clippy `-D warnings`、`pnpm check:docs`、`pnpm check:public-docs`、`pnpm check:test-layout`、`pnpm verify:agent-avatars`、`git diff --check`：全部通过。
+- `pnpm test:test-infrastructure`：10 项通过；`pnpm test:storage-reset-dev` 脚本层：10 项通过。实际用户数据根的 reset 没有执行。
+
+执行中出现的失败均区分记录：首次纯历史查询数由 13 增为固定 14、当前检查点夹具遗漏 pauseReason、构建中尚未完成的 DTO 字段/类型及专项测试定位符在收敛后均修复，最终上述范围全部通过。Clippy 的新测试写法也已修整通过。
+
+没有声称执行完整 `pnpm check` 聚合、全量 browser 或原生 Electron suite。第 4 轮记录的既有 AppShellCollaborationScenario 截图稳定性问题本轮未重跑/修复；本轮执行的是与问答、审批交互和改动范围匹配的 browser 专项。打包应用、系统 IME、商业 Provider、OS 休眠与 ignored 专项保持上文列出的未验证边界。
+
+五轮开发与本轮必需验收已完成。旧 v38 开发库需退出应用后使用受管开发 reset 新建 v39；先运行 `pnpm storage:reset-dev` 阅读只读预检，再按确认步骤操作。模型配置和凭据引用保留，旧聊天/运行/问答不迁移。没有自动执行此破坏性数据重建，也没有改动其他任务的审批样式或既有截图。
+
+## 验收后界面调整（2026-09-05）
+
+- 交互面板替换 Composer 的可见位置。Composer 保持挂载并在交互/审批占用时 hidden/inert，保留消息快路径草稿和附件；非阻塞最小化后恢复，短窗口中交互区可滚动。
+- 标题统一“交互”，标题及每批 timeline 入口共用气泡问号图标。面板使用审批视觉变量，缩小行高、间距，自定义回答采用同行单行输入。
+- “跳过”仅标记当前题，之后显示“已跳过”，保持深色。当前题有效时“下一题”定位下一未处理题；整批有效时才变为“提交”，一次提交整批语义不变。
+- 助手正文、普通用户正文和问答答案使用主题 text.strong；问题继续使用 text.secondary，时间等辅助信息保持原层级。
+- 输入区设置移除保存中的提示和灰色说明文字；独立 revision、即时保存、防重复和错误反馈保留。
+
+本次调整验证：7 个问答/审批/观察模式浏览器文件 53 项通过；2 个 Composer 命令/Skills 浏览器文件 41 项通过；问答投影及控制器单元测试 22 项通过；真实 Chromium → Preload/Main → Rust Core/Core Server 的 2 项用例通过（临时数据库及可控 Provider），包含新分页操作与生产 timeline 入口。类型、定向 ESLint/Prettier、开发/用户文档和 diff whitespace 检查通过。未改变数据库版本或重置实际开发数据。
+
+### 同步回答恢复后的流式顺序修复
+
+同步恢复将回答写入检查点和 trace，但原调用的 ToolResult 不一定先以 live 事件到达 Renderer。此前 Request 已提交而 ToolResult 未到时，展示兜底把用户答案追加在 assistant timeline 末尾；新 delta 加入后就被排在答案前，终态读取工具结果后又恢复正确顺序。现在同一 request/run/assistant/toolCall 绑定下，已接纳的同步答案立即占据原调用的 trace 位置；后到 ToolResult 继续使用相同展示 ID，不移动或重复气泡。此变更只作用于展示副本，不创建模型 User 输入或第二个工具结果。
+
+两个新增单测在修复前复现了“正文 → 续写 → 答案”的错误顺序。修复后相关单元 19 项、浏览器 22 项通过，覆盖回答回执早于/晚于续写、多个 delta、stream commit、done、持久化重载及单气泡；Web 类型和定向格式/ESLint 检查通过。

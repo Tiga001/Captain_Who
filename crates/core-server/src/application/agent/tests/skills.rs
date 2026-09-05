@@ -263,9 +263,9 @@ fn projectless_turn_discovers_enabled_managed_skills_without_explicit_activation
         .expect("enabled bundled Skills should be discoverable");
     assert_eq!(
         discovery.skills.len(),
-        skills.list().unwrap().skills().len()
+        skills.list().unwrap().skills().len() - 1
     );
-    assert!(discovery
+    assert!(!discovery
         .skills
         .iter()
         .any(|skill| skill.id == "bundled:application:image-generation"));
@@ -1171,6 +1171,7 @@ fn existing_conversation_rejects_cross_project_skill_turn_and_preview() {
             model_id: Some("model-1".to_string()),
             title: "Project-bound conversation".to_string(),
             messages: vec![ChatMessageRecord {
+                human_interaction_response: None,
                 id: "user-existing-project-a".to_string(),
                 role: "user".to_string(),
                 content: "History from project A.".to_string(),

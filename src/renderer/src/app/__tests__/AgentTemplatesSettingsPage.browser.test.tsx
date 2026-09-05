@@ -2,6 +2,7 @@ import type { AgentTemplate } from '@mycopilot/protocol'
 import { page } from 'vitest/browser'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { render } from 'vitest-browser-react'
+import { SettingsSearchNavigationProvider } from '../../features/settings/settingsSearchNavigation'
 
 const service = vi.hoisted(() => ({
   assign: vi.fn(),
@@ -125,6 +126,72 @@ beforeEach(() => {
 })
 
 describe('Agent template settings', () => {
+  it('retains a selected template draft while search visits the library and another field', async () => {
+    const screen = await render(
+      <SettingsSearchNavigationProvider
+        target={{
+          page: 'agentTemplates',
+          id: 'agent-template-instructions',
+          view: 'editor',
+          prerequisiteId: 'agent-templates-list',
+          revision: 1
+        }}
+      >
+        <AgentTemplatesSettingsPage projects={PROJECTS} />
+      </SettingsSearchNavigationProvider>
+    )
+    await expect.element(screen.getByText('Global Alpha', { exact: true })).toBeVisible()
+    expect(screen.container.querySelector('.agent-template-form')).toBeNull()
+    await screen.getByRole('button', { name: 'agentTemplates.edit Global Alpha' }).click()
+    await screen
+      .getByRole('textbox', { name: 'agentTemplates.instructions' })
+      .fill('Keep this unsaved draft.')
+
+    await screen.rerender(
+      <SettingsSearchNavigationProvider
+        target={{
+          page: 'agentTemplates',
+          id: 'agent-templates-create',
+          view: 'templates',
+          revision: 2
+        }}
+      >
+        <AgentTemplatesSettingsPage projects={PROJECTS} />
+      </SettingsSearchNavigationProvider>
+    )
+    await expect
+      .element(screen.getByRole('button', { name: 'agentTemplates.create', exact: true }))
+      .toBeVisible()
+    expect(screen.container.querySelector('.agent-template-form')).toBeNull()
+
+    await screen.rerender(
+      <SettingsSearchNavigationProvider
+        target={{
+          page: 'agentTemplates',
+          id: 'agent-template-name',
+          view: 'editor',
+          prerequisiteId: 'agent-templates-list',
+          revision: 3
+        }}
+      >
+        <AgentTemplatesSettingsPage projects={PROJECTS} />
+      </SettingsSearchNavigationProvider>
+    )
+    await expect
+      .element(screen.getByRole('textbox', { name: 'agentTemplates.instructions' }))
+      .toHaveValue('Keep this unsaved draft.')
+    await expect
+      .element(screen.getByRole('textbox', { name: 'agentTemplates.name' }))
+      .toHaveValue('Global Alpha')
+    expect(screen.container.querySelector('[data-setting-id="agent-template-name"]')?.tagName).toBe(
+      'LABEL'
+    )
+    expect(service.create).not.toHaveBeenCalled()
+    expect(service.update).not.toHaveBeenCalled()
+    expect(service.setEnabled).not.toHaveBeenCalled()
+    expect(service.delete).not.toHaveBeenCalled()
+  })
+
   it('loads one global library instead of a project-scoped list', async () => {
     const screen = await render(
       <AgentTemplatesSettingsPage initialProjectId="project-a" projects={PROJECTS} />

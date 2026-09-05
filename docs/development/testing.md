@@ -2,7 +2,7 @@
 status: current
 audience: developers/maintainers
 owner: engineering
-last_verified: 2026-08-31
+last_verified: 2026-09-05
 ---
 
 # 测试策略与矩阵
@@ -60,15 +60,16 @@ pnpm check
 
 ## 3. Vitest 项目
 
-`vitest.config.ts` 定义五个项目；文件规则集中在 `scripts/vitest-project-rules.mjs`：
+`vitest.config.ts` 定义六个项目；文件规则集中在 `scripts/vitest-project-rules.mjs`：
 
-| project                  | 环境                             | 范围                                                                                                            | 并发特点                                   |
-| ------------------------ | -------------------------------- | --------------------------------------------------------------------------------------------------------------- | ------------------------------------------ |
-| `unit`                   | Node                             | Main、Preload、Renderer 非 browser 测试、`packages/protocol`，排除真实 Electron/Core Server E2E                 | 常规并行                                   |
-| `browser`                | Vitest Browser + locked Chromium | App、Chat、Automation、Notification、Skill、MCP/Browser、Git、Sidebar、Files、Collaboration `.browser.test.tsx` | headless 浏览器                            |
-| `electron-fixtures`      | 真实 Electron                    | Browser surface failure/manager/target broker 三个 `.electron.test.ts` fixture                                  | 文件串行；仅 macOS 执行用例                |
-| `managed-playwright-e2e` | Node 启动真实 Electron fixture   | `managedPlaywrightBridge.electron.test.ts`                                                                      | 文件串行                                   |
-| `automation-core-e2e`    | Node + 真实 Core Server 进程     | `automationHostRealCore.integration.test.ts`；Host API → Main → Core Server 的 Automation                       | 文件串行；不启动真实 Electron/系统原生通知 |
+| project                      | 环境                                      | 范围                                                                                                            | 并发特点                                   |
+| ---------------------------- | ----------------------------------------- | --------------------------------------------------------------------------------------------------------------- | ------------------------------------------ |
+| `unit`                       | Node                                      | Main、Preload、Renderer 非 browser 测试、`packages/protocol`，排除真实 Electron/Core Server E2E                 | 常规并行                                   |
+| `browser`                    | Vitest Browser + locked Chromium          | App、Chat、Automation、Notification、Skill、MCP/Browser、Git、Sidebar、Files、Collaboration `.browser.test.tsx` | headless 浏览器                            |
+| `electron-fixtures`          | 真实 Electron                             | Browser surface failure/manager/target broker 三个 `.electron.test.ts` fixture                                  | 文件串行；仅 macOS 执行用例                |
+| `managed-playwright-e2e`     | Node 启动真实 Electron fixture            | `managedPlaywrightBridge.electron.test.ts`                                                                      | 文件串行                                   |
+| `human-interaction-core-e2e` | Node + locked Chromium + 真实 Core Server | 人机交互生产 Renderer/Preload/Main → Harness → 本地可控 Provider                                                | 文件串行；临时数据库和配置                 |
+| `automation-core-e2e`        | Node + 真实 Core Server 进程              | `automationHostRealCore.integration.test.ts`；Host API → Main → Core Server 的 Automation                       | 文件串行；不启动真实 Electron/系统原生通知 |
 
 执行：
 
@@ -78,6 +79,7 @@ pnpm test:unit
 pnpm test:browser
 pnpm test:electron
 pnpm test:automation-core-e2e
+pnpm test:human-interaction-core-e2e
 ```
 
 `pnpm test:web` 依次聚合 `test:unit`、`test:electron` 和 `test:browser`，让原生 Electron fixture 在 Chromium browser suite 之前获得隔离的冷启动窗口；`test:electron` 再依次运行 `electron-fixtures` 与 `managed-playwright-e2e`，避免两个真实 Electron project 并发争用资源。`check:test-layout` 会拒绝未归属或被多个 project 重复选择的 `src/`、`packages/` TypeScript 测试文件。
@@ -153,6 +155,22 @@ cargo test -p mycopilot-core notification
 FileChange 的安全证据还包括 source-boundary、权限/Approval、Staged 恢复、run grant、content redaction、durable history 和 crash reconciliation tests。只验证 Renderer diff 卡不能证明文件副作用正确；必须同时覆盖 Rust planner/committer、SQLite authority 和 Core Server settlement。
 
 Notification tests 必须区分 notification fact、聚合 batch 与 native presentation，并覆盖前台/禁用/不支持时 suppress、claim/validate/ACK/release、五次失败上限、优先级升级、locale 与 show/ACK 崩溃窗口。Browser tests 必须使用受管 session 和临时目录，不读取真实 history、下载目录、Cookie 或 profile。
+
+### Human Interaction
+
+```bash
+pnpm test:human-interaction-core-e2e
+pnpm exec vitest run --project unit src/renderer/src/features/humanInteraction/__tests__ packages/protocol/src/humanInteraction.test.ts src/main/core/coreServer.humanInteraction.test.ts src/main/core/ipc.humanInteraction.test.ts src/preload/HumanInteractionIpcBridge.test.ts
+pnpm exec vitest run --project browser src/renderer/src/features/humanInteraction/__tests__ src/renderer/src/features/chat/__tests__/HumanInteractionIntegration.browser.test.tsx src/renderer/src/app/__tests__/HumanInteractionSettings.browser.test.tsx src/renderer/src/app/__tests__/HumanInteractionConversationSync.browser.test.tsx
+cargo test --locked -p mycopilot-core-server application::agent::tests::human_input --bin core-server
+cargo test --locked -p mycopilot-core human_interaction
+```
+
+专项 `human-interaction-core-e2e` 构建当前 debug Core Server，在受管 Chromium 中运行生产设置、问答 controller、面板及 Preload bridge。只用进程内适配器替代 Electron IPC 传输，所有 Main registrar、DTO 校验、真实 stdio Core Server、SQLite、Harness 和 HTTP Provider 调用均执行生产链路。Provider 是本地可控 SSE 服务，测试使用临时数据根和专用模型凭据，不触达真实账户或开发聊天。
+
+它验证浏览器统一提交恢复原 Run、下一请求动态撤下工具、同步答案唯一 ToolResult、多异步批次、自然结束、同版本 Core Server 重启、忽略不唤醒、空闲答案激活一次后续 Run、通知驱动另一窗口撤下已结算入口。分页/抢占/IME/主 Composer 集成由 browser suite 补充；故障断点、审批与同步交替、投递争用及身份矩阵由真实 Rust Harness/Host tests 补充。原生 Electron contextBridge、安全 origin 检查和打包应用人工验收不在这个专项中，不能把适配 IPC 传输写成打包 Electron 测试。
+
+该专项不在 `pnpm check` 聚合中，必须显式运行；CI 的 macOS Electron job 同时执行它。问答恢复、纯历史展示证明与 canonical schema/reset 的验收矩阵见[人机交互](../subsystems/human-interaction.md)。
 
 ### Scheduled Automation
 

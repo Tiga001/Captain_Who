@@ -59,6 +59,7 @@ fn cancel_run_rpc_reports_tree_stop_persistence_failure_but_interrupts_root_loca
             model_id: Some("model-1".to_string()),
             title: "Cancel tree stop failure".to_string(),
             messages: vec![ChatMessageRecord {
+                human_interaction_response: None,
                 id: assistant_message_id.to_string(),
                 role: "assistant".to_string(),
                 content: String::new(),
@@ -152,6 +153,7 @@ fn interrupting_pending_approval_ignores_retiring_runtime_token_and_commits_pair
             title: "Cancel trace".to_string(),
             messages: vec![
                 ChatMessageRecord {
+                    human_interaction_response: None,
                     id: "user-cancel".to_string(),
                     role: "user".to_string(),
                     content: "Keep tracking this objective.".to_string(),
@@ -162,6 +164,7 @@ fn interrupting_pending_approval_ignores_retiring_runtime_token_and_commits_pair
                     ui_state_json: None,
                 },
                 ChatMessageRecord {
+                    human_interaction_response: None,
                     id: "assistant-cancel".to_string(),
                     role: "assistant".to_string(),
                     content: String::new(),
@@ -347,6 +350,7 @@ fn forced_cancellation_uses_backend_runtime_snapshot_instead_of_empty_trace() {
             model_id: Some("model-1".to_string()),
             title: "Forced cancellation".to_string(),
             messages: vec![ChatMessageRecord {
+                human_interaction_response: None,
                 id: "assistant-forced".to_string(),
                 role: "assistant".to_string(),
                 content: String::new(),
@@ -519,6 +523,7 @@ fn cancelled_tool_call_finish_reason_is_not_projected_as_a_terminal_error() {
             model_id: Some("model-1".to_string()),
             title: "Cancelled tool-call finish reason".to_string(),
             messages: vec![ChatMessageRecord {
+                human_interaction_response: None,
                 id: ASSISTANT_MESSAGE_ID.to_string(),
                 role: "assistant".to_string(),
                 content: String::new(),
@@ -688,6 +693,7 @@ fn failed_forced_cancellation_projection_is_retired_by_current_startup_reconcili
             model_id: Some("model-1".to_string()),
             title: "Forced cancellation recovery".to_string(),
             messages: vec![ChatMessageRecord {
+                human_interaction_response: None,
                 id: "assistant-forced-recovery".to_string(),
                 role: "assistant".to_string(),
                 content: String::new(),
@@ -824,6 +830,7 @@ fn terminal_message_and_trace_roll_back_together_when_trace_is_invalid() {
             model_id: None,
             title: "Atomic trace".to_string(),
             messages: vec![ChatMessageRecord {
+                human_interaction_response: None,
                 id: "assistant-atomic".to_string(),
                 role: "assistant".to_string(),
                 content: String::new(),
@@ -894,6 +901,7 @@ async fn cancelling_immediately_after_approval_prevents_command_side_effects() {
             model_id: Some("model-1".to_string()),
             title: "Cancel before spawn".to_string(),
             messages: vec![ChatMessageRecord {
+                human_interaction_response: None,
                 id: "assistant-cancel-before-spawn".to_string(),
                 role: "assistant".to_string(),
                 content: String::new(),
@@ -1056,6 +1064,7 @@ async fn message_deletion_cancels_a_rejected_actions_pre_spawn_continuation() {
             model_id: Some("model-1".to_string()),
             title: "Delete inline continuation".to_string(),
             messages: vec![ChatMessageRecord {
+                human_interaction_response: None,
                 id: assistant_message_id.to_string(),
                 role: "assistant".to_string(),
                 content: String::new(),
@@ -1240,6 +1249,7 @@ async fn cancelling_run_during_approved_command_finishes_cancelled_without_resum
             model_id: Some("model-1".to_string()),
             title: "Command cancellation".to_string(),
             messages: vec![ChatMessageRecord {
+                human_interaction_response: None,
                 id: "assistant-command-cancel".to_string(),
                 role: "assistant".to_string(),
                 content: String::new(),

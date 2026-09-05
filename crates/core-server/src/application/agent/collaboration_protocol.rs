@@ -173,6 +173,10 @@ impl AgentService {
                     created_at: message.created_at,
                     status: message.status.clone(),
                     input_origin,
+                    human_interaction_response: message
+                        .human_interaction_response
+                        .as_ref()
+                        .map(observer_human_response_dto),
                     attachments: message
                         .attachments
                         .iter()
@@ -660,6 +664,83 @@ fn safe_authorization_error(
     _: crate::application::collaboration_authorization::CollaborationAuthorizationError,
 ) -> AgentServiceError {
     AgentServiceError::from("Agent collaboration operation is not authorized.".to_string())
+}
+
+fn observer_human_response_dto(
+    display: &mycopilot_core::human_interaction::HumanInteractionResponseDisplay,
+) -> mycopilot_protocol_rs::HumanInteractionResponseDisplayDto {
+    use mycopilot_core::human_interaction::HumanInteractionAnswerDisplay as Core;
+    use mycopilot_protocol_rs::HumanInteractionAnswerDisplayDto as Wire;
+    mycopilot_protocol_rs::HumanInteractionResponseDisplayDto {
+        result_type: display.result_type.clone(),
+        schema_version: display.schema_version,
+        request_id: display.request_id.clone(),
+        response_id: display.response_id.clone(),
+        answers: display
+            .answers
+            .iter()
+            .map(|answer| match answer {
+                Core::Option {
+                    question_id,
+                    question,
+                    option_id,
+                    answer,
+                } => Wire::Option {
+                    question_id: question_id.clone(),
+                    question: question.clone(),
+                    option_id: option_id.clone(),
+                    answer: answer.clone(),
+                },
+                Core::Text {
+                    question_id,
+                    question,
+                    answer,
+                } => Wire::Text {
+                    question_id: question_id.clone(),
+                    question: question.clone(),
+                    answer: answer.clone(),
+                },
+                Core::Skipped {
+                    question_id,
+                    question,
+                    answer,
+                } => Wire::Skipped {
+                    question_id: question_id.clone(),
+                    question: question.clone(),
+                    answer: answer.clone(),
+                },
+            })
+            .collect(),
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn observer_human_response_preserves_validated_history_display_without_reparsing_content() {
+    let display: mycopilot_core::human_interaction::HumanInteractionResponseDisplay =
+        serde_json::from_value(serde_json::json!({
+            "type":"human_interaction_response", "schemaVersion":1,
+            "requestId":"request-observer", "responseId":"response-observer",
+            "answers":[
+                {"questionId":"option", "question":"Choose format", "kind":"option", "optionId":"csv", "answer":"CSV"},
+                {"questionId":"text", "question":"Complete question. ".repeat(150), "kind":"text", "answer":"Complete answer. ".repeat(1500)},
+                {"questionId":"skip", "question":"Anything else?", "kind":"skipped", "answer":"已跳过"}
+            ]
+        })).unwrap();
+    display.validate().unwrap();
+    assert_eq!(
+        serde_json::to_value(observer_human_response_dto(&display)).unwrap(),
+        serde_json::to_value(display).unwrap()
+    );
+    let ordinary: AgentObserverMessageDto = serde_json::from_value(serde_json::json!({
+        "messageId":"ordinary-json", "role":"user", "content":"{\"type\":\"human_interaction_response\"}",
+        "createdAt":1, "status":"sent", "inputOrigin":null, "attachments":[], "agentRunJson":null, "uiStateJson":null
+    })).unwrap();
+    assert!(ordinary.human_interaction_response.is_none());
+    assert!(serde_json::to_value(ordinary)
+        .unwrap()
+        .get("humanInteractionResponse")
+        .is_none());
 }
 
 fn safe_graph_error(_: mycopilot_core::AgentGraphError) -> AgentServiceError {

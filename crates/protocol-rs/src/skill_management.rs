@@ -21,6 +21,7 @@ pub enum SkillManagementErrorCodeDto {
     NotFound,
     NotManageable,
     StateConflict,
+    ConfigurationRequired,
     StorageUnavailable,
 }
 
@@ -28,6 +29,7 @@ pub enum SkillManagementErrorCodeDto {
 #[serde(rename_all = "camelCase")]
 pub enum SkillManagementRecoveryDto {
     RefreshManagement,
+    ConfigureImageGeneration,
     Retry,
 }
 
@@ -68,10 +70,18 @@ pub struct SkillManagementEntryDto {
     pub installation_revision: Option<String>,
     pub state_revision: String,
     pub enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enablement_block: Option<SkillEnablementBlockDto>,
     pub actions: SkillManagementActionsDto,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub acquisition: Option<SkillPreviewSourceDto>,
     pub compatibility: SkillCompatibilityReportDto,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum SkillEnablementBlockDto {
+    ImageGenerationConfigurationRequired,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]

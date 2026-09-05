@@ -1,4 +1,5 @@
 import type { AgentObserverConversation } from '@mycopilot/protocol'
+import { parseStorageHumanInteractionResponse } from '@mycopilot/protocol'
 import type { ChatConversation, ChatMessage, ChatMessageUiState } from '../chat/chatTypes'
 import { settleAgentRunToolActivities } from '../agentRun/agentEventReducer'
 import { parsePersistedAgentRunJson } from '../storage/persistedAgentRun'
@@ -44,6 +45,7 @@ function mapObserverMessage(message: AgentObserverConversation['messages'][numbe
 
   return {
     id: message.messageId,
+    humanInteractionDisplay: parseStorageHumanInteractionResponse(message),
     role: message.role === 'user' ? 'user' : 'assistant',
     content: message.content,
     createdAt: message.createdAt,

@@ -35,6 +35,7 @@ fn seed_notification_turn(storage: &StorageService) {
             title: "Atomic notification".to_string(),
             messages: vec![
                 ChatMessageRecord {
+                    human_interaction_response: None,
                     id: "user-notification-atomic".to_string(),
                     role: "user".to_string(),
                     content: "Safe prompt identity".to_string(),
@@ -45,6 +46,7 @@ fn seed_notification_turn(storage: &StorageService) {
                     ui_state_json: None,
                 },
                 ChatMessageRecord {
+                    human_interaction_response: None,
                     id: "assistant-notification-atomic".to_string(),
                     role: "assistant".to_string(),
                     content: "Thinking".to_string(),

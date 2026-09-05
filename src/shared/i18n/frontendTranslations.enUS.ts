@@ -815,6 +815,7 @@ export const enUSTranslations = {
   'skills.error.sourceAuthorityExpired':
     'This skill source selection expired. Resolve the source again.',
   'skills.error.acknowledgementRequired': 'Confirm all required safety notices before continuing.',
+  'skills.error.configurationRequired': 'Save a valid API endpoint, model and key in Settings → Configuration → Image generation before enabling this skill.',
   'skills.error.notManageable': 'This skill cannot be managed on this page.',
   'skills.error.operationConflict': 'The operation state changed. Start the operation again.',
   'skills.error.cancelled': 'The operation was cancelled.',

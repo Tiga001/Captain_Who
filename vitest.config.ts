@@ -85,6 +85,14 @@ export default defineConfig({
         test: {
           environment: 'node',
           fileParallelism: false,
+          ...vitestProjectFileRules['human-interaction-core-e2e'],
+          name: 'human-interaction-core-e2e'
+        }
+      },
+      {
+        test: {
+          environment: 'node',
+          fileParallelism: false,
           ...vitestProjectFileRules['automation-core-e2e'],
           name: 'automation-core-e2e'
         }

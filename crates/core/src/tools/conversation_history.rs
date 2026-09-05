@@ -1584,6 +1584,7 @@ mod tests {
 
     fn message(id: &str, role: &str, content: &str, created_at: i64) -> ChatMessageRecord {
         ChatMessageRecord {
+            human_interaction_response: None,
             id: id.to_string(),
             role: role.to_string(),
             content: content.to_string(),

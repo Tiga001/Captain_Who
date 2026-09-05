@@ -24,6 +24,7 @@ fn completed_source_turn(
     let mut candidate = candidate.take().unwrap();
     candidate.updated_at = 3;
     candidate.messages.push(ChatMessageRecord {
+        human_interaction_response: None,
         id: "source-assistant".to_string(),
         role: "assistant".to_string(),
         content: "Thinking...".to_string(),
@@ -121,6 +122,7 @@ fn replacement_candidate(
     conversation.updated_at = 5;
     conversation.messages.extend([
         ChatMessageRecord {
+            human_interaction_response: None,
             id: "replacement-user".to_string(),
             role: "user".to_string(),
             content: "replacement".to_string(),
@@ -131,6 +133,7 @@ fn replacement_candidate(
             ui_state_json: None,
         },
         ChatMessageRecord {
+            human_interaction_response: None,
             id: "replacement-assistant".to_string(),
             role: "assistant".to_string(),
             content: "Thinking...".to_string(),
@@ -245,6 +248,7 @@ fn rewrite_is_atomic_idempotent_and_keeps_source_receipts_as_raw_facts() {
     candidate.updated_at = 5;
     candidate.messages.extend([
         ChatMessageRecord {
+            human_interaction_response: None,
             id: "replacement-user".to_string(),
             role: "user".to_string(),
             content: "new prompt only".to_string(),
@@ -255,6 +259,7 @@ fn rewrite_is_atomic_idempotent_and_keeps_source_receipts_as_raw_facts() {
             ui_state_json: None,
         },
         ChatMessageRecord {
+            human_interaction_response: None,
             id: "replacement-assistant".to_string(),
             role: "assistant".to_string(),
             content: "Thinking...".to_string(),
@@ -469,6 +474,7 @@ fn rewrite_rejects_a_non_latest_or_unsettled_source_without_hiding_history() {
     let conversation_id = "conversation-rewrite-reject";
     let (mut candidate, revision) = completed_source_turn(&service, conversation_id);
     candidate.messages.push(ChatMessageRecord {
+        human_interaction_response: None,
         id: "later-user".to_string(),
         role: "user".to_string(),
         content: "later".to_string(),
@@ -479,6 +485,7 @@ fn rewrite_rejects_a_non_latest_or_unsettled_source_without_hiding_history() {
         ui_state_json: None,
     });
     candidate.messages.push(ChatMessageRecord {
+        human_interaction_response: None,
         id: "later-assistant".to_string(),
         role: "assistant".to_string(),
         content: "Thinking...".to_string(),
@@ -526,6 +533,7 @@ fn rewrite_rejects_a_non_latest_or_unsettled_source_without_hiding_history() {
     let (mut candidate, revision) = service.load_conversation_for_turn(conversation_id).unwrap();
     let mut candidate = candidate.take().unwrap();
     candidate.messages.push(ChatMessageRecord {
+        human_interaction_response: None,
         id: "replacement-user".to_string(),
         role: "user".to_string(),
         content: "new".to_string(),
@@ -536,6 +544,7 @@ fn rewrite_rejects_a_non_latest_or_unsettled_source_without_hiding_history() {
         ui_state_json: None,
     });
     candidate.messages.push(ChatMessageRecord {
+        human_interaction_response: None,
         id: "replacement-assistant".to_string(),
         role: "assistant".to_string(),
         content: "Thinking...".to_string(),
@@ -614,6 +623,7 @@ fn rewrite_rejects_a_source_that_owns_the_active_compaction_lineage() {
     let (mut earlier, revision) = service.load_conversation_for_turn(conversation_id).unwrap();
     let mut earlier = earlier.take().unwrap();
     earlier.messages.push(ChatMessageRecord {
+        human_interaction_response: None,
         id: "earlier-assistant".to_string(),
         role: "assistant".to_string(),
         content: "Thinking...".to_string(),
@@ -663,6 +673,7 @@ fn rewrite_rejects_a_source_that_owns_the_active_compaction_lineage() {
     let mut source = source.take().unwrap();
     source.messages.extend([
         ChatMessageRecord {
+            human_interaction_response: None,
             id: "source-user".to_string(),
             role: "user".to_string(),
             content: "source".to_string(),
@@ -673,6 +684,7 @@ fn rewrite_rejects_a_source_that_owns_the_active_compaction_lineage() {
             ui_state_json: None,
         },
         ChatMessageRecord {
+            human_interaction_response: None,
             id: "source-assistant".to_string(),
             role: "assistant".to_string(),
             content: "Thinking...".to_string(),

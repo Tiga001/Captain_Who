@@ -1729,6 +1729,7 @@ fn message(
     status: Option<&str>,
 ) -> ChatMessageRecord {
     ChatMessageRecord {
+        human_interaction_response: None,
         id: id.to_string(),
         role: role.to_string(),
         content: content.to_string(),

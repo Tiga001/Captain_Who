@@ -16,6 +16,7 @@ fn seed_turn(
             title: "Notification test".to_string(),
             messages: vec![
                 ChatMessageRecord {
+                    human_interaction_response: None,
                     id: user_message_id.to_string(),
                     role: "user".to_string(),
                     content: prompt.to_string(),
@@ -26,6 +27,7 @@ fn seed_turn(
                     ui_state_json: None,
                 },
                 ChatMessageRecord {
+                    human_interaction_response: None,
                     id: assistant_message_id.to_string(),
                     role: "assistant".to_string(),
                     content: String::new(),

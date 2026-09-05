@@ -34,6 +34,11 @@ import { loadAttachmentImage } from '../../storage/storageClient'
 import { ChatMarkdown } from './ChatMarkdown'
 import { HumanInteractionAnswerContent } from '../../humanInteraction/HumanInteractionAnswerContent'
 import {
+  HumanInteractionTimelineEntry,
+  type HumanInteractionTimelineController
+} from '../../humanInteraction/HumanInteractionTimelineEntry'
+import {
+  humanInteractionRequestsForMessage,
   readHumanInteractionGuidanceDisplay,
   humanInteractionDisplayText
 } from '../../humanInteraction/humanInteractionPresentation'
@@ -123,6 +128,7 @@ interface ChatMessageItemProps {
   agentLabelsById?: Readonly<Record<string, string>>
   collaborationTimelineActivities?: readonly CollaborationTimelineActivity[]
   conversationId?: string
+  humanInteraction?: HumanInteractionTimelineController
   editSelectedModelAvailable?: boolean
   editSelectedModelSupportsImage?: boolean
   isLastAssistantMessage?: boolean
@@ -385,6 +391,7 @@ function GuidanceTimelineItemView({ item }: { item: ChatGuidanceTimelineItem }) 
 function AgentTimelineItemView({
   assistantMessageId,
   conversationId,
+  humanInteraction,
   item,
   observerRootConversationId,
   projectId,
@@ -392,6 +399,7 @@ function AgentTimelineItemView({
 }: {
   assistantMessageId: string
   conversationId?: string
+  humanInteraction?: HumanInteractionTimelineController
   item: RenderableTimelineItem
   observerRootConversationId?: string
   projectId?: string | null
@@ -494,6 +502,18 @@ function AgentTimelineItemView({
   if (item.type === 'tool_call') {
     const call = run.toolCalls.find((candidate) => candidate.id === item.callId)
     if (!call) return null
+    if (call.tool === 'request_user_input' || call.tool === 'request_user_input_async') {
+      const request = humanInteraction?.openRequests.find(
+        (candidate) =>
+          candidate.status === 'open' &&
+          candidate.toolCallId === call.id &&
+          candidate.runId === run.runId &&
+          candidate.assistantMessageId === assistantMessageId
+      )
+      return request && humanInteraction ? (
+        <HumanInteractionTimelineEntry request={request} interaction={humanInteraction} />
+      ) : null
+    }
     const mcpInvocation = run.mcpInvocations?.find((candidate) => candidate.callId === call.id)
     const webActivity = run.webSearchActivities?.find((candidate) => candidate.callId === call.id)
     const readActivity = run.readActivities?.find((candidate) => candidate.callId === call.id)
@@ -538,6 +558,7 @@ function AgentTimelineItemView({
 function AgentRunView({
   collaborationTimelineActivities = [],
   conversationId,
+  humanInteraction,
   message,
   mode,
   onReviewLastTurn,
@@ -551,6 +572,7 @@ function AgentRunView({
 }: {
   collaborationTimelineActivities?: readonly CollaborationTimelineActivity[]
   conversationId?: string
+  humanInteraction?: HumanInteractionTimelineController
   message: ChatMessage
   mode: 'interactive' | 'observer'
   onReviewLastTurn?: (filePath?: string) => void
@@ -566,6 +588,14 @@ function AgentRunView({
   const run = message.agentRun
   const runIsSettled = !run || isRunSettled(run)
   const timeline = useMemo(() => run?.timeline ?? [], [run?.timeline])
+  const interactionCallIds = new Set(
+    humanInteractionRequestsForMessage(message, humanInteraction?.openRequests ?? []).map(
+      (request) => request.toolCallId
+    )
+  )
+  const hasInteractionEntries = timeline.some(
+    (item) => item.type === 'tool_call' && interactionCallIds.has(item.callId)
+  )
   const finalAnswerContent = getAssistantFinalContent(message)
   const finalAnswerTimelineItemIndex = useMemo(() => {
     if (!run || !isRunSettled(run) || !hasDisplayableContent(finalAnswerContent)) return -1
@@ -846,7 +876,11 @@ function AgentRunView({
   const timelineCollapsed = canToggleTimeline
     ? (timelineCollapsedOverride ?? message.uiState?.timelineCollapsed ?? !hasGuidance)
     : false
-  const showTimeline = hasTimeline && !(canToggleTimeline && timelineCollapsed)
+  // Pending interaction entries and their surrounding narration stay in exact trace order even
+  // when technical activity is collapsed. Appending a detached entry after the final answer would
+  // erase the boundary between the question introduction and the model's subsequent work.
+  const showTimeline =
+    hasTimeline && (!(canToggleTimeline && timelineCollapsed) || hasInteractionEntries)
   const showFinalContent =
     hasDisplayableContent(finalAnswerContent) &&
     (runIsSettled || !hasTimeline) &&
@@ -884,7 +918,7 @@ function AgentRunView({
           })
         }}
       />
-      {canToggleTimeline && timelineCollapsed
+      {canToggleTimeline && timelineCollapsed && !hasInteractionEntries
         ? guidanceItems.map((item) => (
             <GuidanceTimelineItemView item={item} key={`timeline-item:${item.id}`} />
           ))
@@ -915,10 +949,20 @@ function AgentRunView({
         // Timeline segments are presentation-only placement boundaries. Their start/end changes
         // whenever a later Tool or collaboration event arrives, so they must never own React
         // identity. Keep every semantic item directly under the run with its durable item id.
-        return block.items.map((item) => (
+        const visibleItems =
+          canToggleTimeline && timelineCollapsed && hasInteractionEntries
+            ? block.items.filter(
+                (item) =>
+                  item.type === 'message' ||
+                  item.type === 'user_guidance' ||
+                  (item.type === 'tool_call' && interactionCallIds.has(item.callId))
+              )
+            : block.items
+        return visibleItems.map((item) => (
           <AgentTimelineItemView
             assistantMessageId={message.id}
             conversationId={conversationId}
+            humanInteraction={mode === 'interactive' ? humanInteraction : undefined}
             item={item}
             key={`timeline-item:${item.id}`}
             observerRootConversationId={observerRootConversationId}
@@ -993,6 +1037,7 @@ function AgentRunView({
 function MessageContent({
   collaborationTimelineActivities,
   conversationId,
+  humanInteraction,
   message,
   mode = 'interactive',
   onReviewLastTurn,
@@ -1009,6 +1054,7 @@ function MessageContent({
       <AgentRunView
         collaborationTimelineActivities={collaborationTimelineActivities}
         conversationId={conversationId}
+        humanInteraction={humanInteraction}
         message={message}
         mode={mode}
         onReviewLastTurn={onReviewLastTurn}
@@ -1266,6 +1312,7 @@ export const ChatMessageItem = memo(function ChatMessageItem({
   agentLabelsById,
   collaborationTimelineActivities,
   conversationId,
+  humanInteraction,
   editSelectedModelAvailable = true,
   editSelectedModelSupportsImage = true,
   isLastAssistantMessage = false,
@@ -1361,6 +1408,7 @@ export const ChatMessageItem = memo(function ChatMessageItem({
           <MessageContent
             collaborationTimelineActivities={collaborationTimelineActivities}
             conversationId={conversationId}
+            humanInteraction={humanInteraction}
             message={message}
             mode={mode}
             onApprove={onApprove}

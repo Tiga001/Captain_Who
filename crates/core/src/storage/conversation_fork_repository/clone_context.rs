@@ -540,8 +540,16 @@ pub(crate) fn rewrite_history_open_tokens(
     value: &mut Value,
     replacements: &HashMap<String, String>,
 ) -> Result<(), String> {
+    if is_frozen_human_answer(value) {
+        return Ok(());
+    }
     match value {
         Value::String(current) => {
+            if serde_json::from_str::<Value>(current)
+                .is_ok_and(|value| is_frozen_human_answer(&value))
+            {
+                return Ok(());
+            }
             *current = rewritten_history_open_tokens(current, replacements)?;
         }
         Value::Array(values) => {

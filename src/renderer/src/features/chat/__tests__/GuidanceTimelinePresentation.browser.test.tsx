@@ -1,15 +1,22 @@
 import { describe, expect, it, vi } from 'vitest'
+import type { AgentEvent } from '@mycopilot/protocol'
 import { render } from 'vitest-browser-react'
 import { ToastProvider } from '../../../components/toast/ToastProvider'
-import type { ChatMessage } from '../chatTypes'
+import type { ChatConversation, ChatMessage } from '../chatTypes'
 import { ChatMessageItem } from '../components/ChatMessageItem'
+import { question, submitted } from '../../humanInteraction/__tests__/humanInteractionFixtures'
+import { projectHumanInteractionConversation } from '../../humanInteraction/humanInteractionPresentation'
+import { humanInteractionResponseDisplay } from '../../humanInteraction/humanInteractionState'
+import { applyAgentEventToChatMessage } from '../../agentRun/agentEventReducer'
 
 const translations: Record<string, string> = {
   'agent.processed': '已处理 {duration}',
   'agent.thinking': '正在思考',
   'chat.guidanceSubmittingStatus': '正在发送',
   'chat.guidanceQueued': '已排队',
-  'chat.guidanceInterrupted': '未生效'
+  'chat.guidanceInterrupted': '未生效',
+  'humanInteraction.timeline.answer': '交互 · 共 {count} 题',
+  'humanInteraction.history.skipped': '已跳过'
 }
 
 vi.mock('../../../config/FrontendConfigProvider', () => ({
@@ -136,5 +143,223 @@ describe('mid-turn guidance Timeline presentation', () => {
 
     expect(firstGuidance).toBeLessThan(secondGuidance)
     expect(secondGuidance).toBeLessThan(finalAnswer)
+  })
+})
+
+describe('pending interaction Timeline chronology', () => {
+  it('keeps a submitted synchronous answer before every resumed delta while its live ToolResult is absent', async () => {
+    const receipt = submitted({ ...question('sync'), mode: 'sync' })
+    const display = humanInteractionResponseDisplay(receipt)!
+    let message: ChatMessage = {
+      ...settledGuidanceMessage(false),
+      id: receipt.assistantMessageId,
+      content: '先确认这两个问题。',
+      status: 'pending',
+      agentRun: {
+        ...settledGuidanceMessage(false).agentRun!,
+        runId: receipt.runId,
+        status: 'waiting_for_user_input',
+        completedAt: undefined,
+        toolCalls: [
+          {
+            id: receipt.toolCallId,
+            tool: 'request_user_input',
+            args: {},
+            approvalStatus: 'not_required',
+            reason: null
+          }
+        ],
+        toolResults: [],
+        timeline: [
+          {
+            id: 'intro',
+            type: 'message',
+            content: '先确认这两个问题。',
+            streamId: 'run-chat-stream-1',
+            traceSequence: 1
+          },
+          {
+            id: 'question',
+            type: 'tool_call',
+            callId: receipt.toolCallId,
+            traceSequence: 2
+          }
+        ]
+      }
+    }
+    const view = () => {
+      const chat: ChatConversation = {
+        id: 'chat',
+        title: 'Sync answer',
+        modelId: null,
+        projectId: null,
+        createdAt: 1,
+        updatedAt: 2,
+        messages: [message]
+      }
+      return (
+        <ToastProvider>
+          <ChatMessageItem
+            message={projectHumanInteractionConversation(chat, [receipt]).messages[0]}
+            showTokenUsageDetails={false}
+          />
+        </ToastProvider>
+      )
+    }
+    const screen = await render(view())
+    const assertAnswer = (resumed = false) => {
+      expect(screen.container.querySelectorAll('.human-interaction-answer')).toHaveLength(1)
+      expect(screen.container.querySelectorAll('.human-interaction-answer__pair')).toHaveLength(2)
+      expect(screen.container.querySelectorAll('[data-human-request-id]')).toHaveLength(0)
+      expect(textPosition(screen.container, '先确认这两个问题。')).toBeLessThan(
+        textPosition(screen.container, '已跳过')
+      )
+      if (resumed)
+        expect(textPosition(screen.container, '已跳过')).toBeLessThan(
+          textPosition(screen.container, '收到跳过选择')
+        )
+    }
+    const apply = async (event: AgentEvent) => {
+      message = applyAgentEventToChatMessage(message, event)
+      await screen.rerender(view())
+    }
+    assertAnswer()
+    await apply({ type: 'started', runId: receipt.runId, toolDefinitions: [] })
+    assertAnswer()
+    await apply({
+      type: 'message_stream_started',
+      runId: receipt.runId,
+      streamId: 'run-chat-stream-2',
+      attempt: 1
+    })
+    assertAnswer()
+    for (const delta of ['收到跳过选择，', '我会根据已有信息继续。']) {
+      await apply({
+        type: 'message_delta',
+        runId: receipt.runId,
+        streamId: 'run-chat-stream-2',
+        delta
+      })
+      expect(message.agentRun!.toolResults).toHaveLength(0)
+      assertAnswer(true)
+    }
+    await apply({
+      type: 'message_stream_committed',
+      runId: receipt.runId,
+      streamId: 'run-chat-stream-2',
+      traceSequence: 4
+    })
+    assertAnswer(true)
+    await apply({
+      type: 'done',
+      runId: receipt.runId,
+      success: true,
+      status: 'completed',
+      content: '收到跳过选择，我会根据已有信息继续。'
+    })
+    assertAnswer(true)
+    // A terminal storage read reconstructs the original continuation result from durable Trace.
+    // It must only replace the receipt projection, without moving or duplicating the answer.
+    message = structuredClone(message)
+    message.agentRun!.toolResults = [
+      {
+        callId: receipt.toolCallId,
+        tool: 'request_user_input',
+        ok: true,
+        result: display
+      }
+    ]
+    await screen.rerender(view())
+    assertAnswer(true)
+  })
+
+  it('interleaves the unique batch entry before subsequent narration while collapsed, streaming and reloaded', async () => {
+    const request = question(),
+      open = vi.fn()
+    const chat: ChatConversation = {
+      id: 'chat',
+      title: 'Interaction',
+      modelId: null,
+      projectId: null,
+      createdAt: 1,
+      updatedAt: 1,
+      messages: [
+        {
+          ...settledGuidanceMessage(true),
+          id: request.assistantMessageId,
+          content: '兴趣爱好：问题已发出。',
+          agentRun: {
+            ...settledGuidanceMessage(true).agentRun!,
+            runId: request.runId,
+            toolCalls: [
+              {
+                id: request.toolCallId,
+                tool: 'request_user_input_async',
+                args: {},
+                approvalStatus: 'not_required',
+                reason: null
+              }
+            ],
+            toolResults: [
+              {
+                callId: request.toolCallId,
+                tool: 'request_user_input_async',
+                ok: true,
+                result: { accepted: true }
+              }
+            ],
+            timeline: [
+              { id: 'intro', type: 'message', content: '兴趣爱好：', traceSequence: 1 },
+              { id: 'question', type: 'tool_call', callId: request.toolCallId, traceSequence: 2 },
+              { id: 'after', type: 'message', content: '问题已发出。', traceSequence: 3 }
+            ]
+          }
+        }
+      ]
+    }
+    const view = (source: ChatConversation, pending = true) => (
+      <ToastProvider>
+        <ChatMessageItem
+          message={
+            projectHumanInteractionConversation(source, [
+              pending ? request : { ...request, status: 'ignored' }
+            ]).messages[0]
+          }
+          humanInteraction={{ openRequests: pending ? [request] : [], canInteract: true, open }}
+          showTokenUsageDetails={false}
+        />
+      </ToastProvider>
+    )
+    const screen = await render(view(chat))
+    const assertOrder = () => {
+      expect(screen.container.querySelectorAll('[data-human-request-id]')).toHaveLength(1)
+      expect(textPosition(screen.container, '兴趣爱好：')).toBeLessThan(
+        textPosition(screen.container, '交互 · 共 2 题')
+      )
+      expect(textPosition(screen.container, '交互 · 共 2 题')).toBeLessThan(
+        textPosition(screen.container, '问题已发出。')
+      )
+      expect(screen.container.textContent!.split('兴趣爱好：')).toHaveLength(2)
+    }
+    assertOrder()
+    await screen.getByRole('button', { name: '交互 · 共 2 题' }).click()
+    expect(open).toHaveBeenCalledExactlyOnceWith(request.requestId)
+    const later = structuredClone(chat)
+    later.messages[0].agentRun!.status = 'running'
+    later.messages[0].agentRun!.timeline.push({
+      id: 'later',
+      type: 'message',
+      content: '继续独立工作。',
+      traceSequence: 4
+    })
+    await screen.rerender(view(later))
+    assertOrder()
+    expect(textPosition(screen.container, '问题已发出。')).toBeLessThan(
+      textPosition(screen.container, '继续独立工作。')
+    )
+    await screen.rerender(view(structuredClone(chat)))
+    assertOrder()
+    await screen.rerender(view(chat, false))
+    expect(screen.container.querySelectorAll('[data-human-request-id]')).toHaveLength(0)
   })
 })

@@ -826,6 +826,7 @@ export const jaJPTranslations = {
     'このスキル ソースの選択は期限切れです。ソースを再度解決してください。',
   'skills.error.acknowledgementRequired':
     '続行する前に、必要な安全上の注意をすべて確認してください。',
+  'skills.error.configurationRequired': 'このスキルを有効にする前に、設定 → 構成 → 画像生成で有効な API アドレス、モデル、キーを保存してください。',
   'skills.error.notManageable': 'このスキルはこのページでは管理できません。',
   'skills.error.operationConflict': '動作状態が変化しました。再度操作を開始してください。',
   'skills.error.cancelled': '操作はキャンセルされました。',

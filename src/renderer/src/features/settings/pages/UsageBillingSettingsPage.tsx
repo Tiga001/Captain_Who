@@ -1,3 +1,8 @@
+import { renderSettingsNodes, settingLabel, settingDescription } from '../settingsDefinition'
+import {
+  usageBillingSettingsNodes,
+  USAGE_RANGE_OPTIONS
+} from './UsageBillingSettingsPage.definition'
 import { useEffect, useMemo, useState } from 'react'
 import type { FocusEvent, ReactElement } from 'react'
 import { Check, ChevronDown } from 'lucide-react'
@@ -15,16 +20,6 @@ interface UsageBillingSettingsPageProps {
   onUiPreferencesChange: (patch: Partial<UiPreferencesSnapshot>) => void
   uiPreferences: UiPreferencesSnapshot
 }
-
-const USAGE_RANGE_OPTIONS: Array<{
-  labelKey:
-    'usageBilling.rangeLast7Days' | 'usageBilling.rangeLast30Days' | 'usageBilling.rangeLastYear'
-  value: UsageChartRange
-}> = [
-  { labelKey: 'usageBilling.rangeLast7Days', value: 'last7Days' },
-  { labelKey: 'usageBilling.rangeLast30Days', value: 'last30Days' },
-  { labelKey: 'usageBilling.rangeLastYear', value: 'lastYear' }
-]
 
 type UsageChartRange = 'last7Days' | 'last30Days' | 'lastYear'
 type UsageChartTokenKey =
@@ -395,432 +390,490 @@ export function UsageBillingSettingsPage({
     <article className="settings-list-page usage-billing-settings-page">
       <h1>{t('settings.page.usageBilling')}</h1>
 
-      <section
-        className="settings-list-section usage-summary-section"
-        aria-labelledby="usage-summary-heading"
-      >
-        <div className="usage-summary-header">
-          <h2 id="usage-summary-heading">{t('usageBilling.summary')}</h2>
-
-          <div className="usage-summary-actions">
-            <button
-              className="secondary-settings-button usage-clear-button"
-              type="button"
-              onClick={() => setClearDialogOpen(true)}
-            >
-              {t('usageBilling.clear')}
-            </button>
-          </div>
-        </div>
-
-        <div className="usage-chart-controls">
-          <div className="usage-chart-filter">
-            <span>{t('usageBilling.usageTime')}:</span>
-            <div className="usage-range-control" aria-label={t('usageBilling.range')}>
-              {USAGE_RANGE_OPTIONS.map((option) => (
-                <button
-                  data-active={range === option.value || undefined}
-                  type="button"
-                  key={option.value}
-                  onClick={() => {
-                    setRange(option.value)
-                    setStatusMessage('')
-                  }}
-                >
-                  {t(option.labelKey)}
-                </button>
-              ))}
-            </div>
-          </div>
-
-          <div className="usage-chart-filter usage-chart-filter--model">
-            <span>{t('usageBilling.model')}:</span>
-            <div className="usage-model-filter-control" onBlur={closeModelMenuOnBlur}>
-              <button
-                className="usage-model-filter-button"
-                type="button"
-                aria-haspopup="listbox"
-                aria-expanded={isModelMenuOpen}
-                onClick={() => setModelMenuOpen((current) => !current)}
+      {renderSettingsNodes(usageBillingSettingsNodes, (section) => {
+        switch (section.id) {
+          case 'usageBilling.summary':
+            return (
+              <section
+                className="settings-list-section usage-summary-section"
+                aria-labelledby="usage-summary-heading"
               >
-                <span>
-                  {selectedModel
-                    ? getModelLabel(
-                        selectedModel,
-                        configuredModelsById.get(selectedModel.modelId),
-                        t('usageBilling.deletedModel')
-                      )
-                    : t('usageBilling.allModels')}
-                </span>
-                <ChevronDown aria-hidden="true" />
-              </button>
+                <div className="usage-summary-header">
+                  <h2 id="usage-summary-heading">{settingLabel(section, t)}</h2>
 
-              {isModelMenuOpen && (
-                <div
-                  className="usage-model-filter-menu"
-                  role="listbox"
-                  aria-label={t('usageBilling.model')}
-                >
-                  <button
-                    className="usage-model-filter-option"
-                    data-selected={activeModelKey === ALL_MODELS_KEY || undefined}
-                    type="button"
-                    role="option"
-                    aria-selected={activeModelKey === ALL_MODELS_KEY}
-                    onMouseDown={(event) => event.preventDefault()}
-                    onClick={() => {
-                      setSelectedModelKey(ALL_MODELS_KEY)
-                      setModelMenuOpen(false)
-                    }}
-                  >
-                    <span>{t('usageBilling.allModels')}</span>
-                    {activeModelKey === ALL_MODELS_KEY && <Check aria-hidden="true" />}
-                  </button>
-
-                  {sortedModels.map((model) => {
-                    const modelKey = getModelKey(model)
-                    const isSelected = activeModelKey === modelKey
-                    return (
-                      <button
-                        className="usage-model-filter-option"
-                        data-selected={isSelected || undefined}
-                        type="button"
-                        role="option"
-                        aria-selected={isSelected}
-                        key={modelKey}
-                        onMouseDown={(event) => event.preventDefault()}
-                        onClick={() => {
-                          setSelectedModelKey(modelKey)
-                          setModelMenuOpen(false)
-                        }}
-                      >
-                        <span>
-                          {getModelLabel(
-                            model,
-                            configuredModelsById.get(model.modelId),
-                            t('usageBilling.deletedModel')
-                          )}
-                        </span>
-                        {isSelected && <Check aria-hidden="true" />}
-                      </button>
-                    )
-                  })}
-                </div>
-              )}
-            </div>
-          </div>
-        </div>
-
-        <div className="usage-chart-panel" aria-busy={isLoading}>
-          <div className="usage-chart-legend" aria-label={t('usageBilling.chartLegend')}>
-            {USAGE_CHART_SERIES.map((series) => (
-              <span key={series.key}>
-                <i className={series.className} aria-hidden="true" />
-                {t(series.labelKey)}
-              </span>
-            ))}
-          </div>
-
-          {isLoading ? (
-            <div className="usage-chart-empty">{t('usageBilling.loading')}</div>
-          ) : hasChartData ? (
-            <div className="usage-chart-scroller">
-              <div
-                className="usage-chart"
-                style={{ minWidth: `${Math.max(chartData.length * 96, 720)}px` }}
-              >
-                <div className="usage-chart-y-axis" aria-hidden="true">
-                  {chartTicks.map((tick, index) => (
-                    <span key={`${tick}-${index}`}>{formatCount(Math.round(tick), language)}</span>
-                  ))}
-                </div>
-
-                <div className="usage-chart-plot">
-                  {chartTicks.map((tick, index) => (
-                    <span
-                      className="usage-chart-grid-line"
-                      key={`${tick}-${index}`}
-                      aria-hidden="true"
-                    />
-                  ))}
-
-                  <div className="usage-chart-bars">
-                    {chartData.map((day) => {
-                      const unpricedMessageCount = day.values.unpricedMessageCount ?? 0
-                      const completenessMarker = unpricedMessageCount > 0 ? '*' : ''
-                      const costLabel = `${formatEstimatedCost(day.values.estimatedCost, language)}${completenessMarker}`
-                      const chartCostLabel = `${formatChartEstimatedCost(day.values.estimatedCost, language)}${completenessMarker}`
-                      const dayMaxValue = USAGE_CHART_SERIES.reduce((currentMax, series) => {
-                        const value = day.values[series.key]
-                        return typeof value === 'number' ? Math.max(currentMax, value) : currentMax
-                      }, 0)
-                      const dayMaxRatio =
-                        chartMaxValue > 0 && dayMaxValue > 0 ? dayMaxValue / chartMaxValue : 0
-                      const costBottom =
-                        dayMaxRatio > 0 ? `${Math.min(dayMaxRatio * 100 + 2, 92)}%` : '8px'
-                      const ariaLabel = [
-                        day.fullDateLabel,
-                        `${t('usageBilling.estimatedCost')} ${costLabel}`,
-                        `${t('usageBilling.uncachedInputTokens')} ${formatTokenCount(day.values.uncachedInputTokens, language, t('usageBilling.tokens'))}`,
-                        `${t('usageBilling.cachedInputTokens')} ${formatTokenCount(day.values.cachedInputTokens, language, t('usageBilling.tokens'))}`,
-                        `${t('usageBilling.outputTokens')} ${formatTokenCount(day.values.outputTokens, language, t('usageBilling.tokens'))}`,
-                        `${t('usageBilling.outputThinkingTokens')} ${formatTokenCount(day.values.outputThinkingTokens, language, t('usageBilling.tokens'))}`
-                      ].join(', ')
-
-                      return (
-                        <div
-                          className="usage-chart-day"
-                          key={day.fullDateLabel}
-                          tabIndex={0}
-                          aria-label={ariaLabel}
+                  <div className="usage-summary-actions">
+                    {renderSettingsNodes(
+                      section.children.filter((node) => node.id === 'usageBilling.clear'),
+                      (node) => (
+                        <button
+                          className="secondary-settings-button usage-clear-button"
+                          type="button"
+                          onClick={() => setClearDialogOpen(true)}
                         >
-                          <div className="usage-chart-day__bars">
-                            {USAGE_CHART_SERIES.map((series) => {
-                              const value = day.values[series.key]
-                              const ratio =
-                                chartMaxValue > 0 && typeof value === 'number' && value > 0
-                                  ? value / chartMaxValue
+                          {settingLabel(node, t)}
+                        </button>
+                      )
+                    )}
+                  </div>
+                </div>
+
+                <div className="usage-chart-controls">
+                  {renderSettingsNodes(
+                    section.children.filter((node) => node.id === 'usageBilling.usageTime'),
+                    (node) => (
+                      <div className="usage-chart-filter">
+                        <span>{settingLabel(node, t)}:</span>
+                        <div className="usage-range-control" aria-label={t('usageBilling.range')}>
+                          {USAGE_RANGE_OPTIONS.map((option) => (
+                            <button
+                              data-active={range === option.value || undefined}
+                              type="button"
+                              key={option.value}
+                              onClick={() => {
+                                setRange(option.value)
+                                setStatusMessage('')
+                              }}
+                            >
+                              {t(option.labelKey)}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    )
+                  )}
+
+                  {renderSettingsNodes(
+                    section.children.filter((node) => node.id === 'usageBilling.model'),
+                    (node) => (
+                      <div className="usage-chart-filter usage-chart-filter--model">
+                        <span>{settingLabel(node, t)}:</span>
+                        <div className="usage-model-filter-control" onBlur={closeModelMenuOnBlur}>
+                          <button
+                            className="usage-model-filter-button"
+                            type="button"
+                            aria-haspopup="listbox"
+                            aria-expanded={isModelMenuOpen}
+                            onClick={() => setModelMenuOpen((current) => !current)}
+                          >
+                            <span>
+                              {selectedModel
+                                ? getModelLabel(
+                                    selectedModel,
+                                    configuredModelsById.get(selectedModel.modelId),
+                                    t('usageBilling.deletedModel')
+                                  )
+                                : t('usageBilling.allModels')}
+                            </span>
+                            <ChevronDown aria-hidden="true" />
+                          </button>
+
+                          {isModelMenuOpen && (
+                            <div
+                              className="usage-model-filter-menu"
+                              role="listbox"
+                              aria-label={settingLabel(node, t)}
+                            >
+                              <button
+                                className="usage-model-filter-option"
+                                data-selected={activeModelKey === ALL_MODELS_KEY || undefined}
+                                type="button"
+                                role="option"
+                                aria-selected={activeModelKey === ALL_MODELS_KEY}
+                                onMouseDown={(event) => event.preventDefault()}
+                                onClick={() => {
+                                  setSelectedModelKey(ALL_MODELS_KEY)
+                                  setModelMenuOpen(false)
+                                }}
+                              >
+                                <span>{t('usageBilling.allModels')}</span>
+                                {activeModelKey === ALL_MODELS_KEY && <Check aria-hidden="true" />}
+                              </button>
+
+                              {sortedModels.map((model) => {
+                                const modelKey = getModelKey(model)
+                                const isSelected = activeModelKey === modelKey
+                                return (
+                                  <button
+                                    className="usage-model-filter-option"
+                                    data-selected={isSelected || undefined}
+                                    type="button"
+                                    role="option"
+                                    aria-selected={isSelected}
+                                    key={modelKey}
+                                    onMouseDown={(event) => event.preventDefault()}
+                                    onClick={() => {
+                                      setSelectedModelKey(modelKey)
+                                      setModelMenuOpen(false)
+                                    }}
+                                  >
+                                    <span>
+                                      {getModelLabel(
+                                        model,
+                                        configuredModelsById.get(model.modelId),
+                                        t('usageBilling.deletedModel')
+                                      )}
+                                    </span>
+                                    {isSelected && <Check aria-hidden="true" />}
+                                  </button>
+                                )
+                              })}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    )
+                  )}
+                </div>
+
+                <div className="usage-chart-panel" aria-busy={isLoading}>
+                  <div className="usage-chart-legend" aria-label={t('usageBilling.chartLegend')}>
+                    {USAGE_CHART_SERIES.map((series) => (
+                      <span key={series.key}>
+                        <i className={series.className} aria-hidden="true" />
+                        {t(series.labelKey)}
+                      </span>
+                    ))}
+                  </div>
+
+                  {isLoading ? (
+                    <div className="usage-chart-empty">{t('usageBilling.loading')}</div>
+                  ) : hasChartData ? (
+                    <div className="usage-chart-scroller">
+                      <div
+                        className="usage-chart"
+                        style={{ minWidth: `${Math.max(chartData.length * 96, 720)}px` }}
+                      >
+                        <div className="usage-chart-y-axis" aria-hidden="true">
+                          {chartTicks.map((tick, index) => (
+                            <span key={`${tick}-${index}`}>
+                              {formatCount(Math.round(tick), language)}
+                            </span>
+                          ))}
+                        </div>
+
+                        <div className="usage-chart-plot">
+                          {chartTicks.map((tick, index) => (
+                            <span
+                              className="usage-chart-grid-line"
+                              key={`${tick}-${index}`}
+                              aria-hidden="true"
+                            />
+                          ))}
+
+                          <div className="usage-chart-bars">
+                            {chartData.map((day) => {
+                              const unpricedMessageCount = day.values.unpricedMessageCount ?? 0
+                              const completenessMarker = unpricedMessageCount > 0 ? '*' : ''
+                              const costLabel = `${formatEstimatedCost(day.values.estimatedCost, language)}${completenessMarker}`
+                              const chartCostLabel = `${formatChartEstimatedCost(day.values.estimatedCost, language)}${completenessMarker}`
+                              const dayMaxValue = USAGE_CHART_SERIES.reduce(
+                                (currentMax, series) => {
+                                  const value = day.values[series.key]
+                                  return typeof value === 'number'
+                                    ? Math.max(currentMax, value)
+                                    : currentMax
+                                },
+                                0
+                              )
+                              const dayMaxRatio =
+                                chartMaxValue > 0 && dayMaxValue > 0
+                                  ? dayMaxValue / chartMaxValue
                                   : 0
-                              const height = ratio > 0 ? `${Math.max(ratio * 100, 2)}%` : '0%'
+                              const costBottom =
+                                dayMaxRatio > 0 ? `${Math.min(dayMaxRatio * 100 + 2, 92)}%` : '8px'
+                              const ariaLabel = [
+                                day.fullDateLabel,
+                                `${t('usageBilling.estimatedCost')} ${costLabel}`,
+                                `${t('usageBilling.uncachedInputTokens')} ${formatTokenCount(day.values.uncachedInputTokens, language, t('usageBilling.tokens'))}`,
+                                `${t('usageBilling.cachedInputTokens')} ${formatTokenCount(day.values.cachedInputTokens, language, t('usageBilling.tokens'))}`,
+                                `${t('usageBilling.outputTokens')} ${formatTokenCount(day.values.outputTokens, language, t('usageBilling.tokens'))}`,
+                                `${t('usageBilling.outputThinkingTokens')} ${formatTokenCount(day.values.outputThinkingTokens, language, t('usageBilling.tokens'))}`
+                              ].join(', ')
 
                               return (
-                                <span
-                                  className={`usage-chart-bar ${series.className}`}
-                                  style={{ height }}
-                                  key={series.key}
-                                />
+                                <div
+                                  className="usage-chart-day"
+                                  key={day.fullDateLabel}
+                                  tabIndex={0}
+                                  aria-label={ariaLabel}
+                                >
+                                  <div className="usage-chart-day__bars">
+                                    {USAGE_CHART_SERIES.map((series) => {
+                                      const value = day.values[series.key]
+                                      const ratio =
+                                        chartMaxValue > 0 && typeof value === 'number' && value > 0
+                                          ? value / chartMaxValue
+                                          : 0
+                                      const height =
+                                        ratio > 0 ? `${Math.max(ratio * 100, 2)}%` : '0%'
+
+                                      return (
+                                        <span
+                                          className={`usage-chart-bar ${series.className}`}
+                                          style={{ height }}
+                                          key={series.key}
+                                        />
+                                      )
+                                    })}
+                                    <span
+                                      className="usage-chart-cost"
+                                      style={{ bottom: costBottom }}
+                                    >
+                                      {chartCostLabel}
+                                    </span>
+                                  </div>
+
+                                  <div className="usage-chart-tooltip" role="tooltip">
+                                    <strong className="usage-chart-tooltip__date">
+                                      {day.fullDateLabel}
+                                    </strong>
+                                    <span className="usage-chart-tooltip__row">
+                                      <span>{t('usageBilling.estimatedCost')}</span>
+                                      <strong>{costLabel}</strong>
+                                    </span>
+                                    {unpricedMessageCount > 0 && (
+                                      <span className="usage-chart-tooltip__warning">
+                                        {formatCount(unpricedMessageCount, language)}{' '}
+                                        {t('usageBilling.unpricedMessages')}
+                                      </span>
+                                    )}
+
+                                    <span className="usage-chart-tooltip__row">
+                                      <span>
+                                        <i className="usage-chart-bar--input" aria-hidden="true" />
+                                        {t('usageBilling.uncachedInputTokens')}
+                                      </span>
+                                      <strong>
+                                        {formatTokenCount(
+                                          day.values.uncachedInputTokens,
+                                          language,
+                                          t('usageBilling.tokens')
+                                        )}
+                                      </strong>
+                                    </span>
+                                    <span className="usage-chart-tooltip__row">
+                                      <span>
+                                        <i
+                                          className="usage-chart-bar--cached-input"
+                                          aria-hidden="true"
+                                        />
+                                        {t('usageBilling.cachedInputTokens')}
+                                      </span>
+                                      <strong>
+                                        {formatTokenCount(
+                                          day.values.cachedInputTokens,
+                                          language,
+                                          t('usageBilling.tokens')
+                                        )}
+                                      </strong>
+                                    </span>
+                                    <span className="usage-chart-tooltip__row">
+                                      <span>
+                                        <i className="usage-chart-bar--output" aria-hidden="true" />
+                                        {t('usageBilling.outputTokens')}
+                                      </span>
+                                      <strong>
+                                        {formatTokenCount(
+                                          day.values.outputTokens,
+                                          language,
+                                          t('usageBilling.tokens')
+                                        )}
+                                      </strong>
+                                    </span>
+                                    <span className="usage-chart-tooltip__row">
+                                      <span>
+                                        <i
+                                          className="usage-chart-bar--output-thinking"
+                                          aria-hidden="true"
+                                        />
+                                        {t('usageBilling.outputThinkingTokens')}
+                                      </span>
+                                      <strong>
+                                        {formatTokenCount(
+                                          day.values.outputThinkingTokens,
+                                          language,
+                                          t('usageBilling.tokens')
+                                        )}
+                                      </strong>
+                                    </span>
+                                  </div>
+
+                                  <span
+                                    className="usage-chart-day__label"
+                                    title={day.fullDateLabel}
+                                  >
+                                    {day.dateLabel}
+                                  </span>
+                                </div>
                               )
                             })}
-                            <span className="usage-chart-cost" style={{ bottom: costBottom }}>
-                              {chartCostLabel}
-                            </span>
                           </div>
-
-                          <div className="usage-chart-tooltip" role="tooltip">
-                            <strong className="usage-chart-tooltip__date">
-                              {day.fullDateLabel}
-                            </strong>
-                            <span className="usage-chart-tooltip__row">
-                              <span>{t('usageBilling.estimatedCost')}</span>
-                              <strong>{costLabel}</strong>
-                            </span>
-                            {unpricedMessageCount > 0 && (
-                              <span className="usage-chart-tooltip__warning">
-                                {formatCount(unpricedMessageCount, language)}{' '}
-                                {t('usageBilling.unpricedMessages')}
-                              </span>
-                            )}
-
-                            <span className="usage-chart-tooltip__row">
-                              <span>
-                                <i className="usage-chart-bar--input" aria-hidden="true" />
-                                {t('usageBilling.uncachedInputTokens')}
-                              </span>
-                              <strong>
-                                {formatTokenCount(
-                                  day.values.uncachedInputTokens,
-                                  language,
-                                  t('usageBilling.tokens')
-                                )}
-                              </strong>
-                            </span>
-                            <span className="usage-chart-tooltip__row">
-                              <span>
-                                <i className="usage-chart-bar--cached-input" aria-hidden="true" />
-                                {t('usageBilling.cachedInputTokens')}
-                              </span>
-                              <strong>
-                                {formatTokenCount(
-                                  day.values.cachedInputTokens,
-                                  language,
-                                  t('usageBilling.tokens')
-                                )}
-                              </strong>
-                            </span>
-                            <span className="usage-chart-tooltip__row">
-                              <span>
-                                <i className="usage-chart-bar--output" aria-hidden="true" />
-                                {t('usageBilling.outputTokens')}
-                              </span>
-                              <strong>
-                                {formatTokenCount(
-                                  day.values.outputTokens,
-                                  language,
-                                  t('usageBilling.tokens')
-                                )}
-                              </strong>
-                            </span>
-                            <span className="usage-chart-tooltip__row">
-                              <span>
-                                <i
-                                  className="usage-chart-bar--output-thinking"
-                                  aria-hidden="true"
-                                />
-                                {t('usageBilling.outputThinkingTokens')}
-                              </span>
-                              <strong>
-                                {formatTokenCount(
-                                  day.values.outputThinkingTokens,
-                                  language,
-                                  t('usageBilling.tokens')
-                                )}
-                              </strong>
-                            </span>
-                          </div>
-
-                          <span className="usage-chart-day__label" title={day.fullDateLabel}>
-                            {day.dateLabel}
-                          </span>
                         </div>
-                      )
-                    })}
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="usage-chart-empty">{t('usageBilling.chartEmpty')}</div>
+                  )}
+                </div>
+
+                <div className="usage-summary-grid" aria-busy={isLoading}>
+                  <div className="usage-summary-card">
+                    <span>{t('usageBilling.requestCount')}</span>
+                    <strong>{formatCount(visibleSummary?.requestCount, language)}</strong>
+                  </div>
+                  <div className="usage-summary-card">
+                    <span>{t('usageBilling.messageCount')}</span>
+                    <strong>{formatCount(visibleSummary?.messageCount, language)}</strong>
+                  </div>
+                  <div className="usage-summary-card">
+                    <span>{t('usageBilling.inputTokens')}</span>
+                    <strong>{formatCount(visibleSummary?.inputTokens, language)}</strong>
+                  </div>
+                  <div className="usage-summary-card">
+                    <span>{t('usageBilling.outputTokens')}</span>
+                    <strong>{formatCount(visibleSummary?.outputTokens, language)}</strong>
+                  </div>
+                  <div className="usage-summary-card">
+                    <span>{t('usageBilling.totalTokens')}</span>
+                    <strong>{formatCount(visibleSummary?.totalTokens, language)}</strong>
+                  </div>
+                  <div className="usage-summary-card">
+                    <span>{t('usageBilling.estimatedCost')}</span>
+                    <strong>{formatEstimatedCost(visibleSummary?.estimatedCost, language)}</strong>
+                    {(visibleSummary?.unpricedMessageCount ?? 0) > 0 && (
+                      <small className="usage-cost-warning">
+                        {formatCount(visibleSummary?.unpricedMessageCount, language)}{' '}
+                        {t('usageBilling.unpricedMessages')}
+                      </small>
+                    )}
                   </div>
                 </div>
-              </div>
-            </div>
-          ) : (
-            <div className="usage-chart-empty">{t('usageBilling.chartEmpty')}</div>
-          )}
-        </div>
 
-        <div className="usage-summary-grid" aria-busy={isLoading}>
-          <div className="usage-summary-card">
-            <span>{t('usageBilling.requestCount')}</span>
-            <strong>{formatCount(visibleSummary?.requestCount, language)}</strong>
-          </div>
-          <div className="usage-summary-card">
-            <span>{t('usageBilling.messageCount')}</span>
-            <strong>{formatCount(visibleSummary?.messageCount, language)}</strong>
-          </div>
-          <div className="usage-summary-card">
-            <span>{t('usageBilling.inputTokens')}</span>
-            <strong>{formatCount(visibleSummary?.inputTokens, language)}</strong>
-          </div>
-          <div className="usage-summary-card">
-            <span>{t('usageBilling.outputTokens')}</span>
-            <strong>{formatCount(visibleSummary?.outputTokens, language)}</strong>
-          </div>
-          <div className="usage-summary-card">
-            <span>{t('usageBilling.totalTokens')}</span>
-            <strong>{formatCount(visibleSummary?.totalTokens, language)}</strong>
-          </div>
-          <div className="usage-summary-card">
-            <span>{t('usageBilling.estimatedCost')}</span>
-            <strong>{formatEstimatedCost(visibleSummary?.estimatedCost, language)}</strong>
-            {(visibleSummary?.unpricedMessageCount ?? 0) > 0 && (
-              <small className="usage-cost-warning">
-                {formatCount(visibleSummary?.unpricedMessageCount, language)}{' '}
-                {t('usageBilling.unpricedMessages')}
-              </small>
-            )}
-          </div>
-        </div>
+                <div className="usage-secondary-grid">
+                  <div className="usage-secondary-stat">
+                    <span>{t('usageBilling.cachedInputTokens')}</span>
+                    <strong>{formatCount(visibleSummary?.cachedInputTokens, language)}</strong>
+                  </div>
+                  <div className="usage-secondary-stat">
+                    <span>{t('usageBilling.outputThinkingTokens')}</span>
+                    <strong>{formatCount(visibleSummary?.outputThinkingTokens, language)}</strong>
+                  </div>
+                </div>
 
-        <div className="usage-secondary-grid">
-          <div className="usage-secondary-stat">
-            <span>{t('usageBilling.cachedInputTokens')}</span>
-            <strong>{formatCount(visibleSummary?.cachedInputTokens, language)}</strong>
-          </div>
-          <div className="usage-secondary-stat">
-            <span>{t('usageBilling.outputThinkingTokens')}</span>
-            <strong>{formatCount(visibleSummary?.outputThinkingTokens, language)}</strong>
-          </div>
-        </div>
+                {statusMessage && <p className="usage-status-message">{statusMessage}</p>}
+                {errorMessage && <p className="usage-error-message">{errorMessage}</p>}
 
-        {statusMessage && <p className="usage-status-message">{statusMessage}</p>}
-        {errorMessage && <p className="usage-error-message">{errorMessage}</p>}
+                {renderSettingsNodes(
+                  section.children.filter((node) => node.id === 'usageBilling.models'),
+                  (node) => (
+                    <div className="usage-models-panel">
+                      <h2>{settingLabel(node, t)}</h2>
 
-        <div className="usage-models-panel">
-          <h2>{t('usageBilling.models')}</h2>
-
-          {sortedModels.length > 0 ? (
-            <div className="usage-model-list">
-              {sortedModels.map((model) => {
-                const presentation = getModelPresentation(
-                  model,
-                  configuredModelsById.get(model.modelId)
-                )
-                return (
-                  <div className="usage-model-row" key={model.modelId}>
-                    <div className="usage-model-row__name">
-                      <strong>{presentation.label}</strong>
-                      {presentation.subtitle && <span>{presentation.subtitle}</span>}
-                      {!model.isConfigured && (
-                        <small className="usage-model-row__deleted">
-                          {t('usageBilling.deletedModel')}
-                        </small>
+                      {sortedModels.length > 0 ? (
+                        <div className="usage-model-list">
+                          {sortedModels.map((model) => {
+                            const presentation = getModelPresentation(
+                              model,
+                              configuredModelsById.get(model.modelId)
+                            )
+                            return (
+                              <div className="usage-model-row" key={model.modelId}>
+                                <div className="usage-model-row__name">
+                                  <strong>{presentation.label}</strong>
+                                  {presentation.subtitle && <span>{presentation.subtitle}</span>}
+                                  {!model.isConfigured && (
+                                    <small className="usage-model-row__deleted">
+                                      {t('usageBilling.deletedModel')}
+                                    </small>
+                                  )}
+                                </div>
+                                <div className="usage-model-row__metrics">
+                                  <span>
+                                    {t('usageBilling.requestCount')}{' '}
+                                    {formatCount(model.requestCount, language)}
+                                  </span>
+                                  <span>
+                                    {t('usageBilling.messageCount')}{' '}
+                                    {formatCount(model.messageCount, language)}
+                                  </span>
+                                  <span>
+                                    {t('usageBilling.totalTokens')}{' '}
+                                    {formatCount(model.totalTokens, language)}
+                                  </span>
+                                  <span className="usage-model-row__cost">
+                                    {t('usageBilling.estimatedCost')}{' '}
+                                    {formatEstimatedCost(model.estimatedCost, language)}
+                                    {model.unpricedMessageCount > 0 && (
+                                      <small className="usage-cost-warning">
+                                        {formatCount(model.unpricedMessageCount, language)}{' '}
+                                        {t('usageBilling.unpricedMessages')}
+                                      </small>
+                                    )}
+                                  </span>
+                                </div>
+                              </div>
+                            )
+                          })}
+                        </div>
+                      ) : (
+                        <div className="usage-empty-state">
+                          {isLoading ? t('usageBilling.loading') : t('usageBilling.empty')}
+                        </div>
                       )}
                     </div>
-                    <div className="usage-model-row__metrics">
-                      <span>
-                        {t('usageBilling.requestCount')} {formatCount(model.requestCount, language)}
-                      </span>
-                      <span>
-                        {t('usageBilling.messageCount')} {formatCount(model.messageCount, language)}
-                      </span>
-                      <span>
-                        {t('usageBilling.totalTokens')} {formatCount(model.totalTokens, language)}
-                      </span>
-                      <span className="usage-model-row__cost">
-                        {t('usageBilling.estimatedCost')}{' '}
-                        {formatEstimatedCost(model.estimatedCost, language)}
-                        {model.unpricedMessageCount > 0 && (
-                          <small className="usage-cost-warning">
-                            {formatCount(model.unpricedMessageCount, language)}{' '}
-                            {t('usageBilling.unpricedMessages')}
-                          </small>
-                        )}
-                      </span>
-                    </div>
-                  </div>
-                )
-              })}
-            </div>
-          ) : (
-            <div className="usage-empty-state">
-              {isLoading ? t('usageBilling.loading') : t('usageBilling.empty')}
-            </div>
-          )}
-        </div>
-      </section>
+                  )
+                )}
+              </section>
+            )
+          case 'usageBilling.displaySettings':
+            return (
+              <section
+                className="settings-list-section usage-display-section"
+                aria-labelledby="usage-display-heading"
+              >
+                <div className="settings-list-section__header">
+                  <h2 id="usage-display-heading">{settingLabel(section, t)}</h2>
+                </div>
 
-      <section
-        className="settings-list-section usage-display-section"
-        aria-labelledby="usage-display-heading"
-      >
-        <div className="settings-list-section__header">
-          <h2 id="usage-display-heading">{t('usageBilling.displaySettings')}</h2>
-        </div>
+                <div className="settings-list">
+                  {renderSettingsNodes(
+                    section.children.filter((node) => node.id === 'usageBilling.tokenDetails'),
+                    (node) => (
+                      <div className="settings-list-row">
+                        <div className="settings-list-row__text">
+                          <h3 className="settings-list-row__title" id="usage-token-details-heading">
+                            {settingLabel(node, t)}
+                          </h3>
+                          <p className="settings-list-row__description">
+                            {settingDescription(node, t)}
+                          </p>
+                        </div>
 
-        <div className="settings-list">
-          <div className="settings-list-row">
-            <div className="settings-list-row__text">
-              <h3 className="settings-list-row__title" id="usage-token-details-heading">
-                {t('usageBilling.tokenDetails')}
-              </h3>
-              <p className="settings-list-row__description">
-                {t('usageBilling.tokenDetailsDescription')}
-              </p>
-            </div>
-
-            <button
-              className="settings-switch"
-              type="button"
-              role="switch"
-              aria-checked={uiPreferences.showTokenUsageDetails}
-              data-state={uiPreferences.showTokenUsageDetails ? 'on' : 'off'}
-              onClick={() =>
-                onUiPreferencesChange({
-                  showTokenUsageDetails: !uiPreferences.showTokenUsageDetails
-                })
-              }
-            >
-              <span className="sr-only">{t('usageBilling.tokenDetails')}</span>
-              <span className="settings-switch__thumb" aria-hidden="true" />
-            </button>
-          </div>
-        </div>
-      </section>
+                        <button
+                          className="settings-switch"
+                          type="button"
+                          role="switch"
+                          aria-checked={uiPreferences.showTokenUsageDetails}
+                          data-state={uiPreferences.showTokenUsageDetails ? 'on' : 'off'}
+                          onClick={() =>
+                            onUiPreferencesChange({
+                              showTokenUsageDetails: !uiPreferences.showTokenUsageDetails
+                            })
+                          }
+                        >
+                          <span className="sr-only">{settingLabel(node, t)}</span>
+                          <span className="settings-switch__thumb" aria-hidden="true" />
+                        </button>
+                      </div>
+                    )
+                  )}
+                </div>
+              </section>
+            )
+          default:
+            return null
+        }
+      })}
 
       {isClearDialogOpen && (
         <div

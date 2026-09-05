@@ -223,7 +223,6 @@ fn tool_routing_section(tool_definitions: &[AgentToolDefinition]) -> String {
         "- 需要工具时必须使用模型 API 的原生 tool/function calling，不要在正文中手写或模拟 tool_call JSON。".to_string(),
         "- 优先使用最接近事实来源的工具：项目事实用 workspace 工具，附件事实用附件工具，公开互联网事实用 web 工具。".to_string(),
         "- 本次模型请求已经提供的工具可以与 skills_activate 出现在同一响应中，仍按当前冻结 ToolSet、权限和审批规则执行；Skill 完整指令及其新解锁工具只从下一次模型请求生效，不要猜测或调用本次请求尚未提供的工具。".to_string(),
-        "- 内置 image_generation 生成物出现平台添加的“AI生成”等水印时，应将其视为产品配置结果而非素材质量缺陷；模型不能更改该配置，也不得通过裁切、遮挡、覆盖、重绘、修图、二次编辑或反复生成使该水印不可见；若用户不希望保留，只提醒其在“设置 → 配置 → 图片生成 → 添加水印”中手动关闭该选项、保存后重新生成；该规则不适用于第三方素材的版权水印或来源不明标记。".to_string(),
     ];
 
     if has_any_tool(
@@ -242,10 +241,7 @@ fn tool_routing_section(tool_definitions: &[AgentToolDefinition]) -> String {
         rules.push("- read_file 未指定范围时会在输出预算允许的情况下返回完整文本。若结果标记 truncated=true，任务确实需要后续内容时，优先原样执行 continueWith；兼容旧结果时使用返回的 nextStartByte 继续读取。不能把截断片段说成完整文件。对明显超大、压缩、生成或日志文件，优先搜索定位相关区域，再读取必要片段。".to_string());
     }
     if has_tool(tool_definitions, "read_image") {
-        rules.push("- read_image 只需要一个 path。查看附件时把 attachments_list 返回的 readPath 原样放进 path；查看生成图片时把 image_generation 返回的 path 原样放进 path；工作区或绝对图片直接使用其路径。不要自行拼 source 对象、URI、附件 ID 或内部文件位置。".to_string());
-        if has_tool(tool_definitions, "image_generation") {
-            rules.push("- image_generation 成功结果中的 path 可直接交给 read_image.path，也可原样交给后续 image_generation 编辑的 inputPath。用户要求检查刚生成的图片时应读取这个 path，不要重新生成，也不要到附件库中寻找生成物。visualInputDelivery 只描述生成发生时的视觉投递，不能证明后续请求仍携带图片像素。".to_string());
-        }
+        rules.push("- read_image 只需要一个 path。查看附件时把 attachments_list 返回的 readPath 原样放进 path；其他工具返回可读取的图片 path 时也原样使用；工作区或绝对图片直接使用其路径。不要自行拼 source 对象、URI、附件 ID 或内部文件位置。".to_string());
     }
     if has_tool(tool_definitions, "run_command") {
         rules.push("- run_command.inputs 中每个文件只填写 path；需要脚本内固定名称时再填写可选 mountPath。不要构造 source 类型对象，Host 会自动识别 workspace、绝对路径、附件、生成物和 Skill 资源并冻结内容身份。".to_string());
@@ -762,7 +758,7 @@ mod tests {
     }
 
     #[test]
-    fn generated_image_inspection_uses_one_copyable_path() {
+    fn image_inspection_uses_one_copyable_path_without_optional_generation_instructions() {
         let prompt = build_system_prompt(
             None,
             &[
@@ -773,39 +769,28 @@ mod tests {
         );
 
         assert!(prompt.contains("read_image 只需要一个 path"));
-        assert!(prompt.contains("image_generation 成功结果中的 path 可直接交给 read_image"));
-        assert!(prompt.contains("后续 image_generation 编辑的 inputPath"));
-        assert!(prompt.contains("不要重新生成"));
-        assert!(prompt.contains("不要到附件库中寻找生成物"));
-        assert!(prompt.contains("只描述生成发生时的视觉投递"));
-        assert!(prompt.contains("visualInputDelivery"));
+        assert!(prompt.contains("其他工具返回可读取的图片 path 时也原样使用"));
+        assert!(!prompt.contains("image_generation"));
+        assert!(!prompt.contains("visualInputDelivery"));
         assert!(prompt.contains("不要自行拼 source 对象"));
     }
 
     #[test]
-    fn stable_prompt_explains_product_watermarks_before_dynamic_tool_activation() {
-        let prompt = build_system_prompt(None, &[]);
-
-        assert!(prompt.contains("设置 → 配置 → 图片生成 → 添加水印"));
-        assert!(prompt.contains("而非素材质量缺陷"));
-        assert!(prompt.contains("模型不能更改该配置"));
-        assert!(prompt
-            .contains("不得通过裁切、遮挡、覆盖、重绘、修图、二次编辑或反复生成使该水印不可见"));
-        assert!(prompt.contains("手动关闭该选项、保存后重新生成"));
-        assert!(prompt.contains("不适用于第三方素材的版权水印或来源不明标记"));
-        assert_eq!(
-            prompt.matches("设置 → 配置 → 图片生成 → 添加水印").count(),
-            1
-        );
-
-        let with_dynamic_tool_shape =
-            build_system_prompt(None, &[tool_definition("image_generation")]);
-        assert_eq!(
-            prompt.matches("设置 → 配置 → 图片生成 → 添加水印").count(),
-            with_dynamic_tool_shape
-                .matches("设置 → 配置 → 图片生成 → 添加水印")
-                .count()
-        );
+    fn stable_prompt_does_not_describe_optional_image_generation() {
+        for tools in [vec![], vec![tool_definition("image_generation")]] {
+            let prompt = build_system_prompt(None, &tools);
+            for fragment in [
+                "image_generation",
+                "图片生成",
+                "水印",
+                "visualInputDelivery",
+            ] {
+                assert!(
+                    !prompt.contains(fragment),
+                    "unexpected stable instruction: {fragment}"
+                );
+            }
+        }
     }
 
     #[test]

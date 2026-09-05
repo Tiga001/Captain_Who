@@ -191,6 +191,7 @@ fn save_settled_history(fixture: &Fixture, turn_count: usize, active_tail: bool)
     let mut messages = Vec::new();
     for turn in 0..turn_count {
         messages.push(ChatMessageRecord {
+            human_interaction_response: None,
             id: format!("root-user-{turn}"),
             role: "user".to_string(),
             content: format!("question {turn}"),
@@ -201,7 +202,8 @@ fn save_settled_history(fixture: &Fixture, turn_count: usize, active_tail: bool)
             ui_state_json: None,
         });
         messages.push(ChatMessageRecord {
-                id: format!("root-assistant-{turn}"),
+                                human_interaction_response: None,
+id: format!("root-assistant-{turn}"),
                 role: "assistant".to_string(),
                 content: format!("answer {turn}"),
                 created_at: 11 + turn as i64 * 2,
@@ -215,6 +217,7 @@ fn save_settled_history(fixture: &Fixture, turn_count: usize, active_tail: bool)
     }
     if active_tail {
         messages.push(ChatMessageRecord {
+            human_interaction_response: None,
             id: "root-user-active".to_string(),
             role: "user".to_string(),
             content: "must not be copied".to_string(),
@@ -225,6 +228,7 @@ fn save_settled_history(fixture: &Fixture, turn_count: usize, active_tail: bool)
             ui_state_json: None,
         });
         messages.push(ChatMessageRecord {
+            human_interaction_response: None,
             id: "root-assistant-active".to_string(),
             role: "assistant".to_string(),
             content: String::new(),

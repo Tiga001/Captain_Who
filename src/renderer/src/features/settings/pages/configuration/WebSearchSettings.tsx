@@ -1,3 +1,5 @@
+import { renderSettingsNodes, settingLabel } from '../../settingsDefinition'
+import { webSearchConfigurationSection } from './configuration.definition'
 import { useState } from 'react'
 import type { CredentialMutation, CredentialStatus } from '@mycopilot/protocol'
 import { useFrontendConfig } from '../../../../config/FrontendConfigProvider'
@@ -5,6 +7,7 @@ import type { SearchMode } from './configurationTypes'
 import { CredentialInput } from './CredentialInput'
 
 interface WebSearchSettingsProps {
+  definition?: typeof webSearchConfigurationSection
   searchMode: SearchMode
   tavilyApiKeyStatus: CredentialStatus
   onSearchModeChange: (value: SearchMode) => void
@@ -12,6 +15,7 @@ interface WebSearchSettingsProps {
 }
 
 export function WebSearchSettings({
+  definition = webSearchConfigurationSection,
   searchMode,
   tavilyApiKeyStatus,
   onSearchModeChange,
@@ -48,51 +52,61 @@ export function WebSearchSettings({
     <section
       className="configuration-section configuration-section--search settings-list-page"
       aria-labelledby="web-search-heading"
+      data-setting-id={definition.id}
     >
-      <h1 id="web-search-heading">{t('configuration.webSearch')}</h1>
+      <h1 id="web-search-heading">{settingLabel(definition, t)}</h1>
 
       <div className="settings-list-section">
         <div className="settings-list">
-          <div className="settings-list-row">
-            <div className="settings-list-row__text">
-              <h2 className="settings-list-row__title">{t('configuration.webSearch')}</h2>
-            </div>
+          {renderSettingsNodes(definition.children, (node) => {
+            switch (node.id) {
+              case 'configuration.webSearch.enabled':
+                return (
+                  <div className="settings-list-row">
+                    <div className="settings-list-row__text">
+                      <h2 className="settings-list-row__title">{settingLabel(node, t)}</h2>
+                    </div>
 
-            <button
-              className="settings-switch"
-              type="button"
-              role="switch"
-              data-state={isSearchAllowed ? 'on' : 'off'}
-              aria-checked={isSearchAllowed}
-              onClick={toggleWebSearch}
-            >
-              <span className="sr-only">
-                {isSearchAllowed
-                  ? t('configuration.webSearchAllowed')
-                  : t('configuration.webSearchDisabled')}
-              </span>
-              <span className="settings-switch__thumb" aria-hidden="true" />
-            </button>
-          </div>
-
-          <div className="configuration-field settings-list-row">
-            <span className="settings-list-row__text">
-              <span className="settings-list-row__title">{t('configuration.tavilyApiKey')}</span>
-            </span>
-            <span className="settings-list-row__control">
-              <CredentialInput
-                ariaLabel={t('configuration.tavilyApiKey')}
-                mutation={tavilyApiKeyMutation}
-                onCommit={async (mutation) => {
-                  await onTavilyApiKeyCommit(mutation)
-                  setTavilyApiKeyMutation({ type: 'keep' })
-                }}
-                onMutationChange={setTavilyApiKeyMutation}
-                placeholder={t('configuration.credential.placeholder')}
-                status={tavilyApiKeyStatus}
-              />
-            </span>
-          </div>
+                    <button
+                      className="settings-switch"
+                      type="button"
+                      role="switch"
+                      data-state={isSearchAllowed ? 'on' : 'off'}
+                      aria-checked={isSearchAllowed}
+                      onClick={toggleWebSearch}
+                    >
+                      <span className="sr-only">
+                        {isSearchAllowed
+                          ? t('configuration.webSearchAllowed')
+                          : t('configuration.webSearchDisabled')}
+                      </span>
+                      <span className="settings-switch__thumb" aria-hidden="true" />
+                    </button>
+                  </div>
+                )
+              case 'configuration.webSearch.apiKey':
+                return (
+                  <div className="configuration-field settings-list-row">
+                    <span className="settings-list-row__text">
+                      <span className="settings-list-row__title">{settingLabel(node, t)}</span>
+                    </span>
+                    <span className="settings-list-row__control">
+                      <CredentialInput
+                        ariaLabel={settingLabel(node, t)}
+                        mutation={tavilyApiKeyMutation}
+                        onCommit={async (mutation) => {
+                          await onTavilyApiKeyCommit(mutation)
+                          setTavilyApiKeyMutation({ type: 'keep' })
+                        }}
+                        onMutationChange={setTavilyApiKeyMutation}
+                        placeholder={t('configuration.credential.placeholder')}
+                        status={tavilyApiKeyStatus}
+                      />
+                    </span>
+                  </div>
+                )
+            }
+          })}
         </div>
       </div>
 

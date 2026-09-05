@@ -19,6 +19,7 @@ use std::sync::Arc;
 pub const APPLICATION_BUNDLED_SKILL_SOURCE_ID: &str = "bundled:application";
 pub const DOCUMENTS_LOCAL_ID: &str = "documents";
 pub const IMAGE_GENERATION_LOCAL_ID: &str = "image-generation";
+pub const IMAGE_GENERATION_SKILL_ID: &str = "bundled:application:image-generation";
 pub const PDF_LOCAL_ID: &str = "pdf";
 pub const PRESENTATIONS_LOCAL_ID: &str = "presentations";
 pub const SKILL_CREATOR_LOCAL_ID: &str = "skill-creator";
@@ -772,6 +773,12 @@ mod tests {
             .contains("request.operation=\"edit\""));
         assert!(package.instructions().contains("request.inputPath"));
         assert!(package.instructions().contains("Artifact is verified"));
+        assert!(package.instructions().contains("## Product watermark"));
+        assert!(package
+            .instructions()
+            .contains("cropping, covering, repainting"));
+        assert!(package.instructions().contains("save, and generate again"));
+        assert!(!descriptor.description().contains("watermark"));
         assert!(package
             .instructions()
             .contains("do not retry it automatically"));

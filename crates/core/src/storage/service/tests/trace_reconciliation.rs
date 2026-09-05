@@ -34,6 +34,7 @@ fn assistant_run_message(
         run["completedAt"] = serde_json::json!(22);
     }
     ChatMessageRecord {
+        human_interaction_response: None,
         id: id.to_string(),
         role: "assistant".to_string(),
         content: "partial response".to_string(),
@@ -61,6 +62,7 @@ fn save_run_conversation(
             title: "orphan trace".to_string(),
             messages: vec![
                 ChatMessageRecord {
+                    human_interaction_response: None,
                     id: format!("user-{assistant_message_id}"),
                     role: "user".to_string(),
                     content: "do work".to_string(),
@@ -459,6 +461,7 @@ fn reload_rebuilds_compaction_and_runtime_error_in_the_durable_trace_order() {
             title: "runtime presentation reload".to_string(),
             messages: vec![
                 ChatMessageRecord {
+                    human_interaction_response: None,
                     id: "user-runtime-presentation-reload".to_string(),
                     role: "user".to_string(),
                     content: "continue".to_string(),
@@ -469,6 +472,7 @@ fn reload_rebuilds_compaction_and_runtime_error_in_the_durable_trace_order() {
                     ui_state_json: None,
                 },
                 ChatMessageRecord {
+                    human_interaction_response: None,
                     id: assistant_message_id.to_string(),
                     role: "assistant".to_string(),
                     content: "iteration limit reached".to_string(),
@@ -655,6 +659,7 @@ fn reload_replaces_live_timeline_projections_with_one_durable_ordered_trace() {
             title: "live trace reload".to_string(),
             messages: vec![
                 ChatMessageRecord {
+                    human_interaction_response: None,
                     id: "user-live-trace-reload".to_string(),
                     role: "user".to_string(),
                     content: "Build a presentation.".to_string(),
@@ -665,6 +670,7 @@ fn reload_replaces_live_timeline_projections_with_one_durable_ordered_trace() {
                     ui_state_json: None,
                 },
                 ChatMessageRecord {
+                    human_interaction_response: None,
                     id: assistant_message_id.to_string(),
                     role: "assistant".to_string(),
                     content: final_answer.to_string(),
@@ -829,6 +835,7 @@ fn reload_keeps_a_host_terminal_error_unanchored_without_inventing_a_trace_seque
             title: "host error reload".to_string(),
             messages: vec![
                 ChatMessageRecord {
+                    human_interaction_response: None,
                     id: "user-host-error-reload".to_string(),
                     role: "user".to_string(),
                     content: "continue".to_string(),
@@ -839,6 +846,7 @@ fn reload_keeps_a_host_terminal_error_unanchored_without_inventing_a_trace_seque
                     ui_state_json: None,
                 },
                 ChatMessageRecord {
+                    human_interaction_response: None,
                     id: assistant_message_id.to_string(),
                     role: "assistant".to_string(),
                     content: "host persistence failed".to_string(),

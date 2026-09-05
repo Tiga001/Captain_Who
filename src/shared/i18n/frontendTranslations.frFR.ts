@@ -838,6 +838,7 @@ export const frFRTranslations = {
     'Cette sélection de source de compétences a expiré. Résolvez à nouveau la source.',
   'skills.error.acknowledgementRequired':
     'Confirmez tous les avis de sécurité requis avant de continuer.',
+  'skills.error.configurationRequired': 'Avant d’activer cette compétence, enregistrez une adresse API, un modèle et une clé valides dans Paramètres → Configuration → Génération d’images.',
   'skills.error.notManageable': 'Cette compétence ne peut pas être gérée sur cette page.',
   'skills.error.operationConflict': "L'état de fonctionnement a changé. Recommencez l'opération.",
   'skills.error.cancelled': "L'opération a été annulée.",

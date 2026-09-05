@@ -61,6 +61,10 @@ vi.mock('../../storage/storageClient', () => ({
   getTranslucentSidebarOpacityPercent: () => 54
 }))
 
+vi.mock('../../notifications/notificationClient', () => ({
+  hasNotificationHostApi: () => false
+}))
+
 vi.mock('../../settings/pages/AppearanceSettingsPage', () => ({
   AppearanceSettingsPage: () => <div>appearance-page</div>
 }))
@@ -600,6 +604,90 @@ describe('Skills settings navigation and management inventory', () => {
 })
 
 describe('Skills management mutations', () => {
+  it('explains a Host-provided image configuration block without sending enablement and refreshes eligibility', async () => {
+    const imageSkill: SkillManagementEntry = {
+      ...bundledImageGenerationSkill,
+      enabled: false,
+      enablementBlock: 'imageGenerationConfigurationRequired'
+    }
+    service.listManagement.mockResolvedValueOnce(managementOutput([imageSkill]))
+    const screen = await render(<SkillsSettingsPage />)
+    await expect.element(screen.getByText('skills.bundled.imageGeneration.name')).toBeVisible()
+    const toggle = findSkillRow(
+      screen.container,
+      'skills.bundled.imageGeneration.name'
+    ).querySelector<HTMLButtonElement>('[role="switch"]')!
+
+    expect(toggle.getAttribute('aria-disabled')).toBe('true')
+    expect(getComputedStyle(toggle).cursor).toBe('not-allowed')
+    expect(getComputedStyle(toggle).opacity).toBe('0.48')
+    toggle.click()
+    expect(service.setEnabled).not.toHaveBeenCalled()
+    expect(service.showToast).toHaveBeenCalledWith('skills.error.configurationRequired', {
+      durationMs: 3200
+    })
+    expect(toggle.getAttribute('aria-checked')).toBe('false')
+
+    service.listManagement.mockResolvedValueOnce(
+      managementOutput([
+        {
+          ...bundledImageGenerationSkill,
+          enabled: false,
+          stateRevision: 'configured-image-revision'
+        }
+      ])
+    )
+    changedHandler?.()
+    await expect.poll(() => toggle.getAttribute('aria-disabled')).toBeNull()
+    service.setEnabled.mockResolvedValueOnce({
+      enabled: true,
+      managementRevision: 'management-revision-2',
+      outcome: 'updated',
+      schemaVersion: 1,
+      skillId: imageSkill.id,
+      stateRevision: 'enabled-image-revision'
+    })
+    toggle.click()
+    expect(service.setEnabled).toHaveBeenCalledWith({
+      enabled: true,
+      expectedStateRevision: 'configured-image-revision',
+      skillId: imageSkill.id
+    })
+    await expect.poll(() => toggle.getAttribute('aria-checked')).toBe('true')
+  })
+
+  it('allows an enabled image Skill to be switched off even with an enablement block', async () => {
+    const imageSkill: SkillManagementEntry = {
+      ...bundledImageGenerationSkill,
+      enablementBlock: 'imageGenerationConfigurationRequired'
+    }
+    service.listManagement.mockResolvedValueOnce(managementOutput([imageSkill]))
+    service.setEnabled.mockResolvedValueOnce({
+      enabled: false,
+      managementRevision: 'management-revision-2',
+      outcome: 'updated',
+      schemaVersion: 1,
+      skillId: imageSkill.id,
+      stateRevision: 'disabled-image-revision'
+    })
+    const screen = await render(<SkillsSettingsPage />)
+    await expect.element(screen.getByText('skills.bundled.imageGeneration.name')).toBeVisible()
+    const toggle = findSkillRow(
+      screen.container,
+      'skills.bundled.imageGeneration.name'
+    ).querySelector<HTMLButtonElement>('[role="switch"]')!
+
+    expect(toggle.getAttribute('aria-disabled')).toBeNull()
+    toggle.click()
+    expect(service.setEnabled).toHaveBeenCalledWith({
+      enabled: false,
+      expectedStateRevision: imageSkill.stateRevision,
+      skillId: imageSkill.id
+    })
+    await expect.poll(() => toggle.getAttribute('aria-checked')).toBe('false')
+    expect(service.showToast).not.toHaveBeenCalled()
+  })
+
   it('uses the exact state revision and disables the row switch while pending', async () => {
     const pending = deferred<{
       enabled: boolean
@@ -660,6 +748,44 @@ describe('Skills management mutations', () => {
     await expect
       .poll(() => service.showToast.mock.calls)
       .toContainEqual(['skills.stateChanged', { durationMs: 3200 }])
+  })
+
+  it('keeps image generation disabled and explains missing configuration when enabling fails', async () => {
+    const imageSkill = { ...bundledImageGenerationSkill, enabled: false }
+    service.listManagement.mockResolvedValueOnce(managementOutput([imageSkill]))
+    service.listManagement.mockResolvedValueOnce(
+      managementOutput([{ ...imageSkill, enablementBlock: 'imageGenerationConfigurationRequired' }])
+    )
+    service.setEnabled.mockRejectedValueOnce(
+      new HostInvocationError({
+        data: {
+          code: 'configurationRequired',
+          operation: 'setEnabled',
+          recovery: 'configureImageGeneration',
+          type: 'skillManagement'
+        },
+        message: 'private backend credential detail'
+      })
+    )
+    const screen = await render(<SkillsSettingsPage />)
+    await expect.element(screen.getByText('skills.bundled.imageGeneration.name')).toBeVisible()
+    const toggle = findSkillRow(
+      screen.container,
+      'skills.bundled.imageGeneration.name'
+    ).querySelector<HTMLButtonElement>('[role="switch"]')!
+    toggle.click()
+    await expect
+      .poll(() => service.showToast.mock.calls)
+      .toContainEqual(['skills.error.configurationRequired', { durationMs: 3200 }])
+    await expect.poll(() => toggle.disabled).toBe(false)
+    expect(service.listManagement).toHaveBeenCalledTimes(2)
+    expect(toggle.getAttribute('aria-disabled')).toBe('true')
+    expect(toggle.getAttribute('aria-checked')).toBe('false')
+    expect(service.setEnabled).toHaveBeenCalledWith({
+      enabled: true,
+      expectedStateRevision: imageSkill.stateRevision,
+      skillId: imageSkill.id
+    })
   })
 
   it('refreshes on skills.changed and unsubscribes on unmount', async () => {

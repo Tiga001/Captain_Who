@@ -60,12 +60,13 @@ test('accepts exactly one owner per TS and TSX test file', async () => {
 test('keeps the repository test inventory in its intended projects', () => {
   const analysis = assertVitestProjectOwnership()
 
-  assert.equal(analysis.candidateFiles.length, 285)
+  assert.equal(analysis.candidateFiles.length, 331)
   assert.deepEqual(analysis.projectCounts, {
-    unit: 187,
-    browser: 93,
+    unit: 205,
+    browser: 120,
     'electron-fixtures': 3,
     'managed-playwright-e2e': 1,
+    'human-interaction-core-e2e': 1,
     'automation-core-e2e': 1
   })
 })

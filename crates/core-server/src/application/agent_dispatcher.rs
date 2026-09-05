@@ -3464,6 +3464,7 @@ mod tests {
             .upsert_chat_messages(
                 "conversation-child-interrupt",
                 vec![ChatMessageRecord {
+                    human_interaction_response: None,
                     id: "assistant-before-crash".to_string(),
                     role: "assistant".to_string(),
                     content: String::new(),

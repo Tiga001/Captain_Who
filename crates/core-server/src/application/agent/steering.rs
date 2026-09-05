@@ -29,6 +29,15 @@ impl AgentService {
                     .into(),
             );
         }
+        // This namespace authenticates Host-owned answer guidance, including frozen fork history.
+        // Reject before journaling or emitting a GuidanceRejected projection: even a rejected
+        // external message must never look like a formal human-interaction response in the UI.
+        // Native answer delivery binds/enqueues its trusted record directly, not via this API.
+        if client_message_id.starts_with("human-answer-") {
+            return Err("clientMessageId 使用了 Host 保留的回答标识前缀。"
+                .to_string()
+                .into());
+        }
         self.authorize_user_conversation_write(&conversation_id)?;
 
         let existing = self

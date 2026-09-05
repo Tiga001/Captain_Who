@@ -5,6 +5,8 @@ import {
   type HostInvocationResult
 } from '@mycopilot/host-api'
 import {
+  assertNoHumanInteractionMessageProof,
+  validateStorageHumanInteractionResponses,
   parseProviderVendorDescriptors,
   parseProviderVendorModelPolicyDescriptor,
   parseProviderProfileUiDescriptors,
@@ -82,16 +84,24 @@ export function registerStorageIpc(
   ipcMain.handle(HOST_CHANNELS.storage.revealProjectFile, (_event, input) =>
     actions.revealProjectFile(coreServer, input)
   )
-  ipcMain.handle(HOST_CHANNELS.storage.loadConversations, () => coreServer.loadConversations())
+  ipcMain.handle(HOST_CHANNELS.storage.loadConversations, async () =>
+    (await coreServer.loadConversations()).map(validateStorageHumanInteractionResponses)
+  )
   ipcMain.handle(HOST_CHANNELS.storage.loadConversationMetas, () =>
     coreServer.loadConversationMetas()
   )
   ipcMain.handle(HOST_CHANNELS.storage.loadConversation, (_event, conversationId) =>
-    coreServer.loadConversation(conversationId)
+    coreServer
+      .loadConversation(conversationId)
+      .then((conversation) =>
+        conversation ? validateStorageHumanInteractionResponses(conversation) : null
+      )
   )
   ipcMain.handle(HOST_CHANNELS.storage.forkConversation, (_event, input) =>
     captureConversationForkInvocation(() =>
-      coreServer.forkConversation(parseStorageForkConversationRequest(input))
+      coreServer
+        .forkConversation(parseStorageForkConversationRequest(input))
+        .then(validateStorageHumanInteractionResponses)
     )
   )
   ipcMain.handle(HOST_CHANNELS.storage.saveConversationMeta, (_event, conversation) =>
@@ -103,15 +113,18 @@ export function registerStorageIpc(
   ipcMain.handle(HOST_CHANNELS.storage.deleteChatMessages, (_event, input) =>
     coreServer.deleteChatMessages(input)
   )
-  ipcMain.handle(HOST_CHANNELS.storage.upsertChatMessages, (_event, input) =>
-    coreServer.upsertChatMessages(input)
-  )
-  ipcMain.handle(HOST_CHANNELS.storage.saveChatMessageState, (_event, input) =>
-    coreServer.saveChatMessageState(input)
-  )
-  ipcMain.handle(HOST_CHANNELS.storage.saveChatMessageUiState, (_event, input) =>
-    coreServer.saveChatMessageUiState(input)
-  )
+  ipcMain.handle(HOST_CHANNELS.storage.upsertChatMessages, (_event, input) => {
+    for (const message of input.messages) assertNoHumanInteractionMessageProof(message)
+    return coreServer.upsertChatMessages(input)
+  })
+  ipcMain.handle(HOST_CHANNELS.storage.saveChatMessageState, (_event, input) => {
+    assertNoHumanInteractionMessageProof(input.message)
+    return coreServer.saveChatMessageState(input)
+  })
+  ipcMain.handle(HOST_CHANNELS.storage.saveChatMessageUiState, (_event, input) => {
+    assertNoHumanInteractionMessageProof(input.message)
+    return coreServer.saveChatMessageUiState(input)
+  })
   ipcMain.handle(HOST_CHANNELS.storage.loadComposerDrafts, () => coreServer.loadComposerDrafts())
   ipcMain.handle(HOST_CHANNELS.storage.saveComposerDraft, (_event, draft) =>
     coreServer.saveComposerDraft(draft)

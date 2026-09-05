@@ -66,6 +66,8 @@ import './GuidanceQueue.css'
 const TEXTAREA_MAX_HEIGHT = 220
 
 interface ChatComposerProps {
+  /** Another interaction occupies the input area; preserve drafts but close transient menus. */
+  isSuspended?: boolean
   commands?: readonly ComposerCommand[]
   isManualCompactionRunning?: boolean
   contextWindowIndicatorEnabled?: boolean
@@ -99,6 +101,7 @@ interface ChatComposerProps {
 const EMPTY_COMMANDS: readonly ComposerCommand[] = []
 
 export function ChatComposer({
+  isSuspended = false,
   commands = EMPTY_COMMANDS,
   isManualCompactionRunning = false,
   contextWindowIndicatorEnabled = false,
@@ -352,6 +355,16 @@ export function ChatComposer({
     setIsPermissionMenuOpen(false)
     setIsProjectMenuOpen(false)
   }, [isModelTransitionRunning])
+
+  useEffect(() => {
+    if (!isSuspended) return
+    setIsCommandMenuOpen(false)
+    setIsAttachmentMenuOpen(false)
+    setIsSkillMenuOpen(false)
+    setIsPermissionMenuOpen(false)
+    setIsProjectMenuOpen(false)
+    setIsFullPermissionConfirmationOpen(false)
+  }, [isSuspended])
 
   useEffect(() => {
     setAttachmentError(null)

@@ -1194,3 +1194,261 @@ async fn pre_runtime_approval_failure_releases_occupancy_and_drains_pending_asyn
     fixture.usage(3);
     fixture.no_request().await;
 }
+
+async fn assert_pre_runtime_sync_revocation(explicit_stop: bool) {
+    let mut fixture = Fixture::new().await;
+    let turn = fixture.start();
+    fixture.request().await;
+    fixture.reply(Reply::Async(2));
+    fixture.request().await;
+    fixture.reply(Reply::Sync);
+    fixture.done("waiting_for_user_input").await;
+    fixture.released(&turn.run_id).await;
+    let batches = fixture.batches();
+    let asynchronous = batches
+        .iter()
+        .filter(|request| request.mode == HumanInteractionMode::Async)
+        .cloned()
+        .collect::<Vec<_>>();
+    let blocking = batches
+        .iter()
+        .find(|request| request.mode == HumanInteractionMode::Sync)
+        .unwrap();
+    let submitted = fixture.submit(&asynchronous[0], false);
+    fixture.no_request().await;
+
+    // The old worker has retired. Revoke the new claim at the last storage execution fence,
+    // after reconstruction but before any resumed Tool or Provider request can run.
+    let service = fixture.agent.clone();
+    let run_id = turn.run_id.clone();
+    super::super::turn_executor::install_before_human_resume_execution_hook(
+        &turn.run_id,
+        Arc::new(move || {
+            if explicit_stop {
+                assert!(service.cancel_run_checked(&run_id).unwrap());
+            } else {
+                service
+                    .storage
+                    .cancel_sync_human_interactions_for_run(&run_id)
+                    .unwrap();
+            }
+        }),
+    );
+    fixture.submit(blocking, true);
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while let Some(event) = fixture.events.recv().await {
+            if event["params"]["code"] == "human_input_resume_failed" {
+                return;
+            }
+        }
+        panic!("missing refused sync resume event");
+    })
+    .await
+    .expect("sync resume refusal did not settle");
+    assert!(
+        !fixture
+            .agent
+            .active_runs
+            .lock()
+            .unwrap()
+            .contains_key(&turn.run_id),
+        "a refused resume must not leave an accepting queue without a worker"
+    );
+    fixture.released(&turn.run_id).await;
+    let trace = fixture
+        .storage
+        .get_conversation_turn_trace(ASSISTANT)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        trace.terminal_status,
+        ConversationTurnTraceTerminalStatus::Cancelled
+    );
+
+    let expected = if explicit_stop {
+        fixture.no_request().await;
+        let cancelled = fixture
+            .batches()
+            .into_iter()
+            .find(|request| request.request_id == submitted.request_id)
+            .unwrap();
+        assert_eq!(
+            cancelled.delivery.unwrap().status,
+            HumanInteractionDeliveryStatus::Cancelled
+        );
+        // This later answer is explicit user intent after Stop. A stale accepting queue would
+        // steal it from the new-root route and leave it stranded until the next process restart.
+        fixture.submit(&asynchronous[1], false)
+    } else {
+        submitted
+    };
+    let continuation = fixture.request().await;
+    assert_projection(&continuation, std::slice::from_ref(&expected));
+    fixture.reply(Reply::Complete);
+    let completed = fixture.done("completed").await;
+    assert_ne!(completed["runId"], turn.run_id);
+    fixture.applied(1).await;
+    assert_eq!(fixture.messages().len(), 4);
+    fixture.usage(3);
+    fixture.no_request().await;
+}
+
+#[tokio::test]
+async fn revoked_sync_resume_claim_retires_control_and_drains_pending_async_answer() {
+    assert_pre_runtime_sync_revocation(false).await;
+}
+
+#[tokio::test]
+async fn stop_before_sync_resume_execution_retires_control_and_allows_later_explicit_answer() {
+    assert_pre_runtime_sync_revocation(true).await;
+}
+
+fn assert_question_contract(request: &Value, enabled: bool) {
+    for tool in ["request_user_input", "request_user_input_async"] {
+        assert_eq!(
+            request["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|entry| entry["function"]["name"] == tool),
+            enabled,
+        );
+    }
+    assert_eq!(
+        request["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|message| message["content"]
+                .as_str()
+                .is_some_and(|text| text.contains("## 人机交互"))),
+        enabled,
+    );
+}
+
+#[tokio::test]
+async fn live_host_setting_close_rejects_in_flight_model_questions_then_reopens_next_snapshot() {
+    for synchronous in [false, true] {
+        let mut fixture = Fixture::new().await;
+        fixture.start();
+        assert_question_contract(&fixture.request().await, true);
+        HumanInteractionService::new(&fixture.storage, &fixture.agent)
+            .update_settings(
+                mycopilot_core::human_interaction::HumanInteractionSettingsUpdate {
+                    enabled: false,
+                    expected_revision: 0,
+                },
+                &fixture.notifications,
+            )
+            .unwrap();
+        // The Provider saw an enabled schema, but durable admission must recheck the later
+        // setting transaction. Neither mode may publish a question or suspend the worker.
+        fixture.reply(if synchronous {
+            Reply::Sync
+        } else {
+            Reply::Async(1)
+        });
+        assert_question_contract(&fixture.request().await, false);
+        assert!(fixture.batches().is_empty());
+        HumanInteractionService::new(&fixture.storage, &fixture.agent)
+            .update_settings(
+                mycopilot_core::human_interaction::HumanInteractionSettingsUpdate {
+                    enabled: true,
+                    expected_revision: 1,
+                },
+                &fixture.notifications,
+            )
+            .unwrap();
+        // Reopening the live policy cannot authorize a call absent from this model request.
+        fixture.reply(if synchronous {
+            Reply::Sync
+        } else {
+            Reply::Async(1)
+        });
+        assert_question_contract(&fixture.request().await, true);
+        assert!(fixture.batches().is_empty());
+        fixture.reply(Reply::Complete);
+        fixture.done("completed").await;
+        let messages = fixture.messages();
+        let trace = fixture
+            .storage
+            .get_conversation_turn_trace(&messages[1].id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            trace
+                .items
+                .iter()
+                .filter(|item| matches!(
+                    item,
+                    ConversationTurnTraceItem::ToolResult { success: false, .. }
+                ))
+                .count(),
+            2
+        );
+        fixture.usage(3);
+        fixture.no_request().await;
+    }
+}
+
+#[tokio::test]
+async fn disabled_host_setting_still_delivers_previously_admitted_sync_and_async_answers() {
+    for synchronous in [false, true] {
+        let mut fixture = Fixture::new().await;
+        let turn = fixture.start();
+        fixture.request().await;
+        fixture.reply(if synchronous {
+            Reply::Sync
+        } else {
+            Reply::Async(1)
+        });
+        if synchronous {
+            fixture.done("waiting_for_user_input").await;
+            fixture.released(&turn.run_id).await;
+        } else {
+            fixture.request().await;
+        }
+        let request = fixture.batches().pop().unwrap();
+        HumanInteractionService::new(&fixture.storage, &fixture.agent)
+            .update_settings(
+                mycopilot_core::human_interaction::HumanInteractionSettingsUpdate {
+                    enabled: false,
+                    expected_revision: 0,
+                },
+                &fixture.notifications,
+            )
+            .unwrap();
+        let answer = fixture.submit(&request, true);
+        if !synchronous {
+            fixture.reply(Reply::Complete);
+        }
+        let continuation = fixture.request().await;
+        assert_question_contract(&continuation, false);
+        if synchronous {
+            let results = continuation["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|message| message["role"] == "tool")
+                .filter_map(|message| {
+                    serde_json::from_str::<HumanInteractionResponseDisplay>(
+                        message["content"].as_str()?,
+                    )
+                    .ok()
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(results.len(), 1);
+            assert_eq!(results[0].response_id, response_id(&answer));
+            assert!(user_displays(&continuation).is_empty());
+        } else {
+            assert_projection(&continuation, std::slice::from_ref(&answer));
+        }
+        fixture.reply(Reply::Complete);
+        let completed = fixture.done("completed").await;
+        assert_eq!(completed["runId"], turn.run_id);
+        fixture.applied(1).await;
+        assert_eq!(fixture.messages().len(), 2);
+        fixture.usage(if synchronous { 2 } else { 3 });
+        fixture.no_request().await;
+    }
+}

@@ -577,12 +577,18 @@ export function parseSkillManagementErrorData(value: unknown): SkillManagementEr
     ),
     code: expectEnum(
       record.code,
-      ['notFound', 'notManageable', 'stateConflict', 'storageUnavailable'] as const,
+      [
+        'notFound',
+        'notManageable',
+        'stateConflict',
+        'configurationRequired',
+        'storageUnavailable'
+      ] as const,
       'Skill management error data.code'
     ),
     recovery: expectEnum(
       record.recovery,
-      ['refreshManagement', 'retry'] as const,
+      ['refreshManagement', 'configureImageGeneration', 'retry'] as const,
       'Skill management error data.recovery'
     ),
     message: expectNonEmptyString(record.message, 'Skill management error data.message')
@@ -865,6 +871,15 @@ function parseSkillManagementEntry(value: unknown): SkillManagementEntry {
       'Skill management entry.stateRevision'
     ),
     enabled: expectBoolean(record.enabled, 'Skill management entry.enabled'),
+    ...(record.enablementBlock === undefined
+      ? {}
+      : {
+          enablementBlock: expectEnum(
+            record.enablementBlock,
+            ['imageGenerationConfigurationRequired'] as const,
+            'Skill management entry.enablementBlock'
+          )
+        }),
     actions: parseSkillManagementActions(record.actions),
     ...(acquisition === undefined ? {} : { acquisition }),
     compatibility: parseSkillCompatibilityReport(record.compatibility)

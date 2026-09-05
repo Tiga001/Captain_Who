@@ -96,17 +96,23 @@ describe('HumanInteractionPanel', () => {
     const change = vi.fn()
     const screen = await render(<Fixture onSubmit={submit} onAnswerChange={change} />)
     const previous = screen.getByRole('button', { name: '上一题' })
-    const next = screen.getByRole('button', { name: '下一题' })
+    const next = screen.getByRole('navigation').getByRole('button', { name: '下一题' })
+    const primary = page
+      .elementLocator(screen.container.querySelector<HTMLElement>('footer')!)
+      .getByRole('button', { name: /下一题|提交/ })
     const send = screen.getByRole('button', { name: '提交', exact: true })
     await expect.element(previous).toBeDisabled()
-    await expect.element(send).toBeDisabled()
+    await expect.element(primary).toBeDisabled()
     await screen.getByRole('button', { name: '明亮外观' }).click()
-    await next.click()
+    await expect.element(primary).toHaveTextContent('下一题')
+    await primary.click()
     await screen.getByRole('textbox').fill('支持中文')
-    await next.click()
+    await primary.click()
     await expect.element(next).toBeDisabled()
-    await screen.getByRole('button', { name: '不回答', exact: true }).click()
-    await expect.element(screen.getByRole('status')).toHaveTextContent('提交前仍可修改')
+    await screen.getByRole('button', { name: '跳过', exact: true }).click()
+    await expect
+      .element(screen.getByRole('button', { name: '已跳过', exact: true }))
+      .toHaveAttribute('aria-pressed', 'true')
     await expect.element(send).toBeEnabled()
     expect(submit).not.toHaveBeenCalled()
     await previous.click()
@@ -119,14 +125,14 @@ describe('HumanInteractionPanel', () => {
     await expect
       .element(screen.getByRole('button', { name: '明亮外观' }))
       .toHaveAttribute('aria-pressed', 'false')
-    await screen.getByRole('button', { name: '不回答', exact: true }).click()
+    await screen.getByRole('button', { name: '跳过', exact: true }).click()
     await expect.element(screen.getByRole('textbox')).toHaveValue('')
     await screen.getByRole('button', { name: '深色外观' }).click()
     await expect
-      .element(screen.getByRole('button', { name: '不回答', exact: true }))
+      .element(screen.getByRole('button', { name: '跳过', exact: true }))
       .toHaveAttribute('aria-pressed', 'false')
     await screen.getByRole('textbox').fill('  ')
-    await expect.element(send).toBeDisabled()
+    await expect.element(primary).toBeDisabled()
     await screen.getByRole('button', { name: '深色外观' }).click()
     await send.click()
     expect(submit).toHaveBeenCalledTimes(1)
@@ -155,7 +161,7 @@ describe('HumanInteractionPanel', () => {
       />
     )
     await expect.element(screen.getByText('本轮已结束，提交回答后继续')).toBeVisible()
-    await screen.getByRole('button', { name: '最小化提问' }).click()
+    await screen.getByRole('button', { name: '最小化交互' }).click()
     await screen.getByRole('button', { name: '忽略全部' }).click()
     expect(minimize).toHaveBeenCalledTimes(1)
     expect(ignore).toHaveBeenCalledTimes(1)
@@ -169,7 +175,7 @@ describe('HumanInteractionPanel', () => {
         onMinimize={minimize}
       />
     )
-    expect(screen.getByRole('button', { name: '最小化提问' }).elements()).toHaveLength(0)
+    expect(screen.getByRole('button', { name: '最小化交互' }).elements()).toHaveLength(0)
     expect(screen.getByRole('button', { name: '忽略全部' }).elements()).toHaveLength(0)
     expect(screen.getByText('本轮已结束，提交回答后继续').elements()).toHaveLength(0)
   })
@@ -181,7 +187,7 @@ describe('HumanInteractionPanel', () => {
       <Fixture initialAnswers={completed} isSubmitting onSubmit={submit} onIgnore={ignore} />
     )
     await expect.element(screen.getByRole('dialog')).toHaveAttribute('aria-busy', 'true')
-    for (const name of ['明亮外观', '不回答', '忽略全部', '提交']) {
+    for (const name of ['明亮外观', '跳过', '忽略全部', '提交']) {
       const button = screen.getByRole('button', { name, exact: true })
       await expect.element(button).toBeDisabled()
       ;(button.element() as HTMLButtonElement).click()
@@ -213,7 +219,7 @@ describe('HumanInteractionPanel', () => {
     expect(ignore).toHaveBeenCalledTimes(1)
   })
 
-  it('keeps textarea Enter, Escape and IME confirmation away from form and composer actions', async () => {
+  it('keeps single-line input Enter, Escape and IME confirmation away from form and composer actions', async () => {
     const outerKeyDown = vi.fn()
     const outerKeyUp = vi.fn()
     const formSubmit = vi.fn()
@@ -234,7 +240,7 @@ describe('HumanInteractionPanel', () => {
     const input = screen.getByRole('textbox')
     await input.fill('第一行')
     await userEvent.keyboard('{End}{Enter}第二行{Escape}')
-    await expect.element(input).toHaveValue('第一行\n第二行')
+    await expect.element(input).toHaveValue('第一行第二行')
     const element = input.element()
     element.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true }))
     element.dispatchEvent(
@@ -253,7 +259,7 @@ describe('HumanInteractionPanel', () => {
     expect(submit).not.toHaveBeenCalled()
     expect(ignore).not.toHaveBeenCalled()
     await expect
-      .element(screen.getByRole('button', { name: '不回答', exact: true }))
+      .element(screen.getByRole('button', { name: '跳过', exact: true }))
       .toHaveAttribute('aria-pressed', 'false')
     expect(
       [...screen.container.querySelectorAll('button')].every((button) => button.type === 'button')
@@ -261,6 +267,8 @@ describe('HumanInteractionPanel', () => {
   })
 
   it('does not truncate large batches and requires valid answers to every original question', async () => {
+    const changePage = vi.fn()
+    const submit = vi.fn()
     const questions = Array.from({ length: 70 }, (_, index) => ({
       id: `question-${index}`,
       title: `完整问题 ${index + 1}`,
@@ -283,9 +291,26 @@ describe('HumanInteractionPanel', () => {
         request={{ ...request, questions }}
         pageIndex={69}
         answers={{ ...answers, 'question-0': undefined }}
+        onPageChange={changePage}
+        onSubmit={submit}
       />
     )
-    await expect.element(screen.getByRole('button', { name: '提交', exact: true })).toBeDisabled()
+    await expect
+      .element(screen.getByRole('button', { name: '提交', exact: true }))
+      .not.toBeInTheDocument()
+    await expect
+      .element(
+        page
+          .elementLocator(screen.container.querySelector<HTMLElement>('footer')!)
+          .getByRole('button', { name: '下一题' })
+      )
+      .toBeEnabled()
+    await page
+      .elementLocator(screen.container.querySelector<HTMLElement>('footer')!)
+      .getByRole('button', { name: '下一题' })
+      .click()
+    expect(changePage).toHaveBeenCalledWith(0)
+    expect(submit).not.toHaveBeenCalled()
   })
 
   it('matches approval typography and surface tokens while keeping long content inside a narrow panel', async () => {
@@ -335,7 +360,9 @@ describe('HumanInteractionPanel', () => {
     ] as const) {
       expect(panelStyle[property]).toBe(approvalStyle[property])
     }
-    expect(getComputedStyle(panel.querySelector('h2')!).fontSize).toBe('14px')
+    expect(getComputedStyle(panel.querySelector('h2')!).fontSize).toBe('13px')
+    expect(panel.querySelector('h2')!.textContent).toBe('交互')
+    expect(panel.querySelector('h2 .lucide-message-circle-question-mark')).not.toBeNull()
     expect(panel.querySelector('h3')!.textContent).toBe(title)
     expect(panel.querySelectorAll('.human-interaction-panel__option')).toHaveLength(12)
     expect(panel.scrollWidth).toBeLessThanOrEqual(320)
@@ -353,17 +380,32 @@ describe('HumanInteractionPanel', () => {
     })
     await screen.rerender(
       <div style={{ width: 440 }}>
-        <Fixture answers={completed} sourceRunEnded />
+        <Fixture initialAnswers={completed} sourceRunEnded />
       </div>
     )
     const compact = screen.container.querySelector<HTMLElement>('.human-interaction-panel')!
+    const customRow = compact.querySelector<HTMLElement>('.human-interaction-panel__custom')!
+    const labelBox = customRow.querySelector('label')!.getBoundingClientRect()
+    const inputBox = customRow.querySelector('input')!.getBoundingClientRect()
+    expect(inputBox.left).toBeGreaterThan(labelBox.right)
+    expect(inputBox.height).toBe(28)
+    expect(
+      Math.abs((labelBox.top + labelBox.bottom) / 2 - (inputBox.top + inputBox.bottom) / 2)
+    ).toBeLessThanOrEqual(1)
+    const skip = screen.getByRole('button', { name: '跳过', exact: true })
+    const skipColor = getComputedStyle(skip.element()).color
+    expect(skipColor).toBe('rgb(26, 28, 31)')
+    await skip.click()
+    expect(
+      getComputedStyle(screen.getByRole('button', { name: '已跳过', exact: true }).element()).color
+    ).toBe(skipColor)
     expect(
       compact.querySelector('.human-interaction-panel__option')!.getBoundingClientRect().height
-    ).toBe(32)
+    ).toBe(28)
     expect(
       compact.querySelector('.human-interaction-panel__option-index')!.getBoundingClientRect()
         .height
-    ).toBe(18)
+    ).toBe(16)
     await page.screenshot({
       element: compact,
       path: '.vitest-attachments/human-interaction-panel.png'

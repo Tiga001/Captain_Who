@@ -11,6 +11,21 @@ export interface HumanInteractionDraft {
 }
 export const EMPTY_HUMAN_INTERACTION_DRAFT: HumanInteractionDraft = { pageIndex: 0, answers: {} }
 
+export function selectHumanInteractionRequest(
+  requests: readonly HumanInteractionRequestSnapshot[],
+  selectedId: string | null | undefined,
+  minimized: Readonly<Record<string, boolean>>
+): HumanInteractionRequestSnapshot | null {
+  const open = requests
+    .filter((request) => request.status === 'open')
+    .sort((a, b) => b.sequence - a.sequence)
+  const blocking = open.find((request) => request.mode === 'sync')
+  if (blocking) return blocking
+  const selected = open.find((request) => request.requestId === selectedId)
+  if (selected) return minimized[selected.requestId] ? null : selected
+  return open.find((request) => !minimized[request.requestId]) ?? null
+}
+
 /** Request settlement and answer delivery have independent monotonic revisions. */
 export function mergeHumanInteractionRequest(
   previous: HumanInteractionRequestSnapshot | undefined,

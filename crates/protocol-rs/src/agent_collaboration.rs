@@ -160,6 +160,45 @@ pub struct AgentObserverAttachmentDto {
     pub created_at: i64,
 }
 
+/// Output-only display facts copied from the Host-validated history record. A matching JSON
+/// string in ordinary message content is not sufficient authority to construct this field.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct HumanInteractionResponseDisplayDto {
+    #[serde(rename = "type")]
+    pub result_type: String,
+    pub schema_version: u32,
+    pub request_id: String,
+    pub response_id: String,
+    pub answers: Vec<HumanInteractionAnswerDisplayDto>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(
+    tag = "kind",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
+pub enum HumanInteractionAnswerDisplayDto {
+    Option {
+        question_id: String,
+        question: String,
+        option_id: String,
+        answer: String,
+    },
+    Text {
+        question_id: String,
+        question: String,
+        answer: String,
+    },
+    Skipped {
+        question_id: String,
+        question: String,
+        answer: String,
+    },
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgentObserverMessageDto {
@@ -169,6 +208,8 @@ pub struct AgentObserverMessageDto {
     pub created_at: i64,
     pub status: Option<String>,
     pub input_origin: Option<AgentObserverInputOriginDto>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub human_interaction_response: Option<HumanInteractionResponseDisplayDto>,
     pub attachments: Vec<AgentObserverAttachmentDto>,
     pub agent_run_json: Option<String>,
     pub ui_state_json: Option<String>,

@@ -935,3 +935,220 @@ async fn human_interaction_untrusted_approval_envelope_cannot_publish_an_answer(
     assert!(error.to_string().contains("trusted Host resume port"));
     assert!(!observed.load(Ordering::SeqCst));
 }
+
+#[tokio::test]
+async fn human_interaction_provider_requests_use_one_policy_snapshot_for_both_tools_and_prompt() {
+    struct ChangingPolicy(std::sync::atomic::AtomicUsize);
+    impl HumanInteractionPolicySource for ChangingPolicy {
+        fn snapshot(&self) -> AgentResult<HumanInteractionSettings> {
+            let revision = self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(HumanInteractionSettings {
+                enabled: revision.is_multiple_of(2),
+                revision: revision as u64,
+                updated_at: 1,
+            })
+        }
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let (url, provider) = provider(vec![
+        // Malformed/malicious model output may name tools omitted from the current request.
+        // Those calls receive ordinary failure results and cannot reach native Host admission.
+        tool_response(vec![
+            question("unavailable-sync"),
+            async_question("unavailable-async"),
+        ]),
+        tool_response(vec![async_question("available-async")]),
+        completed_response(),
+    ])
+    .await;
+    let host = Arc::new(HumanHost {
+        enabled: AtomicBool::new(true),
+        async_ready: true,
+        ..HumanHost::default()
+    });
+    let source = Arc::new(ChangingPolicy(std::sync::atomic::AtomicUsize::new(0)));
+    let output = run(
+        input(url, directory.path()),
+        host.services()
+            .with_human_interaction_policy(source.clone()),
+    )
+    .await;
+    assert_eq!(output.status, AgentRunStatus::Completed);
+    assert!(host.pauses.lock().unwrap().is_empty());
+    assert_eq!(host.accepted.lock().unwrap().len(), 1);
+    let requests = provider.await.unwrap();
+    assert_eq!(requests.len(), 3);
+    assert_eq!(source.0.load(Ordering::SeqCst), 4); // Initial projection, then one read per sample.
+    for (request, available) in requests.iter().zip([false, true, false]) {
+        let tools = request["tools"].as_array().unwrap();
+        for tool in ["request_user_input", "request_user_input_async"] {
+            assert_eq!(
+                tools.iter().any(|entry| entry["function"]["name"] == tool),
+                available
+            );
+        }
+        assert_eq!(
+            request["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|message| message["content"]
+                    .as_str()
+                    .is_some_and(|text| text.contains("## 人机交互"))),
+            available
+        );
+    }
+    let results = output
+        .events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::ToolResult { result, .. } => Some(result),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        results.iter().map(|result| result.ok).collect::<Vec<_>>(),
+        [false, false, true]
+    );
+    let stable = output
+        .events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::ToolSetChanged {
+                stable_revision, ..
+            } => Some(stable_revision),
+            _ => None,
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        stable.len(),
+        1,
+        "dynamic settings must preserve the stable tool prefix"
+    );
+}
+
+#[tokio::test]
+async fn human_interaction_provider_cannot_invoke_questions_from_any_descendant_or_automation() {
+    struct NoReports;
+    impl crate::AutomationReportSink for NoReports {
+        fn record(&self, _: crate::AutomationReportKind, _: &str) -> Result<(), String> {
+            panic!("identity test must not execute a report")
+        }
+    }
+    // Descendants remain children even when their task path denotes a parent of other agents.
+    // Either trusted Automation marker independently suppresses the capability.
+    for identity in [
+        "child",
+        "parent-with-descendants",
+        "deep-child",
+        "automation-context",
+        "automation-sink",
+    ] {
+        let directory = tempfile::tempdir().unwrap();
+        let (url, provider) = provider(vec![
+            tool_response(vec![
+                question("forbidden-sync"),
+                async_question("forbidden-async"),
+            ]),
+            completed_response(),
+        ])
+        .await;
+        let mut input = input(url, directory.path());
+        let host = Arc::new(HumanHost {
+            enabled: AtomicBool::new(true),
+            async_ready: true,
+            ..HumanHost::default()
+        });
+        let mut services = host.services();
+        if identity == "automation-context" {
+            let mut preferences: AgentPromptPreferences =
+                serde_json::from_value(json!({})).unwrap();
+            preferences.automation_execution_context = Some(
+                AgentAutomationExecutionContext::new(
+                    "automation",
+                    "automation-run",
+                    1,
+                    None,
+                    "manual",
+                )
+                .unwrap(),
+            );
+            input.prompt_preferences = Some(preferences);
+        } else if identity == "automation-sink" {
+            services = services.with_automation_report_sink(Arc::new(NoReports));
+        } else {
+            let parent = if identity == "child" {
+                "/root"
+            } else {
+                "/root/parent/ancestor"
+            };
+            input.context.as_mut().unwrap().collaboration_identity =
+                Some(crate::AgentCollaborationIdentity {
+                    agent_id: identity.into(),
+                    root_agent_id: "root".into(),
+                    root_conversation_id: "root-conversation".into(),
+                    parent_agent_id: "parent".into(),
+                    parent_task_name: "parent".into(),
+                    parent_task_path: parent.into(),
+                    conversation_id: "conversation-human".into(),
+                    task_name: identity.into(),
+                    task_path: format!("{parent}/{identity}"),
+                    source_agent_id: "parent".into(),
+                    source_kind: crate::AgentMailboxKind::Task,
+                    source_task_name: "parent".into(),
+                    source_task_path: parent.into(),
+                    source_agent_message_id: "task-message".into(),
+                    entrusted_task: "Complete a bounded task.".into(),
+                    template_instructions: None,
+                });
+        }
+        let output = run(input, services).await;
+        assert_eq!(output.status, AgentRunStatus::Completed, "{identity}");
+        assert!(host.accepted.lock().unwrap().is_empty(), "{identity}");
+        assert!(host.pauses.lock().unwrap().is_empty(), "{identity}");
+        assert!(
+            host.natural_samples.lock().unwrap().is_empty(),
+            "{identity}"
+        );
+        for request in provider.await.unwrap() {
+            assert!(
+                !request["tools"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|tool| matches!(
+                        tool["function"]["name"].as_str(),
+                        Some("request_user_input" | "request_user_input_async")
+                    )),
+                "{identity}"
+            );
+            assert!(
+                !request["messages"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|message| message["content"]
+                        .as_str()
+                        .is_some_and(|text| text.contains("## 人机交互"))),
+                "{identity}"
+            );
+        }
+        let results = output
+            .events
+            .iter()
+            .filter_map(|event| match event {
+                AgentEvent::ToolResult { result, .. }
+                    if matches!(
+                        result.tool.as_str(),
+                        "request_user_input" | "request_user_input_async"
+                    ) =>
+                {
+                    Some(result)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(results.len(), 2, "{identity}");
+        assert!(results.iter().all(|result| !result.ok), "{identity}");
+    }
+}

@@ -39,6 +39,7 @@ fn source_resolution_cancellation_is_routed_and_idempotent() {
         Some(&workflow),
         Some(&source_resolution),
         None,
+        None,
         resolve,
     );
     assert_eq!(resolved["result"]["resolutionId"], resolution_id);
@@ -60,6 +61,7 @@ fn source_resolution_cancellation_is_routed_and_idempotent() {
             &installations,
             Some(&workflow),
             Some(&source_resolution),
+            None,
             None,
             request,
         )
@@ -436,6 +438,7 @@ fn source_resolution_rejects_unknown_hosts_with_structured_recovery_data() {
         &installations,
         None,
         Some(&service),
+        None,
         None,
         parsed,
     );

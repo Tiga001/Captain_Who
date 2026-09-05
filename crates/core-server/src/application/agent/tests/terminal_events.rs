@@ -122,6 +122,7 @@ fn durable_auto_command_context(
             model_id: Some("test-model".to_string()),
             title: "Automatic command Session fixture".to_string(),
             messages: vec![ChatMessageRecord {
+                human_interaction_response: None,
                 id: assistant_message_id.to_string(),
                 role: "assistant".to_string(),
                 content: String::new(),
@@ -240,6 +241,7 @@ fn automatic_command_streams_bounded_output_with_stable_call_identity() {
             model_id: Some("test-model".to_string()),
             title: "Live command events".to_string(),
             messages: vec![ChatMessageRecord {
+                human_interaction_response: None,
                 id: assistant_message_id.to_string(),
                 role: "assistant".to_string(),
                 content: String::new(),
@@ -326,6 +328,7 @@ fn automatic_fast_large_output_returns_a_recoverable_session_instead_of_empty_ex
             model_id: Some("test-model".to_string()),
             title: "Fast large automatic command".to_string(),
             messages: vec![ChatMessageRecord {
+                human_interaction_response: None,
                 id: assistant_message_id.to_string(),
                 role: "assistant".to_string(),
                 content: String::new(),
@@ -470,6 +473,7 @@ fn automatic_running_command_is_aborted_when_handoff_audit_is_definitely_uncommi
             model_id: Some("test-model".to_string()),
             title: "Running command audit failure".to_string(),
             messages: vec![ChatMessageRecord {
+                human_interaction_response: None,
                 id: assistant_message_id.to_string(),
                 role: "assistant".to_string(),
                 content: String::new(),
@@ -548,6 +552,7 @@ fn explicit_run_cancel_interrupts_handed_off_command_after_active_control_is_ret
             model_id: Some("test-model".to_string()),
             title: "Running command post-commit".to_string(),
             messages: vec![ChatMessageRecord {
+                human_interaction_response: None,
                 id: assistant_message_id.to_string(),
                 role: "assistant".to_string(),
                 content: String::new(),
@@ -661,6 +666,7 @@ fn action_cancellation_fence_does_not_abort_a_sibling_command_session() {
             model_id: Some("test-model".to_string()),
             title: "Action-scoped Session cancellation".to_string(),
             messages: vec![ChatMessageRecord {
+                human_interaction_response: None,
                 id: assistant_message_id.to_string(),
                 role: "assistant".to_string(),
                 content: String::new(),
@@ -1360,6 +1366,7 @@ fn message_deletion_waits_for_a_durable_file_effect_receipt() {
             model_id: Some("test-model".to_string()),
             title: "Message effect barrier".to_string(),
             messages: vec![ChatMessageRecord {
+                human_interaction_response: None,
                 id: "assistant-message-effect".to_string(),
                 role: "assistant".to_string(),
                 content: String::new(),
@@ -1435,6 +1442,7 @@ fn message_deletion_rejects_an_unsettled_file_effect_and_preserves_the_owner() {
             model_id: Some("test-model".to_string()),
             title: "Message unsettled barrier".to_string(),
             messages: vec![ChatMessageRecord {
+                human_interaction_response: None,
                 id: "assistant-message-unsettled".to_string(),
                 role: "assistant".to_string(),
                 content: String::new(),
@@ -1497,6 +1505,7 @@ fn message_deletion_blocks_pending_and_approved_processes_then_retires_terminal_
             title: "Message pending barrier".to_string(),
             messages: vec![
                 ChatMessageRecord {
+                    human_interaction_response: None,
                     id: "assistant-message-pending".to_string(),
                     role: "assistant".to_string(),
                     content: String::new(),
@@ -1507,6 +1516,7 @@ fn message_deletion_blocks_pending_and_approved_processes_then_retires_terminal_
                     ui_state_json: None,
                 },
                 ChatMessageRecord {
+                    human_interaction_response: None,
                     id: "assistant-message-retained".to_string(),
                     role: "assistant".to_string(),
                     content: String::new(),
@@ -1696,6 +1706,7 @@ fn restart_restores_executing_auto_command_as_project_deletion_blocker() {
             model_id: Some("test-model".to_string()),
             title: "Restart unsettled".to_string(),
             messages: vec![ChatMessageRecord {
+                human_interaction_response: None,
                 id: "assistant-restart-unsettled".to_string(),
                 role: "assistant".to_string(),
                 content: String::new(),
@@ -1774,6 +1785,7 @@ fn restart_conservatively_blocks_interrupted_manual_command_deletion() {
             model_id: Some("test-model".to_string()),
             title: "Restart manual".to_string(),
             messages: vec![ChatMessageRecord {
+                human_interaction_response: None,
                 id: "assistant-restart-manual".to_string(),
                 role: "assistant".to_string(),
                 content: String::new(),
@@ -1987,6 +1999,7 @@ fn manually_approved_command_reconciles_two_post_commit_errors_and_keeps_observa
             model_id: Some("test-model".to_string()),
             title: "Manual command".to_string(),
             messages: vec![ChatMessageRecord {
+                human_interaction_response: None,
                 id: "assistant-manual-command".to_string(),
                 role: "assistant".to_string(),
                 content: String::new(),
@@ -2484,6 +2497,7 @@ fn runtime_terminal_error_keeps_its_durable_trace_sequence_across_commit_and_rel
             model_id: Some("test-model".to_string()),
             title: "Runtime error trace sequence".to_string(),
             messages: vec![ChatMessageRecord {
+                human_interaction_response: None,
                 id: assistant_message_id.to_string(),
                 role: "assistant".to_string(),
                 content: String::new(),

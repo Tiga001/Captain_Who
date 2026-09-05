@@ -218,6 +218,7 @@ import type {
   StorageInputAttachment,
   StorageLoadInputAttachmentsRequest,
   StorageChatMessageRecord,
+  StorageChatMessageWriteRecord,
   StorageChatMessageStateRecord,
   StorageChatMessageUiStateRecord,
   StorageComposerDraftRecord,
@@ -403,7 +404,7 @@ export interface StorageHostApi {
   deleteChatMessages(input: StorageDeleteChatMessagesRequest): Promise<void>
   upsertChatMessages(input: {
     conversationId: string
-    messages: StorageChatMessageRecord[]
+    messages: StorageChatMessageWriteRecord[]
     positionOffset: number
   }): Promise<StorageChatMessageRecord[]>
   saveChatMessageState(input: {

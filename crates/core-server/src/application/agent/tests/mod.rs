@@ -664,6 +664,7 @@ fn seed_root_effective_permissions(
     let run_id = format!("run-permission-seed-{suffix}");
     let created_at = mycopilot_core::storage::now_ms().max(conversation.updated_at + 1);
     conversation.messages.push(ChatMessageRecord {
+        human_interaction_response: None,
         id: assistant_message_id.clone(),
         role: "assistant".to_string(),
         content: "permission seed".to_string(),

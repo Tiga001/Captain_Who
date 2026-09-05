@@ -9,12 +9,15 @@ type ConversationTurnAdmissionResult = (
 impl StorageService {
     pub fn save_conversation(
         &self,
-        conversation: ChatConversationRecord,
+        mut conversation: ChatConversationRecord,
     ) -> Result<ChatConversationRecord, String> {
         let mut connection = self.state.connection()?;
         ensure_project_reference_exists(&connection, conversation.project_id.as_deref())?;
         chat_repository::save_conversation(&mut connection, conversation.clone())
             .map_err(storage_error)?;
+        crate::storage::human_interaction_repository::attach_message_projections(
+            &connection, &conversation.id, &mut conversation.messages,
+        ).map_err(storage_error)?;
         Ok(conversation)
     }
 
@@ -579,6 +582,10 @@ impl StorageService {
         } else {
             None
         };
+        let mut conversation = conversation;
+        crate::storage::human_interaction_repository::attach_message_projections(
+            &transaction, &conversation.id, &mut conversation.messages,
+        ).map_err(storage_error)?;
         transaction.commit().map_err(storage_error)?;
         Ok((
             conversation,

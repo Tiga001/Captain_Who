@@ -1,3 +1,5 @@
+import { renderSettingsNodes, settingLabel } from '../../settingsDefinition'
+import { modelConfigurationSection } from './configuration.definition'
 import { Check, CircleHelp } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import type { CredentialMutation, CredentialStatus } from '@mycopilot/protocol'
@@ -9,6 +11,7 @@ import { formatModelConfigLabel } from '../../../modelSelection/modelConfigPrese
 import { CredentialInput } from './CredentialInput'
 
 interface ModelProviderSettingsProps {
+  definition?: typeof modelConfigurationSection
   apiUrl: string
   apiTokenStatus: CredentialStatus
   models: ModelConfig[]
@@ -19,6 +22,7 @@ interface ModelProviderSettingsProps {
 }
 
 export function ModelProviderSettings({
+  definition = modelConfigurationSection,
   apiUrl,
   apiTokenStatus,
   models,
@@ -56,76 +60,103 @@ export function ModelProviderSettings({
     <section
       className="configuration-section settings-list-page"
       aria-labelledby="model-settings-heading"
+      data-setting-id={definition.id}
     >
-      <h1 id="model-settings-heading">{t('configuration.model')}</h1>
+      <h1 id="model-settings-heading">{settingLabel(definition, t)}</h1>
 
-      <div className="configuration-form-block settings-list-section">
-        <div className="model-settings-heading">
-          <h2>{t('configuration.modelSettings')}</h2>
-          <button
-            className="model-settings-help-button"
-            type="button"
-            aria-expanded={isDefaultApiHelpOpen}
-            aria-haspopup="dialog"
-            aria-label={t('configuration.modelSettingsHelp.open')}
-            title={t('configuration.modelSettingsHelp.open')}
-            onClick={() => setDefaultApiHelpOpen(true)}
-          >
-            <CircleHelp aria-hidden="true" />
-          </button>
-        </div>
+      {renderSettingsNodes(definition.children, (node) => {
+        switch (node.id) {
+          case 'configuration.defaultApi':
+            return (
+              <div className="configuration-form-block settings-list-section">
+                <div className="model-settings-heading">
+                  <h2>{settingLabel(node, t)}</h2>
+                  <button
+                    className="model-settings-help-button"
+                    type="button"
+                    aria-expanded={isDefaultApiHelpOpen}
+                    aria-haspopup="dialog"
+                    aria-label={t('configuration.modelSettingsHelp.open')}
+                    title={t('configuration.modelSettingsHelp.open')}
+                    onClick={() => setDefaultApiHelpOpen(true)}
+                  >
+                    <CircleHelp aria-hidden="true" />
+                  </button>
+                </div>
 
-        <div className="settings-list">
-          <label className="configuration-field settings-list-row">
-            <span className="settings-list-row__text">
-              <span className="settings-list-row__title">API URL</span>
-            </span>
-            <span className="settings-list-row__control">
-              <input
-                aria-label="API URL"
-                className="settings-list-control"
-                disabled={isApiUrlCommitPending}
-                type="url"
-                value={apiUrlDraft}
-                onBlur={() => void commitApiUrl()}
-                onChange={(event) => setApiUrlDraft(event.target.value)}
-                onKeyDown={(event) => {
-                  if (event.key === 'Enter') {
-                    event.preventDefault()
-                    event.currentTarget.blur()
-                  }
-                }}
-              />
-            </span>
-          </label>
-
-          <div className="configuration-field settings-list-row">
-            <span className="settings-list-row__text">
-              <span className="settings-list-row__title">API Token</span>
-            </span>
-            <span className="settings-list-row__control">
-              <CredentialInput
-                ariaLabel="API Token"
-                mutation={apiTokenMutation}
-                onCommit={async (mutation) => {
-                  await onApiTokenCommit(mutation)
-                  setApiTokenMutation({ type: 'keep' })
-                }}
-                onMutationChange={setApiTokenMutation}
-                placeholder={t('configuration.credential.placeholder')}
-                status={apiTokenStatus}
-              />
-            </span>
-          </div>
-        </div>
-      </div>
-
-      <div className="available-models-heading settings-list-section__header">
-        <h2>{t('configuration.availableModels')}</h2>
-        <button className="secondary-settings-button" type="button" onClick={onManageModels}>
-          {t('configuration.manageModels')}
-        </button>
-      </div>
+                <div className="settings-list">
+                  {renderSettingsNodes(node.children, (node) => {
+                    switch (node.id) {
+                      case 'configuration.apiUrl':
+                        return (
+                          <label className="configuration-field settings-list-row">
+                            <span className="settings-list-row__text">
+                              <span className="settings-list-row__title">
+                                {settingLabel(node, t)}
+                              </span>
+                            </span>
+                            <span className="settings-list-row__control">
+                              <input
+                                aria-label={settingLabel(node, t)}
+                                className="settings-list-control"
+                                disabled={isApiUrlCommitPending}
+                                type="url"
+                                value={apiUrlDraft}
+                                onBlur={() => void commitApiUrl()}
+                                onChange={(event) => setApiUrlDraft(event.target.value)}
+                                onKeyDown={(event) => {
+                                  if (event.key === 'Enter') {
+                                    event.preventDefault()
+                                    event.currentTarget.blur()
+                                  }
+                                }}
+                              />
+                            </span>
+                          </label>
+                        )
+                      case 'configuration.apiToken':
+                        return (
+                          <div className="configuration-field settings-list-row">
+                            <span className="settings-list-row__text">
+                              <span className="settings-list-row__title">
+                                {settingLabel(node, t)}
+                              </span>
+                            </span>
+                            <span className="settings-list-row__control">
+                              <CredentialInput
+                                ariaLabel={settingLabel(node, t)}
+                                mutation={apiTokenMutation}
+                                onCommit={async (mutation) => {
+                                  await onApiTokenCommit(mutation)
+                                  setApiTokenMutation({ type: 'keep' })
+                                }}
+                                onMutationChange={setApiTokenMutation}
+                                placeholder={t('configuration.credential.placeholder')}
+                                status={apiTokenStatus}
+                              />
+                            </span>
+                          </div>
+                        )
+                    }
+                  })}
+                </div>
+              </div>
+            )
+          case 'configuration.models':
+            return (
+              <div className="available-models-heading settings-list-section__header">
+                <h2>{settingLabel(node, t)}</h2>
+                <button
+                  className="secondary-settings-button"
+                  type="button"
+                  onClick={onManageModels}
+                >
+                  {t('configuration.manageModels')}
+                </button>
+              </div>
+            )
+        }
+      })}
 
       <div className="available-model-list" aria-label={t('configuration.availableModelList')}>
         {models.map((model) => (

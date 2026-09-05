@@ -10,7 +10,7 @@ import {
   useState
 } from 'react'
 import type { ReactNode } from 'react'
-import { CircleHelp, Split, X } from 'lucide-react'
+import { Split, X } from 'lucide-react'
 import type {
   AgentApprovalScope,
   AgentContextWindowSnapshot,
@@ -58,8 +58,10 @@ import {
   type HumanInteractionControllerView
 } from '../humanInteraction/useHumanInteraction'
 import { HumanInteractionPanel } from '../humanInteraction/HumanInteractionPanel'
+import { HumanInteractionTimelineEntry } from '../humanInteraction/HumanInteractionTimelineEntry'
 import {
   projectHumanInteractionConversation,
+  getUnanchoredHumanInteractionRequests,
   humanInteractionUserDisplay
 } from '../humanInteraction/humanInteractionPresentation'
 import './ChatConversationPage.css'
@@ -275,43 +277,10 @@ export const ChatMessageList = memo(function ChatMessageList({
   showTokenUsageDetails,
   turnDiffSummariesByMessageId
 }: ChatMessageListProps) {
-  const { t } = useFrontendConfig()
   const presentedConversation = useMemo(
     () => projectHumanInteractionConversation(conversation, humanInteraction?.requests ?? []),
     [conversation, humanInteraction?.requests]
   )
-  const questionEntries = (messageId: string | null) => {
-    if (mode !== 'interactive' || !humanInteraction) return null
-    const requests = humanInteraction.openRequests.filter((request) =>
-      messageId
-        ? request.assistantMessageId === messageId
-        : !conversation.messages.some((message) => message.id === request.assistantMessageId)
-    )
-    if (!requests.length) return null
-    return (
-      <div className="human-interaction-entries">
-        {requests.map((request) => (
-          <button
-            className="human-interaction-entry"
-            data-human-request-id={request.requestId}
-            disabled={
-              !humanInteraction.canInteract ||
-              humanInteraction.openRequests.some((item) => item.mode === 'sync')
-            }
-            key={request.requestId}
-            onClick={() => humanInteraction.open(request.requestId)}
-            type="button"
-          >
-            <CircleHelp aria-hidden="true" />
-            {t('humanInteraction.timeline.answer').replace(
-              '{count}',
-              String(request.questions.length)
-            )}
-          </button>
-        ))}
-      </div>
-    )
-  }
   const continuationOrigin = conversation.continuationOrigin
   const collaborationAgentNavigation = mode === 'interactive' ? onOpenCollaborationAgent : undefined
   const messageIdentities = useStableMessageIdentities(conversation.messages)
@@ -392,6 +361,7 @@ export const ChatMessageList = memo(function ChatMessageList({
             />
           )}
           <ChatMessageItem
+            humanInteraction={mode === 'interactive' ? humanInteraction : undefined}
             agentLabelsById={agentLabelsById}
             collaborationTimelineActivities={
               collaborationAgentNavigation
@@ -446,7 +416,6 @@ export const ChatMessageList = memo(function ChatMessageList({
             }
             turnDiffSummary={turnDiffSummariesByMessageId?.get(message.id)}
           />
-          {questionEntries(message.id)}
           {continuationOrigin?.boundaryMessageId === message.id && (
             <ConversationContinuationDivider
               onOpen={
@@ -507,7 +476,17 @@ export const ChatMessageList = memo(function ChatMessageList({
             ))}
         </Fragment>
       ))}
-      {questionEntries(null)}
+      {mode === 'interactive' &&
+        humanInteraction &&
+        getUnanchoredHumanInteractionRequests(conversation, humanInteraction.openRequests).map(
+          (request) => (
+            <HumanInteractionTimelineEntry
+              key={request.requestId}
+              request={request}
+              interaction={humanInteraction}
+            />
+          )
+        )}
       {manualCompactionOperations
         .filter(
           (operation) =>
@@ -669,6 +648,9 @@ export function ConversationSurface(props: ConversationSurfaceProps) {
     enabled: props.mode === 'interactive'
   })
   const activeQuestion = humanInteraction.activeBatch
+  const isComposerSuspended = Boolean(
+    activeQuestion || pendingApprovalTarget || interactive?.hasCollaborationApproval
+  )
   const questionSourceRun = activeQuestion
     ? conversation.messages.find((message) => message.agentRun?.runId === activeQuestion.runId)
         ?.agentRun
@@ -751,6 +733,7 @@ export function ConversationSurface(props: ConversationSurfaceProps) {
       className="chat-conversation-page conversation-surface"
       aria-label={conversation.title}
       data-approval-pending={hasPendingApproval ? 'true' : undefined}
+      data-interaction-pending={activeQuestion ? 'true' : undefined}
       data-conversation-id={conversation.id}
       data-conversation-surface-mode={props.mode}
     >
@@ -819,6 +802,7 @@ export function ConversationSurface(props: ConversationSurfaceProps) {
         <div className="chat-conversation-page__composer">
           {activeQuestion && (
             <HumanInteractionPanel
+              key={activeQuestion.requestId}
               request={activeQuestion}
               pageIndex={humanInteraction.activeDraft.pageIndex}
               answers={humanInteraction.activeDraft.answers}
@@ -861,14 +845,14 @@ export function ConversationSurface(props: ConversationSurfaceProps) {
                 </button>
               </div>
             )}
-          {activeTodo && (
+          {activeTodo && !activeQuestion && (
             <AgentTodoProgress
               completedAt={activeTodo.completedAt}
               runStatus={activeTodo.runStatus}
               todo={activeTodo.todo}
             />
           )}
-          {pendingApprovalTarget ? (
+          {pendingApprovalTarget && (
             <AgentApprovalDialog
               mcpInvocationState={pendingApprovalTarget.mcpInvocationState}
               target={pendingApprovalTarget}
@@ -876,8 +860,15 @@ export function ConversationSurface(props: ConversationSurfaceProps) {
               onCancel={interactive.onCancelAgentAction}
               onReject={interactive.onRejectAgentAction}
             />
-          ) : (
+          )}
+          {/* Keep the Composer mounted: its fast-path text draft is newer than the shell prop. */}
+          <div
+            className="conversation-composer-slot"
+            hidden={isComposerSuspended}
+            inert={isComposerSuspended}
+          >
             <ChatComposer
+              isSuspended={isComposerSuspended}
               commands={interactive.commands}
               isManualCompactionRunning={interactive.isManualCompactionRunning}
               canGuideQueuedMessages={canGuideQueuedMessages}
@@ -902,7 +893,7 @@ export function ConversationSurface(props: ConversationSurfaceProps) {
               resetKey={conversation.id}
               skillCatalogRefreshToken={interactive.skillCatalogRefreshToken}
             />
-          )}
+          </div>
         </div>
       )}
       {interactive?.modelTransitionConfirmation &&

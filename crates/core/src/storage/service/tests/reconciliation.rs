@@ -3887,6 +3887,7 @@ fn pre_runtime_failure_fixture(
     );
     stored.messages = vec![
         ChatMessageRecord {
+            human_interaction_response: None,
             id: "user-pre-runtime-failure".to_string(),
             role: "user".to_string(),
             content: "do work".to_string(),
