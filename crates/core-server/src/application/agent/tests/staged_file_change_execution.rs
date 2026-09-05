@@ -1,5 +1,6 @@
 use super::file_change_permissions::{
     bind_direct_execution_to_input, direct_execution_input, seed_durable_direct_file_change_owner,
+    FILE_CHANGE_REJECTION_CASES,
 };
 use super::*;
 
@@ -704,70 +705,94 @@ fn expired_waiting_approval_staged_file_change_fails_before_side_effect() {
 
 #[test]
 fn rejected_staged_apply_patch_commit_settles_without_file_side_effects() {
-    let fixture = tempdir().unwrap();
-    let workspace = fixture.path().join("workspace");
-    fs::create_dir(&workspace).unwrap();
-    let workspace = fs::canonicalize(workspace).unwrap();
-    let storage = StorageService::open(&fixture.path().join("storage.sqlite")).unwrap();
-    let target = workspace.join("rejected-staged.txt");
-    let run_id = "run-rejected-staged-commit";
-    let conversation_id = "conversation-rejected-staged-commit";
-    let transaction_id = "transaction-rejected-staged-commit";
-    let (mut proposal, call) = staged_file_change_fixture(
-        StagedFileChangeFixtureIdentity {
+    for (case, message, expected_message) in FILE_CHANGE_REJECTION_CASES {
+        let fixture = tempdir().unwrap();
+        let workspace = fixture.path().join("workspace");
+        fs::create_dir(&workspace).unwrap();
+        let workspace = fs::canonicalize(workspace).unwrap();
+        let storage = StorageService::open(&fixture.path().join("storage.sqlite")).unwrap();
+        let target = workspace.join("rejected-staged.txt");
+        let run_id = "run-rejected-staged-commit";
+        let conversation_id = "conversation-rejected-staged-commit";
+        let transaction_id = "transaction-rejected-staged-commit";
+        let (mut proposal, call) = staged_file_change_fixture(
+            StagedFileChangeFixtureIdentity {
+                run_id,
+                conversation_id,
+                call_id: "call-rejected-staged-commit",
+                transaction_id,
+            },
+            ("rejected-staged.txt", target.to_str().unwrap()),
+            "must not be published\n",
+            AgentApprovalStatus::Required,
+        );
+        let input = direct_execution_input(
+            &workspace,
             run_id,
             conversation_id,
-            call_id: "call-rejected-staged-commit",
-            transaction_id,
-        },
-        ("rejected-staged.txt", target.to_str().unwrap()),
-        "must not be published\n",
-        AgentApprovalStatus::Required,
-    );
-    let input = direct_execution_input(
-        &workspace,
-        run_id,
-        conversation_id,
-        AgentPermissions {
-            write: AgentWritePermission::WorkspaceOnly,
-            patch: mycopilot_core::AgentPatchPermission::RequireApproval,
-            ..Default::default()
-        },
-        &call,
-    );
-    bind_staged_execution_to_input(&mut proposal, &input);
-    save_file_change_conversation(&storage, conversation_id);
-    storage
-        .create_agent_file_change(staged_file_change_record(&proposal, "waiting_approval"))
-        .unwrap();
-    let record = pending_file_change_record(run_id, conversation_id, proposal, &call, input);
-    let restored_call = tool_call_for_pending_record(&record).unwrap();
-
-    let decision = action_execution_for_decision(
-        &storage,
-        &record,
-        &restored_call,
-        AgentApprovalDecisionStatus::Rejected,
-        Some("not approved"),
-    );
-
-    assert_eq!(decision.status, "rejected");
-    assert_eq!(decision.final_pending_status, PendingActionStatus::Rejected);
-    assert_eq!(
-        decision.file_change_result.as_ref().unwrap().status,
-        mycopilot_core::AgentFileChangeResultStatus::Rejected
-    );
-    assert!(decision.tool_result.ok);
-    assert!(!target.exists());
-    assert_eq!(
+            AgentPermissions {
+                write: AgentWritePermission::WorkspaceOnly,
+                patch: mycopilot_core::AgentPatchPermission::RequireApproval,
+                ..Default::default()
+            },
+            &call,
+        );
+        bind_staged_execution_to_input(&mut proposal, &input);
+        save_file_change_conversation(&storage, conversation_id);
         storage
+            .create_agent_file_change(staged_file_change_record(&proposal, "waiting_approval"))
+            .unwrap();
+        let record = pending_file_change_record(run_id, conversation_id, proposal, &call, input);
+        let restored_call = tool_call_for_pending_record(&record).unwrap();
+
+        let decision = action_execution_for_decision(
+            &storage,
+            &record,
+            &restored_call,
+            AgentApprovalDecisionStatus::Rejected,
+            message,
+        );
+        let receipt = decision.file_change_result.as_ref().unwrap();
+        receipt
+            .validate()
+            .unwrap_or_else(|error| panic!("{case}: invalid staged rejection receipt: {error}"));
+        assert_eq!(decision.status, "rejected", "{case}");
+        assert_eq!(
+            decision.final_pending_status,
+            PendingActionStatus::Rejected,
+            "{case}"
+        );
+        assert_eq!(
+            receipt.status,
+            mycopilot_core::AgentFileChangeResultStatus::Rejected,
+            "{case}"
+        );
+        assert_eq!(
+            receipt.outcome,
+            mycopilot_core::AgentFileChangeOutcome::DefinitelyNotExecuted,
+            "{case}"
+        );
+        assert_eq!(receipt.message.as_deref(), Some(expected_message), "{case}");
+        assert_eq!(receipt.error, None, "{case}");
+        assert_eq!(receipt.error_code, None, "{case}");
+        assert!(decision.file_change.is_none(), "{case}");
+        assert!(decision.tool_result.ok, "{case}");
+        assert_eq!(decision.tool_result.call_id, call.id, "{case}");
+        assert_eq!(decision.tool_result.tool, "apply_patch", "{case}");
+        assert_eq!(decision.tool_result.error, None, "{case}");
+        assert_eq!(decision.tool_result.result, Some(json!(receipt)), "{case}");
+        assert!(
+            !target.exists(),
+            "{case}: rejection must not publish the target"
+        );
+        let persisted = storage
             .get_agent_file_change(transaction_id)
             .unwrap()
-            .unwrap()
-            .status,
-        "rejected"
-    );
-    assert!(fs::read_dir(&workspace).unwrap().next().is_none());
+            .unwrap();
+        assert_eq!(persisted.status, "rejected", "{case}");
+        assert!(persisted.stats_final, "{case}");
+        assert!(fs::read_dir(&workspace).unwrap().next().is_none(), "{case}");
+    }
 }
 
 #[test]

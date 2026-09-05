@@ -818,12 +818,13 @@ fn decision(
 
 fn bounded_reason(reason: Option<String>) -> Result<Option<String>, String> {
     match reason {
-        Some(reason)
-            if reason.len() > MAX_SAFE_REASON_BYTES || reason.chars().any(char::is_control) =>
-        {
+        Some(reason) if reason.len() > MAX_SAFE_REASON_BYTES => {
             Err("Browser risk rejection reason is invalid.".to_string())
         }
         Some(reason) if reason.trim().is_empty() => Ok(None),
+        Some(reason) if reason.chars().any(char::is_control) => {
+            Err("Browser risk rejection reason is invalid.".to_string())
+        }
         value => Ok(value),
     }
 }
@@ -1009,6 +1010,58 @@ mod tests {
         panic!("browser risk approval was not published");
     }
 
+    #[test]
+    fn rejection_reason_normalizes_whitespace_and_preserves_input_limits() {
+        for (label, reason, expected) in [
+            ("missing", None, None),
+            ("empty", Some(""), None),
+            ("spaces", Some("   "), None),
+            ("ASCII whitespace", Some(" \t\r\n "), None),
+            ("Unicode whitespace", Some("\u{3000}\u{00a0}"), None),
+            (
+                "guidance",
+                Some("Use a public page."),
+                Some("Use a public page."),
+            ),
+            (
+                "surrounding spaces",
+                Some("  Use a public page.  "),
+                Some("  Use a public page.  "),
+            ),
+        ] {
+            assert_eq!(
+                bounded_reason(reason.map(str::to_string))
+                    .unwrap()
+                    .as_deref(),
+                expected,
+                "{label}"
+            );
+        }
+        for reason in [
+            " ".repeat(MAX_SAFE_REASON_BYTES),
+            "a".repeat(MAX_SAFE_REASON_BYTES),
+        ] {
+            let expected = (!reason.trim().is_empty()).then(|| reason.clone());
+            assert_eq!(bounded_reason(Some(reason)).unwrap(), expected);
+        }
+        for (label, reason) in [
+            (
+                "oversized whitespace",
+                " ".repeat(MAX_SAFE_REASON_BYTES + 1),
+            ),
+            (
+                "oversized Unicode whitespace",
+                "\u{3000}".repeat(MAX_SAFE_REASON_BYTES / 3 + 1),
+            ),
+            ("oversized guidance", "a".repeat(MAX_SAFE_REASON_BYTES + 1)),
+            ("nonempty newline", "No.\nUse a public page.".to_string()),
+            ("nonempty tab", "No.\tUse a public page.".to_string()),
+            ("NUL", "\0".to_string()),
+        ] {
+            assert!(bounded_reason(Some(reason)).is_err(), "{label}");
+        }
+    }
+
     #[tokio::test]
     async fn post_dispatch_boundary_still_prompts_and_concurrent_requests_deduplicate() {
         let harness = harness();
@@ -1132,56 +1185,83 @@ mod tests {
 
     #[tokio::test]
     async fn explicit_rejection_is_a_normal_result_and_exact_retry_does_not_prompt_again() {
-        let harness = harness();
-        let (notifications, _events) = tokio::sync::mpsc::unbounded_channel();
-        let original = input(&harness, Uuid::new_v4());
-        let pending = {
-            let coordinator = Arc::clone(&harness.coordinator);
-            let notifications = notifications.clone();
-            tokio::spawn(async move {
-                coordinator
-                    .authorize(
-                        original,
-                        "conversation".to_string(),
-                        "assistant".to_string(),
-                        notifications,
-                    )
-                    .await
-            })
-        };
-        let action_id = wait_for_one_pending(&harness.coordinator).await;
-        harness
-            .coordinator
-            .reject(
-                &harness.grant.run_id,
-                &action_id,
-                Some("Do not access this service.".to_string()),
-            )
-            .unwrap();
-        let rejected = pending.await.unwrap();
-        assert_eq!(
-            rejected.decision,
-            BrowserRiskAuthorizationDecisionDto::Rejected
-        );
-        assert_eq!(
-            rejected.reason.as_deref(),
-            Some("Do not access this service.")
-        );
+        for (reason, expected_reason) in [
+            (None, None),
+            (Some(""), None),
+            (Some("   "), None),
+            (Some(" \t\r\n "), None),
+            (Some("\u{3000}\u{00a0}"), None),
+            (
+                Some("Do not access this service."),
+                Some("Do not access this service."),
+            ),
+        ] {
+            let harness = harness();
+            let (notifications, _events) = tokio::sync::mpsc::unbounded_channel();
+            let mut original = input(&harness, Uuid::new_v4());
+            original.dispatch_certainty = BrowserRiskDispatchCertaintyDto::DefinitelyNotDispatched;
+            let request = harness.coordinator.parse_request(original.clone()).unwrap();
+            let pending = {
+                let coordinator = Arc::clone(&harness.coordinator);
+                let notifications = notifications.clone();
+                tokio::spawn(async move {
+                    coordinator
+                        .authorize(
+                            original,
+                            "conversation".to_string(),
+                            "assistant".to_string(),
+                            notifications,
+                        )
+                        .await
+                })
+            };
+            let action_id = wait_for_one_pending(&harness.coordinator).await;
+            let output = harness
+                .coordinator
+                .reject(
+                    &harness.grant.run_id,
+                    &action_id,
+                    reason.map(str::to_string),
+                )
+                .unwrap()
+                .expect("rejection settles the pending approval");
+            assert_eq!(output.status, "rejected");
+            let rejected = pending.await.unwrap();
+            assert_eq!(
+                rejected.decision,
+                BrowserRiskAuthorizationDecisionDto::Rejected
+            );
+            assert_eq!(rejected.reason.as_deref(), expected_reason);
+            assert!(rejected.grant_id.is_none());
+            assert!(harness
+                .coordinator
+                .runtime
+                .live_browser_risk_grant(&request)
+                .unwrap()
+                .is_none());
+            assert!(harness
+                .coordinator
+                .approve(&harness.grant.run_id, &action_id)
+                .unwrap()
+                .is_none());
 
-        let repeated = harness
-            .coordinator
-            .authorize(
-                input(&harness, Uuid::new_v4()),
-                "conversation".to_string(),
-                "assistant".to_string(),
-                notifications,
-            )
-            .await;
-        assert_eq!(
-            repeated.decision,
-            BrowserRiskAuthorizationDecisionDto::Rejected
-        );
-        assert!(harness.coordinator.list_pending().is_empty());
+            let repeated = harness
+                .coordinator
+                .authorize(
+                    input(&harness, Uuid::new_v4()),
+                    "conversation".to_string(),
+                    "assistant".to_string(),
+                    notifications,
+                )
+                .await;
+            assert_eq!(
+                repeated.decision,
+                BrowserRiskAuthorizationDecisionDto::Rejected
+            );
+            assert_eq!(repeated.reason.as_deref(), expected_reason);
+            assert!(repeated.grant_id.is_none());
+            assert!(harness.coordinator.list_pending().is_empty());
+        }
     }
 
     #[tokio::test]

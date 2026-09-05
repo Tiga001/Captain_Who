@@ -7,6 +7,9 @@ impl AgentService {
         message: Option<String>,
         notifications: CoreServerNotificationSender,
     ) -> Result<AgentActionExecutionOutput, String> {
+        // Root and projected approvals share this boundary. Feedback is optional; preserve
+        // meaningful text verbatim while treating blank input like an omitted reason.
+        let message = message.filter(|value| !value.trim().is_empty());
         #[cfg(test)]
         run_approval_decision_barrier_hook(action_id, decision_status);
         if decision_status == AgentApprovalDecisionStatus::Approved {

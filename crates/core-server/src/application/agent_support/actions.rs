@@ -526,7 +526,9 @@ pub(crate) fn rejected_action_execution(
             None,
             None,
             None,
-            message.or(Some("用户拒绝了文件修改。")),
+            message
+                .filter(|value| !value.trim().is_empty())
+                .or(Some("用户拒绝了文件修改。")),
         );
         return ActionExecutionDecision {
             status: "rejected".to_string(),

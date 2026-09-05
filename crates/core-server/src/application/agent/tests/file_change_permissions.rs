@@ -3,6 +3,29 @@ use mycopilot_core::{AgentFileChangeOperation, AgentFileChangeResultStatus};
 use mycopilot_protocol_rs::AgentApprovalScopeDto;
 use std::path::Path;
 
+const DEFAULT_FILE_CHANGE_REJECTION_MESSAGE: &str = "用户拒绝了文件修改。";
+
+pub(super) const FILE_CHANGE_REJECTION_CASES: [(&str, Option<&str>, &str); 6] = [
+    ("missing", None, DEFAULT_FILE_CHANGE_REJECTION_MESSAGE),
+    ("empty", Some(""), DEFAULT_FILE_CHANGE_REJECTION_MESSAGE),
+    ("spaces", Some("   "), DEFAULT_FILE_CHANGE_REJECTION_MESSAGE),
+    (
+        "ascii_whitespace",
+        Some("\t\r\n"),
+        DEFAULT_FILE_CHANGE_REJECTION_MESSAGE,
+    ),
+    (
+        "unicode_whitespace",
+        Some("\u{00a0}\u{2003}\u{3000}"),
+        DEFAULT_FILE_CHANGE_REJECTION_MESSAGE,
+    ),
+    (
+        "feedback_preserved",
+        Some(" \t请保留现有文件，先修改方案。\r\n"),
+        " \t请保留现有文件，先修改方案。\r\n",
+    ),
+];
+
 fn test_input(permissions: AgentPermissions) -> AgentChatInput {
     let mut input = serde_json::from_value::<AgentChatInput>(json!({
         "apiUrl": "https://should-not-be-called.test/v1/chat/completions",
@@ -2366,49 +2389,146 @@ async fn manual_file_change_approve_rpc_has_only_the_strict_typed_result() {
 
 #[tokio::test]
 async fn manual_file_change_reject_rpc_has_only_the_strict_typed_result() {
-    let fixture = tempdir().unwrap();
-    let workspace = fixture.path().join("workspace");
-    fs::create_dir(&workspace).unwrap();
-    let workspace = fs::canonicalize(workspace).unwrap();
-    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
-    let service = AgentService::new(Arc::clone(&storage));
-    let run_id = "run-manual-file-change-reject-json";
-    let conversation_id = "conversation-manual-file-change-reject-json";
-    let assistant_message_id = "assistant-manual-file-change-reject-json";
-    let call_id = "call-manual-file-change-reject-json";
-    let target = workspace.join("reject-json.txt");
-    store_manual_direct_create(
-        &service,
-        &storage,
-        &workspace,
-        run_id,
-        conversation_id,
-        assistant_message_id,
-        call_id,
-        "reject-json.txt",
-        "must never be published\n",
-    );
-
-    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
-    let output = service
-        .reject_action(
+    for (case, message, expected_message) in FILE_CHANGE_REJECTION_CASES {
+        let fixture = tempdir().unwrap();
+        let workspace = fixture.path().join("workspace");
+        fs::create_dir(&workspace).unwrap();
+        let workspace = fs::canonicalize(workspace).unwrap();
+        let storage =
+            Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+        let service = AgentService::new(Arc::clone(&storage));
+        let run_id = "run-manual-file-change-reject-json";
+        let conversation_id = "conversation-manual-file-change-reject-json";
+        let assistant_message_id = "assistant-manual-file-change-reject-json";
+        let call_id = "call-manual-file-change-reject-json";
+        let target = workspace.join("reject-json.txt");
+        store_manual_direct_create(
+            &service,
+            &storage,
+            &workspace,
             run_id,
+            conversation_id,
+            assistant_message_id,
             call_id,
-            Some("用户拒绝本次文件修改。".to_string()),
-            notifications,
-        )
-        .expect("manual FileChange rejection succeeds");
-    let receipt = assert_strict_file_change_execution_json(&output, "rejected");
-    assert_eq!(receipt["status"], "rejected");
-    assert_eq!(receipt["outcome"], "definitely_not_executed");
-    assert!(!target.exists());
-    assert_file_change_receipt_surfaces_match(
-        &storage,
-        &pending_action_storage_id(run_id, call_id),
-        run_id,
-        &mut receiver,
-        &receipt,
-    );
+            "reject-json.txt",
+            "must never be published\n",
+        );
+
+        let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let output = service
+            .reject_action(run_id, call_id, message.map(str::to_string), notifications)
+            .unwrap_or_else(|error| panic!("{case}: manual FileChange rejection failed: {error}"));
+        output
+            .file_change_result
+            .as_ref()
+            .expect("rejection returns a typed FileChange receipt")
+            .validate()
+            .unwrap_or_else(|error| panic!("{case}: invalid rejection receipt: {error}"));
+        let receipt = assert_strict_file_change_execution_json(&output, "rejected");
+        assert_eq!(receipt["status"], "rejected", "{case}");
+        assert_eq!(receipt["outcome"], "definitely_not_executed", "{case}");
+        assert_eq!(receipt["message"], expected_message, "{case}");
+        assert!(receipt["error"].is_null(), "{case}");
+        assert!(receipt["errorCode"].is_null(), "{case}");
+        assert_eq!(
+            output.agent_output.status,
+            AgentRunStatus::Running,
+            "{case}"
+        );
+        assert!(
+            !target.exists(),
+            "{case}: rejection must not create the target"
+        );
+        assert_file_change_receipt_surfaces_match(
+            &storage,
+            &pending_action_storage_id(run_id, call_id),
+            run_id,
+            &mut receiver,
+            &receipt,
+        );
+    }
+}
+
+#[test]
+fn direct_file_change_blank_rejection_never_mutates_create_update_or_delete() {
+    for (operation, original, replacement) in [
+        (
+            AgentFileChangeOperation::Create,
+            None,
+            Some("new content\n"),
+        ),
+        (
+            AgentFileChangeOperation::Update,
+            Some("original content\n"),
+            Some("replacement content\n"),
+        ),
+        (
+            AgentFileChangeOperation::Delete,
+            Some("original content\n"),
+            None,
+        ),
+    ] {
+        let fixture = tempdir().unwrap();
+        let workspace = fixture.path().join("workspace");
+        fs::create_dir(&workspace).unwrap();
+        let workspace = fs::canonicalize(workspace).unwrap();
+        let storage = StorageService::open(&fixture.path().join("storage.sqlite")).unwrap();
+        let target = workspace.join("unchanged.txt");
+        if let Some(content) = original {
+            fs::write(&target, content).unwrap();
+        }
+        let run_id = "run-direct-blank-rejection";
+        let conversation_id = "conversation-direct-blank-rejection";
+        let (mut action, call) = direct_file_change_fixture(
+            run_id,
+            conversation_id,
+            "call-direct-blank-rejection",
+            ("unchanged.txt", target.to_str().unwrap()),
+            original,
+            replacement,
+            AgentApprovalStatus::Required,
+        );
+        let input = direct_execution_input(
+            &workspace,
+            run_id,
+            conversation_id,
+            AgentPermissions::default(),
+            &call,
+        );
+        bind_direct_execution_to_input(&mut action, &input);
+        let record = pending_file_change_record(run_id, conversation_id, action, &call, input);
+        let restored_call = tool_call_for_pending_record(&record).unwrap();
+        let decision = action_execution_for_decision(
+            &storage,
+            &record,
+            &restored_call,
+            AgentApprovalDecisionStatus::Rejected,
+            Some("\t\r\n"),
+        );
+        let receipt = decision.file_change_result.as_ref().unwrap();
+        receipt.validate().unwrap();
+        assert_eq!(receipt.operation, operation);
+        assert_eq!(receipt.status, AgentFileChangeResultStatus::Rejected);
+        assert_eq!(
+            receipt.outcome,
+            mycopilot_core::AgentFileChangeOutcome::DefinitelyNotExecuted
+        );
+        assert_eq!(
+            receipt.message.as_deref(),
+            Some(DEFAULT_FILE_CHANGE_REJECTION_MESSAGE)
+        );
+        assert_eq!(decision.final_pending_status, PendingActionStatus::Rejected);
+        assert!(decision.file_change.is_none());
+        assert!(decision.tool_result.ok);
+        assert_eq!(decision.tool_result.error, None);
+        assert_eq!(decision.tool_result.result, Some(json!(receipt)));
+        assert_eq!(fs::read_to_string(&target).ok().as_deref(), original);
+        assert_eq!(
+            fs::read_dir(&workspace).unwrap().count(),
+            usize::from(original.is_some()),
+            "{operation:?}: rejection must not leave temporary files"
+        );
+    }
 }
 
 #[tokio::test]

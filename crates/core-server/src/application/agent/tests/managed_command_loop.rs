@@ -1223,6 +1223,23 @@ async fn approved_command_reuses_one_session_archive_across_restart_and_runtime_
 
 #[tokio::test]
 async fn rejected_command_after_restart_resumes_the_model_without_starting_a_session() {
+    for (message, expected_message) in [
+        (None, None),
+        (Some(""), None),
+        (Some("\t\n"), None),
+        (
+            Some("  Do not execute this command.  "),
+            Some("  Do not execute this command.  "),
+        ),
+    ] {
+        assert_rejected_command_after_restart(message, expected_message).await;
+    }
+}
+
+async fn assert_rejected_command_after_restart(
+    message: Option<&str>,
+    expected_message: Option<&str>,
+) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let (continuation_tx, continuation_rx) = tokio::sync::oneshot::channel();
@@ -1368,11 +1385,27 @@ async fn rejected_command_after_restart_resumes_the_model_without_starting_a_ses
         .reject_action(
             &turn.run_id,
             &action_id,
-            Some("Do not execute this command.".to_string()),
+            message.map(ToString::to_string),
             restart_notifications,
         )
         .unwrap();
     assert_eq!(rejection.agent_output.status, AgentRunStatus::Running);
+    let expected_decision_result = json!({
+        "status": "rejected",
+        "message": expected_message,
+    });
+    let rejection_result = rejection
+        .tool_result
+        .as_ref()
+        .expect("command rejection returns its exact Host ToolResult");
+    assert_eq!(rejection_result.call_id, call_id);
+    assert_eq!(rejection_result.tool, "run_command");
+    assert!(rejection_result.ok);
+    assert_eq!(
+        rejection_result.result.as_ref(),
+        Some(&expected_decision_result),
+        "Host rejection reason must normalize only blank input: {message:?}"
+    );
 
     let continuation_request = tokio::time::timeout(Duration::from_secs(5), continuation_rx)
         .await
@@ -1387,9 +1420,13 @@ async fn rejected_command_after_restart_resumes_the_model_without_starting_a_ses
         })
         .and_then(|message| message["content"].as_str())
         .expect("rejection continuation contains the paired ToolResult");
+    let rejected_tool_result = serde_json::from_str::<Value>(rejected_tool_result).unwrap();
+    // The command model projection deliberately retains status but not message. Verify the
+    // exact Host and audit payloads separately so model compaction cannot hide blank reasons.
     assert_eq!(
-        serde_json::from_str::<Value>(rejected_tool_result).unwrap()["status"],
-        "rejected"
+        rejected_tool_result,
+        json!({ "status": "rejected" }),
+        "Provider must receive the existing rejected-command projection: {message:?}"
     );
 
     tokio::time::timeout(Duration::from_secs(5), async {
@@ -1409,6 +1446,28 @@ async fn rejected_command_after_restart_resumes_the_model_without_starting_a_ses
     .await
     .unwrap();
     server.await.unwrap();
+
+    let audit = restarted_storage
+        .get_agent_action_audit(&pending_action_storage_id(&turn.run_id, &action_id))
+        .unwrap()
+        .expect("command rejection keeps a durable audit record after restart");
+    assert_eq!(audit.status, "rejected");
+    assert_eq!(audit.decision.as_deref(), Some("rejected"));
+    let audited_tool_result = serde_json::from_str::<AgentToolResult>(
+        audit
+            .tool_result_json
+            .as_deref()
+            .expect("command rejection audit contains its exact ToolResult"),
+    )
+    .unwrap();
+    assert_eq!(audited_tool_result.call_id, call_id);
+    assert_eq!(audited_tool_result.tool, "run_command");
+    assert!(audited_tool_result.ok);
+    assert_eq!(
+        audited_tool_result.result.as_ref(),
+        Some(&expected_decision_result),
+        "durable rejection reason must normalize only blank input: {message:?}"
+    );
 
     assert!(restarted.list_pending_actions().is_empty());
     assert!(restarted_storage
