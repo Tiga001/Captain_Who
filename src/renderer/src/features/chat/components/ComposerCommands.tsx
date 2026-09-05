@@ -1,7 +1,16 @@
-import { Archive, FoldVertical, Gauge, Pencil, Pin, Plus, type LucideIcon } from 'lucide-react'
+import {
+  Archive,
+  FoldVertical,
+  Gauge,
+  Pencil,
+  Pin,
+  Plus,
+  Split,
+  type LucideIcon
+} from 'lucide-react'
 import { useEffect } from 'react'
 
-export type ComposerCommandId = 'compact' | 'new' | 'usage' | 'pin' | 'rename' | 'archive'
+export type ComposerCommandId = 'compact' | 'new' | 'fork' | 'usage' | 'pin' | 'rename' | 'archive'
 export interface ComposerCommand {
   id: ComposerCommandId
   label: string
@@ -12,6 +21,7 @@ export interface ComposerCommand {
 const icons: Record<ComposerCommandId, LucideIcon> = {
   compact: FoldVertical,
   new: Plus,
+  fork: Split,
   usage: Gauge,
   pin: Pin,
   rename: Pencil,

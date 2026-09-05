@@ -157,4 +157,5 @@ fn apply_patch_observation(
 include!("tests/planning.rs");
 include!("tests/commit.rs");
 include!("tests/continuity.rs");
+include!("tests/manual_boundary.rs");
 include!("tests/recovery.rs");

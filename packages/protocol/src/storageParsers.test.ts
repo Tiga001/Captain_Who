@@ -159,6 +159,11 @@ describe('storage protocol parsers', () => {
       forkPoint: { kind: 'provider_transition_boundary', operationId: 'operation-1' }
     },
     {
+      requestId: 'manual-boundary-request',
+      sourceConversationId: 'conversation-1',
+      forkPoint: { kind: 'manual_compaction_boundary', operationId: 'context-compaction-cloned-1' }
+    },
+    {
       requestId: 'latest-request',
       sourceConversationId: 'conversation-1',
       forkPoint: { kind: 'latest' }
@@ -168,6 +173,20 @@ describe('storage protocol parsers', () => {
   })
 
   it.each([
+    ...[undefined, '', ' operation ', 'x'.repeat(1025)].map((operationId) => ({
+      requestId: 'manual-request',
+      sourceConversationId: 'conversation-1',
+      forkPoint: { kind: 'manual_compaction_boundary', operationId }
+    })),
+    {
+      requestId: 'manual-request',
+      sourceConversationId: 'conversation-1',
+      forkPoint: {
+        kind: 'manual_compaction_boundary',
+        operationId: 'operation',
+        assistantMessageId: 'untrusted-boundary'
+      }
+    },
     {
       requestId: 'request-1',
       sourceConversationId: 'conversation-1',

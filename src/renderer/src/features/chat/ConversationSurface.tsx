@@ -42,7 +42,7 @@ import type {
 import type { ModelTransitionConfirmation } from './modelTransitionUiState'
 import { stripAttachmentSummary } from './chatAttachments'
 import { getConversationTurnNavigationItems } from './conversationTurnNavigation'
-import { isAssistantMessageGenerating } from './assistantGeneration'
+import { isAssistantMessageGenerating, isAssistantReplyComplete } from './assistantGeneration'
 import { getLatestAgentTodo } from './todoLifetime'
 import { useTurnDiffSummaries } from './useTurnDiffSummaries'
 import { getAgentActionApprovalStatus } from '../agentRun/agentActionUtils'
@@ -66,6 +66,7 @@ interface ConversationSurfaceCommonProps {
 
 export interface InteractiveConversationSurfaceProps extends ConversationSurfaceCommonProps {
   mode: 'interactive'
+  forkDisabledReason?: string
   commands?: readonly ComposerCommand[]
   isManualCompactionRunning?: boolean
   /** Root-only semantic collaboration activity supplied by the durable tree/event projection. */
@@ -187,18 +188,6 @@ function getPendingApprovalTarget(conversation: ChatConversation) {
   return null
 }
 
-function isAssistantReplyComplete(message: ChatConversation['messages'][number] | undefined) {
-  if (!message || message.role !== 'assistant' || message.status !== 'sent') return false
-  const status = message.agentRun?.status
-  return (
-    !status ||
-    status === 'completed' ||
-    status === 'failed' ||
-    status === 'cancelled' ||
-    status === 'idle'
-  )
-}
-
 function getEditableLastUserMessageId(conversation: ChatConversation) {
   const messages = conversation.messages
   if (messages.length < 2) return null
@@ -212,6 +201,7 @@ function getEditableLastUserMessageId(conversation: ChatConversation) {
 }
 
 interface ChatMessageListProps {
+  forkDisabledReason?: string
   agentLabelsById?: Readonly<Record<string, string>>
   collaborationTimelineActivities?: readonly CollaborationTimelineActivity[]
   conversation: ChatConversation
@@ -247,6 +237,7 @@ interface ChatMessageListProps {
 }
 
 export const ChatMessageList = memo(function ChatMessageList({
+  forkDisabledReason,
   agentLabelsById,
   collaborationTimelineActivities = EMPTY_COLLABORATION_TIMELINE_ACTIVITIES,
   conversation,
@@ -377,7 +368,10 @@ export const ChatMessageList = memo(function ChatMessageList({
                 : undefined
             }
             onContinueInNewTask={
-              mode === 'interactive' && isAssistantReplyComplete(message) && onContinueInNewTask
+              mode === 'interactive' &&
+              !forkDisabledReason &&
+              isAssistantReplyComplete(message) &&
+              onContinueInNewTask
                 ? handleContinueAssistantReply
                 : undefined
             }
@@ -418,13 +412,28 @@ export const ChatMessageList = memo(function ChatMessageList({
               .map((operation) => ({
                 at: operation.startedAt,
                 id: operation.operationId,
-                element: <ConversationManualCompactionDivider operation={operation} />
+                element: (
+                  <ConversationManualCompactionDivider
+                    operation={operation}
+                    forkDisabledReason={forkDisabledReason}
+                    onContinueInNewTask={
+                      mode === 'interactive' && onContinueInNewTask
+                        ? () =>
+                            continueInNewTask({
+                              kind: 'manual_compaction_boundary',
+                              operationId: operation.operationId
+                            })
+                        : undefined
+                    }
+                  />
+                )
               })),
             ...(modelTransitions.completedByMessageId.get(message.id) ?? []).map((operation) => ({
               at: operation.startedAt,
               id: operation.operationId,
               element: (
                 <ConversationModelTransitionDivider
+                  forkDisabledReason={forkDisabledReason}
                   operation={operation}
                   onContinueInNewTask={
                     mode === 'interactive' &&
@@ -454,11 +463,25 @@ export const ChatMessageList = memo(function ChatMessageList({
             !operation.coveredThroughMessageId || !messageIds.has(operation.coveredThroughMessageId)
         )
         .map((operation) => (
-          <ConversationManualCompactionDivider key={operation.operationId} operation={operation} />
+          <ConversationManualCompactionDivider
+            key={operation.operationId}
+            operation={operation}
+            forkDisabledReason={forkDisabledReason}
+            onContinueInNewTask={
+              mode === 'interactive' && onContinueInNewTask
+                ? () =>
+                    continueInNewTask({
+                      kind: 'manual_compaction_boundary',
+                      operationId: operation.operationId
+                    })
+                : undefined
+            }
+          />
         ))}
       {modelTransitions.trailing.map((operation) => (
         <ConversationModelTransitionDivider
           key={operation.operationId}
+          forkDisabledReason={forkDisabledReason}
           onContinueInNewTask={
             mode === 'interactive' &&
             operation.status === 'completed' &&
@@ -686,8 +709,19 @@ export function ConversationSurface(props: ConversationSurfaceProps) {
             modelTransitionOperations={interactive?.modelTransitionOperations}
             onApproveAgentAction={interactive?.onApproveAgentAction}
             onCancelAgentAction={interactive?.onCancelAgentAction}
-            onContinueInNewTask={
-              interactive?.isManualCompactionRunning ? undefined : interactive?.onContinueInNewTask
+            onContinueInNewTask={interactive?.onContinueInNewTask}
+            forkDisabledReason={
+              interactive?.forkDisabledReason ??
+              (interactive?.isManualCompactionRunning
+                ? t('chat.commands.compacting')
+                : isGenerating ||
+                    hasPendingApproval ||
+                    interactive?.modelTransitionConfirmation ||
+                    interactive?.modelTransitionOperations?.some(
+                      (operation) => operation.status === 'running'
+                    )
+                  ? t('chat.commands.idleOnly')
+                  : undefined)
             }
             onEditLastUserMessage={
               interactive?.isManualCompactionRunning

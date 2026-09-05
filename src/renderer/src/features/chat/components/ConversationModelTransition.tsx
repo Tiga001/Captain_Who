@@ -44,17 +44,17 @@ export function ModelTransitionConfirmationDialog({
 }
 
 export function ConversationModelTransitionDivider({
+  forkDisabledReason,
   onContinueInNewTask,
   onRetry,
   operation
 }: {
+  forkDisabledReason?: string
   onContinueInNewTask?: () => void | Promise<void>
   onRetry?: () => void | Promise<void>
   operation: AgentProviderTransitionOperation
 }) {
   const { t } = useFrontendConfig()
-  const [isContinuing, setIsContinuing] = useState(false)
-  const isContinuingRef = useRef(false)
   const content =
     operation.status === 'running'
       ? t('chat.modelTransition.running')
@@ -114,30 +114,7 @@ export function ConversationModelTransitionDivider({
       <div className="conversation-model-transition__content">
         {status}
         {operation.status === 'completed' && operation.summaryId && onContinueInNewTask && (
-          <Tooltip content={t('chat.continueInNewTask')}>
-            <button
-              aria-label={t('chat.continueInNewTask')}
-              className="conversation-model-transition__fork"
-              disabled={isContinuing}
-              onClick={() => {
-                if (isContinuingRef.current) return
-                isContinuingRef.current = true
-                setIsContinuing(true)
-                void Promise.resolve(onContinueInNewTask()).finally(() => {
-                  isContinuingRef.current = false
-                  setIsContinuing(false)
-                })
-              }}
-              title={t('chat.continueInNewTask')}
-              type="button"
-            >
-              {isContinuing ? (
-                <LoaderCircle aria-hidden="true" className="chat-message__action-spinner" />
-              ) : (
-                <Split aria-hidden="true" />
-              )}
-            </button>
-          </Tooltip>
+          <CompactionForkButton disabledReason={forkDisabledReason} onFork={onContinueInNewTask} />
         )}
       </div>
       <span aria-hidden="true" />
@@ -147,8 +124,12 @@ export function ConversationModelTransitionDivider({
 
 /** Same timeline divider and running animation as provider compaction. No chat message is created. */
 export function ConversationManualCompactionDivider({
+  forkDisabledReason,
+  onContinueInNewTask,
   operation
 }: {
+  forkDisabledReason?: string
+  onContinueInNewTask?: () => void | Promise<void>
   operation: AgentManualContextCompactionOperation
 }) {
   const { t } = useFrontendConfig()
@@ -168,8 +149,53 @@ export function ConversationManualCompactionDivider({
             {content}
           </span>
         </button>
+        {operation.status === 'completed' && operation.summaryId && onContinueInNewTask && (
+          <CompactionForkButton disabledReason={forkDisabledReason} onFork={onContinueInNewTask} />
+        )}
       </div>
       <span aria-hidden="true" />
     </div>
+  )
+}
+
+function CompactionForkButton({
+  disabledReason,
+  onFork
+}: {
+  disabledReason?: string
+  onFork: () => void | Promise<void>
+}) {
+  const { t } = useFrontendConfig()
+  const [isContinuing, setIsContinuing] = useState(false)
+  const isContinuingRef = useRef(false)
+  const label = t('chat.continueInNewTask')
+  const description = disabledReason ?? label
+  return (
+    <Tooltip content={description}>
+      <button
+        aria-label={label}
+        className="conversation-model-transition__fork"
+        disabled={Boolean(disabledReason) || isContinuing}
+        onClick={async () => {
+          if (disabledReason || isContinuingRef.current) return
+          isContinuingRef.current = true
+          setIsContinuing(true)
+          try {
+            await onFork()
+          } finally {
+            isContinuingRef.current = false
+            setIsContinuing(false)
+          }
+        }}
+        title={description}
+        type="button"
+      >
+        {isContinuing ? (
+          <LoaderCircle aria-hidden="true" className="chat-message__action-spinner" />
+        ) : (
+          <Split aria-hidden="true" />
+        )}
+      </button>
+    </Tooltip>
   )
 }

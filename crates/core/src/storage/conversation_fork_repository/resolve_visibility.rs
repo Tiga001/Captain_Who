@@ -30,6 +30,32 @@ fn resolve_fork_point(
             summary_id: None,
             model_id: assistant_message_model_id(connection, &source.id, assistant_message_id)?,
         }),
+        ConversationForkPoint::ManualCompactionBoundary { operation_id } => {
+            let (operation, receipt) =
+                load_manual_compaction_boundary(connection, &source.id, operation_id)?;
+            let version = active_chain
+                .iter()
+                .find(|version| {
+                    Some(version.summary.id.as_str()) == operation.summary_id.as_deref()
+                })
+                .ok_or_else(|| "该手动压缩摘要已不在当前可分支的历史链中。".to_string())?;
+            if version.summary.conversation_id != source.id
+                || version.lineage.introduced_by_assistant_message_id
+                    != receipt.assistant_message_id
+                || version.summary.covered_through != receipt.plan.covered_through
+                || receipt.source_revision.as_deref()
+                    != Some(version.summary.source_revision.as_str())
+            {
+                return Err("手动压缩分支边界的摘要身份或历史覆盖范围不一致。"
+                    .to_string()
+                    .into());
+            }
+            Ok(ResolvedConversationForkPoint {
+                assistant_message_id: receipt.assistant_message_id,
+                summary_id: operation.summary_id,
+                model_id: operation.model_id,
+            })
+        }
         ConversationForkPoint::ProviderTransitionBoundary { operation_id } => {
             if !operation_id.starts_with("provider-transition-") {
                 return Err("Provider transition 分叉边界无效。".to_string().into());
@@ -84,6 +110,62 @@ fn resolve_fork_point(
             })
         }
     }
+}
+
+/// A cloned manual operation has a fresh generic operation ID. Its durable owner and applied
+/// receipt establish the boundary identity; an ID prefix cannot establish that identity.
+fn load_manual_compaction_boundary(
+    connection: &Connection,
+    conversation_id: &str,
+    operation_id: &str,
+) -> Result<
+    (
+        crate::storage::models::ManualContextCompactionOperation,
+        ContextCompactionReceipt,
+    ),
+    ConversationForkError,
+> {
+    let operation = crate::storage::manual_context_compaction_repository::get(
+        connection,
+        conversation_id,
+        Some(operation_id),
+    )?
+    .ok_or_else(|| "找不到指定的手动压缩分支边界。".to_string())?;
+    let receipt = context_compaction_receipt_repository::get_receipt(connection, operation_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "手动压缩分支边界缺少已提交记录。".to_string())?;
+    if operation.operation_id != operation_id
+        || operation.conversation_id != conversation_id
+        || operation.status != "completed"
+        || operation.phase != "committing"
+        || operation
+            .model_id
+            .as_deref()
+            .is_none_or(|model| model.trim().is_empty())
+        || operation.summary_id.is_none()
+        || operation.assistant_message_id.as_deref() != Some(receipt.assistant_message_id.as_str())
+        || operation.covered_through_message_id != operation.assistant_message_id
+        || operation.completed_at.is_none()
+        || operation.completed_at < receipt.completed_at
+        || receipt.operation_id != operation_id
+        || receipt.conversation_id != conversation_id
+        || receipt.status != ContextCompactionReceiptStatus::Applied
+        || receipt.stage != ContextCompactionReceiptStage::Completed
+        || receipt.model_config_id != operation.model_id
+        || receipt.summary_id != operation.summary_id
+        || receipt
+            .result
+            .as_ref()
+            .map(|result| result.summary_id.as_str())
+            != operation.summary_id.as_deref()
+        || receipt.plan.covered_through
+            != ContextJournalCursor::message(&receipt.assistant_message_id)
+    {
+        return Err("手动压缩分支边界与已完成操作记录不一致。"
+            .to_string()
+            .into());
+    }
+    Ok((operation, receipt))
 }
 
 fn assistant_message_model_id(
@@ -251,6 +333,9 @@ pub(crate) fn validate_fork_point_input(
             operation_id.as_str(),
             1024,
         ),
+        ConversationForkPoint::ManualCompactionBoundary { operation_id } => {
+            ("手动压缩 operation ID", operation_id.as_str(), 1024)
+        }
     };
     if value.trim().is_empty() || value.trim() != value || value.chars().count() > maximum {
         return Err(format!("{label}无效。"));

@@ -820,6 +820,7 @@ pub enum ConversationForkPoint {
     Latest {},
     AssistantReply { assistant_message_id: String },
     ProviderTransitionBoundary { operation_id: String },
+    ManualCompactionBoundary { operation_id: String },
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]

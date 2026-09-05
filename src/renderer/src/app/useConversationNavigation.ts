@@ -76,6 +76,7 @@ export function useConversationNavigation({
   waitForConversationSaves
 }: UseConversationNavigationOptions) {
   const archiveRequestsInFlightRef = useRef(new Set<string>())
+  const forkRequestsInFlightRef = useRef(new Set<string>())
   const selectConversation = useCallback(
     (conversationId: string, messageId?: string | null, loadedConversation?: ChatConversation) => {
       activeConversationIdRef.current = conversationId
@@ -139,7 +140,11 @@ export function useConversationNavigation({
 
   const continueInNewTask = useCallback(
     async (sourceConversationId: string, forkPoint: StorageConversationForkPoint) => {
+      // Shared by timeline and Composer actions, including clicks during pending persistence.
+      if (forkRequestsInFlightRef.current.has(sourceConversationId)) return
+      forkRequestsInFlightRef.current.add(sourceConversationId)
       try {
+        await waitForConversationSaves(sourceConversationId)
         const newConversation = await forkConversation({
           requestId: createId('conversation-fork-request'),
           sourceConversationId,
@@ -178,6 +183,8 @@ export function useConversationNavigation({
             messages.continueInNewTaskFailed
           )
         )
+      } finally {
+        forkRequestsInFlightRef.current.delete(sourceConversationId)
       }
     },
     [
@@ -194,7 +201,8 @@ export function useConversationNavigation({
       setDraftsWithRef,
       setScrollTargetMessageId,
       setSettingsOpen,
-      showToast
+      showToast,
+      waitForConversationSaves
     ]
   )
 

@@ -383,6 +383,10 @@ export type StorageConversationForkPoint =
       kind: 'provider_transition_boundary'
       operationId: string
     }
+  | {
+      kind: 'manual_compaction_boundary'
+      operationId: string
+    }
 
 export interface StorageForkConversationRequest {
   requestId: string

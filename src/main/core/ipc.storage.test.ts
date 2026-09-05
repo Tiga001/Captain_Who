@@ -24,13 +24,17 @@ function registerForkHandler(forkConversation: ReturnType<typeof vi.fn>) {
 }
 
 describe('conversation fork IPC', () => {
-  it('forwards a validated provider-transition boundary fork point', async () => {
+  it.each([
+    { kind: 'provider_transition_boundary', operationId: 'operation-1' },
+    { kind: 'manual_compaction_boundary', operationId: 'context-compaction-cloned' },
+    { kind: 'latest' }
+  ])('forwards a validated fork point %j', async (forkPoint) => {
     const forkConversation = vi.fn().mockResolvedValue({ id: 'conversation-2' })
     const handler = registerForkHandler(forkConversation)
     const input = {
       requestId: 'conversation-fork-request-2',
       sourceConversationId: 'conversation-1',
-      forkPoint: { kind: 'provider_transition_boundary', operationId: 'operation-1' }
+      forkPoint
     }
 
     await expect(handler({} as IpcMainInvokeEvent, input)).resolves.toEqual({

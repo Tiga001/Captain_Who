@@ -21,6 +21,56 @@ fn latest_fork_request_is_host_resolved_and_rejects_client_cursor() {
 }
 
 #[test]
+fn manual_compaction_boundary_request_accepts_only_the_durable_operation_identity() {
+    let request = serde_json::from_value::<ForkConversationRequest>(serde_json::json!({
+        "requestId":"manual-boundary", "sourceConversationId":"source",
+        "forkPoint":{"kind":"manual_compaction_boundary", "operationId":"manual-compaction-operation"}
+    })).unwrap();
+    assert_eq!(
+        request.fork_point,
+        ConversationForkPoint::ManualCompactionBoundary {
+            operation_id: "manual-compaction-operation".into(),
+        }
+    );
+    for field in [
+        "assistantMessageId",
+        "summaryId",
+        "modelId",
+        "coveredThroughMessageId",
+    ] {
+        let mut params = serde_json::json!({
+            "requestId":"manual-boundary", "sourceConversationId":"source",
+            "forkPoint":{"kind":"manual_compaction_boundary", "operationId":"manual-compaction-operation"}
+        });
+        params["forkPoint"][field] = serde_json::json!("untrusted");
+        assert!(
+            serde_json::from_value::<ForkConversationRequest>(params).is_err(),
+            "{field}"
+        );
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let storage = Arc::new(StorageService::open(&temp.path().join("storage.sqlite")).unwrap());
+    let agent_service = AgentService::new(Arc::clone(&storage));
+    let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let response = handle_request(
+        &storage,
+        &agent_service,
+        notifications,
+        JsonRpcRequest {
+            jsonrpc: "2.0".into(),
+            id: JsonRpcId::Number(17),
+            method: STORAGE_FORK_CONVERSATION_METHOD.into(),
+            params: Some(serde_json::json!({
+                "requestId":"manual-boundary", "sourceConversationId":"missing-conversation",
+                "forkPoint":{"kind":"manual_compaction_boundary", "operationId":"manual-compaction-operation"}
+            })),
+        },
+    );
+    assert_eq!(response["error"]["code"], -32000, "{response}");
+    assert_eq!(response["error"]["message"], "原任务不存在。");
+}
+
+#[test]
 fn fork_request_accepts_camel_case_assistant_reply_point() {
     let temp = tempfile::tempdir().unwrap();
     let storage = Arc::new(StorageService::open(&temp.path().join("storage.sqlite")).unwrap());

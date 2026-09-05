@@ -41,7 +41,7 @@ fixture 和测试为准。
 
 ## 子系统
 
-[手动上下文压缩与快捷命令](subsystems/manual-context-compaction.md) 说明六项 Slash 命令、独立用量、取消恢复与 latest fork。
+[手动上下文压缩与快捷命令](subsystems/manual-context-compaction.md) 说明七项 Slash 命令、独立用量、取消恢复、压缩边界分支与 latest fork。
 
 | 文档                                                              | 内容                                                     |
 | ----------------------------------------------------------------- | -------------------------------------------------------- |

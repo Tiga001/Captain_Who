@@ -78,6 +78,29 @@ pub(crate) fn commit_fork_plan_with_provider_continuations(
             return Err("最新分支边界已变化，请重试。".to_string().into());
         }
     }
+    if matches!(
+        plan.source_fork_point,
+        ConversationForkPoint::ManualCompactionBoundary { .. }
+    ) {
+        let source =
+            chat_repository::get_active_conversation(&transaction, &plan.source_conversation_id)
+                .map_err(database_error)?
+                .ok_or_else(|| "原任务已不存在。".to_string())?;
+        let chain =
+            context_compaction_repository::list_active_summary_chain(&transaction, &source.id)
+                .map_err(|error| error.to_string())?;
+        let boundary = resolve_fork_point(&transaction, &source, &plan.source_fork_point, &chain)?;
+        if boundary.assistant_message_id != plan.source_message_id
+            || boundary.model_id != plan.target.model_id
+            || boundary.summary_id.as_deref()
+                != plan
+                    .summaries
+                    .last()
+                    .map(|version| version.summary.id.as_str())
+        {
+            return Err("手动压缩分支边界已变化，请重试。".to_string().into());
+        }
+    }
     insert_conversation(&transaction, &plan.target)?;
     if let Some(collaboration) = &plan.collaboration_root {
         let source = agent_graph_repository::get_agent_node_by_conversation(

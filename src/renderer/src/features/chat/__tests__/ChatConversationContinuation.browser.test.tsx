@@ -2,6 +2,7 @@ import { expect, it, vi } from 'vitest'
 import { render } from 'vitest-browser-react'
 import { ChatMessageList } from '../ChatConversationPage'
 import type { ChatConversation } from '../chatTypes'
+import type { AgentManualContextCompactionOperation } from '@mycopilot/protocol'
 
 vi.mock('../../../config/FrontendConfigProvider', () => ({
   useFrontendConfig: () => ({
@@ -139,4 +140,79 @@ it('emits distinct fork points before and after a completed provider transition'
     kind: 'provider_transition_boundary',
     operationId: 'transition-1'
   })
+})
+
+const manualOperation: AgentManualContextCompactionOperation = {
+  schemaVersion: 1,
+  operationId: 'context-compaction-cloned',
+  requestId: 'request',
+  conversationId: 'forked-task',
+  status: 'completed',
+  phase: 'committing',
+  startedAt: 10,
+  updatedAt: 20,
+  completedAt: 20,
+  coveredThroughMessageId: 'forked-boundary',
+  summaryId: 'summary'
+}
+
+it('forks an older manual divider by operation identity and suppresses repeated clicks', async () => {
+  let resolve!: () => void
+  const onContinueInNewTask = vi.fn(
+    () =>
+      new Promise<void>((done) => {
+        resolve = done
+      })
+  )
+  const screen = await render(
+    <ChatMessageList
+      conversation={conversation()}
+      editableLastUserMessageId={null}
+      editSelectedModelAvailable
+      editSelectedModelSupportsImage
+      manualCompactionOperations={[manualOperation]}
+      onContinueInNewTask={onContinueInNewTask}
+      showTokenUsageDetails={false}
+    />
+  )
+  const divider = screen.getByTestId('manual-compaction-divider').element()
+  expect(divider.nextElementSibling).toHaveAttribute('data-message-id', 'new-user')
+  const button = divider.querySelector<HTMLButtonElement>('.conversation-model-transition__fork')!
+  button.click()
+  button.click()
+  expect(onContinueInNewTask).toHaveBeenCalledExactlyOnceWith({
+    kind: 'manual_compaction_boundary',
+    operationId: 'context-compaction-cloned'
+  })
+  await expect.element(button).toBeDisabled()
+  resolve()
+  await expect.element(button).toBeEnabled()
+})
+
+it('keeps the manual fork disabled while busy and absent in observer mode', async () => {
+  const onContinueInNewTask = vi.fn()
+  const props = {
+    conversation: conversation(),
+    editableLastUserMessageId: null,
+    editSelectedModelAvailable: true,
+    editSelectedModelSupportsImage: true,
+    manualCompactionOperations: [manualOperation],
+    onContinueInNewTask,
+    showTokenUsageDetails: false
+  }
+  const screen = await render(<ChatMessageList {...props} forkDisabledReason="聊天空闲时可用" />)
+  const button = screen
+    .getByTestId('manual-compaction-divider')
+    .element()
+    .querySelector<HTMLButtonElement>('.conversation-model-transition__fork')!
+  await expect.element(button).toBeDisabled()
+  button.click()
+  expect(onContinueInNewTask).not.toHaveBeenCalled()
+  await screen.rerender(<ChatMessageList {...props} mode="observer" />)
+  expect(
+    screen
+      .getByTestId('manual-compaction-divider')
+      .element()
+      .querySelector('.conversation-model-transition__fork')
+  ).toBeNull()
 })

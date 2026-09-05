@@ -741,7 +741,12 @@ function parseStorageConversationForkPoint(value: unknown): StorageConversationF
   const record = expectRecord(value, context)
   const kind = expectEnum(
     record.kind,
-    ['assistant_reply', 'provider_transition_boundary', 'latest'] as const,
+    [
+      'assistant_reply',
+      'provider_transition_boundary',
+      'manual_compaction_boundary',
+      'latest'
+    ] as const,
     `${context}.kind`
   )
 
@@ -762,9 +767,19 @@ function parseStorageConversationForkPoint(value: unknown): StorageConversationF
   }
 
   expectOnlyKeys(record, ['kind', 'operationId'] as const, context)
+  const operationId = expectBoundedForkIdentifier(record.operationId, `${context}.operationId`)
+  if (
+    kind === 'manual_compaction_boundary' &&
+    (operationId.trim() !== operationId || [...operationId].length > 1024)
+  ) {
+    throw invalidProtocolValue(
+      `${context}.operationId`,
+      'must be an unpadded identifier of at most 1024 characters'
+    )
+  }
   return {
     kind,
-    operationId: expectBoundedForkIdentifier(record.operationId, `${context}.operationId`)
+    operationId
   }
 }
 

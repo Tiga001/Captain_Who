@@ -2,6 +2,9 @@
 export const ruRUTranslations = {
   'chat.commands.compact': 'Сжать контекст',
   'chat.commands.compactDescription': 'Сжать контекст текущего чата',
+  'chat.commands.fork': 'Создать ветку чата',
+  'chat.commands.forkDescription': 'Создать ветку чата с последней доступной позиции',
+  'chat.commands.noForkPoint': 'Нет завершённого ответа для создания ветки',
   'chat.commands.new': 'Новый чат',
   'chat.commands.newDescription': 'Начать чат в текущем проекте',
   'chat.commands.usage': 'Использование и оплата',

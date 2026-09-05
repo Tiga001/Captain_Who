@@ -28,6 +28,7 @@ import type {
   ChatSubmitOptions
 } from '../../features/chat/chatTypes'
 import { CHAT_MESSAGE_CHECKPOINT_INTERVAL_MS } from '../chatMessagePersistence'
+import type { ComposerCommand } from '../../features/chat/components/ComposerCommands'
 
 const testState = vi.hoisted(() => ({
   automationEventListeners: new Set<(event: AutomationEvent) => void>(),
@@ -40,6 +41,7 @@ const testState = vi.hoisted(() => ({
   deleteChatMessages: vi.fn(),
   forkConversation: vi.fn(),
   getContextWindowSnapshot: vi.fn(),
+  getManualContextCompactionStatus: vi.fn(),
   getProviderTransitionStatus: vi.fn(),
   getAgentCommandSession: vi.fn(),
   listAgentCommandSessions: vi.fn(),
@@ -172,7 +174,7 @@ vi.mock('../../features/agent/agentClient', () => ({
   cancelAgentAction: vi.fn(),
   cancelAgentRun: testState.cancelAgentRun,
   getContextWindowSnapshot: testState.getContextWindowSnapshot,
-  getManualContextCompactionStatus: vi.fn().mockResolvedValue({ operations: [] }),
+  getManualContextCompactionStatus: testState.getManualContextCompactionStatus,
   onManualContextCompaction: vi.fn(() => () => undefined),
   startManualContextCompaction: vi.fn(),
   cancelManualContextCompaction: vi.fn(),
@@ -358,6 +360,7 @@ vi.mock('../../features/chat/NewConversationPage', () => ({
 }))
 vi.mock('../../features/chat/ChatConversationPage', () => ({
   ChatConversationPage: ({
+    commands,
     composerDraft,
     conversation,
     onComposerDraftChange,
@@ -375,6 +378,7 @@ vi.mock('../../features/chat/ChatConversationPage', () => ({
     scrollTargetMessageId,
     skillCatalogRefreshToken
   }: {
+    commands?: readonly ComposerCommand[]
     composerDraft: ChatComposerDraft
     conversation: ChatConversation
     onComposerDraftChange: (draft: ChatComposerDraft) => void
@@ -393,6 +397,17 @@ vi.mock('../../features/chat/ChatConversationPage', () => ({
     skillCatalogRefreshToken?: number
   }) => (
     <div>
+      {commands?.map((command) => (
+        <button
+          key={command.id}
+          type="button"
+          disabled={Boolean(command.disabledReason)}
+          title={command.disabledReason}
+          onClick={() => void command.execute()}
+        >
+          command-{command.id}
+        </button>
+      ))}
       <output data-testid="draft-skills">
         {composerDraft.skills.map((selection) => `${selection.id}@${selection.revision}`).join(',')}
       </output>
@@ -965,6 +980,7 @@ beforeEach(() => {
   testState.collaborationRootIds.length = 0
   testState.deleteChatMessages.mockReset().mockResolvedValue(undefined)
   testState.forkConversation.mockReset()
+  testState.getManualContextCompactionStatus.mockReset().mockResolvedValue({ operations: [] })
   testState.getContextWindowSnapshot.mockReset().mockResolvedValue({ modelConfigId: 'model-1' })
   testState.getProviderTransitionStatus.mockReset().mockResolvedValue({ operations: [] })
   testState.getAgentCommandSession.mockReset()
@@ -4049,6 +4065,112 @@ describe('authoritative run cancellation and conversation forking', () => {
 
     await expect.element(screen.getByTestId('last-assistant-status')).toHaveTextContent('sent')
     expect(testState.loadConversation).toHaveBeenCalledTimes(initialLoadCount + 2)
+  })
+
+  it('routes the fork command to latest and deduplicates a concurrent timeline click before navigating', async () => {
+    const request = deferred<ChatConversation>()
+    testState.forkConversation.mockReturnValueOnce(request.promise)
+    const screen = await renderSelectedConversation()
+    const command = screen.getByRole('button', { name: 'command-fork' })
+    await expect.element(command).toBeEnabled()
+    await command.click()
+    await screen.getByRole('button', { name: 'continue-in-new-task' }).click()
+    await expect.poll(() => testState.forkConversation.mock.calls.length).toBe(1)
+    expect(testState.forkConversation).toHaveBeenCalledWith({
+      requestId: expect.any(String),
+      sourceConversationId: 'conversation-a',
+      forkPoint: { kind: 'latest' }
+    })
+    expect(testState.startConversationTurn).not.toHaveBeenCalled()
+    request.resolve({ ...storedConversation(), id: 'fork-created', messagesLoaded: true })
+    await expect
+      .element(screen.getByTestId('active-conversation-id'))
+      .toHaveTextContent('fork-created')
+    await expect.element(screen.getByTestId('draft-message')).toHaveTextContent('')
+    expect(testState.saveComposerDraft).toHaveBeenCalledWith(
+      'fork-created',
+      expect.objectContaining({
+        message: '',
+        attachments: [],
+        skills: [],
+        modelId: 'model-1',
+        projectId: 'project-a'
+      })
+    )
+  })
+
+  it('disables the fork command during manual compaction response drain', async () => {
+    testState.getManualContextCompactionStatus.mockResolvedValue({
+      operations: [
+        {
+          schemaVersion: 1,
+          operationId: 'manual',
+          requestId: 'request',
+          conversationId: 'conversation-a',
+          status: 'cancelled',
+          isBusy: true,
+          phase: 'generating',
+          startedAt: 10,
+          updatedAt: 20,
+          completedAt: 20
+        }
+      ]
+    })
+    const screen = await renderSelectedConversation()
+    await expect.element(screen.getByRole('button', { name: 'command-fork' })).toBeDisabled()
+    await expect
+      .element(screen.getByRole('button', { name: 'command-fork' }))
+      .toHaveAttribute('title', 'chat.commands.compacting')
+    expect(testState.forkConversation).not.toHaveBeenCalled()
+  })
+
+  it('disables latest fork when the conversation ends with an unanswered user message', async () => {
+    testState.loadConversation.mockResolvedValue({
+      ...storedConversation(),
+      messages: [storedConversation().messages[0]]
+    })
+    const screen = await renderSelectedConversation()
+    await expect.element(screen.getByRole('button', { name: 'command-fork' })).toBeDisabled()
+    await expect
+      .element(screen.getByRole('button', { name: 'command-fork' }))
+      .toHaveAttribute('title', 'chat.commands.noForkPoint')
+    expect(testState.forkConversation).not.toHaveBeenCalled()
+  })
+
+  it('disables fork when a completed turn still owns a running background command', async () => {
+    const stored = storedConversationWithCommandRun()
+    const session = commandSessionSnapshot()
+    stored.messages.at(-1)!.agentRun!.commandSessions = {
+      'command-call': session
+    }
+    testState.loadConversation.mockResolvedValue(stored)
+    testState.listAgentCommandSessions.mockResolvedValue({ sessions: [session] })
+    testState.getAgentCommandSession.mockResolvedValue(commandSessionGetOutput(session))
+    const screen = await renderSelectedConversation()
+    await expect.element(screen.getByRole('button', { name: 'command-fork' })).toBeDisabled()
+    await expect
+      .element(screen.getByRole('button', { name: 'command-fork' }))
+      .toHaveAttribute('title', 'chat.continueInNewTaskActiveCommand')
+    await screen.getByRole('button', { name: 'continue-in-new-task' }).click()
+    expect(testState.forkConversation).not.toHaveBeenCalled()
+  })
+
+  it('allows latest fork from a settled failed reply', async () => {
+    testState.loadConversation.mockResolvedValue(
+      storedConversationWithRun('failed-assistant', 'failed-run', 'failed')
+    )
+    testState.forkConversation.mockResolvedValue({
+      ...storedConversation(),
+      id: 'recovery-fork',
+      messagesLoaded: true
+    })
+    const screen = await renderSelectedConversation()
+    await expect.element(screen.getByRole('button', { name: 'command-fork' })).toBeEnabled()
+    await screen.getByRole('button', { name: 'command-fork' }).click()
+    await expect
+      .element(screen.getByTestId('active-conversation-id'))
+      .toHaveTextContent('recovery-fork')
+    expect(testState.forkConversation.mock.calls[0]?.[0].forkPoint).toEqual({ kind: 'latest' })
   })
 
   it('opens an existing continuation source at the original reply', async () => {

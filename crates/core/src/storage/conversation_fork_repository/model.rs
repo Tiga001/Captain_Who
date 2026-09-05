@@ -717,6 +717,13 @@ fn authoritative_fork_cutoff_at(
 ) -> Result<i64, ConversationForkError> {
     match fork_point {
         ConversationForkPoint::Latest {} => Ok(i64::MAX),
+        ConversationForkPoint::ManualCompactionBoundary { operation_id } => {
+            let (operation, _) =
+                load_manual_compaction_boundary(connection, source_conversation_id, operation_id)?;
+            operation
+                .completed_at
+                .ok_or_else(|| "手动压缩分支边界缺少完成时间。".to_string().into())
+        }
         ConversationForkPoint::AssistantReply {
             assistant_message_id,
         } => connection

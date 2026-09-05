@@ -2,6 +2,9 @@
 export const frFRTranslations = {
   'chat.commands.compact': 'Compacter le contexte',
   'chat.commands.compactDescription': 'Compacter le contexte de cette discussion',
+  'chat.commands.fork': 'Créer une branche de discussion',
+  'chat.commands.forkDescription': 'Créer une branche à partir du dernier point disponible',
+  'chat.commands.noForkPoint': 'Aucune réponse complète disponible pour créer une branche',
   'chat.commands.new': 'Nouvelle discussion',
   'chat.commands.newDescription': 'Démarrer une discussion dans le projet actuel',
   'chat.commands.usage': 'Utilisation et facturation',

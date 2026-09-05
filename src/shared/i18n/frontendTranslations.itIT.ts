@@ -2,6 +2,9 @@
 export const itITTranslations = {
   'chat.commands.compact': 'Compatta contesto',
   'chat.commands.compactDescription': 'Compatta il contesto di questa chat',
+  'chat.commands.fork': 'Crea un ramo della chat',
+  'chat.commands.forkDescription': 'Crea un ramo della chat dall’ultimo punto disponibile',
+  'chat.commands.noForkPoint': 'Nessuna risposta completa disponibile per creare un ramo',
   'chat.commands.new': 'Nuova chat',
   'chat.commands.newDescription': 'Avvia una chat nel progetto corrente',
   'chat.commands.usage': 'Utilizzo e fatturazione',

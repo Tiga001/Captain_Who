@@ -39,6 +39,22 @@ const completed: AgentManualContextCompactionOperation = {
   summaryId: 'summary'
 }
 
+it.each(['running', 'noop', 'cancelled', 'failed', 'interrupted'] as const)(
+  'does not offer a fork or cancel action for %s compaction',
+  async (status) => {
+    const fork = vi.fn()
+    const view = await render(
+      <ConversationManualCompactionDivider
+        operation={{ ...running, status }}
+        onContinueInNewTask={fork}
+      />
+    )
+    const divider = view.getByTestId('manual-compaction-divider').element()
+    expect(divider.querySelectorAll('button')).toHaveLength(1)
+    await expect.element(divider.querySelector('button')!).toBeDisabled()
+  }
+)
+
 function Harness({ id = 'chat' }: { id?: string }) {
   const state = useManualContextCompaction(id)
   return (

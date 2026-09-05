@@ -4,8 +4,9 @@ import { beforeEach, expect, it, vi } from 'vitest'
 import { render } from 'vitest-browser-react'
 import '../../styles/global.css'
 
-const { execute, submit, changed, translate } = vi.hoisted(() => ({
+const { execute, fork, submit, changed, translate } = vi.hoisted(() => ({
   execute: vi.fn(),
+  fork: vi.fn(),
   submit: vi.fn(),
   changed: vi.fn(),
   translate: (key: string) => key
@@ -65,7 +66,14 @@ function TestComposer({
             disabledReason: disabled ? '聊天空闲时可用' : undefined,
             execute
           },
-          { id: 'new', label: '新聊天', description: 'New', execute }
+          { id: 'new', label: '新聊天', description: 'New', execute },
+          {
+            id: 'fork',
+            label: '创建聊天分支',
+            description: '从当前最新可用位置创建聊天分支',
+            disabledReason: disabled || running || maintenance ? '聊天空闲时可用' : undefined,
+            execute: fork
+          }
         ]}
         draft={draft}
         onDraftChange={update}
@@ -227,3 +235,35 @@ it('routes the send button to the command while preserving attached files and pe
   })
   await expect.element(view.getByText('keep.txt')).toBeVisible()
 })
+
+it('filters the fork command in Chinese and executes the hovered row with Enter', async () => {
+  const view = await render(<TestComposer />)
+  await view.getByRole('textbox').click()
+  await userEvent.keyboard('/分支')
+  await expect.element(view.getByRole('option')).toHaveTextContent('创建聊天分支')
+  await userEvent.keyboard('{Escape}')
+  await view.getByRole('textbox').fill('')
+  await userEvent.keyboard('/')
+  await userEvent.hover(
+    view.getByRole('option', { name: '创建聊天分支 从当前最新可用位置创建聊天分支' })
+  )
+  await userEvent.keyboard('{Enter}')
+  expect(fork).toHaveBeenCalledTimes(1)
+  expect(execute).not.toHaveBeenCalled()
+  expect(submit).not.toHaveBeenCalled()
+})
+
+it.each([{ running: true }, { maintenance: true }])(
+  'keeps /fork out of message and queue paths while busy: %j',
+  async (busy) => {
+    const view = await render(<TestComposer {...busy} />)
+    await view.getByRole('textbox').click()
+    await userEvent.keyboard('/fork{Enter}')
+    document.querySelector('form')!.requestSubmit()
+    await userEvent.keyboard('{Escape}{Enter}')
+    expect(fork).not.toHaveBeenCalled()
+    expect(submit).not.toHaveBeenCalled()
+    expect(changed.mock.calls.every(([draft]) => draft.queuedMessages.length === 0)).toBe(true)
+    await expect.element(view.getByRole('textbox')).toHaveValue('/fork')
+  }
+)

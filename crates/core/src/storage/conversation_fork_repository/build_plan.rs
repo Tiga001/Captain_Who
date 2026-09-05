@@ -164,10 +164,24 @@ fn build_single_conversation_fork_plan_at_point(
         .as_ref()
         .and_then(|requirement| requirement.resolved_summary_id.as_deref())
         .is_some_and(|summary_id| selected_summary_ids.contains(summary_id));
+    // An exact manual boundary is a validated Provider-neutral summary of the entire selected
+    // history. A later Provider transition's adaptation marker belongs after that cutoff and
+    // cannot make this earlier, fully covered snapshot require another paid compaction.
+    // Released replay outside the selected summary still forces adaptation below.
+    let manual_boundary_covers_selected_history = matches!(
+        fork_point,
+        ConversationForkPoint::ManualCompactionBoundary { .. }
+    ) && summaries.last().is_some_and(|version| {
+        Some(version.summary.id.as_str()) == resolved.summary_id.as_deref()
+            && source_messages.last().is_some_and(|message| {
+                version.summary.covered_through == ContextJournalCursor::message(&message.id)
+            })
+    });
     let requires_context_adaptation = released_state_outside_summary
-        || source_adaptation.as_ref().is_some_and(|requirement| {
-            requirement.is_required() || !source_adaptation_boundary_selected
-        });
+        || (!manual_boundary_covers_selected_history
+            && source_adaptation.as_ref().is_some_and(|requirement| {
+                requirement.is_required() || !source_adaptation_boundary_selected
+            }));
     let contains_released_provider_history =
         provider_continuation_repository::has_released_for_messages(
             connection,

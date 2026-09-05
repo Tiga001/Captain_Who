@@ -253,7 +253,27 @@
 }
 
 .git-review__source-menu {
-  width: 208px;
+  width: max-content;
+  min-width: 168px;
+  padding: 4px;
+  border-radius: var(--mc-radius-2xl);
+  gap: 1px;
+}
+
+.git-review__source-menu .git-review__source-menu-item {
+  min-height: 30px;
+  gap: 8px;
+  padding-inline: 8px;
+  white-space: nowrap;
+}
+
+.git-review__source-menu .git-review__source-menu-item svg {
+  width: 15px;
+  height: 15px;
+}
+
+.git-review__source-menu .git-review__menu-separator {
+  margin: 3px 4px;
 }
 
 .git-review__options-menu {

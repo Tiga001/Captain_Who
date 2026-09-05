@@ -6,6 +6,7 @@ import { createPortal } from 'react-dom'
 import type {
   AgentEvent,
   AgentProviderTransitionOperation,
+  StorageConversationForkPoint,
   SkillSelection
 } from '@mycopilot/protocol'
 import { ResizeHandle } from '../components/layout/ResizeHandle'
@@ -24,6 +25,10 @@ import type {
   RightSidebarReviewNavigationRequest
 } from '../features/rightSidebar/rightSidebarTypes'
 import { ChatConversationPage } from '../features/chat/ChatConversationPage'
+import {
+  isAssistantMessageGenerating,
+  isAssistantReplySettled
+} from '../features/chat/assistantGeneration'
 import { NewConversationPage } from '../features/chat/NewConversationPage'
 import {
   getNextRandomNewConversationPromptIndex,
@@ -815,6 +820,52 @@ export function AppShell() {
     [activeProviderTransitionConversationId, providerTransitionStore]
   )
 
+  const forkMaintenanceBusy =
+    manualCompaction.isRunning ||
+    activeProviderTransitionOperations.some((operation) => operation.status === 'running')
+  const forkRunBusy =
+    Boolean(activeRunModelId) ||
+    Boolean(activeConversation?.messages.some(isAssistantMessageGenerating)) ||
+    Boolean(
+      collaborationTree?.agents.some(
+        (agent) =>
+          agent.displayStatus === 'queued' ||
+          agent.displayStatus === 'running' ||
+          agent.displayStatus === 'waiting_approval'
+      )
+    )
+  const forkCommandBusy = activeConversation?.messages.some((message) =>
+    Object.values(message.agentRun?.commandSessions ?? {}).some(
+      (session) => session.status === 'starting' || session.status === 'running'
+    )
+  )
+  let forkDisabledReason: string | undefined
+  if (!activeConversation) forkDisabledReason = t('chat.commands.savedOnly')
+  else if (!manualCompaction.ready || activeConversation.messagesLoaded === false)
+    forkDisabledReason = t('chat.commands.restoring')
+  else if (forkMaintenanceBusy) forkDisabledReason = t('chat.commands.compacting')
+  else if (forkRunBusy || activeProviderTransitionConfirmation)
+    forkDisabledReason = t('chat.commands.idleOnly')
+  else if (forkCommandBusy) forkDisabledReason = t('chat.continueInNewTaskActiveCommand')
+  else if (activeConversation.archivedAt) forkDisabledReason = t('chat.commands.archived')
+  const latestForkDisabledReason =
+    forkDisabledReason ??
+    (!isAssistantReplySettled(activeConversation?.messages.at(-1))
+      ? t('chat.commands.noForkPoint')
+      : undefined)
+  const continueActiveConversationInNewTask = useCallback(
+    async (forkPoint: StorageConversationForkPoint) => {
+      const disabledReason =
+        forkPoint.kind === 'latest' ? latestForkDisabledReason : forkDisabledReason
+      if (disabledReason) {
+        showToast(disabledReason)
+        return
+      }
+      if (activeConversation) await continueInNewTask(activeConversation.id, forkPoint)
+    },
+    [activeConversation, continueInNewTask, forkDisabledReason, latestForkDisabledReason, showToast]
+  )
+
   const conversationCommands = useMemo<ComposerCommand[]>(() => {
     const id = activeConversation?.id
     const unavailable = !id ? t('chat.commands.savedOnly') : undefined
@@ -850,6 +901,13 @@ export function AppShell() {
         label: t('chat.commands.new'),
         description: t('chat.commands.newDescription'),
         execute: () => openNewConversation(activeConversation?.projectId ?? activeDraft.projectId)
+      },
+      {
+        id: 'fork',
+        label: t('chat.commands.fork'),
+        description: t('chat.commands.forkDescription'),
+        disabledReason: latestForkDisabledReason,
+        execute: () => continueActiveConversationInNewTask({ kind: 'latest' })
       },
       {
         id: 'usage',
@@ -893,6 +951,8 @@ export function AppShell() {
     activeProviderTransitionOperations,
     activeRunModelId,
     archiveConversation,
+    continueActiveConversationInNewTask,
+    latestForkDisabledReason,
     manualCompaction,
     openNewConversation,
     openSettings,
@@ -1152,9 +1212,8 @@ export function AppShell() {
                 onModelTransitionRetry={retryActiveProviderTransition}
                 onOpenCollaborationAgent={openAgentCenter}
                 onEditLastUserMessage={submitEditedLastUserMessage}
-                onContinueInNewTask={(forkPoint) =>
-                  continueInNewTask(activeConversation.id, forkPoint)
-                }
+                forkDisabledReason={forkDisabledReason}
+                onContinueInNewTask={continueActiveConversationInNewTask}
                 onOpenContinuationOrigin={openContinuationOrigin}
                 onMessageUiStateChange={(messageId, uiState: ChatMessageUiState | undefined) => {
                   setConversationsWithRef((currentConversations) =>

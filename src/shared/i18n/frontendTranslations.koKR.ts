@@ -2,6 +2,9 @@
 export const koKRTranslations = {
   'chat.commands.compact': '컨텍스트 압축',
   'chat.commands.compactDescription': '현재 채팅의 컨텍스트를 압축합니다',
+  'chat.commands.fork': '채팅 분기 만들기',
+  'chat.commands.forkDescription': '현재 사용 가능한 최신 지점에서 채팅을 분기합니다',
+  'chat.commands.noForkPoint': '분기할 수 있는 완료된 답변이 없습니다',
   'chat.commands.new': '새 채팅',
   'chat.commands.newDescription': '현재 프로젝트에서 채팅을 시작합니다',
   'chat.commands.usage': '사용량 및 요금',

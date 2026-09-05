@@ -381,6 +381,295 @@ async fn manual_compaction_latest_fork_sends_next_turn_with_summary_without_copy
     );
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn manual_compaction_boundary_fork_restores_its_summary_and_model_after_model_transition() {
+    exercise_manual_fork_after_later_turn(true).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn manual_compaction_latest_fork_includes_later_turn_and_sends_normally() {
+    exercise_manual_fork_after_later_turn(false).await;
+}
+
+async fn exercise_manual_fork_after_later_turn(explicit_boundary: bool) {
+    use super::provider_profiles::{
+        collect_until_done, read_provider_request, turn_input, write_provider_stream,
+    };
+    use mycopilot_core::storage::models::{ConversationForkPoint, ForkConversationRequest};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let provider_entered = entered.clone();
+    let provider_release = release.clone();
+    let provider = tokio::spawn(async move {
+        let mut requests = Vec::new();
+        for (index, reply) in [
+            "A later answer after compaction.",
+            "The selected fork continued normally.",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            requests.push(read_provider_request(&mut stream).await);
+            if index == 0 {
+                provider_entered.notify_one();
+                provider_release.notified().await;
+            }
+            write_provider_stream(
+                &mut stream,
+                json!({"role":"assistant", "content":reply}),
+                "stop",
+            )
+            .await;
+        }
+        requests
+    });
+    let id = if explicit_boundary {
+        "manual-explicit-boundary"
+    } else {
+        "manual-later-latest"
+    };
+    let (directory, storage) = fixture(id);
+    let mut settings = two_model_settings(Some(
+        mycopilot_core::ProviderProfileConfig::deepseek_v4_default(),
+    ));
+    settings.api_url = format!("http://{address}/v1/chat/completions");
+    storage.save_model_settings(settings).unwrap();
+    let manual_generator = provider_transition_generator("model-1");
+    let transition_generator = provider_transition_generator("model-2");
+    let generator: ContextCompactionSummaryGenerator = Arc::new(move |request, cancellation| {
+        let transition = request.operation_id.starts_with("provider-transition-");
+        let later_manual = !transition && request.prefix.previous_summary.is_some();
+        let generator = if transition {
+            transition_generator.clone()
+        } else {
+            manual_generator.clone()
+        };
+        Box::pin(async move {
+            let mut generated = generator(request, cancellation).await?;
+            if transition {
+                generated.draft.content = "New provider summary covering the later reply.".into();
+            } else if later_manual {
+                generated.draft.content = "Newer manual summary covering the later reply.".into();
+            }
+            Ok(generated)
+        })
+    });
+    let service =
+        AgentService::new(storage.clone()).with_context_compaction_summary_generator(generator);
+    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let operation = service
+        .start_manual_context_compaction(
+            AgentManualContextCompactionStartInput {
+                conversation_id: id.into(),
+                request_id: format!("{id}-compact"),
+            },
+            notifications.clone(),
+        )
+        .unwrap();
+    let completed = settled(&service, id, &operation.operation_id).await;
+    assert_eq!(completed.status, "completed");
+    let original_summary_id = completed.summary_id.unwrap();
+
+    let mut later = turn_input("model-1");
+    later.conversation_id = Some(id.into());
+    later.user_message_id = Some(format!("{id}-later-user"));
+    later.assistant_message_id = Some(format!("{id}-later-assistant"));
+    later.content = "This later request must only appear in the latest fork. ".repeat(100);
+    service
+        .start_conversation_turn(later, notifications.clone())
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), entered.notified())
+        .await
+        .unwrap();
+    for fork_point in [
+        ConversationForkPoint::Latest {},
+        ConversationForkPoint::ManualCompactionBoundary {
+            operation_id: operation.operation_id.clone(),
+        },
+    ] {
+        assert!(
+            service
+                .fork_conversation_view(ForkConversationRequest {
+                    request_id: format!("{id}-busy-fork"),
+                    source_conversation_id: id.into(),
+                    fork_point,
+                })
+                .is_err(),
+            "a running turn must block both fork entry points"
+        );
+    }
+    release.notify_one();
+    assert_eq!(
+        collect_until_done(&mut receiver).await.last().unwrap()["params"]["status"],
+        "completed"
+    );
+    if explicit_boundary {
+        let second = service
+            .start_manual_context_compaction(
+                AgentManualContextCompactionStartInput {
+                    conversation_id: id.into(),
+                    request_id: format!("{id}-compact-again"),
+                },
+                notifications.clone(),
+            )
+            .unwrap();
+        let second = settled(&service, id, &second.operation_id).await;
+        assert_eq!(second.status, "completed");
+        assert_ne!(
+            second.summary_id.as_deref(),
+            Some(original_summary_id.as_str())
+        );
+        let preflight = service
+            .preflight_provider_transition(AgentProviderTransitionPreflightInput {
+                conversation_id: id.into(),
+                target_model_id: "model-2".into(),
+            })
+            .unwrap();
+        assert_eq!(
+            preflight.decision,
+            AgentProviderTransitionDecision::Compatible
+        );
+        let transition = service
+            .start_provider_transition(
+                AgentProviderTransitionStartInput {
+                    conversation_id: id.into(),
+                    target_model_id: "model-2".into(),
+                    transition_token: preflight.transition_token.unwrap(),
+                },
+                notifications.clone(),
+            )
+            .unwrap();
+        let finished = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let status = service
+                    .get_provider_transition_status(AgentProviderTransitionGetStatusInput {
+                        conversation_id: id.into(),
+                        operation_id: Some(transition.operation_id.clone()),
+                    })
+                    .unwrap()
+                    .operations
+                    .pop()
+                    .unwrap();
+                if status.status != AgentProviderTransitionOperationStatus::Running {
+                    break status;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            finished.status,
+            AgentProviderTransitionOperationStatus::Completed,
+            "{:?}",
+            finished.error
+        );
+        assert_eq!(
+            storage
+                .load_conversation(id)
+                .unwrap()
+                .unwrap()
+                .model_id
+                .as_deref(),
+            Some("model-2")
+        );
+    }
+
+    let request = ForkConversationRequest {
+        request_id: format!("{id}-fork"),
+        source_conversation_id: id.into(),
+        fork_point: if explicit_boundary {
+            ConversationForkPoint::ManualCompactionBoundary {
+                operation_id: operation.operation_id,
+            }
+        } else {
+            ConversationForkPoint::Latest {}
+        },
+    };
+    let fork = service.fork_conversation_view(request.clone()).unwrap();
+    assert_eq!(
+        service
+            .fork_conversation_view(request)
+            .unwrap()
+            .conversation
+            .id,
+        fork.conversation.id,
+        "same request must not create another fork"
+    );
+    let fork_id = &fork.conversation.id;
+    assert_eq!(fork.conversation.model_id.as_deref(), Some("model-1"));
+    assert_eq!(
+        fork.conversation.messages.len(),
+        if explicit_boundary { 2 } else { 4 }
+    );
+    let head = storage
+        .get_active_context_compaction_summary(fork_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(head.content, "已将旧 API 厂商的工具历史压缩为安全摘要。");
+    let connection = rusqlite::Connection::open(directory.path().join("storage.sqlite")).unwrap();
+    assert_eq!(connection.query_row("SELECT COUNT(*) FROM manual_context_compaction_usage_records WHERE conversation_id = ?1",[fork_id],|row|row.get::<_,u64>(0)).unwrap(),0);
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT COUNT(*) FROM agent_usage_records WHERE conversation_id = ?1",
+                [fork_id],
+                |row| row.get::<_, u64>(0)
+            )
+            .unwrap(),
+        0
+    );
+    let mut next = turn_input("model-1");
+    next.conversation_id = Some(fork_id.clone());
+    next.user_message_id = Some(format!("{id}-fork-user"));
+    next.assistant_message_id = Some(format!("{id}-fork-assistant"));
+    next.content = "Continue from the selected fork boundary.".into();
+    service
+        .start_conversation_turn(next, notifications)
+        .unwrap();
+    let events = collect_until_done(&mut receiver).await;
+    assert_eq!(
+        events.last().unwrap()["params"]["status"],
+        "completed",
+        "{events:?}"
+    );
+    let requests = tokio::time::timeout(Duration::from_secs(5), provider)
+        .await
+        .unwrap()
+        .unwrap();
+    let next_request = requests[1].to_string();
+    assert_eq!(requests[1]["model"], "model-1");
+    assert!(next_request.contains("已将旧 API 厂商的工具历史压缩为安全摘要"));
+    assert!(next_request.contains("Continue from the selected fork boundary."));
+    assert_eq!(
+        next_request.contains("This later request must only appear in the latest fork."),
+        !explicit_boundary
+    );
+    assert_eq!(
+        next_request.contains("A later answer after compaction."),
+        !explicit_boundary
+    );
+    assert!(!next_request.contains("New provider summary covering the later reply."));
+    assert!(!next_request.contains("Newer manual summary covering the later reply."));
+    assert!(
+        !next_request.contains("This is a long previous user request with implementation details")
+    );
+    assert_eq!(
+        storage
+            .load_conversation(fork_id)
+            .unwrap()
+            .unwrap()
+            .messages
+            .last()
+            .unwrap()
+            .content,
+        "The selected fork continued normally."
+    );
+}
+
 #[tokio::test]
 async fn model_configuration_change_rejects_manual_commit_but_retains_response_usage() {
     let id = "manual-model-stale";

@@ -2,6 +2,9 @@
 export const zhTWTranslations = {
   'chat.commands.compact': '壓縮上下文',
   'chat.commands.compactDescription': '主動壓縮目前聊天的上下文',
+  'chat.commands.fork': '建立聊天分支',
+  'chat.commands.forkDescription': '從目前最新可用位置建立聊天分支',
+  'chat.commands.noForkPoint': '暫無完整回覆可供分支',
   'chat.commands.new': '新聊天',
   'chat.commands.newDescription': '在目前專案中建立聊天',
   'chat.commands.usage': '使用情況和計費',

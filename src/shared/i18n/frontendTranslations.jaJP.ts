@@ -2,6 +2,9 @@
 export const jaJPTranslations = {
   'chat.commands.compact': 'コンテキストを圧縮',
   'chat.commands.compactDescription': 'このチャットのコンテキストを圧縮します',
+  'chat.commands.fork': 'チャットを分岐',
+  'chat.commands.forkDescription': '現在利用できる最新の位置からチャットを分岐します',
+  'chat.commands.noForkPoint': '分岐できる完了済みの返信がありません',
   'chat.commands.new': '新しいチャット',
   'chat.commands.newDescription': '現在のプロジェクトでチャットを開始します',
   'chat.commands.usage': '使用量と料金',
