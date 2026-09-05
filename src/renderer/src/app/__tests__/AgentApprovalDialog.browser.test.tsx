@@ -410,7 +410,7 @@ describe('AgentApprovalDialog command approval', () => {
     expect(screen.container.querySelectorAll('.agent-approval-dialog__command')).toHaveLength(1)
     expect(code?.getAttribute('data-multiline')).toBe('true')
     expect(code?.textContent).toBe(command)
-    expect(window.getComputedStyle(code!).maxHeight).toBe('180px')
+    expect(window.getComputedStyle(code!).maxHeight).toBe('144px')
     expect(window.getComputedStyle(code!).overflow).toBe('auto')
     expect(window.getComputedStyle(code!).whiteSpace).toBe('pre-wrap')
     expect(screen.container.querySelector('[data-choice="remember"]')).toBeNull()

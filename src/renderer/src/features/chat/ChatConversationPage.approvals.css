@@ -2,59 +2,60 @@
 .agent-approval-dialog {
   display: grid;
   width: 100%;
-  min-height: 194px;
-  padding: 18px 12px 9px 16px;
-  gap: 8px;
+  min-width: 0;
+  min-height: 0;
+  padding: 12px 12px 10px;
+  align-content: start;
+  gap: 6px;
   color: var(--mc-color-text-primary);
   background: var(--mc-color-surface-card);
   border: 0.5px solid var(--mc-color-border-subtle);
-  border-radius: var(--mc-radius-composer);
-  box-shadow: var(--mc-shadow-composer);
+  border-radius: var(--mc-radius-card);
+  box-shadow: var(--mc-shadow-card);
+  font-size: var(--mc-font-size-chat-approval, 13px);
+  font-weight: var(--mc-font-weight-regular);
+  line-height: var(--mc-line-height-relaxed);
   -webkit-app-region: no-drag;
 }
 
 .agent-approval-dialog__request {
   margin: 0;
-  padding: 0 10px 0 12px;
-  overflow: hidden;
+  padding: 0 8px;
   color: var(--mc-color-text-primary);
   font-size: var(--mc-font-size-base);
-  font-weight: var(--mc-font-weight-heavy);
-  line-height: 1.35;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  font-weight: var(--mc-font-weight-strong);
+  line-height: 1.4;
+  overflow-wrap: anywhere;
 }
 
 .agent-approval-dialog__command {
   display: block;
   min-width: 0;
-  padding: 10px 12px;
-  overflow: hidden;
+  max-height: 144px;
+  padding: 8px;
+  overflow: auto;
   color: var(--mc-color-text-muted);
   background: var(--mc-color-surface-muted);
   border: 0;
   border-radius: var(--mc-radius-lg);
   font-family: var(--mc-mono-font-family);
-  font-size: var(--mc-font-size-sm);
+  font-size: inherit;
   line-height: var(--mc-line-height-relaxed);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.agent-approval-dialog__command[data-multiline='true'] {
-  max-height: 180px;
-  overflow: auto;
-  text-overflow: clip;
   white-space: pre-wrap;
-  word-break: break-word;
+  overflow-wrap: anywhere;
 }
 
 .agent-approval-dialog__details {
-  max-height: 220px;
-  padding: 10px 12px;
+  min-width: 0;
+  max-height: 180px;
+  padding: 8px;
   overflow: auto;
   background: var(--mc-color-surface-muted);
   border-radius: var(--mc-radius-lg);
+}
+
+.agent-approval-dialog__details > p {
+  margin: 0;
 }
 
 .agent-approval-dialog__file-change-diff {
@@ -66,6 +67,8 @@
 .agent-approval-dialog__file-change-diff pre {
   margin: 0;
   overflow: auto;
+  font-size: inherit;
+  line-height: inherit;
 }
 
 .agent-approval-dialog__file-change-renderer.git-review {
@@ -111,6 +114,7 @@
   opacity: 0.45;
 }
 
+/* Skill previews also appear in completed tool activity; keep that layout unchanged. */
 .agent-skill-installation-approval__details {
   display: grid;
   margin: 0;
@@ -136,29 +140,41 @@
   color: var(--mc-color-text-secondary);
 }
 
+.agent-approval-dialog .agent-skill-installation-approval__details,
 .agent-browser-risk-approval__details,
-.agent-builtin-capability-approval__details {
+.agent-builtin-capability-approval__details,
+.agent-builtin-mcp-tool-approval__details {
   display: grid;
   margin: 0;
-  gap: 8px;
+  gap: 6px;
   font-family: var(--mc-font-family);
+  font-size: var(--mc-font-size-chat-approval, 13px);
+  line-height: var(--mc-line-height-relaxed);
 }
 
+.agent-approval-dialog .agent-skill-installation-approval__details > div,
 .agent-browser-risk-approval__details > div,
-.agent-builtin-capability-approval__details > div {
+.agent-builtin-capability-approval__details > div,
+.agent-builtin-mcp-tool-approval__details > div {
   display: grid;
-  grid-template-columns: minmax(72px, 0.22fr) minmax(0, 1fr);
-  gap: 10px;
+  grid-template-columns: minmax(64px, 0.22fr) minmax(0, 1fr);
+  gap: 8px;
 }
 
+.agent-approval-dialog .agent-skill-installation-approval__details dt,
 .agent-browser-risk-approval__details dt,
-.agent-builtin-capability-approval__details dt {
+.agent-builtin-capability-approval__details dt,
+.agent-builtin-mcp-tool-approval__details dt {
+  min-width: 0;
+  overflow-wrap: anywhere;
   color: var(--mc-color-text-muted);
-  font-weight: var(--mc-font-weight-medium);
+  font-weight: var(--mc-font-weight-regular);
 }
 
+.agent-approval-dialog .agent-skill-installation-approval__details dd,
 .agent-browser-risk-approval__details dd,
-.agent-builtin-capability-approval__details dd {
+.agent-builtin-capability-approval__details dd,
+.agent-builtin-mcp-tool-approval__details dd {
   min-width: 0;
   margin: 0;
   overflow-wrap: anywhere;
@@ -171,7 +187,7 @@
 
 .agent-approval-dialog__policy {
   margin: 0;
-  padding: 0 12px;
+  padding: 0 8px;
   color: var(--mc-color-text-muted);
   font-size: var(--mc-font-size-xs);
   font-weight: var(--mc-font-weight-medium);
@@ -191,19 +207,21 @@
   border: 0;
   border-radius: var(--mc-radius-lg);
   font: inherit;
-  font-size: var(--mc-font-size-sm);
-  font-weight: var(--mc-font-weight-heavy);
+  font-size: inherit;
+  font-weight: var(--mc-font-weight-medium);
+  line-height: var(--mc-line-height-relaxed);
   cursor: pointer;
 }
 
 .agent-approval-dialog__choice {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);
-  min-height: 38px;
+  min-height: 32px;
   align-items: center;
-  padding: 0 12px;
-  gap: 11px;
+  padding: 4px 8px;
+  gap: 8px;
   text-align: left;
+  overflow-wrap: anywhere;
 }
 
 .agent-approval-dialog__choice[data-choice='remember'] {
@@ -220,15 +238,15 @@
 
 .agent-approval-dialog__index {
   display: grid;
-  width: 22px;
-  height: 22px;
+  width: 18px;
+  height: 18px;
   place-items: center;
   color: var(--mc-color-text-muted);
   background: transparent;
   border: 1px solid var(--mc-color-border-default);
   border-radius: 999px;
-  font-size: var(--mc-font-size-sm);
-  font-weight: var(--mc-font-weight-heavy);
+  font-size: var(--mc-font-size-xs);
+  font-weight: var(--mc-font-weight-regular);
   line-height: 1;
 }
 
@@ -243,26 +261,25 @@
   display: inline-flex;
   min-width: 0;
   align-items: baseline;
-  gap: 8px;
+  flex-wrap: wrap;
+  gap: 2px 6px;
 }
 
 .agent-approval-dialog__choice-text small {
   min-width: 0;
-  overflow: hidden;
   color: var(--mc-color-text-muted);
-  font-size: var(--mc-font-size-sm);
+  font-size: inherit;
   font-weight: var(--mc-font-weight-medium);
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
 }
 
 .agent-approval-dialog__reject-row {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
-  min-height: 38px;
+  min-height: 32px;
   align-items: center;
-  padding: 0 0 0 12px;
-  gap: 9px;
+  padding: 0 0 0 8px;
+  gap: 8px;
   color: var(--mc-color-text-muted);
   border-radius: var(--mc-radius-lg);
   cursor: text;
@@ -271,7 +288,7 @@
 .agent-approval-dialog__reject-row input {
   width: 100%;
   min-width: 0;
-  height: 32px;
+  height: 28px;
   padding: 0;
   color: var(--mc-color-text-primary);
   background: transparent;
@@ -279,7 +296,7 @@
   border-radius: 0;
   outline: 0;
   font: inherit;
-  font-size: var(--mc-font-size-sm);
+  font-size: inherit;
   font-weight: var(--mc-font-weight-medium);
 }
 
@@ -293,8 +310,8 @@
 
 .agent-approval-dialog__reject-icon {
   display: grid;
-  width: 22px;
-  height: 22px;
+  width: 18px;
+  height: 18px;
   place-items: center;
   color: var(--mc-color-icon-muted);
   border: 1px solid var(--mc-color-border-default);
@@ -309,25 +326,25 @@
 }
 
 .agent-approval-dialog__reject-icon svg {
-  width: var(--mc-icon-size-sm);
-  height: var(--mc-icon-size-sm);
+  width: 14px;
+  height: 14px;
   stroke-width: var(--mc-icon-stroke-medium);
 }
 
 .agent-approval-dialog__reject {
   display: inline-flex;
-  height: 32px;
+  height: 28px;
   align-items: center;
-  padding: 0 10px 0 14px;
-  gap: 7px;
+  padding: 0 10px;
+  gap: 6px;
   color: var(--mc-color-text-inverse);
   background: var(--mc-color-text-primary);
   border-radius: var(--mc-radius-pill);
 }
 
 .agent-approval-dialog__reject svg {
-  width: var(--mc-icon-size-sm);
-  height: var(--mc-icon-size-sm);
+  width: 14px;
+  height: 14px;
   stroke-width: var(--mc-icon-stroke-medium);
 }
 
@@ -351,4 +368,28 @@
   padding: 14px 28px 28px;
   margin: 0 auto;
   gap: 8px;
+}
+
+/* Keep approval controls reachable when a terminal or a short window reduces the chat height. */
+.chat-conversation-page[data-approval-pending='true'] {
+  container: approval-surface / inline-size;
+  grid-template-rows: minmax(64px, 1fr) minmax(0, auto);
+}
+
+.chat-conversation-page[data-approval-pending='true'] > .chat-conversation-page__composer {
+  min-height: 0;
+  padding: 10px 28px 16px;
+  grid-auto-rows: max-content;
+  align-content: start;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  scrollbar-color: var(--mc-color-border-default) transparent;
+}
+
+@container approval-surface (max-width: 560px) {
+  .chat-conversation-page[data-approval-pending='true'] > .chat-conversation-page__composer {
+    padding-inline: 16px;
+  }
 }

@@ -41,7 +41,8 @@ export const frontendConfig = {
       assistantSize: '15px',
       activitySize: '14px',
       activityDetailSize: '14px',
-      metadataSize: '12px'
+      metadataSize: '12px',
+      approvalSize: '13px'
     },
     scale: {
       xs: '12px',
@@ -169,6 +170,7 @@ export function getFrontendCssVariables(
     '--mc-font-size-chat-activity': config.typography.chat.activitySize,
     '--mc-font-size-chat-activity-detail': config.typography.chat.activityDetailSize,
     '--mc-font-size-chat-metadata': config.typography.chat.metadataSize,
+    '--mc-font-size-chat-approval': config.typography.chat.approvalSize,
     '--mc-font-size-xs': config.typography.scale.xs,
     '--mc-font-size-sm': config.typography.scale.sm,
     '--mc-font-size-md': config.typography.scale.md,
