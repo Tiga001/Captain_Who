@@ -7,8 +7,17 @@ import { koKRTranslations } from './frontendTranslations.koKR'
 import { ruRUTranslations } from './frontendTranslations.ruRU'
 import { zhCNTranslations } from './frontendTranslations.zhCN'
 import { zhTWTranslations } from './frontendTranslations.zhTW'
+import { humanInteractionErrorTranslations } from './humanInteractionErrorTranslations'
+import { humanInteractionHistoryTranslations } from './humanInteractionHistoryTranslations'
+import { humanInteractionPanelTranslations } from './humanInteractionPanelTranslations'
+import { humanInteractionSettingsTranslations } from './humanInteractionSettingsTranslations'
 
-export type TranslationKey = keyof typeof zhCNTranslations
+export type TranslationKey =
+  | keyof typeof zhCNTranslations
+  | keyof (typeof humanInteractionSettingsTranslations)['zh-CN']
+  | keyof (typeof humanInteractionHistoryTranslations)['zh-CN']
+  | keyof (typeof humanInteractionPanelTranslations)['zh-CN']
+  | keyof (typeof humanInteractionErrorTranslations)['zh-CN']
 export type LanguageDirection = 'ltr' | 'rtl'
 
 type TranslationCatalog = Readonly<Record<TranslationKey, string>>
@@ -23,47 +32,101 @@ export const languageRegistry = {
   'zh-CN': {
     direction: 'ltr',
     displayName: '简体中文（中国）',
-    translations: zhCNTranslations
+    translations: {
+      ...zhCNTranslations,
+      ...humanInteractionSettingsTranslations['zh-CN'],
+      ...humanInteractionHistoryTranslations['zh-CN'],
+      ...humanInteractionPanelTranslations['zh-CN'],
+      ...humanInteractionErrorTranslations['zh-CN']
+    }
   },
   'zh-TW': {
     direction: 'ltr',
     displayName: '繁體中文（中國）',
-    translations: zhTWTranslations
+    translations: {
+      ...zhTWTranslations,
+      ...humanInteractionSettingsTranslations['zh-TW'],
+      ...humanInteractionHistoryTranslations['zh-TW'],
+      ...humanInteractionPanelTranslations['zh-TW'],
+      ...humanInteractionErrorTranslations['zh-TW']
+    }
   },
   'en-US': {
     direction: 'ltr',
     displayName: 'English (United States)',
-    translations: enUSTranslations
+    translations: {
+      ...enUSTranslations,
+      ...humanInteractionSettingsTranslations['en-US'],
+      ...humanInteractionHistoryTranslations['en-US'],
+      ...humanInteractionPanelTranslations['en-US'],
+      ...humanInteractionErrorTranslations['en-US']
+    }
   },
   'en-GB': {
     direction: 'ltr',
     displayName: 'English (United Kingdom)',
-    translations: enGBTranslations
+    translations: {
+      ...enGBTranslations,
+      ...humanInteractionSettingsTranslations['en-GB'],
+      ...humanInteractionHistoryTranslations['en-GB'],
+      ...humanInteractionPanelTranslations['en-GB'],
+      ...humanInteractionErrorTranslations['en-GB']
+    }
   },
   'ko-KR': {
     direction: 'ltr',
     displayName: '한국어',
-    translations: koKRTranslations
+    translations: {
+      ...koKRTranslations,
+      ...humanInteractionSettingsTranslations['ko-KR'],
+      ...humanInteractionHistoryTranslations['ko-KR'],
+      ...humanInteractionPanelTranslations['ko-KR'],
+      ...humanInteractionErrorTranslations['ko-KR']
+    }
   },
   'ja-JP': {
     direction: 'ltr',
     displayName: '日本語',
-    translations: jaJPTranslations
+    translations: {
+      ...jaJPTranslations,
+      ...humanInteractionSettingsTranslations['ja-JP'],
+      ...humanInteractionHistoryTranslations['ja-JP'],
+      ...humanInteractionPanelTranslations['ja-JP'],
+      ...humanInteractionErrorTranslations['ja-JP']
+    }
   },
   'fr-FR': {
     direction: 'ltr',
     displayName: 'Français',
-    translations: frFRTranslations
+    translations: {
+      ...frFRTranslations,
+      ...humanInteractionSettingsTranslations['fr-FR'],
+      ...humanInteractionHistoryTranslations['fr-FR'],
+      ...humanInteractionPanelTranslations['fr-FR'],
+      ...humanInteractionErrorTranslations['fr-FR']
+    }
   },
   'it-IT': {
     direction: 'ltr',
     displayName: 'Italiano',
-    translations: itITTranslations
+    translations: {
+      ...itITTranslations,
+      ...humanInteractionSettingsTranslations['it-IT'],
+      ...humanInteractionHistoryTranslations['it-IT'],
+      ...humanInteractionPanelTranslations['it-IT'],
+      ...humanInteractionErrorTranslations['it-IT']
+    }
   },
   'ru-RU': {
     direction: 'ltr',
     displayName: 'Русский',
-    translations: ruRUTranslations
+    translations: {
+      ...ruRUTranslations,
+      ...humanInteractionSettingsTranslations['ru-RU'],
+      ...humanInteractionHistoryTranslations['ru-RU'],
+      ...humanInteractionPanelTranslations['ru-RU'],
+      ...humanInteractionErrorTranslations['ru-RU']
+    }
   }
 } as const satisfies Record<string, LanguageDefinition>
 

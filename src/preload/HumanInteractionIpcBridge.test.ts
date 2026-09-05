@@ -47,9 +47,18 @@ describe('Human interaction Preload bridge', () => {
       removeListener
     })
     const settings = vi.fn(),
-      requests = vi.fn()
+      requests = vi.fn(),
+      resync = vi.fn()
     const stopSettings = bridge.onSettingsChanged(settings),
       stopRequests = bridge.onRequestChanged(requests)
+    const stopResync = bridge.onResync(resync)
+    listeners.get(HOST_CHANNELS.humanInteraction.resync)?.({}, null)
+    expect(resync).toHaveBeenCalledExactlyOnceWith()
+    stopResync()
+    expect(removeListener).toHaveBeenCalledWith(
+      HOST_CHANNELS.humanInteraction.resync,
+      listeners.get(HOST_CHANNELS.humanInteraction.resync)
+    )
     listeners.get(HOST_CHANNELS.humanInteraction.settingsChanged)?.({}, fixture.settings)
     listeners.get(HOST_CHANNELS.humanInteraction.settingsChanged)?.(
       {},

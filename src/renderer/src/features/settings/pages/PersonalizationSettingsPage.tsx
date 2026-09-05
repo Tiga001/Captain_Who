@@ -7,6 +7,7 @@ import {
   saveAgentPromptPreferences
 } from '../../storage/storageClient'
 import type { AgentPromptPreferencesSnapshot } from '../../storage/storageClient'
+import { HumanInteractionSettingsSection } from './HumanInteractionSettingsSection'
 import './PersonalizationSettingsPage.css'
 
 type PromptWorkMode = AgentPromptPreferencesSnapshot['workMode']
@@ -236,6 +237,8 @@ export function PersonalizationSettingsPage() {
           </div>
         </div>
       </section>
+
+      <HumanInteractionSettingsSection />
 
       <section
         className="personalization-custom-instructions"

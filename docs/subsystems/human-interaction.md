@@ -7,7 +7,7 @@ last_verified: 2026-09-05
 
 # 向用户提问：设计与实施进度
 
-本文记录完整产品契约及分轮交付状态。前两轮完成基础设施与阻塞式提问；第 3 轮接入异步工具、多批次回答及可靠投递。设置页面、答题面板和气泡渲染留在第 4 轮。
+本文记录完整产品契约及分轮交付状态。前两轮完成基础设施与阻塞式提问；第 3 轮接入异步工具、多批次回答及可靠投递。第 4 轮接入独立设置、分页面板、抢占协调和问答气泡；第 5 轮待做整体验收。
 
 ## 产品契约
 
@@ -128,7 +128,7 @@ Canonical SQLite 版本为 v38。正常打开旧库只返回 reset-required，�
 | 持久化        | [`human_interaction_repository.rs`](../../crates/core/src/storage/human_interaction_repository.rs)、[`service/human_interaction.rs`](../../crates/core/src/storage/service/human_interaction.rs)             | 原子创建、结算、独立设置、Host 私有挂起材料                 |
 | Harness       | [`extensions/human_interaction.rs`](../../crates/core/src/runtime/extensions/human_interaction.rs)、[`tools/human_interaction.rs`](../../crates/core/src/tools/human_interaction.rs)                         | 每请求策略快照、根身份过滤、未就绪能力关闭                  |
 | Core Server   | [`application/human_interaction.rs`](../../crates/core-server/src/application/human_interaction.rs)、[`transport/human_interaction_rpc.rs`](../../crates/core-server/src/transport/human_interaction_rpc.rs) | 会话访问校验、独立 API、同步回答领取与恢复                  |
-| Electron Host | [`coreServerHumanInteractionApi.ts`](../../src/main/core/coreServerHumanInteractionApi.ts)、[`HumanInteractionIpcBridge.ts`](../../src/preload/HumanInteractionIpcBridge.ts)                                 | RPC/IPC 校验与订阅；前端页面尚未接入                        |
+| Electron Host | [`coreServerHumanInteractionApi.ts`](../../src/main/core/coreServerHumanInteractionApi.ts)、[`HumanInteractionIpcBridge.ts`](../../src/preload/HumanInteractionIpcBridge.ts)                                 | RPC/IPC 校验、独立通知和 Core Server 重连刷新               |
 
 ## 五轮进度
 
@@ -137,11 +137,11 @@ Canonical SQLite 版本为 v38。正常打开旧库只返回 reset-required，�
 | 1    | 公共协议、独立设置、存储事务、Host 契约、模块挂载基础 | 已完成（2026-09-05） |
 | 2    | 阻塞工具、暂停恢复、用量、取消与重启                  | 已完成（2026-09-05） |
 | 3    | 异步工具、多批次投递、空闲续接、忽略                  | 已完成（2026-09-05） |
-| 4    | 个性化开关、分页面板、抢占、最小化与问答气泡          | 未开始               |
+| 4    | 个性化开关、分页面板、抢占、最小化与问答气泡          | 已完成（2026-09-05） |
 | 5    | 跨层验收、修整、开发及用户文档                        | 未开始               |
 
 当前提交接口先保存回答，再由 Host 选择原同步调用恢复、异步 steering 或正常后续 Run；返回 submitted 不代表已 applied。
-两个工具均已接入真实 Host。设置页与答题面板属于第 4 轮；前端不能直接 startTurn 绕过投递协调。
+两个工具及设置页、答题面板均已接入真实 Host；前端不能直接 startTurn 绕过投递协调。
 
 ## 第 1 轮交付与验证
 
@@ -404,3 +404,92 @@ Canonical SQLite 为 v38，fingerprint 为 `sha256:03332e3251b0660eeff21c26300ce
 
 第 3 轮已结束。结果未知的执行保守标记失败，不自动重放；前端页面、分页草稿、最小化与视觉渲染留待第 4 轮，
 按上述完整 Host 契约接入，不由 Renderer 新建或选择回答目标 Run。
+
+## 第 4 轮交付：前端与 Host/Preload
+
+### 设置与独立问题状态
+
+[`HumanInteractionSettingsSection.tsx`](../../src/renderer/src/features/settings/pages/HumanInteractionSettingsSection.tsx)
+直接挂在个性化页，使用独立 get/updateSettings、expectedRevision 和通知；读取确认前不伪造设置值。
+保存过程中保留已确认值，保存失败显示错误，成功才应用较新的后端 revision；其他个性化内容仍走原保存流程。
+九语种文案在独立 humanInteraction 翻译片段维护。关闭设置不参与待答问题列表的过滤。
+
+[`humanInteractionController.ts`](../../src/renderer/src/features/humanInteraction/humanInteractionController.ts)
+与 [`useHumanInteraction.ts`](../../src/renderer/src/features/humanInteraction/useHumanInteraction.ts)
+独立于当前 Run 事件读取所有分页。每批保存页码、互斥答案草稿、操作状态和稳定提交身份；组件隐藏、抢占、
+最小化及切换聊天不销毁草稿。未提交草稿属于当前窗口的内存状态；完整问题与已提交回答由 Host 持久化。
+
+Request revision 与 Delivery revision 分别单调合并，终态和已删除批次保留墓碑。
+整页扫描必须全部成功后才能剔除缺失项；扫描期间到达的新通知不会被迟到页覆盖。
+提交/忽略失败保留草稿，结果未知时冻结原 payload 并重用 submissionId，不能通过改答案或另一种操作绕过未确认的请求。
+确认拒绝后的未改动 payload 重试同样保留身份；用户修改草稿才创建新身份。
+
+Main 将 Core Server 启动/重连生命周期转为独立 `humanInteraction.onResync`；Preload 继续校验快照，
+问题和设置通过自己的查询恢复。窗口 focus、online、可见性恢复也会重读问题。审批结束后必须先成功重读权威问题状态，
+才能恢复答题操作；失败显示重试入口，不直接解锁旧缓存。后端事实始终优先于本窗口的进行中操作。
+
+### 面板、抢占与历史展示
+
+[`HumanInteractionPanel.tsx`](../../src/renderer/src/features/humanInteraction/HumanInteractionPanel.tsx)
+是纯受控展示组件，不调用模型或伪造 Host 成功。字号、边框、颜色、圆角、间距与当前审批框变量一致，
+没有修改审批框原样式。长问题和选项在面板内容区滚动，页数不做产品上限。
+
+顶部箭头翻页；异步右上角是最小化；底部异步左侧“忽略全部”，右侧“不回答”和“提交”。
+三种答案互斥，整批完整时提交才可用；翻页不发送答案。输入框保留 Enter 换行、IME 确认，Escape 不上冒到
+停止/审批处理。进行中的结算禁用重复动作，未知结果保持原答案用于安全重试。
+
+[`ConversationSurface.tsx`](../../src/renderer/src/features/chat/ConversationSurface.tsx)
+协调根审批和协作审批 > 同步提问 > 异步提问。审批独占时所有问题入口不可操作；同步提问也阻止异步入口抢占。
+异步按创建 sequence 后来者优先，手动打开旧批次只改变面板选择；提交顺序仍完全由 Host 接纳序号决定。
+每批在其所属 assistant 时间线旁只有一个入口，折叠运行详情也可以找到；成功提交或忽略后入口立即撤下。
+子 Agent observer 不查询待答批次、不展示操作入口。
+
+[`humanInteractionPresentation.ts`](../../src/renderer/src/features/humanInteraction/humanInteractionPresentation.ts)
+只产生渲染用副本，不写 messages、Trace、模型上下文或新增 Run：
+
+- 同步原 ToolResult 在其时间线位置显示为用户气泡，保存的原历史仍只有工具结果。
+- 异步运行中使用 Host 专属 guidance 身份；运行后使用 delivery.userMessageId 精确绑定的 User 行。
+- 刚提交的权威 Request/Response 可以即时展示，再按 responseId 与后到的 ToolResult/guidance/User 合并。
+- 历史分支的冻结材料只提供只读展示，不能派生待答问题权限。普通用户碰巧输入同结构 JSON 时不隐藏消息、
+  不参与问答去重，也不把普通 guidance 错当成 Host 回答丢弃。
+- 问题使用次要文字色，答案使用正文色，skipped 本地化为“已跳过”；没有完成卡片、补答或修改答案入口。
+
+Host 回答被拒收或需要重新选择投递路径时，不进入原 Composer 的引导恢复/自动排队发送流程。
+主 Composer 继续保留普通输入、附件与排队逻辑；Host 自动创建回答 User 行不触发清空普通草稿的消息同步键。
+
+[`useHumanInteractionConversationSync.ts`](../../src/renderer/src/app/useHumanInteractionConversationSync.ts)
+在独立通知和重连后载入同聊天的权威消息及 Run 身份；沿用现有 Run 绑定与事件回放，Renderer 从不 startTurn。
+读取串行合并，迟到快照不能回退已停止状态或较新的 trace/流式内容；本地 UI 状态独立保留，不能屏蔽后端完成状态。
+
+### 第 4 轮验证与第 5 轮入口
+
+本轮使用浏览器中的真实组件、受控 Host 契约 fixture，以及临时数据库和可控 Provider 的真实 Host/Harness 回归。
+生产设置、列表、提交、忽略、重连均调用已有 Host/Preload/Core Server RPC，没有纯前端成功分支。
+未重置实际开发数据库、未改写模型配置/API 凭据，没有数据库迁移或 schema 变更，当前仍为 v38。
+
+实际执行并通过的检查（筛选范围有重叠，不应相加为独立总数）：
+
+- Browser：8 文件、51 项。包括面板 6 项、独立状态 hook 6 项、个性化设置 9 项、真实 ConversationSurface/Composer 集成 6 项、
+  会话同步及真实 Run lifecycle 8 项；其余为已有审批密度、Guidance 和 observer 回归。
+  验证分页修改、70 题、IME/Enter/Escape、busy/unknown 重试、审批抢占恢复、后来批次优先、最小化、
+  每批唯一入口、提交后消失与单气泡、普通 JSON 与普通草稿不受影响、重连和旧审批列表迟到。
+- TypeScript unit：7 文件、43 项，覆盖独立控制器、展示去重/分支冻结材料、会话快照合并、公共协议、Main RPC/IPC 与 Preload。
+  另执行语言完整性 6 项，确认九语种新增文案齐全。
+- `cargo test --locked -p mycopilot-core-server application::agent::tests::human_input --bin core-server`：27 项通过，
+  沿用真实 Host/Harness、临时 SQLite 和可控 Provider 检查同步恢复、异步多批次、暂停/停止/重启与唯一投递及用量。
+- `pnpm typecheck`、全部变更 TS/脚本 ESLint、Prettier、`pnpm check:docs`、`pnpm check:public-docs`、
+  `pnpm check:test-layout` 及 `git diff --check` 通过。
+
+扩展回归中 `AppShellSkillRecovery.browser.test.tsx` 的 91 项通过。
+既有 `AppShellCollaborationScenario.browser.test.tsx` 有 1 项截图稳定性失败、1 项通过：同次连续截图从 333×931 变为 333×936。
+在未修改的 HEAD `79ec7341bf63cb5b4dbac218014c61326c6551c5` 独立 checkout 中，同一断言复现，
+两张 PNG 分别与当前工作区失败输出具有完全相同的 SHA-256，因此记录为已有问题；没有修改其测试断言或审批样式。
+临时 checkout 已清理，测试覆盖写入的既有截图已恢复。此项不计入上述通过的本轮专项检查。
+
+本轮已停止于前端交付，没有执行打包 Electron 的全套人工验收。第 5 轮仍未开始，待验收：
+
+1. 打包 Electron 窗口中的完整父智能体工具调用→审批/提问交替→提交→正常后续运行；跨 Provider 的工具与专项提示词动态一致。
+2. 多窗口、Core Server 重启和客户端重开组合验收：未答批次、已提交未投递、恢复领取中、Stop 围栏与删除竞争。
+3. 同步/异步答案经过压缩、latest fork、重启历史恢复后仍唯一进入模型；独立用量及 Run 用量不重复。
+4. 子 Agent 所有层级和无人值守任务继续无提问能力；关闭开关后旧问题仍可结算。
+5. 整体验收发现的问题修整，更新面向用户的操作说明和最终验收矩阵。

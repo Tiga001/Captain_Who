@@ -10,7 +10,7 @@ import {
   useState
 } from 'react'
 import type { ReactNode } from 'react'
-import { Split, X } from 'lucide-react'
+import { CircleHelp, Split, X } from 'lucide-react'
 import type {
   AgentApprovalScope,
   AgentContextWindowSnapshot,
@@ -53,6 +53,15 @@ import {
 } from '../agentCollaboration/CollaborationTimelineActivity'
 import { projectCollaborationTimelineActivities } from '../agentCollaboration/collaborationTimelineModel'
 import { useFrontendConfig } from '../../config/FrontendConfigProvider'
+import {
+  useHumanInteraction,
+  type HumanInteractionControllerView
+} from '../humanInteraction/useHumanInteraction'
+import { HumanInteractionPanel } from '../humanInteraction/HumanInteractionPanel'
+import {
+  projectHumanInteractionConversation,
+  humanInteractionUserDisplay
+} from '../humanInteraction/humanInteractionPresentation'
 import './ChatConversationPage.css'
 
 interface ConversationSurfaceCommonProps {
@@ -71,6 +80,7 @@ export interface InteractiveConversationSurfaceProps extends ConversationSurface
   isManualCompactionRunning?: boolean
   /** Root-only semantic collaboration activity supplied by the durable tree/event projection. */
   collaborationContent?: ReactNode
+  hasCollaborationApproval?: boolean
   /** Typed durable semantic activity; generic Tool/Mailbox/model text never enters this path. */
   collaborationTimelineActivities?: readonly CollaborationTimelineActivity[]
   contextWindowIndicatorEnabled?: boolean
@@ -201,6 +211,7 @@ function getEditableLastUserMessageId(conversation: ChatConversation) {
 }
 
 interface ChatMessageListProps {
+  humanInteraction?: HumanInteractionControllerView
   forkDisabledReason?: string
   agentLabelsById?: Readonly<Record<string, string>>
   collaborationTimelineActivities?: readonly CollaborationTimelineActivity[]
@@ -237,6 +248,7 @@ interface ChatMessageListProps {
 }
 
 export const ChatMessageList = memo(function ChatMessageList({
+  humanInteraction,
   forkDisabledReason,
   agentLabelsById,
   collaborationTimelineActivities = EMPTY_COLLABORATION_TIMELINE_ACTIVITIES,
@@ -263,6 +275,43 @@ export const ChatMessageList = memo(function ChatMessageList({
   showTokenUsageDetails,
   turnDiffSummariesByMessageId
 }: ChatMessageListProps) {
+  const { t } = useFrontendConfig()
+  const presentedConversation = useMemo(
+    () => projectHumanInteractionConversation(conversation, humanInteraction?.requests ?? []),
+    [conversation, humanInteraction?.requests]
+  )
+  const questionEntries = (messageId: string | null) => {
+    if (mode !== 'interactive' || !humanInteraction) return null
+    const requests = humanInteraction.openRequests.filter((request) =>
+      messageId
+        ? request.assistantMessageId === messageId
+        : !conversation.messages.some((message) => message.id === request.assistantMessageId)
+    )
+    if (!requests.length) return null
+    return (
+      <div className="human-interaction-entries">
+        {requests.map((request) => (
+          <button
+            className="human-interaction-entry"
+            data-human-request-id={request.requestId}
+            disabled={
+              !humanInteraction.canInteract ||
+              humanInteraction.openRequests.some((item) => item.mode === 'sync')
+            }
+            key={request.requestId}
+            onClick={() => humanInteraction.open(request.requestId)}
+            type="button"
+          >
+            <CircleHelp aria-hidden="true" />
+            {t('humanInteraction.timeline.answer').replace(
+              '{count}',
+              String(request.questions.length)
+            )}
+          </button>
+        ))}
+      </div>
+    )
+  }
   const continuationOrigin = conversation.continuationOrigin
   const collaborationAgentNavigation = mode === 'interactive' ? onOpenCollaborationAgent : undefined
   const messageIdentities = useStableMessageIdentities(conversation.messages)
@@ -331,7 +380,7 @@ export const ChatMessageList = memo(function ChatMessageList({
 
   return (
     <>
-      {conversation.messages.map((message) => (
+      {presentedConversation.messages.map((message) => (
         <Fragment key={message.id}>
           {collaborationAgentNavigation && (
             <CollaborationTimelineActivityList
@@ -397,6 +446,7 @@ export const ChatMessageList = memo(function ChatMessageList({
             }
             turnDiffSummary={turnDiffSummariesByMessageId?.get(message.id)}
           />
+          {questionEntries(message.id)}
           {continuationOrigin?.boundaryMessageId === message.id && (
             <ConversationContinuationDivider
               onOpen={
@@ -457,6 +507,7 @@ export const ChatMessageList = memo(function ChatMessageList({
             ))}
         </Fragment>
       ))}
+      {questionEntries(null)}
       {manualCompactionOperations
         .filter(
           (operation) =>
@@ -560,6 +611,16 @@ export function ConversationSurface(props: ConversationSurfaceProps) {
   const messagesRef = useRef<HTMLDivElement>(null)
   const handledScrollTargetRef = useRef<string | null>(null)
   const [sideChatPlaceholder, setSideChatPlaceholder] = useState<ChatQueuedMessage | null>(null)
+  const pendingApprovalTarget = useMemo(
+    () => (interactive ? getPendingApprovalTarget(conversation) : null),
+    [conversation, interactive]
+  )
+  const hasPendingApproval = Boolean(pendingApprovalTarget)
+  const humanInteraction = useHumanInteraction({
+    conversationId: interactive ? conversation.id : null,
+    hasApproval: hasPendingApproval || Boolean(interactive?.hasCollaborationApproval),
+    readOnly: !interactive
+  })
   const messageSummary = useMemo(() => {
     let isGenerating = false
     let lastAssistantMessageId: string | undefined
@@ -571,7 +632,11 @@ export function ConversationSurface(props: ConversationSurfaceProps) {
       if (!lastAssistantMessageId && message.role === 'assistant') {
         lastAssistantMessageId = message.id
       }
-      if (!lastCommittedUserMessageId && message.role === 'user') {
+      if (
+        !lastCommittedUserMessageId &&
+        message.role === 'user' &&
+        !humanInteractionUserDisplay(message, humanInteraction.requests)
+      ) {
         lastCommittedUserMessageId = message.id
       }
       if (isAssistantMessageGenerating(message)) {
@@ -586,15 +651,11 @@ export function ConversationSurface(props: ConversationSurfaceProps) {
       lastAssistantMessageId,
       lastCommittedUserMessageId
     }
-  }, [conversation.messages])
+  }, [conversation.messages, humanInteraction.requests])
   const { activeAssistantRun, isGenerating, lastAssistantMessageId, lastCommittedUserMessageId } =
     messageSummary
   const canGuideQueuedMessages = Boolean(
     activeAssistantRun?.runId && activeAssistantRun.status === 'running'
-  )
-  const pendingApprovalTarget = useMemo(
-    () => (interactive ? getPendingApprovalTarget(conversation) : null),
-    [conversation, interactive]
   )
   const turnNavigationItems = useMemo(
     () => getConversationTurnNavigationItems(conversation.messages),
@@ -607,7 +668,11 @@ export function ConversationSurface(props: ConversationSurfaceProps) {
   const turnDiffSummariesByMessageId = useTurnDiffSummaries(conversation, {
     enabled: props.mode === 'interactive'
   })
-  const hasPendingApproval = Boolean(pendingApprovalTarget)
+  const activeQuestion = humanInteraction.activeBatch
+  const questionSourceRun = activeQuestion
+    ? conversation.messages.find((message) => message.agentRun?.runId === activeQuestion.runId)
+        ?.agentRun
+    : undefined
   const editableLastUserMessageId =
     interactive && !hasPendingApproval ? getEditableLastUserMessageId(conversation) : null
 
@@ -697,6 +762,7 @@ export function ConversationSurface(props: ConversationSurfaceProps) {
           ref={messagesRef}
         >
           <ChatMessageList
+            humanInteraction={interactive ? humanInteraction : undefined}
             agentLabelsById={props.mode === 'observer' ? props.agentLabelsById : undefined}
             collaborationTimelineActivities={interactive?.collaborationTimelineActivities}
             conversation={conversation}
@@ -751,6 +817,50 @@ export function ConversationSurface(props: ConversationSurfaceProps) {
 
       {interactive && (
         <div className="chat-conversation-page__composer">
+          {activeQuestion && (
+            <HumanInteractionPanel
+              request={activeQuestion}
+              pageIndex={humanInteraction.activeDraft.pageIndex}
+              answers={humanInteraction.activeDraft.answers}
+              canSubmit={humanInteraction.canSubmit}
+              isSubmitting={humanInteraction.isSubmitting}
+              isDraftLocked={humanInteraction.isDraftLocked}
+              error={humanInteraction.error}
+              sourceRunEnded={
+                activeQuestion.mode === 'async' &&
+                Boolean(
+                  questionSourceRun &&
+                  ['completed', 'failed', 'cancelled'].includes(questionSourceRun.status)
+                )
+              }
+              onPageChange={(index) => humanInteraction.setPage(activeQuestion.requestId, index)}
+              onAnswerChange={(answer) =>
+                humanInteraction.setAnswer(activeQuestion.requestId, answer)
+              }
+              onSubmit={() => void humanInteraction.submit(activeQuestion.requestId)}
+              onIgnore={
+                activeQuestion.mode === 'async' && humanInteraction.pendingAction !== 'submit'
+                  ? () => void humanInteraction.ignore(activeQuestion.requestId)
+                  : undefined
+              }
+              onMinimize={
+                activeQuestion.mode === 'async'
+                  ? () => humanInteraction.minimize(activeQuestion.requestId)
+                  : undefined
+              }
+            />
+          )}
+          {!activeQuestion &&
+            humanInteraction.error &&
+            !hasPendingApproval &&
+            !interactive.hasCollaborationApproval && (
+              <div role="alert">
+                {humanInteraction.error}{' '}
+                <button type="button" onClick={() => void humanInteraction.refresh()}>
+                  {t('chat.retryConversationLoad')}
+                </button>
+              </div>
+            )}
           {activeTodo && (
             <AgentTodoProgress
               completedAt={activeTodo.completedAt}

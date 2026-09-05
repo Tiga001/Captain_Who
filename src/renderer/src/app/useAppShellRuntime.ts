@@ -32,6 +32,7 @@ import { createComposerDraft, synchronizeComposerDraftForScope } from './chatMes
 import { getRecoverableGuidanceSignature, isRecoverableGuidanceItem } from './recoverableGuidance'
 import { useAgentRunLifecycle } from './useAgentRunLifecycle'
 import { usePersistedShellHydration } from './usePersistedShellHydration'
+import { useHumanInteractionConversationSync } from './useHumanInteractionConversationSync'
 
 type StartupStage = ReturnType<
   (typeof import('../features/startup/AppStartupContext'))['useAppStartupStage']
@@ -453,6 +454,12 @@ export function useAppShellRuntime({
   )
 
   const recoverableGuidanceSignature = getRecoverableGuidanceSignature(conversations)
+
+  useHumanInteractionConversationSync({
+    activeConversationId,
+    conversationsRef,
+    setConversations: setConversationsWithRef
+  })
 
   useEffect(() => {
     for (const conversation of conversationsRef.current) {

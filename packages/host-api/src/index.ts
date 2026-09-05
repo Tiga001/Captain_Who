@@ -366,6 +366,8 @@ export interface HumanInteractionHostApi {
   ): Promise<HostInvocationResult<HumanInteractionRequestSnapshot>>
   onSettingsChanged(handler: (settings: HumanInteractionSettings) => void): () => void
   onRequestChanged(handler: (request: HumanInteractionRequestSnapshot) => void): () => void
+  /** Core restarted or reconnected; reload authoritative settings and request pages. */
+  onResync(handler: () => void): () => void
 }
 
 export interface StorageHostApi {

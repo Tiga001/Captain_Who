@@ -18,6 +18,7 @@ const appTests = 'src/renderer/src/app/__tests__'
 const chatTests = 'src/renderer/src/features/chat/__tests__'
 const automationsTests = 'src/renderer/src/features/automations/__tests__'
 const notificationsTests = 'src/renderer/src/features/notifications/__tests__'
+const humanInteractionTests = 'src/renderer/src/features/humanInteraction/__tests__'
 const agentCollaborationTests = 'src/renderer/src/features/agentCollaboration'
 const protocolTests = 'packages/protocol/src'
 
@@ -44,6 +45,7 @@ export const vitestProjectFileRules = {
       `${chatTests}/**/*.test.ts`,
       `${automationsTests}/**/*.test.ts`,
       `${notificationsTests}/**/*.test.ts`,
+      `${humanInteractionTests}/**/*.test.ts`,
       `${agentCollaborationTests}/**/*.test.ts`,
       `${protocolTests}/**/*.test.ts`
     ],
@@ -55,6 +57,7 @@ export const vitestProjectFileRules = {
       `${chatTests}/**/*.browser.test.tsx`,
       `${automationsTests}/**/*.browser.test.tsx`,
       `${notificationsTests}/**/*.browser.test.tsx`,
+      `${humanInteractionTests}/**/*.browser.test.tsx`,
       `${skillsTests}/**/*.browser.test.tsx`,
       `${mcpTests}/**/*.browser.test.tsx`,
       `${gitReviewTests}/**/*.browser.test.tsx`,

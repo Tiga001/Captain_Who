@@ -24,7 +24,8 @@ function core() {
     submitHumanInteractionRequest: vi.fn(),
     ignoreHumanInteractionRequest: vi.fn(),
     onHumanInteractionSettingsChanged: vi.fn().mockReturnValue(vi.fn()),
-    onHumanInteractionRequestChanged: vi.fn().mockReturnValue(vi.fn())
+    onHumanInteractionRequestChanged: vi.fn().mockReturnValue(vi.fn()),
+    onCollaborationResync: vi.fn().mockReturnValue(vi.fn())
   }
 }
 function handler(channel: string): (event: IpcMainInvokeEvent, input: unknown) => Promise<unknown> {
@@ -119,4 +120,20 @@ describe('Trusted human interaction IPC', () => {
     expect(server.onHumanInteractionRequestChanged.mock.results[0].value).toHaveBeenCalledOnce()
     warn.mockRestore()
   })
+})
+
+it('forwards Core reconnect as an independent human interaction refresh hint', () => {
+  const server = core()
+  const send = vi.fn()
+  getAllWindows.mockReturnValue([
+    { isDestroyed: () => false, webContents: { isDestroyed: () => false, send } }
+  ])
+  const dispose = registerHumanInteractionIpc(
+    createTrustedIpcMain(() => true),
+    server as never
+  )
+  server.onCollaborationResync.mock.calls[0][0]({})
+  expect(send).toHaveBeenCalledWith(HOST_CHANNELS.humanInteraction.resync, null)
+  dispose()
+  expect(server.onCollaborationResync.mock.results[0].value).toHaveBeenCalledOnce()
 })

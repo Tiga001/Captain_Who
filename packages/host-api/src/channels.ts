@@ -97,7 +97,8 @@ export const HOST_CHANNELS = {
     submit: 'host:humanInteraction.submit',
     ignore: 'host:humanInteraction.ignore',
     settingsChanged: 'host:humanInteraction.settingsChanged',
-    requestChanged: 'host:humanInteraction.requestChanged'
+    requestChanged: 'host:humanInteraction.requestChanged',
+    resync: 'host:humanInteraction.resync'
   },
   browser: {
     artifactExport: 'host:browser.artifact.export',

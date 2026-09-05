@@ -1,0 +1,47 @@
+.human-interaction-answer {
+  display: grid;
+  gap: 14px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.human-interaction-answer__pair {
+  display: grid;
+  gap: 6px;
+}
+.human-interaction-answer__question {
+  color: var(--mc-color-text-secondary);
+}
+.human-interaction-answer__value {
+  color: var(--mc-color-text-primary);
+}
+.human-interaction-entries {
+  display: grid;
+  justify-items: start;
+  gap: 6px;
+  margin-block: 8px;
+}
+.human-interaction-entry {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  color: var(--mc-color-text-secondary);
+  background: var(--mc-color-surface-card);
+  border: 0.5px solid var(--mc-color-border-subtle);
+  border-radius: var(--mc-radius-card);
+  font: inherit;
+  font-size: var(--mc-font-size-chat-approval, 13px);
+  cursor: pointer;
+}
+.human-interaction-entry svg {
+  width: 15px;
+  height: 15px;
+}
+.human-interaction-entry:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+.human-interaction-entry:hover:not(:disabled) {
+  color: var(--mc-color-text-primary);
+  background: var(--mc-color-state-hover);
+}

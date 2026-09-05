@@ -1231,6 +1231,9 @@ export function AppShell() {
                 isManualCompactionRunning={manualCompaction.isRunning || !manualCompaction.ready}
                 manualCompactionOperations={manualCompaction.operations}
                 collaborationContent={collaborationContent}
+                hasCollaborationApproval={projectedCollaborationApprovals.some(
+                  (approval) => approval.status === 'pending'
+                )}
                 collaborationTimelineActivities={collaborationSnapshot?.activities ?? []}
                 composerDraft={activeDraft}
                 conversation={activeConversation}

@@ -32,6 +32,11 @@ import {
 } from '../attachmentDisplay'
 import { loadAttachmentImage } from '../../storage/storageClient'
 import { ChatMarkdown } from './ChatMarkdown'
+import { HumanInteractionAnswerContent } from '../../humanInteraction/HumanInteractionAnswerContent'
+import {
+  readHumanInteractionGuidanceDisplay,
+  humanInteractionDisplayText
+} from '../../humanInteraction/humanInteractionPresentation'
 import type { ApprovalSubmissionResult } from './approvalSubmission'
 import {
   copyTextToClipboard,
@@ -347,6 +352,7 @@ function AgentThinkingActivity({ label }: { label: string }) {
 
 function GuidanceTimelineItemView({ item }: { item: ChatGuidanceTimelineItem }) {
   const { t } = useFrontendConfig()
+  const humanAnswer = readHumanInteractionGuidanceDisplay(item)
   const content = stripAttachmentSummary(item.content, item.attachments)
   const statusLabel =
     item.status === 'submitting'
@@ -365,9 +371,13 @@ function GuidanceTimelineItemView({ item }: { item: ChatGuidanceTimelineItem }) 
     >
       <div className="chat-guidance__bubble">
         <MessageAttachments attachments={item.attachments} messageId={item.id} />
-        {content && <ChatMarkdown content={content} />}
+        {humanAnswer ? (
+          <HumanInteractionAnswerContent display={humanAnswer} />
+        ) : (
+          content && <ChatMarkdown content={content} />
+        )}
       </div>
-      {statusLabel && <span className="chat-guidance__status">{statusLabel}</span>}
+      {!humanAnswer && statusLabel && <span className="chat-guidance__status">{statusLabel}</span>}
     </div>
   )
 }
@@ -1013,7 +1023,12 @@ function MessageContent({
     )
   }
 
-  return <ChatMarkdown enableMath={false} content={getUserVisibleContent(message)} />
+  const humanAnswer = message.humanInteractionDisplay
+  return humanAnswer ? (
+    <HumanInteractionAnswerContent display={humanAnswer} />
+  ) : (
+    <ChatMarkdown enableMath={false} content={getUserVisibleContent(message)} />
+  )
 }
 
 function EditableUserMessage({
@@ -1275,15 +1290,20 @@ export const ChatMessageItem = memo(function ChatMessageItem({
   const [isEditing, setIsEditing] = useState(false)
   const isAssistantActionsVisible = shouldShowAssistantActions(message)
   const userVisibleContent = getUserVisibleContent(message)
+  const humanAnswer = message.role === 'user' ? message.humanInteractionDisplay : null
   const actionContent =
-    message.role === 'assistant' ? getAssistantFinalContent(message) : userVisibleContent
+    message.role === 'assistant'
+      ? getAssistantFinalContent(message)
+      : humanAnswer
+        ? humanInteractionDisplayText(humanAnswer)
+        : userVisibleContent
   const actionTimestamp =
     message.role === 'assistant'
       ? (message.agentRun?.completedAt ?? message.createdAt)
       : message.createdAt
   const actionUsage = message.role === 'assistant' ? message.agentRun?.usage : undefined
   const showActions = message.role === 'user' || isAssistantActionsVisible
-  const canEdit = message.role === 'user' && Boolean(onEditSubmit)
+  const canEdit = message.role === 'user' && !humanAnswer && Boolean(onEditSubmit)
   const pinCopyAction =
     message.role === 'assistant' && isLastAssistantMessage && isAssistantActionsVisible
   const showBody = message.role === 'assistant' || Boolean(userVisibleContent.trim())

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { readHumanInteractionGuidanceDisplay } from '../features/humanInteraction/humanInteractionPresentation'
 import type { AgentEvent } from '@mycopilot/protocol'
 import {
   cancelAgentRun,
@@ -514,6 +515,22 @@ export function useAgentRunLifecycle({
           const message = conversation.messages.find(
             (candidate) => candidate.id === pendingAction.assistantMessageId
           )
+          const currentRun = message?.agentRun
+          if (
+            currentRun?.runId &&
+            (currentRun.runId !== pendingAction.runId ||
+              ['completed', 'failed', 'cancelled', 'waiting_for_user_input'].includes(
+                currentRun.status
+              ) ||
+              (pendingAction.toolCallId &&
+                currentRun.toolResults.some(
+                  (result) => result.callId === pendingAction.toolCallId
+                )))
+          ) {
+            // Pending-action hydration is a read snapshot. It cannot reopen an approval after
+            // this Run has settled that call, ended, or reached a later synchronous question.
+            continue
+          }
           if (
             pendingAction.toolName === 'run_command' &&
             pendingAction.toolCallId &&
@@ -814,6 +831,17 @@ export function useAgentRunLifecycle({
       }
 
       if (agentEvent.type === 'guidance_rejected') {
+        // Host-owned answer deliveries may be rebound after a pause/stop. They are never
+        // Composer drafts and only the Host may choose their next delivery route.
+        if (readHumanInteractionGuidanceDisplay(agentEvent)) {
+          updateAssistantMessage(
+            conversationId,
+            assistantMessageId,
+            (message) => applyAgentEventToChatMessage(message, agentEvent),
+            { touchConversation: false }
+          )
+          return
+        }
         restoreRejectedGuidance(
           conversationId,
           assistantMessageId,

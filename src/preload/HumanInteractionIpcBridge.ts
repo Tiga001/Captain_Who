@@ -31,6 +31,11 @@ export function createHumanInteractionIpcBridge(
       return () =>
         ipcRenderer.removeListener(HOST_CHANNELS.humanInteraction.settingsChanged, listener)
     },
+    onResync: (handler) => {
+      const listener = (): void => handler()
+      ipcRenderer.on(HOST_CHANNELS.humanInteraction.resync, listener)
+      return () => ipcRenderer.removeListener(HOST_CHANNELS.humanInteraction.resync, listener)
+    },
     onRequestChanged: (handler) => {
       const listener = (_event: IpcRendererEvent, payload: unknown): void => {
         let request: ReturnType<typeof parseHumanInteractionRequestSnapshot>

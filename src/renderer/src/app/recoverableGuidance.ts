@@ -3,6 +3,7 @@ import type {
   ChatGuidanceTimelineItem,
   ChatMessage
 } from '../features/chat/chatTypes'
+import { readHumanInteractionGuidanceDisplay } from '../features/humanInteraction/humanInteractionPresentation'
 
 const recoverableGuidanceSignatureCache = new WeakMap<ChatMessage, string>()
 
@@ -11,6 +12,7 @@ export function isRecoverableGuidanceItem(
 ): item is ChatGuidanceTimelineItem {
   return (
     item.type === 'user_guidance' &&
+    !readHumanInteractionGuidanceDisplay(item) &&
     item.status === 'rejected' &&
     item.recoverable === true &&
     item.rejectionCode === 'run_interrupted'

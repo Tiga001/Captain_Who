@@ -83,11 +83,17 @@ export function registerHumanInteractionIpc(
       console.warn('Ignored invalid human interaction request update')
     }
   })
+  // Collaboration resync is emitted for each Core connection, independently of any open tree.
+  // Translate only the lifecycle hint; question facts always come from their own query API.
+  const stopResync = coreServer.onCollaborationResync?.(() => {
+    broadcast(HOST_CHANNELS.humanInteraction.resync, null)
+  })
   let disposed = false
   return () => {
     if (disposed) return
     disposed = true
     stopSettings()
     stopRequests()
+    stopResync?.()
   }
 }
