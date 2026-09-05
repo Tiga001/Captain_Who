@@ -71,6 +71,40 @@ test('forwards only an explicit confirmation after the authoritative root', () =
   ])
 })
 
+test('forwards an explicit absolute configuration source without enabling reset', () => {
+  const source = '/electron-owned/User Data/storage-backups/storage-reset-dev-source.sqlite'
+  const command = buildDevelopmentStorageResetCommand(
+    '/electron-owned/User Data',
+    ['--', '--configuration-source', source],
+    '/workspace'
+  )
+
+  assert.deepEqual(command.arguments.slice(-4), [
+    '--app-data-root',
+    '/electron-owned/User Data',
+    '--configuration-source',
+    source
+  ])
+  assert.equal(command.arguments.includes('--confirm-reset'), false)
+})
+
+test('forwards a configuration source and explicit confirmation exactly', () => {
+  const source = '/electron-owned/User Data/storage-backups/storage-reset-dev-source.sqlite'
+  const command = buildDevelopmentStorageResetCommand(
+    '/electron-owned/User Data',
+    ['--', '--configuration-source', source, '--confirm-reset'],
+    '/workspace'
+  )
+
+  assert.deepEqual(command.arguments.slice(-5), [
+    '--app-data-root',
+    '/electron-owned/User Data',
+    '--configuration-source',
+    source,
+    '--confirm-reset'
+  ])
+})
+
 test('rejects a relative root before launching Rust', () => {
   assert.throws(
     () => buildDevelopmentStorageResetCommand('relative/root', [], '/workspace'),
@@ -78,10 +112,43 @@ test('rejects a relative root before launching Rust', () => {
   )
 })
 
+test('rejects a missing or relative configuration source', () => {
+  assert.throws(
+    () => buildDevelopmentStorageResetCommand('/root', ['--configuration-source'], '/workspace'),
+    /requires an absolute backup path/
+  )
+  assert.throws(
+    () =>
+      buildDevelopmentStorageResetCommand(
+        '/root',
+        ['--configuration-source', 'storage-backups/source.sqlite'],
+        '/workspace'
+      ),
+    /requires an absolute backup path/
+  )
+})
+
+test('rejects repeated configuration sources', () => {
+  assert.throws(
+    () =>
+      buildDevelopmentStorageResetCommand(
+        '/root',
+        [
+          '--configuration-source',
+          '/backups/first.sqlite',
+          '--configuration-source',
+          '/backups/second.sqlite'
+        ],
+        '/workspace'
+      ),
+    /may be supplied only once/
+  )
+})
+
 test('rejects unsupported or repeated forwarded arguments', () => {
   assert.throws(
     () => buildDevelopmentStorageResetCommand('/root', ['--force'], '/workspace'),
-    /Only one optional/
+    /Unsupported storage reset argument/
   )
   assert.throws(
     () =>
@@ -90,6 +157,6 @@ test('rejects unsupported or repeated forwarded arguments', () => {
         ['--confirm-reset', '--confirm-reset'],
         '/workspace'
       ),
-    /Only one optional/
+    /may be supplied only once/
   )
 })

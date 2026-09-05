@@ -45,7 +45,12 @@ const DATABASE_FILE_NAME: &str = "storage.sqlite";
 const BACKUP_DIRECTORY_NAME: &str = "storage-backups";
 const CONFIRM_RESET_FLAG: &str = "--confirm-reset";
 const APP_DATA_ROOT_FLAG: &str = "--app-data-root";
+const CONFIGURATION_SOURCE_FLAG: &str = "--configuration-source";
 const SQLITE_TRANSIENT_SUFFIXES: [&str; 3] = ["-journal", "-wal", "-shm"];
+const RECOVERABLE_CONFIGURATION_SOURCE_SCHEMA_VERSION: i32 = 33;
+const RECOVERABLE_CONFIGURATION_TARGET_SCHEMA_VERSION: i32 = 34;
+const RECOVERABLE_CONFIGURATION_SOURCE_FINGERPRINT: &str =
+    "sha256:5e1e404d74af5ed899d88dc8b5051e673ecd5beb967579af8f328b07b640c948";
 const EXACT_CONFIGURATION_TABLES: &[&str] = &[
     "model_provider_settings",
     "models",
@@ -78,6 +83,13 @@ const PRESERVED_CONFIGURATION_TABLES: &[&str] = &[
 struct ResetOptions {
     app_data_root: PathBuf,
     confirm_reset: bool,
+    configuration_source: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConfigurationSourcePolicy {
+    CurrentDatabase,
+    ExplicitBackup,
 }
 
 struct PreservedConfiguration {
@@ -132,6 +144,7 @@ impl ExactConfigurationTableSnapshot {
 struct ResetReport {
     database_path: PathBuf,
     backup_path: Option<PathBuf>,
+    configuration_source_path: Option<PathBuf>,
     confirmed: bool,
     source_existed: bool,
     model_count: usize,
@@ -158,10 +171,14 @@ impl ResetReport {
         } else {
             "absent"
         };
-        let preservation = if !self.source_existed {
-            "not applicable"
-        } else if self.preserved_configuration {
+        let configuration_source = self.configuration_source_path.as_ref().map_or_else(
+            || "active database".to_string(),
+            |path| path.display().to_string(),
+        );
+        let preservation = if self.preserved_configuration {
             "supported"
+        } else if !self.source_existed && self.configuration_source_path.is_none() {
+            "not applicable"
         } else {
             "skipped (unsupported schema; defaults used)"
         };
@@ -170,6 +187,7 @@ impl ResetReport {
              database: {}\n\
              source database: {source}\n\
              backup: {backup}\n\
+             configuration source: {configuration_source}\n\
              configuration preservation: {preservation}\n\
              preserved models: {}\n\
              preserved Skill overrides: {}\n\
@@ -207,6 +225,7 @@ fn parse_options(arguments: impl IntoIterator<Item = OsString>) -> io::Result<Re
     let mut arguments = arguments.into_iter();
     let mut app_data_root = None;
     let mut confirm_reset = false;
+    let mut configuration_source = None;
     while let Some(argument) = arguments.next() {
         if argument == OsStr::new(APP_DATA_ROOT_FLAG) {
             if app_data_root.is_some() {
@@ -220,6 +239,21 @@ fn parse_options(arguments: impl IntoIterator<Item = OsString>) -> io::Result<Re
                 return Err(invalid_input("--confirm-reset may be supplied only once"));
             }
             confirm_reset = true;
+        } else if argument == OsStr::new(CONFIGURATION_SOURCE_FLAG) {
+            if configuration_source.is_some() {
+                return Err(invalid_input(
+                    "--configuration-source may be supplied only once",
+                ));
+            }
+            let source = PathBuf::from(arguments.next().ok_or_else(|| {
+                invalid_input("--configuration-source requires an absolute backup path")
+            })?);
+            if !source.is_absolute() {
+                return Err(invalid_input(
+                    "--configuration-source requires an absolute backup path",
+                ));
+            }
+            configuration_source = Some(source);
         } else {
             return Err(invalid_input("unsupported storage reset argument"));
         }
@@ -229,6 +263,7 @@ fn parse_options(arguments: impl IntoIterator<Item = OsString>) -> io::Result<Re
     Ok(ResetOptions {
         app_data_root,
         confirm_reset,
+        configuration_source,
     })
 }
 
@@ -245,16 +280,29 @@ fn execute(options: ResetOptions) -> io::Result<ResetReport> {
         )
     })?;
     let source_existed = validate_optional_database(&database_path)?;
+    let explicit_configuration_source = options
+        .configuration_source
+        .as_deref()
+        .map(|source| validate_configuration_source(&app_data_root, &database_path, source))
+        .transpose()?;
 
     if !options.confirm_reset {
-        let (configuration, discarded_conversation_rows) = if source_existed {
-            inspect_source(&database_path, None)?
-        } else {
-            (None, 0)
-        };
+        let (configuration, discarded_conversation_rows) =
+            if let Some(source) = explicit_configuration_source.as_deref() {
+                inspect_source(source, None, ConfigurationSourcePolicy::ExplicitBackup)?
+            } else if source_existed {
+                inspect_source(
+                    &database_path,
+                    None,
+                    ConfigurationSourcePolicy::CurrentDatabase,
+                )?
+            } else {
+                (None, 0)
+            };
         return Ok(report_from_configuration(
             database_path,
             None,
+            explicit_configuration_source,
             false,
             source_existed,
             configuration.as_ref(),
@@ -266,16 +314,24 @@ fn execute(options: ResetOptions) -> io::Result<ResetReport> {
         .then(|| create_database_backup(&app_data_root, &database_path))
         .transpose()?;
     let backup_digest = backup_path.as_deref().map(file_digest).transpose()?;
-    let mcp_working_snapshot = backup_path
+    let (configuration_source, source_policy) = explicit_configuration_source
         .as_deref()
-        .map(|backup| TemporaryDatabaseSnapshot::from_source(&app_data_root, backup, "mcp"))
+        .map(|source| (Some(source), ConfigurationSourcePolicy::ExplicitBackup))
+        .unwrap_or((
+            backup_path.as_deref(),
+            ConfigurationSourcePolicy::CurrentDatabase,
+        ));
+    let configuration_source_digest = configuration_source.map(file_digest).transpose()?;
+    let mcp_working_snapshot = configuration_source
+        .map(|source| TemporaryDatabaseSnapshot::from_source(&app_data_root, source, "mcp"))
         .transpose()?;
-    let (configuration, discarded_conversation_rows) = match backup_path.as_deref() {
-        Some(backup_path) => inspect_source(
-            backup_path,
+    let (configuration, discarded_conversation_rows) = match configuration_source {
+        Some(source) => inspect_source(
+            source,
             mcp_working_snapshot
                 .as_ref()
                 .map(TemporaryDatabaseSnapshot::path),
+            source_policy,
         )?,
         None => (None, 0),
     };
@@ -285,6 +341,15 @@ fn execute(options: ResetOptions) -> io::Result<ResetReport> {
         if &file_digest(backup_path)? != expected_digest {
             return Err(invalid_data(
                 "the recovery backup changed while configuration was inspected",
+            ));
+        }
+    }
+    if let (Some(source), Some(expected_digest)) =
+        (configuration_source, configuration_source_digest.as_ref())
+    {
+        if &file_digest(source)? != expected_digest {
+            return Err(invalid_data(
+                "the configuration source changed while it was inspected",
             ));
         }
     }
@@ -306,6 +371,7 @@ fn execute(options: ResetOptions) -> io::Result<ResetReport> {
     Ok(report_from_configuration(
         database_path,
         backup_path,
+        explicit_configuration_source,
         true,
         source_existed,
         configuration.as_ref(),
@@ -332,6 +398,49 @@ fn validate_app_data_root(root: &Path) -> io::Result<PathBuf> {
     fs::canonicalize(root)
 }
 
+fn validate_configuration_source(
+    app_data_root: &Path,
+    database_path: &Path,
+    source: &Path,
+) -> io::Result<PathBuf> {
+    if !source.is_absolute() {
+        return Err(invalid_input(
+            "configuration source must be an absolute backup path",
+        ));
+    }
+    let backup_directory = app_data_root.join(BACKUP_DIRECTORY_NAME);
+    let backup_metadata = fs::symlink_metadata(&backup_directory)?;
+    if backup_metadata.file_type().is_symlink() || !backup_metadata.is_dir() {
+        return Err(invalid_data(
+            "configuration source directory must be a real backup directory",
+        ));
+    }
+    let canonical_backup_directory = fs::canonicalize(&backup_directory)?;
+    let source_metadata = fs::symlink_metadata(source)?;
+    if source_metadata.file_type().is_symlink() || !source_metadata.is_file() {
+        return Err(invalid_data(
+            "configuration source must be a regular non-symlink backup file",
+        ));
+    }
+    let canonical_source = fs::canonicalize(source)?;
+    if canonical_source.parent() != Some(canonical_backup_directory.as_path()) {
+        return Err(invalid_input(
+            "configuration source must be a direct child of the application backup directory",
+        ));
+    }
+    if canonical_source == database_path {
+        return Err(invalid_input(
+            "configuration source must not be the active database",
+        ));
+    }
+    if canonical_source.extension() != Some(OsStr::new("sqlite")) {
+        return Err(invalid_input(
+            "configuration source must be a SQLite backup file",
+        ));
+    }
+    Ok(canonical_source)
+}
+
 fn validate_optional_database(database_path: &Path) -> io::Result<bool> {
     match fs::symlink_metadata(database_path) {
         Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
@@ -352,15 +461,31 @@ fn validate_optional_database(database_path: &Path) -> io::Result<bool> {
 fn inspect_source(
     source_path: &Path,
     mutable_mcp_snapshot: Option<&Path>,
+    source_policy: ConfigurationSourcePolicy,
 ) -> io::Result<(Option<PreservedConfiguration>, u64)> {
     let connection = open_read_only(source_path)?;
     let schema_version = storage_schema_version(&connection)?;
-    if !can_preserve_development_configuration(schema_version) {
-        return Ok((None, count_all_business_rows(&connection)?));
+    match source_policy {
+        ConfigurationSourcePolicy::CurrentDatabase
+            if schema_version != mycopilot_core::storage::migrations::STORAGE_SCHEMA_VERSION =>
+        {
+            return Ok((None, count_all_business_rows(&connection)?));
+        }
+        ConfigurationSourcePolicy::ExplicitBackup | ConfigurationSourcePolicy::CurrentDatabase => {}
     }
     validate_source_database_integrity(&connection)?;
-    mycopilot_core::storage::migrations::run_migrations(&connection)
-        .map_err(|_| invalid_data("current development storage schema is not exactly canonical"))?;
+    match source_policy {
+        ConfigurationSourcePolicy::ExplicitBackup => {
+            validate_explicit_configuration_source_schema(&connection, schema_version)?;
+        }
+        ConfigurationSourcePolicy::CurrentDatabase => {}
+    }
+    if source_policy == ConfigurationSourcePolicy::CurrentDatabase {
+        mycopilot_core::storage::migrations::run_migrations(&connection).map_err(|_| {
+            invalid_data("current development storage schema is not exactly canonical")
+        })?;
+    }
+    validate_preserved_configuration_table_schemas(&connection)?;
     validate_model_configuration_schema(&connection)?;
     validate_model_profile_rows_without_credentials(&connection)?;
     let exact_configuration_tables = load_exact_configuration_table_snapshots(&connection)?;
@@ -484,8 +609,69 @@ fn validate_model_profile_rows_without_credentials(connection: &Connection) -> i
     Ok(())
 }
 
-fn can_preserve_development_configuration(schema_version: i32) -> bool {
-    schema_version == mycopilot_core::storage::migrations::STORAGE_SCHEMA_VERSION
+fn validate_explicit_configuration_source_schema(
+    connection: &Connection,
+    schema_version: i32,
+) -> io::Result<()> {
+    let fingerprint = storage_catalog_fingerprint(connection)?;
+    if !is_supported_explicit_configuration_source(schema_version, &fingerprint) {
+        return Err(invalid_data(
+            "configuration source does not match the explicitly supported recovery schema",
+        ));
+    }
+    Ok(())
+}
+
+fn is_supported_explicit_configuration_source(schema_version: i32, fingerprint: &str) -> bool {
+    mycopilot_core::storage::migrations::STORAGE_SCHEMA_VERSION
+        == RECOVERABLE_CONFIGURATION_TARGET_SCHEMA_VERSION
+        && schema_version == RECOVERABLE_CONFIGURATION_SOURCE_SCHEMA_VERSION
+        && fingerprint == RECOVERABLE_CONFIGURATION_SOURCE_FINGERPRINT
+}
+
+fn storage_catalog_fingerprint(connection: &Connection) -> io::Result<String> {
+    let mut statement = connection
+        .prepare(
+            "SELECT type, name, tbl_name, sql
+             FROM sqlite_schema
+             WHERE sql IS NOT NULL
+               AND name NOT LIKE 'sqlite_%'
+             ORDER BY type, name, tbl_name",
+        )
+        .map_err(redacted_storage_error)?;
+    let mut rows = statement.query([]).map_err(redacted_storage_error)?;
+    let mut digest = Sha256::new();
+    while let Some(row) = rows.next().map_err(redacted_storage_error)? {
+        for index in 0..4 {
+            let value = row
+                .get::<_, String>(index)
+                .map_err(redacted_storage_error)?;
+            digest.update((value.len() as u64).to_be_bytes());
+            digest.update(value.as_bytes());
+        }
+    }
+    Ok(format!("sha256:{:x}", digest.finalize()))
+}
+
+fn validate_preserved_configuration_table_schemas(source: &Connection) -> io::Result<()> {
+    let source_snapshots =
+        snapshot_exact_configuration_tables_named(source, PRESERVED_CONFIGURATION_TABLES)?;
+    let canonical = Connection::open_in_memory().map_err(redacted_storage_error)?;
+    mycopilot_core::storage::migrations::run_migrations(&canonical)
+        .map_err(redacted_storage_error)?;
+    let canonical_snapshots =
+        snapshot_exact_configuration_tables_named(&canonical, PRESERVED_CONFIGURATION_TABLES)?;
+    if source_snapshots.len() != canonical_snapshots.len()
+        || source_snapshots
+            .iter()
+            .zip(&canonical_snapshots)
+            .any(|(source, canonical)| !source.has_same_schema(canonical))
+    {
+        return Err(invalid_data(
+            "preserved configuration table schema differs from the current canonical schema",
+        ));
+    }
+    Ok(())
 }
 
 fn validate_model_configuration_schema(source: &Connection) -> io::Result<()> {
@@ -686,36 +872,20 @@ fn restore_exact_configuration_tables(
     transaction.commit().map_err(redacted_storage_error)
 }
 
-/// Preserves UI configuration only from the current development schema.
+/// Loads UI configuration after the selected source policy and exact table schema were verified.
 ///
 /// Conversation, checkpoint, pending-action, and Agent runtime records are intentionally never
 /// decoded or migrated by this reset utility.
 fn load_ui_preferences_for_development_reset(
     connection: &Connection,
 ) -> io::Result<UiPreferencesRecord> {
-    let schema_version = storage_schema_version(connection)?;
-    if can_preserve_development_configuration(schema_version) {
-        return preferences_repository::load_ui_preferences(connection)
-            .map_err(redacted_storage_error);
-    }
-
-    Err(invalid_data(
-        "only the current development UI preference schema can be preserved",
-    ))
+    preferences_repository::load_ui_preferences(connection).map_err(redacted_storage_error)
 }
 
 fn load_browser_download_settings_for_development_reset(
     connection: &Connection,
 ) -> io::Result<BrowserDownloadSettingsRecord> {
-    let schema_version = storage_schema_version(connection)?;
-    if can_preserve_development_configuration(schema_version) {
-        return browser_download_repository::load_settings(connection)
-            .map_err(redacted_storage_error);
-    }
-
-    Err(invalid_data(
-        "only the current development browser download settings schema can be preserved",
-    ))
+    browser_download_repository::load_settings(connection).map_err(redacted_storage_error)
 }
 
 fn decode_reset_provider_profile(
@@ -1345,6 +1515,7 @@ fn pragma_rows(connection: &Connection, pragma: &str) -> io::Result<Vec<String>>
 fn report_from_configuration(
     database_path: PathBuf,
     backup_path: Option<PathBuf>,
+    configuration_source_path: Option<PathBuf>,
     confirmed: bool,
     source_existed: bool,
     configuration: Option<&PreservedConfiguration>,
@@ -1353,6 +1524,7 @@ fn report_from_configuration(
     ResetReport {
         database_path,
         backup_path,
+        configuration_source_path,
         confirmed,
         source_existed,
         model_count: configuration.map_or(0, |configuration| configuration.model_count),
@@ -1553,6 +1725,7 @@ mod tests {
         ResetOptions {
             app_data_root: root.to_path_buf(),
             confirm_reset,
+            configuration_source: None,
         }
     }
 
@@ -1783,15 +1956,136 @@ mod tests {
         .unwrap();
         assert!(parsed.confirm_reset);
         assert!(parsed.app_data_root.is_absolute());
+        assert_eq!(parsed.configuration_source, None);
     }
 
     #[test]
-    fn configuration_preservation_is_limited_to_the_current_schema() {
-        let current = mycopilot_core::storage::migrations::STORAGE_SCHEMA_VERSION;
-        assert!(can_preserve_development_configuration(current));
-        assert!(!can_preserve_development_configuration(current - 1));
-        assert!(!can_preserve_development_configuration(current - 2));
-        assert!(!can_preserve_development_configuration(current + 1));
+    fn parser_accepts_one_explicit_absolute_configuration_source() {
+        let parsed = parse_options([
+            OsString::from(APP_DATA_ROOT_FLAG),
+            OsString::from("/absolute/root"),
+            OsString::from(CONFIGURATION_SOURCE_FLAG),
+            OsString::from("/absolute/root/storage-backups/source.sqlite"),
+            OsString::from(CONFIRM_RESET_FLAG),
+        ])
+        .unwrap();
+        assert_eq!(
+            parsed.configuration_source,
+            Some(PathBuf::from(
+                "/absolute/root/storage-backups/source.sqlite"
+            ))
+        );
+        assert!(parsed.confirm_reset);
+    }
+
+    #[test]
+    fn parser_rejects_invalid_configuration_source_arguments() {
+        for arguments in [
+            vec![
+                OsString::from(APP_DATA_ROOT_FLAG),
+                OsString::from("/absolute/root"),
+                OsString::from(CONFIGURATION_SOURCE_FLAG),
+            ],
+            vec![
+                OsString::from(APP_DATA_ROOT_FLAG),
+                OsString::from("/absolute/root"),
+                OsString::from(CONFIGURATION_SOURCE_FLAG),
+                OsString::from("relative.sqlite"),
+            ],
+            vec![
+                OsString::from(APP_DATA_ROOT_FLAG),
+                OsString::from("/absolute/root"),
+                OsString::from(CONFIGURATION_SOURCE_FLAG),
+                OsString::from("/absolute/one.sqlite"),
+                OsString::from(CONFIGURATION_SOURCE_FLAG),
+                OsString::from("/absolute/two.sqlite"),
+            ],
+        ] {
+            assert_eq!(
+                parse_options(arguments).unwrap_err().kind(),
+                io::ErrorKind::InvalidInput
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_configuration_source_is_pinned_to_schema_33_catalog_for_schema_34() {
+        assert!(is_supported_explicit_configuration_source(
+            RECOVERABLE_CONFIGURATION_SOURCE_SCHEMA_VERSION,
+            RECOVERABLE_CONFIGURATION_SOURCE_FINGERPRINT,
+        ));
+        assert!(!is_supported_explicit_configuration_source(
+            RECOVERABLE_CONFIGURATION_SOURCE_SCHEMA_VERSION - 1,
+            RECOVERABLE_CONFIGURATION_SOURCE_FINGERPRINT,
+        ));
+        assert!(!is_supported_explicit_configuration_source(
+            RECOVERABLE_CONFIGURATION_SOURCE_SCHEMA_VERSION,
+            "sha256:tampered",
+        ));
+    }
+
+    #[test]
+    fn configuration_source_must_be_a_direct_regular_backup_file() {
+        let fixture = tempfile::tempdir().unwrap();
+        let root = fixture.path();
+        let backup_directory = root.join(BACKUP_DIRECTORY_NAME);
+        create_private_directory(&backup_directory).unwrap();
+        let source = backup_directory.join("source.sqlite");
+        create_private_empty_file(&source).unwrap();
+        assert_eq!(
+            validate_configuration_source(root, &root.join(DATABASE_FILE_NAME), &source).unwrap(),
+            fs::canonicalize(&source).unwrap()
+        );
+
+        let nested_directory = backup_directory.join("nested");
+        create_private_directory(&nested_directory).unwrap();
+        let nested = nested_directory.join("source.sqlite");
+        create_private_empty_file(&nested).unwrap();
+        assert_eq!(
+            validate_configuration_source(root, &root.join(DATABASE_FILE_NAME), &nested)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidInput
+        );
+
+        let outside = root.join("outside.sqlite");
+        create_private_empty_file(&outside).unwrap();
+        assert_eq!(
+            validate_configuration_source(root, &root.join(DATABASE_FILE_NAME), &outside)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidInput
+        );
+
+        #[cfg(unix)]
+        {
+            let link = backup_directory.join("source-link.sqlite");
+            std::os::unix::fs::symlink(&source, &link).unwrap();
+            assert_eq!(
+                validate_configuration_source(root, &root.join(DATABASE_FILE_NAME), &link)
+                    .unwrap_err()
+                    .kind(),
+                io::ErrorKind::InvalidData
+            );
+        }
+    }
+
+    #[test]
+    fn preserved_configuration_tables_must_match_the_current_schema_exactly() {
+        let fixture = tempfile::tempdir().unwrap();
+        let database = fixture.path().join(DATABASE_FILE_NAME);
+        open_test_storage(&database);
+        let connection = Connection::open(&database).unwrap();
+        validate_preserved_configuration_table_schemas(&connection).unwrap();
+        connection
+            .execute("ALTER TABLE ui_preferences ADD COLUMN unexpected TEXT", [])
+            .unwrap();
+        assert_eq!(
+            validate_preserved_configuration_table_schemas(&connection)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidData
+        );
     }
 
     #[test]

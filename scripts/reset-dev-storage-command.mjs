@@ -46,12 +46,33 @@ export function buildDevelopmentStorageResetCommand(
   if (forwardedArguments.some((argument) => typeof argument !== 'string')) {
     throw new Error('Storage reset arguments must be strings')
   }
-  const resetArguments = forwardedArguments.filter((argument) => argument !== '--')
-  if (
-    resetArguments.some((argument) => argument !== '--confirm-reset') ||
-    resetArguments.filter((argument) => argument === '--confirm-reset').length > 1
-  ) {
-    throw new Error('Only one optional --confirm-reset argument is supported')
+
+  const resetArguments =
+    forwardedArguments[0] === '--' ? forwardedArguments.slice(1) : [...forwardedArguments]
+  let confirmReset = false
+  let configurationSource
+  for (let index = 0; index < resetArguments.length; index += 1) {
+    const argument = resetArguments[index]
+    if (argument === '--confirm-reset') {
+      if (confirmReset) {
+        throw new Error('--confirm-reset may be supplied only once')
+      }
+      confirmReset = true
+      continue
+    }
+    if (argument === '--configuration-source') {
+      if (configurationSource !== undefined) {
+        throw new Error('--configuration-source may be supplied only once')
+      }
+      const source = resetArguments[index + 1]
+      if (source === undefined || !isAbsolute(source)) {
+        throw new Error('--configuration-source requires an absolute backup path')
+      }
+      configurationSource = source
+      index += 1
+      continue
+    }
+    throw new Error(`Unsupported storage reset argument: ${argument}`)
   }
   return {
     executable: 'cargo',
