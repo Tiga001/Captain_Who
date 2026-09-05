@@ -168,6 +168,7 @@ export function AgentToolActivity({
     return (
       <WorkspaceMapToolActivity
         cancelled={cancelled && !result}
+        call={call}
         result={result}
         settledStatus={settledStatus}
       />

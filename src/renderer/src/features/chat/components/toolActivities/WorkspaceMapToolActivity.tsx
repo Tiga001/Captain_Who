@@ -1,12 +1,14 @@
 import { FolderOpen } from 'lucide-react'
-import type { AgentToolResult } from '@mycopilot/protocol'
+import type { AgentToolCall, AgentToolResult } from '@mycopilot/protocol'
 import type { TranslationKey } from '../../../../config/frontendTranslations'
 import { useFrontendConfig } from '../../../../config/FrontendConfigProvider'
+import { formatTranslation } from '../../../../config/translationFormat'
 import { AgentActivityDisclosure } from './AgentActivityDisclosure'
 import type { SettledToolStatus } from './toolActivityUtils'
 
 interface WorkspaceMapToolActivityProps {
   cancelled?: boolean
+  call: AgentToolCall
   result?: AgentToolResult
   settledStatus?: SettledToolStatus
 }
@@ -18,6 +20,23 @@ const STATUS_LABELS: Record<WorkspaceMapStatus, TranslationKey> = {
   completed: 'agent.workspaceMap.completed',
   failed: 'agent.workspaceMap.failed',
   cancelled: 'agent.workspaceMap.cancelled'
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === 'object' && !Array.isArray(value))
+}
+
+function getFolderName(call: AgentToolCall, result: AgentToolResult | undefined): string {
+  const output = isRecord(result?.result) ? result.result : undefined
+  const workspace = isRecord(output?.workspace) ? output.workspace : undefined
+  const resultPath = workspace?.focusPath
+  const requestedPath = isRecord(call.args) ? call.args.focusPath : undefined
+  const focusPath = typeof resultPath === 'string' && resultPath.trim() ? resultPath : requestedPath
+  if (typeof focusPath !== 'string') return ''
+  const path = focusPath.trim().replace(/\\/g, '/')
+  const withoutTrailingSlash = path.replace(/\/+$/, '')
+  if (!path || withoutTrailingSlash === '.') return ''
+  return withoutTrailingSlash.split('/').filter(Boolean).at(-1) || path
 }
 
 function getWorkspaceMapStatus(
@@ -34,34 +53,21 @@ function getWorkspaceMapStatus(
 
 export function WorkspaceMapToolActivity({
   cancelled = false,
+  call,
   result,
   settledStatus
 }: WorkspaceMapToolActivityProps) {
   const { t } = useFrontendConfig()
   const status = getWorkspaceMapStatus(cancelled, result, settledStatus)
-  const hasDetails = status !== 'running'
+  const folder = getFolderName(call, result) || t('agent.workspaceMap.workspace')
 
   return (
     <AgentActivityDisclosure
       className="agent-activity--workspace-map"
-      hasDetails={hasDetails}
+      hasDetails={false}
       icon={FolderOpen}
       isPending={status === 'running'}
-      label={t(STATUS_LABELS[status])}
-    >
-      {hasDetails && (
-        <div className="agent-activity__details workspace-map-activity__details">
-          {result?.error ? (
-            <p>{result.error}</p>
-          ) : (
-            <p>
-              {status === 'cancelled'
-                ? t('agent.workspaceMap.cancelledDetail')
-                : t('agent.workspaceMap.listedFiles')}
-            </p>
-          )}
-        </div>
-      )}
-    </AgentActivityDisclosure>
+      label={formatTranslation(t, STATUS_LABELS[status], { folder })}
+    />
   )
 }
