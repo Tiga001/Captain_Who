@@ -63,7 +63,11 @@ async fn web_switch_changes_real_requests_without_changing_stable_prefix_or_repl
         }
         requests
     });
-    let mut input = conversation_context_input(vec![message("user", "Check facts")]);
+    let mut input = conversation_context_input(vec![
+        message("user", "WEB_LAYOUT_OLD_USER"),
+        current_assistant_history_message("WEB_LAYOUT_OLD_ASSISTANT"),
+        message("user", "Check facts"),
+    ]);
     input.api_url = format!("http://{address}/v1/chat/completions");
     input.api_token = "test-token".to_string();
     input.stream = Some(false);
@@ -95,13 +99,29 @@ async fn web_switch_changes_real_requests_without_changing_stable_prefix_or_repl
                 index == 1
             );
         }
-        // This adapter renders non-stable RuntimeGuard context as a user-role request tail.
-        // Inspect the wire payload, not only the one stable system message.
+        // Inspect the actual wire payload: capability instructions are a request-only prelude,
+        // while disabling removes them without moving or replaying the causal tool timeline.
         let context = request["messages"].to_string();
         assert_eq!(context.contains("## 联网搜索"), index == 1);
         assert_eq!(context.contains("web_fetch 用于深读"), index == 1);
         assert_eq!(request["messages"][0], requests[0]["messages"][0]);
         assert!(!request.to_string().contains("unused-legacy-secret"));
+        for marker in ["WEB_LAYOUT_OLD_USER", "WEB_LAYOUT_OLD_ASSISTANT"] {
+            assert_eq!(context.matches(marker).count(), 1);
+        }
+        if index == 1 {
+            assert!(
+                context.find("## 联网搜索").unwrap() < context.find("WEB_LAYOUT_OLD_USER").unwrap()
+            );
+        }
+        assert!(
+            context.find("WEB_LAYOUT_OLD_USER").unwrap()
+                < context.find("WEB_LAYOUT_OLD_ASSISTANT").unwrap()
+        );
+        assert!(
+            context.find("WEB_LAYOUT_OLD_ASSISTANT").unwrap()
+                < context.find("Check facts").unwrap()
+        );
         let stable = tools
             .iter()
             .filter(|tool| {
@@ -133,4 +153,22 @@ async fn web_switch_changes_real_requests_without_changing_stable_prefix_or_repl
     assert!(final_messages
         .iter()
         .any(|message| message["content"] == "Inspecting the task."));
+    let context = requests[2]["messages"].to_string();
+    assert!(context.find("Check facts").unwrap() < context.find("Inspecting the task.").unwrap());
+    let late_call = final_messages
+        .iter()
+        .enumerate()
+        .find_map(|(index, message)| {
+            message["tool_calls"].as_array()?.iter().find_map(|call| {
+                (call["function"]["name"] == "web_search")
+                    .then(|| (index, call["id"].as_str().unwrap()))
+            })
+        })
+        .unwrap();
+    assert_runtime_owned_tool_call_id(late_call.1);
+    let result_index = final_messages
+        .iter()
+        .position(|message| message["role"] == "tool" && message["tool_call_id"] == late_call.1)
+        .unwrap();
+    assert!(late_call.0 < result_index);
 }

@@ -3308,18 +3308,33 @@ CREATE TABLE conversation_world_state_records (
                 length(CAST(result_revision AS BLOB)) BETWEEN 1 AND 256
             ),
             effective_before_message_id TEXT,
+            request_run_id TEXT,
+            request_assistant_message_id TEXT,
+            request_index INTEGER,
+            request_after_trace_sequence INTEGER,
+            model_observed INTEGER NOT NULL DEFAULT 1 CHECK (model_observed IN (0, 1)),
             record_json TEXT NOT NULL CHECK (
                 json_valid(record_json) AND length(trim(record_json)) > 0
             ),
             created_at INTEGER NOT NULL CHECK (created_at >= 0),
             UNIQUE (conversation_id, epoch_id, sequence),
             CHECK (
-                (record_kind = 'full' AND base_revision IS NULL)
+                (record_kind = 'full' AND base_revision IS NULL AND effective_before_message_id IS NULL)
                 OR (
                     record_kind = 'diff'
                     AND length(CAST(base_revision AS BLOB)) BETWEEN 1 AND 256
                 )
             ),
+            CHECK (
+                (request_run_id IS NULL AND request_assistant_message_id IS NULL
+                 AND request_index IS NULL AND request_after_trace_sequence IS NULL)
+                OR (record_kind = 'diff' AND effective_before_message_id IS NULL
+                    AND request_run_id IS NOT NULL AND length(trim(request_run_id)) > 0
+                    AND request_assistant_message_id IS NOT NULL
+                    AND request_index IS NOT NULL AND request_index >= 0
+                    AND (request_after_trace_sequence IS NULL OR request_after_trace_sequence >= 0))
+            ),
+            FOREIGN KEY (request_assistant_message_id) REFERENCES messages(id) ON DELETE CASCADE,
             FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE,
             FOREIGN KEY (conversation_id, epoch_id)
                 REFERENCES conversation_world_state_epochs(conversation_id, epoch_id)
@@ -3374,6 +3389,45 @@ CREATE TRIGGER rewind_conversation_world_state_after_record_delete
                     AND epoch_id = OLD.epoch_id
               );
         END;
+CREATE TABLE conversation_world_state_request_commits (
+            conversation_id TEXT NOT NULL,
+            run_id TEXT NOT NULL CHECK (length(trim(run_id)) > 0),
+            assistant_message_id TEXT NOT NULL,
+            request_index INTEGER NOT NULL CHECK (request_index >= 0),
+            after_trace_sequence INTEGER CHECK (after_trace_sequence IS NULL OR after_trace_sequence >= 0),
+            payload_json TEXT NOT NULL CHECK (json_valid(payload_json)),
+            epoch_id TEXT NOT NULL,
+            sequence INTEGER NOT NULL CHECK (sequence >= 0),
+            created_at INTEGER NOT NULL CHECK (created_at >= 0),
+            PRIMARY KEY (conversation_id, run_id, request_index),
+            FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE,
+            FOREIGN KEY (assistant_message_id) REFERENCES messages(id) ON DELETE CASCADE,
+            FOREIGN KEY (conversation_id, epoch_id, sequence)
+                REFERENCES conversation_world_state_records(conversation_id, epoch_id, sequence)
+                ON DELETE CASCADE
+        );
+CREATE TRIGGER validate_conversation_world_state_request_anchor_insert
+        BEFORE INSERT ON conversation_world_state_records
+        WHEN NEW.request_assistant_message_id IS NOT NULL
+          AND NOT EXISTS (
+              SELECT 1 FROM messages WHERE id = NEW.request_assistant_message_id
+                AND conversation_id = NEW.conversation_id AND role = 'assistant'
+          )
+        BEGIN
+            SELECT RAISE(ABORT, 'world state request anchor must be an assistant in the same conversation');
+        END;
+CREATE TRIGGER validate_conversation_world_state_request_anchor_update
+        BEFORE UPDATE OF conversation_id, request_assistant_message_id ON conversation_world_state_records
+        WHEN NEW.request_assistant_message_id IS NOT NULL
+          AND NOT EXISTS (
+              SELECT 1 FROM messages WHERE id = NEW.request_assistant_message_id
+                AND conversation_id = NEW.conversation_id AND role = 'assistant'
+          )
+        BEGIN
+            SELECT RAISE(ABORT, 'world state request anchor must be an assistant in the same conversation');
+        END;
+CREATE INDEX idx_conversation_world_state_request_anchor
+            ON conversation_world_state_records(request_assistant_message_id);
 CREATE TABLE agent_run_guidances (
             guidance_id TEXT PRIMARY KEY CHECK (length(trim(guidance_id)) > 0),
             client_message_id TEXT NOT NULL CHECK (length(trim(client_message_id)) > 0),

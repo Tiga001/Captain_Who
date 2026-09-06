@@ -4,6 +4,7 @@ mod checkpoint;
 mod command_dispatch;
 mod context_compaction;
 mod context_compaction_model;
+mod conversation_world_state;
 mod events;
 mod extensions;
 mod file_transactions;
@@ -16,6 +17,7 @@ mod world_state;
 
 pub use api::*;
 use command_dispatch::*;
+use conversation_world_state::*;
 use events::*;
 use preparation::*;
 use trace::*;
@@ -466,7 +468,7 @@ impl LlmRequestTemplate {
             max_tokens: self.max_tokens,
             temperature: self.temperature,
             stream: self.stream,
-            messages: context.into_messages(),
+            messages: context.into_model_request_messages(),
             tools,
         }
     }

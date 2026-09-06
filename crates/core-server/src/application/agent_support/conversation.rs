@@ -786,20 +786,9 @@ fn prepare_conversation_turn_from_source(
             } => Some(collaboration_identity.as_ref().clone()),
         },
     };
-    let world_state_records =
-        ensure_conversation_world_state(EnsureConversationWorldStateRequest {
-            storage,
-            conversation_id: &conversation_id,
-            effective_before_message_id: &user_message_id,
-            context: Some(&run_context),
-            prompt_preferences: Some(&prompt_preferences),
-            // World State is model-visible. Project the exact provider wire selection, never the
-            // Host-owned local configuration UUID stored on the conversation.
-            model_id: &model.provider_model_id,
-            model_capabilities,
-            active_summary: context_compaction_summary.as_ref(),
-            created_at: timestamp,
-        })?;
+    // Admission only reads history. The first actual sampling boundary atomically commits the
+    // baseline and capability projections from the same snapshot used for schemas and guidance.
+    let world_state_records = load_conversation_world_state(storage, &conversation_id)?;
 
     let mut agent_messages = history_messages;
     agent_messages.push(AgentChatMessage {

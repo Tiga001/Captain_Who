@@ -358,6 +358,26 @@ fn clone_world_state_records_for_history(
             .as_ref()
             .map(|message_id| mapped_id(history.message_id_map, message_id, "World State anchor"))
             .transpose()?;
+        let target_request_boundary = entry
+            .request_boundary
+            .as_ref()
+            .map(|boundary| {
+                Ok::<_, String>(crate::WorldStateRequestBoundary {
+                    assistant_message_id: mapped_id(
+                        history.message_id_map,
+                        &boundary.assistant_message_id,
+                        "World State request assistant",
+                    )?,
+                    run_id: mapped_id(
+                        history.id_replacements,
+                        &boundary.run_id,
+                        "World State request run",
+                    )?,
+                    request_index: boundary.request_index,
+                    after_trace_sequence: boundary.after_trace_sequence,
+                })
+            })
+            .transpose()?;
         let outcome = world_state_repository::append_record_in_connection(
             connection,
             &world_state_repository::ConversationWorldStateRecordWrite {
@@ -365,6 +385,8 @@ fn clone_world_state_records_for_history(
                 epoch_generation: 1,
                 base_summary_id: target_base_summary_id.as_deref(),
                 effective_before_message_id: target_anchor.as_deref(),
+                request_boundary: target_request_boundary.as_ref(),
+                model_observed: entry.model_observed,
                 record: &entry.record,
                 created_at: entry.created_at,
             },

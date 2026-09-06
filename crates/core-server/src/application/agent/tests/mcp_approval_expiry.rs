@@ -183,6 +183,7 @@ fn resume_checkpoint(
             pending_tool_call_id.as_str()
         ]),
         "providerContinuationRefs": [],
+        "conversationWorldStateRecords": [],
         "runWorldState": crate::test_run_world_state(),
         "pendingActionId": action_id,
         "pendingToolCallId": pending_tool_call_id,

@@ -1,5 +1,17 @@
 use super::*;
 
+fn preview_conversation_state(projection: &AgentContextWindowToolProjection) -> String {
+    WorldStateSnapshot::new(
+        "preview",
+        0,
+        projection.conversation_preview_sections().to_vec(),
+    )
+    .unwrap()
+    .model_projection(WorldStateLifetime::Conversation)
+    .unwrap()
+    .render_sanitized_text()
+}
+
 #[test]
 fn runtime_command_definition_is_fixed_while_dispatch_uses_current_permissions() {
     let definitions = [
@@ -151,16 +163,8 @@ fn run_context_changes_only_world_state_while_prompt_preferences_change_configur
         prepare_context_window_tool_projection(&baseline, &host_services, true).unwrap();
     let changed_projection =
         prepare_context_window_tool_projection(&changed_runtime, &host_services, true).unwrap();
-    let baseline_world_state = baseline_projection
-        .initial_run_world_state()
-        .model_projection(WorldStateLifetime::Run)
-        .unwrap()
-        .render_sanitized_text();
-    let changed_world_state = changed_projection
-        .initial_run_world_state()
-        .model_projection(WorldStateLifetime::Run)
-        .unwrap()
-        .render_sanitized_text();
+    let baseline_world_state = preview_conversation_state(&baseline_projection);
+    let changed_world_state = preview_conversation_state(&changed_projection);
     assert_ne!(baseline_world_state, changed_world_state);
     assert!(changed_world_state.contains("\"read\":\"all\""));
     assert!(baseline_world_state.contains("\"builtinExecution\":\"require_approval\""));
@@ -343,7 +347,7 @@ fn durable_conversation_sections_are_not_duplicated_in_run_world_state() {
 }
 
 #[test]
-fn settings_capability_changes_open_a_stable_epoch_but_secret_rotation_does_not() {
+fn settings_capability_changes_only_dynamic_contract_and_preserve_stable_epoch() {
     let input_with_search = |mode, key: Option<&str>| {
         let mut input = conversation_context_input(vec![message("user", "Find current evidence")]);
         input.search_config = Some(crate::protocol::AgentSearchConfig {
@@ -383,12 +387,17 @@ fn settings_capability_changes_open_a_stable_epoch_but_secret_rotation_does_not(
     assert!(!disabled.initial_tool_set.contains("web_fetch"));
     assert!(enabled_a.initial_tool_set.contains("web_search"));
     assert!(enabled_a.initial_tool_set.contains("web_fetch"));
-    assert_ne!(
+    assert_eq!(
         disabled.initial_tool_set.stable_revision(),
         enabled_a.initial_tool_set.stable_revision(),
-        "enabling a model-visible settings capability must open a new stable epoch"
+        "settings capabilities are dynamic and must preserve the stable tool prefix"
     );
     assert_ne!(
+        disabled.initial_tool_set.revision(),
+        enabled_a.initial_tool_set.revision(),
+        "the effective dynamic contract must still observe a capability change"
+    );
+    assert_eq!(
         conversation_context_configuration_revision(&disabled_input).unwrap(),
         conversation_context_configuration_revision(&enabled_a_input).unwrap()
     );
@@ -483,27 +492,15 @@ fn composer_permissions_do_not_change_stable_tools_but_denied_writes_still_fail(
         custom.initial_tool_set.stable_revision()
     );
     let host_services = AgentRuntimeHostServices::new();
-    let default_world_state =
-        prepare_context_window_tool_projection(&default_input, &host_services, true)
-            .unwrap()
-            .initial_run_world_state()
-            .model_projection(WorldStateLifetime::Run)
-            .unwrap()
-            .render_sanitized_text();
-    let full_world_state =
-        prepare_context_window_tool_projection(&full_input, &host_services, true)
-            .unwrap()
-            .initial_run_world_state()
-            .model_projection(WorldStateLifetime::Run)
-            .unwrap()
-            .render_sanitized_text();
-    let custom_world_state =
-        prepare_context_window_tool_projection(&denied_input, &host_services, true)
-            .unwrap()
-            .initial_run_world_state()
-            .model_projection(WorldStateLifetime::Run)
-            .unwrap()
-            .render_sanitized_text();
+    let default_world_state = preview_conversation_state(
+        &prepare_context_window_tool_projection(&default_input, &host_services, true).unwrap(),
+    );
+    let full_world_state = preview_conversation_state(
+        &prepare_context_window_tool_projection(&full_input, &host_services, true).unwrap(),
+    );
+    let custom_world_state = preview_conversation_state(
+        &prepare_context_window_tool_projection(&denied_input, &host_services, true).unwrap(),
+    );
     assert!(default_world_state.contains("\"builtinExecution\":\"require_approval\""));
     assert!(full_world_state.contains("\"builtinExecution\":\"auto_approve\""));
     assert!(custom_world_state.contains("\"builtinExecution\":\"auto_approve\""));

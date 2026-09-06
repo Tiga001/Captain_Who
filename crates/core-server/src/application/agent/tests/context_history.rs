@@ -34,15 +34,65 @@ fn prepared_turn_uses_backend_model_capabilities() {
     assert!(prepared.agent_input.model_capabilities.image_input);
 }
 
+/// Exercise the same bound Host port as sampling, independently of the model transport.
+fn commit_prepared_world_state(
+    service: &AgentService,
+    prepared: &mut crate::application::agent_support::PreparedConversationTurn,
+) {
+    let output = &prepared.output;
+    let before = load_conversation_world_state(&service.storage, &output.conversation_id).unwrap();
+    assert_eq!(
+        prepared.agent_input.world_state_records, before,
+        "admission only loads history"
+    );
+    let mut trace = mycopilot_core::ConversationTraceSnapshot::default().in_progress_trace(
+        &output.run_id,
+        &output.conversation_id,
+        &output.assistant_message_id,
+    );
+    service
+        .storage
+        .append_in_progress_conversation_turn_trace(&trace, 1, 1)
+        .unwrap();
+    let boundary = mycopilot_core::WorldStateRequestBoundary {
+        run_id: output.run_id.clone(),
+        assistant_message_id: output.assistant_message_id.clone(),
+        request_index: 1,
+        after_trace_sequence: None,
+    };
+    let host = service.conversation_world_state_host(
+        &prepared.agent_input,
+        &output.run_id,
+        &output.conversation_id,
+        &output.assistant_message_id,
+        &AgentCancellationToken::new(),
+    );
+    host.prepare_request(mycopilot_core::AgentConversationWorldStateRequest {
+        conversation_id: output.conversation_id.clone(),
+        boundary: boundary.clone(),
+        sections: Vec::new(),
+    })
+    .unwrap();
+    host.mark_request_observed(&boundary).unwrap();
+    prepared.agent_input.world_state_records =
+        load_conversation_world_state(&service.storage, &output.conversation_id).unwrap();
+    trace.terminal_status = ConversationTurnTraceTerminalStatus::Completed;
+    service
+        .storage
+        .replace_conversation_turn_trace(&trace, 1, 2)
+        .unwrap();
+}
+
 #[test]
 fn conversation_world_state_persists_exact_full_and_anchored_diff_across_turns() {
     let fixture = tempdir().unwrap();
-    let storage = StorageService::open(&fixture.path().join("storage.sqlite")).unwrap();
+    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let service = AgentService::new(storage.clone());
     let mut settings = test_model_settings();
     settings.models[0].provider_model_id = "provider-model-1".to_string();
     storage.save_model_settings(settings).unwrap();
 
-    let first = prepare_conversation_turn(
+    let mut first = prepare_conversation_turn(
         &storage,
         &SkillsService::new(),
         AgentConversationTurnInput {
@@ -64,6 +114,8 @@ fn conversation_world_state_persists_exact_full_and_anchored_diff_across_turns()
         "run-world-state-1",
     )
     .unwrap();
+    assert!(first.agent_input.world_state_records.is_empty());
+    commit_prepared_world_state(&service, &mut first);
     assert_eq!(first.agent_input.world_state_records.len(), 1);
     let mycopilot_core::WorldStateRecord::Full(first_snapshot) =
         &first.agent_input.world_state_records[0].record
@@ -88,7 +140,7 @@ fn conversation_world_state_persists_exact_full_and_anchored_diff_across_turns()
     assert!(!first_projection.contains("\"managedOffice\""));
     assert!(!first_projection.contains("\"shellCommand\""));
 
-    let second = prepare_conversation_turn(
+    let mut second = prepare_conversation_turn(
         &storage,
         &SkillsService::new(),
         AgentConversationTurnInput {
@@ -121,12 +173,22 @@ fn conversation_world_state_persists_exact_full_and_anchored_diff_across_turns()
     )
     .unwrap();
 
+    assert_eq!(
+        second.agent_input.world_state_records,
+        first.agent_input.world_state_records
+    );
+    commit_prepared_world_state(&service, &mut second);
     assert_eq!(second.agent_input.world_state_records.len(), 2);
     assert_eq!(
         second.agent_input.world_state_records[1]
-            .effective_before_message_id
-            .as_deref(),
-        Some("user-world-state-2")
+            .request_boundary
+            .as_ref(),
+        Some(&mycopilot_core::WorldStateRequestBoundary {
+            run_id: "run-world-state-2".into(),
+            assistant_message_id: "assistant-world-state-2".into(),
+            request_index: 1,
+            after_trace_sequence: None,
+        })
     );
     let mycopilot_core::WorldStateRecord::Diff(diff) =
         &second.agent_input.world_state_records[1].record
@@ -154,7 +216,8 @@ fn conversation_world_state_persists_exact_full_and_anchored_diff_across_turns()
 #[test]
 fn model_switch_appends_visible_selection_diffs_even_when_modalities_match() {
     let fixture = tempdir().unwrap();
-    let storage = StorageService::open(&fixture.path().join("storage.sqlite")).unwrap();
+    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let service = AgentService::new(storage.clone());
     let mut settings = test_model_settings();
     settings.models[0].provider_model_id = "provider-model-1".to_string();
     let mut alternate = settings.models[0].clone();
@@ -170,7 +233,7 @@ fn model_switch_appends_visible_selection_diffs_even_when_modalities_match() {
     storage.save_model_settings(settings).unwrap();
 
     let prepare = |model_id: &str, user_id: &str, assistant_id: &str, run_id: &str| {
-        prepare_conversation_turn(
+        let mut prepared = prepare_conversation_turn(
             &storage,
             &SkillsService::new(),
             AgentConversationTurnInput {
@@ -191,7 +254,9 @@ fn model_switch_appends_visible_selection_diffs_even_when_modalities_match() {
             },
             run_id,
         )
-        .unwrap()
+        .unwrap();
+        commit_prepared_world_state(&service, &mut prepared);
+        prepared
     };
 
     let first = prepare(
@@ -219,9 +284,14 @@ fn model_switch_appends_visible_selection_diffs_even_when_modalities_match() {
     };
     assert_eq!(
         second.agent_input.world_state_records[1]
-            .effective_before_message_id
-            .as_deref(),
-        Some("user-model-2")
+            .request_boundary
+            .as_ref(),
+        Some(&mycopilot_core::WorldStateRequestBoundary {
+            run_id: "run-model-2".into(),
+            assistant_message_id: "assistant-model-2".into(),
+            request_index: 1,
+            after_trace_sequence: None,
+        })
     );
     let second_projection = second_diff
         .model_projection_against(
@@ -252,9 +322,14 @@ fn model_switch_appends_visible_selection_diffs_even_when_modalities_match() {
     };
     assert_eq!(
         third.agent_input.world_state_records[2]
-            .effective_before_message_id
-            .as_deref(),
-        Some("user-model-vision")
+            .request_boundary
+            .as_ref(),
+        Some(&mycopilot_core::WorldStateRequestBoundary {
+            run_id: "run-model-vision".into(),
+            assistant_message_id: "assistant-model-vision".into(),
+            request_index: 1,
+            after_trace_sequence: None,
+        })
     );
     let third_projection = third_diff
         .model_projection_against(

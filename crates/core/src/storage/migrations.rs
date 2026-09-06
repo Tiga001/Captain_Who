@@ -1,13 +1,13 @@
 use rusqlite::{ffi, Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
 
-pub const STORAGE_SCHEMA_VERSION: i32 = 39;
+pub const STORAGE_SCHEMA_VERSION: i32 = 40;
 pub const DEVELOPMENT_STORAGE_SCHEMA_RESET_REQUIRED: &str =
     "development_storage_schema_reset_required";
 
 const CANONICAL_SCHEMA: &str = include_str!("canonical_schema.sql");
 const CANONICAL_SCHEMA_FINGERPRINT: &str =
-    "sha256:993ab20442c1e258798e8d07bec6922cc46d11bf6a633ceb3cac2a6b80b23078";
+    "sha256:2df6952791a7a8fe0b8c2c962281b39158d5e8b84b18c60cee66994909a5b8b6";
 /// Opens the canonical schema without migrating historical development databases.
 ///
 /// A brand-new database is initialized atomically. Existing development databases must already
@@ -653,7 +653,7 @@ CREATE TABLE model_provider_credential_cleanup (
             .contains(DEVELOPMENT_STORAGE_SCHEMA_RESET_REQUIRED));
         assert!(error
             .to_string()
-            .contains("expected schema version 39, found 30"));
+            .contains("expected schema version 40, found 30"));
         assert_eq!(read_schema_version(&connection).unwrap(), 30);
         assert_eq!(schema_fingerprint(&connection).unwrap(), fingerprint_before);
         let columns = connection
@@ -702,6 +702,10 @@ CREATE TABLE model_provider_credential_cleanup (
             .any(|column| column == "normalized_display_name"));
 
         for required_object in [
+            "conversation_world_state_request_commits",
+            "validate_conversation_world_state_request_anchor_insert",
+            "validate_conversation_world_state_request_anchor_update",
+            "idx_conversation_world_state_request_anchor",
             "models",
             "agent_templates",
             "project_agent_template_bindings",

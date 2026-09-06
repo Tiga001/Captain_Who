@@ -384,7 +384,7 @@ async fn model_activation_preserves_exposed_siblings_and_discloses_new_tools_nex
     );
     assert!(
         context_window_snapshots[1].input_tokens > context_window_snapshots[0].input_tokens,
-        "the post-activation request must account for the paired ToolResult, full Skill instructions, tools.effective World State diff and unlocked Tool schemas"
+        "the post-activation request must account for the paired ToolResult, full Skill instructions, Skill activation state and unlocked Tool schemas"
     );
     drop(context_window_snapshots);
     let activation_call_id = output
@@ -1326,7 +1326,7 @@ async fn anthropic_payload_keeps_current_user_skill_and_attachment_compatible() 
     let current = serialized.find("CURRENT_USER_MARKER").unwrap();
     let skill = serialized.find("ANTHROPIC_SKILL_MARKER").unwrap();
     let attachment = serialized.find("ATTACHMENT_MARKER").unwrap();
-    assert!(current < attachment && attachment < skill);
+    assert!(skill < current && current < attachment);
 }
 
 #[test]

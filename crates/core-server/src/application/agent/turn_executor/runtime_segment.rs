@@ -432,6 +432,13 @@ impl AgentService {
             })
             .flatten();
         let mut host_services = AgentRuntimeHostServices::new()
+            .with_conversation_world_state(self.conversation_world_state_host(
+                &agent_input,
+                &run_id,
+                &conversation_id,
+                &assistant_message_id,
+                &cancellation_token,
+            ))
             .with_web_search_policy(self.web_search_policy_source())
             .with_host_actions(host_executor, self.storage.clone())
             .with_command_session_executor(Arc::new(self.command_sessions.clone()))

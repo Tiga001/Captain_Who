@@ -32,6 +32,7 @@ mod collaboration_harness;
 mod command_sessions;
 mod context_history;
 mod context_runtime;
+mod conversation_world_state;
 mod deletion;
 mod file_change_permissions;
 mod file_change_source_boundary;
@@ -46,7 +47,6 @@ mod mcp_approval_expiry;
 mod mcp_approval_lifecycle;
 mod office;
 mod pending_actions;
-mod web_search_policy;
 mod provider_profiles;
 mod provider_runtime_capability_boundary;
 mod provider_transition;
@@ -55,6 +55,8 @@ mod staged_file_change_execution;
 mod steering;
 mod terminal_events;
 mod usage_lifecycle;
+mod web_search_policy;
+mod world_state_compaction_boundary;
 
 fn completed_output_for_terminal_gate() -> AgentChatOutput {
     AgentChatOutput {

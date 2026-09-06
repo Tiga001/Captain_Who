@@ -73,10 +73,10 @@ impl RuntimeExtension for WebSearchExtension {
             ContextSource::RuntimeGuard,
             ContextScope::Run,
             ContextRetention::RequestOnly,
-        )])
+        ).with_source(ContextSource::CapabilityInstructions)])
     }
 
-    fn world_state_sections(&self) -> AgentResult<Vec<WorldStateSectionEnvelope>> {
+    fn conversation_world_state_sections(&self) -> AgentResult<Vec<WorldStateSectionEnvelope>> {
         let reason = match self.request {
             None => "host_unavailable",
             Some(snapshot) if !snapshot.enabled => "disabled_by_user",
@@ -87,7 +87,7 @@ impl RuntimeExtension for WebSearchExtension {
         Ok(vec![WorldStateSectionEnvelope::model_visible(
             WorldStateSectionId::extension(WEB_SEARCH_EXTENSION_ID)
                 .map_err(|error| AgentError::new(error.to_string()))?,
-            WorldStateLifetime::Run,
+            WorldStateLifetime::Conversation,
             state.clone(),
             state,
         )
@@ -188,7 +188,7 @@ mod tests {
         assert!(!off.contains("web_search"));
         assert!(!off.contains("web_fetch"));
         assert_eq!(
-            extension.world_state_sections().unwrap()[0].state["reason"],
+            extension.conversation_world_state_sections().unwrap()[0].state["reason"],
             "disabled_by_user"
         );
         assert!(extension
@@ -225,7 +225,7 @@ mod tests {
             .unwrap()
             .is_empty());
         assert_eq!(
-            extension.world_state_sections().unwrap()[0].state["reason"],
+            extension.conversation_world_state_sections().unwrap()[0].state["reason"],
             "available"
         );
         assert_eq!(source.reads.load(Ordering::SeqCst), 2);
@@ -260,7 +260,7 @@ mod tests {
         extension.prepare_model_request().unwrap();
         assert!(!extension.available());
         assert_eq!(
-            extension.world_state_sections().unwrap()[0].state["reason"],
+            extension.conversation_world_state_sections().unwrap()[0].state["reason"],
             "configuration_required"
         );
         source.fail_read.store(true, Ordering::SeqCst);
@@ -271,7 +271,7 @@ mod tests {
             .unwrap()
             .is_empty());
         assert_eq!(
-            extension.world_state_sections().unwrap()[0].state["reason"],
+            extension.conversation_world_state_sections().unwrap()[0].state["reason"],
             "host_unavailable"
         );
     }

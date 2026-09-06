@@ -775,7 +775,7 @@ fn rebase_active_world_state_for_summary(
             conversation_id: &summary.conversation_id,
             expected_source_epoch_id: &active_snapshot.epoch_id,
             expected_source_revision: &active_snapshot.revision,
-            covered_through_message_id: summary.covered_through.message_id(),
+            covered_through: &summary.covered_through,
             new_epoch_id: &new_epoch_id,
             base_summary_id: &summary.id,
             created_at: summary.created_at,

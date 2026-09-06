@@ -28,6 +28,7 @@ impl AgentRuntime {
         host_services: Option<AgentRuntimeHostServices>,
     ) -> AgentResult<AgentChatOutput> {
         let AgentRuntimeHostServices {
+            conversation_world_state,
             web_search_policy,
             host_executor,
             storage,
@@ -52,6 +53,7 @@ impl AgentRuntime {
             automation_report_sink,
             human_interaction_policy,
             human_interaction_runtime,
+            human_interaction_preview_readiness: _,
             user_input_resume,
         } = host_services.unwrap_or_default();
         let _steer_input_close_guard = AgentSteerInputCloseGuard::new(steer_input.clone());
@@ -297,6 +299,13 @@ impl AgentRuntime {
             .as_ref()
             .map(|checkpoint| Arc::clone(&checkpoint.file_observations))
             .unwrap_or_else(|| Arc::new(crate::file_change::FileObservationRegistry::default()));
+        if let Some(restored) = restored_checkpoint.as_ref() {
+            // The canonical ledger travels with the checkpoint; rendered state text is never
+            // parsed back into authority, and the original admission input may now be stale.
+            input.world_state_records =
+                restored.context.conversation_world_state_records().to_vec();
+        }
+        let mut memory_conversation_world_state = MemoryConversationWorldState::new(&input)?;
         let PreparedLlmRequest {
             template: llm_request,
             context: mut active_context,
@@ -322,13 +331,19 @@ impl AgentRuntime {
         })?;
         if !resumed_world_state_epoch {
             if let Some(services) = agent_collaboration.as_ref() {
-                active_context.push(ContextItem::text(
-                    LlmMessageRole::System,
-                    collaboration_harness_section(&services.caller, &services.selector_directory),
-                    ContextSource::RuntimeGuard,
-                    ContextScope::Run,
-                    ContextRetention::Retained,
-                ));
+                active_context.push(
+                    ContextItem::text(
+                        LlmMessageRole::System,
+                        collaboration_harness_section(
+                            &services.caller,
+                            &services.selector_directory,
+                        ),
+                        ContextSource::RuntimeGuard,
+                        ContextScope::Run,
+                        ContextRetention::Retained,
+                    )
+                    .with_source(ContextSource::RunBootstrap),
+                );
             }
         }
         let provider_runtime_capabilities = resolve_provider_runtime_capabilities(
@@ -600,12 +615,39 @@ impl AgentRuntime {
                         ));
                     }
                     tool_definitions = effective_tool_set.all_definitions();
+                    let world_state_boundary = crate::WorldStateRequestBoundary {
+                        run_id: run_id.clone(),
+                        assistant_message_id: trace_assistant_message_id.clone()
+                            .unwrap_or_else(|| format!("{run_id}:assistant")),
+                        request_index: u64::try_from(model_request_index + 1)
+                            .map_err(|_| AgentError::new("World State request index overflow."))?,
+                        after_trace_sequence: conversation_trace.lock()
+                            .unwrap_or_else(|e| e.into_inner()).checkpoint_snapshot().items.iter()
+                            .filter(|item| item.is_model_visible() && item.is_safe_compaction_boundary())
+                            .map(|item| item.sequence()).max(),
+                    };
+                    let conversation_sections = runtime_extensions.conversation_world_state_sections()?;
+                    let conversation_records = match conversation_world_state.as_ref() {
+                        Some(host) => host.prepare_request(AgentConversationWorldStateRequest {
+                            conversation_id: trace_conversation_id.clone().ok_or_else(||
+                                AgentError::new("Durable World State requires a conversation identity."))?,
+                            boundary: world_state_boundary.clone(),
+                            sections: conversation_sections,
+                        })?,
+                        None => memory_conversation_world_state.prepare(&world_state_boundary, conversation_sections)?,
+                    };
+                    active_context.sync_conversation_world_state_records(&conversation_records, true)?;
                     if let Some(world_state_diff) = run_world_state.reconcile(
                         &effective_tool_set,
                         runtime_extensions.world_state_sections()?,
                         run_context.as_ref(),
                     )? {
-                        active_context.push(world_state_diff);
+                        if model_request_index != 0 || resumed_world_state_epoch {
+                            active_context.push(world_state_diff);
+                        }
+                    }
+                    if model_request_index == 0 && !resumed_world_state_epoch {
+                        active_context.replace_initial_run_world_state(run_world_state.snapshot())?;
                     }
                     if effective_tool_set.revision() != emitted_tool_set_revision {
                         event_stream.emit(AgentEvent::ToolSetChanged {
@@ -785,6 +827,11 @@ impl AgentRuntime {
                                                 );
                                                 active_context = (*baseline)
                                                     .replace_compacted_model_history(active_context);
+                                                if conversation_world_state.is_none() {
+                                                    memory_conversation_world_state.adopt_compacted_records(
+                                                        active_context.conversation_world_state_records(),
+                                                    )?;
+                                                }
                                                 detector.prepare_frame(&mut active_context);
                                                 publish_trace_snapshot(
                                                     &conversation_trace,
@@ -1079,6 +1126,13 @@ impl AgentRuntime {
                         llm_response.usage,
                         provider_runtime_capabilities.usage(),
                     );
+                    if let Some(host) = conversation_world_state.as_ref() {
+                        host.mark_request_observed(&world_state_boundary)
+                            .map_err(|error| error.with_usage(usage.clone()).with_model_request_interruption())?;
+                    } else {
+                        memory_conversation_world_state.mark_observed();
+                    }
+                    active_context.mark_conversation_world_state_observed();
                     finish_reason = llm_response.finish_reason;
                     let mut assistant_turn = llm_response.assistant_turn;
 

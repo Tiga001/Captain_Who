@@ -390,6 +390,7 @@ pub(super) fn build_llm_request(
                     tool_definitions,
                 )?,
             };
+            context.mark_initial_run_input();
             append_automation_execution_context(
                 &mut context,
                 automation_execution_context.as_ref(),
@@ -447,7 +448,8 @@ pub(super) fn append_attachment_context(
             ContextSource::InputAttachment,
             ContextScope::Run,
             ContextRetention::Retained,
-        ),
+        )
+        .with_source(ContextSource::RunBootstrap),
     ));
 }
 

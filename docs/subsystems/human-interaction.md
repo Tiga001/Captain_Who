@@ -49,6 +49,16 @@ last_verified: 2026-09-06
 子 Agent/Automation 身份。未完成执行链路时 execution readiness 关闭，即使设置开启也不得向
 真实模型提供不可执行的 Schema 或专项提示词。设置开关与实现 readiness 是不同事实。
 
+根智能体的 `human.interaction` World State section 始终保留精简模型投影
+`{available, reason}`。开启且至少一项执行链路就绪时为 `available`；用户关闭时为
+`disabled_by_user`；Host 策略读失败或快照无效时为 `host_unavailable`；设置开启但
+执行链路均未就绪时为 `execution_unavailable`。关闭后的下一次自然模型请求同时卸载
+两工具 Schema 和专项说明，并通过持久 Conversation World State diff 替换能力事实；不会为了
+通知开关变化触发额外请求。`policyRevision`、策略可读性与同步/异步 readiness
+仍只保留在 Host state，不进入模型投影，同一选择的 revision 更新不产生模型可见 diff。
+子 Agent 和无人值守 Automation 仍不挂载该扩展，历史 section 或恢复快照不授予能力。
+这些状态只描述新提问能力，不改变已接纳批次的提交、忽略或原工具结果恢复规则。
+
 工具描述区分“必须等待用户参与才可继续”和“仍有独立工作可做”。能够自行处理的事情自行处理，
 需要用户独有信息、判断或实际协助时清楚请求。回应必须结合原交互含义解释，偏好不是授权，意向不是行动结果，
 用户陈述不能写成智能体执行或验证所得的事实；拒绝、跳过、忽略和沉默均不表示同意或请求事项已发生。交互不能替代正式权限审批。
@@ -72,6 +82,12 @@ last_verified: 2026-09-06
 - `cargo test --locked -p mycopilot-core prompts::tests --lib`：18 项通过，通用交互规则不再限于缺失信息，且不硬编码动态工具名。
 - 首次编译被联网扩展测试访问私有字段阻挡；仅将该测试改用现有 ContextFrame 投影和 AgentError 访问接口，联网执行行为未改。`cargo test --locked -p mycopilot-core runtime::extensions::web_search --lib`：4 项通过。
 - `cargo clippy --locked -p mycopilot-core --lib --tests -- -D warnings`、本次提示词 Rust 文件的 rustfmt、开发/用户文档及 diff whitespace 检查通过。未调用商业模型、未修改数据库版本或重置数据；测试验证提示词传递与契约，未将其表述为商业模型行为评测。
+
+### 关闭状态投影补齐验证（2026-09-06）
+
+- `cargo test --locked -p mycopilot-core --lib human_interaction`：78 项通过。新增真实 `EffectiveToolSet` 与 `WorldStateDiff` 联合测试，验证同请求冻结、关闭后两工具与专项说明撤下、模型获得 `disabled_by_user` replacement，以及同值设置 revision 更新只留 Host、不产生模型 diff。原有根/所有子级/Automation、暂停恢复、存储结算和投递回归通过。
+- Core Server 定向用例 `disabled_host_setting_still_delivers_previously_admitted_sync_and_async_answers` 与 `live_host_setting_close_rejects_in_flight_model_questions_then_reopens_next_snapshot` 各 1 项通过，覆盖真实 Host/Harness、本地可控 Provider、关闭后的同步原调用恢复与异步回答投递，以及迟到新调用拒绝、下一快照重新开启。
+- 人机扩展 Rust 格式、本文 Prettier 和定向 diff whitespace 检查通过。未改数据库 schema、未重置实际数据，未使用商业模型。
 
 ## 数据与状态
 
@@ -136,9 +152,9 @@ Fork 只复制边界内历史，不复制活跃提问权限和投递任务；异
 不新增旧数据迁移 SQL，不提供旧 checkpoint/resume envelope 兼容。新版本自身的持久化、
 重启恢复与防重仍必须实现。测试使用临时数据库，不清空真实开发数据或凭据。
 
-Canonical SQLite 版本为 v39。正常打开旧库只返回 reset-required，不改写旧库。
-受管 reset 可从受支持的 exact 旧指纹读取配置白名单后新建 v39，丢弃聊天/运行历史，保留模型配置和凭据
-引用；受支持的 exact v36/v37/v38 与 current v39 reset 还保留人机交互设置及 revision。无法安全识别且含配置的旧库拒绝
+Canonical SQLite 当前版本为 v40。正常打开旧库只返回 reset-required，不改写旧库。
+受管 reset 可从受支持的 exact 旧指纹读取配置白名单后新建 v40，丢弃聊天/运行历史，保留模型配置和凭据
+引用；受支持的 exact v36/v37/v38/v39 与 current v40 reset 还保留人机交互设置及 revision。无法安全识别且含配置的旧库拒绝
 重置，不能默默用默认值替换配置。既有 exact v33 私有备份配置恢复仍受 fingerprint 限制。
 
 ## 代码接续入口
@@ -206,7 +222,7 @@ Settings 默认为开启，但生产 `executionReady` 固定关闭，两个工�
 
 - `AgentHumanInteractionRuntimeHost::suspend` 接受 Runtime 生成的 native `AgentUserInputSuspension`。
   driver 识别内部 `Suspended`，冻结原调用、前序结果、后序队列、Provider continuation 引用、模型上下文、World State 与扩展。
-  Host 在同一写事务保存问题、v14 检查点的 allowlist 信封、累计用量及 `waiting_for_user_input`；成功后才通知用户。
+  Host 在同一写事务保存问题、v15 检查点的 allowlist 信封、累计用量及 `waiting_for_user_input`；成功后才通知用户。
 - Host 执行 segment 退出并释放执行许可、模型调用与引导队列。Conversation 的 in-progress trace 和逻辑 Run 身份继续占用聊天。
   根聊天不能借此开始新 Run、切换模型、手动压缩或分支。子 Agent 和无人值守 Automation 没有同步工具或 native 执行入口。
 - 提交仅形成一条不可变 Response。Host 在提交完成、旧 segment 退出及启动时事件驱动扫描待投递事实，不轮询人类。
@@ -229,7 +245,7 @@ Settings 默认为开启，但生产 `executionReady` 固定关闭，两个工�
 启动发现已进入执行但没有可靠后继检查点或终态原结果证明时保守失败，不自动重跑工具或结果未知的模型请求。
 已有后继审批/同步检查点或终态中精确匹配的 ToolResult 时按事实结算。停止围栏优先于迟到回答和领取。
 
-恢复信封沿用 `PersistedAgentResumeInput` v11 的显式字段白名单，内部 checkpoint 只接受 v14。
+恢复信封沿用 `PersistedAgentResumeInput` v12 的显式字段白名单，内部 checkpoint 只接受 v15。
 API token、带秘密的 endpoint、不可持久化 MCP 原始参数不进入新表；恢复时校验冻结 Provider 身份后才重新读取凭据。
 文件事务和 MCP 的已有安全约束继续有效：若剩余工具无法通过现有安全检查点规则保存，问题发布前拒绝本次暂停，返回失败工具结果，不存原始私有参数。
 未完成的文件事务保持原有只允许对应提交工具的边界。
@@ -590,3 +606,7 @@ Canonical schema 升为 **v39**，fingerprint 为 `sha256:993ab20442c1e258798e8d
 同步恢复将回答写入检查点和 trace，但原调用的 ToolResult 不一定先以 live 事件到达 Renderer。此前 Request 已提交而 ToolResult 未到时，展示兜底把用户答案追加在 assistant timeline 末尾；新 delta 加入后就被排在答案前，终态读取工具结果后又恢复正确顺序。现在同一 request/run/assistant/toolCall 绑定下，已接纳的同步答案立即占据原调用的 trace 位置；后到 ToolResult 继续使用相同展示 ID，不移动或重复气泡。此变更只作用于展示副本，不创建模型 User 输入或第二个工具结果。
 
 两个新增单测在修复前复现了“正文 → 续写 → 答案”的错误顺序。修复后相关单元 19 项、浏览器 22 项通过，覆盖回答回执早于/晚于续写、多个 delta、stream commit、done、持久化重载及单气泡；Web 类型和定向格式/ESLint 检查通过。
+
+### 2026-09-06：能力状态跨 Run 延续
+
+`human.interaction` 与 `web.search`、浏览器用户开关进入 Conversation World State；实际本任务浏览器激活、Skill 和附件状态仍为 Run。根身份与执行就绪度仍由 Host 判断，关闭开关或恢复旧历史不会授予子 Agent 提问权限。模型请求边界从同一能力快照生成工具、指南和状态，保存精确请求锚点及观察状态。同步暂停的 checkpoint v15 带 canonical Conversation 日志，恢复信封为 v12；原回答的唯一 ToolResult 与异步用户投递语义不变。当前 canonical schema 为 v40，受管开发 reset 新增 exact v39 配置提取，保留凭据引用与人机交互 revision；无需旧聊天迁移。

@@ -16,6 +16,7 @@ use std::sync::Arc;
 
 mod checkpoint;
 mod measurement_state;
+mod request_layout;
 
 pub(crate) use checkpoint::*;
 pub(crate) use measurement_state::*;
@@ -61,10 +62,10 @@ pub(crate) enum ContextUsageClass {
     RequestOnly,
 }
 
-/// Physical cache band for one provider-neutral context item.
+/// Canonical journal band for one provider-neutral context item.
 ///
-/// Bands are ordered from the longest-lived prefix to the most volatile suffix. A valid request
-/// may append within the same band or advance to a later band, but must never move backwards.
+/// Journal/checkpoint assembly advances through these bands without moving backwards.
+/// Provider request placement is a separate projection in `request_layout`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum ContextCacheBand {
     StableContract,
@@ -116,6 +117,9 @@ pub(crate) enum ContextSource {
     ConversationSummary,
     WorldStateSnapshot,
     WorldStateDiff,
+    /// A committed request-boundary observation which has not yet been adopted by a successful
+    /// model request. Conversation ownership alone must not make this active overlay durable.
+    WorldStateUnobserved,
     ConversationHistory,
     ConversationTrace,
     CurrentTurn,
@@ -130,6 +134,11 @@ pub(crate) enum ContextSource {
     RuntimeTodo,
     FileTransaction,
     RuntimeGuard,
+    /// Placement-only tags. They do not change role, lifetime, retention or authority.
+    RunBootstrap,
+    RunInput,
+    RunTimeline,
+    CapabilityInstructions,
     CompactionRequest,
 }
 
@@ -141,6 +150,7 @@ impl ContextSource {
             Self::ConversationSummary => "conversation_summary",
             Self::WorldStateSnapshot => "world_state_snapshot",
             Self::WorldStateDiff => "world_state_diff",
+            Self::WorldStateUnobserved => "world_state_unobserved",
             Self::ConversationHistory => "conversation_history",
             Self::ConversationTrace => "conversation_trace",
             Self::CurrentTurn => "current_turn",
@@ -155,6 +165,10 @@ impl ContextSource {
             Self::RuntimeTodo => "runtime_todo",
             Self::FileTransaction => "file_transaction",
             Self::RuntimeGuard => "runtime_guard",
+            Self::RunBootstrap => "run_bootstrap",
+            Self::RunInput => "run_input",
+            Self::RunTimeline => "run_timeline",
+            Self::CapabilityInstructions => "capability_instructions",
             Self::CompactionRequest => "compaction_request",
         }
     }
@@ -166,6 +180,7 @@ impl ContextSource {
             "conversation_summary" => Some(Self::ConversationSummary),
             "world_state_snapshot" => Some(Self::WorldStateSnapshot),
             "world_state_diff" => Some(Self::WorldStateDiff),
+            "world_state_unobserved" => Some(Self::WorldStateUnobserved),
             "conversation_history" => Some(Self::ConversationHistory),
             "conversation_trace" => Some(Self::ConversationTrace),
             "current_turn" => Some(Self::CurrentTurn),
@@ -180,6 +195,10 @@ impl ContextSource {
             "runtime_todo" => Some(Self::RuntimeTodo),
             "file_transaction" => Some(Self::FileTransaction),
             "runtime_guard" => Some(Self::RuntimeGuard),
+            "run_bootstrap" => Some(Self::RunBootstrap),
+            "run_input" => Some(Self::RunInput),
+            "run_timeline" => Some(Self::RunTimeline),
+            "capability_instructions" => Some(Self::CapabilityInstructions),
             "compaction_request" => Some(Self::CompactionRequest),
             _ => None,
         }
@@ -346,6 +365,8 @@ pub(crate) struct ContextMetadata {
     retention: ContextRetention,
     group: Option<ContextGroup>,
     origin: Option<ContextOrigin>,
+    /// Provider-layout sequence within the current run; never changes journal chronology.
+    request_order: Option<u64>,
 }
 
 impl ContextMetadata {
@@ -360,6 +381,7 @@ impl ContextMetadata {
             retention,
             group: None,
             origin: None,
+            request_order: None,
         }
     }
 
@@ -378,6 +400,15 @@ impl ContextMetadata {
     pub(crate) fn with_origin(mut self, origin: ContextOrigin) -> Self {
         self.origin = Some(origin);
         self
+    }
+
+    pub(crate) fn with_request_order(mut self, order: u64) -> Self {
+        self.request_order = Some(order);
+        self
+    }
+
+    pub(crate) fn request_order(&self) -> Option<u64> {
+        self.request_order
     }
 
     fn replace_source(&mut self, from: ContextSource, to: ContextSource) {
@@ -417,6 +448,9 @@ impl ContextMetadata {
         if self.sources.contains(&ContextSource::BackendSystemPrompt) {
             return ContextUsageClass::Fixed;
         }
+        if self.sources.contains(&ContextSource::WorldStateUnobserved) {
+            return ContextUsageClass::RunTransient;
+        }
         match self.scope {
             ContextScope::Conversation => ContextUsageClass::Durable,
             ContextScope::Run => ContextUsageClass::RunTransient,
@@ -435,6 +469,12 @@ impl ContextMetadata {
                 && matches!(self.scope, ContextScope::Conversation)
         {
             return ContextCacheBand::ConversationEpochPrelude;
+        }
+        // A durable conversation observation can be discovered in the middle of a running
+        // exchange. Its journal placement follows that run, independently from its ownership
+        // and whether the request has adopted the observation yet.
+        if self.sources.contains(&ContextSource::RunTimeline) {
+            return ContextCacheBand::RunTimeline;
         }
         match self.scope {
             ContextScope::Conversation => ContextCacheBand::DurableTimeline,
@@ -473,6 +513,20 @@ struct ContextItemMeasurement {
 }
 
 impl ContextItem {
+    pub(crate) fn metadata(&self) -> &ContextMetadata {
+        &self.metadata
+    }
+
+    pub(crate) fn with_origin(mut self, origin: ContextOrigin) -> Self {
+        self.metadata = self.metadata.with_origin(origin);
+        self
+    }
+
+    pub(crate) fn with_source(mut self, source: ContextSource) -> Self {
+        self.metadata = self.metadata.with_source(source);
+        self
+    }
+
     pub(crate) fn new(mut message: LlmMessage, metadata: ContextMetadata) -> Self {
         message.set_placement(metadata.message_placement());
         Self {
@@ -646,6 +700,10 @@ fn context_item_revision(item: &ContextItem) -> u64 {
     }
     hasher.write_str(item.metadata.scope().as_str());
     hasher.write_str(item.metadata.retention().as_str());
+    if let Some(order) = item.metadata.request_order() {
+        hasher.write_str("request_order");
+        hasher.write_u64(order);
+    }
     if let Some(group) = item.metadata.group() {
         hasher.write_str(group.id());
         hasher.write_str(group.kind().as_str());
@@ -659,3 +717,6 @@ fn context_item_revision(item: &ContextItem) -> u64 {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod compaction_layout_tests;

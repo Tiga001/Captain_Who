@@ -609,6 +609,7 @@ pub(super) fn create_run_checkpoint_with_file_observations(
         assistant_turn_identity,
         provider_continuation_refs,
         run_world_state: run_world_state.clone(),
+        conversation_world_state_records: context.conversation_world_state_records().to_vec(),
         pending_action_id: None,
         file_change_run_grant_ref: None,
         pending_file_observation: pending_file_observation.cloned(),

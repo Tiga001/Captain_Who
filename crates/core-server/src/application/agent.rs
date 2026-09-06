@@ -128,6 +128,7 @@ mod command_sessions;
 mod completion;
 mod context_compaction;
 mod context_window;
+mod conversation_world_state;
 mod human_root_notifications;
 mod manual_context_compaction;
 mod pending_action_store;

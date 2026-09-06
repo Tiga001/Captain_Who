@@ -1,9 +1,10 @@
 use super::*;
 use crate::context::ContextOrigin;
 use crate::world_state::{
-    effective_permissions_section, interaction_profile_section, model_capabilities_section,
-    model_selection_section, workspace_binding_section, WorldStateDiff, WorldStateLifetime,
-    WorldStateRecord, WorldStateSectionEnvelope, WorldStateSectionId, WorldStateSnapshot,
+    effective_permissions_section, environment_section, interaction_profile_section,
+    model_capabilities_section, model_selection_section, workspace_binding_section, WorldStateDiff,
+    WorldStateLifetime, WorldStateRecord, WorldStateSectionEnvelope, WorldStateSectionId,
+    WorldStateSnapshot,
 };
 
 /// Exact run-scoped World State ledger used by the active tool loop.
@@ -32,6 +33,7 @@ impl RunWorldStateTracker {
         tool_set: &EffectiveToolSet,
         extension_sections: Vec<WorldStateSectionEnvelope>,
     ) -> AgentResult<Self> {
+        validate_run_sections(&extension_sections)?;
         let current = WorldStateSnapshot::new(
             epoch_id,
             0,
@@ -52,6 +54,7 @@ impl RunWorldStateTracker {
         epoch_id: impl Into<String>,
         snapshot: &WorldStateSnapshot,
     ) -> AgentResult<Self> {
+        validate_run_sections(&snapshot.sections)?;
         snapshot
             .model_projection(WorldStateLifetime::Run)
             .map_err(world_state_error)?;
@@ -118,6 +121,7 @@ impl RunWorldStateTracker {
         extension_sections: Vec<WorldStateSectionEnvelope>,
         run_context: Option<&AgentRunContext>,
     ) -> AgentResult<Option<ContextItem>> {
+        validate_run_sections(&extension_sections)?;
         let dynamic_ids = [
             WorldStateSectionId::EffectiveTools,
             WorldStateSectionId::SkillActivation,
@@ -155,6 +159,18 @@ impl RunWorldStateTracker {
         self.current = target;
         Ok(visible.map(|projection| world_state_diff_context_item(diff, projection)))
     }
+}
+
+fn validate_run_sections(sections: &[WorldStateSectionEnvelope]) -> AgentResult<()> {
+    if sections
+        .iter()
+        .any(|section| section.lifetime != WorldStateLifetime::Run)
+    {
+        return Err(AgentError::new(
+            "Run World State 不接受会话生命周期的状态。",
+        ));
+    }
+    Ok(())
 }
 
 fn run_world_state_sections(
@@ -210,13 +226,6 @@ fn run_world_state_sections(
         sections.push(section);
     }
 
-    // Direct library callers and a brand-new context preview may not have a backend conversation
-    // ledger. Preserve a complete runtime contract in that compatibility path without duplicating
-    // durable conversation sections for normal core-server runs.
-    if input.world_state_records.is_empty() {
-        sections.extend(fallback_conversation_sections(input)?);
-    }
-
     Ok(sections)
 }
 
@@ -259,51 +268,15 @@ fn effective_tools_section(tool_set: &EffectiveToolSet) -> AgentResult<WorldStat
         "stableTools": stable_tools,
         "dynamicTools": dynamic_tools,
     });
-    let projection = json!({
-        "stableTools": stable_tools,
-        "dynamicTools": dynamic_tools,
-    });
-    WorldStateSectionEnvelope::model_visible(
+    WorldStateSectionEnvelope::host_only(
         WorldStateSectionId::EffectiveTools,
         WorldStateLifetime::Run,
         state,
-        projection,
     )
     .map_err(world_state_error)
 }
 
-/// Renders the same provider-neutral World State diff that the runtime will append after a dynamic
-/// Tool capability change. Capacity reservation must price this message rather than a parallel
-/// availability notice with independent wording.
-pub(super) fn effective_tools_transition_message(
-    current_tool_set: &EffectiveToolSet,
-    projected_tool_set: &EffectiveToolSet,
-) -> AgentResult<Option<LlmMessage>> {
-    let current = WorldStateSnapshot::new(
-        "tool-capacity-projection",
-        0,
-        vec![effective_tools_section(current_tool_set)?],
-    )
-    .map_err(world_state_error)?;
-    let target = WorldStateSnapshot::new(
-        current.epoch_id.clone(),
-        1,
-        vec![effective_tools_section(projected_tool_set)?],
-    )
-    .map_err(world_state_error)?;
-    if current.revision == target.revision {
-        return Ok(None);
-    }
-    let diff = WorldStateDiff::between(&current, &target).map_err(world_state_error)?;
-    diff.model_projection_against(&current, WorldStateLifetime::Run)
-        .map_err(world_state_error)
-        .map(|projection| {
-            projection
-                .map(|projection| LlmMessage::backend_state(projection.render_sanitized_text()))
-        })
-}
-
-fn fallback_conversation_sections(
+pub(super) fn conversation_base_sections(
     input: &AgentChatInput,
 ) -> AgentResult<Vec<WorldStateSectionEnvelope>> {
     let permissions = input
@@ -317,15 +290,22 @@ fn fallback_conversation_sections(
         .and_then(|context| context.workspace.as_ref());
 
     Ok(vec![
-        effective_permissions_section(permissions, WorldStateLifetime::Run)
+        environment_section(WorldStateLifetime::Conversation).map_err(world_state_error)?,
+        model_capabilities_section(input.model_capabilities, WorldStateLifetime::Conversation)
             .map_err(world_state_error)?,
-        workspace_binding_section(workspace, WorldStateLifetime::Run).map_err(world_state_error)?,
-        interaction_profile_section(input.prompt_preferences.as_ref(), WorldStateLifetime::Run)
+        effective_permissions_section(permissions, WorldStateLifetime::Conversation)
             .map_err(world_state_error)?,
+        workspace_binding_section(workspace, WorldStateLifetime::Conversation)
+            .map_err(world_state_error)?,
+        interaction_profile_section(
+            input.prompt_preferences.as_ref(),
+            WorldStateLifetime::Conversation,
+        )
+        .map_err(world_state_error)?,
         model_selection_section(
             &input.model,
             input.model_capabilities,
-            WorldStateLifetime::Run,
+            WorldStateLifetime::Conversation,
         )
         .map_err(world_state_error)?,
     ])
@@ -383,7 +363,7 @@ mod tests {
     use std::collections::BTreeSet;
 
     #[test]
-    fn run_snapshot_exposes_model_selection_but_keeps_execution_capabilities_host_only() {
+    fn run_snapshot_keeps_tool_inventory_host_only_and_conversation_facts_separate() {
         let input = serde_json::from_value::<AgentChatInput>(json!({
             "apiUrl": "https://example.test/v1/chat/completions",
             "apiToken": "secret",
@@ -429,22 +409,60 @@ mod tests {
         let rendered = frame.to_messages()[0].content().to_string();
 
         assert!(rendered.contains("\"lifetime\":\"run\""));
-        assert!(rendered.contains("tools.effective"));
-        assert!(rendered.contains("permissions.effective"));
-        assert!(rendered.contains("\"builtinExecution\":\"require_approval\""));
-        assert!(rendered.contains("model.selection"));
-        assert!(rendered.contains("\"configuredModelId\":\"test-model\""));
-        assert!(rendered.contains("\"imageInput\":true"));
-        assert!(rendered.contains("\"workMode\":\"general\""));
-        assert!(rendered.contains("\"displayName\":\"Demo\""));
-        assert!(!rendered.contains("model.capabilities"));
-        assert!(!rendered.contains("project-secret-id"));
+        for name in [
+            "tools.effective",
+            "permissions.effective",
+            "model.selection",
+            "model.capabilities",
+            "project-secret-id",
+            "/private/workspace/root",
+            "secret",
+        ] {
+            assert!(!rendered.contains(name));
+        }
+        let inventory = tracker
+            .snapshot()
+            .sections
+            .iter()
+            .find(|section| section.id == WorldStateSectionId::EffectiveTools)
+            .unwrap();
+        assert_eq!(
+            inventory.visibility,
+            crate::world_state::WorldStateVisibility::HostOnly
+        );
+        assert!(!inventory.state["stableTools"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+        let conversation = WorldStateSnapshot::new(
+            "conversation-world-state",
+            0,
+            conversation_base_sections(&input).unwrap(),
+        )
+        .unwrap();
+        assert!(conversation
+            .sections
+            .iter()
+            .all(|section| section.lifetime == WorldStateLifetime::Conversation));
+        let rendered = conversation
+            .model_projection(WorldStateLifetime::Conversation)
+            .unwrap()
+            .render_sanitized_text();
+        for fact in [
+            "permissions.effective",
+            "model.selection",
+            "test-model",
+            "general",
+            "Demo",
+        ] {
+            assert!(rendered.contains(fact));
+        }
         assert!(!rendered.contains("/private/workspace/root"));
-        assert!(!rendered.contains("secret"));
+        assert!(!rendered.contains("project-secret-id"));
     }
 
     #[test]
-    fn effective_tool_change_appends_one_real_model_diff_and_no_noop() {
+    fn effective_tool_change_advances_host_state_without_a_model_message() {
         let input = serde_json::from_value::<AgentChatInput>(json!({
             "apiUrl": "https://example.test/v1/chat/completions",
             "apiToken": "secret",
@@ -471,24 +489,31 @@ mod tests {
                 SKILL_RESOURCES_READ_CAPABILITY,
             )]))
             .unwrap();
-        let item = tracker
+        assert!(tracker
             .update_effective_tools(&projected)
             .unwrap()
-            .expect("new dynamic tools must produce a model-visible diff");
-        let frame = ContextFrame::new(vec![item]);
-        frame.validate_cache_layout().unwrap();
-        let messages = frame.to_messages();
-        let rendered = messages[0].content();
-
+            .is_none());
         assert_eq!(tracker.snapshot().sequence, 1);
-        assert!(rendered.contains("\"recordType\":\"diff\""));
-        assert!(rendered.contains("tools.effective"));
-        assert!(rendered.contains("skills_read_resource"));
-        assert!(!rendered.contains("effective-tool-set-v"));
+        let inventory = tracker
+            .snapshot()
+            .sections
+            .iter()
+            .find(|section| section.id == WorldStateSectionId::EffectiveTools)
+            .unwrap();
+        assert!(inventory.state["dynamicTools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|name| name == "skills_read_resource"));
+        assert!(tracker
+            .update_effective_tools(&projected)
+            .unwrap()
+            .is_none());
+        assert_eq!(tracker.snapshot().sequence, 1);
     }
 
     #[test]
-    fn human_interaction_world_state_replaces_extension_snapshots_without_duplicates() {
+    fn run_world_state_replaces_run_extension_snapshots_without_duplicates() {
         let input: AgentChatInput = serde_json::from_value(json!({
             "apiUrl":"https://example.test/v1/chat/completions", "apiToken":"unused",
             "model":"test-model", "modelCapabilities":{"imageInput":false}, "messages":[],
@@ -498,7 +523,7 @@ mod tests {
             prepare_runtime_capabilities(&input, "extension-state", &[], false, None).unwrap();
         let section = |enabled| {
             WorldStateSectionEnvelope::model_visible(
-                WorldStateSectionId::extension("human.interaction").unwrap(),
+                WorldStateSectionId::extension("runtime.fixture").unwrap(),
                 WorldStateLifetime::Run,
                 json!({"available":enabled}),
                 json!({"available":enabled}),
@@ -525,7 +550,7 @@ mod tests {
                 .snapshot()
                 .sections
                 .iter()
-                .filter(|s| s.id.as_str() == "human.interaction")
+                .filter(|s| s.id.as_str() == "runtime.fixture")
                 .count(),
             1
         );
@@ -537,7 +562,7 @@ mod tests {
             .snapshot()
             .sections
             .iter()
-            .any(|s| s.id.as_str() == "human.interaction"));
+            .any(|s| s.id.as_str() == "runtime.fixture"));
     }
 
     #[test]
@@ -614,5 +639,34 @@ mod tests {
             .content()
             .contains("\"op\":\"remove\""));
         assert_eq!(tracker.snapshot().sequence, 2);
+    }
+
+    #[test]
+    fn run_tracker_rejects_conversation_sections_in_construction_reconcile_and_restore() {
+        let input: AgentChatInput = serde_json::from_value(json!({
+            "apiUrl":"https://example.test/v1/chat/completions", "apiToken":"unused",
+            "model":"test-model", "modelCapabilities":{"imageInput":false}, "messages":[],
+        }))
+        .unwrap();
+        let capabilities =
+            prepare_runtime_capabilities(&input, "separate-lifetimes", &[], false, None).unwrap();
+        let sections = conversation_base_sections(&input).unwrap();
+        assert!(RunWorldStateTracker::new_with_extension_sections(
+            "separate-lifetimes",
+            &input,
+            &capabilities.initial_tool_set,
+            sections.clone()
+        )
+        .is_err());
+        let mut tracker =
+            RunWorldStateTracker::new("separate-lifetimes", &input, &capabilities.initial_tool_set)
+                .unwrap();
+        let previous = tracker.snapshot().clone();
+        assert!(tracker
+            .reconcile(&capabilities.initial_tool_set, sections.clone(), None)
+            .is_err());
+        assert_eq!(tracker.snapshot(), &previous);
+        let conversation = WorldStateSnapshot::new("conversation", 0, sections).unwrap();
+        assert!(RunWorldStateTracker::from_checkpoint("restored-run", &conversation).is_err());
     }
 }

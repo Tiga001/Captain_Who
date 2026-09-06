@@ -1472,6 +1472,7 @@ fn pending_approval_persists_full_run_checkpoint() {
                 sources: vec!["backend_system_prompt".to_string()],
                 scope: "run".to_string(),
                 retention: "retained".to_string(),
+                request_order: None,
                 group: None,
                 origin: None,
             },
@@ -1494,6 +1495,7 @@ fn pending_approval_persists_full_run_checkpoint() {
                 sources: vec!["model_response".to_string()],
                 scope: "run".to_string(),
                 retention: "retained".to_string(),
+                request_order: None,
                 group: Some(mycopilot_core::AgentContextCheckpointGroup {
                     id: "exchange-checkpoint".to_string(),
                     kind: "tool_exchange".to_string(),
@@ -1514,6 +1516,7 @@ fn pending_approval_persists_full_run_checkpoint() {
         provider_protocol_key: crate::test_provider_protocol_key("test-model"),
         assistant_turn_identity: crate::test_assistant_turn_identity(&["call-checkpoint"]),
         provider_continuation_refs: Vec::new(),
+        conversation_world_state_records: Vec::new(),
         run_world_state: crate::test_run_world_state(),
         pending_tool_call_id: "call-checkpoint".to_string(),
         conversation_model_context_items: Vec::new(),

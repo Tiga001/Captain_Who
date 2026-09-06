@@ -311,7 +311,7 @@ async fn approval_resume_restores_prior_context_and_continues_queued_tools() {
         .iter()
         .any(|snapshot| snapshot.extension_id == "todo"));
     assert!(checkpoint.context_items.iter().any(|item| {
-        item.sources == vec!["skill_instructions"]
+        item.sources == vec!["skill_instructions", "run_bootstrap"]
             && item.content.contains("SKILL_SNAPSHOT_BEFORE_APPROVAL")
             && item.origin.as_ref().is_some_and(|origin| {
                 origin.kind == "skill" && origin.id == "workspace:workspace-1:review"

@@ -9,8 +9,8 @@ use reqwest::Url;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::net::{IpAddr, Ipv4Addr};
-use std::time::Duration;
 use std::sync::Arc;
+use std::time::Duration;
 
 const TAVILY_EXTRACT_ENDPOINT: &str = "https://api.tavily.com/extract";
 const DEFAULT_EVENT_CONTENT_CHARS: usize = 40_000;
@@ -28,9 +28,14 @@ pub(crate) struct WebFetchTool {
 
 impl WebFetchTool {
     pub fn new(api_key: String) -> Self {
-        Self::with_policy(Arc::new(crate::FrozenWebSearchPolicySource::from_search_config(Some(
-            &crate::AgentSearchConfig { mode: crate::AgentSearchMode::Auto, tavily_api_key: Some(api_key) },
-        ))))
+        Self::with_policy(Arc::new(
+            crate::FrozenWebSearchPolicySource::from_search_config(Some(
+                &crate::AgentSearchConfig {
+                    mode: crate::AgentSearchMode::Auto,
+                    tavily_api_key: Some(api_key),
+                },
+            )),
+        ))
     }
 
     pub(crate) fn with_policy(policy: Arc<dyn crate::WebSearchPolicySource>) -> Self {
@@ -88,8 +93,7 @@ impl AgentTool for WebFetchTool {
         cancellation_token.check()?;
         let api_key = self.policy.authorize_execution()?.into_secret();
         let response = block_on_tool_future(
-            TavilyExtractClient::new(api_key)
-                .extract(&request, cancellation_token.clone()),
+            TavilyExtractClient::new(api_key).extract(&request, cancellation_token.clone()),
         )?;
 
         format_tavily_extract_response(request, response, &cancellation_token)

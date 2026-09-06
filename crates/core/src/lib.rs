@@ -38,8 +38,8 @@ mod system_paths;
 mod tools;
 mod turn_diff;
 mod usage;
-pub mod world_state;
 pub mod web_search;
+pub mod world_state;
 
 pub use web_search::{
     FrozenWebSearchPolicySource, WebSearchExecutionCredential, WebSearchPolicySnapshot,
@@ -348,15 +348,15 @@ pub use runtime::{
     AgentContextCompactionGenerationRequest, AgentContextCompactionModelGenerator,
     AgentContextCompactionPrepareOutcome, AgentContextCompactionPrepareRequest,
     AgentContextCompactionServices, AgentContextWindowObserver, AgentConversationTraceObserver,
-    AgentEventEmitter, AgentHostActionExecutor, AgentHumanInteractionRuntimeHost,
-    AgentHumanInteractionSamplingState, AgentModelRequestObserver, AgentResolvedSkillActivation,
-    AgentRuntime, AgentRuntimeHostServices, AgentSamplingBoundaryDelivery,
-    AgentSamplingBoundaryInbox, AgentSamplingBoundaryMessage, AgentSamplingBoundaryRequest,
-    AgentSkillActivationResolver, AgentSkillCheckpointAuthority, AgentSteerEnqueueOutcome,
-    AgentSteerInputQueue, AgentUserInputResume, AgentUserInputSuspension,
-    HumanInteractionPolicySource, AGENT_COMMAND_SESSION_DEFAULT_WAIT_MS,
-    AGENT_COMMAND_SESSION_INTERRUPT_WAIT_MS, AGENT_COMMAND_SESSION_MAX_WAIT_MS,
-    AGENT_COMMAND_SESSION_MODEL_OUTPUT_BYTES,
+    AgentConversationWorldStateHost, AgentConversationWorldStateRequest, AgentEventEmitter,
+    AgentHostActionExecutor, AgentHumanInteractionRuntimeHost, AgentHumanInteractionSamplingState,
+    AgentModelRequestObserver, AgentResolvedSkillActivation, AgentRuntime,
+    AgentRuntimeHostServices, AgentSamplingBoundaryDelivery, AgentSamplingBoundaryInbox,
+    AgentSamplingBoundaryMessage, AgentSamplingBoundaryRequest, AgentSkillActivationResolver,
+    AgentSkillCheckpointAuthority, AgentSteerEnqueueOutcome, AgentSteerInputQueue,
+    AgentUserInputResume, AgentUserInputSuspension, HumanInteractionPolicySource,
+    AGENT_COMMAND_SESSION_DEFAULT_WAIT_MS, AGENT_COMMAND_SESSION_INTERRUPT_WAIT_MS,
+    AGENT_COMMAND_SESSION_MAX_WAIT_MS, AGENT_COMMAND_SESSION_MODEL_OUTPUT_BYTES,
 };
 pub use system_paths::expand_system_path;
 pub use tools::{
@@ -385,8 +385,8 @@ pub use turn_diff::{
 pub use world_state::{
     AnchoredWorldStateRecord, WorldStateDiff, WorldStateError, WorldStateLifetime,
     WorldStateModelChange, WorldStateModelRecord, WorldStateModelSection, WorldStateOperation,
-    WorldStateRecord, WorldStateRecordKind, WorldStateReducer, WorldStateSectionEnvelope,
-    WorldStateSectionId, WorldStateSectionPrecondition, WorldStateSectionTombstone,
-    WorldStateSnapshot, WorldStateVisibility, WORLD_STATE_REVISION_PREFIX,
-    WORLD_STATE_SCHEMA_VERSION,
+    WorldStateRecord, WorldStateRecordKind, WorldStateReducer, WorldStateRequestBoundary,
+    WorldStateSectionEnvelope, WorldStateSectionId, WorldStateSectionPrecondition,
+    WorldStateSectionTombstone, WorldStateSnapshot, WorldStateVisibility,
+    WORLD_STATE_REVISION_PREFIX, WORLD_STATE_SCHEMA_VERSION,
 };

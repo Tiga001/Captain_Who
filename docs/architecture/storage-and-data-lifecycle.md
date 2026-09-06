@@ -24,9 +24,9 @@ last_verified: 2026-09-05
 
 ## Schema 发布策略
 
-截至本次核验，当前唯一受支持的 canonical schema 是 **v39**（SQLite `PRAGMA user_version = 39`）：
+截至本次核验，当前唯一受支持的 canonical schema 是 **v40**（SQLite `PRAGMA user_version = 40`）：
 
-- `STORAGE_SCHEMA_VERSION = 36`；
+- `STORAGE_SCHEMA_VERSION = 40`；
 - canonical schema fingerprint 由 `migrations.rs` 中的编译期常量和测试固定；
 - 空数据库在一个原子流程中建立完整当前 schema；
 - 开发期采用当前版本新建策略，不运行旧数据库迁移；v34/v35 也返回 reset-required，检查过程不改写旧库；
@@ -36,7 +36,11 @@ last_verified: 2026-09-05
 
 开发库重置前应先关闭应用并备份数据根；优先使用受管 `storage:reset-dev` 流程。不要只删除 `storage.sqlite` 而遗留 attachments、artifacts、spool 或 lock 文件。
 
-`storage:reset-dev` 始终新建 v39，不恢复 Conversation、Project 或 Agent/runtime 历史；本版本不提供旧库保历史升级。它从 exact current v39、exact v38、exact v37、exact v36 或 exact v35 保留 allowlisted 配置与凭据引用；v36/v37/v38/v39 还保留人机交互设置及 revision。既有受限恢复选项也可从绑定 exact v33 fingerprint 的私有备份读取 allowlisted 设置，并把凭据转换为 reference。无法安全识别且含配置的旧库拒绝重置，不能用默认值默默替换模型配置。
+`storage:reset-dev` 始终新建 v40，不恢复 Conversation、Project 或 Agent/runtime 历史；本版本不提供旧库保历史升级。它从 exact current v40、exact v39、exact v38、exact v37、exact v36 或 exact v35 保留 allowlisted 配置与凭据引用；v36/v37/v38/v39/v40 还保留人机交互设置及 revision。既有受限恢复选项也可从绑定 exact v33 fingerprint 的私有备份读取 allowlisted 设置，并把凭据转换为 reference。无法安全识别且含配置的旧库拒绝重置，不能用默认值默默替换模型配置。
+
+## Conversation World State 请求日志
+
+`conversation_world_state_records` 保存 canonical full/diff、可选精确模型请求边界及 `model_observed`。`conversation_world_state_request_commits` 以 conversation/run/request index 绑定准备快照和确认观察的前缀；无状态变化的请求也有幂等回执。请求准备与状态 append 在同一事务完成，确认观察是单独状态，不依赖只在请求终态记录的诊断 observation。压缩、分支、删除与重写同时处理精确 Trace 边界和回执生命周期。详见[上下文管理](./context-management.md)。
 
 ## 领域数据地图
 
@@ -63,7 +67,7 @@ DDL 按领域大致分为：
 
 ## Scheduled Automation 表组
 
-Automation 在 canonical schema v39 中使用当前通用通知表和自动化领域表，完整列、CHECK、索引和 trigger 仍以 DDL 为准：
+Automation 在 canonical schema v40 中使用当前通用通知表和自动化领域表，完整列、CHECK、索引和 trigger 仍以 DDL 为准：
 
 | 表                  | 权威内容                                                                | 关键不变量                                                                                                        |
 | ------------------- | ----------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
@@ -109,7 +113,7 @@ Automation 还要求两个专用原子边界：
 
 ## 启动与崩溃恢复
 
-Bootstrap 大致执行：解析数据根与锁、打开/校验 canonical schema v39、构造 repositories/services、加载凭据 backend、MCP Server/Provider/Skills/Artifact Runtime、随后运行领域 reconciliation。持久凭据 backend 不可用或 credential reference 无法解析时必须保留公开配置并报告 `unavailable`/配置错误，不能把缺失凭据当作空值覆盖；只有实际需要该连接的运行应被阻断。
+Bootstrap 大致执行：解析数据根与锁、打开/校验 canonical schema v40、构造 repositories/services、加载凭据 backend、MCP Server/Provider/Skills/Artifact Runtime、随后运行领域 reconciliation。持久凭据 backend 不可用或 credential reference 无法解析时必须保留公开配置并报告 `unavailable`/配置错误，不能把缺失凭据当作空值覆盖；只有实际需要该连接的运行应被阻断。
 
 恢复必须按“数据库已提交状态”判断，不按 Renderer 缓存判断。当前需要关注：
 
@@ -145,7 +149,7 @@ Automation 启动恢复区分 admission 前后：旧进程遗留的全部 `admit
 
 当前开发策略以整套数据根备份/重置为主。复制在线 SQLite 文件并不等价于一致备份；应在应用关闭、锁释放后复制数据库及其配套文件目录，或使用受支持的 SQLite snapshot/backup 流程。
 
-当前 v39 SQLite snapshot 只含模型/搜索 credential reference 与非秘密元数据，不含这些连接的当前 secret 字节；旧 schema 生成的历史备份仍可能含明文 Token/Key，必须继续按秘密材料保护。只恢复 `storage.sqlite` 不会恢复操作系统凭据，跨设备、跨系统账户、签名身份变化或凭据 backend 丢失后，界面可能显示凭据不可用，此时只能由用户替换或清除。未签名 macOS 开发构建的私有凭据文件位于数据根，因此“整根复制”仍会复制 secret，不能当作普通诊断包。
+当前 v40 SQLite snapshot 只含模型/搜索 credential reference 与非秘密元数据，不含这些连接的当前 secret 字节；旧 schema 生成的历史备份仍可能含明文 Token/Key，必须继续按秘密材料保护。只恢复 `storage.sqlite` 不会恢复操作系统凭据，跨设备、跨系统账户、签名身份变化或凭据 backend 丢失后，界面可能显示凭据不可用，此时只能由用户替换或清除。未签名 macOS 开发构建的私有凭据文件位于数据根，因此“整根复制”仍会复制 secret，不能当作普通诊断包。
 
 删除 SQLite reference、清除凭据或移除私有文件只表达应用层删除意图；文件系统、SSD、系统备份和操作系统凭据后端可能保留副本，产品不承诺安全擦除。怀疑泄露时应在 Provider 侧撤销或轮换凭据。
 
@@ -153,7 +157,7 @@ Automation 启动恢复区分 admission 前后：旧进程遗留的全部 `admit
 
 ## 不变量
 
-1. `canonical_schema.sql`、canonical schema v39 的 version 与 fingerprint 必须一致。
+1. `canonical_schema.sql`、canonical schema v40 的 version 与 fingerprint 必须一致。
 2. 非空非当前 schema fail closed，不自动执行未审计迁移。
 3. 所有领域对象在 service SQL 边界校验 conversation/project/Run 归属。
 4. 外部副作用与数据库提交之间的崩溃窗口必须有明确恢复状态。
@@ -197,7 +201,7 @@ Automation 启动恢复区分 admission 前后：旧进程遗留的全部 `admit
 
 ## 变更检查表
 
-- [ ] 修改 `canonical_schema.sql` 后同步 canonical version、fingerprint 和 fresh-schema 测试；若版本不再是 v39，同时更新本文当前快照。
+- [ ] 修改 `canonical_schema.sql` 后同步 canonical version、fingerprint 和 fresh-schema 测试；若版本不再是 v40，同时更新本文当前快照。
 - [ ] 明确旧数据库行为；没有经批准的迁移链时保持 reset-required。
 - [ ] 新表/列定义 owner、FK、唯一键、索引、删除/保留和敏感分类。
 - [ ] 跨表操作在一个 service 事务中完成，并有冲突/幂等测试。

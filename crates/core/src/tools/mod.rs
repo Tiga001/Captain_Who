@@ -101,6 +101,7 @@ use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+pub(crate) use tool_set::WEB_SEARCH_CAPABILITY;
 pub(crate) use tool_set::{
     validate_tool_set_checkpoint_shape, EffectiveToolSet, ToolCapabilityId, ToolUnavailability,
     IMAGE_GENERATION_CAPABILITY, OFFICE_DOCUMENTS_CAPABILITY, OFFICE_PRESENTATIONS_CAPABILITY,
@@ -110,7 +111,6 @@ pub(crate) use tool_set::{
 };
 pub(crate) use web_fetch::WebFetchTool;
 pub(crate) use web_search::WebSearchTool;
-pub(crate) use tool_set::WEB_SEARCH_CAPABILITY;
 use workspace_map::WorkspaceMapTool;
 
 /// Reprojects a durable Trace call into the same presentation-safe shape emitted live.

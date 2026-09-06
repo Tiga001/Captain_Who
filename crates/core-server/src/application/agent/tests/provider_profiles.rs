@@ -777,7 +777,12 @@ async fn rewrite_turn_is_atomic_replayable_and_runs_with_only_the_active_context
         .list_active_conversation_world_state_records(&source.conversation_id)
         .unwrap();
     assert!(active_world_state.iter().any(|entry| {
-        entry.effective_before_message_id.as_deref() == Some("rewrite-replacement-user")
+        entry.request_boundary.as_ref().is_some_and(|boundary| {
+            boundary.run_id == replacement.run_id
+                && boundary.assistant_message_id == "rewrite-replacement-assistant"
+                && boundary.request_index == 1
+                && boundary.after_trace_sequence.is_none()
+        })
     }));
 
     let replacement_attachment_id = replacement.user_message.attachments[0].id.clone();

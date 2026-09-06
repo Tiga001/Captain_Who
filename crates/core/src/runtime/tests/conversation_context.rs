@@ -259,7 +259,7 @@ fn activated_skill_is_a_measured_dynamic_overlay_not_a_cache_input() {
     let skill_entry = manifest
         .entries
         .iter()
-        .find(|entry| entry.sources == vec!["skill_instructions"])
+        .find(|entry| entry.sources == vec!["skill_instructions", "run_bootstrap"])
         .unwrap();
     assert_eq!(skill_entry.role, "user");
     assert_eq!(skill_entry.scope, "run");
@@ -497,7 +497,7 @@ fn discoverable_skill_catalog_is_a_measured_dynamic_overlay_not_a_cache_input() 
         .manifest()
         .entries
         .into_iter()
-        .find(|entry| entry.sources == vec!["skill_catalog"])
+        .find(|entry| entry.sources.contains(&"skill_catalog"))
         .unwrap();
     assert_eq!(catalog_entry.scope, "run");
     assert_eq!(catalog_entry.retention, "retained");

@@ -256,6 +256,7 @@ pub(crate) struct ExistingConversationFork {
 }
 
 struct ResolvedConversationForkPoint {
+    world_state_cutoff: ContextJournalCursor,
     assistant_message_id: String,
     summary_id: Option<String>,
     model_id: Option<String>,

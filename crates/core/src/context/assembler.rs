@@ -49,7 +49,15 @@ impl ContextAssembler {
     ) -> AgentResult<AssembledContext> {
         let has_compaction_summary = input.compaction_summary.is_some();
         let normalized = normalize_messages(input.messages)?;
-        let world_state = assemble_world_state_timeline(input.world_state_records, &normalized)?;
+        let canonical_world_state = input.world_state_records;
+        let world_state = assemble_world_state_timeline(
+            canonical_world_state.clone(),
+            &normalized,
+            input
+                .compaction_summary
+                .as_ref()
+                .map(|summary| &summary.covered_through),
+        )?;
         let current_turn_index = normalized
             .iter()
             .rposition(|message| message.role == "user");
@@ -93,6 +101,7 @@ impl ContextAssembler {
         if let Some(full) = world_state.full {
             items.push(full);
         }
+        items.extend(world_state.after_summary);
         let mut timing = ConversationTimingTracker::default();
         for (index, message) in normalized.into_iter().enumerate() {
             if let Some(message_id) = message.message_id.as_deref() {
@@ -113,9 +122,19 @@ impl ContextAssembler {
                 })
                 .transpose()?;
 
-            if let Some(trace) = &trace {
-                items.extend(trace.activity_items.iter().cloned());
-            }
+            let trace_items = trace
+                .as_ref()
+                .map(|trace| trace.activity_items.as_slice())
+                .unwrap_or_default();
+            let boundaries = message
+                .message_id
+                .as_ref()
+                .and_then(|id| world_state.request_boundaries.get(id));
+            append_trace_with_world_state(
+                &mut items,
+                trace_items,
+                boundaries.map(Vec::as_slice).unwrap_or_default(),
+            )?;
 
             let content = match message.role.as_str() {
                 "user" => timing.render_user_message(&message.content, message.created_at)?,
@@ -152,12 +171,15 @@ impl ContextAssembler {
             let projection = snapshot
                 .model_projection(WorldStateLifetime::Run)
                 .map_err(world_state_assembly_error)?;
-            items.push(world_state_context_item(
-                &snapshot,
-                projection.render_sanitized_text(),
-                ContextSource::WorldStateSnapshot,
-                ContextScope::Run,
-            ));
+            items.push(
+                world_state_context_item(
+                    &snapshot,
+                    projection.render_sanitized_text(),
+                    ContextSource::WorldStateSnapshot,
+                    ContextScope::Run,
+                )
+                .with_source(ContextSource::RunBootstrap),
+            );
         }
         if current_turn_index.is_some() && (has_attachment_text || has_attachment_images) {
             let mut attachment_message =
@@ -172,13 +194,15 @@ impl ContextAssembler {
                     ContextSource::InputAttachment,
                     ContextScope::Run,
                     ContextRetention::Retained,
-                ),
+                )
+                .with_source(ContextSource::RunBootstrap),
             ));
         }
         append_skill_discovery(&mut items, input.skill_discovery.as_ref())?;
         append_skill_context(&mut items, input.skill_activation.as_ref())?;
 
-        let frame = ContextFrame::new(items);
+        let mut frame = ContextFrame::new(items);
+        frame.restore_conversation_world_state_records(canonical_world_state)?;
         frame.validate_complete_tool_protocol()?;
         frame.validate_cache_layout()?;
         Ok(AssembledContext { frame, timing })
@@ -237,12 +261,15 @@ impl ContextAssembler {
         let projection = snapshot
             .model_projection(WorldStateLifetime::Run)
             .map_err(world_state_assembly_error)?;
-        frame.push(world_state_context_item(
-            snapshot,
-            projection.render_sanitized_text(),
-            ContextSource::WorldStateSnapshot,
-            ContextScope::Run,
-        ));
+        frame.push(
+            world_state_context_item(
+                snapshot,
+                projection.render_sanitized_text(),
+                ContextSource::WorldStateSnapshot,
+                ContextScope::Run,
+            )
+            .with_source(ContextSource::RunBootstrap),
+        );
         Ok(())
     }
 }
@@ -251,17 +278,27 @@ impl ContextAssembler {
 struct AssembledWorldStateTimeline {
     full: Option<ContextItem>,
     before_message: BTreeMap<String, Vec<ContextItem>>,
+    request_boundaries: BTreeMap<String, Vec<(Option<u64>, ContextItem)>>,
+    after_summary: Vec<ContextItem>,
 }
 
 impl AssembledWorldStateTimeline {
     fn rendered_item_count(&self) -> usize {
-        usize::from(self.full.is_some()) + self.before_message.values().map(Vec::len).sum::<usize>()
+        usize::from(self.full.is_some())
+            + self.before_message.values().map(Vec::len).sum::<usize>()
+            + self
+                .request_boundaries
+                .values()
+                .map(Vec::len)
+                .sum::<usize>()
+            + self.after_summary.len()
     }
 }
 
 fn assemble_world_state_timeline(
     records: Vec<AnchoredWorldStateRecord>,
     messages: &[AgentChatMessage],
+    covered_through: Option<&super::ContextJournalCursor>,
 ) -> AgentResult<AssembledWorldStateTimeline> {
     if records.is_empty() {
         return Ok(AssembledWorldStateTimeline::default());
@@ -282,23 +319,141 @@ fn assemble_world_state_timeline(
         }
     }
 
-    let mut records = records.into_iter();
-    let initial = records
-        .next()
-        .expect("non-empty world-state records have an initial record");
-    initial.validate().map_err(world_state_assembly_error)?;
-    if initial.effective_before_message_id.is_some() {
-        return Err(AgentError::new(
-            "Conversation World State 的初始 full snapshot 不能带消息 anchor。",
-        ));
-    }
-    let snapshot = match initial.record {
-        WorldStateRecord::Full(snapshot) => snapshot,
-        WorldStateRecord::Diff(_) => {
+    let mut timeline = AssembledWorldStateTimeline::default();
+    let mut previous_anchor_position = None;
+    let mut projected = project_conversation_world_state_records(&records)?
+        .into_iter()
+        .map(|(record, item)| (record.record.sequence(), item))
+        .collect::<BTreeMap<_, _>>();
+    for anchored in &records {
+        let item = projected.remove(&anchored.record.sequence());
+        if matches!(anchored.record, WorldStateRecord::Full(_)) {
+            timeline.full = item;
+            continue;
+        }
+        let (anchor, trace_position, request_index) =
+            if let Some(boundary) = &anchored.request_boundary {
+                (
+                    &boundary.assistant_message_id,
+                    boundary
+                        .after_trace_sequence
+                        .map(|sequence| sequence.saturating_add(1))
+                        .unwrap_or(0),
+                    boundary.request_index,
+                )
+            } else {
+                (
+                    anchored
+                        .effective_before_message_id
+                        .as_ref()
+                        .expect("validated diff anchor"),
+                    0,
+                    0,
+                )
+            };
+        let covered_boundary = anchored.request_boundary.as_ref().is_some_and(|boundary| {
+            covered_through.is_some_and(|cursor| {
+                cursor.message_id() == boundary.assistant_message_id
+                    && cursor.trace_sequence().is_some()
+                    && cursor.trace_sequence() == boundary.after_trace_sequence
+            })
+        });
+        let message_position = message_positions.get(anchor.as_str()).copied();
+        if message_position.is_none() && covered_boundary {
+            let position = (0, trace_position, request_index);
+            if previous_anchor_position.is_some_and(|previous| position < previous) {
+                return Err(AgentError::new(
+                    "Conversation World State diff 的消息 anchor 顺序发生倒退。",
+                ));
+            }
+            previous_anchor_position = Some(position);
+            if let Some(item) = item {
+                timeline.after_summary.push(item);
+            }
+            continue;
+        }
+        let message_position = message_position.ok_or_else(|| {
+            AgentError::new(format!(
+                "Conversation World State diff 引用了不存在的消息 anchor：`{anchor}`。"
+            ))
+        })?;
+        let position = (message_position + 1, trace_position, request_index);
+        if previous_anchor_position.is_some_and(|previous| position < previous) {
             return Err(AgentError::new(
-                "Conversation World State 必须以 full snapshot 开始。",
+                "Conversation World State diff 的消息 anchor 顺序发生倒退。",
             ));
         }
+        previous_anchor_position = Some(position);
+        if let Some(boundary) = &anchored.request_boundary {
+            let message = &messages[message_position];
+            if message.role != "assistant" {
+                return Err(AgentError::new(
+                    "Conversation World State 请求边界必须属于 assistant 消息。",
+                ));
+            }
+            if message
+                .conversation_turn_trace
+                .as_ref()
+                .is_some_and(|trace| trace.run_id != boundary.run_id)
+            {
+                return Err(AgentError::new(
+                    "Conversation World State 请求边界与 assistant trace 的 Run 身份不一致。",
+                ));
+            }
+            if let Some(sequence) = boundary.after_trace_sequence {
+                let valid = message
+                    .conversation_turn_trace
+                    .as_ref()
+                    .is_some_and(|trace| {
+                        trace.run_id == boundary.run_id
+                            && trace.items.iter().any(|item| {
+                                item.sequence() == sequence
+                                    && matches!(item,
+                            crate::ConversationTurnTraceItem::AssistantNarration { .. }
+                            | crate::ConversationTurnTraceItem::ToolResult { .. }
+                            | crate::ConversationTurnTraceItem::UserGuidance { .. }
+                            | crate::ConversationTurnTraceItem::AgentMailboxDelivery { .. })
+                            })
+                    });
+                if !valid && !covered_boundary {
+                    return Err(AgentError::new(
+                        "Conversation World State 请求边界缺少已提交的安全 trace 前缀。",
+                    ));
+                }
+            }
+            if let Some(item) = item {
+                timeline
+                    .request_boundaries
+                    .entry(anchor.clone())
+                    .or_default()
+                    .push((boundary.after_trace_sequence, item));
+            }
+        } else {
+            if let Some(item) = item {
+                timeline
+                    .before_message
+                    .entry(anchor.clone())
+                    .or_default()
+                    .push(item);
+            }
+        }
+    }
+    Ok(timeline)
+}
+
+/// Projects a validated exact ledger once. Runtime synchronization and cold reconstruction use
+/// identical content and stable origins, including request boundaries which survive epoch rebases.
+pub(crate) fn project_conversation_world_state_records(
+    records: &[AnchoredWorldStateRecord],
+) -> AgentResult<Vec<(&AnchoredWorldStateRecord, ContextItem)>> {
+    let Some(initial) = records.first() else {
+        return Ok(Vec::new());
+    };
+    initial.validate().map_err(world_state_assembly_error)?;
+    let WorldStateRecord::Full(snapshot) = &initial.record else {
+        return Err(AgentError::new(
+            "Conversation World State 必须以 full snapshot 开始。",
+        ));
     };
     if snapshot.sequence != 0 {
         return Err(AgentError::new(
@@ -308,67 +463,80 @@ fn assemble_world_state_timeline(
     let projection = snapshot
         .model_projection(WorldStateLifetime::Conversation)
         .map_err(world_state_assembly_error)?;
-    let full = Some(world_state_context_item(
-        &snapshot,
+    let mut full = world_state_context_item(
+        snapshot,
         projection.render_sanitized_text(),
         ContextSource::WorldStateSnapshot,
         ContextScope::Conversation,
-    ));
-    let mut reducer = WorldStateReducer::new(snapshot).map_err(world_state_assembly_error)?;
-    let mut before_message = BTreeMap::<String, Vec<ContextItem>>::new();
-    let mut previous_anchor_position = None;
-
-    for anchored in records {
+    );
+    if !initial.model_observed {
+        full = full.with_source(ContextSource::WorldStateUnobserved);
+    }
+    let mut items = vec![(initial, full)];
+    let mut reducer =
+        WorldStateReducer::new(snapshot.clone()).map_err(world_state_assembly_error)?;
+    for anchored in records.iter().skip(1) {
         anchored.validate().map_err(world_state_assembly_error)?;
-        let anchor = anchored.effective_before_message_id.ok_or_else(|| {
-            AgentError::new(
-                "Conversation World State diff 必须带 effectiveBeforeMessageId anchor。",
-            )
-        })?;
-        let anchor_position = message_positions
-            .get(anchor.as_str())
-            .copied()
-            .ok_or_else(|| {
-                AgentError::new(format!(
-                    "Conversation World State diff 引用了不存在的消息 anchor：`{anchor}`。"
-                ))
-            })?;
-        if previous_anchor_position.is_some_and(|previous| anchor_position < previous) {
+        let WorldStateRecord::Diff(diff) = &anchored.record else {
             return Err(AgentError::new(
-                "Conversation World State diff 的消息 anchor 顺序发生倒退。",
+                "Conversation World State 活跃 epoch 只能包含一个初始 full snapshot。",
             ));
-        }
-        previous_anchor_position = Some(anchor_position);
-
-        let diff = match anchored.record {
-            WorldStateRecord::Diff(diff) => diff,
-            WorldStateRecord::Full(_) => {
-                return Err(AgentError::new(
-                    "Conversation World State 活跃 epoch 只能包含一个初始 full snapshot。",
-                ));
-            }
         };
         let projection = diff
             .model_projection_against(reducer.snapshot(), WorldStateLifetime::Conversation)
             .map_err(world_state_assembly_error)?;
-        reducer.apply(&diff).map_err(world_state_assembly_error)?;
+        reducer.apply(diff).map_err(world_state_assembly_error)?;
         if let Some(projection) = projection {
-            before_message
-                .entry(anchor)
-                .or_default()
-                .push(world_state_context_item(
-                    &diff,
-                    projection.render_sanitized_text(),
-                    ContextSource::WorldStateDiff,
-                    ContextScope::Conversation,
-                ));
+            let mut item = world_state_context_item(
+                diff,
+                projection.render_sanitized_text(),
+                ContextSource::WorldStateDiff,
+                ContextScope::Conversation,
+            );
+            if let Some(boundary) = &anchored.request_boundary {
+                item = item.with_origin(ContextOrigin::world_state_record(format!(
+                    "request:{}",
+                    serde_json::to_string(boundary)
+                        .expect("request boundary serialization cannot fail")
+                )));
+            }
+            if !anchored.model_observed {
+                item = item.with_source(ContextSource::WorldStateUnobserved);
+            }
+            items.push((anchored, item));
         }
     }
+    Ok(items)
+}
 
-    Ok(AssembledWorldStateTimeline {
-        full,
-        before_message,
-    })
+fn append_trace_with_world_state(
+    items: &mut Vec<ContextItem>,
+    trace_items: &[ContextItem],
+    boundaries: &[(Option<u64>, ContextItem)],
+) -> AgentResult<()> {
+    let mut merged = trace_items.to_vec();
+    // Reverse insertion keeps multiple requests at the same safe trace boundary in ledger order.
+    for (after, item) in boundaries.iter().rev() {
+        let position = match after {
+            None => 0,
+            Some(sequence) => trace_items
+                .iter()
+                .rposition(|item| {
+                    item.metadata()
+                        .origin()
+                        .and_then(ContextOrigin::journal_cursor)
+                        .and_then(|cursor| cursor.trace_sequence())
+                        .is_some_and(|cursor| cursor <= *sequence)
+                })
+                .map(|index| index + 1)
+                // The exact prefix can have been covered by the summary, or can consist only
+                // of intentionally omitted run-local trace records such as Todo.
+                .unwrap_or(0),
+        };
+        merged.insert(position, item.clone());
+    }
+    items.extend(merged);
+    Ok(())
 }
 
 trait WorldStateContextRecord {
@@ -414,13 +582,16 @@ fn append_skill_discovery(
     let content = discovery
         .render_for_context()
         .map_err(|error| AgentError::new(format!("无法渲染 Skill 发现目录：{error}")))?;
-    items.push(ContextItem::text(
-        LlmMessageRole::User,
-        content,
-        ContextSource::SkillCatalog,
-        ContextScope::Run,
-        ContextRetention::Retained,
-    ));
+    items.push(
+        ContextItem::text(
+            LlmMessageRole::User,
+            content,
+            ContextSource::SkillCatalog,
+            ContextScope::Run,
+            ContextRetention::Retained,
+        )
+        .with_source(ContextSource::RunBootstrap),
+    );
     Ok(())
 }
 
@@ -438,10 +609,10 @@ fn append_skill_context(
     let mut skill_ids = BTreeSet::new();
     for skill in &activation.skills {
         validate_activated_skill(skill, &mut skill_ids)?;
-        items.push(activated_skill_context_item(
-            &activation.activation_revision,
-            skill,
-        )?);
+        items.push(
+            activated_skill_context_item(&activation.activation_revision, skill)?
+                .with_source(ContextSource::RunBootstrap),
+        );
     }
     Ok(())
 }
@@ -868,13 +1039,197 @@ mod tests {
         assert_eq!(manifest.entries[4].sources, vec!["current_turn"]);
         assert_eq!(manifest.entries[4].scope, "conversation");
         assert_eq!(manifest.entries[4].retention, "retained");
-        assert_eq!(manifest.entries[5].sources, vec!["input_attachment"]);
+        assert_eq!(
+            manifest.entries[5].sources,
+            vec!["input_attachment", "run_bootstrap"]
+        );
         assert_eq!(manifest.entries[5].scope, "run");
         assert_eq!(manifest.entries[5].retention, "retained");
         assert_eq!(manifest.entries[5].image_base64_bytes, 3);
         let serialized = serde_json::to_string(&manifest).unwrap();
         assert!(!serialized.contains("current question"));
         assert!(!serialized.contains("attachment body"));
+    }
+
+    #[test]
+    fn request_boundary_world_state_cold_and_incremental_assembly_match_after_guidance() {
+        let mut records = conversation_world_state_records("unused");
+        records[1].effective_before_message_id = None;
+        records[1].request_boundary = Some(crate::WorldStateRequestBoundary {
+            run_id: "run-assistant-current".into(),
+            assistant_message_id: "assistant-current".into(),
+            request_index: 2,
+            after_trace_sequence: Some(1),
+        });
+        records[1].model_observed = false;
+        let mut assistant = current_assistant_message("assistant-current", "done");
+        assistant.conversation_turn_trace.as_mut().unwrap().items = vec![
+            crate::ConversationTurnTraceItem::AssistantNarration {
+                sequence: 0,
+                content: "before-guidance".into(),
+                truncated: false,
+            },
+            crate::ConversationTurnTraceItem::UserGuidance {
+                sequence: 1,
+                guidance_id: "guidance".into(),
+                client_message_id: "client".into(),
+                content: "new-guidance".into(),
+                attachments: Vec::new(),
+                created_at: 1,
+                truncated: false,
+            },
+            crate::ConversationTurnTraceItem::AssistantNarration {
+                sequence: 2,
+                content: "after-boundary".into(),
+                truncated: false,
+            },
+        ];
+        assistant.conversation_model_context_items = [
+            ("assistant", "before-guidance"),
+            ("user", "new-guidance"),
+            ("assistant", "after-boundary"),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(
+            |(sequence, (role, content))| crate::ConversationModelContextItem {
+                sequence: sequence as u64,
+                ordinal: 0,
+                role: role.into(),
+                content: content.into(),
+                tool_call_id: None,
+                tool_calls: Vec::new(),
+                is_error: false,
+            },
+        )
+        .collect();
+        let assemble = |records: Vec<AnchoredWorldStateRecord>| {
+            ContextAssembler::assemble(ContextAssemblyInput {
+                system_prompt: "rules".into(),
+                compaction_summary: None,
+                world_state_records: records,
+                initial_run_world_state: None,
+                messages: vec![
+                    identified_message("user", "user", "input"),
+                    assistant.clone(),
+                ],
+                skill_discovery: None,
+                skill_activation: None,
+                attachments: ContextAttachments::default(),
+            })
+            .unwrap()
+        };
+        let cold = assemble(records.clone());
+        let mut incremental = assemble(records[..1].to_vec());
+        incremental
+            .sync_conversation_world_state_records(&records, false)
+            .unwrap();
+        assert_eq!(cold.to_messages(), incremental.to_messages());
+        let contents = cold.to_messages();
+        let index = contents
+            .iter()
+            .position(|message| message.content().contains("\"recordType\":\"diff\""))
+            .unwrap();
+        assert!(contents[index - 1].content().contains("new-guidance"));
+        assert_eq!(contents[index + 1].content(), "after-boundary");
+        let manifest = cold.manifest();
+        assert!(manifest.entries[index]
+            .sources
+            .contains(&"world_state_unobserved"));
+    }
+
+    #[test]
+    fn request_boundary_world_state_uses_summary_prefix_when_trace_anchor_was_compacted() {
+        for retain_assistant_tail in [false, true] {
+            let mut records = conversation_world_state_records("unused");
+            records[1].effective_before_message_id = None;
+            records[1].request_boundary = Some(crate::WorldStateRequestBoundary {
+                run_id: "run-assistant-current".into(),
+                assistant_message_id: "assistant-current".into(),
+                request_index: 2,
+                after_trace_sequence: Some(1),
+            });
+            records[1].model_observed = false;
+            let mut summary = compaction_summary();
+            summary.covered_through = ContextJournalCursor::trace_item("assistant-current", 1);
+            summary.continuity.covered_through = summary.covered_through.clone();
+            let mut messages = Vec::new();
+            if retain_assistant_tail {
+                let mut assistant = current_assistant_message("assistant-current", "");
+                assistant.conversation_turn_trace.as_mut().unwrap().items =
+                    vec![crate::ConversationTurnTraceItem::AssistantNarration {
+                        sequence: 2,
+                        content: "retained-tail".into(),
+                        truncated: false,
+                    }];
+                assistant.conversation_model_context_items =
+                    vec![crate::ConversationModelContextItem {
+                        sequence: 2,
+                        ordinal: 0,
+                        role: "assistant".into(),
+                        content: "retained-tail".into(),
+                        tool_call_id: None,
+                        tool_calls: Vec::new(),
+                        is_error: false,
+                    }];
+                messages.push(assistant);
+            }
+            messages.push(identified_message("user-current", "user", "next-input"));
+            let assemble = |records| {
+                ContextAssembler::assemble(ContextAssemblyInput {
+                    system_prompt: "rules".into(),
+                    compaction_summary: Some(summary.clone()),
+                    world_state_records: records,
+                    initial_run_world_state: None,
+                    messages: messages.clone(),
+                    skill_discovery: None,
+                    skill_activation: None,
+                    attachments: ContextAttachments::default(),
+                })
+                .unwrap()
+            };
+            let cold = assemble(records.clone());
+            let mut incremental = assemble(records[..1].to_vec());
+            incremental
+                .sync_conversation_world_state_records(&records, false)
+                .unwrap();
+            assert_eq!(cold.to_messages(), incremental.to_messages());
+            let contents = cold.to_messages();
+            assert!(contents[2].content().contains("\"recordType\":\"full\""));
+            assert!(contents[3].content().contains("\"recordType\":\"diff\""));
+            assert!(contents[4].content().contains(if retain_assistant_tail {
+                "retained-tail"
+            } else {
+                "next-input"
+            }));
+        }
+    }
+
+    #[test]
+    fn request_boundary_world_state_rejects_a_future_trace_anchor() {
+        let mut records = conversation_world_state_records("unused");
+        records[1].effective_before_message_id = None;
+        records[1].request_boundary = Some(crate::WorldStateRequestBoundary {
+            run_id: "run-assistant-current".into(),
+            assistant_message_id: "assistant-current".into(),
+            request_index: 2,
+            after_trace_sequence: Some(99),
+        });
+        let error = ContextAssembler::assemble(ContextAssemblyInput {
+            system_prompt: "rules".into(),
+            compaction_summary: None,
+            world_state_records: records,
+            initial_run_world_state: None,
+            messages: vec![
+                identified_message("user", "user", "input"),
+                current_assistant_message("assistant-current", ""),
+            ],
+            skill_discovery: None,
+            skill_activation: None,
+            attachments: ContextAttachments::default(),
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("安全 trace 前缀"));
     }
 
     #[test]
@@ -988,10 +1343,16 @@ mod tests {
         assert!(!messages[2].content().contains("providerSecret"));
         assert_eq!(messages[3].content(), "ATTACHMENT_MARKER");
         let manifest = frame.manifest();
-        assert_eq!(manifest.entries[2].sources, vec!["world_state_snapshot"]);
+        assert_eq!(
+            manifest.entries[2].sources,
+            vec!["world_state_snapshot", "run_bootstrap"]
+        );
         assert_eq!(manifest.entries[2].scope, "run");
         assert_eq!(manifest.entries[2].retention, "retained");
-        assert_eq!(manifest.entries[3].sources, vec!["input_attachment"]);
+        assert_eq!(
+            manifest.entries[3].sources,
+            vec!["input_attachment", "run_bootstrap"]
+        );
     }
 
     #[test]
@@ -1107,9 +1468,15 @@ mod tests {
         assert!(!messages[3].content().contains("description"));
 
         let manifest = frame.manifest();
-        assert_eq!(manifest.entries[2].sources, vec!["input_attachment"]);
+        assert_eq!(
+            manifest.entries[2].sources,
+            vec!["input_attachment", "run_bootstrap"]
+        );
         for (index, id) in [(3, "workspace:w:first"), (4, "workspace:w:second")] {
-            assert_eq!(manifest.entries[index].sources, vec!["skill_instructions"]);
+            assert_eq!(
+                manifest.entries[index].sources,
+                vec!["skill_instructions", "run_bootstrap"]
+            );
             assert_eq!(manifest.entries[index].scope, "run");
             assert_eq!(manifest.entries[index].retention, "retained");
             assert_eq!(manifest.entries[index].origin_kind, Some("skill"));
@@ -1184,12 +1551,15 @@ mod tests {
             .contains("FULL_DOCUMENT_SKILL_INSTRUCTIONS"));
         assert_eq!(
             frame.manifest().entries[2].sources,
-            vec!["input_attachment"]
+            vec!["input_attachment", "run_bootstrap"]
         );
-        assert_eq!(frame.manifest().entries[3].sources, vec!["skill_catalog"]);
+        assert_eq!(
+            frame.manifest().entries[3].sources,
+            vec!["skill_catalog", "run_bootstrap"]
+        );
         assert_eq!(
             frame.manifest().entries[4].sources,
-            vec!["skill_instructions"]
+            vec!["skill_instructions", "run_bootstrap"]
         );
     }
 

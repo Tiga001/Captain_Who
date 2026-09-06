@@ -6,12 +6,20 @@
 
 use crate::world_state::{
     AnchoredWorldStateRecord, WorldStateDiff, WorldStateRecord, WorldStateRecordKind,
-    WorldStateReducer, WorldStateSnapshot,
+    WorldStateReducer, WorldStateRequestBoundary, WorldStateSectionEnvelope, WorldStateSectionId,
+    WorldStateSnapshot,
 };
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::Value;
 use std::error::Error;
 use std::fmt::{Display, Formatter};
+
+mod request_commit;
+pub(crate) use request_commit::record_is_covered;
+pub use request_commit::{
+    commit_request, mark_request_observed, ConversationWorldStateCommitOutcome,
+    ConversationWorldStateCommitRequest,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConversationWorldStateRecordKind {
@@ -49,6 +57,8 @@ pub struct ConversationWorldStateRecordWrite<'a> {
     pub epoch_generation: u64,
     pub base_summary_id: Option<&'a str>,
     pub effective_before_message_id: Option<&'a str>,
+    pub request_boundary: Option<&'a WorldStateRequestBoundary>,
+    pub model_observed: bool,
     pub record: &'a WorldStateRecord,
     pub created_at: i64,
 }
@@ -65,6 +75,8 @@ struct IndexedWorldStateRecordWrite<'a> {
     base_revision: Option<&'a str>,
     result_revision: &'a str,
     effective_before_message_id: Option<&'a str>,
+    request_boundary: Option<&'a WorldStateRequestBoundary>,
+    model_observed: bool,
     record_json: String,
     created_at: i64,
 }
@@ -81,6 +93,8 @@ pub struct StoredConversationWorldStateRecord {
     pub base_revision: Option<String>,
     pub result_revision: String,
     pub effective_before_message_id: Option<String>,
+    pub request_boundary: Option<WorldStateRequestBoundary>,
+    pub model_observed: bool,
     pub record_json: String,
     pub created_at: i64,
 }
@@ -114,6 +128,14 @@ impl StoredConversationWorldStateRecord {
                 self.epoch_id, self.sequence
             )));
         }
+        AnchoredWorldStateRecord {
+            record: record.clone(),
+            effective_before_message_id: self.effective_before_message_id.clone(),
+            request_boundary: self.request_boundary.clone(),
+            model_observed: self.model_observed,
+        }
+        .validate()
+        .map_err(|error| ConversationWorldStateRepositoryError::Corrupt(error.to_string()))?;
         Ok(record)
     }
 }
@@ -124,6 +146,8 @@ pub struct ConversationWorldStateJournalEntry {
     pub epoch_generation: u64,
     pub base_summary_id: Option<String>,
     pub effective_before_message_id: Option<String>,
+    pub request_boundary: Option<WorldStateRequestBoundary>,
+    pub model_observed: bool,
     pub record: WorldStateRecord,
     pub created_at: i64,
 }
@@ -133,6 +157,8 @@ impl ConversationWorldStateJournalEntry {
         AnchoredWorldStateRecord {
             record: self.record.clone(),
             effective_before_message_id: self.effective_before_message_id.clone(),
+            request_boundary: self.request_boundary.clone(),
+            model_observed: self.model_observed,
         }
     }
 }
@@ -147,6 +173,8 @@ impl TryFrom<StoredConversationWorldStateRecord> for ConversationWorldStateJourn
             epoch_generation: stored.epoch_generation,
             base_summary_id: stored.base_summary_id,
             effective_before_message_id: stored.effective_before_message_id,
+            request_boundary: stored.request_boundary,
+            model_observed: stored.model_observed,
             record,
             created_at: stored.created_at,
         })
@@ -164,12 +192,8 @@ pub struct ConversationWorldStateRebaseRequest<'a> {
     pub conversation_id: &'a str,
     pub expected_source_epoch_id: &'a str,
     pub expected_source_revision: &'a str,
-    /// Message containing the compaction cursor.
-    ///
-    /// A message cursor covers that message. A trace cursor covers an item inside its assistant
-    /// message; World State anchors are message-granular and effective before the whole message,
-    /// so both cursor kinds intentionally use the same message boundary here.
-    pub covered_through_message_id: &'a str,
+    /// Exact inclusive history cursor; request state becomes effective after its trace prefix.
+    pub covered_through: &'a crate::ContextJournalCursor,
     pub new_epoch_id: &'a str,
     pub base_summary_id: &'a str,
     pub created_at: i64,
@@ -179,6 +203,7 @@ pub struct ConversationWorldStateRebaseRequest<'a> {
 pub struct ConversationWorldStateRebaseOutcome {
     pub append_outcome: ConversationWorldStateAppendOutcome,
     pub full_snapshot: WorldStateSnapshot,
+    pub head_snapshot: WorldStateSnapshot,
     pub epoch_generation: u64,
 }
 
@@ -186,6 +211,8 @@ pub struct ConversationWorldStateRebaseOutcome {
 struct RebasedWorldStateRecord {
     record: WorldStateRecord,
     effective_before_message_id: Option<String>,
+    request_boundary: Option<WorldStateRequestBoundary>,
+    model_observed: bool,
     created_at: i64,
 }
 
@@ -262,6 +289,8 @@ pub(crate) fn append_record_in_connection(
         base_revision: record.record.base_revision(),
         result_revision: record.record.result_revision(),
         effective_before_message_id: record.effective_before_message_id,
+        request_boundary: record.request_boundary,
+        model_observed: record.model_observed,
         record_json: record.record.canonical_json(),
         created_at: record.created_at,
     };
@@ -323,6 +352,7 @@ fn append_indexed_record_in_connection(
                     "现有 World State epoch 的 generation 或压缩边界不一致。".to_string(),
                 ));
             }
+            request_commit::validate_anchor_order(connection, record)?;
             validate_next_record(connection, record)?;
             validate_exact_next_diff(connection, record)?;
         }
@@ -354,8 +384,9 @@ fn append_indexed_record_in_connection(
             result_revision,
             effective_before_message_id,
             record_json,
-            created_at
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            created_at,
+            request_run_id, request_assistant_message_id, request_index, request_after_trace_sequence, model_observed
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
         params![
             record.conversation_id,
             i64::from(record.schema_version),
@@ -367,6 +398,11 @@ fn append_indexed_record_in_connection(
             record.effective_before_message_id,
             &record.record_json,
             record.created_at,
+            record.request_boundary.map(|b| b.run_id.as_str()),
+            record.request_boundary.map(|b| b.assistant_message_id.as_str()),
+            record.request_boundary.map(|b| sqlite_u64(b.request_index, "request index")).transpose()?,
+            record.request_boundary.and_then(|b| b.after_trace_sequence).map(|s| sqlite_u64(s, "trace sequence")).transpose()?,
+            record.model_observed,
         ],
     )?;
 
@@ -411,7 +447,8 @@ pub fn list_records_for_epoch(
             record.result_revision,
             record.effective_before_message_id,
             record.record_json,
-            record.created_at
+            record.created_at,
+            record.request_run_id, record.request_assistant_message_id, record.request_index, record.request_after_trace_sequence, record.model_observed
          FROM conversation_world_state_records AS record
          INNER JOIN conversation_world_state_epochs AS epoch
            ON epoch.conversation_id = record.conversation_id
@@ -446,7 +483,8 @@ pub fn get_active_head(
                 record.result_revision,
                 record.effective_before_message_id,
                 record.record_json,
-                record.created_at
+                record.created_at,
+            record.request_run_id, record.request_assistant_message_id, record.request_index, record.request_after_trace_sequence, record.model_observed
              FROM conversation_world_state_epochs AS epoch
              INNER JOIN conversation_world_state_records AS record
                ON record.conversation_id = epoch.conversation_id
@@ -562,6 +600,8 @@ pub(crate) fn rebase_active_epoch_in_connection(
                 stored.epoch_generation != active_epoch.generation
                     || stored.base_summary_id.as_deref() != Some(request.base_summary_id)
                     || stored.effective_before_message_id != expected.effective_before_message_id
+                    || stored.request_boundary != expected.request_boundary
+                    || stored.model_observed != expected.model_observed
                     || stored.record != expected.record
             })
         {
@@ -582,6 +622,9 @@ pub(crate) fn rebase_active_epoch_in_connection(
         return Ok(ConversationWorldStateRebaseOutcome {
             append_outcome: ConversationWorldStateAppendOutcome::Idempotent,
             full_snapshot: snapshot.clone(),
+            head_snapshot: fold_active_snapshot(connection, request.conversation_id)?.ok_or_else(
+                || ConversationWorldStateRepositoryError::Corrupt("rebase head missing".into()),
+            )?,
             epoch_generation: active_epoch.generation,
         });
     }
@@ -606,6 +649,8 @@ pub(crate) fn rebase_active_epoch_in_connection(
                 epoch_generation,
                 base_summary_id: Some(request.base_summary_id),
                 effective_before_message_id: planned.effective_before_message_id.as_deref(),
+                request_boundary: planned.request_boundary.as_ref(),
+                model_observed: planned.model_observed,
                 record: &planned.record,
                 created_at: planned.created_at,
             },
@@ -628,6 +673,9 @@ pub(crate) fn rebase_active_epoch_in_connection(
     Ok(ConversationWorldStateRebaseOutcome {
         append_outcome: append_outcome.unwrap_or(ConversationWorldStateAppendOutcome::Inserted),
         full_snapshot: full_snapshot.clone(),
+        head_snapshot: fold_active_snapshot(connection, request.conversation_id)?.ok_or_else(
+            || ConversationWorldStateRepositoryError::Corrupt("rebase head missing".into()),
+        )?,
         epoch_generation,
     })
 }
@@ -647,12 +695,7 @@ fn build_rebase_plan(
             request.expected_source_epoch_id
         ))
     })?;
-    let cutoff_position = message_position(
-        connection,
-        request.conversation_id,
-        request.covered_through_message_id,
-        "compaction cutoff",
-    )?;
+
     let source_records = list_records_for_epoch(
         connection,
         request.conversation_id,
@@ -666,10 +709,16 @@ fn build_rebase_plan(
     if first.sequence != 0
         || first.record_kind != ConversationWorldStateRecordKind::Full
         || first.effective_before_message_id.is_some()
+        || first.request_boundary.is_some()
     {
         return Err(ConversationWorldStateRepositoryError::Corrupt(
             "source World State epoch 必须从无消息 anchor 的 sequence 0 full snapshot 开始。"
                 .to_string(),
+        ));
+    }
+    if !first.model_observed {
+        return Err(ConversationWorldStateRepositoryError::Conflict(
+            "未观察的 World State full 不能压缩。".into(),
         ));
     }
     let WorldStateRecord::Full(initial) = first.decode_record()? else {
@@ -692,21 +741,18 @@ fn build_rebase_plan(
                 "source World State epoch 在 initial full 后包含了非 diff 记录。".to_string(),
             ));
         };
-        let anchor = stored
-            .effective_before_message_id
-            .as_deref()
-            .ok_or_else(|| {
-                ConversationWorldStateRepositoryError::Corrupt(
-                    "source World State diff 缺少 effective-before message anchor。".to_string(),
-                )
-            })?;
-        let anchor_position = message_position(
+        let effective_at_boundary = record_is_covered(
             connection,
             request.conversation_id,
-            anchor,
-            "World State diff anchor",
+            stored.effective_before_message_id.as_deref(),
+            stored.request_boundary.as_ref(),
+            request.covered_through,
         )?;
-        let effective_at_boundary = anchor_position <= cutoff_position;
+        if effective_at_boundary && !stored.model_observed {
+            return Err(ConversationWorldStateRepositoryError::Conflict(
+                "不能将未观察的 prepared World State 压入摘要基线。".into(),
+            ));
+        }
         if effective_at_boundary && crossed_boundary {
             return Err(ConversationWorldStateRepositoryError::Corrupt(
                 "World State diff anchor 顺序跨越 compaction cutoff 后又回到已覆盖历史。"
@@ -747,6 +793,8 @@ fn build_rebase_plan(
     let mut records = vec![RebasedWorldStateRecord {
         record: WorldStateRecord::Full(full_snapshot),
         effective_before_message_id: None,
+        request_boundary: None,
+        model_observed: true,
         created_at: request.created_at,
     }];
     for (stored, source_diff) in suffix {
@@ -783,6 +831,8 @@ fn build_rebase_plan(
         records.push(RebasedWorldStateRecord {
             record: WorldStateRecord::Diff(migrated),
             effective_before_message_id: stored.effective_before_message_id.clone(),
+            request_boundary: stored.request_boundary.clone(),
+            model_observed: stored.model_observed,
             created_at: stored.created_at,
         });
     }
@@ -922,11 +972,20 @@ pub(crate) fn rewind_for_message_deletion(
         return Ok(());
     };
 
+    // No-op requests also own identities in the abandoned suffix, despite adding no diff.
+    connection.execute(
+        "DELETE FROM conversation_world_state_request_commits
+        WHERE conversation_id=?1 AND assistant_message_id IN (
+            SELECT id FROM messages WHERE conversation_id=?1 AND position>=?2
+        )",
+        params![conversation_id, minimum_deleted_position],
+    )?;
+
     let first_affected_journal_position = connection.query_row(
         "SELECT MIN(record.journal_position)
              FROM conversation_world_state_records AS record
              INNER JOIN messages AS anchor
-               ON anchor.id = record.effective_before_message_id
+               ON anchor.id = COALESCE(record.effective_before_message_id, record.request_assistant_message_id)
               AND anchor.conversation_id = record.conversation_id
              WHERE record.conversation_id = ?1
                AND anchor.position >= ?2",
@@ -1034,7 +1093,8 @@ fn get_record(
                 record.result_revision,
                 record.effective_before_message_id,
                 record.record_json,
-                record.created_at
+                record.created_at,
+            record.request_run_id, record.request_assistant_message_id, record.request_index, record.request_after_trace_sequence, record.model_observed
              FROM conversation_world_state_records AS record
              INNER JOIN conversation_world_state_epochs AS epoch
                ON epoch.conversation_id = record.conversation_id
@@ -1091,10 +1151,24 @@ fn validate_write(
     }
     if record.record_kind == ConversationWorldStateRecordKind::Diff
         && record.effective_before_message_id.is_none()
+        && record.request_boundary.is_none()
     {
         return Err(ConversationWorldStateRepositoryError::Invalid(
             "conversation World State diff 必须具有 effective-before message anchor。".to_string(),
         ));
+    }
+    if record.effective_before_message_id.is_some() && record.request_boundary.is_some()
+        || record.record_kind == ConversationWorldStateRecordKind::Full
+            && (record.request_boundary.is_some() || record.effective_before_message_id.is_some())
+    {
+        return Err(ConversationWorldStateRepositoryError::Invalid(
+            "World State anchor 必须互斥。".to_string(),
+        ));
+    }
+    if let Some(boundary) = record.request_boundary {
+        boundary
+            .validate()
+            .map_err(|error| ConversationWorldStateRepositoryError::Invalid(error.to_string()))?;
     }
     Ok(())
 }
@@ -1108,7 +1182,7 @@ fn validate_rebase_request(
         ("source revision", request.expected_source_revision),
         (
             "covered-through message id",
-            request.covered_through_message_id,
+            request.covered_through.message_id(),
         ),
         ("new epoch id", request.new_epoch_id),
         ("base summary id", request.base_summary_id),
@@ -1221,6 +1295,7 @@ fn semantically_matches(
         && stored.base_revision.as_deref() == write.base_revision
         && stored.result_revision == write.result_revision
         && stored.effective_before_message_id.as_deref() == write.effective_before_message_id
+        && stored.request_boundary.as_ref() == write.request_boundary
         && stored.record_json == write.record_json
 }
 
@@ -1273,6 +1348,18 @@ fn stored_record_from_row(
         effective_before_message_id: row.get(9)?,
         record_json: row.get(10)?,
         created_at: row.get(11)?,
+        model_observed: row.get(16)?,
+        request_boundary: row
+            .get::<_, Option<String>>(12)?
+            .map(|run_id| {
+                Ok::<_, rusqlite::Error>(WorldStateRequestBoundary {
+                    run_id,
+                    assistant_message_id: row.get(13)?,
+                    request_index: row.get::<_, u64>(14)?,
+                    after_trace_sequence: row.get::<_, Option<u64>>(15)?,
+                })
+            })
+            .transpose()?,
     })
 }
 
@@ -1497,6 +1584,8 @@ mod tests {
                 epoch_generation: generation,
                 base_summary_id: None,
                 effective_before_message_id: anchor,
+                request_boundary: None,
+                model_observed: true,
                 record,
                 created_at,
             },
@@ -1516,29 +1605,13 @@ mod tests {
         let diff_record = WorldStateRecord::Diff(diff);
 
         assert_eq!(
-            append(
-                &mut connection,
-                "conversation",
-                1,
-                Some("message-0"),
-                &full_record,
-                10,
-            )
-            .unwrap(),
+            append(&mut connection, "conversation", 1, None, &full_record, 10,).unwrap(),
             ConversationWorldStateAppendOutcome::Inserted
         );
         // Retries may observe a different wall-clock time; immutable semantic identity still makes
         // this the same append.
         assert_eq!(
-            append(
-                &mut connection,
-                "conversation",
-                1,
-                Some("message-0"),
-                &full_record,
-                99,
-            )
-            .unwrap(),
+            append(&mut connection, "conversation", 1, None, &full_record, 99,).unwrap(),
             ConversationWorldStateAppendOutcome::Idempotent
         );
         assert!(matches!(
@@ -1546,8 +1619,8 @@ mod tests {
                 &mut connection,
                 "conversation",
                 1,
-                Some("message-1"),
-                &full_record,
+                None,
+                &WorldStateRecord::Full(snapshot("epoch-1", 0, "different")),
                 10,
             ),
             Err(ConversationWorldStateRepositoryError::Conflict(_))
@@ -1663,7 +1736,7 @@ mod tests {
             &mut connection,
             "conversation",
             1,
-            Some("message-0"),
+            None,
             &WorldStateRecord::Full(full),
             10,
         )
@@ -1749,7 +1822,7 @@ mod tests {
             conversation_id: "conversation",
             expected_source_epoch_id: "epoch-1",
             expected_source_revision: &current.revision,
-            covered_through_message_id: "message-1",
+            covered_through: &crate::ContextJournalCursor::message("message-1"),
             new_epoch_id: "epoch-2",
             base_summary_id: "summary-1",
             created_at: 21,
@@ -1794,7 +1867,7 @@ mod tests {
             conversation_id: "conversation",
             expected_source_epoch_id: "epoch-2",
             expected_source_revision: &inserted.full_snapshot.revision,
-            covered_through_message_id: "message-1",
+            covered_through: &crate::ContextJournalCursor::message("message-1"),
             new_epoch_id: "epoch-3",
             base_summary_id: "summary-2",
             created_at: 23,
@@ -1862,18 +1935,348 @@ mod tests {
         insert_message(&connection, "conversation-b", "foreign-message", 0);
         let full = WorldStateRecord::Full(snapshot("epoch", 0, "ask"));
 
+        append(&mut connection, "conversation-a", 1, None, &full, 9).unwrap();
+        let changed = snapshot("epoch", 1, "allow");
+        let WorldStateRecord::Full(initial) = &full else {
+            unreachable!()
+        };
+        let diff = WorldStateRecord::Diff(WorldStateDiff::between(initial, &changed).unwrap());
         assert!(matches!(
             append(
                 &mut connection,
                 "conversation-a",
                 1,
                 Some("foreign-message"),
-                &full,
+                &diff,
                 10,
             ),
             Err(ConversationWorldStateRepositoryError::Database(_))
         ));
-        assert!(list_active_journal_entries(&connection, "conversation-a")
+        assert_eq!(
+            list_active_journal_entries(&connection, "conversation-a")
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+    fn live_request_trace(
+        connection: &mut Connection,
+        assistant: &str,
+        run_id: &str,
+        item_count: u64,
+    ) {
+        connection.execute("INSERT OR IGNORE INTO messages (id, conversation_id, role, content, created_at, position) VALUES (?1,'conversation','assistant','',1,1)", [assistant]).unwrap();
+        crate::storage::conversation_trace_repository::append_in_progress_trace(
+            connection,
+            &crate::ConversationTurnTrace {
+                schema_version: crate::CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
+                run_id: run_id.into(),
+                conversation_id: "conversation".into(),
+                assistant_message_id: assistant.into(),
+                terminal_status: crate::ConversationTurnTraceTerminalStatus::InProgress,
+                terminal_error: None,
+                truncated: false,
+                items: (0..item_count)
+                    .map(
+                        |sequence| crate::ConversationTurnTraceItem::AssistantNarration {
+                            sequence,
+                            content: format!("step-{sequence}"),
+                            truncated: false,
+                        },
+                    )
+                    .collect(),
+            },
+            1,
+            2,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn request_commit_cas_preserves_other_owners_and_persists_noop_identity() {
+        let fixture = tempfile::tempdir().unwrap();
+        let path = fixture.path().join("request.sqlite");
+        let mut connection = Connection::open(&path).unwrap();
+        migrations::run_migrations(&connection).unwrap();
+        insert_conversation(&connection, "conversation");
+        live_request_trace(&mut connection, "assistant", "run", 0);
+        let boundary = crate::WorldStateRequestBoundary {
+            run_id: "run".into(),
+            assistant_message_id: "assistant".into(),
+            request_index: 0,
+            after_trace_sequence: None,
+        };
+        let owned = [WorldStateSectionId::EffectivePermissions];
+        let initial = snapshot("epoch", 0, "initial");
+        let request = ConversationWorldStateCommitRequest {
+            conversation_id: "conversation",
+            boundary: &boundary,
+            expected_head: None,
+            owned_section_ids: &owned,
+            sections: &initial.sections,
+            initial_epoch_id: "epoch",
+            created_at: 3,
+        };
+        let first = commit_request(&mut connection, &request).unwrap();
+        assert_eq!(first.records.len(), 1);
+        assert!(!first.records[0].model_observed);
+        drop(connection);
+        let mut connection = Connection::open(&path).unwrap();
+        migrations::run_migrations(&connection).unwrap();
+        assert_eq!(
+            commit_request(&mut connection, &request)
+                .unwrap()
+                .append_outcome,
+            ConversationWorldStateAppendOutcome::Idempotent
+        );
+        let conflict_sections = snapshot("epoch", 0, "different").sections;
+        assert!(matches!(
+            commit_request(
+                &mut connection,
+                &ConversationWorldStateCommitRequest {
+                    sections: &conflict_sections,
+                    ..request.clone()
+                }
+            ),
+            Err(ConversationWorldStateRepositoryError::Conflict(_))
+        ));
+        mark_request_observed(&mut connection, "conversation", &boundary).unwrap();
+        let next_boundary = crate::WorldStateRequestBoundary {
+            request_index: 1,
+            ..boundary.clone()
+        };
+        let other_owned = [WorldStateSectionId::Environment];
+        let other_sections = [WorldStateSectionEnvelope::model_visible(
+            WorldStateSectionId::Environment,
+            WorldStateLifetime::Conversation,
+            json!({"os":"test"}),
+            json!({"os":"test"}),
+        )
+        .unwrap()];
+        assert!(matches!(
+            commit_request(
+                &mut connection,
+                &ConversationWorldStateCommitRequest {
+                    boundary: &next_boundary,
+                    owned_section_ids: &other_owned,
+                    sections: &other_sections,
+                    ..request.clone()
+                }
+            ),
+            Err(ConversationWorldStateRepositoryError::Conflict(_))
+        ));
+        let second = commit_request(
+            &mut connection,
+            &ConversationWorldStateCommitRequest {
+                boundary: &next_boundary,
+                expected_head: Some(&first.head_snapshot),
+                owned_section_ids: &other_owned,
+                sections: &other_sections,
+                ..request.clone()
+            },
+        )
+        .unwrap();
+        assert_eq!(second.head_snapshot.sections.len(), 2);
+        assert_eq!(second.records.len(), 2);
+        assert_eq!(
+            second.records[1].request_boundary.as_ref(),
+            Some(&next_boundary)
+        );
+        assert!(!second.records[1].model_observed);
+        // A late response for request 0 cannot acknowledge a future state from request 1.
+        mark_request_observed(&mut connection, "conversation", &boundary).unwrap();
+        assert!(
+            !list_active_journal_entries(&connection, "conversation").unwrap()[1].model_observed
+        );
+        let third_boundary = crate::WorldStateRequestBoundary {
+            request_index: 2,
+            ..boundary.clone()
+        };
+        let no_op = commit_request(
+            &mut connection,
+            &ConversationWorldStateCommitRequest {
+                boundary: &third_boundary,
+                expected_head: Some(&second.head_snapshot),
+                ..request.clone()
+            },
+        )
+        .unwrap();
+        assert_eq!(no_op.records.len(), 2);
+        assert_eq!(no_op.head_snapshot, second.head_snapshot);
+        mark_request_observed(&mut connection, "conversation", &third_boundary).unwrap();
+        assert!(list_active_journal_entries(&connection, "conversation")
+            .unwrap()
+            .iter()
+            .all(|r| r.model_observed));
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM conversation_world_state_request_commits",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+            3
+        );
+        // Failed identity/binding validation must leave neither state nor a receipt.
+        let bad_boundary = crate::WorldStateRequestBoundary {
+            run_id: "foreign-run".into(),
+            request_index: 3,
+            ..boundary.clone()
+        };
+        assert!(commit_request(
+            &mut connection,
+            &ConversationWorldStateCommitRequest {
+                boundary: &bad_boundary,
+                expected_head: Some(&no_op.head_snapshot),
+                ..request
+            }
+        )
+        .is_err());
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM conversation_world_state_request_commits",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+            3
+        );
+    }
+
+    #[test]
+    fn trace_cursor_rebase_keeps_equal_cursor_request_in_suffix_and_ack_survives_rebase() {
+        let mut connection = connection();
+        insert_conversation(&connection, "conversation");
+        live_request_trace(&mut connection, "assistant", "run", 0);
+        let boundary = crate::WorldStateRequestBoundary {
+            run_id: "run".into(),
+            assistant_message_id: "assistant".into(),
+            request_index: 0,
+            after_trace_sequence: None,
+        };
+        let owned = [WorldStateSectionId::EffectivePermissions];
+        let initial = snapshot("epoch", 0, "initial");
+        let request = ConversationWorldStateCommitRequest {
+            conversation_id: "conversation",
+            boundary: &boundary,
+            expected_head: None,
+            owned_section_ids: &owned,
+            sections: &initial.sections,
+            initial_epoch_id: "epoch",
+            created_at: 3,
+        };
+        let first = commit_request(&mut connection, &request).unwrap();
+        mark_request_observed(&mut connection, "conversation", &boundary).unwrap();
+        live_request_trace(&mut connection, "assistant", "run", 1);
+        let after = crate::WorldStateRequestBoundary {
+            request_index: 1,
+            after_trace_sequence: Some(0),
+            ..boundary.clone()
+        };
+        let changed = snapshot("epoch", 1, "changed");
+        let second = commit_request(
+            &mut connection,
+            &ConversationWorldStateCommitRequest {
+                boundary: &after,
+                expected_head: Some(&first.head_snapshot),
+                sections: &changed.sections,
+                ..request
+            },
+        )
+        .unwrap();
+        insert_summary(&connection, "conversation", "assistant", "summary");
+        let rebase = ConversationWorldStateRebaseRequest {
+            conversation_id: "conversation",
+            expected_source_epoch_id: "epoch",
+            expected_source_revision: &second.head_snapshot.revision,
+            covered_through: &crate::ContextJournalCursor::trace_item("assistant", 0),
+            new_epoch_id: "rebased",
+            base_summary_id: "summary",
+            created_at: 10,
+        };
+        let rebased = rebase_active_epoch(&mut connection, &rebase).unwrap();
+        assert_eq!(rebased.full_snapshot.revision, initial.revision);
+        assert_eq!(rebased.head_snapshot.revision, changed.revision);
+        let records = list_active_journal_entries(&connection, "conversation").unwrap();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[1].request_boundary.as_ref(), Some(&after));
+        assert!(!records[1].model_observed);
+        mark_request_observed(&mut connection, "conversation", &after).unwrap();
+        assert!(
+            list_active_journal_entries(&connection, "conversation").unwrap()[1].model_observed
+        );
+    }
+    #[test]
+    fn request_commit_rejects_stale_trace_stop_fence_and_rolls_back_receipt_failure() {
+        let mut connection = connection();
+        insert_conversation(&connection, "conversation");
+        live_request_trace(&mut connection, "assistant", "run", 1);
+        let boundary = crate::WorldStateRequestBoundary {
+            run_id: "run".into(),
+            assistant_message_id: "assistant".into(),
+            request_index: 0,
+            after_trace_sequence: None,
+        };
+        let owned = [WorldStateSectionId::EffectivePermissions];
+        let initial = snapshot("epoch", 0, "initial");
+        let request = ConversationWorldStateCommitRequest {
+            conversation_id: "conversation",
+            boundary: &boundary,
+            expected_head: None,
+            owned_section_ids: &owned,
+            sections: &initial.sections,
+            initial_epoch_id: "epoch",
+            created_at: 3,
+        };
+        assert!(matches!(
+            commit_request(&mut connection, &request),
+            Err(ConversationWorldStateRepositoryError::Conflict(_))
+        ));
+        let boundary = crate::WorldStateRequestBoundary {
+            after_trace_sequence: Some(0),
+            ..boundary.clone()
+        };
+        let request = ConversationWorldStateCommitRequest {
+            boundary: &boundary,
+            ..request
+        };
+        connection.execute_batch("CREATE TRIGGER fail_test_prepared BEFORE INSERT ON conversation_world_state_request_commits BEGIN SELECT RAISE(ABORT,'test write failure'); END;").unwrap();
+        assert!(matches!(
+            commit_request(&mut connection, &request),
+            Err(ConversationWorldStateRepositoryError::Database(_))
+        ));
+        assert!(list_active_journal_entries(&connection, "conversation")
+            .unwrap()
+            .is_empty());
+        connection
+            .execute_batch("DROP TRIGGER fail_test_prepared;")
+            .unwrap();
+        crate::storage::agent_graph_repository::ensure_root_agent(
+            &mut connection,
+            &crate::EnsureRootAgentInput {
+                agent_id: "root".into(),
+                conversation_id: "conversation".into(),
+                creation_request_id: "root-request".into(),
+                task_name: "Root".into(),
+            },
+            1,
+        )
+        .unwrap();
+        crate::storage::agent_graph_repository::begin_agent_tree_run_stop_by_root_agent(
+            &mut connection,
+            "root",
+            "run",
+            4,
+        )
+        .unwrap()
+        .unwrap();
+        assert!(matches!(
+            commit_request(&mut connection, &request),
+            Err(ConversationWorldStateRepositoryError::Conflict(_))
+        ));
+        assert!(list_active_journal_entries(&connection, "conversation")
             .unwrap()
             .is_empty());
     }

@@ -391,6 +391,52 @@ pub fn model_selection_section(
     )
 }
 
+/// Process-observed environment facts shared by actual Host requests and read-only previews.
+/// Operational capability and grant state belongs to its owner section, not this environment.
+pub fn environment_section(
+    lifetime: WorldStateLifetime,
+) -> Result<WorldStateSectionEnvelope, WorldStateError> {
+    let value = environment_projection();
+    WorldStateSectionEnvelope::model_visible(
+        WorldStateSectionId::Environment,
+        lifetime,
+        value.clone(),
+        value,
+    )
+}
+
+fn environment_projection() -> serde_json::Value {
+    let shell_name = std::env::var("SHELL")
+        .ok()
+        .or_else(|| std::env::var("COMSPEC").ok())
+        .and_then(|shell| {
+            std::path::Path::new(&shell)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map(str::to_string)
+        });
+    let timezone = std::env::var("TZ")
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+    serde_json::json!({
+        "os": {
+            "family": std::env::consts::OS,
+            "arch": std::env::consts::ARCH,
+        },
+        "shell": {
+            "name": shell_name,
+        },
+        "timezone": {
+            "name": timezone,
+            "source": if timezone.is_some() { "TZ" } else { "system" },
+        },
+        "network": {
+            "publicWeb": "tool_gated",
+            "note": "Use registered web tools when available; do not infer arbitrary network access.",
+        }
+    })
+}
+
 /// Complete model capabilities remain Host-only execution authority even though a narrow derived
 /// projection is exposed through `model.selection` in the same versioned World State ledger.
 pub fn model_capabilities_section(
@@ -876,17 +922,38 @@ impl WorldStateRecord {
     }
 }
 
-/// A durable record plus its chronological position in a conversation.
-///
-/// `None` places an initial full snapshot in the epoch prelude. `Some(message_id)` means the state
-/// is effective immediately before that message. The message ID is an opaque backend anchor and is
-/// intentionally not part of the model-visible projection.
+/// A request prepared after an already committed, safe assistant trace prefix.
+/// This identity describes preparation, not proof of provider delivery.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorldStateRequestBoundary {
+    pub run_id: String,
+    pub assistant_message_id: String,
+    pub request_index: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after_trace_sequence: Option<u64>,
+}
+
+impl WorldStateRequestBoundary {
+    pub fn validate(&self) -> Result<(), WorldStateError> {
+        if self.run_id.trim().is_empty() || self.assistant_message_id.trim().is_empty() {
+            return Err(WorldStateError::InvalidRequestBoundary);
+        }
+        Ok(())
+    }
+}
+
+/// A durable record and its chronological placement. Full snapshots have no anchor;
+/// diffs select exactly one message or prepared request boundary.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AnchoredWorldStateRecord {
     pub record: WorldStateRecord,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effective_before_message_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_boundary: Option<WorldStateRequestBoundary>,
+    pub model_observed: bool,
 }
 
 impl AnchoredWorldStateRecord {
@@ -897,6 +964,22 @@ impl AnchoredWorldStateRecord {
         let anchored = Self {
             record,
             effective_before_message_id,
+            request_boundary: None,
+            model_observed: true,
+        };
+        anchored.validate()?;
+        Ok(anchored)
+    }
+
+    pub fn at_request(
+        record: WorldStateRecord,
+        boundary: WorldStateRequestBoundary,
+    ) -> Result<Self, WorldStateError> {
+        let anchored = Self {
+            record,
+            effective_before_message_id: None,
+            request_boundary: Some(boundary),
+            model_observed: true,
         };
         anchored.validate()?;
         Ok(anchored)
@@ -907,11 +990,23 @@ impl AnchoredWorldStateRecord {
         if self
             .effective_before_message_id
             .as_ref()
-            .is_some_and(|message_id| message_id.trim().is_empty())
+            .is_some_and(|id| id.trim().is_empty())
         {
             return Err(WorldStateError::InvalidEffectiveBeforeMessageId);
         }
-        Ok(())
+        if let Some(boundary) = &self.request_boundary {
+            boundary.validate()?;
+        }
+        match (
+            &self.record,
+            &self.effective_before_message_id,
+            &self.request_boundary,
+        ) {
+            (WorldStateRecord::Full(_), None, None)
+            | (WorldStateRecord::Diff(_), Some(_), None)
+            | (WorldStateRecord::Diff(_), None, Some(_)) => Ok(()),
+            _ => Err(WorldStateError::InvalidRequestBoundary),
+        }
     }
 }
 
@@ -1050,6 +1145,7 @@ pub enum WorldStateError {
     },
     InvalidEpochId,
     InvalidEffectiveBeforeMessageId,
+    InvalidRequestBoundary,
     InvalidSectionId(String),
     InvalidRevision {
         field: &'static str,
@@ -1109,6 +1205,7 @@ impl fmt::Display for WorldStateError {
                 "unsupported world state schema version {actual}; expected {expected}"
             ),
             Self::InvalidEpochId => formatter.write_str("world state epoch ID cannot be empty"),
+            Self::InvalidRequestBoundary => formatter.write_str("world state record must have a valid, exclusive boundary"),
             Self::InvalidEffectiveBeforeMessageId => {
                 formatter.write_str("world state effective-before message ID cannot be empty")
             }

@@ -244,6 +244,37 @@ fn rewrite_is_atomic_idempotent_and_keeps_source_receipts_as_raw_facts() {
             2,
         )
         .unwrap();
+    let request_world_state =
+        crate::WorldStateSnapshot::new("rewrite-world-state-epoch", 2, Vec::new()).unwrap();
+    let request_boundary = crate::WorldStateRequestBoundary {
+        run_id: "source-run".into(),
+        assistant_message_id: "source-assistant".into(),
+        request_index: 0,
+        after_trace_sequence: None,
+    };
+    {
+        let mut connection = service.state.connection().unwrap();
+        crate::storage::world_state_repository::append_record(
+            &mut connection,
+            &crate::storage::world_state_repository::ConversationWorldStateRecordWrite {
+                conversation_id,
+                epoch_generation: 1,
+                base_summary_id: None,
+                effective_before_message_id: None,
+                request_boundary: Some(&request_boundary),
+                model_observed: false,
+                record: &crate::WorldStateRecord::Diff(
+                    crate::WorldStateDiff::between(&current_world_state, &request_world_state)
+                        .unwrap(),
+                ),
+                created_at: 3,
+            },
+        )
+        .unwrap();
+        connection.execute("INSERT INTO conversation_world_state_request_commits
+            (conversation_id,run_id,assistant_message_id,request_index,after_trace_sequence,payload_json,epoch_id,sequence,created_at)
+            VALUES (?1,'source-run','source-assistant',0,NULL,'{}','rewrite-world-state-epoch',2,3)", [conversation_id]).unwrap();
+    }
     let mut candidate = candidate;
     candidate.updated_at = 5;
     candidate.messages.extend([
@@ -362,10 +393,15 @@ fn rewrite_is_atomic_idempotent_and_keeps_source_receipts_as_raw_facts() {
     let active_world_state = service
         .list_active_conversation_world_state_records(conversation_id)
         .unwrap();
-    assert_eq!(
-        active_world_state[1].effective_before_message_id.as_deref(),
-        Some("replacement-user")
-    );
+    assert_eq!(active_world_state.len(), 1);
+    assert!(matches!(
+        active_world_state[0].record,
+        crate::WorldStateRecord::Full(_)
+    ));
+    assert_eq!(service.state.connection().unwrap().query_row(
+        "SELECT COUNT(*) FROM conversation_world_state_request_commits WHERE conversation_id=?1",
+        [conversation_id], |row| row.get::<_, i64>(0),
+    ).unwrap(), 0);
     let history_filter =
         crate::storage::conversation_history_repository::ConversationHistorySearchFilter {
             include_messages: true,

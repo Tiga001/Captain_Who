@@ -346,6 +346,8 @@ pub(super) fn restore_run_checkpoint_with_model_projection(
         checkpoint.conversation_trace_truncated,
     );
     let mut context = ContextFrame::from_checkpoint_items(checkpoint.context_items)?;
+    context
+        .restore_conversation_world_state_records(checkpoint.conversation_world_state_records)?;
     let queue = restore_queued_tool_calls(
         checkpoint.queued_tool_calls,
         &checkpoint.pending_tool_call_id,

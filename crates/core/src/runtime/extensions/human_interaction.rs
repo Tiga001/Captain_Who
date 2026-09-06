@@ -44,6 +44,7 @@ pub(super) struct HumanInteractionExtension {
 /// a concurrent settings change cannot produce enabled schema with disabled instructions.
 struct HumanInteractionRequestContract {
     settings: HumanInteractionSettings,
+    policy_readable: bool,
     execution_ready: bool,
     async_execution_ready: bool,
 }
@@ -52,6 +53,7 @@ impl HumanInteractionRequestContract {
     fn unavailable() -> Self {
         Self {
             settings: unavailable_policy(),
+            policy_readable: false,
             execution_ready: false,
             async_execution_ready: false,
         }
@@ -66,13 +68,28 @@ impl HumanInteractionRequestContract {
         }
         Ok(Self {
             settings,
+            policy_readable: true,
             execution_ready: false,
             async_execution_ready: false,
         })
     }
 
     fn available(&self) -> bool {
-        self.settings.enabled && (self.execution_ready || self.async_execution_ready)
+        self.policy_readable
+            && self.settings.enabled
+            && (self.execution_ready || self.async_execution_ready)
+    }
+
+    fn availability_reason(&self) -> &'static str {
+        if !self.policy_readable {
+            "host_unavailable"
+        } else if !self.settings.enabled {
+            "disabled_by_user"
+        } else if !self.available() {
+            "execution_unavailable"
+        } else {
+            "available"
+        }
     }
 
     #[cfg(test)]
@@ -97,12 +114,12 @@ impl HumanInteractionRequestContract {
 
     fn capabilities(&self) -> BTreeSet<ToolCapabilityId> {
         let mut capabilities = BTreeSet::new();
-        if self.settings.enabled && self.execution_ready {
+        if self.policy_readable && self.settings.enabled && self.execution_ready {
             capabilities.insert(ToolCapabilityId::application_owned(
                 HUMAN_INTERACTION_CAPABILITY,
             ));
         }
-        if self.settings.enabled && self.async_execution_ready {
+        if self.policy_readable && self.settings.enabled && self.async_execution_ready {
             capabilities.insert(ToolCapabilityId::application_owned(
                 HUMAN_INTERACTION_ASYNC_CAPABILITY,
             ));
@@ -130,7 +147,8 @@ impl HumanInteractionRequestContract {
             ContextSource::RuntimeGuard,
             ContextScope::Run,
             ContextRetention::RequestOnly,
-        )]
+        )
+        .with_source(ContextSource::CapabilityInstructions)]
     }
 
     fn world_state(&self) -> AgentResult<Vec<WorldStateSectionEnvelope>> {
@@ -139,22 +157,22 @@ impl HumanInteractionRequestContract {
         let state = json!({
             "schemaVersion": 1,
             "policyRevision": self.settings.revision,
+            "policyReadable": self.policy_readable,
             "enabled": self.settings.enabled,
             "executionReady": self.execution_ready,
             "asyncExecutionReady": self.async_execution_ready,
             "asyncAvailable": self.settings.enabled && self.async_execution_ready,
             "available": self.available(),
         });
-        let section = if self.available() {
-            WorldStateSectionEnvelope::model_visible(
-                id,
-                WorldStateLifetime::Run,
-                state,
-                json!({ "available": true }),
-            )
-        } else {
-            WorldStateSectionEnvelope::host_only(id, WorldStateLifetime::Run, state)
-        }
+        // Keep the absence reason visible after unloading schemas/instructions. In particular,
+        // an enabled -> disabled transition is a World State replacement, not an unexplained
+        // removal. Policy revisions and execution readiness remain private Host facts.
+        let section = WorldStateSectionEnvelope::model_visible(
+            id,
+            WorldStateLifetime::Conversation,
+            state,
+            json!({ "available": self.available(), "reason": self.availability_reason() }),
+        )
         .map_err(|error| AgentError::new(error.to_string()))?;
         Ok(vec![section])
     }
@@ -179,6 +197,23 @@ impl HumanInteractionExtension {
         self.async_execution_ready = execution_ready;
         self
     }
+}
+
+pub(super) fn unavailable_world_state_sections(
+    applicable: bool,
+) -> AgentResult<Vec<WorldStateSectionEnvelope>> {
+    let state = json!({
+        "available": false,
+        "reason": if applicable { "host_unavailable" } else { "identity_not_applicable" },
+    });
+    Ok(vec![WorldStateSectionEnvelope::model_visible(
+        WorldStateSectionId::extension(HUMAN_INTERACTION_EXTENSION_ID)
+            .map_err(|error| AgentError::new(error.to_string()))?,
+        WorldStateLifetime::Conversation,
+        state.clone(),
+        state,
+    )
+    .map_err(|error| AgentError::new(error.to_string()))?])
 }
 
 fn unavailable_policy() -> HumanInteractionSettings {
@@ -236,7 +271,7 @@ impl RuntimeExtension for HumanInteractionExtension {
         Ok(self.request.context(request.purpose))
     }
 
-    fn world_state_sections(&self) -> AgentResult<Vec<WorldStateSectionEnvelope>> {
+    fn conversation_world_state_sections(&self) -> AgentResult<Vec<WorldStateSectionEnvelope>> {
         self.request.world_state()
     }
 
@@ -260,6 +295,7 @@ impl RuntimeExtension for HumanInteractionExtension {
 mod tests {
     use super::*;
     use crate::tools::ToolRegistry;
+    use crate::world_state::{WorldStateDiff, WorldStateSnapshot};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
 
@@ -303,10 +339,13 @@ mod tests {
         for name in crate::tools::human_interaction::HUMAN_INTERACTION_TOOL_NAMES {
             assert!(!registry.contains_tool(name));
         }
-        let state = extension.world_state_sections().unwrap();
+        let state = extension.conversation_world_state_sections().unwrap();
         assert_eq!(state[0].state["policyRevision"], 7);
         assert_eq!(state[0].state["executionReady"], false);
-        assert!(state[0].model_projection.is_none());
+        assert_eq!(
+            state[0].model_projection,
+            Some(json!({ "available": false, "reason": "execution_unavailable" }))
+        );
     }
 
     #[test]
@@ -332,7 +371,7 @@ mod tests {
             1
         );
         assert_eq!(
-            extension.world_state_sections().unwrap()[0].state["policyRevision"],
+            extension.conversation_world_state_sections().unwrap()[0].state["policyRevision"],
             3
         );
         assert_eq!(policy.reads.load(Ordering::SeqCst), 1);
@@ -344,10 +383,124 @@ mod tests {
             .unwrap()
             .is_empty());
         assert_eq!(
-            extension.world_state_sections().unwrap()[0].state["policyRevision"],
+            extension.conversation_world_state_sections().unwrap()[0].state["policyRevision"],
             4
         );
         assert_eq!(policy.reads.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn disabling_human_interaction_keeps_only_the_reason_in_model_world_state_diff() {
+        let policy = Arc::new(Policy {
+            settings: Mutex::new(settings(true, 3)),
+            reads: AtomicUsize::new(0),
+        });
+        let mut extension = HumanInteractionExtension::new(Some(policy.clone()))
+            .with_execution_ready(true)
+            .with_async_execution_ready(true);
+        let mut registry = ToolRegistry::defaults_with_search(None);
+        for tool in extension.tools() {
+            registry
+                .register_extension_tool(HUMAN_INTERACTION_EXTENSION_ID, tool)
+                .unwrap();
+        }
+        let tool_set = |extension: &HumanInteractionExtension| {
+            registry
+                .effective_tool_set(
+                    registry.definitions(),
+                    &extension.active_tool_capabilities().unwrap(),
+                )
+                .unwrap()
+        };
+
+        extension.prepare_model_request().unwrap();
+        let enabled_tools = tool_set(&extension);
+        for name in crate::tools::human_interaction::HUMAN_INTERACTION_TOOL_NAMES {
+            assert!(enabled_tools.contains(name));
+        }
+        let enabled = WorldStateSnapshot::new(
+            "human-interaction-toggle",
+            0,
+            extension.conversation_world_state_sections().unwrap(),
+        )
+        .unwrap();
+        assert!(enabled
+            .model_projection(WorldStateLifetime::Conversation)
+            .unwrap()
+            .render_sanitized_text()
+            .contains("\"reason\":\"available\""));
+
+        *policy.settings.lock().unwrap() = settings(false, 4);
+        // Even a setting changed during assembly cannot split this request's tools and state.
+        assert_eq!(tool_set(&extension).revision(), enabled_tools.revision());
+        assert_eq!(
+            extension.conversation_world_state_sections().unwrap(),
+            enabled.sections
+        );
+        assert_eq!(
+            extension
+                .request_context(&ModelRequestContext::agent_work())
+                .unwrap()
+                .len(),
+            1
+        );
+
+        extension.prepare_model_request().unwrap();
+        let disabled_tools = tool_set(&extension);
+        for name in crate::tools::human_interaction::HUMAN_INTERACTION_TOOL_NAMES {
+            assert!(!disabled_tools.contains(name));
+            assert!(registry.contains_tool(name));
+        }
+        assert_eq!(
+            enabled_tools.stable_revision(),
+            disabled_tools.stable_revision()
+        );
+        assert!(extension
+            .request_context(&ModelRequestContext::agent_work())
+            .unwrap()
+            .is_empty());
+        let disabled = WorldStateSnapshot::new(
+            "human-interaction-toggle",
+            1,
+            extension.conversation_world_state_sections().unwrap(),
+        )
+        .unwrap();
+        let diff = WorldStateDiff::between(&enabled, &disabled).unwrap();
+        let text = diff
+            .model_projection_against(&enabled, WorldStateLifetime::Conversation)
+            .unwrap()
+            .expect("disabling must explicitly update the model-visible capability")
+            .render_sanitized_text();
+        assert!(text.contains("human.interaction"));
+        assert!(text.contains("\"op\":\"replace\""));
+        assert!(text.contains("\"available\":false"));
+        assert!(text.contains("\"reason\":\"disabled_by_user\""));
+        for private_key in [
+            "policyRevision",
+            "policyReadable",
+            "executionReady",
+            "asyncExecutionReady",
+            "asyncAvailable",
+        ] {
+            assert!(!text.contains(private_key));
+        }
+        assert!(!text.contains("request_user_input"));
+
+        // Saving the same choice only changes Host bookkeeping, not model context or caches.
+        *policy.settings.lock().unwrap() = settings(false, 5);
+        extension.prepare_model_request().unwrap();
+        let unchanged = WorldStateSnapshot::new(
+            "human-interaction-toggle",
+            2,
+            extension.conversation_world_state_sections().unwrap(),
+        )
+        .unwrap();
+        assert!(WorldStateDiff::between(&disabled, &unchanged)
+            .unwrap()
+            .model_projection_against(&disabled, WorldStateLifetime::Conversation)
+            .unwrap()
+            .is_none());
+        assert_eq!(policy.reads.load(Ordering::SeqCst), 3);
     }
 
     #[test]
@@ -357,6 +510,7 @@ mod tests {
                 for async_execution_ready in [false, true] {
                     let request = HumanInteractionRequestContract {
                         settings: settings(enabled, 1),
+                        policy_readable: true,
                         execution_ready,
                         async_execution_ready,
                     };
@@ -396,6 +550,7 @@ mod tests {
     fn human_interaction_compaction_generation_never_inherits_question_instructions() {
         let request = HumanInteractionRequestContract {
             settings: settings(true, 1),
+            policy_readable: true,
             execution_ready: true,
             async_execution_ready: false,
         };
@@ -467,9 +622,10 @@ mod tests {
                 .request_context(&ModelRequestContext::agent_work())
                 .unwrap()
                 .is_empty());
-            assert!(extension.world_state_sections().unwrap()[0]
-                .model_projection
-                .is_none());
+            assert_eq!(
+                extension.conversation_world_state_sections().unwrap()[0].model_projection,
+                Some(json!({ "available": false, "reason": "host_unavailable" }))
+            );
         }
     }
 }

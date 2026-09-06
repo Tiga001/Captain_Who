@@ -2,7 +2,7 @@
 status: current
 audience: developers
 owner: engineering
-last_verified: 2026-08-31
+last_verified: 2026-09-06
 ---
 
 # Agent Runtime 与模型 Provider
@@ -37,13 +37,16 @@ Rust Core 与 Core Server 的边界是有意的：Runtime 可以提出动作并�
 
 ## 当前 Provider
 
-注册表当前包含三类 profile：
+注册表当前包含以下 profile：
 
 | Profile key                  | Adapter                    | 主要 wire 语义                                 |
 | ---------------------------- | -------------------------- | ---------------------------------------------- |
 | `generic_openai_chat`        | Generic OpenAI Chat        | OpenAI-compatible messages/tool calls          |
 | `generic_anthropic_messages` | Generic Anthropic Messages | Anthropic-compatible content blocks/tool use   |
 | `deepseek_v4_chat`           | DeepSeek V4 Chat           | DeepSeek reasoning continuation 与成组工具交换 |
+| `moonshot_k3_chat`           | Moonshot K3 Chat           | Provider reasoning continuation 与成组工具交换 |
+| `moonshot_k2_7_code_chat`    | Moonshot K2.7 Code Chat    | Provider reasoning continuation 与成组工具交换 |
+| `moonshot_k2_6_chat`         | Moonshot K2.6 Chat         | 按 thinking 配置选择 reasoning 回放范围        |
 
 此表用于读者定位，不应成为新的注册真源。新增或删除 Provider 必须以 `provider_registration.rs` 和 provider contract test 为准，并同步本文。
 
@@ -56,8 +59,10 @@ Provider 能力通过显式枚举描述，包括：Tool 交换方式、私有 re
   -> 读取会话、模型、权限和可用服务
   -> 构造 Runtime input 与 Provider-neutral 历史
   -> 恢复可选 Checkpoint / Provider continuation
-  -> 冻结 EffectiveToolSet 与 World State epoch
-  -> 组装并计量 ContextFrame
+  -> 建立 World State epoch 与逻辑 ContextFrame
+  -> 每次自然请求边界冻结能力策略快照、EffectiveToolSet 和 World State diff
+  -> Host 原子写 Conversation 状态与请求回执（无变化不追加 diff）
+  -> 投影请求布局并计量 ContextFrame
   -> 必要时压缩并从 SQLite 重建上下文
   -> 发送模型请求
       -> narration / final text
@@ -75,6 +80,39 @@ Provider 能力通过显式枚举描述，包括：Tool 交换方式、私有 re
 
 Turn admission 创建的 pending assistant message 正文为空；系统不再把“正在思考”之类 UI placeholder 写进消息。流式 narration/final content 与终态正文只能来自模型输出或明确的错误/取消结算路径，展示占位符不得进入可压缩历史或被当作模型主张。
 
+## 消息布局与动态能力
+
+主请求分开提供 Provider-neutral 消息、`tools` 和模型参数。消息在发送前按下列顺序投影；完整边界见[上下文管理](./context-management.md#组装规则)：
+
+```text
+稳定 system
+→ 初始 Skill 目录
+→ 初始协作目录
+→ 当前可用能力指南（RequestOnly）
+→ Conversation full World State
+→ 摘要
+→ 旧历史及 anchored diff
+→ 本次连续用户输入及其 anchored diff / 附件
+→ 初始预激活 Skill 完整说明
+→ 初始 Run full World State
+→ 因果 Run 时间线
+→ Todo / ignored 交互状态 / 修复提示 / 文件事务提示
+```
+
+此次只把目录和当前指南移到 Conversation full 前，并把本次输入连同关联 diff、附件移到预激活 Skill 与初始 Run 状态前。作用域、权限判定和持久化规则不变；原消息正文、role、lifetime、retention、Tool 参数、调用与结果绑定、Provider continuation 也不因布局而改变。Run 中新激活的 Skill、审批或提问恢复后的 full World State、状态 diff、同步答案 ToolResult 与异步答案 User 消息保持因果位置；不能按类型提前到初始说明。同步答案虽可显示为用户气泡，模型仍只通过原工具调用的唯一结果接收。
+
+Run 结束时，本次输入、预激活 Skill、初始 Run 状态及 live 时间线（完整布局第 8–11 项）仍不会整块历史化。后续 Run 只按原有日志规则重建用户消息、已结算输出、Tool 交换与状态记录；初始 Run 说明和状态块不会因发送位置改变而成为会话历史。
+
+工具实现注册、模型工具暴露和使用指南是三层不同事实：实现可以保持已注册以支持同 Run 后续开启，`EffectiveToolSet` 决定本次 Schema，扩展贡献当前使用指南。`tools` 顺序仍为稳定工具按名称排序，再拼接动态工具按名称排序；稳定工具指导留在稳定 system，可选能力指南使用独立的 `CapabilityInstructions` 布局标记。`tools` 是消息之外的字段，其 JSON 属性位置不表示模型 token 顺序。
+
+浏览器、联网搜索与人机交互在每次自然模型请求边界读取一致策略快照，同时投影 Schema、指南和 World State。关闭后下一次请求撤下对应工具与指南，World State diff 在发生位置记录不可用原因；保留的历史调用、结果和状态变化不重新授予工具权限或挂回说明。关闭无法撤回已发出的 Provider 请求，迟到调用在 Host 执行边界再次校验。开启浏览器也不替代当前任务审批；关闭人机交互不影响已接纳问题的提交、忽略与恢复。开关变化或忽略问题本身不产生额外模型请求。
+
+联网搜索、人机交互和浏览器用户开关属于跨 Run 的 Conversation 日志；Run full 只投影本任务浏览器激活、Skill 与附件状态，工具名称清单不再投影给模型。`AgentConversationWorldStateHost` 提供受信任的 prepare/observed 两个边界：请求发出前持久化并 CAS 校验，Provider 成功后确认观察；失败不重放模型。请求 anchor 定位到 assistant 内最后安全 Trace 前缀，压缩/分支不能只按 message 粗略归并。没有持久 Host 的嵌入式 Rust Core 使用相同内存日志，并随 checkpoint 携带 canonical 状态；预览只计算副本，不创建回执。
+
+Adapter 继续执行各自 wire 规则：稳定 system 可投影为 OpenAI-compatible 的 system 消息或 Anthropic 顶层 system，普通后端状态按既有规则转为对应角色/内容块；Tool 交换仍依 Provider policy 投影为 split 或 grouped batch，continuation 绑定原助手回合。布局层不改这些适配规则。
+
+目标是增加不变内容形成相同前缀的机会，不保证缓存命中或命中率提升。目录、能力或授权改变时，从变化位置开始的缓存可能失效；不能为了缓存继续发送过期能力。本轮没有新增 `cache_control`，也不保证厂商内部缓存组合或实际命中率达到某个最大值。
+
 ## Checkpoint 与恢复
 
 Checkpoint 至少绑定以下事实：
@@ -83,11 +121,15 @@ Checkpoint 至少绑定以下事实：
 - 已闭合的 Provider-neutral 历史以及尚待处理的调用批次；
 - 冻结 Tool 定义、Tool 身份、能力与权限相关投影；
 - World State epoch、扩展快照及可恢复的 Provider continuation 引用；
+- canonical Conversation World State 日志及已观察标记（checkpoint v15、私有恢复信封 v12），恢复时校验与冻结模型投影一致；
+- 上下文布局标签与可选 `request_order`，用于恢复压缩后 journal 项和 Run overlay 的相对请求次序；
 - 审批动作所需的安全投影，而不是任意原始 secret 或不可信参数。
 
 FileChange 的恢复状态横跨两类私有存储：checkpoint 保存 pending/queued Observation、模型已观察的 successor 和可选 Run grant ref；Host pending action/audit/Staged store 保存 exact proposal binding 与待处理 transaction。Observation/run-grant ref 都不是独立 authority：恢复与 effect boundary 必须从 Host 持久 action/audit/grant 重新验证 owner、revision、scope 和 receipt；Event/Trace/Archive 不得提供这些字段。
 
 恢复时必须重新验证版本、归属、调用 ID、Tool 身份、权限和 Provider 能力。外部 MCP Server 调用与未知 Tool 不能仅凭普通 Checkpoint 保存其原始参数；它们需要各自的授权信封或明确失败。Tool 定义在暂停后变化时，应遵循冻结契约或返回结构化恢复错误，不能静默按新定义执行旧调用。
+
+`request_order` 只是私有检查点中的布局元数据，不是 journal sequence、权限身份或可执行授权。压缩重建从权威日志恢复已经闭合的消息，通过此元数据维持它们与尚存 Run overlay 的因果相对顺序；恢复时不重新排列已发生的工具队列、回答与状态变化。当前能力指南仍在下一次自然采样时重新生成，不从 checkpoint 恢复旧的开启状态或 RequestOnly 文本。
 
 模型请求只解析所选 connection 所需的 secret，并在 SQLite transaction/mutex 之外访问 Credential Store。Run、子 Agent Wake、Automation snapshot 和恢复输入必须冻结并复核 `provider_connection_revision`；凭据替换或清除会改变连接 revision，旧 Run 不得静默使用新密钥。catalog/usage/模板等只需元数据的路径不得批量解密凭据，也不能因一个不相关 reference 不可用而阻断全部模型。
 
@@ -128,11 +170,15 @@ Provider 切换由 Core Server 的 transition 流程记录。若目标 Provider 
 9. pending assistant content 为空且不属于模型历史；任何 UI thinking 状态只能是派生展示。
 10. FileChange successor Observation 与 Run grant ref 仅在私有恢复边界有效，不能从公共 Trace/Renderer 重建。
 11. 人工审批 ticket 不随短期 payload TTL 自动结算；材料缺失的晚批准只能产生 definitely-not-dispatched 失败。
+12. Schema、能力指南与 World State 使用同一请求快照；稳定前缀优化不能冻结过期权限或引入额外模型调用。
+13. 请求重排不改原 journal、消息角色、工具配对与 continuation；`request_order` 只能维持存活内容的布局次序。
 
 ## 代码真源
 
 - Runtime：`crates/core/src/runtime.rs`、`crates/core/src/runtime/`
 - 上下文与压缩：`crates/core/src/context/`、`crates/core/src/context_compaction*.rs`
+- Provider 请求布局：`crates/core/src/context/frame/request_layout.rs`、`frame/measurement_state.rs`
+- 动态能力快照与指南：`crates/core/src/runtime/extensions/`、`runtime/driver.rs`
 - Provider 注册：`crates/core/src/provider_registration.rs`、`provider_profile.rs`
 - Adapter 与 transport：`crates/core/src/llm/`
 - continuation vault：`crates/core/src/provider_continuation_store.rs`
@@ -147,6 +193,7 @@ Provider 切换由 Core Server 的 transition 流程记录。若目标 Provider 
 - `crates/core/tests/provider_profile_contract.rs`
 - `crates/core/src/llm/tests/deepseek_runtime.rs`
 - `crates/core/src/runtime/tests/`
+- `crates/core/src/runtime/tests/request_layout.rs`
 - `crates/core/src/runtime/checkpoint/tests/`
 - `crates/core-server/src/application/agent/tests/provider_profiles.rs`
 - `crates/core-server/src/application/agent/tests/provider_runtime_capability_boundary.rs`

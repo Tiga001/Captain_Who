@@ -699,7 +699,11 @@ fn build_single_conversation_fork_plan_at_point(
         connection,
         &source.id,
         &source_positions,
-        message_limit,
+        &if message_limit > cutoff {
+            ContextJournalCursor::message(&source.messages[message_limit].id)
+        } else {
+            resolved.world_state_cutoff.clone()
+        },
         &summaries,
         history_cutoff_at,
     )?;

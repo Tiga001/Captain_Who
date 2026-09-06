@@ -1,7 +1,6 @@
 use super::{ExtensionDescriptor, ModelRequestContext, ModelRequestPurpose, RuntimeExtension};
 use crate::builtin_capabilities::{
     BuiltinCapabilityDescriptor, BuiltinCapabilityPolicy, BuiltinCapabilityRuntime,
-    CapabilityActivationState,
 };
 use crate::context::{ContextItem, ContextRetention, ContextScope, ContextSource};
 use crate::llm::LlmMessageRole;
@@ -29,18 +28,6 @@ struct BuiltinCapabilityRequestState {
     descriptor: BuiltinCapabilityDescriptor,
     policy: BuiltinCapabilityPolicy,
     active: bool,
-}
-
-impl BuiltinCapabilityRequestState {
-    fn status(&self) -> CapabilityActivationState {
-        if !self.policy.user_allowed {
-            CapabilityActivationState::DisabledByUser
-        } else if self.active {
-            CapabilityActivationState::Active
-        } else {
-            CapabilityActivationState::WaitingApproval
-        }
-    }
 }
 
 impl BuiltinCapabilityExtension {
@@ -158,40 +145,48 @@ impl RuntimeExtension for BuiltinCapabilityExtension {
             ContextSource::RuntimeGuard,
             ContextScope::Run,
             ContextRetention::RequestOnly,
-        )])
+        ).with_source(ContextSource::CapabilityInstructions)])
+    }
+
+    fn conversation_world_state_sections(&self) -> AgentResult<Vec<WorldStateSectionEnvelope>> {
+        let state = json!({
+            "capabilities": self.request.iter().map(|capability| json!({
+                "capabilityId": capability.descriptor.id,
+                "userAllowed": capability.policy.user_allowed,
+                "policyRevision": capability.policy.revision,
+            })).collect::<Vec<_>>()
+        });
+        let projection = json!({
+            "capabilities": self.request.iter().map(|capability| json!({
+                "capabilityId": capability.descriptor.id,
+                "userAllowed": capability.policy.user_allowed,
+            })).collect::<Vec<_>>()
+        });
+        Ok(vec![WorldStateSectionEnvelope::model_visible(
+            WorldStateSectionId::extension("builtin.capabilities.policy")
+                .map_err(|error| AgentError::new(error.to_string()))?,
+            WorldStateLifetime::Conversation,
+            state,
+            projection,
+        )
+        .map_err(|error| AgentError::new(error.to_string()))?])
     }
 
     fn world_state_sections(&self) -> AgentResult<Vec<WorldStateSectionEnvelope>> {
-        let id = WorldStateSectionId::extension(BUILTIN_CAPABILITY_EXTENSION_ID)
-            .map_err(|error| AgentError::new(error.to_string()))?;
-        let capabilities = self
-            .request
-            .iter()
-            .map(|capability| {
-                // A disabled capability remains an explicit current fact, without a tool
-                // description or an activation hint. Previous journal entries remain history.
-                json!({
-                    "capabilityId": capability.descriptor.id,
-                    "status": capability.status(),
-                    "policyRevision": capability.policy.revision,
-                })
-            })
-            .collect::<Vec<_>>();
-        let state = json!({"capabilities": capabilities});
-        let model_projection = json!({
+        let state = json!({
             "capabilities": self.request.iter().map(|capability| json!({
                 "capabilityId": capability.descriptor.id,
-                "status": capability.status(),
+                "active": capability.active,
             })).collect::<Vec<_>>()
         });
-        let section = WorldStateSectionEnvelope::model_visible(
-            id,
+        Ok(vec![WorldStateSectionEnvelope::model_visible(
+            WorldStateSectionId::extension(BUILTIN_CAPABILITY_EXTENSION_ID)
+                .map_err(|error| AgentError::new(error.to_string()))?,
             WorldStateLifetime::Run,
+            state.clone(),
             state,
-            model_projection,
         )
-        .map_err(|error| AgentError::new(error.to_string()))?;
-        Ok(vec![section])
+        .map_err(|error| AgentError::new(error.to_string()))?])
     }
 
     /// Grants are deliberately absent: they live only in the Host process-memory provider.
@@ -402,8 +397,8 @@ mod tests {
         extension.prepare_model_request().unwrap();
         let state = extension.world_state_sections().unwrap().remove(0);
         assert_eq!(
-            state.model_projection.unwrap()["capabilities"][0]["status"],
-            "waiting_approval"
+            state.model_projection.unwrap()["capabilities"][0]["active"],
+            false
         );
     }
 
@@ -415,12 +410,15 @@ mod tests {
         let enabled = effective_tools(&extension, &registry);
         let enabled_context = request_text(&extension);
         let enabled_state = extension.world_state_sections().unwrap();
+        let enabled_policy = extension.conversation_world_state_sections().unwrap();
+        assert_eq!(enabled_state[0].lifetime, WorldStateLifetime::Run);
+        assert_eq!(enabled_policy[0].lifetime, WorldStateLifetime::Conversation);
         assert!(enabled.contains("activate_capability"));
         assert!(enabled.contains("browser_automation_snapshot"));
         assert!(enabled_context.contains("Managed Browser operations"));
         assert_eq!(
-            enabled_state[0].model_projection.as_ref().unwrap()["capabilities"][0]["status"],
-            "active"
+            enabled_state[0].model_projection.as_ref().unwrap()["capabilities"][0]["active"],
+            true
         );
 
         let id = BuiltinCapabilityId::parse("browser.automation").unwrap();
@@ -435,6 +433,10 @@ mod tests {
         );
         assert_eq!(enabled_context, request_text(&extension));
         assert_eq!(enabled_state, extension.world_state_sections().unwrap());
+        assert_eq!(
+            enabled_policy,
+            extension.conversation_world_state_sections().unwrap()
+        );
         assert_eq!(provider.policy_reads.load(Ordering::SeqCst), 1);
         assert_eq!(provider.grant_reads.load(Ordering::SeqCst), 1);
 
@@ -456,10 +458,20 @@ mod tests {
             state[0].model_projection.as_ref().unwrap(),
             &json!({"capabilities": [{
                 "capabilityId": "browser.automation",
-                "status": "disabled_by_user"
+                "active": false
             }]})
         );
-        assert_eq!(state[0].state["capabilities"][0]["policyRevision"], 4);
+        assert!(state[0].state["capabilities"][0]
+            .get("policyRevision")
+            .is_none());
+        let policy = extension.conversation_world_state_sections().unwrap();
+        assert_eq!(
+            policy[0].model_projection.as_ref().unwrap(),
+            &json!({
+                "capabilities": [{"capabilityId":"browser.automation", "userAllowed":false}]
+            })
+        );
+        assert_eq!(policy[0].state["capabilities"][0]["policyRevision"], 4);
         assert!(!serde_json::to_string(&state)
             .unwrap()
             .contains("Managed Browser operations"));
@@ -480,8 +492,8 @@ mod tests {
             extension.world_state_sections().unwrap()[0]
                 .model_projection
                 .as_ref()
-                .unwrap()["capabilities"][0]["status"],
-            "waiting_approval"
+                .unwrap()["capabilities"][0]["active"],
+            false
         );
     }
 
@@ -489,36 +501,47 @@ mod tests {
     fn policy_revision_changes_without_status_changes_stay_out_of_model_diffs() {
         use crate::world_state::{WorldStateDiff, WorldStateSnapshot};
 
-        let (mut extension, provider, _) =
-            fixture(vec![manifest("browser.automation", "Browser")]);
+        let (mut extension, provider, _) = fixture(vec![manifest("browser.automation", "Browser")]);
         let id = BuiltinCapabilityId::parse("browser.automation").unwrap();
         *provider.policies.lock().unwrap().get_mut(&id).unwrap() = BuiltinCapabilityPolicy {
             user_allowed: false,
             revision: 4,
         };
         extension.prepare_model_request().unwrap();
-        let before =
-            WorldStateSnapshot::new("run-epoch", 0, extension.world_state_sections().unwrap())
-                .unwrap();
-        provider.policies.lock().unwrap().get_mut(&id).unwrap().revision = 5;
+        let before = WorldStateSnapshot::new(
+            "conversation-epoch",
+            0,
+            extension.conversation_world_state_sections().unwrap(),
+        )
+        .unwrap();
+        provider
+            .policies
+            .lock()
+            .unwrap()
+            .get_mut(&id)
+            .unwrap()
+            .revision = 5;
         extension.prepare_model_request().unwrap();
-        let after =
-            WorldStateSnapshot::new("run-epoch", 1, extension.world_state_sections().unwrap())
-                .unwrap();
+        let after = WorldStateSnapshot::new(
+            "conversation-epoch",
+            1,
+            extension.conversation_world_state_sections().unwrap(),
+        )
+        .unwrap();
         assert_ne!(before.revision, after.revision);
         assert_eq!(
             WorldStateDiff::between(&before, &after)
                 .unwrap()
-                .model_projection_against(&before, WorldStateLifetime::Run)
+                .model_projection_against(&before, WorldStateLifetime::Conversation)
                 .unwrap(),
             None,
         );
         assert_eq!(
             before
-                .model_projection_revision(WorldStateLifetime::Run)
+                .model_projection_revision(WorldStateLifetime::Conversation)
                 .unwrap(),
             after
-                .model_projection_revision(WorldStateLifetime::Run)
+                .model_projection_revision(WorldStateLifetime::Conversation)
                 .unwrap(),
         );
     }
@@ -575,5 +598,40 @@ mod tests {
             .request_context(&ModelRequestContext::agent_work())
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn live_activation_changes_run_state_without_rewriting_conversation_policy() {
+        let (mut extension, provider, _) = fixture(vec![manifest("browser.automation", "Browser")]);
+        extension.prepare_model_request().unwrap();
+        let policy = extension.conversation_world_state_sections().unwrap();
+        let active = extension.world_state_sections().unwrap();
+        provider.grants.lock().unwrap().clear();
+        extension.prepare_model_request().unwrap();
+        assert_eq!(
+            extension.conversation_world_state_sections().unwrap(),
+            policy
+        );
+        let inactive = extension.world_state_sections().unwrap();
+        assert_ne!(active, inactive);
+        assert_eq!(
+            inactive[0].model_projection.as_ref().unwrap()["capabilities"][0]["active"],
+            false
+        );
+        assert_eq!(provider.policy_reads.load(Ordering::SeqCst), 2);
+        assert_eq!(provider.grant_reads.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn failed_browser_policy_read_remains_an_error_instead_of_disabled_user_state() {
+        let (mut extension, provider, _) = fixture(vec![manifest("browser.automation", "Browser")]);
+        extension.prepare_model_request().unwrap();
+        provider.policies.lock().unwrap().clear();
+        assert!(extension.prepare_model_request().is_err());
+        assert!(extension.active_tool_capabilities().unwrap().is_empty());
+        let rendered =
+            serde_json::to_string(&extension.conversation_world_state_sections().unwrap()).unwrap();
+        assert!(!rendered.contains("disabled_by_user"));
+        assert!(!rendered.contains("userAllowed"));
     }
 }

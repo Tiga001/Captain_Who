@@ -16,6 +16,7 @@ fn resolve_fork_point(
                     .into());
             }
             Ok(ResolvedConversationForkPoint {
+                world_state_cutoff: ContextJournalCursor::message(&message.id),
                 assistant_message_id: message.id.clone(),
                 summary_id: active_chain
                     .last()
@@ -26,6 +27,7 @@ fn resolve_fork_point(
         ConversationForkPoint::AssistantReply {
             assistant_message_id,
         } => Ok(ResolvedConversationForkPoint {
+            world_state_cutoff: ContextJournalCursor::message(assistant_message_id),
             assistant_message_id: assistant_message_id.clone(),
             summary_id: None,
             model_id: assistant_message_model_id(connection, &source.id, assistant_message_id)?,
@@ -51,6 +53,7 @@ fn resolve_fork_point(
                     .into());
             }
             Ok(ResolvedConversationForkPoint {
+                world_state_cutoff: receipt.plan.covered_through.clone(),
                 assistant_message_id: receipt.assistant_message_id,
                 summary_id: operation.summary_id,
                 model_id: operation.model_id,
@@ -104,6 +107,7 @@ fn resolve_fork_point(
                 .clone()
                 .unwrap_or_else(|| receipt.model.clone());
             Ok(ResolvedConversationForkPoint {
+                world_state_cutoff: receipt.plan.covered_through.clone(),
                 assistant_message_id: receipt.assistant_message_id,
                 summary_id: Some(summary_id.to_string()),
                 model_id: Some(target_model_config_id),
@@ -625,8 +629,8 @@ fn collect_visible_context_compaction_receipts(
 fn world_state_records_visible_at_cutoff(
     connection: &Connection,
     conversation_id: &str,
-    source_positions: &HashMap<String, usize>,
-    cutoff: usize,
+    _source_positions: &HashMap<String, usize>,
+    cutoff: &ContextJournalCursor,
     visible_summaries: &[context_compaction_repository::ContextCompactionSummaryVersion],
     cutoff_at: Option<i64>,
 ) -> Result<Vec<world_state_repository::ConversationWorldStateJournalEntry>, String> {
@@ -691,13 +695,22 @@ fn world_state_records_visible_at_cutoff(
             );
         }
     }
+    for entry in &mut entries {
+        if let Some(boundary) = &mut entry.request_boundary {
+            boundary.assistant_message_id =
+                conversation_turn_rewrite_repository::resolve_active_message_id(
+                    &replacements,
+                    &boundary.assistant_message_id,
+                )?;
+        }
+    }
     let Some(first) = entries.first() else {
         return Err("选中的 World State epoch 没有 initial full snapshot。".to_string());
     };
     let WorldStateRecord::Full(_) = &first.record else {
         return Err("选中的 World State epoch 没有 initial full snapshot。".to_string());
     };
-    if first.effective_before_message_id.is_some() {
+    if first.effective_before_message_id.is_some() || first.request_boundary.is_some() {
         return Err("选中的 World State full snapshot 不能绑定消息 anchor。".to_string());
     }
     let base_summary_id = first.base_summary_id.as_deref();
@@ -714,19 +727,19 @@ fn world_state_records_visible_at_cutoff(
     let mut visible = Vec::new();
     let mut crossed_cutoff = false;
     for entry in entries {
-        if cutoff_at.is_some_and(|cutoff_at| entry.created_at > cutoff_at) {
+        if !entry.model_observed || cutoff_at.is_some_and(|cutoff_at| entry.created_at > cutoff_at)
+        {
             crossed_cutoff = true;
             continue;
         }
-        let is_visible =
-            match entry.effective_before_message_id.as_deref() {
-                None => true,
-                Some(message_id) => {
-                    source_positions.get(message_id).copied().ok_or_else(|| {
-                        format!("World State anchor 不属于原任务消息：{message_id}")
-                    })? <= cutoff
-                }
-            };
+        let is_visible = world_state_repository::record_is_covered(
+            connection,
+            conversation_id,
+            entry.effective_before_message_id.as_deref(),
+            entry.request_boundary.as_ref(),
+            cutoff,
+        )
+        .map_err(|error| error.to_string())?;
         if is_visible {
             if crossed_cutoff {
                 return Err("World State diff 顺序跨越分叉边界后又回到可见历史。".to_string());

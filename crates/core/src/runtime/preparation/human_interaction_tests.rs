@@ -86,6 +86,33 @@ fn assert_no_human_tools(capabilities: &PreparedRuntimeCapabilities) {
     }
 }
 
+fn assert_inapplicable_human_state(capabilities: &PreparedRuntimeCapabilities) {
+    let sections = capabilities
+        .runtime_extensions
+        .conversation_world_state_sections()
+        .unwrap();
+    let section = sections
+        .iter()
+        .find(|section| section.id.as_str() == "human.interaction")
+        .unwrap();
+    assert_eq!(
+        section.lifetime,
+        crate::world_state::WorldStateLifetime::Conversation
+    );
+    assert_eq!(
+        section.model_projection,
+        Some(json!({
+            "available":false, "reason":"identity_not_applicable"
+        }))
+    );
+    assert!(capabilities
+        .runtime_extensions
+        .world_state_sections()
+        .unwrap()
+        .iter()
+        .all(|section| section.id.as_str() != "human.interaction"));
+}
+
 fn has_human_shell(capabilities: &PreparedRuntimeCapabilities) -> bool {
     capabilities
         .runtime_extensions
@@ -100,6 +127,18 @@ fn human_interaction_root_shell_does_not_change_stable_prefix_or_enable_unready_
     let input = root_input();
     let baseline =
         prepare_runtime_capabilities_with_skills(&input, "run-root", &[], services(None)).unwrap();
+    let unavailable = baseline
+        .runtime_extensions
+        .conversation_world_state_sections()
+        .unwrap();
+    let human = unavailable
+        .iter()
+        .find(|section| section.id.as_str() == "human.interaction")
+        .unwrap();
+    assert_eq!(
+        human.model_projection,
+        Some(json!({"available":false,"reason":"host_unavailable"}))
+    );
     for enabled in [false, true] {
         let source = policy(enabled);
         let capabilities = prepare_runtime_capabilities_with_skills(
@@ -184,6 +223,7 @@ fn human_interaction_child_never_mounts_or_reads_accidentally_supplied_root_poli
             .unwrap();
     assert_no_human_tools(&capabilities);
     assert!(!has_human_shell(&capabilities));
+    assert_inapplicable_human_state(&capabilities);
     assert_eq!(source.reads.load(Ordering::SeqCst), 0);
     let root = prepare_runtime_capabilities_with_skills(
         &root_input(),
@@ -230,6 +270,7 @@ fn human_interaction_automation_metadata_or_report_sink_each_exclude_the_module(
             prepare_runtime_capabilities_with_skills(&input, "run-auto", &[], host).unwrap();
         assert_no_human_tools(&capabilities);
         assert!(!has_human_shell(&capabilities));
+        assert_inapplicable_human_state(&capabilities);
         assert_eq!(source.reads.load(Ordering::SeqCst), 0);
     }
 }
@@ -248,6 +289,7 @@ fn human_interaction_unowned_inputs_never_receive_human_capability() {
     .unwrap();
     assert_no_human_tools(&capabilities);
     assert!(!has_human_shell(&capabilities));
+    assert_inapplicable_human_state(&capabilities);
     assert_eq!(source.reads.load(Ordering::SeqCst), 0);
 }
 

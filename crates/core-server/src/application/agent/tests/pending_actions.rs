@@ -1190,6 +1190,7 @@ fn test_mcp_resume_checkpoint(
             pending_tool_call_id.as_str()
         ]),
         "providerContinuationRefs": [],
+        "conversationWorldStateRecords": [],
         "runWorldState": crate::test_run_world_state(),
         "pendingActionId": action_id,
         "pendingToolCallId": pending_tool_call_id,
@@ -8250,7 +8251,10 @@ fn pending_resume_accepts_search_credential_replacement_without_rehydration() {
 
     let restored = restore_agent_input_secrets(&storage, frozen).unwrap();
     assert!(restored.search_config.unwrap().tavily_api_key.is_none());
-    assert!(storage.load_web_search_policy_snapshot().unwrap().available());
+    assert!(storage
+        .load_web_search_policy_snapshot()
+        .unwrap()
+        .available());
     assert!(storage.authorize_web_search_execution().is_ok());
 }
 
@@ -8550,6 +8554,7 @@ fn terminal_pending_action_persistence_redacts_run_scoped_skill_bodies() {
                 sources: vec!["skill_instructions".to_string()],
                 scope: "run".to_string(),
                 retention: "retained".to_string(),
+                request_order: None,
                 group: None,
                 origin: Some(mycopilot_core::AgentContextCheckpointOrigin {
                     kind: "skill".to_string(),
@@ -8568,6 +8573,7 @@ fn terminal_pending_action_persistence_redacts_run_scoped_skill_bodies() {
                 sources: vec!["skill_catalog".to_string()],
                 scope: "run".to_string(),
                 retention: "retained".to_string(),
+                request_order: None,
                 group: None,
                 origin: None,
             },
@@ -8581,6 +8587,7 @@ fn terminal_pending_action_persistence_redacts_run_scoped_skill_bodies() {
                 sources: vec!["runtime_guard".to_string()],
                 scope: "run".to_string(),
                 retention: "retained".to_string(),
+                request_order: None,
                 group: None,
                 origin: None,
             },
@@ -8614,6 +8621,7 @@ fn terminal_pending_action_persistence_redacts_run_scoped_skill_bodies() {
         provider_protocol_key,
         assistant_turn_identity: crate::test_assistant_turn_identity(&["action-skill-redaction"]),
         provider_continuation_refs: Vec::new(),
+        conversation_world_state_records: Vec::new(),
         run_world_state: crate::test_run_world_state(),
         pending_tool_call_id: "action-skill-redaction".to_string(),
         conversation_model_context_items: Vec::new(),
@@ -10700,6 +10708,7 @@ fn invalid_checkpoint_tool_call_is_rejected_before_pending_publication() {
             sources: vec!["tool_call".to_string()],
             scope: "run".to_string(),
             retention: "retained".to_string(),
+            request_order: None,
             group: None,
             origin: None,
         }],
@@ -10716,6 +10725,7 @@ fn invalid_checkpoint_tool_call_is_rejected_before_pending_publication() {
         provider_protocol_key: crate::test_provider_protocol_key("test-model"),
         assistant_turn_identity: crate::test_assistant_turn_identity(&[call.id.as_str()]),
         provider_continuation_refs: Vec::new(),
+        conversation_world_state_records: Vec::new(),
         run_world_state: crate::test_run_world_state(),
         pending_tool_call_id: call.id.clone(),
         conversation_model_context_items: Vec::new(),

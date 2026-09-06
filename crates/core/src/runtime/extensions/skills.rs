@@ -2479,7 +2479,7 @@ mod tests {
     }
 
     #[test]
-    fn dynamic_tool_capacity_projection_charges_schema_and_world_state_diff() {
+    fn dynamic_tool_capacity_projection_charges_schema_without_host_only_inventory() {
         let budget = ContextTextBudget::heuristic(64 * 1024);
         let capacity = ModelInputCapacity {
             remaining_tokens: 64 * 1024,
@@ -2495,9 +2495,9 @@ mod tests {
             budget.estimate_tool_definitions(projection.effective_tool_set.dynamic_definitions());
 
         assert!(schema_tokens > 0);
-        assert!(
-            projection.additional_tokens > schema_tokens,
-            "the retained tools.effective World State diff must be charged too"
+        assert_eq!(
+            projection.additional_tokens, schema_tokens,
+            "Host-only Tool inventory must not reserve a fabricated model message"
         );
         assert!(projection
             .effective_tool_set
@@ -2524,7 +2524,7 @@ mod tests {
         assert_eq!(definitions[0].name, "skills_commit_install");
         assert_eq!(definitions[1].name, "skills_prepare_install");
         assert!(schema_tokens > 0);
-        assert!(projection.additional_tokens > schema_tokens);
+        assert_eq!(projection.additional_tokens, schema_tokens);
     }
 
     #[test]

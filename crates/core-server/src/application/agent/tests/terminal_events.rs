@@ -20,6 +20,7 @@ fn terminal_test_checkpoint_item(
         sources: vec!["model_response".to_string()],
         scope: "run".to_string(),
         retention: "retained".to_string(),
+        request_order: None,
         group: None,
         origin: None,
     }
@@ -1833,6 +1834,7 @@ fn restart_conservatively_blocks_interrupted_manual_command_deletion() {
         provider_protocol_key: crate::test_provider_protocol_key("test-model"),
         assistant_turn_identity: crate::test_assistant_turn_identity(&[call.id.as_str()]),
         provider_continuation_refs: Vec::new(),
+        conversation_world_state_records: Vec::new(),
         run_world_state: crate::test_run_world_state(),
         pending_tool_call_id: call.id.clone(),
         conversation_trace_items: vec![ConversationTurnTraceItem::ToolCall {
@@ -2038,6 +2040,7 @@ fn manually_approved_command_reconciles_two_post_commit_errors_and_keeps_observa
         provider_protocol_key: crate::test_provider_protocol_key("model-1"),
         assistant_turn_identity: crate::test_assistant_turn_identity(&[call.id.as_str()]),
         provider_continuation_refs: Vec::new(),
+        conversation_world_state_records: Vec::new(),
         run_world_state: crate::test_run_world_state(),
         pending_tool_call_id: call.id.clone(),
         conversation_model_context_items: vec![terminal_test_model_context(&call)],

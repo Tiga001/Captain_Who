@@ -327,10 +327,15 @@ impl AgentService {
     /// Builds the Host-private capability boundary used to hydrate provider-owned Assistant Turns
     /// for context previews. The returned value contains no executable action capability.
     pub(super) fn context_window_provider_host_services(&self) -> AgentRuntimeHostServices {
-        let mut host_services =
-            AgentRuntimeHostServices::new()
-                .with_storage(Arc::clone(&self.storage))
-                .with_web_search_policy(self.web_search_policy_source());
+        let mut host_services = AgentRuntimeHostServices::new()
+            .with_storage(Arc::clone(&self.storage))
+            .with_web_search_policy(self.web_search_policy_source())
+            .with_human_interaction_policy(Arc::new(
+                crate::application::human_interaction::StoredHumanInteractionPolicy(Arc::clone(
+                    &self.storage,
+                )),
+            ))
+            .with_human_interaction_preview_readiness(true, true);
         if let Some(builtin_capabilities) = self.builtin_capabilities.clone() {
             host_services = host_services.with_builtin_capabilities(builtin_capabilities);
         }

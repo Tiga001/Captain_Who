@@ -16,8 +16,11 @@ impl StorageService {
         chat_repository::save_conversation(&mut connection, conversation.clone())
             .map_err(storage_error)?;
         crate::storage::human_interaction_repository::attach_message_projections(
-            &connection, &conversation.id, &mut conversation.messages,
-        ).map_err(storage_error)?;
+            &connection,
+            &conversation.id,
+            &mut conversation.messages,
+        )
+        .map_err(storage_error)?;
         Ok(conversation)
     }
 
@@ -311,6 +314,17 @@ impl StorageService {
                 &transaction,
                 rewrite,
             )?;
+            // The replacement starts a new causal tail. Preserve raw source receipts, while
+            // removing World State request placements that belonged to the superseded run.
+            world_state_repository::rewind_for_message_deletion(
+                &transaction,
+                &rewrite.conversation_id,
+                &[
+                    rewrite.source_user_message_id.clone(),
+                    rewrite.source_assistant_message_id.clone(),
+                ],
+            )
+            .map_err(|error| error.to_string())?;
         }
         let claimed_wake = if let Some(trusted) = trusted_wake {
             let wake = transaction
@@ -584,8 +598,11 @@ impl StorageService {
         };
         let mut conversation = conversation;
         crate::storage::human_interaction_repository::attach_message_projections(
-            &transaction, &conversation.id, &mut conversation.messages,
-        ).map_err(storage_error)?;
+            &transaction,
+            &conversation.id,
+            &mut conversation.messages,
+        )
+        .map_err(storage_error)?;
         transaction.commit().map_err(storage_error)?;
         Ok((
             conversation,

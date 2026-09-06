@@ -1,6 +1,9 @@
 use super::*;
 use std::collections::VecDeque;
 
+#[path = "world_state.rs"]
+mod world_state;
+
 #[derive(Debug, Clone)]
 pub(crate) struct ContextFrame {
     baseline: Option<MeasuredContextBaseline>,
@@ -9,6 +12,7 @@ pub(crate) struct ContextFrame {
     revision: u64,
     persistent_revision: u64,
     measurement: Option<ContextFrameMeasurementState>,
+    conversation_world_state_records: Arc<[crate::AnchoredWorldStateRecord]>,
 }
 
 /// Immutable, already-measured conversation context shared by the server cache and active runs.
@@ -19,6 +23,7 @@ pub(crate) struct MeasuredContextBaseline {
     revision: u64,
     persistent_revision: u64,
     measurement: ContextFrameMeasurementState,
+    conversation_world_state_records: Arc<[crate::AnchoredWorldStateRecord]>,
 }
 
 #[derive(Debug, Clone)]
@@ -148,6 +153,7 @@ impl ContextFrame {
             revision,
             persistent_revision,
             measurement: None,
+            conversation_world_state_records: Arc::from([]),
         }
     }
 
@@ -760,6 +766,9 @@ impl ContextFrame {
             revision: baseline.revision,
             persistent_revision: baseline.persistent_revision,
             measurement: Some(baseline.measurement.clone()),
+            conversation_world_state_records: Arc::clone(
+                &baseline.conversation_world_state_records,
+            ),
             baseline: Some(baseline),
             items: Vec::new(),
         }
@@ -777,6 +786,7 @@ impl ContextFrame {
         };
         let overlay = self.items.split_off(prefix_item_count);
         let mut rebased = Self::from_measured_baseline(baseline);
+        rebased.conversation_world_state_records = self.conversation_world_state_records;
         for item in overlay {
             rebased.push(item);
         }
@@ -801,6 +811,95 @@ impl ContextFrame {
     /// after compaction. Message, guidance and tool protocol items are reconstructed from durable
     /// Trace/ModelContext storage; retaining their run overlay would duplicate the exact tail.
     pub(crate) fn replace_compacted_model_history(self, baseline: MeasuredContextBaseline) -> Self {
+        let baseline = if baseline.conversation_world_state_records.is_empty()
+            && !self.conversation_world_state_records.is_empty()
+        {
+            self.preserve_world_state_for_compaction(baseline)
+        } else {
+            baseline
+        };
+        // Compaction restores journaled model/tool messages as ConversationTrace items, while
+        // request-local World State and newly activated Skill items remain in the run overlay.
+        // Keep a separate provider-layout sequence so those retained observations keep their
+        // causal positions without moving the authoritative journal or changing its lifetime.
+        let ordered = self.model_request_items();
+        let request_orders = ordered
+            .iter()
+            .enumerate()
+            .map(|(index, item)| (*item as *const ContextItem, index))
+            .collect::<BTreeMap<_, _>>();
+        let result_orders = ordered
+            .iter()
+            .enumerate()
+            .filter_map(|(index, item)| {
+                let call_id = item.message.tool_call_id()?;
+                let cursor = item.metadata.origin()?.journal_cursor()?;
+                Some((
+                    (cursor.message_id().to_string(), call_id.to_string()),
+                    index,
+                ))
+            })
+            .collect::<BTreeMap<_, _>>();
+        let mut placements = BTreeMap::<_, VecDeque<_>>::new();
+        let mut split_call_placements = BTreeMap::new();
+        for (index, item) in ordered.iter().enumerate() {
+            let sources = item.metadata.sources();
+            let placement = if sources.contains(&ContextSource::RunInput) {
+                Some(ContextSource::RunInput)
+            } else if sources.contains(&ContextSource::RunTimeline)
+                || (item.metadata.scope() == ContextScope::Run
+                    && item.metadata.retention() == ContextRetention::Retained
+                    && !sources.contains(&ContextSource::BackendSystemPrompt)
+                    && !sources.contains(&ContextSource::AutomationExecution)
+                    && !sources.contains(&ContextSource::RunBootstrap))
+            {
+                Some(ContextSource::RunTimeline)
+            } else {
+                None
+            };
+            if let Some((origin, placement)) = item.metadata.origin().zip(placement) {
+                if let Some(cursor) = origin.journal_cursor() {
+                    for (ordinal, call) in item.message.tool_calls().enumerate() {
+                        let key = (cursor.message_id().to_string(), call.id.clone());
+                        // A live Assistant Turn can own several calls, while durable Generic
+                        // history stores each call immediately before its own result. The
+                        // subsequent call's result is the exact boundary after any retained
+                        // observations produced by the preceding call, such as Skill loading.
+                        let split_index = if ordinal == 0 {
+                            index
+                        } else {
+                            result_orders.get(&key).copied().unwrap_or(index)
+                        };
+                        split_call_placements.insert(
+                            key,
+                            (placement, u64::try_from(split_index).unwrap_or(u64::MAX)),
+                        );
+                    }
+                }
+                // One trace sequence can have several split Tool Call projections. Role and
+                // protocol identity distinguish them without comparing private/redacted text.
+                let key = (
+                    origin.kind().as_str(),
+                    origin.id().to_string(),
+                    item.message.role().as_str(),
+                    item.message.tool_call_id().map(str::to_string),
+                    item.message
+                        .tool_calls()
+                        .map(|call| call.id.clone())
+                        .collect::<Vec<_>>(),
+                );
+                placements
+                    .entry(key)
+                    .or_default()
+                    .push_back((placement, u64::try_from(index).unwrap_or(u64::MAX)));
+            }
+        }
+        let baseline_world_state_origins = baseline
+            .iter_items()
+            .filter_map(|item| item.metadata.origin())
+            .filter(|origin| origin.kind() == ContextOriginKind::WorldStateRecord)
+            .cloned()
+            .collect::<Vec<_>>();
         let overlay = self
             .iter_items()
             .filter(|item| {
@@ -810,10 +909,78 @@ impl ContextFrame {
                     && !sources.contains(&ContextSource::ToolContinuation)
                     && !sources.contains(&ContextSource::UserGuidance)
             })
+            .filter(|item| {
+                !item.metadata.origin().is_some_and(|origin| {
+                    origin.kind() == ContextOriginKind::WorldStateRecord
+                        && baseline_world_state_origins.contains(origin)
+                })
+            })
             .filter(|item| !item.metadata.usage_class().is_persistent())
-            .cloned()
+            .map(|item| {
+                let index = request_orders[&(item as *const ContextItem)];
+                let mut item = item.clone();
+                if item.metadata.retention() == ContextRetention::Retained
+                    && !item
+                        .metadata
+                        .sources()
+                        .contains(&ContextSource::RunBootstrap)
+                    && !item
+                        .metadata
+                        .sources()
+                        .contains(&ContextSource::AutomationExecution)
+                {
+                    item.metadata = item
+                        .metadata
+                        .with_source(ContextSource::RunTimeline)
+                        .with_request_order(u64::try_from(index).unwrap_or(u64::MAX));
+                }
+                item
+            })
             .collect::<Vec<_>>();
         let mut replaced = Self::from_measured_baseline(baseline);
+        // The baseline is a shared immutable cache. Only this run's copy receives layout tags.
+        replaced.materialize_baseline();
+        for item in &mut replaced.items {
+            let Some(origin) = item.metadata.origin() else {
+                continue;
+            };
+            let key = (
+                origin.kind().as_str(),
+                origin.id().to_string(),
+                item.message.role().as_str(),
+                item.message.tool_call_id().map(str::to_string),
+                item.message
+                    .tool_calls()
+                    .map(|call| call.id.clone())
+                    .collect::<Vec<_>>(),
+            );
+            let placement = placements
+                .get_mut(&key)
+                .and_then(VecDeque::pop_front)
+                .or_else(|| {
+                    let mut calls = item.message.tool_calls();
+                    let call = calls.next()?;
+                    if calls.next().is_some() {
+                        return None;
+                    }
+                    let cursor = origin.journal_cursor()?;
+                    split_call_placements
+                        .get(&(cursor.message_id().to_string(), call.id.clone()))
+                        .copied()
+                });
+            if let Some((placement, order)) = placement {
+                item.metadata = item
+                    .metadata
+                    .clone()
+                    .with_source(placement)
+                    .with_request_order(order);
+            }
+        }
+        replaced.revision = replaced.revision.saturating_add(1);
+        replaced.persistent_revision = persistent_frame_revision(&replaced.items);
+        if let Some(measurement) = &mut replaced.measurement {
+            measurement.full_recount = None;
+        }
         for item in overlay {
             replaced.push(item);
         }
@@ -830,10 +997,14 @@ impl ContextFrame {
             .measurement
             .clone()
             .ok_or_else(|| AgentError::new("共享上下文基线前必须先完成计量。"))?;
-        if self
-            .iter_items()
-            .any(|item| !item.metadata.usage_class().is_persistent())
-        {
+        if self.iter_items().any(|item| {
+            !(item.metadata.usage_class().is_persistent()
+                || (item.metadata.scope == ContextScope::Conversation
+                    && item
+                        .metadata
+                        .sources()
+                        .contains(&ContextSource::WorldStateUnobserved)))
+        }) {
             return Err(AgentError::new(
                 "共享上下文基线只能包含 fixed 或 durable 内容。",
             ));
@@ -853,6 +1024,7 @@ impl ContextFrame {
             revision: self.revision,
             persistent_revision: self.persistent_revision,
             measurement,
+            conversation_world_state_records: Arc::clone(&self.conversation_world_state_records),
         };
         self.baseline = Some(baseline.clone());
         Ok(baseline)
@@ -942,7 +1114,8 @@ impl ContextFrame {
         }
 
         let messages = self
-            .iter_items()
+            .model_request_items()
+            .into_iter()
             .map(|item| &item.message)
             .collect::<Vec<_>>();
         let estimate = estimator.estimate_messages(&messages);
@@ -1212,9 +1385,9 @@ impl ContextFrame {
         }
     }
 
-    /// Validates the physical cache layout independently from token accounting.
+    /// Validates canonical journal/checkpoint bands independently from token accounting.
     ///
-    /// A request can append within one cache band or advance to a more volatile band, but it must
+    /// The journal can append within one band or advance to a more volatile band, but it must
     /// never insert a later-lived item ahead of an already-established prefix.
     pub(crate) fn validate_cache_layout(&self) -> AgentResult<()> {
         let mut previous = None;
@@ -1323,13 +1496,77 @@ impl ContextFrame {
         messages
     }
 
+    /// Provider layout is independent of the durable journal and compaction cursors.
+    pub(crate) fn model_request_items(&self) -> Vec<&ContextItem> {
+        super::request_layout::ordered_items(self.iter_items().collect())
+    }
+
+    pub(crate) fn into_model_request_messages(self) -> Vec<LlmMessage> {
+        self.model_request_items()
+            .into_iter()
+            .map(|item| item.message.clone())
+            .collect()
+    }
+
+    /// Mark the trailing user-input cohort on a new run's private frame. A shared baseline
+    /// labels these as history; a cold assembly labels only the last as CurrentTurn. Include
+    /// anchored state diffs between inputs so their causal order survives physical layout.
+    pub(crate) fn mark_initial_run_input(&mut self) {
+        let mut start = None;
+        let items = self.iter_items().collect::<Vec<_>>();
+        for (index, item) in items.into_iter().enumerate().rev() {
+            if item.metadata.scope != ContextScope::Conversation {
+                continue;
+            }
+            let sources = item.metadata.sources();
+            if sources.contains(&ContextSource::WorldStateDiff) {
+                if start.is_some() {
+                    start = Some(index);
+                }
+                continue;
+            }
+            if (sources.contains(&ContextSource::ConversationHistory)
+                || sources.contains(&ContextSource::CurrentTurn))
+                && item.message.role() == LlmMessageRole::User
+            {
+                start = Some(index);
+            } else {
+                break;
+            }
+        }
+        let Some(start) = start else { return };
+        let shared_baseline = self.baseline.clone();
+        self.materialize_baseline();
+        for item in &mut self.items[start..] {
+            if item.metadata.scope == ContextScope::Conversation {
+                item.metadata = item.metadata.clone().with_source(ContextSource::RunInput);
+            }
+        }
+        self.persistent_revision = persistent_frame_revision(&self.items);
+        self.revision = self.revision.saturating_add(1);
+        if let Some(measurement) = &mut self.measurement {
+            measurement.full_recount = None;
+        }
+        if let Some(baseline) = shared_baseline {
+            *self = std::mem::take(self).rebase_onto_measured_baseline(baseline);
+        }
+    }
+
     pub(crate) fn manifest(&self) -> ContextManifest<'_> {
+        let request_indices = self
+            .model_request_items()
+            .into_iter()
+            .enumerate()
+            .map(|(index, item)| (item as *const ContextItem, index))
+            .collect::<BTreeMap<_, _>>();
         ContextManifest {
             entries: self
                 .iter_items()
                 .enumerate()
                 .map(|(index, item)| ContextManifestEntry {
                     index,
+                    model_request_index: request_indices[&(item as *const ContextItem)],
+                    request_order: item.metadata.request_order(),
                     role: item.message.role().as_str(),
                     sources: item
                         .metadata
@@ -1443,7 +1680,7 @@ impl ContextFrame {
         Ok(unresolved)
     }
 
-    fn iter_items(&self) -> impl DoubleEndedIterator<Item = &ContextItem> {
+    pub(super) fn iter_items(&self) -> impl DoubleEndedIterator<Item = &ContextItem> {
         self.baseline
             .iter()
             .flat_map(MeasuredContextBaseline::iter_items)
@@ -1473,7 +1710,7 @@ fn provider_turn_restore_error(code: &'static str, message: &'static str) -> Age
 }
 
 impl MeasuredContextBaseline {
-    fn iter_items(&self) -> impl DoubleEndedIterator<Item = &ContextItem> {
+    pub(super) fn iter_items(&self) -> impl DoubleEndedIterator<Item = &ContextItem> {
         self.chunks.iter().flat_map(|chunk| chunk.iter())
     }
 
@@ -1524,6 +1761,9 @@ impl MeasuredContextBaseline {
                 chunks: Arc::from(matching_chunks.into_boxed_slice()),
                 revision: u64::try_from(item_offset).unwrap_or(u64::MAX),
                 persistent_revision,
+                conversation_world_state_records: Arc::clone(
+                    &self.conversation_world_state_records,
+                ),
                 measurement: ContextFrameMeasurementState {
                     estimator: self.measurement.estimator.clone(),
                     identity: self.measurement.identity.clone(),

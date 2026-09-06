@@ -308,7 +308,7 @@ async fn run_payload_case(api_style: crate::protocol::AgentApiStyle) {
         assert!(!disabled.contains(&"browser_snapshot"));
         assert!(disabled.iter().all(|name| !name.starts_with("browser_")));
         let payload = serde_json::to_string(&requests[index]).unwrap();
-        assert!(payload.contains("disabled_by_user"));
+        assert!(payload.contains(r#"userAllowed\":false"#));
         assert!(!payload.contains("Control the managed in-app browser"));
         assert!(!payload.contains("Enabled built-in capabilities"));
         assert!(!payload.contains("policyRevision"));
@@ -329,7 +329,7 @@ async fn run_payload_case(api_style: crate::protocol::AgentApiStyle) {
     assert!(!reenabled.contains(&"browser_snapshot"));
     assert!(serde_json::to_string(&requests[4])
         .unwrap()
-        .contains("waiting_approval"));
+        .contains("awaiting approval"));
     assert!(!serde_json::to_string(provider_tool_schema(
         &requests[4],
         api_style,
@@ -406,7 +406,7 @@ async fn reenabled_browser_waits_for_real_approval_and_resumes_with_fresh_author
         assert!(!names.contains(&"browser_snapshot"));
         assert!(serde_json::to_string(&awaiting)
             .unwrap()
-            .contains("waiting_approval"));
+            .contains("awaiting approval"));
         write_runtime_test_json_response(&mut stream, json!({
             "choices": [{"message": {"role": "assistant", "content": null, "tool_calls": [{
                 "id": "fresh-browser-activation", "type": "function", "function": {
@@ -574,7 +574,7 @@ async fn disable_after_model_dispatch_rejects_late_call_and_cleans_next_request(
         assert!(!names.contains(&"browser_snapshot"));
         assert!(!names.contains(&"activate_capability"));
         let next_payload = serde_json::to_string(&second).unwrap();
-        assert!(next_payload.contains("disabled_by_user"));
+        assert!(next_payload.contains(r#"userAllowed\":false"#));
         assert!(!next_payload.contains("Enabled built-in capabilities"));
         assert!(!next_payload.contains("Control the managed in-app browser"));
         assert!(

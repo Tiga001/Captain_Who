@@ -10,6 +10,8 @@ pub struct AgentExtensionSnapshot {
 
 /// Current durable Agent run checkpoint schema.
 ///
+/// Version 15 preserves the exact Conversation World State ledger and request-adoption markers
+/// beside its model projection, including direct Core runs without a storage Host.
 /// Version 14 distinguishes approval and human-input suspension authority. Human answers arrive
 /// exclusively through a native Host resume port and never carry an ApprovalDecision.
 /// Version 13 carries the consumed predecessor observation for the exact pending FileChange so a
@@ -25,7 +27,7 @@ pub struct AgentExtensionSnapshot {
 /// The referenced payload remains encrypted in the Host vault; raw Provider continuation and
 /// reasoning are never serialized into the checkpoint. Any other schema version is rejected at
 /// the approval boundary.
-pub const AGENT_RUN_CHECKPOINT_SCHEMA_VERSION: u32 = 14;
+pub const AGENT_RUN_CHECKPOINT_SCHEMA_VERSION: u32 = 15;
 
 /// Suspension sources are separate authority domains. A user answer never grants approval.
 #[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
@@ -90,6 +92,9 @@ pub struct AgentRunCheckpoint {
     /// Exact authoritative Run-lifetime World State. Resume rebases this snapshot into a fresh
     /// epoch; it never reconstructs authority from rendered model context.
     pub run_world_state: WorldStateSnapshot,
+    /// Exact canonical conversation ledger; sanitized context text cannot restore authority or
+    /// recover request-boundary epoch identity after approval or human-input suspension.
+    pub conversation_world_state_records: Vec<crate::AnchoredWorldStateRecord>,
     /// Approval-record identity when it differs from the Provider Tool Call identity. External MCP
     /// and built-in capability activation both use an application UUID here. Tool kind and
     /// projection authority always come from the frozen typed Tool provenance, never this field.
@@ -128,6 +133,9 @@ pub struct AgentContextCheckpointItem {
     pub sources: Vec<String>,
     pub scope: String,
     pub retention: String,
+    /// Provider-layout sequence only; the checkpoint item vector stays in journal order.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_order: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub group: Option<AgentContextCheckpointGroup>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -147,6 +155,7 @@ impl std::fmt::Debug for AgentContextCheckpointItem {
             .field("sources", &self.sources)
             .field("scope", &self.scope)
             .field("retention", &self.retention)
+            .field("request_order", &self.request_order)
             .field("group", &self.group)
             .field("origin", &self.origin)
             .finish()

@@ -208,6 +208,28 @@ pub struct AgentSamplingBoundaryRequest {
     pub expected_next_trace_sequence: u64,
 }
 
+/// A request-boundary projection from the same frozen observations used for tools and guidance.
+/// The Host binds this port to an admitted conversation/run; rendered state is never authority.
+#[derive(Debug, Clone)]
+pub struct AgentConversationWorldStateRequest {
+    pub conversation_id: String,
+    pub boundary: crate::WorldStateRequestBoundary,
+    pub sections: Vec<crate::WorldStateSectionEnvelope>,
+}
+
+/// Required durable state writes are separate from best-effort model usage diagnostics.
+pub trait AgentConversationWorldStateHost: Send + Sync {
+    fn prepare_request(
+        &self,
+        request: AgentConversationWorldStateRequest,
+    ) -> AgentResult<Vec<crate::AnchoredWorldStateRecord>>;
+
+    /// A successful Provider response confirms adoption of the prepared state prefix. An error
+    /// here must stop continuation, never retry an already completed Provider request.
+    fn mark_request_observed(&self, boundary: &crate::WorldStateRequestBoundary)
+        -> AgentResult<()>;
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentSamplingBoundaryMessage {
     pub trace_sequence: u64,
@@ -378,6 +400,7 @@ impl std::fmt::Debug for AgentResolvedSkillActivation {
 /// positional parameter for every durable-state or orchestration capability.
 #[derive(Clone, Default)]
 pub struct AgentRuntimeHostServices {
+    pub(super) conversation_world_state: Option<Arc<dyn AgentConversationWorldStateHost>>,
     pub(super) web_search_policy: Option<Arc<dyn crate::WebSearchPolicySource>>,
     pub(super) host_executor: Option<AgentHostActionExecutor>,
     pub(super) storage: Option<Arc<StorageService>>,
@@ -406,6 +429,9 @@ pub struct AgentRuntimeHostServices {
     pub(super) automation_report_sink: Option<Arc<dyn crate::AutomationReportSink>>,
     pub(super) human_interaction_policy: Option<Arc<dyn HumanInteractionPolicySource>>,
     pub(super) human_interaction_runtime: Option<Arc<dyn AgentHumanInteractionRuntimeHost>>,
+    // Read-only capacity projection only. The driver deliberately ignores these flags and
+    // requires the real durable runtime port before granting execution.
+    pub(super) human_interaction_preview_readiness: Option<(bool, bool)>,
     pub(super) user_input_resume: Option<AgentUserInputResume>,
 }
 
@@ -496,6 +522,14 @@ impl AgentRuntimeHostServices {
         Self::default()
     }
 
+    pub fn with_conversation_world_state(
+        mut self,
+        host: Arc<dyn AgentConversationWorldStateHost>,
+    ) -> Self {
+        self.conversation_world_state = Some(host);
+        self
+    }
+
     /// Supplies live trusted web settings for every request and new execution. When present,
     /// model/Renderer-provided search configuration cannot replace this authority.
     pub fn with_web_search_policy(mut self, source: Arc<dyn crate::WebSearchPolicySource>) -> Self {
@@ -508,6 +542,17 @@ impl AgentRuntimeHostServices {
         host: Arc<dyn AgentHumanInteractionRuntimeHost>,
     ) -> Self {
         self.human_interaction_runtime = Some(host);
+        self
+    }
+
+    /// Describes the eventual Host's question handlers without constructing executable ports.
+    /// This is consumed only by `prepare_context_window_tool_projection`.
+    pub fn with_human_interaction_preview_readiness(
+        mut self,
+        blocking: bool,
+        asynchronous: bool,
+    ) -> Self {
+        self.human_interaction_preview_readiness = Some((blocking, blocking && asynchronous));
         self
     }
 
@@ -867,6 +912,12 @@ pub fn prepare_context_window_tool_projection(
     host_services: &AgentRuntimeHostServices,
     host_actions_available: bool,
 ) -> AgentResult<AgentContextWindowToolProjection> {
+    let (human_ready, human_async_ready) = host_services
+        .human_interaction_runtime
+        .as_ref()
+        .map(|host| (true, host.async_execution_ready()))
+        .or(host_services.human_interaction_preview_readiness)
+        .unwrap_or((false, false));
     let extension_snapshots = input
         .resume_checkpoint
         .as_ref()
@@ -890,11 +941,8 @@ pub fn prepare_context_window_tool_projection(
             agent_collaboration_enabled: host_services.agent_collaboration.is_some(),
             automation_report_sink: host_services.automation_report_sink.clone(),
             human_interaction_policy: host_services.human_interaction_policy.clone(),
-            human_interaction_execution_ready: host_services.human_interaction_runtime.is_some(),
-            human_interaction_async_execution_ready: host_services
-                .human_interaction_runtime
-                .as_ref()
-                .is_some_and(|host| host.async_execution_ready()),
+            human_interaction_execution_ready: human_ready,
+            human_interaction_async_execution_ready: human_async_ready,
         },
     )?;
     let initial_run_world_state = RunWorldStateTracker::new_with_extension_sections(
@@ -905,10 +953,27 @@ pub fn prepare_context_window_tool_projection(
     )?
     .snapshot()
     .clone();
+    let conversation_sections = MemoryConversationWorldState::new(input)?.preview_sections(
+        capabilities
+            .runtime_extensions
+            .conversation_world_state_sections()?,
+    )?;
+    let mut capability_context = ContextFrame::new(Vec::new());
+    capabilities
+        .runtime_extensions
+        .contribute_request_context(&ModelRequestContext::agent_work(), &mut capability_context)?;
     Ok(AgentContextWindowToolProjection::new(
         capabilities.initial_tool_set.checkpoint(),
         initial_run_world_state,
         capabilities.initial_tool_set.dynamic_definitions().to_vec(),
+    )
+    .with_conversation_world_state_sections(conversation_sections)
+    .with_capability_context(
+        capability_context
+            .model_request_items()
+            .into_iter()
+            .cloned()
+            .collect(),
     ))
 }
 

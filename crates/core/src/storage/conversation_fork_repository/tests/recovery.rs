@@ -13,6 +13,8 @@ fn root_fork_time_cutoff_excludes_late_summary_receipt_and_future_unanchored_epo
             epoch_generation: 1,
             base_summary_id: None,
             effective_before_message_id: None,
+            request_boundary: None,
+            model_observed: true,
             record: &WorldStateRecord::Full(visible.clone()),
             created_at: 10,
         },
@@ -42,6 +44,8 @@ fn root_fork_time_cutoff_excludes_late_summary_receipt_and_future_unanchored_epo
             epoch_generation: 3,
             base_summary_id: None,
             effective_before_message_id: None,
+            request_boundary: None,
+            model_observed: true,
             record: &WorldStateRecord::Full(future.clone()),
             created_at: 80,
         },
@@ -408,6 +412,8 @@ fn fork_clones_only_world_state_visible_at_cutoff_and_remaps_anchors_and_summary
             epoch_generation: 1,
             base_summary_id: None,
             effective_before_message_id: None,
+            request_boundary: None,
+            model_observed: true,
             record: &WorldStateRecord::Full(initial),
             created_at: 10,
         },
@@ -439,6 +445,8 @@ fn fork_clones_only_world_state_visible_at_cutoff_and_remaps_anchors_and_summary
             epoch_generation: 2,
             base_summary_id: Some("summary-world-state"),
             effective_before_message_id: Some("user-c"),
+            request_boundary: None,
+            model_observed: true,
             record: &WorldStateRecord::Diff(diff_at_c),
             created_at: 50,
         },
@@ -453,6 +461,8 @@ fn fork_clones_only_world_state_visible_at_cutoff_and_remaps_anchors_and_summary
             epoch_generation: 2,
             base_summary_id: Some("summary-world-state"),
             effective_before_message_id: Some("user-d"),
+            request_boundary: None,
+            model_observed: true,
             record: &WorldStateRecord::Diff(diff_after_cutoff),
             created_at: 70,
         },
@@ -526,6 +536,8 @@ fn fork_selects_the_latest_world_state_epoch_whose_summary_is_visible_at_cutoff(
             epoch_generation: 1,
             base_summary_id: None,
             effective_before_message_id: None,
+            request_boundary: None,
+            model_observed: true,
             record: &WorldStateRecord::Full(initial.clone()),
             created_at: 10,
         },
@@ -538,6 +550,8 @@ fn fork_selects_the_latest_world_state_epoch_whose_summary_is_visible_at_cutoff(
             epoch_generation: 1,
             base_summary_id: None,
             effective_before_message_id: Some("user-b"),
+            request_boundary: None,
+            model_observed: true,
             record: &WorldStateRecord::Diff(WorldStateDiff::between(&initial, &at_b).unwrap()),
             created_at: 30,
         },
@@ -569,6 +583,8 @@ fn fork_selects_the_latest_world_state_epoch_whose_summary_is_visible_at_cutoff(
             epoch_generation: 2,
             base_summary_id: Some("summary-world-state-1"),
             effective_before_message_id: Some("user-c"),
+            request_boundary: None,
+            model_observed: true,
             record: &WorldStateRecord::Diff(WorldStateDiff::between(&epoch_two, &at_c).unwrap()),
             created_at: 50,
         },
@@ -698,8 +714,8 @@ fn source_conversation() -> ChatConversationRecord {
     ]
     .into_iter()
     .map(|(id, role, created_at)| ChatMessageRecord {
-                human_interaction_response: None,
-id: id.to_string(),
+        human_interaction_response: None,
+        id: id.to_string(),
         role: role.to_string(),
         content: format!("content {id}"),
         created_at,
@@ -1042,4 +1058,119 @@ fn record_provider_transition_summary(
         Some(&observation),
     )
     .unwrap();
+}
+
+#[test]
+fn request_world_state_fork_uses_trace_cutoff_and_remaps_history_identity_without_prepared_receipts(
+) {
+    let mut connection = Connection::open_in_memory().unwrap();
+    migrations::run_migrations(&connection).unwrap();
+    let source = source_conversation();
+    chat_repository::save_conversation(&mut connection, source.clone()).unwrap();
+    conversation_trace_repository::replace_trace(
+        &mut connection,
+        &ConversationTurnTrace {
+            schema_version: CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
+            run_id: "run-source-1".into(),
+            conversation_id: source.id.clone(),
+            assistant_message_id: "assistant-b".into(),
+            terminal_status: ConversationTurnTraceTerminalStatus::Completed,
+            terminal_error: None,
+            truncated: false,
+            items: vec![
+                ConversationTurnTraceItem::AssistantNarration {
+                    sequence: 0,
+                    content: "first".into(),
+                    truncated: false,
+                },
+                ConversationTurnTraceItem::AssistantNarration {
+                    sequence: 1,
+                    content: "second".into(),
+                    truncated: false,
+                },
+            ],
+        },
+        30,
+        40,
+    )
+    .unwrap();
+    let initial = fork_world_state_snapshot("request-world", 0, "initial");
+    let before = fork_world_state_snapshot("request-world", 1, "before-request");
+    let after = fork_world_state_snapshot("request-world", 2, "after-first-narration");
+    let first_boundary = crate::WorldStateRequestBoundary {
+        run_id: "run-source-1".into(),
+        assistant_message_id: "assistant-b".into(),
+        request_index: 0,
+        after_trace_sequence: None,
+    };
+    let second_boundary = crate::WorldStateRequestBoundary {
+        request_index: 1,
+        after_trace_sequence: Some(0),
+        ..first_boundary.clone()
+    };
+    for (record, boundary) in [
+        (WorldStateRecord::Full(initial.clone()), None),
+        (
+            WorldStateRecord::Diff(WorldStateDiff::between(&initial, &before).unwrap()),
+            Some(&first_boundary),
+        ),
+        (
+            WorldStateRecord::Diff(WorldStateDiff::between(&before, &after).unwrap()),
+            Some(&second_boundary),
+        ),
+    ] {
+        world_state_repository::append_record(
+            &mut connection,
+            &world_state_repository::ConversationWorldStateRecordWrite {
+                conversation_id: &source.id,
+                epoch_generation: 1,
+                base_summary_id: None,
+                effective_before_message_id: None,
+                request_boundary: boundary,
+                model_observed: true,
+                record: &record,
+                created_at: 30,
+            },
+        )
+        .unwrap();
+    }
+    let positions = source
+        .messages
+        .iter()
+        .enumerate()
+        .map(|(i, m)| (m.id.clone(), i))
+        .collect();
+    let visible = world_state_records_visible_at_cutoff(
+        &connection,
+        &source.id,
+        &positions,
+        &ContextJournalCursor::trace_item("assistant-b", 0),
+        &[],
+        None,
+    )
+    .unwrap();
+    assert_eq!(visible.len(), 2);
+    assert_eq!(visible[1].request_boundary.as_ref(), Some(&first_boundary));
+    let plan = build_assistant_reply_fork_plan(
+        &connection,
+        "fork-request-world",
+        &source.id,
+        "assistant-b",
+        100,
+    )
+    .unwrap();
+    commit_fork_plan(&mut connection, &plan).unwrap();
+    let target =
+        world_state_repository::list_active_journal_entries(&connection, &plan.target.id).unwrap();
+    assert_eq!(target.len(), 3);
+    let boundary = target[2].request_boundary.as_ref().unwrap();
+    assert_eq!(
+        boundary.assistant_message_id,
+        plan.message_id_map["assistant-b"]
+    );
+    assert_ne!(boundary.run_id, second_boundary.run_id);
+    assert_eq!(boundary.request_index, 1);
+    assert_eq!(boundary.after_trace_sequence, Some(0));
+    assert_eq!(connection.query_row("SELECT COUNT(*) FROM conversation_world_state_request_commits WHERE conversation_id=?1", [&plan.target.id], |row| row.get::<_, i64>(0)).unwrap(),0);
+    assert_eq!(connection.query_row("SELECT COUNT(*) FROM agent_effective_permission_snapshots WHERE conversation_id=?1", [&plan.target.id], |row| row.get::<_, i64>(0)).unwrap(),0);
 }

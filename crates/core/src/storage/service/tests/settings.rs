@@ -2237,7 +2237,10 @@ fn web_search_policy_resolves_only_current_search_credential_and_degrades_missin
     service.save_model_settings(settings).unwrap();
     delete_stored_credential(&fixture, "api_token_ref", None);
 
-    assert!(service.load_web_search_policy_snapshot().unwrap().available());
+    assert!(service
+        .load_web_search_policy_snapshot()
+        .unwrap()
+        .available());
     let credential = service.authorize_web_search_execution().unwrap();
     assert!(!format!("{credential:?}").contains(SEARCH));
     assert_eq!(credential.into_secret(), SEARCH);

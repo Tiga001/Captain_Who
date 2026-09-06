@@ -2,7 +2,7 @@
 status: current
 audience: developers
 owner: engineering
-last_verified: 2026-08-31
+last_verified: 2026-09-06
 ---
 
 # 上下文管理
@@ -21,7 +21,7 @@ last_verified: 2026-08-31
 
 ## 权威事实与派生视图
 
-SQLite 中的 `messages`、终态 `ConversationTurnTrace`、当前 compaction head 及当前 Run 已确认状态组成逻辑日志。所有消费者从这些事实派生：
+SQLite 中的 `messages`、`ConversationTurnTrace`、当前 compaction head、Conversation World State 请求日志及当前 Run 已确认状态组成逻辑日志。所有消费者从这些事实派生：
 
 ```text
 messages + terminal traces + active compaction head
@@ -68,22 +68,72 @@ pending assistant message 的持久正文为空；“正在思考”等 UI place
 - `fixed`：系统提示、Tool 定义和 Provider 固定开销；
 - `durable`：当前摘要及其游标之后的已提交消息/Trace；
 - `run_transient`：当前 Run 已产生、但尚未被主模型成功观察和提升的内容；
-- `request_only`：Todo、文件事务提示、当前输入附件说明等只属于本次请求的材料；
+- `request_only`：当前能力使用说明、Todo、文件事务提示等只属于本次请求的材料；
 - `reserved_output`：为模型输出保留的空间。
 
 当前 Run 的 Tool Result 可以先落库，但在包含它的模型请求成功前仍属于 `run_transient`，不能被压缩覆盖。请求成功后，已观察前缀才能提升为 durable baseline。
 
+这些分类描述计量与持久化语义，不直接决定模型请求中的物理位置。初始附件、Skill 和 World State 保持原有 role、scope、retention；重排不会把 Run 材料提升为 Conversation 历史，也不会把 RequestOnly 指南固化到检查点。
+
 ## 组装规则
 
-主请求的逻辑内容为：
+`ContextFrame` 保留逻辑日志顺序；发送前通过独立的 `model_request_items()` 布局投影组织主模型请求。布局按稳定内容、半稳定说明、当前任务和动态状态排列，可选项不存在时跳过：
 
 ```text
-后端 system prompt
-+ active semantic summary（若存在）
-+ coveredThrough 之后的原始消息和闭合 Trace
-+ 当前 Run transient
-+ request-only 内容
+01 稳定 system prompt（含稳定工具使用指导）
+02 初始 Skill 简短目录
+03 初始协作说明与目录
+04 当前能力使用指南（RequestOnly：浏览器、搜索、人机交互）
+05 Conversation World State full snapshot
+06 active semantic summary（若存在）
+07 coveredThrough 之后的旧历史及其 anchored World State diff
+08 本次连续用户输入及其 anchored diff + 附件说明/图片
+09 Run 开始时预激活的 Skill 完整说明
+10 初始 Run World State full snapshot
+11 当前 Run 的因果时间线
+   narration / Tool Call + Tool Result / 回应与引导
+   运行中新激活的 Skill / 恢复后的 Run full snapshot / World State diff
+12 Todo
+13 ignored 交互状态
+14 修复提示
+15 文件事务提示
 ```
+
+当前布局将初始目录与能力指南放在 Conversation full 之前，并让旧历史紧接本次连续用户输入，再接预激活 Skill 与初始 Run 状态。这两项调整只移动发送位置，增加不变内容形成连续前缀的机会。
+
+本次输入可能包含多条连续 User 消息，不能只把最后一条抽到任务位置；它们之间的 anchored diff 随输入一起保留顺序。顶部 Skill/协作目录和预激活说明只来自 Run 初始组装；后来发生的 Skill 激活、恢复 full snapshot、状态 diff、同步 ToolResult 和异步 User 回应都留在当前 Run 的因果时间线，不能按内容类型全局提前。
+
+Run 结束后，第 8–11 项不会作为请求布局块整块写入历史。用户消息、已结算模型输出、Tool 交换及应保留的状态日志仍按原有持久化规则进入逻辑日志；下一 Run 从该日志重建历史，不携带上个 Run 的预激活说明或整份 Run 状态块。
+
+`RunBootstrap`、`RunInput`、`RunTimeline` 和 `CapabilityInstructions` 是附加布局标签，保留原来源、角色、内容、图片、工具参数和绑定。物理重排不改作用域、保留策略、SQLite journal、Trace sequence、压缩游标或权限判定。摘要生成请求有独立的输入契约，不套用主 Agent 请求布局。
+
+工具 Schema 不放入上述消息序列。请求的独立 `tools` 字段保持“稳定工具按名称排序，再拼接动态工具按名称排序”；稳定工具的使用指导继续位于稳定 system，动态能力专项指导只来自对应扩展。
+
+每次自然请求边界先冻结能力快照，再由同一快照生成 Schema、能力指南和 World State。会话中关闭能力后，下一次请求撤下对应 Schema 与指南，通过原时间位置的 World State diff 表达不可用及原因；diff 只记录状态，不重新携带指南。已经发出的请求无法追溯撤回，迟到执行仍由 Host 重新检查实时策略；设置切换本身不额外调用模型。人机交互关闭也不撤销已接纳问题的回答与恢复。
+
+此布局改善出现相同前缀的机会，不保证缓存命中或命中率提升。目录或能力指南变化时，其后长历史的共同前缀也可能失效；能力指南每次重建而不为缓存冻结。此次没有添加 Provider `cache_control`，厂商内部如何组合 tools/system/messages 仍由对应服务决定。
+
+### Conversation 与 Run World State
+
+Conversation World State 在同一会话的多个 Run 之间延续。第一个真实模型请求建立 full，后续状态没有变化就不追加记录；有变化才在该请求的因果位置追加 diff。开启一个新 Run 本身不重新发送一份新的 Conversation full。
+
+| 状态                                         | 所属与模型可见范围                                                                             |
+| -------------------------------------------- | ---------------------------------------------------------------------------------------------- |
+| 权限、工作区、环境、交互偏好、模型选择       | Conversation，保留原有窄投影与 Host-only 私有字段                                              |
+| 联网搜索可用性及原因 `web.search`            | Conversation；由当前 Host 设置与配置就绪状态决定                                               |
+| 人机交互可用性及原因 `human.interaction`     | Conversation；根身份、有人值守、设置和真实执行端口共同决定                                     |
+| 浏览器用户开关 `builtin.capabilities.policy` | Conversation；只描述用户是否允许申请该能力                                                     |
+| 浏览器本任务激活状态 `builtin.capabilities`  | Run；不把设置开启误当成本任务已获授权                                                          |
+| 激活的 Skills、附件库摘要                    | Run；各自保留现有作用域                                                                        |
+| `tools.effective`                            | 仅 Host；完整 toolset/revision 仍参与实际 Schema、执行校验和检查点，不再向模型重复列出工具名称 |
+
+当前可用能力指南仍是 RequestOnly。Conversation 状态日志只记录状态和原因，不保存这些指南，也不重新挂载过去启用过的工具。
+
+请求边界使用后端生成或核验的 `runId + assistantMessageId + requestIndex + afterTraceSequence`。最后一个字段指向该 assistant 内最近已闭合、模型可见的安全 Trace 项；首请求可为空。不能把这个位置退化为整个 assistant message，更不能按墙钟时间插入。因此同一回复中，关闭发生前的 narration、工具结果、之后的状态 diff 与后续回复能够保持顺序。
+
+Host 在发出请求前用事务校验归属、运行状态、停止围栏、预期 head 和安全 Trace 前缀，写入状态与幂等 request receipt。即使没有 diff 也保留该请求的 receipt。状态初始标记为未确认观察，Provider 成功响应后才确认；发送失败不会把准备好的状态误标成已观察。未观察状态保留在上下文中、计为 `run_transient`，不可被压缩覆盖。观察确认失败会保留模型用量并结束当前执行，不重发已经完成的模型请求。
+
+上下文帧和 checkpoint 同时保存 canonical 状态日志及其投影关联；不从模型可见文本反解 Host 状态。SQLite 增量缓存与冷重建使用同一日志。上下文预览在帧副本上计算当前设置对应的临时 full/diff 和指南，使用同一能力快照进行工具计量，不写日志、request receipt 或观察标记。
 
 后端 `ContinuityIndexV2` 用于定位与审计，默认不作为主模型消息发送。附件、Skill Resource、Artifact 与 Browser download 必须先通过统一 locator 和各自授权解析，模型字符串本身不是文件系统权限。Host 可以从 `agent_nodes` 推导同一 Agent task tree 的 exact root scope，使父/子/兄弟复用 durable attachment/artifact/download；模型、Prompt 或 Renderer 不能自报 root identity，未知 scheme-like/`@namespace` locator 必须 fail closed。
 
@@ -94,6 +144,14 @@ Prompt，也不参与可复用 Conversation configuration revision；Approval/Ch
 [Scheduled Automation](../subsystems/scheduled-automations.md)。
 
 组装器应保持确定性：相同持久日志、active head、权限/工具集版本和请求输入应产生相同的逻辑帧。增量缓存只是优化；删除、重写、回退、分叉或摘要变化后，全量重建必须得到相同结果。
+
+### 压缩与恢复时的布局
+
+压缩后，模型消息和 Tool 交换从权威 journal 重建，尚需保留的 Run overlay 则继续存在。`request_order` 元数据将仍存活的 journal 项与 overlay 的相对位置关联起来，防止压缩后把后发的工具结果移到先发的 Skill/World State 之前；它不改变历史游标，也不重复复制已经重建的消息。该布局次序随私有 checkpoint 保存和恢复，恢复后的新 full Run World State 仍在恢复边界后追加。
+
+共享 baseline 不保存其他 Run 的初始选择或当前输入标签；新 Run 在自己的帧副本上标记初始内容。Conversation-owned、尚未确认观察的状态可以随 baseline 保留，但计量和压缩仍识别其 `run_transient` 属性。模型发送与上下文预览使用相同布局投影。
+
+压缩 World State rebase 使用精确 `ContextJournalCursor`：只折叠截止边界已被观察的前缀，后续请求 diff 原位保留，并在新 epoch 下续接。位于某个 Trace 项之后的请求状态不属于“覆盖到该 Trace 项”的前缀。分支只复制选定边界内的状态历史，并重映射 Run、assistant 和 Trace 引用；不复制 prepared 请求回执、授权快照或用量。删除和重写清理受影响状态尾缀及其请求回执，防止保留悬空的请求身份。
 
 ## 容量判断
 
@@ -188,11 +246,16 @@ capacity exceeded
 9. pending assistant placeholder 与 collaboration timeline 都是展示状态，不得进入 Provider-neutral 历史。
 10. FileChange call body/Observation authority 不进入普通 durable Trace；successor 只能由 commit 后验证生成并保留在模型/私有 checkpoint 边界。
 11. Agent-tree 资源共享 scope 必须由 Host 从持久节点解析，locator 文本不构成授权。
+12. 模型请求布局与 journal chronology 分开；后发 Skill、恢复状态和完整 Tool 闭环不得移到其因果前驱之前。
+13. 当前能力 Schema、RequestOnly 指南及 World State 由同一请求快照产生，关闭事实不恢复已撤下的指南或执行权限。
 
 ## 代码真源
 
 - 组装与帧：`crates/core/src/context/`
+- 请求布局：`crates/core/src/context/frame/request_layout.rs`、`frame/measurement_state.rs`、`frame/checkpoint.rs`
 - Runtime 容量入口：`crates/core/src/runtime.rs`
+- Conversation 状态请求边界：`crates/core/src/runtime/conversation_world_state.rs`、`crates/core-server/src/application/agent/conversation_world_state.rs`
+- Conversation 状态事务与请求回执：`crates/core/src/storage/world_state_repository/`
 - 容量与 UI snapshot：`crates/core-server/src/application/agent/context_window.rs`
 - 压缩：`crates/core/src/runtime/context_compaction.rs`、`crates/core/src/runtime/context_compaction_model.rs`、`crates/core-server/src/application/agent/context_compaction.rs`
 - 摘要存储：`crates/core/src/storage/context_compaction_repository.rs`
@@ -207,10 +270,64 @@ capacity exceeded
 - `crates/core/src/context/frame/tests.rs`
 - `crates/core/src/runtime/tests/conversation_context.rs`
 - `crates/core/src/runtime/tests/compaction_and_tool_flow.rs`
+- `crates/core/src/runtime/tests/request_layout.rs`
+- `crates/core/src/runtime/tests/conversation_world_state.rs`
+- `crates/core/src/storage/world_state_repository.rs` 内单元测试
 - `crates/core/src/storage/context_compaction_repository/tests.rs`
 - `crates/core-server/src/application/agent/tests/context_runtime.rs`
 - `crates/core-server/src/application/agent/tests/context_history.rs`
+- `crates/core-server/src/application/agent/tests/conversation_world_state.rs`
+- `crates/core-server/src/application/agent/tests/world_state_compaction_boundary.rs`
 - `crates/core-server/src/application/agent/context_compaction.rs` 内单元测试
+
+### 2026-09-06 前轮：请求顺序与能力开关验收
+
+- `cargo test --locked -p mycopilot-core --lib -- --quiet`：2,483 项通过，10 项按已有配置忽略。包含四类 Provider 的工具与恢复契约、真实 OpenAI/Anthropic Harness 请求、开关快照一致性、迟到调用拒绝、连续用户输入与附件、审批恢复、计量，以及压缩重建后多工具闭环。
+- `cargo test --locked -p mycopilot-core-server --bin core-server human_input -- --quiet`：34 项通过，覆盖真实 Host 的同步/异步回答、开关关闭后的既有批次、暂停恢复与投递边界。
+- `cargo clippy --locked --workspace --all-targets -- -D warnings`：通过。
+- 文档、公开文档、测试归属检查通过；新增 Rust 文件的 Rustfmt 和修改的 whitespace 检查通过。未改 Renderer、Preload 或公共 TypeScript 协议，本轮没有执行浏览器回归。
+
+新增 `frame/request_layout.rs` 测试验证整条消息的 role、内容、图片与工具身份仅发生排列变化，初始与运行中 Skill/快照不混淆，全量计量和 manifest 的 `modelRequestIndex` 使用发送顺序。`frame/compaction_layout_tests.rs` 验证连续压缩、checkpoint 往返及完整多调用 Turn 重建为逐调用日志后的因果关系；manifest 的 `index` 仍为内部 journal 位置。
+
+首次完整回归暴露的两处旧断言已更新：预激活 Skill 的来源增加布局标签；搜索开关只改变动态工具契约，不再改变稳定工具前缀。最终完整回归结果如上。数据库仍为 canonical schema v39，本轮没有迁移或重置数据。
+
+### 2026-09-06 跨 Run World State 升级验收
+
+本轮已完成：搜索与人机交互可用性、浏览器用户设置进入 Conversation full/diff；浏览器任务激活、Skills 和附件保留 Run 作用域；工具名称清单仅供 Host 使用。保留上述 15 层模型消息布局，当前工具 Schema、RequestOnly 指南及状态使用同一请求边界快照。
+
+请求日志、未观察状态保护、幂等提交、观察确认、冷重建、增量缓存、只读预览、checkpoint、压缩、分支、删除及重写均已接入。完整回归发现并修复了无存储压缩执行器丢失 canonical ledger，以及恰好压缩到 Trace N 后无法重建位于 N 之后的未观察 diff 两个问题。真实 Host 回归覆盖跨三个 Run 的关闭／开启／关闭、预览不写库、凭据不入状态，以及精确 Trace 压缩后清理缓存再正常发送。
+
+实际执行结果：
+
+- `cargo test --locked --workspace`：最终 3,606 项通过、0 项失败、14 项按已有配置忽略。包括 Rust Core 2,504 项、Core Server 主程序 857 项、开发库 reset 63 项及其余协议、客户端、集成和文档测试。初轮失败已修复并纳入最终完整复验，忽略项不计为通过。
+- `cargo clippy --locked --workspace --all-targets -- -D warnings`、`cargo fmt --all -- --check`、`pnpm typecheck`：通过。
+- `pnpm test:storage-reset-dev`：10 项通过。修改脚本的 ESLint、修改文档及脚本的 Prettier、文档检查、公开文档检查、测试归属检查和 `git diff --check`：通过。
+- 本轮没有修改 Renderer、Preload 或公共 TypeScript 问答契约，没有执行浏览器回归或真实付费模型请求；跨层请求使用可控本地 Provider。没有进行厂商缓存命中率实测。
+
+当前 canonical schema 为 **v40**，私有 Run checkpoint 为 **v15**，持久恢复输入为 **v12**。旧开发聊天不迁移；受管 reset 支持从 exact v39 保留配置和凭据引用后创建 v40，详见 [恢复手册](../operations/recovery-runbook.md)。所有数据库验证使用临时库，本轮没有重置用户实际数据。
+
+### 2026-09-06 请求前缀布局优化验收
+
+已完成两项布局调整：Conversation full 放到初始 Skill 目录、协作目录及当前能力指南之后；本次连续用户输入与关联 diff、附件整体放到预激活 Skill 和初始 Run full 之前。旧编号顺序为 `1 → 3 → 4 → 5 → 2 → 6 → 7 → 10 → 8 → 9 → 11 → 12 → 13 → 14 → 15`，上方当前组装规则已按新位置重新编号。
+
+新增共同前缀对比验证：full 与摘要同时变化时，前面的目录和指南仍逐消息相同；本次连续用户输入成为下一 Run 历史时，前缀可以延伸至这些用户输入及其关联 diff，同时不继承旧 Run 的 Skill、快照或附件投影。这些测试验证请求相同性，不代表厂商实际缓存命中率。
+
+实际执行以下 Rust 测试筛选，全部最终通过；筛选间存在重叠，不合计为独立用例总数：
+
+| 命令范围                                                                     | 结果                                                                                |
+| ---------------------------------------------------------------------------- | ----------------------------------------------------------------------------------- |
+| `cargo test --locked -p mycopilot-core --lib layout --no-fail-fast`          | 14 通过、1 项已有忽略；包含真实 OpenAI-compatible/Anthropic-compatible 两次连续请求 |
+| 同包 `--lib context::`                                                       | 139 通过，覆盖冷组装、共享基线、计量及压缩后布局                                    |
+| 同包 `--lib runtime::checkpoint::`                                           | 40 通过                                                                             |
+| 同包 `--lib runtime::tests::compaction_and_tool_flow::`                      | 6 通过                                                                              |
+| 同包 `--lib runtime::tests::approval_resume::`                               | 2 通过                                                                              |
+| `cargo test --locked -p mycopilot-core-server --bin core-server world_state` | 3 通过，包含真实 Host 跨 Run 状态及精确 Trace 压缩重建                              |
+| 同包同目标 `application::agent::tests::context_history::`                    | 16 通过、1 项已有忽略                                                               |
+| 同包同目标 `context_window`                                                  | 5 通过                                                                              |
+
+复验中更新了两条与旧布局相关的测试假设：输入归类变化仍使计量缓存失效，但新顺序下消息位置可能相同；Host 历史顺序断言精确匹配消息正文，避免把前置协作目录中引用的任务标题当成用户消息。工具配对、图片字节、因果顺序及状态历史的断言继续保留。
+
+Workspace Clippy（all targets，warnings as errors）、Rustfmt、修改文档的 Prettier、文档/公开文档/测试归属检查和 `git diff --check` 通过。本轮未改公共 TypeScript 协议或前端，未执行浏览器和真实厂商缓存测试；schema/checkpoint/恢复输入版本保持 v40/v15/v12，没有新增存储重置要求。
 
 ## 变更检查表
 

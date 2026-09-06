@@ -66,7 +66,7 @@ pub(super) struct ModelInputCapacity {
     /// Exact effective Tool contract already charged to the current request.
     ///
     /// Skill activation projects this immutable baseline forward before committing activation
-    /// state, ensuring newly exposed schemas and their retained World State diff fit too.
+    /// state, ensuring newly exposed schemas fit too. Effective Tool names remain Host-only.
     pub(super) effective_tool_set: EffectiveToolSet,
 }
 
@@ -80,10 +80,8 @@ impl ModelInputCapacity {
     /// Projects and prices the next request's Skill-gated Tool contract without mutating runtime
     /// state.
     ///
-    /// Existing dynamic schemas and the current Run World State were already charged by the capacity
-    /// detector for the current request. Only positive per-category deltas are reserved here.
-    /// Avoiding cross-category offsets is intentionally conservative and keeps activation
-    /// fail-closed if a future prompt wording change happens to shrink one category.
+    /// Existing dynamic schemas were already charged by the current request capacity detector.
+    /// Tool inventory changes are Host-only metadata; only positive schema deltas are reserved.
     fn project_additional_tool_capabilities(
         &self,
         additional_capabilities: &BTreeSet<ToolCapabilityId>,
@@ -100,16 +98,8 @@ impl ModelInputCapacity {
             .estimate_tool_definitions(projected.dynamic_definitions());
         let schema_delta = projected_schema_tokens.saturating_sub(current_schema_tokens);
 
-        let state_transition_tokens =
-            crate::runtime::world_state::effective_tools_transition_message(
-                &self.effective_tool_set,
-                &projected,
-            )?
-            .map(|message| self.text_budget.estimate_message(&message))
-            .unwrap_or(0);
-
         Ok(DynamicToolCapacityProjection {
-            additional_tokens: schema_delta.saturating_add(state_transition_tokens),
+            additional_tokens: schema_delta,
             effective_tool_set: projected,
         })
     }
@@ -167,6 +157,12 @@ trait RuntimeExtension: Send {
         Ok(Vec::new())
     }
 
+    /// Current conversation-scoped availability, projected from the same request snapshot.
+    /// Preparation only reads it; the Host commits changes at natural sampling boundaries.
+    fn conversation_world_state_sections(&self) -> AgentResult<Vec<WorldStateSectionEnvelope>> {
+        Ok(Vec::new())
+    }
+
     fn update_model_input_capacity(&mut self, _capacity: Option<ModelInputCapacity>) {}
 
     fn consume_model_input_capacity(&mut self, _tokens: u64) {}
@@ -183,6 +179,7 @@ trait RuntimeExtension: Send {
 pub(super) struct RuntimeExtensions {
     extensions: Vec<Box<dyn RuntimeExtension>>,
     todo: Option<TodoStateHandle>,
+    human_root: bool,
 }
 
 #[derive(Default)]
@@ -280,7 +277,9 @@ impl RuntimeExtensions {
             ));
         }
         extensions.push(Box::new(todo));
-        Self::from_extensions(extensions, Some(todo_handle), snapshots)
+        let mut extensions = Self::from_extensions(extensions, Some(todo_handle), snapshots)?;
+        extensions.human_root = host_services.human_root;
+        Ok(extensions)
     }
 
     fn from_extensions(
@@ -319,7 +318,11 @@ impl RuntimeExtensions {
             )));
         }
 
-        Ok(Self { extensions, todo })
+        Ok(Self {
+            extensions,
+            todo,
+            human_root: false,
+        })
     }
 
     pub(super) fn register_tools(&self, registry: &mut ToolRegistry) -> AgentResult<()> {
@@ -367,6 +370,27 @@ impl RuntimeExtensions {
         let mut sections = Vec::new();
         for extension in &self.extensions {
             sections.extend(extension.world_state_sections()?);
+        }
+        Ok(sections)
+    }
+
+    pub(super) fn conversation_world_state_sections(
+        &self,
+    ) -> AgentResult<Vec<WorldStateSectionEnvelope>> {
+        let mut sections = Vec::new();
+        let mut has_human_extension = false;
+        for extension in &self.extensions {
+            has_human_extension |=
+                extension.descriptor().id == human_interaction::HUMAN_INTERACTION_EXTENSION_ID;
+            sections.extend(extension.conversation_world_state_sections()?);
+        }
+        if !has_human_extension {
+            // Inapplicable identities have no executable module and never read human policy.
+            // Publish an explicit current fact so a prior conversation's enabled state cannot
+            // survive as the apparent authority of this request.
+            sections.extend(human_interaction::unavailable_world_state_sections(
+                self.human_root,
+            )?);
         }
         Ok(sections)
     }
@@ -853,6 +877,7 @@ mod tests {
                     }],
                 },
                 provider_continuation_refs: Vec::new(),
+                conversation_world_state_records: Vec::new(),
                 run_world_state: crate::world_state::WorldStateSnapshot::new(
                     "approval-event-test",
                     0,

@@ -5,6 +5,7 @@ use mycopilot_core::skills::{
     GitHubSkillAcquirer, GitHubTransportError, GitHubWorkflowAcquisitionAdapter,
     PreparedSkillPackage, SkillInstallationAuthority, SkillInstallationId,
     SkillInstallationProvenance, SkillInstallationRefresh, SkillPackageOrigin,
+    IMAGE_GENERATION_SKILL_ID,
 };
 use std::sync::Arc;
 
@@ -43,7 +44,23 @@ fn agent_discovery_freezes_every_enabled_managed_skill_with_deterministic_refs()
         .unwrap();
 
     assert_eq!(first, second);
-    assert_eq!(first.skills.len(), service.list().unwrap().skills().len());
+    let catalog = service.list().unwrap();
+    let mut expected_ids = catalog
+        .skills()
+        .iter()
+        .filter(|skill| skill.id().as_str() != IMAGE_GENERATION_SKILL_ID)
+        .map(|skill| skill.id().as_str().to_string())
+        .collect::<Vec<_>>();
+    expected_ids.sort();
+    assert_eq!(
+        first
+            .skills
+            .iter()
+            .map(|skill| skill.id.clone())
+            .collect::<Vec<_>>(),
+        expected_ids,
+        "the image-generation Skill requires configured provider authority"
+    );
     assert!(first
         .skills
         .iter()
@@ -272,6 +289,9 @@ fn agent_discovery_honors_settings_enablement_and_revises_the_frozen_catalog() {
     assert_eq!(restored, enabled);
 
     for skill in service.list().unwrap().skills() {
+        if skill.id().as_str() == IMAGE_GENERATION_SKILL_ID {
+            continue; // Provider configuration is the sole authority for this Skill.
+        }
         storage
             .set_skill_enablement_override(skill.id().as_str(), false)
             .unwrap();
@@ -360,14 +380,23 @@ fn picker_catalog_filters_disabled_global_skills_and_revises_its_etag() {
     let descriptor = catalog.skills().first().unwrap();
 
     let enabled = enabled_catalog_response(&storage, &catalog).unwrap();
-    assert_eq!(enabled.skills.len(), 7);
+    let ordinary_skill_count = catalog
+        .skills()
+        .iter()
+        .filter(|skill| skill.id().as_str() != IMAGE_GENERATION_SKILL_ID)
+        .count();
+    assert_eq!(enabled.skills.len(), ordinary_skill_count);
+    assert!(enabled
+        .skills
+        .iter()
+        .all(|skill| skill.id != IMAGE_GENERATION_SKILL_ID));
     assert_ne!(enabled.catalog_revision, catalog.catalog_revision());
 
     storage
         .set_skill_enablement_override(descriptor.id().as_str(), false)
         .unwrap();
     let disabled = enabled_catalog_response(&storage, &catalog).unwrap();
-    assert_eq!(disabled.skills.len(), 6);
+    assert_eq!(disabled.skills.len(), ordinary_skill_count - 1);
     assert!(disabled
         .skills
         .iter()
@@ -378,7 +407,7 @@ fn picker_catalog_filters_disabled_global_skills_and_revises_its_etag() {
         .set_skill_enablement_override(descriptor.id().as_str(), true)
         .unwrap();
     let restored = enabled_catalog_response(&storage, &catalog).unwrap();
-    assert_eq!(restored.skills.len(), 7);
+    assert_eq!(restored.skills.len(), ordinary_skill_count);
     assert_eq!(restored.catalog_revision, enabled.catalog_revision);
 }
 

@@ -95,6 +95,7 @@ impl ContextItem {
                 .collect(),
             scope: self.metadata.scope().as_str().to_string(),
             retention: self.metadata.retention().as_str().to_string(),
+            request_order: self.metadata.request_order(),
             group: self
                 .metadata
                 .group()
@@ -149,6 +150,9 @@ impl ContextItem {
             return Err(AgentError::new("运行检查点不能恢复 request-only 上下文。"));
         }
         let mut metadata = ContextMetadata::new(first_source, scope, retention);
+        if let Some(order) = item.request_order {
+            metadata = metadata.with_request_order(order);
+        }
         for source in sources {
             let source = ContextSource::from_str(&source)
                 .ok_or_else(|| AgentError::new("运行检查点包含未知上下文来源。"))?;
@@ -284,6 +288,9 @@ pub(crate) struct ContextManifest<'a> {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ContextManifestEntry<'a> {
     pub(crate) index: usize,
+    /// Placement in the model request; `index` remains the canonical planning cursor.
+    pub(crate) model_request_index: usize,
+    pub(crate) request_order: Option<u64>,
     pub(crate) role: &'static str,
     pub(crate) sources: Vec<&'static str>,
     pub(crate) scope: &'static str,

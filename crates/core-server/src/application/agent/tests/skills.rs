@@ -716,6 +716,7 @@ fn installed_skill_crosses_the_production_turn_boundary_without_instruction_leak
             "pending-after-dynamic-skill",
         ]),
         provider_continuation_refs: Vec::new(),
+        conversation_world_state_records: Vec::new(),
         run_world_state: crate::test_run_world_state(),
         pending_tool_call_id: "pending-after-dynamic-skill".to_string(),
         conversation_model_context_items: Vec::new(),
@@ -1308,6 +1309,7 @@ fn conversation_turn_and_pending_restore_use_the_model_connection_override() {
             sources: vec!["model_response".to_string()],
             scope: "run".to_string(),
             retention: "retained".to_string(),
+            request_order: None,
             group: None,
             origin: None,
         }],
@@ -1332,6 +1334,7 @@ fn conversation_turn_and_pending_restore_use_the_model_connection_override() {
             .expect("prepared turn freezes its Provider protocol key"),
         assistant_turn_identity: crate::test_assistant_turn_identity(&[pending_call.id.as_str()]),
         provider_continuation_refs: Vec::new(),
+        conversation_world_state_records: Vec::new(),
         run_world_state: crate::test_run_world_state(),
         pending_tool_call_id: pending_call.id.clone(),
         conversation_trace_items: vec![ConversationTurnTraceItem::ToolCall {

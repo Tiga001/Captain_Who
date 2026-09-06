@@ -8,7 +8,7 @@ use mycopilot_core::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-const PERSISTED_AGENT_RESUME_INPUT_SCHEMA_VERSION: u32 = 11;
+const PERSISTED_AGENT_RESUME_INPUT_SCHEMA_VERSION: u32 = 12;
 
 fn deserialize_required_nullable<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
 where
@@ -496,6 +496,7 @@ mod tests {
                 }]
             },
             "providerContinuationRefs": [],
+            "conversationWorldStateRecords": [],
             "runWorldState": crate::test_run_world_state(),
             "pendingActionId": null,
             "pendingToolCallId": "call-persisted-resume",
