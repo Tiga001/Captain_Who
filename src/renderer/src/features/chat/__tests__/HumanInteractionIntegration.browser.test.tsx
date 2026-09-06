@@ -274,7 +274,7 @@ describe('Human interaction in the real conversation surface', () => {
     await panel.getByRole('textbox').fill('尚未发送的中文草稿')
     const input = panel.getByRole('textbox').element()
     const submit = panel
-      .getByRole('button', { name: '下一题', exact: true })
+      .getByRole('button', { name: '下一项', exact: true })
       .last()
       .element() as HTMLButtonElement
     input.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true }))

@@ -1,13 +1,8 @@
 import type { HumanInteractionAnswer, HumanInteractionRequestSnapshot } from '@mycopilot/protocol'
-import {
-  ChevronLeft,
-  ChevronRight,
-  MessageCircleQuestionMark,
-  Minus,
-  PencilLine
-} from 'lucide-react'
+import { ChevronLeft, ChevronRight, Minus, PencilLine } from 'lucide-react'
 import { useId } from 'react'
 import { useFrontendConfig } from '../../config/FrontendConfigProvider'
+import { HumanInteractionRobotIcon } from './HumanInteractionRobotIcon'
 import './HumanInteractionPanel.css'
 
 export interface HumanInteractionPanelProps {
@@ -100,7 +95,7 @@ export function HumanInteractionPanel({
     >
       <header className="human-interaction-panel__header">
         <h2 id={titleId}>
-          <MessageCircleQuestionMark aria-hidden="true" />
+          <HumanInteractionRobotIcon />
           {t('humanInteraction.panel.title')}
         </h2>
         <nav
@@ -242,7 +237,7 @@ export function HumanInteractionPanel({
             onClick={handlePrimaryAction}
             type="button"
           >
-            {t(complete ? 'humanInteraction.panel.submit' : 'humanInteraction.panel.next')}
+            {t(complete ? 'humanInteraction.panel.submit' : 'humanInteraction.panel.nextItem')}
           </button>
         </div>
       </footer>

@@ -373,5 +373,6 @@ mod moonshot_recovery;
 mod request_layout;
 mod skill_activation;
 mod steering_and_repair;
+mod todo_budget;
 mod trace_and_projection;
 mod web_search;

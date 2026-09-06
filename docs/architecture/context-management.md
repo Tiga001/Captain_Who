@@ -112,6 +112,29 @@ Run 结束后，第 8–11 项不会作为请求布局块整块写入历史。�
 
 此布局改善出现相同前缀的机会，不保证缓存命中或命中率提升。目录或能力指南变化时，其后长历史的共同前缀也可能失效；能力指南每次重建而不为缓存冻结。此次没有添加 Provider `cache_control`，厂商内部如何组合 tools/system/messages 仍由对应服务决定。
 
+### Todo 存储与提醒预算
+
+Todo 的完整状态和模型提醒分别处理：权威状态、Renderer 事件及同 Run 检查点保存完整 ID、标题、备注和时间；500-token 启发式预算只限制 `request_only` 提醒正文，不再作为计划更新或检查点恢复的准入条件。消息结构开销仍由总上下文计量单独计入。最多 12 项以及 ID 64、标题 120、备注 240 字符的输入限制继续生效，恢复时也验证这些结构限制。
+
+提醒使用 `revision`、完成计数和每项的 `ref`（当前列表从 1 开始的编号）/状态。标题和备注中的换行仅在提醒中折叠为空格，避免伪造额外编号行。超预算先省略备注，再优先缩短已完成项和靠后的待办标题，保留当前工作与阻碍；截短不切断 Unicode 字素，以 `…` 和省略声明标明，所有编号与状态始终保留。完成时不再追加重复的行为指导。
+
+`todo_update` 仍是完整列表替换，支持两种条目：新条目或旧接口使用 `id? + title + status + note?`；引用条目使用 `ref + status + title? + note?`，根参数必须带最新 `expectedRevision`。引用从该 revision 的权威列表读取，省略的标题/备注原样保留，`note: ""` 可清空备注，真实 ID 不变；可以重排引用、混入新项或显式删除不再需要的项。`ref` 不能与 `id` 同时使用。过期 revision、重复/越界引用及非法字段原子拒绝，不推进状态、revision 或 ID 分配器。模型不能用省略后的标题重建原条目。
+
+```json
+{
+  "expectedRevision": 3,
+  "items": [
+    { "ref": 1, "status": "completed" },
+    { "ref": 2, "status": "in_progress" },
+    { "title": "汇总验证结果", "status": "pending" }
+  ]
+}
+```
+
+这项预算修复保留 Todo 的请求尾部位置、Run 作用域及压缩排除规则，不改变跨 Run 历史格式。快照结构与扩展版本保持不变，无需重置开发聊天数据。
+
+回归覆盖见 [Todo 预算与引用测试](../../crates/core/src/runtime/extensions/todo_budget_tests.rs) 和 [双 Provider Harness 测试](../../crates/core/src/runtime/tests/todo_budget.rs)：中文长计划、最大合法 Unicode 字段、过期/重复引用的原子拒绝、完整状态恢复，以及 OpenAI/Anthropic 兼容请求中的创建 → 受限提醒 → 引用完成 → 正常回复。2026-09-06 验证通过 Rust Core library 2,536 项测试（10 项按现有配置忽略）和 workspace all-targets Clippy。
+
 ### Conversation 与 Run World State
 
 Conversation World State 在同一会话的多个 Run 之间延续。第一个真实模型请求建立 full，后续状态没有变化就不追加记录；有变化才在该请求的因果位置追加 diff。开启一个新 Run 本身不重新发送一份新的 Conversation full。

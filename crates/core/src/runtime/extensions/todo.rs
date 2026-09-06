@@ -14,6 +14,7 @@ use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
+use unicode_segmentation::UnicodeSegmentation;
 
 const TODO_EXTENSION_ID: &str = "todo";
 const TODO_EXTENSION_VERSION: u32 = 1;
@@ -23,7 +24,12 @@ const MAX_TODO_ID_CHARS: usize = 64;
 const MAX_TODO_TITLE_CHARS: usize = 120;
 const MAX_TODO_NOTE_CHARS: usize = 240;
 const MAX_TODO_EXPLANATION_CHARS: usize = 400;
-const TODO_CONTEXT_HARD_MAX_TOKENS: u64 = 500;
+// Bounds the model reminder, not the authoritative plan or the ability to finish a task.
+const TODO_CONTEXT_MAX_TOKENS: u64 = 500;
+
+#[cfg(test)]
+#[path = "todo_budget_tests.rs"]
+mod budget_tests;
 
 pub(super) struct TodoExtension {
     run_id: String,
@@ -179,6 +185,14 @@ impl TodoStateStore {
                 "todo_update accepts at most {MAX_TODO_ITEMS} items."
             )));
         }
+        if let Some(expected) = args.expected_revision {
+            if expected != self.state.revision {
+                return Err(AgentError::new(format!(
+                    "todo_update expectedRevision {expected} is stale; current revision is {}. Use the latest Runtime todo refs.",
+                    self.state.revision
+                )));
+            }
+        }
 
         let previous = self
             .state
@@ -192,13 +206,45 @@ impl TodoStateStore {
         let mut next_item_id = self.next_item_id;
 
         for item in args.items {
-            let title = normalize_required_text(&item.title, "todo_update.items[].title")?;
+            let referenced = match item.item_ref {
+                Some(_) if item.id.is_some() => {
+                    return Err(AgentError::new(
+                        "todo_update item ref and id are mutually exclusive.",
+                    ));
+                }
+                Some(_) if args.expected_revision.is_none() => {
+                    return Err(AgentError::new(
+                        "todo_update ref requires expectedRevision from the latest Runtime todo.",
+                    ));
+                }
+                Some(reference) => Some(
+                    reference
+                        .checked_sub(1)
+                        .and_then(|index| self.state.items.get(index))
+                        .ok_or_else(|| {
+                            AgentError::new(format!(
+                                "todo_update item ref {reference} is out of range."
+                            ))
+                        })?,
+                ),
+                None => None,
+            };
+            let title = normalize_required_text(
+                item.title
+                    .as_deref()
+                    .or_else(|| referenced.map(|item| item.title.as_str()))
+                    .unwrap_or_default(),
+                "todo_update.items[].title",
+            )?;
             if title.chars().count() > MAX_TODO_TITLE_CHARS {
                 return Err(AgentError::new(format!(
                     "todo_update item title cannot exceed {MAX_TODO_TITLE_CHARS} characters."
                 )));
             }
-            let note = item.note.as_deref().and_then(normalize_optional_text);
+            let note = match item.note.as_deref() {
+                Some(value) => normalize_optional_text(value),
+                None => referenced.and_then(|item| item.note.clone()),
+            };
             if note
                 .as_deref()
                 .is_some_and(|value| value.chars().count() > MAX_TODO_NOTE_CHARS)
@@ -207,14 +253,17 @@ impl TodoStateStore {
                     "todo_update item note cannot exceed {MAX_TODO_NOTE_CHARS} characters."
                 )));
             }
-            let id = match item.id.and_then(|id| normalize_optional_text(&id)) {
+            let id = match referenced
+                .map(|item| item.id.clone())
+                .or_else(|| item.id.and_then(|id| normalize_optional_text(&id)))
+            {
                 Some(id) if id.chars().count() <= MAX_TODO_ID_CHARS => id,
                 Some(_) => {
                     return Err(AgentError::new(format!(
                         "todo_update item id cannot exceed {MAX_TODO_ID_CHARS} characters."
                     )))
                 }
-                None => Self::allocate_item_id(&mut next_item_id, &used_ids, &previous),
+                None => Self::allocate_item_id(&mut next_item_id, &used_ids, &previous)?,
             };
             if !used_ids.insert(id.clone()) {
                 return Err(AgentError::new(format!(
@@ -236,11 +285,14 @@ impl TodoStateStore {
         }
 
         let next_state = AgentTodoState {
-            revision: self.state.revision + 1,
+            revision: self
+                .state
+                .revision
+                .checked_add(1)
+                .ok_or_else(|| AgentError::new("todo_update revision exhausted."))?,
             items: next_items,
             updated_at: now,
         };
-        validate_todo_context_budget(&next_state)?;
         self.next_item_id = next_item_id;
         self.state = next_state;
         Ok(self.state.clone())
@@ -250,20 +302,44 @@ impl TodoStateStore {
         next_item_id: &mut u64,
         used_ids: &BTreeSet<String>,
         previous: &BTreeMap<String, AgentTodoItem>,
-    ) -> String {
+    ) -> AgentResult<String> {
         loop {
             let id = format!("todo-{next_item_id}");
-            *next_item_id += 1;
+            *next_item_id = next_item_id
+                .checked_add(1)
+                .ok_or_else(|| AgentError::new("todo_update item id allocator exhausted."))?;
             if !used_ids.contains(&id) && !previous.contains_key(&id) {
-                return id;
+                return Ok(id);
             }
         }
     }
 
     fn validate_and_normalize(&mut self) -> AgentResult<()> {
+        if self.state.items.len() > MAX_TODO_ITEMS {
+            return Err(AgentError::new(format!(
+                "Cannot restore todo: at most {MAX_TODO_ITEMS} items are allowed."
+            )));
+        }
         let mut ids = BTreeSet::new();
         let mut inferred_next_id = 1;
         for item in &self.state.items {
+            for (field, value, limit) in [
+                ("id", item.id.as_str(), MAX_TODO_ID_CHARS),
+                ("title", item.title.as_str(), MAX_TODO_TITLE_CHARS),
+            ] {
+                if value.trim().is_empty() || value.chars().count() > limit {
+                    return Err(AgentError::new(format!("Cannot restore todo: {field} must be non-empty and at most {limit} characters.")));
+                }
+            }
+            if item
+                .note
+                .as_deref()
+                .is_some_and(|value| value.chars().count() > MAX_TODO_NOTE_CHARS)
+            {
+                return Err(AgentError::new(format!(
+                    "Cannot restore todo: note cannot exceed {MAX_TODO_NOTE_CHARS} characters."
+                )));
+            }
             if !ids.insert(item.id.as_str()) {
                 return Err(AgentError::new(format!(
                     "无法恢复 `{TODO_EXTENSION_ID}` 扩展状态：todo id `{}` 重复。",
@@ -279,7 +355,6 @@ impl TodoStateStore {
             }
         }
         self.next_item_id = self.next_item_id.max(inferred_next_id).max(1);
-        validate_todo_context_budget(&self.state)?;
         Ok(())
     }
 }
@@ -333,25 +408,36 @@ impl AgentTool for TodoTool {
 fn todo_tool_definition() -> AgentToolDefinition {
     AgentToolDefinition {
         name: TODO_TOOL_NAME.to_string(),
-        description: "Create or replace the structured todo plan for this logical run only. It never carries into a later user turn.".to_string(),
+        description: "Create or replace the structured todo plan for this logical run only. Use the latest Runtime todo revision and refs to preserve full items when updating progress. It never carries into a later user turn.".to_string(),
         input_schema: json!({
             "type": "object",
             "properties": {
+                "expectedRevision": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Revision from the latest Runtime todo. Required when any item uses ref; stale references are rejected."
+                },
                 "items": {
                     "type": "array",
-                    "description": "Full replacement todo list in intended order. Multiple items may be in_progress when they are being advanced in parallel.",
+                    "description": "Full replacement list in intended order: include every item to keep, including unchanged items. Reference existing items with ref and status; omitted title/note are preserved. New items require title and status. Multiple items may be in_progress in parallel.",
                     "maxItems": MAX_TODO_ITEMS,
                     "items": {
                         "type": "object",
                         "properties": {
+                            "ref": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "maximum": MAX_TODO_ITEMS,
+                                "description": "1-based item reference from Runtime todo at expectedRevision. Mutually exclusive with id. Preserves the original id and omitted title/note, even when the reminder abbreviates them."
+                            },
                             "id": {
                                 "type": "string",
-                                "description": "Optional stable id from the previous todo state. Omit for new items.",
+                                "description": "Optional exact stable id for a full item. Do not combine with ref. Omit for new items.",
                                 "maxLength": MAX_TODO_ID_CHARS
                             },
                             "title": {
                                 "type": "string",
-                                "description": "Short action-oriented task title.",
+                                "description": "Short action-oriented task title. Required without ref; omit with ref to preserve the complete title.",
                                 "maxLength": MAX_TODO_TITLE_CHARS
                             },
                             "status": {
@@ -360,11 +446,11 @@ fn todo_tool_definition() -> AgentToolDefinition {
                             },
                             "note": {
                                 "type": "string",
-                                "description": "Optional compact blocker or progress note.",
+                                "description": "Optional brief blocker/progress note, not a findings report. With ref, omit to preserve the full note or use an empty string to clear it. The model reminder may abbreviate long titles and notes; stored fields remain complete.",
                                 "maxLength": MAX_TODO_NOTE_CHARS
                             }
                         },
-                        "required": ["title", "status"],
+                        "required": ["status"],
                         "additionalProperties": false
                     }
                 },
@@ -388,6 +474,7 @@ fn todo_tool_definition() -> AgentToolDefinition {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct TodoUpdateArgs {
     items: Vec<TodoUpdateItem>,
+    expected_revision: Option<u64>,
     #[serde(rename = "explanation")]
     _explanation: Option<String>,
 }
@@ -395,8 +482,10 @@ struct TodoUpdateArgs {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct TodoUpdateItem {
+    #[serde(rename = "ref")]
+    item_ref: Option<usize>,
     id: Option<String>,
-    title: String,
+    title: Option<String>,
     status: AgentTodoStatus,
     note: Option<String>,
 }
@@ -415,12 +504,96 @@ fn normalize_optional_text(value: &str) -> Option<String> {
 }
 
 fn render_todo_state(state: &AgentTodoState) -> String {
+    let budget = crate::context::ContextTextBudget::heuristic(TODO_CONTEXT_MAX_TOKENS);
+    let mut titles = state
+        .items
+        .iter()
+        .map(|item| todo_reminder_text(&item.title))
+        .collect::<Vec<_>>();
+    let normalized_notes = state
+        .items
+        .iter()
+        .map(|item| item.note.as_deref().map(todo_reminder_text))
+        .collect::<Vec<_>>();
+    let mut notes = normalized_notes
+        .iter()
+        .map(|note| note.as_deref())
+        .collect::<Vec<_>>();
+    let full = render_todo_projection(state, &titles, &notes, false);
+    if budget.fits(&full) {
+        return full;
+    }
+
+    // Preserve current blockers/work and the earliest pending tasks first. This only changes
+    // the reminder: a revision-bound ref always addresses the complete authoritative item.
+    let mut trim_order = (0..state.items.len()).collect::<Vec<_>>();
+    trim_order.sort_by_key(|&index| {
+        let priority = match state.items[index].status {
+            AgentTodoStatus::Completed => 0,
+            AgentTodoStatus::Pending => 1,
+            AgentTodoStatus::Blocked => 2,
+            AgentTodoStatus::InProgress => 3,
+        };
+        (priority, std::cmp::Reverse(index))
+    });
+    for &index in &trim_order {
+        notes[index] = None;
+        let rendered = render_todo_projection(state, &titles, &notes, true);
+        if budget.fits(&rendered) {
+            return rendered;
+        }
+    }
+
+    for index in trim_order {
+        let title = titles[index].clone();
+        let graphemes = title.graphemes(true).collect::<Vec<_>>();
+        titles[index] = "…".to_string();
+        if !budget.fits(&render_todo_projection(state, &titles, &notes, true)) {
+            continue;
+        }
+        // Keep the longest fitting prefix without cutting a Unicode grapheme. At most 12
+        // ref/status lines plus ellipses always fit, even for maximum-length Unicode ids.
+        let mut low = 0;
+        let mut high = graphemes.len();
+        while low < high {
+            let middle = low + (high - low).div_ceil(2);
+            titles[index] = format!("{}…", graphemes[..middle].concat());
+            if budget.fits(&render_todo_projection(state, &titles, &notes, true)) {
+                low = middle;
+            } else {
+                high = middle - 1;
+            }
+        }
+        titles[index] = format!("{}…", graphemes[..low].concat());
+        return render_todo_projection(state, &titles, &notes, true);
+    }
+    unreachable!("validated Todo refs and statuses fit the reminder budget")
+}
+
+fn todo_reminder_text(value: &str) -> String {
+    // A multiline title/note must not create an apparent extra ref/status row. Keep the
+    // authoritative text untouched; only the one-line reminder folds whitespace.
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn render_todo_projection(
+    state: &AgentTodoState,
+    titles: &[String],
+    notes: &[Option<&str>],
+    abbreviated: bool,
+) -> String {
     let items = state
         .items
         .iter()
-        .map(|item| {
-            let mut line = format!("- [{}] {} ({})", item.status.as_str(), item.title, item.id);
-            if let Some(note) = item.note.as_deref() {
+        .enumerate()
+        .map(|(index, item)| {
+            let mut line = format!(
+                "- ref={} [{}] {}",
+                index + 1,
+                item.status.as_str(),
+                titles[index]
+            );
+            if let Some(note) = notes[index] {
                 line.push_str(": ");
                 line.push_str(note);
             }
@@ -434,28 +607,15 @@ fn render_todo_state(state: &AgentTodoState) -> String {
         .iter()
         .filter(|item| item.status == AgentTodoStatus::Completed)
         .count();
-    let completion_instruction = if total > 0 && completed == total {
-        "\nAll todo items are completed. Do not call more tools unless a requirement is missing or a result failed; otherwise summarize the outcome."
+    let abbreviation_notice = if abbreviated {
+        "\nTitles/notes abbreviated; stored items unchanged."
     } else {
         ""
     };
     format!(
-        "## Runtime todo\n\
-         This is the only plan state for the current logical run and never crosses a new user turn. `in_progress` is the current phase; the first pending items are next. Use `todo_update` to replace it and preserve existing ids.\n\n\
-         revision: {}\nprogress: {}/{} completed\n{}{}",
-        state.revision, completed, total, items, completion_instruction
+        "## Runtime todo\nrevision: {}\nprogress: {}/{} completed\n{}{}",
+        state.revision, completed, total, items, abbreviation_notice
     )
-}
-
-fn validate_todo_context_budget(state: &AgentTodoState) -> AgentResult<()> {
-    let budget = crate::context::ContextTextBudget::heuristic(TODO_CONTEXT_HARD_MAX_TOKENS);
-    let rendered = render_todo_state(state);
-    if !budget.fits(&rendered) {
-        return Err(AgentError::new(format!(
-            "todo_update would exceed the fixed {TODO_CONTEXT_HARD_MAX_TOKENS}-token Todo context budget; shorten or consolidate the items."
-        )));
-    }
-    Ok(())
 }
 
 fn now_ms() -> u64 {
@@ -709,7 +869,7 @@ mod tests {
     }
 
     #[test]
-    fn todo_has_fixed_item_and_context_cost_limits() {
+    fn todo_limits_items_without_rejecting_large_valid_plans() {
         let (_extension, handle) = TodoExtension::new("run-1".to_string());
         let tool = TodoTool {
             state: handle.clone(),
@@ -739,12 +899,16 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let oversized = execute(&tool, json!({ "items": oversized }));
-        assert!(!oversized.ok);
-        assert!(oversized
-            .error
-            .as_deref()
-            .is_some_and(|error| error.contains("500-token Todo context budget")));
-        assert!(handle.state().items.is_empty());
+        assert!(oversized.ok, "{:?}", oversized.error);
+        assert_eq!(handle.state().items.len(), MAX_TODO_ITEMS);
+        assert_eq!(
+            handle.state().items[0].note.as_deref(),
+            Some("y".repeat(MAX_TODO_NOTE_CHARS).as_str())
+        );
+        assert!(
+            crate::context::ContextTextBudget::heuristic(TODO_CONTEXT_MAX_TOKENS)
+                .fits(&render_todo_state(&handle.state()))
+        );
     }
 
     #[test]

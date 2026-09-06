@@ -272,7 +272,8 @@ fn tool_routing_section(tool_definitions: &[AgentToolDefinition]) -> String {
         rules.push("- 任意工具结果若标记 truncated=true，不能假定省略内容不重要。需要继续时原样执行结果中的 continueWith；其中 conversation_history.open 是后端生成的不透明续读位置，不要自行构造或修改。".to_string());
     }
     if has_tool(tool_definitions, "todo_update") {
-        rules.push("- 多步骤任务或当前执行过程中目标发生变化时，使用 todo_update 维护本次 Run 的结构化计划。首次创建计划时可以一次性列出多步；后续更新应保留已有 id，并一次性更新所有实际发生变化的步骤。开始某项前标记 in_progress，完成后标记 completed；并行推进时可以有多项 in_progress，但不要把尚未真正开始的事项提前标记为进行中。".to_string());
+        rules.push("- 多步骤任务或当前执行过程中目标发生变化时，使用 todo_update 维护本次 Run 的结构化计划。items 始终是完整替换列表，必须包含所有要保留的步骤，包括未变化和已完成的步骤。已有步骤优先将最新 Runtime todo 的 revision 填入 expectedRevision，并用 ref（从 1 开始的编号）引用，只填写 status 即可保留完整标题、备注和 id；需要时可以显式修改 title/note，note 空字符串表示清空。ref 不能与 id 混用，旧 revision 的 ref 不可复用；新增步骤填写短 title 和 status。开始某项前标记 in_progress，完成后标记 completed；并行推进时可以有多项 in_progress，但不要把尚未真正开始的事项提前标记为进行中。".to_string());
+        rules.push("- Todo 标题保持简短，note 只记录必要进度或阻碍，不写检查报告。Runtime todo 提醒正文最多约 500 个估算 tokens，必要时会省略备注或用 … 缩短标题；编号和状态始终完整，存储中的标题和备注不会被截断。更新时使用 ref 保留完整字段，不要把提醒中的省略文本重新写回 title/note。".to_string());
         rules.push("- Todo 只表示当前 Run 的计划，不是聊天摘要或跨轮任务状态；不要依据上一轮 Todo 自动续建。".to_string());
         rules.push("- 当 todo 全部 completed 且没有明确失败或缺口时，停止继续调用工具，直接向用户总结已完成内容。".to_string());
         rules.push("- todo 状态只能通过 todo_update 改变；不要在正文里伪造计划状态，也不要声称计划已更新，除非 todo_update 的 tool result 明确成功。".to_string());
@@ -817,6 +818,9 @@ mod tests {
 
         assert!(prompt.contains("Todo 只表示当前 Run 的计划"));
         assert!(prompt.contains("不要依据上一轮 Todo 自动续建"));
+        assert!(prompt.contains("items 始终是完整替换列表"));
+        assert!(prompt.contains("revision 填入 expectedRevision"));
+        assert!(prompt.contains("不要把提醒中的省略文本重新写回"));
     }
 
     #[test]

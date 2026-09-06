@@ -99,12 +99,12 @@ describe('HumanInteractionPanel', () => {
     const next = screen.getByRole('navigation').getByRole('button', { name: '下一题' })
     const primary = page
       .elementLocator(screen.container.querySelector<HTMLElement>('footer')!)
-      .getByRole('button', { name: /下一题|提交/ })
+      .getByRole('button', { name: /下一项|提交/ })
     const send = screen.getByRole('button', { name: '提交', exact: true })
     await expect.element(previous).toBeDisabled()
     await expect.element(primary).toBeDisabled()
     await screen.getByRole('button', { name: '明亮外观' }).click()
-    await expect.element(primary).toHaveTextContent('下一题')
+    await expect.element(primary).toHaveTextContent('下一项')
     await primary.click()
     await screen.getByRole('textbox').fill('支持中文')
     await primary.click()
@@ -302,12 +302,12 @@ describe('HumanInteractionPanel', () => {
       .element(
         page
           .elementLocator(screen.container.querySelector<HTMLElement>('footer')!)
-          .getByRole('button', { name: '下一题' })
+          .getByRole('button', { name: '下一项' })
       )
       .toBeEnabled()
     await page
       .elementLocator(screen.container.querySelector<HTMLElement>('footer')!)
-      .getByRole('button', { name: '下一题' })
+      .getByRole('button', { name: '下一项' })
       .click()
     expect(changePage).toHaveBeenCalledWith(0)
     expect(submit).not.toHaveBeenCalled()
@@ -362,7 +362,11 @@ describe('HumanInteractionPanel', () => {
     }
     expect(getComputedStyle(panel.querySelector('h2')!).fontSize).toBe('13px')
     expect(panel.querySelector('h2')!.textContent).toBe('交互')
-    expect(panel.querySelector('h2 .lucide-message-circle-question-mark')).not.toBeNull()
+    const headerIcon = panel.querySelector('h2 svg')!
+    expect(headerIcon.getAttribute('aria-hidden')).toBe('true')
+    expect(headerIcon.getAttribute('focusable')).toBe('false')
+    expect(getComputedStyle(headerIcon).width).toBe('16px')
+    expect(getComputedStyle(headerIcon).height).toBe('16px')
     expect(panel.querySelector('h3')!.textContent).toBe(title)
     expect(panel.querySelectorAll('.human-interaction-panel__option')).toHaveLength(12)
     expect(panel.scrollWidth).toBeLessThanOrEqual(320)
