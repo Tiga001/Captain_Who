@@ -7757,7 +7757,7 @@ fn pending_resume_sqlite_row_contains_only_versioned_secret_free_projection() {
         .as_ref()
         .unwrap()
         .tavily_api_key
-        .is_some());
+        .is_none());
 }
 
 fn frozen_provider_resume_input(
@@ -8220,7 +8220,7 @@ fn pending_resume_rejects_provider_endpoint_replacement() {
 }
 
 #[test]
-fn pending_resume_rejects_search_credential_replacement() {
+fn pending_resume_accepts_search_credential_replacement_without_rehydration() {
     let fixture = tempdir().unwrap();
     let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
     let endpoint = "https://provider-search.example/v1";
@@ -8248,8 +8248,10 @@ fn pending_resume_rejects_search_credential_replacement() {
         "replacement-fixed-search-key",
     );
 
-    let error = restore_agent_input_secrets(&storage, frozen).unwrap_err();
-    assert!(error.contains("search connection no longer matches"));
+    let restored = restore_agent_input_secrets(&storage, frozen).unwrap();
+    assert!(restored.search_config.unwrap().tavily_api_key.is_none());
+    assert!(storage.load_web_search_policy_snapshot().unwrap().available());
+    assert!(storage.authorize_web_search_execution().is_ok());
 }
 
 #[test]

@@ -2225,3 +2225,28 @@ fn skill_enablement_rejects_empty_and_oversized_ids_before_storage() {
         Some(&false)
     );
 }
+
+#[test]
+fn web_search_policy_resolves_only_current_search_credential_and_degrades_missing_key() {
+    const SEARCH: &str = "web-search-policy-secret-canary";
+    let fixture = StorageFixture::new();
+    let service = fixture.service();
+    let mut settings = revision_test_settings();
+    settings.search_mode = "auto".to_string();
+    settings.tavily_api_key = SEARCH.to_string();
+    service.save_model_settings(settings).unwrap();
+    delete_stored_credential(&fixture, "api_token_ref", None);
+
+    assert!(service.load_web_search_policy_snapshot().unwrap().available());
+    let credential = service.authorize_web_search_execution().unwrap();
+    assert!(!format!("{credential:?}").contains(SEARCH));
+    assert_eq!(credential.into_secret(), SEARCH);
+
+    delete_stored_credential(&fixture, "tavily_api_key_ref", None);
+    let snapshot = service.load_web_search_policy_snapshot().unwrap();
+    assert!(snapshot.enabled);
+    assert!(!snapshot.credential_ready);
+    let error = service.authorize_web_search_execution().unwrap_err();
+    assert!(!error.to_string().contains(SEARCH));
+    assert_eq!(error.code(), Some("web_search.configuration_required"));
+}

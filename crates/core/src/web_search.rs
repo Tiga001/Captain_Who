@@ -42,7 +42,12 @@ pub struct WebSearchExecutionCredential(String);
 impl WebSearchExecutionCredential {
     pub fn new(value: String) -> AgentResult<Self> {
         let value = value.trim();
-        if value.is_empty() || value.chars().any(char::is_control) {
+        if value.is_empty()
+            || value.len() > 8_192
+            || value
+                .chars()
+                .any(|character| character.is_whitespace() || character.is_control())
+        {
             return Err(AgentError::structured(
                 "web_search.configuration_required",
                 "联网搜索尚未配置可用凭据。",

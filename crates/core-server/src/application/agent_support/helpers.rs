@@ -234,15 +234,6 @@ pub(crate) fn normalized_optional(value: Option<&str>) -> Option<String> {
         .map(ToString::to_string)
 }
 
-pub(crate) fn non_empty(value: String) -> Option<String> {
-    let value = value.trim().to_string();
-    if value.is_empty() {
-        None
-    } else {
-        Some(value)
-    }
-}
-
 pub(crate) fn upsert_message(messages: &mut Vec<ChatMessageRecord>, next: ChatMessageRecord) {
     if let Some(existing) = messages.iter_mut().find(|message| message.id == next.id) {
         *existing = next;

@@ -343,6 +343,77 @@ impl StorageService {
             .transpose()
     }
 
+    /// Host request policy: expose readiness only, opening no unrelated model credentials.
+    pub fn load_web_search_policy_snapshot(
+        &self,
+    ) -> Result<crate::WebSearchPolicySnapshot, String> {
+        let _guard = self
+            .model_credential_lock
+            .lock()
+            .map_err(|_| "model credential coordinator is unavailable".to_string())?;
+        let stored = {
+            let mut connection = self.state.connection()?;
+            config_repository::load_model_settings(&mut connection).map_err(storage_error)?
+        };
+        let Some(settings) = stored else {
+            return Ok(crate::WebSearchPolicySnapshot {
+                enabled: false,
+                credential_ready: false,
+            });
+        };
+        let enabled = settings.search_mode != "disabled";
+        let credential_ready = enabled
+            && self
+                .resolve_credential(settings.tavily_api_key_ref.as_deref())
+                .ok()
+                .flatten()
+                .is_some_and(|secret| crate::WebSearchExecutionCredential::new(secret).is_ok());
+        Ok(crate::WebSearchPolicySnapshot {
+            enabled,
+            credential_ready,
+        })
+    }
+
+    /// Admit one built-in search/fetch operation against current settings. Sharing the settings
+    /// mutation lock makes admission atomic with credential rotation and the user toggle. The
+    /// returned secret is execution-only and never becomes Agent input or checkpoint state.
+    pub fn authorize_web_search_execution(
+        &self,
+    ) -> crate::AgentResult<crate::WebSearchExecutionCredential> {
+        let unavailable = || {
+            crate::AgentError::structured(
+                "web_search.configuration_required",
+                "联网搜索尚未配置可用凭据。",
+                serde_json::json!({ "reason": "configuration_required" }),
+            )
+        };
+        let _guard = self
+            .model_credential_lock
+            .lock()
+            .map_err(|_| unavailable())?;
+        let stored = {
+            let mut connection = self.state.connection().map_err(|_| unavailable())?;
+            config_repository::load_model_settings(&mut connection).map_err(|_| unavailable())?
+        };
+        let enabled = stored
+            .as_ref()
+            .is_some_and(|settings| settings.search_mode != "disabled");
+        crate::WebSearchPolicySnapshot {
+            enabled,
+            credential_ready: true,
+        }
+        .ensure_available()?;
+        let secret = self
+            .resolve_credential(
+                stored
+                    .as_ref()
+                    .and_then(|settings| settings.tavily_api_key_ref.as_deref()),
+            )
+            .map_err(|_| unavailable())?
+            .ok_or_else(unavailable)?;
+        crate::WebSearchExecutionCredential::new(secret)
+    }
+
     /// Resolves the minimum secret set required to execute one exact model configuration.
     ///
     /// The returned snapshot deliberately contains only the selected model. An unavailable key

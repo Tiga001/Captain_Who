@@ -2,7 +2,7 @@
 status: current
 audience: developers
 owner: engineering
-last_verified: 2026-08-31
+last_verified: 2026-09-06
 ---
 
 # Tool 体系、权限与审批
@@ -23,11 +23,11 @@ last_verified: 2026-08-31
 
 暴露方式：
 
-| 类型                 | 含义                                                                     |
-| -------------------- | ------------------------------------------------------------------------ |
-| `Stable`             | 权限允许时属于稳定 Tool 前缀；定义排序和 revision 是 Provider cache 契约 |
-| `Dynamic`            | 由当前运行的扩展/目录动态加入，单独排序并参与 dynamic revision           |
-| `RequiresCapability` | 只有经验证的 Skill 或内置 Capability 激活后才进入动态 Toolset            |
+| 类型                 | 含义                                                                                    |
+| -------------------- | --------------------------------------------------------------------------------------- |
+| `Stable`             | 权限允许时属于稳定 Tool 前缀；定义排序和 revision 是 Provider cache 契约                |
+| `Dynamic`            | 由当前运行的扩展/目录动态加入，单独排序并参与 dynamic revision                          |
+| `RequiresCapability` | 只有可信扩展提供当前能力快照，或经验证的 Skill/内置 Capability 激活后才进入动态 Toolset |
 
 `EffectiveToolSet` 同时冻结 stable/dynamic definition、Tool typed identity、active capability 与整体 revision。模型只能调用该请求实际暴露的名称；“Registry 中有实现”不等于“本次请求已授权”。Capability ID 由后端从已验证 manifest 推导，不能接受模型自报 ID。
 
@@ -42,9 +42,23 @@ last_verified: 2026-08-31
 - 内置能力：`activate_capability` 和激活后的 Managed Playwright Browser Tool；
 - 外部扩展：MCP Server Tool 与其他 Runtime Extension。
 
-基础 Registry 总是注册文件/搜索/写入/命令、Command Session 及 Skill Resource/Script Tool；Office、图像生成、Web Tool 仅在对应 engine/execution/API key 可用时注册。历史、Skill 安装、协作、Runtime Extension、Managed Playwright 和外部 MCP Server Tool 由 Core Server 在构造 Run 时追加。上述族列表不是可执行 allowlist；完整真源是 `ToolRegistry` 的注册调用、`EffectiveToolSet` 契约和相关测试，新增 Tool 必须让自动化检查发现，而不是只修改本文。
+基础 Registry 总是注册文件/搜索/写入/命令、Command Session 及 Skill Resource/Script Tool；Office、图像生成仅在对应 engine/execution 可用时注册。联网搜索扩展始终保留私有的 `web_search`/`web_fetch` 实现，是否暴露由当前 Host 能力快照决定。历史、Skill 安装、协作、Runtime Extension、Managed Playwright 和外部 MCP Server Tool 由 Core Server 在构造 Run 时追加。上述族列表不是可执行 allowlist；完整真源是 `ToolRegistry` 的注册调用、`EffectiveToolSet` 契约和相关测试，新增 Tool 必须让自动化检查发现，而不是只修改本文。
 
 Git 差异通过 `run_command` 执行普通 Git 命令，沿用命令权限与审批规则。
+
+### 联网搜索与浏览器动态开关
+
+两个开关都是 Host 能力策略，不是模型稳定提示词中的行为偏好。每个自然模型请求边界先调用扩展的 `prepare_model_request`，由同一快照生成动态 Toolset、`RequestOnly` 专项说明和 World State 投影。开关本身不创建消息、唤醒 Run 或额外调用模型；稳定提示词与稳定 Tool 前缀不随开关变化，动态部分变化仍可能影响 Provider 对该部分的缓存。
+
+- **联网搜索**：`WebSearchExtension` 从 Host 的 `WebSearchPolicySource` 读取开关与凭据可用性；仅两者满足时暴露 `web_search`、`web_fetch` 和搜索专项说明。`web.search` World State 用 `available/reason` 表达当前事实，变化由既有 World State diff 留在上下文。关闭、配置缺失或 Host 读取失败时移除工具和说明，分别呈现 `disabled_by_user`、`configuration_required`、`host_unavailable`。
+- **浏览器自动化**：`BuiltinCapabilityExtension` 用同一请求快照提供可启用能力目录、动态 `activate_capability` 和已授权浏览器工具。关闭时不提供该能力的目录、激活入口和专项说明，只保留 World State 的能力 ID/状态事实。开启不等于当前任务已授权；关闭会使旧 live grant 失效，再开启仍按现有审批策略建立新 grant。没有任何可启用内置能力时，通用激活工具也退出当前 Toolset。
+- **执行与恢复**：已发出的请求保持冻结的工具调用契约，但新搜索执行再次从 Host 读取实时策略与凭据；浏览器仍在 grant/dispatch 边界复核策略。关闭先于执行 admission 时，迟到调用在联网/dispatch 前拒绝；已接纳操作沿用原取消和结算生命周期。Checkpoint 只保存扩展壳和已接纳调用契约，不能恢复旧开关授权、浏览器 live grant 或 Tavily 密钥。审批/人机交互恢复后，下次模型请求读取最新设置，搜索设置变化不会使无关审批失效。
+
+历史消息和已执行工具结果保留；卸载清理的是新请求的能力定义与专项说明，不改写历史事实，也不把这个开关扩展为对所有其他网络通道的统一禁令。联网搜索的稳定提示词不再重复扩展说明。图片生成继续由 Skill 管理，不参与这两个开关。
+
+Core Server 为真实 Run、恢复和上下文预览提供 Storage-backed 搜索策略；设置 CAS 与执行 admission 共享设置锁，只读取搜索凭据，不把 Tavily 密钥放入 `AgentChatInput` 或恢复信封。无 Host 的 Rust Core 独立调用保留显式冻结配置适配器，该适配器不具备运行中更新能力，不能替代真实 Host 接线。
+
+2026-09-06 验证：Rust Core 的 `web_search`（14 项）、`web_fetch`（10 项）、`prompts::tests`（18 项）、`builtin_capability`（29 项）及 `builtin_capabilities`（12 项）全部通过；Core Server 的 `web_search`（4 项）、`human_input`（34 项）、`pending_actions`（71 项）、`persisted_resume_input`（7 项）及 `builtin_capability`（35 项）全部通过，各 filter 存在重叠，不作为独立用例总数相加。真实 Harness/Host 测试使用 loopback Provider、临时 SQLite 和内存测试凭据，覆盖运行中开关、迟到搜索/抓取、审批及同步提问暂停、凭据缺失、重启和重新授权；没有调用真实搜索服务或启动真实浏览器。相关三包 all-targets Clippy、文档和测试布局检查通过。本轮没有修改 Renderer/Preload 协议，不新增数据库版本或要求重置开发数据。
 
 ## 权限模型
 

@@ -499,7 +499,7 @@ impl AgentService {
 
         let settings_snapshot = self
             .storage
-            .load_model_settings_snapshot_for_model(target_model_id, true)?
+            .load_model_settings_snapshot_for_model(target_model_id, false)?
             .ok_or_else(|| "请先配置模型。".to_string())?;
         let target = match resolve_provider_transition_target(
             &self.storage,
@@ -1102,7 +1102,7 @@ pub(super) fn resolve_provider_transition_target(
         }),
         search_config: Some(AgentSearchConfig {
             mode: search_mode_from_storage(&snapshot.settings.search_mode),
-            tavily_api_key: non_empty(snapshot.settings.tavily_api_key.clone()),
+            tavily_api_key: None,
         }),
         prompt_preferences: Some(prompt_preferences),
         approval_decision: None,

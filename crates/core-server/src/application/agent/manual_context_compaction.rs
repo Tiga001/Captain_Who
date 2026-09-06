@@ -213,7 +213,7 @@ impl AgentService {
             .ok_or_else(|| "当前聊天缺少模型配置。".to_string())?;
         let snapshot = self
             .storage
-            .load_model_settings_snapshot_for_model(model_id, true)?
+            .load_model_settings_snapshot_for_model(model_id, false)?
             .ok_or_else(|| "请先配置模型。".to_string())?;
         let target =
             resolve_provider_transition_target(&self.storage, &conversation, &snapshot, model_id)?;

@@ -368,3 +368,4 @@ mod moonshot_recovery;
 mod skill_activation;
 mod steering_and_repair;
 mod trace_and_projection;
+mod web_search;

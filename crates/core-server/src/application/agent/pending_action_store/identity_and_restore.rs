@@ -168,10 +168,7 @@ pub(super) fn restore_agent_input_secrets(
             "frozen pending-action local model configuration is unavailable".to_string()
         })?;
     let settings_snapshot = storage
-        .load_model_settings_snapshot_for_model(
-            model_config_id,
-            agent_input.search_config.is_some(),
-        )
+        .load_model_settings_snapshot_for_model(model_config_id, false)
         .map_err(|_| "failed to resolve frozen pending-action provider settings".to_string())?
         .ok_or_else(|| "frozen pending-action provider settings are unavailable".to_string())?;
     let current_provider_connection_revision = settings_snapshot
@@ -180,9 +177,6 @@ pub(super) fn restore_agent_input_secrets(
         .ok_or_else(|| "frozen pending-action provider connection is unavailable".to_string())?;
     if current_provider_connection_revision != &persisted.provider_connection_revision {
         return Err("frozen pending-action provider connection no longer matches".to_string());
-    }
-    if settings_snapshot.search_connection_revision != persisted.search_connection_revision {
-        return Err("frozen pending-action search connection no longer matches".to_string());
     }
     let settings = settings_snapshot.settings;
 
@@ -273,19 +267,11 @@ pub(super) fn restore_agent_input_secrets(
     agent_input.api_url = connection.api_url;
     agent_input.api_token = connection.api_token;
 
+    // Search is live Host policy, independent of the frozen Provider connection. A toggle or
+    // credential edit during a pause must neither invalidate this Run nor rehydrate search
+    // credentials into its continuation. Runtime admission reads authoritative settings again.
     if let Some(search) = agent_input.search_config.as_mut() {
-        if search.mode != search_mode_from_storage(&settings.search_mode) {
-            return Err("frozen pending-action search mode no longer matches".to_string());
-        }
-        let search_credential_present = !settings.tavily_api_key.trim().is_empty();
-        if search_credential_present != persisted.search_credential_required {
-            return Err(
-                "frozen pending-action search credential presence no longer matches".to_string(),
-            );
-        }
-        if persisted.search_credential_required {
-            search.tavily_api_key = Some(settings.tavily_api_key.trim().to_string());
-        }
+        search.tavily_api_key = None;
     }
     Ok(agent_input)
 }
@@ -307,10 +293,7 @@ fn bind_pending_provider_configuration(
         .filter(|value| !value.trim().is_empty())
         .ok_or_else(|| "pending-action local model configuration is unavailable".to_string())?;
     let snapshot = storage
-        .load_model_settings_snapshot_for_model(
-            model_config_id,
-            agent_input.search_config.is_some(),
-        )
+        .load_model_settings_snapshot_for_model(model_config_id, false)
         .map_err(|_| "failed to freeze pending-action provider configuration".to_string())?
         .ok_or_else(|| "pending-action provider configuration is unavailable".to_string())?;
     let model = snapshot
@@ -335,10 +318,6 @@ fn bind_pending_provider_configuration(
         != Some(current_provider_connection_revision)
     {
         return Err("pending-action provider connection changed before persistence".to_string());
-    }
-    if agent_input.search_connection_revision.as_ref() != Some(&snapshot.search_connection_revision)
-    {
-        return Err("pending-action search connection changed before persistence".to_string());
     }
     let provider_profile_config = agent_input
         .provider_profile_config
@@ -386,17 +365,6 @@ fn bind_pending_provider_configuration(
             || &checkpoint.provider_protocol_key != provider_protocol_key
         {
             return Err("pending-action checkpoint Provider Protocol is inconsistent".to_string());
-        }
-    }
-    if let Some(search) = agent_input.search_config.as_ref() {
-        let configured_key = (!snapshot.settings.tavily_api_key.trim().is_empty())
-            .then_some(snapshot.settings.tavily_api_key.trim());
-        if search.mode != search_mode_from_storage(&snapshot.settings.search_mode)
-            || search.tavily_api_key.as_deref() != configured_key
-        {
-            return Err(
-                "pending-action search configuration does not match the active run".to_string(),
-            );
         }
     }
     Ok(agent_input)

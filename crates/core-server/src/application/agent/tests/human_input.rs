@@ -19,6 +19,7 @@ const ORIGINAL_REQUEST: &str = "Ask for the missing details, then finish this sa
 enum ProviderReply {
     Questions,
     Command,
+    LateWebCalls,
     Complete,
 }
 
@@ -86,6 +87,17 @@ async fn write_provider_reply(stream: &mut TcpStream, reply: ProviderReply, inde
                     }
                 }]
             }),
+            "tool_calls",
+        ),
+        ProviderReply::LateWebCalls => (
+            json!({ "role": "assistant", "tool_calls": [
+                { "index": 0, "id": "late-web-search", "type": "function", "function": {
+                    "name": "web_search", "arguments": "{\"query\":\"host policy test\"}"
+                } },
+                { "index": 1, "id": "late-web-fetch", "type": "function", "function": {
+                    "name": "web_fetch", "arguments": "{\"url\":\"https://example.com/\"}"
+                } }
+            ] }),
             "tool_calls",
         ),
         ProviderReply::Complete => (
@@ -1000,4 +1012,213 @@ async fn submitted_answer_waits_for_the_old_worker_to_retire_before_resuming() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_submission_cannot_overtake_the_open_request_notification() {
     assert_sync_submission_handoff(true).await;
+}
+
+fn assert_web_search_projection(request: &Value, available: bool, reason: &str) {
+    let tools = request["tools"].as_array().unwrap();
+    for name in ["web_search", "web_fetch"] {
+        assert_eq!(
+            tools.iter().any(|tool| tool["function"]["name"] == name),
+            available
+        );
+    }
+    let messages = request["messages"].to_string();
+    assert_eq!(messages.contains("## 联网搜索"), available);
+    assert!(
+        messages.contains(reason),
+        "request must include the current web policy reason"
+    );
+    assert!(!request
+        .to_string()
+        .contains("HOST_SEARCH_CREDENTIAL_CANARY"));
+}
+
+#[tokio::test]
+async fn web_search_toggle_across_sync_and_approval_pauses_preserves_same_run() {
+    use super::web_search_policy::save_search_policy;
+    let (address, mut requests, provider) = controlled_provider(vec![
+        ProviderReply::Questions,
+        ProviderReply::Command,
+        ProviderReply::Questions,
+        ProviderReply::Complete,
+    ])
+    .await;
+    let fixture = tempdir().unwrap();
+    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    configure_storage(&storage, fixture.path(), &address);
+    let mut agent = AgentService::new(Arc::clone(&storage));
+    let (notifications, mut events) = unbounded_channel();
+    let turn = agent
+        .start_conversation_turn(turn_input(), notifications.clone())
+        .unwrap();
+
+    for index in 0..2 {
+        wait_for_done(&mut events, &turn.run_id, "waiting_for_user_input").await;
+        assert_web_search_projection(&requests.recv().await.unwrap(), false, "disabled_by_user");
+        save_search_policy(
+            &storage,
+            "auto",
+            CredentialMutation::Replace {
+                value: "HOST_SEARCH_CREDENTIAL_CANARY".to_string(),
+            },
+        );
+        let request = questions(&storage)
+            .into_iter()
+            .find(|request| request.status == HumanInteractionRequestStatus::Open)
+            .unwrap();
+        HumanInteractionService::new(&storage, &agent)
+            .submit(
+                HumanInteractionSubmitInput {
+                    conversation_id: turn.conversation_id.clone(),
+                    request_id: request.request_id.clone(),
+                    expected_revision: request.revision,
+                    submission_id: format!("web-search-policy-answer-{index}"),
+                    answers: answers(&request, true),
+                },
+                &notifications,
+            )
+            .unwrap();
+        if index == 0 {
+            wait_for_done(&mut events, &turn.run_id, "waiting_for_approval").await;
+            assert_web_search_projection(&requests.recv().await.unwrap(), true, "available");
+            let pending = agent.list_pending_actions();
+            assert_eq!(pending.len(), 1);
+            let durable = storage.list_pending_agent_actions().unwrap();
+            for row in &durable {
+                assert!(!row
+                    .agent_input_json
+                    .contains("HOST_SEARCH_CREDENTIAL_CANARY"));
+                assert!(!row.agent_input_json.contains("tavilyApiKey"));
+            }
+            save_search_policy(&storage, "disabled", CredentialMutation::Clear);
+            wait_for_worker_release(&agent, &turn.run_id).await;
+            drop(agent);
+            agent = AgentService::new(Arc::clone(&storage));
+            assert_eq!(
+                agent.list_pending_actions().len(),
+                1,
+                "changed search policy must survive approval restoration"
+            );
+            agent
+                .approve_action(&turn.run_id, &pending[0].action_id, notifications.clone())
+                .unwrap();
+        }
+    }
+    let done = wait_for_done(&mut events, &turn.run_id, "completed").await;
+    assert_eq!(done["usage"]["billableRequestCount"], 4);
+    assert_web_search_projection(&requests.recv().await.unwrap(), true, "available");
+    provider.await.unwrap();
+    let trace = storage
+        .get_conversation_turn_trace("assistant-human-input")
+        .unwrap()
+        .unwrap();
+    assert_eq!(trace.run_id, turn.run_id);
+}
+
+#[tokio::test]
+async fn web_search_late_model_calls_are_denied_after_committed_off_setting() {
+    use super::web_search_policy::save_search_policy;
+    let gate = Arc::new(Notify::new());
+    let (address, mut requests, provider) = controlled_provider_with_gate(
+        vec![ProviderReply::LateWebCalls, ProviderReply::Complete],
+        Some(Arc::clone(&gate)),
+    )
+    .await;
+    let fixture = tempdir().unwrap();
+    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    configure_storage(&storage, fixture.path(), &address);
+    save_search_policy(
+        &storage,
+        "tavily",
+        CredentialMutation::Replace {
+            value: "HOST_SEARCH_CREDENTIAL_CANARY".to_string(),
+        },
+    );
+    let agent = AgentService::new(Arc::clone(&storage));
+    let (notifications, mut events) = unbounded_channel();
+    let turn = agent
+        .start_conversation_turn(turn_input(), notifications)
+        .unwrap();
+    assert_web_search_projection(&requests.recv().await.unwrap(), true, "available");
+    save_search_policy(&storage, "disabled", CredentialMutation::Keep);
+    gate.notify_one();
+    wait_for_done(&mut events, &turn.run_id, "completed").await;
+    let next = requests.recv().await.unwrap();
+    assert_web_search_projection(&next, false, "disabled_by_user");
+    let results = next["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|message| message["role"] == "tool")
+        .collect::<Vec<_>>();
+    assert_eq!(results.len(), 2);
+    for result in results {
+        assert!(result["content"].to_string().contains("disabled_by_user"));
+    }
+    provider.await.unwrap();
+}
+
+#[tokio::test]
+async fn web_search_missing_credential_after_sync_restart_keeps_same_run() {
+    use super::web_search_policy::save_search_policy;
+    let (address, mut requests, provider) =
+        controlled_provider(vec![ProviderReply::Questions, ProviderReply::Complete]).await;
+    let fixture = tempdir().unwrap();
+    let database_path = fixture.path().join("storage.sqlite");
+    let credentials =
+        Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default());
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(&database_path, credentials.clone()).unwrap(),
+    );
+    configure_storage(&storage, fixture.path(), &address);
+    save_search_policy(
+        &storage,
+        "tavily",
+        CredentialMutation::Replace {
+            value: "HOST_SEARCH_CREDENTIAL_CANARY".to_string(),
+        },
+    );
+    let agent = AgentService::new(Arc::clone(&storage));
+    let (notifications, mut events) = unbounded_channel();
+    let turn = agent
+        .start_conversation_turn(turn_input(), notifications)
+        .unwrap();
+    wait_for_done(&mut events, &turn.run_id, "waiting_for_user_input").await;
+    wait_for_worker_release(&agent, &turn.run_id).await;
+    assert_web_search_projection(&requests.recv().await.unwrap(), true, "available");
+    let request = questions(&storage).pop().unwrap();
+    save_search_policy(&storage, "tavily", CredentialMutation::Clear);
+    drop(agent);
+    drop(storage);
+    let storage =
+        Arc::new(StorageService::open_with_model_credentials(&database_path, credentials).unwrap());
+    let agent = AgentService::new(Arc::clone(&storage));
+    let (notifications, mut events) = unbounded_channel();
+    HumanInteractionService::new(&storage, &agent)
+        .submit(
+            HumanInteractionSubmitInput {
+                conversation_id: turn.conversation_id.clone(),
+                request_id: request.request_id.clone(),
+                expected_revision: request.revision,
+                submission_id: "web-policy-sync-restart".to_string(),
+                answers: answers(&request, true),
+            },
+            &notifications,
+        )
+        .unwrap();
+    wait_for_done(&mut events, &turn.run_id, "completed").await;
+    assert_web_search_projection(
+        &requests.recv().await.unwrap(),
+        false,
+        "configuration_required",
+    );
+    provider.await.unwrap();
+    assert_eq!(
+        storage
+            .get_conversation_turn_trace("assistant-human-input")
+            .unwrap()
+            .unwrap()
+            .run_id,
+        turn.run_id
+    );
 }

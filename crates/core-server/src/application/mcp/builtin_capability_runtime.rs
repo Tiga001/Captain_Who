@@ -3190,6 +3190,67 @@ mod tests {
         assert!(state.consumed_activation_ids.is_empty());
     }
 
+    #[tokio::test]
+    async fn host_rejects_frozen_late_invocation_after_disable_and_reenable() {
+        let harness = harness();
+        let grant = activate_browser(&harness);
+        let invocation = sensitive_invocation(
+            &harness,
+            &grant,
+            "browser_snapshot",
+            "late-browser-call",
+            json!({"call_reason": "Inspect the current page"}),
+        );
+        harness
+            .policies
+            .set_allowed(StoredCapabilityId::BrowserAutomation, 1, false)
+            .unwrap();
+        // Exercise the Host boundary directly, bypassing Core's already-rechecked tool gate.
+        // Keep the old in-memory grant to prove durable policy invalidates it independently.
+        let error = harness
+            .provider
+            .invoke_authorized(
+                invocation.clone(),
+                grant.clone(),
+                AgentCancellationToken::new(),
+            )
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("grant 已失效"));
+        harness
+            .policies
+            .set_allowed(StoredCapabilityId::BrowserAutomation, 2, true)
+            .unwrap();
+        let error = harness
+            .provider
+            .invoke_authorized(invocation, grant, AgentCancellationToken::new())
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("grant 已失效"));
+    }
+
+    #[test]
+    fn restarted_host_recovers_enabled_policy_without_task_grants() {
+        let harness = harness();
+        let grant = activate_browser(&harness);
+        let reopened = Arc::new(
+            SqliteBuiltinCapabilityPolicyStore::open(
+                harness._directory.path().join("storage.sqlite"),
+            )
+            .unwrap(),
+        );
+        let (restarted, provider) =
+            HostBuiltinCapabilityProvider::runtime_and_provider(reopened, None).unwrap();
+        assert!(restarted.policy(&grant.capability_id).unwrap().user_allowed);
+        assert_eq!(restarted.policy(&grant.capability_id).unwrap().revision, 1);
+        assert!(restarted
+            .live_grant(&grant.run_id, &grant.capability_id)
+            .unwrap()
+            .is_none());
+        assert!(provider.lock_grants().unwrap().grants.is_empty());
+        assert!(provider.managed_runtime().unwrap().is_none());
+    }
+
     #[test]
     fn approval_rejects_manifest_policy_expiry_and_id_drift() {
         let harness = harness();

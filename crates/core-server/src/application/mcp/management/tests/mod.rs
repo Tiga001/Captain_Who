@@ -167,6 +167,26 @@ async fn disabling_builtin_capability_revokes_the_live_task_grant() {
         .live_grant(&approval.run_id, &grant.capability_id)
         .unwrap()
         .is_none());
+    let reenabled = harness
+        .service
+        .set_builtin_capability_allowed(McpBuiltinCapabilitySetAllowedInput {
+            schema_version: MCP_MANAGEMENT_SCHEMA_VERSION,
+            capability_id: McpBuiltinCapabilityIdDto::BrowserAutomation,
+            allowed: true,
+            expected_policy_revision: disabled.capability.policy_revision,
+        })
+        .await
+        .unwrap();
+    assert!(reenabled.capability.user_allowed);
+    assert!(harness
+        .builtin_capability_runtime
+        .live_grant(&approval.run_id, &grant.capability_id)
+        .unwrap()
+        .is_none());
+    assert!(harness
+        .builtin_capability_runtime
+        .approve_activation(&approval)
+        .is_err());
     harness.shutdown().await;
 }
 

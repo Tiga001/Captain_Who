@@ -2,7 +2,7 @@
 status: current
 audience: developers
 owner: engineering
-last_verified: 2026-08-31
+last_verified: 2026-09-06
 ---
 
 # 浏览器与自动化
@@ -103,6 +103,10 @@ Browser Settings 是独立 `browser` 页面，而不是 MCP 子页。它组合�
 ## 内置 `browser_automation` capability
 
 该能力是 Rust Core 注册的内置 MCP capability，不是用户配置的 stdio MCP Server。设置页从 Rust Core 获取 capability 列表，使用精确 `policyRevision` 做 CAS 开关。Renderer 的开关仅表达用户策略；每次 Agent 激活和敏感调用仍由 Rust Core 验证。
+
+每次模型请求开始时，Runtime 冻结一次 capability policy/grant 快照；该请求的 Tool schema、能力目录提示和 World State 都使用这份快照。关闭后，下一请求不再包含浏览器 Tool、`activate_capability` 中的浏览器介绍或浏览器专项提示。其他内置能力仍启用时可以保留通用激活入口，但其目录不得介绍已关闭的浏览器。World State 仅以 `capabilityId` 和 `disabled_by_user` 明确当前状态；`policyRevision` 留在 Host state。已有调用、结果和状态 journal 保持历史语义，关闭不删除历史。
+
+设置开启只允许任务申请批准。关闭会撤销 process-only grant、取消风险协调并停止受管自动化；重新开启或重启 Host 都不能恢复旧 task grant，必须经过当前 `builtinExecution` 策略的类型化批准。checkpoint 不保存授权，恢复时仍以 Host 当前 policy/grant 为准。发出模型请求后才关闭时，同一次请求的快照保持一致，但返回的迟到调用仍在 Rust Core/Host 执行边界被当前 policy/grant 拒绝。该开关独立于手动 Browser 页面和图片 Skill。
 
 Rust Core 通过反向 JSON-RPC 通知 Main 执行 `ManagedPlaywrightCommand`：
 

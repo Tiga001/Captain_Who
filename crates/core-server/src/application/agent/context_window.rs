@@ -180,7 +180,7 @@ impl AgentService {
             }),
             search_config: Some(AgentSearchConfig {
                 mode: search_mode_from_storage(&settings.search_mode),
-                tavily_api_key: non_empty(settings.tavily_api_key),
+                tavily_api_key: None,
             }),
             prompt_preferences: Some(prompt_preferences),
             approval_decision: None,
@@ -328,7 +328,9 @@ impl AgentService {
     /// for context previews. The returned value contains no executable action capability.
     pub(super) fn context_window_provider_host_services(&self) -> AgentRuntimeHostServices {
         let mut host_services =
-            AgentRuntimeHostServices::new().with_storage(Arc::clone(&self.storage));
+            AgentRuntimeHostServices::new()
+                .with_storage(Arc::clone(&self.storage))
+                .with_web_search_policy(self.web_search_policy_source());
         if let Some(builtin_capabilities) = self.builtin_capabilities.clone() {
             host_services = host_services.with_builtin_capabilities(builtin_capabilities);
         }

@@ -33,7 +33,7 @@ pub(super) struct PersistedAgentResumeInput {
     /// Stable identity of the selected model's effective endpoint/token pair. It is random and
     /// contains no credential material.
     provider_connection_revision: String,
-    /// Stable identity of the effective search mode/credential pair.
+    /// Historical search metadata retained for schema compatibility; live Host policy owns admission.
     search_connection_revision: String,
     provider_profile_config: ProviderProfileConfig,
     provider_protocol_key: ProviderProtocolKey,
@@ -91,10 +91,8 @@ pub(super) struct DecodedPersistedAgentResumeInput {
     pub(super) agent_input: AgentChatInput,
     pub(super) provider_configuration_revision: String,
     pub(super) provider_connection_revision: String,
-    pub(super) search_connection_revision: String,
     pub(super) provider_endpoint_digest: String,
     pub(super) provider_credential_required: bool,
-    pub(super) search_credential_required: bool,
 }
 
 impl std::fmt::Debug for DecodedPersistedAgentResumeInput {
@@ -358,17 +356,11 @@ impl PersistedAgentResumeInput {
         {
             return Err(PersistedAgentResumeInputError::InvalidShape);
         }
-        let search_credential_required = self
-            .search_config
-            .as_ref()
-            .is_some_and(|search| search.credential_required);
         Ok(DecodedPersistedAgentResumeInput {
             provider_configuration_revision: self.provider_configuration_revision.clone(),
             provider_connection_revision: self.provider_connection_revision.clone(),
-            search_connection_revision: self.search_connection_revision.clone(),
             provider_endpoint_digest: self.provider_endpoint_digest,
             provider_credential_required: self.provider_credential_required,
-            search_credential_required,
             agent_input: AgentChatInput {
                 api_url: String::new(),
                 api_token: String::new(),
@@ -612,7 +604,6 @@ mod tests {
             persisted_endpoint_digest(&format!("https://example.test/v1?token={API_URL_CANARY}"))
         );
         assert!(restored.provider_credential_required);
-        assert!(restored.search_credential_required);
         let restored = restored.agent_input;
         assert_eq!(
             restored.model_config_id.as_deref(),

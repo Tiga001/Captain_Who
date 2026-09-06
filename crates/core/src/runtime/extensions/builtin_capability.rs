@@ -178,11 +178,17 @@ impl RuntimeExtension for BuiltinCapabilityExtension {
             })
             .collect::<Vec<_>>();
         let state = json!({"capabilities": capabilities});
+        let model_projection = json!({
+            "capabilities": self.request.iter().map(|capability| json!({
+                "capabilityId": capability.descriptor.id,
+                "status": capability.status(),
+            })).collect::<Vec<_>>()
+        });
         let section = WorldStateSectionEnvelope::model_visible(
             id,
             WorldStateLifetime::Run,
-            state.clone(),
             state,
+            model_projection,
         )
         .map_err(|error| AgentError::new(error.to_string()))?;
         Ok(vec![section])
@@ -447,9 +453,13 @@ mod tests {
             .is_empty());
         let state = extension.world_state_sections().unwrap();
         assert_eq!(
-            state[0].model_projection.as_ref().unwrap()["capabilities"][0]["status"],
-            "disabled_by_user"
+            state[0].model_projection.as_ref().unwrap(),
+            &json!({"capabilities": [{
+                "capabilityId": "browser.automation",
+                "status": "disabled_by_user"
+            }]})
         );
+        assert_eq!(state[0].state["capabilities"][0]["policyRevision"], 4);
         assert!(!serde_json::to_string(&state)
             .unwrap()
             .contains("Managed Browser operations"));
@@ -472,6 +482,44 @@ mod tests {
                 .as_ref()
                 .unwrap()["capabilities"][0]["status"],
             "waiting_approval"
+        );
+    }
+
+    #[test]
+    fn policy_revision_changes_without_status_changes_stay_out_of_model_diffs() {
+        use crate::world_state::{WorldStateDiff, WorldStateSnapshot};
+
+        let (mut extension, provider, _) =
+            fixture(vec![manifest("browser.automation", "Browser")]);
+        let id = BuiltinCapabilityId::parse("browser.automation").unwrap();
+        *provider.policies.lock().unwrap().get_mut(&id).unwrap() = BuiltinCapabilityPolicy {
+            user_allowed: false,
+            revision: 4,
+        };
+        extension.prepare_model_request().unwrap();
+        let before =
+            WorldStateSnapshot::new("run-epoch", 0, extension.world_state_sections().unwrap())
+                .unwrap();
+        provider.policies.lock().unwrap().get_mut(&id).unwrap().revision = 5;
+        extension.prepare_model_request().unwrap();
+        let after =
+            WorldStateSnapshot::new("run-epoch", 1, extension.world_state_sections().unwrap())
+                .unwrap();
+        assert_ne!(before.revision, after.revision);
+        assert_eq!(
+            WorldStateDiff::between(&before, &after)
+                .unwrap()
+                .model_projection_against(&before, WorldStateLifetime::Run)
+                .unwrap(),
+            None,
+        );
+        assert_eq!(
+            before
+                .model_projection_revision(WorldStateLifetime::Run)
+                .unwrap(),
+            after
+                .model_projection_revision(WorldStateLifetime::Run)
+                .unwrap(),
         );
     }
 

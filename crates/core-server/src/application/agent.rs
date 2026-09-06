@@ -142,6 +142,7 @@ mod steering;
 mod turn;
 mod turn_executor;
 mod usage;
+mod web_search_policy;
 
 use action_execution::*;
 pub(crate) use approval::ProjectedApprovalDecision;

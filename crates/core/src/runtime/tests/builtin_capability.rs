@@ -1,7 +1,8 @@
 use super::*;
 use crate::{
-    AgentBuiltinCapabilityActivationApproval, AgentCancellationToken, AgentError, AgentResult,
-    AgentToolSafety, BuiltinCapabilityDescriptor, BuiltinCapabilityFuture, BuiltinCapabilityId,
+    AgentApprovalDecision, AgentApprovalDecisionStatus, AgentBuiltinCapabilityActivationApproval,
+    AgentCancellationToken, AgentError, AgentResult, AgentToolContinuation, AgentToolSafety,
+    BuiltinCapabilityDescriptor, BuiltinCapabilityFuture, BuiltinCapabilityId,
     BuiltinCapabilityInvocation, BuiltinCapabilityManifest, BuiltinCapabilityPolicy,
     BuiltinCapabilityProvider, BuiltinCapabilityRuntime, BuiltinCapabilityToolDescriptor,
     CapabilityActivationId, CapabilityGrant,
@@ -310,6 +311,7 @@ async fn run_payload_case(api_style: crate::protocol::AgentApiStyle) {
         assert!(payload.contains("disabled_by_user"));
         assert!(!payload.contains("Control the managed in-app browser"));
         assert!(!payload.contains("Enabled built-in capabilities"));
+        assert!(!payload.contains("policyRevision"));
     }
     let before = provider_tool_names(&requests[1], api_style);
     assert!(before.contains(&"activate_capability"));
@@ -355,6 +357,169 @@ async fn run_payload_case(api_style: crate::protocol::AgentApiStyle) {
 async fn reviewed_dynamic_tool_enters_openai_and_anthropic_payload_only_after_grant() {
     run_payload_case(crate::protocol::AgentApiStyle::OpenAiCompatible).await;
     run_payload_case(crate::protocol::AgentApiStyle::AnthropicCompatible).await;
+}
+
+#[tokio::test]
+async fn reenabled_browser_waits_for_real_approval_and_resumes_with_fresh_authority() {
+    let (runtime, provider) = payload_capability_runtime();
+    let run_id = "builtin-reenabled-approval-run";
+    let manifest = &runtime.manifests()[0];
+    let now = crate::builtin_capabilities::unix_timestamp();
+    let old_approval = AgentBuiltinCapabilityActivationApproval {
+        action_id: uuid::Uuid::new_v4().to_string(),
+        activation_id: CapabilityActivationId::generate().as_str().to_string(),
+        run_id: run_id.to_string(),
+        call_id: "previous-browser-activation".to_string(),
+        capability_id: manifest.descriptor.id.as_str().to_string(),
+        display_name: manifest.descriptor.display_name.clone(),
+        reason: "Previously reviewed browser access".to_string(),
+        manifest_digest: manifest.manifest_digest.clone(),
+        policy_revision: 11,
+        created_at: now,
+        expires_at: now + crate::BUILTIN_CAPABILITY_ACTIVATION_TTL_SECONDS,
+        approval_status: AgentApprovalStatus::Approved,
+    };
+    runtime.approve_activation(&old_approval).unwrap();
+    *provider.policy.lock().unwrap() = BuiltinCapabilityPolicy {
+        user_allowed: false,
+        revision: 12,
+    };
+    assert!(runtime.approve_activation(&old_approval).is_err());
+    *provider.policy.lock().unwrap() = BuiltinCapabilityPolicy {
+        user_allowed: true,
+        revision: 13,
+    };
+    assert!(runtime.approve_activation(&old_approval).is_err());
+    assert!(runtime
+        .live_grant(run_id, &manifest.descriptor.id)
+        .unwrap()
+        .is_none());
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let api_style = crate::protocol::AgentApiStyle::OpenAiCompatible;
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let awaiting = read_runtime_test_json_request(&mut stream).await;
+        let names = provider_tool_names(&awaiting, api_style);
+        assert!(names.contains(&"activate_capability"));
+        assert!(!names.contains(&"browser_snapshot"));
+        assert!(serde_json::to_string(&awaiting)
+            .unwrap()
+            .contains("waiting_approval"));
+        write_runtime_test_json_response(&mut stream, json!({
+            "choices": [{"message": {"role": "assistant", "content": null, "tool_calls": [{
+                "id": "fresh-browser-activation", "type": "function", "function": {
+                    "name": "activate_capability",
+                    "arguments": r#"{"capability":"browser_automation","reason":"Inspect the reviewed browser"}"#
+                }
+            }]}, "finish_reason": "tool_calls"}]
+        })).await;
+
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let approved = read_runtime_test_json_request(&mut stream).await;
+        assert!(provider_tool_names(&approved, api_style).contains(&"browser_snapshot"));
+        assert_eq!(awaiting["messages"][0], approved["messages"][0]);
+        assert!(serde_json::to_string(&approved)
+            .unwrap()
+            .contains("activate_capability"));
+        write_runtime_test_json_response(&mut stream, json!({
+            "choices": [{"message": {"role": "assistant", "content": "Access approved."}, "finish_reason": "stop"}]
+        })).await;
+    });
+    let mut input = conversation_context_input(vec![message("user", "Inspect the page")]);
+    input.api_url = format!("http://{address}/v1/chat/completions");
+    input.api_token = "test-token".to_string();
+    input.stream = Some(false);
+    freeze_runtime_test_generic_provider(&mut input, "builtin-reenabled-approval");
+    let host = AgentRuntimeHostServices::new().with_builtin_capabilities(runtime.clone());
+    let waiting = AgentRuntime::default()
+        .send_chat_with_events_and_cancellation(
+            input.clone(),
+            Some(run_id.to_string()),
+            None,
+            AgentCancellationToken::new(),
+            Some(host.clone()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(waiting.status, AgentRunStatus::WaitingForApproval);
+    let (mut approval, checkpoint) = waiting
+        .events
+        .iter()
+        .find_map(|event| match event {
+            AgentEvent::ApprovalRequired {
+                action, checkpoint, ..
+            } => match action.as_ref() {
+                AgentProposedAction::BuiltinCapabilityActivation { approval } => {
+                    Some(((**approval).clone(), (**checkpoint).clone()))
+                }
+                _ => None,
+            },
+            _ => None,
+        })
+        .expect("fresh typed activation approval and checkpoint");
+    assert_eq!(approval.approval_status, AgentApprovalStatus::Required);
+    assert_eq!(approval.policy_revision, 13);
+    assert!(runtime
+        .live_grant(run_id, &manifest.descriptor.id)
+        .unwrap()
+        .is_none());
+    assert!(!checkpoint
+        .tool_set
+        .exposed_tool_names
+        .iter()
+        .any(|name| name == "browser_snapshot"));
+
+    // The Host settles the exact approval before resuming; the feature switch alone did not.
+    approval.approval_status = AgentApprovalStatus::Approved;
+    runtime.approve_activation(&approval).unwrap();
+    let pending_call = checkpoint
+        .context_items
+        .iter()
+        .flat_map(|item| item.tool_calls.iter())
+        .find(|call| call.id == approval.call_id)
+        .unwrap()
+        .clone();
+    input.messages.clear();
+    input.resume_checkpoint = Some(checkpoint);
+    input.approval_decision = Some(AgentApprovalDecision {
+        action_id: approval.action_id.clone(),
+        status: AgentApprovalDecisionStatus::Approved,
+        message: None,
+    });
+    input.tool_continuation = Some(AgentToolContinuation {
+        call: AgentToolCall {
+            id: pending_call.id,
+            tool: pending_call.name,
+            args: pending_call.args,
+            approval_status: AgentApprovalStatus::Approved,
+            reason: None,
+        },
+        result: crate::builtin_capability_activation_result(
+            &approval,
+            crate::CapabilityActivationState::Active,
+            None,
+        ),
+    });
+    let completed = AgentRuntime::default()
+        .send_chat_with_events_and_cancellation(
+            input,
+            Some(run_id.to_string()),
+            None,
+            AgentCancellationToken::new(),
+            Some(host),
+        )
+        .await
+        .unwrap();
+    server.await.unwrap();
+    assert_eq!(completed.status, AgentRunStatus::Completed);
+    assert_eq!(
+        provider
+            .invocations
+            .load(std::sync::atomic::Ordering::SeqCst),
+        0
+    );
 }
 
 #[tokio::test]

@@ -1,7 +1,9 @@
 use super::{ExtensionDescriptor, ModelRequestContext, ModelRequestPurpose, RuntimeExtension};
 use crate::context::{ContextItem, ContextRetention, ContextScope, ContextSource};
 use crate::llm::LlmMessageRole;
-use crate::tools::{AgentTool, ToolCapabilityId, WebFetchTool, WebSearchTool, WEB_SEARCH_CAPABILITY};
+use crate::tools::{
+    AgentTool, ToolCapabilityId, WebFetchTool, WebSearchTool, WEB_SEARCH_CAPABILITY,
+};
 use crate::world_state::{WorldStateLifetime, WorldStateSectionEnvelope, WorldStateSectionId};
 use crate::{AgentError, AgentResult, WebSearchPolicySnapshot, WebSearchPolicySource};
 use serde_json::{json, Value};
@@ -18,7 +20,10 @@ pub(super) struct WebSearchExtension {
 
 impl WebSearchExtension {
     pub(super) fn new(source: Arc<dyn WebSearchPolicySource>) -> Self {
-        Self { source, request: None }
+        Self {
+            source,
+            request: None,
+        }
     }
 
     fn available(&self) -> bool {
@@ -85,7 +90,8 @@ impl RuntimeExtension for WebSearchExtension {
             WorldStateLifetime::Run,
             state.clone(),
             state,
-        ).map_err(|error| AgentError::new(error.to_string()))?])
+        )
+        .map_err(|error| AgentError::new(error.to_string()))?])
     }
 
     fn snapshot_state(&self) -> AgentResult<Value> {
@@ -96,7 +102,9 @@ impl RuntimeExtension for WebSearchExtension {
         if version != WEB_SEARCH_EXTENSION_VERSION
             || state != json!({ "schemaVersion": WEB_SEARCH_EXTENSION_VERSION })
         {
-            return Err(AgentError::new("无法恢复联网搜索扩展：checkpoint 状态版本无效。"));
+            return Err(AgentError::new(
+                "无法恢复联网搜索扩展：checkpoint 状态版本无效。",
+            ));
         }
         // Only restore the shell. A checkpoint cannot grant policy or preserve a credential.
         self.request = None;
@@ -153,13 +161,20 @@ mod tests {
     fn registry(extension: &WebSearchExtension) -> ToolRegistry {
         let mut registry = ToolRegistry::defaults_with_search(None);
         for tool in extension.tools() {
-            registry.register_extension_tool(WEB_SEARCH_EXTENSION_ID, tool).unwrap();
+            registry
+                .register_extension_tool(WEB_SEARCH_EXTENSION_ID, tool)
+                .unwrap();
         }
         registry
     }
 
     fn tool_set(extension: &WebSearchExtension, registry: &ToolRegistry) -> EffectiveToolSet {
-        registry.effective_tool_set(registry.definitions(), &extension.active_tool_capabilities().unwrap()).unwrap()
+        registry
+            .effective_tool_set(
+                registry.definitions(),
+                &extension.active_tool_capabilities().unwrap(),
+            )
+            .unwrap()
     }
 
     #[test]
@@ -172,30 +187,52 @@ mod tests {
         assert!(registry.contains_tool("web_search"));
         assert!(!off.contains("web_search"));
         assert!(!off.contains("web_fetch"));
-        assert_eq!(extension.world_state_sections().unwrap()[0].state["reason"], "disabled_by_user");
-        assert!(extension.request_context(&ModelRequestContext::agent_work()).unwrap().is_empty());
+        assert_eq!(
+            extension.world_state_sections().unwrap()[0].state["reason"],
+            "disabled_by_user"
+        );
+        assert!(extension
+            .request_context(&ModelRequestContext::agent_work())
+            .unwrap()
+            .is_empty());
 
         source.enabled.store(true, Ordering::SeqCst);
         // Every projection retains the same disabled decision until the next natural request.
         assert!(!tool_set(&extension, &registry).contains("web_search"));
-        assert!(extension.request_context(&ModelRequestContext::agent_work()).unwrap().is_empty());
+        assert!(extension
+            .request_context(&ModelRequestContext::agent_work())
+            .unwrap()
+            .is_empty());
         assert_eq!(source.reads.load(Ordering::SeqCst), 1);
         extension.prepare_model_request().unwrap();
         let on = tool_set(&extension, &registry);
         assert!(on.contains("web_search"));
         assert!(on.contains("web_fetch"));
         assert_eq!(on.dynamic_definitions().len(), 2);
-        let instructions = extension.request_context(&ModelRequestContext::agent_work()).unwrap();
+        let instructions = extension
+            .request_context(&ModelRequestContext::agent_work())
+            .unwrap();
         assert_eq!(instructions.len(), 1);
         let frame = crate::context::ContextFrame::new(instructions);
         assert_eq!(frame.manifest().entries[0].retention, "request_only");
         let messages = frame.to_messages();
         assert!(messages[0].content().contains("web_search"));
         assert!(messages[0].content().contains("web_fetch"));
-        assert!(extension.request_context(&ModelRequestContext { purpose: ModelRequestPurpose::ContextCompaction }).unwrap().is_empty());
-        assert_eq!(extension.world_state_sections().unwrap()[0].state["reason"], "available");
+        assert!(extension
+            .request_context(&ModelRequestContext {
+                purpose: ModelRequestPurpose::ContextCompaction
+            })
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            extension.world_state_sections().unwrap()[0].state["reason"],
+            "available"
+        );
         assert_eq!(source.reads.load(Ordering::SeqCst), 2);
-        assert_eq!(serde_json::to_vec(off.stable_definitions()).unwrap(), serde_json::to_vec(on.stable_definitions()).unwrap());
+        assert_eq!(
+            serde_json::to_vec(off.stable_definitions()).unwrap(),
+            serde_json::to_vec(on.stable_definitions()).unwrap()
+        );
         assert_eq!(off.stable_revision(), on.stable_revision());
 
         source.enabled.store(false, Ordering::SeqCst);
@@ -203,9 +240,14 @@ mod tests {
         let disabled_again = tool_set(&extension, &registry);
         assert_eq!(off.revision(), disabled_again.revision());
         // Preserve the already accepted batch contract. Executions still recheck live policy.
-        let restored = disabled_again.restore_frozen_checkpoint(&on.checkpoint()).unwrap();
+        let restored = disabled_again
+            .restore_frozen_checkpoint(&on.checkpoint())
+            .unwrap();
         assert_eq!(restored.revision(), on.revision());
-        assert!(extension.request_context(&ModelRequestContext::agent_work()).unwrap().is_empty());
+        assert!(extension
+            .request_context(&ModelRequestContext::agent_work())
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
@@ -217,12 +259,21 @@ mod tests {
         source.credential_ready.store(false, Ordering::SeqCst);
         extension.prepare_model_request().unwrap();
         assert!(!extension.available());
-        assert_eq!(extension.world_state_sections().unwrap()[0].state["reason"], "configuration_required");
+        assert_eq!(
+            extension.world_state_sections().unwrap()[0].state["reason"],
+            "configuration_required"
+        );
         source.fail_read.store(true, Ordering::SeqCst);
         extension.prepare_model_request().unwrap();
         assert!(extension.active_tool_capabilities().unwrap().is_empty());
-        assert!(extension.request_context(&ModelRequestContext::agent_work()).unwrap().is_empty());
-        assert_eq!(extension.world_state_sections().unwrap()[0].state["reason"], "host_unavailable");
+        assert!(extension
+            .request_context(&ModelRequestContext::agent_work())
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            extension.world_state_sections().unwrap()[0].state["reason"],
+            "host_unavailable"
+        );
     }
 
     #[test]
@@ -243,7 +294,10 @@ mod tests {
             assert_eq!(error.code(), Some("web_search.disabled_by_user"));
         }
         assert_eq!(source.executions.load(Ordering::SeqCst), 2);
-        assert!(extension.available(), "already accepted request stays frozen");
+        assert!(
+            extension.available(),
+            "already accepted request stays frozen"
+        );
     }
 
     #[test]
@@ -258,7 +312,13 @@ mod tests {
         assert!(!extension.available());
         extension.prepare_model_request().unwrap();
         assert!(!extension.available());
-        assert!(extension.restore_state(1, json!({ "schemaVersion": 1, "enabled": true })).is_err());
-        assert!(!format!("{:?}", WebSearchExecutionCredential::new("test-secret".to_string()).unwrap()).contains("test-secret"));
+        assert!(extension
+            .restore_state(1, json!({ "schemaVersion": 1, "enabled": true }))
+            .is_err());
+        assert!(!format!(
+            "{:?}",
+            WebSearchExecutionCredential::new("test-secret".to_string()).unwrap()
+        )
+        .contains("test-secret"));
     }
 }
