@@ -1461,6 +1461,25 @@ impl std::fmt::Debug for AgentFileChangeRecord {
     }
 }
 
+/// Metadata needed to render and enforce the current Run's FileTransactionState.
+///
+/// This projection deliberately excludes draft bodies, observations, and action bindings. It is
+/// not an authorization record; mutations still load and validate the full transaction record.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentFileChangeRuntimeState {
+    pub id: String,
+    pub conversation_id: String,
+    pub project_id: Option<String>,
+    pub run_id: String,
+    pub source_tool_name: String,
+    pub file_path: String,
+    pub operation: String,
+    pub strategy: Option<String>,
+    pub status: String,
+    pub draft_revision: u64,
+    pub next_mutation_index: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentFileChangeChunkRecord {
     pub transaction_id: String,

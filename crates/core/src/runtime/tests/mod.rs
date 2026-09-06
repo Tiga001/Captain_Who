@@ -367,6 +367,7 @@ mod compaction_and_tool_flow;
 mod conversation_context;
 mod conversation_world_state;
 mod deepseek_recovery;
+mod file_transaction_context;
 mod human_interaction;
 mod moonshot_recovery;
 mod request_layout;

@@ -61,6 +61,17 @@ impl StorageService {
             .map_err(storage_error)
     }
 
+    /// Loads only metadata for runtime state checks, without draft bodies or action bindings.
+    /// Terminal rows are retained so callers can validate all owners before status filtering.
+    pub fn list_agent_file_change_runtime_states_for_run(
+        &self,
+        run_id: &str,
+    ) -> Result<Vec<AgentFileChangeRuntimeState>, String> {
+        let connection = self.state.connection()?;
+        file_change_repository::list_file_change_runtime_states_for_run(&connection, run_id)
+            .map_err(storage_error)
+    }
+
     pub fn list_agent_tool_results_for_run(
         &self,
         run_id: &str,

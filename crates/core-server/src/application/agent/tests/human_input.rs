@@ -23,7 +23,7 @@ enum ProviderReply {
     Complete,
 }
 
-async fn read_provider_request(stream: &mut TcpStream) -> Value {
+pub(super) async fn read_provider_request(stream: &mut TcpStream) -> Value {
     let mut request = Vec::new();
     let mut buffer = [0_u8; 4096];
     let mut body_start = None;
@@ -139,7 +139,7 @@ fn turn_input() -> AgentConversationTurnInput {
     }
 }
 
-async fn wait_for_done(
+pub(super) async fn wait_for_done(
     receiver: &mut UnboundedReceiver<Value>,
     run_id: &str,
     status: &str,

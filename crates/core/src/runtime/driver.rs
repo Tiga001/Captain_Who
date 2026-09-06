@@ -523,7 +523,14 @@ impl AgentRuntime {
                     ));
                 }
                 if tool_batch.take_suppressed_narration() {
-                    active_context.push(suppressed_narration_context_item());
+                    record_suppressed_file_transaction_narration(
+                        &run_id,
+                        next_model_request_index.saturating_sub(1),
+                        &mut active_context,
+                        &conversation_trace,
+                        trace_observer.as_ref(),
+                        trace_assistant_message_id.as_deref(),
+                    )?;
                 }
                 if let Some(count) = tool_batch.take_deferred_external_tool_call_count() {
                     active_context.push(deferred_external_tool_calls_context_item(count));
@@ -710,6 +717,9 @@ impl AgentRuntime {
                         )?;
                         if empty_model_action_repair_pending {
                             request_context.push(empty_model_action_repair_context_item());
+                        }
+                        if response_fence_corrections > 0 {
+                            request_context.push(file_transaction_protocol_correction_context_item());
                         }
                         if let Some(context) = file_transactions.request_context() {
                             request_context.push(ContextItem::text(
@@ -1173,9 +1183,12 @@ impl AgentRuntime {
                                 retained_assistant_content,
                                 &tool_requests,
                             );
-                        if suppressed_narration {
+                        if suppressed_narration && !tool_requests.is_empty() {
                             for message in ContextFrame::new(vec![
-                                suppressed_narration_context_item(),
+                                ContextItem::new(
+                                    LlmMessage::backend_state(suppressed_narration_state(model_request_index)),
+                                    ContextMetadata::new(ContextSource::BackendState, ContextScope::Run, ContextRetention::Retained),
+                                ),
                             ])
                             .into_messages()
                             {
@@ -1224,13 +1237,6 @@ impl AgentRuntime {
                                 "模型连续输出文字但未结算文件事务，已停止以避免循环。请重试任务。",
                             ));
                         }
-                        active_context.push(ContextItem::text(
-                            LlmMessageRole::System,
-                            file_transactions.protocol_correction(),
-                            ContextSource::RuntimeGuard,
-                            ContextScope::Run,
-                            ContextRetention::Retained,
-                        ));
                         continue;
                     }
                     if tool_requests.is_empty() {

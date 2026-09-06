@@ -6,15 +6,15 @@ use std::sync::{Arc, Mutex};
 use crate::command::{AgentCommandExecutionResult, ManagedCommandWorkspaceRegistry};
 use crate::storage::models::{
     AgentActionAuditRecord, AgentFileChangeChunkRecord, AgentFileChangeOperationRecord,
-    AgentFileChangeRecord, AgentPendingActionRecord, AgentPromptPreferencesRecord,
-    AgentRunGuidanceRecord, AgentUnsettledFileEffect, AgentUsageRecordInsert,
-    AttachmentImageRecord, AttachmentRecord, ChatConversationMetaRecord, ChatConversationRecord,
-    ChatConversationViewRecord, ChatMessageAttachmentRecord, ChatMessageRecord,
-    ChatMessageStateRecord, ChatSearchInput, ChatSearchResult, ComposerDraftRecord,
-    ConversationForkPoint, ForkConversationRequest, ImageGenerationProfileRecord,
-    McpApprovalEnvelopeRecord, ModelConfigRecord, ModelSettingsRecord, ModelSettingsSaveError,
-    ModelSettingsSaveRequest, ModelSettingsSnapshot, ProjectRecord, ProviderProfileUpdate,
-    UiPreferencesRecord,
+    AgentFileChangeRecord, AgentFileChangeRuntimeState, AgentPendingActionRecord,
+    AgentPromptPreferencesRecord, AgentRunGuidanceRecord, AgentUnsettledFileEffect,
+    AgentUsageRecordInsert, AttachmentImageRecord, AttachmentRecord, ChatConversationMetaRecord,
+    ChatConversationRecord, ChatConversationViewRecord, ChatMessageAttachmentRecord,
+    ChatMessageRecord, ChatMessageStateRecord, ChatSearchInput, ChatSearchResult,
+    ComposerDraftRecord, ConversationForkPoint, ForkConversationRequest,
+    ImageGenerationProfileRecord, McpApprovalEnvelopeRecord, ModelConfigRecord,
+    ModelSettingsRecord, ModelSettingsSaveError, ModelSettingsSaveRequest, ModelSettingsSnapshot,
+    ProjectRecord, ProviderProfileUpdate, UiPreferencesRecord,
 };
 use crate::storage::{
     agent_action_audit_repository, agent_collaboration_event_repository,

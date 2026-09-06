@@ -36,6 +36,7 @@ mod conversation_world_state;
 mod deletion;
 mod file_change_permissions;
 mod file_change_source_boundary;
+mod file_transaction_context;
 mod historical_compatibility_boundary;
 mod human_input;
 mod human_input_async;

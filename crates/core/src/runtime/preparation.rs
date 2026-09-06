@@ -606,14 +606,24 @@ pub(super) fn install_trusted_user_input_resume(
     Ok(())
 }
 
-pub(super) fn suppressed_narration_context_item() -> ContextItem {
+pub(super) fn file_transaction_protocol_correction_context_item() -> ContextItem {
     ContextItem::text(
         LlmMessageRole::System,
-        "The text emitted alongside the preceding tool calls was not shown to the user because file transactions were unsettled. Do not assume the user saw it. Continue the transaction protocol and generate new text only after every draft has a finish or abort outcome.",
+        "Your preceding text-only response was not shown because a file transaction was unsettled. Continue using the latest Backend file transaction state and tool results. Do not repeat the hidden text.",
         ContextSource::RuntimeGuard,
         ContextScope::Run,
-        ContextRetention::Retained,
+        ContextRetention::RequestOnly,
     )
+}
+
+pub(super) fn suppressed_narration_state(model_request_index: usize) -> String {
+    serde_json::json!({
+        "type": "assistant_text_visibility",
+        "modelRequestIndex": model_request_index,
+        "status": "not_shown",
+        "reason": "file_transaction_unsettled",
+    })
+    .to_string()
 }
 
 pub(super) fn accept_async_human_question(

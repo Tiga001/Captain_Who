@@ -1,6 +1,7 @@
 use crate::file_change::FileChangeMutationReceipt;
 use crate::storage::models::{
     AgentFileChangeChunkRecord, AgentFileChangeOperationRecord, AgentFileChangeRecord,
+    AgentFileChangeRuntimeState,
 };
 use rusqlite::{params, Connection, OptionalExtension};
 
@@ -321,6 +322,41 @@ pub fn list_file_changes_for_run(
     )?;
     let changes = statement
         .query_map([run_id], map_file_change)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(changes)
+}
+
+/// Reads only runtime metadata, including terminal rows, so callers can validate every owner
+/// before deciding which statuses remain unsettled. Keep the same stable order as full records.
+pub fn list_file_change_runtime_states_for_run(
+    connection: &Connection,
+    run_id: &str,
+) -> rusqlite::Result<Vec<AgentFileChangeRuntimeState>> {
+    let mut statement = connection.prepare(
+        r#"
+        SELECT id, conversation_id, project_id, run_id, source_tool_name,
+               file_path, operation, strategy, status, draft_revision, next_mutation_index
+        FROM agent_file_changes
+        WHERE run_id = ?1
+        ORDER BY created_at ASC, id ASC
+        "#,
+    )?;
+    let changes = statement
+        .query_map([run_id], |row| {
+            Ok(AgentFileChangeRuntimeState {
+                id: row.get(0)?,
+                conversation_id: row.get(1)?,
+                project_id: row.get(2)?,
+                run_id: row.get(3)?,
+                source_tool_name: row.get(4)?,
+                file_path: row.get(5)?,
+                operation: row.get(6)?,
+                strategy: row.get(7)?,
+                status: row.get(8)?,
+                draft_revision: i64_to_u64(row.get(9)?)?,
+                next_mutation_index: i64_to_u64(row.get(10)?)?,
+            })
+        })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(changes)
 }
@@ -1131,6 +1167,145 @@ mod tests {
                 .status,
             "drafting"
         );
+    }
+
+    #[test]
+    fn runtime_states_preserve_all_statuses_owner_metadata_and_record_order() {
+        let connection = setup();
+        let statuses = [
+            "drafting",
+            "ready",
+            "waiting_approval",
+            "applying",
+            "applied",
+            "already_applied",
+            "rejected",
+            "conflict",
+            "failed",
+            "outcome_unknown",
+            "aborted",
+            "expired",
+        ];
+        // Insert in reverse order and tie creation times to exercise both ordering dimensions.
+        for (index, status) in statuses.iter().enumerate().rev() {
+            let mut change = record();
+            change.id = format!("file-change-{index:02}");
+            change.source_tool_call_id = format!("call-begin-{index:02}");
+            change.status = (*status).to_string();
+            change.file_path = format!("report-{index}.md");
+            change.created_at = (index / 2) as i64;
+            change.draft_revision = index as u64 + 3;
+            change.next_mutation_index = index as u64 + 7;
+            if index % 2 == 1 {
+                change.project_id = None;
+                change.operation = "update".to_string();
+                change.strategy = Some("rewrite".to_string());
+            }
+            if !matches!(*status, "drafting" | "ready") {
+                freeze_final_identity(&mut change, status);
+            }
+            insert_file_change(&connection, &change).unwrap();
+        }
+        let mut other_run = record();
+        other_run.id = "other-run-change".to_string();
+        other_run.run_id = "run-other".to_string();
+        insert_file_change(&connection, &other_run).unwrap();
+
+        let records = list_file_changes_for_run(&connection, "run-1").unwrap();
+        let runtime_states = list_file_change_runtime_states_for_run(&connection, "run-1").unwrap();
+        assert_eq!(runtime_states.len(), statuses.len());
+        assert_eq!(
+            runtime_states
+                .iter()
+                .map(|state| state.status.as_str())
+                .collect::<Vec<_>>(),
+            statuses
+        );
+        for (state, record) in runtime_states.iter().zip(records) {
+            assert_eq!(state.id, record.id);
+            assert_eq!(state.conversation_id, record.conversation_id);
+            assert_eq!(state.project_id, record.project_id);
+            assert_eq!(state.run_id, record.run_id);
+            assert_eq!(state.source_tool_name, record.source_tool_name);
+            assert_eq!(state.file_path, record.file_path);
+            assert_eq!(state.operation, record.operation);
+            assert_eq!(state.strategy, record.strategy);
+            assert_eq!(state.status, record.status);
+            assert_eq!(state.draft_revision, record.draft_revision);
+            assert_eq!(state.next_mutation_index, record.next_mutation_index);
+        }
+        assert!(
+            list_file_change_runtime_states_for_run(&connection, "missing-run")
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn runtime_states_never_read_bodies_observations_or_action_bindings() {
+        use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+
+        let connection = setup();
+        let mut change = record();
+        change.base_content = "base-body\n".repeat(64 * 1024);
+        change.content = "draft-body\n".repeat(64 * 1024);
+        insert_file_change(&connection, &change).unwrap();
+
+        // Deny SQL access to every column outside the lean projection and its ordering key.
+        // This fails even if a full record is loaded and its sensitive fields are later dropped.
+        connection.authorizer(Some(|context: AuthContext<'_>| match context.action {
+            AuthAction::Read {
+                table_name: "agent_file_changes",
+                column_name,
+            } if !matches!(
+                column_name,
+                "id" | "conversation_id"
+                    | "project_id"
+                    | "run_id"
+                    | "source_tool_name"
+                    | "file_path"
+                    | "operation"
+                    | "strategy"
+                    | "status"
+                    | "draft_revision"
+                    | "next_mutation_index"
+                    | "created_at"
+            ) =>
+            {
+                Authorization::Deny
+            }
+            _ => Authorization::Allow,
+        }));
+
+        let states = list_file_change_runtime_states_for_run(&connection, "run-1").unwrap();
+        assert_eq!(states.len(), 1);
+        assert_eq!(states[0].id, change.id);
+        assert!(list_file_changes_for_run(&connection, "run-1").is_err());
+    }
+
+    #[test]
+    fn runtime_states_retain_invalid_owner_source_and_status_for_fail_closed_validation() {
+        let connection = setup();
+        insert_file_change(&connection, &record()).unwrap();
+        // Model a damaged persisted row: runtime callers must see this metadata and reject it,
+        // rather than silently losing the row through SQL owner, source, or status predicates.
+        connection
+            .execute_batch(
+                "PRAGMA ignore_check_constraints = ON;
+                 INSERT INTO conversations (id, title, created_at, updated_at)
+                 VALUES ('conversation-other', 'Other', 1, 1);
+                 UPDATE agent_file_changes
+                 SET conversation_id = 'conversation-other', project_id = NULL,
+                     source_tool_name = 'unsupported_tool', status = 'unknown_status';",
+            )
+            .unwrap();
+
+        let states = list_file_change_runtime_states_for_run(&connection, "run-1").unwrap();
+        assert_eq!(states.len(), 1);
+        assert_eq!(states[0].conversation_id, "conversation-other");
+        assert_eq!(states[0].project_id, None);
+        assert_eq!(states[0].source_tool_name, "unsupported_tool");
+        assert_eq!(states[0].status, "unknown_status");
     }
 
     #[test]

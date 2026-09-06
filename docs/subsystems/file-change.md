@@ -2,7 +2,7 @@
 status: current
 audience: developers/maintainers
 owner: engineering
-last_verified: 2026-08-31
+last_verified: 2026-09-06
 ---
 
 # FileChange 子系统
@@ -112,9 +112,58 @@ FileChange 对不同消费者使用不同投影：
 
 `apply_patch` 的 durable call Trace 不保存完整 content、old/new text 或 Observation ID，而保存安全 operation 与 digest。successor Observation 只进入模型投影和私有 checkpoint；Event、Trace、Archive 以及持久公共结果都会剥离这些字段。
 
+### 模型上下文的三种寿命
+
+固定操作规则保留在稳定 System Prompt 与 `apply_patch` 工具说明中。调用与结算结果沿原时间位置进入
+工具历史，按普通历史参与压缩；当前 Run 的尾部不再重发 action audit 的 settlements。
+
+每次请求与每次工具 dispatch 使用相同的轻量元数据查询读取当前 Run 的事务，保留完整 owner/source
+校验，不加载草稿正文、base content、Observation 或执行 binding。真正修改文件仍重新加载完整记录并
+执行原有授权与 identity 检查。尾部 `System/Run/RequestOnly` 快照只列未完成事务：
+
+```text
+Backend file transaction state.
+```
+
+其 JSON 为 `{"transactions":[...]}`，每项只有 `transactionId`、`filePath`、`operation`、`strategy`、
+`status`、`expectedDraftRevision`、`nextIndex`、`allowedNextActions`。不再重复 `draftRevision`、增删统计、
+summary、settlements、固定操作长文或已终态事务。没有未完成事务时整段省略；Direct-only Run 不产生此段。
+`outcome_unknown` 和未知状态仍保持阻塞并仅允许 `status`，不能因为缩减提示而解除执行边界。
+
+纯文字违规只在紧接着的请求中加入无游标的 `RuntimeGuard/Run/RequestOnly` 提醒；模型恢复工具操作后
+提醒消失，仍保留原有最多两次纠正的限制。它不进入活动上下文或 checkpoint，不累计过期游标。
+
+工具旁白被屏蔽时，Provider 私有 continuation 可能仍带原始生成文字，因此需要保留“未向用户展示”
+这一事实。完整工具批次结算后记录一次普通 `BackendState` Trace：
+
+```json
+{
+  "type": "assistant_text_visibility",
+  "modelRequestIndex": 3,
+  "status": "not_shown",
+  "reason": "file_transaction_unsettled"
+}
+```
+
+`modelRequestIndex` 是当前 Run 内从 0 开始的模型请求序号。事件不包含被屏蔽的正文、游标或权限，
+不产生用户气泡、第二个 ToolResult 或额外模型请求；可随普通历史压缩。它替代原来长期受保护的
+“继续事务”指令，不把已完成事务重新描述为待完成。文件执行、审批、停止清理及恢复语义保持原样。
+
+### 上下文优化回归（2026-09-06）
+
+本轮新增的覆盖使用临时数据库和本地受控 HTTP Provider，不调用商业模型：
+
+- `cargo test --locked -p mycopilot-core --lib file_transaction`：7 项通过，覆盖精确当前状态、终态省略、未知状态围栏、Run 清理、单次纠正以及普通可见性事实的 Trace/checkpoint 投影。
+- `cargo test -p mycopilot-core storage::file_change_repository::tests::runtime_states -- --nocapture`：3 项通过，覆盖所有状态及顺序、owner/source 保留，以及 SQL authorizer 禁止读取正文/Observation/binding 时仍可查询运行元数据。
+- `cargo test --locked -p mycopilot-core-server --bin core-server file_transaction_context`：3 项真实 Host/Harness 测试通过，覆盖 Direct、begin/append/edit/commit/abort、普通工具历史、同批次执行围栏、纯文字纠正退场和审批暂停后的可见性事实单次恢复。
+
+全仓 `cargo test --locked --workspace`：3,637 项通过、0 失败、14 项按现有登记忽略。最后的容量计量调整后再次执行上述 7 项 Rust Core 与 3 项 Host 定向回归，全部通过。`cargo clippy --locked --workspace --all-targets -- -D warnings`、Rust 格式、变更文档格式、开发/用户文档检查、测试归属检查和 `git diff --check` 均通过。没有执行浏览器测试，本轮未改动前端。
+
+本轮没有改变 canonical schema v41、checkpoint v15 或恢复信封 v12，不要求新的开发数据重置；也没有修改 Renderer 或公共 RPC 契约。
+
 ## 7. 持久化、历史 Diff 与分叉
 
-canonical schema v36 中的 FileChange 数据分为：
+canonical schema v41 中的 FileChange 数据分为：
 
 - `agent_file_changes`、`agent_file_change_chunks`、`agent_file_change_operations`：仅保存 Staged create/update 草稿、mutation receipt 与可见历史；Direct 不在这里伪造草稿。
 - `agent_file_change_run_grants`：Run-scoped runtime authority，不是聊天历史。

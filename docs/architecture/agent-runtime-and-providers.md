@@ -96,7 +96,7 @@ Turn admission 创建的 pending assistant message 正文为空；系统不再�
 → 初始预激活 Skill 完整说明
 → 初始 Run full World State
 → 因果 Run 时间线（含已发生的普通后端状态事件）
-→ Todo / 修复提示 / 文件事务提示
+→ Todo / 单次修复提示 / 未完成文件事务的最小状态（若存在）
 ```
 
 此次只把目录和当前指南移到 Conversation full 前，并把本次输入连同关联 diff、附件移到预激活 Skill 与初始 Run 状态前。作用域、权限判定和持久化规则不变；原消息正文、role、lifetime、retention、Tool 参数、调用与结果绑定、Provider continuation 也不因布局而改变。Run 中新激活的 Skill、审批或提问恢复后的 full World State、状态 diff、同步答案 ToolResult 与异步答案 User 消息保持因果位置；不能按类型提前到初始说明。同步答案虽可显示为用户气泡，模型仍只通过原工具调用的唯一结果接收。

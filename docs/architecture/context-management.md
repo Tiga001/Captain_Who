@@ -94,8 +94,8 @@ pending assistant message 的持久正文为空；“正在思考”等 UI place
    narration / Tool Call + Tool Result / 回应与引导 / 普通后端状态事件
    运行中新激活的 Skill / 恢复后的 Run full snapshot / World State diff
 12 Todo
-13 修复提示
-14 文件事务提示
+13 修复提示（空响应修复 / 文件事务纯文字违规的单次提醒）
+14 未完成文件事务的最小状态（无未完成事务时省略）
 ```
 
 当前布局将初始目录与能力指南放在 Conversation full 之前，并让旧历史紧接本次连续用户输入，再接预激活 Skill 与初始 Run 状态。这两项调整只移动发送位置，增加不变内容形成连续前缀的机会。
@@ -342,6 +342,13 @@ Workspace Clippy（all targets，warnings as errors）、Rustfmt、修改文档�
 压缩使用普通历史规则，不特意保留或重新注入忽略状态；活动 Run 的事件与权威 journal
 重建结果通过 trace origin 去重。分支继承边界内的冻结事实，投影回执与未答权限不继承。
 完整实现与本轮验证见[人机交互](../subsystems/human-interaction.md#忽略操作的普通历史投影2026-09-06)。
+
+## 文件事务上下文精简（2026-09-06）
+
+文件事务的上下文现已按寿命拆分：固定规则在稳定前缀，已完成结果归普通工具历史，尾部只含
+当前未完成事务的状态与精确游标。纯文字违规提醒只进入下一次请求；工具旁白被屏蔽的事实以普通
+`BackendState` 留在其完整工具批次之后，随历史压缩，不长期保护过期操作指令。
+详见 [FileChange 模型上下文](../subsystems/file-change.md#模型上下文的三种寿命)。
 
 ## 变更检查表
 

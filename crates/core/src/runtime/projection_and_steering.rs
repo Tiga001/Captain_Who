@@ -325,6 +325,43 @@ fn apply_human_interaction_ignored_events(
     Ok(())
 }
 
+// Provider-native continuation can still contain text suppressed from the UI. Preserve only
+// that immutable visibility fact beside the closed tool batch, never an expired cursor or an
+// instruction to keep working on an already-settled transaction. Ordinary history/compaction
+// handles this event; it grants no write authority and creates no user-visible message.
+fn record_suppressed_file_transaction_narration(
+    run_id: &str,
+    model_request_index: usize,
+    active_context: &mut ContextFrame,
+    conversation_trace: &Arc<Mutex<ConversationTraceRecorder>>,
+    trace_observer: Option<&AgentConversationTraceObserver>,
+    assistant_message_id: Option<&str>,
+) -> AgentResult<()> {
+    let (sequence, content) = {
+        let mut recorder = conversation_trace.lock().unwrap_or_else(|error| error.into_inner());
+        let sequence = recorder.next_sequence();
+        let content = recorder.record_backend_state(
+            sequence,
+            &format!("file-transaction-hidden:{run_id}:{model_request_index}"),
+            &suppressed_narration_state(model_request_index),
+            crate::storage::now_ms(),
+            crate::ConversationBackendStatePlacement::Timeline,
+        ).map_err(AgentError::new)?;
+        (sequence, content)
+    };
+    if let Some(content) = content {
+        publish_trace_snapshot(conversation_trace, trace_observer)?;
+        active_context.push(ContextItem::new(
+            LlmMessage::backend_state(content),
+            with_trace_origin(
+                ContextMetadata::new(ContextSource::BackendState, ContextScope::Run, ContextRetention::Retained),
+                assistant_message_id, Some(sequence),
+            ),
+        ));
+    }
+    Ok(())
+}
+
 fn with_trace_origin(
     metadata: ContextMetadata,
     assistant_message_id: Option<&str>,
