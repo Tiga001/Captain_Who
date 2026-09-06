@@ -908,6 +908,7 @@ impl ContextFrame {
                     && !sources.contains(&ContextSource::ToolResult)
                     && !sources.contains(&ContextSource::ToolContinuation)
                     && !sources.contains(&ContextSource::UserGuidance)
+                    && !sources.contains(&ContextSource::BackendState)
             })
             .filter(|item| {
                 !item.metadata.origin().is_some_and(|origin| {

@@ -1,5 +1,6 @@
 use super::*;
 use crate::notification_subject::human_root_notification_subject;
+use crate::storage::human_interaction_repository;
 use sha2::{Digest, Sha256};
 
 const STARTUP_CANCELLED_TRACE_REASON: &str =
@@ -183,6 +184,12 @@ impl StorageService {
                 &terminal.model_context_items,
             )
             .map_err(storage_error)?;
+            human_interaction_repository::flush_ignored_for_terminal(
+                &transaction,
+                &candidate.assistant_message_id,
+                completed_at,
+            )
+            .map_err(|error| error.to_string())?;
             chat_repository::reconcile_message_run_terminal_state(
                 &transaction,
                 &candidate.conversation_id,
@@ -225,6 +232,27 @@ impl StorageService {
             reconciled += 1;
         }
 
+        let pending_terminal_assistants = {
+            let mut statement = transaction.prepare(
+                "SELECT DISTINCT p.target_assistant_message_id FROM human_interaction_ignored_projections p
+                 JOIN conversation_turn_traces t ON t.assistant_message_id=p.target_assistant_message_id
+                 WHERE p.status='pending' AND t.terminal_status!='in_progress'",
+            ).map_err(storage_error)?;
+            let rows = statement
+                .query_map([], |row| row.get::<_, String>(0))
+                .map_err(storage_error)?
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(storage_error)?;
+            rows
+        };
+        for assistant in pending_terminal_assistants {
+            human_interaction_repository::flush_ignored_for_terminal(
+                &transaction,
+                &assistant,
+                reconciled_at,
+            )
+            .map_err(|error| error.to_string())?;
+        }
         transaction.commit().map_err(storage_error)?;
         Ok(reconciled)
     }

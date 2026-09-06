@@ -110,6 +110,10 @@ impl ContextAssembler {
                 }
             }
             let role = role_from_str(&message.role)?;
+            let terminal_already_covered = message.conversation_completion_covered;
+            if terminal_already_covered && !has_compaction_summary {
+                return Err(AgentError::new("已覆盖的助手终态必须有上下文摘要边界。"));
+            }
             let is_current_turn = current_turn_index == Some(index);
             let trace = message
                 .conversation_turn_trace
@@ -163,7 +167,10 @@ impl ContextAssembler {
                 items.push(ContextItem::new(llm_message, metadata));
             }
             if let Some(trace) = trace {
-                items.extend(trace.terminal_item);
+                if !terminal_already_covered {
+                    items.extend(trace.terminal_item);
+                }
+                items.extend(trace.postlude_items);
             }
         }
 
@@ -710,6 +717,25 @@ fn normalize_messages(messages: Vec<AgentChatMessage>) -> AgentResult<Vec<AgentC
         let content = message.content.trim();
         let trace = message.conversation_turn_trace;
         let model_context_items = message.conversation_model_context_items;
+        if message.conversation_completion_covered
+            && (role != "assistant"
+                || !content.is_empty()
+                || trace.as_ref().is_none_or(|trace| {
+                    trace.items.iter().any(|item| {
+                        !matches!(
+                            item,
+                            crate::ConversationTurnTraceItem::BackendState {
+                                placement: crate::ConversationBackendStatePlacement::AfterMessage,
+                                ..
+                            }
+                        )
+                    })
+                }))
+        {
+            return Err(AgentError::new(
+                "已覆盖终态只能保留助手消息之后的后端状态。",
+            ));
+        }
         if role == "assistant" && trace.is_none() {
             return Err(AgentError::new(
                 "Assistant 历史消息缺少当前 ConversationTurnTrace。",
@@ -737,6 +763,7 @@ fn normalize_messages(messages: Vec<AgentChatMessage>) -> AgentResult<Vec<AgentC
                 created_at: message.created_at,
                 conversation_turn_trace: trace,
                 conversation_model_context_items: model_context_items,
+                conversation_completion_covered: message.conversation_completion_covered,
             }),
             _ => return Err(AgentError::new(format!("不支持的消息角色：{role}"))),
         }
@@ -798,6 +825,7 @@ mod tests {
 
     fn message(role: &str, content: &str) -> AgentChatMessage {
         AgentChatMessage {
+            conversation_completion_covered: false,
             message_id: None,
             role: role.to_string(),
             content: content.to_string(),
@@ -809,6 +837,7 @@ mod tests {
 
     fn identified_message(id: &str, role: &str, content: &str) -> AgentChatMessage {
         AgentChatMessage {
+            conversation_completion_covered: false,
             message_id: Some(id.to_string()),
             role: role.to_string(),
             content: content.to_string(),
@@ -820,6 +849,7 @@ mod tests {
 
     fn current_assistant_message(id: &str, content: &str) -> AgentChatMessage {
         AgentChatMessage {
+            conversation_completion_covered: false,
             message_id: Some(id.to_string()),
             role: "assistant".to_string(),
             content: content.to_string(),
@@ -991,6 +1021,7 @@ mod tests {
             .validate_complete_model_context(&snapshot.model_context_items)
             .unwrap();
         AgentChatMessage {
+            conversation_completion_covered: false,
             message_id: Some("assistant-previous".to_string()),
             role: "assistant".to_string(),
             content: content.to_string(),
@@ -1874,6 +1905,7 @@ mod tests {
             None,
         );
         let historical_assistant = AgentChatMessage {
+            conversation_completion_covered: false,
             message_id: Some("assistant-command".to_string()),
             role: "assistant".to_string(),
             content: "The server is running in a managed Session.".to_string(),
@@ -1931,5 +1963,65 @@ mod tests {
         .unwrap();
 
         assert_eq!(frame.to_messages().len(), 2);
+    }
+
+    #[test]
+    fn backend_state_after_a_covered_message_does_not_replay_its_terminal_record() {
+        let content =
+            json!({"type":"human_interaction_status","requestId":"request-1","status":"ignored"})
+                .to_string();
+        let mut recorder = ConversationTraceRecorder::default();
+        recorder
+            .record_backend_state(
+                0,
+                "ignored:request-1",
+                &content,
+                20,
+                crate::ConversationBackendStatePlacement::AfterMessage,
+            )
+            .unwrap();
+        let snapshot = recorder.snapshot();
+        let mut trace =
+            snapshot.in_progress_audit_trace("run-1", "conversation-1", "assistant-old");
+        trace.terminal_status = ConversationTurnTraceTerminalStatus::Completed;
+        for summary in [None, Some(compaction_summary())] {
+            let covered = summary.is_some();
+            let frame = ContextAssembler::assemble(ContextAssemblyInput {
+                system_prompt: "rules".to_string(),
+                compaction_summary: summary,
+                world_state_records: Vec::new(),
+                initial_run_world_state: None,
+                messages: vec![AgentChatMessage {
+                    message_id: Some("assistant-old".to_string()),
+                    role: "assistant".to_string(),
+                    content: String::new(),
+                    created_at: Some(10),
+                    conversation_turn_trace: Some(trace.clone()),
+                    conversation_model_context_items: snapshot.model_context_items.clone(),
+                    conversation_completion_covered: covered,
+                }],
+                skill_discovery: None,
+                skill_activation: None,
+                attachments: ContextAttachments::default(),
+            })
+            .unwrap();
+            let messages = frame.to_messages();
+            assert_eq!(
+                messages
+                    .iter()
+                    .filter(|message| message.content() == content)
+                    .count(),
+                1
+            );
+            assert_eq!(
+                messages
+                    .iter()
+                    .filter(|message| message
+                        .content()
+                        .contains("historical_agent_activity_terminal"))
+                    .count(),
+                usize::from(!covered)
+            );
+        }
     }
 }

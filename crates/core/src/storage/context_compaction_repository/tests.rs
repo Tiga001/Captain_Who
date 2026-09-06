@@ -75,6 +75,47 @@ fn setup() -> Connection {
     connection
 }
 
+#[test]
+fn backend_postlude_is_after_completion_and_does_not_change_the_covered_message_prefix() {
+    let connection = setup();
+    let mut trace = ConversationTurnTrace {
+        schema_version: CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
+        run_id: "run-1".into(),
+        conversation_id: "conversation-1".into(),
+        assistant_message_id: "assistant-1".into(),
+        terminal_status: ConversationTurnTraceTerminalStatus::Completed,
+        terminal_error: None,
+        truncated: false,
+        items: Vec::new(),
+    };
+    conversation_trace_repository::commit_trace_in_connection(&connection, &trace, 1, 2).unwrap();
+    let cursor = ContextJournalCursor::message("assistant-1");
+    let before = prepare_prefix(&connection, "conversation-1", &cursor).unwrap();
+    trace.items.push(ConversationTurnTraceItem::BackendState {
+        sequence: 0,
+        event_id: "ignored:event-1".into(),
+        content:
+            r#"{"type":"human_interaction_status","requestId":"request-1","status":"ignored"}"#
+                .into(),
+        created_at: 12,
+        placement: crate::ConversationBackendStatePlacement::AfterMessage,
+    });
+    conversation_trace_repository::commit_trace_in_connection(&connection, &trace, 1, 12).unwrap();
+    let after = prepare_prefix(&connection, "conversation-1", &cursor).unwrap();
+    assert_eq!(before.source_revision, after.source_revision);
+    let with_event = prepare_prefix(
+        &connection,
+        "conversation-1",
+        &ContextJournalCursor::trace_item("assistant-1", 0),
+    )
+    .unwrap();
+    assert_eq!(with_event.source_items.len(), before.source_items.len() + 1);
+    assert!(
+        matches!(with_event.source_items.last(),Some(ContextCompactionSourceItem::TraceItem { item,created_at:12,.. })
+        if matches!(item.as_ref(),ConversationTurnTraceItem::BackendState {..}))
+    );
+}
+
 fn draft(prefix: &ContextCompactionPrefix, id: &str) -> ContextCompactionSummaryDraft {
     ContextCompactionSummaryDraft {
         id: id.to_string(),

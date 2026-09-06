@@ -24,10 +24,10 @@ impl mycopilot_core::AgentHumanInteractionRuntimeHost for StoredBlockingHumanInp
     ) -> AgentResult<mycopilot_core::AgentAsyncUserInputAccepted> {
         self.accept_async_question(request)
     }
-    fn natural_sampling_state(
+    fn bind_ignored_events(
         &self,
         request: mycopilot_core::AgentSamplingBoundaryRequest,
-    ) -> AgentResult<mycopilot_core::AgentHumanInteractionSamplingState> {
+    ) -> AgentResult<Vec<mycopilot_core::AgentHumanInteractionIgnoredEvent>> {
         self.ignored_questions_at_sampling(request)
     }
 

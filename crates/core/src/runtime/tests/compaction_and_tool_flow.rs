@@ -101,6 +101,7 @@ async fn durable_compaction_runs_before_capacity_gate_and_then_sends_rebuilt_con
     });
 
     let old_user = AgentChatMessage {
+        conversation_completion_covered: false,
         message_id: Some("user-old".to_string()),
         role: "user".to_string(),
         content: format!("OLD_USER_MARKER {}", "x".repeat(60_000)),
@@ -122,6 +123,7 @@ async fn durable_compaction_runs_before_capacity_gate_and_then_sends_rebuilt_con
     old_assistant_trace.assistant_message_id = "assistant-old".to_string();
     let old_assistant = traced_assistant_message(&old_assistant_content, old_assistant_trace);
     let current_user = AgentChatMessage {
+        conversation_completion_covered: false,
         message_id: Some("user-current".to_string()),
         role: "user".to_string(),
         content: "continue".to_string(),
@@ -583,6 +585,7 @@ async fn recursive_compaction_starts_when_the_assembled_system_summary_is_alread
         created_at: 1,
     };
     let grown_user = AgentChatMessage {
+        conversation_completion_covered: false,
         message_id: Some("user-grown".to_string()),
         role: "user".to_string(),
         content: format!("GROWN_USER_MARKER {}", "x".repeat(60_000)),
@@ -604,6 +607,7 @@ async fn recursive_compaction_starts_when_the_assembled_system_summary_is_alread
     grown_assistant_trace.assistant_message_id = "assistant-grown".to_string();
     let grown_assistant = traced_assistant_message(&grown_assistant_content, grown_assistant_trace);
     let current_user = AgentChatMessage {
+        conversation_completion_covered: false,
         message_id: Some("user-current".to_string()),
         role: "user".to_string(),
         content: "continue after the first compaction".to_string(),
@@ -937,6 +941,7 @@ async fn context_capacity_guard_rejects_the_initial_request_before_network_io() 
         skill_activation: None,
         skill_discovery: None,
         messages: vec![AgentChatMessage {
+            conversation_completion_covered: false,
             message_id: None,
             role: "user".to_string(),
             content: "x".repeat(90_000),

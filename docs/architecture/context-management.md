@@ -91,12 +91,11 @@ pending assistant message 的持久正文为空；“正在思考”等 UI place
 09 Run 开始时预激活的 Skill 完整说明
 10 初始 Run World State full snapshot
 11 当前 Run 的因果时间线
-   narration / Tool Call + Tool Result / 回应与引导
+   narration / Tool Call + Tool Result / 回应与引导 / 普通后端状态事件
    运行中新激活的 Skill / 恢复后的 Run full snapshot / World State diff
 12 Todo
-13 ignored 交互状态
-14 修复提示
-15 文件事务提示
+13 修复提示
+14 文件事务提示
 ```
 
 当前布局将初始目录与能力指南放在 Conversation full 之前，并让旧历史紧接本次连续用户输入，再接预激活 Skill 与初始 Run 状态。这两项调整只移动发送位置，增加不变内容形成连续前缀的机会。
@@ -304,7 +303,7 @@ capacity exceeded
 - `pnpm test:storage-reset-dev`：10 项通过。修改脚本的 ESLint、修改文档及脚本的 Prettier、文档检查、公开文档检查、测试归属检查和 `git diff --check`：通过。
 - 本轮没有修改 Renderer、Preload 或公共 TypeScript 问答契约，没有执行浏览器回归或真实付费模型请求；跨层请求使用可控本地 Provider。没有进行厂商缓存命中率实测。
 
-当前 canonical schema 为 **v40**，私有 Run checkpoint 为 **v15**，持久恢复输入为 **v12**。旧开发聊天不迁移；受管 reset 支持从 exact v39 保留配置和凭据引用后创建 v40，详见 [恢复手册](../operations/recovery-runbook.md)。所有数据库验证使用临时库，本轮没有重置用户实际数据。
+当前 canonical schema 为 **v41**，Trace 为 **v5**，私有 Run checkpoint 为 **v15**，持久恢复输入为 **v12**。旧开发聊天不迁移；受管 reset 支持从 exact v40 及已支持旧版本保留配置和凭据引用后创建 v41，详见 [恢复手册](../operations/recovery-runbook.md)。所有数据库验证使用临时库，没有重置用户实际数据。
 
 ### 2026-09-06 请求前缀布局优化验收
 
@@ -328,6 +327,21 @@ capacity exceeded
 复验中更新了两条与旧布局相关的测试假设：输入归类变化仍使计量缓存失效，但新顺序下消息位置可能相同；Host 历史顺序断言精确匹配消息正文，避免把前置协作目录中引用的任务标题当成用户消息。工具配对、图片字节、因果顺序及状态历史的断言继续保留。
 
 Workspace Clippy（all targets，warnings as errors）、Rustfmt、修改文档的 Prettier、文档/公开文档/测试归属检查和 `git diff --check` 通过。本轮未改公共 TypeScript 协议或前端，未执行浏览器和真实厂商缓存测试；schema/checkpoint/恢复输入版本保持 v40/v15/v12，没有新增存储重置要求。
+
+## 普通后端历史事件（2026-09-06）
+
+忽略非阻塞交互不再占用请求尾部的独立层。每次结算产生一个普通 `BackendState` Trace，
+模型正文为 `{type: human_interaction_status, requestId, status: ignored}`，经过现有
+`backend_observed_state` 包装进入因果历史。它没有审批、用户回应或推理唤醒语义。
+
+运行中的事件在下一次完整工具交换后的自然采样边界进入；空闲后的事件以通用
+`after_message` 位置排在最终回复之后。journal 的该位置也位于 Message cursor 之后，
+因此后来发生的忽略不会更改已经压缩的消息前缀。历史裁剪使用 Host 的
+`conversationCompletionCovered` 标记说明最终回复已经被摘要覆盖，防止后置事件保留时重复终态。
+
+压缩使用普通历史规则，不特意保留或重新注入忽略状态；活动 Run 的事件与权威 journal
+重建结果通过 trace origin 去重。分支继承边界内的冻结事实，投影回执与未答权限不继承。
+完整实现与本轮验证见[人机交互](../subsystems/human-interaction.md#忽略操作的普通历史投影2026-09-06)。
 
 ## 变更检查表
 

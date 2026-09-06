@@ -222,13 +222,33 @@ fn build_single_conversation_fork_plan_at_point(
         .collect::<HashMap<_, _>>();
 
     let mut traces = Vec::new();
+    let backend_event_cutoff = match history_cutoff_at {
+        Some(cutoff) => cutoff,
+        None => authoritative_fork_cutoff_at(connection, &source.id, fork_point)?,
+    };
     let mut run_id_map = HashMap::new();
     let mut tool_call_id_map = HashMap::new();
     for message in &source_messages {
         let trace = conversation_trace_repository::get_trace_for_message(connection, &message.id)
             .map_err(database_error)?;
         ensure_settled_assistant(message, trace.as_ref())?;
-        if let Some(trace) = trace {
+        if let Some(mut trace) = trace {
+            trace.items.retain(|item| match item {
+                crate::ConversationTurnTraceItem::BackendState {
+                    placement,
+                    created_at,
+                    ..
+                } => {
+                    // Member AssistantReply is a synthetic selector inside the root's snapshot;
+                    // its postlude remains visible up to the root's authoritative time boundary.
+                    *created_at <= backend_event_cutoff
+                        && !(message.id == resolved.assistant_message_id
+                            && !allow_member_source
+                            && matches!(fork_point, ConversationForkPoint::AssistantReply { .. })
+                            && *placement == crate::ConversationBackendStatePlacement::AfterMessage)
+                }
+                _ => true,
+            });
             if agent_run_id(message.agent_run_json.as_deref())
                 .as_deref()
                 .is_some_and(|run_id| run_id != trace.run_id)
@@ -268,11 +288,14 @@ fn build_single_conversation_fork_plan_at_point(
                 }
             }
             let (trace_created_at, committed_at) = trace_times(connection, &message.id)?;
-            let model_context_items =
+            let mut model_context_items =
                 conversation_model_context_repository::get_log_for_message(connection, &message.id)
                     .map_err(database_error)?
                     .map(|log| log.items)
                     .unwrap_or_default();
+            model_context_items.retain(|item| {
+                trace.items.iter().any(|event| event.sequence() == item.sequence)
+            });
             traces.push(ForkTrace {
                 trace: ConversationTurnTrace {
                     schema_version: trace.schema_version,

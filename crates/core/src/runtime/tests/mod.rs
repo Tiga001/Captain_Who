@@ -20,6 +20,7 @@ use std::collections::BTreeSet;
 
 fn message(role: &str, content: &str) -> AgentChatMessage {
     AgentChatMessage {
+        conversation_completion_covered: false,
         message_id: None,
         role: role.to_string(),
         content: content.to_string(),
@@ -272,7 +273,8 @@ fn traced_assistant_message(content: &str, trace: ConversationTurnTrace) -> Agen
                         is_error: false,
                     }
                 }
-                ConversationTurnTraceItem::AgentMailboxDelivery { content, .. } => {
+                ConversationTurnTraceItem::AgentMailboxDelivery { content, .. }
+                | ConversationTurnTraceItem::BackendState { content, .. } => {
                     crate::ConversationModelContextItem {
                         sequence,
                         ordinal: 0,
@@ -332,6 +334,7 @@ fn traced_assistant_message(content: &str, trace: ConversationTurnTrace) -> Agen
         })
         .collect();
     AgentChatMessage {
+        conversation_completion_covered: false,
         message_id: Some(trace.assistant_message_id.clone()),
         role: "assistant".to_string(),
         content: content.to_string(),

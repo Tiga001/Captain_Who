@@ -1,4 +1,4 @@
-use mycopilot_core::human_interaction::{HumanInteractionMode, HumanInteractionRequestStatus};
+use mycopilot_core::human_interaction::HumanInteractionMode;
 use mycopilot_core::storage::human_interaction_repository::{
     async_human_interaction_answer_content, HumanInteractionAsyncPending,
     HumanInteractionAsyncTurnAdmission,
@@ -83,32 +83,25 @@ impl StoredBlockingHumanInput {
     fn ignored_questions_at_sampling(
         &self,
         request: mycopilot_core::AgentSamplingBoundaryRequest,
-    ) -> AgentResult<mycopilot_core::AgentHumanInteractionSamplingState> {
-        if self
-            .input
-            .context
-            .as_ref()
-            .and_then(|c| c.conversation_id.as_deref())
-            != Some(request.conversation_id.as_str())
+    ) -> AgentResult<Vec<mycopilot_core::AgentHumanInteractionIgnoredEvent>> {
+        if self.input.context.as_ref().is_none_or(|context| {
+            context.collaboration_identity.is_some()
+                || context.conversation_id.as_deref() != Some(request.conversation_id.as_str())
+        })
             || self.input.assistant_message_id.as_deref()
                 != Some(request.assistant_message_id.as_str())
+            || self.input.prompt_preferences.as_ref().is_some_and(|preferences| preferences.automation_execution_context.is_some())
         {
             return Err(AgentError::new("invalid human interaction sampling owner"));
         }
-        let requests = self
-            .service
-            .human_requests_for_conversation(&request.conversation_id)
-            .map_err(AgentError::new)?;
-        Ok(mycopilot_core::AgentHumanInteractionSamplingState {
-            ignored_request_ids: requests
-                .into_iter()
-                .filter(|r| {
-                    r.mode == HumanInteractionMode::Async
-                        && r.status == HumanInteractionRequestStatus::Ignored
-                })
-                .map(|r| r.request_id)
-                .collect(),
-        })
+        let cancellations = self.service.cancellations.lock().unwrap_or_else(|error| error.into_inner());
+        if self.token.is_cancelled()
+            || !cancellations.get(&request.run_id).is_some_and(|token| token.shares_state_with(&self.token))
+        {
+            return Err(AgentError::new("human interaction execution segment was retired"));
+        }
+        self.service.storage.bind_human_interaction_ignored_at_sampling(&request)
+            .map_err(|error| AgentError::new(error.to_string()))
     }
 }
 

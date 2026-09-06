@@ -32,7 +32,7 @@ last_verified: 2026-09-06
 - 同步、异步共享用户气泡展示，但模型投影不同：同步只通过原 ToolResult 进入模型，
   禁止把展示气泡再次拼成普通 User 消息；异步通过 guidance 或新 HumanRoot Turn 进入。
 - 非阻塞独有“忽略全部”，只忽略当前批次，不发送草稿、User、guidance 或 Wake，
-  不激活模型，不影响其他批次。只能在下一次自然发生的采样中附带已忽略状态。
+  不激活模型，不影响其他批次。忽略产生一条普通后端历史事件，下一次自然请求获知；不在每次请求尾部重复列举。
 - 每题都选“不回答”后点提交仍是正式回应，不能转换为忽略。
 - 原运行自然完成后，异步问题继续有效；整批提交在同一聊天激活后续运行。
 - 中文输入法确认、文本框 Enter、Escape 不能意外提交、跳过、忽略或停止运行。
@@ -72,7 +72,7 @@ last_verified: 2026-09-06
 - 英文模型工具描述及字段说明位于 [`tools/human_interaction.rs`](../../crates/core/src/tools/human_interaction.rs)。
 - 中文专项提示位于 [`runtime/extensions/human_interaction.rs`](../../crates/core/src/runtime/extensions/human_interaction.rs)，共享交互组织和回应解释规则，仅路由段依据同步/异步 readiness 组合命名可用工具；依旧按当次能力快照注入 RequestOnly System 上下文，关闭时撤下，压缩采样不注入。
 - 稳定系统提示 [`prompts.rs`](../../crates/core/src/prompts.rs) 的交互原则允许实际协助及用户明确要求交互，不硬编码动态工具名称。权限规则继续要求正式审批/有效设置，不允许通过用户代做绕过受限操作。
-- 下一次自然采样的忽略说明在 [`runtime/preparation.rs`](../../crates/core/src/runtime/preparation.rs) 中统一为“异步交互状态”，明确没有提交回应，也不能把忽略解释为请求事项已发生。它不会额外调用模型。
+- 忽略结算以普通 `BackendState` 历史事件通知模型，仅包含 `type: human_interaction_status`、`requestId`、`status: ignored`；不再附加专项长文或完整已忽略批次列表。它不会额外调用模型。
 
 回应解释以原事项和用户实际表达为依据；只作回应能够支持的判断，不将偏好扩大为授权、意向视为行动结果、用户陈述视为自身执行证据。后续依赖可核验外部状态时，在现有授权能力内进行必要核验；不能核验时说明事实来源及不确定性。
 
@@ -88,6 +88,54 @@ last_verified: 2026-09-06
 - `cargo test --locked -p mycopilot-core --lib human_interaction`：78 项通过。新增真实 `EffectiveToolSet` 与 `WorldStateDiff` 联合测试，验证同请求冻结、关闭后两工具与专项说明撤下、模型获得 `disabled_by_user` replacement，以及同值设置 revision 更新只留 Host、不产生模型 diff。原有根/所有子级/Automation、暂停恢复、存储结算和投递回归通过。
 - Core Server 定向用例 `disabled_host_setting_still_delivers_previously_admitted_sync_and_async_answers` 与 `live_host_setting_close_rejects_in_flight_model_questions_then_reopens_next_snapshot` 各 1 项通过，覆盖真实 Host/Harness、本地可控 Provider、关闭后的同步原调用恢复与异步回答投递，以及迟到新调用拒绝、下一快照重新开启。
 - 人机扩展 Rust 格式、本文 Prettier 和定向 diff whitespace 检查通过。未改数据库 schema、未重置实际数据，未使用商业模型。
+
+## 忽略操作的普通历史投影（2026-09-06）
+
+每次“忽略全部”仍只结算指定异步批次，事务保存不可变 ignored response 和最小投影回执。
+事件使用 response 派生的稳定 eventId 防重，模型正文只有：
+
+```json
+{ "type": "human_interaction_status", "requestId": "request-123", "status": "ignored" }
+```
+
+Provider 通过既有 `<backend_observed_state>` 包装在时序消息中承载该事实；接口的 user role
+不表示业务用户输入，不创建用户气泡、guidance、第二个 ToolResult、Wake 或新 Run。
+工具已关闭时，既有批次的忽略事件仍正常记录。当前 Todo、空响应修复和文件事务提示保持原行为。
+
+- 运行中：冻结当前 assistant/run 归属，下一次完整工具批次后的自然采样边界，将 Trace、
+  ModelContext 和投影回执同事务提交，再纳入活动上下文；不使用 steering 队列。
+- 没有下一次采样：终态发布或启动对账以 `after_message` 补齐历史，不延长或重启 Run。
+  未观察到忽略操作的最后一次模型回复仍在事件之前；已经采样绑定的事件保持原来的 timeline 位置。
+- 空闲时：事件追加在忽略时最新 assistant 的最终回复之后，不绑定原提问的旧 Run。
+  通用 `after_message` 位置让它留在之后的普通用户输入前，且不改写已经压缩的回复前缀。
+- 多批忽略按 response 接纳 sequence 记录，与问题列表的倒序展示无关。
+- 历史每个事件只有一份；之后随普通历史参与压缩，没有忽略状态的特殊摘要或长期保留规则。
+  分支只复制边界内已物化的事实，不复制未答权限、待物化任务或投递回执。
+- 删除投影目标不会把已消费事实重新变成 pending。重启和重复 submission 重用原结算及事件身份。
+
+底层采用普通 `BackendState` Trace（Trace v5）及 `human_interaction_ignored_projections`
+最小回执表（canonical schema v41），没有新增可恢复问题卡或模型可执行权限。
+开发期旧库需走受管 reset；不自动迁移、不在本次开发中重置实际用户数据库。
+
+本次实际验证：
+
+- `cargo test --locked --workspace --quiet`：**3,627 passed / 0 failed / 14 ignored**。
+  14 项为既有独立/组件/压力专项，未在本轮运行，不能计为通过。
+- 最后补齐“末次请求未观察到忽略时，回复在前、事件在后”的顺序后，重新执行真实
+  Core Server `human_input_async` 25 项、Rust Core `ignored` 8 项、分支仓库 30 项，全部通过。
+  使用临时数据库与可控 Provider，覆盖自然采样、多批顺序、关闭工具后的旧批次、无额外
+  User/guidance/Wake、重启、commit-unknown 重试、终态发布、普通压缩去重和分支边界。
+- canonical 新库、严格收据约束与 reset 测试包含在 workspace 中；另执行受管 reset 的
+  Node 脚本测试 10 项通过。没有运行实际开发库 reset，没有修改真实模型配置或 API 凭据。
+- `pnpm exec vitest run --project unit packages/protocol/src`：27 文件、368 项通过；
+  `pnpm typecheck` 的 Node/Web 两部分通过。
+- Workspace Clippy（all targets，warnings as errors）、Rustfmt、修改文档的 Prettier、
+  开发/公开文档、测试归属与 diff whitespace 检查通过。
+
+回归中修复了无人值守 report-sink 入口的历史绑定隔离，并补齐绑定已提交但 Host 回执丢失时的
+终态收口；同时校正既有 Anthropic 测试仍按旧顺序检查 Skill 的断言，实际组装继续遵循此前批准的
+“本次用户输入及附件 → 预激活 Skill”顺序。本轮未改问答面板、未执行浏览器或商业 Provider
+测试，也未进行厂商缓存命中率实测。
 
 ## 数据与状态
 
@@ -152,9 +200,9 @@ Fork 只复制边界内历史，不复制活跃提问权限和投递任务；异
 不新增旧数据迁移 SQL，不提供旧 checkpoint/resume envelope 兼容。新版本自身的持久化、
 重启恢复与防重仍必须实现。测试使用临时数据库，不清空真实开发数据或凭据。
 
-Canonical SQLite 当前版本为 v40。正常打开旧库只返回 reset-required，不改写旧库。
-受管 reset 可从受支持的 exact 旧指纹读取配置白名单后新建 v40，丢弃聊天/运行历史，保留模型配置和凭据
-引用；受支持的 exact v36/v37/v38/v39 与 current v40 reset 还保留人机交互设置及 revision。无法安全识别且含配置的旧库拒绝
+Canonical SQLite 当前版本为 v41。正常打开旧库只返回 reset-required，不改写旧库。
+受管 reset 可从受支持的 exact 旧指纹读取配置白名单后新建 v41，丢弃聊天/运行历史，保留模型配置和凭据
+引用；受支持的 exact v36/v37/v38/v39/v40 与 current v41 reset 还保留人机交互设置及 revision。无法安全识别且含配置的旧库拒绝
 重置，不能默默用默认值替换配置。既有 exact v33 私有备份配置恢复仍受 fingerprint 限制。
 
 ## 代码接续入口
@@ -336,9 +384,10 @@ Host 校验当前执行 segment、根节点、Run/assistant/toolCall 和实时�
 设置快照，工具 Schema、RequestOnly 提示词及能力状态保持一致，稳定前缀不变。
 专项说明要求同步用于必须等待用户参与的工作，异步只能继续不依赖回应的工作，不重复请求。
 请求内容可包含信息、偏好、决策、反馈或人工操作；选项不使用固定状态模板，回应解释与验证保持事实边界，交互不能替代权限审批。
-`natural_sampling_state` 只在本来就要发生的合法模型采样边界读取已忽略 requestId；它不创建持久
-User/guidance、队列消息或 Wake，不要求 Provider 为忽略状态再推理一次。各 Provider 沿用现有
-RuntimeGuard 的线协议角色转换；内部状态仍是 RequestOnly 运行信息，不是正式用户回答。
+忽略状态现已改为[普通历史投影](#忽略操作的普通历史投影2026-09-06)：
+`bind_ignored_events` 在本来就要发生的合法模型采样边界接纳待记录事件，终态和启动对账补齐
+没有后续采样的情况。它不创建业务 User/guidance、队列消息或 Wake，不要求 Provider 为忽略
+再推理一次。各 Provider 使用既有 BackendState 角色转换，不再重复附加 RequestOnly 列表。
 
 ### Host 仲裁与持久化路径
 
@@ -609,4 +658,4 @@ Canonical schema 升为 **v39**，fingerprint 为 `sha256:993ab20442c1e258798e8d
 
 ### 2026-09-06：能力状态跨 Run 延续
 
-`human.interaction` 与 `web.search`、浏览器用户开关进入 Conversation World State；实际本任务浏览器激活、Skill 和附件状态仍为 Run。根身份与执行就绪度仍由 Host 判断，关闭开关或恢复旧历史不会授予子 Agent 提问权限。模型请求边界从同一能力快照生成工具、指南和状态，保存精确请求锚点及观察状态。同步暂停的 checkpoint v15 带 canonical Conversation 日志，恢复信封为 v12；原回答的唯一 ToolResult 与异步用户投递语义不变。当前 canonical schema 为 v40，受管开发 reset 新增 exact v39 配置提取，保留凭据引用与人机交互 revision；无需旧聊天迁移。
+`human.interaction` 与 `web.search`、浏览器用户开关进入 Conversation World State；实际本任务浏览器激活、Skill 和附件状态仍为 Run。根身份与执行就绪度仍由 Host 判断，关闭开关或恢复旧历史不会授予子 Agent 提问权限。模型请求边界从同一能力快照生成工具、指南和状态，保存精确请求锚点及观察状态。同步暂停的 checkpoint v15 带 canonical Conversation 日志，恢复信封为 v12；原回答的唯一 ToolResult 与异步用户投递语义不变。该轮完成时 canonical schema 为 v40，受管开发 reset 新增 exact v39 配置提取，保留凭据引用与人机交互 revision；无需旧聊天迁移。

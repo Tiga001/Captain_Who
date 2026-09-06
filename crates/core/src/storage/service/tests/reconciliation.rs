@@ -47,6 +47,9 @@ fn current_model_context_for_trace(
             }),
             ConversationTurnTraceItem::AgentMailboxDelivery {
                 sequence, content, ..
+            }
+            | ConversationTurnTraceItem::BackendState {
+                sequence, content, ..
             } => Some(crate::ConversationModelContextItem {
                 sequence: *sequence,
                 ordinal: 0,

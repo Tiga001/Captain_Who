@@ -1,4 +1,30 @@
-pub const CONVERSATION_TURN_TRACE_SCHEMA_VERSION: u32 = 4;
+pub const CONVERSATION_TURN_TRACE_SCHEMA_VERSION: u32 = 5;
+
+/// Temporal placement of a Host-authored state observation relative to the final message.
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ConversationBackendStatePlacement {
+    Timeline,
+    AfterMessage,
+}
+
+pub const MAX_BACKEND_STATE_CONTENT_BYTES: usize = 16 * 1024;
+
+fn validate_backend_state(event_id: &str, content: &str, created_at: i64) -> Result<(), String> {
+    if event_id.trim().is_empty() || event_id.len() > 512 || created_at < 0
+        || content.len() > MAX_BACKEND_STATE_CONTENT_BYTES {
+        return Err("Backend state identity or payload size is invalid".to_string());
+    }
+    ensure_no_binary_text("Backend state event identity", event_id)?;
+    ensure_no_binary_text("Backend state content", content)?;
+    let value: Value = serde_json::from_str(content)
+        .map_err(|_| "Backend state content must be a JSON object".to_string())?;
+    if !value.is_object() {
+        return Err("Backend state content must be a JSON object".to_string());
+    }
+    ensure_no_binary_value("Backend state payload", &value)?;
+    Ok(())
+}
 
 #[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -301,6 +327,10 @@ fn validate_model_item_against_trace(
                 && item.tool_calls.is_empty()
                 && !item.content.trim().is_empty()
         }
+        ConversationTurnTraceItem::BackendState { content, .. } => {
+            item.ordinal == 0 && item.role == "user" && item.tool_call_id.is_none() && item.tool_calls.is_empty()
+                && !item.is_error && item.content == *content
+        }
         ConversationTurnTraceItem::ToolCall { call_id, tool, .. } => {
             item.role == "assistant"
                 && item.tool_call_id.is_none()
@@ -342,6 +372,14 @@ impl ConversationTraceToolResultStatus {
     deny_unknown_fields
 )]
 pub enum ConversationTurnTraceItem {
+    /// Host-generated observation, never a human answer or a permission grant.
+    BackendState {
+        sequence: u64,
+        event_id: String,
+        content: String,
+        created_at: i64,
+        placement: ConversationBackendStatePlacement,
+    },
     AssistantNarration {
         sequence: u64,
         content: String,
@@ -483,6 +521,7 @@ impl ConversationTurnTraceItem {
     pub fn sequence(&self) -> u64 {
         match self {
             Self::AssistantNarration { sequence, .. }
+            | Self::BackendState { sequence, .. }
             | Self::UserGuidance { sequence, .. }
             | Self::AgentMailboxDelivery { sequence, .. }
             | Self::ToolCall { sequence, .. }
@@ -496,6 +535,7 @@ impl ConversationTurnTraceItem {
     pub fn kind(&self) -> &'static str {
         match self {
             Self::AssistantNarration { .. } => "assistant_narration",
+            Self::BackendState { .. } => "backend_state",
             Self::UserGuidance { .. } => "user_guidance",
             Self::AgentMailboxDelivery { .. } => "agent_mailbox_delivery",
             Self::ToolCall { .. } => "tool_call",

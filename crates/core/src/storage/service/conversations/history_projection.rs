@@ -457,7 +457,8 @@ fn project_guidance_timeline(
                     }));
                 }
                 ConversationTurnTraceItem::AgentMailboxDelivery { .. }
-                | ConversationTurnTraceItem::CommandSessionLifecycle { .. } => {}
+                | ConversationTurnTraceItem::CommandSessionLifecycle { .. }
+                | ConversationTurnTraceItem::BackendState { .. } => {}
             }
         }
         if let Some(terminal_error) = trace

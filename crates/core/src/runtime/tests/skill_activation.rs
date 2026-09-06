@@ -1326,7 +1326,7 @@ async fn anthropic_payload_keeps_current_user_skill_and_attachment_compatible() 
     let current = serialized.find("CURRENT_USER_MARKER").unwrap();
     let skill = serialized.find("ANTHROPIC_SKILL_MARKER").unwrap();
     let attachment = serialized.find("ATTACHMENT_MARKER").unwrap();
-    assert!(skill < current && current < attachment);
+    assert!(current < attachment && attachment < skill);
 }
 
 #[test]

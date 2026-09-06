@@ -469,13 +469,14 @@ pub trait AgentHumanInteractionRuntimeHost: Send + Sync {
         ))
     }
 
-    /// Read-only snapshot at an already planned request. Never claim answers, create guidance,
-    /// signal a Wake, or schedule inference here.
-    fn natural_sampling_state(
+    /// Atomically bind pending ignored-question facts to this already planned model boundary.
+    /// Persist the trace/model projection before returning. Never claim answers, create guidance,
+    /// signal a Wake, or schedule inference here. Previously bound events are normal history.
+    fn bind_ignored_events(
         &self,
         _request: AgentSamplingBoundaryRequest,
-    ) -> AgentResult<AgentHumanInteractionSamplingState> {
-        Ok(AgentHumanInteractionSamplingState::default())
+    ) -> AgentResult<Vec<AgentHumanInteractionIgnoredEvent>> {
+        Ok(Vec::new())
     }
 }
 
@@ -494,9 +495,12 @@ pub struct AgentAsyncUserInputAccepted {
     pub request_id: String,
 }
 
-#[derive(Debug, Clone, Default)]
-pub struct AgentHumanInteractionSamplingState {
-    pub ignored_request_ids: Vec<String>,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentHumanInteractionIgnoredEvent {
+    pub trace_sequence: u64,
+    pub event_id: String,
+    pub request_id: String,
+    pub created_at: i64,
 }
 
 /// A Host-authenticated response already claimed for this exact suspended call. Deliberately

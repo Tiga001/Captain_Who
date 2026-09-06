@@ -238,3 +238,88 @@ fn fork_and_compaction_preserve_sync_answer_text_without_adding_user_context() {
         0
     );
 }
+
+#[test]
+fn latest_fork_keeps_idle_backend_postlude_but_reply_fork_stops_before_it() {
+    use crate::{ConversationBackendStatePlacement, ConversationTraceSnapshot};
+    let mut connection = Connection::open_in_memory().unwrap();
+    migrations::run_migrations(&connection).unwrap();
+    let source = source_conversation();
+    chat_repository::save_conversation(&mut connection, source.clone()).unwrap();
+    let mut recorder = crate::conversation_trace::ConversationTraceRecorder::from_durable_snapshot(
+        ConversationTraceSnapshot::default(),
+    );
+    let content = json!({"type":"human_interaction_status","requestId":"question-original","status":"ignored"}).to_string();
+    for (sequence, created_at, placement) in [
+        (0, 79, ConversationBackendStatePlacement::Timeline),
+        (1, 90, ConversationBackendStatePlacement::AfterMessage),
+    ] {
+        recorder
+            .record_backend_state(
+                sequence,
+                &format!("event-{sequence}"),
+                &content,
+                created_at,
+                placement,
+            )
+            .unwrap();
+    }
+    let snapshot = recorder.snapshot();
+    let trace = ConversationTurnTrace {
+        schema_version: CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
+        run_id: "run-source-3".into(),
+        conversation_id: source.id.clone(),
+        assistant_message_id: "assistant-d".into(),
+        terminal_status: ConversationTurnTraceTerminalStatus::Completed,
+        terminal_error: None,
+        truncated: false,
+        items: snapshot.items,
+    };
+    // The idle postlude occurs after completed_at, so using the last completion for Latest loses it.
+    conversation_trace_repository::commit_trace_in_connection(&connection, &trace, 80, 81).unwrap();
+    conversation_model_context_repository::commit_items_in_connection(
+        &connection,
+        &source.id,
+        "assistant-d",
+        &snapshot.model_context_items,
+    )
+    .unwrap();
+    for (request_id, point, expected_count) in [
+        ("fork-latest-postlude", ConversationForkPoint::Latest {}, 2),
+        (
+            "fork-reply-before-postlude",
+            ConversationForkPoint::AssistantReply {
+                assistant_message_id: "assistant-d".into(),
+            },
+            1,
+        ),
+    ] {
+        let plan =
+            build_fork_plan_at_point(&connection, request_id, &source.id, &point, 100).unwrap();
+        commit_fork_plan(&mut connection, &plan).unwrap();
+        let target_assistant = &plan.message_id_map["assistant-d"];
+        let cloned_trace =
+            conversation_trace_repository::get_trace_for_message(&connection, target_assistant)
+                .unwrap()
+                .unwrap();
+        assert_eq!(cloned_trace.items.len(), expected_count);
+        let cloned_context = conversation_model_context_repository::get_log_for_message(
+            &connection,
+            target_assistant,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(cloned_context.items.len(), expected_count);
+        assert_eq!(cloned_context.items.last().unwrap().content, content);
+        if expected_count == 2 {
+            assert!(matches!(
+                cloned_trace.items[1],
+                ConversationTurnTraceItem::BackendState {
+                    placement: ConversationBackendStatePlacement::AfterMessage,
+                    created_at: 90,
+                    ..
+                }
+            ));
+        }
+    }
+}

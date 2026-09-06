@@ -3154,7 +3154,7 @@ CREATE TABLE conversation_turn_trace_items (
             item_kind TEXT NOT NULL CHECK (item_kind IN (
                 'assistant_narration', 'user_guidance', 'tool_call', 'tool_result',
                 'command_session_lifecycle', 'agent_mailbox_delivery',
-                'context_compaction_lifecycle', 'runtime_error'
+                'context_compaction_lifecycle', 'runtime_error', 'backend_state'
             )),
             item_json TEXT NOT NULL CHECK (json_valid(item_json)),
             PRIMARY KEY (assistant_message_id, sequence),
@@ -6365,3 +6365,55 @@ BEFORE UPDATE OF role,content ON messages
 WHEN (NEW.role IS NOT OLD.role OR NEW.content IS NOT OLD.content)
  AND EXISTS(SELECT 1 FROM human_interaction_message_projections WHERE message_id=OLD.id)
 BEGIN SELECT RAISE(ABORT, 'human answer User content is immutable'); END;
+
+-- v41 records ignored-batch history once without creating a User answer or delivery.
+CREATE TABLE human_interaction_ignored_projections (
+    response_id TEXT PRIMARY KEY NOT NULL REFERENCES human_interaction_responses(response_id) ON DELETE CASCADE,
+    conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+    target_assistant_message_id TEXT REFERENCES messages(id) ON DELETE SET NULL,
+    target_run_id TEXT NOT NULL,
+    placement TEXT NOT NULL CHECK (placement IN ('timeline', 'after_message')),
+    status TEXT NOT NULL CHECK (status IN ('pending', 'materialized', 'cancelled')),
+    trace_sequence INTEGER CHECK (trace_sequence IS NULL OR (typeof(trace_sequence) = 'integer' AND trace_sequence >= 0)),
+    model_batch_index INTEGER CHECK (model_batch_index IS NULL OR (typeof(model_batch_index) = 'integer' AND model_batch_index > 0)),
+    UNIQUE (target_assistant_message_id, trace_sequence),
+    CHECK (status != 'pending' OR (trace_sequence IS NULL AND model_batch_index IS NULL)),
+    CHECK (status != 'materialized' OR trace_sequence IS NOT NULL)
+);
+CREATE INDEX idx_human_interaction_ignored_projection_target
+    ON human_interaction_ignored_projections(conversation_id, target_assistant_message_id, status);
+CREATE TRIGGER human_interaction_ignored_projection_owner_insert
+BEFORE INSERT ON human_interaction_ignored_projections
+WHEN NOT EXISTS (
+    SELECT 1 FROM human_interaction_responses AS response
+    JOIN human_interaction_requests AS request ON request.request_id = response.request_id
+    JOIN messages AS message ON message.id = NEW.target_assistant_message_id
+    JOIN conversation_turn_traces AS trace ON trace.assistant_message_id = message.id
+    WHERE response.response_id = NEW.response_id AND response.kind = 'ignored'
+      AND request.mode = 'async' AND request.status = 'ignored'
+      AND request.conversation_id = NEW.conversation_id
+      AND message.conversation_id = NEW.conversation_id AND message.role = 'assistant'
+      AND trace.conversation_id = NEW.conversation_id AND trace.run_id = NEW.target_run_id
+)
+BEGIN SELECT RAISE(ABORT, 'ignored human interaction projection requires its exact owner'); END;
+CREATE TRIGGER human_interaction_ignored_projection_identity
+BEFORE UPDATE ON human_interaction_ignored_projections
+WHEN NEW.response_id IS NOT OLD.response_id OR NEW.conversation_id IS NOT OLD.conversation_id
+  OR NEW.target_run_id IS NOT OLD.target_run_id
+  OR (NEW.target_assistant_message_id IS NOT OLD.target_assistant_message_id
+      AND NEW.target_assistant_message_id IS NOT NULL)
+BEGIN SELECT RAISE(ABORT, 'ignored human interaction projection identity is immutable'); END;
+CREATE TRIGGER human_interaction_ignored_projection_terminal
+BEFORE UPDATE ON human_interaction_ignored_projections
+WHEN OLD.status IN ('materialized', 'cancelled') AND (
+    NEW.status IS NOT OLD.status OR NEW.placement IS NOT OLD.placement
+    OR NEW.trace_sequence IS NOT OLD.trace_sequence
+    OR NEW.model_batch_index IS NOT OLD.model_batch_index
+)
+BEGIN SELECT RAISE(ABORT, 'ignored human interaction projection is terminal'); END;
+CREATE TRIGGER human_interaction_ignored_projection_target_deleted
+BEFORE DELETE ON messages
+BEGIN
+    UPDATE human_interaction_ignored_projections SET status = 'cancelled'
+    WHERE target_assistant_message_id = OLD.id AND status = 'pending';
+END;

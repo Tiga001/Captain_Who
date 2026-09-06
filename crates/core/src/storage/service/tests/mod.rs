@@ -10,6 +10,7 @@ mod action_json_cas;
 mod attachments;
 mod conversations;
 mod guidance;
+mod ignored_history;
 mod message_deletion;
 mod notifications;
 mod reconciliation;

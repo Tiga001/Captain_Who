@@ -58,6 +58,9 @@ impl AgentRuntime {
         } = host_services.unwrap_or_default();
         let _steer_input_close_guard = AgentSteerInputCloseGuard::new(steer_input.clone());
         let run_id = run_id.unwrap_or_else(generate_run_id);
+        let interactive_root = input.context.as_ref().is_some_and(|context| context.collaboration_identity.is_none())
+            && automation_report_sink.is_none()
+            && input.prompt_preferences.as_ref().is_none_or(|preferences| preferences.automation_execution_context.is_none());
         // RunGrant authority must be retired even when approval resume fails during checkpoint,
         // capability, ToolSet, collaboration, or world-state preflight. Construct the guard as
         // soon as the Host-owned run/storage identity exists; later initialization must not leave
@@ -599,6 +602,32 @@ impl AgentRuntime {
                             )?;
                         }
                     }
+                    if interactive_root {
+                        if let (Some(host), Some(conversation_id), Some(assistant_message_id)) = (
+                            human_interaction_runtime.as_ref(),
+                            trace_conversation_id.as_deref(),
+                            trace_assistant_message_id.as_deref(),
+                        ) {
+                            let expected_next_trace_sequence = conversation_trace
+                                .lock().unwrap_or_else(|error| error.into_inner()).next_sequence();
+                            let boundary = AgentSamplingBoundaryRequest {
+                                conversation_id: conversation_id.to_string(),
+                                run_id: run_id.clone(),
+                                assistant_message_id: assistant_message_id.to_string(),
+                                model_batch_index: u64::try_from(next_model_request_index.saturating_add(1)).unwrap_or(u64::MAX),
+                                expected_next_trace_sequence,
+                            };
+                            // Retry only this idempotent storage binding on the same boundary.
+                            // A commit-unknown return must not lose its already recorded facts;
+                            // no Provider request has been issued and no model request is retried.
+                            let events = host.bind_ignored_events(boundary.clone())
+                                .or_else(|_| host.bind_ignored_events(boundary))?;
+                            apply_human_interaction_ignored_events(
+                                &events, &mut active_context, &conversation_trace,
+                                trace_observer.as_ref(), assistant_message_id,
+                            )?;
+                        }
+                    }
                     let model_request_index = next_model_request_index;
                     next_model_request_index = next_model_request_index.saturating_add(1);
                     runtime_extensions.prepare_model_request()?;
@@ -679,21 +708,6 @@ impl AgentRuntime {
                             &ModelRequestContext::agent_work(),
                             &mut request_context,
                         )?;
-                        if tool_registry.contains_tool("request_user_input_async") {
-                            if let (Some(host), Some(conversation_id), Some(assistant_message_id)) = (
-                                human_interaction_runtime.as_ref(), trace_conversation_id.as_deref(), trace_assistant_message_id.as_deref(),
-                            ) {
-                                let expected_next_trace_sequence = conversation_trace.lock().unwrap_or_else(|error| error.into_inner()).next_sequence();
-                                if let Some(context) = human_interaction_ignored_context(host.as_ref(), AgentSamplingBoundaryRequest {
-                                    conversation_id: conversation_id.to_string(), run_id: run_id.clone(),
-                                    assistant_message_id: assistant_message_id.to_string(),
-                                    model_batch_index: u64::try_from(model_request_index + 1).unwrap_or(u64::MAX),
-                                    expected_next_trace_sequence,
-                                }) {
-                                    request_context.push(context);
-                                }
-                            }
-                        }
                         if empty_model_action_repair_pending {
                             request_context.push(empty_model_action_repair_context_item());
                         }

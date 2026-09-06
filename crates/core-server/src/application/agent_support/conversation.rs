@@ -792,6 +792,7 @@ fn prepare_conversation_turn_from_source(
 
     let mut agent_messages = history_messages;
     agent_messages.push(AgentChatMessage {
+        conversation_completion_covered: false,
         message_id: Some(user_message_id.clone()),
         role: "user".to_string(),
         content,
@@ -915,6 +916,28 @@ pub(crate) fn conversation_history_messages_with_model_context(
             .position(|message| message.id == summary.covered_through.message_id())
             .map(|index| (index, &summary.covered_through))
     });
+    let completion_is_covered = |message_id: &str| {
+        covered_boundary.is_some_and(|(_, cursor)| {
+            cursor.message_id() == message_id
+                && match cursor {
+                    ContextJournalCursor::Message { .. } => true,
+                    ContextJournalCursor::TraceItem { sequence, .. } => {
+                        traces.get(message_id).is_some_and(|trace| {
+                            trace.items.iter().any(|item| {
+                                item.sequence() == *sequence
+                                    && matches!(
+                                        item,
+                                        mycopilot_core::ConversationTurnTraceItem::BackendState {
+                                            placement: mycopilot_core::ConversationBackendStatePlacement::AfterMessage,
+                                            ..
+                                        }
+                                    )
+                            })
+                        })
+                    }
+                }
+        })
+    };
     // Mid-run compaction may advance through the current user message to summarize later closed
     // tool exchanges. Keep that latest instruction exact beside the summary while the assistant
     // trace is still active. On later turns it is no longer special and the normal summary
@@ -955,7 +978,26 @@ pub(crate) fn conversation_history_messages_with_model_context(
                 return Some((message, trace, model_context_items));
             }
             match cursor {
-                ContextJournalCursor::Message { .. } => None,
+                ContextJournalCursor::Message { .. } => {
+                    let mut trace = trace?;
+                    trace.items.retain(|item| {
+                        matches!(
+                            item,
+                            mycopilot_core::ConversationTurnTraceItem::BackendState {
+                                placement:
+                                    mycopilot_core::ConversationBackendStatePlacement::AfterMessage,
+                                ..
+                            }
+                        )
+                    });
+                    model_context_items.retain(|item| {
+                        trace
+                            .items
+                            .iter()
+                            .any(|event| event.sequence() == item.sequence)
+                    });
+                    (!trace.items.is_empty()).then_some((message, Some(trace), model_context_items))
+                }
                 ContextJournalCursor::TraceItem { sequence, .. } => {
                     let mut trace = trace?;
                     // The durable trace is an audit log, while this projection is model input.
@@ -967,7 +1009,8 @@ pub(crate) fn conversation_history_messages_with_model_context(
                         .items
                         .retain(|item| item.sequence() > *sequence && item.is_model_visible());
                     model_context_items.retain(|item| item.sequence > *sequence);
-                    let has_uncovered_completion = trace.terminal_status.is_terminal();
+                    let has_uncovered_completion =
+                        trace.terminal_status.is_terminal() && !completion_is_covered(&message.id);
                     (!trace.items.is_empty() || has_uncovered_completion).then_some((
                         message,
                         Some(trace),
@@ -1054,9 +1097,10 @@ pub(crate) fn conversation_history_messages_with_model_context(
                 message.id
             ));
         }
-        let content = if trace.as_ref().is_some_and(|trace| {
-            trace.terminal_status == ConversationTurnTraceTerminalStatus::InProgress
-        }) {
+        let content = if completion_is_covered(&message.id)
+            || trace.as_ref().is_some_and(|trace| {
+                trace.terminal_status == ConversationTurnTraceTerminalStatus::InProgress
+            }) {
             String::new()
         } else {
             message.content.clone()
@@ -1065,6 +1109,7 @@ pub(crate) fn conversation_history_messages_with_model_context(
             continue;
         }
         history.push(AgentChatMessage {
+            conversation_completion_covered: completion_is_covered(&message.id),
             message_id: Some(message.id.clone()),
             role: message.role.clone(),
             content,

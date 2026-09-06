@@ -205,6 +205,57 @@ fn contents(frame: &ContextFrame) -> Vec<String> {
 }
 
 #[test]
+fn compaction_layout_replaces_journaled_backend_state_instead_of_repeating_its_overlay() {
+    let content =
+        r#"{"type":"human_interaction_status","requestId":"request-1","status":"ignored"}"#;
+    let state = |scope| {
+        ContextItem::new(
+            LlmMessage::backend_state(content),
+            ContextMetadata::new(
+                ContextSource::BackendState,
+                scope,
+                ContextRetention::Retained,
+            )
+            .with_origin(ContextOrigin::conversation_trace_item(
+                "active-assistant",
+                2,
+            )),
+        )
+    };
+    let active = ContextFrame::new(vec![
+        text(
+            "stable",
+            ContextSource::BackendSystemPrompt,
+            ContextScope::Run,
+        ),
+        input("input-one", true),
+        narration(1, false),
+        state(ContextScope::Run),
+    ]);
+    let mut durable = ContextFrame::new(vec![
+        text(
+            "stable",
+            ContextSource::BackendSystemPrompt,
+            ContextScope::Run,
+        ),
+        input("input-one", false),
+        narration(1, true),
+        state(ContextScope::Conversation),
+    ]);
+    ContextCapacityDetector::for_model("test-model", AgentApiStyle::OpenAiCompatible, &[])
+        .prepare_frame(&mut durable);
+    let replaced = active
+        .replace_compacted_model_history(durable.share_measured_persistent_baseline().unwrap());
+    assert_eq!(
+        contents(&replaced),
+        ["stable", "input-one", "narration-1", content]
+    );
+    let restored =
+        ContextFrame::from_checkpoint_items(replaced.checkpoint_items().unwrap()).unwrap();
+    assert_eq!(contents(&restored), contents(&replaced));
+}
+
+#[test]
 fn compaction_layout_keeps_current_inputs_and_retained_observations_at_causal_boundaries() {
     let original_baseline = baseline(false);
     let frame = active_frame().replace_compacted_model_history(original_baseline.clone());

@@ -95,8 +95,8 @@ Turn admission 创建的 pending assistant message 正文为空；系统不再�
 → 本次连续用户输入及其 anchored diff / 附件
 → 初始预激活 Skill 完整说明
 → 初始 Run full World State
-→ 因果 Run 时间线
-→ Todo / ignored 交互状态 / 修复提示 / 文件事务提示
+→ 因果 Run 时间线（含已发生的普通后端状态事件）
+→ Todo / 修复提示 / 文件事务提示
 ```
 
 此次只把目录和当前指南移到 Conversation full 前，并把本次输入连同关联 diff、附件移到预激活 Skill 与初始 Run 状态前。作用域、权限判定和持久化规则不变；原消息正文、role、lifetime、retention、Tool 参数、调用与结果绑定、Provider continuation 也不因布局而改变。Run 中新激活的 Skill、审批或提问恢复后的 full World State、状态 diff、同步答案 ToolResult 与异步答案 User 消息保持因果位置；不能按类型提前到初始说明。同步答案虽可显示为用户气泡，模型仍只通过原工具调用的唯一结果接收。
@@ -235,3 +235,5 @@ cargo test -p mycopilot-core-server provider
 - 进程崩溃后只能恢复已进入持久边界的状态；纯内存中且未提交的模型流片段会丢失。
 - 诊断和测试大量依赖 SQLite 开发 schema；非当前 schema 的开发数据库不会原地升级。
 - 人工审批没有通用自动超时；ticket 可长期 pending，而短生命周期执行材料可能在用户决定前失效。
+
+忽略非阻塞问题现在产生一次普通后端历史事件，下一次自然请求获知；它不再是 RequestOnly 尾部状态。运行结束后的事件使用通用 after-message 位置，后续与普通历史一起压缩。不会新建 User、guidance、Wake 或额外模型请求。

@@ -510,7 +510,7 @@ fn terminal_trace_without_items(
 }
 
 #[derive(Debug, Clone, Default)]
-pub(crate) struct ConversationTraceRecorder {
+pub struct ConversationTraceRecorder {
     items: Vec<ConversationTurnTraceItem>,
     model_context_items: Vec<ConversationModelContextItem>,
     next_sequence: u64,

@@ -66,6 +66,7 @@ mod world_state_tests {
                 world_state_records: records,
                 initial_run_world_state: None,
                 messages: vec![crate::AgentChatMessage {
+                    conversation_completion_covered: false,
                     message_id: Some("user".into()),
                     role: "user".into(),
                     content: "input".into(),
@@ -512,6 +513,12 @@ impl AgentConversationContextState {
             ConversationTraceRenderer::render(&terminal_only)?.terminal_item
         {
             self.frame.push(terminal_item);
+        }
+        for item in
+            ConversationTraceRenderer::render_with_model_context(trace, model_context_items)?
+                .postlude_items
+        {
+            self.frame.push(item);
         }
         self.timing = timing;
         Ok(committed_item_count)

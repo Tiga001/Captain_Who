@@ -318,6 +318,13 @@ impl ContinuitySelector {
                     ConversationTurnTraceItem::AssistantNarration { .. } => {
                         increment(&mut self.archived_counts, COUNT_NARRATION);
                     }
+                    ConversationTurnTraceItem::BackendState { .. } => {
+                        push_bounded(
+                            &mut self.recent,
+                            history_ref_from_cursor(cursor),
+                            MAX_RECENT_REFS,
+                        );
+                    }
                     ConversationTurnTraceItem::UserGuidance { .. }
                     | ConversationTurnTraceItem::AgentMailboxDelivery { .. } => {
                         increment(&mut self.archived_counts, COUNT_GUIDANCE);

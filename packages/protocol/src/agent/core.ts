@@ -348,6 +348,14 @@ export interface ConversationTraceAttachment {
 
 export type ConversationTurnTraceItem =
   | {
+      type: 'backend_state'
+      sequence: number
+      eventId: string
+      content: string
+      createdAt: number
+      placement: 'timeline' | 'after_message'
+    }
+  | {
       type: 'assistant_narration'
       sequence: number
       content: string

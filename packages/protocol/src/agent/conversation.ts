@@ -25,6 +25,8 @@ export interface AgentChatMessage {
   role: AgentMessageRole
   content: string
   conversationTurnTrace?: ConversationTurnTrace
+  /** Host-only projection; the assistant's completion is already in the compaction summary. */
+  conversationCompletionCovered?: boolean
 }
 
 export type AgentInputAttachmentKind = 'file' | 'image'

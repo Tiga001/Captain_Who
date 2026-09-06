@@ -84,6 +84,7 @@ impl ToolFailureGuard {
                     }
                 }
                 ConversationTurnTraceItem::AssistantNarration { .. }
+                | ConversationTurnTraceItem::BackendState { .. }
                 | ConversationTurnTraceItem::UserGuidance { .. }
                 | ConversationTurnTraceItem::AgentMailboxDelivery { .. }
                 | ConversationTurnTraceItem::CommandSessionLifecycle { .. }

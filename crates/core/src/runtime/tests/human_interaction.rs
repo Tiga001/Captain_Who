@@ -1,8 +1,8 @@
 use super::*;
 use crate::human_interaction::HumanInteractionSettings;
 use crate::{
-    AgentAsyncUserInputAccepted, AgentAsyncUserInputRequest, AgentHumanInteractionRuntimeHost,
-    AgentHumanInteractionSamplingState, AgentSamplingBoundaryRequest, AgentUserInputResume,
+    AgentAsyncUserInputAccepted, AgentAsyncUserInputRequest, AgentHumanInteractionIgnoredEvent,
+    AgentHumanInteractionRuntimeHost, AgentSamplingBoundaryRequest, AgentUserInputResume,
     AgentUserInputSuspension,
 };
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -16,6 +16,9 @@ struct HumanHost {
     async_ready: bool,
     accepted: Mutex<Vec<AgentAsyncUserInputRequest>>,
     ignored: Mutex<Vec<String>>,
+    ignored_receipts:
+        Mutex<std::collections::BTreeMap<u64, Vec<AgentHumanInteractionIgnoredEvent>>>,
+    ignored_commit_unknown_once: AtomicBool,
     natural_samples: Mutex<Vec<AgentSamplingBoundaryRequest>>,
     answer_queue: Option<AgentSteerInputQueue>,
     cancel_after_accept: Option<AgentCancellationToken>,
@@ -94,14 +97,42 @@ impl AgentHumanInteractionRuntimeHost for HumanHost {
         Ok(AgentAsyncUserInputAccepted { request_id })
     }
 
-    fn natural_sampling_state(
+    fn bind_ignored_events(
         &self,
         request: AgentSamplingBoundaryRequest,
-    ) -> AgentResult<AgentHumanInteractionSamplingState> {
+    ) -> AgentResult<Vec<AgentHumanInteractionIgnoredEvent>> {
+        let first_sequence = request.expected_next_trace_sequence;
+        let batch = request.model_batch_index;
         self.natural_samples.lock().unwrap().push(request);
-        Ok(AgentHumanInteractionSamplingState {
-            ignored_request_ids: self.ignored.lock().unwrap().clone(),
-        })
+        let mut receipts = self.ignored_receipts.lock().unwrap();
+        if let Some(events) = receipts.get(&batch) {
+            return Ok(events.clone());
+        }
+        let events: Vec<_> = self
+            .ignored
+            .lock()
+            .unwrap()
+            .drain(..)
+            .enumerate()
+            .map(|(index, request_id)| AgentHumanInteractionIgnoredEvent {
+                trace_sequence: first_sequence + index as u64,
+                event_id: format!("ignored:{request_id}"),
+                request_id,
+                created_at: 1,
+            })
+            .collect();
+        if !events.is_empty() {
+            receipts.insert(batch, events.clone());
+            if self
+                .ignored_commit_unknown_once
+                .swap(false, Ordering::SeqCst)
+            {
+                return Err(AgentError::new(
+                    "simulated committed binding with unknown return",
+                ));
+            }
+        }
+        Ok(events)
     }
 
     fn suspend(&self, suspension: AgentUserInputSuspension) -> AgentResult<()> {
@@ -374,20 +405,31 @@ async fn human_interaction_async_accepts_multiple_batches_and_continues_without_
     assert!(requests[1].to_string().contains("independent evidence"));
     for request in requests.iter().skip(1) {
         let messages = request["messages"].as_array().unwrap();
-        // The generic provider transports dynamic System context with its existing user-role
-        // adapter. It remains request-only runtime state, never persisted human guidance.
+        // Transport user role carries backend-observed history, not a human input or guidance.
         assert_eq!(
             messages
                 .iter()
                 .filter(|v| v["content"]
                     .as_str()
-                    .is_some_and(|text| text.contains("ignoredRequestIds")
+                    .is_some_and(|text| text.contains("<backend_observed_state>")
+                        && text.contains("human_interaction_status")
                         && text.contains("async-request-1")))
                 .count(),
             1
         );
     }
     assert_eq!(host.natural_samples.lock().unwrap().len(), 3);
+    assert_eq!(
+        output
+            .conversation_turn_trace
+            .as_ref()
+            .unwrap()
+            .items
+            .iter()
+            .filter(|item| matches!(item, ConversationTurnTraceItem::BackendState { .. }))
+            .count(),
+        1
+    );
     assert!(output
         .conversation_turn_trace
         .as_ref()
@@ -400,44 +442,110 @@ async fn human_interaction_async_accepts_multiple_batches_and_continues_without_
 }
 
 #[test]
-fn human_interaction_ignored_snapshot_is_bounded_request_only_runtime_context() {
-    let host = HumanHost::default();
-    let request = AgentSamplingBoundaryRequest {
-        conversation_id: "conversation-human".into(),
-        run_id: "run-human".into(),
-        assistant_message_id: "assistant-human".into(),
-        model_batch_index: 2,
-        expected_next_trace_sequence: 3,
-    };
-    host.ignored.lock().unwrap().push("ignored-request".into());
-    let item =
-        crate::runtime::preparation::human_interaction_ignored_context(&host, request.clone())
-            .unwrap();
-    let frame = crate::context::ContextFrame::new(vec![item]);
-    let manifest = frame.manifest();
-    assert_eq!(manifest.entries[0].role, "system");
-    assert_eq!(manifest.entries[0].sources, ["runtime_guard"]);
-    assert_eq!(manifest.entries[0].retention, "request_only");
-    let messages = frame.to_messages();
-    let status_text = messages[0].content();
-    assert!(status_text.contains("## 异步交互状态"));
-    assert!(status_text.contains("没有提交回应"));
-    assert!(status_text.contains("不要重复请求"));
-    assert!(status_text.contains("所请求事项已经发生"));
-    for ignored in [
-        vec![],
-        vec![" ".into()],
-        vec!["duplicate".into(), "duplicate".into()],
-        (0..2000)
-            .map(|i| format!("{i}-{}", "a".repeat(200)))
-            .collect(),
-    ] {
-        *host.ignored.lock().unwrap() = ignored;
-        assert!(
-            crate::runtime::preparation::human_interaction_ignored_context(&host, request.clone())
-                .is_none()
-        );
+fn human_interaction_ignored_event_is_retained_once_and_has_no_guidance() {
+    let recorder = Arc::new(Mutex::new(ConversationTraceRecorder::default()));
+    let mut context = ContextFrame::new(Vec::new());
+    let events = vec![AgentHumanInteractionIgnoredEvent {
+        trace_sequence: 0,
+        event_id: "ignored:response-1".into(),
+        request_id: "request-1".into(),
+        created_at: 1,
+    }];
+    for _ in 0..2 {
+        apply_human_interaction_ignored_events(
+            &events,
+            &mut context,
+            &recorder,
+            None,
+            "assistant-human",
+        )
+        .unwrap();
     }
+    let manifest = context.manifest();
+    assert_eq!(manifest.entries.len(), 1);
+    assert_eq!(manifest.entries[0].sources, ["backend_state"]);
+    assert_eq!(manifest.entries[0].retention, "retained");
+    let messages = context.to_messages();
+    assert_eq!(
+        messages[0].placement(),
+        crate::llm::LlmMessagePlacement::BackendStateTimeline
+    );
+    assert_eq!(
+        serde_json::from_str::<Value>(messages[0].content()).unwrap(),
+        json!({
+            "type":"human_interaction_status", "requestId":"request-1", "status":"ignored"
+        })
+    );
+    let snapshot = recorder.lock().unwrap().snapshot();
+    assert_eq!(snapshot.items.len(), 1);
+    assert_eq!(snapshot.model_context_items.len(), 1);
+    assert!(matches!(
+        snapshot.items[0],
+        ConversationTurnTraceItem::BackendState { .. }
+    ));
+    let mut invalid = events;
+    invalid[0].request_id = " ".into();
+    assert!(apply_human_interaction_ignored_events(
+        &invalid,
+        &mut context,
+        &recorder,
+        None,
+        "assistant-human",
+    )
+    .is_err());
+    assert_eq!(context.manifest().entries.len(), 1);
+}
+
+#[tokio::test]
+async fn human_interaction_disabled_tools_observe_ignored_batch_after_commit_unknown_binding() {
+    let dir = tempfile::tempdir().unwrap();
+    let (url, server) = provider(vec![
+        tool_response(vec![async_question("q1")]),
+        completed_response(),
+    ])
+    .await;
+    let host = Arc::new(HumanHost {
+        enabled: AtomicBool::new(true),
+        async_ready: true,
+        ignored_commit_unknown_once: AtomicBool::new(true),
+        ..HumanHost::default()
+    });
+    let event_host = host.clone();
+    let output = AgentRuntime::default().send_chat_with_events_and_cancellation(
+        input(url, dir.path()), Some("run-human".into()),
+        Some(Arc::new(move |event| {
+            if matches!(event, AgentEvent::ToolResult { result, .. } if result.tool == "request_user_input_async") {
+                event_host.ignored.lock().unwrap().push("async-request-1".into());
+                event_host.enabled.store(false, Ordering::SeqCst);
+            }
+        })), AgentCancellationToken::new(), Some(host.services()),
+    ).await.unwrap();
+    assert_eq!(output.status, AgentRunStatus::Completed);
+    let requests = server.await.unwrap();
+    assert_eq!(requests.len(), 2);
+    assert!(requests[1]["tools"].as_array().unwrap().iter().all(|tool| {
+        !matches!(
+            tool["function"]["name"].as_str(),
+            Some("request_user_input" | "request_user_input_async")
+        )
+    }));
+    let observed = requests[1]["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|message| message["content"].as_str())
+        .filter(|content| content.contains("human_interaction_status"))
+        .collect::<Vec<_>>();
+    assert_eq!(observed.len(), 1);
+    assert!(observed[0].contains("<backend_observed_state>"));
+    assert!(observed[0].contains("async-request-1"));
+    assert!(!observed[0].contains("ignoredRequestIds"));
+    let samples = host.natural_samples.lock().unwrap();
+    assert_eq!(samples.len(), 3);
+    assert_eq!(
+        samples[1], samples[2],
+        "binding retry must keep the same exact boundary"
+    );
 }
 
 #[tokio::test]

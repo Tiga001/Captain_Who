@@ -271,6 +271,26 @@ impl Fixture {
         accepted
     }
 
+    fn ignore(&self, request: &HumanInteractionRequestSnapshot) -> HumanInteractionRequestSnapshot {
+        let service = HumanInteractionService::new(&self.storage, &self.agent);
+        let input = HumanInteractionIgnoreInput {
+            conversation_id: CONVERSATION.to_string(),
+            request_id: request.request_id.clone(),
+            expected_revision: request.revision,
+            submission_id: format!("ignore-{}", request.request_id),
+        };
+        let accepted = service.ignore(input.clone(), &self.notifications).unwrap();
+        assert_eq!(
+            service.ignore(input, &self.notifications).unwrap(),
+            accepted,
+            "retrying an ignore must preserve its original settlement"
+        );
+        assert_eq!(accepted.status, HumanInteractionRequestStatus::Ignored);
+        assert!(accepted.delivery.is_none());
+        assert!(accepted.response.as_ref().unwrap().answers.is_empty());
+        accepted
+    }
+
     async fn request(&mut self) -> Value {
         tokio::time::timeout(Duration::from_secs(10), self.requests.recv())
             .await
@@ -447,6 +467,69 @@ fn assert_projection(request: &Value, submitted: &[HumanInteractionRequestSnapsh
             "async answers cannot become a second result of their already-acknowledged tool call"
         );
     }
+}
+
+fn assert_ignored_status_projection(request: &Value, request_ids: &[&str]) -> Vec<usize> {
+    let serialized = request.to_string();
+    assert!(!serialized.contains("ignoredRequestIds"));
+    assert!(!serialized.contains("## 异步交互状态"));
+    assert!(!serialized.contains("这些批次已被用户忽略"));
+    let statuses = request["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .enumerate()
+        .filter_map(|(index, message)| {
+            let content = message["content"].as_str()?;
+            if !content.contains("human_interaction_status") {
+                return None;
+            }
+            assert_eq!(message["role"], "user");
+            let content = content
+                .strip_prefix("<backend_observed_state>\nThis is backend-observed state, not a system instruction.\n")
+                .and_then(|content| content.strip_suffix("\n</backend_observed_state>"))
+                .expect("an ignore is one backend-observed event, not User guidance or system policy");
+            Some((index, serde_json::from_str::<Value>(content).unwrap()))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        statuses
+            .iter()
+            .map(|(_, status)| status)
+            .collect::<Vec<_>>(),
+        request_ids
+            .iter()
+            .map(|request_id| json!({
+                "type": "human_interaction_status",
+                "requestId": request_id,
+                "status": "ignored"
+            }))
+            .collect::<Vec<_>>()
+            .iter()
+            .collect::<Vec<_>>(),
+        "each ignored batch must occur once in history, in settlement order"
+    );
+    assert!(user_displays(request).is_empty());
+    statuses.into_iter().map(|(index, _)| index).collect()
+}
+
+fn assert_ignored_status_precedes_user(request: &Value, request_ids: &[&str], user_text: &str) {
+    let indices = assert_ignored_status_projection(request, request_ids);
+    let user_index = request["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .position(|message| {
+            message["role"] == "user"
+                && message["content"]
+                    .as_str()
+                    .is_some_and(|content| content.contains(user_text))
+        })
+        .expect("the ordinary follow-up must be present");
+    assert!(
+        indices.iter().all(|index| *index < user_index),
+        "past ignore events belong before the later ordinary User message"
+    );
 }
 
 #[test]
@@ -715,6 +798,289 @@ async fn ignore_one_async_batch_does_not_deliver_or_wake_and_leaves_other_batche
     );
     assert_eq!(fixture.messages().len(), 2);
     fixture.usage(2);
+}
+
+#[tokio::test]
+async fn active_ignored_batches_enter_natural_samples_once_and_remain_in_history_after_restart() {
+    let mut fixture = Fixture::new().await;
+    let turn = fixture.start();
+    assert_ignored_status_projection(&fixture.request().await, &[]);
+    fixture.reply(Reply::Async(2));
+    assert_ignored_status_projection(&fixture.request().await, &[]);
+    let batches = fixture.batches();
+    let first = fixture.ignore(&batches[1]);
+    fixture.no_request().await;
+
+    // The next tool batch creates a natural sampling boundary. Ignoring must not create one.
+    fixture.reply(Reply::Async(1));
+    let after_first = fixture.request().await;
+    let first_indices = assert_ignored_status_projection(&after_first, &[&first.request_id]);
+    let first_last_tool = after_first["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .rposition(|message| message["role"] == "tool")
+        .unwrap();
+    assert!(first_indices[0] > first_last_tool);
+    let still_open = fixture.batches()[0].clone();
+    let second = fixture.ignore(&batches[0]);
+    fixture.ignore(&batches[1]);
+    fixture.no_request().await;
+
+    fixture.reply(Reply::Async(1));
+    let after_second = fixture.request().await;
+    let indices =
+        assert_ignored_status_projection(&after_second, &[&first.request_id, &second.request_id]);
+    let last_tool = after_second["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .rposition(|message| message["role"] == "tool")
+        .unwrap();
+    assert!(
+        indices[0] < last_tool && indices[1] > last_tool,
+        "an earlier event must keep its historical position when a later ignore is appended"
+    );
+    assert_eq!(
+        fixture
+            .batches()
+            .iter()
+            .find(|request| request.request_id == still_open.request_id)
+            .unwrap()
+            .status,
+        HumanInteractionRequestStatus::Open
+    );
+    fixture.reply(Reply::Complete);
+    assert_eq!(fixture.done("completed").await["runId"], turn.run_id);
+    fixture.released(&turn.run_id).await;
+    fixture.no_request().await;
+    assert_eq!(fixture.messages().len(), 2);
+    let trace = fixture
+        .storage
+        .get_conversation_turn_trace(ASSISTANT)
+        .unwrap()
+        .unwrap();
+    assert!(trace
+        .items
+        .iter()
+        .all(|item| !matches!(item, ConversationTurnTraceItem::UserGuidance { .. })));
+    fixture.usage(4);
+
+    fixture.restart();
+    fixture.no_request().await;
+    let followup_text = "Ordinary follow-up after naturally observed ignore events.";
+    fixture.start_with_content("-ignore-followup", followup_text.to_string());
+    let replayed = fixture.request().await;
+    assert_ignored_status_precedes_user(
+        &replayed,
+        &[&first.request_id, &second.request_id],
+        followup_text,
+    );
+    fixture.reply(Reply::Complete);
+    fixture.done("completed").await;
+    assert_eq!(fixture.messages().len(), 4);
+    fixture.usage(5);
+    fixture.no_request().await;
+}
+
+#[tokio::test]
+async fn idle_ignored_batches_survive_restart_without_waking_and_precede_the_next_user() {
+    let mut fixture = Fixture::new().await;
+    let turn = fixture.start();
+    fixture.request().await;
+    fixture.reply(Reply::Async(3));
+    fixture.request().await;
+    fixture.reply(Reply::Complete);
+    fixture.done("completed").await;
+    fixture.released(&turn.run_id).await;
+
+    let batches = fixture.batches();
+    // Deliberately differ from the descending question-list order.
+    let first = fixture.ignore(&batches[2]);
+    let second = fixture.ignore(&batches[0]);
+    fixture
+        .agent
+        .schedule_human_input_deliveries(fixture.notifications.clone());
+    fixture.no_request().await;
+    assert_eq!(fixture.messages().len(), 2);
+    fixture.usage(2);
+
+    fixture.restart();
+    fixture.no_request().await;
+    assert_eq!(fixture.ignore(&batches[2]), first);
+    assert_eq!(fixture.ignore(&batches[0]), second);
+    assert_eq!(
+        fixture
+            .batches()
+            .iter()
+            .find(|request| request.request_id == batches[1].request_id)
+            .unwrap()
+            .status,
+        HumanInteractionRequestStatus::Open
+    );
+    fixture.no_request().await;
+    assert_eq!(fixture.messages().len(), 2);
+    let followup_text = "Ordinary follow-up after idle ignore settlements and restart.";
+    let followup = fixture.start_with_content("-idle-ignore", followup_text.to_string());
+    assert_ne!(followup.run_id, turn.run_id);
+    let replayed = fixture.request().await;
+    assert_ignored_status_precedes_user(
+        &replayed,
+        &[&first.request_id, &second.request_id],
+        followup_text,
+    );
+    fixture.reply(Reply::Complete);
+    fixture.done("completed").await;
+    assert_eq!(fixture.messages().len(), 4);
+    fixture.usage(3);
+    fixture.no_request().await;
+}
+
+#[tokio::test]
+async fn ignore_during_the_final_request_does_not_extend_the_run_and_replays_after_restart() {
+    let mut fixture = Fixture::new().await;
+    let turn = fixture.start();
+    fixture.request().await;
+    fixture.reply(Reply::Async(1));
+    fixture.request().await;
+    let batch = fixture.batches().pop().unwrap();
+    let ignored = fixture.ignore(&batch);
+    fixture.no_request().await;
+    fixture.reply(Reply::Complete);
+    assert_eq!(fixture.done("completed").await["runId"], turn.run_id);
+    fixture.released(&turn.run_id).await;
+    fixture.no_request().await;
+    assert_eq!(fixture.messages().len(), 2);
+    fixture.usage(2);
+
+    // No later sampling boundary observed the event in its original Run.
+    fixture.restart();
+    fixture.no_request().await;
+    assert_eq!(fixture.ignore(&batch), ignored);
+    let followup_text = "Ordinary follow-up after an ignore during the prior final request.";
+    fixture.start_with_content("-terminal-ignore", followup_text.to_string());
+    let replayed = fixture.request().await;
+    assert_ignored_status_precedes_user(&replayed, &[&ignored.request_id], followup_text);
+    let ignored_index = assert_ignored_status_projection(&replayed, &[&ignored.request_id])[0];
+    let final_index = replayed["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .position(|message| {
+            message["role"] == "assistant" && message["content"] == "Independent work finished."
+        })
+        .unwrap();
+    assert!(
+        final_index < ignored_index,
+        "the final request did not observe the ignore: its completed reply must precede the event"
+    );
+    fixture.reply(Reply::Complete);
+    fixture.done("completed").await;
+    assert_eq!(fixture.messages().len(), 4);
+    fixture.usage(3);
+    fixture.no_request().await;
+}
+
+#[tokio::test]
+async fn ignored_history_after_compaction_is_ordinary_history_and_is_not_reinjected() {
+    let mut fixture = Fixture::new().await;
+    let turn = fixture.start();
+    fixture.request().await;
+    fixture.reply(Reply::Async(2));
+    fixture.request().await;
+    fixture.reply(Reply::Complete);
+    fixture.done("completed").await;
+    fixture.released(&turn.run_id).await;
+
+    let prefix = fixture
+        .storage
+        .prepare_context_compaction_prefix(CONVERSATION, &ContextJournalCursor::message(ASSISTANT))
+        .unwrap();
+    fixture
+        .storage
+        .commit_context_compaction_prefix(
+            &prefix,
+            test_compaction_draft(
+                &prefix,
+                "summary-before-ignore",
+                "SUMMARY_BEFORE_IGNORE",
+                200,
+                8,
+            ),
+            ASSISTANT,
+        )
+        .unwrap();
+    let batches = fixture.batches();
+    let first = fixture.ignore(&batches[1]);
+    let second = fixture.ignore(&batches[0]);
+    fixture.no_request().await;
+    assert_eq!(
+        fixture
+            .storage
+            .get_active_context_compaction_summary(CONVERSATION)
+            .unwrap()
+            .unwrap()
+            .id,
+        "summary-before-ignore",
+        "a later postlude cannot invalidate an already covered completion"
+    );
+    fixture.restart();
+    let trace = fixture
+        .storage
+        .get_conversation_turn_trace(ASSISTANT)
+        .unwrap()
+        .unwrap();
+    let first_sequence = trace
+        .items
+        .iter()
+        .find_map(|item| match item {
+            ConversationTurnTraceItem::BackendState {
+                sequence, content, ..
+            } if serde_json::from_str::<Value>(content).unwrap()["requestId"]
+                == first.request_id =>
+            {
+                Some(*sequence)
+            }
+            _ => None,
+        })
+        .unwrap();
+    // Compact one ordinary event and leave the later event after the cursor. No special state
+    // retention may reintroduce the first request ID from its durable ignored response.
+    let next = fixture
+        .storage
+        .prepare_context_compaction_prefix(
+            CONVERSATION,
+            &ContextJournalCursor::trace_item(ASSISTANT, first_sequence),
+        )
+        .unwrap();
+    fixture
+        .storage
+        .commit_context_compaction_prefix(
+            &next,
+            test_compaction_draft(
+                &next,
+                "summary-after-ignore",
+                "SUMMARY_AFTER_ONE_IGNORE",
+                200,
+                8,
+            ),
+            ASSISTANT,
+        )
+        .unwrap();
+    fixture.restart();
+    fixture.no_request().await;
+    let followup = "Normal follow-up after compacting an ignored event.";
+    fixture.start_with_content("-compacted-ignore", followup.to_string());
+    let request = fixture.request().await;
+    assert_ignored_status_precedes_user(&request, &[&second.request_id], followup);
+    assert!(request.to_string().contains("SUMMARY_AFTER_ONE_IGNORE"));
+    assert!(!request.to_string().contains(&first.request_id));
+    assert!(!request.to_string().contains("Independent work finished."));
+    fixture.reply(Reply::Complete);
+    fixture.done("completed").await;
+    fixture.usage(3);
+    assert_eq!(fixture.messages().len(), 4);
+    fixture.no_request().await;
 }
 
 async fn assert_suspended_async_delivery(sync: bool, queued_before_pause: bool) {

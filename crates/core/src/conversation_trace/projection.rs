@@ -37,6 +37,7 @@ fn project_durable_trace_items(
 
     for item in items {
         let projected_item = match item {
+            ConversationTurnTraceItem::BackendState { .. } => item.clone(),
             ConversationTurnTraceItem::AssistantNarration {
                 sequence,
                 content,

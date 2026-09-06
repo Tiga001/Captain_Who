@@ -686,6 +686,7 @@ async fn deepseek_checkpoint_abort_closes_unknown_suffix_and_replays_next_run() 
         .cloned()
         .expect("terminal abort must publish the protocol-complete model context");
     let aborted_history = AgentChatMessage {
+        conversation_completion_covered: false,
         message_id: Some(FIRST_ASSISTANT_ID.to_string()),
         role: "assistant".to_string(),
         content: String::new(),
@@ -1388,6 +1389,7 @@ async fn deepseek_ordinary_reasoning_survives_restart_for_a_future_tools_request
             .find(|message| message.id == assistant_message_id)
             .expect("restart must reload the durable DeepSeek assistant message");
         AgentChatMessage {
+            conversation_completion_covered: false,
             message_id: Some(assistant_message_id.to_string()),
             role: "assistant".to_string(),
             content: assistant.content.clone(),

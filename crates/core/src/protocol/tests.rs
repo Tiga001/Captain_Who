@@ -726,6 +726,7 @@ fn command_safety_policy_uses_stable_camel_case_field_and_wire_value() {
 #[test]
 fn chat_message_serializes_conversation_trace_with_camel_case_protocol_names() {
     let message = AgentChatMessage {
+        conversation_completion_covered: false,
         message_id: None,
         role: "assistant".to_string(),
         content: "done".to_string(),

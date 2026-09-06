@@ -217,6 +217,9 @@ fn model_context_for_closed_trace(
             }),
             ConversationTurnTraceItem::AgentMailboxDelivery {
                 sequence, content, ..
+            }
+            | ConversationTurnTraceItem::BackendState {
+                sequence, content, ..
             } => Some(ConversationModelContextItem {
                 sequence: *sequence,
                 ordinal: 0,

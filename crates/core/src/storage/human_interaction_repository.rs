@@ -545,6 +545,8 @@ fn settle(
     tx.execute("INSERT INTO human_interaction_responses(response_id,request_id,submission_id,base_revision,kind,answers_json,created_at) VALUES(?1,?2,?3,?4,?5,?6,?7)", params![response_id,request_id,submission_id,expected_revision,enum_name(kind)?,json(&ordered)?,now]).map_err(unavailable)?;
     if kind == HumanInteractionResponseKind::Submitted {
         tx.execute("INSERT INTO human_interaction_deliveries(response_id,status,revision,target_run_id,user_message_id,error_code) VALUES(?1,'pending',0,NULL,NULL,NULL)", [&response_id]).map_err(unavailable)?;
+    } else {
+        ignored_history::admit_ignored_projection(&tx, conversation_id, &response_id, now)?;
     }
     let result = load_request(&tx, conversation_id, request_id)?;
     tx.commit().map_err(unavailable)?;
@@ -622,3 +624,9 @@ pub use asynchronous::*;
 
 mod message_projection;
 pub(crate) use message_projection::*;
+
+mod ignored_history;
+pub use ignored_history::bind_ignored_at_sampling;
+pub(crate) use ignored_history::{
+    flush_ignored_for_terminal, is_materialized_ignored_backend_state,
+};

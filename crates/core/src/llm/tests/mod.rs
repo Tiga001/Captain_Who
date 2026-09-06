@@ -258,6 +258,7 @@ async fn write_test_http_response_with_headers(
 
 fn chat_message(role: &str, content: &str) -> AgentChatMessage {
     AgentChatMessage {
+        conversation_completion_covered: false,
         message_id: None,
         role: role.to_string(),
         content: content.to_string(),
@@ -339,6 +340,7 @@ fn traced_chat_message(content: &str) -> AgentChatMessage {
         None,
     );
     AgentChatMessage {
+        conversation_completion_covered: false,
         message_id: Some("assistant-history".to_string()),
         role: "assistant".to_string(),
         content: content.to_string(),
@@ -359,6 +361,7 @@ fn traced_narration_chat_message(message_id: &str, content: &str) -> AgentChatMe
         None,
     );
     AgentChatMessage {
+        conversation_completion_covered: false,
         message_id: Some(message_id.to_string()),
         role: "assistant".to_string(),
         content: content.to_string(),

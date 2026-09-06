@@ -1101,12 +1101,26 @@ fn list_journal_entries(
                 let trace =
                     conversation_trace_repository::get_trace_for_message(connection, &message_id)?;
                 if let Some(trace) = &trace {
-                    for item in trace.items.iter().filter(|item| item.is_model_visible()) {
+                    for item in trace.items.iter().filter(|item| {
+                        item.is_model_visible()
+                            && !matches!(
+                                item,
+                                crate::ConversationTurnTraceItem::BackendState {
+                                    placement:
+                                        crate::ConversationBackendStatePlacement::AfterMessage,
+                                    ..
+                                }
+                            )
+                    }) {
                         entries.push(ContextCompactionSourceItem::TraceItem {
                             cursor: ContextJournalCursor::trace_item(&message_id, item.sequence()),
                             run_id: trace.run_id.clone(),
                             created_at: match item {
                                 crate::ConversationTurnTraceItem::UserGuidance {
+                                    created_at,
+                                    ..
+                                }
+                                | crate::ConversationTurnTraceItem::BackendState {
                                     created_at,
                                     ..
                                 } => *created_at,
@@ -1133,8 +1147,30 @@ fn list_journal_entries(
                     created_at,
                     status,
                     terminal_status,
-                    terminal_error: trace.and_then(|trace| trace.terminal_error),
+                    terminal_error: trace
+                        .as_ref()
+                        .and_then(|trace| trace.terminal_error.clone()),
                 });
+                if let Some(trace) = &trace {
+                    for item in &trace.items {
+                        if let crate::ConversationTurnTraceItem::BackendState {
+                            placement: crate::ConversationBackendStatePlacement::AfterMessage,
+                            created_at,
+                            ..
+                        } = item
+                        {
+                            entries.push(ContextCompactionSourceItem::TraceItem {
+                                cursor: ContextJournalCursor::trace_item(
+                                    &message_id,
+                                    item.sequence(),
+                                ),
+                                run_id: trace.run_id.clone(),
+                                created_at: *created_at,
+                                item: Box::new(item.clone()),
+                            });
+                        }
+                    }
+                }
             }
             _ => {
                 return Err(ContextCompactionRepositoryError::Invalid(format!(

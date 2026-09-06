@@ -616,36 +616,6 @@ pub(super) fn suppressed_narration_context_item() -> ContextItem {
     )
 }
 
-/// Optional, read-only status on a naturally reached model boundary. Invalid/unavailable status
-/// must not interrupt ordinary work, inject an answer, or create a persistent message.
-pub(super) fn human_interaction_ignored_context(
-    host: &dyn AgentHumanInteractionRuntimeHost,
-    request: AgentSamplingBoundaryRequest,
-) -> Option<ContextItem> {
-    let state = host.natural_sampling_state(request).ok()?;
-    if state.ignored_request_ids.is_empty()
-        || state
-            .ignored_request_ids
-            .iter()
-            .any(|id| crate::human_interaction::validate_human_interaction_id(id).is_err())
-        || state
-            .ignored_request_ids
-            .iter()
-            .collect::<std::collections::BTreeSet<_>>()
-            .len()
-            != state.ignored_request_ids.len()
-        || serde_json::to_vec(&state.ignored_request_ids).ok()?.len()
-            > crate::human_interaction::HUMAN_INTERACTION_MAX_INPUT_BYTES
-    {
-        return None;
-    }
-    Some(ContextItem::text(
-        LlmMessageRole::System,
-        format!("## 异步交互状态\n{}\n这些批次已被用户忽略，没有提交回应。尊重用户选择，不要重复请求、假定回应，或把忽略视作同意或所请求事项已经发生。", json!({"type":"human_interaction_status","schemaVersion":1,"ignoredRequestIds":state.ignored_request_ids})),
-        ContextSource::RuntimeGuard, ContextScope::Run, ContextRetention::RequestOnly,
-    ))
-}
-
 pub(super) fn accept_async_human_question(
     host: Option<&dyn AgentHumanInteractionRuntimeHost>,
     context: Option<&AgentRunContext>,

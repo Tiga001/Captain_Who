@@ -15,6 +15,13 @@ pub struct AgentChatMessage {
     /// author this field; Core validates it against the durable trace before use.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub conversation_model_context_items: Vec<ConversationModelContextItem>,
+    /// Host-only compaction projection: this assistant's final message/terminal is already covered.
+    #[serde(default, skip_serializing_if = "conversation_completion_not_covered")]
+    pub conversation_completion_covered: bool,
+}
+
+fn conversation_completion_not_covered(value: &bool) -> bool {
+    !*value
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]

@@ -1,4 +1,5 @@
 use super::*;
+use crate::storage::human_interaction_repository;
 
 /// Outcome of publishing a Runtime's `WaitingForApproval` projection.
 ///
@@ -377,7 +378,63 @@ impl StorageService {
         collaboration_cutoff: Option<u64>,
     ) -> Result<(), String> {
         let mut connection = self.state.connection()?;
-        let transaction = connection.transaction().map_err(storage_error)?;
+        let transaction = connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(storage_error)?;
+        // A terminal retry can follow an idle observation; a failed binding reply can also leave
+        // the active Runtime unaware of an already committed ignored event. Preserve an exact
+        // suffix only, and require the durable receipt for every unacknowledged active event.
+        let mut effective_trace = trace.clone();
+        let mut effective_model_items = model_context_items.map(<[_]>::to_vec);
+        if let Some(stored) =
+            conversation_trace_repository::get_trace_for_message(&transaction, message_id)
+                .map_err(storage_error)?
+        {
+            if stored.items.len() > trace.items.len()
+                && stored.items[..trace.items.len()] == trace.items
+                && stored.items[trace.items.len()..]
+                    .iter()
+                    .all(|item| matches!(item, ConversationTurnTraceItem::BackendState { .. }))
+            {
+                let mut authorized = stored.terminal_status.is_terminal();
+                if !authorized {
+                    authorized = true;
+                    for item in &stored.items[trace.items.len()..] {
+                        if !human_interaction_repository::is_materialized_ignored_backend_state(
+                            &transaction,
+                            &stored,
+                            item,
+                        )
+                        .map_err(|error| error.to_string())?
+                        {
+                            authorized = false;
+                            break;
+                        }
+                    }
+                }
+                if authorized {
+                    effective_trace.items = stored.items;
+                    effective_trace.truncated |= stored.truncated;
+                    if let Some(incoming) = effective_model_items.as_mut() {
+                        let stored_items =
+                            conversation_model_context_repository::get_log_for_message(
+                                &transaction,
+                                message_id,
+                            )
+                            .map_err(storage_error)?
+                            .map(|log| log.items)
+                            .unwrap_or_default();
+                        if incoming.len() <= stored_items.len()
+                            && *incoming == stored_items[..incoming.len()]
+                        {
+                            *incoming = stored_items;
+                        }
+                    }
+                }
+            }
+        }
+        let trace = &effective_trace;
+        let model_context_items = effective_model_items.as_deref();
         chat_repository::update_message_status_and_content(
             &transaction,
             conversation_id,
@@ -422,6 +479,12 @@ impl StorageService {
         trace
             .validate_complete_model_context(&durable_model_context_items)
             .map_err(|error| format!("terminal Assistant model context is incomplete: {error}"))?;
+        human_interaction_repository::flush_ignored_for_terminal(
+            &transaction,
+            message_id,
+            completed_at,
+        )
+        .map_err(|error| error.to_string())?;
         provider_continuation_repository::promote_staged_trace_projections_in_connection(
             &transaction,
             conversation_id,

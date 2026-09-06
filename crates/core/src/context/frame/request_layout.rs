@@ -34,7 +34,7 @@ fn band(item: &ContextItem) -> u8 {
     } else if has(ContextSource::RunBootstrap) && has(ContextSource::WorldStateSnapshot) {
         9
     } else if metadata.retention == ContextRetention::RequestOnly {
-        // Todo, ignored-question state, repair and file-transaction guidance retain their
+        // Todo, repair and file-transaction guidance retain their
         // existing contribution order at the request tail.
         11
     } else {
@@ -196,6 +196,11 @@ mod tests {
             .with_group(group),
         ));
         frame.push(item(
+            "忽略交互事件",
+            ContextSource::BackendState,
+            ContextScope::Run,
+        ));
+        frame.push(item(
             "运行中新Skill",
             ContextSource::SkillInstructions,
             ContextScope::Run,
@@ -220,7 +225,6 @@ mod tests {
             tail("当前能力说明", ContextSource::RuntimeGuard)
                 .with_source(ContextSource::CapabilityInstructions),
         );
-        frame.push(tail("忽略状态", ContextSource::RuntimeGuard));
         frame.push(tail("修复提示", ContextSource::RuntimeGuard));
         frame.push(tail("文件事务", ContextSource::FileTransaction));
         frame.validate_cache_layout().unwrap();
@@ -246,12 +250,12 @@ mod tests {
                 "Run初始状态",
                 "运行叙述",
                 "工具结果",
+                "忽略交互事件",
                 "运行中新Skill",
                 "运行中状态差异",
                 "恢复的新epoch完整状态",
                 "运行中保护提示",
                 "Todo",
-                "忽略状态",
                 "修复提示",
                 "文件事务",
             ]

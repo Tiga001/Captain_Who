@@ -24,6 +24,7 @@ impl ConversationTurnTrace {
         let mut command_call_ids = BTreeSet::new();
         let mut command_sessions = BTreeMap::<&str, (&str, bool)>::new();
         let mut context_compactions = BTreeMap::<&str, bool>::new();
+        let mut backend_state_ids = BTreeSet::new();
         for item in &self.items {
             let sequence = item.sequence();
             if previous_sequence.is_some_and(|previous| sequence <= previous) {
@@ -32,6 +33,15 @@ impl ConversationTurnTrace {
             previous_sequence = Some(sequence);
 
             match item {
+                ConversationTurnTraceItem::BackendState { event_id, content, created_at, .. } => {
+                    if pending_call.is_some() {
+                        return Err("Backend state cannot split a tool exchange".to_string());
+                    }
+                    validate_backend_state(event_id, content, *created_at)?;
+                    if !backend_state_ids.insert(event_id) {
+                        return Err("Backend state event identity is duplicated".to_string());
+                    }
+                }
                 ConversationTurnTraceItem::AssistantNarration { content, .. } => {
                     if pending_call.is_some() {
                         return Err(

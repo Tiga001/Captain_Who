@@ -2112,6 +2112,7 @@ mod tests {
             skill_activation: None,
             skill_discovery: None,
             messages: vec![AgentChatMessage {
+                conversation_completion_covered: false,
                 message_id: Some("user-mcp-e2e".to_string()),
                 role: "user".to_string(),
                 content: "Call the owned MCP fixture.".to_string(),

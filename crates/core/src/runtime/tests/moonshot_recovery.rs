@@ -191,6 +191,7 @@ fn durable_assistant_history(
         .expect("restart must reload the exact model-context projection")
         .items;
     AgentChatMessage {
+        conversation_completion_covered: false,
         message_id: Some(assistant_message_id.to_string()),
         role: "assistant".to_string(),
         content: assistant.content.clone(),

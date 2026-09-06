@@ -242,6 +242,7 @@ async fn runtime_tool_registry_bridge_manager_stdio_fixture_chain() {
         skill_activation: None,
         skill_discovery: None,
         messages: vec![AgentChatMessage {
+            conversation_completion_covered: false,
             message_id: Some("user-mcp-stdio-e2e".to_string()),
             role: "user".to_string(),
             content: "Call the repository-owned MCP fixture.".to_string(),

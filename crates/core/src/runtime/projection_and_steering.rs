@@ -287,6 +287,44 @@ fn apply_agent_mailbox_delivery(
     Ok(())
 }
 
+fn apply_human_interaction_ignored_events(
+    events: &[AgentHumanInteractionIgnoredEvent],
+    active_context: &mut ContextFrame,
+    conversation_trace: &Arc<Mutex<ConversationTraceRecorder>>,
+    trace_observer: Option<&AgentConversationTraceObserver>,
+    assistant_message_id: &str,
+) -> AgentResult<()> {
+    let mut newly_recorded = Vec::new();
+    {
+        let mut recorder = conversation_trace.lock().unwrap_or_else(|error| error.into_inner());
+        for event in events {
+            crate::human_interaction::validate_human_interaction_id(&event.request_id)
+                .map_err(|_| AgentError::new("Invalid ignored question request identity."))?;
+            let content = json!({"type":"human_interaction_status", "requestId":event.request_id, "status":"ignored"}).to_string();
+            if let Some(content) = recorder.record_backend_state(
+                event.trace_sequence, &event.event_id, &content, event.created_at,
+                crate::ConversationBackendStatePlacement::Timeline,
+            ).map_err(AgentError::new)? {
+                newly_recorded.push((event.trace_sequence, content));
+            }
+        }
+    }
+    if newly_recorded.is_empty() {
+        return Ok(());
+    }
+    publish_trace_snapshot(conversation_trace, trace_observer)?;
+    for (sequence, content) in newly_recorded {
+        active_context.push(ContextItem::new(
+            LlmMessage::backend_state(content),
+            with_trace_origin(
+                ContextMetadata::new(ContextSource::BackendState, ContextScope::Run, ContextRetention::Retained),
+                Some(assistant_message_id), Some(sequence),
+            ),
+        ));
+    }
+    Ok(())
+}
+
 fn with_trace_origin(
     metadata: ContextMetadata,
     assistant_message_id: Option<&str>,
@@ -668,4 +706,3 @@ fn auto_executes_builtin_prepared_action(
                     && tool_name == crate::builtin_capabilities::ACTIVATE_CAPABILITY_TOOL_NAME
             ))
 }
-

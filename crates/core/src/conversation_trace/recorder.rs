@@ -356,6 +356,62 @@ impl ConversationTraceRecorder {
         }
     }
 
+    /// Admits one Host-owned state fact into the audit and model journals atomically.
+    /// Retrying the exact durable identity is a no-op; it never creates a second observation.
+    pub fn record_backend_state(
+        &mut self,
+        expected_sequence: u64,
+        event_id: &str,
+        content: &str,
+        created_at: i64,
+        placement: ConversationBackendStatePlacement,
+    ) -> Result<Option<String>, String> {
+        validate_backend_state(event_id, content, created_at)?;
+        if let Some(existing) = self.items.iter().find(|item| matches!(
+            item, ConversationTurnTraceItem::BackendState { event_id: existing_id, .. }
+                if existing_id == event_id
+        )) {
+            let identical = matches!(existing, ConversationTurnTraceItem::BackendState {
+                sequence, content: existing_content, created_at: existing_time,
+                placement: existing_placement, ..
+            } if *sequence == expected_sequence && existing_content == content
+                && *existing_time == created_at && *existing_placement == placement);
+            let model_is_present = self.model_context_items.iter().any(|item| {
+                item.sequence == expected_sequence && item.ordinal == 0 && item.role == "user"
+                    && item.content == content && item.tool_calls.is_empty()
+                    && item.tool_call_id.is_none() && !item.is_error
+            });
+            return if identical && model_is_present { Ok(None) } else {
+                Err("Backend state identity conflicts with its durable journals".to_string())
+            };
+        }
+        if self.next_sequence != expected_sequence {
+            return Err("Backend state expected trace sequence does not match".to_string());
+        }
+        if self.unresolved_tool_call().is_some() {
+            return Err("Backend state cannot split an unresolved tool exchange".to_string());
+        }
+        if self.model_context_items.iter().any(|item| item.sequence == expected_sequence) {
+            return Err("Backend state model sequence is already occupied".to_string());
+        }
+        let (model_item, truncated) = model_context_item_from_message(
+            expected_sequence, 0, &LlmMessage::text(crate::llm::LlmMessageRole::User, content),
+        )?;
+        if truncated || model_item.content != content {
+            return Err("Backend state model projection must preserve its exact JSON".to_string());
+        }
+        self.items.push(ConversationTurnTraceItem::BackendState {
+            sequence: expected_sequence,
+            event_id: event_id.to_string(),
+            content: content.to_string(),
+            created_at,
+            placement,
+        });
+        self.model_context_items.push(model_item);
+        self.next_sequence = self.next_sequence.saturating_add(1);
+        Ok(Some(content.to_string()))
+    }
+
     pub(crate) fn record_user_guidance(
         &mut self,
         guidance_id: &str,

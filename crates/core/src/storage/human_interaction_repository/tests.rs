@@ -51,7 +51,7 @@ fn insert_conversation(connection: &Connection, id: &str) {
 }
 fn insert_trace(connection: &Connection, conversation: &str, run: &str, assistant: &str) {
     connection.execute("INSERT INTO messages(id,conversation_id,role,content,status,created_at,position) VALUES(?1,?2,'assistant','','in_progress',2,1)", params![assistant,conversation]).unwrap();
-    connection.execute("INSERT INTO conversation_turn_traces(assistant_message_id,conversation_id,run_id,schema_version,terminal_status,truncated,created_at,updated_at) VALUES(?1,?2,?3,1,'in_progress',0,2,2)", params![assistant,conversation,run]).unwrap();
+    connection.execute("INSERT INTO conversation_turn_traces(assistant_message_id,conversation_id,run_id,schema_version,terminal_status,truncated,created_at,updated_at) VALUES(?1,?2,?3,?4,'in_progress',0,2,2)", params![assistant,conversation,run,crate::CONVERSATION_TURN_TRACE_SCHEMA_VERSION]).unwrap();
 }
 fn owner(tool: &str) -> HostHumanInteractionOwner {
     HostHumanInteractionOwner {
@@ -938,3 +938,6 @@ mod sync_tests;
 
 #[path = "async_tests.rs"]
 mod async_tests;
+
+#[path = "ignored_history_tests.rs"]
+mod ignored_history_tests;

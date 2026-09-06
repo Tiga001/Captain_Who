@@ -3,9 +3,9 @@ use super::{
     ContextSource,
 };
 use crate::conversation_trace::{
-    render_tool_observation, render_user_guidance_content, ConversationModelContextItem,
-    ConversationTraceToolResultStatus, ConversationTurnTrace, ConversationTurnTraceItem,
-    ConversationTurnTraceTerminalStatus,
+    render_tool_observation, render_user_guidance_content, ConversationBackendStatePlacement,
+    ConversationModelContextItem, ConversationTraceToolResultStatus, ConversationTurnTrace,
+    ConversationTurnTraceItem, ConversationTurnTraceTerminalStatus,
 };
 use crate::llm::{validate_model_tool_call_id, LlmMessageRole, LlmToolCall};
 use crate::protocol::{AgentError, AgentResult, AgentToolResult};
@@ -14,6 +14,7 @@ use serde_json::json;
 pub(crate) struct RenderedConversationTrace {
     pub(crate) activity_items: Vec<ContextItem>,
     pub(crate) terminal_item: Option<ContextItem>,
+    pub(crate) postlude_items: Vec<ContextItem>,
 }
 
 pub(crate) struct ConversationTraceRenderer;
@@ -41,10 +42,27 @@ impl ConversationTraceRenderer {
             .last()
             .map(|item| item.sequence)
             .expect("non-empty model context prefix");
-        let mut activity_items = model_context_items
-            .iter()
-            .map(|item| model_context_item(item, &trace.assistant_message_id))
-            .collect::<AgentResult<Vec<_>>>()?;
+        let mut activity_items = Vec::new();
+        let mut postlude_items = Vec::new();
+        for item in model_context_items {
+            let trace_item = trace
+                .items
+                .iter()
+                .find(|candidate| candidate.sequence() == item.sequence)
+                .expect("validated model context trace owner");
+            let rendered = model_context_item(item, &trace.assistant_message_id, trace_item)?;
+            if matches!(
+                trace_item,
+                ConversationTurnTraceItem::BackendState {
+                    placement: ConversationBackendStatePlacement::AfterMessage,
+                    ..
+                }
+            ) {
+                postlude_items.push(rendered);
+            } else {
+                activity_items.push(rendered);
+            }
+        }
         let suffix = ConversationTurnTrace {
             schema_version: trace.schema_version,
             run_id: trace.run_id.clone(),
@@ -62,9 +80,11 @@ impl ConversationTraceRenderer {
         };
         let rendered_suffix = Self::render(&suffix)?;
         activity_items.extend(rendered_suffix.activity_items);
+        postlude_items.extend(rendered_suffix.postlude_items);
         Ok(RenderedConversationTrace {
             activity_items,
             terminal_item: rendered_suffix.terminal_item,
+            postlude_items,
         })
     }
 
@@ -74,10 +94,36 @@ impl ConversationTraceRenderer {
             .map_err(|error| AgentError::new(format!("ConversationTurnTrace 无效：{error}")))?;
 
         let mut activity_items = Vec::with_capacity(trace.items.len());
+        let mut postlude_items = Vec::new();
         let mut pending_exchange: Option<PendingExchange> = None;
 
         for (index, item) in trace.items.iter().enumerate() {
             match item {
+                ConversationTurnTraceItem::BackendState {
+                    sequence,
+                    content,
+                    placement,
+                    ..
+                } => {
+                    if pending_exchange.is_some() {
+                        return Err(AgentError::new(
+                            "Backend state cannot split a tool exchange.",
+                        ));
+                    }
+                    let rendered = ContextItem::new(
+                        crate::llm::LlmMessage::backend_state(content),
+                        trace_item_metadata(&trace.assistant_message_id, *sequence)
+                            .with_source(ContextSource::BackendState),
+                    );
+                    match placement {
+                        ConversationBackendStatePlacement::Timeline => {
+                            activity_items.push(rendered)
+                        }
+                        ConversationBackendStatePlacement::AfterMessage => {
+                            postlude_items.push(rendered)
+                        }
+                    }
+                }
                 ConversationTurnTraceItem::AssistantNarration {
                     sequence, content, ..
                 } => {
@@ -256,6 +302,7 @@ impl ConversationTraceRenderer {
         Ok(RenderedConversationTrace {
             activity_items,
             terminal_item,
+            postlude_items,
         })
     }
 }
@@ -263,8 +310,15 @@ impl ConversationTraceRenderer {
 fn model_context_item(
     item: &ConversationModelContextItem,
     assistant_message_id: &str,
+    trace_item: &ConversationTurnTraceItem,
 ) -> AgentResult<ContextItem> {
     let metadata = trace_item_metadata(assistant_message_id, item.sequence);
+    if matches!(trace_item, ConversationTurnTraceItem::BackendState { .. }) {
+        return Ok(ContextItem::new(
+            crate::llm::LlmMessage::backend_state(&item.content),
+            metadata.with_source(ContextSource::BackendState),
+        ));
+    }
     match item.role.as_str() {
         "user" => Ok(ContextItem::new(
             crate::llm::LlmMessage::text(LlmMessageRole::User, item.content.clone()),
@@ -583,6 +637,7 @@ mod tests {
                 },
                 ConversationTurnTraceItem::UserGuidance { .. }
                 | ConversationTurnTraceItem::AgentMailboxDelivery { .. }
+                | ConversationTurnTraceItem::BackendState { .. }
                 | ConversationTurnTraceItem::CommandSessionLifecycle { .. }
                 | ConversationTurnTraceItem::ContextCompactionLifecycle { .. }
                 | ConversationTurnTraceItem::RuntimeError { .. } => unreachable!(),
@@ -947,6 +1002,7 @@ mod tests {
                 ConversationTurnTraceItem::AssistantNarration { .. }
                 | ConversationTurnTraceItem::UserGuidance { .. }
                 | ConversationTurnTraceItem::AgentMailboxDelivery { .. }
+                | ConversationTurnTraceItem::BackendState { .. }
                 | ConversationTurnTraceItem::CommandSessionLifecycle { .. }
                 | ConversationTurnTraceItem::ContextCompactionLifecycle { .. }
                 | ConversationTurnTraceItem::RuntimeError { .. } => {}

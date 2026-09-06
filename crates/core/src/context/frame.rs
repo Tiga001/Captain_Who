@@ -117,6 +117,7 @@ pub(crate) enum ContextSource {
     ConversationSummary,
     WorldStateSnapshot,
     WorldStateDiff,
+    BackendState,
     /// A committed request-boundary observation which has not yet been adopted by a successful
     /// model request. Conversation ownership alone must not make this active overlay durable.
     WorldStateUnobserved,
@@ -150,6 +151,7 @@ impl ContextSource {
             Self::ConversationSummary => "conversation_summary",
             Self::WorldStateSnapshot => "world_state_snapshot",
             Self::WorldStateDiff => "world_state_diff",
+            Self::BackendState => "backend_state",
             Self::WorldStateUnobserved => "world_state_unobserved",
             Self::ConversationHistory => "conversation_history",
             Self::ConversationTrace => "conversation_trace",
@@ -180,6 +182,7 @@ impl ContextSource {
             "conversation_summary" => Some(Self::ConversationSummary),
             "world_state_snapshot" => Some(Self::WorldStateSnapshot),
             "world_state_diff" => Some(Self::WorldStateDiff),
+            "backend_state" => Some(Self::BackendState),
             "world_state_unobserved" => Some(Self::WorldStateUnobserved),
             "conversation_history" => Some(Self::ConversationHistory),
             "conversation_trace" => Some(Self::ConversationTrace),
@@ -491,6 +494,7 @@ impl ContextMetadata {
         if self.sources.contains(&ContextSource::ConversationSummary)
             || self.sources.contains(&ContextSource::WorldStateSnapshot)
             || self.sources.contains(&ContextSource::WorldStateDiff)
+            || self.sources.contains(&ContextSource::BackendState)
         {
             return LlmMessagePlacement::BackendStateTimeline;
         }

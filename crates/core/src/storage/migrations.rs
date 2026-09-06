@@ -1,13 +1,13 @@
 use rusqlite::{ffi, Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
 
-pub const STORAGE_SCHEMA_VERSION: i32 = 40;
+pub const STORAGE_SCHEMA_VERSION: i32 = 41;
 pub const DEVELOPMENT_STORAGE_SCHEMA_RESET_REQUIRED: &str =
     "development_storage_schema_reset_required";
 
 const CANONICAL_SCHEMA: &str = include_str!("canonical_schema.sql");
 const CANONICAL_SCHEMA_FINGERPRINT: &str =
-    "sha256:2df6952791a7a8fe0b8c2c962281b39158d5e8b84b18c60cee66994909a5b8b6";
+    "sha256:f4fb8423e11200ca2e383cd904f624ec1792f8fe8c758a205a904c7b88d8a017";
 /// Opens the canonical schema without migrating historical development databases.
 ///
 /// A brand-new database is initialized atomically. Existing development databases must already
@@ -232,6 +232,137 @@ mod tests {
         assert!(connection.execute("INSERT INTO human_interaction_responses(response_id,request_id,submission_id,base_revision,kind,answers_json,created_at) VALUES ('large','other','large',0,'submitted',?1,2)", [oversize_answers]).is_err());
         let oversize_checkpoint = format!("{{\"value\":\"{}\"}}", "a".repeat(1048576));
         assert!(connection.execute("INSERT INTO human_interaction_suspensions(request_id,run_id,assistant_message_id,tool_call_id,checkpoint_json,status,revision,created_at,updated_at) VALUES ('request','run','assistant','tool',?1,'waiting',0,1,1)", [oversize_checkpoint]).is_err());
+    }
+
+    #[test]
+    fn ignored_history_schema_enforces_owner_shape_and_retains_deleted_target_receipts() {
+        let connection = Connection::open_in_memory().unwrap();
+        run_migrations(&connection).unwrap();
+        // Seed only the ownership facts exercised here; the root graph is separately validated.
+        connection
+            .pragma_update(None, "foreign_keys", false)
+            .unwrap();
+        connection.execute_batch(
+            "INSERT INTO conversations(id,title,created_at,updated_at) VALUES ('chat','Chat',1,1),('other','Other',1,1);
+             INSERT INTO messages(id,conversation_id,role,content,created_at,position) VALUES
+               ('source','chat','assistant','Source',1,0),
+               ('target','chat','assistant','Target',1,1),
+               ('deleted-target','chat','assistant','Deleted target',1,2),
+               ('user-target','chat','user','User',1,3),
+               ('foreign-target','other','assistant','Foreign',1,0);
+             INSERT INTO conversation_turn_traces(assistant_message_id,conversation_id,run_id,schema_version,terminal_status,truncated,created_at,updated_at,completed_at) VALUES
+               ('source','chat','source-run',1,'completed',0,1,1,1),
+               ('target','chat','target-run',1,'completed',0,1,1,1),
+               ('deleted-target','chat','deleted-run',1,'completed',0,1,1,1),
+               ('foreign-target','other','foreign-run',1,'completed',0,1,1,1);"
+        ).unwrap();
+        for index in 0..5 {
+            let status = if index == 4 { "submitted" } else { "ignored" };
+            connection.execute(
+                "INSERT INTO human_interaction_requests(request_id,conversation_id,agent_id,run_id,assistant_message_id,tool_call_id,mode,status,revision,policy_revision,questions_json,created_at,updated_at)
+                 VALUES (?1,'chat','unused-root','source-run','source',?1,'async',?2,1,0,'[]',1,1)",
+                rusqlite::params![format!("request-{index}"), status],
+            ).unwrap();
+            connection.execute(
+                "INSERT INTO human_interaction_responses(response_id,request_id,submission_id,base_revision,kind,answers_json,created_at) VALUES (?1,?2,?1,0,?3,'[]',1)",
+                rusqlite::params![format!("response-{index}"), format!("request-{index}"), status],
+            ).unwrap();
+        }
+        connection
+            .pragma_update(None, "foreign_keys", true)
+            .unwrap();
+        let insert = |response: &str,
+                      target: &str,
+                      run: &str,
+                      status: &str,
+                      sequence: Option<i64>,
+                      batch: Option<i64>| {
+            connection.execute(
+                "INSERT INTO human_interaction_ignored_projections(response_id,conversation_id,target_assistant_message_id,target_run_id,placement,status,trace_sequence,model_batch_index)
+                 VALUES (?1,'chat',?2,?3,'timeline',?4,?5,?6)",
+                rusqlite::params![response,target,run,status,sequence,batch],
+            )
+        };
+        for (target, run) in [
+            ("target", "wrong-run"),
+            ("foreign-target", "foreign-run"),
+            ("user-target", "target-run"),
+            ("missing-target", "target-run"),
+        ] {
+            assert!(insert("response-0", target, run, "pending", None, None).is_err());
+        }
+        assert!(insert("response-4", "target", "target-run", "pending", None, None).is_err());
+        for (status, sequence, batch) in [
+            ("pending", Some(0), None),
+            ("pending", None, Some(1)),
+            ("materialized", None, None),
+            ("materialized", Some(-1), None),
+            ("materialized", Some(0), Some(0)),
+            ("unknown", None, None),
+        ] {
+            assert!(insert(
+                "response-0",
+                "target",
+                "target-run",
+                status,
+                sequence,
+                batch
+            )
+            .is_err());
+        }
+        insert("response-0", "target", "target-run", "pending", None, None).unwrap();
+        insert(
+            "response-1",
+            "deleted-target",
+            "deleted-run",
+            "materialized",
+            Some(0),
+            None,
+        )
+        .unwrap();
+        insert(
+            "response-2",
+            "deleted-target",
+            "deleted-run",
+            "pending",
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(insert(
+            "response-3",
+            "deleted-target",
+            "deleted-run",
+            "materialized",
+            Some(0),
+            None
+        )
+        .is_err());
+        assert!(connection.execute("UPDATE human_interaction_ignored_projections SET target_run_id='wrong-run' WHERE response_id='response-0'", []).is_err());
+        connection.execute("UPDATE human_interaction_ignored_projections SET status='materialized',trace_sequence=0,model_batch_index=1 WHERE response_id='response-0'", []).unwrap();
+        assert!(connection.execute("UPDATE human_interaction_ignored_projections SET status='pending',trace_sequence=NULL,model_batch_index=NULL WHERE response_id='response-0'", []).is_err());
+
+        connection
+            .execute("DELETE FROM messages WHERE id='deleted-target'", [])
+            .unwrap();
+        for (response, expected_status, expected_sequence) in [
+            ("response-1", "materialized", Some(0)),
+            ("response-2", "cancelled", None),
+        ] {
+            let receipt = connection.query_row(
+                "SELECT status,target_assistant_message_id,trace_sequence FROM human_interaction_ignored_projections WHERE response_id=?1",
+                [response],
+                |row| Ok((row.get::<_,String>(0)?, row.get::<_,Option<String>>(1)?, row.get::<_,Option<i64>>(2)?)),
+            ).unwrap();
+            assert_eq!(
+                receipt,
+                (expected_status.to_string(), None, expected_sequence)
+            );
+            assert!(connection.execute("UPDATE human_interaction_ignored_projections SET target_assistant_message_id='target',target_run_id='target-run' WHERE response_id=?1", [response]).is_err());
+        }
+        connection.execute(
+            "INSERT INTO conversation_turn_trace_items(assistant_message_id,sequence,item_kind,item_json) VALUES ('target',0,'backend_state','{\"type\":\"backend_state\",\"sequence\":0}')", [],
+        ).unwrap();
     }
 
     #[test]
@@ -653,7 +784,7 @@ CREATE TABLE model_provider_credential_cleanup (
             .contains(DEVELOPMENT_STORAGE_SCHEMA_RESET_REQUIRED));
         assert!(error
             .to_string()
-            .contains("expected schema version 40, found 30"));
+            .contains("expected schema version 41, found 30"));
         assert_eq!(read_schema_version(&connection).unwrap(), 30);
         assert_eq!(schema_fingerprint(&connection).unwrap(), fingerprint_before);
         let columns = connection

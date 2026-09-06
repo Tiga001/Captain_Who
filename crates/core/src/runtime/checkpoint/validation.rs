@@ -355,6 +355,7 @@ fn validate_conversation_trace_tool_call_ids(
                 validate_model_tool_call_id(call_id)?;
             }
             ConversationTurnTraceItem::AssistantNarration { .. }
+            | ConversationTurnTraceItem::BackendState { .. }
             | ConversationTurnTraceItem::UserGuidance { .. }
             | ConversationTurnTraceItem::AgentMailboxDelivery { .. }
             | ConversationTurnTraceItem::CommandSessionLifecycle { .. }
