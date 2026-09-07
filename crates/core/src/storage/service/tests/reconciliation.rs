@@ -23,9 +23,25 @@ fn current_model_context_for_trace(
         .items
         .iter()
         .filter_map(|item| match item {
+            ConversationTurnTraceItem::ContextMaterial {
+                sequence,
+                content,
+                images,
+                ..
+            } => Some(crate::ConversationModelContextItem {
+                images: images.clone(),
+                sequence: *sequence,
+                ordinal: 0,
+                role: "user".to_string(),
+                content: content.clone(),
+                tool_call_id: None,
+                tool_calls: Vec::new(),
+                is_error: false,
+            }),
             ConversationTurnTraceItem::AssistantNarration {
                 sequence, content, ..
             } => Some(crate::ConversationModelContextItem {
+                images: Vec::new(),
                 sequence: *sequence,
                 ordinal: 0,
                 role: "assistant".to_string(),
@@ -37,6 +53,7 @@ fn current_model_context_for_trace(
             ConversationTurnTraceItem::UserGuidance {
                 sequence, content, ..
             } => Some(crate::ConversationModelContextItem {
+                images: Vec::new(),
                 sequence: *sequence,
                 ordinal: 0,
                 role: "user".to_string(),
@@ -51,6 +68,7 @@ fn current_model_context_for_trace(
             | ConversationTurnTraceItem::BackendState {
                 sequence, content, ..
             } => Some(crate::ConversationModelContextItem {
+                images: Vec::new(),
                 sequence: *sequence,
                 ordinal: 0,
                 role: "user".to_string(),
@@ -66,6 +84,7 @@ fn current_model_context_for_trace(
                 operation,
                 ..
             } => Some(crate::ConversationModelContextItem {
+                images: Vec::new(),
                 sequence: *sequence,
                 ordinal: 0,
                 role: "assistant".to_string(),
@@ -90,6 +109,7 @@ fn current_model_context_for_trace(
                 observation,
                 ..
             } => Some(crate::ConversationModelContextItem {
+                images: Vec::new(),
                 sequence: *sequence,
                 ordinal: 0,
                 role: "tool".to_string(),
@@ -931,6 +951,8 @@ fn seed_current_terminal_assistant_trace(
             .then(|| "The run ended with a safe test failure.".to_string()),
         truncated: false,
         items: vec![ConversationTurnTraceItem::AssistantNarration {
+            provider_turn_id: None,
+            first_tool_call_id: None,
             sequence: 0,
             content: "current assistant output".to_string(),
             truncated: false,
@@ -2231,6 +2253,7 @@ fn startup_reconciliation_excludes_authoritatively_settled_manual_file_effects()
     service.upsert_agent_action_audit(command_approved).unwrap();
     let exact_model_items = vec![
         crate::ConversationModelContextItem {
+            images: Vec::new(),
             sequence: 0,
             ordinal: 0,
             role: "assistant".to_string(),
@@ -2252,6 +2275,7 @@ fn startup_reconciliation_excludes_authoritatively_settled_manual_file_effects()
             is_error: false,
         },
         crate::ConversationModelContextItem {
+            images: Vec::new(),
             sequence: 1,
             ordinal: 0,
             role: "tool".to_string(),
@@ -3158,6 +3182,8 @@ fn manual_command_settlement_inspection_distinguishes_commit_boundaries() {
     advanced
         .items
         .push(ConversationTurnTraceItem::AssistantNarration {
+            provider_turn_id: None,
+            first_tool_call_id: None,
             sequence: 2,
             content: "continued".to_string(),
             truncated: false,

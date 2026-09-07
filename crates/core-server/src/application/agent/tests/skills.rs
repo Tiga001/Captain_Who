@@ -1300,6 +1300,7 @@ fn conversation_turn_and_pending_restore_use_the_model_connection_override() {
         file_change_run_grant_ref: None,
         pending_file_observation: None,
         context_items: vec![mycopilot_core::AgentContextCheckpointItem {
+            context_image_refs: Vec::new(),
             role: "assistant".to_string(),
             content: String::new(),
             images: Vec::new(),
@@ -1349,6 +1350,7 @@ fn conversation_turn_and_pending_restore_use_the_model_connection_override() {
             truncated: false,
         }],
         conversation_model_context_items: vec![ConversationModelContextItem {
+            images: Vec::new(),
             sequence: 0,
             ordinal: 0,
             role: "assistant".to_string(),

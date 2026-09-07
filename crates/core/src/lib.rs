@@ -116,11 +116,15 @@ pub use conversation_trace::{
     terminal_conversation_trace_from_snapshot,
     terminal_conversation_trace_from_snapshot_with_tool_result, ConversationBackendStatePlacement,
     ConversationCommandSessionLifecycle, ConversationCommandSessionLifecyclePhase,
+    ConversationContextImageRef, ConversationContextMaterialKind,
     ConversationHistoryArchiveTraceMetadata, ConversationModelContextItem,
     ConversationModelContextLog, ConversationTraceAttachment, ConversationTraceRecorder,
     ConversationTraceSnapshot, ConversationTraceToolResultStatus, ConversationTurnTrace,
     ConversationTurnTraceItem, ConversationTurnTraceTerminalStatus,
     TerminalConversationTraceProjection, CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
+};
+pub use llm::{
+    fingerprint_llm_request, LlmMessageFingerprint, LlmRequestFingerprint, LlmValueFingerprint,
 };
 pub use model_request_observation::{
     ModelRequestActualUsage, ModelRequestCapacityStatus, ModelRequestEstimate,

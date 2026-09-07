@@ -431,6 +431,7 @@ fn model_context_allows_duplicate_raw_provider_ids_but_rejects_duplicate_runtime
         },
     };
     let mut item = ConversationModelContextItem {
+        images: Vec::new(),
         sequence: 0,
         ordinal: 0,
         role: "assistant".to_string(),

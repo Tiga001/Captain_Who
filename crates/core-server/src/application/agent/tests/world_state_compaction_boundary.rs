@@ -120,11 +120,14 @@ async fn prepared_request_survives_exact_trace_compaction_and_real_host_rebuild(
     trace
         .items
         .push(ConversationTurnTraceItem::AssistantNarration {
+            first_tool_call_id: None,
+            provider_turn_id: None,
             sequence: 0,
             content: "COVERED_TRACE_NARRATION".into(),
             truncated: false,
         });
     let model_context = vec![ConversationModelContextItem {
+        images: Vec::new(),
         sequence: 0,
         ordinal: 0,
         role: "assistant".into(),

@@ -215,6 +215,7 @@ fn resume_checkpoint(
         truncated: false,
     }];
     checkpoint.conversation_model_context_items = vec![ConversationModelContextItem {
+        images: Vec::new(),
         sequence: 0,
         ordinal: 0,
         role: "assistant".to_string(),

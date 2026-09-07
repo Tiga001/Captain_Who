@@ -37,6 +37,7 @@ fn queued_apply_patch_observation_restore_rejects_extra_duplicate_and_tampered_s
     };
     let context_items = vec![
         AgentContextCheckpointItem {
+            context_image_refs: Vec::new(),
             role: "assistant".to_string(),
             content: String::new(),
             images: Vec::new(),
@@ -60,6 +61,7 @@ fn queued_apply_patch_observation_restore_rejects_extra_duplicate_and_tampered_s
             origin: None,
         },
         AgentContextCheckpointItem {
+            context_image_refs: Vec::new(),
             role: "tool".to_string(),
             content: json!({
                 "path": "example.txt",

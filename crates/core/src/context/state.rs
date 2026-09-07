@@ -314,6 +314,14 @@ pub struct AgentConversationContextState {
 }
 
 impl AgentConversationContextState {
+    pub fn hydrate_context_images(
+        &mut self,
+        attachments: &[crate::AgentInputAttachment],
+    ) -> AgentResult<()> {
+        self.frame.hydrate_context_images(attachments)?;
+        self.detector.prepare_frame(&mut self.frame);
+        Ok(())
+    }
     pub(crate) fn new(
         configuration_revision: String,
         model: String,

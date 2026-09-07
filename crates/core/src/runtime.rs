@@ -4,6 +4,7 @@ mod checkpoint;
 mod command_dispatch;
 mod context_compaction;
 mod context_compaction_model;
+mod context_materials;
 mod conversation_world_state;
 mod events;
 mod extensions;
@@ -17,6 +18,7 @@ mod world_state;
 
 pub use api::*;
 use command_dispatch::*;
+use context_materials::*;
 use conversation_world_state::*;
 use events::*;
 use preparation::*;

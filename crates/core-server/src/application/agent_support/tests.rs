@@ -446,6 +446,7 @@ fn pending_continuation_uses_original_model_args_not_backend_bound_builder_field
         file_change_run_grant_ref: None,
         pending_file_observation: None,
         context_items: vec![AgentContextCheckpointItem {
+            context_image_refs: Vec::new(),
             role: "assistant".to_string(),
             content: String::new(),
             images: Vec::new(),

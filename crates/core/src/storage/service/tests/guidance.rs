@@ -81,6 +81,7 @@ fn in_progress_trace_and_guidance_application_commit_atomically() {
         .unwrap();
 
     let model_context_items = vec![crate::ConversationModelContextItem {
+        images: Vec::new(),
         sequence: 0,
         ordinal: 0,
         role: "user".to_string(),

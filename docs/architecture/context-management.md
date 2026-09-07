@@ -2,7 +2,7 @@
 status: current
 audience: developers
 owner: engineering
-last_verified: 2026-09-06
+last_verified: 2026-09-07
 ---
 
 # 上下文管理
@@ -24,7 +24,7 @@ last_verified: 2026-09-06
 SQLite 中的 `messages`、`ConversationTurnTrace`、当前 compaction head、Conversation World State 请求日志及当前 Run 已确认状态组成逻辑日志。所有消费者从这些事实派生：
 
 ```text
-messages + terminal traces + active compaction head
+messages + Trace/model-context journal + active compaction head
                          |
                          v
                   ContextAssembler
@@ -48,6 +48,7 @@ messages + terminal traces + active compaction head
 
 ```text
 user message
+ContextMaterial: attachment projection + preactivated Skill + initial Run World State
 assistant public narration
 Tool Call + Tool Result      # 一个不可拆分闭环
 ...
@@ -73,7 +74,7 @@ pending assistant message 的持久正文为空；“正在思考”等 UI place
 
 当前 Run 的 Tool Result 可以先落库，但在包含它的模型请求成功前仍属于 `run_transient`，不能被压缩覆盖。请求成功后，已观察前缀才能提升为 durable baseline。
 
-这些分类描述计量与持久化语义，不直接决定模型请求中的物理位置。初始附件、Skill 和 World State 保持原有 role、scope、retention；重排不会把 Run 材料提升为 Conversation 历史，也不会把 RequestOnly 指南固化到检查点。
+这些分类描述计量与持久化语义，不直接决定模型请求中的物理位置。当前 Run 的附件、Skill 和 Run World State 仍按运行态计量和保护；它们首次进入模型上下文时同时保存可重放的 `ContextMaterial` 事实。Run 结束后，历史重建保留原有角色、正文、图片引用和因果顺序，以 `HistoricalRunContext` 标识已经结束的运行材料。保存的是观察记录，不是 Skill 激活、工具挂载或审批权限。RequestOnly 指南不会因此固化进历史。
 
 ## 组装规则
 
@@ -86,7 +87,8 @@ pending assistant message 的持久正文为空；“正在思考”等 UI place
 04 当前能力使用指南（RequestOnly：浏览器、搜索、人机交互）
 05 Conversation World State full snapshot
 06 active semantic summary（若存在）
-07 coveredThrough 之后的旧历史及其 anchored World State diff
+07 coveredThrough 之后的统一历史及其 anchored World State diff
+   包含旧 Run 原样保留的输入、附件、Skill 说明、Run 状态与完整工具交换
 08 本次连续用户输入及其 anchored diff + 附件说明/图片
 09 Run 开始时预激活的 Skill 完整说明
 10 初始 Run World State full snapshot
@@ -102,7 +104,11 @@ pending assistant message 的持久正文为空；“正在思考”等 UI place
 
 本次输入可能包含多条连续 User 消息，不能只把最后一条抽到任务位置；它们之间的 anchored diff 随输入一起保留顺序。顶部 Skill/协作目录和预激活说明只来自 Run 初始组装；后来发生的 Skill 激活、恢复 full snapshot、状态 diff、同步 ToolResult 和异步 User 回应都留在当前 Run 的因果时间线，不能按内容类型全局提前。
 
-Run 结束后，第 8–11 项不会作为请求布局块整块写入历史。用户消息、已结算模型输出、Tool 交换及应保留的状态日志仍按原有持久化规则进入逻辑日志；下一 Run 从该日志重建历史，不携带上个 Run 的预激活说明或整份 Run 状态块。
+Run 结束后，第 8–11 项自然成为下一 Run 的第 7 项：原有用户消息、正文和工具日志继续保留；附件的已提取文本与图片引用、预激活 Skill 完整说明、初始和后续 Run 状态则通过 `ContextMaterial` 在原位置重放，不再次读取当前 Skill 文件或重新提取旧附件。运行过程中激活的 Skill、恢复状态及观察以同一种记录追加。旧 Run 的状态是历史观察，当前有效权限仍只由当前能力快照、Run State 和 Host 校验决定。
+
+普通换轮、tools/前缀不变且没有压缩时，上一请求的输入与已发生事件保留相同 provider 消息格式；新回复和新输入追加在其后。当前 Todo、单次修复和未完成文件事务仍是请求尾部，不承诺跨 Run 保留该尾部的缓存。压缩、Provider 切换、能力 Schema/指南或初始目录变化仍会改变共同前缀。
+
+`AssistantNarration` 通过 `provider_turn_id` 和 `first_tool_call_id` 关联所属响应及首个 canonical 工具调用。Generic 的首个 Tool Call 投影已经含有该响应正文时，历史组装不再追加它的独立 narration；原生 Provider 恢复私有 continuation 后也只撤下对应响应的独立正文。不能按文本去重，其他响应即使正文相同也必须保留。私有 MCP 参数和 FileChange successor 不为缓存写进公共历史。
 
 `RunBootstrap`、`RunInput`、`RunTimeline` 和 `CapabilityInstructions` 是附加布局标签，保留原来源、角色、内容、图片、工具参数和绑定。物理重排不改作用域、保留策略、SQLite journal、Trace sequence、压缩游标或权限判定。摘要生成请求有独立的输入契约，不套用主 Agent 请求布局。
 
@@ -111,6 +117,33 @@ Run 结束后，第 8–11 项不会作为请求布局块整块写入历史。�
 每次自然请求边界先冻结能力快照，再由同一快照生成 Schema、能力指南和 World State。会话中关闭能力后，下一次请求撤下对应 Schema 与指南，通过原时间位置的 World State diff 表达不可用及原因；diff 只记录状态，不重新携带指南。已经发出的请求无法追溯撤回，迟到执行仍由 Host 重新检查实时策略；设置切换本身不额外调用模型。人机交互关闭也不撤销已接纳问题的回答与恢复。
 
 此布局改善出现相同前缀的机会，不保证缓存命中或命中率提升。目录或能力指南变化时，其后长历史的共同前缀也可能失效；能力指南每次重建而不为缓存冻结。此次没有添加 Provider `cache_control`，厂商内部如何组合 tools/system/messages 仍由对应服务决定。
+
+### 最终请求指纹与跨 Run 诊断
+
+`MYCOPILOT_REQUEST_FINGERPRINT=1` 可启用最终 HTTP 发送边界诊断：在 Provider adapter 完成 payload 后、`reqwest` 发送前，向 Core Server stderr 输出一行 `[request-fingerprint]` JSON。默认关闭，不修改请求和持久化格式，不保存正文、工具参数或凭据。日志包含 model、tools 数量及 SHA-256、顶层 system、每条消息的序号/role/content UTF-8 字节数与字符数/content 指纹、整条消息指纹及完整 payload 指纹。字符数指 Unicode scalar count，不是 token 估算。结构化内容按 compact JSON 计算，数组顺序保留；整条消息指纹同时覆盖 reasoning、tool call ID 和 arguments，不能只比较可见正文。完整 payload 的指纹覆盖所有其他 Provider 字段。
+
+复现命令（临时数据库、本地可控 Provider，不调用真实模型）：
+
+```sh
+MYCOPILOT_REQUEST_FINGERPRINT=1 cargo test -p mycopilot-core-server --bin core-server request_prefix -- --nocapture
+```
+
+[Host 回归](../../crates/core-server/src/application/agent/tests/request_prefix.rs) 使用真实 `AgentService::start_conversation_turn`、项目绑定、设置/能力快照、SQLite、Rust Core Harness、`workspace_map`/两次 `read_file` 和 native DeepSeek V4 高推理序列化，在本地 HTTP 服务收到最终 JSON 时再计算指纹。第一 Run 发出三个请求，下一 Run 输入“谢谢”；比较上一 Run 最后请求的每条旧消息，而非只检查内容包含关系。请求长度必须增加；真实文件内容、成组工具交换、reasoning 都必须存在。
+
+2026-09-07 的窄范围诊断结果：
+
+| 路径                                           | tools           | 首个旧消息变化                                                             | 后续旧消息                                                                                |
+| ---------------------------------------------- | --------------- | -------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
+| 仅 Host 创建和保存消息                         | 23 个，指纹一致 | 无；12 条旧消息完整保留                                                    | 下一 Run 只在该前缀之后追加                                                               |
+| 首次请求发出后，Renderer 乐观 pair 迟到 upsert | 同上            | `messages[5]`（从 0 开始）的旧 user；仅 `user_message_created_at` 一行变化 | `messages[6]` 至 `messages[11]` 的旧 Run material、正文、reasoning、工具调用/结果全部一致 |
+
+此断点来自消息持久化竞争：[Renderer 提交](../../src/renderer/src/app/useAppShellMessageSubmission.ts) 同时排队乐观消息 upsert 并启动 Host Turn；[持久化队列](../../src/renderer/src/app/useConversationPersistence.ts) 等待 metadata 后才保存旧 pair。Host 已冻结本轮消息时间后，[普通消息 upsert](../../crates/core/src/storage/chat_repository.rs) 仍可覆盖 `created_at`。Run 终态不会纠正该字段；下一 Run 的历史组装从数据库重新读取时间，经 `<backend_conversation_timing>` 变为不同的模型输入。即使后面的文件历史逐字一致，共同前缀也会提前在最早的用户消息处结束。
+
+对所报告真实聊天的只读核对也发现：同一首轮的 user/assistant 消息时间均为 `1788713110306`，独立 Trace 创建时间为 `1788713110335`，差 29ms，符合该保存竞争的表现。但当时没有最终 wire 指纹或保留的初次 input 检查点，不能把此核对当成原始现场 payload 的直接捕获，更不能从本地回归推算 Provider 的确切缓存命中率。
+
+实际验证：2 项真实 Host 对照/缺陷复现通过；启用日志后的 8 次发送指纹与 HTTP 接收端计算结果完全一致；Rust Core 的 148 项 LLM 测试通过（含 4 项指纹校验）；Rust Core/Core Server all-targets Clippy、Rust 格式、文档格式和文档检查通过。未使用付费模型请求验证缓存率。
+
+本轮只加诊断与现状回归，没有修复持久化竞争或重排上下文。迟到保存测试有意断言当前断点，属于已知缺陷的复现，并不表示该行为正确；修复时应将它改为与正常路径相同的完整前缀不变断言。后续修复应先收敛 Host 接纳 Turn 后的消息字段写入权，防止旧 Renderer 快照改写模型已观察的时间；无需据此重新改造工具历史格式。无需重置开发数据库。
 
 ### Todo 存储与提醒预算
 
@@ -167,9 +200,18 @@ Prompt，也不参与可复用 Conversation configuration revision；Approval/Ch
 
 组装器应保持确定性：相同持久日志、active head、权限/工具集版本和请求输入应产生相同的逻辑帧。增量缓存只是优化；删除、重写、回退、分叉或摘要变化后，全量重建必须得到相同结果。
 
+### 统一历史材料的容量与压缩边界
+
+- `ContextMaterial` 同时写入 Trace 和 model-context 投影，事件 ID 与序号不可变。source revision 包含材料种类、正文、图片身份和时间；提交压缩前的 CAS 能发现来源变化。
+- 已结束 Run 的纯文字材料可以随完整前缀一起进入摘要；不能因为原来源叫 `SkillInstructions` 或 `WorldStateSnapshot` 就永久保护。
+- 历史图片保存附件 ID、MIME 和内容摘要，Host 按会话/消息归属读取并核验 SHA-256 后恢复原图片。缺失或被篡改会拒绝发送，不静默去图，也不根据历史路径读任意文件。
+- 文本摘要暂不替代图片。压缩覆盖包含图片的区间时，原图及同项文本作为保留材料继续占用上下文；容量报告计入这些图片。`CompactionRetained` 只是内部保护标记，防止同一已覆盖材料再次计入压缩来源或生成不前进的游标。
+- 当前 Run 的材料在压缩后仍按原布局保留；该 Run 结束后，被摘要覆盖的纯文字不再恢复。fork/child snapshot 只继承边界内的观察材料，不继承激活权限、待投递工作或用量。
+- 历史重建与活动帧合并时按 journal origin 对齐，不能同时计入两份材料；若恢复了活动 Run 的来源和布局标签，会使聚合计量缓存失效并重新计算分类，保证热缓存与冷重建的容量一致。
+
 ### 压缩与恢复时的布局
 
-压缩后，模型消息和 Tool 交换从权威 journal 重建，尚需保留的 Run overlay 则继续存在。`request_order` 元数据将仍存活的 journal 项与 overlay 的相对位置关联起来，防止压缩后把后发的工具结果移到先发的 Skill/World State 之前；它不改变历史游标，也不重复复制已经重建的消息。该布局次序随私有 checkpoint 保存和恢复，恢复后的新 full Run World State 仍在恢复边界后追加。
+压缩后，模型消息、Tool 交换和 ContextMaterial 从权威 journal 重建；同一材料按 journal origin 对齐，当前帧与 baseline 不重复添加。尚需保留的 Run overlay 则继续存在。`request_order` 元数据将仍存活的 journal 项与 overlay 的相对位置关联起来，防止压缩后把后发的工具结果移到先发的 Skill/World State 之前；它不改变历史游标，也不重复复制已经重建的消息。该布局次序随私有 checkpoint 保存和恢复，恢复后的新 full Run World State 仍在恢复边界后追加。
 
 共享 baseline 不保存其他 Run 的初始选择或当前输入标签；新 Run 在自己的帧副本上标记初始内容。Conversation-owned、尚未确认观察的状态可以随 baseline 保留，但计量和压缩仍识别其 `run_transient` 属性。模型发送与上下文预览使用相同布局投影。
 
@@ -372,6 +414,25 @@ Workspace Clippy（all targets，warnings as errors）、Rustfmt、修改文档�
 当前未完成事务的状态与精确游标。纯文字违规提醒只进入下一次请求；工具旁白被屏蔽的事实以普通
 `BackendState` 留在其完整工具批次之后，随历史压缩，不长期保护过期操作指令。
 详见 [FileChange 模型上下文](../subsystems/file-change.md#模型上下文的三种寿命)。
+
+## 2026-09-07 统一跨 Run 历史验收
+
+已完成旧第 7 层与本轮第 8–11 层的统一材料记录和重放，适配容量、自动/手动压缩、fork、child snapshot、历史裁剪和同版本恢复。稳定前缀、动态工具策略以及 Todo/修复/未完成文件事务尾部保持现状。本轮不新增缓存遥测系统，不引入图片摘要器。
+
+实际执行并通过：
+
+- Rust Core 全量单元测试：`cargo test --locked -p mycopilot-core --lib -- --quiet`，**2,566 通过、10 项已有忽略**。其中真实 Runtime + SQLite 重启 + 三轮请求分别验证 DeepSeek、Generic OpenAI、Generic Anthropic 的实际发送内容：不变条件下，上一轮请求 messages 是下一轮的完整前缀；tools/system 不变，工具正文与结果不重复，私有 reasoning 保持 Provider 边界。另有原图引用、审批/引导、压缩、分支和冷/热容量回归。
+- Core Server 主程序：`cargo test --locked -p mycopilot-core-server --bin core-server -- --quiet --test-threads=8`，**865 通过、3 项已有忽略**；Core Server library **33 通过**；受管 MCP stdio 真实集成测试退出码 **0**。
+- 开发期 reset：`cargo test --locked -p mycopilot-core-server --bin storage-reset-dev -- --quiet`，**66 通过**；Node reset 脚本测试 **10 通过**。包含 exact v41 reset、新库校验，以及配置和凭据引用保留。
+- TypeScript 协议 **371 通过**，Host/Preload bridge **11 通过**，问答 Renderer 浏览器回归 **24 通过**。
+- `pnpm test:human-interaction-core-e2e`：**2 通过**，使用受管 Chromium、实际 Host/Preload、实际 Core Server 及可控 Provider，覆盖同步暂停恢复与异步回答后继续。
+- Workspace all-target Clippy（`-D warnings`）、Rustfmt、TypeScript 类型检查、ESLint、修改文件的 Prettier、开发/公开文档检查、测试归属与 Rust 忽略项登记、`git diff --check` 均通过。
+
+首次回归发现并修复了历史 Run 状态误入 Conversation ledger、压缩重建容量分类缓存、合法新 Trace 边界以及若干旧序号/版本断言问题。一次同时运行多个大型套件的 Host 回归出现大输出命令等待超时；该用例单独复验和上述 8 线程全量复验均通过，没有修改命令生产逻辑。浏览器真实链路的旧按钮文案断言已与现有“下一项”界面统一，最终两项通过。忽略项不计为通过。
+
+当前 **SQLite schema v42 / Trace v6 / checkpoint v16 / 恢复信封 v13 / 压缩输入 v6**。旧开发库需要通过现有受管 reset 创建新库，不提供旧聊天迁移；所有数据库测试均使用临时库，本次未重置真实数据。配置与 API 凭据不删除，操作说明见[恢复手册](../operations/recovery-runbook.md)。
+
+本轮验证的是请求内容的相同性，没有调用真实付费 Provider 测量缓存命中率，不能据此承诺 98%。能力/工具/目录变化、压缩和仍保留的请求尾部可缩短共同前缀；图片仍按原始视觉输入计入容量。
 
 ## 变更检查表
 

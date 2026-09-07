@@ -156,6 +156,7 @@ async fn approval_resume_restores_prior_context_and_continues_queued_tools() {
     });
 
     let mut base_input = AgentChatInput {
+        context_image_attachments: Vec::new(),
         api_url: format!("http://{address}/v1/chat/completions"),
         api_token: "test-token".to_string(),
         provider_configuration_revision: None,
@@ -310,11 +311,26 @@ async fn approval_resume_restores_prior_context_and_continues_queued_tools() {
         .extension_snapshots
         .iter()
         .any(|snapshot| snapshot.extension_id == "todo"));
+    let skill_sequence = checkpoint
+        .conversation_trace_items
+        .iter()
+        .find_map(|item| match item {
+            ConversationTurnTraceItem::ContextMaterial {
+                sequence,
+                material_kind: crate::ConversationContextMaterialKind::SkillInstructions,
+                content,
+                ..
+            } if content.contains("SKILL_SNAPSHOT_BEFORE_APPROVAL") => Some(*sequence),
+            _ => None,
+        })
+        .expect("preactivated Skill is preserved as a journal fact");
+    let skill_origin =
+        ContextOrigin::conversation_trace_item("assistant-checkpoint", skill_sequence);
     assert!(checkpoint.context_items.iter().any(|item| {
         item.sources == vec!["skill_instructions", "run_bootstrap"]
             && item.content.contains("SKILL_SNAPSHOT_BEFORE_APPROVAL")
             && item.origin.as_ref().is_some_and(|origin| {
-                origin.kind == "skill" && origin.id == "workspace:workspace-1:review"
+                origin.kind == skill_origin.kind().as_str() && origin.id == skill_origin.id()
             })
     }));
     assert!(!format!("{checkpoint:?}").contains("SKILL_SNAPSHOT_BEFORE_APPROVAL"));
@@ -613,6 +629,7 @@ async fn skill_resource_text_survives_approval_checkpoint_but_is_omitted_from_du
     let workspace = fixture.path().join("workspace");
     std::fs::create_dir(&workspace).unwrap();
     let mut input = AgentChatInput {
+        context_image_attachments: Vec::new(),
         api_url: format!("http://{address}/v1/chat/completions"),
         api_token: "test-token".to_string(),
         provider_configuration_revision: None,

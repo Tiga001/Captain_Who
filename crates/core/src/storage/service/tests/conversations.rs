@@ -924,6 +924,8 @@ fn collaboration_root_fork_reopens_with_raw_snapshot_and_accepts_a_new_turn() {
         truncated: false,
         items: vec![
             ConversationTurnTraceItem::AssistantNarration {
+                provider_turn_id: None,
+                first_tool_call_id: None,
                 sequence: 0,
                 content: "Inspecting durable history".to_string(),
                 truncated: false,
@@ -2493,6 +2495,7 @@ fn conversation_fork_clones_exact_history_archives_and_rewrites_trace_refs() {
     };
     let exact_model_items = vec![
         crate::ConversationModelContextItem {
+            images: Vec::new(),
             sequence: 0,
             ordinal: 0,
             role: "assistant".to_string(),
@@ -2511,6 +2514,7 @@ fn conversation_fork_clones_exact_history_archives_and_rewrites_trace_refs() {
             is_error: false,
         },
         crate::ConversationModelContextItem {
+            images: Vec::new(),
             sequence: 1,
             ordinal: 0,
             role: "tool".to_string(),
@@ -2520,6 +2524,7 @@ fn conversation_fork_clones_exact_history_archives_and_rewrites_trace_refs() {
             is_error: false,
         },
         crate::ConversationModelContextItem {
+            images: Vec::new(),
             sequence: 2,
             ordinal: 0,
             role: "assistant".to_string(),
@@ -2538,6 +2543,7 @@ fn conversation_fork_clones_exact_history_archives_and_rewrites_trace_refs() {
             is_error: false,
         },
         crate::ConversationModelContextItem {
+            images: Vec::new(),
             sequence: 3,
             ordinal: 0,
             role: "tool".to_string(),
@@ -2554,6 +2560,7 @@ fn conversation_fork_clones_exact_history_archives_and_rewrites_trace_refs() {
             is_error: false,
         },
         crate::ConversationModelContextItem {
+            images: Vec::new(),
             sequence: 4,
             ordinal: 0,
             role: "assistant".to_string(),
@@ -2572,6 +2579,7 @@ fn conversation_fork_clones_exact_history_archives_and_rewrites_trace_refs() {
             is_error: false,
         },
         crate::ConversationModelContextItem {
+            images: Vec::new(),
             sequence: 5,
             ordinal: 0,
             role: "tool".to_string(),

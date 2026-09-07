@@ -1,8 +1,8 @@
 use crate::agent_graph::AgentCollaborationIdentity;
 use crate::context::ContextCompactionSummary;
 use crate::conversation_trace::{
-    ConversationModelContextItem, ConversationTraceAttachment, ConversationTurnTrace,
-    ConversationTurnTraceItem,
+    ConversationContextImageRef, ConversationModelContextItem, ConversationTraceAttachment,
+    ConversationTurnTrace, ConversationTurnTraceItem,
 };
 use crate::provider_profile::{ProviderProfileConfig, ProviderProtocolKey};
 use crate::world_state::{AnchoredWorldStateRecord, WorldStateSnapshot};

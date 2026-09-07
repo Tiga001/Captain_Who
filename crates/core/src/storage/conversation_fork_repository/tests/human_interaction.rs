@@ -141,6 +141,7 @@ fn fork_and_compaction_preserve_sync_answer_text_without_adding_user_context() {
     conversation_trace_repository::commit_trace_in_connection(&connection, &trace, 20, 21).unwrap();
     let context = vec![
         ConversationModelContextItem {
+            images: Vec::new(),
             sequence: 0,
             ordinal: 0,
             role: "assistant".into(),
@@ -159,6 +160,7 @@ fn fork_and_compaction_preserve_sync_answer_text_without_adding_user_context() {
             }],
         },
         ConversationModelContextItem {
+            images: Vec::new(),
             sequence: 1,
             ordinal: 0,
             role: "tool".into(),

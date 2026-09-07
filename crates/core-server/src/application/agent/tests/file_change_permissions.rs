@@ -112,6 +112,7 @@ fn direct_execution_input_with_workspace(
         version: AGENT_RUN_CHECKPOINT_SCHEMA_VERSION,
         run_id: run_id.to_string(),
         context_items: vec![mycopilot_core::AgentContextCheckpointItem {
+            context_image_refs: Vec::new(),
             role: "assistant".to_string(),
             content: String::new(),
             images: Vec::new(),
@@ -279,6 +280,7 @@ pub(super) fn seed_durable_direct_file_change_owner(
         .unwrap_or_default();
     let context_sequence = model_context.last().map_or(0, |item| item.sequence + 1);
     model_context.push(ConversationModelContextItem {
+        images: Vec::new(),
         sequence: context_sequence,
         ordinal: 0,
         role: "assistant".to_string(),

@@ -121,14 +121,14 @@ async function status(id: string): Promise<unknown> {
 
 async function answer(page: Page, text: string): Promise<void> {
   const primary = page.locator('.human-interaction-panel__submit')
-  expect(await primary.textContent()).toBe('下一题')
+  expect(await primary.textContent()).toBe('下一项')
   expect(await primary.isDisabled()).toBe(true)
   await page.getByRole('button', { name: 'CSV', exact: true }).click()
   await primary.click()
   await page.getByRole('textbox').fill(text)
   await page.getByRole('textbox').press('Enter')
   await page.getByRole('textbox').press('Escape')
-  expect(await primary.textContent()).toBe('下一题')
+  expect(await primary.textContent()).toBe('下一项')
   await primary.click()
   await page.getByRole('button', { name: '跳过', exact: true }).click()
   expect(await primary.textContent()).toBe('提交')

@@ -11,6 +11,7 @@ fn same_tool_call_identity(live: &LlmMessage, projected: &LlmMessage) -> bool {
 impl ContextItem {
     pub(super) fn same_context_content(&self, other: &Self) -> bool {
         self.message == other.message
+            && self.context_image_refs == other.context_image_refs
             && self.checkpoint_message == other.checkpoint_message
             && self.metadata == other.metadata
     }
@@ -58,6 +59,7 @@ impl ContextItem {
         Ok(AgentContextCheckpointItem {
             role: message.role().as_str().to_string(),
             content: message.content().to_string(),
+            context_image_refs: self.context_image_refs.clone(),
             images: message
                 .images()
                 .iter()
@@ -115,10 +117,15 @@ impl ContextItem {
 
     pub(super) fn from_checkpoint(item: AgentContextCheckpointItem) -> AgentResult<Self> {
         let role = role_from_checkpoint(&item.role)?;
-        if role != LlmMessageRole::User && !item.images.is_empty() {
+        if role != LlmMessageRole::User
+            && (!item.images.is_empty() || !item.context_image_refs.is_empty())
+        {
             return Err(AgentError::new(
                 "运行检查点无效：只有 user 消息可以携带图片。",
             ));
+        }
+        for reference in &item.context_image_refs {
+            reference.validate()?;
         }
         if role != LlmMessageRole::Assistant && !item.tool_calls.is_empty() {
             return Err(AgentError::new(
@@ -262,7 +269,7 @@ impl ContextItem {
             }
         };
 
-        Ok(Self::new(message, metadata))
+        Ok(Self::new(message, metadata).with_context_image_refs(item.context_image_refs))
     }
 }
 
@@ -306,4 +313,44 @@ pub(crate) struct ContextManifestEntry<'a> {
     pub(crate) tool_argument_character_count: usize,
     pub(crate) tool_call_id: Option<&'a str>,
     pub(crate) is_error: bool,
+}
+
+#[cfg(test)]
+mod image_reference_tests {
+    use super::*;
+
+    #[test]
+    fn checkpoint_preserves_immutable_image_references_for_rehydration() {
+        let reference = crate::ConversationContextImageRef {
+            attachment_id: "historical-image".to_string(),
+            mime_type: "image/png".to_string(),
+            sha256: "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+                .to_string(),
+        };
+        let mut message = LlmMessage::text(LlmMessageRole::User, "image material");
+        message.images_mut().unwrap().push(crate::llm::LlmImage {
+            mime_type: "image/png".to_string(),
+            data_base64: "YWJj".to_string(),
+        });
+        let item = ContextItem::new(
+            message,
+            ContextMetadata::new(
+                ContextSource::InputAttachment,
+                ContextScope::Conversation,
+                ContextRetention::Retained,
+            ),
+        )
+        .with_context_image_refs(vec![reference.clone()]);
+        let checkpoint = item.to_checkpoint().unwrap();
+        assert_eq!(checkpoint.context_image_refs, vec![reference]);
+        let restored = ContextItem::from_checkpoint(checkpoint.clone()).unwrap();
+        assert!(item.same_context_content(&restored));
+        let mut wrong_role = checkpoint.clone();
+        wrong_role.role = "assistant".to_string();
+        wrong_role.images.clear();
+        assert!(ContextItem::from_checkpoint(wrong_role).is_err());
+        let mut invalid_reference = checkpoint;
+        invalid_reference.context_image_refs[0].sha256 = "invalid".to_string();
+        assert!(ContextItem::from_checkpoint(invalid_reference).is_err());
+    }
 }

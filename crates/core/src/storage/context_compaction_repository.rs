@@ -1123,6 +1123,10 @@ fn list_journal_entries(
                                 | crate::ConversationTurnTraceItem::BackendState {
                                     created_at,
                                     ..
+                                }
+                                | crate::ConversationTurnTraceItem::ContextMaterial {
+                                    created_at,
+                                    ..
                                 } => *created_at,
                                 _ => created_at,
                             },

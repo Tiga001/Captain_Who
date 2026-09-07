@@ -2,7 +2,7 @@
 status: current
 audience: developers
 owner: engineering
-last_verified: 2026-08-31
+last_verified: 2026-09-07
 ---
 
 # Conversation Trace 与 Exact Archive
@@ -37,7 +37,7 @@ Turn created
   -> terminal: completed | failed | cancelled
 ```
 
-当前 Trace schema version 为 `CONVERSATION_TURN_TRACE_SCHEMA_VERSION = 4`。公开 narration 一旦发出即可追加。长期历史中的 Tool Call 与 Tool Result 必须闭环；为支持审批和崩溃恢复，`in_progress` Trace 可在尾部持久化一个尚未结算的 open Tool Call，并由 Runtime/Checkpoint/pending action 保存恢复权威。该 open call 不进入已闭合 model-context 前缀，Trace 进入终态前必须由权威或合成 Tool Result 关闭。已持久化 sequence 是 append-only，不能重排、缩短或重新打开。
+当前 Trace schema version 为 `CONVERSATION_TURN_TRACE_SCHEMA_VERSION = 6`。公开 narration 一旦发出即可追加。长期历史中的 Tool Call 与 Tool Result 必须闭环；为支持审批和崩溃恢复，`in_progress` Trace 可在尾部持久化一个尚未结算的 open Tool Call，并由 Runtime/Checkpoint/pending action 保存恢复权威。该 open call 不进入已闭合 model-context 前缀，Trace 进入终态前必须由权威或合成 Tool Result 关闭。已持久化 sequence 是 append-only，不能重排、缩短或重新打开。
 
 最终 assistant message、Trace terminal、model-context projection、Usage 和 UI 终态由 Core Server 在同一结算边界提交。进程崩溃后，startup reconciliation 只在已持久证据明确证明 Run 已取消时结算为 `cancelled`；其他孤立的 `in_progress` Trace 结算为 `failed`。Trace 没有 `interrupted` 终态，也不从 Renderer 看似完成的状态推断成功。
 
@@ -63,6 +63,14 @@ Trace 的权威终态。详见 [Scheduled Automation](../subsystems/scheduled-au
 投影是单向的，不能用 Event 或 Trace 重建 canonical result，也不能用 Renderer payload 恢复审批。详细字段边界见[Tool Result 消费者矩阵](../subsystems/tool-result-consumer-matrix.md)。
 
 `FileChange` 还有独立的 action audit 与 diff 读取面。普通 Durable Trace 只保存安全的文件身份、operation、统计、状态和终态，不保存 `apply_patch` 的 patch/file body。成功 Direct write 会生成新的 model-only successor observation，使后续 `apply_patch` 必须基于新 observation；该 successor 属于当前 Runtime/Checkpoint 连续性，不进入 UI、Durable Trace 或 Exact Archive。已结算历史 diff 由 Core Server 使用 conversation、assistant message、Run、tool call 的精确 identity 从 durable action audit 惰性分页读取，而不是从 Trace 正文重建；活动 staged transaction 则使用 transaction id，两者不可互换。执行、Observation 与 Run grant 详见 [FileChange 子系统](../subsystems/file-change.md)。
+
+## 可重放的 Run 材料
+
+`ContextMaterial` 是 model-visible 的安全上下文事件，包含 Host 绑定的 event ID、材料种类、原样正文、图片引用和创建时间。类型覆盖输入附件投影、Skill 完整说明和 Run World State 观察。Trace 与 model-context 同步追加；同一事件的相同 payload 可幂等重用，冲突 payload 或拆开未闭合工具交换的写入被拒绝。
+
+Run 首次组装的材料按实际请求顺序记录；后续材料留在发生时的位置。历史重载、同版本恢复、压缩与 fork 使用已保存的内容，不重新执行 Skill，也不从当前配置重新生成旧状态。图片引用只能通过属于该会话的不可变附件恢复；引用随 fork/child snapshot 重映射，历史不获得当前执行权限。
+
+工具响应附带的 narration 保存 `provider_turn_id` 和 `first_tool_call_id`。Generic 首个工具消息已携带正文，或私有 vault 已恢复同一 Assistant Turn 时，历史组装撤下这份独立正文投影，避免同一次正文出现两遍；匹配依据是响应和调用身份，不是内容字符串。Provider continuation 仍只保存在私有 vault，不进入公共材料。
 
 ## Exact Archive 写入
 

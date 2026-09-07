@@ -389,6 +389,8 @@ fn resume_accepts_only_tool_provenance_from_the_frozen_registry() {
                 truncated: false,
             },
             ConversationTurnTraceItem::AssistantNarration {
+                provider_turn_id: None,
+                first_tool_call_id: None,
                 sequence: 1,
                 content: "unexpected gap".to_string(),
                 truncated: false,

@@ -8,7 +8,7 @@ use mycopilot_core::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-const PERSISTED_AGENT_RESUME_INPUT_SCHEMA_VERSION: u32 = 12;
+const PERSISTED_AGENT_RESUME_INPUT_SCHEMA_VERSION: u32 = 13;
 
 fn deserialize_required_nullable<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
 where
@@ -362,6 +362,7 @@ impl PersistedAgentResumeInput {
             provider_endpoint_digest: self.provider_endpoint_digest,
             provider_credential_required: self.provider_credential_required,
             agent_input: AgentChatInput {
+                context_image_attachments: Vec::new(),
                 api_url: String::new(),
                 api_token: String::new(),
                 provider_configuration_revision: Some(self.provider_configuration_revision),

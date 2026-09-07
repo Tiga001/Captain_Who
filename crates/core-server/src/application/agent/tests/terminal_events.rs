@@ -11,6 +11,7 @@ fn terminal_test_checkpoint_item(
     call: &AgentToolCall,
 ) -> mycopilot_core::AgentContextCheckpointItem {
     mycopilot_core::AgentContextCheckpointItem {
+        context_image_refs: Vec::new(),
         role: "assistant".to_string(),
         content: String::new(),
         images: Vec::new(),
@@ -41,6 +42,7 @@ fn terminal_test_checkpoint_call(call: &AgentToolCall) -> AgentContextCheckpoint
 
 fn terminal_test_model_context(call: &AgentToolCall) -> ConversationModelContextItem {
     ConversationModelContextItem {
+        images: Vec::new(),
         sequence: 0,
         ordinal: 0,
         role: "assistant".to_string(),

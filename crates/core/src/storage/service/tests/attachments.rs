@@ -860,3 +860,247 @@ fn failed_attachment_database_commit_removes_new_file() {
             .is_none()
     );
 }
+
+fn context_image_ref(id: &str, bytes: &[u8]) -> crate::ConversationContextImageRef {
+    use sha2::{Digest, Sha256};
+    crate::ConversationContextImageRef {
+        attachment_id: id.to_string(),
+        mime_type: "image/png".to_string(),
+        sha256: format!("sha256:{:x}", Sha256::digest(bytes)),
+    }
+}
+
+#[test]
+fn context_images_require_visible_owner_exact_mime_and_immutable_bytes() {
+    let fixture = StorageFixture::new();
+    let service = fixture.service();
+    let bytes = png_image(8, 8);
+    service
+        .save_conversation(conversation("image-owner", None, "image-user"))
+        .unwrap();
+    service
+        .save_input_attachments(
+            "image-owner",
+            "image-user",
+            None,
+            &[input_attachment(
+                "history-image",
+                AgentInputAttachmentKind::Image,
+                "picture.png",
+                Some("image/png"),
+                &bytes,
+            )],
+            1,
+        )
+        .unwrap();
+    let reference = context_image_ref("history-image", &bytes);
+    let loaded = service
+        .load_context_image_attachments("image-owner", &[reference.clone(), reference.clone()])
+        .unwrap();
+    assert_eq!(
+        loaded.len(),
+        1,
+        "shared image lookup must not duplicate payload bytes"
+    );
+    assert_eq!(
+        base64::engine::general_purpose::STANDARD
+            .decode(&loaded[0].data)
+            .unwrap(),
+        bytes
+    );
+    assert!(service
+        .load_context_image_attachments("foreign", std::slice::from_ref(&reference))
+        .unwrap_err()
+        .contains("scope_mismatch"));
+    let mut wrong_mime = reference.clone();
+    wrong_mime.mime_type = "image/jpeg".into();
+    assert!(service
+        .load_context_image_attachments("image-owner", &[wrong_mime])
+        .is_err());
+    let mut wrong_hash = reference.clone();
+    wrong_hash.sha256 = format!("sha256:{}", "0".repeat(64));
+    assert!(service
+        .load_context_image_attachments("image-owner", &[reference.clone(), wrong_hash.clone()])
+        .unwrap_err()
+        .contains("reference_conflict"));
+    assert!(service
+        .load_context_image_attachments("image-owner", &[wrong_hash])
+        .unwrap_err()
+        .contains("integrity_mismatch"));
+    let library = service
+        .build_attachment_library_context("image-owner", None)
+        .unwrap();
+    let path = PathBuf::from(library.root_path.unwrap())
+        .join(&library.conversation_attachments[0].storage_rel_path);
+    fs::write(&path, vec![0; bytes.len()]).unwrap();
+    assert!(service
+        .load_context_image_attachments("image-owner", std::slice::from_ref(&reference))
+        .unwrap_err()
+        .contains("integrity_mismatch"));
+    fs::remove_file(path).unwrap();
+    assert!(service
+        .load_context_image_attachments("image-owner", &[reference])
+        .unwrap_err()
+        .contains("unavailable"));
+}
+
+#[test]
+fn context_material_and_images_survive_restart_recursive_fork_and_source_deletion() {
+    let fixture = StorageFixture::new();
+    let service = fixture.service();
+    let bytes = png_image(8, 8);
+    let mut source = conversation("material-source", None, "material-user");
+    source.messages.push(ChatMessageRecord {
+        human_interaction_response: None,
+        id: "material-assistant".into(),
+        role: "assistant".into(),
+        content: "done".into(),
+        created_at: 2,
+        status: Some("sent".into()),
+        attachments: Vec::new(),
+        agent_run_json: None,
+        ui_state_json: None,
+    });
+    source.updated_at = 3;
+    service.save_conversation(source).unwrap();
+    service
+        .save_input_attachments(
+            "material-source",
+            "material-user",
+            None,
+            &[input_attachment(
+                "material-image",
+                AgentInputAttachmentKind::Image,
+                "picture.png",
+                Some("image/png"),
+                &bytes,
+            )],
+            1,
+        )
+        .unwrap();
+    let reference = context_image_ref("material-image", &bytes);
+    let trace = ConversationTurnTrace {
+        schema_version: crate::CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
+        run_id: "material-run".into(),
+        conversation_id: "material-source".into(),
+        assistant_message_id: "material-assistant".into(),
+        terminal_status: crate::ConversationTurnTraceTerminalStatus::Completed,
+        terminal_error: None,
+        truncated: false,
+        items: vec![
+            ConversationTurnTraceItem::ContextMaterial {
+                sequence: 0,
+                event_id: "material-input".into(),
+                material_kind: crate::ConversationContextMaterialKind::InputAttachment,
+                content: "Original image context".into(),
+                images: vec![reference],
+                created_at: 2,
+            },
+            ConversationTurnTraceItem::ContextMaterial {
+                sequence: 1,
+                event_id: "material-world".into(),
+                material_kind: crate::ConversationContextMaterialKind::RunWorldState,
+                content: "Historical browser activation was allowed".into(),
+                images: Vec::new(),
+                created_at: 2,
+            },
+        ],
+    };
+    service
+        .replace_conversation_turn_trace(&trace, 2, 3)
+        .unwrap();
+    let items = trace
+        .items
+        .iter()
+        .map(|event| {
+            let ConversationTurnTraceItem::ContextMaterial {
+                sequence,
+                content,
+                images,
+                ..
+            } = event
+            else {
+                unreachable!()
+            };
+            crate::ConversationModelContextItem {
+                sequence: *sequence,
+                ordinal: 0,
+                role: "user".into(),
+                content: content.clone(),
+                tool_calls: Vec::new(),
+                tool_call_id: None,
+                is_error: false,
+                images: images.clone(),
+            }
+        })
+        .collect::<Vec<_>>();
+    {
+        let connection = service.state.connection().unwrap();
+        conversation_model_context_repository::commit_items_in_connection(
+            &connection,
+            "material-source",
+            "material-assistant",
+            &items,
+        )
+        .unwrap();
+    }
+    drop(service);
+    let service = fixture.service();
+    assert_eq!(
+        service
+            .get_conversation_model_context_log("material-assistant")
+            .unwrap()
+            .unwrap()
+            .items,
+        items
+    );
+    let mut source_id = "material-source".to_string();
+    let mut assistant_id = "material-assistant".to_string();
+    for index in 0..2 {
+        let child = service
+            .fork_conversation_request_view(assistant_reply_fork_request(
+                format!("material-fork-{index}"),
+                &source_id,
+                &assistant_id,
+            ))
+            .unwrap()
+            .conversation;
+        let new_assistant = child
+            .messages
+            .iter()
+            .find(|message| message.role == "assistant")
+            .unwrap();
+        let log = service
+            .get_conversation_model_context_log(&new_assistant.id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(log.items.len(), 2);
+        assert_eq!(log.items[0].content, items[0].content);
+        assert_eq!(log.items[1].content, items[1].content);
+        let child_image = &log.items[0].images[0];
+        assert_ne!(child_image.attachment_id, "material-image");
+        assert_eq!(child_image.sha256, items[0].images[0].sha256);
+        assert_eq!(
+            child_image.attachment_id,
+            child.messages[0].attachments[0].id
+        );
+        assert_eq!(
+            service
+                .load_context_image_attachments(&child.id, std::slice::from_ref(child_image))
+                .unwrap()
+                .len(),
+            1
+        );
+        service.delete_conversation(&source_id).unwrap();
+        assert!(service
+            .load_context_image_attachments(&child.id, std::slice::from_ref(child_image))
+            .is_ok());
+        source_id = child.id;
+        assistant_id = new_assistant.id.clone();
+    }
+    service.delete_conversation(&source_id).unwrap();
+    assert!(service
+        .get_conversation_model_context_log(&assistant_id)
+        .unwrap()
+        .is_none());
+}

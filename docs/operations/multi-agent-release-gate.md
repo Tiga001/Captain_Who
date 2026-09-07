@@ -59,7 +59,7 @@ pnpm test:multi-agent-release -- --smoke-only
 | cross-language protocol                | Rust 消费协作 fixture，与 TypeScript 契约对齐                                                        |
 | AppShell browser scenarios             | activity、Approval、observer、live stream、重启和根 Agent switching                                  |
 
-脚本的 storage step 当前明确标为 “canonical v41”。实际版本的唯一真源仍是 `crates/core/src/storage/migrations.rs`；修改 schema 时必须同步 runner label 与本门禁，不能仅凭日志文字判断兼容性。
+脚本的 storage step 当前明确标为 “canonical v42”。实际版本的唯一真源仍是 `crates/core/src/storage/migrations.rs`；修改 schema 时必须同步 runner label 与本门禁，不能仅凭日志文字判断兼容性。
 
 ## 3. 固定压力阈值
 
@@ -116,14 +116,14 @@ Renderer/Core Server 的协作 RPC 精确为 `agent.collaboration.getTree`、`ag
 
 ## 6. Schema 与 reset 门禁
 
-当前 canonical storage 为 **v41**，当前版本须通过 exact SQLite catalog fingerprint 校验；旧版本没有历史迁移路径。以下输入必须 fail closed 且不修改源库：
+当前 canonical storage 为 **v42**，当前版本须通过 exact SQLite catalog fingerprint 校验；旧版本没有历史迁移路径。以下输入必须 fail closed 且不修改源库：
 
 - 任何旧版本开发库，包括 v34/v35；
 - 非空但 `user_version=0` 的库；
 - 当前版本但 schema object 缺失/额外/被篡改；
 - foreign key violation。
 
-稳定错误标识为 `development_storage_schema_reset_required`。开发 reset 必须先 dry-run、取得 exact DB lock、创建并验证私有备份、构造 fresh v41；正式工具从 exact current v41、exact v40、exact v39、exact v38、exact v37、exact v36 或 exact v35 恢复 allowlisted 配置与 credential reference，v36/v37/v38/v39/v40/v41 还保留人机交互设置及 revision；受限的 v33 私有备份配置恢复绑定固定 fingerprint。旧库不执行保历史升级；未知配置结构必须拒绝重置，不能静默丢弃模型配置。随后执行 `quick_check`/`foreign_key_check` 并原子发布。当前只维护 canonical schema 和受管配置保留流程，不新增旧聊天、运行或检查点迁移。详见 [恢复 Runbook](recovery-runbook.md)。
+稳定错误标识为 `development_storage_schema_reset_required`。开发 reset 必须先 dry-run、取得 exact DB lock、创建并验证私有备份、构造 fresh v42；正式工具从 exact current v42、exact v41、exact v40、exact v39、exact v38、exact v37、exact v36 或 exact v35 恢复 allowlisted 配置与 credential reference，v36/v37/v38/v39/v40/v41/v42 还保留人机交互设置及 revision；受限的 v33 私有备份配置恢复绑定固定 fingerprint。旧库不执行保历史升级；未知配置结构必须拒绝重置，不能静默丢弃模型配置。随后执行 `quick_check`/`foreign_key_check` 并原子发布。当前只维护 canonical schema 和受管配置保留流程，不新增旧聊天、运行或检查点迁移。详见 [恢复 Runbook](recovery-runbook.md)。
 
 ## 7. 发布所需的组合证据
 

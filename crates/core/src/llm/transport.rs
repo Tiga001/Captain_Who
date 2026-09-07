@@ -499,6 +499,7 @@ async fn send_llm_request_with_stream_timeout(
         cancellation_token.clone(),
     )
     .await?;
+    super::request_fingerprint::log_request_fingerprint_if_enabled(&payload);
     let send = client
         .post(request.api_url.trim())
         .headers(headers)

@@ -1084,6 +1084,7 @@ async fn deepseek_runtime_persists_grouped_turns_before_tool_side_effects() {
     });
 
     let input = AgentChatInput {
+        context_image_attachments: Vec::new(),
         api_url: format!("http://{address}/v1/chat/completions"),
         api_token: "deepseek-runtime-token".to_string(),
         provider_configuration_revision: None,

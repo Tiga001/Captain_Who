@@ -422,11 +422,14 @@ fn running_trace_commits_drive_monotonic_context_window_events() {
     assert!(initial_tokens > 0);
 
     let narration = ConversationTurnTraceItem::AssistantNarration {
+        first_tool_call_id: None,
+        provider_turn_id: None,
         sequence: 0,
         content: "I will inspect the relevant files.".to_string(),
         truncated: false,
     };
     let narration_context = ConversationModelContextItem {
+        images: Vec::new(),
         sequence: 0,
         ordinal: 0,
         role: "assistant".to_string(),
@@ -473,6 +476,7 @@ fn running_trace_commits_drive_monotonic_context_window_events() {
         truncated: false,
     };
     let call_context = ConversationModelContextItem {
+        images: Vec::new(),
         sequence: 1,
         ordinal: 0,
         role: "assistant".to_string(),
@@ -536,6 +540,7 @@ fn running_trace_commits_drive_monotonic_context_window_events() {
         archive: Default::default(),
     };
     let result_context = ConversationModelContextItem {
+        images: Vec::new(),
         sequence: 2,
         ordinal: 0,
         role: "tool".to_string(),
@@ -723,6 +728,7 @@ fn durable_trace_append_is_distinguished_from_a_failed_derived_context_refresh()
         truncated: false,
     };
     let call_context = ConversationModelContextItem {
+        images: Vec::new(),
         sequence: 0,
         ordinal: 0,
         role: "assistant".to_string(),

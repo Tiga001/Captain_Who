@@ -232,7 +232,7 @@ async fn concurrent_steer_during_sampling_is_fifo_and_turns_a_terminal_response_
 
     let trace = output.conversation_turn_trace.as_ref().unwrap();
     assert!(matches!(
-        &trace.items[..],
+        trace.items.iter().filter(|item| !matches!(item, ConversationTurnTraceItem::ContextMaterial { .. })).collect::<Vec<_>>().as_slice(),
         [
             ConversationTurnTraceItem::UserGuidance {
                 guidance_id,
@@ -258,30 +258,23 @@ async fn concurrent_steer_during_sampling_is_fifo_and_turns_a_terminal_response_
             && third_guidance_id == "guidance-2"
             && third_client_message_id == "client-2"
     ));
-    assert!(output.events.iter().any(|event| matches!(
-        event,
-        AgentEvent::GuidanceApplied {
-            guidance_id,
-            sequence: 0,
-            ..
-        } if guidance_id == "guidance-before-stream"
-    )));
-    assert!(output.events.iter().any(|event| matches!(
-        event,
-        AgentEvent::GuidanceApplied {
-            guidance_id,
-            sequence: 2,
-            ..
-        } if guidance_id == "guidance-1"
-    )));
-    assert!(output.events.iter().any(|event| matches!(
-        event,
-        AgentEvent::GuidanceApplied {
-            guidance_id,
-            sequence: 3,
-            ..
-        } if guidance_id == "guidance-2"
-    )));
+    for expected_id in ["guidance-before-stream", "guidance-1", "guidance-2"] {
+        let expected_sequence = trace
+            .items
+            .iter()
+            .find_map(|item| match item {
+                ConversationTurnTraceItem::UserGuidance {
+                    guidance_id,
+                    sequence,
+                    ..
+                } if guidance_id == expected_id => Some(*sequence),
+                _ => None,
+            })
+            .unwrap();
+        assert!(output.events.iter().any(|event| matches!(event,
+            AgentEvent::GuidanceApplied { guidance_id, sequence, .. }
+                if guidance_id == expected_id && *sequence == expected_sequence)));
+    }
     assert!(!queue.is_accepting());
     assert_eq!(
         queue
@@ -404,7 +397,7 @@ async fn steer_accepted_during_transport_retry_is_applied_after_the_retried_resp
         .contains("Apply this only after the retry response."));
     let trace = output.conversation_turn_trace.unwrap();
     assert!(matches!(
-        trace.items.as_slice(),
+        trace.items.iter().filter(|item| !matches!(item, ConversationTurnTraceItem::ContextMaterial { .. })).collect::<Vec<_>>().as_slice(),
         [
             ConversationTurnTraceItem::AssistantNarration { content, .. },
             ConversationTurnTraceItem::UserGuidance { guidance_id, .. }

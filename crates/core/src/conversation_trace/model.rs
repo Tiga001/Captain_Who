@@ -1,4 +1,88 @@
-pub const CONVERSATION_TURN_TRACE_SCHEMA_VERSION: u32 = 5;
+pub const CONVERSATION_TURN_TRACE_SCHEMA_VERSION: u32 = 6;
+
+/// Replay-safe material first introduced by the Host at a causal Run position.
+/// This identifies historical content, never current capability or execution authority.
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ConversationContextMaterialKind {
+    InputAttachment,
+    SkillInstructions,
+    RunWorldState,
+}
+
+/// Immutable image identity. Binary bytes and local paths are intentionally excluded.
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ConversationContextImageRef {
+    pub attachment_id: String,
+    pub mime_type: String,
+    pub sha256: String,
+}
+
+pub const MAX_CONTEXT_MATERIAL_CONTENT_BYTES: usize = 4 * 1024 * 1024;
+pub const MAX_CONTEXT_MATERIAL_IMAGE_REFS: usize = 256;
+
+impl ConversationContextImageRef {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.attachment_id.trim().is_empty()
+            || self.attachment_id.len() > 1_024
+            || self.attachment_id.chars().any(char::is_control)
+            || !self.mime_type.starts_with("image/")
+            || self.mime_type.len() <= "image/".len()
+            || self.mime_type.len() > 128
+            || self
+                .mime_type
+                .chars()
+                .any(|ch| ch.is_whitespace() || ch.is_control())
+            || self.sha256.strip_prefix("sha256:").is_none_or(|digest| {
+                digest.len() != 64
+                    || !digest
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            })
+        {
+            return Err("context material image reference is invalid".to_string());
+        }
+        ensure_no_binary_text("context material attachment identity", &self.attachment_id)?;
+        Ok(())
+    }
+}
+
+fn validate_context_images(images: &[ConversationContextImageRef]) -> Result<(), String> {
+    if images.len() > MAX_CONTEXT_MATERIAL_IMAGE_REFS {
+        return Err("context material contains too many image references".to_string());
+    }
+    let mut identities = BTreeSet::new();
+    for image in images {
+        image.validate()?;
+        if !identities.insert(&image.attachment_id) {
+            return Err("context material image identity is duplicated".to_string());
+        }
+    }
+    Ok(())
+}
+
+fn validate_context_material(
+    event_id: &str,
+    material_kind: ConversationContextMaterialKind,
+    content: &str,
+    images: &[ConversationContextImageRef],
+    created_at: i64,
+) -> Result<(), String> {
+    if event_id.trim().is_empty()
+        || event_id.len() > 512
+        || event_id.chars().any(char::is_control)
+        || created_at < 0
+        || content.len() > MAX_CONTEXT_MATERIAL_CONTENT_BYTES
+        || (content.trim().is_empty() && images.is_empty())
+        || (material_kind != ConversationContextMaterialKind::InputAttachment && !images.is_empty())
+    {
+        return Err("context material identity or payload is invalid".to_string());
+    }
+    ensure_no_binary_text("context material event identity", event_id)?;
+    ensure_no_binary_text("context material content", content)?;
+    validate_context_images(images)
+}
 
 /// Temporal placement of a Host-authored state observation relative to the final message.
 #[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
@@ -11,8 +95,11 @@ pub enum ConversationBackendStatePlacement {
 pub const MAX_BACKEND_STATE_CONTENT_BYTES: usize = 16 * 1024;
 
 fn validate_backend_state(event_id: &str, content: &str, created_at: i64) -> Result<(), String> {
-    if event_id.trim().is_empty() || event_id.len() > 512 || created_at < 0
-        || content.len() > MAX_BACKEND_STATE_CONTENT_BYTES {
+    if event_id.trim().is_empty()
+        || event_id.len() > 512
+        || created_at < 0
+        || content.len() > MAX_BACKEND_STATE_CONTENT_BYTES
+    {
         return Err("Backend state identity or payload size is invalid".to_string());
     }
     ensure_no_binary_text("Backend state event identity", event_id)?;
@@ -114,6 +201,8 @@ pub struct ConversationModelContextItem {
     pub ordinal: u32,
     pub role: String,
     pub content: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<ConversationContextImageRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -124,6 +213,10 @@ pub struct ConversationModelContextItem {
 impl ConversationModelContextItem {
     pub fn validate(&self) -> Result<(), String> {
         ensure_no_binary_text("model context content", &self.content)?;
+        validate_context_images(&self.images)?;
+        if self.role != "user" && !self.images.is_empty() {
+            return Err("model context image references require a user message".to_string());
+        }
         match self.role.as_str() {
             "user" => {
                 if self.tool_call_id.is_some() || !self.tool_calls.is_empty() || self.is_error {
@@ -233,6 +326,7 @@ fn model_context_item_from_message_with_identities(
         ordinal,
         role: message.role().as_str().to_string(),
         content,
+        images: Vec::new(),
         tool_call_id: message.tool_call_id().map(str::to_string),
         tool_calls,
         is_error: message.is_error(),
@@ -313,6 +407,14 @@ fn validate_model_item_against_trace(
     item: &ConversationModelContextItem,
     trace_item: &ConversationTurnTraceItem,
 ) -> Result<(), String> {
+    if !item.images.is_empty()
+        && !matches!(
+            trace_item,
+            ConversationTurnTraceItem::ContextMaterial { .. }
+        )
+    {
+        return Err("model context images have no matching context material".to_string());
+    }
     let valid = match trace_item {
         ConversationTurnTraceItem::AssistantNarration { .. } => {
             item.role == "assistant"
@@ -327,9 +429,24 @@ fn validate_model_item_against_trace(
                 && item.tool_calls.is_empty()
                 && !item.content.trim().is_empty()
         }
+        ConversationTurnTraceItem::ContextMaterial {
+            content, images, ..
+        } => {
+            item.ordinal == 0
+                && item.role == "user"
+                && item.tool_call_id.is_none()
+                && item.tool_calls.is_empty()
+                && !item.is_error
+                && item.content == *content
+                && item.images == *images
+        }
         ConversationTurnTraceItem::BackendState { content, .. } => {
-            item.ordinal == 0 && item.role == "user" && item.tool_call_id.is_none() && item.tool_calls.is_empty()
-                && !item.is_error && item.content == *content
+            item.ordinal == 0
+                && item.role == "user"
+                && item.tool_call_id.is_none()
+                && item.tool_calls.is_empty()
+                && !item.is_error
+                && item.content == *content
         }
         ConversationTurnTraceItem::ToolCall { call_id, tool, .. } => {
             item.role == "assistant"
@@ -372,6 +489,16 @@ impl ConversationTraceToolResultStatus {
     deny_unknown_fields
 )]
 pub enum ConversationTurnTraceItem {
+    /// Host-generated, exact safe model material, retained at its original causal position.
+    ContextMaterial {
+        sequence: u64,
+        event_id: String,
+        material_kind: ConversationContextMaterialKind,
+        content: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        images: Vec<ConversationContextImageRef>,
+        created_at: i64,
+    },
     /// Host-generated observation, never a human answer or a permission grant.
     BackendState {
         sequence: u64,
@@ -383,6 +510,13 @@ pub enum ConversationTurnTraceItem {
     AssistantNarration {
         sequence: u64,
         content: String,
+        /// Links the UI narration to the same complete assistant Provider turn.
+        /// Hydration consumes this projection by identity, never by matching text.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_turn_id: Option<String>,
+        /// Host canonical first call identity links Generic wire narration to its Tool batch.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        first_tool_call_id: Option<String>,
         truncated: bool,
     },
     UserGuidance {
@@ -521,6 +655,7 @@ impl ConversationTurnTraceItem {
     pub fn sequence(&self) -> u64 {
         match self {
             Self::AssistantNarration { sequence, .. }
+            | Self::ContextMaterial { sequence, .. }
             | Self::BackendState { sequence, .. }
             | Self::UserGuidance { sequence, .. }
             | Self::AgentMailboxDelivery { sequence, .. }
@@ -536,6 +671,7 @@ impl ConversationTurnTraceItem {
         match self {
             Self::AssistantNarration { .. } => "assistant_narration",
             Self::BackendState { .. } => "backend_state",
+            Self::ContextMaterial { .. } => "context_material",
             Self::UserGuidance { .. } => "user_guidance",
             Self::AgentMailboxDelivery { .. } => "agent_mailbox_delivery",
             Self::ToolCall { .. } => "tool_call",

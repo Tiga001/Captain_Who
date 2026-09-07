@@ -902,6 +902,7 @@ mod tests {
             "source-assistant",
             &[
                 ConversationModelContextItem {
+                    images: Vec::new(),
                     sequence: 0,
                     ordinal: 0,
                     role: "assistant".into(),
@@ -920,6 +921,7 @@ mod tests {
                     is_error: false,
                 },
                 ConversationModelContextItem {
+                    images: Vec::new(),
                     sequence: 1,
                     ordinal: 0,
                     role: "tool".into(),
@@ -932,6 +934,252 @@ mod tests {
         )
         .unwrap();
         connection
+    }
+
+    #[test]
+    fn child_snapshot_preserves_material_order_and_rebinds_image_without_runtime_authority() {
+        let connection = fixture();
+        attachment_repository::insert_attachment(
+            &connection,
+            &AttachmentRecord {
+                id: "source-image".into(),
+                conversation_id: "source".into(),
+                message_id: "source-user".into(),
+                project_id: None,
+                kind: "image".into(),
+                original_name: "image.png".into(),
+                mime_type: Some("image/png".into()),
+                size_bytes: 8,
+                storage_rel_path: "source/image.png".into(),
+                created_at: 10,
+            },
+        )
+        .unwrap();
+        let image = crate::ConversationContextImageRef {
+            attachment_id: "source-image".into(),
+            mime_type: "image/png".into(),
+            sha256: format!("sha256:{}", "a".repeat(64)),
+        };
+        let mut trace =
+            conversation_trace_repository::get_trace_for_message(&connection, "source-assistant")
+                .unwrap()
+                .unwrap();
+        let mut model = conversation_model_context_repository::get_log_for_message(
+            &connection,
+            "source-assistant",
+        )
+        .unwrap()
+        .unwrap()
+        .items;
+        for (sequence, kind, content, images) in [
+            (
+                2,
+                crate::ConversationContextMaterialKind::InputAttachment,
+                "immutable attachment description",
+                vec![image.clone()],
+            ),
+            (
+                3,
+                crate::ConversationContextMaterialKind::RunWorldState,
+                "historical root may ask user",
+                Vec::new(),
+            ),
+        ] {
+            trace
+                .items
+                .push(crate::ConversationTurnTraceItem::ContextMaterial {
+                    sequence,
+                    event_id: format!("source-material-{sequence}"),
+                    material_kind: kind,
+                    content: content.into(),
+                    images: images.clone(),
+                    created_at: 11,
+                });
+            model.push(ConversationModelContextItem {
+                sequence,
+                ordinal: 0,
+                role: "user".into(),
+                content: content.into(),
+                images,
+                tool_calls: Vec::new(),
+                tool_call_id: None,
+                is_error: false,
+            });
+        }
+        conversation_trace_repository::commit_trace_in_connection(&connection, &trace, 11, 12)
+            .unwrap();
+        conversation_model_context_repository::commit_items_in_connection(
+            &connection,
+            "source",
+            "source-assistant",
+            &model,
+        )
+        .unwrap();
+        let mut plan = build_child_context_snapshot_plan(
+            &connection,
+            "source",
+            "target",
+            &AgentForkTurns::All,
+            20,
+        )
+        .unwrap();
+        assert_eq!(plan.attachments.len(), 1);
+        plan.attachments[0].target.storage_rel_path = "target/independent-image.png".into();
+        let target_image = plan.attachments[0].target.id.clone();
+        assert_ne!(target_image, image.attachment_id);
+        apply_child_context_snapshot_in_transaction(&connection, &plan).unwrap();
+        let log = conversation_model_context_repository::get_log_for_message(
+            &connection,
+            &plan.message_id_map["source-assistant"],
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(log.items.len(), 4);
+        assert_eq!(log.items[2].images[0].attachment_id, target_image);
+        assert_eq!(log.items[2].images[0].sha256, image.sha256);
+        assert_eq!(log.items[3].content, model[3].content);
+        let child = chat_repository::get_conversation(&connection, "target")
+            .unwrap()
+            .unwrap();
+        assert_eq!(child.messages.len(), 2);
+        assert!(child
+            .messages
+            .iter()
+            .all(|message| message.agent_run_json.is_none()));
+        for table in [
+            "human_interaction_requests",
+            "human_interaction_deliveries",
+            "human_interaction_suspensions",
+            "agent_usage_records",
+        ] {
+            let count: i64 = connection
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(
+                count, 0,
+                "history must not grant execution authority: {table}"
+            );
+        }
+    }
+
+    #[test]
+    fn child_snapshot_keeps_narration_bound_to_its_snapshot_tool_call() {
+        let connection = fixture();
+        let mut trace =
+            conversation_trace_repository::get_trace_for_message(&connection, "source-assistant")
+                .unwrap()
+                .unwrap();
+        let mut model = conversation_model_context_repository::get_log_for_message(
+            &connection,
+            "source-assistant",
+        )
+        .unwrap()
+        .unwrap()
+        .items;
+        let source_call =
+            crate::llm::model_response_tool_call_id("source-run", 0, 0, "source-call");
+        let provider_turn_id = format!("at1_{}", "a".repeat(64));
+        let mut call_trace = trace.items[0].clone();
+        let mut result_trace = trace.items[1].clone();
+        if let crate::ConversationTurnTraceItem::ToolCall {
+            sequence, call_id, ..
+        } = &mut call_trace
+        {
+            *sequence = 3;
+            *call_id = source_call.clone();
+        }
+        if let crate::ConversationTurnTraceItem::ToolResult {
+            sequence,
+            call_id,
+            archive,
+            ..
+        } = &mut result_trace
+        {
+            *sequence = 4;
+            *call_id = source_call.clone();
+            *archive = Default::default();
+        }
+        trace
+            .items
+            .push(crate::ConversationTurnTraceItem::AssistantNarration {
+                sequence: 2,
+                content: "Inspecting evidence.".into(),
+                provider_turn_id: Some(provider_turn_id.clone()),
+                first_tool_call_id: Some(source_call.clone()),
+                truncated: false,
+            });
+        trace.items.extend([call_trace, result_trace]);
+        let mut call_model = model[0].clone();
+        call_model.sequence = 3;
+        call_model.content = "Inspecting evidence.".into();
+        call_model.tool_calls[0].id = source_call.clone();
+        call_model.tool_calls[0].provider_identity.runtime_call_id = source_call.clone();
+        let mut result_model = model[1].clone();
+        result_model.sequence = 4;
+        result_model.tool_call_id = Some(source_call.clone());
+        model.push(ConversationModelContextItem {
+            sequence: 2,
+            ordinal: 0,
+            role: "assistant".into(),
+            content: "Inspecting evidence.".into(),
+            images: Vec::new(),
+            tool_call_id: None,
+            tool_calls: Vec::new(),
+            is_error: false,
+        });
+        model.extend([call_model, result_model]);
+        conversation_trace_repository::commit_trace_in_connection(&connection, &trace, 11, 12)
+            .unwrap();
+        conversation_model_context_repository::commit_items_in_connection(
+            &connection,
+            "source",
+            "source-assistant",
+            &model,
+        )
+        .unwrap();
+        let plan = build_child_context_snapshot_plan(
+            &connection,
+            "source",
+            "target",
+            &AgentForkTurns::All,
+            20,
+        )
+        .unwrap();
+        apply_child_context_snapshot_in_transaction(&connection, &plan).unwrap();
+        let target_trace = conversation_trace_repository::get_trace_for_message(
+            &connection,
+            &plan.message_id_map["source-assistant"],
+        )
+        .unwrap()
+        .unwrap();
+        let crate::ConversationTurnTraceItem::AssistantNarration {
+            first_tool_call_id: Some(bound_call),
+            provider_turn_id: Some(bound_turn),
+            ..
+        } = &target_trace.items[2]
+        else {
+            panic!("missing narration identity")
+        };
+        let crate::ConversationTurnTraceItem::ToolCall { call_id, .. } = &target_trace.items[3]
+        else {
+            panic!("missing snapshot call")
+        };
+        assert_ne!(target_trace.run_id, "source-run");
+        assert_eq!(bound_call, call_id);
+        assert_eq!(bound_turn, &provider_turn_id);
+        let log = conversation_model_context_repository::get_log_for_message(
+            &connection,
+            &plan.message_id_map["source-assistant"],
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(&log.items[3].tool_calls[0].id, bound_call);
+        assert_eq!(log.items[4].tool_call_id.as_ref(), Some(bound_call));
+        target_trace
+            .validate_complete_model_context(&log.items)
+            .unwrap();
     }
 
     #[test]

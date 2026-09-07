@@ -417,6 +417,7 @@ fn terminal_trace(fixture: &Fixture, request: &HumanInteractionRequestSnapshot, 
     if proof != "trace_only" {
         let items = vec![
             crate::ConversationModelContextItem {
+                images: Vec::new(),
                 sequence: 0,
                 ordinal: 0,
                 role: "assistant".into(),
@@ -435,6 +436,7 @@ fn terminal_trace(fixture: &Fixture, request: &HumanInteractionRequestSnapshot, 
                 }],
             },
             crate::ConversationModelContextItem {
+                images: Vec::new(),
                 sequence: 1,
                 ordinal: 0,
                 role: "tool".into(),

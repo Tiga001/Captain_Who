@@ -132,6 +132,180 @@ fn draft(prefix: &ContextCompactionPrefix, id: &str) -> ContextCompactionSummary
     }
 }
 
+fn append_context_materials(connection: &Connection) -> Vec<ConversationTurnTraceItem> {
+    let mut trace = conversation_trace_repository::get_trace_for_message(connection, "assistant-2")
+        .unwrap()
+        .unwrap();
+    let materials = [
+        (
+            crate::ConversationContextMaterialKind::InputAttachment,
+            "Attachment text\n保持原文",
+        ),
+        (
+            crate::ConversationContextMaterialKind::SkillInstructions,
+            "Historical skill instructions",
+        ),
+        (
+            crate::ConversationContextMaterialKind::RunWorldState,
+            "Historical browser task state",
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    .map(
+        |(index, (material_kind, content))| ConversationTurnTraceItem::ContextMaterial {
+            sequence: 2 + index as u64,
+            event_id: format!("context-material-{index}"),
+            material_kind,
+            content: content.into(),
+            images: if index == 0 {
+                vec![crate::ConversationContextImageRef {
+                    attachment_id: "attachment-image-1".into(),
+                    mime_type: "image/png".into(),
+                    sha256: format!("sha256:{}", "a".repeat(64)),
+                }]
+            } else {
+                Vec::new()
+            },
+            created_at: 10 + index as i64,
+        },
+    )
+    .collect::<Vec<_>>();
+    trace.items.extend(materials.iter().cloned());
+    conversation_trace_repository::commit_trace_in_connection(connection, &trace, 3, 12).unwrap();
+    materials
+}
+
+#[test]
+fn context_material_is_an_ordered_timestamped_compaction_source_and_safe_boundary() {
+    let mut connection = setup();
+    let materials = append_context_materials(&connection);
+    let prefix = prepare_prefix(
+        &connection,
+        "conversation-1",
+        &ContextJournalCursor::trace_item("assistant-2", 4),
+    )
+    .unwrap();
+    let sources = &prefix.source_items[prefix.source_items.len() - 3..];
+    for (index, source) in sources.iter().enumerate() {
+        assert!(source.is_safe_boundary());
+        match source {
+            ContextCompactionSourceItem::TraceItem {
+                cursor,
+                run_id,
+                created_at,
+                item,
+            } => {
+                assert_eq!(
+                    cursor,
+                    &ContextJournalCursor::trace_item("assistant-2", index as u64 + 2)
+                );
+                assert_eq!(run_id, "run-2");
+                assert_eq!(*created_at, 10 + index as i64);
+                assert_eq!(item.as_ref(), &materials[index]);
+            }
+            other => panic!("context material disappeared from raw prefix: {other:?}"),
+        }
+    }
+    let summary = commit_prefix_replacement(
+        &mut connection,
+        &prefix,
+        draft(&prefix, "summary-materials"),
+        "assistant-2",
+    )
+    .unwrap();
+    assert_eq!(summary.covered_through, prefix.covered_through);
+    assert_eq!(
+        get_active_summary(&connection, "conversation-1")
+            .unwrap()
+            .unwrap(),
+        summary
+    );
+}
+
+#[test]
+fn context_material_payload_and_image_identity_participate_in_source_revision() {
+    let connection = setup();
+    append_context_materials(&connection);
+    let prefix = prepare_prefix(
+        &connection,
+        "conversation-1",
+        &ContextJournalCursor::trace_item("assistant-2", 4),
+    )
+    .unwrap();
+    for field in ["content", "attachment", "mime", "hash", "created_at"] {
+        let mut changed = prefix.source_items.clone();
+        let material = changed.iter_mut().find_map(|source| match source {
+            ContextCompactionSourceItem::TraceItem { item, .. }
+                if matches!(item.as_ref(), ConversationTurnTraceItem::ContextMaterial { images, .. } if !images.is_empty()) => Some(item),
+            _ => None,
+        }).unwrap();
+        let ConversationTurnTraceItem::ContextMaterial {
+            content,
+            images,
+            created_at,
+            ..
+        } = material.as_mut()
+        else {
+            unreachable!()
+        };
+        match field {
+            "content" => content.push_str(" changed"),
+            "attachment" => images[0].attachment_id.push_str("-different"),
+            "mime" => images[0].mime_type = "image/jpeg".into(),
+            "hash" => images[0].sha256 = format!("sha256:{}", "b".repeat(64)),
+            "created_at" => *created_at += 1,
+            _ => unreachable!(),
+        }
+        assert_ne!(
+            source_revision("conversation-1", &prefix.covered_through, &changed).unwrap(),
+            prefix.source_revision,
+            "material {field} must be covered by source CAS"
+        );
+    }
+}
+
+#[test]
+fn changed_context_material_rejects_compaction_commit_without_advancing_head() {
+    let mut connection = setup();
+    let mut materials = append_context_materials(&connection);
+    let prefix = prepare_prefix(
+        &connection,
+        "conversation-1",
+        &ContextJournalCursor::trace_item("assistant-2", 4),
+    )
+    .unwrap();
+    // Simulate a source edit outside the append-only writer while a summary request is in flight.
+    // The compaction commit must independently verify the complete raw prefix in its transaction.
+    let ConversationTurnTraceItem::ContextMaterial { content, .. } = &mut materials[0] else {
+        unreachable!()
+    };
+    content.push_str(" corrected source");
+    connection.execute(
+        "UPDATE conversation_turn_trace_items SET item_json = ?1 WHERE assistant_message_id = 'assistant-2' AND sequence = 2",
+        [serde_json::to_string(&materials[0]).unwrap()],
+    ).unwrap();
+    let error = commit_prefix_replacement(
+        &mut connection,
+        &prefix,
+        draft(&prefix, "summary-stale-material"),
+        "assistant-2",
+    )
+    .unwrap_err();
+    assert!(error.is_stale());
+    assert!(get_active_summary(&connection, "conversation-1")
+        .unwrap()
+        .is_none());
+    let count: u64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM context_compaction_summaries",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(count, 0);
+}
+
 fn provider_continuation_record(
     assistant_message_id: &str,
     run_id: &str,
@@ -505,6 +679,8 @@ fn trace_summary_releases_only_the_exact_ordinary_narration_projection() {
     trace
         .items
         .push(ConversationTurnTraceItem::AssistantNarration {
+            provider_turn_id: None,
+            first_tool_call_id: None,
             sequence: 2,
             content: "steered answer".to_string(),
             truncated: false,
@@ -1497,6 +1673,8 @@ fn appending_after_a_trace_cursor_keeps_the_summary_valid() {
     trace
         .items
         .push(ConversationTurnTraceItem::AssistantNarration {
+            provider_turn_id: None,
+            first_tool_call_id: None,
             sequence: 2,
             content: "continue".to_string(),
             truncated: false,

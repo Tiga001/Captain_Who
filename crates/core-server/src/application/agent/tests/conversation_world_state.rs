@@ -253,13 +253,30 @@ async fn cross_run_web_policy_commits_at_request_boundaries_and_preview_never_wr
                 "later Runs must preserve the original full"
             );
             assert!(stored[index].effective_before_message_id.is_none());
+            let trace = storage
+                .get_conversation_turn_trace(&turn.assistant_message_id)
+                .unwrap()
+                .unwrap();
+            let bootstrap_sequence = trace
+                .items
+                .iter()
+                .find_map(|item| match item {
+                    mycopilot_core::ConversationTurnTraceItem::ContextMaterial {
+                        sequence,
+                        material_kind:
+                            mycopilot_core::ConversationContextMaterialKind::RunWorldState,
+                        ..
+                    } => Some(*sequence),
+                    _ => None,
+                })
+                .expect("initial Run material is journaled before observing this request");
             assert_eq!(
                 stored[index].request_boundary.as_ref(),
                 Some(&mycopilot_core::WorldStateRequestBoundary {
                     run_id: turn.run_id.clone(),
                     assistant_message_id: turn.assistant_message_id.clone(),
                     request_index: 1,
-                    after_trace_sequence: None,
+                    after_trace_sequence: Some(bootstrap_sequence),
                 })
             );
         }
@@ -317,7 +334,7 @@ async fn cross_run_web_policy_commits_at_request_boundaries_and_preview_never_wr
     assert!(position("WORLD_USER_2") < diffs[1].0);
     let run_full = final_wire
         .iter()
-        .position(|text| {
+        .rposition(|text| {
             text.contains("\"lifetime\":\"run\"") && text.contains("\"recordType\":\"full\"")
         })
         .unwrap();

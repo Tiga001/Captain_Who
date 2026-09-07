@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 6,
+  "runId": "run-material",
+  "conversationId": "conversation-material",
+  "assistantMessageId": "assistant-material",
+  "terminalStatus": "completed",
+  "truncated": false,
+  "items": [
+    {
+      "type": "context_material",
+      "sequence": 0,
+      "eventId": "run-material:attachment:0",
+      "materialKind": "input_attachment",
+      "content": "附件：diagram.png\n保持原始的空格和换行。\n",
+      "images": [
+        {
+          "attachmentId": "attachment-diagram",
+          "mimeType": "image/png",
+          "sha256": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      ],
+      "createdAt": 42
+    },
+    {
+      "type": "context_material",
+      "sequence": 1,
+      "eventId": "run-material:skill:0",
+      "materialKind": "skill_instructions",
+      "content": "<skill>\nRead the project instructions.\n</skill>",
+      "createdAt": 42
+    },
+    {
+      "type": "context_material",
+      "sequence": 2,
+      "eventId": "run-material:world:0",
+      "materialKind": "run_world_state",
+      "content": "Run state: waiting for browser authorization.",
+      "createdAt": 42
+    }
+  ]
+}

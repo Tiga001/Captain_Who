@@ -346,7 +346,26 @@ export interface ConversationTraceAttachment {
   sizeBytes: number
 }
 
+/** Immutable Host-owned image reference; never carries image bytes or local paths. */
+export interface ConversationContextImageRef {
+  attachmentId: string
+  mimeType: string
+  sha256: string
+}
+
+export type ConversationContextMaterialKind =
+  'input_attachment' | 'skill_instructions' | 'run_world_state'
+
 export type ConversationTurnTraceItem =
+  | {
+      type: 'context_material'
+      sequence: number
+      eventId: string
+      materialKind: ConversationContextMaterialKind
+      content: string
+      images?: ConversationContextImageRef[]
+      createdAt: number
+    }
   | {
       type: 'backend_state'
       sequence: number
@@ -359,6 +378,8 @@ export type ConversationTurnTraceItem =
       type: 'assistant_narration'
       sequence: number
       content: string
+      providerTurnId?: string
+      firstToolCallId?: string
       truncated: boolean
     }
   | {

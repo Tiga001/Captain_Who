@@ -9,6 +9,8 @@ fn conversation_context_state_incremental_updates_match_full_rebuilds() {
             .unwrap();
 
     let narration = ConversationTurnTraceItem::AssistantNarration {
+        provider_turn_id: None,
+        first_tool_call_id: None,
         sequence: 0,
         content: "I will inspect the current implementation first.".to_string(),
         truncated: false,

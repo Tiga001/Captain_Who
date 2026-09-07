@@ -308,6 +308,8 @@ impl AgentRuntime {
             input.world_state_records =
                 restored.context.conversation_world_state_records().to_vec();
         }
+        let mut context_image_attachments = input.context_image_attachments.clone();
+        context_image_attachments.extend(input.attachments.iter().cloned());
         let mut memory_conversation_world_state = MemoryConversationWorldState::new(&input)?;
         let PreparedLlmRequest {
             template: llm_request,
@@ -332,6 +334,7 @@ impl AgentRuntime {
                 trace_assistant_message_id.as_deref(),
             )
         })?;
+        active_context.hydrate_context_images(&context_image_attachments)?;
         if !resumed_world_state_epoch {
             if let Some(services) = agent_collaboration.as_ref() {
                 active_context.push(
@@ -411,6 +414,12 @@ impl AgentRuntime {
         let mut tool_failure_guard =
             ToolFailureGuard::from_trace(&conversation_trace.checkpoint_snapshot());
         let conversation_trace = Arc::new(Mutex::new(conversation_trace));
+        if !resumed_world_state_epoch {
+            persist_run_context_materials(
+                &mut active_context, &conversation_trace, trace_observer.as_ref(),
+                &run_id, trace_assistant_message_id.as_deref(), &context_image_attachments,
+            )?;
+        }
         publish_trace_snapshot(&conversation_trace, trace_observer.as_ref())?;
         let capacity_detector = ContextCapacityDetector::for_model(
             &llm_request.model,
@@ -558,6 +567,10 @@ impl AgentRuntime {
                 }
                 if tool_batch.is_empty() {
                     active_context.validate_complete_tool_protocol()?;
+                    persist_run_context_materials(
+                        &mut active_context, &conversation_trace, trace_observer.as_ref(),
+                        &run_id, trace_assistant_message_id.as_deref(), &context_image_attachments,
+                    )?;
                     // The initial sample is already a complete protocol boundary. This also
                     // consumes answers queued while a prior segment was paused, after its frozen
                     // tool batch has finished and before asking the provider to continue.
@@ -678,13 +691,12 @@ impl AgentRuntime {
                         runtime_extensions.world_state_sections()?,
                         run_context.as_ref(),
                     )? {
-                        if model_request_index != 0 || resumed_world_state_epoch {
-                            active_context.push(world_state_diff);
-                        }
+                        active_context.push(world_state_diff);
                     }
-                    if model_request_index == 0 && !resumed_world_state_epoch {
-                        active_context.replace_initial_run_world_state(run_world_state.snapshot())?;
-                    }
+                    persist_run_context_materials(
+                        &mut active_context, &conversation_trace, trace_observer.as_ref(),
+                        &run_id, trace_assistant_message_id.as_deref(), &context_image_attachments,
+                    )?;
                     if effective_tool_set.revision() != emitted_tool_set_revision {
                         event_stream.emit(AgentEvent::ToolSetChanged {
                             run_id: run_id.clone(),
@@ -856,6 +868,7 @@ impl AgentRuntime {
                                                         active_context.conversation_world_state_records(),
                                                     )?;
                                                 }
+                                                active_context.hydrate_context_images(&context_image_attachments)?;
                                                 detector.prepare_frame(&mut active_context);
                                                 publish_trace_snapshot(
                                                     &conversation_trace,
@@ -1206,7 +1219,11 @@ impl AgentRuntime {
                         let sequence = conversation_trace
                             .lock()
                             .unwrap_or_else(|error| error.into_inner())
-                            .record_narration(&response_content)
+                            .record_tool_turn_narration(
+                                &response_content,
+                                &assistant_turn.stable_id(),
+                                &tool_requests.first().expect("nonempty Tool batch").id,
+                            )
                             .map_err(AgentError::new)?;
                         publish_trace_snapshot(&conversation_trace, trace_observer.as_ref())?;
                         sequence
@@ -3340,6 +3357,10 @@ impl AgentRuntime {
                             }
                         }
                     }
+                    persist_run_context_materials(
+                        &mut active_context, &conversation_trace, trace_observer.as_ref(),
+                        &run_id, trace_assistant_message_id.as_deref(), &context_image_attachments,
+                    )?;
                     if terminate_after_repeat_guard_result {
                         let error = ToolFailureGuard::terminal_error(&call);
                         if settles_entire_provider_tool_batch_on_terminal && !tool_batch.is_empty()

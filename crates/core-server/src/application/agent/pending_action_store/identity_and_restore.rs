@@ -273,6 +273,7 @@ pub(super) fn restore_agent_input_secrets(
     if let Some(search) = agent_input.search_config.as_mut() {
         search.tavily_api_key = None;
     }
+    crate::application::agent_support::hydrate_context_image_attachments(storage, &mut agent_input)?;
     Ok(agent_input)
 }
 

@@ -98,6 +98,8 @@ fn in_progress_trace(
         truncated: false,
         items: vec![
             ConversationTurnTraceItem::AssistantNarration {
+                provider_turn_id: None,
+                first_tool_call_id: None,
                 sequence: 0,
                 content: "I will inspect the file.".to_string(),
                 truncated: false,
@@ -154,9 +156,25 @@ fn model_context_for_closed_trace(
         .items
         .iter()
         .filter_map(|item| match item {
+            ConversationTurnTraceItem::ContextMaterial {
+                sequence,
+                content,
+                images,
+                ..
+            } => Some(ConversationModelContextItem {
+                images: images.clone(),
+                sequence: *sequence,
+                ordinal: 0,
+                role: "user".to_string(),
+                content: content.clone(),
+                tool_call_id: None,
+                tool_calls: Vec::new(),
+                is_error: false,
+            }),
             ConversationTurnTraceItem::AssistantNarration {
                 sequence, content, ..
             } => Some(ConversationModelContextItem {
+                images: Vec::new(),
                 sequence: *sequence,
                 ordinal: 0,
                 role: "assistant".to_string(),
@@ -172,6 +190,7 @@ fn model_context_for_closed_trace(
                 operation,
                 ..
             } => Some(ConversationModelContextItem {
+                images: Vec::new(),
                 sequence: *sequence,
                 ordinal: 0,
                 role: "assistant".to_string(),
@@ -196,6 +215,7 @@ fn model_context_for_closed_trace(
                 observation,
                 ..
             } => Some(ConversationModelContextItem {
+                images: Vec::new(),
                 sequence: *sequence,
                 ordinal: 0,
                 role: "tool".to_string(),
@@ -207,6 +227,7 @@ fn model_context_for_closed_trace(
             ConversationTurnTraceItem::UserGuidance {
                 sequence, content, ..
             } => Some(ConversationModelContextItem {
+                images: Vec::new(),
                 sequence: *sequence,
                 ordinal: 0,
                 role: "user".to_string(),
@@ -221,6 +242,7 @@ fn model_context_for_closed_trace(
             | ConversationTurnTraceItem::BackendState {
                 sequence, content, ..
             } => Some(ConversationModelContextItem {
+                images: Vec::new(),
                 sequence: *sequence,
                 ordinal: 0,
                 role: "user".to_string(),
@@ -503,6 +525,8 @@ fn reload_rebuilds_compaction_and_runtime_error_in_the_durable_trace_order() {
         truncated: false,
         items: vec![
             ConversationTurnTraceItem::AssistantNarration {
+                provider_turn_id: None,
+                first_tool_call_id: None,
                 sequence: 0,
                 content: "Working on it.".to_string(),
                 truncated: false,
@@ -703,6 +727,8 @@ fn reload_replaces_live_timeline_projections_with_one_durable_ordered_trace() {
                 truncated: false,
                 items: vec![
                     ConversationTurnTraceItem::AssistantNarration {
+                        provider_turn_id: None,
+                        first_tool_call_id: None,
                         sequence: 0,
                         content: "I will inspect the brief.".to_string(),
                         truncated: false,
@@ -740,6 +766,8 @@ fn reload_replaces_live_timeline_projections_with_one_durable_ordered_trace() {
                         archive: Default::default(),
                     },
                     ConversationTurnTraceItem::AssistantNarration {
+                        provider_turn_id: None,
+                        first_tool_call_id: None,
                         sequence: 4,
                         content: "I kept the watermark and finished the layout.".to_string(),
                         truncated: false,
@@ -915,6 +943,8 @@ fn reload_keeps_a_host_terminal_error_unanchored_without_inventing_a_trace_seque
                 terminal_error: Some("host persistence failed".to_string()),
                 truncated: false,
                 items: vec![ConversationTurnTraceItem::AssistantNarration {
+                    provider_turn_id: None,
+                    first_tool_call_id: None,
                     sequence: 0,
                     content: "Working.".to_string(),
                     truncated: false,
@@ -1325,6 +1355,7 @@ fn startup_trace_reconciliation_closes_a_durable_unresolved_tool_call() {
         }],
     };
     let model_context = vec![ConversationModelContextItem {
+        images: Vec::new(),
         sequence: 0,
         ordinal: 0,
         role: "assistant".to_string(),

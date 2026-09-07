@@ -48,6 +48,10 @@ impl ContextAssembler {
         input: ContextAssemblyInput,
     ) -> AgentResult<AssembledContext> {
         let has_compaction_summary = input.compaction_summary.is_some();
+        let covered_cursor = input
+            .compaction_summary
+            .as_ref()
+            .map(|summary| summary.covered_through.clone());
         let normalized = normalize_messages(input.messages)?;
         let canonical_world_state = input.world_state_records;
         let world_state = assemble_world_state_timeline(
@@ -115,7 +119,7 @@ impl ContextAssembler {
                 return Err(AgentError::new("已覆盖的助手终态必须有上下文摘要边界。"));
             }
             let is_current_turn = current_turn_index == Some(index);
-            let trace = message
+            let mut trace = message
                 .conversation_turn_trace
                 .as_ref()
                 .map(|trace| {
@@ -126,6 +130,31 @@ impl ContextAssembler {
                 })
                 .transpose()?;
 
+            if let Some(trace) = &mut trace {
+                for item in &mut trace.activity_items {
+                    let covered_material = item
+                        .metadata()
+                        .sources()
+                        .contains(&ContextSource::HistoricalRunContext)
+                        && (terminal_already_covered
+                            || covered_cursor.as_ref().is_some_and(|covered| {
+                                item.metadata()
+                                    .origin()
+                                    .and_then(ContextOrigin::journal_cursor)
+                                    .is_some_and(|cursor| {
+                                        cursor.message_id() == covered.message_id()
+                                            && cursor.trace_sequence().is_some_and(|sequence| {
+                                                covered
+                                                    .trace_sequence()
+                                                    .is_none_or(|limit| sequence <= limit)
+                                            })
+                                    })
+                            }));
+                    if covered_material {
+                        *item = item.clone().with_source(ContextSource::CompactionRetained);
+                    }
+                }
+            }
             let trace_items = trace
                 .as_ref()
                 .map(|trace| trace.activity_items.as_slice())
@@ -415,11 +444,8 @@ fn assemble_world_state_timeline(
                         trace.run_id == boundary.run_id
                             && trace.items.iter().any(|item| {
                                 item.sequence() == sequence
-                                    && matches!(item,
-                            crate::ConversationTurnTraceItem::AssistantNarration { .. }
-                            | crate::ConversationTurnTraceItem::ToolResult { .. }
-                            | crate::ConversationTurnTraceItem::UserGuidance { .. }
-                            | crate::ConversationTurnTraceItem::AgentMailboxDelivery { .. })
+                                    && item.is_model_visible()
+                                    && item.is_safe_compaction_boundary()
                             })
                     });
                 if !valid && !covered_boundary {
@@ -722,18 +748,16 @@ fn normalize_messages(messages: Vec<AgentChatMessage>) -> AgentResult<Vec<AgentC
                 || !content.is_empty()
                 || trace.as_ref().is_none_or(|trace| {
                     trace.items.iter().any(|item| {
-                        !matches!(
-                            item,
+                        !matches!(item,
                             crate::ConversationTurnTraceItem::BackendState {
-                                placement: crate::ConversationBackendStatePlacement::AfterMessage,
-                                ..
-                            }
-                        )
+                                placement: crate::ConversationBackendStatePlacement::AfterMessage, ..
+                            }) && !matches!(item,
+                            crate::ConversationTurnTraceItem::ContextMaterial { images, .. } if !images.is_empty())
                     })
                 }))
         {
             return Err(AgentError::new(
-                "已覆盖终态只能保留助手消息之后的后端状态。",
+                "已覆盖终态只能保留历史图片材料和助手消息之后的后端状态。",
             ));
         }
         if role == "assistant" && trace.is_none() {
@@ -1096,6 +1120,8 @@ mod tests {
         let mut assistant = current_assistant_message("assistant-current", "done");
         assistant.conversation_turn_trace.as_mut().unwrap().items = vec![
             crate::ConversationTurnTraceItem::AssistantNarration {
+                provider_turn_id: None,
+                first_tool_call_id: None,
                 sequence: 0,
                 content: "before-guidance".into(),
                 truncated: false,
@@ -1110,6 +1136,8 @@ mod tests {
                 truncated: false,
             },
             crate::ConversationTurnTraceItem::AssistantNarration {
+                provider_turn_id: None,
+                first_tool_call_id: None,
                 sequence: 2,
                 content: "after-boundary".into(),
                 truncated: false,
@@ -1124,6 +1152,7 @@ mod tests {
         .enumerate()
         .map(
             |(sequence, (role, content))| crate::ConversationModelContextItem {
+                images: Vec::new(),
                 sequence: sequence as u64,
                 ordinal: 0,
                 role: role.into(),
@@ -1189,12 +1218,15 @@ mod tests {
                 let mut assistant = current_assistant_message("assistant-current", "");
                 assistant.conversation_turn_trace.as_mut().unwrap().items =
                     vec![crate::ConversationTurnTraceItem::AssistantNarration {
+                        provider_turn_id: None,
+                        first_tool_call_id: None,
                         sequence: 2,
                         content: "retained-tail".into(),
                         truncated: false,
                     }];
                 assistant.conversation_model_context_items =
                     vec![crate::ConversationModelContextItem {
+                        images: Vec::new(),
                         sequence: 2,
                         ordinal: 0,
                         role: "assistant".into(),

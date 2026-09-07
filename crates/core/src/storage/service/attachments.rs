@@ -661,6 +661,92 @@ impl StorageService {
         Ok(attachments)
     }
 
+    /// Resolves immutable model-history image references within their owning conversation.
+    /// References carry no read authority: deleted/superseded messages, foreign attachments,
+    /// MIME drift, missing files and changed bytes all fail closed before model projection.
+    pub fn load_context_image_attachments(
+        &self,
+        conversation_id: &str,
+        refs: &[crate::ConversationContextImageRef],
+    ) -> Result<Vec<AgentInputAttachment>, String> {
+        use sha2::{Digest, Sha256};
+        if refs.is_empty() {
+            return Ok(Vec::new());
+        }
+        let connection = self.state.connection()?;
+        let superseded = conversation_turn_rewrite_repository::superseded_message_ids(
+            &connection,
+            conversation_id,
+        )
+        .map_err(storage_error)?;
+        let mut seen = HashMap::new();
+        let mut records = Vec::new();
+        for reference in refs {
+            reference.validate()?;
+            if let Some(previous) = seen.insert(reference.attachment_id.clone(), reference) {
+                if previous != reference {
+                    return Err("context_image_reference_conflict: image identity changed".into());
+                }
+                continue;
+            }
+            let record =
+                attachment_repository::get_attachment(&connection, &reference.attachment_id)
+                    .map_err(storage_error)?
+                    .ok_or_else(|| {
+                        "context_image_unavailable: attachment is missing".to_string()
+                    })?;
+            if record.conversation_id != conversation_id
+                || superseded.contains(&record.message_id)
+                || record.kind != "image"
+                || record.mime_type.as_deref() != Some(reference.mime_type.as_str())
+            {
+                return Err(
+                    "context_image_scope_mismatch: image is outside visible history".into(),
+                );
+            }
+            let visible: bool = connection
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM messages WHERE id = ?1 AND conversation_id = ?2)",
+                    rusqlite::params![record.message_id, conversation_id],
+                    |row| row.get(0),
+                )
+                .map_err(storage_error)?;
+            if !visible {
+                return Err("context_image_unavailable: owner message is missing".into());
+            }
+            records.push((record, reference));
+        }
+        drop(connection);
+        records
+            .into_iter()
+            .map(|(record, reference)| {
+                let path = safe_existing_attachment_storage_path(
+                    &self.attachment_root,
+                    &record.storage_rel_path,
+                )
+                .ok_or_else(|| "context_image_unavailable: image bytes are missing".to_string())?;
+                let bytes = fs::read(path).map_err(|_| {
+                    "context_image_unavailable: image bytes cannot be read".to_string()
+                })?;
+                if bytes.len() as u64 != record.size_bytes
+                    || format!("sha256:{:x}", Sha256::digest(&bytes)) != reference.sha256
+                {
+                    return Err("context_image_integrity_mismatch: image bytes changed".into());
+                }
+                Ok(AgentInputAttachment {
+                    id: record.id,
+                    kind: AgentInputAttachmentKind::Image,
+                    name: record.original_name,
+                    mime_type: record.mime_type,
+                    size_bytes: record.size_bytes,
+                    encoding: AgentInputAttachmentEncoding::Base64,
+                    data: base64::engine::general_purpose::STANDARD.encode(bytes),
+                    truncated: None,
+                })
+            })
+            .collect()
+    }
+
     pub fn build_attachment_library_context(
         &self,
         conversation_id: &str,

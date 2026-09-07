@@ -16,6 +16,8 @@ fn band(item: &ContextItem) -> u8 {
         2
     } else if has(ContextSource::CapabilityInstructions) {
         3
+    } else if has(ContextSource::HistoricalRunContext) {
+        6
     } else if has(ContextSource::WorldStateSnapshot) && metadata.scope == ContextScope::Conversation
     {
         4
@@ -380,50 +382,90 @@ mod tests {
     }
 
     #[test]
-    fn user_input_prefix_survives_promotion_to_next_run_history() {
-        let original = initial();
-        let mut next_run = ContextFrame::new(
-            original
-                .iter_items()
-                .filter(|item| {
-                    let sources = item.metadata.sources();
-                    item.metadata.scope == ContextScope::Conversation
-                        || sources.contains(&ContextSource::BackendSystemPrompt)
-                        || sources.contains(&ContextSource::SkillCatalog)
-                        || sources.contains(&ContextSource::RuntimeGuard)
-                })
-                .cloned()
-                .collect(),
-        );
+    fn complete_run_prefix_survives_promotion_to_next_run_history() {
+        let mut original = initial();
+        original.mark_initial_run_input();
+        let mut narration = item("运行正文", ContextSource::ModelResponse, ContextScope::Run);
+        narration.message = LlmMessage::text(LlmMessageRole::Assistant, "运行正文");
+        original.push(narration);
+        original.push(item(
+            "运行中新Skill",
+            ContextSource::SkillInstructions,
+            ContextScope::Run,
+        ));
+        original.push(item(
+            "运行中状态",
+            ContextSource::WorldStateDiff,
+            ContextScope::Run,
+        ));
+        let before = prepare_request(original.clone());
+
+        // A sealed Run contributes the same ordered messages to history. Its old World State
+        // must remain here, rather than sorting with the session baseline at the request front.
+        let mut history = original
+            .model_request_items()
+            .into_iter()
+            .cloned()
+            .map(|mut item| {
+                let sources = item.metadata.sources();
+                if item.metadata.scope == ContextScope::Run
+                    && !sources.contains(&ContextSource::BackendSystemPrompt)
+                    && !sources.contains(&ContextSource::SkillCatalog)
+                    && !sources.contains(&ContextSource::RuntimeGuard)
+                {
+                    item.metadata.scope = ContextScope::Conversation;
+                    item.metadata = item
+                        .metadata
+                        .with_source(ContextSource::HistoricalRunContext);
+                }
+                // Last Run's user cohort is no longer the next Run's input band.
+                item.metadata
+                    .sources
+                    .retain(|source| *source != ContextSource::RunInput);
+                item
+            })
+            .collect::<Vec<_>>();
         let mut reply = item(
             "上一轮已提交回复",
             ContextSource::ConversationHistory,
             ContextScope::Conversation,
         );
         reply.message = LlmMessage::text(LlmMessageRole::Assistant, "上一轮已提交回复");
-        next_run.push(reply);
-        next_run.push(item(
+        history.push(reply);
+        history.push(item(
             "下一轮用户输入",
             ContextSource::CurrentTurn,
             ContextScope::Conversation,
         ));
-        next_run.push(bootstrap("下一轮Skill", ContextSource::SkillInstructions));
-        next_run.push(bootstrap("下一轮状态", ContextSource::WorldStateSnapshot));
-        let before = prepare_request(original);
-        let after = prepare_request(next_run);
-        let input_end = before
-            .iter()
-            .position(|message| message.content() == "本次输入二")
-            .unwrap()
-            + 1;
-        assert_eq!(before[..input_end], after[..input_end]);
-        // The previous attachment and Run bootstrap are not promoted into history. The shared
-        // prefix extends through the user cohort, without claiming reuse of the whole old run.
-        assert_eq!(before[input_end].content(), "当前附件");
-        assert_eq!(after[input_end].content(), "上一轮已提交回复");
-        for old_overlay in ["当前附件", "预激活Skill", "Run初始状态"] {
-            assert!(!after.iter().any(|message| message.content() == old_overlay));
+        history.push(bootstrap("下一轮Skill", ContextSource::SkillInstructions));
+        history.push(bootstrap("下一轮状态", ContextSource::WorldStateSnapshot));
+        let after = prepare_request(ContextFrame::new(history));
+        assert_eq!(before, after[..before.len()]);
+        assert_eq!(after[before.len()].content(), "上一轮已提交回复");
+        for content in [
+            "当前附件",
+            "预激活Skill",
+            "Run初始状态",
+            "运行中新Skill",
+            "运行中状态",
+        ] {
+            assert_eq!(
+                after
+                    .iter()
+                    .filter(|message| message.content() == content)
+                    .count(),
+                1
+            );
         }
+        let old_image = before
+            .iter()
+            .find(|message| message.content() == "当前附件")
+            .unwrap();
+        let new_image = after
+            .iter()
+            .find(|message| message.content() == "当前附件")
+            .unwrap();
+        assert_eq!(old_image.images(), new_image.images());
     }
 
     #[test]

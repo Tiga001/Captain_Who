@@ -1,5 +1,67 @@
 use super::*;
 
+fn compaction_prefix_with_published_materials(
+    prefix: &crate::ContextCompactionPrefix,
+    request: &crate::AgentContextCompactionPrepareRequest,
+    snapshots: &[crate::ConversationTraceSnapshot],
+) -> Arc<crate::ContextCompactionPrefix> {
+    let snapshot = snapshots
+        .last()
+        .expect("Run material must be durable before preparation");
+    let through_sequence = request
+        .covered_through
+        .trace_sequence()
+        .expect("initial Run state is now a journal bridge");
+    let mut prefix = prefix.clone();
+    let materials = snapshot
+        .items
+        .iter()
+        .filter(|item| {
+            item.sequence() <= through_sequence
+                && matches!(item, ConversationTurnTraceItem::ContextMaterial { .. })
+        })
+        .collect::<Vec<_>>();
+    assert!(!materials.is_empty());
+    assert_eq!(materials.last().unwrap().sequence(), through_sequence);
+    for item in materials {
+        let ConversationTurnTraceItem::ContextMaterial { created_at, .. } = item else {
+            unreachable!()
+        };
+        prefix
+            .source_items
+            .push(crate::ContextCompactionSourceItem::TraceItem {
+                cursor: crate::ContextJournalCursor::trace_item(
+                    &request.assistant_message_id,
+                    item.sequence(),
+                ),
+                run_id: request.run_id.clone(),
+                created_at: *created_at,
+                item: Box::new(item.clone()),
+            });
+    }
+    prefix.covered_through = request.covered_through.clone();
+    prefix.source_revision =
+        crate::content_revision(&serde_json::to_vec(&prefix.source_items).unwrap());
+    prefix.validate().unwrap();
+    Arc::new(prefix)
+}
+
+fn committed_runtime_compaction_baseline(
+    template: &AgentChatInput,
+    current_user: &AgentChatMessage,
+    request: &crate::AgentContextCompactionCommitRequest,
+) -> AgentContextBaseline {
+    let summary = request.draft.clone().finish(&request.prefix).unwrap();
+    assert_eq!(summary.covered_through, request.prefix.covered_through);
+    let mut state = create_conversation_context_state(AgentChatInput {
+        context_compaction_summary: Some(summary),
+        messages: vec![current_user.clone()],
+        ..template.clone()
+    })
+    .unwrap();
+    state.shared_baseline().unwrap()
+}
+
 #[tokio::test]
 async fn durable_compaction_runs_before_capacity_gate_and_then_sends_rebuilt_context() {
     use crate::context::{ContextCompactionGeneration, ContextCompactionSummary};
@@ -113,6 +175,8 @@ async fn durable_compaction_runs_before_capacity_gate_and_then_sends_rebuilt_con
     let mut old_assistant_trace = conversation_context_trace(
         ConversationTurnTraceTerminalStatus::Completed,
         vec![ConversationTurnTraceItem::AssistantNarration {
+            provider_turn_id: None,
+            first_tool_call_id: None,
             sequence: 0,
             content: old_assistant_content.clone(),
             truncated: false,
@@ -132,6 +196,7 @@ async fn durable_compaction_runs_before_capacity_gate_and_then_sends_rebuilt_con
         conversation_model_context_items: Vec::new(),
     };
     let mut input = AgentChatInput {
+        context_image_attachments: Vec::new(),
         api_url: format!("http://{address}/v1/chat/completions"),
         api_token: "test-token".to_string(),
         provider_configuration_revision: None,
@@ -226,7 +291,7 @@ async fn durable_compaction_runs_before_capacity_gate_and_then_sends_rebuilt_con
     };
     let mut compacted_state = create_conversation_context_state(AgentChatInput {
         context_compaction_summary: Some(compacted_summary),
-        messages: vec![current_user],
+        messages: vec![current_user.clone()],
         ..input.clone()
     })
     .unwrap();
@@ -236,27 +301,29 @@ async fn durable_compaction_runs_before_capacity_gate_and_then_sends_rebuilt_con
     let prepare_count = Arc::new(AtomicUsize::new(0));
     let generate_count = Arc::new(AtomicUsize::new(0));
     let commit_count = Arc::new(AtomicUsize::new(0));
-    let trace_publish_count = Arc::new(AtomicUsize::new(0));
     let trace_snapshots = Arc::new(Mutex::new(Vec::new()));
     let prepare_counter = prepare_count.clone();
     let generate_counter = generate_count.clone();
     let commit_counter = commit_count.clone();
     let commit_count_for_trace = commit_count.clone();
-    let trace_publish_counter = trace_publish_count.clone();
     let trace_snapshots_for_observer = trace_snapshots.clone();
-    let compacted_baseline_for_commit = compacted_baseline.clone();
-    let compacted_baseline_for_trace = compacted_baseline.clone();
+    let compacted_baseline_for_trace = Arc::new(Mutex::new(compacted_baseline.clone()));
+    let compacted_baseline_for_commit = compacted_baseline_for_trace.clone();
+    let compaction_commit_input = input.clone();
+    let compaction_commit_user = current_user.clone();
+    let snapshots_for_prepare = trace_snapshots.clone();
     let durable_prefix_for_prepare = durable_prefix.clone();
     let steer_input = AgentSteerInputQueue::new();
     let steer_input_during_compaction = steer_input.clone();
     let services = AgentContextCompactionServices::new(
         move |request, _| {
             prepare_counter.fetch_add(1, Ordering::SeqCst);
-            assert_eq!(
-                request.covered_through,
-                ContextJournalCursor::message("user-current")
+            let durable_prefix = compaction_prefix_with_published_materials(
+                &durable_prefix_for_prepare,
+                &request,
+                &snapshots_for_prepare.lock().unwrap(),
             );
-            let durable_prefix = durable_prefix_for_prepare.clone();
+            assert!(request.retained_input_tokens > 0);
             async move { Ok(AgentContextCompactionPrepareOutcome::Ready(durable_prefix)) }
         },
         move |request, _| {
@@ -340,7 +407,12 @@ async fn durable_compaction_runs_before_capacity_gate_and_then_sends_rebuilt_con
             }
         },
         move |request, _| {
-            let baseline = compacted_baseline_for_commit.clone();
+            let baseline = committed_runtime_compaction_baseline(
+                &compaction_commit_input,
+                &compaction_commit_user,
+                &request,
+            );
+            *compacted_baseline_for_commit.lock().unwrap() = baseline.clone();
             commit_counter.fetch_add(1, Ordering::SeqCst);
             assert_eq!(request.draft.id, "summary-runtime");
             async move {
@@ -363,12 +435,11 @@ async fn durable_compaction_runs_before_capacity_gate_and_then_sends_rebuilt_con
         observations_for_callback.lock().unwrap().push(observation);
     });
     let trace_observer: AgentConversationTraceObserver = Arc::new(move |snapshot| {
-        trace_publish_counter.fetch_add(1, Ordering::SeqCst);
         trace_snapshots_for_observer.lock().unwrap().push(snapshot);
         let baseline = if commit_count_for_trace.load(Ordering::SeqCst) == 0 {
             uncompacted_baseline.clone()
         } else {
-            compacted_baseline_for_trace.clone()
+            compacted_baseline_for_trace.lock().unwrap().clone()
         };
         Ok(Some(baseline))
     });
@@ -403,7 +474,6 @@ async fn durable_compaction_runs_before_capacity_gate_and_then_sends_rebuilt_con
     assert_eq!(prepare_count.load(Ordering::SeqCst), 1);
     assert_eq!(generate_count.load(Ordering::SeqCst), 1);
     assert_eq!(commit_count.load(Ordering::SeqCst), 1);
-    assert_eq!(trace_publish_count.load(Ordering::SeqCst), 8);
     let usage = output.usage.as_ref().unwrap();
     assert_eq!(usage.input_tokens, Some(100));
     assert_eq!(usage.output_tokens, Some(20));
@@ -460,6 +530,33 @@ async fn durable_compaction_runs_before_capacity_gate_and_then_sends_rebuilt_con
     assert_eq!(*outcome, AgentContextCompactionEventOutcome::Applied);
     assert_eq!(finished_trace_sequence, trace_sequence);
     let snapshots = trace_snapshots.lock().unwrap();
+    let initial_material_content = snapshots
+        .iter()
+        .flat_map(|snapshot| &snapshot.items)
+        .find_map(|item| match item {
+            ConversationTurnTraceItem::ContextMaterial {
+                material_kind: crate::ConversationContextMaterialKind::RunWorldState,
+                content,
+                ..
+            } => Some(content),
+            _ => None,
+        })
+        .expect("the original Run state must be published before it is summarized");
+    for request_body in &request_bodies {
+        let payload: serde_json::Value = serde_json::from_str(request_body).unwrap();
+        let text = payload["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|message| message["content"].as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(
+            text.matches(initial_material_content.as_str()).count(),
+            1,
+            "active Run material must survive compaction exactly once"
+        );
+    }
     let settled_snapshot = snapshots
         .iter()
         .rev()
@@ -597,6 +694,8 @@ async fn recursive_compaction_starts_when_the_assembled_system_summary_is_alread
     let mut grown_assistant_trace = conversation_context_trace(
         ConversationTurnTraceTerminalStatus::Completed,
         vec![ConversationTurnTraceItem::AssistantNarration {
+            provider_turn_id: None,
+            first_tool_call_id: None,
             sequence: 0,
             content: grown_assistant_content.clone(),
             truncated: false,
@@ -616,6 +715,7 @@ async fn recursive_compaction_starts_when_the_assembled_system_summary_is_alread
         conversation_model_context_items: Vec::new(),
     };
     let mut input = AgentChatInput {
+        context_image_attachments: Vec::new(),
         api_url: "http://127.0.0.1:0/v1/chat/completions".to_string(),
         api_token: "test-token".to_string(),
         provider_configuration_revision: None,
@@ -742,38 +842,21 @@ async fn recursive_compaction_starts_when_the_assembled_system_summary_is_alread
             },
         ],
     });
-    let recursive_summary = ContextCompactionSummary {
-        schema_version: crate::CONTEXT_COMPACTION_SUMMARY_SCHEMA_VERSION,
-        id: "summary-recursive".to_string(),
-        conversation_id: "conversation-1".to_string(),
-        source_revision: recursive_prefix.source_revision.clone(),
-        previous_summary_id: Some("summary-previous".to_string()),
-        covered_through: recursive_prefix.covered_through.clone(),
-        content: "RECURSIVE_SUMMARY_MARKER: later history was compacted.".to_string(),
-        continuity: crate::ContextContinuitySnapshot::from_prefix(&recursive_prefix)
-            .expect("recursive prefix should produce continuity records"),
-        generation: ContextCompactionGeneration::test(),
-        source_input_tokens: 40_000,
-        summary_input_tokens: 32,
-        continuity_input_tokens: 64,
-        uncovered_tail_input_tokens: 0,
-        replacement_input_tokens: 96,
-        created_at: 2,
-    };
-    let mut compacted_state = create_conversation_context_state(AgentChatInput {
-        context_compaction_summary: Some(recursive_summary.clone()),
-        messages: vec![current_user.clone()],
-        ..input.clone()
-    })
-    .unwrap();
-    let compacted_baseline = compacted_state.shared_baseline().unwrap();
     let prepare_count = Arc::new(AtomicUsize::new(0));
     let generate_count = Arc::new(AtomicUsize::new(0));
     let commit_count = Arc::new(AtomicUsize::new(0));
     let prepare_counter = prepare_count.clone();
     let generate_counter = generate_count.clone();
     let commit_counter = commit_count.clone();
-    let compacted_baseline_for_commit = compacted_baseline.clone();
+    let compaction_commit_input = input.clone();
+    let compaction_commit_user = current_user.clone();
+    let trace_snapshots = Arc::new(Mutex::new(Vec::new()));
+    let snapshots_for_prepare = trace_snapshots.clone();
+    let snapshots_for_observer = trace_snapshots.clone();
+    let trace_observer: AgentConversationTraceObserver = Arc::new(move |snapshot| {
+        snapshots_for_observer.lock().unwrap().push(snapshot);
+        Ok(None)
+    });
     let recursive_prefix_for_prepare = recursive_prefix.clone();
     let services = AgentContextCompactionServices::new(
         move |request, _| {
@@ -782,11 +865,12 @@ async fn recursive_compaction_starts_when_the_assembled_system_summary_is_alread
                 request.expected_previous_summary_id.as_deref(),
                 Some("summary-previous")
             );
-            assert_eq!(
-                request.covered_through,
-                ContextJournalCursor::message("user-current")
+            let recursive_prefix = compaction_prefix_with_published_materials(
+                &recursive_prefix_for_prepare,
+                &request,
+                &snapshots_for_prepare.lock().unwrap(),
             );
-            let recursive_prefix = recursive_prefix_for_prepare.clone();
+            assert!(request.retained_input_tokens > 0);
             async move {
                 Ok(AgentContextCompactionPrepareOutcome::Ready(
                     recursive_prefix,
@@ -852,7 +936,11 @@ async fn recursive_compaction_starts_when_the_assembled_system_summary_is_alread
             }
         },
         move |request, _| {
-            let baseline = compacted_baseline_for_commit.clone();
+            let baseline = committed_runtime_compaction_baseline(
+                &compaction_commit_input,
+                &compaction_commit_user,
+                &request,
+            );
             commit_counter.fetch_add(1, Ordering::SeqCst);
             assert_eq!(request.draft.id, "summary-recursive");
             async move {
@@ -876,7 +964,11 @@ async fn recursive_compaction_starts_when_the_assembled_system_summary_is_alread
             Some("run-recursive-compaction".to_string()),
             Some(emitter),
             AgentCancellationToken::new(),
-            Some(AgentRuntimeHostServices::new().with_context_compaction(services)),
+            Some(
+                AgentRuntimeHostServices::new()
+                    .with_context_compaction(services)
+                    .with_trace_observer(trace_observer),
+            ),
         )
         .await
         .unwrap();
@@ -912,6 +1004,7 @@ async fn context_capacity_guard_rejects_the_initial_request_before_network_io() 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let mut input = AgentChatInput {
+        context_image_attachments: Vec::new(),
         api_url: format!("http://{address}/v1/chat/completions"),
         api_token: "test-token".to_string(),
         provider_configuration_revision: None,
@@ -1080,6 +1173,7 @@ async fn context_capacity_guard_accepts_budgeted_tool_results_for_the_next_reque
         .await;
     });
     let mut input = AgentChatInput {
+        context_image_attachments: Vec::new(),
         api_url: format!("http://{address}/v1/chat/completions"),
         api_token: "test-token".to_string(),
         provider_configuration_revision: None,
@@ -1466,6 +1560,7 @@ async fn streams_apply_patch_previews_end_to_end_without_persisting_them() {
         captured_for_emitter.lock().unwrap().push(event);
     });
     let mut input = AgentChatInput {
+        context_image_attachments: Vec::new(),
         api_url: format!("http://{address}/v1/chat/completions"),
         api_token: "test-token".to_string(),
         provider_configuration_revision: None,

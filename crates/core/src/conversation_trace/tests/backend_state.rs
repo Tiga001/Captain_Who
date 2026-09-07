@@ -78,6 +78,7 @@ fn backend_state_recording_is_atomic_idempotent_and_has_one_exact_model_fact() {
     assert!(trace.items[0].is_safe_compaction_boundary());
     let mut corrupted = snapshot.model_context_items;
     corrupted.push(ConversationModelContextItem {
+        images: Vec::new(),
         ordinal: 1,
         ..corrupted[0].clone()
     });

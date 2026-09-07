@@ -50,6 +50,28 @@ impl ConversationTraceRenderer {
                 .iter()
                 .find(|candidate| candidate.sequence() == item.sequence)
                 .expect("validated model context trace owner");
+            // Generic wire retains narration in the first Tool Call message. The audit also
+            // has a standalone UI narration, so consume that projection only when its trusted
+            // first-call identity proves the matching model message already owns the text.
+            // Do not infer ownership from equal text or neighboring trace sequence numbers.
+            if let ConversationTurnTraceItem::AssistantNarration {
+                first_tool_call_id: Some(first_call_id),
+                ..
+            } = trace_item
+            {
+                let already_retained = model_context_items.iter().any(|candidate| {
+                    candidate.sequence > item.sequence
+                        && candidate.role == "assistant"
+                        && !candidate.content.is_empty()
+                        && candidate
+                            .tool_calls
+                            .iter()
+                            .any(|call| &call.id == first_call_id)
+                });
+                if already_retained {
+                    continue;
+                }
+            }
             let rendered = model_context_item(item, &trace.assistant_message_id, trace_item)?;
             if matches!(
                 trace_item,
@@ -99,6 +121,26 @@ impl ConversationTraceRenderer {
 
         for (index, item) in trace.items.iter().enumerate() {
             match item {
+                ConversationTurnTraceItem::ContextMaterial {
+                    sequence,
+                    material_kind,
+                    content,
+                    images,
+                    ..
+                } => {
+                    if pending_exchange.is_some() {
+                        return Err(AgentError::new(
+                            "Context material cannot split a tool exchange.",
+                        ));
+                    }
+                    activity_items.push(context_material_item(
+                        &trace.assistant_message_id,
+                        *sequence,
+                        *material_kind,
+                        content,
+                        images,
+                    ));
+                }
                 ConversationTurnTraceItem::BackendState {
                     sequence,
                     content,
@@ -125,7 +167,11 @@ impl ConversationTraceRenderer {
                     }
                 }
                 ConversationTurnTraceItem::AssistantNarration {
-                    sequence, content, ..
+                    sequence,
+                    content,
+                    provider_turn_id,
+                    first_tool_call_id,
+                    ..
                 } => {
                     if !content.trim().is_empty() {
                         activity_items.push(ContextItem::new(
@@ -133,7 +179,12 @@ impl ConversationTraceRenderer {
                                 LlmMessageRole::Assistant,
                                 content.clone(),
                             ),
-                            trace_item_metadata(&trace.assistant_message_id, *sequence),
+                            narration_metadata(
+                                &trace.assistant_message_id,
+                                *sequence,
+                                provider_turn_id.as_deref(),
+                                first_tool_call_id.as_deref(),
+                            ),
                         ));
                     }
                 }
@@ -312,7 +363,36 @@ fn model_context_item(
     assistant_message_id: &str,
     trace_item: &ConversationTurnTraceItem,
 ) -> AgentResult<ContextItem> {
-    let metadata = trace_item_metadata(assistant_message_id, item.sequence);
+    if let ConversationTurnTraceItem::ContextMaterial {
+        material_kind,
+        content,
+        images,
+        ..
+    } = trace_item
+    {
+        return Ok(context_material_item(
+            assistant_message_id,
+            item.sequence,
+            *material_kind,
+            content,
+            images,
+        ));
+    }
+    let metadata = if let ConversationTurnTraceItem::AssistantNarration {
+        provider_turn_id,
+        first_tool_call_id,
+        ..
+    } = trace_item
+    {
+        narration_metadata(
+            assistant_message_id,
+            item.sequence,
+            provider_turn_id.as_deref(),
+            first_tool_call_id.as_deref(),
+        )
+    } else {
+        trace_item_metadata(assistant_message_id, item.sequence)
+    };
     if matches!(trace_item, ConversationTurnTraceItem::BackendState { .. }) {
         return Ok(ContextItem::new(
             crate::llm::LlmMessage::backend_state(&item.content),
@@ -360,6 +440,51 @@ fn model_context_item(
         }
         _ => Err(AgentError::new("模型上下文日志包含未知消息角色。")),
     }
+}
+
+fn narration_metadata(
+    assistant_message_id: &str,
+    sequence: u64,
+    provider_turn_id: Option<&str>,
+    first_tool_call_id: Option<&str>,
+) -> ContextMetadata {
+    let metadata = trace_item_metadata(assistant_message_id, sequence);
+    match (provider_turn_id, first_tool_call_id) {
+        (Some(id), Some(first_call_id)) => metadata
+            .with_source(ContextSource::ToolTurnNarration)
+            .with_group(ContextGroup::tool_exchange(format!(
+                "narration-owner:{id}:{first_call_id}"
+            ))),
+        _ => metadata,
+    }
+}
+
+fn context_material_item(
+    assistant_message_id: &str,
+    sequence: u64,
+    kind: crate::ConversationContextMaterialKind,
+    content: &str,
+    images: &[crate::ConversationContextImageRef],
+) -> ContextItem {
+    let source = match kind {
+        crate::ConversationContextMaterialKind::InputAttachment => ContextSource::InputAttachment,
+        crate::ConversationContextMaterialKind::SkillInstructions => {
+            ContextSource::SkillInstructions
+        }
+        crate::ConversationContextMaterialKind::RunWorldState => ContextSource::WorldStateSnapshot,
+    };
+    let message = if kind == crate::ConversationContextMaterialKind::RunWorldState {
+        crate::llm::LlmMessage::backend_state(content)
+    } else {
+        crate::llm::LlmMessage::text(LlmMessageRole::User, content)
+    };
+    ContextItem::new(
+        message,
+        trace_item_metadata(assistant_message_id, sequence)
+            .with_source(ContextSource::HistoricalRunContext)
+            .with_source(source),
+    )
+    .with_context_image_refs(images.to_vec())
 }
 
 #[derive(Debug)]
@@ -418,6 +543,8 @@ mod tests {
             truncated: false,
             items: vec![
                 ConversationTurnTraceItem::AssistantNarration {
+                    provider_turn_id: None,
+                    first_tool_call_id: None,
                     sequence: 3,
                     content: "I will inspect the file.".to_string(),
                     truncated: false,
@@ -596,6 +723,7 @@ mod tests {
                 ConversationTurnTraceItem::AssistantNarration {
                     sequence, content, ..
                 } => ConversationModelContextItem {
+                    images: Vec::new(),
                     sequence: *sequence,
                     ordinal: 0,
                     role: "assistant".to_string(),
@@ -611,6 +739,7 @@ mod tests {
                     operation,
                     ..
                 } => ConversationModelContextItem {
+                    images: Vec::new(),
                     sequence: *sequence,
                     ordinal: 0,
                     role: "assistant".to_string(),
@@ -627,6 +756,7 @@ mod tests {
                 ConversationTurnTraceItem::ToolResult {
                     sequence, call_id, ..
                 } => ConversationModelContextItem {
+                    images: Vec::new(),
                     sequence: *sequence,
                     ordinal: 0,
                     role: "tool".to_string(),
@@ -638,6 +768,7 @@ mod tests {
                 ConversationTurnTraceItem::UserGuidance { .. }
                 | ConversationTurnTraceItem::AgentMailboxDelivery { .. }
                 | ConversationTurnTraceItem::BackendState { .. }
+                | ConversationTurnTraceItem::ContextMaterial { .. }
                 | ConversationTurnTraceItem::CommandSessionLifecycle { .. }
                 | ConversationTurnTraceItem::ContextCompactionLifecycle { .. }
                 | ConversationTurnTraceItem::RuntimeError { .. } => unreachable!(),
@@ -661,6 +792,7 @@ mod tests {
         let exact_marker = "EXACT_RESULT_BODY_OMITTED_FROM_DURABLE_TRACE";
         let model_items = vec![
             ConversationModelContextItem {
+                images: Vec::new(),
                 sequence: 3,
                 ordinal: 0,
                 role: "assistant".to_string(),
@@ -670,6 +802,7 @@ mod tests {
                 is_error: false,
             },
             ConversationModelContextItem {
+                images: Vec::new(),
                 sequence: 4,
                 ordinal: 0,
                 role: "assistant".to_string(),
@@ -684,6 +817,7 @@ mod tests {
                 is_error: false,
             },
             ConversationModelContextItem {
+                images: Vec::new(),
                 sequence: 5,
                 ordinal: 0,
                 role: "tool".to_string(),
@@ -712,6 +846,99 @@ mod tests {
                 .sum::<usize>(),
             1
         );
+    }
+
+    #[test]
+    fn generic_narration_projection_is_consumed_only_by_its_explicit_tool_owner() {
+        const TEXT: &str = "The same words may belong to another response.";
+        let mut trace = trace();
+        let call = match &trace.items[1] {
+            ConversationTurnTraceItem::ToolCall {
+                call_id,
+                tool,
+                operation,
+                ..
+            } => AgentContextCheckpointToolCall {
+                id: call_id.clone(),
+                name: tool.clone(),
+                args: operation.clone(),
+                provider_identity: provider_identity(call_id),
+            },
+            _ => unreachable!(),
+        };
+        trace.items[0] = ConversationTurnTraceItem::AssistantNarration {
+            sequence: 3,
+            content: TEXT.into(),
+            provider_turn_id: Some("at1_tool_owner".into()),
+            first_tool_call_id: Some(call.id.clone()),
+            truncated: false,
+        };
+        trace.items.insert(
+            0,
+            ConversationTurnTraceItem::AssistantNarration {
+                sequence: 2,
+                content: TEXT.into(),
+                provider_turn_id: None,
+                first_tool_call_id: None,
+                truncated: false,
+            },
+        );
+        let plain = |sequence, content: &str| ConversationModelContextItem {
+            sequence,
+            ordinal: 0,
+            role: "assistant".into(),
+            content: content.into(),
+            images: Vec::new(),
+            tool_call_id: None,
+            tool_calls: Vec::new(),
+            is_error: false,
+        };
+        let mut model = vec![
+            plain(2, TEXT),
+            plain(3, TEXT),
+            plain(4, TEXT),
+            ConversationModelContextItem {
+                sequence: 5,
+                ordinal: 0,
+                role: "tool".into(),
+                content: "read result".into(),
+                images: Vec::new(),
+                tool_call_id: Some(call.id.clone()),
+                tool_calls: Vec::new(),
+                is_error: false,
+            },
+        ];
+        model[2].tool_calls.push(call);
+        let render = |trace: &ConversationTurnTrace, model: &[ConversationModelContextItem]| {
+            ContextFrame::new(
+                ConversationTraceRenderer::render_with_model_context(trace, model)
+                    .unwrap()
+                    .activity_items,
+            )
+            .to_messages()
+        };
+        let messages = render(&trace, &model);
+        assert_eq!(messages.len(), 3);
+        assert!(
+            messages[0].tool_calls().next().is_none(),
+            "ordinary identical narration is retained"
+        );
+        assert_eq!(messages[0].content(), TEXT);
+        assert_eq!(messages[1].content(), TEXT);
+        assert!(messages[1].tool_calls().next().is_some());
+        // A missing tool-body projection cannot consume the only remaining narration.
+        model[2].content.clear();
+        assert_eq!(render(&trace, &model).len(), 4);
+        // Equal words in an unrelated tool response do not establish ownership.
+        model[2].content = TEXT.into();
+        if let ConversationTurnTraceItem::AssistantNarration {
+            first_tool_call_id, ..
+        } = &mut trace.items[1]
+        {
+            *first_tool_call_id =
+                Some(model_response_tool_call_id("other-run", 0, 0, "other-call"));
+        }
+        assert_eq!(render(&trace, &model).len(), 4);
     }
 
     #[test]
@@ -748,6 +975,7 @@ mod tests {
         });
         let model_items = vec![
             ConversationModelContextItem {
+                images: Vec::new(),
                 sequence: 3,
                 ordinal: 0,
                 role: "assistant".to_string(),
@@ -757,6 +985,7 @@ mod tests {
                 is_error: false,
             },
             ConversationModelContextItem {
+                images: Vec::new(),
                 sequence: 4,
                 ordinal: 0,
                 role: "assistant".to_string(),
@@ -771,6 +1000,7 @@ mod tests {
                 is_error: false,
             },
             ConversationModelContextItem {
+                images: Vec::new(),
                 sequence: 5,
                 ordinal: 0,
                 role: "tool".to_string(),
@@ -780,6 +1010,7 @@ mod tests {
                 is_error: false,
             },
             ConversationModelContextItem {
+                images: Vec::new(),
                 sequence: 6,
                 ordinal: 0,
                 role: "assistant".to_string(),
@@ -794,6 +1025,7 @@ mod tests {
                 is_error: false,
             },
             ConversationModelContextItem {
+                images: Vec::new(),
                 sequence: 7,
                 ordinal: 0,
                 role: "tool".to_string(),
@@ -839,6 +1071,7 @@ mod tests {
         };
         let model_items = vec![
             ConversationModelContextItem {
+                images: Vec::new(),
                 sequence: 3,
                 ordinal: 0,
                 role: "assistant".to_string(),
@@ -848,6 +1081,7 @@ mod tests {
                 is_error: false,
             },
             ConversationModelContextItem {
+                images: Vec::new(),
                 sequence: 4,
                 ordinal: 0,
                 role: "assistant".to_string(),
@@ -891,6 +1125,7 @@ mod tests {
         trace.terminal_error = None;
         let staged_items = vec![
             ConversationModelContextItem {
+                images: Vec::new(),
                 sequence: 3,
                 ordinal: 0,
                 role: "assistant".to_string(),
@@ -900,6 +1135,7 @@ mod tests {
                 is_error: false,
             },
             ConversationModelContextItem {
+                images: Vec::new(),
                 sequence,
                 ordinal: 0,
                 role: "assistant".to_string(),
@@ -1003,6 +1239,7 @@ mod tests {
                 | ConversationTurnTraceItem::UserGuidance { .. }
                 | ConversationTurnTraceItem::AgentMailboxDelivery { .. }
                 | ConversationTurnTraceItem::BackendState { .. }
+                | ConversationTurnTraceItem::ContextMaterial { .. }
                 | ConversationTurnTraceItem::CommandSessionLifecycle { .. }
                 | ConversationTurnTraceItem::ContextCompactionLifecycle { .. }
                 | ConversationTurnTraceItem::RuntimeError { .. } => {}

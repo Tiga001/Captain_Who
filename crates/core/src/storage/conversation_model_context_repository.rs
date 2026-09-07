@@ -361,6 +361,7 @@ mod tests {
     fn exact_items() -> Vec<ConversationModelContextItem> {
         vec![
             ConversationModelContextItem {
+                images: Vec::new(),
                 sequence: 0,
                 ordinal: 0,
                 role: "assistant".to_string(),
@@ -379,6 +380,7 @@ mod tests {
                 is_error: false,
             },
             ConversationModelContextItem {
+                images: Vec::new(),
                 sequence: 1,
                 ordinal: 0,
                 role: "tool".to_string(),

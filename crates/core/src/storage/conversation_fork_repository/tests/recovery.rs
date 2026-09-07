@@ -1079,11 +1079,15 @@ fn request_world_state_fork_uses_trace_cutoff_and_remaps_history_identity_withou
             truncated: false,
             items: vec![
                 ConversationTurnTraceItem::AssistantNarration {
+                    provider_turn_id: None,
+                    first_tool_call_id: None,
                     sequence: 0,
                     content: "first".into(),
                     truncated: false,
                 },
                 ConversationTurnTraceItem::AssistantNarration {
+                    provider_turn_id: None,
+                    first_tool_call_id: None,
                     sequence: 1,
                     content: "second".into(),
                     truncated: false,

@@ -144,6 +144,126 @@ pub(crate) struct ContextFramePlanningItem {
 }
 
 impl ContextFrame {
+    /// Resolve only Host-provided, immutable attachments. Never reopen arbitrary paths from
+    /// model-authored history or reinterpret a historical reference as current tool authority.
+    pub(crate) fn hydrate_context_images(
+        &mut self,
+        attachments: &[crate::AgentInputAttachment],
+    ) -> AgentResult<()> {
+        use base64::Engine;
+        use sha2::{Digest, Sha256};
+        if !self
+            .iter_items()
+            .any(|item| !item.context_image_refs.is_empty())
+        {
+            return Ok(());
+        }
+        self.materialize_baseline();
+        let mut changed = false;
+        for item in &mut self.items {
+            if item.context_image_refs.is_empty() {
+                continue;
+            }
+            let mut images = Vec::new();
+            for reference in &item.context_image_refs {
+                let attachment = attachments
+                    .iter()
+                    .find(|attachment| attachment.id == reference.attachment_id)
+                    .ok_or_else(|| AgentError::new("Historical context image is unavailable."))?;
+                if attachment.mime_type.as_deref() != Some(reference.mime_type.as_str())
+                    || attachment.encoding != crate::AgentInputAttachmentEncoding::Base64
+                {
+                    return Err(AgentError::new(
+                        "Historical context image identity mismatch.",
+                    ));
+                }
+                let bytes = base64::engine::general_purpose::STANDARD
+                    .decode(&attachment.data)
+                    .map_err(|_| AgentError::new("Invalid historical context image encoding."))?;
+                if format!("sha256:{:x}", Sha256::digest(&bytes)) != reference.sha256 {
+                    return Err(AgentError::new("Historical context image content changed."));
+                }
+                images.push(crate::llm::LlmImage {
+                    mime_type: reference.mime_type.clone(),
+                    data_base64: attachment.data.clone(),
+                });
+            }
+            if item.message.images() != images {
+                *item.message.images_mut().ok_or_else(|| {
+                    AgentError::new("Historical image has an invalid message role.")
+                })? = images;
+                item.measurement = None;
+                changed = true;
+            }
+        }
+        if changed {
+            self.revision = self.revision.saturating_add(1);
+            self.persistent_revision = persistent_frame_revision(&self.items);
+            self.measurement = None;
+        }
+        Ok(())
+    }
+
+    /// Returns not-yet-journaled Run materials in the exact order used by the model request.
+    pub(crate) fn pending_run_materials(
+        &self,
+    ) -> Vec<(usize, crate::ConversationContextMaterialKind, LlmMessage)> {
+        let indices = self
+            .iter_items()
+            .enumerate()
+            .map(|(index, item)| (item as *const ContextItem, index))
+            .collect::<BTreeMap<_, _>>();
+        self.model_request_items()
+            .into_iter()
+            .filter_map(|item| {
+                if item.metadata.scope != ContextScope::Run
+                    || item
+                        .metadata
+                        .origin()
+                        .and_then(ContextOrigin::journal_cursor)
+                        .is_some()
+                {
+                    return None;
+                }
+                let sources = item.metadata.sources();
+                let kind = if sources.contains(&ContextSource::InputAttachment) {
+                    crate::ConversationContextMaterialKind::InputAttachment
+                } else if sources.contains(&ContextSource::SkillInstructions) {
+                    crate::ConversationContextMaterialKind::SkillInstructions
+                } else if sources.contains(&ContextSource::WorldStateSnapshot)
+                    || sources.contains(&ContextSource::WorldStateDiff)
+                {
+                    crate::ConversationContextMaterialKind::RunWorldState
+                } else {
+                    return None;
+                };
+                Some((
+                    indices[&(item as *const ContextItem)],
+                    kind,
+                    item.message.clone(),
+                ))
+            })
+            .collect()
+    }
+
+    pub(crate) fn bind_run_material(
+        &mut self,
+        index: usize,
+        assistant_message_id: &str,
+        sequence: u64,
+        images: Vec<crate::ConversationContextImageRef>,
+    ) {
+        self.materialize_baseline();
+        self.items[index].metadata.origin = Some(ContextOrigin::conversation_trace_item(
+            assistant_message_id,
+            sequence,
+        ));
+        self.items[index].context_image_refs = images;
+        self.items[index].measurement = None;
+        self.revision = self.revision.saturating_add(1);
+        self.persistent_revision = persistent_frame_revision(&self.items);
+        self.measurement = None;
+    }
     pub(crate) fn new(items: Vec<ContextItem>) -> Self {
         let revision = u64::try_from(items.len()).unwrap_or(u64::MAX);
         let persistent_revision = persistent_frame_revision(&items);
@@ -415,6 +535,19 @@ impl ContextFrame {
                 .origin()
                 .and_then(ContextOrigin::journal_cursor)
                 .is_some_and(|cursor| cursor.message_id() == assistant_message_id);
+            if belongs_to_message
+                && item
+                    .metadata
+                    .sources
+                    .contains(&ContextSource::ToolTurnNarration)
+                && item.metadata.group.as_ref().is_some_and(|group| {
+                    group.id == format!("narration-owner:{}:{}", turn.stable_id(), expected_ids[0])
+                })
+            {
+                // This public trace row is a projection of this exact response, not another
+                // Assistant message. Match response and first canonical call identity, never text.
+                continue;
+            }
             if belongs_to_message && item.message.role() == LlmMessageRole::Assistant {
                 let call_ids = item
                     .message
@@ -894,6 +1027,36 @@ impl ContextFrame {
                     .push_back((placement, u64::try_from(index).unwrap_or(u64::MAX)));
             }
         }
+        let live_materials = self
+            .iter_items()
+            .filter(|item| {
+                item.metadata.scope() == ContextScope::Run
+                    && item.metadata.sources().iter().any(|source| {
+                        matches!(
+                            source,
+                            ContextSource::InputAttachment
+                                | ContextSource::SkillInstructions
+                                | ContextSource::WorldStateSnapshot
+                                | ContextSource::WorldStateDiff
+                        )
+                    })
+                    && item
+                        .metadata
+                        .origin()
+                        .and_then(ContextOrigin::journal_cursor)
+                        .is_some()
+            })
+            .filter_map(|item| {
+                item.metadata
+                    .origin()
+                    .map(|origin| (origin.id().to_string(), item.clone()))
+            })
+            .collect::<BTreeMap<_, _>>();
+        let baseline_origins = baseline
+            .iter_items()
+            .filter_map(|item| item.metadata.origin())
+            .map(|origin| origin.id().to_string())
+            .collect::<BTreeSet<_>>();
         let baseline_world_state_origins = baseline
             .iter_items()
             .filter_map(|item| item.metadata.origin())
@@ -917,9 +1080,24 @@ impl ContextFrame {
                 })
             })
             .filter(|item| !item.metadata.usage_class().is_persistent())
+            .filter(|item| {
+                !item.metadata.origin().is_some_and(|origin| {
+                    live_materials.contains_key(origin.id())
+                        && baseline_origins.contains(origin.id())
+                })
+            })
             .map(|item| {
                 let index = request_orders[&(item as *const ContextItem)];
                 let mut item = item.clone();
+                if item
+                    .metadata
+                    .origin()
+                    .is_some_and(|origin| live_materials.contains_key(origin.id()))
+                {
+                    // The authoritative tail no longer contains this journal event. Preserve
+                    // active run context, but never summarize the covered event a second time.
+                    item.metadata = item.metadata.with_source(ContextSource::CompactionRetained);
+                }
                 if item.metadata.retention() == ContextRetention::Retained
                     && !item
                         .metadata
@@ -942,6 +1120,23 @@ impl ContextFrame {
         // The baseline is a shared immutable cache. Only this run's copy receives layout tags.
         replaced.materialize_baseline();
         for item in &mut replaced.items {
+            if let Some(live) = item
+                .metadata
+                .origin()
+                .and_then(|origin| live_materials.get(origin.id()))
+            {
+                let covered = item
+                    .metadata
+                    .sources()
+                    .contains(&ContextSource::CompactionRetained);
+                *item = live.clone();
+                if covered {
+                    item.metadata = item
+                        .metadata
+                        .clone()
+                        .with_source(ContextSource::CompactionRetained);
+                }
+            }
             let Some(origin) = item.metadata.origin() else {
                 continue;
             };
@@ -979,7 +1174,13 @@ impl ContextFrame {
         }
         replaced.revision = replaced.revision.saturating_add(1);
         replaced.persistent_revision = persistent_frame_revision(&replaced.items);
-        if let Some(measurement) = &mut replaced.measurement {
+        if !live_materials.is_empty() {
+            // A durable baseline copy has just become a Run-scoped exact overlay. Its cached
+            // bucket allocation is no longer valid, even when the message bytes are identical;
+            // hydrated live images can also differ from the persisted reference-only copy.
+            // Keep reusable item estimates, but rebuild the frame's classified total once.
+            replaced.measurement = None;
+        } else if let Some(measurement) = &mut replaced.measurement {
             measurement.full_recount = None;
         }
         for item in overlay {

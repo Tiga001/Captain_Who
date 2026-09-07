@@ -426,6 +426,7 @@ fn failed_terminal_settlement_closes_a_durable_open_tool_call_with_paired_contex
             truncated: false,
         }],
         model_context_items: vec![ConversationModelContextItem {
+            images: Vec::new(),
             sequence: 0,
             ordinal: 0,
             role: "assistant".to_string(),
@@ -1463,6 +1464,7 @@ fn pending_approval_persists_full_run_checkpoint() {
         pending_file_observation: None,
         context_items: vec![
             mycopilot_core::AgentContextCheckpointItem {
+                context_image_refs: Vec::new(),
                 role: "system".to_string(),
                 content: "rules".to_string(),
                 images: Vec::new(),
@@ -1477,6 +1479,7 @@ fn pending_approval_persists_full_run_checkpoint() {
                 origin: None,
             },
             mycopilot_core::AgentContextCheckpointItem {
+                context_image_refs: Vec::new(),
                 role: "assistant".to_string(),
                 content: String::new(),
                 images: Vec::new(),

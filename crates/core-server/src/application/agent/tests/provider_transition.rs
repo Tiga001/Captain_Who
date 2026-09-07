@@ -45,6 +45,7 @@ fn completed_history_model_context() -> Vec<ConversationModelContextItem> {
     let call_id = history_call_id();
     vec![
         ConversationModelContextItem {
+            images: Vec::new(),
             sequence: 0,
             ordinal: 0,
             role: "assistant".to_string(),
@@ -54,6 +55,7 @@ fn completed_history_model_context() -> Vec<ConversationModelContextItem> {
             is_error: false,
         },
         ConversationModelContextItem {
+            images: Vec::new(),
             sequence: 1,
             ordinal: 0,
             role: "assistant".to_string(),
@@ -79,6 +81,7 @@ fn completed_history_model_context() -> Vec<ConversationModelContextItem> {
             is_error: false,
         },
         ConversationModelContextItem {
+            images: Vec::new(),
             sequence: 2,
             ordinal: 0,
             role: "tool".to_string(),

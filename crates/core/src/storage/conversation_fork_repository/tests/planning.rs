@@ -68,8 +68,8 @@ fn cloned_agent_usage_is_zero_and_ids_are_rewritten() {
 #[test]
 fn unsettled_assistant_state_cannot_enter_a_fork_snapshot() {
     let mut message = ChatMessageRecord {
-                human_interaction_response: None,
-id: "assistant-running".to_string(),
+        human_interaction_response: None,
+        id: "assistant-running".to_string(),
         role: "assistant".to_string(),
         content: "partial".to_string(),
         created_at: 1,
@@ -439,6 +439,7 @@ fn fork_clone_preserves_the_exact_steer_boundary_projection() {
         &source.id,
         "assistant-a",
         &[ConversationModelContextItem {
+            images: Vec::new(),
             sequence: 0,
             ordinal: 0,
             role: "user".to_string(),
@@ -750,6 +751,8 @@ fn fork_clones_only_causally_visible_summary_history_and_remains_recursive() {
         .enumerate()
     {
         let mut items = vec![ConversationTurnTraceItem::AssistantNarration {
+            provider_turn_id: None,
+            first_tool_call_id: None,
             sequence: 0,
             content: format!("narration {index}"),
             truncated: false,
@@ -1097,4 +1100,111 @@ fn fork_clones_only_causally_visible_summary_history_and_remains_recursive() {
         .len(),
         1
     );
+}
+
+#[test]
+fn fork_rebinds_narration_to_its_cloned_tool_call_without_changing_provider_turn() {
+    let mut connection = Connection::open_in_memory().unwrap();
+    migrations::run_migrations(&connection).unwrap();
+    let source = source_conversation();
+    chat_repository::save_conversation(&mut connection, source.clone()).unwrap();
+    let source_call = crate::llm::model_response_tool_call_id("run-source-0", 0, 0, "source-call");
+    let provider_turn_id = format!("at1_{}", "a".repeat(64));
+    let mut trace = ConversationTurnTrace {
+        schema_version: CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
+        run_id: "run-source-0".into(),
+        conversation_id: source.id.clone(),
+        assistant_message_id: "assistant-a".into(),
+        terminal_status: ConversationTurnTraceTerminalStatus::Completed,
+        terminal_error: None,
+        truncated: false,
+        items: vec![ConversationTurnTraceItem::AssistantNarration {
+            sequence: 0,
+            content: "Inspecting evidence.".into(),
+            provider_turn_id: Some(provider_turn_id.clone()),
+            first_tool_call_id: Some(source_call.clone()),
+            truncated: false,
+        }],
+    };
+    trace.items.extend(staged_tool_exchange(
+        1,
+        &source_call,
+        "read_file",
+        json!({"path":"evidence.txt"}),
+    ));
+    conversation_trace_repository::replace_trace(&mut connection, &trace, 20, 21).unwrap();
+    let narration = ConversationModelContextItem {
+        sequence: 0,
+        ordinal: 0,
+        role: "assistant".into(),
+        content: "Inspecting evidence.".into(),
+        images: Vec::new(),
+        tool_call_id: None,
+        tool_calls: Vec::new(),
+        is_error: false,
+    };
+    let mut call = narration.clone();
+    call.sequence = 1;
+    call.tool_calls.push(crate::AgentContextCheckpointToolCall {
+        id: source_call.clone(),
+        name: "read_file".into(),
+        args: json!({"path":"evidence.txt"}),
+        provider_identity: crate::AgentProviderToolCallIdentity {
+            provider_tool_index: 0,
+            provider_call_id: "provider-call".into(),
+            runtime_call_id: source_call.clone(),
+        },
+    });
+    let mut result = narration.clone();
+    result.sequence = 2;
+    result.role = "tool".into();
+    result.tool_call_id = Some(source_call.clone());
+    result.content = "{\"accepted\":true}".into();
+    conversation_model_context_repository::commit_items_in_connection(
+        &connection,
+        &source.id,
+        "assistant-a",
+        &[narration, call, result],
+    )
+    .unwrap();
+    let plan = build_assistant_reply_fork_plan(
+        &connection,
+        "fork-narration-binding",
+        &source.id,
+        "assistant-a",
+        30,
+    )
+    .unwrap();
+    commit_fork_plan(&mut connection, &plan).unwrap();
+    let target_trace = conversation_trace_repository::get_trace_for_message(
+        &connection,
+        &plan.message_id_map["assistant-a"],
+    )
+    .unwrap()
+    .unwrap();
+    let ConversationTurnTraceItem::AssistantNarration {
+        first_tool_call_id: Some(bound_call),
+        provider_turn_id: Some(bound_turn),
+        ..
+    } = &target_trace.items[0]
+    else {
+        panic!("missing narration identity")
+    };
+    let ConversationTurnTraceItem::ToolCall { call_id, .. } = &target_trace.items[1] else {
+        panic!("missing cloned tool call")
+    };
+    assert_ne!(bound_call, &source_call);
+    assert_eq!(bound_call, call_id);
+    assert_eq!(bound_turn, &provider_turn_id);
+    let log = conversation_model_context_repository::get_log_for_message(
+        &connection,
+        &plan.message_id_map["assistant-a"],
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(&log.items[1].tool_calls[0].id, bound_call);
+    assert_eq!(log.items[2].tool_call_id.as_ref(), Some(bound_call));
+    target_trace
+        .validate_complete_model_context(&log.items)
+        .unwrap();
 }

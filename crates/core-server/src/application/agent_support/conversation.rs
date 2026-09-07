@@ -804,7 +804,8 @@ fn prepare_conversation_turn_from_source(
         mycopilot_core::resolve_provider_runtime_capabilities(&provider_protocol_key)
             .map_err(|error| error.to_string())?
             .usage();
-    let agent_input = AgentChatInput {
+    let mut agent_input = AgentChatInput {
+        context_image_attachments: Vec::new(),
         api_url: connection.api_url,
         api_token: connection.api_token,
         provider_configuration_revision: Some(provider_protocol_revision),
@@ -838,6 +839,8 @@ fn prepare_conversation_turn_from_source(
         skill_discovery: skill_discovery.clone(),
         messages: agent_messages,
     };
+
+    hydrate_context_image_attachments(storage, &mut agent_input)?;
 
     let skill_resources = match (prepared_skills.resources, skill_discovery.as_ref()) {
         (Some(resources), _) => Some(resources),
@@ -917,7 +920,10 @@ pub(crate) fn conversation_history_messages_with_model_context(
             .map(|index| (index, &summary.covered_through))
     });
     let completion_is_covered = |message_id: &str| {
-        covered_boundary.is_some_and(|(_, cursor)| {
+        covered_boundary.is_some_and(|(boundary_index, cursor)| {
+            if conversation.messages[..boundary_index].iter().any(|message| message.id == message_id) {
+                return true;
+            }
             cursor.message_id() == message_id
                 && match cursor {
                     ContextJournalCursor::Message { .. } => true,
@@ -968,9 +974,22 @@ pub(crate) fn conversation_history_messages_with_model_context(
                 return Some((message, trace, model_context_items));
             };
             if index < boundary_index {
-                return (retained_active_user_index == Some(index)).then_some((
+                if retained_active_user_index == Some(index) {
+                    return Some((message, trace, model_context_items));
+                }
+                // Vision payloads are not text-summary replacements. Keep only their immutable
+                // material rows, never old assistant completion or unrelated runtime facts.
+                let mut trace = trace?;
+                trace.items.retain(is_retained_context_image_material);
+                model_context_items.retain(|item| {
+                    trace
+                        .items
+                        .iter()
+                        .any(|event| event.sequence() == item.sequence)
+                });
+                return (!trace.items.is_empty()).then_some((
                     message,
-                    trace,
+                    Some(trace),
                     model_context_items,
                 ));
             }
@@ -981,7 +1000,8 @@ pub(crate) fn conversation_history_messages_with_model_context(
                 ContextJournalCursor::Message { .. } => {
                     let mut trace = trace?;
                     trace.items.retain(|item| {
-                        matches!(
+                        is_retained_context_image_material(item)
+                            || matches!(
                             item,
                             mycopilot_core::ConversationTurnTraceItem::BackendState {
                                 placement:
@@ -1005,10 +1025,16 @@ pub(crate) fn conversation_history_messages_with_model_context(
                     // covered by the active summary, so retaining those rows would turn a valid
                     // full trace into an invalid standalone suffix. The complete trace is still
                     // validated below before this model-visible suffix is accepted.
-                    trace
-                        .items
-                        .retain(|item| item.sequence() > *sequence && item.is_model_visible());
-                    model_context_items.retain(|item| item.sequence > *sequence);
+                    trace.items.retain(|item| {
+                        (item.sequence() > *sequence && item.is_model_visible())
+                            || is_retained_context_image_material(item)
+                    });
+                    model_context_items.retain(|item| {
+                        trace
+                            .items
+                            .iter()
+                            .any(|event| event.sequence() == item.sequence)
+                    });
                     let has_uncovered_completion =
                         trace.terminal_status.is_terminal() && !completion_is_covered(&message.id);
                     (!trace.items.is_empty() || has_uncovered_completion).then_some((
@@ -1097,7 +1123,8 @@ pub(crate) fn conversation_history_messages_with_model_context(
                 message.id
             ));
         }
-        let content = if completion_is_covered(&message.id)
+        let completion_covered = message.role == "assistant" && completion_is_covered(&message.id);
+        let content = if completion_covered
             || trace.as_ref().is_some_and(|trace| {
                 trace.terminal_status == ConversationTurnTraceTerminalStatus::InProgress
             }) {
@@ -1109,7 +1136,7 @@ pub(crate) fn conversation_history_messages_with_model_context(
             continue;
         }
         history.push(AgentChatMessage {
-            conversation_completion_covered: completion_is_covered(&message.id),
+            conversation_completion_covered: completion_covered,
             message_id: Some(message.id.clone()),
             role: message.role.clone(),
             content,
@@ -1119,4 +1146,78 @@ pub(crate) fn conversation_history_messages_with_model_context(
         });
     }
     Ok(history)
+}
+
+/// Rehydrates historical image bytes only from Host-owned immutable references. The request
+/// keeps the transient historical image field out of the resume-input allowlist. Existing
+/// checkpoint image payloads retain their policy and are revalidated through these references.
+pub(crate) fn hydrate_context_image_attachments(
+    storage: &StorageService,
+    input: &mut AgentChatInput,
+) -> Result<(), String> {
+    let mut refs = input
+        .messages
+        .iter()
+        .flat_map(|message| &message.conversation_model_context_items)
+        .flat_map(|item| item.images.iter().cloned())
+        .collect::<Vec<_>>();
+    refs.extend(
+        input
+            .messages
+            .iter()
+            .filter_map(|message| message.conversation_turn_trace.as_ref())
+            .flat_map(|trace| &trace.items)
+            .flat_map(|item| match item {
+                mycopilot_core::ConversationTurnTraceItem::ContextMaterial { images, .. } => {
+                    images.as_slice()
+                }
+                _ => &[],
+            })
+            .cloned(),
+    );
+    if let Some(checkpoint) = &input.resume_checkpoint {
+        refs.extend(
+            checkpoint
+                .conversation_trace_items
+                .iter()
+                .flat_map(|item| match item {
+                    mycopilot_core::ConversationTurnTraceItem::ContextMaterial {
+                        images, ..
+                    } => images.as_slice(),
+                    _ => &[],
+                })
+                .cloned(),
+        );
+        refs.extend(
+            checkpoint
+                .conversation_model_context_items
+                .iter()
+                .flat_map(|item| item.images.iter().cloned()),
+        );
+        refs.extend(
+            checkpoint
+                .context_items
+                .iter()
+                .flat_map(|item| item.context_image_refs.iter().cloned()),
+        );
+    }
+    if refs.is_empty() {
+        input.context_image_attachments.clear();
+        return Ok(());
+    }
+    let conversation_id = input
+        .context
+        .as_ref()
+        .and_then(|context| context.conversation_id.as_deref())
+        .ok_or_else(|| {
+            "context_image_scope_missing: image history needs a conversation".to_string()
+        })?;
+    input.context_image_attachments =
+        storage.load_context_image_attachments(conversation_id, &refs)?;
+    Ok(())
+}
+
+fn is_retained_context_image_material(item: &mycopilot_core::ConversationTurnTraceItem) -> bool {
+    matches!(item, mycopilot_core::ConversationTurnTraceItem::ContextMaterial { images, .. }
+        if !images.is_empty())
 }

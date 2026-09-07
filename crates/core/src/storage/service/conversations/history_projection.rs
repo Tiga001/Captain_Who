@@ -456,7 +456,8 @@ fn project_guidance_timeline(
                         "traceSequence": sequence,
                     }));
                 }
-                ConversationTurnTraceItem::AgentMailboxDelivery { .. }
+                ConversationTurnTraceItem::ContextMaterial { .. }
+                | ConversationTurnTraceItem::AgentMailboxDelivery { .. }
                 | ConversationTurnTraceItem::CommandSessionLifecycle { .. }
                 | ConversationTurnTraceItem::BackendState { .. } => {}
             }

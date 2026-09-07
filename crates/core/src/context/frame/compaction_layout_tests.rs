@@ -374,6 +374,150 @@ fn compaction_layout_survives_checkpoint_and_a_second_compaction_with_new_live_i
 }
 
 #[test]
+fn journaled_active_material_is_unique_retained_and_measured_consistently_after_compaction_restart()
+{
+    use crate::context::measurement::HeuristicTokenEstimator;
+    use sha2::{Digest, Sha256};
+
+    let mut image = attachment().with_origin(ContextOrigin::conversation_trace_item(
+        "active-assistant",
+        1,
+    ));
+    image.context_image_refs = vec![crate::ConversationContextImageRef {
+        attachment_id: "input-image".into(),
+        mime_type: "image/png".into(),
+        sha256: format!("sha256:{:x}", Sha256::digest(b"abc")),
+    }];
+    let skill = text(
+        "exact active skill",
+        ContextSource::SkillInstructions,
+        ContextScope::Run,
+    )
+    .with_origin(ContextOrigin::conversation_trace_item(
+        "active-assistant",
+        2,
+    ))
+    .with_source(ContextSource::RunBootstrap);
+    let active = ContextFrame::new(vec![
+        text(
+            "stable",
+            ContextSource::BackendSystemPrompt,
+            ContextScope::Run,
+        ),
+        input("input-one", true),
+        image.clone(),
+        skill.clone(),
+        narration(3, false),
+    ]);
+    let historical = |mut item: ContextItem, covered: bool| {
+        item.metadata.scope = ContextScope::Conversation;
+        item.metadata = item
+            .metadata
+            .with_source(ContextSource::HistoricalRunContext);
+        if covered {
+            item.metadata = item.metadata.with_source(ContextSource::CompactionRetained);
+        }
+        item
+    };
+    let measured = |items| {
+        let mut frame = ContextFrame::new(items);
+        ContextCapacityDetector::for_model("test-model", AgentApiStyle::OpenAiCompatible, &[])
+            .prepare_frame(&mut frame);
+        frame.share_measured_persistent_baseline().unwrap()
+    };
+    let check = |frame: &mut ContextFrame| {
+        let items = frame.model_request_items();
+        for expected in ["input attachment", "exact active skill"] {
+            assert_eq!(
+                items
+                    .iter()
+                    .filter(|item| item.message.content() == expected)
+                    .count(),
+                1
+            );
+        }
+        let retained_image = items
+            .iter()
+            .find(|item| item.message.content() == "input attachment")
+            .unwrap();
+        assert_eq!(retained_image.message.images(), image.message.images());
+        assert_eq!(retained_image.context_image_refs, image.context_image_refs);
+        assert!(
+            frame.pending_run_materials().is_empty(),
+            "journal identities must survive replacement and restart"
+        );
+        let checkpoint = frame.checkpoint_items().unwrap();
+        let mut cold = ContextFrame::from_checkpoint_items(checkpoint).unwrap();
+        assert_eq!(contents(&cold), contents(frame));
+        let hot_estimate = frame.measure_incrementally(Arc::new(HeuristicTokenEstimator));
+        let cold_estimate = cold.measure_incrementally(Arc::new(HeuristicTokenEstimator));
+        assert_eq!(hot_estimate.breakdown, cold_estimate.breakdown,
+            "replacing a durable copy by the active Run copy must rebuild category and image accounting");
+        cold
+    };
+
+    let mut uncovered = active.replace_compacted_model_history(measured(vec![
+        text(
+            "stable",
+            ContextSource::BackendSystemPrompt,
+            ContextScope::Run,
+        ),
+        text(
+            "summary-first",
+            ContextSource::ConversationSummary,
+            ContextScope::Conversation,
+        ),
+        input("input-one", false),
+        historical(image.clone(), false),
+        historical(skill.clone(), false),
+        narration(3, true),
+    ]));
+    let restored = check(&mut uncovered);
+    for item in restored.model_request_items().iter().filter(|item| {
+        matches!(
+            item.message.content(),
+            "input attachment" | "exact active skill"
+        )
+    }) {
+        assert_eq!(item.metadata.scope(), ContextScope::Run);
+        assert!(!item
+            .metadata
+            .sources()
+            .contains(&ContextSource::CompactionRetained));
+    }
+
+    // The next replacement covers both materials. The Host restores only the visual source;
+    // the current Run must retain its textual Skill overlay until the Run finishes as well.
+    let mut covered = restored.replace_compacted_model_history(measured(vec![
+        text(
+            "stable",
+            ContextSource::BackendSystemPrompt,
+            ContextScope::Run,
+        ),
+        text(
+            "summary-second",
+            ContextSource::ConversationSummary,
+            ContextScope::Conversation,
+        ),
+        input("input-one", false),
+        historical(image.clone(), true),
+    ]));
+    let mut restarted = check(&mut covered);
+    for item in restarted.model_request_items().iter().filter(|item| {
+        matches!(
+            item.message.content(),
+            "input attachment" | "exact active skill"
+        )
+    }) {
+        assert!(item
+            .metadata
+            .sources()
+            .contains(&ContextSource::CompactionRetained));
+    }
+    check(&mut restarted);
+}
+
+#[test]
 fn compaction_layout_maps_a_complete_multi_call_turn_to_each_durable_split_exchange() {
     let calls = (1..=2)
         .map(|index| LlmToolCall {

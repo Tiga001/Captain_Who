@@ -41,6 +41,7 @@ pub(crate) enum ContextCompactionProtectionReason {
     VisualInput,
     MixedAtomicGroup,
     UncommittedRun,
+    CompactionRetained,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -56,7 +57,7 @@ pub(crate) struct ContextCompactionStep {
     pub(crate) ranges: Vec<ContextCompactionItemRange>,
     pub(crate) atomic_unit_count: usize,
     pub(crate) source_input_tokens: u64,
-    /// Exact latest-user tokens restored beside the summary after commit.
+    /// Exact user, active Run material, and historical visual tokens retained beside the summary.
     pub(crate) retained_input_tokens: u64,
     /// Aspirational size of the model-visible semantic summary. Backend-only Continuity metadata
     /// is deliberately excluded. This is a planning projection, not an output limit.
@@ -129,7 +130,12 @@ impl ContextCompactionPlanner {
         let latest_user_index = items
             .iter()
             .rev()
-            .find(|item| item.role == LlmMessageRole::User)
+            .find(|item| {
+                item.role == LlmMessageRole::User
+                    && !item.sources.contains(&ContextSource::HistoricalRunContext)
+                    && !(is_trace_origin(item.origin.as_ref())
+                        && item.sources.iter().copied().any(is_run_material_source))
+            })
             .map(|item| item.index);
         let mut protected_reasons = BTreeMap::<String, u64>::new();
         let mut protected_unit_count = 0_usize;
@@ -143,8 +149,23 @@ impl ContextCompactionPlanner {
             // it to reach later closed activity, but projection restores the exact message after
             // the summary. Run-scoped guidance is instead a hard boundary because its attachments
             // and placement are part of the live run.
-            let retained_after_compaction =
-                contains_latest_user && unit.usage_class == ContextUsageClass::Durable;
+            // Historical visual material is also an exact journal bridge. Its original text
+            // and image references are restored after coverage, rather than making every later
+            // textual history entry permanently unreachable to prefix compaction.
+            let retained_visual_material =
+                is_historical_run_material(&unit) && unit.contains_images;
+            // Once active Run material has a journal identity it is included in the exact raw
+            // source prefix too. Count it on both sides of replacement instead of omitting it
+            // from the measured source or dropping its live projection after compaction.
+            let retained_active_material = !unit.mixed_usage_classes
+                && !unit.sources.contains(&ContextSource::CompactionRetained)
+                && unit.usage_class == ContextUsageClass::RunTransient
+                && is_trace_origin(unit.origin.as_ref())
+                && unit.sources.iter().copied().any(is_run_material_source);
+            let retained_after_compaction = (contains_latest_user
+                && unit.usage_class == ContextUsageClass::Durable)
+                || retained_visual_material
+                || retained_active_material;
             if contains_latest_user && !retained_after_compaction {
                 protected_unit_count = protected_unit_count.saturating_add(1);
                 merge_reason_tokens(
@@ -155,9 +176,11 @@ impl ContextCompactionPlanner {
                 continue;
             }
             if let Some(reason) = absolute_protection_reason(&unit) {
-                protected_unit_count = protected_unit_count.saturating_add(1);
-                merge_reason_tokens(&mut protected_reasons, reason, unit.tokens);
-                continue;
+                if !retained_active_material {
+                    protected_unit_count = protected_unit_count.saturating_add(1);
+                    merge_reason_tokens(&mut protected_reasons, reason, unit.tokens);
+                    continue;
+                }
             }
             match unit.usage_class {
                 ContextUsageClass::Durable | ContextUsageClass::RunTransient => {}
@@ -178,7 +201,14 @@ impl ContextCompactionPlanner {
                 protected_unit_count = protected_unit_count.saturating_add(1);
                 merge_reason_tokens(
                     &mut protected_reasons,
-                    ContextCompactionProtectionReason::CurrentUser,
+                    if retained_visual_material {
+                        ContextCompactionProtectionReason::VisualInput
+                    } else if retained_active_material {
+                        absolute_protection_reason(&unit)
+                            .expect("active Run material has an exact protection reason")
+                    } else {
+                        ContextCompactionProtectionReason::CurrentUser
+                    },
                     unit.tokens,
                 );
             }
@@ -410,6 +440,15 @@ fn absolute_protection_reason(
     if unit.mixed_usage_classes {
         return Some(ContextCompactionProtectionReason::MixedAtomicGroup);
     }
+    if unit.sources.contains(&ContextSource::CompactionRetained) {
+        return Some(ContextCompactionProtectionReason::CompactionRetained);
+    }
+    // Finished-run context is ordinary durable history, even when its original source tag is
+    // retained for token attribution. It is not a live Skill, permission or attachment overlay.
+    // Visual historical material is admitted as a retained bridge by the planner above.
+    if is_historical_run_material(unit) {
+        return None;
+    }
     // Activated Skill instructions are an immutable run snapshot. They must survive every
     // compaction attempt exactly as selected, even if run-transient policy is refined later.
     if unit.sources.contains(&ContextSource::SkillInstructions) {
@@ -437,6 +476,31 @@ fn absolute_protection_reason(
         return Some(ContextCompactionProtectionReason::VisualInput);
     }
     None
+}
+
+fn is_historical_run_material(unit: &AtomicContextUnit) -> bool {
+    unit.usage_class == ContextUsageClass::Durable
+        && unit.sources.contains(&ContextSource::HistoricalRunContext)
+}
+
+fn is_trace_origin(origin: Option<&ContextOrigin>) -> bool {
+    origin.is_some_and(|origin| origin.kind() == ContextOriginKind::ConversationTraceItem)
+}
+
+fn is_run_material_source(source: ContextSource) -> bool {
+    matches!(
+        source,
+        ContextSource::SkillInstructions
+            | ContextSource::InputAttachment
+            | ContextSource::WorldStateSnapshot
+            | ContextSource::WorldStateDiff
+    )
+}
+
+fn is_journal_run_material(unit: &AtomicContextUnit) -> bool {
+    is_historical_run_material(unit)
+        || (is_trace_origin(unit.origin.as_ref())
+            && unit.sources.iter().copied().any(is_run_material_source))
 }
 
 fn maximum_reclaimable_tokens(selected: &[CompactionCandidate]) -> u64 {
@@ -517,19 +581,21 @@ fn normalize_unified_journal_prefix(
         // These are exact side ledgers or request contracts rather than entries in the
         // conversation message/trace journal. They survive compaction independently and do not
         // interrupt chronological prefix selection.
-        if unit.sources.contains(&ContextSource::WorldStateSnapshot)
-            || unit.sources.contains(&ContextSource::WorldStateDiff)
-            || unit.sources.contains(&ContextSource::SkillInstructions)
-            || unit.sources.contains(&ContextSource::SkillCatalog)
-            || unit.sources.contains(&ContextSource::RuntimeTodo)
-            || unit.sources.contains(&ContextSource::FileTransaction)
-            || unit.sources.contains(&ContextSource::RuntimeGuard)
-            || unit.sources.contains(&ContextSource::InputAttachment)
-            || (unit.origin.is_none()
-                && matches!(
-                    unit.usage_class,
-                    ContextUsageClass::Fixed | ContextUsageClass::RequestOnly
-                ))
+        if unit.sources.contains(&ContextSource::CompactionRetained)
+            || (!is_journal_run_material(unit)
+                && (unit.sources.contains(&ContextSource::WorldStateSnapshot)
+                    || unit.sources.contains(&ContextSource::WorldStateDiff)
+                    || unit.sources.contains(&ContextSource::SkillInstructions)
+                    || unit.sources.contains(&ContextSource::SkillCatalog)
+                    || unit.sources.contains(&ContextSource::RuntimeTodo)
+                    || unit.sources.contains(&ContextSource::FileTransaction)
+                    || unit.sources.contains(&ContextSource::RuntimeGuard)
+                    || unit.sources.contains(&ContextSource::InputAttachment)
+                    || (unit.origin.is_none()
+                        && matches!(
+                            unit.usage_class,
+                            ContextUsageClass::Fixed | ContextUsageClass::RequestOnly
+                        ))))
         {
             continue;
         }
@@ -646,6 +712,7 @@ fn protection_reason_name(reason: ContextCompactionProtectionReason) -> String {
         ContextCompactionProtectionReason::VisualInput => "visual_input",
         ContextCompactionProtectionReason::MixedAtomicGroup => "mixed_atomic_group",
         ContextCompactionProtectionReason::UncommittedRun => "uncommitted_run",
+        ContextCompactionProtectionReason::CompactionRetained => "compaction_retained",
     }
     .to_string()
 }
@@ -1227,6 +1294,292 @@ mod tests {
         assert_eq!(
             plan.protected.reasons.get("skill_instructions"),
             Some(&2_000)
+        );
+    }
+
+    fn historical_material(
+        index: usize,
+        source: ContextSource,
+        tokens: u64,
+    ) -> ContextFramePlanningItem {
+        let mut material = item(
+            index,
+            ContextUsageClass::Durable,
+            tokens,
+            LlmMessageRole::User,
+            source,
+            Some(ContextOrigin::conversation_trace_item(
+                "assistant-old",
+                index as u64,
+            )),
+        );
+        material.sources.push(ContextSource::HistoricalRunContext);
+        material
+    }
+
+    #[test]
+    fn finished_run_material_is_compactable_despite_its_original_attribution_tags() {
+        let items = vec![
+            item(
+                0,
+                ContextUsageClass::Durable,
+                100,
+                LlmMessageRole::User,
+                ContextSource::ConversationHistory,
+                Some(ContextOrigin::conversation_message("user-old")),
+            ),
+            historical_material(1, ContextSource::InputAttachment, 1_000),
+            historical_material(2, ContextSource::SkillInstructions, 2_000),
+            historical_material(3, ContextSource::WorldStateSnapshot, 3_000),
+            historical_material(4, ContextSource::WorldStateDiff, 500),
+        ];
+        let plan = ContextCompactionPlanner::for_tools(&[]).plan(
+            &query(ContextBudgetStatus::OverBudget, Some(2_000), 0, 6_600, 0, 0),
+            &items,
+            true,
+        );
+
+        assert_eq!(plan.status, ContextCompactionPlanStatus::Required);
+        // The historical User-role material must never masquerade as the latest user request.
+        assert_eq!(plan.protected.reasons.get("current_user"), Some(&100));
+        assert_eq!(plan.compactable_input_tokens, 6_500);
+        let step = &plan.steps[0];
+        assert_eq!(step.source_input_tokens, 6_600);
+        assert_eq!(step.retained_input_tokens, 100);
+        assert_eq!(
+            step.ranges,
+            vec![ContextCompactionItemRange {
+                start_index: 0,
+                end_index_exclusive: 5
+            }]
+        );
+        assert_eq!(
+            step.durable_prefix.as_ref().unwrap().covered_through,
+            ContextJournalCursor::trace_item("assistant-old", 4)
+        );
+    }
+
+    #[test]
+    fn historical_images_are_retained_bridges_that_do_not_block_later_text_compaction() {
+        let mut image = historical_material(1, ContextSource::InputAttachment, 1_000);
+        image.image_count = 2;
+        let items = vec![
+            historical_material(0, ContextSource::SkillInstructions, 2_000),
+            image,
+            historical_material(2, ContextSource::WorldStateSnapshot, 3_000),
+        ];
+        let plan = ContextCompactionPlanner::for_tools(&[]).plan(
+            &query(ContextBudgetStatus::OverBudget, Some(4_000), 0, 6_000, 0, 0),
+            &items,
+            false,
+        );
+
+        assert_eq!(plan.status, ContextCompactionPlanStatus::Required);
+        assert_eq!(plan.compactable_input_tokens, 5_000);
+        assert_eq!(plan.protected.input_tokens, 1_000);
+        assert_eq!(plan.protected.reasons.get("visual_input"), Some(&1_000));
+        let step = &plan.steps[0];
+        assert_eq!(step.source_input_tokens, 6_000);
+        assert_eq!(step.retained_input_tokens, 1_000);
+        assert_eq!(step.expected_reclaimed_tokens, 5_000);
+        assert_eq!(
+            step.durable_prefix.as_ref().unwrap().covered_through,
+            ContextJournalCursor::trace_item("assistant-old", 2)
+        );
+        assert_eq!(
+            step.ranges,
+            vec![ContextCompactionItemRange {
+                start_index: 0,
+                end_index_exclusive: 3
+            }]
+        );
+    }
+
+    #[test]
+    fn historical_images_alone_cannot_claim_a_reduction_in_context_size() {
+        let mut image = historical_material(0, ContextSource::InputAttachment, 9_000);
+        image.image_count = 1;
+        let plan = ContextCompactionPlanner::for_tools(&[]).plan(
+            &query(ContextBudgetStatus::OverBudget, Some(4_000), 0, 9_000, 0, 0),
+            &[image],
+            false,
+        );
+        assert_eq!(
+            plan.status,
+            ContextCompactionPlanStatus::InsufficientCompactableContext
+        );
+        assert_eq!(plan.compactable_input_tokens, 0);
+        assert_eq!(plan.protected.input_tokens, 9_000);
+        assert!(plan.steps.is_empty());
+    }
+
+    #[test]
+    fn another_compaction_does_not_recount_or_recover_an_already_covered_visual_cursor() {
+        let mut retained = historical_material(1, ContextSource::InputAttachment, 1_000);
+        retained.image_count = 1;
+        retained.sources.push(ContextSource::CompactionRetained);
+        let mut items = vec![
+            item(
+                0,
+                ContextUsageClass::Durable,
+                500,
+                LlmMessageRole::Assistant,
+                ContextSource::ConversationSummary,
+                Some(ContextOrigin::compaction_summary("summary-previous")),
+            ),
+            retained,
+        ];
+        let without_new_history = ContextCompactionPlanner::for_tools(&[]).plan(
+            &query(ContextBudgetStatus::OverBudget, Some(1_000), 0, 1_500, 0, 0),
+            &items,
+            false,
+        );
+        // The retained old image must not supply a non-advancing cursor for summary-of-summary.
+        assert_eq!(
+            without_new_history.status,
+            ContextCompactionPlanStatus::InsufficientCompactableContext
+        );
+        assert!(without_new_history.steps.is_empty());
+
+        let mut new_material = historical_material(2, ContextSource::SkillInstructions, 5_000);
+        new_material.origin = Some(ContextOrigin::conversation_trace_item("assistant-new", 0));
+        items.push(new_material);
+        let plan = ContextCompactionPlanner::for_tools(&[]).plan(
+            &query(ContextBudgetStatus::OverBudget, Some(4_000), 0, 6_500, 0, 0),
+            &items,
+            false,
+        );
+        assert_eq!(plan.status, ContextCompactionPlanStatus::Required);
+        assert_eq!(plan.protected.input_tokens, 1_000);
+        assert_eq!(
+            plan.protected.reasons.get("compaction_retained"),
+            Some(&1_000)
+        );
+        let step = &plan.steps[0];
+        assert_eq!(step.source_input_tokens, 5_500);
+        assert_eq!(step.retained_input_tokens, 0);
+        assert_eq!(
+            step.ranges,
+            vec![
+                ContextCompactionItemRange {
+                    start_index: 0,
+                    end_index_exclusive: 1
+                },
+                ContextCompactionItemRange {
+                    start_index: 2,
+                    end_index_exclusive: 3
+                },
+            ]
+        );
+        let prefix = step.durable_prefix.as_ref().unwrap();
+        assert_eq!(
+            prefix.previous_summary_id.as_deref(),
+            Some("summary-previous")
+        );
+        assert_eq!(
+            prefix.covered_through,
+            ContextJournalCursor::trace_item("assistant-new", 0)
+        );
+    }
+
+    #[test]
+    fn current_run_material_remains_protected_even_with_a_durable_trace_identity() {
+        for (source, reason) in [
+            (ContextSource::InputAttachment, "user_attachment"),
+            (ContextSource::SkillInstructions, "skill_instructions"),
+            (ContextSource::WorldStateSnapshot, "world_state"),
+        ] {
+            let mut current = historical_material(0, source, 2_000);
+            current.usage_class = ContextUsageClass::RunTransient;
+            let plan = ContextCompactionPlanner::for_tools(&[]).plan(
+                &query(ContextBudgetStatus::OverBudget, Some(1_000), 0, 0, 2_000, 0),
+                &[current],
+                false,
+            );
+            assert_eq!(plan.compactable_input_tokens, 0);
+            assert_eq!(plan.protected.reasons.get(reason), Some(&2_000));
+            assert!(plan.steps.is_empty());
+        }
+    }
+
+    #[test]
+    fn active_material_is_counted_as_exact_retention_when_compacting_later_tool_results() {
+        let mut items = vec![item(
+            0,
+            ContextUsageClass::Durable,
+            100,
+            LlmMessageRole::User,
+            ContextSource::CurrentTurn,
+            Some(ContextOrigin::conversation_message("user-current")),
+        )];
+        for source in [
+            ContextSource::InputAttachment,
+            ContextSource::SkillInstructions,
+            ContextSource::WorldStateSnapshot,
+        ] {
+            let index = items.len();
+            items.push(item(
+                index,
+                ContextUsageClass::RunTransient,
+                200,
+                LlmMessageRole::User,
+                source,
+                Some(ContextOrigin::conversation_trace_item(
+                    "assistant-current",
+                    index as u64 - 1,
+                )),
+            ));
+        }
+        for (role, source) in [
+            (LlmMessageRole::Assistant, ContextSource::ModelResponse),
+            (LlmMessageRole::Tool, ContextSource::ToolResult),
+        ] {
+            let index = items.len();
+            let mut tool_item = item(
+                index,
+                ContextUsageClass::RunTransient,
+                4_000,
+                role,
+                source,
+                Some(ContextOrigin::conversation_trace_item(
+                    "assistant-current",
+                    index as u64 - 1,
+                )),
+            );
+            tool_item.group_id = Some("tool:current-call".into());
+            items.push(tool_item);
+        }
+        let plan = ContextCompactionPlanner::for_tools(&[]).plan(
+            &query(
+                ContextBudgetStatus::OverBudget,
+                Some(6_000),
+                0,
+                100,
+                8_600,
+                0,
+            ),
+            &items,
+            true,
+        );
+        assert_eq!(plan.status, ContextCompactionPlanStatus::Required);
+        assert_eq!(plan.protected.reasons.get("current_user"), Some(&100));
+        for reason in ["user_attachment", "skill_instructions", "world_state"] {
+            assert_eq!(plan.protected.reasons.get(reason), Some(&200));
+        }
+        assert_eq!(plan.compactable_input_tokens, 8_000);
+        let step = &plan.steps[0];
+        assert_eq!(step.source_input_tokens, 8_700);
+        assert_eq!(step.retained_input_tokens, 700);
+        assert_eq!(
+            step.ranges,
+            vec![ContextCompactionItemRange {
+                start_index: 0,
+                end_index_exclusive: 6
+            }]
+        );
+        assert_eq!(
+            step.durable_prefix.as_ref().unwrap().covered_through,
+            ContextJournalCursor::trace_item("assistant-current", 4)
         );
     }
 

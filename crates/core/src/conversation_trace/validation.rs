@@ -1,3 +1,24 @@
+fn validate_narration_binding(
+    provider_turn_id: Option<&str>,
+    first_tool_call_id: Option<&str>,
+) -> Result<(), String> {
+    if provider_turn_id.is_some() != first_tool_call_id.is_some() {
+        return Err(
+            "narration Provider and first Tool identities must be bound together".to_string(),
+        );
+    }
+    if let Some(id) = first_tool_call_id {
+        crate::llm::validate_model_tool_call_id(id).map_err(|error| error.to_string())?;
+    }
+    if let Some(id) = provider_turn_id {
+        if id.trim().is_empty() || id.len() > 1_024 || id.chars().any(char::is_control) {
+            return Err("narration Provider turn identity is invalid".to_string());
+        }
+        ensure_no_binary_text("narration Provider turn identity", id)?;
+    }
+    Ok(())
+}
+
 impl ConversationTurnTrace {
     pub fn validate(&self) -> Result<(), String> {
         if self.schema_version != CONVERSATION_TURN_TRACE_SCHEMA_VERSION {
@@ -25,6 +46,7 @@ impl ConversationTurnTrace {
         let mut command_sessions = BTreeMap::<&str, (&str, bool)>::new();
         let mut context_compactions = BTreeMap::<&str, bool>::new();
         let mut backend_state_ids = BTreeSet::new();
+        let mut context_material_ids = BTreeSet::new();
         for item in &self.items {
             let sequence = item.sequence();
             if previous_sequence.is_some_and(|previous| sequence <= previous) {
@@ -33,7 +55,34 @@ impl ConversationTurnTrace {
             previous_sequence = Some(sequence);
 
             match item {
-                ConversationTurnTraceItem::BackendState { event_id, content, created_at, .. } => {
+                ConversationTurnTraceItem::ContextMaterial {
+                    event_id,
+                    material_kind,
+                    content,
+                    images,
+                    created_at,
+                    ..
+                } => {
+                    if pending_call.is_some() {
+                        return Err("context material cannot split a tool exchange".to_string());
+                    }
+                    validate_context_material(
+                        event_id,
+                        *material_kind,
+                        content,
+                        images,
+                        *created_at,
+                    )?;
+                    if !context_material_ids.insert(event_id) {
+                        return Err("context material event identity is duplicated".to_string());
+                    }
+                }
+                ConversationTurnTraceItem::BackendState {
+                    event_id,
+                    content,
+                    created_at,
+                    ..
+                } => {
                     if pending_call.is_some() {
                         return Err("Backend state cannot split a tool exchange".to_string());
                     }
@@ -42,7 +91,16 @@ impl ConversationTurnTrace {
                         return Err("Backend state event identity is duplicated".to_string());
                     }
                 }
-                ConversationTurnTraceItem::AssistantNarration { content, .. } => {
+                ConversationTurnTraceItem::AssistantNarration {
+                    content,
+                    provider_turn_id,
+                    first_tool_call_id,
+                    ..
+                } => {
+                    validate_narration_binding(
+                        provider_turn_id.as_deref(),
+                        first_tool_call_id.as_deref(),
+                    )?;
                     if pending_call.is_some() {
                         return Err(
                             "conversation trace narration cannot split a tool exchange".to_string()

@@ -2076,6 +2076,7 @@ mod tests {
         .unwrap();
 
         let input = AgentChatInput {
+            context_image_attachments: Vec::new(),
             api_url: format!("http://{address}/v1/chat/completions"),
             api_token: "owned-fixture-token".to_string(),
             provider_configuration_revision,

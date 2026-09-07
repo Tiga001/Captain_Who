@@ -416,6 +416,8 @@ impl AgentService {
             )?);
         }
 
+        hydrate_context_image_attachments(&self.storage, &mut preview_input)?;
+        let context_images = preview_input.context_image_attachments.clone();
         let host_services = self.context_window_provider_host_services();
         let mut state = create_conversation_context_state_with_host_services(
             preview_input,
@@ -423,6 +425,9 @@ impl AgentService {
             &host_services,
         )
         .map_err(|error| error.to_string())?;
+        state
+            .hydrate_context_images(&context_images)
+            .map_err(|error| error.to_string())?;
         let committed_activity_items = match active_trace {
             Some(trace) => {
                 let model_context_items = full_model_context_logs
@@ -629,6 +634,27 @@ impl AgentService {
             configuration_revision,
             tool_projection,
         } = request;
+        let mut context_images = agent_input.context_image_attachments.clone();
+        let mut image_refs = model_context_items
+            .iter()
+            .flat_map(|item| item.images.iter().cloned())
+            .collect::<Vec<_>>();
+        image_refs.extend(
+            trace
+                .items
+                .iter()
+                .flat_map(|item| match item {
+                    mycopilot_core::ConversationTurnTraceItem::ContextMaterial {
+                        images, ..
+                    } => images.as_slice(),
+                    _ => &[],
+                })
+                .cloned(),
+        );
+        context_images.extend(
+            self.storage
+                .load_context_image_attachments(conversation_id, &image_refs)?,
+        );
         let access = self.next_conversation_context_state_access();
         let needs_rebuild;
         {
@@ -687,6 +713,10 @@ impl AgentService {
                     };
                     match update {
                         Ok(committed_activity_items) => {
+                            entry
+                                .state
+                                .hydrate_context_images(&context_images)
+                                .map_err(|error| error.to_string())?;
                             entry.active_run_id = Some(run_id.to_string());
                             entry.committed_activity_items = committed_activity_items;
                             entry.last_access = access;

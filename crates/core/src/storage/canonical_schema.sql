@@ -3154,7 +3154,7 @@ CREATE TABLE conversation_turn_trace_items (
             item_kind TEXT NOT NULL CHECK (item_kind IN (
                 'assistant_narration', 'user_guidance', 'tool_call', 'tool_result',
                 'command_session_lifecycle', 'agent_mailbox_delivery',
-                'context_compaction_lifecycle', 'runtime_error', 'backend_state'
+                'context_compaction_lifecycle', 'runtime_error', 'backend_state', 'context_material'
             )),
             item_json TEXT NOT NULL CHECK (json_valid(item_json)),
             PRIMARY KEY (assistant_message_id, sequence),

@@ -138,6 +138,29 @@ impl ConversationTraceRecorder {
     }
 
     pub(crate) fn record_narration(&mut self, content: &str) -> Result<Option<u64>, String> {
+        self.record_narration_with_provider_turn(content, None, None)
+    }
+
+    pub(crate) fn record_tool_turn_narration(
+        &mut self,
+        content: &str,
+        provider_turn_id: &str,
+        first_tool_call_id: &str,
+    ) -> Result<Option<u64>, String> {
+        validate_narration_binding(Some(provider_turn_id), Some(first_tool_call_id))?;
+        self.record_narration_with_provider_turn(
+            content,
+            Some(provider_turn_id),
+            Some(first_tool_call_id),
+        )
+    }
+
+    fn record_narration_with_provider_turn(
+        &mut self,
+        content: &str,
+        provider_turn_id: Option<&str>,
+        first_tool_call_id: Option<&str>,
+    ) -> Result<Option<u64>, String> {
         let content = content.trim();
         if content.is_empty() {
             return Ok(None);
@@ -148,6 +171,8 @@ impl ConversationTraceRecorder {
             .push(ConversationTurnTraceItem::AssistantNarration {
                 sequence,
                 content: content.clone(),
+                provider_turn_id: provider_turn_id.map(str::to_string),
+                first_tool_call_id: first_tool_call_id.map(str::to_string),
                 truncated: redacted,
             });
         self.record_model_message(
@@ -356,6 +381,80 @@ impl ConversationTraceRecorder {
         }
     }
 
+    /// Records exact safe material in both journals. Stable Host identities make retries
+    /// idempotent; conflicting payloads fail without consuming a sequence.
+    pub(crate) fn record_context_material(
+        &mut self,
+        event_id: &str,
+        material_kind: ConversationContextMaterialKind,
+        content: &str,
+        images: &[ConversationContextImageRef],
+        created_at: i64,
+    ) -> Result<u64, String> {
+        validate_context_material(event_id, material_kind, content, images, created_at)?;
+        if let Some(existing) = self.items.iter().find(|item| {
+            matches!(
+                item, ConversationTurnTraceItem::ContextMaterial { event_id: existing_id, .. }
+                    if existing_id == event_id
+            )
+        }) {
+            let sequence = existing.sequence();
+            let identical = matches!(existing, ConversationTurnTraceItem::ContextMaterial {
+                material_kind: existing_kind, content: existing_content,
+                images: existing_images, created_at: existing_time, ..
+            } if *existing_kind == material_kind && existing_content == content
+                && existing_images == images && *existing_time == created_at);
+            let model_is_present = self.model_context_items.iter().any(|item| {
+                item.sequence == sequence
+                    && item.ordinal == 0
+                    && item.role == "user"
+                    && item.content == content
+                    && item.images == images
+                    && item.tool_calls.is_empty()
+                    && item.tool_call_id.is_none()
+                    && !item.is_error
+            });
+            return if identical && model_is_present {
+                Ok(sequence)
+            } else {
+                Err("context material identity conflicts with its durable journals".to_string())
+            };
+        }
+        if self.unresolved_tool_call().is_some() {
+            return Err("context material cannot split an unresolved tool exchange".to_string());
+        }
+        let sequence = self.next_sequence;
+        if self
+            .model_context_items
+            .iter()
+            .any(|item| item.sequence == sequence)
+        {
+            return Err("context material model sequence is already occupied".to_string());
+        }
+        let item = ConversationModelContextItem {
+            sequence,
+            ordinal: 0,
+            role: "user".to_string(),
+            content: content.to_string(),
+            images: images.to_vec(),
+            tool_call_id: None,
+            tool_calls: Vec::new(),
+            is_error: false,
+        };
+        item.validate()?;
+        self.items.push(ConversationTurnTraceItem::ContextMaterial {
+            sequence,
+            event_id: event_id.to_string(),
+            material_kind,
+            content: content.to_string(),
+            images: images.to_vec(),
+            created_at,
+        });
+        self.model_context_items.push(item);
+        self.next_sequence = sequence.saturating_add(1);
+        Ok(sequence)
+    }
+
     /// Admits one Host-owned state fact into the audit and model journals atomically.
     /// Retrying the exact durable identity is a no-op; it never creates a second observation.
     pub fn record_backend_state(
@@ -367,21 +466,29 @@ impl ConversationTraceRecorder {
         placement: ConversationBackendStatePlacement,
     ) -> Result<Option<String>, String> {
         validate_backend_state(event_id, content, created_at)?;
-        if let Some(existing) = self.items.iter().find(|item| matches!(
-            item, ConversationTurnTraceItem::BackendState { event_id: existing_id, .. }
-                if existing_id == event_id
-        )) {
+        if let Some(existing) = self.items.iter().find(|item| {
+            matches!(
+                item, ConversationTurnTraceItem::BackendState { event_id: existing_id, .. }
+                    if existing_id == event_id
+            )
+        }) {
             let identical = matches!(existing, ConversationTurnTraceItem::BackendState {
                 sequence, content: existing_content, created_at: existing_time,
                 placement: existing_placement, ..
             } if *sequence == expected_sequence && existing_content == content
                 && *existing_time == created_at && *existing_placement == placement);
             let model_is_present = self.model_context_items.iter().any(|item| {
-                item.sequence == expected_sequence && item.ordinal == 0 && item.role == "user"
-                    && item.content == content && item.tool_calls.is_empty()
-                    && item.tool_call_id.is_none() && !item.is_error
+                item.sequence == expected_sequence
+                    && item.ordinal == 0
+                    && item.role == "user"
+                    && item.content == content
+                    && item.tool_calls.is_empty()
+                    && item.tool_call_id.is_none()
+                    && !item.is_error
             });
-            return if identical && model_is_present { Ok(None) } else {
+            return if identical && model_is_present {
+                Ok(None)
+            } else {
                 Err("Backend state identity conflicts with its durable journals".to_string())
             };
         }
@@ -391,11 +498,17 @@ impl ConversationTraceRecorder {
         if self.unresolved_tool_call().is_some() {
             return Err("Backend state cannot split an unresolved tool exchange".to_string());
         }
-        if self.model_context_items.iter().any(|item| item.sequence == expected_sequence) {
+        if self
+            .model_context_items
+            .iter()
+            .any(|item| item.sequence == expected_sequence)
+        {
             return Err("Backend state model sequence is already occupied".to_string());
         }
         let (model_item, truncated) = model_context_item_from_message(
-            expected_sequence, 0, &LlmMessage::text(crate::llm::LlmMessageRole::User, content),
+            expected_sequence,
+            0,
+            &LlmMessage::text(crate::llm::LlmMessageRole::User, content),
         )?;
         if truncated || model_item.content != content {
             return Err("Backend state model projection must preserve its exact JSON".to_string());

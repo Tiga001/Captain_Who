@@ -12,6 +12,23 @@ pub(super) fn world_state_boundary(item: &ContextItem) -> Option<WorldStateReque
     serde_json::from_str(origin.id().strip_prefix("request:")?).ok()
 }
 
+/// Run World State material is replayed as an ordinary, trace-owned historical fact. Its
+/// content class is still WorldStateSnapshot for capacity reporting, but it is not a member of
+/// the canonical Conversation ledger and must neither be validated as one nor protected as one.
+fn is_historical_run_world_state(item: &ContextItem) -> bool {
+    item.metadata
+        .sources
+        .contains(&ContextSource::HistoricalRunContext)
+        && item
+            .metadata
+            .sources
+            .contains(&ContextSource::ConversationTrace)
+        && item
+            .metadata
+            .origin()
+            .is_some_and(|origin| origin.kind() == ContextOriginKind::ConversationTraceItem)
+}
+
 impl ContextFrame {
     /// A direct Core compaction executor may return only its new message/trace journal. Preserve
     /// the independently owned exact ledger instead of treating an absent Host ledger as deletion.
@@ -26,6 +43,7 @@ impl ContextFrame {
         let original = self.iter_items().collect::<Vec<_>>();
         for (source_index, source) in original.iter().enumerate() {
             if source.metadata.scope != ContextScope::Conversation
+                || is_historical_run_world_state(source)
                 || !(source
                     .metadata
                     .sources
@@ -211,6 +229,7 @@ impl ContextFrame {
         }
         if self.iter_items().any(|item| {
             item.metadata.scope == ContextScope::Conversation
+                && !is_historical_run_world_state(item)
                 && (item
                     .metadata
                     .sources
@@ -229,43 +248,6 @@ impl ContextFrame {
             ));
         }
         self.conversation_world_state_records = Arc::from(records);
-        Ok(())
-    }
-
-    /// Replaces only the unsent bootstrap projection. The caller must restrict this to the first
-    /// actual request; later observations and approval-resume snapshots belong to the timeline.
-    pub(crate) fn replace_initial_run_world_state(
-        &mut self,
-        snapshot: &crate::WorldStateSnapshot,
-    ) -> AgentResult<()> {
-        let projection = snapshot
-            .model_projection(crate::WorldStateLifetime::Run)
-            .map_err(|error| AgentError::new(format!("Run World State 无效：{error}")))?;
-        let index = self
-            .iter_items()
-            .position(|item| {
-                item.metadata.scope == ContextScope::Run
-                    && item.metadata.sources.contains(&ContextSource::RunBootstrap)
-                    && item
-                        .metadata
-                        .sources
-                        .contains(&ContextSource::WorldStateSnapshot)
-            })
-            .ok_or_else(|| AgentError::new("首个请求缺少 Run World State bootstrap。"))?;
-        self.materialize_baseline();
-        let metadata =
-            self.items[index]
-                .metadata
-                .clone()
-                .with_origin(ContextOrigin::world_state_record(format!(
-                    "{}:{}",
-                    snapshot.epoch_id, snapshot.sequence
-                )));
-        self.items[index] = ContextItem::new(
-            LlmMessage::backend_state(projection.render_sanitized_text()),
-            metadata,
-        );
-        self.world_state_metadata_changed();
         Ok(())
     }
 
@@ -323,6 +305,7 @@ impl ContextFrame {
             if matches!(record.record, WorldStateRecord::Full(_)) {
                 if self.iter_items().any(|item| {
                     item.metadata.scope == ContextScope::Conversation
+                        && !is_historical_run_world_state(item)
                         && item
                             .metadata
                             .sources
@@ -745,6 +728,50 @@ mod tests {
                 replaced.conversation_world_state_records().to_vec(),
             )
             .unwrap();
+    }
+
+    #[test]
+    fn historical_run_material_is_not_conversation_ledger_authority_on_restore() {
+        let ledger = records("epoch", true);
+        let mut live = frame();
+        let historical = ContextItem::new(
+            LlmMessage::backend_state("historical run browser authorization"),
+            ContextMetadata::new(
+                ContextSource::ConversationTrace,
+                ContextScope::Conversation,
+                ContextRetention::Retained,
+            )
+            .with_source(ContextSource::HistoricalRunContext)
+            .with_source(ContextSource::WorldStateSnapshot)
+            .with_origin(ContextOrigin::conversation_trace_item("old-assistant", 0)),
+        );
+        live.push(historical);
+        live.sync_conversation_world_state_records(&ledger[..1], true)
+            .unwrap();
+        let mut restored =
+            ContextFrame::from_checkpoint_items(live.checkpoint_items().unwrap()).unwrap();
+        restored
+            .restore_conversation_world_state_records(ledger[..1].to_vec())
+            .unwrap();
+        assert_eq!(restored.conversation_world_state_records(), &ledger[..1]);
+        assert!(text(&restored)
+            .iter()
+            .any(|content| *content == "historical run browser authorization"));
+        // An unbound World State record is still rejected, including one carrying the historical
+        // marker without the required trace-owned history provenance.
+        restored.push(
+            ContextItem::text(
+                LlmMessageRole::User,
+                "forged",
+                ContextSource::WorldStateSnapshot,
+                ContextScope::Conversation,
+                ContextRetention::Retained,
+            )
+            .with_source(ContextSource::HistoricalRunContext),
+        );
+        assert!(restored
+            .restore_conversation_world_state_records(ledger[..1].to_vec())
+            .is_err());
     }
 
     #[test]

@@ -4,6 +4,7 @@ fn pending_checkpoint_context_item(
     call: &AgentToolCall,
 ) -> mycopilot_core::AgentContextCheckpointItem {
     mycopilot_core::AgentContextCheckpointItem {
+        context_image_refs: Vec::new(),
         role: "assistant".to_string(),
         content: String::new(),
         images: Vec::new(),
@@ -34,6 +35,7 @@ fn pending_checkpoint_tool_call(call: &AgentToolCall) -> AgentContextCheckpointT
 
 fn pending_model_context_item(call: &AgentToolCall) -> ConversationModelContextItem {
     ConversationModelContextItem {
+        images: Vec::new(),
         sequence: 0,
         ordinal: 0,
         role: "assistant".to_string(),
@@ -412,6 +414,7 @@ fn forced_cancellation_uses_backend_runtime_snapshot_instead_of_empty_trace() {
         pending_tool_call_id: "pending-command".to_string(),
         conversation_model_context_items: vec![
             ConversationModelContextItem {
+                images: Vec::new(),
                 sequence: 0,
                 ordinal: 0,
                 role: "assistant".to_string(),
@@ -437,6 +440,7 @@ fn forced_cancellation_uses_backend_runtime_snapshot_instead_of_empty_trace() {
                 is_error: false,
             },
             ConversationModelContextItem {
+                images: Vec::new(),
                 sequence: 1,
                 ordinal: 0,
                 role: "tool".to_string(),
@@ -722,12 +726,15 @@ fn failed_forced_cancellation_projection_is_retired_by_current_startup_reconcili
         terminal_error: None,
         truncated: false,
         items: vec![ConversationTurnTraceItem::AssistantNarration {
+            first_tool_call_id: None,
+            provider_turn_id: None,
             sequence: 0,
             content: "A durable partial response.".to_string(),
             truncated: false,
         }],
     };
     let durable_model_context = vec![ConversationModelContextItem {
+        images: Vec::new(),
         sequence: 0,
         ordinal: 0,
         role: "assistant".to_string(),

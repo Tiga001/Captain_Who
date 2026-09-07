@@ -206,6 +206,7 @@ async fn runtime_tool_registry_bridge_manager_stdio_fixture_chain() {
     )
     .expect("freeze the current Generic OpenAI provider protocol");
     let input = AgentChatInput {
+        context_image_attachments: Vec::new(),
         api_url: format!("http://{model_address}/v1/chat/completions"),
         api_token: "fixed-model-fixture-token".to_string(),
         provider_configuration_revision,

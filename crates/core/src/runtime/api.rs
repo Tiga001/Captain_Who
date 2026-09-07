@@ -1006,7 +1006,7 @@ pub fn create_conversation_context_state(
         prepared.api_style,
         &prepared.tool_definitions,
     );
-    Ok(AgentConversationContextState::new(
+    let mut state = AgentConversationContextState::new(
         prepared.configuration_revision,
         input.model,
         input.context_window_tokens,
@@ -1014,7 +1014,9 @@ pub fn create_conversation_context_state(
         detector,
         assembled.frame,
         assembled.timing,
-    ))
+    );
+    state.hydrate_context_images(&input.context_image_attachments)?;
+    Ok(state)
 }
 
 /// Rebuilds a durable conversation context and privately restores provider-native Assistant

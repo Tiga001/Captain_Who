@@ -51,6 +51,7 @@ mod pending_actions;
 mod provider_profiles;
 mod provider_runtime_capability_boundary;
 mod provider_transition;
+mod request_prefix;
 mod skills;
 mod staged_file_change_execution;
 mod steering;
@@ -524,6 +525,8 @@ fn completed_trace(
         truncated: false,
         items: vec![
             ConversationTurnTraceItem::AssistantNarration {
+                first_tool_call_id: None,
+                provider_turn_id: None,
                 sequence: 0,
                 content: "I am creating the requested file.".to_string(),
                 truncated: false,

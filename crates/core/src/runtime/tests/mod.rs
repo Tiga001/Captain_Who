@@ -107,6 +107,7 @@ fn discoverable_skill(description: &str) -> crate::skills::AgentSkillDiscoverySn
 
 fn conversation_context_input(messages: Vec<AgentChatMessage>) -> AgentChatInput {
     AgentChatInput {
+        context_image_attachments: Vec::new(),
         api_url: "https://example.test/v1/chat/completions".to_string(),
         api_token: String::new(),
         provider_configuration_revision: None,
@@ -251,8 +252,21 @@ fn traced_assistant_message(content: &str, trace: ConversationTurnTrace) -> Agen
         .filter_map(|item| {
             let sequence = item.sequence();
             let projected = match item {
+                ConversationTurnTraceItem::ContextMaterial {
+                    content, images, ..
+                } => crate::ConversationModelContextItem {
+                    images: images.clone(),
+                    sequence,
+                    ordinal: 0,
+                    role: "user".to_string(),
+                    content: content.clone(),
+                    tool_call_id: None,
+                    tool_calls: Vec::new(),
+                    is_error: false,
+                },
                 ConversationTurnTraceItem::AssistantNarration { content, .. } => {
                     crate::ConversationModelContextItem {
+                        images: Vec::new(),
                         sequence,
                         ordinal: 0,
                         role: "assistant".to_string(),
@@ -264,6 +278,7 @@ fn traced_assistant_message(content: &str, trace: ConversationTurnTrace) -> Agen
                 }
                 ConversationTurnTraceItem::UserGuidance { content, .. } => {
                     crate::ConversationModelContextItem {
+                        images: Vec::new(),
                         sequence,
                         ordinal: 0,
                         role: "user".to_string(),
@@ -276,6 +291,7 @@ fn traced_assistant_message(content: &str, trace: ConversationTurnTrace) -> Agen
                 ConversationTurnTraceItem::AgentMailboxDelivery { content, .. }
                 | ConversationTurnTraceItem::BackendState { content, .. } => {
                     crate::ConversationModelContextItem {
+                        images: Vec::new(),
                         sequence,
                         ordinal: 0,
                         role: "user".to_string(),
@@ -298,6 +314,7 @@ fn traced_assistant_message(content: &str, trace: ConversationTurnTrace) -> Agen
                     };
                     provider_tool_index = provider_tool_index.saturating_add(1);
                     crate::ConversationModelContextItem {
+                        images: Vec::new(),
                         sequence,
                         ordinal: 0,
                         role: "assistant".to_string(),
@@ -318,6 +335,7 @@ fn traced_assistant_message(content: &str, trace: ConversationTurnTrace) -> Agen
                     success,
                     ..
                 } => crate::ConversationModelContextItem {
+                    images: Vec::new(),
                     sequence,
                     ordinal: 0,
                     role: "tool".to_string(),
@@ -376,3 +394,5 @@ mod steering_and_repair;
 mod todo_budget;
 mod trace_and_projection;
 mod web_search;
+
+mod unified_history;

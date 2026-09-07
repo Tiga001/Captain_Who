@@ -3,10 +3,15 @@ mod payload;
 mod provider_cooldown;
 mod provider_error;
 mod providers;
+mod request_fingerprint;
 mod response;
 mod stream;
 mod tool_call_id;
 mod transport;
+
+pub use request_fingerprint::{
+    fingerprint_llm_request, LlmMessageFingerprint, LlmRequestFingerprint, LlmValueFingerprint,
+};
 
 pub(crate) use tool_call_id::{
     model_response_tool_call_id, validate_model_tool_call_id, validate_model_tool_protocol,

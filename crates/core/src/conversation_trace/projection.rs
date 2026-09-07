@@ -37,10 +37,13 @@ fn project_durable_trace_items(
 
     for item in items {
         let projected_item = match item {
-            ConversationTurnTraceItem::BackendState { .. } => item.clone(),
+            ConversationTurnTraceItem::BackendState { .. }
+            | ConversationTurnTraceItem::ContextMaterial { .. } => item.clone(),
             ConversationTurnTraceItem::AssistantNarration {
                 sequence,
                 content,
+                provider_turn_id,
+                first_tool_call_id,
                 truncated,
             } => {
                 let (content, projection_truncated) = project_narration(content);
@@ -48,6 +51,8 @@ fn project_durable_trace_items(
                 ConversationTurnTraceItem::AssistantNarration {
                     sequence: *sequence,
                     content,
+                    provider_turn_id: provider_turn_id.clone(),
+                    first_tool_call_id: first_tool_call_id.clone(),
                     truncated: *truncated || projection_truncated,
                 }
             }

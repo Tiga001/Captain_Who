@@ -355,6 +355,8 @@ fn compaction_accepts_newly_closed_exchange_but_rejects_unsafe_trace_boundaries(
         truncated: false,
         items: vec![
             ConversationTurnTraceItem::AssistantNarration {
+                first_tool_call_id: None,
+                provider_turn_id: None,
                 sequence: 0,
                 content: "I will read the file.".to_string(),
                 truncated: false,
@@ -731,6 +733,7 @@ fn next_turn_carries_the_uncompressed_model_projection_beside_the_durable_trace(
     let runtime_call_id = history_call_id();
     let model_items = vec![
         mycopilot_core::ConversationModelContextItem {
+            images: Vec::new(),
             sequence: 0,
             ordinal: 0,
             role: "assistant".to_string(),
@@ -740,6 +743,7 @@ fn next_turn_carries_the_uncompressed_model_projection_beside_the_durable_trace(
             is_error: false,
         },
         mycopilot_core::ConversationModelContextItem {
+            images: Vec::new(),
             sequence: 1,
             ordinal: 0,
             role: "assistant".to_string(),
@@ -765,6 +769,7 @@ fn next_turn_carries_the_uncompressed_model_projection_beside_the_durable_trace(
             is_error: false,
         },
         mycopilot_core::ConversationModelContextItem {
+            images: Vec::new(),
             sequence: 2,
             ordinal: 0,
             role: "tool".to_string(),
@@ -1003,6 +1008,8 @@ fn mid_run_projection_keeps_latest_user_exact_and_only_the_uncovered_trace_tail(
                 archive: Default::default(),
             },
             ConversationTurnTraceItem::AssistantNarration {
+                first_tool_call_id: None,
+                provider_turn_id: None,
                 sequence: 3,
                 content: "UNCOVERED_TAIL_MARKER".to_string(),
                 truncated: false,
@@ -1045,6 +1052,7 @@ fn mid_run_projection_keeps_latest_user_exact_and_only_the_uncovered_trace_tail(
     let tail_logs = [mycopilot_core::ConversationModelContextLog {
         assistant_message_id: "assistant-current".to_string(),
         items: vec![mycopilot_core::ConversationModelContextItem {
+            images: Vec::new(),
             sequence: 3,
             ordinal: 0,
             role: "assistant".to_string(),
@@ -1142,6 +1150,8 @@ fn compaction_projection_drops_command_session_audit_that_references_the_covered
                 archive: Default::default(),
             },
             ConversationTurnTraceItem::AssistantNarration {
+                first_tool_call_id: None,
+                provider_turn_id: None,
                 sequence: 2,
                 content: "The remaining model-visible tail.".to_string(),
                 truncated: false,
@@ -1224,6 +1234,7 @@ fn compaction_projection_drops_command_session_audit_that_references_the_covered
     summary.validate().unwrap();
     let model_context_items = vec![
         ConversationModelContextItem {
+            images: Vec::new(),
             sequence: 0,
             ordinal: 0,
             role: "assistant".to_string(),
@@ -1242,6 +1253,7 @@ fn compaction_projection_drops_command_session_audit_that_references_the_covered
             is_error: false,
         },
         ConversationModelContextItem {
+            images: Vec::new(),
             sequence: 1,
             ordinal: 0,
             role: "tool".to_string(),
@@ -1251,6 +1263,7 @@ fn compaction_projection_drops_command_session_audit_that_references_the_covered
             is_error: false,
         },
         ConversationModelContextItem {
+            images: Vec::new(),
             sequence: 2,
             ordinal: 0,
             role: "assistant".to_string(),
@@ -1754,4 +1767,162 @@ fn five_hundred_turn_context_compaction_release_profile() {
         post_assembly_elapsed.as_millis(),
         total_started.elapsed().as_millis(),
     );
+}
+
+#[test]
+fn compacted_history_retains_only_immutable_images_without_reviving_completion() {
+    let image = mycopilot_core::ConversationContextImageRef {
+        attachment_id: "historical-image".into(),
+        mime_type: "image/png".into(),
+        sha256: format!("sha256:{}", "a".repeat(64)),
+    };
+    let messages = [
+        ("user-visual", "user", "inspect image"),
+        ("assistant-visual", "assistant", "old visual answer"),
+        ("user-later", "user", "continue"),
+        ("assistant-later", "assistant", "later answer"),
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(index, (id, role, content))| ChatMessageRecord {
+        human_interaction_response: None,
+        id: id.into(),
+        role: role.into(),
+        content: content.into(),
+        created_at: index as i64 + 1,
+        status: Some("sent".into()),
+        attachments: Vec::new(),
+        agent_run_json: None,
+        ui_state_json: None,
+    })
+    .collect();
+    let conversation = ChatConversationRecord {
+        id: "visual-history".into(),
+        project_id: None,
+        model_id: None,
+        title: "images".into(),
+        messages,
+        created_at: 1,
+        updated_at: 4,
+        pinned_at: None,
+        archived_at: None,
+        unread_at: None,
+    };
+    let trace = ConversationTurnTrace {
+        schema_version: CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
+        run_id: "visual-run".into(),
+        conversation_id: conversation.id.clone(),
+        assistant_message_id: "assistant-visual".into(),
+        terminal_status: ConversationTurnTraceTerminalStatus::Completed,
+        terminal_error: None,
+        truncated: false,
+        items: vec![
+            ConversationTurnTraceItem::ContextMaterial {
+                sequence: 0,
+                event_id: "visual-input".into(),
+                material_kind: mycopilot_core::ConversationContextMaterialKind::InputAttachment,
+                content: "image description".into(),
+                images: vec![image.clone()],
+                created_at: 2,
+            },
+            ConversationTurnTraceItem::ContextMaterial {
+                sequence: 1,
+                event_id: "visual-world".into(),
+                material_kind: mycopilot_core::ConversationContextMaterialKind::RunWorldState,
+                content: "old run state".into(),
+                images: Vec::new(),
+                created_at: 2,
+            },
+        ],
+    };
+    let later_trace = ConversationTurnTrace {
+        run_id: "later-run".into(),
+        assistant_message_id: "assistant-later".into(),
+        items: Vec::new(),
+        ..trace.clone()
+    };
+    let log = mycopilot_core::ConversationModelContextLog {
+        assistant_message_id: trace.assistant_message_id.clone(),
+        items: vec![
+            ConversationModelContextItem {
+                sequence: 0,
+                ordinal: 0,
+                role: "user".into(),
+                content: "image description".into(),
+                images: vec![image.clone()],
+                tool_call_id: None,
+                tool_calls: Vec::new(),
+                is_error: false,
+            },
+            ConversationModelContextItem {
+                sequence: 1,
+                ordinal: 0,
+                role: "user".into(),
+                content: "old run state".into(),
+                images: Vec::new(),
+                tool_call_id: None,
+                tool_calls: Vec::new(),
+                is_error: false,
+            },
+        ],
+    };
+    // Cover the image's own message, then cover a later whole message. Both paths must preserve
+    // image bytes but must not resurrect the already summarized assistant prose or pure text.
+    for cursor in [
+        ContextJournalCursor::message("assistant-visual"),
+        ContextJournalCursor::message("assistant-later"),
+    ] {
+        let summary = ContextCompactionSummary {
+            schema_version: CONTEXT_COMPACTION_SUMMARY_SCHEMA_VERSION,
+            id: "visual-summary".into(),
+            conversation_id: conversation.id.clone(),
+            source_revision: "visual-revision".into(),
+            previous_summary_id: None,
+            covered_through: cursor.clone(),
+            content: "summary".into(),
+            continuity: mycopilot_core::ContextContinuitySnapshot {
+                schema_version: mycopilot_core::CONTEXT_CONTINUITY_SCHEMA_VERSION,
+                covered_through: cursor,
+                task_evidence_refs: Vec::new(),
+                unresolved_failure_refs: Vec::new(),
+                approval_refs: Vec::new(),
+                important_decision_refs: Vec::new(),
+                recent_refs: Vec::new(),
+                archived_counts: Default::default(),
+            },
+            generation: ContextCompactionGeneration::test(),
+            source_input_tokens: 100,
+            summary_input_tokens: 10,
+            continuity_input_tokens: 10,
+            uncovered_tail_input_tokens: 0,
+            replacement_input_tokens: 20,
+            created_at: 5,
+        };
+        let projected = conversation_history_messages_with_model_context(
+            &conversation,
+            &[trace.clone(), later_trace.clone()],
+            std::slice::from_ref(&log),
+            Some(&summary),
+            &[],
+        )
+        .unwrap();
+        let visual = projected
+            .iter()
+            .find(|message| message.message_id.as_deref() == Some("assistant-visual"))
+            .unwrap();
+        assert!(visual.content.is_empty());
+        assert!(visual.conversation_completion_covered);
+        assert_eq!(
+            visual.conversation_turn_trace.as_ref().unwrap().items.len(),
+            1
+        );
+        assert_eq!(visual.conversation_model_context_items.len(), 1);
+        assert_eq!(
+            visual.conversation_model_context_items[0].images,
+            vec![image.clone()]
+        );
+        assert!(!projected
+            .iter()
+            .any(|message| message.content == "old visual answer"));
+    }
 }

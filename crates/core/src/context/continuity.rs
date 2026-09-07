@@ -318,7 +318,8 @@ impl ContinuitySelector {
                     ConversationTurnTraceItem::AssistantNarration { .. } => {
                         increment(&mut self.archived_counts, COUNT_NARRATION);
                     }
-                    ConversationTurnTraceItem::BackendState { .. } => {
+                    ConversationTurnTraceItem::BackendState { .. }
+                    | ConversationTurnTraceItem::ContextMaterial { .. } => {
                         push_bounded(
                             &mut self.recent,
                             history_ref_from_cursor(cursor),

@@ -81,6 +81,7 @@ async fn restart_pairs_a_durable_image_call_with_its_terminal_journal_receipt() 
         }],
     };
     let model_context_items = vec![ConversationModelContextItem {
+        images: Vec::new(),
         sequence: 0,
         ordinal: 0,
         role: "assistant".to_string(),

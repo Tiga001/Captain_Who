@@ -1052,13 +1052,25 @@ async fn conversation_turn_steering_runs_through_rpc_control_trace_and_events() 
         .unwrap()
         .unwrap();
     assert_eq!(journal.status, AgentGuidanceStatus::Applied);
-    assert_eq!(journal.applied_trace_sequence, Some(1));
     let trace = storage
         .get_conversation_turn_trace(&turn.assistant_message_id)
         .unwrap()
         .unwrap();
+    let guidance_sequence = trace
+        .items
+        .iter()
+        .find_map(|item| match item {
+            ConversationTurnTraceItem::UserGuidance {
+                guidance_id,
+                sequence,
+                ..
+            } if guidance_id == &steer.guidance_id => Some(*sequence),
+            _ => None,
+        })
+        .expect("steering is bound to its exact journal event");
+    assert_eq!(journal.applied_trace_sequence, Some(guidance_sequence));
     assert!(matches!(
-        trace.items.as_slice(),
+        trace.items.iter().filter(|item| !matches!(item, ConversationTurnTraceItem::ContextMaterial { .. })).collect::<Vec<_>>().as_slice(),
         [
             ConversationTurnTraceItem::AssistantNarration { content, .. },
             ConversationTurnTraceItem::UserGuidance {

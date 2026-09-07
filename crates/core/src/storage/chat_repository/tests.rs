@@ -517,6 +517,8 @@ fn full_conversation_save_preserves_retained_trace_and_deletes_missing_trace() {
         terminal_error: None,
         truncated: false,
         items: vec![ConversationTurnTraceItem::AssistantNarration {
+            provider_turn_id: None,
+            first_tool_call_id: None,
             sequence: 0,
             content: "Inspecting the workspace.".to_string(),
             truncated: false,

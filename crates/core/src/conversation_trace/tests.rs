@@ -187,3 +187,5 @@ fn assert_precommitted_wait_matches_runtime_terminal(payload: &str, truncated: b
 include!("tests/model_and_validation.rs");
 include!("tests/recording_and_projection.rs");
 include!("tests/backend_state.rs");
+
+include!("tests/context_material.rs");

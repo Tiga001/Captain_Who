@@ -56,7 +56,7 @@ pub(crate) enum ContextUsageClass {
     Fixed,
     /// Conversation or project state that is retained for later turns.
     Durable,
-    /// Current-run history required by the active tool loop but not rebuilt next turn.
+    /// Active-run input kept until its durable observation can be adopted into history.
     RunTransient,
     /// Ephemeral state injected into exactly one provider request.
     RequestOnly,
@@ -123,6 +123,13 @@ pub(crate) enum ContextSource {
     WorldStateUnobserved,
     ConversationHistory,
     ConversationTrace,
+    /// Replayable material from a previous Run, not the current capability/authority snapshot.
+    HistoricalRunContext,
+    /// Exact material already covered by a summary; it remains visible without reentering the
+    /// next raw prefix or contributing twice to the next compaction source.
+    CompactionRetained,
+    /// Public narration already owned by a complete Provider assistant turn.
+    ToolTurnNarration,
     CurrentTurn,
     UserGuidance,
     SkillCatalog,
@@ -155,6 +162,9 @@ impl ContextSource {
             Self::WorldStateUnobserved => "world_state_unobserved",
             Self::ConversationHistory => "conversation_history",
             Self::ConversationTrace => "conversation_trace",
+            Self::HistoricalRunContext => "historical_run_context",
+            Self::CompactionRetained => "compaction_retained",
+            Self::ToolTurnNarration => "tool_turn_narration",
             Self::CurrentTurn => "current_turn",
             Self::UserGuidance => "user_guidance",
             Self::SkillCatalog => "skill_catalog",
@@ -186,6 +196,9 @@ impl ContextSource {
             "world_state_unobserved" => Some(Self::WorldStateUnobserved),
             "conversation_history" => Some(Self::ConversationHistory),
             "conversation_trace" => Some(Self::ConversationTrace),
+            "historical_run_context" => Some(Self::HistoricalRunContext),
+            "compaction_retained" => Some(Self::CompactionRetained),
+            "tool_turn_narration" => Some(Self::ToolTurnNarration),
             "current_turn" => Some(Self::CurrentTurn),
             "user_guidance" => Some(Self::UserGuidance),
             "skill_catalog" => Some(Self::SkillCatalog),
@@ -467,6 +480,9 @@ impl ContextMetadata {
         if self.sources.contains(&ContextSource::BackendSystemPrompt) {
             return ContextCacheBand::StableContract;
         }
+        if self.sources.contains(&ContextSource::HistoricalRunContext) {
+            return ContextCacheBand::DurableTimeline;
+        }
         if self.sources.contains(&ContextSource::ConversationSummary)
             || self.sources.contains(&ContextSource::WorldStateSnapshot)
                 && matches!(self.scope, ContextScope::Conversation)
@@ -508,6 +524,7 @@ pub(crate) struct ContextItem {
     checkpoint_message: Option<LlmMessage>,
     metadata: ContextMetadata,
     measurement: Option<ContextItemMeasurement>,
+    context_image_refs: Vec<crate::ConversationContextImageRef>,
 }
 
 #[derive(Debug, Clone)]
@@ -531,6 +548,14 @@ impl ContextItem {
         self
     }
 
+    pub(crate) fn with_context_image_refs(
+        mut self,
+        refs: Vec<crate::ConversationContextImageRef>,
+    ) -> Self {
+        self.context_image_refs = refs;
+        self
+    }
+
     pub(crate) fn new(mut message: LlmMessage, metadata: ContextMetadata) -> Self {
         message.set_placement(metadata.message_placement());
         Self {
@@ -538,6 +563,7 @@ impl ContextItem {
             checkpoint_message: None,
             metadata,
             measurement: None,
+            context_image_refs: Vec::new(),
         }
     }
 
@@ -685,6 +711,11 @@ fn context_item_revision(item: &ContextItem) -> u64 {
         .map_or((None, false), |(id, _, is_error)| (Some(id), is_error));
     hasher.write_str(tool_call_id.unwrap_or_default());
     hasher.write_u64(is_error.into());
+    for reference in &item.context_image_refs {
+        hasher.write_str(&reference.attachment_id);
+        hasher.write_str(&reference.mime_type);
+        hasher.write_str(&reference.sha256);
+    }
     for image in item.message.images() {
         hasher.write_str(&image.mime_type);
         hasher.write_str(&image.data_base64);

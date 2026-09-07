@@ -1091,3 +1091,121 @@ fn cache_layout_rejects_a_durable_item_after_the_run_timeline() {
     assert!(error.contains("上下文缓存分层顺序无效"));
     assert!(error.contains("durable_timeline"));
 }
+
+#[test]
+fn provider_turn_hydration_removes_only_owned_narration_with_identical_text() {
+    const TEXT: &str = "The same sentence can belong to different responses.";
+    let profile = ProviderProfileConfig::deepseek_v4_default();
+    let protocol = ProviderProtocolKey::new(
+        ProviderProtocolDialect::OpenAiChatCompletions,
+        &profile,
+        "deepseek-v4-flash",
+        None,
+    )
+    .unwrap();
+    let provider_call = LlmToolCall {
+        id: "provider-narration-owner".to_string(),
+        name: "read_file".to_string(),
+        args: json!({"path":"a.txt"}),
+    };
+    let runtime_call = LlmToolCall {
+        id: "runtime-narration-owner".to_string(),
+        ..provider_call.clone()
+    };
+    let mut turn =
+        LlmAssistantTurn::from_provider(protocol.clone(), TEXT, vec![provider_call.clone()])
+            .unwrap()
+            .with_runtime_tool_bindings(vec![LlmRuntimeToolCallBinding::new(
+                0,
+                &provider_call,
+                runtime_call.clone(),
+            )])
+            .unwrap();
+    let continuation = ProviderContinuation::new(
+        protocol,
+        ProviderContinuationReplayScope::InteractionV1,
+        turn.digest(),
+        vec![ProviderContinuationFragment::new(
+            ProviderContinuationPosition::new(0, ProviderContinuationAttachment::AssistantTurn),
+            b"\x01narration-private".to_vec(),
+        )],
+    )
+    .unwrap();
+    turn = turn
+        .with_provider_continuation(continuation)
+        .unwrap()
+        .with_provider_continuation_ref(ProviderContinuationRef::new())
+        .unwrap();
+    let metadata = |sequence| {
+        ContextMetadata::new(
+            ContextSource::ConversationTrace,
+            ContextScope::Conversation,
+            ContextRetention::Retained,
+        )
+        .with_origin(ContextOrigin::conversation_trace_item(
+            "assistant-narration-owner",
+            sequence,
+        ))
+    };
+    let narration = |sequence, owner: Option<(&str, &str)>| {
+        let mut metadata = metadata(sequence);
+        if let Some((owner, first_call)) = owner {
+            metadata = metadata
+                .with_source(ContextSource::ToolTurnNarration)
+                .with_group(ContextGroup::tool_exchange(format!(
+                    "narration-owner:{owner}:{first_call}"
+                )));
+        }
+        ContextItem::new(LlmMessage::text(LlmMessageRole::Assistant, TEXT), metadata)
+    };
+    let mut frame = ContextFrame::new(vec![
+        narration(0, None),
+        narration(1, Some(("different-provider-turn", "another-call"))),
+        // Provider payload identity can repeat; canonical runtime call identity cannot.
+        narration(2, Some((&turn.stable_id(), "different-runtime-call"))),
+        narration(3, Some((&turn.stable_id(), &runtime_call.id))),
+        ContextItem::assistant(
+            "",
+            vec![runtime_call.clone()],
+            metadata(4).with_group(ContextGroup::tool_exchange("split-owned")),
+        ),
+        ContextItem::tool_result(
+            runtime_call.id,
+            "file",
+            false,
+            metadata(5).with_group(ContextGroup::tool_exchange("split-owned")),
+        ),
+    ]);
+    frame
+        .restore_provider_assistant_turn("assistant-narration-owner", None, turn)
+        .unwrap();
+    frame.validate_complete_tool_protocol().unwrap();
+    let messages = frame.to_messages();
+    assert_eq!(messages.len(), 5);
+    assert_eq!(
+        messages
+            .iter()
+            .filter(|message| message.content() == TEXT)
+            .count(),
+        4
+    );
+    assert_eq!(messages[0].tool_calls().count(), 0);
+    assert_eq!(messages[1].tool_calls().count(), 0);
+    assert_eq!(messages[2].tool_calls().count(), 0);
+    assert_eq!(messages[3].tool_calls().count(), 1);
+    assert_eq!(messages[4].content(), "file");
+    assert_eq!(
+        frame.iter_items().next().unwrap().metadata.origin(),
+        Some(&ContextOrigin::conversation_trace_item(
+            "assistant-narration-owner",
+            0
+        ))
+    );
+    assert_eq!(
+        frame.iter_items().nth(1).unwrap().metadata.origin(),
+        Some(&ContextOrigin::conversation_trace_item(
+            "assistant-narration-owner",
+            1
+        ))
+    );
+}

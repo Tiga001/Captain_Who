@@ -776,12 +776,28 @@ async fn rewrite_turn_is_atomic_replayable_and_runs_with_only_the_active_context
     let active_world_state = storage
         .list_active_conversation_world_state_records(&source.conversation_id)
         .unwrap();
+    let replacement_trace = storage
+        .get_conversation_turn_trace("rewrite-replacement-assistant")
+        .unwrap()
+        .unwrap();
+    let replacement_bootstrap_sequence = replacement_trace
+        .items
+        .iter()
+        .find_map(|item| match item {
+            ConversationTurnTraceItem::ContextMaterial {
+                sequence,
+                material_kind: mycopilot_core::ConversationContextMaterialKind::RunWorldState,
+                ..
+            } => Some(*sequence),
+            _ => None,
+        })
+        .expect("replacement request has its own Run bootstrap material");
     assert!(active_world_state.iter().any(|entry| {
         entry.request_boundary.as_ref().is_some_and(|boundary| {
             boundary.run_id == replacement.run_id
                 && boundary.assistant_message_id == "rewrite-replacement-assistant"
                 && boundary.request_index == 1
-                && boundary.after_trace_sequence.is_none()
+                && boundary.after_trace_sequence == Some(replacement_bootstrap_sequence)
         })
     }));
 
@@ -1219,6 +1235,7 @@ async fn reopened_assistant_and_provider_transition_forks_complete_human_turns()
         let runtime_call_id = history_call_id();
         let model_context_items = vec![
             ConversationModelContextItem {
+                images: Vec::new(),
                 sequence: 0,
                 ordinal: 0,
                 role: "assistant".to_string(),
@@ -1228,6 +1245,7 @@ async fn reopened_assistant_and_provider_transition_forks_complete_human_turns()
                 is_error: false,
             },
             ConversationModelContextItem {
+                images: Vec::new(),
                 sequence: 1,
                 ordinal: 0,
                 role: "assistant".to_string(),
@@ -1253,6 +1271,7 @@ async fn reopened_assistant_and_provider_transition_forks_complete_human_turns()
                 is_error: false,
             },
             ConversationModelContextItem {
+                images: Vec::new(),
                 sequence: 2,
                 ordinal: 0,
                 role: "tool".to_string(),

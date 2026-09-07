@@ -224,6 +224,7 @@ fn async_guidance_requires_exact_trace_and_atomically_marks_applied() {
         .unwrap();
     assert!(guidance_repository::mark_guidance_applied(&fixture.connect(), "g", 0, 22).is_err());
     let context = vec![crate::ConversationModelContextItem {
+        images: Vec::new(),
         sequence: 0,
         ordinal: 0,
         role: "user".into(),

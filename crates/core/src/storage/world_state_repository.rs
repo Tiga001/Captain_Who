@@ -1979,6 +1979,8 @@ mod tests {
                 items: (0..item_count)
                     .map(
                         |sequence| crate::ConversationTurnTraceItem::AssistantNarration {
+                            provider_turn_id: None,
+                            first_tool_call_id: None,
                             sequence,
                             content: format!("step-{sequence}"),
                             truncated: false,

@@ -104,6 +104,8 @@ fn fork_remaps_current_apply_patch_staged_transaction_and_read_observation() {
             items
         } else {
             vec![ConversationTurnTraceItem::AssistantNarration {
+                provider_turn_id: None,
+                first_tool_call_id: None,
                 sequence: 0,
                 content: format!("narration {index}"),
                 truncated: false,

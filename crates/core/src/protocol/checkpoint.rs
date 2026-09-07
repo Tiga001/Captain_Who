@@ -10,6 +10,7 @@ pub struct AgentExtensionSnapshot {
 
 /// Current durable Agent run checkpoint schema.
 ///
+/// Version 16 retains causal context material and immutable image identities across Run boundaries.
 /// Version 15 preserves the exact Conversation World State ledger and request-adoption markers
 /// beside its model projection, including direct Core runs without a storage Host.
 /// Version 14 distinguishes approval and human-input suspension authority. Human answers arrive
@@ -27,7 +28,7 @@ pub struct AgentExtensionSnapshot {
 /// The referenced payload remains encrypted in the Host vault; raw Provider continuation and
 /// reasoning are never serialized into the checkpoint. Any other schema version is rejected at
 /// the approval boundary.
-pub const AGENT_RUN_CHECKPOINT_SCHEMA_VERSION: u32 = 15;
+pub const AGENT_RUN_CHECKPOINT_SCHEMA_VERSION: u32 = 16;
 
 /// Suspension sources are separate authority domains. A user answer never grants approval.
 #[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
@@ -50,7 +51,7 @@ pub struct AgentRunToolSetCheckpoint {
     pub exposed_tool_names: Vec<String>,
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+#[derive(Deserialize, Serialize, Clone, PartialEq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgentRunCheckpoint {
     pub version: u32,
@@ -120,12 +121,52 @@ pub struct AgentRunCheckpoint {
     pub conversation_trace_truncated: bool,
 }
 
+/// Checkpoint diagnostics must never disclose model history, Skill instructions, images,
+/// queued Tool arguments, extension snapshots or private authority references.
+impl std::fmt::Debug for AgentRunCheckpoint {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AgentRunCheckpoint")
+            .field("version", &self.version)
+            .field("pause_reason", &self.pause_reason)
+            .field("run_id", &self.run_id)
+            .field("next_model_request_index", &self.next_model_request_index)
+            .field("context_item_count", &self.context_items.len())
+            .field("queued_tool_call_count", &self.queued_tool_calls.len())
+            .field("extension_snapshot_count", &self.extension_snapshots.len())
+            .field(
+                "provider_continuation_ref_count",
+                &self.provider_continuation_refs.len(),
+            )
+            .field("pending_tool_call_id", &self.pending_tool_call_id)
+            .field(
+                "conversation_trace_item_count",
+                &self.conversation_trace_items.len(),
+            )
+            .field(
+                "conversation_model_context_item_count",
+                &self.conversation_model_context_items.len(),
+            )
+            .field(
+                "next_conversation_trace_sequence",
+                &self.next_conversation_trace_sequence,
+            )
+            .field(
+                "conversation_trace_truncated",
+                &self.conversation_trace_truncated,
+            )
+            .finish_non_exhaustive()
+    }
+}
+
 #[derive(Deserialize, Serialize, Clone, PartialEq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgentContextCheckpointItem {
     pub role: String,
     pub content: String,
     pub images: Vec<AgentContextCheckpointImage>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub context_image_refs: Vec<ConversationContextImageRef>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
     pub tool_calls: Vec<AgentContextCheckpointToolCall>,
@@ -149,6 +190,7 @@ impl std::fmt::Debug for AgentContextCheckpointItem {
             .field("role", &self.role)
             .field("content_bytes", &self.content.len())
             .field("image_count", &self.images.len())
+            .field("context_image_ref_count", &self.context_image_refs.len())
             .field("tool_call_id", &self.tool_call_id)
             .field("tool_call_count", &self.tool_calls.len())
             .field("is_error", &self.is_error)

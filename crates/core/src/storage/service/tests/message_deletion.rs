@@ -194,6 +194,7 @@ fn persist_settled_manual_command(
     };
     let model_context_items = vec![
         crate::ConversationModelContextItem {
+            images: Vec::new(),
             sequence: 0,
             ordinal: 0,
             role: "assistant".to_string(),
@@ -212,6 +213,7 @@ fn persist_settled_manual_command(
             is_error: false,
         },
         crate::ConversationModelContextItem {
+            images: Vec::new(),
             sequence: 1,
             ordinal: 0,
             role: "tool".to_string(),

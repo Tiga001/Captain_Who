@@ -4273,6 +4273,9 @@ fn delayed_failed_settlement_does_not_starve_a_healthy_session() {
         still_blocked.snapshot.status,
         AgentCommandSessionStatus::Running
     );
+    // A durable terminal commit precedes the worker's admission release. Await the same
+    // ownership boundary used below before checking scheduler fairness under parallel load.
+    wait_for_retained_admission_count(&fixture.registry, 1);
     assert_eq!(fixture.registry.settlement_scheduler_stats().0, 1);
     assert_eq!(fixture.registry.retained_admission_count(), 1);
 

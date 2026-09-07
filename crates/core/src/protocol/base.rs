@@ -126,6 +126,10 @@ pub struct AgentChatInput {
     pub tool_continuation: Option<AgentToolContinuation>,
     #[serde(default)]
     pub attachments: Vec<AgentInputAttachment>,
+    /// Host-hydrated immutable historical image references. These are input bytes only;
+    /// model journals and checkpoints persist references, never this collection.
+    #[serde(skip)]
+    pub context_image_attachments: Vec<AgentInputAttachment>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub resume_checkpoint: Option<AgentRunCheckpoint>,
     #[serde(skip_serializing_if = "Option::is_none")]

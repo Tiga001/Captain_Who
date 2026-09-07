@@ -1,5 +1,6 @@
 export * from './agent'
 export * from './agentBackendState'
+export * from './agentContextMaterial'
 export * from './agentActionParsers'
 export * from './agentCollaboration'
 export * from './agentCommandSessionParsers'

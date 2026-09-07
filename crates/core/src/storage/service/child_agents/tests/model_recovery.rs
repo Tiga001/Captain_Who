@@ -538,6 +538,8 @@ fn incomplete_parent_model_context_rejects_spawn_and_rolls_back_every_child_fact
                 terminal_error: None,
                 truncated: false,
                 items: vec![crate::ConversationTurnTraceItem::AssistantNarration {
+                    provider_turn_id: None,
+                    first_tool_call_id: None,
                     sequence: 0,
                     content: "Inspecting the parent history.".to_string(),
                     truncated: false,

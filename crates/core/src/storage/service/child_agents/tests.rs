@@ -434,6 +434,8 @@ fn append_terminal_assistant_for_tree_fork(
             terminal_error: terminal_error.map(ToString::to_string),
             truncated: false,
             items: vec![crate::ConversationTurnTraceItem::AssistantNarration {
+                provider_turn_id: None,
+                first_tool_call_id: None,
                 sequence: 0,
                 content: format!("trace: {content}"),
                 truncated: false,

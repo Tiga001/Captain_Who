@@ -1238,6 +1238,7 @@ fn test_pending_resume_checkpoint_for_call(
         truncated: trace_truncated,
     }];
     checkpoint.conversation_model_context_items = vec![ConversationModelContextItem {
+        images: Vec::new(),
         sequence: 0,
         ordinal: 0,
         role: "assistant".to_string(),
@@ -1370,6 +1371,7 @@ fn append_durable_pending_trace(
         }],
     };
     let model_context = vec![ConversationModelContextItem {
+        images: Vec::new(),
         sequence: 0,
         ordinal: 0,
         role: "assistant".to_string(),
@@ -1619,6 +1621,7 @@ fn predecessor_gate_records(
     };
     let model_context = vec![
         ConversationModelContextItem {
+            images: Vec::new(),
             sequence: 0,
             ordinal: 0,
             role: "assistant".to_string(),
@@ -1637,6 +1640,7 @@ fn predecessor_gate_records(
             is_error: false,
         },
         ConversationModelContextItem {
+            images: Vec::new(),
             sequence: 1,
             ordinal: 0,
             role: "tool".to_string(),
@@ -1646,6 +1650,7 @@ fn predecessor_gate_records(
             is_error: false,
         },
         ConversationModelContextItem {
+            images: Vec::new(),
             sequence: 2,
             ordinal: 0,
             role: "assistant".to_string(),
@@ -8431,6 +8436,8 @@ fn agent_service_startup_retires_an_orphaned_cancelled_conversation_trace() {
         terminal_error: None,
         truncated: false,
         items: vec![ConversationTurnTraceItem::AssistantNarration {
+            first_tool_call_id: None,
+            provider_turn_id: None,
             sequence: 0,
             content: "Reading the image.".to_string(),
             truncated: false,
@@ -8440,6 +8447,7 @@ fn agent_service_startup_retires_an_orphaned_cancelled_conversation_trace() {
         .append_in_progress_conversation_turn_trace_and_apply_guidances(
             &trace,
             &[ConversationModelContextItem {
+                images: Vec::new(),
                 sequence: 0,
                 ordinal: 0,
                 role: "assistant".to_string(),
@@ -8545,6 +8553,7 @@ fn terminal_pending_action_persistence_redacts_run_scoped_skill_bodies() {
         pending_file_observation: None,
         context_items: vec![
             mycopilot_core::AgentContextCheckpointItem {
+                context_image_refs: Vec::new(),
                 role: "user".to_string(),
                 content: format!("<backend_activated_skill>{MARKER}</backend_activated_skill>"),
                 images: Vec::new(),
@@ -8562,6 +8571,7 @@ fn terminal_pending_action_persistence_redacts_run_scoped_skill_bodies() {
                 }),
             },
             mycopilot_core::AgentContextCheckpointItem {
+                context_image_refs: Vec::new(),
                 role: "user".to_string(),
                 content: format!(
                     "<backend_available_skills>{CATALOG_MARKER}</backend_available_skills>"
@@ -8578,6 +8588,7 @@ fn terminal_pending_action_persistence_redacts_run_scoped_skill_bodies() {
                 origin: None,
             },
             mycopilot_core::AgentContextCheckpointItem {
+                context_image_refs: Vec::new(),
                 role: "system".to_string(),
                 content: "NON_SKILL_CHECKPOINT_CONTENT".to_string(),
                 images: Vec::new(),
@@ -10690,6 +10701,7 @@ fn invalid_checkpoint_tool_call_is_rejected_before_pending_publication() {
         file_change_run_grant_ref: None,
         pending_file_observation: None,
         context_items: vec![mycopilot_core::AgentContextCheckpointItem {
+            context_image_refs: Vec::new(),
             role: "assistant".to_string(),
             content: String::new(),
             images: Vec::new(),

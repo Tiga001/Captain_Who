@@ -902,6 +902,8 @@ mod tests {
         with_late_audit_item
             .items
             .push(ConversationTurnTraceItem::AssistantNarration {
+                provider_turn_id: None,
+                first_tool_call_id: None,
                 sequence: 3,
                 content: "late audit placeholder".to_string(),
                 truncated: false,
@@ -1080,6 +1082,8 @@ mod tests {
             truncated: false,
             items: vec![
                 ConversationTurnTraceItem::AssistantNarration {
+                    provider_turn_id: None,
+                    first_tool_call_id: None,
                     sequence: 0,
                     content: "I will inspect the file.".to_string(),
                     truncated: false,

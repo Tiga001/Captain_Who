@@ -211,6 +211,7 @@ fn direct_update_approval_restore_renews_the_exact_pending_observation_id() {
         0..0,
         [
             AgentContextCheckpointItem {
+                context_image_refs: Vec::new(),
                 role: "assistant".to_string(),
                 content: String::new(),
                 images: Vec::new(),
@@ -237,6 +238,7 @@ fn direct_update_approval_restore_renews_the_exact_pending_observation_id() {
                 origin: None,
             },
             AgentContextCheckpointItem {
+                context_image_refs: Vec::new(),
                 role: "tool".to_string(),
                 content: json!({
                     "path": "report.txt",
@@ -417,6 +419,7 @@ fn queued_apply_patch_checkpoint_restores_only_its_exact_unconsumed_read_observa
     };
     let context_items = vec![
         AgentContextCheckpointItem {
+            context_image_refs: Vec::new(),
             role: "assistant".to_string(),
             content: String::new(),
             images: Vec::new(),
@@ -440,6 +443,7 @@ fn queued_apply_patch_checkpoint_restores_only_its_exact_unconsumed_read_observa
             origin: None,
         },
         AgentContextCheckpointItem {
+            context_image_refs: Vec::new(),
             role: "tool".to_string(),
             content: json!({
                 "path": "example.txt",
@@ -604,6 +608,7 @@ fn queued_apply_patch_checkpoint_accepts_only_an_exact_successful_apply_patch_su
     });
     let context_items = vec![
         AgentContextCheckpointItem {
+            context_image_refs: Vec::new(),
             role: "assistant".to_string(),
             content: String::new(),
             images: Vec::new(),
@@ -618,6 +623,7 @@ fn queued_apply_patch_checkpoint_accepts_only_an_exact_successful_apply_patch_su
             origin: None,
         },
         AgentContextCheckpointItem {
+            context_image_refs: Vec::new(),
             role: "tool".to_string(),
             content: terminal_result.to_string(),
             images: Vec::new(),
@@ -789,6 +795,7 @@ fn queued_apply_patch_checkpoint_accepts_only_an_exact_staged_commit_successor_s
     });
     let context_items = vec![
         AgentContextCheckpointItem {
+            context_image_refs: Vec::new(),
             role: "assistant".to_string(),
             content: String::new(),
             images: Vec::new(),
@@ -803,6 +810,7 @@ fn queued_apply_patch_checkpoint_accepts_only_an_exact_staged_commit_successor_s
             origin: None,
         },
         AgentContextCheckpointItem {
+            context_image_refs: Vec::new(),
             role: "tool".to_string(),
             content: json!({
                 "transactionId": transaction_id,
@@ -837,6 +845,7 @@ fn queued_apply_patch_checkpoint_accepts_only_an_exact_staged_commit_successor_s
             origin: None,
         },
         AgentContextCheckpointItem {
+            context_image_refs: Vec::new(),
             role: "assistant".to_string(),
             content: String::new(),
             images: Vec::new(),
@@ -851,6 +860,7 @@ fn queued_apply_patch_checkpoint_accepts_only_an_exact_staged_commit_successor_s
             origin: None,
         },
         AgentContextCheckpointItem {
+            context_image_refs: Vec::new(),
             role: "tool".to_string(),
             content: terminal_result.to_string(),
             images: Vec::new(),

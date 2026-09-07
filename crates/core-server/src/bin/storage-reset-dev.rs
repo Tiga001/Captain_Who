@@ -48,7 +48,7 @@ const APP_DATA_ROOT_FLAG: &str = "--app-data-root";
 const CONFIGURATION_SOURCE_FLAG: &str = "--configuration-source";
 const SQLITE_TRANSIENT_SUFFIXES: [&str; 3] = ["-journal", "-wal", "-shm"];
 const RECOVERABLE_CONFIGURATION_SOURCE_SCHEMA_VERSION: i32 = 33;
-const RECOVERABLE_CONFIGURATION_TARGET_SCHEMA_VERSION: i32 = 41;
+const RECOVERABLE_CONFIGURATION_TARGET_SCHEMA_VERSION: i32 = 42;
 const RECOVERABLE_CONFIGURATION_SOURCE_FINGERPRINT: &str =
     "sha256:5e1e404d74af5ed899d88dc8b5051e673ecd5beb967579af8f328b07b640c948";
 const PREVIOUS_CONFIGURATION_SOURCE_SCHEMA_VERSION: i32 = 35;
@@ -69,6 +69,9 @@ const REQUEST_WORLD_STATE_CONFIGURATION_SOURCE_FINGERPRINT: &str =
 const IGNORED_HISTORY_CONFIGURATION_SOURCE_SCHEMA_VERSION: i32 = 40;
 const IGNORED_HISTORY_CONFIGURATION_SOURCE_FINGERPRINT: &str =
     "sha256:2df6952791a7a8fe0b8c2c962281b39158d5e8b84b18c60cee66994909a5b8b6";
+const UNIFIED_HISTORY_CONFIGURATION_SOURCE_SCHEMA_VERSION: i32 = 41;
+const UNIFIED_HISTORY_CONFIGURATION_SOURCE_FINGERPRINT: &str =
+    "sha256:f4fb8423e11200ca2e383cd904f624ec1792f8fe8c758a205a904c7b88d8a017";
 const EXACT_CONFIGURATION_TABLES: &[&str] = &[
     "model_provider_settings",
     "models",
@@ -493,7 +496,8 @@ fn inspect_source(
                 && schema_version != SYNC_INPUT_CONFIGURATION_SOURCE_SCHEMA_VERSION
                 && schema_version != ASYNC_INPUT_CONFIGURATION_SOURCE_SCHEMA_VERSION
                 && schema_version != REQUEST_WORLD_STATE_CONFIGURATION_SOURCE_SCHEMA_VERSION
-                && schema_version != IGNORED_HISTORY_CONFIGURATION_SOURCE_SCHEMA_VERSION =>
+                && schema_version != IGNORED_HISTORY_CONFIGURATION_SOURCE_SCHEMA_VERSION
+                && schema_version != UNIFIED_HISTORY_CONFIGURATION_SOURCE_SCHEMA_VERSION =>
         {
             // Unknown schemas must never silently discard configuration. Even an empty table
             // may have an incompatible layout; do not interpret it as a missing preference.
@@ -529,6 +533,7 @@ fn inspect_source(
                     | ASYNC_INPUT_CONFIGURATION_SOURCE_SCHEMA_VERSION
                     | REQUEST_WORLD_STATE_CONFIGURATION_SOURCE_SCHEMA_VERSION
                     | IGNORED_HISTORY_CONFIGURATION_SOURCE_SCHEMA_VERSION
+                    | UNIFIED_HISTORY_CONFIGURATION_SOURCE_SCHEMA_VERSION
             ) =>
         {
             if !is_supported_explicit_configuration_source(
@@ -603,6 +608,7 @@ fn inspect_source(
         || schema_version == ASYNC_INPUT_CONFIGURATION_SOURCE_SCHEMA_VERSION
         || schema_version == REQUEST_WORLD_STATE_CONFIGURATION_SOURCE_SCHEMA_VERSION
         || schema_version == IGNORED_HISTORY_CONFIGURATION_SOURCE_SCHEMA_VERSION
+        || schema_version == UNIFIED_HISTORY_CONFIGURATION_SOURCE_SCHEMA_VERSION
     {
         Some(load_human_interaction_settings_for_reset(&connection)?)
     } else {
@@ -715,7 +721,9 @@ fn is_supported_explicit_configuration_source(schema_version: i32, fingerprint: 
             || (schema_version == REQUEST_WORLD_STATE_CONFIGURATION_SOURCE_SCHEMA_VERSION
                 && fingerprint == REQUEST_WORLD_STATE_CONFIGURATION_SOURCE_FINGERPRINT)
             || (schema_version == IGNORED_HISTORY_CONFIGURATION_SOURCE_SCHEMA_VERSION
-                && fingerprint == IGNORED_HISTORY_CONFIGURATION_SOURCE_FINGERPRINT))
+                && fingerprint == IGNORED_HISTORY_CONFIGURATION_SOURCE_FINGERPRINT)
+            || (schema_version == UNIFIED_HISTORY_CONFIGURATION_SOURCE_SCHEMA_VERSION
+                && fingerprint == UNIFIED_HISTORY_CONFIGURATION_SOURCE_FINGERPRINT))
 }
 
 fn load_human_interaction_settings_for_reset(
@@ -770,6 +778,7 @@ fn validate_preserved_configuration_table_schemas(source: &Connection) -> io::Re
             | ASYNC_INPUT_CONFIGURATION_SOURCE_SCHEMA_VERSION
             | REQUEST_WORLD_STATE_CONFIGURATION_SOURCE_SCHEMA_VERSION
             | IGNORED_HISTORY_CONFIGURATION_SOURCE_SCHEMA_VERSION
+            | UNIFIED_HISTORY_CONFIGURATION_SOURCE_SCHEMA_VERSION
     ) || storage_schema_version(source)?
         == mycopilot_core::storage::migrations::STORAGE_SCHEMA_VERSION;
     let tables = PRESERVED_CONFIGURATION_TABLES
@@ -2181,7 +2190,7 @@ mod tests {
     }
 
     #[test]
-    fn explicit_configuration_sources_are_pinned_to_known_catalogs_for_schema_41() {
+    fn explicit_configuration_sources_are_pinned_to_known_catalogs_for_schema_42() {
         assert!(is_supported_explicit_configuration_source(
             RECOVERABLE_CONFIGURATION_SOURCE_SCHEMA_VERSION,
             RECOVERABLE_CONFIGURATION_SOURCE_FINGERPRINT,
@@ -2781,6 +2790,25 @@ mod tests {
             .unwrap();
     }
 
+    fn downgrade_fixture_to_exact_v41(database: &Path) {
+        let connection = Connection::open(database).unwrap();
+        assert_eq!(
+            count_rows_if_table_exists(&connection, "conversation_turn_trace_items").unwrap(),
+            0
+        );
+        connection
+            .execute_batch("PRAGMA foreign_keys = OFF; DROP TABLE conversation_turn_trace_items;")
+            .unwrap();
+        connection
+            .execute_batch(include_str!("../../tests/fixtures/trace_items_v41.sql"))
+            .unwrap();
+        connection.pragma_update(None, "user_version", 41).unwrap();
+        assert_eq!(
+            storage_catalog_fingerprint(&connection).unwrap(),
+            UNIFIED_HISTORY_CONFIGURATION_SOURCE_FINGERPRINT
+        );
+    }
+
     fn downgrade_fixture_to_exact_v40(database: &Path) {
         let connection = Connection::open(database).unwrap();
         drop_ignored_projection_fixture_schema(&connection);
@@ -2872,6 +2900,10 @@ mod tests {
                 downgrade_fixture_to_exact_v40(&database);
                 IGNORED_HISTORY_CONFIGURATION_SOURCE_FINGERPRINT
             }
+            41 => {
+                downgrade_fixture_to_exact_v41(&database);
+                UNIFIED_HISTORY_CONFIGURATION_SOURCE_FINGERPRINT
+            }
             _ => panic!("unsupported reset fixture"),
         };
         let connection = Connection::open(&database).unwrap();
@@ -2917,7 +2949,7 @@ mod tests {
         assert!(storage.load_conversations().unwrap().is_empty());
         drop(storage);
         let current = open_read_only(&database).unwrap();
-        assert_eq!(storage_schema_version(&current).unwrap(), 41);
+        assert_eq!(storage_schema_version(&current).unwrap(), 42);
         assert_eq!(
             snapshot_exact_configuration_tables(&current).unwrap(),
             exact_before
@@ -2946,6 +2978,11 @@ mod tests {
     #[test]
     fn exact_v39_reset_preserves_configuration_credential_refs_and_human_revision() {
         assert_previous_reset_preserves_configuration(39);
+    }
+
+    #[test]
+    fn exact_v41_reset_preserves_configuration_credential_refs_and_human_revision() {
+        assert_previous_reset_preserves_configuration(41);
     }
 
     #[test]
@@ -3143,7 +3180,7 @@ mod tests {
         assert!(storage.load_conversations().unwrap().is_empty());
         drop(storage);
         let connection = open_read_only(&database).unwrap();
-        assert_eq!(storage_schema_version(&connection).unwrap(), 41);
+        assert_eq!(storage_schema_version(&connection).unwrap(), 42);
         assert_eq!(
             snapshot_exact_configuration_tables(&connection).unwrap(),
             exact_before

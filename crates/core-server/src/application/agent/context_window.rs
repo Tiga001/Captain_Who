@@ -145,7 +145,8 @@ impl AgentService {
                 agent_prompt_preferences_from_record(self.storage.load_agent_prompt_preferences()?)
             }
         };
-        let agent_input = AgentChatInput {
+        let mut agent_input = AgentChatInput {
+            context_image_attachments: Vec::new(),
             api_url: connection.api_url,
             api_token: String::new(),
             provider_configuration_revision: Some(provider_protocol_revision),
@@ -194,6 +195,7 @@ impl AgentService {
             skill_discovery,
             messages,
         };
+        hydrate_context_image_attachments(&self.storage, &mut agent_input)?;
         let tool_projection = self.context_window_tool_projection(
             &agent_input,
             prepared_skills.resources.as_ref().map(Arc::clone),
@@ -442,6 +444,7 @@ impl AgentService {
                 context.project_id.as_deref(),
             )?);
         }
+        hydrate_context_image_attachments(&self.storage, &mut preview_input)?;
         Ok((preview_input, traces))
     }
 
@@ -517,6 +520,7 @@ impl AgentService {
             })
             .transpose()?
             .unwrap_or_default();
+        let context_images = preview_input.context_image_attachments.clone();
         let host_services = self.context_window_provider_host_services();
         let mut state = create_conversation_context_state_with_host_services(
             preview_input,
@@ -524,6 +528,9 @@ impl AgentService {
             &host_services,
         )
         .map_err(|error| error.to_string())?;
+        state
+            .hydrate_context_images(&context_images)
+            .map_err(|error| error.to_string())?;
         let baseline = state.shared_baseline().map_err(|error| error.to_string())?;
         let snapshot = if agent_input.context_window_indicator_enabled {
             Some(match tool_projection {
@@ -578,6 +585,27 @@ impl AgentService {
             .get_conversation_model_context_log(assistant_message_id)?
             .map(|log| log.items)
             .unwrap_or_default();
+        let mut context_images = agent_input.context_image_attachments.clone();
+        let mut image_refs = model_context_items
+            .iter()
+            .flat_map(|item| item.images.iter().cloned())
+            .collect::<Vec<_>>();
+        image_refs.extend(
+            trace
+                .items
+                .iter()
+                .flat_map(|item| match item {
+                    mycopilot_core::ConversationTurnTraceItem::ContextMaterial {
+                        images, ..
+                    } => images.as_slice(),
+                    _ => &[],
+                })
+                .cloned(),
+        );
+        context_images.extend(
+            self.storage
+                .load_context_image_attachments(conversation_id, &image_refs)?,
+        );
         let assistant_created_at = self
             .storage
             .get_assistant_message_created_at(conversation_id, assistant_message_id)?
@@ -631,6 +659,10 @@ impl AgentService {
                                 Some(assistant_created_at),
                             ) {
                                 Ok(committed_activity_items) => {
+                                    entry
+                                        .state
+                                        .hydrate_context_images(&context_images)
+                                        .map_err(|error| error.to_string())?;
                                     entry.committed_activity_items = committed_activity_items;
                                     entry.terminal = true;
                                     entry.active_run_id = None;
@@ -829,6 +861,8 @@ mod capability_tests {
     #[test]
     fn deferred_provider_projection_only_applies_to_an_unclosed_tool_call() {
         let text_only = in_progress_trace(vec![ConversationTurnTraceItem::AssistantNarration {
+            first_tool_call_id: None,
+            provider_turn_id: None,
             sequence: 0,
             content: "still sampling".to_string(),
             truncated: false,
