@@ -287,7 +287,8 @@ describe('pending interaction Timeline chronology', () => {
         {
           ...settledGuidanceMessage(true),
           id: request.assistantMessageId,
-          content: '兴趣爱好：问题已发出。',
+          // This turn only contains the Trace narration around the question, no separate answer.
+          content: '',
           agentRun: {
             ...settledGuidanceMessage(true).agentRun!,
             runId: request.runId,

@@ -121,7 +121,7 @@ impl AgentService {
             Some(conversation_id) => load_conversation_world_state(&self.storage, conversation_id)?,
             None => Vec::new(),
         };
-        let messages = match conversation.as_ref() {
+        let mut messages = match conversation.as_ref() {
             Some(conversation) => {
                 let traces = self
                     .storage
@@ -139,6 +139,10 @@ impl AgentService {
             }
             None => Vec::new(),
         };
+        if let Some(conversation_id) = conversation_id.as_deref() {
+            self.storage
+                .project_agent_messages_for_model(conversation_id, &mut messages)?;
+        }
         let prompt_preferences = match input.prompt_preferences {
             Some(preferences) => preferences,
             None => {
@@ -430,6 +434,8 @@ impl AgentService {
             context_compaction_summary.as_ref(),
             &[],
         )?;
+        self.storage
+            .project_agent_messages_for_model(conversation_id, &mut preview_input.messages)?;
         preview_input.context_compaction_summary = context_compaction_summary;
         preview_input.world_state_records =
             load_conversation_world_state(&self.storage, conversation_id)?;

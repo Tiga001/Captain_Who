@@ -48,13 +48,15 @@ last_verified: 2026-09-07
 
 `saveChatMessageState` 不修改创建时间。对已有 Trace 的助手消息，回存的 `agentRunJson.runId` 必须等于已接纳的 Run；未确认启动的本地失败/取消或其他 Run 的状态不能覆盖该消息。身份匹配后仍复用现有终态围栏，保留正常状态回存与同 Run 迟到 running checkpoint 的处理；纯本地未接纳消息不受 Run 绑定限制。Renderer 启动失败/取消也只本地展示，再通过新增接口保存尚不存在的失败 pair。
 
+成功完成的回答正文以 Host 提交的 `messages.content` 为准。终态提交、历史重建和 Renderer 终态显示都会移除 Timeline 中有 `streamId` 但没有 `traceSequence` 的临时回答流，并清空完成 Run 的 `messageStreamCheckpoints`；有 Trace 身份的过程说明完整保留，不按文字相同或前缀关系删除。迟到的 Renderer 快照不能覆盖已经完成的权威正文或复活临时流。取消、失败和等待审批不采用成功回答的流清理规则，以保留原有中断及恢复语义。
+
 ## 连续模型历史与不可变图像引用
 
 当前 Trace v6 新增 `context_material`：保存首次发送的附件说明、Skill 完整说明与 Run World State，绑定原 Trace sequence、事件身份及模型日志。跨 Run、fork 与 child snapshot 复制这份已观察历史，不重建旧 Run 的运行授权。消息删除/编辑重发仍通过现有级联与 superseded 可见性规则裁剪历史。
 
 模型日志只持久化图片的 attachment ID、MIME 与 SHA-256，不写入重复 base64。Host 在普通启动、上下文预览、压缩重建与恢复时，按同一会话可见消息归属读取附件并验证 MIME、长度和原始字节摘要；缺失、替换、跨会话或已被编辑替代的附件一律失败，不静默改用预览图。分支重绑定附件 ID 并复制原始文件，保留摘要；子快照不复制问答待办、Run 授权或用量。
 
-已压缩前缀只额外保留有不可变图片引用的材料，避免文字摘要替代原始视觉输入；不会由此复活旧助手正文或纯文字 Run 状态。checkpoint v16 和恢复信封 v13 只支持本版本恢复；Host 临时 `context_image_attachments` 字段不进入恢复信封 allowlist，图片 bytes 由 Host 重新加载并校验；既有检查点图片字段沿用原有保存策略，新增不可变引用跨重启保留。
+已压缩前缀只额外保留有不可变图片引用的材料，避免文字摘要替代原始视觉输入；不会由此复活旧助手正文或纯文字 Run 状态。checkpoint v17 和恢复信封 v13 只支持本版本恢复；Host 临时 `context_image_attachments` 字段不进入恢复信封 allowlist，图片 bytes 由 Host 重新加载并校验；既有检查点图片字段沿用原有保存策略，新增不可变引用跨重启保留。
 
 ## Conversation World State 请求日志
 

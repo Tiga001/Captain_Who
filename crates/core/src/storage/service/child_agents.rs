@@ -427,6 +427,8 @@ fn validate_spawn_input(input: &CreateChildAgentInput) -> Result<(), ChildAgentS
     validate_bounded_trimmed("parent_agent_id", &input.parent_agent_id, MAX_ID_BYTES)?;
     validate_bounded_trimmed("creation_request_id", &input.creation_request_id, 256)?;
     validate_bounded_trimmed("task_name", &input.task_name, MAX_TASK_NAME_BYTES)?;
+    crate::agent_graph::validate_child_agent_task_name(&input.task_name)
+        .map_err(map_graph_error)?;
     if input.task_name.contains('/') || input.task_name.chars().any(char::is_control) {
         return Err(invalid_spawn(
             "task_name",

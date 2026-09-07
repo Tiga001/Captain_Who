@@ -157,6 +157,20 @@ async fn assert_child_command_rejection(feedback: Option<&str>) {
         .unwrap()
         .unwrap();
     assert!(request.to_string().contains("## 子 Agent 协作身份"));
+    let resumed_model_input = request.to_string();
+    assert!(resumed_model_input.contains("审批恢复后若要汇报子 Agent 状态，必须重新查询"));
+    assert!(resumed_model_input.contains("command_rejection_child"));
+    for private_identity in [
+        root_agent_id,
+        child.agent.agent_id.as_str(),
+        child.agent.task_path.as_str(),
+        child.initial_wake.wake_id.as_str(),
+    ] {
+        assert!(
+            !resumed_model_input.contains(private_identity),
+            "approval continuation leaked private collaboration identity: {private_identity}"
+        );
+    }
     let result = request["messages"]
         .as_array()
         .unwrap()

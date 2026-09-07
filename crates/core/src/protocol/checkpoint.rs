@@ -10,6 +10,8 @@ pub struct AgentExtensionSnapshot {
 
 /// Current durable Agent run checkpoint schema.
 ///
+/// Version 17 uses semantic Agent names throughout model collaboration inputs and outputs.
+/// Internal Agent IDs remain Host-only; older model contexts and checkpoints are not compatible.
 /// Version 16 retains causal context material and immutable image identities across Run boundaries.
 /// Version 15 preserves the exact Conversation World State ledger and request-adoption markers
 /// beside its model projection, including direct Core runs without a storage Host.
@@ -28,7 +30,7 @@ pub struct AgentExtensionSnapshot {
 /// The referenced payload remains encrypted in the Host vault; raw Provider continuation and
 /// reasoning are never serialized into the checkpoint. Any other schema version is rejected at
 /// the approval boundary.
-pub const AGENT_RUN_CHECKPOINT_SCHEMA_VERSION: u32 = 16;
+pub const AGENT_RUN_CHECKPOINT_SCHEMA_VERSION: u32 = 17;
 
 /// Suspension sources are separate authority domains. A user answer never grants approval.
 #[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]

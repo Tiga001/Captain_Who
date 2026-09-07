@@ -71,6 +71,26 @@ pub(super) struct UpdateRunningConversationContextStateRequest<'a> {
 }
 
 impl AgentService {
+    pub(super) fn model_context_compaction_generator(
+        &self,
+        input: &AgentChatInput,
+    ) -> ContextCompactionSummaryGenerator {
+        let generator = AgentContextCompactionModelGenerator::from_chat_input(input);
+        let storage = Arc::clone(&self.storage);
+        Arc::new(move |mut request, cancellation| {
+            let generator = generator.clone();
+            let storage = Arc::clone(&storage);
+            Box::pin(async move {
+                request.prefix = Arc::new(
+                    storage
+                        .project_context_compaction_prefix_for_model(&request.prefix)
+                        .map_err(AgentError::new)?,
+                );
+                generator.generate(request, cancellation).await
+            })
+        })
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(super) fn trace_observer(
         &self,
@@ -161,13 +181,7 @@ impl AgentService {
         let generator: ContextCompactionSummaryGenerator = self
             .context_compaction_summary_generator
             .clone()
-            .unwrap_or_else(|| {
-                let generator = AgentContextCompactionModelGenerator::from_chat_input(&agent_input);
-                Arc::new(move |request, cancellation| {
-                    let generator = generator.clone();
-                    Box::pin(async move { generator.generate(request, cancellation).await })
-                })
-            });
+            .unwrap_or_else(|| self.model_context_compaction_generator(&agent_input));
         let run_id = run_id.to_string();
         let conversation_id = conversation_id.to_string();
         let assistant_message_id = assistant_message_id.to_string();
@@ -401,6 +415,8 @@ impl AgentService {
             summary.as_ref(),
             &[],
         )?;
+        self.storage
+            .project_agent_messages_for_model(conversation_id, &mut preview_input.messages)?;
         preview_input.context_compaction_summary = summary;
         preview_input.world_state_records =
             load_conversation_world_state(&self.storage, conversation_id)?;

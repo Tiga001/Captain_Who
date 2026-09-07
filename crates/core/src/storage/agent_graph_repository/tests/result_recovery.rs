@@ -1,6 +1,382 @@
 use super::*;
 
 #[test]
+fn result_wake_input_and_search_history_only_expose_semantic_task_identity() {
+    let mut connection = setup_tree();
+    add_grandchild(&mut connection);
+    let followup = follow_up_agent(
+        &mut connection,
+        &SendAgentMessageRequest {
+            sender_agent_id: "agent-child".to_string(),
+            recipient_agent_id: "agent-grand".to_string(),
+            request_id: "nested-result-input".to_string(),
+            content: "perform nested check".to_string(),
+        },
+        30,
+    )
+    .unwrap();
+    let wake_id = followup.deferred_wake.unwrap().wake_id;
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .unwrap();
+    project_agent_wake_source_in_transaction(&transaction, &wake_id, "nested-project", 31).unwrap();
+    transaction.commit().unwrap();
+    claim_next_agent_wake(&mut connection, "agent-grand", "nested-claim", 32)
+        .unwrap()
+        .unwrap();
+    let settled = finish_agent_turn_with_result(
+        &mut connection,
+        &FinishAgentTurnResultInput {
+            wake_id: wake_id.clone(),
+            expected_status: AgentWakeStatus::Claimed,
+            claim_token: "nested-claim".to_string(),
+            terminal_status: AgentWakeStatus::Failed,
+            run_id: None,
+            assistant_message_id: None,
+            summary: "Nested result evidence; preserve literal agent-user-example.".to_string(),
+            terminal_error: Some("The delegated operation was not started.".to_string()),
+        },
+        33,
+    )
+    .unwrap();
+    let parent_wake = settled.parent_wake.unwrap();
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .unwrap();
+    project_agent_wake_source_in_transaction(
+        &transaction,
+        &parent_wake.wake_id,
+        "nested-result-project",
+        34,
+    )
+    .unwrap();
+    transaction.commit().unwrap();
+    let trusted = resolve_child_wake_bundle(
+        &connection,
+        "agent-child",
+        &parent_wake.wake_id,
+        &settled.result_message.message_id,
+    )
+    .unwrap();
+    assert_eq!(
+        trusted.collaboration_identity.source_kind,
+        AgentMailboxKind::Result
+    );
+    let entrusted = &trusted.collaboration_identity.entrusted_task;
+    let projected_content: String = connection
+        .query_row(
+            "SELECT content FROM messages WHERE id = ?1",
+            [&settled.result_message.projection_message_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(&projected_content, entrusted);
+    assert!(entrusted.contains("agent-grand"));
+    let model_content = crate::storage::agent_message_model_projection::project_message(
+        &connection,
+        "conversation-child",
+        &settled.result_message.projection_message_id,
+    )
+    .unwrap()
+    .unwrap();
+    let wrapper: serde_json::Value = serde_json::from_str(&model_content).unwrap();
+    assert_eq!(wrapper["type"], "agent_collaboration_input");
+    assert_eq!(wrapper["senderTaskName"], "details");
+    let payload: serde_json::Value =
+        serde_json::from_str(wrapper["payload"].as_str().unwrap()).unwrap();
+    assert_eq!(payload["taskName"], "details");
+    assert_eq!(payload["status"], "failed");
+    assert!(payload["summary"]
+        .as_str()
+        .unwrap()
+        .contains("agent-user-example"));
+    for hidden in [
+        "agent-grand",
+        "agent-child",
+        "/root/review/details",
+        &wake_id,
+    ] {
+        assert!(
+            !model_content.contains(hidden),
+            "result Wake input leaked {hidden}"
+        );
+    }
+
+    let raw_message = get_agent_message(&connection, &settled.result_message.message_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(raw_message.content, settled.result_message.content);
+    assert!(raw_message.content.contains("agent-grand"));
+    let mut history = crate::storage::conversation_history_repository::read_record(
+        &connection,
+        "conversation-child",
+        &crate::storage::conversation_history_repository::ConversationHistoryRecordRef::Message {
+            message_id: settled.result_message.projection_message_id.clone(),
+        },
+    )
+    .unwrap()
+    .unwrap();
+    assert!(history.serialized_json.contains("agent-grand"));
+    crate::storage::agent_message_model_projection::project_history_record(
+        &connection,
+        "conversation-child",
+        &mut history,
+    )
+    .unwrap();
+    assert!(!history.serialized_json.contains("agent-grand"));
+    let filter = crate::storage::conversation_history_repository::ConversationHistorySearchFilter {
+        include_messages: true,
+        ..Default::default()
+    };
+    let mut hits = crate::storage::conversation_history_repository::search_records(
+        &connection,
+        "conversation-child",
+        "Nested result evidence",
+        &filter,
+        8,
+    )
+    .unwrap();
+    assert_eq!(hits.len(), 1);
+    for hit in &mut hits {
+        crate::storage::agent_message_model_projection::project_history_preview(
+            &connection,
+            "conversation-child",
+            &hit.reference,
+            &mut hit.preview,
+            &mut hit.preview_truncated,
+        )
+        .unwrap();
+    }
+    assert!(!serde_json::to_string(&hits)
+        .unwrap()
+        .contains("agent-grand"));
+    let mut private_matches = crate::storage::conversation_history_repository::search_records(
+        &connection,
+        "conversation-child",
+        "agent-grand",
+        &filter,
+        8,
+    )
+    .unwrap();
+    assert_eq!(private_matches.len(), 1);
+    for hit in &mut private_matches {
+        crate::storage::agent_message_model_projection::project_history_preview(
+            &connection,
+            "conversation-child",
+            &hit.reference,
+            &mut hit.preview,
+            &mut hit.preview_truncated,
+        )
+        .unwrap();
+    }
+    assert!(!serde_json::to_string(&private_matches)
+        .unwrap()
+        .contains("agent-grand"));
+
+    // Detached snapshots do not need a surviving source node/Mailbox. Their frozen Host receipt
+    // and typed sender binding are sufficient; ordinary message-shaped JSON is never converted.
+    assert_eq!(
+        crate::storage::agent_message_model_projection::project_snapshot_result(
+            "agent-grand",
+            &settled.result_message.message_id,
+            &projected_content,
+        )
+        .unwrap()
+        .unwrap(),
+        model_content,
+    );
+    assert!(
+        crate::storage::agent_message_model_projection::project_snapshot_result(
+            "agent-grand",
+            "mailbox-ordinary-message",
+            &projected_content,
+        )
+        .unwrap()
+        .is_none()
+    );
+    assert!(
+        crate::storage::agent_message_model_projection::project_snapshot_result(
+            "wrong-sender",
+            &settled.result_message.message_id,
+            &projected_content,
+        )
+        .is_err()
+    );
+
+    connection.execute(
+        "INSERT INTO messages (id, conversation_id, role, content, status, created_at, position)
+         VALUES ('snapshot-source-assistant', 'conversation-child', 'assistant', 'Result received', 'sent', 35, 1)",
+        [],
+    ).unwrap();
+    crate::storage::conversation_trace_repository::replace_trace(
+        &mut connection,
+        &crate::completed_conversation_trace_without_items(
+            "snapshot-source-run",
+            "conversation-child",
+            "snapshot-source-assistant",
+        ),
+        35,
+        35,
+    )
+    .unwrap();
+    insert_conversation(&connection, "conversation-snapshot", Some("project-a"));
+    create_agent_node(
+        &mut connection,
+        &child_input(
+            "agent-snapshot",
+            "agent-root",
+            "agent-child",
+            "conversation-snapshot",
+            "snapshot-review",
+            "/root/review/snapshot-review",
+        ),
+        36,
+    )
+    .unwrap();
+    let plan =
+        crate::storage::child_context_snapshot_repository::build_child_context_snapshot_plan(
+            &connection,
+            "conversation-child",
+            "conversation-snapshot",
+            &crate::AgentForkTurns::All,
+            37,
+        )
+        .unwrap();
+    crate::storage::child_context_snapshot_repository::apply_child_context_snapshot_in_transaction(
+        &connection,
+        &plan,
+    )
+    .unwrap();
+    let snapshot_message_id: String = connection.query_row(
+        "SELECT id FROM messages WHERE conversation_id = 'conversation-snapshot' AND role = 'user'",
+        [], |row| row.get(0),
+    ).unwrap();
+    assert_eq!(
+        crate::storage::agent_message_model_projection::project_message(
+            &connection,
+            "conversation-snapshot",
+            &snapshot_message_id,
+        )
+        .unwrap()
+        .unwrap(),
+        model_content,
+    );
+
+    let fixture = tempfile::tempdir().unwrap();
+    let database_path = fixture.path().join("result-model-views.sqlite");
+    connection
+        .execute("VACUUM INTO ?1", [database_path.to_str().unwrap()])
+        .unwrap();
+    let storage = crate::storage::service::StorageService::open(&database_path).unwrap();
+    for (conversation_id, message_id) in [
+        (
+            "conversation-child",
+            settled.result_message.projection_message_id.as_str(),
+        ),
+        ("conversation-snapshot", snapshot_message_id.as_str()),
+    ] {
+        let mut messages = vec![crate::AgentChatMessage {
+            conversation_completion_covered: false,
+            message_id: Some(message_id.to_string()),
+            role: "user".to_string(),
+            content: projected_content.clone(),
+            created_at: Some(34),
+            conversation_turn_trace: None,
+            conversation_model_context_items: Vec::new(),
+        }];
+        storage
+            .project_agent_messages_for_model(conversation_id, &mut messages)
+            .unwrap();
+        assert_eq!(messages[0].content, model_content);
+        storage
+            .project_agent_messages_for_model(conversation_id, &mut messages)
+            .unwrap();
+        assert_eq!(
+            messages[0].content, model_content,
+            "a repeated projection must not add a second wrapper"
+        );
+
+        let cursor = crate::ContextJournalCursor::Message {
+            message_id: message_id.to_string(),
+        };
+        let prefix = crate::ContextCompactionPrefix {
+            conversation_id: conversation_id.to_string(),
+            source_revision: "canonical-raw-prefix-revision".to_string(),
+            covered_through: cursor.clone(),
+            previous_summary: None,
+            source_items: vec![crate::ContextCompactionSourceItem::Message {
+                cursor,
+                role: "user".to_string(),
+                content: projected_content.clone(),
+                created_at: 34,
+                status: Some("sent".to_string()),
+                terminal_status: None,
+                terminal_error: None,
+            }],
+        };
+        let canonical = serde_json::to_string(&prefix).unwrap();
+        let model_prefix = storage
+            .project_context_compaction_prefix_for_model(&prefix)
+            .unwrap();
+        assert_eq!(model_prefix.source_revision, prefix.source_revision);
+        assert_eq!(model_prefix.covered_through, prefix.covered_through);
+        assert!(!serde_json::to_string(&model_prefix)
+            .unwrap()
+            .contains("agent-grand"));
+        assert_eq!(serde_json::to_string(&prefix).unwrap(), canonical);
+
+        let reference = crate::storage::conversation_history_repository::ConversationHistoryRecordRef::Message {
+            message_id: message_id.to_string(),
+        };
+        let record = storage
+            .read_conversation_history_record(conversation_id, &reference)
+            .unwrap()
+            .unwrap();
+        assert!(!record.serialized_json.contains("agent-grand"));
+        let hits = storage
+            .search_conversation_history(conversation_id, "agent-grand", &filter, 8)
+            .unwrap();
+        assert!(!hits.is_empty());
+        assert!(!serde_json::to_string(&hits)
+            .unwrap()
+            .contains("agent-grand"));
+        let around = storage
+            .conversation_history_around(conversation_id, &reference, 1, 1)
+            .unwrap()
+            .unwrap();
+        assert!(!serde_json::to_string(&around)
+            .unwrap()
+            .contains("agent-grand"));
+        let range = storage
+            .conversation_history_range(conversation_id, &reference, &reference, 8)
+            .unwrap()
+            .unwrap();
+        assert!(!serde_json::to_string(&range)
+            .unwrap()
+            .contains("agent-grand"));
+        let mut history = storage.load_conversation(conversation_id).unwrap().unwrap();
+        assert!(history
+            .messages
+            .iter()
+            .any(|message| message.content.contains("agent-grand")));
+        storage
+            .project_history_conversation_for_model(&mut history)
+            .unwrap();
+        assert!(history
+            .messages
+            .iter()
+            .all(|message| !message.content.contains("agent-grand")));
+        assert!(storage
+            .load_conversation(conversation_id)
+            .unwrap()
+            .unwrap()
+            .messages
+            .iter()
+            .any(|message| message.content.contains("agent-grand")));
+    }
+}
+
+#[test]
 fn child_result_is_frozen_direct_parent_outbox_and_root_is_not_auto_woken() {
     let mut connection = setup_tree();
     add_grandchild(&mut connection);

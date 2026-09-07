@@ -224,6 +224,21 @@ impl CollaborationAuthorizer {
         Ok((caller, target))
     }
 
+    /// Model addressing is an exact task name within the caller's durable root tree. Names and
+    /// node identities are immutable; the resolved ID still passes the ordinary operation
+    /// authorization and transactional scheduling checks before any effect is committed.
+    pub(crate) fn resolve_task_name(
+        &self,
+        caller_agent_id: &str,
+        task_name: &str,
+    ) -> Result<Option<AgentNodeRecord>, CollaborationAuthorizationError> {
+        let caller = self.required_active_caller(caller_agent_id)?;
+        Ok(self
+            .tree_for(&caller)?
+            .into_iter()
+            .find(|node| node.task_name == task_name))
+    }
+
     /// Authorizes a root-card decision without trusting any source identity carried by the UI.
     pub(crate) fn authorize_root_projection(
         &self,
@@ -439,6 +454,76 @@ mod tests {
             })
             .unwrap()
             .agent
+    }
+
+    #[test]
+    fn task_name_resolution_is_exact_tree_scoped_and_never_falls_back_to_ids_or_paths() {
+        let directory = tempfile::tempdir().unwrap();
+        let storage = Arc::new(
+            StorageService::open(&directory.path().join("name-resolution.sqlite")).unwrap(),
+        );
+        storage.save_model_settings(model_settings()).unwrap();
+        save_root(&storage, "project-a", "root-a", "conversation-root-a");
+        save_root(&storage, "project-b", "root-b", "conversation-root-b");
+        let child = spawn(&storage, "root-a", "Review");
+        let other = spawn(&storage, "root-b", "Review");
+        let wildcard = spawn(&storage, "root-a", "review_%");
+        let authorizer = CollaborationAuthorizer::new(Arc::clone(&storage));
+        assert_eq!(
+            authorizer
+                .resolve_task_name("root-a", "Review")
+                .unwrap()
+                .unwrap()
+                .agent_id,
+            child.agent_id
+        );
+        assert_eq!(
+            authorizer
+                .resolve_task_name("root-b", "Review")
+                .unwrap()
+                .unwrap()
+                .agent_id,
+            other.agent_id
+        );
+        assert_eq!(
+            authorizer
+                .resolve_task_name("root-a", "review_%")
+                .unwrap()
+                .unwrap()
+                .agent_id,
+            wildcard.agent_id
+        );
+        for target in [
+            &child.agent_id,
+            &child.task_path,
+            &other.agent_id,
+            "review",
+            " Review",
+            "Review ",
+            "Rev",
+            "%",
+        ] {
+            assert!(
+                authorizer
+                    .resolve_task_name("root-a", target)
+                    .unwrap()
+                    .is_none(),
+                "unexpected alias resolution for {target}"
+            );
+        }
+        assert!(authorizer
+            .resolve_task_name("unavailable-caller", "Review")
+            .is_err());
+        assert!(
+            authorizer
+                .authorize_management(
+                    &child.agent_id,
+                    &wildcard.agent_id,
+                    AgentManagementOperation::Wait
+                )
+                .is_err(),
+            "name resolution must not broaden descendant authority"
+        );
     }
 
     #[test]

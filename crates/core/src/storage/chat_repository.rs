@@ -2,7 +2,7 @@ mod agent_run_projection;
 
 pub(crate) use agent_run_projection::{
     canonical_agent_run_lifecycle_projection, current_agent_run_projection_is_safe,
-    current_agent_run_projection_is_safe_for_trace_rebuild,
+    current_agent_run_projection_is_safe_for_trace_rebuild, settle_completed_message_streams,
 };
 #[cfg(test)]
 use agent_run_projection::{
@@ -1447,12 +1447,17 @@ pub fn update_message_state(
         let incoming_reopens_run = incoming_run_status
             .as_deref()
             .is_some_and(is_live_run_status);
-        if incoming_reopens_run || message.status.as_deref() == Some("pending") {
+        if incoming_reopens_run
+            || message.status.as_deref() == Some("pending")
+            || (terminal.trace_backed && terminal.status == "completed")
+        {
             let next_status = Some(message_status_for_terminal_run(&terminal.status).to_string());
+            // The Host commits the complete answer together with its terminal Trace. A late
+            // Renderer checkpoint remains a presentation update even if it says "completed".
             let next_content = content_for_terminal_write(
                 &existing_content,
                 &message.content,
-                incoming_reopens_run,
+                incoming_reopens_run || (terminal.trace_backed && terminal.status == "completed"),
             );
             let base_json = if incoming_reopens_run {
                 existing_run_json
@@ -1686,6 +1691,7 @@ struct DurableTerminalRun {
     run_id: String,
     status: String,
     completed_at: i64,
+    trace_backed: bool,
 }
 
 fn is_terminal_run_status(status: &str) -> bool {
@@ -1720,9 +1726,9 @@ fn run_status_from_json(raw: Option<&str>) -> Option<String> {
 fn content_for_terminal_write(
     existing_content: &str,
     incoming_content: &str,
-    incoming_reopens_run: bool,
+    preserve_committed_content: bool,
 ) -> String {
-    if incoming_reopens_run {
+    if preserve_committed_content {
         return existing_content.to_string();
     }
     incoming_content.to_string()
@@ -1771,6 +1777,7 @@ fn durable_terminal_run(
                 run_id,
                 status: terminal_status,
                 completed_at: completed_at.unwrap_or_else(now_ms),
+                trace_backed: true,
             }));
         }
     }
@@ -1800,6 +1807,7 @@ fn durable_terminal_run(
             .get("completedAt")
             .and_then(serde_json::Value::as_i64)
             .unwrap_or_else(now_ms),
+        trace_backed: false,
     }))
 }
 
@@ -1829,6 +1837,7 @@ fn overlay_loaded_message_with_terminal_trace(
         run_id,
         status: trace_status,
         completed_at: trace_completed_at.unwrap_or(created_at),
+        trace_backed: true,
     };
     let next_status = Some(message_status_for_terminal_run(&terminal.status).to_string());
     let next_json = stamp_terminal_agent_run_json(agent_run_json.as_deref(), &terminal, created_at)

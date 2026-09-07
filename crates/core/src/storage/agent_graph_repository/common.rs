@@ -115,7 +115,7 @@ pub(super) fn decode_bool(value: i64, label: &str) -> Result<bool, AgentGraphErr
     }
 }
 
-pub(super) fn stable_fact_id(prefix: &str, parts: &[&str]) -> String {
+pub(crate) fn stable_fact_id(prefix: &str, parts: &[&str]) -> String {
     let mut digest = Sha256::new();
     for part in parts {
         digest.update((part.len() as u64).to_be_bytes());

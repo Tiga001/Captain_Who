@@ -601,6 +601,13 @@ fn project_guidance_timeline(
     }
     run.entry("messageStreamCheckpoints".to_string())
         .or_insert_with(|| serde_json::json!({}));
+    if trace.is_some_and(|trace| {
+        trace.terminal_status == crate::ConversationTurnTraceTerminalStatus::Completed
+    }) {
+        // A stale Renderer checkpoint can predate the terminal commit. The durable narration
+        // above has already been rebuilt; never append its final-answer stream as a second body.
+        chat_repository::settle_completed_message_streams(&mut run);
+    }
     if !run.contains_key("status") {
         let status = trace
             .map(|trace| match trace.terminal_status {

@@ -282,6 +282,9 @@ export function getAssistantFinalContent(message: ChatMessage) {
   // the live delta accumulator in `content`; never reinterpret it (or timeline narration) as a
   // final answer after the user stopped the run.
   if (message.agentRun?.status === 'cancelled') return ''
+  // Completion commits even an empty final answer. Never promote earlier Trace narration into
+  // an answer when the Host deliberately completed without one.
+  if (message.agentRun?.status === 'completed') return message.content
 
   const timelineContent = getLastMessageTimelineContent(message.agentRun?.timeline ?? [])
   // The durable assistant message is the canonical final answer. Timeline messages are execution

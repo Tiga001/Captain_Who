@@ -103,7 +103,7 @@ fn wait_call() -> AgentToolCall {
     AgentToolCall {
         id: "wait-call".to_string(),
         tool: "wait_agent".to_string(),
-        args: json!({ "targets": ["agent-child"], "timeout_ms": 30_000 }),
+        args: json!({ "targets": ["research"], "timeout_ms": 30_000 }),
         approval_status: AgentApprovalStatus::NotRequired,
         reason: None,
     }
@@ -116,25 +116,15 @@ fn wait_result(payload: &str) -> AgentToolResult {
         tool: "wait_agent".to_string(),
         ok: true,
         result: Some(json!({
-            "receiptId": "receipt-wait",
-            "sourceReceiptId": null,
             "targets": [{
-                "targetAgentId": "agent-child",
+                "taskName": "research",
+                "status": "latest_completed",
                 "messages": [{
-                    "messageId": "message-child-result",
-                    "senderAgentId": "agent-child",
                     "senderTaskName": "research",
-                    "senderTaskPath": "/root/research",
-                    "kind": "result",
+                    "kind": "message",
                     "content": payload,
-                    "mailboxSequence": 1,
                     "createdAt": 1
-                }],
-                "targetStatusVersion": 1,
-                "latestWakeSequence": 1,
-                "latestWakeStatusRevision": 1,
-                "latestWakeStatus": "completed",
-                "displayStatus": "idle"
+                }]
             }]
         })),
         error: None,

@@ -27,7 +27,7 @@ async fn assert_precommitted_wait_survives_terminal_settlement(outcome: AfterPre
                             return;
                         }
                         let results = tool_results(&request);
-                        if results.iter().any(|result| result["receiptId"].is_string()) {
+                        if results.iter().any(|result| result["targets"].is_array()) {
                             sample_sender.send(()).unwrap();
                             release.notified().await;
                             if matches!(outcome, AfterPrecommittedWait::Fail) {
@@ -38,7 +38,7 @@ async fn assert_precommitted_wait_survives_terminal_settlement(outcome: AfterPre
                                 ).as_bytes()).await.unwrap();
                             }
                         } else if let Some(child) = results.iter()
-                            .find_map(|result| result["childAgentId"].as_str())
+                            .find_map(|result| result["taskName"].as_str())
                         {
                             write_tool_call(&mut stream, "wait-child", "wait_agent", json!({
                                 "targets": [child], "timeout_ms": 5_000,
@@ -113,7 +113,7 @@ async fn assert_precommitted_wait_survives_terminal_settlement(outcome: AfterPre
         .unwrap();
     assert!(matches!(durable_before.items.last(), Some(
         ConversationTurnTraceItem::ToolResult { tool, success: true, observation, .. }
-    ) if tool == "wait_agent" && observation["receiptId"].is_string()));
+    ) if tool == "wait_agent" && observation["targets"].is_array()));
     let model_before = storage
         .get_conversation_model_context_log(ASSISTANT)
         .unwrap()

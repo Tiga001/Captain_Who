@@ -308,6 +308,7 @@ pub(crate) fn insert_forked_agent_node_in_transaction(
     validate_id("conversation_id", &record.conversation_id)?;
     validate_request_id(&record.creation_request_id)?;
     validate_identity_task_name(&record.task_name)?;
+    crate::agent_graph::validate_child_agent_task_name(&record.task_name)?;
     validate_time(record.created_at)?;
     validate_time(record.updated_at)?;
     if record.revision == 0 || record.updated_at < record.created_at {
@@ -822,6 +823,7 @@ pub(super) fn validate_create_node(
     validate_request_id(&input.creation_request_id)?;
     validate_identity_task_name(&input.task_name)?;
     validate_trimmed("task_path", &input.task_path, MAX_TASK_PATH_BYTES)?;
+    crate::agent_graph::validate_child_agent_task_name(&input.task_name)?;
     validate_model_snapshot(&input.model_snapshot)?;
     if let Some(template) = &input.template_snapshot {
         validate_template_fields(template)?;

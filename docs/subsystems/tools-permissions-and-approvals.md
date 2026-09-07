@@ -2,7 +2,7 @@
 status: current
 audience: developers
 owner: engineering
-last_verified: 2026-09-06
+last_verified: 2026-09-07
 ---
 
 # Tool 体系、权限与审批
@@ -93,6 +93,10 @@ Automation 的 `permissionModeVersion` 当前为 2。Core Server 在创建/更�
 
 未来 Run 使用冻结权限，当前用户偏好只作为撤销上限，绝不能重新解析出更宽权限。Full/Custom 会在 scheduler precheck 和 HumanRoot `BEGIN IMMEDIATE` admission 事务中再次检查；若权限在两个检查之间被关闭，Task 与未 admission Run 在该事务内变为 blocked/failed，Conversation、message 和 Trace 不会写入。重新开启偏好不会自动修复已 blocked Task，用户必须提交一次有效更新。
 
+## 协作目标授权
+
+六个协作工具只向模型提供任务名称。`spawn_agent` 指定树内唯一且不可变的 `task_name`，后续 `target`/`targets` 精确复制返回的 `taskName`；不接受内部 Agent ID、路径或别名。Host 先在可信 caller 的当前树内解析名称，再按内部 ID 校验调用者和目标的生命周期、同树关系以及 follow-up/wait/interrupt 的严格后代边界。模型提示、工具回执、Mailbox、wait 和历史读取的模型投影都不能把 Host Agent ID 重新变成第二套寻址接口；Renderer 和持久授权记录仍使用原内部身份。
+
 ## 文件与 URI 授权
 
 模型路径先进入 `file_input`/filesystem router：
@@ -139,6 +143,8 @@ model ToolCall
 FileChange 还允许用户对 create/update 选择“本 Run 剩余 `apply_patch`”。该选择先持久化无 authority 的 pending intent，只有当前 FileChange 以匹配 receipt 成功结算后才激活 Run grant；grant 只覆盖同 Run、同冻结权限/Toolset/Provider revision、同 workspace 或精确 external parent 下的后续 create/update，永不覆盖 delete。每次 effect boundary 都重新加载 durable grant；终态、取消、恢复身份不匹配或目录 identity 变化时撤销或 fail closed。详见 [FileChange 子系统](./file-change.md#4-审批与-run-grant)。
 
 ### Renderer 审批区域
+
+UI 的子 Agent 状态投影独立于模型采样。主 Agent 等待审批时模型暂停，不能查询子 Agent；恢复后如需说明子 Agent 的当前状态，主、子 Agent 共享的提示词都要求先成功调用一次 `list_agents`。查询失败须明确尚未确认；等待任务推进使用 `wait_agent`，不轮询 list。运行终态也不能单独证明委派任务已成功完成。
 
 根对话将主 Agent 与子 Agent 的待审批统一显示在输入框位置，每次只展示一张现有审批卡片。多条待审批时，卡片上方的来源行左侧显示当前 Agent 名称和子 Agent 头像，右侧通过箭头和当前位置/总数切换。主 Agent 不显示头像；只剩一条子 Agent 审批时仍保留来源行、`1 / 1` 和禁用的切换箭头，只剩一条主 Agent 审批时隐藏来源行。
 

@@ -17,6 +17,8 @@ mod wake_records;
 mod wake_resolution;
 mod wakes;
 
+pub(crate) use common::stable_fact_id;
+
 pub use mailbox::{
     acknowledge_agent_message_with_projection, acknowledge_agent_task_with_projection_and_wake,
     claim_next_agent_message, conversation_message_origin, conversation_message_origins,

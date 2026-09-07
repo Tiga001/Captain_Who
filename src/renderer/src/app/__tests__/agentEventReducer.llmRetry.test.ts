@@ -371,6 +371,83 @@ describe('LLM retry Renderer projection', () => {
       content: '升级完成。'
     })
     expect(completed.content).toBe('升级完成。')
+    expect(completed.agentRun?.messageStreamCheckpoints).toEqual({})
+    expect(
+      completed.agentRun?.timeline
+        .filter((item) => item.type === 'message')
+        .map((item) => item.content)
+    ).toEqual(['先读取现有文件。', '现在开始实质性升级。'])
+  })
+
+  it.each([false, true])(
+    'settles an incomplete final stream without replacing identical committed narration (stream committed: %s)',
+    (streamCommitted) => {
+      const content = '三个子智能体正在等待审批。你那边审批一下，我继续等。'
+      const initial = runningMessage()
+      initial.agentRun!.timeline = [
+        {
+          id: 'trace-message-0',
+          type: 'message',
+          content,
+          streamId: 'narration-stream',
+          traceSequence: 0
+        }
+      ]
+      let streaming = applyAgentEventToChatMessage(initial, {
+        type: 'message_stream_started',
+        runId: 'run-retry',
+        streamId: 'final-stream',
+        attempt: 1
+      })
+      streaming = applyAgentEventToChatMessage(streaming, {
+        type: 'message_delta',
+        runId: 'run-retry',
+        streamId: 'final-stream',
+        delta: '三个子智能体正在等待审批。你'
+      })
+      if (streamCommitted) {
+        streaming = applyAgentEventToChatMessage(streaming, {
+          type: 'message_stream_committed',
+          runId: 'run-retry',
+          streamId: 'final-stream',
+          traceSequence: null
+        })
+      }
+      const completed = applyAgentEventToChatMessage(streaming, {
+        type: 'done',
+        runId: 'run-retry',
+        success: true,
+        status: 'completed',
+        content
+      })
+      expect(completed.content).toBe(content)
+      expect(completed.agentRun?.timeline).toEqual(initial.agentRun?.timeline)
+      expect(completed.agentRun?.messageStreamCheckpoints).toEqual({})
+
+      const lateDelta = applyAgentEventToChatMessage(completed, {
+        type: 'message_delta',
+        runId: 'run-retry',
+        streamId: 'final-stream',
+        delta: '那边审批一下，我继续等。'
+      })
+      expect(lateDelta).toBe(completed)
+    }
+  )
+
+  it('does not overwrite the last committed narration when a completed response has no stream events', () => {
+    const initial = runningMessage()
+    initial.agentRun!.timeline = [
+      { id: 'trace-message-0', type: 'message', content: '正在检查。', traceSequence: 0 }
+    ]
+    const completed = applyAgentEventToChatMessage(initial, {
+      type: 'done',
+      runId: 'run-retry',
+      success: true,
+      status: 'completed',
+      content: '检查结束。'
+    })
+    expect(completed.content).toBe('检查结束。')
+    expect(completed.agentRun?.timeline).toEqual(initial.agentRun?.timeline)
   })
 
   it('does not let a late retry resurrect a terminal run', () => {

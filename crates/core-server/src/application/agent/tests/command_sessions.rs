@@ -3446,6 +3446,7 @@ fn cross_domain_ready() -> AgentWaitReadySnapshot {
         source_receipt_id: None,
         targets: vec![AgentWaitTargetSnapshot {
             target_agent_id: "target".into(),
+            target_task_name: "review".into(),
             messages: Vec::new(),
             target_status_version: 2,
             latest_wake_sequence: Some(1),

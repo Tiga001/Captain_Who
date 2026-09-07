@@ -550,14 +550,7 @@ impl AgentService {
         let generator = self
             .context_compaction_summary_generator
             .clone()
-            .unwrap_or_else(|| {
-                let generator =
-                    AgentContextCompactionModelGenerator::from_chat_input(&target.generator_input);
-                Arc::new(move |request, cancellation| {
-                    let generator = generator.clone();
-                    Box::pin(async move { generator.generate(request, cancellation).await })
-                })
-            });
+            .unwrap_or_else(|| self.model_context_compaction_generator(&target.generator_input));
         let generated = match generator(request, cancellation.clone()).await {
             Ok(generated) => generated,
             Err(error) => {

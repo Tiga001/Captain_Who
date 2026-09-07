@@ -16,7 +16,6 @@ use crate::storage::{
     turn_diff_repository, world_state_repository,
 };
 use crate::{
-    bounded_root_agent_task_name,
     provider_continuation_store::{
         PreparedProviderContinuationClone, ProviderContinuationForkMapping,
     },
@@ -26,6 +25,7 @@ use crate::{
     ConversationMessageOrigin, ConversationModelContextItem, ConversationTurnTrace,
     EnsureRootAgentInput, ModelRequestObservation, ProviderContinuationRef, WorldStateDiff,
     WorldStateRecord, WorldStateReducer, WorldStateSectionEnvelope, WorldStateSnapshot,
+    ROOT_AGENT_TASK_NAME,
 };
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde_json::{json, Value};

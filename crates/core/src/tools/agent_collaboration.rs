@@ -10,9 +10,10 @@ use crate::{
     AgentCollaborationAction, AgentCollaborationExecutionControl,
     AgentCollaborationResultPersistence, AgentForkTurns, AgentMessageRequest, AgentSpawnRequest,
     AgentWaitRequest, ReasoningEffort, AGENT_COLLABORATION_DEFAULT_WAIT_MS,
-    AGENT_COLLABORATION_MAX_AGENT_ID_BYTES, AGENT_COLLABORATION_MAX_AGENT_TYPE_BYTES,
-    AGENT_COLLABORATION_MAX_MODEL_CONFIG_ID_BYTES, AGENT_COLLABORATION_MAX_WAIT_MS,
-    AGENT_COLLABORATION_MAX_WAIT_TARGETS,
+    AGENT_COLLABORATION_MAX_AGENT_TYPE_BYTES, AGENT_COLLABORATION_MAX_MODEL_CONFIG_ID_BYTES,
+    AGENT_COLLABORATION_MAX_TASK_NAME_BYTES, AGENT_COLLABORATION_MAX_WAIT_MS,
+    AGENT_COLLABORATION_MAX_WAIT_TARGETS, ROOT_AGENT_TASK_NAME,
+    ROOT_AGENT_TASK_NAME_RESERVED_MESSAGE,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -40,8 +41,19 @@ impl AgentCollaborationTool {
         match self.kind {
             AgentCollaborationToolKind::Spawn => {
                 let input: SpawnArgs = parse_args("spawn_agent", args)?;
+                let task_name = nonempty(
+                    "task_name",
+                    input.task_name,
+                    AGENT_COLLABORATION_MAX_TASK_NAME_BYTES,
+                )?;
+                if task_name == ROOT_AGENT_TASK_NAME {
+                    return Err(argument_error(
+                        "task_name",
+                        ROOT_AGENT_TASK_NAME_RESERVED_MESSAGE,
+                    ));
+                }
                 Ok(AgentCollaborationAction::Spawn(AgentSpawnRequest {
-                    task_name: nonempty("task_name", input.task_name, 256)?,
+                    task_name,
                     message: nonempty("message", input.message, 64 * 1024)?,
                     agent_type: optional_selector(
                         "agent_type",
@@ -71,14 +83,14 @@ impl AgentCollaborationTool {
                     return Err(argument_error(
                         "targets",
                         format!(
-                            "must contain 1..={AGENT_COLLABORATION_MAX_WAIT_TARGETS} stable agent ids"
+                            "must contain 1..={AGENT_COLLABORATION_MAX_WAIT_TARGETS} exact task names"
                         ),
                     ));
                 }
                 let mut targets = Vec::with_capacity(input.targets.len());
                 for target in input.targets {
                     let target =
-                        nonempty("targets", target, AGENT_COLLABORATION_MAX_AGENT_ID_BYTES)?;
+                        nonempty("targets", target, AGENT_COLLABORATION_MAX_TASK_NAME_BYTES)?;
                     if targets.contains(&target) {
                         return Err(argument_error("targets", "must not contain duplicates"));
                     }
@@ -94,7 +106,7 @@ impl AgentCollaborationTool {
                     ));
                 }
                 Ok(AgentCollaborationAction::Wait(AgentWaitRequest {
-                    target_agent_ids: targets,
+                    target_task_names: targets,
                     timeout_ms,
                 }))
             }
@@ -105,10 +117,10 @@ impl AgentCollaborationTool {
             AgentCollaborationToolKind::Interrupt => {
                 let input: TargetArgs = parse_args("interrupt_agent", args)?;
                 Ok(AgentCollaborationAction::Interrupt {
-                    target_agent_id: nonempty(
+                    target_task_name: nonempty(
                         "target",
                         input.target,
-                        AGENT_COLLABORATION_MAX_AGENT_ID_BYTES,
+                        AGENT_COLLABORATION_MAX_TASK_NAME_BYTES,
                     )?,
                 })
             }
@@ -125,7 +137,7 @@ impl AgentTool for AgentCollaborationTool {
                 json!({
                     "type": "object",
                     "properties": {
-                        "task_name": { "type": "string", "minLength": 1, "maxLength": 256 },
+                        "task_name": { "type": "string", "minLength": 1, "maxLength": AGENT_COLLABORATION_MAX_TASK_NAME_BYTES, "description": "Short, meaningful task name unique in the current Agent tree, such as frontend-review. 主智能体 is reserved for the root Agent and cannot name a child. Do not use a conversation title or full instructions as the name. Use this exact name to address the Agent in every later collaboration call." },
                         "message": { "type": "string", "minLength": 1, "maxLength": 65536 },
                         "agent_type": { "type": "string", "minLength": 1, "maxLength": AGENT_COLLABORATION_MAX_AGENT_TYPE_BYTES, "description": "Optional exact template machine key." },
                         "model": { "type": "string", "minLength": 1, "maxLength": AGENT_COLLABORATION_MAX_MODEL_CONFIG_ID_BYTES, "description": "Optional exact model_config_id." },
@@ -162,7 +174,7 @@ impl AgentTool for AgentCollaborationTool {
                             "type": "array",
                             "minItems": 1,
                             "maxItems": AGENT_COLLABORATION_MAX_WAIT_TARGETS,
-                            "items": { "type": "string", "minLength": 1, "maxLength": AGENT_COLLABORATION_MAX_AGENT_ID_BYTES }
+                            "items": { "type": "string", "minLength": 1, "maxLength": AGENT_COLLABORATION_MAX_TASK_NAME_BYTES, "description": "Exact taskName returned by spawn_agent or list_agents; Agent IDs and task paths are not accepted." }
                         },
                         "timeout_ms": {
                             "type": "integer",
@@ -186,7 +198,7 @@ impl AgentTool for AgentCollaborationTool {
                 json!({
                     "type": "object",
                     "properties": {
-                        "target": { "type": "string", "minLength": 1, "maxLength": AGENT_COLLABORATION_MAX_AGENT_ID_BYTES }
+                        "target": { "type": "string", "minLength": 1, "maxLength": AGENT_COLLABORATION_MAX_TASK_NAME_BYTES, "description": "Exact taskName returned by spawn_agent or list_agents; Agent IDs and task paths are not accepted." }
                     },
                     "required": ["target"],
                     "additionalProperties": false
@@ -280,7 +292,7 @@ fn message_schema() -> Value {
     json!({
         "type": "object",
         "properties": {
-            "target": { "type": "string", "minLength": 1, "maxLength": AGENT_COLLABORATION_MAX_AGENT_ID_BYTES },
+            "target": { "type": "string", "minLength": 1, "maxLength": AGENT_COLLABORATION_MAX_TASK_NAME_BYTES, "description": "Exact taskName returned by spawn_agent or list_agents; Agent IDs and task paths are not accepted." },
             "message": { "type": "string", "minLength": 1, "maxLength": 65536 }
         },
         "required": ["target", "message"],
@@ -291,10 +303,10 @@ fn message_schema() -> Value {
 fn parse_message_args(tool: &str, args: Value) -> AgentResult<AgentMessageRequest> {
     let input: MessageArgs = parse_args(tool, args)?;
     Ok(AgentMessageRequest {
-        target_agent_id: nonempty(
+        target_task_name: nonempty(
             "target",
             input.target,
-            AGENT_COLLABORATION_MAX_AGENT_ID_BYTES,
+            AGENT_COLLABORATION_MAX_TASK_NAME_BYTES,
         )?,
         message: nonempty("message", input.message, 64 * 1024)?,
     })
@@ -528,6 +540,70 @@ mod tests {
         assert!(wait
             .action(json!({"targets":["agent-a"],"timeout_ms":300001}))
             .is_err());
+    }
+
+    #[test]
+    fn spawn_rejects_the_root_reserved_name_before_host_dispatch() {
+        let spawn = AgentCollaborationTool::new(AgentCollaborationToolKind::Spawn);
+        let error = spawn
+            .action(json!({"task_name": ROOT_AGENT_TASK_NAME, "message": "Check"}))
+            .unwrap_err();
+        assert_eq!(error.code(), Some("agent.collaboration.invalid_arguments"));
+        let details = error.details().unwrap();
+        assert_eq!(details["field"], "task_name");
+        assert!(details["reason"]
+            .as_str()
+            .unwrap()
+            .contains("reserved for the root Agent"));
+        assert!(spawn
+            .action(json!({"task_name": "核心检查", "message": "Check"}))
+            .is_ok());
+    }
+
+    #[test]
+    fn target_schemas_and_actions_use_exact_task_names_with_spawn_name_limits() {
+        let name = "r".repeat(AGENT_COLLABORATION_MAX_TASK_NAME_BYTES);
+        for kind in [
+            AgentCollaborationToolKind::SendMessage,
+            AgentCollaborationToolKind::FollowupTask,
+        ] {
+            let tool = AgentCollaborationTool::new(kind);
+            let action = tool
+                .action(json!({"target": name, "message": "Continue"}))
+                .unwrap();
+            match action {
+                AgentCollaborationAction::SendMessage(request)
+                | AgentCollaborationAction::FollowupTask(request) => {
+                    assert_eq!(request.target_task_name, name)
+                }
+                _ => panic!("expected a message action"),
+            }
+            let target = tool.definition().input_schema["properties"]["target"].clone();
+            assert_eq!(target["maxLength"], AGENT_COLLABORATION_MAX_TASK_NAME_BYTES);
+            assert!(target["description"]
+                .as_str()
+                .unwrap()
+                .contains("Exact taskName"));
+            assert!(tool
+                .action(json!({"target": format!(" {name}"), "message": "Continue"}))
+                .is_err());
+        }
+        let wait = AgentCollaborationTool::new(AgentCollaborationToolKind::Wait);
+        let AgentCollaborationAction::Wait(request) = wait
+            .action(json!({"targets": [name], "timeout_ms": 0}))
+            .unwrap()
+        else {
+            panic!("expected wait action");
+        };
+        assert_eq!(request.target_task_names, vec![name.clone()]);
+        assert!(wait.action(json!({"targets": [name, name]})).is_err());
+        let interrupt = AgentCollaborationTool::new(AgentCollaborationToolKind::Interrupt);
+        assert_eq!(
+            interrupt.action(json!({"target": name})).unwrap(),
+            AgentCollaborationAction::Interrupt {
+                target_task_name: name
+            }
+        );
     }
 
     #[test]

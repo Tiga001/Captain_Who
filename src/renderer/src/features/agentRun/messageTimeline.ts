@@ -100,6 +100,14 @@ export function getFinalMessageContent(currentContent: string, finalContent?: st
 
 export function getFinalTimeline(run: ChatAgentRunView, finalContent?: string) {
   const timeline = removeTransientToolTimelineItems(run.timeline)
+  // A completed answer belongs to ChatMessage.content. Its provisional stream has no Trace
+  // sequence; committed tool-loop narration does. Use that identity rather than comparing text,
+  // since the last persisted stream can lag behind the authoritative final answer.
+  if (run.status === 'completed') {
+    return timeline.filter(
+      (item) => item.type !== 'message' || !item.streamId || item.traceSequence !== undefined
+    )
+  }
   if (finalContent === undefined) return timeline
   return appendMessageToTimeline({ ...run, timeline }, finalContent)
 }

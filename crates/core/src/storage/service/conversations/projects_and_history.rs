@@ -540,6 +540,48 @@ impl StorageService {
         chat_search_repository::search_chats(&connection, input).map_err(storage_error)
     }
 
+    pub fn project_agent_messages_for_model(
+        &self,
+        conversation_id: &str,
+        messages: &mut [crate::AgentChatMessage],
+    ) -> Result<(), String> {
+        let connection = self.state.connection()?;
+        for message in messages.iter_mut().filter(|message| message.role == "user") {
+            let Some(message_id) = message.message_id.as_deref() else {
+                continue;
+            };
+            if let Some(content) = crate::storage::agent_message_model_projection::project_message(
+                &connection,
+                conversation_id,
+                message_id,
+            )? {
+                message.content = content;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn project_history_conversation_for_model(
+        &self,
+        conversation: &mut ChatConversationRecord,
+    ) -> Result<(), String> {
+        let connection = self.state.connection()?;
+        for message in conversation
+            .messages
+            .iter_mut()
+            .filter(|message| message.role == "user")
+        {
+            if let Some(content) = crate::storage::agent_message_model_projection::project_message(
+                &connection,
+                &conversation.id,
+                &message.id,
+            )? {
+                message.content = content;
+            }
+        }
+        Ok(())
+    }
+
     pub fn search_conversation_history(
         &self,
         conversation_id: &str,
@@ -548,14 +590,24 @@ impl StorageService {
         limit: usize,
     ) -> Result<Vec<conversation_history_repository::ConversationHistorySearchHit>, String> {
         let connection = self.state.connection()?;
-        conversation_history_repository::search_records(
+        let mut hits = conversation_history_repository::search_records(
             &connection,
             conversation_id,
             query,
             filter,
             limit,
         )
-        .map_err(storage_error)
+        .map_err(storage_error)?;
+        for hit in &mut hits {
+            crate::storage::agent_message_model_projection::project_history_preview(
+                &connection,
+                conversation_id,
+                &hit.reference,
+                &mut hit.preview,
+                &mut hit.preview_truncated,
+            )?;
+        }
+        Ok(hits)
     }
 
     pub fn conversation_history_around(
@@ -569,14 +621,24 @@ impl StorageService {
         String,
     > {
         let connection = self.state.connection()?;
-        conversation_history_repository::records_around(
+        let mut records = conversation_history_repository::records_around(
             &connection,
             conversation_id,
             reference,
             before,
             after,
         )
-        .map_err(storage_error)
+        .map_err(storage_error)?;
+        for record in records.iter_mut().flatten() {
+            crate::storage::agent_message_model_projection::project_history_preview(
+                &connection,
+                conversation_id,
+                &record.reference,
+                &mut record.preview,
+                &mut record.preview_truncated,
+            )?;
+        }
+        Ok(records)
     }
 
     pub fn conversation_history_range(
@@ -590,14 +652,24 @@ impl StorageService {
         String,
     > {
         let connection = self.state.connection()?;
-        conversation_history_repository::records_in_range(
+        let mut records = conversation_history_repository::records_in_range(
             &connection,
             conversation_id,
             start,
             end,
             limit,
         )
-        .map_err(storage_error)
+        .map_err(storage_error)?;
+        for record in records.iter_mut().flatten() {
+            crate::storage::agent_message_model_projection::project_history_preview(
+                &connection,
+                conversation_id,
+                &record.reference,
+                &mut record.preview,
+                &mut record.preview_truncated,
+            )?;
+        }
+        Ok(records)
     }
 
     pub fn conversation_history_tool_exchange(
@@ -625,8 +697,17 @@ impl StorageService {
         reference: &conversation_history_repository::ConversationHistoryRecordRef,
     ) -> Result<Option<conversation_history_repository::ConversationHistoryRecord>, String> {
         let connection = self.state.connection()?;
-        conversation_history_repository::read_record(&connection, conversation_id, reference)
-            .map_err(storage_error)
+        let mut record =
+            conversation_history_repository::read_record(&connection, conversation_id, reference)
+                .map_err(storage_error)?;
+        if let Some(record) = record.as_mut() {
+            crate::storage::agent_message_model_projection::project_history_record(
+                &connection,
+                conversation_id,
+                record,
+            )?;
+        }
+        Ok(record)
     }
 
     pub fn archive_conversation_tool_result(

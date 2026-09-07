@@ -1,31 +1,77 @@
 use super::*;
 
 #[test]
-fn markdown_link_conversation_title_produces_a_valid_root_task_name() {
-    let title =
-        "使用内置浏览器打开 [http://127.0.0.1:18765/](http://127.0.0.1:18765/)，读取页面标题";
-    let task_name = crate::bounded_root_agent_task_name(title);
-
-    assert!(!task_name.contains('/'));
-    assert!(!task_name.chars().any(char::is_control));
-    assert_eq!(task_name.trim(), task_name);
-    assert!(task_name.len() <= 256);
-
+fn root_reserved_task_name_is_valid_for_a_root() {
     let mut connection = connection();
-    insert_conversation(&connection, "conversation-link-title", None);
-    let root = ensure_root_agent(
-        &mut connection,
-        &EnsureRootAgentInput {
-            agent_id: "agent-link-title".to_string(),
-            conversation_id: "conversation-link-title".to_string(),
-            creation_request_id: "ensure-link-title".to_string(),
-            task_name: task_name.clone(),
-        },
-        10,
-    )
-    .expect("a display title containing a Markdown URL should bind a root Agent");
+    insert_conversation(&connection, "conversation-root-name", None);
+    let input = EnsureRootAgentInput {
+        agent_id: "agent-root-name".to_string(),
+        conversation_id: "conversation-root-name".to_string(),
+        creation_request_id: "ensure-root-name".to_string(),
+        task_name: crate::ROOT_AGENT_TASK_NAME.to_string(),
+    };
+    let root = ensure_root_agent(&mut connection, &input, 10).unwrap();
+    assert_eq!(root.record().task_name, "主智能体");
+    assert!(matches!(
+        ensure_root_agent(&mut connection, &input, 11).unwrap(),
+        IdempotentCreate::Existing(_)
+    ));
+}
 
-    assert_eq!(root.record().task_name, task_name);
+#[test]
+fn root_reserved_task_name_is_rejected_for_children_at_every_depth_without_writes() {
+    // The fixture root has a different name: this must not depend on UNIQUE collisions.
+    let mut connection = setup_tree();
+    let original_tree = list_agent_tree(&connection, "agent-root").unwrap();
+    for (parent, path) in [
+        ("agent-root", "/root/主智能体"),
+        ("agent-child", "/root/review/主智能体"),
+    ] {
+        let input = child_input(
+            "reserved-child",
+            "agent-root",
+            parent,
+            "conversation-grand",
+            crate::ROOT_AGENT_TASK_NAME,
+            path,
+        );
+        for _ in 0..2 {
+            assert_eq!(
+                create_agent_node(&mut connection, &input, 20),
+                Err(AgentGraphError::InvalidInput {
+                    field: "task_name",
+                    reason: crate::ROOT_AGENT_TASK_NAME_RESERVED_MESSAGE.to_string(),
+                })
+            );
+            assert_eq!(
+                list_agent_tree(&connection, "agent-root").unwrap(),
+                original_tree
+            );
+        }
+    }
+
+    // The fork insertion boundary also rejects a child record before writing anything.
+    let mut forked = original_tree
+        .iter()
+        .find(|node| node.parent_agent_id.is_some())
+        .unwrap()
+        .clone();
+    forked.agent_id = "reserved-fork-child".to_string();
+    forked.conversation_id = "conversation-grand".to_string();
+    forked.creation_request_id = "reserved-fork-child-request".to_string();
+    forked.task_name = crate::ROOT_AGENT_TASK_NAME.to_string();
+    forked.task_path = "/root/主智能体".to_string();
+    assert_eq!(
+        insert_forked_agent_node_in_transaction(&connection, &forked),
+        Err(AgentGraphError::InvalidInput {
+            field: "task_name",
+            reason: crate::ROOT_AGENT_TASK_NAME_RESERVED_MESSAGE.to_string(),
+        })
+    );
+    assert_eq!(
+        list_agent_tree(&connection, "agent-root").unwrap(),
+        original_tree
+    );
 }
 
 #[test]

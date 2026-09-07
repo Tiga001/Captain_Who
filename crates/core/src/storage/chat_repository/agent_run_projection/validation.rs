@@ -741,6 +741,9 @@ pub(crate) fn canonical_agent_run_lifecycle_projection(
             serde_json::json!({}),
         );
     }
+    if run_status == "completed" {
+        settle_completed_message_streams(&mut run);
+    }
 
     let state = run
         .entry("state".to_string())
@@ -768,4 +771,33 @@ pub(crate) fn canonical_agent_run_lifecycle_projection(
 
     serde_json::to_string(&serde_json::Value::Object(run))
         .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))
+}
+
+/// A completed answer belongs to `messages.content`; an unanchored stream is only its live
+/// presentation. Committed narration is identified by Trace sequence, never by textual equality
+/// with the answer. Failed/cancelled runs do not use this settlement because partial output may
+/// still be their only useful response.
+pub(crate) fn settle_completed_message_streams(
+    run: &mut serde_json::Map<String, serde_json::Value>,
+) {
+    if let Some(timeline) = run
+        .get_mut("timeline")
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        timeline.retain(|item| {
+            !(item.get("type").and_then(serde_json::Value::as_str) == Some("message")
+                && item
+                    .get("streamId")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some()
+                && item
+                    .get("traceSequence")
+                    .and_then(serde_json::Value::as_u64)
+                    .is_none())
+        });
+    }
+    run.insert(
+        "messageStreamCheckpoints".to_string(),
+        serde_json::json!({}),
+    );
 }

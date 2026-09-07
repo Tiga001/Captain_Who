@@ -2,7 +2,7 @@
 status: current
 audience: developers/maintainers
 owner: engineering
-last_verified: 2026-09-05
+last_verified: 2026-09-07
 ---
 
 # Multi-Agent 当前架构
@@ -65,11 +65,13 @@ AgentDispatcher → 统一 Turn executor → 原 Agent Runtime/Tool
 
 ### AgentNode
 
-节点保存稳定 ID、根 Agent/父 Agent、独立 Conversation、可空 Project、树内唯一 task name/path、创建 request ID、模板/模型 snapshot、lifecycle/revision 和时间。
+节点保存稳定 ID、根 Agent/父 Agent、独立 Conversation、可空 Project、树内唯一 task name/path、创建 request ID、模板/模型 snapshot、lifecycle/revision 和时间。内部 Agent ID 只供 Host 持久化、授权和 Renderer 使用；模型的协作身份和寻址只使用精确 task name。
 
 - 根 Agent 对旧 Conversation 按需幂等物化。
+- 新建或从会话分支创建的根 Agent 使用固定协作名称 `主智能体`；普通聊天标题不参与协作寻址。`主智能体` 是保留名，工具参数与后端创建入口均拒绝任意层级的子节点使用。子任务使用简短的工作名称，避免复制带引号或截断标记的整段标题。
 - 子 Agent spawn 在同一事务创建/导入 Conversation、冻结 snapshot、AgentNode、initial task Mailbox、唯一投影/ack 和 queued Wake。
-- task path 由后端从父子关系生成；不得接受模型传入的完整路径。
+- task name 在整棵树内唯一且不可变，覆盖根、各层子节点以及已完成、停用和归档节点；重复名称不能创建新节点，应使用原名称继续已有任务。
+- task path 由后端从父子关系生成；模型输入不接受路径或内部 ID，也不提供这些字段作为协作寻址信息。
 - 模板更新只影响未来节点；模型 snapshot 冻结精确 `model_config_id` 与审计能力，不复制 Token、URL 或 Provider 凭据。
 - 模板定义属于工作区级模板库；`project_agent_template_bindings` 决定一个项目未来可以 spawn 哪些模板。删除项目或取消关联只删除授权关系，不改写已创建节点的模板 snapshot。
 - `fork_turns=none | all | N` 复制已结算的逻辑轮次；FileChange 可见 Staged history 与 terminal audit 按专用逻辑重映射，active 尾部、Usage、pending action、FileChange Run grant、Command Session、provider continuation 等不复制。
@@ -116,11 +118,19 @@ Wake 表示“需要一次执行机会”，不是线程或可无条件重试的
 | `spawn_agent`     | 创建直接子 Agent 并排队初始任务 | selector 精确匹配；`task_name` 256 bytes；message 64 KiB；`fork_turns` 明确 |
 | `send_message`    | mailbox-only 消息               | 不创建 Wake，不保证目标执行；Tool 描述用于子 Agent 向父 Agent 汇报/求助     |
 | `followup_task`   | 向严格后代分配、继续或返工      | 创建可靠执行机会，但不与目标现有 Turn 并发                                  |
-| `wait_agent`      | first-ready 等待消息/结果/状态  | 1–32 targets；默认 30 秒；0 为立即快照；最长 300 秒                         |
+| `wait_agent`      | first-ready 等待消息/结果/状态  | 1–32 个精确任务名称；默认 30 秒；0 为立即检查 ready 条件；最长 300 秒       |
 | `list_agents`     | 返回授权范围内简洁树投影        | 只读，不泄漏内部 lease/checkpoint                                           |
 | `interrupt_agent` | 中断严格后代当前任务            | 不删除节点、Conversation 或历史；回执与实际终态分离且可幂等恢复             |
 
 不存在 `wait_any` 或第七个协作工具。只有 Host 为本 Turn 注入可信协作 capability 时才整组注册六工具。
+
+`spawn_agent.task_name` 是模型为新任务指定的唯一名称，其余工具的 `target`/`targets` 只接受此名称的精确值。模型从 `spawn_agent` 或 `list_agents` 的 `taskName` 复制名称，不使用 UUID、完整路径、别名或模糊匹配。Host 在可信 caller 所属树内解析名称，再使用内部 Agent ID 执行原有权限校验；名称解析不扩大同树或严格后代的权限边界。
+
+普通工具回执使用 `taskName`，`list_agents` 额外提供 `parentTaskName`、`status`、模型显示名和最近活动时间。Mailbox 和 wait 的模型投影也只保留任务名称及必要语义；终态结果不暴露 sender/root/parent/source Agent ID、task path、Wake/Run/receipt 等内部绑定。持久记录仍保留这些身份供审计与恢复，`conversation_history` 打开 Mailbox record 时在分页前省略 Host 身份元数据，不修改自由文本或持久原文。
+
+子结果触发新 Wake、历史目录/搜索/正文、上下文重建与摘要生成，都在读取模型视图时按可信消息来源投影 typed Result。Mailbox 与其 Conversation 原文保持数据库要求的字节一致，摘要提交仍验证原始前缀 revision。历史快照使用冻结的发送者与 Host result receipt 验证结果，不依赖源树仍然存在；普通用户或 Agent 文本不按 JSON 外形或 ID 字样替换。
+
+主、子 Agent 共用状态汇报规则：向用户或父 Agent 说明子 Agent 的当前状态前，先成功调用一次 `list_agents`，紧接着的汇报以该次快照为准。创建/跟进的入队回执和旧消息不代表当前运行状态；查询失败只能说明尚未确认并标注最后已知情况。等待推进使用 `wait_agent`，不反复 list 轮询。`latest_completed` 表示最近一次运行已结束，任务是否成功还须核对结果与产物。这是模型行为契约，不是阻止 final 的调度门禁。
 
 ### Selector 目录
 
@@ -131,7 +141,7 @@ Host 给每个 Turn 冻结当前项目已关联的脱敏模板/模型目录：�
 - 默认树深度 8、每树 64 节点、Harness message 64 KiB、全局 Turn 并发 50。
 - spawn 配额在同一 `BEGIN IMMEDIATE` 内核验；幂等 request 先返回原事实，不重复占配额。
 - `send_message` 的后端授权当前只校验消息大小、调用者 active、目标存在且同树；Tool 描述约定用于子 Agent → 父 Agent 报告，但 Authorizer 尚未强制方向，甚至同树其他目标也可通过。它不是方向性授权边界；工作指派必须使用 `followup_task`。
-- follow-up、wait、interrupt 只允许 caller 的严格后代。不存在、跨树、跨项目和越权 target 对调用方统一表现为 permission denied，避免存在性探测。
+- follow-up、wait、interrupt 只允许 caller 的严格后代。名称只在 caller 当前树内解析；其他树中的同名节点不参与查找。解析后继续按内部身份校验 active、同树和后代边界，拒绝越权目标。
 - 子 Agent 新 Turn 的权限以直接父 Agent 的最新持久 effective snapshot 为基线，再与完整祖先链取交集；任一 snapshot 缺失或损坏即 fail closed。
 - 已开始 Run 冻结权限；Approval continuation 使用 checkpoint 原权限。下一次 Wake 才读取新的收紧策略。
 - 根 Agent 可交互，子 Agent 只能通过精确的根 Agent Conversation + 子 Agent Conversation observer RPC 读取。旧历史、搜索、meta、start/steer/cancel/fork/Provider transition 和 Approval 等写入口均受同一根 Agent guard。
@@ -210,6 +220,8 @@ caller 的 exact run identity 查询 fence 并 fail closed，避免停止与新�
 
 子 Agent Approval 仍使用原 `agent_pending_actions`、checkpoint 和 continuation 状态机。根 Agent UI 看到的是 JOIN 得到的投影，决定请求只提交 `root_conversation_id + approval_id + decision`；Core Server 反查 source Agent/Run/action。重复、过期或已结算决定不会启动第二次 continuation。
 
+UI 可以在主 Agent 等待审批时更新子 Agent 状态，此时主模型已暂停，不能调用 `list_agents`。审批恢复后若要汇报子 Agent 状态，必须重新查询；自动 Mailbox 投递不等于完整最新状态快照，也不把每次 UI 状态变更自动转成模型消息。
+
 Renderer 在根对话输入框位置聚合主、子 Agent 待审批，每次展示一张审批卡片。多条审批通过卡片上方右侧的箭头和位置/总数切换，左侧显示当前来源名称和子 Agent 头像；主 Agent 无头像，单条子 Agent 审批仍保留来源行、`1 / 1` 和禁用的切换箭头，单条主 Agent 审批隐藏该行。每条审批独立处理，Host 确认受理或结算后移出集合并更新总数；新请求不抢占当前选择，切换保留各条拒绝草稿和提交状态。审批全部清空后才恢复人机交互问题或普通输入框。展示聚合不合并主、子审批的权限 API，observer 对话仍为只读。
 
 当前协作 notification 名必须是：
@@ -231,6 +243,8 @@ notification 只是失效信号。Renderer 通过 tree snapshot 与 `agent.colla
 ```rust
 pub const STORAGE_SCHEMA_VERSION: i32 = 42;
 ```
+
+当前 Runtime checkpoint 为 **v17**，拒绝旧版本 checkpoint；本次模型协作身份变更不提供含旧 Agent ID 的聊天、上下文或 checkpoint 兼容转换。
 
 旧版本（含 v34/v35/v36/v37/v38/v39/v40/v41）、catalog fingerprint 不匹配、非空未版本化库或外键违规都会返回 `development_storage_schema_reset_required`，原库不做原地改写，也不迁移聊天或运行历史。历史文档中的 v7/v8/v10/v11/v17/v19/v20/v22/v23/v24/v25/v26 只是 rollout 阶段标签，不是当前兼容声明；release runner 的 storage step 已标为 canonical v42。
 

@@ -13,7 +13,6 @@ use crate::{
     PollAgentWaitInput,
 };
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
-use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashSet};
 
@@ -690,6 +689,7 @@ pub fn poll_wait_ready(
         if !messages.is_empty() || state.status_advanced {
             snapshots.push(AgentWaitTargetSnapshot {
                 target_agent_id: target.clone(),
+                target_task_name: agent_task_name(&transaction, target)?,
                 messages,
                 target_status_version: state.target_status_version,
                 latest_wake_sequence: state.latest_wake.as_ref().map(|wake| wake.sequence),
@@ -958,19 +958,9 @@ fn commit_wait_snapshot_to_model_batch(
         call_id,
         tool,
         ok: true,
-        result: Some(json!({
-            "receiptId": receipt.receipt_id,
-            "sourceReceiptId": connection
-                .query_row(
-                    "SELECT source_receipt_id
-                     FROM agent_model_batch_receipt_replays WHERE receipt_id = ?1",
-                    [&receipt.receipt_id],
-                    |row| row.get::<_, String>(0),
-                )
-                .optional()
-                .map_err(read_error)?,
-            "targets": snapshots,
-        })),
+        result: Some(
+            crate::agent_wait_model_value(snapshots).map_err(|error| corrupt(error.to_string()))?,
+        ),
         error: None,
     };
     let serialized = serde_json::to_vec(result.result.as_ref().unwrap_or(&serde_json::Value::Null))
@@ -1052,6 +1042,7 @@ fn load_open_wait_snapshot_from_previous_run(
         .iter()
         .map(|target| AgentWaitTargetSnapshot {
             target_agent_id: target.target_agent_id.clone(),
+            target_task_name: target.target_task_name.clone(),
             messages: previous_delivery
                 .messages
                 .iter()
@@ -1176,12 +1167,14 @@ fn load_wait_receipt_targets(
 ) -> Result<Vec<AgentModelBatchReceiptTargetRecord>, AgentGraphError> {
     let mut statement = connection
         .prepare(
-            "SELECT receipt_id, target_agent_id, ordinal, latest_wake_sequence,
-                    target_status_version, latest_wake_status_revision, latest_wake_status,
-                    display_status, frozen_at
-             FROM agent_model_batch_receipt_targets
-             WHERE receipt_id = ?1
-             ORDER BY ordinal ASC",
+            "SELECT target.receipt_id, target.target_agent_id, target.ordinal,
+                    target.latest_wake_sequence, target.target_status_version,
+                    target.latest_wake_status_revision, target.latest_wake_status,
+                    target.display_status, target.frozen_at, agent.task_name
+             FROM agent_model_batch_receipt_targets AS target
+             INNER JOIN agent_nodes AS agent ON agent.agent_id = target.target_agent_id
+             WHERE target.receipt_id = ?1
+             ORDER BY target.ordinal ASC",
         )
         .map_err(read_error)?;
     let rows = statement
@@ -1196,6 +1189,7 @@ fn load_wait_receipt_targets(
                 row.get::<_, Option<String>>(6)?,
                 row.get::<_, String>(7)?,
                 row.get::<_, i64>(8)?,
+                row.get::<_, String>(9)?,
             ))
         })
         .map_err(read_error)?;
@@ -1210,10 +1204,12 @@ fn load_wait_receipt_targets(
             wake_status,
             display_status,
             frozen_at,
+            target_task_name,
         ) = row.map_err(read_error)?;
         Ok(AgentModelBatchReceiptTargetRecord {
             receipt_id,
             target_agent_id,
+            target_task_name,
             ordinal: u32::try_from(ordinal)
                 .map_err(|_| corrupt("wait target ordinal is invalid"))?,
             target_status_version: positive_u64(target_status_version, "target status version")?,
@@ -1251,6 +1247,7 @@ fn wait_snapshot_from_frozen(
                     .cloned()
                     .collect(),
                 target_agent_id: target.target_agent_id,
+                target_task_name: target.target_task_name,
                 target_status_version: target.target_status_version,
                 latest_wake_sequence: target.latest_wake_sequence,
                 latest_wake_status_revision: target.latest_wake_status_revision,
@@ -1260,6 +1257,16 @@ fn wait_snapshot_from_frozen(
             .collect(),
         model_projection: AgentWaitModelProjection::PrecommittedToolResult,
     }
+}
+
+fn agent_task_name(connection: &Connection, agent_id: &str) -> Result<String, AgentGraphError> {
+    connection
+        .query_row(
+            "SELECT task_name FROM agent_nodes WHERE agent_id = ?1",
+            [agent_id],
+            |row| row.get(0),
+        )
+        .map_err(read_error)
 }
 
 fn active_turn_position(

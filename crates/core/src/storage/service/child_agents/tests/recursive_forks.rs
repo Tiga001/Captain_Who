@@ -1,6 +1,64 @@
 use super::*;
 
 #[test]
+fn forked_root_uses_the_reserved_name_independent_of_complex_titles_and_source_identity() {
+    for title in [
+        "让子智能体发送“已完成”给父亲".to_string(),
+        "长中文会话标题".repeat(80),
+        "读取 [页面](http://127.0.0.1:18765/path)\n标题".to_string(),
+    ] {
+        let fixture = Fixture::new(Some("model-a"));
+        save_settled_history(&fixture, 1, false);
+        let mut conversation = fixture
+            .service
+            .load_conversation("root-conversation")
+            .unwrap()
+            .unwrap();
+        conversation.title = title.clone();
+        fixture.service.save_conversation(conversation).unwrap();
+        let source_root = fixture
+            .service
+            .get_agent_node_by_conversation("root-conversation")
+            .unwrap()
+            .unwrap();
+        let fork = fixture
+            .service
+            .fork_conversation_request_view(ForkConversationRequest {
+                request_id: "fixed-root-name-fork".to_string(),
+                source_conversation_id: "root-conversation".to_string(),
+                fork_point: ConversationForkPoint::AssistantReply {
+                    assistant_message_id: "root-assistant-0".to_string(),
+                },
+            })
+            .unwrap();
+        let fork_root = fixture
+            .service
+            .get_agent_node_by_conversation(&fork.conversation.id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(fork_root.task_name, crate::ROOT_AGENT_TASK_NAME);
+        assert_eq!(
+            fixture
+                .service
+                .load_conversation("root-conversation")
+                .unwrap()
+                .unwrap()
+                .title,
+            title
+        );
+        assert_eq!(
+            fixture
+                .service
+                .get_agent_node_by_conversation("root-conversation")
+                .unwrap()
+                .unwrap(),
+            source_root
+        );
+        assert_ne!(fork_root.agent_id, source_root.agent_id);
+    }
+}
+
+#[test]
 fn three_level_agent_tree_fork_is_recursive_idempotent_and_independent() {
     const FIRST_FORK_REQUEST: &str = "three-level-tree-fork";
     const SECOND_FORK_REQUEST: &str = "three-level-tree-fork-recursive";
@@ -98,6 +156,7 @@ fn three_level_agent_tree_fork_is_recursive_idempotent_and_independent() {
         .get_agent_node_by_conversation(&first_fork.conversation.id)
         .unwrap()
         .expect("the first fork owns an independent root Agent");
+    assert_eq!(first_root.task_name, crate::ROOT_AGENT_TASK_NAME);
     let first_tree = tree_by_task_path(&fixture, &first_root.root_agent_id);
     assert_eq!(first_tree.len(), 3);
     assert_tree_identities_are_fresh(&fixture, &source_tree, &first_tree);

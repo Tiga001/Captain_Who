@@ -689,7 +689,7 @@ fn collaboration_receipt_can_cover_multiple_fifo_messages_with_exact_model_envel
             "agent-child",
             "Child",
             "/root/child",
-            crate::AgentMailboxKind::Result,
+            crate::AgentMailboxKind::Message,
             "second\u{0007}payload",
             2,
         )
@@ -741,6 +741,79 @@ fn collaboration_model_envelope_is_utf8_safe_deterministic_and_bounded() {
 }
 
 #[test]
+fn collaboration_result_envelope_exposes_only_authenticated_semantic_state() {
+    let result = crate::AgentTurnResultEnvelope {
+        schema_version: crate::AGENT_RESULT_ENVELOPE_SCHEMA_VERSION,
+        child_agent_id: "private-child".into(),
+        task_name: "reviewer".into(),
+        task_path: "/root/private-path".into(),
+        wake_id: "private-wake".into(),
+        turn_id: Some("private-turn".into()),
+        run_id: Some("private-run".into()),
+        status: crate::AgentWakeStatus::Completed,
+        summary: "Review finished with evidence.".into(),
+        artifact_refs: vec![crate::AgentResultArtifactReference {
+            artifact_id: "report-artifact".into(),
+            kind: crate::AgentResultArtifactKind::Document,
+            media_type: "application/pdf".into(),
+        }],
+        terminal_error: None,
+    };
+    let payload = serde_json::to_string(&result).unwrap();
+    let (projected, truncated) = project_agent_mailbox_model_envelope(
+        &result.child_agent_id,
+        &result.task_name,
+        &result.task_path,
+        crate::AgentMailboxKind::Result,
+        &payload,
+    )
+    .unwrap();
+    assert!(!truncated);
+    assert!(!projected.contains("private-"));
+    let envelope: Value = serde_json::from_str(&projected).unwrap();
+    assert_eq!(envelope["senderTaskName"], "reviewer");
+    assert!(envelope.get("senderAgentId").is_none());
+    assert!(envelope.get("senderTaskPath").is_none());
+    let model_result: Value = serde_json::from_str(envelope["payload"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        model_result,
+        json!({
+            "taskName":"reviewer", "status":"completed", "summary":result.summary,
+            "artifacts":result.artifact_refs, "terminalError":null,
+        })
+    );
+    assert!(project_agent_mailbox_model_envelope(
+        "another-private-child",
+        &result.task_name,
+        &result.task_path,
+        crate::AgentMailboxKind::Result,
+        &payload,
+    )
+    .is_err());
+    assert!(project_agent_mailbox_model_envelope(
+        &result.child_agent_id,
+        &result.task_name,
+        &result.task_path,
+        crate::AgentMailboxKind::Result,
+        "untyped legacy result",
+    )
+    .is_err());
+    let ordinary = project_agent_mailbox_model_envelope(
+        &result.child_agent_id,
+        &result.task_name,
+        &result.task_path,
+        crate::AgentMailboxKind::Message,
+        &payload,
+    )
+    .unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(&ordinary.0).unwrap()["payload"],
+        payload,
+        "ordinary message prose must not be parsed as Host-authored identity metadata"
+    );
+}
+
+#[test]
 fn large_collaboration_delivery_precommit_is_an_exact_terminal_trace_prefix() {
     let mut recorder = ConversationTraceRecorder::default();
     let model_content = recorder
@@ -751,7 +824,7 @@ fn large_collaboration_delivery_precommit_is_an_exact_terminal_trace_prefix() {
             "agent-child",
             "Child",
             "/root/child",
-            crate::AgentMailboxKind::Result,
+            crate::AgentMailboxKind::Message,
             &"evidence ".repeat(3_000),
             1,
         )

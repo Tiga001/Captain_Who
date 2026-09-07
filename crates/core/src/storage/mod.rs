@@ -3,6 +3,7 @@ pub mod agent_collaboration_event_repository;
 pub mod agent_command_session_repository;
 pub mod agent_delivery_repository;
 pub mod agent_graph_repository;
+pub(crate) mod agent_message_model_projection;
 pub mod agent_prompt_preferences_repository;
 pub mod agent_template_repository;
 pub(crate) mod agent_tree_resource_scope;

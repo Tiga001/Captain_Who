@@ -183,7 +183,11 @@ export function settleAgentRunToolActivities(
   return {
     ...runWithStatus,
     fileChangePreviews: [],
-    timeline: settlePendingContextCompactions(runWithStatus.timeline, settledActivityStatus),
+    messageStreamCheckpoints: status === 'completed' ? {} : runWithStatus.messageStreamCheckpoints,
+    timeline: settlePendingContextCompactions(
+      getFinalTimeline(runWithStatus),
+      settledActivityStatus
+    ),
     webSearchActivities: settlePendingWebSearchActivities(
       runWithStatus,
       settledActivityStatus,
@@ -986,7 +990,7 @@ export function applyAgentEventToChatMessage(
   const mcpProjection = addMcpApprovalViews(
     {
       ...currentRun,
-      timeline: getFinalTimeline(currentRun, terminalEventContent)
+      timeline: getFinalTimeline({ ...currentRun, status: nextStatus }, terminalEventContent)
     },
     proposedActions
   )
@@ -1055,7 +1059,7 @@ function applyAgentOutputToChatMessage(message: ChatMessage, output: AgentChatOu
   const mcpProjection = addMcpApprovalViews(
     {
       ...currentRun,
-      timeline: getFinalTimeline(currentRun, outputFinalContent)
+      timeline: getFinalTimeline({ ...currentRun, status: output.status }, outputFinalContent)
     },
     output.proposedActions
   )

@@ -12,16 +12,17 @@ use crate::application::collaboration_authorization::{
 };
 use mycopilot_core::storage::service::StorageService;
 use mycopilot_core::{
-    bounded_root_agent_task_name, root_agent_creation_request_id, root_agent_id_for_conversation,
-    AgentCollaborationAction, AgentCollaborationCaller, AgentCollaborationDeliveryState,
-    AgentCollaborationExecutionControl, AgentCollaborationExecutionFuture,
-    AgentCollaborationExecutionOutput, AgentCollaborationExecutor, AgentCollaborationInvocation,
-    AgentCollaborationModelSelector, AgentCollaborationResultPersistence,
-    AgentCollaborationRuntimeServices, AgentCollaborationSelectorDirectory,
-    AgentCollaborationTemplateSelector, AgentCollaborationToolResult, AgentDisplayStatus,
-    AgentError, AgentGraphError, AgentHarnessSummary, AgentInterruptStatus, AgentNodeRecord,
-    AgentRuntimeHostServices, AgentTemplateError, ChildAgentSpawnError, CreateChildAgentInput,
-    EnsureRootAgentInput, PollAgentWaitInput, SendAgentMessageRequest,
+    root_agent_creation_request_id, root_agent_id_for_conversation, AgentCollaborationAction,
+    AgentCollaborationCaller, AgentCollaborationDeliveryState, AgentCollaborationExecutionControl,
+    AgentCollaborationExecutionFuture, AgentCollaborationExecutionOutput,
+    AgentCollaborationExecutor, AgentCollaborationInvocation, AgentCollaborationModelSelector,
+    AgentCollaborationResultPersistence, AgentCollaborationRuntimeServices,
+    AgentCollaborationSelectorDirectory, AgentCollaborationTemplateSelector,
+    AgentCollaborationToolResult, AgentDisplayStatus, AgentError, AgentGraphError,
+    AgentHarnessSummary, AgentInterruptStatus, AgentNodeRecord, AgentRuntimeHostServices,
+    AgentTemplateError, ChildAgentSpawnError, CreateChildAgentInput, EnsureRootAgentInput,
+    PollAgentWaitInput, SendAgentMessageRequest, ROOT_AGENT_TASK_NAME,
+    ROOT_AGENT_TASK_NAME_RESERVED_MESSAGE,
 };
 use sha2::{Digest, Sha256};
 use std::sync::{Arc, Mutex};
@@ -128,7 +129,7 @@ impl AgentCollaborationHarnessAdapter {
             parent_agent_id: None,
             conversation_id: conversation_id.to_string(),
             project_id: conversation.project_id,
-            task_name: bounded_root_agent_task_name(&conversation.title),
+            task_name: ROOT_AGENT_TASK_NAME.to_string(),
             task_path: "/root".to_string(),
         })
     }
@@ -246,7 +247,7 @@ impl AgentCollaborationHarnessAdapter {
                         ..AgentDispatcherConfig::default()
                     },
                 )
-                .map_err(|error| unavailable(error.to_string()))?,
+                .map_err(|_| unavailable("The Agent dispatcher is unavailable."))?,
             );
         }
         operation(slot.as_ref().expect("dispatcher was initialized"))
@@ -341,7 +342,11 @@ impl AgentCollaborationHarnessAdapter {
                             || self
                                 .service
                                 .agent_tree_run_is_stopped(&invocation.run_id)
-                                .map_err(unavailable)?
+                                .map_err(|_| {
+                                    unavailable(
+                                        "Agent collaboration execution state could not be read.",
+                                    )
+                                })?
                         {
                             return Err(AgentError::cancelled());
                         }
@@ -359,6 +364,7 @@ impl AgentCollaborationHarnessAdapter {
                 })?;
                 AgentCollaborationToolResult::Spawned {
                     child_agent_id: child.agent.agent_id,
+                    task_name: child.agent.task_name,
                     task_path: child.agent.task_path,
                     model_display_name: model.display_name,
                     model_capabilities: mycopilot_core::ModelCapabilities {
@@ -368,15 +374,17 @@ impl AgentCollaborationHarnessAdapter {
                 }
             }
             AgentCollaborationAction::SendMessage(request) => {
+                let target =
+                    self.resolve_target_task_name(&caller.agent_id, &request.target_task_name)?;
                 self.authorizer
-                    .authorize_send(&caller.agent_id, &request.target_agent_id, &request.message)
+                    .authorize_send(&caller.agent_id, &target.agent_id, &request.message)
                     .map_err(authorizer_error)?;
                 self.check_scheduling_precommit(&invocation.run_id, &cancellation)?;
                 let dispatch = match AgentMessagingService::new(Arc::clone(&self.storage))
                     .send_message_from_run(
                         &SendAgentMessageRequest {
                             sender_agent_id: caller.agent_id,
-                            recipient_agent_id: request.target_agent_id,
+                            recipient_agent_id: target.agent_id,
                             request_id,
                             content: request.message,
                         },
@@ -388,7 +396,11 @@ impl AgentCollaborationHarnessAdapter {
                             || self
                                 .service
                                 .agent_tree_run_is_stopped(&invocation.run_id)
-                                .map_err(unavailable)?
+                                .map_err(|_| {
+                                    unavailable(
+                                        "Agent collaboration execution state could not be read.",
+                                    )
+                                })?
                         {
                             return Err(AgentError::cancelled());
                         }
@@ -398,16 +410,19 @@ impl AgentCollaborationHarnessAdapter {
                 self.finish_scheduling_commit(&invocation.run_id, &cancellation)?;
                 AgentCollaborationToolResult::MessageQueued {
                     message_id: dispatch.message.message_id,
+                    task_name: target.task_name,
                     delivery_state: AgentCollaborationDeliveryState::Queued,
                 }
             }
             AgentCollaborationAction::FollowupTask(request) => {
+                let target =
+                    self.resolve_target_task_name(&caller.agent_id, &request.target_task_name)?;
                 self.authorizer
-                    .authorize_send(&caller.agent_id, &request.target_agent_id, &request.message)
+                    .authorize_send(&caller.agent_id, &target.agent_id, &request.message)
                     .and_then(|_| {
                         self.authorizer.authorize_management(
                             &caller.agent_id,
-                            &request.target_agent_id,
+                            &target.agent_id,
                             AgentManagementOperation::FollowUp,
                         )
                     })
@@ -417,7 +432,7 @@ impl AgentCollaborationHarnessAdapter {
                     .follow_up_from_run(
                         &SendAgentMessageRequest {
                             sender_agent_id: caller.agent_id,
-                            recipient_agent_id: request.target_agent_id,
+                            recipient_agent_id: target.agent_id,
                             request_id,
                             content: request.message,
                         },
@@ -429,7 +444,11 @@ impl AgentCollaborationHarnessAdapter {
                             || self
                                 .service
                                 .agent_tree_run_is_stopped(&invocation.run_id)
-                                .map_err(unavailable)?
+                                .map_err(|_| {
+                                    unavailable(
+                                        "Agent collaboration execution state could not be read.",
+                                    )
+                                })?
                         {
                             return Err(AgentError::cancelled());
                         }
@@ -440,18 +459,22 @@ impl AgentCollaborationHarnessAdapter {
                 self.notify_work_available()?;
                 AgentCollaborationToolResult::MessageQueued {
                     message_id: dispatch.message.message_id,
+                    task_name: target.task_name,
                     delivery_state: AgentCollaborationDeliveryState::Queued,
                 }
             }
             AgentCollaborationAction::Wait(request) => {
-                for target in &request.target_agent_ids {
+                let mut target_agent_ids = Vec::with_capacity(request.target_task_names.len());
+                for task_name in &request.target_task_names {
+                    let target = self.resolve_target_task_name(&caller.agent_id, task_name)?;
                     self.authorizer
                         .authorize_management(
                             &caller.agent_id,
-                            target,
+                            &target.agent_id,
                             AgentManagementOperation::Wait,
                         )
                         .map_err(authorizer_error)?;
+                    target_agent_ids.push(target.agent_id);
                 }
                 let outcome = AgentWaitKernel::production(Arc::clone(&self.storage))
                     .wait(
@@ -461,7 +484,7 @@ impl AgentCollaborationHarnessAdapter {
                             run_id: invocation.run_id,
                             assistant_message_id: invocation.assistant_message_id,
                             model_batch_index: invocation.model_batch_index,
-                            target_agent_ids: request.target_agent_ids,
+                            target_agent_ids,
                             maximum_messages: 64,
                         },
                         Duration::from_millis(request.timeout_ms),
@@ -497,6 +520,10 @@ impl AgentCollaborationHarnessAdapter {
                     .visible_tree(&caller.agent_id)
                     .map_err(authorizer_error)?;
                 let mut agents = Vec::with_capacity(tree.len());
+                let task_names = tree
+                    .iter()
+                    .map(|node| (node.agent_id.clone(), node.task_name.clone()))
+                    .collect::<std::collections::HashMap<_, _>>();
                 for node in tree {
                     let display = self
                         .storage
@@ -511,6 +538,11 @@ impl AgentCollaborationHarnessAdapter {
                         agent_id: node.agent_id,
                         task_name: node.task_name,
                         task_path: node.task_path,
+                        parent_task_name: node
+                            .parent_agent_id
+                            .as_ref()
+                            .and_then(|id| task_names.get(id))
+                            .cloned(),
                         parent_agent_id: node.parent_agent_id,
                         display_status: display.status,
                         model_display_name: node.model_snapshot.map(|model| model.display_name),
@@ -519,18 +551,19 @@ impl AgentCollaborationHarnessAdapter {
                 }
                 AgentCollaborationToolResult::Agents { agents }
             }
-            AgentCollaborationAction::Interrupt { target_agent_id } => {
+            AgentCollaborationAction::Interrupt { target_task_name } => {
+                let target = self.resolve_target_task_name(&caller.agent_id, &target_task_name)?;
                 self.authorizer
                     .authorize_management(
                         &caller.agent_id,
-                        &target_agent_id,
+                        &target.agent_id,
                         AgentManagementOperation::Interrupt,
                     )
                     .map_err(authorizer_error)?;
                 let disposition = self.with_dispatcher(|dispatcher| {
                     dispatcher
-                        .interrupt_agent(&caller.agent_id, &target_agent_id, &request_id)
-                        .map_err(|error| unavailable(error.to_string()))
+                        .interrupt_agent(&caller.agent_id, &target.agent_id, &request_id)
+                        .map_err(|_| unavailable("The Agent dispatcher is unavailable."))
                 })?;
                 let status = match disposition {
                     AgentInterruptDisposition::NoPendingExecution => {
@@ -542,7 +575,8 @@ impl AgentCollaborationHarnessAdapter {
                     }
                 };
                 AgentCollaborationToolResult::Interrupted {
-                    target_agent_id,
+                    target_agent_id: target.agent_id,
+                    task_name: target.task_name,
                     status,
                 }
             }
@@ -551,6 +585,23 @@ impl AgentCollaborationHarnessAdapter {
             result: output,
             persistence: AgentCollaborationResultPersistence::RuntimeCommits,
         })
+    }
+
+    fn resolve_target_task_name(
+        &self,
+        caller_agent_id: &str,
+        task_name: &str,
+    ) -> Result<AgentNodeRecord, AgentError> {
+        self.authorizer
+            .resolve_task_name(caller_agent_id, task_name)
+            .map_err(authorizer_error)?
+            .ok_or_else(|| {
+                collaboration_error(
+                    "target_unavailable",
+                    false,
+                    "No accessible Agent has this exact task name. Use list_agents and copy taskName; Agent IDs and task paths are not accepted.".to_string(),
+                )
+            })
     }
 
     fn check_scheduling_precommit(
@@ -562,7 +613,7 @@ impl AgentCollaborationHarnessAdapter {
         if self
             .service
             .agent_tree_run_is_stopped(run_id)
-            .map_err(unavailable)?
+            .map_err(|_| unavailable("Agent collaboration execution state could not be read."))?
         {
             return Err(AgentError::cancelled());
         }
@@ -578,7 +629,9 @@ impl AgentCollaborationHarnessAdapter {
             cancellation,
             self.service
                 .agent_tree_run_is_stopped(run_id)
-                .map_err(unavailable)?,
+                .map_err(|_| {
+                    unavailable("Agent collaboration execution state could not be read.")
+                })?,
             || self.service.reinforce_agent_tree_stop_for_run(run_id),
         )
     }
@@ -673,9 +726,18 @@ fn validate_spawn_selector_authorization(
 }
 
 fn authorizer_error(error: CollaborationAuthorizationError) -> AgentError {
+    let message = match &error {
+        CollaborationAuthorizationError::InvalidPolicy(_) => {
+            "Agent collaboration policy is invalid.".to_string()
+        }
+        CollaborationAuthorizationError::StorageUnavailable(_) => {
+            "Agent collaboration authorization storage is unavailable.".to_string()
+        }
+        _ => error.to_string(),
+    };
     AgentError::structured(
         format!("agent.collaboration.{}", error.code()),
-        error.to_string(),
+        message,
         serde_json::json!({
             "type": "agent_collaboration",
             "category": error.code(),
@@ -701,7 +763,20 @@ fn graph_error(error: AgentGraphError) -> AgentError {
         | AgentGraphError::BoundProject(_)
         | AgentGraphError::CorruptRecord(_) => ("conflict", false),
     };
-    collaboration_error(category, retryable, error.to_string())
+    let message = match &error {
+        AgentGraphError::InvalidInput { field: "task_name", reason } if reason == ROOT_AGENT_TASK_NAME_RESERVED_MESSAGE => ROOT_AGENT_TASK_NAME_RESERVED_MESSAGE.to_string(),
+        AgentGraphError::InvalidInput { field, .. } => format!("Invalid collaboration {field}. Check the tool arguments and use exact taskName values from list_agents."),
+        AgentGraphError::ResourceLimit { .. }
+        | AgentGraphError::IllegalLifecycleTransition { .. }
+        | AgentGraphError::IllegalTransition { .. } => error.to_string(),
+        AgentGraphError::AgentNotFound(_) => "The target Agent is unavailable. Refresh list_agents and address it by taskName.".to_string(),
+        AgentGraphError::ConversationNotFound(_) => "The Agent conversation is unavailable.".to_string(),
+        AgentGraphError::MessageNotFound(_) | AgentGraphError::WakeNotFound(_) => "The Agent task or message is no longer available. Refresh list_agents before continuing.".to_string(),
+        AgentGraphError::StorageUnavailable(_) => "Agent collaboration storage is unavailable.".to_string(),
+        AgentGraphError::CorruptRecord(_) => "Agent collaboration state is inconsistent; the operation could not be completed.".to_string(),
+        _ => "Agent collaboration state changed. Refresh list_agents before continuing.".to_string(),
+    };
+    collaboration_error(category, retryable, message)
 }
 
 fn spawn_error(error: ChildAgentSpawnError) -> AgentError {
@@ -721,7 +796,23 @@ fn spawn_error(error: ChildAgentSpawnError) -> AgentError {
         | ChildAgentSpawnError::SnapshotUnavailable(_)
         | ChildAgentSpawnError::CorruptRecord(_) => ("conflict", false),
     };
-    collaboration_error(category, retryable, error.to_string())
+    let message = match &error {
+        ChildAgentSpawnError::InvalidInput { field: "task_name", reason } if reason == ROOT_AGENT_TASK_NAME_RESERVED_MESSAGE => ROOT_AGENT_TASK_NAME_RESERVED_MESSAGE.to_string(),
+        ChildAgentSpawnError::InvalidInput { field, .. } => format!("Invalid spawn_agent {field}. Check the tool schema and the authorized selector directory."),
+        ChildAgentSpawnError::ParentNotFound(_) | ChildAgentSpawnError::ParentUnavailable(_) => "The parent Agent is unavailable; a child could not be created.".to_string(),
+        ChildAgentSpawnError::TemplateNotFound(_) | ChildAgentSpawnError::TemplateDisabled(_) => "The selected agent_type is unavailable in this project. Use an authorized selector from the collaboration directory.".to_string(),
+        ChildAgentSpawnError::Conflict(reason) if reason == "task name or path is already in use in this Agent tree" => "This task_name is already in use in the Agent tree. Use list_agents and followup_task with the existing taskName to continue that Agent, or choose a unique task_name for a new Agent.".to_string(),
+        ChildAgentSpawnError::IdempotencyConflict(_) => "This child creation request was already used with different inputs; no additional child was created.".to_string(),
+        ChildAgentSpawnError::SnapshotUnavailable(_) => "The requested child context snapshot is unavailable.".to_string(),
+        ChildAgentSpawnError::CorruptRecord(_) => "Child Agent state is inconsistent; a child could not be created.".to_string(),
+        ChildAgentSpawnError::Conflict(_) => "Child Agent state changed. Refresh list_agents before requesting more work.".to_string(),
+        ChildAgentSpawnError::StorageUnavailable(_) => "Child Agent storage is unavailable.".to_string(),
+        ChildAgentSpawnError::ProjectRequiredForTemplate
+        | ChildAgentSpawnError::ModelUnavailable { .. }
+        | ChildAgentSpawnError::UnsupportedReasoningEffort(_)
+        | ChildAgentSpawnError::ResourceLimit { .. } => error.to_string(),
+    };
+    collaboration_error(category, retryable, message)
 }
 
 fn collaboration_error(category: &'static str, retryable: bool, message: String) -> AgentError {
@@ -736,21 +827,27 @@ fn collaboration_error(category: &'static str, retryable: bool, message: String)
     )
 }
 
-fn storage_error(error: impl std::fmt::Display) -> AgentError {
-    unavailable(error.to_string())
+fn storage_error(_error: impl std::fmt::Display) -> AgentError {
+    unavailable("Agent collaboration storage is unavailable.")
 }
 
 fn template_error(error: AgentTemplateError) -> AgentError {
     match error {
-        AgentTemplateError::StorageUnavailable(message) => unavailable(message),
-        other => collaboration_error("unavailable", false, other.to_string()),
+        AgentTemplateError::StorageUnavailable(_) => {
+            unavailable("The Agent template directory is unavailable.")
+        }
+        _ => collaboration_error(
+            "unavailable",
+            false,
+            "The authorized Agent template directory could not be loaded.".to_string(),
+        ),
     }
 }
 
-fn unavailable(message: impl Into<String>) -> AgentError {
+fn unavailable(message: &'static str) -> AgentError {
     AgentError::structured(
         "agent.collaboration.unavailable",
-        message.into(),
+        message,
         serde_json::json!({
             "type": "agent_collaboration",
             "category": "unavailable",
@@ -791,6 +888,187 @@ mod tests {
         let details = error.details().unwrap();
         assert_eq!(details["category"], category);
         assert_eq!(details["retryable"], retryable);
+    }
+
+    #[test]
+    fn model_facing_collaboration_errors_do_not_expose_backend_identities() {
+        const PRIVATE: &str = "agent-c110510f-5338-4d97-9336-0232c53ec142 /root/private-agent";
+        let mut errors = vec![
+            storage_error(PRIVATE),
+            template_error(AgentTemplateError::TemplateNotFound(PRIVATE.to_string())),
+            template_error(AgentTemplateError::StorageUnavailable(PRIVATE.to_string())),
+            authorizer_error(CollaborationAuthorizationError::InvalidPolicy(
+                PRIVATE.to_string(),
+            )),
+            authorizer_error(CollaborationAuthorizationError::StorageUnavailable(
+                PRIVATE.to_string(),
+            )),
+        ];
+        errors.extend(
+            [
+                AgentGraphError::AgentNotFound(PRIVATE.to_string()),
+                AgentGraphError::ConversationNotFound(PRIVATE.to_string()),
+                AgentGraphError::MessageNotFound(PRIVATE.to_string()),
+                AgentGraphError::WakeNotFound(PRIVATE.to_string()),
+                AgentGraphError::BoundConversation(PRIVATE.to_string()),
+                AgentGraphError::BoundProject(PRIVATE.to_string()),
+                AgentGraphError::Conflict(PRIVATE.to_string()),
+                AgentGraphError::CorruptRecord(PRIVATE.to_string()),
+                AgentGraphError::StorageUnavailable(PRIVATE.to_string()),
+                AgentGraphError::InvalidInput {
+                    field: "target",
+                    reason: PRIVATE.to_string(),
+                },
+            ]
+            .into_iter()
+            .map(graph_error),
+        );
+        errors.extend(
+            [
+                ChildAgentSpawnError::ParentNotFound(PRIVATE.to_string()),
+                ChildAgentSpawnError::ParentUnavailable(PRIVATE.to_string()),
+                ChildAgentSpawnError::TemplateNotFound(PRIVATE.to_string()),
+                ChildAgentSpawnError::TemplateDisabled(PRIVATE.to_string()),
+                ChildAgentSpawnError::IdempotencyConflict(PRIVATE.to_string()),
+                ChildAgentSpawnError::Conflict(PRIVATE.to_string()),
+                ChildAgentSpawnError::SnapshotUnavailable(PRIVATE.to_string()),
+                ChildAgentSpawnError::CorruptRecord(PRIVATE.to_string()),
+                ChildAgentSpawnError::StorageUnavailable(PRIVATE.to_string()),
+                ChildAgentSpawnError::InvalidInput {
+                    field: "task_name",
+                    reason: PRIVATE.to_string(),
+                },
+            ]
+            .into_iter()
+            .map(spawn_error),
+        );
+        for error in errors {
+            let model_visible = format!("{error} {:?}", error.details());
+            assert!(!model_visible.contains("agent-c110510f"), "{model_visible}");
+            assert!(
+                !model_visible.contains("/root/private-agent"),
+                "{model_visible}"
+            );
+            assert!(error.code().unwrap().starts_with("agent.collaboration."));
+        }
+        let duplicate = spawn_error(ChildAgentSpawnError::Conflict(
+            "task name or path is already in use in this Agent tree".to_string(),
+        ));
+        assert!(duplicate
+            .to_string()
+            .contains("task_name is already in use"));
+        assert!(duplicate.to_string().contains("followup_task"));
+        assert_category(duplicate, "conflict", false);
+    }
+
+    #[test]
+    fn reserved_child_name_errors_explain_how_to_recover_without_backend_identity() {
+        for error in [
+            graph_error(AgentGraphError::InvalidInput {
+                field: "task_name",
+                reason: ROOT_AGENT_TASK_NAME_RESERVED_MESSAGE.to_string(),
+            }),
+            spawn_error(ChildAgentSpawnError::InvalidInput {
+                field: "task_name",
+                reason: ROOT_AGENT_TASK_NAME_RESERVED_MESSAGE.to_string(),
+            }),
+        ] {
+            assert!(error
+                .to_string()
+                .contains(ROOT_AGENT_TASK_NAME_RESERVED_MESSAGE));
+            assert_category(error, "invalid_arguments", false);
+        }
+    }
+
+    #[tokio::test]
+    async fn root_task_name_is_independent_of_titles_and_renaming() {
+        let fixture = tempfile::tempdir().unwrap();
+        let storage =
+            Arc::new(StorageService::open(&fixture.path().join("root-name.sqlite")).unwrap());
+        let service = AgentService::try_new_deferred_startup_reconciliation_with_agent_limit(
+            Arc::clone(&storage),
+            None,
+            2,
+        )
+        .unwrap();
+        let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
+        let adapter = AgentCollaborationHarnessAdapter::new(
+            Arc::clone(&storage),
+            service.clone(),
+            service.collaboration_authorizer(),
+            Arc::new(Mutex::new(None)),
+            notifications,
+        );
+        for (index, title) in [
+            "让子智能体发送“已完成”给父亲".to_string(),
+            "长中文会话标题".repeat(80),
+            "读取 [页面](http://127.0.0.1:18765/path)\n标题".to_string(),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let conversation_id = format!("root-name-{index}");
+            let mut conversation = ChatConversationRecord {
+                id: conversation_id.clone(),
+                project_id: None,
+                model_id: None,
+                title: title.clone(),
+                messages: Vec::new(),
+                created_at: 1,
+                updated_at: 1,
+                pinned_at: None,
+                archived_at: None,
+                unread_at: None,
+            };
+            storage.save_conversation(conversation.clone()).unwrap();
+            let preview = adapter
+                .preview_runtime_services_for_conversation(&conversation_id)
+                .unwrap();
+            assert_eq!(preview.caller.task_name, "主智能体");
+            assert!(storage
+                .get_agent_node_by_conversation(&conversation_id)
+                .unwrap()
+                .is_none());
+            let live = adapter
+                .runtime_services_for_conversation(&conversation_id)
+                .unwrap();
+            assert_eq!(live.caller, preview.caller);
+            assert_eq!(
+                storage
+                    .load_conversation(&conversation_id)
+                    .unwrap()
+                    .unwrap()
+                    .title,
+                title
+            );
+
+            conversation.title = "重命名后的新标题：“继续工作”".to_string();
+            storage.save_conversation(conversation.clone()).unwrap();
+            let renamed = adapter
+                .runtime_services_for_conversation(&conversation_id)
+                .unwrap();
+            assert_eq!(renamed.caller, live.caller);
+            assert_eq!(
+                adapter
+                    .preview_runtime_services_for_conversation(&conversation_id)
+                    .unwrap()
+                    .caller,
+                live.caller
+            );
+            assert_eq!(
+                adapter
+                    .resolve_target_task_name(&live.caller.agent_id, ROOT_AGENT_TASK_NAME)
+                    .unwrap()
+                    .agent_id,
+                live.caller.agent_id
+            );
+            assert!(adapter
+                .resolve_target_task_name(&live.caller.agent_id, &title)
+                .is_err());
+            assert!(adapter
+                .resolve_target_task_name(&live.caller.agent_id, &conversation.title)
+                .is_err());
+        }
     }
 
     #[test]

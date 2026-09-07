@@ -1692,9 +1692,220 @@ async fn trusted_child_wake_uses_the_root_loop_without_duplicating_the_parent_ta
     );
     assert!(provider_messages.iter().any(|message| {
         message["role"] == "system"
-            && provider_message_text(message).contains("security_review")
-            && provider_message_text(message).contains("agent-root-for-child")
+            && provider_message_text(message).contains("当前任务名称：`security_review`")
+            && provider_message_text(message).contains("直接父任务名称：`Root`")
     }));
+    let model_input = serde_json::to_string(provider_messages).unwrap();
+    for private_identity in [
+        "agent-root-for-child",
+        "conversation-root-for-child",
+        spawn.agent.agent_id.as_str(),
+        spawn.agent.conversation_id.as_str(),
+        spawn.agent.task_path.as_str(),
+        spawn.initial_wake.wake_id.as_str(),
+        spawn.task_message.message_id.as_str(),
+        spawn.task_message.projection_message_id.as_str(),
+        turn.run_id.as_str(),
+        turn.assistant_message_id.as_str(),
+    ] {
+        assert!(
+            !model_input.contains(private_identity),
+            "private child execution identity leaked to the provider: {private_identity}"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn nested_result_wake_projects_semantic_identity_only_at_the_provider_boundary() {
+    async fn execute_next_wake(
+        storage: &StorageService,
+        service: &AgentService,
+        claim_token: &str,
+        summary: &str,
+    ) -> mycopilot_core::AgentTurnResultSettlement {
+        let wake = storage
+            .claim_next_dispatchable_agent_wake(claim_token)
+            .unwrap()
+            .expect("the next delegated Wake is dispatchable");
+        let source_id = wake.source_agent_message_id.as_deref().unwrap();
+        let bundle = storage
+            .resolve_child_agent_wake(&wake.agent_id, &wake.wake_id, source_id)
+            .unwrap();
+        let trusted = TrustedAgentWakeTurnStart::new(
+            wake.wake_id.clone(),
+            wake.agent_id.clone(),
+            bundle.agent.conversation_id.clone(),
+            source_id.to_string(),
+            claim_token.to_string(),
+            bundle.collaboration_identity,
+        )
+        .unwrap()
+        .with_global_permit(service.turn_concurrency_gate().try_acquire().unwrap());
+        let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let turn = service
+            .execute_turn(AgentTurnStart::AgentWake(trusted), notifications)
+            .unwrap();
+        let events = collect_until_done(&mut receiver).await;
+        assert_eq!(events.last().unwrap()["params"]["status"], "completed");
+        storage
+            .finish_agent_turn_with_result(&mycopilot_core::FinishAgentTurnResultInput {
+                wake_id: wake.wake_id,
+                expected_status: mycopilot_core::AgentWakeStatus::Running,
+                claim_token: claim_token.to_string(),
+                terminal_status: mycopilot_core::AgentWakeStatus::Completed,
+                run_id: Some(turn.run_id),
+                assistant_message_id: Some(turn.assistant_message_id),
+                summary: summary.to_string(),
+                terminal_error: None,
+            })
+            .unwrap()
+    }
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let summaries = [
+        "Initial review complete.",
+        "Nested evidence; preserve the literal agent-user-example.",
+        "Nested evidence received.",
+    ];
+    let model_server = tokio::spawn(async move {
+        let mut requests = Vec::new();
+        for summary in summaries {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            requests.push(read_provider_request(&mut stream).await);
+            write_provider_stream(
+                &mut stream,
+                json!({ "role": "assistant", "content": summary }),
+                "stop",
+            )
+            .await;
+        }
+        requests
+    });
+    let fixture = tempdir().unwrap();
+    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    save_provider_profile_fixture(
+        &storage,
+        &format!("http://{address}/v1/chat/completions"),
+        None,
+    );
+    let root_agent_id = "agent-nested-result-root";
+    let root_conversation_id = "conversation-nested-result-root";
+    storage
+        .save_conversation(ChatConversationRecord {
+            id: root_conversation_id.to_string(),
+            project_id: None,
+            model_id: Some("model-1".to_string()),
+            title: "Nested Result input".to_string(),
+            messages: Vec::new(),
+            created_at: 1,
+            updated_at: 1,
+            pinned_at: None,
+            archived_at: None,
+            unread_at: None,
+        })
+        .unwrap();
+    storage
+        .ensure_root_agent(&mycopilot_core::EnsureRootAgentInput {
+            agent_id: root_agent_id.to_string(),
+            conversation_id: root_conversation_id.to_string(),
+            creation_request_id: "ensure-nested-result-root".to_string(),
+            task_name: "Root".to_string(),
+        })
+        .unwrap();
+    seed_root_effective_permissions(
+        &storage,
+        root_agent_id,
+        root_conversation_id,
+        "nested-result-root",
+        AgentPermissions::default(),
+    );
+    let create_child = |parent_agent_id: &str, task_name: &str| {
+        storage
+            .create_child_agent(&mycopilot_core::CreateChildAgentInput {
+                parent_agent_id: parent_agent_id.to_string(),
+                creation_request_id: format!("spawn-nested-{task_name}"),
+                task_name: task_name.to_string(),
+                task: format!("Inspect the {task_name} subsystem."),
+                template_machine_key: None,
+                explicit_model_id: None,
+                reasoning_effort: None,
+                fork_turns: mycopilot_core::AgentForkTurns::None,
+            })
+            .unwrap()
+    };
+    let child = create_child(root_agent_id, "review");
+    let service =
+        AgentService::try_new_with_startup_reconciliation(Arc::clone(&storage), false, None)
+            .unwrap();
+    execute_next_wake(&storage, &service, "nested-parent-claim", summaries[0]).await;
+    let grandchild = create_child(&child.agent.agent_id, "details");
+    let nested = execute_next_wake(&storage, &service, "nested-details-claim", summaries[1]).await;
+    assert_eq!(
+        nested.result_message.recipient_agent_id,
+        child.agent.agent_id
+    );
+    let result_wake = nested.parent_wake.as_ref().unwrap();
+    let completed =
+        execute_next_wake(&storage, &service, "nested-result-claim", summaries[2]).await;
+
+    let raw = storage
+        .get_agent_message(&nested.result_message.message_id)
+        .unwrap()
+        .unwrap();
+    let raw_envelope: mycopilot_core::AgentTurnResultEnvelope =
+        serde_json::from_str(&raw.content).unwrap();
+    assert_eq!(raw_envelope.child_agent_id, grandchild.agent.agent_id);
+    let conversation = storage
+        .load_conversation(&child.agent.conversation_id)
+        .unwrap()
+        .unwrap();
+    let result_message = conversation
+        .messages
+        .iter()
+        .find(|message| message.id == raw.projection_message_id)
+        .unwrap();
+    assert_eq!(result_message.content, raw.content);
+
+    let requests = model_server.await.unwrap();
+    assert_eq!(requests.len(), 3);
+    let messages = requests[2]["messages"].as_array().unwrap();
+    let result_inputs = messages
+        .iter()
+        .filter(|message| {
+            message["role"] == "user" && provider_message_text(message).contains(summaries[1])
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(result_inputs.len(), 1, "the Result is delivered once");
+    let content = provider_message_text(result_inputs[0]);
+    assert_eq!(content.matches("agent_collaboration_input").count(), 1);
+    assert!(content.contains("details"));
+    assert!(content.contains("completed"));
+    assert!(content.contains("agent-user-example"));
+    let model_input = serde_json::to_string(messages).unwrap();
+    for hidden in [
+        root_agent_id,
+        root_conversation_id,
+        &child.agent.agent_id,
+        &child.agent.conversation_id,
+        &child.agent.task_path,
+        &grandchild.agent.agent_id,
+        &grandchild.agent.conversation_id,
+        &grandchild.agent.task_path,
+        &raw.message_id,
+        &raw.projection_message_id,
+        &raw_envelope.wake_id,
+        raw_envelope.run_id.as_deref().unwrap(),
+        raw_envelope.turn_id.as_deref().unwrap(),
+        &result_wake.wake_id,
+        completed.envelope.run_id.as_deref().unwrap(),
+        completed.envelope.turn_id.as_deref().unwrap(),
+    ] {
+        assert!(
+            !model_input.contains(hidden),
+            "private nested execution identity leaked to the provider: {hidden}"
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

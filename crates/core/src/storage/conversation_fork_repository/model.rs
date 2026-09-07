@@ -383,10 +383,6 @@ pub(crate) fn build_fork_plan_at_point(
         return Ok(plan);
     };
     let target_root_agent_id = root_agent_id_for_conversation(&target_root_conversation_id);
-    if let Some(collaboration) = &mut plan.collaboration_root {
-        collaboration.target_root.task_name = source_root.task_name.clone();
-    }
-
     let copied_conversation_ids = std::iter::once(source_root.conversation_id.clone())
         .chain(
             visible_members

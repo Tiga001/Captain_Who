@@ -421,6 +421,15 @@ fn build_compaction_request_context(
             let object = payload
                 .as_object_mut()
                 .ok_or_else(|| AgentError::new("上下文压缩源日志项不是 JSON 对象。"))?;
+            if matches!(item, crate::ContextCompactionSourceItem::TraceItem { item, .. }
+                if matches!(item.as_ref(), crate::ConversationTurnTraceItem::AgentMailboxDelivery { .. }))
+            {
+                if let Some(mailbox) = object.get_mut("item").and_then(serde_json::Value::as_object_mut) {
+                    for key in ["receiptId", "messageId", "senderAgentId", "senderTaskPath"] {
+                        mailbox.remove(key);
+                    }
+                }
+            }
             if let Some(created_at) = object.get("createdAt").and_then(|value| value.as_i64()) {
                 object.insert(
                     "createdAt".to_string(),
@@ -998,6 +1007,57 @@ mod tests {
             report.maximum_output_tokens_for_current_input(),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn summary_model_omits_mailbox_identity_without_rewriting_the_prefix() {
+        let mut request = generation_request();
+        std::sync::Arc::make_mut(&mut request.prefix)
+            .source_items
+            .insert(
+                0,
+                ContextCompactionSourceItem::TraceItem {
+                    cursor: ContextJournalCursor::trace_item("assistant-mailbox", 0),
+                    run_id: "source-run".into(),
+                    created_at: 2,
+                    item: Box::new(crate::ConversationTurnTraceItem::AgentMailboxDelivery {
+                        sequence: 0,
+                        receipt_id: "private-receipt".into(),
+                        message_id: "private-mailbox".into(),
+                        sender_agent_id: "agent-private-identity".into(),
+                        sender_task_name: "security_review".into(),
+                        sender_task_path: "/root/private-task-path".into(),
+                        kind: crate::AgentMailboxKind::Message,
+                        content: "User text agent-example remains unchanged.".into(),
+                        created_at: 2,
+                        truncated: false,
+                    }),
+                },
+            );
+        let canonical = serde_json::to_value(&request.prefix.source_items).unwrap();
+        let messages = build_compaction_request_context(&request, 1_000)
+            .unwrap()
+            .into_messages();
+        let serialized = messages[1].content();
+        assert!(serialized.contains("security_review"));
+        assert!(serialized.contains("User text agent-example remains unchanged."));
+        for hidden in [
+            "private-receipt",
+            "private-mailbox",
+            "agent-private-identity",
+            "/root/private-task-path",
+            "senderAgentId",
+            "senderTaskPath",
+        ] {
+            assert!(
+                !serialized.contains(hidden),
+                "summary model leaked {hidden}"
+            );
+        }
+        assert_eq!(
+            serde_json::to_value(&request.prefix.source_items).unwrap(),
+            canonical
+        );
     }
 
     async fn read_http_body(stream: &mut TcpStream) -> Value {

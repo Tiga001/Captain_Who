@@ -50,7 +50,7 @@ pub use agent_collaboration_event::*;
 pub use agent_collaboration_harness::*;
 pub use agent_delivery::*;
 pub use agent_graph::{
-    bounded_root_agent_task_name, root_agent_creation_request_id, root_agent_id_for_conversation,
+    root_agent_creation_request_id, root_agent_id_for_conversation,
     AcknowledgeAgentTaskAndWakeInput, AgentCollaborationIdentity, AgentDisplayStatus,
     AgentDisplayStatusSnapshot, AgentEffectivePermissionSnapshot, AgentForkTurns, AgentGraphError,
     AgentLifecycle, AgentMailboxDeliveryStatus, AgentMailboxKind, AgentMailboxMessageRecord,
@@ -69,7 +69,8 @@ pub use agent_graph::{
     UndispatchedAgentInterrupt, UpdateAgentTemplateInput,
     AGENT_EFFECTIVE_PERMISSION_SNAPSHOT_SCHEMA_VERSION, AGENT_GRAPH_SCHEMA_VERSION,
     AGENT_RESULT_ENVELOPE_SCHEMA_VERSION, AGENT_RESULT_SUMMARY_MAX_BYTES,
-    AGENT_RESULT_TERMINAL_ERROR_MAX_BYTES,
+    AGENT_RESULT_TERMINAL_ERROR_MAX_BYTES, ROOT_AGENT_TASK_NAME,
+    ROOT_AGENT_TASK_NAME_RESERVED_MESSAGE,
 };
 pub use builtin_capabilities::{
     browser_risk_rejected_result, build_browser_risk_approval, build_builtin_mcp_tool_approval,

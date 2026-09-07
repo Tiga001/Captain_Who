@@ -209,6 +209,209 @@ function imageGenerationResult(id: string, hash: string): AgentToolResult {
   }
 }
 
+describe('terminal assistant answer timeline', () => {
+  const modes = ['interactive', 'observer'] as const
+  const streamId = 'run-1-final-stream'
+  const finalContent = '三个子智能体目前全部等待审批。你那边审批一下，我继续等。'
+  const partialContent = '三个子智能体目前全部等待审批。你'
+
+  function terminalMessage(overrides: Partial<ChatMessage['agentRun']> = {}): ChatMessage {
+    const message = assistantMessage({
+      toolCalls: [
+        {
+          id: 'terminal-check',
+          tool: 'run_command',
+          approvalStatus: 'not_required',
+          reason: null,
+          args: { command: 'true', reason: '检查结束。' }
+        }
+      ],
+      toolResults: [
+        {
+          callId: 'terminal-check',
+          tool: 'run_command',
+          ok: true,
+          result: { exitCode: 0, stdout: '', stderr: '' }
+        }
+      ],
+      ...overrides
+    })
+    message.content = finalContent
+    return message
+  }
+
+  function visibleNarration(container: HTMLElement) {
+    return Array.from(container.querySelectorAll('.chat-agent-text'), (element) =>
+      element.textContent?.trim()
+    )
+  }
+
+  for (const mode of modes) {
+    it(`does not turn prior narration into an empty completed answer in ${mode}`, async () => {
+      const narration = '过程说明保留在时间线中。'
+      const message = terminalMessage({
+        timeline: [
+          { id: 'trace-message-0', type: 'message', content: narration, traceSequence: 0 },
+          {
+            id: 'tool-call-terminal-check',
+            type: 'tool_call',
+            callId: 'terminal-check',
+            traceSequence: 1
+          }
+        ]
+      })
+      message.content = ''
+      const screen = await render(
+        <ChatMessageItem message={message} mode={mode} showTokenUsageDetails={false} />
+      )
+      expect(visibleNarration(screen.container)).toEqual([narration])
+      await screen.rerender(
+        <ChatMessageItem
+          message={message}
+          mode={mode}
+          showTokenUsageDetails={false}
+          timelineCollapsedOverride
+        />
+      )
+      expect(visibleNarration(screen.container)).toEqual([])
+    })
+
+    it.each([true, false])(
+      `shows the complete answer once in ${mode} with a stale final stream (checkpoint=%s)`,
+      async (hasCheckpoint) => {
+        const narration = '超时了，先查一下当前状态。'
+        const message = terminalMessage({
+          messageStreamCheckpoints: hasCheckpoint
+            ? { [streamId]: { previousContent: narration } }
+            : {},
+          timeline: [
+            { id: 'trace-message-1', type: 'message', content: narration, traceSequence: 1 },
+            {
+              id: 'tool-call-terminal-check',
+              type: 'tool_call',
+              callId: 'terminal-check',
+              traceSequence: 2
+            },
+            {
+              id: `message-stream-${streamId}`,
+              type: 'message',
+              content: partialContent,
+              streamId
+            }
+          ]
+        })
+        const screen = await render(
+          <ChatMessageItem message={message} mode={mode} showTokenUsageDetails={false} />
+        )
+
+        expect(visibleNarration(screen.container)).toEqual([narration, finalContent])
+
+        await screen.rerender(
+          <ChatMessageItem
+            message={message}
+            mode={mode}
+            showTokenUsageDetails={false}
+            timelineCollapsedOverride
+          />
+        )
+        expect(visibleNarration(screen.container)).toEqual([finalContent])
+
+        await screen.rerender(
+          <ChatMessageItem message={message} mode={mode} showTokenUsageDetails={false} />
+        )
+        expect(visibleNarration(screen.container)).toEqual([narration, finalContent])
+      }
+    )
+
+    it.each(['equal', 'prefix'] as const)(
+      `retains committed narration in ${mode} even when its text is a final-answer %s`,
+      async (relationship) => {
+        const narration = relationship === 'equal' ? finalContent : partialContent
+        const message = terminalMessage({
+          messageStreamCheckpoints: {},
+          timeline: [
+            {
+              id: 'message-stream-committed-narration',
+              type: 'message',
+              content: narration,
+              streamId: 'committed-narration',
+              traceSequence: 1
+            },
+            {
+              id: 'tool-call-terminal-check',
+              type: 'tool_call',
+              callId: 'terminal-check',
+              traceSequence: 2
+            },
+            {
+              id: `message-stream-${streamId}`,
+              type: 'message',
+              content: partialContent,
+              streamId
+            }
+          ]
+        })
+        const screen = await render(
+          <ChatMessageItem message={message} mode={mode} showTokenUsageDetails={false} />
+        )
+
+        expect(visibleNarration(screen.container)).toEqual([narration, finalContent])
+
+        await screen.rerender(
+          <ChatMessageItem
+            message={message}
+            mode={mode}
+            showTokenUsageDetails={false}
+            timelineCollapsedOverride
+          />
+        )
+        expect(visibleNarration(screen.container)).toEqual([finalContent])
+      }
+    )
+
+    it.each(['cancelled', 'failed'] as const)(
+      `retains interrupted partial text in the expanded ${mode} timeline (status=%s)`,
+      async (status) => {
+        const message = terminalMessage({
+          status,
+          messageStreamCheckpoints: { [streamId]: { previousContent: '' } },
+          timeline: [
+            {
+              id: 'tool-call-terminal-check',
+              type: 'tool_call',
+              callId: 'terminal-check',
+              traceSequence: 1
+            },
+            {
+              id: `message-stream-${streamId}`,
+              type: 'message',
+              content: partialContent,
+              streamId
+            }
+          ]
+        })
+        message.content = status === 'cancelled' ? '' : '请求失败。'
+        const finalNarration = status === 'cancelled' ? [] : [message.content]
+        const screen = await render(
+          <ChatMessageItem message={message} mode={mode} showTokenUsageDetails={false} />
+        )
+
+        expect(visibleNarration(screen.container)).toEqual([partialContent, ...finalNarration])
+
+        await screen.rerender(
+          <ChatMessageItem
+            message={message}
+            mode={mode}
+            showTokenUsageDetails={false}
+            timelineCollapsedOverride
+          />
+        )
+        expect(visibleNarration(screen.container)).toEqual(finalNarration)
+      }
+    )
+  }
+})
+
 describe('Skill and Office chat timeline', () => {
   it('does not expose stale narration as a final answer when a cancelled timeline is collapsed', async () => {
     const message = assistantMessage({

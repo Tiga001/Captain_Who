@@ -457,14 +457,42 @@ fn project_agent_mailbox_envelope_with_budget(
     maximum_bytes: usize,
 ) -> Result<(String, bool), String> {
     const SUFFIX: &str = "\n...[agent mailbox payload truncated]";
+    // Result is a Host-authored typed fact, not ordinary Agent prose. Verify its owner before
+    // projecting only semantic task state; never expose private Run/Wake/Turn identities through
+    // the nested JSON payload. Other message kinds retain their exact user/Agent-authored text.
+    let projected_result;
+    let payload = if kind == crate::AgentMailboxKind::Result {
+        let result: crate::AgentTurnResultEnvelope =
+            serde_json::from_str(payload).map_err(|_| {
+                "Agent result mailbox payload is not a valid Host result envelope".to_string()
+            })?;
+        if result.schema_version != crate::AGENT_RESULT_ENVELOPE_SCHEMA_VERSION
+            || result.child_agent_id != sender_agent_id
+            || result.task_name != sender_task_name
+            || result.task_path != sender_task_path
+        {
+            return Err(
+                "Agent result mailbox payload does not match its trusted sender".to_string(),
+            );
+        }
+        projected_result = serde_json::to_string(&serde_json::json!({
+            "taskName": sender_task_name,
+            "status": result.status,
+            "summary": result.summary,
+            "artifacts": result.artifact_refs,
+            "terminalError": result.terminal_error,
+        }))
+        .map_err(|error| format!("cannot project Agent result envelope: {error}"))?;
+        projected_result.as_str()
+    } else {
+        payload
+    };
     let encode = |payload: &str, truncated: bool| {
         serde_json::to_string(&serde_json::json!({
             "type": "agent_collaboration_input",
             "origin": "agent",
             "isHuman": false,
-            "senderAgentId": sender_agent_id,
             "senderTaskName": sender_task_name,
-            "senderTaskPath": sender_task_path,
             "kind": kind.as_str(),
             "payload": payload,
             "payloadTruncated": truncated,

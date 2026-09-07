@@ -493,7 +493,7 @@ Workspace Clippy（all targets，warnings as errors）、Rustfmt、修改文档�
 
 首次回归发现并修复了历史 Run 状态误入 Conversation ledger、压缩重建容量分类缓存、合法新 Trace 边界以及若干旧序号/版本断言问题。一次同时运行多个大型套件的 Host 回归出现大输出命令等待超时；该用例单独复验和上述 8 线程全量复验均通过，没有修改命令生产逻辑。浏览器真实链路的旧按钮文案断言已与现有“下一项”界面统一，最终两项通过。忽略项不计为通过。
 
-当前 **SQLite schema v42 / Trace v6 / checkpoint v16 / 恢复信封 v13 / 压缩输入 v6**。旧开发库需要通过现有受管 reset 创建新库，不提供旧聊天迁移；所有数据库测试均使用临时库，本次未重置真实数据。配置与 API 凭据不删除，操作说明见[恢复手册](../operations/recovery-runbook.md)。
+当前 **SQLite schema v42 / Trace v6 / checkpoint v17 / 恢复信封 v13 / 压缩输入 v6**。旧开发库需要通过现有受管 reset 创建新库，不提供旧聊天迁移；所有数据库测试均使用临时库，本次未重置真实数据。配置与 API 凭据不删除，操作说明见[恢复手册](../operations/recovery-runbook.md)。
 
 本轮验证的是请求内容的相同性，没有调用真实付费 Provider 测量缓存命中率，不能据此承诺 98%。能力/工具/目录变化、压缩和仍保留的请求尾部可缩短共同前缀；图片仍按原始视觉输入计入容量。
 

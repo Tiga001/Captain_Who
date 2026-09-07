@@ -73,6 +73,7 @@ pub struct AgentModelBatchReceiptItemRecord {
 pub struct AgentModelBatchReceiptTargetRecord {
     pub receipt_id: String,
     pub target_agent_id: String,
+    pub target_task_name: String,
     pub ordinal: u32,
     pub target_status_version: u64,
     pub latest_wake_sequence: Option<u64>,
@@ -149,9 +150,9 @@ pub struct PollAgentWaitInput {
 /// Tells the future Harness adapter how the wait result entered the shared Turn history.
 ///
 /// `wait_agent` is unusual: selecting the first-ready facts advances durable cursors. The
-/// corresponding ToolResult is therefore committed in the same SQLite transaction. A future
-/// Runtime adapter must reload that precommitted trace/model-context prefix and must not append a
-/// second ordinary ToolResult.
+/// corresponding ToolResult is therefore committed in the same SQLite transaction. Runtime
+/// reproduces that exact prefix and publishes the paired snapshot through the idempotent trace
+/// observer; it never executes the wait or consumes its receipt twice.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentWaitModelProjection {
@@ -162,6 +163,8 @@ pub enum AgentWaitModelProjection {
 #[serde(rename_all = "camelCase")]
 pub struct AgentWaitTargetSnapshot {
     pub target_agent_id: String,
+    /// Immutable semantic selector read from the trusted Agent graph, never from model output.
+    pub target_task_name: String,
     pub messages: Vec<AgentDeliveredMailboxMessage>,
     /// Monotonic durable semantic version derived from lifecycle plus every Wake status revision.
     pub target_status_version: u64,
@@ -180,4 +183,80 @@ pub struct AgentWaitReadySnapshot {
     pub source_receipt_id: Option<String>,
     pub targets: Vec<AgentWaitTargetSnapshot>,
     pub model_projection: AgentWaitModelProjection,
+}
+
+/// The sole model projection for both the atomic wait receipt commit and Runtime's returned
+/// ToolResult. Delivery/Run identities and cursor versions remain private storage facts.
+pub fn agent_wait_model_value(
+    targets: &[AgentWaitTargetSnapshot],
+) -> crate::AgentResult<serde_json::Value> {
+    let targets = targets
+        .iter()
+        .map(|target| {
+            if target.target_task_name.trim().is_empty() {
+                return Err(crate::AgentError::new(
+                    "Wait target is missing its trusted task name.",
+                ));
+            }
+            let messages = target
+                .messages
+                .iter()
+                .map(|message| {
+                    serde_json::json!({
+                        "senderTaskName": message.sender_task_name,
+                        "kind": message.kind,
+                        "content": message.content,
+                        "createdAt": message.created_at,
+                    })
+                })
+                .collect::<Vec<_>>();
+            Ok(serde_json::json!({
+                "taskName": target.target_task_name,
+                "status": target.display_status,
+                "messages": messages,
+            }))
+        })
+        .collect::<crate::AgentResult<Vec<_>>>()?;
+    Ok(serde_json::json!({ "targets": targets }))
+}
+
+#[cfg(test)]
+mod model_projection_tests {
+    use super::*;
+
+    #[test]
+    fn wait_projection_exposes_semantic_names_without_private_delivery_metadata() {
+        let targets = vec![AgentWaitTargetSnapshot {
+            target_agent_id: "private-target-id".into(),
+            target_task_name: "reviewer".into(),
+            messages: vec![AgentDeliveredMailboxMessage {
+                message_id: "private-message-id".into(),
+                sender_agent_id: "private-sender-id".into(),
+                sender_task_name: "reviewer".into(),
+                sender_task_path: "/root/private-path".into(),
+                kind: AgentMailboxKind::Message,
+                content: "User-authored text may mention agent-example verbatim.".into(),
+                mailbox_sequence: 31,
+                delivery_path: AgentDeliveryPath::WaitAgent,
+                trace_sequence: Some(47),
+                created_at: 100,
+            }],
+            target_status_version: 53,
+            latest_wake_sequence: Some(59),
+            latest_wake_status_revision: Some(61),
+            latest_wake_status: Some(AgentWakeStatus::Running),
+            display_status: AgentDisplayStatus::WaitingApproval,
+        }];
+        let projected = agent_wait_model_value(&targets).unwrap();
+        assert_eq!(
+            projected,
+            serde_json::json!({"targets":[{
+                "taskName":"reviewer", "status":"waiting_approval", "messages":[{
+                    "senderTaskName":"reviewer", "kind":"message", "createdAt":100,
+                    "content":"User-authored text may mention agent-example verbatim.",
+                }],
+            }]})
+        );
+        assert!(!projected.to_string().contains("private-"));
+    }
 }

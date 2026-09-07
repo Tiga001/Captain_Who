@@ -264,7 +264,7 @@ fn safe_boundary_delivery_uses_one_byte_exact_authenticated_envelope() {
             sender_agent_id: "agent-child".into(),
             sender_task_name: "child".into(),
             sender_task_path: "/root/child".into(),
-            kind: crate::AgentMailboxKind::Result,
+            kind: crate::AgentMailboxKind::Message,
             content: "  exact payload  ".into(),
             created_at: 1,
         }],
@@ -287,6 +287,9 @@ fn safe_boundary_delivery_uses_one_byte_exact_authenticated_envelope() {
     assert_eq!(model_content, live_content);
     let envelope: serde_json::Value = serde_json::from_str(&live_content).unwrap();
     assert_eq!(envelope["type"], "agent_collaboration_input");
+    assert_eq!(envelope["senderTaskName"], "child");
+    assert!(envelope.get("senderAgentId").is_none());
+    assert!(envelope.get("senderTaskPath").is_none());
     assert_eq!(envelope["payload"], "exact payload");
     assert!(envelope["payload"]
         .as_str()

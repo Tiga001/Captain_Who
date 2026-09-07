@@ -10,6 +10,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
 include!("collaboration_wait_terminal.rs");
+include!("collaboration_parent_name.rs");
 
 const ROOT_CONVERSATION_ID: &str = "conversation-collaboration-harness";
 const PROJECT_ID: &str = "project-collaboration-harness";
@@ -214,10 +215,11 @@ fn collaboration_tool_names(request: &Value) -> Vec<String> {
 
 async fn respond_to_root_request(stream: &mut TcpStream, request: &Value) {
     let results = tool_results(request);
-    let child_agent_ids = || {
+    let child_task_names = || {
         results
             .iter()
-            .filter_map(|result| result["childAgentId"].as_str().map(str::to_string))
+            .filter(|result| result.get("modelCapabilities").is_some())
+            .filter_map(|result| result["taskName"].as_str().map(str::to_string))
             .collect::<Vec<_>>()
     };
     if results.len() >= 8 {
@@ -227,22 +229,22 @@ async fn respond_to_root_request(stream: &mut TcpStream, request: &Value) {
             stream,
             "call-interrupt",
             "interrupt_agent",
-            json!({ "target": child_agent_ids()[1] }),
+            json!({ "target": child_task_names()[1] }),
         )
         .await;
     } else if results.len() == 5 {
-        let child_agent_ids = child_agent_ids();
+        let child_task_names = child_task_names();
         write_two_tool_calls(
             stream,
             (
                 "call-wait-first",
                 "wait_agent",
-                json!({ "targets": [child_agent_ids[0]], "timeout_ms": 5_000 }),
+                json!({ "targets": [child_task_names[0]], "timeout_ms": 5_000 }),
             ),
             (
                 "call-wait-second",
                 "wait_agent",
-                json!({ "targets": [child_agent_ids[1]], "timeout_ms": 0 }),
+                json!({ "targets": [child_task_names[1]], "timeout_ms": 0 }),
             ),
         )
         .await;
@@ -254,7 +256,7 @@ async fn respond_to_root_request(stream: &mut TcpStream, request: &Value) {
             "call-followup",
             "followup_task",
             json!({
-                "target": child_agent_ids()[0],
+                "target": child_task_names()[0],
                 "message": "Verify the follow-up invariant and report again."
             }),
         )
@@ -265,7 +267,7 @@ async fn respond_to_root_request(stream: &mut TcpStream, request: &Value) {
             "call-send",
             "send_message",
             json!({
-                "target": child_agent_ids()[0],
+                "target": child_task_names()[0],
                 "message": "Additional evidence is available; do not start a new Turn for this message alone."
             }),
         )
@@ -605,9 +607,21 @@ async fn fake_provider_drives_all_six_tools_through_runtime_host_and_server_serv
     assert!(first_root_text.contains("\"modelConfigId\":\"model-1\""));
     assert!(first_root_text.contains("\"modelConfigId\":\"model-2\""));
     assert!(first_root_text.contains("\"defaultModelCapabilities\":{\"imageInput\":false}"));
-    assert!(first_root_text.contains(
-        "\"modelConfigId\":\"model-2\",\"displayName\":\"Model 2\",\"capabilities\":{\"imageInput\":true}"
-    ));
+    let directory: Value = serde_json::from_str(
+        first_root_text
+            .split_once("<agent_collaboration_directory>")
+            .unwrap()
+            .1
+            .split_once("</agent_collaboration_directory>")
+            .unwrap()
+            .0,
+    )
+    .unwrap();
+    assert!(directory["models"].as_array().unwrap().iter().any(|model| {
+        model["modelConfigId"] == "model-2"
+            && model["displayName"] == "Model 2"
+            && model["capabilities"]["imageInput"] == true
+    }));
     assert!(!first_root_text.contains("PRIVATE_TEMPLATE_INSTRUCTION"));
     for secret_key in [
         "must-not-enter-selector-directory",
@@ -626,15 +640,17 @@ async fn fake_provider_drives_all_six_tools_through_runtime_host_and_server_serv
 
     let final_results = tool_results(root_requests.last().unwrap());
     assert_eq!(final_results.len(), 8, "root tool chain={final_results:#?}");
-    assert!(final_results[0]["childAgentId"].is_string());
-    assert!(final_results[1]["childAgentId"].is_string());
+    assert!(final_results[0]["taskName"].is_string());
+    assert!(final_results[1]["taskName"].is_string());
     assert_eq!(final_results[0]["modelCapabilities"]["imageInput"], false);
     assert_eq!(final_results[1]["modelCapabilities"]["imageInput"], true);
-    assert!(final_results[2]["messageId"].is_string());
-    assert!(final_results[3]["messageId"].is_string());
+    assert_eq!(final_results[2]["taskName"], "security_review");
+    assert_eq!(final_results[2]["deliveryState"], "queued");
+    assert_eq!(final_results[3]["taskName"], "security_review");
+    assert_eq!(final_results[3]["deliveryState"], "queued");
     assert!(final_results[4]["agents"].is_array());
     let wait_result = &final_results[5];
-    assert!(wait_result["receiptId"].is_string());
+    assert!(wait_result.get("receiptId").is_none());
     assert!(wait_result["targets"]
         .as_array()
         .is_some_and(|targets| !targets.is_empty()));
@@ -644,7 +660,7 @@ async fn fake_provider_drives_all_six_tools_through_runtime_host_and_server_serv
     );
     assert_eq!(final_results[6]["category"], "conflict");
     assert!(final_results[6].get("receiptId").is_none());
-    assert!(final_results[7]["targetAgentId"].is_string());
+    assert!(final_results[7]["taskName"].is_string());
     assert_eq!(final_results[7]["status"], "interrupt_requested");
 
     let root = storage
@@ -653,11 +669,33 @@ async fn fake_provider_drives_all_six_tools_through_runtime_host_and_server_serv
         .expect("trusted Turn construction lazily materializes the root Agent");
     let tree = storage.list_agent_tree(&root.agent_id).unwrap();
     assert_eq!(tree.len(), 3);
+    for request in &requests {
+        let model_request = serde_json::to_string(request).unwrap();
+        for node in &tree {
+            assert!(
+                !model_request.contains(&node.agent_id),
+                "model request exposed an internal Agent ID for {}",
+                node.task_name,
+            );
+        }
+        for field in [
+            "childAgentId",
+            "targetAgentId",
+            "senderAgentId",
+            "parentAgentId",
+            "rootAgentId",
+        ] {
+            assert!(
+                !model_request.contains(field),
+                "model request exposed {field}"
+            );
+        }
+    }
     let listed_agents = final_results[4]["agents"].as_array().unwrap();
     for node in &tree {
         let listed = listed_agents
             .iter()
-            .find(|summary| summary["agentId"] == node.agent_id)
+            .find(|summary| summary["taskName"] == node.task_name)
             .expect("list_agents includes every visible tree node");
         let current_latest_activity = storage
             .latest_agent_collaboration_activity_at(&node.root_agent_id, &node.agent_id)
@@ -674,7 +712,7 @@ async fn fake_provider_drives_all_six_tools_through_runtime_host_and_server_serv
         .unwrap();
     let template_child_summary = listed_agents
         .iter()
-        .find(|summary| summary["agentId"] == template_child.agent_id)
+        .find(|summary| summary["taskName"] == template_child.task_name)
         .unwrap();
     assert!(
         template_child_summary["latestActivityAt"].as_i64().unwrap() > template_child.updated_at
@@ -800,7 +838,7 @@ async fn fake_provider_drives_all_six_tools_through_runtime_host_and_server_serv
     assert_eq!(
         wait_results
             .iter()
-            .filter(|(success, observation)| *success && observation["receiptId"].is_string())
+            .filter(|(success, observation)| *success && observation["targets"].is_array())
             .count(),
         1,
         "the durable wait receipt must not be reused or double-appended"
@@ -1296,7 +1334,7 @@ async fn interrupt_agent_stops_a_child_waiting_on_a_handed_off_command_session()
                                 .await;
                             }
                             1 => {
-                                let child_agent_id = results[0]["childAgentId"]
+                                let child_agent_id = results[0]["taskName"]
                                     .as_str()
                                     .expect("spawn result must contain the child Agent identity")
                                     .to_string();

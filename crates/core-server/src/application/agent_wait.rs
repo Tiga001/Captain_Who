@@ -340,6 +340,7 @@ mod tests {
             source_receipt_id: None,
             targets: vec![AgentWaitTargetSnapshot {
                 target_agent_id: "target-b".into(),
+                target_task_name: "review-b".into(),
                 messages: Vec::new(),
                 target_status_version: 4,
                 latest_wake_sequence: Some(2),

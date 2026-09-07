@@ -29,6 +29,7 @@ pub const AGENT_COLLABORATION_MAX_WAIT_TARGETS: usize = 32;
 pub const AGENT_COLLABORATION_MAX_SELECTOR_ITEMS: usize = 32;
 pub const AGENT_COLLABORATION_MAX_SELECTOR_DIRECTORY_BYTES: usize = 16 * 1024;
 pub const AGENT_COLLABORATION_MAX_AGENT_ID_BYTES: usize = 128;
+pub const AGENT_COLLABORATION_MAX_TASK_NAME_BYTES: usize = 256;
 pub const AGENT_COLLABORATION_MAX_AGENT_TYPE_BYTES: usize = 64;
 pub const AGENT_COLLABORATION_MAX_MODEL_CONFIG_ID_BYTES: usize = 512;
 
@@ -99,7 +100,10 @@ impl AgentCollaborationSelectorDirectory {
             truncated: original_template_count > AGENT_COLLABORATION_MAX_SELECTOR_ITEMS
                 || original_model_count > AGENT_COLLABORATION_MAX_SELECTOR_ITEMS,
         };
-        while directory.prompt_data_json().len() > AGENT_COLLABORATION_MAX_SELECTOR_DIRECTORY_BYTES
+        // Keep the existing conservative budget for the full authorization snapshot even though
+        // the model projection omits private template identity fields.
+        while escaped_selector_json(&directory).len()
+            > AGENT_COLLABORATION_MAX_SELECTOR_DIRECTORY_BYTES
         {
             directory.truncated = true;
             if directory.templates.len() >= directory.models.len()
@@ -116,19 +120,20 @@ impl AgentCollaborationSelectorDirectory {
     }
 
     /// Encodes user-editable metadata as JSON data which cannot close the surrounding prompt tag
-    /// or open a Markdown code boundary. `bounded` measures this exact representation, so every
-    /// selector authorized for this Turn is also visible to the model.
+    /// or open a Markdown code boundary. The private template identity stays in the checkpoint;
+    /// the model selects it only by agent_type. Every authorized selector remains visible.
     pub fn prompt_data_json(&self) -> String {
-        serde_json::to_string(self)
-            .map(|json| {
-                json.replace('&', "\\u0026")
-                    .replace('<', "\\u003c")
-                    .replace('>', "\\u003e")
-                    .replace('`', "\\u0060")
-                    .replace('\u{2028}', "\\u2028")
-                    .replace('\u{2029}', "\\u2029")
-            })
-            .unwrap_or_else(|_| "{\"templates\":[],\"models\":[],\"truncated\":true}".to_string())
+        escaped_selector_json(&serde_json::json!({
+            "templates": self.templates.iter().map(|template| serde_json::json!({
+                "agentType": template.agent_type,
+                "name": template.name,
+                "description": template.description,
+                "modelDisplayName": template.model_display_name,
+                "defaultModelCapabilities": template.default_model_capabilities,
+            })).collect::<Vec<_>>(),
+            "models": self.models,
+            "truncated": self.truncated,
+        }))
     }
 
     pub fn validate(&self) -> crate::AgentResult<()> {
@@ -160,7 +165,7 @@ impl AgentCollaborationSelectorDirectory {
             });
         if !templates_are_canonical
             || !models_are_canonical
-            || self.prompt_data_json().len() > AGENT_COLLABORATION_MAX_SELECTOR_DIRECTORY_BYTES
+            || escaped_selector_json(self).len() > AGENT_COLLABORATION_MAX_SELECTOR_DIRECTORY_BYTES
         {
             return Err(crate::AgentError::new(
                 "Agent collaboration selector snapshot is not canonical or bounded.",
@@ -168,6 +173,19 @@ impl AgentCollaborationSelectorDirectory {
         }
         Ok(())
     }
+}
+
+fn escaped_selector_json(value: &impl Serialize) -> String {
+    serde_json::to_string(value)
+        .map(|json| {
+            json.replace('&', "\\u0026")
+                .replace('<', "\\u003c")
+                .replace('>', "\\u003e")
+                .replace('`', "\\u0060")
+                .replace('\u{2028}', "\\u2028")
+                .replace('\u{2029}', "\\u2029")
+        })
+        .unwrap_or_else(|_| "{\"templates\":[],\"models\":[],\"truncated\":true}".to_string())
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -369,7 +387,7 @@ pub enum AgentCollaborationAction {
     FollowupTask(AgentMessageRequest),
     Wait(AgentWaitRequest),
     List,
-    Interrupt { target_agent_id: String },
+    Interrupt { target_task_name: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -384,13 +402,13 @@ pub struct AgentSpawnRequest {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentMessageRequest {
-    pub target_agent_id: String,
+    pub target_task_name: String,
     pub message: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentWaitRequest {
-    pub target_agent_ids: Vec<String>,
+    pub target_task_names: Vec<String>,
     pub timeout_ms: u64,
 }
 
@@ -437,6 +455,7 @@ pub struct AgentHarnessSummary {
     pub task_name: String,
     pub task_path: String,
     pub parent_agent_id: Option<String>,
+    pub parent_task_name: Option<String>,
     pub display_status: AgentDisplayStatus,
     pub model_display_name: Option<String>,
     pub latest_activity_at: i64,
@@ -447,6 +466,7 @@ pub struct AgentHarnessSummary {
 pub enum AgentCollaborationToolResult {
     Spawned {
         child_agent_id: String,
+        task_name: String,
         task_path: String,
         model_display_name: String,
         model_capabilities: ModelCapabilities,
@@ -454,6 +474,7 @@ pub enum AgentCollaborationToolResult {
     },
     MessageQueued {
         message_id: String,
+        task_name: String,
         delivery_state: AgentCollaborationDeliveryState,
     },
     WaitReady {
@@ -469,6 +490,7 @@ pub enum AgentCollaborationToolResult {
     },
     Interrupted {
         target_agent_id: String,
+        task_name: String,
         status: AgentInterruptStatus,
     },
 }
@@ -480,44 +502,43 @@ impl AgentCollaborationToolResult {
         use serde_json::json;
         Ok(match self {
             Self::Spawned {
-                child_agent_id,
-                task_path,
+                task_name,
                 model_display_name,
                 model_capabilities,
                 status,
+                ..
             } => json!({
-                "childAgentId": child_agent_id,
-                "taskPath": task_path,
+                "taskName": task_name,
                 "modelDisplayName": model_display_name,
                 "modelCapabilities": model_capabilities,
                 "status": status,
             }),
             Self::MessageQueued {
-                message_id,
+                task_name,
                 delivery_state,
+                ..
             } => json!({
-                "messageId": message_id,
+                "taskName": task_name,
                 "deliveryState": delivery_state,
             }),
-            Self::WaitReady {
-                receipt_id,
-                source_receipt_id,
-                targets,
-            } => json!({
-                "receiptId": receipt_id,
-                "sourceReceiptId": source_receipt_id,
-                "targets": targets,
-            }),
+            Self::WaitReady { targets, .. } => crate::agent_wait_model_value(&targets)?,
             Self::WaitStopped { reason } => json!({
                 "ready": false,
                 "reason": reason,
             }),
-            Self::Agents { agents } => json!({ "agents": agents }),
+            Self::Agents { agents } => json!({
+                "agents": agents.into_iter().map(|agent| json!({
+                    "taskName": agent.task_name,
+                    "parentTaskName": agent.parent_task_name,
+                    "status": agent.display_status,
+                    "modelDisplayName": agent.model_display_name,
+                    "latestActivityAt": agent.latest_activity_at,
+                })).collect::<Vec<_>>()
+            }),
             Self::Interrupted {
-                target_agent_id,
-                status,
+                task_name, status, ..
             } => json!({
-                "targetAgentId": target_agent_id,
+                "taskName": task_name,
                 "status": status,
             }),
         })
@@ -528,8 +549,9 @@ impl AgentCollaborationToolResult {
 pub enum AgentCollaborationResultPersistence {
     RuntimeCommits,
     /// The Host atomically advanced collaboration cursors and committed this exact wait
-    /// ToolResult to the durable trace/model context. Runtime must update only its in-memory
-    /// recorder and must not publish the same prefix a second time.
+    /// ToolResult to the durable trace/model context. Runtime updates its recorder and publishes
+    /// the paired trace/context snapshot idempotently; it must not execute the tool or consume
+    /// the wait receipt again.
     PrecommittedWaitToolResult,
 }
 
@@ -609,6 +631,19 @@ mod tests {
         }
         assert!(encoded.contains("defaultModelCapabilities"));
         assert!(encoded.contains("capabilities"));
+        assert!(
+            encoded.contains("templateId"),
+            "the checkpoint retains exact authorization identity"
+        );
+        let model_visible = directory.prompt_data_json();
+        assert!(!model_visible.contains("templateId"));
+        assert!(!model_visible.contains("templateRevision"));
+        assert!(!model_visible.contains("template-00"));
+        assert!(
+            model_visible.contains("modelConfigId"),
+            "the model selector remains addressable"
+        );
+        assert!(model_visible.len() <= encoded.len());
     }
 
     #[test]
@@ -657,8 +692,6 @@ mod tests {
         assert_eq!(
             value,
             serde_json::json!({
-                "receiptId": "receipt",
-                "sourceReceiptId": "source",
                 "targets": []
             })
         );
@@ -668,6 +701,7 @@ mod tests {
     fn spawn_result_reports_the_frozen_child_model_capabilities() {
         let value = AgentCollaborationToolResult::Spawned {
             child_agent_id: "agent-vision".into(),
+            task_name: "vision".into(),
             task_path: "/root/vision".into(),
             model_display_name: "Vision".into(),
             model_capabilities: ModelCapabilities { image_input: true },
@@ -677,5 +711,48 @@ mod tests {
         .unwrap();
         assert_eq!(value["modelCapabilities"]["imageInput"], true);
         assert_eq!(value["modelDisplayName"], "Vision");
+        assert_eq!(value["taskName"], "vision");
+        assert!(value.get("childAgentId").is_none());
+        assert!(value.get("taskPath").is_none());
+    }
+
+    #[test]
+    fn collaboration_model_results_address_tasks_without_internal_identities() {
+        let results = [
+            AgentCollaborationToolResult::MessageQueued {
+                message_id: "private-message-id".into(),
+                task_name: "review".into(),
+                delivery_state: AgentCollaborationDeliveryState::Queued,
+            },
+            AgentCollaborationToolResult::Interrupted {
+                target_agent_id: "private-agent-id".into(),
+                task_name: "review".into(),
+                status: AgentInterruptStatus::InterruptRequested,
+            },
+            AgentCollaborationToolResult::Agents {
+                agents: vec![AgentHarnessSummary {
+                    agent_id: "private-agent-id".into(),
+                    task_name: "review".into(),
+                    task_path: "/root/review".into(),
+                    parent_agent_id: Some("private-parent-id".into()),
+                    parent_task_name: Some("Root".into()),
+                    display_status: AgentDisplayStatus::WaitingApproval,
+                    model_display_name: Some("Model".into()),
+                    latest_activity_at: 100,
+                }],
+            },
+        ];
+        for result in results {
+            let value = result.into_model_value().unwrap();
+            let serialized = value.to_string();
+            assert!(!serialized.contains("private-"));
+            assert!(!serialized.contains("/root"));
+            let target = value.get("agents").map_or(&value, |agents| &agents[0]);
+            assert_eq!(target["taskName"], "review");
+            if value.get("agents").is_some() {
+                assert_eq!(target["parentTaskName"], "Root");
+                assert_eq!(target["status"], "waiting_approval");
+            }
+        }
     }
 }

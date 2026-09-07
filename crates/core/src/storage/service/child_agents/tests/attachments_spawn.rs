@@ -192,6 +192,79 @@ fn unexecutable_identity_names_are_rejected_before_spawn_but_payloads_remain_mul
 }
 
 #[test]
+fn reserved_root_name_is_rejected_at_every_child_depth_without_any_spawn_facts() {
+    let fixture = Fixture::new(Some("model-a"));
+    let first = fixture
+        .service
+        .create_child_agent(&spawn_input("ordinary-child", "ordinary_child"))
+        .unwrap();
+    let mut nested_input = spawn_input("ordinary-grandchild", "ordinary_grandchild");
+    nested_input.parent_agent_id = first.agent.agent_id.clone();
+    let second = fixture.service.create_child_agent(&nested_input).unwrap();
+    let counts = || {
+        let connection = fixture.service.state.connection().unwrap();
+        [
+            "agent_nodes",
+            "conversations",
+            "messages",
+            "agent_mailbox_messages",
+            "agent_wake_requests",
+            "child_context_snapshots",
+        ]
+        .map(|table| {
+            connection
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get::<_, u64>(0)
+                })
+                .unwrap()
+        })
+    };
+    let before = counts();
+    // Root uses the fixture name Root, so a reserved-name rejection cannot be a duplicate-name collision.
+    for (index, parent) in [
+        "agent-root",
+        first.agent.agent_id.as_str(),
+        second.agent.agent_id.as_str(),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut input = spawn_input(
+            &format!("reserved-child-{index}"),
+            crate::ROOT_AGENT_TASK_NAME,
+        );
+        input.parent_agent_id = parent.to_string();
+        for _ in 0..2 {
+            assert_eq!(
+                fixture.service.create_child_agent(&input),
+                Err(ChildAgentSpawnError::InvalidInput {
+                    field: "task_name",
+                    reason: crate::ROOT_AGENT_TASK_NAME_RESERVED_MESSAGE.to_string(),
+                })
+            );
+            assert_eq!(counts(), before);
+        }
+    }
+    // An existing idempotency key must not turn a reserved-name attempt into a replay or a write.
+    let mut reused = spawn_input("ordinary-child", crate::ROOT_AGENT_TASK_NAME);
+    assert_eq!(
+        fixture.service.create_child_agent(&reused),
+        Err(ChildAgentSpawnError::InvalidInput {
+            field: "task_name",
+            reason: crate::ROOT_AGENT_TASK_NAME_RESERVED_MESSAGE.to_string(),
+        })
+    );
+    assert_eq!(counts(), before);
+    reused.task_name = "ordinary_child".to_string();
+    reused.task = "Perform ordinary_child and report evidence.".to_string();
+    assert_eq!(
+        fixture.service.create_child_agent(&reused).unwrap().agent,
+        first.agent
+    );
+    assert_eq!(counts(), before);
+}
+
+#[test]
 fn atomic_spawn_persists_independent_conversation_task_projection_and_queued_wake() {
     let fixture = Fixture::new(Some("model-a"));
     let input = spawn_input("spawn-1", "security_review");

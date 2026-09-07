@@ -800,6 +800,7 @@ fn prepare_conversation_turn_from_source(
         conversation_turn_trace: None,
         conversation_model_context_items: Vec::new(),
     });
+    storage.project_agent_messages_for_model(&conversation_id, &mut agent_messages)?;
     let provider_usage_semantics =
         mycopilot_core::resolve_provider_runtime_capabilities(&provider_protocol_key)
             .map_err(|error| error.to_string())?

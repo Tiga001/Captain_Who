@@ -23,6 +23,7 @@ import { formatTranslation } from '../../../config/translationFormat'
 import type { ChatAgentRunView, ChatAgentTimelineItem, ChatMessage } from '../chatTypes'
 import type { ChatGuidanceTimelineItem } from '../chatTypes'
 import { getUniqueWebSearchSources } from '../agentWebSearch'
+import { getFinalTimeline } from '../../agentRun/messageTimeline'
 import { stripAttachmentSummary } from '../chatAttachments'
 import {
   getAttachmentBadgeLabel,
@@ -587,7 +588,7 @@ function AgentRunView({
   const { t } = useFrontendConfig()
   const run = message.agentRun
   const runIsSettled = !run || isRunSettled(run)
-  const timeline = useMemo(() => run?.timeline ?? [], [run?.timeline])
+  const timeline = useMemo(() => (run ? getFinalTimeline(run) : []), [run])
   const interactionCallIds = new Set(
     humanInteractionRequestsForMessage(message, humanInteraction?.openRequests ?? []).map(
       (request) => request.toolCallId
@@ -602,7 +603,10 @@ function AgentRunView({
 
     const normalizedFinalAnswer = finalAnswerContent.trim()
     return timeline.findLastIndex(
-      (item) => item.type === 'message' && item.content.trim() === normalizedFinalAnswer
+      (item) =>
+        item.type === 'message' &&
+        item.traceSequence === undefined &&
+        item.content.trim() === normalizedFinalAnswer
     )
   }, [finalAnswerContent, run, timeline])
   const timelineWithoutFinalAnswer = useMemo(
@@ -772,8 +776,10 @@ function AgentRunView({
     timeline
   ])
   const finalAnswerRepresentedByTimeline = useMemo(
-    () => isContentFullyRepresentedByTimeline(finalAnswerContent, timelineWithoutFinalAnswer),
-    [finalAnswerContent, timelineWithoutFinalAnswer]
+    () =>
+      run?.status !== 'completed' &&
+      isContentFullyRepresentedByTimeline(finalAnswerContent, timelineWithoutFinalAnswer),
+    [finalAnswerContent, run?.status, timelineWithoutFinalAnswer]
   )
   const displayTimeline = useMemo(
     () => displayTimelineBlocks.flatMap((block) => (block.kind === 'timeline' ? block.items : [])),

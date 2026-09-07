@@ -6,6 +6,10 @@ use crate::provider_profile::ReasoningEffort;
 
 pub const AGENT_GRAPH_SCHEMA_VERSION: u32 = 1;
 pub const AGENT_EFFECTIVE_PERMISSION_SNAPSHOT_SCHEMA_VERSION: u32 = 2;
+/// Stable model-facing address for every newly created root, independent of its chat title.
+pub const ROOT_AGENT_TASK_NAME: &str = "主智能体";
+pub const ROOT_AGENT_TASK_NAME_RESERVED_MESSAGE: &str =
+    "主智能体 is reserved for the root Agent. Choose a different task_name for a child Agent.";
 
 /// Derives the one trusted root-Agent identity for a Conversation.
 ///
@@ -22,41 +26,15 @@ pub fn root_agent_creation_request_id(conversation_id: &str) -> String {
     format!("harness-root-{}", &digest[..32])
 }
 
-/// Applies the persisted root task-name constraints without changing the user-visible title.
-pub fn bounded_root_agent_task_name(title: &str) -> String {
-    const MAX_TASK_NAME_BYTES: usize = 256;
-
-    // Conversation titles are natural-language display text and may contain Markdown links.
-    // Root task names are persisted as one Agent task-path segment, so normalize only the
-    // internal identity instead of restricting or rewriting the user-visible title.
-    let normalized = title
-        .chars()
-        .map(|character| {
-            if character.is_control() || character == '/' {
-                ' '
-            } else {
-                character
-            }
-        })
-        .collect::<String>()
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
-    let title = if normalized.is_empty() {
-        "Root"
-    } else {
-        normalized.as_str()
-    };
-    let mut boundary = title.len().min(MAX_TASK_NAME_BYTES);
-    while boundary > 0 && !title.is_char_boundary(boundary) {
-        boundary -= 1;
+/// Shared by child creation and fork insertion; root names cannot become child addresses.
+pub(crate) fn validate_child_agent_task_name(task_name: &str) -> Result<(), AgentGraphError> {
+    if task_name == ROOT_AGENT_TASK_NAME {
+        return Err(AgentGraphError::InvalidInput {
+            field: "task_name",
+            reason: ROOT_AGENT_TASK_NAME_RESERVED_MESSAGE.to_string(),
+        });
     }
-    let bounded = title[..boundary].trim();
-    if bounded.is_empty() {
-        "Root".to_string()
-    } else {
-        bounded.to_string()
-    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

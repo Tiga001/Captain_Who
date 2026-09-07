@@ -5,10 +5,28 @@ use crate::{
     EnqueueAgentMessageInput, EnqueueAgentWakeInput, EnsureRootAgentInput,
     FinishAgentTurnResultInput, SendAgentMessageRequest,
 };
+use serde_json::json;
 
 const TEST_MAX_MESSAGE_BYTES: usize = 1_048_576;
 const TEST_MAX_UNBOUND_MAILBOX_MESSAGES: u64 = 1_024;
 const TEST_MAX_UNBOUND_ORDINARY_MAILBOX_MESSAGES: u64 = 960;
+
+fn result_payload(agent_id: &str, task_name: &str, task_path: &str, summary: &str) -> String {
+    serde_json::to_string(&crate::AgentTurnResultEnvelope {
+        schema_version: crate::AGENT_RESULT_ENVELOPE_SCHEMA_VERSION,
+        child_agent_id: agent_id.into(),
+        task_name: task_name.into(),
+        task_path: task_path.into(),
+        wake_id: "private-wake".into(),
+        turn_id: Some("private-turn".into()),
+        run_id: Some("private-run".into()),
+        status: AgentWakeStatus::Completed,
+        summary: summary.into(),
+        artifact_refs: Vec::new(),
+        terminal_error: None,
+    })
+    .unwrap()
+}
 
 fn connection() -> Connection {
     let connection = Connection::open_in_memory().unwrap();
@@ -664,7 +682,12 @@ fn wait_consumes_only_caller_inbox_and_coalesces_result_wake() {
             recipient_agent_id: "agent-child".into(),
             request_id: "result-message-request".into(),
             kind: AgentMailboxKind::Result,
-            content: "grandchild result".into(),
+            content: result_payload(
+                "agent-grand",
+                "grand",
+                "/root/child/grand",
+                "grandchild result",
+            ),
             projection_message_id: "projection-result".into(),
         },
         51,
@@ -766,7 +789,12 @@ fn wait_binding_rolls_back_before_a_durable_tool_result_can_be_committed() {
             recipient_agent_id: "agent-root".into(),
             request_id: "message-wait-rollback-request".into(),
             kind: AgentMailboxKind::Result,
-            content: "authenticated child result".into(),
+            content: result_payload(
+                "agent-child",
+                "child",
+                "/root/child",
+                "authenticated child result",
+            ),
             projection_message_id: "projection-wait-rollback".into(),
         },
         57,
@@ -1062,11 +1090,7 @@ fn wait_enforces_global_fifo_message_and_byte_budget_leaving_excess_pending() {
         call_id: call.id.clone(),
         tool: call.tool.clone(),
         ok: true,
-        result: Some(json!({
-            "receiptId": first.receipt.receipt_id,
-            "sourceReceiptId": first.source_receipt_id,
-            "targets": first.targets,
-        })),
+        result: Some(crate::agent_wait_model_value(&first.targets).unwrap()),
         error: None,
     };
     let mut runtime = crate::conversation_trace::ConversationTraceRecorder::default();
@@ -1158,7 +1182,8 @@ fn wait_truncates_oversized_fifo_head_and_caps_distinct_targets() {
         .find(|message| message.mailbox_sequence == u64::try_from(sequences[0]).unwrap())
         .unwrap();
     let envelope: serde_json::Value = serde_json::from_str(&first.content).unwrap();
-    assert_eq!(envelope["senderAgentId"], "agent-child");
+    assert_eq!(envelope["senderTaskName"], "child");
+    assert!(envelope.get("senderAgentId").is_none());
     assert_eq!(envelope["payloadTruncated"], true);
     assert!(
         first.content.len() <= crate::conversation_trace::AGENT_MAILBOX_MODEL_ENVELOPE_MAX_BYTES
@@ -1432,7 +1457,12 @@ fn legacy_open_message_wait_replays_authenticated_snapshot_and_closes_once() {
             recipient_agent_id: "agent-root".into(),
             request_id: "message-open-wait-request".into(),
             kind: AgentMailboxKind::Result,
-            content: "frozen child payload".into(),
+            content: result_payload(
+                "agent-child",
+                "child",
+                "/root/child",
+                "frozen child payload",
+            ),
             projection_message_id: "projection-open-wait".into(),
         },
         91,
@@ -1493,6 +1523,7 @@ fn legacy_open_message_wait_replays_authenticated_snapshot_and_closes_once() {
     let target_version = target_status_version(&connection, "agent-child").unwrap();
     let frozen = AgentWaitTargetSnapshot {
         target_agent_id: "agent-child".into(),
+        target_task_name: "child".into(),
         messages: vec![wait_delivered(&candidate).unwrap()],
         target_status_version: target_version,
         latest_wake_sequence: None,
@@ -1614,14 +1645,20 @@ fn legacy_open_message_wait_replays_authenticated_snapshot_and_closes_once() {
         item => panic!("unexpected recovered trace item: {item:?}"),
     };
     let recovered_message = &observation["targets"][0]["messages"][0];
-    assert_eq!(observation["sourceReceiptId"], receipt.receipt_id);
-    assert_eq!(recovered_message["senderAgentId"], "agent-child");
+    assert!(observation.get("sourceReceiptId").is_none());
+    assert_eq!(observation["targets"][0]["taskName"], "child");
+    assert_eq!(recovered_message["senderTaskName"], "child");
+    assert!(recovered_message.get("senderAgentId").is_none());
     assert_eq!(recovered_message["kind"], "result");
     let authenticated: serde_json::Value =
         serde_json::from_str(recovered_message["content"].as_str().unwrap()).unwrap();
-    assert_eq!(authenticated["senderAgentId"], "agent-child");
+    assert_eq!(authenticated["senderTaskName"], "child");
+    assert!(authenticated.get("senderAgentId").is_none());
     assert_eq!(authenticated["kind"], "result");
-    assert_eq!(authenticated["payload"], "frozen child payload");
+    let payload: serde_json::Value =
+        serde_json::from_str(authenticated["payload"].as_str().unwrap()).unwrap();
+    assert_eq!(payload["summary"], "frozen child payload");
+    assert!(payload.get("childAgentId").is_none());
 }
 
 #[test]

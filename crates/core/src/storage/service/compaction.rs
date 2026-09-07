@@ -1,6 +1,38 @@
 use super::*;
 
 impl StorageService {
+    /// Builds only the summary model's source view. The caller retains the canonical prefix and
+    /// continuity for revision checks and commit; immutable journal facts are never rewritten.
+    pub fn project_context_compaction_prefix_for_model(
+        &self,
+        prefix: &ContextCompactionPrefix,
+    ) -> Result<ContextCompactionPrefix, String> {
+        let connection = self.state.connection()?;
+        let mut projected = prefix.clone();
+        for item in &mut projected.source_items {
+            if let crate::ContextCompactionSourceItem::Message {
+                cursor,
+                role,
+                content,
+                ..
+            } = item
+            {
+                if role == "user" {
+                    if let Some(model_content) =
+                        crate::storage::agent_message_model_projection::project_message(
+                            &connection,
+                            &prefix.conversation_id,
+                            cursor.message_id(),
+                        )?
+                    {
+                        *content = model_content;
+                    }
+                }
+            }
+        }
+        Ok(projected)
+    }
+
     pub fn conversation_requires_context_adaptation(
         &self,
         conversation_id: &str,

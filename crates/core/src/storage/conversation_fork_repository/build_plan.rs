@@ -779,7 +779,7 @@ fn build_single_conversation_fork_plan_at_point(
             agent_id: root_agent_id_for_conversation(&target_conversation_id),
             conversation_id: target_conversation_id.clone(),
             creation_request_id: root_agent_creation_request_id(&target_conversation_id),
-            task_name: bounded_root_agent_task_name(&source.title),
+            task_name: ROOT_AGENT_TASK_NAME.to_string(),
         },
     });
 
