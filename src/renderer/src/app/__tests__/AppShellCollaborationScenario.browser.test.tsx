@@ -491,6 +491,16 @@ describe('AppShell deterministic collaboration scenario', () => {
       .toBeGreaterThanOrEqual(2)
     expect(screen.container.querySelector('[data-semantic="waiting_approval"]')).toBeNull()
     expect(screen.container.querySelectorAll('[data-approval-id]')).toHaveLength(2)
+    expect(
+      screen.container.querySelectorAll('.conversation-approval-queue__item:not([hidden])')
+    ).toHaveLength(1)
+    expect(
+      screen.container.querySelector('.chat-conversation-page__messages [data-approval-id]')
+    ).toBeNull()
+    const approvalNavigation = screen.getByRole('navigation', {
+      name: enUSTranslations['agent.approval.navigation.label']
+    })
+    await expect.element(approvalNavigation.getByText('1 / 2')).toBeVisible()
     await captureStableScreenshot(
       screen.container.querySelector('.main-panel__surface') ?? screen.container,
       '__screenshots__/AppShellCollaborationScenario.browser.test.tsx/root-collaboration.png'
@@ -512,6 +522,9 @@ describe('AppShell deterministic collaboration scenario', () => {
       .poll(() => scenarioState.observerLoadRequests)
       .toContain('conversation-root:conversation-review')
 
+    await approvalNavigation
+      .getByRole('button', { name: enUSTranslations['agent.approval.navigation.next'] })
+      .click()
     const approveCard = screen.container.querySelector<HTMLElement>(
       '[data-approval-id="approval-approve"]'
     )
@@ -519,6 +532,15 @@ describe('AppShell deterministic collaboration scenario', () => {
     if (!approveButton) throw new Error('Missing approve button')
     await page.elementLocator(approveButton).click()
     await expect.poll(() => scenarioState.decisionInputs.length).toBe(1)
+    await expect.element(approvalNavigation.getByText('1 / 1')).toBeVisible()
+    await expect
+      .element(
+        approvalNavigation.getByRole('button', {
+          name: enUSTranslations['agent.approval.navigation.next']
+        })
+      )
+      .toBeDisabled()
+    expect(screen.container.querySelector('[data-approval-id="approval-approve"]')).toBeNull()
 
     storagePersistenceSpies.saveChatMessageState.mockClear()
     storagePersistenceSpies.saveChatMessageUiState.mockClear()
@@ -547,23 +569,16 @@ describe('AppShell deterministic collaboration scenario', () => {
       ])
     expect(storagePersistenceSpies.saveChatMessageState).not.toHaveBeenCalled()
 
-    // A fresh root projection (the same restart/remount path used below) exposes the second
-    // pending action. The production list deliberately renders one actionable approval at a time.
-    await screen.unmount()
-    scenarioState.approvalList = {
-      schemaVersion: 1,
-      approvals: parseCollaborationApprovalList(scenarioFixture.approvalList).approvals.filter(
-        (approval) => approval.approvalId === 'approval-reject'
-      )
-    }
-    const rejectionScreen = await render(<AppShell />)
-    await rejectionScreen.getByRole('button', { name: 'select-conversation-root' }).click()
-    await expect.element(rejectionScreen.getByTestId('collaboration-timeline')).toBeVisible()
-    const rejectButton = await rejectionScreen.getByRole('button', {
+    // The authoritative decision removes only its own card and exposes the remaining approval
+    // in the same mounted root conversation, even when the subsequent list is stale.
+    const rejectButton = screen.getByRole('button', {
       name: enUSTranslations['agent.approval.dialog.reject']
     })
     await rejectButton.click()
     await expect.poll(() => scenarioState.decisionInputs.length).toBe(2)
+    await expect
+      .poll(() => screen.container.querySelector('.conversation-approval-queue'))
+      .toBeNull()
     expect(scenarioState.decisionInputs).toEqual([
       {
         approvalId: 'approval-approve',
@@ -579,26 +594,26 @@ describe('AppShell deterministic collaboration scenario', () => {
       }
     ])
 
-    const rootAgentListenerCount = scenarioState.agentEventListeners.size
-    await expect.element(rejectionScreen.getByRole('button', { name: 'Subagents' })).toBeVisible()
-    await page
-      .elementLocator(rejectionScreen.getByRole('button', { name: 'Subagents' }).element())
-      .click()
+    const backToAgents = screen.getByRole('button', {
+      name: enUSTranslations['agentCenter.back'],
+      exact: true
+    })
+    await expect.element(backToAgents).toBeVisible()
+    ;(backToAgents.element() as HTMLButtonElement).click()
     await expect
       .poll(() =>
-        rejectionScreen.container.querySelector('.agent-center__row[data-agent-id="agent-review"]')
+        screen.container.querySelector('.agent-center__row[data-agent-id="agent-review"]')
       )
       .not.toBeNull()
-    expect(rejectionScreen.container.textContent).toContain('Model One')
-    expect(rejectionScreen.container.textContent).toContain('Model Two')
-    await expect
-      .poll(() => rejectionScreen.container.querySelector('.agent-center__observer'))
-      .toBeNull()
-    const securityRow = requiredAgentCenterRow(rejectionScreen.container, 'agent-review')
+    expect(screen.container.textContent).toContain('Model One')
+    expect(screen.container.textContent).toContain('Model Two')
+    await expect.poll(() => screen.container.querySelector('.agent-center__observer')).toBeNull()
+    const rootAgentListenerCount = scenarioState.agentEventListeners.size
+    const securityRow = requiredAgentCenterRow(screen.container, 'agent-review')
     securityRow.click()
     securityRow.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
     await expect
-      .poll(() => rejectionScreen.container.querySelector('.agent-center__observer'))
+      .poll(() => screen.container.querySelector('.agent-center__observer'))
       .not.toBeNull()
     await expect
       .poll(() => scenarioState.observerLoadRequests)
@@ -606,24 +621,18 @@ describe('AppShell deterministic collaboration scenario', () => {
     expect(scenarioState.observerEventListeners.size).toBe(1)
     expect(scenarioState.agentEventListeners.size).toBe(rootAgentListenerCount + 1)
     await expect
-      .poll(
-        () => rejectionScreen.container.querySelector('.agent-center__state')?.textContent ?? ''
-      )
+      .poll(() => screen.container.querySelector('.agent-center__state')?.textContent ?? '')
       .not.toContain('Loading')
-    await expect
-      .element(rejectionScreen.getByText('Inspect the authentication boundary.'))
-      .toBeVisible()
+    await expect.element(screen.getByText('Inspect the authentication boundary.')).toBeVisible()
     expect(
-      rejectionScreen.container.querySelector('[data-conversation-surface-mode="observer"]')
+      screen.container.querySelector('[data-conversation-surface-mode="observer"]')
     ).not.toBeNull()
+    expect(screen.container.querySelector('.agent-center__observer .chat-composer')).toBeNull()
+    expect(screen.container.querySelector('.agent-center__observer textarea')).toBeNull()
     expect(
-      rejectionScreen.container.querySelector('.agent-center__observer .chat-composer')
+      screen.container.querySelector('.agent-center__observer .agent-approval-dialog')
     ).toBeNull()
-    expect(rejectionScreen.container.querySelector('.agent-center__observer textarea')).toBeNull()
-    expect(
-      rejectionScreen.container.querySelector('.agent-center__observer .agent-approval-dialog')
-    ).toBeNull()
-    expect(rejectionScreen.container.textContent).toContain('Inspect the authentication boundary.')
+    expect(screen.container.textContent).toContain('Inspect the authentication boundary.')
 
     // Both children may stream at the same time. The authenticated Host envelope, rather than
     // whichever observer happens to be mounted, owns the run/message routing decision.
@@ -662,9 +671,9 @@ describe('AppShell deterministic collaboration scenario', () => {
       })
     )
     await expect
-      .poll(() => rejectionScreen.container.querySelector('.agent-center__observer')?.textContent)
+      .poll(() => screen.container.querySelector('.agent-center__observer')?.textContent)
       .toContain('live review evidence')
-    expect(rejectionScreen.container.textContent).not.toContain('compatibility-only live delta')
+    expect(screen.container.textContent).not.toContain('compatibility-only live delta')
     emitObserverEvent(
       parseAgentObserverEventEnvelope({
         schemaVersion: 1,
@@ -687,7 +696,7 @@ describe('AppShell deterministic collaboration scenario', () => {
     )
     await expect
       .poll(() =>
-        rejectionScreen.container.querySelector<HTMLButtonElement>(
+        screen.container.querySelector<HTMLButtonElement>(
           '.agent-center__observer .chat-message__usage button'
         )
       )
@@ -699,13 +708,13 @@ describe('AppShell deterministic collaboration scenario', () => {
         .get('conversation-review')
         ?.messages.find((message) => message.messageId === 'assistant-review')?.agentRunJson
     ).toContain('"totalTokens":18')
-    expect(rejectionScreen.container.querySelector('.agent-center__observer')).not.toBeNull()
-    expect(rejectionScreen.container.textContent).toContain('Inspect the authentication boundary.')
-    const usageButton = rejectionScreen.container.querySelector<HTMLButtonElement>(
+    expect(screen.container.querySelector('.agent-center__observer')).not.toBeNull()
+    expect(screen.container.textContent).toContain('Inspect the authentication boundary.')
+    const usageButton = screen.container.querySelector<HTMLButtonElement>(
       '.agent-center__observer .chat-message__usage button'
     )
     if (!usageButton) throw new Error('Missing observer Usage action')
-    const agentCenter = rejectionScreen.container.querySelector<HTMLElement>(
+    const agentCenter = screen.container.querySelector<HTMLElement>(
       '.right-sidebar__page[data-active="true"] .agent-center--detail'
     )
     if (!agentCenter) throw new Error('Missing visible Agent Center detail')
@@ -747,12 +756,10 @@ describe('AppShell deterministic collaboration scenario', () => {
 
     // Root scope changes must unmount the retained detail observer and release both live channels;
     // a keep-alive sidebar page may persist, but a child subscription may not cross roots.
-    await rejectionScreen.getByRole('button', { name: 'select-conversation-other' }).click()
+    await screen.getByRole('button', { name: 'select-conversation-other' }).click()
     await expect.poll(() => scenarioState.observerEventListeners.size).toBe(0)
     expect(scenarioState.agentEventListeners.size).toBe(rootAgentListenerCount)
-    expect(
-      rejectionScreen.container.querySelector('[data-conversation-surface-mode="observer"]')
-    ).toBeNull()
+    expect(screen.container.querySelector('[data-conversation-surface-mode="observer"]')).toBeNull()
   })
 
   it('converges through the durable sequence, survives remount and drops the old root scope', async () => {

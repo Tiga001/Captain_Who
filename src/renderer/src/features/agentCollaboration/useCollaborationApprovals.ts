@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type {
   CollaborationApprovalDecisionResult,
-  CollaborationApprovalProjection
+  CollaborationApprovalProjection,
+  CollaborationApprovalStatus
 } from '@mycopilot/protocol'
 import { decideCollaborationApproval, listCollaborationApprovals } from './collaborationClient'
-import type { CollaborationApprovalDecision } from './CollaborationApprovalPanel'
+import type { CollaborationApprovalDecisionHandler } from './ProjectedApprovalDecisionCard'
 
 export interface UseCollaborationApprovalsOptions {
   enabled?: boolean
@@ -15,11 +16,7 @@ export interface UseCollaborationApprovalsOptions {
 
 export interface CollaborationApprovalsController {
   approvals: readonly CollaborationApprovalProjection[]
-  decide: (
-    approvalId: string,
-    decision: CollaborationApprovalDecision,
-    message: string | null
-  ) => Promise<CollaborationApprovalDecisionResult>
+  decide: CollaborationApprovalDecisionHandler
   error: string | null
   loading: boolean
   refresh: () => Promise<void>
@@ -42,6 +39,7 @@ export function useCollaborationApprovals({
   const [loading, setLoading] = useState(false)
   const generationRef = useRef(0)
   const inFlightRef = useRef(new Set<string>())
+  const decisionStatusesRef = useRef(new Map<string, CollaborationApprovalStatus>())
   const rootConversationIdRef = useRef(rootConversationId)
 
   useEffect(() => {
@@ -50,12 +48,15 @@ export function useCollaborationApprovals({
 
   const applyAuthoritativeDecisionStatus = useCallback(
     (decisionRootConversationId: string, result: CollaborationApprovalDecisionResult) => {
-      if (
-        result.status === 'pending' ||
-        rootConversationIdRef.current !== decisionRootConversationId
-      ) {
-        return
-      }
+      if (result.status === 'pending') return
+
+      // Only decision acknowledgements are retained here. List-only states may legitimately
+      // change during recovery; an old pending list must not reopen an acknowledged decision.
+      decisionStatusesRef.current.set(
+        approvalScopeKey(decisionRootConversationId, result.approvalId),
+        result.status
+      )
+      if (rootConversationIdRef.current !== decisionRootConversationId) return
 
       setApprovals((current) =>
         current.map((approval) =>
@@ -69,6 +70,9 @@ export function useCollaborationApprovals({
   )
 
   const refresh = useCallback(async () => {
+    // A decision may finish after navigation and still hold this root's refresh callback.
+    // Ignore it before touching either the active scope or its request generation.
+    if (rootConversationIdRef.current !== rootConversationId) return
     const generation = ++generationRef.current
     setApprovalsRootConversationId((currentRootConversationId) => {
       if (currentRootConversationId !== rootConversationId) {
@@ -87,8 +91,22 @@ export function useCollaborationApprovals({
     setLoading(true)
     try {
       const projection = await listCollaborationApprovals({ rootConversationId })
-      if (generationRef.current !== generation) return
-      setApprovals(projection.approvals)
+      if (
+        generationRef.current !== generation ||
+        rootConversationIdRef.current !== rootConversationId
+      ) {
+        return
+      }
+      setApprovals(
+        projection.approvals.map((approval) => {
+          const acknowledgedStatus = decisionStatusesRef.current.get(
+            approvalScopeKey(rootConversationId, approval.approvalId)
+          )
+          return approval.status === 'pending' && acknowledgedStatus
+            ? { ...approval, status: acknowledgedStatus }
+            : approval
+        })
+      )
       setApprovalsRootConversationId(rootConversationId)
       setError(null)
     } catch (loadError) {
@@ -106,16 +124,17 @@ export function useCollaborationApprovals({
     }
   }, [invalidationSequence, refresh])
 
-  const decide = useCallback(
-    async (approvalId: string, decision: CollaborationApprovalDecision, message: string | null) => {
+  const decide = useCallback<CollaborationApprovalDecisionHandler>(
+    async (approvalId, decision, message) => {
       if (!enabled || !rootConversationId) {
         throw new Error('Collaboration approval is unavailable.')
       }
-      if (inFlightRef.current.has(approvalId)) {
+      const scopeKey = approvalScopeKey(rootConversationId, approvalId)
+      if (inFlightRef.current.has(scopeKey)) {
         throw new Error('Collaboration approval decision is already in progress.')
       }
 
-      inFlightRef.current.add(approvalId)
+      inFlightRef.current.add(scopeKey)
       try {
         const decisionRootConversationId = rootConversationId
         const result = await decideCollaborationApproval({
@@ -134,7 +153,7 @@ export function useCollaborationApprovals({
         applyAuthoritativeDecisionStatus(decisionRootConversationId, result)
         return result
       } finally {
-        inFlightRef.current.delete(approvalId)
+        inFlightRef.current.delete(scopeKey)
       }
     },
     [applyAuthoritativeDecisionStatus, enabled, refresh, rootConversationId]
@@ -148,4 +167,8 @@ export function useCollaborationApprovals({
     loading: isCurrentScope ? loading : Boolean(enabled && rootConversationId),
     refresh
   }
+}
+
+function approvalScopeKey(rootConversationId: string, approvalId: string): string {
+  return JSON.stringify([rootConversationId, approvalId])
 }

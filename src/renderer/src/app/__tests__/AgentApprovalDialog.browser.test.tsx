@@ -378,6 +378,50 @@ describe('AgentApprovalDialog Skill script approval', () => {
 })
 
 describe('AgentApprovalDialog command approval', () => {
+  it('preserves rejection drafts and the submission lock when the same action is refreshed', async () => {
+    const action: AgentProposedAction = {
+      type: 'command',
+      command: {
+        id: 'stable-command-action',
+        command: 'pnpm test',
+        cwd: null,
+        timeoutMs: null,
+        approvalStatus: 'required',
+        riskLevel: null,
+        reason: '运行测试',
+        observe: null
+      }
+    }
+    let finish!: (accepted: boolean) => void
+    const onReject = vi.fn(() => new Promise<boolean>((resolve) => (finish = resolve)))
+    const view = (value: AgentProposedAction) => (
+      <AgentApprovalDialog
+        target={{ action: value, messageId: 'assistant-message' }}
+        onReject={onReject}
+      />
+    )
+    const screen = await render(view(action))
+    const input = screen.getByLabelText('说明拒绝原因')
+    await input.fill('请先缩小范围')
+    await screen.rerender(view(structuredClone(action)))
+    await expect.element(input).toHaveValue('请先缩小范围')
+
+    const reject = screen.getByRole('button', { name: '拒绝' })
+    await reject.click()
+    await screen.rerender(view(structuredClone(action)))
+    await expect.element(reject).toBeDisabled()
+    await reject.click({ force: true })
+    expect(onReject).toHaveBeenCalledExactlyOnceWith('assistant-message', action, '请先缩小范围')
+
+    finish(false)
+    await expect.element(reject).toBeEnabled()
+    await expect.element(input).toHaveValue('请先缩小范围')
+    await screen.rerender(
+      view({ ...action, command: { ...action.command, id: 'next-command-action' } })
+    )
+    await expect.element(input).toHaveValue('')
+  })
+
   it('shows a multiline heredoc as one scrollable preformatted command', async () => {
     const command = [
       "python3 <<'PY'",

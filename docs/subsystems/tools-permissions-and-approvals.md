@@ -136,6 +136,14 @@ model ToolCall
 
 FileChange 还允许用户对 create/update 选择“本 Run 剩余 `apply_patch`”。该选择先持久化无 authority 的 pending intent，只有当前 FileChange 以匹配 receipt 成功结算后才激活 Run grant；grant 只覆盖同 Run、同冻结权限/Toolset/Provider revision、同 workspace 或精确 external parent 下的后续 create/update，永不覆盖 delete。每次 effect boundary 都重新加载 durable grant；终态、取消、恢复身份不匹配或目录 identity 变化时撤销或 fail closed。详见 [FileChange 子系统](./file-change.md#4-审批与-run-grant)。
 
+### Renderer 审批区域
+
+根对话将主 Agent 与子 Agent 的待审批统一显示在输入框位置，每次只展示一张现有审批卡片。多条待审批时，卡片上方的来源行左侧显示当前 Agent 名称和子 Agent 头像，右侧通过箭头和当前位置/总数切换。主 Agent 不显示头像；只剩一条子 Agent 审批时仍保留来源行、`1 / 1` 和禁用的切换箭头，只剩一条主 Agent 审批时隐藏来源行。
+
+每条审批独立提交并恢复对应 Agent 的运行。Host 确认受理或结算后，该条退出待审批集合，总数减少，并显示剩余审批；提交失败则保留该条以便重试。选择与拒绝理由草稿按审批身份保留，新请求到达不会抢占用户正在处理的卡片，切换也不会把提交状态或反馈带到另一条审批。
+
+有任何待审批时，审批区域优先于人机交互问题和普通输入框；待审批全部清空后才恢复原问题或输入草稿。统一的是展示与切换，主、子 Agent 仍各自使用原有审批 API 和 Host 授权边界，子 Agent 的只读观察对话不提供审批操作。
+
 ### 后台 Automation Approval 与报告
 
 Scheduled Automation 复用普通 HumanRoot pending action、audit、Checkpoint 和审批恢复，不建立第二套审批系统：

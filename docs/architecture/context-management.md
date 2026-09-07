@@ -78,33 +78,96 @@ pending assistant message 的持久正文为空；“正在思考”等 UI place
 
 ## 组装规则
 
-`ContextFrame` 保留逻辑日志顺序；发送前通过独立的 `model_request_items()` 布局投影组织主模型请求。布局按稳定内容、半稳定说明、当前任务和动态状态排列，可选项不存在时跳过：
+`ContextFrame` 保留逻辑日志顺序；发送前通过独立的 `model_request_items()` 布局投影组织主模型请求。以下是当前主模型请求的完整逻辑层次：稳定与半稳定前缀 → 可连续继承的历史与当前运行 → 当前请求的即时尾部。可选项不存在时跳过。
 
 ```text
-01 稳定 system prompt（含稳定工具使用指导）
-02 初始 Skill 简短目录
-03 初始协作说明与目录
-04 当前能力使用指南（RequestOnly：浏览器、搜索、人机交互）
-05 Conversation World State full snapshot
-06 active semantic summary（若存在）
-07 coveredThrough 之后的统一历史及其 anchored World State diff
-   包含旧 Run 原样保留的输入、附件、Skill 说明、Run 状态与完整工具交换
-08 本次连续用户输入及其 anchored diff + 附件说明/图片
-09 Run 开始时预激活的 Skill 完整说明
-10 初始 Run World State full snapshot
-11 当前 Run 的因果时间线
-   narration / Tool Call + Tool Result / 回应与引导 / 普通后端状态事件
-   运行中新激活的 Skill / 恢复后的 Run full snapshot / World State diff
-12 Todo
-13 修复提示（空响应修复 / 文件事务纯文字违规的单次提醒）
-14 未完成文件事务的最小状态（无未完成事务时省略）
+模型请求
+│
+├─ tools：实际工具 Schema
+│   ├─ 稳定工具，按名称排序
+│   └─ 当前挂载的动态工具，按名称排序
+│
+└─ messages
+    │
+    │  稳定与半稳定前缀
+    │
+    ├─ 1. 稳定 System Prompt
+    │      基础行为、稳定工具指导、文件事务固定规则、
+    │      用户自定义指令等
+    │
+    ├─ 2. 初始 Skill 简短目录
+    ├─ 3. 初始协作说明与目录
+    │
+    ├─ 4. 当前已启用能力的使用指南
+    │      联网搜索 / 人机交互 / 浏览器
+    │      关闭能力后，对应指南撤下
+    │
+    ├─ 5. 会话 World State full 基线
+    │      工作区、权限、环境、模型选择等
+    │      联网搜索、人机交互、浏览器设置开关状态
+    │
+    ├─ 6. 当前有效压缩摘要（若存在）
+    │
+    │  历史与当前任务
+    │
+    ├─ 7. 摘要之后的统一历史
+    │      历次用户输入、助手输出、完整工具交换
+    │      原始附件材料与图片引用
+    │      当时的 Skill 完整说明、Run 状态
+    │      World State diff、忽略提问等状态事实
+    │      均保留原有因果顺序
+    │
+    ├─ 8. 本次用户输入
+    │      连续用户消息、其间关联的状态 diff
+    │      附件说明与图片
+    │
+    ├─ 9. Run 开始时预激活的 Skill 完整说明
+    │
+    ├─ 10. 初始 Run World State
+    │       本轮激活的 Skill
+    │       浏览器在当前任务中的激活状态
+    │       附件等必要运行状态
+    │
+    ├─ 11. 当前 Run 的因果时间线
+    │       助手输出
+    │       Tool Call + Tool Result
+    │       用户回答、运行引导
+    │       运行中新激活的 Skill
+    │       会话及 Run 状态 diff、必要恢复快照
+    │       忽略提问等普通后端状态事实
+    │
+    │  当前请求的即时尾部
+    │
+    ├─ 12. 当前 Todo 的精简提醒
+    │       完整计划独立保存，提醒受 500-token 预算约束
+    │
+    ├─ 13. 必要的单次修复提示
+    │       如空响应修复、文件事务纯文字违规提醒
+    │
+    └─ 14. 未完成文件事务的最小快照
+            事务 ID、路径、操作、策略、状态
+            expectedDraftRevision、nextIndex
+            allowedNextActions
+
+            没有未完成事务 → 整段省略
+            已完成事务结果 → 留在正常工具历史中
 ```
+
+这 14 项是逻辑分区，不代表固定发送 14 条消息，也不把所有内容改成 System 角色。原有消息角色、图片、Tool Call/Tool Result 配对和 Provider 续接格式继续保留。`tools` 独立于消息序列；输出预留预算参与容量判断，不是一条发送给模型的消息。具体排序以[请求布局](../../crates/core/src/context/frame/request_layout.rs)和[工具集排序](../../crates/core/src/tools/tool_set.rs)为准，公开阅读版本见[上下文管理](../../public-docs/user/learn/context-management.md)。
 
 当前布局将初始目录与能力指南放在 Conversation full 之前，并让旧历史紧接本次连续用户输入，再接预激活 Skill 与初始 Run 状态。这两项调整只移动发送位置，增加不变内容形成连续前缀的机会。
 
 本次输入可能包含多条连续 User 消息，不能只把最后一条抽到任务位置；它们之间的 anchored diff 随输入一起保留顺序。顶部 Skill/协作目录和预激活说明只来自 Run 初始组装；后来发生的 Skill 激活、恢复 full snapshot、状态 diff、同步 ToolResult 和异步 User 回应都留在当前 Run 的因果时间线，不能按内容类型全局提前。
 
 Run 结束后，第 8–11 项自然成为下一 Run 的第 7 项：原有用户消息、正文和工具日志继续保留；附件的已提取文本与图片引用、预激活 Skill 完整说明、初始和后续 Run 状态则通过 `ContextMaterial` 在原位置重放，不再次读取当前 Skill 文件或重新提取旧附件。运行过程中激活的 Skill、恢复状态及观察以同一种记录追加。旧 Run 的状态是历史观察，当前有效权限仍只由当前能力快照、Run State 和 Host 校验决定。
+
+```text
+上一 Run：前缀 + 旧 7 + 本轮 8–11 + 即时尾部 12–14
+下一 Run：前缀 + [旧 7 + 上轮 8–11（含最终回复）]
+               + 新一轮 8–11 + 新的即时尾部 12–14
+
+方括号部分 = 新一轮的 7
+```
 
 普通换轮、tools/前缀不变且没有压缩时，上一请求的输入与已发生事件保留相同 provider 消息格式；新回复和新输入追加在其后。当前 Todo、单次修复和未完成文件事务仍是请求尾部，不承诺跨 Run 保留该尾部的缓存。压缩、Provider 切换、能力 Schema/指南或初始目录变化仍会改变共同前缀。
 
@@ -357,7 +420,7 @@ capacity exceeded
 
 ### 2026-09-06 跨 Run World State 升级验收
 
-本轮已完成：搜索与人机交互可用性、浏览器用户设置进入 Conversation full/diff；浏览器任务激活、Skills 和附件保留 Run 作用域；工具名称清单仅供 Host 使用。保留上述 15 层模型消息布局，当前工具 Schema、RequestOnly 指南及状态使用同一请求边界快照。
+本轮已完成：搜索与人机交互可用性、浏览器用户设置进入 Conversation full/diff；浏览器任务激活、Skills 和附件保留 Run 作用域；工具名称清单仅供 Host 使用。当时保留 15 层模型消息布局，工具 Schema、RequestOnly 指南及状态使用同一请求边界快照；后续已将忽略提问改为普通时序事实，当前 14 项布局以上文组装规则为准。
 
 请求日志、未观察状态保护、幂等提交、观察确认、冷重建、增量缓存、只读预览、checkpoint、压缩、分支、删除及重写均已接入。完整回归发现并修复了无存储压缩执行器丢失 canonical ledger，以及恰好压缩到 Trace N 后无法重建位于 N 之后的未观察 diff 两个问题。真实 Host 回归覆盖跨三个 Run 的关闭／开启／关闭、预览不写库、凭据不入状态，以及精确 Trace 压缩后清理缓存再正常发送。
 

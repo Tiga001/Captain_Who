@@ -210,6 +210,8 @@ caller 的 exact run identity 查询 fence 并 fail closed，避免停止与新�
 
 子 Agent Approval 仍使用原 `agent_pending_actions`、checkpoint 和 continuation 状态机。根 Agent UI 看到的是 JOIN 得到的投影，决定请求只提交 `root_conversation_id + approval_id + decision`；Core Server 反查 source Agent/Run/action。重复、过期或已结算决定不会启动第二次 continuation。
 
+Renderer 在根对话输入框位置聚合主、子 Agent 待审批，每次展示一张审批卡片。多条审批通过卡片上方右侧的箭头和位置/总数切换，左侧显示当前来源名称和子 Agent 头像；主 Agent 无头像，单条子 Agent 审批仍保留来源行、`1 / 1` 和禁用的切换箭头，单条主 Agent 审批隐藏该行。每条审批独立处理，Host 确认受理或结算后移出集合并更新总数；新请求不抢占当前选择，切换保留各条拒绝草稿和提交状态。审批全部清空后才恢复人机交互问题或普通输入框。展示聚合不合并主、子审批的权限 API，observer 对话仍为只读。
+
 当前协作 notification 名必须是：
 
 - `agent.collaboration.event`

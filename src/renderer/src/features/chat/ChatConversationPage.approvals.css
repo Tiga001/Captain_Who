@@ -370,6 +370,31 @@
   gap: 8px;
 }
 
+.conversation-approval-load-error {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  color: var(--mc-color-text-danger);
+  font-size: var(--mc-font-size-xs);
+}
+
+.conversation-approval-load-error button {
+  flex: 0 0 auto;
+  padding: 4px 8px;
+  color: inherit;
+  background: transparent;
+  border: 1px solid currentColor;
+  border-radius: var(--mc-radius-md);
+  cursor: pointer;
+  font: inherit;
+}
+
+.conversation-approval-load-error button:focus-visible {
+  outline: 2px solid var(--mc-color-focus-ring);
+  outline-offset: 2px;
+}
+
 /* Keep approval controls reachable when a terminal or a short window reduces the chat height. */
 .chat-conversation-page[data-approval-pending='true'] {
   container: approval-surface / inline-size;

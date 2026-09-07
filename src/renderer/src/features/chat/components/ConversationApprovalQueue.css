@@ -1,0 +1,100 @@
+.conversation-approval-queue {
+  display: grid;
+  width: 100%;
+  min-width: 0;
+  gap: 6px;
+}
+
+.conversation-approval-queue__header,
+.conversation-approval-queue__source,
+.conversation-approval-queue__navigation {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+}
+
+.conversation-approval-queue__header {
+  padding-inline: 12px 4px;
+  color: var(--mc-color-text-strong);
+  font-size: var(--mc-font-size-chat-approval, 13px);
+  line-height: var(--mc-line-height-relaxed);
+  -webkit-app-region: no-drag;
+}
+
+.conversation-approval-queue__source {
+  overflow: hidden;
+  padding: 2px 4px;
+  font-weight: var(--mc-font-weight-medium);
+}
+
+.conversation-approval-queue__source .agent-avatar {
+  width: 20px;
+  height: 20px;
+}
+
+.conversation-approval-queue__name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.conversation-approval-queue__navigation {
+  flex: 0 0 auto;
+  margin-left: auto;
+}
+
+.conversation-approval-queue__navigation span {
+  min-width: 36px;
+  color: var(--mc-color-text-muted);
+  font-size: var(--mc-font-size-xs);
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+  white-space: nowrap;
+}
+
+.conversation-approval-queue__header button {
+  color: inherit;
+  background: transparent;
+  border: 0;
+  border-radius: var(--mc-radius-lg);
+  font: inherit;
+  cursor: pointer;
+}
+
+.conversation-approval-queue__navigation button {
+  display: grid;
+  width: 28px;
+  height: 28px;
+  flex: 0 0 auto;
+  padding: 0;
+  place-items: center;
+}
+
+.conversation-approval-queue__navigation svg {
+  width: 16px;
+  height: 16px;
+}
+
+.conversation-approval-queue__header button:hover:not(:disabled) {
+  background: var(--mc-color-state-hover);
+}
+
+.conversation-approval-queue__header button:focus-visible {
+  outline: 2px solid var(--mc-color-focus-ring);
+  outline-offset: 2px;
+}
+
+.conversation-approval-queue__header button:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+
+.conversation-approval-queue__item {
+  min-width: 0;
+}
+
+.conversation-approval-queue__item[hidden] {
+  display: none;
+}

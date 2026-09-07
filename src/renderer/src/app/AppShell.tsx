@@ -76,7 +76,6 @@ import { useAppShellRuntime } from './useAppShellRuntime'
 import { useAppShellRunControls } from './useAppShellRunControls'
 import { selectRenderableModelTransitionOperations } from '../features/chat/modelTransitionUiState'
 import { useOptionalCollaborationStore } from '../features/agentCollaboration/useCollaborationStore'
-import { CollaborationApprovalPanel } from '../features/agentCollaboration/CollaborationApprovalPanel'
 import { useCollaborationApprovals } from '../features/agentCollaboration/useCollaborationApprovals'
 import { AgentObserverConversationSurface } from '../features/agentCollaboration/AgentObserverConversationSurface'
 import { useBrowserSurfaceCommand } from '../features/browser/browserSurface'
@@ -448,32 +447,9 @@ export function AppShell() {
     ),
     [uiPreferences.showTokenUsageDetails]
   )
-  const {
-    approvals: projectedCollaborationApprovals,
-    decide: decideCollaborationApproval,
-    error: collaborationApprovalError,
-    refresh: refreshCollaborationApprovals
-  } = collaborationApprovals
-  const collaborationContent = useMemo(
-    () =>
-      collaborationChildren.length > 0 ? (
-        <CollaborationApprovalPanel
-          approvals={projectedCollaborationApprovals}
-          loadError={collaborationApprovalError}
-          mode="interactive"
-          onDecision={decideCollaborationApproval}
-          onOpenAgent={openAgentCenter}
-          onRetryLoad={() => void refreshCollaborationApprovals()}
-        />
-      ) : null,
-    [
-      collaborationApprovalError,
-      collaborationChildren,
-      decideCollaborationApproval,
-      openAgentCenter,
-      projectedCollaborationApprovals,
-      refreshCollaborationApprovals
-    ]
+  const collaborationAgentLabelsById = useMemo(
+    () => Object.fromEntries(collaborationChildren.map((agent) => [agent.agentId, agent.taskName])),
+    [collaborationChildren]
   )
   const rightSidebarMaximizedToolbarControls = useMemo(
     () =>
@@ -1230,10 +1206,8 @@ export function AppShell() {
                 commands={conversationCommands}
                 isManualCompactionRunning={manualCompaction.isRunning || !manualCompaction.ready}
                 manualCompactionOperations={manualCompaction.operations}
-                collaborationContent={collaborationContent}
-                hasCollaborationApproval={projectedCollaborationApprovals.some(
-                  (approval) => approval.status === 'pending'
-                )}
+                collaborationApprovals={collaborationApprovals}
+                collaborationAgentLabelsById={collaborationAgentLabelsById}
                 collaborationTimelineActivities={collaborationSnapshot?.activities ?? []}
                 composerDraft={activeDraft}
                 conversation={activeConversation}

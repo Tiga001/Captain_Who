@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import type {
   AgentApprovalScope,
   AgentFileChangeProposal,
@@ -23,6 +23,7 @@ import {
   type ApprovalSubmissionResult
 } from './approvalSubmission'
 import { formatToolDetails, getToolDisplayName } from './toolActivities/toolActivityUtils'
+import { getAgentActionId } from '../../agentRun/agentActionUtils'
 
 const FILE_CHANGE_DIFF_PAGE_CHARS = 50_000
 const MAX_FILE_CHANGE_DIFF_PAGES = 256
@@ -215,6 +216,8 @@ function StandardAgentApprovalDialog({
   const { t } = useFrontendConfig()
   const [rejectMessage, setRejectMessage] = useState('')
   const [isSubmitting, setIsSubmitting] = useState(false)
+  const submittingRef = useRef(false)
+  const actionId = getAgentActionId(action)
   const [fileChangeDiff, setFileChangeDiff] = useState<{
     transactionId: string | null
     pages: string[]
@@ -250,7 +253,8 @@ function StandardAgentApprovalDialog({
   useEffect(() => {
     setRejectMessage('')
     setIsSubmitting(false)
-  }, [action, messageId])
+    submittingRef.current = false
+  }, [actionId, messageId])
 
   useEffect(() => {
     if (fileChangeTransactionId === null) {
@@ -370,19 +374,23 @@ function StandardAgentApprovalDialog({
   )
 
   const approve = (approvalScope: AgentApprovalScope) => {
-    if (isSubmitting || !fileChangeDiffReady) return
+    if (submittingRef.current || !fileChangeDiffReady || !onApprove) return
+    submittingRef.current = true
     setIsSubmitting(true)
-    resetApprovalSubmissionOnFailure(onApprove?.(messageId, action, approvalScope), () =>
+    resetApprovalSubmissionOnFailure(onApprove(messageId, action, approvalScope), () => {
+      submittingRef.current = false
       setIsSubmitting(false)
-    )
+    })
   }
 
   const reject = () => {
-    if (isSubmitting) return
+    if (submittingRef.current || !onReject) return
+    submittingRef.current = true
     setIsSubmitting(true)
-    resetApprovalSubmissionOnFailure(onReject?.(messageId, action, rejectMessage), () =>
+    resetApprovalSubmissionOnFailure(onReject(messageId, action, rejectMessage), () => {
+      submittingRef.current = false
       setIsSubmitting(false)
-    )
+    })
   }
 
   return (

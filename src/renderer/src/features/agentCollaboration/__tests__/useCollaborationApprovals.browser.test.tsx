@@ -80,6 +80,9 @@ function Harness({
       <output data-testid="approvals">
         {controller.approvals.map((entry) => entry.approvalId).join(',')}
       </output>
+      <output data-testid="pending-count">
+        {controller.approvals.filter((entry) => entry.status === 'pending').length}
+      </output>
       <output data-testid="load-error">{controller.error ?? 'none'}</output>
       <output data-testid="decision-error">{decisionError ?? 'none'}</output>
       <button
@@ -256,6 +259,101 @@ describe('useCollaborationApprovals', () => {
 
     refresh.resolve({ schemaVersion: 1, approvals: [approval('executing')] })
     await expect.element(screen.getByTestId('status')).toHaveTextContent('executing')
+  })
+
+  it('removes each acknowledged approval from the pending count before refresh finishes and never reopens it from stale lists', async () => {
+    const refresh = deferred<{ schemaVersion: 1; approvals: CollaborationApprovalProjection[] }>()
+    const projections = [approval('pending'), approval('pending', 'conversation-root', 'other')]
+    clients.list
+      .mockReset()
+      .mockResolvedValueOnce({ schemaVersion: 1, approvals: projections })
+      .mockReturnValueOnce(refresh.promise)
+      .mockResolvedValueOnce({ schemaVersion: 1, approvals: projections })
+    clients.decide.mockReset().mockResolvedValue(decisionResult())
+    const screen = await render(<Harness sequence={1} />)
+    await expect.element(screen.getByTestId('pending-count')).toHaveTextContent('2')
+
+    await screen.getByRole('button', { name: 'decide' }).click()
+    await expect.element(screen.getByTestId('status')).toHaveTextContent('loading')
+    await expect.element(screen.getByTestId('pending-count')).toHaveTextContent('1')
+
+    // A notification can start another list before the decision-triggered reload completes.
+    await screen.rerender(<Harness sequence={2} />)
+    await expect.element(screen.getByTestId('status')).toHaveTextContent('approved')
+    await expect.element(screen.getByTestId('pending-count')).toHaveTextContent('1')
+    refresh.resolve({ schemaVersion: 1, approvals: projections })
+    await expect.element(screen.getByTestId('pending-count')).toHaveTextContent('1')
+  })
+
+  it('allows a list-only approved state to recover to pending without a local decision acknowledgement', async () => {
+    clients.list
+      .mockReset()
+      .mockResolvedValueOnce({ schemaVersion: 1, approvals: [approval('approved')] })
+      .mockResolvedValueOnce({ schemaVersion: 1, approvals: [approval('pending')] })
+    const screen = await render(<Harness sequence={1} />)
+    await expect.element(screen.getByTestId('status')).toHaveTextContent('approved')
+
+    await screen.rerender(<Harness sequence={2} />)
+    await expect.element(screen.getByTestId('status')).toHaveTextContent('pending')
+  })
+
+  it('does not let a late decision refresh from the previous root replace the active root or invalidate its load', async () => {
+    const decision = deferred<CollaborationApprovalDecisionResult>()
+    const nextRoot = deferred<{ schemaVersion: 1; approvals: CollaborationApprovalProjection[] }>()
+    clients.list
+      .mockReset()
+      .mockResolvedValueOnce({ schemaVersion: 1, approvals: [approval('pending', 'root-a')] })
+      .mockReturnValueOnce(nextRoot.promise)
+    clients.decide.mockReset().mockReturnValueOnce(decision.promise)
+    const screen = await render(<Harness rootConversationId="root-a" sequence={1} />)
+    await expect.element(screen.getByTestId('status')).toHaveTextContent('pending')
+    await screen.getByRole('button', { name: 'decide' }).click()
+
+    await screen.rerender(<Harness rootConversationId="root-b" sequence={1} />)
+    await expect.element(screen.getByTestId('status')).toHaveTextContent('loading')
+    decision.resolve(decisionResult())
+    nextRoot.resolve({ schemaVersion: 1, approvals: [approval('pending', 'root-b')] })
+
+    await expect.element(screen.getByTestId('status')).toHaveTextContent('pending')
+    await expect.element(screen.getByTestId('pending-count')).toHaveTextContent('1')
+    expect(clients.list).toHaveBeenCalledTimes(2)
+  })
+
+  it('deduplicates decisions within one root while allowing the same approval identity in another root', async () => {
+    const firstDecision = deferred<CollaborationApprovalDecisionResult>()
+    const secondDecision = deferred<CollaborationApprovalDecisionResult>()
+    clients.list
+      .mockReset()
+      .mockResolvedValueOnce({ schemaVersion: 1, approvals: [approval('pending', 'root-a')] })
+      .mockResolvedValueOnce({ schemaVersion: 1, approvals: [approval('pending', 'root-b')] })
+      .mockResolvedValueOnce({ schemaVersion: 1, approvals: [approval('pending', 'root-b')] })
+    clients.decide
+      .mockReset()
+      .mockReturnValueOnce(firstDecision.promise)
+      .mockReturnValueOnce(secondDecision.promise)
+    const screen = await render(<Harness rootConversationId="root-a" sequence={1} />)
+    await expect.element(screen.getByTestId('status')).toHaveTextContent('pending')
+    await screen.getByRole('button', { name: 'decide' }).click()
+    await screen.getByRole('button', { name: 'decide' }).click()
+    await expect
+      .element(screen.getByTestId('decision-error'))
+      .toHaveTextContent('already in progress')
+    expect(clients.decide).toHaveBeenCalledTimes(1)
+
+    await screen.rerender(<Harness rootConversationId="root-b" sequence={1} />)
+    await expect.element(screen.getByTestId('status')).toHaveTextContent('pending')
+    await screen.getByRole('button', { name: 'decide' }).click()
+    expect(clients.decide).toHaveBeenNthCalledWith(2, {
+      approvalId: 'approval-stable',
+      decision: 'approve',
+      message: null,
+      rootConversationId: 'root-b'
+    })
+    secondDecision.resolve(decisionResult())
+    firstDecision.resolve(decisionResult({ status: 'completed' }))
+    await expect.element(screen.getByTestId('status')).toHaveTextContent('approved')
+    await expect.element(screen.getByTestId('decision-error')).toHaveTextContent('none')
+    expect(clients.list).toHaveBeenCalledTimes(3)
   })
 })
 

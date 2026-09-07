@@ -9,7 +9,6 @@ import {
   useRef,
   useState
 } from 'react'
-import type { ReactNode } from 'react'
 import { Split, X } from 'lucide-react'
 import type {
   AgentApprovalScope,
@@ -17,11 +16,18 @@ import type {
   AgentProposedAction,
   AgentProviderTransitionOperation,
   AgentManualContextCompactionOperation,
+  CollaborationApprovalProjection,
   GitTurnDiffSummary,
   StorageConversationForkPoint
 } from '@mycopilot/protocol'
 import { ChatComposer } from './components/ChatComposer'
 import { AgentApprovalDialog } from './components/AgentApprovalDialog'
+import {
+  ConversationApprovalQueue,
+  type ConversationApprovalQueueItem
+} from './components/ConversationApprovalQueue'
+import { ProjectedApprovalDecisionCard } from '../agentCollaboration/ProjectedApprovalDecisionCard'
+import type { CollaborationApprovalsController } from '../agentCollaboration/useCollaborationApprovals'
 import type { ApprovalSubmissionResult } from './components/approvalSubmission'
 import { AgentTodoProgress } from './components/AgentTodoProgress'
 import { ChatMessageItem } from './components/ChatMessageItem'
@@ -45,7 +51,7 @@ import { getConversationTurnNavigationItems } from './conversationTurnNavigation
 import { isAssistantMessageGenerating, isAssistantReplyComplete } from './assistantGeneration'
 import { getLatestAgentTodo } from './todoLifetime'
 import { useTurnDiffSummaries } from './useTurnDiffSummaries'
-import { getAgentActionApprovalStatus } from '../agentRun/agentActionUtils'
+import { getAgentActionApprovalStatus, getAgentActionId } from '../agentRun/agentActionUtils'
 import {
   CollaborationTimelineActivityList,
   copyCollaborationTimelineSelection,
@@ -53,6 +59,7 @@ import {
 } from '../agentCollaboration/CollaborationTimelineActivity'
 import { projectCollaborationTimelineActivities } from '../agentCollaboration/collaborationTimelineModel'
 import { useFrontendConfig } from '../../config/FrontendConfigProvider'
+import { formatTranslation } from '../../config/translationFormat'
 import {
   useHumanInteraction,
   type HumanInteractionControllerView
@@ -80,9 +87,9 @@ export interface InteractiveConversationSurfaceProps extends ConversationSurface
   forkDisabledReason?: string
   commands?: readonly ComposerCommand[]
   isManualCompactionRunning?: boolean
-  /** Root-only semantic collaboration activity supplied by the durable tree/event projection. */
-  collaborationContent?: ReactNode
-  hasCollaborationApproval?: boolean
+  /** Root-scoped child approvals retain their own authoritative decision route. */
+  collaborationApprovals?: CollaborationApprovalsController
+  collaborationAgentLabelsById?: Readonly<Record<string, string>>
   /** Typed durable semantic activity; generic Tool/Mailbox/model text never enters this path. */
   collaborationTimelineActivities?: readonly CollaborationTimelineActivity[]
   contextWindowIndicatorEnabled?: boolean
@@ -186,6 +193,7 @@ function getPendingApprovalTarget(conversation: ChatConversation) {
     if (action) {
       return {
         action,
+        runId: run.runId,
         messageId: message.id,
         mcpInvocationState:
           action.type === 'mcp_tool_call'
@@ -594,10 +602,64 @@ export function ConversationSurface(props: ConversationSurfaceProps) {
     () => (interactive ? getPendingApprovalTarget(conversation) : null),
     [conversation, interactive]
   )
-  const hasPendingApproval = Boolean(pendingApprovalTarget)
+  const childApprovals = useMemo(() => {
+    const byId = new Map<string, CollaborationApprovalProjection>()
+    for (const approval of interactive?.collaborationApprovals?.approvals ?? []) {
+      if (approval.rootConversationId !== conversation.id) continue
+      const previous = byId.get(approval.approvalId)
+      if (!previous || approval.updatedAt >= previous.updatedAt) {
+        byId.set(approval.approvalId, approval)
+      }
+    }
+    return [...byId.values()]
+      .filter((approval) => approval.status === 'pending')
+      .sort(
+        (left, right) =>
+          right.createdAt - left.createdAt || left.approvalId.localeCompare(right.approvalId)
+      )
+  }, [conversation.id, interactive?.collaborationApprovals?.approvals])
+  const hasPendingApproval = Boolean(pendingApprovalTarget || childApprovals.length)
+  const approvalItems: ConversationApprovalQueueItem[] = []
+  if (interactive && pendingApprovalTarget) {
+    approvalItems.push({
+      id: JSON.stringify([
+        'root',
+        pendingApprovalTarget.runId,
+        pendingApprovalTarget.messageId,
+        getAgentActionId(pendingApprovalTarget.action)
+      ]),
+      label: t('agent.approval.rootAgent'),
+      content: (
+        <AgentApprovalDialog
+          mcpInvocationState={pendingApprovalTarget.mcpInvocationState}
+          target={pendingApprovalTarget}
+          onApprove={interactive.onApproveAgentAction}
+          onCancel={interactive.onCancelAgentAction}
+          onReject={interactive.onRejectAgentAction}
+        />
+      )
+    })
+  }
+  if (interactive?.collaborationApprovals) {
+    for (const approval of childApprovals) {
+      approvalItems.push({
+        id: JSON.stringify(['child', approval.rootConversationId, approval.approvalId]),
+        sourceAgentId: approval.sourceAgentId,
+        label:
+          interactive.collaborationAgentLabelsById?.[approval.sourceAgentId] ??
+          approval.sourceTaskPath,
+        content: (
+          <ProjectedApprovalDecisionCard
+            approval={approval}
+            onDecision={interactive.collaborationApprovals.decide}
+          />
+        )
+      })
+    }
+  }
   const humanInteraction = useHumanInteraction({
     conversationId: interactive ? conversation.id : null,
-    hasApproval: hasPendingApproval || Boolean(interactive?.hasCollaborationApproval),
+    hasApproval: hasPendingApproval,
     readOnly: !interactive
   })
   const messageSummary = useMemo(() => {
@@ -648,9 +710,7 @@ export function ConversationSurface(props: ConversationSurfaceProps) {
     enabled: props.mode === 'interactive'
   })
   const activeQuestion = humanInteraction.activeBatch
-  const isComposerSuspended = Boolean(
-    activeQuestion || pendingApprovalTarget || interactive?.hasCollaborationApproval
-  )
+  const isComposerSuspended = Boolean(activeQuestion || hasPendingApproval)
   const questionSourceRun = activeQuestion
     ? conversation.messages.find((message) => message.agentRun?.runId === activeQuestion.runId)
         ?.agentRun
@@ -790,7 +850,6 @@ export function ConversationSurface(props: ConversationSurfaceProps) {
             showTokenUsageDetails={showTokenUsageDetails}
             turnDiffSummariesByMessageId={turnDiffSummariesByMessageId}
           />
-          {interactive?.collaborationContent}
         </div>
         <ConversationTurnNavigationRail
           items={turnNavigationItems}
@@ -834,17 +893,14 @@ export function ConversationSurface(props: ConversationSurfaceProps) {
               }
             />
           )}
-          {!activeQuestion &&
-            humanInteraction.error &&
-            !hasPendingApproval &&
-            !interactive.hasCollaborationApproval && (
-              <div role="alert">
-                {humanInteraction.error}{' '}
-                <button type="button" onClick={() => void humanInteraction.refresh()}>
-                  {t('chat.retryConversationLoad')}
-                </button>
-              </div>
-            )}
+          {!activeQuestion && humanInteraction.error && !hasPendingApproval && (
+            <div role="alert">
+              {humanInteraction.error}{' '}
+              <button type="button" onClick={() => void humanInteraction.refresh()}>
+                {t('chat.retryConversationLoad')}
+              </button>
+            </div>
+          )}
           {activeTodo && !activeQuestion && (
             <AgentTodoProgress
               completedAt={activeTodo.completedAt}
@@ -852,14 +908,25 @@ export function ConversationSurface(props: ConversationSurfaceProps) {
               todo={activeTodo.todo}
             />
           )}
-          {pendingApprovalTarget && (
-            <AgentApprovalDialog
-              mcpInvocationState={pendingApprovalTarget.mcpInvocationState}
-              target={pendingApprovalTarget}
-              onApprove={interactive.onApproveAgentAction}
-              onCancel={interactive.onCancelAgentAction}
-              onReject={interactive.onRejectAgentAction}
-            />
+          <ConversationApprovalQueue
+            key={conversation.id}
+            items={approvalItems}
+            onOpenAgent={interactive.onOpenCollaborationAgent}
+          />
+          {interactive.collaborationApprovals?.error && (
+            <div className="conversation-approval-load-error" role="alert">
+              <span>
+                {formatTranslation(t, 'collaboration.approval.loadFailed', {
+                  error: interactive.collaborationApprovals.error
+                })}
+              </span>
+              <button
+                type="button"
+                onClick={() => void interactive.collaborationApprovals?.refresh()}
+              >
+                {t('collaboration.approval.retry')}
+              </button>
+            </div>
           )}
           {/* Keep the Composer mounted: its fast-path text draft is newer than the shell prop. */}
           <div

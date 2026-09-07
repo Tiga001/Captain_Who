@@ -4,10 +4,9 @@ import type {
   CollaborationApprovalProjection,
   CollaborationApprovalStatus
 } from '@mycopilot/protocol'
-import { page } from 'vitest/browser'
 import { describe, expect, it, vi } from 'vitest'
 import { render } from 'vitest-browser-react'
-import { CollaborationApprovalPanel } from '../CollaborationApprovalPanel'
+import { ProjectedApprovalDecisionCard } from '../ProjectedApprovalDecisionCard'
 
 const translations: Record<string, string> = {
   'collaboration.approval.title': '子智能体请求审批',
@@ -130,8 +129,8 @@ function decisionResult(
   }
 }
 
-describe('CollaborationApprovalPanel', () => {
-  it('routes staged child Diff reads through the exact root conversation', async () => {
+describe('ProjectedApprovalDecisionCard', () => {
+  it('routes child Diff reads through the exact root and never offers run-scoped approval', async () => {
     const projected = fileChangeApproval()
     fileChangeRpc.getDiff.mockResolvedValue({
       transactionId: 'file-change-transaction',
@@ -140,12 +139,9 @@ describe('CollaborationApprovalPanel', () => {
       nextOffset: null,
       truncated: false
     })
+    const onDecision = vi.fn(async () => decisionResult())
     const screen = await render(
-      <CollaborationApprovalPanel
-        approvals={[projected]}
-        mode="interactive"
-        onDecision={vi.fn(async () => decisionResult())}
-      />
+      <ProjectedApprovalDecisionCard approval={projected} onDecision={onDecision} />
     )
 
     await expect.element(screen.getByText(/\+new/)).toBeVisible()
@@ -155,71 +151,28 @@ describe('CollaborationApprovalPanel', () => {
       50_000,
       'conversation-root'
     )
-    await expect.element(screen.getByRole('button', { name: '批准' })).toBeEnabled()
+    expect(screen.container.querySelector('[data-choice="remember"]')).toBeNull()
+    await screen.getByRole('button', { name: '批准' }).click()
+    expect(onDecision).toHaveBeenCalledWith('approval-stable', 'approve', null)
   })
 
-  it('routes a root decision by stable approval identity without offering remember-for-run', async () => {
+  it('routes a command decision by stable approval identity without run-scoped approval', async () => {
     const onDecision = vi.fn(async () => decisionResult())
-    const onOpenAgent = vi.fn()
     const screen = await render(
-      <CollaborationApprovalPanel
-        approvals={[approval(), approval()]}
-        mode="interactive"
-        onDecision={onDecision}
-        onOpenAgent={onOpenAgent}
-      />
+      <ProjectedApprovalDecisionCard approval={approval()} onDecision={onDecision} />
     )
 
-    expect(screen.container.querySelectorAll('[data-approval-id="approval-stable"]')).toHaveLength(
-      1
-    )
-    expect(screen.container.textContent).toContain('/root/review')
+    expect(screen.container.querySelector('[data-approval-id="approval-stable"]')).not.toBeNull()
     expect(screen.container.textContent).toContain('cargo test -p example')
     expect(screen.container.querySelector('[data-choice="remember"]')).toBeNull()
-
-    await screen.getByRole('button', { name: '批准' }).click()
-    expect(onDecision).toHaveBeenCalledWith('approval-stable', 'approve', null)
-
-    await screen.getByRole('button', { name: '查看来源子智能体 /root/review' }).click()
-    expect(onOpenAgent).toHaveBeenCalledWith('agent-child')
-    await page.screenshot({
-      element: screen.getByRole('region', { name: '子智能体请求审批' }).element(),
-      path: '__screenshots__/CollaborationApprovalPanel.browser.test.tsx/root-child-approval.png'
-    })
-  })
-
-  it('never offers run-scoped approval for a child FileChange', async () => {
-    const projected = fileChangeApproval()
-    fileChangeRpc.getDiff.mockResolvedValue({
-      transactionId: 'file-change-transaction',
-      patch: '-old\n+new\n',
-      offset: 0,
-      nextOffset: null,
-      truncated: false
-    })
-    const onDecision = vi.fn(async () => decisionResult())
-    const screen = await render(
-      <CollaborationApprovalPanel
-        approvals={[projected]}
-        mode="interactive"
-        onDecision={onDecision}
-      />
-    )
-
-    await expect.element(screen.getByText(/\+new/)).toBeVisible()
-    expect(screen.container.querySelector('[data-choice="remember"]')).toBeNull()
     await screen.getByRole('button', { name: '批准' }).click()
     expect(onDecision).toHaveBeenCalledWith('approval-stable', 'approve', null)
   })
 
-  it('routes root rejection guidance to the original child approval', async () => {
+  it('routes rejection guidance to the original child approval', async () => {
     const onDecision = vi.fn(async () => decisionResult({ status: 'rejected' }))
     const screen = await render(
-      <CollaborationApprovalPanel
-        approvals={[approval()]}
-        mode="interactive"
-        onDecision={onDecision}
-      />
+      <ProjectedApprovalDecisionCard approval={approval()} onDecision={onDecision} />
     )
 
     await screen.getByLabelText('说明拒绝原因').fill('  请改用只读命令  ')
@@ -227,39 +180,23 @@ describe('CollaborationApprovalPanel', () => {
     expect(onDecision).toHaveBeenCalledWith('approval-stable', 'reject', '请改用只读命令')
   })
 
-  it('renders pending child approvals without any write entrypoint in observer mode', async () => {
-    const screen = await render(
-      <CollaborationApprovalPanel approvals={[approval()]} mode="observer" />
-    )
-
-    expect(screen.container.textContent).toContain('等待你的决定')
-    expect(screen.container.textContent).toContain('只读对话中不能处理审批')
-    await expect
-      .element(screen.getByRole('region', { name: '子智能体请求审批' }))
-      .toBeInTheDocument()
-    expect(screen.container.querySelector('.agent-approval-dialog')).toBeNull()
-    expect(screen.container.querySelector('button')).toBeNull()
-    expect(screen.container.querySelector('input')).toBeNull()
-  })
-
-  it('remounts the decision shell after a transport failure so the user can retry', async () => {
+  it('retains rejection guidance and reenables submission after a transport failure', async () => {
     const onDecision = vi
       .fn<() => Promise<CollaborationApprovalDecisionResult>>()
       .mockRejectedValueOnce(new Error('temporarily unavailable'))
-      .mockResolvedValueOnce(decisionResult())
+      .mockResolvedValueOnce(decisionResult({ status: 'rejected' }))
     const screen = await render(
-      <CollaborationApprovalPanel
-        approvals={[approval()]}
-        mode="interactive"
-        onDecision={onDecision}
-      />
+      <ProjectedApprovalDecisionCard approval={approval()} onDecision={onDecision} />
     )
 
-    await screen.getByRole('button', { name: '批准' }).click()
+    await screen.getByLabelText('说明拒绝原因').fill('请改用只读命令')
+    await screen.getByRole('button', { name: '拒绝' }).click()
     await expect.element(screen.getByRole('alert')).toHaveTextContent('temporarily unavailable')
-    await expect.element(screen.getByRole('button', { name: '批准' })).toBeEnabled()
-    await screen.getByRole('button', { name: '批准' }).click()
+    await expect.element(screen.getByLabelText('说明拒绝原因')).toHaveValue('请改用只读命令')
+    await expect.element(screen.getByRole('button', { name: '拒绝' })).toBeEnabled()
+    await screen.getByRole('button', { name: '拒绝' }).click()
     expect(onDecision).toHaveBeenCalledTimes(2)
+    expect(onDecision).toHaveBeenLastCalledWith('approval-stable', 'reject', '请改用只读命令')
   })
 
   it('does not latch an unaccepted decision that is still pending', async () => {
@@ -270,69 +207,48 @@ describe('CollaborationApprovalPanel', () => {
       )
       .mockResolvedValueOnce(decisionResult())
     const screen = await render(
-      <CollaborationApprovalPanel
-        approvals={[approval()]}
-        mode="interactive"
-        onDecision={onDecision}
-      />
+      <ProjectedApprovalDecisionCard approval={approval()} onDecision={onDecision} />
     )
 
     await screen.getByRole('button', { name: '批准' }).click()
     await expect.element(screen.getByRole('alert')).toHaveTextContent('服务端未受理')
     await expect.element(screen.getByRole('button', { name: '批准' })).toBeEnabled()
-
     await screen.getByRole('button', { name: '批准' }).click()
     expect(onDecision).toHaveBeenCalledTimes(2)
   })
 
-  it('keeps one decision in flight when the approve control is clicked repeatedly', async () => {
+  it('keeps one decision in flight across prop refreshes and repeated clicks', async () => {
     const pending = deferred<CollaborationApprovalDecisionResult>()
     const onDecision = vi.fn(() => pending.promise)
     const screen = await render(
-      <CollaborationApprovalPanel
-        approvals={[approval()]}
-        mode="interactive"
+      <ProjectedApprovalDecisionCard approval={approval()} onDecision={onDecision} />
+    )
+
+    await screen.getByRole('button', { name: '批准' }).click()
+    await screen.rerender(
+      <ProjectedApprovalDecisionCard
+        approval={{ ...approval(), action: structuredClone(commandAction) }}
         onDecision={onDecision}
       />
     )
-
     const approve = screen.getByRole('button', { name: '批准' })
-    await approve.click()
+    await expect.element(approve).toBeDisabled()
     await approve.click({ force: true })
     expect(onDecision).toHaveBeenCalledOnce()
-
     pending.resolve(decisionResult())
   })
 
-  it('shows durable settled status without approval controls', async () => {
+  it('keeps already-settled decisions closed while their projection catches up', async () => {
+    const onDecision = vi.fn(async () =>
+      decisionResult({ accepted: false, alreadySettled: true, status: 'completed' })
+    )
     const screen = await render(
-      <CollaborationApprovalPanel
-        approvals={[approval('completed')]}
-        mode="interactive"
-        onDecision={vi.fn(async () => decisionResult({ status: 'completed' }))}
-      />
+      <ProjectedApprovalDecisionCard approval={approval()} onDecision={onDecision} />
     )
 
-    expect(screen.container.textContent).toContain('已完成')
-    expect(screen.container.querySelector('.agent-approval-dialog')).toBeNull()
-  })
-
-  it('keeps a durable approval visible while offering a retry after refresh fails', async () => {
-    const onRetryLoad = vi.fn()
-    const screen = await render(
-      <CollaborationApprovalPanel
-        approvals={[approval()]}
-        loadError="temporarily unavailable"
-        mode="interactive"
-        onDecision={vi.fn(async () => decisionResult())}
-        onRetryLoad={onRetryLoad}
-      />
-    )
-
-    expect(screen.container.querySelector('[data-approval-id="approval-stable"]')).not.toBeNull()
-    await expect.element(screen.getByRole('alert')).toHaveTextContent('temporarily unavailable')
-    await screen.getByRole('button', { name: '重试' }).click()
-    expect(onRetryLoad).toHaveBeenCalledOnce()
+    await screen.getByRole('button', { name: '批准' }).click()
+    await expect.element(screen.getByRole('button', { name: '批准' })).toBeDisabled()
+    expect(screen.container.querySelector('[role="alert"]')).toBeNull()
   })
 })
 

@@ -16,13 +16,21 @@ const fileChangeRpc = vi.hoisted(() => ({ getDiff: vi.fn() }))
 
 vi.mock('../../config/FrontendConfigProvider', async () => {
   const { getTranslation } = await import('../../config/languageRegistry')
+  const t = (key: Parameters<typeof getTranslation>[1]) => getTranslation('zh-CN', key)
   return {
     useFrontendConfig: () => ({
       language: 'zh-CN',
-      t: (key: Parameters<typeof getTranslation>[1]) => getTranslation('zh-CN', key)
+      t
     })
   }
 })
+// Approval replaces the visible Composer, which remains mounted to preserve its draft.
+vi.mock('../../config/ModelSettingsProvider', () => ({
+  useModelSettings: () => ({ enabledModels: [] })
+}))
+vi.mock('../../config/ProjectSettingsProvider', () => ({
+  useProjectSettings: () => ({ projects: [], selectProjectDirectory: vi.fn() })
+}))
 vi.mock('../../features/chat/components/ImagePreview', () => ({
   useImagePreview: () => vi.fn(),
   useImagePreviewNotice: () => vi.fn()

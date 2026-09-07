@@ -1,5 +1,10 @@
 import type { HumanInteractionHostApi, HostInvocationResult } from '@mycopilot/host-api'
-import type { AgentProposedAction, HumanInteractionRequestSnapshot } from '@mycopilot/protocol'
+import type {
+  AgentProposedAction,
+  CollaborationApprovalDecisionResult,
+  CollaborationApprovalProjection,
+  HumanInteractionRequestSnapshot
+} from '@mycopilot/protocol'
 import { useState } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { page } from 'vitest/browser'
@@ -13,6 +18,7 @@ import {
   submitted
 } from '../../humanInteraction/__tests__/humanInteractionFixtures'
 import { humanInteractionResponseDisplay } from '../../humanInteraction/humanInteractionState'
+import type { CollaborationApprovalsController } from '../../agentCollaboration/useCollaborationApprovals'
 import { ConversationSurface } from '../ConversationSurface'
 import type { ChatComposerDraft, ChatConversation, ChatMessage } from '../chatTypes'
 import '../../../styles/global.css'
@@ -63,6 +69,42 @@ const approval: AgentProposedAction = {
     reason: '验证项目',
     observe: null
   }
+}
+
+function childApproval(id: string, createdAt = 1): CollaborationApprovalProjection {
+  if (approval.type !== 'command') throw new Error('Expected the command approval fixture')
+  return {
+    schemaVersion: 1,
+    approvalId: id,
+    rootAgentId: 'agent-root',
+    rootConversationId: 'chat',
+    sourceAgentId: `agent-${id}`,
+    sourceTaskPath: `/root/${id}`,
+    sourceConversationId: `chat-${id}`,
+    runId: `run-${id}`,
+    actionId: `command-${id}`,
+    actionType: 'command',
+    toolName: 'run_command',
+    action: {
+      type: 'command',
+      command: {
+        ...approval.command,
+        id: `command-${id}`,
+        command: `pnpm test ${id}`,
+        reason: `验证 ${id}`
+      }
+    },
+    status: 'pending',
+    createdAt,
+    updatedAt: createdAt
+  }
+}
+
+function approvalController(
+  approvals: CollaborationApprovalProjection[],
+  decide: CollaborationApprovalsController['decide'] = vi.fn()
+): CollaborationApprovalsController {
+  return { approvals, decide, error: null, loading: false, refresh: vi.fn() }
 }
 
 function batch(id: string, sequence = 1): HumanInteractionRequestSnapshot {
@@ -136,13 +178,15 @@ function conversation(
 function Workspace({
   value,
   observer = false,
-  hasCollaborationApproval = false,
-  initialAttachments = []
+  collaborationApprovals,
+  initialAttachments = [],
+  onApproveAgentAction = async () => false
 }: {
   value: ChatConversation
   observer?: boolean
-  hasCollaborationApproval?: boolean
+  collaborationApprovals?: CollaborationApprovalsController
   initialAttachments?: ChatComposerDraft['attachments']
+  onApproveAgentAction?: () => Promise<boolean>
 }) {
   // The real shell persists text through a ref-only callback. Keep the prop stale until an explicit
   // commit, so an unintended messageSyncKey reset is observable in the real Composer.
@@ -176,10 +220,11 @@ function Workspace({
           onComposerDraftMessageChange={boundary.draft}
           onSubmitMessage={boundary.send}
           onStopGenerating={boundary.stop}
-          onApproveAgentAction={async () => false}
+          onApproveAgentAction={onApproveAgentAction}
           onRejectAgentAction={async () => false}
           onCancelAgentAction={async () => false}
-          hasCollaborationApproval={hasCollaborationApproval}
+          collaborationApprovals={collaborationApprovals}
+          collaborationAgentLabelsById={{ 'agent-review': '代码审阅', 'agent-tests': '运行测试' }}
           permissionModeAvailability={{ custom: true, full: true }}
           showTokenUsageDetails={false}
         />
@@ -259,10 +304,163 @@ describe('Human interaction in the real conversation surface', () => {
     expect(panel.elements()).toHaveLength(0)
     refresh.resolve({ ok: true, value: { items: [request], nextCursor: null } })
     await expect.element(panel.getByRole('textbox')).toHaveValue('审批前填写的内容')
-    await screen.rerender(<Workspace value={conversation([request])} hasCollaborationApproval />)
+    await screen.rerender(
+      <Workspace
+        value={conversation([request])}
+        collaborationApprovals={approvalController([childApproval('review')])}
+      />
+    )
     await expect.poll(() => panel.elements().length).toBe(0)
     expect(host.api.submit).not.toHaveBeenCalled()
     expect(host.api.ignore).not.toHaveBeenCalled()
+  })
+
+  it('routes mixed approvals through one composer card and preserves question, input and per-approval drafts', async () => {
+    const request = batch('approval-queue'),
+      host = fakeHost([])
+    boundary.api = host.api
+    const screen = await render(<Workspace value={conversation([])} />)
+    const composer = page.elementLocator(
+      screen.container.querySelector<HTMLTextAreaElement>('.chat-composer textarea')!
+    )
+    await composer.fill('审批完成后继续写的普通消息')
+    host.notify(request)
+    await screen.rerender(<Workspace value={conversation([request])} />)
+    const questionPanel = screen.getByRole('dialog', { name: '交互', exact: true })
+    await questionPanel.getByRole('textbox').fill('审批前保留的问答草稿')
+
+    const review = childApproval('review'),
+      tests = childApproval('tests', 2)
+    const rejected = deferred<CollaborationApprovalDecisionResult>()
+    const approved = deferred<CollaborationApprovalDecisionResult>()
+    const decide = vi
+      .fn<CollaborationApprovalsController['decide']>()
+      .mockReturnValueOnce(rejected.promise)
+      .mockReturnValueOnce(approved.promise)
+    const rootAccepted = deferred<boolean>()
+    const approveRoot = vi.fn(() => rootAccepted.promise)
+    const rerender = (children: CollaborationApprovalProjection[], rootPending = true) =>
+      screen.rerender(
+        <Workspace
+          value={conversation([request], rootPending ? 'waiting_for_approval' : 'running')}
+          collaborationApprovals={approvalController(children, decide)}
+          onApproveAgentAction={approveRoot}
+        />
+      )
+    await rerender([review])
+    const navigation = screen.getByRole('navigation', { name: '审批切换' })
+    const card = screen.getByRole('dialog')
+    await expect.element(navigation.getByText('1 / 2')).toBeVisible()
+    await expect.element(card).toHaveClass('agent-approval-dialog')
+    expect(
+      screen.container.querySelector('.conversation-approval-queue__source')?.textContent
+    ).toBe('主智能体')
+    expect(
+      screen.container.querySelector('.conversation-approval-queue__source .agent-avatar')
+    ).toBeNull()
+    expect(
+      screen.container.querySelector('.chat-conversation-page__messages .agent-approval-dialog')
+    ).toBeNull()
+    expect(
+      screen.container.querySelector(
+        '.chat-conversation-page__composer .conversation-approval-queue'
+      )
+    ).not.toBeNull()
+    await navigation.getByRole('button', { name: '下一条审批' }).click()
+    await card.getByRole('textbox').fill('请只审阅改动，不要执行测试')
+
+    // A fresh Host projection uses new action objects and inserts a newer child before the
+    // selected child. Neither the selection nor its rejection guidance may reset.
+    await rerender([structuredClone(review), tests])
+    await expect.element(navigation.getByText('3 / 3')).toBeVisible()
+    await expect.element(card.getByRole('textbox')).toHaveValue('请只审阅改动，不要执行测试')
+    await expect.element(card.getByText('pnpm test review')).toBeVisible()
+    expect(card.elements()).toHaveLength(1)
+    expect(
+      screen.container.querySelectorAll('.conversation-approval-queue__item:not([hidden])')
+    ).toHaveLength(1)
+    await document.fonts.ready
+    await page.screenshot({
+      element: screen.container.querySelector('.chat-conversation-page__composer')!,
+      path: '__screenshots__/HumanInteractionIntegration.browser.test.tsx/mixed-approvals.png'
+    })
+    await navigation.getByRole('button', { name: '上一条审批' }).click()
+    await expect.element(card.getByRole('textbox')).toHaveValue('')
+    await expect.element(card.getByText('pnpm test tests')).toBeVisible()
+    await navigation.getByRole('button', { name: '下一条审批' }).click()
+    await expect.element(card.getByRole('textbox')).toHaveValue('请只审阅改动，不要执行测试')
+    await card.getByRole('button', { name: '否', exact: true }).click()
+    expect(decide).toHaveBeenCalledWith('review', 'reject', '请只审阅改动，不要执行测试')
+    await expect.element(navigation.getByText('3 / 3')).toBeVisible()
+    await navigation.getByRole('button', { name: '上一条审批' }).click()
+    await navigation.getByRole('button', { name: '下一条审批' }).click()
+    await expect.element(card.getByRole('textbox')).toBeDisabled()
+    rejected.resolve({
+      schemaVersion: 1,
+      approvalId: 'review',
+      accepted: true,
+      alreadySettled: false,
+      status: 'rejected'
+    })
+    await rerender([{ ...review, status: 'rejected' }, tests])
+    await expect.element(navigation.getByText('2 / 2')).toBeVisible()
+    await expect.element(card.getByText('pnpm test tests')).toBeVisible()
+
+    await navigation.getByRole('button', { name: '上一条审批' }).click()
+    await card.getByRole('button', { name: '1 是', exact: true }).click()
+    expect(approveRoot).toHaveBeenCalledTimes(1)
+    await expect.element(navigation.getByText('1 / 2')).toBeVisible()
+    rootAccepted.resolve(true)
+    await rerender([tests], false)
+    await expect.element(navigation.getByText('1 / 1')).toBeVisible()
+    await expect.element(navigation.getByRole('button', { name: '上一条审批' })).toBeDisabled()
+    await expect.element(navigation.getByRole('button', { name: '下一条审批' })).toBeDisabled()
+    expect(
+      screen.container.querySelector('.conversation-approval-queue__source')?.textContent
+    ).toBe('运行测试')
+    expect(
+      screen.container.querySelector('.conversation-approval-queue__source .agent-avatar img')
+    ).not.toBeNull()
+    await expect.element(composer).not.toBeVisible()
+    expect(questionPanel.elements()).toHaveLength(0)
+    await card.getByRole('button', { name: '1 是', exact: true }).click()
+    expect(decide).toHaveBeenLastCalledWith('tests', 'approve', null)
+    await expect.element(navigation.getByText('1 / 1')).toBeVisible()
+    approved.resolve({
+      schemaVersion: 1,
+      approvalId: 'tests',
+      accepted: true,
+      alreadySettled: false,
+      status: 'approved'
+    })
+    await rerender([{ ...tests, status: 'approved' }], false)
+    expect(screen.container.querySelector('.conversation-approval-queue')).toBeNull()
+    await expect.element(questionPanel.getByRole('textbox')).toHaveValue('审批前保留的问答草稿')
+    await questionPanel.getByRole('button', { name: '最小化交互' }).click()
+    await expect.element(composer).toBeVisible()
+    await expect.element(composer).toHaveValue('审批完成后继续写的普通消息')
+    expect(boundary.send).not.toHaveBeenCalled()
+  })
+
+  it('removes the source and navigation row when only the main agent approval remains', async () => {
+    boundary.api = fakeHost([]).api
+    const review = childApproval('review')
+    const screen = await render(
+      <Workspace
+        value={conversation([], 'waiting_for_approval')}
+        collaborationApprovals={approvalController([review])}
+      />
+    )
+    await expect.element(screen.getByRole('navigation', { name: '审批切换' })).toBeVisible()
+    await screen.rerender(
+      <Workspace
+        value={conversation([], 'waiting_for_approval')}
+        collaborationApprovals={approvalController([{ ...review, status: 'cancelled' }])}
+      />
+    )
+    await expect.element(screen.getByRole('dialog')).toHaveClass('agent-approval-dialog')
+    expect(screen.container.querySelector('.conversation-approval-queue__header')).toBeNull()
+    expect(screen.container.querySelectorAll('.conversation-approval-queue__item')).toHaveLength(1)
   })
 
   it('isolates pending IME and button events from the batch that preempts their original question', async () => {

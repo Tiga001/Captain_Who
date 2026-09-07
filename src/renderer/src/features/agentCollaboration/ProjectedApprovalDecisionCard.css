@@ -1,0 +1,12 @@
+.collaboration-approval__decision {
+  display: grid;
+  gap: 6px;
+}
+
+.collaboration-approval__error {
+  margin: 0;
+  padding: 0 6px;
+  color: var(--mc-color-text-danger);
+  font-size: var(--mc-font-size-xs);
+  line-height: var(--mc-line-height-relaxed);
+}
