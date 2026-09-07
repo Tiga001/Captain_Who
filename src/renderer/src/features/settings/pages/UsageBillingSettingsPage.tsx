@@ -13,6 +13,7 @@ import type { ModelConfig } from '../../../config/modelConfig'
 import { formatModelConfigLabel } from '../../modelSelection/modelConfigPresentation'
 import { getUserFacingErrorMessage } from '../../../errors/userFacingError'
 import { clearAgentUsageRecords, getAgentUsageSummary } from '../../agent/agentClient'
+import { formatCacheHitRate } from '../../agent/usagePresentation'
 import type { UiPreferencesSnapshot } from '../../storage/storageClient'
 import './UsageBillingSettingsPage.css'
 
@@ -263,7 +264,11 @@ export function UsageBillingSettingsPage({
   onUiPreferencesChange,
   uiPreferences
 }: UsageBillingSettingsPageProps): ReactElement {
-  const { language, t } = useFrontendConfig()
+  const { language, t, showCacheHitRate, setShowCacheHitRate } = useFrontendConfig()
+  const displayPreferences = {
+    showCacheHitRate,
+    showTokenUsageDetails: uiPreferences.showTokenUsageDetails
+  }
   const { models } = useModelSettings()
   const [range, setRange] = useState<UsageChartRange>('last7Days')
   const [summary, setSummary] = useState<AgentUsageSummaryOutput | null>(null)
@@ -751,8 +756,21 @@ export function UsageBillingSettingsPage({
 
                 <div className="usage-secondary-grid">
                   <div className="usage-secondary-stat">
-                    <span>{t('usageBilling.cachedInputTokens')}</span>
-                    <strong>{formatCount(visibleSummary?.cachedInputTokens, language)}</strong>
+                    <span>
+                      {t(
+                        showCacheHitRate
+                          ? 'usageBilling.cacheHitRate'
+                          : 'usageBilling.cachedInputTokens'
+                      )}
+                    </span>
+                    <strong>
+                      {showCacheHitRate
+                        ? (formatCacheHitRate(
+                            visibleSummary?.cachedInputTokens,
+                            visibleSummary?.inputTokens
+                          ) ?? '—')
+                        : formatCount(visibleSummary?.cachedInputTokens, language)}
+                    </strong>
                   </div>
                   <div className="usage-secondary-stat">
                     <span>{t('usageBilling.outputThinkingTokens')}</span>
@@ -836,37 +854,38 @@ export function UsageBillingSettingsPage({
                 </div>
 
                 <div className="settings-list">
-                  {renderSettingsNodes(
-                    section.children.filter((node) => node.id === 'usageBilling.tokenDetails'),
-                    (node) => (
-                      <div className="settings-list-row">
-                        <div className="settings-list-row__text">
-                          <h3 className="settings-list-row__title" id="usage-token-details-heading">
-                            {settingLabel(node, t)}
-                          </h3>
-                          <p className="settings-list-row__description">
-                            {settingDescription(node, t)}
-                          </p>
-                        </div>
+                  {renderSettingsNodes(section.children, (node) => (
+                    <div className="settings-list-row">
+                      <div className="settings-list-row__text">
+                        <h3 className="settings-list-row__title" id={node.headingId}>
+                          {settingLabel(node, t)}
+                        </h3>
+                        <p className="settings-list-row__description">
+                          {settingDescription(node, t)}
+                        </p>
+                      </div>
 
-                        <button
-                          className="settings-switch"
-                          type="button"
-                          role="switch"
-                          aria-checked={uiPreferences.showTokenUsageDetails}
-                          data-state={uiPreferences.showTokenUsageDetails ? 'on' : 'off'}
-                          onClick={() =>
+                      <button
+                        className="settings-switch"
+                        type="button"
+                        role="switch"
+                        aria-checked={displayPreferences[node.preferenceKey]}
+                        data-state={displayPreferences[node.preferenceKey] ? 'on' : 'off'}
+                        onClick={() => {
+                          if (node.preferenceKey === 'showCacheHitRate') {
+                            setShowCacheHitRate(!showCacheHitRate)
+                          } else {
                             onUiPreferencesChange({
                               showTokenUsageDetails: !uiPreferences.showTokenUsageDetails
                             })
                           }
-                        >
-                          <span className="sr-only">{settingLabel(node, t)}</span>
-                          <span className="settings-switch__thumb" aria-hidden="true" />
-                        </button>
-                      </div>
-                    )
-                  )}
+                        }}
+                      >
+                        <span className="sr-only">{settingLabel(node, t)}</span>
+                        <span className="settings-switch__thumb" aria-hidden="true" />
+                      </button>
+                    </div>
+                  ))}
                 </div>
               </section>
             )

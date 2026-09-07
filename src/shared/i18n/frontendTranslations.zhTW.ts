@@ -902,6 +902,10 @@ export const zhTWTranslations = {
     '這會從 Captain Who 永久刪除該項目及其本機對話和附件；專案目錄中的檔案不會被修改。',
   'environment.cancelRemoveProject': '取消',
   'environment.confirmRemoveProject': '移除',
+  'usageBilling.showCacheHitRate': '快取命中以百分比顯示',
+  'usageBilling.showCacheHitRateDescription':
+    '在用量彙總和對話 token 詳情中，以兩位小數的百分比顯示快取命中率。',
+  'usageBilling.cacheHitRate': '快取命中率',
   'usageBilling.tokenDetails': '對話 token 詳情',
   'usageBilling.tokenDetailsDescription': '顯示模型回覆下方的 token 消耗按鈕。',
   'usageBilling.summary': '用量統計',
@@ -1110,6 +1114,7 @@ export const zhTWTranslations = {
   'chat.usageInputTokens': '輸入',
   'chat.usageOutputTokens': '輸出',
   'chat.usageTotalTokens': '總計',
+  'chat.usageCacheHitRate': '快取命中率',
   'chat.usageCachedInputTokens': '緩存命中',
   'chat.usageCacheCreationInputTokens': '快取寫入',
   'agent.thinking': '正在思考',

@@ -980,6 +980,10 @@ export const itITTranslations = {
     'Ciò rimuove permanentemente il progetto e le relative chat locali e allegati da Captain Who. I file nella directory del progetto non vengono modificati.',
   'environment.cancelRemoveProject': 'Annulla',
   'environment.confirmRemoveProject': 'Rimuovi',
+  'usageBilling.showCacheHitRate': 'Mostra gli accessi alla cache in percentuale',
+  'usageBilling.showCacheHitRateDescription':
+    'Mostra la percentuale di accessi alla cache con due decimali nel riepilogo e nei dettagli dei token.',
+  'usageBilling.cacheHitRate': 'Percentuale di accessi alla cache',
   'usageBilling.tokenDetails': 'Dettagli del token di conversazione',
   'usageBilling.tokenDetailsDescription':
     'Mostra il pulsante di utilizzo del token sotto le risposte del modello.',
@@ -1216,6 +1220,7 @@ export const itITTranslations = {
   'chat.usageInputTokens': 'Ingresso',
   'chat.usageOutputTokens': 'Uscita',
   'chat.usageTotalTokens': 'Totale',
+  'chat.usageCacheHitRate': 'Percentuale di accessi alla cache',
   'chat.usageCachedInputTokens': 'Ingresso memorizzato nella cache',
   'chat.usageCacheCreationInputTokens': 'Scrittura nella cache',
   'agent.thinking': 'Pensare',

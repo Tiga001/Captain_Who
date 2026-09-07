@@ -913,6 +913,10 @@ export const zhCNTranslations = {
     '这会从 Captain Who 永久删除该项目及其本地对话和附件；项目目录中的文件不会被修改。',
   'environment.cancelRemoveProject': '取消',
   'environment.confirmRemoveProject': '移除',
+  'usageBilling.showCacheHitRate': '缓存命中以百分比展示',
+  'usageBilling.showCacheHitRateDescription':
+    '在用量汇总和对话 token 详情中，以两位小数的百分比显示缓存命中率。',
+  'usageBilling.cacheHitRate': '缓存命中率',
   'usageBilling.tokenDetails': '对话 token 详情',
   'usageBilling.tokenDetailsDescription': '显示模型回复下方的 token 消耗按钮。',
   'usageBilling.summary': '用量统计',
@@ -1122,6 +1126,7 @@ export const zhCNTranslations = {
   'chat.usageInputTokens': '输入',
   'chat.usageOutputTokens': '输出',
   'chat.usageTotalTokens': '总计',
+  'chat.usageCacheHitRate': '缓存命中率',
   'chat.usageCachedInputTokens': '缓存命中',
   'chat.usageCacheCreationInputTokens': '缓存写入',
 

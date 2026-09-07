@@ -971,6 +971,10 @@ export const ruRUTranslations = {
     'Это навсегда удалит проект, его локальные чаты и вложения из Captain Who. Файлы в каталоге проекта не изменяются.',
   'environment.cancelRemoveProject': 'Отмена',
   'environment.confirmRemoveProject': 'Удалить',
+  'usageBilling.showCacheHitRate': 'Показывать попадания в кэш в процентах',
+  'usageBilling.showCacheHitRateDescription':
+    'Показывать процент попаданий в кэш с двумя знаками после запятой в сводке и деталях токенов.',
+  'usageBilling.cacheHitRate': 'Процент попаданий в кэш',
   'usageBilling.tokenDetails': 'Подробности токена разговора',
   'usageBilling.tokenDetailsDescription':
     'Показывать кнопку использования токена под ответами модели.',
@@ -1205,6 +1209,7 @@ export const ruRUTranslations = {
   'chat.usageInputTokens': 'Ввод',
   'chat.usageOutputTokens': 'Выход',
   'chat.usageTotalTokens': 'Итого',
+  'chat.usageCacheHitRate': 'Процент попаданий в кэш',
   'chat.usageCachedInputTokens': 'Кэшированный ввод',
   'chat.usageCacheCreationInputTokens': 'Запись в кэш',
   'agent.thinking': 'мышление',

@@ -202,9 +202,9 @@ function AgentRunElapsedHeader({
 }
 
 function UsageAction({ usage }: { usage: AgentUsage | undefined }) {
-  const { language, t } = useFrontendConfig()
+  const { language, showCacheHitRate, t } = useFrontendConfig()
   const popoverId = useId()
-  const rows = getUsageRows(usage, language, t)
+  const rows = getUsageRows(usage, language, t, showCacheHitRate)
 
   if (rows.length === 0) return null
 

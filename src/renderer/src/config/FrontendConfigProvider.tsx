@@ -32,6 +32,7 @@ import { hostClient } from '../host/hostClient'
 
 interface NormalizedFrontendConfig extends FrontendThemePreferences {
   language: AppLanguage
+  showCacheHitRate: boolean
 }
 
 interface FrontendConfigContextValue {
@@ -41,6 +42,8 @@ interface FrontendConfigContextValue {
   resolvedThemeId: FrontendThemeId
   setColorSchemePreference: (preference: ColorSchemePreference) => void
   setLanguage: (language: AppLanguage) => void
+  showCacheHitRate: boolean
+  setShowCacheHitRate: (showCacheHitRate: boolean) => void
   setThemeForColorScheme: (colorScheme: ColorScheme, themeId: FrontendThemeId) => void
   t: (key: TranslationKey) => string
   themeIdsByColorScheme: ThemeIdsByColorScheme
@@ -61,6 +64,7 @@ function getDefaultFrontendConfig(): NormalizedFrontendConfig {
   return {
     colorSchemePreference: frontendConfig.colorSchemePreference,
     language: frontendConfig.language,
+    showCacheHitRate: false,
     themeIdsByColorScheme: frontendConfig.themeIdsByColorScheme
   }
 }
@@ -73,7 +77,8 @@ function normalizeStoredFrontendConfig(value: unknown): NormalizedFrontendConfig
 
   return {
     ...themePreferences,
-    language: isAppLanguage(storedLanguage) ? storedLanguage : defaults.language
+    language: isAppLanguage(storedLanguage) ? storedLanguage : defaults.language,
+    showCacheHitRate: stored.showCacheHitRate === true
   }
 }
 
@@ -89,6 +94,8 @@ function readStoredConfig(): NormalizedFrontendConfig {
 export function FrontendConfigProvider({ children }: { children: ReactNode }) {
   const [initialConfig] = useState(() => readStoredConfig())
   const [language, setLanguage] = useState<AppLanguage>(initialConfig.language)
+  const t = useCallback((key: TranslationKey) => getTranslation(language, key), [language])
+  const [showCacheHitRate, setShowCacheHitRate] = useState(initialConfig.showCacheHitRate)
   const [systemColorScheme, setSystemColorScheme] = useState<ColorScheme>(() =>
     getSystemColorScheme()
   )
@@ -168,11 +175,12 @@ export function FrontendConfigProvider({ children }: { children: ReactNode }) {
       JSON.stringify({
         version: FRONTEND_THEME_PREFERENCES_VERSION,
         language,
+        showCacheHitRate,
         colorSchemePreference,
         themeIdsByColorScheme
       })
     )
-  }, [colorSchemePreference, language, themeIdsByColorScheme])
+  }, [colorSchemePreference, language, showCacheHitRate, themeIdsByColorScheme])
 
   const value = useMemo<FrontendConfigContextValue>(
     () => ({
@@ -182,16 +190,20 @@ export function FrontendConfigProvider({ children }: { children: ReactNode }) {
       resolvedThemeId: resolvedTheme.themeId,
       setColorSchemePreference,
       setLanguage,
+      showCacheHitRate,
+      setShowCacheHitRate,
       setThemeForColorScheme,
-      t: (key) => getTranslation(language, key),
+      t,
       themeIdsByColorScheme
     }),
     [
       colorSchemePreference,
       language,
+      showCacheHitRate,
       resolvedTheme.colorScheme,
       resolvedTheme.themeId,
       setThemeForColorScheme,
+      t,
       themeIdsByColorScheme
     ]
   )

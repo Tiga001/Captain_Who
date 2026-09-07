@@ -9,7 +9,8 @@ const mocks = vi.hoisted(() => ({
   getAgentFileChangeDiff: vi.fn(),
   getAgentFileChangeHistoryDiff: vi.fn(),
   getTurnDiffSummaries: vi.fn(),
-  loadAttachmentImage: vi.fn()
+  loadAttachmentImage: vi.fn(),
+  showCacheHitRate: false
 }))
 
 const translations: Record<string, string> = {
@@ -28,6 +29,7 @@ const translations: Record<string, string> = {
 vi.mock('../../../config/FrontendConfigProvider', () => ({
   useFrontendConfig: () => ({
     language: 'en-US',
+    showCacheHitRate: mocks.showCacheHitRate,
     t: (key: string) => translations[key] ?? key
   })
 }))
@@ -474,3 +476,36 @@ function longObserverConversation(turns: number): ChatConversation {
     messages
   }
 }
+
+it('updates the observer usage details when the shared cache display preference changes', async () => {
+  const conversation = observerConversation()
+  conversation.messages = conversation.messages.filter((message) => message.agentRun)
+  conversation.messages[0].agentRun!.usage = { inputTokens: 10_000, cachedInputTokens: 9_011 }
+  mocks.showCacheHitRate = true
+  const screen = await render(
+    <ConversationSurface
+      conversation={conversation}
+      mode="observer"
+      rootConversationId="root-conversation"
+      showTokenUsageDetails
+    />
+  )
+  const usage = () => screen.container.querySelector('.chat-message__usage-list')?.textContent
+  expect(usage()).toContain('chat.usageCacheHitRate90.11%')
+  expect(usage()).not.toContain('chat.usageCachedInputTokens')
+
+  mocks.showCacheHitRate = false
+  await screen.rerender(
+    <ConversationSurface
+      conversation={{
+        ...conversation,
+        messages: conversation.messages.map((message) => ({ ...message }))
+      }}
+      mode="observer"
+      rootConversationId="root-conversation"
+      showTokenUsageDetails
+    />
+  )
+  expect(usage()).toContain('chat.usageCachedInputTokens9,011')
+  expect(usage()).not.toContain('chat.usageCacheHitRate')
+})

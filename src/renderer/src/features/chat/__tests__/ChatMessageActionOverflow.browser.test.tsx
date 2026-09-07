@@ -8,12 +8,16 @@ import '../../../styles/global.css'
 import '../ChatConversationPage.css'
 import '../../agentCollaboration/AgentCenterPanel.css'
 
-const settings = vi.hoisted(() => ({ language: 'zh-CN' as 'zh-CN' | 'en-US' }))
+const settings = vi.hoisted(() => ({
+  language: 'zh-CN' as 'zh-CN' | 'en-US',
+  showCacheHitRate: false
+}))
 vi.mock('../../../config/FrontendConfigProvider', async () => {
   const { getTranslation } = await import('../../../config/languageRegistry')
   return {
     useFrontendConfig: () => ({
       language: settings.language,
+      showCacheHitRate: settings.showCacheHitRate,
       t: (key: Parameters<typeof getTranslation>[1]) => getTranslation(settings.language, key)
     })
   }
@@ -129,6 +133,7 @@ function expectTooltipVisible(tooltip: HTMLElement, scroller: HTMLElement, conte
 
 let previousRootStyle: string | null
 beforeEach(async () => {
+  settings.showCacheHitRate = false
   previousRootStyle = document.documentElement.getAttribute('style')
   for (const [name, value] of Object.entries(getFrontendCssVariables())) {
     document.documentElement.style.setProperty(name, value)
@@ -183,4 +188,90 @@ describe('Message action overflow in narrow translated layouts', () => {
       }
     }
   )
+})
+
+describe('Cache hit display preference', () => {
+  function usageMessage(values: AgentUsage): ChatMessage {
+    const message = messages()[1]
+    return { ...message, agentRun: { ...message.agentRun!, usage: values } }
+  }
+
+  function visibleUsageRows(root: ParentNode) {
+    return Object.fromEntries(
+      [...root.querySelectorAll('.chat-message__usage-row')].map((row) => [
+        row.querySelector('dt')?.textContent,
+        row.querySelector('dd')?.textContent
+      ])
+    )
+  }
+
+  it.each(['interactive', 'observer'] as const)(
+    'switches existing %s message details between counts and precise percentages',
+    async (mode) => {
+      settings.language = 'zh-CN'
+      const message = usageMessage({
+        inputTokens: 10_000,
+        outputTokens: 321,
+        totalTokens: 10_321,
+        cachedInputTokens: 9_011,
+        cacheCreationInputTokens: 700
+      })
+      const screen = await render(
+        <ChatMessageItem message={message} mode={mode} showTokenUsageDetails />
+      )
+      expect(visibleUsageRows(screen.container)).toEqual({
+        输入: '10,000',
+        输出: '321',
+        总计: '10,321',
+        缓存命中: '9,011',
+        缓存写入: '700'
+      })
+
+      settings.showCacheHitRate = true
+      await screen.rerender(
+        <ChatMessageItem message={{ ...message }} mode={mode} showTokenUsageDetails />
+      )
+      const rateRows = visibleUsageRows(screen.container)
+      expect(rateRows).toEqual({
+        输入: '10,000',
+        输出: '321',
+        总计: '10,321',
+        缓存命中率: '90.11%',
+        缓存写入: '700'
+      })
+      required<HTMLButtonElement>(screen.container, '.chat-message__usage button').focus()
+      await expect
+        .poll(
+          () => getComputedStyle(required(screen.container, '.chat-message__usage-popover')).opacity
+        )
+        .toBe('1')
+
+      settings.showCacheHitRate = false
+      await screen.rerender(
+        <ChatMessageItem message={{ ...message }} mode={mode} showTokenUsageDetails />
+      )
+      expect(visibleUsageRows(screen.container)['缓存命中']).toBe('9,011')
+      expect(visibleUsageRows(screen.container)).not.toHaveProperty('缓存命中率')
+    }
+  )
+
+  it.each([
+    { inputTokens: 100, cachedInputTokens: undefined, expected: undefined },
+    { inputTokens: 100, cachedInputTokens: 0, expected: '0.00%' },
+    { inputTokens: 0, cachedInputTokens: 0, expected: '—' },
+    { inputTokens: undefined, cachedInputTokens: 90, expected: '—' }
+  ])('preserves missing-cache and zero-input semantics for $expected', async (testCase) => {
+    settings.language = 'zh-CN'
+    settings.showCacheHitRate = true
+    const screen = await render(
+      <ChatMessageItem
+        message={usageMessage({
+          inputTokens: testCase.inputTokens,
+          cachedInputTokens: testCase.cachedInputTokens
+        })}
+        showTokenUsageDetails
+      />
+    )
+    expect(visibleUsageRows(screen.container)['缓存命中率']).toBe(testCase.expected)
+  })
 })

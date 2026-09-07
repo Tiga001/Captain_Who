@@ -960,6 +960,10 @@ export const enUSTranslations = {
     'This permanently removes the project and its local chats and attachments from Captain Who. Files in the project directory are not changed.',
   'environment.cancelRemoveProject': 'Cancel',
   'environment.confirmRemoveProject': 'Remove',
+  'usageBilling.showCacheHitRate': 'Show cache hits as a percentage',
+  'usageBilling.showCacheHitRateDescription':
+    'Show cache hit rates with two decimal places in usage summaries and conversation token details.',
+  'usageBilling.cacheHitRate': 'Cache hit rate',
   'usageBilling.tokenDetails': 'Conversation token details',
   'usageBilling.tokenDetailsDescription': 'Show the token usage button below model replies.',
   'usageBilling.summary': 'Usage statistics',
@@ -1187,6 +1191,7 @@ export const enUSTranslations = {
   'chat.usageInputTokens': 'Input',
   'chat.usageOutputTokens': 'Output',
   'chat.usageTotalTokens': 'Total',
+  'chat.usageCacheHitRate': 'Cache hit rate',
   'chat.usageCachedInputTokens': 'Cached input',
   'chat.usageCacheCreationInputTokens': 'Cache write',
 

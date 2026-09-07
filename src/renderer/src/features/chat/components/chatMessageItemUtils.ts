@@ -1,5 +1,6 @@
 import type { AgentToolCall, AgentToolResult, AgentUsage } from '@mycopilot/protocol'
 import type { Translate } from '../../../config/translationFormat'
+import { formatCacheHitRate } from '../../agent/usagePresentation'
 import { getApplyPatchRequest } from '../../agentRun/applyPatchRequest'
 import { getReadActivityKindForTool, isReadActivityTool } from '../agentReadActivities'
 import { stripAttachmentSummary } from '../chatAttachments'
@@ -141,8 +142,19 @@ export function formatUsageTokenCount(value: unknown, language: string) {
   return new Intl.NumberFormat(language).format(value)
 }
 
-export function getUsageRows(usage: AgentUsage | undefined, language: string, t: Translate) {
+export function getUsageRows(
+  usage: AgentUsage | undefined,
+  language: string,
+  t: Translate,
+  showCacheHitRate = false
+) {
   if (!usage) return []
+
+  const cachedInputCount = formatUsageTokenCount(usage.cachedInputTokens, language)
+  const cachedInputValue =
+    showCacheHitRate && cachedInputCount !== null
+      ? (formatCacheHitRate(usage.cachedInputTokens, usage.inputTokens) ?? '—')
+      : cachedInputCount
 
   return [
     {
@@ -158,8 +170,8 @@ export function getUsageRows(usage: AgentUsage | undefined, language: string, t:
       value: formatUsageTokenCount(usage.totalTokens, language)
     },
     {
-      label: t('chat.usageCachedInputTokens'),
-      value: formatUsageTokenCount(usage.cachedInputTokens, language)
+      label: t(showCacheHitRate ? 'chat.usageCacheHitRate' : 'chat.usageCachedInputTokens'),
+      value: cachedInputValue
     },
     {
       label: t('chat.usageCacheCreationInputTokens'),

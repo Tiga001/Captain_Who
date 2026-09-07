@@ -28,7 +28,16 @@ export const usageBillingSettingsNodes = defineSettingsNodes([
       {
         id: 'usageBilling.tokenDetails',
         title: 'usageBilling.tokenDetails',
-        description: 'usageBilling.tokenDetailsDescription'
+        description: 'usageBilling.tokenDetailsDescription',
+        preferenceKey: 'showTokenUsageDetails',
+        headingId: 'usage-token-details-heading'
+      },
+      {
+        id: 'usageBilling.showCacheHitRate',
+        title: 'usageBilling.showCacheHitRate',
+        description: 'usageBilling.showCacheHitRateDescription',
+        preferenceKey: 'showCacheHitRate',
+        headingId: 'usage-cache-hit-rate-heading'
       }
     ]
   }

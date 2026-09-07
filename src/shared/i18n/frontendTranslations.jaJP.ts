@@ -970,6 +970,10 @@ export const jaJPTranslations = {
     'これにより、プロジェクトとそのローカル チャットおよび添付ファイルが Captain Who から完全に削除されます。プロジェクトディレクトリ内のファイルは変更されません。',
   'environment.cancelRemoveProject': 'キャンセル',
   'environment.confirmRemoveProject': '削除',
+  'usageBilling.showCacheHitRate': 'キャッシュヒットをパーセントで表示',
+  'usageBilling.showCacheHitRateDescription':
+    '使用量の概要と会話のトークン詳細で、キャッシュヒット率を小数点以下2桁で表示します。',
+  'usageBilling.cacheHitRate': 'キャッシュヒット率',
   'usageBilling.tokenDetails': '会話トークンの詳細',
   'usageBilling.tokenDetailsDescription': 'モデルの応答の下にトークン使用ボタンを表示します。',
   'usageBilling.summary': '使用状況の統計',
@@ -1200,6 +1204,7 @@ export const jaJPTranslations = {
   'chat.usageInputTokens': '入力',
   'chat.usageOutputTokens': '出力',
   'chat.usageTotalTokens': '合計',
+  'chat.usageCacheHitRate': 'キャッシュヒット率',
   'chat.usageCachedInputTokens': 'キャッシュされた入力',
   'chat.usageCacheCreationInputTokens': 'キャッシュ書き込み',
   'agent.thinking': '考える',

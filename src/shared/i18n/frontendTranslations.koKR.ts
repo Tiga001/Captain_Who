@@ -945,6 +945,10 @@ export const koKRTranslations = {
     '이렇게 하면 Captain Who에서 프로젝트와 해당 로컬 채팅 및 첨부 파일이 영구적으로 제거됩니다. 프로젝트 디렉터리의 파일은 변경되지 않습니다.',
   'environment.cancelRemoveProject': '취소',
   'environment.confirmRemoveProject': '제거',
+  'usageBilling.showCacheHitRate': '캐시 적중을 백분율로 표시',
+  'usageBilling.showCacheHitRateDescription':
+    '사용량 요약과 대화 토큰 세부정보에서 캐시 적중률을 소수점 둘째 자리까지 표시합니다.',
+  'usageBilling.cacheHitRate': '캐시 적중률',
   'usageBilling.tokenDetails': '대화 토큰 세부정보',
   'usageBilling.tokenDetailsDescription': '모델 답변 아래에 토큰 사용 버튼을 표시합니다.',
   'usageBilling.summary': '사용통계',
@@ -1171,6 +1175,7 @@ export const koKRTranslations = {
   'chat.usageInputTokens': '입력',
   'chat.usageOutputTokens': '출력',
   'chat.usageTotalTokens': '합계',
+  'chat.usageCacheHitRate': '캐시 적중률',
   'chat.usageCachedInputTokens': '캐시된 입력',
   'chat.usageCacheCreationInputTokens': '캐시 쓰기',
   'agent.thinking': '생각',

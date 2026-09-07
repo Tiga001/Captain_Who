@@ -985,6 +985,10 @@ export const frFRTranslations = {
     'Cela supprime définitivement le projet, ses discussions locales et ses pièces jointes de Captain Who. Les fichiers du répertoire du projet ne sont pas modifiés.',
   'environment.cancelRemoveProject': 'Annuler',
   'environment.confirmRemoveProject': 'Supprimer',
+  'usageBilling.showCacheHitRate': 'Afficher les accès au cache en pourcentage',
+  'usageBilling.showCacheHitRateDescription':
+    'Afficher le taux de succès du cache avec deux décimales dans le résumé et les détails des tokens.',
+  'usageBilling.cacheHitRate': 'Taux de succès du cache',
   'usageBilling.tokenDetails': 'Détails du jeton de conversation',
   'usageBilling.tokenDetailsDescription':
     "Affichez le bouton d'utilisation du jeton sous les réponses du modèle.",
@@ -1220,6 +1224,7 @@ export const frFRTranslations = {
   'chat.usageInputTokens': 'Entrée',
   'chat.usageOutputTokens': 'Sortie',
   'chat.usageTotalTokens': 'Total',
+  'chat.usageCacheHitRate': 'Taux de succès du cache',
   'chat.usageCachedInputTokens': 'Entrée en cache',
   'chat.usageCacheCreationInputTokens': 'Écriture en cache',
   'agent.thinking': 'Penser',
