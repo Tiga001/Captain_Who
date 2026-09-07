@@ -198,6 +198,42 @@ pub(super) fn run_command_model_projection(result: &AgentToolResult) -> AgentToo
 }
 
 fn project_command_result_value(value: &Value) -> Option<Value> {
+    if value.get("status").and_then(Value::as_str) == Some("rejected") {
+        // Approval rejection is a successfully settled user decision, not a command result.
+        // Keep its authority and feedback visible when projecting both live and replayed facts.
+        let feedback = value
+            .get("userFeedback")
+            .or_else(|| {
+                // Older Host receipts stored feedback as message. New projected messages are
+                // system guidance and must never become invented user feedback on re-projection.
+                (value.get("code").is_none() && value.get("decisionBy").is_none())
+                    .then(|| value.get("message"))
+                    .flatten()
+            })
+            .and_then(Value::as_str)
+            .filter(|message| !message.trim().is_empty());
+        let mut output = json!({
+            "status": "rejected",
+            "code": "command.approval_rejected",
+            "decisionBy": "user",
+            "executionAttempted": false,
+            "retryable": false,
+            "retryPolicy": if feedback.is_some() {
+                "follow_user_feedback_without_repeating_same_call"
+            } else {
+                "new_explicit_user_instruction_required"
+            },
+            "message": if feedback.is_some() {
+                "The user rejected this command approval. The command was not executed. Follow the user's feedback, but do not repeat the same or an equivalent command without a new explicit user instruction. This does not mean the command tool is unavailable."
+            } else {
+                "The user rejected this command approval. The command was not executed. Do not retry the same or an equivalent command without a new explicit user instruction. This does not mean the command tool is unavailable."
+            },
+        });
+        if let Some(feedback) = feedback {
+            output["userFeedback"] = json!(feedback);
+        }
+        return Some(output);
+    }
     if let Some(execution) = value.get("execution") {
         let mut output = Map::new();
         for field in [

@@ -104,7 +104,7 @@ Wake 表示“需要一次执行机会”，不是线程或可无条件重试的
 ### Receipt 与事件
 
 - `agent_model_batch_receipts` 以 `(run_id, model_batch_index)` 锁定一次模型采样 admission；Mailbox item 只能被 safe sampling 或 wait 的一方消费。
-- `wait_agent` 的 target snapshot、cursor、ToolResult/model-context prefix 在同一事务预提交，Runtime 不得再次写同一 ToolResult。
+- `wait_agent` 的 target snapshot、cursor、ToolResult/model-context prefix 在同一事务预提交。Runtime 接回结果后仍须发布 Trace 与 model-context 成对快照，由 observer 幂等确认已提交前缀并同步 Host 内存；不得追加第二条 ToolResult、再次消费 Mailbox 或重复执行 wait。后续取消或失败结算必须保留这条已经成功的等待结果。
 - `agent_collaboration_events` 是根 Agent 本地单调 invalidation outbox，不是第二份聊天表。snapshot/read 先取得保守 replay cursor，允许重复 replay，不允许 cursor 越过未观察状态。
 
 ## 4. 六个模型工具

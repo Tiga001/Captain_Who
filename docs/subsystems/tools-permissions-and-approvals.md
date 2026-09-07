@@ -130,6 +130,8 @@ model ToolCall
 
 当前 typed proposed action 包括普通 ToolCall、外部 MCP Server Tool、内置 Capability 激活、内置 MCP 敏感调用、Browser risk、FileChange、Command、Skill materialization/script/installation 和 Office operation。Direct 与 Staged 文件修改共用同一个 FileChange proposal/result，不存在 Diff/FileWrite 双 action。
 
+命令审批拒绝是用户对当前申请的确定决定，不是待审批、工具不可用或命令执行失败。主 Agent 与子 Agent 共用拒绝结果及续跑投影：模型必须收到明确的用户拒绝、命令未执行、用户反馈和后续行为说明，不得在投影时只保留 `status=rejected`。无新用户指示时不得原样或等价重提；有反馈时按反馈调整。审批恢复及持久历史回放保留同一拒绝语义，不能用“子 Agent 无法获得人工审批”解释用户拒绝。
+
 “无需弹窗”不一定等于“直接执行”。自动 MCP Server 调用或需要冻结资源的动作仍必须先 prepare，以便 Core Server 获得一次性的权威 payload、TOCTOU 校验和审计身份。
 
 人工审批票据与短生命周期执行材料是两类状态。MCP Server、Browser risk、内置 MCP 敏感调用和 Skill 安装的票据会保持 pending，直到用户决定或所属 Run 的取消/终态流程显式收口；sealed payload、进程内 grant 或已准备包过期不再替用户作决定。用户稍后批准但执行材料已不可用时，Host 必须提交一个 `definitely_not_dispatched` 的 failed Tool Result，并恢复模型继续处理，不能把票据重新标成“过期后请重试”或实际 dispatch。

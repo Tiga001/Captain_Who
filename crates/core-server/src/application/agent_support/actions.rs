@@ -405,10 +405,24 @@ pub(crate) fn tool_result_for_decision(
             call_id: call.id.clone(),
             tool: call.tool.clone(),
             ok: true,
-            result: Some(json!({
-                "status": "rejected",
-                "message": message
-            })),
+            result: Some(if call.tool == "run_command" {
+                let mut result = json!({
+                    "status": "rejected",
+                    "code": "command.approval_rejected",
+                    "decisionBy": "user",
+                    "executionAttempted": false,
+                    "retryable": false,
+                });
+                if let Some(feedback) = message.filter(|message| !message.trim().is_empty()) {
+                    result["userFeedback"] = json!(feedback);
+                }
+                result
+            } else {
+                json!({
+                    "status": "rejected",
+                    "message": message
+                })
+            }),
             error: None,
         },
     }

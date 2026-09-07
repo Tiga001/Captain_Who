@@ -518,6 +518,59 @@ fn classifies_common_risk_levels() {
 }
 
 #[test]
+fn rejected_command_model_projection_preserves_user_decision_and_feedback_on_replay() {
+    let tool = RunCommandTool;
+    for feedback in [None, Some(""), Some(" \t\n"), Some("请改成只查看文件名。")] {
+        for legacy in [false, true] {
+            let mut value = json!({ "status": "rejected" });
+            if !legacy {
+                value["code"] = json!("command.approval_rejected");
+                value["decisionBy"] = json!("user");
+            }
+            value[if legacy { "message" } else { "userFeedback" }] = json!(feedback);
+            let raw = AgentToolResult {
+                exact_archive_file: None,
+                call_id: "rejected-command".to_string(),
+                tool: "run_command".to_string(),
+                ok: true,
+                result: Some(value),
+                error: None,
+            };
+            let expected_feedback = feedback.filter(|feedback| !feedback.trim().is_empty());
+            let live = tool.model_projection(&raw);
+            let projected = live.result.as_ref().unwrap();
+            assert_eq!(projected["status"], "rejected");
+            assert_eq!(projected["code"], "command.approval_rejected");
+            assert_eq!(projected["decisionBy"], "user");
+            assert_eq!(projected["executionAttempted"], false);
+            assert_eq!(projected["retryable"], false);
+            assert_eq!(projected["userFeedback"].as_str(), expected_feedback);
+            assert_eq!(
+                projected["retryPolicy"],
+                if expected_feedback.is_some() {
+                    "follow_user_feedback_without_repeating_same_call"
+                } else {
+                    "new_explicit_user_instruction_required"
+                }
+            );
+            let guidance = projected["message"].as_str().unwrap();
+            assert!(guidance.contains("The user rejected this command approval"));
+            assert!(guidance.contains("The command was not executed"));
+            assert!(guidance.contains("without a new explicit user instruction"));
+            assert!(guidance.contains("same or an equivalent command"));
+            assert!(guidance.contains("does not mean the command tool is unavailable"));
+            assert_eq!(tool.model_projection(&live).result, live.result);
+            for durable in [
+                tool.trace_projection(&raw),
+                tool.checkpoint_projection(&raw),
+            ] {
+                assert_eq!(tool.model_projection(&durable).result, live.result);
+            }
+        }
+    }
+}
+
+#[test]
 fn model_projection_keeps_only_actionable_capture_safety_metadata() {
     let raw = AgentToolResult {
         exact_archive_file: None,

@@ -3162,13 +3162,18 @@ impl AgentRuntime {
                             return Err(error);
                         }
                     };
-                    let trace_publish = if tool_result_persistence
-                        == crate::tools::AgentToolResultPersistence::PrecommittedTrace
-                    {
-                        Ok(())
-                    } else {
-                        publish_trace_snapshot(&conversation_trace, trace_observer.as_ref())
-                            .map(|_| ())
+                    let trace_publish = match tool_result_persistence {
+                        // Precommitted wait results already own their durable receipt and
+                        // ToolResult. The observer still needs the paired Trace/ModelContext
+                        // snapshot for cancellation or failure during the next sample. Its
+                        // append is an idempotent prefix confirmation, not another Tool dispatch
+                        // or receipt consumption; skipping it leaves the Host's last snapshot
+                        // at the unresolved call and synthesizes a conflicting cancellation.
+                        crate::tools::AgentToolResultPersistence::RuntimeCommits
+                        | crate::tools::AgentToolResultPersistence::PrecommittedTrace => {
+                            publish_trace_snapshot(&conversation_trace, trace_observer.as_ref())
+                                .map(|_| ())
+                        }
                     };
                     if let Err(error) = trace_publish {
                         if settles_entire_provider_tool_batch_on_terminal {

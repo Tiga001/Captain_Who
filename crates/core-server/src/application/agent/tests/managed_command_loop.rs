@@ -19,7 +19,7 @@ const BACKGROUND_COMMAND_WITH_MIXED_LINE_ENDINGS: &str =
 const BACKGROUND_COMMAND_CANONICAL: &str =
     "printf 'ready\\n'\nsleep 0.25\nprintf 'progress\\n'\nsleep 0.35\nexit 7";
 
-async fn read_json_request(stream: &mut TcpStream) -> Value {
+pub(super) async fn read_json_request(stream: &mut TcpStream) -> Value {
     let mut request = Vec::new();
     let mut buffer = [0_u8; 4_096];
     let mut body_start = None;
@@ -66,7 +66,7 @@ async fn write_run_command_stream(stream: &mut TcpStream) {
     .await;
 }
 
-async fn write_tool_call_stream(
+pub(super) async fn write_tool_call_stream(
     stream: &mut TcpStream,
     call_id: &str,
     tool: &str,
@@ -108,7 +108,7 @@ async fn write_tool_call_stream(
         .unwrap();
 }
 
-async fn write_text_stream(stream: &mut TcpStream, content: &str) {
+pub(super) async fn write_text_stream(stream: &mut TcpStream, content: &str) {
     stream
         .write_all(
             b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n",
@@ -1390,10 +1390,16 @@ async fn assert_rejected_command_after_restart(
         )
         .unwrap();
     assert_eq!(rejection.agent_output.status, AgentRunStatus::Running);
-    let expected_decision_result = json!({
+    let mut expected_decision_result = json!({
         "status": "rejected",
-        "message": expected_message,
+        "code": "command.approval_rejected",
+        "decisionBy": "user",
+        "executionAttempted": false,
+        "retryable": false,
     });
+    if let Some(feedback) = expected_message {
+        expected_decision_result["userFeedback"] = json!(feedback);
+    }
     let rejection_result = rejection
         .tool_result
         .as_ref()
@@ -1421,13 +1427,28 @@ async fn assert_rejected_command_after_restart(
         .and_then(|message| message["content"].as_str())
         .expect("rejection continuation contains the paired ToolResult");
     let rejected_tool_result = serde_json::from_str::<Value>(rejected_tool_result).unwrap();
-    // The command model projection deliberately retains status but not message. Verify the
-    // exact Host and audit payloads separately so model compaction cannot hide blank reasons.
+    assert_eq!(rejected_tool_result["status"], "rejected");
+    assert_eq!(rejected_tool_result["code"], "command.approval_rejected");
+    assert_eq!(rejected_tool_result["decisionBy"], "user");
+    assert_eq!(rejected_tool_result["executionAttempted"], false);
+    assert_eq!(rejected_tool_result["retryable"], false);
     assert_eq!(
-        rejected_tool_result,
-        json!({ "status": "rejected" }),
-        "Provider must receive the existing rejected-command projection: {message:?}"
+        rejected_tool_result["userFeedback"].as_str(),
+        expected_message.map(str::trim),
+        "Provider must receive the user's nonblank rejection feedback: {message:?}"
     );
+    assert_eq!(
+        rejected_tool_result["retryPolicy"],
+        if expected_message.is_some() {
+            "follow_user_feedback_without_repeating_same_call"
+        } else {
+            "new_explicit_user_instruction_required"
+        }
+    );
+    assert!(rejected_tool_result["message"]
+        .as_str()
+        .unwrap()
+        .contains("The command was not executed"));
 
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {

@@ -692,6 +692,37 @@ fn project_run_command_result(value: &Value) -> (Value, bool) {
     let Some(input) = value.as_object() else {
         return project_generic_value(value);
     };
+    if input.get("status").and_then(Value::as_str) == Some("rejected") {
+        // Preserve the decision receipt as recorded. Do not enrich older committed trace items:
+        // model-facing guidance is derived later and durable traces must remain exact prefixes.
+        let mut output = Map::new();
+        let mut truncated = false;
+        for key in [
+            "status",
+            "code",
+            "decisionBy",
+            "executionAttempted",
+            "retryable",
+        ] {
+            copy_bounded_field(
+                input,
+                &mut output,
+                key,
+                DurableTraceProjectionLimits::TITLE_CHARS,
+                &mut truncated,
+            );
+        }
+        for key in ["userFeedback", "message"] {
+            copy_bounded_field(
+                input,
+                &mut output,
+                key,
+                DurableTraceProjectionLimits::USER_GUIDANCE_CHARS,
+                &mut truncated,
+            );
+        }
+        return (Value::Object(output), truncated);
+    }
     if input.get("status").and_then(Value::as_str) == Some("running") {
         return project_running_command_result(input);
     }
@@ -1702,6 +1733,37 @@ mod tests {
         assert_eq!(projected["historyOpen"], open);
         assert_eq!(projected["continueWith"]["tool"], "conversation_history");
         assert_eq!(projected["continueWith"]["args"]["open"], open);
+    }
+
+    #[test]
+    fn rejected_command_trace_preserves_decision_feedback_and_existing_prefix_shape() {
+        for value in [
+            json!({ "status": "rejected" }),
+            json!({ "status": "rejected", "message": "Use existing information." }),
+            json!({
+                "status": "rejected",
+                "code": "command.approval_rejected",
+                "decisionBy": "user",
+                "executionAttempted": false,
+                "retryable": false,
+                "userFeedback": "请不要重复执行。"
+            }),
+        ] {
+            let (projected, truncated) = project_run_command_result(&value);
+            assert!(!truncated);
+            assert_eq!(projected, value);
+            assert_eq!(project_run_command_result(&projected), (projected, false));
+        }
+        let (projected, truncated) = project_run_command_result(&json!({
+            "status": "rejected",
+            "userFeedback": "x".repeat(DurableTraceProjectionLimits::USER_GUIDANCE_CHARS + 1),
+        }));
+        assert!(truncated);
+        assert!(projected["userFeedback"]
+            .as_str()
+            .unwrap()
+            .ends_with(TRUNCATED_SUFFIX));
+        assert_eq!(project_run_command_result(&projected).0, projected);
     }
 
     #[test]

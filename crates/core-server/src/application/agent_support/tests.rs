@@ -620,3 +620,34 @@ fn policy_rejection_keeps_stable_structured_diagnostics_in_tool_result() {
         "catastrophic"
     );
 }
+
+#[test]
+fn command_approval_rejection_records_user_authority_without_claiming_execution() {
+    let call = AgentToolCall {
+        id: "command-user-rejected".to_string(),
+        tool: "run_command".to_string(),
+        args: json!({ "command": "printf 'approval fixture'" }),
+        approval_status: mycopilot_core::AgentApprovalStatus::Rejected,
+        reason: None,
+    };
+    for feedback in [None, Some(""), Some(" \t\n"), Some("请改成只查看文件名。")] {
+        let result =
+            tool_result_for_decision(&call, AgentApprovalDecisionStatus::Rejected, feedback);
+        assert!(
+            result.ok,
+            "the user decision itself was settled successfully"
+        );
+        assert!(result.error.is_none());
+        let value = result.result.unwrap();
+        assert_eq!(value["status"], "rejected");
+        assert_eq!(value["code"], "command.approval_rejected");
+        assert_eq!(value["decisionBy"], "user");
+        assert_eq!(value["executionAttempted"], false);
+        assert_eq!(value["retryable"], false);
+        assert_eq!(
+            value["userFeedback"].as_str(),
+            feedback.filter(|feedback| !feedback.trim().is_empty())
+        );
+        assert!(value.get("exitCode").is_none());
+    }
+}

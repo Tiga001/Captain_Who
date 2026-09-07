@@ -9,6 +9,8 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
+include!("collaboration_wait_terminal.rs");
+
 const ROOT_CONVERSATION_ID: &str = "conversation-collaboration-harness";
 const PROJECT_ID: &str = "project-collaboration-harness";
 

@@ -29,6 +29,7 @@ use tempfile::tempdir;
 mod automation_turn;
 mod cancellation;
 mod collaboration_harness;
+mod command_approval_rejection;
 mod command_sessions;
 mod context_history;
 mod context_runtime;
