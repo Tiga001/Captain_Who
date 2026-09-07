@@ -54,7 +54,7 @@ const { PersonalizationSettingsPage } =
   await import('../../features/settings/pages/PersonalizationSettingsPage')
 const { HumanInteractionSettingsSection } =
   await import('../../features/settings/pages/HumanInteractionSettingsSection')
-const label = '允许智能体向人类提问'
+const label = '允许智能体向人类发起提问与协作'
 let changed: (settings: HumanInteractionSettings) => void
 let resync: () => void
 

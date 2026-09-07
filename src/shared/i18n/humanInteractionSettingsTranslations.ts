@@ -1,6 +1,6 @@
 const zhCN = {
   'humanInteraction.settings.title': '人机交互',
-  'humanInteraction.settings.allowQuestions': '允许智能体向人类提问',
+  'humanInteraction.settings.allowQuestions': '允许智能体向人类发起提问与协作',
   'humanInteraction.settings.description': '更改即时保存。关闭后，已提出的问题仍可回答或忽略。',
   'humanInteraction.settings.loading': '正在读取设置…',
   'humanInteraction.settings.saving': '正在保存…',
@@ -13,7 +13,8 @@ type SettingsTranslations = Record<keyof typeof zhCN, string>
 
 const enUS: SettingsTranslations = {
   'humanInteraction.settings.title': 'Human interaction',
-  'humanInteraction.settings.allowQuestions': 'Allow agents to ask people questions',
+  'humanInteraction.settings.allowQuestions':
+    'Allow agents to ask questions and request human collaboration',
   'humanInteraction.settings.description':
     'Changes save immediately. Existing questions can still be answered or ignored when this is off.',
   'humanInteraction.settings.loading': 'Loading settings…',
@@ -29,7 +30,7 @@ export const humanInteractionSettingsTranslations = {
   'zh-CN': zhCN,
   'zh-TW': {
     'humanInteraction.settings.title': '人機互動',
-    'humanInteraction.settings.allowQuestions': '允許智能體向人類提問',
+    'humanInteraction.settings.allowQuestions': '允許智能體向人類發起提問與協作',
     'humanInteraction.settings.description': '變更立即儲存。關閉後，已提出的問題仍可回答或忽略。',
     'humanInteraction.settings.loading': '正在讀取設定…',
     'humanInteraction.settings.saving': '正在儲存…',
@@ -41,7 +42,8 @@ export const humanInteractionSettingsTranslations = {
   'en-GB': enUS,
   'ja-JP': {
     'humanInteraction.settings.title': 'ユーザーとの対話',
-    'humanInteraction.settings.allowQuestions': 'エージェントがユーザーに質問することを許可',
+    'humanInteraction.settings.allowQuestions':
+      'エージェントがユーザーに質問や協力を求めることを許可',
     'humanInteraction.settings.description':
       '変更はすぐに保存されます。オフにしても、既存の質問には回答または無視できます。',
     'humanInteraction.settings.loading': '設定を読み込み中…',
@@ -54,7 +56,8 @@ export const humanInteractionSettingsTranslations = {
   },
   'ko-KR': {
     'humanInteraction.settings.title': '사용자와의 상호작용',
-    'humanInteraction.settings.allowQuestions': '에이전트가 사용자에게 질문하도록 허용',
+    'humanInteraction.settings.allowQuestions':
+      '에이전트가 사용자에게 질문하고 협력을 요청하도록 허용',
     'humanInteraction.settings.description':
       '변경 사항은 즉시 저장됩니다. 꺼도 기존 질문에 답하거나 무시할 수 있습니다.',
     'humanInteraction.settings.loading': '설정 불러오는 중…',
@@ -66,7 +69,8 @@ export const humanInteractionSettingsTranslations = {
   },
   'fr-FR': {
     'humanInteraction.settings.title': 'Interaction humaine',
-    'humanInteraction.settings.allowQuestions': 'Autoriser les agents à poser des questions',
+    'humanInteraction.settings.allowQuestions':
+      'Autoriser les agents à poser des questions et à solliciter une collaboration humaine',
     'humanInteraction.settings.description':
       'Les changements sont enregistrés immédiatement. Les questions existantes peuvent toujours recevoir une réponse ou être ignorées.',
     'humanInteraction.settings.loading': 'Chargement des paramètres…',
@@ -79,7 +83,8 @@ export const humanInteractionSettingsTranslations = {
   },
   'it-IT': {
     'humanInteraction.settings.title': 'Interazione umana',
-    'humanInteraction.settings.allowQuestions': 'Consenti agli agenti di porre domande',
+    'humanInteraction.settings.allowQuestions':
+      'Consenti agli agenti di porre domande e richiedere la collaborazione umana',
     'humanInteraction.settings.description':
       'Le modifiche vengono salvate subito. Le domande esistenti possono ancora ricevere risposta o essere ignorate.',
     'humanInteraction.settings.loading': 'Caricamento delle impostazioni…',
@@ -92,7 +97,8 @@ export const humanInteractionSettingsTranslations = {
   },
   'ru-RU': {
     'humanInteraction.settings.title': 'Взаимодействие с человеком',
-    'humanInteraction.settings.allowQuestions': 'Разрешить агентам задавать вопросы людям',
+    'humanInteraction.settings.allowQuestions':
+      'Разрешить агентам задавать вопросы людям и обращаться к ним за содействием',
     'humanInteraction.settings.description':
       'Изменения сохраняются сразу. На уже заданные вопросы по-прежнему можно ответить или проигнорировать их.',
     'humanInteraction.settings.loading': 'Загрузка настроек…',

@@ -2,7 +2,7 @@
 status: current
 audience: developers
 owner: engineering
-last_verified: 2026-09-05
+last_verified: 2026-09-07
 ---
 
 # SQLite 存储与数据生命周期
@@ -37,6 +37,16 @@ last_verified: 2026-09-05
 开发库重置前应先关闭应用并备份数据根；优先使用受管 `storage:reset-dev` 流程。不要只删除 `storage.sqlite` 而遗留 attachments、artifacts、spool 或 lock 文件。
 
 `storage:reset-dev` 始终新建 v42，不恢复 Conversation、Project 或 Agent/runtime 历史；本版本不提供旧库保历史升级。它从 exact current v42、exact v41、exact v40、exact v39、exact v38、exact v37、exact v36 或 exact v35 保留 allowlisted 配置与凭据引用；v36/v37/v38/v39/v40/v41/v42 还保留人机交互设置及 revision。既有受限恢复选项也可从绑定 exact v33 fingerprint 的私有备份读取 allowlisted 设置，并把凭据转换为 reference。无法安全识别且含配置的旧库拒绝重置，不能用默认值默默替换模型配置。
+
+## 消息创建与重试归属
+
+普通发送由 Host 的 `startConversationTurn` 在接纳事务中创建消息与 Run。Renderer 可乐观展示，不能同时把初始 user/assistant pair 排队写入存储；未建立 Run 的失败输入才通过独立新增接口保存，便于恢复输入、附件和错误。
+
+`storage.upsertChatMessages` 是新增及幂等重试边界：同会话已存在的 ID 返回原持久化事实，不覆盖时间、正文、角色、运行状态或消息位置；与另一会话冲突的 ID 使整批事务回滚。保留首次事实也适用于已持久化的本地失败消息，后续状态更新走专用接口。agent/snapshot 原有不可变校验保持不变；Host Turn 接纳、流式与终态写入、编辑重发及分支各自的事务路径不受该新增接口影响。
+
+此处的重复保存不能只返回原入参，否则前端会误以为迟到副本已成为权威记录。回执必须在同一事务读取/返回实际保留的记录，按请求顺序对应。该修复不改变 schema，不需要重置或改写旧聊天数据。相关最终模型请求回归见[上下文管理](./context-management.md)。
+
+`saveChatMessageState` 不修改创建时间。对已有 Trace 的助手消息，回存的 `agentRunJson.runId` 必须等于已接纳的 Run；未确认启动的本地失败/取消或其他 Run 的状态不能覆盖该消息。身份匹配后仍复用现有终态围栏，保留正常状态回存与同 Run 迟到 running checkpoint 的处理；纯本地未接纳消息不受 Run 绑定限制。Renderer 启动失败/取消也只本地展示，再通过新增接口保存尚不存在的失败 pair。
 
 ## 连续模型历史与不可变图像引用
 

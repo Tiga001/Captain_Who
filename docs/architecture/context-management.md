@@ -130,20 +130,20 @@ MYCOPILOT_REQUEST_FINGERPRINT=1 cargo test -p mycopilot-core-server --bin core-s
 
 [Host 回归](../../crates/core-server/src/application/agent/tests/request_prefix.rs) 使用真实 `AgentService::start_conversation_turn`、项目绑定、设置/能力快照、SQLite、Rust Core Harness、`workspace_map`/两次 `read_file` 和 native DeepSeek V4 高推理序列化，在本地 HTTP 服务收到最终 JSON 时再计算指纹。第一 Run 发出三个请求，下一 Run 输入“谢谢”；比较上一 Run 最后请求的每条旧消息，而非只检查内容包含关系。请求长度必须增加；真实文件内容、成组工具交换、reasoning 都必须存在。
 
-2026-09-07 的窄范围诊断结果：
+2026-09-07 初次诊断在真实 Host 重现的断点是 `messages[5]`（从 0 开始）中旧 user 的 `user_message_created_at` 被改写；tools 和后面的 Run material、正文、reasoning、成组工具交换都保持一致。原因是 Renderer 同时排队乐观消息保存并启动 Host，迟到的 upsert 覆盖了 Host 已冻结的时间。所报告真实聊天的消息与独立 Trace 时间也相差 29ms，与该机制吻合；旧请求未保留最终 wire，不能把落盘核对当成现场 payload 捕获。
 
-| 路径                                           | tools           | 首个旧消息变化                                                             | 后续旧消息                                                                                |
-| ---------------------------------------------- | --------------- | -------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
-| 仅 Host 创建和保存消息                         | 23 个，指纹一致 | 无；12 条旧消息完整保留                                                    | 下一 Run 只在该前缀之后追加                                                               |
-| 首次请求发出后，Renderer 乐观 pair 迟到 upsert | 同上            | `messages[5]`（从 0 开始）的旧 user；仅 `user_message_created_at` 一行变化 | `messages[6]` 至 `messages[11]` 的旧 Run material、正文、reasoning、工具调用/结果全部一致 |
+该竞争现已在两端修复：
 
-此断点来自消息持久化竞争：[Renderer 提交](../../src/renderer/src/app/useAppShellMessageSubmission.ts) 同时排队乐观消息 upsert 并启动 Host Turn；[持久化队列](../../src/renderer/src/app/useConversationPersistence.ts) 等待 metadata 后才保存旧 pair。Host 已冻结本轮消息时间后，[普通消息 upsert](../../crates/core/src/storage/chat_repository.rs) 仍可覆盖 `created_at`。Run 终态不会纠正该字段；下一 Run 的历史组装从数据库重新读取时间，经 `<backend_conversation_timing>` 变为不同的模型输入。即使后面的文件历史逐字一致，共同前缀也会提前在最早的用户消息处结束。
+- [普通发送](../../src/renderer/src/app/useAppShellMessageSubmission.ts) 只做乐观展示，由 `startConversationTurn` 原子创建用户/助手消息；`starting` 不再发起状态保存。明确没有 Run 的失败或取消才补存失败 pair，保留输入、附件和错误，不覆盖后来输入的草稿。排队发送复用相同路径。
+- [Renderer 新增消息接口](../../crates/core/src/storage/chat_repository.rs) 的同会话重复 ID 保留已存时间、正文、角色、状态、Run 投影和位置，在同一事务返回真实记录；另一会话占用该 ID 则整批拒绝。agent/snapshot 不可变校验继续生效。
+- 扩大复测还发现：Host 已完成但启动响应丢失时，无 Run ID 的本地失败状态可经 `saveChatMessageState` 清空最终正文，导致下一轮 `provider_protocol_changed` 拦截。该路径也已修复：启动未确认的失败/取消只更新本地展示；后端对有 Trace 的助手消息只接纳绑定同一 Run ID 的状态回存，忽略未绑定或绑定其他 Run 的迟到副本。本地尚未接纳的失败消息仍可正常保存。
+- Host 接纳、运行中与终态持久化继续走专用写入路径；编辑重发使用新消息 ID。没有修改上下文排序、时间格式、Provider wire 格式或 schema。
 
-对所报告真实聊天的只读核对也发现：同一首轮的 user/assistant 消息时间均为 `1788713110306`，独立 Trace 创建时间为 `1788713110335`，差 29ms，符合该保存竞争的表现。但当时没有最终 wire 指纹或保留的初次 input 检查点，不能把此核对当成原始现场 payload 的直接捕获，更不能从本地回归推算 Provider 的确切缓存命中率。
+[Host 回归](../../crates/core-server/src/application/agent/tests/request_prefix.rs) 将原缺陷断言改为完整前缀不变，并覆盖：无前端保存、首次请求后迟到 upsert、终态后迟到 upsert、迟到保存后重启、Renderer 终态状态回存、迟到 live checkpoint，以及启动响应丢失后的未绑定失败状态与补存。回存经真实 storage RPC 的 DTO/授权边界，核对持久化返回值、消息时间和最终正文，再比较“读文件 → 谢谢”的 tools 与每一条旧消息。另验证上一 Run 最终助手正文和 reasoning 在后续请求中完整保留，避免只检查之前已发送的输入而漏掉最后输出。
 
-实际验证：2 项真实 Host 对照/缺陷复现通过；启用日志后的 8 次发送指纹与 HTTP 接收端计算结果完全一致；Rust Core 的 148 项 LLM 测试通过（含 4 项指纹校验）；Rust Core/Core Server all-targets Clippy、Rust 格式、文档格式和文档检查通过。未使用付费模型请求验证缓存率。
+修复后实际验证：7 项真实 Host 回归全部通过，28/28 发送前与 HTTP 接收端完整指纹一致。每个场景的 23 个工具不变，请求消息数量为 `7 → 9 → 12 → 16`；下一 Run 的前 12 条消息逐条等于上一 Run 最后请求，七个 `firstCrossRunChange` 均为 `None`。存储测试 662 项通过、1 项沿用既有忽略；AppShell 浏览器测试 94 项通过；Node/Web 类型检查、workspace all-targets Clippy、格式和文档检查通过。
 
-本轮只加诊断与现状回归，没有修复持久化竞争或重排上下文。迟到保存测试有意断言当前断点，属于已知缺陷的复现，并不表示该行为正确；修复时应将它改为与正常路径相同的完整前缀不变断言。后续修复应先收敛 Host 接纳 Turn 后的消息字段写入权，防止旧 Renderer 快照改写模型已观察的时间；无需据此重新改造工具历史格式。无需重置开发数据库。
+此修复无需重置数据库，也不推测或回写旧消息的原始时间。已经被改写的历史保持当前持久化事实；本次保护阻止后续迟到插入再次改写它。最终共同前缀一致仅说明本地序列化没有制造额外断点，不等于保证 Provider 实际缓存命中率。
 
 ### Todo 存储与提醒预算
 

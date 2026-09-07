@@ -221,7 +221,7 @@ describe('Human interaction in the real conversation surface', () => {
     host.notify(newest)
     await expect.element(panel).toHaveAttribute('data-request-id', 'newest')
     await expect
-      .element(screen.getByRole('button', { name: '交互 · 共 2 题' }).first())
+      .element(screen.getByRole('button', { name: '交互 · 共 2 项' }).first())
       .toBeVisible()
     screen.container.querySelector<HTMLButtonElement>('[data-human-request-id="old"]')!.click()
     await expect.element(panel).toHaveAttribute('data-request-id', 'old')
@@ -309,7 +309,7 @@ describe('Human interaction in the real conversation surface', () => {
     const panel = screen.getByRole('dialog', { name: '交互', exact: true })
     await expect.element(panel).toHaveAttribute('data-request-id', 'blocking')
     expect(panel.getByRole('button', { name: '忽略全部' }).elements()).toHaveLength(0)
-    for (const entry of screen.getByRole('button', { name: '交互 · 共 2 题' }).elements())
+    for (const entry of screen.getByRole('button', { name: '交互 · 共 2 项' }).elements())
       expect(entry).toBeDisabled()
     host.notify({ ...blocking, status: 'cancelled', revision: 1, updatedAt: 4 })
     await expect.element(panel).toHaveAttribute('data-request-id', 'newer')
@@ -365,7 +365,7 @@ describe('Human interaction in the real conversation surface', () => {
     await expect
       .poll(() => screen.container.querySelectorAll('.human-interaction-answer').length)
       .toBe(1)
-    expect(screen.getByRole('button', { name: '交互 · 共 2 题' }).elements()).toHaveLength(0)
+    expect(screen.getByRole('button', { name: '交互 · 共 2 项' }).elements()).toHaveLength(0)
     expect(screen.container.querySelector('.human-interaction-answer')!.textContent).toContain(
       'submit：选择外观submit 明亮外观submit：补充需求已跳过'
     )

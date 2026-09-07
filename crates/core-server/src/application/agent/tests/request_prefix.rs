@@ -1,6 +1,6 @@
-//! Characterize the actual HTTP prefix across read-file -> next-turn thanks.
-//! No context repair here: include the Renderer persistence ordering that a
-//! direct Harness fixture omits, and report the first changed wire message.
+//! Compare the actual HTTP prefix across read-file -> next-turn thanks.
+//! Include Renderer persistence and Host restart boundaries that a direct
+//! Harness fixture omits; all accepted request history must remain identical.
 use super::provider_profiles::{collect_until_done, read_provider_request, write_provider_stream};
 use super::*;
 use mycopilot_core::{fingerprint_llm_request, LlmRequestFingerprint};
@@ -12,9 +12,38 @@ const PROJECT: &str = "wire-prefix-project";
 const TASK: &str = "读取工作区文件，说明这是什么项目";
 
 #[derive(Clone, Copy, Debug)]
-enum OptimisticSave {
+enum RendererSave {
     Absent,
     AfterFirstRequest,
+    AfterTerminal,
+    AfterTerminalAndRestart,
+    TerminalStateProjection,
+    LateLiveState,
+    LostStartResponse,
+}
+
+const FINAL_ANSWER: &str = "这是一个桌面助手项目。";
+
+fn renderer_storage_request(
+    storage: &StorageService,
+    service: &AgentService,
+    notifications: &CoreServerNotificationSender,
+    method: &str,
+    params: Value,
+) -> Value {
+    let response = crate::transport::handle_request(
+        storage,
+        service,
+        notifications.clone(),
+        mycopilot_protocol_rs::JsonRpcRequest {
+            jsonrpc: "2.0".into(),
+            id: mycopilot_protocol_rs::JsonRpcId::Number(1),
+            method: method.into(),
+            params: Some(params),
+        },
+    );
+    assert!(response.get("error").is_none(), "{response}");
+    response["result"].clone()
 }
 
 fn turn_input(model: &str, index: usize) -> AgentConversationTurnInput {
@@ -54,7 +83,7 @@ async fn wait_for_worker_release(service: &AgentService, run_id: &str) {
     .expect("completed Host worker must release before the next turn");
 }
 
-async fn capture_read_then_thanks(save: OptimisticSave) -> Vec<Value> {
+async fn capture_read_then_thanks(save: RendererSave) -> Vec<Value> {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let (captured, mut requests) = unbounded_channel();
@@ -73,7 +102,7 @@ async fn capture_read_then_thanks(save: OptimisticSave) -> Vec<Value> {
                 "tool_calls",
             ),
             (
-                json!({"role":"assistant", "content":"这是一个桌面助手项目。", "reasoning_content":"The two files confirm the project description."}),
+                json!({"role":"assistant", "content":FINAL_ANSWER, "reasoning_content":"The two files confirm the project description."}),
                 "stop",
             ),
             (
@@ -109,12 +138,11 @@ async fn capture_read_then_thanks(save: OptimisticSave) -> Vec<Value> {
         "{\"name\":\"wire-fixture\",\"private\":true}",
     )
     .unwrap();
-    let storage = Arc::new(
-        StorageService::open_with_model_credentials(
-            &fixture.path().join("storage.sqlite"),
-            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
-        )
-        .unwrap(),
+    let database = fixture.path().join("storage.sqlite");
+    let credentials =
+        Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default());
+    let mut storage = Arc::new(
+        StorageService::open_with_model_credentials(&database, credentials.clone()).unwrap(),
     );
     // Match the observed native DeepSeek profile, including reasoning replay.
     // Only this loopback endpoint and fake credentials are used.
@@ -157,7 +185,13 @@ async fn capture_read_then_thanks(save: OptimisticSave) -> Vec<Value> {
             unread_at: None,
         })
         .unwrap();
-    let service = AgentService::new(storage.clone());
+    let vault = Arc::new(
+        ProviderContinuationVaultFactory::open_or_provision(storage.clone(), credentials.clone())
+            .unwrap(),
+    );
+    let mut service =
+        AgentService::try_new_with_startup_reconciliation(storage.clone(), true, Some(vault))
+            .unwrap();
     // Same-ms optimistic user/assistant, generated before the Host prepares its
     // own authoritative pair. Deliberately distinct, not relying on clock speed.
     let optimistic_timestamp = 1_788_713_110_306;
@@ -172,12 +206,22 @@ async fn capture_read_then_thanks(save: OptimisticSave) -> Vec<Value> {
             .unwrap(),
     ];
     assert_ne!(first.user_message.created_at, optimistic_timestamp);
-    if matches!(save, OptimisticSave::AfterFirstRequest) {
-        // Same persistence API as storage.upsertChatMessages; does not reassemble
-        // the live Run. Its frozen message time and the DB can now disagree.
-        storage
-            .upsert_chat_messages(CONVERSATION, optimistic_pair(optimistic_timestamp), 0)
-            .unwrap();
+    if matches!(save, RendererSave::AfterFirstRequest) {
+        // The actual public storage RPC, including authorization and DTO parsing,
+        // must keep the Host-admitted row when a queued optimistic insert arrives.
+        let persisted = renderer_storage_request(
+            &storage,
+            &service,
+            &notifications,
+            mycopilot_protocol_rs::STORAGE_UPSERT_CHAT_MESSAGES_METHOD,
+            json!({"conversationId":CONVERSATION,
+                "messages":optimistic_pair(optimistic_timestamp), "positionOffset":0}),
+        );
+        assert_eq!(persisted[0]["createdAt"], first.user_message.created_at);
+        assert_eq!(
+            persisted[1]["createdAt"],
+            first.assistant_message.created_at
+        );
     }
     release.send(()).unwrap();
     let first_events = collect_until_done(&mut events).await;
@@ -189,6 +233,109 @@ async fn capture_read_then_thanks(save: OptimisticSave) -> Vec<Value> {
     wait_for_worker_release(&service, &first.run_id).await;
     for _ in 0..2 {
         wires.push(requests.recv().await.unwrap());
+    }
+    if matches!(
+        save,
+        RendererSave::AfterTerminal | RendererSave::AfterTerminalAndRestart
+    ) {
+        let persisted = renderer_storage_request(
+            &storage,
+            &service,
+            &notifications,
+            mycopilot_protocol_rs::STORAGE_UPSERT_CHAT_MESSAGES_METHOD,
+            json!({"conversationId":CONVERSATION,
+                "messages":optimistic_pair(optimistic_timestamp), "positionOffset":0}),
+        );
+        assert_eq!(persisted[1]["content"], FINAL_ANSWER);
+        assert_eq!(persisted[1]["status"], "sent");
+    }
+    if matches!(
+        save,
+        RendererSave::TerminalStateProjection | RendererSave::LateLiveState
+    ) {
+        let current = storage.load_conversation(CONVERSATION).unwrap().unwrap();
+        let assistant = current
+            .messages
+            .iter()
+            .find(|message| message.id == first.assistant_message_id)
+            .unwrap();
+        // Match storageClient.mapMessageStateToStorage exactly. The current read
+        // projection is what a reconnected Renderer may persist; the live shape
+        // models a delayed queued checkpoint from before the Host terminal event.
+        let mut run: Value =
+            serde_json::from_str(assistant.agent_run_json.as_deref().unwrap()).unwrap();
+        let (content, status) = if matches!(save, RendererSave::LateLiveState) {
+            run["status"] = json!("running");
+            run["completedAt"] = Value::Null;
+            ("先查看目录。", "pending")
+        } else {
+            (
+                assistant.content.as_str(),
+                assistant.status.as_deref().unwrap(),
+            )
+        };
+        renderer_storage_request(
+            &storage,
+            &service,
+            &notifications,
+            mycopilot_protocol_rs::STORAGE_SAVE_CHAT_MESSAGE_STATE_METHOD,
+            json!({"conversationId":CONVERSATION,"message":{
+                "id":assistant.id,"content":content,"status":status,
+                "agentRunJson":serde_json::to_string(&run).unwrap()
+            }}),
+        );
+    }
+    if matches!(save, RendererSave::AfterTerminalAndRestart) {
+        service.shutdown_collaboration_dispatcher().await.unwrap();
+        drop(service);
+        drop(storage);
+        storage = Arc::new(
+            StorageService::open_with_model_credentials(&database, credentials.clone()).unwrap(),
+        );
+        // Production retains the credential store across process restarts. The
+        // test-only AgentService::new creates a fresh one, so reopen the vault
+        // explicitly using this fixture's unchanged durable credential identity.
+        let vault = Arc::new(
+            ProviderContinuationVaultFactory::open_or_provision(storage.clone(), credentials)
+                .unwrap(),
+        );
+        service =
+            AgentService::try_new_with_startup_reconciliation(storage.clone(), true, Some(vault))
+                .unwrap();
+    }
+    if matches!(save, RendererSave::LostStartResponse) {
+        // A lost start response leaves the Renderer optimistic assistant unbound
+        // even though the Host has completed. This matches the catch branch in
+        // useRequestAssistantResponse: ensureAgentRun(undefined, null, 'failed'),
+        // sent/empty content, followed by the failed-local-start insertion queue.
+        let failed_at = mycopilot_core::storage::now_ms();
+        let failed_run = json!({
+            "runId":null,"status":"failed","startedAt":failed_at,"completedAt":failed_at,
+            "toolDefinitions":[],"toolCalls":[],"toolResults":[],"approvals":[],
+            "fileChangeProposals":[],"fileChanges":[],"fileChangePreviews":[],
+            "messageStreamCheckpoints":{},"webSearchActivities":[],"readActivities":[],
+            "mcpInvocations":[],"timeline":[],"interruption":{"reason":"request_failed"}
+        });
+        renderer_storage_request(
+            &storage,
+            &service,
+            &notifications,
+            mycopilot_protocol_rs::STORAGE_SAVE_CHAT_MESSAGE_STATE_METHOD,
+            json!({"conversationId":CONVERSATION,"message":{
+                "id":first.assistant_message_id,"content":"","status":"sent",
+                "agentRunJson":failed_run.to_string()
+            }}),
+        );
+        let mut fallback = optimistic_pair(optimistic_timestamp);
+        fallback[1].status = Some("sent".into());
+        fallback[1].agent_run_json = Some(failed_run.to_string());
+        renderer_storage_request(
+            &storage,
+            &service,
+            &notifications,
+            mycopilot_protocol_rs::STORAGE_UPSERT_CHAT_MESSAGES_METHOD,
+            json!({"conversationId":CONVERSATION,"messages":fallback,"positionOffset":0}),
+        );
     }
     let saved = storage.load_conversation(CONVERSATION).unwrap().unwrap();
     for (id, authoritative_time) in [
@@ -205,14 +352,20 @@ async fn capture_read_then_thanks(save: OptimisticSave) -> Vec<Value> {
                 .find(|message| &message.id == id)
                 .unwrap()
                 .created_at,
-            if matches!(save, OptimisticSave::AfterFirstRequest) {
-                optimistic_timestamp
-            } else {
-                authoritative_time
-            },
-            "terminal persistence must be included in the timestamp diagnosis"
+            authoritative_time,
+            "Renderer writes and restart must retain Host-admitted message times"
         );
     }
+    let saved_assistant = saved
+        .messages
+        .iter()
+        .find(|message| message.id == first.assistant_message_id)
+        .unwrap();
+    assert_eq!(
+        saved_assistant.content, FINAL_ANSWER,
+        "{save:?} must not replace the accepted Host answer"
+    );
+    assert_eq!(saved_assistant.status.as_deref(), Some("sent"));
     let second = service
         .start_conversation_turn(turn_input(model, 1), notifications)
         .unwrap();
@@ -247,7 +400,7 @@ fn first_message_change(
         .position(|(left, right)| left != right)
 }
 
-fn diagnose(save: OptimisticSave, wires: &[Value]) -> Option<usize> {
+fn diagnose(save: RendererSave, wires: &[Value]) -> Option<usize> {
     let summaries = wires
         .iter()
         .map(fingerprint_llm_request)
@@ -302,6 +455,15 @@ fn diagnose(save: OptimisticSave, wires: &[Value]) -> Option<usize> {
             "within-Run messages must append"
         );
     }
+    let follow_up = wires[3]["messages"].as_array().unwrap();
+    assert!(
+        follow_up.iter().skip(old.len()).any(|message| {
+            message["role"] == "assistant"
+                && message["content"] == FINAL_ANSWER
+                && message["reasoning_content"] == "The two files confirm the project description."
+        }),
+        "the final response, which was not yet in the old last request, must also replay exactly"
+    );
     let change = first_message_change(&summaries[2], &summaries[3]);
     eprintln!("[host-request-prefix] case={save:?} firstCrossRunChange={change:?}");
     change
@@ -309,52 +471,48 @@ fn diagnose(save: OptimisticSave, wires: &[Value]) -> Option<usize> {
 
 #[tokio::test]
 async fn read_then_thanks_wire_prefix_without_renderer_save() {
-    let wires = capture_read_then_thanks(OptimisticSave::Absent).await;
-    assert_eq!(diagnose(OptimisticSave::Absent, &wires), None);
+    let wires = capture_read_then_thanks(RendererSave::Absent).await;
+    assert_eq!(diagnose(RendererSave::Absent, &wires), None);
 }
 
 #[tokio::test]
-async fn read_then_thanks_characterizes_late_renderer_timestamp_break() {
-    let wires = capture_read_then_thanks(OptimisticSave::AfterFirstRequest).await;
-    let change = diagnose(OptimisticSave::AfterFirstRequest, &wires)
-        .expect("diagnostic characterization: late optimistic upsert currently changes history");
-    let before = wires[2]["messages"].as_array().unwrap();
-    let after = wires[3]["messages"].as_array().unwrap();
-    let expected = before
-        .iter()
-        .position(|message| {
-            message["content"]
-                .as_str()
-                .is_some_and(|text| text.ends_with(TASK))
-        })
-        .unwrap();
+async fn read_then_thanks_retains_prefix_after_late_renderer_upsert() {
+    let wires = capture_read_then_thanks(RendererSave::AfterFirstRequest).await;
+    assert_eq!(diagnose(RendererSave::AfterFirstRequest, &wires), None);
+}
+
+#[tokio::test]
+async fn read_then_thanks_retains_prefix_after_terminal_renderer_upsert() {
+    let wires = capture_read_then_thanks(RendererSave::AfterTerminal).await;
+    assert_eq!(diagnose(RendererSave::AfterTerminal, &wires), None);
+}
+
+#[tokio::test]
+async fn read_then_thanks_retains_prefix_after_late_save_and_restart() {
+    let wires = capture_read_then_thanks(RendererSave::AfterTerminalAndRestart).await;
     assert_eq!(
-        change, expected,
-        "first divergence must be the original user timing, before all read-file history"
+        diagnose(RendererSave::AfterTerminalAndRestart, &wires),
+        None
     );
-    assert!(change + 1 < before.len());
-    assert_eq!(before[change]["role"], "user");
-    let (left, right) = (
-        before[change]["content"].as_str().unwrap(),
-        after[change]["content"].as_str().unwrap(),
-    );
-    assert!(left.starts_with("<backend_conversation_timing>"));
-    assert_eq!(left.lines().count(), right.lines().count());
-    let changed_lines = left
-        .lines()
-        .zip(right.lines())
-        .filter(|(left, right)| left != right)
-        .collect::<Vec<_>>();
-    assert_eq!(changed_lines.len(), 1);
-    assert!(changed_lines[0].0.starts_with("user_message_created_at: "));
-    assert!(changed_lines[0].1.starts_with("user_message_created_at: "));
+}
+
+#[tokio::test]
+async fn read_then_thanks_retains_prefix_after_renderer_terminal_state_projection() {
+    let wires = capture_read_then_thanks(RendererSave::TerminalStateProjection).await;
     assert_eq!(
-        left.split_once("</backend_conversation_timing>").unwrap().1,
-        right
-            .split_once("</backend_conversation_timing>")
-            .unwrap()
-            .1
+        diagnose(RendererSave::TerminalStateProjection, &wires),
+        None
     );
-    assert_eq!(&before[change + 1..], &after[change + 1..before.len()],
-        "all old bootstrap, reasoning and complete tool exchanges remain byte-identical after the changed time");
+}
+
+#[tokio::test]
+async fn read_then_thanks_retains_prefix_after_late_renderer_live_checkpoint() {
+    let wires = capture_read_then_thanks(RendererSave::LateLiveState).await;
+    assert_eq!(diagnose(RendererSave::LateLiveState, &wires), None);
+}
+
+#[tokio::test]
+async fn read_then_thanks_retains_prefix_after_lost_start_response() {
+    let wires = capture_read_then_thanks(RendererSave::LostStartResponse).await;
+    assert_eq!(diagnose(RendererSave::LostStartResponse, &wires), None);
 }

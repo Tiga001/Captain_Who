@@ -184,11 +184,6 @@ export function useAppShellMessageSubmission({
 
       setConversationsWithRef(nextConversations)
       enqueueConversationMetaSave(conversationToSave)
-      enqueueChatMessagesUpsert(
-        conversationId,
-        [userMessage, assistantMessage],
-        targetConversation?.messages.length ?? 0
-      )
       if (behavior.activate) {
         activeConversationIdRef.current = conversationId
         setScrollTargetMessageId(null)
@@ -228,7 +223,33 @@ export function useAppShellMessageSubmission({
         options.attachments,
         options.skills,
         targetConversation ? undefined : title
-      )
+      ).then((committed) => {
+        if (committed) return
+
+        // Host owns accepted turns. Persist only a failed local start so its input,
+        // attachments and error remain recoverable; never queue the optimistic pair
+        // alongside startConversationTurn, where it could arrive after Host acceptance.
+        const currentConversation = conversationsRef.current.find(
+          (conversation) => conversation.id === conversationId
+        )
+        const userIndex = currentConversation?.messages.findIndex(
+          (message) => message.id === userMessage.id
+        )
+        if (!currentConversation || userIndex === undefined || userIndex < 0) return
+        const failedAssistant = currentConversation.messages[userIndex + 1]
+        if (
+          failedAssistant?.id !== assistantMessage.id ||
+          failedAssistant.agentRun?.runId ||
+          !['failed', 'cancelled'].includes(failedAssistant.agentRun?.status ?? '')
+        ) {
+          return
+        }
+        enqueueChatMessagesUpsert(
+          conversationId,
+          [currentConversation.messages[userIndex], failedAssistant],
+          userIndex
+        )
+      })
       return true
     },
     [

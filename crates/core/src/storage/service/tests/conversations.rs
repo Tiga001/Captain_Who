@@ -3910,6 +3910,37 @@ fn stale_saves_cannot_recreate_deleted_project_data() {
 }
 
 #[test]
+fn renderer_message_insert_service_returns_authoritative_retries() {
+    let fixture = StorageFixture::new();
+    let service = fixture.service();
+    let initial = conversation("insertion-retry", None, "message-first");
+    service.save_conversation(initial.clone()).unwrap();
+    let mut stale = initial.messages[0].clone();
+    stale.created_at = 9;
+    stale.content = "late optimistic text".into();
+    let returned = service
+        .upsert_chat_messages(&initial.id, vec![stale], 99)
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(returned).unwrap(),
+        serde_json::to_value(&initial.messages).unwrap()
+    );
+    drop(service);
+    let reopened = fixture.service();
+    assert_eq!(
+        serde_json::to_value(
+            reopened
+                .load_conversation(&initial.id)
+                .unwrap()
+                .unwrap()
+                .messages
+        )
+        .unwrap(),
+        serde_json::to_value(initial.messages).unwrap()
+    );
+}
+
+#[test]
 fn deleting_conversation_removes_agent_rows_and_keeps_usage_rollup() {
     let fixture = StorageFixture::new();
     let service = fixture.service();

@@ -1742,3 +1742,174 @@ fn message(
         ui_state_json: None,
     }
 }
+
+#[test]
+fn renderer_message_insert_preserves_existing_facts_and_returns_stored_rows() {
+    let mut connection = Connection::open_in_memory().unwrap();
+    migrations::run_migrations(&connection).unwrap();
+    let mut initial = conversation();
+    initial.messages[1].agent_run_json = Some(live_running_agent_run().to_string());
+    initial.messages[1].ui_state_json = Some("{\"expanded\":true}".into());
+    save_conversation(&mut connection, initial.clone()).unwrap();
+
+    let mut stale_user = message("user-1", "assistant", "stale body", 0, Some("error"));
+    stale_user.ui_state_json = Some("{\"expanded\":false}".into());
+    let stale_assistant = message("assistant-1", "assistant", "", 0, Some("pending"));
+    let added = message("user-2", "user", "next", 3, Some("sent"));
+    let returned = upsert_messages(
+        &mut connection,
+        &initial.id,
+        &[stale_user.clone(), stale_assistant, added.clone()],
+        0,
+    )
+    .unwrap();
+    assert_eq!(returned.len(), 3);
+    assert_eq!(
+        serde_json::to_value(&returned[..2]).unwrap(),
+        serde_json::to_value(&initial.messages).unwrap()
+    );
+    assert_eq!(
+        serde_json::to_value(&returned[2]).unwrap(),
+        serde_json::to_value(&added).unwrap()
+    );
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT position FROM messages WHERE id = 'assistant-1'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+        1
+    );
+
+    // The Host's separate lifecycle writer still advances the accepted message;
+    // retrying the old insertion cannot undo it or rewrite its timestamp.
+    update_message_status_and_content(
+        &connection,
+        &initial.id,
+        "assistant-1",
+        "Host finished",
+        Some("sent"),
+        4,
+    )
+    .unwrap();
+    let replayed = upsert_messages(
+        &mut connection,
+        &initial.id,
+        &[
+            message("assistant-1", "assistant", "", 0, Some("pending")),
+            stale_user,
+        ],
+        99,
+    )
+    .unwrap();
+    assert_eq!(replayed[0].content, "Host finished");
+    assert_eq!(replayed[0].created_at, 2);
+    assert_eq!(replayed[0].status.as_deref(), Some("sent"));
+    assert_eq!(
+        replayed[0].agent_run_json,
+        initial.messages[1].agent_run_json
+    );
+    assert_eq!(replayed[0].ui_state_json, initial.messages[1].ui_state_json);
+}
+
+#[test]
+fn renderer_message_insert_rejects_cross_conversation_ids_atomically() {
+    let mut connection = Connection::open_in_memory().unwrap();
+    migrations::run_migrations(&connection).unwrap();
+    let first = conversation();
+    save_conversation(&mut connection, first.clone()).unwrap();
+    let mut second = conversation();
+    second.id = "conversation-2".into();
+    second.messages.clear();
+    save_conversation(&mut connection, second.clone()).unwrap();
+    let result = upsert_messages(
+        &mut connection,
+        &second.id,
+        &[
+            message("new-before-conflict", "user", "new", 4, Some("sent")),
+            message("user-1", "user", "overwrite another chat", 4, Some("sent")),
+        ],
+        0,
+    );
+    assert!(result.is_err());
+    assert!(get_conversation(&connection, &second.id)
+        .unwrap()
+        .unwrap()
+        .messages
+        .is_empty());
+    assert_eq!(
+        serde_json::to_value(
+            get_conversation(&connection, &first.id)
+                .unwrap()
+                .unwrap()
+                .messages
+        )
+        .unwrap(),
+        serde_json::to_value(first.messages).unwrap()
+    );
+}
+
+#[test]
+fn renderer_unconfirmed_state_cannot_overwrite_an_admitted_turn() {
+    let mut connection = Connection::open_in_memory().unwrap();
+    migrations::run_migrations(&connection).unwrap();
+    let initial = conversation();
+    save_conversation(&mut connection, initial.clone()).unwrap();
+    let trace = ConversationTurnTrace {
+        schema_version: CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
+        run_id: "run-1".into(),
+        conversation_id: initial.id.clone(),
+        assistant_message_id: "assistant-1".into(),
+        terminal_status: ConversationTurnTraceTerminalStatus::InProgress,
+        terminal_error: None,
+        truncated: false,
+        items: Vec::new(),
+    };
+    conversation_trace_repository::replace_trace(&mut connection, &trace, 2, 2).unwrap();
+    for run in [
+        None,
+        Some(serde_json::json!({"runId":null,"status":"failed"}).to_string()),
+        Some(serde_json::json!({"runId":"other-run","status":"failed"}).to_string()),
+    ] {
+        update_message_state(
+            &connection,
+            &initial.id,
+            &ChatMessageStateRecord {
+                id: "assistant-1".into(),
+                content: String::new(),
+                status: Some("sent".into()),
+                agent_run_json: run,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            get_conversation(&connection, &initial.id)
+                .unwrap()
+                .unwrap()
+                .messages[1]
+                .content,
+            "final answer"
+        );
+    }
+    update_message_state(
+        &connection,
+        &initial.id,
+        &ChatMessageStateRecord {
+            id: "assistant-1".into(),
+            content: "Host-bound checkpoint".into(),
+            status: Some("pending".into()),
+            agent_run_json: Some(live_running_agent_run().to_string()),
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        get_conversation(&connection, &initial.id)
+            .unwrap()
+            .unwrap()
+            .messages[1]
+            .content,
+        "Host-bound checkpoint"
+    );
+}

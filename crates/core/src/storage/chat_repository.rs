@@ -799,12 +799,15 @@ pub fn save_conversation_meta(
     Ok(())
 }
 
+/// Renderer insertion/retry boundary. Accepted message facts belong to the Host:
+/// repeating an ID cannot rewrite its time, body, Run state, or history position.
+/// Host Turn admission and lifecycle updates use their separate write paths.
 pub fn upsert_messages(
     connection: &mut Connection,
     conversation_id: &str,
     messages: &[ChatMessageRecord],
     position_offset: i64,
-) -> rusqlite::Result<()> {
+) -> rusqlite::Result<Vec<ChatMessageRecord>> {
     let transaction = connection.transaction()?;
     let agent_bound = transaction.query_row(
         "SELECT EXISTS(SELECT 1 FROM agent_nodes WHERE conversation_id = ?1)",
@@ -816,58 +819,64 @@ pub fn upsert_messages(
         [conversation_id],
         |row| row.get::<_, i64>(0),
     )?;
+    let mut stored = Vec::with_capacity(messages.len());
 
     for (index, message) in messages.iter().enumerate() {
-        if let Some(existing) = immutable_graph_message(&transaction, conversation_id, &message.id)?
-        {
-            if existing.role != message.role
-                || existing.content != message.content
-                || existing.status != message.status
-                || existing.created_at != message.created_at
-                || existing.agent_run_json != message.agent_run_json
+        let existing = transaction
+            .query_row(
+                "SELECT message.conversation_id, message.id, message.role, message.content,
+                    message.created_at, message.status, message.agent_run_json, ui.ui_state_json
+             FROM messages AS message
+             LEFT JOIN chat_message_ui_states AS ui ON ui.message_id = message.id
+             WHERE message.id = ?1",
+                [&message.id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        ChatMessageRecord {
+                            human_interaction_response: None,
+                            id: row.get(1)?,
+                            role: row.get(2)?,
+                            content: row.get(3)?,
+                            created_at: row.get(4)?,
+                            status: row.get(5)?,
+                            attachments: Vec::new(),
+                            agent_run_json: row.get(6)?,
+                            ui_state_json: row.get(7)?,
+                        },
+                    ))
+                },
+            )
+            .optional()?;
+        if let Some((owner, existing)) = existing {
+            if owner != conversation_id {
+                // Roll back earlier inserts in this batch as well. An ID can never
+                // be used to overwrite a message owned by a different chat.
+                return Err(rusqlite::Error::InvalidQuery);
+            }
+            if immutable_graph_message(&transaction, conversation_id, &message.id)?.is_some()
+                && (existing.role != message.role
+                    || existing.content != message.content
+                    || existing.status != message.status
+                    || existing.created_at != message.created_at
+                    || existing.agent_run_json != message.agent_run_json)
             {
                 return Err(rusqlite::Error::InvalidQuery);
             }
+            stored.push(existing);
             continue;
         }
-        let existing_position = transaction
-            .query_row(
-                "SELECT position FROM messages WHERE conversation_id = ?1 AND id = ?2",
-                params![conversation_id, &message.id],
-                |row| row.get::<_, i64>(0),
-            )
-            .optional()?;
-        let is_new_message = existing_position.is_none();
         let position = if agent_bound {
-            existing_position.unwrap_or_else(|| {
-                let position = next_agent_position;
-                next_agent_position = next_agent_position.saturating_add(1);
-                position
-            })
+            let position = next_agent_position;
+            next_agent_position = next_agent_position.saturating_add(1);
+            position
         } else {
             position_offset + index as i64
         };
         transaction.execute(
-            "
-            INSERT INTO messages (
-                id,
-                conversation_id,
-                role,
-                content,
-                status,
-                agent_run_json,
-                created_at,
-                position
-            )
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-            ON CONFLICT(id) DO UPDATE SET
-                role = excluded.role,
-                content = excluded.content,
-                status = excluded.status,
-                agent_run_json = excluded.agent_run_json,
-                created_at = excluded.created_at,
-                position = excluded.position
-            ",
+            "INSERT INTO messages (
+                id, conversation_id, role, content, status, agent_run_json, created_at, position
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 &message.id,
                 conversation_id,
@@ -879,17 +888,21 @@ pub fn upsert_messages(
                 position
             ],
         )?;
-        if is_new_message {
-            update_message_ui_state(
-                &transaction,
-                conversation_id,
-                &message.id,
-                message.ui_state_json.as_deref(),
-            )?;
-        }
+        update_message_ui_state(
+            &transaction,
+            conversation_id,
+            &message.id,
+            message.ui_state_json.as_deref(),
+        )?;
+        stored.push(message.clone());
     }
-
-    transaction.commit()
+    super::human_interaction_repository::attach_message_projections(
+        &transaction,
+        conversation_id,
+        &mut stored,
+    )?;
+    transaction.commit()?;
+    Ok(stored)
 }
 
 pub fn delete_messages(
@@ -1398,6 +1411,27 @@ pub fn update_message_state(
     let Some((_existing_status, existing_content, existing_run_json, created_at)) = existing else {
         return Ok(());
     };
+    let admitted_run_id = connection
+        .query_row(
+            "SELECT run_id FROM conversation_turn_traces
+             WHERE conversation_id = ?1 AND assistant_message_id = ?2",
+            params![conversation_id, &message.id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    if let Some(admitted_run_id) = admitted_run_id {
+        let incoming_run_id = message
+            .agent_run_json
+            .as_deref()
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+            .and_then(|run| run.get("runId")?.as_str().map(str::to_owned));
+        if incoming_run_id.as_deref() != Some(admitted_run_id.as_str()) {
+            // A lost start response can leave a Renderer with a local failed or
+            // cancelled placeholder even though this Turn was already accepted.
+            // Only checkpoints bound to the admitted Run may update its state.
+            return Ok(());
+        }
+    }
     let durable_terminal = durable_terminal_run(
         connection,
         conversation_id,

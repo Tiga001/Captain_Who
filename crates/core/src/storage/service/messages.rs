@@ -114,8 +114,7 @@ impl StorageService {
             &messages,
             position_offset,
         )
-        .map_err(storage_error)?;
-        Ok(messages)
+        .map_err(storage_error)
     }
 
     pub fn get_assistant_message_created_at(

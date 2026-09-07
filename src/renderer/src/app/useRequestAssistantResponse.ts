@@ -102,10 +102,15 @@ export function useRequestAssistantResponse({
       rewrite?: RewriteConversationTurnStart
     ): Promise<boolean> => {
       if (!rewrite) {
-        updateAssistantMessage(conversationId, assistantMessageId, (message) => ({
-          ...message,
-          agentRun: ensureAgentRun(message.agentRun, null, 'starting')
-        }))
+        updateAssistantMessage(
+          conversationId,
+          assistantMessageId,
+          (message) => ({
+            ...message,
+            agentRun: ensureAgentRun(message.agentRun, null, 'starting')
+          }),
+          { persist: false }
+        )
       }
 
       try {
@@ -378,7 +383,9 @@ export function useRequestAssistantResponse({
                 stoppedAt
               )
             }),
-            { touchConversation: true }
+            // A lost start response does not prove Host failed to accept this turn.
+            // Keep the local projection; an unbound state save could erase its real Run.
+            { persist: false, touchConversation: true }
           )
           return false
         }
@@ -415,7 +422,7 @@ export function useRequestAssistantResponse({
               )
             }
           },
-          { touchConversation: true }
+          { persist: false, touchConversation: true }
         )
         return false
       }

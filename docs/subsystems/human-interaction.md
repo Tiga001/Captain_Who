@@ -16,7 +16,7 @@ last_verified: 2026-09-06
 - `request_user_input_async` 接纳后立即返回，继续独立工作；整批回答随后作为用户消息投递。
 - 两工具只属于直接面向用户的根智能体。普通单 Agent 聊天属于根聊天；所有层级子 Agent，
   包括自身拥有后代者，均不得挂载或执行。第一阶段不向无人值守 Automation 挂载。
-- 设置 → 个性化新增“人机交互”及默认开启的“允许智能体向人类提问”。Host 独立保存设置及
+- 设置 → 个性化新增“人机交互”及默认开启的“允许智能体向人类发起提问与协作”。Host 独立保存设置及
   revision，单次输入中的 Prompt Preferences 不具备覆盖此策略的权限。
 - 关闭只阻止新提问，已有问题仍可提交或忽略。创建问题与关闭设置在同一数据库写事务边界裁定先后。
 - 每题一页，不设置产品题数上限。允许多个未结束的异步批次，一次工具调用对应一批问题。
@@ -527,7 +527,7 @@ Main 将 Core Server 启动/重连生命周期转为独立 `humanInteraction.onR
 [`ConversationSurface.tsx`](../../src/renderer/src/features/chat/ConversationSurface.tsx)
 协调根审批和协作审批 > 同步提问 > 异步提问。审批独占时所有问题入口不可操作；同步提问也阻止异步入口抢占。
 异步按创建 sequence 后来者优先，手动打开旧批次只改变面板选择；提交顺序仍完全由 Host 接纳序号决定。
-每批在所属 assistant 原工具调用位置有一个“交互 · 共 N 题”入口，位于调用前后正文之间，折叠运行详情不改变顺序；成功提交或忽略后入口立即撤下。
+每批在所属 assistant 原工具调用位置有一个“交互 · 共 N 项”入口，位于调用前后正文之间，折叠运行详情不改变顺序；成功提交或忽略后入口立即撤下。
 子 Agent observer 不查询待答批次、不展示操作入口。
 
 [`humanInteractionPresentation.ts`](../../src/renderer/src/features/humanInteraction/humanInteractionPresentation.ts)

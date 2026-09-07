@@ -402,6 +402,7 @@ export interface StorageHostApi {
   ): Promise<StorageChatConversationMetaRecord>
   deleteConversation(conversationId: string): Promise<void>
   deleteChatMessages(input: StorageDeleteChatMessagesRequest): Promise<void>
+  /** Inserts new messages; an existing ID returns its stored facts without replacing them. */
   upsertChatMessages(input: {
     conversationId: string
     messages: StorageChatMessageWriteRecord[]

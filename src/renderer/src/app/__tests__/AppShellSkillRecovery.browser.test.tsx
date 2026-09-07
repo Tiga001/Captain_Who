@@ -561,6 +561,20 @@ vi.mock('../../features/chat/ChatConversationPage', () => ({
       <button
         type="button"
         onClick={() =>
+          onSubmitMessage(composerDraft.message, {
+            attachments: composerDraft.attachments,
+            modelId: composerDraft.modelId,
+            permissionMode: composerDraft.permissionMode,
+            projectId: composerDraft.projectId,
+            skills: composerDraft.skills
+          })
+        }
+      >
+        submit-draft-content
+      </button>
+      <button
+        type="button"
+        onClick={() =>
           onComposerDraftChange({
             ...composerDraft,
             modelId: 'model-2',
@@ -3312,6 +3326,121 @@ describe('unified activated Skill inventory', () => {
         )
       )
       .toBe(true)
+  })
+})
+
+describe('Host-owned turn acceptance', () => {
+  const submittedAttachment = {
+    id: 'submitted-attachment',
+    kind: 'file' as const,
+    name: 'question.txt',
+    mimeType: 'text/plain',
+    sizeBytes: 8,
+    encoding: 'base64' as const,
+    data: 'cXVlc3Rpb24='
+  }
+
+  function prepareDraft() {
+    testState.loadComposerDrafts.mockResolvedValueOnce({
+      'conversation-a': createComposerDraft({
+        message: 'read this file',
+        attachments: [submittedAttachment],
+        modelId: 'model-1',
+        projectId: 'project-a'
+      })
+    })
+  }
+
+  it('keeps optimistic messages local while Host accepts the turn before a delayed metadata save', async () => {
+    prepareDraft()
+    const start = deferred<AgentConversationTurnOutput>()
+    testState.startConversationTurn.mockReturnValueOnce(start.promise)
+    const screen = await renderSelectedConversation()
+    const metadata = deferred<void>()
+    testState.saveConversationMeta.mockReturnValueOnce(metadata.promise)
+
+    await screen.getByRole('button', { name: 'submit-draft-content' }).click()
+    await expect.poll(() => testState.startConversationTurn.mock.calls.length).toBe(1)
+    await expect.element(screen.getByTestId('agent-run-status')).toHaveTextContent('starting')
+    await expect
+      .element(screen.getByTestId('conversation-message-contents'))
+      .toHaveTextContent('read this file')
+    expect(testState.upsertChatMessages).not.toHaveBeenCalled()
+    expect(testState.saveChatMessageState).not.toHaveBeenCalled()
+    const input = testState.startConversationTurn.mock.calls[0]?.[0] as AgentConversationTurnInput
+    expect(input.attachments).toEqual([submittedAttachment])
+    start.resolve(successfulTurnOutput(input, 1))
+
+    await expect.element(screen.getByTestId('agent-run-status')).toHaveTextContent('running')
+    metadata.resolve()
+    await expect.poll(() => testState.saveChatMessageState.mock.calls.length).toBe(1)
+    expect(testState.saveChatMessageState.mock.calls[0]?.[1]).toMatchObject({
+      id: input.assistantMessageId,
+      createdAt: 21,
+      agentRun: { runId: 'run-1', status: 'running' }
+    })
+    expect(testState.upsertChatMessages).not.toHaveBeenCalled()
+  })
+
+  it('persists the rejected local pair with its input and attachments without overwriting a newer draft', async () => {
+    prepareDraft()
+    const start = deferred<AgentConversationTurnOutput>()
+    testState.startConversationTurn.mockReturnValueOnce(start.promise)
+    const screen = await renderSelectedConversation()
+
+    await screen.getByRole('button', { name: 'submit-draft-content' }).click()
+    await expect.poll(() => testState.startConversationTurn.mock.calls.length).toBe(1)
+    expect(testState.upsertChatMessages).not.toHaveBeenCalled()
+    await screen.getByRole('button', { name: 'edit-composer-after-transition-failure' }).click()
+    start.reject(new Error('Host rejected the turn before starting a Run'))
+
+    await expect.element(screen.getByTestId('agent-run-status')).toHaveTextContent('failed')
+    await expect.poll(() => testState.upsertChatMessages.mock.calls.length).toBe(1)
+    // A transport failure can hide a successful Host start. Never send an unbound
+    // failed state over its authoritative assistant; the insert-only fallback is safe.
+    expect(testState.saveChatMessageState).not.toHaveBeenCalled()
+    expect(testState.upsertChatMessages.mock.calls[0]).toEqual([
+      'conversation-a',
+      [
+        expect.objectContaining({
+          role: 'user',
+          content: 'read this file',
+          attachments: [expect.objectContaining({ id: submittedAttachment.id })]
+        }),
+        expect.objectContaining({
+          role: 'assistant',
+          status: 'sent',
+          agentRun: expect.objectContaining({ runId: null, status: 'failed' })
+        })
+      ],
+      2
+    ])
+    await expect
+      .element(screen.getByTestId('draft-message'))
+      .toHaveTextContent('new draft after failure')
+  })
+
+  it('keeps an unconfirmed stopped start local instead of overwriting Host state', async () => {
+    prepareDraft()
+    const start = deferred<AgentConversationTurnOutput>()
+    testState.startConversationTurn.mockReturnValueOnce(start.promise)
+    const screen = await renderSelectedConversation()
+
+    await screen.getByRole('button', { name: 'submit-draft-content' }).click()
+    await expect.poll(() => testState.startConversationTurn.mock.calls.length).toBe(1)
+    await screen.getByRole('button', { name: 'stop-generating' }).click()
+    start.reject(new Error('The start response was lost'))
+
+    await expect.element(screen.getByTestId('agent-run-status')).toHaveTextContent('cancelled')
+    await expect.poll(() => testState.upsertChatMessages.mock.calls.length).toBe(1)
+    expect(testState.saveChatMessageState).not.toHaveBeenCalled()
+    expect(testState.upsertChatMessages.mock.calls[0]?.[1]).toEqual([
+      expect.objectContaining({ role: 'user', content: 'read this file' }),
+      expect.objectContaining({
+        role: 'assistant',
+        agentRun: expect.objectContaining({ runId: null, status: 'cancelled' })
+      })
+    ])
   })
 })
 

@@ -15,7 +15,7 @@ const translations: Record<string, string> = {
   'chat.guidanceSubmittingStatus': '正在发送',
   'chat.guidanceQueued': '已排队',
   'chat.guidanceInterrupted': '未生效',
-  'humanInteraction.timeline.answer': '交互 · 共 {count} 题',
+  'humanInteraction.timeline.answer': '交互 · 共 {count} 项',
   'humanInteraction.history.skipped': '已跳过'
 }
 
@@ -334,15 +334,15 @@ describe('pending interaction Timeline chronology', () => {
     const assertOrder = () => {
       expect(screen.container.querySelectorAll('[data-human-request-id]')).toHaveLength(1)
       expect(textPosition(screen.container, '兴趣爱好：')).toBeLessThan(
-        textPosition(screen.container, '交互 · 共 2 题')
+        textPosition(screen.container, '交互 · 共 2 项')
       )
-      expect(textPosition(screen.container, '交互 · 共 2 题')).toBeLessThan(
+      expect(textPosition(screen.container, '交互 · 共 2 项')).toBeLessThan(
         textPosition(screen.container, '问题已发出。')
       )
       expect(screen.container.textContent!.split('兴趣爱好：')).toHaveLength(2)
     }
     assertOrder()
-    await screen.getByRole('button', { name: '交互 · 共 2 题' }).click()
+    await screen.getByRole('button', { name: '交互 · 共 2 项' }).click()
     expect(open).toHaveBeenCalledExactlyOnceWith(request.requestId)
     const later = structuredClone(chat)
     later.messages[0].agentRun!.status = 'running'

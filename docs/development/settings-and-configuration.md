@@ -56,7 +56,7 @@ App startup gate 分别等待项目、模型设置及其他权威状态加载。
 
 ### 人机交互设置
 
-“允许智能体向人类提问”默认开启，由 Host 独立保存 enabled/revision，使用 `host.humanInteraction` 读取、CAS 更新和接收变更通知。它不属于 Prompt Preferences，个性化整页保存不能覆盖此项。关闭只阻止新提问，已有问题仍能回答或忽略。第 1 轮完成存储和接口；个性化中的“人机交互”开关页面在第 4 轮接入，当前未完成执行链路的工具不会对模型暴露。完整设计见[向用户提问](../subsystems/human-interaction.md)。
+“允许智能体向人类发起提问与协作”默认开启，由 Host 独立保存 enabled/revision，使用 `host.humanInteraction` 读取、CAS 更新和接收变更通知。它不属于 Prompt Preferences，个性化整页保存不能覆盖此项。关闭只阻止新提问，已有问题仍能回答或忽略。第 1 轮完成存储和接口；个性化中的“人机交互”开关页面在第 4 轮接入，当前未完成执行链路的工具不会对模型暴露。完整设计见[向用户提问](../subsystems/human-interaction.md)。
 
 ### 系统通知设置
 
