@@ -650,6 +650,18 @@ vi.mock('../../features/chat/ChatConversationPage', () => ({
       >
         select-model-2
       </button>
+      <button
+        type="button"
+        onClick={() =>
+          onComposerDraftChange({
+            ...composerDraft,
+            permissionMode: 'custom',
+            updatedAt: Math.max(Date.now(), composerDraft.updatedAt + 1)
+          })
+        }
+      >
+        select-custom-permissions
+      </button>
       <button type="button" onClick={onModelTransitionCancel}>
         cancel-model-transition
       </button>
@@ -1604,6 +1616,80 @@ describe('automation conversation navigation', () => {
 })
 
 describe('provider transition guard', () => {
+  it('keeps newer next-turn choices and input when an earlier confirmed transition completes', async () => {
+    mockSuccessfulTurnStarts()
+    const running = runningProviderTransition('model-1')
+    testState.preflightProviderTransition.mockResolvedValueOnce({
+      conversationId: 'conversation-a',
+      targetModelId: 'model-1',
+      decision: 'requires_compaction',
+      reason: 'provider_protocol_changed',
+      operationId: running.operationId,
+      transitionToken: 'transition-token-older-composer'
+    })
+    testState.startProviderTransition.mockResolvedValueOnce(running)
+    const screen = await renderSelectedConversation()
+
+    await screen.getByRole('button', { name: 'submit-without-skill' }).click()
+    await screen.getByRole('button', { name: 'confirm-model-transition' }).click()
+    await expect.poll(() => testState.startProviderTransition.mock.calls.length).toBe(1)
+    await screen.getByRole('button', { name: 'select-model-2' }).click()
+    await screen.getByRole('button', { name: 'select-custom-permissions' }).click()
+    await screen.getByRole('button', { name: 'edit-composer-after-transition-failure' }).click()
+
+    emitProviderTransition({
+      ...running,
+      status: 'completed',
+      modelId: 'model-1',
+      summaryId: 'summary-older-composer',
+      completedAt: running.startedAt + 10,
+      conversationUpdatedAt: running.startedAt + 11
+    })
+    await expect.poll(() => testState.startConversationTurn.mock.calls.length).toBe(1)
+    expect(testState.startConversationTurn.mock.calls[0]?.[0]).toEqual(
+      expect.objectContaining({ content: 'follow up', modelId: 'model-1' })
+    )
+    expect(JSON.parse(screen.getByTestId('draft-payload').element().textContent ?? '{}')).toEqual(
+      expect.objectContaining({
+        modelId: 'model-2',
+        permissionMode: 'custom',
+        message: 'new draft after failure'
+      })
+    )
+  })
+
+  it('preserves next-turn choices made while a compatible transition reply is pending', async () => {
+    mockSuccessfulTurnStarts()
+    const transition =
+      deferred<Extract<AgentProviderTransitionOperation, { status: 'completed' }>>()
+    testState.startProviderTransition.mockReturnValueOnce(transition.promise)
+    const screen = await renderSelectedConversation()
+    await screen.getByRole('button', { name: 'submit-without-skill' }).click()
+    await expect.poll(() => testState.startProviderTransition.mock.calls.length).toBe(1)
+    await screen.getByRole('button', { name: 'select-model-2' }).click()
+    await screen.getByRole('button', { name: 'select-custom-permissions' }).click()
+
+    transition.resolve(completedProviderTransition('model-1'))
+    await expect.poll(() => testState.startConversationTurn.mock.calls.length).toBe(1)
+    expect(testState.startConversationTurn.mock.calls[0]?.[0].modelId).toBe('model-1')
+    expect(JSON.parse(screen.getByTestId('draft-payload').element().textContent ?? '{}')).toEqual(
+      expect.objectContaining({ modelId: 'model-2', permissionMode: 'custom' })
+    )
+  })
+
+  it('uses the completed transition model when the submitted composer selection is unchanged', async () => {
+    mockSuccessfulTurnStarts()
+    testState.startProviderTransition.mockImplementationOnce(async () => ({
+      ...completedProviderTransition('model-1'),
+      modelId: 'model-2'
+    }))
+    const screen = await renderSelectedConversation()
+    await screen.getByRole('button', { name: 'submit-without-skill' }).click()
+    await expect.poll(() => testState.startConversationTurn.mock.calls.length).toBe(1)
+    expect(testState.startConversationTurn.mock.calls[0]?.[0].modelId).toBe('model-2')
+    await expect.element(screen.getByTestId('draft-model-id')).toHaveTextContent('model-2')
+  })
+
   it('keeps model selection in the draft and preflights only when the user sends', async () => {
     mockSuccessfulTurnStarts()
     const running = runningProviderTransition('model-2')
@@ -3016,6 +3102,117 @@ describe('running conversation guidance queue', () => {
     })
   }
 
+  it('keeps a running turn on its settings and applies composer choices to the next turn', async () => {
+    mockSuccessfulTurnStarts()
+    const screen = await renderSelectedConversation()
+    await screen.getByRole('button', { name: 'submit-without-skill' }).click()
+    await expect.element(screen.getByTestId('agent-run-status')).toHaveTextContent('running')
+    const firstTurn = structuredClone(testState.startConversationTurn.mock.calls[0]?.[0])
+    const preflightCalls = testState.preflightProviderTransition.mock.calls.length
+    const transitionCalls = testState.startProviderTransition.mock.calls.length
+
+    await screen.getByRole('button', { name: 'select-model-2' }).click()
+    await screen.getByRole('button', { name: 'select-custom-permissions' }).click()
+    await screen.getByRole('button', { name: 'edit-composer-after-transition-failure' }).click()
+    expect(testState.startConversationTurn).toHaveBeenCalledTimes(1)
+    expect(testState.startConversationTurn.mock.calls[0]?.[0]).toEqual(firstTurn)
+    expect(testState.preflightProviderTransition).toHaveBeenCalledTimes(preflightCalls)
+    expect(testState.startProviderTransition).toHaveBeenCalledTimes(transitionCalls)
+    expect(testState.steerAgentRun).not.toHaveBeenCalled()
+    expect(testState.cancelAgentRun).not.toHaveBeenCalled()
+
+    finishRun('run-1')
+    await expect.element(screen.getByTestId('agent-run-status')).toHaveTextContent('completed')
+    await screen.getByRole('button', { name: 'submit-draft-content' }).click()
+    await expect.poll(() => testState.startConversationTurn.mock.calls.length).toBe(2)
+    expect(testState.startConversationTurn.mock.calls[1]?.[0]).toEqual(
+      expect.objectContaining({
+        content: 'new draft after failure',
+        modelId: 'model-2',
+        permissions: defaultUiPreferences().customPermissions
+      })
+    )
+  })
+
+  it('auto-sends the frozen queue settings without replacing newer composer choices', async () => {
+    const queued = queuedMessage('queue-older-settings', 'queued on the first model', 10)
+    loadQueue([queued])
+    const screen = await renderSelectedConversation()
+    await screen.getByRole('button', { name: 'submit-without-skill' }).click()
+    await expect.element(screen.getByTestId('agent-run-status')).toHaveTextContent('running')
+    const firstTurn = testState.startConversationTurn.mock.calls[0]?.[0]
+    await screen.getByRole('button', { name: 'toggle-queue-auto-send' }).click()
+    await screen.getByRole('button', { name: 'select-model-2' }).click()
+    await screen.getByRole('button', { name: 'select-custom-permissions' }).click()
+    await screen.getByRole('button', { name: 'edit-composer-after-transition-failure' }).click()
+
+    finishRun('run-1')
+    await expect.poll(() => testState.startConversationTurn.mock.calls.length).toBe(2)
+    expect(testState.startConversationTurn.mock.calls[1]?.[0]).toEqual(
+      expect.objectContaining({
+        content: queued.content,
+        modelId: queued.modelId,
+        permissions: firstTurn.permissions
+      })
+    )
+    expect(JSON.parse(screen.getByTestId('draft-payload').element().textContent ?? '{}')).toEqual(
+      expect.objectContaining({
+        modelId: 'model-2',
+        permissionMode: 'custom',
+        message: 'new draft after failure'
+      })
+    )
+    await expect.element(screen.getByTestId('queued-message-ids')).toHaveTextContent('')
+
+    finishRun('run-2')
+    await expect.element(screen.getByTestId('agent-run-status')).toHaveTextContent('completed')
+    await screen.getByRole('button', { name: 'submit-draft-content' }).click()
+    await expect.poll(() => testState.startConversationTurn.mock.calls.length).toBe(3)
+    expect(testState.startConversationTurn.mock.calls[2]?.[0]).toEqual(
+      expect.objectContaining({
+        content: 'new draft after failure',
+        modelId: 'model-2',
+        permissions: defaultUiPreferences().customPermissions
+      })
+    )
+  })
+
+  it('keeps newer composer choices when a queued message finishes its confirmed model transition', async () => {
+    loadQueue([queuedMessage('queue-transition-settings', 'queued before model change', 10)])
+    const running = runningProviderTransition('model-1')
+    testState.preflightProviderTransition.mockResolvedValueOnce({
+      conversationId: 'conversation-a',
+      targetModelId: 'model-1',
+      decision: 'requires_compaction',
+      reason: 'provider_protocol_changed',
+      operationId: running.operationId,
+      transitionToken: 'transition-token-queue-settings'
+    })
+    testState.startProviderTransition.mockResolvedValueOnce(running)
+    const screen = await renderSelectedConversation()
+    await screen.getByRole('button', { name: 'toggle-queue-auto-send' }).click()
+    await screen.getByRole('button', { name: 'confirm-model-transition' }).click()
+    await expect.poll(() => testState.startProviderTransition.mock.calls.length).toBe(1)
+    await screen.getByRole('button', { name: 'select-model-2' }).click()
+    await screen.getByRole('button', { name: 'select-custom-permissions' }).click()
+
+    emitProviderTransition({
+      ...running,
+      status: 'completed',
+      modelId: 'model-1',
+      summaryId: 'summary-queue-settings',
+      completedAt: running.startedAt + 10,
+      conversationUpdatedAt: running.startedAt + 11
+    })
+    await expect.poll(() => testState.startConversationTurn.mock.calls.length).toBe(1)
+    expect(testState.startConversationTurn.mock.calls[0]?.[0]).toEqual(
+      expect.objectContaining({ content: 'queued before model change', modelId: 'model-1' })
+    )
+    expect(JSON.parse(screen.getByTestId('draft-payload').element().textContent ?? '{}')).toEqual(
+      expect.objectContaining({ modelId: 'model-2', permissionMode: 'custom' })
+    )
+  })
+
   it('leaves the queue untouched by default when a reply completes', async () => {
     loadQueue([queuedMessage('queue-first', 'keep for later', 10)])
     const screen = await renderSelectedConversation()
@@ -3651,6 +3848,9 @@ describe('running conversation guidance queue', () => {
     await expect.element(screen.getByTestId('agent-run-status')).toHaveTextContent('running')
     await screen.getByRole('button', { name: 'toggle-queue-auto-send' }).click()
 
+    await screen.getByRole('button', { name: 'select-model-2' }).click()
+    await screen.getByRole('button', { name: 'select-custom-permissions' }).click()
+    const preflightsBeforeGuidance = testState.preflightProviderTransition.mock.calls.length
     await screen.getByRole('button', { name: 'guide-second-message' }).click()
     await expect.poll(() => testState.steerAgentRun.mock.calls.length).toBe(1)
     expect(testState.steerAgentRun).toHaveBeenCalledWith({
@@ -3660,6 +3860,8 @@ describe('running conversation guidance queue', () => {
       content: 'guide this run',
       attachments: []
     })
+    expect(testState.preflightProviderTransition).toHaveBeenCalledTimes(preflightsBeforeGuidance)
+    expect(testState.startConversationTurn.mock.calls[0]?.[0].modelId).toBe('model-1')
     await expect
       .element(screen.getByTestId('guidance-timeline'))
       .toHaveTextContent('client-queue-second:submitting')
@@ -4773,6 +4975,38 @@ describe('edited turn Skill recovery', () => {
       .element(screen.getByTestId('conversation-message-contents'))
       .toHaveTextContent('edited')
     expect(testState.rewriteConversationTurn).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps next-turn settings and new input queued before an edited turn is acknowledged', async () => {
+    const rewrite = deferred<AgentConversationTurnOutput>()
+    testState.rewriteConversationTurn.mockReturnValueOnce(rewrite.promise)
+    const screen = await renderSelectedConversation()
+
+    await screen.getByRole('button', { name: 'edit-last-message' }).click()
+    await expect.poll(() => testState.rewriteConversationTurn.mock.calls.length).toBe(1)
+    const input = testState.rewriteConversationTurn.mock
+      .calls[0]?.[0] as AgentConversationTurnRewriteInput
+    await screen.getByRole('button', { name: 'select-model-2' }).click()
+    await screen.getByRole('button', { name: 'select-custom-permissions' }).click()
+    await screen.getByRole('button', { name: 'edit-composer-after-transition-failure' }).click()
+    await screen.getByRole('button', { name: 'select-latest-skill' }).click()
+    await screen.getByRole('button', { name: 'append-queued-message' }).click()
+
+    rewrite.resolve(commitSuccessfulRewrite(input, 107))
+    await expect
+      .element(screen.getByTestId('conversation-message-contents'))
+      .toHaveTextContent('edited')
+    expect(input.turn.modelId).toBe('model-1')
+    expect(JSON.parse(screen.getByTestId('draft-payload').element().textContent ?? '{}')).toEqual(
+      expect.objectContaining({
+        modelId: 'model-2',
+        permissionMode: 'custom',
+        message: 'new draft after failure',
+        skills: [latestSkillSelection]
+      })
+    )
+    await expect.element(screen.getByTestId('queued-message-ids')).toHaveTextContent('queue-late')
+    expect(testState.startProviderTransition).not.toHaveBeenCalled()
   })
 
   it('keeps navigation on another conversation when a background rewrite settles', async () => {

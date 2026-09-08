@@ -50,11 +50,43 @@ interface EditRewriteAttempt {
 }
 
 type PendingProviderTransitionSubmission =
-  { kind: 'composer'; message: string; options: ChatSubmitOptions } | { kind: 'queued_message' }
+  | {
+      kind: 'composer'
+      message: string
+      options: ChatSubmitOptions
+      draftSnapshot?: ChatComposerDraft
+    }
+  | { kind: 'queued_message' }
 
 type RequestAssistantResponse = ReturnType<
   (typeof import('./useAgentRunLifecycle'))['useAgentRunLifecycle']
 >['requestAssistantResponse']
+
+function clearSubmittedComposerDraft(
+  currentDraft: ChatComposerDraft,
+  submittedDraft: ChatComposerDraft,
+  options: Pick<ChatSubmitOptions, 'modelId' | 'permissionMode' | 'projectId'>,
+  now: number
+): ChatComposerDraft {
+  return {
+    ...currentDraft,
+    message: currentDraft.message === submittedDraft.message ? '' : currentDraft.message,
+    attachments:
+      currentDraft.attachments === submittedDraft.attachments ? [] : currentDraft.attachments,
+    skills: currentDraft.skills === submittedDraft.skills ? [] : currentDraft.skills,
+    modelId:
+      currentDraft.modelId === submittedDraft.modelId ? options.modelId : currentDraft.modelId,
+    permissionMode:
+      currentDraft.permissionMode === submittedDraft.permissionMode
+        ? options.permissionMode
+        : currentDraft.permissionMode,
+    projectId:
+      currentDraft.projectId === submittedDraft.projectId
+        ? options.projectId
+        : currentDraft.projectId,
+    updatedAt: Math.max(now, currentDraft.updatedAt + 1)
+  }
+}
 
 interface UseAppShellMessageSubmissionOptions {
   activeConversationIdRef: MutableRefObject<string | null>
@@ -164,7 +196,11 @@ export function useAppShellMessageSubmission({
       targetConversationId: string | null,
       message: string,
       options: ChatSubmitOptions,
-      behavior: { activate: boolean; preserveComposerContent: boolean }
+      behavior: {
+        activate: boolean
+        preserveComposerContent: boolean
+        draftSnapshot?: ChatComposerDraft
+      }
     ): boolean => {
       const targetConversation = targetConversationId
         ? (conversationsRef.current.find(
@@ -229,26 +265,20 @@ export function useAppShellMessageSubmission({
         setActiveConversationId(conversationId)
       }
       const currentDraft = draftsRef.current[conversationId] ?? createComposerDraft()
-      updateDraft(
-        conversationId,
-        behavior.preserveComposerContent
-          ? {
-              ...currentDraft,
-              modelId: options.modelId,
-              permissionMode: options.permissionMode,
-              projectId: options.projectId,
-              updatedAt: now
-            }
-          : {
-              ...createComposerDraft({
-                modelId: options.modelId,
-                permissionMode: options.permissionMode,
-                projectId: options.projectId,
-                queuedMessages: currentDraft.queuedMessages
-              }),
-              updatedAt: now
-            }
-      )
+      // A queued item owns its frozen settings, not the composer's next-turn choices.
+      // For composer sends, asynchronous Provider work must not clear newer input or
+      // overwrite choices made after the user submitted this particular turn.
+      if (!behavior.preserveComposerContent) {
+        updateDraft(
+          conversationId,
+          clearSubmittedComposerDraft(
+            currentDraft,
+            behavior.draftSnapshot ?? currentDraft,
+            options,
+            now
+          )
+        )
+      }
       void requestAssistantResponse(
         conversationId,
         userMessage.id,
@@ -329,8 +359,15 @@ export function useAppShellMessageSubmission({
         )
       )
 
+      const pendingSubmission = pendingProviderTransitionSubmissionsRef.current.get(
+        operation.conversationId
+      )
       const currentDraft = draftsRef.current[operation.conversationId]
-      if (currentDraft) {
+      if (
+        currentDraft &&
+        pendingSubmission?.kind !== 'queued_message' &&
+        currentDraft.modelId === operation.targetModelId
+      ) {
         updateDraft(operation.conversationId, {
           ...currentDraft,
           modelId: operation.modelId,
@@ -338,9 +375,6 @@ export function useAppShellMessageSubmission({
         })
       }
 
-      const pendingSubmission = pendingProviderTransitionSubmissionsRef.current.get(
-        operation.conversationId
-      )
       if (!pendingSubmission) return
       const latestConversation = conversationsRef.current.find(
         (conversation) => conversation.id === operation.conversationId
@@ -367,7 +401,8 @@ export function useAppShellMessageSubmission({
         { ...pendingSubmission.options, modelId: operation.modelId },
         {
           activate: activeConversationIdRef.current === operation.conversationId,
-          preserveComposerContent: false
+          preserveComposerContent: false,
+          draftSnapshot: pendingSubmission.draftSnapshot
         }
       )
     },
@@ -409,6 +444,7 @@ export function useAppShellMessageSubmission({
   const submitMessage = useCallback(
     async (message: string, options: ChatSubmitOptions): Promise<boolean> => {
       const conversationId = activeConversationIdRef.current
+      const draftSnapshot = conversationId ? draftsRef.current[conversationId] : undefined
       if (!conversationId) {
         submitMessageToConversation(null, message, options, {
           activate: true,
@@ -438,7 +474,8 @@ export function useAppShellMessageSubmission({
           { ...options, modelId: outcome.operation.modelId },
           {
             activate: true,
-            preserveComposerContent: false
+            preserveComposerContent: false,
+            draftSnapshot
           }
         )
       }
@@ -446,7 +483,8 @@ export function useAppShellMessageSubmission({
         pendingProviderTransitionSubmissionsRef.current.set(conversationId, {
           kind: 'composer',
           message,
-          options
+          options,
+          draftSnapshot
         })
       }
       return false
@@ -681,6 +719,7 @@ export function useAppShellMessageSubmission({
       if (!conversationId) {
         throw new Error(t('chat.editNoConversation'))
       }
+      const draftSnapshot = draftsRef.current[conversationId] ?? activeDraft
 
       const conversation = conversationsRef.current.find(
         (candidate) => candidate.id === conversationId
@@ -826,13 +865,10 @@ export function useAppShellMessageSubmission({
         ) {
           return
         }
+        const currentDraft = draftsRef.current[conversationId] ?? draftSnapshot
         updateDraft(
           conversationId,
-          createComposerDraft({
-            modelId: rewriteAttempt.modelId,
-            permissionMode: rewriteAttempt.permissionMode,
-            projectId: rewriteAttempt.projectId
-          })
+          clearSubmittedComposerDraft(currentDraft, draftSnapshot, rewriteAttempt, Date.now())
         )
         if (activeConversationIdRef.current === conversationId) {
           setScrollTargetMessageId(null)

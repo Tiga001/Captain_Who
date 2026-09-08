@@ -382,7 +382,31 @@ it.each([false, true])(
   }
 )
 
-it.each([{ running: true }, { maintenance: true }, { transition: true }])(
+it('keeps both model menus available when a run starts and changes only the next-turn draft', async () => {
+  modelState.enabledModels = MODEL_OPTIONS
+  const view = await render(<TestComposer portalMenus />)
+  const input = view.getByRole('textbox', { name: 'chat.inputAria' })
+  const footer = view.getByRole('button', { name: 'chat.selectModel' })
+  await expect.element(footer).not.toHaveAttribute('title')
+  await input.click()
+  await userEvent.keyboard('/model{Enter}')
+  await view.rerender(<TestComposer portalMenus running />)
+  const menu = view.getByRole('listbox', { name: 'chat.selectModel' })
+  await expect.element(footer).toBeEnabled()
+  await expect.element(footer).toHaveAttribute('title', 'chat.nextTurnConfigurationHint')
+  await menu.getByRole('option', { name: /deepseek-chat-api/ }).click()
+  expect(changed.mock.lastCall?.[0]).toMatchObject({ modelId: 'model-deepseek', message: '' })
+  await expect.element(input).toHaveValue('')
+  await footer.click()
+  await view.getByRole('option', { name: /Vision work model/ }).click()
+  expect(changed.mock.lastCall?.[0]).toMatchObject({ modelId: 'model-moonshot', message: '' })
+  expect(changed.mock.lastCall?.[0].queuedMessages).toEqual([])
+  expect(execute).not.toHaveBeenCalled()
+  expect(submit).not.toHaveBeenCalled()
+  expect(stop).not.toHaveBeenCalled()
+})
+
+it.each([{ maintenance: true }, { transition: true }])(
   'shares footer busy protection when state changes while the model page is open: %j',
   async (busy) => {
     modelState.enabledModels = MODEL_OPTIONS

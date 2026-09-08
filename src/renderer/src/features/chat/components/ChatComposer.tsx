@@ -219,8 +219,8 @@ export function ChatComposer({
     () => enabledModels.map((model) => createComposerModelMenuOption(model, t)),
     [enabledModels, t]
   )
-  const isModelSelectionDisabled =
-    isGenerating || isModelTransitionRunning || isManualCompactionRunning
+  const isModelSelectionDisabled = isModelTransitionRunning || isManualCompactionRunning
+  const nextTurnConfigurationHint = isGenerating ? t('chat.nextTurnConfigurationHint') : undefined
   const selectedProject = projects.find((project) => project.id === selectedProjectId)
   const skillCatalogEnabled = isSkillMenuOpen || draft.skills.length > 0
   const skillCatalogRefreshKey = `${skillCatalogRefreshToken}\u0002${
@@ -426,10 +426,7 @@ export function ChatComposer({
 
   const updateDraft = useCallback(
     (patch: Partial<ChatComposerDraft>) => {
-      const currentDraft = {
-        ...draftRef.current,
-        message
-      }
+      const currentDraft = draftRef.current
       const nextDraft = {
         ...currentDraft,
         ...patch,
@@ -443,7 +440,7 @@ export function ChatComposer({
         ...nextDraft
       })
     },
-    [message, onDraftChange]
+    [onDraftChange]
   )
 
   // Both model menus use this selection path. Only the slash menu also consumes its local query.
@@ -575,6 +572,7 @@ export function ChatComposer({
 
     setIsCommandMenuOpen(false)
     setIsCommandSession(false)
+    const submittedDraft = draftRef.current
     const trimmedMessage = message.trim()
     const attachmentSummary = createAttachmentSummary(attachments)
     const messageContent = [trimmedMessage, attachmentSummary].filter(Boolean).join('\n\n')
@@ -588,19 +586,23 @@ export function ChatComposer({
       return
     }
 
+    if (previousResetKeyRef.current !== resetKey) return
+
     const submitOptions: ChatSubmitOptions = {
       attachments: inputAttachments,
       modelId: selectedModel?.id ?? selectedModelId,
       permissionMode,
       projectId: selectedProject?.id ?? null,
-      skills: [...draftRef.current.skills]
+      skills: [...submittedDraft.skills]
     }
 
     if (isGenerating) {
       const createdAt = Date.now()
+      const currentDraft = draftRef.current
       updateDraft({
-        message: '',
-        attachments: [],
+        message: currentDraft.message === submittedDraft.message ? '' : currentDraft.message,
+        attachments:
+          currentDraft.attachments === submittedDraft.attachments ? [] : currentDraft.attachments,
         queuedMessages: [
           ...draftRef.current.queuedMessages,
           {
@@ -623,14 +625,18 @@ export function ChatComposer({
     }
 
     const accepted = await onSubmitMessage?.(messageContent, submitOptions)
-    if (accepted === false) return
+    if (accepted === false || previousResetKeyRef.current !== resetKey) return
+    // Submission may await Provider work while the composer already holds the next turn's draft.
+    const currentDraft = draftRef.current
     updateDraft({
-      message: '',
-      attachments: [],
-      skills: [],
-      modelId: selectedModel?.id ?? selectedModelId,
-      permissionMode,
-      projectId: selectedProject?.id ?? null
+      message: currentDraft.message === submittedDraft.message ? '' : currentDraft.message,
+      attachments:
+        currentDraft.attachments === submittedDraft.attachments ? [] : currentDraft.attachments,
+      skills: currentDraft.skills === submittedDraft.skills ? [] : currentDraft.skills,
+      projectId:
+        currentDraft.projectId === submittedDraft.projectId
+          ? (selectedProject?.id ?? null)
+          : currentDraft.projectId
     })
     setIsAttachmentMenuOpen(false)
     setIsSkillMenuOpen(false)
@@ -690,6 +696,7 @@ export function ChatComposer({
   }
 
   const selectPermissionMode = (nextPermissionMode: ChatPermissionMode) => {
+    if (isModelSelectionDisabled) return
     setIsPermissionMenuOpen(false)
     if (nextPermissionMode === permissionMode) return
 
@@ -1140,7 +1147,8 @@ export function ChatComposer({
               type="button"
               className="composer-permission-button"
               ref={permissionTriggerRef}
-              disabled={isGenerating || isModelTransitionRunning || isManualCompactionRunning}
+              disabled={isModelSelectionDisabled}
+              title={nextTurnConfigurationHint}
               data-permission={selectedPermission.id}
               aria-haspopup="listbox"
               aria-expanded={isPermissionMenuOpen}
@@ -1184,6 +1192,7 @@ export function ChatComposer({
                         role="option"
                         aria-selected={isSelected}
                         className="composer-permission-option"
+                        disabled={isModelSelectionDisabled}
                         data-permission={option.id}
                         data-selected={isSelected || undefined}
                         key={option.id}
@@ -1216,6 +1225,7 @@ export function ChatComposer({
             onChange={selectModelConfig}
             options={modelOptions}
             value={selectedModel?.id ?? null}
+            title={nextTurnConfigurationHint}
             variant="composer"
           />
 
@@ -1364,7 +1374,7 @@ export function ChatComposer({
             description={t('chat.fullPermissionConfirmDescription')}
             onCancel={() => setIsFullPermissionConfirmationOpen(false)}
             onConfirm={() => {
-              if (permissionModeAvailability.full) {
+              if (permissionModeAvailability.full && !isModelSelectionDisabled) {
                 updateDraft({ permissionMode: 'full' })
               }
               setIsFullPermissionConfirmationOpen(false)

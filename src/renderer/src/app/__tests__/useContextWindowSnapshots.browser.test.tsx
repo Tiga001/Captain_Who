@@ -47,6 +47,7 @@ interface HarnessProps {
   customPermissions?: AgentPermissions
   eventModelConfigId?: string
   eventSnapshot?: AgentContextWindowSnapshot
+  isRunning?: boolean
   modelId?: string
   permissionMode?: ChatPermissionMode
   projectId?: string
@@ -57,6 +58,7 @@ function Harness({
   customPermissions = CUSTOM_PERMISSIONS,
   eventModelConfigId = 'model-1',
   eventSnapshot,
+  isRunning = false,
   modelId = 'model-1',
   permissionMode = 'default',
   projectId = 'project-1',
@@ -66,6 +68,7 @@ function Harness({
     conversationId: 'conversation-1',
     customPermissions,
     enabled: true,
+    isRunning,
     modelId,
     permissionMode,
     projectId,
@@ -236,5 +239,67 @@ describe('useContextWindowSnapshots', () => {
     })
     await inspection.promise
     await expect.element(screen.getByTestId('input-tokens')).toHaveTextContent('42000')
+  })
+
+  it('uses Host usage throughout a Run and previews the next configuration only after it ends', async () => {
+    const inspection = deferred<AgentContextWindowSnapshotOutput>()
+    agentClient.getContextWindowSnapshot.mockReturnValueOnce(inspection.promise)
+    const screen = await render(<Harness skills={[]} />)
+    await expect.poll(() => agentClient.getContextWindowSnapshot.mock.calls.length).toBe(1)
+
+    await screen.rerender(<Harness isRunning eventSnapshot={snapshot(42_000)} skills={[]} />)
+    await screen.getByRole('button', { name: 'record event' }).click()
+
+    // Model selection is pinned by AppShell to the active Run. Future permissions/skills remain
+    // editable in the composer even while a command executes or an approval is pending.
+    await screen.rerender(
+      <Harness
+        isRunning
+        permissionMode="full"
+        eventSnapshot={snapshot(43_000)}
+        skills={[{ id: 'installed:spreadsheets', revision: 'next-revision' }]}
+      />
+    )
+    agentClient.settingsListener?.({ enabled: true, revision: 2, updatedAt: 1 })
+    inspection.resolve({ modelConfigId: 'model-1', snapshot: snapshot(10_000) })
+    await inspection.promise
+    await expect.element(screen.getByTestId('input-tokens')).toHaveTextContent('42000')
+    expect(agentClient.getContextWindowSnapshot).toHaveBeenCalledTimes(1)
+
+    await screen.getByRole('button', { name: 'record event' }).click()
+    await expect.element(screen.getByTestId('input-tokens')).toHaveTextContent('43000')
+
+    agentClient.getContextWindowSnapshot.mockResolvedValueOnce({
+      modelConfigId: 'model-2',
+      snapshot: snapshot(18_000, 'provider-model-2')
+    })
+    await screen.rerender(
+      <Harness
+        modelId="model-2"
+        permissionMode="full"
+        skills={[{ id: 'installed:spreadsheets', revision: 'next-revision' }]}
+      />
+    )
+    await expect.element(screen.getByTestId('input-tokens')).toHaveTextContent('18000')
+    expect(agentClient.getContextWindowSnapshot).toHaveBeenCalledTimes(2)
+    expect(agentClient.getContextWindowSnapshot).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        modelId: 'model-2',
+        permissions: expect.objectContaining({
+          command: 'auto_approve',
+          commandSafety: 'full_access'
+        }),
+        skills: [{ id: 'installed:spreadsheets', revision: 'next-revision' }]
+      })
+    )
+  })
+
+  it('can observe an already-running conversation without estimating from its future draft', async () => {
+    const screen = await render(
+      <Harness isRunning permissionMode="full" eventSnapshot={snapshot(25_000)} skills={[]} />
+    )
+    await screen.getByRole('button', { name: 'record event' }).click()
+    await expect.element(screen.getByTestId('input-tokens')).toHaveTextContent('25000')
+    expect(agentClient.getContextWindowSnapshot).not.toHaveBeenCalled()
   })
 })

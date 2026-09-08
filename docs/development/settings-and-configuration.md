@@ -2,7 +2,7 @@
 status: current
 audience: developers
 owner: engineering
-last_verified: 2026-09-08
+last_verified: 2026-09-09
 ---
 
 # 设置与配置
@@ -58,7 +58,9 @@ App startup gate 分别等待项目、模型设置及其他权威状态加载。
 
 Composer 的 `/` 菜单首项为 `model`，与 `capabilities` 一样是二级导航命令，不包含普通命令的 `execute` 回调。进入模型面板只改变菜单视图，不提交消息。面板不提供筛选输入，返回按钮和 Escape 恢复原命令列表。
 
-模型列表复用 `ModelSettingsProvider.enabledModels`，与 Composer 右下角模型入口使用同一份配置。展示内容从模型配置投影出实际模型 ID、厂商、上下文容量和输入模态；`contextWindowTokens` 缺失时使用既有运行默认值 `DEFAULT_MODEL_CONTEXT_WINDOW_TOKENS = 128_000`，显示为 128K，非法容量显示“上下文未知”，不根据模型名称猜测。两个入口使用同一模型选择处理函数，保持现有运行占用、Provider 切换确认和压缩流程，不能从快捷入口直接写入另一份模型状态或绕过切换保护。
+模型列表复用 `ModelSettingsProvider.enabledModels`，与 Composer 右下角模型入口使用同一份配置。展示内容从模型配置投影出实际模型 ID、厂商、上下文容量和输入模态；`contextWindowTokens` 缺失时使用既有运行默认值 `DEFAULT_MODEL_CONTEXT_WINDOW_TOKENS = 128_000`，显示为 128K，非法容量显示“上下文未知”，不根据模型名称猜测。两个入口使用同一模型选择处理函数，只修改 Composer 草稿。运行中允许选择下一轮模型与权限，真实 Provider 切换及手动压缩期间仍禁用选择；发送下一轮前沿用 Host 的空闲检查、Provider 切换确认和压缩流程。
+
+当前 Run、审批续跑与 Guidance 保持原配置；队列按每项的 `modelId` / `permissionMode` 发送，不回写覆盖用户后来选择的草稿。异步提交与 Provider 完成通知只能更新仍属于原提交的草稿字段。上下文用量在 Run 活跃时采用 Host 事件快照，停止草稿预估 RPC 并作废此前在途预估；结束后才为当前草稿刷新预估。
 
 ### 人机交互设置
 

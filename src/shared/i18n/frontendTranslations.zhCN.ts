@@ -999,6 +999,7 @@ export const zhCNTranslations = {
   'chat.fullPermissionConfirmAction': '启用完全权限',
   'chat.selectPermission': '选择权限',
   'chat.selectModel': '选择模型',
+  'chat.nextTurnConfigurationHint': '下一轮生效',
   'chat.noEnabledModels': '没有启用的模型',
   'chat.modelTransition.providerTitle': '切换 API 厂商',
   'chat.modelTransition.providerDescription': 'API 厂商不同，新模型需要先压缩历史完成适配。',

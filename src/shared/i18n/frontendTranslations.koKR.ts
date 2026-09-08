@@ -1033,6 +1033,7 @@ export const koKRTranslations = {
   'chat.fullPermissionConfirmAction': '전체 액세스 활성화',
   'chat.selectPermission': '권한 선택',
   'chat.selectModel': '모델 선택',
+  'chat.nextTurnConfigurationHint': '다음 턴부터 적용',
   'chat.noEnabledModels': '활성화된 모델이 없습니다.',
   'chat.modelTransition.providerTitle': 'API 공급자 전환',
   'chat.modelTransition.providerDescription':

@@ -1062,6 +1062,7 @@ export const ruRUTranslations = {
   'chat.fullPermissionConfirmAction': 'Включить полный доступ',
   'chat.selectPermission': 'Выберите разрешение',
   'chat.selectModel': 'Выберите модель',
+  'chat.nextTurnConfigurationHint': 'Применится со следующего хода',
   'chat.noEnabledModels': 'Нет активных моделей',
   'chat.modelTransition.providerTitle': 'Сменить провайдера API',
   'chat.modelTransition.providerDescription':

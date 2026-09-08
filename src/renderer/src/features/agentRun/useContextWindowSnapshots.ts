@@ -19,6 +19,7 @@ interface UseContextWindowSnapshotsOptions {
   conversationId?: string
   customPermissions: UiPreferencesSnapshot['customPermissions']
   enabled: boolean
+  isRunning?: boolean
   refreshKey?: string
   modelId: string | null
   permissionMode: ChatPermissionMode
@@ -44,7 +45,7 @@ function requestDescriptorKey({
   projectId,
   scopeId,
   skills
-}: Omit<UseContextWindowSnapshotsOptions, 'enabled' | 'refreshKey'>): string {
+}: Omit<UseContextWindowSnapshotsOptions, 'enabled' | 'isRunning' | 'refreshKey'>): string {
   const permissions = resolveChatPermissions(permissionMode, customPermissions)
   const descriptor: ContextWindowSnapshotRequestDescriptor = {
     conversationId: conversationId ?? null,
@@ -68,6 +69,7 @@ export function useContextWindowSnapshots({
   conversationId,
   customPermissions,
   enabled,
+  isRunning = false,
   refreshKey,
   modelId,
   permissionMode,
@@ -99,7 +101,10 @@ export function useContextWindowSnapshots({
   })
 
   useEffect(() => {
-    if (!enabled) return undefined
+    // During a Run, only Host events describe the model's actual context and frozen permissions.
+    // Composer settings are for a future Turn; estimating with them would replace the current
+    // Run's usage with an unrelated preview. This also retires any pre-Run inspection in flight.
+    if (!enabled || isRunning) return undefined
 
     const request = JSON.parse(requestKey) as ContextWindowSnapshotRequestDescriptor
     if (!request.modelId) return undefined
@@ -140,7 +145,7 @@ export function useContextWindowSnapshots({
     return () => {
       cancelled = true
     }
-  }, [enabled, refreshKey, requestKey, collaborationSettingsRevision])
+  }, [enabled, isRunning, refreshKey, requestKey, collaborationSettingsRevision])
 
   const recordSnapshot = useCallback(
     (eventScopeId: string, eventModelConfigId: string, snapshot: AgentContextWindowSnapshot) => {

@@ -1075,6 +1075,7 @@ export const frFRTranslations = {
   'chat.fullPermissionConfirmAction': "Activer l'accès complet",
   'chat.selectPermission': "Sélectionnez l'autorisation",
   'chat.selectModel': 'Sélectionnez le modèle',
+  'chat.nextTurnConfigurationHint': 'S’applique au prochain tour',
   'chat.noEnabledModels': 'Aucun modèle activé',
   'chat.modelTransition.providerTitle': 'Changer de fournisseur API',
   'chat.modelTransition.providerDescription':

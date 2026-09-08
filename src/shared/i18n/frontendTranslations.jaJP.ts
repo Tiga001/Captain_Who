@@ -1060,6 +1060,7 @@ export const jaJPTranslations = {
   'chat.fullPermissionConfirmAction': 'フルアクセスを有効にする',
   'chat.selectPermission': '権限の選択',
   'chat.selectModel': 'モデルを選択してください',
+  'chat.nextTurnConfigurationHint': '次のターンから適用',
   'chat.noEnabledModels': '有効なモデルがありません',
   'chat.modelTransition.providerTitle': 'APIプロバイダーを切り替える',
   'chat.modelTransition.providerDescription':

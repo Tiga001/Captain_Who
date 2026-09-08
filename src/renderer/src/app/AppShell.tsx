@@ -280,7 +280,13 @@ export function AppShell() {
   const pendingProviderTransitionSubmissionsRef = useRef<
     Map<
       string,
-      { kind: 'composer'; message: string; options: ChatSubmitOptions } | { kind: 'queued_message' }
+      | {
+          kind: 'composer'
+          message: string
+          options: ChatSubmitOptions
+          draftSnapshot?: ChatComposerDraft
+        }
+      | { kind: 'queued_message' }
     >
   >(new Map())
   const [drafts, setDrafts] = useState<Record<string, ChatComposerDraft>>({
@@ -364,6 +370,7 @@ export function AppShell() {
     conversationId: activeConversation?.id,
     customPermissions: uiPreferences.customPermissions,
     enabled: contextWindowIndicatorEnabled,
+    isRunning: activeRunModelId !== null,
     modelId: contextWindowModelId,
     permissionMode: activeDraft.permissionMode,
     projectId: activeConversation?.projectId ?? activeDraft.projectId,

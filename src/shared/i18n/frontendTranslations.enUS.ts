@@ -1049,6 +1049,7 @@ export const enUSTranslations = {
   'chat.fullPermissionConfirmAction': 'Enable full access',
   'chat.selectPermission': 'Select permission',
   'chat.selectModel': 'Select model',
+  'chat.nextTurnConfigurationHint': 'Applies to the next turn',
   'chat.noEnabledModels': 'No enabled models',
   'chat.modelTransition.providerTitle': 'Switch API provider',
   'chat.modelTransition.providerDescription':

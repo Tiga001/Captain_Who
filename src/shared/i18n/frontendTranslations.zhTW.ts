@@ -987,6 +987,7 @@ export const zhTWTranslations = {
   'chat.fullPermissionConfirmAction': '啟用完全權限',
   'chat.selectPermission': '選擇權限',
   'chat.selectModel': '選擇模型',
+  'chat.nextTurnConfigurationHint': '下一輪生效',
   'chat.noEnabledModels': '沒有啟用的模型',
   'chat.modelTransition.providerTitle': '切換 API 廠商',
   'chat.modelTransition.providerDescription': 'API 廠商不同，新機型需先壓縮歷史完成適配。',

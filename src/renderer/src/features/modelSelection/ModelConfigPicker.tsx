@@ -22,6 +22,7 @@ interface ModelConfigPickerProps {
   options: readonly ModelConfigPickerOption[]
   portalMenu?: boolean
   showSelectedCapability?: boolean
+  title?: string
   value: string | null
   variant: 'composer' | 'settings'
 }
@@ -39,6 +40,7 @@ export function ModelConfigPicker({
   options,
   portalMenu = false,
   showSelectedCapability = false,
+  title,
   value,
   variant
 }: ModelConfigPickerProps) {
@@ -168,6 +170,7 @@ export function ModelConfigPicker({
         onClick={() => (isOpen ? closeMenu() : openMenu())}
         onKeyDown={handleTriggerKeyDown}
         ref={triggerRef}
+        title={title}
         type="button"
       >
         <span className="model-config-picker__selected-name">

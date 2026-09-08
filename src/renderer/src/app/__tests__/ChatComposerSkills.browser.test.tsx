@@ -344,7 +344,107 @@ describe('ChatComposer model picker', () => {
 
     await expect.element(screen.getByRole('textbox', { name: 'chat.inputAria' })).toBeDisabled()
     await expect.element(screen.getByRole('button', { name: 'chat.selectModel' })).toBeDisabled()
+    await expect.element(screen.getByRole('button', { name: /chat\.permission/ })).toBeDisabled()
     await expect.element(screen.getByRole('button', { name: 'chat.send' })).toBeDisabled()
+  })
+
+  it('preserves a newer next-turn selection when an older submission finishes', async () => {
+    let finishSubmission!: (accepted: boolean) => void
+    const pendingSubmit = vi.fn<NonNullable<ChatComposerProps['onSubmitMessage']>>(
+      () =>
+        new Promise<boolean>((resolve) => {
+          finishSubmission = resolve
+        })
+    )
+    const screen = await render(<TestComposer onSubmitMessage={pendingSubmit} />)
+    const input = screen.getByRole('textbox', { name: 'chat.inputAria' })
+    await input.fill('start the current turn')
+    await input.click()
+    await userEvent.keyboard('{Enter}')
+    expect(pendingSubmit).toHaveBeenCalledWith(
+      'start the current turn',
+      expect.objectContaining({
+        modelId: 'model-1',
+        permissionMode: 'default'
+      })
+    )
+    await screen.rerender(<TestComposer isGenerating onSubmitMessage={pendingSubmit} />)
+    await screen.getByRole('button', { name: 'chat.selectModel' }).click()
+    await screen.getByRole('option', { name: /Model 2/ }).click()
+    await screen.getByRole('button', { name: /chat\.permission/ }).click()
+    await screen.getByRole('option', { name: 'chat.customPermission' }).click()
+    finishSubmission(true)
+    await expect.element(input).toHaveValue('')
+    expect(draftChangeSpy.mock.lastCall?.[0]).toMatchObject({
+      modelId: 'model-2',
+      permissionMode: 'custom'
+    })
+    await expect
+      .element(screen.getByRole('button', { name: 'chat.selectModel' }))
+      .toHaveTextContent('Model 2')
+    await expect
+      .element(screen.getByRole('button', { name: /chat\.permission/ }))
+      .toHaveTextContent('chat.customPermission')
+    expect(pendingSubmit).toHaveBeenCalledTimes(1)
+  })
+
+  it('clears only unchanged submitted fields when a newer draft is composed during submission', async () => {
+    let finishSubmission!: (accepted: boolean) => void
+    const pendingSubmit = vi.fn<NonNullable<ChatComposerProps['onSubmitMessage']>>(
+      () =>
+        new Promise<boolean>((resolve) => {
+          finishSubmission = resolve
+        })
+    )
+    const initialDraft = createComposerDraft({
+      modelId: 'model-1',
+      projectId: 'project-a',
+      message: 'original submission',
+      skills: [{ id: auditorSkill.id, revision: auditorSkill.revision }],
+      attachments: ['remove.txt', 'keep.txt'].map((name) => ({
+        id: name,
+        kind: 'file' as const,
+        name,
+        mimeType: 'text/plain',
+        sizeBytes: 4,
+        encoding: 'base64' as const,
+        data: 'a2VlcA=='
+      }))
+    })
+    const screen = await render(
+      <TestComposer
+        initialDraft={initialDraft}
+        showProjectSelector
+        onSubmitMessage={pendingSubmit}
+      />
+    )
+    const input = screen.getByRole('textbox', { name: 'chat.inputAria' })
+    await screen.getByRole('button', { name: 'chat.send' }).click()
+    await expect.poll(() => pendingSubmit.mock.calls.length).toBe(1)
+    await input.fill('new input while the previous send is pending')
+    await screen.getByRole('button', { name: 'chat.removeAttachment remove.txt' }).click()
+    await screen.getByRole('button', { name: 'Project A' }).click()
+    await screen.getByRole('option', { name: /Project B/ }).click()
+    await screen.getByRole('button', { name: 'chat.addContext' }).click()
+    await screen.getByRole('menuitem', { name: 'chat.skills' }).click()
+    await screen.getByRole('button', { name: /^Dependency auditor/ }).click()
+    finishSubmission(true)
+    await expect
+      .poll(() => draftChangeSpy.mock.lastCall?.[0])
+      .toMatchObject({
+        message: 'new input while the previous send is pending',
+        projectId: 'project-b',
+        skills: [{ id: projectBSkill.id, revision: projectBSkill.revision }],
+        attachments: [initialDraft.attachments[1]]
+      })
+    await expect.element(input).toHaveValue('new input while the previous send is pending')
+    await expect.element(screen.getByText('keep.txt')).toBeVisible()
+    expect(pendingSubmit).toHaveBeenCalledTimes(1)
+    expect(pendingSubmit.mock.calls[0]?.[1]).toMatchObject({
+      projectId: 'project-a',
+      skills: initialDraft.skills,
+      attachments: initialDraft.attachments
+    })
   })
 
   it('retains composer input when the submit guard defers message creation', async () => {
@@ -542,6 +642,46 @@ describe('running composer guidance queue', () => {
     createdAt
   })
 
+  it('captures new selections only in newly queued messages and preserves existing queue configuration', async () => {
+    const originalQueue = [queuedMessage('old', 'old queued message', 1)]
+    const screen = await render(
+      <TestComposer
+        isGenerating
+        initialDraft={createComposerDraft({
+          modelId: 'model-1',
+          projectId: 'project-a',
+          queuedMessages: originalQueue
+        })}
+      />
+    )
+    const model = screen.getByRole('button', { name: 'chat.selectModel' })
+    const permission = screen.getByRole('button', { name: /chat\.permission/ })
+    await expect.element(model).toHaveAttribute('title', 'chat.nextTurnConfigurationHint')
+    await expect.element(permission).toHaveAttribute('title', 'chat.nextTurnConfigurationHint')
+    await model.click()
+    await screen.getByRole('option', { name: /Model 2/ }).click()
+    await permission.click()
+    await screen.getByRole('option', { name: 'chat.customPermission' }).click()
+    expect(draftChangeSpy.mock.lastCall?.[0].queuedMessages).toEqual(originalQueue)
+    const input = screen.getByRole('textbox', { name: 'chat.inputAria' })
+    await input.fill('use the next-turn configuration')
+    await input.click()
+    await userEvent.keyboard('{Enter}')
+    await expect.element(input).toHaveValue('')
+    const latestDraft = draftChangeSpy.mock.lastCall?.[0] as ChatComposerProps['draft']
+    expect(latestDraft).toMatchObject({ modelId: 'model-2', permissionMode: 'custom' })
+    expect(latestDraft.queuedMessages).toEqual([
+      originalQueue[0],
+      expect.objectContaining({
+        content: 'use the next-turn configuration',
+        modelId: 'model-2',
+        permissionMode: 'custom',
+        status: 'pending'
+      })
+    ])
+    expect(submitSpy).not.toHaveBeenCalled()
+  })
+
   it('allows guiding any selected row without consuming rows above it', async () => {
     const guideSpy = vi.fn()
     const screen = await render(
@@ -730,46 +870,49 @@ describe('running composer guidance queue', () => {
 })
 
 describe('Composer permission confirmation', () => {
-  it('keeps the current permission until full access is explicitly confirmed', async () => {
-    const screen = await render(<TestComposer />)
+  it.each([false, true])(
+    'keeps the current permission until full access is explicitly confirmed (running=%s)',
+    async (isGenerating) => {
+      const screen = await render(<TestComposer isGenerating={isGenerating} />)
 
-    await screen.getByRole('button', { name: /chat\.permission/ }).click()
-    await screen.getByRole('option', { name: 'chat.fullPermission' }).click()
+      await screen.getByRole('button', { name: /chat\.permission/ }).click()
+      await screen.getByRole('option', { name: 'chat.fullPermission' }).click()
 
-    await expect
-      .element(screen.getByRole('heading', { name: 'chat.fullPermissionConfirmTitle' }))
-      .toBeVisible()
-    await expect
-      .element(screen.getByText('chat.fullPermissionConfirmDescription', { exact: true }))
-      .toBeVisible()
-    expect(
-      draftChangeSpy.mock.calls.some(([nextDraft]) => nextDraft.permissionMode === 'full')
-    ).toBe(false)
-
-    await screen
-      .getByRole('button', { name: 'chat.fullPermissionConfirmCancel', exact: true })
-      .nth(1)
-      .click()
-    await expect.poll(() => document.querySelector('[role="dialog"]')).toBeNull()
-    expect(
-      draftChangeSpy.mock.calls.some(([nextDraft]) => nextDraft.permissionMode === 'full')
-    ).toBe(false)
-
-    await screen.getByRole('button', { name: /chat\.permission/ }).click()
-    await screen.getByRole('option', { name: 'chat.fullPermission' }).click()
-    await screen
-      .getByRole('button', { name: 'chat.fullPermissionConfirmAction', exact: true })
-      .click()
-
-    await expect
-      .poll(() =>
+      await expect
+        .element(screen.getByRole('heading', { name: 'chat.fullPermissionConfirmTitle' }))
+        .toBeVisible()
+      await expect
+        .element(screen.getByText('chat.fullPermissionConfirmDescription', { exact: true }))
+        .toBeVisible()
+      expect(
         draftChangeSpy.mock.calls.some(([nextDraft]) => nextDraft.permissionMode === 'full')
-      )
-      .toBe(true)
-    await expect
-      .element(screen.getByRole('button', { name: /chat\.permission.*chat\.fullPermission/ }))
-      .toBeVisible()
-  })
+      ).toBe(false)
+
+      await screen
+        .getByRole('button', { name: 'chat.fullPermissionConfirmCancel', exact: true })
+        .nth(1)
+        .click()
+      await expect.poll(() => document.querySelector('[role="dialog"]')).toBeNull()
+      expect(
+        draftChangeSpy.mock.calls.some(([nextDraft]) => nextDraft.permissionMode === 'full')
+      ).toBe(false)
+
+      await screen.getByRole('button', { name: /chat\.permission/ }).click()
+      await screen.getByRole('option', { name: 'chat.fullPermission' }).click()
+      await screen
+        .getByRole('button', { name: 'chat.fullPermissionConfirmAction', exact: true })
+        .click()
+
+      await expect
+        .poll(() =>
+          draftChangeSpy.mock.calls.some(([nextDraft]) => nextDraft.permissionMode === 'full')
+        )
+        .toBe(true)
+      await expect
+        .element(screen.getByRole('button', { name: /chat\.permission.*chat\.fullPermission/ }))
+        .toBeVisible()
+    }
+  )
 })
 
 describe('ChatComposer Skill picker', () => {
