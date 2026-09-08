@@ -209,7 +209,7 @@ async fn durable_compaction_runs_before_capacity_gate_and_then_sends_rebuilt_con
         model_capabilities: crate::ModelCapabilities::default(),
         api_style: Some(AgentApiStyle::OpenAiCompatible),
         context_window_tokens: Some(50_000),
-        context_window_indicator_enabled: false,
+        context_window_indicator_enabled: true,
         max_tokens: Some(1_000),
         temperature: None,
         stream: Some(false),
@@ -434,6 +434,14 @@ async fn durable_compaction_runs_before_capacity_gate_and_then_sends_rebuilt_con
     let model_request_observer: AgentModelRequestObserver = Arc::new(move |observation| {
         observations_for_callback.lock().unwrap().push(observation);
     });
+    let context_snapshots = Arc::new(Mutex::new(Vec::new()));
+    let context_snapshots_for_observer = context_snapshots.clone();
+    let context_window_observer: AgentContextWindowObserver = Arc::new(move |snapshot| {
+        context_snapshots_for_observer
+            .lock()
+            .unwrap()
+            .push(snapshot);
+    });
     let trace_observer: AgentConversationTraceObserver = Arc::new(move |snapshot| {
         trace_snapshots_for_observer.lock().unwrap().push(snapshot);
         let baseline = if commit_count_for_trace.load(Ordering::SeqCst) == 0 {
@@ -455,6 +463,7 @@ async fn durable_compaction_runs_before_capacity_gate_and_then_sends_rebuilt_con
                     .with_context_compaction(services)
                     .with_trace_observer(trace_observer)
                     .with_model_request_observer(model_request_observer)
+                    .with_context_window_observer(context_window_observer)
                     .with_steer_input(steer_input),
             ),
         )
@@ -484,6 +493,48 @@ async fn durable_compaction_runs_before_capacity_gate_and_then_sends_rebuilt_con
         observation.purpose == crate::ModelRequestPurpose::AgentLoop
             && observation.estimate.is_some()
     }));
+    let context_snapshots = context_snapshots.lock().unwrap();
+    assert_eq!(
+        context_snapshots.len(),
+        observations.len(),
+        "only final assembled requests, never an abandoned compaction candidate, reach the ring"
+    );
+    for (snapshot, observation) in context_snapshots.iter().zip(observations.iter()) {
+        let estimate = observation.estimate.as_ref().unwrap();
+        assert_eq!(snapshot.input_tokens, estimate.estimated_input_tokens);
+        assert_eq!(
+            snapshot.cost_breakdown.total_input_tokens,
+            estimate.total_input_tokens
+        );
+        assert_eq!(
+            snapshot.cost_breakdown.tool_schema_tokens,
+            estimate.tool_schema_tokens
+        );
+        assert_eq!(
+            snapshot.cost_breakdown.summary_tokens,
+            estimate.summary_tokens
+        );
+        assert_eq!(
+            snapshot.cost_breakdown.world_state_tokens,
+            estimate.world_state_tokens
+        );
+        assert_eq!(
+            snapshot.context_window_tokens,
+            estimate.context_window_tokens
+        );
+        assert_eq!(
+            snapshot.reserved_output_tokens,
+            estimate.reserved_output_tokens
+        );
+        assert_eq!(snapshot.safety_margin_tokens, estimate.safety_margin_tokens);
+        assert_eq!(
+            snapshot.input_capacity_tokens,
+            estimate.context_window_tokens.map(|window| {
+                window - estimate.reserved_output_tokens - estimate.safety_margin_tokens
+            })
+        );
+        assert!(snapshot.input_tokens <= snapshot.input_capacity_tokens.unwrap());
+    }
     for request_body in &request_bodies {
         assert!(request_body.contains("COMPACTED_HISTORY_MARKER"));
         assert!(!request_body.contains("OLD_USER_MARKER"));

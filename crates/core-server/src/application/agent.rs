@@ -520,6 +520,14 @@ struct ConversationContextStateUpdate {
     snapshot: Option<AgentContextWindowSnapshot>,
 }
 
+struct PersistedConversationContextState {
+    /// Model-facing history uses the active summary and its uncovered suffix.
+    preview_input: AgentChatInput,
+    /// Incremental journal cursors must be measured against the complete, matching records.
+    full_traces: Vec<ConversationTurnTrace>,
+    full_model_context_logs: Vec<mycopilot_core::ConversationModelContextLog>,
+}
+
 #[derive(Clone)]
 struct RunContextToolProjection {
     initial: Option<AgentContextWindowToolProjection>,

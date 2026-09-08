@@ -217,9 +217,12 @@ impl AgentService {
             .ok_or_else(|| "请先配置模型。".to_string())?;
         let target =
             resolve_provider_transition_target(&self.storage, &conversation, &snapshot, model_id)?;
-        let (preview, traces) =
-            self.persisted_conversation_context_state(&target.generator_input, &conversation.id)?;
-        if traces
+        let PersistedConversationContextState {
+            preview_input: preview,
+            full_traces,
+            ..
+        } = self.persisted_conversation_context_state(&target.generator_input, &conversation.id)?;
+        if full_traces
             .iter()
             .any(|trace| !trace.terminal_status.is_terminal())
         {

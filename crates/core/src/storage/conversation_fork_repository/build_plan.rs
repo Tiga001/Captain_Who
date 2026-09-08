@@ -294,7 +294,10 @@ fn build_single_conversation_fork_plan_at_point(
                     .map(|log| log.items)
                     .unwrap_or_default();
             model_context_items.retain(|item| {
-                trace.items.iter().any(|event| event.sequence() == item.sequence)
+                trace
+                    .items
+                    .iter()
+                    .any(|event| event.sequence() == item.sequence)
             });
             traces.push(ForkTrace {
                 trace: ConversationTurnTrace {
@@ -329,10 +332,10 @@ fn build_single_conversation_fork_plan_at_point(
     )?;
 
     // A recursive fork needs every visible turn diff, not only the boundary turn.
-    let mut turn_diffs = turn_diff_repository::list_fork_copies_through_message(
+    let mut turn_diffs = turn_diff_repository::list_fork_copies_for_messages(
         connection,
         &source.id,
-        &resolved.assistant_message_id,
+        &source_message_ids,
     )
     .map_err(database_error)?;
     for turn_diff in &mut turn_diffs {

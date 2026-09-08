@@ -308,38 +308,21 @@ pub(crate) fn build_child_context_snapshot_plan(
         })
         .collect::<Result<Vec<_>, ConversationForkError>>()?;
 
-    let mut turn_diffs = Vec::new();
-    for assistant in source_messages
-        .iter()
-        .filter(|message| message.role == "assistant")
-    {
-        for mut copy in turn_diff_repository::list_fork_copies_through_message(
-            connection,
-            source_conversation_id,
-            &assistant.id,
-        )
-        .map_err(database_error)?
-        {
-            if !source_message_ids.contains(&copy.record.identity.assistant_message_id)
-                || turn_diffs.iter().any(
-                    |existing: &turn_diff_repository::AgentTurnDiffForkCopy| {
-                        existing.record.identity.assistant_message_id
-                            == copy.record.identity.assistant_message_id
-                    },
-                )
-            {
-                continue;
-            }
-            copy.record.identity.conversation_id = target_conversation_id.to_string();
-            copy.record.identity.assistant_message_id = mapped(
-                &message_id_map,
-                &copy.record.identity.assistant_message_id,
-                "turn diff message",
-            )?;
-            copy.record.identity.run_id =
-                mapped(&run_id_map, &copy.record.identity.run_id, "turn diff run")?;
-            turn_diffs.push(copy);
-        }
+    let mut turn_diffs = turn_diff_repository::list_fork_copies_for_messages(
+        connection,
+        source_conversation_id,
+        &source_message_ids,
+    )
+    .map_err(database_error)?;
+    for copy in &mut turn_diffs {
+        copy.record.identity.conversation_id = target_conversation_id.to_string();
+        copy.record.identity.assistant_message_id = mapped(
+            &message_id_map,
+            &copy.record.identity.assistant_message_id,
+            "turn diff message",
+        )?;
+        copy.record.identity.run_id =
+            mapped(&run_id_map, &copy.record.identity.run_id, "turn diff run")?;
     }
 
     let selected_source_run_ids = run_id_map.keys().cloned().collect::<HashSet<_>>();

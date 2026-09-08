@@ -890,6 +890,90 @@ mod tests {
     }
 
     #[test]
+    fn complete_request_snapshot_and_compaction_share_reserves_and_threshold() {
+        use crate::context::{
+            ContextCompactionPlanStatus, ContextCompactionPlanner, ContextOrigin,
+        };
+
+        let mut request = ContextFrame::new(vec![
+            ContextItem::text(
+                LlmMessageRole::System,
+                "stable rules",
+                ContextSource::BackendSystemPrompt,
+                ContextScope::Run,
+                ContextRetention::Retained,
+            ),
+            ContextItem::new(
+                LlmMessage::text(LlmMessageRole::Assistant, "old evidence ".repeat(600)),
+                ContextMetadata::new(
+                    ContextSource::ConversationHistory,
+                    ContextScope::Conversation,
+                    ContextRetention::Retained,
+                )
+                .with_origin(ContextOrigin::conversation_message("assistant-old")),
+            ),
+            ContextItem::text(
+                LlmMessageRole::System,
+                "current skill instructions ".repeat(20),
+                ContextSource::SkillInstructions,
+                ContextScope::Run,
+                ContextRetention::Retained,
+            ),
+            ContextItem::text(
+                LlmMessageRole::System,
+                "current capability guidance ".repeat(20),
+                ContextSource::CapabilityInstructions,
+                ContextScope::Run,
+                ContextRetention::RequestOnly,
+            ),
+        ]);
+        let mut dynamic_tool = read_tool();
+        dynamic_tool.name = "skill_resource_read".into();
+        let stable_tools = [read_tool()];
+        let dynamic_tools = [dynamic_tool];
+        let all_tools = [stable_tools[0].clone(), dynamic_tools[0].clone()];
+        let detector = detector(&stable_tools);
+        let initial =
+            detector.inspect_with_dynamic_tools(&mut request, Some(100_000), 1_000, &dynamic_tools);
+        let input_tokens = initial.usage.request_input_tokens();
+        assert!(initial.usage.breakdown.run_transient.input_tokens > 0);
+        assert!(initial.usage.breakdown.request_only.input_tokens > 0);
+        let threshold_capacity = input_tokens * 100 / 90;
+        let planner = ContextCompactionPlanner::for_tools(&all_tools);
+
+        for (capacity, expected_status) in [
+            (
+                threshold_capacity + 1,
+                ContextCompactionPlanStatus::NotRequired,
+            ),
+            (threshold_capacity, ContextCompactionPlanStatus::Required),
+        ] {
+            let reserve = u32::try_from(100_000 - 5_000 - capacity).unwrap();
+            let report = detector.inspect_with_dynamic_tools(
+                &mut request,
+                Some(100_000),
+                reserve,
+                &dynamic_tools,
+            );
+            let snapshot = report.snapshot("model");
+            let query = report.compaction_query();
+            let plan = planner.plan(&query, &request.planning_items().unwrap(), true);
+
+            assert_eq!(snapshot.input_tokens, input_tokens);
+            assert_eq!(query.request_input_tokens, snapshot.input_tokens);
+            assert_eq!(query.available_input_tokens, snapshot.input_capacity_tokens);
+            assert_eq!(snapshot.reserved_output_tokens, u64::from(reserve));
+            assert_eq!(snapshot.safety_margin_tokens, 5_000);
+            assert_eq!(snapshot.input_capacity_tokens, Some(capacity));
+            assert_eq!(plan.status, expected_status);
+            assert_eq!(
+                snapshot.input_tokens * 100 / capacity >= 90,
+                expected_status == ContextCompactionPlanStatus::Required
+            );
+        }
+    }
+
+    #[test]
     fn rejects_configuration_that_leaves_no_input_capacity() {
         let mut frame = frame(vec![LlmMessage::text(LlmMessageRole::User, "hello")]);
         let detector = detector(&[]);

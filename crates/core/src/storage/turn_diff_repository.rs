@@ -357,23 +357,15 @@ pub fn load_turns_for_messages(
         .collect())
 }
 
-pub(crate) fn list_fork_copies_through_message(
+pub(crate) fn list_fork_copies_for_messages(
     connection: &Connection,
     conversation_id: &str,
-    through_assistant_message_id: &str,
+    source_message_ids: &[String],
 ) -> rusqlite::Result<Vec<AgentTurnDiffForkCopy>> {
-    let cutoff_position = connection
-        .query_row(
-            "
-            SELECT position
-            FROM messages
-            WHERE id = ?1 AND conversation_id = ?2
-            ",
-            params![through_assistant_message_id, conversation_id],
-            |row| row.get::<_, i64>(0),
-        )
-        .optional()?
-        .ok_or_else(|| invalid_input("fork turn diff cutoff message does not exist"))?;
+    // A raw position cutoff also includes immutable records hidden by edit/resend. Evidence
+    // must use the same selected message set as the fork's messages, traces, and attachments.
+    let source_message_ids_json = serde_json::to_string(source_message_ids)
+        .map_err(|error| invalid_input(error.to_string()))?;
 
     let mut statement = connection.prepare(
         "
@@ -391,7 +383,7 @@ pub(crate) fn list_fork_copies_through_message(
             ON message.id = turn.assistant_message_id
         WHERE turn.conversation_id = ?1
           AND message.conversation_id = ?1
-          AND message.position <= ?2
+          AND message.id IN (SELECT value FROM json_each(?2))
           AND turn.schema_version = ?3
         ORDER BY
             message.position ASC,
@@ -403,7 +395,7 @@ pub(crate) fn list_fork_copies_through_message(
         .query_map(
             params![
                 conversation_id,
-                cutoff_position,
+                source_message_ids_json,
                 i64::from(AGENT_TURN_DIFF_SCHEMA_VERSION)
             ],
             |row| {
@@ -448,7 +440,7 @@ pub(crate) fn list_fork_copies_through_message(
             ON message.id = turn.assistant_message_id
         WHERE turn.conversation_id = ?1
           AND message.conversation_id = ?1
-          AND message.position <= ?2
+          AND message.id IN (SELECT value FROM json_each(?2))
           AND turn.schema_version = ?3
         ORDER BY
             message.position ASC,
@@ -460,7 +452,7 @@ pub(crate) fn list_fork_copies_through_message(
         .query_map(
             params![
                 conversation_id,
-                cutoff_position,
+                source_message_ids_json,
                 i64::from(AGENT_TURN_DIFF_SCHEMA_VERSION)
             ],
             |row| {
@@ -502,7 +494,7 @@ pub(crate) fn list_fork_copies_through_message(
             ON message.id = turn.assistant_message_id
         WHERE turn.conversation_id = ?1
           AND message.conversation_id = ?1
-          AND message.position <= ?2
+          AND message.id IN (SELECT value FROM json_each(?2))
           AND turn.schema_version = ?3
         ORDER BY
             message.position ASC,
@@ -514,7 +506,7 @@ pub(crate) fn list_fork_copies_through_message(
         .query_map(
             params![
                 conversation_id,
-                cutoff_position,
+                source_message_ids_json,
                 i64::from(AGENT_TURN_DIFF_SCHEMA_VERSION)
             ],
             |row| {

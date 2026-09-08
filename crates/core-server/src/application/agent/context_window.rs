@@ -412,7 +412,7 @@ impl AgentService {
         &self,
         agent_input: &AgentChatInput,
         conversation_id: &str,
-    ) -> Result<(AgentChatInput, Vec<ConversationTurnTrace>), String> {
+    ) -> Result<PersistedConversationContextState, String> {
         let conversation = self
             .storage
             .load_conversation(conversation_id)?
@@ -451,7 +451,11 @@ impl AgentService {
             )?);
         }
         hydrate_context_image_attachments(&self.storage, &mut preview_input)?;
-        Ok((preview_input, traces))
+        Ok(PersistedConversationContextState {
+            preview_input,
+            full_traces: traces,
+            full_model_context_logs: model_context_logs,
+        })
     }
 
     pub(super) fn context_window_snapshot_with_projection_cache(
@@ -505,18 +509,21 @@ impl AgentService {
         snapshot_skill_activation: Option<&mycopilot_core::AgentSkillActivation>,
         tool_projection: Option<&AgentContextWindowToolProjection>,
     ) -> Result<ConversationContextStateUpdate, String> {
-        let (preview_input, traces) =
-            self.persisted_conversation_context_state(agent_input, conversation_id)?;
-        let latest_trace = traces.last();
+        let PersistedConversationContextState {
+            preview_input,
+            full_traces,
+            full_model_context_logs,
+        } = self.persisted_conversation_context_state(agent_input, conversation_id)?;
+        let latest_trace = full_traces.last();
         let latest_committed_activity_items = latest_trace
             .map(|trace| {
-                let model_context_items = preview_input
-                    .messages
+                // The baseline below is compacted, but append_trace_items advances within the
+                // full journal. Pair full records here so validation does not mistake a summary
+                // boundary for missing history, or a shorter cursor replay the covered prefix.
+                let model_context_items = full_model_context_logs
                     .iter()
-                    .find(|message| {
-                        message.message_id.as_deref() == Some(trace.assistant_message_id.as_str())
-                    })
-                    .map(|message| message.conversation_model_context_items.as_slice())
+                    .find(|log| log.assistant_message_id == trace.assistant_message_id)
+                    .map(|log| log.items.as_slice())
                     .unwrap_or_default();
                 AgentConversationContextState::rendered_trace_activity_count(
                     trace,
@@ -582,6 +589,46 @@ impl AgentService {
         assistant_message_id: &str,
         assistant_content: &str,
     ) -> Result<Option<AgentContextWindowSnapshot>, String> {
+        if !self.finalize_conversation_context_baseline(
+            agent_input,
+            run_id,
+            conversation_id,
+            assistant_message_id,
+            assistant_content,
+        )? || !agent_input.context_window_indicator_enabled
+        {
+            return Ok(None);
+        }
+
+        // A completed run leaves a durable baseline, but the indicator measures a complete
+        // next request, just like opening this conversation. Rebuild the current Host-owned
+        // projection rather than retaining the completed run's activation or checkpoint.
+        let mut preview_input = self
+            .persisted_conversation_context_state(agent_input, conversation_id)?
+            .preview_input;
+        preview_input.assistant_message_id = None;
+        preview_input.skill_activation = None;
+        if let Some(preferences) = preview_input.prompt_preferences.as_mut() {
+            preferences.automation_execution_context = None;
+        }
+        let projection = self.context_window_tool_projection(&preview_input, None)?;
+        self.context_window_snapshot_with_projection_cache(
+            &preview_input,
+            conversation_id,
+            &projection,
+        )
+    }
+
+    /// Commits only the reusable history. Its bare size is not a request-size UI snapshot.
+    /// False means a grouped Provider turn is still incomplete and cannot be rebuilt yet.
+    fn finalize_conversation_context_baseline(
+        &self,
+        agent_input: &AgentChatInput,
+        run_id: &str,
+        conversation_id: &str,
+        assistant_message_id: &str,
+        assistant_content: &str,
+    ) -> Result<bool, String> {
         let trace = self
             .storage
             .get_conversation_turn_trace(assistant_message_id)?
@@ -636,7 +683,7 @@ impl AgentService {
             // rebuilding a Host preview here would incorrectly require later queued calls to be
             // visible already. Keep the incremental safe projection until a complete terminal
             // trace can be privately hydrated.
-            return Ok(None);
+            return Ok(false);
         }
         // A nonterminal grouped exchange can briefly end at a safe ToolResult while a later call
         // from the same Provider turn has not been published yet. Its durable trace is useful for
@@ -682,9 +729,7 @@ impl AgentService {
                                 .state
                                 .shared_baseline()
                                 .map_err(|error| error.to_string())?;
-                            return Ok(agent_input
-                                .context_window_indicator_enabled
-                                .then(|| entry.state.snapshot()));
+                            return Ok(true);
                         }
                     } else {
                         needs_rebuild = true;
@@ -697,14 +742,16 @@ impl AgentService {
                 states.remove(conversation_id);
             }
         }
+        let mut baseline_input = agent_input.clone();
+        baseline_input.context_window_indicator_enabled = false;
         self.rebuild_conversation_context_state(
-            agent_input,
+            &baseline_input,
             conversation_id,
             Some(run_id),
             None,
             None,
         )
-        .map(|update| update.snapshot)
+        .map(|_| true)
     }
 
     pub(super) fn emit_terminal_context_window_snapshot(
@@ -731,8 +778,8 @@ impl AgentService {
                 return;
             }
         };
-        // A terminal snapshot measures the newly committed durable baseline without run overlays.
-        // Retire the last pre-request exact snapshot before publishing that new authority.
+        // The completed response is now included in the next-request preview, measured with the
+        // same full projection as an idle reload. Retire the preceding runtime request snapshot.
         self.discard_exact_running_context_window_snapshot(run_id);
         self.emit_context_window_snapshot(
             notifications,

@@ -292,6 +292,8 @@ Prompt，也不参与可复用 Conversation configuration revision；Approval/Ch
 
 估算与实际 Provider usage 是两个不同事实：前者用于发送前防溢出，后者用于发送后计费和诊断。不能用返回 usage 回写历史内容，也不能因为一次估算偏差改变已经发送的请求。
 
+自动压缩的触发判断、发送容量门禁和运行中圆环直接消费同一份完整请求计量报告，使用相同的输入总量、输出预留、安全余量和可用输入容量。压缩完成后重新组装并计量最终请求，不能从另一个历史计数或 Provider usage 推导阈值。打开会话、回复完成及缓存重建后的圆环都使用完整的下一次请求预览，包含当前工具 schema、Skill 目录和 Run World State 等临时内容；已完成 Run 的 Skill 激活、Automation 执行标记与恢复状态不作为下一次请求的活动配置。持久 baseline 只是可复用历史，不能把它的裸计数作为完整请求大小发布。相同历史与配置的冷缓存、热缓存和终态预览必须一致；实际压缩或配置变化仍可以让占用下降。
+
 ## 稳定压缩游标
 
 `ContextJournalCursor` 只能落在完整逻辑项之后：
@@ -301,6 +303,8 @@ Prompt，也不参与可复用 Conversation configuration revision；Approval/Ch
 - 已闭合 Tool Result。
 
 游标不得位于 Tool Call 与 Tool Result 之间，也不能覆盖 `run_transient`。规划器选择的是可被单个替换块替代的旧前缀，而不是简单删除最老若干 token。
+
+Host 重建上下文缓存时，模型 baseline 使用摘要与未覆盖的 Trace/模型日志片段；`committed_activity_items` 则始终用完整 Trace 与完整模型日志配对计数。不能把完整 Trace 与压缩后的局部日志一起校验，也不能把局部片段长度当作完整 journal 的增量游标，否则会误报历史缺失或在后续追加时重新引入已压缩内容。终态统计刷新、缓存失效恢复和压缩后的运行中重建遵守同一规则。
 
 ## 摘要与 Continuity Index
 
@@ -354,6 +358,7 @@ capacity exceeded
 ## 分叉、删除与回退对上下文的影响
 
 - 普通 UI 分叉和子 Agent snapshot 都复制已选择的完整终态 Turn，而不是共享原 conversation 的活动视图。
+- 消息、Trace 和文件变更证据使用同一份已选消息集合；编辑重发所替代的旧 Turn 即使保留审计索引，也不进入新分支。有效消息的证据归属仍须严格校验，不能用忽略映射错误代替边界筛选。
 - `fork_turns=all` 可包含可见摘要链；最近 N 个 Turn 只复制选中的完整终态 Turn，不继承更老摘要；`none` 不复制历史。
 - 运行中尾部、Usage、普通请求 Observation、Command Session 运行态、Checkpoint、draft 和可变 World State 不进入历史快照。
 - 删除/回退使依赖被删除前缀的摘要失效；分叉会重写 Message/Trace/Archive 引用。

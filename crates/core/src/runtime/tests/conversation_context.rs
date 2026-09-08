@@ -350,6 +350,13 @@ fn activated_skill_is_a_measured_dynamic_overlay_not_a_cache_input() {
         .unwrap()],
     )
     .unwrap();
+    let capability_context = ContextItem::text(
+        LlmMessageRole::System,
+        "request-scoped capability guidance ".repeat(20),
+        ContextSource::CapabilityInstructions,
+        ContextScope::Run,
+        ContextRetention::RequestOnly,
+    );
     let dynamic_projection = AgentContextWindowToolProjection::new(
         crate::protocol::AgentRunToolSetCheckpoint {
             stable_revision: "stable-test-revision".to_string(),
@@ -361,9 +368,10 @@ fn activated_skill_is_a_measured_dynamic_overlay_not_a_cache_input() {
                 "skill_dynamic_test_tool".to_string(),
             ],
         },
-        dynamic_run_world_state,
+        dynamic_run_world_state.clone(),
         vec![dynamic_tool.clone()],
-    );
+    )
+    .with_capability_context(vec![capability_context.clone()]);
     let dynamic_preview =
         inspect_context_window_with_tool_projection(input.clone(), &dynamic_projection)
             .unwrap()
@@ -386,6 +394,37 @@ fn activated_skill_is_a_measured_dynamic_overlay_not_a_cache_input() {
         )
         .unwrap();
     assert!(cached_dynamic_skill.input_tokens > cached_skill.input_tokens);
+    assert_eq!(cached_dynamic_skill, dynamic_preview);
+    let mut dynamic_request = build_llm_request(
+        input.clone(),
+        capabilities.initial_tool_set.stable_definitions(),
+        None,
+        Some(durable_state.shared_baseline().unwrap()),
+        Some(dynamic_run_world_state),
+    )
+    .unwrap();
+    dynamic_request.context.push(capability_context);
+    let dynamic_detector = ContextCapacityDetector::for_model(
+        &input.model,
+        crate::protocol::AgentApiStyle::OpenAiCompatible,
+        capabilities.initial_tool_set.stable_definitions(),
+    );
+    let dynamic_report = dynamic_detector.inspect_with_dynamic_tools(
+        &mut dynamic_request.context,
+        input.context_window_tokens,
+        sanitize_max_tokens(input.max_tokens),
+        &[dynamic_tool],
+    );
+    assert_eq!(dynamic_preview, dynamic_report.snapshot(&input.model));
+    let compaction_query = dynamic_report.compaction_query();
+    assert_eq!(
+        compaction_query.request_input_tokens,
+        dynamic_preview.input_tokens
+    );
+    assert_eq!(
+        compaction_query.available_input_tokens,
+        dynamic_preview.input_capacity_tokens
+    );
     let baseline = durable_state.shared_baseline().unwrap();
     let shared = build_llm_request(
         input.clone(),

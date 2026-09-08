@@ -538,10 +538,14 @@ impl AgentService {
             .as_ref()
             .map(|_| target.model.display_label());
 
-        let (preview_input, traces) = self
+        let PersistedConversationContextState {
+            preview_input,
+            full_traces,
+            ..
+        } = self
             .persisted_conversation_context_state(&target.generator_input, conversation_id)
             .map_err(AgentServiceError::from)?;
-        if traces
+        if full_traces
             .iter()
             .any(|trace| !trace.terminal_status.is_terminal())
         {

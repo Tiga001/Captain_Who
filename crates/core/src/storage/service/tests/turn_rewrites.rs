@@ -909,3 +909,344 @@ fn rewrite_rejects_an_active_command_session_without_hiding_the_source() {
         .unwrap()
         .is_none());
 }
+
+fn complete_fork_evidence_turn(
+    service: &StorageService,
+    conversation_id: &str,
+    name: &str,
+    created_at: i64,
+    rewrite_latest: bool,
+) -> String {
+    let (candidate, revision) = service.load_conversation_for_turn(conversation_id).unwrap();
+    let mut candidate = candidate.unwrap();
+    let assistant_id = format!("{name}-assistant");
+    let user_id = format!("{name}-user");
+    let run_id = format!("{name}-run");
+    let source_assistant_id = candidate.messages.last().unwrap().id.clone();
+    let source_user_id = candidate.messages[candidate.messages.len() - 2].id.clone();
+    candidate.updated_at = created_at;
+    for (id, role, content) in [
+        (&user_id, "user", name),
+        (&assistant_id, "assistant", "Thinking..."),
+    ] {
+        candidate.messages.push(ChatMessageRecord {
+            human_interaction_response: None,
+            id: id.clone(),
+            role: role.to_string(),
+            content: content.to_string(),
+            created_at,
+            status: Some(
+                if role == "assistant" {
+                    "pending"
+                } else {
+                    "sent"
+                }
+                .to_string(),
+            ),
+            attachments: Vec::new(),
+            agent_run_json: None,
+            ui_state_json: None,
+        });
+    }
+    let trace = crate::ConversationTraceSnapshot::default().in_progress_trace(
+        &run_id,
+        conversation_id,
+        &assistant_id,
+    );
+    let permission =
+        crate::AgentTurnPermissionSource::HostAuthenticatedRoot(crate::AgentPermissions::default());
+    if rewrite_latest {
+        let admission = ConversationTurnRewriteAdmission {
+            request_id: format!("{name}-rewrite"),
+            request_fingerprint: format!("sha256:{}", "a".repeat(64)),
+            conversation_id: conversation_id.to_string(),
+            source_user_message_id: source_user_id,
+            source_assistant_message_id: source_assistant_id,
+            replacement_user_message_id: user_id.clone(),
+            replacement_assistant_message_id: assistant_id.clone(),
+            run_id: run_id.clone(),
+            response_json: serde_json::json!({
+                "runId": run_id,
+                "conversationId": conversation_id,
+                "userMessageId": user_id,
+                "assistantMessageId": assistant_id
+            })
+            .to_string(),
+            created_at,
+        };
+        let attachments = service
+            .prepare_conversation_turn_rewrite_attachments(
+                conversation_id,
+                &user_id,
+                Some("project-1"),
+                &[],
+                created_at,
+            )
+            .unwrap();
+        service
+            .rewrite_conversation_turn_and_begin_turn(
+                candidate,
+                revision,
+                permission,
+                &[],
+                &trace,
+                created_at,
+                created_at,
+                &admission,
+                &attachments,
+            )
+            .unwrap();
+    } else {
+        service
+            .save_conversation_and_begin_turn(
+                candidate, revision, None, permission, &trace, created_at, created_at,
+            )
+            .unwrap();
+    }
+    service
+        .finalize_chat_message_with_conversation_trace(
+            conversation_id,
+            &assistant_id,
+            name,
+            Some("sent"),
+            "completed",
+            &crate::completed_conversation_trace_without_items(
+                &run_id,
+                conversation_id,
+                &assistant_id,
+            ),
+            created_at,
+            created_at + 1,
+        )
+        .unwrap();
+    assistant_id
+}
+
+fn record_fork_evidence(
+    fixture: &StorageFixture,
+    service: &StorageService,
+    conversation_id: &str,
+    message_id: &str,
+    run_id: &str,
+    file: Option<&str>,
+) {
+    let identity = crate::AgentTurnDiffIdentity {
+        run_id: run_id.to_string(),
+        conversation_id: conversation_id.to_string(),
+        assistant_message_id: message_id.to_string(),
+        project_id: "project-1".to_string(),
+        workspace_root: fixture
+            .root
+            .join("project-1")
+            .to_string_lossy()
+            .into_owned(),
+    };
+    service.initialize_agent_turn_diff(&identity).unwrap();
+    if let Some(file) = file {
+        service
+            .record_agent_turn_file_change(
+                &identity,
+                &format!("{run_id}-action"),
+                &crate::AgentTurnFileChange {
+                    path: file.to_string(),
+                    before: crate::AgentTurnFileContent::Missing,
+                    after: crate::AgentTurnFileContent::Text(format!("{run_id}\n")),
+                },
+            )
+            .unwrap();
+    }
+}
+
+#[test]
+fn fork_after_rewrite_excludes_superseded_empty_turn_evidence() {
+    let fixture = StorageFixture::new();
+    let service = fixture.service();
+    let conversation_id = "fork-rewrite-empty-evidence";
+    completed_source_turn(&service, conversation_id);
+    record_fork_evidence(
+        &fixture,
+        &service,
+        conversation_id,
+        "source-assistant",
+        "source-run",
+        None,
+    );
+    let replacement = complete_fork_evidence_turn(&service, conversation_id, "edited", 5, true);
+    record_fork_evidence(
+        &fixture,
+        &service,
+        conversation_id,
+        &replacement,
+        "edited-run",
+        None,
+    );
+
+    let fork = service
+        .fork_conversation_request_view(assistant_reply_fork_request(
+            "fork-empty-evidence",
+            conversation_id,
+            &replacement,
+        ))
+        .unwrap()
+        .conversation;
+    assert_eq!(fork.messages.len(), 2);
+    let copied = service
+        .load_agent_turn_diffs_for_messages(&fork.id, "project-1", &[fork.messages[1].id.clone()])
+        .unwrap();
+    assert_eq!(copied.len(), 1);
+    assert!(copied[0].files.is_empty());
+    assert_eq!(
+        service
+            .state
+            .connection()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM agent_turn_diffs WHERE conversation_id=?1",
+                [conversation_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        2,
+        "fork must not delete the superseded source's durable evidence"
+    );
+}
+
+#[test]
+fn fork_after_repeated_rewrites_keeps_selected_file_evidence_and_can_fork_again() {
+    let fixture = StorageFixture::new();
+    let service = fixture.service();
+    let conversation_id = "fork-rewrite-file-evidence";
+    completed_source_turn(&service, conversation_id);
+    record_fork_evidence(
+        &fixture,
+        &service,
+        conversation_id,
+        "source-assistant",
+        "source-run",
+        Some("prefix.txt"),
+    );
+    for (name, time, rewrite) in [
+        ("old", 5, false),
+        ("edited-once", 7, true),
+        ("edited-twice", 9, true),
+    ] {
+        let message_id =
+            complete_fork_evidence_turn(&service, conversation_id, name, time, rewrite);
+        record_fork_evidence(
+            &fixture,
+            &service,
+            conversation_id,
+            &message_id,
+            &format!("{name}-run"),
+            Some(&format!("{name}.txt")),
+        );
+    }
+    let later = complete_fork_evidence_turn(&service, conversation_id, "later", 11, false);
+    record_fork_evidence(
+        &fixture,
+        &service,
+        conversation_id,
+        &later,
+        "later-run",
+        Some("later.txt"),
+    );
+
+    for (boundary, expected_files) in [
+        (
+            "edited-twice-assistant",
+            vec!["prefix.txt", "edited-twice.txt"],
+        ),
+        (
+            later.as_str(),
+            vec!["prefix.txt", "edited-twice.txt", "later.txt"],
+        ),
+    ] {
+        let first = service
+            .fork_conversation_request_view(assistant_reply_fork_request(
+                format!("fork-{boundary}"),
+                conversation_id,
+                boundary,
+            ))
+            .unwrap()
+            .conversation;
+        let second = service
+            .fork_conversation_request_view(assistant_reply_fork_request(
+                format!("fork-again-{boundary}"),
+                &first.id,
+                &first.messages.last().unwrap().id,
+            ))
+            .unwrap()
+            .conversation;
+        for fork in [&first, &second] {
+            let assistant_ids = fork
+                .messages
+                .iter()
+                .filter(|message| message.role == "assistant")
+                .map(|message| message.id.clone())
+                .collect::<Vec<_>>();
+            let copies = service
+                .load_agent_turn_diffs_for_messages(&fork.id, "project-1", &assistant_ids)
+                .unwrap();
+            assert_eq!(copies.len(), expected_files.len());
+            assert_eq!(
+                copies
+                    .iter()
+                    .flat_map(|copy| copy.files.iter().map(|file| file.path.as_str()))
+                    .collect::<Vec<_>>(),
+                expected_files
+            );
+            for copy in &copies {
+                assert!(assistant_ids.contains(&copy.identity.assistant_message_id));
+                assert_ne!(copy.identity.conversation_id, conversation_id);
+                assert_eq!(copy.files.len(), 1);
+                assert_eq!(copy.files[0].before, crate::AgentTurnFileContent::Missing);
+            }
+            assert_eq!(service.state.connection().unwrap().query_row(
+                "SELECT COUNT(*) FROM agent_turn_diff_actions AS action JOIN agent_turn_diffs AS turn ON turn.assistant_message_id=action.assistant_message_id WHERE turn.conversation_id=?1", [&fork.id],
+                |row| row.get::<_, i64>(0),
+            ).unwrap(), expected_files.len() as i64);
+        }
+    }
+    assert_eq!(
+        service
+            .state
+            .connection()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM agent_turn_diffs WHERE conversation_id=?1",
+                [conversation_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        5
+    );
+}
+
+#[test]
+fn fork_still_rejects_selected_turn_evidence_with_an_unmapped_run() {
+    let fixture = StorageFixture::new();
+    let service = fixture.service();
+    let conversation_id = "fork-evidence-invalid-run";
+    completed_source_turn(&service, conversation_id);
+    record_fork_evidence(
+        &fixture,
+        &service,
+        conversation_id,
+        "source-assistant",
+        "missing-run",
+        None,
+    );
+    let error = service
+        .fork_conversation_request_view(assistant_reply_fork_request(
+            "fork-invalid-run",
+            conversation_id,
+            "source-assistant",
+        ))
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("文件变更证据所属运行未包含在分叉快照中"),
+        "{error}"
+    );
+}
