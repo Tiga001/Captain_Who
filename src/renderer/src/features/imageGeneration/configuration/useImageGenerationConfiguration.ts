@@ -7,6 +7,7 @@ import type {
 } from '@mycopilot/protocol'
 import { IMAGE_GENERATION_CONFIGURATION_SCHEMA_VERSION } from '@mycopilot/protocol'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { hostClient } from '../../../host/hostClient'
 import {
   getImageGenerationConfiguration,
   updateImageGenerationConfiguration
@@ -94,6 +95,10 @@ export function useImageGenerationConfiguration() {
   const mountedRef = useRef(false)
   const requestSequenceRef = useRef(0)
   const mutationInFlightRef = useRef(false)
+  const backgroundRefreshPendingRef = useRef(false)
+  const formBaselineRef = useRef<ImageGenerationConfiguration | undefined>(undefined)
+  const draftRevisionRef = useRef(0)
+  const cleanDraftRevisionRef = useRef(0)
   const [configuration, setConfiguration] = useState<ImageGenerationConfiguration>()
   const [form, setForm] = useState<ImageGenerationConfigurationForm>()
   const [credentialMutation, setCredentialMutation] = useState<ImageGenerationCredentialMutation>({
@@ -118,6 +123,8 @@ export function useImageGenerationConfiguration() {
       setConfiguration(output.configuration)
       setForm(formFromConfiguration(output.configuration))
       setCredentialMutation({ type: 'keep' })
+      formBaselineRef.current = output.configuration
+      cleanDraftRevisionRef.current = draftRevisionRef.current
       return output.configuration
     } catch (error) {
       if (!mountedRef.current || requestSequenceRef.current !== sequence) return undefined
@@ -138,34 +145,109 @@ export function useImageGenerationConfiguration() {
     }
   }, [load])
 
+  const refreshInBackground = useCallback(async () => {
+    if (mutationInFlightRef.current) {
+      backgroundRefreshPendingRef.current = true
+      return
+    }
+    const sequence = ++requestSequenceRef.current
+    try {
+      const output = await getImageGenerationConfiguration()
+      if (!mountedRef.current || sequence !== requestSequenceRef.current) return
+      setConfiguration(output.configuration)
+      // A capability change must not discard an unsaved endpoint, model or
+      // credential. Keep the draft's CAS base too, rather than silently rebasing
+      // an old configuration edit over another window's saved fields.
+      if (draftRevisionRef.current === cleanDraftRevisionRef.current) {
+        formBaselineRef.current = output.configuration
+        setForm(formFromConfiguration(output.configuration))
+        setCredentialMutation({ type: 'keep' })
+      }
+      setLoading(false)
+      setLoadErrorCode(undefined)
+    } catch (error) {
+      // Retain the authoritative state and draft; reconnect/focus will retry.
+      if (
+        mountedRef.current &&
+        sequence === requestSequenceRef.current &&
+        !formBaselineRef.current
+      ) {
+        setLoading(false)
+        setLoadErrorCode(getImageGenerationConfigurationErrorDetails(error).code)
+      }
+    }
+  }, [])
+
+  useEffect(() => {
+    const changed = () => void refreshInBackground()
+    const visible = () => {
+      if (document.visibilityState === 'visible') changed()
+    }
+    const unsubscribe = hostClient.imageGeneration.onChanged(changed)
+    window.addEventListener('focus', changed)
+    document.addEventListener('visibilitychange', visible)
+    return () => {
+      unsubscribe()
+      window.removeEventListener('focus', changed)
+      document.removeEventListener('visibilitychange', visible)
+    }
+  }, [refreshInBackground])
+
   const dirty = useMemo(
     () => Boolean(configuration && form && isFormDirty(form, configuration, credentialMutation)),
     [configuration, credentialMutation, form]
   )
 
-  const handleMutationError = useCallback(
-    async (error: unknown) => {
-      if (!mountedRef.current) return
-      const details = getImageGenerationConfigurationErrorDetails(error)
-      if (shouldRefreshImageGenerationConfiguration(details)) {
-        const authoritativeConfiguration = await load()
-        if (!mountedRef.current) return
-        setFeedback(
-          authoritativeConfiguration
-            ? { kind: 'authoritativeRefresh', code: details.code }
-            : { kind: 'error', code: 'unavailable' }
+  const handleMutationError = useCallback(async (error: unknown) => {
+    if (!mountedRef.current) return
+    const details = getImageGenerationConfigurationErrorDetails(error)
+    if (shouldRefreshImageGenerationConfiguration(details)) {
+      const sequence = ++requestSequenceRef.current
+      try {
+        const { configuration: latest } = await getImageGenerationConfiguration()
+        if (!mountedRef.current || sequence !== requestSequenceRef.current) return
+        const baseline = formBaselineRef.current
+        const latestForm = formFromConfiguration(latest)
+        setConfiguration(latest)
+        // Keep the user's edited fields/credential intention, but refresh fields
+        // they did not edit. A subsequent explicit Save uses this new CAS base;
+        // a conflict never silently discards the draft or retries the write.
+        setForm((draft) =>
+          !draft || !baseline
+            ? latestForm
+            : {
+                endpointUrl:
+                  draft.endpointUrl.trim() === baseline.endpointUrl
+                    ? latestForm.endpointUrl
+                    : draft.endpointUrl,
+                modelId:
+                  draft.modelId.trim() === baseline.modelId ? latestForm.modelId : draft.modelId,
+                imageToImage:
+                  draft.imageToImage === baseline.capabilities.imageToImage
+                    ? latestForm.imageToImage
+                    : draft.imageToImage,
+                watermark:
+                  draft.watermark === baseline.defaults.watermark
+                    ? latestForm.watermark
+                    : draft.watermark
+              }
         )
-        return
+        formBaselineRef.current = latest
+        setFeedback({ kind: 'authoritativeRefresh', code: details.code })
+      } catch {
+        if (mountedRef.current && sequence === requestSequenceRef.current)
+          setFeedback({ kind: 'error', code: 'unavailable' })
       }
-      if (mountedRef.current) setFeedback({ kind: 'error', code: details.code })
-    },
-    [load]
-  )
+      return
+    }
+    if (mountedRef.current) setFeedback({ kind: 'error', code: details.code })
+  }, [])
 
   const runMutation = useCallback(
     async (task: () => Promise<void>) => {
       if (mutationInFlightRef.current) return false
       mutationInFlightRef.current = true
+      requestSequenceRef.current += 1
       setPendingOperation('saving')
       setFeedback(undefined)
       try {
@@ -177,14 +259,18 @@ export function useImageGenerationConfiguration() {
       } finally {
         mutationInFlightRef.current = false
         if (mountedRef.current) setPendingOperation(undefined)
+        if (mountedRef.current && backgroundRefreshPendingRef.current) {
+          backgroundRefreshPendingRef.current = false
+          void refreshInBackground()
+        }
       }
     },
-    [handleMutationError]
+    [handleMutationError, refreshInBackground]
   )
 
   const save = useCallback(async () => {
     if (!configuration || !form) return
-    const snapshotConfiguration = configuration
+    const snapshotConfiguration = formBaselineRef.current ?? configuration
     const snapshotForm = form
     const snapshotCredentialMutation = credentialMutation
 
@@ -196,6 +282,8 @@ export function useImageGenerationConfiguration() {
       setConfiguration(output.configuration)
       setForm(formFromConfiguration(output.configuration))
       setCredentialMutation({ type: 'keep' })
+      formBaselineRef.current = output.configuration
+      cleanDraftRevisionRef.current = draftRevisionRef.current
     })
   }, [configuration, credentialMutation, form, runMutation])
 
@@ -204,6 +292,7 @@ export function useImageGenerationConfiguration() {
       key: Key,
       value: ImageGenerationConfigurationForm[Key]
     ) => {
+      draftRevisionRef.current += 1
       setForm((current) => (current ? { ...current, [key]: value } : current))
       setFeedback(undefined)
     },
@@ -211,6 +300,7 @@ export function useImageGenerationConfiguration() {
   )
 
   const updateCredentialMutation = useCallback((mutation: ImageGenerationCredentialMutation) => {
+    draftRevisionRef.current += 1
     setCredentialMutation(mutation)
     setFeedback(undefined)
   }, [])

@@ -30,6 +30,7 @@ import { registerSkillsIpc } from './ipc/skillsIpc'
 import { registerMcpIpc } from './ipc/mcpIpc'
 import { registerCoreServiceIpc } from './ipc/serviceIpc'
 import { registerStorageIpc } from './ipc/storageIpc'
+import { registerConfigurationNotifications } from './ipc/configurationNotifications'
 import { registerTerminalIpc } from './ipc/terminalIpc'
 import { createTrustedIpcMain } from './ipc/trustedIpc'
 import { RendererQuitFlushCoordinator } from './ipc/rendererQuitFlush'
@@ -333,6 +334,7 @@ export function registerHostIpc(
   const rendererQuitFlush = new RendererQuitFlushCoordinator(ipcMain)
 
   registerCoreServiceIpc(ipcMain, coreServer)
+  const disposeConfigurationNotifications = registerConfigurationNotifications(coreServer)
   registerAgentIpc(ipcMain, coreServer)
   const disposeHumanInteractionIpc = registerHumanInteractionIpc(ipcMain, coreServer)
   const disposeAutomationIpc = registerAutomationIpc(ipcMain, coreServer)
@@ -387,6 +389,7 @@ export function registerHostIpc(
     rendererQuitFlush.dispose()
     disposeNotificationIpc()
     disposeHumanInteractionIpc()
+    disposeConfigurationNotifications()
     disposeAutomationIpc()
     disposeMcpIpc()
     disposeBrowserDataIpc()

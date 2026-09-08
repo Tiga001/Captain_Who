@@ -2,7 +2,7 @@
 status: current
 audience: developers
 owner: engineering
-last_verified: 2026-08-31
+last_verified: 2026-09-08
 ---
 
 # 右侧栏平台
@@ -62,6 +62,19 @@ last_verified: 2026-08-31
 - `single` 在整个页面栈复用第一个同模块页面。
 - `single-per-workspace` 按 `workspaceSessionKey` 复用；当前注册模块尚未采用该策略。
 - 创建和激活在同一个 reducer action 中完成，避免中间出现无活动页状态。
+
+### Composer 工作区命令
+
+Composer 的 `/` 菜单通过 AppShell 的显式打开操作导航，不能复用会关闭已展开面板的 toggle。`useRightSidebarModules` 和 `useRightSidebarModuleAvailability` 同时服务菜单与页面平台，避免另建审阅/子 Agent 资格规则。不可用的右栏命令隐藏，Git 检查中显示禁用状态；这些导航不要求 Agent 空闲。
+
+| 命令                  | 目标与复用规则                                                                                      |
+| --------------------- | --------------------------------------------------------------------------------------------------- |
+| 打开终端 `/terminal`  | 展开底部栏，每次创建并选中新终端，保留现有会话与面板高度。窗口不足以容纳底部栏时禁用。              |
+| 内置浏览器 `/browser` | 展开右侧栏，每次新建空白浏览器页，保留其他标签。沿用浏览器内部 bootstrap，不导航外部地址。          |
+| 查看修改 `/review`    | 展开并选中现有 Git Review，保留当前审阅目标与局部状态；首次打开使用模块默认的未提交修改。           |
+| 子 Agent `/agents`    | 展开并复用 Agent Center，回到当前根聊天的子 Agent 列表。只在同一根聊天的授权树存在子 Agent 时显示。 |
+
+导航请求包含递增 `requestId`、工作区 key/path 和 conversation id。消费方校验当前上下文并去重；旧项目/聊天请求被消费后丢弃，切回原上下文也不重放。底部栏将外部终端请求与首次打开的默认终端初始化合并，React effect 重放不额外创建终端。命令只消费 Slash 查询，不提交模型消息或清除附件。
 
 ### 关联页面
 

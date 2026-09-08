@@ -9,6 +9,7 @@ import type {
   ProviderVendorModelPolicyInput
 } from '@mycopilot/protocol'
 import { useToast } from '../components/toast/ToastContext'
+import { hostClient } from '../host/hostClient'
 import {
   loadModelSettings,
   loadProviderProfileUiDescriptors,
@@ -45,6 +46,7 @@ interface ModelSettingsContextValue {
   updateApiToken: (mutation: CredentialMutation) => Promise<void>
   setApiUrl: (value: string) => Promise<void>
   setSearchMode: (value: SearchMode) => void
+  saveSearchMode: (value: SearchMode) => Promise<void>
   updateTavilyApiKey: (mutation: CredentialMutation) => Promise<void>
   toggleModel: (modelId: string) => void
   upsertModel: (model: ModelConfig | ModelConfigSaveDraft) => Promise<ModelConfig>
@@ -122,8 +124,10 @@ export function ModelSettingsProvider({ children }: { children: ReactNode }) {
 
   const persistSettings = useCallback(
     (
-      saveDraft: ModelSettingsSaveDraft,
-      optimisticSettings?: ModelSettingsSnapshot
+      saveDraft:
+        ModelSettingsSaveDraft | ((current: ModelSettingsSnapshot) => ModelSettingsSaveDraft),
+      optimisticSettings?: ModelSettingsSnapshot,
+      notifyOnError = true
     ): Promise<ModelSettingsSnapshot> => {
       const revision = latestSaveRevisionRef.current + 1
       latestSaveRevisionRef.current = revision
@@ -131,12 +135,24 @@ export function ModelSettingsProvider({ children }: { children: ReactNode }) {
 
       const save = saveQueueRef.current
         .catch(() => undefined)
-        .then(() =>
-          saveModelSettings(
-            saveDraft,
-            lastSuccessfulSettingsRef.current?.configurationRevision ?? null
+        .then(() => {
+          const current = lastSuccessfulSettingsRef.current ?? settingsRef.current
+          return saveModelSettings(
+            typeof saveDraft === 'function'
+              ? saveDraft(current)
+              : {
+                  ...saveDraft,
+                  // Other editors may have captured a draft before a queued search
+                  // toggle completed. They do not own searchMode; only an explicit
+                  // Tavily credential clear must also disable search atomically.
+                  searchMode:
+                    saveDraft.tavilyApiKeyMutation.type === 'clear'
+                      ? 'disabled'
+                      : current.searchMode
+                },
+            current.configurationRevision
           )
-        )
+        })
         .then((authoritativeSettings) => {
           lastSuccessfulSettingsRef.current = authoritativeSettings
           if (latestSaveRevisionRef.current === revision) {
@@ -164,7 +180,7 @@ export function ModelSettingsProvider({ children }: { children: ReactNode }) {
             // ModelForm owns the actionable duplicate-name recovery dialog. Emitting a toast
             // here would show the same rejection twice and steal attention from the retained
             // draft. Other failures keep the existing global notification behavior.
-            if (classified.code !== 'duplicate_display_name') {
+            if (notifyOnError && classified.code !== 'duplicate_display_name') {
               presentToast(translate('configuration.saveFailed'), { durationMs: 5000 })
             }
           }
@@ -251,6 +267,83 @@ export function ModelSettingsProvider({ children }: { children: ReactNode }) {
     persistSettings,
     startupAttempt
   ])
+
+  useEffect(() => {
+    if (hydrationStatus !== 'ready') return
+    let disposed = false
+    let dirty = false
+    let refreshing = false
+    let notificationRevision = 0
+
+    const refresh = async () => {
+      dirty = true
+      notificationRevision += 1
+      if (refreshing) return
+      refreshing = true
+      try {
+        while (dirty && !disposed) {
+          dirty = false
+          const queue = saveQueueRef.current
+          await queue
+          if (disposed) return
+          if (queue !== saveQueueRef.current) {
+            dirty = true
+            continue
+          }
+          const saveRevision = latestSaveRevisionRef.current
+          const readRevision = notificationRevision
+          try {
+            const latest = await loadModelSettings()
+            if (disposed) return
+            // An invalidation or mutation during the read makes even a successful
+            // response stale. Re-read after the save queue, never overwrite it.
+            if (
+              saveRevision !== latestSaveRevisionRef.current ||
+              readRevision !== notificationRevision
+            ) {
+              dirty = true
+              continue
+            }
+            if (latest) {
+              lastSuccessfulSettingsRef.current = latest
+              applySettings(latest)
+            }
+          } catch {
+            // Retain the last authoritative value; reconnect/focus will retry.
+          }
+        }
+      } finally {
+        refreshing = false
+      }
+    }
+    const onChange = () => void refresh()
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible') onChange()
+    }
+    const unsubscribe = hostClient.storage.onModelSettingsChanged(onChange)
+    window.addEventListener('focus', onChange)
+    document.addEventListener('visibilitychange', onVisibility)
+    return () => {
+      disposed = true
+      unsubscribe()
+      window.removeEventListener('focus', onChange)
+      document.removeEventListener('visibilitychange', onVisibility)
+    }
+  }, [applySettings, hydrationStatus])
+
+  const changeSearchMode = useCallback(
+    async (value: SearchMode, notifyOnError: boolean) => {
+      if (hydrationStatus !== 'ready') throw new Error('Model settings are not ready')
+      // Build this narrow edit when it reaches the queue. A model/configuration
+      // save ahead of it must not be overwritten by a stale whole-page snapshot.
+      await persistSettings(
+        (current) => ({ ...keepSaveDraft(current), searchMode: value }),
+        undefined,
+        notifyOnError
+      )
+    },
+    [hydrationStatus, persistSettings]
+  )
 
   const updateSettings = useCallback(
     (update: (current: ModelSettingsSnapshot) => ModelSettingsSnapshot): void => {
@@ -345,7 +438,10 @@ export function ModelSettingsProvider({ children }: { children: ReactNode }) {
         }
         await persistSettings(keepSaveDraft(nextSettings), nextSettings)
       },
-      setSearchMode: (value) => updateSettings((current) => ({ ...current, searchMode: value })),
+      setSearchMode: (value) => {
+        void changeSearchMode(value, true).catch(() => undefined)
+      },
+      saveSearchMode: (value) => changeSearchMode(value, false),
       updateTavilyApiKey: async (mutation) => {
         const current = settingsRef.current
         const nextStatus = credentialStatusAfterMutation(current.tavilyApiKeyStatus, mutation)
@@ -376,6 +472,7 @@ export function ModelSettingsProvider({ children }: { children: ReactNode }) {
       upsertModel
     }
   }, [
+    changeSearchMode,
     persistSettings,
     providerProfileDescriptors,
     providerVendorDescriptors,

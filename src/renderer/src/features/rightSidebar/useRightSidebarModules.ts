@@ -1,7 +1,46 @@
 import { useMemo } from 'react'
 import type { CollaborationStoreSnapshot } from '../agentCollaboration/collaborationStore'
 import { AGENT_CENTER_RIGHT_SIDEBAR_MODULE, RIGHT_SIDEBAR_MODULES } from './rightSidebarModules'
-import type { RightSidebarModuleDefinition } from './rightSidebarTypes'
+import {
+  getRightSidebarModuleAvailability,
+  resolveRightSidebarModuleAvailabilityMap
+} from './rightSidebarModuleAvailability'
+import type { RightSidebarCapabilities, RightSidebarModuleDefinition } from './rightSidebarTypes'
+import { createRightSidebarWorkspaceContext } from './rightSidebarWorkspace'
+
+const EMPTY_CAPABILITIES: RightSidebarCapabilities = {}
+
+/** Shared by the module picker and external navigation entry points. */
+export function useRightSidebarModuleAvailability({
+  capabilities = EMPTY_CAPABILITIES,
+  modules,
+  workspaceKey,
+  workspaceName,
+  workspacePath
+}: {
+  capabilities?: RightSidebarCapabilities
+  modules: RightSidebarModuleDefinition[]
+  workspaceKey?: string | null
+  workspaceName?: string | null
+  workspacePath?: string
+}) {
+  const workspace = useMemo(
+    () => createRightSidebarWorkspaceContext(workspaceKey, workspaceName, workspacePath),
+    [workspaceKey, workspaceName, workspacePath]
+  )
+  const moduleAvailability = useMemo(
+    () => resolveRightSidebarModuleAvailabilityMap(modules, capabilities, workspace),
+    [capabilities, modules, workspace]
+  )
+  const availableModules = useMemo(
+    () =>
+      modules.filter(
+        (module) => getRightSidebarModuleAvailability(moduleAvailability, module.id) === 'available'
+      ),
+    [moduleAvailability, modules]
+  )
+  return { availableModules, moduleAvailability, workspace }
+}
 
 export function useRightSidebarModules({
   activeConversationId,

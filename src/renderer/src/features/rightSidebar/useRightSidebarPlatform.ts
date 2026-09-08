@@ -1,9 +1,6 @@
-import { useCallback, useLayoutEffect, useMemo, useReducer } from 'react'
+import { useCallback, useLayoutEffect, useReducer } from 'react'
 import type { Translate } from '../../config/translationFormat'
-import {
-  getRightSidebarModuleAvailability,
-  resolveRightSidebarModuleAvailabilityMap
-} from './rightSidebarModuleAvailability'
+import { getRightSidebarModuleAvailability } from './rightSidebarModuleAvailability'
 import {
   INITIAL_RIGHT_SIDEBAR_PLATFORM_STATE,
   reduceRightSidebarPlatform
@@ -16,7 +13,7 @@ import type {
   RightSidebarPageOpenRequest,
   RightSidebarPageUpdate
 } from './rightSidebarTypes'
-import { createRightSidebarWorkspaceContext } from './rightSidebarWorkspace'
+import { useRightSidebarModuleAvailability } from './useRightSidebarModules'
 
 interface UseRightSidebarPlatformOptions {
   capabilities?: RightSidebarCapabilities
@@ -28,10 +25,8 @@ interface UseRightSidebarPlatformOptions {
   modules: RightSidebarModuleDefinition[]
 }
 
-const EMPTY_CAPABILITIES: RightSidebarCapabilities = {}
-
 export function useRightSidebarPlatform({
-  capabilities = EMPTY_CAPABILITIES,
+  capabilities,
   modules,
   t,
   workspaceKey,
@@ -43,21 +38,13 @@ export function useRightSidebarPlatform({
     reduceRightSidebarPlatform,
     INITIAL_RIGHT_SIDEBAR_PLATFORM_STATE
   )
-  const workspace = useMemo(
-    () => createRightSidebarWorkspaceContext(workspaceKey, workspaceName, workspacePath),
-    [workspaceKey, workspaceName, workspacePath]
-  )
-  const moduleAvailability = useMemo(
-    () => resolveRightSidebarModuleAvailabilityMap(modules, capabilities, workspace),
-    [capabilities, modules, workspace]
-  )
-  const availableModules = useMemo(
-    () =>
-      modules.filter(
-        (module) => getRightSidebarModuleAvailability(moduleAvailability, module.id) === 'available'
-      ),
-    [moduleAvailability, modules]
-  )
+  const { availableModules, moduleAvailability, workspace } = useRightSidebarModuleAvailability({
+    capabilities,
+    modules,
+    workspaceKey,
+    workspaceName,
+    workspacePath
+  })
 
   const openModulePage = useCallback(
     (

@@ -7,7 +7,10 @@ import type { CSSProperties } from 'react'
 import { frontendConfig, getFrontendCssVariables } from '../../../config/frontendConfig'
 import { classicDarkTheme, classicLightTheme } from '../../../config/themes/classic'
 import type { CollaborationStoreSnapshot } from '../../agentCollaboration/collaborationStore'
-import type { RightSidebarModuleDefinition } from '../rightSidebarTypes'
+import type {
+  RightSidebarModuleDefinition,
+  RightSidebarModuleNavigationRequest
+} from '../rightSidebarTypes'
 
 const TRANSLATIONS: Record<string, string> = {
   'agentCenter.active': 'In progress',
@@ -69,6 +72,83 @@ const KEEP_ALIVE_TEST_MODULE: RightSidebarModuleDefinition = {
 }
 
 describe('Agent Center right sidebar', () => {
+  it('reuses the current agent center and returns from detail to the root list on module navigation', async () => {
+    const tree = snapshot('root-a', [agent('root-a', 'child-a', 'running')])
+    const renderSidebar = (requestId?: number) => (
+      <NarrowSidebar
+        activeConversationId="root-a"
+        moduleNavigation={
+          requestId === undefined
+            ? undefined
+            : {
+                conversationId: 'root-a',
+                moduleId: 'agent-center',
+                requestId,
+                workspaceKey: 'project-a',
+                workspacePath: '/workspace/a'
+              }
+        }
+        navigation={{ agentId: 'child-a', requestId: 1, rootConversationId: 'root-a' }}
+        snapshot={tree}
+      />
+    )
+    const screen = await render(renderSidebar())
+    await expect.element(screen.getByTestId('agent-observer-child-a')).toBeVisible()
+    const originalPage = requiredElement(screen.container, '.right-sidebar__page')
+    await screen.rerender(renderSidebar(1))
+    await expect
+      .element(
+        screen.getByRole('button', {
+          name: 'Open subagent child-a, base model model-child-a, status Working'
+        })
+      )
+      .toBeVisible()
+    expect(screen.container.querySelector('[data-testid="agent-observer-child-a"]')).toBeNull()
+    expect(requiredElement(screen.container, '.right-sidebar__page')).toBe(originalPage)
+    expect(screen.container.querySelectorAll('[role="tab"]')).toHaveLength(1)
+
+    await screen
+      .getByRole('button', {
+        name: 'Open subagent child-a, base model model-child-a, status Working'
+      })
+      .click()
+    await expect.element(screen.getByTestId('agent-observer-child-a')).toBeVisible()
+    await screen.rerender(renderSidebar(1))
+    await expect.element(screen.getByTestId('agent-observer-child-a')).toBeVisible()
+    await screen.rerender(renderSidebar(2))
+    await expect
+      .poll(() => screen.container.querySelector('[data-testid="agent-observer-child-a"]'))
+      .toBeNull()
+    expect(screen.container.querySelectorAll('[role="tab"]')).toHaveLength(1)
+  })
+
+  it('rejects a module request after its child catalog disappears without reopening it later', async () => {
+    const moduleNavigation: RightSidebarModuleNavigationRequest = {
+      conversationId: 'root-a',
+      moduleId: 'agent-center',
+      requestId: 1,
+      workspaceKey: 'project-a',
+      workspacePath: '/workspace/a'
+    }
+    const screen = await render(
+      <NarrowSidebar
+        activeConversationId="root-a"
+        moduleNavigation={moduleNavigation}
+        snapshot={snapshot('root-a', [])}
+      />
+    )
+    expect(screen.container.querySelectorAll('[role="tab"]')).toHaveLength(0)
+    await screen.rerender(
+      <NarrowSidebar
+        activeConversationId="root-a"
+        moduleNavigation={moduleNavigation}
+        snapshot={snapshot('root-a', [agent('root-a', 'child-a', 'running')])}
+      />
+    )
+    await expect.poll(() => homeModuleLabels(screen.container)).toContain('Subagents')
+    expect(screen.container.querySelectorAll('[role="tab"]')).toHaveLength(0)
+  })
+
   it('preserves the legacy home when the active root has no child and appears dynamically later', async () => {
     const screen = await render(
       <NarrowSidebar activeConversationId="root-a" snapshot={snapshot('root-a', [])} />
@@ -176,7 +256,7 @@ describe('Agent Center right sidebar', () => {
     const observerStyle = getComputedStyle(messages)
     expect(observerStyle.paddingLeft).toBe('14px')
     expect(observerStyle.paddingRight).toBe('14px')
-    expect(observerStyle.gap).toBe('28px')
+    expect(observerStyle.gap).toBe('40px')
     expect(center.scrollWidth).toBeLessThanOrEqual(center.clientWidth)
     expect(observer.scrollWidth).toBeLessThanOrEqual(observer.clientWidth)
     expect(screen.container.querySelector('.chat-composer')).toBeNull()
@@ -416,12 +496,14 @@ describe('Agent Center right sidebar', () => {
 function NarrowSidebar({
   activeConversationId,
   height = 720,
+  moduleNavigation,
   navigation,
   snapshot,
   theme = 'light'
 }: {
   activeConversationId: string
   height?: number
+  moduleNavigation?: RightSidebarModuleNavigationRequest
   navigation?: { agentId: string; requestId: number; rootConversationId: string }
   snapshot: CollaborationStoreSnapshot
   theme?: 'dark' | 'light'
@@ -447,6 +529,7 @@ function NarrowSidebar({
         isMaximized={false}
         isOpen
         modules={[KEEP_ALIVE_TEST_MODULE]}
+        moduleNavigationRequest={moduleNavigation}
         onToggleMaximized={NOOP}
         renderAgentObserver={({ agent }) => (
           <div className="chat-conversation-page" data-testid={`agent-observer-${agent.agentId}`}>

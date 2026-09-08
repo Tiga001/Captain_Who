@@ -22,7 +22,7 @@ export const IMAGE_GENERATION_SET_ENABLED_CHANNEL = HOST_CHANNELS.imageGeneratio
 export const IMAGE_GENERATION_GET_STATUS_CHANNEL = HOST_CHANNELS.imageGeneration.getStatus
 export const IMAGE_GENERATION_READ_ARTIFACT_CHANNEL = HOST_CHANNELS.imageGeneration.readArtifact
 
-type ImageGenerationIpcRenderer = Pick<IpcRenderer, 'invoke'>
+type ImageGenerationIpcRenderer = Pick<IpcRenderer, 'invoke' | 'on' | 'removeListener'>
 
 async function parseSuccessfulInvocation<T>(
   invocation: Promise<HostInvocationResult<unknown>>,
@@ -43,6 +43,11 @@ export function createImageGenerationIpcBridge(
   ipcRenderer: ImageGenerationIpcRenderer
 ): ImageGenerationHostApi {
   return {
+    onChanged: (handler) => {
+      const listener = (): void => handler()
+      ipcRenderer.on(HOST_CHANNELS.imageGeneration.changed, listener)
+      return () => ipcRenderer.removeListener(HOST_CHANNELS.imageGeneration.changed, listener)
+    },
     getConfiguration: () =>
       parseSuccessfulInvocation(
         ipcRenderer.invoke(IMAGE_GENERATION_GET_CONFIGURATION_CHANNEL),

@@ -16,7 +16,7 @@ import {
   IMAGE_GENERATION_UPDATE_CONFIGURATION_CHANNEL
 } from './ImageGenerationIpcBridge'
 
-type ImageGenerationIpcRenderer = Pick<IpcRenderer, 'invoke'>
+type ImageGenerationIpcRenderer = Pick<IpcRenderer, 'invoke' | 'on' | 'removeListener'>
 
 describe('Image generation IPC bridge', () => {
   it('routes all configuration operations without unwrapping the Host invocation result', async () => {

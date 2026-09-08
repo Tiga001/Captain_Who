@@ -7,10 +7,12 @@ import { RightSidebarTabStrip } from '../rightSidebar/RightSidebarTabStrip'
 import { useRightSidebarDocumentVisibility } from '../rightSidebar/rightSidebarActivity'
 import { useRightSidebarModules } from '../rightSidebar/useRightSidebarModules'
 import { useRightSidebarPlatform } from '../rightSidebar/useRightSidebarPlatform'
+import { createRightSidebarWorkspaceSessionKey } from '../rightSidebar/rightSidebarWorkspace'
 import type {
   RightSidebarCapabilities,
   RightSidebarModuleDefinition,
   RightSidebarModuleId,
+  RightSidebarModuleNavigationRequest,
   RightSidebarPageOpenRequest
 } from '../rightSidebar/rightSidebarTypes'
 import '../rightSidebar/RightSidebar.css'
@@ -22,6 +24,7 @@ interface BottomPanelProps {
   collaborationSnapshot?: CollaborationStoreSnapshot | null
   isOpen: boolean
   isWorkspaceVisible: boolean
+  moduleNavigationRequest?: RightSidebarModuleNavigationRequest | null
   modules?: RightSidebarModuleDefinition[]
   onClose: () => void
   onOpenRightModule: (moduleId: RightSidebarModuleId) => void
@@ -37,6 +40,7 @@ export const BottomPanel = memo(function BottomPanel({
   collaborationSnapshot,
   isOpen,
   isWorkspaceVisible,
+  moduleNavigationRequest,
   modules: configuredModules,
   onClose,
   onOpenRightModule,
@@ -50,6 +54,7 @@ export const BottomPanel = memo(function BottomPanel({
   const visible = isOpen && isWorkspaceVisible
   const [isMenuOpen, setIsMenuOpen] = useState(false)
   const openedRef = useRef(false)
+  const handledNavigationRequestIdRef = useRef<number | null>(null)
   const { modules } = useRightSidebarModules({
     activeConversationId,
     collaborationSnapshot,
@@ -75,15 +80,50 @@ export const BottomPanel = memo(function BottomPanel({
   })
 
   useEffect(() => {
+    const request = moduleNavigationRequest
+    const isNewRequest =
+      request != null &&
+      (handledNavigationRequestIdRef.current === null ||
+        request.requestId > handledNavigationRequestIdRef.current)
+    const matchesContext =
+      request != null &&
+      createRightSidebarWorkspaceSessionKey(request.workspaceKey, request.workspacePath) ===
+        createRightSidebarWorkspaceSessionKey(workspaceKey, workspacePath) &&
+      (request.conversationId ?? null) === (activeConversationId ?? null)
+    const shouldOpenTerminal = isNewRequest && request.moduleId === 'terminal' && matchesContext
+    if (isNewRequest && !shouldOpenTerminal) {
+      handledNavigationRequestIdRef.current = request.requestId
+    }
+
     if (!visible) {
       openedRef.current = false
       setIsMenuOpen(false)
       return
     }
+    if (shouldOpenTerminal) {
+      if (moduleAvailability.terminal === 'checking') return
+      handledNavigationRequestIdRef.current = request.requestId
+      if (moduleAvailability.terminal === 'available') {
+        // A navigation request also satisfies first-open initialization, including effect replay.
+        openedRef.current = true
+        setIsMenuOpen(false)
+        openModule('terminal')
+        return
+      }
+    }
     if (openedRef.current) return
     openedRef.current = true
     if (pages.length === 0) openModule('terminal')
-  }, [openModule, pages.length, visible])
+  }, [
+    activeConversationId,
+    moduleAvailability.terminal,
+    moduleNavigationRequest,
+    openModule,
+    pages.length,
+    visible,
+    workspaceKey,
+    workspacePath
+  ])
 
   const closeMenu = useCallback(() => setIsMenuOpen(false), [])
   const handleOpenModule = useCallback(

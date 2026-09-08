@@ -5,7 +5,11 @@ import {
   type McpBuiltinCapabilityListItem,
   type McpBuiltinCapabilityListOutput
 } from '@mycopilot/protocol'
-import { listMcpBuiltinCapabilities, setMcpBuiltinCapabilityAllowed } from './mcpManagementClient'
+import {
+  listMcpBuiltinCapabilities,
+  onMcpBuiltinCapabilitiesChanged,
+  setMcpBuiltinCapabilityAllowed
+} from './mcpManagementClient'
 import { getMcpManagementErrorDetails } from './mcpManagementErrors'
 
 export interface BuiltinMcpCapabilitiesViewState {
@@ -26,8 +30,8 @@ const INITIAL_STATE: BuiltinMcpCapabilitiesViewState = {
  * Renderer state for Host-managed capabilities.
  *
  * The existing `mcp.changed` contract is scoped to external Server identities, so this hook does
- * not reinterpret those notifications. It applies mutation responses authoritatively and safely
- * re-fetches when the Settings window regains focus or visibility.
+ * not reinterpret those notifications. Built-in invalidations have their own payload-free
+ * channel; focus and visibility also re-fetch missed authoritative changes.
  */
 export function useBuiltinMcpCapabilities() {
   const [state, setState] = useState<BuiltinMcpCapabilitiesViewState>(INITIAL_STATE)
@@ -121,6 +125,7 @@ export function useBuiltinMcpCapabilities() {
     void refresh()
 
     const refreshOnFocus = () => void refresh()
+    const unsubscribe = onMcpBuiltinCapabilitiesChanged(refreshOnFocus)
     const refreshOnVisibility = () => {
       if (document.visibilityState === 'visible') void refresh()
     }
@@ -132,6 +137,7 @@ export function useBuiltinMcpCapabilities() {
       lifecycleEpochRef.current += 1
       refreshDirtyRef.current = false
       refreshVisibleRef.current = false
+      unsubscribe()
       window.removeEventListener('focus', refreshOnFocus)
       document.removeEventListener('visibilitychange', refreshOnVisibility)
     }

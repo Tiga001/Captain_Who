@@ -1,29 +1,54 @@
-import { useState, type ComponentProps } from 'react'
-import { userEvent } from 'vitest/browser'
-import { beforeEach, expect, it, vi } from 'vitest'
+import { useEffect, useRef, useState, type ComponentProps } from 'react'
+import { page, userEvent } from 'vitest/browser'
+import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { render } from 'vitest-browser-react'
+import type { ModelConfig } from '../../config/modelConfig'
+import { getFrontendCssVariables } from '../../config/frontendConfig'
+import { getFrontendTheme } from '../../config/frontendTheme'
 import '../../styles/global.css'
 
-const { execute, fork, submit, changed, translate } = vi.hoisted(() => ({
+const { execute, fork, submit, stop, changed, translate, workspaceActions } = vi.hoisted(() => ({
   execute: vi.fn(),
   fork: vi.fn(),
   submit: vi.fn(),
+  stop: vi.fn(),
   changed: vi.fn(),
-  translate: (key: string) => key
+  translate: vi.fn((key: string) => key),
+  workspaceActions: {
+    terminal: vi.fn(),
+    browser: vi.fn(),
+    review: vi.fn(),
+    agents: vi.fn()
+  }
 }))
+const modelState = vi.hoisted(() => ({ enabledModels: [] as ModelConfig[] }))
 vi.mock('../../config/FrontendConfigProvider', () => ({
   useFrontendConfig: () => ({ t: translate })
 }))
 vi.mock('../../config/ModelSettingsProvider', () => ({
-  useModelSettings: () => ({
-    enabledModels: [{ id: 'model-1', displayName: 'Model', supportsImage: true, enabled: true }]
-  })
+  useModelSettings: () => modelState
 }))
 vi.mock('../../config/ProjectSettingsProvider', () => ({
-  useProjectSettings: () => ({ projects: [], selectProjectDirectory: vi.fn() })
+  useProjectSettings: () => ({
+    projects: [{ id: 'keep-project', name: 'Keep project', path: '/repo/keep', createdAt: 1 }],
+    selectProjectDirectory: vi.fn()
+  })
 }))
 vi.mock('../../features/chat/components/ImagePreview', () => ({ useImagePreview: () => vi.fn() }))
-vi.mock('../../features/skills/skillsClient', () => ({ listSkills: vi.fn() }))
+vi.mock('../../features/skills/skillsClient', () => ({
+  listSkills: vi.fn(async () => ({
+    schemaVersion: 1,
+    catalogRevision: 'fixture',
+    skills: [],
+    diagnostics: [],
+    truncated: false
+  }))
+}))
+// Exercise Composer navigation and portal ownership independently of capability persistence,
+// which is covered by CapabilityCenterMenu's Host-client contract tests.
+vi.mock('../../features/capabilities/CapabilityCenterMenu', () => ({
+  CapabilityCenterMenu: CapabilityMenuFixture
+}))
 vi.mock('../../features/chat/chatAttachments', () => ({
   buildAgentInputAttachments: (attachments: unknown[]) => attachments,
   composerAttachmentFromAgentAttachment: (attachment: unknown) => attachment,
@@ -34,18 +59,137 @@ vi.mock('../../features/chat/chatAttachments', () => ({
 }))
 import { ChatComposer } from '../../features/chat/components/ChatComposer'
 import { createComposerDraft } from '../chatMessageFactory'
+import { ConfirmationDialog } from '../../components/dialog/ConfirmationDialog'
+
+const WORKSPACE_COMMANDS = [
+  { id: 'terminal', label: '打开终端', query: '终端', description: '在底部栏新建终端' },
+  { id: 'browser', label: '内置浏览器', query: '浏览器', description: '打开空白浏览器标签页' },
+  { id: 'review', label: '查看修改', query: '修改', description: '打开当前项目的审阅页面' },
+  { id: 'agents', label: '子智能体', query: '子智能体', description: '打开当前聊天的子智能体列表' }
+] as const
+
+function modelFixture(overrides: Partial<ModelConfig> = {}): ModelConfig {
+  return {
+    id: 'model-1',
+    providerModelId: 'generic-api-model',
+    displayName: 'Model',
+    apiTokenOverrideStatus: 'missing',
+    apiTokenOverrideMutation: { type: 'keep' },
+    supportsImage: true,
+    providerProfileUpdate: { kind: 'unchanged' },
+    providerProfileConfig: {
+      schemaVersion: 2,
+      vendorId: 'generic',
+      profile: { id: 'generic_openai_chat', version: 1 },
+      settings: { kind: 'generic' }
+    },
+    inputPrice: '0',
+    cachedInputPrice: '',
+    outputPrice: '0',
+    enabled: true,
+    ...overrides
+  }
+}
+
+const MODEL_OPTIONS = [
+  modelFixture({ contextWindowTokens: 128_000 }),
+  modelFixture({
+    id: 'model-deepseek',
+    providerModelId: 'deepseek-chat-api',
+    displayName: 'Reasoning work model',
+    supportsImage: false,
+    contextWindowTokens: 256_000,
+    providerProfileConfig: {
+      schemaVersion: 2,
+      vendorId: 'deepseek',
+      profile: { id: 'deepseek_v4_chat', version: 1 },
+      settings: {
+        kind: 'deepseek_v4_chat',
+        reasoning: { mode: 'provider_default', effort: 'provider_default' }
+      }
+    }
+  }),
+  modelFixture({
+    id: 'model-moonshot',
+    providerModelId: 'kimi-latest-api',
+    displayName: 'Vision work model',
+    contextWindowTokens: 1_000_000,
+    providerProfileConfig: {
+      schemaVersion: 2,
+      vendorId: 'moonshot',
+      profile: { id: 'moonshot_k3_chat', version: 1 },
+      settings: { kind: 'moonshot_k3_chat', reasoningEffort: 'max' }
+    }
+  })
+]
+
+function CapabilityMenuFixture({
+  onBack,
+  onDialogOpenChange
+}: {
+  onBack: () => void
+  onDialogOpenChange?: (open: boolean) => void
+}) {
+  const [enabled, setEnabled] = useState(false)
+  const [dialogOpen, setDialogOpen] = useState(false)
+  const menuRef = useRef<HTMLElement>(null)
+  useEffect(() => {
+    menuRef.current?.focus({ preventScroll: true })
+  }, [])
+  useEffect(() => {
+    onDialogOpenChange?.(dialogOpen)
+    return () => onDialogOpenChange?.(false)
+  }, [dialogOpen, onDialogOpenChange])
+  return (
+    <section aria-label="capability menu" ref={menuRef} tabIndex={-1}>
+      <button type="button" onClick={onBack}>
+        Back to commands
+      </button>
+      <input aria-label="Search capabilities" />
+      <button
+        type="button"
+        role="switch"
+        aria-label="Search capability"
+        aria-checked={enabled}
+        onClick={() => setEnabled((current) => !current)}
+      >
+        Search
+      </button>
+      <button type="button" onClick={() => setDialogOpen(true)}>
+        Show configuration error
+      </button>
+      {dialogOpen && (
+        <ConfirmationDialog
+          cancelLabel="Cancel error"
+          confirmLabel="Dismiss error"
+          title="Capability error"
+          onCancel={() => setDialogOpen(false)}
+          onConfirm={() => setDialogOpen(false)}
+        />
+      )}
+    </section>
+  )
+}
 
 function TestComposer({
   message = '',
   disabled = false,
   running = false,
   maintenance = false,
+  transition = false,
+  portalMenus = false,
+  showWorkspaceCommands = false,
+  workspaceChecking = false,
   initialDraft
 }: {
   message?: string
   disabled?: boolean
   running?: boolean
   maintenance?: boolean
+  transition?: boolean
+  portalMenus?: boolean
+  showWorkspaceCommands?: boolean
+  workspaceChecking?: boolean
   initialDraft?: ComponentProps<typeof ChatComposer>['draft']
 }) {
   const [draft, setDraft] = useState(
@@ -59,6 +203,7 @@ function TestComposer({
     <div style={{ marginTop: 300, width: 650 }}>
       <ChatComposer
         commands={[
+          { id: 'model', label: '模型', description: '查看并切换模型' },
           {
             id: 'compact',
             label: '压缩上下文',
@@ -73,21 +218,452 @@ function TestComposer({
             description: '从当前最新可用位置创建聊天分支',
             disabledReason: disabled || running || maintenance ? '聊天空闲时可用' : undefined,
             execute: fork
-          }
+          },
+          { id: 'capabilities', label: '能力中心', description: 'Capabilities' },
+          ...(showWorkspaceCommands
+            ? WORKSPACE_COMMANDS.map(({ id, label, description }) => ({
+                id,
+                label,
+                description,
+                disabledReason: workspaceChecking ? '正在检查可用性' : undefined,
+                execute: workspaceActions[id]
+              }))
+            : [])
         ]}
         draft={draft}
         onDraftChange={update}
         onDraftMessageChange={update}
         onSubmitMessage={submit}
+        onStopGenerating={stop}
+        portalMenus={portalMenus}
         isGenerating={running}
         isManualCompactionRunning={maintenance}
+        isModelTransitionRunning={transition}
       />
     </div>
   )
 }
-beforeEach(() => {
+let previousRootStyle: string | null
+let previousViewport: { width: number; height: number }
+beforeEach(async () => {
   vi.clearAllMocks()
+  translate.mockImplementation((key: string) => key)
+  modelState.enabledModels = [modelFixture()]
+  previousRootStyle = document.documentElement.getAttribute('style')
+  const theme = getFrontendTheme('classic-light')
+  for (const [key, value] of Object.entries(getFrontendCssVariables(undefined, theme.tokens))) {
+    document.documentElement.style.setProperty(key, value)
+  }
+  previousViewport = { width: window.innerWidth, height: window.innerHeight }
+  await page.viewport(1280, 720)
 })
+afterEach(async () => {
+  if (previousRootStyle === null) document.documentElement.removeAttribute('style')
+  else document.documentElement.setAttribute('style', previousRootStyle)
+  await page.viewport(previousViewport.width, previousViewport.height)
+})
+
+it.each([false, true])(
+  'opens models as the first command, lists API metadata without search, and shares draft selection with the footer (portal=%s)',
+  async (portalMenus) => {
+    modelState.enabledModels = MODEL_OPTIONS
+    const initialDraft = createComposerDraft({
+      modelId: 'model-1',
+      permissionMode: 'custom',
+      projectId: 'keep-project',
+      attachments: [
+        {
+          id: 'attachment',
+          kind: 'file',
+          name: 'keep-model-context.txt',
+          mimeType: 'text/plain',
+          sizeBytes: 4,
+          encoding: 'base64',
+          data: 'a2VlcA=='
+        }
+      ],
+      skills: [{ id: 'bundled:application:documents', revision: 'keep-revision' }]
+    })
+    const view = await render(
+      <TestComposer portalMenus={portalMenus} initialDraft={initialDraft} />
+    )
+    const input = view.getByRole('textbox', { name: 'chat.inputAria' })
+    const footer = view.getByRole('button', { name: 'chat.selectModel' })
+    await footer.click()
+    const footerOptions = view.getByRole('listbox', { name: 'chat.selectModel' })
+    expect(footerOptions.element().querySelectorAll('[role="option"]')).toHaveLength(3)
+    for (const model of MODEL_OPTIONS) {
+      await expect
+        .element(footerOptions.getByRole('option', { name: new RegExp(model.displayName) }))
+        .toBeVisible()
+    }
+    await footerOptions.getByRole('option', { name: /Reasoning work model/ }).click()
+    expect(changed.mock.lastCall?.[0]).toMatchObject({ modelId: 'model-deepseek' })
+
+    await input.click()
+    await userEvent.keyboard('/')
+    expect(document.querySelector('.composer-commands [role="option"]')?.textContent).toContain(
+      '模型'
+    )
+    await userEvent.keyboard('{Enter}')
+    const menu = view.getByRole('listbox', { name: 'chat.selectModel' })
+    await expect.element(menu).toBeVisible()
+    expect(menu.element().querySelectorAll('[role="option"]')).toHaveLength(3)
+    expect(menu.element().querySelector('input, textarea, [role="searchbox"]')).toBeNull()
+    const generic = menu.getByRole('option', { name: /generic-api-model/ })
+    const deepseek = menu.getByRole('option', { name: /deepseek-chat-api/ })
+    const moonshot = menu.getByRole('option', { name: /kimi-latest-api/ })
+    await expect.element(generic).toHaveTextContent('chat.models.providerGeneric')
+    await expect.element(generic).toHaveTextContent('128K')
+    await expect.element(generic).toHaveTextContent('configuration.image')
+    await expect.element(deepseek).toHaveTextContent('chat.models.providerDeepseek')
+    await expect.element(deepseek).toHaveTextContent('256K')
+    await expect.element(deepseek).toHaveTextContent('configuration.text')
+    await expect.element(moonshot).toHaveTextContent('chat.models.providerMoonshot')
+    await expect.element(moonshot).toHaveTextContent('1000K')
+    await expect.element(moonshot).toHaveTextContent('configuration.image')
+    expect(menu.element().textContent).not.toContain('Reasoning work model')
+    await expect.element(deepseek).toHaveAttribute('aria-selected', 'true')
+    expect(deepseek.element().querySelector('.lucide-check')).not.toBeNull()
+
+    const writes = changed.mock.calls.length
+    await moonshot.click()
+    expect(changed).toHaveBeenCalledTimes(writes + 1)
+    expect(changed.mock.lastCall?.[0]).toMatchObject({
+      message: '',
+      modelId: 'model-moonshot',
+      attachments: initialDraft.attachments,
+      skills: initialDraft.skills,
+      permissionMode: initialDraft.permissionMode,
+      projectId: initialDraft.projectId,
+      queuedMessages: []
+    })
+    await expect.element(input).toHaveValue('')
+    await expect.element(footer).toHaveTextContent('Vision work model')
+    await expect.element(view.getByText('keep-model-context.txt')).toBeVisible()
+    await expect.element(menu).not.toBeInTheDocument()
+
+    await input.click()
+    await userEvent.keyboard('/模型{Enter}')
+    await expect
+      .element(menu.getByRole('option', { name: /kimi-latest-api/ }))
+      .toHaveAttribute('aria-selected', 'true')
+    await menu.getByRole('option', { name: /kimi-latest-api/ }).click()
+    await expect.element(input).toHaveValue('')
+    expect(changed.mock.lastCall?.[0]).toMatchObject({ modelId: 'model-moonshot', message: '' })
+    expect(execute).not.toHaveBeenCalled()
+    expect(submit).not.toHaveBeenCalled()
+    expect(stop).not.toHaveBeenCalled()
+  }
+)
+
+it.each([false, true])(
+  'returns from the model page to the same slash query without selecting or submitting (portal=%s)',
+  async (portalMenus) => {
+    modelState.enabledModels = MODEL_OPTIONS
+    const view = await render(<TestComposer portalMenus={portalMenus} />)
+    const input = view.getByRole('textbox', { name: 'chat.inputAria' })
+    await input.click()
+    await userEvent.keyboard('/model{Enter}')
+    const writes = changed.mock.calls.length
+    await view.getByRole('button', { name: 'capabilityCenter.back' }).click()
+    await expect.element(input).toHaveFocus()
+    await expect.element(input).toHaveValue('/model')
+    await expect.element(view.getByRole('option')).toHaveTextContent('模型')
+    await userEvent.keyboard('{Enter}')
+    await expect.element(view.getByRole('listbox', { name: 'chat.selectModel' })).toBeVisible()
+    await userEvent.keyboard('{Escape}')
+    await expect.element(input).toHaveFocus()
+    await expect.element(input).toHaveValue('/model')
+    await expect.element(view.getByRole('option')).toHaveTextContent('模型')
+    expect(changed).toHaveBeenCalledTimes(writes)
+    expect(submit).not.toHaveBeenCalled()
+    expect(stop).not.toHaveBeenCalled()
+  }
+)
+
+it.each([{ running: true }, { maintenance: true }, { transition: true }])(
+  'shares footer busy protection when state changes while the model page is open: %j',
+  async (busy) => {
+    modelState.enabledModels = MODEL_OPTIONS
+    const view = await render(<TestComposer portalMenus />)
+    const input = view.getByRole('textbox', { name: 'chat.inputAria' })
+    await input.click()
+    await userEvent.keyboard('/model{Enter}')
+    const menu = view.getByRole('listbox', { name: 'chat.selectModel' })
+    const option = menu.getByRole('option', { name: /deepseek-chat-api/ })
+    await expect.element(option).toBeEnabled()
+    await view.rerender(<TestComposer portalMenus {...busy} />)
+    await expect.element(menu).toBeVisible()
+    await expect.element(view.getByRole('button', { name: 'chat.selectModel' })).toBeDisabled()
+    await expect.element(option).toBeDisabled()
+    await expect.element(option).toHaveAttribute('aria-disabled', 'true')
+    const writes = changed.mock.calls.length
+    option.element().dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    option
+      .element()
+      .dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true })
+      )
+    view.container.querySelector('form')!.requestSubmit()
+    expect(changed).toHaveBeenCalledTimes(writes)
+    await expect.element(input).toHaveValue('/model')
+    expect(submit).not.toHaveBeenCalled()
+    expect(stop).not.toHaveBeenCalled()
+
+    await view.getByRole('button', { name: 'capabilityCenter.back' }).click()
+    await view.getByRole('option', { name: '模型 查看并切换模型' }).click()
+    await expect.element(option).toBeDisabled()
+    await view.rerender(<TestComposer portalMenus />)
+    await expect.element(option).toBeEnabled()
+    await option.click()
+    expect(changed.mock.lastCall?.[0]).toMatchObject({ modelId: 'model-deepseek', message: '' })
+  }
+)
+
+it('shows an empty model page and reflects the current enabled model list after configuration changes', async () => {
+  modelState.enabledModels = []
+  const view = await render(<TestComposer portalMenus />)
+  const input = view.getByRole('textbox', { name: 'chat.inputAria' })
+  await expect.element(view.getByRole('button', { name: 'chat.selectModel' })).toBeDisabled()
+  await input.click()
+  await userEvent.keyboard('/model{Enter}')
+  const menu = view.getByRole('listbox', { name: 'chat.selectModel' })
+  await expect.element(menu).toHaveTextContent('chat.noEnabledModels')
+  expect(menu.element().querySelector('[role="option"]')).toBeNull()
+
+  modelState.enabledModels = MODEL_OPTIONS
+  await view.rerender(<TestComposer portalMenus />)
+  await expect.element(menu.getByRole('option', { name: /deepseek-chat-api/ })).toBeVisible()
+  modelState.enabledModels = [
+    modelFixture({
+      id: 'model-replacement',
+      displayName: 'Replacement model',
+      providerModelId: 'replacement-api',
+      contextWindowTokens: 32_000,
+      supportsImage: false
+    })
+  ]
+  await view.rerender(<TestComposer portalMenus />)
+  await expect
+    .element(menu.getByRole('option', { name: /deepseek-chat-api/ }))
+    .not.toBeInTheDocument()
+  expect(menu.element().querySelectorAll('[role="option"]')).toHaveLength(1)
+  const replacement = menu.getByRole('option', { name: /replacement-api/ })
+  await expect.element(replacement).toHaveTextContent('32K')
+  await replacement.click()
+  expect(changed.mock.lastCall?.[0]).toMatchObject({
+    modelId: 'model-replacement',
+    message: ''
+  })
+  await view.getByRole('button', { name: 'chat.selectModel' }).click()
+  await expect.element(menu.getByRole('option')).toHaveTextContent('Replacement model')
+  expect(menu.element().querySelectorAll('[role="option"]')).toHaveLength(1)
+  expect(submit).not.toHaveBeenCalled()
+})
+
+it('does not select a model or leave its menu on IME confirmation and composition Escape', async () => {
+  modelState.enabledModels = MODEL_OPTIONS
+  const view = await render(<TestComposer portalMenus />)
+  const input = view.getByRole('textbox', { name: 'chat.inputAria' })
+  await input.click()
+  await userEvent.keyboard('/model')
+  const textarea = input.element()
+  textarea.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true }))
+  textarea.dispatchEvent(
+    new KeyboardEvent('keydown', { key: 'Enter', isComposing: true, keyCode: 229, bubbles: true })
+  )
+  await expect
+    .element(view.getByRole('listbox', { name: 'chat.selectModel' }))
+    .not.toBeInTheDocument()
+  textarea.dispatchEvent(new CompositionEvent('compositionend', { bubbles: true }))
+  await new Promise((resolve) => setTimeout(resolve, 130))
+  await userEvent.keyboard('{Enter}')
+  const menu = view.getByRole('listbox', { name: 'chat.selectModel' })
+  const option = menu.getByRole('option', { name: /deepseek-chat-api/ })
+  const writes = changed.mock.calls.length
+  for (const key of ['Enter', 'Escape']) {
+    option.element().dispatchEvent(
+      new KeyboardEvent('keydown', {
+        key,
+        isComposing: true,
+        keyCode: 229,
+        bubbles: true,
+        cancelable: true
+      })
+    )
+  }
+  await expect.element(menu).toBeVisible()
+  expect(changed).toHaveBeenCalledTimes(writes)
+  expect(submit).not.toHaveBeenCalled()
+  expect(stop).not.toHaveBeenCalled()
+})
+
+it('keeps long portalled model lists within their scroll area without moving the page', async () => {
+  modelState.enabledModels = Array.from({ length: 22 }, (_, index) =>
+    modelFixture({
+      id: `scroll-model-${index}`,
+      providerModelId: `scroll-api-${index}`,
+      displayName: `Scroll model ${index}`,
+      contextWindowTokens: 128_000
+    })
+  )
+  const view = await render(
+    <div style={{ height: 1300, paddingTop: 140 }}>
+      <TestComposer
+        portalMenus
+        initialDraft={createComposerDraft({ modelId: 'scroll-model-21' })}
+      />
+    </div>
+  )
+  try {
+    window.scrollTo(0, 80)
+    const input = view.getByRole('textbox', { name: 'chat.inputAria' })
+    await input.click()
+    const originalScroll = window.scrollY
+    await userEvent.keyboard('/model{Enter}')
+    const menu = view.getByRole('listbox', { name: 'chat.selectModel' })
+    await expect.element(menu).toBeVisible()
+    await expect.element(view.getByRole('button', { name: 'capabilityCenter.back' })).toBeVisible()
+    expect(menu.element().querySelector('input, textarea')).toBeNull()
+    expect(menu.element().scrollHeight).toBeGreaterThan(menu.element().clientHeight)
+    await expect.poll(() => menu.element().scrollTop).toBeGreaterThan(0)
+    expect(Math.abs(window.scrollY - originalScroll)).toBeLessThanOrEqual(1)
+    await userEvent.keyboard('{Home}')
+    await expect.poll(() => menu.element().scrollTop).toBeLessThanOrEqual(8)
+    await userEvent.keyboard('{End}')
+    await expect.poll(() => menu.element().scrollTop).toBeGreaterThan(0)
+    expect(Math.abs(window.scrollY - originalScroll)).toBeLessThanOrEqual(1)
+    const rect = menu.element().getBoundingClientRect()
+    expect(rect.top).toBeGreaterThanOrEqual(0)
+    expect(rect.bottom).toBeLessThanOrEqual(window.innerHeight)
+    expect(submit).not.toHaveBeenCalled()
+  } finally {
+    window.scrollTo(0, 0)
+  }
+})
+
+it('captures the compact model command page with readable API metadata', async () => {
+  const labels: Record<string, string> = {
+    'chat.commands.model': '模型',
+    'chat.selectModel': '选择模型',
+    'chat.models.providerGeneric': '通用兼容',
+    'chat.models.providerDeepseek': '深度求索',
+    'chat.models.providerMoonshot': '月之暗面',
+    'configuration.text': '文本',
+    'configuration.image': '图片',
+    'capabilityCenter.back': '返回命令列表'
+  }
+  translate.mockImplementation((key: string) => labels[key] ?? key)
+  modelState.enabledModels = MODEL_OPTIONS
+  const view = await render(<TestComposer portalMenus />)
+  await view.getByRole('textbox', { name: 'chat.inputAria' }).click()
+  await userEvent.keyboard('/model{Enter}')
+  const menu = view.getByRole('region', { name: '模型' })
+  await expect.element(menu).toBeVisible()
+  await document.fonts.ready
+  await new Promise<void>((resolve) => {
+    requestAnimationFrame(() => requestAnimationFrame(() => resolve()))
+  })
+  const panel = menu.element()
+  const toolbarModelButton = view.getByRole('button', { name: '选择模型' }).element()
+  expect(getComputedStyle(panel).fontSize).toBe(getComputedStyle(toolbarModelButton).fontSize)
+  expect(getComputedStyle(panel).fontFamily).not.toContain('Times')
+  expect(panel.scrollWidth).toBeLessThanOrEqual(panel.clientWidth)
+  const anchorWidth = view
+    .getByRole('textbox', { name: 'chat.inputAria' })
+    .element()
+    .getBoundingClientRect().width
+  expect(Math.abs(panel.getBoundingClientRect().width - anchorWidth)).toBeLessThanOrEqual(2)
+  await page.screenshot({
+    element: panel,
+    path: '.vitest-attachments/slash-model-menu.png'
+  })
+})
+
+it.each(WORKSPACE_COMMANDS)(
+  'dispatches $id through Chinese and English filtering and hovered Enter, preserves attachments, and permits repeated invocation',
+  async ({ id, label, query, description }) => {
+    const initialDraft = createComposerDraft({
+      modelId: 'model-1',
+      permissionMode: 'custom',
+      attachments: [
+        {
+          id: 'workspace-attachment',
+          kind: 'file',
+          name: 'keep-context.txt',
+          mimeType: 'text/plain',
+          sizeBytes: 4,
+          encoding: 'base64',
+          data: 'a2VlcA=='
+        }
+      ],
+      skills: [{ id: 'bundled:application:documents', revision: 'keep-revision' }]
+    })
+    const view = await render(
+      <TestComposer running showWorkspaceCommands initialDraft={initialDraft} />
+    )
+    const input = view.getByRole('textbox', { name: 'chat.inputAria' })
+    await input.click()
+    await userEvent.keyboard(`/${query}`)
+    await expect.element(view.getByRole('option')).toHaveTextContent(label)
+    await userEvent.keyboard('{Enter}')
+    expect(workspaceActions[id]).toHaveBeenCalledTimes(1)
+    await expect.element(input).toHaveValue('')
+
+    // Reopening an empty Composer starts another local command session.
+    await input.click()
+    await userEvent.keyboard(`/${id}`)
+    await expect.element(view.getByRole('option')).toHaveTextContent(label)
+    await userEvent.keyboard('{Enter}')
+    expect(workspaceActions[id]).toHaveBeenCalledTimes(2)
+    await expect.element(input).toHaveValue('')
+
+    await input.click()
+    await userEvent.keyboard('/')
+    const hovered = view.getByRole('option', { name: `${label} ${description}` })
+    await hovered.hover()
+    await expect.element(hovered).toHaveAttribute('aria-selected', 'true')
+    await userEvent.keyboard('{Enter}')
+    expect(workspaceActions[id]).toHaveBeenCalledTimes(3)
+    for (const command of WORKSPACE_COMMANDS) {
+      if (command.id !== id) expect(workspaceActions[command.id]).not.toHaveBeenCalled()
+    }
+    await expect.element(view.getByText('keep-context.txt')).toBeVisible()
+    expect(changed.mock.lastCall?.[0]).toMatchObject({
+      message: '',
+      attachments: initialDraft.attachments,
+      skills: initialDraft.skills,
+      modelId: initialDraft.modelId,
+      permissionMode: initialDraft.permissionMode,
+      queuedMessages: []
+    })
+    expect(execute).not.toHaveBeenCalled()
+    expect(submit).not.toHaveBeenCalled()
+    expect(stop).not.toHaveBeenCalled()
+  }
+)
+
+it.each(WORKSPACE_COMMANDS)(
+  'keeps checking /$id out of message and queue paths for keyboard and form submission',
+  async ({ id, label }) => {
+    const view = await render(<TestComposer running showWorkspaceCommands workspaceChecking />)
+    const input = view.getByRole('textbox', { name: 'chat.inputAria' })
+    await input.click()
+    await userEvent.keyboard(`/${id}`)
+    const row = view.getByRole('option', { name: `${label} 正在检查可用性` })
+    await expect.element(row).toHaveAttribute('aria-disabled', 'true')
+    await userEvent.keyboard('{Enter}')
+    view.container.querySelector('form')!.requestSubmit()
+    await userEvent.keyboard('{Escape}{Enter}')
+    for (const command of WORKSPACE_COMMANDS)
+      expect(workspaceActions[command.id]).not.toHaveBeenCalled()
+    expect(submit).not.toHaveBeenCalled()
+    expect(stop).not.toHaveBeenCalled()
+    expect(changed.mock.calls.every(([draft]) => draft.queuedMessages.length === 0)).toBe(true)
+    await expect.element(input).toHaveValue(`/${id}`)
+  }
+)
 
 it('opens only for a typed slash and executes a local command without a message', async () => {
   const view = await render(<TestComposer />)
@@ -173,7 +749,7 @@ it('allows navigation commands during maintenance and prevents duplicate executi
   )
   const view = await render(<TestComposer disabled maintenance />)
   await view.getByRole('textbox').click()
-  await userEvent.keyboard('/{ArrowDown}{Enter}{Enter}')
+  await userEvent.keyboard('/new{Enter}{Enter}')
   expect(execute).toHaveBeenCalledTimes(1)
   expect(submit).not.toHaveBeenCalled()
   resolve()
@@ -267,3 +843,125 @@ it.each([{ running: true }, { maintenance: true }])(
     await expect.element(view.getByRole('textbox')).toHaveValue('/fork')
   }
 )
+
+it.each([false, true])(
+  'drills into capabilities without changing Composer context and returns to the same query (portal=%s)',
+  async (portalMenus) => {
+    const initialDraft = createComposerDraft({
+      modelId: 'model-1',
+      permissionMode: 'custom',
+      attachments: [
+        {
+          id: 'attachment',
+          kind: 'file',
+          name: 'keep.txt',
+          mimeType: 'text/plain',
+          sizeBytes: 4,
+          encoding: 'base64',
+          data: 'a2VlcA=='
+        }
+      ],
+      skills: [{ id: 'bundled:application:documents', revision: 'keep-revision' }],
+      queuedMessages: [
+        {
+          id: 'queued',
+          clientMessageId: 'queued-client',
+          content: 'Keep queued content',
+          attachments: [],
+          skills: [],
+          modelId: 'model-1',
+          permissionMode: 'custom',
+          projectId: null,
+          status: 'pending',
+          createdAt: 1
+        }
+      ]
+    })
+    const view = await render(
+      <TestComposer running portalMenus={portalMenus} initialDraft={initialDraft} />
+    )
+    const input = view.getByRole('textbox', { name: 'chat.inputAria' })
+    await input.click()
+    await userEvent.keyboard('/能力')
+    await expect.element(view.getByRole('option')).toHaveTextContent('能力中心')
+    const writes = changed.mock.calls.length
+    await userEvent.keyboard('{Enter}')
+    const search = view.getByRole('textbox', { name: 'Search capabilities' })
+    await expect.element(search).not.toHaveFocus()
+    await expect.element(view.getByRole('region', { name: 'capability menu' })).toHaveFocus()
+    await search.click()
+    await expect.element(search).toHaveFocus()
+    await search.fill('搜索')
+    await userEvent.keyboard('{Enter}')
+    await view.getByRole('switch', { name: 'Search capability' }).click()
+    await expect.element(view.getByRole('switch')).toHaveAttribute('aria-checked', 'true')
+    view.container.querySelector('form')!.requestSubmit()
+    expect(changed).toHaveBeenCalledTimes(writes)
+    expect(changed.mock.lastCall?.[0]).toMatchObject({
+      message: '/能力',
+      attachments: initialDraft.attachments,
+      skills: initialDraft.skills,
+      queuedMessages: initialDraft.queuedMessages,
+      permissionMode: initialDraft.permissionMode,
+      modelId: initialDraft.modelId
+    })
+    await userEvent.keyboard('{Escape}')
+    await expect.element(input).toHaveFocus()
+    await expect.element(input).toHaveValue('/能力')
+    await expect.element(view.getByRole('option')).toHaveTextContent('能力中心')
+    await userEvent.keyboard('{Enter}')
+    await expect.element(search).toBeVisible()
+    await view.getByRole('button', { name: 'Back to commands' }).click()
+    await expect.element(input).toHaveFocus()
+    expect(execute).not.toHaveBeenCalled()
+    expect(submit).not.toHaveBeenCalled()
+    expect(stop).not.toHaveBeenCalled()
+  }
+)
+
+it('keeps a portalled capability menu alive through an error dialog and resumes its focus', async () => {
+  const view = await render(<TestComposer portalMenus running />)
+  const input = view.getByRole('textbox', { name: 'chat.inputAria' })
+  await input.click()
+  await userEvent.keyboard('/capabilities{Enter}')
+  await view.getByRole('button', { name: 'Show configuration error' }).click()
+  await expect.element(view.getByRole('dialog', { name: 'Capability error' })).toBeVisible()
+  await view.getByRole('button', { name: 'Dismiss error' }).click()
+  await expect.element(view.getByRole('region', { name: 'capability menu' })).toBeVisible()
+  await view.getByRole('button', { name: 'Show configuration error' }).click()
+  await userEvent.keyboard('{Escape}')
+  await expect
+    .element(view.getByRole('dialog', { name: 'Capability error' }))
+    .not.toBeInTheDocument()
+  await expect.element(view.getByRole('region', { name: 'capability menu' })).toBeVisible()
+  await userEvent.keyboard('{Escape}')
+  await expect.element(input).toHaveFocus()
+  await expect.element(view.getByRole('option')).toHaveTextContent('能力中心')
+  expect(execute).not.toHaveBeenCalled()
+  expect(submit).not.toHaveBeenCalled()
+  expect(stop).not.toHaveBeenCalled()
+})
+
+it('does not treat capability-search IME confirmation or cancellation as a command or run control', async () => {
+  const view = await render(<TestComposer portalMenus running />)
+  await view.getByRole('textbox', { name: 'chat.inputAria' }).click()
+  await userEvent.keyboard('/capabilities{Enter}')
+  await view.getByRole('textbox', { name: 'Search capabilities' }).click()
+  const search = document.querySelector<HTMLInputElement>(
+    'input[aria-label="Search capabilities"]'
+  )!
+  for (const key of ['Enter', 'Escape']) {
+    search.dispatchEvent(
+      new KeyboardEvent('keydown', {
+        key,
+        isComposing: true,
+        keyCode: 229,
+        bubbles: true,
+        cancelable: true
+      })
+    )
+  }
+  await expect.element(view.getByRole('region', { name: 'capability menu' })).toBeVisible()
+  expect(submit).not.toHaveBeenCalled()
+  expect(stop).not.toHaveBeenCalled()
+})

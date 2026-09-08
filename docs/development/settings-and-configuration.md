@@ -2,7 +2,7 @@
 status: current
 audience: developers
 owner: engineering
-last_verified: 2026-09-03
+last_verified: 2026-09-08
 ---
 
 # 设置与配置
@@ -54,9 +54,36 @@ App startup gate 分别等待项目、模型设置及其他权威状态加载。
 - Agent 模板名称与 machine key 在工作区级模板库内唯一；启用状态和内容使用 revision/CAS，项目 assignment 独立且每个项目最多 32 个模板。未分配、已停用或模型不可用的模板不能用于 spawn。
 - Browser 的链接打开目标使用 `system | builtin`；下载目录与“每次询问”只影响用户手动下载，Agent 下载不会停在原生保存对话框中。Renderer 只接收安全 display path，不取得 Host 保存的真实 custom directory authority。
 
+### 模型快捷选择
+
+Composer 的 `/` 菜单首项为 `model`，与 `capabilities` 一样是二级导航命令，不包含普通命令的 `execute` 回调。进入模型面板只改变菜单视图，不提交消息。面板不提供筛选输入，返回按钮和 Escape 恢复原命令列表。
+
+模型列表复用 `ModelSettingsProvider.enabledModels`，与 Composer 右下角模型入口使用同一份配置。展示内容从模型配置投影出实际模型 ID、厂商、上下文容量和输入模态；`contextWindowTokens` 缺失时使用既有运行默认值 `DEFAULT_MODEL_CONTEXT_WINDOW_TOKENS = 128_000`，显示为 128K，非法容量显示“上下文未知”，不根据模型名称猜测。两个入口使用同一模型选择处理函数，保持现有运行占用、Provider 切换确认和压缩流程，不能从快捷入口直接写入另一份模型状态或绕过切换保护。
+
 ### 人机交互设置
 
-“允许智能体向人类发起提问与协作”默认开启，由 Host 独立保存 enabled/revision，使用 `host.humanInteraction` 读取、CAS 更新和接收变更通知。它不属于 Prompt Preferences，个性化整页保存不能覆盖此项。关闭只阻止新提问，已有问题仍能回答或忽略。第 1 轮完成存储和接口；个性化中的“人机交互”开关页面在第 4 轮接入，当前未完成执行链路的工具不会对模型暴露。完整设计见[向用户提问](../subsystems/human-interaction.md)。
+“允许智能体向人类发起提问与协作”默认开启，由 Host 独立保存 enabled/revision，使用 `host.humanInteraction` 读取、CAS 更新和接收变更通知。它不属于 Prompt Preferences，个性化整页保存不能覆盖此项。关闭只阻止新提问，已有问题仍能回答或忽略。完整设计见[向用户提问](../subsystems/human-interaction.md)。
+
+### 能力中心
+
+Composer 的 `/` 菜单提供“能力中心”二级面板。软件能力区固定包含图片生成、联网搜索、人机交互、多智能体、浏览器自动化；MCP 区按外部服务器稳定 ID 列出开关。该入口不管理 Skill，不建立第二份 capability settings 或新的授权来源。
+
+| 菜单项       | 既有权威与写入路径                                                               | 生命周期保持不变                            |
+| ------------ | -------------------------------------------------------------------------------- | ------------------------------------------- |
+| 图片生成     | ImageGeneration configuration 的 enabled/revision；与图片 Skill 开关共用 profile | 原有发现、加载与执行校验                    |
+| 联网搜索     | ModelSettings 的 searchMode/configurationRevision；凭据始终 keep                 | 原有请求与执行时校验                        |
+| 人机交互     | 独立 HumanInteraction settings revision/CAS                                      | 请求快照及新批次接纳时校验；已有问题可结算  |
+| 多智能体     | AgentCollaboration settings revision/CAS                                         | 保持既有 Run/任务继承的冻结策略             |
+| 浏览器自动化 | 内置 MCP capability policyRevision                                               | 保持原有禁用撤销与停止行为                  |
+| 外部 MCP     | MCP server registry/config epoch 前置条件                                        | 保持启动授权、enable/disable 与连接生命周期 |
+
+菜单逐行防重复提交，等待权威结果再更新状态；不显示“正在保存”文字，不改变行高。配置不足、授权缺失和保存失败复用 `ConfirmationDialog`，底部只显示“知道了”。菜单不代办 launch authorization，不把“用户希望开启”显示成“后端已开启”；不确定结果需重新查询，不盲目重试或回滚。
+
+Host 新增零 payload 的 `storage.onModelSettingsChanged`、`imageGeneration.onChanged`、`mcp.onBuiltinCapabilitiesChanged` 失效通知。它们覆盖对应写入及不确定失败，图片 Skill 别名也触发图片配置失效；Core Server 启动/重连触发重新查询。外部 MCP、人机交互和多智能体继续使用原有领域事件。通知不携带凭据，也不冒充已保存结果。Renderer 查询有序列/写入围栏，旧响应不能覆盖后来的权威状态；窗口焦点恢复时补查。
+
+联网快捷开关通过 `ModelSettingsProvider.saveSearchMode` 串行保存，在真正执行写入时基于上一份权威配置构造 searchMode 单项变化并保留其他字段。排队的模型/URL 保存也保留最新 searchMode；只有显式清除 Tavily 凭据时会同时关闭搜索。通知刷新等待保存队列，避免覆盖正在提交的设置。图片设置后台刷新保留未保存的配置和凭据草稿，以及对应的旧 CAS 基线；若其他窗口修改了配置，后续保存仍由后端冲突检查裁决。冲突或结果不确定时，重新读取权威状态，保留已编辑字段和凭据意图、刷新未编辑字段，不自动重试；用户核对后再次保存才使用新的 revision。
+
+本次不修改 Harness 能力生命周期、检查点或 canonical schema，无需重置开发聊天数据。
 
 ### 系统通知设置
 

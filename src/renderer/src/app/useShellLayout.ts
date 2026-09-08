@@ -41,7 +41,9 @@ export function useShellLayout() {
     maximum: bottomLayout.maximum,
     minimum: BOTTOM_PANEL_MIN_HEIGHT
   }
+  const canOpenBottomPanel = bottomLayout.maximum >= BOTTOM_PANEL_MIN_HEIGHT
   const closeBottomPanel = useCallback(() => setBottomRequestedOpen(false), [])
+  const openBottomPanel = useCallback(() => setBottomRequestedOpen(true), [])
   const toggleBottomPanel = useCallback(
     () => setBottomRequestedOpen(!bottomLayout.open),
     [bottomLayout.open]
@@ -170,12 +172,14 @@ export function useShellLayout() {
     bottomHeight: bottomLayout.height,
     bottomOpen: bottomLayout.open,
     bottomResizeMetrics,
+    canOpenBottomPanel,
     closeBottomPanel,
     commitBottomPanelResize,
     commitSidebarResize,
     leftResizeMetrics,
     leftOpen: layout.leftOpen,
     leftWidth: layout.leftWidth,
+    openBottomPanel,
     openRightSidebar,
     rightMaximized,
     rightOpen: layout.rightOpen,

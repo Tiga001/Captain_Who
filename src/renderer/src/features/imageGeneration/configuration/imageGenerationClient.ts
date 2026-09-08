@@ -12,6 +12,10 @@ import {
 } from '@mycopilot/protocol'
 import { hostClient } from '../../../host/hostClient'
 
+export function onImageGenerationConfigurationChanged(handler: () => void): () => void {
+  return hostClient.imageGeneration.onChanged(handler)
+}
+
 export async function getImageGenerationConfiguration(): Promise<ImageGenerationGetConfigurationOutput> {
   const result = await hostClient.imageGeneration.getConfiguration()
   if (!result.ok) throw new HostInvocationError(result.error)

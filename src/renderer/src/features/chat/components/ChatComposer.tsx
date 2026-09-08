@@ -1,4 +1,14 @@
-import { useCallback, useEffect, useId, useMemo, useRef, useState, type KeyboardEvent } from 'react'
+import {
+  lazy,
+  Suspense,
+  useCallback,
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent
+} from 'react'
 import type { AgentContextWindowSnapshot, SkillDescriptor } from '@mycopilot/protocol'
 import {
   ArrowUp,
@@ -54,7 +64,8 @@ import { ComposerSelectedSkills, ComposerSkillPicker } from './ComposerSkillPick
 import { GuidanceQueue } from './GuidanceQueue'
 import { useImagePreview } from './ImagePreview'
 import { ModelConfigPicker } from '../../modelSelection/ModelConfigPicker'
-import { formatModelConfigLabel } from '../../modelSelection/modelConfigPresentation'
+import { createComposerModelMenuOption } from '../../modelSelection/composerModelPresentation'
+import { ComposerModelMenu } from './ComposerModelMenu'
 import {
   CHAT_PERMISSION_PRESENTATIONS,
   getChatPermissionPresentation
@@ -64,6 +75,9 @@ import './ChatComposer.css'
 import './GuidanceQueue.css'
 
 const TEXTAREA_MAX_HEIGHT = 220
+const CapabilityCenterMenu = lazy(async () => ({
+  default: (await import('../../capabilities/CapabilityCenterMenu')).CapabilityCenterMenu
+}))
 
 interface ChatComposerProps {
   /** Another interaction occupies the input area; preserve drafts but close transient menus. */
@@ -133,6 +147,9 @@ export function ChatComposer({
   const openImagePreview = useImagePreview()
   const commandListId = useId()
   const [isCommandMenuOpen, setIsCommandMenuOpen] = useState(false)
+  const [isCapabilityCenterOpen, setIsCapabilityCenterOpen] = useState(false)
+  const [isModelMenuOpen, setIsModelMenuOpen] = useState(false)
+  const [isCapabilityDialogOpen, setIsCapabilityDialogOpen] = useState(false)
   const [isCommandSession, setIsCommandSession] = useState(false)
   const [commandIndex, setCommandIndex] = useState(0)
   const commandTriggerRef = useRef(false)
@@ -163,6 +180,7 @@ export function ChatComposer({
   const [projectSearch, setProjectSearch] = useState('')
   const [skillSearch, setSkillSearch] = useState('')
   const [message, setMessage] = useState(draft.message)
+  const isCommandSubmenuOpen = isCapabilityCenterOpen || isModelMenuOpen
   const filteredCommands = isCommandSession ? filterComposerCommands(commands, message) : []
   const selectedCommandIndex = Math.min(commandIndex, Math.max(0, filteredCommands.length - 1))
   const selectedCommand = filteredCommands[selectedCommandIndex]
@@ -197,6 +215,12 @@ export function ChatComposer({
   const selectedModel = useMemo(() => {
     return enabledModels.find((model) => model.id === selectedModelId) ?? enabledModels[0]
   }, [enabledModels, selectedModelId])
+  const modelOptions = useMemo(
+    () => enabledModels.map((model) => createComposerModelMenuOption(model, t)),
+    [enabledModels, t]
+  )
+  const isModelSelectionDisabled =
+    isGenerating || isModelTransitionRunning || isManualCompactionRunning
   const selectedProject = projects.find((project) => project.id === selectedProjectId)
   const skillCatalogEnabled = isSkillMenuOpen || draft.skills.length > 0
   const skillCatalogRefreshKey = `${skillCatalogRefreshToken}\u0002${
@@ -244,19 +268,21 @@ export function ChatComposer({
     !isModelTransitionRunning &&
     !isManualCompactionRunning &&
     Boolean(selectedModel)
-  const submitButtonState = hasCommandSelection
-    ? selectedCommand?.disabledReason
-      ? 'disabled'
-      : 'ready'
-    : isModelTransitionRunning || isManualCompactionRunning
-      ? 'disabled'
-      : isGenerating
-        ? canSend
-          ? 'ready'
-          : 'stop'
-        : canSend
-          ? 'ready'
-          : 'disabled'
+  const submitButtonState = isCommandSubmenuOpen
+    ? 'disabled'
+    : hasCommandSelection
+      ? selectedCommand?.disabledReason
+        ? 'disabled'
+        : 'ready'
+      : isModelTransitionRunning || isManualCompactionRunning
+        ? 'disabled'
+        : isGenerating
+          ? canSend
+            ? 'ready'
+            : 'stop'
+          : canSend
+            ? 'ready'
+            : 'disabled'
   const isConfirmingImeInput = (event: KeyboardEvent<HTMLTextAreaElement>) => {
     const nativeEvent = event.nativeEvent
     const keyCode = 'keyCode' in nativeEvent ? nativeEvent.keyCode : 0
@@ -270,11 +296,18 @@ export function ChatComposer({
 
   useDismissOnOutsidePointer(
     commandMenuRef,
-    isCommandMenuOpen,
+    isCommandMenuOpen && !isCapabilityDialogOpen,
     () => setIsCommandMenuOpen(false),
     (target) =>
       Boolean(textareaRef.current?.contains(target) || commandPopoverRef.current?.contains(target))
   )
+  useEffect(() => {
+    if (!isCommandMenuOpen) {
+      setIsCapabilityCenterOpen(false)
+      setIsModelMenuOpen(false)
+      setIsCapabilityDialogOpen(false)
+    }
+  }, [isCommandMenuOpen])
   useEffect(() => {
     if (isAttachmentMenuOpen || isSkillMenuOpen || isPermissionMenuOpen || isProjectMenuOpen)
       setIsCommandMenuOpen(false)
@@ -413,6 +446,22 @@ export function ChatComposer({
     [message, onDraftChange]
   )
 
+  // Both model menus use this selection path. Only the slash menu also consumes its local query.
+  const selectModelConfig = (modelId: string) => {
+    if (isModelSelectionDisabled || !enabledModels.some((model) => model.id === modelId)) return
+    setIsAttachmentMenuOpen(false)
+    setIsSkillMenuOpen(false)
+    setIsPermissionMenuOpen(false)
+    if (isModelMenuOpen) {
+      setIsCommandMenuOpen(false)
+      setIsCommandSession(false)
+      updateDraft({ modelId, message: '' })
+      textareaRef.current?.focus({ preventScroll: true })
+    } else if (modelId !== selectedModel?.id) {
+      updateDraft({ modelId })
+    }
+  }
+
   useEffect(() => {
     if (draft.permissionMode !== permissionMode) {
       updateDraft({ permissionMode })
@@ -485,6 +534,18 @@ export function ChatComposer({
 
   const executeCommand = async (command: ComposerCommand) => {
     if (command.disabledReason || commandExecutingRef.current) return
+    if (command.id === 'capabilities') {
+      setIsModelMenuOpen(false)
+      setIsCapabilityCenterOpen(true)
+      setIsCommandMenuOpen(true)
+      return
+    }
+    if (command.id === 'model') {
+      setIsCapabilityCenterOpen(false)
+      setIsModelMenuOpen(true)
+      setIsCommandMenuOpen(true)
+      return
+    }
     commandExecutingRef.current = true
     setIsCommandMenuOpen(false)
     setIsCommandSession(false)
@@ -502,7 +563,8 @@ export function ChatComposer({
     if (
       isComposingRef.current ||
       Date.now() - lastCompositionEndAtRef.current < 120 ||
-      commandExecutingRef.current
+      commandExecutingRef.current ||
+      isCommandSubmenuOpen
     )
       return
     if (hasCommandSelection && selectedCommand) {
@@ -574,6 +636,12 @@ export function ChatComposer({
     setIsSkillMenuOpen(false)
     setIsPermissionMenuOpen(false)
     setIsProjectMenuOpen(false)
+  }
+
+  const returnToCommands = () => {
+    setIsCapabilityCenterOpen(false)
+    setIsModelMenuOpen(false)
+    textareaRef.current?.focus({ preventScroll: true })
   }
 
   const removeAttachment = (attachmentId: string) => {
@@ -695,27 +763,65 @@ export function ChatComposer({
 
   return (
     <div className="chat-composer-shell">
-      <div ref={commandMenuRef}>
+      <div
+        ref={commandMenuRef}
+        onKeyDown={(event) => {
+          if (
+            !isCommandSubmenuOpen ||
+            isCapabilityDialogOpen ||
+            event.defaultPrevented ||
+            event.key !== 'Escape'
+          )
+            return
+          if (event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229) {
+            event.stopPropagation()
+            return
+          }
+          event.preventDefault()
+          event.stopPropagation()
+          returnToCommands()
+        }}
+      >
         {isCommandMenuOpen && (
           <AnchoredPopover
             anchorRef={textareaRef}
             enabled={portalMenus}
             matchAnchorWidth
-            onClose={() => setIsCommandMenuOpen(false)}
+            onClose={() => {
+              if (!isCapabilityDialogOpen) setIsCommandMenuOpen(false)
+            }}
             popoverRef={commandPopoverRef}
           >
-            <ComposerCommands
-              commands={filteredCommands}
-              query={message.slice(1)}
-              selectedIndex={selectedCommandIndex}
-              onSelect={setCommandIndex}
-              onExecute={(command) => {
-                void executeCommand(command)
-              }}
-              emptyLabel={t('chat.commands.noMatch')}
-              listId={commandListId}
-              scrollContainerRef={portalMenus ? commandPopoverRef : undefined}
-            />
+            {isModelMenuOpen ? (
+              <ComposerModelMenu
+                disabled={isModelSelectionDisabled}
+                options={modelOptions}
+                value={selectedModel?.id ?? null}
+                onChange={selectModelConfig}
+                onBack={returnToCommands}
+                scrollContainerRef={portalMenus ? commandPopoverRef : undefined}
+              />
+            ) : isCapabilityCenterOpen ? (
+              <Suspense fallback={null}>
+                <CapabilityCenterMenu
+                  onBack={returnToCommands}
+                  onDialogOpenChange={setIsCapabilityDialogOpen}
+                />
+              </Suspense>
+            ) : (
+              <ComposerCommands
+                commands={filteredCommands}
+                query={message.slice(1)}
+                selectedIndex={selectedCommandIndex}
+                onSelect={setCommandIndex}
+                onExecute={(command) => {
+                  void executeCommand(command)
+                }}
+                emptyLabel={t('chat.commands.noMatch')}
+                listId={commandListId}
+                scrollContainerRef={portalMenus ? commandPopoverRef : undefined}
+              />
+            )}
           </AnchoredPopover>
         )}
       </div>
@@ -844,14 +950,16 @@ export function ChatComposer({
           aria-label={t('chat.inputAria')}
           disabled={isModelTransitionRunning}
           rows={1}
-          aria-controls={isCommandMenuOpen ? commandListId : undefined}
+          aria-controls={isCommandMenuOpen && !isCommandSubmenuOpen ? commandListId : undefined}
           aria-activedescendant={
-            isCommandMenuOpen && selectedCommand
+            isCommandMenuOpen && !isCommandSubmenuOpen && selectedCommand
               ? `${commandListId}-${selectedCommandIndex}`
               : undefined
           }
           aria-autocomplete="list"
           onChange={(event) => {
+            setIsCapabilityCenterOpen(false)
+            setIsModelMenuOpen(false)
             const nextMessage = event.target.value
             const native = event.nativeEvent as InputEvent
             const typedSlash =
@@ -896,10 +1004,19 @@ export function ChatComposer({
               !event.altKey
             if (isCommandMenuOpen && event.key === 'Escape') {
               event.preventDefault()
-              setIsCommandMenuOpen(false)
+              if (isCommandSubmenuOpen) returnToCommands()
+              else setIsCommandMenuOpen(false)
               return
             }
-            if (isCommandMenuOpen && (event.key === 'ArrowDown' || event.key === 'ArrowUp')) {
+            if (isCommandSubmenuOpen && event.key === 'Enter') {
+              event.preventDefault()
+              return
+            }
+            if (
+              isCommandMenuOpen &&
+              !isCommandSubmenuOpen &&
+              (event.key === 'ArrowDown' || event.key === 'ArrowUp')
+            ) {
               event.preventDefault()
               const count = filteredCommands.length
               if (count > 0)
@@ -1093,23 +1210,11 @@ export function ChatComposer({
 
           <ModelConfigPicker
             ariaLabel={t('chat.selectModel')}
-            disabled={isGenerating || isModelTransitionRunning || isManualCompactionRunning}
+            disabled={isModelSelectionDisabled}
             emptyLabel={t('chat.noEnabledModels')}
             portalMenu={portalMenus}
-            onChange={(modelId) => {
-              setIsAttachmentMenuOpen(false)
-              setIsSkillMenuOpen(false)
-              setIsPermissionMenuOpen(false)
-              if (modelId !== selectedModel?.id) updateDraft({ modelId })
-            }}
-            options={enabledModels.map((model) => ({
-              capabilityLabel: model.supportsImage
-                ? t('configuration.image')
-                : t('configuration.text'),
-              capabilitySupported: model.supportsImage,
-              id: model.id,
-              label: formatModelConfigLabel(model)
-            }))}
+            onChange={selectModelConfig}
+            options={modelOptions}
             value={selectedModel?.id ?? null}
             variant="composer"
           />

@@ -138,7 +138,10 @@ function Workspace({
         <div className="main-panel__surface">
           <NewConversationPage
             commands={(
-              ['new', 'compact', 'fork', 'usage', 'pin', 'rename', 'archive'] as ComposerCommandId[]
+              ['new', 'compact', 'fork', 'usage', 'pin', 'rename', 'archive'] as Exclude<
+                ComposerCommandId,
+                'capabilities'
+              >[]
             ).map((id) => ({
               id,
               label: id === 'new' ? 'New task' : id,

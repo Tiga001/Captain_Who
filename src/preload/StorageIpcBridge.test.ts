@@ -36,7 +36,10 @@ describe('Storage IPC bridge', () => {
       .fn()
       .mockResolvedValueOnce(descriptors)
       .mockResolvedValueOnce({ ok: true, value: authoritativeSettings })
-    const bridge = createStorageIpcBridge({ invoke } as unknown as Pick<IpcRenderer, 'invoke'>)
+    const bridge = createStorageIpcBridge({ invoke } as unknown as Pick<
+      IpcRenderer,
+      'invoke' | 'on' | 'removeListener'
+    >)
 
     await expect(bridge.loadProviderProfileUiDescriptors()).resolves.toEqual(descriptors)
     await expect(bridge.saveModelSettings(update)).resolves.toEqual({
@@ -71,7 +74,10 @@ describe('Storage IPC bridge', () => {
       dialect: 'openai_chat_completions'
     } as const
     const invoke = vi.fn().mockResolvedValueOnce(descriptors).mockResolvedValueOnce(policy)
-    const bridge = createStorageIpcBridge({ invoke } as unknown as Pick<IpcRenderer, 'invoke'>)
+    const bridge = createStorageIpcBridge({ invoke } as unknown as Pick<
+      IpcRenderer,
+      'invoke' | 'on' | 'removeListener'
+    >)
 
     await expect(bridge.loadProviderVendorDescriptors()).resolves.toEqual(descriptors)
     await expect(bridge.resolveProviderVendorModelPolicy(input)).resolves.toEqual(policy)
@@ -111,7 +117,10 @@ describe('Storage IPC bridge', () => {
         reason: 'unsupported_model',
         credential_ref: 'private-reference'
       })
-    const bridge = createStorageIpcBridge({ invoke } as unknown as Pick<IpcRenderer, 'invoke'>)
+    const bridge = createStorageIpcBridge({ invoke } as unknown as Pick<
+      IpcRenderer,
+      'invoke' | 'on' | 'removeListener'
+    >)
 
     await expect(bridge.loadProviderProfileUiDescriptors()).rejects.toThrow(
       /credential field credentialRef/
@@ -137,7 +146,10 @@ describe('Storage IPC bridge', () => {
       tavilyApiKeyStatus: 'missing',
       models: []
     })
-    const bridge = createStorageIpcBridge({ invoke } as unknown as Pick<IpcRenderer, 'invoke'>)
+    const bridge = createStorageIpcBridge({ invoke } as unknown as Pick<
+      IpcRenderer,
+      'invoke' | 'on' | 'removeListener'
+    >)
 
     await expect(bridge.loadModelSettings()).rejects.toThrow(/credential field apiToken/)
     await expect(
@@ -165,7 +177,10 @@ describe('Storage IPC bridge', () => {
         models: []
       }
     })
-    const bridge = createStorageIpcBridge({ invoke } as unknown as Pick<IpcRenderer, 'invoke'>)
+    const bridge = createStorageIpcBridge({ invoke } as unknown as Pick<
+      IpcRenderer,
+      'invoke' | 'on' | 'removeListener'
+    >)
 
     await expect(
       bridge.saveModelSettings({
@@ -194,7 +209,10 @@ describe('Storage IPC bridge', () => {
       }
     } satisfies HostInvocationResult<StorageChatConversationRecord>
     const invoke = vi.fn().mockResolvedValue(response)
-    const bridge = createStorageIpcBridge({ invoke } as unknown as Pick<IpcRenderer, 'invoke'>)
+    const bridge = createStorageIpcBridge({ invoke } as unknown as Pick<
+      IpcRenderer,
+      'invoke' | 'on' | 'removeListener'
+    >)
     const input = {
       requestId: 'conversation-fork-request-1',
       sourceConversationId: 'conversation-1',
@@ -207,7 +225,10 @@ describe('Storage IPC bridge', () => {
 
   it('routes lightweight Composer text autosaves without the full draft payload', async () => {
     const invoke = vi.fn().mockResolvedValue(true)
-    const bridge = createStorageIpcBridge({ invoke } as unknown as Pick<IpcRenderer, 'invoke'>)
+    const bridge = createStorageIpcBridge({ invoke } as unknown as Pick<
+      IpcRenderer,
+      'invoke' | 'on' | 'removeListener'
+    >)
     const input = { scopeId: 'conversation-1', message: 'latest text', updatedAt: 42 }
 
     await expect(bridge.saveComposerDraftMessage(input)).resolves.toBe(true)
@@ -233,7 +254,10 @@ describe('human answer proof at the isolated storage bridge', () => {
   it('preserves verified output and rejects a malformed or foreign display receipt', async () => {
     const value = { id: 'chat', title: 'chat', createdAt: 1, updatedAt: 1, messages: [message] }
     const invoke = vi.fn().mockResolvedValue(value)
-    const bridge = createStorageIpcBridge({ invoke } as unknown as Pick<IpcRenderer, 'invoke'>)
+    const bridge = createStorageIpcBridge({ invoke } as unknown as Pick<
+      IpcRenderer,
+      'invoke' | 'on' | 'removeListener'
+    >)
     await expect(bridge.loadConversation('chat')).resolves.toEqual(value)
     invoke.mockResolvedValue({
       ...value,
@@ -243,7 +267,10 @@ describe('human answer proof at the isolated storage bridge', () => {
   })
   it('refuses caller-made proof on write before entering IPC', () => {
     const invoke = vi.fn()
-    const bridge = createStorageIpcBridge({ invoke } as unknown as Pick<IpcRenderer, 'invoke'>)
+    const bridge = createStorageIpcBridge({ invoke } as unknown as Pick<
+      IpcRenderer,
+      'invoke' | 'on' | 'removeListener'
+    >)
     for (const key of ['humanInteractionResponse', 'humanInteractionDisplay']) {
       const message = { id: 'message', content: '{}', role: 'user', createdAt: 1, [key]: response }
       expect(() =>

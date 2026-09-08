@@ -10,7 +10,12 @@ const service = vi.hoisted(() => ({
   loadProviderVendorDescriptors: vi.fn(),
   resolveProviderVendorModelPolicy: vi.fn(),
   saveModelSettings: vi.fn(),
+  onModelSettingsChanged: vi.fn(),
   showToast: vi.fn()
+}))
+
+vi.mock('../../host/hostClient', () => ({
+  hostClient: { storage: { onModelSettingsChanged: service.onModelSettingsChanged } }
 }))
 
 vi.mock('../../features/storage/storageClient', () => ({
@@ -218,6 +223,7 @@ function ModelOverrideCredentialProbe() {
 }
 
 beforeEach(() => {
+  service.onModelSettingsChanged.mockReset().mockReturnValue(() => {})
   service.loadModelSettings.mockReset()
   service.loadProviderProfileUiDescriptors.mockReset().mockResolvedValue([])
   service.loadProviderVendorDescriptors.mockReset().mockResolvedValue([
@@ -242,6 +248,162 @@ beforeEach(() => {
     configurationRevision: 'model-settings-v1:00000000-0000-4000-8000-000000000002'
   }))
   service.showToast.mockReset()
+})
+
+function CapabilitySearchProbe() {
+  const { apiUrl, searchMode, saveSearchMode, setApiUrl } = useModelSettings()
+  const [result, setResult] = useState('')
+  return (
+    <div>
+      <span data-testid="capability-search-mode">{searchMode}</span>
+      <span data-testid="capability-api-url">{apiUrl}</span>
+      <span data-testid="capability-save-result">{result}</span>
+      <button
+        onClick={() => {
+          void saveSearchMode('disabled').then(
+            () => setResult('saved'),
+            () => setResult('failed')
+          )
+        }}
+      >
+        disable search
+      </button>
+      <button
+        onClick={() => {
+          void setApiUrl('https://changed.example/v1').catch(() => {})
+          void saveSearchMode('disabled').catch(() => {})
+        }}
+      >
+        queue configuration and search
+      </button>
+      <button
+        onClick={() => {
+          void saveSearchMode('disabled').catch(() => {})
+          void setApiUrl('https://changed-after-search.example/v1').catch(() => {})
+        }}
+      >
+        queue search and configuration
+      </button>
+    </div>
+  )
+}
+
+describe('capability search settings', () => {
+  it('does not overwrite a pending search toggle with a later configuration draft', async () => {
+    service.loadModelSettings.mockResolvedValue(storedSettings)
+    let finishFirst!: (value: ModelSettingsSnapshot) => void
+    service.saveModelSettings
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            finishFirst = resolve
+          })
+      )
+      .mockImplementation(async (draft) => ({
+        ...storedSettings,
+        ...draft,
+        configurationRevision: 'revision-3'
+      }))
+    const screen = await render(
+      <ModelSettingsProvider>
+        <CapabilitySearchProbe />
+      </ModelSettingsProvider>
+    )
+    await expect
+      .element(screen.getByTestId('capability-api-url'))
+      .toHaveTextContent(storedSettings.apiUrl)
+    await screen.getByRole('button', { name: 'queue search and configuration' }).click()
+    await expect.poll(() => service.saveModelSettings.mock.calls.length).toBe(1)
+    finishFirst({ ...storedSettings, searchMode: 'disabled', configurationRevision: 'revision-2' })
+    await expect.poll(() => service.saveModelSettings.mock.calls.length).toBe(2)
+    expect(service.saveModelSettings).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        apiUrl: 'https://changed-after-search.example/v1',
+        searchMode: 'disabled'
+      }),
+      'revision-2'
+    )
+    await expect.element(screen.getByTestId('capability-search-mode')).toHaveTextContent('disabled')
+  })
+
+  it('builds a queued search edit from the preceding authoritative save', async () => {
+    service.loadModelSettings.mockResolvedValue(storedSettings)
+    service.saveModelSettings.mockImplementation(async (draft) => ({
+      ...storedSettings,
+      ...draft,
+      configurationRevision: 'model-settings-v1:00000000-0000-4000-8000-000000000002'
+    }))
+    const screen = await render(
+      <ModelSettingsProvider>
+        <CapabilitySearchProbe />
+      </ModelSettingsProvider>
+    )
+    await expect
+      .element(screen.getByTestId('capability-api-url'))
+      .toHaveTextContent(storedSettings.apiUrl)
+    await screen.getByRole('button', { name: 'queue configuration and search' }).click()
+    await expect.poll(() => service.saveModelSettings.mock.calls.length).toBe(2)
+    expect(service.saveModelSettings).toHaveBeenLastCalledWith(
+      expect.objectContaining({ apiUrl: 'https://changed.example/v1', searchMode: 'disabled' }),
+      'model-settings-v1:00000000-0000-4000-8000-000000000002'
+    )
+    await expect.element(screen.getByTestId('capability-search-mode')).toHaveTextContent('disabled')
+  })
+
+  it('waits for authority and leaves capability errors to the acknowledgement dialog', async () => {
+    let rejectSave!: (reason: Error) => void
+    service.loadModelSettings.mockResolvedValue(storedSettings)
+    service.saveModelSettings.mockImplementation(
+      () =>
+        new Promise((_resolve, reject) => {
+          rejectSave = reject
+        })
+    )
+    const screen = await render(
+      <ModelSettingsProvider>
+        <CapabilitySearchProbe />
+      </ModelSettingsProvider>
+    )
+    await expect.element(screen.getByTestId('capability-search-mode')).toHaveTextContent('auto')
+    await screen.getByRole('button', { name: 'disable search' }).click()
+    await expect.poll(() => service.saveModelSettings.mock.calls.length).toBe(1)
+    await expect.element(screen.getByTestId('capability-search-mode')).toHaveTextContent('auto')
+    rejectSave(new Error('connection lost'))
+    await expect.element(screen.getByTestId('capability-save-result')).toHaveTextContent('failed')
+    expect(service.showToast).not.toHaveBeenCalled()
+    expect(service.loadModelSettings).toHaveBeenCalledTimes(2)
+  })
+
+  it('re-reads an invalidated in-flight snapshot without reviving stale settings', async () => {
+    let releaseOld!: (settings: ModelSettingsSnapshot) => void
+    const latest: ModelSettingsSnapshot = {
+      ...storedSettings,
+      searchMode: 'disabled',
+      configurationRevision: 'new-revision'
+    }
+    service.loadModelSettings
+      .mockResolvedValueOnce(storedSettings)
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            releaseOld = resolve
+          })
+      )
+      .mockResolvedValue(latest)
+    const screen = await render(
+      <ModelSettingsProvider>
+        <CapabilitySearchProbe />
+      </ModelSettingsProvider>
+    )
+    await expect.element(screen.getByTestId('capability-search-mode')).toHaveTextContent('auto')
+    const changed = service.onModelSettingsChanged.mock.calls.at(-1)![0] as () => void
+    changed()
+    await expect.poll(() => service.loadModelSettings.mock.calls.length).toBe(2)
+    changed()
+    releaseOld(storedSettings)
+    await expect.element(screen.getByTestId('capability-search-mode')).toHaveTextContent('disabled')
+    expect(service.saveModelSettings).not.toHaveBeenCalled()
+  })
 })
 
 describe('ModelSettingsProvider hydration', () => {

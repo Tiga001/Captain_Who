@@ -375,6 +375,8 @@ export interface HumanInteractionHostApi {
 }
 
 export interface StorageHostApi {
+  /** Configuration may have changed or Core reconnected; reload the authoritative snapshot. */
+  onModelSettingsChanged(handler: () => void): () => void
   loadModelSettings(): Promise<StorageModelSettingsRecord | null>
   loadProviderProfileUiDescriptors(): Promise<ProviderProfileUiDescriptor[]>
   loadProviderVendorDescriptors(): Promise<ProviderVendorDescriptor[]>
@@ -438,6 +440,8 @@ export interface SearchHostApi {
 }
 
 export interface ImageGenerationHostApi {
+  /** Payload-free invalidation, including changes made through the bundled Skill alias. */
+  onChanged(handler: () => void): () => void
   getConfiguration(): Promise<HostInvocationResult<ImageGenerationGetConfigurationOutput>>
   updateConfiguration(
     input: ImageGenerationUpdateConfigurationInput
@@ -490,6 +494,8 @@ export interface SkillsHostApi {
 
 /** Explicit, context-isolated MCP management surface. It intentionally has no direct callTool. */
 export interface McpHostApi {
+  /** Built-in capability policy invalidation; independent of external mcp.changed events. */
+  onBuiltinCapabilitiesChanged(handler: () => void): () => void
   listBuiltinCapabilities(): Promise<HostInvocationResult<McpBuiltinCapabilityListOutput>>
   setBuiltinCapabilityAllowed(
     input: McpBuiltinCapabilitySetAllowedInput

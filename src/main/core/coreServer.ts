@@ -148,7 +148,7 @@ export interface CoreServerOptions {
   appDataRoot?: string
 }
 
-/** Sole owner of the Core JSON-RPC process lifecycle; request families live in stateless bases. */
+/** Sole owner of the Core JSON-RPC process lifecycle; request families live in separate bases. */
 export class CoreServer extends CoreServerHumanInteractionApi {
   private readonly automationResyncHandlers = new Set<(event: AutomationResync) => void>()
   private automationResyncSubscription: (() => void) | null = null
@@ -542,6 +542,11 @@ export class CoreServer extends CoreServerHumanInteractionApi {
           return
         }
         this.latestNotificationResync = event
+        // The existing Core-start signal also invalidates configuration projections after a
+        // lazy reconnect. No capability runtime policy is mutated here.
+        this.invalidateConfiguration('modelSettings')
+        this.invalidateConfiguration('imageGeneration')
+        this.invalidateConfiguration('builtinCapabilities')
         for (const handler of [...this.notificationResyncHandlers]) {
           try {
             handler(event)

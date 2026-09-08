@@ -1,0 +1,140 @@
+.composer-model-command-menu {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 0;
+  right: 0;
+  z-index: 30;
+  box-sizing: border-box;
+  min-width: 0;
+  max-width: 100%;
+  padding: 6px;
+  border: 1px solid var(--mc-color-border-subtle);
+  border-radius: 16px;
+  background: var(--mc-color-surface-card);
+  box-shadow: 0 8px 28px #00000012;
+  color: var(--mc-color-text-primary);
+  font-size: var(--mc-font-size-chat-toolbar);
+  line-height: var(--mc-line-height-compact);
+}
+
+.composer-model-command-menu svg {
+  width: var(--mc-icon-size-sm);
+  height: var(--mc-icon-size-sm);
+  flex-shrink: 0;
+}
+
+.composer-model-command-menu__header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 4px 7px;
+  border-bottom: 1px solid var(--mc-color-border-subtle);
+}
+
+.composer-model-command-menu__back {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+.composer-model-command-menu__list {
+  max-height: min(340px, 42vh);
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
+  padding-top: 4px;
+  outline: none;
+}
+
+.composer-model-command-menu__option {
+  display: flex;
+  box-sizing: border-box;
+  width: 100%;
+  align-items: center;
+  gap: 12px;
+  min-height: 32px;
+  padding: 6px 10px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.composer-model-command-menu__option[data-highlighted='true'],
+.composer-model-command-menu__back:hover {
+  background: var(--mc-color-surface-hover, #88888812);
+}
+
+.composer-model-command-menu__back:focus-visible,
+.composer-model-command-menu__option:focus-visible {
+  outline: 2px solid var(--mc-color-focus-ring);
+  outline-offset: -2px;
+}
+
+.composer-model-command-menu__option[aria-disabled='true'] {
+  cursor: default;
+  opacity: 0.5;
+}
+
+.composer-model-command-menu__name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.composer-model-command-menu__metadata {
+  display: flex;
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 60%;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  color: var(--mc-color-text-muted);
+  font-size: var(--mc-font-size-xs);
+  white-space: nowrap;
+}
+
+.composer-model-command-menu__metadata > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.composer-model-command-menu__modality {
+  display: inline-flex;
+  align-items: center;
+  height: 20px;
+  padding: 0 7px;
+  border-radius: var(--mc-radius-pill);
+  background: var(--mc-color-surface-neutral-subtle);
+  font-weight: var(--mc-font-weight-strong);
+}
+
+.composer-model-command-menu__modality[data-supported='true'] {
+  color: var(--mc-color-text-accent);
+  background: var(--mc-color-surface-info-subtle);
+}
+
+.composer-model-command-menu__selection {
+  display: grid;
+  place-items: center;
+  flex: 0 0 var(--mc-icon-size-sm);
+}
+
+.composer-model-command-menu__empty {
+  padding: 6px 10px;
+  color: var(--mc-color-text-muted);
+}

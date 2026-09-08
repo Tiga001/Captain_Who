@@ -12,6 +12,10 @@ import type {
 import { ResizeHandle } from '../components/layout/ResizeHandle'
 import { LeftSidebar } from './shell/sidebar/LeftSidebar'
 import { RightSidebar } from '../features/rightSidebar/RightSidebar'
+import {
+  useRightSidebarModuleAvailability,
+  useRightSidebarModules
+} from '../features/rightSidebar/useRightSidebarModules'
 import { BottomPanel } from '../features/bottomPanel/BottomPanel'
 import { useToast } from '../components/toast/ToastContext'
 import { useModelSettings } from '../config/ModelSettingsProvider'
@@ -119,7 +123,7 @@ interface ScheduledExternalNavigationRequest {
 }
 
 export function AppShell() {
-  const { t } = useFrontendConfig()
+  const { resolvedColorScheme, setColorSchemePreference, t } = useFrontendConfig()
   const { showToast } = useToast()
   const {
     attempt: uiPreferencesStartupAttempt,
@@ -152,12 +156,14 @@ export function AppShell() {
     bottomHeight,
     bottomOpen,
     bottomResizeMetrics,
+    canOpenBottomPanel,
     closeBottomPanel,
     commitBottomPanelResize,
     commitSidebarResize,
     leftResizeMetrics,
     leftOpen,
     leftWidth,
+    openBottomPanel,
     openRightSidebar,
     rightMaximized,
     rightOpen,
@@ -172,6 +178,9 @@ export function AppShell() {
   const [rightSidebarModuleNavigationRequest, setRightSidebarModuleNavigationRequest] =
     useState<RightSidebarModuleNavigationRequest | null>(null)
   const rightSidebarModuleNavigationRequestIdRef = useRef(0)
+  const [bottomPanelModuleNavigationRequest, setBottomPanelModuleNavigationRequest] =
+    useState<RightSidebarModuleNavigationRequest | null>(null)
+  const bottomPanelModuleNavigationRequestIdRef = useRef(0)
   const browserSurfaceBridge = useBrowserSurfaceCommand(openRightSidebar)
   const [rightSidebarReviewNavigationRequest, setRightSidebarReviewNavigationRequest] =
     useState<RightSidebarReviewNavigationRequest | null>(null)
@@ -375,6 +384,24 @@ export function AppShell() {
   }, [rightSidebarWorkspaceProjectId, projects])
   const rightSidebarWorkspaceKeys = useMemo(() => projects.map((project) => project.id), [projects])
   const rightSidebarWorkspacePath = rightSidebarWorkspaceProject?.path?.trim() || undefined
+  const openNewBottomTerminal = useCallback(() => {
+    if (!canOpenBottomPanel) return
+    bottomPanelModuleNavigationRequestIdRef.current += 1
+    setBottomPanelModuleNavigationRequest({
+      moduleId: 'terminal',
+      requestId: bottomPanelModuleNavigationRequestIdRef.current,
+      workspaceKey: rightSidebarWorkspaceProject?.id,
+      workspacePath: rightSidebarWorkspacePath,
+      conversationId: activeConversation?.id ?? null
+    })
+    openBottomPanel()
+  }, [
+    activeConversation?.id,
+    canOpenBottomPanel,
+    openBottomPanel,
+    rightSidebarWorkspacePath,
+    rightSidebarWorkspaceProject?.id
+  ])
   const openRightSidebarModule = useCallback(
     (moduleId: RightSidebarModuleId) => {
       rightSidebarModuleNavigationRequestIdRef.current += 1
@@ -403,6 +430,17 @@ export function AppShell() {
     () => ({ 'git-repository': gitRepositoryCapability }),
     [gitRepositoryCapability]
   )
+  const { modules: rightSidebarModules } = useRightSidebarModules({
+    activeConversationId: activeConversation?.id,
+    collaborationSnapshot
+  })
+  const { moduleAvailability: rightSidebarModuleAvailability } = useRightSidebarModuleAvailability({
+    modules: rightSidebarModules,
+    capabilities: rightSidebarCapabilities,
+    workspaceKey: rightSidebarWorkspaceProject?.id,
+    workspaceName: rightSidebarWorkspaceProject?.name,
+    workspacePath: rightSidebarWorkspacePath
+  })
   const openLastTurnReview = useCallback(
     (filePath?: string) => {
       const projectId = rightSidebarWorkspaceProject?.id
@@ -884,6 +922,7 @@ export function AppShell() {
     [activeConversation, continueInNewTask, forkDisabledReason, latestForkDisabledReason, showToast]
   )
 
+  const newConversationProjectId = activeConversation?.projectId ?? activeDraft.projectId
   const conversationCommands = useMemo<ComposerCommand[]>(() => {
     const id = activeConversation?.id
     const unavailable = !id ? t('chat.commands.savedOnly') : undefined
@@ -901,7 +940,71 @@ export function AppShell() {
             : activeConversation?.archivedAt
               ? t('chat.commands.archived')
               : undefined)
+    const moduleIsVisible = (moduleId: RightSidebarModuleId) =>
+      rightSidebarModules.some((module) => module.id === moduleId) &&
+      rightSidebarModuleAvailability[moduleId] !== 'unavailable'
+    const moduleDisabledReason = (moduleId: RightSidebarModuleId) =>
+      rightSidebarModuleAvailability[moduleId] === 'checking'
+        ? t('chat.commands.moduleChecking')
+        : undefined
+    const workspaceCommands: ComposerCommand[] = [
+      {
+        id: 'terminal',
+        label: t('chat.commands.terminal'),
+        description: t('chat.commands.terminalDescription'),
+        disabledReason: canOpenBottomPanel ? undefined : t('chat.commands.terminalUnavailable'),
+        execute: openNewBottomTerminal
+      },
+      ...(moduleIsVisible('browser')
+        ? [
+            {
+              id: 'browser' as const,
+              label: t('chat.commands.browser'),
+              description: t('chat.commands.browserDescription'),
+              disabledReason: moduleDisabledReason('browser'),
+              execute: () => openRightSidebarModule('browser')
+            }
+          ]
+        : []),
+      ...(moduleIsVisible('git-review')
+        ? [
+            {
+              id: 'review' as const,
+              label: t('chat.commands.review'),
+              description: t('chat.commands.reviewDescription'),
+              disabledReason: moduleDisabledReason('git-review'),
+              execute: () => openRightSidebarModule('git-review')
+            }
+          ]
+        : []),
+      ...(moduleIsVisible('agent-center')
+        ? [
+            {
+              id: 'agents' as const,
+              label: t('chat.commands.agents'),
+              description: t('chat.commands.agentsDescription'),
+              disabledReason: moduleDisabledReason('agent-center'),
+              execute: () => openRightSidebarModule('agent-center')
+            }
+          ]
+        : [])
+    ]
     return [
+      {
+        id: 'model',
+        label: t('chat.commands.model'),
+        description: t('chat.commands.modelDescription')
+      },
+      {
+        id: 'theme',
+        label: t(
+          resolvedColorScheme === 'dark'
+            ? 'chat.commands.switchToLightTheme'
+            : 'chat.commands.switchToDarkTheme'
+        ),
+        description: t('chat.commands.themeDescription'),
+        execute: () => setColorSchemePreference(resolvedColorScheme === 'dark' ? 'light' : 'dark')
+      },
       {
         id: 'compact',
         label: t('chat.commands.compact'),
@@ -918,7 +1021,7 @@ export function AppShell() {
         id: 'new',
         label: t('chat.commands.new'),
         description: t('chat.commands.newDescription'),
-        execute: () => openNewConversation(activeConversation?.projectId ?? activeDraft.projectId)
+        execute: () => openNewConversation(newConversationProjectId)
       },
       {
         id: 'fork',
@@ -927,6 +1030,12 @@ export function AppShell() {
         disabledReason: latestForkDisabledReason,
         execute: () => continueActiveConversationInNewTask({ kind: 'latest' })
       },
+      {
+        id: 'capabilities',
+        label: t('capabilityCenter.title'),
+        description: t('capabilityCenter.description')
+      },
+      ...workspaceCommands,
       {
         id: 'usage',
         label: t('chat.commands.usage'),
@@ -964,18 +1073,25 @@ export function AppShell() {
     ]
   }, [
     activeConversation,
-    activeDraft.projectId,
     activeProviderTransitionConfirmation,
     activeProviderTransitionOperations,
     activeRunModelId,
     archiveConversation,
+    canOpenBottomPanel,
     continueActiveConversationInNewTask,
     latestForkDisabledReason,
     manualCompaction,
+    newConversationProjectId,
     openNewConversation,
+    openNewBottomTerminal,
+    openRightSidebarModule,
     openSettings,
     patchConversation,
     requestChatRename,
+    resolvedColorScheme,
+    rightSidebarModuleAvailability,
+    rightSidebarModules,
+    setColorSchemePreference,
     t,
     waitForConversationSaves
   ])
@@ -1375,6 +1491,7 @@ export function AppShell() {
           collaborationSnapshot={collaborationSnapshot}
           isOpen={bottomOpen}
           isWorkspaceVisible={!settingsOpen && primaryView === 'conversation'}
+          moduleNavigationRequest={bottomPanelModuleNavigationRequest}
           onClose={closeBottomPanel}
           onOpenRightModule={openRightSidebarModule}
           workspaceKey={rightSidebarWorkspaceProject?.id}

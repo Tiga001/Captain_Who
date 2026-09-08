@@ -1,27 +1,62 @@
 import {
   Archive,
+  Blocks,
+  Bot,
+  Box,
+  FileDiff,
   FoldVertical,
   Gauge,
+  Globe2,
   Pencil,
   Pin,
   Plus,
   Split,
+  SunMoon,
+  TerminalSquare,
   type LucideIcon
 } from 'lucide-react'
 import { useEffect, type RefObject } from 'react'
 
-export type ComposerCommandId = 'compact' | 'new' | 'fork' | 'usage' | 'pin' | 'rename' | 'archive'
-export interface ComposerCommand {
-  id: ComposerCommandId
+export type ComposerCommandId =
+  | 'model'
+  | 'theme'
+  | 'compact'
+  | 'new'
+  | 'fork'
+  | 'capabilities'
+  | 'terminal'
+  | 'browser'
+  | 'review'
+  | 'agents'
+  | 'usage'
+  | 'pin'
+  | 'rename'
+  | 'archive'
+interface ComposerCommandPresentation {
   label: string
   description: string
   disabledReason?: string
-  execute: () => void | Promise<void>
 }
+export type ComposerCommand = ComposerCommandPresentation &
+  (
+    | { id: 'model' }
+    | { id: 'capabilities' }
+    | {
+        id: Exclude<ComposerCommandId, 'model' | 'capabilities'>
+        execute: () => void | Promise<void>
+      }
+  )
 const icons: Record<ComposerCommandId, LucideIcon> = {
+  model: Box,
+  theme: SunMoon,
   compact: FoldVertical,
   new: Plus,
   fork: Split,
+  capabilities: Blocks,
+  terminal: TerminalSquare,
+  browser: Globe2,
+  review: FileDiff,
+  agents: Bot,
   usage: Gauge,
   pin: Pin,
   rename: Pencil,

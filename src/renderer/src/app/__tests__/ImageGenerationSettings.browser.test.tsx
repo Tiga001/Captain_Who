@@ -10,7 +10,12 @@ import { render } from 'vitest-browser-react'
 
 const service = vi.hoisted(() => ({
   getConfiguration: vi.fn(),
-  updateConfiguration: vi.fn()
+  updateConfiguration: vi.fn(),
+  onChanged: vi.fn()
+}))
+
+vi.mock('../../host/hostClient', () => ({
+  hostClient: { imageGeneration: { onChanged: service.onChanged } }
 }))
 
 vi.mock('../../features/imageGeneration/configuration/imageGenerationClient', () => ({
@@ -82,6 +87,7 @@ function deferred<Value>() {
 
 beforeEach(() => {
   vi.clearAllMocks()
+  service.onChanged.mockReturnValue(() => {})
   service.getConfiguration.mockResolvedValue(configurationOutput(configuration()))
   service.updateConfiguration.mockImplementation(async (input) => ({
     schemaVersion: IMAGE_GENERATION_CONFIGURATION_SCHEMA_VERSION,
@@ -98,6 +104,59 @@ beforeEach(() => {
 })
 
 describe('ImageGenerationSettings', () => {
+  it('refreshes from capability changes without discarding a configuration or credential draft', async () => {
+    const screen = await render(<ImageGenerationSettings />)
+    const model = screen.getByRole('textbox', { name: 'configuration.imageGeneration.modelId' })
+    await model.fill('my-unsaved-model')
+    await screen.getByRole('button', { name: 'configuration.credential.replace' }).click()
+    const credential = screen.getByLabelText('configuration.imageGeneration.apiKey')
+    await credential.fill('replacement-draft')
+    service.getConfiguration.mockResolvedValue(
+      configurationOutput(
+        configuration({
+          enabled: true,
+          modelId: 'another-window-model',
+          revision: 'revision-other'
+        })
+      )
+    )
+    const changed = service.onChanged.mock.calls.at(-1)![0] as () => void
+    const readsBeforeChange = service.getConfiguration.mock.calls.length
+    changed()
+    await expect
+      .poll(() => service.getConfiguration.mock.calls.length)
+      .toBeGreaterThan(readsBeforeChange)
+    await expect.element(model).toHaveValue('my-unsaved-model')
+    await expect.element(credential).toHaveValue('replacement-draft')
+    await screen.getByRole('button', { name: 'configuration.imageGeneration.save' }).click()
+    await expect.poll(() => service.updateConfiguration.mock.calls.length).toBe(1)
+    expect(service.updateConfiguration).toHaveBeenCalledWith(
+      expect.objectContaining({
+        expectedRevision: 'revision-1',
+        modelId: 'my-unsaved-model',
+        credentialMutation: { type: 'replace', value: 'replacement-draft' }
+      })
+    )
+  })
+
+  it('refreshes untouched settings after a capability notification', async () => {
+    const screen = await render(<ImageGenerationSettings />)
+    const model = screen.getByRole('textbox', { name: 'configuration.imageGeneration.modelId' })
+    await expect.element(model).toHaveValue('seedream-model')
+    service.getConfiguration.mockResolvedValue(
+      configurationOutput(
+        configuration({
+          modelId: 'current-model',
+          revision: 'revision-current'
+        })
+      )
+    )
+    const changed = service.onChanged.mock.calls.at(-1)![0] as () => void
+    changed()
+    await expect.element(model).toHaveValue('current-model')
+    expect(service.updateConfiguration).not.toHaveBeenCalled()
+  })
+
   it('shows a load error and retries the authoritative request', async () => {
     service.getConfiguration
       .mockRejectedValueOnce(new Error('unavailable'))
@@ -292,7 +351,11 @@ describe('ImageGenerationSettings', () => {
     ['revisionConflict', false],
     ['commitIndeterminate', true]
   ] as const)('refreshes authoritative state for %s without blind retry', async (code, changed) => {
-    const latest = configuration({ modelId: 'authoritative-model', revision: 'revision-latest' })
+    const latest = configuration({
+      modelId: 'authoritative-model',
+      endpointUrl: 'https://other-window.example/v1',
+      revision: 'revision-latest'
+    })
     service.getConfiguration
       .mockResolvedValueOnce(configurationOutput(configuration()))
       .mockResolvedValueOnce(configurationOutput(latest))
@@ -317,9 +380,24 @@ describe('ImageGenerationSettings', () => {
 
     await expect
       .element(screen.getByRole('textbox', { name: 'configuration.imageGeneration.modelId' }))
-      .toHaveValue('authoritative-model')
+      .toHaveValue('draft-model')
+    await expect
+      .element(screen.getByRole('textbox', { name: 'configuration.imageGeneration.endpointUrl' }))
+      .toHaveValue('https://other-window.example/v1')
     expect(service.updateConfiguration).toHaveBeenCalledTimes(1)
     expect(service.getConfiguration).toHaveBeenCalledTimes(2)
+
+    // The preserved edit is retried only after another explicit Save, with the
+    // refreshed untouched fields and the new revision, never by an automatic replay.
+    await screen.getByRole('button', { name: 'configuration.imageGeneration.save' }).click()
+    await expect.poll(() => service.updateConfiguration.mock.calls.length).toBe(2)
+    expect(service.updateConfiguration).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        expectedRevision: 'revision-latest',
+        modelId: 'draft-model',
+        endpointUrl: 'https://other-window.example/v1'
+      })
+    )
   })
 
   it('does not claim an indeterminate mutation was confirmed when the refresh also fails', async () => {

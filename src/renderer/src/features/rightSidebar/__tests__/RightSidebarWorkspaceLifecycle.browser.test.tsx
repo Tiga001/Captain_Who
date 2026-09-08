@@ -7,9 +7,11 @@ import type {
   RightSidebarCapabilities,
   RightSidebarModuleDefinition,
   RightSidebarModuleId,
+  RightSidebarModuleNavigationRequest,
   RightSidebarModuleRenderProps
 } from '../rightSidebarTypes'
 import { createRightSidebarWorkspaceSessionKey } from '../rightSidebarWorkspace'
+import { RIGHT_SIDEBAR_MODULES } from '../rightSidebarModules'
 
 const { translate } = vi.hoisted(() => ({
   translate: (key: string) => key
@@ -54,6 +56,198 @@ afterEach(() => {
 })
 
 describe('RightSidebar workspace lifecycle', () => {
+  it('opens one fresh browser page per navigation request and preserves existing page state', async () => {
+    const workspace = workspaceProps('project-a', 'Project A', '/repo/a')
+    const browserModule = RIGHT_SIDEBAR_MODULES.find((module) => module.id === 'browser')!
+    const modules = MODULES.map((module) =>
+      module.id === 'browser' ? { ...module, createPage: browserModule.createPage } : module
+    )
+    const renderSidebar = (requestId: number) => (
+      <RightSidebar
+        {...workspace}
+        activeConversationId="conversation-a"
+        isMaximized={false}
+        isOpen
+        modules={modules}
+        moduleNavigationRequest={{
+          ...workspace,
+          conversationId: 'conversation-a',
+          moduleId: 'browser',
+          requestId
+        }}
+        onToggleMaximized={NOOP}
+      />
+    )
+    const screen = await render(renderSidebar(1))
+    await expect.poll(() => lifecycleCount('mount', 'browser')).toBe(1)
+    const original = getSurface(screen.container, 'browser')
+    const originalPageId = original.dataset.pageId
+    const localState = original.querySelector('button')!
+    localState.click()
+    await expect.poll(() => localState.textContent).toBe('1')
+    expect(original.dataset.browserUrl).toBe('https://example.com/existing')
+
+    await screen.rerender(renderSidebar(1))
+    expect(lifecycleCount('mount', 'browser')).toBe(1)
+
+    await screen.rerender(renderSidebar(2))
+    await expect.poll(() => lifecycleCount('mount', 'browser')).toBe(2)
+    const surfaces = screen.container.querySelectorAll<HTMLElement>(
+      '[data-testid="browser-surface"]'
+    )
+    expect(surfaces).toHaveLength(2)
+    expect(surfaces[0]).toBe(original)
+    expect(surfaces[0]?.dataset.activity).toBe('background')
+    expect(surfaces[0]?.querySelector('button')?.textContent).toBe('1')
+    expect(surfaces[0]?.dataset.browserUrl).toBe('https://example.com/existing')
+    expect(surfaces[1]?.dataset.pageId).not.toBe(originalPageId)
+    expect(surfaces[1]?.dataset.activity).toBe('foreground')
+    expect(surfaces[1]?.querySelector('button')?.textContent).toBe('0')
+    expect(surfaces[1]?.dataset.browserUrl).toBeUndefined()
+    expect(getTabLabels(screen.container)).toEqual(['browser.newTab', 'browser.newTab (1)'])
+    expect(lifecycleCount('unmount', 'browser')).toBe(0)
+
+    await screen.rerender(renderSidebar(1))
+    expect(lifecycleCount('mount', 'browser')).toBe(2)
+  })
+
+  it('reuses review navigation without resetting its selected target or local view', async () => {
+    const workspace = workspaceProps('project-a', 'Project A', '/repo/a')
+    const reviewRequest = {
+      kind: 'git-review' as const,
+      filePath: 'src/selected.ts',
+      projectId: 'project-a',
+      requestId: 1,
+      target: { kind: 'lastTurn' as const, conversationId: 'conversation-a' }
+    }
+    const renderSidebar = (requestId?: number) => (
+      <RightSidebar
+        {...workspace}
+        activeConversationId="conversation-a"
+        capabilities={gitCapability(workspace, 'available')}
+        isMaximized={false}
+        isOpen
+        modules={MODULES}
+        moduleNavigationRequest={
+          requestId === undefined
+            ? undefined
+            : {
+                ...workspace,
+                conversationId: 'conversation-a',
+                moduleId: 'git-review',
+                requestId
+              }
+        }
+        onToggleMaximized={NOOP}
+        reviewNavigationRequest={reviewRequest}
+      />
+    )
+    const screen = await render(renderSidebar())
+    await expect.poll(() => lifecycleCount('mount', 'git-review')).toBe(1)
+    const review = getSurface(screen.container, 'git-review')
+    const localState = review.querySelector('button')!
+    localState.click()
+    await expect.poll(() => localState.textContent).toBe('1')
+    await openAdditionalModule(screen, 'rightSidebar.browser')
+
+    await screen.rerender(renderSidebar(1))
+    await expect.poll(() => review.dataset.activity).toBe('foreground')
+    expect(getSurface(screen.container, 'git-review')).toBe(review)
+    expect(review.dataset.reviewScope).toBe('lastTurn')
+    expect(review.dataset.reviewFilePath).toBe('src/selected.ts')
+    expect(review.dataset.reviewRequestId).toBe('1')
+    expect(localState.textContent).toBe('1')
+
+    await screen.rerender(renderSidebar(2))
+    expect(lifecycleCount('mount', 'git-review')).toBe(1)
+    expect(localState.textContent).toBe('1')
+  })
+
+  it('waits for current repository availability and opens a pending request only once', async () => {
+    const workspace = workspaceProps('project-a', 'Project A', '/repo/a')
+    const renderSidebar = (status: 'checking' | 'available') => (
+      <RightSidebar
+        {...workspace}
+        capabilities={gitCapability(workspace, status)}
+        isMaximized={false}
+        isOpen
+        modules={MODULES}
+        moduleNavigationRequest={{ ...workspace, moduleId: 'git-review', requestId: 1 }}
+        onToggleMaximized={NOOP}
+      />
+    )
+    const screen = await render(renderSidebar('checking'))
+    expect(getTabLabels(screen.container)).toEqual([])
+    await screen.rerender(renderSidebar('available'))
+    await expect.poll(() => lifecycleCount('mount', 'git-review')).toBe(1)
+    clickTestButton(screen.container.querySelector('.right-sidebar__tab-close')!)
+    await expect.poll(() => getTabLabels(screen.container)).toEqual([])
+    await screen.rerender(renderSidebar('available'))
+    expect(getTabLabels(screen.container)).toEqual([])
+  })
+
+  it.each(['workspace', 'conversation'] as const)(
+    'discards a pending navigation after its %s changes and never replays it on return',
+    async (changedContext) => {
+      const workspaceA = workspaceProps('project-a', 'Project A', '/repo/a')
+      const workspaceB = workspaceProps('project-b', 'Project B', '/repo/b')
+      const request: RightSidebarModuleNavigationRequest = {
+        ...workspaceA,
+        conversationId: 'conversation-a',
+        moduleId: 'git-review',
+        requestId: 1
+      }
+      const renderSidebar = (changed: boolean, status: 'checking' | 'available') => {
+        const workspace = changed && changedContext === 'workspace' ? workspaceB : workspaceA
+        return (
+          <RightSidebar
+            {...workspace}
+            activeConversationId={changed ? 'conversation-b' : 'conversation-a'}
+            capabilities={gitCapability(workspace, status)}
+            isMaximized={false}
+            isOpen
+            modules={MODULES}
+            moduleNavigationRequest={request}
+            onToggleMaximized={NOOP}
+          />
+        )
+      }
+      const screen = await render(renderSidebar(false, 'checking'))
+      await screen.rerender(renderSidebar(true, 'available'))
+      expect(getTabLabels(screen.container)).toEqual([])
+      await screen.rerender(renderSidebar(false, 'available'))
+      expect(getTabLabels(screen.container)).toEqual([])
+      expect(lifecycleCount('mount', 'git-review')).toBe(0)
+    }
+  )
+
+  it('discards navigation when a checking module is removed before it becomes available', async () => {
+    const workspace = workspaceProps('project-a', 'Project A', '/repo/a')
+    const renderSidebar = (
+      modules: RightSidebarModuleDefinition[],
+      status: 'checking' | 'available'
+    ) => (
+      <RightSidebar
+        {...workspace}
+        capabilities={gitCapability(workspace, status)}
+        isMaximized={false}
+        isOpen
+        modules={modules}
+        moduleNavigationRequest={{ ...workspace, moduleId: 'git-review', requestId: 1 }}
+        onToggleMaximized={NOOP}
+      />
+    )
+    const screen = await render(renderSidebar(MODULES, 'checking'))
+    await screen.rerender(
+      renderSidebar(
+        MODULES.filter((module) => module.id !== 'git-review'),
+        'available'
+      )
+    )
+    await screen.rerender(renderSidebar(MODULES, 'available'))
+    expect(getTabLabels(screen.container)).toEqual([])
+  })
+
   it('reloads review in place while preserving terminal and browser surfaces', async () => {
     const workspaceA = workspaceProps('project-a', 'Project A', '/repo/a')
     const workspaceB = workspaceProps('project-b', 'Project B', '/repo/b')
@@ -578,7 +772,9 @@ function renderTestModule(id: RightSidebarModuleId, props: RightSidebarModuleRen
       isSelected={props.isSelected}
       moduleState={props.page.moduleState}
       moduleId={id}
+      pageId={props.page.id}
       onOpenPage={props.onOpenPage}
+      onPageUpdate={props.onPageUpdate}
       workspaceKey={props.page.workspaceKey}
     />
   )
@@ -589,14 +785,18 @@ function TrackedSurface({
   isSelected,
   moduleState,
   moduleId,
+  pageId,
   onOpenPage,
+  onPageUpdate,
   workspaceKey
 }: {
   activity: RightSidebarActivity
   isSelected: boolean
   moduleState: RightSidebarModuleRenderProps['page']['moduleState']
   moduleId: RightSidebarModuleId
+  pageId: string
   onOpenPage: RightSidebarModuleRenderProps['onOpenPage']
+  onPageUpdate: RightSidebarModuleRenderProps['onPageUpdate']
   workspaceKey?: string | null
 }) {
   const [localState, setLocalState] = useState(0)
@@ -608,6 +808,8 @@ function TrackedSurface({
   return (
     <div
       data-activity={activity}
+      data-page-id={pageId}
+      data-browser-url={moduleState?.kind === 'browser-surface' ? moduleState.url : undefined}
       data-review-request-id={
         moduleState?.kind === 'git-review' ? String(moduleState.requestId) : undefined
       }
@@ -619,7 +821,18 @@ function TrackedSurface({
     >
       <button
         data-testid={`${moduleId}-local-state`}
-        onClick={() => setLocalState((current) => current + 1)}
+        onClick={() => {
+          setLocalState((current) => current + 1)
+          if (moduleId === 'browser') {
+            onPageUpdate({
+              moduleState: {
+                kind: 'browser-surface',
+                surfaceId: `fixture-${pageId}`,
+                url: 'https://example.com/existing'
+              }
+            })
+          }
+        }}
         type="button"
       >
         {localState}

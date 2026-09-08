@@ -15,6 +15,7 @@ const terminalPreloadTests = 'src/preload'
 const terminalRendererTests = 'src/renderer/src/features/terminal/__tests__'
 const skillsTests = 'src/renderer/src/features/skills/__tests__'
 const mcpTests = 'src/renderer/src/features/mcp/__tests__'
+const capabilitiesTests = 'src/renderer/src/features/capabilities/__tests__'
 const settingsTests = 'src/renderer/src/features/settings/__tests__'
 const appTests = 'src/renderer/src/app/__tests__'
 const chatTests = 'src/renderer/src/features/chat/__tests__'
@@ -68,6 +69,7 @@ export const vitestProjectFileRules = {
       `${humanInteractionTests}/**/*.browser.test.tsx`,
       `${skillsTests}/**/*.browser.test.tsx`,
       `${mcpTests}/**/*.browser.test.tsx`,
+      `${capabilitiesTests}/**/*.browser.test.tsx`,
       `${settingsTests}/**/*.browser.test.tsx`,
       `${gitReviewTests}/**/*.browser.test.tsx`,
       `${rightSidebarTests}/**/*.browser.test.tsx`,

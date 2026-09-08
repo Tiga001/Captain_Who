@@ -111,6 +111,153 @@ beforeEach(() => {
 })
 
 describe('BottomPanel', () => {
+  it('creates one new terminal per navigation request on first open, while open, and on reopen', async () => {
+    const request = (requestId: number): RightSidebarModuleNavigationRequest => ({
+      ...workspaceA,
+      conversationId: 'conversation-a',
+      moduleId: 'terminal',
+      requestId
+    })
+    const fixture = (requestId: number, isOpen: boolean, isWorkspaceVisible = true) => (
+      <StrictMode>
+        <BottomPanel
+          {...workspaceA}
+          activeConversationId="conversation-a"
+          isOpen={isOpen}
+          isWorkspaceVisible={isWorkspaceVisible}
+          moduleNavigationRequest={request(requestId)}
+          modules={modules}
+          onClose={noop}
+          onOpenRightModule={noop}
+        />
+      </StrictMode>
+    )
+    const screen = await render(fixture(1, false))
+    expect(screen.container.querySelectorAll('[role="tab"]')).toHaveLength(0)
+    await screen.rerender(fixture(1, true, false))
+    expect(screen.container.querySelectorAll('[role="tab"]')).toHaveLength(0)
+    await screen.rerender(fixture(1, true))
+    await expect.element(screen.getByRole('tab', { name: 'terminal 1' })).toBeVisible()
+    expect(screen.container.querySelectorAll('[role="tab"]')).toHaveLength(1)
+    const first = screen.getByTestId('terminal-surface').element()
+    await screen.rerender(fixture(1, true))
+    expect(screen.container.querySelectorAll('[role="tab"]')).toHaveLength(1)
+
+    await screen.rerender(fixture(2, true))
+    await expect
+      .element(screen.getByRole('tab', { name: 'terminal 2' }))
+      .toHaveAttribute('aria-selected', 'true')
+    expect(screen.container.querySelectorAll('[role="tab"]')).toHaveLength(2)
+    expect(first.isConnected).toBe(true)
+    expect(first.getAttribute('data-activity')).toBe('background')
+    await screen.rerender(fixture(2, false))
+    await screen.rerender(fixture(2, true))
+    expect(screen.container.querySelectorAll('[role="tab"]')).toHaveLength(2)
+
+    await screen.rerender(fixture(3, false))
+    expect(screen.container.querySelectorAll('[role="tab"]')).toHaveLength(2)
+    await screen.rerender(fixture(3, true))
+    await expect.element(screen.getByRole('tab', { name: 'terminal 3' })).toBeVisible()
+    expect(screen.container.querySelectorAll('[role="tab"]')).toHaveLength(3)
+    await screen.rerender(fixture(2, true))
+    expect(screen.container.querySelectorAll('[role="tab"]')).toHaveLength(3)
+  })
+
+  it('consumes stale workspace, conversation, and non-terminal requests without reopening them later', async () => {
+    const request = (requestId: number): RightSidebarModuleNavigationRequest => ({
+      ...workspaceA,
+      conversationId: 'conversation-a',
+      moduleId: 'terminal',
+      requestId
+    })
+    const fixture = (
+      navigation: RightSidebarModuleNavigationRequest | null,
+      isOpen = true,
+      workspace = workspaceA,
+      conversationId = 'conversation-a'
+    ) => (
+      <BottomPanel
+        {...workspace}
+        activeConversationId={conversationId}
+        isOpen={isOpen}
+        isWorkspaceVisible
+        moduleNavigationRequest={navigation}
+        modules={modules}
+        onClose={noop}
+        onOpenRightModule={noop}
+      />
+    )
+    const screen = await render(fixture(null))
+    await expect.element(screen.getByRole('tab', { name: 'terminal 1' })).toBeVisible()
+    const first = screen.getByTestId('terminal-surface').element()
+    await screen.rerender(fixture(request(1), false))
+    await screen.rerender(fixture(request(1), false, workspaceB))
+    await screen.rerender(fixture(request(1)))
+    expect(screen.container.querySelectorAll('[role="tab"]')).toHaveLength(1)
+    await screen.rerender(fixture(request(2), false))
+    await screen.rerender(fixture(request(2), false, workspaceA, 'conversation-b'))
+    await screen.rerender(fixture(request(2)))
+    expect(screen.container.querySelectorAll('[role="tab"]')).toHaveLength(1)
+    await screen.rerender(fixture({ ...request(3), moduleId: 'browser' }))
+    await screen.rerender(fixture(request(3)))
+    expect(screen.container.querySelectorAll('[role="tab"]')).toHaveLength(1)
+    expect(screen.getByTestId('terminal-surface').element()).toBe(first)
+    expect(unmounts).not.toHaveBeenCalled()
+    await screen.rerender(fixture(request(4)))
+    await expect.element(screen.getByRole('tab', { name: 'terminal 2' })).toBeVisible()
+  })
+
+  it('waits for availability before consuming the first navigation request', async () => {
+    const navigation: RightSidebarModuleNavigationRequest = {
+      ...workspaceA,
+      conversationId: null,
+      moduleId: 'terminal',
+      requestId: 1
+    }
+    const terminalModules: RightSidebarModuleDefinition[] = [
+      { ...createModule('terminal'), requiredCapability: 'git-repository' }
+    ]
+    const fixture = (status: 'checking' | 'available') => (
+      <StrictMode>
+        <BottomPanel
+          {...workspaceA}
+          capabilities={capability(workspaceA, status)}
+          isOpen
+          isWorkspaceVisible
+          moduleNavigationRequest={navigation}
+          modules={terminalModules}
+          onClose={noop}
+          onOpenRightModule={noop}
+        />
+      </StrictMode>
+    )
+    const screen = await render(fixture('checking'))
+    expect(screen.container.querySelectorAll('[role="tab"]')).toHaveLength(0)
+    await screen.rerender(fixture('available'))
+    await expect.element(screen.getByRole('tab', { name: 'terminal 1' })).toBeVisible()
+    expect(screen.container.querySelectorAll('[role="tab"]')).toHaveLength(1)
+  })
+
+  it('opens a terminal from a projectless new chat', async () => {
+    const screen = await render(
+      <BottomPanel
+        isOpen
+        isWorkspaceVisible
+        moduleNavigationRequest={{
+          conversationId: null,
+          moduleId: 'terminal',
+          requestId: 1,
+          workspaceKey: null
+        }}
+        modules={modules}
+        onClose={noop}
+        onOpenRightModule={noop}
+      />
+    )
+    await expect.element(screen.getByRole('tab', { name: 'terminal 1' })).toBeVisible()
+    expect(screen.container.querySelectorAll('[role="tab"]')).toHaveLength(1)
+  })
+
   it('starts only when visible and keeps terminal pages pinned and mounted while hidden or switching workspaces', async () => {
     const fixture = (isOpen: boolean, isWorkspaceVisible: boolean, workspace = workspaceA) => (
       <BottomPanel

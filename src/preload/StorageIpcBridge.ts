@@ -11,10 +11,15 @@ import {
   type StorageModelSettingsRecord
 } from '@mycopilot/protocol'
 
-type StorageIpcRenderer = Pick<IpcRenderer, 'invoke'>
+type StorageIpcRenderer = Pick<IpcRenderer, 'invoke' | 'on' | 'removeListener'>
 
 export function createStorageIpcBridge(ipcRenderer: StorageIpcRenderer): StorageHostApi {
   return {
+    onModelSettingsChanged: (handler) => {
+      const listener = (): void => handler()
+      ipcRenderer.on(HOST_CHANNELS.storage.modelSettingsChanged, listener)
+      return () => ipcRenderer.removeListener(HOST_CHANNELS.storage.modelSettingsChanged, listener)
+    },
     loadModelSettings: async () => {
       const value: unknown = await ipcRenderer.invoke(HOST_CHANNELS.storage.loadModelSettings)
       return value === null ? null : parseStorageModelSettingsRecord(value)

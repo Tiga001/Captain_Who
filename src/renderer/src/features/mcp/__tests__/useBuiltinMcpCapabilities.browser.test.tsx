@@ -10,11 +10,13 @@ import { render } from 'vitest-browser-react'
 
 const service = vi.hoisted(() => ({
   list: vi.fn(),
+  onChanged: vi.fn<(handler: () => void) => () => void>().mockReturnValue(() => undefined),
   setAllowed: vi.fn()
 }))
 
 vi.mock('../mcpManagementClient', () => ({
   listMcpBuiltinCapabilities: service.list,
+  onMcpBuiltinCapabilitiesChanged: service.onChanged,
   setMcpBuiltinCapabilityAllowed: service.setAllowed
 }))
 
@@ -87,12 +89,29 @@ function Harness() {
 }
 
 beforeEach(() => {
+  service.onChanged.mockReset().mockReturnValue(() => undefined)
   service.list.mockReset()
   service.setAllowed.mockReset()
   service.list.mockResolvedValue(output())
 })
 
 describe('useBuiltinMcpCapabilities', () => {
+  it('refreshes a cross-window change and removes its independent notification subscription', async () => {
+    let notify: (() => void) | undefined
+    const unsubscribe = vi.fn()
+    service.onChanged.mockImplementation((handler) => {
+      notify = handler
+      return unsubscribe
+    })
+    const screen = await render(<Harness />)
+    await expect.element(screen.getByTestId('status')).toHaveTextContent('ready')
+    service.list.mockResolvedValue(output(capability({ userAllowed: true, policyRevision: 2 }), 2))
+    notify?.()
+    await expect.element(screen.getByTestId('allowed')).toHaveTextContent('allowed')
+    await expect.element(screen.getByTestId('revision')).toHaveTextContent('2')
+    await screen.unmount()
+    expect(unsubscribe).toHaveBeenCalledTimes(1)
+  })
   it('does not retain focus refresh listeners after StrictMode unmount', async () => {
     const screen = await render(
       <StrictMode>

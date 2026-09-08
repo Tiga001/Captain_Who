@@ -1,3 +1,5 @@
+import { workspaceCommandTranslations } from './workspaceCommandTranslations'
+import { capabilityCenterTranslations } from './capabilityCenterTranslations'
 import { settingsSearchTranslations } from './settingsSearchTranslations'
 import { enGBTranslations } from './frontendTranslations.enGB'
 import { enUSTranslations } from './frontendTranslations.enUS'
@@ -14,6 +16,8 @@ import { humanInteractionPanelTranslations } from './humanInteractionPanelTransl
 import { humanInteractionSettingsTranslations } from './humanInteractionSettingsTranslations'
 
 export type TranslationKey =
+  | keyof (typeof workspaceCommandTranslations)['zh-CN']
+  | keyof (typeof capabilityCenterTranslations)['zh-CN']
   | keyof (typeof settingsSearchTranslations)['zh-CN']
   | keyof typeof zhCNTranslations
   | keyof (typeof humanInteractionSettingsTranslations)['zh-CN']
@@ -40,7 +44,9 @@ export const languageRegistry = {
       ...settingsSearchTranslations['zh-CN'],
       ...humanInteractionHistoryTranslations['zh-CN'],
       ...humanInteractionPanelTranslations['zh-CN'],
-      ...humanInteractionErrorTranslations['zh-CN']
+      ...humanInteractionErrorTranslations['zh-CN'],
+      ...capabilityCenterTranslations['zh-CN'],
+      ...workspaceCommandTranslations['zh-CN']
     }
   },
   'zh-TW': {
@@ -52,7 +58,9 @@ export const languageRegistry = {
       ...settingsSearchTranslations['zh-TW'],
       ...humanInteractionHistoryTranslations['zh-TW'],
       ...humanInteractionPanelTranslations['zh-TW'],
-      ...humanInteractionErrorTranslations['zh-TW']
+      ...humanInteractionErrorTranslations['zh-TW'],
+      ...capabilityCenterTranslations['zh-TW'],
+      ...workspaceCommandTranslations['zh-TW']
     }
   },
   'en-US': {
@@ -64,7 +72,9 @@ export const languageRegistry = {
       ...settingsSearchTranslations['en-US'],
       ...humanInteractionHistoryTranslations['en-US'],
       ...humanInteractionPanelTranslations['en-US'],
-      ...humanInteractionErrorTranslations['en-US']
+      ...humanInteractionErrorTranslations['en-US'],
+      ...capabilityCenterTranslations['en-US'],
+      ...workspaceCommandTranslations['en-US']
     }
   },
   'en-GB': {
@@ -76,7 +86,9 @@ export const languageRegistry = {
       ...settingsSearchTranslations['en-GB'],
       ...humanInteractionHistoryTranslations['en-GB'],
       ...humanInteractionPanelTranslations['en-GB'],
-      ...humanInteractionErrorTranslations['en-GB']
+      ...humanInteractionErrorTranslations['en-GB'],
+      ...capabilityCenterTranslations['en-GB'],
+      ...workspaceCommandTranslations['en-GB']
     }
   },
   'ko-KR': {
@@ -88,7 +100,9 @@ export const languageRegistry = {
       ...settingsSearchTranslations['ko-KR'],
       ...humanInteractionHistoryTranslations['ko-KR'],
       ...humanInteractionPanelTranslations['ko-KR'],
-      ...humanInteractionErrorTranslations['ko-KR']
+      ...humanInteractionErrorTranslations['ko-KR'],
+      ...capabilityCenterTranslations['ko-KR'],
+      ...workspaceCommandTranslations['ko-KR']
     }
   },
   'ja-JP': {
@@ -100,7 +114,9 @@ export const languageRegistry = {
       ...settingsSearchTranslations['ja-JP'],
       ...humanInteractionHistoryTranslations['ja-JP'],
       ...humanInteractionPanelTranslations['ja-JP'],
-      ...humanInteractionErrorTranslations['ja-JP']
+      ...humanInteractionErrorTranslations['ja-JP'],
+      ...capabilityCenterTranslations['ja-JP'],
+      ...workspaceCommandTranslations['ja-JP']
     }
   },
   'fr-FR': {
@@ -112,7 +128,9 @@ export const languageRegistry = {
       ...settingsSearchTranslations['fr-FR'],
       ...humanInteractionHistoryTranslations['fr-FR'],
       ...humanInteractionPanelTranslations['fr-FR'],
-      ...humanInteractionErrorTranslations['fr-FR']
+      ...humanInteractionErrorTranslations['fr-FR'],
+      ...capabilityCenterTranslations['fr-FR'],
+      ...workspaceCommandTranslations['fr-FR']
     }
   },
   'it-IT': {
@@ -124,7 +142,9 @@ export const languageRegistry = {
       ...settingsSearchTranslations['it-IT'],
       ...humanInteractionHistoryTranslations['it-IT'],
       ...humanInteractionPanelTranslations['it-IT'],
-      ...humanInteractionErrorTranslations['it-IT']
+      ...humanInteractionErrorTranslations['it-IT'],
+      ...capabilityCenterTranslations['it-IT'],
+      ...workspaceCommandTranslations['it-IT']
     }
   },
   'ru-RU': {
@@ -136,7 +156,9 @@ export const languageRegistry = {
       ...settingsSearchTranslations['ru-RU'],
       ...humanInteractionHistoryTranslations['ru-RU'],
       ...humanInteractionPanelTranslations['ru-RU'],
-      ...humanInteractionErrorTranslations['ru-RU']
+      ...humanInteractionErrorTranslations['ru-RU'],
+      ...capabilityCenterTranslations['ru-RU'],
+      ...workspaceCommandTranslations['ru-RU']
     }
   }
 } as const satisfies Record<string, LanguageDefinition>

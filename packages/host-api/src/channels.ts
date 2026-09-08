@@ -144,6 +144,7 @@ export const HOST_CHANNELS = {
     mutateReviewFile: 'host:git.mutateReviewFile'
   },
   imageGeneration: {
+    changed: 'host:imageGeneration.changed',
     getConfiguration: 'host:imageGeneration.getConfiguration',
     getStatus: 'host:imageGeneration.getStatus',
     readArtifact: 'host:imageGeneration.readArtifact',
@@ -151,6 +152,7 @@ export const HOST_CHANNELS = {
     updateConfiguration: 'host:imageGeneration.updateConfiguration'
   },
   mcp: {
+    builtinCapabilitiesChanged: 'host:mcp.builtinCapabilitiesChanged',
     addServer: 'host:mcp.addServer',
     listBuiltinCapabilities: 'host:mcp.listBuiltinCapabilities',
     changed: 'host:mcp.changed',
@@ -194,6 +196,7 @@ export const HOST_CHANNELS = {
     uninstall: 'host:skills.uninstall'
   },
   storage: {
+    modelSettingsChanged: 'host:storage.modelSettingsChanged',
     deleteChatMessages: 'host:storage.deleteChatMessages',
     deleteConversation: 'host:storage.deleteConversation',
     deleteProject: 'host:storage.deleteProject',

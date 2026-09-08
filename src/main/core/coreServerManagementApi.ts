@@ -245,6 +245,7 @@ export class CoreServerManagementApi extends CoreServerAgentApi {
       )
       .then(parseImageGenerationUpdateConfigurationOutput)
       .catch(rethrowValidatedImageGenerationConfigurationError)
+      .finally(() => this.invalidateConfiguration('imageGeneration'))
   }
 
   setImageGenerationEnabled(
@@ -258,6 +259,7 @@ export class CoreServerManagementApi extends CoreServerAgentApi {
       )
       .then(parseImageGenerationSetEnabledOutput)
       .catch(rethrowValidatedImageGenerationConfigurationError)
+      .finally(() => this.invalidateConfiguration('imageGeneration'))
   }
 
   getImageGenerationStatus(): Promise<ImageGenerationStatus> {
@@ -312,6 +314,7 @@ export class CoreServerManagementApi extends CoreServerAgentApi {
       )
       .then(parseMcpBuiltinCapabilityMutationOutput)
       .catch(rethrowValidatedMcpManagementError)
+      .finally(() => this.invalidateConfiguration('builtinCapabilities'))
   }
 
   getMcpServer(input: McpServerIdInput): Promise<McpServerDetailsOutput> {

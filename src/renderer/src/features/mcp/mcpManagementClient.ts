@@ -145,3 +145,7 @@ export function selectMcpWorkingDirectory(): Promise<string | null> {
 export function onMcpChanged(handler: (event: McpChangedNotification) => void): () => void {
   return hostClient.mcp.onChanged(handler)
 }
+
+export function onMcpBuiltinCapabilitiesChanged(handler: () => void): () => void {
+  return hostClient.mcp.onBuiltinCapabilitiesChanged(handler)
+}

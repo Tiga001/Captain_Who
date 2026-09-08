@@ -30,8 +30,13 @@ import type {
 } from '../../features/chat/chatTypes'
 import { CHAT_MESSAGE_CHECKPOINT_INTERVAL_MS } from '../chatMessagePersistence'
 import type { ComposerCommand } from '../../features/chat/components/ComposerCommands'
+import type { RightSidebarModuleNavigationRequest } from '../../features/rightSidebar/rightSidebarTypes'
 
 const testState = vi.hoisted(() => ({
+  canOpenBottomPanel: true,
+  gitStatus: 'unavailable' as 'available' | 'checking' | 'unavailable',
+  openBottomPanel: vi.fn(),
+  openRightSidebar: vi.fn(),
   automationEventListeners: new Set<(event: AutomationEvent) => void>(),
   automationOpenRequestListeners: new Set<(request: AutomationOpenRequest) => void>(),
   automationResyncListeners: new Set<(event: AutomationResync) => void>(),
@@ -119,6 +124,9 @@ vi.mock('../../components/toast/ToastContext', () => ({
 
 vi.mock('../useShellLayout', () => ({
   useShellLayout: () => ({
+    canOpenBottomPanel: testState.canOpenBottomPanel,
+    openBottomPanel: testState.openBottomPanel,
+    openRightSidebar: testState.openRightSidebar,
     commitSidebarResize: vi.fn(),
     leftResizeMetrics: { maximum: 420, minimum: 220, width: 0 },
     leftOpen: false,
@@ -159,7 +167,10 @@ vi.mock('../../host/hostClient', () => ({
 }))
 
 vi.mock('../../features/gitReview/useGitRepositoryCapability', () => ({
-  useGitRepositoryCapability: () => ({ status: 'unavailable' })
+  useGitRepositoryCapability: (id?: string, path?: string) => ({
+    contextKey: JSON.stringify([id ?? null, path ?? null]),
+    status: testState.gitStatus
+  })
 }))
 
 // This suite is the legacy/no-child AppShell baseline. Collaboration is covered by its own
@@ -328,8 +339,26 @@ vi.mock('../shell/sidebar/LeftSidebar', () => ({
   )
 }))
 vi.mock('../../features/rightSidebar/RightSidebar', () => ({
-  RightSidebar: ({ activeConversationId }: { activeConversationId?: string | null }) => (
-    <output data-testid="right-sidebar-conversation-id">{activeConversationId ?? 'none'}</output>
+  RightSidebar: ({
+    activeConversationId,
+    moduleNavigationRequest
+  }: {
+    activeConversationId?: string | null
+    moduleNavigationRequest?: RightSidebarModuleNavigationRequest | null
+  }) => (
+    <>
+      <output data-testid="right-sidebar-conversation-id">{activeConversationId ?? 'none'}</output>
+      <output data-testid="right-module-request">{JSON.stringify(moduleNavigationRequest)}</output>
+    </>
+  )
+}))
+vi.mock('../../features/bottomPanel/BottomPanel', () => ({
+  BottomPanel: ({
+    moduleNavigationRequest
+  }: {
+    moduleNavigationRequest?: RightSidebarModuleNavigationRequest | null
+  }) => (
+    <output data-testid="bottom-module-request">{JSON.stringify(moduleNavigationRequest)}</output>
   )
 }))
 vi.mock('../AppShellSettingsView', () => ({
@@ -409,7 +438,9 @@ vi.mock('../../features/chat/ChatConversationPage', () => ({
           type="button"
           disabled={Boolean(command.disabledReason)}
           title={command.disabledReason}
-          onClick={() => void command.execute()}
+          onClick={() => {
+            if (command.id !== 'capabilities' && command.id !== 'model') void command.execute()
+          }}
         >
           command-{command.id}
         </button>
@@ -1020,6 +1051,10 @@ function queuedMessage(id: string, content: string, createdAt: number): ChatQueu
 }
 
 beforeEach(() => {
+  testState.canOpenBottomPanel = true
+  testState.gitStatus = 'unavailable'
+  testState.openBottomPanel.mockReset()
+  testState.openRightSidebar.mockReset()
   testState.automationEventListeners.clear()
   testState.automationOpenRequestListeners.clear()
   testState.automationResyncListeners.clear()
@@ -4700,6 +4735,7 @@ describe('authoritative run cancellation and conversation forking', () => {
     await screen.getByRole('button', { name: 'submit-without-skill' }).click()
     await expect.poll(() => testState.startConversationTurn.mock.calls.length).toBe(1)
     const readsBeforeWaiting = testState.loadConversation.mock.calls.length
+    await expect.element(screen.getByRole('button', { name: 'command-capabilities' })).toBeEnabled()
 
     emitAgentEvent({
       type: 'done',
@@ -4714,6 +4750,7 @@ describe('authoritative run cancellation and conversation forking', () => {
     await expect.element(screen.getByTestId('last-assistant-status')).toHaveTextContent('pending')
     await expect.element(screen.getByRole('button', { name: 'command-compact' })).toBeDisabled()
     await expect.element(screen.getByRole('button', { name: 'command-fork' })).toBeDisabled()
+    await expect.element(screen.getByRole('button', { name: 'command-capabilities' })).toBeEnabled()
     expect(testState.loadConversation.mock.calls.length).toBe(readsBeforeWaiting)
 
     await screen.getByRole('button', { name: 'submit-without-skill' }).click()
@@ -4965,6 +5002,95 @@ describe('authoritative run cancellation and conversation forking', () => {
 
     await expect.element(screen.getByTestId('last-assistant-status')).toHaveTextContent('sent')
     expect(testState.loadConversation).toHaveBeenCalledTimes(initialLoadCount + 2)
+  })
+
+  it('routes workspace commands to explicit scoped panel opens without sending a model message', async () => {
+    testState.gitStatus = 'available'
+    testState.loadComposerDrafts.mockResolvedValue({
+      'conversation-a': createComposerDraft({
+        message: 'keep my draft',
+        modelId: 'model-1',
+        projectId: 'project-a'
+      })
+    })
+    const screen = await renderSelectedConversation()
+    const request = (target: string) =>
+      JSON.parse(screen.getByTestId(target).element().textContent!)
+    const commandButtons = Array.from(screen.container.querySelectorAll('button')).filter(
+      (button) => button.textContent?.startsWith('command-')
+    )
+    expect(commandButtons[0]?.textContent).toBe('command-model')
+    await screen.getByRole('button', { name: 'command-model', exact: true }).click()
+    expect(testState.startConversationTurn).not.toHaveBeenCalled()
+    await screen.getByRole('button', { name: 'command-terminal', exact: true }).click()
+    expect(testState.openBottomPanel).toHaveBeenCalledTimes(1)
+    expect(request('bottom-module-request')).toEqual({
+      moduleId: 'terminal',
+      requestId: 1,
+      workspaceKey: 'project-a',
+      workspacePath: '/workspace/a',
+      conversationId: 'conversation-a'
+    })
+    await screen.getByRole('button', { name: 'command-terminal', exact: true }).click()
+    expect(request('bottom-module-request').requestId).toBe(2)
+    expect(testState.openBottomPanel).toHaveBeenCalledTimes(2)
+    await screen.getByRole('button', { name: 'command-browser', exact: true }).click()
+    expect(request('right-module-request')).toEqual({
+      moduleId: 'browser',
+      requestId: 1,
+      workspaceKey: 'project-a',
+      workspacePath: '/workspace/a',
+      conversationId: 'conversation-a'
+    })
+    await screen.getByRole('button', { name: 'command-review', exact: true }).click()
+    expect(request('right-module-request')).toEqual({
+      moduleId: 'git-review',
+      requestId: 2,
+      workspaceKey: 'project-a',
+      workspacePath: '/workspace/a',
+      conversationId: 'conversation-a'
+    })
+    expect(testState.openRightSidebar).toHaveBeenCalledTimes(2)
+    await expect.element(screen.getByTestId('draft-message')).toHaveTextContent('keep my draft')
+    expect(testState.startConversationTurn).not.toHaveBeenCalled()
+  })
+
+  it('hides unavailable review and child-agent commands, and disables terminal when the bottom panel cannot fit', async () => {
+    testState.canOpenBottomPanel = false
+    const screen = await renderSelectedConversation()
+    await expect
+      .element(screen.getByRole('button', { name: 'command-review', exact: true }))
+      .not.toBeInTheDocument()
+    await expect
+      .element(screen.getByRole('button', { name: 'command-agents', exact: true }))
+      .not.toBeInTheDocument()
+    await expect
+      .element(screen.getByRole('button', { name: 'command-terminal', exact: true }))
+      .toBeDisabled()
+    await expect
+      .element(screen.getByRole('button', { name: 'command-browser', exact: true }))
+      .toBeEnabled()
+    expect(testState.openBottomPanel).not.toHaveBeenCalled()
+  })
+
+  it('keeps repository checking commands disabled without requiring the agent to be idle', async () => {
+    testState.gitStatus = 'checking'
+    const screen = await renderSelectedConversation()
+    await expect
+      .element(screen.getByRole('button', { name: 'command-review', exact: true }))
+      .toBeDisabled()
+    await expect
+      .element(screen.getByRole('button', { name: 'command-review', exact: true }))
+      .toHaveAttribute('title', 'chat.commands.moduleChecking')
+    mockSuccessfulTurnStarts()
+    await screen.getByRole('button', { name: 'submit-without-skill' }).click()
+    await expect.poll(() => testState.startConversationTurn.mock.calls.length).toBe(1)
+    await expect
+      .element(screen.getByRole('button', { name: 'command-browser', exact: true }))
+      .toBeEnabled()
+    await expect
+      .element(screen.getByRole('button', { name: 'command-terminal', exact: true }))
+      .toBeEnabled()
   })
 
   it('routes the fork command to latest and deduplicates a concurrent timeline click before navigating', async () => {

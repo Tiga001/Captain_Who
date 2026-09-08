@@ -229,9 +229,37 @@ function rethrowValidatedSkillSourceResolutionError(error: unknown): never {
   )
 }
 
-/** Stateless request facade. CoreServer remains the sole owner of the RPC process lifecycle. */
+export type HostConfigurationDomain = 'modelSettings' | 'imageGeneration' | 'builtinCapabilities'
+
+/** Request and invalidation facade. CoreServer owns the RPC process lifecycle. */
 export class CoreServerStorageApi {
+  private readonly configurationHandlers = new Map<HostConfigurationDomain, Set<() => void>>()
+
   protected constructor(protected readonly rpc: CoreJsonRpcClient) {}
+
+  /** An invalidation is not a successful-write receipt. Consumers always requery Core. */
+  onConfigurationInvalidated(domain: HostConfigurationDomain, handler: () => void): () => void {
+    const handlers = this.configurationHandlers.get(domain) ?? new Set<() => void>()
+    handlers.add(handler)
+    this.configurationHandlers.set(domain, handlers)
+    return () => {
+      handlers.delete(handler)
+      if (!handlers.size && this.configurationHandlers.get(domain) === handlers) {
+        this.configurationHandlers.delete(domain)
+      }
+    }
+  }
+
+  protected invalidateConfiguration(domain: HostConfigurationDomain): void {
+    for (const handler of [...(this.configurationHandlers.get(domain) ?? [])]) {
+      try {
+        handler()
+      } catch {
+        // Observers cannot change the outcome of a committed or uncertain mutation.
+        console.warn('Host configuration invalidation listener failed')
+      }
+    }
+  }
 
   searchChats(input: ChatSearchInput): Promise<ChatSearchResult[]> {
     return this.rpc.request<ChatSearchResult[], ChatSearchInput>(SEARCH_SEARCH_CHATS_METHOD, input)
@@ -323,6 +351,11 @@ export class CoreServerStorageApi {
       .request<unknown, SkillsSetEnabledInput>(SKILLS_SET_ENABLED_METHOD, input)
       .then(parseSkillsSetEnabledOutput)
       .catch(rethrowValidatedSkillManagementError)
+      .finally(() => {
+        if (input.skillId === 'bundled:application:image-generation') {
+          this.invalidateConfiguration('imageGeneration')
+        }
+      })
   }
 
   onSkillsChanged(handler: (event: SkillsChangedNotification) => void): () => void {
@@ -449,6 +482,7 @@ export class CoreServerStorageApi {
         parseStorageModelSettingsUpdateRecord(settings)
       )
       .then(parseStorageModelSettingsRecord)
+      .finally(() => this.invalidateConfiguration('modelSettings'))
   }
 
   loadAgentPromptPreferences(): Promise<StorageAgentPromptPreferencesRecord> {
