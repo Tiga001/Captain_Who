@@ -204,6 +204,8 @@ Rust Core 将已解析路径通过私有 bridge 交给 Main，Main 按 Run/call/
 
 `browser_pdf_save` 沿官方 `page.pdf()` 和 Host Artifact 预留/发布链路执行。`ElectronGuestCdpTransport` 将 `Page.printToPDF` 适配到同一个 guest 的原生打印，再通过该传输私有、有界的 `IO` stream 返回字节。它不会重新加载网页或把截图包装成 PDF。
 
+生成的 PDF 通过 Electron Main 与 Core Server 之间的私有 bridge 接入统一 managed Artifact 发布流程，登记内容哈希及 conversation/run/call 授权。发布结果的 `readPath` 为 `artifact://sha256/<64 位小写十六进制摘要>`，后续命令将该值传入 `run_command.inputs[].path`，由现有文件输入链路校验并挂载；不能把临时 `browser-artifact:` 句柄拼成 URI，也不能直接把 URI 当作 shell 文件路径。聊天、归档和 checkpoint 保留合法 `readPath`，宿主文件路径不进入模型结果。
+
 当前 Electron 39 的 webview guest 打印含跨进程 iframe 的页面可能永久挂起，因此打印前检查 native frame process identity，拒绝已有 OOPIF 的页面；打印后复核 frame identity 和导航变化。取消或超时会丢弃迟到结果，但原生打印没有取消 API，Main 必须保留全局单个未完成打印的占位，直到实际完成或原页面关闭。动态插入 OOPIF 的竞态仍可能使底层打印挂起；结果会提示关闭发起打印的页面后恢复。该能力是有明确页面兼容边界的局部支持。
 
 ### 下载

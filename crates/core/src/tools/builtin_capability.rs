@@ -917,7 +917,7 @@ pub fn builtin_capability_tool_result_persistence_projection(
         .as_ref()
         .and_then(|value| value.get("structuredContent"))
         .and_then(|structured| structured.get("readPath"))
-        .and_then(crate::browser_artifacts::safe_image_artifact_read_path)
+        .and_then(crate::browser_artifacts::safe_browser_artifact_read_path)
     {
         safe_result["readPath"] = json!(read_path);
     }
@@ -1556,7 +1556,7 @@ mod tests {
                     "status": "completed",
                     "artifacts": [artifact.clone()],
                     "readPath": format!("image-artifact://sha256/{}", "a".repeat(64)),
-                    "hostImagePublishPath": "/tmp/private-screenshot.png",
+                    "hostArtifactPublishPath": "/tmp/private-screenshot.png",
                     "privateDiagnostic": secret,
                 },
                 "content": [{"type": "text", "text": secret}],
@@ -1573,7 +1573,7 @@ mod tests {
         assert!(!serde_json::to_string(&safe).unwrap().contains(secret));
         assert!(!serde_json::to_string(&safe)
             .unwrap()
-            .contains("hostImagePublishPath"));
+            .contains("hostArtifactPublishPath"));
         assert!(!serde_json::to_string(&safe)
             .unwrap()
             .contains("/tmp/private-screenshot.png"));

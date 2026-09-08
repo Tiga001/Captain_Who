@@ -20,10 +20,6 @@ fn wire(request: Value) -> Value {
 fn unified_schema_is_portable_strict_and_has_no_raw_patch_or_revision() {
     let definition = ApplyPatchTool.definition();
     let schema = definition.input_schema;
-    assert!(definition.description.contains("Examples show shape only"));
-    assert!(definition.description.contains(
-        "reuse the same ID only after the model has received the successful Tool Result"
-    ));
     assert_eq!(schema["type"], "object");
     assert_eq!(schema["additionalProperties"], false);
     assert_eq!(schema["required"], json!(["request"]));
@@ -42,6 +38,69 @@ fn unified_schema_is_portable_strict_and_has_no_raw_patch_or_revision() {
             .len(),
         5
     );
+}
+
+#[test]
+fn guidance_preserves_observation_lifecycle_and_staged_settlement() {
+    let description = ApplyPatchTool.definition().description;
+    for invariant in [
+        "create (apply or begin) omits observationId and needs no prior read",
+        "atomic no-clobber",
+        "success returns its first fileChangeTarget",
+        "read the target first if no reusable observation is available",
+        "renews the same observationId to the verified post-write state",
+        "reuse it only after receiving the successful Tool Result",
+        "never for multiple writes in the same Provider Tool Call batch",
+        "observationRefreshRequired=true",
+        "follow continueWith and read_file again",
+        "Failure, rejection, cancellation, conflict and outcome_unknown do not renew",
+        "never invent them or replay persisted chunks",
+        "follow allowedNextActions",
+        "append/edit changes only the draft",
+        "only a successful commit issues or renews fileChangeTarget",
+        "commit or abort before user-visible narration",
+        "Never bypass file-change approval",
+    ] {
+        assert!(
+            description.contains(invariant),
+            "missing guidance: {invariant}"
+        );
+    }
+
+    // The example is executable documentation, not a source of fabricated observation IDs.
+    let example = description
+        .split_once("Direct create: ")
+        .unwrap()
+        .1
+        .split_once(". For larger content")
+        .unwrap()
+        .0;
+    let args: Value = serde_json::from_str(example).unwrap();
+    validate_wire_shape(&args).unwrap();
+    assert_eq!(args["request"]["operation"], "create");
+    assert!(args["request"].get("observationId").is_none());
+}
+
+#[test]
+fn create_path_guidance_does_not_require_an_existing_observation() {
+    let schema = ApplyPatchTool.definition().input_schema;
+    let branches = schema["properties"]["request"]["oneOf"].as_array().unwrap();
+    for branch in branches {
+        let properties = &branch["properties"];
+        let Some(path) = properties.get("filePath") else {
+            continue;
+        };
+        let description = path["description"].as_str().unwrap();
+        if properties["operation"]["enum"][0] == "create" {
+            assert!(description.contains("New target path"));
+            assert!(description.contains("No prior read required"));
+            assert!(properties.get("observationId").is_none());
+        } else {
+            assert!(description.contains("exact fileChangeTarget.filePath"));
+            assert!(description.contains("read_file or the latest successful apply/commit"));
+            assert!(properties.get("observationId").is_some());
+        }
+    }
 }
 
 #[test]

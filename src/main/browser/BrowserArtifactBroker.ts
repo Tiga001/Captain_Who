@@ -293,12 +293,14 @@ export class BrowserArtifactBroker {
   }
 
   /**
-   * Main/Core-only absolute file for publishing an `image-artifact://` readPath.
+   * Main/Core-only image or PDF file for publishing a canonical Artifact readPath.
    * Never include this path in MCP, Renderer, or model payloads.
    */
   hostOwnedAbsolutePath(reference: BrowserArtifactReference): string | undefined {
     const record = this.artifacts.get(reference.artifactId)
-    if (!record || record.reference.kind !== 'image') return undefined
+    if (!record || (record.reference.kind !== 'image' && record.reference.kind !== 'pdf')) {
+      return undefined
+    }
     if (!sameReference(reference, record.reference)) return undefined
     return record.path
   }

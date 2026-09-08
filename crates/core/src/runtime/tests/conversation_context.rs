@@ -1,6 +1,65 @@
 use super::*;
 
 #[test]
+fn concise_base_contract_keeps_all_tools_and_preview_accounts_for_the_same_prefix() {
+    let input = conversation_context_input(vec![message("user", "你好")]);
+    let capabilities =
+        prepare_runtime_capabilities(&input, "base-wording-budget", &[], true, None).unwrap();
+    let tools = capabilities.initial_tool_set.stable_definitions();
+    assert_eq!(
+        tools
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "apply_patch",
+            "attachments_list",
+            "attachments_list_project",
+            "command_session",
+            "conversation_history",
+            "read_file",
+            "read_image",
+            "run_command",
+            "search_code",
+            "search_files",
+            "skills_activate",
+            "todo_update",
+            "workspace_map",
+        ],
+        "wording compaction must not reduce or replace the base tool set"
+    );
+    let mut request = build_llm_request(input.clone(), tools, None, None, None).unwrap();
+    let detector = ContextCapacityDetector::for_model(
+        &input.model,
+        crate::protocol::AgentApiStyle::OpenAiCompatible,
+        tools,
+    );
+    let costs = detector
+        .inspect(
+            &mut request.context,
+            input.context_window_tokens,
+            sanitize_max_tokens(input.max_tokens),
+        )
+        .context_cost_breakdown();
+    let preview = inspect_context_window(input).unwrap().unwrap();
+    assert_eq!(preview.cost_breakdown.system_tokens, costs.system_tokens);
+    assert_eq!(
+        preview.cost_breakdown.tool_schema_tokens,
+        costs.tool_schema_tokens
+    );
+    // September 2026's thirteen-tool, no-custom-instructions baseline. This is the local
+    // estimator, not provider billing: preserve the reduction without freezing exact wording.
+    assert!(costs.system_tokens < 15_990, "{costs:?}");
+    assert!(costs.tool_schema_tokens < 11_641, "{costs:?}");
+    eprintln!(
+        "base contract local estimate: system={}, tools={}, fixed={}",
+        costs.system_tokens,
+        costs.tool_schema_tokens,
+        costs.system_tokens + costs.tool_schema_tokens
+    );
+}
+
+#[test]
 fn conversation_context_state_incremental_updates_match_full_rebuilds() {
     let mut first_user = message("user", "Inspect the project and update src/lib.rs");
     first_user.created_at = Some(1_000);

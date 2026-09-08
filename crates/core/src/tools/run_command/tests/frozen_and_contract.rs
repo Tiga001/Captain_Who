@@ -408,9 +408,18 @@ fn definition_exposes_the_workspace_dependent_cwd_contract() {
         "activated PDF Skill",
         "Host-owned private working directory",
     ] {
-        assert!(cwd_description.contains(contract), "missing cwd rule: {contract}");
+        assert!(
+            cwd_description.contains(contract),
+            "missing cwd rule: {contract}"
+        );
     }
-    for alias in ["@home", "@desktop", "@documents", "@downloads", "@desktop/project-dir"] {
+    for alias in [
+        "@home",
+        "@desktop",
+        "@documents",
+        "@downloads",
+        "@desktop/project-dir",
+    ] {
         assert!(cwd_description.contains(alias));
     }
     assert!(definition

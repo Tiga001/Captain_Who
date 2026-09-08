@@ -751,6 +751,49 @@ mod tests {
     }
 
     #[test]
+    fn wording_changes_cannot_restore_an_older_frozen_tool_contract() {
+        let registry = registry();
+        let before = EffectiveToolSet::from_permitted_definitions(
+            &registry,
+            registry.definitions(),
+            &BTreeSet::new(),
+        )
+        .unwrap();
+
+        // Both tool and parameter descriptions are part of what the model was allowed to see.
+        // A documentation-only release must not silently substitute its new contract on resume.
+        for schema_description in [false, true] {
+            let mut definitions = registry.definitions();
+            let tool = definitions
+                .iter_mut()
+                .find(|tool| tool.name == "b_stable")
+                .unwrap();
+            if schema_description {
+                tool.input_schema["description"] = json!("Concise parameter guidance");
+            } else {
+                tool.description = "Concise tool guidance".to_string();
+            }
+            let after = EffectiveToolSet::from_permitted_definitions(
+                &registry,
+                definitions,
+                &BTreeSet::new(),
+            )
+            .unwrap();
+            assert_eq!(before.exposed_names, after.exposed_names);
+            assert_eq!(before.dynamic_revision(), after.dynamic_revision());
+            assert_ne!(before.stable_revision(), after.stable_revision());
+            assert_eq!(
+                after
+                    .restore_frozen_checkpoint(&before.checkpoint())
+                    .unwrap_err()
+                    .code(),
+                Some("agent.checkpoint_tool_set_mismatch")
+            );
+            after.validate_checkpoint(&after.checkpoint()).unwrap();
+        }
+    }
+
+    #[test]
     fn inactive_capabilities_and_permission_filtering_do_not_change_stable_revision() {
         let registry = registry();
         let permitted = registry

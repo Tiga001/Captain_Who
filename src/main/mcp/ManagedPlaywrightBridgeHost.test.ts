@@ -101,6 +101,44 @@ class FakeCore {
 }
 
 describe('ManagedPlaywrightBridgeHost', () => {
+  it('passes the private PDF publication source to Core outside the MCP result', async () => {
+    const core = new FakeCore()
+    const managed = hostWith({})
+    const hostArtifactPublishPath = '/private/browser-automation-artifacts/objects/pdf-object'
+    const result = {
+      content: [{ type: 'text' as const, text: 'Created managed PDF Artifact.' }],
+      isError: false
+    }
+    vi.spyOn(managed, 'callTool').mockResolvedValue({ ...result, hostArtifactPublishPath })
+    const bridge = new ManagedPlaywrightBridgeHost({
+      core,
+      sensitiveTargetBindings: targetBindingBroker(),
+      createHost: () => managed
+    })
+    try {
+      core.emitCommand(
+        command({
+          type: 'call_tool',
+          name: 'browser_pdf_save',
+          arguments: { call_reason: 'Publish the fixture PDF.' },
+          timeoutMs: 1_000,
+          authorizationContext: { ...AUTHORIZATION_CONTEXT, triggerToolName: 'browser_pdf_save' }
+        })
+      )
+      await vi.waitFor(() => expect(core.completions).toHaveLength(1))
+      expect(core.completions[0]?.outcome).toEqual({
+        type: 'tool_called',
+        result,
+        hostArtifactPublishPath
+      })
+      const outcome = core.completions[0]!.outcome
+      if (outcome.type !== 'tool_called') throw new Error('Expected a tool result')
+      expect(JSON.stringify(outcome.result)).not.toContain(hostArtifactPublishPath)
+    } finally {
+      await bridge.close()
+    }
+  })
+
   it('ignores the wrong managed Server identity and duplicate active request IDs', async () => {
     const core = new FakeCore()
     let resolveConnect: (() => void) | undefined

@@ -33,7 +33,7 @@ impl AgentTool for ReadFileTool {
     fn definition(&self) -> AgentToolDefinition {
         AgentToolDefinition {
             name: "read_file".to_string(),
-            description: "Read an authorized regular UTF-8 text file and return a run-owned fileChangeTarget for apply_patch. Read the exact target before the first update/delete or Staged begin/update, when current contents are unknown, or when apply_patch requires a fresh observation. Directory listings, workspace_map and search results cannot substitute. apply_patch create and begin/create need no prior read and omit observationId, including an ID from a not-found result. Follow apply_patch's successful-result rules for observation reuse. Without a range, return the complete file within the output token budget; larger files return a lossless continuation cursor."
+            description: "Read an authorized regular UTF-8 text file and return a run-owned fileChangeTarget for apply_patch. Read the exact target before update/delete or Staged begin/update if no reusable fileChangeTarget is available, when current contents are unknown, or when apply_patch requires a fresh observation. Directory listings, workspace_map and search results cannot substitute. apply_patch create and begin/create need no prior read and omit observationId, including an ID from a not-found result. Follow apply_patch's successful-result rules for observation reuse. Without a range, return the complete file within the output token budget; larger files return a lossless continuation cursor."
                 .to_string(),
             input_schema: json!({
                 "type": "object",
@@ -1136,31 +1136,57 @@ mod tests {
         assert!(definition.description.contains("regular UTF-8 text file"));
         assert!(definition
             .description
-            .contains("before the first apply_patch update/delete or Staged begin/update"));
+            .contains("before update/delete or Staged begin/update if no reusable fileChangeTarget is available"));
         assert!(definition
             .description
-            .contains("successful apply_patch result did not return a reusable fileChangeTarget"));
+            .contains("current contents are unknown"));
         assert!(definition
             .description
-            .contains("renews the same observationId"));
+            .contains("apply_patch requires a fresh observation"));
         assert!(definition
             .description
-            .contains("apply_patch create and begin/create omit observationId"));
+            .contains("Directory listings, workspace_map and search results cannot substitute"));
+        assert!(definition.description.contains(
+            "apply_patch create and begin/create need no prior read and omit observationId"
+        ));
         assert!(definition
             .description
-            .contains("observationId must not be supplied to create"));
+            .contains("including an ID from a not-found result"));
         assert!(definition
             .description
-            .contains("Without a workspace, relative paths are invalid"));
-        for alias in ["@home", "@desktop", "@documents", "@downloads"] {
-            assert!(definition.description.contains(alias));
-        }
+            .contains("apply_patch's successful-result rules"));
+        assert!(definition
+            .description
+            .contains("lossless continuation cursor"));
         let path_description = definition.input_schema["properties"]["path"]["description"]
             .as_str()
             .unwrap();
-        assert!(path_description.contains("regular UTF-8 text file"));
+        assert!(path_description.contains("Regular UTF-8 text file"));
+        assert!(path_description.contains("workspace-relative only when a workspace is bound"));
+        for reference in [
+            "@home",
+            "@desktop",
+            "@documents",
+            "@downloads",
+            "@attachments/...",
+            "browser-download:",
+            "artifact://",
+        ] {
+            assert!(path_description.contains(reference));
+        }
         assert!(path_description.contains("workspace_map"));
         assert!(path_description.contains("focusPath"));
+        let cursor = definition.input_schema["properties"]["startByte"]["description"]
+            .as_str()
+            .unwrap();
+        assert!(cursor.contains("nextStartByte"));
+        assert!(cursor.contains("pair with expectedRevision, never startLine"));
+        let revision = definition.input_schema["properties"]["expectedRevision"]["description"]
+            .as_str()
+            .unwrap();
+        assert!(revision.contains("Use only with startByte"));
+        assert!(revision.contains("exact revision to prevent mixing file versions"));
+        assert!(revision.contains("if changed, reread from the beginning"));
     }
 
     #[test]

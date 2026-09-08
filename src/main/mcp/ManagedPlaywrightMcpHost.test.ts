@@ -2707,10 +2707,12 @@ describe('ManagedPlaywrightMcpHost', () => {
         },
         isError: false
       })
-      const { hostImagePublishPath, ...mcpResult } = result
-      expect(hostImagePublishPath).toEqual(expect.stringContaining('browser-automation-artifacts'))
+      const { hostArtifactPublishPath, ...mcpResult } = result
+      expect(hostArtifactPublishPath).toEqual(
+        expect.stringContaining('browser-automation-artifacts')
+      )
       expect(JSON.stringify(mcpResult)).not.toContain(parent)
-      expect(JSON.stringify(mcpResult)).not.toContain(hostImagePublishPath)
+      expect(JSON.stringify(mcpResult)).not.toContain(hostArtifactPublishPath)
       expect(callTool).toHaveBeenLastCalledWith(
         expect.objectContaining({
           arguments: expect.objectContaining({
@@ -2755,7 +2757,7 @@ describe('ManagedPlaywrightMcpHost', () => {
         { scale: 'css', filename: 'page.png', call_reason: 'Take a screenshot.' },
         { authorizationContext: { ...RISK_CONTEXT, callId: 'call-screenshot-too-large' } }
       )
-      expect(result.hostImagePublishPath).toBeUndefined()
+      expect(result.hostArtifactPublishPath).toBeUndefined()
       expect(result.content[0]).toMatchObject({
         type: 'text',
         text: expect.stringContaining('8 MiB read_image limit')
@@ -2954,7 +2956,14 @@ describe('ManagedPlaywrightMcpHost', () => {
         },
         isError: false
       })
-      expect(JSON.stringify(result)).not.toContain(parent)
+      const { hostArtifactPublishPath, ...mcpResult } = result
+      expect(hostArtifactPublishPath).toEqual(
+        expect.stringContaining('browser-automation-artifacts')
+      )
+      expect(await readFile(hostArtifactPublishPath!)).toEqual(
+        Buffer.from('%PDF-1.7\nfixture\n%%EOF\n')
+      )
+      expect(JSON.stringify(mcpResult)).not.toContain(parent)
     } finally {
       await host.close()
       await broker.shutdown()

@@ -1,49 +1,54 @@
 use super::*;
 
 pub(super) fn patch_input_schema() -> Value {
-    let file_path = json!({
+    let create_file_path = json!({
         "type": "string",
         "minLength": 1,
-        "description": "Copy the exact fileChangeTarget.filePath returned by read_file or by the latest successful apply_patch apply/commit for this target. It may be workspace-relative, an authorized absolute local path, or a supported system alias."
+        "description": "New target path: workspace-relative, an authorized absolute path or system alias. No prior read required."
+    });
+    let observed_file_path = json!({
+        "type": "string",
+        "minLength": 1,
+        "description": "Copy this target's exact fileChangeTarget.filePath from read_file or the latest successful apply/commit."
     });
     let observation_id = json!({
         "type": "string",
         "minLength": 1,
-        "description": "Copy the opaque observationId returned by the exact read_file or latest successful apply_patch apply/commit for this target."
+        "description": "Copy this target's exact fileChangeTarget.observationId from read_file or the latest successful apply/commit."
     });
     let transaction_id = json!({
         "type": "string",
         "minLength": 1,
-        "description": "Copy the opaque transactionId returned by begin or status."
+        "description": "Exact Host transactionId from begin or status."
     });
     let index = json!({
         "type": "integer",
         "minimum": 0,
-        "description": "Copy the exact nextIndex returned by the preceding successful mutation or status."
+        "description": "Copy nextIndex from the latest successful mutation or status."
     });
     let draft_revision = json!({
         "type": "integer",
         "minimum": 0,
-        "description": "Copy the exact draftRevision returned by the preceding successful mutation or status."
+        "description": "Copy draftRevision from the latest successful mutation or status."
     });
     let summary = json!({
         "type": "string",
         "maxLength": MAX_SUMMARY_CHARS,
-        "description": "Optional short human-readable summary. Allowed only for apply or commit."
+        "description": "Short human-readable change summary."
     });
     let edits = structured_edits_schema();
     json!({
         "type": "object",
         "properties": {
             "request": {
-                "description": "Exactly one strict FileChange request. Do not add fields from another branch.",
+                "description": "Exactly one branch; no fields from other branches.",
                 "oneOf": [
                     {
                         "type": "object",
                         "properties": {
                             "action": { "type": "string", "enum": ["apply"] },
                             "operation": { "type": "string", "enum": ["create"] },
-                            "filePath": file_path.clone(),
+                            "filePath": create_file_path.clone(),
                             "content": {
                                 "type": "string",
                                 "maxLength": MAX_INLINE_CONTENT_BYTES,
@@ -59,7 +64,7 @@ pub(super) fn patch_input_schema() -> Value {
                         "properties": {
                             "action": { "type": "string", "enum": ["apply"] },
                             "operation": { "type": "string", "enum": ["update"] },
-                            "filePath": file_path.clone(),
+                            "filePath": observed_file_path.clone(),
                             "observationId": observation_id.clone(),
                             "content": {
                                 "type": "string",
@@ -76,7 +81,7 @@ pub(super) fn patch_input_schema() -> Value {
                         "properties": {
                             "action": { "type": "string", "enum": ["apply"] },
                             "operation": { "type": "string", "enum": ["update"] },
-                            "filePath": file_path.clone(),
+                            "filePath": observed_file_path.clone(),
                             "observationId": observation_id.clone(),
                             "edits": edits.clone(),
                             "summary": summary.clone()
@@ -89,7 +94,7 @@ pub(super) fn patch_input_schema() -> Value {
                         "properties": {
                             "action": { "type": "string", "enum": ["apply"] },
                             "operation": { "type": "string", "enum": ["delete"] },
-                            "filePath": file_path.clone(),
+                            "filePath": observed_file_path.clone(),
                             "observationId": observation_id.clone(),
                             "summary": summary.clone()
                         },
@@ -101,7 +106,7 @@ pub(super) fn patch_input_schema() -> Value {
                         "properties": {
                             "action": { "type": "string", "enum": ["begin"] },
                             "operation": { "type": "string", "enum": ["create"] },
-                            "filePath": file_path.clone(),
+                            "filePath": create_file_path,
                         },
                         "required": ["action", "operation", "filePath"],
                         "additionalProperties": false
@@ -111,7 +116,7 @@ pub(super) fn patch_input_schema() -> Value {
                         "properties": {
                             "action": { "type": "string", "enum": ["begin"] },
                             "operation": { "type": "string", "enum": ["update"] },
-                            "filePath": file_path.clone(),
+                            "filePath": observed_file_path,
                             "observationId": observation_id.clone(),
                             "strategy": {
                                 "type": "string",
@@ -193,7 +198,7 @@ fn structured_edits_schema() -> Value {
         "type": "array",
         "minItems": 1,
         "maxItems": 128,
-        "description": "One to 128 ordered exact text edits. Direct edits must leave a target no larger than 240,000 UTF-8 bytes; Staged edits must keep the transaction total at or below 4 MiB. replace matches exact bytes once unless replaceAll=true; no trimming, normalization, or fuzzy matching occurs.",
+        "description": "Apply 1-128 edits in order using exact bytes: no trimming, normalization or fuzzy matching. replace requires one match unless replaceAll=true. Final size limit: Direct 240,000 UTF-8 bytes; Staged 4 MiB.",
         "items": {
             "oneOf": [
                 {

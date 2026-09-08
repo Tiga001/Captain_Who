@@ -1602,9 +1602,9 @@ impl BuiltinCapabilityProvider for HostBuiltinCapabilityProvider {
                 result = &mut invoke => result,
             }
             .map_err(crate::adapters::mcp_runtime::map_invocation_error);
-            let publish_path = runtime.take_host_image_publish_path(&invocation.call_id);
+            let publish_path = runtime.take_host_artifact_publish_path(&invocation.call_id);
             let result = result?;
-            let result = attach_browser_screenshot_read_path(
+            let result = attach_browser_artifact_read_path(
                 result,
                 publish_path,
                 self.storage.as_deref(),
@@ -1678,9 +1678,9 @@ fn map_target_binding_release_reason(
     }
 }
 
-/// Publishes a Host-owned screenshot file into the managed Artifact store and returns a canonical
-/// `readPath` for `read_image`. The source path never survives this function.
-fn attach_browser_screenshot_read_path(
+/// Publishes a Host-owned image or PDF into the managed Artifact store and returns a canonical
+/// `readPath` for subsequent tools. The source path never survives this function.
+fn attach_browser_artifact_read_path(
     mut result: McpToolResult,
     publish_path: Option<String>,
     storage: Option<&mycopilot_core::storage::service::StorageService>,
@@ -1691,7 +1691,7 @@ fn attach_browser_screenshot_read_path(
         .as_mut()
         .and_then(Value::as_object_mut)
     {
-        structured.remove("hostImagePublishPath");
+        structured.remove("hostArtifactPublishPath");
         structured.remove("managedPath");
         structured.remove("privatePath");
         structured.remove("outputDir");
@@ -1723,13 +1723,11 @@ fn attach_browser_screenshot_read_path(
         .and_then(|artifact| artifact.get("mimeType"))
         .and_then(Value::as_str)
         .unwrap_or_default();
-    if kind != Some("image") {
-        return result;
-    }
-    let extension = match mime {
-        "image/png" => "png",
-        "image/jpeg" => "jpg",
-        "image/webp" => "webp",
+    let extension = match (kind, mime) {
+        (Some("image"), "image/png") => "png",
+        (Some("image"), "image/jpeg") => "jpg",
+        (Some("image"), "image/webp") => "webp",
+        (Some("pdf"), "application/pdf") => "pdf",
         _ => return result,
     };
     let source_path = Path::new(&source);
@@ -1758,8 +1756,13 @@ fn attach_browser_screenshot_read_path(
         structured.insert("readPath".to_string(), json!(read_path));
     }
     if let Some(McpContentBlock::Text { text }) = result.content.first_mut() {
-        if !text.contains("read_image.path") {
-            text.push_str(&format!("\nread_image.path: {read_path}"));
+        let input_field = if extension == "pdf" {
+            "run_command.inputs[].path"
+        } else {
+            "read_image.path"
+        };
+        if !text.contains(input_field) {
+            text.push_str(&format!("\n{input_field}: {read_path}"));
         }
     }
     result
@@ -1803,7 +1806,7 @@ fn project_managed_browser_result(result: McpToolResult) -> AgentResult<Value> {
         let mut projected = json!({"artifacts": artifacts});
         if let Some(read_path) = structured
             .get("readPath")
-            .and_then(mycopilot_core::browser_artifacts::safe_image_artifact_read_path)
+            .and_then(mycopilot_core::browser_artifacts::safe_browser_artifact_read_path)
         {
             projected["readPath"] = json!(read_path);
         }
@@ -3466,7 +3469,7 @@ mod tests {
             structured_content: Some(json!({
                 "artifacts": [image.clone()],
                 "readPath": read_path,
-                "hostImagePublishPath": "/tmp/private-output/page.png",
+                "hostArtifactPublishPath": "/tmp/private-output/page.png",
             })),
             is_error: false,
         })
@@ -3480,7 +3483,7 @@ mod tests {
             .contains("private-output"));
         assert!(!serde_json::to_string(&with_read_path)
             .unwrap()
-            .contains("hostImagePublishPath"));
+            .contains("hostArtifactPublishPath"));
 
         let malformed = project_managed_browser_result(McpToolResult {
             content: vec![],
@@ -3543,7 +3546,7 @@ mod tests {
             "owner": "browser_automation",
             "preview": "image"
         });
-        let attached = attach_browser_screenshot_read_path(
+        let attached = attach_browser_artifact_read_path(
             McpToolResult {
                 content: vec![McpContentBlock::Text {
                     text: "Created managed image Artifact “page.png” (68 bytes).".to_string(),
@@ -3551,7 +3554,7 @@ mod tests {
                 structured_content: Some(json!({
                     "status": "completed",
                     "artifacts": [artifact.clone()],
-                    "hostImagePublishPath": source.to_string_lossy(),
+                    "hostArtifactPublishPath": source.to_string_lossy(),
                 })),
                 is_error: false,
             },
@@ -3570,7 +3573,7 @@ mod tests {
         assert!(read_path.starts_with("image-artifact://sha256/"));
         assert_eq!(read_path.len(), "image-artifact://sha256/".len() + 64);
         let attached_json = serde_json::to_string(&attached).unwrap();
-        assert!(!attached_json.contains("hostImagePublishPath"));
+        assert!(!attached_json.contains("hostArtifactPublishPath"));
         assert!(!attached_json.contains("screenshot-object"));
         assert!(attached.content.iter().any(|block| matches!(
             block,
@@ -3584,8 +3587,118 @@ mod tests {
         );
         let projected_json = serde_json::to_string(&projected).unwrap();
         assert!(!projected_json.contains("screenshot-object"));
-        assert!(!projected_json.contains("hostImagePublishPath"));
+        assert!(!projected_json.contains("hostArtifactPublishPath"));
         assert!(!projected_json.contains("managedPath"));
+    }
+
+    #[test]
+    fn pdf_publish_attaches_durable_authorized_read_path_through_result_projections() {
+        use mycopilot_core::storage::service::{ManagedArtifactAuthority, StorageService};
+        use sha2::{Digest, Sha256};
+
+        let directory = tempfile::tempdir().unwrap();
+        let database_path = directory.path().join("storage.sqlite");
+        let storage = StorageService::open(&database_path).unwrap();
+        rusqlite::Connection::open(&database_path)
+            .unwrap()
+            .execute(
+                "INSERT INTO conversations (id, title, created_at, updated_at)
+                 VALUES ('conversation-1', 'test', 1, 1), ('conversation-2', 'unrelated', 1, 1)",
+                [],
+            )
+            .unwrap();
+        let pdf = b"%PDF-1.7\n1 0 obj\n<<>>\nendobj\n%%EOF\n";
+        let source = directory.path().join("pdf-object");
+        fs::write(&source, pdf).unwrap();
+        let artifact = json!({
+            "schemaVersion": 1,
+            "artifactId": "browser-artifact:123e4567-e89b-42d3-a456-426614174000",
+            "kind": "pdf",
+            "displayName": "网页.pdf",
+            "mimeType": "application/pdf",
+            "sizeBytes": pdf.len(),
+            "createdAt": 1_000,
+            "expiresAt": 2_000,
+            "lifecycle": "run",
+            "owner": "browser_automation",
+            "preview": "none"
+        });
+        let attached = attach_browser_artifact_read_path(
+            McpToolResult {
+                content: vec![McpContentBlock::Text {
+                    text: "Created managed PDF Artifact.".to_string(),
+                }],
+                structured_content: Some(json!({
+                    "status": "completed",
+                    "artifacts": [artifact.clone()],
+                    "hostArtifactPublishPath": source.to_string_lossy(),
+                })),
+                is_error: false,
+            },
+            Some(source.to_string_lossy().into_owned()),
+            Some(&storage),
+            Some(ManagedArtifactAuthority {
+                conversation_id: "conversation-1",
+                run_id: "run-1",
+                call_id: "call-pdf",
+            }),
+        );
+        let digest = format!("{:x}", Sha256::digest(pdf));
+        let read_path = format!("artifact://sha256/{digest}");
+        assert_eq!(
+            attached.structured_content.as_ref().unwrap()["readPath"],
+            read_path
+        );
+        assert!(attached.content.iter().any(|block| matches!(
+            block,
+            McpContentBlock::Text { text } if text.contains(&format!("run_command.inputs[].path: {read_path}"))
+                && !text.contains("read_image.path")
+        )));
+        assert!(!source.with_extension("pdf").exists());
+        fs::remove_file(&source).unwrap();
+        drop(storage);
+
+        // The unified object and its grant survive browser source cleanup and reopening storage.
+        let storage = StorageService::open(&database_path).unwrap();
+        let artifact_id = format!("sha256:{digest}");
+        let stored = storage
+            .read_authorized_managed_artifact(&artifact_id, "conversation-1")
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.bytes, pdf);
+        assert_eq!(stored.media_type, "application/pdf");
+        assert!(storage
+            .read_authorized_managed_artifact(&artifact_id, "conversation-2")
+            .unwrap()
+            .is_none());
+
+        let projected = project_managed_browser_result(attached).unwrap();
+        assert_eq!(
+            projected["structuredContent"],
+            json!({ "artifacts": [artifact.clone()], "readPath": read_path })
+        );
+        let result = mycopilot_core::protocol::AgentToolResult {
+            exact_archive_file: None,
+            call_id: "call-pdf".to_string(),
+            tool: "browser_pdf_save".to_string(),
+            ok: true,
+            result: Some(projected.clone()),
+            error: None,
+        };
+        let persisted =
+            mycopilot_core::builtin_capability_tool_result_persistence_projection(&result);
+        assert_eq!(persisted.result.as_ref().unwrap()["readPath"], read_path);
+        assert_eq!(
+            persisted.result.as_ref().unwrap()["artifacts"],
+            json!([artifact])
+        );
+        for json in [
+            serde_json::to_string(&projected).unwrap(),
+            serde_json::to_string(&persisted).unwrap(),
+        ] {
+            assert!(!json.contains("pdf-object"));
+            assert!(!json.contains("hostArtifactPublishPath"));
+        }
     }
 
     #[test]

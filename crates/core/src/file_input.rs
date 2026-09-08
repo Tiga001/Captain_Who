@@ -2206,7 +2206,7 @@ mod tests {
             mount_path: "same-digest.pdf".to_string(),
             source: document_ref.clone(),
         }];
-        prepare_agent_file_input_bindings(
+        let document_bindings = prepare_agent_file_input_bindings(
             None,
             permissions(AgentReadPermission::WorkspaceOnly),
             &context,
@@ -2214,6 +2214,23 @@ mod tests {
             None,
         )
         .unwrap();
+        let prepared = materialize_agent_file_inputs(
+            None,
+            permissions(AgentReadPermission::WorkspaceOnly),
+            &context,
+            &document_bindings,
+            None,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            fs::read(prepared.root().join("same-digest.pdf")).unwrap(),
+            pdf_bytes
+        );
+        assert!(fs::metadata(prepared.root().join("same-digest.pdf"))
+            .unwrap()
+            .permissions()
+            .readonly());
 
         let image_ref = agent_file_input_ref_from_model_path(
             &context,

@@ -815,13 +815,13 @@ export class ManagedPlaywrightMcpHost {
                   screenshot && screenshot.sizeBytes > MAX_READ_IMAGE_BYTES
                     ? 'too_large'
                     : undefined
-                const hostImagePublishPath =
-                  screenshot && !readPathUnavailable
-                    ? this.artifactBroker?.hostOwnedAbsolutePath(screenshot)
+                const hostArtifactPublishPath =
+                  (screenshot || artifact.kind === 'pdf') && !readPathUnavailable
+                    ? this.artifactBroker?.hostOwnedAbsolutePath(artifact)
                     : undefined
                 return artifactToolResult(artifact, {
                   downloads,
-                  ...(hostImagePublishPath ? { hostImagePublishPath } : {}),
+                  ...(hostArtifactPublishPath ? { hostArtifactPublishPath } : {}),
                   ...(readPathUnavailable ? { readPathUnavailable } : {})
                 })
               } finally {

@@ -330,13 +330,13 @@ pub enum ManagedPlaywrightCompletionOutcome {
     },
     ToolCalled {
         result: Value,
-        /// Main/Core-only absolute screenshot file. Never copy this into MCP, Renderer, or model JSON.
+        /// Main/Core-only absolute image or PDF file. Never copy this into MCP, Renderer, or model JSON.
         #[serde(
             default,
             skip_serializing_if = "Option::is_none",
-            rename = "hostImagePublishPath"
+            rename = "hostArtifactPublishPath"
         )]
-        host_image_publish_path: Option<String>,
+        host_artifact_publish_path: Option<String>,
     },
     SensitiveToolPrepared {
         #[serde(rename = "bindingId")]
@@ -497,6 +497,30 @@ mod tests {
                 authorization_context: Box::new(authorization_context),
             }
         );
+    }
+
+    #[test]
+    fn artifact_publish_path_round_trips_outside_the_tool_result() {
+        let wire = json!({
+            "type": "tool_called",
+            "result": {"content": [], "isError": false},
+            "hostArtifactPublishPath": "/private/browser-automation-artifacts/objects/pdf-object"
+        });
+        let outcome: ManagedPlaywrightCompletionOutcome =
+            serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&outcome).unwrap(), wire);
+        let ManagedPlaywrightCompletionOutcome::ToolCalled {
+            result,
+            host_artifact_publish_path,
+        } = outcome
+        else {
+            panic!("expected tool_called");
+        };
+        assert_eq!(
+            host_artifact_publish_path.as_deref(),
+            wire["hostArtifactPublishPath"].as_str()
+        );
+        assert!(!result.to_string().contains("pdf-object"));
     }
 
     #[test]

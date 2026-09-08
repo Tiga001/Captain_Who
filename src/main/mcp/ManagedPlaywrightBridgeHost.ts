@@ -336,11 +336,11 @@ export class ManagedPlaywrightBridgeHost {
               }
             }
           )
-          const { hostImagePublishPath, ...mcpResult } = result
+          const { hostArtifactPublishPath, ...mcpResult } = result
           outcome = {
             type: 'tool_called',
             result: mcpResult,
-            ...(hostImagePublishPath ? { hostImagePublishPath } : {})
+            ...(hostArtifactPublishPath ? { hostArtifactPublishPath } : {})
           }
           break
         }

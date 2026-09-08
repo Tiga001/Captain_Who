@@ -173,8 +173,8 @@ export type ManagedPlaywrightCompletionOutcome =
   | {
       type: 'tool_called'
       result: unknown
-      /** Main/Core-only absolute screenshot file. Never copy this into MCP, Renderer, or model JSON. */
-      hostImagePublishPath?: string
+      /** Main/Core-only absolute image or PDF file. Never copy this into MCP, Renderer, or model JSON. */
+      hostArtifactPublishPath?: string
     }
   | {
       type: 'sensitive_tool_prepared'
@@ -826,21 +826,21 @@ function parseCompletionOutcome(value: unknown): ManagedPlaywrightCompletionOutc
       exactKeys(base, ['type', 'page'])
       return { type: 'tools_listed', page: base.page }
     case 'tool_called': {
-      const hostImagePublishPath =
-        typeof base.hostImagePublishPath === 'string' ? base.hostImagePublishPath : undefined
+      const hostArtifactPublishPath =
+        typeof base.hostArtifactPublishPath === 'string' ? base.hostArtifactPublishPath : undefined
       exactKeys(
         base,
-        hostImagePublishPath === undefined
+        hostArtifactPublishPath === undefined
           ? ['type', 'result']
-          : ['type', 'result', 'hostImagePublishPath']
+          : ['type', 'result', 'hostArtifactPublishPath']
       )
-      if (hostImagePublishPath !== undefined && hostImagePublishPath.length < 1) {
-        throw new Error('Invalid managed Playwright host image publish path')
+      if (hostArtifactPublishPath !== undefined && hostArtifactPublishPath.length < 1) {
+        throw new Error('Invalid managed Playwright host Artifact publish path')
       }
       return {
         type: 'tool_called',
         result: base.result,
-        ...(hostImagePublishPath === undefined ? {} : { hostImagePublishPath })
+        ...(hostArtifactPublishPath === undefined ? {} : { hostArtifactPublishPath })
       }
     }
     case 'sensitive_tool_prepared': {

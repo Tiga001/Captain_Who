@@ -44,10 +44,10 @@ export interface ManagedPlaywrightCallResult {
   structuredContent?: Record<string, unknown>
   isError: boolean
   /**
-   * Main/Core-only absolute screenshot file used to publish an `image-artifact://` readPath.
+   * Main/Core-only absolute image or PDF file used to publish a canonical Artifact readPath.
    * Callers must omit this from the MCP `tools/call` result object.
    */
-  hostImagePublishPath?: string
+  hostArtifactPublishPath?: string
 }
 
 export interface ManagedPlaywrightProtocolSnapshot {

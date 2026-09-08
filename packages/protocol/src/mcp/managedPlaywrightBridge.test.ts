@@ -214,14 +214,14 @@ describe('managed Playwright bridge wire contract', () => {
     ).toThrow()
   })
 
-  it('keeps host screenshot publish paths off the MCP tools/call result object', () => {
+  it('keeps host Artifact publish paths off the MCP tools/call result object', () => {
     const completion = {
       schemaVersion: MANAGED_PLAYWRIGHT_BRIDGE_SCHEMA_VERSION,
       requestId: REQUEST_ID,
       outcome: {
         type: 'tool_called' as const,
         result: { content: [], isError: false },
-        hostImagePublishPath: '/private/browser-automation-artifacts/objects/abc'
+        hostArtifactPublishPath: '/private/browser-automation-artifacts/objects/abc'
       }
     }
     expect(parseManagedPlaywrightCompletionInput(completion)).toEqual(completion)
@@ -248,7 +248,7 @@ describe('managed Playwright bridge wire contract', () => {
         outcome: {
           type: 'tool_called',
           result: { content: [], isError: false },
-          hostImagePublishPath: ''
+          hostArtifactPublishPath: ''
         }
       })
     ).toThrow()

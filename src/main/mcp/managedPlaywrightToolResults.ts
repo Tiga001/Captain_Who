@@ -204,7 +204,7 @@ export function artifactToolResult(
   artifactOrArtifacts: BrowserArtifactReference | readonly BrowserArtifactReference[],
   options: {
     downloads?: readonly BrowserDownloadReference[]
-    hostImagePublishPath?: string
+    hostArtifactPublishPath?: string
     readPathUnavailable?: 'too_large'
   } = {}
 ): ManagedPlaywrightCallResult {
@@ -231,7 +231,9 @@ export function artifactToolResult(
       ...(options.downloads?.length ? { downloads: [...options.downloads] } : {})
     },
     isError: false,
-    ...(options.hostImagePublishPath ? { hostImagePublishPath: options.hostImagePublishPath } : {})
+    ...(options.hostArtifactPublishPath
+      ? { hostArtifactPublishPath: options.hostArtifactPublishPath }
+      : {})
   }
 }
 

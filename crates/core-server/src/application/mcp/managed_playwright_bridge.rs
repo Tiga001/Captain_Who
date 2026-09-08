@@ -144,7 +144,7 @@ pub(crate) struct ManagedPlaywrightHostBridge {
     pending: StdMutex<HashMap<Uuid, PendingRequest>>,
     authorization_contexts:
         StdMutex<HashMap<McpInvocationId, ManagedPlaywrightAuthorizationContext>>,
-    host_image_publish_paths: StdMutex<HashMap<String, String>>,
+    host_artifact_publish_paths: StdMutex<HashMap<String, String>>,
     closed: AtomicBool,
 }
 
@@ -196,7 +196,7 @@ impl ManagedPlaywrightHostBridge {
             outbound: StdMutex::new(None),
             pending: StdMutex::new(HashMap::new()),
             authorization_contexts: StdMutex::new(HashMap::new()),
-            host_image_publish_paths: StdMutex::new(HashMap::new()),
+            host_artifact_publish_paths: StdMutex::new(HashMap::new()),
             closed: AtomicBool::new(false),
         })
     }
@@ -679,14 +679,14 @@ impl ManagedPlaywrightHostBridge {
         }
     }
 
-    fn stash_host_image_publish_path(&self, call_id: String, path: String) {
+    fn stash_host_artifact_publish_path(&self, call_id: String, path: String) {
         if call_id.trim().is_empty()
             || path.trim().is_empty()
             || !std::path::Path::new(&path).is_absolute()
         {
             return;
         }
-        if let Ok(mut paths) = self.host_image_publish_paths.lock() {
+        if let Ok(mut paths) = self.host_artifact_publish_paths.lock() {
             if paths.len() >= MAX_PENDING_REQUESTS {
                 paths.clear();
             }
@@ -694,8 +694,11 @@ impl ManagedPlaywrightHostBridge {
         }
     }
 
-    fn take_host_image_publish_path(&self, call_id: &str) -> Option<String> {
-        self.host_image_publish_paths.lock().ok()?.remove(call_id)
+    fn take_host_artifact_publish_path(&self, call_id: &str) -> Option<String> {
+        self.host_artifact_publish_paths
+            .lock()
+            .ok()?
+            .remove(call_id)
     }
 
     fn send_cancel(&self, request_id: Uuid, reason: ManagedPlaywrightCancelReason) {
@@ -835,13 +838,13 @@ impl ManagedPlaywrightHostBridgePeer {
                 .await?;
             let ManagedPlaywrightCompletionOutcome::ToolCalled {
                 result,
-                host_image_publish_path,
+                host_artifact_publish_path,
             } = outcome
             else {
                 return Err(error_from_outcome(outcome, PendingOperation::CallTool));
             };
-            if let Some(path) = host_image_publish_path {
-                self.bridge.stash_host_image_publish_path(call_id, path);
+            if let Some(path) = host_artifact_publish_path {
+                self.bridge.stash_host_artifact_publish_path(call_id, path);
             }
             serde_json::from_value(result).map_err(|_| {
                 McpError::protocol("managed Playwright tools/call result is invalid")
@@ -1059,8 +1062,8 @@ impl ManagedPlaywrightMcpRuntime {
         Arc::clone(&self.bridge)
     }
 
-    pub(crate) fn take_host_image_publish_path(&self, call_id: &str) -> Option<String> {
-        self.bridge.take_host_image_publish_path(call_id)
+    pub(crate) fn take_host_artifact_publish_path(&self, call_id: &str) -> Option<String> {
+        self.bridge.take_host_artifact_publish_path(call_id)
     }
 
     #[cfg(test)]
@@ -2107,7 +2110,7 @@ mod tests {
                 request_id: params.request_id,
                 outcome: ManagedPlaywrightCompletionOutcome::ToolCalled {
                     result: json!({"content": [], "structuredContent": null, "isError": false}),
-                    host_image_publish_path: None,
+                    host_artifact_publish_path: None,
                 },
             })
             .unwrap());
@@ -2542,7 +2545,7 @@ mod tests {
                             ManagedPlaywrightCompletionOutcome::ToolCalled {
                                 result: json!({"content":[{"type":"text","text":"ok"}],
                                   "structuredContent":null,"isError":false}),
-                                host_image_publish_path: None,
+                                host_artifact_publish_path: None,
                             }
                         }
                     }
@@ -3997,7 +4000,10 @@ mod tests {
             }),
         )
         .await;
-        assert!(pdf.is_error, "managed guest PDF must reject this OOPIF page");
+        assert!(
+            pdf.is_error,
+            "managed guest PDF must reject this OOPIF page"
+        );
         assert_eq!(
             pdf.structured_content
                 .as_ref()
