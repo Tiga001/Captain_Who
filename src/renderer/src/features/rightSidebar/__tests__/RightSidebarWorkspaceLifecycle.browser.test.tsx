@@ -921,7 +921,7 @@ function getPageFrame(container: HTMLElement, moduleId: RightSidebarModuleId): H
 }
 
 function getTabLabels(container: HTMLElement): string[] {
-  return Array.from(container.querySelectorAll<HTMLElement>('.right-sidebar__tab > span')).map(
+  return Array.from(container.querySelectorAll<HTMLElement>('.right-sidebar__tab-label')).map(
     (tab) => tab.textContent ?? ''
   )
 }

@@ -1,7 +1,10 @@
-import { useReducer } from 'react'
-import { userEvent } from 'vitest/browser'
+import { useReducer, useState } from 'react'
+import { Globe } from 'lucide-react'
+import { page, userEvent } from 'vitest/browser'
 import { describe, expect, it, vi } from 'vitest'
 import { render } from 'vitest-browser-react'
+import { frontendConfig, getFrontendCssVariables } from '../../../config/frontendConfig'
+import { classicLightTheme } from '../../../config/themes/classic'
 import { RightSidebarTabStrip } from '../RightSidebarTabStrip'
 import { reduceRightSidebarPlatform } from '../rightSidebarPlatformState'
 import type { RightSidebarPlatformState } from '../rightSidebarPlatformState'
@@ -78,6 +81,86 @@ function Fixture({
 }
 
 describe('RightSidebarTabStrip close targets', () => {
+  it('keeps multiple Agent targets highlighted while the user switches and closes tabs', async () => {
+    function BrowserTabs() {
+      const [state, dispatch] = useReducer(reduceRightSidebarPlatform, {
+        activePageId: 'first',
+        pages: [
+          { id: 'first', moduleId: 'browser', title: '项目资料' },
+          { id: 'second', moduleId: 'browser', title: '百度' },
+          { id: 'third', moduleId: 'browser', title: '构建记录' }
+        ]
+      })
+      const [targets, setTargets] = useState(new Set(['first', 'third']))
+      return (
+        <div
+          style={{
+            ...getFrontendCssVariables(frontendConfig, classicLightTheme),
+            width: 650,
+            padding: 24
+          }}
+        >
+          <RightSidebarTabStrip
+            activePageId={state.activePageId}
+            automationPageIds={targets}
+            availableModules={[]}
+            isMenuOpen={false}
+            modules={[
+              {
+                id: 'browser',
+                icon: Globe,
+                contextBinding: 'global',
+                instancePolicy: 'multiple',
+                retention: 'keep-alive',
+                surfaceKind: 'react',
+                titleKey: 'rightSidebar.browser',
+                unavailablePagePolicy: 'retain-page',
+                createPage: ({ pageId }) => ({
+                  id: pageId,
+                  moduleId: 'browser',
+                  title: 'Browser'
+                }),
+                render: () => null
+              }
+            ]}
+            onActivatePage={(pageId) => dispatch({ type: 'activate', pageId })}
+            onClosePage={(pageId) => dispatch({ type: 'close', pageId })}
+            onMenuOpenChange={() => undefined}
+            onOpenModule={() => undefined}
+            pages={state.pages}
+            t={(key) => key}
+          />
+          <button onClick={() => setTargets(new Set())}>完成任务</button>
+        </div>
+      )
+    }
+    const screen = await render(<BrowserTabs />)
+    const first = screen.getByRole('tab', { name: /项目资料/ })
+    const second = screen.getByRole('tab', { name: '百度' })
+    const marked = () => screen.container.querySelectorAll('[data-automation-active="true"]')
+    expect(marked()).toHaveLength(2)
+    await second.click()
+    await expect.element(second).toHaveAttribute('aria-selected', 'true')
+    expect(marked()).toHaveLength(2)
+    expect(second.element().parentElement).not.toHaveAttribute('data-automation-active')
+    const shell = first.element().parentElement!
+    expect(getComputedStyle(shell, '::after').borderStyle).toBe('solid')
+    expect(getComputedStyle(shell, '::after').pointerEvents).toBe('none')
+    expect(shell.querySelector('.right-sidebar__tab-agent-icon')).not.toBeNull()
+    await page.screenshot({
+      element: screen.container.querySelector<HTMLElement>('.right-sidebar__tab-scroll')!,
+      path: '__screenshots__/RightSidebarTabStrip.browser.test.tsx/browser-agent-targets.png'
+    })
+    await first.hover()
+    await userEvent.click(shell.querySelector<HTMLButtonElement>('.right-sidebar__tab-close')!)
+    await expect.element(first).not.toBeInTheDocument()
+    await expect.element(second).toHaveAttribute('aria-selected', 'true')
+    expect(marked()).toHaveLength(1)
+    await screen.getByRole('button', { name: '完成任务' }).click()
+    expect(marked()).toHaveLength(0)
+    expect(screen.container.querySelector('.right-sidebar__tab-agent-icon')).toBeNull()
+  })
+
   it('closes on the first fast edge press even when pointerup happens after the hover animation', async () => {
     const events: PointerRecord[] = []
     const onClose = vi.fn()

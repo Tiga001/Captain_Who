@@ -2,6 +2,10 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 import type { BrowserContext, ElementHandle, Page, Route } from 'playwright'
 import type { BrowserAgentDownloadSnapshot } from '@mycopilot/protocol'
+import type {
+  BrowserRunSurfaceOwner,
+  BrowserToolSurfaceLeaseOptions
+} from '../browser/BrowserSurfaceTypes'
 import { createConnection } from '@playwright/mcp'
 import { chmod, copyFile, mkdir, mkdtemp, rm, stat, writeFile } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
@@ -266,6 +270,7 @@ export class ManagedPlaywrightMcpHost {
   /** Releases task-scoped Host overlays without closing any manual Browser surface. */
   async releaseRun(runId: string): Promise<void> {
     if (!runId || runId.length > 512) return
+    this.surfaceGroup.releaseRunTarget?.(runId)
     this.sensitiveTargetBindings?.releaseRun(runId)
     await this.clearFrameEditorCandidatesForRun(runId)
     this.offlineRuns.delete(runId)
@@ -335,6 +340,9 @@ export class ManagedPlaywrightMcpHost {
       this.activationIds.add(options.authorizationContext.activationId)
     }
     this.assertRunStateAccess(options.authorizationContext?.runId)
+    if (options.authorizationContext && toolSurfaceLeaseMode(name, modelArguments) !== 'none') {
+      this.surfaceGroup.prepareRunTarget?.(options.authorizationContext)
+    }
     let serverArguments = stripHostArguments(modelArguments)
 
     let dispatchStarted = false
@@ -374,11 +382,14 @@ export class ManagedPlaywrightMcpHost {
                 modelArguments,
                 options.authorizationContext
               )
+              if (operationSignal.aborted) throw cancellationError(operationSignal.reason)
               if (name === 'browser_get_config') {
                 responseReceived = true
                 return managedBrowserConfigResult()
               }
               if (name === 'browser_close') {
+                if (options.authorizationContext)
+                  this.surfaceGroup.releaseRunTarget?.(options.authorizationContext.runId)
                 // The visible surfaces are jointly owned by the user. `browser_close` retires
                 // only this automation generation, matching a shared official BrowserContext;
                 // browser_tabs close remains the sole tab-closing operation.
@@ -408,7 +419,11 @@ export class ManagedPlaywrightMcpHost {
                 })
                 return result
               }
-              surfaceLease = await this.acquireToolSurfaceLease(name, modelArguments)
+              surfaceLease = await this.acquireToolSurfaceLease(
+                name,
+                modelArguments,
+                options.authorizationContext
+              )
               const surfaceFailure = surfaceLease
                 ? this.surfaceFailureForLease(surfaceLease)
                 : undefined
@@ -475,8 +490,11 @@ export class ManagedPlaywrightMcpHost {
                 Boolean(surfaceLease)
               )
               if (targetCreationIntent) {
-                finishTargetCreationIntent =
-                  this.surfaceGroup.beginTargetCreationIntent(targetCreationIntent)
+                finishTargetCreationIntent = this.surfaceGroup.beginTargetCreationIntent(
+                  targetCreationIntent,
+                  undefined,
+                  options.authorizationContext
+                )
               }
               const connection = await this.ensureConnected()
               await this.ensureOfficialCatalog(connection, operationSignal)
@@ -918,8 +936,19 @@ export class ManagedPlaywrightMcpHost {
 
   private async acquireToolSurfaceLease(
     name: string,
-    modelArguments: Readonly<Record<string, unknown>>
+    modelArguments: Readonly<Record<string, unknown>>,
+    owner?: BrowserRunSurfaceOwner
   ): Promise<ManagedPlaywrightToolSurfaceLease | undefined> {
+    const leaseOptions: BrowserToolSurfaceLeaseOptions | undefined = owner
+      ? {
+          owner,
+          selectTarget: name === 'browser_tabs' && modelArguments.action === 'select',
+          contextOnly:
+            name === 'browser_tabs' &&
+            (modelArguments.action === 'list' ||
+              (modelArguments.action === 'close' && modelArguments.index !== undefined))
+        }
+      : undefined
     if (
       name === 'browser_tabs' &&
       (modelArguments.action === 'select' || modelArguments.action === 'close') &&
@@ -928,14 +957,17 @@ export class ManagedPlaywrightMcpHost {
       if (!Number.isSafeInteger(modelArguments.index) || (modelArguments.index as number) < 0) {
         throw new ManagedPlaywrightMcpHostError('browser.target_closed')
       }
-      return await this.surfaceGroup.beginToolSurfaceLeaseByIndex(modelArguments.index as number)
+      return await this.surfaceGroup.beginToolSurfaceLeaseByIndex(
+        modelArguments.index as number,
+        leaseOptions
+      )
     }
     const mode = toolSurfaceLeaseMode(name, modelArguments)
     if (mode === 'none') return undefined
     if (mode === 'creating') {
-      return await this.surfaceGroup.beginToolSurfaceLease()
+      return await this.surfaceGroup.beginToolSurfaceLease(leaseOptions)
     }
-    const lease = await this.surfaceGroup.beginExistingToolSurfaceLease()
+    const lease = await this.surfaceGroup.beginExistingToolSurfaceLease(leaseOptions)
     if (!lease && mode === 'optional_existing') {
       const retainedSurfaces = this.surfaceGroup.listSurfaces()
       if (retainedSurfaces.length === 0) return undefined
@@ -946,10 +978,16 @@ export class ManagedPlaywrightMcpHost {
       // Rebind only when one live page is uniquely identifiable. With multiple pages and no
       // trusted selection, fail closed instead of guessing a target or calling ensureSurface(),
       // which could reveal or create a page while trying to recover selection.
-      if (retainedSurfaces.length !== 1) {
+      if (
+        retainedSurfaces.length !== 1 &&
+        !(name === 'browser_tabs' && modelArguments.action === 'list')
+      ) {
         throw new ManagedPlaywrightMcpHostError('browser.surface_unavailable')
       }
-      return await this.surfaceGroup.beginToolSurfaceLeaseByIndex(retainedSurfaces[0]!.index)
+      return await this.surfaceGroup.beginToolSurfaceLeaseByIndex(
+        retainedSurfaces[0]!.index,
+        leaseOptions
+      )
     }
     if (!lease && mode === 'existing') {
       throw new ManagedPlaywrightMcpHostError('browser.target_closed')
@@ -1010,7 +1048,8 @@ export class ManagedPlaywrightMcpHost {
         toolId: toolName,
         url
       })
-      finishIntent = surfaceGroup.beginTargetCreationIntent('interactive', authority)
+      if (input.signal.aborted) throw cancellationError(input.signal.reason)
+      finishIntent = surfaceGroup.beginTargetCreationIntent('interactive', authority, authorization)
 
       connection = await this.ensureConnected()
       await this.ensureOfficialCatalog(connection, input.signal)
@@ -1249,7 +1288,7 @@ export class ManagedPlaywrightMcpHost {
     const profileScoped =
       sensitiveBindingScopeForInvocation(reviewed.rawName, modelArguments) ===
       'managed_browser_profile'
-    const target = profileScoped ? undefined : this.getActiveBrowserTarget()
+    const target = profileScoped ? undefined : this.getActiveBrowserTarget(authorizationContext)
     const lease = validateSensitiveToolGrant({
       reviewed,
       modelArguments,
@@ -1566,13 +1605,13 @@ export class ManagedPlaywrightMcpHost {
     return surface && (surface.loadError || surface.crashError) ? surface : undefined
   }
 
-  private getActiveBrowserTarget(): {
+  private getActiveBrowserTarget(owner?: BrowserRunSurfaceOwner): {
     surfaceId: string
     generation: number
     navigationEpoch: number
     origin: string
   } {
-    const target = this.surfaceGroup.getSensitiveTargetIdentity()
+    const target = this.surfaceGroup.getSensitiveTargetIdentity(owner)
     if (!target) throw new ManagedPlaywrightSensitiveGrantError('origin_drifted')
     return target
   }
@@ -2069,6 +2108,7 @@ export class ManagedPlaywrightMcpHost {
   async close(): Promise<void> {
     if (this.closed) return
     this.closed = true
+    this.surfaceGroup.clearRunTargets?.()
     await this.cleanupManagedState()
     await this.disposeConnection(true)
     await Promise.allSettled(

@@ -76,14 +76,30 @@
 
 .right-sidebar__tab-shell[data-automation-active='true']::after {
   position: absolute;
-  top: 4px;
-  left: 5px;
-  width: 6px;
-  height: 6px;
+  inset: 0;
   content: '';
-  background: var(--mc-color-text-accent);
-  border-radius: 999px;
+  border: 1.5px solid var(--mc-color-text-accent);
+  border-radius: 13px;
   pointer-events: none;
+}
+
+.right-sidebar__tab .right-sidebar__tab-icon {
+  position: relative;
+  display: inline-flex;
+  flex: 0 0 18px;
+  width: 18px;
+  height: 18px;
+  overflow: visible;
+}
+
+.right-sidebar__tab .right-sidebar__tab-agent-icon {
+  position: absolute;
+  inset: -2px;
+  width: 22px;
+  height: 22px;
+  color: var(--mc-color-text-accent);
+  background: var(--mc-color-surface-right-panel);
+  border-radius: 4px;
 }
 
 .right-sidebar__tab {
@@ -363,6 +379,13 @@
 
 .right-sidebar__page[data-activity='foreground'] {
   content-visibility: visible;
+}
+
+/* Agent pages need animation frames for Playwright's actionability checks even in the
+   background. Opacity, pointer-events and inert keep them out of the user's current page. */
+.right-sidebar__page[data-agent-rendering='true'] {
+  content-visibility: visible;
+  visibility: visible;
 }
 
 .right-sidebar__home {

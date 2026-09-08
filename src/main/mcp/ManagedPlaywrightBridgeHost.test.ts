@@ -297,6 +297,114 @@ describe('ManagedPlaywrightBridgeHost', () => {
     }
   })
 
+  it('cancels a finished run while queued without cancelling another run or dispatching late', async () => {
+    const core = new FakeCore()
+    let release!: (value: unknown) => void
+    let markStarted!: () => void
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve
+    })
+    const callTool = vi.fn<ManagedMcpClient['callTool']>(async (request) => {
+      if (request.name === 'browser_tabs') return { content: [], isError: false }
+      markStarted()
+      return await new Promise((resolve) => {
+        release = resolve
+      })
+    })
+    const releaseRunTarget = vi.fn()
+    const group = singleSurfaceGroupAdapter()
+    group.prepareRunTarget = vi.fn()
+    const managed = hostWith({ callTool, surfaceGroup: group })
+    const bridge = new ManagedPlaywrightBridgeHost({
+      core,
+      sensitiveTargetBindings: targetBindingBroker(),
+      releaseRunTarget,
+      createHost: () => managed
+    })
+    try {
+      const first = command({
+        type: 'call_tool',
+        name: 'browser_snapshot',
+        arguments: { call_reason: 'Read the first run page.' },
+        timeoutMs: 5_000,
+        authorizationContext: AUTHORIZATION_CONTEXT
+      })
+      core.emitCommand(first)
+      await started
+      const queued = command({
+        type: 'call_tool',
+        name: 'browser_snapshot',
+        arguments: { call_reason: 'Read the second run page.' },
+        timeoutMs: 5_000,
+        authorizationContext: {
+          ...AUTHORIZATION_CONTEXT,
+          runId: 'run-finished',
+          callId: 'call-queued'
+        }
+      })
+      core.emitCommand(queued)
+      await vi.waitFor(() => expect(group.prepareRunTarget).toHaveBeenCalledTimes(2))
+      core.emitAgentEvent({
+        type: 'done',
+        runId: 'run-finished',
+        success: false,
+        status: 'cancelled'
+      })
+      await vi.waitFor(() => expect(core.completions).toHaveLength(1))
+      expect(core.completions[0]).toMatchObject({
+        requestId: queued.requestId,
+        outcome: {
+          type: 'error',
+          code: 'cancelled',
+          dispatchCertainty: 'definitely_not_dispatched'
+        }
+      })
+      expect(releaseRunTarget).toHaveBeenCalledExactlyOnceWith('run-finished')
+      expect(core.dispatchPhases.filter((phase) => phase.requestId === queued.requestId)).toEqual(
+        []
+      )
+      release({ content: [], isError: false })
+      await vi.waitFor(() => expect(core.completions).toHaveLength(2))
+      expect(core.completions[1]).toMatchObject({
+        requestId: first.requestId,
+        outcome: { type: 'tool_called' }
+      })
+      expect(
+        callTool.mock.calls.filter(([request]) => request.name === 'browser_snapshot')
+      ).toHaveLength(1)
+    } finally {
+      await bridge.close()
+    }
+  })
+
+  it('releases target markers on terminal events before an MCP Host has been constructed', async () => {
+    const core = new FakeCore()
+    const createHost = vi.fn(() => hostWith({}))
+    const releaseRunTarget = vi.fn()
+    const bridge = new ManagedPlaywrightBridgeHost({
+      core,
+      createHost,
+      releaseRunTarget,
+      sensitiveTargetBindings: targetBindingBroker()
+    })
+    core.emitAgentEvent({
+      type: 'done',
+      runId: 'run-preflight',
+      success: false,
+      status: 'waiting_for_approval'
+    })
+    expect(releaseRunTarget).not.toHaveBeenCalled()
+    core.emitAgentEvent({
+      type: 'done',
+      runId: 'run-preflight',
+      success: false,
+      status: 'cancelled'
+    })
+    expect(releaseRunTarget).toHaveBeenCalledExactlyOnceWith('run-preflight')
+    expect(createHost).not.toHaveBeenCalled()
+    await bridge.close()
+  })
+
   it('does not apply the bridge envelope deadline to an admitted call_tool', async () => {
     vi.useFakeTimers()
     try {

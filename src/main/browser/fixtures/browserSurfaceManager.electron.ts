@@ -298,7 +298,32 @@ async function main(): Promise<void> {
     if (!reattachedPage) throw new Error('reattached page missing')
     const retainedText = await reattachedPage.locator('#output').textContent()
 
+    const runA = { runId: 'fixture-run-a', activationId: 'fixture-activation-a' }
+    const runB = { runId: 'fixture-run-b', activationId: 'fixture-activation-b' }
+    manager.prepareRunTarget(runA)
     const created = await manager.createSurface({ url: `${fixtureUrl}?tab=second` })
+    manager.prepareRunTarget(runB)
+    await setFixtureVisibility(window, SURFACE_ID, false)
+    const leaseA = await manager.beginToolSurfaceLease({ owner: runA })
+    const boundPageA = (await manager.getBrowserContext()).pages()[await leaseA.resolveIndex()]!
+    await boundPageA.bringToFront()
+    await boundPageA
+      .getByLabel('Message', { exact: true })
+      .fill('background-run', { timeout: 5_000 })
+    await boundPageA.getByRole('button', { name: 'Apply' }).click({ timeout: 5_000 })
+    const backgroundRunText = await boundPageA.locator('#output').textContent()
+    const visibleTabStayedSecond =
+      manager.listSurfaces().find((surface) => surface.isActive)?.surfaceId === created.surfaceId
+    // Restore the fixture's earlier content before continuing its existing lifecycle checks.
+    await boundPageA.getByLabel('Message', { exact: true }).fill('hidden')
+    await boundPageA.getByRole('button', { name: 'Apply' }).click()
+    leaseA.finish()
+    const leaseB = await manager.beginToolSurfaceLease({ owner: runB })
+    const secondRunTarget = leaseB.surfaceId === created.surfaceId
+    leaseB.finish()
+    manager.releaseRunTarget(runA.runId)
+    manager.releaseRunTarget(runB.runId)
+    await setFixtureVisibility(window, SURFACE_ID, true)
     const secondContext = await manager.getBrowserContext()
     const secondPage = secondContext.pages()[0]
     if (!secondPage) throw new Error('second managed page missing')
@@ -363,6 +388,9 @@ async function main(): Promise<void> {
         inputValueAfterFill,
         mainWindowAliveAfterClose,
         multiTab: {
+          backgroundRunText,
+          visibleTabStayedSecond,
+          secondRunTarget,
           createdSurfaceId: created.surfaceId,
           selectedRetainedText,
           secondTitle,
@@ -447,7 +475,11 @@ async function ensureFixtureSurface(
       webview.setAttribute('src', ${JSON.stringify(bootstrapUrl)})
       webview.style.width = '320px'
       webview.style.height = '220px'
-      document.querySelector('#host').appendChild(webview)
+      const wrapper = document.createElement('section')
+      wrapper.className = 'fixture-page'
+      wrapper.style.cssText = 'position:absolute;inset:0;width:320px;height:220px'
+      wrapper.append(webview)
+      document.querySelector('#host').appendChild(wrapper)
     })
   })()`)
 }
@@ -492,7 +524,15 @@ async function setFixtureVisibility(
 ): Promise<void> {
   await window.webContents.executeJavaScript(`(() => {
     const webview = document.querySelector('webview[data-surface-id=${JSON.stringify(surfaceId)}]')
-    if (webview) webview.hidden = ${JSON.stringify(!visible)}
+    if (!webview) return
+    const wrapper = webview.closest('.fixture-page')
+    if (!wrapper) throw new Error('fixture page wrapper missing')
+    // Match the production keep-alive sidebar's background-page rendering rules.
+    wrapper.style.visibility = 'visible'
+    wrapper.style.opacity = ${JSON.stringify(visible ? '1' : '0')}
+    wrapper.style.pointerEvents = ${JSON.stringify(visible ? 'auto' : 'none')}
+    wrapper.style.contentVisibility = 'visible'
+    wrapper.inert = ${JSON.stringify(!visible)}
   })()`)
 }
 

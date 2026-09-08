@@ -21,6 +21,9 @@ interface FixtureResult {
   mainWindowAliveAfterClose: boolean
   minimizedTitle: string
   multiTab: {
+    backgroundRunText: string
+    visibleTabStayedSecond: boolean
+    secondRunTarget: boolean
     createdSurfaceId: string
     popupKeptOpenerActive: boolean
     popupTitle: string
@@ -106,6 +109,9 @@ describe.runIf(process.platform === 'darwin')('BrowserSurfaceManager Electron fi
         mainWindowAliveAfterClose: true,
         minimizedTitle: 'Browser Surface Fixture',
         multiTab: {
+          backgroundRunText: 'applied:background-run',
+          visibleTabStayedSecond: true,
+          secondRunTarget: true,
           createdSurfaceId: 'right-sidebar-browser-electron-fixture-second',
           popupKeptOpenerActive: true,
           popupTitle: 'Browser Surface Fixture',

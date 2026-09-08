@@ -68,7 +68,10 @@ export interface ManagedPlaywrightSensitiveTargetBindingBrokerOptions {
   beginDispatchFence: (
     target: ManagedPlaywrightSensitiveTargetIdentity
   ) => ManagedPlaywrightSensitiveDispatchFence
-  getActiveTarget: () => ManagedPlaywrightSensitiveTargetIdentity | null
+  getActiveTarget: (owner: {
+    runId: string
+    activationId: string
+  }) => ManagedPlaywrightSensitiveTargetIdentity | null
   maxBindings?: number
   now?: () => number
   releasePreparedFiles?: (owner: { runId: string; callId: string }) => void
@@ -110,7 +113,7 @@ export class ManagedPlaywrightSensitiveTargetBindingBroker implements ManagedPla
   private readonly activeLeases = new Set<ActiveBindingLease>()
   private readonly beginDispatchFence: ManagedPlaywrightSensitiveTargetBindingBrokerOptions['beginDispatchFence']
   private readonly byRequestId = new Map<string, string>()
-  private readonly getActiveTarget: () => ManagedPlaywrightSensitiveTargetIdentity | null
+  private readonly getActiveTarget: ManagedPlaywrightSensitiveTargetBindingBrokerOptions['getActiveTarget']
   private readonly maxBindings: number
   private readonly now: () => number
   private readonly releasePreparedFiles: NonNullable<
@@ -165,7 +168,7 @@ export class ManagedPlaywrightSensitiveTargetBindingBroker implements ManagedPla
       throw new ManagedPlaywrightSensitiveTargetBindingError('expired')
     }
     const target =
-      bindingScope === 'managed_surface' ? normalizeTarget(this.getActiveTarget()) : undefined
+      bindingScope === 'managed_surface' ? normalizeTarget(this.getActiveTarget(input)) : undefined
     if (bindingScope === 'managed_surface' && !target) {
       throw new ManagedPlaywrightSensitiveTargetBindingError('surface_unavailable')
     }
@@ -361,7 +364,7 @@ export class ManagedPlaywrightSensitiveTargetBindingBroker implements ManagedPla
       this.deleteRecord(record)
       throw new ManagedPlaywrightSensitiveTargetBindingError('drifted')
     }
-    const current = normalizeTarget(this.getActiveTarget())
+    const current = normalizeTarget(this.getActiveTarget(record))
     if (
       !current ||
       current.surfaceId !== record.target.surfaceId ||

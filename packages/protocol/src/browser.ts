@@ -201,6 +201,8 @@ export interface BrowserSurfaceState {
   surfaceId: string
   surfaceInstanceId: string
   stateRevision: number
+  /** Live Main-owned task binding; never a restriction on manual page input. */
+  isAgentTarget?: boolean
   url: string | null
   title: string | null
   faviconUrl: string | null
@@ -573,6 +575,7 @@ export function parseBrowserSurfaceState(value: unknown): BrowserSurfaceState {
     'surfaceId',
     'surfaceInstanceId',
     'stateRevision',
+    'isAgentTarget',
     'url',
     'title',
     'faviconUrl',
@@ -588,6 +591,11 @@ export function parseBrowserSurfaceState(value: unknown): BrowserSurfaceState {
     surfaceId: parseBrowserSurfaceId(record.surfaceId),
     surfaceInstanceId: parseBrowserSurfaceInstanceId(record.surfaceInstanceId),
     stateRevision: expectNonNegativeSelectionRevision(record.stateRevision),
+    ...(record.isAgentTarget === undefined
+      ? {}
+      : {
+          isAgentTarget: expectBoolean(record.isAgentTarget, 'browser surface agent target')
+        }),
     url: record.url === null ? null : parseBrowserNavigationUrl(record.url),
     title: parseNullableBoundedText(record.title, 'browser surface title', 256),
     faviconUrl: parseNullableHttpUrl(record.faviconUrl, 'browser surface favicon URL', 4_096),

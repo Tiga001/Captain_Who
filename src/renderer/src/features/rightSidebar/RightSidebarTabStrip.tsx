@@ -11,7 +11,7 @@ import type {
 
 interface RightSidebarTabStripProps {
   activePageId: string | null
-  automationPageId?: string
+  automationPageIds?: ReadonlySet<string>
   availableModules: RightSidebarModuleDefinition[]
   dragRegion?: boolean
   isMenuOpen: boolean
@@ -27,7 +27,7 @@ interface RightSidebarTabStripProps {
 
 export function RightSidebarTabStrip({
   activePageId,
-  automationPageId,
+  automationPageIds,
   availableModules,
   dragRegion = true,
   isMenuOpen,
@@ -108,6 +108,7 @@ export function RightSidebarTabStrip({
         {pages.map((page) => {
           const Icon = modules.find((module) => module.id === page.moduleId)?.icon
           const selected = page.id === activePageId
+          const automationActive = automationPageIds?.has(page.id) === true
           const iconUrl = page.iconUrl?.trim()
           const transient =
             page.moduleId === 'files' &&
@@ -117,7 +118,7 @@ export function RightSidebarTabStrip({
             <div
               className="right-sidebar__tab-shell"
               data-active={selected ? 'true' : undefined}
-              data-automation-active={page.id === automationPageId ? 'true' : undefined}
+              data-automation-active={automationActive ? 'true' : undefined}
               key={page.id}
             >
               <button
@@ -125,24 +126,49 @@ export function RightSidebarTabStrip({
                 type="button"
                 role="tab"
                 aria-selected={selected}
+                aria-label={
+                  automationActive
+                    ? `${page.title} · ${t('agent.builtinCapability.activity.browserAutomation')}`
+                    : undefined
+                }
                 data-active={selected ? 'true' : undefined}
                 data-file-preview-state={transient ? 'transient' : undefined}
                 onClick={() => onActivatePage(page.id)}
               >
-                {iconUrl ? (
-                  <img
-                    className="right-sidebar__tab-favicon"
-                    src={iconUrl}
-                    alt=""
-                    aria-hidden="true"
-                    onError={(event) => {
-                      event.currentTarget.style.display = 'none'
-                    }}
-                  />
-                ) : (
-                  Icon && <Icon aria-hidden="true" />
-                )}
-                <span>{page.title}</span>
+                <span className="right-sidebar__tab-icon">
+                  {iconUrl ? (
+                    <img
+                      className="right-sidebar__tab-favicon"
+                      src={iconUrl}
+                      alt=""
+                      aria-hidden="true"
+                      onError={(event) => {
+                        event.currentTarget.style.display = 'none'
+                      }}
+                    />
+                  ) : (
+                    Icon && <Icon aria-hidden="true" />
+                  )}
+                  {automationActive && (
+                    <svg
+                      className="right-sidebar__tab-agent-icon"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="1.8"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      aria-hidden="true"
+                    >
+                      <path d="M8 4V2m-6 8H1m14-2h1" />
+                      <rect x="2.5" y="4.5" width="11" height="9" rx="2.5" />
+                      <path d="M6 8v1m4-1v1M3 20v-2a3 3 0 0 1 3-3h2" />
+                      <rect x="10" y="12" width="12" height="8" rx="1.5" />
+                      <path d="M16 20v2m-4 0h8" />
+                    </svg>
+                  )}
+                </span>
+                <span className="right-sidebar__tab-label">{page.title}</span>
               </button>
               <button
                 className="right-sidebar__tab-close"

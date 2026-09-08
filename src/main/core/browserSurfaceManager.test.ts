@@ -2111,6 +2111,133 @@ describe('BrowserSurfaceManager', () => {
     await manager.shutdown()
   })
 
+  it('keeps run targets and approval identities across UI changes, shared manual input, and reconnects', async () => {
+    const sendState = vi.fn()
+    const { host, manager } = createHarness({ sendState })
+    const first = attachGuest(manager, host, 2, 'run-page-a')
+    const second = attachGuest(manager, host, 3, 'run-page-b')
+    first.url = 'https://a.example.test/form'
+    second.url = 'https://b.example.test/docs'
+    const ownerA = { runId: 'run-a', activationId: 'activation-a' }
+    const ownerB = { runId: 'run-b', activationId: 'activation-b' }
+    const sharedOwner = { runId: 'run-shared', activationId: 'activation-shared' }
+    const firstSelection = selectBoundSurface(manager, host, 'run-page-a', 1)
+    manager.prepareRunTarget(ownerA)
+    manager.prepareRunTarget(sharedOwner)
+    selectBoundSurface(manager, host, 'run-page-b', 2)
+    manager.prepareRunTarget(ownerB)
+    await manager.getBrowserContext()
+    const leaseA = await manager.beginToolSurfaceLease({ owner: ownerA })
+    expect(leaseA.surfaceId).toBe('run-page-a')
+    // Preparing B's approval while A executes must never inherit A's in-flight lease.
+    expect(manager.getSensitiveTargetIdentity(ownerB)?.surfaceId).toBe('run-page-b')
+    expect(manager.getSensitiveTargetIdentity(ownerA)?.surfaceId).toBe('run-page-a')
+    const keyboardEvent = { preventDefault: vi.fn() }
+    first.emit('before-input-event', keyboardEvent, { type: 'keyDown', key: 'x' })
+    expect(keyboardEvent.preventDefault).not.toHaveBeenCalled()
+    expect(manager.listSurfaces().find((surface) => surface.isActive)?.surfaceId).toBe('run-page-b')
+    leaseA.finish()
+    const leaseB = await manager.beginToolSurfaceLease({ owner: ownerB })
+    expect(leaseB.surfaceId).toBe('run-page-b')
+    leaseB.finish()
+    await manager.detachAutomation()
+    const renewedA = await manager.beginToolSurfaceLease({
+      owner: { ...ownerA, activationId: 'renewed-a' }
+    })
+    expect(renewedA.surfaceId).toBe('run-page-a')
+    renewedA.finish()
+    const stateInput = {
+      schemaVersion: 1 as const,
+      surfaceId: 'run-page-a',
+      surfaceInstanceId: firstSelection.surfaceInstanceId!
+    }
+    expect(manager.getSurfaceState(host.asWebContents(), stateInput).isAgentTarget).toBe(true)
+    manager.releaseRunTarget(ownerA.runId)
+    expect(manager.getSurfaceState(host.asWebContents(), stateInput).isAgentTarget).toBe(true)
+    manager.releaseRunTarget(sharedOwner.runId)
+    expect(manager.getSurfaceState(host.asWebContents(), stateInput).isAgentTarget).toBe(false)
+    expect(sendState).toHaveBeenLastCalledWith(
+      host,
+      expect.objectContaining({ surfaceId: 'run-page-a', isAgentTarget: false })
+    )
+    expect(first.isDestroyed()).toBe(false)
+    expect(second.isDestroyed()).toBe(false)
+  })
+
+  it('does not resurrect a completed run when a surface lease finishes attaching late', async () => {
+    const { host, manager } = createHarness()
+    attachGuest(manager, host, 2, 'late-binding')
+    const selection = selectBoundSurface(manager, host, 'late-binding', 1)
+    const owner = { runId: 'run-late', activationId: 'activation-late' }
+    for (const begin of [
+      () => manager.beginToolSurfaceLease({ owner }),
+      () => manager.beginExistingToolSurfaceLease({ owner }),
+      () => manager.beginToolSurfaceLeaseByIndex(0, { owner, selectTarget: true })
+    ]) {
+      manager.prepareRunTarget(owner)
+      const pending = begin()
+      manager.releaseRunTarget(owner.runId)
+      await expect(pending).rejects.toThrow('browser.target_closed')
+      expect(
+        manager.getSurfaceState(host.asWebContents(), {
+          schemaVersion: 1,
+          surfaceId: 'late-binding',
+          surfaceInstanceId: selection.surfaceInstanceId!
+        }).isAgentTarget
+      ).toBe(false)
+    }
+  })
+
+  it('does not inherit a replacement page and permits explicit recovery without stealing the visible tab', async () => {
+    let groupTransport!: ConnectOverCDPTransport
+    const { host, manager, commands } = createHarness({
+      connectOverCdp: async (transport) => {
+        groupTransport = transport
+        return createFakeBrowser(transport).browser
+      }
+    })
+    const first = attachGuest(manager, host, 2, 'bound-original')
+    attachGuest(manager, host, 3, 'bound-other')
+    const owner = { runId: 'target-run', activationId: 'target-activation' }
+    selectBoundSurface(manager, host, 'bound-original', 1)
+    manager.prepareRunTarget(owner)
+    selectBoundSurface(manager, host, 'bound-other', 2)
+    await manager.getBrowserContext()
+    const cdp = createCdpHarness(groupTransport)
+    await cdp.send('Target.setAutoAttach', {
+      autoAttach: true,
+      flatten: true,
+      waitForDebuggerOnStart: false
+    })
+    const sessions = cdp.events
+      .filter((event) => event.method === 'Target.attachedToTarget' && !event.sessionId)
+      .map((event) => (event.params as { sessionId: string }).sessionId)
+    const lease = await manager.beginToolSurfaceLease({ owner })
+    const commandCount = commands.length
+    await cdp.send('Page.bringToFront', undefined, sessions[0])
+    expect(commands).toHaveLength(commandCount)
+    expect(manager.listSurfaces().find((surface) => surface.isActive)?.surfaceId).toBe(
+      'bound-other'
+    )
+    lease.finish()
+    first.destroy()
+    attachGuest(manager, host, 4, 'bound-original')
+    await expect(manager.beginToolSurfaceLease({ owner })).rejects.toMatchObject({
+      code: 'browser.target_closed'
+    })
+    const listing = await manager.beginExistingToolSurfaceLease({ owner, contextOnly: true })
+    listing?.finish()
+    await expect(manager.beginToolSurfaceLease({ owner })).rejects.toMatchObject({
+      code: 'browser.target_closed'
+    })
+    const selection = await manager.beginToolSurfaceLeaseByIndex(0, { owner, selectTarget: true })
+    await cdp.send('Page.bringToFront', undefined, sessions[1])
+    selection.finish()
+    const next = await manager.beginToolSurfaceLease({ owner })
+    expect(next.surfaceId).toBe('bound-other')
+    next.finish()
+  })
+
   it('reuses the trusted manually selected tab while admitting only its managed SurfaceGroup', async () => {
     const { broker, host, manager } = createHarness()
     const manualOne = attachGuest(manager, host, 2, 'manual-one')
@@ -2597,7 +2724,11 @@ describe('BrowserSurfaceManager', () => {
       }),
       finish: vi.fn()
     }
-    const finishIntent = manager.beginTargetCreationIntent('interactive', authority)
+    const owner = { runId: 'run-create', activationId: 'activation-create' }
+    const otherOwner = { runId: 'run-other', activationId: 'activation-other' }
+    manager.prepareRunTarget(owner)
+    manager.prepareRunTarget(otherOwner)
+    const finishIntent = manager.beginTargetCreationIntent('interactive', authority, owner)
 
     const originalAdd = broker.addSurfaceToGroup.bind(broker)
     const starts: string[] = []
@@ -2670,6 +2801,12 @@ describe('BrowserSurfaceManager', () => {
     ])
     finishIntent()
     expect(authority.finish).toHaveBeenCalledOnce()
+    const createdLease = await manager.beginToolSurfaceLease({ owner })
+    expect(createdLease.surfaceId).toBe('ordered-target')
+    createdLease.finish()
+    const otherLease = await manager.beginToolSurfaceLease({ owner: otherOwner })
+    expect(otherLease.surfaceId).toBe('ordered-initial')
+    otherLease.finish()
     await manager.shutdown()
   })
 

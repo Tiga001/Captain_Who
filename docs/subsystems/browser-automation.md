@@ -58,6 +58,18 @@ Main 在 `will-attach-webview` 校验 partition 与初始 URL、收紧 webPrefer
 
 没有 Browser 页处于 foreground 时，Renderer 用更高 revision 明确清空选择。UI 选择只说明哪个受管 surface 是当前交互目标，不授予 debugger 或 Agent 自动化权限。
 
+### 任务目标与人工操作
+
+Main 按 `runId` 保存独立的 `{ surfaceId, generation }` 目标；首次页面调用在进入队列前捕获当前 UI 页面，敏感操作的审批预检也使用该 Run 的目标。后续调用沿用绑定，用户切页、另一 Run 选页和自动化连接重建都不改变它；同一 Run 的 capability activation 更新会保留目标。显式 `browser_tabs select/new` 才切换该 Run 的目标。工具内部的 currentTab 同步不再切换用户正在看的标签。
+
+绑定只决定工具操作的页面，不赋予独占权。用户仍能点击、输入、滚动和切换页面；现有单次调用保护与敏感操作审批继续生效，不新增接管、暂停或恢复流程。Host 仍串行调度工具调用。
+
+后台 Agent webview 保持布局与绘制，避免 `content-visibility: hidden` 停止动画帧后让 Playwright 的稳定性检查超时；父页仍以 opacity、pointer-events 和 inert 隔离前台人工输入。没有 Agent 绑定的后台页面继续使用原有节能策略。
+
+目标 guest 被关闭或重建后，旧 generation 不会继承到其他页面；普通操作返回 `browser.target_closed`，Agent 可通过列举页面后显式选择或新建恢复。审批校验同一任务的精确文档身份，不借用全局前台页或另一 Run 的在途 lease。
+
+`BrowserSurfaceState.isAgentTarget` 发布实时目标标记，Renderer 仅接受匹配 instance 与 revision 的状态。目标标签显示高亮边框，并在 favicon 上覆盖机器人操作电脑的图标；多个 Run 可标记多个标签，也可共享一页。标记跨工具调用和等待审批保留，在任务 completed/failed/cancelled、显式关闭该 Run 的自动化上下文或 Host 关闭时清除；不写入持久布局。任务终止同时取消该 Run 尚未完成的 Bridge 请求，避免排队请求重新挂上标记。
+
 Main → Renderer 的 surface command 包括：
 
 - `ensureAttached`

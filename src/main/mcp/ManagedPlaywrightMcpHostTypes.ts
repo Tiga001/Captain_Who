@@ -20,6 +20,10 @@ import type {
 import type { BrowserFileBroker, BrowserFileReadLease } from '../browser/BrowserFileBroker'
 import type { BrowserFrameEditorKind } from '../browser/BrowserFrameEditorProbe'
 import type { BrowserRiskAuthorizationContext } from '../browser/BrowserRiskCoordinator'
+import type {
+  BrowserRunSurfaceOwner,
+  BrowserToolSurfaceLeaseOptions
+} from '../browser/BrowserSurfaceTypes'
 import type { ManagedPlaywrightSensitiveGrantLease } from './managedPlaywrightSensitivePolicy'
 import type {
   ManagedPlaywrightSensitiveTargetBindingLease,
@@ -136,22 +140,35 @@ export interface ManagedPlaywrightSurfaceView {
 
 export interface ManagedPlaywrightSurfaceGroupAdapter {
   /** Main-only identity; never include this projection in Renderer surface ViewModels. */
-  getSensitiveTargetIdentity(): ManagedPlaywrightSensitiveTargetIdentity | null
+  getSensitiveTargetIdentity(
+    owner?: BrowserRunSurfaceOwner
+  ): ManagedPlaywrightSensitiveTargetIdentity | null
+  prepareRunTarget?(owner: BrowserRunSurfaceOwner): void
+  releaseRunTarget?(runId: string): void
+  clearRunTargets?(): void
   ensureActiveSurface(): Promise<ManagedPlaywrightSurfaceView>
   listSurfaces(): readonly ManagedPlaywrightSurfaceView[]
   createSurface(input?: { url?: string }): Promise<ManagedPlaywrightSurfaceView>
   selectSurface(input: { index: number }): Promise<ManagedPlaywrightSurfaceView>
   closeSurfaceByIndex(index?: number): Promise<void>
-  /** Freezes the trusted UI-selected surface for one serialized Tool dispatch. */
-  beginToolSurfaceLease(): Promise<ManagedPlaywrightToolSurfaceLease>
+  /** Freezes the run's bound surface (or its initial trusted UI selection) for one dispatch. */
+  beginToolSurfaceLease(
+    options?: BrowserToolSurfaceLeaseOptions
+  ): Promise<ManagedPlaywrightToolSurfaceLease>
   /** Locks the selected existing surface without creating or revealing a tab. */
-  beginExistingToolSurfaceLease(): Promise<ManagedPlaywrightToolSurfaceLease | null>
+  beginExistingToolSurfaceLease(
+    options?: BrowserToolSurfaceLeaseOptions
+  ): Promise<ManagedPlaywrightToolSurfaceLease | null>
   /** Locks one exact model-visible tab index without selecting or revealing it. */
-  beginToolSurfaceLeaseByIndex(index: number): Promise<ManagedPlaywrightToolSurfaceLease>
+  beginToolSurfaceLeaseByIndex(
+    index: number,
+    options?: BrowserToolSurfaceLeaseOptions
+  ): Promise<ManagedPlaywrightToolSurfaceLease>
   /** Narrows Browser-level target creation to the reviewed Tool's expected UX. */
   beginTargetCreationIntent(
     intent: 'background' | 'interactive',
-    authority?: BrowserTargetCreationAuthority
+    authority?: BrowserTargetCreationAuthority,
+    owner?: BrowserRunSurfaceOwner
   ): () => void
   createInitialTargetSurface?(input: {
     authority: BrowserTargetCreationAuthority

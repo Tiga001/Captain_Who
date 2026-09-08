@@ -17,6 +17,7 @@ import type {
 
 interface RightSidebarPageStackProps {
   activePageId: string | null
+  automationPageIds?: ReadonlySet<string>
   availability: RightSidebarModuleAvailabilityMap
   documentVisible: boolean
   modules: RightSidebarModuleDefinition[]
@@ -34,6 +35,7 @@ interface RightSidebarPageStackProps {
 
 export const RightSidebarPageStack = memo(function RightSidebarPageStack({
   activePageId,
+  automationPageIds,
   availability,
   documentVisible,
   modules,
@@ -65,6 +67,7 @@ export const RightSidebarPageStack = memo(function RightSidebarPageStack({
         return (
           <RightSidebarPageFrame
             activity={activity}
+            automationActive={automationPageIds?.has(page.id) === true}
             availability={pageAvailability}
             isSelected={isSelected}
             key={`${page.id}:${page.workspaceSessionKey ?? 'global'}`}
@@ -83,6 +86,7 @@ export const RightSidebarPageStack = memo(function RightSidebarPageStack({
 
 interface RightSidebarPageFrameProps {
   activity: RightSidebarActivity
+  automationActive: boolean
   availability: RightSidebarModuleAvailability
   isSelected: boolean
   module: RightSidebarModuleDefinition
@@ -99,6 +103,7 @@ interface RightSidebarPageFrameProps {
 
 const RightSidebarPageFrame = memo(function RightSidebarPageFrame({
   activity,
+  automationActive,
   availability,
   isSelected,
   module,
@@ -123,9 +128,13 @@ const RightSidebarPageFrame = memo(function RightSidebarPageFrame({
     <section
       className="right-sidebar__page"
       data-active={isSelected ? 'true' : undefined}
+      data-agent-rendering={
+        automationActive && module.surfaceKind === 'webview' ? 'true' : undefined
+      }
       data-activity={activity}
       data-surface-kind={module.surfaceKind}
       aria-hidden={isSelected ? undefined : true}
+      inert={automationActive && !isSelected ? true : undefined}
     >
       {shouldMount &&
         module.render({

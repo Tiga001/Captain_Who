@@ -32,6 +32,11 @@ import { ClearBrowsingDataDialog } from './ClearBrowsingDataDialog'
 import './BrowserPanel.css'
 
 interface BrowserPanelProps {
+  onAutomationTargetChange?: (
+    surfaceId: string,
+    surfaceInstanceId: string,
+    isTarget: boolean
+  ) => void
   automationRequestId?: string
   isActive: boolean
   onAutomationSurfaceReady?: (
@@ -69,6 +74,7 @@ function clampZoom(value: number) {
 }
 
 export function BrowserPanel({
+  onAutomationTargetChange,
   automationRequestId,
   isActive,
   onAutomationSurfaceReady,
@@ -111,6 +117,7 @@ export function BrowserPanel({
   const [zoom, setZoomState] = useState(1)
   const viewId = surfaceId ?? browserSurfaceIdForPage(pageId)
   const {
+    isAgentTarget,
     currentUrl,
     goBack,
     goForward,
@@ -133,6 +140,12 @@ export function BrowserPanel({
     isActiveRef.current = isActive
     onSurfaceInstanceChangeRef.current = onSurfaceInstanceChange
   }, [isActive, onSurfaceInstanceChange])
+
+  useEffect(() => {
+    if (!surfaceInstanceId) return
+    onAutomationTargetChange?.(viewId, surfaceInstanceId, isAgentTarget)
+    return () => onAutomationTargetChange?.(viewId, surfaceInstanceId, false)
+  }, [isAgentTarget, onAutomationTargetChange, surfaceInstanceId, viewId])
 
   const closeMenu = useCallback(() => setIsMenuOpen(false), [])
   const ignoreMenuPortal = useCallback(

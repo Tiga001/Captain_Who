@@ -368,13 +368,14 @@ async function initializeApplication(): Promise<void> {
       if (!manager) throw new Error('browser.surface_unavailable')
       return manager.beginSensitiveDispatchFence(target)
     },
-    getActiveTarget: () => browserSurfaceManager?.getSensitiveTargetIdentity() ?? null,
+    getActiveTarget: (owner) => browserSurfaceManager?.getSensitiveTargetIdentity(owner) ?? null,
     releasePreparedFiles: ({ runId, callId }) => {
       void browserFileBroker?.releaseToolCall({ runId, toolCallId: callId })
     }
   })
   managedPlaywrightBridgeHost = new ManagedPlaywrightBridgeHost({
     core: coreServer,
+    releaseRunTarget: (runId) => browserSurfaceManager?.releaseRunTarget(runId),
     fileBroker: browserFileBroker,
     sensitiveTargetBindings,
     createHost: createManagedPlaywrightHostFactory({

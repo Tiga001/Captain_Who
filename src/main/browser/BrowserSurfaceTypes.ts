@@ -108,6 +108,24 @@ export interface BrowserToolSurfaceLease {
   surfaceId: string
 }
 
+export interface BrowserRunSurfaceOwner {
+  runId: string
+  activationId: string
+}
+
+export interface BrowserRunSurfaceBinding {
+  owner: BrowserRunSurfaceOwner
+  target?: { surfaceId: string; generation: number }
+}
+
+export interface BrowserToolSurfaceLeaseOptions {
+  owner?: BrowserRunSurfaceOwner
+  /** An explicit browser_tabs select may replace this run's target. */
+  selectTarget?: boolean
+  /** Listing or closing another tab must not change the run's selected target. */
+  contextOnly?: boolean
+}
+
 export interface ActiveSensitiveDispatchFence {
   finishSilently(): boolean
 }
@@ -262,6 +280,7 @@ export interface PendingSurfaceGroupAdmission {
 
 export interface ActiveTargetCreationIntent {
   authority?: BrowserTargetCreationAuthority
+  runBinding?: BrowserRunSurfaceBinding
   finished: boolean
   intent: ManagedTargetCreationIntent
   transportFinish?: () => void

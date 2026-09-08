@@ -20,6 +20,7 @@ interface UseBrowserWebviewOptions {
 }
 
 interface UseBrowserWebviewResult {
+  isAgentTarget: boolean
   currentUrl: string | null
   goBack: () => Promise<void>
   goForward: () => Promise<void>
@@ -39,6 +40,7 @@ export function useBrowserWebview({
   surfaceId,
   surfaceInstanceId
 }: UseBrowserWebviewOptions): UseBrowserWebviewResult {
+  const [isAgentTarget, setIsAgentTarget] = useState(false)
   const [navigationState, setNavigationState] = useState<BrowserNavigationState>(
     createEmptyNavigationState
   )
@@ -101,6 +103,7 @@ export function useBrowserWebview({
         return
       }
       stateRevisionRef.current = state.stateRevision
+      setIsAgentTarget(state.isAgentTarget === true)
       setHostFallbackError(state.presentation === 'host-fallback' ? state.loadError : null)
       setHostFallbackCrashError(state.presentation === 'host-fallback' ? state.crashError : null)
       updateNavigationState((current) => {
@@ -125,6 +128,7 @@ export function useBrowserWebview({
 
   useEffect(() => {
     surfaceIdentityRef.current = { surfaceId, surfaceInstanceId }
+    setIsAgentTarget(false)
     stateRevisionRef.current = -1
     faviconRequestSequenceRef.current += 1
     setHostFallbackError(null)
@@ -243,6 +247,7 @@ export function useBrowserWebview({
 
   return useMemo(
     () => ({
+      isAgentTarget,
       currentUrl: navigationState.metadata.url,
       goBack,
       goForward,
@@ -256,6 +261,7 @@ export function useBrowserWebview({
       setZoom
     }),
     [
+      isAgentTarget,
       goBack,
       goForward,
       hostFallbackError,

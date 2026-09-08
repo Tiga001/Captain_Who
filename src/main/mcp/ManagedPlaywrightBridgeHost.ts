@@ -48,6 +48,7 @@ export interface ManagedPlaywrightBridgeCore {
 }
 
 export interface ManagedPlaywrightBridgeHostOptions {
+  releaseRunTarget?: (runId: string) => void
   completionSettleMs?: number
   core: ManagedPlaywrightBridgeCore
   createHost: () => ManagedPlaywrightMcpHost
@@ -58,6 +59,7 @@ export interface ManagedPlaywrightBridgeHostOptions {
 
 interface ActiveCommand {
   controller: AbortController
+  runId?: string
   timer?: ReturnType<typeof setTimeout>
 }
 
@@ -105,6 +107,10 @@ export class ManagedPlaywrightBridgeHost {
             event.status === 'failed' ||
             event.status === 'cancelled')
         ) {
+          for (const active of this.active.values()) {
+            if (active.runId === event.runId) active.controller.abort('cancelled')
+          }
+          options.releaseRunTarget?.(event.runId)
           this.sensitiveTargetBindings.releaseRun(event.runId)
           void this.fileBroker?.releaseRun(event.runId)
           void this.host?.releaseRun(event.runId)
@@ -157,7 +163,13 @@ export class ManagedPlaywrightBridgeHost {
       input.command.type === 'call_tool'
         ? undefined
         : setTimeout(() => controller.abort('timeout'), input.deadlineMs - this.now())
-    this.active.set(input.requestId, { controller, timer })
+    const runId =
+      input.command.type === 'call_tool'
+        ? input.command.authorizationContext.runId
+        : input.command.type === 'prepare_sensitive_tool'
+          ? input.command.input.runId
+          : undefined
+    this.active.set(input.requestId, { controller, timer, runId })
     void this.execute(input, controller)
   }
 

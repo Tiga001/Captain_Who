@@ -4,6 +4,11 @@ import type { CollaborationStoreSnapshot } from '../agentCollaboration/collabora
 import type { AgentObserverRenderContext } from './rightSidebarTypes'
 
 interface RightSidebarRuntimeContextValue {
+  onBrowserAutomationTargetChange?: (
+    surfaceId: string,
+    surfaceInstanceId: string,
+    isTarget: boolean
+  ) => void
   activeConversationId: string | null
   activeWorkspaceKey: string | null
   collaborationSnapshot: CollaborationStoreSnapshot | null

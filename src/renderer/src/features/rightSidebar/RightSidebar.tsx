@@ -159,7 +159,41 @@ export const RightSidebar = memo(function RightSidebar({
     workspaceName,
     workspacePath
   })
-  const [agentBrowserSurfaceId, setAgentBrowserSurfaceId] = useState<string | null>(null)
+  const [agentBrowserSurfaces, setAgentBrowserSurfaces] = useState<ReadonlyMap<string, string>>(
+    () => new Map()
+  )
+  const handleBrowserAutomationTargetChange = useCallback(
+    (surfaceId: string, instanceId: string, isTarget: boolean) => {
+      if (browserSurfaceInstancesRef.current.get(surfaceId) !== instanceId) return
+      setAgentBrowserSurfaces((current) => {
+        if (isTarget ? current.get(surfaceId) === instanceId : !current.has(surfaceId))
+          return current
+        const next = new Map(current)
+        if (isTarget) next.set(surfaceId, instanceId)
+        else next.delete(surfaceId)
+        return next
+      })
+    },
+    []
+  )
+
+  const automationPageIds = useMemo(
+    () =>
+      new Set(
+        pages
+          .filter((page) => {
+            if (page.moduleId !== 'browser') return false
+            const surfaceId =
+              page.moduleState?.kind === 'browser-surface'
+                ? page.moduleState.surfaceId
+                : browserSurfaceIdForPage(page.id)
+            const instanceId = agentBrowserSurfaces.get(surfaceId)
+            return instanceId !== undefined && browserSurfaceInstances.get(surfaceId) === instanceId
+          })
+          .map((page) => page.id)
+      ),
+    [agentBrowserSurfaces, browserSurfaceInstances, pages]
+  )
 
   useEffect(() => {
     if (
@@ -198,9 +232,11 @@ export const RightSidebar = memo(function RightSidebar({
         browserSurfaceInstancesRef.current = next
         return next
       })
-      setAgentBrowserSurfaceId((current) =>
-        current === browserSurfaceCommand.surfaceId ? null : current
-      )
+      setAgentBrowserSurfaces((current) => {
+        const next = new Map(current)
+        next.delete(browserSurfaceCommand.surfaceId)
+        return next
+      })
       setBrowserSurfaceRequest((current) => {
         const next = current?.pageId === page?.id ? null : current
         browserSurfaceRequestRef.current = next
@@ -244,7 +280,6 @@ export const RightSidebar = memo(function RightSidebar({
       browserSurfaceCommand.kind !== 'createSurface' || browserSurfaceCommand.activate
     if (shouldActivate) {
       activatePage(pageId)
-      setAgentBrowserSurfaceId(browserSurfaceCommand.surfaceId)
     }
     submittedBrowserSurfaceRequestRef.current = null
     const nextRequest = { pageId, requestId: browserSurfaceCommand.requestId }
@@ -366,6 +401,7 @@ export const RightSidebar = memo(function RightSidebar({
       collaborationSnapshot,
       browserSurfaceRequest: browserSurfaceRequest ?? undefined,
       onBrowserSurfaceInstance: handleBrowserSurfaceInstance,
+      onBrowserAutomationTargetChange: handleBrowserAutomationTargetChange,
       onBrowserSurfaceReady: handleBrowserSurfaceReady,
       onOpenAgentTemplates,
       onOpenBrowserSettings,
@@ -376,6 +412,7 @@ export const RightSidebar = memo(function RightSidebar({
       browserSurfaceRequest,
       collaborationSnapshot,
       handleBrowserSurfaceInstance,
+      handleBrowserAutomationTargetChange,
       handleBrowserSurfaceReady,
       onOpenAgentTemplates,
       onOpenBrowserSettings,
@@ -527,15 +564,7 @@ export const RightSidebar = memo(function RightSidebar({
         {hasOpenPages ? (
           <RightSidebarTabStrip
             activePageId={activePageId}
-            automationPageId={
-              pages.find(
-                (page) =>
-                  page.moduleId === 'browser' &&
-                  (page.moduleState?.kind === 'browser-surface'
-                    ? page.moduleState.surfaceId
-                    : browserSurfaceIdForPage(page.id)) === agentBrowserSurfaceId
-              )?.id
-            }
+            automationPageIds={automationPageIds}
             availableModules={availableModules}
             isMenuOpen={isModuleMenuOpen}
             modules={modules}
@@ -577,6 +606,7 @@ export const RightSidebar = memo(function RightSidebar({
             {hasOpenPages ? (
               <RightSidebarPageStack
                 activePageId={activePageId}
+                automationPageIds={automationPageIds}
                 availability={moduleAvailability}
                 documentVisible={documentVisible}
                 modules={modules}

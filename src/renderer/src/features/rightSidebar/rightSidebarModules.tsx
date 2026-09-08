@@ -183,6 +183,7 @@ const BrowserModuleSurface = memo(function BrowserModuleSurface({
   const {
     browserSurfaceRequest,
     onBrowserSurfaceInstance,
+    onBrowserAutomationTargetChange,
     onBrowserSurfaceReady,
     onOpenBrowserSettings
   } = useRightSidebarRuntimeContext()
@@ -209,6 +210,7 @@ const BrowserModuleSurface = memo(function BrowserModuleSurface({
   return (
     <Suspense fallback={<div className="right-sidebar__panel-loading">{t('browser.title')}</div>}>
       <BrowserPanel
+        onAutomationTargetChange={onBrowserAutomationTargetChange}
         automationRequestId={
           browserSurfaceRequest?.pageId === pageId ? browserSurfaceRequest.requestId : undefined
         }

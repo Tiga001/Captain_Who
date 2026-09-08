@@ -1912,7 +1912,13 @@ describe('ManagedPlaywrightMcpHost', () => {
 
     expect(beginExistingToolSurfaceLease).toHaveBeenCalledOnce()
     expect(beginToolSurfaceLease).not.toHaveBeenCalled()
-    expect(beginToolSurfaceLeaseByIndex).toHaveBeenCalledWith(0)
+    expect(beginToolSurfaceLeaseByIndex).toHaveBeenCalledWith(
+      0,
+      expect.objectContaining({
+        owner: expect.objectContaining({ runId: RISK_CONTEXT.runId }),
+        contextOnly: false
+      })
+    )
     expect(beginTargetCreationOperation).not.toHaveBeenCalled()
     expect(beginNetworkOperation).toHaveBeenCalledOnce()
     expect(risk.preflight).toHaveBeenCalledWith(url)

@@ -2,7 +2,8 @@ import type { BrowserHostApi, HostApi, MyCopilotGlobal } from '@mycopilot/host-a
 import {
   BROWSER_DATA_SCHEMA_VERSION,
   BROWSER_DOWNLOAD_SCHEMA_VERSION,
-  type BrowserSurfaceCommand
+  type BrowserSurfaceCommand,
+  type BrowserSurfaceState
 } from '@mycopilot/protocol'
 import { useState } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -113,6 +114,41 @@ describe('browser surface Host bridge availability', () => {
       action: 'navigate',
       url: restoredUrl
     })
+  })
+
+  it('keeps Agent target state bound to the exact instance and newest Main revision', async () => {
+    let listener!: (state: BrowserSurfaceState) => void
+    exposeHost({
+      browser: createBrowserApi({
+        onSurfaceState: (next) => {
+          listener = next
+          return () => undefined
+        }
+      })
+    })
+    const identity = {
+      surfaceId: 'right-sidebar-browser-restore',
+      surfaceInstanceId: 'instance-target-0001'
+    }
+    const screen = await render(
+      <BrowserStateHarness initialLogicalUrl="" surfaceInstanceId={identity.surfaceInstanceId} />
+    )
+    await expect.element(screen.getByTestId('agent-target')).toHaveTextContent('false')
+    listener({ ...emptySurfaceState(identity), stateRevision: 5, isAgentTarget: true })
+    await expect.element(screen.getByTestId('agent-target')).toHaveTextContent('true')
+    listener({ ...emptySurfaceState(identity), stateRevision: 4, isAgentTarget: false })
+    listener({
+      ...emptySurfaceState({ ...identity, surfaceInstanceId: 'instance-retired-0001' }),
+      stateRevision: 6,
+      isAgentTarget: false
+    })
+    await expect.element(screen.getByTestId('agent-target')).toHaveTextContent('true')
+    await screen.rerender(
+      <BrowserStateHarness initialLogicalUrl="" surfaceInstanceId="instance-replaced-0001" />
+    )
+    await expect.element(screen.getByTestId('agent-target')).toHaveTextContent('false')
+    listener({ ...emptySurfaceState(identity), stateRevision: 7, isAgentTarget: true })
+    await expect.element(screen.getByTestId('agent-target')).toHaveTextContent('false')
   })
 
   it('snapshots the persisted logical URL before the blank bootstrap state resolves', async () => {
@@ -228,7 +264,12 @@ function BrowserStateHarness({
     surfaceId: 'right-sidebar-browser-restore',
     surfaceInstanceId
   })
-  return <output data-testid="logical-url">{browser.currentUrl ?? 'blank'}</output>
+  return (
+    <>
+      <output data-testid="logical-url">{browser.currentUrl ?? 'blank'}</output>
+      <output data-testid="agent-target">{String(browser.isAgentTarget)}</output>
+    </>
+  )
 }
 
 function createBrowserApi(overrides: Partial<BrowserHostApi> = {}): BrowserHostApi {

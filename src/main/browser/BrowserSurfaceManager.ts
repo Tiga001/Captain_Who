@@ -99,6 +99,9 @@ import {
   type BrowserSurfaceManagerErrorCode,
   type BrowserSurfaceView,
   type BrowserToolSurfaceLease,
+  type BrowserToolSurfaceLeaseOptions,
+  type BrowserRunSurfaceOwner,
+  type BrowserRunSurfaceBinding,
   type InternalPageLoad,
   type ManagedSurface,
   type PendingClose,
@@ -149,6 +152,7 @@ export class BrowserSurfaceManager {
   private readonly sendCommand: (host: WebContents, command: BrowserSurfaceCommand) => void
   private readonly sendState: (host: WebContents, state: BrowserSurfaceState) => void
   private readonly surfaces = new Map<string, ManagedSurface>()
+  private readonly runSurfaceBindings = new Map<string, BrowserRunSurfaceBinding>()
   private readonly surfaceGroupAdmissions = new Map<string, PendingSurfaceGroupAdmission>()
   private readonly suppressAutomaticGroupAdmission = new Set<string>()
   private readonly suppressDeferredGroupAdmissionReservation = new Set<string>()
@@ -176,6 +180,8 @@ export class BrowserSurfaceManager {
   /** Main-owned mutation epoch retained by exact in-flight Tool leases. */
   private manualSelectionRevision = 0
   private toolSurfaceLease?: {
+    runBinding?: BrowserRunSurfaceBinding
+    selectTarget?: boolean
     generation: number
     selectionRevision: number
     surfaceId: string
@@ -864,17 +870,83 @@ export class BrowserSurfaceManager {
       : null
   }
 
-  /** Returns a stable, non-navigating Main-only document identity without attaching automation. */
-  getSensitiveTargetIdentity(): BrowserSensitiveTargetIdentity | null {
+  /** Captures the first UI target before queue/approval waits, without attaching or navigating. */
+  prepareRunTarget(owner: BrowserRunSurfaceOwner): void {
+    const binding = this.ensureRunBinding(owner)
+    if (binding.target) return
+    const surface = this.activeSurfaceId ? this.surfaces.get(this.activeSurfaceId) : undefined
+    if (surface && !surface.guest.isDestroyed()) this.bindRunSurface(binding, surface)
+  }
+
+  releaseRunTarget(runId: string): void {
+    const binding = this.runSurfaceBindings.get(runId)
+    this.runSurfaceBindings.delete(runId)
+    const surface = binding?.target ? this.surfaces.get(binding.target.surfaceId) : undefined
+    if (surface) this.publishSurfaceState(surface)
+  }
+
+  clearRunTargets(): void {
+    for (const runId of [...this.runSurfaceBindings.keys()]) this.releaseRunTarget(runId)
+  }
+
+  private ensureRunBinding(owner: BrowserRunSurfaceOwner): BrowserRunSurfaceBinding {
+    this.assertUsable()
+    let binding = this.runSurfaceBindings.get(owner.runId)
+    if (binding) binding.owner = { runId: owner.runId, activationId: owner.activationId }
+    if (!binding) {
+      binding = { owner: { runId: owner.runId, activationId: owner.activationId } }
+      this.runSurfaceBindings.set(owner.runId, binding)
+    }
+    return binding
+  }
+
+  private bindRunSurface(binding: BrowserRunSurfaceBinding, surface: ManagedSurface): void {
+    if (
+      this.runSurfaceBindings.get(binding.owner.runId) !== binding ||
+      surface.guest.isDestroyed()
+    ) {
+      throw new BrowserSurfaceManagerError('browser.target_closed')
+    }
+    const previous = binding.target ? this.surfaces.get(binding.target.surfaceId) : undefined
+    binding.target = { surfaceId: surface.surfaceId, generation: surface.generation }
+    if (previous && previous !== surface) this.publishSurfaceState(previous)
+    this.publishSurfaceState(surface)
+  }
+
+  private resolveRunSurface(
+    binding?: BrowserRunSurfaceBinding,
+    contextOnly = false
+  ): ManagedSurface | undefined {
+    if (binding?.target) {
+      const surface = this.surfaces.get(binding.target.surfaceId)
+      if (
+        surface &&
+        surface.generation === binding.target.generation &&
+        !surface.guest.isDestroyed() &&
+        !this.closingSurfaceIds.has(surface.surfaceId)
+      )
+        return surface
+      // Keep the retired identity until explicit selection/new. Never borrow the next UI tab.
+      if (!contextOnly) throw new BrowserSurfaceManagerError('browser.target_closed')
+    }
+    return this.activeSurfaceId ? this.surfaces.get(this.activeSurfaceId) : undefined
+  }
+
+  /** Returns the run's exact document for approval; another task's in-flight lease is irrelevant. */
+  getSensitiveTargetIdentity(
+    owner?: BrowserRunSurfaceOwner
+  ): BrowserSensitiveTargetIdentity | null {
     if (this.disposed) return null
-    // Approval proposals are created before a Tool lease exists and therefore bind the user's
-    // latest trusted UI choice. Once dispatch owns a lease, the identity stays locked even if the
-    // user selects another tab for the next call.
-    const surfaceId = this.toolSurfaceLease?.surfaceId ?? this.activeSurfaceId
+    if (owner) this.prepareRunTarget(owner)
+    const target = owner ? this.runSurfaceBindings.get(owner.runId)?.target : undefined
+    const surfaceId = owner
+      ? target?.surfaceId
+      : (this.toolSurfaceLease?.surfaceId ?? this.activeSurfaceId)
     if (!surfaceId) return null
     const surface = this.surfaces.get(surfaceId)
     if (
       !surface ||
+      (target && target.generation !== surface.generation) ||
       surface.guest.isDestroyed() ||
       surface.navigationInProgress ||
       surface.loadError ||
@@ -979,7 +1051,8 @@ export class BrowserSurfaceManager {
 
   beginTargetCreationIntent(
     intent: ManagedTargetCreationIntent,
-    authority?: BrowserTargetCreationAuthority
+    authority?: BrowserTargetCreationAuthority,
+    owner?: BrowserRunSurfaceOwner
   ): () => void {
     this.assertUsable()
     if (this.targetCreation !== undefined || (intent === 'interactive' && !authority)) {
@@ -987,6 +1060,7 @@ export class BrowserSurfaceManager {
     }
     const targetCreation: ActiveTargetCreationIntent = {
       authority,
+      runBinding: owner && intent === 'interactive' ? this.ensureRunBinding(owner) : undefined,
       finished: false,
       intent
     }
@@ -1006,56 +1080,77 @@ export class BrowserSurfaceManager {
     if (this.targetCreation === targetCreation) this.targetCreation = undefined
   }
 
-  async beginToolSurfaceLease(): Promise<BrowserToolSurfaceLease> {
+  async beginToolSurfaceLease(
+    options?: BrowserToolSurfaceLeaseOptions
+  ): Promise<BrowserToolSurfaceLease> {
     this.assertUsable()
     if (this.toolSurfaceLease) {
       throw new BrowserSurfaceManagerError('browser.surface_unavailable')
     }
-    const surface = await this.ensureSurface()
-    return await this.acquireToolSurfaceLease(surface)
+    const runBinding = options?.owner ? this.ensureRunBinding(options.owner) : undefined
+    const surface =
+      this.resolveRunSurface(runBinding, options?.contextOnly) ?? (await this.ensureSurface())
+    return await this.acquireToolSurfaceLease(surface, options, runBinding)
   }
 
   /**
    * Locks an already-visible tab without creating, revealing, or selecting a page. Context-only
    * tools and browser_tabs use this to preserve the fixed Playwright zero-tab semantics.
    */
-  async beginExistingToolSurfaceLease(): Promise<BrowserToolSurfaceLease | null> {
+  async beginExistingToolSurfaceLease(
+    options?: BrowserToolSurfaceLeaseOptions
+  ): Promise<BrowserToolSurfaceLease | null> {
     this.assertUsable()
     if (this.toolSurfaceLease) {
       throw new BrowserSurfaceManagerError('browser.surface_unavailable')
     }
-    const surfaceId = this.activeSurfaceId
-    if (!surfaceId) return null
-    const surface = this.surfaces.get(surfaceId)
+    const runBinding = options?.owner ? this.ensureRunBinding(options.owner) : undefined
+    const surface = this.resolveRunSurface(runBinding, options?.contextOnly)
     if (!surface || surface.guest.isDestroyed()) return null
     await this.addSurfaceToActiveGroup(surface)
-    return await this.acquireToolSurfaceLease(surface)
+    return await this.acquireToolSurfaceLease(surface, options, runBinding)
   }
 
   /** Locks the exact current index without creating, selecting, or revealing a page. */
-  async beginToolSurfaceLeaseByIndex(index: number): Promise<BrowserToolSurfaceLease> {
+  async beginToolSurfaceLeaseByIndex(
+    index: number,
+    options?: BrowserToolSurfaceLeaseOptions
+  ): Promise<BrowserToolSurfaceLease> {
     this.assertUsable()
     if (this.toolSurfaceLease) {
       throw new BrowserSurfaceManagerError('browser.surface_unavailable')
     }
+    const runBinding = options?.owner ? this.ensureRunBinding(options.owner) : undefined
     const surface = this.resolveSurfaceSelection({ index })
     await this.addSurfaceToActiveGroup(surface)
-    return await this.acquireToolSurfaceLease(surface)
+    return await this.acquireToolSurfaceLease(surface, options, runBinding)
   }
 
-  private async acquireToolSurfaceLease(surface: ManagedSurface): Promise<BrowserToolSurfaceLease> {
+  private async acquireToolSurfaceLease(
+    surface: ManagedSurface,
+    options?: BrowserToolSurfaceLeaseOptions,
+    runBinding?: BrowserRunSurfaceBinding
+  ): Promise<BrowserToolSurfaceLease> {
     await this.reconcileActiveGroup()
+    if (runBinding && this.runSurfaceBindings.get(runBinding.owner.runId) !== runBinding) {
+      throw new BrowserSurfaceManagerError('browser.target_closed')
+    }
     const index = this.orderedSurfaces().indexOf(surface)
     if (index < 0 || surface.guest.isDestroyed()) {
       throw new BrowserSurfaceManagerError('browser.target_closed')
     }
     const record = {
+      runBinding,
+      selectTarget: options?.selectTarget,
       generation: surface.generation,
       selectionRevision: this.manualSelectionRevision,
       surfaceId: surface.surfaceId
     }
     this.toolSurfaceLease = record
     this.automationSurfaceId = surface.surfaceId
+    if (runBinding && !runBinding.target && !options?.contextOnly && !options?.selectTarget) {
+      this.bindRunSurface(runBinding, surface)
+    }
     let finished = false
     return {
       ...record,
@@ -1650,6 +1745,7 @@ export class BrowserSurfaceManager {
 
   async shutdown(): Promise<void> {
     if (this.disposed) return
+    this.clearRunTargets()
     this.disposed = true
     for (const handoff of this.pendingSurfaceHandoffs.values()) clearTimeout(handoff.timer)
     this.pendingSurfaceHandoffs.clear()
@@ -1844,6 +1940,8 @@ export class BrowserSurfaceManager {
               if (url !== 'about:blank') {
                 await loadManagedSurface(candidate, url, this.attachTimeoutMs)
               }
+              if (targetCreation?.runBinding)
+                this.bindRunSurface(targetCreation.runBinding, candidate)
               return {
                 generation: candidate.generation,
                 surfaceId: candidate.surfaceId
@@ -2096,12 +2194,19 @@ export class BrowserSurfaceManager {
   }
 
   private async resolveToolSurfaceIndex(record: {
+    runBinding?: BrowserRunSurfaceBinding
     generation: number
     selectionRevision: number
     surfaceId: string
   }): Promise<number> {
     if (this.toolSurfaceLease !== record) {
       throw new BrowserSurfaceManagerError('browser.surface_unavailable')
+    }
+    if (
+      record.runBinding &&
+      this.runSurfaceBindings.get(record.runBinding.owner.runId) !== record.runBinding
+    ) {
+      throw new BrowserSurfaceManagerError('browser.target_closed')
     }
     const surface = this.surfaces.get(record.surfaceId)
     if (!surface || surface.generation !== record.generation || surface.guest.isDestroyed()) {
@@ -3198,6 +3303,11 @@ export class BrowserSurfaceManager {
       surfaceId: surface.surfaceId,
       surfaceInstanceId: surface.surfaceInstanceId,
       stateRevision: surface.stateRevision,
+      isAgentTarget: [...this.runSurfaceBindings.values()].some(
+        (binding) =>
+          binding.target?.surfaceId === surface.surfaceId &&
+          binding.target.generation === surface.generation
+      ),
       url: surface.logicalUrl,
       title: surface.logicalTitle,
       faviconUrl: surface.logicalFaviconUrl,
@@ -3286,6 +3396,14 @@ export class BrowserSurfaceManager {
     }
     this.automationSurfaceId = surface.surfaceId
     const revision = this.toolSurfaceLease?.selectionRevision ?? this.manualSelectionRevision
+    if (lease?.runBinding) {
+      if (this.runSurfaceBindings.get(lease.runBinding.owner.runId) !== lease.runBinding) {
+        throw new BrowserSurfaceManagerError('browser.target_closed')
+      }
+      if (lease.selectTarget) this.bindRunSurface(lease.runBinding, surface)
+      // Ordinary MCP currentTab synchronization is not a user-facing tab selection.
+      if (!lease.selectTarget) return
+    }
     if (this.manualSelectionRevision !== revision) return
     if (this.activeSurfaceId !== surface.surfaceId) {
       const host = this.resolveHost()

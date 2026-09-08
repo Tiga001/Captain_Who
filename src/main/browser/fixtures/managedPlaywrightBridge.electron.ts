@@ -745,13 +745,14 @@ async function main(): Promise<void> {
 
   const sensitiveTargetBindings = new ManagedPlaywrightSensitiveTargetBindingBroker({
     beginDispatchFence: (target) => manager.beginSensitiveDispatchFence(target),
-    getActiveTarget: () => manager.getSensitiveTargetIdentity(),
+    getActiveTarget: (owner) => manager.getSensitiveTargetIdentity(owner),
     releasePreparedFiles: ({ runId, callId }) => {
       void fileBroker.releaseToolCall({ runId, toolCallId: callId })
     }
   })
   const bridgeHost = new ManagedPlaywrightBridgeHost({
     core,
+    releaseRunTarget: (runId) => manager.releaseRunTarget(runId),
     fileBroker,
     sensitiveTargetBindings,
     createHost: createManagedPlaywrightHostFactory({

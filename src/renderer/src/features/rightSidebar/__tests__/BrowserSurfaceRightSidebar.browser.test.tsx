@@ -1,7 +1,8 @@
 import { useEffect } from 'react'
 import { PanelTop } from 'lucide-react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { render } from 'vitest-browser-react'
+import { cleanup, render } from 'vitest-browser-react'
+import { userEvent } from 'vitest/browser'
 import type {
   BrowserSurfaceCommand,
   BrowserSurfaceReadyInput,
@@ -24,6 +25,7 @@ const NOOP = () => undefined
 const SURFACE_ID = 'managed-browser-fixture'
 const SECOND_SURFACE_ID = 'managed-browser-fixture-second'
 const SURFACE_INSTANCE_ID = 'instance-fixture-00001'
+const targetUpdates = new Map<string, (instanceId: string, active: boolean) => void>()
 
 const BROWSER_MODULE: RightSidebarModuleDefinition = {
   contextBinding: 'global',
@@ -38,16 +40,87 @@ const BROWSER_MODULE: RightSidebarModuleDefinition = {
   instancePolicy: 'multiple',
   render: (props) => <BrowserSurfaceFixture {...props} />,
   retention: 'keep-alive',
-  surfaceKind: 'react',
+  surfaceKind: 'webview',
   titleKey: 'rightSidebar.browser',
   unavailablePagePolicy: 'retain-page'
 }
 
 afterEach(() => {
+  cleanup()
   surfaceLifecycle.mockClear()
+  targetUpdates.clear()
 })
 
 describe('RightSidebar browser automation surface bridge', () => {
+  it('uses live exact-instance target state instead of selection commands to mark tabs', async () => {
+    const ready = vi.fn(async (input: BrowserSurfaceReadyInput) => appliedReady(input))
+    const props = {
+      isMaximized: false,
+      isOpen: true,
+      modules: [BROWSER_MODULE],
+      onBrowserSurfaceReady: ready,
+      onToggleMaximized: NOOP
+    }
+    const screen = await render(
+      <RightSidebar
+        {...props}
+        browserSurfaceCommand={ensureCommand('11111111-1111-4111-8111-111111111111')}
+      />
+    )
+    await expect.poll(() => ready).toHaveBeenCalledTimes(1)
+    const marked = () => screen.container.querySelectorAll('[data-automation-active="true"]')
+    expect(marked()).toHaveLength(0)
+    targetUpdates.get(SURFACE_ID)!(SURFACE_INSTANCE_ID, true)
+    await expect.poll(() => marked().length).toBe(1)
+
+    await screen.rerender(
+      <RightSidebar
+        {...props}
+        browserSurfaceCommand={{
+          schemaVersion: 1,
+          kind: 'createSurface',
+          activate: false,
+          requestId: '22222222-2222-4222-8222-222222222222',
+          surfaceId: SECOND_SURFACE_ID
+        }}
+      />
+    )
+    await expect.poll(() => ready).toHaveBeenCalledTimes(2)
+    expect(marked()).toHaveLength(1)
+    targetUpdates.get(SECOND_SURFACE_ID)!(SURFACE_INSTANCE_ID, true)
+    await expect.poll(() => marked().length).toBe(2)
+    const tabs = [...screen.container.querySelectorAll<HTMLButtonElement>('[role="tab"]')]
+    await userEvent.click(tabs[1]!)
+    expect(tabs[1]).toHaveAttribute('aria-selected', 'true')
+    expect(marked()).toHaveLength(2)
+    const firstPage = getSurface(screen.container).closest<HTMLElement>('.right-sidebar__page')!
+    expect(firstPage).toHaveAttribute('data-agent-rendering', 'true')
+    expect(firstPage.inert).toBe(true)
+    expect(getComputedStyle(firstPage).contentVisibility).toBe('visible')
+    expect(getComputedStyle(firstPage).opacity).toBe('0')
+    expect(getComputedStyle(firstPage).pointerEvents).toBe('none')
+
+    targetUpdates.get(SURFACE_ID)!('instance-retired-0001', false)
+    expect(marked()).toHaveLength(2)
+    targetUpdates.get(SURFACE_ID)!(SURFACE_INSTANCE_ID, false)
+    await expect.poll(() => marked().length).toBe(1)
+    expect(getComputedStyle(firstPage).contentVisibility).toBe('hidden')
+    await screen.rerender(
+      <RightSidebar
+        {...props}
+        browserSurfaceCommand={{
+          schemaVersion: 1,
+          kind: 'closeSurface',
+          requestId: '33333333-3333-4333-8333-333333333333',
+          surfaceId: SECOND_SURFACE_ID,
+          surfaceInstanceId: SURFACE_INSTANCE_ID
+        }}
+      />
+    )
+    await expect.poll(() => marked().length).toBe(0)
+    expect(screen.container.querySelectorAll('[role="tab"]')).toHaveLength(1)
+  })
+
   it('creates once, reuses the exact surface, and only closes the requested browser page', async () => {
     const ready = vi.fn(async (input: BrowserSurfaceReadyInput) => appliedReady(input))
     const first = ensureCommand('11111111-1111-4111-8111-111111111111')
@@ -237,14 +310,27 @@ describe('RightSidebar browser automation surface bridge', () => {
 })
 
 function BrowserSurfaceFixture({ page }: RightSidebarModuleRenderProps) {
-  const { browserSurfaceRequest, onBrowserSurfaceInstance, onBrowserSurfaceReady } =
-    useRightSidebarRuntimeContext()
+  const {
+    browserSurfaceRequest,
+    onBrowserSurfaceInstance,
+    onBrowserSurfaceReady,
+    onBrowserAutomationTargetChange
+  } = useRightSidebarRuntimeContext()
   const requestId =
     browserSurfaceRequest?.pageId === page.id ? browserSurfaceRequest.requestId : null
   const surfaceId =
     page.moduleState?.kind === 'browser-surface'
       ? page.moduleState.surfaceId
       : browserSurfaceIdForPage(page.id)
+
+  useEffect(() => {
+    targetUpdates.set(surfaceId, (instanceId, active) => {
+      onBrowserAutomationTargetChange?.(surfaceId, instanceId, active)
+    })
+    return () => {
+      targetUpdates.delete(surfaceId)
+    }
+  }, [surfaceId, onBrowserAutomationTargetChange])
 
   useEffect(() => {
     surfaceLifecycle('mount', page.id)

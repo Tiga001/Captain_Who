@@ -93,6 +93,11 @@ describe('browser surface protocol', () => {
       presentation: 'crash-page',
       crashError: { kind: 'renderer_crashed' }
     })
+    expect(parseBrowserSurfaceState(crashState)).not.toHaveProperty('isAgentTarget')
+    expect(parseBrowserSurfaceState({ ...crashState, isAgentTarget: true })).toMatchObject({
+      isAgentTarget: true
+    })
+    expect(() => parseBrowserSurfaceState({ ...crashState, isAgentTarget: 'true' })).toThrow()
     expect(() =>
       parseBrowserSurfaceState({
         ...crashState,
