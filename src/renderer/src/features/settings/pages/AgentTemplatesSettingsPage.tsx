@@ -406,29 +406,14 @@ export function AgentTemplatesSettingsPage({
 
   return (
     <article className="settings-list-page agent-templates-page">
-      <header className="agent-templates-page__heading">
-        <div>
-          <h1>{t('settings.page.agentTemplates')}</h1>
-          <p className="settings-list-page__description">{t('agentTemplates.descriptionText')}</p>
-        </div>
-        {renderSettingsNodes(agentTemplateCreateSettings, (node) => (
-          <button
-            className="agent-templates-create-button"
-            disabled={enabledModels.length === 0}
-            onClick={startCreate}
-            type="button"
-          >
-            <Plus aria-hidden="true" />
-            <span>{settingLabel(node, t)}</span>
-          </button>
-        ))}
-      </header>
+      <h1>{t('settings.page.agentTemplates')}</h1>
 
       {renderSettingsNodes(agentCollaborationSettingsNodes, (node) => (
         <section
           className="agent-templates-page__collaboration settings-list-section"
-          aria-labelledby="agent-collaboration-settings-label"
+          aria-labelledby="agent-collaboration-heading"
         >
+          <h2 id="agent-collaboration-heading">{t('settings.page.agentTemplates')}</h2>
           <div className="settings-list">
             <div className="settings-list-row">
               <div className="settings-list-row__text">
@@ -484,7 +469,24 @@ export function AgentTemplatesSettingsPage({
       ) : null}
 
       {renderSettingsNodes(agentTemplateLibrarySettings, (node) => (
-        <section aria-label={settingLabel(node, t)} className="agent-templates-page__list">
+        <section
+          aria-labelledby="agent-templates-library-heading"
+          className="settings-list-section agent-templates-page__list"
+        >
+          <div className="settings-list-section__header agent-templates-page__library-heading">
+            <h2 id="agent-templates-library-heading">{settingLabel(node, t)}</h2>
+            {renderSettingsNodes(agentTemplateCreateSettings, (createNode) => (
+              <button
+                className="agent-templates-create-button"
+                disabled={enabledModels.length === 0}
+                onClick={startCreate}
+                type="button"
+              >
+                <Plus aria-hidden="true" />
+                <span>{settingLabel(createNode, t)}</span>
+              </button>
+            ))}
+          </div>
           {loading ? <p role="status">{t('agentTemplates.loading')}</p> : null}
           {!loading && loadError ? (
             <div className="agent-templates-page__load-error" role="alert">

@@ -13,7 +13,7 @@ import { loadConversation } from '../features/storage/storageClient'
 import type { UiPreferencesSnapshot } from '../features/storage/storageClient'
 import type { Translate } from '../config/translationFormat'
 import { mergeConversationMessageFromBackend } from './chatMessageFactory'
-import type { ActiveRunBinding } from './appTypes'
+import type { ActiveRunBinding, AutoSubmitQueuedMessage } from './appTypes'
 import type { PendingMessageDelta } from './AppShellSupport'
 
 export const STOP_RECONCILIATION_DELAYS_MS = [400, 1500, 4000] as const
@@ -118,7 +118,7 @@ export function captureCommandSessionRefreshCandidates(
   conversation: ChatConversation | undefined
 ): CommandSessionRefreshCandidate[] {
   const candidates: CommandSessionRefreshCandidate[] = []
-  for (const message of conversation?.messages ?? []) {
+  for (const message of getCommandSessionOwnerMessages(conversation)) {
     const run = message.agentRun
     if (!run) continue
     for (const call of run.toolCalls) {
@@ -131,6 +131,18 @@ export function captureCommandSessionRefreshCandidates(
     }
   }
   return candidates
+}
+
+export function getCommandSessionOwnerMessages(
+  conversation: ChatConversation | undefined
+): ChatMessage[] {
+  const messages = conversation?.messages ?? []
+  const boundaryMessageId = conversation?.continuationOrigin?.boundaryMessageId
+  if (!boundaryMessageId) return messages
+  const boundaryIndex = messages.findIndex((message) => message.id === boundaryMessageId)
+  // Copied history is an immutable snapshot, including its command cards. Only messages
+  // created after the Host-provided fork boundary can own live Sessions in the new task.
+  return messages.slice(boundaryIndex + 1)
 }
 
 export function isSameRunBinding(
@@ -206,7 +218,7 @@ export function mergeAuthoritativeTerminalMessage(
 
 export interface AgentRunLifecycleRefs {
   activeRunBindings: MutableRefObject<Map<string, ActiveRunBinding>>
-  autoSubmitQueuedMessage: MutableRefObject<(conversationId: string) => void>
+  autoSubmitQueuedMessage: MutableRefObject<AutoSubmitQueuedMessage>
   bufferedAgentEvents: MutableRefObject<Map<string, AgentEvent[]>>
   cancelledPendingMessageIds: MutableRefObject<Set<string>>
   cancelledRunIds: MutableRefObject<Set<string>>
@@ -249,6 +261,7 @@ export interface UseAgentRunLifecycleOptions {
   }
   enqueueChatMessageCheckpoint: (conversationId: string, message: ChatMessage) => void
   enqueueChatMessageStateSave: (conversationId: string, message: ChatMessage) => void
+  enqueueConversationMetaSave: (conversation: ChatConversation) => void
   flushChatMessageStateSave: (conversationId: string, messageId: string) => Promise<void>
   flushConversationMessageStateSaves: (conversationId: string) => Promise<void>
   recordContextWindowSnapshot: (

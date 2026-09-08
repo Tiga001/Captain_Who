@@ -407,8 +407,14 @@ export class CoreServerAgentApi extends CoreServerStorageApi {
         validateProviderTransitionResponseIdentity(request, operation)
         return operation
       })
-      .catch(() => {
-        throw new Error('The model-switch check expired. Please try again.')
+      .catch((error: unknown) => {
+        const safeError = new Error('The model-switch check expired. Please try again.')
+        // Preserve only the JSON-RPC rejection marker. Private diagnostics stay in Core,
+        // while transport failures without a response code remain uncertain to the caller.
+        if (error instanceof Error && 'code' in error && typeof error.code === 'number') {
+          Object.assign(safeError, { code: error.code })
+        }
+        throw safeError
       })
   }
 

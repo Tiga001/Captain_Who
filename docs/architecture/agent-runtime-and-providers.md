@@ -74,9 +74,12 @@ Provider 能力通过显式枚举描述，包括：Tool 交换方式、私有 re
   -> 继续下一次模型请求，或暂停为 pending action
   -> 原子提交模型生成的 assistant message、Trace 终态、Usage/UI 终态
   -> 释放 Turn reservation
+  -> 发布成功完成的终态事件
 ```
 
 模型返回一批 Tool 调用时，Runtime 保留调用顺序与 Provider 要求的批次语义。Tool 调用不能在未形成权威结果时被当作已完成；需要审批的调用在 Checkpoint 中冻结，批准后由 Core Server 从持久状态恢复，而不是重新让模型生成一次。
+
+普通回复与审批续跑的成功 `Done` 在终态提交、旧 Run 占用与并发许可释放、上下文清理之后发布。接收端可以据此请求下一轮，仍由 Turn admission 原子检查是否允许启动；等待审批或用户输入的 `Done` 不表示会话空闲。
 
 Turn admission 创建的 pending assistant message 正文为空；系统不再把“正在思考”之类 UI placeholder 写进消息。流式 narration/final content 与终态正文只能来自模型输出或明确的错误/取消结算路径，展示占位符不得进入可压缩历史或被当作模型主张。
 

@@ -130,6 +130,7 @@ Projects 标题栏的新增按钮直接调用 Main 的原生文件夹选择器�
 - stop 只是请求；最终 completed/failed/cancelled 状态必须来自后端事件或权威存储对账。
 - reload 后重新加载 pending actions、command sessions 和未完成 Run，而不是根据 UI 文本推断。
 - edit/rewrite、Provider transition 和 Skill 恢复均使用 epoch/revision，迟到结果不得回退更新后的选择。
+- 队列自动发送由 Host 成功完成、权威状态恢复和队列变更驱动，不通过定时重试推断空闲。发送前等待终态对账及消息、会话保存完成；Host 预检为 `compatible/same_protocol` 时直接请求下一轮，无需创建无变化的模型切换。需要模型切换确认或压缩时，队列等待其明确完成；有错误码的 Host 拒绝不能冒充尚在运行的切换。
 - assistant message 从空正文开始；正常流式/完成路径接收模型 delta/final content，模型请求中断保持空正文并显示 typed interruption。其他受控错误或取消结算可能包含 Host 持久化的终态可见正文，Renderer 必须按权威 message/run 状态呈现，不能自行把原始 Provider/异常文本拼接进去。
 - 审批按钮只在提交期间锁定；Host 返回未接受或请求失败时必须重新启用，pending ticket 是否结算仍以 Rust Core 的权威决定为准，不能由一次前端点击乐观终止。
 - 流式 Markdown 保持已完成代码块的组件身份和 wrap/copy 状态；代码仅追加时可保留已高亮前缀，非追加修改必须丢弃旧 highlight snapshot，避免展示与源码不一致。

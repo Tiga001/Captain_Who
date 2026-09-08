@@ -1115,11 +1115,8 @@ export const frFRTranslations = {
   'chat.deleteQueuedMessage': "Supprimer le message en file d'attente",
   'chat.queuedMessageMenu': "Menu des messages en file d'attente",
   'chat.editQueuedMessage': 'Modifier le message',
-  'chat.openQueuedMessageInSideChat': 'Ouvrir dans le chat secondaire',
-  'chat.sideChatPlaceholderTitle': 'Discussion parallèle',
-  'chat.sideChatPlaceholderDescription':
-    'Le chat secondaire sera disponible dans une prochaine version.',
-  'chat.closeSideChatPlaceholder': 'Fermer le chat secondaire',
+  'chat.enableQueueAutoSend': 'Activer l’envoi automatique de la file',
+  'chat.disableQueueAutoSend': 'Désactiver l’envoi automatique de la file',
   'chat.guidanceQueued': "En file d'attente",
   'chat.guidanceSubmittingStatus': 'Envoi',
   'chat.guidanceFailed': "Les conseils n'ont pas pu être envoyés. Modifiez-le et réessayez.",

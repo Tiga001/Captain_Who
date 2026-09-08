@@ -9,7 +9,7 @@ import {
   useRef,
   useState
 } from 'react'
-import { Split, X } from 'lucide-react'
+import { Split } from 'lucide-react'
 import type {
   AgentApprovalScope,
   AgentContextWindowSnapshot,
@@ -46,7 +46,6 @@ import type {
   ChatSubmitOptions
 } from './chatTypes'
 import type { ModelTransitionConfirmation } from './modelTransitionUiState'
-import { stripAttachmentSummary } from './chatAttachments'
 import { getConversationTurnNavigationItems } from './conversationTurnNavigation'
 import { isAssistantMessageGenerating, isAssistantReplyComplete } from './assistantGeneration'
 import { getLatestAgentTodo } from './todoLifetime'
@@ -111,6 +110,8 @@ export interface InteractiveConversationSurfaceProps extends ConversationSurface
   onContinueInNewTask?: (forkPoint: StorageConversationForkPoint) => void | Promise<void>
   onEditLastUserMessage?: (messageId: string, content: string) => void | Promise<void>
   onGuideQueuedMessage?: (message: ChatQueuedMessage) => void
+  queueAutoSendEnabled?: boolean
+  onToggleQueueAutoSend?: () => void
   onMessageUiStateChange?: (
     messageId: string,
     uiState: ChatConversation['messages'][number]['uiState']
@@ -597,7 +598,6 @@ export function ConversationSurface(props: ConversationSurfaceProps) {
   const interactive = props.mode === 'interactive' ? props : null
   const messagesRef = useRef<HTMLDivElement>(null)
   const handledScrollTargetRef = useRef<string | null>(null)
-  const [sideChatPlaceholder, setSideChatPlaceholder] = useState<ChatQueuedMessage | null>(null)
   const pendingApprovalTarget = useMemo(
     () => (interactive ? getPendingApprovalTarget(conversation) : null),
     [conversation, interactive]
@@ -784,10 +784,6 @@ export function ConversationSurface(props: ConversationSurfaceProps) {
 
   useEffect(() => rememberCurrentScrollPosition, [rememberCurrentScrollPosition])
 
-  useEffect(() => {
-    setSideChatPlaceholder(null)
-  }, [conversation.id])
-
   return (
     <section
       className="chat-conversation-page conversation-surface"
@@ -953,7 +949,8 @@ export function ConversationSurface(props: ConversationSurfaceProps) {
               onDraftChange={interactive.onComposerDraftChange}
               onDraftMessageChange={interactive.onComposerDraftMessageChange}
               onGuideQueuedMessage={interactive.onGuideQueuedMessage}
-              onOpenQueuedMessageInSideChat={setSideChatPlaceholder}
+              queueAutoSendEnabled={interactive.queueAutoSendEnabled}
+              onToggleQueueAutoSend={interactive.onToggleQueueAutoSend}
               onStopGenerating={interactive.onStopGenerating}
               onSubmitMessage={interactive.onSubmitMessage}
               permissionModeAvailability={interactive.permissionModeAvailability}
@@ -972,33 +969,6 @@ export function ConversationSurface(props: ConversationSurfaceProps) {
             preflight={interactive.modelTransitionConfirmation}
           />
         )}
-      {interactive && sideChatPlaceholder && (
-        <aside
-          className="guidance-side-chat-placeholder"
-          aria-label={t('chat.sideChatPlaceholderTitle')}
-        >
-          <header>
-            <strong>{t('chat.sideChatPlaceholderTitle')}</strong>
-            <button
-              aria-label={t('chat.closeSideChatPlaceholder')}
-              onClick={() => setSideChatPlaceholder(null)}
-              type="button"
-            >
-              <X aria-hidden="true" />
-            </button>
-          </header>
-          <div className="guidance-side-chat-placeholder__message">
-            {stripAttachmentSummary(sideChatPlaceholder.content, sideChatPlaceholder.attachments) ||
-              t('chat.attachmentOnlyMessage')}
-          </div>
-          {sideChatPlaceholder.attachments.length > 0 && (
-            <p>
-              {sideChatPlaceholder.attachments.map((attachment) => attachment.name).join(' · ')}
-            </p>
-          )}
-          <span>{t('chat.sideChatPlaceholderDescription')}</span>
-        </aside>
-      )}
     </section>
   )
 }

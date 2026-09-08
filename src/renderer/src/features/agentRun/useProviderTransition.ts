@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useReducer, useRef } from 'react'
+import { HostInvocationError } from '@mycopilot/host-api'
 import type {
   AgentProviderTransitionOperation,
   AgentProviderTransitionPreflightOutput,
@@ -58,6 +59,7 @@ function waitForProviderTransitionReconciliation(
 }
 
 type TransitionRequestOutcome =
+  | { status: 'ready'; modelId: string }
   | {
       status: 'completed'
       operation: Extract<AgentProviderTransitionOperation, { status: 'completed' }>
@@ -68,7 +70,8 @@ type TransitionRequestOutcome =
       /** Missing only when both idempotent invocation replies were lost; exact polling continues. */
       operation?: Extract<AgentProviderTransitionOperation, { status: 'running' }>
     }
-  | { status: 'blocked' | 'failed' | 'superseded' }
+  | { status: 'blocked'; reason: AgentProviderTransitionReason }
+  | { status: 'failed' | 'superseded' }
 
 interface UseProviderTransitionOptions {
   onBlocked: (reason: AgentProviderTransitionReason) => void
@@ -260,7 +263,7 @@ export function useProviderTransition({
       let operation: AgentProviderTransitionOperation
       try {
         operation = await startProviderTransition(input)
-      } catch {
+      } catch (error) {
         // A lost invocation reply may hide an already committed operation. The Host-signed token
         // makes repeating this exact start idempotent. The preflight-derived operation identity
         // keeps recovery scoped to this attempt rather than replaying historical status.
@@ -275,9 +278,15 @@ export function useProviderTransition({
             ? { status: 'completed', operation: terminalBeforeRetry }
             : { status: 'failed' }
         }
+        if (error instanceof HostInvocationError && typeof error.code === 'number') {
+          // A JSON-RPC rejection is a received Host answer, not an uncertain lost reply.
+          cancelActiveAttempt(preflight.conversationId)
+          onRequestErrorRef.current()
+          return { status: 'failed' }
+        }
         try {
           operation = await startProviderTransition(input)
-        } catch {
+        } catch (error) {
           if (activeAttemptsRef.current.get(preflight.conversationId) !== attempt) {
             return { status: 'superseded' }
           }
@@ -288,6 +297,11 @@ export function useProviderTransition({
             return terminalAfterRetry.status === 'completed'
               ? { status: 'completed', operation: terminalAfterRetry }
               : { status: 'failed' }
+          }
+          if (error instanceof HostInvocationError && typeof error.code === 'number') {
+            cancelActiveAttempt(preflight.conversationId)
+            onRequestErrorRef.current()
+            return { status: 'failed' }
           }
           // Both invocation replies may be lost after Host accepted the idempotent authority.
           // Keep exact-operation reconciliation alive and preserve the caller's pending message.
@@ -331,24 +345,41 @@ export function useProviderTransition({
   )
 
   const request = useCallback(
-    async (conversationId: string, targetModelId: string): Promise<TransitionRequestOutcome> => {
+    async (
+      conversationId: string,
+      targetModelId: string,
+      options: {
+        shouldContinue?: () => boolean
+        reportBlocked?: boolean
+        allowUnchangedModel?: boolean
+      } = {}
+    ): Promise<TransitionRequestOutcome> => {
+      const shouldContinue = options.shouldContinue ?? (() => true)
       const requestEpoch = (requestEpochsRef.current.get(conversationId) ?? 0) + 1
       requestEpochsRef.current.set(conversationId, requestEpoch)
       try {
         const preflight = await preflightProviderTransition({ conversationId, targetModelId })
-        if (requestEpochsRef.current.get(conversationId) !== requestEpoch) {
+        if (!shouldContinue() || requestEpochsRef.current.get(conversationId) !== requestEpoch) {
           return { status: 'superseded' }
         }
         if (preflight.decision === 'blocked') {
-          onBlockedRef.current(preflight.reason)
-          return { status: 'blocked' }
+          if (options.reportBlocked !== false) onBlockedRef.current(preflight.reason)
+          return { status: 'blocked', reason: preflight.reason }
         }
         if (preflight.decision === 'requires_compaction') {
           dispatch({ type: 'confirmation_requested', preflight })
           return { status: 'confirmation_required' }
         }
+        if (options.allowUnchangedModel && preflight.reason === 'same_protocol') {
+          // Host has checked both the model identity and its current protocol compatibility.
+          // The actual Turn admission checks again; no model mutation needs a token handshake.
+          return { status: 'ready', modelId: preflight.targetModelId }
+        }
         return start(preflight)
       } catch {
+        if (!shouldContinue() || requestEpochsRef.current.get(conversationId) !== requestEpoch) {
+          return { status: 'superseded' }
+        }
         onRequestErrorRef.current()
         return { status: 'failed' }
       }
@@ -393,7 +424,7 @@ export function useProviderTransition({
         })
         if (preflight.decision === 'blocked') {
           onBlockedRef.current(preflight.reason)
-          return { status: 'blocked' }
+          return { status: 'blocked', reason: preflight.reason }
         }
         return start(preflight)
       } catch {

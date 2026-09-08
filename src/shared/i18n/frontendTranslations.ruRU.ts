@@ -1102,10 +1102,8 @@ export const ruRUTranslations = {
   'chat.deleteQueuedMessage': 'Удалить сообщение из очереди',
   'chat.queuedMessageMenu': 'Меню сообщений в очереди',
   'chat.editQueuedMessage': 'Редактировать сообщение',
-  'chat.openQueuedMessageInSideChat': 'Открыть в дополнительном чате',
-  'chat.sideChatPlaceholderTitle': 'Боковой чат',
-  'chat.sideChatPlaceholderDescription': 'Боковой чат будет доступен в будущем выпуске.',
-  'chat.closeSideChatPlaceholder': 'Закрыть боковой чат',
+  'chat.enableQueueAutoSend': 'Включить автоотправку очереди',
+  'chat.disableQueueAutoSend': 'Выключить автоотправку очереди',
   'chat.guidanceQueued': 'В очереди',
   'chat.guidanceSubmittingStatus': 'Отправка',
   'chat.guidanceFailed':

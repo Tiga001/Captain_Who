@@ -1,5 +1,39 @@
 use super::*;
 
+#[cfg(test)]
+type AfterTerminalPublicationHook = Arc<dyn Fn() + Send + Sync>;
+
+#[cfg(test)]
+static AFTER_TERMINAL_PUBLICATION_HOOKS: Mutex<Vec<(String, AfterTerminalPublicationHook)>> =
+    Mutex::new(Vec::new());
+
+#[cfg(test)]
+pub(super) fn install_after_terminal_publication_hook(
+    run_id: &str,
+    hook: AfterTerminalPublicationHook,
+) {
+    AFTER_TERMINAL_PUBLICATION_HOOKS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .push((run_id.to_string(), hook));
+}
+
+#[cfg(test)]
+pub(super) fn run_after_terminal_publication_hook(run_id: &str) {
+    let hook = {
+        let mut hooks = AFTER_TERMINAL_PUBLICATION_HOOKS
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        hooks
+            .iter()
+            .position(|(candidate, _)| candidate == run_id)
+            .map(|index| hooks.swap_remove(index).1)
+    };
+    if let Some(hook) = hook {
+        hook();
+    }
+}
+
 #[derive(Default)]
 pub(super) struct AgentTerminalEventGate {
     deferred: Mutex<Vec<AgentEvent>>,

@@ -316,6 +316,7 @@ impl AgentService {
         }
 
         let mut deletion_cleanup = false;
+        let mut committed_terminal_output = None;
         let (durable_turn_terminal, settlement_committed) = match result {
             Ok(mut agent_output) => {
                 let committed_durable_context = is_terminal_run_status(agent_output.status);
@@ -421,13 +422,7 @@ impl AgentService {
                         }));
                     }
                     if terminal_commit_published {
-                        emit_terminal_events_after_persistence_for_turn(
-                            &notifications,
-                            &terminal_event_gate,
-                            &agent_output,
-                            resumed_identity.as_ref(),
-                            assistant_message_id,
-                        );
+                        committed_terminal_output = Some(agent_output);
                     }
                 }
                 (
@@ -669,6 +664,32 @@ impl AgentService {
             || (keep_trace_snapshot && settlement_committed)
         {
             self.unregister_cancellation_if_current(&run_id, &cancellation_token);
+        }
+        // Match ordinary Turns: successful Done must not retain the completed
+        // approval continuation's occupancy or permit when a receiver sends the next Turn.
+        if let (Some(output), Some(assistant_message_id)) = (
+            committed_terminal_output.as_ref(),
+            record.snapshot.assistant_message_id.as_deref(),
+        ) {
+            {
+                let deletion_lifecycle = self
+                    .deletion_lifecycle
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner());
+                if deletion_lifecycle.contains_input(&record.agent_input) {
+                    terminal_event_gate.discard();
+                } else {
+                    emit_terminal_events_after_persistence_for_turn(
+                        &notifications,
+                        &terminal_event_gate,
+                        output,
+                        resumed_identity.as_ref(),
+                        assistant_message_id,
+                    );
+                }
+            }
+            #[cfg(test)]
+            run_after_terminal_publication_hook(&run_id);
         }
         if waiting_for_user_input && cancellation_token.is_cancelled() {
             self.cancel_waiting_human_input_run(&run_id);

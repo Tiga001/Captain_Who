@@ -102,13 +102,34 @@ describe('CoreServer Provider transition client', () => {
       })
     )
 
-    await expect(
-      new CoreServer().startProviderTransition({
+    const error = await new CoreServer()
+      .startProviderTransition({
         conversationId: 'conversation-1',
         targetModelId: 'generic-model',
         transitionToken: 'stale-token'
       })
-    ).rejects.toThrow('The model-switch check expired. Please try again.')
+      .catch((error: unknown) => error)
+    expect(error).toMatchObject({
+      message: 'The model-switch check expired. Please try again.',
+      code: -32000
+    })
+    expect(error).not.toHaveProperty('data')
+  })
+
+  it('keeps a lost transport reply distinguishable from a Core rejection', async () => {
+    rpcRequest.mockRejectedValue(new Error('private socket diagnostics'))
+    const error = await new CoreServer()
+      .startProviderTransition({
+        conversationId: 'conversation-1',
+        targetModelId: 'generic-model',
+        transitionToken: 'opaque-token'
+      })
+      .catch((error: unknown) => error)
+    expect(error).toMatchObject({
+      message: 'The model-switch check expired. Please try again.'
+    })
+    expect(error).not.toHaveProperty('code')
+    expect(error).not.toHaveProperty('data')
   })
 
   it('strictly parses notifications and ignores invalid payloads', () => {

@@ -203,6 +203,9 @@ async function captureProviderTransitionInvocation<T>(
   if (result.ok) return result
   return {
     ok: false,
-    error: { message: safeErrorMessage }
+    error: {
+      message: safeErrorMessage,
+      ...(result.error.code === undefined ? {} : { code: result.error.code })
+    }
   }
 }

@@ -7,6 +7,192 @@ use mycopilot_core::{
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 
+struct ReleaseTerminalWorker(Option<std::sync::mpsc::Sender<()>>);
+
+impl Drop for ReleaseTerminalWorker {
+    fn drop(&mut self) {
+        if let Some(sender) = self.0.take() {
+            let _ = sender.send(());
+        }
+    }
+}
+
+async fn assert_completed_done_admits_next_turn(require_approval: bool) {
+    use super::managed_command_loop::{
+        read_json_request, write_text_stream, write_tool_call_stream,
+    };
+    use mycopilot_core::{AgentCommandPermission, AgentCommandSafetyPolicy};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (allow_first_reply, first_reply_allowed) = tokio::sync::oneshot::channel();
+    let (allow_next_reply, next_reply_allowed) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        read_json_request(&mut stream).await;
+        first_reply_allowed.await.unwrap();
+        if require_approval {
+            write_tool_call_stream(
+                &mut stream,
+                "done-readiness-command",
+                "run_command",
+                json!({ "command": "printf ready", "reason": "verify approval completion" }),
+                "Please approve the command.",
+            )
+            .await;
+            drop(stream);
+            stream = listener.accept().await.unwrap().0;
+            read_json_request(&mut stream).await;
+        }
+        write_text_stream(&mut stream, "The first reply is complete.").await;
+        drop(stream);
+        let (mut next_stream, _) = listener.accept().await.unwrap();
+        read_json_request(&mut next_stream).await;
+        next_reply_allowed.await.unwrap();
+        write_text_stream(&mut next_stream, "The queued reply is complete.").await;
+    });
+
+    let fixture = tempdir().unwrap();
+    let storage = Arc::new(StorageService::open(&fixture.path().join("ready.sqlite")).unwrap());
+    let mut settings = test_model_settings();
+    settings.api_url = format!("http://{address}/v1/chat/completions");
+    storage.save_model_settings(settings).unwrap();
+    let workspace = fixture.path().join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    storage
+        .save_project(ProjectRecord {
+            id: "project-done-ready".to_string(),
+            name: "Done readiness".to_string(),
+            path: Some(workspace.to_string_lossy().into_owned()),
+            created_at: 1,
+            pinned_at: None,
+        })
+        .unwrap();
+    let conversation_id = "conversation-done-ready";
+    let input = |suffix: &str| AgentConversationTurnInput {
+        conversation_id: Some(conversation_id.to_string()),
+        project_id: Some("project-done-ready".to_string()),
+        model_id: "model-1".to_string(),
+        context_window_indicator_enabled: true,
+        content: format!("Reply to {suffix}."),
+        attachments: Vec::new(),
+        skills: Vec::new(),
+        title: None,
+        user_message_id: Some(format!("user-{suffix}")),
+        assistant_message_id: Some(format!("assistant-{suffix}")),
+        max_tokens: None,
+        temperature: None,
+        prompt_preferences: None,
+        permissions: AgentPermissions {
+            command: AgentCommandPermission::RequireApproval,
+            command_safety: AgentCommandSafetyPolicy::FullAccess,
+            ..AgentPermissions::default()
+        },
+    };
+    let service = AgentService::new(storage);
+    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let first = service
+        .start_conversation_turn(input("first"), notifications.clone())
+        .unwrap();
+    let (release_worker, worker_released) = std::sync::mpsc::channel();
+    let release_worker = ReleaseTerminalWorker(Some(release_worker));
+    let worker_released = Mutex::new(worker_released);
+    install_after_terminal_publication_hook(
+        &first.run_id,
+        Arc::new(move || {
+            worker_released.lock().unwrap().recv().unwrap();
+        }),
+    );
+    allow_first_reply.send(()).unwrap();
+
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let notification = receiver.recv().await.unwrap();
+            let event = &notification["params"];
+            assert_ne!(event["type"], "error", "{notification}");
+            if event["type"] != "done" {
+                continue;
+            }
+            if event["status"] == "waiting_for_approval" {
+                assert!(require_approval);
+                assert!(service
+                    .has_conversation_turn_occupancy(conversation_id)
+                    .unwrap());
+                let pending = service.list_pending_actions();
+                assert_eq!(pending.len(), 1);
+                service
+                    .approve_action(&first.run_id, &pending[0].action_id, notifications.clone())
+                    .unwrap();
+                continue;
+            }
+            assert_eq!(event["status"], "completed", "{notification}");
+            assert_eq!(event["success"], true);
+            break;
+        }
+    })
+    .await
+    .unwrap();
+
+    // The previous worker is frozen immediately after publishing Done. No retry, sleep,
+    // polling, or waiting for worker cleanup may make these admission assertions pass.
+    let preflight = service
+        .preflight_provider_transition(AgentProviderTransitionPreflightInput {
+            conversation_id: conversation_id.to_string(),
+            target_model_id: "model-1".to_string(),
+        })
+        .unwrap();
+    assert_eq!(
+        preflight.decision,
+        AgentProviderTransitionDecision::Compatible
+    );
+    assert!(!service
+        .active_turn_permits
+        .lock()
+        .unwrap()
+        .contains_key(&first.run_id));
+    let next = service
+        .start_conversation_turn(input("next"), notifications.clone())
+        .expect("receiving completed Done must permit an immediate next Turn");
+    // A delayed cleanup for the old Run must never release this newly admitted owner.
+    service.release_conversation_turn_if_current(conversation_id, &first.run_id);
+    service.release_turn_concurrency_permit(&first.run_id);
+    assert_eq!(
+        service.active_conversation_turns.lock().unwrap()[conversation_id].run_id,
+        next.run_id
+    );
+    assert!(service
+        .active_turn_permits
+        .lock()
+        .unwrap()
+        .contains_key(&next.run_id));
+    drop(release_worker);
+    allow_next_reply.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let notification = receiver.recv().await.unwrap();
+            if notification["params"]["type"] == "done"
+                && notification["params"]["runId"] == next.run_id
+            {
+                assert_eq!(notification["params"]["status"], "completed");
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    server.await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn completed_done_admits_next_turn_before_retiring_worker_returns() {
+    assert_completed_done_admits_next_turn(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn approval_completed_done_admits_next_turn_before_retiring_worker_returns() {
+    assert_completed_done_admits_next_turn(true).await;
+}
+
 fn terminal_test_checkpoint_item(
     call: &AgentToolCall,
 ) -> mycopilot_core::AgentContextCheckpointItem {

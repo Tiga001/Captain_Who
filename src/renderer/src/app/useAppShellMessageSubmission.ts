@@ -2,6 +2,8 @@
 import {
   useCallback,
   useEffect,
+  useRef,
+  useState,
   type Dispatch,
   type MutableRefObject,
   type SetStateAction
@@ -17,10 +19,13 @@ import type {
   ChatComposerDraft,
   ChatConversation,
   ChatMessage,
+  ChatQueuedMessage,
   ChatSubmitOptions
 } from '../features/chat/chatTypes'
 import { loadInputAttachments } from '../features/storage/storageClient'
 import { useProviderTransition } from '../features/agentRun/useProviderTransition'
+import { isAssistantReplySettled } from '../features/chat/assistantGeneration'
+import type { AutoSubmitQueuedMessage } from './appTypes'
 import { getEditableLastTurn } from './appShellConversationUtils'
 import { buildMessageContentWithAttachments } from './appShellConversationUtils'
 import {
@@ -45,8 +50,7 @@ interface EditRewriteAttempt {
 }
 
 type PendingProviderTransitionSubmission =
-  | { kind: 'composer'; message: string; options: ChatSubmitOptions }
-  | { kind: 'queued_message'; queueMessageId: string }
+  { kind: 'composer'; message: string; options: ChatSubmitOptions } | { kind: 'queued_message' }
 
 type RequestAssistantResponse = ReturnType<
   (typeof import('./useAgentRunLifecycle'))['useAgentRunLifecycle']
@@ -56,8 +60,10 @@ interface UseAppShellMessageSubmissionOptions {
   activeConversationIdRef: MutableRefObject<string | null>
   activeDraft: ChatComposerDraft
   activeDraftSelectedModel: ModelConfig | null
-  autoSubmitQueuedMessageRef: MutableRefObject<(conversationId: string) => void>
+  autoSubmitQueuedMessageRef: MutableRefObject<AutoSubmitQueuedMessage>
+  conversations: ChatConversation[]
   conversationsRef: MutableRefObject<ChatConversation[]>
+  drafts: Record<string, ChatComposerDraft>
   draftsRef: MutableRefObject<Record<string, ChatComposerDraft>>
   editRewriteAttemptsRef: MutableRefObject<Map<string, EditRewriteAttempt>>
   editRewriteInFlightRef: MutableRefObject<Set<string>>
@@ -92,6 +98,8 @@ interface UseAppShellMessageSubmissionOptions {
   updateDraft: (scopeId: string, draft: ChatComposerDraft) => void
   waitForConversationSaves: (conversationId: string) => Promise<void>
   waitForMessageUpserts: (conversationId: string) => Promise<void>
+  waitForMessageStateSaves: (conversationId: string) => Promise<void>
+  waitForRunSettlement: (conversationId: string) => Promise<void>
 }
 
 export function useAppShellMessageSubmission({
@@ -99,7 +107,9 @@ export function useAppShellMessageSubmission({
   activeDraft,
   activeDraftSelectedModel,
   autoSubmitQueuedMessageRef,
+  conversations,
   conversationsRef,
+  drafts,
   draftsRef,
   editRewriteAttemptsRef,
   editRewriteInFlightRef,
@@ -120,8 +130,35 @@ export function useAppShellMessageSubmission({
   t,
   updateDraft,
   waitForConversationSaves,
-  waitForMessageUpserts
+  waitForMessageUpserts,
+  waitForMessageStateSaves,
+  waitForRunSettlement
 }: UseAppShellMessageSubmissionOptions) {
+  // Queue execution is opt-in for each conversation during this app session.
+  // A fresh token on every enable invalidates work that was awaiting a previous enable.
+  const queueAutoSendTokensRef = useRef(new Map<string, symbol>())
+  const queueSubmissionAttemptsRef = useRef(new Map<string, { retryRequested: boolean }>())
+  const queueProviderWaitsRef = useRef(new Set<string>())
+  const queueMountedRef = useRef(false)
+  const queueWakeSnapshotsRef = useRef(
+    new Map<string, { head: ChatQueuedMessage | undefined; failure: string | undefined }>()
+  )
+  const [queueAutoSendConversationIds, setQueueAutoSendConversationIds] = useState(
+    () => new Set<string>()
+  )
+
+  const pauseQueueAutoSend = useCallback((conversationId: string) => {
+    queueWakeSnapshotsRef.current.delete(conversationId)
+    queueProviderWaitsRef.current.delete(conversationId)
+    if (!queueAutoSendTokensRef.current.delete(conversationId)) return
+    setQueueAutoSendConversationIds(new Set(queueAutoSendTokensRef.current.keys()))
+    if (
+      pendingProviderTransitionSubmissionsRef.current.get(conversationId)?.kind === 'queued_message'
+    ) {
+      pendingProviderTransitionSubmissionsRef.current.delete(conversationId)
+    }
+  }, [])
+
   const submitMessageToConversation = useCallback(
     (
       targetConversationId: string | null,
@@ -225,6 +262,7 @@ export function useAppShellMessageSubmission({
         targetConversation ? undefined : title
       ).then((committed) => {
         if (committed) return
+        pauseQueueAutoSend(conversationId)
 
         // Host owns accepted turns. Persist only a failed local start so its input,
         // attachments and error remain recoverable; never queue the optimistic pair
@@ -256,6 +294,7 @@ export function useAppShellMessageSubmission({
       enqueueChatMessagesUpsert,
       enqueueConversationMetaSave,
       requestAssistantResponse,
+      pauseQueueAutoSend,
       setConversationsWithRef,
       t,
       updateDraft
@@ -277,6 +316,7 @@ export function useAppShellMessageSubmission({
 
   const handleProviderTransitionCompleted = useCallback(
     (operation: Extract<AgentProviderTransitionOperation, { status: 'completed' }>) => {
+      queueProviderWaitsRef.current.delete(operation.conversationId)
       setConversationsWithRef((currentConversations) =>
         currentConversations.map((conversation) =>
           conversation.id === operation.conversationId
@@ -316,8 +356,6 @@ export function useAppShellMessageSubmission({
 
       if (pendingSubmission.kind === 'queued_message') {
         queueMicrotask(() => {
-          const nextQueuedMessage = draftsRef.current[operation.conversationId]?.queuedMessages[0]
-          if (nextQueuedMessage?.id !== pendingSubmission.queueMessageId) return
           autoSubmitQueuedMessageRef.current(operation.conversationId)
         })
         return
@@ -338,6 +376,7 @@ export function useAppShellMessageSubmission({
 
   const handleProviderTransitionFailed = useCallback(
     (operation: Extract<AgentProviderTransitionOperation, { status: 'failed' }>) => {
+      queueProviderWaitsRef.current.delete(operation.conversationId)
       const pendingSubmission = pendingProviderTransitionSubmissionsRef.current.get(
         operation.conversationId
       )
@@ -346,8 +385,11 @@ export function useAppShellMessageSubmission({
       if (pendingSubmission?.kind === 'composer') {
         pendingProviderTransitionSubmissionsRef.current.delete(operation.conversationId)
       }
+      if (pendingSubmission?.kind === 'queued_message') {
+        pauseQueueAutoSend(operation.conversationId)
+      }
     },
-    []
+    [pauseQueueAutoSend]
   )
 
   const {
@@ -412,93 +454,226 @@ export function useAppShellMessageSubmission({
     [requestProviderTransition, submitMessageToConversation, waitForConversationSaves]
   )
 
+  const readQueueWakeSnapshot = useCallback((conversationId: string) => {
+    const conversation = conversationsRef.current.find((item) => item.id === conversationId)
+    const latestAssistant = conversation?.messages.findLast(
+      (message) => message.role === 'assistant'
+    )
+    const status = latestAssistant?.agentRun?.status
+    const failure =
+      status === 'failed' || status === 'cancelled' ? `${latestAssistant!.id}:${status}` : undefined
+    const head = draftsRef.current[conversationId]?.queuedMessages[0]
+    const ready =
+      conversation &&
+      conversation.messagesLoaded !== false &&
+      !conversation.archivedAt &&
+      conversation.pendingArchivedAt === undefined &&
+      !queueProviderWaitsRef.current.has(conversationId) &&
+      !editRewriteInFlightRef.current.has(conversationId) &&
+      pendingProviderTransitionSubmissionsRef.current.get(conversationId)?.kind !== 'composer' &&
+      conversation.messages.every(
+        (message) => message.role !== 'assistant' || isAssistantReplySettled(message)
+      ) &&
+      head?.status !== 'submitting'
+    return { head: ready ? head : undefined, failure }
+  }, [])
+
   const submitNextQueuedMessage = useCallback(
     async (conversationId: string) => {
-      const conversation = conversationsRef.current.find(
-        (candidate) => candidate.id === conversationId
-      )
-      if (conversation?.archivedAt || conversation?.pendingArchivedAt !== undefined) return
-      const latestAssistant = [...(conversation?.messages ?? [])]
-        .reverse()
-        .find((message) => message.role === 'assistant')
-      if (
-        !conversation ||
-        !latestAssistant ||
-        !['completed', 'cancelled'].includes(latestAssistant.agentRun?.status ?? '')
-      ) {
+      const token = queueAutoSendTokensRef.current.get(conversationId)
+      if (!token) return
+      const existingAttempt = queueSubmissionAttemptsRef.current.get(conversationId)
+      if (existingAttempt) {
+        existingAttempt.retryRequested = true
         return
       }
 
-      const draft = draftsRef.current[conversationId]
-      const queuedMessage = draft?.queuedMessages[0]
-      if (!draft || !queuedMessage || queuedMessage.status === 'submitting') return
-
-      await waitForConversationSaves(conversationId)
-      const conversationAfterSave = conversationsRef.current.find(
-        (candidate) => candidate.id === conversationId
-      )
-      if (
-        conversationAfterSave?.archivedAt ||
-        conversationAfterSave?.pendingArchivedAt !== undefined
-      ) {
-        return
-      }
-      const transitionOutcome = await requestProviderTransition(
-        conversationId,
-        queuedMessage.modelId
-      )
-      if (
-        transitionOutcome.status === 'confirmation_required' ||
-        transitionOutcome.status === 'running'
-      ) {
-        pendingProviderTransitionSubmissionsRef.current.set(conversationId, {
-          kind: 'queued_message',
-          queueMessageId: queuedMessage.id
-        })
-        return
-      }
-      if (transitionOutcome.status !== 'completed') return
-
-      const conversationAfterTransition = conversationsRef.current.find(
-        (candidate) => candidate.id === conversationId
-      )
-      if (
-        conversationAfterTransition?.archivedAt ||
-        conversationAfterTransition?.pendingArchivedAt !== undefined
-      ) {
-        return
-      }
-
-      const currentQueuedMessage = draftsRef.current[conversationId]?.queuedMessages[0]
-      if (!currentQueuedMessage || currentQueuedMessage.id !== queuedMessage.id) return
-
-      mutateDraft(conversationId, (currentDraft) => ({
-        ...currentDraft,
-        queuedMessages: currentDraft.queuedMessages.filter(
-          (message) => message.id !== queuedMessage.id
+      const getEligibleHead = () => {
+        if (
+          !queueMountedRef.current ||
+          queueAutoSendTokensRef.current.get(conversationId) !== token
         )
-      }))
-      submitMessageToConversation(
-        conversationId,
-        queuedMessage.content,
-        {
-          attachments: queuedMessage.attachments,
-          modelId: transitionOutcome.operation.modelId,
-          permissionMode: queuedMessage.permissionMode,
-          projectId: queuedMessage.projectId,
-          skills: queuedMessage.skills
-        },
-        {
-          activate: activeConversationIdRef.current === conversationId,
-          preserveComposerContent: true
+          return
+        return readQueueWakeSnapshot(conversationId).head
+      }
+      let queuedMessage = getEligibleHead()
+      if (!queuedMessage) return
+
+      const attempt = { retryRequested: false }
+      queueSubmissionAttemptsRef.current.set(conversationId, attempt)
+      try {
+        await waitForRunSettlement(conversationId)
+        await waitForMessageStateSaves(conversationId)
+        await waitForConversationSaves(conversationId)
+        // Ordering and payload may have changed while persistence was finishing.
+        queuedMessage = getEligibleHead()
+        if (!queuedMessage) return
+        // Keep a queue-level continuation while a model switch awaits confirmation or completes;
+        // the queue may be reordered or edited before that operation settles.
+        pendingProviderTransitionSubmissionsRef.current.set(conversationId, {
+          kind: 'queued_message'
+        })
+        const transitionOutcome = await requestProviderTransition(
+          conversationId,
+          queuedMessage.modelId,
+          {
+            shouldContinue: () => getEligibleHead() === queuedMessage,
+            reportBlocked: false,
+            allowUnchangedModel: true
+          }
+        )
+        if (
+          transitionOutcome.status === 'confirmation_required' ||
+          transitionOutcome.status === 'running'
+        ) {
+          const stillWaiting =
+            queueAutoSendTokensRef.current.get(conversationId) === token &&
+            pendingProviderTransitionSubmissionsRef.current.get(conversationId)?.kind ===
+              'queued_message'
+          if (stillWaiting) {
+            queueProviderWaitsRef.current.add(conversationId)
+          }
+          // A completion notification may precede the invocation's running reply. Its callback
+          // already removed the continuation; do not recreate a wait with no future completion.
+          attempt.retryRequested = !stillWaiting
+          return
         }
-      )
+        const currentHead = getEligibleHead()
+        if (!currentHead) return
+        if (currentHead !== queuedMessage) {
+          attempt.retryRequested = true
+          return
+        }
+        if (transitionOutcome.status !== 'completed' && transitionOutcome.status !== 'ready') {
+          // Busy/approval responses wait for a new Host completion or queue/readiness change.
+          // A timer cannot establish that the previous Turn has released its ownership.
+          if (
+            transitionOutcome.status === 'failed' ||
+            (transitionOutcome.status === 'blocked' &&
+              transitionOutcome.reason === 'unsupported_target')
+          ) {
+            pauseQueueAutoSend(conversationId)
+            if (transitionOutcome.status === 'blocked') {
+              showProviderTransitionBlocked(transitionOutcome.reason)
+            }
+          }
+          return
+        }
+        pendingProviderTransitionSubmissionsRef.current.delete(conversationId)
+
+        const submitted = submitMessageToConversation(
+          conversationId,
+          currentHead.content,
+          {
+            attachments: currentHead.attachments,
+            modelId:
+              transitionOutcome.status === 'ready'
+                ? transitionOutcome.modelId
+                : transitionOutcome.operation.modelId,
+            permissionMode: currentHead.permissionMode,
+            projectId: currentHead.projectId,
+            skills: currentHead.skills
+          },
+          {
+            activate: activeConversationIdRef.current === conversationId,
+            preserveComposerContent: true
+          }
+        )
+        if (submitted) {
+          mutateDraft(conversationId, (currentDraft) => ({
+            ...currentDraft,
+            queuedMessages: currentDraft.queuedMessages.filter(
+              (message) => message.id !== currentHead.id
+            )
+          }))
+        }
+      } catch {
+        if (queueAutoSendTokensRef.current.get(conversationId) === token) {
+          pauseQueueAutoSend(conversationId)
+          showToast(t('chat.commands.failed'))
+        }
+      } finally {
+        queueSubmissionAttemptsRef.current.delete(conversationId)
+        if (
+          queueMountedRef.current &&
+          attempt.retryRequested &&
+          queueAutoSendTokensRef.current.has(conversationId)
+        ) {
+          queueMicrotask(() => autoSubmitQueuedMessageRef.current(conversationId))
+        }
+      }
     },
-    [mutateDraft, requestProviderTransition, submitMessageToConversation, waitForConversationSaves]
+    [
+      mutateDraft,
+      pauseQueueAutoSend,
+      readQueueWakeSnapshot,
+      requestProviderTransition,
+      showProviderTransitionBlocked,
+      showToast,
+      submitMessageToConversation,
+      t,
+      waitForConversationSaves,
+      waitForMessageStateSaves,
+      waitForRunSettlement
+    ]
   )
   useEffect(() => {
-    autoSubmitQueuedMessageRef.current = submitNextQueuedMessage
-  }, [submitNextQueuedMessage])
+    autoSubmitQueuedMessageRef.current = (conversationId, action) => {
+      if (action === 'pause') pauseQueueAutoSend(conversationId)
+      else void submitNextQueuedMessage(conversationId)
+    }
+  }, [pauseQueueAutoSend, submitNextQueuedMessage])
+
+  useEffect(() => {
+    queueMountedRef.current = true
+    // Fast Refresh replays effects while retaining the visible switch state. Resume enabled
+    // queues through the dispatcher rather than clearing only their execution tokens.
+    for (const conversationId of queueAutoSendTokensRef.current.keys()) {
+      queueMicrotask(() => autoSubmitQueuedMessageRef.current(conversationId))
+    }
+    return () => {
+      queueMountedRef.current = false
+      for (const conversationId of queueAutoSendTokensRef.current.keys()) {
+        queueAutoSendTokensRef.current.set(conversationId, Symbol())
+      }
+      autoSubmitQueuedMessageRef.current = () => undefined
+    }
+  }, [])
+
+  useEffect(() => {
+    for (const conversationId of queueAutoSendConversationIds) {
+      const previous = queueWakeSnapshotsRef.current.get(conversationId)
+      const current = readQueueWakeSnapshot(conversationId)
+      queueWakeSnapshotsRef.current.set(conversationId, current)
+      if (previous && current.failure && previous.failure !== current.failure) {
+        pauseQueueAutoSend(conversationId)
+      } else if (current.head && current.head !== previous?.head) {
+        // A queue item can arrive after Done (for example after attachment preparation), and
+        // an authoritative reload can settle a Run without replaying Done. Observe both inputs.
+        autoSubmitQueuedMessageRef.current(conversationId)
+      }
+    }
+  }, [
+    conversations,
+    drafts,
+    queueAutoSendConversationIds,
+    pauseQueueAutoSend,
+    readQueueWakeSnapshot
+  ])
+
+  const toggleQueueAutoSend = useCallback(
+    (conversationId: string) => {
+      if (queueAutoSendTokensRef.current.has(conversationId)) {
+        pauseQueueAutoSend(conversationId)
+      } else {
+        queueAutoSendTokensRef.current.set(conversationId, Symbol())
+        queueWakeSnapshotsRef.current.set(conversationId, readQueueWakeSnapshot(conversationId))
+        setQueueAutoSendConversationIds(new Set(queueAutoSendTokensRef.current.keys()))
+        void submitNextQueuedMessage(conversationId)
+      }
+    },
+    [pauseQueueAutoSend, readQueueWakeSnapshot, submitNextQueuedMessage]
+  )
 
   const submitEditedLastUserMessage = useCallback(
     async (messageId: string, content: string) => {
@@ -695,8 +870,10 @@ export function useAppShellMessageSubmission({
     confirmProviderTransition,
     loadProviderTransitionStatus,
     providerTransitionStore,
+    queueAutoSendConversationIds,
     retryProviderTransition,
     submitEditedLastUserMessage,
-    submitMessage
+    submitMessage,
+    toggleQueueAutoSend
   }
 }

@@ -1098,11 +1098,8 @@ export const jaJPTranslations = {
   'chat.deleteQueuedMessage': 'キューに入れられたメッセージを削除する',
   'chat.queuedMessageMenu': 'キューに入れられたメッセージメニュー',
   'chat.editQueuedMessage': 'メッセージを編集する',
-  'chat.openQueuedMessageInSideChat': 'サイドチャットで開く',
-  'chat.sideChatPlaceholderTitle': 'サイドチャット',
-  'chat.sideChatPlaceholderDescription':
-    'サイドチャットは将来のリリースで利用できるようになる予定です。',
-  'chat.closeSideChatPlaceholder': 'サイドチャットを閉じる',
+  'chat.enableQueueAutoSend': 'キューの自動送信をオンにする',
+  'chat.disableQueueAutoSend': 'キューの自動送信をオフにする',
   'chat.guidanceQueued': 'キューに入れられました',
   'chat.guidanceSubmittingStatus': '送信中',
   'chat.guidanceFailed': '案内を送信できませんでした。編集して再試行してください。',

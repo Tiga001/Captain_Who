@@ -1110,11 +1110,8 @@ export const itITTranslations = {
   'chat.deleteQueuedMessage': 'Elimina il messaggio in coda',
   'chat.queuedMessageMenu': 'Menu dei messaggi in coda',
   'chat.editQueuedMessage': 'Modifica messaggio',
-  'chat.openQueuedMessageInSideChat': 'Apri nella chat laterale',
-  'chat.sideChatPlaceholderTitle': 'Chiacchierata laterale',
-  'chat.sideChatPlaceholderDescription':
-    'La chat laterale sarà disponibile in una versione futura.',
-  'chat.closeSideChatPlaceholder': 'Chiudi la chat laterale',
+  'chat.enableQueueAutoSend': 'Attiva invio automatico della coda',
+  'chat.disableQueueAutoSend': 'Disattiva invio automatico della coda',
   'chat.guidanceQueued': 'In coda',
   'chat.guidanceSubmittingStatus': 'Invio',
   'chat.guidanceFailed': 'Impossibile inviare la guida. Modificalo e riprova.',

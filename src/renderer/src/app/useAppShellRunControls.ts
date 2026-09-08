@@ -14,7 +14,7 @@ import type {
   ChatConversation,
   ChatQueuedMessage
 } from '../features/chat/chatTypes'
-import type { ActiveRunBinding } from './appTypes'
+import type { ActiveRunBinding, AutoSubmitQueuedMessage } from './appTypes'
 
 type AppShellRuntime = ReturnType<(typeof import('./useAppShellRuntime'))['useAppShellRuntime']>
 
@@ -22,7 +22,7 @@ interface UseAppShellRunControlsOptions {
   activeConversationId: string | null
   activeConversationIdRef: MutableRefObject<string | null>
   activeRunBindingsRef: MutableRefObject<Map<string, ActiveRunBinding>>
-  autoSubmitQueuedMessageRef: MutableRefObject<(conversationId: string) => void>
+  autoSubmitQueuedMessageRef: MutableRefObject<AutoSubmitQueuedMessage>
   conversations: ChatConversation[]
   conversationsRef: MutableRefObject<ChatConversation[]>
   draftsRef: MutableRefObject<Record<string, ChatComposerDraft>>
@@ -69,6 +69,7 @@ export function useAppShellRunControls({
 }: UseAppShellRunControlsOptions) {
   const stopActiveGeneration = useCallback(() => {
     if (!activeConversationId) return
+    autoSubmitQueuedMessageRef.current(activeConversationId, 'pause')
     const activeConversationSnapshot = conversations.find(
       (conversation) => conversation.id === activeConversationId
     )
@@ -175,7 +176,7 @@ export function useAppShellRunControls({
               queuedMessage.clientMessageId,
               output.message || t('chat.guidanceFailed')
             )
-            window.setTimeout(() => autoSubmitQueuedMessageRef.current(conversationId), 0)
+            queueMicrotask(() => autoSubmitQueuedMessageRef.current(conversationId))
             return
           }
 
@@ -217,7 +218,7 @@ export function useAppShellRunControls({
           if (output.status === 'applied') {
             pendingGuidancePayloadsRef.current.delete(queuedMessage.clientMessageId)
           }
-          window.setTimeout(() => autoSubmitQueuedMessageRef.current(conversationId), 0)
+          queueMicrotask(() => autoSubmitQueuedMessageRef.current(conversationId))
         })
         .catch((error) => {
           restoreRejectedGuidance(
@@ -226,7 +227,7 @@ export function useAppShellRunControls({
             queuedMessage.clientMessageId,
             getUserFacingErrorMessage(error, t, 'chat.guidanceFailed')
           )
-          window.setTimeout(() => autoSubmitQueuedMessageRef.current(conversationId), 0)
+          queueMicrotask(() => autoSubmitQueuedMessageRef.current(conversationId))
         })
     },
     [

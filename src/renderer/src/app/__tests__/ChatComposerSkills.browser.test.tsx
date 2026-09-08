@@ -187,6 +187,8 @@ function TestComposer({
   isModelTransitionRunning = false,
   onSubmitMessage = submitSpy,
   onGuideQueuedMessage,
+  initialQueueAutoSendEnabled = false,
+  onToggleQueueAutoSend,
   skillCatalogRefreshToken = 0,
   showProjectSelector = false
 }: {
@@ -195,10 +197,13 @@ function TestComposer({
   isModelTransitionRunning?: boolean
   onSubmitMessage?: ChatComposerProps['onSubmitMessage']
   onGuideQueuedMessage?: ChatComposerProps['onGuideQueuedMessage']
+  initialQueueAutoSendEnabled?: boolean
+  onToggleQueueAutoSend?: ChatComposerProps['onToggleQueueAutoSend']
   skillCatalogRefreshToken?: number
   showProjectSelector?: boolean
 }) {
   const [draft, setDraft] = useState(initialDraft)
+  const [queueAutoSendEnabled, setQueueAutoSendEnabled] = useState(initialQueueAutoSendEnabled)
   return (
     <div style={{ margin: 120, width: 620 }}>
       <ChatComposer
@@ -212,6 +217,15 @@ function TestComposer({
         }}
         onSubmitMessage={onSubmitMessage}
         onGuideQueuedMessage={onGuideQueuedMessage}
+        queueAutoSendEnabled={queueAutoSendEnabled}
+        onToggleQueueAutoSend={
+          onToggleQueueAutoSend
+            ? () => {
+                onToggleQueueAutoSend()
+                setQueueAutoSendEnabled((enabled) => !enabled)
+              }
+            : undefined
+        }
         skillCatalogRefreshToken={skillCatalogRefreshToken}
         showProjectSelector={showProjectSelector}
       />
@@ -551,6 +565,47 @@ describe('running composer guidance queue', () => {
     expect(guideSpy).toHaveBeenCalledWith(expect.objectContaining({ id: 'three', content: '890' }))
     await expect.element(screen.getByText('123')).toBeVisible()
     await expect.element(screen.getByText('345')).toBeVisible()
+  })
+
+  it('toggles auto-send for the whole queue from any row menu without editing its messages', async () => {
+    const toggleSpy = vi.fn()
+    const screen = await render(
+      <TestComposer
+        initialDraft={createComposerDraft({
+          modelId: 'model-1',
+          projectId: 'project-a',
+          queuedMessages: [
+            queuedMessage('one', 'first queued message', 1),
+            queuedMessage('two', 'second queued message', 2)
+          ]
+        })}
+        isGenerating
+        onToggleQueueAutoSend={toggleSpy}
+      />
+    )
+
+    await screen.getByRole('button', { name: 'chat.queuedMessageMenu' }).first().click()
+    await expect
+      .element(screen.getByRole('menuitem', { name: 'chat.editQueuedMessage' }))
+      .toBeVisible()
+    expect(screen.container.querySelectorAll('[role="menuitem"]')).toHaveLength(2)
+    expect(screen.container.textContent).not.toContain('chat.openQueuedMessageInSideChat')
+    await screen.getByRole('menuitem', { name: 'chat.enableQueueAutoSend' }).click()
+    expect(toggleSpy).toHaveBeenCalledTimes(1)
+    expect(screen.container.querySelector('[role="menu"]')).toBeNull()
+
+    await screen.getByRole('button', { name: 'chat.queuedMessageMenu' }).nth(1).click()
+    await screen.getByRole('menuitem', { name: 'chat.disableQueueAutoSend' }).click()
+    expect(toggleSpy).toHaveBeenCalledTimes(2)
+
+    await screen.getByRole('button', { name: 'chat.queuedMessageMenu' }).first().click()
+    await expect
+      .element(screen.getByRole('menuitem', { name: 'chat.enableQueueAutoSend' }))
+      .toBeVisible()
+    await expect.element(screen.getByText('first queued message')).toBeVisible()
+    await expect.element(screen.getByText('second queued message')).toBeVisible()
+    expect(draftChangeSpy).not.toHaveBeenCalled()
+    expect(submitSpy).not.toHaveBeenCalled()
   })
 
   it('moves an edited row back to the composer and overwrites existing input', async () => {

@@ -12,7 +12,7 @@
   z-index: 1;
   display: grid;
   margin: 0 28px -16px;
-  padding: 7px 12px 20px;
+  padding: 5px 10px 20px;
   color: var(--mc-color-text-primary);
   background: color-mix(in srgb, var(--mc-color-surface-card) 94%, var(--mc-color-surface-muted));
   border: 0.5px solid var(--mc-color-border-subtle);
@@ -24,10 +24,10 @@
 .guidance-queue__item {
   position: relative;
   display: grid;
-  grid-template-columns: 16px 16px minmax(0, 1fr) auto;
-  min-height: 38px;
+  grid-template-columns: 24px 14px minmax(0, 1fr) auto;
+  min-height: 32px;
   align-items: center;
-  gap: 6px;
+  gap: 4px;
   border-bottom: 0.5px solid var(--mc-color-border-subtle);
   transition:
     background-color 120ms ease,
@@ -57,7 +57,7 @@
 
 .guidance-queue__drag-handle {
   display: grid;
-  width: 18px;
+  width: 24px;
   height: 24px;
   padding: 0;
   place-items: center;
@@ -80,8 +80,8 @@
 
 .guidance-queue__drag-handle svg,
 .guidance-queue__leading-icon {
-  width: 16px;
-  height: 16px;
+  width: 14px;
+  height: 14px;
 }
 
 .guidance-queue__leading-icon {
@@ -92,7 +92,8 @@
   display: grid;
   min-width: 0;
   gap: 1px;
-  font-size: var(--mc-font-size-chat-input);
+  font-size: 13px;
+  line-height: 18px;
 }
 
 .guidance-queue__content > span:first-child {
@@ -122,12 +123,14 @@
 
 .guidance-queue__actions button {
   display: inline-flex;
-  min-width: 27px;
-  height: 27px;
-  padding: 0 5px;
+  min-width: 24px;
+  height: 24px;
+  padding: 0 4px;
   align-items: center;
   justify-content: center;
-  gap: 5px;
+  gap: 4px;
+  font-size: 13px;
+  line-height: 18px;
   color: var(--mc-color-text-muted);
   background: transparent;
   border: 0;
@@ -146,13 +149,13 @@
 }
 
 .guidance-queue__actions .guidance-queue__guide {
-  padding-inline: 7px;
-  font-weight: var(--mc-font-weight-strong);
+  padding-inline: 5px;
+  font-weight: var(--mc-font-weight-regular);
 }
 
 .guidance-queue__actions svg {
-  width: 16px;
-  height: 16px;
+  width: 14px;
+  height: 14px;
 }
 
 .guidance-queue__menu-host {
@@ -166,7 +169,7 @@
   bottom: calc(100% + 6px);
   display: grid;
   width: 230px;
-  padding: 6px;
+  padding: 4px;
   background: var(--mc-color-surface-card);
   border: 1px solid var(--mc-color-border-subtle);
   border-radius: var(--mc-radius-xl);
@@ -175,8 +178,8 @@
 
 .guidance-queue__menu button {
   width: 100%;
-  height: 38px;
-  padding: 0 10px;
+  height: 30px;
+  padding: 0 8px;
   justify-content: flex-start;
   color: var(--mc-color-text-primary);
 }
@@ -187,7 +190,7 @@
   }
 
   .guidance-queue__item {
-    grid-template-columns: 18px minmax(0, 1fr) auto;
+    grid-template-columns: 24px minmax(0, 1fr) auto;
   }
 
   .guidance-queue__leading-icon {

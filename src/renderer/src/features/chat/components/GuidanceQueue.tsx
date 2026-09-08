@@ -10,7 +10,8 @@ import {
   CornerDownRight,
   GripVertical,
   MoreHorizontal,
-  PanelRightOpen,
+  Pause,
+  Play,
   Pencil,
   Trash2
 } from 'lucide-react'
@@ -25,7 +26,8 @@ interface GuidanceQueueProps {
   onEdit: (messageId: string) => void
   onGuide: (message: ChatQueuedMessage) => void
   onMove: (messageId: string, targetMessageId: string) => void
-  onOpenSideChat: (message: ChatQueuedMessage) => void
+  queueAutoSendEnabled?: boolean
+  onToggleQueueAutoSend?: () => void
 }
 
 export function GuidanceQueue({
@@ -35,7 +37,8 @@ export function GuidanceQueue({
   onEdit,
   onGuide,
   onMove,
-  onOpenSideChat
+  queueAutoSendEnabled = false,
+  onToggleQueueAutoSend
 }: GuidanceQueueProps) {
   const { t } = useFrontendConfig()
   const [openMenuId, setOpenMenuId] = useState<string | null>(null)
@@ -259,15 +262,24 @@ export function GuidanceQueue({
                       <span>{t('chat.editQueuedMessage')}</span>
                     </button>
                     <button
+                      disabled={!onToggleQueueAutoSend}
                       onClick={() => {
                         setOpenMenuId(null)
-                        onOpenSideChat(message)
+                        onToggleQueueAutoSend?.()
                       }}
                       role="menuitem"
                       type="button"
                     >
-                      <PanelRightOpen aria-hidden="true" />
-                      <span>{t('chat.openQueuedMessageInSideChat')}</span>
+                      {queueAutoSendEnabled ? (
+                        <Pause aria-hidden="true" />
+                      ) : (
+                        <Play aria-hidden="true" />
+                      )}
+                      <span>
+                        {queueAutoSendEnabled
+                          ? t('chat.disableQueueAutoSend')
+                          : t('chat.enableQueueAutoSend')}
+                      </span>
                     </button>
                   </div>
                 )}

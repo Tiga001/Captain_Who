@@ -2,6 +2,7 @@ import type {
   AgentProviderTransitionNotification,
   AgentProviderTransitionOperation
 } from '@mycopilot/protocol'
+import { HostInvocationError } from '@mycopilot/host-api'
 import { useState } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { render } from 'vitest-browser-react'
@@ -78,6 +79,16 @@ function TransitionHarness() {
         type="button"
       >
         request transition
+      </button>
+      <button
+        onClick={() => {
+          void transition
+            .request('conversation-1', 'model-2', { allowUnchangedModel: true })
+            .then((result) => setOutcome(result.status))
+        }}
+        type="button"
+      >
+        request queued transition
       </button>
       <button
         onClick={() => {
@@ -159,6 +170,75 @@ async function startRunningTransition() {
 }
 
 describe('useProviderTransition terminal reconciliation', () => {
+  it.each([
+    ['compatible', 'same_protocol', 'ready', 0],
+    ['compatible', 'no_incompatible_history', 'running', 1],
+    ['requires_compaction', 'provider_protocol_changed', 'confirmation_required', 0]
+  ] as const)(
+    'skips queued transition mutation only for a Host-compatible unchanged model: %s / %s',
+    async (decision, reason, outcome, starts) => {
+      service.preflight.mockResolvedValue({
+        conversationId: 'conversation-1',
+        targetModelId: 'model-2',
+        decision,
+        reason,
+        operationId: running.operationId,
+        transitionToken: 'opaque-token-model-2'
+      })
+      const screen = await render(<TransitionHarness />)
+      await screen.getByRole('button', { name: 'request queued transition' }).click()
+      await expect.element(screen.getByTestId('outcome')).toHaveTextContent(outcome)
+      expect(service.start).toHaveBeenCalledTimes(starts)
+      expect(service.onCompleted).not.toHaveBeenCalled()
+    }
+  )
+
+  it('keeps manual compatible transitions on the existing commit path', async () => {
+    service.preflight.mockResolvedValue({
+      conversationId: 'conversation-1',
+      targetModelId: 'model-2',
+      decision: 'compatible',
+      reason: 'same_protocol',
+      operationId: running.operationId,
+      transitionToken: 'opaque-token-model-2'
+    })
+    const screen = await render(<TransitionHarness />)
+    await screen.getByRole('button', { name: 'request transition' }).click()
+    await expect.element(screen.getByTestId('outcome')).toHaveTextContent('running')
+    expect(service.start).toHaveBeenCalledTimes(1)
+  })
+
+  it.each([false, true])(
+    'stops exact reconciliation when Host rejects start after a lost reply: %s',
+    async (loseFirstReply) => {
+      service.start.mockReset()
+      if (loseFirstReply) {
+        service.start.mockRejectedValueOnce(
+          new HostInvocationError({ message: 'core-server connection lost' })
+        )
+      }
+      service.start.mockRejectedValue(
+        new HostInvocationError({
+          message: 'The model-switch check expired. Please try again.',
+          code: -32000
+        })
+      )
+      const screen = await render(<TransitionHarness />)
+      await screen.getByRole('button', { name: 'request transition' }).click()
+      await expect.element(screen.getByTestId('confirmation')).toHaveTextContent('required')
+      vi.useFakeTimers()
+      await screen.getByRole('button', { name: 'confirm transition' }).click()
+      await expect.element(screen.getByTestId('outcome')).toHaveTextContent('failed')
+
+      const statusCalls = service.getStatus.mock.calls.length
+      await vi.advanceTimersByTimeAsync(120_000)
+      expect(service.getStatus).toHaveBeenCalledTimes(statusCalls)
+      expect(service.start).toHaveBeenCalledTimes(loseFirstReply ? 2 : 1)
+      expect(service.onRequestError).toHaveBeenCalledTimes(1)
+      expect(service.onCompleted).not.toHaveBeenCalled()
+    }
+  )
+
   it('recovers a completed exact operation when its terminal notification is lost', async () => {
     service.getStatus.mockImplementation(async (input: { operationId?: string }) => ({
       operations: input.operationId === running.operationId ? [completed] : []
@@ -326,7 +406,7 @@ describe('useProviderTransition terminal reconciliation', () => {
   })
 
   it('reconciles the exact operation when both idempotent start replies are lost', async () => {
-    service.start.mockReset().mockRejectedValue(new Error('reply lost'))
+    service.start.mockReset().mockRejectedValue(new HostInvocationError({ message: 'reply lost' }))
     let exactStatusCalls = 0
     service.getStatus.mockImplementation(async (input: { operationId?: string }) => {
       if (input.operationId !== running.operationId) return { operations: [] }

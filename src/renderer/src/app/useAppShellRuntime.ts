@@ -26,7 +26,7 @@ import type { SkillActivationRecoveryPlan } from '../features/skills/skillActiva
 import { reconcileSkillActivationSelections } from '../features/skills/skillActivationRecovery'
 import { mergeSkillSelections } from '../features/skills/skillSelection'
 import { hostClient } from '../host/hostClient'
-import type { ActiveRunBinding } from './appTypes'
+import type { ActiveRunBinding, AutoSubmitQueuedMessage } from './appTypes'
 import type { PendingMessageDelta } from './AppShellSupport'
 import { createComposerDraft, synchronizeComposerDraftForScope } from './chatMessageFactory'
 import { getRecoverableGuidanceSignature, isRecoverableGuidanceItem } from './recoverableGuidance'
@@ -53,7 +53,7 @@ interface UseAppShellRuntimeOptions {
   activeDraftId: string
   activeRunBindingsRef: MutableRefObject<Map<string, ActiveRunBinding>>
   automationConversationMetaRefreshEpochRef: MutableRefObject<number>
-  autoSubmitQueuedMessageRef: MutableRefObject<(conversationId: string) => void>
+  autoSubmitQueuedMessageRef: MutableRefObject<AutoSubmitQueuedMessage>
   bufferedAgentEventsRef: MutableRefObject<Map<string, AgentEvent[]>>
   cancelledPendingMessageIdsRef: MutableRefObject<Set<string>>
   cancelledRunIdsRef: MutableRefObject<Set<string>>
@@ -67,6 +67,7 @@ interface UseAppShellRuntimeOptions {
   draftsRef: MutableRefObject<Record<string, ChatComposerDraft>>
   enqueueChatMessageCheckpoint: ConversationPersistence['enqueueChatMessageCheckpoint']
   enqueueChatMessageStateSave: ConversationPersistence['enqueueChatMessageStateSave']
+  enqueueConversationMetaSave: ConversationPersistence['enqueueConversationMetaSave']
   flushChatMessageStateSave: ConversationPersistence['flushChatMessageStateSave']
   flushConversationMessageStateSaves: ConversationPersistence['flushConversationMessageStateSaves']
   flushDraft: ComposerDraftPersistence['flushDraft']
@@ -135,6 +136,7 @@ export function useAppShellRuntime({
   draftsRef,
   enqueueChatMessageCheckpoint,
   enqueueChatMessageStateSave,
+  enqueueConversationMetaSave,
   flushChatMessageStateSave,
   flushConversationMessageStateSaves,
   flushDraft,
@@ -602,7 +604,8 @@ export function useAppShellRuntime({
     requestAssistantResponse,
     restoreRejectedGuidance,
     scheduleStoppedRunReconciliation,
-    updateAssistantMessage
+    updateAssistantMessage,
+    waitForRunSettlement
   } = useAgentRunLifecycle({
     contextWindowIndicatorEnabled,
     conversationState: {
@@ -619,6 +622,7 @@ export function useAppShellRuntime({
     },
     enqueueChatMessageCheckpoint,
     enqueueChatMessageStateSave,
+    enqueueConversationMetaSave,
     flushChatMessageStateSave,
     flushConversationMessageStateSaves,
     recordContextWindowSnapshot,
@@ -660,6 +664,7 @@ export function useAppShellRuntime({
     setDraftsWithRef,
     updateAssistantMessage,
     updateDraft,
+    waitForRunSettlement,
     updateUiPreferences
   }
 }

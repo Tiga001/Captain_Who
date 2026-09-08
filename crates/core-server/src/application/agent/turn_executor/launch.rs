@@ -258,6 +258,7 @@ impl AgentService {
         }
 
         let mut deletion_cleanup = false;
+        let mut committed_terminal_output = None;
         let (durable_terminal, persistence_committed) = match result {
             Ok(mut agent_output) => {
                 let committed_durable_context = is_terminal_run_status(agent_output.status);
@@ -325,16 +326,7 @@ impl AgentService {
                         }));
                     }
                     if durable_terminal {
-                        emit_terminal_events_after_persistence_for_turn(
-                            &notifications,
-                            &terminal_event_gate,
-                            &agent_output,
-                            pending_agent_input
-                                .context
-                                .as_ref()
-                                .and_then(|context| context.collaboration_identity.as_ref()),
-                            &worker_assistant_message_id,
-                        );
+                        committed_terminal_output = Some(agent_output);
                     }
                     durable_terminal
                 };
@@ -495,6 +487,34 @@ impl AgentService {
         }
         if durable_terminal || deletion_cleanup || (keep_trace_snapshot && persistence_committed) {
             service.unregister_cancellation_if_current(&worker_run_id, &cancellation_token);
+        }
+
+        // Successful Done is also the admission boundary for the next user Turn. Publish it
+        // only after the old owner and permit have been released and its context cleanup is
+        // complete; a receiver may synchronously start another Turn from this notification.
+        if let Some(output) = committed_terminal_output.as_ref() {
+            {
+                let deletion_lifecycle = service
+                    .deletion_lifecycle
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner());
+                if deletion_lifecycle.contains_input(&pending_agent_input) {
+                    terminal_event_gate.discard();
+                } else {
+                    emit_terminal_events_after_persistence_for_turn(
+                        &notifications,
+                        &terminal_event_gate,
+                        output,
+                        pending_agent_input
+                            .context
+                            .as_ref()
+                            .and_then(|context| context.collaboration_identity.as_ref()),
+                        &worker_assistant_message_id,
+                    );
+                }
+            }
+            #[cfg(test)]
+            run_after_terminal_publication_hook(&worker_run_id);
         }
 
         if waiting_for_user_input && cancellation_token.is_cancelled() {

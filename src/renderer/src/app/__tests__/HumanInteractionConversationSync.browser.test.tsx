@@ -190,6 +190,7 @@ function Lifecycle({
     refs,
     enqueueChatMessageCheckpoint: client.save,
     enqueueChatMessageStateSave: client.save,
+    enqueueConversationMetaSave: vi.fn(),
     flushChatMessageStateSave: async () => {},
     flushConversationMessageStateSaves: async () => {},
     recordContextWindowSnapshot: vi.fn(),

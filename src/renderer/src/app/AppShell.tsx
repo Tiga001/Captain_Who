@@ -49,7 +49,7 @@ import { retainGlobalSkillSelections } from '../features/skills/skillSelection'
 import { defaultUiPreferences } from '../features/storage/storageClient'
 import type { UiPreferencesSnapshot } from '../features/storage/storageClient'
 import { NEW_CONVERSATION_DRAFT_ID } from './appConstants'
-import type { ActiveRunBinding } from './appTypes'
+import type { ActiveRunBinding, AutoSubmitQueuedMessage } from './appTypes'
 import { createComposerDraft } from './chatMessageFactory'
 import { getActiveRunModelId, getActiveRunSkillSelections } from './appShellConversationUtils'
 import { useConversationPersistence } from './useConversationPersistence'
@@ -264,15 +264,14 @@ export function AppShell() {
     >
   >(new Map())
   const recoveredGuidanceKeysRef = useRef<Set<string>>(new Set())
-  const autoSubmitQueuedMessageRef = useRef<(conversationId: string) => void>(() => undefined)
+  const autoSubmitQueuedMessageRef = useRef<AutoSubmitQueuedMessage>(() => undefined)
   const editSubmissionSeqRef = useRef(0)
   const editRewriteInFlightRef = useRef<Set<string>>(new Set())
   const editRewriteAttemptsRef = useRef<Map<string, EditRewriteAttempt>>(new Map())
   const pendingProviderTransitionSubmissionsRef = useRef<
     Map<
       string,
-      | { kind: 'composer'; message: string; options: ChatSubmitOptions }
-      | { kind: 'queued_message'; queueMessageId: string }
+      { kind: 'composer'; message: string; options: ChatSubmitOptions } | { kind: 'queued_message' }
     >
   >(new Map())
   const [drafts, setDrafts] = useState<Record<string, ChatComposerDraft>>({
@@ -493,6 +492,7 @@ export function AppShell() {
     setDraftsWithRef,
     updateAssistantMessage,
     updateDraft,
+    waitForRunSettlement,
     updateUiPreferences
   } = useAppShellRuntime({
     activeConversationId,
@@ -514,6 +514,7 @@ export function AppShell() {
     draftsRef,
     enqueueChatMessageCheckpoint,
     enqueueChatMessageStateSave,
+    enqueueConversationMetaSave,
     flushChatMessageStateSave,
     flushConversationMessageStateSaves,
     flushDraft,
@@ -556,15 +557,19 @@ export function AppShell() {
     confirmProviderTransition,
     loadProviderTransitionStatus,
     providerTransitionStore,
+    queueAutoSendConversationIds,
     retryProviderTransition,
     submitEditedLastUserMessage,
-    submitMessage
+    submitMessage,
+    toggleQueueAutoSend
   } = useAppShellMessageSubmission({
     activeConversationIdRef,
     activeDraft,
     activeDraftSelectedModel,
     autoSubmitQueuedMessageRef,
+    conversations,
     conversationsRef,
+    drafts,
     draftsRef,
     editRewriteAttemptsRef,
     editRewriteInFlightRef,
@@ -585,7 +590,9 @@ export function AppShell() {
     t,
     updateDraft,
     waitForConversationSaves,
-    waitForMessageUpserts
+    waitForMessageUpserts,
+    waitForMessageStateSaves,
+    waitForRunSettlement
   })
 
   const handleActiveConversationArchived = useCallback(() => {
@@ -976,6 +983,11 @@ export function AppShell() {
   const cancelActiveProviderTransition = useCallback(() => {
     const conversationId = activeConversationIdRef.current
     if (!conversationId) return
+    if (
+      pendingProviderTransitionSubmissionsRef.current.get(conversationId)?.kind === 'queued_message'
+    ) {
+      autoSubmitQueuedMessageRef.current(conversationId, 'pause')
+    }
     pendingProviderTransitionSubmissionsRef.current.delete(conversationId)
     cancelProviderTransitionConfirmation(conversationId)
   }, [cancelProviderTransitionConfirmation])
@@ -1230,6 +1242,23 @@ export function AppShell() {
                   persistDraftMessageOnly(activeConversation.id, draft)
                 }
                 onGuideQueuedMessage={guideQueuedMessage}
+                queueAutoSendEnabled={queueAutoSendConversationIds.has(activeConversation.id)}
+                onToggleQueueAutoSend={() => {
+                  if (
+                    !queueAutoSendConversationIds.has(activeConversation.id) &&
+                    (manualCompaction.isRunning || !manualCompaction.ready)
+                  ) {
+                    showToast(
+                      t(
+                        manualCompaction.isRunning
+                          ? 'chat.commands.compacting'
+                          : 'chat.commands.restoring'
+                      )
+                    )
+                    return
+                  }
+                  toggleQueueAutoSend(activeConversation.id)
+                }}
                 onModelTransitionCancel={cancelActiveProviderTransition}
                 onModelTransitionConfirm={confirmActiveProviderTransition}
                 onModelTransitionRetry={retryActiveProviderTransition}

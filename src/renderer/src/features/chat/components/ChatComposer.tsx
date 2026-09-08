@@ -82,7 +82,8 @@ interface ChatComposerProps {
   onDraftChange: (draft: ChatComposerDraft) => void
   onDraftMessageChange?: (draft: ChatComposerDraft) => void
   onGuideQueuedMessage?: (message: ChatQueuedMessage) => void
-  onOpenQueuedMessageInSideChat?: (message: ChatQueuedMessage) => void
+  queueAutoSendEnabled?: boolean
+  onToggleQueueAutoSend?: () => void
   onSubmitMessage?: (
     message: string,
     options: ChatSubmitOptions
@@ -116,7 +117,8 @@ export function ChatComposer({
   onDraftChange,
   onDraftMessageChange,
   onGuideQueuedMessage,
-  onOpenQueuedMessageInSideChat,
+  queueAutoSendEnabled = false,
+  onToggleQueueAutoSend,
   onSubmitMessage,
   onStopGenerating,
   permissionModeAvailability = { custom: true, full: true },
@@ -724,7 +726,8 @@ export function ChatComposer({
         onEdit={editQueuedMessage}
         onGuide={(queuedMessage) => onGuideQueuedMessage?.(queuedMessage)}
         onMove={moveQueuedMessage}
-        onOpenSideChat={(queuedMessage) => onOpenQueuedMessageInSideChat?.(queuedMessage)}
+        queueAutoSendEnabled={queueAutoSendEnabled}
+        onToggleQueueAutoSend={onToggleQueueAutoSend}
       />
       <form
         ref={composerRef}
