@@ -391,37 +391,34 @@ fn definition_exposes_the_workspace_dependent_cwd_contract() {
     let cwd_description = definition.input_schema["properties"]["cwd"]["description"]
         .as_str()
         .unwrap();
-    let schema_description = definition.input_schema["description"].as_str().unwrap();
-
-    for contract in [&definition.description, schema_description, cwd_description] {
-        assert!(contract.contains("When no workspace is selected"));
-        assert!(contract.contains("cwd is mandatory"));
-        for alias in ["@home", "@desktop", "@documents", "@downloads"] {
-            assert!(contract.contains(alias));
-        }
-        assert!(contract.contains("@desktop/project-dir"));
-        assert!(contract.contains("backend-recognized managed PDF command"));
-        assert!(contract.contains("activated PDF Skill"));
-        assert!(contract.contains("private working directory"));
-        assert!(contract.contains("write scope"));
+    // The field carries the complete contract; repeating it at three levels was unnecessary.
+    // Keep the first-call cue in the tool description so an absent workspace is not discovered
+    // by deliberately failing the first call.
+    assert!(definition.input_schema.get("description").is_none());
+    for contract in [
+        "World State workspace.binding before the first ordinary call",
+        "With a workspace, omit for its root or use a workspace-relative directory",
+        "When no workspace is selected, cwd is mandatory",
+        "even when command/executable/argument paths are absolute",
+        "existing absolute directory",
+        "It cannot be relative or `.` without a workspace",
+        "normally the target file's parent",
+        "write scope to allow all locations (write=all)",
+        "Only a backend-recognized managed PDF command",
+        "activated PDF Skill",
+        "Host-owned private working directory",
+    ] {
+        assert!(cwd_description.contains(contract), "missing cwd rule: {contract}");
     }
-    assert!(definition
-        .description
-        .contains("cwd may be omitted to use the workspace root"));
+    for alias in ["@home", "@desktop", "@documents", "@downloads", "@desktop/project-dir"] {
+        assert!(cwd_description.contains(alias));
+    }
     assert!(definition
         .description
         .contains("Before the first ordinary call, inspect World State workspace.binding"));
     assert!(definition
         .description
-        .contains("When no workspace is selected, the first call must include cwd"));
-    assert!(definition.description.contains(
-        "must not be omitted even when the command, executable, or arguments already use absolute paths"
-    ));
-    assert!(cwd_description.contains(
-        "cannot be omitted even when the command, executable, or arguments already use absolute paths"
-    ));
-    assert!(cwd_description.contains("it also cannot be relative or `.`"));
-    assert!(cwd_description.contains("normally the target file's parent"));
+        .contains("without a workspace, the first call must include cwd"));
     assert_eq!(definition.input_schema["required"], json!(["command"]));
 }
 

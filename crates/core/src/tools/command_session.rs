@@ -32,7 +32,7 @@ impl AgentTool for CommandSessionTool {
     fn definition(&self) -> AgentToolDefinition {
         AgentToolDefinition {
             name: "command_session".to_string(),
-            description: "Wait for or interrupt a managed command returned by run_command with status=running. action defaults to wait. wait lets the Host quietly collect incremental output until the command reaches a terminal state or the Host's bounded deadline; ordinary output does not require repeated calls. For a GUI app or long-lived server, normally continue without waiting for natural exit. For a build or test whose result is required, call wait and do not emit repeated waiting narration. The latest command_session status supersedes any earlier run_command status: starting/running are non-terminal; exited/interrupted/timed_out/failed are terminal and mean the process is no longer running; outcome_unknown is terminal for Session tracking, but the process outcome is unknown, so do not claim continued execution or success. Background exit never starts a new model turn. Arbitrary stdin is not supported.".to_string(),
+            description: "Wait for or interrupt a run_command Session returned with status=running; action defaults to wait. Host quietly collects incremental output until a terminal state or its bounded deadline; ordinary output does not require repeated calls. Wait for required build/test results; GUI apps or long-lived servers normally need no wait for natural exit. Do not repeatedly narrate waiting. The latest command_session status supersedes any earlier run_command status: starting/running are non-terminal; exited/interrupted/timed_out/failed are terminal and mean the process is no longer running; outcome_unknown is terminal for Session tracking, but the process outcome is unknown, so do not claim continued execution or success. Background exit never starts a new model turn. Arbitrary stdin is not supported.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -44,7 +44,7 @@ impl AgentTool for CommandSessionTool {
                     "action": {
                         "type": "string",
                         "enum": ["wait", "interrupt"],
-                        "description": "Defaults to wait. wait observes terminal state through a Host-bounded quiet wait; interrupt sends a controlled interrupt to this Session."
+                        "description": "wait (default) observes this Session through a Host-bounded quiet wait; interrupt sends a controlled interrupt."
                     }
                 },
                 "required": ["sessionId"],
