@@ -68,6 +68,9 @@ import type {
   PendingAgentActionSnapshot
 } from '@mycopilot/protocol'
 import {
+  AGENT_PROMPT_PREFERENCES_CHANGED_METHOD,
+  parseAgentPromptPreferencesChanged,
+  type AgentPromptPreferencesChanged,
   AGENT_COLLABORATION_GET_SETTINGS_METHOD,
   AGENT_COLLABORATION_UPDATE_SETTINGS_METHOD,
   AGENT_COLLABORATION_SETTINGS_CHANGED_METHOD,
@@ -621,6 +624,19 @@ export class CoreServerAgentApi extends CoreServerStorageApi {
         parseAgentCollaborationSettingsUpdate(input)
       )
       .then(parseAgentCollaborationSettings)
+  }
+
+  onPromptPreferencesChanged(handler: (event: AgentPromptPreferencesChanged) => void): () => void {
+    return this.rpc.onNotification(AGENT_PROMPT_PREFERENCES_CHANGED_METHOD, (params) => {
+      let event: AgentPromptPreferencesChanged
+      try {
+        event = parseAgentPromptPreferencesChanged(params)
+      } catch {
+        console.warn('Ignored invalid prompt preferences notification')
+        return
+      }
+      handler(event)
+    })
   }
 
   onCollaborationSettingsChanged(

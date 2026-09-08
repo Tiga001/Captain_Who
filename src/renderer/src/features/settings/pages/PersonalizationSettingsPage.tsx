@@ -4,7 +4,7 @@ import {
   WORK_MODE_OPTIONS,
   TONE_OPTIONS
 } from './PersonalizationSettingsPage.definition'
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Check, ChevronDown, MessageCircle, Terminal } from 'lucide-react'
 import { useFrontendConfig } from '../../../config/FrontendConfigProvider'
 import {
@@ -16,25 +16,20 @@ import type { AgentPromptPreferencesSnapshot } from '../../storage/storageClient
 import { HumanInteractionSettingsSection } from './HumanInteractionSettingsSection'
 import './PersonalizationSettingsPage.css'
 
-function getComparablePreferences(preferences: AgentPromptPreferencesSnapshot) {
-  return {
-    workMode: preferences.workMode,
-    tone: preferences.tone,
-    detailLevel: preferences.detailLevel,
-    customInstructions: preferences.customInstructions
-  }
-}
+type ImmediatePreferences = Partial<
+  Pick<AgentPromptPreferencesSnapshot, 'contextProfile' | 'workMode' | 'tone'>
+>
 
 export function PersonalizationSettingsPage() {
   const { t } = useFrontendConfig()
   const [preferences, setPreferences] = useState<AgentPromptPreferencesSnapshot>(() =>
     defaultAgentPromptPreferences()
   )
-  const [savedPreferences, setSavedPreferences] = useState<AgentPromptPreferencesSnapshot>(() =>
-    defaultAgentPromptPreferences()
-  )
+  const [customInstructions, setCustomInstructions] = useState('')
+  const [hasLoaded, setHasLoaded] = useState(false)
   const [isLoading, setIsLoading] = useState(true)
   const [isSaving, setIsSaving] = useState(false)
+  const saveInFlight = useRef(false)
   const [statusMessage, setStatusMessage] = useState('')
   const [isToneOpen, setToneOpen] = useState(false)
 
@@ -48,7 +43,8 @@ export function PersonalizationSettingsPage() {
         const loadedPreferences = await loadAgentPromptPreferences()
         if (isCancelled) return
         setPreferences(loadedPreferences)
-        setSavedPreferences(loadedPreferences)
+        setCustomInstructions(loadedPreferences.customInstructions)
+        setHasLoaded(true)
       } catch {
         if (!isCancelled) setStatusMessage(t('personalization.loadFailed'))
       } finally {
@@ -67,32 +63,39 @@ export function PersonalizationSettingsPage() {
     () => TONE_OPTIONS.find((option) => option.value === preferences.tone) ?? TONE_OPTIONS[1],
     [preferences.tone]
   )
-  const isDirty =
-    JSON.stringify(getComparablePreferences(preferences)) !==
-    JSON.stringify(getComparablePreferences(savedPreferences))
+  const isDirty = customInstructions !== preferences.customInstructions
+  const controlsDisabled = isLoading || !hasLoaded || isSaving
 
-  const updatePreferences = (patch: Partial<AgentPromptPreferencesSnapshot>) => {
-    setStatusMessage('')
-    setPreferences((current) => ({ ...current, ...patch }))
-  }
+  const persistPreferences = async (
+    patch: ImmediatePreferences,
+    submittedInstructions?: string
+  ) => {
+    if (isLoading || !hasLoaded || saveInFlight.current) return
 
-  const savePreferences = async () => {
-    if (!isDirty || isSaving) return
-
+    // This API stores the whole record. Serialize writes and keep the editor draft separate so
+    // changing a switch cannot publish unsaved instructions or overwrite another pending save.
+    saveInFlight.current = true
     setIsSaving(true)
     setStatusMessage('')
     try {
       const saved = await saveAgentPromptPreferences({
+        contextProfile: preferences.contextProfile,
         workMode: preferences.workMode,
         tone: preferences.tone,
+        ...patch,
         detailLevel: preferences.detailLevel || 'medium',
-        customInstructions: preferences.customInstructions
+        customInstructions: submittedInstructions ?? preferences.customInstructions
       })
       setPreferences(saved)
-      setSavedPreferences(saved)
+      if (submittedInstructions !== undefined) {
+        setCustomInstructions((current) =>
+          current === submittedInstructions ? saved.customInstructions : current
+        )
+      }
     } catch {
       setStatusMessage(t('personalization.saveFailed'))
     } finally {
+      saveInFlight.current = false
       setIsSaving(false)
     }
   }
@@ -100,6 +103,11 @@ export function PersonalizationSettingsPage() {
   return (
     <article className="settings-list-page personalization-settings-page">
       <h1>{t('settings.page.personalization')}</h1>
+      {statusMessage && (
+        <p className="personalization-status personalization-settings-status" role="alert">
+          {statusMessage}
+        </p>
+      )}
 
       {renderSettingsNodes(personalizationSettingsNodes, (node) => {
         switch (node.id) {
@@ -125,7 +133,10 @@ export function PersonalizationSettingsPage() {
                         data-selected={isSelected || undefined}
                         type="button"
                         key={option.value}
-                        onClick={() => updatePreferences({ workMode: option.value })}
+                        disabled={controlsDisabled}
+                        onClick={() => {
+                          if (!isSelected) void persistPreferences({ workMode: option.value })
+                        }}
                       >
                         <Icon aria-hidden="true" />
                         <span className="personalization-work-mode-card__text">
@@ -140,6 +151,41 @@ export function PersonalizationSettingsPage() {
                       </button>
                     )
                   })}
+                </div>
+                <div className="settings-list personalization-minimal-mode">
+                  {renderSettingsNodes(node.children, (setting) => (
+                    <div className="settings-list-row personalization-minimal-mode__row">
+                      <span className="settings-list-row__text">
+                        <span className="settings-list-row__title" id="minimal-mode-label">
+                          {settingLabel(setting, t)}
+                        </span>
+                        <span
+                          className="settings-list-row__description"
+                          id="minimal-mode-description"
+                        >
+                          {settingDescription(setting, t)}
+                        </span>
+                      </span>
+                      <button
+                        className="settings-switch"
+                        type="button"
+                        role="switch"
+                        aria-labelledby="minimal-mode-label"
+                        aria-describedby="minimal-mode-description"
+                        aria-checked={preferences.contextProfile === 'minimal'}
+                        data-state={preferences.contextProfile === 'minimal' ? 'on' : 'off'}
+                        disabled={controlsDisabled}
+                        onClick={() =>
+                          void persistPreferences({
+                            contextProfile:
+                              preferences.contextProfile === 'minimal' ? 'full' : 'minimal'
+                          })
+                        }
+                      >
+                        <span className="settings-switch__thumb" aria-hidden="true" />
+                      </button>
+                    </div>
+                  ))}
                 </div>
               </section>
             )
@@ -166,6 +212,7 @@ export function PersonalizationSettingsPage() {
                         type="button"
                         aria-haspopup="listbox"
                         aria-expanded={isToneOpen}
+                        disabled={controlsDisabled}
                         onClick={() => setToneOpen((current) => !current)}
                       >
                         <span>{t(selectedTone.titleKey)}</span>
@@ -188,8 +235,9 @@ export function PersonalizationSettingsPage() {
                                 role="option"
                                 aria-selected={isSelected}
                                 key={option.value}
+                                disabled={controlsDisabled}
                                 onClick={() => {
-                                  updatePreferences({ tone: option.value })
+                                  if (!isSelected) void persistPreferences({ tone: option.value })
                                   setToneOpen(false)
                                 }}
                               >
@@ -215,17 +263,30 @@ export function PersonalizationSettingsPage() {
                 aria-labelledby="personalization-custom-heading"
               >
                 <div className="personalization-section-heading">
-                  <h2 id="personalization-custom-heading">{settingLabel(node, t)}</h2>
+                  <div className="personalization-custom-instructions__heading-row">
+                    <h2 id="personalization-custom-heading">{settingLabel(node, t)}</h2>
+                    <button
+                      className="personalization-save-button"
+                      type="button"
+                      disabled={controlsDisabled || !isDirty}
+                      onClick={() => void persistPreferences({}, customInstructions)}
+                    >
+                      {t('personalization.save')}
+                    </button>
+                  </div>
                   <p>{settingDescription(node, t)}</p>
                 </div>
 
                 <textarea
                   className="personalization-custom-instructions__textarea"
-                  value={preferences.customInstructions}
+                  value={customInstructions}
+                  disabled={isLoading || !hasLoaded}
+                  aria-labelledby="personalization-custom-heading"
                   placeholder={t('personalization.customInstructionsPlaceholder')}
-                  onChange={(event) =>
-                    updatePreferences({ customInstructions: event.target.value })
-                  }
+                  onChange={(event) => {
+                    setStatusMessage('')
+                    setCustomInstructions(event.target.value)
+                  }}
                 />
               </section>
             )
@@ -235,18 +296,6 @@ export function PersonalizationSettingsPage() {
             return null
         }
       })}
-
-      <div className="personalization-actions">
-        {statusMessage && <p className="personalization-status">{statusMessage}</p>}
-        <button
-          className="personalization-save-button"
-          type="button"
-          disabled={isLoading || isSaving || !isDirty}
-          onClick={savePreferences}
-        >
-          {t('personalization.save')}
-        </button>
-      </div>
     </article>
   )
 }

@@ -17,6 +17,7 @@ mod image_generation;
 mod input_stream;
 mod limits;
 mod mcp;
+mod minimal_definitions;
 pub(crate) mod model_projection;
 mod office;
 mod read_file;
@@ -69,6 +70,7 @@ pub use image_generation::{
     agent_image_generation_execution_id, agent_image_generation_tool_result_from_execution,
     agent_image_generation_tool_result_from_service_error, normalize_agent_image_generation_reason,
 };
+pub(crate) use minimal_definitions::apply_minimal_tool_descriptions;
 pub(crate) use office::validate_frozen_office_trace_args;
 use office::{OfficeDocumentTool, OfficePresentationTool, OfficeSpreadsheetTool};
 use read_file::ReadFileTool;

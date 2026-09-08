@@ -389,8 +389,16 @@ pub(crate) fn handle_request(
                 Err(message) => return response_error(Some(request.id), -32602, message),
             };
             let result = storage.save_agent_prompt_preferences(preferences);
-            if result.is_ok() {
+            if let Ok(preferences) = &result {
                 agent_service.invalidate_all_conversation_context_states();
+                let _ = notification_tx.send(serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "method": mycopilot_protocol_rs::AGENT_PROMPT_PREFERENCES_CHANGED_METHOD,
+                    "params": {
+                        "contextProfile": preferences.context_profile,
+                        "updatedAt": preferences.updated_at,
+                    },
+                }));
             }
             storage_response(request.id, result)
         }

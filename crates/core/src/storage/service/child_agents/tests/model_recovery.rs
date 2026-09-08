@@ -1,6 +1,314 @@
 use super::*;
 
 #[test]
+fn context_profile_follows_spawn_followup_and_reopened_wake_instead_of_global_settings() {
+    use crate::storage::agent_context_profile_repository as policy;
+    use crate::AgentContextProfile;
+    let fixture = Fixture::new(Some("model-a"));
+    let mut preferences = fixture.service.load_agent_prompt_preferences().unwrap();
+    preferences.context_profile = AgentContextProfile::Minimal;
+    fixture
+        .service
+        .save_agent_prompt_preferences(preferences)
+        .unwrap();
+    insert_active_root_trace(&fixture, "run-mode-root", "assistant-mode-root");
+    {
+        let connection = fixture.service.state.connection().unwrap();
+        assert_eq!(
+            policy::freeze_run(&connection, "run-mode-root", None).unwrap(),
+            AgentContextProfile::Minimal
+        );
+    }
+    let mut preferences = fixture.service.load_agent_prompt_preferences().unwrap();
+    preferences.context_profile = AgentContextProfile::Full;
+    fixture
+        .service
+        .save_agent_prompt_preferences(preferences)
+        .unwrap();
+    let child = fixture
+        .service
+        .create_child_agent_with_limits_and_expected_selector_from_run(
+            &spawn_input("mode-spawn", "mode-child"),
+            AgentTreeResourceLimits::default(),
+            None,
+            None,
+            "run-mode-root",
+        )
+        .unwrap();
+    let followup = fixture
+        .service
+        .follow_up_agent_from_run(
+            &SendAgentMessageRequest {
+                sender_agent_id: "agent-root".into(),
+                recipient_agent_id: child.agent.agent_id.clone(),
+                request_id: "mode-followup".into(),
+                content: "Finish the existing task.".into(),
+            },
+            "run-mode-root",
+        )
+        .unwrap()
+        .deferred_wake
+        .unwrap();
+    let reopened = StorageService::open(&fixture._directory.path().join("storage.sqlite")).unwrap();
+    let connection = reopened.state.connection().unwrap();
+    for wake in [&child.initial_wake, &followup] {
+        let actual: String = connection
+            .query_row(
+                "SELECT context_profile FROM agent_context_profile_wake_policies WHERE wake_id=?1",
+                [&wake.wake_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(actual, "minimal");
+    }
+    connection.execute("INSERT INTO messages(id,conversation_id,role,content,status,created_at,position) VALUES ('mode-child-assistant',?1,'assistant','','pending',30,(SELECT COALESCE(MAX(position),-1)+1 FROM messages WHERE conversation_id=?1))", [&child.agent.conversation_id]).unwrap();
+    let trace = crate::ConversationTraceSnapshot::default().in_progress_trace(
+        "run-mode-child",
+        &child.agent.conversation_id,
+        "mode-child-assistant",
+    );
+    crate::storage::conversation_trace_repository::commit_trace_in_connection(
+        &connection,
+        &trace,
+        30,
+        30,
+    )
+    .unwrap();
+    assert_eq!(
+        policy::freeze_run(
+            &connection,
+            &trace.run_id,
+            Some(&child.initial_wake.wake_id)
+        )
+        .unwrap(),
+        AgentContextProfile::Minimal
+    );
+    // A parent continuation caused by a child result carries the same mode too.
+    policy::inherit_run_for_wake(&connection, &trace.run_id, &followup.wake_id).unwrap();
+    policy::inherit_wake_for_wake(&connection, &child.initial_wake.wake_id, &followup.wake_id)
+        .unwrap();
+    assert_eq!(
+        policy::freeze_run(&connection, "run-mode-root", None).unwrap(),
+        AgentContextProfile::Minimal
+    );
+    assert!(connection.execute("UPDATE agent_context_profile_run_policies SET context_profile='full' WHERE run_id='run-mode-root'", []).is_err());
+    assert!(connection.execute("UPDATE agent_context_profile_wake_policies SET context_profile='full' WHERE wake_id=?1", [&child.initial_wake.wake_id]).is_err());
+}
+
+#[test]
+fn context_profile_parent_result_wake_inherits_completed_run_after_global_change() {
+    assert_parent_result_wake_context_profile(true);
+}
+
+#[test]
+fn context_profile_parent_result_wake_inherits_pre_admission_failure_after_global_change() {
+    assert_parent_result_wake_context_profile(false);
+}
+
+fn assert_parent_result_wake_context_profile(admitted: bool) {
+    use crate::storage::agent_context_profile_repository as policy;
+    use crate::{AgentContextProfile, FinishAgentTurnResultInput};
+
+    let fixture = Fixture::new(Some("model-a"));
+    let mut preferences = fixture.service.load_agent_prompt_preferences().unwrap();
+    preferences.context_profile = AgentContextProfile::Minimal;
+    fixture
+        .service
+        .save_agent_prompt_preferences(preferences)
+        .unwrap();
+
+    // A non-root coordinator receives a result Wake when its direct child settles.
+    let coordinator = fixture
+        .service
+        .create_child_agent(&spawn_input("result-mode-coordinator", "coordinator"))
+        .unwrap();
+    {
+        let connection = fixture.service.state.connection().unwrap();
+        insert_context_profile_result_trace(
+            &connection,
+            &coordinator.agent.conversation_id,
+            "run-result-mode-coordinator",
+            "assistant-result-mode-coordinator",
+        );
+        assert_eq!(
+            policy::freeze_run(&connection, "run-result-mode-coordinator", None).unwrap(),
+            AgentContextProfile::Minimal
+        );
+    }
+    let mut input = spawn_input("result-mode-worker", "worker");
+    input.parent_agent_id = coordinator.agent.agent_id.clone();
+    let worker = fixture
+        .service
+        .create_child_agent_with_limits_and_expected_selector_from_run(
+            &input,
+            AgentTreeResourceLimits::default(),
+            None,
+            None,
+            "run-result-mode-coordinator",
+        )
+        .unwrap();
+    let mut preferences = fixture.service.load_agent_prompt_preferences().unwrap();
+    preferences.context_profile = AgentContextProfile::Full;
+    fixture
+        .service
+        .save_agent_prompt_preferences(preferences)
+        .unwrap();
+
+    let claimed_at = worker.initial_wake.created_at + 10;
+    let (run_id, assistant_message_id, expected_status, terminal_status, terminal_error) = {
+        let mut connection = fixture.service.state.connection().unwrap();
+        let claimed = agent_graph_repository::claim_next_agent_wake(
+            &mut connection,
+            &worker.agent.agent_id,
+            "result-mode-claim",
+            claimed_at,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(claimed.wake_id, worker.initial_wake.wake_id);
+        if admitted {
+            agent_graph_repository::transition_agent_wake(
+                &mut connection,
+                &claimed.wake_id,
+                AgentWakeStatus::Claimed,
+                AgentWakeStatus::Running,
+                Some("result-mode-claim"),
+                claimed_at + 1,
+            )
+            .unwrap();
+            insert_context_profile_result_trace(
+                &connection,
+                &worker.agent.conversation_id,
+                "run-result-mode-worker",
+                "assistant-result-mode-worker",
+            );
+            assert_eq!(
+                policy::freeze_run(
+                    &connection,
+                    "run-result-mode-worker",
+                    Some(&claimed.wake_id),
+                )
+                .unwrap(),
+                AgentContextProfile::Minimal
+            );
+            connection
+                .execute(
+                    "UPDATE agent_wake_requests
+                     SET run_id = 'run-result-mode-worker',
+                         assistant_message_id = 'assistant-result-mode-worker'
+                     WHERE wake_id = ?1",
+                    [&claimed.wake_id],
+                )
+                .unwrap();
+            (
+                Some("run-result-mode-worker".to_string()),
+                Some("assistant-result-mode-worker".to_string()),
+                AgentWakeStatus::Running,
+                AgentWakeStatus::Completed,
+                None,
+            )
+        } else {
+            // Admission never created a Run, so settlement must inherit from the original Wake.
+            assert!(claimed.run_id.is_none());
+            (
+                None,
+                None,
+                AgentWakeStatus::Claimed,
+                AgentWakeStatus::Failed,
+                Some("Model unavailable before admission.".to_string()),
+            )
+        }
+    };
+    let settlement = fixture
+        .service
+        .finish_agent_turn_with_result_at(
+            &FinishAgentTurnResultInput {
+                wake_id: worker.initial_wake.wake_id.clone(),
+                expected_status,
+                claim_token: "result-mode-claim".to_string(),
+                terminal_status,
+                run_id,
+                assistant_message_id,
+                summary: "Worker settlement evidence.".to_string(),
+                terminal_error,
+            },
+            claimed_at + 2,
+        )
+        .unwrap();
+    let parent_wake = settlement.parent_wake.unwrap();
+    assert_eq!(parent_wake.agent_id, coordinator.agent.agent_id);
+    assert_eq!(parent_wake.requester_agent_id, worker.agent.agent_id);
+    assert_eq!(
+        parent_wake.source_agent_message_id.as_deref(),
+        Some(settlement.result_message.message_id.as_str())
+    );
+
+    let reopened = StorageService::open(&fixture._directory.path().join("storage.sqlite")).unwrap();
+    assert_eq!(
+        reopened
+            .load_agent_prompt_preferences()
+            .unwrap()
+            .context_profile,
+        AgentContextProfile::Full
+    );
+    let connection = reopened.state.connection().unwrap();
+    let persisted_profile: String = connection
+        .query_row(
+            "SELECT context_profile FROM agent_context_profile_wake_policies WHERE wake_id = ?1",
+            [&parent_wake.wake_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(persisted_profile, "minimal");
+    insert_context_profile_result_trace(
+        &connection,
+        &coordinator.agent.conversation_id,
+        "run-result-mode-continuation",
+        "assistant-result-mode-continuation",
+    );
+    assert_eq!(
+        policy::freeze_run(
+            &connection,
+            "run-result-mode-continuation",
+            Some(&parent_wake.wake_id),
+        )
+        .unwrap(),
+        AgentContextProfile::Minimal,
+        "the actual result Wake must preserve the task-tree mode across restart"
+    );
+}
+
+fn insert_context_profile_result_trace(
+    connection: &rusqlite::Connection,
+    conversation_id: &str,
+    run_id: &str,
+    assistant_message_id: &str,
+) {
+    connection
+        .execute(
+            "INSERT INTO messages (
+                 id, conversation_id, role, content, status, created_at, position
+             ) VALUES (
+                 ?1, ?2, 'assistant', '', 'sent', 30,
+                 (SELECT COALESCE(MAX(position), -1) + 1 FROM messages WHERE conversation_id = ?2)
+             )",
+            [assistant_message_id, conversation_id],
+        )
+        .unwrap();
+    crate::storage::conversation_trace_repository::commit_trace_in_connection(
+        connection,
+        &crate::completed_conversation_trace_without_items(
+            run_id,
+            conversation_id,
+            assistant_message_id,
+        ),
+        30,
+        30,
+    )
+    .unwrap();
+}
+
+#[test]
 fn collaboration_policy_follows_spawn_and_followup_after_global_switch_off() {
     use crate::storage::agent_collaboration_run_policy_repository as policy;
 

@@ -734,6 +734,11 @@ fn prepare_conversation_turn_from_source(
             // Child authority is resolved only inside durable Turn admission. The placeholder on
             // AgentConversationTurnInput never reaches RunContext or a model/tool boundary.
             input.permissions = effective_permissions;
+            // Admission, not the timing of preparation/settings reads, decides the mode. Wakes
+            // inherit the originating tree, including after the parent has already completed.
+            prompt_preferences.context_profile = storage
+                .load_agent_context_profile_for_run(run_id)?
+                .ok_or_else(|| "已接受的 Run 缺少冻结的上下文模式。".to_string())?;
             #[cfg(test)]
             if automation_admission.is_some_and(|admission| {
                 crate::application::agent::take_automation_post_admission_preparation_failure(

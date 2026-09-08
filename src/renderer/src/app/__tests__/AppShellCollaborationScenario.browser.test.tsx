@@ -131,6 +131,7 @@ vi.mock('../../host/hostClient', () => ({
       getTurnDiffSummaries: vi.fn().mockResolvedValue({ summaries: [] })
     },
     agent: {
+      onPromptPreferencesChanged: vi.fn(() => () => undefined),
       onCollaborationSettingsChanged: vi.fn(() => () => undefined),
       getCollaborationTree: vi.fn(
         async ({ rootConversationId }: { rootConversationId: string }) => ({

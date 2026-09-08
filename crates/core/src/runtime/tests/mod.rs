@@ -382,6 +382,7 @@ mod builtin_capability;
 mod capabilities;
 mod command_and_attachments;
 mod compaction_and_tool_flow;
+mod context_profile;
 mod conversation_context;
 mod conversation_world_state;
 mod deepseek_recovery;

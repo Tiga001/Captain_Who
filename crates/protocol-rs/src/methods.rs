@@ -87,6 +87,7 @@ pub const AGENT_EVENT_NOTIFICATION_METHOD: &str = "agent.event";
 pub const AGENT_COLLABORATION_GET_SETTINGS_METHOD: &str = "agent.collaboration.settings.get";
 pub const AGENT_COLLABORATION_UPDATE_SETTINGS_METHOD: &str = "agent.collaboration.settings.update";
 pub const AGENT_COLLABORATION_SETTINGS_CHANGED_METHOD: &str = "agent.collaboration.settingsChanged";
+pub const AGENT_PROMPT_PREFERENCES_CHANGED_METHOD: &str = "agent.promptPreferencesChanged";
 pub const AGENT_COLLABORATION_GET_TREE_METHOD: &str = "agent.collaboration.getTree";
 pub const AGENT_COLLABORATION_GET_AGENT_METHOD: &str = "agent.collaboration.getAgent";
 pub const AGENT_COLLABORATION_LOCATE_CONVERSATION_METHOD: &str =

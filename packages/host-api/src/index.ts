@@ -1,4 +1,5 @@
 import type {
+  AgentPromptPreferencesChanged,
   AgentCollaborationSettings,
   AgentCollaborationSettingsGetInput,
   AgentCollaborationSettingsUpdate,
@@ -570,6 +571,7 @@ export interface WorkspaceFilesHostApi {
 }
 
 export interface AgentHostApi {
+  onPromptPreferencesChanged(handler: (event: AgentPromptPreferencesChanged) => void): () => void
   getCollaborationSettings(
     input: AgentCollaborationSettingsGetInput
   ): Promise<HostInvocationResult<AgentCollaborationSettings>>

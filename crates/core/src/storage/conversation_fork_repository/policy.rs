@@ -61,6 +61,10 @@ const RUNTIME_ONLY_TABLES: &[&str] = &[
     "agent_collaboration_cursors",
     "agent_collaboration_run_policies",
     "agent_collaboration_wake_policies",
+    // Admission policy is execution authority, not copied conversation history. A fork's next
+    // root Run selects its own profile; historical Run/Wake bindings stay with their source.
+    "agent_context_profile_run_policies",
+    "agent_context_profile_wake_policies",
     "agent_command_session_lifecycle_events",
     "agent_command_session_model_read_receipts",
     "agent_command_session_output_chunks",
@@ -207,6 +211,8 @@ fn high_risk_fork_policies_stay_explicit() {
         Some(&ForkDataPolicy::DoNotCopy)
     );
     for table in [
+        "agent_context_profile_run_policies",
+        "agent_context_profile_wake_policies",
         "human_interaction_requests",
         "human_interaction_responses",
         "human_interaction_deliveries",

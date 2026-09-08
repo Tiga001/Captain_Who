@@ -201,6 +201,7 @@ fn run_context_changes_only_world_state_while_prompt_preferences_change_configur
     );
 
     changed_runtime.prompt_preferences = Some(AgentPromptPreferences {
+        context_profile: crate::protocol::AgentContextProfile::Full,
         work_mode: Some(crate::protocol::AgentPromptWorkMode::General),
         tone: Some(crate::protocol::AgentPromptTone::Friendly),
         detail_level: None,

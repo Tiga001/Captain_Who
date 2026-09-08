@@ -73,6 +73,7 @@ export interface ModelSettingsSaveDraft {
 }
 
 export interface AgentPromptPreferencesSnapshot extends AgentPromptPreferences {
+  contextProfile: 'full' | 'minimal'
   workMode: 'coding' | 'general'
   tone: 'friendly' | 'pragmatic'
   detailLevel: 'low' | 'medium' | 'high'
@@ -318,6 +319,7 @@ export async function loadImageFile(input: {
 
 export function defaultAgentPromptPreferences(): AgentPromptPreferencesSnapshot {
   return {
+    contextProfile: 'full',
     workMode: 'coding',
     tone: 'pragmatic',
     detailLevel: 'medium',
@@ -603,6 +605,7 @@ function normalizeAgentPromptPreferences(
 ): AgentPromptPreferencesSnapshot {
   const defaults = defaultAgentPromptPreferences()
   return {
+    contextProfile: preferences?.contextProfile === 'minimal' ? 'minimal' : 'full',
     workMode: preferences?.workMode === 'general' ? 'general' : defaults.workMode,
     tone: preferences?.tone === 'friendly' ? 'friendly' : defaults.tone,
     detailLevel:

@@ -193,6 +193,7 @@ pub(crate) fn agent_prompt_preferences_from_record(
     record: AgentPromptPreferencesRecord,
 ) -> AgentPromptPreferences {
     AgentPromptPreferences {
+        context_profile: record.context_profile,
         work_mode: Some(match record.work_mode.as_str() {
             "general" => AgentPromptWorkMode::General,
             _ => AgentPromptWorkMode::Coding,

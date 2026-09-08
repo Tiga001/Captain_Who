@@ -84,7 +84,10 @@ export interface AgentAttachmentLibraryContext {
   projectAttachments: AgentAttachmentReference[]
 }
 
+export type AgentContextProfile = 'full' | 'minimal'
+
 export interface AgentPromptPreferences {
+  contextProfile?: AgentContextProfile
   workMode?: AgentPromptWorkMode
   tone?: AgentPromptTone
   detailLevel?: AgentPromptDetailLevel

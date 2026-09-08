@@ -345,7 +345,15 @@ pub fn interaction_profile_section(
     preferences: Option<&crate::protocol::AgentPromptPreferences>,
     lifetime: WorldStateLifetime,
 ) -> Result<WorldStateSectionEnvelope, WorldStateError> {
+    let profile = preferences
+        .map(|value| value.context_profile)
+        .unwrap_or_default();
     let state = serde_json::json!({
+        "contextProfile": profile,
+        "contextProfileDescription": match profile {
+            crate::protocol::AgentContextProfile::Full => "Full base instructions and tools; extensions follow their existing settings.",
+            crate::protocol::AgentContextProfile::Minimal => "Concise base instructions and tool descriptions with fewer base tools; extensions follow their existing settings.",
+        },
         "workMode": match preferences.and_then(|value| value.work_mode) {
             Some(crate::protocol::AgentPromptWorkMode::General) => "general",
             Some(crate::protocol::AgentPromptWorkMode::Coding) | None => "coding",

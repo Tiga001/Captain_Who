@@ -41,7 +41,14 @@ export const personalizationSettingsNodes = defineSettingsNodes([
     id: 'personalization.workMode',
     title: 'personalization.workMode',
     description: 'personalization.workModeDescription',
-    terms: WORK_MODE_OPTIONS.flatMap((option) => [option.titleKey, option.descriptionKey])
+    terms: WORK_MODE_OPTIONS.flatMap((option) => [option.titleKey, option.descriptionKey]),
+    children: [
+      {
+        id: 'personalization.minimalMode',
+        title: 'personalization.minimalMode',
+        description: 'personalization.minimalModeDescription'
+      }
+    ]
   },
   {
     id: 'personalization.tone',

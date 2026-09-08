@@ -931,6 +931,9 @@ export const frFRTranslations = {
   'profile.handlePlaceholder': 'UTILISATEUR',
   'profile.openSettings': 'Paramètres',
   'profile.avatarUploadFailed': "Échec du téléchargement de l'avatar",
+  'personalization.minimalMode': 'Mode minimal',
+  'personalization.minimalModeDescription':
+    'Allège le contexte de base et les outils. Le changement prend effet au prochain tour. Les extensions conservent leurs réglages ; désactivez pour rétablir le mode complet.',
   'personalization.workMode': 'Mode de travail',
   'personalization.workModeDescription':
     'Choisissez la quantité de détails techniques que les réponses incluent',

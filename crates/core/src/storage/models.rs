@@ -1222,6 +1222,8 @@ pub struct BrowserOwnedDataClearOutput {
 #[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentPromptPreferencesRecord {
+    #[serde(default)]
+    pub context_profile: crate::AgentContextProfile,
     pub work_mode: String,
     pub tone: String,
     pub detail_level: String,

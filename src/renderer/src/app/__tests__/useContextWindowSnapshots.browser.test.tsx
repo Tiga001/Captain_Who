@@ -10,6 +10,8 @@ import type { ChatPermissionMode } from '../../features/chat/chatTypes'
 
 const agentClient = vi.hoisted(() => ({
   getContextWindowSnapshot: vi.fn(),
+  preferencesListener: null as
+    null | ((event: { contextProfile: 'full' | 'minimal'; updatedAt: number }) => void),
   settingsListener: null as
     null | ((settings: { enabled: boolean; revision: number; updatedAt: number }) => void)
 }))
@@ -17,6 +19,12 @@ const agentClient = vi.hoisted(() => ({
 vi.mock('../../host/hostClient', () => ({
   hostClient: {
     agent: {
+      onPromptPreferencesChanged: (listener: typeof agentClient.preferencesListener) => {
+        agentClient.preferencesListener = listener
+        return () => {
+          agentClient.preferencesListener = null
+        }
+      },
       onCollaborationSettingsChanged: (listener: typeof agentClient.settingsListener) => {
         agentClient.settingsListener = listener
         return () => {
@@ -136,6 +144,24 @@ describe('useContextWindowSnapshots', () => {
     agentClient.settingsListener?.({ enabled: false, revision: 2, updatedAt: 1 })
     await expect.element(screen.getByTestId('input-tokens')).toHaveTextContent('19000')
     expect(agentClient.getContextWindowSnapshot).toHaveBeenCalledTimes(2)
+  })
+
+  it('refreshes idle estimates after profile changes and defers refresh during a run', async () => {
+    agentClient.getContextWindowSnapshot
+      .mockResolvedValueOnce({ modelConfigId: 'model-1', snapshot: snapshot(21000) })
+      .mockResolvedValueOnce({ modelConfigId: 'model-1', snapshot: snapshot(6000) })
+      .mockResolvedValueOnce({ modelConfigId: 'model-1', snapshot: snapshot(21000) })
+    const screen = await render(<Harness skills={[]} />)
+    await expect.element(screen.getByTestId('input-tokens')).toHaveTextContent('21000')
+    agentClient.preferencesListener?.({ contextProfile: 'minimal', updatedAt: 1 })
+    await expect.element(screen.getByTestId('input-tokens')).toHaveTextContent('6000')
+    await screen.rerender(<Harness skills={[]} isRunning />)
+    agentClient.preferencesListener?.({ contextProfile: 'full', updatedAt: 2 })
+    await Promise.resolve()
+    expect(agentClient.getContextWindowSnapshot).toHaveBeenCalledTimes(2)
+    await screen.rerender(<Harness skills={[]} />)
+    await expect.element(screen.getByTestId('input-tokens')).toHaveTextContent('21000')
+    expect(agentClient.getContextWindowSnapshot).toHaveBeenCalledTimes(3)
   })
 
   it('indexes an inspection by Host-owned modelConfigId while retaining the provider wire model', async () => {

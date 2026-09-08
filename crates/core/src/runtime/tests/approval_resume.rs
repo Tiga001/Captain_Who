@@ -541,10 +541,21 @@ async fn approval_resume_restores_prior_context_and_continues_queued_tools() {
 
 #[tokio::test]
 async fn skill_resource_text_survives_approval_checkpoint_but_is_omitted_from_durable_history() {
+    assert_skill_resource_approval_round_trip(crate::protocol::AgentContextProfile::Full).await;
+}
+
+#[tokio::test]
+async fn minimal_skill_resource_text_survives_approval_checkpoint_with_frozen_tool_set() {
+    assert_skill_resource_approval_round_trip(crate::protocol::AgentContextProfile::Minimal).await;
+}
+
+async fn assert_skill_resource_approval_round_trip(
+    context_profile: crate::protocol::AgentContextProfile,
+) {
     use crate::protocol::{
         AgentActivatedSkillResources, AgentApprovalDecision, AgentApprovalDecisionStatus,
-        AgentCommandPermission, AgentPatchPermission, AgentPermissions, AgentReadPermission,
-        AgentToolContinuation, AgentWritePermission,
+        AgentCommandPermission, AgentContextProfile, AgentPatchPermission, AgentPermissions,
+        AgentPromptPreferences, AgentReadPermission, AgentToolContinuation, AgentWritePermission,
     };
     use crate::skills::{
         memory_resource_session_for_test, SkillId, SkillPackageUri, SkillResourceKind,
@@ -555,6 +566,7 @@ async fn skill_resource_text_survives_approval_checkpoint_but_is_omitted_from_du
     use tokio::net::{TcpListener, TcpStream};
 
     const RESOURCE_MARKER: &str = "SKILL_RESOURCE_CHECKPOINT_SECRET_MARKER";
+    const SKILL_INSTRUCTIONS: &str = "Read references progressively.";
 
     async fn read_json_request(stream: &mut TcpStream) -> Value {
         let mut request = Vec::new();
@@ -633,6 +645,8 @@ async fn skill_resource_text_survives_approval_checkpoint_but_is_omitted_from_du
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
+    let initial_request = Arc::new(std::sync::Mutex::new(None::<Value>));
+    let captured_initial_request = Arc::clone(&initial_request);
     let second_request = Arc::new(std::sync::Mutex::new(None::<Value>));
     let captured_second_request = Arc::clone(&second_request);
     let resumed_request = Arc::new(std::sync::Mutex::new(None::<Value>));
@@ -642,7 +656,9 @@ async fn skill_resource_text_survives_approval_checkpoint_but_is_omitted_from_du
             let (mut stream, _) = listener.accept().await.unwrap();
             let request = read_json_request(&mut stream).await;
             let response = match request_index {
-                0 => json!({
+                0 => {
+                    *captured_initial_request.lock().unwrap() = Some(request);
+                    json!({
                     "choices": [{
                         "message": {
                             "role": "assistant",
@@ -662,7 +678,8 @@ async fn skill_resource_text_survives_approval_checkpoint_but_is_omitted_from_du
                         },
                         "finish_reason": "tool_calls"
                     }]
-                }),
+                    })
+                }
                 1 => {
                     *captured_second_request.lock().unwrap() = Some(request);
                     json!({
@@ -745,7 +762,15 @@ async fn skill_resource_text_survives_approval_checkpoint_but_is_omitted_from_du
             },
         }),
         search_config: None,
-        prompt_preferences: None,
+        prompt_preferences: Some(AgentPromptPreferences {
+            context_profile,
+            work_mode: None,
+            tone: None,
+            detail_level: None,
+            custom_instructions: None,
+            updated_at: None,
+            automation_execution_context: None,
+        }),
         approval_decision: None,
         tool_continuation: None,
         attachments: Vec::new(),
@@ -760,7 +785,7 @@ async fn skill_resource_text_survives_approval_checkpoint_but_is_omitted_from_du
                 name: "resource-checkpoint".to_string(),
                 revision: revision.as_str().to_string(),
                 source: "workspace:workspace-1".to_string(),
-                instructions: "Read references progressively.".to_string(),
+                instructions: SKILL_INSTRUCTIONS.to_string(),
                 source_bytes: 30,
                 resources: Some(AgentActivatedSkillResources {
                     root_uri: package.to_string(),
@@ -789,7 +814,42 @@ async fn skill_resource_text_survives_approval_checkpoint_but_is_omitted_from_du
         .unwrap();
 
     assert_eq!(output.status, AgentRunStatus::WaitingForApproval);
+    assert!(!workspace.join("report.txt").exists());
+    let initial_request = initial_request.lock().unwrap().clone().unwrap();
+    let tool_names = initial_request["tools"]
+        .as_array()
+        .expect("native provider tools")
+        .iter()
+        .map(|tool| tool["function"]["name"].as_str().expect("native tool name"))
+        .collect::<BTreeSet<_>>();
+    for name in [
+        "skills_activate",
+        "skills_read_resource",
+        "read_file",
+        "apply_patch",
+    ] {
+        assert!(
+            tool_names.contains(name),
+            "{context_profile:?} is missing {name}"
+        );
+    }
+    assert_eq!(
+        tool_names.contains("todo_update"),
+        context_profile == AgentContextProfile::Full,
+        "the provider must receive the selected profile's real tool set"
+    );
+    let initial_messages = initial_request["messages"].to_string();
+    assert!(initial_messages.contains(SKILL_INSTRUCTIONS));
+    assert!(initial_messages.contains("skills_read_resource"));
+    assert_eq!(
+        initial_messages.contains("## 必要工具约束"),
+        context_profile == AgentContextProfile::Minimal
+    );
     let model_request = second_request.lock().unwrap().clone().unwrap();
+    assert_eq!(initial_request["tools"], model_request["tools"]);
+    assert!(model_request["messages"]
+        .to_string()
+        .contains(SKILL_INSTRUCTIONS));
     assert!(model_request.to_string().contains(RESOURCE_MARKER));
     let checkpoint = output
         .events
@@ -916,7 +976,12 @@ async fn skill_resource_text_survives_approval_checkpoint_but_is_omitted_from_du
         "the setup publication must not discard the checkpoint's exact model projection"
     );
     let resumed_request = resumed_request.lock().unwrap().clone().unwrap();
+    assert_eq!(
+        model_request["tools"], resumed_request["tools"],
+        "approval resume must retain exactly the same native tool names, schemas and descriptions"
+    );
     let resumed_messages = serde_json::to_string(&resumed_request["messages"]).unwrap();
+    assert!(resumed_messages.contains(SKILL_INSTRUCTIONS));
     assert!(resumed_messages.contains(&resource_read_call_id));
     assert!(resumed_messages.contains(&target_read_call_id));
     assert!(resumed_messages.contains(&pending_call_id));

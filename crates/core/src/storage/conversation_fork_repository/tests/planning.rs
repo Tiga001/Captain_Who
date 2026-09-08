@@ -134,6 +134,108 @@ fn ordinary_fork_copies_message_ui_state_overlay() {
 }
 
 #[test]
+fn fork_does_not_inherit_context_profile_admission_policy_and_next_run_uses_current_setting() {
+    use crate::storage::agent_context_profile_repository;
+    use crate::AgentContextProfile;
+
+    let mut connection = Connection::open_in_memory().unwrap();
+    migrations::run_migrations(&connection).unwrap();
+    let source = source_conversation();
+    chat_repository::save_conversation(&mut connection, source.clone()).unwrap();
+    conversation_trace_repository::replace_trace(
+        &mut connection,
+        &ConversationTurnTrace {
+            schema_version: CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
+            run_id: "run-source-0".into(),
+            conversation_id: source.id.clone(),
+            assistant_message_id: "assistant-a".into(),
+            terminal_status: ConversationTurnTraceTerminalStatus::Completed,
+            terminal_error: None,
+            truncated: false,
+            items: vec![ConversationTurnTraceItem::AssistantNarration {
+                provider_turn_id: None,
+                first_tool_call_id: None,
+                sequence: 0,
+                content: "content assistant-a".into(),
+                truncated: false,
+            }],
+        },
+        19,
+        20,
+    )
+    .unwrap();
+    connection
+        .execute(
+            "INSERT INTO agent_prompt_preferences
+         (id, work_mode, tone, detail_level, custom_instructions, updated_at, context_profile)
+         VALUES ('default', 'coding', 'pragmatic', 'medium', '', 20, 'minimal')
+         ON CONFLICT(id) DO UPDATE SET context_profile='minimal'",
+            [],
+        )
+        .unwrap();
+    assert_eq!(
+        agent_context_profile_repository::freeze_run(&connection, "run-source-0", None).unwrap(),
+        AgentContextProfile::Minimal
+    );
+
+    let plan = build_assistant_reply_fork_plan(
+        &connection,
+        "fork-context-profile-policy",
+        &source.id,
+        "assistant-a",
+        21,
+    )
+    .unwrap();
+    commit_fork_plan(&mut connection, &plan).unwrap();
+    let cloned_trace = conversation_trace_repository::get_trace_for_message(
+        &connection,
+        &plan.message_id_map["assistant-a"],
+    )
+    .unwrap()
+    .unwrap();
+    assert_ne!(cloned_trace.run_id, "run-source-0");
+    assert_eq!(
+        agent_context_profile_repository::load_run(&connection, &cloned_trace.run_id).unwrap(),
+        None,
+        "a copied historical trace must not create executable Run policy"
+    );
+    assert_eq!(
+        agent_context_profile_repository::load_run(&connection, "run-source-0").unwrap(),
+        Some(AgentContextProfile::Minimal),
+        "fork must leave the original Run's immutable policy untouched"
+    );
+
+    connection
+        .execute(
+            "UPDATE agent_prompt_preferences SET context_profile='full' WHERE id='default'",
+            [],
+        )
+        .unwrap();
+    connection.execute(
+        "INSERT INTO messages (id, conversation_id, role, content, status, created_at, position)
+         VALUES ('assistant-after-profile-fork', ?1, 'assistant', '', 'pending', 22, 2)",
+        [&plan.target.id],
+    ).unwrap();
+    conversation_trace_repository::append_in_progress_trace(
+        &mut connection,
+        &crate::ConversationTraceSnapshot::default().in_progress_trace(
+            "run-after-profile-fork",
+            &plan.target.id,
+            "assistant-after-profile-fork",
+        ),
+        22,
+        22,
+    )
+    .unwrap();
+    assert_eq!(
+        agent_context_profile_repository::freeze_run(&connection, "run-after-profile-fork", None)
+            .unwrap(),
+        AgentContextProfile::Full,
+        "a new root Run in the fork must freeze the current setting, not its source Run's mode"
+    );
+}
+
+#[test]
 fn fork_with_released_provider_history_is_marked_for_safe_adaptation() {
     let mut connection = Connection::open_in_memory().unwrap();
     migrations::run_migrations(&connection).unwrap();

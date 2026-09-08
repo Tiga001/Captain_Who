@@ -10,6 +10,33 @@ import { registerAgentIpc } from '../ipc/agentIpc'
 describe('Main Agent IPC collaboration routing', () => {
   beforeEach(() => getAllWindows.mockReset())
 
+  it('broadcasts profile invalidation to live windows only', () => {
+    let listener: ((event: unknown) => void) | undefined
+    const send = vi.fn()
+    const destroyedSend = vi.fn()
+    getAllWindows.mockReturnValue([
+      { isDestroyed: () => false, webContents: { isDestroyed: () => false, send } },
+      { isDestroyed: () => true, webContents: { isDestroyed: () => false, send: destroyedSend } }
+    ])
+    registerAgentIpc(
+      { handle: vi.fn(), on: vi.fn() } as never,
+      {
+        onAgentEvent: vi.fn(),
+        onProviderTransition: vi.fn(),
+        onPromptPreferencesChanged: (handler: typeof listener) => {
+          listener = handler
+        }
+      } as never
+    )
+    const event = { contextProfile: 'minimal', updatedAt: 7 }
+    listener?.(event)
+    expect(send).toHaveBeenCalledExactlyOnceWith(
+      HOST_CHANNELS.agent.promptPreferencesChanged,
+      event
+    )
+    expect(destroyedSend).not.toHaveBeenCalled()
+  })
+
   it('routes global settings updates and broadcasts the persisted revision', async () => {
     let settingsListener: ((settings: unknown) => void) | undefined
     const send = vi.fn()

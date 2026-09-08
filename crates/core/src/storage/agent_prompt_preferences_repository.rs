@@ -13,13 +13,17 @@ pub fn load_agent_prompt_preferences(
     let preferences = connection
         .query_row(
             "
-            SELECT work_mode, tone, detail_level, custom_instructions, updated_at
+            SELECT work_mode, tone, detail_level, custom_instructions, updated_at, context_profile
             FROM agent_prompt_preferences
             WHERE id = 'default'
             ",
             [],
             |row| {
                 Ok(AgentPromptPreferencesRecord {
+                    context_profile: match row.get::<_, String>(5)?.as_str() {
+                        "minimal" => crate::AgentContextProfile::Minimal,
+                        _ => crate::AgentContextProfile::Full,
+                    },
                     work_mode: row.get(0)?,
                     tone: row.get(1)?,
                     detail_level: row.get(2)?,
@@ -50,22 +54,28 @@ pub fn save_agent_prompt_preferences(
             tone,
             detail_level,
             custom_instructions,
-            updated_at
+            updated_at,
+            context_profile
         )
-        VALUES ('default', ?1, ?2, ?3, ?4, ?5)
+        VALUES ('default', ?1, ?2, ?3, ?4, ?5, ?6)
         ON CONFLICT(id) DO UPDATE SET
             work_mode = excluded.work_mode,
             tone = excluded.tone,
             detail_level = excluded.detail_level,
             custom_instructions = excluded.custom_instructions,
-            updated_at = excluded.updated_at
+            updated_at = excluded.updated_at,
+            context_profile = excluded.context_profile
         ",
         params![
             &preferences.work_mode,
             &preferences.tone,
             &preferences.detail_level,
             &preferences.custom_instructions,
-            timestamp
+            timestamp,
+            match preferences.context_profile {
+                crate::AgentContextProfile::Full => "full",
+                crate::AgentContextProfile::Minimal => "minimal",
+            }
         ],
     )?;
 
@@ -77,6 +87,7 @@ pub fn save_agent_prompt_preferences(
 
 fn default_agent_prompt_preferences() -> AgentPromptPreferencesRecord {
     AgentPromptPreferencesRecord {
+        context_profile: crate::AgentContextProfile::Full,
         work_mode: DEFAULT_WORK_MODE.to_string(),
         tone: DEFAULT_TONE.to_string(),
         detail_level: DEFAULT_DETAIL_LEVEL.to_string(),
@@ -89,6 +100,7 @@ fn normalize_preferences(
     preferences: AgentPromptPreferencesRecord,
 ) -> AgentPromptPreferencesRecord {
     AgentPromptPreferencesRecord {
+        context_profile: preferences.context_profile,
         work_mode: normalize_value(
             &preferences.work_mode,
             &[DEFAULT_WORK_MODE, "general"],
@@ -125,4 +137,39 @@ fn truncate_custom_instructions(value: &str) -> String {
     }
 
     output
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::AgentContextProfile;
+
+    #[test]
+    fn profile_round_trip_preserves_every_other_preference() {
+        let connection = Connection::open_in_memory().unwrap();
+        crate::storage::migrations::run_migrations(&connection).unwrap();
+        let defaults = load_agent_prompt_preferences(&connection).unwrap();
+        assert_eq!(defaults.context_profile, AgentContextProfile::Full);
+        let mut preferences = defaults;
+        preferences.work_mode = "general".into();
+        preferences.tone = "friendly".into();
+        preferences.detail_level = "high".into();
+        preferences.custom_instructions = "Keep this instruction".into();
+        for profile in [AgentContextProfile::Minimal, AgentContextProfile::Full] {
+            preferences.context_profile = profile;
+            save_agent_prompt_preferences(&connection, preferences.clone()).unwrap();
+            let restored = load_agent_prompt_preferences(&connection).unwrap();
+            assert_eq!(restored.context_profile, profile);
+            assert_eq!(restored.work_mode, "general");
+            assert_eq!(restored.tone, "friendly");
+            assert_eq!(restored.detail_level, "high");
+            assert_eq!(restored.custom_instructions, "Keep this instruction");
+        }
+        assert!(connection
+            .execute(
+                "UPDATE agent_prompt_preferences SET context_profile='unknown'",
+                []
+            )
+            .is_err());
+    }
 }

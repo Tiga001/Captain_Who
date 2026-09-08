@@ -406,3 +406,168 @@ fn text_append_grows_the_same_measurement_and_compaction_can_reduce_it() {
         after.cost_breakdown.tool_schema_tokens
     );
 }
+
+fn save_context_profile(storage: &StorageService, profile: mycopilot_core::AgentContextProfile) {
+    let mut preferences = storage.load_agent_prompt_preferences().unwrap();
+    preferences.context_profile = profile;
+    storage.save_agent_prompt_preferences(preferences).unwrap();
+}
+
+fn saved_profile_snapshot(service: &AgentService) -> AgentContextWindowSnapshot {
+    service
+        .get_context_window_snapshot(AgentContextWindowSnapshotInput {
+            conversation_id: Some(CONVERSATION.into()),
+            project_id: None,
+            model_id: "model-1".into(),
+            max_tokens: Some(30_000),
+            prompt_preferences: None,
+            permissions: AgentPermissions::default(),
+            skills: vec![],
+        })
+        .unwrap()
+        .snapshot
+        .unwrap()
+}
+
+#[test]
+fn context_profile_idle_toggle_refreshes_measurement_without_rewriting_history() {
+    use mycopilot_core::AgentContextProfile::{Full, Minimal};
+
+    let fixture = WindowFixture::new();
+    let before = fixture
+        .storage
+        .load_conversation_for_turn(CONVERSATION)
+        .unwrap();
+    let traces_before = fixture
+        .storage
+        .list_conversation_turn_traces(CONVERSATION)
+        .unwrap();
+    let full = saved_profile_snapshot(&fixture.service);
+    save_context_profile(&fixture.storage, Minimal);
+    let minimal = saved_profile_snapshot(&fixture.service);
+    assert!(minimal.input_tokens < full.input_tokens);
+    assert!(minimal.cost_breakdown.tool_schema_tokens < full.cost_breakdown.tool_schema_tokens);
+    assert_eq!(minimal.input_capacity_tokens, full.input_capacity_tokens);
+
+    let reopened =
+        Arc::new(StorageService::open(&fixture._directory.path().join("storage.sqlite")).unwrap());
+    assert_eq!(
+        reopened
+            .load_agent_prompt_preferences()
+            .unwrap()
+            .context_profile,
+        Minimal
+    );
+    save_context_profile(&fixture.storage, Full);
+    assert_eq!(saved_profile_snapshot(&fixture.service), full);
+    assert_eq!(
+        serde_json::to_value(
+            fixture
+                .storage
+                .load_conversation_for_turn(CONVERSATION)
+                .unwrap()
+        )
+        .unwrap(),
+        serde_json::to_value(before).unwrap(),
+    );
+    assert_eq!(
+        fixture
+            .storage
+            .list_conversation_turn_traces(CONVERSATION)
+            .unwrap(),
+        traces_before
+    );
+}
+
+#[test]
+fn context_profile_active_run_stays_frozen_and_terminal_previews_next_mode() {
+    use mycopilot_core::AgentContextProfile::{Full, Minimal};
+
+    let fixture = WindowFixture::new();
+    save_context_profile(&fixture.storage, Minimal);
+    let (existing, revision) = fixture
+        .storage
+        .load_conversation_for_turn(CONVERSATION)
+        .unwrap();
+    let run_id = "run-minimal-frozen-window";
+    let prepared = crate::application::agent_support::prepare_reserved_human_turn(
+        &fixture.storage,
+        &fixture.service.skills,
+        serde_json::from_value(json!({
+            "conversationId": CONVERSATION,
+            "modelId": "model-1",
+            "content": "Keep the current task in its original mode.",
+            "userMessageId": "user-minimal-window",
+            "assistantMessageId": "assistant-minimal-window",
+            "maxTokens": 30000
+        }))
+        .unwrap(),
+        run_id,
+        existing,
+        revision,
+        None,
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        prepared
+            .agent_input
+            .prompt_preferences
+            .as_ref()
+            .unwrap()
+            .context_profile,
+        Minimal
+    );
+    assert_eq!(
+        fixture
+            .storage
+            .load_agent_context_profile_for_run(run_id)
+            .unwrap(),
+        Some(Minimal)
+    );
+    let active = saved_profile_snapshot(&fixture.service);
+    save_context_profile(&fixture.storage, Full);
+    assert_eq!(saved_profile_snapshot(&fixture.service), active);
+    let reopened =
+        Arc::new(StorageService::open(&fixture._directory.path().join("storage.sqlite")).unwrap());
+    assert_eq!(
+        reopened.load_agent_context_profile_for_run(run_id).unwrap(),
+        Some(Minimal)
+    );
+
+    let assistant_id = &prepared.output.assistant_message_id;
+    let trace = completed_conversation_trace_without_items(run_id, CONVERSATION, assistant_id);
+    fixture
+        .storage
+        .finalize_chat_message_with_conversation_trace(
+            CONVERSATION,
+            assistant_id,
+            "Done.",
+            Some("sent"),
+            "completed",
+            &trace,
+            prepared.output.assistant_message.created_at,
+            prepared.output.assistant_message.created_at + 1,
+        )
+        .unwrap();
+    let terminal = fixture
+        .service
+        .finalize_conversation_context_state(
+            &prepared.agent_input,
+            run_id,
+            CONVERSATION,
+            assistant_id,
+            "Done.",
+        )
+        .unwrap()
+        .unwrap();
+    assert!(terminal.cost_breakdown.tool_schema_tokens > active.cost_breakdown.tool_schema_tokens);
+    assert_eq!(saved_profile_snapshot(&fixture.service), terminal);
+    assert_eq!(
+        fixture
+            .storage
+            .load_agent_context_profile_for_run(run_id)
+            .unwrap(),
+        Some(Minimal)
+    );
+}

@@ -892,6 +892,9 @@ export const koKRTranslations = {
   'profile.handlePlaceholder': '사용자',
   'profile.openSettings': '설정',
   'profile.avatarUploadFailed': '아바타 업로드 실패',
+  'personalization.minimalMode': '최소 모드',
+  'personalization.minimalModeDescription':
+    '기본 컨텍스트와 도구를 간소화합니다. 전환 후 새 턴부터 적용됩니다. 확장 설정은 유지되며 끄면 전체 모드로 돌아갑니다.',
   'personalization.workMode': '작업 모드',
   'personalization.workModeDescription': '기술 세부 응답에 포함되는 내용을 선택하세요.',
   'personalization.workModeCoding': '코딩용',

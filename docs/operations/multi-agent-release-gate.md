@@ -55,11 +55,11 @@ pnpm test:multi-agent-release -- --smoke-only
 | 双等待域                               | Command Session wait 与 Agent wait 不互相唤醒/消费                                                   |
 | 子 Agent Approval continuation         | 进入 Runtime 前持久 `waiting_for_approval → running`                                                 |
 | 旧入口授权回归                         | 普通用户 RPC 不能读写子 Agent Conversation                                                           |
-| storage migrations tests               | fresh canonical、exact v42 单向迁移、旧/损坏 schema 拒绝、reset-required 行为                        |
+| storage migrations tests               | fresh canonical、exact v43 单向迁移、旧/损坏 schema 拒绝、reset-required 行为                        |
 | cross-language protocol                | Rust 消费协作 fixture，与 TypeScript 契约对齐                                                        |
 | AppShell browser scenarios             | activity、Approval、observer、live stream、重启和根 Agent switching                                  |
 
-脚本的 storage step 当前明确标为 “canonical v43”。实际版本的唯一真源仍是 `crates/core/src/storage/migrations.rs`；修改 schema 时必须同步 runner label 与本门禁，不能仅凭日志文字判断兼容性。
+脚本的 storage step 当前明确标为 “canonical v44”。实际版本的唯一真源仍是 `crates/core/src/storage/migrations.rs`；修改 schema 时必须同步 runner label 与本门禁，不能仅凭日志文字判断兼容性。
 
 ## 3. 固定压力阈值
 
@@ -117,14 +117,14 @@ Renderer/Core Server 的协作 RPC 精确为 `agent.collaboration.settings.get`�
 
 ## 6. Schema 与 reset 门禁
 
-当前 canonical storage 为 **v43**，当前版本须通过 exact SQLite catalog fingerprint 校验。exact v42 可在单个事务中验证旧 fingerprint、新增全局协作设置及冻结策略表并验证新 schema，保留原历史与配置。以下输入必须 fail closed 且不修改源库：
+当前 canonical storage 为 **v44**，当前版本须通过 exact SQLite catalog fingerprint 校验。exact v43 可在单个事务中验证旧 fingerprint、新增上下文模式偏好及 Run/Wake 模式冻结策略表并验证新 schema，旧模式补为 Full，保留原历史与配置。以下输入必须 fail closed 且不修改源库：
 
-- 除 exact v42 之外的旧版本开发库，包括 v34/v35；
+- 除 exact v43 之外的旧版本开发库，包括 v34/v35/v42；
 - 非空但 `user_version=0` 的库；
 - 当前版本但 schema object 缺失/额外/被篡改；
 - foreign key violation。
 
-稳定错误标识为 `development_storage_schema_reset_required`。开发 reset 必须先 dry-run、取得 exact DB lock、创建并验证私有备份、构造 fresh v43；正式工具从 exact current v43、exact v42、exact v41、exact v40、exact v39、exact v38、exact v37、exact v36 或 exact v35 恢复 allowlisted 配置与 credential reference，v36–v43 还保留人机交互设置及 revision，v43 还保留全局协作开关及 revision；受限的 v33 私有备份配置恢复绑定固定 fingerprint。该显式 reset 清空聊天、运行及 Run/Wake 冻结策略，与启动时的 v42 → v43 保历史升级分开；未知配置结构必须拒绝重置，不能静默丢弃模型配置。随后执行 `quick_check`/`foreign_key_check` 并原子发布。当前维护 canonical schema、已审计的 v42 → v43 单向增量升级和受管配置保留流程，不转换旧聊天、运行或检查点格式。详见 [恢复 Runbook](recovery-runbook.md)。
+稳定错误标识为 `development_storage_schema_reset_required`。开发 reset 必须先 dry-run、取得 exact DB lock、创建并验证私有备份、构造 fresh v44；正式工具从 exact current v44 及 exact v35–v43 恢复 allowlisted 配置与 credential reference，v36–v44 还保留人机交互设置及 revision，v43–v44 保留全局协作开关及 revision，v44 保留上下文模式，旧版本该项默认 Full；受限的 v33 私有备份配置恢复绑定固定 fingerprint。该显式 reset 清空聊天、运行及 Run/Wake 冻结策略，与启动时的 v43 → v44 保历史升级分开；未知配置结构必须拒绝重置，不能静默丢弃模型配置。随后执行 `quick_check`/`foreign_key_check` 并原子发布。当前维护 canonical schema、exact v43 → v44 单向增量升级和受管配置保留流程，不转换旧聊天、运行或检查点格式。详见 [恢复 Runbook](recovery-runbook.md)。
 
 ## 7. 发布所需的组合证据
 

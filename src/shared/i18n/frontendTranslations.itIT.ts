@@ -927,6 +927,9 @@ export const itITTranslations = {
   'profile.handlePlaceholder': 'UTENTE',
   'profile.openSettings': 'Impostazioni',
   'profile.avatarUploadFailed': "Caricamento dell'avatar non riuscito",
+  'personalization.minimalMode': 'Modalità minima',
+  'personalization.minimalModeDescription':
+    'Riduce il contesto di base e gli strumenti. La modifica si applica dal prossimo turno. Le estensioni mantengono le impostazioni; disattiva per tornare alla modalità completa.',
   'personalization.workMode': 'Modalità di lavoro',
   'personalization.workModeDescription': 'Scegli quanti dettagli tecnici includono le risposte',
   'personalization.workModeCoding': 'Per la codifica',

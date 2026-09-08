@@ -62,9 +62,15 @@ Composer 的 `/` 菜单首项为 `model`，与 `capabilities` 一样是二级导
 
 当前 Run、审批续跑与 Guidance 保持原配置；队列按每项的 `modelId` / `permissionMode` 发送，不回写覆盖用户后来选择的草稿。异步提交与 Provider 完成通知只能更新仍属于原提交的草稿字段。上下文用量在 Run 活跃时采用 Host 事件快照，停止草稿预估 RPC 并作废此前在途预估；结束后才为当前草稿刷新预估。
 
+### 极简上下文模式
+
+个性化页面的工作模式、语气等选择及“极简模式”切换后立即保存；“保存”按钮只提交自定义指令，其他设置的自动保存不能提交尚未保存的指令草稿。“极简模式”位于工作模式底部，默认关闭，对应全局 `AgentPromptPreferences.contextProfile = full | minimal`，不把 `coding | general` 改成第三种工作模式，也不改写图片生成、搜索、人机交互、协作、浏览器、Skill 或 MCP 的原配置。模式切换从新轮次生效，关闭后恢复完整基础提示词和工具。
+
+新根 Run 在接纳事务中冻结模式；该 Run 委派的 Wake 继承此值，审批、提问及进程恢复沿用原 Run 策略。保存不改变正在执行的任务树，也不启动模型请求。`agent.promptPreferencesChanged` 通知只携带 `contextProfile` 与 `updatedAt`，不传播自定义指令；Host 使上下文缓存失效，Renderer 为空闲会话刷新预览，活跃 Run 继续采用本轮快照，结束后刷新下一轮预览。提示词、工具与计量的对应关系见[Agent Runtime](../architecture/agent-runtime-and-providers.md#极简上下文模式)。
+
 ### 人机交互设置
 
-“允许智能体向人类发起提问与协作”默认开启，由 Host 独立保存 enabled/revision，使用 `host.humanInteraction` 读取、CAS 更新和接收变更通知。它不属于 Prompt Preferences，个性化整页保存不能覆盖此项。关闭只阻止新提问，已有问题仍能回答或忽略。完整设计见[向用户提问](../subsystems/human-interaction.md)。
+“允许智能体向人类发起提问与协作”默认开启，由 Host 独立保存 enabled/revision，使用 `host.humanInteraction` 读取、CAS 更新和接收变更通知。它不属于 Prompt Preferences，个性化偏好保存不能覆盖此项。关闭只阻止新提问，已有问题仍能回答或忽略。完整设计见[向用户提问](../subsystems/human-interaction.md)。
 
 ### 能力中心
 
@@ -141,7 +147,7 @@ MCP、Browser、Subagents、Environment 和 Archived Conversations。Browser 页
 - 配置 DTO 与 parser 是否拒绝未知/无效字段；
 - 默认值是在 Renderer、Main、Core Server 还是 Rust Core 定义，是否只有一个权威来源；
 - revision/CAS、重复提交和重启后的行为是否有测试；
-- reset/backup 是否应保留该配置；当前 reset 从 exact current v36 或 exact v35 保留 allowlisted 配置与 credential reference，v36 还保留人机交互设置及 revision，不复制或恢复操作系统 secret。通知事件、Browser history/download records 或 Agent template library 不保留；
+- reset/backup 是否应保留该配置；当前 reset 保留 allowlisted 配置与 credential reference（含 v44 的上下文模式），受支持旧版来源与默认值见[存储生命周期](../architecture/storage-and-data-lifecycle.md#schema-发布策略)，不复制或恢复操作系统 secret。通知事件、Browser history/download records 或 Agent template library 不保留；
 - 删除项目是否应删除该配置或仅移除 Agent template assignment；
 - Automation 是否需要重建冻结 snapshot、阻断后续 Run 或使现有任务进入 blocked；
 - 敏感字段是否避开日志、Trace、IPC event 和 model projection；

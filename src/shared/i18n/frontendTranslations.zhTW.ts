@@ -852,6 +852,9 @@ export const zhTWTranslations = {
   'profile.handlePlaceholder': 'USER',
   'profile.openSettings': '設定',
   'profile.avatarUploadFailed': '頭像上傳失敗',
+  'personalization.minimalMode': '極簡模式',
+  'personalization.minimalModeDescription':
+    '精簡基礎上下文與工具。切換後從新回合生效；擴充功能仍依原設定，關閉後恢復完整模式。',
   'personalization.workMode': '工作模式',
   'personalization.workModeDescription': '選擇回復中的技術細節程度',
   'personalization.workModeCoding': '適用於程式設計',

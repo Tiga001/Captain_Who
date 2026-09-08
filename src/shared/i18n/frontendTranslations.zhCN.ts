@@ -862,6 +862,9 @@ export const zhCNTranslations = {
   'profile.openSettings': '设置',
   'profile.avatarUploadFailed': '头像上传失败',
 
+  'personalization.minimalMode': '极简模式',
+  'personalization.minimalModeDescription':
+    '精简基础上下文和工具。切换后从新轮次生效；扩展仍按原配置，关闭后恢复完整模式。',
   'personalization.workMode': '工作模式',
   'personalization.workModeDescription': '选择回复中的技术细节程度',
   'personalization.workModeCoding': '适用于编程',

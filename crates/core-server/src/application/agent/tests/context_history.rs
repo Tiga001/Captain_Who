@@ -157,6 +157,7 @@ fn conversation_world_state_persists_exact_full_and_anchored_diff_across_turns()
             max_tokens: None,
             temperature: None,
             prompt_preferences: Some(mycopilot_core::AgentPromptPreferences {
+                context_profile: mycopilot_core::AgentContextProfile::Full,
                 work_mode: Some(mycopilot_core::AgentPromptWorkMode::General),
                 tone: Some(mycopilot_core::AgentPromptTone::Friendly),
                 detail_level: Some(mycopilot_core::AgentPromptDetailLevel::High),

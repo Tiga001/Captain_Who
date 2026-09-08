@@ -278,6 +278,12 @@ impl StorageService {
                     &initial_wake.wake_id,
                 )
                 .map_err(spawn_database_error)?;
+                crate::storage::agent_context_profile_repository::inherit_run_for_wake(
+                    &transaction,
+                    origin_run_id,
+                    &initial_wake.wake_id,
+                )
+                .map_err(spawn_database_error)?;
             }
             let collaboration_identity = collaboration_identity(&parent, &agent, &task_message)?;
             let record = ChildAgentSpawnRecord {

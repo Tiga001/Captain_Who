@@ -78,6 +78,14 @@ export function useContextWindowSnapshots({
   skills
 }: UseContextWindowSnapshotsOptions) {
   const [collaborationSettingsRevision, setCollaborationSettingsRevision] = useState(0)
+  const [promptPreferencesRevision, setPromptPreferencesRevision] = useState(0)
+  useEffect(
+    () =>
+      hostClient.agent.onPromptPreferencesChanged(() => {
+        setPromptPreferencesRevision((revision) => revision + 1)
+      }),
+    []
+  )
   useEffect(
     () =>
       hostClient.agent.onCollaborationSettingsChanged((settings) => {
@@ -145,7 +153,14 @@ export function useContextWindowSnapshots({
     return () => {
       cancelled = true
     }
-  }, [enabled, isRunning, refreshKey, requestKey, collaborationSettingsRevision])
+  }, [
+    enabled,
+    isRunning,
+    refreshKey,
+    requestKey,
+    collaborationSettingsRevision,
+    promptPreferencesRevision
+  ])
 
   const recordSnapshot = useCallback(
     (eventScopeId: string, eventModelConfigId: string, snapshot: AgentContextWindowSnapshot) => {

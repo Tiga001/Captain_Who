@@ -344,6 +344,22 @@ describe('manual context compaction IPC', () => {
 })
 
 describe('Agent IPC collaboration settings', () => {
+  it('validates prompt profile invalidation and removes its subscription', () => {
+    const ipc = { invoke: vi.fn(), on: vi.fn(), removeListener: vi.fn() }
+    const bridge = createAgentIpcBridge(ipc as never)
+    const handler = vi.fn()
+    const unsubscribe = bridge.onPromptPreferencesChanged(handler)
+    const [channel, listener] = ipc.on.mock.calls[0]!
+    expect(channel).toBe('host:agent.promptPreferencesChanged')
+    listener({}, { contextProfile: 'unknown', updatedAt: 1 })
+    listener({}, { contextProfile: 'minimal', updatedAt: 1, customInstructions: 'private' })
+    expect(handler).not.toHaveBeenCalled()
+    listener({}, { contextProfile: 'minimal', updatedAt: 1 })
+    expect(handler).toHaveBeenCalledExactlyOnceWith({ contextProfile: 'minimal', updatedAt: 1 })
+    unsubscribe()
+    expect(ipc.removeListener).toHaveBeenCalledWith(channel, listener)
+  })
+
   it('forwards settings and drops malformed notifications before invoking subscribers', async () => {
     const ipc = { invoke: vi.fn(), on: vi.fn(), removeListener: vi.fn() }
     const bridge = createAgentIpcBridge(ipc as never)

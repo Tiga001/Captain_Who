@@ -1,17 +1,17 @@
 use rusqlite::{ffi, Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
 
-pub const STORAGE_SCHEMA_VERSION: i32 = 43;
+pub const STORAGE_SCHEMA_VERSION: i32 = 44;
 pub const DEVELOPMENT_STORAGE_SCHEMA_RESET_REQUIRED: &str =
     "development_storage_schema_reset_required";
 
 const CANONICAL_SCHEMA: &str = include_str!("canonical_schema.sql");
 const CANONICAL_SCHEMA_FINGERPRINT: &str =
-    "sha256:7a3a86134a9ca406071f90839e3eceb5e74f24da212421aec20a2573f1120212";
+    "sha256:358ad31ab6d85de12e335afaeb51e41870fa25c1c7b5ea792c55c91b1ab0241a";
 const PREVIOUS_SCHEMA_FINGERPRINT: &str =
-    "sha256:ccb63eda4aaee1451732235b7327d63e6b1ad82f6c897d90b3ba40fa25ef5657";
-const COLLABORATION_SCHEMA_MARKER: &str =
-    "-- Agent collaboration settings and immutable run admission policy, schema v43.";
+    "sha256:7a3a86134a9ca406071f90839e3eceb5e74f24da212421aec20a2573f1120212";
+const CONTEXT_PROFILE_SCHEMA_MARKER: &str =
+    "-- Context profiles and immutable run admission policy, schema v44.";
 
 /// Initializes fresh storage or atomically upgrades the immediately preceding canonical schema.
 /// Other development schemas still require an explicit reset.
@@ -25,12 +25,12 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
         return create_canonical_schema(connection);
     }
 
-    if schema_version == 42 {
+    if schema_version == 43 {
         let transaction = connection.unchecked_transaction()?;
         validate_schema_fingerprint(&transaction, PREVIOUS_SCHEMA_FINGERPRINT)?;
         let additions = CANONICAL_SCHEMA
-            .split_once(COLLABORATION_SCHEMA_MARKER)
-            .expect("canonical collaboration migration suffix")
+            .split_once(CONTEXT_PROFILE_SCHEMA_MARKER)
+            .expect("canonical context profile migration suffix")
             .1;
         transaction.execute_batch(additions)?;
         transaction.pragma_update(None, "user_version", STORAGE_SCHEMA_VERSION)?;
@@ -143,22 +143,31 @@ mod tests {
     use super::*;
 
     #[test]
-    fn v42_upgrade_preserves_existing_data_and_installs_default_collaboration_settings_once() {
+    fn v43_upgrade_preserves_existing_data_and_installs_full_context_profile_once() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("existing.sqlite");
         let connection = Connection::open(&path).unwrap();
         connection
             .execute_batch(
                 CANONICAL_SCHEMA
-                    .split_once(COLLABORATION_SCHEMA_MARKER)
+                    .split_once(CONTEXT_PROFILE_SCHEMA_MARKER)
                     .unwrap()
                     .0,
             )
             .unwrap();
-        connection.pragma_update(None, "user_version", 42).unwrap();
+        connection.pragma_update(None, "user_version", 43).unwrap();
+        connection.execute_batch("INSERT INTO agent_prompt_preferences(id,work_mode,tone,detail_level,custom_instructions,updated_at) VALUES ('default','general','friendly','high','Keep my full-mode preferences',7);").unwrap();
         connection.execute_batch("INSERT INTO conversations(id,title,created_at,updated_at) VALUES ('kept','Existing chat',1,1); INSERT INTO messages(id,conversation_id,role,content,created_at,position) VALUES ('kept-user','kept','user','Do not delete this history',1,0);").unwrap();
         run_migrations(&connection).unwrap();
-        assert_eq!(read_schema_version(&connection).unwrap(), 43);
+        assert_eq!(read_schema_version(&connection).unwrap(), 44);
+        assert_eq!(
+            connection.query_row(
+                "SELECT context_profile,work_mode,tone,detail_level,custom_instructions,updated_at FROM agent_prompt_preferences",
+                [],
+                |row| Ok((row.get::<_, String>(0)?,row.get::<_, String>(1)?,row.get::<_, String>(2)?,row.get::<_, String>(3)?,row.get::<_, String>(4)?,row.get::<_, i64>(5)?)),
+            ).unwrap(),
+            ("full".into(),"general".into(),"friendly".into(),"high".into(),"Keep my full-mode preferences".into(),7)
+        );
         assert_eq!(
             connection
                 .query_row(
@@ -192,6 +201,16 @@ mod tests {
         drop(connection);
         let reopened = Connection::open(&path).unwrap();
         run_migrations(&reopened).unwrap();
+        assert_eq!(
+            reopened
+                .query_row(
+                    "SELECT context_profile FROM agent_prompt_preferences",
+                    [],
+                    |row| row.get::<_, String>(0)
+                )
+                .unwrap(),
+            "full"
+        );
         assert!(!reopened
             .query_row(
                 "SELECT enabled FROM agent_collaboration_settings",
@@ -202,23 +221,23 @@ mod tests {
     }
 
     #[test]
-    fn tampered_v42_is_rejected_before_migration_writes() {
+    fn tampered_v43_is_rejected_before_migration_writes() {
         let connection = Connection::open_in_memory().unwrap();
         connection
             .execute_batch(
                 CANONICAL_SCHEMA
-                    .split_once(COLLABORATION_SCHEMA_MARKER)
+                    .split_once(CONTEXT_PROFILE_SCHEMA_MARKER)
                     .unwrap()
                     .0,
             )
             .unwrap();
-        connection.pragma_update(None, "user_version", 42).unwrap();
+        connection.pragma_update(None, "user_version", 43).unwrap();
         connection
             .execute_batch("DROP TRIGGER conversation_history_fts_message_insert;")
             .unwrap();
         let before = schema_fingerprint(&connection).unwrap();
         assert!(run_migrations(&connection).is_err());
-        assert_eq!(read_schema_version(&connection).unwrap(), 42);
+        assert_eq!(read_schema_version(&connection).unwrap(), 43);
         assert_eq!(schema_fingerprint(&connection).unwrap(), before);
     }
 

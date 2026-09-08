@@ -374,9 +374,47 @@ pub enum AgentPromptDetailLevel {
     High,
 }
 
+#[derive(Debug, Default, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum AgentContextProfile {
+    #[default]
+    Full,
+    Minimal,
+}
+
+#[cfg(test)]
+mod context_profile_tests {
+    use super::{AgentContextProfile, AgentPromptPreferences};
+
+    #[test]
+    fn missing_profile_defaults_to_full_and_unknown_profiles_are_rejected() {
+        let preferences: AgentPromptPreferences =
+            serde_json::from_value(serde_json::json!({})).unwrap();
+        assert_eq!(preferences.context_profile, AgentContextProfile::Full);
+        for (wire, expected) in [
+            ("full", AgentContextProfile::Full),
+            ("minimal", AgentContextProfile::Minimal),
+        ] {
+            let preferences: AgentPromptPreferences =
+                serde_json::from_value(serde_json::json!({"contextProfile": wire})).unwrap();
+            assert_eq!(preferences.context_profile, expected);
+            assert_eq!(
+                serde_json::to_value(preferences).unwrap()["contextProfile"],
+                wire
+            );
+        }
+        assert!(serde_json::from_value::<AgentPromptPreferences>(
+            serde_json::json!({"contextProfile": "unknown"})
+        )
+        .is_err());
+    }
+}
+
 #[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgentPromptPreferences {
+    #[serde(default)]
+    pub context_profile: AgentContextProfile,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub work_mode: Option<AgentPromptWorkMode>,
     #[serde(skip_serializing_if = "Option::is_none")]

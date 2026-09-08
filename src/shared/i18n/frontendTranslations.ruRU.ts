@@ -917,6 +917,9 @@ export const ruRUTranslations = {
   'profile.handlePlaceholder': 'ПОЛЬЗОВАТЕЛЬ',
   'profile.openSettings': 'Настройки',
   'profile.avatarUploadFailed': 'Не удалось загрузить аватар',
+  'personalization.minimalMode': 'Минимальный режим',
+  'personalization.minimalModeDescription':
+    'Сокращает базовый контекст и инструменты. Изменение действует со следующего хода. Настройки расширений сохраняются; выключите для возврата к полному режиму.',
   'personalization.workMode': 'Режим работы',
   'personalization.workModeDescription':
     'Выберите, сколько технических подробностей будут включать в себя ответы.',

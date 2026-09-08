@@ -2,7 +2,7 @@
 status: current
 audience: developers
 owner: engineering
-last_verified: 2026-09-07
+last_verified: 2026-09-09
 ---
 
 # SQLite 存储与数据生命周期
@@ -24,21 +24,23 @@ last_verified: 2026-09-07
 
 ## Schema 发布策略
 
-截至本次核验，当前唯一受支持的 canonical schema 是 **v43**（SQLite `PRAGMA user_version = 43`）：
+截至本次核验，当前唯一受支持的 canonical schema 是 **v44**（SQLite `PRAGMA user_version = 44`）：
 
-- `STORAGE_SCHEMA_VERSION = 43`；
+- `STORAGE_SCHEMA_VERSION = 44`；
 - canonical schema fingerprint 由 `migrations.rs` 中的编译期常量和测试固定；
 - 空数据库在一个原子流程中建立完整当前 schema；
-- exact canonical v42 可在单个事务中升级至 v43：验证原 fingerprint，新增全局协作设置及 Run/Wake 冻结策略表，再验证当前 fingerprint 与外键；原聊天、运行历史和配置保留；
-- 该升级不转换旧版未完成 Run 的 checkpoint 或补写其冻结策略。升级前应结束挂起的审批任务；v43 内切换设置和恢复审批使用已持久化的本轮策略；
-- v42 之外的旧版（包括 v34/v35）仍返回 reset-required，拒绝检查不改写旧库；
+- exact canonical v43 可在单个事务中升级至 v44：验证原 fingerprint，新增 `agent_prompt_preferences.context_profile` 及 Run/Wake 模式冻结表，再验证当前 fingerprint 与外键；原聊天、运行历史和配置保留；
+- 旧偏好、已有 Run 与 Wake 明确补为 `full`，不把当前设置反推为历史模式。字段和旧 checkpoint 中缺失的模式均默认 Full；已经启动的任务继续使用本轮冻结策略；
+- v43 之外的旧版（包括 v34/v35/v42）仍返回 reset-required，拒绝检查不改写旧库；
 - 其他旧版、未知版、非空未版本化或结构被篡改的数据库返回 `development_storage_schema_reset_required`，不自动重置。
 
 版本号和 fingerprint 可能变化，维护时必须读取 `crates/core/src/storage/migrations.rs`，不得从本文复制常量到运行逻辑。发布说明可以记录版本，但架构文档应强调策略而非长期维护一张迁移历史表。
 
 开发库重置前应先关闭应用并备份数据根；优先使用受管 `storage:reset-dev` 流程。不要只删除 `storage.sqlite` 而遗留 attachments、artifacts、spool 或 lock 文件。
 
-`storage:reset-dev` 是显式丢弃历史的重建操作，始终新建 v43，不恢复 Conversation、Project 或 Agent/runtime 历史；它与启动时保留历史的 v42 → v43 升级分开。它从 exact current v43、exact v42、exact v41、exact v40、exact v39、exact v38、exact v37、exact v36 或 exact v35 保留 allowlisted 配置与凭据引用；v36–v43 还保留人机交互设置及 revision，v43 保留全局协作开关及 revision。Run/Wake 冻结策略属于运行事实，重置时清空。既有受限恢复选项也可从绑定 exact v33 fingerprint 的私有备份读取 allowlisted 设置，并把凭据转换为 reference。无法安全识别且含配置的旧库拒绝重置，不能用默认值默默替换模型配置。
+`storage:reset-dev` 是显式丢弃历史的重建操作，始终新建 v44，不恢复 Conversation、Project 或 Agent/runtime 历史；它与启动时保留历史的 v43 → v44 升级分开。它从 exact current v44 及 exact v35–v43 保留 allowlisted 配置与凭据引用；v36–v44 还保留人机交互设置及 revision，v43–v44 保留全局协作开关及 revision，v44 保留极简/完整模式，旧版本该项默认 Full。Run/Wake 冻结策略属于运行事实，重置时清空。既有受限恢复选项也可从绑定 exact v33 fingerprint 的私有备份读取 allowlisted 设置，并把凭据转换为 reference。无法安全识别且含配置的旧库拒绝重置，不能用默认值默默替换模型配置。
+
+`agent_context_profile_run_policies` 以 `conversation_turn_traces.run_id` 为外键，`agent_context_profile_wake_policies` 以 `agent_wake_requests.wake_id` 为外键；两表只接受 `full | minimal`，禁止更新，随父记录删除。Run admission 与模式冻结同事务，Wake 入队继承来源 Run/Wake 的模式。它们不属于偏好表，也不能在设置保存时批量改写。
 
 ## 消息创建与重试归属
 
@@ -89,7 +91,7 @@ DDL 按领域大致分为：
 
 ## Scheduled Automation 表组
 
-Automation 在 canonical schema v43 中使用当前通用通知表和自动化领域表，完整列、CHECK、索引和 trigger 仍以 DDL 为准：
+Automation 在 canonical schema v44 中使用当前通用通知表和自动化领域表，完整列、CHECK、索引和 trigger 仍以 DDL 为准：
 
 | 表                  | 权威内容                                                                | 关键不变量                                                                                                        |
 | ------------------- | ----------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
@@ -135,7 +137,7 @@ Automation 还要求两个专用原子边界：
 
 ## 启动与崩溃恢复
 
-Bootstrap 大致执行：解析数据根与锁、打开/校验 canonical schema v43、构造 repositories/services、加载凭据 backend、MCP Server/Provider/Skills/Artifact Runtime、随后运行领域 reconciliation。持久凭据 backend 不可用或 credential reference 无法解析时必须保留公开配置并报告 `unavailable`/配置错误，不能把缺失凭据当作空值覆盖；只有实际需要该连接的运行应被阻断。
+Bootstrap 大致执行：解析数据根与锁、打开/校验 canonical schema v44、构造 repositories/services、加载凭据 backend、MCP Server/Provider/Skills/Artifact Runtime、随后运行领域 reconciliation。持久凭据 backend 不可用或 credential reference 无法解析时必须保留公开配置并报告 `unavailable`/配置错误，不能把缺失凭据当作空值覆盖；只有实际需要该连接的运行应被阻断。
 
 恢复必须按“数据库已提交状态”判断，不按 Renderer 缓存判断。当前需要关注：
 
@@ -171,7 +173,7 @@ Automation 启动恢复区分 admission 前后：旧进程遗留的全部 `admit
 
 当前开发策略以整套数据根备份/重置为主。复制在线 SQLite 文件并不等价于一致备份；应在应用关闭、锁释放后复制数据库及其配套文件目录，或使用受支持的 SQLite snapshot/backup 流程。
 
-当前 v43 SQLite snapshot 只含模型/搜索 credential reference 与非秘密元数据，不含这些连接的当前 secret 字节；旧 schema 生成的历史备份仍可能含明文 Token/Key，必须继续按秘密材料保护。只恢复 `storage.sqlite` 不会恢复操作系统凭据，跨设备、跨系统账户、签名身份变化或凭据 backend 丢失后，界面可能显示凭据不可用，此时只能由用户替换或清除。未签名 macOS 开发构建的私有凭据文件位于数据根，因此“整根复制”仍会复制 secret，不能当作普通诊断包。
+当前 v44 SQLite snapshot 只含模型/搜索 credential reference 与非秘密元数据，不含这些连接的当前 secret 字节；旧 schema 生成的历史备份仍可能含明文 Token/Key，必须继续按秘密材料保护。只恢复 `storage.sqlite` 不会恢复操作系统凭据，跨设备、跨系统账户、签名身份变化或凭据 backend 丢失后，界面可能显示凭据不可用，此时只能由用户替换或清除。未签名 macOS 开发构建的私有凭据文件位于数据根，因此“整根复制”仍会复制 secret，不能当作普通诊断包。
 
 删除 SQLite reference、清除凭据或移除私有文件只表达应用层删除意图；文件系统、SSD、系统备份和操作系统凭据后端可能保留副本，产品不承诺安全擦除。怀疑泄露时应在 Provider 侧撤销或轮换凭据。
 
@@ -179,7 +181,7 @@ Automation 启动恢复区分 admission 前后：旧进程遗留的全部 `admit
 
 ## 不变量
 
-1. `canonical_schema.sql`、canonical schema v43 的 version 与 fingerprint 必须一致。
+1. `canonical_schema.sql`、canonical schema v44 的 version 与 fingerprint 必须一致。
 2. 仅 exact canonical v42 执行已审计的单向升级；其他非空非当前 schema fail closed。
 3. 所有领域对象在 service SQL 边界校验 conversation/project/Run 归属。
 4. 外部副作用与数据库提交之间的崩溃窗口必须有明确恢复状态。
@@ -223,7 +225,7 @@ Automation 启动恢复区分 admission 前后：旧进程遗留的全部 `admit
 
 ## 变更检查表
 
-- [ ] 修改 `canonical_schema.sql` 后同步 canonical version、fingerprint 和 fresh-schema 测试；若版本不再是 v43，同时更新本文当前快照。
+- [ ] 修改 `canonical_schema.sql` 后同步 canonical version、fingerprint 和 fresh-schema 测试；若版本不再是 v44，同时更新本文当前快照。
 - [ ] 明确旧数据库行为；没有经批准的迁移链时保持 reset-required。
 - [ ] 新表/列定义 owner、FK、唯一键、索引、删除/保留和敏感分类。
 - [ ] 跨表操作在一个 service 事务中完成，并有冲突/幂等测试。

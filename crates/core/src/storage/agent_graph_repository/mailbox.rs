@@ -153,6 +153,12 @@ fn follow_up_agent_internal(
             &deferred_wake.wake_id,
         )
         .map_err(write_error)?;
+        crate::storage::agent_context_profile_repository::inherit_run_for_wake(
+            &transaction,
+            origin_run_id,
+            &deferred_wake.wake_id,
+        )
+        .map_err(write_error)?;
     }
     transaction.commit().map_err(write_error)?;
     Ok(AgentMessageDispatch {

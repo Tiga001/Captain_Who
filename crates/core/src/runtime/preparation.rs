@@ -191,6 +191,19 @@ pub(super) fn prepare_runtime_capabilities_with_skills(
         && host_actions_available;
 
     let mut permitted_tool_definitions = tool_registry.definitions();
+    if input
+        .prompt_preferences
+        .as_ref()
+        .is_some_and(|preferences| {
+            preferences.context_profile == crate::protocol::AgentContextProfile::Minimal
+        })
+    {
+        // Keep the nine base operations plus Skill/attachment discovery and all existing
+        // capability-owned tools. Their availability remains owned by the original extensions.
+        // Stable discovery entry points must not flicker with attachment counts or activation.
+        permitted_tool_definitions.retain(|definition| definition.name != "todo_update");
+        crate::tools::apply_minimal_tool_descriptions(&mut permitted_tool_definitions);
+    }
     apply_permission_policy_to_tool_definitions(
         &mut permitted_tool_definitions,
         context,

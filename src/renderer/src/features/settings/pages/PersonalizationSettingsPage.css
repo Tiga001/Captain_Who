@@ -33,6 +33,23 @@
   gap: 18px;
 }
 
+.personalization-minimal-mode {
+  margin-top: 18px;
+}
+
+.personalization-minimal-mode__row {
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 20px;
+}
+
+.personalization-minimal-mode__row .settings-list-row__description {
+  display: block;
+}
+
+.personalization-minimal-mode__row .settings-switch {
+  justify-self: end;
+}
+
 .personalization-work-mode-card {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
@@ -54,7 +71,7 @@
   border-color: transparent;
 }
 
-.personalization-work-mode-card:hover {
+.personalization-work-mode-card:hover:not(:disabled) {
   background: var(--mc-color-state-hover);
 }
 
@@ -243,6 +260,25 @@
   margin-top: 44px;
 }
 
+.personalization-custom-instructions__heading-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.personalization-custom-instructions__heading-row .personalization-save-button {
+  flex-shrink: 0;
+}
+
+.personalization-work-mode-card:disabled,
+.personalization-tone-button:disabled,
+.personalization-tone-option:disabled,
+.personalization-minimal-mode .settings-switch:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+
 .personalization-human-interaction {
   margin-top: 36px;
 }
@@ -329,13 +365,8 @@
   box-shadow: var(--mc-shadow-focus);
 }
 
-.personalization-actions {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  min-height: 40px;
+.personalization-status.personalization-settings-status {
   margin-top: 16px;
-  gap: 16px;
 }
 
 .personalization-status {

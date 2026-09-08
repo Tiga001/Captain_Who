@@ -18,6 +18,7 @@ mod collaboration_settings;
 mod conversation_fork;
 mod human_interaction;
 mod manual_context_compaction;
+mod prompt_preferences;
 mod provider_profiles;
 mod request_loop;
 mod skills_catalog;

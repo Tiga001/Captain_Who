@@ -262,12 +262,25 @@ impl AgentService {
             self.storage
                 .project_agent_messages_for_model(conversation_id, &mut messages)?;
         }
-        let prompt_preferences = match input.prompt_preferences {
+        let mut prompt_preferences = match input.prompt_preferences {
             Some(preferences) => preferences,
             None => {
                 agent_prompt_preferences_from_record(self.storage.load_agent_prompt_preferences()?)
             }
         };
+        // A settings toggle previews the next run only when idle. Active approvals and
+        // running task trees must retain their admitted stable prompt/tool contract.
+        if let Some(conversation_id) = conversation_id.as_deref() {
+            if let Some((run_id, _)) = self
+                .storage
+                .load_active_conversation_turn_identity(conversation_id)?
+            {
+                prompt_preferences.context_profile = self
+                    .storage
+                    .load_agent_context_profile_for_run(&run_id)?
+                    .ok_or_else(|| "运行中的任务缺少冻结的上下文模式。".to_string())?;
+            }
+        }
         let mut agent_input = AgentChatInput {
             context_image_attachments: Vec::new(),
             api_url: connection.api_url,
@@ -755,9 +768,13 @@ impl AgentService {
             .preview_input;
         preview_input.assistant_message_id = None;
         preview_input.skill_activation = None;
-        if let Some(preferences) = preview_input.prompt_preferences.as_mut() {
-            preferences.automation_execution_context = None;
-        }
+        let next_preferences =
+            agent_prompt_preferences_from_record(self.storage.load_agent_prompt_preferences()?);
+        let preferences = preview_input
+            .prompt_preferences
+            .get_or_insert_with(|| next_preferences.clone());
+        preferences.context_profile = next_preferences.context_profile;
+        preferences.automation_execution_context = None;
         let projection = self.context_window_tool_projection(&preview_input, None)?;
         self.context_window_snapshot_with_projection_cache(
             &preview_input,

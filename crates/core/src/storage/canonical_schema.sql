@@ -6450,3 +6450,30 @@ BEFORE UPDATE ON agent_collaboration_wake_policies
 BEGIN
     SELECT RAISE(ABORT, 'wake collaboration policy is immutable');
 END;
+
+-- Context profiles and immutable run admission policy, schema v44.
+ALTER TABLE agent_prompt_preferences
+ADD COLUMN context_profile TEXT NOT NULL DEFAULT 'full' CHECK (context_profile IN ('full', 'minimal'));
+
+CREATE TABLE agent_context_profile_run_policies (
+    run_id TEXT PRIMARY KEY REFERENCES conversation_turn_traces(run_id) ON DELETE CASCADE,
+    context_profile TEXT NOT NULL CHECK (context_profile IN ('full', 'minimal'))
+) STRICT;
+CREATE TRIGGER agent_context_profile_run_policies_immutable
+BEFORE UPDATE ON agent_context_profile_run_policies
+BEGIN
+    SELECT RAISE(ABORT, 'run context profile is immutable');
+END;
+CREATE TABLE agent_context_profile_wake_policies (
+    wake_id TEXT PRIMARY KEY REFERENCES agent_wake_requests(wake_id) ON DELETE CASCADE,
+    context_profile TEXT NOT NULL CHECK (context_profile IN ('full', 'minimal'))
+) STRICT;
+CREATE TRIGGER agent_context_profile_wake_policies_immutable
+BEFORE UPDATE ON agent_context_profile_wake_policies
+BEGIN
+    SELECT RAISE(ABORT, 'wake context profile is immutable');
+END;
+INSERT INTO agent_context_profile_run_policies(run_id, context_profile)
+SELECT run_id, 'full' FROM conversation_turn_traces;
+INSERT INTO agent_context_profile_wake_policies(wake_id, context_profile)
+SELECT wake_id, 'full' FROM agent_wake_requests;

@@ -49,6 +49,7 @@ use uuid::Uuid;
 mod agent_collaboration_events;
 mod agent_collaboration_run_policies;
 mod agent_collaboration_settings;
+mod agent_context_profiles;
 mod agent_delivery;
 mod agent_graph;
 mod agent_templates;

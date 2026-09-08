@@ -1227,7 +1227,9 @@ pub(super) fn conversation_context_configuration_revision_from_parts(
         .validate_against_config(&provider_profile_config)
         .map_err(|error| AgentError::new(format!("Provider protocol key is invalid: {error}")))?;
     let material = serde_json::to_vec(&json!({
-        "schemaVersion": 3,
+        "schemaVersion": 4,
+        "contextProfile": input.prompt_preferences.as_ref()
+            .map(|preferences| preferences.context_profile).unwrap_or_default(),
         "model": input.model.trim(),
         "apiStyle": api_style,
         "providerProfileConfig": provider_profile_config,

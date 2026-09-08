@@ -40,6 +40,7 @@ vi.mock('../../config/FrontendConfigProvider', async () => {
 })
 vi.mock('../../features/storage/storageClient', () => ({
   defaultAgentPromptPreferences: () => ({
+    contextProfile: 'full',
     workMode: 'coding',
     tone: 'pragmatic',
     detailLevel: 'medium',
@@ -86,6 +87,7 @@ beforeEach(() => {
     return service.unsubscribeResync
   })
   service.loadPreferences.mockResolvedValue({
+    contextProfile: 'full',
     workMode: 'coding',
     tone: 'pragmatic',
     detailLevel: 'medium',
@@ -95,6 +97,140 @@ beforeEach(() => {
 })
 
 describe('Human interaction personalization settings', () => {
+  it('immediately saves choices without publishing the instruction draft, then saves only instructions', async () => {
+    service.savePreferences.mockImplementation(async (value) => ({ ...value, updatedAt: 2 }))
+    const screen = await render(<PersonalizationSettingsPage />)
+    const toggle = screen.getByRole('switch', { name: '极简模式', exact: true })
+    await expect.element(toggle).toBeEnabled()
+    await expect.element(toggle).toHaveAttribute('aria-checked', 'false')
+    await screen.getByRole('textbox').fill('Preserve my instructions')
+    for (const contextProfile of ['minimal', 'full']) {
+      await toggle.click()
+      await expect
+        .poll(() => service.savePreferences.mock.calls.at(-1)?.[0])
+        .toEqual({
+          contextProfile,
+          workMode: 'coding',
+          tone: 'pragmatic',
+          detailLevel: 'medium',
+          customInstructions: 'Saved instructions'
+        })
+      await expect.element(toggle).toBeEnabled()
+      await expect.element(screen.getByRole('textbox')).toHaveValue('Preserve my instructions')
+    }
+    await screen.getByRole('button', { name: /适用于日常工作/ }).click()
+    await expect
+      .poll(() => service.savePreferences.mock.calls.at(-1)?.[0])
+      .toMatchObject({
+        contextProfile: 'full',
+        workMode: 'general',
+        tone: 'pragmatic',
+        customInstructions: 'Saved instructions'
+      })
+    await screen.getByRole('button', { name: '务实', exact: true }).click()
+    await screen.getByRole('option', { name: /亲和/ }).click()
+    await expect
+      .poll(() => service.savePreferences.mock.calls.at(-1)?.[0])
+      .toMatchObject({
+        contextProfile: 'full',
+        workMode: 'general',
+        tone: 'friendly',
+        customInstructions: 'Saved instructions'
+      })
+    const save = screen.getByRole('button', { name: '保存', exact: true })
+    expect(
+      save.element().closest('.personalization-custom-instructions__heading-row')
+    ).not.toBeNull()
+    await save.click()
+    await expect
+      .poll(() => service.savePreferences.mock.calls.at(-1)?.[0])
+      .toEqual({
+        contextProfile: 'full',
+        workMode: 'general',
+        tone: 'friendly',
+        detailLevel: 'medium',
+        customInstructions: 'Preserve my instructions'
+      })
+    await expect.element(save).toBeDisabled()
+    expect(service.savePreferences).toHaveBeenCalledTimes(5)
+    expect(service.update).not.toHaveBeenCalled()
+    await expect.element(toggle).toHaveAttribute('aria-checked', 'false')
+  })
+
+  it('keeps choices and the latest instruction draft after an immediate save fails', async () => {
+    const pending = deferred<unknown>()
+    service.savePreferences.mockReturnValueOnce(pending.promise)
+    const screen = await render(<PersonalizationSettingsPage />)
+    const textarea = screen.getByRole('textbox')
+    await expect.element(textarea).toHaveValue('Saved instructions')
+    await textarea.fill('Draft before switching')
+    const toggle = screen.getByRole('switch', { name: '极简模式', exact: true })
+    await toggle.click()
+    await expect.element(toggle).toBeDisabled()
+    await expect.element(screen.getByRole('button', { name: /适用于日常工作/ })).toBeDisabled()
+    await expect.element(screen.getByRole('button', { name: '务实', exact: true })).toBeDisabled()
+    await expect.element(screen.getByRole('button', { name: '保存', exact: true })).toBeDisabled()
+    await textarea.fill('Newer draft while switching')
+    pending.reject(new Error('Unable to save'))
+    await expect.element(screen.getByRole('alert')).toBeVisible()
+    await expect.element(toggle).toBeEnabled()
+    await expect.element(toggle).toHaveAttribute('aria-checked', 'false')
+    await expect.element(textarea).toHaveValue('Newer draft while switching')
+    service.savePreferences.mockImplementation(async (value) => ({ ...value, updatedAt: 2 }))
+    await toggle.click()
+    await expect.element(toggle).toHaveAttribute('aria-checked', 'true')
+    expect(service.savePreferences.mock.calls.at(-1)?.[0].customInstructions).toBe(
+      'Saved instructions'
+    )
+    await expect.element(textarea).toHaveValue('Newer draft while switching')
+    await expect.element(screen.getByRole('button', { name: '保存', exact: true })).toBeEnabled()
+  })
+
+  it('preserves edits typed during an instruction save and uses only committed instructions for choices', async () => {
+    const pending = deferred<Record<string, unknown>>()
+    service.savePreferences.mockReturnValueOnce(pending.promise)
+    const screen = await render(<PersonalizationSettingsPage />)
+    const textarea = screen.getByRole('textbox')
+    await expect.element(textarea).toHaveValue('Saved instructions')
+    await textarea.fill('Submitted instructions')
+    const save = screen.getByRole('button', { name: '保存', exact: true })
+    await save.click()
+    const submitted = service.savePreferences.mock.calls[0][0]
+    await textarea.fill('New draft after submission')
+    pending.resolve({ ...submitted, updatedAt: 2 })
+    await expect.element(save).toBeEnabled()
+    await expect.element(textarea).toHaveValue('New draft after submission')
+    service.savePreferences.mockImplementation(async (value) => ({ ...value, updatedAt: 3 }))
+    const toggle = screen.getByRole('switch', { name: '极简模式', exact: true })
+    await toggle.click()
+    await expect.element(toggle).toHaveAttribute('aria-checked', 'true')
+    expect(service.savePreferences.mock.calls.at(-1)?.[0].customInstructions).toBe(
+      'Submitted instructions'
+    )
+    await expect.element(textarea).toHaveValue('New draft after submission')
+    // Clearing instructions is also an explicit save; whitespace normalization may come from Host.
+    await textarea.fill('')
+    await save.click()
+    await expect.element(save).toBeDisabled()
+    expect(service.savePreferences.mock.calls.at(-1)?.[0]).toMatchObject({
+      contextProfile: 'minimal',
+      customInstructions: ''
+    })
+  })
+
+  it('does not overwrite saved preferences with defaults when the initial read fails', async () => {
+    service.loadPreferences.mockRejectedValueOnce(new Error('Core unavailable'))
+    const screen = await render(<PersonalizationSettingsPage />)
+    await expect.element(screen.getByRole('alert')).toBeVisible()
+    await expect
+      .element(screen.getByRole('switch', { name: '极简模式', exact: true }))
+      .toBeDisabled()
+    await expect.element(screen.getByRole('button', { name: /适用于日常工作/ })).toBeDisabled()
+    await expect.element(screen.getByRole('button', { name: '务实', exact: true })).toBeDisabled()
+    await expect.element(screen.getByRole('button', { name: '保存', exact: true })).toBeDisabled()
+    expect(service.savePreferences).not.toHaveBeenCalled()
+  })
+
   it('uses Host settings and keeps a newer notification when the initial read arrives late', async () => {
     const pending = deferred<HostInvocationResult<HumanInteractionSettings>>()
     service.get.mockReturnValue(pending.promise)
@@ -252,6 +388,32 @@ describe('Human interaction personalization settings', () => {
     await page.screenshot({
       element: screen.container.querySelector<HTMLElement>('.personalization-human-interaction')!,
       path: '__screenshots__/HumanInteractionSettings.browser.test.tsx/narrow-settings.png'
+    })
+    const minimalToggle = screen.getByRole('switch', { name: '极简模式', exact: true })
+    await expect.element(minimalToggle).toBeVisible()
+    const minimalBox = minimalToggle.element().getBoundingClientRect()
+    expect(minimalBox.width).toBe(44)
+    expect(minimalBox.height).toBe(24)
+    expect(
+      screen.container.querySelector('.personalization-minimal-mode')!.scrollWidth
+    ).toBeLessThanOrEqual(340)
+    await page.screenshot({
+      element: screen.container.querySelector<HTMLElement>('.personalization-work-mode')!,
+      path: '__screenshots__/HumanInteractionSettings.browser.test.tsx/minimal-mode.png'
+    })
+    const customHeading = screen.container.querySelector<HTMLElement>(
+      '.personalization-custom-instructions__heading-row'
+    )!
+    const save = screen.getByRole('button', { name: '保存', exact: true })
+    const titleBox = customHeading.querySelector('h2')!.getBoundingClientRect()
+    const saveBox = save.element().getBoundingClientRect()
+    expect(saveBox.left).toBeGreaterThan(titleBox.right)
+    expect(
+      Math.abs(saveBox.top + saveBox.height / 2 - (titleBox.top + titleBox.height / 2))
+    ).toBeLessThan(1)
+    await page.screenshot({
+      element: customHeading,
+      path: '__screenshots__/HumanInteractionSettings.browser.test.tsx/custom-instructions-save.png'
     })
   })
 })

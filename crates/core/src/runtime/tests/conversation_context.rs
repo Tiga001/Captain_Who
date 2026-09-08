@@ -211,6 +211,7 @@ fn automation_execution_is_a_host_only_retained_run_system_context() {
     let mut input = conversation_context_input(vec![message("user", PROMPT)]);
     let mut without_automation = input.clone();
     input.prompt_preferences = Some(AgentPromptPreferences {
+        context_profile: crate::protocol::AgentContextProfile::Full,
         work_mode: None,
         tone: None,
         detail_level: None,

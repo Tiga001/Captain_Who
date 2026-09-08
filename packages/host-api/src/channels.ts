@@ -16,6 +16,7 @@ export const HOST_CHANNELS = {
     windowStateChange: 'host:app.windowStateChange'
   },
   agent: {
+    promptPreferencesChanged: 'host:agent.promptPreferencesChanged',
     collaborationGetSettings: 'host:agent.collaboration.settings.get',
     collaborationUpdateSettings: 'host:agent.collaboration.settings.update',
     collaborationSettingsChanged: 'host:agent.collaboration.settingsChanged',

@@ -2,7 +2,7 @@
 status: current
 audience: developers
 owner: engineering
-last_verified: 2026-09-06
+last_verified: 2026-09-09
 ---
 
 # Agent Runtime 与模型 Provider
@@ -116,6 +116,14 @@ Run 结束时，本次输入、预激活 Skill、初始 Run 状态及 live 时�
 Adapter 继续执行各自 wire 规则：稳定 system 可投影为 OpenAI-compatible 的 system 消息或 Anthropic 顶层 system，普通后端状态按既有规则转为对应角色/内容块；Tool 交换仍依 Provider policy 投影为 split 或 grouped batch，continuation 绑定原助手回合。布局层不改这些适配规则。
 
 目标是增加不变内容形成相同前缀的机会，不保证缓存命中或命中率提升。目录、能力或授权改变时，从变化位置开始的缓存可能失效；不能为了缓存继续发送过期能力。本轮没有新增 `cache_control`，也不保证厂商内部缓存组合或实际命中率达到某个最大值。
+
+## 极简上下文模式
+
+`AgentContextProfile` 的 `full` / `minimal` 独立于工作模式和扩展开关。完整模式保留原基础提示词与工具定义；极简模式使用独立短提示词，并仅压缩所选基础工具的描述，参数、必填项、枚举、校验约束、执行器及审批逻辑共用原契约。工具描述仍参与 ToolSet revision，必须在稳定工具集冻结前完成投影，不能在审批续跑或 Skill 激活后改写稳定 Schema。
+
+极简模式保留 12 个基础入口：9 个核心工具 `read_file`、`read_image`、`apply_patch`、`run_command`、`command_session`、`workspace_map`、`search_files`、`search_code`、`conversation_history`，以及 `skills_activate`、`attachments_list`、`attachments_list_project`；不暴露 `todo_update`。这不是总工具数上限：扩展仍按原有设置、目录和授权路径提供自己的工具与指南，基础入口也继续受当前权限校验。
+
+模式在根 Turn admission 时持久冻结，委派 Wake 继承来源 Run 的模式；已有 Run 和其任务树不随全局设置切换。实际生效模式通过 World State 的 `interaction.profile.contextProfile` 及简短说明投影，模型不能根据旧历史或工具数量猜测。模式选择、短提示词和工具投影同时用于真实请求及上下文预览；计量边界见[上下文管理](./context-management.md#容量判断)。
 
 ## Checkpoint 与恢复
 
