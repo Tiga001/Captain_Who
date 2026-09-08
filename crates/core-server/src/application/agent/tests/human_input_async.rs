@@ -1123,8 +1123,12 @@ async fn assert_suspended_async_delivery(sync: bool, queued_before_pause: bool) 
             .delivery
             .unwrap()
             .status,
-        HumanInteractionDeliveryStatus::Pending,
-        "a suspended conversation is occupied despite having no worker"
+        if sync {
+            HumanInteractionDeliveryStatus::Pending
+        } else {
+            HumanInteractionDeliveryStatus::Bound
+        },
+        "approval retains the inbox while a synchronous pause keeps answers pending"
     );
     if sync {
         let blocking = fixture
@@ -1157,7 +1161,14 @@ async fn assert_suspended_async_delivery(sync: bool, queued_before_pause: bool) 
             .load_agent_run_guidance(&previous_guidance[0].guidance_id)
             .unwrap()
             .unwrap();
-        assert_eq!(old.status, AgentGuidanceStatus::Rejected);
+        assert_eq!(
+            old.status,
+            if sync {
+                AgentGuidanceStatus::Rejected
+            } else {
+                AgentGuidanceStatus::Applied
+            }
+        );
         let trace = fixture
             .storage
             .get_conversation_turn_trace(ASSISTANT)
@@ -1172,7 +1183,11 @@ async fn assert_suspended_async_delivery(sync: bool, queued_before_pause: bool) 
             })
             .collect::<Vec<_>>();
         assert_eq!(applied_ids.len(), 1);
-        assert_ne!(applied_ids[0], &previous_guidance[0].guidance_id);
+        if sync {
+            assert_ne!(applied_ids[0], &previous_guidance[0].guidance_id);
+        } else {
+            assert_eq!(applied_ids[0], &previous_guidance[0].guidance_id);
+        }
     }
     assert_eq!(fixture.messages().len(), 2);
     fixture.usage(3);
@@ -1190,7 +1205,7 @@ async fn async_submission_waits_for_sync_answer_then_enters_the_same_run() {
 }
 
 #[tokio::test]
-async fn async_guidance_queued_before_approval_is_rebound_once_after_same_run_resume() {
+async fn async_guidance_queued_before_approval_retains_identity_after_same_run_resume() {
     assert_suspended_async_delivery(false, true).await;
 }
 
@@ -1464,7 +1479,7 @@ async fn pre_runtime_approval_failure_releases_occupancy_and_drains_pending_asyn
     fixture.no_request().await;
     assert_eq!(
         fixture.batches()[0].delivery.as_ref().unwrap().status,
-        HumanInteractionDeliveryStatus::Pending
+        HumanInteractionDeliveryStatus::Bound
     );
 
     // Reuse the existing pre-Runtime continuation failure test entrance: the real Host pending

@@ -568,6 +568,7 @@ struct ActiveRunControl {
     permissions: AgentPermissions,
     steer_state: ActiveRunSteerState,
     steer_input: AgentSteerInputQueue,
+    steering_notifications: Option<CoreServerNotificationSender>,
 }
 
 /// Process-local accelerator for the durable in-progress ConversationTurnTrace admission fact.

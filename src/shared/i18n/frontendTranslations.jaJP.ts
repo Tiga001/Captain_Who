@@ -340,6 +340,8 @@ export const jaJPTranslations = {
   'browser.title': 'ブラウザ',
   'browser.newTab': '新しいタブ',
   'browser.addressPlaceholder': 'URLを入力してください',
+  'browser.invalidAddress':
+    'example.com や localhost:3000 など、有効なウェブアドレスを入力してください。',
   'browser.open': 'ページを開く',
   'browser.back': '戻る',
   'browser.forward': '進む',

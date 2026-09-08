@@ -273,7 +273,7 @@ describe('BuiltinCapabilityToolActivity', () => {
     expect(completed.container.textContent).not.toContain(CANARY)
   })
 
-  it('routes only from typed identity and exposes only the bounded display reason', async () => {
+  it('renders a static browser status without call reasons or raw tool details', async () => {
     const result: AgentToolResult = {
       callId: 'call-browser-capability',
       tool: 'managed-visible-name',
@@ -292,10 +292,10 @@ describe('BuiltinCapabilityToolActivity', () => {
     )
 
     expect(screen.container.textContent).toContain('Opened page')
-    expect(screen.container.textContent).toContain('Call reason')
-    expect(screen.container.textContent).toContain('Open the requested page.')
+    expect(screen.container.textContent).not.toContain('Call reason')
+    expect(screen.container.textContent).not.toContain('Open the requested page.')
     expect(screen.container.textContent).not.toContain(CANARY)
-    expect(screen.container.querySelector('details')).not.toBeNull()
+    expect(screen.container.querySelector('details, summary, .agent-activity__chevron')).toBeNull()
     expect(screen.container.querySelector('pre')).toBeNull()
   })
 
@@ -535,7 +535,7 @@ describe('BuiltinCapabilityToolActivity', () => {
         toolIdentity={identity('browser_snapshot', 'browser_snapshot')}
       />
     )
-    screen.container.querySelector('summary')?.click()
+    expect(screen.container.querySelector('details, summary, .agent-activity__chevron')).toBeNull()
     expect(screen.container.textContent).toContain('page-snapshot.txt')
     expect(screen.container.querySelector('b')).toBeNull()
     expect(screen.container.textContent).toContain('text/plain · 13 B')
@@ -544,6 +544,7 @@ describe('BuiltinCapabilityToolActivity', () => {
       (button) => button.textContent === 'Preview'
     )
     expect(previewButton).toBeDefined()
+    await expect.element(screen.getByRole('button', { name: 'Preview', exact: true })).toBeVisible()
     previewButton?.click()
     await expect.poll(() => screen.container.textContent).toContain('safe snapshot')
     expect(hostMocks.readArtifactPreview).toHaveBeenCalledWith({ schemaVersion: 1, artifact })
@@ -603,13 +604,14 @@ describe('BuiltinCapabilityToolActivity', () => {
         toolIdentity={identity('browser_storage_state', 'browser_storage_state')}
       />
     )
-    screen.container.querySelector('summary')?.click()
+    expect(screen.container.querySelector('details, summary, .agent-activity__chevron')).toBeNull()
     expect(screen.container.textContent).not.toContain('Preview')
 
     const exportButton = [...screen.container.querySelectorAll('button')].find(
       (button) => button.textContent === 'Export'
     )
     expect(exportButton).toBeDefined()
+    await expect.element(screen.getByRole('button', { name: 'Export', exact: true })).toBeVisible()
     const callsBeforeExport = hostMocks.exportArtifact.mock.calls.length
     exportButton?.click()
     exportButton?.click()
@@ -663,7 +665,7 @@ describe('BuiltinCapabilityToolActivity', () => {
         toolIdentity={identity('browser_click', 'browser_click')}
       />
     )
-    screen.container.querySelector('summary')?.click()
+    expect(screen.container.querySelector('details, summary, .agent-activity__chevron')).toBeNull()
     expect(screen.container.textContent).toContain('archive.zip')
     expect(screen.container.textContent).toContain('application/zip · 351 B')
     expect(screen.container.textContent).not.toContain('browser-download:')
@@ -673,6 +675,7 @@ describe('BuiltinCapabilityToolActivity', () => {
       (button) => button.textContent === 'Show in folder'
     )
     expect(reveal).toBeDefined()
+    await expect.element(screen.getByRole('button', { name: 'Show in folder' })).toBeVisible()
     reveal?.click()
     await expect.poll(() => hostMocks.revealDownload.mock.calls.length).toBeGreaterThan(0)
     expect(hostMocks.revealDownload).toHaveBeenLastCalledWith({
@@ -792,7 +795,7 @@ describe('BuiltinCapabilityToolActivity', () => {
     }
   )
 
-  it('renders the display reason as text rather than HTML', async () => {
+  it('omits the display reason even when it contains markup', async () => {
     const reason = '<img src=x onerror=alert(1)>Click the requested result'
     const screen = await render(
       <AgentToolActivity
@@ -803,12 +806,12 @@ describe('BuiltinCapabilityToolActivity', () => {
       />
     )
 
-    expect(screen.container.textContent).toContain(reason)
+    expect(screen.container.textContent).not.toContain(reason)
     expect(screen.container.querySelector('img')).toBeNull()
     expect(screen.container.querySelector('pre')).toBeNull()
   })
 
-  it('removes control characters and bounds the only expanded call_reason field', async () => {
+  it('does not create expandable details for a long call reason', async () => {
     const visiblePrefix = 'R'.repeat(512)
     const reason = `${visiblePrefix}\u202e${CANARY}`
     const screen = await render(
@@ -820,10 +823,10 @@ describe('BuiltinCapabilityToolActivity', () => {
       />
     )
 
-    expect(screen.container.textContent).toContain(visiblePrefix)
+    expect(screen.container.textContent).not.toContain(visiblePrefix)
     expect(screen.container.textContent).not.toContain('\u202e')
     expect(screen.container.textContent).not.toContain(CANARY)
-    expect(screen.container.querySelector('details')).not.toBeNull()
+    expect(screen.container.querySelector('details, summary, .agent-activity__chevron')).toBeNull()
     expect(screen.container.querySelector('pre')).toBeNull()
   })
 
@@ -1146,7 +1149,7 @@ describe('BuiltinCapabilityToolActivity', () => {
     )
   })
 
-  it('renders an expanded OutcomeUnknown state without exposing a retry control or payload', async () => {
+  it('renders a static OutcomeUnknown state without exposing a retry control or payload', async () => {
     const screen = await render(
       <AgentToolActivity
         call={call('opaque-model-name', 'Upload the selected file.')}
@@ -1173,7 +1176,8 @@ describe('BuiltinCapabilityToolActivity', () => {
     expect(screen.container.textContent).toContain(
       'File upload outcome uncertain; the upload may have occurred'
     )
-    expect(screen.container.textContent).toContain('Upload the selected file.')
+    expect(screen.container.textContent).not.toContain('Upload the selected file.')
+    expect(screen.container.querySelector('details, summary, .agent-activity__chevron')).toBeNull()
     expect(screen.container.textContent).not.toContain(CANARY)
     expect(screen.container.querySelector('button')).toBeNull()
     expect(screen.container.querySelector('a')).toBeNull()

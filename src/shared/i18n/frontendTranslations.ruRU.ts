@@ -338,6 +338,8 @@ export const ruRUTranslations = {
   'browser.title': 'Браузер',
   'browser.newTab': 'Новая вкладка',
   'browser.addressPlaceholder': 'Введите URL',
+  'browser.invalidAddress':
+    'Введите корректный веб-адрес, например example.com или localhost:3000.',
   'browser.open': 'Открыть страницу',
   'browser.back': 'Назад',
   'browser.forward': 'Вперед',

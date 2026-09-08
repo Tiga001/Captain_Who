@@ -241,18 +241,44 @@ export function isPdfUnavailableResult(result: ManagedPlaywrightCallResult): boo
   )
 }
 
-export function pdfUnavailableToolResult(): ManagedPlaywrightCallResult {
+const PDF_UNAVAILABLE_REASONS: Readonly<Record<string, string>> = Object.freeze({
+  cross_process_frame:
+    'PDF export is unavailable for this page because it contains a cross-process embedded frame. Try a page without embedded content.',
+  native_print_pending:
+    'A previous PDF print is still running in the managed browser. Wait for it to finish, or close the page that started that print before retrying.',
+  timed_out:
+    'PDF printing timed out. The underlying print may still be running; close this page before retrying if subsequent PDF exports remain blocked.',
+  page_changed:
+    'The page changed during PDF printing, so the result was discarded. Wait for the page to settle and retry.',
+  cancelled: 'PDF export was cancelled and no result was published.',
+  output_too_large:
+    'The printed PDF exceeds the 64 MiB artifact limit. Try exporting a smaller page; retrying this unchanged page will not reduce its size.',
+  native_print_failed:
+    'The managed browser could not print this page as a PDF. Wait for the page to finish loading and retry.'
+})
+
+export function pdfUnavailableToolResult(
+  result?: ManagedPlaywrightCallResult
+): ManagedPlaywrightCallResult {
+  const reason = result?.content.flatMap((block) => {
+    if (block.type !== 'text') return []
+    const candidate = /browser\.pdf_unavailable:([a-z_]+)(?![a-z_])/.exec(block.text)?.[1]
+    return candidate && Object.hasOwn(PDF_UNAVAILABLE_REASONS, candidate) ? [candidate] : []
+  })[0]
   return {
     content: [
       {
         type: 'text',
-        text: 'PDF export is unavailable in the current managed Electron browser.'
+        text: reason
+          ? PDF_UNAVAILABLE_REASONS[reason]
+          : 'PDF export is unavailable in the current managed Electron browser.'
       }
     ],
     structuredContent: {
       status: 'unavailable',
       code: PDF_UNAVAILABLE_SENTINEL,
-      platformScope: 'managed_electron'
+      platformScope: 'managed_electron',
+      ...(reason ? { reason } : {})
     },
     isError: true
   }

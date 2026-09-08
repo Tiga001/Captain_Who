@@ -45,7 +45,7 @@ Core Server 在开发环境由 `cargo run -p mycopilot-core-server --bin core-se
 
 终端服务按需启动：第一个终端会话触发 `utilityProcess.fork()`。所有终端会话共享同一个 utility process，但 Main 使用 utility generation、Renderer WebContents 和 session id 共同约束所有权。
 
-浏览器页面是 Renderer 创建的 `<webview>`，实际 guest、Session、网络策略、Target 和自动化附件均由 Main 管理。详细边界见 [浏览器与自动化](../subsystems/browser-automation.md)。
+浏览器侧栏页面是 Renderer 创建的 `<webview>`；网站弹窗由 Main 接管原生 WebContents 并显示为独立受管窗口，以保留 opener 和登录回传。两者的 guest、Session、网络策略、Target 和自动化附件均由 Main 管理，弹窗不获得主 Renderer 权限。详细边界见 [浏览器与自动化](../subsystems/browser-automation.md)。
 
 ## Main 启动顺序
 

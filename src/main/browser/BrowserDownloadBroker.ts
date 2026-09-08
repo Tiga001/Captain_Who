@@ -86,6 +86,8 @@ interface GuestRecord {
   generation: number
   guest: WebContents
   surfaceId: string
+  trustedNativePopup?: boolean
+  nativePopupReady?: () => boolean
 }
 
 type ToolOwner = Omit<BrowserDownloadOwner, 'generation' | 'surfaceId'>
@@ -199,6 +201,10 @@ export class BrowserDownloadBroker {
   ): void => {
     const guest = this.guests.get(webContents.id)
     if (!guest || guest.guest !== webContents) {
+      safeCancel(item)
+      return
+    }
+    if (guest.trustedNativePopup && !guest.nativePopupReady?.()) {
       safeCancel(item)
       return
     }
@@ -381,11 +387,20 @@ export class BrowserDownloadBroker {
     this.destinationDirectory = destination
   }
 
-  registerGuest(input: { guest: WebContents; surfaceId: string; generation: number }): void {
+  registerGuest(input: {
+    guest: WebContents
+    surfaceId: string
+    generation: number
+    /** Main-only proof for the exact child admitted by the managed native popup host. */
+    trustedNativePopup?: boolean
+    /** Exact Main-owned admission state; pending native popups cannot become manual downloads. */
+    nativePopupReady?: () => boolean
+  }): void {
     this.assertUsable()
     if (
       input.guest.session !== this.expectedSession ||
-      input.guest.getType() !== 'webview' ||
+      (input.guest.getType() !== 'webview' &&
+        !(input.trustedNativePopup && input.guest.getType() === 'window')) ||
       !Number.isSafeInteger(input.generation) ||
       input.generation <= 0
     ) {
@@ -559,6 +574,11 @@ export class BrowserDownloadBroker {
     }
     tool.createdGuestClaimsStarted[input.action] += 1
     tool.guests.add(guest)
+    if (input.action === 'popup' && guest.trustedNativePopup) {
+      // Native OAuth callbacks may close themselves. Mark the exact child at claim time,
+      // before any manager/guard destruction listener can race to release its resources.
+      tool.expectedTargetCloses.add(surfaceKey(guest.surfaceId, guest.generation))
+    }
   }
 
   async finalizeRun(runId: string): Promise<void> {

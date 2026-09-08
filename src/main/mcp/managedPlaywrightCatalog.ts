@@ -120,6 +120,14 @@ const HOST_CALL_REASON_SCHEMA = Object.freeze({
 })
 
 const HOST_TOOL_DESCRIPTIONS: Readonly<Record<string, string>> = Object.freeze({
+  browser_pdf_save:
+    'Save the current page as a managed PDF artifact using native webpage printing. Pages with cross-process embedded frames are currently unsupported. A typed unavailable result explains compatibility limits or a pending print; follow its recovery guidance before retrying.',
+  browser_take_screenshot:
+    'Take a screenshot of the current page. Prefer browser_snapshot and DOM targets for actions. When DOM targets are unavailable, inspect the screenshot with read_image before using coordinate tools; use viewport coordinates from a recent screenshot of the same page, and refresh after navigation, scrolling, resizing, or other page changes. A successful result includes readPath as an image-artifact://sha256/... URI; pass that exact value to read_image.path. Do not guess a workspace path, filename, displayName, or artifactId.',
+  browser_file_upload:
+    'Upload files through an open file chooser. paths accepts authorized workspace-relative or absolute file paths and accessible file-input references such as browser-download:<uuid>. File access and target approval are checked before upload. Omitting paths cancels the file chooser; it does not open a native file picker.',
+  browser_drop:
+    'Drop files or MIME data onto an element on the current page. Provide paths, data, or both. paths accepts authorized workspace-relative or absolute file paths and accessible file-input references such as browser-download:<uuid>. File access and target approval are checked before dropping files. Use data for a MIME-data-only drop.',
   browser_click:
     'Perform a click on the current page. If the click starts a browser download, the result reports download_started with a stable download ID; use browser_wait_for with a short time to observe progress.',
   browser_get_config:
@@ -386,10 +394,7 @@ function parsePolicyManifest(
     return Object.freeze({
       rawName: parsed.rawName,
       modelName: parsed.modelName,
-      description:
-        parsed.rawName === 'browser_take_screenshot'
-          ? "Take a screenshot of the current page. You can't perform actions based on the screenshot, use browser_snapshot for actions. A successful result includes readPath as an image-artifact://sha256/... URI; pass that exact value to read_image.path. Do not guess a workspace path, filename, displayName, or artifactId."
-          : (HOST_TOOL_DESCRIPTIONS[parsed.rawName] ?? upstream.description ?? parsed.rawName),
+      description: HOST_TOOL_DESCRIPTIONS[parsed.rawName] ?? upstream.description ?? parsed.rawName,
       handlingMode: parsed.handlingMode,
       exposed: parsed.exposed,
       safety: readOnly ? ('read_only' as const) : ('destructive' as const),

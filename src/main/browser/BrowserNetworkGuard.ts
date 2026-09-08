@@ -37,12 +37,21 @@ const MAX_SINGLE_DOWNLOAD_BYTES = 64 * 1024 * 1024
 const MAX_TOTAL_ACTIVE_DOWNLOAD_BYTES = 128 * 1024 * 1024
 const MAX_TOOL_POPUP_AUTHORITIES = 4
 const MAX_TRUSTED_INTERNAL_PAGES_PER_GUEST = 128
+const NATIVE_POPUP_ADMISSION_TIMEOUT_MS = 15_000
 
 /** Host-owned policy; Renderer and model cannot select or weaken it. */
 export type BrowserNetworkAccessPolicy = 'host_boundaries_only' | 'risk_approval'
 
 interface GuestRecord {
   active?: ActiveOperation
+  nativePopupOwner?: ActiveOperation
+  nativePopupAdmission?: {
+    ready: Promise<void>
+    cancel(): void
+    blocked(): boolean
+    admitted(): boolean
+  }
+  trustedNativePopup?: boolean
   activeInternalNavigation?: InternalNavigationRecord
   generation: number
   guest: WebContents
@@ -268,6 +277,10 @@ export class BrowserNetworkGuard {
       item.cancel()
       return
     }
+    if (record.trustedNativePopup && !record.nativePopupAdmission?.admitted()) {
+      item.cancel()
+      return
+    }
     const view = this.operationFor(record)
     if (!view) {
       // A manual download belongs to the user's browser session, not to an Agent operation. It
@@ -389,9 +402,19 @@ export class BrowserNetworkGuard {
     this.downloadBroker?.install()
   }
 
-  registerGuest(input: { generation: number; guest: WebContents; surfaceId: string }): void {
+  registerGuest(input: {
+    generation: number
+    guest: WebContents
+    surfaceId: string
+    /** Main-only proof that this exact window was created by the managed native popup host. */
+    trustedNativePopup?: boolean
+  }): void {
     this.assertUsable()
-    if (input.guest.session !== this.expectedSession || input.guest.getType() !== 'webview') {
+    if (
+      input.guest.session !== this.expectedSession ||
+      (input.guest.getType() !== 'webview' &&
+        !(input.trustedNativePopup && input.guest.getType() === 'window'))
+    ) {
       throw new Error('browser.network_guard.invalid_guest')
     }
     const previous = this.guests.get(input.guest.id)
@@ -405,7 +428,8 @@ export class BrowserNetworkGuard {
       guest: input.guest,
       handleDestroyed: () => this.unregisterGuest(record, true),
       internalNavigationUrls: new Set(),
-      surfaceId: input.surfaceId
+      surfaceId: input.surfaceId,
+      trustedNativePopup: input.trustedNativePopup
     }
     this.guests.set(input.guest.id, record)
     input.guest.once('destroyed', record.handleDestroyed)
@@ -415,7 +439,17 @@ export class BrowserNetworkGuard {
       // network window, but it is not Target authority and must never admit downloads. The
       // BrowserSurfaceGroup replaces it with the first positive generation before automation can
       // acquire a Tool/download lease.
-      if (input.generation > 0) this.downloadBroker?.registerGuest(input)
+      if (input.generation > 0)
+        this.downloadBroker?.registerGuest({
+          ...input,
+          ...(input.trustedNativePopup
+            ? {
+                nativePopupReady: () =>
+                  this.guests.get(input.guest.id) === record &&
+                  record.nativePopupAdmission?.admitted() === true
+              }
+            : {})
+        })
     } catch (error) {
       input.guest.removeListener('destroyed', record.handleDestroyed)
       this.guests.delete(input.guest.id)
@@ -745,6 +779,9 @@ export class BrowserNetworkGuard {
       if (record.active === active) record.active = undefined
       this.cancelDownloadsFor(record, true)
     }
+    for (const record of this.guests.values()) {
+      if (record.nativePopupOwner === active) record.nativePopupOwner = undefined
+    }
     active.records.clear()
     active.controller.abort(reason)
     active.unlinkCaller()
@@ -911,6 +948,150 @@ export class BrowserNetworkGuard {
     void view.operation.track(approvalAndNavigation).catch(() => undefined)
   }
 
+  /**
+   * Install before returning the exact child from Electron's synchronous createWindow callback.
+   * Chromium retains the real opener, referrer and POST; only its original network request waits.
+   */
+  beginNativePopupAdmission(input: {
+    guest: WebContents
+    opener: WebContents
+    url: string
+    prepare: () => Promise<void>
+    settled: Promise<void>
+    close: () => void
+  }): Promise<void> {
+    this.assertUsable()
+    const child = this.guests.get(input.guest.id)
+    const opener = this.guests.get(input.opener.id)
+    if (
+      !child ||
+      child.guest !== input.guest ||
+      !child.trustedNativePopup ||
+      child.generation <= 0 ||
+      child.active ||
+      child.nativePopupAdmission ||
+      !opener ||
+      opener.guest !== input.opener ||
+      child === opener ||
+      input.guest.isDestroyed() ||
+      input.opener.isDestroyed()
+    ) {
+      throw new Error('browser.network_guard.native_popup_unavailable')
+    }
+    const active = opener.active
+    const controller = new AbortController()
+    const onChildClosed = (): void => controller.abort('popup_closed')
+    const onOwnerClosed = (): void => controller.abort('owner_closed')
+    const onCancelled = (): void => controller.abort('cancelled')
+    input.guest.once('destroyed', onChildClosed)
+    input.opener.once('destroyed', onOwnerClosed)
+    active?.controller.signal.addEventListener('abort', onCancelled, { once: true })
+    // A native callback page may legitimately postMessage and close itself during the Tool.
+    // Mark only this exact created child, including the asynchronous download-claim interval.
+    child.nativePopupOwner = active
+    const assertCurrent = (): void => {
+      if (
+        this.disposed ||
+        controller.signal.aborted ||
+        active?.closed ||
+        this.guests.get(input.guest.id) !== child ||
+        this.guests.get(input.opener.id) !== opener ||
+        input.guest.isDestroyed() ||
+        input.opener.isDestroyed()
+      )
+        throw new Error('browser.network_guard.native_popup_cancelled')
+    }
+    const opensBlank = input.url === '' || input.url === 'about:blank'
+    const effectiveUrl = opensBlank ? input.opener.getURL() : input.url
+    let admitted = false
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const preparation = Promise.resolve().then(async () => {
+      assertCurrent()
+      if (opensBlank && !/^https?:\/\//iu.test(effectiveUrl)) {
+        throw new Error('browser.network_guard.native_popup_origin_unavailable')
+      }
+      if (active) await this.preflightActiveOperation(active, effectiveUrl, 'new_window')
+      else await this.authorizeManualRequest(effectiveUrl)
+      assertCurrent()
+      // Human approval belongs to BrowserRisk's pausable budget. Bound only native attachment
+      // and ownership setup after that decision, never time spent reading the approval prompt.
+      timer = setTimeout(
+        () => controller.abort('admission_timeout'),
+        NATIVE_POPUP_ADMISSION_TIMEOUT_MS
+      )
+      let authority: BrowserTargetCreationAuthority | undefined
+      try {
+        if (active) {
+          const context = active.authorizationContext
+          authority = await this.createTargetCreationAuthority(
+            active,
+            {
+              action: 'popup',
+              activationId: context.activationId,
+              capabilityId: context.capabilityId,
+              runId: context.runId,
+              toolCallId: context.callId,
+              toolId: context.triggerToolName,
+              url: effectiveUrl
+            },
+            true
+          )
+          assertCurrent()
+          await authority.claim({
+            guest: child.guest,
+            generation: child.generation,
+            surfaceId: child.surfaceId
+          })
+        }
+        assertCurrent()
+        await input.prepare()
+        assertCurrent()
+        admitted = true
+      } finally {
+        authority?.finish()
+      }
+    })
+    const ready = raceNativePopupAdmission(preparation, controller.signal).finally(() => {
+      if (timer) clearTimeout(timer)
+    })
+    // This assignment is synchronous, before preflight/claim can yield or any real request can run.
+    child.nativePopupAdmission = {
+      ready,
+      cancel: onChildClosed,
+      blocked: () => controller.signal.aborted,
+      admitted: () => admitted && !controller.signal.aborted
+    }
+    const lifetime = ready
+      .then(async () => await raceNativePopupAdmission(input.settled, controller.signal))
+      .catch(() => {
+        if (controller.signal.reason !== 'popup_closed') {
+          controller.abort('admission_failed')
+          if (active && !active.closed) {
+            active.operation.recordFailure({
+              code: 'browser.risk_outcome_unknown',
+              dispatchCertainty: active.dispatched
+                ? 'possibly_dispatched'
+                : 'definitely_not_dispatched'
+            })
+          }
+          try {
+            input.close()
+          } catch {
+            /* The rejected gate remains closed even if native teardown fails. */
+          }
+        }
+      })
+      .finally(() => {
+        input.guest.removeListener('destroyed', onChildClosed)
+        input.opener.removeListener('destroyed', onOwnerClosed)
+        active?.controller.signal.removeEventListener('abort', onCancelled)
+      })
+    if (active) void active.operation.track(lifetime).catch(() => undefined)
+    // Consume an early load failure even if admission is still awaiting an explicit decision.
+    void input.settled.catch(() => undefined)
+    return ready
+  }
+
   /** Records a privileged/malformed navigation that the synchronous webContents hook denied. */
   recordBlockedNavigation(guest: WebContents): void {
     const record = this.guests.get(guest.id)
@@ -982,6 +1163,16 @@ export class BrowserNetworkGuard {
   private async authorizeRequest(details: OnBeforeRequestListenerDetails): Promise<void> {
     if (this.disposed) throw new Error('browser.network_guard.closed')
     const registeredRecord = this.requestGuest(details)
+    if (registeredRecord?.nativePopupAdmission) {
+      await registeredRecord.nativePopupAdmission.ready
+      if (
+        registeredRecord.nativePopupAdmission.blocked() ||
+        this.guests.get(registeredRecord.guest.id) !== registeredRecord ||
+        registeredRecord.guest.isDestroyed()
+      ) {
+        throw new Error('browser.network_guard.native_popup_cancelled')
+      }
+    }
     if (registeredRecord?.navigationFence && details.resourceType === 'mainFrame') {
       registeredRecord.navigationFence.blocked = true
       registeredRecord.active?.operation.recordFailure({
@@ -1164,12 +1355,24 @@ export class BrowserNetworkGuard {
   private unregisterGuest(record: GuestRecord, abort: boolean): void {
     if (this.guests.get(record.guest.id) !== record) return
     record.guest.removeListener('destroyed', record.handleDestroyed)
+    record.nativePopupAdmission?.cancel()
     let plannedClose = false
+    if (record.nativePopupOwner && !record.nativePopupOwner.closed) {
+      plannedClose = true
+      try {
+        record.nativePopupOwner.downloadLease?.expectTargetClose({
+          surfaceId: record.surfaceId,
+          generation: record.generation
+        })
+      } catch {
+        /* An admission cancelled before its download claim owns no download target. */
+      }
+    }
     if (record.active) {
       const active = record.active
-      plannedClose = active.expectedTargetCloses.delete(
-        surfaceKey(record.surfaceId, record.generation)
-      )
+      plannedClose =
+        active.expectedTargetCloses.delete(surfaceKey(record.surfaceId, record.generation)) ||
+        plannedClose
       if (plannedClose || !abort) {
         active.records.delete(record)
         record.active = undefined
@@ -1323,6 +1526,18 @@ function onceCallback<T>(callback: (value: T) => void): (value: T) => void {
     called = true
     callback(value)
   }
+}
+
+function raceNativePopupAdmission<T>(operation: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) {
+    void operation.catch(() => undefined)
+    return Promise.reject(new Error('browser.network_guard.native_popup_cancelled'))
+  }
+  return new Promise<T>((resolve, reject) => {
+    const abort = (): void => reject(new Error('browser.network_guard.native_popup_cancelled'))
+    signal.addEventListener('abort', abort, { once: true })
+    operation.then(resolve, reject).finally(() => signal.removeEventListener('abort', abort))
+  })
 }
 
 function onceVoid(callback: () => void): () => void {

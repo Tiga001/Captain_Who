@@ -229,6 +229,74 @@ describe('ManagedPlaywrightBridgeHost', () => {
     await bridge.close()
   })
 
+  it('reports a queued timeout without dispatch phases or cancelling the active browser call', async () => {
+    const core = new FakeCore()
+    let release!: (value: unknown) => void
+    let markStarted!: () => void
+    const started = new Promise<void>((resolve) => (markStarted = resolve))
+    const callTool = vi.fn<ManagedMcpClient['callTool']>(async (request) => {
+      if (request.name === 'browser_tabs') return { content: [], isError: false }
+      markStarted()
+      return await new Promise((resolve) => (release = resolve))
+    })
+    const detachAutomation = vi.fn(async () => undefined)
+    const managed = hostWith({ callTool, detachAutomation, queueTimeoutMs: 40 })
+    await managed.connect()
+    const bridge = new ManagedPlaywrightBridgeHost({
+      core,
+      sensitiveTargetBindings: targetBindingBroker(),
+      createHost: () => managed
+    })
+    vi.useFakeTimers()
+    try {
+      const first = command({
+        type: 'call_tool',
+        name: 'browser_snapshot',
+        arguments: { call_reason: 'Read the first page.' },
+        timeoutMs: 1_000,
+        authorizationContext: AUTHORIZATION_CONTEXT
+      })
+      core.emitCommand(first)
+      await started
+      const queued = command({
+        type: 'call_tool',
+        name: 'browser_snapshot',
+        arguments: { call_reason: 'Read the next page.' },
+        timeoutMs: 1_000,
+        authorizationContext: { ...AUTHORIZATION_CONTEXT, callId: 'call-queued' }
+      })
+      core.emitCommand(queued)
+      await vi.advanceTimersByTimeAsync(41)
+      expect(core.completions).toEqual([
+        {
+          schemaVersion: MANAGED_PLAYWRIGHT_BRIDGE_SCHEMA_VERSION,
+          requestId: queued.requestId,
+          outcome: {
+            type: 'error',
+            code: 'queue_timeout',
+            dispatchCertainty: 'definitely_not_dispatched'
+          }
+        }
+      ])
+      expect(core.dispatchPhases.filter((phase) => phase.requestId === queued.requestId)).toEqual(
+        []
+      )
+      expect(detachAutomation).not.toHaveBeenCalled()
+      expect(
+        callTool.mock.calls.filter(([request]) => request.name === 'browser_snapshot')
+      ).toHaveLength(1)
+      release({ content: [], isError: false })
+      await vi.advanceTimersByTimeAsync(1)
+      expect(
+        core.completions.find((completion) => completion.requestId === first.requestId)?.outcome
+          .type
+      ).toBe('tool_called')
+    } finally {
+      vi.useRealTimers()
+      await bridge.close()
+    }
+  })
+
   it('does not apply the bridge envelope deadline to an admitted call_tool', async () => {
     vi.useFakeTimers()
     try {
@@ -870,6 +938,7 @@ function hostWith(options: {
   callTool?: ManagedMcpClient['callTool']
   createOfficialConnection?: ManagedPlaywrightConnectionFactory
   detachAutomation?: () => Promise<void>
+  queueTimeoutMs?: number
   surfaceGroup?: ManagedPlaywrightSurfaceGroupAdapter
 }): ManagedPlaywrightMcpHost {
   const upstreamTools = MANAGED_PLAYWRIGHT_CATALOG_LOCK.tools.map((tool) => ({
@@ -884,6 +953,7 @@ function hostWith(options: {
     },
     closeSurface: vi.fn(async () => undefined),
     detachAutomation: options.detachAutomation ?? vi.fn(async () => undefined),
+    queueTimeoutMs: options.queueTimeoutMs,
     surfaceGroup: options.surfaceGroup ?? singleSurfaceGroupAdapter(),
     createOfficialConnection:
       options.createOfficialConnection ??

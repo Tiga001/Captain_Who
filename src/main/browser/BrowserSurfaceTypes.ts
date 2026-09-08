@@ -1,4 +1,4 @@
-import type { Event, Input, RenderProcessGoneDetails, WebContents } from 'electron'
+import type { BrowserWindow, Event, Input, RenderProcessGoneDetails, WebContents } from 'electron'
 import type { Browser, BrowserContext, ConnectOverCDPTransport } from 'playwright'
 import type {
   BrowserSurfaceCommand,
@@ -113,6 +113,12 @@ export interface ActiveSensitiveDispatchFence {
 }
 
 export interface ManagedSurface {
+  nativePopup?: {
+    window: BrowserWindow
+    openerSurfaceId: string
+    openerGeneration: number
+    cleanup: () => void
+  }
   createdSequence: number
   dispatchFence?: ActiveSensitiveDispatchFence
   generation: number

@@ -2,9 +2,34 @@ import { StrictMode } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { render } from 'vitest-browser-react'
 import type { WebviewTag } from 'electron'
+import type { BrowserSurfaceSelectedInput, BrowserSurfaceSelectedOutput } from '@mycopilot/protocol'
 
 const setWebview = vi.fn()
+const navigateToUrl = vi.fn(async () => undefined)
 const SURFACE_INSTANCE_ID = 'instance-browser-00001'
+let mainSelectedSurfaceId: string | null = null
+const surfaceSelected = vi.fn(
+  async (input: BrowserSurfaceSelectedInput): Promise<BrowserSurfaceSelectedOutput> => {
+    if (input.surfaceInstanceId === null) {
+      return {
+        ...input,
+        status: 'noop',
+        reason: 'instance_required',
+        retryable: true,
+        authoritativeRevision: input.selectionRevision,
+        surfaceInstanceId: SURFACE_INSTANCE_ID
+      }
+    }
+    mainSelectedSurfaceId = input.surfaceId
+    return {
+      ...input,
+      status: 'applied',
+      reason: 'selection_applied',
+      retryable: false,
+      authoritativeRevision: input.selectionRevision
+    }
+  }
+)
 
 vi.mock('../../../config/FrontendConfigProvider', () => ({
   useFrontendConfig: () => ({ t: (key: string) => key })
@@ -23,7 +48,7 @@ vi.mock('../../browser/useBrowserWebview', () => ({
       isLoading: false,
       metadata: { iconUrl: null, title: null, url: null }
     },
-    navigateToUrl: vi.fn(async () => undefined),
+    navigateToUrl,
     reload: vi.fn(async () => undefined),
     setWebview,
     setZoom: vi.fn(async () => undefined)
@@ -34,15 +59,14 @@ vi.mock('../../browser/browserSurface', async (importOriginal) => {
   const original = await importOriginal<typeof import('../../browser/browserSurface')>()
   return {
     ...original,
-    resolveBrowserSurfaceHostApi: () => ({}),
+    resolveBrowserSurfaceHostApi: () => ({ surfaceSelected }),
     synchronizeBrowserSurfaceInstance: (
       _browser: unknown,
       target: { onInstance: (surfaceInstanceId: string) => void }
     ) => {
       target.onInstance(SURFACE_INSTANCE_ID)
       return () => undefined
-    },
-    synchronizeBrowserSurfaceSelection: () => () => undefined
+    }
   }
 })
 
@@ -50,9 +74,93 @@ const { BrowserPanel } = await import('../../browser/BrowserPanel')
 
 afterEach(() => {
   setWebview.mockClear()
+  navigateToUrl.mockClear()
+  surfaceSelected.mockClear()
+  mainSelectedSurfaceId = null
+})
+
+describe('BrowserPanel address input', () => {
+  it('opens a local development server with its port and path', async () => {
+    const screen = await render(<BrowserPanel isActive pageId="local-address" />)
+
+    await screen
+      .getByRole('textbox', { name: 'browser.addressPlaceholder' })
+      .fill('localhost:5173/login')
+    await screen.getByRole('button', { name: 'browser.open' }).click()
+
+    expect(navigateToUrl).toHaveBeenCalledWith('http://localhost:5173/login')
+    expect(screen.container.querySelector('[role="alert"]')).toBeNull()
+  })
+
+  it('explains an invalid address and clears the error when the user corrects it', async () => {
+    const screen = await render(<BrowserPanel isActive pageId="invalid-address" />)
+    const address = screen.getByRole('textbox', { name: 'browser.addressPlaceholder' })
+
+    await address.fill('file:///private/report.pdf')
+    await screen.getByRole('button', { name: 'browser.open' }).click()
+
+    await expect.element(screen.getByRole('alert')).toHaveTextContent('browser.invalidAddress')
+    await expect.element(address).toHaveAttribute('aria-invalid', 'true')
+    await expect.element(address).toHaveValue('file:///private/report.pdf')
+    expect(navigateToUrl).not.toHaveBeenCalled()
+
+    await address.fill('example.com:8080/report')
+    await expect.element(address).not.toHaveAttribute('aria-invalid')
+    expect(screen.container.querySelector('[role="alert"]')).toBeNull()
+    await screen.getByRole('button', { name: 'browser.open' }).click()
+    expect(navigateToUrl).toHaveBeenCalledWith('https://example.com:8080/report')
+  })
 })
 
 describe('BrowserPanel automation readiness lifecycle', () => {
+  it('reselects the exact existing webview when focus returns from a native popup without a tab change', async () => {
+    const surfaceId = 'right-sidebar-browser-popup-opener'
+    const screen = await render(
+      <BrowserPanel isActive pageId="popup-opener" surfaceId={surfaceId} />
+    )
+    const webview = screen.container.querySelector('webview') as WebviewTag
+    webview.dispatchEvent(new Event('did-attach'))
+    await expect.poll(() => mainSelectedSurfaceId).toBe(surfaceId)
+    const previousRevision = surfaceSelected.mock.calls.at(-1)![0].selectionRevision
+
+    // Main changes selection when its separate native popup receives focus. The sidebar page
+    // stays selected and mounted, so no isActive effect can repair this by itself.
+    mainSelectedSurfaceId = 'managed-native-popup'
+    surfaceSelected.mockClear()
+    webview.dispatchEvent(new Event('focus'))
+
+    await expect.poll(() => mainSelectedSurfaceId).toBe(surfaceId)
+    expect(screen.container.querySelector('webview')).toBe(webview)
+    expect(surfaceSelected.mock.calls.map(([input]) => input.surfaceInstanceId)).toEqual([
+      null,
+      SURFACE_INSTANCE_ID
+    ])
+    expect(surfaceSelected.mock.calls.at(-1)![0].selectionRevision).toBeGreaterThan(
+      previousRevision
+    )
+  })
+
+  it('ignores focus from a background or retired webview instead of stealing native popup selection', async () => {
+    const screen = await render(<BrowserPanel isActive pageId="background-opener" />)
+    const webview = screen.container.querySelector('webview') as WebviewTag
+    webview.dispatchEvent(new Event('did-attach'))
+    await expect.poll(() => mainSelectedSurfaceId).toBe('right-sidebar-browser-background-opener')
+    await screen.rerender(<BrowserPanel isActive={false} pageId="background-opener" />)
+    mainSelectedSurfaceId = 'managed-native-popup'
+    surfaceSelected.mockClear()
+
+    webview.dispatchEvent(new Event('focus'))
+    await Promise.resolve()
+    expect(surfaceSelected).not.toHaveBeenCalled()
+    expect(mainSelectedSurfaceId).toBe('managed-native-popup')
+
+    screen.unmount()
+    webview.dispatchEvent(new Event('focus'))
+    await Promise.resolve()
+    expect(surfaceSelected).not.toHaveBeenCalled()
+    expect(mainSelectedSurfaceId).toBe('managed-native-popup')
+  })
+
   it('renders the browser overflow menu in the top-level portal', async () => {
     const onOpenSettings = vi.fn()
     const screen = await render(

@@ -1,5 +1,12 @@
 import { randomUUID } from 'node:crypto'
-import type { Event, Input, RenderProcessGoneDetails, WebContents } from 'electron'
+import type {
+  BrowserWindow,
+  BrowserWindowConstructorOptions,
+  Event,
+  Input,
+  RenderProcessGoneDetails,
+  WebContents
+} from 'electron'
 import type { Browser, BrowserContext, ConnectOverCDPTransport } from 'playwright'
 import { chromium } from 'playwright'
 import {
@@ -19,6 +26,8 @@ import {
   type BrowserSurfaceStateInput
 } from '@mycopilot/protocol'
 import { BrowserTargetBroker } from './BrowserTargetBroker'
+import { printManagedGuestToPdf } from './ElectronGuestPdfPrinter'
+import { observeNativePopupLoad } from './BrowserPopupLifecycle'
 import type { ManagedTargetCreationIntent } from './ElectronSurfaceGroupCdpTransport'
 import type { ElectronSurfaceGroupCdpTransport } from './ElectronSurfaceGroupCdpTransport'
 import {
@@ -216,6 +225,7 @@ export class BrowserSurfaceManager {
     host: WebContents
     partition: string
     surfaceId?: string
+    nativePopup?: { window: BrowserWindow; openerGuest: WebContents }
   }): void {
     this.assertUsable()
     if (input.partition !== BROWSER_WEBVIEW_PARTITION) {
@@ -236,7 +246,23 @@ export class BrowserSurfaceManager {
       throw new BrowserSurfaceManagerError('browser.surface_capacity_exceeded')
     }
 
-    this.broker.registerManagedGuest(input)
+    const opener = input.nativePopup
+      ? [...this.surfaces.values()].find(
+          (surface) => surface.guest === input.nativePopup!.openerGuest
+        )
+      : undefined
+    if (input.nativePopup) {
+      if (
+        !opener ||
+        input.nativePopup.window.isDestroyed() ||
+        input.nativePopup.window.webContents !== input.guest
+      ) {
+        throw new BrowserSurfaceManagerError('browser.surface_unavailable')
+      }
+      this.broker.registerManagedPopup({ ...input, openerGuest: input.nativePopup.openerGuest })
+    } else {
+      this.broker.registerManagedGuest(input)
+    }
     const generation = (this.generationBySurface.get(surfaceId) ?? 0) + 1
     this.generationBySurface.set(surfaceId, generation)
     try {
@@ -339,6 +365,16 @@ export class BrowserSurfaceManager {
     }
     const initialLogicalUrl = safeLogicalSurfaceUrl(input.guest.getURL())
     const surface: ManagedSurface = {
+      ...(input.nativePopup && opener
+        ? {
+            nativePopup: {
+              window: input.nativePopup.window,
+              openerSurfaceId: opener.surfaceId,
+              openerGeneration: opener.generation,
+              cleanup: () => undefined
+            }
+          }
+        : {}),
       createdSequence: ++this.createSequence,
       generation,
       guest: input.guest,
@@ -420,7 +456,12 @@ export class BrowserSurfaceManager {
       }, this.attachTimeoutMs)
     }
     try {
-      this.networkGuard?.registerGuest({ generation, guest: input.guest, surfaceId })
+      this.networkGuard?.registerGuest({
+        generation,
+        guest: input.guest,
+        surfaceId,
+        ...(input.nativePopup ? { trustedNativePopup: true } : {})
+      })
     } catch {
       input.guest.removeListener('destroyed', handleDestroyed)
       this.removeNavigationListeners(surface)
@@ -1180,7 +1221,12 @@ export class BrowserSurfaceManager {
     if (!host || host.isDestroyed() || surface.host !== host) {
       throw new BrowserSurfaceManagerError('browser.surface_unavailable')
     }
-    await this.requestSurface(host, 'selectSurface', surface.surfaceId)
+    if (surface.nativePopup) {
+      surface.nativePopup.window.show()
+      surface.nativePopup.window.focus()
+    } else {
+      await this.requestSurface(host, 'selectSurface', surface.surfaceId)
+    }
     await this.switchActiveSurface(surface)
     return this.toSurfaceView(surface)
   }
@@ -1221,6 +1267,11 @@ export class BrowserSurfaceManager {
       throw new BrowserSurfaceManagerError('browser.surface_unavailable')
     }
     const dimensions = normalizeViewportSize(input)
+    if (surface.nativePopup) {
+      surface.nativePopup.window.setContentSize(dimensions.width, dimensions.height)
+      const [width, height] = surface.nativePopup.window.getContentSize()
+      return { width, height }
+    }
     await this.requestSurface(host, 'resizeSurface', surface.surfaceId, dimensions)
     return dimensions
   }
@@ -1234,19 +1285,12 @@ export class BrowserSurfaceManager {
       throw new BrowserSurfaceManagerError('browser.target_closed')
     }
 
-    let timer: ReturnType<typeof setTimeout> | undefined
     try {
-      const bytes = await Promise.race([
-        // Fixed @playwright/mcp 0.0.79 delegates to `page.pdf()` without options, whose
-        // `printBackground` default is false. Preserve that visible output semantic here.
-        surface.guest.printToPDF({ printBackground: false }),
-        new Promise<never>((_resolve, reject) => {
-          timer = setTimeout(
-            () => reject(new BrowserSurfaceManagerError('browser.surface_unavailable')),
-            this.attachTimeoutMs
-          )
-        })
-      ])
+      const bytes = await printManagedGuestToPdf(
+        surface.guest,
+        { printBackground: false, margins: { top: 0, bottom: 0, left: 0, right: 0 } },
+        { timeoutMs: this.attachTimeoutMs }
+      )
       if (surface.guest.isDestroyed()) {
         throw new BrowserSurfaceManagerError('browser.target_closed')
       }
@@ -1260,8 +1304,6 @@ export class BrowserSurfaceManager {
       }
       if (error instanceof BrowserSurfaceManagerError) throw error
       throw new BrowserSurfaceManagerError('browser.surface_unavailable')
-    } finally {
-      if (timer) clearTimeout(timer)
     }
   }
 
@@ -1275,6 +1317,11 @@ export class BrowserSurfaceManager {
 
     const surface = this.surfaces.get(targetSurfaceId)
     if (!surface) throw new BrowserSurfaceManagerError('browser.target_closed')
+    if (surface.nativePopup) {
+      this.closingSurfaceIds.add(targetSurfaceId)
+      surface.nativePopup.window.destroy()
+      return
+    }
     await this.enqueueRendererCommand(async () => {
       if (this.surfaces.get(targetSurfaceId) !== surface || surface.guest.isDestroyed()) {
         throw new BrowserSurfaceManagerError('browser.target_closed')
@@ -1331,6 +1378,8 @@ export class BrowserSurfaceManager {
       return
     }
 
+    const restorePopupOpener = surface.nativePopup && this.activeSurfaceId === surfaceId
+    surface.nativePopup?.cleanup()
     surface.dispatchFence?.finishSilently()
     surface.guest.removeListener('destroyed', surface.handleDestroyed)
     this.removeNavigationListeners(surface)
@@ -1350,6 +1399,7 @@ export class BrowserSurfaceManager {
     }
     const wasExplicitlyClosing = this.closingSurfaceIds.delete(surfaceId)
     const awaitingReplacement =
+      !surface.nativePopup &&
       !this.disposed &&
       !wasExplicitlyClosing &&
       !surface.host.isDestroyed() &&
@@ -1364,6 +1414,26 @@ export class BrowserSurfaceManager {
     // Renderer owns tab ordering and fallback choice. Main clears the retired exact identity and
     // waits for a bound Renderer selection instead of guessing from a potentially stale snapshot.
     this.clearActiveSelectionForRetiredSurface(surfaceId)
+    if (restorePopupOpener && surface.nativePopup) {
+      const opener = this.surfaces.get(surface.nativePopup.openerSurfaceId)
+      if (
+        !this.disposed &&
+        opener &&
+        opener.generation === surface.nativePopup.openerGeneration &&
+        !opener.guest.isDestroyed() &&
+        !opener.host.isDestroyed() &&
+        !this.closingSurfaceIds.has(opener.surfaceId)
+      ) {
+        this.activeSurfaceId = opener.surfaceId
+        this.needsReveal = false
+      }
+    }
+    if (surface.nativePopup) {
+      // Transport failure can retire a still-live popup. The removed surface must not leave an
+      // untracked native window behind; destruction re-entry sees that this identity is gone.
+      if (!surface.nativePopup.window.isDestroyed()) surface.nativePopup.window.destroy()
+      return
+    }
     if (
       !awaitingReplacement &&
       !this.disposed &&
@@ -1393,6 +1463,10 @@ export class BrowserSurfaceManager {
   private forceRetireSurface(input: { generation: number; surfaceId: string }): void {
     const surface = this.surfaces.get(input.surfaceId)
     if (!surface || surface.generation !== input.generation) return
+    if (surface.nativePopup) {
+      surface.nativePopup.window.destroy()
+      return
+    }
     this.handleTargetClosed(surface.surfaceId, surface.generation, surface.guest)
     // Unlike the ordinary destroyed event, this path can retire a still-live guest after a lost
     // Renderer close acknowledgement. Remove its Broker registration/listeners immediately, then
@@ -1407,6 +1481,110 @@ export class BrowserSurfaceManager {
         // Logical retirement already removed every Main-owned capability route. Electron may
         // throw while a renderer crash is concurrently destroying the same WebContents.
       }
+    }
+  }
+
+  /** Adopt Electron's original popup WebContents so Chromium retains its real opener semantics. */
+  canCreateNativePopup(input: { guest: WebContents; url: string }): boolean {
+    const source = [...this.surfaces.values()].find((surface) => surface.guest === input.guest)
+    return Boolean(
+      !this.disposed &&
+      this.networkGuard &&
+      source &&
+      !source.guest.isDestroyed() &&
+      !source.host.isDestroyed() &&
+      !this.closingSurfaceIds.has(source.surfaceId) &&
+      (input.url === '' || input.url === 'about:blank' || isSafeManagedPageUrl(input.url)) &&
+      this.surfaces.size + this.pendingCreatedSurfaceCount() < this.maxSurfaces &&
+      (Date.now() - this.popupWindowStartedAt >= 1_000 || this.popupCount < MAX_POPUPS_PER_SECOND)
+    )
+  }
+
+  createNativePopup(input: {
+    guest: WebContents
+    url: string
+    options: BrowserWindowConstructorOptions
+    createWindow: (options: BrowserWindowConstructorOptions) => BrowserWindow
+    configureGuest: (guest: WebContents) => void
+  }): WebContents {
+    this.assertUsable()
+    const source = [...this.surfaces.values()].find((surface) => surface.guest === input.guest)
+    if (
+      !this.networkGuard ||
+      !source ||
+      source.guest.isDestroyed() ||
+      source.host.isDestroyed() ||
+      this.closingSurfaceIds.has(source.surfaceId) ||
+      (input.url !== '' && input.url !== 'about:blank' && !isSafeManagedPageUrl(input.url))
+    ) {
+      throw new BrowserSurfaceManagerError('browser.surface_unavailable')
+    }
+    const now = Date.now()
+    if (now - this.popupWindowStartedAt >= 1_000) {
+      this.popupWindowStartedAt = now
+      this.popupCount = 0
+    }
+    if (
+      ++this.popupCount > MAX_POPUPS_PER_SECOND ||
+      this.surfaces.size + this.pendingCreatedSurfaceCount() >= this.maxSurfaces
+    ) {
+      throw new BrowserSurfaceManagerError('browser.surface_capacity_exceeded')
+    }
+    const surfaceId = this.allocateSurfaceId()
+    const window = input.createWindow(input.options)
+    const guest = window.webContents
+    const loading = observeNativePopupLoad(guest)
+    const close = (): void => {
+      if (!window.isDestroyed()) window.destroy()
+    }
+    this.suppressAutomaticGroupAdmission.add(surfaceId)
+    try {
+      input.configureGuest(guest)
+      this.registerManagedGuest({
+        documentReady: true,
+        guest,
+        host: source.host,
+        partition: BROWSER_WEBVIEW_PARTITION,
+        surfaceId,
+        nativePopup: { window, openerGuest: source.guest }
+      })
+      const popup = this.surfaces.get(surfaceId)!
+      const onFocus = (): void => {
+        if (this.surfaces.get(surfaceId) !== popup || this.activeSurfaceId === surfaceId) return
+        this.activeSurfaceId = surfaceId
+        this.manualSelectionRevision += 1
+      }
+      window.on('focus', onFocus)
+      source.guest.once('destroyed', close)
+      popup.nativePopup!.cleanup = () => {
+        loading.dispose()
+        window.removeListener('focus', onFocus)
+        source.guest.removeListener('destroyed', close)
+      }
+      // This call installs its exact-child gate synchronously. Electron may initiate the original
+      // navigation/POST as soon as createWindow returns; no request may precede owner/route setup.
+      const ready = this.networkGuard.beginNativePopupAdmission({
+        guest,
+        opener: source.guest,
+        url: input.url,
+        prepare: async () => {
+          await this.addSurfaceToActiveGroup(popup, true)
+        },
+        settled: loading.settled,
+        close
+      })
+      void ready.then(() => {
+        if (window.isDestroyed()) return
+        loading.start()
+        window.showInactive()
+      }, close)
+      return guest
+    } catch (error) {
+      loading.dispose()
+      close()
+      throw error
+    } finally {
+      this.suppressAutomaticGroupAdmission.delete(surfaceId)
     }
   }
 
@@ -1491,6 +1669,7 @@ export class BrowserSurfaceManager {
       })
     )
     for (const surface of remainingSurfaces) {
+      surface.nativePopup?.cleanup()
       surface.dispatchFence?.finishSilently()
       surface.guest.removeListener('destroyed', surface.handleDestroyed)
       this.removeNavigationListeners(surface)
@@ -1509,7 +1688,8 @@ export class BrowserSurfaceManager {
     for (const surface of remainingSurfaces) {
       if (surface.guest.isDestroyed()) continue
       try {
-        surface.guest.close({ waitForBeforeUnload: false })
+        if (surface.nativePopup) surface.nativePopup.window.destroy()
+        else surface.guest.close({ waitForBeforeUnload: false })
       } catch {
         // Electron will also destroy these guests with their owning BrowserWindow. All logical
         // admission and debugger state has already been retired above, so shutdown remains safe.
@@ -1779,6 +1959,14 @@ export class BrowserSurfaceManager {
         : this.uniqueReusableSurface()
     if (reusable) {
       if (reusable.surfaceId === this.activeSurfaceId && !this.needsReveal) {
+        await this.addSurfaceToActiveGroup(reusable)
+        return reusable
+      }
+      if (reusable.nativePopup) {
+        reusable.nativePopup.window.show()
+        reusable.nativePopup.window.focus()
+        this.activeSurfaceId = reusable.surfaceId
+        this.needsReveal = false
         await this.addSurfaceToActiveGroup(reusable)
         return reusable
       }
@@ -3024,6 +3212,9 @@ export class BrowserSurfaceManager {
 
   private publishSurfaceState(surface: ManagedSurface): void {
     if (this.surfaces.get(surface.surfaceId) !== surface || surface.host.isDestroyed()) return
+    // Native popups have their own window; publishing an unknown sidebar surface would imply a
+    // Renderer webview that does not exist. Model-facing listSurfaces still includes this page.
+    if (surface.nativePopup) return
     const current = this.toRendererSurfaceState(surface)
     const stateKey = JSON.stringify({ ...current, stateRevision: 0 })
     if (surface.lastPublishedStateKey === stateKey) return
@@ -3101,7 +3292,12 @@ export class BrowserSurfaceManager {
       if (!host || host.isDestroyed() || surface.host !== host) {
         throw new BrowserSurfaceManagerError('browser.surface_unavailable')
       }
-      await this.requestSurface(host, 'selectSurface', surface.surfaceId)
+      if (surface.nativePopup) {
+        surface.nativePopup.window.show()
+        surface.nativePopup.window.focus()
+      } else {
+        await this.requestSurface(host, 'selectSurface', surface.surfaceId)
+      }
       if (this.manualSelectionRevision !== revision) return
       this.activeSurfaceId = surface.surfaceId
     }

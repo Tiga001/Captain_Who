@@ -1,6 +1,6 @@
 import { EventEmitter } from 'node:events'
 import type { Browser, BrowserContext, ConnectOverCDPTransport } from 'playwright'
-import type { Debugger, Session, WebContents } from 'electron'
+import type { BrowserWindow, Debugger, Session, WebContents } from 'electron'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   BROWSER_WEBVIEW_PARTITION,
@@ -160,6 +160,10 @@ class FakeWebContents extends EventEmitter {
   }
   close = vi.fn(() => this.destroy())
   printToPDF = vi.fn(async () => Buffer.from('%PDF-1.7\nfixture\n%%EOF\n'))
+  get mainFrame() {
+    const frame = { detached: false, frameToken: 'main', processId: 1, url: this.url }
+    return { ...frame, framesInSubtree: [frame] }
+  }
   destroy(): void {
     if (this.destroyed) return
     this.destroyed = true
@@ -350,6 +354,125 @@ afterEach(async () => {
 })
 
 describe('BrowserSurfaceManager', () => {
+  function nativePopupHarness(overrides: Partial<BrowserSurfaceManagerOptions> = {}) {
+    const beginNativePopupAdmission = vi.fn(
+      async (input: Parameters<BrowserNetworkGuard['beginNativePopupAdmission']>[0]) => {
+        await input.prepare()
+      }
+    )
+    const networkGuard = {
+      registerGuest: vi.fn(),
+      beginNativePopupAdmission,
+      deactivateAutomation: vi.fn(),
+      shutdown: vi.fn(async () => undefined)
+    } as unknown as BrowserNetworkGuard
+    const harness = createHarness({
+      networkGuard,
+      createSurfaceId: () => 'native-popup',
+      ...overrides
+    })
+    const opener = attachGuest(harness.manager, harness.host)
+    selectBoundSurface(harness.manager, harness.host, SURFACE_ID, 1)
+    const guest = new FakeWebContents(99, 'window', 'about:blank')
+    let contentSize = [1_000, 760]
+    const window = Object.assign(new EventEmitter(), {
+      webContents: guest.asWebContents(),
+      isDestroyed: () => guest.isDestroyed(),
+      showInactive: vi.fn(),
+      show: vi.fn(),
+      focus: vi.fn(() => window.emit('focus')),
+      setContentSize: vi.fn((width: number, height: number) => {
+        contentSize = [width, height]
+      }),
+      getContentSize: () => contentSize,
+      destroy: vi.fn(() => {
+        if (!guest.isDestroyed()) guest.destroy()
+      })
+    })
+    const configureGuest = vi.fn()
+    harness.manager.createNativePopup({
+      guest: opener.asWebContents(),
+      url: 'https://login.example.test/',
+      options: {},
+      createWindow: () => window as unknown as BrowserWindow,
+      configureGuest
+    })
+    return { ...harness, beginNativePopupAdmission, configureGuest, guest, opener, window }
+  }
+
+  it('owns native popup commands without creating a duplicate Renderer webview', async () => {
+    const { manager, commands, beginNativePopupAdmission, configureGuest, guest, window } =
+      nativePopupHarness()
+    expect(configureGuest).toHaveBeenCalledWith(guest.asWebContents())
+    expect(beginNativePopupAdmission).toHaveBeenCalledOnce()
+    await vi.waitFor(() => expect(window.showInactive).toHaveBeenCalledOnce())
+    await guest.loadURL('https://login.example.test/')
+    expect(manager.listSurfaces()).toHaveLength(2)
+    expect(commands).toHaveLength(0)
+    await manager.selectSurface({ surfaceId: 'native-popup' })
+    expect(window.focus).toHaveBeenCalledOnce()
+    const lease = await manager.beginExistingToolSurfaceLease()
+    expect(lease).not.toBeNull()
+    await expect(lease!.resizeSurface({ width: 640, height: 480 })).resolves.toEqual({
+      width: 640,
+      height: 480
+    })
+    lease!.finish()
+    await manager.closeSurface('native-popup')
+    expect(window.destroy).toHaveBeenCalledOnce()
+    expect(manager.listSurfaces()).toEqual([
+      expect.objectContaining({ surfaceId: SURFACE_ID, isActive: true })
+    ])
+    expect(commands).toHaveLength(0)
+  })
+
+  it('rejects capacity and unregistered openers before Electron creates a native child', () => {
+    const { manager, opener, host } = nativePopupHarness({ maxSurfaces: 2 })
+    expect(
+      manager.canCreateNativePopup({
+        guest: opener.asWebContents(),
+        url: 'https://login.example.test/'
+      })
+    ).toBe(false)
+    expect(manager.canCreateNativePopup({ guest: host.asWebContents(), url: 'about:blank' })).toBe(
+      false
+    )
+    expect(
+      manager.canCreateNativePopup({ guest: opener.asWebContents(), url: 'file:///private/file' })
+    ).toBe(false)
+  })
+
+  it.each(['transport', 'opener', 'shutdown'] as const)(
+    'destroys the native window on %s retirement',
+    async (cause) => {
+      const { manager, opener, guest, window, broker } = nativePopupHarness()
+      if (cause === 'transport') manager.handleTargetClosed('native-popup', 1)
+      else if (cause === 'opener') opener.destroy()
+      else await manager.shutdown()
+      expect(window.destroy).toHaveBeenCalledOnce()
+      expect(guest.isDestroyed()).toBe(true)
+      if (cause === 'shutdown') expect(manager.snapshot().surfaces).toBe(0)
+      else
+        expect(manager.listSurfaces().some((surface) => surface.surfaceId === 'native-popup')).toBe(
+          false
+        )
+      expect(guest.listenerCount('did-finish-load')).toBe(0)
+      expect(window.listenerCount('focus')).toBe(0)
+      if (cause === 'shutdown') expect(broker.snapshot().registeredGuests).toBe(0)
+    }
+  )
+
+  it('does not restore an opener already waiting for Renderer close acknowledgement', async () => {
+    const { manager, host, opener } = nativePopupHarness()
+    const closing = manager.closeSurface(SURFACE_ID)
+    await manager.selectSurface({ surfaceId: 'native-popup' })
+    await manager.closeSurface('native-popup')
+    expect(manager.listSurfaces().some((surface) => surface.isActive)).toBe(false)
+    opener.destroy()
+    await closing
+    expect(host.isDestroyed()).toBe(false)
+  })
+
   it('ignores iframe, aborted, and stale main-frame failures without replacing newer state', () => {
     vi.useFakeTimers()
     const { host, manager } = createHarness()
@@ -2286,7 +2409,10 @@ describe('BrowserSurfaceManager', () => {
     await expect(toolLease.printToPdf()).resolves.toEqual(
       Uint8Array.from(Buffer.from('%PDF-1.7\nfixture\n%%EOF\n'))
     )
-    expect(first.printToPDF).toHaveBeenCalledWith({ printBackground: false })
+    expect(first.printToPDF).toHaveBeenCalledWith({
+      printBackground: false,
+      margins: { top: 0, bottom: 0, left: 0, right: 0 }
+    })
     expect(second.printToPDF).not.toHaveBeenCalled()
     expect(manager.getActiveSurfaceIdentity()).toEqual({ generation: 1, surfaceId: 'lease-one' })
     toolLease.finish()

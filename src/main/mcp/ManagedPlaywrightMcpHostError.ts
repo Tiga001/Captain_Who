@@ -3,6 +3,7 @@ export type ManagedPlaywrightMcpHostErrorCode =
   | 'mcp.builtin_playwright.busy'
   | 'mcp.builtin_playwright.cancelled'
   | 'mcp.builtin_playwright.timeout'
+  | 'mcp.builtin_playwright.queue_timeout'
   | 'mcp.builtin_playwright.tool_not_reviewed'
   | 'mcp.builtin_playwright.invalid_arguments'
   | 'mcp.builtin_playwright.sensitive_grant_missing'

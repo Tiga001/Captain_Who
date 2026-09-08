@@ -395,17 +395,19 @@ Host 校验当前执行 segment、根节点、Run/assistant/toolCall 和实时�
 `AgentService::schedule_human_input_deliveries`。同步恢复优先，异步按 Response.sequence 扫描。
 Host 的 dispatcher 串行选择路径；SQLite 的 revision/CAS、停止范围和逻辑 Turn 占用是最终依据。
 
-| 场景                        | 路径与结算点                                                                                            |
-| --------------------------- | ------------------------------------------------------------------------------------------------------- |
-| 合法活跃 segment 可接收引导 | 同事务绑定 Response、目标 Run 与 guidance journal，然后放入现有 steering 队列                           |
-| 完整工具批次结束            | Runtime 按队列顺序加入 UserGuidance；Trace、ModelContext、guidance applied 与 Delivery applied 原子提交 |
-| 审批或同步等待              | 先保存 pending 回答；合法恢复 segment 注册队列后接入，仍等完整工具批次结束                              |
-| 手动压缩或厂商切换占用      | 保持 pending；操作释放占用后由 Host 再次调度                                                            |
-| 同聊天真正空闲              | 复用正常 HumanRoot Turn 准备与权限路径；User、assistant、Run lease、回答绑定和回执在同事务保存          |
-| 新回答 Run 执行             | 进入 Runtime 前持久 executing 围栏；绑定目标的已完成 agent_loop 模型请求事实确认 applied                |
+| 场景                     | 路径与结算点                                                                                            |
+| ------------------------ | ------------------------------------------------------------------------------------------------------- |
+| 逻辑 Run 可接收引导      | 同事务绑定 Response、目标 Run 与 guidance journal，然后放入现有 steering 队列                           |
+| 完整工具批次结束         | Runtime 按队列顺序加入 UserGuidance；Trace、ModelContext、guidance applied 与 Delivery applied 原子提交 |
+| 审批等待及批准后工具执行 | 沿用逻辑 Run 的接收入口，保留 queued 身份和顺序；恢复后仍等完整工具批次结束                             |
+| 同步等待                 | 先保存 pending 回答；合法恢复 segment 注册队列后接入，仍等完整工具批次结束                              |
+| 手动压缩或厂商切换占用   | 保持 pending；操作释放占用后由 Host 再次调度                                                            |
+| 同聊天真正空闲           | 复用正常 HumanRoot Turn 准备与权限路径；User、assistant、Run lease、回答绑定和回执在同事务保存          |
+| 新回答 Run 执行          | 进入 Runtime 前持久 executing 围栏；绑定目标的已完成 agent_loop 模型请求事实确认 applied                |
 
 初始 Run 的预排队引导也在第一次合法采样前应用；审批或同步恢复必须先完成被冻结的剩余工具队列。
-队列在终结或暂停时关闭，尚未应用的异步 guidance 可以回到 pending。重新绑定使用新的 guidance
+审批通过队列身份移交保留 FIFO 和去重记录，旧 segment 退出只关闭旧队列，不拒绝已经接纳的消息。
+队列在终结或同步等待时关闭，尚未应用的异步 guidance 可以回到 pending。重新绑定使用新的 guidance
 及 clientMessageId，避免旧 rejected journal 与同逻辑 Run 恢复冲突；正式回应身份始终是 responseId。
 如果旧队列已关闭但旧 Run 还没有持久终结，Host 不会把“无 worker”当作空闲另开 Run。
 

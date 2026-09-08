@@ -3780,6 +3780,218 @@ describe('running conversation guidance queue', () => {
     expect(testState.startProviderTransition).toHaveBeenCalledTimes(1)
   })
 
+  it('accepts guidance when approval arrives before the queued message is submitted', async () => {
+    const queued = queuedMessage('approval-race', 'keep this instruction', 10)
+    testState.loadComposerDrafts.mockResolvedValueOnce({
+      'conversation-a': createComposerDraft({ modelId: 'model-1', queuedMessages: [queued] })
+    })
+    mockSuccessfulTurnStarts()
+    const screen = await renderSelectedConversation()
+    await screen.getByRole('button', { name: 'submit-without-skill' }).click()
+    await expect.element(screen.getByTestId('agent-run-status')).toHaveTextContent('running')
+    emitAgentEvent({
+      type: 'approval_required',
+      runId: 'run-1',
+      action: {
+        type: 'command',
+        command: {
+          id: 'approval-command',
+          command: 'sleep 5',
+          cwd: null,
+          timeoutMs: null,
+          approvalStatus: 'required',
+          riskLevel: null,
+          reason: 'check approval',
+          observe: null
+        }
+      }
+    })
+    await expect
+      .element(screen.getByTestId('agent-run-status'))
+      .toHaveTextContent('waiting_for_approval')
+    await screen.getByRole('button', { name: 'guide-first-message' }).click()
+    await expect.poll(() => testState.steerAgentRun.mock.calls.length).toBe(1)
+    await expect.element(screen.getByTestId('queued-message-ids')).toHaveTextContent('')
+    await expect
+      .element(screen.getByTestId('guidance-timeline'))
+      .toHaveTextContent(`${queued.clientMessageId}:queued`)
+    expect(testState.steerAgentRun.mock.calls[0][0].expectedRunId).toBe('run-1')
+    await expect
+      .element(screen.getByTestId('agent-run-status'))
+      .toHaveTextContent('waiting_for_approval')
+  })
+
+  it('manually resends a confirmed rejected guidance identity once and ignores its late notifications', async () => {
+    const queued = {
+      ...queuedMessage('rejected-row', 'retry this instruction', 10),
+      attachments: [
+        {
+          id: 'guidance-attachment',
+          kind: 'file' as const,
+          name: 'notes.txt',
+          mimeType: 'text/plain',
+          sizeBytes: 5,
+          encoding: 'base64' as const,
+          data: 'aGVsbG8='
+        }
+      ],
+      status: 'error' as const,
+      error: 'The previous run stopped accepting guidance.'
+    }
+    const next = queuedMessage('next-row', 'preserve this position', 20)
+    testState.loadComposerDrafts.mockResolvedValueOnce({
+      'conversation-a': createComposerDraft({ modelId: 'model-1', queuedMessages: [queued, next] })
+    })
+    mockSuccessfulTurnStarts()
+    const original = deferred<AgentSteerRunOutput>()
+    const replacement = deferred<AgentSteerRunOutput>()
+    testState.steerAgentRun
+      .mockReturnValueOnce(original.promise)
+      .mockReturnValueOnce(replacement.promise)
+    const screen = await renderSelectedConversation()
+    await screen.getByRole('button', { name: 'submit-without-skill' }).click()
+    await expect.element(screen.getByTestId('agent-run-status')).toHaveTextContent('running')
+    await screen.getByRole('button', { name: 'guide-first-message' }).click()
+    await expect.poll(() => testState.steerAgentRun.mock.calls.length).toBe(1)
+    const rejection: AgentEvent = {
+      type: 'guidance_rejected',
+      runId: 'run-1',
+      guidanceId: 'old-guidance',
+      clientMessageId: queued.clientMessageId,
+      content: queued.content,
+      rejectionCode: 'run_not_steerable',
+      message: queued.error,
+      createdAt: queued.createdAt
+    }
+    // Notifications may restore the error row before the original RPC has acknowledged it.
+    emitAgentEvent(rejection)
+    await screen.getByRole('button', { name: 'guide-first-message' }).click()
+    expect(testState.steerAgentRun).toHaveBeenCalledTimes(1)
+    original.resolve({
+      guidanceId: 'old-guidance',
+      status: 'rejected',
+      rejectionCode: 'run_not_steerable'
+    })
+    await expect.poll(() => testState.steerAgentRun.mock.calls.length).toBe(2)
+    const replacementInput = testState.steerAgentRun.mock.calls[1][0]
+    expect(replacementInput.clientMessageId).not.toBe(queued.clientMessageId)
+    expect(replacementInput).toEqual({
+      conversationId: 'conversation-a',
+      expectedRunId: 'run-1',
+      clientMessageId: expect.any(String),
+      content: queued.content,
+      attachments: queued.attachments
+    })
+    emitAgentEvent(rejection)
+    await expect
+      .element(screen.getByTestId('queued-message-ids'))
+      .toHaveTextContent('rejected-row,next-row')
+    replacement.resolve({ guidanceId: 'new-guidance', status: 'queued' })
+    await expect.element(screen.getByTestId('queued-message-ids')).toHaveTextContent('next-row')
+    emitAgentEvent(rejection)
+    await new Promise((resolve) => window.setTimeout(resolve, 0))
+    await expect.element(screen.getByTestId('queued-message-ids')).toHaveTextContent('next-row')
+    await expect
+      .element(screen.getByTestId('guidance-timeline'))
+      .toHaveTextContent(`${replacementInput.clientMessageId}:queued`)
+    expect(screen.getByTestId('guidance-timeline').element().textContent).not.toContain(
+      queued.clientMessageId
+    )
+    expect(testState.steerAgentRun).toHaveBeenCalledTimes(2)
+  })
+
+  it.each(['queued', 'applied', 'identity_conflict', 'transport_error'] as const)(
+    'preserves the original guidance identity after an error when Host reports %s',
+    async (outcome) => {
+      const queued = {
+        ...queuedMessage('uncertain-row', 'do not duplicate this message', 10),
+        status: 'error' as const,
+        error: 'No acknowledgement received'
+      }
+      testState.loadComposerDrafts.mockResolvedValueOnce({
+        'conversation-a': createComposerDraft({ modelId: 'model-1', queuedMessages: [queued] })
+      })
+      mockSuccessfulTurnStarts()
+      if (outcome === 'transport_error') {
+        testState.steerAgentRun.mockRejectedValueOnce(new Error('Transport unavailable'))
+      } else {
+        testState.steerAgentRun.mockResolvedValueOnce({
+          guidanceId: 'original-guidance',
+          status: outcome === 'identity_conflict' ? 'rejected' : outcome,
+          ...(outcome === 'identity_conflict' ? { rejectionCode: 'identity_conflict' } : {})
+        })
+      }
+      const screen = await renderSelectedConversation()
+      await screen.getByRole('button', { name: 'submit-without-skill' }).click()
+      await expect.element(screen.getByTestId('agent-run-status')).toHaveTextContent('running')
+      await screen.getByRole('button', { name: 'guide-first-message' }).click()
+      if (outcome === 'queued' || outcome === 'applied') {
+        await expect.element(screen.getByTestId('queued-message-ids')).toHaveTextContent('')
+        await expect
+          .element(screen.getByTestId('guidance-timeline'))
+          .toHaveTextContent(`${queued.clientMessageId}:${outcome}`)
+      } else {
+        await expect
+          .poll(
+            () =>
+              JSON.parse(
+                screen.getByTestId('queued-message-payloads').element().textContent ?? '[]'
+              )[0]?.status
+          )
+          .toBe('error')
+        expect(
+          JSON.parse(screen.getByTestId('queued-message-payloads').element().textContent ?? '[]')[0]
+            .clientMessageId
+        ).toBe(queued.clientMessageId)
+      }
+      expect(testState.steerAgentRun).toHaveBeenCalledExactlyOnceWith({
+        conversationId: 'conversation-a',
+        expectedRunId: 'run-1',
+        clientMessageId: queued.clientMessageId,
+        content: queued.content,
+        attachments: []
+      })
+    }
+  )
+
+  it.each(['guidance_queued', 'guidance_applied'] as const)(
+    'keeps the authoritative %s receipt when the RPC acknowledgement is lost',
+    async (type) => {
+      const queued = queuedMessage('lost-reply', 'accepted once', 10)
+      testState.loadComposerDrafts.mockResolvedValueOnce({
+        'conversation-a': createComposerDraft({ modelId: 'model-1', queuedMessages: [queued] })
+      })
+      mockSuccessfulTurnStarts()
+      const reply = deferred<AgentSteerRunOutput>()
+      testState.steerAgentRun.mockReturnValueOnce(reply.promise)
+      const screen = await renderSelectedConversation()
+      await screen.getByRole('button', { name: 'submit-without-skill' }).click()
+      await expect.element(screen.getByTestId('agent-run-status')).toHaveTextContent('running')
+      await screen.getByRole('button', { name: 'guide-first-message' }).click()
+      await expect.poll(() => testState.steerAgentRun.mock.calls.length).toBe(1)
+      emitAgentEvent({
+        type,
+        runId: 'run-1',
+        guidanceId: 'accepted-guidance',
+        clientMessageId: queued.clientMessageId,
+        content: queued.content,
+        attachments: [],
+        createdAt: queued.createdAt,
+        ...(type === 'guidance_applied' ? { sequence: 1 } : {})
+      } as AgentEvent)
+      await expect.element(screen.getByTestId('queued-message-ids')).toHaveTextContent('')
+      reply.reject(new Error('Acknowledgement lost'))
+      await new Promise((resolve) => window.setTimeout(resolve, 0))
+      await expect.element(screen.getByTestId('queued-message-ids')).toHaveTextContent('')
+      await expect
+        .element(screen.getByTestId('guidance-timeline'))
+        .toHaveTextContent(
+          `${queued.clientMessageId}:${type === 'guidance_queued' ? 'queued' : 'applied'}`
+        )
+      expect(testState.steerAgentRun).toHaveBeenCalledTimes(1)
+    }
+  )
+
   it('auto-sends the next row when the steer acknowledgement arrives after run completion', async () => {
     const first = queuedMessage('queue-first', 'late guidance', 10)
     const second = queuedMessage('queue-second', 'send after the race', 20)

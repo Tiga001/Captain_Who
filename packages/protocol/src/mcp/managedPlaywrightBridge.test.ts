@@ -26,6 +26,19 @@ const AUTHORIZATION_CONTEXT = {
 }
 
 describe('managed Playwright bridge wire contract', () => {
+  it('preserves a queue timeout as a distinct, undispatched completion', () => {
+    const input = {
+      schemaVersion: MANAGED_PLAYWRIGHT_BRIDGE_SCHEMA_VERSION,
+      requestId: REQUEST_ID,
+      outcome: {
+        type: 'error',
+        code: 'queue_timeout',
+        dispatchCertainty: 'definitely_not_dispatched'
+      }
+    }
+    expect(parseManagedPlaywrightCompletionInput(input)).toEqual(input)
+  })
+
   it('strictly validates monotonic dispatch phase acknowledgements', () => {
     expect(MANAGED_PLAYWRIGHT_BRIDGE_SCHEMA_VERSION).toBe(4)
     const input = {

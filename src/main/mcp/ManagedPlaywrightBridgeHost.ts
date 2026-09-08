@@ -151,7 +151,8 @@ export class ManagedPlaywrightBridgeHost {
 
     const controller = new AbortController()
     // ManagedPlaywrightMcpHost owns CallTool's execution budget because only that boundary knows
-    // when BrowserRisk is waiting for a human. Other bridge commands retain the envelope timer.
+    // when dispatch is queued or BrowserRisk is waiting for a human. Other bridge commands retain
+    // the envelope timer.
     const timer =
       input.command.type === 'call_tool'
         ? undefined
@@ -469,6 +470,7 @@ function mapError(
     'mcp.builtin_playwright.busy': 'busy',
     'mcp.builtin_playwright.cancelled': 'cancelled',
     'mcp.builtin_playwright.timeout': 'timeout',
+    'mcp.builtin_playwright.queue_timeout': 'queue_timeout',
     'mcp.builtin_playwright.tool_not_reviewed': 'tool_not_reviewed',
     'mcp.builtin_playwright.invalid_arguments': 'invalid_arguments',
     'mcp.builtin_playwright.sensitive_grant_missing': 'invalid_arguments',
@@ -490,7 +492,14 @@ function mapError(
   if (error.dispatchCertainty) certainty = error.dispatchCertainty
   else if (
     operation === 'call_tool' &&
-    ['closed', 'busy', 'tool_not_reviewed', 'invalid_arguments', 'catalog_drift'].includes(code)
+    [
+      'closed',
+      'busy',
+      'queue_timeout',
+      'tool_not_reviewed',
+      'invalid_arguments',
+      'catalog_drift'
+    ].includes(code)
   ) {
     certainty = 'definitely_not_dispatched'
   } else if (operation === 'call_tool' && code === 'output_too_large') {

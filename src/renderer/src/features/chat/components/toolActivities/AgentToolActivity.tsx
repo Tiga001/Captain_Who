@@ -89,7 +89,6 @@ export function AgentToolActivity({
     return (
       <BuiltinCapabilityToolActivity
         cancelled={cancelled && !result}
-        displayReason={call.reason}
         result={result}
         settledStatus={settledStatus}
         toolName={toolIdentity.rawName}

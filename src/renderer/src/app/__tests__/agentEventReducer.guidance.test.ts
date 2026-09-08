@@ -188,7 +188,41 @@ describe('agent guidance timeline projection', () => {
     expect(rejected.agentRun?.timeline).toEqual([])
   })
 
-  it('keeps guidance disabled until an approved continuation actually starts', () => {
+  it('preserves one queued guidance item through approval and the later applied receipt', () => {
+    const queued = applyAgentEventToChatMessage(
+      assistantMessage(),
+      guidanceEvent('guidance_queued')
+    )
+    const waiting = applyAgentEventToChatMessage(queued, {
+      type: 'approval_required',
+      runId: 'run-1',
+      action: {
+        type: 'command',
+        command: {
+          id: 'command-1',
+          command: 'sleep 5',
+          cwd: null,
+          timeoutMs: null,
+          approvalStatus: 'required',
+          riskLevel: null,
+          reason: 'test approval',
+          observe: null
+        }
+      }
+    })
+    expect(waiting.agentRun?.status).toBe('waiting_for_approval')
+    expect(waiting.agentRun?.timeline.filter((item) => item.type === 'user_guidance')).toEqual([
+      expect.objectContaining({ clientMessageId: 'client-1', status: 'queued' })
+    ])
+
+    const applied = applyAgentEventToChatMessage(waiting, guidanceEvent('guidance_applied'))
+    const replayed = applyAgentEventToChatMessage(applied, guidanceEvent('guidance_queued'))
+    expect(replayed.agentRun?.timeline.filter((item) => item.type === 'user_guidance')).toEqual([
+      expect.objectContaining({ clientMessageId: 'client-1', status: 'applied' })
+    ])
+  })
+
+  it('keeps the run available for guidance after approval before another model request starts', () => {
     const waiting: ChatMessage = {
       ...assistantMessage(),
       agentRun: {
@@ -211,7 +245,7 @@ describe('agent guidance timeline projection', () => {
       }
     })
 
-    expect(accepted.agentRun?.status).toBe('starting')
+    expect(accepted.agentRun?.status).toBe('running')
 
     const started = applyAgentEventToChatMessage(accepted, {
       type: 'state',

@@ -33,6 +33,36 @@ afterEach(async () => {
 })
 
 describe('managed Playwright fixed Catalog', () => {
+  it('describes visual fallback and authorized file inputs without changing upstream contracts', () => {
+    const screenshot = MANAGED_PLAYWRIGHT_EXPOSED_TOOLS.find(
+      (tool) => tool.rawName === 'browser_take_screenshot'
+    )!
+    expect(screenshot.description).toContain('Prefer browser_snapshot and DOM targets')
+    expect(screenshot.description).toContain('inspect the screenshot with read_image')
+    expect(screenshot.description).toContain('viewport coordinates')
+    expect(screenshot.description).toContain('refresh after navigation, scrolling, resizing')
+    expect(screenshot.description).not.toContain("can't perform actions based on the screenshot")
+
+    for (const rawName of ['browser_file_upload', 'browser_drop']) {
+      const exposed = MANAGED_PLAYWRIGHT_EXPOSED_TOOLS.find((tool) => tool.rawName === rawName)!
+      const upstream = MANAGED_PLAYWRIGHT_CATALOG_LOCK.tools.find((tool) => tool.name === rawName)!
+      const properties = exposed.inputSchema.properties as Record<string, Record<string, unknown>>
+      const upstreamProperties = upstream.inputSchema.properties as typeof properties
+      expect(exposed.description).toContain('authorized workspace-relative or absolute file paths')
+      expect(properties.paths.description).toContain('browser-download:<uuid>')
+      expect(properties.paths).toEqual({
+        ...upstreamProperties.paths,
+        description: properties.paths.description
+      })
+      expect(upstreamProperties.paths.description).not.toContain('browser-download:')
+      expect(exposed.upstreamSchemaDigest).toBe(digestJson(upstream.inputSchema))
+    }
+    expect(
+      MANAGED_PLAYWRIGHT_EXPOSED_TOOLS.find((tool) => tool.rawName === 'browser_file_upload')!
+        .description
+    ).toContain('Omitting paths cancels the file chooser')
+  })
+
   it('locks all 69 upstream schemas while exposing only the reviewed Host-overlay subset', () => {
     expect(MANAGED_PLAYWRIGHT_CATALOG_LOCK.tools).toHaveLength(69)
     expect(
@@ -288,7 +318,7 @@ describe('managed Playwright fixed Catalog', () => {
       exposedToolCount: 61,
       upstreamCatalogDigest:
         'sha256:6c24d29f58242f59fa4e53e46ff5216170a21358d613a8b5f7f5d323c0080fbf',
-      policyDigest: 'sha256:4f36ae204ff1990f1cec45c8054062406b7a02186b7bd39620a30f128505f268'
+      policyDigest: 'sha256:cf4b0d4ba01ce5c695096ad4dca499ceb895fd3c08c6f638b5602c1a21dc6e0c'
     })
 
     const titleDrift = structuredClone(live)

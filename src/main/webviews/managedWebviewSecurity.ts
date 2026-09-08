@@ -1,5 +1,6 @@
-import { session } from 'electron'
+import { BrowserWindow, session } from 'electron'
 import type {
+  BrowserWindowConstructorOptions,
   Event,
   WebContents,
   WebContentsDidStartNavigationEventParams,
@@ -31,6 +32,16 @@ export interface ManagedWebviewTargetRegistry {
     guest: WebContents
     url: string
   }): Promise<void> | void
+  /** Synchronous, side-effect-free admission before Electron allocates a native child. */
+  canCreateNativePopup?(input: { guest: WebContents; url: string }): boolean
+  /** Adopts Electron's exact native child WebContents before its initial navigation. */
+  createNativePopup?(input: {
+    guest: WebContents
+    url: string
+    options: BrowserWindowConstructorOptions
+    createWindow: (options: BrowserWindowConstructorOptions) => BrowserWindow
+    configureGuest: (child: WebContents) => void
+  }): WebContents
   /** Exact, short-lived Main authorization; never widens the partition protocol policy. */
   isInternalNavigationAllowed?(guest: WebContents, url: string): boolean
 }
@@ -103,7 +114,7 @@ export function configureManagedWebviewHost(
     enforceManagedWebPreferences(webPreferences, policy)
     const requestedNewWindowHandling = 'allowpopups' in params
     if (policy.newWindowBehavior === 'navigate-current' && requestedNewWindowHandling) {
-      // Enables the window-open event only; the guest handler still denies the real popup.
+      // Enables the window-open event only; the guest handler decides managed admission.
       params.allowpopups = 'true'
     } else {
       delete params.allowpopups
@@ -120,7 +131,7 @@ export function configureManagedWebviewHost(
       return
     }
 
-    configureManagedGuest(guest, policy, options.networkGuard, options.targetRegistry)
+    configureManagedGuest(guest, host, policy, options.networkGuard, options.targetRegistry)
     if (options.targetRegistry) {
       registerManagedGuestWhenIdentified(
         options.targetRegistry,
@@ -230,11 +241,54 @@ function enforceManagedWebPreferences(
 
 function configureManagedGuest(
   guest: WebContents,
+  host: WebContents,
   policy: ManagedWebviewPolicy,
   networkGuard?: BrowserNetworkGuard,
   targetRegistry?: ManagedWebviewTargetRegistry
 ): void {
   guest.setWindowOpenHandler(({ url }) => {
+    if (
+      policy.newWindowBehavior === 'navigate-current' &&
+      networkGuard &&
+      targetRegistry?.createNativePopup &&
+      isAllowedNativePopupUrl(url, policy)
+    ) {
+      try {
+        if (targetRegistry.canCreateNativePopup?.({ guest, url }) === false) {
+          return { action: 'deny' }
+        }
+      } catch {
+        return { action: 'deny' }
+      }
+      return {
+        action: 'allow',
+        overrideBrowserWindowOptions: managedPopupWindowOptions(policy),
+        createWindow: (options) => {
+          const nativeGuest = (
+            options as BrowserWindowConstructorOptions & { webContents?: WebContents }
+          ).webContents
+          if (!nativeGuest) {
+            throw new Error('Managed popup requires the exact native child WebContents')
+          }
+          try {
+            return targetRegistry.createNativePopup!({
+              guest,
+              url,
+              options: managedPopupWindowOptions(policy, options),
+              createWindow: (windowOptions) => createManagedPopupWindow(host, windowOptions, url),
+              configureGuest: (child) =>
+                configureManagedGuest(child, host, policy, networkGuard, targetRegistry)
+            })
+          } catch {
+            // Electron has already allocated this native child. Reject by closing that exact
+            // guest and returning it; throwing here escapes Electron's window-open callback and
+            // can leave the unregistered child alive after a capacity or lifecycle race.
+            if (!nativeGuest.isDestroyed()) nativeGuest.close({ waitForBeforeUnload: false })
+            return nativeGuest
+          }
+        }
+      }
+    }
     if (
       policy.newWindowBehavior === 'navigate-current' &&
       isAllowedWebviewUrl(url, policy) &&
@@ -279,6 +333,103 @@ function configureManagedGuest(
       networkGuard?.recordBlockedNavigation(guest)
     }
   })
+}
+
+function createManagedPopupWindow(
+  host: WebContents,
+  options: BrowserWindowConstructorOptions,
+  url: string
+): BrowserWindow {
+  // Nested login popups use the original application host as their positioning anchor too.
+  const hostWindow = BrowserWindow.fromWebContents(host)
+  if (!hostWindow || hostWindow.isDestroyed()) {
+    throw new Error('Managed popup requires its application window')
+  }
+  const hostBounds = hostWindow.getBounds()
+  const window = new BrowserWindow({
+    ...options,
+    title: `CaptainWho-${url}`,
+    x: Math.round(hostBounds.x + (hostBounds.width - options.width!) / 2),
+    y: Math.round(hostBounds.y + (hostBounds.height - options.height!) / 2)
+  })
+  const guest = window.webContents
+  const updateTitle = (): void => {
+    if (!window.isDestroyed() && !guest.isDestroyed()) {
+      window.setTitle(`CaptainWho-${guest.getURL() || url}`)
+    }
+  }
+  const preventPageTitle = (event: Event): void => {
+    event.preventDefault()
+    updateTitle()
+  }
+  const centerOnHost = (): void => {
+    if (window.isDestroyed() || hostWindow.isDestroyed()) return
+    const currentHostBounds = hostWindow.getBounds()
+    const bounds = window.getBounds()
+    window.setPosition(
+      Math.round(currentHostBounds.x + (currentHostBounds.width - bounds.width) / 2),
+      Math.round(currentHostBounds.y + (currentHostBounds.height - bounds.height) / 2)
+    )
+  }
+  // An approval may keep the child hidden while the user moves the main window. Recenter once
+  // when it first appears; subsequent focus changes preserve the user's own window placement.
+  window.once('show', centerOnHost)
+  window.on('page-title-updated', preventPageTitle)
+  guest.on('did-navigate', updateTitle)
+  guest.on('did-navigate-in-page', updateTitle)
+  window.once('closed', () => {
+    window.removeListener('show', centerOnHost)
+    window.removeListener('page-title-updated', preventPageTitle)
+    guest.removeListener('did-navigate', updateTitle)
+    guest.removeListener('did-navigate-in-page', updateTitle)
+  })
+  return window
+}
+
+function managedPopupWindowOptions(
+  policy: ManagedWebviewPolicy,
+  options?: BrowserWindowConstructorOptions
+): BrowserWindowConstructorOptions {
+  const webPreferences: WebPreferences = {}
+  enforceManagedWebPreferences(webPreferences, policy)
+  webPreferences.session = session.fromPartition(policy.partition)
+  // Electron supplies this internal constructor field to preserve the native window proxy,
+  // opener relationship, and initial POST body. Never create or navigate a replacement guest.
+  const webContents = (
+    options as (BrowserWindowConstructorOptions & { webContents?: WebContents }) | undefined
+  )?.webContents
+  if (options && !webContents) {
+    throw new Error('Managed popup requires the exact native child WebContents')
+  }
+  return {
+    ...(webContents ? { webContents } : {}),
+    width: 520,
+    height: 680,
+    minWidth: 480,
+    minHeight: 320,
+    maxWidth: 1_600,
+    maxHeight: 1_200,
+    title: 'CaptainWho',
+    show: false,
+    autoHideMenuBar: true,
+    frame: true,
+    resizable: true,
+    fullscreen: false,
+    fullscreenable: false,
+    kiosk: false,
+    alwaysOnTop: false,
+    skipTaskbar: false,
+    webPreferences
+  }
+}
+
+function isAllowedNativePopupUrl(value: string, policy: ManagedWebviewPolicy): boolean {
+  if (value === SAFE_INITIAL_URL) return true
+  try {
+    return policy.allowedProtocols.has(new URL(value).protocol)
+  } catch {
+    return false
+  }
 }
 
 function navigateManagedGuest(guest: WebContents, url: string): void {

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import {
   ArrowLeft,
@@ -82,6 +82,7 @@ export function BrowserPanel({
   viewport
 }: BrowserPanelProps) {
   const { t } = useFrontendConfig()
+  const addressErrorId = useId()
   const menuAnchorRef = useRef<HTMLDivElement>(null)
   const webviewRef = useRef<WebviewTag | null>(null)
   const documentReadyWebviewRef = useRef<WebviewTag | null>(null)
@@ -101,6 +102,7 @@ export function BrowserPanel({
   } | null>(null)
   const [addressValue, setAddressValue] = useState('')
   const [isAddressEditing, setIsAddressEditing] = useState(false)
+  const [isAddressInvalid, setIsAddressInvalid] = useState(false)
   const [isDownloadsOpen, setIsDownloadsOpen] = useState(false)
   const [isMenuOpen, setIsMenuOpen] = useState(false)
   const [isClearDataOpen, setIsClearDataOpen] = useState(false)
@@ -133,11 +135,6 @@ export function BrowserPanel({
   }, [isActive, onSurfaceInstanceChange])
 
   const closeMenu = useCallback(() => setIsMenuOpen(false), [])
-  const handleSurfaceFocus = useCallback(() => {
-    closeMenu()
-    setIsDownloadsOpen(false)
-    onSurfaceFocus?.()
-  }, [closeMenu, onSurfaceFocus])
   const ignoreMenuPortal = useCallback(
     (target: Node) => target instanceof Element && Boolean(target.closest('.browser-panel__menu')),
     []
@@ -230,6 +227,15 @@ export function BrowserPanel({
     },
     [viewId]
   )
+
+  const handleSurfaceFocus = useCallback(() => {
+    // Returning from a native popup does not change the selected sidebar tab. Reassert the
+    // exact current webview through the same guarded instance/revision handshake as tab changes.
+    reportManualSurfaceSelection(webviewRef.current)
+    closeMenu()
+    setIsDownloadsOpen(false)
+    onSurfaceFocus?.()
+  }, [closeMenu, onSurfaceFocus, reportManualSurfaceSelection])
 
   const handleWebviewReady = useCallback(
     (webview: WebviewTag | null): void => {
@@ -357,9 +363,11 @@ export function BrowserPanel({
   const submitAddress = useCallback(async () => {
     const url = normalizeBrowserUrl(addressValue)
     if (!url) {
+      setIsAddressInvalid(true)
       return
     }
 
+    setIsAddressInvalid(false)
     setAddressValue(url)
     onPageMetadataChange?.({
       iconUrl: null,
@@ -421,11 +429,13 @@ export function BrowserPanel({
 
         <form
           className="browser-panel__address"
+          data-invalid={isAddressInvalid ? 'true' : undefined}
           onBlur={(event) => {
             const nextTarget = event.relatedTarget
             if (nextTarget instanceof Node && event.currentTarget.contains(nextTarget)) return
 
             setIsAddressEditing(false)
+            setIsAddressInvalid(false)
             setAddressValue(currentUrl ?? '')
           }}
           onSubmit={(event) => {
@@ -439,8 +449,11 @@ export function BrowserPanel({
             spellCheck={false}
             placeholder={t('browser.addressPlaceholder')}
             aria-label={t('browser.addressPlaceholder')}
+            aria-invalid={isAddressInvalid || undefined}
+            aria-describedby={isAddressInvalid ? addressErrorId : undefined}
             onChange={(event) => {
               setIsAddressEditing(true)
+              setIsAddressInvalid(false)
               setAddressValue(event.target.value)
             }}
             onFocus={() => setIsAddressEditing(true)}
@@ -477,6 +490,11 @@ export function BrowserPanel({
             </button>
           </div>
         </div>
+        {isAddressInvalid ? (
+          <p className="browser-panel__address-error" id={addressErrorId} role="alert">
+            {t('browser.invalidAddress')}
+          </p>
+        ) : null}
       </header>
 
       {isMenuOpen && menuPosition

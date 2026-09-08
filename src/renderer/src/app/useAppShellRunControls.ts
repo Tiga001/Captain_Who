@@ -1,12 +1,13 @@
 /* eslint-disable react-hooks/exhaustive-deps -- extracted callbacks keep AppShell's original dependency arrays; omitted inputs are stable refs. */
-import { useCallback, type MutableRefObject } from 'react'
+import { useCallback, useRef, type MutableRefObject } from 'react'
 import type { AgentEvent } from '@mycopilot/protocol'
 import type { Translate } from '../config/translationFormat'
 import { getUserFacingErrorMessage } from '../errors/userFacingError'
 import { cancelAgentRun, steerAgentRun } from '../features/agent/agentClient'
 import {
   applyAgentEventToChatMessage,
-  applyOptimisticGuidanceToChatMessage
+  applyOptimisticGuidanceToChatMessage,
+  removeGuidanceFromChatMessage
 } from '../features/agentRun/agentEventReducer'
 import { isAssistantMessageGenerating } from '../features/chat/assistantGeneration'
 import type {
@@ -15,6 +16,7 @@ import type {
   ChatQueuedMessage
 } from '../features/chat/chatTypes'
 import type { ActiveRunBinding, AutoSubmitQueuedMessage } from './appTypes'
+import { createId } from './chatMessageFactory'
 
 type AppShellRuntime = ReturnType<(typeof import('./useAppShellRuntime'))['useAppShellRuntime']>
 
@@ -41,6 +43,7 @@ interface UseAppShellRunControlsOptions {
   >
   removeQueuedMessageByClientId: AppShellRuntime['removeQueuedMessageByClientId']
   restoreRejectedGuidance: AppShellRuntime['restoreRejectedGuidance']
+  supersedeRejectedGuidance: AppShellRuntime['supersedeRejectedGuidance']
   scheduleStoppedRunReconciliation: AppShellRuntime['scheduleStoppedRunReconciliation']
   stopRequestedPendingMessageIdsRef: MutableRefObject<Set<string>>
   stopRequestedRunIdsRef: MutableRefObject<Set<string>>
@@ -61,12 +64,14 @@ export function useAppShellRunControls({
   pendingGuidancePayloadsRef,
   removeQueuedMessageByClientId,
   restoreRejectedGuidance,
+  supersedeRejectedGuidance,
   scheduleStoppedRunReconciliation,
   stopRequestedPendingMessageIdsRef,
   stopRequestedRunIdsRef,
   t,
   updateAssistantMessage
 }: UseAppShellRunControlsOptions) {
+  const guidanceSubmissionsRef = useRef(new Set<string>())
   const stopActiveGeneration = useCallback(() => {
     if (!activeConversationId) return
     autoSubmitQueuedMessageRef.current(activeConversationId, 'pause')
@@ -104,9 +109,19 @@ export function useAppShellRunControls({
   ])
 
   const guideQueuedMessage = useCallback(
-    (queuedMessage: ChatQueuedMessage) => {
+    (selectedMessage: ChatQueuedMessage) => {
       const conversationId = activeConversationIdRef.current
       if (!conversationId) return
+      const queuedMessage = draftsRef.current[conversationId]?.queuedMessages.find(
+        (message) => message.id === selectedMessage.id
+      )
+      const submissionKey = `${conversationId}:${selectedMessage.id}`
+      if (
+        !queuedMessage ||
+        queuedMessage.status === 'submitting' ||
+        guidanceSubmissionsRef.current.has(submissionKey)
+      )
+        return
       const conversation = conversationsRef.current.find(
         (candidate) => candidate.id === conversationId
       )
@@ -114,7 +129,11 @@ export function useAppShellRunControls({
         .reverse()
         .find(isAssistantMessageGenerating)
       const runId = assistantMessage?.agentRun?.runId
-      if (!assistantMessage || !runId || assistantMessage.agentRun?.status !== 'running') {
+      if (
+        !assistantMessage ||
+        !runId ||
+        !['running', 'waiting_for_approval'].includes(assistantMessage.agentRun?.status ?? '')
+      ) {
         mutateDraft(conversationId, (draft) => ({
           ...draft,
           queuedMessages: draft.queuedMessages.map((message) =>
@@ -134,54 +153,93 @@ export function useAppShellRunControls({
         draftsRef.current[conversationId]?.queuedMessages.findIndex(
           (message) => message.id === queuedMessage.id
         ) ?? -1
-      if (queueIndex < 0 || queuedMessage.status === 'submitting') return
+      if (queueIndex < 0) return
 
-      const submittingMessage: ChatQueuedMessage = {
-        ...queuedMessage,
-        status: 'submitting',
-        error: undefined
-      }
-      pendingGuidancePayloadsRef.current.set(queuedMessage.clientMessageId, {
-        assistantMessageId: assistantMessage.id,
-        conversationId,
-        index: queueIndex,
-        message: queuedMessage
-      })
-      mutateDraft(conversationId, (draft) => ({
-        ...draft,
-        queuedMessages: draft.queuedMessages.map((message) =>
-          message.id === queuedMessage.id ? submittingMessage : message
+      guidanceSubmissionsRef.current.add(submissionKey)
+      let submittedMessage = queuedMessage
+      const projectSubmission = () => {
+        pendingGuidancePayloadsRef.current.set(submittedMessage.clientMessageId, {
+          assistantMessageId: assistantMessage.id,
+          conversationId,
+          index: queueIndex,
+          message: submittedMessage
+        })
+        mutateDraft(conversationId, (draft) => ({
+          ...draft,
+          queuedMessages: draft.queuedMessages.map((message) =>
+            message.id === submittedMessage.id
+              ? { ...submittedMessage, status: 'submitting', error: undefined }
+              : message
+          )
+        }))
+        updateAssistantMessage(
+          conversationId,
+          assistantMessage.id,
+          (message) => applyOptimisticGuidanceToChatMessage(message, submittedMessage, runId),
+          { touchConversation: true }
         )
-      }))
+      }
+      const send = () =>
+        steerAgentRun({
+          conversationId,
+          expectedRunId: runId,
+          clientMessageId: submittedMessage.clientMessageId,
+          content: submittedMessage.content,
+          attachments: submittedMessage.attachments
+        })
       void flushRunMessagePersistence(conversationId, assistantMessage.id, runId)
-      updateAssistantMessage(
-        conversationId,
-        assistantMessage.id,
-        (message) => applyOptimisticGuidanceToChatMessage(message, queuedMessage, runId),
-        { touchConversation: true }
-      )
+      projectSubmission()
 
-      void steerAgentRun({
-        conversationId,
-        expectedRunId: runId,
-        clientMessageId: queuedMessage.clientMessageId,
-        content: queuedMessage.content,
-        attachments: queuedMessage.attachments
-      })
+      void send()
+        .then(async (output) => {
+          // An error row can also mean a lost acknowledgement. Replay its original identity
+          // first; only an authoritative terminal refusal permits this explicit manual resend
+          // to use a new identity. Identity conflicts never prove the original was unapplied.
+          if (
+            queuedMessage.status !== 'error' ||
+            output.status !== 'rejected' ||
+            output.rejectionCode !== 'run_not_steerable' ||
+            stopRequestedRunIdsRef.current.has(runId)
+          )
+            return output
+          const currentMessage = draftsRef.current[conversationId]?.queuedMessages.find(
+            (message) => message.id === queuedMessage.id
+          )
+          const currentRun = conversationsRef.current
+            .find((candidate) => candidate.id === conversationId)
+            ?.messages.find((message) => message.id === assistantMessage.id)?.agentRun
+          if (
+            currentMessage?.clientMessageId !== queuedMessage.clientMessageId ||
+            currentRun?.runId !== runId ||
+            !['running', 'waiting_for_approval'].includes(currentRun.status)
+          )
+            return output
+
+          supersedeRejectedGuidance(queuedMessage.clientMessageId)
+          updateAssistantMessage(
+            conversationId,
+            assistantMessage.id,
+            (message) => removeGuidanceFromChatMessage(message, queuedMessage.clientMessageId),
+            { touchConversation: true }
+          )
+          submittedMessage = { ...queuedMessage, clientMessageId: createId('guidance') }
+          projectSubmission()
+          return send()
+        })
         .then((output) => {
           if (output.status === 'rejected') {
             restoreRejectedGuidance(
               conversationId,
               assistantMessage.id,
-              queuedMessage.clientMessageId,
+              submittedMessage.clientMessageId,
               output.message || t('chat.guidanceFailed')
             )
             queueMicrotask(() => autoSubmitQueuedMessageRef.current(conversationId))
             return
           }
 
-          removeQueuedMessageByClientId(conversationId, queuedMessage.clientMessageId)
-          const attachments = queuedMessage.attachments.map((attachment) => ({
+          removeQueuedMessageByClientId(conversationId, submittedMessage.clientMessageId)
+          const attachments = submittedMessage.attachments.map((attachment) => ({
             id: attachment.id,
             kind: attachment.kind,
             name: attachment.name,
@@ -194,20 +252,20 @@ export function useAppShellRunControls({
                   type: 'guidance_applied',
                   runId,
                   guidanceId: output.guidanceId,
-                  clientMessageId: queuedMessage.clientMessageId,
-                  content: queuedMessage.content,
+                  clientMessageId: submittedMessage.clientMessageId,
+                  content: submittedMessage.content,
                   attachments,
-                  createdAt: queuedMessage.createdAt,
+                  createdAt: submittedMessage.createdAt,
                   sequence: 0
                 }
               : {
                   type: 'guidance_queued',
                   runId,
                   guidanceId: output.guidanceId,
-                  clientMessageId: queuedMessage.clientMessageId,
-                  content: queuedMessage.content,
+                  clientMessageId: submittedMessage.clientMessageId,
+                  content: submittedMessage.content,
                   attachments,
-                  createdAt: queuedMessage.createdAt
+                  createdAt: submittedMessage.createdAt
                 }
           updateAssistantMessage(
             conversationId,
@@ -216,18 +274,33 @@ export function useAppShellRunControls({
             { touchConversation: true }
           )
           if (output.status === 'applied') {
-            pendingGuidancePayloadsRef.current.delete(queuedMessage.clientMessageId)
+            pendingGuidancePayloadsRef.current.delete(submittedMessage.clientMessageId)
           }
           queueMicrotask(() => autoSubmitQueuedMessageRef.current(conversationId))
         })
         .catch((error) => {
+          // A notification can acknowledge acceptance before the RPC transport loses its reply.
+          // That authoritative receipt wins; do not turn an accepted input back into an error row.
+          const accepted = conversationsRef.current
+            .find((candidate) => candidate.id === conversationId)
+            ?.messages.find((message) => message.id === assistantMessage.id)
+            ?.agentRun?.timeline.some(
+              (item) =>
+                item.type === 'user_guidance' &&
+                item.clientMessageId === submittedMessage.clientMessageId &&
+                (item.status === 'queued' || item.status === 'applied')
+            )
+          if (accepted) return
           restoreRejectedGuidance(
             conversationId,
             assistantMessage.id,
-            queuedMessage.clientMessageId,
+            submittedMessage.clientMessageId,
             getUserFacingErrorMessage(error, t, 'chat.guidanceFailed')
           )
           queueMicrotask(() => autoSubmitQueuedMessageRef.current(conversationId))
+        })
+        .finally(() => {
+          guidanceSubmissionsRef.current.delete(submissionKey)
         })
     },
     [
@@ -235,6 +308,7 @@ export function useAppShellRunControls({
       mutateDraft,
       removeQueuedMessageByClientId,
       restoreRejectedGuidance,
+      supersedeRejectedGuidance,
       t,
       updateAssistantMessage
     ]

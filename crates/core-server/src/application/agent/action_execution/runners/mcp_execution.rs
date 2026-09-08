@@ -8,6 +8,7 @@ impl AgentService {
         dispatch_already_claimed: bool,
     ) {
         let run_id = record.snapshot.run_id.clone();
+        let _steering_cleanup = self.active_run_steering_cleanup(&run_id, notifications.clone());
         self.seed_trace_snapshot_from_checkpoint(
             &run_id,
             record.agent_input.resume_checkpoint.as_ref(),

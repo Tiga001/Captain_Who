@@ -93,7 +93,8 @@ export function applyOptimisticGuidanceToChatMessage(
   queuedMessage: ChatQueuedMessage,
   runId: string
 ): ChatMessage {
-  const run = ensureAgentRun(message.agentRun, runId, 'running')
+  // Accepting guidance does not resume an approval pause; only the Host's decision does.
+  const run = ensureAgentRun(message.agentRun, runId, message.agentRun?.status ?? 'running')
   return {
     ...message,
     status: 'pending',

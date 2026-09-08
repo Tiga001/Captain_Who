@@ -115,6 +115,17 @@ export function useAgentRunLifecycle({
   const previousActiveConversationIdRef = useRef(activeConversationId)
   const commandSessionHydrationMountedRef = useRef(true)
   const terminalReconciliationsRef = useRef(new Map<string, Promise<void>>())
+  const supersededGuidanceIdsRef = useRef(new Set<string>())
+
+  const supersedeRejectedGuidance = useCallback(
+    (clientMessageId: string) => {
+      // Decision notifications and RPC replies can both arrive after a manual resend. Fence
+      // the old identity, including any attachment recovery already awaiting storage below.
+      supersededGuidanceIdsRef.current.add(clientMessageId)
+      pendingGuidancePayloadMap.delete(clientMessageId)
+    },
+    [pendingGuidancePayloadMap]
+  )
 
   useEffect(() => {
     const hydratedConversationSet = commandSessionHydratedConversationSetRef.current
@@ -313,6 +324,7 @@ export function useAgentRunLifecycle({
         createdAt: number
       }
     ) => {
+      if (supersededGuidanceIdsRef.current.has(clientMessageId)) return
       const pending = pendingGuidancePayloadMap.get(clientMessageId)
       pendingGuidancePayloadMap.delete(clientMessageId)
       const alreadyRestored = draftsRef.current[conversationId]?.queuedMessages.find(
@@ -320,6 +332,7 @@ export function useAgentRunLifecycle({
       )
 
       const restore = (message: ChatQueuedMessage, preferredIndex: number) => {
+        if (supersededGuidanceIdsRef.current.has(clientMessageId)) return
         mutateDraft(conversationId, (draft) => {
           const withoutMessage = draft.queuedMessages.filter(
             (candidate) => candidate.clientMessageId !== clientMessageId
@@ -1279,6 +1292,7 @@ export function useAgentRunLifecycle({
     requestAssistantResponse,
     restoreRejectedGuidance,
     scheduleStoppedRunReconciliation,
+    supersedeRejectedGuidance,
     updateAssistantMessage,
     waitForRunSettlement
   }

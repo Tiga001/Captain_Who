@@ -116,6 +116,8 @@ export interface ManagedPlaywrightMcpHostOptions {
   closeSurface: () => Promise<void>
   detachAutomation: () => Promise<void>
   toolTimeoutMs?: number
+  /** Maximum wait for the shared browser dispatch slot; separate from Tool execution time. */
+  queueTimeoutMs?: number
   createOfficialConnection?: ManagedPlaywrightConnectionFactory
   createClient?: () => ManagedMcpClient
 }

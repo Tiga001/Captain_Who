@@ -14,9 +14,9 @@
   "identity": {
     "managedMcpId": "builtin.browser_automation.mcp",
     "capabilityId": "browser_automation",
-    "manifestVersion": "builtin-browser-automation-playwright-mcp-0.0.79-v7",
+    "manifestVersion": "builtin-browser-automation-playwright-mcp-0.0.79-v8",
     "upstreamCatalogDigest": "sha256:6c24d29f58242f59fa4e53e46ff5216170a21358d613a8b5f7f5d323c0080fbf",
-    "policyDigest": "sha256:4f36ae204ff1990f1cec45c8054062406b7a02186b7bd39620a30f128505f268"
+    "policyDigest": "sha256:cf4b0d4ba01ce5c695096ad4dca499ceb895fd3c08c6f638b5602c1a21dc6e0c"
   },
   "classification": {
     "status": "contract",
@@ -232,9 +232,16 @@
       "exposed": true,
       "availability": "model_visible",
       "upstreamSchemaDigest": "sha256:2f2a2c904744c935fc66547031c43b43466e86043f6c306624b536867b18d8e8",
-      "hostOverlayDigest": "sha256:c1164c0b22970782b52b27a778173249c7670f90b32e8fd2efa21b5a2f27fa65",
-      "hostInputSchemaDigest": "sha256:604263e421f88763ead1e67d13f914f84e6a16a4304e96eee3932a186c0dc2d4",
-      "hostOverlay": { "addCallReason": true },
+      "hostOverlayDigest": "sha256:7ddee678f067fafb49a056070641d61088272538e86e4d5de6596e24ca6125b6",
+      "hostInputSchemaDigest": "sha256:97851c28e7666d85955fc45daa1597ecebcd13c01fbba4564ac560cf7b29e1d7",
+      "hostOverlay": {
+        "addCallReason": true,
+        "propertyOverrides": {
+          "paths": {
+            "description": "Files to drop: 1–16 authorized workspace-relative or absolute file paths, or accessible file-input references such as browser-download:<uuid>. Omit paths for a data-only drop."
+          }
+        }
+      },
       "reasonCode": "sensitive_data_or_file_boundary",
       "constraints": [
         "requires_call_reason",
@@ -268,9 +275,16 @@
       "exposed": true,
       "availability": "model_visible",
       "upstreamSchemaDigest": "sha256:c76aede191ef1e3bdd09ff177419a1e77a0e1f3f676bdd7c8053ac78e6a80086",
-      "hostOverlayDigest": "sha256:c1164c0b22970782b52b27a778173249c7670f90b32e8fd2efa21b5a2f27fa65",
-      "hostInputSchemaDigest": "sha256:692ecaa3f41402f927528579cb131699608989ef02a161723a7a93b6480cc559",
-      "hostOverlay": { "addCallReason": true },
+      "hostOverlayDigest": "sha256:37e0c098880d7cfe8b2620949d68d190875e028fb0968b6969a70e4bb5497427",
+      "hostInputSchemaDigest": "sha256:04f671aa3f3b4a0ba641d61f3c891dbaf3a522c46493fe6d384029794b18b408",
+      "hostOverlay": {
+        "addCallReason": true,
+        "propertyOverrides": {
+          "paths": {
+            "description": "Files to upload: 1–16 authorized workspace-relative or absolute file paths, or accessible file-input references such as browser-download:<uuid>. Omitting paths cancels the file chooser and does not open a native file picker."
+          }
+        }
+      },
       "reasonCode": "sensitive_data_or_file_boundary",
       "constraints": ["requires_call_reason", "task_scoped_tool_approval"],
       "behaviorContract": "original_tool_internal_approval_then_fixed_official_server"
@@ -687,7 +701,7 @@
       "capability": "pdf",
       "handlingMode": "artifact_managed",
       "exposed": true,
-      "availability": "model_visible_typed_unavailable",
+      "availability": "model_visible_with_page_limits",
       "upstreamSchemaDigest": "sha256:9ef6269f3a795e2f49cc03b9478671ee10e0cc2bd3a78fb2fc3d9fa48907d6e3",
       "hostOverlayDigest": "sha256:9143a7cc349609a500915141dc319c7d2a322d631bfaf57a4872dd0b7eca8d48",
       "hostInputSchemaDigest": "sha256:9a10b2606be8a84e813887629e4bb7486227beec471f7122e53585f0b1d580d2",
@@ -699,16 +713,18 @@
           }
         }
       },
-      "reasonCode": "electron39_pdf_transport_unavailable",
+      "reasonCode": "managed_guest_native_pdf_frame_limited",
       "constraints": [
         "requires_call_reason",
         "artifact_handle_only",
         "no_arbitrary_output_path",
         "host_owned_output_only",
-        "typed_platform_unavailable",
-        "electron39_print_to_pdf_unavailable"
+        "native_guest_print",
+        "no_cross_process_frames",
+        "single_pending_native_print",
+        "typed_unavailable_on_incompatible_page"
       ],
-      "behaviorContract": "typed_platform_unavailable"
+      "behaviorContract": "native_guest_pdf_with_frame_guard"
     },
     {
       "rawName": "browser_press_key",
@@ -1368,20 +1384,27 @@
     "browser_pdf_save": {
       "platform": "darwin-arm64",
       "runtime": "electron39_managed_guest",
-      "status": "typed_unavailable",
+      "status": "native_print_with_frame_limits",
       "modelVisibility": "visible",
       "fixedUpstreamContract": "page_pdf_via_page_print_to_pdf_return_as_stream",
-      "builtinEvidence": "managed_guest_debugger_rejects_page_print_to_pdf_before_cdp_dispatch_and_web_contents_print_to_pdf_does_not_settle",
+      "builtinEvidence": "same_live_guest_native_print_to_pdf_via_private_cdp_stream_preserves_cookie_session_unsaved_form_dynamic_dom_and_print_css",
+      "supportedPages": "native_frame_tree_contains_no_cross_process_frames",
+      "unsupportedPages": "existing_cross_process_frames_are_rejected_before_native_dispatch",
+      "nativeLifetime": "one_global_native_print_reservation_retained_until_actual_settlement_or_guest_destruction_even_after_timeout_or_cancellation",
+      "raceHandling": "navigation_or_frame_identity_changes_discard_output",
       "toolResult": {
         "isError": true,
         "status": "unavailable",
         "code": "browser.pdf_unavailable",
         "dispatchCertainty": "response_received"
       },
-      "fallback": "none",
-      "artifactPublished": false,
+      "fallback": "none_for_incompatible_pages",
+      "artifactPublished": "successful_supported_pages_only",
       "evidence": [
         "src/main/core/browserTargetBroker.test.ts",
+        "src/main/core/electronGuestPdfPrinter.test.ts",
+        "src/main/core/electronGuestPdf.electron.test.ts",
+        "src/main/browser/fixtures/electronGuestPdf.electron.ts",
         "src/main/core/managedPlaywrightBridge.electron.test.ts",
         "src/main/browser/fixtures/managedPlaywrightBridge.electron.ts"
       ]
@@ -1389,14 +1412,19 @@
   },
   "knownBehaviorGaps": {
     "popupOpenerSemantics": {
-      "status": "not_native_parity",
-      "builtinBehavior": "host_owned_independent_managed_webview_surface",
+      "status": "native_popup_with_managed_admission",
+      "builtinBehavior": "host_adopts_original_electron_popup_webcontents_in_managed_window",
       "targetAdmission": "current_surface_group_only",
-      "nativeWindowProxy": false,
-      "openerReference": false,
-      "openerPostMessage": false,
-      "popupCloseLinkage": false,
+      "nativeWindowProxy": true,
+      "openerReference": true,
+      "openerPostMessage": true,
+      "popupCloseLinkage": true,
+      "nativeIsolation": "noopener_noreferrer_and_coop_remain_authoritative",
+      "firstRequest": "original_get_or_post_waits_for_exact_child_owner_and_group_admission",
+      "fallbackWithoutNetworkGuard": "denied_native_popup_with_independent_managed_surface",
       "evidence": [
+        "src/main/core/browserNativePopup.electron.test.ts",
+        "src/main/core/browserNetworkGuard.test.ts",
         "src/main/core/browserSurfaceManager.test.ts",
         "src/main/core/browserTargetBroker.test.ts"
       ]

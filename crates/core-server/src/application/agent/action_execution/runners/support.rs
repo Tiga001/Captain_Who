@@ -224,6 +224,7 @@ fn skill_script_setup_failure_result(
 pub(in crate::application::agent) enum BuiltinMcpToolResultCommitDisposition {
     Committed,
     CommittedAndAdvanced,
+    OwnershipLost,
     Terminalized,
 }
 

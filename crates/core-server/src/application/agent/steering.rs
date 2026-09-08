@@ -1,12 +1,42 @@
 use super::*;
 use base64::Engine;
 
-const RUN_NOT_STEERABLE_MESSAGE: &str =
-    "The agent run has finished, is waiting for approval, or no longer accepts guidance.";
+const RUN_NOT_STEERABLE_MESSAGE: &str = "The agent run has finished or no longer accepts guidance.";
 const MAX_GUIDANCE_ATTACHMENTS: usize = 8;
 const MAX_GUIDANCE_ATTACHMENT_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_GUIDANCE_TOTAL_ATTACHMENT_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_RUN_GUIDANCE_ATTACHMENT_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Owns the inbox only until another execution segment adopts it. Failure paths which retain a
+/// durable recovery record must still stop accepting messages once their worker has exited.
+pub(super) struct ActiveRunSteeringCleanup {
+    service: AgentService,
+    run_id: String,
+    queue: Option<AgentSteerInputQueue>,
+    notifications: CoreServerNotificationSender,
+}
+
+impl ActiveRunSteeringCleanup {
+    pub(super) fn disarm(&mut self) {
+        self.queue = None;
+    }
+}
+
+impl Drop for ActiveRunSteeringCleanup {
+    fn drop(&mut self) {
+        if let Some(queue) = self.queue.as_ref() {
+            if let Err(error) = self.service.unregister_active_run_control(
+                &self.run_id,
+                queue,
+                AgentSteerRunRejectionCode::RunNotSteerable,
+                "The agent execution stopped before the guidance could be applied.",
+                &self.notifications,
+            ) {
+                eprintln!("failed to settle guidance after Host execution: {error}");
+            }
+        }
+    }
+}
 
 impl AgentService {
     pub fn steer_run(
@@ -96,7 +126,7 @@ impl AgentService {
             .map(|record| record.created_at)
             .unwrap_or_else(now_ms);
 
-        // Admission, approval fencing and terminal close all serialize through this registry
+        // Admission, approval handoff and terminal close all serialize through this registry
         // lock. The runtime queue has its own final-response close fence for the smaller race
         // between the last model response and this host-side admission path.
         let mut active_runs = self
@@ -144,6 +174,7 @@ impl AgentService {
                 created_at,
             ));
         }
+        control.steering_notifications = Some(notifications.clone());
         if let ActiveRunSteerState::Closed { code, message } = &control.steer_state {
             if existing.is_some() {
                 self.reject_queued_guidance(
@@ -395,9 +426,167 @@ impl AgentService {
                     permissions,
                     steer_state: ActiveRunSteerState::Accepting,
                     steer_input: steer_input.clone(),
+                    steering_notifications: None,
                 },
             );
         steer_input
+    }
+
+    /// Approval execution is part of the same logical Run. Its waiting inbox already accepts
+    /// messages while no Runtime is attached; continuation must adopt it without resetting FIFO.
+    pub(super) fn resume_active_run_control(
+        &self,
+        run_id: &str,
+        conversation_id: &str,
+        assistant_message_id: &str,
+        project_id: Option<&str>,
+        model_capabilities: ModelCapabilities,
+        permissions: AgentPermissions,
+    ) -> AgentSteerInputQueue {
+        let mut active = self
+            .active_runs
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Some(control) = active.get_mut(run_id) {
+            // Run identity was validated against the durable Turn before reaching this boundary.
+            // A cancelled/closed control must remain closed, never be reopened by a late worker.
+            if matches!(control.steer_state, ActiveRunSteerState::Accepting) {
+                // Claim the inbox under a fresh identity before the old Host worker exits.
+                // Its cleanup guard can then only close the retired waiting queue.
+                control.steer_input = control.steer_input.handoff_pending();
+            }
+            return control.steer_input.clone();
+        }
+        let steer_input = AgentSteerInputQueue::new();
+        active.insert(
+            run_id.to_string(),
+            ActiveRunControl {
+                conversation_id: conversation_id.to_string(),
+                assistant_message_id: assistant_message_id.to_string(),
+                project_id: project_id.map(ToString::to_string),
+                model_capabilities,
+                permissions,
+                steer_state: ActiveRunSteerState::Accepting,
+                steer_input: steer_input.clone(),
+                steering_notifications: None,
+            },
+        );
+        steer_input
+    }
+
+    pub(super) fn active_run_steering_cleanup(
+        &self,
+        run_id: &str,
+        notifications: CoreServerNotificationSender,
+    ) -> ActiveRunSteeringCleanup {
+        let queue = self
+            .active_runs
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(run_id)
+            .map(|control| control.steer_input.clone());
+        ActiveRunSteeringCleanup {
+            service: self.clone(),
+            run_id: run_id.to_string(),
+            queue,
+            notifications,
+        }
+    }
+
+    pub(super) fn segment_steering_cleanup(
+        &self,
+        run_id: &str,
+        queue: &AgentSteerInputQueue,
+        notifications: CoreServerNotificationSender,
+    ) -> ActiveRunSteeringCleanup {
+        ActiveRunSteeringCleanup {
+            service: self.clone(),
+            run_id: run_id.to_string(),
+            queue: Some(queue.clone()),
+            notifications,
+        }
+    }
+
+    pub(super) fn handoff_active_run_steering(
+        &self,
+        run_id: &str,
+        expected_steer_input: &AgentSteerInputQueue,
+    ) -> Option<AgentSteerInputQueue> {
+        let mut active = self
+            .active_runs
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let control = active.get_mut(run_id)?;
+        if !control.steer_input.is_same_queue(expected_steer_input)
+            || !matches!(control.steer_state, ActiveRunSteerState::Accepting)
+        {
+            return None;
+        }
+        let successor = control.steer_input.handoff_pending();
+        control.steer_input = successor.clone();
+        Some(successor)
+    }
+
+    pub(super) fn bind_active_run_steering_notifications(
+        &self,
+        run_id: &str,
+        expected_steer_input: &AgentSteerInputQueue,
+        notifications: CoreServerNotificationSender,
+    ) {
+        let mut active = self
+            .active_runs
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Some(control) = active.get_mut(run_id) {
+            if control.steer_input.is_same_queue(expected_steer_input) {
+                control.steering_notifications = Some(notifications);
+            }
+        }
+    }
+
+    /// Also covers cancellation/failure during approved Host work, before a Runtime resumes.
+    pub(super) fn finish_active_run_steering(&self, run_id: &str, message: &str) {
+        let current = self
+            .active_runs
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(run_id)
+            .map(|control| {
+                (
+                    control.steer_input.clone(),
+                    control.steering_notifications.clone(),
+                )
+            });
+        let Some((queue, notifications)) = current else {
+            return;
+        };
+        let notifications =
+            notifications.unwrap_or_else(|| tokio::sync::mpsc::unbounded_channel().0);
+        if let Err(error) = self.unregister_active_run_control(
+            run_id,
+            &queue,
+            AgentSteerRunRejectionCode::RunNotSteerable,
+            message,
+            &notifications,
+        ) {
+            eprintln!("failed to settle terminal Run guidance: {error}");
+        }
+    }
+
+    /// Stop admission immediately, leaving final settlement to the current worker. It may have
+    /// already drained an input whose trace acknowledgement is still committing concurrently.
+    pub(super) fn fence_cancelled_run_steering(&self, run_id: &str) {
+        let mut active = self
+            .active_runs
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Some(control) = active.get_mut(run_id) {
+            control.steer_state = ActiveRunSteerState::Closed {
+                code: AgentSteerRunRejectionCode::RunNotSteerable,
+                message: "The agent run was cancelled and no longer accepts guidance.".to_string(),
+            };
+            control.steer_input.close();
+        }
     }
 
     pub(super) fn refresh_agent_input_attachment_library(

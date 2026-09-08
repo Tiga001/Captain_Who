@@ -229,6 +229,7 @@ export async function buildPlaywrightConformanceReport(options = {}) {
   const tools = catalog.tools.map((upstreamTool) => {
     const policy = policyByName.get(upstreamTool.rawName)
     const typedPlatformUnavailable = policy.constraints.includes('typed_platform_unavailable')
+    const frameLimitedPdf = policy.constraints.includes('no_cross_process_frames')
     return {
       rawName: upstreamTool.rawName,
       modelName: policy.modelName,
@@ -238,7 +239,9 @@ export async function buildPlaywrightConformanceReport(options = {}) {
       availability: policy.exposed
         ? typedPlatformUnavailable
           ? 'model_visible_typed_unavailable'
-          : 'model_visible'
+          : frameLimitedPdf
+            ? 'model_visible_with_page_limits'
+            : 'model_visible'
         : 'model_hidden',
       upstreamSchemaDigest: upstreamTool.schemaDigest,
       hostOverlayDigest: policy.hostOverlayDigest,
@@ -248,7 +251,9 @@ export async function buildPlaywrightConformanceReport(options = {}) {
       constraints: policy.constraints,
       behaviorContract: typedPlatformUnavailable
         ? 'typed_platform_unavailable'
-        : behaviorContractFor(policy.handlingMode)
+        : frameLimitedPdf
+          ? 'native_guest_pdf_with_frame_guard'
+          : behaviorContractFor(policy.handlingMode)
     }
   })
 
@@ -322,21 +327,29 @@ export async function buildPlaywrightConformanceReport(options = {}) {
       browser_pdf_save: {
         platform: 'darwin-arm64',
         runtime: 'electron39_managed_guest',
-        status: 'typed_unavailable',
+        status: 'native_print_with_frame_limits',
         modelVisibility: 'visible',
         fixedUpstreamContract: 'page_pdf_via_page_print_to_pdf_return_as_stream',
         builtinEvidence:
-          'managed_guest_debugger_rejects_page_print_to_pdf_before_cdp_dispatch_and_web_contents_print_to_pdf_does_not_settle',
+          'same_live_guest_native_print_to_pdf_via_private_cdp_stream_preserves_cookie_session_unsaved_form_dynamic_dom_and_print_css',
+        supportedPages: 'native_frame_tree_contains_no_cross_process_frames',
+        unsupportedPages: 'existing_cross_process_frames_are_rejected_before_native_dispatch',
+        nativeLifetime:
+          'one_global_native_print_reservation_retained_until_actual_settlement_or_guest_destruction_even_after_timeout_or_cancellation',
+        raceHandling: 'navigation_or_frame_identity_changes_discard_output',
         toolResult: {
           isError: true,
           status: 'unavailable',
           code: 'browser.pdf_unavailable',
           dispatchCertainty: 'response_received'
         },
-        fallback: 'none',
-        artifactPublished: false,
+        fallback: 'none_for_incompatible_pages',
+        artifactPublished: 'successful_supported_pages_only',
         evidence: [
           'src/main/core/browserTargetBroker.test.ts',
+          'src/main/core/electronGuestPdfPrinter.test.ts',
+          'src/main/core/electronGuestPdf.electron.test.ts',
+          'src/main/browser/fixtures/electronGuestPdf.electron.ts',
           'src/main/core/managedPlaywrightBridge.electron.test.ts',
           'src/main/browser/fixtures/managedPlaywrightBridge.electron.ts'
         ]
@@ -344,14 +357,19 @@ export async function buildPlaywrightConformanceReport(options = {}) {
     },
     knownBehaviorGaps: {
       popupOpenerSemantics: {
-        status: 'not_native_parity',
-        builtinBehavior: 'host_owned_independent_managed_webview_surface',
+        status: 'native_popup_with_managed_admission',
+        builtinBehavior: 'host_adopts_original_electron_popup_webcontents_in_managed_window',
         targetAdmission: 'current_surface_group_only',
-        nativeWindowProxy: false,
-        openerReference: false,
-        openerPostMessage: false,
-        popupCloseLinkage: false,
+        nativeWindowProxy: true,
+        openerReference: true,
+        openerPostMessage: true,
+        popupCloseLinkage: true,
+        nativeIsolation: 'noopener_noreferrer_and_coop_remain_authoritative',
+        firstRequest: 'original_get_or_post_waits_for_exact_child_owner_and_group_admission',
+        fallbackWithoutNetworkGuard: 'denied_native_popup_with_independent_managed_surface',
         evidence: [
+          'src/main/core/browserNativePopup.electron.test.ts',
+          'src/main/core/browserNetworkGuard.test.ts',
           'src/main/core/browserSurfaceManager.test.ts',
           'src/main/core/browserTargetBroker.test.ts'
         ]
@@ -742,15 +760,19 @@ function behaviorDifferences(tools) {
 
 async function readSecurityLimits(root) {
   return {
-    managedMcpHost: await constantsFromSource(root, 'src/main/mcp/ManagedPlaywrightMcpHost.ts', {
-      maxActiveCalls: 'MAX_ACTIVE_CALLS',
-      maxArgumentBytes: 'MAX_ARGUMENT_BYTES',
-      maxArgumentDepth: 'MAX_ARGUMENT_DEPTH',
-      maxArgumentNodes: 'MAX_ARGUMENT_NODES',
-      maxResultBytes: 'MAX_RESULT_BYTES',
-      maxTextBytes: 'MAX_TEXT_BYTES',
-      maxStructuredContentBytes: 'MAX_STRUCTURED_CONTENT_BYTES'
-    }),
+    managedMcpHost: {
+      ...(await constantsFromSource(root, 'src/main/mcp/ManagedPlaywrightMcpHost.ts', {
+        maxActiveCalls: 'MAX_ACTIVE_CALLS'
+      })),
+      ...(await constantsFromSource(root, 'src/main/mcp/managedPlaywrightProtocolSupport.ts', {
+        maxArgumentBytes: 'MAX_ARGUMENT_BYTES',
+        maxArgumentDepth: 'MAX_ARGUMENT_DEPTH',
+        maxArgumentNodes: 'MAX_ARGUMENT_NODES',
+        maxResultBytes: 'MAX_RESULT_BYTES',
+        maxTextBytes: 'MAX_TEXT_BYTES',
+        maxStructuredContentBytes: 'MAX_STRUCTURED_CONTENT_BYTES'
+      }))
+    },
     cdp: await constantsFromSource(root, 'src/main/browser/ElectronGuestCdpTransport.ts', {
       maxInsertTextBytes: 'MAX_INSERT_TEXT_BYTES',
       maxPayloadBytes: 'MAX_CDP_PAYLOAD_BYTES',

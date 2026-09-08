@@ -369,6 +369,7 @@ pub enum ManagedPlaywrightCompletionOutcome {
 pub enum ManagedPlaywrightBridgeErrorCode {
     Cancelled,
     Timeout,
+    QueueTimeout,
     Closed,
     Busy,
     SurfaceUnavailable,

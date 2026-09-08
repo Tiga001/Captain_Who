@@ -344,6 +344,7 @@ export const itITTranslations = {
   'browser.title': 'Navigatore',
   'browser.newTab': 'Nuova scheda',
   'browser.addressPlaceholder': 'Inserisci URL',
+  'browser.invalidAddress': 'Inserisci un indirizzo web valido, come example.com o localhost:3000.',
   'browser.open': 'Apri pagina',
   'browser.back': 'Indietro',
   'browser.forward': 'Avanti',

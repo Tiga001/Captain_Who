@@ -597,11 +597,16 @@ describe('ManagedPlaywrightMcpHost', () => {
 
   it('retires a timed-out evaluate generation before releasing the next dispatch slot', async () => {
     let completeLateEvaluation!: (value: unknown) => void
+    let markEvaluationStarted!: () => void
+    const evaluationStarted = new Promise<void>((resolve) => (markEvaluationStarted = resolve))
     const lateEvaluation = new Promise<unknown>((resolve) => {
       completeLateEvaluation = resolve
     })
     const callTool = vi.fn(async (input: { name: string }) => {
-      if (input.name === 'browser_evaluate') return await lateEvaluation
+      if (input.name === 'browser_evaluate') {
+        markEvaluationStarted()
+        return await lateEvaluation
+      }
       return {
         content: [{ type: 'text', text: 'fresh-generation-snapshot' }],
         isError: false
@@ -630,6 +635,10 @@ describe('ManagedPlaywrightMcpHost', () => {
       .finally(() => {
         terminalCount += 1
       })
+    await evaluationStarted
+    const queuedSnapshot = host.callTool('browser_snapshot', {
+      call_reason: 'Inspect the recovered fixture page.'
+    })
 
     await expect(timedOut).rejects.toMatchObject({
       code: 'browser.risk_outcome_unknown',
@@ -637,9 +646,7 @@ describe('ManagedPlaywrightMcpHost', () => {
     })
     expect(detachAutomation).toHaveBeenCalledOnce()
 
-    await expect(
-      host.callTool('browser_snapshot', { call_reason: 'Inspect the recovered fixture page.' })
-    ).resolves.toEqual({
+    await expect(queuedSnapshot).resolves.toEqual({
       content: [{ type: 'text', text: 'fresh-generation-snapshot' }],
       isError: false
     })
@@ -3257,6 +3264,107 @@ describe('ManagedPlaywrightMcpHost', () => {
     expect(risk.finish).toHaveBeenCalledOnce()
   })
 
+  it('gives a queued call its full execution budget after the previous call finishes', async () => {
+    let releaseFirst!: (result: unknown) => void
+    let releaseSecond!: (result: unknown) => void
+    let markFirstStarted!: () => void
+    let markSecondStarted!: () => void
+    const firstStarted = new Promise<void>((resolve) => (markFirstStarted = resolve))
+    const secondStarted = new Promise<void>((resolve) => (markSecondStarted = resolve))
+    const callTool = vi
+      .fn<ManagedMcpClient['callTool']>()
+      .mockImplementationOnce(async () => {
+        markFirstStarted()
+        return await new Promise((resolve) => (releaseFirst = resolve))
+      })
+      .mockImplementationOnce(async () => {
+        markSecondStarted()
+        return await new Promise((resolve) => (releaseSecond = resolve))
+      })
+    const host = fakeHost({ callTool })
+    await host.connect()
+    vi.useFakeTimers()
+    try {
+      const first = host.callTool(
+        'browser_snapshot',
+        { call_reason: 'Read the first page.' },
+        { timeoutMs: 1_000 }
+      )
+      await firstStarted
+      const second = host.callTool(
+        'browser_snapshot',
+        { call_reason: 'Read after the current operation.' },
+        { timeoutMs: 30 }
+      )
+      await vi.advanceTimersByTimeAsync(100)
+      expect(callTool).toHaveBeenCalledOnce()
+      releaseFirst({ content: [], isError: false })
+      await first
+      await secondStarted
+      await vi.advanceTimersByTimeAsync(29)
+      releaseSecond({ content: [], isError: false })
+      await expect(second).resolves.toMatchObject({ isError: false })
+      expect(callTool).toHaveBeenCalledTimes(2)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it.each(['timeout', 'cancel'] as const)(
+    'removes a queued call on %s without dispatching it or retiring the active connection',
+    async (stop) => {
+      let releaseFirst!: (result: unknown) => void
+      let markFirstStarted!: () => void
+      const firstStarted = new Promise<void>((resolve) => (markFirstStarted = resolve))
+      const callTool = vi
+        .fn<ManagedMcpClient['callTool']>()
+        .mockImplementationOnce(async () => {
+          markFirstStarted()
+          return await new Promise((resolve) => (releaseFirst = resolve))
+        })
+        .mockResolvedValue({ content: [], isError: false })
+      const detachAutomation = vi.fn(async () => undefined)
+      const host = fakeHost({ callTool, detachAutomation, queueTimeoutMs: 40 })
+      await host.connect()
+      vi.useFakeTimers()
+      try {
+        const first = host.callTool('browser_snapshot', { call_reason: 'Keep the slot occupied.' })
+        await firstStarted
+        const controller = new AbortController()
+        const queued = host.callTool(
+          'browser_snapshot',
+          { call_reason: 'Cancel this queued action.' },
+          { signal: controller.signal }
+        )
+        const rejected = expect(queued).rejects.toMatchObject({
+          code:
+            stop === 'timeout'
+              ? 'mcp.builtin_playwright.queue_timeout'
+              : 'mcp.builtin_playwright.cancelled',
+          dispatchCertainty: 'definitely_not_dispatched'
+        })
+        if (stop === 'timeout') await vi.advanceTimersByTimeAsync(41)
+        else controller.abort()
+        await rejected
+        expect(callTool).toHaveBeenCalledOnce()
+        expect(detachAutomation).not.toHaveBeenCalled()
+
+        const next = host.callTool('browser_snapshot', {
+          call_reason: 'Wait behind the same owner.'
+        })
+        await vi.advanceTimersByTimeAsync(1)
+        expect(callTool).toHaveBeenCalledOnce()
+        releaseFirst({ content: [], isError: false })
+        await expect(first).resolves.toMatchObject({ isError: false })
+        await expect(next).resolves.toMatchObject({ isError: false })
+        expect(callTool).toHaveBeenCalledTimes(2)
+        expect(detachAutomation).not.toHaveBeenCalled()
+      } finally {
+        vi.useRealTimers()
+      }
+    }
+  )
+
   it('pauses the tool deadline only while BrowserRisk waits for a human decision', async () => {
     vi.useFakeTimers()
     try {
@@ -4951,6 +5059,7 @@ function fakeHost(overrides: {
   preparedFileHandles?: readonly string[]
   surfaceGroup?: ManagedPlaywrightSurfaceGroupAdapter
   toolTimeoutMs?: number
+  queueTimeoutMs?: number
 }): ManagedPlaywrightMcpHost {
   const upstreamTools = MANAGED_PLAYWRIGHT_CATALOG_LOCK.tools.map((tool) => ({
     name: tool.name,
@@ -4994,6 +5103,7 @@ function fakeHost(overrides: {
       overrides.preparedFileHandles
     ),
     toolTimeoutMs: overrides.toolTimeoutMs,
+    queueTimeoutMs: overrides.queueTimeoutMs,
     closeSurface: overrides.closeSurface ?? vi.fn(async () => undefined),
     detachAutomation: overrides.detachAutomation ?? vi.fn(async () => undefined),
     createOfficialConnection,

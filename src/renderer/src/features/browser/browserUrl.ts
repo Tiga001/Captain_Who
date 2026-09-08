@@ -1,12 +1,15 @@
 const EXPLICIT_PROTOCOL_PATTERN = /^[a-zA-Z][a-zA-Z\d+.-]*:/
-const LOCAL_HTTP_PATTERN = /^(localhost|127(?:\.\d{1,3}){3}|\[::1\])(?::|\/|$)/i
+const HOST_WITH_PORT_PATTERN =
+  /^(?:localhost|[^:/?#\s]+\.[^:/?#\s]+|\[[\da-f:.]+\]):\d+(?=[/?#]|$)/i
+const LOCAL_HTTP_PATTERN = /^(localhost|127(?:\.\d{1,3}){3}|\[::1\])(?=[:/?#]|$)/i
 const SAFE_BROWSER_PROTOCOLS = new Set(['http:', 'https:'])
 
 export function normalizeBrowserUrl(input: string): string | null {
   const trimmedInput = input.trim()
   if (!trimmedInput) return null
 
-  if (EXPLICIT_PROTOCOL_PATTERN.test(trimmedInput)) {
+  // A dotted hostname or localhost followed by a port is an address, not a URL scheme.
+  if (EXPLICIT_PROTOCOL_PATTERN.test(trimmedInput) && !HOST_WITH_PORT_PATTERN.test(trimmedInput)) {
     return normalizeHttpUrl(trimmedInput)
   }
 

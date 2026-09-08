@@ -771,6 +771,12 @@ export function mapSafeHostError(error: unknown): ManagedPlaywrightMcpHostError 
 }
 
 export function cancellationError(reason: unknown): ManagedPlaywrightMcpHostError {
+  if (reason === 'queue_timeout') {
+    return new ManagedPlaywrightMcpHostError(
+      'mcp.builtin_playwright.queue_timeout',
+      'definitely_not_dispatched'
+    )
+  }
   return new ManagedPlaywrightMcpHostError(
     reason === 'timeout' ? 'mcp.builtin_playwright.timeout' : 'mcp.builtin_playwright.cancelled'
   )

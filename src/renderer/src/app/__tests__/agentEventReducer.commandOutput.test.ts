@@ -517,7 +517,7 @@ describe('command output runtime projection', () => {
     expect(approved.agentRun?.approvals).toEqual([])
     expect(approved.agentRun?.toolCalls[0]?.approvalStatus).toBe('approved')
     expect(approved.agentRun?.commandSessions?.['command-call']?.status).toBe('starting')
-    expect(approved.agentRun?.status).toBe('starting')
+    expect(approved.agentRun?.status).toBe('running')
   })
 
   it('advances a waiting parent from Session authority and ignores a stale command approval', () => {

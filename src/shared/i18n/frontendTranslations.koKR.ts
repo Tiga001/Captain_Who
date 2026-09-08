@@ -332,6 +332,7 @@ export const koKRTranslations = {
   'browser.title': '브라우저',
   'browser.newTab': '새 탭',
   'browser.addressPlaceholder': 'URL를 입력하세요.',
+  'browser.invalidAddress': 'example.com 또는 localhost:3000과 같은 유효한 웹 주소를 입력하세요.',
   'browser.open': '페이지 열기',
   'browser.back': '뒤로',
   'browser.forward': '앞으로',

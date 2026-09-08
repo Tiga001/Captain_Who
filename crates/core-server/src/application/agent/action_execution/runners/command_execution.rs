@@ -7,6 +7,7 @@ impl AgentService {
         notifications: CoreServerNotificationSender,
     ) {
         let run_id = record.snapshot.run_id.clone();
+        let mut steering_cleanup = self.active_run_steering_cleanup(&run_id, notifications.clone());
         let action_id = record.snapshot.action_id.clone();
         self.seed_trace_snapshot_from_checkpoint(
             &run_id,
@@ -207,6 +208,7 @@ impl AgentService {
                 match handoff {
                     Ok(AgentCommandHandoffOutcome::Adopted) => {
                         if handoff_already_advanced {
+                            steering_cleanup.disarm();
                             self.unregister_cancellation_if_current(
                                 &run_id,
                                 &run_cancellation_token,
@@ -429,6 +431,7 @@ impl AgentService {
                         settled = true;
                     }
                     Ok(AgentPendingActionSettlementInspection::CommittedAndAdvanced) => {
+                        steering_cleanup.disarm();
                         if let Some(guard) = file_effect_guard.as_mut() {
                             guard.mark_durably_settled();
                         }
@@ -520,6 +523,7 @@ impl AgentService {
                             settled = true;
                         }
                         Ok(AgentPendingActionSettlementInspection::CommittedAndAdvanced) => {
+                            steering_cleanup.disarm();
                             if let Some(guard) = file_effect_guard.as_mut() {
                                 guard.mark_durably_settled();
                             }

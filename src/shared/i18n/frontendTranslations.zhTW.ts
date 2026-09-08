@@ -327,6 +327,7 @@ export const zhTWTranslations = {
   'browser.title': '瀏覽器',
   'browser.newTab': '新選項卡',
   'browser.addressPlaceholder': '輸入 URL',
+  'browser.invalidAddress': '請輸入有效的網址，例如 example.com 或 localhost:3000。',
   'browser.open': '開啟頁面',
   'browser.back': '後退',
   'browser.forward': '前進',

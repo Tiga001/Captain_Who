@@ -79,7 +79,11 @@ function createSession() {
   return { emitter, session: value, webRequest }
 }
 
-function createGuest(session: Session, id = 42): WebContents {
+function createGuest(
+  session: Session,
+  id = 42,
+  type: 'webview' | 'window' = 'webview'
+): WebContents {
   const emitter = new EventEmitter()
   const mainFrame = { parent: null } as WebContents['mainFrame']
   Object.assign(mainFrame, { top: mainFrame })
@@ -88,7 +92,8 @@ function createGuest(session: Session, id = 42): WebContents {
     id,
     mainFrame,
     session,
-    getType: () => 'webview',
+    getType: () => type,
+    getURL: () => 'https://public.test/opener',
     isDestroyed: () => destroyed,
     loadURL: vi.fn(async () => undefined),
     destroyFixture: () => {
@@ -187,7 +192,329 @@ function begin(harness: ReturnType<typeof createHarness>, signal?: AbortSignal) 
   })
 }
 
+function deferred<T>(): { promise: Promise<T>; resolve(value: T): void } {
+  let resolve!: (value: T) => void
+  const promise = new Promise<T>((accept) => {
+    resolve = accept
+  })
+  return { promise, resolve }
+}
+
+function registerNativePopup(harness: ReturnType<typeof createHarness>, id = 80): WebContents {
+  const child = createGuest(harness.guest.session, id, 'window')
+  harness.guard.registerGuest({
+    guest: child,
+    generation: 1,
+    surfaceId: `native-${id}`,
+    trustedNativePopup: true
+  })
+  return child
+}
+
+function destroyGuest(guest: WebContents): void {
+  ;(guest as unknown as { destroyFixture(): void }).destroyFixture()
+}
+
 describe('BrowserNetworkGuard', () => {
+  it('holds native GET and POST until exact ownership and shared state are ready without replay', async () => {
+    const harness = createHarness(undefined, ['93.184.216.34'], {}, 'host_boundaries_only')
+    const lease = begin(harness)
+    lease.markDispatched()
+    const child = registerNativePopup(harness)
+    const preparation = deferred<void>()
+    const loaded = deferred<void>()
+    const prepare = vi.fn(() => preparation.promise)
+    const close = vi.fn(() => destroyGuest(child))
+    const ready = harness.guard.beginNativePopupAdmission({
+      guest: child,
+      opener: harness.guest,
+      url: 'https://public.test/popup',
+      prepare,
+      settled: loaded.promise,
+      close
+    })
+    const outcomes: { cancel?: boolean }[] = []
+    const requests = ['GET', 'POST'].map((method, index) =>
+      request(harness, {
+        id: index + 10,
+        webContents: child,
+        webContentsId: child.id,
+        method,
+        url: 'https://public.test/popup',
+        uploadData: method === 'POST' ? [{ bytes: Buffer.from('code=original') }] : []
+      }).then((result) => {
+        outcomes.push(result)
+        return result
+      })
+    )
+    await vi.waitFor(() => expect(prepare).toHaveBeenCalledOnce())
+    expect(outcomes).toEqual([])
+    const prematureDownload = { cancel: vi.fn() }
+    harness.emitter.emit('will-download', {}, prematureDownload, child)
+    expect(prematureDownload.cancel).toHaveBeenCalledOnce()
+    preparation.resolve()
+    await ready
+    expect(await Promise.all(requests)).toEqual([{}, {}])
+    expect(child.loadURL).not.toHaveBeenCalled()
+    expect(harness.guest.loadURL).not.toHaveBeenCalled()
+    let settled = false
+    const settlement = lease.settle().then(() => {
+      settled = true
+    })
+    await new Promise<void>((resolve) => setImmediate(resolve))
+    expect(settled).toBe(false)
+    loaded.resolve()
+    await settlement
+    expect(close).not.toHaveBeenCalled()
+    expect(child.listenerCount('destroyed')).toBe(1)
+    expect(harness.guest.listenerCount('destroyed')).toBe(1)
+    lease.finish()
+    await harness.guard.shutdown()
+  })
+
+  it('keeps blank popup navigation behind the opener origin approval and cancels it without a late replay', async () => {
+    const harness = createHarness()
+    const decision = deferred<BrowserRiskAuthorizationDecision>()
+    const authorize = vi.spyOn(harness.authorizer, 'authorize').mockReturnValue(decision.promise)
+    const cancellation = new AbortController()
+    const lease = begin(harness, cancellation.signal)
+    lease.markDispatched()
+    const child = registerNativePopup(harness)
+    const prepare = vi.fn(async () => undefined)
+    const close = vi.fn(() => destroyGuest(child))
+    const ready = harness.guard.beginNativePopupAdmission({
+      guest: child,
+      opener: harness.guest,
+      url: 'about:blank',
+      prepare,
+      settled: new Promise(() => undefined),
+      close
+    })
+    const rejected = expect(ready).rejects.toThrow('native_popup_cancelled')
+    const pending = request(harness, {
+      webContents: child,
+      webContentsId: child.id,
+      url: 'http://127.0.0.1/callback'
+    })
+    await vi.waitFor(() => expect(authorize).toHaveBeenCalledOnce())
+    expect(authorize.mock.calls[0]?.[0].destination.origin).toBe('https://public.test')
+    expect(prepare).not.toHaveBeenCalled()
+    cancellation.abort()
+    await rejected
+    expect(await pending).toEqual({ cancel: true })
+    await vi.waitFor(() => expect(close).toHaveBeenCalledOnce())
+    decision.resolve({ decision: 'approved', grantId: 'late' })
+    await new Promise<void>((resolve) => setImmediate(resolve))
+    expect(prepare).not.toHaveBeenCalled()
+    expect(child.loadURL).not.toHaveBeenCalled()
+    await harness.guard.shutdown()
+  })
+
+  it('does not charge human approval time against the native attachment deadline', async () => {
+    vi.useFakeTimers()
+    const harness = createHarness()
+    try {
+      const decision = deferred<BrowserRiskAuthorizationDecision>()
+      const authorize = vi.spyOn(harness.authorizer, 'authorize').mockReturnValue(decision.promise)
+      const lease = begin(harness)
+      lease.markDispatched()
+      const child = registerNativePopup(harness)
+      const close = vi.fn(() => destroyGuest(child))
+      const prepare = vi.fn(async () => undefined)
+      const ready = harness.guard.beginNativePopupAdmission({
+        guest: child,
+        opener: harness.guest,
+        url: 'http://127.0.0.1/login',
+        prepare,
+        settled: Promise.resolve(),
+        close
+      })
+      await vi.waitFor(() => expect(authorize).toHaveBeenCalledOnce())
+      await vi.advanceTimersByTimeAsync(20_000)
+      expect(close).not.toHaveBeenCalled()
+      expect(prepare).not.toHaveBeenCalled()
+      decision.resolve({ decision: 'approved', grantId: 'user-read-the-prompt' })
+      await ready
+      await lease.settle()
+      expect(prepare).toHaveBeenCalledOnce()
+      expect(close).not.toHaveBeenCalled()
+      lease.finish()
+    } finally {
+      vi.useRealTimers()
+      await harness.guard.shutdown()
+    }
+  })
+
+  it('bounds stalled native setup and keeps the original request cancelled after late setup completion', async () => {
+    vi.useFakeTimers()
+    const harness = createHarness(undefined, ['93.184.216.34'], {}, 'host_boundaries_only')
+    try {
+      const child = registerNativePopup(harness)
+      const preparation = deferred<void>()
+      const prepare = vi.fn(() => preparation.promise)
+      const close = vi.fn(() => destroyGuest(child))
+      const ready = harness.guard.beginNativePopupAdmission({
+        guest: child,
+        opener: harness.guest,
+        url: 'https://public.test/popup',
+        prepare,
+        settled: new Promise(() => undefined),
+        close
+      })
+      const rejected = expect(ready).rejects.toThrow('native_popup_cancelled')
+      const pending = request(harness, { webContents: child, webContentsId: child.id })
+      await vi.waitFor(() => expect(prepare).toHaveBeenCalledOnce())
+      await vi.advanceTimersByTimeAsync(15_001)
+      await rejected
+      expect(await pending).toEqual({ cancel: true })
+      expect(close).toHaveBeenCalledOnce()
+      preparation.resolve()
+      await Promise.resolve()
+      expect(child.loadURL).not.toHaveBeenCalled()
+    } finally {
+      vi.useRealTimers()
+      await harness.guard.shutdown()
+    }
+  })
+
+  it('blocks new requests immediately after cancellation even before native close finishes', async () => {
+    const harness = createHarness(undefined, ['93.184.216.34'], {}, 'host_boundaries_only')
+    const cancellation = new AbortController()
+    const lease = begin(harness, cancellation.signal)
+    lease.markDispatched()
+    const child = registerNativePopup(harness)
+    const close = vi.fn()
+    await harness.guard.beginNativePopupAdmission({
+      guest: child,
+      opener: harness.guest,
+      url: 'https://public.test/popup',
+      prepare: async () => undefined,
+      settled: new Promise(() => undefined),
+      close
+    })
+    cancellation.abort()
+    expect(await request(harness, { webContents: child, webContentsId: child.id })).toEqual({
+      cancel: true
+    })
+    const lateDownload = { cancel: vi.fn() }
+    harness.emitter.emit('will-download', {}, lateDownload, child)
+    expect(lateDownload.cancel).toHaveBeenCalledOnce()
+    await vi.waitFor(() => expect(close).toHaveBeenCalledOnce())
+    expect(child.isDestroyed()).toBe(false)
+    await harness.guard.shutdown()
+  })
+
+  it('allows an exact native callback child to close without aborting its opener operation', async () => {
+    const expectTargetClose = vi.fn()
+    const downloadLease: BrowserDownloadToolLease = {
+      claimCreatedGuest: vi.fn(async () => undefined),
+      expectTargetClose,
+      downloads: vi.fn(() => []),
+      finish: vi.fn(),
+      markDispatched: vi.fn(),
+      ready: vi.fn(async () => undefined),
+      settle: vi.fn(async () => [])
+    }
+    const downloadBroker = {
+      beginTool: () => downloadLease,
+      install: vi.fn(),
+      registerGuest: vi.fn(),
+      unregisterGuest: vi.fn(),
+      releaseSurface: vi.fn(async () => undefined),
+      snapshot: vi.fn(() => ({ downloads: 0 })),
+      shutdown: vi.fn(async () => undefined)
+    } as unknown as BrowserDownloadBroker
+    const harness = createHarness(
+      undefined,
+      ['93.184.216.34'],
+      {},
+      'host_boundaries_only',
+      downloadBroker
+    )
+    const lease = begin(harness)
+    lease.markDispatched()
+    const child = registerNativePopup(harness)
+    const close = vi.fn()
+    await harness.guard.beginNativePopupAdmission({
+      guest: child,
+      opener: harness.guest,
+      url: 'https://public.test/callback',
+      prepare: async () => undefined,
+      settled: new Promise(() => undefined),
+      close
+    })
+    destroyGuest(child)
+    await lease.settle()
+    expect(lease.failure()).toBeNull()
+    expect(harness.guard.snapshot().activeOperations).toBe(1)
+    expect(expectTargetClose).toHaveBeenCalledWith({ surfaceId: 'native-80', generation: 1 })
+    expect(close).not.toHaveBeenCalled()
+    lease.finish()
+    await harness.guard.shutdown()
+  })
+
+  it('keeps refused native requests closed and releases the child on approval rejection', async () => {
+    const harness = createHarness({ decision: 'rejected' })
+    const lease = begin(harness)
+    lease.markDispatched()
+    const child = registerNativePopup(harness)
+    const close = vi.fn(() => destroyGuest(child))
+    const prepare = vi.fn(async () => undefined)
+    const ready = harness.guard.beginNativePopupAdmission({
+      guest: child,
+      opener: harness.guest,
+      url: 'http://127.0.0.1/private',
+      prepare,
+      settled: new Promise(() => undefined),
+      close
+    })
+    await expect(ready).rejects.toThrow()
+    await lease.settle()
+    expect(await request(harness, { webContents: child, webContentsId: child.id })).toEqual({
+      cancel: true
+    })
+    expect(close).toHaveBeenCalledOnce()
+    expect(prepare).not.toHaveBeenCalled()
+    expect(lease.failure()).toMatchObject({ code: 'browser.risk_rejected' })
+    lease.finish()
+    await harness.guard.shutdown()
+  })
+
+  it('requires Main native admission and never borrows another tab operation for a manual popup', async () => {
+    const harness = createHarness()
+    const foreign = createGuest(harness.guest.session, 81, 'window')
+    expect(() =>
+      harness.guard.registerGuest({ guest: foreign, surfaceId: 'foreign', generation: 1 })
+    ).toThrow('invalid_guest')
+    const otherSession = createSession().session
+    expect(() =>
+      harness.guard.registerGuest({
+        guest: createGuest(otherSession, 82, 'window'),
+        surfaceId: 'foreign-session',
+        generation: 1,
+        trustedNativePopup: true
+      })
+    ).toThrow('invalid_guest')
+    const active = begin(harness)
+    const manualOpener = createGuest(harness.guest.session, 83)
+    harness.guard.registerGuest({ guest: manualOpener, surfaceId: 'manual', generation: 1 })
+    const child = registerNativePopup(harness)
+    const loaded = deferred<void>()
+    await harness.guard.beginNativePopupAdmission({
+      guest: child,
+      opener: manualOpener,
+      url: 'http://127.0.0.1/manual',
+      prepare: async () => undefined,
+      settled: loaded.promise,
+      close: () => destroyGuest(child)
+    })
+    expect(harness.authorizer.requests).toHaveLength(0)
+    expect(await request(harness, { webContents: child, webContentsId: child.id })).toEqual({})
+    loaded.resolve()
+    active.finish()
+    await harness.guard.shutdown()
+  })
+
   it('retains only an exact Main-authored internal document until history releases it', async () => {
     const harness = createHarness(undefined, ['93.184.216.34'], {}, 'host_boundaries_only')
     const internalUrl = 'mycopilot-browser-internal://page/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'

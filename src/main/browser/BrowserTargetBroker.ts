@@ -31,6 +31,10 @@ export interface ManagedBrowserGuestRegistration {
   partition: string
 }
 
+export interface ManagedBrowserPopupRegistration extends ManagedBrowserGuestRegistration {
+  openerGuest: WebContents
+}
+
 export interface ManagedBrowserSurfaceClaim {
   generation: number
   guestWebContentsId: number
@@ -44,6 +48,8 @@ export interface ManagedBrowserSurfaceIdentity {
 }
 
 interface RegisteredGuest {
+  kind: 'webview' | 'native-popup'
+  openerGuest?: WebContents
   activeTransport?: ElectronGuestCdpTransport
   connecting: boolean
   guest: WebContents
@@ -85,10 +91,51 @@ export class BrowserTargetBroker {
   registerManagedGuest(input: ManagedBrowserGuestRegistration): void {
     this.assertUsable()
     this.assertRegistration(input)
+    this.registerGuest(input, 'webview')
+  }
 
+  registerManagedPopup(input: ManagedBrowserPopupRegistration): void {
+    this.assertUsable()
+    if (
+      input.partition !== this.expectedPartition ||
+      input.guest.session !== this.expectedSession
+    ) {
+      throw new BrowserTargetBrokerError('invalid_partition')
+    }
+    const opener = this.guests.get(input.openerGuest.id)
+    const openerClaim = opener?.surfaceId ? this.surfaces.get(opener.surfaceId) : undefined
+    if (
+      input.guest.getType() !== 'window' ||
+      input.guest === input.host ||
+      input.guest === input.openerGuest ||
+      input.guest.isDestroyed() ||
+      input.host.isDestroyed() ||
+      !opener ||
+      opener.guest !== input.openerGuest ||
+      opener.host !== input.host ||
+      !this.isExactGuest(opener) ||
+      openerClaim?.guestId !== opener.guest.id ||
+      openerClaim?.generation !== opener.surfaceGeneration
+    ) {
+      throw new BrowserTargetBrokerError('invalid_guest')
+    }
+    this.registerGuest(input, 'native-popup', input.openerGuest)
+  }
+
+  private registerGuest(
+    input: ManagedBrowserGuestRegistration,
+    kind: RegisteredGuest['kind'],
+    openerGuest?: WebContents
+  ): void {
     const existing = this.guests.get(input.guest.id)
     if (existing) {
-      if (existing.guest === input.guest && existing.host === input.host) return
+      if (
+        existing.guest === input.guest &&
+        existing.host === input.host &&
+        existing.kind === kind &&
+        existing.openerGuest === openerGuest
+      )
+        return
       throw new BrowserTargetBrokerError('duplicate_guest')
     }
     if (this.guests.size >= BrowserTargetBroker.MAX_REGISTERED_GUESTS) {
@@ -100,6 +147,8 @@ export class BrowserTargetBroker {
     const handleHostDestroyed = (): void => this.unregisterGuest(input.guest.id, input.guest, true)
     const record: RegisteredGuest = {
       ...input,
+      kind,
+      openerGuest,
       connecting: false,
       handleGuestDestroyed,
       handleHostDestroyed
@@ -344,10 +393,12 @@ export class BrowserTargetBroker {
 
   private isExactGuest(record: RegisteredGuest): boolean {
     return (
+      this.guests.get(record.guest.id) === record &&
       !record.guest.isDestroyed() &&
       !record.host.isDestroyed() &&
-      record.guest.getType() === 'webview' &&
-      record.guest.hostWebContents === record.host &&
+      (record.kind === 'native-popup'
+        ? record.guest.getType() === 'window' && record.guest !== record.host
+        : record.guest.getType() === 'webview' && record.guest.hostWebContents === record.host) &&
       record.guest.session === this.expectedSession
     )
   }

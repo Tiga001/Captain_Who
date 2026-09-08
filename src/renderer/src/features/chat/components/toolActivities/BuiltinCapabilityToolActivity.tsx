@@ -48,8 +48,6 @@ import {
 import type { ReactNode } from 'react'
 import { useFrontendConfig } from '../../../../config/FrontendConfigProvider'
 import type { TranslationKey } from '../../../../config/frontendTranslations'
-import { toSafeMcpDisplayText } from '../../../mcp/mcpSafeDisplay'
-import { AgentActivityDisclosure } from './AgentActivityDisclosure'
 import type { SettledToolStatus } from './toolActivityUtils'
 import { BrowserArtifactCards, BrowserDownloadCards } from './BrowserArtifactCards'
 
@@ -169,7 +167,6 @@ const browserToolFamilyIcons = {
 
 interface BuiltinCapabilityToolActivityProps {
   cancelled?: boolean
-  displayReason?: string | null
   result?: AgentToolResult
   settledStatus?: SettledToolStatus
   toolName: string
@@ -492,12 +489,6 @@ function getStatusKey(toolId: string, status: BrowserToolStatus): TranslationKey
   return toolKeys[status]
 }
 
-function getBrowserToolIcon(toolId: string, status: BrowserToolStatus): LucideIcon {
-  if (status === 'running') return LoaderCircle
-  const family = getBrowserToolFamily(toolId)
-  return family ? browserToolFamilyIcons[family] : Globe
-}
-
 function getBrowserToolStatusBadge(status: BrowserToolStatus): {
   iconBadge?: ReactNode
   iconBadgeTone?: 'danger' | 'blocked'
@@ -514,35 +505,36 @@ function getBrowserToolStatusBadge(status: BrowserToolStatus): {
 /** Product-safe activity for a Host-reviewed managed browser Tool. */
 export function BuiltinCapabilityToolActivity({
   cancelled = false,
-  displayReason,
   result,
   settledStatus,
   toolName
 }: BuiltinCapabilityToolActivityProps) {
   const { t } = useFrontendConfig()
-  const reason = displayReason ? toSafeMcpDisplayText(displayReason, 512).trim() : ''
   const { artifacts, downloads } = safeProjectedResources(result)
   const status = getStatus(result, settledStatus, cancelled)
   const { iconBadge, iconBadgeTone } = getBrowserToolStatusBadge(status)
+  const family = getBrowserToolFamily(toolName)
+  const Icon = status === 'running' ? LoaderCircle : family ? browserToolFamilyIcons[family] : Globe
 
   return (
-    <AgentActivityDisclosure
-      className="builtin-capability-tool-activity"
-      hasDetails={Boolean(reason) || artifacts.length > 0 || downloads.length > 0}
-      icon={getBrowserToolIcon(toolName, status)}
-      iconBadge={iconBadge}
-      iconBadgeTone={iconBadgeTone}
-      isPending={status === 'running'}
-      label={t(getStatusKey(toolName, status))}
-    >
-      {reason ? (
-        <div className="agent-activity__details">
-          <span>{t('agent.builtinCapability.activity.reason')}</span>
-          <p>{reason}</p>
-        </div>
-      ) : null}
+    <div className="agent-activity builtin-capability-tool-activity">
+      <div className="agent-activity__static-summary">
+        <span className="agent-activity__icon">
+          <Icon aria-hidden="true" />
+          {iconBadge ? (
+            <span className="agent-activity__icon-badge" data-tone={iconBadgeTone}>
+              {iconBadge}
+            </span>
+          ) : null}
+        </span>
+        <span
+          className={`agent-activity__label${status === 'running' ? ' agent-running-text' : ''}`}
+        >
+          {t(getStatusKey(toolName, status))}
+        </span>
+      </div>
       <BrowserArtifactCards artifacts={artifacts} />
       <BrowserDownloadCards downloads={downloads} />
-    </AgentActivityDisclosure>
+    </div>
   )
 }

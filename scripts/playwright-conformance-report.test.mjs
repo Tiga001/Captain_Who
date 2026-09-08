@@ -40,17 +40,26 @@ test('derives every tool row from the frozen inputs and keeps all policy states 
   assert.equal(unsafe.behaviorContract, 'unavailable_until_real_process_sandbox')
   const pdf = report.tools.find((tool) => tool.rawName === 'browser_pdf_save')
   assert.equal(pdf.exposed, true)
-  assert.equal(pdf.availability, 'model_visible_typed_unavailable')
-  assert.equal(pdf.behaviorContract, 'typed_platform_unavailable')
-  assert.equal(report.platformCapabilityDifferences.browser_pdf_save.status, 'typed_unavailable')
+  assert.equal(pdf.availability, 'model_visible_with_page_limits')
+  assert.equal(pdf.behaviorContract, 'native_guest_pdf_with_frame_guard')
+  assert.equal(
+    report.platformCapabilityDifferences.browser_pdf_save.status,
+    'native_print_with_frame_limits'
+  )
   assert.equal(
     report.platformCapabilityDifferences.browser_pdf_save.toolResult.code,
     'browser.pdf_unavailable'
   )
-  assert.equal(report.platformCapabilityDifferences.browser_pdf_save.artifactPublished, false)
-  assert.equal(report.knownBehaviorGaps.popupOpenerSemantics.status, 'not_native_parity')
-  assert.equal(report.knownBehaviorGaps.popupOpenerSemantics.nativeWindowProxy, false)
-  assert.equal(report.knownBehaviorGaps.popupOpenerSemantics.openerPostMessage, false)
+  assert.equal(
+    report.platformCapabilityDifferences.browser_pdf_save.artifactPublished,
+    'successful_supported_pages_only'
+  )
+  assert.equal(
+    report.knownBehaviorGaps.popupOpenerSemantics.status,
+    'native_popup_with_managed_admission'
+  )
+  assert.equal(report.knownBehaviorGaps.popupOpenerSemantics.nativeWindowProxy, true)
+  assert.equal(report.knownBehaviorGaps.popupOpenerSemantics.openerPostMessage, true)
   assert.equal(report.knownBehaviorGaps.workerTargets.serviceWorker.status, 'not_admitted')
   assert.equal(report.knownBehaviorGaps.workerTargets.sharedWorker.electronE2e, false)
   assert.equal(

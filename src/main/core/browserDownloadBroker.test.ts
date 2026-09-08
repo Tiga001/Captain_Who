@@ -212,6 +212,85 @@ async function waitFor(predicate: () => boolean): Promise<void> {
 }
 
 describe('BrowserDownloadBroker', () => {
+  it('never treats pending or revoked native-popup downloads as manual downloads', async () => {
+    const { broker, records, session } = await createHarness()
+    let ready = false
+    const child = {
+      id: 82,
+      session,
+      getType: () => 'window',
+      isDestroyed: () => false
+    } as unknown as WebContents
+    broker.registerGuest({
+      guest: child,
+      surfaceId: 'native-pending',
+      generation: 1,
+      trustedNativePopup: true,
+      nativePopupReady: () => ready
+    })
+    const premature = new FakeDownloadItem('before-approval.txt')
+    dispatchDownload(session, child, premature)
+    expect(premature.cancelled).toBe(true)
+    expect(premature.savePath).toBeUndefined()
+
+    ready = true
+    const admitted = new FakeDownloadItem('after-admission.txt')
+    dispatchDownload(session, child, admitted)
+    await waitForManagedPath(admitted)
+    expect(admitted.cancelled).toBe(false)
+    await admitted.complete()
+    await waitFor(() => records.length === 1)
+
+    ready = false
+    const revoked = new FakeDownloadItem('after-cancellation.txt')
+    dispatchDownload(session, child, revoked)
+    expect(revoked.cancelled).toBe(true)
+    expect(revoked.savePath).toBeUndefined()
+    await broker.shutdown()
+  })
+
+  it('requires exact Main admission for native windows and preserves an opener after expected child closure', async () => {
+    const { broker, guest, session } = await createHarness()
+    const child = {
+      id: 81,
+      session,
+      getType: () => 'window',
+      isDestroyed: () => false
+    } as unknown as WebContents
+    expect(() =>
+      broker.registerGuest({ guest: child, surfaceId: 'native-popup', generation: 1 })
+    ).toThrow()
+    expect(() =>
+      broker.registerGuest({
+        guest: { ...child, session: new FakeSession() } as unknown as WebContents,
+        surfaceId: 'wrong-session',
+        generation: 1,
+        trustedNativePopup: true
+      })
+    ).toThrow()
+    broker.registerGuest({
+      guest: child,
+      surfaceId: 'native-popup',
+      generation: 1,
+      trustedNativePopup: true
+    })
+    const lease = broker.beginTool({ guest, owner: OWNER })
+    await lease.ready?.()
+    lease.markDispatched()
+    await lease.claimCreatedGuest({
+      guest: child,
+      surfaceId: 'native-popup',
+      generation: 1,
+      action: 'popup'
+    })
+    // SurfaceManager can release resources before the NetworkGuard destroyed listener runs.
+    await broker.releaseSurface({ surfaceId: 'native-popup', generation: 1 })
+    broker.unregisterGuest(child, 1)
+    await expect(lease.settle()).resolves.toEqual([])
+    lease.finish()
+    await broker.shutdown()
+  })
+
   it('publishes an Agent download durably and returns only a path-free reference', async () => {
     const { broker, guest, records, session, systemDirectory } = await createHarness()
     const lease = broker.beginTool({ guest, owner: OWNER })

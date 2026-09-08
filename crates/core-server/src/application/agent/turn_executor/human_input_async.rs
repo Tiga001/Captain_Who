@@ -239,6 +239,7 @@ impl AgentService {
                 if !matches!(control.steer_state, ActiveRunSteerState::Accepting) {
                     return Ok(false);
                 }
+                control.steering_notifications = Some(notifications.clone());
                 let guidance_id = create_id("guidance");
                 let record = AgentRunGuidanceRecord {
                     client_message_id: format!("human-answer-{guidance_id}"),

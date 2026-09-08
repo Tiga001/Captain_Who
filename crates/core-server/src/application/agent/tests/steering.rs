@@ -373,7 +373,7 @@ fn steer_run_durably_queues_once_and_reports_applied_on_retry() {
 }
 
 #[test]
-fn approval_close_rejects_every_accepted_guidance_and_fences_new_requests() {
+fn terminal_close_rejects_every_accepted_guidance_and_fences_new_requests() {
     let fixture = tempdir().unwrap();
     let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
     let service = AgentService::new(storage);
@@ -493,6 +493,178 @@ fn stale_finalizer_cannot_remove_a_new_approval_continuation_queue() {
         .unwrap();
     assert_eq!(queued.status, AgentSteerRunResultStatus::Queued);
     assert_eq!(continuation_queue.pending_len(), 1);
+}
+
+#[test]
+fn failed_host_cleanup_settles_only_the_inbox_it_still_owns() {
+    for resumed in [false, true] {
+        let fixture = tempdir().unwrap();
+        let storage =
+            Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+        let service = AgentService::new(storage.clone());
+        let original = install_active_run(
+            &service,
+            "run-cleanup",
+            "conversation-cleanup",
+            "assistant-cleanup",
+            false,
+        );
+        let (notifications, mut events) = tokio::sync::mpsc::unbounded_channel();
+        let first = service
+            .steer_run(
+                text_input(
+                    "run-cleanup",
+                    "conversation-cleanup",
+                    "client-cleanup-first",
+                ),
+                notifications.clone(),
+            )
+            .unwrap();
+        let cleanup = service.active_run_steering_cleanup("run-cleanup", notifications.clone());
+        let continued = resumed.then(|| {
+            service.resume_active_run_control(
+                "run-cleanup",
+                "conversation-cleanup",
+                "assistant-cleanup",
+                None,
+                ModelCapabilities { image_input: false },
+                AgentPermissions::default(),
+            )
+        });
+        drop(cleanup);
+        let first_record = storage
+            .load_agent_run_guidance(&first.guidance_id)
+            .unwrap()
+            .unwrap();
+        let second = service
+            .steer_run(
+                text_input(
+                    "run-cleanup",
+                    "conversation-cleanup",
+                    "client-cleanup-second",
+                ),
+                notifications,
+            )
+            .unwrap();
+        if let Some(continued) = continued {
+            assert!(!original.is_same_queue(&continued));
+            assert_eq!(first_record.status, AgentGuidanceStatus::Queued);
+            assert_eq!(second.status, AgentSteerRunResultStatus::Queued);
+            assert!(continued.is_accepting());
+            assert_eq!(continued.pending_len(), 2);
+            assert!(std::iter::from_fn(|| events.try_recv().ok())
+                .all(|event| event["params"]["type"] != "guidance_rejected"));
+        } else {
+            assert_eq!(first_record.status, AgentGuidanceStatus::Rejected);
+            assert_eq!(second.status, AgentSteerRunResultStatus::Rejected);
+            assert!(!original.is_accepting());
+            assert_eq!(original.pending_len(), 0);
+        }
+    }
+}
+
+#[test]
+fn repeated_approval_handoffs_preserve_guidance_identity_attachments_and_admission() {
+    let fixture = tempdir().unwrap();
+    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let service = AgentService::new(storage.clone());
+    let first_queue = install_active_run(
+        &service,
+        "run-handoff",
+        "conversation-handoff",
+        "assistant-handoff",
+        false,
+    );
+    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let mut first = text_input("run-handoff", "conversation-handoff", "client-first");
+    first.attachments = vec![encoded_attachment(
+        "attachment-handoff",
+        AgentInputAttachmentKind::File,
+        "constraint.txt",
+        "text/plain",
+        b"preserve this attachment across approval boundaries",
+    )];
+    let accepted = service
+        .steer_run(first.clone(), notifications.clone())
+        .unwrap();
+    service
+        .handoff_active_run_steering("run-handoff", &first_queue)
+        .unwrap();
+    let second_queue = service.resume_active_run_control(
+        "run-handoff",
+        "conversation-handoff",
+        "assistant-handoff",
+        None,
+        ModelCapabilities { image_input: false },
+        AgentPermissions::default(),
+    );
+    assert!(!first_queue.is_same_queue(&second_queue));
+    assert_eq!(first_queue.pending_len(), 0);
+    assert_eq!(second_queue.pending_len(), 1);
+    first_queue.close();
+    service
+        .unregister_active_run_control(
+            "run-handoff",
+            &first_queue,
+            AgentSteerRunRejectionCode::RunNotSteerable,
+            "stale segment finished",
+            &notifications,
+        )
+        .unwrap();
+    let duplicate = service
+        .steer_run(first.clone(), notifications.clone())
+        .unwrap();
+    assert_eq!(duplicate.guidance_id, accepted.guidance_id);
+    assert_eq!(duplicate.status, AgentSteerRunResultStatus::Queued);
+    assert_eq!(second_queue.pending_len(), 1);
+    let second = service
+        .steer_run(
+            text_input("run-handoff", "conversation-handoff", "client-second"),
+            notifications.clone(),
+        )
+        .unwrap();
+    service
+        .handoff_active_run_steering("run-handoff", &second_queue)
+        .unwrap();
+    second_queue.close();
+    let third_queue = service.resume_active_run_control(
+        "run-handoff",
+        "conversation-handoff",
+        "assistant-handoff",
+        None,
+        ModelCapabilities { image_input: false },
+        AgentPermissions::default(),
+    );
+    assert!(third_queue.is_accepting());
+    assert_eq!(third_queue.pending_len(), 2);
+    assert_eq!(
+        service.steer_run(first, notifications).unwrap().guidance_id,
+        accepted.guidance_id
+    );
+    assert_eq!(third_queue.pending_len(), 2);
+    for id in [&accepted.guidance_id, &second.guidance_id] {
+        assert_eq!(
+            storage.load_agent_run_guidance(id).unwrap().unwrap().status,
+            AgentGuidanceStatus::Queued
+        );
+    }
+    assert_eq!(
+        storage
+            .load_agent_run_guidance(&accepted.guidance_id)
+            .unwrap()
+            .unwrap()
+            .attachment_ids,
+        vec!["attachment-handoff"]
+    );
+    assert!(storage
+        .build_attachment_library_context("conversation-handoff", None)
+        .unwrap()
+        .conversation_attachments
+        .is_empty());
+    let event_types = std::iter::from_fn(|| receiver.try_recv().ok())
+        .map(|event| event["params"]["type"].as_str().unwrap().to_string())
+        .collect::<Vec<_>>();
+    assert_eq!(event_types, vec!["guidance_queued", "guidance_queued"]);
 }
 
 #[test]
@@ -1358,7 +1530,7 @@ async fn guidance_attachments_reach_model_context_and_refresh_runtime_tools_afte
 }
 
 #[tokio::test]
-async fn waiting_for_approval_closes_steering_before_the_approval_event_is_published() {
+async fn approval_retains_accepted_guidance_until_explicit_stop() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let (request_seen_tx, request_seen_rx) = oneshot::channel();
@@ -1450,15 +1622,12 @@ async fn waiting_for_approval_closes_steering_before_the_approval_event_is_publi
     .unwrap();
     server.await.unwrap();
 
-    assert_eq!(
-        ordered_events,
-        vec!["guidance_queued", "guidance_rejected", "approval_required"]
-    );
+    assert_eq!(ordered_events, vec!["guidance_queued", "approval_required"]);
     let journal = storage
         .load_agent_run_guidance(&queued.guidance_id)
         .unwrap()
         .unwrap();
-    assert_eq!(journal.status, AgentGuidanceStatus::Rejected);
+    assert_eq!(journal.status, AgentGuidanceStatus::Queued);
     let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
     let after_approval = service
         .steer_run(
@@ -1470,10 +1639,33 @@ async fn waiting_for_approval_closes_steering_before_the_approval_event_is_publi
             notifications,
         )
         .unwrap();
-    assert_eq!(
-        after_approval.rejection_code,
-        Some(AgentSteerRunRejectionCode::RunNotSteerable)
-    );
+    assert_eq!(after_approval.status, AgentSteerRunResultStatus::Queued);
+    let pending = service.list_pending_actions();
+    assert_eq!(pending.len(), 1);
+    assert!(service
+        .cancel_action(&turn.run_id, &pending[0].action_id)
+        .unwrap());
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while storage
+            .load_agent_run_guidance(&after_approval.guidance_id)
+            .unwrap()
+            .unwrap()
+            .status
+            == AgentGuidanceStatus::Queued
+        {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    for guidance_id in [&queued.guidance_id, &after_approval.guidance_id] {
+        let journal = storage
+            .load_agent_run_guidance(guidance_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(journal.status, AgentGuidanceStatus::Rejected);
+    }
+    assert!(service.list_pending_actions().is_empty());
 }
 
 #[tokio::test]
@@ -1657,4 +1849,290 @@ async fn approved_run_reopens_steering_and_applies_guidance_to_the_same_turn() {
     let committed_trace_json = serde_json::to_string(&committed_trace).unwrap();
     assert!(!committed_trace_json.contains("fileChangeTarget"));
     assert!(!committed_trace_json.contains("observationId"));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn guidance_is_accepted_during_approved_command_and_survives_a_second_rejected_approval() {
+    struct StopRunOnDrop<'a>(&'a AgentService, String);
+    impl Drop for StopRunOnDrop<'_> {
+        fn drop(&mut self) {
+            self.0.cancel_run(&self.1);
+        }
+    }
+
+    let fixture = tempdir().unwrap();
+    let workspace = fixture.path().join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let release_pipe = workspace.join("release.fifo");
+    assert!(std::process::Command::new("mkfifo")
+        .arg(&release_pipe)
+        .status()
+        .unwrap()
+        .success());
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (request_seen_tx, request_seen_rx) = oneshot::channel();
+    let (release_response_tx, release_response_rx) = oneshot::channel();
+    let (guided_request_tx, guided_request_rx) = oneshot::channel();
+    let provider = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        read_json_request(&mut stream).await;
+        request_seen_tx.send(()).unwrap();
+        release_response_rx.await.unwrap();
+        let calls = [
+            (
+                "first-command",
+                "printf entered > entered.txt; cat release.fifo; printf finished > finished.txt",
+            ),
+            ("second-command", "printf must-not-run > rejected.txt"),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, (id, command))| {
+            json!({
+                "index": index, "id": id, "type": "function",
+                "function": {"name": "run_command", "arguments": serde_json::to_string(&json!({
+                    "command": command, "reason": "Verify guidance across consecutive approvals"
+                })).unwrap()}
+            })
+        })
+        .collect::<Vec<_>>();
+        let frame = json!({"choices":[{"delta":{"role":"assistant","tool_calls":calls},"finish_reason":null}]});
+        let finish = json!({"choices":[{"delta":{},"finish_reason":"tool_calls"}]});
+        stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\ndata: {frame}\n\ndata: {finish}\n\ndata: [DONE]\n\n").as_bytes()).await.unwrap();
+        drop(stream);
+        let (mut stream, _) = listener.accept().await.unwrap();
+        guided_request_tx
+            .send(read_json_request(&mut stream).await)
+            .unwrap();
+        write_text_stream(
+            &mut stream,
+            "Both decisions and all guidance were received.",
+        )
+        .await;
+    });
+    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let mut settings = test_model_settings();
+    settings.api_url = format!("http://{address}/v1/chat/completions");
+    storage.save_model_settings(settings).unwrap();
+    storage
+        .save_project(ProjectRecord {
+            id: "project-command-guidance".to_string(),
+            name: "Command guidance".to_string(),
+            path: Some(workspace.to_string_lossy().into_owned()),
+            created_at: 1,
+            pinned_at: None,
+        })
+        .unwrap();
+    let service = AgentService::new(storage.clone());
+    let (notifications, mut events) = tokio::sync::mpsc::unbounded_channel();
+    let turn = service
+        .start_conversation_turn(
+            AgentConversationTurnInput {
+                conversation_id: Some("conversation-command-guidance".to_string()),
+                project_id: Some("project-command-guidance".to_string()),
+                model_id: "model-1".to_string(),
+                context_window_indicator_enabled: true,
+                content: "Run the two commands.".to_string(),
+                attachments: Vec::new(),
+                skills: Vec::new(),
+                title: None,
+                user_message_id: Some("user-command-guidance".to_string()),
+                assistant_message_id: Some("assistant-command-guidance".to_string()),
+                max_tokens: None,
+                temperature: None,
+                prompt_preferences: None,
+                permissions: AgentPermissions {
+                    write: AgentWritePermission::WorkspaceOnly,
+                    command: mycopilot_core::AgentCommandPermission::RequireApproval,
+                    command_safety: mycopilot_core::AgentCommandSafetyPolicy::FullAccess,
+                    ..Default::default()
+                },
+            },
+            notifications.clone(),
+        )
+        .unwrap();
+    let _stop_on_failure = StopRunOnDrop(&service, turn.run_id.clone());
+    request_seen_rx.await.unwrap();
+    let mut first_input = text_input(&turn.run_id, &turn.conversation_id, "client-command-first");
+    first_input.content = "First guidance before approval.".to_string();
+    first_input.attachments = vec![encoded_attachment(
+        "command-guidance-attachment",
+        AgentInputAttachmentKind::File,
+        "constraints.txt",
+        "text/plain",
+        b"attachment-survives-two-approvals",
+    )];
+    let first = service
+        .steer_run(first_input.clone(), notifications.clone())
+        .unwrap();
+    release_response_tx.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let event = events.recv().await.unwrap();
+            assert_ne!(event["params"]["type"], "guidance_rejected", "{event}");
+            assert_ne!(event["params"]["type"], "error", "{event}");
+            if event["params"]["type"] == "done"
+                && event["params"]["status"] == "waiting_for_approval"
+            {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    let pending = service.list_pending_actions();
+    assert_eq!(pending.len(), 1);
+    assert!(
+        serde_json::to_string(&pending[0])
+            .unwrap()
+            .contains("release.fifo"),
+        "unexpected approval: {:?}",
+        pending[0]
+    );
+    service
+        .approve_action(&turn.run_id, &pending[0].action_id, notifications.clone())
+        .unwrap();
+    // The pipe keeps the actual approved command alive until this test releases it.
+    // Admission must succeed before command completion or a continuation model request.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !workspace.join("entered.txt").exists() {
+            while let Ok(event) = events.try_recv() {
+                assert_ne!(event["params"]["type"], "error", "{event}");
+                assert_ne!(
+                    event["params"]["type"], "done",
+                    "command ended before opening its release pipe: {event}"
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(!workspace.join("finished.txt").exists());
+    let retry = service
+        .steer_run(first_input, notifications.clone())
+        .unwrap();
+    assert_eq!(retry.guidance_id, first.guidance_id);
+    assert_eq!(retry.status, AgentSteerRunResultStatus::Queued);
+    let mut second_input = text_input(&turn.run_id, &turn.conversation_id, "client-command-second");
+    second_input.content = "Second guidance while the approved command runs.".to_string();
+    let second = service
+        .steer_run(second_input, notifications.clone())
+        .unwrap();
+    assert_eq!(second.status, AgentSteerRunResultStatus::Queued);
+    assert!(!workspace.join("finished.txt").exists());
+    tokio::task::spawn_blocking(move || std::fs::write(release_pipe, b"continue\n"))
+        .await
+        .unwrap()
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let event = events.recv().await.unwrap();
+            assert_ne!(event["params"]["type"], "guidance_rejected", "{event}");
+            assert_ne!(
+                event["params"]["type"], "guidance_applied",
+                "the tool batch remains incomplete: {event}"
+            );
+            assert_ne!(event["params"]["type"], "error", "{event}");
+            if event["params"]["type"] == "done"
+                && event["params"]["status"] == "waiting_for_approval"
+            {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert!(workspace.join("finished.txt").exists());
+    let mut third_input = text_input(&turn.run_id, &turn.conversation_id, "client-command-third");
+    third_input.content = "Third guidance before rejecting the next command.".to_string();
+    let third = service
+        .steer_run(third_input, notifications.clone())
+        .unwrap();
+    assert_eq!(third.status, AgentSteerRunResultStatus::Queued);
+    let pending = service.list_pending_actions();
+    assert_eq!(pending.len(), 1);
+    service
+        .reject_action(
+            &turn.run_id,
+            &pending[0].action_id,
+            Some("Skip the second command.".to_string()),
+            notifications,
+        )
+        .unwrap();
+    let request = tokio::time::timeout(Duration::from_secs(5), guided_request_rx)
+        .await
+        .unwrap()
+        .unwrap();
+    let expected_ids = vec![&first.guidance_id, &second.guidance_id, &third.guidance_id];
+    let mut applied_ids = Vec::new();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let event = events.recv().await.unwrap();
+            assert_ne!(event["params"]["type"], "guidance_rejected", "{event}");
+            assert_ne!(event["params"]["type"], "error", "{event}");
+            if event["params"]["type"] == "guidance_applied" {
+                applied_ids.push(event["params"]["guidanceId"].as_str().unwrap().to_string());
+            }
+            if event["params"]["type"] == "done" && event["params"]["status"] == "completed" {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    provider.await.unwrap();
+    assert_eq!(applied_ids.iter().collect::<Vec<_>>(), expected_ids);
+    let request_text = request.to_string();
+    assert!(request_text.contains("attachment-survives-two-approvals"));
+    assert!(request_text.contains("command.approval_rejected"));
+    assert!(!workspace.join("rejected.txt").exists());
+    for id in &expected_ids {
+        assert_eq!(
+            storage.load_agent_run_guidance(id).unwrap().unwrap().status,
+            AgentGuidanceStatus::Applied
+        );
+    }
+    let trace = storage
+        .get_conversation_turn_trace(&turn.assistant_message_id)
+        .unwrap()
+        .unwrap();
+    let trace_ids = trace
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            ConversationTurnTraceItem::UserGuidance { guidance_id, .. } => Some(guidance_id),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(trace_ids, expected_ids);
+    let messages = request["messages"].as_array().unwrap();
+    let guidance_positions = [
+        "First guidance before approval.",
+        "Second guidance while the approved command runs.",
+        "Third guidance before rejecting the next command.",
+    ]
+    .map(|content| {
+        let matches = messages
+            .iter()
+            .enumerate()
+            .filter(|(_, message)| {
+                message["role"] == "user"
+                    && message["content"]
+                        .as_str()
+                        .is_some_and(|value| value.starts_with(content))
+            })
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+        assert_eq!(matches.len(), 1);
+        matches[0]
+    });
+    assert!(guidance_positions.windows(2).all(|pair| pair[0] < pair[1]));
+    assert!(messages
+        .iter()
+        .enumerate()
+        .filter(|(_, message)| message["role"] == "tool")
+        .all(|(index, _)| index < guidance_positions[0]));
 }

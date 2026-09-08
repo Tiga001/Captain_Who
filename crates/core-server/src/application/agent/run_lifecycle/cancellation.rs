@@ -332,6 +332,9 @@ impl AgentService {
         } else {
             let _ = self.storage.cancel_sync_human_interactions_for_run(run_id);
         }
+        if outcome.any_effect() {
+            self.fence_cancelled_run_steering(run_id);
+        }
         outcome
     }
 

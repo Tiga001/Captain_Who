@@ -330,6 +330,7 @@ export const zhCNTranslations = {
   'browser.title': '浏览器',
   'browser.newTab': '新选项卡',
   'browser.addressPlaceholder': '输入 URL',
+  'browser.invalidAddress': '请输入有效的网址，例如 example.com 或 localhost:3000。',
   'browser.open': '打开页面',
   'browser.back': '后退',
   'browser.forward': '前进',

@@ -8,6 +8,7 @@ impl AgentService {
         existing_cancellation_token: Option<AgentCancellationToken>,
     ) {
         let run_id = record.snapshot.run_id.clone();
+        let _steering_cleanup = self.active_run_steering_cleanup(&run_id, notifications.clone());
         let cancellation_token = existing_cancellation_token.unwrap_or_default();
         match self.agent_tree_run_is_stopped(&run_id) {
             Ok(true) => cancellation_token.cancel(),
@@ -176,7 +177,7 @@ impl AgentService {
             );
             return;
         }
-        let steer_input = self.register_active_run_control(
+        let steer_input = self.resume_active_run_control(
             &run_id,
             &turn_conversation_id,
             &turn_assistant_message_id,

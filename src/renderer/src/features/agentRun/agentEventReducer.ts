@@ -1202,13 +1202,9 @@ export function applyAgentActionExecutionToChatMessage(
     parentIsTerminal || parentIsWaitingForUserInput
       ? message
       : applyAgentOutputToChatMessage(message, execution.agentOutput)
-  const outputRun = ensureAgentRun(messageWithAgentOutput.agentRun, execution.agentOutput.runId)
-  const currentRun: ChatAgentRunView =
-    message.agentRun?.status === 'waiting_for_approval' &&
-    execution.agentOutput.status === 'running' &&
-    execution.agentOutput.events.length === 0
-      ? { ...outputRun, status: 'starting' }
-      : outputRun
+  // The Host keeps the logical Run's guidance inbox available across approval and tool
+  // execution. Its running acknowledgement is sufficient; another model request is not required.
+  const currentRun = ensureAgentRun(messageWithAgentOutput.agentRun, execution.agentOutput.runId)
   const originalMcpApproval = message.agentRun?.approvals.find(
     (action) =>
       action.type === 'mcp_tool_call' && action.approval.identity.actionId === execution.actionId

@@ -24,6 +24,12 @@ impl AgentService {
             steering_close_error_context,
         } = segment;
 
+        self.bind_active_run_steering_notifications(&run_id, &steer_input, notifications.clone());
+        // Host preparation can fail before the Runtime installs its own queue Drop guard.
+        let _steering_cleanup =
+            self.segment_steering_cleanup(&run_id, &steer_input, notifications.clone());
+        let emitter_steer_input = steer_input.clone();
+
         let human_binding = human_input_resume
             .as_ref()
             .map(|(_, binding)| binding.clone());
@@ -86,21 +92,6 @@ impl AgentService {
                         return;
                     }
                 }
-                if let Err(error) = emitter_service.close_active_run_steering(
-                    run_id,
-                    AgentSteerRunRejectionCode::RunNotSteerable,
-                    "The agent run is waiting for approval and no longer accepts guidance.",
-                    &emitter_notifications,
-                ) {
-                    if invalidate_mcp_payload_on_pending_store_failure {
-                        emitter_service.invalidate_mcp_pending_payload(action);
-                    }
-                    emitter_terminal_event_gate.discard();
-                    *emitter_pending_store_failure
-                        .lock()
-                        .unwrap_or_else(|lock_error| lock_error.into_inner()) = Some(error);
-                    return;
-                }
                 let mut checkpoint_input =
                     agent_input_with_run_checkpoint(&emitter_agent_input, checkpoint);
                 if let Err(error) =
@@ -115,6 +106,12 @@ impl AgentService {
                         .unwrap_or_else(|lock_error| lock_error.into_inner()) = Some(error);
                     return;
                 }
+                // Retire only this Runtime's queue before the pending action can become visible.
+                // The successor keeps accepted guidance while approval/Host execution pauses
+                // sampling. A fast continuation can adopt it even before this segment returns;
+                // the old Runtime Drop and unregister still refer only to the retired queue.
+                let successor_steer_input =
+                    emitter_service.handoff_active_run_steering(run_id, &emitter_steer_input);
                 #[cfg(test)]
                 run_before_pending_action_store_hook(&action_id_for_action(action.as_ref()));
                 let pending_store = if let Some((predecessor, terminal_status)) =
@@ -141,6 +138,17 @@ impl AgentService {
                 let should_publish = match pending_store {
                     Ok(should_publish) => should_publish,
                     Err(error) => {
+                        if let Some(successor) = successor_steer_input.as_ref() {
+                            if let Err(close_error) = emitter_service.unregister_active_run_control(
+                                run_id,
+                                successor,
+                                AgentSteerRunRejectionCode::RunNotSteerable,
+                                "The approval could not be persisted and the agent run has stopped.",
+                                &emitter_notifications,
+                            ) {
+                                eprintln!("failed to settle guidance after approval persistence failure: {close_error}");
+                            }
+                        }
                         if invalidate_mcp_payload_on_pending_store_failure {
                             emitter_service.invalidate_mcp_pending_payload(action);
                         }
@@ -572,12 +580,9 @@ impl AgentService {
             }
             None => result,
         };
-        let close_message = match &result {
-            Ok(output) if output.status == AgentRunStatus::WaitingForApproval => {
-                "The agent run is waiting for approval and no longer accepts guidance."
-            }
-            _ => "The agent run has finished and no longer accepts guidance.",
-        };
+        // Approval moved pending guidance to another queue identity. Cleanup remains scoped to
+        // this segment, so a late completion cannot close that successor or its continuation.
+        let close_message = "The agent run has finished and no longer accepts guidance.";
         let result = match self.unregister_active_run_control(
             &run_id,
             &steer_input,

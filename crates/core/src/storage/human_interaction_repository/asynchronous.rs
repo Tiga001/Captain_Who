@@ -220,7 +220,9 @@ fn async_route_blocked(
     conversation: &str,
     guidance: bool,
 ) -> Result<bool> {
-    connection.query_row("SELECT EXISTS(SELECT 1 FROM agent_pending_actions WHERE conversation_id=?1 AND (status='pending' OR (status IN ('approved','executing') AND NOT ?2))) OR EXISTS(SELECT 1 FROM human_interaction_suspensions s JOIN human_interaction_requests r ON r.request_id=s.request_id WHERE r.conversation_id=?1 AND s.status IN ('waiting','claimed')) OR EXISTS(SELECT 1 FROM manual_context_compaction_operations WHERE conversation_id=?1 AND status='running')",params![conversation,guidance],|r|r.get(0)).map_err(unavailable)
+    // Approval pauses sampling inside the existing Run. Its guidance inbox can retain an answer;
+    // starting a new Turn must still wait for every pending/approved/executing action to settle.
+    connection.query_row("SELECT EXISTS(SELECT 1 FROM agent_pending_actions WHERE conversation_id=?1 AND status IN ('pending','approved','executing') AND NOT ?2) OR EXISTS(SELECT 1 FROM human_interaction_suspensions s JOIN human_interaction_requests r ON r.request_id=s.request_id WHERE r.conversation_id=?1 AND s.status IN ('waiting','claimed')) OR EXISTS(SELECT 1 FROM manual_context_compaction_operations WHERE conversation_id=?1 AND status='running')",params![conversation,guidance],|r|r.get(0)).map_err(unavailable)
 }
 
 pub fn bind_async_to_guidance(

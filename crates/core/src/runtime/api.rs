@@ -121,6 +121,27 @@ impl AgentSteerInputQueue {
         self.changed.notify_waiters();
     }
 
+    /// Transfers pending inputs and their identities to the next segment of the same Run.
+    /// The retiring segment keeps a closed, empty queue, so its Drop guard cannot close the
+    /// successor. Hosts serialize this handoff with admission through their Run registry lock.
+    pub fn handoff_pending(&self) -> Self {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        let successor = Self {
+            state: Arc::new(Mutex::new(AgentSteerInputQueueState {
+                accepting: state.accepting,
+                pending: std::mem::take(&mut state.pending),
+                seen_by_client_message_id: std::mem::take(&mut state.seen_by_client_message_id),
+                client_message_id_by_guidance_id: std::mem::take(
+                    &mut state.client_message_id_by_guidance_id,
+                ),
+            })),
+            changed: Arc::new(tokio::sync::Notify::new()),
+        };
+        state.accepting = false;
+        self.changed.notify_waiters();
+        successor
+    }
+
     /// Atomically stops admission and returns every input that was accepted but not yet drained.
     pub fn close_and_take_pending(&self) -> Vec<crate::AgentSteerInput> {
         let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
@@ -1264,6 +1285,45 @@ mod steer_input_queue_tests {
 
         assert_eq!(queue.drain_pending(), vec![first, second]);
         assert!(queue.is_accepting());
+    }
+
+    #[test]
+    fn approval_handoff_preserves_fifo_and_identity_without_sharing_close() {
+        let queue = AgentSteerInputQueue::new();
+        let first = input("guidance-1", "client-1", "first");
+        let second = input("guidance-2", "client-2", "second");
+        queue.enqueue(first.clone()).unwrap();
+        queue.enqueue(second.clone()).unwrap();
+
+        let successor = queue.handoff_pending();
+        assert!(!queue.is_same_queue(&successor));
+        assert!(!queue.is_accepting());
+        assert_eq!(queue.pending_len(), 0);
+        assert_eq!(
+            successor.enqueue(first.clone()).unwrap(),
+            AgentSteerEnqueueOutcome::Duplicate
+        );
+        assert!(successor
+            .enqueue(input("different", "client-1", "changed"))
+            .is_err());
+        let third = input("guidance-3", "client-3", "third");
+        successor.enqueue(third.clone()).unwrap();
+
+        // Both cleanup operations may happen late, after the next Runtime has already started.
+        queue.close();
+        assert!(queue.close_and_take_pending().is_empty());
+        assert!(successor.is_accepting());
+        assert_eq!(
+            successor.drain_pending(),
+            vec![first.clone(), second, third]
+        );
+        let next = successor.handoff_pending();
+        successor.close();
+        assert!(next.is_accepting());
+        assert_eq!(
+            next.enqueue(first).unwrap(),
+            AgentSteerEnqueueOutcome::Duplicate
+        );
     }
 
     #[test]

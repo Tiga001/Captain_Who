@@ -85,6 +85,7 @@ impl AgentService {
         notifications: CoreServerNotificationSender,
     ) {
         let run_id = record.snapshot.run_id.clone();
+        let mut steering_cleanup = self.active_run_steering_cleanup(&run_id, notifications.clone());
         let action_id = record.snapshot.action_id.clone();
         self.seed_trace_snapshot_from_checkpoint(
             &run_id,
@@ -197,6 +198,7 @@ impl AgentService {
                 pending_status,
             } => (*agent_input, tool_result, pending_status),
             ManualFileEffectSettlement::CommittedAndAdvanced => {
+                steering_cleanup.disarm();
                 file_effect_guard.mark_durably_settled();
                 self.unregister_cancellation(&run_id);
                 return;

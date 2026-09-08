@@ -23,7 +23,10 @@ const REVIEWED_POLICY_JSON: &str =
 const FIXED_UPSTREAM_TOOL_COUNT: usize = 69;
 const MAX_REVIEWED_EXPOSED_TOOLS: usize = 128;
 const CALL_REASON_PROPERTY: &str = "call_reason";
-const BROWSER_TAKE_SCREENSHOT_DESCRIPTION: &str = "Take a screenshot of the current page. You can't perform actions based on the screenshot, use browser_snapshot for actions. A successful result includes readPath as an image-artifact://sha256/... URI; pass that exact value to read_image.path. Do not guess a workspace path, filename, displayName, or artifactId.";
+const BROWSER_PDF_SAVE_DESCRIPTION: &str = "Save the current page as a managed PDF artifact using native webpage printing. Pages with cross-process embedded frames are currently unsupported. A typed unavailable result explains compatibility limits or a pending print; follow its recovery guidance before retrying.";
+const BROWSER_TAKE_SCREENSHOT_DESCRIPTION: &str = "Take a screenshot of the current page. Prefer browser_snapshot and DOM targets for actions. When DOM targets are unavailable, inspect the screenshot with read_image before using coordinate tools; use viewport coordinates from a recent screenshot of the same page, and refresh after navigation, scrolling, resizing, or other page changes. A successful result includes readPath as an image-artifact://sha256/... URI; pass that exact value to read_image.path. Do not guess a workspace path, filename, displayName, or artifactId.";
+const BROWSER_FILE_UPLOAD_DESCRIPTION: &str = "Upload files through an open file chooser. paths accepts authorized workspace-relative or absolute file paths and accessible file-input references such as browser-download:<uuid>. File access and target approval are checked before upload. Omitting paths cancels the file chooser; it does not open a native file picker.";
+const BROWSER_DROP_DESCRIPTION: &str = "Drop files or MIME data onto an element on the current page. Provide paths, data, or both. paths accepts authorized workspace-relative or absolute file paths and accessible file-input references such as browser-download:<uuid>. File access and target approval are checked before dropping files. Use data for a MIME-data-only drop.";
 const BROWSER_CLICK_DESCRIPTION: &str = "Perform a click on the current page. If the click starts a browser download, the result reports download_started with a stable download ID; use browser_wait_for with a short time to observe progress.";
 const BROWSER_GET_CONFIG_DESCRIPTION: &str = "Get the managed browser's resolved Host configuration and the current task's path-free download progress.";
 const BROWSER_WAIT_FOR_DESCRIPTION: &str = "Wait for text to appear or disappear or for a specified time. The result also reports current-task browser download progress, so use a short time to poll an active download.";
@@ -296,7 +299,10 @@ pub(crate) fn load_playwright_browser_contract() -> AgentResult<PlaywrightBrowse
                 identity.as_str(),
                 &policy.model_name,
                 match identity.as_str() {
+                    "browser_pdf_save" => BROWSER_PDF_SAVE_DESCRIPTION,
                     "browser_take_screenshot" => BROWSER_TAKE_SCREENSHOT_DESCRIPTION,
+                    "browser_file_upload" => BROWSER_FILE_UPLOAD_DESCRIPTION,
+                    "browser_drop" => BROWSER_DROP_DESCRIPTION,
                     "browser_click" => BROWSER_CLICK_DESCRIPTION,
                     "browser_get_config" => BROWSER_GET_CONFIG_DESCRIPTION,
                     "browser_wait_for" => BROWSER_WAIT_FOR_DESCRIPTION,
@@ -831,7 +837,7 @@ mod tests {
         );
         assert_eq!(
             contract.policy_digest,
-            "sha256:4f36ae204ff1990f1cec45c8054062406b7a02186b7bd39620a30f128505f268"
+            "sha256:cf4b0d4ba01ce5c695096ad4dca499ceb895fd3c08c6f638b5602c1a21dc6e0c"
         );
 
         let counts = contract.tools.values().fold(
@@ -912,10 +918,39 @@ mod tests {
             .find(|tool| tool.model_name == "browser_take_screenshot")
             .unwrap();
         assert!(screenshot.description.contains("read_image.path"));
+        assert!(screenshot
+            .description
+            .contains("Prefer browser_snapshot and DOM targets"));
+        assert!(screenshot
+            .description
+            .contains("inspect the screenshot with read_image"));
+        assert!(screenshot.description.contains("viewport coordinates"));
+        assert!(screenshot
+            .description
+            .contains("refresh after navigation, scrolling, resizing"));
         assert!(screenshot.description.contains("image-artifact://sha256/"));
         assert!(screenshot
             .description
             .contains("Do not guess a workspace path, filename, displayName, or artifactId."));
+        for tool_name in ["browser_file_upload", "browser_drop"] {
+            let tool = manifest
+                .tools
+                .iter()
+                .find(|tool| tool.model_name == tool_name)
+                .unwrap();
+            assert!(tool
+                .description
+                .contains("authorized workspace-relative or absolute file paths"));
+            assert!(tool.input_schema["properties"]["paths"]["description"]
+                .as_str()
+                .unwrap()
+                .contains("browser-download:<uuid>"));
+            assert_eq!(tool.input_schema["properties"]["paths"]["type"], "array");
+            assert_eq!(
+                tool.input_schema["properties"]["paths"]["items"]["type"],
+                "string"
+            );
+        }
     }
 
     #[test]

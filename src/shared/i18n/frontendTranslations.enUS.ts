@@ -335,6 +335,7 @@ export const enUSTranslations = {
   'browser.title': 'Browser',
   'browser.newTab': 'New tab',
   'browser.addressPlaceholder': 'Enter URL',
+  'browser.invalidAddress': 'Enter a valid web address, such as example.com or localhost:3000.',
   'browser.open': 'Open page',
   'browser.back': 'Back',
   'browser.forward': 'Forward',

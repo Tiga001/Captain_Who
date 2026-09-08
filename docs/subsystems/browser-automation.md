@@ -2,7 +2,7 @@
 status: current
 audience: developers
 owner: engineering
-last_verified: 2026-09-06
+last_verified: 2026-09-08
 ---
 
 # 浏览器与自动化
@@ -79,10 +79,20 @@ Main 对 guest 强制：
 - 开启 sandbox、context isolation、webSecurity、safeDialogs；禁止 drag/drop navigation 和不安全内容。
 - 网页权限 check/request 一律拒绝。
 - 页面协议只允许 HTTP/HTTPS；bootstrap `about:blank` 和内部 Chromium PDF viewer 走窄例外。
-- Electron popup 本身永远拒绝。当前应用在 Electron Main 的导航与网络策略允许后，为合法 `target=_blank` 创建一个非活动的受管新 surface；网页不会获得真实 popup WebContents，也不会直接决定 surface identity。
+- 合法 HTTP/HTTPS 和 `about:blank` popup 由 Electron Main 接管原生 child WebContents，以独立受管窗口呈现；保留 Chromium 的 `window.opener`、WindowProxy、`postMessage`、原始 POST 和关闭关系。`noopener`、`noreferrer`、COOP 仍按浏览器规则隔离。网页不能决定 surface identity 或获得主 Renderer 权限。
 - 非法导航/redirect 被阻止；日志不打印可能含 query/credential 的完整 URL。
 
 应用页面中的 HTTP/HTTPS 链接按 Rust Core-owned `linkOpenTarget` 选择系统浏览器或内置受管 surface；`mailto:` 始终交给系统。该决定由 `BrowserLinkRouter` 在 Main 执行，外部链接从不导航主 Renderer。favicon 也通过受管 Browser Session 与网络策略抓取，不能借主 Renderer 网络栈绕过分区策略。
+
+### 原生弹窗准入
+
+`setWindowOpenHandler` 的 `overrideBrowserWindowOptions` 在原生 WebContents 创建前强制受管 webPreferences；`createWindow` 保留 Electron 传入的同一个 WebContents，不能取消后重新 `loadURL`。`BrowserTargetBroker.registerManagedPopup` 独立校验已登记且已 claim 的 exact opener、同 host、同 Session 和 native window 类型；普通 guest 登记仍只接受原有 webview。
+
+容量、频率和已关闭 opener 在窗口创建前同步拒绝。创建回调意外失败时关闭 Electron 已预建的原始 WebContents，收敛异常，不留下未登记的隐藏页面。
+
+Main 同步登记 child 并安装 NetworkGuard 的精确页面准入等待，在风险审批、下载归属 claim、Context routes/offline 安装完成后，才放行原始首请求。等待不会重放 POST，也不会把尚未完成绑定的 Agent popup 误判成手动流。人工审批时间不计入准入准备的 15 秒上限。空白 popup 按 opener 的当前 HTTP/HTTPS 地址审批；准入后保留短暂的空白页等待，允许 `window.open('')` 后立即赋值 `location`。
+
+弹窗进入同一受管页面列表，Agent 可选择、缩放和关闭。窗口初次显示不抢走 opener 选择；用户聚焦 popup 或点击回侧栏网页时更新当前查看页。原生 callback 自行关闭只回收该 child，不中断仍在执行的 opener Tool。关闭 opener、窗口、异常 transport 或应用退出都会清理精确 popup 实例。无 NetworkGuard 的测试/兼容入口仍使用原有拒绝原生窗口并创建独立 surface 的降级路径。
 
 ## 浏览历史、偏好与清除数据
 
@@ -125,7 +135,7 @@ Main 只加载固定 manifest/catalog 中审查过的官方 Tool。当前锁定 
 
 - 绑定 scope 是当前 managed surface 或 managed browser profile。
 - 绑定包含 Run、activation、call、Tool、arguments digest 和过期时间。
-- 若涉及上传，Main 先用原生 picker 选择文件并形成 process-only 路径能力。
+- 若涉及上传，Rust Core 先解析有读取授权的工作区路径或文件输入引用，Main 再冻结文件内容和 revision，形成 process-only 临时路径能力。
 - Main 冻结 exact surface generation/origin，返回 value-free target binding digest。
 - Rust Core 审批后签发只适用于该参数、资源和目标的 grant；Main 调用前再次核对 opaque `targetBindingId`。
 
@@ -164,11 +174,25 @@ Main 只加载固定 manifest/catalog 中审查过的官方 Tool。当前锁定 
 
 如果 phase acknowledgement 失败，调用在执行前 fail closed。执行开始后发生超时、崩溃或通道丢失时，结果必须携带 `possibly_dispatched`/`outcome_unknown`，不能谎报“未执行”。这对点击、提交、下载等有副作用 Tool 尤其重要。
 
+浏览器 Tool 保持全局串行执行，最多接纳 8 个调用。排队单独计时，默认上限 60 秒；取得执行槽位后才启动该调用的完整执行预算，人工审批等待仍暂停执行计时。排队超时返回 `queue_timeout` 与 `definitely_not_dispatched`，提示等待当前操作或审批结束后重试；排队取消不会撤销正在执行的连接。当前尚无 Renderer 排队状态或占用任务展示。
+
 ## 上传、下载与 Artifact
 
 ### 文件上传
 
-Renderer/模型不提供绝对路径。Main 用原生 picker 获取文件，按 Run/call/capability 建立短期准备记录并绑定文件 revision。Tool 完成、取消、grant 撤销或 surface 关闭时释放。
+`browser_file_upload.paths` 和 `browser_drop.paths` 接受有授权的工作区相对/绝对文件路径，以及当前任务可访问的文件输入引用（例如 `browser-download:<uuid>`）。Rust Core 负责 canonical path、工作区边界和文件输入权限校验；工作区外路径仍需相应读取权限。绝对路径字符串本身不是授权，临时 `browser-artifact:` 句柄也不能作为文件路径。
+
+Rust Core 将已解析路径通过私有 bridge 交给 Main，Main 按 Run/call/capability 冻结文件内容并绑定 revision，再给官方工具一次性的上传副本。Tool 完成、取消、grant 撤销或 surface 关闭时释放。此链路不隐式打开系统文件选择器；`browser_file_upload` 省略 `paths` 表示取消网页文件选择。新文件应先通过任务附件或已授权工作区提供。
+
+### 截图与定位
+
+工具说明要求优先使用 `browser_snapshot` 的 DOM target。DOM 无法定位时，可先用截图返回的 `readPath` 调用 `read_image`，再使用坐标工具。坐标必须对应同一页面的近期视口截图；导航、滚动、尺寸或页面内容变化后重新观察。该规则是模型操作指引，当前 Host 不维护截图与坐标调用之间的强制时效绑定。
+
+### 网页 PDF
+
+`browser_pdf_save` 沿官方 `page.pdf()` 和 Host Artifact 预留/发布链路执行。`ElectronGuestCdpTransport` 将 `Page.printToPDF` 适配到同一个 guest 的原生打印，再通过该传输私有、有界的 `IO` stream 返回字节。它不会重新加载网页或把截图包装成 PDF。
+
+当前 Electron 39 的 webview guest 打印含跨进程 iframe 的页面可能永久挂起，因此打印前检查 native frame process identity，拒绝已有 OOPIF 的页面；打印后复核 frame identity 和导航变化。取消或超时会丢弃迟到结果，但原生打印没有取消 API，Main 必须保留全局单个未完成打印的占位，直到实际完成或原页面关闭。动态插入 OOPIF 的竞态仍可能使底层打印挂起；结果会提示关闭发起打印的页面后恢复。该能力是有明确页面兼容边界的局部支持。
 
 ### 下载
 
@@ -265,7 +289,7 @@ pnpm verify:playwright-round3-release
 - [ ] 新风险被正确归类为 hard deny、网络审批或敏感 Tool 审批。
 - [ ] grant 绑定 exact Run/call/arguments/resource/target/expiry，并在所有终止路径释放。
 - [ ] 副作用路径的 dispatch phase 和 outcome_unknown 测试已覆盖。
-- [ ] 上传不接受 Renderer 路径；下载和 Artifact 不暴露托管路径；手动询问保存位置不影响 Agent 下载。
+- [ ] 上传路径先经 Rust Core 文件读取授权和 Main 冻结校验；下载和 Artifact 不暴露托管路径；手动询问保存位置不影响 Agent 下载。
 - [ ] 下载 live/history/settings、文件 identity 检查和 path-free Agent input materialization 均覆盖 available/missing/modified 与 task-tree 隔离。
 - [ ] Browser data 按类别/时间范围清理，偏好更新使用 CAS，app link 不导航主 Renderer。
 - [ ] 手动浏览与 Agent 自动化权限没有混用。

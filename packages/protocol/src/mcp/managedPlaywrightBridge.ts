@@ -153,6 +153,7 @@ export type ManagedPlaywrightDispatchCertainty =
 export type ManagedPlaywrightBridgeErrorCode =
   | 'cancelled'
   | 'timeout'
+  | 'queue_timeout'
   | 'closed'
   | 'busy'
   | 'surface_unavailable'
@@ -910,6 +911,7 @@ function parseCompletionOutcome(value: unknown): ManagedPlaywrightCompletionOutc
       const code = expectEnum(base.code, [
         'cancelled',
         'timeout',
+        'queue_timeout',
         'closed',
         'busy',
         'surface_unavailable',

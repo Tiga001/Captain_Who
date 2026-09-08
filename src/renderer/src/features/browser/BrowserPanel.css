@@ -100,6 +100,17 @@
   border-color: var(--mc-color-focus-ring);
 }
 
+.browser-panel__address[data-invalid='true'] {
+  border-color: var(--mc-color-border-error);
+}
+
+.browser-panel__address-error {
+  grid-column: 1 / -1;
+  margin: 0;
+  color: var(--mc-color-text-danger);
+  font-size: var(--mc-font-size-xs);
+}
+
 .browser-panel__address input {
   width: 100%;
   min-width: 0;

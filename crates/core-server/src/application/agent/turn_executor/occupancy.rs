@@ -148,6 +148,11 @@ impl AgentService {
         {
             active_turns.remove(conversation_id);
         }
+        drop(active_turns);
+        self.finish_active_run_steering(
+            run_id,
+            "The agent run has finished and no longer accepts guidance.",
+        );
     }
 
     pub(super) fn restore_durable_conversation_turn_occupancies(&self) -> Result<(), String> {

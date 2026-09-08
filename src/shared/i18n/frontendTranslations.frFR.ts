@@ -345,6 +345,8 @@ export const frFRTranslations = {
   'browser.title': 'Navigateur',
   'browser.newTab': 'Nouvel onglet',
   'browser.addressPlaceholder': 'Entrez URL',
+  'browser.invalidAddress':
+    'Saisissez une adresse Web valide, comme example.com ou localhost:3000.',
   'browser.open': 'Ouvrir la page',
   'browser.back': 'Retour',
   'browser.forward': 'En avant',

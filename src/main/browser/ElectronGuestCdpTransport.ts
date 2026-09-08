@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto'
 import type { ConnectOverCDPTransport } from 'playwright'
 import type { Debugger, Event as ElectronEvent, WebContents } from 'electron'
+import { GuestPdfError } from './ElectronGuestPdfPrinter'
+import { ElectronGuestPdfStream } from './ElectronGuestPdfStream'
 
 type CdpParams = Record<string, unknown>
 
@@ -100,6 +102,7 @@ export class ElectronGuestCdpTransport implements ConnectOverCDPTransport {
   private emittedAttached = false
   private messageHandler?: (message: object) => void
   private ownsDebugger = false
+  private readonly pdfStream: ElectronGuestPdfStream
 
   constructor(
     private readonly guest: WebContents,
@@ -108,6 +111,7 @@ export class ElectronGuestCdpTransport implements ConnectOverCDPTransport {
       physicalUrl: string
     ) => ElectronGuestCdpPresentation | null
   ) {
+    this.pdfStream = new ElectronGuestPdfStream(guest)
     this.debuggerClient = guest.debugger
     this.targetInfo = {
       attached: true,
@@ -348,7 +352,10 @@ export class ElectronGuestCdpTransport implements ConnectOverCDPTransport {
       this.respond(request, {
         error: {
           code: -32_000,
-          message: error instanceof CdpPolicyError ? error.message : 'Managed target command failed'
+          message:
+            error instanceof CdpPolicyError || error instanceof GuestPdfError
+              ? error.message
+              : 'Managed target command failed'
         }
       })
     }
@@ -442,11 +449,19 @@ export class ElectronGuestCdpTransport implements ConnectOverCDPTransport {
       }
     }
     if (request.method === 'Page.printToPDF') {
-      // Electron 39 does not expose Page.printToPDF on an admitted webview debugger target, and
-      // its native WebContents.printToPDF pipeline hangs on a real page containing an OOPIF.
-      // Fail deterministically instead of dispatching a command that cannot complete or faking a
-      // screenshot-based PDF with materially different print/CSS semantics.
-      throw new CdpPolicyError('browser.pdf_unavailable')
+      if (childSessionId)
+        throw new CdpPolicyError('PDF printing requires the admitted page session')
+      return await this.pdfStream.print(request.params)
+    }
+    if (
+      (request.method === 'IO.read' || request.method === 'IO.close') &&
+      this.pdfStream.ownsHandle(request.params)
+    ) {
+      if (childSessionId)
+        throw new CdpPolicyError('PDF streams belong to the admitted page session')
+      return request.method === 'IO.read'
+        ? this.pdfStream.read(request.params)
+        : this.pdfStream.closeStream(request.params)
     }
     const result = await this.debuggerClient.sendCommand(
       request.method,
@@ -937,6 +952,7 @@ export class ElectronGuestCdpTransport implements ConnectOverCDPTransport {
   private terminate(reason: string): void {
     if (this.closed) return
     this.closed = true
+    this.pdfStream.dispose()
 
     if (this.emittedAttached) {
       this.messageHandler?.({

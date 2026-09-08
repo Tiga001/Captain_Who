@@ -184,6 +184,7 @@ export class ManagedPlaywrightMcpHost {
   private readonly releaseBrowserCapability?: ManagedPlaywrightMcpHostOptions['releaseBrowserCapability']
   private readonly releaseBrowserToolCall?: ManagedPlaywrightMcpHostOptions['releaseBrowserToolCall']
   private readonly toolTimeoutMs: number
+  private readonly queueTimeoutMs: number
 
   private readonly activeCalls = new Set<AbortController>()
   private readonly callTimeoutBudgets = new WeakMap<AbortSignal, PausableCallTimeout>()
@@ -226,6 +227,7 @@ export class ManagedPlaywrightMcpHost {
           { capabilities: {} }
         ))
     this.toolTimeoutMs = boundedTimeout(options.toolTimeoutMs)
+    this.queueTimeoutMs = boundedTimeout(options.queueTimeoutMs)
   }
 
   async connect(signal?: AbortSignal): Promise<void> {
@@ -356,8 +358,9 @@ export class ManagedPlaywrightMcpHost {
     }
     try {
       return await this.runBounded(
-        async (operationSignal) =>
+        async (operationSignal, startExecutionTimeout) =>
           this.serializeDispatch(operationSignal, async () => {
+            startExecutionTimeout()
             this.assertRunStateAccess(options.authorizationContext?.runId)
             let sensitiveGrant: PreparedSensitiveGrant | undefined
             let fileLease: PreparedSensitiveFileLease | undefined
@@ -758,7 +761,7 @@ export class ManagedPlaywrightMcpHost {
                 if (parsed.isError) {
                   await artifactPlan.reservation.discard().catch(() => undefined)
                   if (name === 'browser_pdf_save' && isPdfUnavailableResult(parsed)) {
-                    return pdfUnavailableToolResult()
+                    return pdfUnavailableToolResult(parsed)
                   }
                   return {
                     content: [
@@ -896,6 +899,7 @@ export class ManagedPlaywrightMcpHost {
     this.dispatchTail = previous.then(() => slot)
     try {
       await raceWithAbort(previous, signal)
+      if (signal.aborted) throw cancellationError(signal.reason)
       try {
         return await raceWithAbort(operation(), signal)
       } catch (error) {
@@ -2368,10 +2372,10 @@ export class ManagedPlaywrightMcpHost {
   }
 
   private async runBounded<T>(
-    operation: (signal: AbortSignal) => Promise<T>,
+    operation: (signal: AbortSignal, startExecutionTimeout: () => void) => Promise<T>,
     callerSignal?: AbortSignal,
     requestedTimeoutMs?: number,
-    awaitOperationAbortCleanup = false
+    queuedDispatch = false
   ): Promise<T> {
     if (this.closed) {
       throw new ManagedPlaywrightMcpHostError('mcp.builtin_playwright.closed')
@@ -2381,31 +2385,42 @@ export class ManagedPlaywrightMcpHost {
     }
     const controller = new AbortController()
     const timeoutMs = boundedTimeout(requestedTimeoutMs ?? this.toolTimeoutMs)
-    const timeout = new PausableCallTimeout(controller, timeoutMs)
-    this.callTimeoutBudgets.set(controller.signal, timeout)
+    let timeout: PausableCallTimeout | undefined
+    let queueTimer: ReturnType<typeof setTimeout> | undefined
+    const startExecutionTimeout = (): void => {
+      if (timeout || controller.signal.aborted) return
+      if (queueTimer) clearTimeout(queueTimer)
+      queueTimer = undefined
+      timeout = new PausableCallTimeout(controller, timeoutMs)
+      this.callTimeoutBudgets.set(controller.signal, timeout)
+    }
+    if (queuedDispatch) {
+      // Waiting for a shared browser slot must not consume a short Tool execution budget.
+      // Queue admission is still bounded independently, including while the owner awaits approval.
+      queueTimer = setTimeout(() => controller.abort('queue_timeout'), this.queueTimeoutMs)
+    } else {
+      startExecutionTimeout()
+    }
     const abortFromCaller = (): void => controller.abort('caller')
     callerSignal?.addEventListener('abort', abortFromCaller, { once: true })
     this.activeCalls.add(controller)
     try {
       if (callerSignal?.aborted) controller.abort('caller')
       if (controller.signal.aborted) throw cancellationError(controller.signal.reason)
-      const pending = operation(controller.signal)
-      const result = await (awaitOperationAbortCleanup
-        ? pending
-        : raceWithAbort(pending, controller.signal))
+      const pending = operation(controller.signal, startExecutionTimeout)
+      // serializeDispatch owns cancellation cleanup: it must retire the previous CDP generation
+      // before releasing an executing slot, while cancellation in the queue leaves that owner alone.
+      const result = await (queuedDispatch ? pending : raceWithAbort(pending, controller.signal))
       if (controller.signal.aborted) throw cancellationError(controller.signal.reason)
       return result
     } catch (error) {
       if (controller.signal.aborted) {
-        const code =
-          controller.signal.reason === 'timeout'
-            ? 'mcp.builtin_playwright.timeout'
-            : 'mcp.builtin_playwright.cancelled'
-        throw new ManagedPlaywrightMcpHostError(code)
+        throw cancellationError(controller.signal.reason)
       }
       throw mapSafeHostError(error)
     } finally {
-      timeout.dispose()
+      if (queueTimer) clearTimeout(queueTimer)
+      timeout?.dispose()
       this.callTimeoutBudgets.delete(controller.signal)
       callerSignal?.removeEventListener('abort', abortFromCaller)
       this.activeCalls.delete(controller)

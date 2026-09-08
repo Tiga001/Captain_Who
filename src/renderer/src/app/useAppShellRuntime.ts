@@ -603,6 +603,7 @@ export function useAppShellRuntime({
     removeQueuedMessageByClientId,
     requestAssistantResponse,
     restoreRejectedGuidance,
+    supersedeRejectedGuidance,
     scheduleStoppedRunReconciliation,
     updateAssistantMessage,
     waitForRunSettlement
@@ -659,6 +660,7 @@ export function useAppShellRuntime({
     requestAssistantResponse,
     restoreRejectedGuidance,
     restoreSubmittedSkills,
+    supersedeRejectedGuidance,
     scheduleStoppedRunReconciliation,
     setConversationsWithRef,
     setDraftsWithRef,

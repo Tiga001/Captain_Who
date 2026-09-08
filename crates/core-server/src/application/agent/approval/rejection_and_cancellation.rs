@@ -137,6 +137,7 @@ impl AgentService {
                     token.cancel();
                     runtime_token_signalled = true;
                 }
+                self.fence_cancelled_run_steering(&record.snapshot.run_id);
                 self.record_action_audit(
                     &record,
                     Some("cancelled"),

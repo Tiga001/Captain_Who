@@ -8,6 +8,7 @@ impl AgentService {
         notifications: CoreServerNotificationSender,
     ) {
         let run_id = record.snapshot.run_id.clone();
+        let mut steering_cleanup = self.active_run_steering_cleanup(&run_id, notifications.clone());
         self.seed_trace_snapshot_from_checkpoint(
             &run_id,
             record.agent_input.resume_checkpoint.as_ref(),
@@ -96,7 +97,12 @@ impl AgentService {
         ) {
             BuiltinMcpToolResultCommitDisposition::Committed => {}
             BuiltinMcpToolResultCommitDisposition::CommittedAndAdvanced
-            | BuiltinMcpToolResultCommitDisposition::Terminalized => {
+            | BuiltinMcpToolResultCommitDisposition::OwnershipLost => {
+                steering_cleanup.disarm();
+                self.unregister_cancellation_if_current(&run_id, &cancellation);
+                return;
+            }
+            BuiltinMcpToolResultCommitDisposition::Terminalized => {
                 self.unregister_cancellation_if_current(&run_id, &cancellation);
                 return;
             }
@@ -148,14 +154,11 @@ impl AgentService {
                     }
                     Ok(AgentPendingActionSettlementInspection::DefinitelyUncommitted)
                     | Ok(AgentPendingActionSettlementInspection::Diverged { .. })
-                    | Err(_) => {
-                        self.terminalize_builtin_mcp_tool_without_receipt(
-                            record,
-                            notifications,
-                            cancellation,
-                        );
-                        BuiltinMcpToolResultCommitDisposition::Terminalized
-                    }
+                    | Err(_) => self.terminalize_builtin_mcp_tool_without_receipt(
+                        record,
+                        notifications,
+                        cancellation,
+                    ),
                 }
             }
         }
@@ -178,14 +181,14 @@ impl AgentService {
         record: &PendingActionRecord,
         notifications: &CoreServerNotificationSender,
         cancellation: &AgentCancellationToken,
-    ) {
+    ) -> BuiltinMcpToolResultCommitDisposition {
         const FAILURE_CODE: &str = "builtin_mcp_result_persistence_failed";
         const FAILURE_MESSAGE: &str = "The sensitive built-in MCP Tool did not produce a durable terminal receipt. It will not be replayed; its external outcome is unknown.";
         let run_id = &record.snapshot.run_id;
         let AgentProposedAction::BuiltinMcpToolApproval { approval } = &record.snapshot.action
         else {
             self.unregister_cancellation_if_current(run_id, cancellation);
-            return;
+            return BuiltinMcpToolResultCommitDisposition::Terminalized;
         };
         let (outcome, result) = if record.snapshot.status == PendingActionStatus::Executing {
             (
@@ -222,7 +225,9 @@ impl AgentService {
         }
         if lost_terminal_fence {
             self.unregister_cancellation_if_current(run_id, cancellation);
-            return;
+            // Another settlement owns this action. Its continuation may not yet have claimed
+            // the waiting inbox, so the retiring worker must also relinquish inbox cleanup.
+            return BuiltinMcpToolResultCommitDisposition::OwnershipLost;
         }
 
         self.invalidate_mcp_pending_payload(&record.snapshot.action);
@@ -267,5 +272,6 @@ impl AgentService {
             finish_reason: None,
             proposed_actions: Vec::new(),
         }));
+        BuiltinMcpToolResultCommitDisposition::Terminalized
     }
 }

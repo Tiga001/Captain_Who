@@ -316,6 +316,129 @@ function emitWorkerAttached(
 }
 
 describe('BrowserTargetBroker', () => {
+  it('admits only an exact Main-created popup of an already claimed managed opener', async () => {
+    const broker = createBroker()
+    const { guest: opener, host } = createRegisteredGuest(broker)
+    const popup = new FakeWebContents(3, 'window')
+    const registration = {
+      guest: popup.asWebContents(),
+      host: host.asWebContents(),
+      openerGuest: opener.asWebContents(),
+      partition: PARTITION
+    }
+    broker.registerManagedPopup(registration)
+    broker.registerManagedPopup(registration)
+    broker.claimSurface({
+      generation: 1,
+      guestWebContentsId: popup.id,
+      host: host.asWebContents(),
+      surfaceId: 'popup-one'
+    })
+    const transport = await broker.connect('popup-one')
+    expect(transport).toBeDefined()
+    expect(broker.snapshot()).toEqual({
+      activeConnections: 1,
+      registeredGuests: 2,
+      claimedSurfaces: 2
+    })
+    expect(() => broker.registerManagedGuest(registration)).toThrow(
+      expect.objectContaining({ code: 'invalid_guest' })
+    )
+    broker.dispose()
+  })
+
+  it('rejects unclaimed, substituted, or foreign opener identities for native popups', () => {
+    const broker = createBroker()
+    const { guest: opener, host } = createRegisteredGuest(broker)
+    const popup = new FakeWebContents(5, 'window')
+    const unclaimed = new FakeWebContents(4, 'webview', host.asWebContents())
+    broker.registerManagedGuest({
+      guest: unclaimed.asWebContents(),
+      host: host.asWebContents(),
+      partition: PARTITION
+    })
+    const substituted = new FakeWebContents(opener.id, 'webview', host.asWebContents())
+    for (const openerGuest of [
+      unclaimed,
+      substituted,
+      new FakeWebContents(99, 'webview', host.asWebContents())
+    ]) {
+      expect(() =>
+        broker.registerManagedPopup({
+          guest: popup.asWebContents(),
+          host: host.asWebContents(),
+          openerGuest: openerGuest.asWebContents(),
+          partition: PARTITION
+        })
+      ).toThrow(expect.objectContaining({ code: 'invalid_guest' }))
+    }
+    expect(() =>
+      broker.registerManagedPopup({
+        guest: popup.asWebContents(),
+        host: new FakeWebContents(10, 'window').asWebContents(),
+        openerGuest: opener.asWebContents(),
+        partition: PARTITION
+      })
+    ).toThrow(expect.objectContaining({ code: 'invalid_guest' }))
+    broker.dispose()
+  })
+
+  it('rejects wrong-session popups and cannot register the host as its own managed popup', () => {
+    const broker = createBroker()
+    const { guest: opener, host } = createRegisteredGuest(broker)
+    const foreignPopup = new FakeWebContents(3, 'window', null, OTHER_SESSION)
+    expect(() =>
+      broker.registerManagedPopup({
+        guest: foreignPopup.asWebContents(),
+        host: host.asWebContents(),
+        openerGuest: opener.asWebContents(),
+        partition: PARTITION
+      })
+    ).toThrow(expect.objectContaining({ code: 'invalid_partition' }))
+    expect(() =>
+      broker.registerManagedPopup({
+        guest: host.asWebContents(),
+        host: host.asWebContents(),
+        openerGuest: opener.asWebContents(),
+        partition: PARTITION
+      })
+    ).toThrow(expect.objectContaining({ code: 'invalid_guest' }))
+    broker.dispose()
+  })
+
+  it.each(['session', 'kind'] as const)(
+    'revalidates a native popup when its %s identity drifts',
+    async (drift) => {
+      const broker = createBroker()
+      const { guest: opener, host } = createRegisteredGuest(broker)
+      const popup = new FakeWebContents(3, 'window')
+      broker.registerManagedPopup({
+        guest: popup.asWebContents(),
+        host: host.asWebContents(),
+        openerGuest: opener.asWebContents(),
+        partition: PARTITION
+      })
+      broker.claimSurface({
+        generation: 1,
+        guestWebContentsId: popup.id,
+        host: host.asWebContents(),
+        surfaceId: 'popup-one'
+      })
+      if (drift === 'session') popup.session = OTHER_SESSION
+      else popup.kind = 'webview'
+      await expect(broker.connect('popup-one')).rejects.toMatchObject({
+        code: drift === 'session' ? 'invalid_partition' : 'invalid_guest'
+      })
+      expect(broker.snapshot()).toEqual({
+        activeConnections: 0,
+        registeredGuests: 1,
+        claimedSurfaces: 1
+      })
+      expect(popup.listenerCount('destroyed')).toBe(0)
+      broker.dispose()
+    }
+  )
+
   it('only registers a managed webview owned by the expected host and partition', () => {
     const broker = createBroker()
     const host = new FakeWebContents(1, 'window')
@@ -892,6 +1015,13 @@ describe('BrowserTargetBroker', () => {
   it('reports PDF unavailable and applies the artifact budget to IO.read responses', async () => {
     const { guest, harness, sessionId, transport } = await createConnectedTransportHarness()
     const fakeDebugger = guest.debugger as unknown as FakeDebugger
+    Object.defineProperty(guest, 'mainFrame', {
+      value: {
+        detached: false,
+        processId: 1,
+        framesInSubtree: [{ processId: 1 }, { processId: 2 }]
+      }
+    })
     const pdfParams = {
       displayHeaderFooter: false,
       footerTemplate: '',
@@ -916,7 +1046,7 @@ describe('BrowserTargetBroker', () => {
       harness.send('Page.printToPDF', { params: pdfParams, sessionId })
     ).resolves.toEqual(
       expect.objectContaining({
-        error: expect.objectContaining({ message: 'browser.pdf_unavailable' })
+        error: expect.objectContaining({ message: 'browser.pdf_unavailable:cross_process_frame' })
       })
     )
     expect(fakeDebugger.commands.some((command) => command.method === 'Page.printToPDF')).toBe(

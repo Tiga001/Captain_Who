@@ -533,10 +533,10 @@ impl ManagedPlaywrightHostBridge {
             Cancelled,
             TimedOut,
         }
-        // Managed Browser Tool execution is bounded in Electron Main, where BrowserRisk human
-        // approval waits can pause (but not reset) the budget. The reverse bridge therefore waits
-        // indefinitely only for CallTool completion or an explicit cancellation/shutdown token;
-        // every other bridge operation retains this transport deadline.
+        // Managed Browser queueing and execution are bounded separately in Electron Main, where
+        // BrowserRisk human approval waits can pause (but not reset) the execution budget.
+        // The reverse bridge waits indefinitely only for CallTool completion or an explicit
+        // cancellation/shutdown token; every other operation retains this transport deadline.
         let deadline = async {
             if operation == PendingOperation::CallTool {
                 std::future::pending::<()>().await;
@@ -857,9 +857,9 @@ impl McpPeer for ManagedPlaywrightHostBridgePeer {
     }
 
     fn owns_tool_timeout(&self) -> bool {
-        // Electron Main owns the managed Browser Tool budget so it can exclude only explicit
-        // BrowserRisk human-wait intervals. Cancellation and shutdown still flow through the
-        // Manager token passed to `call_tool_with_dispatch`.
+        // Electron Main owns separate queue and execution budgets; the execution budget excludes
+        // queue waits and explicit BrowserRisk human-wait intervals. Cancellation and shutdown
+        // still flow through the Manager token passed to `call_tool_with_dispatch`.
         true
     }
 
@@ -1518,6 +1518,7 @@ fn error_from_outcome(
             McpError::timeout("managed Playwright operation", 0)
         }
         ManagedPlaywrightBridgeErrorCode::Busy
+        | ManagedPlaywrightBridgeErrorCode::QueueTimeout
         | ManagedPlaywrightBridgeErrorCode::SurfaceCapacityExceeded => McpError::capacity(message),
         ManagedPlaywrightBridgeErrorCode::Closed => McpError::shutdown(message),
         ManagedPlaywrightBridgeErrorCode::OutputTooLarge => {
@@ -1629,8 +1630,13 @@ fn safe_error_message(code: ManagedPlaywrightBridgeErrorCode) -> &'static str {
     match code {
         ManagedPlaywrightBridgeErrorCode::Cancelled => "managed Playwright operation cancelled",
         ManagedPlaywrightBridgeErrorCode::Timeout => "managed Playwright operation timed out",
+        ManagedPlaywrightBridgeErrorCode::QueueTimeout => {
+            "browser queue wait timed out before this action started; wait for the current browser operation or its approval to finish, then retry"
+        }
         ManagedPlaywrightBridgeErrorCode::Closed => "managed Playwright Host is closed",
-        ManagedPlaywrightBridgeErrorCode::Busy => "managed Playwright Host is busy",
+        ManagedPlaywrightBridgeErrorCode::Busy => {
+            "browser capacity or shared browser state is occupied; wait for the current browser operation to finish or release its shared state, then retry"
+        }
         ManagedPlaywrightBridgeErrorCode::SurfaceUnavailable => "browser surface is unavailable",
         ManagedPlaywrightBridgeErrorCode::SurfaceCapacityExceeded => {
             "browser surface capacity was exceeded"
@@ -2173,6 +2179,24 @@ mod tests {
             Some(McpDispatchCertainty::DefinitelyNotDispatched)
         );
         assert_eq!(bridge.pending_request_count(), 0);
+    }
+
+    #[test]
+    fn queue_timeout_is_undispatched_capacity_with_actionable_retry_guidance() {
+        let outcome: ManagedPlaywrightCompletionOutcome = serde_json::from_value(json!({
+            "type": "error",
+            "code": "queue_timeout",
+            "dispatchCertainty": "definitely_not_dispatched"
+        }))
+        .unwrap();
+        let error = error_from_outcome(outcome, PendingOperation::CallTool);
+        assert_eq!(error.kind, mycopilot_mcp_client::McpErrorKind::Capacity);
+        assert_eq!(
+            error.dispatch_certainty,
+            Some(McpDispatchCertainty::DefinitelyNotDispatched)
+        );
+        assert!(error.message.contains("before this action started"));
+        assert!(error.message.contains("then retry"));
     }
 
     #[tokio::test]
@@ -3973,7 +3997,7 @@ mod tests {
             }),
         )
         .await;
-        assert!(pdf.is_error, "managed Electron PDF must fail closed");
+        assert!(pdf.is_error, "managed guest PDF must reject this OOPIF page");
         assert_eq!(
             pdf.structured_content
                 .as_ref()
@@ -3988,7 +4012,13 @@ mod tests {
         );
         assert_eq!(
             tool_result_text(&pdf),
-            "PDF export is unavailable in the current managed Electron browser."
+            "PDF export is unavailable for this page because it contains a cross-process embedded frame. Try a page without embedded content."
+        );
+        assert_eq!(
+            pdf.structured_content
+                .as_ref()
+                .and_then(|value| value["reason"].as_str()),
+            Some("cross_process_frame")
         );
         let trace_start = invoke_browser_tool_with_grant(
             &runtime,

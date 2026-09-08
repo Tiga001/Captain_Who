@@ -10,6 +10,7 @@ impl AgentService {
         cancellation_token: Option<AgentCancellationToken>,
     ) {
         let run_id = record.snapshot.run_id.clone();
+        let mut steering_cleanup = self.active_run_steering_cleanup(&run_id, notifications.clone());
         let result_cancelled = cancellation_token
             .as_ref()
             .is_some_and(|token| token.is_cancelled())
@@ -55,6 +56,7 @@ impl AgentService {
                 pending_status,
             } => (*agent_input, tool_result, pending_status),
             ManualFileEffectSettlement::CommittedAndAdvanced => {
+                steering_cleanup.disarm();
                 if let Some(guard) = file_effect_guard.as_mut() {
                     guard.mark_durably_settled();
                 }
