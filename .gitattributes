@@ -1,6 +1,11 @@
 resources/artifact-runtime/*.mjs text eol=lf
 resources/artifact-runtime-manifest.json text eol=lf
 resources/artifact-runtime-python-requirements.txt text eol=lf
+resources/artifact-runtime-node-package-evidence.json text eol=lf
 packages/artifact-runtime-node/package.json text eol=lf
 scripts/prepare-artifact-runtime.mjs text eol=lf
+scripts/artifact-runtime/*.mjs text eol=lf
+scripts/frozen-macho-signing.mjs text eol=lf
+patches/pptxgenjs@4.0.1.patch text eol=lf
+crates/core/src/command/pdf_runtime_cli.py text eol=lf
 pnpm-lock.yaml text eol=lf

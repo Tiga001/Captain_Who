@@ -1,6 +1,7 @@
 /* eslint-disable @typescript-eslint/explicit-function-return-type -- Node's test runner infers helper contracts. */
 
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import { spawn } from 'node:child_process'
 import {
   chmod,
@@ -16,8 +17,12 @@ import {
 } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import test from 'node:test'
+import {
+  normalizeManagedNodeBytes,
+  normalizeManagedNodeGraph
+} from './artifact-runtime/node-dependencies.mjs'
 
 import {
   createManagedNodeDependencyEvidence,
@@ -73,6 +78,12 @@ test('pip console scripts are rewritten as relocatable launchers without build p
 
   const normalized = await normalizePythonConsoleScriptShebangs(pythonExecutable)
   const rewritten = await readFile(consoleScript, 'utf8')
+
+  if (process.platform === 'win32') {
+    assert.deepEqual(normalized, [])
+    assert.ok(rewritten.startsWith(`#!${pythonExecutable}\n`))
+    return
+  }
 
   assert.deepEqual(normalized, ['pdfplumber'])
   assert.match(rewritten, /^#!\/bin\/sh\n/)
@@ -483,6 +494,57 @@ async function expectSupplyChainPreparationFailure(fixture, pattern) {
   )
 }
 
+test('Windows normalizes only the CRLF shebang in managed Node package bytes', () => {
+  const source = Buffer.from('#!/usr/bin/env node\r\n\r\nconsole.log("fixture")\r\n')
+  assert.equal(
+    normalizeManagedNodeBytes(source, 'win32').toString(),
+    '#!/usr/bin/env node\n\r\nconsole.log("fixture")\r\n'
+  )
+  for (const platform of ['darwin', 'linux'])
+    assert.strictEqual(normalizeManagedNodeBytes(source, platform), source)
+  for (const value of ['#!/bin/node\nbody\r\n', 'text\r\n', '#!no-newline']) {
+    const bytes = Buffer.from(value)
+    assert.strictEqual(normalizeManagedNodeBytes(bytes, 'win32'), bytes)
+  }
+})
+
+test('Windows normalizes only POSIX execute bits in frozen Node evidence', () => {
+  const files = [{ path: 'index.js', size: 7, sha256: 'a'.repeat(64), executable: true }]
+  const roots = [{ name: 'fixture', package: 'fixture@1.0.0' }]
+  const packages = [
+    {
+      id: 'fixture@1.0.0',
+      contentRevision: `sha256:${createHash('sha256').update(JSON.stringify(files)).digest('hex')}`,
+      dependencies: [],
+      files
+    }
+  ]
+  const expected = {
+    roots,
+    packages,
+    graphRevision: `sha256:${createHash('sha256').update(JSON.stringify({ roots, packages })).digest('hex')}`
+  }
+  const windows = structuredClone(expected)
+  windows.packages[0].files[0].executable = false
+  assert.deepEqual(normalizeManagedNodeGraph(windows, expected, 'win32'), expected)
+  for (const platform of ['darwin', 'linux']) {
+    assert.strictEqual(normalizeManagedNodeGraph(windows, expected, platform), windows)
+    assert.notDeepEqual(normalizeManagedNodeGraph(windows, expected, platform), expected)
+  }
+  for (const [key, value] of [
+    ['sha256', 'b'.repeat(64)],
+    ['size', 8],
+    ['path', 'extra.js']
+  ]) {
+    const polluted = structuredClone(windows)
+    polluted.packages[0].files[0][key] = value
+    assert.notDeepEqual(normalizeManagedNodeGraph(polluted, expected, 'win32'), expected)
+  }
+  const rewired = structuredClone(windows)
+  rewired.packages[0].dependencies.push({ name: 'unexpected', package: 'unexpected@1.0.0' })
+  assert.notDeepEqual(normalizeManagedNodeGraph(rewired, expected, 'win32'), expected)
+})
+
 test('managed Node acquisition rejects package-byte pollution against frozen evidence', async () => {
   const fixture = await managedNodeSupplyChainFixture()
   await writeFile(join(fixture.directPackage, 'polluted.js'), 'unexpected package content\n')
@@ -493,6 +555,15 @@ test('managed Node acquisition rejects package-byte pollution against frozen evi
 })
 
 test('managed Node acquisition rejects package symlinks without dereferencing them', async () => {
+  if (process.platform === 'win32') {
+    const escapedRoot = await managedNodeSupplyChainFixture()
+    const outsidePackage = join(escapedRoot.allowedPackageRoot, '..', 'escaped-office-fixture')
+    await rename(escapedRoot.directPackage, outsidePackage)
+    // Junction creation does not require Windows Developer Mode or administrator privileges.
+    await symlink(outsidePackage, escapedRoot.directPackage, 'junction')
+    await expectSupplyChainPreparationFailure(escapedRoot, /must be a real, non-symlink directory/)
+    return
+  }
   const internal = await managedNodeSupplyChainFixture()
   await symlink('index.js', join(internal.directPackage, 'internal-link.js'))
   await expectSupplyChainPreparationFailure(internal, /contains a forbidden symlink/)
@@ -534,15 +605,19 @@ test('managed ESM bootstrap loads real Office packages and ignores a workspace s
       'console.log(typeof fs.readFile, typeof ExcelJS.Workbook, typeof RequiredExcelJS.Workbook, typeof Document, typeof pptxgen)'
     ].join('\n')
   )
-  const result = await run(process.execPath, ['--import', fixture.bootstrap, script], {
-    cwd: workspace,
-    env: { MYCOPILOT_ARTIFACT_NODE_MODULES: fixture.moduleRoot }
-  })
+  const result = await run(
+    process.execPath,
+    ['--import', pathToFileURL(fixture.bootstrap).href, script],
+    {
+      cwd: workspace,
+      env: { MYCOPILOT_ARTIFACT_NODE_MODULES: fixture.moduleRoot }
+    }
+  )
   assert.equal(result.stdout.trim(), 'function function function function function')
 })
 
 async function offlineComponentSource() {
-  if (process.platform === 'win32') throw new Error('Unix-only fixture')
+  // Executable fixtures run only in Unix tests; Windows legal-evidence tests inspect bytes.
   const fixture = await managedNodeFixture()
   const { manifest, directory } = fixture
   const nodeExecutable = join(directory, ...manifest.node.executable.unix.split('/'))
@@ -1043,7 +1118,7 @@ test('legal evidence generation fails closed for an unreviewed package without a
     })
   )
   await assert.rejects(
-    prepareArtifactRuntimeLegalEvidence(source.manifest, source.directory),
+    prepareArtifactRuntimeLegalEvidence(source.manifest, source.directory, 'darwin'),
     /has no license file or exact reviewed exception/
   )
 })
@@ -1063,7 +1138,7 @@ test('reviewed Python PDF license evidence fails closed when wheel metadata chan
     ].join('\n')
   )
   await assert.rejects(
-    prepareArtifactRuntimeLegalEvidence(source.manifest, source.directory),
+    prepareArtifactRuntimeLegalEvidence(source.manifest, source.directory, 'darwin'),
     /no longer matches its reviewed license metadata/
   )
 })

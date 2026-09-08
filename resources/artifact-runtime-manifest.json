@@ -9,7 +9,7 @@
     },
     "artifactRuntimeContract": {
       "path": "scripts/artifact-runtime/contract.mjs",
-      "sha256": "bd941f294693388b16ffaeb70b3d1635d05aa6ccfd6d9df1a4cadccf032bd59b"
+      "sha256": "08f0486ef251fafc488cbd17094c36fc3393f46601b46207c88d9f975dee5a1e"
     },
     "artifactRuntimeFilesystem": {
       "path": "scripts/artifact-runtime/filesystem.mjs",
@@ -21,19 +21,19 @@
     },
     "artifactRuntimeNodeDependencies": {
       "path": "scripts/artifact-runtime/node-dependencies.mjs",
-      "sha256": "0d1b9693e39fc0d0e3f494418941034e536a3c1ff758738c86de1659596249ab"
+      "sha256": "939797ac1f3e1d833010352fa9672bc728a8ae2db61a2a9eafb94d3f33c42311"
     },
     "artifactRuntimePythonRuntime": {
       "path": "scripts/artifact-runtime/python-runtime.mjs",
-      "sha256": "59bc648e80525b123175f144859a645833c63edefb3ff371c6d919facd144049"
+      "sha256": "863e22a6757952455460fbb85f39e515ad0a7b4a3eee375c66b1e8d9b4ca3cbb"
     },
     "artifactRuntimeLegalEvidence": {
       "path": "scripts/artifact-runtime/legal-evidence.mjs",
-      "sha256": "520da8ed3957ba1d294208b7d36754b2faf7651ad2e20d063fe8dcadd44085c5"
+      "sha256": "ad2fd8e9ee8ec8c3005caf9996990020d3ed80b6e9fcde1df681d561f09dd36f"
     },
     "artifactRuntimeReceipt": {
       "path": "scripts/artifact-runtime/receipt.mjs",
-      "sha256": "8fed43f749f0c9bfe2ba262979380a0f1b2cd3f07374afa7b8f3a19ed0180924"
+      "sha256": "21187469ba17d888a99d05c24b67d8414e5a70ed9980e75d1b592b2cf79d3ce1"
     },
     "artifactRuntimeSigning": {
       "path": "scripts/artifact-runtime/signing.mjs",
@@ -41,7 +41,7 @@
     },
     "artifactRuntimePrepare": {
       "path": "scripts/artifact-runtime/prepare.mjs",
-      "sha256": "d5ebc1c4d5245d300808d33c0f14b84190ef51b03b5160ebf83629644d4303a8"
+      "sha256": "2c75f463169b68e12ff5cd00b13d10fe93a0159e2d56057d0cd1876f6f8aa1c9"
     },
     "frozenMachOSigning": {
       "path": "scripts/frozen-macho-signing.mjs",
@@ -312,9 +312,18 @@
         }
       },
       "licenseFiles": [
-        { "source": "COPYING", "target": "legal/ripgrep/COPYING" },
-        { "source": "LICENSE-MIT", "target": "legal/ripgrep/LICENSE-MIT" },
-        { "source": "UNLICENSE", "target": "legal/ripgrep/UNLICENSE" }
+        {
+          "source": "COPYING",
+          "target": "legal/ripgrep/COPYING"
+        },
+        {
+          "source": "LICENSE-MIT",
+          "target": "legal/ripgrep/LICENSE-MIT"
+        },
+        {
+          "source": "UNLICENSE",
+          "target": "legal/ripgrep/UNLICENSE"
+        }
       ],
       "source": "https://github.com/BurntSushi/ripgrep",
       "license": "MIT OR Unlicense"

@@ -557,8 +557,14 @@ export async function installWindowsMsi(
     })
     const officeRoot = await locateInstalledLibreOfficeRoot(
       administrativeRoot,
-      'program/soffice.exe'
+      'program/soffice.com',
+      'license.txt'
     )
+    // The Windows MSI uses license.txt; keep the component's existing LICENSE contract.
+    await cp(join(officeRoot, 'license.txt'), join(officeRoot, 'LICENSE'), {
+      errorOnExist: true,
+      force: false
+    })
     await rename(officeRoot, join(extracted, 'libreoffice'))
     await assertInstalledLibreOfficeLayout(extracted, target)
     return extracted
@@ -567,7 +573,11 @@ export async function installWindowsMsi(
   }
 }
 
-async function locateInstalledLibreOfficeRoot(searchRoot, executableRelativePath) {
+async function locateInstalledLibreOfficeRoot(
+  searchRoot,
+  executableRelativePath,
+  licenseRelativePath = 'LICENSE'
+) {
   const rootMetadata = await lstat(searchRoot)
   if (!rootMetadata.isDirectory() || rootMetadata.isSymbolicLink()) {
     throw new Error('Pinned LibreOffice installer root is not a real directory')
@@ -581,7 +591,7 @@ async function locateInstalledLibreOfficeRoot(searchRoot, executableRelativePath
     if (
       executableMetadata?.isFile() &&
       !executableMetadata.isSymbolicLink() &&
-      (await hasRegularFile(join(current.path, 'LICENSE'))) &&
+      (await hasRegularFile(join(current.path, licenseRelativePath))) &&
       (await hasRegularFile(join(current.path, 'NOTICE')))
     ) {
       matches.push(current.path)

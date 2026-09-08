@@ -20,6 +20,15 @@ import {
   nonEmptyString
 } from './contract.mjs'
 
+// pnpm preserves CRLF shebangs on Windows but strips their CR on Unix. Match the frozen
+// Unix package bytes without normalizing any other line or relaxing the content digest.
+export function normalizeManagedNodeBytes(bytes, platform = process.platform) {
+  if (platform !== 'win32' || bytes[0] !== 0x23 || bytes[1] !== 0x21) return bytes
+  const newline = bytes.indexOf(0x0a)
+  if (newline < 1 || bytes[newline - 1] !== 0x0d) return bytes
+  return Buffer.concat([bytes.subarray(0, newline - 1), bytes.subarray(newline)])
+}
+
 function pathIsWithin(root, candidate) {
   const remainder = relative(root, candidate)
   return (
@@ -174,13 +183,14 @@ async function collectNodePackageFiles(packageRoot) {
       if (totalBytes > MAX_NODE_PACKAGE_BYTES) {
         throw new Error('Managed Node package graph exceeds the byte limit')
       }
-      const { bytes, metadata: opened } = await readRegularFileNoFollow(
+      const { bytes: sourceBytes, metadata: opened } = await readRegularFileNoFollow(
         source,
         'Managed Node package content'
       )
+      const bytes = normalizeManagedNodeBytes(sourceBytes)
       files.push({
         path: logical,
-        size: opened.size,
+        size: bytes.length,
         sha256: createHash('sha256').update(bytes).digest('hex'),
         executable: (opened.mode & 0o111) !== 0
       })
@@ -354,15 +364,16 @@ async function copyVerifiedPackageFiles(sourceRoot, destination, packageEvidence
     const logical = canonicalRelativePath(file.path, `${packageEvidence.id} evidence path`)
     const source = join(sourceRoot, ...logical.split('/'))
     const target = join(destination, ...logical.split('/'))
-    const { bytes, metadata } = await readRegularFileNoFollow(
+    const { bytes: sourceBytes, metadata } = await readRegularFileNoFollow(
       source,
       `${packageEvidence.id} verified content`
     )
+    const bytes = normalizeManagedNodeBytes(sourceBytes)
     const digest = createHash('sha256').update(bytes).digest('hex')
     if (
-      metadata.size !== file.size ||
+      bytes.length !== file.size ||
       digest !== file.sha256 ||
-      ((metadata.mode & 0o111) !== 0) !== file.executable
+      (process.platform !== 'win32' && ((metadata.mode & 0o111) !== 0) !== file.executable)
     ) {
       throw new Error(`Managed Node package content changed after verification: ${source}`)
     }
@@ -404,6 +415,34 @@ async function copyPackageDependency(
   }
 }
 
+// Windows stat does not preserve POSIX execute bits. Restore only that metadata from the
+// frozen evidence; file paths, sizes, hashes, and dependency edges still compare exactly.
+export function normalizeManagedNodeGraph(graph, evidence, platform = process.platform) {
+  if (platform !== 'win32') return graph
+  const expectedPackages = new Map(evidence.packages.map((entry) => [entry.id, entry]))
+  const packages = graph.packages.map((entry) => {
+    const expectedFiles = new Map(
+      (expectedPackages.get(entry.id)?.files ?? []).map((file) => [file.path, file])
+    )
+    const files = entry.files.map((file) => ({
+      ...file,
+      executable: expectedFiles.get(file.path)?.executable ?? file.executable
+    }))
+    return {
+      ...entry,
+      contentRevision: `sha256:${createHash('sha256').update(JSON.stringify(files)).digest('hex')}`,
+      files
+    }
+  })
+  return {
+    ...graph,
+    packages,
+    graphRevision: `sha256:${createHash('sha256')
+      .update(JSON.stringify({ roots: graph.roots, packages }))
+      .digest('hex')}`
+  }
+}
+
 export async function prepareManagedNodeDependencies(manifest, staging, options = {}) {
   const expected = options.evidence ?? (await loadManagedNodeDependencyEvidence(manifest))
   const sourcePackageDirectory = options.sourcePackageDirectory ?? NODE_WORKSPACE_PACKAGE
@@ -422,7 +461,10 @@ export async function prepareManagedNodeDependencies(manifest, staging, options 
     packages: expected.packages,
     graphRevision: expected.graphRevision
   }
-  if (JSON.stringify(actualGraph) !== JSON.stringify(expectedGraph)) {
+  if (
+    JSON.stringify(normalizeManagedNodeGraph(actualGraph, expected)) !==
+    JSON.stringify(expectedGraph)
+  ) {
     throw new Error(
       'Managed Node dependency graph or package bytes do not match the frozen supply-chain evidence'
     )
@@ -473,7 +515,10 @@ export async function verifyPreparedManagedNodeDependencies(manifest, staging) {
     packages: expected.packages,
     graphRevision: expected.graphRevision
   }
-  if (JSON.stringify(actualGraph) !== JSON.stringify(expectedGraph)) {
+  if (
+    JSON.stringify(normalizeManagedNodeGraph(actualGraph, expected)) !==
+    JSON.stringify(expectedGraph)
+  ) {
     throw new Error(
       'Offline Artifact Runtime Node dependencies do not match the frozen supply-chain evidence'
     )

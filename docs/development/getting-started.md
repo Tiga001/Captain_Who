@@ -26,6 +26,31 @@ receipt，详见[运行时组件](runtime-components.md)。
 
 ## 启动开发环境
 
+### Windows 原生环境
+
+使用 Node.js 22、仓库固定的 pnpm 和 `stable-x86_64-pc-windows-msvc` Rust 工具链。
+Visual Studio 2022 Build Tools 需包含 C++ x64/x86 工具、Windows SDK 和对应工具集的
+Spectre 缓解库（`Microsoft.VisualStudio.Component.VC.Runtimes.x86.x64.Spectre`）；缺少后者会使
+`node-pty` 的 Electron 原生模块重建报 MSB8040。Python 供 node-gyp 使用，与应用自动准备的受管
+Python 是两个独立环境。
+
+如果本机有多套 Node/pnpm，先确认当前命令实际使用的版本，再安装依赖。
+Windows PowerShell 可显式选择仓库 `.npmrc` 要求的依赖布局，避免 pnpm 版本间配置读取差异：
+
+```powershell
+$env:pnpm_config_node_linker = 'hoisted'
+pnpm install --frozen-lockfile
+```
+
+准备组件并执行 `pnpm build` 后，可用 `pnpm verify:windows-startup` 验证实际 Electron 窗口、
+Renderer → Core Server ping 及 PowerShell 终端。该命令使用临时数据目录，不读取用户的对话或模型配置，
+结束时关闭测试应用，并输出保留的测试 profile 和截图路径。
+
+Windows 的 Agent 命令执行、Office 工具执行及 Managed PDF 沙箱仍受现有平台策略限制；组件
+准备成功不代表这些执行隔离已实现。不要关闭这些检查来绕过 Windows Job Object/沙箱适配。
+
+### 启动命令
+
 ```bash
 pnpm dev
 ```

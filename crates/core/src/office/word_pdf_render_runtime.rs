@@ -1024,7 +1024,7 @@ fn current_arch() -> &'static str {
 fn expected_executable() -> &'static str {
     match current_platform() {
         "darwin" => "libreoffice/LibreOffice.app/Contents/MacOS/soffice",
-        "win32" => "libreoffice/program/soffice.exe",
+        "win32" => "libreoffice/program/soffice.com",
         _ => "libreoffice/program/soffice",
     }
 }
@@ -1238,6 +1238,11 @@ mod tests {
             assert_eq!(target["size"], expected.size);
             assert_eq!(target["sha256"], expected.sha256);
         }
+        let current_target = format!("{}-{}", current_platform(), current_arch());
+        assert_eq!(
+            manifest["targets"][current_target]["executable"],
+            expected_executable()
+        );
     }
 
     #[test]

@@ -6,17 +6,16 @@ import { cp, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/p
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
-import { pathToFileURL } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 
-const sdkUrl = pathToFileURL(
-  new URL('../resources/artifact-runtime/presentation-sdk.mjs', import.meta.url).pathname
+const sdkUrl = new URL('../resources/artifact-runtime/presentation-sdk.mjs', import.meta.url)
+const bootstrapPath = fileURLToPath(
+  new URL('../resources/artifact-runtime/node-bootstrap.mjs', import.meta.url)
 )
-const bootstrapPath = new URL('../resources/artifact-runtime/node-bootstrap.mjs', import.meta.url)
-  .pathname
-const loaderPath = new URL('../resources/artifact-runtime/node-loader.mjs', import.meta.url)
-  .pathname
-const sdkPath = new URL('../resources/artifact-runtime/presentation-sdk.mjs', import.meta.url)
-  .pathname
+const loaderPath = fileURLToPath(
+  new URL('../resources/artifact-runtime/node-loader.mjs', import.meta.url)
+)
+const sdkPath = fileURLToPath(sdkUrl)
 
 async function loadFreshSdk() {
   const url = new URL(sdkUrl)
@@ -68,7 +67,7 @@ async function runManagedEditor(source) {
 
   const args = [
     '--import',
-    join(canonicalRuntimeRoot, 'node-bootstrap.mjs'),
+    pathToFileURL(join(canonicalRuntimeRoot, 'node-bootstrap.mjs')).href,
     '--permission',
     `--allow-fs-read=${canonicalComponentRoot}`,
     `--allow-fs-read=${canonicalScriptPath}`,

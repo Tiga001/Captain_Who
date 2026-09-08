@@ -292,7 +292,7 @@ fn managed_pdf_sandbox_fails_closed_on_unsupported_hosts() {
         super::super::managed_pdf_shell::parse_managed_pdf_shell("pdfinfo outputs/test.pdf")
             .unwrap()
             .unwrap();
-    assert!(prepare_managed_pdf_shell_launch(
+    let error = prepare_managed_pdf_shell_launch(
         &invocation,
         &shell_plan,
         &mut Vec::new(),
@@ -304,8 +304,11 @@ fn managed_pdf_sandbox_fails_closed_on_unsupported_hosts() {
             ripgrep: &runtime_root,
         },
     )
-    .unwrap_err()
-    .contains("拒绝裸进程执行"));
+    .unwrap_err();
+    assert!(matches!(
+        error,
+        ManagedPdfShellLaunchError::Unavailable(message) if message.contains("拒绝裸进程执行")
+    ));
 }
 
 #[test]

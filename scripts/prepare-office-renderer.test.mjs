@@ -2,7 +2,7 @@
 
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
-import { chmod, mkdtemp, mkdir, readFile, readdir, symlink, writeFile } from 'node:fs/promises'
+import { chmod, mkdtemp, mkdir, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { Readable } from 'node:stream'
@@ -15,7 +15,9 @@ import {
   loadOfficeRendererManifest,
   prepareOfficeRenderer,
   refreshOfficeRendererReceiptAfterSigning,
+  resolveOfficePlaywrightCoreRoot,
   selectOfficeRendererTarget,
+  syncRegularFile,
   validateOfficeRendererManifest
 } from './prepare-office-renderer.mjs'
 
@@ -25,6 +27,43 @@ const manifestPath = join(repositoryRoot, 'resources', 'office-renderer-manifest
 async function rawManifest() {
   return JSON.parse(await readFile(manifestPath, 'utf8'))
 }
+
+test('renderer file synchronization preserves bytes on the native platform', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'mycopilot-office-renderer-sync-'))
+  const path = join(directory, 'payload.bin')
+  const bytes = Buffer.from('verified renderer payload')
+  await writeFile(path, bytes)
+  await syncRegularFile(path)
+  assert.deepEqual(await readFile(path), bytes)
+})
+
+test('Office Playwright resolves its own core in nested and sibling package layouts', async () => {
+  for (const nested of [true, false]) {
+    const directory = await mkdtemp(join(tmpdir(), 'mycopilot-office-playwright-layout-'))
+    const playwright = nested
+      ? join(directory, 'node_modules', '@mycopilot', 'office-playwright-runtime')
+      : join(directory, 'node_modules', '.pnpm', 'playwright@1.61.1', 'node_modules', 'playwright')
+    const core = nested
+      ? join(playwright, 'node_modules', 'playwright-core')
+      : join(dirname(playwright), 'playwright-core')
+    await mkdir(playwright, { recursive: true })
+    await mkdir(core, { recursive: true })
+    const packageJsonPath = join(playwright, 'package.json')
+    await writeFile(packageJsonPath, JSON.stringify({ name: 'playwright', version: '1.61.1' }))
+    await writeFile(
+      join(core, 'package.json'),
+      JSON.stringify({ name: 'playwright-core', version: '1.61.1' })
+    )
+    // A separate application version must not shadow the Office runtime's dependency.
+    const appCore = join(directory, 'node_modules', 'playwright-core')
+    await mkdir(appCore, { recursive: true })
+    await writeFile(
+      join(appCore, 'package.json'),
+      JSON.stringify({ name: 'playwright-core', version: '1.63.0' })
+    )
+    assert.equal(resolveOfficePlaywrightCoreRoot(packageJsonPath), core)
+  }
+})
 
 async function fixtureInstaller({ installRoot, manifest, target }, options = {}) {
   const installed = join(installRoot, `chromium_headless_shell-${manifest.browser.revision}`)
@@ -40,6 +79,68 @@ async function fixtureInstaller({ installRoot, manifest, target }, options = {})
     await symlink('icudtl.dat', join(dirname(executable), 'linked-resource'))
   }
   return installed
+}
+
+for (const [platform, fileLimit] of [
+  ['win32', 320],
+  ['darwin', 256],
+  ['linux', 256]
+]) {
+  test(`${platform}: renderer verification enforces its bounded file count and integrity`, async (t) => {
+    const manifest = await loadOfficeRendererManifest(manifestPath)
+    const target = selectOfficeRendererTarget(manifest, platform, 'x64')
+    const outputDirectory = await mkdtemp(join(tmpdir(), 'mycopilot-office-renderer-limit-'))
+    t.after(() => rm(outputDirectory, { recursive: true, force: true }))
+    const content = 'pinned renderer resource\n'
+    const descriptor = (path) => ({
+      path,
+      size: Buffer.byteLength(content),
+      sha256: createHash('sha256').update(content).digest('hex')
+    })
+    const paths = [
+      target.executable,
+      ...Array.from({ length: fileLimit - 1 }, (_, index) => `browser/resource-${index}.pak`)
+    ]
+    for (const relative of paths) {
+      const path = join(outputDirectory, ...relative.split('/'))
+      await mkdir(dirname(path), { recursive: true })
+      await writeFile(path, content, { mode: 0o755 })
+    }
+    const receipt = {
+      schemaVersion: 2,
+      providerId: manifest.providerId,
+      bundleVersion: manifest.bundleVersion,
+      platform,
+      arch: 'x64',
+      browser: { ...manifest.browser, executable: target.executable },
+      archive: target.archive,
+      files: paths
+        .sort((left, right) => Buffer.from(left).compare(Buffer.from(right)))
+        .map(descriptor)
+    }
+    const saveReceipt = async () => {
+      await writeFile(
+        join(outputDirectory, 'component-receipt.json'),
+        JSON.stringify({ ...receipt, bundleRevision: computeBundleRevision(receipt) })
+      )
+    }
+    await saveReceipt()
+    const options = { outputDirectory, platform, arch: 'x64', verifyOnly: true }
+    const verified = await prepareOfficeRenderer(options)
+    assert.equal(verified.receipt.files.length, fileLimit)
+
+    const resource = join(outputDirectory, 'browser', 'resource-0.pak')
+    await writeFile(resource, 'changed bytes')
+    await assert.rejects(prepareOfficeRenderer(options), /do not match the frozen receipt/)
+    await writeFile(resource, content)
+
+    const overflow = 'browser/zz-overflow.pak'
+    await writeFile(join(outputDirectory, ...overflow.split('/')), content)
+    await assert.rejects(prepareOfficeRenderer(options), /exceeds its file-count limit/)
+    receipt.files.push(descriptor(overflow))
+    await saveReceipt()
+    await assert.rejects(prepareOfficeRenderer(options), /receipt files are invalid/)
+  })
 }
 
 test('manifest pins one exact Playwright Chromium Headless Shell for every desktop target', async () => {

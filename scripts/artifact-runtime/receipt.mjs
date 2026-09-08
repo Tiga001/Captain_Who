@@ -3,6 +3,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { chmod, lstat, open, readFile, readdir, rename, rm } from 'node:fs/promises'
 import { basename, dirname, join } from 'node:path'
+import { pathToFileURL } from 'node:url'
 
 import { isPinnedRipgrepVersion, runProcess, syncDirectory, unlinkIfPresent } from './archive.mjs'
 import { hashFile, verifyPinnedLocalFile } from './filesystem.mjs'
@@ -13,6 +14,7 @@ import {
   BUNDLE_REVISION_PREFIX,
   NODE_PACKAGE_EVIDENCE_TARGET,
   RECEIPT_NAME,
+  artifactRuntimePythonDependencies,
   canonicalRelativePath,
   exactKeys,
   nonEmptyString,
@@ -48,7 +50,13 @@ export async function probePreparedRuntimes(
     .join(',')
   await runProcess(
     nodeExecutable,
-    ['--import', bootstrap, '--input-type=module', '--eval', `await Promise.all([${nodeProbe}])`],
+    [
+      '--import',
+      process.platform === 'win32' ? pathToFileURL(bootstrap).href : bootstrap,
+      '--input-type=module',
+      '--eval',
+      `await Promise.all([${nodeProbe}])`
+    ],
     {
       timeoutMs: 30_000,
       env: { MYCOPILOT_ARTIFACT_NODE_MODULES: packageRoot }
@@ -140,9 +148,10 @@ function buildRuntimeReceipt(manifest, platform) {
     NODE_PACKAGE_EVIDENCE_TARGET,
     ...manifest.node.dependencies.map((dependency) => dependency.identityFile)
   ]
+  const pythonDependencies = artifactRuntimePythonDependencies(manifest, platform)
   const pythonIdentity = [
     pythonExecutable,
-    ...manifest.python.dependencies.map((dependency) => dependency.identityFile)
+    ...pythonDependencies.map((dependency) => dependency.identityFile)
   ]
   return {
     node: {
@@ -157,7 +166,7 @@ function buildRuntimeReceipt(manifest, platform) {
       version: manifest.python.version,
       executable: pythonExecutable,
       runtimeHome: manifest.python.runtimeHome,
-      dependencies: manifest.python.dependencies,
+      dependencies: pythonDependencies,
       identityFiles: pythonIdentity
     }
   }

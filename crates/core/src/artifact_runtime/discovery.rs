@@ -298,8 +298,18 @@ impl ArtifactRuntimeProvider {
                     self.file_path(runtime.bootstrap.as_deref().ok_or_else(|| {
                         invalid_component("Node runtime is missing its module bootstrap.")
                     })?)?;
+                #[cfg(windows)]
+                let bootstrap_argument = OsString::from(
+                    url::Url::from_file_path(&bootstrap)
+                        .map_err(|_| {
+                            invalid_component("Node bootstrap is not an absolute file path.")
+                        })?
+                        .as_str(),
+                );
+                #[cfg(not(windows))]
+                let bootstrap_argument = bootstrap.into_os_string();
                 arguments_prefix.push(OsString::from("--import"));
-                arguments_prefix.push(bootstrap.into_os_string());
+                arguments_prefix.push(bootstrap_argument);
                 environment.insert(OsString::from("NODE_NO_WARNINGS"), OsString::from("1"));
                 environment.insert(
                     OsString::from("MYCOPILOT_ARTIFACT_NODE_MODULES"),
@@ -313,6 +323,10 @@ impl ArtifactRuntimeProvider {
                     })?)?;
                 arguments_prefix.push(OsString::from("-I"));
                 arguments_prefix.push(OsString::from("-B"));
+                // Isolated mode ignores PYTHONUTF8; use an interpreter option so piped
+                // Unicode output does not fall back to the Windows ANSI code page.
+                #[cfg(windows)]
+                arguments_prefix.extend([OsString::from("-X"), OsString::from("utf8")]);
                 environment.insert(OsString::from("PYTHONNOUSERSITE"), OsString::from("1"));
                 environment.insert(
                     OsString::from("PYTHONDONTWRITEBYTECODE"),
@@ -1404,8 +1418,21 @@ mod tests {
     use std::io::Write;
     use std::sync::Arc;
 
+    #[cfg(windows)]
+    const TEST_RIPGREP_PATH: &str = "dependencies/tools/rg.exe";
+    #[cfg(not(windows))]
+    const TEST_RIPGREP_PATH: &str = "dependencies/tools/rg";
+
     struct Fixture {
         directory: tempfile::TempDir,
+    }
+
+    fn assert_python_isolation_arguments(arguments: &[OsString]) {
+        #[cfg(windows)]
+        let expected = ["-I", "-B", "-X", "utf8"].map(OsString::from);
+        #[cfg(not(windows))]
+        let expected = ["-I", "-B"].map(OsString::from);
+        assert_eq!(arguments, expected);
     }
 
     impl Fixture {
@@ -1431,7 +1458,7 @@ mod tests {
                     "dependencies/python/bin/python3",
                     b"python fixture".as_slice(),
                 ),
-                ("dependencies/tools/rg", b"ripgrep fixture".as_slice()),
+                (TEST_RIPGREP_PATH, b"ripgrep fixture".as_slice()),
                 (
                     "runtime/pdf-runtime-cli.py",
                     b"# managed PDF CLI fixture\n".as_slice(),
@@ -1655,9 +1682,9 @@ mod tests {
                 },
                 ripgrep: ExecutableToolReceipt {
                     version: ARTIFACT_RUNTIME_RIPGREP_VERSION.to_string(),
-                    executable: "dependencies/tools/rg".to_string(),
+                    executable: TEST_RIPGREP_PATH.to_string(),
                     identity_files: vec![
-                        "dependencies/tools/rg".to_string(),
+                        TEST_RIPGREP_PATH.to_string(),
                         "legal/ripgrep/COPYING".to_string(),
                         "legal/ripgrep/LICENSE-MIT".to_string(),
                         "legal/ripgrep/UNLICENSE".to_string(),
@@ -1752,10 +1779,7 @@ mod tests {
         };
         assert_eq!(invocation.kind(), ArtifactRuntimeKind::Python);
         assert_eq!(invocation.version(), ARTIFACT_RUNTIME_PYTHON_VERSION);
-        assert_eq!(
-            invocation.arguments_prefix(),
-            &[OsString::from("-I"), OsString::from("-B")]
-        );
+        assert_python_isolation_arguments(invocation.arguments_prefix());
     }
 
     #[test]
@@ -1779,10 +1803,10 @@ mod tests {
                 .path()
                 .canonicalize()
                 .unwrap()
-                .join("dependencies/tools/rg")
+                .join(TEST_RIPGREP_PATH)
         );
         fs::write(
-            fixture.directory.path().join("dependencies/tools/rg"),
+            fixture.directory.path().join(TEST_RIPGREP_PATH),
             b"replaced ripgrep fixture",
         )
         .unwrap();
@@ -1796,7 +1820,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let fixture = Fixture::new();
-        let launcher = fixture.directory.path().join("dependencies/tools/rg");
+        let launcher = fixture.directory.path().join(TEST_RIPGREP_PATH);
         fs::set_permissions(&launcher, fs::Permissions::from_mode(0o644)).unwrap();
 
         let error = ArtifactRuntimeProvider::discover(&fixture.options()).unwrap_err();
@@ -1804,6 +1828,9 @@ mod tests {
         assert!(error.message().contains("is not executable"));
     }
 
+    // Windows rejects command execution before profile validation. Its denial is
+    // covered by command::windows_tests rather than this Unix execution-path test.
+    #[cfg(unix)]
     #[test]
     fn execution_refuses_a_profile_binding_that_no_longer_matches_the_provider() {
         let fixture = Fixture::new();
@@ -1882,6 +1909,20 @@ mod tests {
         };
         assert!(node.executable().is_absolute());
         assert_eq!(node.arguments_prefix()[0], "--import");
+        #[cfg(windows)]
+        {
+            let bootstrap = url::Url::parse(node.arguments_prefix()[1].to_str().unwrap()).unwrap();
+            assert_eq!(bootstrap.scheme(), "file");
+            assert_eq!(
+                bootstrap.to_file_path().unwrap().canonicalize().unwrap(),
+                fixture
+                    .directory
+                    .path()
+                    .join("runtime/node-bootstrap.mjs")
+                    .canonicalize()
+                    .unwrap()
+            );
+        }
         assert!(!node
             .environment()
             .contains_key(std::ffi::OsStr::new("NODE_PATH")));
@@ -1898,10 +1939,7 @@ mod tests {
         else {
             panic!("Python runtime should be ready")
         };
-        assert_eq!(
-            python.arguments_prefix(),
-            &[OsString::from("-I"), OsString::from("-B")]
-        );
+        assert_python_isolation_arguments(python.arguments_prefix());
         assert!(python
             .environment()
             .contains_key(std::ffi::OsStr::new("PYTHONNOUSERSITE")));

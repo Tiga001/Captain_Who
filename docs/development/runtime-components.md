@@ -189,6 +189,12 @@ pnpm test:playwright-fixed-catalog
 
 ## 11. 当前限制
 
+Windows 组件准备使用原生布局：Python 为 `Lib/site-packages`、CPython 许可证位于运行时根目录；
+LibreOffice 使用 `license.txt` 并保留协议要求的 `LICENSE` 副本，命令行入口为 `soffice.com`。
+锁定 Windows Chromium 归档含 290 个文件，扫描和 receipt 上限为 320；macOS/Linux 仍为 256。
+Node 依赖在 Windows 上仅规范化 Unix 执行位和 shebang 的首行 CRLF，文件内容摘要、闭包关系、
+文件集合及版本仍须匹配冻结清单，macOS/Linux 校验行为保持不变。
+
 - 组件准备可能联网；仓库没有集中 artifact mirror 或离线 release bundle 流程。
 - manifest 覆盖六个平台/架构，但没有 CI 自动逐 target prepare/package/acceptance。
 - OfficeCLI 与 Artifact Runtime 缺少最终 package afterPack 完整校验；Core Server 的通用内容 receipt 也未建立。

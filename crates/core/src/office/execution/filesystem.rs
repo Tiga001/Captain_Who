@@ -387,7 +387,7 @@ pub(super) fn path_identity(
         (Some(metadata.dev()), Some(metadata.ino()))
     };
     #[cfg(not(unix))]
-    let (device, inode) = (None, None);
+    let (device, inode): (Option<u64>, Option<u64>) = (None, None);
     if let Some(device) = device {
         digest.update(device.to_le_bytes());
     }

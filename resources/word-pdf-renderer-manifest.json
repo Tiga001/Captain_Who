@@ -58,7 +58,7 @@
     "win32-arm64": {
       "archiveFormat": "msi",
       "payload": "LibreOffice",
-      "executable": "libreoffice/program/soffice.exe",
+      "executable": "libreoffice/program/soffice.com",
       "license": "libreoffice/LICENSE",
       "notice": "libreoffice/NOTICE",
       "archive": {
@@ -70,7 +70,7 @@
     "win32-x64": {
       "archiveFormat": "msi",
       "payload": "LibreOffice",
-      "executable": "libreoffice/program/soffice.exe",
+      "executable": "libreoffice/program/soffice.com",
       "license": "libreoffice/LICENSE",
       "notice": "libreoffice/NOTICE",
       "archive": {

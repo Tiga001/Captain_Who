@@ -9,7 +9,8 @@ import {
   MAX_LEGAL_EVIDENCE_FILES_PER_PACKAGE,
   MAX_LEGAL_EVIDENCE_FILE_BYTES,
   NODE_METADATA_LICENSE_EVIDENCE_ALLOWLIST,
-  PYTHON_METADATA_LICENSE_EVIDENCE_ALLOWLIST
+  PYTHON_METADATA_LICENSE_EVIDENCE_ALLOWLIST,
+  artifactRuntimePythonLayout
 } from './contract.mjs'
 import { hashFile } from './filesystem.mjs'
 
@@ -341,7 +342,11 @@ async function buildPythonLegalInventory(manifest, staging) {
   return inventory
 }
 
-export async function prepareArtifactRuntimeLegalEvidence(manifest, staging) {
+export async function prepareArtifactRuntimeLegalEvidence(
+  manifest,
+  staging,
+  platform = process.platform
+) {
   await rm(join(staging, 'component-legal.json'), { force: true })
   await rm(join(staging, 'legal', 'node-packages'), { recursive: true, force: true })
   await rm(join(staging, 'legal', 'python-packages'), { recursive: true, force: true })
@@ -353,10 +358,7 @@ export async function prepareArtifactRuntimeLegalEvidence(manifest, staging) {
   }
   const pythonRuntimeLicenseSource = join(
     staging,
-    ...manifest.python.runtimeHome.split('/'),
-    'lib',
-    `python${manifest.python.version.split('.').slice(0, 2).join('.')}`,
-    'LICENSE.txt'
+    ...artifactRuntimePythonLayout(manifest, platform).licenseFile.split('/')
   )
   const pythonRuntimeLicense = await copyLegalEvidenceFile(
     pythonRuntimeLicenseSource,

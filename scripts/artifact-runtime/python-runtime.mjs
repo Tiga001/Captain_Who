@@ -16,7 +16,8 @@ import {
   NODE_BOOTSTRAP_SOURCE,
   NODE_LOADER_SOURCE,
   PRESENTATION_SDK_SOURCE,
-  REPOSITORY_ROOT
+  REPOSITORY_ROOT,
+  artifactRuntimePythonDependencies
 } from './contract.mjs'
 import { verifyPinnedLocalFile } from './filesystem.mjs'
 
@@ -71,8 +72,14 @@ export async function installPythonDependencies(manifest, pythonExecutable) {
   )
 }
 
-export async function pruneManagedPythonTestFixtures(manifest, staging) {
-  const pandas = manifest.python.dependencies.find((dependency) => dependency.name === 'pandas')
+export async function pruneManagedPythonTestFixtures(
+  manifest,
+  staging,
+  platform = process.platform
+) {
+  const pandas = artifactRuntimePythonDependencies(manifest, platform).find(
+    (dependency) => dependency.name === 'pandas'
+  )
   if (!pandas) {
     throw new Error('Managed Python test pruning requires the pinned pandas dependency')
   }

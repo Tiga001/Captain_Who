@@ -22,6 +22,9 @@ const EXPECTED_BROWSER_VERSION: &str = "149.0.7827.55";
 const EXPECTED_PLAYWRIGHT_VERSION: &str = "1.61.1";
 const EXPECTED_PLAYWRIGHT_REVISION: &str = "1228";
 const MAX_RECEIPT_BYTES: u64 = 1024 * 1024;
+#[cfg(windows)]
+const MAX_COMPONENT_FILES: usize = 320;
+#[cfg(not(windows))]
 const MAX_COMPONENT_FILES: usize = 256;
 const MAX_COMPONENT_FILE_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_COMPONENT_BYTES: u64 = 1024 * 1024 * 1024;
@@ -1678,6 +1681,44 @@ pub(super) fn write_test_render_runtime(root: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_component_accepts_320_files_and_rejects_321() {
+        let directory = tempfile::tempdir().unwrap();
+        write_test_render_runtime(directory.path());
+        let mut receipt = read_receipt(directory.path()).unwrap();
+        for index in 0..319 {
+            let path = format!("fixture-{index:03}.pak");
+            fs::write(directory.path().join(&path), b"fixture").unwrap();
+            receipt.files.push(FileReceipt {
+                path,
+                size: 7,
+                sha256: hex_lower(&Sha256::digest(b"fixture")),
+            });
+        }
+        receipt
+            .files
+            .sort_by(|left, right| left.path.cmp(&right.path));
+        receipt.bundle_revision = compute_bundle_revision(&receipt).unwrap();
+        assert_eq!(
+            collect_component_files(directory.path()).unwrap().len(),
+            320
+        );
+        validate_receipt(&receipt).unwrap();
+
+        fs::write(directory.path().join("extra.pak"), b"fixture").unwrap();
+        receipt.files.push(FileReceipt {
+            path: "extra.pak".to_string(),
+            size: 7,
+            sha256: hex_lower(&Sha256::digest(b"fixture")),
+        });
+        assert!(collect_component_files(directory.path()).is_err());
+        assert!(validate_receipt(&receipt)
+            .unwrap_err()
+            .message()
+            .contains("between 1 and 320 files"));
+    }
 
     #[test]
     fn discovers_and_reverifies_a_frozen_component_tree() {

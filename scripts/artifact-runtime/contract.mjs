@@ -610,6 +610,39 @@ export async function verifyArtifactRuntimeBuildInputs(manifest) {
   }
 }
 
+export function artifactRuntimePythonLayout(manifest, platform = process.platform) {
+  const runtimeHome = manifest.python.runtimeHome
+  const pythonMinor = manifest.python.version.split('.').slice(0, 2).join('.')
+  // The pinned python-build-standalone Windows archive has Lib/site-packages and a
+  // top-level LICENSE.txt; Unix archives keep both under lib/python<major.minor>.
+  const libraryRoot =
+    platform === 'win32' ? `${runtimeHome}/Lib` : `${runtimeHome}/lib/python${pythonMinor}`
+  return Object.freeze({
+    sitePackages: `${libraryRoot}/site-packages`,
+    licenseFile: platform === 'win32' ? `${runtimeHome}/LICENSE.txt` : `${libraryRoot}/LICENSE.txt`
+  })
+}
+
+export function artifactRuntimePythonDependencies(manifest, platform = process.platform) {
+  if (platform !== 'win32') return manifest.python.dependencies
+
+  // Keep the frozen manifest's package identities as the source of truth. Only the
+  // known Unix installation prefix is translated, without changing package versions.
+  const unixPrefix = `${artifactRuntimePythonLayout(manifest, 'linux').sitePackages}/`
+  const windowsPrefix = `${artifactRuntimePythonLayout(manifest, 'win32').sitePackages}/`
+  return Object.freeze(
+    manifest.python.dependencies.map((dependency) => {
+      if (!dependency.identityFile.startsWith(unixPrefix)) {
+        throw new Error('Managed Python identity file has an unexpected package layout')
+      }
+      return Object.freeze({
+        ...dependency,
+        identityFile: `${windowsPrefix}${dependency.identityFile.slice(unixPrefix.length)}`
+      })
+    })
+  )
+}
+
 export function selectArtifactRuntimeAssets(
   manifest,
   platform = process.platform,

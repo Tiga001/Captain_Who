@@ -18,6 +18,9 @@ const BROWSER_VERSION = '149.0.7827.55'
 const BROWSER_REVISION = '1228'
 const BUNDLE_REVISION_PREFIX = 'office-render-runtime-sha256-v1:'
 const MAX_FILES = 256
+// The pinned Windows Chromium archive contains 290 files, including 220 locale
+// resources and 52 hyphenation dictionaries. Keep a bounded Windows allowance.
+const MAX_WINDOWS_FILES = 320
 const MAX_TOTAL_BYTES = 1024 * 1024 * 1024
 const MAX_FILE_BYTES = 512 * 1024 * 1024
 const MAX_ARCHIVE_BYTES = 256 * 1024 * 1024
@@ -218,8 +221,9 @@ async function syncDirectory(path) {
   }
 }
 
-async function syncRegularFile(path) {
-  const file = await open(path, 'r')
+export async function syncRegularFile(path) {
+  // FlushFileBuffers requires a writable handle on Windows; opening r+ keeps bytes intact.
+  const file = await open(path, process.platform === 'win32' ? 'r+' : 'r')
   try {
     await file.sync()
   } finally {
@@ -227,7 +231,11 @@ async function syncRegularFile(path) {
   }
 }
 
-async function inspectComponentTree(root) {
+function maxComponentFiles(platform) {
+  return platform === 'win32' ? MAX_WINDOWS_FILES : MAX_FILES
+}
+
+async function inspectComponentTree(root, platform = process.platform) {
   const rootMetadata = await lstat(root)
   if (!rootMetadata.isDirectory() || rootMetadata.isSymbolicLink()) {
     throw new Error('Office renderer component root must be a real, non-symlink directory')
@@ -255,7 +263,9 @@ async function inspectComponentTree(root) {
         throw new Error(`Office renderer entry is not a regular file: ${logical}`)
       }
       if (logical === RECEIPT_NAME) continue
-      if (files.length >= MAX_FILES) throw new Error('Office renderer exceeds its file-count limit')
+      if (files.length >= maxComponentFiles(platform)) {
+        throw new Error('Office renderer exceeds its file-count limit')
+      }
       if (metadata.size > MAX_FILE_BYTES) {
         throw new Error(`Office renderer file exceeds its byte limit: ${logical}`)
       }
@@ -305,12 +315,15 @@ async function syncTree(root) {
   for (const directory of directories) await syncDirectory(directory)
 }
 
+export function resolveOfficePlaywrightCoreRoot(packageJsonPath) {
+  return dirname(createRequire(packageJsonPath).resolve('playwright-core/package.json'))
+}
+
 function readPlaywrightPin() {
   // Office rendering remains pinned to its independently reviewed browser runtime. The
   // application-level `playwright` dependency follows the managed Playwright MCP version.
   const packageJsonPath = localRequire.resolve('@mycopilot/office-playwright-runtime/package.json')
-  const playwrightRoot = dirname(packageJsonPath)
-  const playwrightCoreRoot = resolve(playwrightRoot, '..', 'playwright-core')
+  const playwrightCoreRoot = resolveOfficePlaywrightCoreRoot(packageJsonPath)
   return Promise.all([
     readFile(packageJsonPath, 'utf8'),
     readFile(resolve(playwrightCoreRoot, 'browsers.json'), 'utf8')
@@ -566,7 +579,11 @@ function validateReceipt(receipt, manifest, target, platform, arch) {
   if (JSON.stringify(value.archive) !== JSON.stringify(target.archive)) {
     throw new Error('Office renderer receipt archive identity does not match the pinned manifest')
   }
-  if (!Array.isArray(value.files) || value.files.length === 0 || value.files.length > MAX_FILES) {
+  if (
+    !Array.isArray(value.files) ||
+    value.files.length === 0 ||
+    value.files.length > maxComponentFiles(platform)
+  ) {
     throw new Error('Office renderer receipt files are invalid')
   }
   let priorPath
@@ -631,7 +648,7 @@ async function verifyReceipt(outputDirectory, manifest, target, platform, arch) 
   if (process.platform !== 'win32' && (executableMetadata.mode & 0o111) === 0) {
     throw new Error('Office renderer executable must have a Unix execute bit')
   }
-  const actual = await inspectComponentTree(outputDirectory)
+  const actual = await inspectComponentTree(outputDirectory, platform)
   if (JSON.stringify(actual.files) !== JSON.stringify(receipt.files)) {
     throw new Error('Office renderer component files do not match the frozen receipt')
   }
@@ -680,7 +697,7 @@ export async function refreshOfficeRendererReceiptAfterSigning({
     }
   }
 
-  const actual = await inspectComponentTree(outputDirectory)
+  const actual = await inspectComponentTree(outputDirectory, platform)
   if (JSON.stringify(actual.directories) !== JSON.stringify(directoriesForFiles(frozen.files))) {
     throw new Error('Office renderer directories changed during the signing transaction')
   }
@@ -789,7 +806,7 @@ export async function prepareOfficeRenderer({
     const browserRoot = join(staging, 'browser')
     await rename(installedRoot, browserRoot)
     await rm(installRoot, { recursive: true, force: true })
-    const inspected = await inspectComponentTree(staging)
+    const inspected = await inspectComponentTree(staging, platform)
     if (
       JSON.stringify(inspected.directories) !== JSON.stringify(directoriesForFiles(inspected.files))
     ) {

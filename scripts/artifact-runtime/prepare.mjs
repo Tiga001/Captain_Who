@@ -101,7 +101,7 @@ export async function prepareArtifactRuntime({
       }
       await copyTreeRejectingSymlinks(source, staging, { destinationExists: true })
       await verifyPreparedManagedNodeDependencies(manifest, staging)
-      await pruneManagedPythonTestFixtures(manifest, staging)
+      await pruneManagedPythonTestFixtures(manifest, staging, platform)
       const nodeExecutableRelative =
         platform === 'win32' ? manifest.node.executable.win32 : manifest.node.executable.unix
       const pythonExecutableRelative =
@@ -120,7 +120,7 @@ export async function prepareArtifactRuntime({
     } else {
       await buildComponentSource({ manifestPath, manifest, staging, downloadDirectory })
     }
-    await prepareArtifactRuntimeLegalEvidence(manifest, staging)
+    await prepareArtifactRuntimeLegalEvidence(manifest, staging, platform)
     const files = await walkRegularFiles(staging)
     const receipt = buildReceipt(manifest, platform, arch, files)
     await writeReceipt(staging, receipt)

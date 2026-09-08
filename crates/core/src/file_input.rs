@@ -1511,6 +1511,12 @@ fn reject_symlink_components(path: &Path) -> Result<(), AgentFileInputError> {
     let mut current = PathBuf::new();
     for component in path.components() {
         current.push(component.as_os_str());
+        // A Windows drive/UNC prefix is not a path until its root separator is
+        // appended; probing a verbatim prefix alone fails with InvalidInput.
+        #[cfg(windows)]
+        if matches!(component, Component::Prefix(_)) {
+            continue;
+        }
         if current.as_os_str().is_empty() {
             continue;
         }

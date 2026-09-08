@@ -2,7 +2,7 @@
 
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
-import { chmod, mkdtemp, mkdir, readFile, symlink, writeFile } from 'node:fs/promises'
+import { chmod, mkdtemp, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -82,6 +82,9 @@ test('manifest freezes real LibreOffice archives for every supported desktop tar
     for (const arch of ['arm64', 'x64']) {
       const target = selectWordPdfRendererTarget(manifest, platform, arch)
       assert.match(target.executable, /^libreoffice\//)
+      if (platform === 'win32') {
+        assert.equal(target.executable, 'libreoffice/program/soffice.com')
+      }
       assert.match(target.archive.url, /^https:\/\/downloadarchive\.documentfoundation\.org\//)
       assert.ok(target.archive.size > 200_000_000)
       assert.match(target.archive.sha256, /^[a-f0-9]{64}$/)
@@ -108,7 +111,7 @@ test('manifest rejects mutable versions, path escapes, and fake archive identiti
   assert.throws(() => validateWordPdfRendererManifest(weak), /lowercase SHA-256/)
 })
 
-test('Linux DEB and Windows MSI installers normalize their native layouts', async () => {
+test('Linux DEB installer normalizes its native layout', async () => {
   const manifest = await loadWordPdfRendererManifest(manifestPath)
 
   const linuxRoot = await mkdtemp(join(tmpdir(), 'word-pdf-linux-installer-'))
@@ -139,33 +142,115 @@ test('Linux DEB and Windows MSI installers normalize their native layouts', asyn
     await readFile(join(linuxInstalled, ...linuxTarget.license.split('/')), 'utf8'),
     'MPL-2.0\n'
   )
+})
 
-  const windowsRoot = await mkdtemp(join(tmpdir(), 'word-pdf-windows-installer-'))
-  const windowsTarget = selectWordPdfRendererTarget(manifest, 'win32', 'x64')
-  const windowsCalls = []
-  const windowsInstalled = await installWindowsMsi(
-    windowsRoot,
-    join(windowsRoot, 'libreoffice.msi'),
-    windowsTarget,
-    {
-      run: async (executable, args) => {
-        windowsCalls.push({ executable, args })
-        const targetArgument = args.find((argument) => argument.startsWith('TARGETDIR='))
-        const administrativeRoot = targetArgument.slice('TARGETDIR='.length)
-        await writeNativeLibreOfficeLayout(
-          join(administrativeRoot, 'Program Files', 'LibreOffice'),
-          windowsTarget
-        )
+for (const arch of ['arm64', 'x64']) {
+  test(`Windows ${arch} MSI normalizes its native license.txt without changing receipt paths`, async (t) => {
+    const manifest = await loadWordPdfRendererManifest(manifestPath)
+    const windowsRoot = await mkdtemp(join(tmpdir(), 'word-pdf-windows-installer-'))
+    t.after(() => rm(windowsRoot, { recursive: true, force: true }))
+    const windowsTarget = selectWordPdfRendererTarget(manifest, 'win32', arch)
+    const windowsCalls = []
+    const windowsInstalled = await installWindowsMsi(
+      windowsRoot,
+      join(windowsRoot, 'libreoffice.msi'),
+      windowsTarget,
+      {
+        run: async (executable, args) => {
+          windowsCalls.push({ executable, args })
+          const targetArgument = args.find((argument) => argument.startsWith('TARGETDIR='))
+          const administrativeRoot = targetArgument.slice('TARGETDIR='.length)
+          // The pinned x64 MSI places the application directly in TARGETDIR.
+          const officeRoot =
+            arch === 'x64'
+              ? administrativeRoot
+              : join(administrativeRoot, 'Program Files', 'LibreOffice')
+          await writeNativeLibreOfficeLayout(officeRoot, {
+            ...windowsTarget,
+            license: 'libreoffice/license.txt'
+          })
+        }
       }
-    }
-  )
-  assert.deepEqual(
-    windowsCalls.map(({ executable, args }) => [executable, args.slice(0, 3)]),
-    [['msiexec.exe', ['/a', join(windowsRoot, 'libreoffice.msi'), '/qn']]]
-  )
-  assert.equal(
-    await readFile(join(windowsInstalled, ...windowsTarget.notice.split('/')), 'utf8'),
-    'LibreOffice notices\n'
+    )
+    assert.deepEqual(
+      windowsCalls.map(({ executable, args }) => [executable, args.slice(0, 3)]),
+      [['msiexec.exe', ['/a', join(windowsRoot, 'libreoffice.msi'), '/qn']]]
+    )
+    assert.equal(
+      await readFile(join(windowsInstalled, ...windowsTarget.notice.split('/')), 'utf8'),
+      'LibreOffice notices\n'
+    )
+    assert.equal(windowsTarget.license, 'libreoffice/LICENSE')
+    assert.equal(
+      await readFile(join(windowsInstalled, ...windowsTarget.license.split('/')), 'utf8'),
+      await readFile(join(windowsInstalled, 'libreoffice', 'license.txt'), 'utf8')
+    )
+  })
+}
+
+for (const scenario of ['missing license', 'missing notice', 'ambiguous roots']) {
+  test(`Windows MSI rejects ${scenario} before normalizing its license`, async (t) => {
+    const manifest = await loadWordPdfRendererManifest(manifestPath)
+    const target = selectWordPdfRendererTarget(manifest, 'win32', 'x64')
+    const installRoot = await mkdtemp(join(tmpdir(), 'word-pdf-windows-invalid-'))
+    t.after(() => rm(installRoot, { recursive: true, force: true }))
+    await assert.rejects(
+      installWindowsMsi(installRoot, join(installRoot, 'libreoffice.msi'), target, {
+        run: async (_executable, args) => {
+          const administrativeRoot = args
+            .find((argument) => argument.startsWith('TARGETDIR='))
+            .slice('TARGETDIR='.length)
+          const officeRoot = join(administrativeRoot, 'LibreOffice')
+          const nativeTarget = { ...target, license: 'libreoffice/license.txt' }
+          await writeNativeLibreOfficeLayout(officeRoot, nativeTarget)
+          if (scenario === 'ambiguous roots') {
+            await writeNativeLibreOfficeLayout(join(administrativeRoot, 'duplicate'), nativeTarget)
+          } else {
+            await rm(join(officeRoot, scenario === 'missing license' ? 'license.txt' : 'NOTICE'))
+          }
+        }
+      }),
+      /exactly one complete application root; found [02]/
+    )
+  })
+}
+
+test('Windows preparation verifies and reuses the console launcher and normalized license', async (t) => {
+  const parent = await mkdtemp(join(tmpdir(), 'word-pdf-windows-receipt-'))
+  t.after(() => rm(parent, { recursive: true, force: true }))
+  const outputDirectory = join(parent, 'current')
+  let installs = 0
+  const options = {
+    outputDirectory,
+    platform: 'win32',
+    arch: 'x64',
+    installer: async ({ installRoot, target }) => {
+      installs += 1
+      return installWindowsMsi(installRoot, join(installRoot, 'libreoffice.msi'), target, {
+        run: async (_executable, args) => {
+          const administrativeRoot = args
+            .find((argument) => argument.startsWith('TARGETDIR='))
+            .slice('TARGETDIR='.length)
+          await writeNativeLibreOfficeLayout(administrativeRoot, {
+            ...target,
+            license: 'libreoffice/license.txt'
+          })
+        }
+      })
+    },
+    probe: async (path) => assert.equal(basename(path), 'soffice.com')
+  }
+  const first = await prepareWordPdfRenderer(options)
+  assert.equal(first.reused, false)
+  assert.equal(first.receipt.runtime.executable, 'libreoffice/program/soffice.com')
+  assert.equal(first.receipt.runtime.license, 'libreoffice/LICENSE')
+  assert.ok(first.receipt.files.some(({ path }) => path === 'libreoffice/license.txt'))
+  assert.equal((await prepareWordPdfRenderer(options)).reused, true)
+  assert.equal(installs, 1)
+  await writeFile(join(outputDirectory, 'libreoffice', 'LICENSE'), 'changed\n')
+  await assert.rejects(
+    prepareWordPdfRenderer({ ...options, verifyOnly: true }),
+    /do not match the frozen receipt/
   )
 })
 
