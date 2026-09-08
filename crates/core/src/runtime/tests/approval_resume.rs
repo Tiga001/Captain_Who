@@ -65,6 +65,47 @@ async fn approval_resume_restores_prior_context_and_continues_queued_tools() {
         })
     }
 
+    fn collaboration_host(model_label: &str) -> AgentRuntimeHostServices {
+        struct Executor;
+        impl crate::AgentCollaborationExecutor for Executor {
+            fn execute(
+                &self,
+                _: crate::AgentCollaborationInvocation,
+                _: crate::AgentCollaborationExecutionControl,
+            ) -> crate::AgentCollaborationExecutionFuture {
+                panic!("this approval fixture must not execute collaboration")
+            }
+        }
+        AgentRuntimeHostServices::new()
+            .with_skill_resources(activated_skill_authority())
+            .with_agent_collaboration(crate::AgentCollaborationRuntimeServices::new(
+                Arc::new(Executor),
+                crate::AgentCollaborationCaller {
+                    agent_id: "root".into(),
+                    root_agent_id: "root".into(),
+                    root_conversation_id: "conversation-checkpoint".into(),
+                    parent_agent_id: None,
+                    conversation_id: "conversation-checkpoint".into(),
+                    project_id: None,
+                    task_name: crate::ROOT_AGENT_TASK_NAME.into(),
+                    task_path: "/root".into(),
+                },
+                crate::AgentCollaborationSelectorDirectory::bounded(
+                    Vec::new(),
+                    vec![crate::AgentCollaborationModelSelector {
+                        model_config_id: "fixture-model".into(),
+                        display_name: model_label.into(),
+                        capabilities: crate::ModelCapabilities::default(),
+                    }],
+                ),
+            ))
+            .with_agent_collaboration_policy(Arc::new(
+                crate::FrozenAgentCollaborationPolicySource::new(
+                    crate::AgentCollaborationSettings::default(),
+                ),
+            ))
+    }
+
     let fixture = tempdir().unwrap();
     let workspace = fixture.path().join("workspace");
     std::fs::create_dir_all(&workspace).unwrap();
@@ -212,7 +253,7 @@ async fn approval_resume_restores_prior_context_and_continues_queued_tools() {
             Some("run-checkpoint".to_string()),
             None,
             AgentCancellationToken::new(),
-            Some(AgentRuntimeHostServices::new().with_skill_resources(activated_skill_authority())),
+            Some(collaboration_host("MODEL_DIRECTORY_BEFORE_APPROVAL")),
         )
         .await
         .unwrap();
@@ -378,13 +419,26 @@ async fn approval_resume_restores_prior_context_and_continues_queued_tools() {
             ),
         },
     });
+    // Settings can change during approval, but the preview and real resumed driver must both
+    // retain the complete selector directory that this logical run originally received.
+    let resume_host = collaboration_host("MODEL_DIRECTORY_CHANGED_DURING_APPROVAL_LONGER_NAME");
+    let preview =
+        prepare_context_window_tool_projection(&resume_input, &resume_host, false).unwrap();
+    let preview_collaboration = preview
+        .capability_context_texts()
+        .iter()
+        .find(|text| text.contains("<agent_collaboration_directory>"))
+        .unwrap()
+        .to_string();
+    assert!(preview_collaboration.contains("MODEL_DIRECTORY_BEFORE_APPROVAL"));
+    assert!(!preview_collaboration.contains("MODEL_DIRECTORY_CHANGED_DURING_APPROVAL_LONGER_NAME"));
     let completed = AgentRuntime::default()
         .send_chat_with_events_and_cancellation(
             resume_input,
             Some("run-checkpoint".to_string()),
             None,
             AgentCancellationToken::new(),
-            Some(AgentRuntimeHostServices::new().with_skill_resources(activated_skill_authority())),
+            Some(resume_host),
         )
         .await
         .unwrap();
@@ -398,6 +452,31 @@ async fn approval_resume_restores_prior_context_and_continues_queued_tools() {
     );
     assert_eq!(completed.todo.as_ref().unwrap().revision, 1);
     let request = final_request.lock().unwrap().take().unwrap();
+    let wire_text = request["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|message| {
+            message["content"]
+                .as_str()
+                .map(|text| vec![text])
+                .unwrap_or_else(|| {
+                    message["content"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|part| part["text"].as_str())
+                        .collect()
+                })
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_eq!(
+        wire_text.matches(&preview_collaboration).count(),
+        1,
+        "preview must price the exact collaboration instructions and directory sent after resume"
+    );
+    assert!(!wire_text.contains("MODEL_DIRECTORY_CHANGED_DURING_APPROVAL_LONGER_NAME"));
     let messages = serde_json::to_string(&request["messages"]).unwrap();
     assert!(messages.contains("evidence-before-approval"));
     assert!(messages.contains("evidence-from-queued-tool"));

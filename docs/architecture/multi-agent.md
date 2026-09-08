@@ -122,7 +122,11 @@ Wake 表示“需要一次执行机会”，不是线程或可无条件重试的
 | `list_agents`     | 返回授权范围内简洁树投影        | 只读，不泄漏内部 lease/checkpoint                                           |
 | `interrupt_agent` | 中断严格后代当前任务            | 不删除节点、Conversation 或历史；回执与实际终态分离且可幂等恢复             |
 
-不存在 `wait_any` 或第七个协作工具。只有 Host 为本 Turn 注入可信协作 capability 时才整组注册六工具。
+不存在 `wait_any` 或第七个协作工具。六个实现由 Runtime extension 注册，以 `agent.collaboration` 动态 capability 整组暴露；它们不属于配置稳定的 Tool 前缀。
+
+设置的子 Agent 页面提供全局能力开关，默认开启。每个根 Turn 在原子 admission 中冻结设置，Spawn、Followup 和子任务结果所产生的 Wake 在同一事务内继承来源 Run 的策略。已启动的任务树完成本轮协作；后续新根 Turn 使用更新后的设置。`agent_collaboration_run_policies` 和 `agent_collaboration_wake_policies` 是不可改写的 Host 记录，随所属历史删除，Fork 不复制其执行授权。
+
+同一策略同时决定六个 Schema、完整协作规则与可用模型/模板目录是否进入请求；规则与目录由扩展以 RequestOnly 方式贡献。Conversation World State 的 `agent.collaboration` 始终记录 enabled、available 和不可用原因，关闭时也保留明确状态。审批恢复验证 Host 的运行策略与 checkpoint 一致，不重新采用全局开关。空闲圆环预览新一轮策略，运行中预览使用本轮策略；其 Schema、提示词和状态计量与真实请求及自动压缩报告共用 Rust Core 投影。
 
 `spawn_agent.task_name` 是模型为新任务指定的唯一名称，其余工具的 `target`/`targets` 只接受此名称的精确值。模型从 `spawn_agent` 或 `list_agents` 的 `taskName` 复制名称，不使用 UUID、完整路径、别名或模糊匹配。Host 在可信 caller 所属树内解析名称，再使用内部 Agent ID 执行原有权限校验；名称解析不扩大同树或严格后代的权限边界。
 
@@ -238,15 +242,15 @@ notification 只是失效信号。Renderer 通过 tree snapshot 与 `agent.colla
 
 ## 8. Schema
 
-当前 canonical storage 是 **v42**。唯一真源：
+当前 canonical storage 是 **v43**。唯一真源：
 
 ```rust
-pub const STORAGE_SCHEMA_VERSION: i32 = 42;
+pub const STORAGE_SCHEMA_VERSION: i32 = 43;
 ```
 
 当前 Runtime checkpoint 为 **v17**，拒绝旧版本 checkpoint；本次模型协作身份变更不提供含旧 Agent ID 的聊天、上下文或 checkpoint 兼容转换。
 
-旧版本（含 v34/v35/v36/v37/v38/v39/v40/v41）、catalog fingerprint 不匹配、非空未版本化库或外键违规都会返回 `development_storage_schema_reset_required`，原库不做原地改写，也不迁移聊天或运行历史。历史文档中的 v7/v8/v10/v11/v17/v19/v20/v22/v23/v24/v25/v26 只是 rollout 阶段标签，不是当前兼容声明；release runner 的 storage step 已标为 canonical v42。
+原 canonical v42 在通过旧 fingerprint 验证后，可以单向升级至 v43：原子新增协作设置与 Run/Wake 策略表，保留已有聊天。其他旧版本（含 v34/v35/v36/v37/v38/v39/v40/v41）、catalog fingerprint 不匹配、非空未版本化库或外键违规仍返回 `development_storage_schema_reset_required`。历史文档中的 v7/v8/v10/v11/v17/v19/v20/v22/v23/v24/v25/v26 只是 rollout 阶段标签，不是当前兼容声明；release runner 的 storage step 标为 canonical v43。
 
 ## 9. 代码真源
 
@@ -302,5 +306,5 @@ pnpm exec vitest run --project browser src/renderer/src/features/agentCollaborat
 - [ ] 新 UI 状态是否来自持久 semantic event，而不是模型文本或时间戳？
 - [ ] 新 tree-shared 资源是否只从 Host-resolved root identity 授权，并覆盖 root/child/sibling 与跨树/普通 Conversation 负向测试？
 - [ ] terminal parent Timeline 是否在 final stream 开始处冻结，且后续事件只留在 event log/Agent Center？
-- [ ] 是否更新 schema v42 后继版本、fingerprint、reset、双语言 fixture 和 release gate？
+- [ ] 是否更新 schema v43 后继版本、fingerprint、迁移/reset、双语言 fixture 和 release gate？
 - [ ] 是否同步更新当前文档；历史轮次只在 archive 中追加注释？

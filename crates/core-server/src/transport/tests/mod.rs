@@ -14,6 +14,7 @@ use tokio::io::AsyncReadExt;
 
 mod bootstrap;
 mod collaboration_authorization;
+mod collaboration_settings;
 mod conversation_fork;
 mod human_interaction;
 mod manual_context_compaction;

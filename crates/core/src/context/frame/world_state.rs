@@ -30,6 +30,43 @@ fn is_historical_run_world_state(item: &ContextItem) -> bool {
 }
 
 impl ContextFrame {
+    /// A staged preview can be rebuilt after the active run's initial snapshot was journaled.
+    /// Match that exact trace owner, not a similar record from an earlier run. Reading the typed
+    /// projection here classifies existing measured text only; it never restores state authority.
+    pub(crate) fn contains_historical_initial_run_world_state(
+        &self,
+        assistant_message_id: &str,
+    ) -> bool {
+        self.iter_items().any(|item| {
+            is_historical_run_world_state(item)
+                && item
+                    .metadata
+                    .sources
+                    .contains(&ContextSource::WorldStateSnapshot)
+                && item
+                    .metadata
+                    .origin()
+                    .and_then(ContextOrigin::journal_cursor)
+                    .is_some_and(|cursor| cursor.message_id() == assistant_message_id)
+                && item
+                    .message
+                    .content()
+                    .lines()
+                    .filter_map(|line| {
+                        serde_json::from_str::<crate::world_state::WorldStateModelRecord>(line).ok()
+                    })
+                    .any(|record| {
+                        matches!(
+                            record,
+                            crate::world_state::WorldStateModelRecord::Full {
+                                lifetime: crate::world_state::WorldStateLifetime::Run,
+                                ..
+                            }
+                        )
+                    })
+        })
+    }
+
     /// A direct Core compaction executor may return only its new message/trace journal. Preserve
     /// the independently owned exact ledger instead of treating an absent Host ledger as deletion.
     /// The model's retained order supplies placement when a covered anchor no longer has a row.

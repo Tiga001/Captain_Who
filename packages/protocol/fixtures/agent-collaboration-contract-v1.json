@@ -1,5 +1,7 @@
 {
   "methods": [
+    "agent.collaboration.settings.get",
+    "agent.collaboration.settings.update",
     "agent.collaboration.getTree",
     "agent.collaboration.getAgent",
     "agent.collaboration.locateConversation",
@@ -17,7 +19,8 @@
   "notifications": {
     "event": "agent.collaboration.event",
     "observerEvent": "agent.collaboration.observerEvent",
-    "resync": "agent.collaboration.resync"
+    "resync": "agent.collaboration.resync",
+    "settingsChanged": "agent.collaboration.settingsChanged"
   },
   "observerEvent": {
     "schemaVersion": 1,
@@ -167,7 +170,9 @@
           "call": {
             "id": "call-1",
             "tool": "read_file",
-            "args": { "path": "README.md" },
+            "args": {
+              "path": "README.md"
+            },
             "approvalStatus": "required",
             "reason": "Inspect the requested file."
           }
@@ -243,5 +248,10 @@
         "uiStateJson": null
       }
     ]
+  },
+  "settings": {
+    "enabled": true,
+    "revision": 1,
+    "updatedAt": 0
   }
 }

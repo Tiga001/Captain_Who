@@ -111,6 +111,7 @@ impl MemoryConversationWorldState {
 pub(super) fn conversation_capability_section_ids() -> AgentResult<Vec<WorldStateSectionId>> {
     [
         "web.search",
+        "agent.collaboration",
         "human.interaction",
         "builtin.capabilities.policy",
     ]

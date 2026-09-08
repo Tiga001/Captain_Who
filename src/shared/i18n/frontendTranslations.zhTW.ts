@@ -421,6 +421,9 @@ export const zhTWTranslations = {
   'agentTemplates.createTitle': '新智能體模板',
   'agentTemplates.editTitle': '編輯智能體模板',
   'agentTemplates.back': '返回模板列表',
+  'agentTemplates.collaborationEnabled': '允許建立子智能體',
+  'agentTemplates.collaborationEnabledDescription':
+    '對新一輪任務生效，正在執行的任務樹會完成本輪。',
   'agentTemplates.snapshotHint': '修改只影響未來創建的智能體，已有智能體保留創建時快照。',
   'agentTemplates.name': '名稱',
   'agentTemplates.description': '簡短描述',

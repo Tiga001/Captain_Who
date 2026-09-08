@@ -21,6 +21,7 @@ impl AgentService {
                     prepared.skill_resources.as_ref().map(Arc::clone),
                     mcp_tools.clone(),
                     automation_report_sink.clone(),
+                    Some(&run_id),
                 )
                 .map(|projection| (projection, automation_report_sink))
             });

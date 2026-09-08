@@ -67,6 +67,33 @@ describe('CoreServer collaboration client', () => {
     onNotification.mockReset().mockReturnValue(() => undefined)
   })
 
+  it('validates settings requests, responses and change notifications', async () => {
+    const server = new CoreServer()
+    const settings = { enabled: true, revision: 1, updatedAt: 0 }
+    rpcRequest
+      .mockResolvedValueOnce(settings)
+      .mockResolvedValueOnce({ ...settings, enabled: false, revision: 2 })
+    await expect(server.getCollaborationSettings({})).resolves.toEqual(settings)
+    await server.updateCollaborationSettings({ enabled: false, expectedRevision: 1 })
+    expect(rpcRequest).toHaveBeenNthCalledWith(1, 'agent.collaboration.settings.get', {})
+    expect(rpcRequest).toHaveBeenNthCalledWith(2, 'agent.collaboration.settings.update', {
+      enabled: false,
+      expectedRevision: 1
+    })
+    expect(() =>
+      server.updateCollaborationSettings({ enabled: false, expectedRevision: 0 })
+    ).toThrow()
+    const handler = vi.fn()
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    server.onCollaborationSettingsChanged(handler)
+    const callback = onNotification.mock.calls.at(-1)?.[1]
+    callback({ ...settings, enabled: 'yes' })
+    expect(handler).not.toHaveBeenCalled()
+    callback(settings)
+    expect(handler).toHaveBeenCalledWith(settings)
+    warn.mockRestore()
+  })
+
   it('uses global template requests and enforces canonical project assignment responses', async () => {
     rpcRequest
       .mockResolvedValueOnce({ schemaVersion: 1, templates: [template] })

@@ -432,6 +432,9 @@ export const koKRTranslations = {
   'agentTemplates.createTitle': '새로운 Agent 템플릿',
   'agentTemplates.editTitle': 'Agent 템플릿 편집',
   'agentTemplates.back': '템플릿으로 돌아가기',
+  'agentTemplates.collaborationEnabled': '하위 에이전트 생성 허용',
+  'agentTemplates.collaborationEnabledDescription':
+    '새 턴부터 적용됩니다. 실행 중인 작업 트리는 현재 턴을 마칩니다.',
   'agentTemplates.snapshotHint':
     '변경사항은 향후 생성되는 에이전트에 적용됩니다. 기존 에이전트는 생성 스냅샷을 유지합니다.',
   'agentTemplates.name': '이름',

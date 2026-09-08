@@ -236,6 +236,8 @@ fn agent_collaboration_contract_matches_the_typescript_fixture_and_is_strict() {
     ))
     .unwrap();
     let expected_methods = [
+        AGENT_COLLABORATION_GET_SETTINGS_METHOD,
+        AGENT_COLLABORATION_UPDATE_SETTINGS_METHOD,
         AGENT_COLLABORATION_GET_TREE_METHOD,
         AGENT_COLLABORATION_GET_AGENT_METHOD,
         AGENT_COLLABORATION_LOCATE_CONVERSATION_METHOD,
@@ -260,8 +262,20 @@ fn agent_collaboration_contract_matches_the_typescript_fixture_and_is_strict() {
             "event": AGENT_COLLABORATION_EVENT_NOTIFICATION_METHOD,
             "observerEvent": AGENT_COLLABORATION_OBSERVER_EVENT_NOTIFICATION_METHOD,
             "resync": AGENT_COLLABORATION_RESYNC_NOTIFICATION_METHOD,
+            "settingsChanged": AGENT_COLLABORATION_SETTINGS_CHANGED_METHOD,
         })
     );
+
+    let settings: AgentCollaborationSettings =
+        serde_json::from_value(fixture["settings"].clone()).unwrap();
+    assert_eq!(
+        (settings.enabled, settings.revision, settings.updated_at),
+        (true, 1, 0)
+    );
+    assert!(serde_json::from_value::<AgentCollaborationSettingsUpdate>(
+        serde_json::json!({"enabled":false,"expectedRevision":1,"runId":"forged"})
+    )
+    .is_err());
 
     let observer_event: AgentObserverEventEnvelopeDto =
         serde_json::from_value(fixture["observerEvent"].clone()).unwrap();

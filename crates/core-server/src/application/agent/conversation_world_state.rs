@@ -62,6 +62,7 @@ impl AgentConversationWorldStateHost for StoredConversationWorldState {
         let mut owned_section_ids = [
             "web.search",
             "human.interaction",
+            "agent.collaboration",
             "builtin.capabilities.policy",
         ]
         .into_iter()

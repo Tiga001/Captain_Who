@@ -1182,7 +1182,10 @@ fn test_mcp_resume_checkpoint(
         "extensionSnapshots": [],
         "toolSet": crate::test_tool_set_checkpoint(),
         "runContext": null,
-        "collaborationRunSnapshot": null,
+        "collaborationRunSnapshot": mycopilot_core::AgentCollaborationRunSnapshot {
+            selector_directory: Default::default(),
+            admitted_wait_model_batches: Vec::new(),
+        },
         "modelCapabilities": { "imageInput": false },
         "providerProfileConfig": provider_profile_config,
         "providerProtocolKey": provider_protocol_key,
@@ -1385,6 +1388,7 @@ fn append_durable_pending_trace(
         }],
         is_error: false,
     }];
+    admit_test_conversation_run(storage, &trace, AgentPermissions::default(), created_at);
     storage
         .append_in_progress_conversation_turn_trace_and_apply_guidances(
             &trace,
@@ -8301,22 +8305,6 @@ fn startup_reconciliation_failure_prevents_agent_service_startup() {
         })
         .unwrap();
 
-    // Corrupt the persisted row explicitly so the test continues to cover startup fail-closed
-    // behavior while ordinary repository writes remain protected by the canonical CHECK.
-    let corruption = rusqlite::Connection::open(&database_path).unwrap();
-    corruption
-        .pragma_update(None, "ignore_check_constraints", 1)
-        .unwrap();
-    corruption
-        .execute(
-            "UPDATE messages SET agent_run_json = ?1 WHERE id = ?2",
-            ["not-json", "assistant-bad-reconciliation"],
-        )
-        .unwrap();
-    corruption
-        .pragma_update(None, "ignore_check_constraints", 0)
-        .unwrap();
-    drop(corruption);
     let call = AgentToolCall {
         id: "bad-reconciliation-call".to_string(),
         tool: "approval_tool".to_string(),
@@ -8378,6 +8366,23 @@ fn startup_reconciliation_failure_prevents_agent_service_startup() {
             updated_at: 1,
         })
         .unwrap();
+
+    // Corrupt the persisted row explicitly so the test continues to cover startup fail-closed
+    // behavior while ordinary repository writes remain protected by the canonical CHECK.
+    let corruption = rusqlite::Connection::open(&database_path).unwrap();
+    corruption
+        .pragma_update(None, "ignore_check_constraints", 1)
+        .unwrap();
+    corruption
+        .execute(
+            "UPDATE messages SET agent_run_json = ?1 WHERE id = ?2",
+            ["not-json", "assistant-bad-reconciliation"],
+        )
+        .unwrap();
+    corruption
+        .pragma_update(None, "ignore_check_constraints", 0)
+        .unwrap();
+    drop(corruption);
 
     let error = match AgentService::try_new(storage) {
         Ok(_) => panic!("reconciliation failure must prevent startup"),

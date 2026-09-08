@@ -109,6 +109,43 @@ pub(crate) fn handle_request(
         AGENT_LIST_PENDING_ACTIONS_METHOD => {
             response_success(request.id, agent_service.list_user_pending_actions())
         }
+        mycopilot_protocol_rs::AGENT_COLLABORATION_GET_SETTINGS_METHOD => {
+            if let Err(message) = parse_params::<
+                mycopilot_protocol_rs::AgentCollaborationSettingsGetInput,
+            >(request.params)
+            {
+                return response_error(Some(request.id), -32602, message);
+            }
+            match storage.load_agent_collaboration_settings() {
+                Ok(settings) => response_success(request.id, settings),
+                Err(error) => response_error(Some(request.id), -32000, error),
+            }
+        }
+        mycopilot_protocol_rs::AGENT_COLLABORATION_UPDATE_SETTINGS_METHOD => {
+            let input = match parse_params::<mycopilot_protocol_rs::AgentCollaborationSettingsUpdate>(
+                request.params,
+            ) {
+                Ok(input) => input,
+                Err(message) => return response_error(Some(request.id), -32602, message),
+            };
+            match storage.update_agent_collaboration_settings(
+                &mycopilot_core::AgentCollaborationSettingsUpdate {
+                    enabled: input.enabled,
+                    expected_revision: input.expected_revision,
+                },
+            ) {
+                Ok(settings) => {
+                    agent_service.invalidate_all_conversation_context_states();
+                    let _ = notification_tx.send(serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "method": mycopilot_protocol_rs::AGENT_COLLABORATION_SETTINGS_CHANGED_METHOD,
+                        "params": settings,
+                    }));
+                    response_success(request.id, settings)
+                }
+                Err(error) => response_error(Some(request.id), -32000, error),
+            }
+        }
         AGENT_COLLABORATION_GET_TREE_METHOD => {
             let input = match parse_params::<AgentTreeRequest>(request.params) {
                 Ok(input) => input,

@@ -135,6 +135,9 @@ impl AgentService {
     }
 
     pub(super) fn release_conversation_turn_if_current(&self, conversation_id: &str, run_id: &str) {
+        self.collaboration_run_directories.lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .remove(run_id);
         let mut active_turns = self
             .active_conversation_turns
             .lock()

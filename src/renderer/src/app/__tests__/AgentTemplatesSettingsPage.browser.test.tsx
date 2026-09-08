@@ -5,6 +5,10 @@ import { render } from 'vitest-browser-react'
 import { SettingsSearchNavigationProvider } from '../../features/settings/settingsSearchNavigation'
 
 const service = vi.hoisted(() => ({
+  getSettings: vi.fn(),
+  updateSettings: vi.fn(),
+  settingsListener: null as
+    null | ((settings: { enabled: boolean; revision: number; updatedAt: number }) => void),
   assign: vi.fn(),
   create: vi.fn(),
   delete: vi.fn(),
@@ -36,6 +40,14 @@ vi.mock('../../config/ModelSettingsProvider', () => ({
 }))
 
 vi.mock('../../features/agentCollaboration/collaborationClient', () => ({
+  getCollaborationSettings: service.getSettings,
+  updateCollaborationSettings: service.updateSettings,
+  onCollaborationSettingsChanged: (listener: typeof service.settingsListener) => {
+    service.settingsListener = listener
+    return () => {
+      service.settingsListener = null
+    }
+  },
   createAgentTemplate: service.create,
   deleteAgentTemplate: service.delete,
   listAgentTemplates: service.list,
@@ -55,6 +67,10 @@ const PROJECTS = [
 let inventory: AgentTemplate[]
 
 beforeEach(() => {
+  service.getSettings.mockReset().mockResolvedValue({ enabled: true, revision: 1, updatedAt: 0 })
+  service.updateSettings
+    .mockReset()
+    .mockResolvedValue({ enabled: false, revision: 2, updatedAt: 1 })
   inventory = [
     template('template-a', 'Global Alpha', 'model-one', ['project-a']),
     template('template-b', 'Global Beta', 'model-two', ['project-b'])
@@ -478,3 +494,40 @@ function deferred<T>() {
   })
   return { promise, resolve }
 }
+
+describe('global collaboration permission', () => {
+  it('persists the global switch independently of template enablement and accepts newer revisions', async () => {
+    const screen = await render(<AgentTemplatesSettingsPage projects={PROJECTS} />)
+    const toggle = screen.getByRole('switch', {
+      name: 'agentTemplates.collaborationEnabled',
+      exact: true
+    })
+    await expect.element(toggle).toHaveAttribute('aria-checked', 'true')
+    await toggle.click()
+    await expect.element(toggle).toHaveAttribute('aria-checked', 'false')
+    expect(service.updateSettings).toHaveBeenCalledWith({ enabled: false, expectedRevision: 1 })
+    expect(service.setEnabled).not.toHaveBeenCalled()
+    service.settingsListener?.({ enabled: true, revision: 3, updatedAt: 2 })
+    await expect.element(toggle).toHaveAttribute('aria-checked', 'true')
+    service.settingsListener?.({ enabled: false, revision: 2, updatedAt: 1 })
+    await expect.element(toggle).toHaveAttribute('aria-checked', 'true')
+  })
+
+  it('keeps the persisted choice after a failed save and lets the user refresh', async () => {
+    service.updateSettings.mockRejectedValueOnce(new Error('revision conflict'))
+    const screen = await render(<AgentTemplatesSettingsPage projects={PROJECTS} />)
+    const toggle = screen.getByRole('switch', {
+      name: 'agentTemplates.collaborationEnabled',
+      exact: true
+    })
+    await expect.element(toggle).toHaveAttribute('aria-checked', 'true')
+    await toggle.click()
+    await expect
+      .element(screen.getByRole('alert'))
+      .toHaveTextContent('humanInteraction.settings.saveFailed')
+    await expect.element(toggle).toHaveAttribute('aria-checked', 'true')
+    service.getSettings.mockResolvedValueOnce({ enabled: false, revision: 2, updatedAt: 1 })
+    await screen.getByRole('button', { name: 'agentTemplates.retry', exact: true }).click()
+    await expect.element(toggle).toHaveAttribute('aria-checked', 'false')
+  })
+})

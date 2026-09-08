@@ -1,6 +1,156 @@
 use super::*;
 
 #[test]
+fn collaboration_policy_follows_spawn_and_followup_after_global_switch_off() {
+    use crate::storage::agent_collaboration_run_policy_repository as policy;
+
+    let fixture = Fixture::new(Some("model-a"));
+    insert_active_root_trace(&fixture, "run-policy-root", "assistant-policy-root");
+    let original = {
+        let connection = fixture.service.state.connection().unwrap();
+        policy::freeze_run(&connection, "run-policy-root", None).unwrap()
+    };
+    let disabled = fixture
+        .service
+        .update_agent_collaboration_settings(&crate::AgentCollaborationSettingsUpdate {
+            enabled: false,
+            expected_revision: original.revision,
+        })
+        .unwrap();
+    assert!(!disabled.enabled);
+
+    let child = fixture
+        .service
+        .create_child_agent_with_limits_and_expected_selector_from_run(
+            &spawn_input("policy-spawn", "policy-child"),
+            AgentTreeResourceLimits::default(),
+            None,
+            None,
+            "run-policy-root",
+        )
+        .unwrap();
+    let followup = fixture
+        .service
+        .follow_up_agent_from_run(
+            &SendAgentMessageRequest {
+                sender_agent_id: "agent-root".into(),
+                recipient_agent_id: child.agent.agent_id.clone(),
+                request_id: "policy-followup".into(),
+                content: "Complete the already admitted task.".into(),
+            },
+            "run-policy-root",
+        )
+        .unwrap();
+    let followup_wake = followup.deferred_wake.unwrap();
+    let connection = fixture.service.state.connection().unwrap();
+    for wake in [&child.initial_wake, &followup_wake] {
+        let actual = connection.query_row(
+            "SELECT enabled,revision,updated_at FROM agent_collaboration_wake_policies WHERE wake_id=?1",
+            [&wake.wake_id],
+            |row| Ok(crate::AgentCollaborationSettings {
+                enabled: row.get(0)?, revision: row.get(1)?, updated_at: row.get(2)?,
+            }),
+        ).unwrap();
+        assert_eq!(
+            actual, original,
+            "a queued descendant must inherit the originating run, not the later global policy"
+        );
+    }
+    assert_eq!(
+        policy::freeze_run(&connection, "run-policy-root", None).unwrap(),
+        original
+    );
+    assert!(connection.execute(
+        "UPDATE agent_collaboration_run_policies SET enabled=0 WHERE run_id='run-policy-root'", [],
+    ).is_err(), "settings changes cannot rewrite a frozen run");
+    assert!(
+        connection
+            .execute(
+                "UPDATE agent_collaboration_wake_policies SET enabled=0 WHERE wake_id=?1",
+                [&child.initial_wake.wake_id],
+            )
+            .is_err(),
+        "queued policy inheritance is immutable too"
+    );
+}
+
+#[test]
+fn collaboration_policy_wake_admission_preserves_tree_scope_after_database_reopen() {
+    use crate::storage::agent_collaboration_run_policy_repository as policy;
+
+    let fixture = Fixture::new(Some("model-a"));
+    insert_active_root_trace(&fixture, "run-policy-reopen", "assistant-policy-reopen");
+    let original = {
+        let connection = fixture.service.state.connection().unwrap();
+        policy::freeze_run(&connection, "run-policy-reopen", None).unwrap()
+    };
+    let child = fixture
+        .service
+        .create_child_agent_with_limits_and_expected_selector_from_run(
+            &spawn_input("policy-reopen-spawn", "policy-reopen-child"),
+            AgentTreeResourceLimits::default(),
+            None,
+            None,
+            "run-policy-reopen",
+        )
+        .unwrap();
+    fixture
+        .service
+        .update_agent_collaboration_settings(&crate::AgentCollaborationSettingsUpdate {
+            enabled: false,
+            expected_revision: original.revision,
+        })
+        .unwrap();
+
+    // A separate connection models recovery after the producing Host's memory is gone.
+    let reopened = StorageService::open(&fixture._directory.path().join("storage.sqlite")).unwrap();
+    let connection = reopened.state.connection().unwrap();
+    connection
+        .execute(
+            "INSERT INTO messages(id,conversation_id,role,content,status,created_at,position)
+         VALUES ('policy-child-assistant',?1,'assistant','','pending',30,
+          (SELECT COALESCE(MAX(position),-1)+1 FROM messages WHERE conversation_id=?1))",
+            [&child.agent.conversation_id],
+        )
+        .unwrap();
+    let trace = crate::ConversationTraceSnapshot::default().in_progress_trace(
+        "run-policy-child",
+        &child.agent.conversation_id,
+        "policy-child-assistant",
+    );
+    crate::storage::conversation_trace_repository::commit_trace_in_connection(
+        &connection,
+        &trace,
+        30,
+        30,
+    )
+    .unwrap();
+    let inherited = policy::freeze_run(
+        &connection,
+        &trace.run_id,
+        Some(&child.initial_wake.wake_id),
+    )
+    .unwrap();
+    assert_eq!(
+        inherited, original,
+        "delayed child admission must keep the completed parent admission's policy"
+    );
+    assert!(
+        policy::load_run(&connection, &trace.run_id)
+            .unwrap()
+            .unwrap()
+            .enabled
+    );
+    drop(connection);
+    assert!(
+        !reopened
+            .load_agent_collaboration_settings()
+            .unwrap()
+            .enabled
+    );
+}
+
+#[test]
 fn run_bound_spawn_is_rejected_atomically_after_durable_tree_stop() {
     let fixture = Fixture::new(Some("model-a"));
     insert_active_root_trace(&fixture, "run-stopped-spawn", "assistant-stopped-spawn");

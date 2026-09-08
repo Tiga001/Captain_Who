@@ -142,7 +142,10 @@ fn direct_execution_input_with_workspace(
         extension_snapshots: Vec::new(),
         tool_set: crate::test_tool_set_checkpoint(),
         run_context: Some(context),
-        collaboration_run_snapshot: None,
+        collaboration_run_snapshot: Some(mycopilot_core::AgentCollaborationRunSnapshot {
+            selector_directory: Default::default(),
+            admitted_wait_model_batches: Vec::new(),
+        }),
         model_capabilities: ModelCapabilities::default(),
         provider_profile_config: profile,
         provider_protocol_key: protocol_key,
@@ -302,6 +305,7 @@ pub(super) fn seed_durable_direct_file_change_owner(
     checkpoint.conversation_model_context_items = model_context.clone();
     checkpoint.next_conversation_trace_sequence = trace_sequence + 1;
     checkpoint.conversation_trace_truncated = trace.truncated;
+    admit_test_conversation_run(storage, &trace, permissions_from_input(input), created_at);
     storage
         .append_in_progress_conversation_turn_trace_and_apply_guidances(
             &trace,

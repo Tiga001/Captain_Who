@@ -33,6 +33,20 @@ export function registerAgentIpc(ipcMain: TrustedIpcMain, coreServer: CoreServer
     }
   })
 
+  coreServer.onCollaborationSettingsChanged?.((settings) => {
+    for (const window of BrowserWindow.getAllWindows()) {
+      if (!window.isDestroyed() && !window.webContents.isDestroyed()) {
+        window.webContents.send(HOST_CHANNELS.agent.collaborationSettingsChanged, settings)
+      }
+    }
+  })
+  ipcMain.handle(HOST_CHANNELS.agent.collaborationGetSettings, (_event, input) =>
+    captureHostInvocation(() => coreServer.getCollaborationSettings(input))
+  )
+  ipcMain.handle(HOST_CHANNELS.agent.collaborationUpdateSettings, (_event, input) =>
+    captureHostInvocation(() => coreServer.updateCollaborationSettings(input))
+  )
+
   coreServer.onCollaborationEvent?.((event) => {
     for (const window of BrowserWindow.getAllWindows()) {
       if (!window.isDestroyed() && !window.webContents.isDestroyed()) {

@@ -6417,3 +6417,36 @@ BEGIN
     UPDATE human_interaction_ignored_projections SET status = 'cancelled'
     WHERE target_assistant_message_id = OLD.id AND status = 'pending';
 END;
+
+-- Agent collaboration settings and immutable run admission policy, schema v43.
+CREATE TABLE agent_collaboration_settings (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
+    revision INTEGER NOT NULL CHECK (revision BETWEEN 1 AND 9007199254740991),
+    updated_at INTEGER NOT NULL CHECK (updated_at BETWEEN 0 AND 9007199254740991)
+) STRICT;
+INSERT INTO agent_collaboration_settings (singleton, enabled, revision, updated_at) VALUES (1, 1, 1, 0);
+
+CREATE TABLE agent_collaboration_run_policies (
+    run_id TEXT PRIMARY KEY REFERENCES conversation_turn_traces(run_id) ON DELETE CASCADE,
+    enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
+    revision INTEGER NOT NULL CHECK (revision BETWEEN 1 AND 9007199254740991),
+    updated_at INTEGER NOT NULL CHECK (updated_at BETWEEN 0 AND 9007199254740991)
+) STRICT;
+CREATE TRIGGER agent_collaboration_run_policies_immutable
+BEFORE UPDATE ON agent_collaboration_run_policies
+BEGIN
+    SELECT RAISE(ABORT, 'run collaboration policy is immutable');
+END;
+
+CREATE TABLE agent_collaboration_wake_policies (
+    wake_id TEXT PRIMARY KEY REFERENCES agent_wake_requests(wake_id) ON DELETE CASCADE,
+    enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
+    revision INTEGER NOT NULL CHECK (revision BETWEEN 1 AND 9007199254740991),
+    updated_at INTEGER NOT NULL CHECK (updated_at BETWEEN 0 AND 9007199254740991)
+) STRICT;
+CREATE TRIGGER agent_collaboration_wake_policies_immutable
+BEFORE UPDATE ON agent_collaboration_wake_policies
+BEGIN
+    SELECT RAISE(ABORT, 'wake collaboration policy is immutable');
+END;

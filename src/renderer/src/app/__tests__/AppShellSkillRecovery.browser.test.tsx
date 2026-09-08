@@ -135,6 +135,7 @@ vi.mock('../useShellLayout', () => ({
 
 vi.mock('../../host/hostClient', () => ({
   hostClient: {
+    agent: { onCollaborationSettingsChanged: vi.fn(() => () => undefined) },
     app: {
       getWindowState: vi.fn().mockResolvedValue({ isFullScreen: false, isMaximized: false }),
       onWindowStateChange: vi.fn(() => () => undefined)

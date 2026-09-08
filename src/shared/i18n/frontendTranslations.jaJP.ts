@@ -440,6 +440,9 @@ export const jaJPTranslations = {
   'agentTemplates.createTitle': '新しい Agent テンプレート',
   'agentTemplates.editTitle': 'Agent テンプレートを編集',
   'agentTemplates.back': 'テンプレートに戻る',
+  'agentTemplates.collaborationEnabled': 'サブエージェントの作成を許可',
+  'agentTemplates.collaborationEnabledDescription':
+    '次のターンから適用されます。実行中のタスクツリーは現在のターンを完了します。',
   'agentTemplates.snapshotHint':
     '変更は、今後作成されるエージェントに適用されます。既存のエージェントは作成スナップショットを保持します。',
   'agentTemplates.name': '名前',

@@ -1005,6 +1005,7 @@ async fn cancelling_immediately_after_approval_prevents_command_side_effects() {
     checkpoint.run_context = agent_input.context.clone();
     agent_input.resume_checkpoint = Some(checkpoint);
     save_test_pending_provider_for_input(&storage, &mut agent_input);
+    admit_test_pending_checkpoint(&storage, &agent_input, "assistant-cancel-before-spawn");
     service
         .store_pending_action(
             "run-cancel-before-spawn",
@@ -1164,6 +1165,7 @@ async fn message_deletion_cancels_a_rejected_actions_pre_spawn_continuation() {
 
     save_test_pending_provider_for_input(&storage, &mut agent_input);
     let service = AgentService::new(Arc::clone(&storage));
+    admit_test_pending_checkpoint(&storage, &agent_input, assistant_message_id);
     service
         .store_pending_action(
             run_id,
@@ -1371,6 +1373,7 @@ async fn cancelling_run_during_approved_command_finishes_cancelled_without_resum
     checkpoint.run_context = agent_input.context.clone();
     agent_input.resume_checkpoint = Some(checkpoint);
     save_test_pending_provider_for_input(&storage, &mut agent_input);
+    admit_test_pending_checkpoint(&storage, &agent_input, "assistant-command-cancel");
     let record = PendingActionRecord {
         storage_id: pending_action_storage_id("run-command-cancel", &command.id),
         snapshot: PendingAgentActionSnapshot {

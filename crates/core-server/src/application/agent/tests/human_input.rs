@@ -588,7 +588,35 @@ async fn assert_sync_restart(answer_committed_before_restart: bool) {
         .unwrap();
     wait_for_done(&mut events, &turn.run_id, "waiting_for_user_input").await;
     wait_for_worker_release(&agent, &turn.run_id).await;
-    requests.recv().await.unwrap();
+    let original_wire = requests.recv().await.unwrap();
+    let original_collaboration = original_wire["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|message| message["content"].as_str())
+        .find(|content| content.contains("<agent_collaboration_directory>"))
+        .unwrap()
+        .to_string();
+    let (_, envelope) = storage
+        .load_sync_human_interaction_for_run(&turn.run_id)
+        .unwrap()
+        .unwrap();
+    let encoded_checkpoint = serde_json::to_string(&envelope).unwrap();
+    let frozen_input = PersistedAgentResumeInput::decode(&encoded_checkpoint)
+        .unwrap()
+        .agent_input;
+    let frozen_checkpoint = frozen_input.resume_checkpoint.as_ref().unwrap();
+    let original_directory = frozen_checkpoint
+        .collaboration_run_snapshot
+        .as_ref()
+        .unwrap()
+        .selector_directory
+        .clone();
+    let mut current_directory = original_directory.clone();
+    current_directory.models[0].display_name = "Changed during the synchronous question".into();
+    let mut settings = storage.load_model_settings().unwrap().unwrap();
+    settings.models[0].display_name = current_directory.models[0].display_name.clone();
+    storage.save_model_settings(settings).unwrap();
     let request = questions(&storage).pop().unwrap();
     let submission = HumanInteractionSubmitInput {
         conversation_id: turn.conversation_id.clone(),
@@ -624,6 +652,101 @@ async fn assert_sync_restart(answer_committed_before_restart: bool) {
     assert!(storage
         .has_sync_human_interaction_wait(&turn.conversation_id)
         .unwrap());
+    assert!(restarted.pending_actions.lock().unwrap().is_empty());
+    assert!(restarted
+        .collaboration_run_directories
+        .lock()
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        restarted
+            .collaboration_directory_for_run(&turn.run_id, &current_directory, None)
+            .unwrap(),
+        original_directory,
+        "a cold synchronous wait must recover its directory from the durable checkpoint"
+    );
+
+    // A healthy hot cache does not reload storage on every preview. A cold malformed envelope
+    // must fail explicitly instead of silently switching the in-progress run to today's directory.
+    let connection = rusqlite::Connection::open(&database_path).unwrap();
+    let identity_trigger: String = connection
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE name='human_interaction_suspensions_immutable_identity'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    // Fault injection is confined to this temporary database; normal writes reject this corruption.
+    connection
+        .execute_batch("DROP TRIGGER human_interaction_suspensions_immutable_identity")
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE human_interaction_suspensions SET checkpoint_json='{}' WHERE request_id=?1",
+            [&request.request_id],
+        )
+        .unwrap();
+    assert_eq!(
+        restarted
+            .collaboration_directory_for_run(&turn.run_id, &current_directory, None)
+            .unwrap(),
+        original_directory
+    );
+    restarted
+        .collaboration_run_directories
+        .lock()
+        .unwrap()
+        .clear();
+    assert!(restarted
+        .collaboration_directory_for_run(&turn.run_id, &current_directory, None)
+        .is_err());
+    connection
+        .execute(
+            "UPDATE human_interaction_suspensions SET checkpoint_json=?1 WHERE request_id=?2",
+            [&encoded_checkpoint, &request.request_id],
+        )
+        .unwrap();
+    connection.execute_batch(&identity_trigger).unwrap();
+    drop(connection);
+
+    restarted
+        .collaboration_run_directories
+        .lock()
+        .unwrap()
+        .insert(turn.run_id.clone(), current_directory.clone());
+    let mut invalid_checkpoint = frozen_checkpoint.clone();
+    invalid_checkpoint.run_id = "another-run".into();
+    assert!(restarted
+        .collaboration_directory_for_run(
+            &turn.run_id,
+            &current_directory,
+            Some(&invalid_checkpoint)
+        )
+        .is_err());
+    invalid_checkpoint = frozen_checkpoint.clone();
+    invalid_checkpoint
+        .collaboration_run_snapshot
+        .as_mut()
+        .unwrap()
+        .admitted_wait_model_batches = vec![0];
+    assert!(restarted
+        .collaboration_directory_for_run(
+            &turn.run_id,
+            &current_directory,
+            Some(&invalid_checkpoint)
+        )
+        .is_err());
+    // The production preview path must replace even a pre-existing speculative cache entry
+    // with the validated explicit resume checkpoint before the resumed runtime is attached.
+    restarted
+        .context_window_tool_projection(&frozen_input, None)
+        .unwrap();
+    assert_eq!(
+        restarted
+            .collaboration_directory_for_run(&turn.run_id, &current_directory, None)
+            .unwrap(),
+        original_directory
+    );
     let (notifications, mut events) = unbounded_channel();
     let human = HumanInteractionService::new(&storage, &restarted);
     if answer_committed_before_restart {
@@ -644,6 +767,18 @@ async fn assert_sync_restart(answer_committed_before_restart: bool) {
     assert_eq!(done["usage"]["billableRequestCount"], 2);
     assert_eq!(done["usage"]["totalTokens"], 24);
     let resumed_request = requests.recv().await.unwrap();
+    let resumed_collaboration = resumed_request["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|message| message["content"].as_str())
+        .filter(|content| content.contains("<agent_collaboration_directory>"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        resumed_collaboration,
+        vec![original_collaboration.as_str()],
+        "the resumed provider request must use the same frozen directory exactly once"
+    );
     let retried = human.submit(submission, &notifications).unwrap();
     assert_user_projection(
         &resumed_request,

@@ -29,6 +29,7 @@ use tempfile::tempdir;
 mod automation_turn;
 mod cancellation;
 mod collaboration_harness;
+mod collaboration_request_accounting;
 mod command_approval_rejection;
 mod command_sessions;
 mod context_history;
@@ -787,6 +788,76 @@ fn save_test_pending_provider(
         .unwrap();
 }
 
+/// Synthetic approval/execution fixtures skip the model request that normally admits a run.
+/// Use the production admission transaction so trace ownership and frozen policy stay paired.
+pub(super) fn admit_test_conversation_run(
+    storage: &StorageService,
+    trace: &ConversationTurnTrace,
+    permissions: AgentPermissions,
+    created_at: i64,
+) {
+    if storage
+        .load_agent_collaboration_run_policy(&trace.run_id)
+        .unwrap()
+        .is_some()
+    {
+        return;
+    }
+    let conversation = storage
+        .load_conversation(&trace.conversation_id)
+        .unwrap()
+        .expect("test run conversation");
+    let revision = storage
+        .conversation_revision(&trace.conversation_id)
+        .unwrap();
+    storage
+        .save_conversation_and_begin_turn(
+            conversation,
+            revision,
+            None,
+            mycopilot_core::AgentTurnPermissionSource::HostAuthenticatedRoot(permissions),
+            trace,
+            created_at,
+            created_at,
+        )
+        .expect("synthetic run must use the same immutable policy admission as a real run");
+}
+
+pub(super) fn admit_test_pending_checkpoint(
+    storage: &StorageService,
+    input: &AgentChatInput,
+    assistant_message_id: &str,
+) {
+    let checkpoint = input
+        .resume_checkpoint
+        .as_ref()
+        .expect("test pending checkpoint");
+    let conversation_id = input
+        .context
+        .as_ref()
+        .and_then(|context| context.conversation_id.as_deref())
+        .expect("test pending conversation");
+    let trace = ConversationTurnTrace {
+        schema_version: CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
+        run_id: checkpoint.run_id.clone(),
+        conversation_id: conversation_id.into(),
+        assistant_message_id: assistant_message_id.into(),
+        terminal_status: ConversationTurnTraceTerminalStatus::InProgress,
+        terminal_error: None,
+        truncated: checkpoint.conversation_trace_truncated,
+        items: checkpoint.conversation_trace_items.clone(),
+    };
+    admit_test_conversation_run(storage, &trace, permissions_from_input(input), 1);
+    storage
+        .append_in_progress_conversation_turn_trace_and_apply_guidances(
+            &trace,
+            &checkpoint.conversation_model_context_items,
+            1,
+            1,
+        )
+        .unwrap();
+}
+
 fn save_test_pending_provider_for_input(storage: &StorageService, input: &mut AgentChatInput) {
     // Test callers build the same explicit current Profile that the Host model-settings boundary
     // would have frozen before an Agent run. This is fixture setup, not a production fallback.
@@ -873,6 +944,14 @@ fn freeze_test_pending_provider_configuration(
     if let Some(checkpoint) = input.resume_checkpoint.as_mut() {
         checkpoint.provider_profile_config = config;
         checkpoint.provider_protocol_key = key;
+        // AgentService always attached collaboration services before a real suspension, even
+        // when a fixture only exercises a command or FileChange continuation.
+        checkpoint
+            .collaboration_run_snapshot
+            .get_or_insert_with(|| mycopilot_core::AgentCollaborationRunSnapshot {
+                selector_directory: Default::default(),
+                admitted_wait_model_batches: Vec::new(),
+            });
     }
 }
 

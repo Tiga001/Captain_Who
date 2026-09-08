@@ -534,6 +534,21 @@ fn completed_trace_rejects_a_missing_model_context_suffix() {
 }
 
 #[test]
+fn active_trace_accepts_a_valid_staged_call_without_treating_it_as_closed_context() {
+    let mut recorder = ConversationTraceRecorder::default();
+    recorder.record_narration("Inspecting the current state.").unwrap();
+    record_open_call(&mut recorder, &call("pending-read"));
+    let snapshot = recorder.snapshot();
+    let trace = snapshot.in_progress_audit_trace("run", "conversation", "assistant");
+    trace.validate_complete_model_context(&snapshot.model_context_items).unwrap();
+    trace.validate_complete_model_context(&snapshot.committed_prefix().model_context_items).unwrap();
+    assert!(trace.validate_complete_model_context(&snapshot.model_context_items[1..]).is_err());
+    let mut corrupted = snapshot.model_context_items;
+    corrupted.last_mut().unwrap().sequence += 1;
+    assert!(trace.validate_complete_model_context(&corrupted).is_err());
+}
+
+#[test]
 fn model_observation_is_compact_and_does_not_expose_backend_history_metadata() {
     let result = AgentToolResult {
         exact_archive_file: None,

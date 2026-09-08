@@ -2066,6 +2066,7 @@ fn manually_approved_command_reconciles_two_post_commit_errors_and_keeps_observa
     checkpoint.run_context = agent_input.context.clone();
     agent_input.resume_checkpoint = Some(checkpoint);
     save_test_pending_provider_for_input(&storage, &mut agent_input);
+    admit_test_pending_checkpoint(&storage, &agent_input, "assistant-manual-command");
     let record = PendingActionRecord {
         storage_id: pending_action_storage_id(run_id, call_id),
         snapshot: PendingAgentActionSnapshot {

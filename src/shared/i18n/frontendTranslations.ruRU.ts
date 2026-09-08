@@ -440,6 +440,9 @@ export const ruRUTranslations = {
   'agentTemplates.createTitle': 'Новый шаблон Agent',
   'agentTemplates.editTitle': 'Редактировать шаблон Agent',
   'agentTemplates.back': 'Вернуться к шаблонам',
+  'agentTemplates.collaborationEnabled': 'Разрешить создание субагентов',
+  'agentTemplates.collaborationEnabledDescription':
+    'Применяется к новым ходам. Запущенные задачи завершат текущий ход.',
   'agentTemplates.snapshotHint':
     'Изменения применяются к агентам, созданным в будущем. Существующие агенты сохраняют снимок своего создания.',
   'agentTemplates.name': 'Имя',

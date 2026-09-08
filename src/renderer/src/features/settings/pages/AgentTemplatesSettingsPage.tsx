@@ -1,6 +1,7 @@
 import { renderSettingsNodes, settingLabel, settingDescription } from '../settingsDefinition'
 import { useSettingsPageNavigation } from '../settingsSearchNavigation'
 import {
+  agentCollaborationSettingsNodes,
   agentTemplateCreateSettings,
   agentTemplateEditorSettings,
   agentTemplateLibrarySettings,
@@ -26,6 +27,7 @@ import {
   updateAgentTemplate
 } from '../../agentCollaboration/collaborationClient'
 import { SettingsBreadcrumbs } from '../components/SettingsBreadcrumbs'
+import { useAgentCollaborationSettings } from './useAgentCollaborationSettings'
 import './AgentTemplatesSettingsPage.css'
 
 interface AgentTemplatesSettingsPageProps {
@@ -50,6 +52,7 @@ export function AgentTemplatesSettingsPage({
   projects
 }: AgentTemplatesSettingsPageProps) {
   const { t } = useFrontendConfig()
+  const collaboration = useAgentCollaborationSettings()
   const { enabledModels, models } = useModelSettings()
   const [templates, setTemplates] = useState<AgentTemplate[]>([])
   const [loading, setLoading] = useState(false)
@@ -420,6 +423,59 @@ export function AgentTemplatesSettingsPage({
           </button>
         ))}
       </header>
+
+      {renderSettingsNodes(agentCollaborationSettingsNodes, (node) => (
+        <section
+          className="agent-templates-page__collaboration settings-list-section"
+          aria-labelledby="agent-collaboration-settings-label"
+        >
+          <div className="settings-list">
+            <div className="settings-list-row">
+              <div className="settings-list-row__text">
+                <span className="settings-list-row__title" id="agent-collaboration-settings-label">
+                  {settingLabel(node, t)}
+                </span>
+                <p className="settings-list-row__description">{settingDescription(node, t)}</p>
+              </div>
+              {collaboration.settings ? (
+                <button
+                  className="settings-switch"
+                  type="button"
+                  role="switch"
+                  aria-labelledby="agent-collaboration-settings-label"
+                  aria-checked={collaboration.settings.enabled}
+                  aria-busy={collaboration.saving || undefined}
+                  data-state={collaboration.settings.enabled ? 'on' : 'off'}
+                  disabled={collaboration.loading || collaboration.saving}
+                  onClick={() => void collaboration.toggle()}
+                >
+                  <span className="settings-switch__thumb" aria-hidden="true" />
+                </button>
+              ) : collaboration.loading ? (
+                <span role="status">{t('humanInteraction.settings.loading')}</span>
+              ) : null}
+            </div>
+          </div>
+          {collaboration.error ? (
+            <div className="agent-templates-page__load-error">
+              <span role="alert">
+                {t(
+                  collaboration.error === 'save'
+                    ? 'humanInteraction.settings.saveFailed'
+                    : 'humanInteraction.settings.loadFailed'
+                )}
+              </span>
+              <button
+                type="button"
+                disabled={collaboration.loading || collaboration.saving}
+                onClick={() => void collaboration.refresh()}
+              >
+                {t('agentTemplates.retry')}
+              </button>
+            </div>
+          ) : null}
+        </section>
+      ))}
 
       {operationError ? (
         <p className="agent-templates-page__error" role="alert">

@@ -30,7 +30,9 @@ fn manual_settlement_trace_state(
         && durable.items == expected.items[..durable.items.len()]
         && durable.terminal_status == crate::ConversationTurnTraceTerminalStatus::InProgress
         && durable.terminal_error == expected.terminal_error
-        && durable.truncated == expected.truncated
+        // Appending a bounded ToolResult may introduce the first truncated item. The
+        // already committed prefix must remain exact, while this aggregate flag can only grow.
+        && (!durable.truncated || expected.truncated)
     {
         return ManualSettlementTraceState::BeforeBoundary;
     }

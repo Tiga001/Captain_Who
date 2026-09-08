@@ -522,7 +522,7 @@ impl AgentService {
                 notifications.clone(),
             );
         host_services =
-            match collaboration_harness.attach_to_host_services(host_services, &conversation_id) {
+            match collaboration_harness.attach_to_host_services(host_services, &conversation_id, &run_id) {
                 Ok(services) => services,
                 Err(error) => {
                     let final_response_collaboration_cutoff = *final_response_collaboration_cutoff

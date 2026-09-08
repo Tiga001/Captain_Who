@@ -90,19 +90,77 @@ impl AgentCollaborationHarnessAdapter {
         &self,
         host_services: AgentRuntimeHostServices,
         conversation_id: &str,
+        run_id: &str,
     ) -> Result<AgentRuntimeHostServices, AgentError> {
+        let policy = self.run_policy(run_id)?;
+        let services = self.freeze_run_directory(
+            self.runtime_services_for_conversation(conversation_id)?,
+            run_id,
+            None,
+        )?;
         Ok(host_services
-            .with_agent_collaboration(self.runtime_services_for_conversation(conversation_id)?))
+            .with_agent_collaboration(services)
+            .with_agent_collaboration_policy(Arc::new(
+                mycopilot_core::FrozenAgentCollaborationPolicySource::new(policy),
+            )))
     }
 
     pub(crate) fn attach_preview_to_host_services(
         &self,
         host_services: AgentRuntimeHostServices,
         conversation_id: &str,
+        run_id: Option<&str>,
+        resume_checkpoint: Option<&mycopilot_core::AgentRunCheckpoint>,
     ) -> Result<AgentRuntimeHostServices, AgentError> {
-        Ok(host_services.with_agent_collaboration(
-            self.preview_runtime_services_for_conversation(conversation_id)?,
-        ))
+        let policy = match run_id {
+            Some(run_id) => self.run_policy(run_id)?,
+            None => match self
+                .storage
+                .load_active_agent_collaboration_run_policy(conversation_id)
+                .map_err(storage_error)?
+            {
+                Some(policy) => policy,
+                None => self
+                    .storage
+                    .load_agent_collaboration_settings()
+                    .map_err(storage_error)?,
+            },
+        };
+        let services = self.preview_runtime_services_for_conversation(conversation_id)?;
+        let services = match run_id {
+            Some(run_id) => self.freeze_run_directory(services, run_id, resume_checkpoint)?,
+            None => services,
+        };
+        Ok(host_services
+            .with_agent_collaboration(services)
+            .with_agent_collaboration_policy(Arc::new(
+                mycopilot_core::FrozenAgentCollaborationPolicySource::new(policy),
+            )))
+    }
+
+    fn run_policy(
+        &self,
+        run_id: &str,
+    ) -> Result<mycopilot_core::AgentCollaborationSettings, AgentError> {
+        self.storage
+            .load_agent_collaboration_run_policy(run_id)
+            .map_err(storage_error)?
+            .ok_or_else(|| unavailable("The run's frozen Agent collaboration policy is missing."))
+    }
+
+    fn freeze_run_directory(
+        &self,
+        services: AgentCollaborationRuntimeServices,
+        run_id: &str,
+        resume_checkpoint: Option<&mycopilot_core::AgentRunCheckpoint>,
+    ) -> Result<AgentCollaborationRuntimeServices, AgentError> {
+        let mut snapshot = services.run_snapshot();
+        snapshot.selector_directory = self.service.collaboration_directory_for_run(
+            run_id,
+            &snapshot.selector_directory,
+            resume_checkpoint,
+        )?;
+        services.with_run_snapshot(&snapshot)
     }
 
     fn caller_snapshot(
@@ -276,6 +334,13 @@ impl AgentCollaborationHarnessAdapter {
         cancellation.check()?;
         if invocation.conversation_id != invocation.caller.conversation_id {
             return Err(permission_denied());
+        }
+        if !self.run_policy(&invocation.run_id)?.enabled {
+            return Err(collaboration_error(
+                "disabled",
+                false,
+                "本轮任务未启用子智能体协作能力。".to_string(),
+            ));
         }
         let caller = self.ensure_and_validate_caller(&invocation.caller)?;
         // Every collaboration action first refreshes the caller's latest effective permissions

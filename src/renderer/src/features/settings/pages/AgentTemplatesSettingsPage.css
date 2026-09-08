@@ -323,3 +323,10 @@
     justify-content: flex-start;
   }
 }
+
+.agent-templates-page__collaboration .settings-list-row__text {
+  min-width: 0;
+}
+.agent-templates-page__collaboration .settings-switch {
+  flex: 0 0 auto;
+}

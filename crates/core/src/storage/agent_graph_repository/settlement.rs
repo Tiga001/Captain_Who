@@ -418,6 +418,23 @@ fn finish_agent_turn_with_result_in_transaction(
         } else {
             None
         };
+    if let Some(parent_wake) = &parent_wake {
+        if let Some(run_id) = input.run_id.as_deref() {
+            crate::storage::agent_collaboration_run_policy_repository::inherit_run_for_wake(
+                transaction,
+                run_id,
+                &parent_wake.wake_id,
+            )
+            .map_err(write_error)?;
+        } else {
+            crate::storage::agent_collaboration_run_policy_repository::inherit_wake_for_wake(
+                transaction,
+                &wake.wake_id,
+                &parent_wake.wake_id,
+            )
+            .map_err(write_error)?;
+        }
+    }
     Ok(AgentTurnResultSettlement {
         wake: settled_wake,
         result_message,

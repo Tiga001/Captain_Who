@@ -24,6 +24,7 @@ pub struct AgentContextWindowToolProjection {
     conversation_world_state: Vec<crate::AnchoredWorldStateRecord>,
     conversation_preview_sections: Option<Vec<crate::WorldStateSectionEnvelope>>,
     capability_context: Vec<ContextItem>,
+    active_assistant_message_id: Option<String>,
 }
 
 #[cfg(test)]
@@ -178,6 +179,127 @@ mod world_state_tests {
         assert!(exact.cost_breakdown.world_state_tokens > base.cost_breakdown.world_state_tokens);
         assert_eq!(state.snapshot(), before);
     }
+
+    #[test]
+    fn active_preview_counts_a_journaled_initial_run_snapshot_only_once() {
+        let initial = WorldStateSnapshot::new(
+            "active-run",
+            0,
+            vec![crate::world_state::model_capabilities_section(
+                crate::ModelCapabilities::default(),
+                WorldStateLifetime::Run,
+            )
+            .unwrap()],
+        )
+        .unwrap();
+        let projection = AgentContextWindowToolProjection::new(
+            AgentRunToolSetCheckpoint {
+                stable_revision: "stable".into(),
+                dynamic_revision: "dynamic".into(),
+                effective_revision: "effective".into(),
+                active_capability_ids: Vec::new(),
+                exposed_tool_names: Vec::new(),
+            },
+            initial.clone(),
+            Vec::new(),
+        );
+        let active = projection
+            .clone()
+            .with_active_assistant_message_id("active".into());
+        let mut state = state(Vec::new());
+        let baseline_before_publish = state.snapshot();
+        let prepublish = state
+            .snapshot_with_skill_overlays_and_tool_projection(None, None, &active)
+            .unwrap();
+        assert!(prepublish.input_tokens > baseline_before_publish.input_tokens);
+        assert_eq!(
+            prepublish,
+            state
+                .snapshot_with_skill_overlays_and_tool_projection(None, None, &projection)
+                .unwrap()
+        );
+
+        let historical = |owner: &str, text: String| {
+            ContextItem::new(
+                crate::llm::LlmMessage::backend_state(text),
+                ContextMetadata::new(
+                    ContextSource::ConversationTrace,
+                    ContextScope::Conversation,
+                    ContextRetention::Retained,
+                )
+                .with_source(ContextSource::HistoricalRunContext)
+                .with_source(ContextSource::WorldStateSnapshot)
+                .with_origin(ContextOrigin::conversation_trace_item(owner, 0)),
+            )
+        };
+        state.frame.push(historical(
+            "active",
+            initial
+                .model_projection(WorldStateLifetime::Run)
+                .unwrap()
+                .render_sanitized_text(),
+        ));
+        let journaled = state.snapshot();
+        let staged = state
+            .snapshot_with_skill_overlays_and_tool_projection(None, None, &active)
+            .unwrap();
+        assert_eq!(staged.input_tokens, journaled.input_tokens);
+        assert_eq!(
+            staged.cost_breakdown.world_state_tokens,
+            journaled.cost_breakdown.world_state_tokens
+        );
+        let next_run = state
+            .snapshot_with_skill_overlays_and_tool_projection(None, None, &projection)
+            .unwrap();
+        assert_eq!(
+            next_run.input_tokens - staged.input_tokens,
+            prepublish.input_tokens - baseline_before_publish.input_tokens
+        );
+        let unrelated = projection
+            .clone()
+            .with_active_assistant_message_id("other".into());
+        assert_eq!(
+            next_run,
+            state
+                .snapshot_with_skill_overlays_and_tool_projection(None, None, &unrelated)
+                .unwrap()
+        );
+        assert_eq!(state.snapshot(), journaled);
+
+        // A retained fragment containing only a state update is not the initial full snapshot.
+        let target = WorldStateSnapshot::new(
+            "active-run",
+            1,
+            vec![WorldStateSectionEnvelope::model_visible(
+                WorldStateSectionId::AttachmentLibrarySummary,
+                WorldStateLifetime::Run,
+                serde_json::json!({"available": true}),
+                serde_json::json!({"available": true}),
+            )
+            .unwrap()],
+        )
+        .unwrap();
+        let diff = WorldStateDiff::between(&initial, &target)
+            .unwrap()
+            .model_projection_against(&initial, WorldStateLifetime::Run)
+            .unwrap()
+            .unwrap();
+        let mut fragment = super::world_state_tests::state(Vec::new());
+        fragment
+            .frame
+            .push(historical("active", diff.render_sanitized_text()));
+        assert!(!fragment
+            .frame
+            .contains_historical_initial_run_world_state("active"));
+        assert_eq!(
+            fragment
+                .snapshot_with_skill_overlays_and_tool_projection(None, None, &active)
+                .unwrap(),
+            fragment
+                .snapshot_with_skill_overlays_and_tool_projection(None, None, &projection)
+                .unwrap(),
+        );
+    }
 }
 
 impl std::fmt::Debug for AgentContextWindowToolProjection {
@@ -209,6 +331,7 @@ impl AgentContextWindowToolProjection {
             conversation_world_state: Vec::new(),
             conversation_preview_sections: None,
             capability_context: Vec::new(),
+            active_assistant_message_id: None,
         }
     }
 
@@ -219,6 +342,14 @@ impl AgentContextWindowToolProjection {
         records: Vec<crate::AnchoredWorldStateRecord>,
     ) -> Self {
         self.conversation_world_state = records;
+        self
+    }
+
+    /// Identifies an existing active run for a read-only preview. Its initial World State may
+    /// already be present in the durable trace; idle previews deliberately leave this unset so
+    /// they include the new run snapshot that the next request will introduce.
+    pub fn with_active_assistant_message_id(mut self, assistant_message_id: String) -> Self {
+        self.active_assistant_message_id = Some(assistant_message_id);
         self
     }
 
@@ -242,6 +373,15 @@ impl AgentContextWindowToolProjection {
     pub(crate) fn with_capability_context(mut self, context: Vec<ContextItem>) -> Self {
         self.capability_context = context;
         self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn capability_context_texts(&self) -> Vec<String> {
+        ContextFrame::new(self.capability_context.clone())
+            .to_messages()
+            .into_iter()
+            .map(|message| message.content().to_string())
+            .collect()
     }
 
     pub fn stable_revision(&self) -> &str {
@@ -602,10 +742,16 @@ impl AgentConversationContextState {
             .map(|sections| preview.conversation_world_state_preview(sections))
             .transpose()?
             .flatten();
-        ContextAssembler::append_initial_run_world_state(
-            &mut preview,
-            Some(projection.initial_run_world_state()),
-        )?;
+        if !projection
+            .active_assistant_message_id
+            .as_deref()
+            .is_some_and(|id| preview.contains_historical_initial_run_world_state(id))
+        {
+            ContextAssembler::append_initial_run_world_state(
+                &mut preview,
+                Some(projection.initial_run_world_state()),
+            )?;
+        }
         ContextAssembler::append_skill_overlays(&mut preview, discovery, activation)?;
         preview.mark_initial_run_input();
         if let Some(item) = conversation_preview {

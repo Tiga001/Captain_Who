@@ -91,9 +91,9 @@ transport/application → adapters → core/protocol
 - `storage.sqlite` 是 Conversation、Agent、模板与项目分配、Mailbox、Wake、Approval、FileChange
   audit/run grant、Automation task/Run/event、Notification fact/batch、Browser history/preferences/download
   等持久事实来源。
-- 当前 canonical schema 为 **v42**；版本与 catalog fingerprint 的唯一真源是 `crates/core/src/storage/migrations.rs`。
+- 当前 canonical schema 为 **v43**；版本与 catalog fingerprint 的唯一真源是 `crates/core/src/storage/migrations.rs`。
 - 内存 channel、`Notify`、Renderer store 和 notification 只用于降延迟或失效通知。间隙、重启和丢通知必须从 SQLite snapshot/event log 恢复。
-- 开发库不做原地迁移。版本、fingerprint 或外键不匹配时 fail closed，返回 `development_storage_schema_reset_required`，再由显式开发重建流程处理。
+- exact canonical v42 可原子升级至 v43，保留历史及配置并新增协作设置、Run/Wake 冻结策略表。其他旧版本、fingerprint 或外键不匹配时 fail closed，返回 `development_storage_schema_reset_required`，再由显式开发重建流程处理。
 
 ## 5. 启动与关停概览
 
@@ -183,7 +183,7 @@ pnpm test:web
 - 打包、真实签名、专项 Multi-Agent gate 和 Managed Playwright release gate 不在 `pnpm check` 内；内部文档、公开文档和 Agent 头像检查已纳入 `pnpm check`。
 - Automation 真实 Core Server E2E 也不在 `pnpm check`，且尚无定时触发到操作系统通知点击的
   packaged E2E。
-- 当前没有生产数据库原地迁移、notarization 或自动更新通道。
+- 当前仅有已审计的 v42 → v43 开发库升级，没有通用生产数据库迁移、notarization 或自动更新通道。
 
 ## 11. 变更检查表
 

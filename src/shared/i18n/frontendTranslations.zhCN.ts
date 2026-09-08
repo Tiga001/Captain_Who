@@ -426,6 +426,9 @@ export const zhCNTranslations = {
   'agentTemplates.createTitle': '新建智能体模板',
   'agentTemplates.editTitle': '编辑智能体模板',
   'agentTemplates.back': '返回模板列表',
+  'agentTemplates.collaborationEnabled': '允许创建子智能体',
+  'agentTemplates.collaborationEnabledDescription':
+    '对新一轮任务生效，正在运行的任务树会完成本轮。',
   'agentTemplates.snapshotHint': '修改只影响未来创建的智能体，已有智能体保留创建时快照。',
   'agentTemplates.name': '名称',
   'agentTemplates.description': '简短描述',

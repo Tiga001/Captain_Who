@@ -446,6 +446,9 @@ export const itITTranslations = {
   'agentTemplates.createTitle': 'Nuovo modello Agent',
   'agentTemplates.editTitle': 'Modifica modello Agent',
   'agentTemplates.back': 'Torna ai modelli',
+  'agentTemplates.collaborationEnabled': 'Consenti la creazione di sottoagenti',
+  'agentTemplates.collaborationEnabledDescription':
+    'Si applica ai nuovi turni. Le attività in corso completano il turno attuale.',
   'agentTemplates.snapshotHint':
     'Le modifiche si applicano agli agenti creati in futuro. Gli agenti esistenti conservano la loro istantanea di creazione.',
   'agentTemplates.name': 'Nome',

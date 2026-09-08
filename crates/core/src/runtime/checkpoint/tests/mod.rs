@@ -22,7 +22,12 @@ fn collaboration_tool_set() -> EffectiveToolSet {
     let mut registry = ToolRegistry::defaults_with_search(None);
     registry.register_agent_collaboration_tools();
     registry
-        .effective_tool_set(registry.definitions(), &std::collections::BTreeSet::new())
+        .effective_tool_set(
+            registry.definitions(),
+            &std::collections::BTreeSet::from([crate::tools::ToolCapabilityId::application_owned(
+                crate::tools::AGENT_COLLABORATION_CAPABILITY,
+            )]),
+        )
         .unwrap()
 }
 

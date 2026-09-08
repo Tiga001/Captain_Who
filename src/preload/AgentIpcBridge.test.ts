@@ -342,3 +342,26 @@ describe('manual context compaction IPC', () => {
     expect(removeListener).toHaveBeenCalledWith('host:agent.manualContextCompaction', listener)
   })
 })
+
+describe('Agent IPC collaboration settings', () => {
+  it('forwards settings and drops malformed notifications before invoking subscribers', async () => {
+    const ipc = { invoke: vi.fn(), on: vi.fn(), removeListener: vi.fn() }
+    const bridge = createAgentIpcBridge(ipc as never)
+    await bridge.getCollaborationSettings({})
+    await bridge.updateCollaborationSettings({ enabled: false, expectedRevision: 1 })
+    expect(ipc.invoke).toHaveBeenNthCalledWith(1, 'host:agent.collaboration.settings.get', {})
+    expect(ipc.invoke).toHaveBeenNthCalledWith(2, 'host:agent.collaboration.settings.update', {
+      enabled: false,
+      expectedRevision: 1
+    })
+    const handler = vi.fn()
+    const unsubscribe = bridge.onCollaborationSettingsChanged(handler)
+    const [channel, listener] = ipc.on.mock.calls[0]!
+    listener({}, { enabled: true, revision: -1, updatedAt: 0 })
+    expect(handler).not.toHaveBeenCalled()
+    listener({}, { enabled: true, revision: 2, updatedAt: 1 })
+    expect(handler).toHaveBeenCalledWith({ enabled: true, revision: 2, updatedAt: 1 })
+    unsubscribe()
+    expect(ipc.removeListener).toHaveBeenCalledWith(channel, listener)
+  })
+})

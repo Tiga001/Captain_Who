@@ -1,5 +1,6 @@
 import type { IpcRenderer, IpcRendererEvent } from 'electron'
 import { HOST_CHANNELS, type AgentHostApi } from '@mycopilot/host-api'
+import { parseAgentCollaborationSettings } from '@mycopilot/protocol'
 import type {
   AgentEvent,
   AgentObserverEventEnvelope,
@@ -11,6 +12,24 @@ type AgentIpcRenderer = Pick<IpcRenderer, 'invoke' | 'on' | 'removeListener'>
 
 export function createAgentIpcBridge(ipcRenderer: AgentIpcRenderer): AgentHostApi {
   return {
+    getCollaborationSettings: (input) =>
+      ipcRenderer.invoke(HOST_CHANNELS.agent.collaborationGetSettings, input),
+    updateCollaborationSettings: (input) =>
+      ipcRenderer.invoke(HOST_CHANNELS.agent.collaborationUpdateSettings, input),
+    onCollaborationSettingsChanged: (handler) => {
+      const listener = (_event: IpcRendererEvent, payload: unknown): void => {
+        let settings: ReturnType<typeof parseAgentCollaborationSettings>
+        try {
+          settings = parseAgentCollaborationSettings(payload)
+        } catch {
+          return
+        }
+        handler(settings)
+      }
+      ipcRenderer.on(HOST_CHANNELS.agent.collaborationSettingsChanged, listener)
+      return () =>
+        ipcRenderer.removeListener(HOST_CHANNELS.agent.collaborationSettingsChanged, listener)
+    },
     getCollaborationTree: (input) =>
       ipcRenderer.invoke(HOST_CHANNELS.agent.collaborationGetTree, input),
     getCollaborationAgent: (input) =>

@@ -384,6 +384,7 @@ impl AgentService {
             skill_resources.clone(),
             mcp_tools.clone(),
             None,
+            Some(&binding.run_id),
         )?;
         let assistant_created_at = self
             .storage

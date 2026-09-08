@@ -2,6 +2,12 @@ import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import {
+  parseAgentCollaborationSettings,
+  parseAgentCollaborationSettingsGetInput,
+  parseAgentCollaborationSettingsUpdate,
+  AGENT_COLLABORATION_GET_SETTINGS_METHOD,
+  AGENT_COLLABORATION_UPDATE_SETTINGS_METHOD,
+  AGENT_COLLABORATION_SETTINGS_CHANGED_METHOD,
   AGENT_COLLABORATION_APPROVALS_DECIDE_METHOD,
   AGENT_COLLABORATION_APPROVALS_LIST_METHOD,
   AGENT_COLLABORATION_GET_AGENT_METHOD,
@@ -42,7 +48,8 @@ const fixture = JSON.parse(
   )
 ) as {
   methods: string[]
-  notifications: { event: string; observerEvent: string; resync: string }
+  notifications: { event: string; observerEvent: string; resync: string; settingsChanged: string }
+  settings: unknown
   tree: unknown
   detail: unknown
   locator: unknown
@@ -243,6 +250,8 @@ describe('agent collaboration protocol', () => {
 
   it('keeps the Rust/TypeScript method and DTO fixture stable', () => {
     expect(fixture.methods).toEqual([
+      AGENT_COLLABORATION_GET_SETTINGS_METHOD,
+      AGENT_COLLABORATION_UPDATE_SETTINGS_METHOD,
       AGENT_COLLABORATION_GET_TREE_METHOD,
       AGENT_COLLABORATION_GET_AGENT_METHOD,
       AGENT_COLLABORATION_LOCATE_CONVERSATION_METHOD,
@@ -260,7 +269,8 @@ describe('agent collaboration protocol', () => {
     expect(fixture.notifications).toEqual({
       event: AGENT_COLLABORATION_EVENT_NOTIFICATION_METHOD,
       observerEvent: AGENT_COLLABORATION_OBSERVER_EVENT_NOTIFICATION_METHOD,
-      resync: AGENT_COLLABORATION_RESYNC_NOTIFICATION_METHOD
+      resync: AGENT_COLLABORATION_RESYNC_NOTIFICATION_METHOD,
+      settingsChanged: AGENT_COLLABORATION_SETTINGS_CHANGED_METHOD
     })
     expect(parseAgentObserverEventEnvelope(fixture.observerEvent)).toMatchObject({
       agentId: 'agent-child',
@@ -809,5 +819,43 @@ describe('agent collaboration protocol', () => {
       snapshotSourceMessageId: null
     }
     expect(() => parseAgentObserverConversation(observer)).toThrow()
+  })
+})
+
+describe('collaboration settings contract', () => {
+  it('rejects unknown fields, invalid flags, and unsafe revisions on both boundaries', () => {
+    expect(parseAgentCollaborationSettings({ enabled: true, revision: 1, updatedAt: 0 })).toEqual({
+      enabled: true,
+      revision: 1,
+      updatedAt: 0
+    })
+    expect(parseAgentCollaborationSettings(fixture.settings)).toEqual({
+      enabled: true,
+      revision: 1,
+      updatedAt: 0
+    })
+    expect(parseAgentCollaborationSettingsGetInput({})).toEqual({})
+    expect(() => parseAgentCollaborationSettingsGetInput({ enabled: true })).toThrow()
+    for (const revision of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+      expect(() =>
+        parseAgentCollaborationSettings({ enabled: true, revision, updatedAt: 0 })
+      ).toThrow()
+      expect(() =>
+        parseAgentCollaborationSettingsUpdate({ enabled: false, expectedRevision: revision })
+      ).toThrow()
+    }
+    expect(() =>
+      parseAgentCollaborationSettingsUpdate({ enabled: 1, expectedRevision: 1 })
+    ).toThrow()
+    expect(() =>
+      parseAgentCollaborationSettingsUpdate({
+        enabled: false,
+        expectedRevision: 1,
+        runId: 'forged'
+      })
+    ).toThrow()
+    expect(() =>
+      parseAgentCollaborationSettings({ enabled: true, revision: 1, updatedAt: -1 })
+    ).toThrow()
   })
 })

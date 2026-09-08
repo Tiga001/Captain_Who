@@ -132,6 +132,7 @@ fn is_blocking_read_method(method: &str) -> bool {
     matches!(
         method,
         AGENT_GET_CONTEXT_WINDOW_SNAPSHOT_METHOD
+            | mycopilot_protocol_rs::AGENT_COLLABORATION_GET_SETTINGS_METHOD
             | AGENT_COLLABORATION_GET_TREE_METHOD
             | AGENT_COLLABORATION_GET_AGENT_METHOD
             | AGENT_COLLABORATION_LOCATE_CONVERSATION_METHOD

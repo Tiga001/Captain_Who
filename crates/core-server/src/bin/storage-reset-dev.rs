@@ -48,7 +48,7 @@ const APP_DATA_ROOT_FLAG: &str = "--app-data-root";
 const CONFIGURATION_SOURCE_FLAG: &str = "--configuration-source";
 const SQLITE_TRANSIENT_SUFFIXES: [&str; 3] = ["-journal", "-wal", "-shm"];
 const RECOVERABLE_CONFIGURATION_SOURCE_SCHEMA_VERSION: i32 = 33;
-const RECOVERABLE_CONFIGURATION_TARGET_SCHEMA_VERSION: i32 = 42;
+const RECOVERABLE_CONFIGURATION_TARGET_SCHEMA_VERSION: i32 = 43;
 const RECOVERABLE_CONFIGURATION_SOURCE_FINGERPRINT: &str =
     "sha256:5e1e404d74af5ed899d88dc8b5051e673ecd5beb967579af8f328b07b640c948";
 const PREVIOUS_CONFIGURATION_SOURCE_SCHEMA_VERSION: i32 = 35;
@@ -72,6 +72,9 @@ const IGNORED_HISTORY_CONFIGURATION_SOURCE_FINGERPRINT: &str =
 const UNIFIED_HISTORY_CONFIGURATION_SOURCE_SCHEMA_VERSION: i32 = 41;
 const UNIFIED_HISTORY_CONFIGURATION_SOURCE_FINGERPRINT: &str =
     "sha256:f4fb8423e11200ca2e383cd904f624ec1792f8fe8c758a205a904c7b88d8a017";
+const TRACE_PREFIX_CONFIGURATION_SOURCE_SCHEMA_VERSION: i32 = 42;
+const TRACE_PREFIX_CONFIGURATION_SOURCE_FINGERPRINT: &str =
+    "sha256:ccb63eda4aaee1451732235b7327d63e6b1ad82f6c897d90b3ba40fa25ef5657";
 const EXACT_CONFIGURATION_TABLES: &[&str] = &[
     "model_provider_settings",
     "models",
@@ -94,6 +97,7 @@ const PRESERVED_CONFIGURATION_TABLES: &[&str] = &[
     "browser_download_settings",
     "browser_preferences",
     "human_interaction_settings",
+    "agent_collaboration_settings",
     "mcp_registry_metadata",
     "mcp_registry_servers",
     "mcp_registry_model_namespaces",
@@ -127,6 +131,7 @@ struct PreservedConfiguration {
     browser_download_settings: Option<BrowserDownloadSettingsRecord>,
     browser_preferences: Option<BrowserPreferencesRecord>,
     human_interaction_settings: Option<mycopilot_core::human_interaction::HumanInteractionSettings>,
+    agent_collaboration_settings: Option<mycopilot_core::AgentCollaborationSettings>,
     mcp_records: Vec<McpPersistedRegistryRecord>,
     mcp_server_count: usize,
 }
@@ -497,7 +502,8 @@ fn inspect_source(
                 && schema_version != ASYNC_INPUT_CONFIGURATION_SOURCE_SCHEMA_VERSION
                 && schema_version != REQUEST_WORLD_STATE_CONFIGURATION_SOURCE_SCHEMA_VERSION
                 && schema_version != IGNORED_HISTORY_CONFIGURATION_SOURCE_SCHEMA_VERSION
-                && schema_version != UNIFIED_HISTORY_CONFIGURATION_SOURCE_SCHEMA_VERSION =>
+                && schema_version != UNIFIED_HISTORY_CONFIGURATION_SOURCE_SCHEMA_VERSION
+                && schema_version != TRACE_PREFIX_CONFIGURATION_SOURCE_SCHEMA_VERSION =>
         {
             // Unknown schemas must never silently discard configuration. Even an empty table
             // may have an incompatible layout; do not interpret it as a missing preference.
@@ -534,6 +540,7 @@ fn inspect_source(
                     | REQUEST_WORLD_STATE_CONFIGURATION_SOURCE_SCHEMA_VERSION
                     | IGNORED_HISTORY_CONFIGURATION_SOURCE_SCHEMA_VERSION
                     | UNIFIED_HISTORY_CONFIGURATION_SOURCE_SCHEMA_VERSION
+                    | TRACE_PREFIX_CONFIGURATION_SOURCE_SCHEMA_VERSION
             ) =>
         {
             if !is_supported_explicit_configuration_source(
@@ -609,11 +616,18 @@ fn inspect_source(
         || schema_version == REQUEST_WORLD_STATE_CONFIGURATION_SOURCE_SCHEMA_VERSION
         || schema_version == IGNORED_HISTORY_CONFIGURATION_SOURCE_SCHEMA_VERSION
         || schema_version == UNIFIED_HISTORY_CONFIGURATION_SOURCE_SCHEMA_VERSION
+        || schema_version == TRACE_PREFIX_CONFIGURATION_SOURCE_SCHEMA_VERSION
     {
         Some(load_human_interaction_settings_for_reset(&connection)?)
     } else {
         None
     };
+    let agent_collaboration_settings =
+        if schema_version == mycopilot_core::storage::migrations::STORAGE_SCHEMA_VERSION {
+            Some(load_agent_collaboration_settings_for_reset(&connection)?)
+        } else {
+            None
+        };
     let discarded_conversation_rows = count_discarded_conversation_rows(&connection)?;
     let expected_mcp_count = count_rows_if_table_exists(&connection, "mcp_registry_servers")?;
     drop(connection);
@@ -645,6 +659,7 @@ fn inspect_source(
         browser_download_settings,
         browser_preferences,
         human_interaction_settings,
+        agent_collaboration_settings,
         mcp_records,
         mcp_server_count: mcp_count,
     };
@@ -723,7 +738,27 @@ fn is_supported_explicit_configuration_source(schema_version: i32, fingerprint: 
             || (schema_version == IGNORED_HISTORY_CONFIGURATION_SOURCE_SCHEMA_VERSION
                 && fingerprint == IGNORED_HISTORY_CONFIGURATION_SOURCE_FINGERPRINT)
             || (schema_version == UNIFIED_HISTORY_CONFIGURATION_SOURCE_SCHEMA_VERSION
-                && fingerprint == UNIFIED_HISTORY_CONFIGURATION_SOURCE_FINGERPRINT))
+                && fingerprint == UNIFIED_HISTORY_CONFIGURATION_SOURCE_FINGERPRINT)
+            || (schema_version == TRACE_PREFIX_CONFIGURATION_SOURCE_SCHEMA_VERSION
+                && fingerprint == TRACE_PREFIX_CONFIGURATION_SOURCE_FINGERPRINT))
+}
+
+fn load_agent_collaboration_settings_for_reset(
+    connection: &Connection,
+) -> io::Result<mycopilot_core::AgentCollaborationSettings> {
+    let settings = connection.query_row(
+        "SELECT enabled, revision, updated_at FROM agent_collaboration_settings WHERE singleton = 1",
+        [], |row| Ok(mycopilot_core::AgentCollaborationSettings { enabled: row.get(0)?, revision: row.get(1)?, updated_at: row.get(2)? }),
+    ).map_err(redacted_storage_error)?;
+    const MAXIMUM: u64 = 9_007_199_254_740_991;
+    if settings.revision == 0
+        || settings.revision > MAXIMUM
+        || settings.updated_at < 0
+        || settings.updated_at as u64 > MAXIMUM
+    {
+        return Err(invalid_data("agent collaboration settings are invalid"));
+    }
+    Ok(settings)
 }
 
 fn load_human_interaction_settings_for_reset(
@@ -771,20 +806,24 @@ fn storage_catalog_fingerprint(connection: &Connection) -> io::Result<String> {
 }
 
 fn validate_preserved_configuration_table_schemas(source: &Connection) -> io::Result<()> {
+    let schema_version = storage_schema_version(source)?;
+    let has_collaboration_settings =
+        schema_version == mycopilot_core::storage::migrations::STORAGE_SCHEMA_VERSION;
     let has_human_settings = matches!(
-        storage_schema_version(source)?,
+        schema_version,
         BLOCKING_INPUT_CONFIGURATION_SOURCE_SCHEMA_VERSION
             | SYNC_INPUT_CONFIGURATION_SOURCE_SCHEMA_VERSION
             | ASYNC_INPUT_CONFIGURATION_SOURCE_SCHEMA_VERSION
             | REQUEST_WORLD_STATE_CONFIGURATION_SOURCE_SCHEMA_VERSION
             | IGNORED_HISTORY_CONFIGURATION_SOURCE_SCHEMA_VERSION
             | UNIFIED_HISTORY_CONFIGURATION_SOURCE_SCHEMA_VERSION
-    ) || storage_schema_version(source)?
-        == mycopilot_core::storage::migrations::STORAGE_SCHEMA_VERSION;
+            | TRACE_PREFIX_CONFIGURATION_SOURCE_SCHEMA_VERSION
+    ) || has_collaboration_settings;
     let tables = PRESERVED_CONFIGURATION_TABLES
         .iter()
         .copied()
         .filter(|table| *table != "human_interaction_settings" || has_human_settings)
+        .filter(|table| *table != "agent_collaboration_settings" || has_collaboration_settings)
         .collect::<Vec<_>>();
     let source_snapshots = snapshot_exact_configuration_tables_named(source, &tables)?;
     let canonical = Connection::open_in_memory().map_err(redacted_storage_error)?;
@@ -1159,6 +1198,21 @@ fn build_fresh_database(
         }
     }
 
+    if let Some(settings) =
+        configuration.and_then(|value| value.agent_collaboration_settings.as_ref())
+    {
+        let connection = Connection::open(database_path).map_err(redacted_storage_error)?;
+        let changed = connection.execute(
+            "UPDATE agent_collaboration_settings SET enabled = ?1, revision = ?2, updated_at = ?3 WHERE singleton = 1",
+            params![settings.enabled, settings.revision, settings.updated_at],
+        ).map_err(redacted_storage_error)?;
+        if changed != 1 || load_agent_collaboration_settings_for_reset(&connection)? != *settings {
+            return Err(invalid_data(
+                "failed to restore agent collaboration settings exactly",
+            ));
+        }
+    }
+
     if let Some(configuration) = configuration {
         restore_mcp_records(database_path, &configuration.mcp_records)?;
     }
@@ -1409,6 +1463,17 @@ fn verify_fresh_database(
         verify_table_count(&connection, "browser_download_settings", 1)?;
         verify_table_count(&connection, "browser_preferences", 1)?;
         verify_table_count(&connection, "human_interaction_settings", 1)?;
+        verify_table_count(&connection, "agent_collaboration_settings", 1)?;
+        if load_agent_collaboration_settings_for_reset(&connection)?
+            != configuration
+                .agent_collaboration_settings
+                .clone()
+                .unwrap_or_default()
+        {
+            return Err(invalid_data(
+                "restored agent collaboration settings differ from preserved configuration",
+            ));
+        }
         let restored_human_settings = load_human_interaction_settings_for_reset(&connection)?;
         if restored_human_settings
             != configuration
@@ -2190,7 +2255,7 @@ mod tests {
     }
 
     #[test]
-    fn explicit_configuration_sources_are_pinned_to_known_catalogs_for_schema_42() {
+    fn explicit_configuration_sources_are_pinned_to_known_catalogs_for_schema_43() {
         assert!(is_supported_explicit_configuration_source(
             RECOVERABLE_CONFIGURATION_SOURCE_SCHEMA_VERSION,
             RECOVERABLE_CONFIGURATION_SOURCE_FINGERPRINT,
@@ -2581,6 +2646,8 @@ mod tests {
         populated_storage(fixture.path(), secret);
         let source = Connection::open(fixture.path().join(DATABASE_FILE_NAME)).unwrap();
         source.execute("UPDATE human_interaction_settings SET enabled = 0, revision = 37, updated_at = 123456 WHERE singleton = 1", []).unwrap();
+        source.execute("UPDATE agent_collaboration_settings SET enabled=0,revision=8,updated_at=123457 WHERE singleton=1", []).unwrap();
+        source.execute("INSERT INTO agent_collaboration_run_policies(run_id,enabled,revision,updated_at) VALUES ('disposable-run',1,1,0)", []).unwrap();
         let exact_configuration_before = snapshot_exact_configuration_tables(&source).unwrap();
         drop(source);
 
@@ -2662,6 +2729,22 @@ mod tests {
                 revision: 37,
                 updated_at: 123456,
             }
+        );
+        assert_eq!(
+            load_agent_collaboration_settings_for_reset(&connection).unwrap(),
+            mycopilot_core::AgentCollaborationSettings {
+                enabled: false,
+                revision: 8,
+                updated_at: 123457
+            }
+        );
+        assert_eq!(
+            count_rows_if_table_exists(&connection, "agent_collaboration_run_policies").unwrap(),
+            0
+        );
+        assert_eq!(
+            count_rows_if_table_exists(&connection, "agent_collaboration_wake_policies").unwrap(),
+            0
         );
         assert_eq!(
             count_rows_if_table_exists(&connection, "projects").unwrap(),
@@ -2770,7 +2853,22 @@ mod tests {
         assert_eq!(fs::read(database).unwrap(), before);
     }
 
+    fn drop_collaboration_policy_fixture_schema(connection: &Connection) {
+        connection.execute_batch("PRAGMA foreign_keys=OFF; DROP TABLE agent_collaboration_run_policies; DROP TABLE agent_collaboration_wake_policies; DROP TABLE agent_collaboration_settings;").unwrap();
+    }
+
+    fn downgrade_fixture_to_exact_v42(database: &Path) {
+        let connection = Connection::open(database).unwrap();
+        drop_collaboration_policy_fixture_schema(&connection);
+        connection.pragma_update(None, "user_version", 42).unwrap();
+        assert_eq!(
+            storage_catalog_fingerprint(&connection).unwrap(),
+            TRACE_PREFIX_CONFIGURATION_SOURCE_FINGERPRINT
+        );
+    }
+
     fn drop_ignored_projection_fixture_schema(connection: &Connection) {
+        drop_collaboration_policy_fixture_schema(connection);
         // The seeded historical fixtures have an empty trace. Recreate its pinned table,
         // index and FTS triggers so v40 and earlier catalogs do not inherit v41's item kind.
         assert_eq!(
@@ -2792,6 +2890,7 @@ mod tests {
 
     fn downgrade_fixture_to_exact_v41(database: &Path) {
         let connection = Connection::open(database).unwrap();
+        drop_collaboration_policy_fixture_schema(&connection);
         assert_eq!(
             count_rows_if_table_exists(&connection, "conversation_turn_trace_items").unwrap(),
             0
@@ -2904,6 +3003,10 @@ mod tests {
                 downgrade_fixture_to_exact_v41(&database);
                 UNIFIED_HISTORY_CONFIGURATION_SOURCE_FINGERPRINT
             }
+            42 => {
+                downgrade_fixture_to_exact_v42(&database);
+                TRACE_PREFIX_CONFIGURATION_SOURCE_FINGERPRINT
+            }
             _ => panic!("unsupported reset fixture"),
         };
         let connection = Connection::open(&database).unwrap();
@@ -2920,11 +3023,13 @@ mod tests {
         validate_explicit_configuration_source_schema(&connection, source_version).unwrap();
         drop(connection);
         let before = fs::read(&database).unwrap();
-        assert!(mycopilot_core::storage::migrations::run_migrations(
-            &Connection::open(&database).unwrap()
-        )
-        .is_err());
-        assert_eq!(fs::read(&database).unwrap(), before);
+        if source_version != 42 {
+            assert!(mycopilot_core::storage::migrations::run_migrations(
+                &Connection::open(&database).unwrap()
+            )
+            .is_err());
+            assert_eq!(fs::read(&database).unwrap(), before);
+        }
         let preview = execute(options(fixture.path(), false)).unwrap();
         assert!(preview.preserved_configuration);
         assert_eq!(fs::read(&database).unwrap(), before);
@@ -2949,7 +3054,10 @@ mod tests {
         assert!(storage.load_conversations().unwrap().is_empty());
         drop(storage);
         let current = open_read_only(&database).unwrap();
-        assert_eq!(storage_schema_version(&current).unwrap(), 42);
+        assert_eq!(
+            storage_schema_version(&current).unwrap(),
+            mycopilot_core::storage::migrations::STORAGE_SCHEMA_VERSION
+        );
         assert_eq!(
             snapshot_exact_configuration_tables(&current).unwrap(),
             exact_before
@@ -2973,6 +3081,11 @@ mod tests {
             load_human_interaction_settings_for_reset(&backup).unwrap(),
             expected_human
         );
+    }
+
+    #[test]
+    fn exact_v42_reset_preserves_configuration_and_defaults_new_collaboration_setting() {
+        assert_previous_reset_preserves_configuration(42);
     }
 
     #[test]
@@ -3180,7 +3293,10 @@ mod tests {
         assert!(storage.load_conversations().unwrap().is_empty());
         drop(storage);
         let connection = open_read_only(&database).unwrap();
-        assert_eq!(storage_schema_version(&connection).unwrap(), 42);
+        assert_eq!(
+            storage_schema_version(&connection).unwrap(),
+            mycopilot_core::storage::migrations::STORAGE_SCHEMA_VERSION
+        );
         assert_eq!(
             snapshot_exact_configuration_tables(&connection).unwrap(),
             exact_before

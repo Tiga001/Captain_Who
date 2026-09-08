@@ -606,6 +606,10 @@ pub struct AgentService {
     usage_contexts: Arc<Mutex<HashMap<String, AgentRunUsageState>>>,
     trace_snapshots: Arc<Mutex<HashMap<String, ConversationTraceSnapshot>>>,
     running_context_window_snapshots: Arc<Mutex<HashMap<String, AgentContextWindowSnapshot>>>,
+    /// The selector directory shown to this run, shared by live execution and read-only previews.
+    /// Pending checkpoints persist the same directory across process restarts.
+    collaboration_run_directories:
+        Arc<Mutex<HashMap<String, mycopilot_core::AgentCollaborationSelectorDirectory>>>,
     conversation_context_states: Arc<Mutex<HashMap<String, ConversationContextStateEntry>>>,
     conversation_context_state_clock: Arc<AtomicU64>,
     context_compaction_summary_generator: Option<ContextCompactionSummaryGenerator>,
@@ -807,6 +811,7 @@ impl AgentService {
             usage_contexts: Arc::new(Mutex::new(usage_contexts)),
             trace_snapshots: Arc::new(Mutex::new(HashMap::new())),
             running_context_window_snapshots: Arc::new(Mutex::new(HashMap::new())),
+            collaboration_run_directories: Arc::new(Mutex::new(HashMap::new())),
             conversation_context_states: Arc::new(Mutex::new(HashMap::new())),
             conversation_context_state_clock: Arc::new(AtomicU64::new(1)),
             context_compaction_summary_generator: None,

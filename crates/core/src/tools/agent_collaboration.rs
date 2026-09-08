@@ -1,7 +1,7 @@
 use super::{
     AgentTool, AgentToolCancellationSettlement, AgentToolExecutionValue, AgentToolExposure,
     AgentToolPermissionPolicy, AgentToolResultPersistence, AsyncAgentTool, BoxAgentToolFuture,
-    ToolExecutionContext,
+    ToolCapabilityId, ToolExecutionContext, AGENT_COLLABORATION_CAPABILITY,
 };
 use crate::protocol::{
     AgentError, AgentResult, AgentToolApprovalMode, AgentToolDefinition, AgentToolSafety,
@@ -227,7 +227,9 @@ impl AgentTool for AgentCollaborationTool {
     }
 
     fn exposure(&self) -> AgentToolExposure {
-        AgentToolExposure::Stable
+        AgentToolExposure::RequiresCapability(ToolCapabilityId::application_owned(
+            AGENT_COLLABORATION_CAPABILITY,
+        ))
     }
 
     fn archives_result(&self) -> bool {

@@ -1,5 +1,6 @@
 mod agent_collaboration_event;
 mod agent_collaboration_harness;
+mod agent_collaboration_policy;
 mod agent_delivery;
 mod agent_graph;
 pub mod artifact_runtime;
@@ -48,6 +49,7 @@ pub use web_search::{
 
 pub use agent_collaboration_event::*;
 pub use agent_collaboration_harness::*;
+pub use agent_collaboration_policy::*;
 pub use agent_delivery::*;
 pub use agent_graph::{
     root_agent_creation_request_id, root_agent_id_for_conversation,

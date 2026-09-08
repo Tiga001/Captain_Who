@@ -426,6 +426,7 @@ pub struct AgentRuntimeHostServices {
     pub(super) steer_input: Option<AgentSteerInputQueue>,
     pub(super) collaboration_inbox: Option<Arc<dyn AgentSamplingBoundaryInbox>>,
     pub(super) agent_collaboration: Option<crate::AgentCollaborationRuntimeServices>,
+    pub(super) agent_collaboration_policy: Option<Arc<dyn crate::AgentCollaborationPolicySource>>,
     pub(super) automation_report_sink: Option<Arc<dyn crate::AutomationReportSink>>,
     pub(super) human_interaction_policy: Option<Arc<dyn HumanInteractionPolicySource>>,
     pub(super) human_interaction_runtime: Option<Arc<dyn AgentHumanInteractionRuntimeHost>>,
@@ -736,12 +737,21 @@ impl AgentRuntimeHostServices {
         self
     }
 
-    /// Enables exactly the six Host-authenticated Agent collaboration tools for this Turn.
+    /// Supplies authenticated collaboration services. Model exposure additionally requires the
+    /// Host's policy bound to this logical run; services remain attached during approval resume.
     pub fn with_agent_collaboration(
         mut self,
         services: crate::AgentCollaborationRuntimeServices,
     ) -> Self {
         self.agent_collaboration = Some(services);
+        self
+    }
+
+    pub fn with_agent_collaboration_policy(
+        mut self,
+        source: Arc<dyn crate::AgentCollaborationPolicySource>,
+    ) -> Self {
+        self.agent_collaboration_policy = Some(source);
         self
     }
 }
@@ -927,6 +937,13 @@ pub fn prepare_context_window_tool_projection(
         .as_ref()
         .map(|checkpoint| checkpoint.extension_snapshots.as_slice())
         .unwrap_or_default();
+    let agent_collaboration = match input.resume_checkpoint.as_ref() {
+        Some(checkpoint) => restore_collaboration_runtime_services(
+            host_services.agent_collaboration.clone(),
+            checkpoint.collaboration_run_snapshot.as_ref(),
+        )?,
+        None => host_services.agent_collaboration.clone(),
+    };
     let capabilities = prepare_runtime_capabilities_with_skills(
         input,
         "context-window-tool-preview",
@@ -942,7 +959,8 @@ pub fn prepare_context_window_tool_projection(
             skill_resources: host_services.skill_resources.clone(),
             mcp_tools: host_services.mcp_tools.clone(),
             builtin_capabilities: host_services.builtin_capabilities.clone(),
-            agent_collaboration_enabled: host_services.agent_collaboration.is_some(),
+            agent_collaboration,
+            agent_collaboration_policy: host_services.agent_collaboration_policy.clone(),
             automation_report_sink: host_services.automation_report_sink.clone(),
             human_interaction_policy: host_services.human_interaction_policy.clone(),
             human_interaction_execution_ready: human_ready,

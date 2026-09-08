@@ -59,6 +59,8 @@ const RUNTIME_ONLY_TABLES: &[&str] = &[
     "human_interaction_ignored_projections",
     "conversation_world_state_request_commits",
     "agent_collaboration_cursors",
+    "agent_collaboration_run_policies",
+    "agent_collaboration_wake_policies",
     "agent_command_session_lifecycle_events",
     "agent_command_session_model_read_receipts",
     "agent_command_session_output_chunks",

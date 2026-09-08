@@ -87,8 +87,7 @@ Turn admission 创建的 pending assistant message 正文为空；系统不再�
 ```text
 稳定 system
 → 初始 Skill 目录
-→ 初始协作目录
-→ 当前可用能力指南（RequestOnly）
+→ 当前可用能力指南（RequestOnly，含启用时的协作规则与目录）
 → Conversation full World State
 → 摘要
 → 旧历史及 anchored diff
@@ -106,6 +105,8 @@ Run 结束时，本次输入、预激活 Skill、初始 Run 状态及 live 时�
 工具实现注册、模型工具暴露和使用指南是三层不同事实：实现可以保持已注册以支持同 Run 后续开启，`EffectiveToolSet` 决定本次 Schema，扩展贡献当前使用指南。`tools` 顺序仍为稳定工具按名称排序，再拼接动态工具按名称排序；稳定工具指导留在稳定 system，可选能力指南使用独立的 `CapabilityInstructions` 布局标记。`tools` 是消息之外的字段，其 JSON 属性位置不表示模型 token 顺序。
 
 浏览器、联网搜索与人机交互在每次自然模型请求边界读取一致策略快照，同时投影 Schema、指南和 World State。关闭后下一次请求撤下对应工具与指南，World State diff 在发生位置记录不可用原因；保留的历史调用、结果和状态变化不重新授予工具权限或挂回说明。关闭无法撤回已发出的 Provider 请求，迟到调用在 Host 执行边界再次校验。开启浏览器也不替代当前任务审批；关闭人机交互不影响已接纳问题的提交、忽略与恢复。开关变化或忽略问题本身不产生额外模型请求。
+
+多智能体复用相同的动态 Schema、RequestOnly 指南和 World State 投影机制，但策略在 Turn admission 冻结，并由本轮委派的 Wake 继承。关闭子 Agent 总开关不改变已经启动的任务树，新的根 Turn 才采用新设置；审批与进程恢复读取同一持久策略。协作六工具从稳定前缀移至动态后缀，预览和真实请求通过同一个扩展生成说明与目录，从而统一圆环及自动压缩的完整请求计量。
 
 联网搜索、人机交互和浏览器用户开关属于跨 Run 的 Conversation 日志；Run full 只投影本任务浏览器激活、Skill 与附件状态，工具名称清单不再投影给模型。`AgentConversationWorldStateHost` 提供受信任的 prepare/observed 两个边界：请求发出前持久化并 CAS 校验，Provider 成功后确认观察；失败不重放模型。请求 anchor 定位到 assistant 内最后安全 Trace 前缀，压缩/分支不能只按 message 粗略归并。没有持久 Host 的嵌入式 Rust Core 使用相同内存日志，并随 checkpoint 携带 canonical 状态；预览只计算副本，不创建回执。
 

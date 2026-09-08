@@ -21,7 +21,126 @@ fn resolve_context_window_provider_capabilities(
         .map_err(|error| error.to_string())
 }
 
+fn collaboration_checkpoint_directory(
+    run_id: &str,
+    checkpoint: &AgentRunCheckpoint,
+) -> AgentResult<mycopilot_core::AgentCollaborationSelectorDirectory> {
+    if checkpoint.run_id != run_id
+        || checkpoint.version != mycopilot_core::AGENT_RUN_CHECKPOINT_SCHEMA_VERSION
+    {
+        return Err(AgentError::new(
+            "Agent collaboration checkpoint does not match the requested run.",
+        ));
+    }
+    let snapshot = checkpoint
+        .collaboration_run_snapshot
+        .as_ref()
+        .ok_or_else(|| {
+            AgentError::new("Agent collaboration checkpoint is missing its frozen directory.")
+        })?;
+    snapshot.validate()?;
+    Ok(snapshot.selector_directory.clone())
+}
+
 impl AgentService {
+    pub(crate) fn collaboration_directory_for_run(
+        &self,
+        run_id: &str,
+        current: &mycopilot_core::AgentCollaborationSelectorDirectory,
+        resume_checkpoint: Option<&AgentRunCheckpoint>,
+    ) -> AgentResult<mycopilot_core::AgentCollaborationSelectorDirectory> {
+        // Resume authority takes precedence over a speculative cached preview. This only freezes
+        // the selector projection; execution still validates the persisted run policy.
+        if let Some(checkpoint) = resume_checkpoint {
+            return self.cache_collaboration_checkpoint_directory(run_id, checkpoint);
+        }
+        let pending_directory = self
+            .pending_actions
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .values()
+            .find(|pending| pending.snapshot.run_id == run_id)
+            .map(|pending| {
+                let checkpoint =
+                    pending
+                        .agent_input
+                        .resume_checkpoint
+                        .as_ref()
+                        .ok_or_else(|| {
+                            AgentError::new(
+                                "Pending Agent action is missing its frozen checkpoint.",
+                            )
+                        })?;
+                collaboration_checkpoint_directory(run_id, checkpoint)
+            })
+            .transpose()?;
+        if let Some(directory) = pending_directory {
+            self.collaboration_run_directories
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .insert(run_id.to_string(), directory.clone());
+            return Ok(directory);
+        }
+        if let Some(directory) = self
+            .collaboration_run_directories
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(run_id)
+            .cloned()
+        {
+            return Ok(directory);
+        }
+
+        // A synchronous question has its own durable checkpoint, outside pending_actions. On a
+        // cold Host, recover its safe directory before using today's model/template settings.
+        // No credential restoration or execution happens during this read-only projection.
+        if let Some((_request, envelope)) = self
+            .storage
+            .load_sync_human_interaction_for_run(run_id)
+            .map_err(|_| {
+                AgentError::new("Agent collaboration continuation storage is unavailable.")
+            })?
+        {
+            let encoded = serde_json::to_string(&envelope).map_err(|_| {
+                AgentError::new("Agent collaboration continuation could not be decoded.")
+            })?;
+            let decoded =
+                super::persisted_resume_input::PersistedAgentResumeInput::decode(&encoded)
+                    .map_err(|_| {
+                        AgentError::new("Agent collaboration continuation could not be decoded.")
+                    })?;
+            let checkpoint = decoded
+                .agent_input
+                .resume_checkpoint
+                .as_ref()
+                .ok_or_else(|| {
+                    AgentError::new("Agent collaboration continuation is missing its checkpoint.")
+                })?;
+            return self.cache_collaboration_checkpoint_directory(run_id, checkpoint);
+        }
+        let mut directories = self
+            .collaboration_run_directories
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        Ok(directories
+            .entry(run_id.to_string())
+            .or_insert_with(|| current.clone())
+            .clone())
+    }
+
+    fn cache_collaboration_checkpoint_directory(
+        &self,
+        run_id: &str,
+        checkpoint: &AgentRunCheckpoint,
+    ) -> AgentResult<mycopilot_core::AgentCollaborationSelectorDirectory> {
+        let directory = collaboration_checkpoint_directory(run_id, checkpoint)?;
+        self.collaboration_run_directories
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .insert(run_id.to_string(), directory.clone());
+        Ok(directory)
+    }
+
     pub fn get_context_window_snapshot(
         &self,
         input: AgentContextWindowSnapshotInput,
@@ -255,6 +374,7 @@ impl AgentService {
             skill_resources,
             mcp_tools,
             automation_report_sink,
+            Some(agent_run_id),
         )
     }
 
@@ -269,6 +389,7 @@ impl AgentService {
             skill_resources,
             mcp_tools,
             None,
+            None,
         )
     }
 
@@ -281,6 +402,7 @@ impl AgentService {
         skill_resources: Option<Arc<mycopilot_core::skills::SkillResourceSession>>,
         mcp_tools: Option<McpToolRuntime>,
         automation_report_sink: Option<Arc<dyn AutomationReportSink>>,
+        run_id: Option<&str>,
     ) -> Result<AgentContextWindowToolProjection, String> {
         let mut host_services = self
             .context_window_provider_host_services()
@@ -306,11 +428,27 @@ impl AgentService {
         if let Some(mcp_tools) = mcp_tools {
             host_services = host_services.with_mcp_tools(mcp_tools);
         }
+        let mut active_assistant_message_id = None;
         if let Some(conversation_id) = agent_input
             .context
             .as_ref()
             .and_then(|context| context.conversation_id.as_deref())
         {
+            let active_identity = self
+                .storage
+                .load_active_conversation_turn_identity(conversation_id)?;
+            let effective_run_id = run_id
+                .or_else(|| active_identity.as_ref().map(|(run_id, _)| run_id.as_str()))
+                .or_else(|| {
+                    agent_input
+                        .resume_checkpoint
+                        .as_ref()
+                        .map(|checkpoint| checkpoint.run_id.as_str())
+                });
+            active_assistant_message_id = active_identity
+                .as_ref()
+                .filter(|(active_run, _)| effective_run_id == Some(active_run.as_str()))
+                .map(|(_, assistant)| assistant.clone());
             let (preview_notifications, _preview_receiver) = tokio::sync::mpsc::unbounded_channel();
             let harness = crate::application::agent_harness::AgentCollaborationHarnessAdapter::new(
                 Arc::clone(&self.storage),
@@ -320,14 +458,23 @@ impl AgentService {
                 preview_notifications,
             );
             host_services = harness
-                .attach_preview_to_host_services(host_services, conversation_id)
+                .attach_preview_to_host_services(
+                    host_services,
+                    conversation_id,
+                    effective_run_id,
+                    agent_input.resume_checkpoint.as_ref(),
+                )
                 .map_err(|error| error.to_string())?;
         }
         // AgentService always provides the real Host action executor to a started run. Passing
         // `true` keeps preview approval schemas aligned with that production boundary without
         // constructing an executable action closure during a read-only capacity inspection.
-        prepare_context_window_tool_projection(agent_input, &host_services, true)
-            .map_err(|error| error.to_string())
+        let projection = prepare_context_window_tool_projection(agent_input, &host_services, true)
+            .map_err(|error| error.to_string())?;
+        Ok(match active_assistant_message_id {
+            Some(assistant) => projection.with_active_assistant_message_id(assistant),
+            None => projection,
+        })
     }
 
     /// Builds the Host-private capability boundary used to hydrate provider-owned Assistant Turns
@@ -690,7 +837,20 @@ impl AgentService {
         // an incremental UI preview, but it is not a complete exact turn and must not be hydrated
         // as one. Once terminal, rebuild from the encrypted Host sidecar so the next Provider
         // request and its budget use the complete original turn.
-        let mut needs_rebuild = exact_provider_replay && trace.terminal_status.is_terminal();
+        // Mid-run compaction retains the latest user instruction even if the summary covers it.
+        // The canonical terminal projection retires that temporary copy. Appending only the
+        // final assistant text cannot remove it, so rebuild at this boundary instead.
+        let summary_covers_current_trace = self
+            .storage
+            .get_active_context_compaction_summary(conversation_id)?
+            .is_some_and(|summary| {
+                matches!(
+                    summary.covered_through,
+                    mycopilot_core::ContextJournalCursor::TraceItem { .. }
+                ) && summary.covered_through.message_id() == assistant_message_id
+            });
+        let mut needs_rebuild = trace.terminal_status.is_terminal()
+            && (exact_provider_replay || summary_covers_current_trace);
         {
             let mut states = self
                 .conversation_context_states

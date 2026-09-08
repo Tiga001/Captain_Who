@@ -9,7 +9,22 @@ import { render } from 'vitest-browser-react'
 import type { ChatPermissionMode } from '../../features/chat/chatTypes'
 
 const agentClient = vi.hoisted(() => ({
-  getContextWindowSnapshot: vi.fn()
+  getContextWindowSnapshot: vi.fn(),
+  settingsListener: null as
+    null | ((settings: { enabled: boolean; revision: number; updatedAt: number }) => void)
+}))
+
+vi.mock('../../host/hostClient', () => ({
+  hostClient: {
+    agent: {
+      onCollaborationSettingsChanged: (listener: typeof agentClient.settingsListener) => {
+        agentClient.settingsListener = listener
+        return () => {
+          agentClient.settingsListener = null
+        }
+      }
+    }
+  }
 }))
 
 vi.mock('../../features/agent/agentClient', () => ({
@@ -107,6 +122,17 @@ function deferred<Value>() {
 describe('useContextWindowSnapshots', () => {
   beforeEach(() => {
     agentClient.getContextWindowSnapshot.mockReset().mockResolvedValue({ modelConfigId: 'model-1' })
+  })
+
+  it('refreshes the ring when global collaboration settings change', async () => {
+    agentClient.getContextWindowSnapshot
+      .mockResolvedValueOnce({ modelConfigId: 'model-1', snapshot: snapshot(21000) })
+      .mockResolvedValueOnce({ modelConfigId: 'model-1', snapshot: snapshot(19000) })
+    const screen = await render(<Harness skills={[]} />)
+    await expect.element(screen.getByTestId('input-tokens')).toHaveTextContent('21000')
+    agentClient.settingsListener?.({ enabled: false, revision: 2, updatedAt: 1 })
+    await expect.element(screen.getByTestId('input-tokens')).toHaveTextContent('19000')
+    expect(agentClient.getContextWindowSnapshot).toHaveBeenCalledTimes(2)
   })
 
   it('indexes an inspection by Host-owned modelConfigId while retaining the provider wire model', async () => {

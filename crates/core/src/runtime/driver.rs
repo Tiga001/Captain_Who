@@ -50,6 +50,7 @@ impl AgentRuntime {
             steer_input,
             collaboration_inbox,
             mut agent_collaboration,
+            agent_collaboration_policy,
             automation_report_sink,
             human_interaction_policy,
             human_interaction_runtime,
@@ -155,24 +156,10 @@ impl AgentRuntime {
             input.model_capabilities = restored.model_capabilities;
             input.provider_profile_config = Some(restored.provider_profile_config.clone());
             input.provider_protocol_key = Some(restored.provider_protocol_key.clone());
-            agent_collaboration = match (
+            agent_collaboration = restore_collaboration_runtime_services(
                 agent_collaboration.take(),
                 restored.collaboration_run_snapshot.as_ref(),
-            ) {
-                (Some(services), Some(snapshot)) => {
-                    Some(services.with_run_snapshot(snapshot).map_err(|error| {
-                        AgentError::new(format!(
-                            "无法恢复运行检查点的 Agent collaboration 授权：{error}"
-                        ))
-                    })?)
-                }
-                (None, None) => None,
-                _ => {
-                    return Err(AgentError::new(
-                        "无法恢复运行检查点：Agent collaboration Host capability 与冻结授权不一致。",
-                    ));
-                }
-            };
+            )?;
         }
         let mut run_context = input.context.clone();
         let model_capabilities = input.model_capabilities;
@@ -216,7 +203,8 @@ impl AgentRuntime {
                 skill_resources: skill_resources.clone(),
                 mcp_tools,
                 builtin_capabilities,
-                agent_collaboration_enabled: agent_collaboration.is_some(),
+                agent_collaboration: agent_collaboration.clone(),
+                agent_collaboration_policy,
                 automation_report_sink,
                 human_interaction_policy,
                 human_interaction_execution_ready: human_interaction_runtime.is_some(),
@@ -335,23 +323,6 @@ impl AgentRuntime {
             )
         })?;
         active_context.hydrate_context_images(&context_image_attachments)?;
-        if !resumed_world_state_epoch {
-            if let Some(services) = agent_collaboration.as_ref() {
-                active_context.push(
-                    ContextItem::text(
-                        LlmMessageRole::System,
-                        collaboration_harness_section(
-                            &services.caller,
-                            &services.selector_directory,
-                        ),
-                        ContextSource::RuntimeGuard,
-                        ContextScope::Run,
-                        ContextRetention::Retained,
-                    )
-                    .with_source(ContextSource::RunBootstrap),
-                );
-            }
-        }
         let provider_runtime_capabilities = resolve_provider_runtime_capabilities(
             &llm_request.provider_protocol_key,
         )

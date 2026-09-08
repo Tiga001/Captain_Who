@@ -271,6 +271,14 @@ impl StorageService {
                     created_at,
                 )
                 .map_err(map_graph_error)?;
+            if let Some(origin_run_id) = origin_run_id {
+                crate::storage::agent_collaboration_run_policy_repository::inherit_run_for_wake(
+                    &transaction,
+                    origin_run_id,
+                    &initial_wake.wake_id,
+                )
+                .map_err(spawn_database_error)?;
+            }
             let collaboration_identity = collaboration_identity(&parent, &agent, &task_message)?;
             let record = ChildAgentSpawnRecord {
                 agent,

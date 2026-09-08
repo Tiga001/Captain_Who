@@ -141,7 +141,16 @@ export const agentTemplateLibrarySettings = defineSettingsNodes([
     children: [...agentTemplateEditorSettings, ...agentTemplateRowSettings]
   }
 ])
+export const agentCollaborationSettingsNodes = defineSettingsNodes([
+  {
+    id: 'agent-collaboration-enabled',
+    title: 'agentTemplates.collaborationEnabled',
+    description: 'agentTemplates.collaborationEnabledDescription',
+    view: 'templates'
+  }
+])
 export const agentTemplateSettings = defineSettingsNodes([
+  ...agentCollaborationSettingsNodes,
   ...agentTemplateCreateSettings,
   ...agentTemplateLibrarySettings
 ])

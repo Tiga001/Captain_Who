@@ -14,6 +14,7 @@ pub(crate) const OFFICE_SPREADSHEETS_CAPABILITY: &str = "office.spreadsheets";
 pub(crate) const OFFICE_PRESENTATIONS_CAPABILITY: &str = "office.presentations";
 pub(crate) const IMAGE_GENERATION_CAPABILITY: &str = "image.generation";
 pub(crate) const WEB_SEARCH_CAPABILITY: &str = "web.search";
+pub(crate) const AGENT_COLLABORATION_CAPABILITY: &str = "agent.collaboration";
 pub(crate) const SKILL_RESOURCES_READ_CAPABILITY: &str = "skill.resources.read";
 pub(crate) const SKILL_RESOURCES_MATERIALIZE_CAPABILITY: &str = "skill.resources.materialize";
 pub(crate) const SKILL_SCRIPTS_CAPABILITY: &str = "skill.scripts";
@@ -280,6 +281,7 @@ impl EffectiveToolSet {
         if let Some(required_capability) = expected_capability {
             if !self.active_capabilities.contains(&required_capability) {
                 if required_capability.as_str() == WEB_SEARCH_CAPABILITY
+                    || required_capability.as_str() == AGENT_COLLABORATION_CAPABILITY
                     || required_capability.as_str() == super::BUILTIN_ACTIVATION_CAPABILITY
                 {
                     return Some(ToolUnavailability::RuntimeCapabilityUnavailable {

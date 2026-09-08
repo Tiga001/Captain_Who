@@ -12,6 +12,48 @@ export const AGENT_COLLABORATION_SCHEMA_VERSION = 1 as const
 export const AGENT_COLLABORATION_EVENT_SCHEMA_VERSION = 2 as const
 export const AGENT_COLLABORATION_ACTIVITY_SCHEMA_VERSION = 2 as const
 
+export const AGENT_COLLABORATION_GET_SETTINGS_METHOD = 'agent.collaboration.settings.get'
+export const AGENT_COLLABORATION_UPDATE_SETTINGS_METHOD = 'agent.collaboration.settings.update'
+export const AGENT_COLLABORATION_SETTINGS_CHANGED_METHOD = 'agent.collaboration.settingsChanged'
+
+export interface AgentCollaborationSettings {
+  enabled: boolean
+  revision: number
+  updatedAt: number
+}
+export type AgentCollaborationSettingsGetInput = Record<string, never>
+export interface AgentCollaborationSettingsUpdate {
+  enabled: boolean
+  expectedRevision: number
+}
+
+export function parseAgentCollaborationSettingsGetInput(
+  value: unknown
+): AgentCollaborationSettingsGetInput {
+  const item = record(value, 'AgentCollaborationSettingsGetInput')
+  exact(item, [], 'AgentCollaborationSettingsGetInput')
+  return {}
+}
+export function parseAgentCollaborationSettings(value: unknown): AgentCollaborationSettings {
+  const item = record(value, 'AgentCollaborationSettings')
+  exact(item, ['enabled', 'revision', 'updatedAt'], 'AgentCollaborationSettings')
+  return {
+    enabled: bool(item.enabled, 'enabled'),
+    revision: integer(item.revision, 'revision', 1),
+    updatedAt: integer(item.updatedAt, 'updatedAt')
+  }
+}
+export function parseAgentCollaborationSettingsUpdate(
+  value: unknown
+): AgentCollaborationSettingsUpdate {
+  const item = record(value, 'AgentCollaborationSettingsUpdate')
+  exact(item, ['enabled', 'expectedRevision'], 'AgentCollaborationSettingsUpdate')
+  return {
+    enabled: bool(item.enabled, 'enabled'),
+    expectedRevision: integer(item.expectedRevision, 'expectedRevision', 1)
+  }
+}
+
 export const AGENT_COLLABORATION_GET_TREE_METHOD = 'agent.collaboration.getTree'
 export const AGENT_COLLABORATION_GET_AGENT_METHOD = 'agent.collaboration.getAgent'
 export const AGENT_COLLABORATION_LOCATE_CONVERSATION_METHOD =

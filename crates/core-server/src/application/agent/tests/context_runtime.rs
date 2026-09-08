@@ -1099,6 +1099,17 @@ fn disabled_indicator_still_builds_runtime_context_baseline() {
         notifications,
     );
 
+    admit_test_conversation_run(
+        &storage,
+        &ConversationTraceSnapshot::default().in_progress_trace(
+            "run-hidden-indicator",
+            "conversation-hidden-indicator",
+            "assistant-hidden-indicator",
+        ),
+        permissions_from_input(&agent_input),
+        2,
+    );
+
     let baseline = observer(ConversationTraceSnapshot::default()).unwrap();
 
     assert!(baseline.is_some());

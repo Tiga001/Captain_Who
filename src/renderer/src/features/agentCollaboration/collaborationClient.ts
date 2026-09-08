@@ -1,5 +1,8 @@
 import { unwrapHostInvocation } from '@mycopilot/host-api'
 import type {
+  AgentCollaborationSettingsGetInput,
+  AgentCollaborationSettingsUpdate,
+  AgentCollaborationSettings,
   AgentConversationLocator,
   AgentConversationLocatorRequest,
   AgentDetail,
@@ -117,4 +120,20 @@ export async function decideCollaborationApproval(
   input: CollaborationApprovalDecisionRequest
 ): Promise<CollaborationApprovalDecisionResult> {
   return unwrapHostInvocation(await hostClient.agent.decideCollaborationApproval(input))
+}
+
+export async function getCollaborationSettings(
+  input: AgentCollaborationSettingsGetInput = {}
+): Promise<AgentCollaborationSettings> {
+  return unwrapHostInvocation(await hostClient.agent.getCollaborationSettings(input))
+}
+export async function updateCollaborationSettings(
+  input: AgentCollaborationSettingsUpdate
+): Promise<AgentCollaborationSettings> {
+  return unwrapHostInvocation(await hostClient.agent.updateCollaborationSettings(input))
+}
+export function onCollaborationSettingsChanged(
+  handler: (settings: AgentCollaborationSettings) => void
+): () => void {
+  return hostClient.agent.onCollaborationSettingsChanged(handler)
 }

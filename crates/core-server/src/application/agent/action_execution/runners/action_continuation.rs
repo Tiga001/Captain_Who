@@ -226,6 +226,7 @@ impl AgentService {
                 skill_resources.clone(),
                 mcp_tools.clone(),
                 automation_report_sink.clone(),
+                Some(&run_id),
             ) {
             Ok(projection) => projection,
             Err(error) => {

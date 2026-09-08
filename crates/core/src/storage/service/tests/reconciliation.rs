@@ -3133,6 +3133,72 @@ fn manual_command_audit_failure_wrapper_preserves_the_exact_execution_evidence()
 }
 
 #[test]
+fn manual_settlement_short_prefix_allows_only_monotonic_truncation() {
+    for (case, durable_truncated, expected_truncated, change_committed_call, uncommitted) in [
+        ("new bounded result", false, true, false, true),
+        ("truncation removed", true, false, false, false),
+        ("committed call changed", false, true, true, false),
+    ] {
+        let fixture = StorageFixture::new();
+        let service = fixture.service();
+        let (pending, approved, terminal, mut expected) = manual_command_settlement(
+            "inspect-truncated-command",
+            "conversation-inspect-truncated",
+            "assistant-inspect-truncated",
+        );
+        save_assistant_conversation(
+            &service,
+            "conversation-inspect-truncated",
+            "assistant-inspect-truncated",
+        );
+        service.store_pending_agent_action(pending).unwrap();
+        service.upsert_agent_action_audit(approved).unwrap();
+        expected.truncated = expected_truncated;
+        let mut durable = expected.clone();
+        durable.items.truncate(1);
+        durable.truncated = durable_truncated;
+        if change_committed_call {
+            let ConversationTurnTraceItem::ToolCall { operation, .. } = &mut durable.items[0]
+            else {
+                panic!("fixture must begin with its admitted ToolCall");
+            };
+            operation["command"] = serde_json::json!("a different command");
+        }
+        service
+            .append_in_progress_conversation_turn_trace(&durable, 10, 11)
+            .unwrap();
+
+        let inspection = service
+            .inspect_pending_agent_action_audited_result_trace(
+                &terminal,
+                "approved",
+                "completed",
+                &expected,
+                12,
+            )
+            .unwrap();
+        if uncommitted {
+            assert_eq!(
+                inspection,
+                AgentPendingActionSettlementInspection::DefinitelyUncommitted,
+                "{case}"
+            );
+        } else {
+            assert!(
+                matches!(
+                    inspection,
+                    AgentPendingActionSettlementInspection::Diverged {
+                        component: "conversationTrace",
+                        ..
+                    }
+                ),
+                "{case}: {inspection:?}"
+            );
+        }
+    }
+}
+
+#[test]
 fn manual_command_settlement_inspection_distinguishes_commit_boundaries() {
     let fixture = StorageFixture::new();
     let service = fixture.service();

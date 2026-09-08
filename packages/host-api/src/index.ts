@@ -1,4 +1,7 @@
 import type {
+  AgentCollaborationSettings,
+  AgentCollaborationSettingsGetInput,
+  AgentCollaborationSettingsUpdate,
   HumanInteractionSettings,
   HumanInteractionSettingsGetInput,
   HumanInteractionSettingsUpdate,
@@ -561,6 +564,15 @@ export interface WorkspaceFilesHostApi {
 }
 
 export interface AgentHostApi {
+  getCollaborationSettings(
+    input: AgentCollaborationSettingsGetInput
+  ): Promise<HostInvocationResult<AgentCollaborationSettings>>
+  updateCollaborationSettings(
+    input: AgentCollaborationSettingsUpdate
+  ): Promise<HostInvocationResult<AgentCollaborationSettings>>
+  onCollaborationSettingsChanged(
+    handler: (settings: AgentCollaborationSettings) => void
+  ): () => void
   getCollaborationTree(input: AgentTreeRequest): Promise<HostInvocationResult<AgentTreeLookup>>
   getCollaborationAgent(input: AgentDetailRequest): Promise<HostInvocationResult<AgentDetail>>
   locateCollaborationConversation(

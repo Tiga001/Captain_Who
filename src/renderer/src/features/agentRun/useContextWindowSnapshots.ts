@@ -5,6 +5,7 @@ import type {
   SkillSelection
 } from '@mycopilot/protocol'
 import { getContextWindowSnapshot } from '../agent/agentClient'
+import { hostClient } from '../../host/hostClient'
 import { resolveChatPermissions } from '../chat/chatPermissions'
 import type { ChatPermissionMode } from '../chat/chatTypes'
 import type { UiPreferencesSnapshot } from '../storage/storageClient'
@@ -74,6 +75,14 @@ export function useContextWindowSnapshots({
   scopeId,
   skills
 }: UseContextWindowSnapshotsOptions) {
+  const [collaborationSettingsRevision, setCollaborationSettingsRevision] = useState(0)
+  useEffect(
+    () =>
+      hostClient.agent.onCollaborationSettingsChanged((settings) => {
+        setCollaborationSettingsRevision((current) => Math.max(current, settings.revision))
+      }),
+    []
+  )
   const requestSequenceRef = useRef(0)
   const eventSequenceRef = useRef<Map<string, number>>(new Map())
   const [snapshots, setSnapshots] = useState<Record<string, AgentContextWindowSnapshot>>({})
@@ -131,7 +140,7 @@ export function useContextWindowSnapshots({
     return () => {
       cancelled = true
     }
-  }, [enabled, refreshKey, requestKey])
+  }, [enabled, refreshKey, requestKey, collaborationSettingsRevision])
 
   const recordSnapshot = useCallback(
     (eventScopeId: string, eventModelConfigId: string, snapshot: AgentContextWindowSnapshot) => {

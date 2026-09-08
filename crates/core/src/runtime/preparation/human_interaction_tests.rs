@@ -66,7 +66,8 @@ fn services(policy: Option<Arc<Policy>>) -> RuntimeCapabilityServices {
         skill_resources: None,
         mcp_tools: None,
         builtin_capabilities: None,
-        agent_collaboration_enabled: false,
+        agent_collaboration: None,
+        agent_collaboration_policy: None,
         automation_report_sink: None,
         human_interaction_policy: policy
             .map(|policy| policy as Arc<dyn HumanInteractionPolicySource>),

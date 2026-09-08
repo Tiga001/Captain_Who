@@ -436,6 +436,9 @@ export const enUSTranslations = {
   'agentTemplates.createTitle': 'New Agent template',
   'agentTemplates.editTitle': 'Edit Agent template',
   'agentTemplates.back': 'Back to templates',
+  'agentTemplates.collaborationEnabled': 'Allow creating subagents',
+  'agentTemplates.collaborationEnabledDescription':
+    'Applies to new turns. Running task trees finish their current turn.',
   'agentTemplates.snapshotHint':
     'Changes apply to Agents created in the future. Existing Agents retain their creation snapshot.',
   'agentTemplates.name': 'Name',

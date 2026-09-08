@@ -19,7 +19,8 @@ pub(super) struct RuntimeCapabilityServices {
     pub(super) skill_resources: Option<Arc<crate::skills::SkillResourceSession>>,
     pub(super) mcp_tools: Option<crate::tools::McpToolRuntime>,
     pub(super) builtin_capabilities: Option<crate::BuiltinCapabilityRuntime>,
-    pub(super) agent_collaboration_enabled: bool,
+    pub(super) agent_collaboration: Option<crate::AgentCollaborationRuntimeServices>,
+    pub(super) agent_collaboration_policy: Option<Arc<dyn crate::AgentCollaborationPolicySource>>,
     pub(super) automation_report_sink: Option<Arc<dyn crate::AutomationReportSink>>,
     pub(super) human_interaction_policy: Option<Arc<dyn HumanInteractionPolicySource>>,
     pub(super) human_interaction_execution_ready: bool,
@@ -30,6 +31,30 @@ pub(super) struct DurableConversationTimeline {
     pub(super) compaction_summary: Option<crate::ContextCompactionSummary>,
     pub(super) world_state_records: Vec<crate::AnchoredWorldStateRecord>,
     pub(super) messages: Vec<AgentChatMessage>,
+}
+
+/// Both the running driver and its read-only preview must use the selector authority frozen
+/// before approval, not a directory rebuilt from settings that changed during the pause.
+pub(super) fn restore_collaboration_runtime_services(
+    services: Option<crate::AgentCollaborationRuntimeServices>,
+    snapshot: Option<&crate::AgentCollaborationRunSnapshot>,
+) -> AgentResult<Option<crate::AgentCollaborationRuntimeServices>> {
+    match (services, snapshot) {
+        (Some(services), Some(snapshot)) => {
+            services
+                .with_run_snapshot(snapshot)
+                .map(Some)
+                .map_err(|error| {
+                    AgentError::new(format!(
+                        "无法恢复运行检查点的 Agent collaboration 授权：{error}"
+                    ))
+                })
+        }
+        (None, None) => Ok(None),
+        _ => Err(AgentError::new(
+            "无法恢复运行检查点：Agent collaboration Host capability 与冻结授权不一致。",
+        )),
+    }
 }
 
 pub(super) fn prepare_runtime_capabilities(
@@ -54,7 +79,8 @@ pub(super) fn prepare_runtime_capabilities(
             skill_resources: None,
             mcp_tools: None,
             builtin_capabilities: None,
-            agent_collaboration_enabled: false,
+            agent_collaboration: None,
+            agent_collaboration_policy: None,
             automation_report_sink: None,
             human_interaction_policy: None,
             human_interaction_execution_ready: false,
@@ -80,7 +106,8 @@ pub(super) fn prepare_runtime_capabilities_with_skills(
         skill_resources,
         mcp_tools,
         builtin_capabilities,
-        agent_collaboration_enabled,
+        agent_collaboration,
+        agent_collaboration_policy,
         automation_report_sink,
         human_interaction_policy,
         human_interaction_execution_ready,
@@ -111,6 +138,8 @@ pub(super) fn prepare_runtime_capabilities_with_skills(
         extensions::RuntimeExtensionHostServices {
             web_search_policy: Some(web_search_policy),
             builtin_capabilities,
+            agent_collaboration,
+            agent_collaboration_policy,
             human_interaction_policy: human_root.then_some(human_interaction_policy).flatten(),
             human_interaction_execution_ready: human_root && human_interaction_execution_ready,
             human_interaction_async_execution_ready: human_root
@@ -133,9 +162,6 @@ pub(super) fn prepare_runtime_capabilities_with_skills(
     }
     let context = input.context.as_ref();
     tool_registry.register_conversation_history();
-    if agent_collaboration_enabled {
-        tool_registry.register_agent_collaboration_tools();
-    }
     if let Some(sink) = automation_report_sink {
         tool_registry.register_automation_report(sink);
     }
@@ -832,6 +858,7 @@ mod approval_identity_tests {
     };
     use serde_json::json;
     use std::collections::BTreeSet;
+    use std::sync::Arc;
 
     #[test]
     fn mcp_action_identity_is_independent_while_builtin_actions_use_call_identity() {
@@ -857,6 +884,16 @@ mod approval_identity_tests {
     }
 
     fn services(agent_collaboration_enabled: bool) -> RuntimeCapabilityServices {
+        struct Executor;
+        impl crate::AgentCollaborationExecutor for Executor {
+            fn execute(
+                &self,
+                _: crate::AgentCollaborationInvocation,
+                _: crate::AgentCollaborationExecutionControl,
+            ) -> crate::AgentCollaborationExecutionFuture {
+                panic!("capability preparation must not execute collaboration")
+            }
+        }
         RuntimeCapabilityServices {
             web_search_policy: None,
             host_actions_available: false,
@@ -868,7 +905,28 @@ mod approval_identity_tests {
             skill_resources: None,
             mcp_tools: None,
             builtin_capabilities: None,
-            agent_collaboration_enabled,
+            agent_collaboration: Some(crate::AgentCollaborationRuntimeServices::new(
+                Arc::new(Executor),
+                crate::AgentCollaborationCaller {
+                    agent_id: "root".into(),
+                    root_agent_id: "root".into(),
+                    root_conversation_id: "conversation".into(),
+                    parent_agent_id: None,
+                    conversation_id: "conversation".into(),
+                    project_id: None,
+                    task_name: crate::ROOT_AGENT_TASK_NAME.into(),
+                    task_path: "/root".into(),
+                },
+                crate::AgentCollaborationSelectorDirectory::default(),
+            )),
+            agent_collaboration_policy: Some(Arc::new(
+                crate::FrozenAgentCollaborationPolicySource::new(
+                    crate::AgentCollaborationSettings {
+                        enabled: agent_collaboration_enabled,
+                        ..Default::default()
+                    },
+                ),
+            )),
             automation_report_sink: None,
             human_interaction_policy: None,
             human_interaction_execution_ready: false,
@@ -886,10 +944,7 @@ mod approval_identity_tests {
         )
         .unwrap();
         assert!(crate::AGENT_COLLABORATION_TOOL_NAMES.iter().all(|name| {
-            disabled
-                .tool_definitions
-                .iter()
-                .all(|definition| definition.name != *name)
+            disabled.tool_registry.contains_tool(name) && !disabled.initial_tool_set.contains(name)
         }));
 
         let enabled = prepare_runtime_capabilities_with_skills(
@@ -900,7 +955,8 @@ mod approval_identity_tests {
         )
         .unwrap();
         let actual = enabled
-            .tool_definitions
+            .initial_tool_set
+            .dynamic_definitions()
             .iter()
             .filter(|definition| {
                 crate::AGENT_COLLABORATION_TOOL_NAMES.contains(&definition.name.as_str())
@@ -912,5 +968,9 @@ mod approval_identity_tests {
             .copied()
             .collect::<BTreeSet<_>>();
         assert_eq!(actual, expected);
+        assert_eq!(
+            disabled.initial_tool_set.stable_revision(),
+            enabled.initial_tool_set.stable_revision()
+        );
     }
 }

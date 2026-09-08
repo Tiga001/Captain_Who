@@ -10,6 +10,33 @@ import { registerAgentIpc } from '../ipc/agentIpc'
 describe('Main Agent IPC collaboration routing', () => {
   beforeEach(() => getAllWindows.mockReset())
 
+  it('routes global settings updates and broadcasts the persisted revision', async () => {
+    let settingsListener: ((settings: unknown) => void) | undefined
+    const send = vi.fn()
+    getAllWindows.mockReturnValue([
+      { isDestroyed: () => false, webContents: { isDestroyed: () => false, send } }
+    ])
+    const output = { enabled: false, revision: 2, updatedAt: 10 }
+    const server = {
+      onAgentEvent: vi.fn(),
+      onProviderTransition: vi.fn(),
+      onCollaborationSettingsChanged: vi.fn((listener) => {
+        settingsListener = listener
+      }),
+      updateCollaborationSettings: vi.fn().mockResolvedValue(output)
+    }
+    const ipc = { handle: vi.fn(), on: vi.fn() }
+    registerAgentIpc(ipc as never, server as never)
+    const handler = ipc.handle.mock.calls.find(
+      ([channel]) => channel === HOST_CHANNELS.agent.collaborationUpdateSettings
+    )?.[1]
+    const input = { enabled: false, expectedRevision: 1 }
+    await expect(handler({}, input)).resolves.toEqual({ ok: true, value: output })
+    expect(server.updateCollaborationSettings).toHaveBeenCalledWith(input)
+    settingsListener?.(output)
+    expect(send).toHaveBeenCalledWith(HOST_CHANNELS.agent.collaborationSettingsChanged, output)
+  })
+
   it('routes template project assignment through the strict invocation envelope', async () => {
     getAllWindows.mockReturnValue([])
     const output = { schemaVersion: 1, templateId: 'template-1', projectIds: ['project-1'] }

@@ -68,6 +68,15 @@ import type {
   PendingAgentActionSnapshot
 } from '@mycopilot/protocol'
 import {
+  AGENT_COLLABORATION_GET_SETTINGS_METHOD,
+  AGENT_COLLABORATION_UPDATE_SETTINGS_METHOD,
+  AGENT_COLLABORATION_SETTINGS_CHANGED_METHOD,
+  parseAgentCollaborationSettings,
+  parseAgentCollaborationSettingsGetInput,
+  parseAgentCollaborationSettingsUpdate,
+  type AgentCollaborationSettings,
+  type AgentCollaborationSettingsGetInput,
+  type AgentCollaborationSettingsUpdate,
   AGENT_APPROVE_ACTION_METHOD,
   AGENT_CANCEL_ACTION_METHOD,
   AGENT_CANCEL_RUN_METHOD,
@@ -583,6 +592,43 @@ export class CoreServerAgentApi extends CoreServerStorageApi {
         // MCP event rejection must not echo the rejected payload or a parser diagnostic.
         console.warn('Ignored invalid Agent event')
       }
+    })
+  }
+
+  getCollaborationSettings(
+    input: AgentCollaborationSettingsGetInput
+  ): Promise<AgentCollaborationSettings> {
+    return this.rpc
+      .request<unknown, AgentCollaborationSettingsGetInput>(
+        AGENT_COLLABORATION_GET_SETTINGS_METHOD,
+        parseAgentCollaborationSettingsGetInput(input)
+      )
+      .then(parseAgentCollaborationSettings)
+  }
+
+  updateCollaborationSettings(
+    input: AgentCollaborationSettingsUpdate
+  ): Promise<AgentCollaborationSettings> {
+    return this.rpc
+      .request<unknown, AgentCollaborationSettingsUpdate>(
+        AGENT_COLLABORATION_UPDATE_SETTINGS_METHOD,
+        parseAgentCollaborationSettingsUpdate(input)
+      )
+      .then(parseAgentCollaborationSettings)
+  }
+
+  onCollaborationSettingsChanged(
+    handler: (settings: AgentCollaborationSettings) => void
+  ): () => void {
+    return this.rpc.onNotification(AGENT_COLLABORATION_SETTINGS_CHANGED_METHOD, (params) => {
+      let settings: AgentCollaborationSettings
+      try {
+        settings = parseAgentCollaborationSettings(params)
+      } catch {
+        console.warn('Ignored invalid collaboration settings')
+        return
+      }
+      handler(settings)
     })
   }
 

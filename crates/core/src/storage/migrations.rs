@@ -1,17 +1,20 @@
 use rusqlite::{ffi, Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
 
-pub const STORAGE_SCHEMA_VERSION: i32 = 42;
+pub const STORAGE_SCHEMA_VERSION: i32 = 43;
 pub const DEVELOPMENT_STORAGE_SCHEMA_RESET_REQUIRED: &str =
     "development_storage_schema_reset_required";
 
 const CANONICAL_SCHEMA: &str = include_str!("canonical_schema.sql");
 const CANONICAL_SCHEMA_FINGERPRINT: &str =
+    "sha256:7a3a86134a9ca406071f90839e3eceb5e74f24da212421aec20a2573f1120212";
+const PREVIOUS_SCHEMA_FINGERPRINT: &str =
     "sha256:ccb63eda4aaee1451732235b7327d63e6b1ad82f6c897d90b3ba40fa25ef5657";
-/// Opens the canonical schema without migrating historical development databases.
-///
-/// A brand-new database is initialized atomically. Existing development databases must already
-/// match the canonical catalog. Other versions require an explicit reset.
+const COLLABORATION_SCHEMA_MARKER: &str =
+    "-- Agent collaboration settings and immutable run admission policy, schema v43.";
+
+/// Initializes fresh storage or atomically upgrades the immediately preceding canonical schema.
+/// Other development schemas still require an explicit reset.
 pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
     connection.execute_batch("PRAGMA foreign_keys = ON;")?;
 
@@ -20,6 +23,19 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
 
     if schema_version == 0 && object_count == 0 {
         return create_canonical_schema(connection);
+    }
+
+    if schema_version == 42 {
+        let transaction = connection.unchecked_transaction()?;
+        validate_schema_fingerprint(&transaction, PREVIOUS_SCHEMA_FINGERPRINT)?;
+        let additions = CANONICAL_SCHEMA
+            .split_once(COLLABORATION_SCHEMA_MARKER)
+            .expect("canonical collaboration migration suffix")
+            .1;
+        transaction.execute_batch(additions)?;
+        transaction.pragma_update(None, "user_version", STORAGE_SCHEMA_VERSION)?;
+        validate_canonical_schema(&transaction)?;
+        return transaction.commit();
     }
 
     if schema_version != STORAGE_SCHEMA_VERSION {
@@ -125,6 +141,86 @@ fn reset_required_error(detail: impl std::fmt::Display) -> rusqlite::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn v42_upgrade_preserves_existing_data_and_installs_default_collaboration_settings_once() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("existing.sqlite");
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch(
+                CANONICAL_SCHEMA
+                    .split_once(COLLABORATION_SCHEMA_MARKER)
+                    .unwrap()
+                    .0,
+            )
+            .unwrap();
+        connection.pragma_update(None, "user_version", 42).unwrap();
+        connection.execute_batch("INSERT INTO conversations(id,title,created_at,updated_at) VALUES ('kept','Existing chat',1,1); INSERT INTO messages(id,conversation_id,role,content,created_at,position) VALUES ('kept-user','kept','user','Do not delete this history',1,0);").unwrap();
+        run_migrations(&connection).unwrap();
+        assert_eq!(read_schema_version(&connection).unwrap(), 43);
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT content FROM messages WHERE id='kept-user'",
+                    [],
+                    |row| row.get::<_, String>(0)
+                )
+                .unwrap(),
+            "Do not delete this history"
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT enabled,revision,updated_at FROM agent_collaboration_settings",
+                    [],
+                    |row| Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?
+                    ))
+                )
+                .unwrap(),
+            (1, 1, 0)
+        );
+        connection
+            .execute(
+                "UPDATE agent_collaboration_settings SET enabled=0,revision=2,updated_at=1",
+                [],
+            )
+            .unwrap();
+        drop(connection);
+        let reopened = Connection::open(&path).unwrap();
+        run_migrations(&reopened).unwrap();
+        assert!(!reopened
+            .query_row(
+                "SELECT enabled FROM agent_collaboration_settings",
+                [],
+                |row| row.get::<_, bool>(0)
+            )
+            .unwrap());
+    }
+
+    #[test]
+    fn tampered_v42_is_rejected_before_migration_writes() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                CANONICAL_SCHEMA
+                    .split_once(COLLABORATION_SCHEMA_MARKER)
+                    .unwrap()
+                    .0,
+            )
+            .unwrap();
+        connection.pragma_update(None, "user_version", 42).unwrap();
+        connection
+            .execute_batch("DROP TRIGGER conversation_history_fts_message_insert;")
+            .unwrap();
+        let before = schema_fingerprint(&connection).unwrap();
+        assert!(run_migrations(&connection).is_err());
+        assert_eq!(read_schema_version(&connection).unwrap(), 42);
+        assert_eq!(schema_fingerprint(&connection).unwrap(), before);
+    }
 
     #[test]
     fn previous_development_versions_require_reset_without_any_write() {
@@ -782,9 +878,9 @@ CREATE TABLE model_provider_credential_cleanup (
         assert!(error
             .to_string()
             .contains(DEVELOPMENT_STORAGE_SCHEMA_RESET_REQUIRED));
-        assert!(error
-            .to_string()
-            .contains("expected schema version 42, found 30"));
+        assert!(error.to_string().contains(&format!(
+            "expected schema version {STORAGE_SCHEMA_VERSION}, found 30"
+        )));
         assert_eq!(read_schema_version(&connection).unwrap(), 30);
         assert_eq!(schema_fingerprint(&connection).unwrap(), fingerprint_before);
         let columns = connection

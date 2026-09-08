@@ -1,5 +1,22 @@
 use serde::{de::Error as _, Deserialize, Deserializer, Serialize};
 
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AgentCollaborationSettings {
+    pub enabled: bool,
+    pub revision: u64,
+    pub updated_at: i64,
+}
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AgentCollaborationSettingsUpdate {
+    pub enabled: bool,
+    pub expected_revision: u64,
+}
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AgentCollaborationSettingsGetInput {}
+
 pub const AGENT_COLLABORATION_SCHEMA_VERSION: u32 = 1;
 pub const AGENT_COLLABORATION_EVENT_SCHEMA_VERSION: u32 = 2;
 pub const AGENT_COLLABORATION_ACTIVITY_SCHEMA_VERSION: u32 = 2;

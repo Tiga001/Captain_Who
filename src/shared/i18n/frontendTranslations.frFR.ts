@@ -447,6 +447,9 @@ export const frFRTranslations = {
   'agentTemplates.createTitle': 'Nouveau modèle Agent',
   'agentTemplates.editTitle': 'Modifier le modèle Agent',
   'agentTemplates.back': 'Retour aux modèles',
+  'agentTemplates.collaborationEnabled': 'Autoriser la création de sous-agents',
+  'agentTemplates.collaborationEnabledDescription':
+    'S’applique aux nouveaux tours. Les tâches en cours terminent leur tour actuel.',
   'agentTemplates.snapshotHint':
     "Les modifications s'appliquent aux agents créés ultérieurement. Les agents existants conservent leur instantané de création.",
   'agentTemplates.name': 'Nom',

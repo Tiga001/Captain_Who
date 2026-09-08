@@ -472,10 +472,6 @@ impl ConversationTurnTrace {
         items: &[ConversationModelContextItem],
     ) -> Result<(), String> {
         validate_model_context_prefix(self, items)?;
-        let actual_sequences = items
-            .iter()
-            .map(|item| item.sequence)
-            .collect::<BTreeSet<_>>();
         let unresolved_call_sequence = (self.terminal_status
             == ConversationTurnTraceTerminalStatus::InProgress)
             .then(|| {
@@ -490,6 +486,13 @@ impl ConversationTurnTrace {
                 })
             })
             .flatten();
+        // The exact open call may already be staged durably for crash recovery. Its content was
+        // validated above, but neither side of the closed-prefix comparison should include it.
+        let actual_sequences = items
+            .iter()
+            .filter(|item| unresolved_call_sequence != Some(item.sequence))
+            .map(|item| item.sequence)
+            .collect::<BTreeSet<_>>();
         let expected_sequences = self
             .items
             .iter()

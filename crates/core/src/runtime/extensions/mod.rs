@@ -12,6 +12,7 @@
 //! the rebuilt agent-work request. Extensions may later contribute purpose-specific context to a
 //! compaction-generation request, but they never control that restart.
 
+mod agent_collaboration;
 mod builtin_capability;
 mod human_interaction;
 mod skills;
@@ -186,6 +187,8 @@ pub(super) struct RuntimeExtensions {
 pub(super) struct RuntimeExtensionHostServices {
     pub(super) web_search_policy: Option<Arc<dyn crate::WebSearchPolicySource>>,
     pub(super) builtin_capabilities: Option<crate::BuiltinCapabilityRuntime>,
+    pub(super) agent_collaboration: Option<crate::AgentCollaborationRuntimeServices>,
+    pub(super) agent_collaboration_policy: Option<Arc<dyn crate::AgentCollaborationPolicySource>>,
     pub(super) human_interaction_policy: Option<Arc<dyn crate::HumanInteractionPolicySource>>,
     pub(super) human_interaction_execution_ready: bool,
     pub(super) human_interaction_async_execution_ready: bool,
@@ -253,6 +256,12 @@ impl RuntimeExtensions {
         };
         let (todo, todo_handle) = TodoExtension::new(run_id.to_string());
         let mut extensions: Vec<Box<dyn RuntimeExtension>> = vec![Box::new(skills)];
+        extensions.push(Box::new(
+            agent_collaboration::AgentCollaborationExtension::new(
+                host_services.agent_collaboration,
+                host_services.agent_collaboration_policy,
+            ),
+        ));
         if let Some(source) = host_services.web_search_policy {
             extensions.push(Box::new(web_search::WebSearchExtension::new(source)));
         }

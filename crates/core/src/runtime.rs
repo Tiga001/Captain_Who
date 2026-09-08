@@ -54,7 +54,7 @@ use crate::model_request_observation::{
     ModelRequestEstimate, ModelRequestObservation, ModelRequestObservationBuilder,
     ModelRequestPurpose, ModelRequestToolSetObservation,
 };
-use crate::prompts::{build_system_prompt_with_collaboration, collaboration_harness_section};
+use crate::prompts::build_system_prompt_with_collaboration;
 use crate::protocol::{
     AgentApprovalStatus, AgentAutomationExecutionContext, AgentBuiltinExecutionPermission,
     AgentChatInput, AgentChatMessage, AgentChatOutput, AgentCommandPermission,

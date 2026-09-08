@@ -146,6 +146,14 @@ fn follow_up_agent_internal(
     let deferred_wake = enqueue_wake_in_transaction(&transaction, &wake_input, created_at)?
         .record()
         .clone();
+    if let Some(origin_run_id) = origin_run_id {
+        crate::storage::agent_collaboration_run_policy_repository::inherit_run_for_wake(
+            &transaction,
+            origin_run_id,
+            &deferred_wake.wake_id,
+        )
+        .map_err(write_error)?;
+    }
     transaction.commit().map_err(write_error)?;
     Ok(AgentMessageDispatch {
         message,
