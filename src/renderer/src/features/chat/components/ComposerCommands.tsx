@@ -114,38 +114,40 @@ export function ComposerCommands({
     }
   }, [listId, scrollContainerRef, selectedIndex])
   return (
-    <div className="composer-commands" id={listId} role="listbox">
-      {commands.length === 0 ? (
-        <p className="composer-commands__empty">{emptyLabel}</p>
-      ) : (
-        commands.map((command, index) => {
-          const Icon = icons[command.id]
-          return (
-            <button
-              id={`${listId}-${index}`}
-              key={command.id}
-              type="button"
-              role="option"
-              aria-selected={index === selectedIndex}
-              aria-disabled={Boolean(command.disabledReason)}
-              data-disabled={Boolean(command.disabledReason)}
-              onPointerMove={() => onSelect(index)}
-              onPointerEnter={() => onSelect(index)}
-              onFocus={() => onSelect(index)}
-              onMouseDown={(event) => event.preventDefault()}
-              onClick={() => onExecute(command)}
-            >
-              <Icon aria-hidden="true" />
-              <span className="composer-commands__label">
-                <CommandMatch label={command.label} query={query} />
-              </span>
-              <span className="composer-commands__description">
-                {command.disabledReason ?? command.description}
-              </span>
-            </button>
-          )
-        })
-      )}
+    <div className="composer-commands">
+      <div className="composer-commands__list" id={listId} role="listbox">
+        {commands.length === 0 ? (
+          <p className="composer-commands__empty">{emptyLabel}</p>
+        ) : (
+          commands.map((command, index) => {
+            const Icon = icons[command.id]
+            return (
+              <button
+                id={`${listId}-${index}`}
+                key={command.id}
+                type="button"
+                role="option"
+                aria-selected={index === selectedIndex}
+                aria-disabled={Boolean(command.disabledReason)}
+                data-disabled={Boolean(command.disabledReason)}
+                onPointerMove={() => onSelect(index)}
+                onPointerEnter={() => onSelect(index)}
+                onFocus={() => onSelect(index)}
+                onMouseDown={(event) => event.preventDefault()}
+                onClick={() => onExecute(command)}
+              >
+                <Icon aria-hidden="true" />
+                <span className="composer-commands__label">
+                  <CommandMatch label={command.label} query={query} />
+                </span>
+                <span className="composer-commands__description">
+                  {command.disabledReason ?? command.description}
+                </span>
+              </button>
+            )
+          })
+        )}
+      </div>
     </div>
   )
 }

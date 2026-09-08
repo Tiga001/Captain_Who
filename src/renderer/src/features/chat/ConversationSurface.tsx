@@ -743,13 +743,6 @@ export function ConversationSurface(props: ConversationSurfaceProps) {
   }, [conversation.id, initialScrollTop, scrollTargetMessageId])
 
   useLayoutEffect(() => {
-    if (!hasPendingApproval || scrollTargetMessageId) return
-    const messagesElement = messagesRef.current
-    if (!messagesElement) return
-    messagesElement.scrollTop = messagesElement.scrollHeight
-  }, [conversation.messages, hasPendingApproval, scrollTargetMessageId])
-
-  useLayoutEffect(() => {
     if (!scrollToBottomSignal || scrollTargetMessageId) return
     const messagesElement = messagesRef.current
     if (!messagesElement) return

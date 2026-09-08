@@ -105,7 +105,11 @@
 
 .capability-center__row[data-selected='true'],
 .capability-center__back:hover {
-  background: var(--mc-color-surface-hover, #88888812);
+  background: color-mix(
+    in srgb,
+    var(--mc-color-surface-selected) 92%,
+    var(--mc-color-text-primary)
+  );
 }
 
 .capability-center__row[aria-disabled='true'] {

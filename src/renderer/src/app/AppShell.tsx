@@ -996,16 +996,6 @@ export function AppShell() {
         description: t('chat.commands.modelDescription')
       },
       {
-        id: 'theme',
-        label: t(
-          resolvedColorScheme === 'dark'
-            ? 'chat.commands.switchToLightTheme'
-            : 'chat.commands.switchToDarkTheme'
-        ),
-        description: t('chat.commands.themeDescription'),
-        execute: () => setColorSchemePreference(resolvedColorScheme === 'dark' ? 'light' : 'dark')
-      },
-      {
         id: 'compact',
         label: t('chat.commands.compact'),
         description: t('chat.commands.compactDescription'),
@@ -1018,29 +1008,9 @@ export function AppShell() {
         }
       },
       {
-        id: 'new',
-        label: t('chat.commands.new'),
-        description: t('chat.commands.newDescription'),
-        execute: () => openNewConversation(newConversationProjectId)
-      },
-      {
-        id: 'fork',
-        label: t('chat.commands.fork'),
-        description: t('chat.commands.forkDescription'),
-        disabledReason: latestForkDisabledReason,
-        execute: () => continueActiveConversationInNewTask({ kind: 'latest' })
-      },
-      {
         id: 'capabilities',
         label: t('capabilityCenter.title'),
         description: t('capabilityCenter.description')
-      },
-      ...workspaceCommands,
-      {
-        id: 'usage',
-        label: t('chat.commands.usage'),
-        description: t('chat.commands.usageDescription'),
-        execute: () => openSettings('usageBilling')
       },
       {
         id: 'pin',
@@ -1069,6 +1039,36 @@ export function AppShell() {
         execute: async () => {
           if (id) await archiveConversation(id)
         }
+      },
+      {
+        id: 'fork',
+        label: t('chat.commands.fork'),
+        description: t('chat.commands.forkDescription'),
+        disabledReason: latestForkDisabledReason,
+        execute: () => continueActiveConversationInNewTask({ kind: 'latest' })
+      },
+      {
+        id: 'new',
+        label: t('chat.commands.new'),
+        description: t('chat.commands.newDescription'),
+        execute: () => openNewConversation(newConversationProjectId)
+      },
+      ...workspaceCommands,
+      {
+        id: 'usage',
+        label: t('chat.commands.usage'),
+        description: t('chat.commands.usageDescription'),
+        execute: () => openSettings('usageBilling')
+      },
+      {
+        id: 'theme',
+        label: t(
+          resolvedColorScheme === 'dark'
+            ? 'chat.commands.switchToLightTheme'
+            : 'chat.commands.switchToDarkTheme'
+        ),
+        description: t('chat.commands.themeDescription'),
+        execute: () => setColorSchemePreference(resolvedColorScheme === 'dark' ? 'light' : 'dark')
       }
     ]
   }, [

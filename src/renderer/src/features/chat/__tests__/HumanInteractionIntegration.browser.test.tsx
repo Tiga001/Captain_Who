@@ -7,7 +7,7 @@ import type {
 } from '@mycopilot/protocol'
 import { useState } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { page } from 'vitest/browser'
+import { page, userEvent } from 'vitest/browser'
 import { render } from 'vitest-browser-react'
 import { getFrontendCssVariables } from '../../../config/frontendConfig'
 import { getFrontendTheme } from '../../../config/frontendTheme'
@@ -724,6 +724,66 @@ describe('Human interaction in the real conversation surface', () => {
     await panel.getByRole('button', { name: '最小化交互' }).click()
     await expect.element(composer).toBeVisible()
     await expect.element(composer).toHaveValue('尚未发送的输入框草稿')
+    expect(boundary.send).not.toHaveBeenCalled()
+    expect(boundary.stop).not.toHaveBeenCalled()
+  })
+
+  it('keeps history scrollable and retains the reading position when approvals arrive and messages update', async () => {
+    boundary.api = fakeHost([]).api
+    const history: ChatMessage[] = Array.from({ length: 12 }, (_, index) => [
+      {
+        id: `history-user-${index}`,
+        role: 'user' as const,
+        content: `此前请求 ${index}`,
+        createdAt: index,
+        status: 'sent' as const
+      },
+      {
+        id: `history-assistant-${index}`,
+        role: 'assistant' as const,
+        content: `此前答复 ${index}：保留历史上下文供审批时查阅。`,
+        createdAt: index,
+        status: 'sent' as const
+      }
+    ]).flat()
+    const running = conversation([])
+    const initial = { ...running, messages: [...history, ...running.messages] }
+    const screen = await render(<Workspace value={initial} />)
+    const messages = screen.container.querySelector<HTMLElement>(
+      '.chat-conversation-page__messages'
+    )!
+    // Wait for the conversation's initial scroll restoration before browsing older messages.
+    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
+    expect(messages.scrollHeight).toBeGreaterThan(messages.clientHeight + 1000)
+    messages.scrollTop = 600
+
+    const pending = conversation([], 'waiting_for_approval')
+    const awaitingApproval = { ...pending, messages: [...history, ...pending.messages] }
+    await screen.rerender(<Workspace value={awaitingApproval} />)
+    await expect.element(screen.getByRole('dialog', { name: '验证项目' })).toBeVisible()
+    expect(getComputedStyle(messages).overflowY).toBe('auto')
+    expect(messages.scrollTop).toBe(600)
+
+    messages.scrollTop = 240
+
+    await screen.rerender(
+      <Workspace
+        value={{
+          ...awaitingApproval,
+          messages: awaitingApproval.messages.map((message) =>
+            message.id === 'assistant-chat'
+              ? { ...message, content: `${message.content}\n\n等待用户审批。` }
+              : message
+          )
+        }}
+      />
+    )
+    expect(messages.scrollTop).toBe(240)
+    await expect.element(screen.getByRole('dialog', { name: '验证项目' })).toBeVisible()
+    // Click the history padding so PageUp is a real browser scroll, outside the approval card.
+    await page.elementLocator(messages).click({ position: { x: 8, y: 60 } })
+    await userEvent.keyboard('{PageUp}')
+    await expect.poll(() => messages.scrollTop).toBeLessThan(240)
     expect(boundary.send).not.toHaveBeenCalled()
     expect(boundary.stop).not.toHaveBeenCalled()
   })

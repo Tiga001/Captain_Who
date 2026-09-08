@@ -53,10 +53,6 @@
   border-radius: 999px;
 }
 
-.chat-conversation-page[data-approval-pending='true'] .chat-conversation-page__messages {
-  overflow-y: hidden;
-}
-
 @container chat-messages (max-width: 760px) {
   .chat-conversation-page__messages {
     padding-inline: 32px;

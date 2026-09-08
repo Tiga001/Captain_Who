@@ -72,7 +72,11 @@
 
 .composer-model-command-menu__option[data-highlighted='true'],
 .composer-model-command-menu__back:hover {
-  background: var(--mc-color-surface-hover, #88888812);
+  background: color-mix(
+    in srgb,
+    var(--mc-color-surface-selected) 92%,
+    var(--mc-color-text-primary)
+  );
 }
 
 .composer-model-command-menu__back:focus-visible,
