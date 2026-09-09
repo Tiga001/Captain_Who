@@ -2,7 +2,11 @@ import { useState } from 'react'
 import { page, userEvent } from 'vitest/browser'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { render } from 'vitest-browser-react'
-import type { ImageGenerationConfiguration, McpServerDetailsView } from '@mycopilot/protocol'
+import type {
+  AgentPromptPreferences,
+  ImageGenerationConfiguration,
+  McpServerDetailsView
+} from '@mycopilot/protocol'
 import { IMAGE_GENERATION_CONFIGURATION_SCHEMA_VERSION } from '@mycopilot/protocol'
 import { getFrontendCssVariables } from '../../../config/frontendConfig'
 import '../../../styles/global.css'
@@ -19,6 +23,9 @@ const service = vi.hoisted(() => ({
   collaborationGet: vi.fn(),
   collaborationSet: vi.fn(),
   collaborationChanged: vi.fn(),
+  preferencesGet: vi.fn(),
+  preferencesSave: vi.fn(),
+  preferencesChanged: vi.fn(),
   browserList: vi.fn(),
   browserSet: vi.fn(),
   browserChanged: vi.fn(),
@@ -51,7 +58,12 @@ vi.mock('../../../host/hostClient', () => ({
     agent: {
       getCollaborationSettings: service.collaborationGet,
       updateCollaborationSettings: service.collaborationSet,
-      onCollaborationSettingsChanged: service.collaborationChanged
+      onCollaborationSettingsChanged: service.collaborationChanged,
+      onPromptPreferencesChanged: service.preferencesChanged
+    },
+    storage: {
+      loadAgentPromptPreferences: service.preferencesGet,
+      saveAgentPromptPreferences: service.preferencesSave
     },
     mcp: {
       listBuiltinCapabilities: service.browserList,
@@ -112,6 +124,7 @@ const ok = <T,>(value: T) => ({ ok: true as const, value })
 let image: ImageGenerationConfiguration
 let human: { enabled: boolean; revision: number; updatedAt: number }
 let collaboration: typeof human
+let preferences: AgentPromptPreferences
 let browser: {
   schemaVersion: 1
   kind: 'builtinCapability'
@@ -181,6 +194,7 @@ beforeEach(() => {
     service.humanChanged,
     service.humanResync,
     service.collaborationChanged,
+    service.preferencesChanged,
     service.browserChanged,
     service.serverChanged
   ])
@@ -198,6 +212,14 @@ beforeEach(() => {
   }
   human = { enabled: true, revision: 1, updatedAt: 1 }
   collaboration = { enabled: true, revision: 1, updatedAt: 1 }
+  preferences = {
+    contextProfile: 'full',
+    workMode: 'general',
+    tone: 'friendly',
+    detailLevel: 'high',
+    customInstructions: 'Keep these saved instructions.',
+    updatedAt: 1
+  }
   browser = {
     schemaVersion: 1,
     kind: 'builtinCapability',
@@ -268,6 +290,12 @@ beforeEach(() => {
     }
     return ok(collaboration)
   })
+  service.preferencesGet.mockImplementation(async () => ({ ...preferences }))
+  service.preferencesSave.mockImplementation(async (input) => {
+    preferences = { ...input, updatedAt: (preferences.updatedAt ?? 0) + 1 }
+    notify(service.preferencesChanged)
+    return { ...preferences }
+  })
   service.browserList.mockImplementation(async () =>
     ok({ schemaVersion: 1, revision: browser.policyRevision, capabilities: [{ ...browser }] })
   )
@@ -304,12 +332,16 @@ afterEach(() => {
 })
 
 describe('CapabilityCenterMenu domain Host contracts', () => {
-  it('lists software and MCP only, and persists all software switches with existing CAS contracts', async () => {
+  it('lists software and MCP only, and persists all software switches with existing Host contracts', async () => {
     const screen = await render(<Menu />)
     await expect.element(screen.getByRole('switch', { name: 'Local files' })).toBeVisible()
-    expect(screen.container.querySelectorAll('[role="switch"]')).toHaveLength(6)
+    expect(screen.container.querySelectorAll('[role="switch"]')).toHaveLength(7)
+    expect(screen.container.querySelector('[role="switch"]')).toHaveAttribute(
+      'aria-label',
+      '轻量模式'
+    )
     expect(screen.container.textContent).not.toContain('Skill')
-    for (const name of ['图片生成', '人机交互', '多智能体', '浏览器自动化', '联网搜索'])
+    for (const name of ['轻量模式', '图片生成', '人机交互', '多智能体', '浏览器自动化', '联网搜索'])
       await screen.getByRole('switch', { name }).click()
     await expect
       .element(screen.getByRole('switch', { name: '图片生成' }))
@@ -328,7 +360,57 @@ describe('CapabilityCenterMenu domain Host contracts', () => {
       allowed: true
     })
     expect(service.searchSave).toHaveBeenCalledWith('auto')
+    expect(service.preferencesSave).toHaveBeenCalledWith({
+      contextProfile: 'minimal',
+      workMode: 'general',
+      tone: 'friendly',
+      detailLevel: 'high',
+      customInstructions: 'Keep these saved instructions.',
+      updatedAt: 1
+    })
     expect(screen.container.textContent).not.toContain('正在保存')
+    expect(service.back).not.toHaveBeenCalled()
+  })
+
+  it('syncs lightweight mode with personalization notices and preserves fresh saved preferences', async () => {
+    const screen = await render(<Menu />)
+    const row = screen.getByRole('switch', { name: '轻量模式' })
+    await expect.element(row).toHaveAttribute('aria-disabled', 'false')
+    preferences = { ...preferences, contextProfile: 'minimal', updatedAt: 4 }
+    notify(service.preferencesChanged)
+    await expect.element(row).toHaveAttribute('aria-checked', 'true')
+
+    // Other settings may change before their notification reaches the open menu.
+    preferences = {
+      ...preferences,
+      workMode: 'coding',
+      tone: 'pragmatic',
+      customInstructions: 'Newly saved instructions.',
+      updatedAt: 5
+    }
+    await row.click()
+    await expect.element(row).toHaveAttribute('aria-checked', 'false')
+    await expect.element(row).toHaveAttribute('aria-disabled', 'false')
+    expect(service.preferencesSave).toHaveBeenCalledWith({
+      ...preferences,
+      contextProfile: 'full',
+      updatedAt: 5
+    })
+    expect(service.preferencesSave).toHaveBeenCalledTimes(1)
+    expect(service.back).not.toHaveBeenCalled()
+  })
+
+  it('keeps the authoritative lightweight setting after a failed save and makes it searchable', async () => {
+    const screen = await render(<Menu />)
+    await screen.getByRole('searchbox').fill('lightweight')
+    const row = screen.getByRole('switch', { name: '轻量模式' })
+    await expect.element(row).toHaveAttribute('aria-disabled', 'false')
+    expect(screen.container.querySelectorAll('[role="switch"]')).toHaveLength(1)
+    service.preferencesSave.mockRejectedValueOnce(new Error('save failed'))
+    await row.click()
+    await expect.element(page.getByRole('dialog')).toBeVisible()
+    await expect.element(row).toHaveAttribute('aria-checked', 'false')
+    expect(preferences.contextProfile).toBe('full')
     expect(service.back).not.toHaveBeenCalled()
   })
 

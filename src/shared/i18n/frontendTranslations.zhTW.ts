@@ -852,9 +852,13 @@ export const zhTWTranslations = {
   'profile.handlePlaceholder': 'USER',
   'profile.openSettings': '設定',
   'profile.avatarUploadFailed': '頭像上傳失敗',
-  'personalization.minimalMode': '極簡模式',
-  'personalization.minimalModeDescription':
-    '精簡基礎上下文與工具。切換後從新回合生效；擴充功能仍依原設定，關閉後恢復完整模式。',
+  'personalization.minimalMode': '輕量模式',
+  'personalization.minimalModeDescription': '精簡基礎上下文和工具。',
+  'personalization.minimalModeHelp.description':
+    '開啟輕量模式後，基礎系統提示詞、基礎工具集合和對應工具說明會被精簡。在新一輪對話生效。',
+  'personalization.minimalModeHelp.open': '查看輕量模式說明',
+  'personalization.minimalModeHelp.close': '關閉輕量模式說明',
+  'personalization.minimalModeHelp.acknowledge': '知道了',
   'personalization.workMode': '工作模式',
   'personalization.workModeDescription': '選擇回復中的技術細節程度',
   'personalization.workModeCoding': '適用於程式設計',

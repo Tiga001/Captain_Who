@@ -1,0 +1,29 @@
+.settings-help-button {
+  display: grid;
+  flex-shrink: 0;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  place-items: center;
+  color: var(--settings-content-muted-color);
+  background: transparent;
+  border: 0;
+  border-radius: var(--mc-radius-pill);
+  cursor: pointer;
+}
+
+.settings-help-button:hover {
+  color: var(--settings-content-text-color);
+  background: var(--mc-color-state-hover);
+}
+
+.settings-help-button:focus-visible {
+  outline: 2px solid var(--mc-color-focus-ring);
+  outline-offset: 2px;
+}
+
+.settings-help-button svg {
+  width: 14px;
+  height: 14px;
+  stroke-width: var(--mc-icon-stroke-regular);
+}

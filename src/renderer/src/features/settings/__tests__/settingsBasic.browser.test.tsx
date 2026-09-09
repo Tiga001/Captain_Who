@@ -33,7 +33,9 @@ vi.mock('../../../config/FrontendConfigProvider', async () => {
   }
   return { useFrontendConfig: () => config }
 })
-vi.mock('../../../host/hostClient', () => ({ hostClient: {} }))
+vi.mock('../../../host/hostClient', () => ({
+  hostClient: { agent: { onPromptPreferencesChanged: vi.fn(() => () => undefined) } }
+}))
 vi.mock('../../../lib/platform', () => ({ isMacOS: () => mocks.mac }))
 vi.mock('../../notifications/notificationClient', () => ({
   hasNotificationHostApi: () => mocks.notifications

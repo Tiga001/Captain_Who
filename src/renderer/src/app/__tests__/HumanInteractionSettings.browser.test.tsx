@@ -1,4 +1,4 @@
-import type { HumanInteractionSettings } from '@mycopilot/protocol'
+import type { AgentPromptPreferencesChanged, HumanInteractionSettings } from '@mycopilot/protocol'
 import type { HostInvocationResult } from '@mycopilot/host-api'
 import { page } from 'vitest/browser'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
@@ -7,6 +7,8 @@ import { getFrontendCssVariables } from '../../config/frontendConfig'
 import '../../features/settings/SettingsPage.css'
 
 const service = vi.hoisted(() => ({
+  preferencesSubscribe: vi.fn(),
+  preferencesUnsubscribe: vi.fn(),
   get: vi.fn(),
   update: vi.fn(),
   subscribe: vi.fn(),
@@ -22,6 +24,7 @@ const service = vi.hoisted(() => ({
 
 vi.mock('../../host/hostClient', () => ({
   hostClient: {
+    agent: { onPromptPreferencesChanged: service.preferencesSubscribe },
     humanInteraction: {
       getSettings: service.get,
       updateSettings: service.update,
@@ -58,6 +61,7 @@ const { HumanInteractionSettingsSection } =
 const label = '允许智能体向人类发起提问与协作'
 let changed: (settings: HumanInteractionSettings) => void
 let resync: () => void
+let preferencesChanged: (event: AgentPromptPreferencesChanged) => void
 
 function deferred<T>() {
   let resolve!: (value: T) => void
@@ -77,6 +81,10 @@ function ok(value: HumanInteractionSettings): HostInvocationResult<HumanInteract
 
 beforeEach(() => {
   for (const method of Object.values(service)) method.mockReset()
+  service.preferencesSubscribe.mockImplementation((handler) => {
+    preferencesChanged = handler
+    return service.preferencesUnsubscribe
+  })
   service.get.mockResolvedValue(ok(snapshot()))
   service.subscribe.mockImplementation((handler) => {
     changed = handler
@@ -100,9 +108,22 @@ describe('Human interaction personalization settings', () => {
   it('immediately saves choices without publishing the instruction draft, then saves only instructions', async () => {
     service.savePreferences.mockImplementation(async (value) => ({ ...value, updatedAt: 2 }))
     const screen = await render(<PersonalizationSettingsPage />)
-    const toggle = screen.getByRole('switch', { name: '极简模式', exact: true })
+    const toggle = screen.getByRole('switch', { name: '轻量模式', exact: true })
     await expect.element(toggle).toBeEnabled()
     await expect.element(toggle).toHaveAttribute('aria-checked', 'false')
+    const help = screen.getByRole('button', { name: '查看轻量模式说明' })
+    await help.click()
+    const dialog = screen.getByRole('dialog', { name: '轻量模式' })
+    await expect.element(dialog).toBeVisible()
+    await expect
+      .element(dialog)
+      .toHaveTextContent(
+        '打开轻量模式后，基础系统提示词、基础工具集合和对应工具说明会被精简。在新一轮次对话生效。'
+      )
+    await screen.getByRole('button', { name: '知道了' }).click()
+    await expect.element(dialog).not.toBeInTheDocument()
+    await expect.element(help).toHaveFocus()
+    expect(service.savePreferences).not.toHaveBeenCalled()
     await screen.getByRole('textbox').fill('Preserve my instructions')
     for (const contextProfile of ['minimal', 'full']) {
       await toggle.click()
@@ -157,6 +178,29 @@ describe('Human interaction personalization settings', () => {
     await expect.element(toggle).toHaveAttribute('aria-checked', 'false')
   })
 
+  it('keeps capability-center mode changes across a delayed initial read and preserves instruction drafts', async () => {
+    const pending = deferred<unknown>()
+    service.loadPreferences.mockReturnValueOnce(pending.promise)
+    const screen = await render(<PersonalizationSettingsPage />)
+    preferencesChanged({ contextProfile: 'minimal', updatedAt: 3 })
+    pending.resolve({
+      contextProfile: 'full',
+      workMode: 'coding',
+      tone: 'pragmatic',
+      detailLevel: 'medium',
+      customInstructions: 'Saved instructions',
+      updatedAt: 1
+    })
+    const toggle = screen.getByRole('switch', { name: '轻量模式', exact: true })
+    await expect.element(toggle).toBeEnabled()
+    await expect.element(toggle).toHaveAttribute('aria-checked', 'true')
+    await screen.getByRole('textbox').fill('Unsaved draft')
+    preferencesChanged({ contextProfile: 'full', updatedAt: 4 })
+    await expect.element(toggle).toHaveAttribute('aria-checked', 'false')
+    await expect.element(screen.getByRole('textbox')).toHaveValue('Unsaved draft')
+    expect(service.savePreferences).not.toHaveBeenCalled()
+  })
+
   it('keeps choices and the latest instruction draft after an immediate save fails', async () => {
     const pending = deferred<unknown>()
     service.savePreferences.mockReturnValueOnce(pending.promise)
@@ -164,7 +208,7 @@ describe('Human interaction personalization settings', () => {
     const textarea = screen.getByRole('textbox')
     await expect.element(textarea).toHaveValue('Saved instructions')
     await textarea.fill('Draft before switching')
-    const toggle = screen.getByRole('switch', { name: '极简模式', exact: true })
+    const toggle = screen.getByRole('switch', { name: '轻量模式', exact: true })
     await toggle.click()
     await expect.element(toggle).toBeDisabled()
     await expect.element(screen.getByRole('button', { name: /适用于日常工作/ })).toBeDisabled()
@@ -201,7 +245,7 @@ describe('Human interaction personalization settings', () => {
     await expect.element(save).toBeEnabled()
     await expect.element(textarea).toHaveValue('New draft after submission')
     service.savePreferences.mockImplementation(async (value) => ({ ...value, updatedAt: 3 }))
-    const toggle = screen.getByRole('switch', { name: '极简模式', exact: true })
+    const toggle = screen.getByRole('switch', { name: '轻量模式', exact: true })
     await toggle.click()
     await expect.element(toggle).toHaveAttribute('aria-checked', 'true')
     expect(service.savePreferences.mock.calls.at(-1)?.[0].customInstructions).toBe(
@@ -223,7 +267,7 @@ describe('Human interaction personalization settings', () => {
     const screen = await render(<PersonalizationSettingsPage />)
     await expect.element(screen.getByRole('alert')).toBeVisible()
     await expect
-      .element(screen.getByRole('switch', { name: '极简模式', exact: true }))
+      .element(screen.getByRole('switch', { name: '轻量模式', exact: true }))
       .toBeDisabled()
     await expect.element(screen.getByRole('button', { name: /适用于日常工作/ })).toBeDisabled()
     await expect.element(screen.getByRole('button', { name: '务实', exact: true })).toBeDisabled()
@@ -389,17 +433,24 @@ describe('Human interaction personalization settings', () => {
       element: screen.container.querySelector<HTMLElement>('.personalization-human-interaction')!,
       path: '__screenshots__/HumanInteractionSettings.browser.test.tsx/narrow-settings.png'
     })
-    const minimalToggle = screen.getByRole('switch', { name: '极简模式', exact: true })
+    const minimalToggle = screen.getByRole('switch', { name: '轻量模式', exact: true })
     await expect.element(minimalToggle).toBeVisible()
     const minimalBox = minimalToggle.element().getBoundingClientRect()
+    const toneBox = screen.container
+      .querySelector('.personalization-tone-section')!
+      .getBoundingClientRect()
+    const minimalRow = screen.container
+      .querySelector('.personalization-minimal-mode')!
+      .getBoundingClientRect()
+    expect(minimalRow.top).toBeGreaterThan(toneBox.bottom)
     expect(minimalBox.width).toBe(44)
     expect(minimalBox.height).toBe(24)
     expect(
       screen.container.querySelector('.personalization-minimal-mode')!.scrollWidth
     ).toBeLessThanOrEqual(340)
     await page.screenshot({
-      element: screen.container.querySelector<HTMLElement>('.personalization-work-mode')!,
-      path: '__screenshots__/HumanInteractionSettings.browser.test.tsx/minimal-mode.png'
+      element: screen.container.querySelector<HTMLElement>('.personalization-minimal-mode')!,
+      path: '__screenshots__/HumanInteractionSettings.browser.test.tsx/lightweight-mode.png'
     })
     const customHeading = screen.container.querySelector<HTMLElement>(
       '.personalization-custom-instructions__heading-row'

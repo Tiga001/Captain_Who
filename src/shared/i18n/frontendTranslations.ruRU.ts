@@ -917,9 +917,13 @@ export const ruRUTranslations = {
   'profile.handlePlaceholder': 'ПОЛЬЗОВАТЕЛЬ',
   'profile.openSettings': 'Настройки',
   'profile.avatarUploadFailed': 'Не удалось загрузить аватар',
-  'personalization.minimalMode': 'Минимальный режим',
-  'personalization.minimalModeDescription':
-    'Сокращает базовый контекст и инструменты. Изменение действует со следующего хода. Настройки расширений сохраняются; выключите для возврата к полному режиму.',
+  'personalization.minimalMode': 'Облегчённый режим',
+  'personalization.minimalModeDescription': 'Упрощает базовый контекст и инструменты.',
+  'personalization.minimalModeHelp.description':
+    'При включении облегчённого режима базовый системный промпт, набор базовых инструментов и их описания сокращаются. Изменение вступает в силу со следующего хода диалога.',
+  'personalization.minimalModeHelp.open': 'Подробнее об облегчённом режиме',
+  'personalization.minimalModeHelp.close': 'Закрыть описание облегчённого режима',
+  'personalization.minimalModeHelp.acknowledge': 'Понятно',
   'personalization.workMode': 'Режим работы',
   'personalization.workModeDescription':
     'Выберите, сколько технических подробностей будут включать в себя ответы.',

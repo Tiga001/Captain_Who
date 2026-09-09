@@ -38,7 +38,7 @@ last_verified: 2026-09-09
 
 开发库重置前应先关闭应用并备份数据根；优先使用受管 `storage:reset-dev` 流程。不要只删除 `storage.sqlite` 而遗留 attachments、artifacts、spool 或 lock 文件。
 
-`storage:reset-dev` 是显式丢弃历史的重建操作，始终新建 v44，不恢复 Conversation、Project 或 Agent/runtime 历史；它与启动时保留历史的 v43 → v44 升级分开。它从 exact current v44 及 exact v35–v43 保留 allowlisted 配置与凭据引用；v36–v44 还保留人机交互设置及 revision，v43–v44 保留全局协作开关及 revision，v44 保留极简/完整模式，旧版本该项默认 Full。Run/Wake 冻结策略属于运行事实，重置时清空。既有受限恢复选项也可从绑定 exact v33 fingerprint 的私有备份读取 allowlisted 设置，并把凭据转换为 reference。无法安全识别且含配置的旧库拒绝重置，不能用默认值默默替换模型配置。
+`storage:reset-dev` 是显式丢弃历史的重建操作，始终新建 v44，不恢复 Conversation、Project 或 Agent/runtime 历史；它与启动时保留历史的 v43 → v44 升级分开。它从 exact current v44 及 exact v35–v43 保留 allowlisted 配置与凭据引用；v36–v44 还保留人机交互设置及 revision，v43–v44 保留全局协作开关及 revision，v44 保留轻量/完整模式，旧版本该项默认 Full。Run/Wake 冻结策略属于运行事实，重置时清空。既有受限恢复选项也可从绑定 exact v33 fingerprint 的私有备份读取 allowlisted 设置，并把凭据转换为 reference。无法安全识别且含配置的旧库拒绝重置，不能用默认值默默替换模型配置。
 
 `agent_context_profile_run_policies` 以 `conversation_turn_traces.run_id` 为外键，`agent_context_profile_wake_policies` 以 `agent_wake_requests.wake_id` 为外键；两表只接受 `full | minimal`，禁止更新，随父记录删除。Run admission 与模式冻结同事务，Wake 入队继承来源 Run/Wake 的模式。它们不属于偏好表，也不能在设置保存时批量改写。
 

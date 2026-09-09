@@ -927,9 +927,13 @@ export const itITTranslations = {
   'profile.handlePlaceholder': 'UTENTE',
   'profile.openSettings': 'Impostazioni',
   'profile.avatarUploadFailed': "Caricamento dell'avatar non riuscito",
-  'personalization.minimalMode': 'Modalità minima',
-  'personalization.minimalModeDescription':
-    'Riduce il contesto di base e gli strumenti. La modifica si applica dal prossimo turno. Le estensioni mantengono le impostazioni; disattiva per tornare alla modalità completa.',
+  'personalization.minimalMode': 'Modalità leggera',
+  'personalization.minimalModeDescription': 'Semplifica il contesto e gli strumenti di base.',
+  'personalization.minimalModeHelp.description':
+    'Attivando la modalità leggera, il prompt di sistema di base, gli strumenti di base e le relative descrizioni vengono semplificati. La modifica ha effetto dal prossimo turno di conversazione.',
+  'personalization.minimalModeHelp.open': 'Visualizza i dettagli della modalità leggera',
+  'personalization.minimalModeHelp.close': 'Chiudi i dettagli della modalità leggera',
+  'personalization.minimalModeHelp.acknowledge': 'Ho capito',
   'personalization.workMode': 'Modalità di lavoro',
   'personalization.workModeDescription': 'Scegli quanti dettagli tecnici includono le risposte',
   'personalization.workModeCoding': 'Per la codifica',

@@ -62,11 +62,13 @@ Composer 的 `/` 菜单首项为 `model`，与 `capabilities` 一样是二级导
 
 当前 Run、审批续跑与 Guidance 保持原配置；队列按每项的 `modelId` / `permissionMode` 发送，不回写覆盖用户后来选择的草稿。异步提交与 Provider 完成通知只能更新仍属于原提交的草稿字段。上下文用量在 Run 活跃时采用 Host 事件快照，停止草稿预估 RPC 并作废此前在途预估；结束后才为当前草稿刷新预估。
 
-### 极简上下文模式
+### 轻量上下文模式
 
-个性化页面的工作模式、语气等选择及“极简模式”切换后立即保存；“保存”按钮只提交自定义指令，其他设置的自动保存不能提交尚未保存的指令草稿。“极简模式”位于工作模式底部，默认关闭，对应全局 `AgentPromptPreferences.contextProfile = full | minimal`，不把 `coding | general` 改成第三种工作模式，也不改写图片生成、搜索、人机交互、协作、浏览器、Skill 或 MCP 的原配置。模式切换从新轮次生效，关闭后恢复完整基础提示词和工具。
+个性化页面的工作模式、语气等选择及“轻量模式”切换后立即保存；“保存”按钮只提交自定义指令，其他设置的自动保存不能提交尚未保存的指令草稿。“轻量模式”位于“个性”选择框下方，说明为“精简基础上下文和工具。”；标题后的小问号复用模型配置的帮助入口和弹窗样式，弹窗标题为“轻量模式”，正文为“打开轻量模式后，基础系统提示词、基础工具集合和对应工具说明会被精简。在新一轮次对话生效。”，确认按钮为“知道了”。开关默认关闭，对应全局 `AgentPromptPreferences.contextProfile = full | minimal`，不把 `coding | general` 改成第三种工作模式，也不改写图片生成、搜索、人机交互、协作、浏览器、Skill 或 MCP 的原配置。模式切换从新轮次生效，关闭后恢复完整基础提示词和工具。
 
-新根 Run 在接纳事务中冻结模式；该 Run 委派的 Wake 继承此值，审批、提问及进程恢复沿用原 Run 策略。保存不改变正在执行的任务树，也不启动模型请求。`agent.promptPreferencesChanged` 通知只携带 `contextProfile` 与 `updatedAt`，不传播自定义指令；Host 使上下文缓存失效，Renderer 为空闲会话刷新预览，活跃 Run 继续采用本轮快照，结束后刷新下一轮预览。提示词、工具与计量的对应关系见[Agent Runtime](../architecture/agent-runtime-and-providers.md#极简上下文模式)。
+输入框 `/` 菜单的“能力中心”在首行提供同一轻量模式开关。快捷入口保存前读取最新偏好，只修改 `contextProfile`；两个入口通过偏好变更通知同步，保留其他个性化设置及未保存的自定义指令草稿。
+
+新根 Run 在接纳事务中冻结模式；该 Run 委派的 Wake 继承此值，审批、提问及进程恢复沿用原 Run 策略。保存不改变正在执行的任务树，也不启动模型请求。`agent.promptPreferencesChanged` 通知只携带 `contextProfile` 与 `updatedAt`，不传播自定义指令；Host 使上下文缓存失效，Renderer 为空闲会话刷新预览，活跃 Run 继续采用本轮快照，结束后刷新下一轮预览。提示词、工具与计量的对应关系见[Agent Runtime](../architecture/agent-runtime-and-providers.md#轻量上下文模式)。
 
 ### 人机交互设置
 

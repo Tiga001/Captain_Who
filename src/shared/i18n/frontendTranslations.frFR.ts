@@ -931,9 +931,13 @@ export const frFRTranslations = {
   'profile.handlePlaceholder': 'UTILISATEUR',
   'profile.openSettings': 'Paramètres',
   'profile.avatarUploadFailed': "Échec du téléchargement de l'avatar",
-  'personalization.minimalMode': 'Mode minimal',
-  'personalization.minimalModeDescription':
-    'Allège le contexte de base et les outils. Le changement prend effet au prochain tour. Les extensions conservent leurs réglages ; désactivez pour rétablir le mode complet.',
+  'personalization.minimalMode': 'Mode léger',
+  'personalization.minimalModeDescription': 'Simplifie le contexte et les outils de base.',
+  'personalization.minimalModeHelp.description':
+    'Activer le mode léger simplifie le prompt système de base, les outils de base et leurs descriptions. Le changement prend effet au prochain tour de conversation.',
+  'personalization.minimalModeHelp.open': 'Afficher les détails du mode léger',
+  'personalization.minimalModeHelp.close': 'Fermer les détails du mode léger',
+  'personalization.minimalModeHelp.acknowledge': 'Compris',
   'personalization.workMode': 'Mode de travail',
   'personalization.workModeDescription':
     'Choisissez la quantité de détails techniques que les réponses incluent',

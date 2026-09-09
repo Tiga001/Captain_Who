@@ -918,9 +918,13 @@ export const jaJPTranslations = {
   'profile.handlePlaceholder': 'ユーザー',
   'profile.openSettings': '設定',
   'profile.avatarUploadFailed': 'アバターのアップロードに失敗しました',
-  'personalization.minimalMode': '最小モード',
-  'personalization.minimalModeDescription':
-    '基本コンテキストとツールを簡素化します。切り替え後の新しいターンから適用されます。拡張機能の設定は維持され、オフにすると通常モードに戻ります。',
+  'personalization.minimalMode': '軽量モード',
+  'personalization.minimalModeDescription': '基本コンテキストとツールを簡素化します。',
+  'personalization.minimalModeHelp.description':
+    '軽量モードをオンにすると、基本システムプロンプト、基本ツールセット、各ツールの説明が簡素化されます。次の会話ターンから有効になります。',
+  'personalization.minimalModeHelp.open': '軽量モードの説明を表示',
+  'personalization.minimalModeHelp.close': '軽量モードの説明を閉じる',
+  'personalization.minimalModeHelp.acknowledge': '了解',
   'personalization.workMode': '仕事モード',
   'personalization.workModeDescription': '回答に技術的な詳細をどの程度含めるかを選択してください',
   'personalization.workModeCoding': 'コーディング用',

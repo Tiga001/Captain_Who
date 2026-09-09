@@ -862,9 +862,13 @@ export const zhCNTranslations = {
   'profile.openSettings': '设置',
   'profile.avatarUploadFailed': '头像上传失败',
 
-  'personalization.minimalMode': '极简模式',
-  'personalization.minimalModeDescription':
-    '精简基础上下文和工具。切换后从新轮次生效；扩展仍按原配置，关闭后恢复完整模式。',
+  'personalization.minimalMode': '轻量模式',
+  'personalization.minimalModeDescription': '精简基础上下文和工具。',
+  'personalization.minimalModeHelp.description':
+    '打开轻量模式后，基础系统提示词、基础工具集合和对应工具说明会被精简。在新一轮次对话生效。',
+  'personalization.minimalModeHelp.open': '查看轻量模式说明',
+  'personalization.minimalModeHelp.close': '关闭轻量模式说明',
+  'personalization.minimalModeHelp.acknowledge': '知道了',
   'personalization.workMode': '工作模式',
   'personalization.workModeDescription': '选择回复中的技术细节程度',
   'personalization.workModeCoding': '适用于编程',

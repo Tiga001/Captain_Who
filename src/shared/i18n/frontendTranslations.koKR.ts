@@ -892,9 +892,13 @@ export const koKRTranslations = {
   'profile.handlePlaceholder': '사용자',
   'profile.openSettings': '설정',
   'profile.avatarUploadFailed': '아바타 업로드 실패',
-  'personalization.minimalMode': '최소 모드',
-  'personalization.minimalModeDescription':
-    '기본 컨텍스트와 도구를 간소화합니다. 전환 후 새 턴부터 적용됩니다. 확장 설정은 유지되며 끄면 전체 모드로 돌아갑니다.',
+  'personalization.minimalMode': '경량 모드',
+  'personalization.minimalModeDescription': '기본 컨텍스트와 도구를 간소화합니다.',
+  'personalization.minimalModeHelp.description':
+    '경량 모드를 켜면 기본 시스템 프롬프트, 기본 도구 모음 및 해당 도구 설명이 간소화됩니다. 다음 대화 턴부터 적용됩니다.',
+  'personalization.minimalModeHelp.open': '경량 모드 설명 보기',
+  'personalization.minimalModeHelp.close': '경량 모드 설명 닫기',
+  'personalization.minimalModeHelp.acknowledge': '확인',
   'personalization.workMode': '작업 모드',
   'personalization.workModeDescription': '기술 세부 응답에 포함되는 내용을 선택하세요.',
   'personalization.workModeCoding': '코딩용',

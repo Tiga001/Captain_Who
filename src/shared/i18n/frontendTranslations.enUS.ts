@@ -906,9 +906,13 @@ export const enUSTranslations = {
   'profile.openSettings': 'Settings',
   'profile.avatarUploadFailed': 'Avatar upload failed',
 
-  'personalization.minimalMode': 'Minimal mode',
-  'personalization.minimalModeDescription':
-    'Use leaner base context and tools. Changes apply from the next turn. Extensions keep their settings; turn off to restore full mode.',
+  'personalization.minimalMode': 'Lightweight mode',
+  'personalization.minimalModeDescription': 'Streamline base context and tools.',
+  'personalization.minimalModeHelp.description':
+    'Turning on lightweight mode simplifies the base system prompt, base tool set, and corresponding tool descriptions. Takes effect on the next conversation turn.',
+  'personalization.minimalModeHelp.open': 'View lightweight mode details',
+  'personalization.minimalModeHelp.close': 'Close lightweight mode details',
+  'personalization.minimalModeHelp.acknowledge': 'Got it',
   'personalization.workMode': 'Work mode',
   'personalization.workModeDescription': 'Choose how much technical detail responses include',
   'personalization.workModeCoding': 'For coding',

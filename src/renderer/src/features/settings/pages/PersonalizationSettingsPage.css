@@ -42,6 +42,12 @@
   gap: 20px;
 }
 
+.personalization-minimal-mode__heading {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
 .personalization-minimal-mode__row .settings-list-row__description {
   display: block;
 }

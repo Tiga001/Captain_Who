@@ -6,7 +6,7 @@ import {
   parseImageGenerationGetConfigurationOutput,
   parseImageGenerationSetEnabledOutput
 } from '@mycopilot/protocol'
-import { ArrowLeft, Bot, Globe, Image, Monitor, Plug, Search, Users } from 'lucide-react'
+import { ArrowLeft, Bot, Globe, Image, Leaf, Monitor, Plug, Search, Users } from 'lucide-react'
 import { useEffect, useId, useRef, useState, type ComponentType } from 'react'
 import { ConfirmationDialog } from '../../components/dialog/ConfirmationDialog'
 import { useFrontendConfig } from '../../config/FrontendConfigProvider'
@@ -16,6 +16,7 @@ import { getImageGenerationConfigurationErrorDetails } from '../imageGeneration/
 import { getMcpManagementErrorDetails } from '../mcp/mcpManagementErrors'
 import { useBuiltinMcpCapabilities } from '../mcp/useBuiltinMcpCapabilities'
 import { useMcpManagement } from '../mcp/useMcpManagement'
+import { loadAgentPromptPreferences, saveAgentPromptPreferences } from '../storage/storageClient'
 import { useCapabilitySnapshot } from './useCapabilitySnapshot'
 import './CapabilityCenterMenu.css'
 
@@ -49,6 +50,11 @@ const collaborationSource = {
   subscribe: (changed: () => void) => hostClient.agent.onCollaborationSettingsChanged(changed),
   revision: (value: { revision: number }) => value.revision
 }
+const promptPreferencesSource = {
+  load: loadAgentPromptPreferences,
+  subscribe: (changed: () => void) => hostClient.agent.onPromptPreferencesChanged(changed),
+  revision: (value: { updatedAt: number }) => value.updatedAt
+}
 
 interface CapabilityRow {
   id: string
@@ -71,10 +77,11 @@ export function CapabilityCenterMenu({ onBack, onDialogOpenChange }: CapabilityC
   const image = useCapabilitySnapshot(imageSource)
   const human = useCapabilitySnapshot(humanSource)
   const collaboration = useCapabilitySnapshot(collaborationSource)
+  const promptPreferences = useCapabilitySnapshot(promptPreferencesSource)
   const builtin = useBuiltinMcpCapabilities()
   const mcp = useMcpManagement()
   const [query, setQuery] = useState('')
-  const [selectedId, setSelectedId] = useState('image')
+  const [selectedId, setSelectedId] = useState('lightweight')
   const [pending, setPending] = useState<ReadonlySet<string>>(() => new Set())
   const pendingRef = useRef(new Set<string>())
   const [error, setError] = useState<string | null>(null)
@@ -118,17 +125,45 @@ export function CapabilityCenterMenu({ onBack, onDialogOpenChange }: CapabilityC
       image.error ||
       human.error ||
       collaboration.error ||
+      promptPreferences.error ||
       builtin.state.status === 'error' ||
       mcp.state.status === 'error'
     ) {
       setError(t('capabilityCenter.loadFailed'))
     }
-  }, [image.error, human.error, collaboration.error, builtin.state.status, mcp.state.status, t])
+  }, [
+    image.error,
+    human.error,
+    collaboration.error,
+    promptPreferences.error,
+    builtin.state.status,
+    mcp.state.status,
+    t
+  ])
 
   const browser = builtin.state.output?.capabilities.find(
     (item) => item.capabilityId === 'browser_automation'
   )
   const software: CapabilityRow[] = [
+    {
+      id: 'lightweight',
+      label: t('personalization.minimalMode'),
+      keywords: 'lightweight minimal mode 轻量模式 輕量模式',
+      icon: Leaf,
+      enabled: promptPreferences.value?.contextProfile === 'minimal',
+      disabled: !promptPreferences.available || promptPreferences.pending,
+      toggle: async () => {
+        if (!promptPreferences.value) return
+        const contextProfile =
+          promptPreferences.value.contextProfile === 'minimal' ? 'full' : 'minimal'
+        await promptPreferences.mutate(async () => {
+          // The storage API writes the whole record. Read immediately before saving so this
+          // shortcut preserves the latest personalization settings and saved instructions.
+          const latest = await loadAgentPromptPreferences()
+          await saveAgentPromptPreferences({ ...latest, contextProfile })
+        })
+      }
+    },
     {
       id: 'image',
       label: t('capabilityCenter.image'),

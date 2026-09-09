@@ -5,8 +5,10 @@ import {
   TONE_OPTIONS
 } from './PersonalizationSettingsPage.definition'
 import { useEffect, useMemo, useRef, useState } from 'react'
+import type { AgentPromptPreferencesChanged } from '@mycopilot/protocol'
 import { Check, ChevronDown, MessageCircle, Terminal } from 'lucide-react'
 import { useFrontendConfig } from '../../../config/FrontendConfigProvider'
+import { hostClient } from '../../../host/hostClient'
 import {
   defaultAgentPromptPreferences,
   loadAgentPromptPreferences,
@@ -14,6 +16,7 @@ import {
 } from '../../storage/storageClient'
 import type { AgentPromptPreferencesSnapshot } from '../../storage/storageClient'
 import { HumanInteractionSettingsSection } from './HumanInteractionSettingsSection'
+import { SettingsHelpButton } from '../components/SettingsHelpButton'
 import './PersonalizationSettingsPage.css'
 
 type ImmediatePreferences = Partial<
@@ -35,6 +38,14 @@ export function PersonalizationSettingsPage() {
 
   useEffect(() => {
     let isCancelled = false
+    let latestModeChange: AgentPromptPreferencesChanged | undefined
+    const unsubscribe = hostClient.agent.onPromptPreferencesChanged((event) => {
+      if (latestModeChange && event.updatedAt < latestModeChange.updatedAt) return
+      latestModeChange = event
+      setPreferences((current) =>
+        event.updatedAt >= current.updatedAt ? { ...current, ...event } : current
+      )
+    })
 
     async function loadPreferences() {
       setIsLoading(true)
@@ -42,7 +53,11 @@ export function PersonalizationSettingsPage() {
       try {
         const loadedPreferences = await loadAgentPromptPreferences()
         if (isCancelled) return
-        setPreferences(loadedPreferences)
+        setPreferences(
+          latestModeChange && latestModeChange.updatedAt >= loadedPreferences.updatedAt
+            ? { ...loadedPreferences, ...latestModeChange }
+            : loadedPreferences
+        )
         setCustomInstructions(loadedPreferences.customInstructions)
         setHasLoaded(true)
       } catch {
@@ -56,6 +71,7 @@ export function PersonalizationSettingsPage() {
 
     return () => {
       isCancelled = true
+      unsubscribe()
     }
   }, [t])
 
@@ -86,7 +102,11 @@ export function PersonalizationSettingsPage() {
         detailLevel: preferences.detailLevel || 'medium',
         customInstructions: submittedInstructions ?? preferences.customInstructions
       })
-      setPreferences(saved)
+      setPreferences((current) =>
+        current.updatedAt > saved.updatedAt
+          ? { ...saved, contextProfile: current.contextProfile, updatedAt: current.updatedAt }
+          : saved
+      )
       if (submittedInstructions !== undefined) {
         setCustomInstructions((current) =>
           current === submittedInstructions ? saved.customInstructions : current
@@ -151,41 +171,6 @@ export function PersonalizationSettingsPage() {
                       </button>
                     )
                   })}
-                </div>
-                <div className="settings-list personalization-minimal-mode">
-                  {renderSettingsNodes(node.children, (setting) => (
-                    <div className="settings-list-row personalization-minimal-mode__row">
-                      <span className="settings-list-row__text">
-                        <span className="settings-list-row__title" id="minimal-mode-label">
-                          {settingLabel(setting, t)}
-                        </span>
-                        <span
-                          className="settings-list-row__description"
-                          id="minimal-mode-description"
-                        >
-                          {settingDescription(setting, t)}
-                        </span>
-                      </span>
-                      <button
-                        className="settings-switch"
-                        type="button"
-                        role="switch"
-                        aria-labelledby="minimal-mode-label"
-                        aria-describedby="minimal-mode-description"
-                        aria-checked={preferences.contextProfile === 'minimal'}
-                        data-state={preferences.contextProfile === 'minimal' ? 'on' : 'off'}
-                        disabled={controlsDisabled}
-                        onClick={() =>
-                          void persistPreferences({
-                            contextProfile:
-                              preferences.contextProfile === 'minimal' ? 'full' : 'minimal'
-                          })
-                        }
-                      >
-                        <span className="settings-switch__thumb" aria-hidden="true" />
-                      </button>
-                    </div>
-                  ))}
                 </div>
               </section>
             )
@@ -253,6 +238,51 @@ export function PersonalizationSettingsPage() {
                       )}
                     </span>
                   </div>
+                </div>
+              </section>
+            )
+          case 'personalization.minimalMode':
+            return (
+              <section
+                className="settings-list personalization-minimal-mode"
+                aria-labelledby="minimal-mode-label"
+              >
+                <div className="settings-list-row personalization-minimal-mode__row">
+                  <span className="settings-list-row__text">
+                    <span className="personalization-minimal-mode__heading">
+                      <span className="settings-list-row__title" id="minimal-mode-label">
+                        {settingLabel(node, t)}
+                      </span>
+                      <SettingsHelpButton
+                        label={t('personalization.minimalModeHelp.open')}
+                        title={settingLabel(node, t)}
+                        description={t('personalization.minimalModeHelp.description')}
+                        closeLabel={t('personalization.minimalModeHelp.close')}
+                        acknowledgeLabel={t('personalization.minimalModeHelp.acknowledge')}
+                      />
+                    </span>
+                    <span className="settings-list-row__description" id="minimal-mode-description">
+                      {settingDescription(node, t)}
+                    </span>
+                  </span>
+                  <button
+                    className="settings-switch"
+                    type="button"
+                    role="switch"
+                    aria-labelledby="minimal-mode-label"
+                    aria-describedby="minimal-mode-description"
+                    aria-checked={preferences.contextProfile === 'minimal'}
+                    data-state={preferences.contextProfile === 'minimal' ? 'on' : 'off'}
+                    disabled={controlsDisabled}
+                    onClick={() =>
+                      void persistPreferences({
+                        contextProfile:
+                          preferences.contextProfile === 'minimal' ? 'full' : 'minimal'
+                      })
+                    }
+                  >
+                    <span className="settings-switch__thumb" aria-hidden="true" />
+                  </button>
                 </div>
               </section>
             )

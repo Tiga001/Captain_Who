@@ -1,9 +1,9 @@
 import { renderSettingsNodes, settingLabel } from '../../settingsDefinition'
 import { modelConfigurationSection } from './configuration.definition'
-import { Check, CircleHelp } from 'lucide-react'
+import { Check } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import type { CredentialMutation, CredentialStatus } from '@mycopilot/protocol'
-import { ConfirmationDialog } from '../../../../components/dialog/ConfirmationDialog'
+import { SettingsHelpButton } from '../../components/SettingsHelpButton'
 import { useFrontendConfig } from '../../../../config/FrontendConfigProvider'
 import type { ModelConfig } from './configurationTypes'
 import { formatContextWindow } from './modelPresentation'
@@ -35,7 +35,6 @@ export function ModelProviderSettings({
   const [apiUrlDraft, setApiUrlDraft] = useState(apiUrl)
   const [isApiUrlCommitPending, setApiUrlCommitPending] = useState(false)
   const [apiTokenMutation, setApiTokenMutation] = useState<CredentialMutation>({ type: 'keep' })
-  const [isDefaultApiHelpOpen, setDefaultApiHelpOpen] = useState(false)
   const helpDescription = `${t('configuration.modelSettingsHelp.description')} ${t(
     'configuration.modelSettingsHelp.note'
   )}`
@@ -71,17 +70,13 @@ export function ModelProviderSettings({
               <div className="configuration-form-block settings-list-section">
                 <div className="model-settings-heading">
                   <h2>{settingLabel(node, t)}</h2>
-                  <button
-                    className="model-settings-help-button"
-                    type="button"
-                    aria-expanded={isDefaultApiHelpOpen}
-                    aria-haspopup="dialog"
-                    aria-label={t('configuration.modelSettingsHelp.open')}
-                    title={t('configuration.modelSettingsHelp.open')}
-                    onClick={() => setDefaultApiHelpOpen(true)}
-                  >
-                    <CircleHelp aria-hidden="true" />
-                  </button>
+                  <SettingsHelpButton
+                    label={t('configuration.modelSettingsHelp.open')}
+                    title={t('configuration.modelSettingsHelp.title')}
+                    description={helpDescription}
+                    closeLabel={t('configuration.modelSettingsHelp.close')}
+                    acknowledgeLabel={t('configuration.modelSettingsHelp.acknowledge')}
+                  />
                 </div>
 
                 <div className="settings-list">
@@ -192,19 +187,6 @@ export function ModelProviderSettings({
           </label>
         ))}
       </div>
-
-      {isDefaultApiHelpOpen && (
-        <ConfirmationDialog
-          cancelLabel={t('configuration.modelSettingsHelp.close')}
-          confirmLabel={t('configuration.modelSettingsHelp.acknowledge')}
-          confirmVariant="primary"
-          description={helpDescription}
-          onCancel={() => setDefaultApiHelpOpen(false)}
-          onConfirm={() => setDefaultApiHelpOpen(false)}
-          showCancelButton={false}
-          title={t('configuration.modelSettingsHelp.title')}
-        />
-      )}
     </section>
   )
 }

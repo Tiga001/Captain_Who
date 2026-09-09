@@ -129,7 +129,7 @@ fn core_identity_section() -> String {
 }
 
 fn context_profile_section() -> String {
-    "## 上下文模式\n完整模式（full）提供完整基础提示词和常驻工具；极简模式（minimal）精简基础提示词和常驻工具，扩展能力仍按实际配置提供。当前模式只以最新 World State 的 `interaction.profile.contextProfile` 为准，不从历史或工具数量猜测。模式不改变权限、审批、自定义指令或已有聊天历史；实际可用工具以本次请求的原生 Schema 为准。".to_string()
+    "## 上下文模式\n完整模式（full）提供完整基础提示词和常驻工具；轻量模式（minimal）精简基础提示词和常驻工具，扩展能力仍按实际配置提供。当前模式只以最新 World State 的 `interaction.profile.contextProfile` 为准，不从历史或工具数量猜测。模式不改变权限、审批、自定义指令或已有聊天历史；实际可用工具以本次请求的原生 Schema 为准。".to_string()
 }
 
 fn minimal_prompt_sections(tool_definitions: &[AgentToolDefinition]) -> Vec<String> {
@@ -145,7 +145,7 @@ fn minimal_prompt_sections(tool_definitions: &[AgentToolDefinition]) -> Vec<Stri
 
 fn minimal_interaction_profile_section() -> String {
     "## 模式与交互\n\
-    完整模式（full）提供完整基础提示词和常驻工具；极简模式（minimal）精简其说明与集合，扩展能力仍按实际配置提供。当前模式只看最新 World State 的 interaction.profile.contextProfile；workMode、tone、detailLevel 同样只看 interaction.profile，不从历史或工具数量猜测。模式不改变权限、审批、自定义指令或已有历史。\n\
+    完整模式（full）提供完整基础提示词和常驻工具；轻量模式（minimal）精简其说明与集合，扩展能力仍按实际配置提供。当前模式只看最新 World State 的 interaction.profile.contextProfile；workMode、tone、detailLevel 同样只看 interaction.profile，不从历史或工具数量猜测。模式不改变权限、审批、自定义指令或已有历史。\n\
     workMode=coding 重视代码正确性、先读后改、diff、测试和风险说明；workMode=general 优先用户目标，减少工程过程。tone=friendly 温和具体，tone=pragmatic 简洁直接；detailLevel 只调节可见说明，不改变事实、安全、验证或权限标准。"
         .to_string()
 }
@@ -545,7 +545,7 @@ mod tests {
         ] {
             assert_eq!(prompt.matches(&mode_section).count(), 1);
             assert!(prompt.contains("完整模式（full）"));
-            assert!(prompt.contains("极简模式（minimal）"));
+            assert!(prompt.contains("轻量模式（minimal）"));
             assert!(prompt.contains("interaction.profile.contextProfile"));
             assert!(!prompt.contains("当前模式是"));
             assert!(prompt.contains("workMode=general"));
