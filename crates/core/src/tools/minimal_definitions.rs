@@ -58,10 +58,10 @@ fn minimal_description(name: &str) -> Option<&'static str> {
         "search_files" => "Find paths by case-insensitive name/path substring. Read UTF-8 kind=file results with read_file; inspect kind=directory with workspace_map.focusPath, never read_file.",
         "search_code" => "Search UTF-8 contents of an authorized file or directory.",
         "skills_activate" => "Load a matching or explicitly requested Skill's full instructions and revision-bound resources from this Run's catalog. Activation grants no file/command/network/approval permission.",
-        "attachments_list" => "List this chat's files/images; copy returned @attachments paths unchanged. Read text with read_file and images with read_image; other formats need a matching currently available reader. Never invent tools or Skill refs.",
+        "attachments_list" => "List this chat's files/images; use returned @attachments readPath unchanged.",
         "attachments_list_project" => concat!(
-            "List other authorized conversations' files/images in this project or Agent task tree, excluding this chat; ",
-            "copy returned @attachments paths unchanged. Read text with read_file and images with read_image; other formats need a matching currently available reader. Never invent tools or Skill refs."
+            "List files/images from other authorized chats in this project or Agent tree, excluding this chat; ",
+            "use returned @attachments readPath unchanged."
         ),
         _ => return None,
     })
@@ -92,10 +92,10 @@ fn schema_descriptions(name: &str) -> &'static [(&'static str, &'static str)] {
             ("/properties/command", "Non-interactive shell text; CRLF/CR become LF. Host checks each newline/pipeline/&&/||/; segment. Bounded non-writing heredocs need quoted delimiters, e.g. <<'PY'; unquoted/shell-interpreter heredocs, here-strings, background execution and NUL are denied."),
             ("/properties/cwd", "Before the first call, check World State workspace.binding. With workspace: omit for root or use a relative directory. Without workspace: require an existing absolute directory or @home/@desktop/@documents/@downloads[/child], even for absolute command paths; never relative or '.'. Absolute paths/aliases require write=all. Only a backend-recognized command whose currently activated Skill explicitly supplies a Host-owned private directory may omit cwd."),
             ("/properties/reason", "Purpose and expected result."),
-            ("/properties/observe", "Supported artifact observation relative to cwd; follow the currently activated Skill. Grants no permissions."),
-            ("/properties/observe/properties/expectedOutputs", "Exact supported outputs; no sibling enumeration. Observation does not change command success."),
-            ("/properties/observe/properties/additionalRoots", "Extra supported files/directories; recursive external scans require read=all."),
-            ("/properties/runtimeProfile", "Managed runtime selector: use only when the currently activated Skill explicitly instructs; otherwise omit, never guess. Host verifies and freezes runtime/version/integrity. No package versions; grants no permissions or PATH fallback."),
+            ("/properties/observe", "Best-effort per activated Skill; paths relative to cwd. Grants no permissions."),
+            ("/properties/observe/properties/expectedOutputs", "Exact outputs only; no sibling scan. Observation does not change command success."),
+            ("/properties/observe/properties/additionalRoots", "Extra files/directories; external recursive scans require read=all."),
+            ("/properties/runtimeProfile", "Only if the currently activated Skill explicitly instructs; else omit. Host verifies/freezes runtime identity. Never guess profiles or supply package versions; no extra permissions or PATH fallback."),
             ("/properties/inputs", "Authorized read-only inputs at $MYCOPILOT_INPUT_ROOT/<mountPath>; each item has path and optional mountPath, never source. Host freezes hash/size before approval and revalidates before execution. Copy user/tool paths, never private Host storage paths; supports browser downloads."),
             ("/properties/inputs/items/properties/path", "Exact authorized workspace/absolute/system-alias path, @attachments, browser-download:, image-artifact://, artifact://, or revision-bound skill:// reference."),
             ("/properties/inputs/items/properties/mountPath", "Safe relative mount path; default source filename."),
@@ -388,10 +388,10 @@ mod tests {
             "Only a backend-recognized command whose currently activated Skill explicitly supplies a Host-owned private directory may omit cwd",
             "quoted delimiters",
             "unquoted/shell-interpreter heredocs, here-strings, background execution and NUL are denied",
-            "use only when the currently activated Skill explicitly instructs",
-            "otherwise omit, never guess",
-            "Host verifies and freezes runtime/version/integrity",
-            "No package versions; grants no permissions or PATH fallback",
+            "Only if the currently activated Skill explicitly instructs",
+            "else omit",
+            "Host verifies/freezes runtime identity",
+            "Never guess profiles or supply package versions; no extra permissions or PATH fallback",
             "run_command",
             "$MYCOPILOT_INPUT_ROOT/",
             "freezes hash/size",
@@ -429,21 +429,18 @@ mod tests {
             );
         }
         // History trust belongs to the system prompt; specialized format workflows belong
-        // to activated Skills. These tools retain only local scope and reader discovery.
+        // to activated Skills. These tools retain only scope and exact returned readPath; the system routes readers.
         assert!(tool("conversation_history")
             .description
             .contains("this conversation's durable history"));
         for name in ["attachments_list", "attachments_list_project"] {
             let description = &tool(name).description;
-            assert!(description.contains("returned @attachments paths unchanged"));
-            assert!(description.contains("text with read_file and images with read_image"));
-            assert!(description.contains("matching currently available reader"));
-            assert!(description.contains("Never invent tools or Skill refs"));
+            assert!(description.contains("returned @attachments readPath unchanged"));
         }
         assert!(tool("attachments_list").description.contains("this chat's"));
         assert!(tool("attachments_list_project")
             .description
-            .contains("this project or Agent task tree, excluding this chat"));
+            .contains("other authorized chats in this project or Agent tree, excluding this chat"));
         assert!(schema_descriptions("skills_activate").iter().any(
             |(pointer, description)| *pointer == "/properties/skillRef"
                 && description

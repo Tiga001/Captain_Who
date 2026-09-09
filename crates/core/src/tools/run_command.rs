@@ -95,7 +95,7 @@ impl AgentTool for RunCommandTool {
     fn definition(&self) -> AgentToolDefinition {
         AgentToolDefinition {
             name: "run_command".to_string(),
-            description: "Run one bounded non-interactive shell command through the host for builds, tests, queries, dependency management, or program execution. Before the first ordinary call, inspect World State workspace.binding and follow the cwd field contract; without a workspace, the first call must include cwd. Never use run_command, shell redirection, a heredoc, or an inline script as an alternate writer for ordinary text/code/config files or to bypass file-write approval; use apply_patch action=apply for short Direct changes and apply_patch Staged actions for long or staged content. Explicitly activated managed Skill workflows retain their narrower Host-owned contracts. Host policy may execute, request approval, or deny catastrophic/unsupported operations; it is not an OS sandbox. The Host owns process lifetime and its short initial yield: do not add a deadline merely to bound tool waiting or confirm startup. status=running returns a sessionId; running is not final success. For a required build/test/serial result, call command_session once with action=wait; do not repeatedly poll or narrate waiting. A GUI app or long-lived server normally only needs startup confirmation. Background output and exit update Host state but never start a model turn. For managed workflows, follow only the currently activated Skill's instructions; never guess Host paths or runtimeProfile. inputs binds authorized files read-only under $MYCOPILOT_INPUT_ROOT/<mountPath>; copy input paths from tool results or the user, never private Host storage paths.".to_string(),
+            description: "Run one bounded non-interactive shell command through the host for builds, tests, queries, dependency management, or program execution. Before the first ordinary call, inspect World State workspace.binding and follow the cwd field contract; without a workspace, the first call must include cwd. Never use run_command, shell redirection, a heredoc, or an inline script as an alternate writer for ordinary text/code/config files or to bypass file-write approval; use apply_patch action=apply for short Direct changes and apply_patch Staged actions for long or staged content. Explicitly activated managed Skill workflows retain their narrower Host-owned contracts. Host policy may execute, request approval, or deny catastrophic/unsupported operations; it is not an OS sandbox. The Host owns process lifetime and its short initial yield: do not add a deadline merely to bound tool waiting or confirm startup. status=running returns a sessionId; running is not final success. For a required build/test/serial result, call command_session once with action=wait; do not repeatedly poll or narrate waiting. A GUI app or long-lived server normally only needs startup confirmation. Background output and exit update Host state but never start a model turn. inputs binds authorized files read-only under $MYCOPILOT_INPUT_ROOT/<mountPath>; copy input paths from tool results or the user, never private Host storage paths.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -104,7 +104,7 @@ impl AgentTool for RunCommandTool {
                     "reason": { "type": "string", "description": "Why this command is needed and what result is expected." },
                     "observe": {
                         "type": "object",
-                        "description": "Optional best-effort observation of supported artifacts; use as directed by the currently activated Skill. Paths resolve relative to cwd. Grants no command/read/write permission.",
+                        "description": "Best-effort per activated Skill; paths relative to cwd. Grants no permissions.",
                         "properties": {
                             "kinds": {
                                 "type": "array",
@@ -116,13 +116,13 @@ impl AgentTool for RunCommandTool {
                                 "type": "array",
                                 "items": { "type": "string", "minLength": 1, "maxLength": MAX_OBSERVATION_PATH_CHARS },
                                 "maxItems": MAX_EXPECTED_OUTPUTS,
-                                "description": "Exact supported output files to observe; sibling files are not enumerated. Observation does not change command success."
+                                "description": "Exact outputs only; no sibling scan. Observation does not change command success."
                             },
                             "additionalRoots": {
                                 "type": "array",
                                 "items": { "type": "string", "minLength": 1, "maxLength": MAX_OBSERVATION_PATH_CHARS },
                                 "maxItems": MAX_ADDITIONAL_ROOTS,
-                                "description": "Additional supported files/directories to observe beyond the workspace. Recursive external directory scans require read=all."
+                                "description": "Extra files/directories; external recursive scans require read=all."
                             }
                         },
                         "required": ["kinds"],
@@ -131,7 +131,7 @@ impl AgentTool for RunCommandTool {
                     "runtimeProfile": {
                         "type": "string",
                         "enum": ["documents", "spreadsheets", "presentations"],
-                        "description": "Optional managed runtime selector. Use only when the currently activated Skill explicitly instructs; otherwise omit, never guess. Host verifies and freezes runtime/version/integrity. Never supply package versions. No additional command/file permission or fallback to PATH."
+                        "description": "Only if the currently activated Skill explicitly instructs; else omit. Host verifies/freezes runtime identity. Never guess profiles or supply package versions; no extra permissions or PATH fallback."
                     },
                     "inputs": {
                         "type": "array",

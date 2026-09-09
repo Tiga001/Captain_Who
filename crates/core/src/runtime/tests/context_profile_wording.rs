@@ -76,6 +76,8 @@ async fn minimal_native_request_keeps_system_and_tool_guidance_as_one_contract()
         "ref 原样填入 skills_activate.skillRef",
         "完整 Skill 指令及新工具只从下一次模型请求生效",
         "copy-first 工作流",
+        "取得 readPath 后使用实际可用的匹配读取工具",
+        "不猜尚未提供的工具",
     ] {
         assert!(
             system.contains(invariant),
@@ -125,7 +127,8 @@ async fn minimal_native_request_keeps_system_and_tool_guidance_as_one_contract()
         .as_str()
         .unwrap();
     assert!(runtime_profile.contains("currently activated Skill explicitly instructs"));
-    assert!(runtime_profile.contains("otherwise omit, never guess"));
+    assert!(runtime_profile.contains("else omit"));
+    assert!(runtime_profile.contains("Never guess profiles or supply package versions"));
     let image = native_tool("read_image")["description"]
         .as_str()
         .unwrap()
@@ -150,4 +153,36 @@ async fn minimal_native_request_keeps_system_and_tool_guidance_as_one_contract()
         .as_str()
         .unwrap();
     assert!(open.contains("opaque hist_v1_") && open.contains("never modify or invent"));
+}
+
+#[test]
+fn generic_tool_wording_stays_below_pre_cleanup_budget() {
+    // Same one-message fixture, without history, custom instructions or extensions. These
+    // pre-cleanup ceilings use the production estimator, not provider-billed token usage.
+    for (profile, previous_schema_tokens) in [
+        (AgentContextProfile::Full, 9_696),
+        (AgentContextProfile::Minimal, 7_048),
+    ] {
+        let input = wording_input(profile);
+        let capabilities =
+            prepare_runtime_capabilities(&input, "wording-budget", &[], true, None).unwrap();
+        let tools = capabilities.initial_tool_set.stable_definitions();
+        let mut request = build_llm_request(input.clone(), tools, None, None, None).unwrap();
+        let detector = ContextCapacityDetector::for_model(
+            &input.model,
+            crate::protocol::AgentApiStyle::OpenAiCompatible,
+            tools,
+        );
+        let costs = detector
+            .inspect(
+                &mut request.context,
+                input.context_window_tokens,
+                sanitize_max_tokens(input.max_tokens),
+            )
+            .context_cost_breakdown();
+        assert!(
+            costs.tool_schema_tokens < previous_schema_tokens,
+            "{profile:?} generic guidance regrew past its pre-cleanup budget: {costs:?}"
+        );
+    }
 }

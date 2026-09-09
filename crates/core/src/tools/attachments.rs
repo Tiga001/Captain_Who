@@ -31,7 +31,9 @@ impl AgentTool for AttachmentsListTool {
     fn definition(&self) -> AgentToolDefinition {
         AgentToolDefinition {
             name: "attachments_list".to_string(),
-            description: "List files and images attached to the current conversation only. Use this for attachments shared in this chat. For images/text, pass returned @attachments read paths unchanged to read_image/read_file. For other formats, use only a matching currently available reader and follow its activated Skill instructions when needed. Never invent tool names or Skill refs.".to_string(),
+            description:
+                "List this chat's files/images; use returned @attachments readPath unchanged."
+                    .to_string(),
             input_schema: attachment_list_schema(),
             safety: AgentToolSafety::ReadOnly,
             requires_workspace: false,
@@ -67,7 +69,7 @@ impl AgentTool for AttachmentsListProjectTool {
     fn definition(&self) -> AgentToolDefinition {
         AgentToolDefinition {
             name: "attachments_list_project".to_string(),
-            description: "List files and images attached to other conversations that are authorized by the current project or the same Agent task tree, excluding the current conversation. Use this to discover shared historical or parent/child Agent attachments. For images/text, pass returned @attachments read paths unchanged to read_image/read_file. For other formats, use only a matching currently available reader and follow its activated Skill instructions when needed. Never invent tool names or Skill refs.".to_string(),
+            description: "List files/images from other authorized chats in this project or Agent tree, excluding this chat; use returned @attachments readPath unchanged.".to_string(),
             input_schema: attachment_list_schema(),
             safety: AgentToolSafety::ReadOnly,
             requires_workspace: false,
@@ -400,23 +402,17 @@ mod tests {
     };
 
     #[test]
-    fn tool_descriptions_route_paths_only_to_currently_available_readers() {
-        for definition in [
-            AttachmentsListTool.definition(),
-            AttachmentsListProjectTool.definition(),
-        ] {
-            for rule in [
-                "@attachments read paths unchanged",
-                "read_image/read_file",
-                "matching currently available reader",
-                "activated Skill instructions",
-                "Never invent tool names or Skill refs",
-            ] {
-                assert!(
-                    definition.description.contains(rule),
-                    "missing route: {rule}"
-                );
-            }
+    fn tool_descriptions_preserve_scope_and_exact_paths() {
+        let current = AttachmentsListTool.definition();
+        let project = AttachmentsListProjectTool.definition();
+        assert!(current.description.contains("this chat's files/images"));
+        assert!(project
+            .description
+            .contains("other authorized chats in this project or Agent tree, excluding this chat"));
+        for definition in [current, project] {
+            assert!(definition
+                .description
+                .contains("returned @attachments readPath unchanged"));
             assert!(!definition.description.contains("run_command.inputs"));
         }
     }
