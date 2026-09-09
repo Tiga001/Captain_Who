@@ -2,7 +2,7 @@
 status: current
 audience: developers
 owner: engineering
-last_verified: 2026-08-31
+last_verified: 2026-09-10
 ---
 
 # 内置终端
@@ -33,6 +33,8 @@ Main 校验 session id 必须匹配 `[A-Za-z0-9._:-]{1,160}`，确保全局不�
 - create request id
 
 utility process 按需启动。默认 cwd 是请求值，否则使用 `HOME`/用户主目录；默认尺寸为 80×24。它调用 `node-pty.spawn()` 启动平台默认 shell，设置 `TERM=xterm-256color`，并返回 shell、cwd、rows/cols 和 pid 快照。
+
+macOS 使用 `SHELL`（默认 `/bin/zsh`）；zsh/bash 通过 `-l` 启动登录 shell，让登录配置先初始化 `PATH`，避免从 Finder 启动应用时交互配置找不到 Homebrew 等命令。开发版和打包版使用同一策略，不硬编码工具路径，也不预先启动额外 shell 提取环境。其他 macOS shell 保留原有无参数启动；Windows 仍使用 PowerShell，Linux 保持原有启动方式。
 
 如果 Renderer 在创建响应前销毁或切换 main-frame，Main 会拒绝请求并向 utility 发送 dispose，迟到成功不能重新建立所有权。
 
@@ -103,6 +105,7 @@ Main 只接受 session owner 的 write、resize、kill 和 ACK。以下任一事
 - Main owner/child bridge：`src/main/terminal/TerminalBridge.ts`
 - utility transport：`src/main/terminal/terminalTransportProtocol.ts`
 - PTY service：`src/main/terminal/terminal-service.ts`
+- shell 启动策略：`src/main/terminal/terminalShell.ts`
 - 输出背压：`src/main/terminal/TerminalOutputFlowController.ts`
 - 退出 drain：`src/main/terminal/TerminalExitDrainController.ts`
 - Renderer lifecycle：`src/renderer/src/features/terminal/useTerminalSession.ts`
@@ -114,6 +117,7 @@ Main 只接受 session owner 的 write、resize、kill 和 ACK。以下任一事
 关键测试：
 
 - `src/main/terminal/TerminalBridge.test.ts`
+- `src/main/terminal/terminalShell.test.ts`：平台启动策略，以及隔离 HOME/ZDOTDIR、精简 PATH 下的登录配置回归。
 - `src/main/terminal/TerminalOutputFlowController.test.ts`
 - `src/main/terminal/TerminalExitDrainController.test.ts`
 - `src/preload/TerminalEventRouter.test.ts`

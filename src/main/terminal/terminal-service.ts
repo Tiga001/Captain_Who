@@ -10,6 +10,7 @@ import type {
 } from '@mycopilot/protocol'
 import { TerminalExitDrainController } from './TerminalExitDrainController'
 import { TerminalOutputFlowController } from './TerminalOutputFlowController'
+import { getTerminalShellLaunch } from './terminalShell'
 import type {
   TerminalServiceCommand,
   TerminalServiceInboundMessage,
@@ -130,10 +131,10 @@ function createSession(request: TerminalCreateSessionRequest): TerminalSessionSn
   }
 
   const cwd = request.cwd?.trim() || process.env.HOME || homedir()
-  const shell = getDefaultShell()
+  const { shell, args } = getTerminalShellLaunch(process.platform, process.env.SHELL)
   const cols = normalizeTerminalSize(request.cols, 80)
   const rows = normalizeTerminalSize(request.rows, 24)
-  const ptyProcess = pty.spawn(shell, [], {
+  const ptyProcess = pty.spawn(shell, args, {
     cols,
     cwd,
     env: createTerminalEnvironment(),
@@ -347,18 +348,6 @@ function assertValidSessionId(sessionId: string): void {
   if (!SESSION_ID_PATTERN.test(sessionId)) {
     throw new Error('Invalid terminal session id')
   }
-}
-
-function getDefaultShell(): string {
-  if (process.platform === 'darwin') {
-    return process.env.SHELL || '/bin/zsh'
-  }
-
-  if (process.platform === 'win32') {
-    return 'powershell.exe'
-  }
-
-  return process.env.SHELL || '/bin/sh'
 }
 
 function createTerminalEnvironment(): Record<string, string | undefined> {
