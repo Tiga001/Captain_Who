@@ -39,6 +39,7 @@ function findHandler(channel: string): (...args: unknown[]) => Promise<unknown> 
 
 function automationCoreStubs() {
   return {
+    onConfigurationInvalidated: vi.fn(() => vi.fn()),
     onAutomationEvent: vi.fn(() => vi.fn()),
     onAutomationResync: vi.fn(() => vi.fn()),
     onNotificationEvent: vi.fn(() => vi.fn()),
