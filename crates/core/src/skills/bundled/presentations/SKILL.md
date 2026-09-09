@@ -11,6 +11,12 @@ Route by intent instead of mixing write mechanisms:
 - **Create:** use one saved Managed Builder for every new deck.
 - **Edit an existing `.pptx`:** inspect first, then use one saved Managed Editor based on `templates/editor.mjs`. The Editor expresses a typed edit plan through the fixed `@mycopilot/presentation-sdk` facade; the Host applies that plan to a private copy and publishes only after validation. Do not rebuild an existing deck with `pptxgenjs`.
 
+For a presentation attachment, use `attachments_list` for this conversation or
+`attachments_list_project` for authorized project/task-tree attachments. Pass its exact returned
+`readPath` to the available `office_presentation` reader; when using a script, bind that same path
+through `run_command.inputs`. These virtual paths are not workspace files. Use only tools
+actually provided in the current model request; do not invent a missing reader or Skill ref.
+
 Combine the paths only at their intended boundaries: native inspect/render/validate around one Builder creation or one Editor transaction.
 
 Never expose OfficeCLI arguments, executable paths, runtime versions, or package versions to a model-facing native call. The model-facing Office tool is intentionally read/verification-only and accepts only `status`, `inspect`, `validate`, and `render`; every deck write uses the Builder or Editor. Every native call uses flat top-level semantic fields plus a required `reason`; never wrap it in `request`. The Managed Editor is the one exception for Host-returned stable object targets: copy an exact target such as `/slide[3]/shape[@id=42]` from the `office_presentation` inspect result into the fixed SDK, but never invent one or turn it into OfficeCLI arguments.
@@ -23,6 +29,19 @@ The Builder and Editor are different fixed entry points:
 - `templates/editor.mjs` edits one frozen existing deck and defaults to save-as.
 
 Never use the Builder to imitate an edit, and never turn the Editor into a general-purpose Node.js program.
+
+For both fixed scripts, omit `runtimeProfile`: the Host verifies this Run's materialization
+receipt and freezes the `presentations` runtime, version, and integrity. This grants no additional
+command or file permission and never falls back to executables on PATH. Never supply package
+versions, guess a profile, or use `runtimeProfile` to replace the Builder/Editor workflow with a
+self-authored script.
+
+`observe` is optional best-effort Office file observation, not permission or command-success
+evidence. For a separately needed explicit observation, use `kinds: ["office"]` and exact
+`expectedOutputs`, resolved relative to `cwd`; it does not enumerate sibling files. Add
+`additionalRoots` only for separately authorized files/directories; recursive scans outside the
+workspace require `read=all`. Verified Builder/Editor outputs are observed automatically, so keep
+omitting `observe` for the normal workflow.
 
 Before materializing a script or calling anything that writes a file, choose the task-owned script
 directory and every nested parent directory that the Builder, Editor, or renderer will use. Create
@@ -96,7 +115,7 @@ Default to fidelity-preserving targeted changes. Do not unzip or rewrite OOXML, 
 3. Confirm the expected file effect in the native result or `artifactObservation`.
 4. Inspect the final deck, record its authoritative slide count `N` and slide order, then validate the package.
 5. A whole-deck contact sheet is optional and is overview-only. Never use it to prove slide coverage or per-slide visual quality.
-6. For every slide `1..N`, make a separate `render` call with that `pageOrSlide` and a unique `outputPath`. Pass the exact returned `outputs[].readPath` to `read_image.path` and record one numbered visual verdict for that slide. Any later deck edit invalidates the ledger; re-inspect, revalidate, and rebuild all `N` verdicts from the final deck.
+6. For every slide `1..N`, make a separate `render` call with that `pageOrSlide` and a unique `outputPath`. Pass the exact returned `outputs[].readPath` to the actually available `read_image.path` and record one numbered visual verdict for that slide. If image reading is unavailable, disclose incomplete coverage. Any later deck edit invalidates the ledger; re-inspect, revalidate, and rebuild all `N` verdicts from the final deck.
 7. `outputs[].layoutCoverage` proves only that the frozen requested slide set fits inside the PNG viewport under the trusted renderer's fixed layout geometry. It does not prove slide content, visual quality, or successful per-slide inspection. Do not infer visual coverage from it, `total`, `pageSelection`, an output filename, or a contact-sheet image. Without exactly `N` successful numbered verdicts, do not claim complete visual verification or completion.
 8. Report only the file effects and checks that actually succeeded. Preserve structured errors and disclose unavailable visual verification.
 9. After all required retries and verification are complete, clean up the task-owned Builder or

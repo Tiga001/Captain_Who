@@ -105,7 +105,7 @@ fn build_attachment_context_in_workspace(
 
         if is_pdf_attachment(attachment, &safe_name) {
             sections.push(format!(
-                "### {}\nMIME：{}\n大小：{} bytes\n{}\n状态：正文未读取；先激活匹配该文件类型的 Skill `bundled:application:pdf`，再将上述 readPath 绑定到 run_command.inputs；页面渲染后将命令返回的准确图片 readPath 原样传给 read_image。",
+                "### {}\nMIME：{}\n大小：{} bytes\n{}\n状态：正文未读取；仅在本轮实际提供匹配工具或可用 Skill 时，按其说明读取上述 readPath；不要推断未提供的能力。",
                 attachment.name,
                 mime_type,
                 attachment.size_bytes,
@@ -133,7 +133,7 @@ fn build_attachment_context_in_workspace(
             Some(AgentToolExposure::Stable) => {}
             Some(AgentToolExposure::Dynamic | AgentToolExposure::RequiresCapability(_)) => {
                 sections.push(format!(
-                    "### {}\nMIME：{}\n大小：{} bytes\n{}\n状态：正文未读取；先激活匹配该文件类型的 Skill，再使用激活后提供的读取工具读取上述 readPath。",
+                    "### {}\nMIME：{}\n大小：{} bytes\n{}\n状态：正文未读取；仅在本轮实际提供匹配工具或可用 Skill 时，按其说明读取上述 readPath；不要推断未提供的能力。",
                     attachment.name,
                     mime_type,
                     attachment.size_bytes,

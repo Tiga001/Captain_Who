@@ -95,16 +95,16 @@ impl AgentTool for RunCommandTool {
     fn definition(&self) -> AgentToolDefinition {
         AgentToolDefinition {
             name: "run_command".to_string(),
-            description: "Run one bounded non-interactive shell command through the host for builds, tests, queries, dependency management, or program execution. Before the first ordinary call, inspect World State workspace.binding and follow the cwd field contract; without a workspace, the first call must include cwd. Never use run_command, shell redirection, a heredoc, or an inline script as an alternate writer for ordinary text/code/config files or to bypass file-write approval; use apply_patch action=apply for short Direct changes and apply_patch Staged actions for long or staged content. Explicit managed Skill/Builder workflows retain their narrower Host-owned contracts. Host policy may execute, request approval, or deny catastrophic/unsupported operations; it is not an OS sandbox. The Host owns process lifetime and its short initial yield: do not add a deadline merely to bound tool waiting or confirm startup. status=running returns a sessionId; running is not final success. For a required build/test/serial result, call command_session once with action=wait; do not repeatedly poll or narrate waiting. A GUI app or long-lived server normally only needs startup confirmation. Background output and exit update Host state but never start a model turn. A backend-verified Office Skill Builder uses one direct Python/Node command with --output <file.docx|file.xlsx|file.pptx>; Host binds the runtime and observes output, runtimeProfile must be omitted and observe is optional. Other trusted activated Skills may also bind a managed runtime and publication contract: follow their instructions, never guess Host paths or runtimeProfile. inputs binds authorized files read-only under $MYCOPILOT_INPUT_ROOT/<mountPath>; copy input paths from tool results or the user, never private Host storage paths.".to_string(),
+            description: "Run one bounded non-interactive shell command through the host for builds, tests, queries, dependency management, or program execution. Before the first ordinary call, inspect World State workspace.binding and follow the cwd field contract; without a workspace, the first call must include cwd. Never use run_command, shell redirection, a heredoc, or an inline script as an alternate writer for ordinary text/code/config files or to bypass file-write approval; use apply_patch action=apply for short Direct changes and apply_patch Staged actions for long or staged content. Explicitly activated managed Skill workflows retain their narrower Host-owned contracts. Host policy may execute, request approval, or deny catastrophic/unsupported operations; it is not an OS sandbox. The Host owns process lifetime and its short initial yield: do not add a deadline merely to bound tool waiting or confirm startup. status=running returns a sessionId; running is not final success. For a required build/test/serial result, call command_session once with action=wait; do not repeatedly poll or narrate waiting. A GUI app or long-lived server normally only needs startup confirmation. Background output and exit update Host state but never start a model turn. For managed workflows, follow only the currently activated Skill's instructions; never guess Host paths or runtimeProfile. inputs binds authorized files read-only under $MYCOPILOT_INPUT_ROOT/<mountPath>; copy input paths from tool results or the user, never private Host storage paths.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "command": { "type": "string", "maxLength": MAX_COMMAND_CHARS, "description": "Non-interactive shell command. Newlines are allowed; CRLF/CR normalize to LF. Host checks every newline, pipeline, &&, || and ; segment. Use a quoted heredoc delimiter such as <<'PY' for bounded non-writing input; unquoted or shell-interpreter heredocs, here-strings, background execution and NUL are denied." },
-                    "cwd": { "type": "string", "description": "Working directory, based on World State workspace.binding before the first ordinary call. With a workspace, omit for its root or use a workspace-relative directory. When no workspace is selected, cwd is mandatory even when command/executable/argument paths are absolute: use an existing absolute directory or @home, @desktop, @documents, @downloads with an optional safe child path (e.g. @desktop/project-dir), normally the target file's parent. It cannot be relative or `.` without a workspace. Absolute directories and aliases require the write scope to allow all locations (write=all). Only a backend-recognized managed PDF command whose activated PDF Skill supplies a Host-owned private working directory may omit cwd without a workspace." },
+                    "cwd": { "type": "string", "description": "Working directory, based on World State workspace.binding before the first ordinary call. With a workspace, omit for its root or use a workspace-relative directory. When no workspace is selected, cwd is mandatory even when command/executable/argument paths are absolute: use an existing absolute directory or @home, @desktop, @documents, @downloads with an optional safe child path (e.g. @desktop/project-dir), normally the target file's parent. It cannot be relative or `.` without a workspace. Absolute directories and aliases require the write scope to allow all locations (write=all). Only a backend-recognized command whose currently activated Skill explicitly supplies a Host-owned private working directory may omit cwd without a workspace." },
                     "reason": { "type": "string", "description": "Why this command is needed and what result is expected." },
                     "observe": {
                         "type": "object",
-                        "description": "Optional best-effort Office artifact observation; verified Builders are observed automatically. Paths resolve relative to cwd. Grants no command/read/write permission.",
+                        "description": "Optional best-effort observation of supported artifacts; use as directed by the currently activated Skill. Paths resolve relative to cwd. Grants no command/read/write permission.",
                         "properties": {
                             "kinds": {
                                 "type": "array",
@@ -116,13 +116,13 @@ impl AgentTool for RunCommandTool {
                                 "type": "array",
                                 "items": { "type": "string", "minLength": 1, "maxLength": MAX_OBSERVATION_PATH_CHARS },
                                 "maxItems": MAX_EXPECTED_OUTPUTS,
-                                "description": "Exact Office output files to observe; sibling files are not enumerated. Observation does not change command success."
+                                "description": "Exact supported output files to observe; sibling files are not enumerated. Observation does not change command success."
                             },
                             "additionalRoots": {
                                 "type": "array",
                                 "items": { "type": "string", "minLength": 1, "maxLength": MAX_OBSERVATION_PATH_CHARS },
                                 "maxItems": MAX_ADDITIONAL_ROOTS,
-                                "description": "Additional Office files/directories to observe beyond the workspace. Recursive external directory scans require read=all."
+                                "description": "Additional supported files/directories to observe beyond the workspace. Recursive external directory scans require read=all."
                             }
                         },
                         "required": ["kinds"],
@@ -131,7 +131,7 @@ impl AgentTool for RunCommandTool {
                     "runtimeProfile": {
                         "type": "string",
                         "enum": ["documents", "spreadsheets", "presentations"],
-                        "description": "Optional managed runtime for a custom saved .mjs/.py Office script. Verified Skill Builders must omit: Host verifies the run-scoped materialization receipt, derives Node/Python and profile, and freezes packages, version and integrity identity. Never supply package versions. No additional command/file permission or fallback to PATH."
+                        "description": "Optional managed runtime selector. Use only when the currently activated Skill explicitly instructs; otherwise omit, never guess. Host verifies and freezes runtime/version/integrity. Never supply package versions. No additional command/file permission or fallback to PATH."
                     },
                     "inputs": {
                         "type": "array",

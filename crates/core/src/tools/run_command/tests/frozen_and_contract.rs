@@ -404,8 +404,8 @@ fn definition_exposes_the_workspace_dependent_cwd_contract() {
         "It cannot be relative or `.` without a workspace",
         "normally the target file's parent",
         "write scope to allow all locations (write=all)",
-        "Only a backend-recognized managed PDF command",
-        "activated PDF Skill",
+        "Only a backend-recognized command",
+        "currently activated Skill explicitly supplies",
         "Host-owned private working directory",
     ] {
         assert!(
@@ -441,7 +441,7 @@ fn definition_forbids_using_commands_as_an_alternate_file_writer() {
     assert!(description.contains("or to bypass file-write approval"));
     assert!(description.contains("use apply_patch action=apply for short Direct changes"));
     assert!(description.contains("apply_patch Staged actions for long or staged content"));
-    assert!(description.contains("managed Skill/Builder workflows retain their narrower"));
+    assert!(description.contains("activated managed Skill workflows retain their narrower"));
 }
 
 #[test]

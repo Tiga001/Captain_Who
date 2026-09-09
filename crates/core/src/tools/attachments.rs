@@ -31,7 +31,7 @@ impl AgentTool for AttachmentsListTool {
     fn definition(&self) -> AgentToolDefinition {
         AgentToolDefinition {
             name: "attachments_list".to_string(),
-            description: "List files and images attached to the current conversation only. Use this for attachments shared in this chat. For images/text, pass returned @attachments read paths unchanged to read_image/read_file. For PDF/Office, activate the matching available Skill using the current catalog ref as skills_activate.skillRef; bind PDF paths through run_command.inputs or use the activated Office reader. Do not invent a missing Skill ref.".to_string(),
+            description: "List files and images attached to the current conversation only. Use this for attachments shared in this chat. For images/text, pass returned @attachments read paths unchanged to read_image/read_file. For other formats, use only a matching currently available reader and follow its activated Skill instructions when needed. Never invent tool names or Skill refs.".to_string(),
             input_schema: attachment_list_schema(),
             safety: AgentToolSafety::ReadOnly,
             requires_workspace: false,
@@ -67,7 +67,7 @@ impl AgentTool for AttachmentsListProjectTool {
     fn definition(&self) -> AgentToolDefinition {
         AgentToolDefinition {
             name: "attachments_list_project".to_string(),
-            description: "List files and images attached to other conversations that are authorized by the current project or the same Agent task tree, excluding the current conversation. Use this to discover shared historical or parent/child Agent attachments. For images/text, pass returned @attachments read paths unchanged to read_image/read_file. For PDF/Office, activate the matching available Skill using the current catalog ref as skills_activate.skillRef; bind PDF paths through run_command.inputs or use the activated Office reader. Do not invent a missing Skill ref.".to_string(),
+            description: "List files and images attached to other conversations that are authorized by the current project or the same Agent task tree, excluding the current conversation. Use this to discover shared historical or parent/child Agent attachments. For images/text, pass returned @attachments read paths unchanged to read_image/read_file. For other formats, use only a matching currently available reader and follow its activated Skill instructions when needed. Never invent tool names or Skill refs.".to_string(),
             input_schema: attachment_list_schema(),
             safety: AgentToolSafety::ReadOnly,
             requires_workspace: false,
@@ -400,24 +400,24 @@ mod tests {
     };
 
     #[test]
-    fn tool_descriptions_route_document_paths_through_current_skill_refs() {
+    fn tool_descriptions_route_paths_only_to_currently_available_readers() {
         for definition in [
             AttachmentsListTool.definition(),
             AttachmentsListProjectTool.definition(),
         ] {
-            assert!(!definition.description.contains("bundled:application:pdf"));
             for rule in [
-                "matching available Skill",
-                "current catalog ref as skills_activate.skillRef",
-                "Do not invent a missing Skill ref",
-                "activated Office reader",
+                "@attachments read paths unchanged",
+                "read_image/read_file",
+                "matching currently available reader",
+                "activated Skill instructions",
+                "Never invent tool names or Skill refs",
             ] {
                 assert!(
                     definition.description.contains(rule),
                     "missing route: {rule}"
                 );
             }
-            assert!(definition.description.contains("run_command.inputs"));
+            assert!(!definition.description.contains("run_command.inputs"));
         }
     }
 

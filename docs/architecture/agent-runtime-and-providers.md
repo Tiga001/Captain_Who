@@ -117,9 +117,17 @@ Adapter 继续执行各自 wire 规则：稳定 system 可投影为 OpenAI-compa
 
 目标是增加不变内容形成相同前缀的机会，不保证缓存命中或命中率提升。目录、能力或授权改变时，从变化位置开始的缓存可能失效；不能为了缓存继续发送过期能力。本轮没有新增 `cache_control`，也不保证厂商内部缓存组合或实际命中率达到某个最大值。
 
+## Skill 专用说明的归属
+
+Office 与 PDF 的专用读取、Builder/Editor 调用、运行环境选择、产物观察和私有工作目录规则，由对应内置 `SKILL.md` 正文持有。完整与极简模式的稳定 system、常驻工具描述及附件预处理状态仅保留通用约束，不按 Skill 开关或激活状态拼接、替换专用说明。关闭的 Skill 不进入当前可用目录；开启后仅公开目录元数据；激活后经现有 `backend_activated_skill` 上下文消息提供正文，稳定 system 与已提供的工具定义不变。
+
+通用命令的参数结构和枚举（包括 `runtimeProfile`、`observe`）、执行器及权限审批契约保持原样。参数存在不代表对应 Skill 已开启；专用用法由已激活正文说明。已有历史内容不在这次迁移中删除，描述和 Skill 正文更新仍服从原有版本及检查点校验。
+
 ## 极简上下文模式
 
 `AgentContextProfile` 的 `full` / `minimal` 独立于工作模式和扩展开关。完整模式保留原基础提示词与工具定义；极简模式使用独立短提示词，并仅压缩所选基础工具的描述，参数、必填项、枚举、校验约束、执行器及审批逻辑共用原契约。工具描述仍参与 ToolSet revision，必须在稳定工具集冻结前完成投影，不能在审批续跑或 Skill 激活后改写稳定 Schema。
+
+极简文案按职责去重：系统提示词保留信任、权限、模式说明、Skill 作用域及跨工具工作流；参数、文件凭据与事务生命周期、命令会话状态等调用细节由对应原生工具说明提供。二者作为同一请求联合验证，规则移动不代表删去安全约束；完整模式文案、工具身份、返回格式、前端展示及存储协议不随极简文字优化改变。描述更新仍会改变极简 ToolSet revision，旧版暂停检查点的严格恢复校验不因此放宽。
 
 极简模式保留 12 个基础入口：9 个核心工具 `read_file`、`read_image`、`apply_patch`、`run_command`、`command_session`、`workspace_map`、`search_files`、`search_code`、`conversation_history`，以及 `skills_activate`、`attachments_list`、`attachments_list_project`；不暴露 `todo_update`。这不是总工具数上限：扩展仍按原有设置、目录和授权路径提供自己的工具与指南，基础入口也继续受当前权限校验。
 

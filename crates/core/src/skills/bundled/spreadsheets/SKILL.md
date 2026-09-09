@@ -13,6 +13,12 @@ Route by intent:
   `templates/editor.py`. It executes normal Python against the frozen source snapshot and publishes
   a distinct Host-gated save-as output.
 
+For a workbook attachment, use `attachments_list` for this conversation or
+`attachments_list_project` for authorized project/task-tree attachments. Pass its exact returned
+`readPath` to the available `office_spreadsheet` reader; when using a script, bind that same path
+through `run_command.inputs`. These virtual paths are not workspace files. Use only tools
+actually provided in the current model request; do not invent a missing reader or Skill ref.
+
 Do not call or invent native Office create or mutation operations. The model-facing Office tool is intentionally read/verify-only; all workbook writes go through the fixed Builder or Editor.
 
 ## Managed scripts
@@ -42,6 +48,18 @@ temporary file, candidate reopen, or `os.replace` layer. If a command returns `r
 that same command session before using the output. Inspect `artifactObservation` after every
 terminal result and never blindly repeat a call that may have changed files.
 
+The Host verifies this Run's materialization receipt and freezes the `spreadsheets` runtime,
+version, and integrity. It grants no additional command or file permission and never falls back to
+executables on PATH. Never supply package versions, guess a profile, or use `runtimeProfile` to
+replace the fixed Builder/Editor workflow with a self-authored script.
+
+`observe` is optional best-effort Office file observation, not permission or command-success
+evidence. For a separately needed explicit observation, use `kinds: ["office"]` and exact
+`expectedOutputs`, resolved relative to `cwd`; it does not enumerate sibling files. Add
+`additionalRoots` only for separately authorized files/directories; recursive scans outside the
+workspace require `read=all`. Verified Builder/Editor outputs are observed automatically, so keep
+omitting `observe` for the normal workflow.
+
 `openpyxl` stores formulas but does not calculate them. The Host reopen gate, formula inspection,
 and cached values do not prove recalculation. Claim calculated results only when a separate
 authoritative calculation engine returned explicit evidence.
@@ -54,7 +72,7 @@ authoritative calculation engine returned explicit evidence.
 4. Terminal success proves the Host reopened the private candidate with pinned `openpyxl` before
    publication. Inspect the final sheet list, populated ranges, formula text, formats, tables,
    charts, images, and defined names; do not call native `validate`.
-5. For every final sheet, render the visual extent formed by its populated range plus every reported floating chart/image bound. Read each exact returned `outputs[].readPath` with `read_image.path` and record a verdict. If bounds or rendering are unavailable, disclose incomplete coverage. Any later edit invalidates the ledger.
+5. For every final sheet, render the visual extent formed by its populated range plus every reported floating chart/image bound. Read each exact returned `outputs[].readPath` with the actually available `read_image.path` and record a verdict. If bounds, rendering, or image reading are unavailable, disclose incomplete coverage. Any later edit invalidates the ledger.
 6. Keep syntax, execution, package, calculation, and visual evidence separate. Report only checks that actually succeeded.
 7. Delete the exact task-owned Builder or Editor and temporary files. Use `rmdir` only if this task created the now-empty directory; preserve pre-existing files and never use recursive deletion.
 

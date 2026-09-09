@@ -15,6 +15,12 @@ Route by intent:
   one mounted source and one distinct save-as output. Never rebuild the source with the Builder and
   never substitute native write calls for the Editor transaction.
 
+For a Word attachment, use `attachments_list` for this conversation or
+`attachments_list_project` for authorized project/task-tree attachments. Pass its exact returned
+`readPath` to the available `office_document` reader; when using a script, bind that same path
+through `run_command.inputs`. These virtual paths are not workspace files. Use only tools
+actually provided in the current model request; do not invent a missing reader or Skill ref.
+
 Do not expose OfficeCLI arguments, DOM paths, executable paths, runtime versions, or package
 versions to model-facing Office calls. Native read calls use flat top-level semantic fields and a
 required non-empty user-facing `reason` of at most 240 characters; never wrap them in `request`.
@@ -53,6 +59,9 @@ the pinned `documents` runtime, freezes the script and inputs, runs preflight, d
 through a private candidate, runs the pinned OfficeCLI schema gate, publishes atomically, and binds
 observation. The fixed script saves once to the Host-provided output path; do not add another
 temporary file, candidate reopen, `os.replace`, or model-side validation layer.
+The managed runtime grants no additional command or file permission and never falls back to
+executables on PATH. The Host freezes runtime version and integrity; never supply package versions
+or guess another `runtimeProfile` to work around a rejected command.
 
 Bind every non-workspace input through `run_command.inputs`. Scripts resolve only declared logical
 mount names below `MYCOPILOT_INPUT_ROOT`; never pass or open `@attachments`, `skill://`, artifact
@@ -64,6 +73,13 @@ JSON operation DSL. This freedom remains inside the existing managed-command per
 approval boundary and does not make unrelated Python side effects transactional. Read
 [references/editing-existing.md](references/editing-existing.md) before editing for the exact
 workflow, preservation rules, and unsupported OOXML boundaries.
+
+`observe` is optional best-effort Office file observation, not permission or command-success
+evidence. For a separately needed explicit observation, use `kinds: ["office"]` and exact
+`expectedOutputs`, resolved relative to `cwd`; it does not enumerate sibling files. Add
+`additionalRoots` only for separately authorized files/directories; recursive scans outside the
+workspace require `read=all`. Verified Builder/Editor outputs are observed automatically, so keep
+omitting `observe` for the normal workflow.
 
 Inspect `artifactObservation` even after failure, timeout, or cancellation. When `run_command`
 returns `status: "running"`, follow its `continueWith` receipt and wait with `command_session` for
@@ -107,7 +123,9 @@ present it as a delivery card unless the user explicitly requested a PDF.
    `outputFormat: "pdf"` and a `.pdf` `outputPath` inside the existing task script directory, never
    top-level `outputs/`. Require one returned PDF output containing `outputs[].readPath`,
    `outputs[].pageCount`, `outputs[].sourceSha256`, and `outputs[].rendererRevision`; use only that
-   exact `readPath`, then activate and follow the PDF Skill. Pass the returned `readPath` unchanged
+   exact `readPath`, then activate and follow the PDF Skill using its exact current catalog ref.
+   If that Skill or `read_image` is unavailable, report the missing visual coverage rather than
+   inventing an activation target or claiming verification. Pass the returned `readPath` unchanged
    as the PDF source for `pdfinfo` and `pdftoppm`; do not add `run_command.inputs` or rewrite it
    beneath `MYCOPILOT_INPUT_ROOT`.
    Bind the evidence ledger to `sourceSha256` and invalidate it after any DOCX change. Treat

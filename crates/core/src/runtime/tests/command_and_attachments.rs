@@ -465,13 +465,13 @@ fn attachment_context_defers_pdf_and_office_files_to_matching_skills() {
     assert_eq!(
         context
             .text
-            .matches("正文未读取；先激活匹配该文件类型的 Skill")
+            .matches("正文未读取；仅在本轮实际提供匹配工具或可用 Skill 时")
             .count(),
         7
     );
-    assert!(context.text.contains("bundled:application:pdf"));
-    assert!(context.text.contains("run_command.inputs"));
-    assert!(context.text.contains("read_image"));
+    assert!(!context.text.contains("bundled:application:pdf"));
+    assert!(!context.text.contains("run_command.inputs"));
+    assert!(!context.text.contains("read_image"));
     for hidden_contract_detail in [
         "read_word",
         "read_presentation",
@@ -551,8 +551,11 @@ fn attachment_context_routes_pdf_without_decoding_its_payload() {
     let context = build_attachment_context(&[attachment], Some(&library)).unwrap();
 
     assert!(context.text.contains("正文未读取"));
-    assert!(context.text.contains("bundled:application:pdf"));
-    assert!(context.text.contains("run_command.inputs"));
+    assert!(context
+        .text
+        .contains("仅在本轮实际提供匹配工具或可用 Skill 时"));
+    assert!(!context.text.contains("bundled:application:pdf"));
+    assert!(!context.text.contains("run_command.inputs"));
     assert!(context
         .text
         .contains("@attachments/attachment-pdf-invalid-payload/manual.pdf"));
