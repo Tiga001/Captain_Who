@@ -997,6 +997,33 @@ fn current_checkpoint_schema_round_trips_and_rejects_missing_or_extra_fields() {
 }
 
 #[test]
+fn collaboration_checkpoint_still_rejects_missing_extra_and_partial_authority() {
+    let (checkpoint, continuation) = restorable_checkpoint_fixture();
+    let authority = crate::AgentCollaborationRunSnapshot {
+        selector_directory: crate::AgentCollaborationSelectorDirectory::default(),
+        admitted_wait_model_batches: Vec::new(),
+    };
+    let mut extra = checkpoint.clone();
+    extra.collaboration_run_snapshot = Some(authority.clone());
+    let error = restore_run_checkpoint(extra, "checkpoint-validation-run", &continuation)
+        .err()
+        .unwrap();
+    assert!(error.to_string().contains("未暴露 Agent collaboration"));
+
+    let mut missing = checkpoint;
+    missing.tool_set = collaboration_tool_set().checkpoint();
+    let error = restore_run_checkpoint(missing, "checkpoint-validation-run", &continuation)
+        .err()
+        .unwrap();
+    assert!(error.to_string().contains("缺少 Agent collaboration"));
+
+    // The same validator is used when creating and restoring a checkpoint. A partial group
+    // must never allow a supplied snapshot to grant authority for the other collaboration tools.
+    let error = validate_collaboration_run_snapshot(["spawn_agent"], Some(&authority)).unwrap_err();
+    assert!(error.to_string().contains("不完整的 Agent collaboration"));
+}
+
+#[test]
 fn approval_checkpoint_freezes_selector_and_wait_admission_across_resume() {
     let (mut checkpoint, continuation) = restorable_checkpoint_fixture();
     let frozen_directory = crate::AgentCollaborationSelectorDirectory::bounded(

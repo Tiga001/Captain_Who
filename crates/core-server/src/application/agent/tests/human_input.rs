@@ -18,6 +18,7 @@ const ORIGINAL_REQUEST: &str = "Ask for the missing details, then finish this sa
 #[derive(Clone)]
 enum ProviderReply {
     Questions,
+    AsyncQuestions,
     Command,
     LateWebCalls,
     Complete,
@@ -56,13 +57,17 @@ pub(super) async fn read_provider_request(stream: &mut TcpStream) -> Value {
 
 async fn write_provider_reply(stream: &mut TcpStream, reply: ProviderReply, index: usize) {
     let (delta, finish_reason) = match reply {
-        ProviderReply::Questions => (
+        kind @ (ProviderReply::Questions | ProviderReply::AsyncQuestions) => (
             json!({
                 "role":"assistant",
                 "tool_calls":[{
                     "index":0,"id":format!("provider-question-{index}"),"type":"function",
                     "function":{
-                        "name":"request_user_input",
+                        "name":if matches!(kind, ProviderReply::Questions) {
+                            "request_user_input"
+                        } else {
+                            "request_user_input_async"
+                        },
                         "arguments":serde_json::to_string(&json!({"questions":[
                             {"title":QUESTION_TITLE,"options":["main","release"]},
                             {"title":"Describe the constraint"},
@@ -553,6 +558,200 @@ async fn assert_sync_scenario(question_batches: usize, skip_all: bool, approval_
 #[tokio::test]
 async fn sync_human_input_resumes_same_run_once_with_mixed_answers() {
     assert_sync_scenario(1, false, false).await;
+}
+
+#[tokio::test]
+async fn disabled_collaboration_first_turn_keeps_root_owned_sync_and_async_human_input() {
+    for profile in [
+        mycopilot_core::AgentContextProfile::Full,
+        mycopilot_core::AgentContextProfile::Minimal,
+    ] {
+        let (address, mut requests, provider) = controlled_provider(vec![
+            ProviderReply::AsyncQuestions,
+            ProviderReply::Questions,
+            ProviderReply::Complete,
+        ])
+        .await;
+        let fixture = tempdir().unwrap();
+        let storage =
+            Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+        configure_storage(&storage, fixture.path(), &address);
+        let settings = storage.load_agent_collaboration_settings().unwrap();
+        storage
+            .update_agent_collaboration_settings(
+                &mycopilot_core::AgentCollaborationSettingsUpdate {
+                    enabled: false,
+                    expected_revision: settings.revision,
+                },
+            )
+            .unwrap();
+        let mut preferences = storage.load_agent_prompt_preferences().unwrap();
+        preferences.context_profile = profile;
+        storage.save_agent_prompt_preferences(preferences).unwrap();
+        assert!(storage
+            .get_agent_node_by_conversation("conversation-human-input")
+            .unwrap()
+            .is_none());
+
+        let agent = AgentService::new(Arc::clone(&storage));
+        let (notifications, mut events) = unbounded_channel();
+        let turn = agent
+            .start_conversation_turn(turn_input(), notifications.clone())
+            .unwrap();
+        wait_for_done(&mut events, &turn.run_id, "waiting_for_user_input").await;
+        wait_for_worker_release(&agent, &turn.run_id).await;
+        let mut model_requests = vec![
+            requests.recv().await.unwrap(),
+            requests.recv().await.unwrap(),
+        ];
+        let root = storage
+            .get_agent_node_by_conversation(&turn.conversation_id)
+            .unwrap()
+            .expect("a disabled collaboration run still needs its Host root owner");
+        assert!(root.parent_agent_id.is_none());
+        assert_eq!(root.root_agent_id, root.agent_id);
+        assert!(
+            !storage
+                .load_agent_collaboration_run_policy(&turn.run_id)
+                .unwrap()
+                .unwrap()
+                .enabled
+        );
+        let batches = questions(&storage);
+        assert_eq!(batches.len(), 2);
+        assert!(batches.iter().all(|request| request.run_id == turn.run_id
+            && request.status == HumanInteractionRequestStatus::Open));
+        let asynchronous = batches
+            .iter()
+            .find(|request| request.mode == HumanInteractionMode::Async)
+            .unwrap();
+        let blocking = batches
+            .iter()
+            .find(|request| request.mode == HumanInteractionMode::Sync)
+            .unwrap();
+
+        let (_, envelope) = storage
+            .load_sync_human_interaction_for_run(&turn.run_id)
+            .unwrap()
+            .expect("the first-run root must own a durable synchronous suspension");
+        let frozen_input =
+            PersistedAgentResumeInput::decode(&serde_json::to_string(&envelope).unwrap())
+                .unwrap()
+                .agent_input;
+        let checkpoint = frozen_input.resume_checkpoint.as_ref().unwrap();
+        assert!(checkpoint.collaboration_run_snapshot.is_none());
+        assert!(!checkpoint
+            .tool_set
+            .exposed_tool_names
+            .iter()
+            .any(|name| mycopilot_core::AGENT_COLLABORATION_TOOL_NAMES.contains(&name.as_str())));
+        // The capacity preview must restore the same disabled capability contract, including
+        // a cold preview with no collaboration directory cached by an earlier enabled run.
+        assert!(agent
+            .collaboration_run_directories
+            .lock()
+            .unwrap()
+            .is_empty());
+        for projection in [
+            agent.context_window_tool_projection(&frozen_input, None),
+            agent.context_window_tool_projection_for_agent_run(&turn.run_id, &frozen_input, None),
+        ] {
+            assert_eq!(
+                serde_json::to_value(projection.unwrap().tool_set_checkpoint()).unwrap(),
+                serde_json::to_value(&checkpoint.tool_set).unwrap(),
+            );
+        }
+
+        let human = HumanInteractionService::new(&storage, &agent);
+        human
+            .submit(
+                HumanInteractionSubmitInput {
+                    conversation_id: turn.conversation_id.clone(),
+                    request_id: asynchronous.request_id.clone(),
+                    expected_revision: asynchronous.revision,
+                    submission_id: "disabled-collaboration-async-answer".into(),
+                    answers: answers(asynchronous, false),
+                },
+                &notifications,
+            )
+            .unwrap();
+        assert!(
+            requests.try_recv().is_err(),
+            "the asynchronous answer cannot bypass the blocking question"
+        );
+        human
+            .submit(
+                HumanInteractionSubmitInput {
+                    conversation_id: turn.conversation_id.clone(),
+                    request_id: blocking.request_id.clone(),
+                    expected_revision: blocking.revision,
+                    submission_id: "disabled-collaboration-sync-answer".into(),
+                    answers: answers(blocking, false),
+                },
+                &notifications,
+            )
+            .unwrap();
+        wait_for_done(&mut events, &turn.run_id, "completed").await;
+        wait_for_worker_release(&agent, &turn.run_id).await;
+        model_requests.push(requests.recv().await.unwrap());
+        provider.await.unwrap();
+
+        for request in &model_requests {
+            assert_eq!(request["tools"], model_requests[0]["tools"]);
+            let tools = request["tools"].as_array().unwrap();
+            for tool in ["request_user_input", "request_user_input_async"] {
+                assert!(tools
+                    .iter()
+                    .any(|definition| definition["function"]["name"] == tool));
+            }
+            assert!(!tools
+                .iter()
+                .any(|definition| mycopilot_core::AGENT_COLLABORATION_TOOL_NAMES
+                    .contains(&definition["function"]["name"].as_str().unwrap())));
+            assert_eq!(
+                tools
+                    .iter()
+                    .any(|definition| definition["function"]["name"] == "todo_update"),
+                profile == mycopilot_core::AgentContextProfile::Full
+            );
+            let messages = request["messages"].to_string();
+            assert!(!messages.contains("<agent_collaboration_directory>"));
+            assert!(messages.contains("disabled_by_user"));
+        }
+        let settled = questions(&storage);
+        assert_eq!(settled.len(), 2);
+        assert!(settled
+            .iter()
+            .all(|request| request
+                .delivery
+                .as_ref()
+                .is_some_and(|delivery| delivery.status
+                    == HumanInteractionDeliveryStatus::Applied
+                    && delivery.target_run_id.as_deref() == Some(turn.run_id.as_str()))));
+        let resumed_messages = model_requests[2]["messages"].as_array().unwrap();
+        for request in &settled {
+            let response_id = &request.response.as_ref().unwrap().response_id;
+            assert_eq!(
+                resumed_messages
+                    .iter()
+                    .filter(|message| message["content"]
+                        .as_str()
+                        .is_some_and(|content| content.contains(response_id)))
+                    .count(),
+                1,
+                "each synchronous or asynchronous answer must reach the resumed model exactly once"
+            );
+        }
+        assert_eq!(
+            storage
+                .load_conversation(&turn.conversation_id)
+                .unwrap()
+                .unwrap()
+                .messages
+                .len(),
+            2
+        );
+    }
 }
 
 #[tokio::test]

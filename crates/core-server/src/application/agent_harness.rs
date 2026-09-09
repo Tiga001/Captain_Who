@@ -60,8 +60,8 @@ impl AgentCollaborationHarnessAdapter {
     ) -> Result<AgentCollaborationRuntimeServices, AgentError> {
         let claimed = self.caller_snapshot(conversation_id)?;
         // Tool exposure must work for pre-collaboration root Conversations. Materialize their
-        // stable root identity while the trusted Host constructs the Turn, before the first model
-        // sample can invoke spawn_agent.
+        // stable root identity while the trusted Host constructs the Turn. Human interaction
+        // ownership and durable inbox delivery also use this identity, independently of tools.
         let caller = caller_from_node(&self.ensure_and_validate_caller(&claimed)?);
         let selector_directory = self.selector_directory(caller.project_id.as_deref())?;
         Ok(AgentCollaborationRuntimeServices::new(
@@ -93,16 +93,23 @@ impl AgentCollaborationHarnessAdapter {
         run_id: &str,
     ) -> Result<AgentRuntimeHostServices, AgentError> {
         let policy = self.run_policy(run_id)?;
-        let services = self.freeze_run_directory(
-            self.runtime_services_for_conversation(conversation_id)?,
-            run_id,
-            None,
-        )?;
-        Ok(host_services
-            .with_agent_collaboration(services)
-            .with_agent_collaboration_policy(Arc::new(
-                mycopilot_core::FrozenAgentCollaborationPolicySource::new(policy),
-            )))
+        // A disabled run has neither collaboration tools nor checkpoint authority. Keep its
+        // frozen policy for world state, without materializing or restoring a selector directory.
+        let host_services = if policy.enabled {
+            host_services.with_agent_collaboration(self.freeze_run_directory(
+                self.runtime_services_for_conversation(conversation_id)?,
+                run_id,
+                None,
+            )?)
+        } else {
+            // Root identity also owns human interaction and inbox records. Disabling model-facing
+            // collaboration must not remove that independent Host authority or its validation.
+            self.ensure_and_validate_caller(&self.caller_snapshot(conversation_id)?)?;
+            host_services
+        };
+        Ok(host_services.with_agent_collaboration_policy(Arc::new(
+            mycopilot_core::FrozenAgentCollaborationPolicySource::new(policy),
+        )))
     }
 
     pub(crate) fn attach_preview_to_host_services(
@@ -126,16 +133,19 @@ impl AgentCollaborationHarnessAdapter {
                     .map_err(storage_error)?,
             },
         };
-        let services = self.preview_runtime_services_for_conversation(conversation_id)?;
-        let services = match run_id {
-            Some(run_id) => self.freeze_run_directory(services, run_id, resume_checkpoint)?,
-            None => services,
+        let host_services = if policy.enabled {
+            let services = self.preview_runtime_services_for_conversation(conversation_id)?;
+            let services = match run_id {
+                Some(run_id) => self.freeze_run_directory(services, run_id, resume_checkpoint)?,
+                None => services,
+            };
+            host_services.with_agent_collaboration(services)
+        } else {
+            host_services
         };
-        Ok(host_services
-            .with_agent_collaboration(services)
-            .with_agent_collaboration_policy(Arc::new(
-                mycopilot_core::FrozenAgentCollaborationPolicySource::new(policy),
-            )))
+        Ok(host_services.with_agent_collaboration_policy(Arc::new(
+            mycopilot_core::FrozenAgentCollaborationPolicySource::new(policy),
+        )))
     }
 
     fn run_policy(

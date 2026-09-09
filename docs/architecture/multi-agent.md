@@ -128,6 +128,8 @@ Wake 表示“需要一次执行机会”，不是线程或可无条件重试的
 
 同一策略同时决定六个 Schema、完整协作规则与可用模型/模板目录是否进入请求；规则与目录由扩展以 RequestOnly 方式贡献。Conversation World State 的 `agent.collaboration` 始终记录 enabled、available 和不可用原因，关闭时也保留明确状态。审批恢复验证 Host 的运行策略与 checkpoint 一致，不重新采用全局开关。空闲圆环预览新一轮策略，运行中预览使用本轮策略；其 Schema、提示词和状态计量与真实请求及自动压缩报告共用 Rust Core 投影。
 
+Host 服务装配也遵守本轮冻结策略：关闭时不创建协作执行服务或冻结模型/模板目录，但保留关闭策略与 `disabled_by_user` 状态，以及人机交互和消息投递所需的后台根身份。Rust Core 在运行与预览入口使用同一次策略快照筛选服务，所有工具共用的检查点路径（人工审批、文件/MCP 自动执行前冻结、同步人机交互等待）只记录实际启用的协作授权。恢复时仍严格校验工具集合、协作授权和 Host 冻结策略一致，不能通过关闭开关绕过校验，也不能影响其他工具正常执行。
+
 `spawn_agent.task_name` 是模型为新任务指定的唯一名称，其余工具的 `target`/`targets` 只接受此名称的精确值。模型从 `spawn_agent` 或 `list_agents` 的 `taskName` 复制名称，不使用 UUID、完整路径、别名或模糊匹配。Host 在可信 caller 所属树内解析名称，再使用内部 Agent ID 执行原有权限校验；名称解析不扩大同树或严格后代的权限边界。
 
 普通工具回执使用 `taskName`，`list_agents` 额外提供 `parentTaskName`、`status`、模型显示名和最近活动时间。Mailbox 和 wait 的模型投影也只保留任务名称及必要语义；终态结果不暴露 sender/root/parent/source Agent ID、task path、Wake/Run/receipt 等内部绑定。持久记录仍保留这些身份供审计与恢复，`conversation_history` 打开 Mailbox record 时在分页前省略 Host 身份元数据，不修改自由文本或持久原文。

@@ -33,6 +33,37 @@ pub(super) struct DurableConversationTimeline {
     pub(super) messages: Vec<AgentChatMessage>,
 }
 
+pub(super) struct FrozenCollaborationServices {
+    pub(super) services: Option<crate::AgentCollaborationRuntimeServices>,
+    pub(super) policy: Option<Arc<dyn crate::AgentCollaborationPolicySource>>,
+}
+
+/// Freeze one Host-bound policy before either execution or preview restores a checkpoint.
+/// The same decision must govern tool exposure, execution authority and every checkpoint:
+/// disabled collaboration has no runtime services, but keeps its policy for world state and
+/// checkpoint policy validation. Read the source once so those decisions cannot diverge.
+pub(super) fn freeze_collaboration_runtime_services(
+    services: Option<crate::AgentCollaborationRuntimeServices>,
+    source: Option<Arc<dyn crate::AgentCollaborationPolicySource>>,
+) -> AgentResult<FrozenCollaborationServices> {
+    let policy = match source {
+        Some(source) => Some(source.snapshot()?),
+        None if services.is_some() => {
+            return Err(AgentError::new(
+                "智能体协作配置无效：Host 未提供本轮协作策略。",
+            ));
+        }
+        None => None,
+    };
+    Ok(FrozenCollaborationServices {
+        services: services.filter(|_| policy.as_ref().is_some_and(|policy| policy.enabled)),
+        policy: policy.map(|policy| {
+            Arc::new(crate::FrozenAgentCollaborationPolicySource::new(policy))
+                as Arc<dyn crate::AgentCollaborationPolicySource>
+        }),
+    })
+}
+
 /// Both the running driver and its read-only preview must use the selector authority frozen
 /// before approval, not a directory rebuilt from settings that changed during the pause.
 pub(super) fn restore_collaboration_runtime_services(
@@ -866,8 +897,8 @@ fn assemble_initial_context_with_skill_overlays(
 #[cfg(test)]
 mod approval_identity_tests {
     use super::{
-        expected_approval_action_id, prepare_runtime_capabilities_with_skills, AgentChatInput,
-        RuntimeCapabilityServices,
+        expected_approval_action_id, freeze_collaboration_runtime_services,
+        prepare_runtime_capabilities_with_skills, AgentChatInput, RuntimeCapabilityServices,
     };
     use serde_json::json;
     use std::collections::BTreeSet;
@@ -985,5 +1016,55 @@ mod approval_identity_tests {
             disabled.initial_tool_set.stable_revision(),
             enabled.initial_tool_set.stable_revision()
         );
+    }
+
+    #[test]
+    fn frozen_collaboration_policy_controls_runtime_authority_without_losing_disabled_state() {
+        for enabled in [false, true] {
+            let host = services(enabled);
+            let frozen = freeze_collaboration_runtime_services(
+                host.agent_collaboration,
+                host.agent_collaboration_policy,
+            )
+            .unwrap();
+            assert_eq!(frozen.services.is_some(), enabled);
+            assert_eq!(frozen.policy.unwrap().snapshot().unwrap().enabled, enabled);
+        }
+        let unavailable = freeze_collaboration_runtime_services(None, None).unwrap();
+        assert!(unavailable.services.is_none());
+        assert!(unavailable.policy.is_none());
+        assert!(
+            freeze_collaboration_runtime_services(services(true).agent_collaboration, None)
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("未提供本轮协作策略")
+        );
+    }
+
+    #[test]
+    fn collaboration_service_and_extension_policy_use_one_host_snapshot() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct ChangingPolicy(AtomicUsize);
+        impl crate::AgentCollaborationPolicySource for ChangingPolicy {
+            fn snapshot(&self) -> crate::AgentResult<crate::AgentCollaborationSettings> {
+                Ok(crate::AgentCollaborationSettings {
+                    enabled: self.0.fetch_add(1, Ordering::SeqCst) != 0,
+                    ..Default::default()
+                })
+            }
+        }
+        let source = Arc::new(ChangingPolicy(AtomicUsize::new(0)));
+        let frozen = freeze_collaboration_runtime_services(
+            services(true).agent_collaboration,
+            Some(source.clone()),
+        )
+        .unwrap();
+        assert!(frozen.services.is_none());
+        let policy = frozen.policy.unwrap();
+        assert!(!policy.snapshot().unwrap().enabled);
+        assert!(!policy.snapshot().unwrap().enabled);
+        assert_eq!(source.0.load(Ordering::SeqCst), 1);
     }
 }

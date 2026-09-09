@@ -1,7 +1,10 @@
 //! FileChange context regressions through the real Host, Harness and a controlled HTTP Provider.
 use super::human_input::{read_provider_request, wait_for_done};
 use super::*;
-use mycopilot_core::{AgentCommandPermission, AgentCommandSafetyPolicy, AgentPatchPermission};
+use mycopilot_core::{
+    AgentCollaborationSettingsUpdate, AgentCommandPermission, AgentCommandSafetyPolicy,
+    AgentContextProfile, AgentPatchPermission, AGENT_COLLABORATION_TOOL_NAMES,
+};
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
@@ -29,6 +32,15 @@ struct FileTransactionHost {
 
 impl FileTransactionHost {
     async fn start(request_count: usize, patch: AgentPatchPermission) -> Self {
+        Self::start_with_collaboration(request_count, patch, AgentContextProfile::Full, true).await
+    }
+
+    async fn start_with_collaboration(
+        request_count: usize,
+        patch: AgentPatchPermission,
+        context_profile: AgentContextProfile,
+        collaboration_enabled: bool,
+    ) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let (captured, requests) = unbounded_channel();
@@ -78,6 +90,10 @@ impl FileTransactionHost {
         let mut settings = test_model_settings();
         settings.api_url = format!("http://{address}/v1/chat/completions");
         storage.save_model_settings(settings).unwrap();
+        let mut preferences = storage.load_agent_prompt_preferences().unwrap();
+        preferences.context_profile = context_profile;
+        storage.save_agent_prompt_preferences(preferences).unwrap();
+        set_collaboration_enabled(&storage, collaboration_enabled);
         let agent = AgentService::new(Arc::clone(&storage));
         let (notifications, events) = unbounded_channel();
         let turn = agent
@@ -122,10 +138,30 @@ impl FileTransactionHost {
     }
 
     async fn request(&mut self) -> Value {
-        tokio::time::timeout(Duration::from_secs(10), self.requests.recv())
-            .await
-            .expect("Host must reach the next controlled Provider request")
-            .expect("controlled Provider stopped unexpectedly")
+        match tokio::time::timeout(Duration::from_secs(10), self.requests.recv()).await {
+            Ok(Some(request)) => request,
+            failure => {
+                let captured_events = std::iter::from_fn(|| self.events.try_recv().ok())
+                    .map(|event| {
+                        let params = &event["params"];
+                        json!({
+                            "method": event["method"], "type": params["type"],
+                            "status": params["status"], "code": params["code"],
+                            "message": params["message"], "error": params["error"],
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                let terminal = self
+                    .storage
+                    .get_conversation_turn_trace(ASSISTANT_ID)
+                    .map(|trace| trace.map(|trace| (trace.terminal_status, trace.terminal_error)));
+                panic!(
+                    "Host must reach the next controlled Provider request; wait={failure:?}; \
+                     run={}; terminal={terminal:?}; events={captured_events:?}",
+                    self.run_id,
+                );
+            }
+        }
     }
 
     fn calls(&self, calls: &[(&str, &str, Value)]) {
@@ -192,6 +228,202 @@ impl FileTransactionHost {
                 .all(|item| !item.content.contains(STATE_HEADER)),
             "the dynamic transaction tail must never become retained model history"
         );
+    }
+}
+
+fn set_collaboration_enabled(storage: &StorageService, enabled: bool) {
+    let current = storage.load_agent_collaboration_settings().unwrap();
+    if current.enabled != enabled {
+        storage
+            .update_agent_collaboration_settings(&AgentCollaborationSettingsUpdate {
+                enabled,
+                expected_revision: current.revision,
+            })
+            .unwrap();
+    }
+}
+
+fn assert_collaboration_request(request: &Value, enabled: bool, profile: AgentContextProfile) {
+    let tools = request["tools"].as_array().unwrap();
+    for name in AGENT_COLLABORATION_TOOL_NAMES {
+        assert_eq!(
+            tools
+                .iter()
+                .filter(|tool| tool["function"]["name"] == name)
+                .count(),
+            usize::from(enabled),
+            "the actual Provider request must obey the frozen collaboration policy: {name}"
+        );
+    }
+    assert_eq!(
+        tools
+            .iter()
+            .any(|tool| tool["function"]["name"] == "todo_update"),
+        profile == AgentContextProfile::Full,
+        "the real run must exercise the requested context profile"
+    );
+    let text = request["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|message| message["content"].as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_eq!(text.contains("<agent_collaboration_directory>"), enabled);
+    if !enabled {
+        assert!(
+            text.contains("disabled_by_user"),
+            "the disabled capability must retain its World State explanation"
+        );
+    }
+}
+
+#[tokio::test]
+async fn collaboration_file_change_disabled_auto_create_succeeds_in_full_and_minimal_modes() {
+    for profile in [AgentContextProfile::Full, AgentContextProfile::Minimal] {
+        let mut host = FileTransactionHost::start_with_collaboration(
+            2,
+            AgentPatchPermission::AutoApprove,
+            profile,
+            false,
+        )
+        .await;
+        assert_collaboration_request(&host.request().await, false, profile);
+        host.patch(
+            "collaboration-disabled-create",
+            json!({
+                "action": "apply", "operation": "create", "filePath": "quick_sort.py",
+                "content": "def quick_sort(values):\n    return sorted(values)\n"
+            }),
+        );
+        let after_create = host.request().await;
+        assert_collaboration_request(&after_create, false, profile);
+        assert_eq!(
+            tool_result(&host, &after_create, "collaboration-disabled-create")["status"],
+            "applied",
+            "disabled collaboration must not invalidate an unrelated FileChange checkpoint"
+        );
+        assert_eq!(
+            fs::read_to_string(host.workspace.join("quick_sort.py")).unwrap(),
+            "def quick_sort(values):\n    return sorted(values)\n"
+        );
+        assert!(host.agent.list_pending_actions().is_empty());
+        assert!(
+            !host
+                .storage
+                .load_agent_collaboration_run_policy(&host.run_id)
+                .unwrap()
+                .unwrap()
+                .enabled
+        );
+        host.finish().await;
+    }
+}
+
+#[tokio::test]
+async fn collaboration_file_change_approval_and_preview_preserve_frozen_policy_after_switch() {
+    for profile in [AgentContextProfile::Full, AgentContextProfile::Minimal] {
+        for enabled in [false, true] {
+            let mut host = FileTransactionHost::start_with_collaboration(
+                2,
+                AgentPatchPermission::RequireApproval,
+                profile,
+                enabled,
+            )
+            .await;
+            assert_collaboration_request(&host.request().await, enabled, profile);
+            host.patch(
+                "collaboration-approval-create",
+                json!({
+                    "action": "apply", "operation": "create", "filePath": "approved.py",
+                    "content": "print('approved once')\n"
+                }),
+            );
+            wait_for_done(&mut host.events, &host.run_id, "waiting_for_approval").await;
+            assert!(!host.workspace.join("approved.py").exists());
+            let pending = host.agent.list_pending_actions();
+            assert_eq!(pending.len(), 1);
+            assert_eq!(pending[0].tool_name, "apply_patch");
+            let frozen_input = host
+                .agent
+                .pending_actions
+                .lock()
+                .unwrap()
+                .values()
+                .find(|record| record.snapshot.run_id == host.run_id)
+                .unwrap()
+                .agent_input
+                .clone();
+            let checkpoint = frozen_input.resume_checkpoint.as_ref().unwrap();
+            assert_eq!(checkpoint.collaboration_run_snapshot.is_some(), enabled);
+            assert_eq!(
+                frozen_input
+                    .prompt_preferences
+                    .as_ref()
+                    .unwrap()
+                    .context_profile,
+                profile
+            );
+            set_collaboration_enabled(&host.storage, !enabled);
+            assert_eq!(
+                host.storage
+                    .load_agent_collaboration_settings()
+                    .unwrap()
+                    .enabled,
+                !enabled
+            );
+            assert_eq!(
+                host.storage
+                    .load_agent_collaboration_run_policy(&host.run_id)
+                    .unwrap()
+                    .unwrap()
+                    .enabled,
+                enabled
+            );
+
+            // Reconstruct both preview routes after discarding the cached selector directory.
+            // A disabled run has no authorization snapshot even if the global switch is now on.
+            host.agent
+                .collaboration_run_directories
+                .lock()
+                .unwrap()
+                .clear();
+            for projection in [
+                host.agent
+                    .context_window_tool_projection(&frozen_input, None),
+                host.agent.context_window_tool_projection_for_agent_run(
+                    &host.run_id,
+                    &frozen_input,
+                    None,
+                ),
+            ] {
+                let projected = projection.unwrap().tool_set_checkpoint();
+                assert_eq!(
+                    serde_json::to_value(projected).unwrap(),
+                    serde_json::to_value(&checkpoint.tool_set).unwrap(),
+                    "preview must reconstruct exactly the approved run's frozen Tool set"
+                );
+            }
+
+            host.agent
+                .approve_action(
+                    &host.run_id,
+                    &pending[0].action_id,
+                    host.notifications.clone(),
+                )
+                .unwrap();
+            let resumed = host.request().await;
+            assert_collaboration_request(&resumed, enabled, profile);
+            assert_eq!(
+                tool_result(&host, &resumed, "collaboration-approval-create")["status"],
+                "applied"
+            );
+            assert_eq!(
+                fs::read_to_string(host.workspace.join("approved.py")).unwrap(),
+                "print('approved once')\n"
+            );
+            host.finish().await;
+        }
     }
 }
 

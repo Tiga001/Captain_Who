@@ -304,6 +304,232 @@ fn assert_paused(output: &AgentChatOutput) {
     assert!(!public.contains("providerContinuationRefs"));
 }
 
+fn with_disabled_collaboration(host: AgentRuntimeHostServices) -> AgentRuntimeHostServices {
+    struct UnusedCollaborationExecutor;
+    impl crate::AgentCollaborationExecutor for UnusedCollaborationExecutor {
+        fn execute(
+            &self,
+            _: crate::AgentCollaborationInvocation,
+            _: crate::AgentCollaborationExecutionControl,
+        ) -> crate::AgentCollaborationExecutionFuture {
+            panic!("disabled collaboration must never reach its Host executor")
+        }
+    }
+
+    // Deliberately provide a service despite the disabled policy. The runtime must freeze
+    // availability before preparing either an approval or a human-input checkpoint.
+    host.with_agent_collaboration(crate::AgentCollaborationRuntimeServices::new(
+        Arc::new(UnusedCollaborationExecutor),
+        crate::AgentCollaborationCaller {
+            agent_id: "root-disabled-collaboration".into(),
+            root_agent_id: "root-disabled-collaboration".into(),
+            root_conversation_id: "conversation-human".into(),
+            parent_agent_id: None,
+            conversation_id: "conversation-human".into(),
+            project_id: None,
+            task_name: crate::ROOT_AGENT_TASK_NAME.into(),
+            task_path: "/root".into(),
+        },
+        crate::AgentCollaborationSelectorDirectory::bounded(
+            Vec::new(),
+            vec![crate::AgentCollaborationModelSelector {
+                model_config_id: "disabled-collaboration-model".into(),
+                display_name: "DISABLED_COLLABORATION_DIRECTORY_CANARY".into(),
+                capabilities: crate::ModelCapabilities::default(),
+            }],
+        ),
+    ))
+    .with_agent_collaboration_policy(Arc::new(
+        crate::FrozenAgentCollaborationPolicySource::new(crate::AgentCollaborationSettings {
+            enabled: false,
+            revision: 2,
+            updated_at: 1,
+        }),
+    ))
+}
+
+fn assert_disabled_collaboration_checkpoint(checkpoint: &crate::AgentRunCheckpoint) {
+    assert!(checkpoint.collaboration_run_snapshot.is_none());
+    assert!(!checkpoint
+        .tool_set
+        .exposed_tool_names
+        .iter()
+        .any(|name| crate::AGENT_COLLABORATION_TOOL_NAMES.contains(&name.as_str())));
+}
+
+fn assert_disabled_collaboration_requests(
+    requests: &[Value],
+    profile: crate::AgentContextProfile,
+    required_tool: &str,
+) {
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0]["tools"], requests[1]["tools"]);
+    for request in requests {
+        let names: Vec<_> = request["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|definition| definition["function"]["name"].as_str().unwrap())
+            .collect();
+        assert!(names.contains(&required_tool));
+        assert_eq!(
+            names.contains(&"todo_update"),
+            profile == crate::AgentContextProfile::Full
+        );
+        assert!(!names
+            .iter()
+            .any(|name| crate::AGENT_COLLABORATION_TOOL_NAMES.contains(name)));
+        let serialized = request.to_string();
+        assert!(!serialized.contains("DISABLED_COLLABORATION_DIRECTORY_CANARY"));
+        assert!(serialized.contains("disabled_by_user"));
+    }
+}
+
+#[tokio::test]
+async fn disabled_collaboration_service_allows_command_approval_checkpoint_and_resume() {
+    for profile in [
+        crate::AgentContextProfile::Full,
+        crate::AgentContextProfile::Minimal,
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let (url, server) = provider(vec![
+            tool_response(vec![tool(
+                "command-approval",
+                "run_command",
+                json!({"command":"printf 'command checkpoint complete\\n'","reason":"Exercise manual command approval."}),
+            )]),
+            completed_response(),
+        ])
+        .await;
+        let mut base = input(url, dir.path());
+        base.prompt_preferences =
+            Some(serde_json::from_value(json!({"contextProfile":profile})).unwrap());
+        let approval = run(
+            base.clone(),
+            with_disabled_collaboration(AgentRuntimeHostServices::new()),
+        )
+        .await;
+        assert_eq!(approval.status, AgentRunStatus::WaitingForApproval);
+        assert_eq!(approval.proposed_actions.len(), 1);
+        assert!(matches!(
+            &approval.proposed_actions[0],
+            AgentProposedAction::Command { .. }
+        ));
+        let checkpoint = approval
+            .events
+            .iter()
+            .find_map(|event| match event {
+                AgentEvent::ApprovalRequired { checkpoint, .. } => Some((**checkpoint).clone()),
+                _ => None,
+            })
+            .expect("manual command approval must produce a restorable checkpoint");
+        assert_disabled_collaboration_checkpoint(&checkpoint);
+        let frozen = checkpoint
+            .context_items
+            .iter()
+            .flat_map(|item| &item.tool_calls)
+            .find(|call| call.id == checkpoint.pending_tool_call_id)
+            .unwrap()
+            .clone();
+        assert_eq!(frozen.name, "run_command");
+        let call_id = frozen.id.clone();
+        let mut resumed_input = base;
+        resumed_input.messages.clear();
+        resumed_input.approval_decision = Some(crate::AgentApprovalDecision {
+            action_id: checkpoint
+                .pending_action_id
+                .clone()
+                .unwrap_or_else(|| call_id.clone()),
+            status: crate::AgentApprovalDecisionStatus::Approved,
+            message: None,
+        });
+        // The Host supplies the trusted execution receipt at the manual-approval boundary.
+        // No real command or remote provider is required to exercise restoration and dispatch.
+        resumed_input.tool_continuation = Some(crate::AgentToolContinuation {
+            call: AgentToolCall {
+                id: frozen.id.clone(),
+                tool: frozen.name.clone(),
+                args: frozen.args,
+                approval_status: AgentApprovalStatus::Approved,
+                reason: None,
+            },
+            result: AgentToolResult {
+                exact_archive_file: None,
+                call_id: frozen.id,
+                tool: frozen.name,
+                ok: true,
+                result: Some(
+                    json!({"exitCode":0,"stdout":"command checkpoint complete","stderr":""}),
+                ),
+                error: None,
+            },
+        });
+        resumed_input.resume_checkpoint = Some(checkpoint);
+        let completed = run(
+            resumed_input,
+            with_disabled_collaboration(AgentRuntimeHostServices::new()),
+        )
+        .await;
+        assert_eq!(completed.status, AgentRunStatus::Completed);
+        let requests = server.await.unwrap();
+        assert_disabled_collaboration_requests(&requests, profile, "run_command");
+        let results: Vec<_> = requests[1]["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|message| message["role"] == "tool" && message["tool_call_id"] == call_id)
+            .collect();
+        assert_eq!(results.len(), 1);
+        assert!(results[0]["content"]
+            .as_str()
+            .unwrap()
+            .contains("command checkpoint complete"));
+    }
+}
+
+#[tokio::test]
+async fn disabled_collaboration_service_allows_human_input_checkpoint_and_resume() {
+    for profile in [
+        crate::AgentContextProfile::Full,
+        crate::AgentContextProfile::Minimal,
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let (url, server) = provider(vec![
+            tool_response(vec![question("question-disabled-collaboration")]),
+            completed_response(),
+        ])
+        .await;
+        let mut base = input(url, dir.path());
+        base.prompt_preferences =
+            Some(serde_json::from_value(json!({"contextProfile":profile})).unwrap());
+        let host = HumanHost::enabled();
+        assert_paused(&run(base.clone(), with_disabled_collaboration(host.services())).await);
+        let pause = host.take_pause();
+        assert_disabled_collaboration_checkpoint(&pause.checkpoint);
+        let call_id = pause.call.id.clone();
+        let completed = run(
+            base,
+            with_disabled_collaboration(host.services()).with_user_input_resume(answer(pause, 1)),
+        )
+        .await;
+        assert_eq!(completed.status, AgentRunStatus::Completed);
+        assert!(host.pauses.lock().unwrap().is_empty());
+        let requests = server.await.unwrap();
+        assert_disabled_collaboration_requests(&requests, profile, "request_user_input");
+        let results: Vec<_> = requests[1]["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|message| message["role"] == "tool" && message["tool_call_id"] == call_id)
+            .collect();
+        assert_eq!(results.len(), 1);
+        assert!(results[0]["content"]
+            .as_str()
+            .unwrap()
+            .contains("human_interaction_response"));
+    }
+}
+
 #[tokio::test]
 async fn human_interaction_async_accepts_multiple_batches_and_continues_without_answers() {
     let dir = tempfile::tempdir().unwrap();

@@ -124,10 +124,10 @@ impl RuntimeExtension for AgentCollaborationExtension {
 
     fn conversation_world_state_sections(&self) -> AgentResult<Vec<WorldStateSectionEnvelope>> {
         let enabled = self.request.as_ref().is_some_and(|policy| policy.enabled);
-        let reason = if self.services.is_none() || self.request.is_none() {
-            "host_unavailable"
-        } else if !enabled {
+        let reason = if self.request.as_ref().is_some_and(|policy| !policy.enabled) {
             "disabled_by_user"
+        } else if self.services.is_none() || self.request.is_none() {
+            "host_unavailable"
         } else {
             "available"
         };
@@ -376,5 +376,29 @@ mod tests {
             .request_context(&ModelRequestContext::agent_work())
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn disabled_run_without_services_retains_policy_in_world_state_and_checkpoint() {
+        let policy = Policy::new(false);
+        let mut extension = AgentCollaborationExtension::new(None, Some(policy.clone()));
+        extension.prepare_model_request().unwrap();
+        let section = &extension.conversation_world_state_sections().unwrap()[0];
+        assert_eq!(section.state["enabled"], false);
+        assert_eq!(section.state["available"], false);
+        assert_eq!(section.state["reason"], "disabled_by_user");
+        assert_eq!(section.state["policyRevision"], 1);
+        let snapshot = extension.snapshot_state().unwrap();
+        assert_eq!(snapshot["policy"]["enabled"], false);
+        let mut resumed = AgentCollaborationExtension::new(None, Some(policy));
+        resumed.restore_state(1, snapshot).unwrap();
+        resumed.prepare_model_request().unwrap();
+        assert_eq!(
+            tool_set(&extension).revision(),
+            tool_set(&resumed).revision()
+        );
+        assert!(AGENT_COLLABORATION_TOOL_NAMES
+            .iter()
+            .all(|name| !tool_set(&resumed).contains(name)));
     }
 }

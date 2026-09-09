@@ -388,6 +388,7 @@ mod conversation_world_state;
 mod deepseek_recovery;
 mod file_transaction_context;
 mod human_interaction;
+mod mcp_checkpoint;
 mod moonshot_recovery;
 mod request_layout;
 mod skill_activation;

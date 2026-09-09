@@ -758,8 +758,8 @@ impl AgentRuntimeHostServices {
         self
     }
 
-    /// Supplies authenticated collaboration services. Model exposure additionally requires the
-    /// Host's policy bound to this logical run; services remain attached during approval resume.
+    /// Supplies authenticated collaboration services. Execution and preview retain them only
+    /// when the Host's policy bound to this logical run enables collaboration, including resume.
     pub fn with_agent_collaboration(
         mut self,
         services: crate::AgentCollaborationRuntimeServices,
@@ -958,12 +958,19 @@ pub fn prepare_context_window_tool_projection(
         .as_ref()
         .map(|checkpoint| checkpoint.extension_snapshots.as_slice())
         .unwrap_or_default();
+    let FrozenCollaborationServices {
+        services: agent_collaboration,
+        policy: agent_collaboration_policy,
+    } = freeze_collaboration_runtime_services(
+        host_services.agent_collaboration.clone(),
+        host_services.agent_collaboration_policy.clone(),
+    )?;
     let agent_collaboration = match input.resume_checkpoint.as_ref() {
         Some(checkpoint) => restore_collaboration_runtime_services(
-            host_services.agent_collaboration.clone(),
+            agent_collaboration,
             checkpoint.collaboration_run_snapshot.as_ref(),
         )?,
-        None => host_services.agent_collaboration.clone(),
+        None => agent_collaboration,
     };
     let capabilities = prepare_runtime_capabilities_with_skills(
         input,
@@ -981,7 +988,7 @@ pub fn prepare_context_window_tool_projection(
             mcp_tools: host_services.mcp_tools.clone(),
             builtin_capabilities: host_services.builtin_capabilities.clone(),
             agent_collaboration,
-            agent_collaboration_policy: host_services.agent_collaboration_policy.clone(),
+            agent_collaboration_policy,
             automation_report_sink: host_services.automation_report_sink.clone(),
             human_interaction_policy: host_services.human_interaction_policy.clone(),
             human_interaction_execution_ready: human_ready,

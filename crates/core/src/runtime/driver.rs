@@ -49,7 +49,7 @@ impl AgentRuntime {
             command_session_executor,
             steer_input,
             collaboration_inbox,
-            mut agent_collaboration,
+            agent_collaboration,
             agent_collaboration_policy,
             automation_report_sink,
             human_interaction_policy,
@@ -148,6 +148,19 @@ impl AgentRuntime {
                 restore_trace_assistant_message_id.as_deref(),
             )
         })?;
+        let FrozenCollaborationServices {
+            services: mut agent_collaboration,
+            policy: agent_collaboration_policy,
+        } = freeze_collaboration_runtime_services(agent_collaboration, agent_collaboration_policy)
+            .map_err(|error| {
+                attach_failed_runtime_trace(
+                    error,
+                    &setup_conversation_trace,
+                    &trace_run_id,
+                    restore_trace_conversation_id.as_deref(),
+                    restore_trace_assistant_message_id.as_deref(),
+                )
+            })?;
         if let Some(restored) = restored_checkpoint.as_ref() {
             // Approval resume continues the backend authority frozen in schema-v6 checkpoint.
             // Newer UI/settings payloads cannot silently change permissions, workspace,
