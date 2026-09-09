@@ -370,12 +370,14 @@ it.each([false, true])(
     await expect.element(input).toHaveFocus()
     await expect.element(input).toHaveValue('/model')
     await expect.element(view.getByRole('option')).toHaveTextContent('模型')
-    await userEvent.keyboard('{Enter}')
-    await expect.element(view.getByRole('listbox', { name: 'chat.selectModel' })).toBeVisible()
-    await userEvent.keyboard('{Escape}')
-    await expect.element(input).toHaveFocus()
-    await expect.element(input).toHaveValue('/model')
-    await expect.element(view.getByRole('option')).toHaveTextContent('模型')
+    for (const key of ['Escape', 'Backspace', 'Delete']) {
+      await userEvent.keyboard('{Enter}')
+      await expect.element(view.getByRole('listbox', { name: 'chat.selectModel' })).toBeVisible()
+      await userEvent.keyboard(`{${key}}`)
+      await expect.element(input).toHaveFocus()
+      await expect.element(input).toHaveValue('/model')
+      await expect.element(view.getByRole('option')).toHaveTextContent('模型')
+    }
     expect(changed).toHaveBeenCalledTimes(writes)
     expect(submit).not.toHaveBeenCalled()
     expect(stop).not.toHaveBeenCalled()
@@ -405,6 +407,32 @@ it('keeps both model menus available when a run starts and changes only the next
   expect(submit).not.toHaveBeenCalled()
   expect(stop).not.toHaveBeenCalled()
 })
+
+it.each(['model', 'capabilities'])(
+  'returns from the %s submenu with Delete or Backspace after refocusing the composer without deleting its slash query',
+  async (command) => {
+    modelState.enabledModels = MODEL_OPTIONS
+    const view = await render(<TestComposer portalMenus />)
+    const input = view.getByRole('textbox', { name: 'chat.inputAria' })
+    await input.click()
+    await userEvent.keyboard(`/${command}{Enter}`)
+    for (const key of ['Backspace', 'Delete']) {
+      await expect.element(view.getByRole('region')).toBeVisible()
+      await input.click()
+      const writes = changed.mock.calls.length
+      await userEvent.keyboard(`{${key}}`)
+      await expect.element(input).toHaveFocus()
+      await expect.element(input).toHaveValue(`/${command}`)
+      await expect.element(view.getByRole('region')).not.toBeInTheDocument()
+      await expect.element(view.getByRole('option')).toBeVisible()
+      expect(changed).toHaveBeenCalledTimes(writes)
+      if (key === 'Backspace') await userEvent.keyboard('{Enter}')
+    }
+    expect(execute).not.toHaveBeenCalled()
+    expect(submit).not.toHaveBeenCalled()
+    expect(stop).not.toHaveBeenCalled()
+  }
+)
 
 it.each([{ maintenance: true }, { transition: true }])(
   'shares footer busy protection when state changes while the model page is open: %j',
@@ -506,7 +534,7 @@ it('does not select a model or leave its menu on IME confirmation and compositio
   const menu = view.getByRole('listbox', { name: 'chat.selectModel' })
   const option = menu.getByRole('option', { name: /deepseek-chat-api/ })
   const writes = changed.mock.calls.length
-  for (const key of ['Enter', 'Escape']) {
+  for (const key of ['Enter', 'Escape', 'Backspace', 'Delete']) {
     option.element().dispatchEvent(
       new KeyboardEvent('keydown', {
         key,

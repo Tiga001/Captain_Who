@@ -1015,6 +1015,19 @@ export function ChatComposer({
               else setIsCommandMenuOpen(false)
               return
             }
+            if (
+              isCommandSubmenuOpen &&
+              !isCapabilityDialogOpen &&
+              (event.key === 'Backspace' || event.key === 'Delete') &&
+              !event.ctrlKey &&
+              !event.metaKey &&
+              !event.altKey &&
+              !event.shiftKey
+            ) {
+              event.preventDefault()
+              returnToCommands()
+              return
+            }
             if (isCommandSubmenuOpen && event.key === 'Enter') {
               event.preventDefault()
               return

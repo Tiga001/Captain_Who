@@ -474,6 +474,8 @@ describe('CapabilityCenterMenu domain Host contracts', () => {
     input.dispatchEvent(new CompositionEvent('compositionend', { bubbles: true }))
     input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
     input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Backspace', bubbles: true }))
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Delete', bubbles: true }))
     expect(service.humanSet).not.toHaveBeenCalled()
     expect(service.back).not.toHaveBeenCalled()
     await search.fill('')
@@ -501,6 +503,68 @@ describe('CapabilityCenterMenu domain Host contracts', () => {
     await expect.element(row).toHaveAttribute('aria-disabled', 'false')
     await expect.element(row).toHaveAttribute('aria-checked', 'true')
     expect(service.humanGet.mock.calls.length).toBeGreaterThanOrEqual(3)
+  })
+
+  it.each([
+    ['轻量模式', service.preferencesSave],
+    ['图片生成', service.imageSet],
+    ['联网搜索', service.searchSave],
+    ['人机交互', service.humanSet],
+    ['多智能体', service.collaborationSet],
+    ['浏览器自动化', service.browserSet],
+    ['Local files', service.serverEnable]
+  ] as const)(
+    'keeps the hovered %s row visually stable while saving without duplicate writes',
+    async (name, save) => {
+      const saving = deferred<void>()
+      const original = save.getMockImplementation()!
+      save.mockImplementationOnce(async (...args) => {
+        await saving.promise
+        return original(...args)
+      })
+      const screen = await render(<Menu />)
+      const row = screen.getByRole('switch', { name })
+      await expect.element(row).toHaveAttribute('aria-disabled', 'false')
+      await row.hover()
+      await expect.element(row).toHaveAttribute('data-selected', 'true')
+      const element = row.element()
+      const appearance = () => {
+        const style = getComputedStyle(element)
+        return { opacity: style.opacity, color: style.color, background: style.backgroundColor }
+      }
+      const before = appearance()
+      expect(before.opacity).toBe('1')
+      const wasEnabled = element.getAttribute('aria-checked') === 'true'
+      await row.click()
+      await expect.element(row).toHaveAttribute('aria-busy', 'true')
+      await expect.element(row).toHaveAttribute('aria-disabled', 'true')
+      expect(appearance()).toEqual(before)
+      element.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+      expect(save).toHaveBeenCalledTimes(1)
+      saving.resolve()
+      await expect.element(row).toHaveAttribute('aria-busy', 'false')
+      await expect.element(row).toHaveAttribute('aria-disabled', 'false')
+      await expect.element(row).toHaveAttribute('aria-checked', String(!wasEnabled))
+      expect(row.element()).toBe(element)
+      expect(appearance()).toEqual(before)
+      expect(service.back).not.toHaveBeenCalled()
+    }
+  )
+
+  it('still dims unavailable rows during initial loading', async () => {
+    const loading = deferred<ReturnType<typeof ok<typeof collaboration>>>()
+    service.collaborationGet.mockReturnValueOnce(loading.promise)
+    const screen = await render(<Menu />)
+    const row = screen.getByRole('switch', { name: '多智能体' })
+    await row.hover()
+    await expect.element(row).toHaveAttribute('aria-disabled', 'true')
+    await expect.element(row).toHaveAttribute('aria-busy', 'false')
+    expect(getComputedStyle(row.element()).opacity).toBe('0.5')
+    row.element().dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    expect(service.collaborationSet).not.toHaveBeenCalled()
+    loading.resolve(ok({ ...collaboration }))
+    await expect.element(row).toHaveAttribute('aria-disabled', 'false')
+    expect(getComputedStyle(row.element()).opacity).toBe('1')
   })
 
   it('re-reads an indeterminate mutation and retains the actual committed value while showing its error', async () => {
@@ -541,6 +605,42 @@ describe('CapabilityCenterMenu domain Host contracts', () => {
       .toHaveAttribute('aria-checked', 'true')
   })
 
+  it.each(['Backspace', 'Delete'])('returns from menu and row focus with %s', async (key) => {
+    const screen = await render(<Menu />)
+    const region = screen.getByRole('region', { name: '能力中心' })
+    await expect.element(region).toHaveFocus()
+    await userEvent.keyboard(`{${key}}`)
+    expect(service.back).toHaveBeenCalledTimes(1)
+    const row = screen.getByRole('switch', { name: '人机交互' })
+    await expect.element(row).toHaveAttribute('aria-disabled', 'false')
+    row.element().focus()
+    await userEvent.keyboard(`{${key}}`)
+    expect(service.back).toHaveBeenCalledTimes(2)
+    expect(service.humanSet).not.toHaveBeenCalled()
+  })
+
+  it.each(['Backspace', 'Delete'])(
+    'edits a nonempty search but returns to slash commands from an empty search with %s',
+    async (key) => {
+      const screen = await render(<Composer />)
+      await screen.getByRole('textbox').click()
+      await userEvent.keyboard('/')
+      await page.getByRole('option', { name: /能力中心/ }).click()
+      const search = page.getByRole('searchbox')
+      await search.fill('xx')
+      if (key === 'Delete') (search.element() as HTMLInputElement).setSelectionRange(0, 0)
+      await userEvent.keyboard(`{${key}}`)
+      await expect.element(search).toHaveValue('x')
+      await expect.element(page.getByRole('region', { name: '能力中心' })).toBeVisible()
+      await search.fill('')
+      await userEvent.keyboard(`{${key}}`)
+      await expect.element(page.getByRole('option', { name: /能力中心/ })).toBeVisible()
+      await expect.element(screen.getByRole('textbox')).toHaveValue('/')
+      expect(service.submit).not.toHaveBeenCalled()
+      expect(service.stop).not.toHaveBeenCalled()
+    }
+  )
+
   it('keeps the real Composer capability submenu through a portal error dialog and never sends or stops', async () => {
     image.credentialStatus = 'missing'
     const screen = await render(<Composer />)
@@ -555,6 +655,9 @@ describe('CapabilityCenterMenu domain Host contracts', () => {
     expect(page.getByRole('dialog').element().contains(document.activeElement)).toBe(true)
     await userEvent.keyboard('{Shift>}{Tab}{/Shift}')
     expect(page.getByRole('dialog').element().contains(document.activeElement)).toBe(true)
+    await userEvent.keyboard('{Backspace}{Delete}')
+    await expect.element(page.getByRole('dialog')).toBeVisible()
+    await expect.element(page.getByRole('region', { name: '能力中心' })).toBeVisible()
     await userEvent.keyboard('{Escape}')
     await expect.element(page.getByRole('dialog')).not.toBeInTheDocument()
     await expect.element(page.getByRole('searchbox')).toBeVisible()

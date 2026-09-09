@@ -83,7 +83,13 @@ export function ComposerModelMenu({
           if (event.key === 'Enter' || event.key === 'Escape') event.preventDefault()
           return
         }
-        if (event.key === 'Escape') {
+        const isDeleteBack =
+          (event.key === 'Backspace' || event.key === 'Delete') &&
+          !event.ctrlKey &&
+          !event.metaKey &&
+          !event.altKey &&
+          !event.shiftKey
+        if (event.key === 'Escape' || isDeleteBack) {
           event.preventDefault()
           onBack()
         } else if (['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) {

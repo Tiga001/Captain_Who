@@ -113,8 +113,11 @@
 }
 
 .capability-center__row[aria-disabled='true'] {
-  opacity: 0.5;
   cursor: default;
+}
+
+.capability-center__row[aria-disabled='true']:not([aria-busy='true']) {
+  opacity: 0.5;
 }
 
 .capability-center__label {

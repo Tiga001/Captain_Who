@@ -333,6 +333,7 @@ export function CapabilityCenterMenu({ onBack, onDialogOpenChange }: CapabilityC
         aria-checked={row.enabled}
         aria-label={row.label}
         aria-disabled={disabled}
+        aria-busy={pending.has(row.id)}
         data-selected={selected?.id === row.id}
         className="capability-center__row"
         onMouseEnter={() => setSelectedId(row.id)}
@@ -379,7 +380,17 @@ export function CapabilityCenterMenu({ onBack, onDialogOpenChange }: CapabilityC
         }
         if (event.key === 'Escape') return // The composer owns the submenu's back action.
         event.stopPropagation()
-        if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+        if (
+          (event.key === 'Backspace' || event.key === 'Delete') &&
+          !event.ctrlKey &&
+          !event.metaKey &&
+          !event.altKey &&
+          !event.shiftKey &&
+          (event.target !== searchRef.current || query.length === 0)
+        ) {
+          event.preventDefault()
+          onBack()
+        } else if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
           event.preventDefault()
           if (!rows.length) return
           const index = Math.max(
