@@ -19,6 +19,8 @@ coverage
 .cache/office-renderer/
 .cache/word-pdf-renderer/
 .cache/artifact-runtime/
+.cache/sidebar-menu-preview/
+.cache/frontend-locale-generation/
 
 __pycache__/
 *.pyc
