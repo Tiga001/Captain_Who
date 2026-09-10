@@ -232,6 +232,10 @@ describe('FilesPanel', () => {
     await screen.getByRole('button', { name: 'files.options' }).click()
     const sourceOption = screen.getByRole('menuitemradio', { name: 'files.markdown.source' })
     const previewOption = screen.getByRole('menuitemradio', { name: 'files.markdown.preview' })
+    const optionsMenu = screen.container.querySelector<HTMLElement>('.files-panel__options-menu')
+    expect(getComputedStyle(sourceOption.element()).fontSize).toBe('13px')
+    expect(getComputedStyle(sourceOption.element()).lineHeight).toBe('18px')
+    expect(optionsMenu && sourceOption.element().scrollWidth <= optionsMenu.clientWidth).toBe(true)
     await expect.element(sourceOption).toHaveAttribute('aria-checked', 'true')
     await expect.element(previewOption).toHaveAttribute('aria-checked', 'false')
     await previewOption.click()
@@ -417,7 +421,17 @@ See [Conversation Trace](../docs/conversation-trace.md#details) and [OpenAI](htt
     const nextPage = screen.getByRole('button', { name: 'files.pdf.nextPage' })
     await expect.element(previousPage).toBeDisabled()
     await expect.element(nextPage).toBeEnabled()
-    expect(screen.container.querySelector('.files-panel__pdf-pager')?.textContent).toContain('1/3')
+    const pager = screen.container.querySelector<HTMLElement>('.files-panel__pdf-pager')
+    const preview = screen.container.querySelector<HTMLElement>('.files-panel__preview')
+    expect(pager?.textContent).toContain('1/3')
+    expect(getComputedStyle(pager!).left).toBe('12px')
+    expect(getComputedStyle(pager!).bottom).toBe('12px')
+    expect(pager!.getBoundingClientRect().left).toBeLessThan(
+      preview!.getBoundingClientRect().left + preview!.clientWidth / 2
+    )
+    expect(pager!.getBoundingClientRect().top).toBeGreaterThan(
+      preview!.getBoundingClientRect().top + preview!.clientHeight / 2
+    )
 
     await nextPage.click()
     await expect.poll(() => pdfPageChangeSpy).toHaveBeenCalledWith(2)

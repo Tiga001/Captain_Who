@@ -92,31 +92,36 @@
   right: 0;
   z-index: 20;
   display: grid;
-  min-width: 200px;
-  padding: 7px;
+  width: max-content;
+  min-width: 168px;
+  padding: 5px;
   color: var(--mc-color-text-primary);
   background: var(--mc-color-surface-popover);
   border: 1px solid var(--mc-color-border-default);
   border-radius: var(--mc-radius-popover);
   box-shadow: var(--mc-shadow-composer);
-  gap: 2px;
+  gap: 1px;
+  font-size: 13px;
+  line-height: 18px;
 }
 
 .files-panel__options-menu button {
   display: flex;
   width: 100%;
-  min-height: 36px;
+  min-height: 32px;
   align-items: center;
-  gap: 10px;
-  padding: 0 10px;
+  gap: 7px;
+  padding: 0 8px;
   color: inherit;
   text-align: left;
   background: transparent;
   border: 0;
-  border-radius: var(--mc-radius-sm);
+  border-radius: var(--mc-radius-control);
   cursor: pointer;
-  font-size: var(--mc-font-size-base);
+  font: inherit;
   font-weight: var(--mc-font-weight-medium);
+  line-height: inherit;
+  white-space: nowrap;
 }
 
 .files-panel__options-menu button:hover {
@@ -124,15 +129,15 @@
 }
 
 .files-panel__options-menu button svg {
-  width: 17px;
-  height: 17px;
+  width: var(--mc-icon-size-sm);
+  height: var(--mc-icon-size-sm);
   flex: 0 0 auto;
   color: var(--mc-color-icon-muted);
 }
 
 .files-panel__menu-separator {
   height: 1px;
-  margin: 5px 7px;
+  margin: 3px 4px;
   background: var(--mc-color-border-subtle);
 }
 
@@ -487,8 +492,8 @@
 
 .files-panel__pdf-pager {
   position: absolute;
-  top: 12px;
-  right: 12px;
+  bottom: 12px;
+  left: 12px;
   z-index: 4;
   display: grid;
   height: 40px;

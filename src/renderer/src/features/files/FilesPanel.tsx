@@ -229,23 +229,21 @@ export function FilesPanel({
             onBlur={handleOptionsBlur}
             ref={optionsControlRef}
           >
-            <Tooltip content={t('files.options')} preferredPlacement="bottom">
-              <button
-                className="files-panel__icon-button"
-                type="button"
-                aria-controls={isOptionsMenuOpen ? optionsMenuId : undefined}
-                aria-expanded={isOptionsMenuOpen}
-                aria-haspopup="menu"
-                aria-label={t('files.options')}
-                data-active={isOptionsMenuOpen ? 'true' : undefined}
-                disabled={!filePath}
-                onClick={() => (isOptionsMenuOpen ? closeOptionsMenu() : openOptionsMenu())}
-                onKeyDown={handleOptionsTriggerKeyDown}
-                ref={optionsTriggerRef}
-              >
-                <Ellipsis aria-hidden="true" />
-              </button>
-            </Tooltip>
+            <button
+              className="files-panel__icon-button"
+              type="button"
+              aria-controls={isOptionsMenuOpen ? optionsMenuId : undefined}
+              aria-expanded={isOptionsMenuOpen}
+              aria-haspopup="menu"
+              aria-label={t('files.options')}
+              data-active={isOptionsMenuOpen ? 'true' : undefined}
+              disabled={!filePath}
+              onClick={() => (isOptionsMenuOpen ? closeOptionsMenu() : openOptionsMenu())}
+              onKeyDown={handleOptionsTriggerKeyDown}
+              ref={optionsTriggerRef}
+            >
+              <Ellipsis aria-hidden="true" />
+            </button>
             {isOptionsMenuOpen && filePath && (
               <div className="files-panel__options-menu" id={optionsMenuId} role="menu">
                 {isMarkdown && (
