@@ -224,6 +224,19 @@
   line-height: 16px;
 }
 
+.left-sidebar__project-menu,
+.left-sidebar__conversation-menu,
+.left-sidebar__section-menu,
+.left-sidebar__section-submenu,
+.left-sidebar__account-menu {
+  --left-sidebar-menu-padding: 6px;
+  --left-sidebar-menu-radius: 12px;
+  --left-sidebar-menu-row-height: 30px;
+  --left-sidebar-menu-font-size: 13px;
+  --left-sidebar-menu-line-height: 18px;
+  --left-sidebar-menu-icon-size: 16px;
+}
+
 .left-sidebar__account-menu {
   position: absolute;
   z-index: var(--left-sidebar-popover-z-index);
@@ -231,12 +244,12 @@
   bottom: calc(100% - 6px);
   left: 12px;
   display: grid;
-  padding: 10px;
-  gap: 4px;
+  padding: var(--left-sidebar-menu-padding);
+  gap: 2px;
   color: var(--mc-color-sidebar-text-secondary);
   background: var(--mc-color-surface-glass-strong);
   border: 1px solid var(--mc-color-border-hairline);
-  border-radius: var(--mc-radius-card);
+  border-radius: var(--left-sidebar-menu-radius);
   box-shadow: var(--mc-shadow-sidebar-menu);
   backdrop-filter: var(--mc-effect-blur-popover);
   -webkit-backdrop-filter: var(--mc-effect-blur-popover);
@@ -247,14 +260,14 @@
   grid-template-columns: 30px minmax(0, 1fr);
   align-items: center;
   min-width: 0;
-  min-height: 42px;
-  padding: 4px 6px;
-  gap: 10px;
+  min-height: 38px;
+  padding: 3px 8px;
+  gap: 8px;
 }
 
 .left-sidebar__account-menu-divider {
   height: 1px;
-  margin: 4px 6px;
+  margin: 4px;
   background: var(--mc-color-border-hairline);
 }
 
@@ -263,15 +276,15 @@
   align-items: center;
   width: 100%;
   min-width: 0;
-  height: 38px;
+  height: var(--left-sidebar-menu-row-height);
   padding: 0 8px;
-  gap: 10px;
+  gap: 8px;
   color: var(--mc-color-sidebar-text-secondary);
   text-align: left;
-  border-radius: var(--mc-radius-row);
-  font-size: var(--mc-font-size-sidebar-action);
+  border-radius: var(--mc-radius-sm);
+  font-size: var(--left-sidebar-menu-font-size);
   font-weight: var(--mc-font-weight-control);
-  line-height: var(--mc-line-height-sidebar);
+  line-height: var(--left-sidebar-menu-line-height);
 }
 
 .left-sidebar__account-menu-item:hover {
@@ -300,16 +313,23 @@
 .left-sidebar__primary-action svg,
 .left-sidebar__search-action svg,
 .left-sidebar__scheduled-action svg,
-.left-sidebar__account-menu-item svg,
 .left-sidebar__conversation-title-button svg,
 .left-sidebar__section-title-button svg,
 .left-sidebar__section-action svg,
 .left-sidebar__project-main svg,
 .left-sidebar__project-action svg,
-.left-sidebar__conversation-action svg,
-.left-sidebar__project-menu-item svg {
+.left-sidebar__conversation-action svg {
   width: 20px;
   height: 20px;
+  flex: 0 0 auto;
+  color: var(--mc-color-icon-subtle);
+  stroke-width: var(--mc-icon-stroke-regular);
+}
+
+.left-sidebar__account-menu-item svg,
+.left-sidebar__project-menu-item svg {
+  width: var(--left-sidebar-menu-icon-size);
+  height: var(--left-sidebar-menu-icon-size);
   flex: 0 0 auto;
   color: var(--mc-color-icon-subtle);
   stroke-width: var(--mc-icon-stroke-regular);
