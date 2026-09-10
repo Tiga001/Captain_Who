@@ -2183,6 +2183,9 @@ fn validate_optional_origin(origin: Option<&str>) -> AgentResult<()> {
     let Some(origin) = origin else {
         return Ok(());
     };
+    if origin == "file://" {
+        return Ok(());
+    }
     let lower = origin.to_ascii_lowercase();
     let has_http_scheme = lower.starts_with("https://") || lower.starts_with("http://");
     let authority = origin.split_once("://").map(|(_, rest)| rest).unwrap_or("");
@@ -2193,7 +2196,7 @@ fn validate_optional_origin(origin: Option<&str>) -> AgentResult<()> {
         || origin.chars().any(char::is_control)
     {
         return Err(AgentError::new(
-            "内置 MCP Tool Host origin 必须是无凭据、无路径的 HTTP(S) origin。",
+            "内置 MCP Tool Host origin 必须是无凭据、无路径的 HTTP(S) 或 file origin。",
         ));
     }
     Ok(())

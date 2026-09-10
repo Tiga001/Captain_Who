@@ -734,7 +734,7 @@ export class ElectronGuestCdpTransport implements ConnectOverCDPTransport {
       if (!presentation) return null
       const parsed = new URL(presentation.url)
       if (
-        !['http:', 'https:'].includes(parsed.protocol) ||
+        !isPublicGuestDocumentProtocol(parsed.protocol) ||
         parsed.username !== '' ||
         parsed.password !== ''
       ) {
@@ -1406,11 +1406,15 @@ function normalizeTargetInfo(value: unknown, fallback: CdpTargetInfo): CdpTarget
   }
 }
 
+function isPublicGuestDocumentProtocol(protocol: string): boolean {
+  return protocol === 'http:' || protocol === 'https:' || protocol === 'file:'
+}
+
 function publicHttpUrl(value: string): string | null {
   try {
     const parsed = new URL(value)
     if (
-      !['http:', 'https:'].includes(parsed.protocol) ||
+      !isPublicGuestDocumentProtocol(parsed.protocol) ||
       parsed.username !== '' ||
       parsed.password !== ''
     ) {
@@ -1423,6 +1427,14 @@ function publicHttpUrl(value: string): string | null {
 }
 
 function publicHttpOrigin(value: string): string | null {
+  try {
+    const parsed = new URL(value)
+    if (parsed.protocol === 'file:') {
+      return parsed.username === '' && parsed.password === '' ? 'file://' : null
+    }
+  } catch {
+    return null
+  }
   const publicUrl = publicHttpUrl(value)
   return publicUrl ? new URL(publicUrl).origin : null
 }

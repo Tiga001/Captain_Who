@@ -67,10 +67,34 @@ export function safeSurfaceTitle(value: string): string {
 
 export function fallbackSurfaceTitle(value: string): string {
   try {
-    return new URL(value).hostname.slice(0, 256) || 'New tab'
+    const parsed = new URL(value)
+    if (parsed.protocol === 'file:') return fileUrlDisplayName(parsed).slice(0, 256)
+    return parsed.hostname.slice(0, 256) || 'New tab'
   } catch {
     return 'New tab'
   }
+}
+
+export function isNavigableBrowserProtocol(protocol: string): boolean {
+  return protocol === 'http:' || protocol === 'https:' || protocol === 'file:'
+}
+
+export function fileUrlDisplayName(url: URL): string {
+  const encoded = url.pathname.split('/').filter(Boolean).at(-1) ?? ''
+  let name = encoded
+  try {
+    name = decodeURIComponent(encoded)
+  } catch {
+    // Keep the encoded segment when it is not valid UTF-8 percent-encoding.
+  }
+  const sanitized = name.replace(/[/\\@]/g, '-').trim()
+  return sanitized || 'file'
+}
+
+export function historyHostnameForUrl(url: URL): string {
+  if (url.protocol !== 'file:') return url.hostname.toLowerCase()
+  if (url.hostname) return url.hostname.toLowerCase()
+  return fileUrlDisplayName(url).toLowerCase().slice(0, 255)
 }
 
 export function safeLogicalSurfaceUrl(value: string): string | null {
@@ -78,7 +102,7 @@ export function safeLogicalSurfaceUrl(value: string): string | null {
   try {
     const parsed = new URL(value)
     if (
-      !['http:', 'https:'].includes(parsed.protocol) ||
+      !isNavigableBrowserProtocol(parsed.protocol) ||
       parsed.username !== '' ||
       parsed.password !== ''
     ) {
@@ -270,7 +294,7 @@ export function normalizeRendererGoneReason(reason: string): string {
 export function safeSurfaceUrl(value: string): string {
   try {
     const parsed = new URL(value)
-    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return 'about:blank'
+    if (!isNavigableBrowserProtocol(parsed.protocol)) return 'about:blank'
     if (parsed.username !== '' || parsed.password !== '') return 'about:blank'
     return parsed.toString().slice(0, 16_384)
   } catch {
@@ -281,13 +305,9 @@ export function safeSurfaceUrl(value: string): string {
 export function safeHttpOrigin(value: string): string | null {
   try {
     const parsed = new URL(value)
-    if (
-      !['http:', 'https:'].includes(parsed.protocol) ||
-      parsed.username !== '' ||
-      parsed.password !== ''
-    ) {
-      return null
-    }
+    if (parsed.username !== '' || parsed.password !== '') return null
+    if (parsed.protocol === 'file:') return 'file://'
+    if (!['http:', 'https:'].includes(parsed.protocol)) return null
     return parsed.origin
   } catch {
     return null
@@ -309,8 +329,7 @@ export function sameSensitiveTarget(
 
 export function isSafeManagedPageUrl(value: string): boolean {
   try {
-    const protocol = new URL(value).protocol
-    return protocol === 'http:' || protocol === 'https:'
+    return isNavigableBrowserProtocol(new URL(value).protocol)
   } catch {
     return false
   }

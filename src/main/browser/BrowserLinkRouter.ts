@@ -66,7 +66,7 @@ export class BrowserLinkRouter {
 function parseAppUrl(value: unknown): URL {
   if (typeof value !== 'string') throw new Error('App URL must be a string')
   const url = new URL(value)
-  if (!['http:', 'https:', 'mailto:'].includes(url.protocol)) {
+  if (!['http:', 'https:', 'file:', 'mailto:'].includes(url.protocol)) {
     throw new Error(`Unsupported app URL protocol: ${url.protocol}`)
   }
   if (url.username || url.password) throw new Error('Credential-bearing app URLs are unsupported')

@@ -1084,7 +1084,8 @@ function isManagedTargetUrl(value: string): boolean {
   if (value === 'about:blank') return true
   try {
     const url = new URL(value)
-    return url.protocol === 'http:' || url.protocol === 'https:'
+    if (url.username !== '' || url.password !== '') return false
+    return url.protocol === 'http:' || url.protocol === 'https:' || url.protocol === 'file:'
   } catch {
     return false
   }

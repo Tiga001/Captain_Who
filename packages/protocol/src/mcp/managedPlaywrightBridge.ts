@@ -624,6 +624,7 @@ function parseBuiltinToolGrant(
 
 function expectHttpOrigin(value: unknown): string {
   const origin = expectSafeString(value, 1, 2_048)
+  if (origin === 'file://') return origin
   let parsed: URL
   try {
     parsed = new URL(origin)

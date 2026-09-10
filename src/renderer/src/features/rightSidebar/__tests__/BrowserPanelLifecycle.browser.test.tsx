@@ -96,12 +96,12 @@ describe('BrowserPanel address input', () => {
     const screen = await render(<BrowserPanel isActive pageId="invalid-address" />)
     const address = screen.getByRole('textbox', { name: 'browser.addressPlaceholder' })
 
-    await address.fill('file:///private/report.pdf')
+    await address.fill('javascript:alert(1)')
     await screen.getByRole('button', { name: 'browser.open' }).click()
 
     await expect.element(screen.getByRole('alert')).toHaveTextContent('browser.invalidAddress')
     await expect.element(address).toHaveAttribute('aria-invalid', 'true')
-    await expect.element(address).toHaveValue('file:///private/report.pdf')
+    await expect.element(address).toHaveValue('javascript:alert(1)')
     expect(navigateToUrl).not.toHaveBeenCalled()
 
     await address.fill('example.com:8080/report')

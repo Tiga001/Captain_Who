@@ -481,6 +481,7 @@ function normalizeTarget(
   }
   if (!Number.isSafeInteger(target.navigationEpoch) || target.navigationEpoch < 1) return null
   try {
+    if (target.origin === 'file://') return target
     const parsed = new URL(target.origin)
     if (
       !['http:', 'https:'].includes(parsed.protocol) ||

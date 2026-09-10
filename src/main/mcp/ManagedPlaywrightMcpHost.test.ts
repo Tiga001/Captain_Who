@@ -132,6 +132,7 @@ describe('ManagedPlaywrightMcpHost', () => {
     })
     await host.connect()
     expect(capturedConfig).toMatchObject({
+      allowUnrestrictedFileAccess: true,
       browser: { isolated: false },
       capabilities: [...MANAGED_PLAYWRIGHT_CAPABILITIES],
       codegen: 'none',
@@ -139,7 +140,6 @@ describe('ManagedPlaywrightMcpHost', () => {
       saveSession: false,
       sharedBrowserContext: true
     })
-    expect(capturedConfig).not.toHaveProperty('allowUnrestrictedFileAccess')
     const outputDirectory = capturedConfig?.outputDir
     expect(typeof outputDirectory).toBe('string')
     expect(isAbsolute(outputDirectory!)).toBe(true)
@@ -3277,6 +3277,38 @@ describe('ManagedPlaywrightMcpHost', () => {
     expect(check).toHaveBeenCalledWith('http://127.0.0.1:3000/')
     expect(risk.markDispatched).toHaveBeenCalledOnce()
     expect(risk.finish).toHaveBeenCalledOnce()
+  })
+
+  it('preflights browser_navigate for a local file URL', async () => {
+    const check = vi.fn(async () => undefined)
+    const callTool = vi.fn(async () => ({
+      content: [{ type: 'text', text: 'ok' }],
+      isError: false
+    }))
+    const risk = riskLease({ check })
+    const host = fakeHost({
+      callTool,
+      beginNetworkOperation: vi.fn(async () => risk.lease)
+    })
+    const url = 'file:///Users/docs/Predici%20.pdf'
+
+    await expect(
+      host.callTool(
+        'browser_navigate',
+        { url, call_reason: 'Open the local PDF in the managed browser.' },
+        { authorizationContext: RISK_CONTEXT, parentRequestId: PARENT_REQUEST_ID }
+      )
+    ).resolves.toMatchObject({ isError: false })
+
+    expect(check).toHaveBeenCalledWith(url)
+    expect(callTool).toHaveBeenCalledWith(
+      expect.objectContaining({
+        name: 'browser_navigate',
+        arguments: expect.objectContaining({ url })
+      }),
+      undefined,
+      expect.anything()
+    )
   })
 
   it('gives a queued call its full execution budget after the previous call finishes', async () => {

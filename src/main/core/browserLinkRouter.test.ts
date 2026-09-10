@@ -65,11 +65,18 @@ describe('BrowserLinkRouter', () => {
       activate: true,
       url: 'https://example.test/history'
     })
+    await harness.router.openInBuiltinBrowser({
+      schemaVersion: BROWSER_DATA_SCHEMA_VERSION,
+      url: 'file:///tmp/report.pdf'
+    })
+    expect(harness.createSurface).toHaveBeenCalledWith({
+      activate: true,
+      url: 'file:///tmp/report.pdf'
+    })
     await expect(
       harness.router.openAppUrl('https://user:secret@example.test/private')
     ).rejects.toThrow('Credential-bearing')
-    await expect(harness.router.openAppUrl('file:///tmp/private')).rejects.toThrow(
-      'Unsupported app URL protocol'
-    )
+    await harness.router.openAppUrl('file:///tmp/report.pdf')
+    expect(harness.openSystemUrl).toHaveBeenCalledWith('file:///tmp/report.pdf')
   })
 })

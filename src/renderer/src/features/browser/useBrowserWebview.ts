@@ -288,7 +288,7 @@ function normalizeHttpUrl(value: string | null | undefined): string | null {
   if (!value) return null
   try {
     const parsed = new URL(value)
-    return ['http:', 'https:'].includes(parsed.protocol) ? parsed.toString() : null
+    return ['http:', 'https:', 'file:'].includes(parsed.protocol) ? parsed.toString() : null
   } catch {
     return null
   }
@@ -302,6 +302,9 @@ function haveSameHttpOrigin(
   try {
     const leftUrl = new URL(left)
     const rightUrl = new URL(right)
+    if (leftUrl.protocol === 'file:' || rightUrl.protocol === 'file:') {
+      return leftUrl.href === rightUrl.href
+    }
     return (
       ['http:', 'https:'].includes(leftUrl.protocol) &&
       ['http:', 'https:'].includes(rightUrl.protocol) &&

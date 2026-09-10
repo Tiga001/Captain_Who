@@ -228,4 +228,78 @@ describe('ElectronGuestCdpTransport logical presentation', () => {
 
     transport.close()
   })
+
+  it('presents credential-free file URLs to Playwright instead of about:blank', async () => {
+    const fileUrl = 'file:///Users/docs/Predici%20.pdf'
+    const pdfViewerUrl = 'chrome-extension://mhjfbmdgcfjbbpaeojofohoefgiehjai/index.html'
+    const debuggerFixture = new DebuggerFixture(pdfViewerUrl)
+    const guest = new GuestFixture(pdfViewerUrl, debuggerFixture)
+    const transport = new ElectronGuestCdpTransport(
+      guest.asWebContents(),
+      vi.fn(),
+      (physicalUrl) =>
+        physicalUrl === pdfViewerUrl ? { title: 'Predici.pdf', url: fileUrl } : null
+    )
+    const pending = new Map<number, (message: Record<string, unknown>) => void>()
+    transport.onmessage = (message) => {
+      const record = message as Record<string, unknown>
+      if (typeof record.id === 'number') {
+        pending.get(record.id)?.(record)
+        pending.delete(record.id)
+      }
+    }
+    const send = async (id: number, method: string): Promise<Record<string, unknown>> =>
+      await new Promise((resolve) => {
+        pending.set(id, resolve)
+        transport.send({ id, method })
+      })
+
+    await transport.attach()
+    expect(transport.managedIdentity().targetInfo).toMatchObject({
+      title: 'Predici.pdf',
+      url: fileUrl
+    })
+    const targetResponse = await send(1, 'Target.getTargetInfo')
+    expect(targetResponse).toEqual(
+      expect.objectContaining({
+        result: {
+          targetInfo: expect.objectContaining({ title: 'Predici.pdf', url: fileUrl })
+        }
+      })
+    )
+    expect(JSON.stringify(targetResponse)).not.toContain('chrome-extension:')
+    expect(JSON.stringify(targetResponse)).not.toContain('about:blank')
+    transport.close()
+  })
+
+  it('keeps a direct file document URL visible without rewriting it', async () => {
+    const fileUrl = 'file:///Users/docs/report.pdf'
+    const debuggerFixture = new DebuggerFixture(fileUrl)
+    const guest = new GuestFixture(fileUrl, debuggerFixture)
+    const transport = new ElectronGuestCdpTransport(guest.asWebContents(), vi.fn())
+    const pending = new Map<number, (message: Record<string, unknown>) => void>()
+    transport.onmessage = (message) => {
+      const record = message as Record<string, unknown>
+      if (typeof record.id === 'number') {
+        pending.get(record.id)?.(record)
+        pending.delete(record.id)
+      }
+    }
+    const send = async (id: number, method: string): Promise<Record<string, unknown>> =>
+      await new Promise((resolve) => {
+        pending.set(id, resolve)
+        transport.send({ id, method })
+      })
+
+    await transport.attach()
+    const targetResponse = await send(1, 'Target.getTargetInfo')
+    expect(targetResponse).toEqual(
+      expect.objectContaining({
+        result: {
+          targetInfo: expect.objectContaining({ url: fileUrl })
+        }
+      })
+    )
+    transport.close()
+  })
 })

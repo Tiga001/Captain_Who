@@ -147,11 +147,12 @@ export function expectSafeCode(value: unknown, context: string): string {
 export function parseNullableHttpOrigin(value: unknown, context: string): string | null {
   if (value === null) return null
   const origin = expectDisplayText(value, context, 2048)
+  if (origin === 'file://') return origin
   let parsed: URL
   try {
     parsed = new URL(origin)
   } catch {
-    throw invalidProtocolValue(context, 'must be an HTTP(S) origin')
+    throw invalidProtocolValue(context, 'must be an HTTP(S) or file origin')
   }
   if (
     !['http:', 'https:'].includes(parsed.protocol) ||
@@ -162,7 +163,7 @@ export function parseNullableHttpOrigin(value: unknown, context: string): string
     parsed.search !== '' ||
     parsed.hash !== ''
   ) {
-    throw invalidProtocolValue(context, 'must be a canonical HTTP(S) origin')
+    throw invalidProtocolValue(context, 'must be a canonical HTTP(S) or file origin')
   }
   return origin
 }

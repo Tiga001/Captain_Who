@@ -537,8 +537,12 @@ function parseHttpUrl(value: unknown, context: string, maximumBytes: number): st
   } catch {
     throw invalidProtocolValue(context, 'invalid URL')
   }
-  if ((url.protocol !== 'http:' && url.protocol !== 'https:') || url.username || url.password) {
-    throw invalidProtocolValue(context, 'expected a credential-free HTTP(S) URL')
+  if (
+    (url.protocol !== 'http:' && url.protocol !== 'https:' && url.protocol !== 'file:') ||
+    url.username ||
+    url.password
+  ) {
+    throw invalidProtocolValue(context, 'expected a credential-free HTTP(S) or file URL')
   }
   return url.toString()
 }

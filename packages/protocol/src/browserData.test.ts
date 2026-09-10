@@ -47,8 +47,21 @@ describe('browser data protocol', () => {
       visitedAt: 1
     }
     expect(parseBrowserHistoryEntry(entry)).toEqual(entry)
-    expect(() => parseBrowserHistoryEntry({ ...entry, url: 'file:///tmp/private' })).toThrow(
-      'HTTP(S)'
+    expect(
+      parseBrowserHistoryEntry({
+        ...entry,
+        url: 'file:///tmp/report.pdf',
+        hostname: 'report.pdf',
+        faviconUrl: null
+      })
+    ).toEqual({
+      ...entry,
+      url: 'file:///tmp/report.pdf',
+      hostname: 'report.pdf',
+      faviconUrl: null
+    })
+    expect(() => parseBrowserHistoryEntry({ ...entry, url: 'ftp://example.test/private' })).toThrow(
+      'HTTP(S) or file'
     )
     expect(() =>
       parseBrowserHistoryEntry({ ...entry, url: 'https://user:secret@example.test/private' })

@@ -28,6 +28,9 @@ describe('BrowserNetworkPolicy', () => {
     await expect(policy.assessStaticHostBoundary('http://localhost:3000/')).resolves.toBeNull()
     await expect(policy.assessStaticHostBoundary('https://198.18.0.42/')).resolves.toBeNull()
     await expect(policy.assessStaticHostBoundary('wss://public.test/socket')).resolves.toBeNull()
+    await expect(
+      policy.assessStaticHostBoundary('file:///Users/docs/report.pdf')
+    ).resolves.toBeNull()
     expect(resolve).not.toHaveBeenCalled()
   })
 
@@ -220,7 +223,6 @@ describe('BrowserNetworkPolicy', () => {
   })
 
   it.each([
-    ['file:///private/file', 'privileged_electron'],
     ['chrome://settings/', 'privileged_electron'],
     ['devtools://devtools/bundled/', 'privileged_electron'],
     ['javascript:alert(1)', 'privileged_electron'],
@@ -252,6 +254,17 @@ describe('BrowserNetworkPolicy', () => {
       disposition: 'deny',
       code: 'mcp_control'
     })
+  })
+
+  it('admits local file URLs without DNS', async () => {
+    const resolve = vi.fn(async () => ['93.184.216.34'])
+    const policy = new BrowserNetworkPolicy({ dnsResolver: { resolve } })
+
+    await expect(policy.assess('file:///Users/docs/report.pdf')).resolves.toMatchObject({
+      disposition: 'allow',
+      riskKinds: []
+    })
+    expect(resolve).not.toHaveBeenCalled()
   })
 
   it.each([

@@ -336,6 +336,40 @@ describe('ElectronSurfaceGroupCdpTransport', () => {
     })
   })
 
+  it('creates a managed target for a local file URL', async () => {
+    const group = createGroup()
+    await group.transport.addSurface(surface('a').surface)
+    const harness = new GroupHarness(group.transport)
+    await harness.send('Target.setAutoAttach', {
+      params: { autoAttach: true, flatten: true, waitForDebuggerOnStart: true }
+    })
+    const fileUrl = 'file:///Users/docs/Predici%20.pdf'
+    const response = await harness.send('Target.createTarget', {
+      params: { url: fileUrl }
+    })
+    expect(response.error).toBeUndefined()
+    expect(group.createSurface).toHaveBeenCalledWith({
+      activate: true,
+      intent: 'interactive',
+      purpose: 'target',
+      url: fileUrl
+    })
+  })
+
+  it.each(['javascript:alert(1)', 'data:text/html,hi', 'chrome://settings'])(
+    'rejects Target.createTarget for %s',
+    async (url) => {
+      const group = createGroup()
+      const harness = new GroupHarness(group.transport)
+      await expect(harness.send('Target.createTarget', { params: { url } })).resolves.toEqual(
+        expect.objectContaining({
+          error: expect.objectContaining({ message: 'target_creation_not_permitted' })
+        })
+      )
+      expect(group.createSurface).not.toHaveBeenCalled()
+    }
+  )
+
   it('uses one-call background intent without changing the public target contract', async () => {
     const group = createGroup()
     await group.transport.addSurface(surface('a').surface)

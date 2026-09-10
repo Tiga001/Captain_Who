@@ -55,6 +55,29 @@ describe('BrowserHistoryService', () => {
     expect(changed).toHaveBeenCalledTimes(2)
   })
 
+  it('persists local file navigations with the file name as hostname', async () => {
+    const registerBrowserHistory = vi.fn(async (entry) => entry)
+    const service = new BrowserHistoryService({
+      registerBrowserHistory,
+      updateBrowserHistoryMetadata: vi.fn(async () => true)
+    } as unknown as CoreServer)
+
+    service.recordNavigation(
+      navigation({
+        url: 'file:///Users/docs/Predici%20.pdf',
+        title: null,
+        faviconUrl: null
+      })
+    )
+    await vi.waitFor(() => expect(registerBrowserHistory).toHaveBeenCalledTimes(1))
+    expect(registerBrowserHistory.mock.calls[0]?.[0]).toMatchObject({
+      url: 'file:///Users/docs/Predici%20.pdf',
+      title: 'Predici .pdf',
+      hostname: 'predici .pdf',
+      faviconUrl: null
+    })
+  })
+
   it('ignores private schemes, credential-bearing URLs, and stale metadata', async () => {
     const registerBrowserHistory = vi.fn(async (entry) => entry)
     const updateBrowserHistoryMetadata = vi.fn(async () => true)
@@ -63,7 +86,7 @@ describe('BrowserHistoryService', () => {
       updateBrowserHistoryMetadata
     } as unknown as CoreServer)
 
-    service.recordNavigation(navigation({ url: 'file:///tmp/private' }))
+    service.recordNavigation(navigation({ url: 'javascript:alert(1)' }))
     service.recordNavigation(navigation({ url: 'https://user:secret@example.test/private' }))
     service.recordNavigation(navigation())
     await vi.waitFor(() => expect(registerBrowserHistory).toHaveBeenCalledTimes(1))

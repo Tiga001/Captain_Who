@@ -120,10 +120,10 @@ impl StorageService {
 fn validate_history_record(input: &BrowserHistoryRecord) -> Result<(), String> {
     validate_schema(input.schema_version)?;
     validate_history_id(&input.history_id)?;
-    let url = validate_http_url(&input.url, 8192)?;
+    let url = validate_navigable_url(&input.url, 8192)?;
     validate_text(&input.title, 1024)?;
     validate_text(&input.hostname, 255)?;
-    if input.hostname != url.host_str().unwrap_or_default().to_lowercase() {
+    if input.hostname != history_hostname(&url) {
         return Err("browser.data.history_invalid".to_string());
     }
     if let Some(favicon_url) = input.favicon_url.as_deref() {
@@ -170,26 +170,62 @@ fn validate_text(value: &str, maximum_bytes: usize) -> Result<(), String> {
 }
 
 fn validate_http_url(value: &str, maximum_bytes: usize) -> Result<Url, String> {
+    validate_url(value, maximum_bytes, false)
+}
+
+fn validate_navigable_url(value: &str, maximum_bytes: usize) -> Result<Url, String> {
+    validate_url(value, maximum_bytes, true)
+}
+
+fn validate_url(value: &str, maximum_bytes: usize, allow_file: bool) -> Result<Url, String> {
     if value.len() > maximum_bytes || value.chars().any(char::is_control) {
         return Err("browser.data.history_invalid".to_string());
     }
     let parsed = Url::parse(value).map_err(|_| "browser.data.history_invalid".to_string())?;
-    if !matches!(parsed.scheme(), "http" | "https")
-        || !parsed.username().is_empty()
-        || parsed.password().is_some()
-        || parsed.host_str().is_none()
-    {
+    let allowed_scheme =
+        matches!(parsed.scheme(), "http" | "https") || (allow_file && parsed.scheme() == "file");
+    if !allowed_scheme || !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err("browser.data.history_invalid".to_string());
+    }
+    if parsed.scheme() != "file" && parsed.host_str().is_none() {
         return Err("browser.data.history_invalid".to_string());
     }
     Ok(parsed)
+}
+
+fn history_hostname(url: &Url) -> String {
+    if url.scheme() != "file" {
+        return url.host_str().unwrap_or_default().to_lowercase();
+    }
+    if let Some(host) = url.host_str().filter(|host| !host.is_empty()) {
+        return host.to_lowercase();
+    }
+    let name = url
+        .to_file_path()
+        .ok()
+        .and_then(|path| path.file_name()?.to_str().map(str::to_string))
+        .or_else(|| {
+            url.path()
+                .rsplit('/')
+                .find(|segment| !segment.is_empty())
+                .map(str::to_string)
+        })
+        .unwrap_or_default()
+        .replace(['/', '\\', '@'], "-");
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        "file".to_string()
+    } else {
+        trimmed.chars().take(255).collect::<String>().to_lowercase()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::storage::models::{
-        BrowserLinkOpenTarget, BrowserOwnedDataClearInput, BrowserOwnedDataRangeInput,
-        BrowserPreferencesUpdate,
+        BrowserHistoryListInput, BrowserHistoryRecord, BrowserLinkOpenTarget,
+        BrowserOwnedDataClearInput, BrowserOwnedDataRangeInput, BrowserPreferencesUpdate,
     };
 
     fn history(id: &str, hostname: &str, visited_at: i64) -> BrowserHistoryRecord {
@@ -278,5 +314,29 @@ mod tests {
                 .unwrap(),
             vec![first]
         );
+    }
+
+    #[test]
+    fn browser_history_accepts_local_file_urls() {
+        let root = tempfile::tempdir().unwrap();
+        let service = StorageService::open(&root.path().join("storage.sqlite")).unwrap();
+        let record = BrowserHistoryRecord {
+            schema_version: BROWSER_DATA_SCHEMA_VERSION,
+            history_id: "browser-history:123e4567-e89b-42d3-a456-426614174012".to_string(),
+            url: "file:///Users/docs/Predici%20.pdf".to_string(),
+            title: "Predici .pdf".to_string(),
+            hostname: "predici .pdf".to_string(),
+            favicon_url: None,
+            visited_at: 300,
+        };
+        service.register_browser_history(record.clone()).unwrap();
+        let listed = service
+            .list_browser_history(BrowserHistoryListInput {
+                schema_version: BROWSER_DATA_SCHEMA_VERSION,
+                query: "Predici".to_string(),
+                limit: 20,
+            })
+            .unwrap();
+        assert_eq!(listed, vec![record]);
     }
 }

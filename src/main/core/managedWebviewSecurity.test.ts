@@ -199,12 +199,12 @@ describe('managed native popup admission', () => {
       expect(child.loadURL).not.toHaveBeenCalled()
       expect(opener.loadURL).not.toHaveBeenCalled()
       const event = { preventDefault: vi.fn() }
-      child.emit('will-navigate', event, 'file:///private/secret')
+      child.emit('will-navigate', event, 'javascript:alert(1)')
       expect(event.preventDefault).toHaveBeenCalledOnce()
     }
   )
 
-  it.each(['file:///private/secret', 'javascript:alert(1)', 'data:text/html,test'])(
+  it.each(['javascript:alert(1)', 'data:text/html,test'])(
     'does not admit an unsupported native popup destination %s',
     (url) => {
       const { createNativePopup, open } = setup()

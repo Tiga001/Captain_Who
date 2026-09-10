@@ -13,6 +13,7 @@ import {
   type TranslationKey
 } from '../../shared/i18n/languageRegistry'
 import { BROWSER_INTERNAL_PAGE_SCHEME } from './BrowserInternalPageStore'
+import { fileUrlDisplayName } from './BrowserSurfaceHelpers'
 
 const MAX_FAILED_URL_LENGTH = 16_384
 const MAX_ERROR_DESCRIPTION_LENGTH = 128
@@ -402,7 +403,7 @@ function normalizeFailedUrl(value: string): string {
     throw new Error('browser.invalid_failed_url')
   }
   if (
-    !['http:', 'https:'].includes(parsed.protocol) ||
+    !['http:', 'https:', 'file:'].includes(parsed.protocol) ||
     parsed.username !== '' ||
     parsed.password !== ''
   ) {
@@ -435,6 +436,7 @@ function hostnameForLogicalUrl(value: string | null): string {
   if (!value) return 'page'
   try {
     const parsed = new URL(value)
+    if (parsed.protocol === 'file:') return fileUrlDisplayName(parsed)
     return ['http:', 'https:'].includes(parsed.protocol) ? parsed.hostname : 'page'
   } catch {
     return 'page'

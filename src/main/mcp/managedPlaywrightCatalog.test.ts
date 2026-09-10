@@ -581,6 +581,7 @@ describe('managed Playwright fixed Catalog', () => {
 
 function officialConfig(outputDirectory: string): Parameters<typeof createConnection>[0] {
   return {
+    allowUnrestrictedFileAccess: true,
     browser: { isolated: false },
     capabilities: [...MANAGED_PLAYWRIGHT_CAPABILITIES],
     codegen: 'none',

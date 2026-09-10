@@ -26,6 +26,9 @@ describe('browser surface protocol', () => {
       url: 'https://example.test/path?q=value'
     }
     expect(parseBrowserSurfaceActionInput(action)).toEqual(action)
+    expect(
+      parseBrowserSurfaceActionInput({ ...action, url: 'file:///Users/docs/report.pdf' })
+    ).toEqual({ ...action, url: 'file:///Users/docs/report.pdf' })
     expect(() =>
       parseBrowserSurfaceActionInput({ ...action, url: 'data:text/html,unsafe' })
     ).toThrow('navigation URL')

@@ -225,6 +225,15 @@ describe('ManagedPlaywrightSensitiveTargetBindingBroker', () => {
     })
   })
 
+  it('acquires a binding for a local file document origin', () => {
+    const fixture = harness()
+    fixture.setTarget({ ...TARGET, origin: 'file://' })
+    const input = prepareInput()
+    const prepared = fixture.broker.prepare(input)
+    expect(prepared.origin).toBe('file://')
+    expect(() => fixture.broker.acquire(authorization(prepared, input))).not.toThrow()
+  })
+
   it.each([
     ['same-origin tab', { ...TARGET, surfaceId: 'other-surface' }],
     ['generation', { ...TARGET, generation: TARGET.generation + 1 }],

@@ -708,7 +708,7 @@ function parseHttpUrl(value: unknown, context: string, maxLength: number): strin
     throw new Error(`Invalid ${context}`)
   }
   if (
-    !['http:', 'https:'].includes(parsed.protocol) ||
+    !['http:', 'https:', 'file:'].includes(parsed.protocol) ||
     parsed.username !== '' ||
     parsed.password !== ''
   ) {

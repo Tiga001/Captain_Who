@@ -167,6 +167,7 @@ export class BrowserNetworkPolicy {
     const literal = this.assessLiteralHostBoundary(untrustedUrl, true)
     if ('boundary' in literal) return literal.boundary
     const { url } = literal
+    if (url.protocol === 'file:') return null
 
     const port = effectivePort(url)
 
@@ -187,6 +188,22 @@ export class BrowserNetworkPolicy {
     const literal = this.assessLiteralHostBoundary(untrustedUrl)
     if ('boundary' in literal) return { disposition: 'deny', code: literal.boundary }
     const { url } = literal
+    if (url.protocol === 'file:') {
+      return {
+        disposition: 'allow',
+        destination: {
+          displayUrl: safeDisplayUrl(url),
+          origin: 'file://',
+          scheme: 'http',
+          host: url.hostname || 'file',
+          port: 0,
+          addressClass: 'unresolved',
+          targetDigest: this.fingerprint(normalizeSecurityUrl(url)),
+          resolutionFingerprint: this.fingerprint(`file:${url.pathname}`)
+        },
+        riskKinds: []
+      }
+    }
 
     const hostname = normalizeHostname(url.hostname)
     const port = effectivePort(url)
@@ -251,6 +268,7 @@ export class BrowserNetworkPolicy {
 
     const schemeBoundary = classifySchemeBoundary(url.protocol)
     if (schemeBoundary) return { boundary: schemeBoundary }
+    if (url.protocol === 'file:') return { url }
     const supportedNetworkScheme =
       url.protocol === 'http:' ||
       url.protocol === 'https:' ||
@@ -386,7 +404,6 @@ function classifySchemeBoundary(protocol: string): BrowserHostBoundaryCode | nul
     case 'chrome:':
     case 'chrome-extension:':
     case 'devtools:':
-    case 'file:':
     case 'javascript:':
       return 'privileged_electron'
     default:

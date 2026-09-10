@@ -15,7 +15,12 @@ describe('normalizeBrowserUrl', () => {
     ['example.com', 'https://example.com/'],
     ['http://localhost:3000', 'http://localhost:3000/'],
     ['https://localhost:3000/login', 'https://localhost:3000/login'],
-    ['https://example.com:8443/path', 'https://example.com:8443/path']
+    ['https://example.com:8443/path', 'https://example.com:8443/path'],
+    ['file:///Users/docs/report.pdf', 'file:///Users/docs/report.pdf'],
+    [
+      'file:///Users/shenhuajiao/Nutstore%20Files/Predici%20.pdf',
+      'file:///Users/shenhuajiao/Nutstore%20Files/Predici%20.pdf'
+    ]
   ])('normalizes %s into %s', (input, expected) => {
     expect(normalizeBrowserUrl(input)).toBe(expected)
   })
@@ -29,7 +34,6 @@ describe('normalizeBrowserUrl', () => {
     'https://',
     'javascript:alert(1)',
     'data:text/html,test',
-    'file:///private/report.pdf',
     'ftp://example.com/file',
     'mailto:user@example.com'
   ])('rejects invalid addresses and unsupported schemes: %s', (input) => {

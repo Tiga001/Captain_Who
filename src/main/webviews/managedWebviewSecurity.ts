@@ -58,7 +58,7 @@ export interface ManagedWebviewSessionOptions {
 const SAFE_INITIAL_URL = 'about:blank'
 const MANAGED_WEBVIEW_POLICIES: ManagedWebviewPolicy[] = [
   {
-    allowedProtocols: new Set(['http:', 'https:']),
+    allowedProtocols: new Set(['http:', 'https:', 'file:']),
     newWindowBehavior: 'navigate-current',
     partition: BROWSER_WEBVIEW_PARTITION
   }

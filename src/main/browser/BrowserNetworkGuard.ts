@@ -1193,6 +1193,9 @@ export class BrowserNetworkGuard {
     // Chromium's PDF MIME handler owns a separate, unregistered WebContents. Admit only its
     // compiled-in component resources; registered Browser surfaces still pass through policy.
     if (!registeredRecord && this.chromiumPdfViewerRequests.allows(details)) return
+    // Local files are opened by the compiled-in PDF Viewer and by direct file:// navigation.
+    // Their stream requests are not always attributed to a registered guest WebContents.
+    if (isFileRequestUrl(details.url)) return
     if (details.url === 'about:blank' || parseBrowserSurfaceBootstrapUrl(details.url) !== null) {
       return
     }
@@ -1546,6 +1549,14 @@ function onceVoid(callback: () => void): () => void {
     if (called) return
     called = true
     callback()
+  }
+}
+
+function isFileRequestUrl(url: string): boolean {
+  try {
+    return new URL(url).protocol === 'file:'
+  } catch {
+    return false
   }
 }
 

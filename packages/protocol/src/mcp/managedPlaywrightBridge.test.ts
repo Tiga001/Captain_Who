@@ -131,6 +131,24 @@ describe('managed Playwright bridge wire contract', () => {
       }
     }
     expect(parseManagedPlaywrightCommandNotification(notification)).toEqual(notification)
+    expect(
+      parseManagedPlaywrightCommandNotification({
+        ...notification,
+        command: {
+          ...notification.command,
+          authorizationContext: {
+            ...AUTHORIZATION_CONTEXT,
+            builtinToolGrant: { ...grant, origin: 'file://' }
+          }
+        }
+      })
+    ).toMatchObject({
+      command: {
+        authorizationContext: {
+          builtinToolGrant: { origin: 'file://' }
+        }
+      }
+    })
     expect(() =>
       parseManagedPlaywrightCommandNotification({
         ...notification,

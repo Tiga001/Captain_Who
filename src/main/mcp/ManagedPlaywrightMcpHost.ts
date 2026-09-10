@@ -2298,8 +2298,10 @@ export class ManagedPlaywrightMcpHost {
         {
           // Approved input files are immutable one-time FileBroker copies. Each file-bearing call
           // copies them into a short-lived 0700 child of this connection's upstream-recognized
-          // output root and binds `_meta.cwd` to that exact directory. Unrestricted process-wide
-          // file access remains disabled; raw model paths never reach this connection.
+          // output root and binds `_meta.cwd` to that exact directory. Raw model paths never reach
+          // this connection. Playwright still blocks `file:` navigation unless this flag is set;
+          // Host already admits those URLs on the managed guest.
+          allowUnrestrictedFileAccess: true,
           browser: { isolated: false },
           capabilities: [...MANAGED_PLAYWRIGHT_CAPABILITIES],
           codegen: 'none',

@@ -5,6 +5,7 @@ import {
   type BrowserHistoryMetadataUpdateInput
 } from '@mycopilot/protocol'
 
+import { historyHostnameForUrl } from './BrowserSurfaceHelpers'
 import type { CoreServer } from '../core/coreServer'
 import type { BrowserSurfaceHistoryEvent } from './BrowserSurfaceManager'
 
@@ -13,7 +14,7 @@ interface CurrentHistoryEntry {
   url: string
 }
 
-/** Persists only user-visible HTTP(S) navigation metadata. It is never connected to Agent output. */
+/** Persists user-visible HTTP(S) and local file navigation metadata. It is never connected to Agent output. */
 export class BrowserHistoryService {
   private readonly coreServer: CoreServer
   private readonly currentBySurface = new Map<string, CurrentHistoryEntry>()
@@ -44,7 +45,7 @@ export class BrowserHistoryService {
       historyId,
       url: normalized.toString(),
       title,
-      hostname: normalized.hostname.toLowerCase(),
+      hostname: historyHostnameForUrl(normalized),
       faviconUrl: normalizeRemoteUrl(input.faviconUrl),
       visitedAt: input.visitedAt
     }
@@ -105,7 +106,9 @@ function surfaceKey(input: Pick<BrowserSurfaceHistoryEvent, 'surfaceId' | 'gener
 function normalizeHistoryUrl(value: string): URL | null {
   try {
     const url = new URL(value)
-    if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) return null
+    if (!['http:', 'https:', 'file:'].includes(url.protocol) || url.username || url.password) {
+      return null
+    }
     return url
   } catch {
     return null
@@ -114,10 +117,25 @@ function normalizeHistoryUrl(value: string): URL | null {
 
 function normalizeRemoteUrl(value: string | null): string | null {
   if (!value) return null
-  return normalizeHistoryUrl(value)?.toString() ?? null
+  try {
+    const url = new URL(value)
+    if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) return null
+    return url.toString()
+  } catch {
+    return null
+  }
 }
 
 function normalizeTitle(value: string | null, url: URL): string {
   const title = value?.trim()
-  return title || url.hostname || url.toString()
+  if (title) return title
+  if (url.protocol === 'file:') {
+    const encoded = url.pathname.split('/').filter(Boolean).at(-1) ?? ''
+    try {
+      return decodeURIComponent(encoded) || url.toString()
+    } catch {
+      return encoded || url.toString()
+    }
+  }
+  return url.hostname || url.toString()
 }
