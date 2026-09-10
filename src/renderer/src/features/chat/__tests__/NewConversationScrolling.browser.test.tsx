@@ -269,6 +269,25 @@ describe('New conversation with a half-height bottom panel', () => {
     )
   })
 
+  it('clears the selected project from the composer trigger without opening the menu', async () => {
+    await render(<Workspace longDraft={false} />)
+    await expect.element(page.getByRole('button', { name: 'Project 0', exact: true })).toBeVisible()
+    const trigger = page.getByRole('button', { name: 'Project 0', exact: true })
+    const clearButton = page.getByRole('button', { name: 'project.noProject', exact: true })
+    expect(getComputedStyle(clearButton.element()).opacity).toBe('0')
+    await trigger.hover()
+    expect(getComputedStyle(clearButton.element()).opacity).toBe('1')
+    expect(document.querySelector('.composer-project-menu')).toBeNull()
+    await clearButton.click()
+    await expect
+      .element(page.getByRole('button', { name: 'project.chooseProject', exact: true }))
+      .toBeVisible()
+    expect(document.querySelector('.composer-project-menu')).toBeNull()
+    await expect
+      .element(page.getByRole('heading', { name: 'chat.newConversationPrompt.voyage.title' }))
+      .toBeVisible()
+  })
+
   it('keeps project search and selection clickable beyond the scroller bounds', async () => {
     await render(<Workspace />)
     await scrollToBottom()

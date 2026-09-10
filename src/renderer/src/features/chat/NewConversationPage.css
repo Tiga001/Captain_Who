@@ -46,10 +46,10 @@
 }
 
 .new-conversation-page .chat-composer__project-row {
-  min-height: 48px;
-  padding-top: 6px;
-  padding-bottom: 6px;
-  margin-top: 8px;
+  min-height: 40px;
+  padding-top: 4px;
+  padding-bottom: 4px;
+  margin-top: 6px;
 }
 
 @media (max-width: 820px) {

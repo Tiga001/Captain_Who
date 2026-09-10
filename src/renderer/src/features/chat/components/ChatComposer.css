@@ -84,9 +84,9 @@
   display: flex;
   align-items: center;
   min-width: 0;
-  min-height: 58px;
-  padding: 10px 12px 10px;
-  margin: 8px -12px -4px -16px;
+  min-height: 40px;
+  padding: 4px 10px;
+  margin: 6px -12px -4px -16px;
   background: var(--mc-color-surface-muted);
   border-radius: var(--mc-radius-none) var(--mc-radius-none) var(--mc-radius-composer)
     var(--mc-radius-composer);
@@ -401,6 +401,46 @@
   flex: 0 1 auto;
 }
 
+.composer-project-clear {
+  position: absolute;
+  z-index: 1;
+  top: 50%;
+  left: 6px;
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  color: var(--mc-color-icon-muted);
+  background: transparent;
+  border: 0;
+  border-radius: var(--mc-radius-sm);
+  opacity: 0;
+  transform: translateY(-50%);
+  cursor: pointer;
+}
+
+.composer-project-clear svg {
+  width: var(--mc-icon-size-sm);
+  height: var(--mc-icon-size-sm);
+}
+
+.composer-project-picker:hover .composer-project-clear,
+.composer-project-clear:focus-visible {
+  opacity: 1;
+}
+
+.composer-project-picker:has(.composer-project-clear):hover .composer-project-button > svg,
+.composer-project-picker:has(.composer-project-clear:focus-visible) .composer-project-button > svg {
+  opacity: 0;
+}
+
+.composer-project-button:focus-visible,
+.composer-project-clear:focus-visible {
+  outline: 2px solid var(--mc-color-focus-ring);
+  outline-offset: 2px;
+}
+
 .composer-model-button span {
   overflow: hidden;
   max-width: 150px;
@@ -413,27 +453,28 @@
   align-items: center;
   min-width: 0;
   max-width: 100%;
-  height: 38px;
-  padding: 0 12px;
-  gap: 8px;
+  height: 32px;
+  padding: 0 10px;
+  gap: 6px;
   color: var(--mc-color-text-primary);
   background: transparent;
   border: 0;
   border-radius: var(--mc-radius-control);
   font: inherit;
-  font-size: var(--mc-font-size-xl);
+  font-size: var(--mc-font-size-chat-toolbar);
   font-weight: var(--mc-font-weight-regular);
   cursor: pointer;
 }
 
+.composer-project-picker:hover .composer-project-button,
 .composer-project-button:hover {
   background: var(--mc-color-state-hover);
 }
 
 .composer-project-button svg {
   flex: 0 0 auto;
-  width: var(--mc-icon-size-lg);
-  height: var(--mc-icon-size-lg);
+  width: var(--mc-icon-size-sm);
+  height: var(--mc-icon-size-sm);
   color: var(--mc-color-icon-muted);
 }
 
@@ -475,7 +516,8 @@
 .composer-skill-menu,
 .composer-model-menu,
 .composer-permission-menu,
-.composer-add-menu {
+.composer-add-menu,
+.composer-project-menu {
   font-size: 13px;
   line-height: 18px;
 }
@@ -865,10 +907,10 @@
   left: 0;
   bottom: calc(100% + 8px);
   display: grid;
-  width: 380px;
-  max-width: min(380px, calc(100vw - 48px));
-  padding: 16px 18px;
-  gap: 10px;
+  width: 280px;
+  max-width: min(280px, calc(100vw - 32px));
+  padding: 5px;
+  gap: 1px;
   background: var(--mc-color-surface-popover);
   border: 1px solid var(--mc-color-border-default);
   border-radius: var(--mc-radius-popover);
@@ -878,14 +920,15 @@
 .composer-project-menu__search {
   display: flex;
   align-items: center;
-  height: 34px;
-  gap: 10px;
+  height: 32px;
+  padding: 0 8px;
+  gap: 7px;
   color: var(--mc-color-icon-subtle);
 }
 
 .composer-project-menu__search svg {
-  width: var(--mc-icon-size-base);
-  height: var(--mc-icon-size-base);
+  width: var(--mc-icon-size-sm);
+  height: var(--mc-icon-size-sm);
 }
 
 .composer-project-menu__search input {
@@ -897,12 +940,13 @@
   border: 0;
   outline: 0;
   font: inherit;
-  font-size: var(--mc-font-size-lg);
+  font-size: inherit;
+  line-height: inherit;
 }
 
 .composer-project-menu__items {
   display: grid;
-  max-height: 220px;
+  max-height: 160px;
   overflow-y: auto;
   scrollbar-width: thin;
 }
@@ -911,16 +955,18 @@
 .composer-project-command {
   display: grid;
   align-items: center;
-  min-height: 42px;
-  padding: 0 4px;
-  gap: 12px;
+  height: 32px;
+  min-height: 32px;
+  padding: 0 8px;
+  gap: 7px;
   color: var(--mc-color-text-primary);
   text-align: left;
   background: transparent;
   border: 0;
-  border-radius: var(--mc-radius-lg);
+  border-radius: var(--mc-radius-control);
   font: inherit;
-  font-size: var(--mc-font-size-xl);
+  font-size: inherit;
+  line-height: inherit;
   cursor: pointer;
 }
 
@@ -940,15 +986,15 @@
 
 .composer-project-option > svg:first-child,
 .composer-project-command > svg:first-child {
-  width: var(--mc-icon-size-lg);
-  height: var(--mc-icon-size-lg);
+  width: var(--mc-icon-size-sm);
+  height: var(--mc-icon-size-sm);
   color: var(--mc-color-icon-muted);
 }
 
 .composer-project-option > svg:last-child,
 .composer-project-command > svg:last-child {
-  width: var(--mc-icon-size-lg);
-  height: var(--mc-icon-size-lg);
+  width: var(--mc-icon-size-sm);
+  height: var(--mc-icon-size-sm);
   color: var(--mc-color-icon-muted);
 }
 

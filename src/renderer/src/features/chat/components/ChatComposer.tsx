@@ -443,6 +443,15 @@ export function ChatComposer({
     [onDraftChange]
   )
 
+  const clearSelectedProject = useCallback(() => {
+    updateDraft({
+      projectId: null,
+      skills: retainGlobalSkillSelections(draftRef.current.skills)
+    })
+    setProjectSearch('')
+    setIsProjectMenuOpen(false)
+  }, [updateDraft])
+
   // Both model menus use this selection path. Only the slash menu also consumes its local query.
   const selectModelConfig = (modelId: string) => {
     if (isModelSelectionDisabled || !enabledModels.some((model) => model.id === modelId)) return
@@ -1292,6 +1301,17 @@ export function ChatComposer({
                   {selectedProject?.name ?? t('project.chooseProject')}
                 </span>
               </button>
+              {selectedProject && (
+                <button
+                  className="composer-project-clear"
+                  type="button"
+                  disabled={isModelTransitionRunning}
+                  aria-label={t('project.noProject')}
+                  onClick={clearSelectedProject}
+                >
+                  <X aria-hidden="true" />
+                </button>
+              )}
 
               {isProjectMenuOpen && (
                 <AnchoredPopover
@@ -1362,14 +1382,7 @@ export function ChatComposer({
                     <button
                       className="composer-project-command"
                       type="button"
-                      onClick={() => {
-                        updateDraft({
-                          projectId: null,
-                          skills: retainGlobalSkillSelections(draftRef.current.skills)
-                        })
-                        setProjectSearch('')
-                        setIsProjectMenuOpen(false)
-                      }}
+                      onClick={clearSelectedProject}
                     >
                       <X aria-hidden="true" />
                       <span>{t('project.noProject')}</span>
