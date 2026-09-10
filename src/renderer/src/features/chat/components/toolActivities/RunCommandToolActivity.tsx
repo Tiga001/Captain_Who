@@ -36,6 +36,41 @@ type RunCommandStatus =
 
 const COPIED_INDICATOR_MS = 1300
 
+function RunCommandCopyButton({
+  content,
+  copiedLabel,
+  label
+}: {
+  content: string
+  copiedLabel: string
+  label: string
+}) {
+  const [copied, setCopied] = useState(false)
+  useEffect(() => {
+    if (!copied) return undefined
+    const timerId = window.setTimeout(() => setCopied(false), COPIED_INDICATOR_MS)
+    return () => window.clearTimeout(timerId)
+  }, [copied])
+
+  return (
+    <button
+      aria-label={copied ? copiedLabel : label}
+      className="run-command-shell__copy"
+      disabled={!content}
+      onClick={() => {
+        void copyTextToClipboard(content)
+          .then(() => setCopied(true))
+          .catch(() => setCopied(false))
+      }}
+      title={copied ? copiedLabel : label}
+      type="button"
+    >
+      {copied ? <Check aria-hidden="true" /> : <Copy aria-hidden="true" />}
+      <span>{label}</span>
+    </button>
+  )
+}
+
 function getObjectValue(value: unknown) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null
   return value as Record<string, unknown>
@@ -188,73 +223,6 @@ function getRunCommandStatus(item: RunCommandToolActivityGroupItem): RunCommandS
   return 'running'
 }
 
-function getGroupLabel(
-  items: RunCommandToolActivityGroupItem[],
-  t: ReturnType<typeof useFrontendConfig>['t']
-) {
-  const counts = items.reduce(
-    (currentCounts, item) => {
-      currentCounts[getRunCommandStatus(item)] += 1
-      return currentCounts
-    },
-    {
-      cancelled: 0,
-      completed: 0,
-      failed: 0,
-      interrupted: 0,
-      rejected: 0,
-      running: 0,
-      starting: 0,
-      timed_out: 0,
-      waiting_for_approval: 0
-    }
-  )
-
-  if (
-    counts.running === 0 &&
-    counts.starting === 0 &&
-    counts.waiting_for_approval === 0 &&
-    counts.failed === 0 &&
-    counts.timed_out === 0 &&
-    counts.interrupted === 0 &&
-    counts.rejected === 0 &&
-    counts.cancelled === 0
-  ) {
-    return formatTranslation(t, 'agent.command.groupCompleted', { count: String(items.length) })
-  }
-
-  const summaryParts = [
-    counts.running + counts.starting + counts.waiting_for_approval > 0
-      ? formatTranslation(t, 'agent.command.groupRunningCount', {
-          count: String(counts.running + counts.starting + counts.waiting_for_approval)
-        })
-      : '',
-    counts.completed > 0
-      ? formatTranslation(t, 'agent.command.groupSucceededCount', {
-          count: String(counts.completed)
-        })
-      : '',
-    counts.failed + counts.timed_out > 0
-      ? formatTranslation(t, 'agent.command.groupFailedCount', {
-          count: String(counts.failed + counts.timed_out)
-        })
-      : '',
-    counts.rejected > 0
-      ? formatTranslation(t, 'agent.command.groupRejectedCount', { count: String(counts.rejected) })
-      : '',
-    counts.cancelled + counts.interrupted > 0
-      ? formatTranslation(t, 'agent.command.groupCancelledCount', {
-          count: String(counts.cancelled + counts.interrupted)
-        })
-      : ''
-  ].filter(Boolean)
-
-  return [
-    formatTranslation(t, 'agent.command.groupProcessedTotal', { count: String(items.length) }),
-    ...summaryParts
-  ].join(t('agent.separator'))
-}
-
 export function RunCommandToolActivity({
   cancelled = false,
   call,
@@ -295,14 +263,8 @@ export function RunCommandToolActivity({
     status === 'running' && runningStartedAt !== undefined
       ? Math.max(0, clockNow - runningStartedAt)
       : undefined
-  const [copied, setCopied] = useState(false)
   const outputRef = useRef<HTMLPreElement>(null)
   const keepLiveOutputPinnedRef = useRef(true)
-  useEffect(() => {
-    if (!copied) return undefined
-    const timerId = window.setTimeout(() => setCopied(false), COPIED_INDICATOR_MS)
-    return () => window.clearTimeout(timerId)
-  }, [copied])
   useEffect(() => {
     if (status !== 'running') return undefined
     const timerId = window.setInterval(() => setClockNow(Date.now()), 1000)
@@ -362,24 +324,21 @@ export function RunCommandToolActivity({
         <div className="agent-activity__details run-command-activity__details">
           {commandResult || runningCommandOutput || session || isPending ? (
             <div className="run-command-shell" role="group" aria-label={t('agent.command.shell')}>
-              <div className="run-command-shell__title">{t('agent.command.shell')}</div>
-              {copyableOutput && (
-                <button
-                  aria-label={
-                    copied ? t('agent.command.outputCopied') : t('agent.command.copyOutput')
-                  }
-                  className="run-command-shell__copy"
-                  onClick={() => {
-                    void copyTextToClipboard(copyableOutput)
-                      .then(() => setCopied(true))
-                      .catch(() => setCopied(false))
-                  }}
-                  title={copied ? t('agent.command.outputCopied') : t('agent.command.copyOutput')}
-                  type="button"
-                >
-                  {copied ? <Check aria-hidden="true" /> : <Copy aria-hidden="true" />}
-                </button>
-              )}
+              <div className="run-command-shell__header">
+                <div className="run-command-shell__title">{t('agent.command.shell')}</div>
+                <div className="run-command-shell__actions">
+                  <RunCommandCopyButton
+                    content={command}
+                    copiedLabel={t('agent.command.commandCopied')}
+                    label={t('agent.command.copyCommand')}
+                  />
+                  <RunCommandCopyButton
+                    content={copyableOutput}
+                    copiedLabel={t('agent.command.outputCopied')}
+                    label={t('agent.command.copyOutput')}
+                  />
+                </div>
+              </div>
               {command && <pre className="run-command-shell__command">$ {command}</pre>}
               <div className="run-command-shell__output-region">
                 <pre
@@ -490,7 +449,7 @@ export function RunCommandToolActivityGroup({ items }: RunCommandToolActivityGro
       hasDetails
       icon={SquareTerminal}
       isPending={isPending}
-      label={getGroupLabel(items, t)}
+      label={formatTranslation(t, 'agent.command.groupCompleted', { count: String(items.length) })}
     >
       <div className="agent-activity__details run-command-activity__details run-command-activity__details--group">
         {items.map((item) => (

@@ -20,7 +20,7 @@ const { copyTextSpy } = vi.hoisted(() => ({
 const translations: Record<string, string> = {
   'agent.command.completed': '已运行命令',
   'agent.command.failed': '命令失败',
-  'agent.command.groupCompleted': '已处理 {count} 个命令',
+  'agent.command.groupCompleted': '已运行 {count} 个命令',
   'agent.command.waitingApproval': '等待审批运行命令',
   'agent.command.waitingApprovalStatus': '等待审批',
   'agent.command.starting': '正在启动命令',
@@ -38,7 +38,9 @@ const translations: Record<string, string> = {
   'agent.command.runningStatus': '运行中',
   'agent.command.runningElapsed': '已运行 {duration}',
   'agent.command.waitingForOutput': '等待命令输出…',
-  'agent.command.copyOutput': '复制命令输出',
+  'agent.command.copyCommand': '复制命令',
+  'agent.command.commandCopied': '命令已复制',
+  'agent.command.copyOutput': '复制输出',
   'agent.command.outputCopied': '命令输出已复制',
   'agent.command.cancelled': '已取消',
   'agent.separator': ' · ',
@@ -178,6 +180,24 @@ describe('RunCommandToolActivity', () => {
     expect(window.getComputedStyle(commandBlock!).maxHeight).toBe('260px')
     expect(window.getComputedStyle(commandBlock!).overflow).toBe('auto')
     expect(window.getComputedStyle(commandBlock!).whiteSpace).toBe('pre')
+
+    await screen.getByRole('button', { name: '复制命令', exact: true }).click()
+    expect(copyTextSpy).toHaveBeenLastCalledWith(command)
+    await expect.element(screen.getByRole('button', { name: '命令已复制' })).toBeVisible()
+    await expect
+      .element(screen.getByRole('button', { name: '复制输出', exact: true }))
+      .toBeVisible()
+
+    await screen.getByRole('button', { name: '复制输出', exact: true }).click()
+    expect(copyTextSpy).toHaveBeenLastCalledWith('done')
+    await expect.element(screen.getByRole('button', { name: '命令输出已复制' })).toBeVisible()
+    await expect.element(screen.getByRole('button', { name: '命令已复制' })).toBeVisible()
+    await expect
+      .element(screen.getByRole('button', { name: '复制命令', exact: true }))
+      .toBeVisible()
+    await expect
+      .element(screen.getByRole('button', { name: '复制输出', exact: true }))
+      .toBeVisible()
   })
 
   it('scrolls newly expanded command details above the composer boundary', async () => {
@@ -258,11 +278,9 @@ describe('RunCommandToolActivity', () => {
     expect(window.getComputedStyle(output!).maxHeight).toBe('260px')
     expect(window.getComputedStyle(output!).overflowY).toBe('auto')
     expect(window.getComputedStyle(output!).whiteSpace).toBe('pre')
-    const copyButton =
-      screen.container.querySelector<HTMLButtonElement>('[aria-label="复制命令输出"]')
+    const copyButton = screen.container.querySelector<HTMLButtonElement>('[aria-label="复制输出"]')
     expect(copyButton).not.toBeNull()
-    expect(copyButton?.parentElement).toHaveClass('run-command-shell')
-    expect(window.getComputedStyle(copyButton!).top).toBe('8px')
+    expect(copyButton?.parentElement).toHaveClass('run-command-shell__actions')
     await userEvent.click(screen.container.querySelector('summary')!)
     await userEvent.click(copyButton!)
     expect(copyTextSpy).toHaveBeenCalledWith('suite started\none warning\n')
@@ -282,6 +300,12 @@ describe('RunCommandToolActivity', () => {
     }
     const screen = await render(<RunCommandToolActivity call={call} />)
 
+    expect(
+      screen.container.querySelector<HTMLButtonElement>('[aria-label="复制命令"]')?.disabled
+    ).toBe(false)
+    expect(
+      screen.container.querySelector<HTMLButtonElement>('[aria-label="复制输出"]')?.disabled
+    ).toBe(true)
     expect(screen.container.querySelector('.run-command-shell__output')?.textContent).toBe(
       '等待命令输出…'
     )
