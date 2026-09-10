@@ -7,6 +7,7 @@ import type { UiPreferencesSnapshot } from '../features/storage/storageClient'
 import { getTranslucentSidebarOpacityPercent } from '../features/storage/storageClient'
 import { useDismissOnOutsidePointer } from '../hooks/useDismissOnOutsidePointer'
 import { isMacOS } from '../lib/platform'
+import { MainPanelBrandMark } from './shell/MainPanelBrandMark'
 import {
   ConversationActionsMenu,
   type ConversationActionsMenuPosition
@@ -323,7 +324,9 @@ export function MainPanelToolbar({
       />
       {title ? (
         <MainPanelConversationTitle conversationActions={conversationActions} t={t} title={title} />
-      ) : null}
+      ) : (
+        <MainPanelBrandMark />
+      )}
     </div>
   )
 }

@@ -20,6 +20,8 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  vi.restoreAllMocks()
+  document.documentElement.removeAttribute('data-color-scheme')
   if (previousRootStyle === null) document.documentElement.removeAttribute('style')
   else document.documentElement.setAttribute('style', previousRootStyle)
 })
@@ -44,6 +46,18 @@ const shellStyle = {
 function centerY(element: Element) {
   const box = element.getBoundingClientRect()
   return (box.top + box.bottom) / 2
+}
+
+function animationDuration(element: HTMLElement) {
+  const timing = element.getAnimations()[0]?.effect?.getTiming()
+  return typeof timing?.duration === 'number' ? timing.duration : 0
+}
+
+function translateX(element: HTMLElement) {
+  const { transform } = getComputedStyle(element)
+  const values = /matrix(?:3d)?\(([^)]+)\)/.exec(transform)?.[1]?.split(',')
+  if (!values) return 0
+  return Number(values.length === 16 ? values[12] : values[4])
 }
 
 function conversationActions(
@@ -181,5 +195,112 @@ describe('MainPanelToolbar conversation menu', () => {
     await expect
       .element(screen.getByRole('button', { name: 'sidebar.moreConversationActions' }))
       .not.toBeInTheDocument()
+    await expect
+      .element(screen.getByRole('button', { name: 'Captain Who' }))
+      .not.toBeInTheDocument()
+  })
+
+  it('centers the theme-matching boat mark on the new conversation toolbar', async () => {
+    const screen = await render(
+      <div className="app-shell" style={shellStyle}>
+        <MainPanelToolbar {...toolbarProps} />
+      </div>
+    )
+
+    const boat = screen.getByRole('button', { name: 'Captain Who' }).element()
+    const lightLogo = screen.container.querySelector<HTMLImageElement>(
+      '.main-panel__brand-mark--light'
+    )
+    const darkLogo = screen.container.querySelector<HTMLImageElement>(
+      '.main-panel__brand-mark--dark'
+    )
+    const titleSlot = screen.container.querySelector('.main-panel__title')
+    const toolbar = screen.container.querySelector('.main-panel__toolbar')
+    if (!lightLogo || !darkLogo || !titleSlot || !toolbar) {
+      throw new Error('Missing toolbar brand mark')
+    }
+    expect(lightLogo.src).toContain('brand-mark-light')
+    expect(darkLogo.src).toContain('brand-mark-dark')
+    expect(getComputedStyle(lightLogo).backgroundColor).toBe('rgba(0, 0, 0, 0)')
+    expect(getComputedStyle(titleSlot).overflow).toBe('hidden')
+    expect(Math.abs(centerY(boat) - centerY(toolbar))).toBeLessThan(1)
+    expect(
+      (boat.getBoundingClientRect().left + boat.getBoundingClientRect().right) / 2
+    ).toBeCloseTo(
+      (titleSlot.getBoundingClientRect().left + titleSlot.getBoundingClientRect().right) / 2,
+      0
+    )
+
+    document.documentElement.setAttribute('data-color-scheme', 'dark')
+    expect(getComputedStyle(lightLogo).display).toBe('none')
+    expect(getComputedStyle(darkLogo).display).not.toBe('none')
+    document.documentElement.removeAttribute('data-color-scheme')
+  })
+
+  it('wobbles in place on the first clicks and speeds up consecutive taps', async () => {
+    const screen = await render(
+      <div className="app-shell" style={shellStyle}>
+        <MainPanelToolbar {...toolbarProps} />
+      </div>
+    )
+
+    const boat = screen.getByRole('button', { name: 'Captain Who' })
+    await boat.click()
+    await expect.element(boat).toHaveAttribute('data-motion', 'wobble')
+    const firstDuration = animationDuration(boat.element())
+    expect(firstDuration).toBeGreaterThan(400)
+    expect(boat.element().getAnimations().length).toBeGreaterThan(0)
+
+    await boat.click()
+    await expect.element(boat).toHaveAttribute('data-motion', 'wobble')
+    expect(animationDuration(boat.element())).toBeLessThan(firstDuration)
+  })
+
+  it('sails out of the title slot on the fifth click, ignores taps underway, then returns', async () => {
+    const screen = await render(
+      <div className="app-shell" style={shellStyle}>
+        <MainPanelToolbar {...toolbarProps} />
+      </div>
+    )
+
+    const boat = screen.getByRole('button', { name: 'Captain Who' })
+    const boatNode = boat.element()
+    for (let click = 0; click < 4; click += 1) await boat.click()
+    await expect.element(boat).toHaveAttribute('data-motion', 'wobble')
+
+    await boat.click()
+    await expect.element(boat).toHaveAttribute('data-motion', 'sail')
+    boatNode.click()
+    boatNode.click()
+    expect(boatNode.getAttribute('data-motion')).toBe('sail')
+    await expect.poll(() => translateX(boatNode)).toBeLessThan(-20)
+    expect(boatNode.getAttribute('data-motion')).toBe('sail')
+
+    await expect.poll(() => boatNode.getAttribute('data-motion'), { timeout: 4000 }).toBeNull()
+    expect(Math.abs(translateX(boatNode))).toBeLessThan(1)
+  })
+
+  it('skips wobble and sail when the user prefers reduced motion', async () => {
+    vi.spyOn(window, 'matchMedia').mockImplementation((query: string) => ({
+      matches: query.includes('prefers-reduced-motion'),
+      media: query,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+      onchange: null
+    }))
+
+    const screen = await render(
+      <div className="app-shell" style={shellStyle}>
+        <MainPanelToolbar {...toolbarProps} />
+      </div>
+    )
+
+    const boat = screen.getByRole('button', { name: 'Captain Who' })
+    for (let click = 0; click < 5; click += 1) await boat.click()
+    expect(boat.element().getAttribute('data-motion')).toBeNull()
+    expect(boat.element().getAnimations()).toHaveLength(0)
   })
 })

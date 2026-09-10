@@ -426,6 +426,63 @@ button.main-panel__title-text:focus-visible {
   outline-offset: 1px;
 }
 
+.main-panel__title--brand {
+  overflow: hidden;
+}
+
+.main-panel__brand-mark-button {
+  display: grid;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  place-items: center;
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+  pointer-events: auto;
+  transform-origin: 50% 82%;
+  -webkit-app-region: no-drag;
+}
+
+.main-panel__brand-mark-button:focus-visible {
+  outline: 2px solid var(--mc-color-focus-ring);
+  outline-offset: 1px;
+  border-radius: var(--mc-radius-sm);
+}
+
+.main-panel__brand-mark {
+  grid-area: 1 / 1;
+  width: 28px;
+  height: 28px;
+  object-fit: contain;
+  background: transparent;
+  -webkit-user-drag: none;
+  user-select: none;
+  pointer-events: none;
+}
+
+.main-panel__brand-mark--dark {
+  display: none;
+}
+
+html[data-color-scheme='dark'] .main-panel__brand-mark--light {
+  display: none;
+}
+
+html[data-color-scheme='dark'] .main-panel__brand-mark--dark {
+  display: block;
+}
+
+@media (prefers-color-scheme: dark) {
+  html:not([data-color-scheme]) .main-panel__brand-mark--light {
+    display: none;
+  }
+
+  html:not([data-color-scheme]) .main-panel__brand-mark--dark {
+    display: block;
+  }
+}
+
 .panel-toggle {
   position: absolute;
   top: 10px;
