@@ -1,10 +1,11 @@
 // Conversation row presentation and local context-menu behavior.
-import { Archive, Mail, PencilLine, Pin } from 'lucide-react'
+import { Archive } from 'lucide-react'
 import { memo, useRef, useState } from 'react'
 import type { AppLanguage } from '../../../config/frontendTranslations'
 import { isAssistantMessageGenerating } from '../../../features/chat/assistantGeneration'
 import { useDismissOnOutsidePointer } from '../../../hooks/useDismissOnOutsidePointer'
 import { Tooltip } from '../../../components/overlay/Tooltip'
+import { ConversationActionsMenu } from './ConversationActionsMenu'
 import type { SidebarConversation } from './leftSidebarTypes'
 import { formatConversationAge } from './leftSidebarUtils'
 
@@ -161,64 +162,23 @@ export const ConversationRow = memo(function ConversationRow({
       </div>
 
       {menuPosition && (
-        <div
-          className="left-sidebar__conversation-menu"
-          role="menu"
-          ref={conversationMenuRef}
-          style={{ left: menuPosition.x, top: menuPosition.y }}
-        >
-          <button
-            className="left-sidebar__project-menu-item"
-            type="button"
-            role="menuitem"
-            onClick={() => {
-              onTogglePinConversation(conversation.id)
-              closeConversationMenu()
-            }}
-          >
-            <Pin aria-hidden="true" />
-            <span>{isPinned ? unpinLabel : pinLabel}</span>
-          </button>
-          <button
-            className="left-sidebar__project-menu-item"
-            type="button"
-            role="menuitem"
-            onClick={() => {
-              onRenameConversation(conversation)
-              closeConversationMenu()
-            }}
-          >
-            <PencilLine aria-hidden="true" />
-            <span>{renameLabel}</span>
-          </button>
-          <button
-            className="left-sidebar__project-menu-item"
-            type="button"
-            role="menuitem"
-            onClick={() => {
-              onArchiveConversation(conversation.id)
-              closeConversationMenu()
-            }}
-          >
-            <Archive aria-hidden="true" />
-            <span>{archiveLabel}</span>
-          </button>
-          <button
-            className="left-sidebar__project-menu-item"
-            type="button"
-            role="menuitem"
-            disabled={!canMarkUnread}
-            onClick={() => {
-              if (!canMarkUnread) return
-
-              onMarkConversationUnread(conversation.id)
-              closeConversationMenu()
-            }}
-          >
-            <Mail aria-hidden="true" />
-            <span>{markUnreadLabel}</span>
-          </button>
-        </div>
+        <ConversationActionsMenu
+          archiveLabel={archiveLabel}
+          canMarkUnread={canMarkUnread}
+          isPinned={isPinned}
+          markUnreadLabel={markUnreadLabel}
+          menuPosition={menuPosition}
+          menuRef={conversationMenuRef}
+          onArchive={() => onArchiveConversation(conversation.id)}
+          onClose={closeConversationMenu}
+          onMarkUnread={() => onMarkConversationUnread(conversation.id)}
+          onRename={() => onRenameConversation(conversation)}
+          onTogglePin={() => onTogglePinConversation(conversation.id)}
+          pinLabel={pinLabel}
+          renameLabel={renameLabel}
+          showMarkUnread
+          unpinLabel={unpinLabel}
+        />
       )}
     </div>
   )

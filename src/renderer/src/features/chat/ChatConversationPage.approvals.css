@@ -365,7 +365,7 @@
   display: grid;
   justify-items: stretch;
   width: min(100%, 760px);
-  padding: 14px 28px 28px;
+  padding: 14px 28px 16px;
   margin: 0 auto;
   gap: 8px;
 }

@@ -213,7 +213,10 @@
   gap: 8px;
   color: var(--mc-color-sidebar-text-secondary);
   text-align: left;
+  background: transparent;
+  border: 0;
   border-radius: var(--mc-radius-sm);
+  cursor: pointer;
   font-size: var(--left-sidebar-menu-font-size);
   font-weight: var(--mc-font-weight-semibold);
   line-height: var(--left-sidebar-menu-line-height);

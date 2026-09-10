@@ -1310,6 +1310,28 @@ export function AppShell() {
       >
         <MainPanelToolbar
           bottomOpen={bottomOpen}
+          conversationActions={
+            activeConversation
+              ? {
+                  conversationId: activeConversation.id,
+                  isPinned: Boolean(activeConversation.pinnedAt),
+                  onArchive: () => {
+                    void archiveConversation(activeConversation.id)
+                  },
+                  onCommitTitle: (nextTitle) => {
+                    patchConversation(activeConversation.id, { title: nextTitle })
+                  },
+                  onRename: () => {
+                    requestChatRename(activeConversation.id)
+                  },
+                  onTogglePin: () => {
+                    patchConversation(activeConversation.id, {
+                      pinnedAt: activeConversation.pinnedAt ? null : Date.now()
+                    })
+                  }
+                }
+              : undefined
+          }
           onToggleBottomPanel={toggleBottomPanel}
           hasUnreadConversations={hasUnreadConversations}
           leftOpen={leftOpen}

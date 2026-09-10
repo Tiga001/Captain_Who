@@ -12,29 +12,18 @@ interface TerminalPanelProps {
 export function TerminalPanel({ initialCwd, isActive }: TerminalPanelProps) {
   const { resolvedThemeId, t } = useFrontendConfig()
   const terminalContainerRef = useTerminalSessionContainer()
-  const { errorMessage, status } = useTerminalSession({
+  useTerminalSession({
     containerRef: terminalContainerRef,
     initialCwd,
     isActive,
     themeKey: resolvedThemeId
   })
-  const statusLabel = {
-    error: t('terminal.status.error'),
-    exited: t('terminal.status.exited'),
-    running: t('terminal.status.running'),
-    starting: t('terminal.status.starting')
-  }[status]
 
   return (
     <section className="terminal-panel" aria-label={t('terminal.title')}>
       <div className="terminal-panel__surface">
         <div ref={terminalContainerRef} className="terminal-panel__xterm" />
       </div>
-
-      <footer className="terminal-panel__status" data-status={status}>
-        <span>{statusLabel}</span>
-        {errorMessage && <span className="terminal-panel__error">{errorMessage}</span>}
-      </footer>
     </section>
   )
 }

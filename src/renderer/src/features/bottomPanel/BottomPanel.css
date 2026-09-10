@@ -16,11 +16,3 @@
 .bottom-panel .right-sidebar__tab-scroll {
   -webkit-app-region: no-drag;
 }
-
-.bottom-panel .terminal-panel {
-  grid-template-rows: minmax(0, 1fr);
-}
-
-.bottom-panel .terminal-panel__status {
-  display: none;
-}

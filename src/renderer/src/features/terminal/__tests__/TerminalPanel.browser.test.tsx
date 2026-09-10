@@ -167,6 +167,7 @@ describe('TerminalPanel session lifetime', () => {
     expect(initial.rows).toBeLessThan(8)
     const container = screen.container.querySelector<HTMLElement>('.terminal-panel__xterm')!
     expect(container.getBoundingClientRect().height).toBe(111)
+    expect(screen.container.querySelector('.terminal-panel__status')).toBeNull()
 
     await screen.rerender(<CompactBottomTerminal height={280} />)
     await expect.poll(() => resizeSession.mock.calls.at(-1)?.[2]).toBeGreaterThan(initial.rows!)

@@ -1,10 +1,16 @@
 // Small constants, queue payload types, and panel toggle controls for AppShell.
-import type { CSSProperties } from 'react'
+import { MoreHorizontal } from 'lucide-react'
+import { useEffect, useRef, useState, type CSSProperties } from 'react'
 import type { TranslationKey } from '../config/frontendTranslations'
 import type { ChatMessage } from '../features/chat/chatTypes'
 import type { UiPreferencesSnapshot } from '../features/storage/storageClient'
 import { getTranslucentSidebarOpacityPercent } from '../features/storage/storageClient'
+import { useDismissOnOutsidePointer } from '../hooks/useDismissOnOutsidePointer'
 import { isMacOS } from '../lib/platform'
+import {
+  ConversationActionsMenu,
+  type ConversationActionsMenuPosition
+} from './shell/sidebar/ConversationActionsMenu'
 
 export const SUPPORTS_NATIVE_FONT_SMOOTHING = isMacOS()
 export const HAS_MACOS_WINDOW_CONTROLS = isMacOS()
@@ -122,12 +128,166 @@ interface SidebarToggleControlsProps {
   t: (key: TranslationKey) => string
 }
 
+export interface MainPanelConversationActions {
+  conversationId: string
+  isPinned: boolean
+  onArchive: () => void
+  onCommitTitle: (title: string) => void
+  onRename: () => void
+  onTogglePin: () => void
+}
+
 interface MainPanelToolbarProps extends SidebarToggleControlsProps {
+  conversationActions?: MainPanelConversationActions
   title?: string
+}
+
+const TITLE_CONVERSATION_MENU_WIDTH = 224
+const TITLE_CONVERSATION_MENU_HEIGHT = 148
+
+function MainPanelConversationTitle({
+  conversationActions,
+  t,
+  title
+}: {
+  conversationActions?: MainPanelConversationActions
+  t: (key: TranslationKey) => string
+  title: string
+}) {
+  const menuRootRef = useRef<HTMLDivElement>(null)
+  const editingConversationIdRef = useRef<string | null>(null)
+  const titleAtEditStartRef = useRef(title)
+  const [menuPosition, setMenuPosition] = useState<ConversationActionsMenuPosition | null>(null)
+  const [draft, setDraft] = useState(title)
+  const [editingConversationId, setEditingConversationId] = useState<string | null>(null)
+  const isMenuOpen = Boolean(menuPosition)
+  const isEditing = Boolean(
+    conversationActions && editingConversationId === conversationActions.conversationId
+  )
+  const closeMenu = () => setMenuPosition(null)
+  useDismissOnOutsidePointer(menuRootRef, isMenuOpen, closeMenu)
+
+  useEffect(() => {
+    editingConversationIdRef.current = null
+    setEditingConversationId(null)
+  }, [conversationActions?.conversationId])
+
+  const finishEditing = (next: string | null) => {
+    const conversationId = editingConversationIdRef.current
+    editingConversationIdRef.current = null
+    setEditingConversationId(null)
+    if (
+      next === null ||
+      !conversationId ||
+      conversationId !== conversationActions?.conversationId
+    ) {
+      return
+    }
+
+    const trimmed = next.trim()
+    if (!trimmed || trimmed === titleAtEditStartRef.current) return
+    conversationActions.onCommitTitle(trimmed)
+  }
+
+  const startEditing = () => {
+    if (!conversationActions) return
+    closeMenu()
+    titleAtEditStartRef.current = title
+    setDraft(title)
+    editingConversationIdRef.current = conversationActions.conversationId
+    setEditingConversationId(conversationActions.conversationId)
+  }
+
+  return (
+    <div className="main-panel__title" data-editing={isEditing || undefined}>
+      {isEditing ? (
+        <input
+          className="main-panel__title-input"
+          aria-label={t('conversation.renameTitle')}
+          autoFocus
+          spellCheck={false}
+          value={draft}
+          onBlur={(event) => finishEditing(event.currentTarget.value)}
+          onChange={(event) => setDraft(event.currentTarget.value)}
+          onFocus={(event) => event.currentTarget.select()}
+          onKeyDown={(event) => {
+            if (event.nativeEvent.isComposing) return
+            if (event.key === 'Enter') {
+              event.preventDefault()
+              finishEditing(event.currentTarget.value)
+            }
+            if (event.key === 'Escape') {
+              event.preventDefault()
+              finishEditing(null)
+            }
+          }}
+        />
+      ) : conversationActions ? (
+        <button className="main-panel__title-text" type="button" onClick={startEditing}>
+          {title}
+        </button>
+      ) : (
+        <h1 className="main-panel__title-text">{title}</h1>
+      )}
+      {conversationActions ? (
+        <div className="main-panel__title-menu" ref={menuRootRef}>
+          <button
+            className="main-panel__title-menu-button"
+            type="button"
+            aria-expanded={isMenuOpen}
+            aria-haspopup="menu"
+            aria-label={t('sidebar.moreConversationActions')}
+            data-open={isMenuOpen || undefined}
+            onClick={(event) => {
+              if (isMenuOpen) {
+                closeMenu()
+                return
+              }
+
+              const rect = event.currentTarget.getBoundingClientRect()
+              setMenuPosition({
+                x: Math.max(
+                  12,
+                  Math.min(
+                    rect.right - TITLE_CONVERSATION_MENU_WIDTH,
+                    window.innerWidth - TITLE_CONVERSATION_MENU_WIDTH - 12
+                  )
+                ),
+                y: Math.max(
+                  12,
+                  Math.min(
+                    rect.bottom + 4,
+                    window.innerHeight - TITLE_CONVERSATION_MENU_HEIGHT - 12
+                  )
+                )
+              })
+            }}
+          >
+            <MoreHorizontal aria-hidden="true" />
+          </button>
+          {menuPosition ? (
+            <ConversationActionsMenu
+              archiveLabel={t('conversation.archiveConversation')}
+              isPinned={conversationActions.isPinned}
+              menuPosition={menuPosition}
+              onArchive={conversationActions.onArchive}
+              onClose={closeMenu}
+              onRename={conversationActions.onRename}
+              onTogglePin={conversationActions.onTogglePin}
+              pinLabel={t('conversation.pinConversation')}
+              renameLabel={t('conversation.renameConversation')}
+              unpinLabel={t('conversation.unpinConversation')}
+            />
+          ) : null}
+        </div>
+      ) : null}
+    </div>
+  )
 }
 
 export function MainPanelToolbar({
   bottomOpen,
+  conversationActions,
   onToggleBottomPanel,
   hasUnreadConversations,
   leftOpen,
@@ -161,7 +321,9 @@ export function MainPanelToolbar({
         side="right"
         t={t}
       />
-      {title && <h1 className="main-panel__title">{title}</h1>}
+      {title ? (
+        <MainPanelConversationTitle conversationActions={conversationActions} t={t} title={title} />
+      ) : null}
     </div>
   )
 }

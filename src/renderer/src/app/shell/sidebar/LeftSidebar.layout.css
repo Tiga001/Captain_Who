@@ -235,6 +235,7 @@
   --left-sidebar-menu-font-size: 13px;
   --left-sidebar-menu-line-height: 18px;
   --left-sidebar-menu-icon-size: 16px;
+  --left-sidebar-popover-z-index: 1100;
 }
 
 .left-sidebar__account-menu {
