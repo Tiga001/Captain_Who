@@ -156,6 +156,8 @@ export const ruRUTranslations = {
   'project.pinProject': 'Закрепить проект',
   'project.unpinProject': 'Открепить проект',
   'project.showInFolder': 'Показать в папке',
+  'project.openDetails': 'Открыть сведения о проекте',
+  'project.conversationCount': '{count} чатов',
   'project.editProject': 'Редактировать проект',
   'project.archiveConversations': 'Архив чатов',
   'project.removeProject': 'Удалить',

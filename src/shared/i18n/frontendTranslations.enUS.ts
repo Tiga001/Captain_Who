@@ -157,6 +157,8 @@ export const enUSTranslations = {
   'project.pinProject': 'Pin project',
   'project.unpinProject': 'Unpin project',
   'project.showInFolder': 'Show in folder',
+  'project.openDetails': 'Open project details',
+  'project.conversationCount': '{count} chats',
   'project.editProject': 'Edit project',
   'project.archiveConversations': 'Archive chats',
   'project.removeProject': 'Remove',

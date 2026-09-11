@@ -98,6 +98,7 @@ vi.mock('../../config/ProjectSettingsProvider', async () => {
       openCreateProjectDialog: vi.fn(async () => null),
       openEditProjectDialog: vi.fn(async () => 'cancelled'),
       showProjectInFolder: vi.fn(),
+      showProjectFolder: vi.fn(),
       togglePinProject: vi.fn()
     })
   }

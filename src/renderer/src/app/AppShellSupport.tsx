@@ -2,12 +2,14 @@
 import { MoreHorizontal } from 'lucide-react'
 import { useEffect, useRef, useState, type CSSProperties } from 'react'
 import type { TranslationKey } from '../config/frontendTranslations'
+import type { AppProject } from '../config/projectConfig'
 import type { ChatMessage } from '../features/chat/chatTypes'
 import type { UiPreferencesSnapshot } from '../features/storage/storageClient'
 import { getTranslucentSidebarOpacityPercent } from '../features/storage/storageClient'
 import { useDismissOnOutsidePointer } from '../hooks/useDismissOnOutsidePointer'
 import { isMacOS } from '../lib/platform'
 import { MainPanelBrandMark } from './shell/MainPanelBrandMark'
+import { MainPanelProjectCard } from './shell/MainPanelProjectCard'
 import {
   ConversationActionsMenu,
   type ConversationActionsMenuPosition
@@ -138,8 +140,16 @@ export interface MainPanelConversationActions {
   onTogglePin: () => void
 }
 
+export interface MainPanelProjectCardActions {
+  conversationCount: number
+  onEditProject: () => void
+  onRevealFolder: (folderId: string) => void
+  project: AppProject
+}
+
 interface MainPanelToolbarProps extends SidebarToggleControlsProps {
   conversationActions?: MainPanelConversationActions
+  projectCard?: MainPanelProjectCardActions
   title?: string
 }
 
@@ -148,10 +158,12 @@ const TITLE_CONVERSATION_MENU_HEIGHT = 148
 
 function MainPanelConversationTitle({
   conversationActions,
+  projectCard,
   t,
   title
 }: {
   conversationActions?: MainPanelConversationActions
+  projectCard?: MainPanelProjectCardActions
   t: (key: TranslationKey) => string
   title: string
 }) {
@@ -159,6 +171,7 @@ function MainPanelConversationTitle({
   const editingConversationIdRef = useRef<string | null>(null)
   const titleAtEditStartRef = useRef(title)
   const [menuPosition, setMenuPosition] = useState<ConversationActionsMenuPosition | null>(null)
+  const [projectOpen, setProjectOpen] = useState(false)
   const [draft, setDraft] = useState(title)
   const [editingConversationId, setEditingConversationId] = useState<string | null>(null)
   const isMenuOpen = Boolean(menuPosition)
@@ -166,12 +179,14 @@ function MainPanelConversationTitle({
     conversationActions && editingConversationId === conversationActions.conversationId
   )
   const closeMenu = () => setMenuPosition(null)
+  const closeProjectCard = () => setProjectOpen(false)
   useDismissOnOutsidePointer(menuRootRef, isMenuOpen, closeMenu)
 
   useEffect(() => {
     editingConversationIdRef.current = null
     setEditingConversationId(null)
-  }, [conversationActions?.conversationId])
+    setProjectOpen(false)
+  }, [conversationActions?.conversationId, projectCard?.project.id])
 
   const finishEditing = (next: string | null) => {
     const conversationId = editingConversationIdRef.current
@@ -193,6 +208,7 @@ function MainPanelConversationTitle({
   const startEditing = () => {
     if (!conversationActions) return
     closeMenu()
+    closeProjectCard()
     titleAtEditStartRef.current = title
     setDraft(title)
     editingConversationIdRef.current = conversationActions.conversationId
@@ -201,6 +217,20 @@ function MainPanelConversationTitle({
 
   return (
     <div className="main-panel__title" data-editing={isEditing || undefined}>
+      {projectCard ? (
+        <MainPanelProjectCard
+          conversationCount={projectCard.conversationCount}
+          onEditProject={projectCard.onEditProject}
+          onOpenChange={(nextOpen) => {
+            if (nextOpen) closeMenu()
+            setProjectOpen(nextOpen)
+          }}
+          onRevealFolder={projectCard.onRevealFolder}
+          open={projectOpen}
+          project={projectCard.project}
+          t={t}
+        />
+      ) : null}
       {isEditing ? (
         <input
           className="main-panel__title-input"
@@ -245,6 +275,7 @@ function MainPanelConversationTitle({
                 return
               }
 
+              closeProjectCard()
               const rect = event.currentTarget.getBoundingClientRect()
               setMenuPosition({
                 x: Math.max(
@@ -294,6 +325,7 @@ export function MainPanelToolbar({
   leftOpen,
   onToggleLeftSidebar,
   onToggleRightSidebar,
+  projectCard,
   rightOpen,
   t,
   title
@@ -323,7 +355,12 @@ export function MainPanelToolbar({
         t={t}
       />
       {title ? (
-        <MainPanelConversationTitle conversationActions={conversationActions} t={t} title={title} />
+        <MainPanelConversationTitle
+          conversationActions={conversationActions}
+          projectCard={projectCard}
+          t={t}
+          title={title}
+        />
       ) : (
         <MainPanelBrandMark />
       )}

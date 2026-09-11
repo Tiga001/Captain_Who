@@ -157,6 +157,8 @@ export const zhCNTranslations = {
   'project.pinProject': '置顶项目',
   'project.unpinProject': '取消置顶项目',
   'project.showInFolder': '在文件夹中显示',
+  'project.openDetails': '打开项目详情',
+  'project.conversationCount': '{count} 个对话',
   'project.editProject': '编辑项目',
   'project.archiveConversations': '归档对话',
   'project.removeProject': '移除',

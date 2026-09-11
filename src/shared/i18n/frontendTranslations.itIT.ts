@@ -156,6 +156,8 @@ export const itITTranslations = {
   'project.pinProject': 'Progetto Pin',
   'project.unpinProject': 'Sblocca progetto',
   'project.showInFolder': 'Mostra nella cartella',
+  'project.openDetails': 'Apri i dettagli del progetto',
+  'project.conversationCount': '{count} chat',
   'project.editProject': 'Modifica progetto',
   'project.archiveConversations': 'Archivia le chat',
   'project.removeProject': 'Rimuovi',

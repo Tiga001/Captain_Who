@@ -155,6 +155,8 @@ export const koKRTranslations = {
   'project.pinProject': '프로젝트 고정',
   'project.unpinProject': '프로젝트 고정 해제',
   'project.showInFolder': '폴더에 표시',
+  'project.openDetails': '프로젝트 세부정보 열기',
+  'project.conversationCount': '채팅 {count}개',
   'project.editProject': '프로젝트 편집',
   'project.archiveConversations': '채팅 보관',
   'project.removeProject': '제거',

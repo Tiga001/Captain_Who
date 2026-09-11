@@ -155,6 +155,8 @@ export const zhTWTranslations = {
   'project.pinProject': '置頂項目',
   'project.unpinProject': '取消置頂項目',
   'project.showInFolder': '在資料夾中顯示',
+  'project.openDetails': '開啟項目詳情',
+  'project.conversationCount': '{count} 個對話',
   'project.editProject': '編輯項目',
   'project.archiveConversations': '歸檔對話',
   'project.removeProject': '移除',

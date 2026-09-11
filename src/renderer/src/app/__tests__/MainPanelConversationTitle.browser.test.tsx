@@ -3,9 +3,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { userEvent } from 'vitest/browser'
 import { render } from 'vitest-browser-react'
 import { getFrontendCssVariables } from '../../config/frontendConfig'
+import { getTranslation } from '../../config/frontendTranslations'
 import type { Translate } from '../../config/translationFormat'
+import { singleFolderProject } from '../../features/projects/__tests__/projectFixtures'
 import { MainPanelToolbar } from '../AppShellSupport'
 import '../../styles/global.css'
+import '../shell/MainPanelProjectCard.css'
 
 vi.mock('../../host/hostClient', () => ({ hostClient: {} }))
 
@@ -104,6 +107,9 @@ describe('MainPanelToolbar conversation menu', () => {
     const toolbar = screen.container.querySelector('.main-panel__toolbar')
     if (!toolbar) throw new Error('Missing toolbar')
     await expect.element(menuButton).toBeVisible()
+    await expect
+      .element(screen.getByRole('button', { name: 'project.openDetails' }))
+      .not.toBeInTheDocument()
     expect(menuButton.element().getBoundingClientRect().left).toBeGreaterThanOrEqual(
       title.getBoundingClientRect().right
     )
@@ -302,5 +308,114 @@ describe('MainPanelToolbar conversation menu', () => {
     for (let click = 0; click < 5; click += 1) await boat.click()
     expect(boat.element().getAttribute('data-motion')).toBeNull()
     expect(boat.element().getAnimations()).toHaveLength(0)
+  })
+})
+
+describe('MainPanelToolbar project card', () => {
+  const translate: Translate = (key) => getTranslation('en-US', key)
+  const playground = {
+    ...singleFolderProject({
+      id: 'project-a',
+      name: 'Playground',
+      path: '/Users/me/Desktop/Playground'
+    }),
+    folders: [
+      {
+        id: 'folder-primary',
+        path: '/Users/me/Desktop/Playground',
+        alias: 'Playground',
+        role: 'primary' as const,
+        sortOrder: 0,
+        createdAt: 1
+      },
+      {
+        id: 'folder-notes',
+        path: '/Users/me/Documents/Notes',
+        alias: 'Notes',
+        role: 'auxiliary' as const,
+        sortOrder: 1,
+        createdAt: 2
+      }
+    ]
+  }
+
+  it('opens project details from the title and reveals or edits from the card', async () => {
+    const onEditProject = vi.fn()
+    const onRevealFolder = vi.fn()
+    const screen = await render(
+      <div className="app-shell" style={shellStyle}>
+        <MainPanelToolbar
+          {...toolbarProps}
+          t={translate}
+          conversationActions={conversationActions()}
+          projectCard={{
+            conversationCount: 2,
+            onEditProject,
+            onRevealFolder,
+            project: playground
+          }}
+          title="Open the polymer PDF"
+        />
+      </div>
+    )
+
+    const title = screen.getByRole('button', { name: 'Open the polymer PDF' }).element()
+    const projectButton = screen.getByRole('button', { name: 'Open project details' })
+    const menuButton = screen.getByRole('button', { name: 'More chat actions' }).element()
+    await expect.element(projectButton).toBeVisible()
+    expect(projectButton.element().getBoundingClientRect().right).toBeLessThanOrEqual(
+      title.getBoundingClientRect().left + 1
+    )
+    expect(getComputedStyle(projectButton.element()).backgroundColor).toBe(
+      getComputedStyle(menuButton).backgroundColor
+    )
+    expect(getComputedStyle(projectButton.element()).borderRadius).toBe(
+      getComputedStyle(menuButton).borderRadius
+    )
+
+    await projectButton.click()
+    await expect.element(screen.getByRole('dialog', { name: 'Playground' })).toBeVisible()
+    await expect.element(screen.getByText('2 chats')).toBeVisible()
+    expect(document.body.textContent).not.toContain('Pin project')
+    await expect
+      .element(screen.getByRole('button', { name: 'Show in folder: ~/Desktop/Playground' }))
+      .toBeVisible()
+    await expect
+      .element(screen.getByRole('button', { name: 'Show in folder: ~/Documents/Notes' }))
+      .toBeVisible()
+
+    await screen.getByRole('button', { name: 'Show in folder: ~/Desktop/Playground' }).click()
+    expect(onRevealFolder).toHaveBeenCalledWith('folder-primary')
+    await expect.element(screen.getByRole('dialog', { name: 'Playground' })).not.toBeInTheDocument()
+
+    await screen.getByRole('button', { name: 'Open project details' }).click()
+    await screen.getByRole('button', { name: 'Edit project' }).click()
+    expect(onEditProject).toHaveBeenCalledOnce()
+    await expect.element(screen.getByRole('dialog', { name: 'Playground' })).not.toBeInTheDocument()
+  })
+
+  it('closes the project card when the conversation menu opens', async () => {
+    const screen = await render(
+      <div className="app-shell" style={shellStyle}>
+        <MainPanelToolbar
+          {...toolbarProps}
+          t={translate}
+          conversationActions={conversationActions()}
+          projectCard={{
+            conversationCount: 1,
+            onEditProject: vi.fn(),
+            onRevealFolder: vi.fn(),
+            project: playground
+          }}
+          title="Trip notes"
+        />
+      </div>
+    )
+
+    await screen.getByRole('button', { name: 'Open project details' }).click()
+    await expect.element(screen.getByRole('dialog', { name: 'Playground' })).toBeVisible()
+    await screen.getByRole('button', { name: 'More chat actions' }).click()
+    await expect.element(screen.getByRole('dialog', { name: 'Playground' })).not.toBeInTheDocument()
+    await expect.element(screen.getByRole('menuitem', { name: 'Pin chat' })).toBeVisible()
   })
 })

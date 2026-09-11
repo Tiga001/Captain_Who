@@ -11,6 +11,7 @@ import {
   deleteStoredProject,
   loadProjects,
   pickProjectFolder,
+  revealStoredProjectFile,
   saveProject as saveStoredProject,
   showStoredProjectInFolder,
   updateProject as updateStoredProject
@@ -29,6 +30,8 @@ interface ProjectSettingsContextValue {
   openEditProjectDialog: (projectId: string) => Promise<ProjectEditDialogResult>
   projects: AppProject[]
   showProjectInFolder: (projectId: string) => Promise<void>
+  /** Reveals one of the project's folders in the OS file manager. */
+  showProjectFolder: (projectId: string, folderId: string) => Promise<void>
   togglePinProject: (projectId: string) => void
 }
 
@@ -122,6 +125,13 @@ export function ProjectSettingsProvider({ children }: { children: ReactNode }) {
       projects,
       showProjectInFolder: async (projectId) => {
         await showStoredProjectInFolder(projectId)
+      },
+      showProjectFolder: async (projectId, folderId) => {
+        const folder = projects
+          .find((project) => project.id === projectId)
+          ?.folders.find((candidate) => candidate.id === folderId)
+        if (!folder) return
+        await revealStoredProjectFile(projectId, folder.path)
       },
       togglePinProject: (projectId) => {
         const now = Date.now()

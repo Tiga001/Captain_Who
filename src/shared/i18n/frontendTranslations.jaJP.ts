@@ -156,6 +156,8 @@ export const jaJPTranslations = {
   'project.pinProject': 'ピンプロジェクト',
   'project.unpinProject': 'プロジェクトの固定を解除する',
   'project.showInFolder': 'フォルダ内に表示',
+  'project.openDetails': 'プロジェクトの詳細を開く',
+  'project.conversationCount': '{count} 件のチャット',
   'project.editProject': 'プロジェクトを編集',
   'project.archiveConversations': 'チャットをアーカイブする',
   'project.removeProject': '削除',

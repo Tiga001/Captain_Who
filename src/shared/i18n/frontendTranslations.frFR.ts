@@ -156,6 +156,8 @@ export const frFRTranslations = {
   'project.pinProject': 'Épingler le projet',
   'project.unpinProject': 'Désépingler le projet',
   'project.showInFolder': 'Afficher dans le dossier',
+  'project.openDetails': 'Ouvrir les détails du projet',
+  'project.conversationCount': '{count} discussions',
   'project.editProject': 'Modifier le projet',
   'project.archiveConversations': 'Archiver les discussions',
   'project.removeProject': 'Supprimer',

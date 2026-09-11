@@ -151,6 +151,7 @@ export function AppShell() {
     openCreateProjectDialog,
     openEditProjectDialog,
     showProjectInFolder,
+    showProjectFolder,
     togglePinProject
   } = useProjectSettings()
   const {
@@ -382,6 +383,17 @@ export function AppShell() {
   const hasUnreadConversations = conversations.some(
     (conversation) => !conversation.archivedAt && Boolean(conversation.unreadAt)
   )
+  const titleProject = useMemo(() => {
+    const projectId = activeConversation?.projectId
+    if (!projectId) return null
+    return projects.find((project) => project.id === projectId) ?? null
+  }, [activeConversation?.projectId, projects])
+  const titleProjectConversationCount = useMemo(() => {
+    if (!titleProject) return 0
+    return conversations.filter(
+      (conversation) => !conversation.archivedAt && conversation.projectId === titleProject.id
+    ).length
+  }, [conversations, titleProject])
   const rightSidebarWorkspaceProjectId = activeConversation
     ? activeConversation.projectId
     : activeDraft.projectId
@@ -1341,6 +1353,20 @@ export function AppShell() {
           rightOpen={rightOpen}
           t={t}
           title={activeConversation?.title}
+          projectCard={
+            titleProject
+              ? {
+                  conversationCount: titleProjectConversationCount,
+                  onEditProject: () => {
+                    void openEditProjectDialog(titleProject.id)
+                  },
+                  onRevealFolder: (folderId) => {
+                    void showProjectFolder(titleProject.id, folderId)
+                  },
+                  project: titleProject
+                }
+              : undefined
+          }
         />
 
         <div className="main-panel__surface">

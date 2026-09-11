@@ -30,6 +30,7 @@ vi.mock('../../../config/ProjectSettingsProvider', async () => {
       openCreateProjectDialog: projectSettings.openCreateProjectDialog,
       openEditProjectDialog: projectSettings.openEditProjectDialog,
       showProjectInFolder: vi.fn(),
+      showProjectFolder: vi.fn(),
       togglePinProject: vi.fn()
     })
   }
