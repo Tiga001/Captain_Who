@@ -1,13 +1,20 @@
-import { describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { userEvent } from 'vitest/browser'
 import { render } from 'vitest-browser-react'
 import type { StorageProjectFolderPick } from '@mycopilot/protocol'
+import { getFrontendCssVariables } from '../../../config/frontendConfig'
 import { getTranslation, type TranslationKey } from '../../../config/frontendTranslations'
 import { ProjectValidationError } from '../projectValidationError'
 import { ProjectFormDialog, type ProjectFormValues } from '../ProjectFormDialog'
 import '../../../styles/global.css'
 
 const t = (key: TranslationKey) => getTranslation('en-US', key)
+
+beforeEach(() => {
+  for (const [key, value] of Object.entries(getFrontendCssVariables())) {
+    document.documentElement.style.setProperty(key, value)
+  }
+})
 
 function pickQueue(picks: (StorageProjectFolderPick | null)[]) {
   const remaining = [...picks]
@@ -38,10 +45,18 @@ describe('ProjectFormDialog', () => {
 
     const create = screen.getByRole('button', { name: 'Create', exact: true })
     await expect.element(create).toBeDisabled()
+    await expect.element(screen.getByRole('button', { name: 'Add folder' })).toBeVisible()
+    expect(document.querySelectorAll('.project-form-dialog__folder')).toHaveLength(0)
+    expect(document.querySelector('.project-form-dialog__label')?.textContent).toBe(
+      'Source folders'
+    )
 
     await screen.getByRole('button', { name: 'Add folder' }).click()
     await expect.element(screen.getByRole('textbox', { name: 'Project name' })).toHaveValue('app')
     await expect.element(screen.getByText('Primary', { exact: true })).toBeVisible()
+    expect(document.querySelector('.project-form-dialog')?.textContent).not.toContain(
+      '/workspace/app'
+    )
 
     await screen.getByRole('button', { name: 'Add folder' }).click()
     await expect.element(screen.getByRole('button', { name: 'Make primary docs' })).toBeVisible()

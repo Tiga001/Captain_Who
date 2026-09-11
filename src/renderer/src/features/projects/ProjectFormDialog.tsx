@@ -1,4 +1,4 @@
-import { Folder, Plus, X } from 'lucide-react'
+import { Folder, FolderPlus, X } from 'lucide-react'
 import { useEffect, useId, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import type { StorageProjectFolderPick, StorageProjectValidationCode } from '@mycopilot/protocol'
@@ -209,43 +209,37 @@ export function ProjectFormDialog({
           {mode === 'create' ? t('project.createTitle') : t('project.editTitle')}
         </h2>
 
-        <label className="project-form-dialog__label" htmlFor={nameInputId}>
-          {t('project.nameLabel')}
-        </label>
-        <input
-          ref={nameInputRef}
-          id={nameInputId}
-          className="app-confirm-dialog__input project-form-dialog__name"
-          placeholder={t('project.namePlaceholder')}
-          value={name}
-          disabled={isBusy}
-          onChange={(event) => {
-            setError(null)
-            setName(event.target.value)
-          }}
-        />
-
-        <div className="project-form-dialog__folders-header">
-          <span className="project-form-dialog__label" id={foldersHeadingId}>
-            {t('project.foldersLabel')}
+        <div className="project-form-dialog__name-field">
+          <span className="project-form-dialog__name-icon" aria-hidden="true">
+            <Folder />
           </span>
-          <p className="project-form-dialog__hint">{t('project.foldersDescription')}</p>
+          <input
+            ref={nameInputRef}
+            id={nameInputId}
+            className="app-confirm-dialog__input project-form-dialog__name"
+            aria-label={t('project.nameLabel')}
+            placeholder={t('project.namePlaceholder')}
+            value={name}
+            disabled={isBusy}
+            onChange={(event) => {
+              setError(null)
+              setName(event.target.value)
+            }}
+          />
         </div>
+
+        <span className="project-form-dialog__label" id={foldersHeadingId}>
+          {t('project.foldersLabel')}
+        </span>
         <ul className="project-form-dialog__folders" aria-labelledby={foldersHeadingId}>
-          {folders.length === 0 && (
-            <li className="project-form-dialog__empty">{t('project.noFolders')}</li>
-          )}
           {folders.map((folder, index) => {
             const displayName = projectFolderDisplayName(folder.path)
             return (
               <li className="project-form-dialog__folder" key={folder.id ?? folder.path}>
                 <Folder aria-hidden="true" />
-                <div className="project-form-dialog__folder-text">
-                  <span className="project-form-dialog__folder-name">{displayName}</span>
-                  <span className="project-form-dialog__folder-path" title={folder.path}>
-                    {folder.path}
-                  </span>
-                </div>
+                <span className="project-form-dialog__folder-name" title={folder.path}>
+                  {displayName}
+                </span>
                 {folder.role === 'primary' ? (
                   <span className="project-form-dialog__badge">{t('project.primaryFolder')}</span>
                 ) : (
@@ -271,16 +265,18 @@ export function ProjectFormDialog({
               </li>
             )
           })}
+          <li className="project-form-dialog__add-row">
+            <button
+              className="project-form-dialog__add-folder"
+              type="button"
+              disabled={isBusy || folders.length >= MAX_PROJECT_FOLDERS}
+              onClick={() => void addFolder()}
+            >
+              <FolderPlus aria-hidden="true" />
+              <span>{t('project.addFolder')}</span>
+            </button>
+          </li>
         </ul>
-        <button
-          className="project-form-dialog__add-folder"
-          type="button"
-          disabled={isBusy || folders.length >= MAX_PROJECT_FOLDERS}
-          onClick={() => void addFolder()}
-        >
-          <Plus aria-hidden="true" />
-          <span>{t('project.addFolder')}</span>
-        </button>
 
         {error && (
           <p className="project-form-dialog__error" id={errorId} role="alert">
@@ -291,7 +287,7 @@ export function ProjectFormDialog({
         <div className="app-confirm-dialog__actions project-form-dialog__actions">
           {mode === 'edit' && onRemoveProject && (
             <button
-              className="app-confirm-dialog__button project-form-dialog__remove-project"
+              className="app-confirm-dialog__button app-confirm-dialog__button--danger project-form-dialog__remove-project"
               type="button"
               disabled={isBusy}
               onClick={onRemoveProject}

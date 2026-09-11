@@ -1,6 +1,7 @@
 import { Check, ChevronDown } from 'lucide-react'
 import { useCallback, useEffect, useId, useRef, useState } from 'react'
 import type { FocusEvent, KeyboardEvent, ReactNode } from 'react'
+import { AnchoredPopover } from '../../../components/overlay/AnchoredPopover'
 import { useDismissOnOutsidePointer } from '../../../hooks/useDismissOnOutsidePointer'
 import './SettingsSelect.css'
 
@@ -34,6 +35,7 @@ export function SettingsSelect<Value extends string>({
   const [isOpen, setOpen] = useState(false)
   const rootRef = useRef<HTMLSpanElement>(null)
   const triggerRef = useRef<HTMLButtonElement>(null)
+  const popoverRef = useRef<HTMLDivElement>(null)
   const optionRefs = useRef<Array<HTMLButtonElement | null>>([])
   const listboxId = useId()
   const selectedIndex = Math.max(
@@ -43,7 +45,9 @@ export function SettingsSelect<Value extends string>({
   const selectedOption = options[selectedIndex]
   const closeMenu = useCallback(() => setOpen(false), [])
 
-  useDismissOnOutsidePointer(rootRef, isOpen, closeMenu)
+  useDismissOnOutsidePointer(rootRef, isOpen, closeMenu, (target) =>
+    Boolean(popoverRef.current?.contains(target))
+  )
 
   useEffect(() => {
     if (disabled) closeMenu()
@@ -78,7 +82,14 @@ export function SettingsSelect<Value extends string>({
   }
 
   const handleBlur = (event: FocusEvent<HTMLSpanElement>) => {
-    if (!event.currentTarget.contains(event.relatedTarget)) closeMenu()
+    const next = event.relatedTarget
+    if (
+      next instanceof Node &&
+      (event.currentTarget.contains(next) || popoverRef.current?.contains(next))
+    ) {
+      return
+    }
+    closeMenu()
   }
 
   const handleTriggerKeyDown = (event: KeyboardEvent<HTMLButtonElement>) => {
@@ -114,6 +125,9 @@ export function SettingsSelect<Value extends string>({
     } else if (event.key === 'End') {
       event.preventDefault()
       focusOption(options.length - 1, -1)
+    } else if (event.key === 'Tab') {
+      event.preventDefault()
+      focusOption(index + (event.shiftKey ? -1 : 1), event.shiftKey ? -1 : 1)
     } else if (event.key === 'Escape') {
       event.preventDefault()
       closeMenuAndRestoreFocus()
@@ -151,37 +165,47 @@ export function SettingsSelect<Value extends string>({
       </button>
 
       {isOpen && (
-        <span
-          aria-label={ariaLabel}
-          className="settings-select__menu"
-          id={listboxId}
-          role="listbox"
+        <AnchoredPopover
+          align="end"
+          anchorRef={triggerRef}
+          className={['settings-select__popover', className].filter(Boolean).join(' ')}
+          enabled
+          matchAnchorWidth
+          onClose={closeMenu}
+          popoverRef={popoverRef}
         >
-          {options.map((option, index) => {
-            const isSelected = option.value === selectedOption.value
-            return (
-              <button
-                aria-disabled={option.disabled || undefined}
-                aria-selected={isSelected}
-                className="settings-select__option"
-                data-selected={isSelected || undefined}
-                disabled={option.disabled}
-                key={option.value}
-                onClick={() => selectOption(option)}
-                onKeyDown={(event) => handleOptionKeyDown(event, index)}
-                ref={(node) => {
-                  optionRefs.current[index] = node
-                }}
-                role="option"
-                tabIndex={!option.disabled && isSelected ? 0 : -1}
-                type="button"
-              >
-                <span className="settings-select__option-label">{option.label}</span>
-                {isSelected && <Check aria-hidden="true" />}
-              </button>
-            )
-          })}
-        </span>
+          <span
+            aria-label={ariaLabel}
+            className={['settings-select__menu', className].filter(Boolean).join(' ')}
+            id={listboxId}
+            role="listbox"
+          >
+            {options.map((option, index) => {
+              const isSelected = option.value === selectedOption.value
+              return (
+                <button
+                  aria-disabled={option.disabled || undefined}
+                  aria-selected={isSelected}
+                  className="settings-select__option"
+                  data-selected={isSelected || undefined}
+                  disabled={option.disabled}
+                  key={option.value}
+                  onClick={() => selectOption(option)}
+                  onKeyDown={(event) => handleOptionKeyDown(event, index)}
+                  ref={(node) => {
+                    optionRefs.current[index] = node
+                  }}
+                  role="option"
+                  tabIndex={!option.disabled && isSelected ? 0 : -1}
+                  type="button"
+                >
+                  <span className="settings-select__option-label">{option.label}</span>
+                  {isSelected && <Check aria-hidden="true" />}
+                </button>
+              )
+            })}
+          </span>
+        </AnchoredPopover>
       )}
     </span>
   )

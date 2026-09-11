@@ -606,9 +606,7 @@ describe('MCP and Browser settings pages', () => {
         name: 'mcp.browserData.linkTarget: mcp.browserData.systemBrowser'
       })
       .click()
-    const browserTargetMenu = screen.container.querySelector<HTMLElement>(
-      '.browser-link-target-select .settings-select__menu'
-    )
+    const browserTargetMenu = document.querySelector<HTMLElement>('.settings-select__menu')
     expect(browserTargetMenu).not.toBeNull()
     expect(browserTargetMenu!.getBoundingClientRect().width).toBeGreaterThanOrEqual(239)
 

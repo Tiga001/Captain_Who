@@ -165,9 +165,6 @@ export const enUSTranslations = {
   'project.nameLabel': 'Project name',
   'project.namePlaceholder': 'Name this project',
   'project.foldersLabel': 'Source folders',
-  'project.foldersDescription':
-    'The primary folder is the working directory. Other folders are available alongside it.',
-  'project.noFolders': 'No folders yet. Add at least one folder to create the project.',
   'project.primaryFolder': 'Primary',
   'project.setPrimaryFolder': 'Make primary',
   'project.removeFolder': 'Remove folder',
@@ -1039,6 +1036,7 @@ export const enUSTranslations = {
   'archive.allProjects': 'All projects',
   'archive.noProject': 'No project',
   'archive.empty': 'No archived chats',
+  'archive.groupCount': '{count} chats',
   'archive.deleteConversation': 'Delete chat',
   'archive.deleteConfirmTitle': 'Delete archived chat?',
   'archive.deleteConfirmDescription': 'This will permanently delete this archived chat.',

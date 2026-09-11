@@ -163,9 +163,6 @@ export const koKRTranslations = {
   'project.nameLabel': '프로젝트 이름',
   'project.namePlaceholder': '프로젝트 이름을 입력하세요',
   'project.foldersLabel': '소스 폴더',
-  'project.foldersDescription':
-    '기본 폴더가 작업 디렉터리입니다. 다른 폴더도 함께 사용할 수 있습니다.',
-  'project.noFolders': '폴더가 없습니다. 프로젝트를 만들려면 폴더를 하나 이상 추가하세요.',
   'project.primaryFolder': '기본',
   'project.setPrimaryFolder': '기본으로 설정',
   'project.removeFolder': '폴더 제거',
@@ -1024,6 +1021,7 @@ export const koKRTranslations = {
   'archive.allProjects': '모든 프로젝트',
   'archive.noProject': '프로젝트 없음',
   'archive.empty': '보관된 채팅 없음',
+  'archive.groupCount': '채팅 {count}개',
   'archive.deleteConversation': '채팅 삭제',
   'archive.deleteConfirmTitle': '보관된 채팅을 삭제하시겠습니까?',
   'archive.deleteConfirmDescription': '보관된 채팅이 영구적으로 삭제됩니다.',

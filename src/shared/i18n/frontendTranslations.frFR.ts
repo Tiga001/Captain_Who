@@ -164,9 +164,6 @@ export const frFRTranslations = {
   'project.nameLabel': 'Nom du projet',
   'project.namePlaceholder': 'Nommez ce projet',
   'project.foldersLabel': 'Dossiers sources',
-  'project.foldersDescription':
-    'Le dossier principal est le répertoire de travail. Les autres dossiers sont disponibles avec lui.',
-  'project.noFolders': 'Aucun dossier. Ajoutez au moins un dossier pour créer le projet.',
   'project.primaryFolder': 'Principal',
   'project.setPrimaryFolder': 'Définir comme principal',
   'project.removeFolder': 'Retirer le dossier',
@@ -1067,6 +1064,7 @@ export const frFRTranslations = {
   'archive.allProjects': 'Tous les projets',
   'archive.noProject': 'Aucun projet',
   'archive.empty': 'Aucune discussion archivée',
+  'archive.groupCount': '{count} discussions',
   'archive.deleteConversation': 'Supprimer le chat',
   'archive.deleteConfirmTitle': 'Supprimer le chat archivé ?',
   'archive.deleteConfirmDescription': 'Cela supprimera définitivement cette discussion archivée.',

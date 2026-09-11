@@ -472,7 +472,7 @@ describe('ModelForm vendor controls', () => {
       .click()
     const labels = Array.from(
       document.querySelectorAll<HTMLElement>(
-        '.model-provider-profile-select .settings-select__option-label'
+        '.settings-select__menu .settings-select__option-label'
       )
     ).map((option) => option.textContent)
     expect(labels).toEqual([

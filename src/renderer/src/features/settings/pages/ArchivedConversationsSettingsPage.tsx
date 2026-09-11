@@ -13,8 +13,7 @@ import { useFrontendConfig } from '../../../config/FrontendConfigProvider'
 import type { AppLanguage } from '../../../config/frontendTranslations'
 import type { AppProject } from '../../../config/projectConfig'
 import type { ChatConversation } from '../../chat/chatTypes'
-import { SettingsSelect } from '../components/SettingsSelect'
-import type { SettingsSelectOption } from '../components/SettingsSelect'
+import { SettingsSelect, type SettingsSelectOption } from '../components/SettingsSelect'
 import './ArchivedConversationsSettingsPage.css'
 
 interface ArchivedConversationsSettingsPageProps {
@@ -30,6 +29,12 @@ type PendingDeleteConfirmation =
   | { conversationId: string; type: 'single' }
   | { conversationIds: string[]; type: 'all' }
   | { conversationIds: string[]; scopeName: string; type: 'filtered' }
+
+interface ArchivedConversationGroup {
+  key: string
+  name: string
+  conversations: ChatConversation[]
+}
 
 const archivedDateFormatters = new Map<AppLanguage, Intl.DateTimeFormat>()
 
@@ -65,6 +70,30 @@ function getProjectFilterName(
   return projects.find((project) => project.id === projectFilter)?.name ?? noProjectLabel
 }
 
+function groupArchivedConversations(
+  conversations: ChatConversation[],
+  projects: AppProject[],
+  noProjectLabel: string
+): ArchivedConversationGroup[] {
+  const groups: ArchivedConversationGroup[] = []
+  const indexByKey = new Map<string, number>()
+  for (const conversation of conversations) {
+    const key = conversation.projectId ?? 'none'
+    let index = indexByKey.get(key)
+    if (index === undefined) {
+      index = groups.length
+      indexByKey.set(key, index)
+      groups.push({
+        key,
+        name: getProjectName(conversation.projectId, projects, noProjectLabel),
+        conversations: []
+      })
+    }
+    groups[index].conversations.push(conversation)
+  }
+  return groups
+}
+
 export function ArchivedConversationsSettingsPage({
   conversations,
   onDeleteArchivedConversations,
@@ -91,11 +120,19 @@ export function ArchivedConversationsSettingsPage({
         .sort((a, b) => (b.archivedAt ?? b.updatedAt) - (a.archivedAt ?? a.updatedAt)),
     [conversations]
   )
-  const filteredConversations = archivedConversations.filter((conversation) => {
-    if (projectFilter === 'all') return true
-    if (projectFilter === 'none') return !conversation.projectId
-    return conversation.projectId === projectFilter
-  })
+  const filteredConversations = useMemo(
+    () =>
+      archivedConversations.filter((conversation) => {
+        if (projectFilter === 'all') return true
+        if (projectFilter === 'none') return !conversation.projectId
+        return conversation.projectId === projectFilter
+      }),
+    [archivedConversations, projectFilter]
+  )
+  const conversationGroups = useMemo(
+    () => groupArchivedConversations(filteredConversations, projects, t('archive.noProject')),
+    [filteredConversations, projects, t]
+  )
   const pendingDeleteTitle =
     pendingDeleteConfirmation?.type === 'filtered'
       ? t('archive.deleteFilteredConfirmTitle').replace(
@@ -149,76 +186,82 @@ export function ArchivedConversationsSettingsPage({
         ))}
       </div>
 
-      <section
-        className="archived-conversations-panel"
-        aria-label={t('settings.page.archivedConversations')}
-      >
-        {renderSettingsNodes(archiveProjectFilterSettings, (node) => (
-          <div className="archived-conversations-panel__toolbar">
-            <SettingsSelect
-              ariaLabel={settingLabel(node, t)}
-              className="archived-conversations-project-filter"
-              leadingIcon={<Folder />}
-              onChange={setProjectFilter}
-              options={projectFilterOptions}
-              value={projectFilter}
-            />
+      {renderSettingsNodes(archiveProjectFilterSettings, (node) => (
+        <div className="archived-conversations-page__toolbar">
+          <SettingsSelect
+            ariaLabel={settingLabel(node, t)}
+            className="archived-conversations-project-filter"
+            leadingIcon={<Folder />}
+            onChange={setProjectFilter}
+            options={projectFilterOptions}
+            value={projectFilter}
+          />
+        </div>
+      ))}
+
+      {renderSettingsNodes(archiveConversationListSettings, () =>
+        filteredConversations.length === 0 ? (
+          <div className="archived-conversations-empty">
+            <Archive aria-hidden="true" />
+            <span>{t('archive.empty')}</span>
           </div>
-        ))}
-
-        {renderSettingsNodes(archiveConversationListSettings, () => (
-          <div className="archived-conversations-list">
-            {filteredConversations.length === 0 ? (
-              <div className="archived-conversations-empty">
-                <Archive aria-hidden="true" />
-                <span>{t('archive.empty')}</span>
-              </div>
-            ) : (
-              filteredConversations.map((conversation) => (
-                <div className="archived-conversation-row" key={conversation.id}>
-                  <div className="archived-conversation-row__main">
-                    <strong>{conversation.title}</strong>
-                    <span>
-                      {formatArchivedDate(conversation.updatedAt, language)}
-                      {' · '}
-                      {getProjectName(conversation.projectId, projects, t('archive.noProject'))}
-                    </span>
-                  </div>
-
-                  <div className="archived-conversation-row__actions">
-                    {renderSettingsNodes(archiveConversationDeleteSettings, (item) => (
-                      <button
-                        className="archived-conversation-row__icon-button"
-                        type="button"
-                        aria-label={settingLabel(item, t)}
-                        title={settingLabel(item, t)}
-                        onClick={() =>
-                          setPendingDeleteConfirmation({
-                            conversationId: conversation.id,
-                            type: 'single'
-                          })
-                        }
-                      >
-                        <Trash2 aria-hidden="true" />
-                      </button>
-                    ))}
-                    {renderSettingsNodes(archiveConversationRestoreSettings, (item) => (
-                      <button
-                        className="archived-conversation-row__restore-button"
-                        type="button"
-                        onClick={() => onUnarchiveConversation(conversation.id)}
-                      >
-                        <RotateCcw aria-hidden="true" />
-                        <span>{settingLabel(item, t)}</span>
-                      </button>
-                    ))}
-                  </div>
+        ) : (
+          <div className="archived-conversations-groups">
+            {conversationGroups.map((group) => (
+              <section className="archived-conversations-group" key={group.key}>
+                <div className="archived-conversations-group__header">
+                  <h2 className="archived-conversations-group__title">
+                    <Folder aria-hidden="true" />
+                    {group.name}
+                  </h2>
+                  <span className="archived-conversations-group__count">
+                    {t('archive.groupCount').replace('{count}', String(group.conversations.length))}
+                  </span>
                 </div>
-              ))
-            )}
+                <div className="archived-conversations-list">
+                  {group.conversations.map((conversation) => (
+                    <div className="archived-conversation-row" key={conversation.id}>
+                      <div className="archived-conversation-row__main">
+                        <strong>{conversation.title}</strong>
+                        <span>{formatArchivedDate(conversation.updatedAt, language)}</span>
+                      </div>
+
+                      <div className="archived-conversation-row__actions">
+                        {renderSettingsNodes(archiveConversationDeleteSettings, (item) => (
+                          <button
+                            className="archived-conversation-row__icon-button"
+                            type="button"
+                            aria-label={settingLabel(item, t)}
+                            title={settingLabel(item, t)}
+                            onClick={() =>
+                              setPendingDeleteConfirmation({
+                                conversationId: conversation.id,
+                                type: 'single'
+                              })
+                            }
+                          >
+                            <Trash2 aria-hidden="true" />
+                          </button>
+                        ))}
+                        {renderSettingsNodes(archiveConversationRestoreSettings, (item) => (
+                          <button
+                            className="archived-conversation-row__restore-button"
+                            type="button"
+                            onClick={() => onUnarchiveConversation(conversation.id)}
+                          >
+                            <RotateCcw aria-hidden="true" />
+                            <span>{settingLabel(item, t)}</span>
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </section>
+            ))}
           </div>
-        ))}
-      </section>
+        )
+      )}
 
       {pendingDeleteConfirmation && (
         <ConfirmationDialog

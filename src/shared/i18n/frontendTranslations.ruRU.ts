@@ -164,9 +164,6 @@ export const ruRUTranslations = {
   'project.nameLabel': 'Название проекта',
   'project.namePlaceholder': 'Назовите проект',
   'project.foldersLabel': 'Исходные папки',
-  'project.foldersDescription':
-    'Основная папка является рабочим каталогом. Остальные папки доступны вместе с ней.',
-  'project.noFolders': 'Папок пока нет. Добавьте хотя бы одну папку, чтобы создать проект.',
   'project.primaryFolder': 'Основная',
   'project.setPrimaryFolder': 'Сделать основной',
   'project.removeFolder': 'Удалить папку',
@@ -1052,6 +1049,7 @@ export const ruRUTranslations = {
   'archive.allProjects': 'Все проекты',
   'archive.noProject': 'Нет проекта',
   'archive.empty': 'Нет архивированных чатов',
+  'archive.groupCount': '{count} чатов',
   'archive.deleteConversation': 'Удалить чат',
   'archive.deleteConfirmTitle': 'Удалить архивированный чат?',
   'archive.deleteConfirmDescription':

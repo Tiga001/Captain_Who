@@ -164,10 +164,6 @@ export const jaJPTranslations = {
   'project.nameLabel': 'プロジェクト名',
   'project.namePlaceholder': 'プロジェクトに名前を付ける',
   'project.foldersLabel': 'ソースフォルダ',
-  'project.foldersDescription':
-    'プライマリフォルダが作業ディレクトリになります。他のフォルダも一緒に利用できます。',
-  'project.noFolders':
-    'フォルダがありません。プロジェクトを作成するには少なくとも 1 つ追加してください。',
   'project.primaryFolder': 'プライマリ',
   'project.setPrimaryFolder': 'プライマリにする',
   'project.removeFolder': 'フォルダを削除',
@@ -1051,6 +1047,7 @@ export const jaJPTranslations = {
   'archive.allProjects': 'すべてのプロジェクト',
   'archive.noProject': 'プロジェクトがありません',
   'archive.empty': 'アーカイブされたチャットはありません',
+  'archive.groupCount': '{count} 件のチャット',
   'archive.deleteConversation': 'チャットを削除する',
   'archive.deleteConfirmTitle': 'アーカイブされたチャットを削除しますか?',
   'archive.deleteConfirmDescription':

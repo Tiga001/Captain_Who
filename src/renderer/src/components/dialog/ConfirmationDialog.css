@@ -11,11 +11,11 @@
 .app-confirm-dialog__card {
   position: relative;
   display: grid;
-  width: min(560px, calc(100vw - 64px));
+  width: min(440px, calc(100vw - 64px));
   max-height: calc(100vh - 64px);
   overflow: auto;
-  padding: 26px 28px 24px;
-  gap: 9px;
+  padding: 20px 20px 16px;
+  gap: 10px;
   color: var(--mc-color-sidebar-text-secondary);
   background: var(--mc-color-surface-glass-strong);
   border: 1px solid var(--mc-color-border-hairline);
@@ -28,7 +28,7 @@
   margin: 0;
   padding-right: 36px;
   color: var(--mc-color-sidebar-text-secondary);
-  font-size: var(--mc-font-size-dialog-title);
+  font-size: var(--mc-font-size-3xl);
   font-weight: var(--mc-font-weight-display);
   letter-spacing: 0;
   line-height: var(--mc-line-height-compact);
@@ -39,18 +39,18 @@
   color: var(--mc-color-text-muted);
   font-size: var(--mc-font-size-base);
   font-weight: var(--mc-font-weight-medium);
-  line-height: var(--mc-line-height-relaxed);
+  line-height: var(--mc-line-height-normal);
 }
 
 .app-confirm-dialog__input {
   width: 100%;
-  height: 46px;
-  margin-top: 8px;
-  padding: 0 14px;
+  height: 38px;
+  margin-top: 0;
+  padding: 0 12px;
   color: var(--mc-color-sidebar-text-secondary);
   background: var(--mc-color-surface-glass-input);
   border: 1px solid var(--mc-color-border-subtle);
-  border-radius: var(--mc-radius-row);
+  border-radius: var(--mc-radius-md);
   font: inherit;
   font-size: var(--mc-font-size-base);
   font-weight: var(--mc-font-weight-medium);
@@ -64,8 +64,8 @@
 
 .app-confirm-dialog__close {
   position: absolute;
-  top: 18px;
-  right: 20px;
+  top: 14px;
+  right: 14px;
   display: grid;
   width: 28px;
   height: 28px;
@@ -97,18 +97,18 @@
 .app-confirm-dialog__actions {
   display: flex;
   justify-content: flex-end;
-  margin-top: 18px;
-  gap: 14px;
+  margin-top: 8px;
+  gap: 8px;
 }
 
 .app-confirm-dialog__button {
-  min-width: 76px;
-  height: 42px;
-  padding: 0 21px;
+  min-width: 64px;
+  height: 34px;
+  padding: 0 12px;
   border: 0;
   border-radius: var(--mc-radius-row);
   font: inherit;
-  font-size: var(--mc-font-size-base);
+  font-size: var(--mc-font-size-sm);
   font-weight: var(--mc-font-weight-display);
   cursor: pointer;
 }

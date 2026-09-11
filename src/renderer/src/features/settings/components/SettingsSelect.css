@@ -78,14 +78,17 @@
   white-space: nowrap;
 }
 
+.settings-select__popover.mc-anchored-popover {
+  z-index: 12000;
+  overflow: auto;
+  background: transparent;
+  border: 0;
+  border-radius: var(--mc-radius-card);
+}
+
 .settings-select__menu {
-  position: absolute;
-  z-index: 80;
-  top: calc(100% + 6px);
-  right: 0;
   display: grid;
   width: 100%;
-  max-height: min(280px, calc(100vh - 96px));
   overflow: auto;
   padding: 6px;
   background: var(--mc-color-surface-popover);

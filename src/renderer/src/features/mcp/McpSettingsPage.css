@@ -754,13 +754,12 @@
   width: 100%;
 }
 
-.browser-link-target-select .settings-select__menu {
-  width: max-content;
+.settings-select__popover.browser-link-target-select {
   min-width: min(240px, calc(100vw - 32px));
   max-width: min(320px, calc(100vw - 32px));
 }
 
-.browser-link-target-select .settings-select__option-label {
+.settings-select__menu.browser-link-target-select .settings-select__option-label {
   overflow: visible;
   text-overflow: clip;
 }

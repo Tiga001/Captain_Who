@@ -164,9 +164,6 @@ export const itITTranslations = {
   'project.nameLabel': 'Nome del progetto',
   'project.namePlaceholder': 'Dai un nome al progetto',
   'project.foldersLabel': 'Cartelle sorgente',
-  'project.foldersDescription':
-    'La cartella principale è la directory di lavoro. Le altre cartelle sono disponibili insieme a essa.',
-  'project.noFolders': 'Nessuna cartella. Aggiungi almeno una cartella per creare il progetto.',
   'project.primaryFolder': 'Principale',
   'project.setPrimaryFolder': 'Imposta come principale',
   'project.removeFolder': 'Rimuovi cartella',
@@ -1060,6 +1057,7 @@ export const itITTranslations = {
   'archive.allProjects': 'Tutti i progetti',
   'archive.noProject': 'Nessun progetto',
   'archive.empty': 'Nessuna chat archiviata',
+  'archive.groupCount': '{count} chat',
   'archive.deleteConversation': 'Elimina la chat',
   'archive.deleteConfirmTitle': 'Eliminare la chat archiviata?',
   'archive.deleteConfirmDescription': 'Ciò eliminerà permanentemente questa chat archiviata.',

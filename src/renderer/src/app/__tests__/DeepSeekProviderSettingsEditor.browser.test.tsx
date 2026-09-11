@@ -95,10 +95,15 @@ describe('DeepSeekProviderSettingsEditor', () => {
     })
 
     await effort.click()
+    const effortMenu = document.querySelector('.settings-select__menu')
+    expect(effortMenu).not.toBeNull()
+    expect(document.querySelector('.provider-settings-dialog__card')?.contains(effortMenu)).toBe(
+      false
+    )
     expect(
       Array.from(
         document.querySelectorAll<HTMLElement>(
-          '.provider-settings-dialog__select .settings-select__option-label'
+          '.settings-select__menu .settings-select__option-label'
         )
       ).map((option) => option.textContent)
     ).toEqual([
@@ -117,7 +122,7 @@ describe('DeepSeekProviderSettingsEditor', () => {
     expect(
       Array.from(
         document.querySelectorAll<HTMLElement>(
-          '.provider-settings-dialog__select .settings-select__option-label'
+          '.settings-select__menu .settings-select__option-label'
         )
       ).map((option) => option.textContent)
     ).toEqual([
@@ -271,7 +276,7 @@ describe('MoonshotProviderSettingsEditor', () => {
     expect(
       Array.from(
         document.querySelectorAll<HTMLElement>(
-          '.provider-settings-dialog__select .settings-select__option-label'
+          '.settings-select__menu .settings-select__option-label'
         )
       ).map((option) => option.textContent)
     ).toEqual([
@@ -340,7 +345,7 @@ describe('MoonshotProviderSettingsEditor', () => {
     expect(
       Array.from(
         document.querySelectorAll<HTMLElement>(
-          '.provider-settings-dialog__select .settings-select__option-label'
+          '.settings-select__menu .settings-select__option-label'
         )
       ).map((option) => option.textContent)
     ).toEqual([
@@ -421,11 +426,11 @@ describe('ProviderSettingsDialogShell parity', () => {
     expect(geometry(cards[0]!)).toEqual(geometry(cards[1]!))
     expect(geometry(cards[0]!)).toMatchObject({
       display: 'grid',
-      gap: '14px',
-      paddingBottom: '24px',
-      paddingLeft: '28px',
-      paddingRight: '28px',
-      paddingTop: '26px',
+      gap: '10px',
+      paddingBottom: '16px',
+      paddingLeft: '20px',
+      paddingRight: '20px',
+      paddingTop: '20px',
       position: 'relative',
       width: `${Math.min(500, window.innerWidth - 48)}px`
     })
