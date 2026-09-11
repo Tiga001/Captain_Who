@@ -8,6 +8,8 @@ import {
   parseProviderProfileUiDescriptors,
   parseStorageModelSettingsRecord,
   parseStorageModelSettingsUpdateRecord,
+  parseStorageProjectCreateInput,
+  parseStorageProjectUpdateInput,
   type StorageModelSettingsRecord
 } from '@mycopilot/protocol'
 
@@ -50,7 +52,17 @@ export function createStorageIpcBridge(ipcRenderer: StorageIpcRenderer): Storage
     saveAgentPromptPreferences: (preferences) =>
       ipcRenderer.invoke(HOST_CHANNELS.storage.saveAgentPromptPreferences, preferences),
     loadProjects: () => ipcRenderer.invoke(HOST_CHANNELS.storage.loadProjects),
-    selectProjectDirectory: () => ipcRenderer.invoke(HOST_CHANNELS.storage.selectProjectDirectory),
+    pickProjectFolder: () => ipcRenderer.invoke(HOST_CHANNELS.storage.pickProjectFolder),
+    createProject: (input) =>
+      ipcRenderer.invoke(
+        HOST_CHANNELS.storage.createProject,
+        parseStorageProjectCreateInput(input)
+      ),
+    updateProject: (input) =>
+      ipcRenderer.invoke(
+        HOST_CHANNELS.storage.updateProject,
+        parseStorageProjectUpdateInput(input)
+      ),
     saveProject: (project) => ipcRenderer.invoke(HOST_CHANNELS.storage.saveProject, project),
     deleteProject: (projectId) =>
       ipcRenderer.invoke(HOST_CHANNELS.storage.deleteProject, projectId),

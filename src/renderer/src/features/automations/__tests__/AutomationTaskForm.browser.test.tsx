@@ -10,6 +10,7 @@ import {
   testConversation,
   testModel
 } from './automationUiFixtures'
+import { singleFolderProject } from '../../projects/__tests__/projectFixtures'
 import '../ScheduledPage.css'
 
 vi.mock('../../../config/FrontendConfigProvider', () => ({
@@ -25,7 +26,7 @@ const commonProps = {
   onSubmittingChange: vi.fn(),
   onSubmit: vi.fn(async () => undefined),
   permissionModeAvailability: { custom: true, full: true },
-  projects: [{ id: 'project-1', name: 'Project One', createdAt: 1 }]
+  projects: [singleFolderProject({ id: 'project-1', name: 'Project One' })]
 }
 
 function CustomScheduleHarness() {
@@ -106,7 +107,7 @@ describe('AutomationTaskForm', () => {
             }
           }}
           mode="create"
-          projects={[{ id: 'project-long', name: longProjectName, createdAt: 1 }]}
+          projects={[singleFolderProject({ id: 'project-long', name: longProjectName })]}
         />
       </div>
     )

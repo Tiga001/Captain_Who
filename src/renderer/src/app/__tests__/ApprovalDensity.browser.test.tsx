@@ -29,7 +29,7 @@ vi.mock('../../config/ModelSettingsProvider', () => ({
   useModelSettings: () => ({ enabledModels: [] })
 }))
 vi.mock('../../config/ProjectSettingsProvider', () => ({
-  useProjectSettings: () => ({ projects: [], selectProjectDirectory: vi.fn() })
+  useProjectSettings: () => ({ projects: [], openCreateProjectDialog: vi.fn(async () => null) })
 }))
 vi.mock('../../features/chat/components/ImagePreview', () => ({
   useImagePreview: () => vi.fn(),

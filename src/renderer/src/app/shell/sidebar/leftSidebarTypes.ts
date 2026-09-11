@@ -1,4 +1,5 @@
 import type { AppProject } from '../../../config/projectConfig'
+import type { ProjectEditDialogResult } from '../../../config/ProjectSettingsProvider'
 import type { ChatConversation } from '../../../features/chat/chatTypes'
 import type { UiPreferencesSnapshot } from '../../../features/storage/storageClient'
 
@@ -44,6 +45,8 @@ export interface LeftSidebarProps {
   onArchiveAllRootConversations: () => void
   onArchiveConversation: (conversationId: string) => void
   onArchiveProjectConversations: (projectId: string) => void
+  /** Opens the project editor; `remove-requested` hands off to the sidebar's removal confirm. */
+  onEditProject: (projectId: string) => Promise<ProjectEditDialogResult>
   onMarkConversationUnread: (conversationId: string) => void
   onNewConversation: (projectId?: string | null) => void
   onNewProject: () => Promise<AppProject | null>
@@ -51,7 +54,6 @@ export interface LeftSidebarProps {
   onRemoveProject: (projectId: string) => Promise<boolean>
   onRequestRenameConversation?: (conversationId: string) => void
   onRenameConversation: (conversationId: string, title: string) => void
-  onRenameProject: (projectId: string, name: string) => void
   onOpenScheduled: () => void
   onSelectConversation: (conversationId: string, messageId?: string | null) => void
   onShowProjectInFolder: (projectId: string) => void

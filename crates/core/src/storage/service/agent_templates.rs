@@ -257,13 +257,11 @@ mod tests {
             let service = StorageService::open(&directory.path().join("storage.sqlite")).unwrap();
             for project_id in ["project-a", "project-b"] {
                 service
-                    .save_project(ProjectRecord {
-                        id: project_id.to_string(),
-                        name: project_id.to_string(),
-                        path: None,
-                        created_at: 1,
-                        pinned_at: None,
-                    })
+                    .save_project(ProjectRecord::without_folders(
+                        project_id.to_string(),
+                        project_id.to_string(),
+                        1,
+                    ))
                     .unwrap();
             }
             Self {

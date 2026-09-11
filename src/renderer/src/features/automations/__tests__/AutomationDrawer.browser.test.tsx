@@ -9,6 +9,7 @@ import {
   testConversation,
   testModel
 } from './automationUiFixtures'
+import { singleFolderProject } from '../../projects/__tests__/projectFixtures'
 import '../ScheduledPage.css'
 
 vi.mock('../../../config/FrontendConfigProvider', () => ({
@@ -39,7 +40,7 @@ const commonProps = {
   onSubmit: vi.fn(async () => undefined),
   onToggleMaximized: vi.fn(),
   permissionModeAvailability: { custom: true, full: true },
-  projects: [{ id: 'project-1', name: 'Project One', createdAt: 1 }],
+  projects: [singleFolderProject({ id: 'project-1', name: 'Project One' })],
   runs: []
 }
 

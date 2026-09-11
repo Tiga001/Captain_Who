@@ -342,13 +342,12 @@ fn skills_list_resolves_the_project_and_returns_camel_case_catalog() {
     .unwrap();
     let storage = Arc::new(StorageService::open(&temp.path().join("storage.sqlite")).unwrap());
     storage
-        .save_project(ProjectRecord {
-            id: "project-1".to_string(),
-            name: "Workspace".to_string(),
-            path: Some(workspace.to_string_lossy().into_owned()),
-            created_at: 1,
-            pinned_at: None,
-        })
+        .save_project(ProjectRecord::with_primary_folder(
+            "project-1".to_string(),
+            "Workspace".to_string(),
+            workspace.to_string_lossy().into_owned(),
+            1,
+        ))
         .unwrap();
     let installed_store_root = temp.path().join("skills");
     let skills_service = SkillsService::new()

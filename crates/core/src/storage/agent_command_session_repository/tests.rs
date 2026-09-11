@@ -95,8 +95,8 @@ fn seed_conversation(
     connection
         .execute(
             "INSERT OR IGNORE INTO projects (
-                 id, name, path, created_at, pinned_at, updated_at
-             ) VALUES (?1, ?1, '/tmp/project', 1, NULL, 1)",
+                 id, name, created_at, pinned_at, updated_at
+             ) VALUES (?1, ?1, 1, NULL, 1)",
             [project_id],
         )
         .unwrap();

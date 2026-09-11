@@ -28,12 +28,17 @@ vi.mock('../../config/FrontendConfigProvider', () => ({
 vi.mock('../../config/ModelSettingsProvider', () => ({
   useModelSettings: () => modelState
 }))
-vi.mock('../../config/ProjectSettingsProvider', () => ({
-  useProjectSettings: () => ({
-    projects: [{ id: 'keep-project', name: 'Keep project', path: '/repo/keep', createdAt: 1 }],
-    selectProjectDirectory: vi.fn()
-  })
-}))
+vi.mock('../../config/ProjectSettingsProvider', async () => {
+  const { singleFolderProject } = await import('../../features/projects/__tests__/projectFixtures')
+  return {
+    useProjectSettings: () => ({
+      projects: [
+        singleFolderProject({ id: 'keep-project', name: 'Keep project', path: '/repo/keep' })
+      ],
+      openCreateProjectDialog: vi.fn(async () => null)
+    })
+  }
+})
 vi.mock('../../features/chat/components/ImagePreview', () => ({ useImagePreview: () => vi.fn() }))
 vi.mock('../../features/skills/skillsClient', () => ({
   listSkills: vi.fn(async () => ({

@@ -60,13 +60,7 @@ async fn assert_precommitted_wait_survives_terminal_settlement(outcome: AfterPre
     let database_path = fixture.path().join("wait-terminal.sqlite");
     let storage = Arc::new(StorageService::open(&database_path).unwrap());
     storage
-        .save_project(ProjectRecord {
-            id: PROJECT_ID.to_string(),
-            name: "Precommitted wait terminal settlement".to_string(),
-            path: Some(fixture.path().to_string_lossy().into_owned()),
-            created_at: 1,
-            pinned_at: None,
-        })
+        .save_project(ProjectRecord::with_primary_folder(PROJECT_ID.to_string(), "Precommitted wait terminal settlement".to_string(), fixture.path().to_string_lossy().into_owned(), 1))
         .unwrap();
     let mut settings = test_model_settings();
     settings.api_url = format!("http://{address}/v1/chat/completions");

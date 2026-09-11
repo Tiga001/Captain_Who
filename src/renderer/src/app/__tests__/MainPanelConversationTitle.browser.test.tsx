@@ -48,12 +48,12 @@ function centerY(element: Element) {
   return (box.top + box.bottom) / 2
 }
 
-function animationDuration(element: HTMLElement) {
+function animationDuration(element: Element) {
   const timing = element.getAnimations()[0]?.effect?.getTiming()
   return typeof timing?.duration === 'number' ? timing.duration : 0
 }
 
-function translateX(element: HTMLElement) {
+function translateX(element: Element) {
   const { transform } = getComputedStyle(element)
   const values = /matrix(?:3d)?\(([^)]+)\)/.exec(transform)?.[1]?.split(',')
   if (!values) return 0
@@ -264,7 +264,7 @@ describe('MainPanelToolbar conversation menu', () => {
     )
 
     const boat = screen.getByRole('button', { name: 'Captain Who' })
-    const boatNode = boat.element()
+    const boatNode = boat.element() as HTMLElement
     for (let click = 0; click < 4; click += 1) await boat.click()
     await expect.element(boat).toHaveAttribute('data-motion', 'wobble')
 

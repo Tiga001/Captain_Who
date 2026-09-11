@@ -26,8 +26,8 @@ fn connection() -> Connection {
 fn insert_project(connection: &Connection, project_id: &str) {
     connection
         .execute(
-            "INSERT INTO projects (id, name, path, created_at, pinned_at, updated_at)
-                 VALUES (?1, ?1, NULL, 1, NULL, 1)",
+            "INSERT INTO projects (id, name, created_at, pinned_at, updated_at)
+                 VALUES (?1, ?1, 1, NULL, 1)",
             [project_id],
         )
         .unwrap();

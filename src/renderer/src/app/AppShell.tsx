@@ -20,6 +20,7 @@ import { BottomPanel } from '../features/bottomPanel/BottomPanel'
 import { useToast } from '../components/toast/ToastContext'
 import { useModelSettings } from '../config/ModelSettingsProvider'
 import { useProjectSettings } from '../config/ProjectSettingsProvider'
+import { primaryProjectPath } from '../config/projectConfig'
 import { useFrontendConfig } from '../config/FrontendConfigProvider'
 import { featureFlags } from '../config/featureFlags'
 import { useGitRepositoryCapability } from '../features/gitReview/useGitRepositoryCapability'
@@ -147,8 +148,8 @@ export function AppShell() {
   const {
     projects,
     deleteProject,
-    renameProject,
-    selectProjectDirectory,
+    openCreateProjectDialog,
+    openEditProjectDialog,
     showProjectInFolder,
     togglePinProject
   } = useProjectSettings()
@@ -390,7 +391,7 @@ export function AppShell() {
     return projects.find((project) => project.id === rightSidebarWorkspaceProjectId) ?? null
   }, [rightSidebarWorkspaceProjectId, projects])
   const rightSidebarWorkspaceKeys = useMemo(() => projects.map((project) => project.id), [projects])
-  const rightSidebarWorkspacePath = rightSidebarWorkspaceProject?.path?.trim() || undefined
+  const rightSidebarWorkspacePath = primaryProjectPath(rightSidebarWorkspaceProject)
   const openNewBottomTerminal = useCallback(() => {
     if (!canOpenBottomPanel) return
     bottomPanelModuleNavigationRequestIdRef.current += 1
@@ -1265,14 +1266,14 @@ export function AppShell() {
               patchConversation(conversationId, { unreadAt: Date.now() })
             }
             onNewConversation={openNewConversation}
-            onNewProject={selectProjectDirectory}
+            onNewProject={openCreateProjectDialog}
             onOpenSettings={() => openSettings('general')}
             onRemoveProject={removeProject}
             onRequestRenameConversation={requestChatRename}
             onRenameConversation={(conversationId, title) =>
               patchConversation(conversationId, { title })
             }
-            onRenameProject={renameProject}
+            onEditProject={openEditProjectDialog}
             onOpenScheduled={openScheduled}
             onSelectConversation={requestOpenConversationFromScheduled}
             onShowProjectInFolder={showProjectInFolder}

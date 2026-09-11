@@ -397,8 +397,8 @@ mod tests {
     fn project(connection: &Connection, id: &str) {
         connection
             .execute(
-                "INSERT INTO projects (id, name, path, created_at, pinned_at, updated_at)
-                 VALUES (?1, ?1, NULL, 1, NULL, 1)",
+                "INSERT INTO projects (id, name, created_at, pinned_at, updated_at)
+                 VALUES (?1, ?1, 1, NULL, 1)",
                 [id],
             )
             .unwrap();

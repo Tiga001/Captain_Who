@@ -114,13 +114,12 @@ fn ordinary_user_rpc_cannot_read_or_mutate_a_child_conversation() {
     let storage = Arc::new(StorageService::open(&directory.path().join("rpc.sqlite")).unwrap());
     storage.save_model_settings(model_settings()).unwrap();
     storage
-        .save_project(ProjectRecord {
-            id: "project-a".to_string(),
-            name: "Project A".to_string(),
-            path: Some(directory.path().to_string_lossy().into_owned()),
-            created_at: 1,
-            pinned_at: None,
-        })
+        .save_project(ProjectRecord::with_primary_folder(
+            "project-a".to_string(),
+            "Project A".to_string(),
+            directory.path().to_string_lossy().into_owned(),
+            1,
+        ))
         .unwrap();
     storage
         .save_conversation_meta(ChatConversationMetaRecord {

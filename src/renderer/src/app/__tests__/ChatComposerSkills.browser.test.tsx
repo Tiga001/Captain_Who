@@ -43,15 +43,23 @@ vi.mock('../../config/ModelSettingsProvider', () => ({
   })
 }))
 
-vi.mock('../../config/ProjectSettingsProvider', () => ({
-  useProjectSettings: () => ({
-    projects: [
-      { id: 'project-a', name: 'Project A', path: '/workspace/a', createdAt: 1 },
-      { id: 'project-b', name: 'Project B', path: '/workspace/b', createdAt: 2 }
-    ],
-    selectProjectDirectory: vi.fn()
-  })
-}))
+vi.mock('../../config/ProjectSettingsProvider', async () => {
+  const { singleFolderProject } = await import('../../features/projects/__tests__/projectFixtures')
+  return {
+    useProjectSettings: () => ({
+      projects: [
+        singleFolderProject({ id: 'project-a', name: 'Project A', path: '/workspace/a' }),
+        singleFolderProject({
+          id: 'project-b',
+          name: 'Project B',
+          path: '/workspace/b',
+          createdAt: 2
+        })
+      ],
+      openCreateProjectDialog: vi.fn(async () => null)
+    })
+  }
+})
 
 vi.mock('../../features/chat/components/ImagePreview', () => ({
   useImagePreview: () => vi.fn()

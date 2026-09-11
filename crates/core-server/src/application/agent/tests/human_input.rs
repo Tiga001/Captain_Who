@@ -251,13 +251,12 @@ fn assert_user_projection(provider_request: &Value, response_ids: &[String]) {
 
 fn configure_storage(storage: &StorageService, workspace: &Path, address: &str) {
     storage
-        .save_project(ProjectRecord {
-            id: "project-human-input".to_string(),
-            name: "Human input integration".to_string(),
-            path: Some(workspace.to_string_lossy().into_owned()),
-            created_at: 1,
-            pinned_at: None,
-        })
+        .save_project(ProjectRecord::with_primary_folder(
+            "project-human-input".to_string(),
+            "Human input integration".to_string(),
+            workspace.to_string_lossy().into_owned(),
+            1,
+        ))
         .unwrap();
     let mut settings = test_model_settings();
     settings.api_url = format!("http://{address}/v1/chat/completions");

@@ -145,13 +145,12 @@ impl Fixture {
             }
         });
         storage
-            .save_project(ProjectRecord {
-                id: "project-async-human-input".to_string(),
-                name: "Async human input".to_string(),
-                path: Some(directory.path().to_string_lossy().into_owned()),
-                created_at: 1,
-                pinned_at: None,
-            })
+            .save_project(ProjectRecord::with_primary_folder(
+                "project-async-human-input".to_string(),
+                "Async human input".to_string(),
+                directory.path().to_string_lossy().into_owned(),
+                1,
+            ))
             .unwrap();
         let mut settings = test_model_settings();
         settings.api_url = format!("http://{address}/v1/chat/completions");

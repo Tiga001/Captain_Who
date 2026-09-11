@@ -463,13 +463,12 @@ async fn fake_provider_drives_all_six_tools_through_runtime_host_and_server_serv
     let database_path = fixture.path().join("collaboration-harness.sqlite");
     let storage = Arc::new(StorageService::open(&database_path).unwrap());
     storage
-        .save_project(ProjectRecord {
-            id: PROJECT_ID.to_string(),
-            name: "Collaboration harness".to_string(),
-            path: Some(fixture.path().to_string_lossy().into_owned()),
-            created_at: 1,
-            pinned_at: None,
-        })
+        .save_project(ProjectRecord::with_primary_folder(
+            PROJECT_ID.to_string(),
+            "Collaboration harness".to_string(),
+            fixture.path().to_string_lossy().into_owned(),
+            1,
+        ))
         .unwrap();
     let mut settings = test_model_settings();
     settings.api_url = format!("http://{address}/v1/chat/completions");
@@ -883,13 +882,12 @@ async fn process_start_dispatcher_recovers_a_queued_child_without_a_new_root_tur
     let database_path = fixture.path().join("collaboration-startup-recovery.sqlite");
     let storage = Arc::new(StorageService::open(&database_path).unwrap());
     storage
-        .save_project(ProjectRecord {
-            id: PROJECT_ID.to_string(),
-            name: "Collaboration startup recovery".to_string(),
-            path: Some(fixture.path().to_string_lossy().into_owned()),
-            created_at: 1,
-            pinned_at: None,
-        })
+        .save_project(ProjectRecord::with_primary_folder(
+            PROJECT_ID.to_string(),
+            "Collaboration startup recovery".to_string(),
+            fixture.path().to_string_lossy().into_owned(),
+            1,
+        ))
         .unwrap();
     let mut settings = test_model_settings();
     settings.api_url = format!("http://{address}/v1/chat/completions");
@@ -1018,13 +1016,12 @@ async fn user_root_run_cancellation_stops_running_and_queued_descendants() {
     let database_path = fixture.path().join("collaboration-root-stop.sqlite");
     let storage = Arc::new(StorageService::open(&database_path).unwrap());
     storage
-        .save_project(ProjectRecord {
-            id: PROJECT_ID.to_string(),
-            name: "Collaboration root stop".to_string(),
-            path: Some(fixture.path().to_string_lossy().into_owned()),
-            created_at: 1,
-            pinned_at: None,
-        })
+        .save_project(ProjectRecord::with_primary_folder(
+            PROJECT_ID.to_string(),
+            "Collaboration root stop".to_string(),
+            fixture.path().to_string_lossy().into_owned(),
+            1,
+        ))
         .unwrap();
     let mut settings = test_model_settings();
     settings.api_url = format!("http://{address}/v1/chat/completions");
@@ -1370,13 +1367,12 @@ async fn interrupt_agent_stops_a_child_waiting_on_a_handed_off_command_session()
     let project_id = "project-collaboration-command-interrupt";
     let root_conversation_id = "conversation-collaboration-command-interrupt";
     storage
-        .save_project(ProjectRecord {
-            id: project_id.to_string(),
-            name: "Collaboration command interrupt".to_string(),
-            path: Some(workspace.to_string_lossy().into_owned()),
-            created_at: 1,
-            pinned_at: None,
-        })
+        .save_project(ProjectRecord::with_primary_folder(
+            project_id.to_string(),
+            "Collaboration command interrupt".to_string(),
+            workspace.to_string_lossy().into_owned(),
+            1,
+        ))
         .unwrap();
     let mut settings = test_model_settings();
     settings.api_url = format!("http://{address}/v1/chat/completions");
@@ -1662,13 +1658,12 @@ async fn assert_child_approval_handoff_linearizes(window: ChildApprovalInterrupt
     let root_conversation_id = "conversation-collaboration-approval-handoff-root";
     let root_agent_id = "agent-collaboration-approval-handoff-root";
     storage
-        .save_project(ProjectRecord {
-            id: project_id.to_string(),
-            name: "Collaboration approval handoff".to_string(),
-            path: Some(workspace.to_string_lossy().into_owned()),
-            created_at: 1,
-            pinned_at: None,
-        })
+        .save_project(ProjectRecord::with_primary_folder(
+            project_id.to_string(),
+            "Collaboration approval handoff".to_string(),
+            workspace.to_string_lossy().into_owned(),
+            1,
+        ))
         .unwrap();
     let mut settings = test_model_settings();
     settings.api_url = format!("http://{address}/v1/chat/completions");

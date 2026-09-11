@@ -339,8 +339,8 @@ fn resource_deletion_blocks_tasks_without_deleting_tasks_or_chat_history() {
     let mut connection = connection();
     connection
         .execute_batch(
-            "INSERT INTO projects (id, name, path, created_at, pinned_at, updated_at)
-             VALUES ('project-a', 'Project A', '/project-a', 1, NULL, 1);
+            "INSERT INTO projects (id, name, created_at, pinned_at, updated_at)
+             VALUES ('project-a', 'Project A', 1, NULL, 1);
              INSERT INTO conversations (
                 id, project_id, model_id, title, created_at, updated_at,
                 pinned_at, archived_at, unread_at
@@ -799,8 +799,8 @@ fn existing_chat_is_blocked_when_its_inherited_project_is_deleted() {
     let mut connection = connection();
     connection
         .execute_batch(
-            "INSERT INTO projects (id, name, path, created_at, pinned_at, updated_at)
-             VALUES ('project-a', 'Project A', '/project-a', 1, NULL, 1);
+            "INSERT INTO projects (id, name, created_at, pinned_at, updated_at)
+             VALUES ('project-a', 'Project A', 1, NULL, 1);
              INSERT INTO conversations (
                 id, project_id, model_id, title, created_at, updated_at,
                 pinned_at, archived_at, unread_at

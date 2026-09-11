@@ -855,13 +855,12 @@ async fn destructive_resource_mutations_terminalize_live_automation_runs_before_
     let project_path = fixture.path().join("automation-delete-project");
     std::fs::create_dir_all(&project_path).unwrap();
     storage
-        .save_project(ProjectRecord {
-            id: "automation-delete-project".to_string(),
-            name: "Automation delete project".to_string(),
-            path: Some(project_path.to_string_lossy().into_owned()),
-            created_at: 1,
-            pinned_at: None,
-        })
+        .save_project(ProjectRecord::with_primary_folder(
+            "automation-delete-project".to_string(),
+            "Automation delete project".to_string(),
+            project_path.to_string_lossy().into_owned(),
+            1,
+        ))
         .unwrap();
     let service =
         AgentService::try_new_deferred_startup_reconciliation(Arc::clone(&storage)).unwrap();

@@ -674,7 +674,10 @@ mod tests {
         let storage = StorageState::open(Path::new(":memory:")).unwrap();
         let connection = storage.connection().unwrap();
         connection
-            .execute("INSERT INTO projects (id,name,path,created_at,updated_at) VALUES ('project-1','p','/w',1,1)", [])
+            .execute(
+                "INSERT INTO projects (id,name,created_at,updated_at) VALUES ('project-1','p',1,1)",
+                [],
+            )
             .unwrap();
         connection
             .execute("INSERT INTO conversations (id,project_id,title,created_at,updated_at) VALUES ('conversation-1','project-1','c',1,1)", [])
@@ -735,7 +738,10 @@ mod tests {
         let storage = StorageState::open(Path::new(":memory:")).unwrap();
         let connection = storage.connection().unwrap();
         connection
-            .execute("INSERT INTO projects (id,name,path,created_at,updated_at) VALUES ('project-1','p','/w',1,1)", [])
+            .execute(
+                "INSERT INTO projects (id,name,created_at,updated_at) VALUES ('project-1','p',1,1)",
+                [],
+            )
             .unwrap();
         connection
             .execute("INSERT INTO conversations (id,project_id,title,created_at,updated_at) VALUES ('conversation-1','project-1','c',1,1)", [])

@@ -22,7 +22,7 @@ vi.mock('../../../config/ModelSettingsProvider', () => ({
   })
 }))
 vi.mock('../../../config/ProjectSettingsProvider', () => ({
-  useProjectSettings: () => ({ projects: [], selectProjectDirectory: vi.fn() })
+  useProjectSettings: () => ({ projects: [], openCreateProjectDialog: vi.fn(async () => null) })
 }))
 vi.mock('../../skills/useSkillCatalog', () => ({
   useSkillCatalog: () => ({ state: { status: 'idle' }, refresh: vi.fn() })

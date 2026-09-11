@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { render } from 'vitest-browser-react'
 import { defaultUiPreferences } from '../../features/storage/storageClient'
 import { LeftSidebar } from '../shell/sidebar/LeftSidebar'
+import { singleFolderProject } from '../../features/projects/__tests__/projectFixtures'
 import '../shell/sidebar/LeftSidebar.css'
 
 vi.mock('../../config/FrontendConfigProvider', () => ({
@@ -51,12 +52,13 @@ function renderSidebar({
             updatedAt: 1
           }
         ]}
-        projects={[{ id: 'project-1', name: 'Existing project', createdAt: 1 }]}
+        projects={[singleFolderProject({ id: 'project-1', name: 'Existing project' })]}
         uiPreferences={defaultUiPreferences()}
         onArchiveAllProjectConversations={noop}
         onArchiveAllRootConversations={noop}
         onArchiveConversation={noop}
         onArchiveProjectConversations={noop}
+        onEditProject={async () => 'cancelled' as const}
         onMarkConversationUnread={noop}
         onNewConversation={noop}
         onNewProject={onNewProject}
@@ -64,7 +66,6 @@ function renderSidebar({
         onOpenSettings={noop}
         onRemoveProject={async () => true}
         onRenameConversation={noop}
-        onRenameProject={noop}
         onSelectConversation={noop}
         onShowProjectInFolder={noop}
         onTogglePinConversation={noop}

@@ -2,9 +2,10 @@ import { renderSettingsNodes, settingLabel } from '../settingsDefinition'
 import {
   environmentSettings,
   environmentAddProjectSettings,
+  environmentEditProjectActions,
   environmentProjectActions
 } from './managementSettings.definition'
-import { NotebookText, Trash2 } from 'lucide-react'
+import { NotebookText, PencilLine, Trash2 } from 'lucide-react'
 import { useState } from 'react'
 import { ConfirmationDialog } from '../../../components/dialog/ConfirmationDialog'
 import { useFrontendConfig } from '../../../config/FrontendConfigProvider'
@@ -18,11 +19,17 @@ export function EnvironmentSettingsPage({
   onRemoveProject: (projectId: string) => Promise<boolean>
 }) {
   const { t } = useFrontendConfig()
-  const { projects, selectProjectDirectory } = useProjectSettings()
+  const { projects, openCreateProjectDialog, openEditProjectDialog } = useProjectSettings()
   const [pendingDeleteProject, setPendingDeleteProject] = useState<AppProject | null>(null)
 
-  const addProjectFromFolder = () => {
-    void selectProjectDirectory()
+  const addProject = () => {
+    void openCreateProjectDialog()
+  }
+
+  const editProject = (project: AppProject) => {
+    void openEditProjectDialog(project.id).then((result) => {
+      if (result === 'remove-requested') setPendingDeleteProject(project)
+    })
   }
 
   return (
@@ -40,7 +47,7 @@ export function EnvironmentSettingsPage({
               <button
                 className="environment-projects__add-button"
                 type="button"
-                onClick={addProjectFromFolder}
+                onClick={addProject}
               >
                 {settingLabel(item, t)}
               </button>
@@ -52,19 +59,28 @@ export function EnvironmentSettingsPage({
               <div className="environment-project-card" key={project.id}>
                 <NotebookText aria-hidden="true" />
                 <span className="environment-project-card__name">{project.name}</span>
-                {project.path && (
-                  <span className="environment-project-card__detail">{project.path}</span>
-                )}
-                {renderSettingsNodes(environmentProjectActions, (item) => (
-                  <button
-                    className="environment-project-card__delete"
-                    type="button"
-                    aria-label={`${settingLabel(item, t)} ${project.name}`}
-                    onClick={() => setPendingDeleteProject(project)}
-                  >
-                    <Trash2 aria-hidden="true" />
-                  </button>
-                ))}
+                <div className="environment-project-card__actions">
+                  {renderSettingsNodes(environmentEditProjectActions, (item) => (
+                    <button
+                      className="environment-project-card__action environment-project-card__edit"
+                      type="button"
+                      aria-label={`${settingLabel(item, t)} ${project.name}`}
+                      onClick={() => editProject(project)}
+                    >
+                      <PencilLine aria-hidden="true" />
+                    </button>
+                  ))}
+                  {renderSettingsNodes(environmentProjectActions, (item) => (
+                    <button
+                      className="environment-project-card__action environment-project-card__delete"
+                      type="button"
+                      aria-label={`${settingLabel(item, t)} ${project.name}`}
+                      onClick={() => setPendingDeleteProject(project)}
+                    >
+                      <Trash2 aria-hidden="true" />
+                    </button>
+                  ))}
+                </div>
               </div>
             ))}
           </div>

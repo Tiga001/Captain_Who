@@ -15,10 +15,18 @@ import {
   parseStorageModelSettingsRecord,
   parseStorageModelSettingsUpdateRecord,
   parseStorageModelSettingsValidationErrorData,
+  parseStorageProjectCreateInput,
+  parseStorageProjectUpdateInput,
+  parseStorageProjectValidationErrorData,
   type StorageImageFileRecord,
+  type StorageProjectFolderPick,
   type StorageProjectRecord
 } from '@mycopilot/protocol'
 import type { CoreServer } from '../core/coreServer'
+import {
+  buildProjectRecordFromCreateInput,
+  buildProjectRecordFromUpdateInput
+} from '../projects/projectFolders'
 import type { TrustedIpcMain } from './trustedIpc'
 
 interface StorageIpcPlatformActions {
@@ -26,13 +34,20 @@ interface StorageIpcPlatformActions {
     coreServer: CoreServer,
     input: { projectId?: string | null; filePath?: string }
   ): Promise<StorageImageFileRecord | null>
+  pickProjectFolder(event: IpcMainInvokeEvent): Promise<StorageProjectFolderPick | null>
   revealProjectFile(
     coreServer: CoreServer,
     input: { projectId?: string | null; filePath: string }
   ): Promise<void>
   selectProfileAvatar(event: IpcMainInvokeEvent): Promise<string | null>
-  selectProjectDirectory(event: IpcMainInvokeEvent): Promise<StorageProjectRecord | null>
   showProjectInFolder(coreServer: CoreServer, projectId: string): Promise<void>
+}
+
+async function loadStoredProject(
+  coreServer: CoreServer,
+  projectId: string
+): Promise<StorageProjectRecord | undefined> {
+  return (await coreServer.loadProjects()).find((project) => project.id === projectId)
 }
 
 export function registerStorageIpc(
@@ -69,12 +84,35 @@ export function registerStorageIpc(
     coreServer.saveAgentPromptPreferences(preferences)
   )
   ipcMain.handle(HOST_CHANNELS.storage.loadProjects, () => coreServer.loadProjects())
-  ipcMain.handle(HOST_CHANNELS.storage.selectProjectDirectory, (event) =>
-    actions.selectProjectDirectory(event)
+  ipcMain.handle(HOST_CHANNELS.storage.pickProjectFolder, (event) =>
+    actions.pickProjectFolder(event)
   )
-  ipcMain.handle(HOST_CHANNELS.storage.saveProject, (_event, project) =>
-    coreServer.saveProject(project)
+  ipcMain.handle(HOST_CHANNELS.storage.createProject, (_event, input) =>
+    captureProjectMutationInvocation(async () =>
+      coreServer.saveProject(
+        await buildProjectRecordFromCreateInput(parseStorageProjectCreateInput(input))
+      )
+    )
   )
+  ipcMain.handle(HOST_CHANNELS.storage.updateProject, (_event, input) =>
+    captureProjectMutationInvocation(async () => {
+      const update = parseStorageProjectUpdateInput(input)
+      const existing = await loadStoredProject(coreServer, update.projectId)
+      return coreServer.saveProject(await buildProjectRecordFromUpdateInput(update, existing))
+    })
+  )
+  ipcMain.handle(HOST_CHANNELS.storage.saveProject, async (_event, project) => {
+    // Only pin state is writable here. Names and folder membership go through updateProject,
+    // which validates folders against the filesystem before Core stores them.
+    const projectId = typeof project?.id === 'string' ? project.id : ''
+    const existing = await loadStoredProject(coreServer, projectId)
+    if (!existing) throw new Error('Project does not exist')
+    const pinnedAt =
+      typeof project.pinnedAt === 'number' && Number.isSafeInteger(project.pinnedAt)
+        ? project.pinnedAt
+        : null
+    return coreServer.saveProject({ ...existing, pinnedAt })
+  })
   ipcMain.handle(HOST_CHANNELS.storage.deleteProject, (_event, projectId) =>
     coreServer.deleteProject(projectId)
   )
@@ -174,6 +212,30 @@ async function captureConversationForkInvocation<T>(
     return {
       ok: false,
       error: { message: 'Conversation fork failed.' }
+    }
+  }
+}
+
+/**
+ * Projects only the bounded project validation contract. Filesystem diagnostics and Core
+ * error text never cross into Renderer; the renderer localizes the code itself.
+ */
+async function captureProjectMutationInvocation<T>(
+  operation: () => Promise<T>
+): Promise<HostInvocationResult<T>> {
+  const result = await captureHostInvocation(operation)
+  if (result.ok) return result
+
+  try {
+    const data = parseStorageProjectValidationErrorData(result.error.data)
+    return {
+      ok: false,
+      error: { message: 'Project validation failed.', data }
+    }
+  } catch {
+    return {
+      ok: false,
+      error: { message: 'Project save failed.' }
     }
   }
 }

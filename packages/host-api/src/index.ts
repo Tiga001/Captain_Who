@@ -230,7 +230,10 @@ import type {
   StorageImageFileRecord,
   StorageModelSettingsRecord,
   StorageModelSettingsUpdateRecord,
+  StorageProjectCreateInput,
+  StorageProjectFolderPick,
   StorageProjectRecord,
+  StorageProjectUpdateInput,
   StorageUiPreferencesRecord,
   TerminalCreateSessionRequest,
   TerminalExitEvent,
@@ -392,7 +395,15 @@ export interface StorageHostApi {
     preferences: StorageAgentPromptPreferencesRecord
   ): Promise<StorageAgentPromptPreferencesRecord>
   loadProjects(): Promise<StorageProjectRecord[]>
-  selectProjectDirectory(): Promise<StorageProjectRecord | null>
+  /** Opens the native directory picker and returns the chosen folder without persisting it. */
+  pickProjectFolder(): Promise<StorageProjectFolderPick | null>
+  createProject(
+    input: StorageProjectCreateInput
+  ): Promise<HostInvocationResult<StorageProjectRecord>>
+  updateProject(
+    input: StorageProjectUpdateInput
+  ): Promise<HostInvocationResult<StorageProjectRecord>>
+  /** Persists project metadata (pinning). Folder membership only changes through updateProject. */
   saveProject(project: StorageProjectRecord): Promise<StorageProjectRecord>
   deleteProject(projectId: string): Promise<void>
   showProjectInFolder(projectId: string): Promise<void>

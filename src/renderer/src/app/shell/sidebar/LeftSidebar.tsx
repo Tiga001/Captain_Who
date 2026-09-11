@@ -118,13 +118,13 @@ export function LeftSidebar(props: LeftSidebarProps) {
   const onArchiveAllRootConversations = useLatestCallback(props.onArchiveAllRootConversations)
   const onArchiveConversation = useLatestCallback(props.onArchiveConversation)
   const onArchiveProjectConversations = useLatestCallback(props.onArchiveProjectConversations)
+  const onEditProject = useLatestCallback(props.onEditProject)
   const onMarkConversationUnread = useLatestCallback(props.onMarkConversationUnread)
   const onNewConversation = useLatestCallback(props.onNewConversation)
   const onNewProject = useLatestCallback(props.onNewProject)
   const onOpenSettings = useLatestCallback(props.onOpenSettings)
   const onRemoveProject = useLatestCallback(props.onRemoveProject)
   const onRenameConversation = useLatestCallback(props.onRenameConversation)
-  const onRenameProject = useLatestCallback(props.onRenameProject)
   const onOpenScheduled = useLatestCallback(props.onOpenScheduled)
   const onSelectConversation = useLatestCallback(props.onSelectConversation)
   const onShowProjectInFolder = useLatestCallback(props.onShowProjectInFolder)
@@ -140,13 +140,13 @@ export function LeftSidebar(props: LeftSidebarProps) {
       onArchiveAllRootConversations={onArchiveAllRootConversations}
       onArchiveConversation={onArchiveConversation}
       onArchiveProjectConversations={onArchiveProjectConversations}
+      onEditProject={onEditProject}
       onMarkConversationUnread={onMarkConversationUnread}
       onNewConversation={onNewConversation}
       onNewProject={onNewProject}
       onOpenSettings={onOpenSettings}
       onRemoveProject={onRemoveProject}
       onRenameConversation={onRenameConversation}
-      onRenameProject={onRenameProject}
       onOpenScheduled={onOpenScheduled}
       onSelectConversation={onSelectConversation}
       onShowProjectInFolder={onShowProjectInFolder}
@@ -168,6 +168,7 @@ const LeftSidebarView = memo(function LeftSidebarView({
   onArchiveAllRootConversations,
   onArchiveConversation,
   onArchiveProjectConversations,
+  onEditProject,
   onMarkConversationUnread,
   onNewConversation,
   onNewProject,
@@ -175,7 +176,6 @@ const LeftSidebarView = memo(function LeftSidebarView({
   onRemoveProject,
   onRequestRenameConversation,
   onRenameConversation,
-  onRenameProject,
   onOpenScheduled,
   onSelectConversation,
   onShowProjectInFolder,
@@ -196,8 +196,6 @@ const LeftSidebarView = memo(function LeftSidebarView({
   const [openSectionMenu, setOpenSectionMenu] = useState<SidebarSectionScope | null>(null)
   const [sectionMenuPosition, setSectionMenuPosition] = useState<SidebarMenuPosition | null>(null)
   const [openSectionSubmenu, setOpenSectionSubmenu] = useState<SidebarSectionSubmenu | null>(null)
-  const [renamingProject, setRenamingProject] = useState<AppProject | null>(null)
-  const [renameValue, setRenameValue] = useState('')
   const [renamingConversation, setRenamingConversation] = useState<SidebarConversation | null>(null)
   const [conversationRenameValue, setConversationRenameValue] = useState('')
   const [pendingBulkArchiveScope, setPendingBulkArchiveScope] = useState<BulkArchiveScope | null>(
@@ -371,21 +369,13 @@ const LeftSidebarView = memo(function LeftSidebarView({
     })
   }
 
-  const startRenamingProject = (project: AppProject) => {
-    setRenameValue(project.name)
-    setRenamingProject(project)
+  const startEditingProject = (project: AppProject) => {
     closeProjectMenu()
-  }
-
-  const confirmRenameProject = () => {
-    if (!renamingProject) return
-
-    const normalizedName = renameValue.trim()
-    if (!normalizedName) return
-
-    onRenameProject(renamingProject.id, normalizedName)
-    setRenamingProject(null)
-    setRenameValue('')
+    void onEditProject(project.id).then((result) => {
+      // The editor's "remove local project" entry hands off to the same confirmation flow the
+      // context menu uses, so removal stays a single, explicit decision.
+      if (result === 'remove-requested') setPendingRemoveProject(project)
+    })
   }
 
   const startRenamingConversation = useCallback(
@@ -920,7 +910,7 @@ const LeftSidebarView = memo(function LeftSidebarView({
               setPendingRemoveProject(project)
               closeProjectMenu()
             }}
-            onRenameProject={() => startRenamingProject(project)}
+            onEditProject={() => startEditingProject(project)}
             onShowInFolder={() => {
               onShowProjectInFolder(project.id)
               closeProjectMenu()
@@ -1151,19 +1141,14 @@ const LeftSidebarView = memo(function LeftSidebarView({
         onCancelArchiveProject={() => setPendingArchiveProject(null)}
         onCancelBulkArchive={() => setPendingBulkArchiveScope(null)}
         onCancelConversationRename={() => setRenamingConversation(null)}
-        onCancelProjectRename={() => setRenamingProject(null)}
         onCancelRemoveProject={() => setPendingRemoveProject(null)}
         onConfirmConversationRename={confirmRenameConversation}
-        onConfirmProjectRename={confirmRenameProject}
         onConversationRenameValueChange={setConversationRenameValue}
-        onProjectRenameValueChange={setRenameValue}
         onRemoveProject={onRemoveProject}
         pendingArchiveProject={pendingArchiveProject}
         pendingBulkArchiveScope={pendingBulkArchiveScope}
         pendingRemoveProject={pendingRemoveProject}
-        renameValue={renameValue}
         renamingConversation={renamingConversation}
-        renamingProject={renamingProject}
         t={t}
       />
 

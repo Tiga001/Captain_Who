@@ -183,9 +183,9 @@ describe('Queue auto-send Chromium → production submission/lifecycle/IPC → r
     }
     registerStorageIpc(ipc, core, {
       loadImageFile: unavailable,
+      pickProjectFolder: unavailable,
       revealProjectFile: unavailable,
       selectProfileAvatar: unavailable,
-      selectProjectDirectory: unavailable,
       showProjectInFolder: unavailable
     })
     vite = await createServer({

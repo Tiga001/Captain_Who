@@ -28,31 +28,34 @@ vi.mock('../../../config/ModelSettingsProvider', () => ({
   })
 }))
 
-vi.mock('../../../config/ProjectSettingsProvider', () => ({
-  useProjectSettings: () => ({
-    projects: [
-      {
-        id: 'project-long',
-        name: LONG_PROJECT_NAME,
-        path: '/workspace/long',
-        createdAt: 1
-      },
-      {
-        id: 'project-short',
-        name: SHORT_PROJECT_NAME,
-        path: '/workspace/short',
-        createdAt: 2
-      },
-      {
-        id: 'project-mixed',
-        name: LONG_MIXED_PROJECT_NAME,
-        path: '/workspace/mixed',
-        createdAt: 3
-      }
-    ],
-    selectProjectDirectory: vi.fn()
-  })
-}))
+vi.mock('../../../config/ProjectSettingsProvider', async () => {
+  const { singleFolderProject } = await import('../../projects/__tests__/projectFixtures')
+  return {
+    useProjectSettings: () => ({
+      projects: [
+        singleFolderProject({
+          id: 'project-long',
+          name: LONG_PROJECT_NAME,
+          path: '/workspace/long',
+          createdAt: 1
+        }),
+        singleFolderProject({
+          id: 'project-short',
+          name: SHORT_PROJECT_NAME,
+          path: '/workspace/short',
+          createdAt: 2
+        }),
+        singleFolderProject({
+          id: 'project-mixed',
+          name: LONG_MIXED_PROJECT_NAME,
+          path: '/workspace/mixed',
+          createdAt: 3
+        })
+      ],
+      openCreateProjectDialog: vi.fn(async () => null)
+    })
+  }
+})
 
 vi.mock('../../skills/useSkillCatalog', () => ({
   useSkillCatalog: () => ({

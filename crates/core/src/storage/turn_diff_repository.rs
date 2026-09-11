@@ -843,8 +843,8 @@ mod tests {
         connection
             .execute(
                 "
-                INSERT INTO projects (id, name, path, created_at, updated_at)
-                VALUES ('project-1', 'Project', '/tmp/project-1', 1, 1)
+                INSERT INTO projects (id, name, created_at, updated_at)
+                VALUES ('project-1', 'Project', 1, 1)
                 ",
                 [],
             )
@@ -937,8 +937,8 @@ mod tests {
         connection
             .execute(
                 "
-                INSERT INTO projects (id, name, path, created_at, updated_at)
-                VALUES ('project-1', 'Project', '/tmp/project-1', 1, 1)
+                INSERT INTO projects (id, name, created_at, updated_at)
+                VALUES ('project-1', 'Project', 1, 1)
                 ",
                 [],
             )

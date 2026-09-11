@@ -3,6 +3,7 @@ import { page } from 'vitest/browser'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { render } from 'vitest-browser-react'
 import { SettingsSearchNavigationProvider } from '../../features/settings/settingsSearchNavigation'
+import { singleFolderProject } from '../../features/projects/__tests__/projectFixtures'
 
 const service = vi.hoisted(() => ({
   getSettings: vi.fn(),
@@ -60,8 +61,8 @@ const { AgentTemplatesSettingsPage, createTemplateMachineKey } =
   await import('../../features/settings/pages/AgentTemplatesSettingsPage')
 
 const PROJECTS = [
-  { createdAt: 1, id: 'project-a', name: 'Project A', path: '/workspace/a' },
-  { createdAt: 2, id: 'project-b', name: 'Project B', path: '/workspace/b' }
+  singleFolderProject({ createdAt: 1, id: 'project-a', name: 'Project A', path: '/workspace/a' }),
+  singleFolderProject({ createdAt: 2, id: 'project-b', name: 'Project B', path: '/workspace/b' })
 ]
 
 let inventory: AgentTemplate[]

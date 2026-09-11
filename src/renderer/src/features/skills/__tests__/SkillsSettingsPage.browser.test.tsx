@@ -50,7 +50,7 @@ vi.mock('../../../config/FrontendConfigProvider', () => ({
 }))
 
 vi.mock('../../../config/ProjectSettingsProvider', () => ({
-  useProjectSettings: () => ({ projects: [], selectProjectDirectory: vi.fn() })
+  useProjectSettings: () => ({ projects: [], openCreateProjectDialog: vi.fn(async () => null) })
 }))
 
 vi.mock('../../../components/toast/ToastContext', () => ({

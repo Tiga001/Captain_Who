@@ -1,5 +1,8 @@
 import type { IpcMainInvokeEvent } from 'electron'
-import { describe, expect, it, vi } from 'vitest'
+import { mkdir, mkdtemp, realpath, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { registerStorageIpc } from '../ipc/storageIpc'
 
 const forkInput = {
@@ -123,6 +126,162 @@ describe('conversation fork IPC', () => {
       ok: false,
       error: { message: 'Conversation fork failed.' }
     })
+  })
+})
+
+describe('multi-folder project IPC', () => {
+  let root = ''
+  let appFolder = ''
+  let docsFolder = ''
+
+  beforeEach(async () => {
+    root = await realpath(await mkdtemp(join(tmpdir(), 'mycopilot-project-ipc-')))
+    appFolder = join(root, 'app')
+    docsFolder = join(root, 'docs')
+    await mkdir(appFolder)
+    await mkdir(docsFolder)
+  })
+
+  afterEach(async () => {
+    await rm(root, { force: true, recursive: true })
+  })
+
+  function registerProjectHandlers(coreServer: Record<string, unknown>) {
+    const handlers = new Map<string, (...args: unknown[]) => unknown>()
+    const ipcMain = {
+      handle: vi.fn((channel: string, handler: (...args: unknown[]) => unknown) => {
+        handlers.set(channel, handler)
+      }),
+      on: vi.fn()
+    }
+    const pickProjectFolder = vi.fn(async () => ({ path: docsFolder, name: 'docs' }))
+    registerStorageIpc(ipcMain as never, coreServer as never, { pickProjectFolder } as never)
+    const get = (channel: string) => {
+      const handler = handlers.get(channel)
+      expect(handler).toBeTypeOf('function')
+      return handler as (...args: unknown[]) => Promise<unknown>
+    }
+    return {
+      createProject: get('host:storage.createProject'),
+      pickProjectFolder,
+      pickProjectFolderHandler: get('host:storage.pickProjectFolder'),
+      saveProject: get('host:storage.saveProject'),
+      updateProject: get('host:storage.updateProject')
+    }
+  }
+
+  it('validates folders in Main, then stores exactly one primary folder through Core', async () => {
+    const saveProject = vi.fn(async (project: unknown) => project)
+    const handlers = registerProjectHandlers({ saveProject, loadProjects: vi.fn(async () => []) })
+
+    const result = (await handlers.createProject({} as IpcMainInvokeEvent, {
+      name: 'Wire workspace',
+      folders: [
+        { path: appFolder, role: 'primary' },
+        { path: docsFolder, role: 'auxiliary' }
+      ]
+    })) as { ok: boolean; value: { folders: { path: string; role: string; alias: string }[] } }
+
+    expect(result.ok).toBe(true)
+    expect(result.value.folders.map(({ path, role, alias }) => ({ path, role, alias }))).toEqual([
+      { path: appFolder, role: 'primary', alias: 'app' },
+      { path: docsFolder, role: 'auxiliary', alias: 'docs' }
+    ])
+    expect(saveProject).toHaveBeenCalledTimes(1)
+    await expect(handlers.pickProjectFolderHandler({} as IpcMainInvokeEvent)).resolves.toEqual({
+      path: docsFolder,
+      name: 'docs'
+    })
+  })
+
+  it('projects only the bounded validation code and path, never filesystem diagnostics', async () => {
+    const saveProject = vi.fn()
+    const handlers = registerProjectHandlers({ saveProject, loadProjects: vi.fn(async () => []) })
+    const missing = join(root, 'missing')
+
+    await expect(
+      handlers.createProject({} as IpcMainInvokeEvent, {
+        name: 'Broken',
+        folders: [{ path: missing, role: 'primary' }]
+      })
+    ).resolves.toEqual({
+      ok: false,
+      error: {
+        message: 'Project validation failed.',
+        data: { kind: 'project_validation', code: 'folder_missing', path: missing }
+      }
+    })
+    await expect(
+      handlers.createProject({} as IpcMainInvokeEvent, {
+        name: 'Broken',
+        folders: [{ path: appFolder, role: 'primary', alias: 'client-chosen' }]
+      })
+    ).resolves.toEqual({ ok: false, error: { message: 'Project save failed.' } })
+    expect(saveProject).not.toHaveBeenCalled()
+  })
+
+  it('redacts Core failures and reports a vanished project on update', async () => {
+    const saveProject = vi
+      .fn()
+      .mockRejectedValue(new Error('UNIQUE constraint failed: project_folders.alias'))
+    const handlers = registerProjectHandlers({ saveProject, loadProjects: vi.fn(async () => []) })
+
+    await expect(
+      handlers.createProject({} as IpcMainInvokeEvent, {
+        name: 'Racing',
+        folders: [{ path: appFolder, role: 'primary' }]
+      })
+    ).resolves.toEqual({ ok: false, error: { message: 'Project save failed.' } })
+
+    await expect(
+      handlers.updateProject({} as IpcMainInvokeEvent, {
+        projectId: 'gone',
+        name: 'Gone',
+        folders: [{ path: appFolder, role: 'primary' }]
+      })
+    ).resolves.toEqual({
+      ok: false,
+      error: {
+        message: 'Project validation failed.',
+        data: { kind: 'project_validation', code: 'project_missing' }
+      }
+    })
+  })
+
+  it('lets saveProject change only the pin state of a stored project', async () => {
+    const stored = {
+      id: 'project-1',
+      name: 'Stored',
+      folders: [
+        {
+          id: 'folder-1',
+          path: appFolder,
+          alias: 'app',
+          role: 'primary',
+          sortOrder: 0,
+          createdAt: 1
+        }
+      ],
+      createdAt: 1,
+      pinnedAt: null
+    }
+    const saveProject = vi.fn(async (project: unknown) => project)
+    const handlers = registerProjectHandlers({
+      saveProject,
+      loadProjects: vi.fn(async () => [stored])
+    })
+
+    await expect(
+      handlers.saveProject({} as IpcMainInvokeEvent, {
+        ...stored,
+        name: 'Renamed through the pin channel',
+        folders: [],
+        pinnedAt: 42
+      })
+    ).resolves.toEqual({ ...stored, pinnedAt: 42 })
+    await expect(
+      handlers.saveProject({} as IpcMainInvokeEvent, { id: 'missing', pinnedAt: 42 })
+    ).rejects.toThrow('Project does not exist')
   })
 })
 

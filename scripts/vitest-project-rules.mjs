@@ -10,6 +10,7 @@ const managedPlaywrightElectronE2e = 'src/main/core/managedPlaywrightBridge.elec
 const humanInteractionCoreE2e = 'src/main/core/humanInteractionRealCore.integration.test.ts'
 const automationCoreE2e = 'src/main/core/automationHostRealCore.integration.test.ts'
 const mcpMainTests = 'src/main/mcp'
+const projectsMainTests = 'src/main/projects'
 const terminalMainTests = 'src/main/terminal'
 const terminalPreloadTests = 'src/preload'
 const terminalRendererTests = 'src/renderer/src/features/terminal/__tests__'
@@ -22,6 +23,7 @@ const chatTests = 'src/renderer/src/features/chat/__tests__'
 const automationsTests = 'src/renderer/src/features/automations/__tests__'
 const notificationsTests = 'src/renderer/src/features/notifications/__tests__'
 const humanInteractionTests = 'src/renderer/src/features/humanInteraction/__tests__'
+const projectsTests = 'src/renderer/src/features/projects/__tests__'
 const agentCollaborationTests = 'src/renderer/src/features/agentCollaboration'
 const protocolTests = 'packages/protocol/src'
 
@@ -38,6 +40,7 @@ export const vitestProjectFileRules = {
       mainWindowLifecycleTest,
       `${coreMainTests}/**/*.test.ts`,
       `${mcpMainTests}/**/*.test.ts`,
+      `${projectsMainTests}/**/*.test.ts`,
       `${workspaceFilesTests}/**/*.test.ts`,
       `${terminalMainTests}/**/*.test.ts`,
       `${terminalPreloadTests}/**/*.test.ts`,
@@ -67,6 +70,7 @@ export const vitestProjectFileRules = {
       `${automationsTests}/**/*.browser.test.tsx`,
       `${notificationsTests}/**/*.browser.test.tsx`,
       `${humanInteractionTests}/**/*.browser.test.tsx`,
+      `${projectsTests}/**/*.browser.test.tsx`,
       `${skillsTests}/**/*.browser.test.tsx`,
       `${mcpTests}/**/*.browser.test.tsx`,
       `${capabilitiesTests}/**/*.browser.test.tsx`,

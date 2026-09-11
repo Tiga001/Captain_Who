@@ -353,13 +353,12 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let service = StorageService::open(&root.path().join("storage.sqlite")).unwrap();
         service
-            .save_project(ProjectRecord {
-                id: "project-a".to_string(),
-                name: "Project A".to_string(),
-                path: Some(root.path().to_string_lossy().into_owned()),
-                created_at: 1,
-                pinned_at: None,
-            })
+            .save_project(ProjectRecord::with_primary_folder(
+                "project-a".to_string(),
+                "Project A".to_string(),
+                root.path().to_string_lossy().into_owned(),
+                1,
+            ))
             .unwrap();
         for record in [
             conversation("conversation-a", Some("project-a")),

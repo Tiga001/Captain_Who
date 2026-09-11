@@ -3,6 +3,13 @@ import { defineSettingsNodes } from '../settingsDefinition'
 export const environmentAddProjectSettings = defineSettingsNodes([
   { id: 'environment-add-project', title: 'environment.addProject' }
 ])
+export const environmentEditProjectActions = defineSettingsNodes([
+  {
+    id: 'environment-edit-project',
+    title: 'environment.editProject',
+    prerequisiteId: 'environment-projects'
+  }
+])
 export const environmentProjectActions = defineSettingsNodes([
   {
     id: 'environment-delete-project',
@@ -15,7 +22,11 @@ export const environmentSettings = defineSettingsNodes([
     id: 'environment-projects',
     searchable: true,
     title: 'environment.selectProject',
-    children: [...environmentAddProjectSettings, ...environmentProjectActions]
+    children: [
+      ...environmentAddProjectSettings,
+      ...environmentEditProjectActions,
+      ...environmentProjectActions
+    ]
   }
 ])
 

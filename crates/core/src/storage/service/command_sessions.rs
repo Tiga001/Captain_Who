@@ -658,8 +658,8 @@ mod tests {
             connection
                 .execute(
                     "INSERT INTO projects (
-                         id, name, path, created_at, pinned_at, updated_at
-                     ) VALUES ('project-1', 'project-1', '/tmp/project', 1, NULL, 1)",
+                         id, name, created_at, pinned_at, updated_at
+                     ) VALUES ('project-1', 'project-1', 1, NULL, 1)",
                     [],
                 )
                 .unwrap();

@@ -60,13 +60,12 @@ async fn assert_completed_done_admits_next_turn(require_approval: bool) {
     let workspace = fixture.path().join("workspace");
     fs::create_dir_all(&workspace).unwrap();
     storage
-        .save_project(ProjectRecord {
-            id: "project-done-ready".to_string(),
-            name: "Done readiness".to_string(),
-            path: Some(workspace.to_string_lossy().into_owned()),
-            created_at: 1,
-            pinned_at: None,
-        })
+        .save_project(ProjectRecord::with_primary_folder(
+            "project-done-ready".to_string(),
+            "Done readiness".to_string(),
+            workspace.to_string_lossy().into_owned(),
+            1,
+        ))
         .unwrap();
     let conversation_id = "conversation-done-ready";
     let input = |suffix: &str| AgentConversationTurnInput {
@@ -294,15 +293,20 @@ fn durable_auto_command_context(
             .as_ref()
             .and_then(|context| context.workspace.as_ref())
             .and_then(|workspace| workspace.root_path.clone());
-        storage
-            .save_project(ProjectRecord {
-                id: project_id.clone(),
-                name: "Automatic command Session fixture".to_string(),
-                path: project_path,
-                created_at: 1,
-                pinned_at: None,
-            })
-            .unwrap();
+        let project = match project_path {
+            Some(project_path) => ProjectRecord::with_primary_folder(
+                project_id.clone(),
+                "Automatic command Session fixture".to_string(),
+                project_path,
+                1,
+            ),
+            None => ProjectRecord::without_folders(
+                project_id.clone(),
+                "Automatic command Session fixture".to_string(),
+                1,
+            ),
+        };
+        storage.save_project(project).unwrap();
     }
     storage
         .save_conversation(ChatConversationRecord {
@@ -1880,13 +1884,12 @@ fn restart_restores_executing_auto_command_as_project_deletion_blocker() {
     let fixture = tempdir().unwrap();
     let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
     storage
-        .save_project(ProjectRecord {
-            id: "project-restart-unsettled".to_string(),
-            name: "Restart unsettled".to_string(),
-            path: Some(fixture.path().to_string_lossy().into_owned()),
-            created_at: 1,
-            pinned_at: None,
-        })
+        .save_project(ProjectRecord::with_primary_folder(
+            "project-restart-unsettled".to_string(),
+            "Restart unsettled".to_string(),
+            fixture.path().to_string_lossy().into_owned(),
+            1,
+        ))
         .unwrap();
     storage
         .save_conversation(ChatConversationRecord {
@@ -1959,13 +1962,12 @@ fn restart_conservatively_blocks_interrupted_manual_command_deletion() {
     let fixture = tempdir().unwrap();
     let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
     storage
-        .save_project(ProjectRecord {
-            id: "project-restart-manual".to_string(),
-            name: "Restart manual".to_string(),
-            path: Some(fixture.path().to_string_lossy().into_owned()),
-            created_at: 1,
-            pinned_at: None,
-        })
+        .save_project(ProjectRecord::with_primary_folder(
+            "project-restart-manual".to_string(),
+            "Restart manual".to_string(),
+            fixture.path().to_string_lossy().into_owned(),
+            1,
+        ))
         .unwrap();
     storage
         .save_conversation(ChatConversationRecord {

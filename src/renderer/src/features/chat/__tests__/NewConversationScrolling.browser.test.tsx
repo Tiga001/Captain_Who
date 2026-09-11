@@ -5,13 +5,17 @@ import { render } from 'vitest-browser-react'
 import { getFrontendCssVariables } from '../../../config/frontendConfig'
 import { getFrontendTheme } from '../../../config/frontendTheme'
 import type { ComposerCommandId } from '../components/ComposerCommands'
+import { singleFolderProject } from '../../projects/__tests__/projectFixtures'
 import '../../../styles/global.css'
 
-const { translate, selectAttachments, executeCommand } = vi.hoisted(() => ({
-  translate: (key: string) => key,
-  selectAttachments: vi.fn(async () => []),
-  executeCommand: vi.fn()
-}))
+const { translate, selectAttachments, executeCommand, openCreateProjectDialog } = vi.hoisted(
+  () => ({
+    translate: (key: string) => key,
+    selectAttachments: vi.fn(async () => []),
+    executeCommand: vi.fn(),
+    openCreateProjectDialog: vi.fn<() => Promise<unknown>>(async () => null)
+  })
+)
 
 vi.mock('../../../config/FrontendConfigProvider', () => ({
   useFrontendConfig: () => ({ t: translate })
@@ -29,17 +33,22 @@ vi.mock('../../../config/ModelSettingsProvider', () => ({
     }))
   })
 }))
-vi.mock('../../../config/ProjectSettingsProvider', () => ({
-  useProjectSettings: () => ({
-    projects: Array.from({ length: 20 }, (_, index) => ({
-      id: `project-${index}`,
-      name: `Project ${index}`,
-      path: `/workspace/${index}`,
-      createdAt: index
-    })),
-    selectProjectDirectory: vi.fn()
-  })
-}))
+vi.mock('../../../config/ProjectSettingsProvider', async () => {
+  const { singleFolderProject } = await import('../../projects/__tests__/projectFixtures')
+  return {
+    useProjectSettings: () => ({
+      projects: Array.from({ length: 20 }, (_, index) =>
+        singleFolderProject({
+          id: `project-${index}`,
+          name: `Project ${index}`,
+          path: `/workspace/${index}`,
+          createdAt: index
+        })
+      ),
+      openCreateProjectDialog
+    })
+  }
+})
 vi.mock('../../skills/skillsClient', () => ({
   listSkills: async () => ({
     schemaVersion: 4,
@@ -286,6 +295,24 @@ describe('New conversation with a half-height bottom panel', () => {
     await expect
       .element(page.getByRole('heading', { name: 'chat.newConversationPrompt.voyage.title' }))
       .toBeVisible()
+  })
+
+  it('binds the draft to the project created through the dialog and closes the menu', async () => {
+    openCreateProjectDialog.mockResolvedValueOnce(
+      singleFolderProject({
+        id: 'project-5',
+        name: 'Project 5',
+        path: '/workspace/5',
+        createdAt: 5
+      })
+    )
+    await render(<Workspace />)
+    await page.getByRole('button', { name: 'Project 0', exact: true }).click()
+    await expectFloatingMenu('.composer-project-menu')
+    await page.getByRole('button', { name: 'project.newProject', exact: true }).click()
+    expect(openCreateProjectDialog).toHaveBeenCalledOnce()
+    await expect.element(page.getByRole('button', { name: 'Project 5', exact: true })).toBeVisible()
+    expect(document.querySelector('.composer-project-menu')).toBeNull()
   })
 
   it('keeps project search and selection clickable beyond the scroller bounds', async () => {

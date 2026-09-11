@@ -1,20 +1,18 @@
 use rusqlite::{ffi, Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
 
-pub const STORAGE_SCHEMA_VERSION: i32 = 44;
+pub const STORAGE_SCHEMA_VERSION: i32 = 45;
 pub const DEVELOPMENT_STORAGE_SCHEMA_RESET_REQUIRED: &str =
     "development_storage_schema_reset_required";
 
 const CANONICAL_SCHEMA: &str = include_str!("canonical_schema.sql");
 const CANONICAL_SCHEMA_FINGERPRINT: &str =
-    "sha256:358ad31ab6d85de12e335afaeb51e41870fa25c1c7b5ea792c55c91b1ab0241a";
-const PREVIOUS_SCHEMA_FINGERPRINT: &str =
-    "sha256:7a3a86134a9ca406071f90839e3eceb5e74f24da212421aec20a2573f1120212";
-const CONTEXT_PROFILE_SCHEMA_MARKER: &str =
-    "-- Context profiles and immutable run admission policy, schema v44.";
+    "sha256:f8d106839487dda40070acc471675c9c4299bad1afb6aaf2a56d75807ce3b2f7";
 
-/// Initializes fresh storage or atomically upgrades the immediately preceding canonical schema.
-/// Other development schemas still require an explicit reset.
+/// Initializes fresh storage or validates the exact current canonical schema.
+///
+/// Development storage is never upgraded in place: every earlier schema requires an explicit
+/// reset through the development storage reset tool, which preserves configuration only.
 pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
     connection.execute_batch("PRAGMA foreign_keys = ON;")?;
 
@@ -23,19 +21,6 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
 
     if schema_version == 0 && object_count == 0 {
         return create_canonical_schema(connection);
-    }
-
-    if schema_version == 43 {
-        let transaction = connection.unchecked_transaction()?;
-        validate_schema_fingerprint(&transaction, PREVIOUS_SCHEMA_FINGERPRINT)?;
-        let additions = CANONICAL_SCHEMA
-            .split_once(CONTEXT_PROFILE_SCHEMA_MARKER)
-            .expect("canonical context profile migration suffix")
-            .1;
-        transaction.execute_batch(additions)?;
-        transaction.pragma_update(None, "user_version", STORAGE_SCHEMA_VERSION)?;
-        validate_canonical_schema(&transaction)?;
-        return transaction.commit();
     }
 
     if schema_version != STORAGE_SCHEMA_VERSION {
@@ -142,103 +127,127 @@ fn reset_required_error(detail: impl std::fmt::Display) -> rusqlite::Error {
 mod tests {
     use super::*;
 
-    #[test]
-    fn v43_upgrade_preserves_existing_data_and_installs_full_context_profile_once() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("existing.sqlite");
-        let connection = Connection::open(&path).unwrap();
-        connection
-            .execute_batch(
-                CANONICAL_SCHEMA
-                    .split_once(CONTEXT_PROFILE_SCHEMA_MARKER)
-                    .unwrap()
-                    .0,
-            )
+    const MULTI_FOLDER_PROJECT_SCHEMA_MARKER: &str = "-- Multi-folder project roots, schema v45.";
+    const V44_CANONICAL_SCHEMA_FINGERPRINT: &str =
+        "sha256:358ad31ab6d85de12e335afaeb51e41870fa25c1c7b5ea792c55c91b1ab0241a";
+    const PROJECTS_TABLE_V45: &str = "CREATE TABLE projects (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            pinned_at INTEGER,
+            updated_at INTEGER NOT NULL
+        );";
+    const PROJECTS_TABLE_V44: &str = "CREATE TABLE projects (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            path TEXT,
+            created_at INTEGER NOT NULL,
+            pinned_at INTEGER,
+            updated_at INTEGER NOT NULL
+        );";
+
+    /// Rebuilds the exact v44 catalog: single-path projects and no `project_folders` table.
+    fn v44_canonical_schema() -> String {
+        let (before_multi_folder, _) = CANONICAL_SCHEMA
+            .split_once(MULTI_FOLDER_PROJECT_SCHEMA_MARKER)
             .unwrap();
-        connection.pragma_update(None, "user_version", 43).unwrap();
-        connection.execute_batch("INSERT INTO agent_prompt_preferences(id,work_mode,tone,detail_level,custom_instructions,updated_at) VALUES ('default','general','friendly','high','Keep my full-mode preferences',7);").unwrap();
-        connection.execute_batch("INSERT INTO conversations(id,title,created_at,updated_at) VALUES ('kept','Existing chat',1,1); INSERT INTO messages(id,conversation_id,role,content,created_at,position) VALUES ('kept-user','kept','user','Do not delete this history',1,0);").unwrap();
-        run_migrations(&connection).unwrap();
-        assert_eq!(read_schema_version(&connection).unwrap(), 44);
-        assert_eq!(
-            connection.query_row(
-                "SELECT context_profile,work_mode,tone,detail_level,custom_instructions,updated_at FROM agent_prompt_preferences",
-                [],
-                |row| Ok((row.get::<_, String>(0)?,row.get::<_, String>(1)?,row.get::<_, String>(2)?,row.get::<_, String>(3)?,row.get::<_, String>(4)?,row.get::<_, i64>(5)?)),
-            ).unwrap(),
-            ("full".into(),"general".into(),"friendly".into(),"high".into(),"Keep my full-mode preferences".into(),7)
-        );
-        assert_eq!(
-            connection
-                .query_row(
-                    "SELECT content FROM messages WHERE id='kept-user'",
-                    [],
-                    |row| row.get::<_, String>(0)
-                )
-                .unwrap(),
-            "Do not delete this history"
-        );
-        assert_eq!(
-            connection
-                .query_row(
-                    "SELECT enabled,revision,updated_at FROM agent_collaboration_settings",
-                    [],
-                    |row| Ok((
-                        row.get::<_, i64>(0)?,
-                        row.get::<_, i64>(1)?,
-                        row.get::<_, i64>(2)?
-                    ))
-                )
-                .unwrap(),
-            (1, 1, 0)
-        );
-        connection
-            .execute(
-                "UPDATE agent_collaboration_settings SET enabled=0,revision=2,updated_at=1",
-                [],
-            )
-            .unwrap();
-        drop(connection);
-        let reopened = Connection::open(&path).unwrap();
-        run_migrations(&reopened).unwrap();
-        assert_eq!(
-            reopened
-                .query_row(
-                    "SELECT context_profile FROM agent_prompt_preferences",
-                    [],
-                    |row| row.get::<_, String>(0)
-                )
-                .unwrap(),
-            "full"
-        );
-        assert!(!reopened
-            .query_row(
-                "SELECT enabled FROM agent_collaboration_settings",
-                [],
-                |row| row.get::<_, bool>(0)
-            )
-            .unwrap());
+        assert!(before_multi_folder.contains(PROJECTS_TABLE_V45));
+        before_multi_folder.replacen(PROJECTS_TABLE_V45, PROJECTS_TABLE_V44, 1)
     }
 
     #[test]
-    fn tampered_v43_is_rejected_before_migration_writes() {
-        let connection = Connection::open_in_memory().unwrap();
+    fn a_v44_database_requires_reset_without_upgrading_single_path_projects() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("v44.sqlite");
+        let connection = Connection::open(&path).unwrap();
+        connection.execute_batch(&v44_canonical_schema()).unwrap();
+        connection.pragma_update(None, "user_version", 44).unwrap();
+        assert_eq!(
+            schema_fingerprint(&connection).unwrap(),
+            V44_CANONICAL_SCHEMA_FINGERPRINT,
+            "the rebuilt v44 fixture must match the last single-path development catalog"
+        );
         connection
             .execute_batch(
-                CANONICAL_SCHEMA
-                    .split_once(CONTEXT_PROFILE_SCHEMA_MARKER)
-                    .unwrap()
-                    .0,
+                "INSERT INTO projects(id,name,path,created_at,updated_at)
+                 VALUES ('legacy-project','旧项目','/tmp/legacy',1,1);
+                 INSERT INTO conversations(id,project_id,title,created_at,updated_at)
+                 VALUES ('legacy-chat','legacy-project','旧对话',1,1);",
             )
             .unwrap();
-        connection.pragma_update(None, "user_version", 43).unwrap();
+        drop(connection);
+        let before = std::fs::read(&path).unwrap();
+
+        for _ in 0..2 {
+            let connection = Connection::open(&path).unwrap();
+            let error = run_migrations(&connection).unwrap_err();
+            assert!(error
+                .to_string()
+                .contains(DEVELOPMENT_STORAGE_SCHEMA_RESET_REQUIRED));
+            assert!(error.to_string().contains(&format!(
+                "expected schema version {STORAGE_SCHEMA_VERSION}, found 44"
+            )));
+            assert_eq!(read_schema_version(&connection).unwrap(), 44);
+            assert_eq!(
+                schema_fingerprint(&connection).unwrap(),
+                V44_CANONICAL_SCHEMA_FINGERPRINT
+            );
+            assert!(connection
+                .query_row(
+                    "SELECT 1 FROM sqlite_schema WHERE name = 'project_folders'",
+                    [],
+                    |_| Ok(()),
+                )
+                .optional()
+                .unwrap()
+                .is_none());
+            drop(connection);
+        }
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn fresh_database_stores_project_folders_with_a_single_primary_per_project() {
+        let connection = Connection::open_in_memory().unwrap();
+        run_migrations(&connection).unwrap();
         connection
-            .execute_batch("DROP TRIGGER conversation_history_fts_message_insert;")
+            .execute_batch(
+                "INSERT INTO projects(id,name,created_at,updated_at) VALUES ('project','P',1,1);
+                 INSERT INTO project_folders(id,project_id,path,alias,role,sort_order,created_at)
+                 VALUES ('folder-a','project','/tmp/a','a','primary',0,1);
+                 INSERT INTO project_folders(id,project_id,path,alias,role,sort_order,created_at)
+                 VALUES ('folder-b','project','/tmp/b','b','auxiliary',1,1);",
+            )
             .unwrap();
-        let before = schema_fingerprint(&connection).unwrap();
-        assert!(run_migrations(&connection).is_err());
-        assert_eq!(read_schema_version(&connection).unwrap(), 43);
-        assert_eq!(schema_fingerprint(&connection).unwrap(), before);
+        let second_primary = connection.execute(
+            "INSERT INTO project_folders(id,project_id,path,alias,role,sort_order,created_at)
+             VALUES ('folder-c','project','/tmp/c','c','primary',2,1)",
+            [],
+        );
+        assert!(
+            second_primary.is_err(),
+            "only one primary folder per project"
+        );
+        let duplicate_alias = connection.execute(
+            "INSERT INTO project_folders(id,project_id,path,alias,role,sort_order,created_at)
+             VALUES ('folder-d','project','/tmp/d','a','auxiliary',3,1)",
+            [],
+        );
+        assert!(
+            duplicate_alias.is_err(),
+            "aliases are unique within a project"
+        );
+        connection
+            .execute("DELETE FROM projects WHERE id = 'project'", [])
+            .unwrap();
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM project_folders", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0,
+            "folders cascade with their project"
+        );
     }
 
     #[test]
@@ -1289,10 +1298,10 @@ CREATE TABLE model_provider_credential_cleanup (
 
         connection
             .execute_batch(
-                "INSERT INTO projects (id, name, path, created_at, pinned_at, updated_at)
+                "INSERT INTO projects (id, name, created_at, pinned_at, updated_at)
                  VALUES
-                    ('project-a', 'Project A', NULL, 1, NULL, 1),
-                    ('project-b', 'Project B', NULL, 1, NULL, 1);",
+                    ('project-a', 'Project A', 1, NULL, 1),
+                    ('project-b', 'Project B', 1, NULL, 1);",
             )
             .unwrap();
 

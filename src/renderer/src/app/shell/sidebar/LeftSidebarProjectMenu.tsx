@@ -2,14 +2,14 @@
 import { Archive, FolderOpen, PencilLine, Pin, X } from 'lucide-react'
 import type { RefObject } from 'react'
 import type { TranslationKey } from '../../../config/frontendTranslations'
-import type { AppProject } from '../../../config/projectConfig'
+import { primaryProjectPath, type AppProject } from '../../../config/projectConfig'
 import type { SidebarMenuPosition } from './leftSidebarTypes'
 
 interface LeftSidebarProjectMenuProps {
   isProjectPinned: boolean
   onArchiveConversations: () => void
+  onEditProject: () => void
   onRemoveProject: () => void
-  onRenameProject: () => void
   onShowInFolder: () => void
   onTogglePinProject: () => void
   project: AppProject
@@ -22,8 +22,8 @@ interface LeftSidebarProjectMenuProps {
 export function LeftSidebarProjectMenu({
   isProjectPinned,
   onArchiveConversations,
+  onEditProject,
   onRemoveProject,
-  onRenameProject,
   onShowInFolder,
   onTogglePinProject,
   project,
@@ -52,7 +52,7 @@ export function LeftSidebarProjectMenu({
         className="left-sidebar__project-menu-item"
         type="button"
         role="menuitem"
-        disabled={!project.path}
+        disabled={!primaryProjectPath(project)}
         onClick={onShowInFolder}
       >
         <FolderOpen aria-hidden="true" />
@@ -62,10 +62,10 @@ export function LeftSidebarProjectMenu({
         className="left-sidebar__project-menu-item"
         type="button"
         role="menuitem"
-        onClick={onRenameProject}
+        onClick={onEditProject}
       >
         <PencilLine aria-hidden="true" />
-        <span>{t('project.renameProject')}</span>
+        <span>{t('project.editProject')}</span>
       </button>
       <button
         className="left-sidebar__project-menu-item"

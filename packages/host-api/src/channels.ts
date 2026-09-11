@@ -198,6 +198,7 @@ export const HOST_CHANNELS = {
   },
   storage: {
     modelSettingsChanged: 'host:storage.modelSettingsChanged',
+    createProject: 'host:storage.createProject',
     deleteChatMessages: 'host:storage.deleteChatMessages',
     deleteConversation: 'host:storage.deleteConversation',
     deleteProject: 'host:storage.deleteProject',
@@ -216,6 +217,7 @@ export const HOST_CHANNELS = {
     resolveProviderVendorModelPolicy: 'host:storage.resolveProviderVendorModelPolicy',
     loadProjects: 'host:storage.loadProjects',
     loadUiPreferences: 'host:storage.loadUiPreferences',
+    pickProjectFolder: 'host:storage.pickProjectFolder',
     revealProjectFile: 'host:storage.revealProjectFile',
     saveAgentPromptPreferences: 'host:storage.saveAgentPromptPreferences',
     saveChatMessageState: 'host:storage.saveChatMessageState',
@@ -227,8 +229,8 @@ export const HOST_CHANNELS = {
     saveProject: 'host:storage.saveProject',
     saveUiPreferences: 'host:storage.saveUiPreferences',
     selectProfileAvatar: 'host:storage.selectProfileAvatar',
-    selectProjectDirectory: 'host:storage.selectProjectDirectory',
     showProjectInFolder: 'host:storage.showProjectInFolder',
+    updateProject: 'host:storage.updateProject',
     upsertChatMessages: 'host:storage.upsertChatMessages'
   },
   terminal: {

@@ -7,7 +7,10 @@ import {
   parseStorageForkConversationRequest,
   parseStorageModelSettingsRecord,
   parseStorageModelSettingsUpdateRecord,
-  parseStorageModelSettingsValidationErrorData
+  parseStorageModelSettingsValidationErrorData,
+  parseStorageProjectCreateInput,
+  parseStorageProjectUpdateInput,
+  parseStorageProjectValidationErrorData
 } from './storageParsers'
 
 describe('Provider Profile UI descriptor parser', () => {
@@ -279,6 +282,102 @@ describe('model settings validation error parser', () => {
   ])('rejects malformed, oversized, or expanded error data %#', (value) => {
     expect(() => parseStorageModelSettingsValidationErrorData(value)).toThrow(
       'Invalid storage model settings validation error data'
+    )
+  })
+})
+
+describe('multi-folder project input parsers', () => {
+  const folders = [
+    { path: '/workspace/app', role: 'primary' },
+    { id: 'folder-docs', path: '/workspace/docs', role: 'auxiliary' }
+  ] as const
+  const create = { name: 'Wire workspace', folders } as const
+  const update = { projectId: 'project-1', ...create } as const
+
+  it('accepts the exact create and update shapes and drops null folder ids', () => {
+    expect(parseStorageProjectCreateInput(create)).toEqual(create)
+    expect(parseStorageProjectUpdateInput(update)).toEqual(update)
+    expect(
+      parseStorageProjectCreateInput({
+        ...create,
+        folders: [{ id: null, path: '/workspace/app', role: 'primary' }]
+      })
+    ).toEqual({ ...create, folders: [{ path: '/workspace/app', role: 'primary' }] })
+  })
+
+  it('leaves semantic checks (empty name, primary count, existence) to Main', () => {
+    expect(parseStorageProjectCreateInput({ name: '   ', folders: [] })).toEqual({
+      name: '   ',
+      folders: []
+    })
+    expect(
+      parseStorageProjectCreateInput({
+        ...create,
+        folders: [
+          { path: '/a', role: 'auxiliary' },
+          { path: '/b', role: 'auxiliary' }
+        ]
+      }).folders
+    ).toHaveLength(2)
+  })
+
+  it.each([
+    null,
+    { ...create, id: 'client-chosen-id' },
+    { ...create, name: 'x'.repeat(513) },
+    { ...create, folders: 'not-an-array' },
+    { ...create, folders: [{ path: '', role: 'primary' }] },
+    { ...create, folders: [{ path: '/workspace/app', role: 'main' }] },
+    { ...create, folders: [{ path: '/workspace/app', role: 'primary', alias: 'chosen' }] },
+    { ...create, folders: [{ id: '', path: '/workspace/app', role: 'primary' }] },
+    {
+      ...create,
+      folders: Array.from({ length: 33 }, (_, index) => ({
+        path: `/workspace/${index}`,
+        role: index === 0 ? 'primary' : 'auxiliary'
+      }))
+    }
+  ])('rejects malformed, expanded, or oversized create input %#', (value) => {
+    expect(() => parseStorageProjectCreateInput(value)).toThrow(
+      'Invalid storage project create input'
+    )
+  })
+
+  it.each([
+    { ...update, projectId: '' },
+    { ...update, projectId: 'p'.repeat(129) },
+    { ...update, createdAt: 1 },
+    { ...update, pinnedAt: 1 }
+  ])('rejects update input that tries to set identity or pin state %#', (value) => {
+    expect(() => parseStorageProjectUpdateInput(value)).toThrow(
+      'Invalid storage project update input'
+    )
+  })
+})
+
+describe('project validation error parser', () => {
+  const missing = {
+    kind: 'project_validation',
+    code: 'folder_missing',
+    path: '/workspace/missing'
+  } as const
+
+  it('accepts every bounded validation code with an optional path', () => {
+    expect(parseStorageProjectValidationErrorData(missing)).toEqual(missing)
+    expect(
+      parseStorageProjectValidationErrorData({ kind: 'project_validation', code: 'name_required' })
+    ).toEqual({ kind: 'project_validation', code: 'name_required' })
+  })
+
+  it.each([
+    null,
+    { ...missing, kind: 'database_error' },
+    { ...missing, code: 'disk_full' },
+    { ...missing, path: 'x'.repeat(16_385) },
+    { ...missing, sql: 'private schema detail' }
+  ])('rejects malformed, oversized, or expanded error data %#', (value) => {
+    expect(() => parseStorageProjectValidationErrorData(value)).toThrow(
+      'Invalid storage project validation error data'
     )
   })
 })

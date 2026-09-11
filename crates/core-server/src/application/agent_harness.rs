@@ -1329,13 +1329,12 @@ mod tests {
             StorageService::open(&fixture.path().join("agent-harness-catalog.sqlite")).unwrap(),
         );
         storage
-            .save_project(ProjectRecord {
-                id: "project-catalog".to_string(),
-                name: "Catalog".to_string(),
-                path: Some(fixture.path().to_string_lossy().into_owned()),
-                created_at: 1,
-                pinned_at: None,
-            })
+            .save_project(ProjectRecord::with_primary_folder(
+                "project-catalog".to_string(),
+                "Catalog".to_string(),
+                fixture.path().to_string_lossy().into_owned(),
+                1,
+            ))
             .unwrap();
         storage
             .save_model_settings(ModelSettingsRecord {

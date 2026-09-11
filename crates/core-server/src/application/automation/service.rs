@@ -657,8 +657,7 @@ impl<'a> AutomationService<'a> {
                     return Ok(Some(TargetBlock::PROJECT_MISSING));
                 };
                 if project
-                    .path
-                    .as_deref()
+                    .primary_path()
                     .is_none_or(|path| !Path::new(path).is_dir())
                 {
                     return Ok(Some(TargetBlock::PROJECT_PATH_MISSING));
@@ -706,8 +705,7 @@ impl<'a> AutomationService<'a> {
                 return Ok(Some(TargetBlock::PROJECT_MISSING));
             };
             if project
-                .path
-                .as_deref()
+                .primary_path()
                 .is_none_or(|path| !Path::new(path).is_dir())
             {
                 return Ok(Some(TargetBlock::PROJECT_PATH_MISSING));
@@ -812,8 +810,7 @@ fn resolve_target(
                             )
                         })?;
                     if project
-                        .path
-                        .as_deref()
+                        .primary_path()
                         .is_none_or(|path| !Path::new(path).is_dir())
                     {
                         return Err(AutomationServiceError::target_invalid(
@@ -904,8 +901,7 @@ fn resolve_target(
                             )
                         })?;
                     if project
-                        .path
-                        .as_deref()
+                        .primary_path()
                         .is_none_or(|path| !Path::new(path).is_dir())
                     {
                         return Err(AutomationServiceError::target_invalid(

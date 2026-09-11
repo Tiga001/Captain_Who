@@ -1434,13 +1434,12 @@ fn cached_context_preview_measures_skill_without_polluting_durable_revision() {
     let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
     storage.save_model_settings(test_model_settings()).unwrap();
     storage
-        .save_project(ProjectRecord {
-            id: "project-preview-skill".to_string(),
-            name: "Preview workspace".to_string(),
-            path: Some(workspace.to_string_lossy().into_owned()),
-            created_at: 1,
-            pinned_at: None,
-        })
+        .save_project(ProjectRecord::with_primary_folder(
+            "project-preview-skill".to_string(),
+            "Preview workspace".to_string(),
+            workspace.to_string_lossy().into_owned(),
+            1,
+        ))
         .unwrap();
     storage
         .save_conversation(ChatConversationRecord {

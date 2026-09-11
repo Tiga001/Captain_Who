@@ -411,7 +411,7 @@ fn prepare_conversation_turn_from_source(
     let project = resolve_project(storage, resolved_project_id.as_deref())?;
     let workspace_root = project
         .as_ref()
-        .and_then(|project| project.path.as_deref())
+        .and_then(|project| project.primary_path())
         .map(PathBuf::from);
     let workspace = project
         .as_ref()
@@ -777,7 +777,7 @@ fn prepare_conversation_turn_from_source(
         workspace: project.as_ref().map(|project| AgentWorkspaceContext {
             project_id: Some(project.id.clone()),
             display_name: Some(project.name.clone()),
-            root_path: project.path.clone(),
+            root_path: project.primary_path().map(str::to_string),
         }),
         attachment_library: Some(attachment_library),
         permissions: input.permissions,

@@ -12,7 +12,11 @@ import {
   parseProviderVendorDescriptors,
   parseProviderVendorModelPolicyDescriptor
 } from '@mycopilot/protocol'
-import { unwrapHostInvocation } from '@mycopilot/host-api'
+import {
+  HostInvocationError,
+  unwrapHostInvocation,
+  type HostInvocationResult
+} from '@mycopilot/host-api'
 import type {
   ProviderProfileUiDescriptor,
   ProviderVendorDescriptor,
@@ -32,11 +36,15 @@ import type {
   StorageModelConfigRecord,
   StorageModelSettingsRecord,
   StorageModelSettingsUpdateRecord,
+  StorageProjectCreateInput,
+  StorageProjectFolderPick,
+  StorageProjectFolderRecord,
   StorageProjectRecord,
+  StorageProjectUpdateInput,
   StorageUiPreferencesRecord
 } from '@mycopilot/protocol'
 import type { ModelConfig, ModelConfigSaveDraft, SearchMode } from '../../config/modelConfig'
-import type { AppProject } from '../../config/projectConfig'
+import type { AppProject, AppProjectFolder } from '../../config/projectConfig'
 import type {
   ChatAgentRunView,
   ChatComposerDraft,
@@ -47,6 +55,10 @@ import type {
   ChatQueuedMessage
 } from '../chat/chatTypes'
 import { settleAgentRunToolActivities } from '../agentRun/agentEventReducer'
+import {
+  isProjectValidationErrorData,
+  ProjectValidationError
+} from '../projects/projectValidationError'
 import { normalizeSkillSelections } from '../skills/skillSelection'
 import { hostClient } from '../../host/hostClient'
 import { parsePersistedAgentRunJson, stringifyPersistedAgentRun } from './persistedAgentRun'
@@ -166,11 +178,26 @@ export async function loadProjects(): Promise<AppProject[]> {
   return (await hostClient.storage.loadProjects()).map(mapProjectFromStorage)
 }
 
-export async function selectProjectDirectory(): Promise<AppProject | null> {
-  const project = await hostClient.storage.selectProjectDirectory()
-  return project ? mapProjectFromStorage(project) : null
+export async function pickProjectFolder(): Promise<StorageProjectFolderPick | null> {
+  return hostClient.storage.pickProjectFolder()
 }
 
+function unwrapProjectMutation(result: HostInvocationResult<StorageProjectRecord>): AppProject {
+  if (result.ok) return mapProjectFromStorage(result.value)
+  const data = result.error.data
+  if (isProjectValidationErrorData(data)) throw new ProjectValidationError(data)
+  throw new HostInvocationError(result.error)
+}
+
+export async function createProject(input: StorageProjectCreateInput): Promise<AppProject> {
+  return unwrapProjectMutation(await hostClient.storage.createProject(input))
+}
+
+export async function updateProject(input: StorageProjectUpdateInput): Promise<AppProject> {
+  return unwrapProjectMutation(await hostClient.storage.updateProject(input))
+}
+
+/** Persists pin state; folder membership and names are edited through updateProject. */
 export async function saveProject(project: AppProject): Promise<AppProject> {
   return mapProjectFromStorage(await hostClient.storage.saveProject(mapProjectToStorage(project)))
 }
@@ -422,11 +449,24 @@ function mapModelToStorage(
   }
 }
 
+function mapProjectFolderFromStorage(folder: StorageProjectFolderRecord): AppProjectFolder {
+  return {
+    id: folder.id,
+    path: folder.path,
+    alias: folder.alias,
+    role: folder.role,
+    sortOrder: folder.sortOrder,
+    createdAt: folder.createdAt
+  }
+}
+
 function mapProjectFromStorage(project: StorageProjectRecord): AppProject {
   return {
     id: project.id,
     name: project.name,
-    path: project.path ?? undefined,
+    folders: [...project.folders]
+      .sort((left, right) => left.sortOrder - right.sortOrder)
+      .map(mapProjectFolderFromStorage),
     createdAt: project.createdAt,
     pinnedAt: project.pinnedAt ?? null
   }
@@ -436,7 +476,14 @@ function mapProjectToStorage(project: AppProject): StorageProjectRecord {
   return {
     id: project.id,
     name: project.name,
-    path: project.path ?? null,
+    folders: project.folders.map((folder) => ({
+      id: folder.id,
+      path: folder.path,
+      alias: folder.alias,
+      role: folder.role,
+      sortOrder: folder.sortOrder,
+      createdAt: folder.createdAt
+    })),
     createdAt: project.createdAt,
     pinnedAt: project.pinnedAt ?? null
   }

@@ -86,13 +86,7 @@ async fn lazy_root_has_a_stable_parent_name_for_child_messages_during_approval()
     let database_path = fixture.path().join("parent-name-approval.sqlite");
     let storage = Arc::new(StorageService::open(&database_path).unwrap());
     storage
-        .save_project(ProjectRecord {
-            id: PROJECT.to_string(),
-            name: "Parent name approval".to_string(),
-            path: Some(fixture.path().to_string_lossy().into_owned()),
-            created_at: 1,
-            pinned_at: None,
-        })
+        .save_project(ProjectRecord::with_primary_folder(PROJECT.to_string(), "Parent name approval".to_string(), fixture.path().to_string_lossy().into_owned(), 1))
         .unwrap();
     let mut settings = test_model_settings();
     settings.api_url = format!("http://{address}/v1/chat/completions");

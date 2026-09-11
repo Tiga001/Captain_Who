@@ -271,13 +271,12 @@ mod tests {
         let storage = StorageService::open(&database_path).unwrap();
         storage.save_model_settings(model_settings()).unwrap();
         let project_id = "project-notification".to_string();
-        let project = ProjectRecord {
-            id: project_id.clone(),
-            name: "Notification project".to_string(),
-            path: Some(temporary.path().to_string_lossy().to_string()),
-            created_at: mycopilot_core::storage::now_ms(),
-            pinned_at: None,
-        };
+        let project = ProjectRecord::with_primary_folder(
+            project_id.clone(),
+            "Notification project".to_string(),
+            temporary.path().to_string_lossy().to_string(),
+            mycopilot_core::storage::now_ms(),
+        );
         storage.save_project(project).unwrap();
         let created: AutomationTaskDto = serde_json::from_value(
             request(
@@ -423,13 +422,12 @@ mod tests {
         storage.save_model_settings(model_settings()).unwrap();
         let project_id = "project-notification-validation".to_string();
         storage
-            .save_project(ProjectRecord {
-                id: project_id.clone(),
-                name: "Notification validation project".to_string(),
-                path: Some(temporary.path().to_string_lossy().to_string()),
-                created_at: mycopilot_core::storage::now_ms(),
-                pinned_at: None,
-            })
+            .save_project(ProjectRecord::with_primary_folder(
+                project_id.clone(),
+                "Notification validation project".to_string(),
+                temporary.path().to_string_lossy().to_string(),
+                mycopilot_core::storage::now_ms(),
+            ))
             .unwrap();
         let created: AutomationTaskDto = serde_json::from_value(
             request(
@@ -537,13 +535,12 @@ mod tests {
             Arc::new(StorageService::open(&temporary.path().join("storage.sqlite")).unwrap());
         storage.save_model_settings(model_settings()).unwrap();
         storage
-            .save_project(ProjectRecord {
-                id: "project-automation".to_string(),
-                name: "Automation Project".to_string(),
-                path: Some(workspace.to_string_lossy().into_owned()),
-                created_at: 1,
-                pinned_at: None,
-            })
+            .save_project(ProjectRecord::with_primary_folder(
+                "project-automation".to_string(),
+                "Automation Project".to_string(),
+                workspace.to_string_lossy().into_owned(),
+                1,
+            ))
             .unwrap();
 
         let create = create_input("project-automation", "create-request-1");
@@ -821,13 +818,12 @@ mod tests {
         let storage = StorageService::open(&temporary.path().join("storage.sqlite")).unwrap();
         storage.save_model_settings(model_settings()).unwrap();
         storage
-            .save_project(ProjectRecord {
-                id: "project-automation".to_string(),
-                name: "Automation Project".to_string(),
-                path: Some(workspace.to_string_lossy().into_owned()),
-                created_at: 1,
-                pinned_at: None,
-            })
+            .save_project(ProjectRecord::with_primary_folder(
+                "project-automation".to_string(),
+                "Automation Project".to_string(),
+                workspace.to_string_lossy().into_owned(),
+                1,
+            ))
             .unwrap();
         let mut preferences = storage.load_ui_preferences().unwrap();
         preferences.full_permission_enabled = true;
@@ -892,13 +888,12 @@ mod tests {
         let storage = StorageService::open(&temporary.path().join("storage.sqlite")).unwrap();
         storage.save_model_settings(model_settings()).unwrap();
         storage
-            .save_project(ProjectRecord {
-                id: "project-automation".to_string(),
-                name: "Automation Project".to_string(),
-                path: Some(workspace.to_string_lossy().into_owned()),
-                created_at: 1,
-                pinned_at: None,
-            })
+            .save_project(ProjectRecord::with_primary_folder(
+                "project-automation".to_string(),
+                "Automation Project".to_string(),
+                workspace.to_string_lossy().into_owned(),
+                1,
+            ))
             .unwrap();
         let task: AutomationTaskDto = serde_json::from_value(
             request(

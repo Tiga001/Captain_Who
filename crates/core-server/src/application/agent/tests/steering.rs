@@ -1556,13 +1556,12 @@ async fn approval_retains_accepted_guidance_until_explicit_stop() {
     settings.api_url = format!("http://{address}/v1/chat/completions");
     storage.save_model_settings(settings).unwrap();
     storage
-        .save_project(ProjectRecord {
-            id: "project-approval-steer".to_string(),
-            name: "Approval steering".to_string(),
-            path: Some(workspace.to_string_lossy().into_owned()),
-            created_at: 1,
-            pinned_at: None,
-        })
+        .save_project(ProjectRecord::with_primary_folder(
+            "project-approval-steer".to_string(),
+            "Approval steering".to_string(),
+            workspace.to_string_lossy().into_owned(),
+            1,
+        ))
         .unwrap();
     let service = AgentService::new(storage.clone());
     let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
@@ -1709,13 +1708,12 @@ async fn approved_run_reopens_steering_and_applies_guidance_to_the_same_turn() {
     settings.api_url = format!("http://{address}/v1/chat/completions");
     storage.save_model_settings(settings).unwrap();
     storage
-        .save_project(ProjectRecord {
-            id: "project-approval-resume-steer".to_string(),
-            name: "Approval resume steering".to_string(),
-            path: Some(workspace.to_string_lossy().into_owned()),
-            created_at: 1,
-            pinned_at: None,
-        })
+        .save_project(ProjectRecord::with_primary_folder(
+            "project-approval-resume-steer".to_string(),
+            "Approval resume steering".to_string(),
+            workspace.to_string_lossy().into_owned(),
+            1,
+        ))
         .unwrap();
     let service = AgentService::new(storage.clone());
     let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
@@ -1917,13 +1915,12 @@ async fn guidance_is_accepted_during_approved_command_and_survives_a_second_reje
     settings.api_url = format!("http://{address}/v1/chat/completions");
     storage.save_model_settings(settings).unwrap();
     storage
-        .save_project(ProjectRecord {
-            id: "project-command-guidance".to_string(),
-            name: "Command guidance".to_string(),
-            path: Some(workspace.to_string_lossy().into_owned()),
-            created_at: 1,
-            pinned_at: None,
-        })
+        .save_project(ProjectRecord::with_primary_folder(
+            "project-command-guidance".to_string(),
+            "Command guidance".to_string(),
+            workspace.to_string_lossy().into_owned(),
+            1,
+        ))
         .unwrap();
     let service = AgentService::new(storage.clone());
     let (notifications, mut events) = tokio::sync::mpsc::unbounded_channel();

@@ -15,19 +15,14 @@ interface LeftSidebarDialogsProps {
   onCancelArchiveProject: () => void
   onCancelBulkArchive: () => void
   onCancelConversationRename: () => void
-  onCancelProjectRename: () => void
   onCancelRemoveProject: () => void
   onConfirmConversationRename: () => void
-  onConfirmProjectRename: () => void
   onConversationRenameValueChange: (value: string) => void
-  onProjectRenameValueChange: (value: string) => void
   onRemoveProject: (projectId: string) => Promise<boolean>
   pendingArchiveProject: AppProject | null
   pendingBulkArchiveScope: BulkArchiveScope | null
   pendingRemoveProject: AppProject | null
-  renameValue: string
   renamingConversation: SidebarConversation | null
-  renamingProject: AppProject | null
   t: (key: TranslationKey) => string
 }
 
@@ -41,37 +36,18 @@ export function LeftSidebarDialogs({
   onCancelArchiveProject,
   onCancelBulkArchive,
   onCancelConversationRename,
-  onCancelProjectRename,
   onCancelRemoveProject,
   onConfirmConversationRename,
-  onConfirmProjectRename,
   onConversationRenameValueChange,
-  onProjectRenameValueChange,
   onRemoveProject,
   pendingArchiveProject,
   pendingBulkArchiveScope,
   pendingRemoveProject,
-  renameValue,
   renamingConversation,
-  renamingProject,
   t
 }: LeftSidebarDialogsProps) {
   return (
     <>
-      {renamingProject && (
-        <TextInputDialog
-          title={t('project.renameTitle')}
-          description={t('project.renameDescription')}
-          value={renameValue}
-          confirmDisabled={!renameValue.trim()}
-          cancelLabel={t('project.cancel')}
-          confirmLabel={t('project.save')}
-          onCancel={onCancelProjectRename}
-          onConfirm={onConfirmProjectRename}
-          onValueChange={onProjectRenameValueChange}
-        />
-      )}
-
       {renamingConversation && (
         <TextInputDialog
           title={t('conversation.renameTitle')}

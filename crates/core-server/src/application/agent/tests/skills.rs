@@ -9,13 +9,12 @@ fn conversation_turn_resolves_skill_snapshot_before_persisting_the_run() {
     let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
     storage.save_model_settings(test_model_settings()).unwrap();
     storage
-        .save_project(ProjectRecord {
-            id: "project-skills".to_string(),
-            name: "Skill workspace".to_string(),
-            path: Some(workspace.to_string_lossy().into_owned()),
-            created_at: 1,
-            pinned_at: None,
-        })
+        .save_project(ProjectRecord::with_primary_folder(
+            "project-skills".to_string(),
+            "Skill workspace".to_string(),
+            workspace.to_string_lossy().into_owned(),
+            1,
+        ))
         .unwrap();
     let skills = SkillsService::new();
     let catalog = skills.list_workspace("project-skills", &workspace).unwrap();
@@ -67,13 +66,12 @@ fn bundled_skill_crosses_the_production_turn_boundary_without_public_instruction
     let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
     storage.save_model_settings(test_model_settings()).unwrap();
     storage
-        .save_project(ProjectRecord {
-            id: "project-bundled-skill".to_string(),
-            name: "Bundled Skill workspace".to_string(),
-            path: Some(workspace.to_string_lossy().into_owned()),
-            created_at: 1,
-            pinned_at: None,
-        })
+        .save_project(ProjectRecord::with_primary_folder(
+            "project-bundled-skill".to_string(),
+            "Bundled Skill workspace".to_string(),
+            workspace.to_string_lossy().into_owned(),
+            1,
+        ))
         .unwrap();
 
     let skills = SkillsService::new().with_bundled_source().unwrap();
@@ -575,13 +573,12 @@ fn installed_skill_crosses_the_production_turn_boundary_without_instruction_leak
     let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
     storage.save_model_settings(test_model_settings()).unwrap();
     storage
-        .save_project(ProjectRecord {
-            id: "project-installed-skill".to_string(),
-            name: "Installed Skill workspace".to_string(),
-            path: Some(workspace.to_string_lossy().into_owned()),
-            created_at: 1,
-            pinned_at: None,
-        })
+        .save_project(ProjectRecord::with_primary_folder(
+            "project-installed-skill".to_string(),
+            "Installed Skill workspace".to_string(),
+            workspace.to_string_lossy().into_owned(),
+            1,
+        ))
         .unwrap();
 
     let skills = Arc::new(
@@ -1096,13 +1093,12 @@ fn stale_skill_selection_fails_before_conversation_mutation() {
     let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
     storage.save_model_settings(test_model_settings()).unwrap();
     storage
-        .save_project(ProjectRecord {
-            id: "project-stale-skill".to_string(),
-            name: "Skill workspace".to_string(),
-            path: Some(workspace.to_string_lossy().into_owned()),
-            created_at: 1,
-            pinned_at: None,
-        })
+        .save_project(ProjectRecord::with_primary_folder(
+            "project-stale-skill".to_string(),
+            "Skill workspace".to_string(),
+            workspace.to_string_lossy().into_owned(),
+            1,
+        ))
         .unwrap();
     let skills = SkillsService::new();
     let catalog = skills
@@ -1156,13 +1152,12 @@ fn existing_conversation_rejects_cross_project_skill_turn_and_preview() {
         ("project-b", "Project B", &workspace_b),
     ] {
         storage
-            .save_project(ProjectRecord {
-                id: id.to_string(),
-                name: name.to_string(),
-                path: Some(path.to_string_lossy().into_owned()),
-                created_at: 1,
-                pinned_at: None,
-            })
+            .save_project(ProjectRecord::with_primary_folder(
+                id.to_string(),
+                name.to_string(),
+                path.to_string_lossy().into_owned(),
+                1,
+            ))
             .unwrap();
     }
     storage

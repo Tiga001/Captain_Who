@@ -79,13 +79,12 @@ impl FileTransactionHost {
         let storage =
             Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
         storage
-            .save_project(ProjectRecord {
-                id: "project-file-transaction-context".to_string(),
-                name: "File transaction context integration".to_string(),
-                path: Some(workspace.to_string_lossy().into_owned()),
-                created_at: 1,
-                pinned_at: None,
-            })
+            .save_project(ProjectRecord::with_primary_folder(
+                "project-file-transaction-context".to_string(),
+                "File transaction context integration".to_string(),
+                workspace.to_string_lossy().into_owned(),
+                1,
+            ))
             .unwrap();
         let mut settings = test_model_settings();
         settings.api_url = format!("http://{address}/v1/chat/completions");

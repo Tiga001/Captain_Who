@@ -4390,13 +4390,12 @@ fn every_restart_restores_outcome_unknown_conversation_and_project_fences() {
     let session_id = "cmd_0123456789abcdef0123456789abcdef";
     let project_id = "project-command-session-restart";
     storage
-        .save_project(ProjectRecord {
-            id: project_id.to_string(),
-            name: "Command session restart".to_string(),
-            path: Some(fixture.path().to_string_lossy().into_owned()),
-            created_at: 1,
-            pinned_at: None,
-        })
+        .save_project(ProjectRecord::with_primary_folder(
+            project_id.to_string(),
+            "Command session restart".to_string(),
+            fixture.path().to_string_lossy().into_owned(),
+            1,
+        ))
         .unwrap();
     storage
         .save_conversation(ChatConversationRecord {

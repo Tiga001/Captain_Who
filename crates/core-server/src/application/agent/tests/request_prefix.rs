@@ -163,13 +163,12 @@ async fn capture_read_then_thanks(save: RendererSave) -> Vec<Value> {
     })).unwrap()).unwrap();
     let model = &settings.models[0].id;
     storage
-        .save_project(ProjectRecord {
-            id: PROJECT.into(),
-            name: "Wire workspace".into(),
-            path: Some(workspace.to_string_lossy().into_owned()),
-            created_at: 1,
-            pinned_at: None,
-        })
+        .save_project(ProjectRecord::with_primary_folder(
+            PROJECT,
+            "Wire workspace",
+            workspace.to_string_lossy().into_owned(),
+            1,
+        ))
         .unwrap();
     storage
         .save_conversation(ChatConversationRecord {

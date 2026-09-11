@@ -143,7 +143,7 @@ export function ChatComposer({
 }: ChatComposerProps) {
   const { t } = useFrontendConfig()
   const { enabledModels } = useModelSettings()
-  const { projects, selectProjectDirectory } = useProjectSettings()
+  const { projects, openCreateProjectDialog } = useProjectSettings()
   const openImagePreview = useImagePreview()
   const commandListId = useId()
   const [isCommandMenuOpen, setIsCommandMenuOpen] = useState(false)
@@ -763,7 +763,8 @@ export function ChatComposer({
   }
 
   const handleSelectProjectDirectory = async () => {
-    const project = await selectProjectDirectory()
+    setIsProjectMenuOpen(false)
+    const project = await openCreateProjectDialog()
     if (!project) return
 
     updateDraft({

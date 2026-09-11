@@ -50,8 +50,8 @@ fn setup_tree() -> Connection {
     let mut connection = connection();
     connection
         .execute(
-            "INSERT INTO projects (id, name, path, created_at, pinned_at, updated_at)
-                 VALUES ('project-a', 'Project A', NULL, 1, NULL, 1)",
+            "INSERT INTO projects (id, name, created_at, pinned_at, updated_at)
+                 VALUES ('project-a', 'Project A', 1, NULL, 1)",
             [],
         )
         .unwrap();

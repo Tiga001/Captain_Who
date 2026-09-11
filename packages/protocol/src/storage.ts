@@ -293,12 +293,74 @@ export interface StorageModelSettingsValidationErrorData {
   displayName: string
 }
 
+/** Exactly one folder of a project is `primary`; it stays the working directory. */
+export type StorageProjectFolderRole = 'primary' | 'auxiliary'
+
+/** Upper bound on the folders a single project may reference. Mirrors Core. */
+export const MAX_PROJECT_FOLDERS = 32
+
+/**
+ * One filesystem root of a project. `alias` is assigned once by Main when the folder is added
+ * and stays stable; it is the project-unique name used to address the folder.
+ */
+export interface StorageProjectFolderRecord {
+  id: string
+  path: string
+  alias: string
+  role: StorageProjectFolderRole
+  sortOrder: number
+  createdAt: number
+}
+
 export interface StorageProjectRecord {
   id: string
   name: string
-  path?: string | null
+  /** Display order. Empty only for projects without a workspace. */
+  folders: StorageProjectFolderRecord[]
   createdAt: number
   pinnedAt?: number | null
+}
+
+/** One folder the user picked through the native directory dialog. */
+export interface StorageProjectFolderPick {
+  path: string
+  name: string
+}
+
+export interface StorageProjectFolderInput {
+  /** Existing folder id when editing a project; omitted for folders that were just added. */
+  id?: string | null
+  path: string
+  role: StorageProjectFolderRole
+}
+
+export interface StorageProjectCreateInput {
+  name: string
+  folders: StorageProjectFolderInput[]
+}
+
+export interface StorageProjectUpdateInput {
+  projectId: string
+  name: string
+  folders: StorageProjectFolderInput[]
+}
+
+export type StorageProjectValidationCode =
+  | 'name_required'
+  | 'folders_required'
+  | 'primary_required'
+  | 'too_many_folders'
+  | 'folder_missing'
+  | 'folder_duplicate'
+  | 'folder_nested'
+  | 'project_missing'
+
+/** Safe, renderer-visible rejection from the Main project create/update boundary. */
+export interface StorageProjectValidationErrorData {
+  kind: 'project_validation'
+  code: StorageProjectValidationCode
+  /** The offending folder path for folder-level codes. */
+  path?: string
 }
 
 export interface StorageChatMessageAttachmentRecord {

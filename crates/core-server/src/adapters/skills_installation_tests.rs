@@ -79,13 +79,12 @@ fn local_skill_installation_service_runs_the_complete_backend_lifecycle() {
 
     let storage = StorageService::open(&fixture.path().join("storage.sqlite")).unwrap();
     storage
-        .save_project(ProjectRecord {
-            id: "project-1".to_string(),
-            name: "Workspace".to_string(),
-            path: Some(workspace.to_string_lossy().into_owned()),
-            created_at: 1,
-            pinned_at: None,
-        })
+        .save_project(ProjectRecord::with_primary_folder(
+            "project-1".to_string(),
+            "Workspace".to_string(),
+            workspace.to_string_lossy().into_owned(),
+            1,
+        ))
         .unwrap();
     let catalog = SkillsService::new()
         .with_installed_source(&store_root)
@@ -420,13 +419,12 @@ async fn request_loop_serializes_install_before_the_following_catalog_read() {
     write_local_skill(&local_skill, "DISPATCHED_INSTALL_MARKER");
     let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
     storage
-        .save_project(ProjectRecord {
-            id: "project-1".to_string(),
-            name: "Workspace".to_string(),
-            path: Some(workspace.to_string_lossy().into_owned()),
-            created_at: 1,
-            pinned_at: None,
-        })
+        .save_project(ProjectRecord::with_primary_folder(
+            "project-1".to_string(),
+            "Workspace".to_string(),
+            workspace.to_string_lossy().into_owned(),
+            1,
+        ))
         .unwrap();
     let catalog = Arc::new(
         SkillsService::new()

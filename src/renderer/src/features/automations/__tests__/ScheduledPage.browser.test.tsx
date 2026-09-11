@@ -11,6 +11,7 @@ import {
   testConversation,
   testModel
 } from './automationUiFixtures'
+import { singleFolderProject } from '../../projects/__tests__/projectFixtures'
 import '../ScheduledPage.css'
 
 const service = vi.hoisted(() => ({
@@ -119,7 +120,7 @@ const props = {
   onOpenConversation: vi.fn(),
   onOpenPermissionSettings: vi.fn(),
   permissionModeAvailability: { custom: true, full: true },
-  projects: [{ id: 'project-1', name: 'Project One', createdAt: 1 }]
+  projects: [singleFolderProject({ id: 'project-1', name: 'Project One' })]
 }
 
 function ScheduledWidthHarness() {

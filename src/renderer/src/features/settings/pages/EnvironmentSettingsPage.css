@@ -46,12 +46,12 @@
 }
 
 .environment-projects__add-button:hover,
-.environment-project-card__delete:hover {
+.environment-project-card__action:hover {
   background: var(--mc-color-state-hover);
 }
 
 .environment-projects__add-button:focus-visible,
-.environment-project-card__delete:focus-visible {
+.environment-project-card__action:focus-visible {
   outline: 2px solid var(--mc-color-focus-ring);
   outline-offset: 2px;
 }
@@ -64,7 +64,7 @@
 
 .environment-project-card {
   display: grid;
-  grid-template-columns: auto auto minmax(0, 1fr) auto;
+  grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
   min-height: 56px;
   padding: 0 16px 0 22px;
@@ -95,17 +95,13 @@
   white-space: nowrap;
 }
 
-.environment-project-card__detail {
-  min-width: 0;
-  overflow: hidden;
-  color: var(--settings-content-muted-color);
-  font-size: var(--mc-font-size-xs);
-  line-height: var(--mc-line-height-normal);
-  text-overflow: ellipsis;
-  white-space: nowrap;
+.environment-project-card__actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
-.environment-project-card__delete {
+.environment-project-card__action {
   display: grid;
   width: 36px;
   height: 32px;
@@ -118,7 +114,7 @@
   cursor: pointer;
 }
 
-.environment-project-card__delete svg {
+.environment-project-card__action svg {
   width: var(--mc-icon-size-md);
   height: var(--mc-icon-size-md);
   stroke-width: var(--mc-icon-stroke-strong);
@@ -130,12 +126,7 @@
   }
 
   .environment-project-card {
-    grid-template-columns: auto minmax(0, 1fr) auto;
     padding: 14px 14px 14px 16px;
     gap: 8px 12px;
-  }
-
-  .environment-project-card__detail {
-    grid-column: 2 / 3;
   }
 }

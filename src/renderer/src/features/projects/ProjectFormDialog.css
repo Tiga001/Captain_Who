@@ -1,0 +1,210 @@
+.project-form-dialog {
+  gap: 6px;
+}
+
+.project-form-dialog__label {
+  margin-top: 10px;
+  color: var(--mc-color-text-muted);
+  font-size: var(--mc-font-size-xs);
+  font-weight: var(--mc-font-weight-strong);
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.project-form-dialog__name {
+  margin-top: 0;
+}
+
+.project-form-dialog__folders-header {
+  display: grid;
+  margin-top: 6px;
+  gap: 2px;
+}
+
+.project-form-dialog__hint {
+  margin: 0;
+  font-size: var(--mc-font-size-xs);
+  font-weight: var(--mc-font-weight-medium);
+}
+
+.project-form-dialog__folders {
+  display: grid;
+  margin: 4px 0 0;
+  padding: 0;
+  gap: 4px;
+  list-style: none;
+}
+
+.project-form-dialog__empty {
+  padding: 12px 14px;
+  color: var(--mc-color-text-muted);
+  background: var(--mc-color-surface-glass-input);
+  border: 1px dashed var(--mc-color-border-subtle);
+  border-radius: var(--mc-radius-row);
+  font-size: var(--mc-font-size-base);
+  font-weight: var(--mc-font-weight-medium);
+}
+
+.project-form-dialog__folder {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  align-items: center;
+  min-height: 52px;
+  padding: 8px 8px 8px 14px;
+  gap: 12px;
+  background: var(--mc-color-surface-glass-input);
+  border: 1px solid var(--mc-color-border-subtle);
+  border-radius: var(--mc-radius-row);
+}
+
+.project-form-dialog__folder > svg {
+  width: var(--mc-icon-size-md);
+  height: var(--mc-icon-size-md);
+  color: var(--mc-color-icon-muted);
+  stroke-width: var(--mc-icon-stroke-regular);
+}
+
+.project-form-dialog__folder-text {
+  display: grid;
+  min-width: 0;
+  gap: 1px;
+}
+
+.project-form-dialog__folder-name {
+  overflow: hidden;
+  color: var(--mc-color-sidebar-text-secondary);
+  font-size: var(--mc-font-size-base);
+  font-weight: var(--mc-font-weight-semibold);
+  line-height: var(--mc-line-height-normal);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.project-form-dialog__folder-path {
+  overflow: hidden;
+  color: var(--mc-color-text-muted);
+  font-size: var(--mc-font-size-xs);
+  line-height: var(--mc-line-height-normal);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.project-form-dialog__badge {
+  padding: 3px 9px;
+  color: var(--mc-color-text-muted);
+  background: var(--mc-color-surface-muted);
+  border-radius: var(--mc-radius-pill);
+  font-size: var(--mc-font-size-xs);
+  font-weight: var(--mc-font-weight-strong);
+  white-space: nowrap;
+}
+
+.project-form-dialog__folder-action {
+  padding: 4px 10px;
+  color: var(--mc-color-text-muted);
+  background: transparent;
+  border: 1px solid var(--mc-color-border-subtle);
+  border-radius: var(--mc-radius-pill);
+  font: inherit;
+  font-size: var(--mc-font-size-xs);
+  font-weight: var(--mc-font-weight-strong);
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.project-form-dialog__folder-action:hover:not(:disabled) {
+  color: var(--mc-color-sidebar-text-secondary);
+  background: var(--mc-color-state-hover);
+}
+
+.project-form-dialog__folder-remove {
+  display: grid;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  place-items: center;
+  color: var(--mc-color-icon-muted);
+  background: transparent;
+  border: 0;
+  border-radius: var(--mc-radius-pill);
+  cursor: pointer;
+}
+
+.project-form-dialog__folder-remove:hover:not(:disabled) {
+  color: var(--mc-color-icon-default);
+  background: var(--mc-color-state-hover);
+}
+
+.project-form-dialog__folder-remove svg {
+  width: 16px;
+  height: 16px;
+  stroke-width: var(--mc-icon-stroke-regular);
+}
+
+.project-form-dialog__add-folder {
+  display: inline-flex;
+  align-items: center;
+  justify-self: start;
+  height: 36px;
+  margin-top: 4px;
+  padding: 0 14px 0 10px;
+  gap: 6px;
+  color: var(--mc-color-sidebar-text-secondary);
+  background: var(--mc-color-surface-muted);
+  border: 0;
+  border-radius: var(--mc-radius-row);
+  font: inherit;
+  font-size: var(--mc-font-size-base);
+  font-weight: var(--mc-font-weight-display);
+  cursor: pointer;
+}
+
+.project-form-dialog__add-folder:hover:not(:disabled) {
+  background: var(--mc-color-state-hover);
+}
+
+.project-form-dialog__add-folder:disabled,
+.project-form-dialog__folder-action:disabled,
+.project-form-dialog__folder-remove:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+
+.project-form-dialog__add-folder svg {
+  width: 16px;
+  height: 16px;
+  stroke-width: var(--mc-icon-stroke-strong);
+}
+
+.project-form-dialog__error {
+  margin: 6px 0 0;
+  color: var(--mc-color-button-danger-soft-text);
+  font-size: var(--mc-font-size-xs);
+  font-weight: var(--mc-font-weight-strong);
+  overflow-wrap: anywhere;
+}
+
+.project-form-dialog__actions {
+  align-items: center;
+}
+
+.project-form-dialog__actions-spacer {
+  flex: 1 1 auto;
+}
+
+.project-form-dialog__remove-project {
+  padding: 0 12px;
+  color: var(--mc-color-button-danger-soft-text);
+  background: transparent;
+}
+
+.project-form-dialog__remove-project:hover:not(:disabled) {
+  background: var(--mc-color-button-danger-soft-bg);
+}
+
+.project-form-dialog__add-folder:focus-visible,
+.project-form-dialog__folder-action:focus-visible,
+.project-form-dialog__folder-remove:focus-visible {
+  outline: 2px solid var(--mc-color-focus-ring);
+  outline-offset: 2px;
+}

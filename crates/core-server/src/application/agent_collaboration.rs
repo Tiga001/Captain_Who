@@ -656,13 +656,11 @@ mod tests {
         let storage =
             Arc::new(StorageService::open(&directory.path().join("collaboration.sqlite")).unwrap());
         storage
-            .save_project(ProjectRecord {
-                id: "project-a".to_string(),
-                name: "Project A".to_string(),
-                path: None,
-                created_at: 1,
-                pinned_at: None,
-            })
+            .save_project(ProjectRecord::without_folders(
+                "project-a".to_string(),
+                "Project A".to_string(),
+                1,
+            ))
             .unwrap();
         storage
             .save_conversation_meta(ChatConversationMetaRecord {

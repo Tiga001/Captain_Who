@@ -1034,13 +1034,12 @@ async fn run_waiting_approval_restart_scenario(decision: RestartApprovalDecision
     );
     let project_id = format!("automation-approval-project-{label}");
     storage
-        .save_project(ProjectRecord {
-            id: project_id.clone(),
-            name: format!("Automation approval {label}"),
-            path: Some(workspace.to_string_lossy().into_owned()),
-            created_at: 1,
-            pinned_at: None,
-        })
+        .save_project(ProjectRecord::with_primary_folder(
+            project_id.clone(),
+            format!("Automation approval {label}"),
+            workspace.to_string_lossy().into_owned(),
+            1,
+        ))
         .unwrap();
     let mut settings = model_settings();
     settings.api_url = format!("http://{address}/v1/chat/completions");

@@ -121,8 +121,7 @@ pub(crate) fn resolve_project(
         .find(|project| project.id == project_id)
         .ok_or_else(|| format!("未找到项目：{project_id}"))?;
     if project
-        .path
-        .as_deref()
+        .primary_path()
         .map(str::trim)
         .filter(|path| !path.is_empty())
         .is_none()

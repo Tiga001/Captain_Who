@@ -995,13 +995,11 @@ fn sibling_conversation_usage_owners_remain_independent() {
     let fixture = tempdir().unwrap();
     let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
     storage
-        .save_project(ProjectRecord {
-            id: "project-shared".to_string(),
-            name: "Shared project".to_string(),
-            path: None,
-            created_at: 1,
-            pinned_at: None,
-        })
+        .save_project(ProjectRecord::without_folders(
+            "project-shared".to_string(),
+            "Shared project".to_string(),
+            1,
+        ))
         .unwrap();
     for (conversation_id, assistant_message_id, model_id) in [
         ("conversation-child-a", "assistant-child-a", "model-a"),

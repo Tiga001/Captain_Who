@@ -10,9 +10,10 @@ import type {
 import { homedir } from 'os'
 import { basename, extname, isAbsolute, join, relative, resolve } from 'path'
 import { readFile } from 'fs/promises'
-import type { StorageImageFileRecord, StorageProjectRecord } from '@mycopilot/protocol'
+import type { StorageImageFileRecord, StorageProjectFolderPick } from '@mycopilot/protocol'
 import { HOST_CHANNELS, type AppWindowState } from '@mycopilot/host-api'
 import { CoreServer } from './core/coreServer'
+import { primaryProjectFolderPath } from './projects/projectFolders'
 import { TerminalBridge } from './terminal/TerminalBridge'
 import { AttachmentDialogBridge } from './attachments/AttachmentDialogBridge'
 import { FaviconResourceCache } from './resources/FaviconResourceCache'
@@ -111,37 +112,25 @@ async function selectBrowserArtifactExportPath(
   return result.canceled || !result.filePath ? null : result.filePath
 }
 
-function createProjectRecord(directoryPath: string): StorageProjectRecord {
-  const now = Date.now()
-  const name = basename(directoryPath) || directoryPath
-  const slug = name
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-
-  return {
-    id: `project-${slug || 'workspace'}-${now}`,
-    name,
-    path: directoryPath,
-    createdAt: now,
-    pinnedAt: null
-  }
-}
-
-async function selectProjectDirectory(
+/**
+ * Lets the user pick one project folder. Nothing is persisted here: the renderer collects the
+ * picks in the project dialog and submits them through createProject/updateProject.
+ */
+async function pickProjectFolder(
   event: IpcMainInvokeEvent
-): Promise<StorageProjectRecord | null> {
+): Promise<StorageProjectFolderPick | null> {
   const result = await showOpenDialog(event, {
-    title: 'Select project directory',
+    title: 'Select project folder',
     properties: ['openDirectory', 'createDirectory']
   })
 
-  if (result.canceled || !result.filePaths[0]) {
+  const selectedPath = result.filePaths[0]
+  if (result.canceled || !selectedPath) {
     return null
   }
 
-  return createProjectRecord(result.filePaths[0])
+  const path = resolve(selectedPath)
+  return { path, name: basename(path) || path }
 }
 
 /** Selects one local Skill package root without granting the renderer broader filesystem access. */
@@ -183,9 +172,10 @@ async function selectProfileAvatar(event: IpcMainInvokeEvent): Promise<string | 
   return `data:${mimeType};base64,${data.toString('base64')}`
 }
 
+/** The primary folder remains the project's working directory for host-side file access. */
 async function getProjectPath(coreServer: CoreServer, projectId: string): Promise<string | null> {
   const projects = await coreServer.loadProjects()
-  return projects.find((project) => project.id === projectId)?.path ?? null
+  return primaryProjectFolderPath(projects.find((project) => project.id === projectId))
 }
 
 async function showProjectInFolder(coreServer: CoreServer, projectId: string): Promise<void> {
@@ -347,9 +337,9 @@ export function registerHostIpc(
   registerGitIpc(ipcMain, coreServer)
   registerStorageIpc(ipcMain, coreServer, {
     loadImageFile,
+    pickProjectFolder,
     revealProjectFile,
     selectProfileAvatar,
-    selectProjectDirectory,
     showProjectInFolder
   })
   registerWorkspaceFilesIpc(ipcMain, workspaceFilesService)

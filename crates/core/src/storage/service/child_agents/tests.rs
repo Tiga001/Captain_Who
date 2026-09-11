@@ -28,13 +28,11 @@ impl Fixture {
         let directory = tempfile::tempdir().unwrap();
         let service = StorageService::open(&directory.path().join("storage.sqlite")).unwrap();
         service
-            .save_project(ProjectRecord {
-                id: "project-a".to_string(),
-                name: "Project A".to_string(),
-                path: None,
-                created_at: 1,
-                pinned_at: None,
-            })
+            .save_project(ProjectRecord::without_folders(
+                "project-a".to_string(),
+                "Project A".to_string(),
+                1,
+            ))
             .unwrap();
         service
             .save_model_settings(model_settings(vec![

@@ -89,15 +89,19 @@ vi.mock('../../config/ModelSettingsProvider', () => ({
   })
 }))
 
-vi.mock('../../config/ProjectSettingsProvider', () => ({
-  useProjectSettings: () => ({
-    projects: [{ id: 'project-a', name: 'Project A', path: '/workspace/a', createdAt: 1 }],
-    deleteProject: vi.fn(),
-    renameProject: vi.fn(),
-    showProjectInFolder: vi.fn(),
-    togglePinProject: vi.fn()
-  })
-}))
+vi.mock('../../config/ProjectSettingsProvider', async () => {
+  const { singleFolderProject } = await import('../../features/projects/__tests__/projectFixtures')
+  return {
+    useProjectSettings: () => ({
+      projects: [singleFolderProject({ id: 'project-a', name: 'Project A', path: '/workspace/a' })],
+      deleteProject: vi.fn(),
+      openCreateProjectDialog: vi.fn(async () => null),
+      openEditProjectDialog: vi.fn(async () => 'cancelled'),
+      showProjectInFolder: vi.fn(),
+      togglePinProject: vi.fn()
+    })
+  }
+})
 
 vi.mock('../../components/toast/ToastContext', () => ({
   useToast: () => ({ showToast: vi.fn() })

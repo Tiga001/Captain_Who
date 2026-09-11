@@ -157,13 +157,12 @@ fn rewrite_is_atomic_idempotent_and_keeps_source_receipts_as_raw_facts() {
     let fixture = tempfile::tempdir().unwrap();
     let service = StorageService::open(&fixture.path().join("storage.sqlite")).unwrap();
     service
-        .save_project(ProjectRecord {
-            id: "project-1".to_string(),
-            name: "project-1".to_string(),
-            path: Some(fixture.path().to_string_lossy().into_owned()),
-            created_at: 1,
-            pinned_at: None,
-        })
+        .save_project(ProjectRecord::with_primary_folder(
+            "project-1".to_string(),
+            "project-1".to_string(),
+            fixture.path().to_string_lossy().into_owned(),
+            1,
+        ))
         .unwrap();
     let conversation_id = "conversation-rewrite-atomic";
     let (candidate, revision) = completed_source_turn(&service, conversation_id);
@@ -631,13 +630,12 @@ fn rewrite_rejects_a_source_that_owns_the_active_compaction_lineage() {
     let fixture = tempfile::tempdir().unwrap();
     let service = StorageService::open(&fixture.path().join("storage.sqlite")).unwrap();
     service
-        .save_project(ProjectRecord {
-            id: "project-1".to_string(),
-            name: "project-1".to_string(),
-            path: Some(fixture.path().to_string_lossy().into_owned()),
-            created_at: 1,
-            pinned_at: None,
-        })
+        .save_project(ProjectRecord::with_primary_folder(
+            "project-1".to_string(),
+            "project-1".to_string(),
+            fixture.path().to_string_lossy().into_owned(),
+            1,
+        ))
         .unwrap();
     let conversation_id = "conversation-rewrite-summary-owner";
     service
@@ -849,13 +847,12 @@ fn rewrite_rejects_an_active_command_session_without_hiding_the_source() {
     let fixture = tempfile::tempdir().unwrap();
     let service = StorageService::open(&fixture.path().join("storage.sqlite")).unwrap();
     service
-        .save_project(ProjectRecord {
-            id: "project-1".to_string(),
-            name: "project-1".to_string(),
-            path: Some(fixture.path().to_string_lossy().into_owned()),
-            created_at: 1,
-            pinned_at: None,
-        })
+        .save_project(ProjectRecord::with_primary_folder(
+            "project-1".to_string(),
+            "project-1".to_string(),
+            fixture.path().to_string_lossy().into_owned(),
+            1,
+        ))
         .unwrap();
     let conversation_id = "conversation-rewrite-command";
     completed_source_turn(&service, conversation_id);

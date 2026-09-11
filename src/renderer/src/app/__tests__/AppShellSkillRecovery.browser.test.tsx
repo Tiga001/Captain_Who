@@ -92,7 +92,23 @@ const testState = vi.hoisted(() => ({
       enabled: true
     }
   ],
-  projects: [{ id: 'project-a', name: 'Project A', path: '/workspace/a', createdAt: 1 }]
+  projects: [
+    {
+      id: 'project-a',
+      name: 'Project A',
+      folders: [
+        {
+          id: 'project-a-primary',
+          path: '/workspace/a',
+          alias: 'a',
+          role: 'primary' as const,
+          sortOrder: 0,
+          createdAt: 1
+        }
+      ],
+      createdAt: 1
+    }
+  ]
 }))
 
 const frontendConfig = vi.hoisted(() => ({ t: (key: string) => key }))
@@ -112,7 +128,8 @@ vi.mock('../../config/ProjectSettingsProvider', () => ({
   useProjectSettings: () => ({
     projects: testState.projects,
     deleteProject: vi.fn(),
-    renameProject: vi.fn(),
+    openCreateProjectDialog: vi.fn(async () => null),
+    openEditProjectDialog: vi.fn(async () => 'cancelled'),
     showProjectInFolder: vi.fn(),
     togglePinProject: vi.fn()
   })

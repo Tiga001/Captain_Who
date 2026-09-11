@@ -47,13 +47,12 @@ impl StorageFixture {
         .unwrap();
         for project_id in ["project-1", "project-2"] {
             service
-                .save_project(ProjectRecord {
-                    id: project_id.to_string(),
-                    name: project_id.to_string(),
-                    path: Some(self.root.join(project_id).to_string_lossy().to_string()),
-                    created_at: 1,
-                    pinned_at: None,
-                })
+                .save_project(ProjectRecord::with_primary_folder(
+                    project_id.to_string(),
+                    project_id.to_string(),
+                    self.root.join(project_id).to_string_lossy().to_string(),
+                    1,
+                ))
                 .unwrap();
         }
         service

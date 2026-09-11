@@ -207,13 +207,12 @@ async fn assert_approved_running_command_handoff(case: ApprovedRunningHandoffCas
     let conversation_id = format!("conversation-approved-running-{}", case.label);
     let assistant_message_id = format!("assistant-approved-running-{}", case.label);
     storage
-        .save_project(ProjectRecord {
-            id: project_id.clone(),
-            name: "Approved Running handoff".to_string(),
-            path: Some(workspace.to_string_lossy().into_owned()),
-            created_at: 1,
-            pinned_at: None,
-        })
+        .save_project(ProjectRecord::with_primary_folder(
+            project_id.clone(),
+            "Approved Running handoff".to_string(),
+            workspace.to_string_lossy().into_owned(),
+            1,
+        ))
         .unwrap();
     let mut settings = test_model_settings();
     settings.api_url = format!("http://{address}/v1/chat/completions");
@@ -431,13 +430,12 @@ async fn guidance_releases_a_running_command_wait_and_background_exit_never_wake
     let fixture = tempdir().unwrap();
     let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
     storage
-        .save_project(ProjectRecord {
-            id: "project-managed-loop".to_string(),
-            name: "Managed loop".to_string(),
-            path: Some(fixture.path().to_string_lossy().into_owned()),
-            created_at: 1,
-            pinned_at: None,
-        })
+        .save_project(ProjectRecord::with_primary_folder(
+            "project-managed-loop".to_string(),
+            "Managed loop".to_string(),
+            fixture.path().to_string_lossy().into_owned(),
+            1,
+        ))
         .unwrap();
     let mut settings = test_model_settings();
     settings.api_url = format!("http://{address}/v1/chat/completions");
@@ -653,13 +651,12 @@ async fn model_poll_observes_nonzero_terminal_result_without_background_continua
     let database_path = fixture.path().join("managed-poll.sqlite");
     let storage = Arc::new(StorageService::open(&database_path).unwrap());
     storage
-        .save_project(ProjectRecord {
-            id: "project-managed-poll".to_string(),
-            name: "Managed poll".to_string(),
-            path: Some(fixture.path().to_string_lossy().into_owned()),
-            created_at: 1,
-            pinned_at: None,
-        })
+        .save_project(ProjectRecord::with_primary_folder(
+            "project-managed-poll".to_string(),
+            "Managed poll".to_string(),
+            fixture.path().to_string_lossy().into_owned(),
+            1,
+        ))
         .unwrap();
     let mut settings = test_model_settings();
     settings.api_url = format!("http://{address}/v1/chat/completions");
@@ -846,13 +843,12 @@ async fn approved_command_reuses_one_session_archive_across_restart_and_runtime_
             .unwrap(),
     );
     storage
-        .save_project(ProjectRecord {
-            id: "project-approved-command-archive".to_string(),
-            name: "Approved command archive".to_string(),
-            path: Some(workspace.to_string_lossy().into_owned()),
-            created_at: 1,
-            pinned_at: None,
-        })
+        .save_project(ProjectRecord::with_primary_folder(
+            "project-approved-command-archive".to_string(),
+            "Approved command archive".to_string(),
+            workspace.to_string_lossy().into_owned(),
+            1,
+        ))
         .unwrap();
     let mut settings = test_model_settings();
     settings.api_url = format!("http://{address}/v1/chat/completions");
@@ -1280,13 +1276,12 @@ async fn assert_rejected_command_after_restart(
             .unwrap(),
     );
     storage
-        .save_project(ProjectRecord {
-            id: "project-rejected-command-restart".to_string(),
-            name: "Rejected command restart".to_string(),
-            path: Some(workspace.to_string_lossy().into_owned()),
-            created_at: 1,
-            pinned_at: None,
-        })
+        .save_project(ProjectRecord::with_primary_folder(
+            "project-rejected-command-restart".to_string(),
+            "Rejected command restart".to_string(),
+            workspace.to_string_lossy().into_owned(),
+            1,
+        ))
         .unwrap();
     let mut settings = test_model_settings();
     settings.api_url = format!("http://{address}/v1/chat/completions");

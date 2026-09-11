@@ -256,8 +256,7 @@ impl AgentService {
                             message: "The selected project no longer exists.".to_string(),
                         })?;
                     if project
-                        .path
-                        .as_deref()
+                        .primary_path()
                         .is_none_or(|path| !std::path::Path::new(path).is_dir())
                     {
                         return Err(AutomationHumanRootStartError::TargetInvalid {
@@ -319,8 +318,7 @@ impl AgentService {
                                 .to_string(),
                         })?;
                     if project
-                        .path
-                        .as_deref()
+                        .primary_path()
                         .is_none_or(|path| !std::path::Path::new(path).is_dir())
                     {
                         return Err(AutomationHumanRootStartError::TargetInvalid {

@@ -362,7 +362,6 @@ CREATE TABLE models (
 CREATE TABLE projects (
             id TEXT PRIMARY KEY,
             name TEXT NOT NULL,
-            path TEXT,
             created_at INTEGER NOT NULL,
             pinned_at INTEGER,
             updated_at INTEGER NOT NULL
@@ -6477,3 +6476,29 @@ INSERT INTO agent_context_profile_run_policies(run_id, context_profile)
 SELECT run_id, 'full' FROM conversation_turn_traces;
 INSERT INTO agent_context_profile_wake_policies(wake_id, context_profile)
 SELECT wake_id, 'full' FROM agent_wake_requests;
+-- Multi-folder project roots, schema v45.
+CREATE TABLE project_folders (
+    id TEXT PRIMARY KEY CHECK (
+        length(CAST(id AS BLOB)) BETWEEN 1 AND 128
+        AND id = trim(id)
+    ),
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    path TEXT NOT NULL CHECK (
+        length(CAST(path AS BLOB)) BETWEEN 1 AND 16384
+        AND path = trim(path)
+    ),
+    alias TEXT NOT NULL CHECK (
+        length(CAST(alias AS BLOB)) BETWEEN 1 AND 256
+        AND alias = trim(alias)
+    ),
+    role TEXT NOT NULL CHECK (role IN ('primary', 'auxiliary')),
+    sort_order INTEGER NOT NULL CHECK (sort_order >= 0),
+    created_at INTEGER NOT NULL CHECK (created_at >= 0),
+    UNIQUE (project_id, path),
+    UNIQUE (project_id, alias)
+) STRICT;
+CREATE UNIQUE INDEX project_folders_primary_per_project
+    ON project_folders (project_id)
+    WHERE role = 'primary';
+CREATE INDEX project_folders_project_order
+    ON project_folders (project_id, sort_order, created_at);

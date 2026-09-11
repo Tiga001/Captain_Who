@@ -674,13 +674,12 @@ async fn rewrite_turn_is_atomic_replayable_and_runs_with_only_the_active_context
     let fixture = tempdir().unwrap();
     let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
     storage
-        .save_project(ProjectRecord {
-            id: "rewrite-project".to_string(),
-            name: "Rewrite project".to_string(),
-            path: Some(fixture.path().to_string_lossy().into_owned()),
-            created_at: 1,
-            pinned_at: None,
-        })
+        .save_project(ProjectRecord::with_primary_folder(
+            "rewrite-project".to_string(),
+            "Rewrite project".to_string(),
+            fixture.path().to_string_lossy().into_owned(),
+            1,
+        ))
         .unwrap();
     save_provider_profile_fixture(
         &storage,
@@ -880,13 +879,12 @@ fn rewrite_pre_runtime_failure_is_fail_closed_then_replays_the_failed_terminal()
     let database_path = fixture.path().join("storage.sqlite");
     let storage = Arc::new(StorageService::open(&database_path).unwrap());
     storage
-        .save_project(ProjectRecord {
-            id: "rewrite-failure-project".to_string(),
-            name: "Rewrite failure project".to_string(),
-            path: Some(fixture.path().to_string_lossy().into_owned()),
-            created_at: 1,
-            pinned_at: None,
-        })
+        .save_project(ProjectRecord::with_primary_folder(
+            "rewrite-failure-project".to_string(),
+            "Rewrite failure project".to_string(),
+            fixture.path().to_string_lossy().into_owned(),
+            1,
+        ))
         .unwrap();
     storage
         .save_conversation(ChatConversationRecord {

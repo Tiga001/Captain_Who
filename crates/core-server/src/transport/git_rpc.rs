@@ -165,7 +165,7 @@ pub(crate) fn resolve_project_path(
         .find(|project| project.id == project_id)
         .ok_or_else(|| "The selected project no longer exists.".to_string())?;
     let path = project
-        .path
+        .primary_path()
         .filter(|path| !path.trim().is_empty())
         .ok_or_else(|| "The selected project does not have a local directory.".to_string())?;
     Ok(PathBuf::from(path))

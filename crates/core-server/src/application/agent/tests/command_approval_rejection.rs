@@ -50,13 +50,12 @@ async fn assert_child_command_rejection(feedback: Option<&str>) {
     let root_conversation_id = "conversation-child-command-rejection-root";
     let root_agent_id = "agent-child-command-rejection-root";
     storage
-        .save_project(ProjectRecord {
-            id: project_id.to_string(),
-            name: "Child rejection".to_string(),
-            path: Some(workspace.to_string_lossy().into_owned()),
-            created_at: 1,
-            pinned_at: None,
-        })
+        .save_project(ProjectRecord::with_primary_folder(
+            project_id.to_string(),
+            "Child rejection".to_string(),
+            workspace.to_string_lossy().into_owned(),
+            1,
+        ))
         .unwrap();
     let mut settings = test_model_settings();
     settings.api_url = format!("http://{address}/v1/chat/completions");
