@@ -230,6 +230,7 @@ describe('RightSidebarTabStrip close targets', () => {
     const close = tab.parentElement!.querySelector<HTMLButtonElement>('.right-sidebar__tab-close')!
     const icon = close.querySelector<HTMLElement>('.right-sidebar__tab-close-icon')!
     tab.focus()
+    expect(getComputedStyle(tab).height).toBe('28px')
     expect(close.getBoundingClientRect().width).toBe(24)
     expect(close.getBoundingClientRect().height).toBe(24)
     expect(icon.getBoundingClientRect().width).toBe(14)

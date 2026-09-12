@@ -90,7 +90,7 @@ describe('macOS window control safe area', () => {
     const drawerHeading = screen.getByTestId('automation-drawer-heading').element()
 
     expect(leftToggle && getComputedStyle(leftToggle).left).toBe('20px')
-    expect(rightToolbar && getComputedStyle(rightToolbar).paddingLeft).toBe('14px')
+    expect(rightToolbar && getComputedStyle(rightToolbar).paddingLeft).toBe('10px')
     expect(leftToggle!.getBoundingClientRect().right).toBeLessThanOrEqual(
       drawerHeading.getBoundingClientRect().left
     )

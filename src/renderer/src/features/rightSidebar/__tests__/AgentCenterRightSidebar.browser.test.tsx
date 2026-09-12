@@ -156,6 +156,12 @@ describe('Agent Center right sidebar', () => {
 
     expect(homeModuleLabels(screen.container)).not.toContain('Subagents')
     expect(screen.container.querySelector('.right-sidebar__module-badge')).toBeNull()
+    const homeCard = screen.container.querySelector<HTMLElement>('.right-sidebar__tool-card')
+    expect(homeCard).not.toBeNull()
+    expect(getComputedStyle(homeCard!).minHeight).toBe('36px')
+    expect(getComputedStyle(homeCard!).justifyContent).toBe('center')
+    const home = requiredElement(screen.container, '.right-sidebar__home')
+    expect(getComputedStyle(home).justifyContent).toBe('center')
 
     await screen.rerender(
       <NarrowSidebar
@@ -224,6 +230,7 @@ describe('Agent Center right sidebar', () => {
     expect(listMeta.children).toHaveLength(1)
     expect(listMeta.textContent).toBe('Now')
     expect(getComputedStyle(listRow).borderTopWidth).toBe('0px')
+    await userEvent.unhover(listRow)
     expect(getComputedStyle(listRow).backgroundColor).toBe('rgba(0, 0, 0, 0)')
     await userEvent.hover(listRow)
     expect(getComputedStyle(listRow).backgroundColor).not.toBe('rgba(0, 0, 0, 0)')
@@ -357,6 +364,7 @@ describe('Agent Center right sidebar', () => {
     center.append(tokenProbe)
 
     expect(getComputedStyle(row).borderTopWidth).toBe('0px')
+    await userEvent.unhover(row)
     expect(getComputedStyle(row).backgroundColor).toBe('rgba(0, 0, 0, 0)')
     expect(getComputedStyle(avatar).backgroundColor).not.toBe('rgba(0, 0, 0, 0)')
     expect(getComputedStyle(activityTime).color).toBe(getComputedStyle(tokenProbe).color)

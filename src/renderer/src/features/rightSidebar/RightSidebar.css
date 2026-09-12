@@ -11,16 +11,16 @@
   z-index: 30;
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
-  gap: 10px;
+  gap: 8px;
   min-width: 0;
   align-items: center;
-  padding: 8px 14px 7px;
+  padding: 6px 10px 5px;
   border-bottom: 1px solid var(--mc-color-border-right-toolbar-divider);
   -webkit-app-region: drag;
 }
 
 .right-sidebar--maximized .right-sidebar__toolbar {
-  gap: 8px;
+  gap: 6px;
 }
 
 .app-shell[data-macos-window-controls='true'][data-left-open='false']
@@ -56,7 +56,7 @@
   width: max-content;
   min-width: min-content;
   align-items: center;
-  gap: 7px;
+  gap: 4px;
   -webkit-app-region: no-drag;
 }
 
@@ -79,24 +79,24 @@
   inset: 0;
   content: '';
   border: 1.5px solid var(--mc-color-text-accent);
-  border-radius: 13px;
+  border-radius: 10px;
   pointer-events: none;
 }
 
 .right-sidebar__tab .right-sidebar__tab-icon {
   position: relative;
   display: inline-flex;
-  flex: 0 0 18px;
-  width: 18px;
-  height: 18px;
+  flex: 0 0 16px;
+  width: 16px;
+  height: 16px;
   overflow: visible;
 }
 
 .right-sidebar__tab .right-sidebar__tab-agent-icon {
   position: absolute;
   inset: -2px;
-  width: 22px;
-  height: 22px;
+  width: 20px;
+  height: 20px;
   color: var(--mc-color-text-accent);
   background: var(--mc-color-surface-right-panel);
   border-radius: 4px;
@@ -106,14 +106,14 @@
   display: flex;
   width: 100%;
   min-width: 0;
-  height: 34px;
+  height: 28px;
   align-items: center;
-  gap: 8px;
-  padding: 0 12px;
+  gap: 6px;
+  padding: 0 10px;
   color: var(--mc-color-sidebar-text-secondary);
   background: transparent;
   border: 0;
-  border-radius: 13px;
+  border-radius: 10px;
   cursor: pointer;
   font-size: var(--mc-font-size-base);
   font-weight: var(--mc-font-weight-medium);
@@ -131,15 +131,15 @@
 
 .right-sidebar__tab svg {
   flex: 0 0 auto;
-  width: 18px;
-  height: 18px;
+  width: 16px;
+  height: 16px;
   stroke-width: var(--mc-icon-stroke-regular);
 }
 
 .right-sidebar__tab-favicon {
   flex: 0 0 auto;
-  width: 18px;
-  height: 18px;
+  width: 16px;
+  height: 16px;
   object-fit: contain;
   border-radius: 4px;
 }
@@ -219,8 +219,8 @@
 .right-sidebar__icon-button {
   position: relative;
   display: grid;
-  width: 34px;
-  height: 34px;
+  width: 28px;
+  height: 28px;
   padding: 0;
   place-items: center;
   color: var(--mc-color-icon-default);
@@ -234,8 +234,8 @@
 
 .right-sidebar__icon-button[data-has-unread='true']::after {
   position: absolute;
-  top: 7px;
-  right: 6px;
+  top: 5px;
+  right: 5px;
   width: 7px;
   height: 7px;
   content: '';
@@ -261,8 +261,8 @@
 
 .right-sidebar__new-tab-button svg,
 .right-sidebar__icon-button svg {
-  width: 20px;
-  height: 20px;
+  width: 16px;
+  height: 16px;
   stroke-width: var(--mc-icon-stroke-regular);
 }
 
@@ -270,7 +270,7 @@
   display: flex;
   flex: 0 0 auto;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
   justify-self: end;
   -webkit-app-region: no-drag;
 }
@@ -284,8 +284,8 @@
   position: fixed;
   z-index: 1000;
   display: grid;
-  width: 280px;
-  padding: 8px;
+  width: 240px;
+  padding: 6px;
   background: var(--mc-color-surface-popover);
   border: 1px solid var(--mc-color-border-default);
   border-radius: var(--mc-radius-popover);
@@ -297,10 +297,10 @@
 .right-sidebar__module-menu-item {
   display: flex;
   width: 100%;
-  height: 42px;
+  height: 32px;
   align-items: center;
-  gap: 12px;
-  padding: 0 12px;
+  gap: 8px;
+  padding: 0 8px;
   color: var(--mc-color-text-primary);
   text-align: left;
   background: transparent;
@@ -319,8 +319,8 @@
 
 .right-sidebar__module-menu-item svg {
   flex: 0 0 auto;
-  width: 20px;
-  height: 20px;
+  width: 16px;
+  height: 16px;
   color: var(--mc-color-icon-default);
   stroke-width: var(--mc-icon-stroke-regular);
 }
@@ -404,8 +404,8 @@
   flex-direction: column;
   justify-content: center;
   min-height: 100%;
-  padding: 0 22px 2%;
-  gap: 8px;
+  padding: 16px;
+  gap: 6px;
 }
 
 .right-sidebar__panel-loading {
@@ -422,9 +422,9 @@
   align-items: center;
   justify-content: center;
   width: 100%;
-  min-height: 48px;
-  padding: 0 16px;
-  text-align: left;
+  min-height: 36px;
+  padding: 0 12px;
+  text-align: center;
   color: inherit;
   background: var(--right-sidebar-tool-background);
   border: 1px solid var(--mc-color-border-subtle);
@@ -445,13 +445,14 @@
   display: flex;
   min-width: 0;
   align-items: center;
-  gap: 10px;
+  justify-content: center;
+  gap: 8px;
 }
 
 .right-sidebar__tool-heading svg {
   flex: 0 0 auto;
-  width: 18px;
-  height: 18px;
+  width: 16px;
+  height: 16px;
   color: var(--mc-color-icon-default);
   stroke-width: var(--mc-icon-stroke-regular);
 }
