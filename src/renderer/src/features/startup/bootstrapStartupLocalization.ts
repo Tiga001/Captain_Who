@@ -7,6 +7,8 @@ import {
   isAppLanguage
 } from '../../config/languageRegistry'
 import type { AppLanguage, LanguageDirection } from '../../config/languageRegistry'
+import { isColorSchemePreference } from '../../config/frontendTheme'
+import type { ColorScheme, ColorSchemePreference } from '../../config/frontendTheme'
 
 export interface BootstrapStartupCopy {
   readonly ambient: string
@@ -17,24 +19,29 @@ export interface BootstrapStartupCopy {
   readonly loading: string
 }
 
-export function getBootstrapStartupCopy(rawStoredConfig: string | null): BootstrapStartupCopy {
-  let language = DEFAULT_APP_LANGUAGE
+export interface BootstrapStartupAppearance {
+  readonly colorScheme: ColorScheme
+  readonly preference: ColorSchemePreference
+}
 
-  if (rawStoredConfig) {
-    try {
-      const storedConfig: unknown = JSON.parse(rawStoredConfig)
-      if (
-        typeof storedConfig === 'object' &&
-        storedConfig !== null &&
-        'language' in storedConfig &&
-        isAppLanguage(storedConfig.language)
-      ) {
-        language = storedConfig.language
-      }
-    } catch {
-      // A malformed preference must not block the static startup shell.
-    }
+function readStoredFrontendConfig(rawStoredConfig: string | null): Record<string, unknown> | null {
+  if (!rawStoredConfig) return null
+  try {
+    const storedConfig: unknown = JSON.parse(rawStoredConfig)
+    return storedConfig && typeof storedConfig === 'object' && !Array.isArray(storedConfig)
+      ? storedConfig
+      : null
+  } catch {
+    return null
   }
+}
+
+export function getBootstrapStartupCopy(rawStoredConfig: string | null): BootstrapStartupCopy {
+  const storedConfig = readStoredFrontendConfig(rawStoredConfig)
+  const language =
+    storedConfig && isAppLanguage(storedConfig.language)
+      ? storedConfig.language
+      : DEFAULT_APP_LANGUAGE
 
   return {
     ambient: getTranslation(language, 'startup.ambient.deepThinking'),
@@ -44,6 +51,29 @@ export function getBootstrapStartupCopy(rawStoredConfig: string | null): Bootstr
     language,
     loading: getTranslation(language, 'startup.loading')
   }
+}
+
+export function getBootstrapStartupAppearance(
+  rawStoredConfig: string | null,
+  systemColorScheme: ColorScheme
+): BootstrapStartupAppearance {
+  const storedConfig = readStoredFrontendConfig(rawStoredConfig)
+  const preference = isColorSchemePreference(storedConfig?.colorSchemePreference)
+    ? storedConfig.colorSchemePreference
+    : 'system'
+
+  return {
+    colorScheme: preference === 'system' ? systemColorScheme : preference,
+    preference
+  }
+}
+
+export function applyBootstrapStartupAppearance(
+  documentRoot: Document,
+  appearance: BootstrapStartupAppearance
+): void {
+  documentRoot.documentElement.dataset.colorScheme = appearance.colorScheme
+  documentRoot.documentElement.style.colorScheme = appearance.colorScheme
 }
 
 export function applyBootstrapStartupFailure(

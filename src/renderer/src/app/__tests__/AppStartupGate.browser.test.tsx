@@ -18,7 +18,11 @@ vi.mock('../../host/hostClient', () => ({
 }))
 
 vi.mock('../../config/FrontendConfigProvider', () => ({
-  useFrontendConfig: () => ({ language: 'zh-CN', t: (key: string) => key })
+  useFrontendConfig: () => ({
+    language: 'zh-CN',
+    resolvedColorScheme: 'light',
+    t: (key: string) => key
+  })
 }))
 
 const { AppStartupGate } = await import('../../features/startup/AppStartupGate')

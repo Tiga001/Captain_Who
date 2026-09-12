@@ -3,6 +3,10 @@ import darkIconPath from '../../resources/icon-dark.png?asset'
 import darkMacIconPath from '../../resources/icon-dark-macos.png?asset'
 import lightIconPath from '../../resources/icon-light.png?asset'
 import lightMacIconPath from '../../resources/icon-light-macos.png?asset'
+import {
+  resolveAppearanceColorScheme,
+  type AppearanceThemePreference
+} from './appearance/appearanceThemeStore'
 
 type AppIconVariant = 'light' | 'dark'
 
@@ -11,10 +15,6 @@ const iconPaths: Record<AppIconVariant, string> =
     ? { light: lightMacIconPath, dark: darkMacIconPath }
     : { light: lightIconPath, dark: darkIconPath }
 const iconCache = new Map<AppIconVariant, NativeImage>()
-
-function getAppIconVariant(): AppIconVariant {
-  return nativeTheme.shouldUseDarkColors ? 'dark' : 'light'
-}
 
 function getAppIcon(variant: AppIconVariant): NativeImage {
   const cachedIcon = iconCache.get(variant)
@@ -29,12 +29,12 @@ function getAppIcon(variant: AppIconVariant): NativeImage {
   return icon
 }
 
-export function getAdaptiveAppIcon(): NativeImage {
-  return getAppIcon(getAppIconVariant())
+export function getAdaptiveAppIcon(preference: AppearanceThemePreference = 'system'): NativeImage {
+  return getAppIcon(resolveAppearanceColorScheme(preference, nativeTheme.shouldUseDarkColors))
 }
 
-function applyAdaptiveAppIcon(): void {
-  const icon = getAdaptiveAppIcon()
+export function applyAdaptiveAppIcon(preference: AppearanceThemePreference = 'system'): void {
+  const icon = getAdaptiveAppIcon(preference)
 
   if (process.platform === 'darwin') {
     app.dock?.setIcon(icon)
@@ -48,11 +48,13 @@ function applyAdaptiveAppIcon(): void {
   }
 }
 
-export function installAdaptiveAppIcon(): () => void {
-  const handleThemeUpdated = (): void => applyAdaptiveAppIcon()
+export function installAdaptiveAppIcon(
+  getPreference: () => AppearanceThemePreference = () => 'system'
+): () => void {
+  const apply = () => applyAdaptiveAppIcon(getPreference())
 
-  nativeTheme.on('updated', handleThemeUpdated)
-  applyAdaptiveAppIcon()
+  nativeTheme.on('updated', apply)
+  apply()
 
-  return () => nativeTheme.off('updated', handleThemeUpdated)
+  return () => nativeTheme.off('updated', apply)
 }

@@ -23,7 +23,7 @@
         inset: 0;
         display: grid;
         place-items: center;
-        background: rgba(244, 244, 242, 0.58);
+        background: rgba(16, 16, 16, 0.32);
         backdrop-filter: saturate(1.12);
         -webkit-backdrop-filter: saturate(1.12);
         -webkit-app-region: no-drag;
@@ -35,14 +35,14 @@
         top: 0;
         right: 0;
         left: 0;
-        height: 52px;
+        height: 38px;
         -webkit-app-region: drag;
       }
 
       .app-bootstrap-screen__icon {
-        width: 72px;
-        height: 72px;
-        border-radius: 16px;
+        width: 48px;
+        height: 48px;
+        border-radius: 11px;
         object-fit: contain;
         animation: app-bootstrap-icon-pulse 1800ms ease-in-out infinite;
         -webkit-user-drag: none;
@@ -64,7 +64,7 @@
         align-items: center;
         justify-content: center;
         overflow: hidden;
-        color: #737b86;
+        color: #ffffff;
         font:
           400 14px/22px -apple-system,
           BlinkMacSystemFont,
@@ -108,26 +108,46 @@
       }
 
       @media (prefers-color-scheme: dark) {
-        .app-bootstrap-screen {
-          background: rgba(23, 23, 23, 0.58);
+        html:not([data-color-scheme='light']) .app-bootstrap-screen {
+          background: rgba(16, 16, 16, 0.32);
         }
 
-        .app-bootstrap-screen__ambient {
-          color: #969ca5;
+        html:not([data-color-scheme='light']) .app-bootstrap-screen__ambient {
+          color: #ffffff;
         }
+      }
+
+      html[data-color-scheme='dark'] .app-bootstrap-screen {
+        background: rgba(16, 16, 16, 0.32);
+      }
+
+      html[data-color-scheme='dark'] .app-bootstrap-screen__ambient {
+        color: #ffffff;
+      }
+
+      html[data-color-scheme='light'] .app-bootstrap-screen {
+        background: rgba(244, 244, 242, 0.16);
+      }
+
+      html[data-color-scheme='light'] .app-bootstrap-screen__ambient {
+        color: #000000;
       }
 
       @media (prefers-reduced-transparency: reduce) {
         .app-bootstrap-screen {
-          background: #f4f4f2;
+          background: #101010;
           backdrop-filter: none;
           -webkit-backdrop-filter: none;
         }
+
+        html[data-color-scheme='light'] .app-bootstrap-screen {
+          background: #f4f4f2;
+        }
       }
 
-      @media (prefers-color-scheme: dark) and (prefers-reduced-transparency: reduce) {
-        .app-bootstrap-screen {
-          background: #171717;
+      @media (prefers-color-scheme: light) and (prefers-reduced-transparency: reduce) {
+        html:not([data-color-scheme='dark']) .app-bootstrap-screen {
+          background: #f4f4f2;
         }
       }
 

@@ -26,6 +26,12 @@ import {
   createVolatileNotificationLocaleMirror,
   type NotificationLocaleMirror
 } from './notifications/notificationLocaleStore'
+import {
+  createVolatileAppearanceThemeMirror,
+  isAppearanceThemePreference,
+  type AppearanceThemeMirror
+} from './appearance/appearanceThemeStore'
+import { applyAdaptiveAppIcon } from './appIcon'
 import { registerGitIpc } from './ipc/gitIpc'
 import { registerSkillsIpc } from './ipc/skillsIpc'
 import { registerMcpIpc } from './ipc/mcpIpc'
@@ -55,12 +61,6 @@ const IMAGE_MIME_BY_EXTENSION: Record<string, string> = {
   '.tif': 'image/tiff',
   '.tiff': 'image/tiff',
   '.webp': 'image/webp'
-}
-
-type NativeThemeSource = 'system' | 'light' | 'dark'
-
-function isNativeThemeSource(value: unknown): value is NativeThemeSource {
-  return value === 'system' || value === 'light' || value === 'dark'
 }
 
 export function openExternalUrl(value: unknown): Promise<void> {
@@ -314,7 +314,8 @@ export function registerHostIpc(
   browserArtifactBroker?: BrowserArtifactBroker,
   notificationLocaleMirror: NotificationLocaleMirror = createVolatileNotificationLocaleMirror(),
   browserDownloadBroker?: BrowserDownloadBroker,
-  browserDataIpc?: BrowserDataIpcDependencies
+  browserDataIpc?: BrowserDataIpcDependencies,
+  appearanceThemeMirror: AppearanceThemeMirror = createVolatileAppearanceThemeMirror()
 ): HostIpcRegistration {
   const attachmentDialogBridge = new AttachmentDialogBridge()
   const workspaceFilesService = new WorkspaceFilesService((projectId) =>
@@ -351,11 +352,13 @@ export function registerHostIpc(
   ipcMain.handle(HOST_CHANNELS.app.openExternal, (_event, url) =>
     browserDataIpc ? browserDataIpc.linkRouter.openAppUrl(url) : openExternalUrl(url)
   )
-  ipcMain.handle(HOST_CHANNELS.app.setNativeThemeSource, (_event, themeSource) => {
-    if (!isNativeThemeSource(themeSource)) {
+  ipcMain.handle(HOST_CHANNELS.app.setNativeThemeSource, async (_event, themeSource) => {
+    if (!isAppearanceThemePreference(themeSource)) {
       throw new Error('Invalid native theme source')
     }
     nativeTheme.themeSource = themeSource
+    await appearanceThemeMirror.setPreference(themeSource)
+    applyAdaptiveAppIcon(themeSource)
   })
   ipcMain.handle(HOST_CHANNELS.attachments.selectInputAttachments, (event, request) =>
     attachmentDialogBridge.selectInputAttachments(event, request)

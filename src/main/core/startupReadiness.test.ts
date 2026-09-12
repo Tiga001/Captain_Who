@@ -24,6 +24,34 @@ class FakeIpcMain {
 }
 
 describe('application startup readiness', () => {
+  it('applies the persisted appearance preference before creating the first window', () => {
+    const mainEntry = readFileSync(resolve('src/main/index.ts'), 'utf8')
+    const appearanceStoreIndex = mainEntry.indexOf(
+      'const appearanceThemeStore = new AppearanceThemeStore(appDataRoot)'
+    )
+    const nativeThemeIndex = mainEntry.indexOf(
+      'nativeTheme.themeSource = appearanceThemeStore.getPreference()'
+    )
+    const createWindowIndex = mainEntry.indexOf('createWindow()')
+
+    expect(appearanceStoreIndex).toBeGreaterThan(-1)
+    expect(nativeThemeIndex).toBeGreaterThan(appearanceStoreIndex)
+    expect(createWindowIndex).toBeGreaterThan(nativeThemeIndex)
+  })
+
+  it('reapplies the appearance preference after ready before branding the Dock icon', () => {
+    const mainEntry = readFileSync(resolve('src/main/index.ts'), 'utf8')
+    const initializeIndex = mainEntry.indexOf('async function initializeApplication()')
+    const readyThemeIndex = mainEntry.indexOf(
+      'nativeTheme.themeSource = appearanceThemeStore.getPreference()',
+      initializeIndex
+    )
+    const dockIconIndex = mainEntry.indexOf('installAdaptiveAppIcon(', initializeIndex)
+
+    expect(readyThemeIndex).toBeGreaterThan(initializeIndex)
+    expect(dockIconIndex).toBeGreaterThan(readyThemeIndex)
+  })
+
   it('creates the existing Renderer window before starting slow Host services', () => {
     const mainEntry = readFileSync(resolve('src/main/index.ts'), 'utf8')
     const readinessIndex = mainEntry.indexOf(

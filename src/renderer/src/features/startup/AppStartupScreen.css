@@ -26,7 +26,7 @@
   inset: 0;
   display: grid;
   place-items: center;
-  background: var(--mc-color-surface-main-panel, #f4f4f2);
+  background: var(--mc-color-surface-main-panel, #101010);
   opacity: 1;
   transition: opacity 180ms ease;
   -webkit-app-region: no-drag;
@@ -37,9 +37,13 @@
    * Electron's native macOS vibrancy supplies the blur. This layer only contributes enough
    * theme tint for startup text and branding to remain legible without double-blurring.
    */
-  background: color-mix(in srgb, var(--mc-color-surface-main-panel, #f4f4f2) 58%, transparent);
+  background: color-mix(in srgb, var(--mc-color-surface-main-panel, #101010) 32%, transparent);
   backdrop-filter: saturate(1.12);
   -webkit-backdrop-filter: saturate(1.12);
+}
+
+html[data-color-scheme='light'] .app-startup-screen[data-native-translucency='true'] {
+  background: color-mix(in srgb, var(--mc-color-surface-main-panel, #f4f4f2) 16%, transparent);
 }
 
 .app-startup-screen[data-exiting='true'] {
@@ -66,9 +70,9 @@
 }
 
 .app-startup-screen__icon {
-  width: 72px;
-  height: 72px;
-  border-radius: 16px;
+  width: 48px;
+  height: 48px;
+  border-radius: 11px;
   object-fit: contain;
   animation: app-startup-icon-pulse 1800ms ease-in-out infinite;
   -webkit-user-drag: none;
@@ -82,7 +86,7 @@
   align-items: center;
   justify-content: center;
   overflow: hidden;
-  color: var(--mc-color-text-secondary, #737b86);
+  color: var(--mc-color-text-primary, #ffffff);
   font-size: var(--mc-font-size-sm, 14px);
   font-weight: 400;
   line-height: 22px;
@@ -96,6 +100,10 @@
 
 .app-startup-screen__ambient[data-phase='fading'] {
   opacity: 0;
+}
+
+html[data-color-scheme='light'] .app-startup-screen__ambient {
+  color: #000000;
 }
 
 .app-startup-screen__failure {
@@ -178,7 +186,7 @@
 
 @media (prefers-reduced-transparency: reduce) {
   .app-startup-screen[data-native-translucency='true'] {
-    background: var(--mc-color-surface-main-panel, #f4f4f2);
+    background: var(--mc-color-surface-main-panel, #101010);
     backdrop-filter: none;
     -webkit-backdrop-filter: none;
   }

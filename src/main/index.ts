@@ -43,6 +43,10 @@ import {
 } from './mcp/ManagedPlaywrightBridgeHost'
 import { ManagedPlaywrightSensitiveTargetBindingBroker } from './mcp/ManagedPlaywrightSensitiveTargetBindingBroker'
 import { NotificationLocaleStore } from './notifications/notificationLocaleStore'
+import {
+  AppearanceThemeStore,
+  resolveAppearanceColorScheme
+} from './appearance/appearanceThemeStore'
 import { registerStartupReadiness, type StartupReadinessController } from './startupReadiness'
 
 // Electron is the sole authority for the application data location. Freeze it before
@@ -56,6 +60,8 @@ registerResourceSchemes()
 
 const coreServer = new CoreServer({ appDataRoot })
 const notificationLocaleStore = new NotificationLocaleStore(appDataRoot)
+const appearanceThemeStore = new AppearanceThemeStore(appDataRoot)
+nativeTheme.themeSource = appearanceThemeStore.getPreference()
 const terminalBridge = new TerminalBridge()
 let isQuittingAfterServiceShutdown = false
 let isServiceShutdownInProgress = false
@@ -167,9 +173,17 @@ function createWindow(): void {
     autoHideMenuBar: true,
     // Non-macOS windows do not have native vibrancy. Their opaque native surface is the
     // compatibility fallback beneath the shared translucent startup CSS.
-    backgroundColor: nativeTheme.shouldUseDarkColors ? '#171717' : '#f4f4f2',
+    backgroundColor:
+      resolveAppearanceColorScheme(
+        appearanceThemeStore.getPreference(),
+        nativeTheme.shouldUseDarkColors
+      ) === 'dark'
+        ? '#171717'
+        : '#f4f4f2',
     ...macWindowChromeOptions,
-    ...(process.platform !== 'darwin' ? { icon: getAdaptiveAppIcon() } : {}),
+    ...(process.platform !== 'darwin'
+      ? { icon: getAdaptiveAppIcon(appearanceThemeStore.getPreference()) }
+      : {}),
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
       contextIsolation: true,
@@ -277,7 +291,8 @@ function activateMainWindow(): void {
 async function initializeApplication(): Promise<void> {
   app.setName('Captain Who')
   electronApp.setAppUserModelId('io.github.tiga001.captainwho')
-  disposeAdaptiveAppIcon = installAdaptiveAppIcon()
+  nativeTheme.themeSource = appearanceThemeStore.getPreference()
+  disposeAdaptiveAppIcon = installAdaptiveAppIcon(() => appearanceThemeStore.getPreference())
   app.on('browser-window-created', (_, window) => {
     optimizer.watchWindowShortcuts(window)
   })
@@ -434,7 +449,8 @@ async function initializeApplication(): Promise<void> {
       historyService: browserHistoryService,
       linkRouter: browserLinkRouter,
       session: managedBrowserSession
-    }
+    },
+    appearanceThemeStore
   )
   if (mainWindow?.isVisible()) disposeHostIpc.beginNotificationDelivery()
   hostInitializationReady = true
@@ -488,6 +504,7 @@ app.on('before-quit', (event) => {
     // outcome and could strand an attachment.
     await Promise.allSettled([
       notificationShutdown ?? Promise.resolve(),
+      appearanceThemeStore.beginShutdown(),
       terminalBridge.stop(),
       coreServer.shutdown()
     ])
