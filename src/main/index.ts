@@ -81,7 +81,7 @@ const macWindowChromeOptions =
     ? {
         backgroundColor: '#00000000',
         titleBarStyle: 'hidden' as const,
-        trafficLightPosition: { x: 18, y: 18 },
+        trafficLightPosition: { x: 18, y: 12 },
         transparent: true,
         vibrancy: 'sidebar' as const,
         visualEffectState: 'active' as const

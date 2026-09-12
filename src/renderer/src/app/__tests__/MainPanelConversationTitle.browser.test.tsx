@@ -106,6 +106,10 @@ describe('MainPanelToolbar conversation menu', () => {
     const menuButton = screen.getByRole('button', { name: 'sidebar.moreConversationActions' })
     const toolbar = screen.container.querySelector('.main-panel__toolbar')
     if (!toolbar) throw new Error('Missing toolbar')
+    expect(getComputedStyle(toolbar).height).toBe('38px')
+    expect(getComputedStyle(screen.container.querySelector('.panel-toggle--left')!).height).toBe(
+      '28px'
+    )
     await expect.element(menuButton).toBeVisible()
     await expect
       .element(screen.getByRole('button', { name: 'project.openDetails' }))

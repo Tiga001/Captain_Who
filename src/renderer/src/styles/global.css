@@ -485,10 +485,10 @@ html[data-color-scheme='dark'] .main-panel__brand-mark--dark {
 
 .panel-toggle {
   position: absolute;
-  top: 10px;
+  top: 5px;
   display: grid;
-  width: 32px;
-  height: 32px;
+  width: 28px;
+  height: 28px;
   padding: 0;
   place-items: center;
   color: var(--mc-color-icon-muted);
@@ -510,8 +510,8 @@ html[data-color-scheme='dark'] .main-panel__brand-mark--dark {
 
 .panel-toggle[data-has-unread='true']::after {
   position: absolute;
-  top: 7px;
-  right: 6px;
+  top: 5px;
+  right: 5px;
   width: 7px;
   height: 7px;
   content: '';

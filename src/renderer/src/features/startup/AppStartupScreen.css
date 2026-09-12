@@ -53,7 +53,7 @@
   top: 0;
   right: 0;
   left: 0;
-  height: var(--mc-layout-titlebar-height, 52px);
+  height: var(--mc-layout-titlebar-height, 38px);
   -webkit-app-region: drag;
 }
 

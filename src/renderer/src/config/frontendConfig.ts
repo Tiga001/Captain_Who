@@ -133,7 +133,7 @@ export const frontendConfig = {
     }
   },
   layout: {
-    titlebarHeight: '52px',
+    titlebarHeight: '38px',
     sidebarActionHeight: '29px',
     sidebarHeaderHeight: '29px',
     sidebarActionWidth: '28px',

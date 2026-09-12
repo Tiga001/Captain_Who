@@ -28,7 +28,7 @@ async function renderSidebar({
       style={
         {
           '--mc-layout-sidebar-action-height': '29px',
-          '--titlebar-height': '52px',
+          '--titlebar-height': '38px',
           height: 640,
           width: 280
         } as CSSProperties
