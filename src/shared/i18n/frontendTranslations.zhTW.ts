@@ -926,7 +926,8 @@ export const zhTWTranslations = {
   'appearance.translucentSidebarDescription': '打開後左側欄使用半透明背景和模糊效果。',
   'appearance.translucentSidebarTransparency': '側邊欄透明度',
   'appearance.uiContrast': '對比度',
-  'appearance.uiContrastDescription': '只加強邊框、弱文字和次級圖示與背景的反差。',
+  'appearance.uiContrastDescription':
+    '加強邊框、弱文字、次級圖示、側欄和設定次級文字，以及選中、弱底和懸停層次。',
   'environment.selectProject': '選擇項目',
   'environment.addProject': '新增項目',
   'environment.editProject': '編輯項目',

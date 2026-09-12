@@ -997,7 +997,7 @@ export const ruRUTranslations = {
   'appearance.translucentSidebarTransparency': 'Прозрачность боковой панели',
   'appearance.uiContrast': 'Контраст',
   'appearance.uiContrastDescription':
-    'Усиливает только контраст границ, приглушённого текста и второстепенных значков.',
+    'Усиливает контраст границ, приглушённого текста, второстепенных значков, второстепенного текста боковой панели и настроек, а также выделенных, приглушённых и наведённых поверхностей.',
   'environment.selectProject': 'Выберите проект',
   'environment.addProject': 'Добавить проект',
   'environment.editProject': 'Редактировать проект',

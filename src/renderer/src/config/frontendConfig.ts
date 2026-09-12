@@ -153,6 +153,7 @@ export function getFrontendCssVariables(
   const ink = theme.colors.text.primary
   const contrastText = (color: string) => mixTowardInk(color, ink, mix.text)
   const contrastIcon = (color: string) => mixTowardInk(color, theme.colors.icon.default, mix.text)
+  const contrastSurface = (color: string) => mixTowardInk(color, ink, mix.surface)
   const contrastBorder = (color: string) => mixTowardInk(color, ink, mix.border)
 
   return {
@@ -237,9 +238,9 @@ export function getFrontendCssVariables(
     '--mc-color-surface-card': theme.colors.surface.card,
     '--mc-color-surface-input': theme.colors.surface.input,
     '--mc-color-surface-popover': theme.colors.surface.popover,
-    '--mc-color-surface-muted': theme.colors.surface.muted,
-    '--mc-color-surface-selected': theme.colors.surface.selected,
-    '--mc-color-surface-selected-subtle': theme.colors.surface.selectedSubtle,
+    '--mc-color-surface-muted': contrastSurface(theme.colors.surface.muted),
+    '--mc-color-surface-selected': contrastSurface(theme.colors.surface.selected),
+    '--mc-color-surface-selected-subtle': contrastSurface(theme.colors.surface.selectedSubtle),
     '--mc-color-surface-info-subtle': theme.colors.surface.infoSubtle,
     '--mc-color-surface-success-subtle': theme.colors.surface.successSubtle,
     '--mc-color-surface-neutral-subtle': theme.colors.surface.neutralSubtle,
@@ -270,14 +271,14 @@ export function getFrontendCssVariables(
     '--mc-color-button-danger-soft-bg-hover': theme.colors.button.dangerSoftBgHover,
     '--mc-color-control-selected-background': theme.colors.control.selectedBackground,
     '--mc-color-control-selected-text': theme.colors.control.selectedText,
-    '--mc-color-sidebar-text-secondary': theme.colors.sidebar.textSecondary,
+    '--mc-color-sidebar-text-secondary': contrastText(theme.colors.sidebar.textSecondary),
     '--mc-color-sidebar-text-active': theme.colors.sidebar.textActive,
     '--mc-color-sidebar-translucent-tint': theme.colors.sidebar.translucentTint,
     '--mc-color-settings-content-title': theme.colors.settings.contentTitle,
-    '--mc-color-settings-content-text': theme.colors.settings.contentText,
+    '--mc-color-settings-content-text': contrastText(theme.colors.settings.contentText),
     '--mc-color-settings-content-muted': contrastText(theme.colors.settings.contentMuted),
-    '--mc-color-state-hover': theme.colors.state.hover,
-    '--mc-color-state-active': theme.colors.state.active,
+    '--mc-color-state-hover': contrastSurface(theme.colors.state.hover),
+    '--mc-color-state-active': contrastSurface(theme.colors.state.active),
     '--mc-color-focus-ring': theme.colors.state.focusRing,
     '--mc-color-resize-handle': theme.colors.state.resizeHandle,
     '--mc-color-overlay': theme.colors.state.overlay,

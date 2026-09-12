@@ -1005,7 +1005,7 @@ export const itITTranslations = {
   'appearance.translucentSidebarTransparency': 'Trasparenza della barra laterale',
   'appearance.uiContrast': 'Contrasto',
   'appearance.uiContrastDescription':
-    'Aumenta solo il contrasto di bordi, testo attenuato e icone secondarie.',
+    'Aumenta il contrasto di bordi, testo attenuato, icone secondarie, testo secondario della barra laterale e delle impostazioni, e delle superfici selezionate, attenuate o in hover.',
   'environment.selectProject': 'Seleziona progetto',
   'environment.addProject': 'Aggiungi progetto',
   'environment.editProject': 'Modifica progetto',

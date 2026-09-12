@@ -969,7 +969,8 @@ export const koKRTranslations = {
     '왼쪽 사이드바에는 반투명하고 흐린 배경을 사용하세요.',
   'appearance.translucentSidebarTransparency': '사이드바 투명도',
   'appearance.uiContrast': '대비',
-  'appearance.uiContrastDescription': '테두리, 약한 텍스트, 보조 아이콘의 대비만 높입니다.',
+  'appearance.uiContrastDescription':
+    '테두리, 약한 텍스트, 보조 아이콘, 사이드바와 설정의 보조 텍스트, 선택·약한 배경, 호버 대비를 높입니다.',
   'environment.selectProject': '프로젝트 선택',
   'environment.addProject': '프로젝트 추가',
   'environment.editProject': '프로젝트 편집',

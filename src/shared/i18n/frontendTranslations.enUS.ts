@@ -985,7 +985,7 @@ export const enUSTranslations = {
   'appearance.translucentSidebarTransparency': 'Sidebar transparency',
   'appearance.uiContrast': 'Contrast',
   'appearance.uiContrastDescription':
-    'Increase contrast for borders, muted text, and secondary icons only.',
+    'Increase contrast for borders, muted text, secondary icons, secondary sidebar or settings text, and selected, muted, or hover surfaces.',
   'environment.selectProject': 'Select project',
   'environment.addProject': 'Add project',
   'environment.editProject': 'Edit project',

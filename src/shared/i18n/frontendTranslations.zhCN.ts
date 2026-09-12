@@ -937,7 +937,8 @@ export const zhCNTranslations = {
   'appearance.translucentSidebarDescription': '打开后左侧栏使用半透明背景和模糊效果。',
   'appearance.translucentSidebarTransparency': '侧边栏透明度',
   'appearance.uiContrast': '对比度',
-  'appearance.uiContrastDescription': '只加强边框、弱文字和次级图标与背景的反差。',
+  'appearance.uiContrastDescription':
+    '加强边框、弱文字、次级图标、侧栏和设置次级文字，以及选中、弱底和悬停层次。',
   'environment.selectProject': '选择项目',
   'environment.addProject': '添加项目',
   'environment.editProject': '编辑项目',

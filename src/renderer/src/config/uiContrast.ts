@@ -3,6 +3,7 @@ export const MAX_UI_CONTRAST = 100
 export const DEFAULT_UI_CONTRAST = 0
 
 const TEXT_MIX_AT_MAX = 42
+const SURFACE_MIX_AT_MAX = 28
 const BORDER_MIX_AT_MAX = 55
 
 export function normalizeUiContrast(value: unknown): number {
@@ -25,11 +26,13 @@ export function mixTowardInk(color: string, ink: string, mixPercent: number): st
 
 export function getUiContrastMixPercents(contrast: unknown): {
   border: number
+  surface: number
   text: number
 } {
   const shape = getUiContrastShape(contrast)
   return {
     border: Math.round(shape * BORDER_MIX_AT_MAX),
+    surface: Math.round(shape * SURFACE_MIX_AT_MAX),
     text: Math.round(shape * TEXT_MIX_AT_MAX)
   }
 }

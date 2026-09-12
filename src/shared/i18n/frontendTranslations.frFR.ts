@@ -1012,7 +1012,7 @@ export const frFRTranslations = {
   'appearance.translucentSidebarTransparency': 'Transparence de la barre latérale',
   'appearance.uiContrast': 'Contraste',
   'appearance.uiContrastDescription':
-    'Augmente uniquement le contraste des bordures, du texte atténué et des icônes secondaires.',
+    'Augmente le contraste des bordures, du texte atténué, des icônes secondaires, du texte secondaire de la barre latérale et des réglages, ainsi que des surfaces sélectionnées, atténuées ou survolées.',
   'environment.selectProject': 'Sélectionnez un projet',
   'environment.addProject': 'Ajouter un projet',
   'environment.editProject': 'Modifier le projet',

@@ -996,7 +996,7 @@ export const jaJPTranslations = {
   'appearance.translucentSidebarTransparency': 'サイドバーの透明性',
   'appearance.uiContrast': 'コントラスト',
   'appearance.uiContrastDescription':
-    '枠線、弱い文字、副次アイコンのコントラストだけを上げます。',
+    '枠線、弱い文字、副次アイコン、サイドバーと設定の副次テキスト、選択・ミュート面、ホバーのコントラストを上げます。',
   'environment.selectProject': 'プロジェクトの選択',
   'environment.addProject': 'プロジェクトの追加',
   'environment.editProject': 'プロジェクトの編集',
