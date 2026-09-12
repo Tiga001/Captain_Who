@@ -571,3 +571,352 @@ fn context_profile_active_run_stays_frozen_and_terminal_previews_next_mode() {
         Some(Minimal)
     );
 }
+
+#[test]
+fn multi_workspace_active_preview_and_next_turn_share_the_correct_frozen_binding() {
+    use mycopilot_core::storage::models::{ProjectFolderRecord, ProjectFolderRole, ProjectRecord};
+    let fixture = WindowFixture::new();
+    let primary = fixture._directory.path().join("app");
+    let auxiliary = fixture._directory.path().join("docs");
+    for root in [&primary, &auxiliary] {
+        std::fs::create_dir(root).unwrap();
+    }
+    let mut project = ProjectRecord::with_primary_folder(
+        "window-project",
+        "Window workspace",
+        primary.to_string_lossy(),
+        1,
+    );
+    project.folders.push(ProjectFolderRecord {
+        id: "window-docs".into(),
+        alias: "docs".into(),
+        path: auxiliary.to_string_lossy().into_owned(),
+        role: ProjectFolderRole::Auxiliary,
+        sort_order: 1,
+        created_at: 1,
+    });
+    fixture.storage.save_project(project.clone()).unwrap();
+    let mut conversation = fixture
+        .storage
+        .load_conversation(CONVERSATION)
+        .unwrap()
+        .unwrap();
+    conversation.project_id = Some(project.id.clone());
+    fixture.storage.save_conversation(conversation).unwrap();
+    let (existing, revision) = fixture
+        .storage
+        .load_conversation_for_turn(CONVERSATION)
+        .unwrap();
+    let run_id = "run-workspace-window";
+    let prepared = crate::application::agent_support::prepare_reserved_human_turn(
+        &fixture.storage,&fixture.service.skills,
+        serde_json::from_value(json!({"conversationId":CONVERSATION,"modelId":"model-1","content":"Keep this workspace.","userMessageId":"workspace-window-user","assistantMessageId":"workspace-window-assistant","maxTokens":30000})).unwrap(),
+        run_id,existing,revision,None,None).unwrap();
+    let frozen = prepared
+        .agent_input
+        .context
+        .as_ref()
+        .unwrap()
+        .workspace
+        .clone();
+    assert_eq!(
+        fixture
+            .storage
+            .load_agent_workspace_for_run(run_id)
+            .unwrap(),
+        Some(frozen.clone())
+    );
+    let active = saved_profile_snapshot(&fixture.service);
+    project.folders[0].role = ProjectFolderRole::Auxiliary;
+    project.folders[1].role = ProjectFolderRole::Primary;
+    fixture.storage.save_project(project.clone()).unwrap();
+    fixture
+        .service
+        .invalidate_conversation_context_state(CONVERSATION);
+    assert_eq!(saved_profile_snapshot(&fixture.service), active);
+    let assistant_id = &prepared.output.assistant_message_id;
+    fixture
+        .storage
+        .finalize_chat_message_with_conversation_trace(
+            CONVERSATION,
+            assistant_id,
+            "Done.",
+            Some("sent"),
+            "completed",
+            &completed_conversation_trace_without_items(run_id, CONVERSATION, assistant_id),
+            prepared.output.assistant_message.created_at,
+            prepared.output.assistant_message.created_at + 1,
+        )
+        .unwrap();
+    let terminal = fixture
+        .service
+        .finalize_conversation_context_state(
+            &prepared.agent_input,
+            run_id,
+            CONVERSATION,
+            assistant_id,
+            "Done.",
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(saved_profile_snapshot(&fixture.service), terminal);
+    assert_eq!(
+        fixture
+            .storage
+            .load_agent_workspace_for_run(run_id)
+            .unwrap(),
+        Some(frozen)
+    );
+    let (existing, revision) = fixture
+        .storage
+        .load_conversation_for_turn(CONVERSATION)
+        .unwrap();
+    let next = crate::application::agent_support::prepare_reserved_human_turn(
+        &fixture.storage,&fixture.service.skills,
+        serde_json::from_value(json!({"conversationId":CONVERSATION,"modelId":"model-1","content":"Next turn.","userMessageId":"workspace-next-user","assistantMessageId":"workspace-next-assistant"})).unwrap(),
+        "run-workspace-next",existing,revision,None,None).unwrap();
+    assert_eq!(
+        next.agent_input
+            .context
+            .as_ref()
+            .unwrap()
+            .workspace
+            .as_ref()
+            .unwrap()
+            .root_path
+            .as_deref(),
+        Some(auxiliary.to_str().unwrap())
+    );
+}
+
+#[test]
+fn child_terminal_preview_retains_tree_workspace_and_skill_catalog_after_primary_switch() {
+    use mycopilot_core::storage::models::{ProjectFolderRecord, ProjectFolderRole, ProjectRecord};
+    use mycopilot_core::{
+        AgentForkTurns, AgentTreeResourceLimits, CreateChildAgentInput, EnsureRootAgentInput,
+        TrustedAgentWakeTurnAdmission,
+    };
+
+    let fixture = WindowFixture::new();
+    let original = fixture._directory.path().join("original");
+    let replacement = fixture._directory.path().join("replacement");
+    for (root, name, description) in [
+        (
+            &original,
+            "original-root-check",
+            "Check the original tree workspace.".into(),
+        ),
+        (
+            &replacement,
+            "replacement-root-check",
+            "Inspect replacement-only project evidence and conventions. ".repeat(12),
+        ),
+    ] {
+        let skill_dir = root.join(".agents/skills").join(name);
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            format!("---\nname: {name}\ndescription: {description}\n---\n# Check\nUse workspace evidence.\n"),
+        )
+        .unwrap();
+    }
+    let mut project = ProjectRecord::with_primary_folder(
+        "child-window-project",
+        "Child window workspace",
+        original.to_string_lossy(),
+        1,
+    );
+    project.folders.push(ProjectFolderRecord {
+        id: "child-window-replacement".into(),
+        alias: "replacement".into(),
+        path: replacement.to_string_lossy().into_owned(),
+        role: ProjectFolderRole::Auxiliary,
+        sort_order: 1,
+        created_at: 1,
+    });
+    fixture.storage.save_project(project.clone()).unwrap();
+    let mut conversation = fixture
+        .storage
+        .load_conversation(CONVERSATION)
+        .unwrap()
+        .unwrap();
+    conversation.project_id = Some(project.id.clone());
+    fixture.storage.save_conversation(conversation).unwrap();
+    let root_agent_id = "child-window-root";
+    fixture
+        .storage
+        .ensure_root_agent(&EnsureRootAgentInput {
+            agent_id: root_agent_id.into(),
+            conversation_id: CONVERSATION.into(),
+            creation_request_id: "ensure-child-window-root".into(),
+            task_name: "Root".into(),
+        })
+        .unwrap();
+    let (existing, revision) = fixture
+        .storage
+        .load_conversation_for_turn(CONVERSATION)
+        .unwrap();
+    let root_run_id = "run-child-window-root";
+    crate::application::agent_support::prepare_reserved_human_turn(
+        &fixture.storage,
+        &fixture.service.skills,
+        serde_json::from_value(json!({
+            "conversationId": CONVERSATION, "modelId": "model-1",
+            "content": "Check the original workspace with a child.",
+            "userMessageId": "child-window-root-user",
+            "assistantMessageId": "child-window-root-assistant"
+        }))
+        .unwrap(),
+        root_run_id,
+        existing,
+        revision,
+        None,
+        None,
+    )
+    .unwrap();
+    let spawn = fixture
+        .storage
+        .create_child_agent_with_limits_and_expected_selector_from_run(
+            &CreateChildAgentInput {
+                parent_agent_id: root_agent_id.into(),
+                creation_request_id: "spawn-child-window".into(),
+                task_name: "workspace_check".into(),
+                task: "Check this workspace and report.".into(),
+                template_machine_key: None,
+                explicit_model_id: None,
+                reasoning_effort: None,
+                fork_turns: AgentForkTurns::None,
+            },
+            AgentTreeResourceLimits::default(),
+            None,
+            None,
+            root_run_id,
+        )
+        .unwrap();
+    let claim_token = "claim-child-window";
+    let wake = fixture
+        .storage
+        .claim_next_agent_wake(&spawn.agent.agent_id, claim_token)
+        .unwrap()
+        .unwrap();
+    let child_conversation_id = &spawn.agent.conversation_id;
+    let (existing, revision) = fixture
+        .storage
+        .load_conversation_for_turn(child_conversation_id)
+        .unwrap();
+    let child_run_id = "run-child-window";
+    let prepared = crate::application::agent_support::prepare_agent_wake_turn(
+        &fixture.storage,
+        &fixture.service.skills,
+        &spawn,
+        "child-window-assistant".into(),
+        child_run_id,
+        existing.unwrap(),
+        revision.unwrap(),
+        TrustedAgentWakeTurnAdmission {
+            agent_id: spawn.agent.agent_id.clone(),
+            wake_id: wake.wake_id,
+            claim_token: claim_token.into(),
+            source_agent_message_id: spawn.task_message.message_id.clone(),
+        },
+    )
+    .unwrap();
+    let frozen_context = prepared.agent_input.context.as_ref().unwrap();
+    assert!(frozen_context.collaboration_identity.is_some());
+    assert_eq!(
+        frozen_context
+            .workspace
+            .as_ref()
+            .unwrap()
+            .root_path
+            .as_deref(),
+        original.to_str()
+    );
+    let discovery = prepared.agent_input.skill_discovery.as_ref().unwrap();
+    assert!(discovery
+        .skills
+        .iter()
+        .any(|skill| skill.name == "original-root-check"));
+    assert!(!discovery
+        .skills
+        .iter()
+        .any(|skill| skill.name == "replacement-root-check"));
+
+    project.folders[0].role = ProjectFolderRole::Auxiliary;
+    project.folders[1].role = ProjectFolderRole::Primary;
+    fixture.storage.save_project(project.clone()).unwrap();
+    let assistant_id = &prepared.output.assistant_message_id;
+    fixture
+        .storage
+        .finalize_chat_message_with_conversation_trace(
+            child_conversation_id,
+            assistant_id,
+            "Done.",
+            Some("sent"),
+            "completed",
+            &completed_conversation_trace_without_items(
+                child_run_id,
+                child_conversation_id,
+                assistant_id,
+            ),
+            prepared.output.assistant_message.created_at,
+            prepared.output.assistant_message.created_at + 1,
+        )
+        .unwrap();
+    let terminal = fixture
+        .service
+        .finalize_conversation_context_state(
+            &prepared.agent_input,
+            child_run_id,
+            child_conversation_id,
+            assistant_id,
+            "Done.",
+        )
+        .unwrap()
+        .unwrap();
+    let mut expected_input = fixture
+        .service
+        .persisted_conversation_context_state(&prepared.agent_input, child_conversation_id)
+        .unwrap()
+        .preview_input;
+    expected_input.assistant_message_id = None;
+    expected_input.skill_activation = None;
+    let projection = fixture
+        .service
+        .context_window_tool_projection(&expected_input, None)
+        .unwrap();
+    let frozen_preview =
+        inspect_context_window_with_tool_projection(expected_input.clone(), &projection)
+            .unwrap()
+            .unwrap();
+    assert_eq!(
+        terminal, frozen_preview,
+        "child terminal preview must keep its tree's frozen workspace and Skill source"
+    );
+
+    // Verify this fixture distinguishes the current project's catalog from the inherited one.
+    expected_input.context.as_mut().unwrap().workspace =
+        Some(mycopilot_core::workspace::capture_project_workspace(&project).unwrap());
+    expected_input.skill_discovery =
+        crate::adapters::skills_adapter::prepare_enabled_skill_discovery(
+            &fixture.storage,
+            &fixture.service.skills,
+            Some((&project.id, &replacement)),
+            expected_input.context_window_tokens.unwrap(),
+        )
+        .unwrap();
+    assert!(expected_input
+        .skill_discovery
+        .as_ref()
+        .unwrap()
+        .skills
+        .iter()
+        .any(|skill| skill.name == "replacement-root-check"));
+    let changed_preview = inspect_context_window_with_tool_projection(expected_input, &projection)
+        .unwrap()
+        .unwrap();
+    assert_ne!(
+        terminal, changed_preview,
+        "a child must not preview an unrelated new root's workspace or Skills"
+    );
+}

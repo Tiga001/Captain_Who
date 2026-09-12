@@ -48,7 +48,7 @@ const APP_DATA_ROOT_FLAG: &str = "--app-data-root";
 const CONFIGURATION_SOURCE_FLAG: &str = "--configuration-source";
 const SQLITE_TRANSIENT_SUFFIXES: [&str; 3] = ["-journal", "-wal", "-shm"];
 const RECOVERABLE_CONFIGURATION_SOURCE_SCHEMA_VERSION: i32 = 33;
-const RECOVERABLE_CONFIGURATION_TARGET_SCHEMA_VERSION: i32 = 45;
+const RECOVERABLE_CONFIGURATION_TARGET_SCHEMA_VERSION: i32 = 46;
 const RECOVERABLE_CONFIGURATION_SOURCE_FINGERPRINT: &str =
     "sha256:5e1e404d74af5ed899d88dc8b5051e673ecd5beb967579af8f328b07b640c948";
 const PREVIOUS_CONFIGURATION_SOURCE_SCHEMA_VERSION: i32 = 35;
@@ -83,6 +83,9 @@ const CONTEXT_PROFILE_CONFIGURATION_SOURCE_FINGERPRINT: &str =
     "sha256:358ad31ab6d85de12e335afaeb51e41870fa25c1c7b5ea792c55c91b1ab0241a";
 const CONTEXT_PROFILE_SCHEMA_MARKER: &str =
     "-- Context profiles and immutable run admission policy, schema v44.";
+const WORKSPACE_CONFIGURATION_SOURCE_SCHEMA_VERSION: i32 = 45;
+const WORKSPACE_CONFIGURATION_SOURCE_FINGERPRINT: &str =
+    "sha256:f8d106839487dda40070acc471675c9c4299bad1afb6aaf2a56d75807ce3b2f7";
 const MULTI_FOLDER_PROJECT_SCHEMA_MARKER: &str = "-- Multi-folder project roots, schema v45.";
 /// `projects` table SQL of the current canonical schema and its exact pre-v45 shape. Older
 /// catalogs are rebuilt byte-for-byte from the current schema by swapping these definitions.
@@ -531,7 +534,8 @@ fn inspect_source(
                 && schema_version != UNIFIED_HISTORY_CONFIGURATION_SOURCE_SCHEMA_VERSION
                 && schema_version != TRACE_PREFIX_CONFIGURATION_SOURCE_SCHEMA_VERSION
                 && schema_version != COLLABORATION_CONFIGURATION_SOURCE_SCHEMA_VERSION
-                && schema_version != CONTEXT_PROFILE_CONFIGURATION_SOURCE_SCHEMA_VERSION =>
+                && schema_version != CONTEXT_PROFILE_CONFIGURATION_SOURCE_SCHEMA_VERSION
+                && schema_version != WORKSPACE_CONFIGURATION_SOURCE_SCHEMA_VERSION =>
         {
             // Unknown schemas must never silently discard configuration. Even an empty table
             // may have an incompatible layout; do not interpret it as a missing preference.
@@ -571,6 +575,7 @@ fn inspect_source(
                     | TRACE_PREFIX_CONFIGURATION_SOURCE_SCHEMA_VERSION
                     | COLLABORATION_CONFIGURATION_SOURCE_SCHEMA_VERSION
                     | CONTEXT_PROFILE_CONFIGURATION_SOURCE_SCHEMA_VERSION
+                    | WORKSPACE_CONFIGURATION_SOURCE_SCHEMA_VERSION
             ) =>
         {
             if !is_supported_explicit_configuration_source(
@@ -647,6 +652,7 @@ fn inspect_source(
         || schema_version == UNIFIED_HISTORY_CONFIGURATION_SOURCE_SCHEMA_VERSION
         || schema_version == TRACE_PREFIX_CONFIGURATION_SOURCE_SCHEMA_VERSION
         || schema_version == COLLABORATION_CONFIGURATION_SOURCE_SCHEMA_VERSION
+        || schema_version == WORKSPACE_CONFIGURATION_SOURCE_SCHEMA_VERSION
         || schema_version == CONTEXT_PROFILE_CONFIGURATION_SOURCE_SCHEMA_VERSION
     {
         Some(load_human_interaction_settings_for_reset(&connection)?)
@@ -656,6 +662,7 @@ fn inspect_source(
     let agent_collaboration_settings = if schema_version
         == mycopilot_core::storage::migrations::STORAGE_SCHEMA_VERSION
         || schema_version == COLLABORATION_CONFIGURATION_SOURCE_SCHEMA_VERSION
+        || schema_version == WORKSPACE_CONFIGURATION_SOURCE_SCHEMA_VERSION
         || schema_version == CONTEXT_PROFILE_CONFIGURATION_SOURCE_SCHEMA_VERSION
     {
         Some(load_agent_collaboration_settings_for_reset(&connection)?)
@@ -778,7 +785,9 @@ fn is_supported_explicit_configuration_source(schema_version: i32, fingerprint: 
             || (schema_version == COLLABORATION_CONFIGURATION_SOURCE_SCHEMA_VERSION
                 && fingerprint == COLLABORATION_CONFIGURATION_SOURCE_FINGERPRINT)
             || (schema_version == CONTEXT_PROFILE_CONFIGURATION_SOURCE_SCHEMA_VERSION
-                && fingerprint == CONTEXT_PROFILE_CONFIGURATION_SOURCE_FINGERPRINT))
+                && fingerprint == CONTEXT_PROFILE_CONFIGURATION_SOURCE_FINGERPRINT)
+            || (schema_version == WORKSPACE_CONFIGURATION_SOURCE_SCHEMA_VERSION
+                && fingerprint == WORKSPACE_CONFIGURATION_SOURCE_FINGERPRINT))
 }
 
 /// Called only after the exact source catalog has been verified. Catalogs before v44 have no
@@ -788,6 +797,7 @@ fn load_agent_prompt_preferences_for_reset(
     schema_version: i32,
 ) -> io::Result<AgentPromptPreferencesRecord> {
     if schema_version == mycopilot_core::storage::migrations::STORAGE_SCHEMA_VERSION
+        || schema_version == WORKSPACE_CONFIGURATION_SOURCE_SCHEMA_VERSION
         || schema_version == CONTEXT_PROFILE_CONFIGURATION_SOURCE_SCHEMA_VERSION
     {
         return agent_prompt_preferences_repository::load_agent_prompt_preferences(connection)
@@ -913,6 +923,7 @@ fn validate_preserved_configuration_table_schemas(source: &Connection) -> io::Re
     let has_collaboration_settings = schema_version
         == mycopilot_core::storage::migrations::STORAGE_SCHEMA_VERSION
         || schema_version == COLLABORATION_CONFIGURATION_SOURCE_SCHEMA_VERSION
+        || schema_version == WORKSPACE_CONFIGURATION_SOURCE_SCHEMA_VERSION
         || schema_version == CONTEXT_PROFILE_CONFIGURATION_SOURCE_SCHEMA_VERSION;
     let has_human_settings = matches!(
         schema_version,
@@ -934,6 +945,15 @@ fn validate_preserved_configuration_table_schemas(source: &Connection) -> io::Re
     let canonical = Connection::open_in_memory().map_err(redacted_storage_error)?;
     if schema_version == mycopilot_core::storage::migrations::STORAGE_SCHEMA_VERSION {
         mycopilot_core::storage::migrations::run_migrations(&canonical)
+            .map_err(redacted_storage_error)?;
+    } else if schema_version == WORKSPACE_CONFIGURATION_SOURCE_SCHEMA_VERSION {
+        canonical
+            .execute_batch(
+                include_str!("../../../core/src/storage/canonical_schema.sql")
+                    .split_once("-- Frozen workspace membership, schema v46.")
+                    .expect("workspace schema marker")
+                    .0,
+            )
             .map_err(redacted_storage_error)?;
     } else if schema_version == CONTEXT_PROFILE_CONFIGURATION_SOURCE_SCHEMA_VERSION {
         // v44 already carries every preserved table in its current shape; only the project
@@ -2374,7 +2394,7 @@ mod tests {
     }
 
     #[test]
-    fn explicit_configuration_sources_are_pinned_to_known_catalogs_for_schema_45() {
+    fn explicit_configuration_sources_are_pinned_to_known_catalogs_for_schema_46() {
         assert!(is_supported_explicit_configuration_source(
             RECOVERABLE_CONFIGURATION_SOURCE_SCHEMA_VERSION,
             RECOVERABLE_CONFIGURATION_SOURCE_FINGERPRINT,
@@ -3015,7 +3035,22 @@ mod tests {
         assert_eq!(fs::read(database).unwrap(), before);
     }
 
+    fn drop_frozen_workspace_fixture_schema(connection: &Connection) {
+        connection.execute_batch("DROP TABLE agent_workspace_run_bindings; DROP TABLE agent_workspace_wake_bindings;").unwrap();
+    }
+
+    fn downgrade_fixture_to_exact_v45(database: &Path) {
+        let connection = Connection::open(database).unwrap();
+        drop_frozen_workspace_fixture_schema(&connection);
+        connection.pragma_update(None, "user_version", 45).unwrap();
+        assert_eq!(
+            storage_catalog_fingerprint(&connection).unwrap(),
+            WORKSPACE_CONFIGURATION_SOURCE_FINGERPRINT
+        );
+    }
+
     fn drop_multi_folder_project_fixture_schema(connection: &Connection) {
+        drop_frozen_workspace_fixture_schema(connection);
         // Only temporary fixture databases are rewritten. Recreate the pre-v45 projects table
         // byte-for-byte and fold each primary folder back into the legacy path column. Dropping
         // the table also drops its index and trigger, so their catalog SQL is replayed verbatim.
@@ -3275,6 +3310,10 @@ mod tests {
                 downgrade_fixture_to_exact_v44(&database);
                 CONTEXT_PROFILE_CONFIGURATION_SOURCE_FINGERPRINT
             }
+            45 => {
+                downgrade_fixture_to_exact_v45(&database);
+                WORKSPACE_CONFIGURATION_SOURCE_FINGERPRINT
+            }
             _ => panic!("unsupported reset fixture"),
         };
         let connection = Connection::open(&database).unwrap();
@@ -3295,7 +3334,7 @@ mod tests {
             } else {
                 None
             };
-        if source_version == 44 {
+        if source_version >= 44 {
             connection
                 .execute(
                     "UPDATE agent_prompt_preferences SET context_profile='minimal'",
@@ -3340,7 +3379,7 @@ mod tests {
         let preferences = storage.load_agent_prompt_preferences().unwrap();
         assert_eq!(
             preferences.context_profile,
-            if source_version == 44 {
+            if source_version >= 44 {
                 mycopilot_core::AgentContextProfile::Minimal
             } else {
                 mycopilot_core::AgentContextProfile::Full
@@ -3393,6 +3432,11 @@ mod tests {
             load_human_interaction_settings_for_reset(&backup).unwrap(),
             expected_human
         );
+    }
+
+    #[test]
+    fn exact_v45_reset_preserves_configuration_and_discards_multi_folder_history() {
+        assert_previous_reset_preserves_configuration(45);
     }
 
     #[test]

@@ -183,6 +183,13 @@ fn insert_active_root_trace(fixture: &Fixture, run_id: &str, assistant_message_i
         20,
     )
     .unwrap();
+    crate::storage::agent_workspace_repository::freeze_run(
+        &connection,
+        run_id,
+        None,
+        Some("project-a"),
+    )
+    .unwrap();
 }
 
 fn save_settled_history(fixture: &Fixture, turn_count: usize, active_tail: bool) {

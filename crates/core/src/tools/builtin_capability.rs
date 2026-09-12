@@ -477,8 +477,10 @@ fn sensitive_file_preparation(
                         .canonicalize()
                         .map_err(|_| AgentError::new("browser.file.invalid_file"))?;
                     if context
-                        .workspace_root_optional()?
-                        .is_some_and(|root| canonical.starts_with(root))
+                        .workspace_resolver()
+                        .containing_root(&canonical)
+                        .map_err(|_| AgentError::new("browser.file.invalid_file"))?
+                        .is_some()
                     {
                         canonical
                     } else {
@@ -1160,6 +1162,7 @@ mod tests {
             conversation_id: None,
             project_id: None,
             workspace: Some(AgentWorkspaceContext {
+                folders: Vec::new(),
                 project_id: None,
                 display_name: Some("browser file preflight fixture".to_string()),
                 root_path: Some(root.to_string_lossy().to_string()),

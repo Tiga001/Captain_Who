@@ -431,7 +431,7 @@ pub(super) fn rewrite_managed_office_script_arguments(
 }
 
 pub(super) fn presentation_editor_contract(
-    workspace_root: Option<&Path>,
+    workspace: &crate::workspace::WorkspaceResolver,
     cwd: &Path,
     request: &AgentCommandRequest,
     binding: &crate::AgentCommandRuntimeBinding,
@@ -477,7 +477,7 @@ pub(super) fn presentation_editor_contract(
                 .to_string(),
         );
     }
-    let workspace_root = workspace_root.ok_or_else(|| {
+    workspace.primary_root().ok_or_else(|| {
         "Presentation Editor requires the workspace which owns its materialized script.".to_string()
     })?;
     let script_binding = editor_bindings[0];
@@ -498,8 +498,16 @@ pub(super) fn presentation_editor_contract(
     } else {
         cwd.join(requested_script)
     };
-    let frozen_source = workspace_root.join(frozen_script_source);
-    if requested_script.canonicalize().ok() != frozen_source.canonicalize().ok() {
+    let frozen_source = workspace.resolve_input(frozen_script_source)?;
+    let requested_canonical = requested_script
+        .canonicalize()
+        .map_err(|error| format!("Presentation Editor script is unavailable: {error}"))?;
+    let frozen_canonical = frozen_source
+        .canonicalize()
+        .map_err(|error| format!("Presentation Editor frozen script is unavailable: {error}"))?;
+    if requested_canonical != frozen_canonical
+        || workspace.containing_root(&frozen_canonical)?.is_none()
+    {
         return Err(
             "Presentation Editor command script does not match its frozen materialization input."
                 .to_string(),

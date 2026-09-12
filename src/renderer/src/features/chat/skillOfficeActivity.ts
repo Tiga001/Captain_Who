@@ -450,8 +450,9 @@ export function getOfficeActivityView(
 }
 
 function normalizedArtifactPath(path: string): string {
-  const normalized = path.replace(/\\/g, '/').replace(/^\.\//, '')
-  return normalized.replace(/\/{2,}/g, '/')
+  const normalized = path.replace(/\\/g, '/').replace(/\/{2,}/g, '/')
+  // ./@... names a literal workspace directory, not a virtual resource namespace.
+  return normalized.startsWith('./@') ? normalized : normalized.replace(/^\.\//, '')
 }
 
 function artifactKindForPath(path: string): AgentCommandArtifactKind | undefined {
@@ -681,6 +682,8 @@ export function getOfficeArtifactFileName(path: string): string {
 }
 
 export function hasUnresolvedPathAlias(path: string): boolean {
+  // The Host resolves project namespaces against the originating Turn's frozen roots.
+  if (/^@workspace\/[\p{L}\p{N}._-]+(?:\/|$)/u.test(path.trim())) return false
   return /^@[A-Za-z][A-Za-z0-9_-]*(?:\/|$)/.test(path.trim())
 }
 

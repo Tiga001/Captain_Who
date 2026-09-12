@@ -117,6 +117,17 @@ impl CommandSpawnPlan {
         self
     }
 
+    pub(crate) fn with_workspace_projection(
+        mut self,
+        workspace: &crate::workspace::WorkspaceResolver,
+    ) -> Self {
+        self.cwd_projection = workspace.display_path(&self.cwd);
+        if self.cwd_projection.is_empty() {
+            self.cwd_projection = ".".to_string();
+        }
+        self
+    }
+
     pub(crate) fn build(&self) -> Command {
         let mut command = match &self.launch {
             CommandLaunchPlan::Shell => shell_command(&self.command),

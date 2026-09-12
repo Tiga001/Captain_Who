@@ -4,9 +4,9 @@ use crate::command::{
     infer_managed_artifact_command_kind, infer_managed_pdf_command_kind,
     infer_managed_pdf_workspace_inputs, is_presentation_editor_direct_command,
     normalize_command_text, validate_command_runtime_binding,
-    validate_managed_artifact_builder_output_scope, MANAGED_OFFICE_SCRIPT_RESERVED_MOUNT_PREFIX,
-    MAX_ADDITIONAL_ROOTS, MAX_COMMAND_CHARS, MAX_EXPECTED_OUTPUTS, MAX_OBSERVATION_PATH_CHARS,
-    PRESENTATION_EDITOR_RESERVED_MOUNT_PREFIX, PRESENTATION_EDITOR_SCRIPT_MOUNT_PATH,
+    MANAGED_OFFICE_SCRIPT_RESERVED_MOUNT_PREFIX, MAX_ADDITIONAL_ROOTS, MAX_COMMAND_CHARS,
+    MAX_EXPECTED_OUTPUTS, MAX_OBSERVATION_PATH_CHARS, PRESENTATION_EDITOR_RESERVED_MOUNT_PREFIX,
+    PRESENTATION_EDITOR_SCRIPT_MOUNT_PATH,
 };
 use crate::file_input::{
     agent_file_input_ref_from_model_path, agent_file_input_ref_matches_model_path,
@@ -500,6 +500,7 @@ fn command_request_from_call(
         context.attachment_library().cloned(),
         context.skill_resources_optional(),
     )
+    .with_workspace(context.workspace_context())
     .with_storage(context.storage_optional())
     .with_conversation_id(context.conversation_id_optional())
     .with_permissions(context.permissions());
@@ -753,35 +754,31 @@ fn trusted_materialized_builder_profile(
     let Some(builder) = builder else {
         return Ok(None);
     };
-    let (Some(storage), Ok(run_id), Some(workspace_root)) = (
+    let (Some(storage), Ok(run_id), Some(_)) = (
         context.storage_optional(),
         context.run_id(),
         context.workspace_root_optional()?,
     ) else {
         return Ok(None);
     };
-    let command_cwd = match cwd {
-        None => workspace_root.clone(),
-        Some(cwd) if Path::new(cwd).is_absolute() => PathBuf::from(cwd),
-        Some(cwd) => workspace_root.join(cwd),
-    };
+    let workspace = context.workspace_resolver();
+    let command_cwd = workspace
+        .resolve_input(cwd.unwrap_or("."))
+        .map_err(AgentError::new)?;
     let script = Path::new(&builder.script);
     let script_path = normalize_builder_script_path(if script.is_absolute() {
         script.to_path_buf()
     } else {
         command_cwd.join(script)
     })?;
-    let Ok(relative_script) = script_path.strip_prefix(&workspace_root) else {
+    if workspace
+        .containing_root(&script_path)
+        .map_err(AgentError::new)?
+        .is_none()
+    {
         return Ok(None);
-    };
-    let relative_script = relative_script
-        .components()
-        .filter_map(|component| match component {
-            Component::Normal(part) => Some(part.to_string_lossy().into_owned()),
-            _ => None,
-        })
-        .collect::<Vec<_>>()
-        .join("/");
+    }
+    let relative_script = workspace.display_path(&script_path);
 
     let results = storage
         .list_agent_tool_results_for_run(run_id, "skills_materialize_resource")
@@ -892,7 +889,12 @@ fn trusted_materialized_builder_profile(
     let canonical_script = script_path
         .canonicalize()
         .map_err(|error| AgentError::new(format!("Managed Builder 路径无法规范化：{error}")))?;
-    if !canonical_script.starts_with(&workspace_root) {
+    if workspace
+        .containing_root(&canonical_script)
+        .map_err(AgentError::new)?
+        .is_none()
+        || workspace.display_path(&canonical_script) != relative_script
+    {
         return Err(AgentError::structured(
             "managedBuilder.provenanceInvalid",
             "后端物化的 Managed Builder 路径已经通过符号链接离开 workspace。",
@@ -1227,7 +1229,8 @@ fn prepare_managed_office_script_binding(
         workspace_root.clone(),
         context.permissions(),
         context.attachment_library().cloned(),
-    );
+    )
+    .with_workspace(context.workspace_context());
     let binding = crate::office::prepare_managed_script_binding(
         &office_context,
         document_kind,
@@ -1323,26 +1326,22 @@ fn validate_managed_builder_output_scope(
     cwd: Option<&str>,
     outputs: &[String],
 ) -> AgentResult<()> {
+    if outputs.is_empty() {
+        return Ok(());
+    }
     let workspace_root = context.workspace_root_optional()?;
-    let command_cwd = match (cwd, workspace_root.as_ref()) {
-        (None, Some(root)) => root.clone(),
-        (None, None) => PathBuf::from("/"),
-        (Some(cwd), _) if Path::new(cwd).is_absolute() => PathBuf::from(cwd),
-        (Some(cwd), Some(root)) => root.join(cwd),
-        (Some(_), None) => {
-            return Err(AgentError::structured(
-                "managedBuilder.outputOutsideWriteScope",
-                "没有 workspace 时，Managed Builder 相对 cwd 无法解析。",
-                json!({
-                    "type": "managedBuilder",
-                    "code": "managedBuilder.outputOutsideWriteScope",
-                    "recovery": "changePermissionsOrOutput"
-                }),
-            ))
-        }
+    let workspace = context.workspace_resolver();
+    let command_cwd = if cwd.is_none() && workspace_root.is_none() {
+        PathBuf::from("/")
+    } else {
+        // Request preparation validates the selected root and output scope. The cwd itself may
+        // be created before execution; the session repeats canonical directory checks at launch.
+        workspace
+            .resolve_input(cwd.unwrap_or("."))
+            .map_err(AgentError::new)?
     };
-    validate_managed_artifact_builder_output_scope(
-        workspace_root.as_deref(),
+    crate::command::validate_managed_artifact_builder_output_scope_in_workspace(
+        &workspace,
         &command_cwd,
         outputs,
         context.permissions().write,
@@ -1725,14 +1724,26 @@ fn normalize_trace_cwd(cwd: Option<String>) -> AgentResult<Option<String>> {
     if cwd.is_empty() || cwd == "." {
         return Ok(None);
     }
+    crate::resource_locator::ResourceLocator::parse(cwd)
+        .map_err(|error| AgentError::new(error.to_string()))?;
+    if let Some((alias, relative)) =
+        crate::workspace::parse_workspace_path(cwd).map_err(AgentError::new)?
+    {
+        let suffix = relative.to_string_lossy().replace('\\', "/");
+        return Ok(Some(if suffix.is_empty() {
+            format!("@workspace/{alias}")
+        } else {
+            format!("@workspace/{alias}/{suffix}")
+        }));
+    }
     if let Some(expanded) = expand_system_path(cwd).map_err(AgentError::new)? {
         return Ok(Some(expanded.to_string_lossy().to_string()));
     }
     if std::path::Path::new(cwd).is_absolute() {
         return Ok(Some(cwd.to_string()));
     }
-    Ok(Some(
-        clean_relative_path(cwd)?
+    Ok(Some(crate::workspace::escape_relative(
+        &clean_relative_path(cwd)?
             .components()
             .filter_map(|component| match component {
                 std::path::Component::Normal(part) => Some(part.to_string_lossy().to_string()),
@@ -1740,7 +1751,7 @@ fn normalize_trace_cwd(cwd: Option<String>) -> AgentResult<Option<String>> {
             })
             .collect::<Vec<_>>()
             .join("/"),
-    ))
+    )))
 }
 
 fn sanitize_observe(
@@ -1834,6 +1845,18 @@ fn sanitize_cwd(
         };
     }
 
+    crate::resource_locator::ResourceLocator::parse(cwd)
+        .map_err(|error| AgentError::new(error.to_string()))?;
+    if crate::workspace::parse_workspace_path(cwd)
+        .map_err(AgentError::new)?
+        .is_some()
+    {
+        context
+            .workspace_resolver()
+            .resolve_input(cwd)
+            .map_err(AgentError::new)?;
+        return normalize_trace_cwd(Some(cwd.to_string()));
+    }
     let write_permission = context.permissions().write;
     if let Some(expanded) = expand_system_path(cwd).map_err(AgentError::new)? {
         if write_permission != crate::protocol::AgentWritePermission::All {
@@ -1858,8 +1881,8 @@ fn sanitize_cwd(
         ));
     }
 
-    Ok(Some(
-        clean_relative_path(cwd)?
+    Ok(Some(crate::workspace::escape_relative(
+        &clean_relative_path(cwd)?
             .components()
             .filter_map(|component| match component {
                 std::path::Component::Normal(part) => Some(part.to_string_lossy().to_string()),
@@ -1867,7 +1890,7 @@ fn sanitize_cwd(
             })
             .collect::<Vec<_>>()
             .join("/"),
-    ))
+    )))
 }
 
 #[cfg(test)]

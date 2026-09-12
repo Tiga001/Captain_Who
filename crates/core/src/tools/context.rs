@@ -1,5 +1,5 @@
 // Tool execution context and path resolution helpers.
-use super::{clean_relative_path, relative_display};
+use super::relative_display;
 use crate::cancellation::AgentCancellationToken;
 use crate::context::ContextTextBudget;
 use crate::file_change::FileObservationRegistry;
@@ -72,7 +72,6 @@ impl Drop for ModelImageDeliveryReservation {
 
 #[derive(Clone)]
 pub struct ToolExecutionContext {
-    workspace_root: Option<PathBuf>,
     workspace_context: Option<crate::AgentWorkspaceContext>,
     attachment_library: Option<AgentAttachmentLibraryContext>,
     cancellation_token: AgentCancellationToken,
@@ -309,10 +308,6 @@ impl FileObservationRegistryView<'_> {
 
 impl ToolExecutionContext {
     pub fn from_run_context(context: Option<&AgentRunContext>) -> Self {
-        let workspace_root = context
-            .and_then(|context| context.workspace.as_ref())
-            .and_then(|workspace| workspace.root_path.as_ref())
-            .map(PathBuf::from);
         let workspace_context = context.and_then(|context| context.workspace.clone());
         let attachment_library = context.and_then(|context| context.attachment_library.clone());
         let permissions = context
@@ -322,7 +317,6 @@ impl ToolExecutionContext {
         let project_id = context.and_then(|context| context.project_id.clone());
 
         Self {
-            workspace_root,
             workspace_context,
             attachment_library,
             cancellation_token: AgentCancellationToken::new(),
@@ -553,15 +547,21 @@ impl ToolExecutionContext {
         })
     }
 
+    pub(super) fn workspace_context(&self) -> Option<&crate::AgentWorkspaceContext> {
+        self.workspace_context.as_ref()
+    }
+
+    pub(super) fn workspace_resolver(&self) -> crate::workspace::WorkspaceResolver {
+        crate::workspace::WorkspaceResolver::from_context(self.workspace_context())
+    }
+
     pub(super) fn workspace_root_optional(&self) -> AgentResult<Option<PathBuf>> {
         self.check_cancelled()?;
-        let Some(root) = &self.workspace_root else {
+        let resolver = self.workspace_resolver();
+        if resolver.primary_root().is_none() {
             return Ok(None);
-        };
-
-        let root = root
-            .canonicalize()
-            .map_err(|error| AgentError::new(format!("workspace 路径不可访问：{error}")))?;
+        }
+        let root = resolver.canonical_primary().map_err(AgentError::new)?;
         if !root.is_dir() {
             return Err(AgentError::new("workspace 路径不是目录。"));
         }
@@ -801,13 +801,16 @@ impl ToolExecutionContext {
         }
 
         let input_path = locator.logical_value();
-        if let Some(candidate) = expand_system_path(input_path).map_err(AgentError::new)? {
+        if matches!(&locator, ResourceLocator::SystemAlias(_)) {
             if self.permissions.read != AgentReadPermission::All {
                 return Err(AgentError::new(
                     "读取系统路径别名需要将读取范围设为“所有位置”。",
                 ));
             }
-            return candidate
+            return self
+                .workspace_resolver()
+                .resolve_input(input_path)
+                .map_err(AgentError::new)?
                 .canonicalize()
                 .map_err(|error| AgentError::new(format!("路径不可访问：{error}")));
         }
@@ -816,19 +819,27 @@ impl ToolExecutionContext {
             if self.permissions.read != AgentReadPermission::All {
                 return Err(AgentError::new("当前读取权限仅允许访问 workspace 内路径。"));
             }
-            return candidate
+            return self
+                .workspace_resolver()
+                .resolve_input(input_path)
+                .map_err(AgentError::new)?
                 .canonicalize()
                 .map_err(|error| AgentError::new(format!("路径不可访问：{error}")));
         }
 
-        let root = self.workspace_root()?;
-        let relative = clean_relative_path(input_path)?;
-        let resolved = root.join(relative);
+        let resolver = self.workspace_resolver();
+        let resolved = resolver
+            .resolve_input(input_path)
+            .map_err(AgentError::new)?;
         let canonical = resolved
             .canonicalize()
             .map_err(|error| AgentError::new(format!("路径不可访问：{error}")))?;
 
-        if !canonical.starts_with(&root) {
+        if resolver
+            .containing_root(&canonical)
+            .map_err(AgentError::new)?
+            .is_none()
+        {
             return Err(AgentError::new("路径必须位于已选择的 workspace 内。"));
         }
 
@@ -854,12 +865,16 @@ impl ToolExecutionContext {
         }
 
         let input_path = locator.logical_value();
-        if let Some(candidate) = expand_system_path(input_path).map_err(AgentError::new)? {
+        if matches!(&locator, ResourceLocator::SystemAlias(_)) {
             if self.permissions.read != AgentReadPermission::All {
                 return Err(AgentError::new(
                     "读取系统路径别名需要将读取范围设为“所有位置”。",
                 ));
             }
+            let candidate = self
+                .workspace_resolver()
+                .resolve_input(input_path)
+                .map_err(AgentError::new)?;
             return canonicalize_parent_preserving_leaf(&candidate);
         }
         let candidate = Path::new(input_path);
@@ -867,13 +882,23 @@ impl ToolExecutionContext {
             if self.permissions.read != AgentReadPermission::All {
                 return Err(AgentError::new("当前读取权限仅允许访问 workspace 内路径。"));
             }
-            return canonicalize_parent_preserving_leaf(candidate);
+            let candidate = self
+                .workspace_resolver()
+                .resolve_input(input_path)
+                .map_err(AgentError::new)?;
+            return canonicalize_parent_preserving_leaf(&candidate);
         }
 
-        let root = self.workspace_root()?;
-        let relative = clean_relative_path(input_path)?;
-        let resolved = canonicalize_parent_preserving_leaf(&root.join(relative))?;
-        if !resolved.starts_with(&root) {
+        let resolver = self.workspace_resolver();
+        let target = resolver
+            .resolve_input(input_path)
+            .map_err(AgentError::new)?;
+        let resolved = canonicalize_parent_preserving_leaf(&target)?;
+        if resolver
+            .containing_root(&resolved)
+            .map_err(AgentError::new)?
+            .is_none()
+        {
             return Err(AgentError::new("路径必须位于已选择的 workspace 内。"));
         }
         Ok(resolved)
@@ -884,16 +909,10 @@ impl ToolExecutionContext {
         input_path: &str,
     ) -> Result<crate::file_change::ResolvedFileChangeTarget, crate::file_change::FileChangeError>
     {
-        let workspace_root = self.workspace_root_optional().map_err(|error| {
-            crate::file_change::FileChangeError::with_diagnostic(
-                crate::file_change::FileChangeErrorCode::Failed,
-                error.to_string(),
-            )
-        })?;
         let allow_outside_workspace = self.permissions.read == AgentReadPermission::All
             || self.permissions.write == AgentWritePermission::All;
-        crate::file_change::FileChangePathPolicy::new(
-            workspace_root.as_deref(),
+        crate::file_change::FileChangePathPolicy::from_workspace(
+            self.workspace_context(),
             allow_outside_workspace,
         )
         .resolve(input_path)
@@ -913,6 +932,9 @@ impl ToolExecutionContext {
                     "读取系统路径别名需要将读取范围设为“所有位置”。",
                 ));
             }
+            self.workspace_resolver()
+                .resolve_input(input_path)
+                .map_err(AgentError::new)?;
             let alias_path = alias_path
                 .canonicalize()
                 .map_err(|error| AgentError::new(format!("路径不可访问：{error}")))?;
@@ -925,10 +947,13 @@ impl ToolExecutionContext {
             }
         }
 
-        if let Some(root) = self.workspace_root_optional()? {
-            if file_path.starts_with(&root) {
-                return Ok(relative_display(&root, file_path));
-            }
+        let resolver = self.workspace_resolver();
+        if resolver
+            .containing_root(file_path)
+            .map_err(AgentError::new)?
+            .is_some()
+        {
+            return Ok(resolver.display_path(file_path));
         }
         if self.permissions.read == AgentReadPermission::All && file_path.is_absolute() {
             return Ok(file_path.to_string_lossy().to_string());
@@ -945,6 +970,7 @@ impl ToolExecutionContext {
         .with_storage(self.storage.clone())
         .with_conversation_id(self.conversation_id.as_deref())
         .with_permissions(self.permissions)
+        .with_workspace(self.workspace_context())
     }
 
     pub(super) fn conversation_attachments(&self) -> &[AgentAttachmentReference] {

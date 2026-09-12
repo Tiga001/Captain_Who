@@ -54,6 +54,7 @@ interface RightSidebarProps {
   renderAgentObserver?: (context: AgentObserverRenderContext) => ReactNode
   workspaceKey?: string | null
   workspaceKeys?: readonly string[]
+  projectWorkspaceRevisions?: Readonly<Record<string, string>>
   workspaceName?: string | null
   workspacePath?: string
 }
@@ -111,6 +112,7 @@ export const RightSidebar = memo(function RightSidebar({
   renderAgentObserver,
   workspaceKey,
   workspaceKeys,
+  projectWorkspaceRevisions,
   workspaceName,
   workspacePath
 }: RightSidebarProps): ReactNode {
@@ -600,7 +602,10 @@ export const RightSidebar = memo(function RightSidebar({
         </div>
       </header>
 
-      <WorkspaceFileTreeSessionsProvider projectIds={fileTreeProjectIds}>
+      <WorkspaceFileTreeSessionsProvider
+        projectIds={fileTreeProjectIds}
+        projectRevisions={projectWorkspaceRevisions}
+      >
         <div className="right-sidebar__content">
           <RightSidebarRuntimeContext.Provider value={runtimeContext}>
             {hasOpenPages ? (

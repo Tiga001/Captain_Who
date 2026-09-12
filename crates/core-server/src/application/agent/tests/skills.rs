@@ -867,6 +867,68 @@ fn installed_skill_crosses_the_production_turn_boundary_without_instruction_leak
         Some("already_applied")
     );
 
+    // Materializing into an auxiliary folder shares the frozen workspace authorization; it
+    // must keep the namespace in the public result and never rebound to a replacement folder.
+    {
+        let auxiliary_container = tempfile::tempdir().unwrap();
+        let auxiliary = auxiliary_container.path().join("docs");
+        fs::create_dir(&auxiliary).unwrap();
+        let auxiliary = auxiliary.canonicalize().unwrap();
+        let mut auxiliary_input = materialization_input.clone();
+        auxiliary_input
+            .context
+            .as_mut()
+            .unwrap()
+            .workspace
+            .as_mut()
+            .unwrap()
+            .folders
+            .push(mycopilot_core::workspace::WorkspaceFolder {
+                id: "materialization-auxiliary".to_string(),
+                alias: "docs".to_string(),
+                role: mycopilot_core::storage::models::ProjectFolderRole::Auxiliary,
+                path: auxiliary.to_string_lossy().into_owned(),
+                canonical_path: Some(auxiliary.to_string_lossy().into_owned()),
+                directory_identity: Some(
+                    mycopilot_core::file_change::FileChangeDirectoryIdentity::read(&auxiliary)
+                        .unwrap(),
+                ),
+            });
+        let mut auxiliary_request = request.clone();
+        auxiliary_request.id = "materialize-auxiliary".to_string();
+        auxiliary_request.destination = "@workspace/docs/runtime.md".to_string();
+        let result = service.execute_skill_materialization(
+            &auxiliary_input,
+            &auxiliary_request,
+            Some(session.as_ref()),
+        );
+        assert!(
+            result.ok,
+            "auxiliary materialization failed: {:?}",
+            result.error
+        );
+        assert_eq!(
+            result.result.as_ref().unwrap()["destination"],
+            "@workspace/docs/runtime.md"
+        );
+        assert_eq!(
+            fs::read_to_string(auxiliary.join("runtime.md")).unwrap(),
+            "revision-bound resource marker"
+        );
+        fs::rename(&auxiliary, auxiliary_container.path().join("old-docs")).unwrap();
+        fs::create_dir(&auxiliary).unwrap();
+        assert!(
+            !service
+                .execute_skill_materialization(
+                    &auxiliary_input,
+                    &auxiliary_request,
+                    Some(session.as_ref())
+                )
+                .ok
+        );
+        assert!(!auxiliary.join("runtime.md").exists());
+    }
+
     let script_uri = script_entry.uri().clone();
     let preflight = mycopilot_core::skills::preflight_skill_python_script(
         session,

@@ -317,20 +317,37 @@ pub fn workspace_binding_section(
     workspace: Option<&crate::protocol::AgentWorkspaceContext>,
     lifetime: WorldStateLifetime,
 ) -> Result<WorldStateSectionEnvelope, WorldStateError> {
-    let available = workspace
-        .and_then(|workspace| workspace.root_path.as_deref())
-        .map(str::trim)
-        .is_some_and(|root| !root.is_empty());
+    let available = workspace.is_some_and(|workspace| {
+        if workspace.folders.is_empty() {
+            workspace
+                .root_path
+                .as_deref()
+                .is_some_and(|root| !root.trim().is_empty())
+        } else {
+            workspace.folders.iter().any(|folder| {
+                folder.role == crate::storage::models::ProjectFolderRole::Primary
+                    && folder.canonical_path.is_some()
+            })
+        }
+    });
     let state = serde_json::json!({
         "available": available,
         "projectId": workspace.and_then(|workspace| workspace.project_id.as_deref()),
         "displayName": workspace.and_then(|workspace| workspace.display_name.as_deref()),
         "rootPath": workspace.and_then(|workspace| workspace.root_path.as_deref()),
+        "folders": workspace.map(|workspace| &workspace.folders),
     });
     let projection = serde_json::json!({
         "available": available,
         "displayName": workspace.and_then(|workspace| workspace.display_name.as_deref()),
         "pathConvention": if available { "workspace_relative" } else { "no_workspace" },
+        "folders": workspace.map(|workspace| workspace.folders.iter().map(|folder| serde_json::json!({
+            "alias": folder.alias,
+            "role": folder.role,
+            "available": folder.canonical_path.is_some(),
+            "path": format!("@workspace/{}",folder.alias),
+        })).collect::<Vec<_>>()).unwrap_or_default(),
+        "defaultScope": if available { "primary_only" } else { "no_workspace" },
     });
     WorldStateSectionEnvelope::model_visible(
         WorldStateSectionId::WorkspaceBinding,

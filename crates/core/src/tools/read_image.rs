@@ -75,6 +75,7 @@ impl AgentTool for ReadImageTool {
             context.attachment_library().cloned(),
             context.skill_resources_optional(),
         )
+        .with_workspace(context.workspace_context())
         .with_storage(context.storage_optional())
         .with_conversation_id(context.conversation_id_optional())
         .with_permissions(context.permissions());
@@ -253,6 +254,7 @@ impl ReadImageArgs {
             context.attachment_library().cloned(),
             context.skill_resources_optional(),
         )
+        .with_workspace(context.workspace_context())
         .with_storage(context.storage_optional())
         .with_conversation_id(context.conversation_id_optional())
         .with_permissions(context.permissions());
@@ -398,6 +400,7 @@ mod tests {
             conversation_id: Some("conversation-read-image".to_string()),
             project_id: None,
             workspace: workspace.map(|root| AgentWorkspaceContext {
+                folders: Vec::new(),
                 project_id: None,
                 display_name: Some("read-image-test".to_string()),
                 root_path: Some(root.to_string_lossy().into_owned()),

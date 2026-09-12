@@ -163,6 +163,7 @@ fn runtime_messages_add_backend_system_prompt() {
         conversation_id: Some("conversation-1".to_string()),
         project_id: Some("project-1".to_string()),
         workspace: Some(AgentWorkspaceContext {
+            folders: Vec::new(),
             project_id: Some("project-1".to_string()),
             display_name: Some("Workspace".to_string()),
             root_path: Some("/private/path".to_string()),

@@ -59,9 +59,15 @@ impl AgentRuntime {
         } = host_services.unwrap_or_default();
         let _steer_input_close_guard = AgentSteerInputCloseGuard::new(steer_input.clone());
         let run_id = run_id.unwrap_or_else(generate_run_id);
-        let interactive_root = input.context.as_ref().is_some_and(|context| context.collaboration_identity.is_none())
+        let interactive_root = input
+            .context
+            .as_ref()
+            .is_some_and(|context| context.collaboration_identity.is_none())
             && automation_report_sink.is_none()
-            && input.prompt_preferences.as_ref().is_none_or(|preferences| preferences.automation_execution_context.is_none());
+            && input
+                .prompt_preferences
+                .as_ref()
+                .is_none_or(|preferences| preferences.automation_execution_context.is_none());
         // RunGrant authority must be retired even when approval resume fails during checkpoint,
         // capability, ToolSet, collaboration, or world-state preflight. Construct the guard as
         // soon as the Host-owned run/storage identity exists; later initialization must not leave
@@ -400,8 +406,12 @@ impl AgentRuntime {
         let conversation_trace = Arc::new(Mutex::new(conversation_trace));
         if !resumed_world_state_epoch {
             persist_run_context_materials(
-                &mut active_context, &conversation_trace, trace_observer.as_ref(),
-                &run_id, trace_assistant_message_id.as_deref(), &context_image_attachments,
+                &mut active_context,
+                &conversation_trace,
+                trace_observer.as_ref(),
+                &run_id,
+                trace_assistant_message_id.as_deref(),
+                &context_image_attachments,
             )?;
         }
         publish_trace_snapshot(&conversation_trace, trace_observer.as_ref())?;
@@ -1711,11 +1721,11 @@ impl AgentRuntime {
                             .await
                         {
                             Ok(action) => match if call.tool == "run_command" {
-                                prepare_command_dispatch(
+                                prepare_command_dispatch_in_workspace(
                                     &call,
                                     action,
                                     command_permissions,
-                                    command_workspace_root.as_deref(),
+                                    &crate::workspace::WorkspaceResolver::from_context(run_context.as_ref().and_then(|context| context.workspace.as_ref())),
                                     command_auto_approve,
                                 )
                             } else {

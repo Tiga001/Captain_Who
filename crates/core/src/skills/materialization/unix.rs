@@ -22,11 +22,12 @@ pub(super) use test_hooks::{install_materialization_test_hook, MaterializationTe
 
 pub(super) fn materialize_file(
     workspace_root: &Path,
+    workspace_identity: Option<&crate::file_change::FileChangeDirectoryIdentity>,
     destination: &SkillMaterializationDestination,
     descriptor: &SkillResourceDescriptor,
     bytes: &[u8],
 ) -> Result<SkillMaterializationStatus, SkillMaterializationError> {
-    let root = open_workspace_root(workspace_root, destination)?;
+    let root = open_workspace_root(workspace_root, workspace_identity, destination)?;
     let components = destination.components().collect::<Vec<_>>();
     let (file_name, parents) = components
         .split_last()
@@ -113,10 +114,11 @@ pub(super) fn materialize_file(
 
 pub(super) fn materialize_tree(
     workspace_root: &Path,
+    workspace_identity: Option<&crate::file_change::FileChangeDirectoryIdentity>,
     destination: &SkillMaterializationDestination,
     prepared: &PreparedTemplateTree,
 ) -> Result<SkillMaterializationStatus, SkillMaterializationError> {
-    let root = open_workspace_root(workspace_root, destination)?;
+    let root = open_workspace_root(workspace_root, workspace_identity, destination)?;
     let components = destination.components().collect::<Vec<_>>();
     let (directory_name, parents) = components
         .split_last()
@@ -910,6 +912,7 @@ struct OpenedWorkspaceRoot {
 
 fn open_workspace_root(
     workspace_root: &Path,
+    workspace_identity: Option<&crate::file_change::FileChangeDirectoryIdentity>,
     destination: &SkillMaterializationDestination,
 ) -> Result<OpenedWorkspaceRoot, SkillMaterializationError> {
     let root = CString::new(workspace_root.as_os_str().as_bytes()).map_err(|_| {
@@ -937,6 +940,23 @@ fn open_workspace_root(
     }
     // SAFETY: `fd` is newly owned by this function.
     let file = unsafe { File::from_raw_fd(fd) };
+    if let Some(expected) = workspace_identity {
+        let metadata =
+            file.metadata()
+                .map_err(|error| SkillMaterializationError::InvalidWorkspace {
+                    reason: error.to_string(),
+                })?;
+        let opened =
+            crate::file_change::FileChangeDirectoryIdentity::from_bound_metadata(&metadata)
+                .map_err(|reason| SkillMaterializationError::InvalidWorkspace {
+                    reason: reason.to_string(),
+                })?;
+        if opened != *expected {
+            return Err(SkillMaterializationError::InvalidWorkspace {
+                reason: "workspace folder identity changed".to_string(),
+            });
+        }
+    }
     let identity =
         file_stat(&file).map_err(|error| SkillMaterializationError::InvalidWorkspace {
             reason: format!("workspace root cannot be inspected: {error}"),

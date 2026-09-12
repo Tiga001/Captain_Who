@@ -77,7 +77,14 @@ fn project_turn_review<'a>(
     let record = record.filter(|record| {
         workspace_paths_match(project_path, Path::new(&record.identity.workspace_root))
     });
-    let source_files = record.map(|record| record.files.as_slice()).unwrap_or(&[]);
+    // This panel still targets the primary repository. Auxiliary workspace references are
+    // retained in turn history, but must not affect its file list, totals or paging budget.
+    // A literal primary directory named @workspace is escaped as ./@workspace/... .
+    let source_files = record
+        .into_iter()
+        .flat_map(|record| &record.files)
+        .filter(|change| !change.path.starts_with("@workspace/"))
+        .collect::<Vec<_>>();
     let truncated =
         record.is_some_and(|record| record.truncated) || source_files.len() > MAX_REVIEW_FILES;
     let mut files = Vec::new();
@@ -99,7 +106,7 @@ fn project_turn_review<'a>(
         }
         let id = content_revision(format!("lastTurn\0{}\0", change.path).as_bytes());
         files.push((
-            change,
+            *change,
             GitReviewFile {
                 id,
                 path: change.path.clone(),

@@ -147,6 +147,7 @@ async fn assert_unified_history_wire(style: crate::AgentApiStyle, native_deepsee
             conversation_id: Some(CONVERSATION.to_string()),
             project_id: None,
             workspace: Some(AgentWorkspaceContext {
+                folders: Vec::new(),
                 project_id: None,
                 display_name: Some("History workspace".to_string()),
                 root_path: Some(workspace.to_string_lossy().into_owned()),

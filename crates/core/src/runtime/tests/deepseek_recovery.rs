@@ -144,6 +144,7 @@ async fn deepseek_cancellation_during_result_publication_closes_grouped_suffix()
         conversation_id: Some(CONVERSATION_ID.to_string()),
         project_id: None,
         workspace: Some(AgentWorkspaceContext {
+            folders: Vec::new(),
             project_id: None,
             display_name: Some("DeepSeek cancellation workspace".to_string()),
             root_path: Some(workspace.to_string_lossy().into_owned()),
@@ -382,6 +383,7 @@ async fn deepseek_commit_unknown_trace_publish_recovers_staged_turn_without_tool
         conversation_id: Some(CONVERSATION_ID.to_string()),
         project_id: None,
         workspace: Some(AgentWorkspaceContext {
+            folders: Vec::new(),
             project_id: None,
             display_name: Some("DeepSeek commit-unknown workspace".to_string()),
             root_path: Some(workspace.to_string_lossy().into_owned()),
@@ -613,6 +615,7 @@ async fn deepseek_checkpoint_abort_closes_unknown_suffix_and_replays_next_run() 
         conversation_id: Some(CONVERSATION_ID.to_string()),
         project_id: None,
         workspace: Some(AgentWorkspaceContext {
+            folders: Vec::new(),
             project_id: None,
             display_name: Some("DeepSeek abort workspace".to_string()),
             root_path: Some(workspace.to_string_lossy().into_owned()),
@@ -715,6 +718,7 @@ async fn deepseek_checkpoint_abort_closes_unknown_suffix_and_replays_next_run() 
         conversation_id: Some(CONVERSATION_ID.to_string()),
         project_id: None,
         workspace: Some(AgentWorkspaceContext {
+            folders: Vec::new(),
             project_id: None,
             display_name: Some("DeepSeek recovery workspace".to_string()),
             root_path: Some(workspace.to_string_lossy().into_owned()),
@@ -1106,6 +1110,7 @@ async fn deepseek_runtime_persists_grouped_turns_before_tool_side_effects() {
             conversation_id: Some(CONVERSATION_ID.to_string()),
             project_id: None,
             workspace: Some(AgentWorkspaceContext {
+                folders: Vec::new(),
                 project_id: None,
                 display_name: Some("DeepSeek E2E workspace".to_string()),
                 root_path: Some(workspace.to_string_lossy().into_owned()),
@@ -1670,6 +1675,7 @@ async fn deepseek_ordinary_reasoning_survives_restart_for_a_future_tools_request
         ],
     );
     restarted_input.context.as_mut().unwrap().workspace = Some(AgentWorkspaceContext {
+        folders: Vec::new(),
         project_id: None,
         display_name: Some("DeepSeek future-tools workspace".to_string()),
         root_path: Some(workspace.to_string_lossy().into_owned()),

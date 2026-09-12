@@ -1,3 +1,5 @@
+import { ConfirmationDialog } from '../components/dialog/ConfirmationDialog'
+import { formatTranslation } from '../config/translationFormat'
 import { TextInputDialog } from '../components/dialog/TextInputDialog'
 import { useManualContextCompaction } from '../features/chat/useManualContextCompaction'
 import type { ComposerCommand } from '../features/chat/components/ComposerCommands'
@@ -20,7 +22,11 @@ import { BottomPanel } from '../features/bottomPanel/BottomPanel'
 import { useToast } from '../components/toast/ToastContext'
 import { useModelSettings } from '../config/ModelSettingsProvider'
 import { useProjectSettings } from '../config/ProjectSettingsProvider'
-import { primaryProjectPath } from '../config/projectConfig'
+import {
+  primaryProjectPath,
+  projectWorkspaceRevision,
+  type AppProject
+} from '../config/projectConfig'
 import { useFrontendConfig } from '../config/FrontendConfigProvider'
 import { featureFlags } from '../config/featureFlags'
 import { useGitRepositoryCapability } from '../features/gitReview/useGitRepositoryCapability'
@@ -360,6 +366,15 @@ export function AppShell() {
     .filter((operation) => operation.status === 'completed')
     .map((operation) => operation.operationId)
     .join(',')
+  const projectWorkspaceRevisions = useMemo(
+    () =>
+      Object.fromEntries(
+        projects.map((project) => [project.id, projectWorkspaceRevision(project)])
+      ),
+    [projects]
+  )
+  const contextProjectId = activeConversation?.projectId ?? activeDraft.projectId
+  const contextProjectRevision = contextProjectId ? projectWorkspaceRevisions[contextProjectId] : ''
   const activeContextWindowKey = activeConversation?.id ?? NEW_CONVERSATION_DRAFT_ID
   const contextWindowModelId = contextWindowModel?.id ?? null
   const contextWindowIndicatorEnabled =
@@ -368,7 +383,7 @@ export function AppShell() {
     activeSnapshot: activeContextWindowSnapshot,
     recordSnapshot: recordContextWindowSnapshot
   } = useContextWindowSnapshots({
-    refreshKey: manualCompactionRefreshKey,
+    refreshKey: JSON.stringify([manualCompactionRefreshKey, contextProjectRevision]),
     conversationId: activeConversation?.id,
     customPermissions: uiPreferences.customPermissions,
     enabled: contextWindowIndicatorEnabled,
@@ -1144,6 +1159,9 @@ export function AppShell() {
     [retryProviderTransition, waitForConversationSaves]
   )
 
+  const [pendingTitleRemoveProject, setPendingTitleRemoveProject] = useState<AppProject | null>(
+    null
+  )
   const removeProject = useProjectRemoval({
     activeConversationIdRef,
     activeRunBindingsRef,
@@ -1246,6 +1264,21 @@ export function AppShell() {
           onValueChange={(value) =>
             setRenamingChat((current) => (current ? { ...current, value } : null))
           }
+        />
+      )}
+      {pendingTitleRemoveProject && (
+        <ConfirmationDialog
+          title={formatTranslation(t, 'project.removeTitle', {
+            projectName: pendingTitleRemoveProject.name
+          })}
+          description={t('project.removeDescription')}
+          cancelLabel={t('project.cancel')}
+          confirmLabel={t('project.confirmRemove')}
+          onCancel={() => setPendingTitleRemoveProject(null)}
+          onConfirm={async () => {
+            if (await removeProject(pendingTitleRemoveProject.id))
+              setPendingTitleRemoveProject(null)
+          }}
         />
       )}
       <header className="window-toolbar" data-drag-region />
@@ -1358,7 +1391,9 @@ export function AppShell() {
               ? {
                   conversationCount: titleProjectConversationCount,
                   onEditProject: () => {
-                    void openEditProjectDialog(titleProject.id)
+                    void openEditProjectDialog(titleProject.id).then((result) => {
+                      if (result === 'remove-requested') setPendingTitleRemoveProject(titleProject)
+                    })
                   },
                   onRevealFolder: (folderId) => {
                     void showProjectFolder(titleProject.id, folderId)
@@ -1509,6 +1544,7 @@ export function AppShell() {
           moduleNavigationRequest={rightSidebarModuleNavigationRequest}
           workspaceKey={rightSidebarWorkspaceProject?.id}
           workspaceKeys={rightSidebarWorkspaceKeys}
+          projectWorkspaceRevisions={projectWorkspaceRevisions}
           workspaceName={rightSidebarWorkspaceProject?.name}
           workspacePath={rightSidebarWorkspacePath}
           onToggleMaximized={toggleRightSidebarMaximized}

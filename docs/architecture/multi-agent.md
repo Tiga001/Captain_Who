@@ -244,15 +244,15 @@ notification 只是失效信号。Renderer 通过 tree snapshot 与 `agent.colla
 
 ## 8. Schema
 
-当前 canonical storage 是 **v45**。唯一真源：
+当前 canonical storage 是 **v46**。唯一真源：
 
 ```rust
-pub const STORAGE_SCHEMA_VERSION: i32 = 45;
+pub const STORAGE_SCHEMA_VERSION: i32 = 46;
 ```
 
-当前 Runtime checkpoint 为 **v17**，拒绝旧版本 checkpoint；本次模型协作身份变更不提供含旧 Agent ID 的聊天、上下文或 checkpoint 兼容转换。
+当前 Runtime checkpoint 为 **v18**，拒绝旧版本 checkpoint；本次模型协作身份变更不提供含旧 Agent ID 的聊天、上下文或 checkpoint 兼容转换。
 
-v45 引入多文件夹项目（`project_folders`），没有从 v44 或更早版本的原地升级：任何旧版本（含 v34–v44）、catalog fingerprint 不匹配、非空未版本化库或外键违规都返回 `development_storage_schema_reset_required`，由显式 `storage:reset-dev` 保留配置后重建。历史文档中的 v7/v8/v10/v11/v17/v19/v20/v22/v23/v24/v25/v26 只是 rollout 阶段标签，不是当前兼容声明；release runner 的 storage step 标为 canonical v45。
+v46 为 Run/Wake 持久化冻结工作区并集，v45 已引入多文件夹项目（`project_folders`）。没有原地升级：任何旧版本（含 v34–v45）、catalog fingerprint 不匹配、非空未版本化库或外键违规都返回 `development_storage_schema_reset_required`，由显式 `storage:reset-dev` 保留配置后重建。历史文档中的 v7/v8/v10/v11/v17/v19/v20/v22/v23/v24/v25/v26 只是 rollout 阶段标签，不是当前兼容声明；release runner 的 storage step 标为 canonical v46。
 
 ## 9. 代码真源
 
@@ -308,5 +308,5 @@ pnpm exec vitest run --project browser src/renderer/src/features/agentCollaborat
 - [ ] 新 UI 状态是否来自持久 semantic event，而不是模型文本或时间戳？
 - [ ] 新 tree-shared 资源是否只从 Host-resolved root identity 授权，并覆盖 root/child/sibling 与跨树/普通 Conversation 负向测试？
 - [ ] terminal parent Timeline 是否在 final stream 开始处冻结，且后续事件只留在 event log/Agent Center？
-- [ ] 是否更新 schema v45 后继版本、fingerprint、迁移/reset、双语言 fixture 和 release gate？
+- [ ] 是否更新 schema v46 后继版本、fingerprint、迁移/reset、双语言 fixture 和 release gate？
 - [ ] 是否同步更新当前文档；历史轮次只在 archive 中追加注释？

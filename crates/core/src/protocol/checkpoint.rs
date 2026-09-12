@@ -30,7 +30,7 @@ pub struct AgentExtensionSnapshot {
 /// The referenced payload remains encrypted in the Host vault; raw Provider continuation and
 /// reasoning are never serialized into the checkpoint. Any other schema version is rejected at
 /// the approval boundary.
-pub const AGENT_RUN_CHECKPOINT_SCHEMA_VERSION: u32 = 17;
+pub const AGENT_RUN_CHECKPOINT_SCHEMA_VERSION: u32 = 18;
 
 /// Suspension sources are separate authority domains. A user answer never grants approval.
 #[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]

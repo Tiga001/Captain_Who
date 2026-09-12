@@ -52,6 +52,8 @@ pub(super) fn freeze_path(
     if logical_path.contains('\0') {
         return Err(invalid_request("Office paths cannot contain NUL bytes."));
     }
+    crate::resource_locator::ResourceLocator::parse(logical_path)
+        .map_err(|error| invalid_request(error.to_string()))?;
 
     let (candidate, attachment) = if logical_path.starts_with("@attachments/") {
         if purpose != OfficePathPurpose::ReadSource {
@@ -60,6 +62,17 @@ pub(super) fn freeze_path(
             ));
         }
         (resolve_attachment(context, logical_path)?, true)
+    } else if crate::workspace::parse_workspace_path(logical_path)
+        .map_err(workspace_error)?
+        .is_some()
+    {
+        (
+            context
+                .workspace_folders
+                .resolve_input(logical_path)
+                .map_err(workspace_error)?,
+            false,
+        )
     } else if let Some(expanded) = expand_system_path(logical_path).map_err(workspace_error)? {
         (normalize_absolute_path(&expanded)?, false)
     } else {
@@ -80,9 +93,10 @@ pub(super) fn freeze_path(
     let lexical_scope = if attachment {
         OfficePathScope::Attachment
     } else if context
-        .workspace
-        .as_deref()
-        .is_some_and(|workspace| candidate.starts_with(workspace))
+        .workspace_folders
+        .containing_root(&candidate)
+        .map_err(workspace_error)?
+        .is_some()
     {
         OfficePathScope::Workspace
     } else {
@@ -129,9 +143,10 @@ pub(super) fn freeze_path(
     let scope = if attachment {
         OfficePathScope::Attachment
     } else if context
-        .workspace
-        .as_deref()
-        .is_some_and(|workspace| normalized.starts_with(workspace))
+        .workspace_folders
+        .containing_root(&normalized)
+        .map_err(workspace_error)?
+        .is_some()
     {
         OfficePathScope::Workspace
     } else {

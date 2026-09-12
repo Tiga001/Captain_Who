@@ -178,6 +178,7 @@ fn fork_does_not_inherit_context_profile_admission_policy_and_next_run_uses_curr
         AgentContextProfile::Minimal
     );
 
+    crate::storage::agent_workspace_repository::freeze_run(&connection, "run-source-0", None, None).unwrap();
     let plan = build_assistant_reply_fork_plan(
         &connection,
         "fork-context-profile-policy",
@@ -194,6 +195,9 @@ fn fork_does_not_inherit_context_profile_admission_policy_and_next_run_uses_curr
     .unwrap()
     .unwrap();
     assert_ne!(cloned_trace.run_id, "run-source-0");
+    assert_eq!(crate::storage::agent_workspace_repository::load_run(&connection, &cloned_trace.run_id).unwrap(), Some(None),
+        "historical file identity bindings are copied independently of executable mode policy");
+
     assert_eq!(
         agent_context_profile_repository::load_run(&connection, &cloned_trace.run_id).unwrap(),
         None,

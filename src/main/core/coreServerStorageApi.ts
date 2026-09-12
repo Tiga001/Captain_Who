@@ -1,4 +1,5 @@
 import type {
+  AgentWorkspaceContext,
   BrowserDownloadListInput,
   BrowserDownloadRecord,
   BrowserDownloadRegistrationInput,
@@ -148,6 +149,8 @@ const STORAGE_SAVE_MODEL_SETTINGS_METHOD = 'storage.saveModelSettings'
 const STORAGE_LOAD_AGENT_PROMPT_PREFERENCES_METHOD = 'storage.loadAgentPromptPreferences'
 const STORAGE_SAVE_AGENT_PROMPT_PREFERENCES_METHOD = 'storage.saveAgentPromptPreferences'
 const STORAGE_LOAD_PROJECTS_METHOD = 'storage.loadProjects'
+const STORAGE_LOAD_RUN_WORKSPACE_METHOD = 'storage.loadRunWorkspace'
+const STORAGE_RESOLVE_RUN_WORKSPACE_PATH_METHOD = 'storage.resolveRunWorkspacePath'
 const STORAGE_SAVE_PROJECT_METHOD = 'storage.saveProject'
 const STORAGE_DELETE_PROJECT_METHOD = 'storage.deleteProject'
 const STORAGE_LOAD_CONVERSATIONS_METHOD = 'storage.loadConversations'
@@ -498,6 +501,24 @@ export class CoreServerStorageApi {
       StorageAgentPromptPreferencesRecord,
       StorageAgentPromptPreferencesRecord
     >(STORAGE_SAVE_AGENT_PROMPT_PREFERENCES_METHOD, preferences)
+  }
+
+  loadRunWorkspace(input: {
+    assistantMessageId: string
+    projectId?: string | null
+  }): Promise<AgentWorkspaceContext | null> {
+    return this.rpc.request<AgentWorkspaceContext | null, typeof input>(
+      STORAGE_LOAD_RUN_WORKSPACE_METHOD,
+      input
+    )
+  }
+
+  resolveRunWorkspacePath(input: {
+    assistantMessageId: string
+    projectId?: string | null
+    filePath: string
+  }): Promise<string> {
+    return this.rpc.request<string, typeof input>(STORAGE_RESOLVE_RUN_WORKSPACE_PATH_METHOD, input)
   }
 
   loadProjects(): Promise<StorageProjectRecord[]> {

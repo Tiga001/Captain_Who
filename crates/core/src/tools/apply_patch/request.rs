@@ -130,9 +130,8 @@ pub(super) fn direct_proposal_from_args(
             FileChangeErrorCode::PermissionDenied,
         )));
     }
-    let workspace_root = context.workspace_root_optional()?;
-    let target = FileChangePathPolicy::new(
-        workspace_root.as_deref(),
+    let target = FileChangePathPolicy::from_workspace(
+        context.workspace_context(),
         context.permissions().write == AgentWritePermission::All,
     )
     .resolve(&file_path)

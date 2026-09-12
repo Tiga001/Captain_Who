@@ -94,6 +94,7 @@ fn command_test_input(workspace: &Path) -> AgentChatInput {
         conversation_id: Some("conversation-command-policy".to_string()),
         project_id: None,
         workspace: Some(AgentWorkspaceContext {
+            folders: Vec::new(),
             project_id: None,
             display_name: Some("command-policy-test".to_string()),
             root_path: Some(workspace.to_string_lossy().into_owned()),

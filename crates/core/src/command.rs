@@ -66,8 +66,8 @@ pub use managed_output_publication::{
 pub(crate) use managed_runtime::{
     infer_managed_artifact_builder_command, infer_managed_artifact_command_kind,
     infer_managed_pdf_command_kind, infer_managed_pdf_workspace_inputs,
-    is_presentation_editor_direct_command, validate_managed_artifact_builder_output_scope,
-    ManagedArtifactBuilderCommand,
+    is_presentation_editor_direct_command,
+    validate_managed_artifact_builder_output_scope_in_workspace, ManagedArtifactBuilderCommand,
 };
 pub(crate) const MANAGED_OFFICE_SCRIPT_RESERVED_MOUNT_PREFIX: &str =
     "__mycopilot/managed-office-script";

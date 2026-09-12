@@ -63,6 +63,7 @@ fn build_attachment_context_in_workspace(
         conversation_id: Some(ATTACHMENT_PREPROCESSING_CONVERSATION_ID.to_string()),
         project_id: None,
         workspace: Some(AgentWorkspaceContext {
+            folders: Vec::new(),
             project_id: None,
             display_name: Some("input attachments".to_string()),
             root_path: Some(temp_root.to_string_lossy().to_string()),

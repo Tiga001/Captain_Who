@@ -1010,6 +1010,7 @@ fn load_authorized_image_input(
         context.attachment_library().cloned(),
         context.skill_resources_optional(),
     )
+    .with_workspace(context.workspace_context())
     .with_storage(context.storage_optional())
     .with_conversation_id(context.conversation_id_optional())
     .with_permissions(context.permissions());
@@ -1591,6 +1592,7 @@ mod tests {
             conversation_id: Some("conversation-1".to_string()),
             project_id: Some("project-1".to_string()),
             workspace: Some(AgentWorkspaceContext {
+                folders: Vec::new(),
                 project_id: Some("project-1".to_string()),
                 display_name: Some("test".to_string()),
                 root_path: Some(workspace.to_string_lossy().to_string()),
@@ -1855,6 +1857,7 @@ mod tests {
             conversation_id: Some("conversation-1".to_string()),
             project_id: None,
             workspace: Some(AgentWorkspaceContext {
+                folders: Vec::new(),
                 project_id: None,
                 display_name: None,
                 root_path: Some(workspace.path().to_string_lossy().to_string()),

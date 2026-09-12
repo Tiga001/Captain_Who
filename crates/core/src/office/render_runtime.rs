@@ -78,7 +78,7 @@ pub(crate) struct OfficeRenderFailureMarker {
 pub struct OfficeRenderRuntimeDiscoveryOptions {
     configured_component_dir: Option<PathBuf>,
     application_resources_dir: Option<PathBuf>,
-    workspace_root: Option<PathBuf>,
+    workspace_roots: Vec<PathBuf>,
 }
 
 impl OfficeRenderRuntimeDiscoveryOptions {
@@ -97,7 +97,12 @@ impl OfficeRenderRuntimeDiscoveryOptions {
     }
 
     pub fn with_workspace_root(mut self, workspace_root: impl Into<PathBuf>) -> Self {
-        self.workspace_root = Some(workspace_root.into());
+        self.workspace_roots = vec![workspace_root.into()];
+        self
+    }
+
+    pub fn with_workspace_roots(mut self, roots: impl IntoIterator<Item = PathBuf>) -> Self {
+        self.workspace_roots = roots.into_iter().collect();
         self
     }
 }
@@ -136,15 +141,15 @@ impl OfficeRenderRuntime {
     pub fn discover(
         options: &OfficeRenderRuntimeDiscoveryOptions,
     ) -> Result<Self, OfficeEngineError> {
-        let workspace = options
-            .workspace_root
-            .as_deref()
-            .map(canonical_directory)
-            .transpose()?;
+        let workspaces = options
+            .workspace_roots
+            .iter()
+            .map(|root| root.canonicalize().unwrap_or_else(|_| root.clone()))
+            .collect::<Vec<_>>();
         let root = resolve_component_root(options)?;
-        if workspace
-            .as_ref()
-            .is_some_and(|workspace| root.starts_with(workspace))
+        if workspaces
+            .iter()
+            .any(|workspace| root.starts_with(workspace) || workspace.starts_with(&root))
         {
             return Err(invalid_component(
                 "The Office render runtime must not be loaded from the agent-writable workspace.",
@@ -174,6 +179,10 @@ impl OfficeRenderRuntime {
 
     pub fn executable_path(&self) -> &Path {
         &self.executable
+    }
+
+    pub(crate) fn component_root(&self) -> &Path {
+        &self.root
     }
 
     pub fn runtime_revision(&self) -> &str {

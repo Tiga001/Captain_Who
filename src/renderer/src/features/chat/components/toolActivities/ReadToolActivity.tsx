@@ -20,6 +20,7 @@ import { AgentActivityDisclosure } from './AgentActivityDisclosure'
 import type { SettledToolStatus } from './toolActivityUtils'
 
 interface ReadToolActivityProps {
+  assistantMessageId?: string
   activity?: ChatReadActivity
   artifactResolver?: ImageArtifactResolver
   call: AgentToolCall
@@ -33,6 +34,7 @@ interface ReadToolActivityProps {
 export interface ReadToolActivityGroupItem extends ReadToolActivityProps {}
 
 interface ReadToolActivityGroupProps {
+  assistantMessageId?: string
   conversationId?: string
   items: ReadToolActivityGroupItem[]
   observerRootConversationId?: string
@@ -345,6 +347,7 @@ function ReadTextRow({ activity, call, result }: ReadToolActivityProps) {
 }
 
 function ReadActivityCard({
+  assistantMessageId,
   activity,
   artifactResolver = lazyHostImageArtifactResolver,
   call,
@@ -379,7 +382,7 @@ function ReadActivityCard({
         openResolvedArtifact(generatedArtifact, resolved, openImagePreview)
         return
       }
-      const image = await loadImageFile({ projectId, filePath: sourcePath })
+      const image = await loadImageFile({ projectId, filePath: sourcePath, assistantMessageId })
       if (!image?.mimeType.startsWith('image/') || !image.data) {
         showImagePreviewNotice(t('imagePreview.originalMissing'))
         return
@@ -392,7 +395,7 @@ function ReadActivityCard({
       })
     } catch (error) {
       console.error('Failed to load read_image source', error)
-      showImagePreviewNotice(t('imagePreview.originalMissing'))
+      showImagePreviewNotice(t('files.preview.error'))
     }
   }
 
@@ -413,6 +416,7 @@ function ReadActivityCard({
 }
 
 function ReadActivityDetails({
+  assistantMessageId,
   activity,
   artifactResolver,
   call,
@@ -429,6 +433,7 @@ function ReadActivityDetails({
       {error ? <p className="read-activity__error">{error}</p> : null}
       <div className="read-activity__items" data-kind={getKind(call, activity)}>
         <ReadActivityCard
+          assistantMessageId={assistantMessageId}
           activity={activity}
           artifactResolver={artifactResolver}
           call={call}
@@ -444,6 +449,7 @@ function ReadActivityDetails({
 }
 
 export function ReadToolActivity({
+  assistantMessageId,
   activity,
   artifactResolver,
   call,
@@ -472,6 +478,7 @@ export function ReadToolActivity({
       label={label}
     >
       <ReadActivityDetails
+        assistantMessageId={assistantMessageId}
         activity={activity}
         artifactResolver={artifactResolver}
         call={call}
@@ -486,6 +493,7 @@ export function ReadToolActivity({
 }
 
 export function ReadToolActivityGroup({
+  assistantMessageId,
   conversationId,
   items,
   observerRootConversationId,
@@ -497,6 +505,7 @@ export function ReadToolActivityGroup({
   if (items.length === 1) {
     return (
       <ReadToolActivity
+        assistantMessageId={assistantMessageId}
         activity={firstItem.activity}
         artifactResolver={firstItem.artifactResolver}
         call={firstItem.call}
@@ -531,6 +540,7 @@ export function ReadToolActivityGroup({
         <div className="read-activity__items" data-kind={kind}>
           {items.map((item) => (
             <ReadActivityCard
+              assistantMessageId={assistantMessageId}
               activity={item.activity}
               artifactResolver={item.artifactResolver}
               call={item.call}

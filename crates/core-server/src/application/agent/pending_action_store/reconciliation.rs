@@ -201,8 +201,11 @@ pub(super) fn reconcile_interrupted_file_changes(
             Ok(plan) => plan,
             Err(_) => continue,
         };
-        let target =
-            resolve_direct_file_change_recovery_target(&binding.canonical_target, &plan.file_path);
+        let target = resolve_direct_file_change_recovery_target(
+            &binding.canonical_target,
+            &plan.file_path,
+            decoded.agent_input.context.as_ref(),
+        );
         let committer = FileChangeCommitter;
         let disposition = if !staged_record_is_valid {
             RecoveredFileChangeDisposition::OutcomeUnknown
@@ -505,45 +508,21 @@ fn finalized_direct_delete_action(
 
 /// Recreates the original path-policy binding from the frozen display path and canonical target.
 ///
-/// A normal execution resolves a workspace-relative `file_path`, so the committer deliberately
-/// binds its receipt to that relative display path. Startup recovery only retains the canonical
-/// target and must not resolve it as an absolute display path, because that would produce a
-/// different transaction identity. For relative paths, derive the only workspace root that could
-/// have produced both frozen values, resolve through the normal policy again, and require the
-/// canonical path to match exactly.
+/// Use the checkpoint's frozen workspace, including auxiliary aliases and directory identities.
+/// Inferring a root from the display path is not valid for a namespaced auxiliary file and can
+/// accidentally bind a replacement directory. The physical target must still match exactly.
 fn resolve_direct_file_change_recovery_target(
     canonical_target: &str,
     file_path: &str,
+    context: Option<&mycopilot_core::AgentRunContext>,
 ) -> Option<mycopilot_core::file_change::ResolvedFileChangeTarget> {
-    use std::path::Component;
-
-    let frozen_path = Path::new(file_path);
-    let target = if frozen_path.is_absolute() {
-        mycopilot_core::file_change::FileChangePathPolicy::new(None, true)
-            .resolve(file_path)
-            .ok()?
-    } else {
-        let mut workspace_root = Path::new(canonical_target).to_path_buf();
-        let mut normal_components = 0usize;
-        for component in frozen_path.components() {
-            match component {
-                Component::Normal(_) => {
-                    normal_components = normal_components.saturating_add(1);
-                    if !workspace_root.pop() {
-                        return None;
-                    }
-                }
-                Component::CurDir => {}
-                Component::ParentDir | Component::RootDir | Component::Prefix(_) => return None,
-            }
-        }
-        if normal_components == 0 {
-            return None;
-        }
-        mycopilot_core::file_change::FileChangePathPolicy::new(Some(&workspace_root), false)
-            .resolve(file_path)
-            .ok()?
-    };
+    let context = context?;
+    let target = mycopilot_core::file_change::FileChangePathPolicy::from_workspace(
+        context.workspace.as_ref(),
+        context.permissions.write == mycopilot_core::AgentWritePermission::All,
+    )
+    .resolve(file_path)
+    .ok()?;
     (target.absolute_path().to_string_lossy() == canonical_target).then_some(target)
 }
 

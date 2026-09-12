@@ -546,6 +546,34 @@ describe('Skill and Office activity derivation', () => {
     ])
   })
 
+  it('does not merge a literal @workspace directory with an auxiliary folder namespace', () => {
+    const command = toolCall({ id: 'command-roots', tool: 'run_command' })
+    const paths = ['./@workspace/docs/report.xlsx', '@workspace/docs/report.xlsx']
+    const currentRun = run({
+      toolCalls: [command],
+      toolResults: [
+        toolResult({
+          callId: command.id,
+          tool: command.tool,
+          result: {
+            exitCode: 0,
+            artifactObservation: {
+              status: 'complete',
+              changes: paths.map((path) => ({
+                kind: 'created',
+                artifactKind: 'spreadsheet',
+                path,
+                scope: 'workspace',
+                after: { validation: { status: 'valid' } }
+              }))
+            }
+          }
+        })
+      ]
+    })
+    expect(getOfficeArtifactEntries(currentRun).map(({ path }) => path)).toEqual(paths)
+  })
+
   it('does not expose a temporary Word QA PDF as a final artifact card', () => {
     const render = toolCall({
       id: 'word-qa-render',

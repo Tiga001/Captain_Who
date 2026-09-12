@@ -9,6 +9,7 @@ const VCS_COMPONENTS: &[&str] = &[".git", ".hg", ".svn"];
 #[derive(Debug, Clone)]
 pub struct FileChangePathPolicy {
     workspace_root: Option<PathBuf>,
+    workspace: Option<crate::AgentWorkspaceContext>,
     allow_outside_workspace: bool,
 }
 
@@ -16,6 +17,21 @@ impl FileChangePathPolicy {
     pub fn new(workspace_root: Option<&Path>, allow_outside_workspace: bool) -> Self {
         Self {
             workspace_root: workspace_root.map(Path::to_path_buf),
+            workspace: None,
+            allow_outside_workspace,
+        }
+    }
+
+    /// Bind path resolution to the Host-frozen workspace, never current project settings.
+    pub fn from_workspace(
+        workspace: Option<&crate::AgentWorkspaceContext>,
+        allow_outside_workspace: bool,
+    ) -> Self {
+        Self {
+            workspace_root: workspace
+                .and_then(|value| value.root_path.as_deref())
+                .map(PathBuf::from),
+            workspace: workspace.cloned(),
             allow_outside_workspace,
         }
     }
@@ -28,23 +44,28 @@ impl FileChangePathPolicy {
         reject_vcs_component(Path::new(input))?;
         reject_unsupported_extension(Path::new(input))?;
 
-        let workspace_root = self
-            .workspace_root
-            .as_deref()
-            .map(canonical_directory)
-            .transpose()?;
-        let expanded = crate::expand_system_path(input).map_err(|error| {
-            FileChangeError::with_diagnostic(FileChangeErrorCode::InvalidArguments, error)
-        })?;
-        let supplied = expanded.unwrap_or_else(|| PathBuf::from(input));
-        let unresolved = if supplied.is_absolute() {
-            normalize_absolute(&supplied)?
-        } else {
-            let root = workspace_root
-                .as_deref()
-                .ok_or_else(|| FileChangeError::new(FileChangeErrorCode::WorkspaceRequired))?;
-            root.join(clean_relative(&supplied)?)
+        let resolver = match self.workspace.as_ref() {
+            Some(workspace) => crate::workspace::WorkspaceResolver::from_context(Some(workspace)),
+            None => {
+                let root = self
+                    .workspace_root
+                    .as_deref()
+                    .map(canonical_directory)
+                    .transpose()?;
+                crate::workspace::WorkspaceResolver::from_primary(root.as_deref())
+            }
         };
+        if !Path::new(input).is_absolute()
+            && !input.starts_with('@')
+            && !input.starts_with('~')
+            && resolver.primary_root().is_none()
+        {
+            return Err(FileChangeError::new(FileChangeErrorCode::WorkspaceRequired));
+        }
+        let supplied = resolver
+            .resolve_input(input)
+            .map_err(workspace_path_error)?;
+        let unresolved = normalize_absolute(&supplied)?;
 
         validate_existing_components_no_symlink(&unresolved)?;
         let parent = unresolved
@@ -52,11 +73,10 @@ impl FileChangePathPolicy {
             .ok_or_else(|| FileChangeError::new(FileChangeErrorCode::ParentMissing))?;
         let canonical_parent = canonical_directory(parent)?;
         let parent_identity = DirectoryIdentity::read(&canonical_parent)?;
-        if let Some(root) = workspace_root.as_deref() {
-            if !self.allow_outside_workspace && !canonical_parent.starts_with(root) {
-                return Err(FileChangeError::new(FileChangeErrorCode::PermissionDenied));
-            }
-        } else if !self.allow_outside_workspace {
+        let workspace_root = resolver
+            .containing_root(&canonical_parent)
+            .map_err(workspace_path_error)?;
+        if workspace_root.is_none() && !self.allow_outside_workspace {
             return Err(FileChangeError::new(FileChangeErrorCode::PermissionDenied));
         }
         let file_name = unresolved
@@ -67,17 +87,29 @@ impl FileChangePathPolicy {
         reject_unsupported_extension(&absolute_path)?;
         validate_leaf(&absolute_path)?;
 
-        let display_path = workspace_root
-            .as_deref()
-            .and_then(|root| absolute_path.strip_prefix(root).ok())
-            .map(relative_display)
-            .filter(|path| !path.is_empty())
-            .unwrap_or_else(|| absolute_path.to_string_lossy().to_string());
+        let display_path = resolver.display_path(&absolute_path);
+        let workspace_root_identity = workspace_root
+            .map(|root| {
+                let frozen = resolver
+                    .folders()
+                    .iter()
+                    .find(|folder| {
+                        folder.canonical_path.as_deref().map(Path::new) == Some(root.as_path())
+                    })
+                    .and_then(|folder| folder.directory_identity.clone());
+                let identity = frozen
+                    .map(Ok)
+                    .unwrap_or_else(|| super::FileChangeDirectoryIdentity::read(&root))
+                    .map_err(workspace_path_error)?;
+                Ok::<_, FileChangeError>((root, identity))
+            })
+            .transpose()?;
         Ok(ResolvedFileChangeTarget {
             absolute_path,
             canonical_parent,
             display_path,
             parent_identity,
+            workspace_root_identity,
         })
     }
 }
@@ -88,6 +120,7 @@ pub struct ResolvedFileChangeTarget {
     canonical_parent: PathBuf,
     display_path: String,
     parent_identity: DirectoryIdentity,
+    workspace_root_identity: Option<(PathBuf, super::FileChangeDirectoryIdentity)>,
 }
 
 impl ResolvedFileChangeTarget {
@@ -104,6 +137,13 @@ impl ResolvedFileChangeTarget {
     }
 
     pub(crate) fn revalidate(&self) -> FileChangeResultValue<()> {
+        if let Some((root, identity)) = &self.workspace_root_identity {
+            if super::FileChangeDirectoryIdentity::read(root).map_err(workspace_path_error)?
+                != *identity
+            {
+                return Err(FileChangeError::new(FileChangeErrorCode::Conflict));
+            }
+        }
         validate_existing_components_no_symlink(&self.absolute_path)?;
         let current_parent = canonical_directory(&self.canonical_parent)?;
         if current_parent != self.canonical_parent {
@@ -114,6 +154,10 @@ impl ResolvedFileChangeTarget {
         }
         validate_leaf(&self.absolute_path)
     }
+}
+
+fn workspace_path_error(error: impl ToString) -> FileChangeError {
+    FileChangeError::with_diagnostic(FileChangeErrorCode::PermissionDenied, error.to_string())
 }
 
 #[cfg(unix)]
@@ -165,24 +209,6 @@ fn canonical_directory(path: &Path) -> FileChangeResultValue<PathBuf> {
     }
     path.canonicalize()
         .map_err(|error| path_io_error(error, FileChangeErrorCode::ParentMissing))
-}
-
-fn clean_relative(path: &Path) -> FileChangeResultValue<PathBuf> {
-    let mut cleaned = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::Normal(part) => cleaned.push(part),
-            Component::CurDir => {}
-            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
-                return Err(FileChangeError::new(FileChangeErrorCode::PermissionDenied));
-            }
-        }
-    }
-    if cleaned.as_os_str().is_empty() {
-        Err(FileChangeError::new(FileChangeErrorCode::InvalidArguments))
-    } else {
-        Ok(cleaned)
-    }
 }
 
 fn normalize_absolute(path: &Path) -> FileChangeResultValue<PathBuf> {
@@ -295,14 +321,4 @@ fn reject_unsupported_extension(path: &Path) -> FileChangeResultValue<()> {
     } else {
         Ok(())
     }
-}
-
-fn relative_display(path: &Path) -> String {
-    path.components()
-        .filter_map(|component| match component {
-            Component::Normal(part) => Some(part.to_string_lossy().to_string()),
-            _ => None,
-        })
-        .collect::<Vec<_>>()
-        .join("/")
 }

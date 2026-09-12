@@ -373,6 +373,7 @@ mod tests {
                 "conversationId": null,
                 "projectId": "project-secret-id",
                 "workspace": {
+                    "folders": [],
                     "projectId": "project-secret-id",
                     "displayName": "Demo",
                     "rootPath": "/private/workspace/root"

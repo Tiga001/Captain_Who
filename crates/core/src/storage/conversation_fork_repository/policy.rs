@@ -12,6 +12,7 @@ enum ForkDataPolicy {
 }
 
 const COPY_VISIBLE_HISTORY_TABLES: &[&str] = &[
+    "agent_workspace_run_bindings",
     "agent_file_change_chunks",
     "agent_file_change_operations",
     "agent_file_changes",
@@ -56,6 +57,7 @@ const DO_NOT_COPY_TABLES: &[&str] = &[
 ];
 
 const RUNTIME_ONLY_TABLES: &[&str] = &[
+    "agent_workspace_wake_bindings",
     "human_interaction_ignored_projections",
     "conversation_world_state_request_commits",
     "agent_collaboration_cursors",

@@ -197,19 +197,38 @@ pub(super) fn looks_like_node_syntax_check_intent(command: &str) -> bool {
 /// This runs both while preparing an action and again immediately before process spawn. It is
 /// deliberately independent of artifact observation: observation is telemetry and never grants
 /// filesystem authority.
+#[cfg(test)]
 pub(crate) fn validate_managed_artifact_builder_output_scope(
     workspace_root: Option<&Path>,
     cwd: &Path,
     outputs: &[String],
     write_permission: AgentWritePermission,
 ) -> Result<(), String> {
-    if outputs.is_empty() || write_permission == AgentWritePermission::All {
+    validate_managed_artifact_builder_output_scope_in_workspace(
+        &crate::workspace::WorkspaceResolver::from_primary(workspace_root),
+        cwd,
+        outputs,
+        write_permission,
+    )
+}
+
+pub(crate) fn validate_managed_artifact_builder_output_scope_in_workspace(
+    workspace: &crate::workspace::WorkspaceResolver,
+    cwd: &Path,
+    outputs: &[String],
+    write_permission: AgentWritePermission,
+) -> Result<(), String> {
+    if outputs.is_empty() {
         return Ok(());
     }
-    let workspace_root = workspace_root.ok_or_else(|| {
-        "没有 workspace 时，Managed Builder 输出需要 write=all 权限。".to_string()
-    })?;
-    if !cwd.is_absolute() || !workspace_root.is_absolute() {
+    if workspace.primary_root().is_none() && write_permission != AgentWritePermission::All {
+        return Err("没有 workspace 时，Managed Builder 输出需要 write=all 权限。".to_string());
+    }
+    if !cwd.is_absolute()
+        || workspace
+            .primary_root()
+            .is_some_and(|root| !root.is_absolute())
+    {
         return Err("Managed Builder 输出范围校验要求绝对 workspace 与 cwd。".to_string());
     }
     for output in outputs {
@@ -221,7 +240,9 @@ pub(crate) fn validate_managed_artifact_builder_output_scope(
         };
         let normalized = normalize_absolute_builder_path(&candidate)?;
         let resolved = resolve_builder_scope_path(&normalized)?;
-        if !resolved.starts_with(workspace_root) {
+        if workspace.containing_root(&resolved)?.is_none()
+            && write_permission != AgentWritePermission::All
+        {
             return Err(format!(
                 "Managed Builder 输出 `{output}` 位于 workspace 外；当前权限只允许写入 workspace。"
             ));
@@ -417,9 +438,9 @@ pub(super) fn managed_artifact_command_tokens(command: &str) -> Result<Vec<Strin
     Ok(tokens.clone())
 }
 
-pub(super) fn validate_saved_script(
+pub(super) fn validate_saved_script_in_workspace(
     cwd: &Path,
-    workspace_root: Option<&Path>,
+    workspace: &crate::workspace::WorkspaceResolver,
     read_permission: AgentReadPermission,
     script: &str,
 ) -> Result<(), String> {
@@ -437,7 +458,7 @@ pub(super) fn validate_saved_script(
     let canonical = path
         .canonicalize()
         .map_err(|_| "Managed Artifact Runtime 脚本路径无法规范化。".to_string())?;
-    if workspace_root.is_none_or(|root| !canonical.starts_with(root))
+    if workspace.containing_root(&canonical)?.is_none()
         && read_permission != AgentReadPermission::All
     {
         return Err(

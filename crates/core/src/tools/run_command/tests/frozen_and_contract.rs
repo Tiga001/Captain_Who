@@ -36,6 +36,7 @@ fn freezes_declared_attachment_input_without_persisting_library_paths() {
             conversation_id: Some("conversation-1".to_string()),
             project_id: None,
             workspace: Some(AgentWorkspaceContext {
+                folders: Vec::new(),
                 project_id: None,
                 display_name: Some("attachment-input-test".to_string()),
                 root_path: Some(root.to_string_lossy().to_string()),
@@ -223,6 +224,7 @@ fn frozen_trace_argument_verifier_binds_every_command_authority_field() {
             conversation_id: None,
             project_id: None,
             workspace: Some(AgentWorkspaceContext {
+                folders: Vec::new(),
                 project_id: None,
                 display_name: Some("temp".to_string()),
                 root_path: Some(std::env::temp_dir().to_string_lossy().to_string()),
@@ -300,6 +302,7 @@ fn rejects_unknown_top_level_runtime_authority_fields() {
         conversation_id: None,
         project_id: None,
         workspace: Some(AgentWorkspaceContext {
+            folders: Vec::new(),
             project_id: None,
             display_name: Some("temp".to_string()),
             root_path: Some(std::env::temp_dir().to_string_lossy().to_string()),
@@ -333,6 +336,7 @@ fn freezes_bounded_office_observation_hint_without_authority_fields() {
         conversation_id: None,
         project_id: None,
         workspace: Some(AgentWorkspaceContext {
+            folders: Vec::new(),
             project_id: None,
             display_name: Some("temp".to_string()),
             root_path: Some(std::env::temp_dir().to_string_lossy().to_string()),
@@ -451,6 +455,7 @@ fn rejects_cwd_outside_workspace() {
         conversation_id: None,
         project_id: None,
         workspace: Some(AgentWorkspaceContext {
+            folders: Vec::new(),
             project_id: None,
             display_name: Some("temp".to_string()),
             root_path: Some(std::env::temp_dir().to_string_lossy().to_string()),
@@ -781,4 +786,68 @@ fn model_contract_routes_long_lived_commands_without_polling_loops() {
     assert!(definition
         .description
         .contains("do not repeatedly poll or narrate waiting"));
+}
+
+#[test]
+fn multi_workspace_command_namespace_survives_tool_freeze_and_trace_validation() {
+    use crate::storage::models::{ProjectFolderRecord, ProjectFolderRole, ProjectRecord};
+    let primary = tempfile::tempdir().unwrap();
+    let auxiliary = tempfile::tempdir().unwrap();
+    let mut project = ProjectRecord::with_primary_folder(
+        "project",
+        "Project",
+        primary.path().to_string_lossy(),
+        0,
+    );
+    project.folders[0].alias = "app".into();
+    project.folders.push(ProjectFolderRecord {
+        id: "docs".into(),
+        path: auxiliary.path().to_string_lossy().into_owned(),
+        alias: "docs".into(),
+        role: ProjectFolderRole::Auxiliary,
+        sort_order: 1,
+        created_at: 0,
+    });
+    let workspace = crate::workspace::freeze_project_workspace(&project).unwrap();
+    let context = ToolExecutionContext::from_run_context(Some(&AgentRunContext {
+        collaboration_identity: None,
+        conversation_id: None,
+        project_id: Some("project".into()),
+        workspace: Some(workspace),
+        attachment_library: None,
+        permissions: AgentPermissions::default(),
+    }));
+    let call = AgentToolCall {
+        id: "call".into(),
+        tool: "run_command".into(),
+        args: json!({"command": "printf hello", "cwd": "@workspace/docs"}),
+        approval_status: AgentApprovalStatus::Required,
+        reason: None,
+    };
+    let request = command_request_from_call(&context, &call).unwrap();
+    assert_eq!(request.cwd.as_deref(), Some("@workspace/docs"));
+    assert_eq!(request.command, "printf hello");
+    validate_frozen_command_trace_args(&request, &call.args).unwrap();
+    assert!(
+        sanitize_cwd(
+            &context,
+            Some(auxiliary.path().to_string_lossy().into_owned())
+        )
+        .is_err(),
+        "absolute cwd still requires write=all at the model entrance"
+    );
+    assert!(sanitize_cwd(&context, Some("@workspace/unknown".into())).is_err());
+    assert!(sanitize_cwd(&context, Some("@workspace/docs/../app".into())).is_err());
+    assert_eq!(
+        sanitize_cwd(&context, Some("./@workspace/docs".into()))
+            .unwrap()
+            .as_deref(),
+        Some("./@workspace/docs")
+    );
+    assert_eq!(
+        normalize_trace_cwd(Some("./@workspace/docs".into()))
+            .unwrap()
+            .as_deref(),
+        Some("./@workspace/docs")
+    );
 }

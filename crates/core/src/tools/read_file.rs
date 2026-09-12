@@ -150,6 +150,11 @@ fn execute_read_file_with_hook(
             .map(|value| u64::try_from(value).unwrap_or(u64::MAX)),
     )?;
     opened.ensure_current(&inspection.identity)?;
+    if context.resolve_existing_path_preserving_leaf(path)? != file_path {
+        return Err(AgentError::new(
+            "读取期间工作区文件身份已变化，请重新读取。",
+        ));
+    }
     let parent_metadata = opened.parent_metadata()?;
     let observation = context
         .file_observations()
@@ -462,6 +467,9 @@ fn missing_file_observation_with_hook(
         fs::metadata(target.parent())
             .map_err(|_| AgentError::new("read_file 无法验证目标文件的父目录。"))?
     };
+    if target.revalidate().is_err() {
+        return Ok(None);
+    }
     let observation = context
         .file_observations()
         .issue_missing(
@@ -472,11 +480,11 @@ fn missing_file_observation_with_hook(
         )
         .map_err(file_observation_error)?;
     Ok(Some(json!({
-        "path": input_path,
+        "path": target.display_path(),
         "exists": false,
         "observationId": observation.id(),
         "fileChangeTarget": {
-            "filePath": input_path,
+            "filePath": target.display_path(),
             "observationId": observation.id(),
             "state": "missing"
         },
@@ -1837,6 +1845,7 @@ mod tests {
                 conversation_id: Some("read-file-test-conversation".to_string()),
                 project_id: None,
                 workspace: Some(AgentWorkspaceContext {
+                    folders: Vec::new(),
                     project_id: None,
                     display_name: Some("test".to_string()),
                     root_path: Some(self.root.to_string_lossy().to_string()),

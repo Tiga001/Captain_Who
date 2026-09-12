@@ -43,6 +43,7 @@ pub(crate) struct ForkAttachmentCopy {
 
 #[derive(Debug)]
 struct ForkTrace {
+    source_run_id: String,
     trace: ConversationTurnTrace,
     model_context_items: Vec<ConversationModelContextItem>,
     created_at: i64,

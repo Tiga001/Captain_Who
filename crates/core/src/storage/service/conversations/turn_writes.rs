@@ -487,6 +487,12 @@ impl StorageService {
             trusted_wake.map(|wake| wake.wake_id.as_str()),
         )
         .map_err(storage_error)?;
+        crate::storage::agent_workspace_repository::freeze_run(
+            &transaction,
+            &trace.run_id,
+            trusted_wake.map(|wake| wake.wake_id.as_str()),
+            conversation.project_id.as_deref(),
+        ).map_err(storage_error)?;
         if let Some((agent_id, _, _)) = bound_agent.as_ref() {
             agent_graph_repository::record_agent_effective_permissions_in_transaction(
                 &transaction,

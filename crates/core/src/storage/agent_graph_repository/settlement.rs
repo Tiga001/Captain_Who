@@ -432,6 +432,12 @@ fn finish_agent_turn_with_result_in_transaction(
                 &parent_wake.wake_id,
             )
             .map_err(write_error)?;
+            crate::storage::agent_workspace_repository::inherit_run_for_wake(
+                transaction,
+                run_id,
+                &parent_wake.wake_id,
+            )
+            .map_err(write_error)?;
         } else {
             crate::storage::agent_collaboration_run_policy_repository::inherit_wake_for_wake(
                 transaction,
@@ -440,6 +446,12 @@ fn finish_agent_turn_with_result_in_transaction(
             )
             .map_err(write_error)?;
             crate::storage::agent_context_profile_repository::inherit_wake_for_wake(
+                transaction,
+                &wake.wake_id,
+                &parent_wake.wake_id,
+            )
+            .map_err(write_error)?;
+            crate::storage::agent_workspace_repository::inherit_wake_for_wake(
                 transaction,
                 &wake.wake_id,
                 &parent_wake.wake_id,

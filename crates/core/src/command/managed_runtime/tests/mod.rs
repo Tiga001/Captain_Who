@@ -826,6 +826,8 @@ fn completion_result(
     }
 }
 
+#[cfg(unix)]
+mod multi_workspace;
 mod office_transactions;
 mod pdf_and_scope;
 mod syntax_checks;

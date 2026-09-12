@@ -244,6 +244,7 @@ mod tests {
             conversation_id: Some("conversation-1".to_string()),
             project_id: Some("project-1".to_string()),
             workspace: Some(AgentWorkspaceContext {
+                folders: Vec::new(),
                 project_id: Some("project-1".to_string()),
                 display_name: Some("Workspace".to_string()),
                 root_path: Some(root.to_string_lossy().to_string()),

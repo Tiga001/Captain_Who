@@ -86,7 +86,13 @@ pub(crate) fn record_turn_file_change_best_effort(
     else {
         return;
     };
-    let Some(change) = workspace_relative_turn_change(&identity, change) else {
+    let resolver = mycopilot_core::workspace::WorkspaceResolver::from_context(
+        agent_input
+            .context
+            .as_ref()
+            .and_then(|context| context.workspace.as_ref()),
+    );
+    let Some(change) = workspace_relative_turn_change(&resolver, change) else {
         return;
     };
     if let Err(error) = storage.record_agent_turn_file_change(&identity, action_id, &change) {
@@ -117,12 +123,14 @@ fn turn_diff_identity(
     {
         return None;
     }
-    let workspace_root = Path::new(workspace.root_path.as_deref()?.trim())
-        .canonicalize()
-        .ok()?;
-    if !workspace_root.is_dir() {
-        return None;
-    }
+    let resolver = mycopilot_core::workspace::WorkspaceResolver::from_context(Some(workspace));
+    let workspace_root = resolver
+        .folders()
+        .iter()
+        .find(|folder| folder.role == mycopilot_core::storage::models::ProjectFolderRole::Primary)
+        .and_then(|folder| folder.canonical_path.as_deref())
+        .map(std::path::PathBuf::from)
+        .or_else(|| resolver.canonical_primary().ok())?;
 
     Some(AgentTurnDiffIdentity {
         run_id: run_id.to_string(),
@@ -134,36 +142,24 @@ fn turn_diff_identity(
 }
 
 fn workspace_relative_turn_change(
-    identity: &AgentTurnDiffIdentity,
+    resolver: &mycopilot_core::workspace::WorkspaceResolver,
     change: &AgentTurnFileChange,
 ) -> Option<AgentTurnFileChange> {
-    let path = Path::new(&change.path);
-    let relative = if path.is_absolute() {
-        path.strip_prefix(Path::new(&identity.workspace_root))
-            .ok()?
-    } else {
-        path
-    };
-    let components = relative
-        .components()
-        .filter_map(|component| match component {
-            Component::Normal(part) => Some(part.to_string_lossy().into_owned()),
-            Component::CurDir => None,
-            Component::ParentDir | Component::RootDir | Component::Prefix(_) => None,
-        })
-        .collect::<Vec<_>>();
-    if components.is_empty()
-        || relative.components().any(|component| {
-            matches!(
-                component,
-                Component::ParentDir | Component::RootDir | Component::Prefix(_)
-            )
-        })
+    if change.path.trim().is_empty()
+        || Path::new(&change.path)
+            .components()
+            .any(|part| part == Component::ParentDir)
     {
         return None;
     }
+    let path = resolver.resolve_input(&change.path).ok()?;
+    resolver.containing_root(&path).ok()??;
+    let display_path = resolver.display_path(&path);
+    if display_path.is_empty() {
+        return None;
+    }
     Some(AgentTurnFileChange {
-        path: components.join("/"),
+        path: display_path,
         before: change.before.clone(),
         after: change.after.clone(),
     })
@@ -936,9 +932,11 @@ fn execute_file_change_binding(
             FileChangeErrorCode::IllegalFieldCombination,
         ));
     }
-    let workspace_root = workspace_root_optional(agent_input);
-    let target = FileChangePathPolicy::new(
-        workspace_root.as_deref(),
+    let target = FileChangePathPolicy::from_workspace(
+        agent_input
+            .context
+            .as_ref()
+            .and_then(|context| context.workspace.as_ref()),
         permissions.write == mycopilot_core::AgentWritePermission::All,
     )
     .resolve(request.file_path)?;

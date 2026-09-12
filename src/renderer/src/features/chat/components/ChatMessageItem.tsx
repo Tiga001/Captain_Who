@@ -427,6 +427,7 @@ function AgentTimelineItemView({
     if (items.length === 0) return null
     return (
       <ReadToolActivityGroup
+        assistantMessageId={assistantMessageId}
         conversationId={conversationId}
         items={items}
         observerRootConversationId={observerRootConversationId}
@@ -995,6 +996,7 @@ function AgentRunView({
       )}
       {isRunSettled(run) && (
         <OfficeArtifactsCard
+          assistantMessageId={message.id}
           conversationId={conversationId}
           key={`office-artifacts:${run.runId}`}
           observerRootConversationId={observerRootConversationId}

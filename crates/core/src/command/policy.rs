@@ -111,6 +111,42 @@ pub fn evaluate_command_policy_with_context(
     )
 }
 
+/// Uses the same frozen directory membership as command resolution. The classifier still
+/// analyzes the unchanged shell text; workspace namespaces apply only to typed path fields.
+pub(crate) fn evaluate_command_policy_in_workspace(
+    command: &str,
+    permissions: AgentPermissions,
+    authorization_source: CommandAuthorizationSource,
+    workspace: &crate::workspace::WorkspaceResolver,
+    cwd: Option<&Path>,
+) -> CommandPolicyEvaluation {
+    let scope = match cwd.map(|path| workspace.containing_root(path)).transpose() {
+        Ok(scope) => scope.flatten(),
+        Err(reason) => {
+            return CommandPolicyEvaluation {
+                decision: CommandPolicyDecision::Deny,
+                code: "command.scope.workspace_changed".into(),
+                reason: reason.clone(),
+                risk_level: AgentCommandRiskLevel::Unknown,
+                findings: vec![CommandPolicyFinding {
+                    segment_index: 0,
+                    program: "<cwd>".into(),
+                    risk: CommandRiskClass::Unsupported,
+                    code: "command.scope.workspace_changed".into(),
+                    reason,
+                }],
+            };
+        }
+    };
+    evaluate_command_policy_at(
+        command,
+        permissions,
+        authorization_source,
+        scope.as_deref().or(workspace.primary_root()),
+        cwd,
+    )
+}
+
 #[cfg(windows)]
 pub(super) fn evaluate_command_policy_at(
     command: &str,

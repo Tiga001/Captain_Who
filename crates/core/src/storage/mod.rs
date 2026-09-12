@@ -10,6 +10,7 @@ pub(crate) mod agent_message_model_projection;
 pub mod agent_prompt_preferences_repository;
 pub mod agent_template_repository;
 pub(crate) mod agent_tree_resource_scope;
+pub(crate) mod agent_workspace_repository;
 pub mod attachment_repository;
 pub mod automation_repository;
 pub mod browser_data_repository;

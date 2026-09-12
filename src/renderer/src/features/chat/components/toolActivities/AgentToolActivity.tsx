@@ -151,6 +151,7 @@ export function AgentToolActivity({
   if (isReadActivityTool(call.tool)) {
     return (
       <ReadToolActivity
+        assistantMessageId={assistantMessageId}
         activity={readActivity}
         call={call}
         conversationId={conversationId}

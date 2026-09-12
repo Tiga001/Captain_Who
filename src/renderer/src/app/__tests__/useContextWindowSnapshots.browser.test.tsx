@@ -52,6 +52,7 @@ const CUSTOM_PERMISSIONS: AgentPermissions = {
 }
 
 interface HarnessProps {
+  refreshKey?: string
   customPermissions?: AgentPermissions
   eventModelConfigId?: string
   eventSnapshot?: AgentContextWindowSnapshot
@@ -63,6 +64,7 @@ interface HarnessProps {
 }
 
 function Harness({
+  refreshKey,
   customPermissions = CUSTOM_PERMISSIONS,
   eventModelConfigId = 'model-1',
   eventSnapshot,
@@ -74,6 +76,7 @@ function Harness({
 }: HarnessProps) {
   const { activeSnapshot, recordSnapshot } = useContextWindowSnapshots({
     conversationId: 'conversation-1',
+    refreshKey,
     customPermissions,
     enabled: true,
     isRunning,
@@ -161,6 +164,26 @@ describe('useContextWindowSnapshots', () => {
     expect(agentClient.getContextWindowSnapshot).toHaveBeenCalledTimes(2)
     await screen.rerender(<Harness skills={[]} />)
     await expect.element(screen.getByTestId('input-tokens')).toHaveTextContent('21000')
+    expect(agentClient.getContextWindowSnapshot).toHaveBeenCalledTimes(3)
+  })
+
+  it('refreshes a changed folder configuration only while idle and preserves active-run snapshots', async () => {
+    agentClient.getContextWindowSnapshot
+      .mockResolvedValueOnce({ modelConfigId: 'model-1', snapshot: snapshot(21000) })
+      .mockResolvedValueOnce({ modelConfigId: 'model-1', snapshot: snapshot(22000) })
+      .mockResolvedValueOnce({ modelConfigId: 'model-1', snapshot: snapshot(24000) })
+    const screen = await render(<Harness skills={[]} refreshKey="primary-app" />)
+    await expect.element(screen.getByTestId('input-tokens')).toHaveTextContent('21000')
+    await screen.rerender(<Harness skills={[]} refreshKey="primary-app-with-docs" />)
+    await expect.element(screen.getByTestId('input-tokens')).toHaveTextContent('22000')
+    await screen.rerender(
+      <Harness skills={[]} refreshKey="primary-docs" isRunning eventSnapshot={snapshot(43000)} />
+    )
+    await screen.getByRole('button', { name: 'record event' }).click()
+    await expect.element(screen.getByTestId('input-tokens')).toHaveTextContent('43000')
+    expect(agentClient.getContextWindowSnapshot).toHaveBeenCalledTimes(2)
+    await screen.rerender(<Harness skills={[]} refreshKey="primary-docs" />)
+    await expect.element(screen.getByTestId('input-tokens')).toHaveTextContent('24000')
     expect(agentClient.getContextWindowSnapshot).toHaveBeenCalledTimes(3)
   })
 

@@ -701,6 +701,68 @@ See [Conversation Trace](../docs/conversation-trace.md#details) and [OpenAI](htt
     await expect.poll(stickyPaths).toEqual(['omega/'])
   })
 
+  it('reloads both directory and file-preview caches when the same project changes its primary root', async () => {
+    let root = 'old'
+    listDirectorySpy.mockImplementation(async () => ({
+      directoryPath: '',
+      entries: [{ name: `${root}.txt`, kind: 'file', path: `${root}.txt` }],
+      truncated: false
+    }))
+    readPreviewSpy.mockImplementation(async ({ path }: { path: string }) => ({
+      metadata: {
+        kind: 'file',
+        mimeType: 'text/plain',
+        path,
+        previewKind: 'text',
+        sizeBytes: 10,
+        modifiedAtMs: 1
+      },
+      text: { content: `${root} content`, path, modifiedAtMs: 1, sizeBytes: 10 }
+    }))
+    function RootChangeHarness({ revision }: { revision: string }) {
+      return (
+        <WorkspaceFileTreeSessionsProvider
+          projectIds={['project-1']}
+          projectRevisions={{ 'project-1': revision }}
+        >
+          <div style={{ height: 620, width: 620 }}>
+            <FilesPanel
+              filePath="same.txt"
+              isActive
+              markdownView="source"
+              onMarkdownViewChange={() => undefined}
+              onOpenFile={openFileSpy}
+              onPdfPageChange={() => undefined}
+              onSurfaceFocus={() => undefined}
+              onWrapLinesChange={() => undefined}
+              pdfPage={1}
+              projectId="project-1"
+              projectName="Workspace"
+              wrapLines={false}
+            />
+          </div>
+        </WorkspaceFileTreeSessionsProvider>
+      )
+    }
+    const screen = await render(<RootChangeHarness revision="old-folder" />)
+    await expect
+      .poll(() => screen.container.querySelector('.files-panel__code')?.textContent)
+      .toContain('old content')
+    await expect.poll(() => listDirectorySpy.mock.calls.length).toBe(1)
+    root = 'new'
+    await screen.rerender(<RootChangeHarness revision="new-folder" />)
+    await expect
+      .poll(() => screen.container.querySelector('.files-panel__code')?.textContent)
+      .toContain('new content')
+    await expect.poll(() => listDirectorySpy.mock.calls.length).toBe(2)
+    const treeHost = screen.container.querySelector<HTMLElement>('file-tree-container')
+    await expect
+      .poll(() => treeHost?.shadowRoot?.querySelector('[data-item-path="new.txt"]'))
+      .not.toBeNull()
+    expect(treeHost?.shadowRoot?.querySelector('[data-item-path="old.txt"]')).toBeNull()
+    expect(readPreviewSpy).toHaveBeenCalledTimes(2)
+  })
+
   it('shares one tree model and directory cache across file-page remounts', async () => {
     function SharedTreeHarness() {
       const [filePath, setFilePath] = useState('README.md')

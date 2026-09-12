@@ -405,6 +405,12 @@ fn apply_history_facts(
             trace.committed_at,
         )
         .map_err(database_error)?;
+        // Historical file addresses retain their original Host root identities after a fork.
+        // This grants no Run authority: any newly admitted turn receives its own binding.
+        connection.execute(
+            "INSERT INTO agent_workspace_run_bindings(run_id,workspace_json) SELECT ?1,workspace_json FROM agent_workspace_run_bindings WHERE run_id=?2",
+            rusqlite::params![trace.trace.run_id, trace.source_run_id],
+        ).map_err(database_error)?;
         conversation_model_context_repository::commit_items_in_connection(
             connection,
             &trace.trace.conversation_id,

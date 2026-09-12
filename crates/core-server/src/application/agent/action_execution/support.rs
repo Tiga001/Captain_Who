@@ -32,6 +32,12 @@ pub(super) fn agent_file_input_execution_context(
             .and_then(|context| context.attachment_library.clone()),
         skill_resources,
     )
+    .with_workspace(
+        input
+            .context
+            .as_ref()
+            .and_then(|context| context.workspace.as_ref()),
+    )
     .with_storage(Some(storage))
     .with_conversation_id(
         input

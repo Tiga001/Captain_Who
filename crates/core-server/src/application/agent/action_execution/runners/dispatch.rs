@@ -267,12 +267,42 @@ impl AgentService {
             let resources = resources.ok_or_else(|| {
                 plain_error("The activated Skill resource snapshot is unavailable.")
             })?;
-            let workspace_root = workspace_root_optional(agent_input).ok_or_else(|| {
-                plain_error("Skill resource materialization requires a workspace.")
-            })?;
-            let destination =
-                SkillMaterializationDestination::parse(materialization.destination.clone())
-                    .map_err(materialization_failure)?;
+            let resolver = mycopilot_core::workspace::WorkspaceResolver::from_context(
+                agent_input
+                    .context
+                    .as_ref()
+                    .and_then(|context| context.workspace.as_ref()),
+            );
+            let target = resolver
+                .resolve_input(&materialization.destination)
+                .map_err(|error| plain_error(&error))?;
+            let display_destination = resolver.display_path(&target);
+            let workspace_root = resolver
+                .containing_root(&target)
+                .map_err(|error| plain_error(&error))?
+                .ok_or_else(|| {
+                    plain_error("Skill resource materialization requires a workspace.")
+                })?;
+            let workspace_identity = resolver
+                .folders()
+                .iter()
+                .find(|folder| {
+                    folder.canonical_path.as_deref().map(std::path::Path::new)
+                        == Some(workspace_root.as_path())
+                })
+                .and_then(|folder| folder.directory_identity.clone())
+                .map(Ok)
+                .unwrap_or_else(|| {
+                    mycopilot_core::file_change::FileChangeDirectoryIdentity::read(&workspace_root)
+                })
+                .map_err(plain_error)?;
+            let relative_destination = target
+                .strip_prefix(&workspace_root)
+                .map_err(|_| plain_error("Skill destination is outside its frozen workspace."))?
+                .to_string_lossy()
+                .replace('\\', "/");
+            let destination = SkillMaterializationDestination::parse(relative_destination)
+                .map_err(materialization_failure)?;
             let materializer = SkillResourceMaterializer::new();
             let result = if let Some(source_prefix) = materialization.source_prefix.as_deref() {
                 let source = SkillPackageUri::parse(&materialization.source_uri)
@@ -285,7 +315,8 @@ impl AgentService {
                     workspace_root,
                     destination,
                 )
-                .map_err(materialization_failure)?;
+                .map_err(materialization_failure)?
+                .with_workspace_identity(workspace_identity);
                 let outcome = materializer
                     .materialize_template_tree(resources, &request)
                     .map_err(materialization_failure)?;
@@ -293,7 +324,7 @@ impl AgentService {
                     status: materialization_result_status(outcome.status()),
                     source_uri: outcome.source().to_string(),
                     source_prefix: Some(outcome.source_prefix().to_string()),
-                    destination: outcome.destination().to_string(),
+                    destination: display_destination.clone(),
                     source_revision: outcome.source().revision().as_str().to_string(),
                     file_count: u64::try_from(outcome.file_count()).unwrap_or(u64::MAX),
                     byte_count: outcome.byte_length(),
@@ -305,7 +336,8 @@ impl AgentService {
                 let source = SkillResourceUri::parse(&materialization.source_uri)
                     .map_err(|error| plain_error(&error.to_string()))?;
                 let request = SkillMaterializationRequest::new(source, workspace_root, destination)
-                    .map_err(materialization_failure)?;
+                    .map_err(materialization_failure)?
+                    .with_workspace_identity(workspace_identity);
                 let outcome = materializer
                     .materialize(resources, &request)
                     .map_err(materialization_failure)?;
@@ -313,7 +345,7 @@ impl AgentService {
                     status: materialization_result_status(outcome.status()),
                     source_uri: outcome.source().to_string(),
                     source_prefix: None,
-                    destination: outcome.destination().to_string(),
+                    destination: display_destination,
                     source_revision: outcome.source().package().revision().as_str().to_string(),
                     file_count: 1,
                     byte_count: outcome.byte_length(),

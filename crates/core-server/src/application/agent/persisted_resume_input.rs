@@ -8,7 +8,7 @@ use mycopilot_core::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-const PERSISTED_AGENT_RESUME_INPUT_SCHEMA_VERSION: u32 = 13;
+const PERSISTED_AGENT_RESUME_INPUT_SCHEMA_VERSION: u32 = 14;
 
 fn deserialize_required_nullable<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
 where

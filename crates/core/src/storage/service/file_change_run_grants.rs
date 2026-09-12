@@ -280,7 +280,13 @@ fn file_change_run_grant_scope_authorizes(
         return Ok(false);
     }
     derive_file_change_run_grant_scope(proposal, run_context)
-        .map(|scope| scope.matches_record(grant))
+        .map(|scope| {
+            if grant.status == FileChangeRunGrantStatus::Pending {
+                scope.matches_record(grant)
+            } else {
+                scope.is_authorized_by(grant)
+            }
+        })
         .map_err(run_grant_invalid_state)
 }
 
@@ -403,6 +409,7 @@ mod tests {
             conversation_id: Some("conversation-1".to_string()),
             project_id: Some("project-1".to_string()),
             workspace: Some(AgentWorkspaceContext {
+                folders: Vec::new(),
                 project_id: Some("project-1".to_string()),
                 display_name: Some("workspace".to_string()),
                 root_path: Some(canonical_root.to_string_lossy().into_owned()),
@@ -493,6 +500,83 @@ mod tests {
         assert_eq!(
             derive_file_change_run_grant_scope(&proposal, &context).unwrap_err(),
             "FileChange Run grants require create or update"
+        );
+    }
+
+    #[test]
+    fn multi_workspace_run_grant_covers_frozen_members_but_rejects_scope_drift() {
+        use crate::storage::models::ProjectFolderRole;
+        use crate::workspace::WorkspaceFolder;
+        let root = tempdir().unwrap();
+        let main = root.path().join("main");
+        let auxiliary = root.path().join("docs");
+        fs::create_dir(&main).unwrap();
+        fs::create_dir(&auxiliary).unwrap();
+        let main = main.canonicalize().unwrap();
+        let auxiliary = auxiliary.canonicalize().unwrap();
+        let (mut grant, proposal, mut context) = fixture(&main);
+        context.workspace.as_mut().unwrap().folders = [
+            (&main, "main", ProjectFolderRole::Primary),
+            (&auxiliary, "docs", ProjectFolderRole::Auxiliary),
+        ]
+        .into_iter()
+        .map(|(path, alias, role)| WorkspaceFolder {
+            id: format!("folder-{alias}"),
+            alias: alias.to_string(),
+            role,
+            path: path.to_string_lossy().into_owned(),
+            canonical_path: Some(path.to_string_lossy().into_owned()),
+            directory_identity: Some(FileChangeDirectoryIdentity::read(path).unwrap()),
+        })
+        .collect();
+        grant.workspace_identity = derive_file_change_run_grant_scope(&proposal, &context)
+            .unwrap()
+            .workspace_identity;
+        assert!(file_change_run_grant_authorizes(&grant, None, &proposal, &context).unwrap());
+
+        let mut child_proposal = proposal.clone();
+        let child_path = "@workspace/docs/file.txt";
+        child_proposal.file_path = child_path.to_string();
+        child_proposal.execution.transaction.file_path = child_path.to_string();
+        child_proposal.execution.proposal.file_path = child_path.to_string();
+        child_proposal.execution.canonical_target =
+            auxiliary.join("file.txt").to_string_lossy().into_owned();
+        child_proposal.execution.observation.canonical_target =
+            child_proposal.execution.canonical_target.clone();
+        child_proposal
+            .execution
+            .observation
+            .parent_directory_identity =
+            FileObservationDirectoryIdentity::read(&auxiliary).unwrap();
+        assert!(file_change_run_grant_authorizes(&grant, None, &child_proposal, &context).unwrap());
+
+        for mutate in ["id", "alias", "remove"] {
+            let mut changed = context.clone();
+            let folders = &mut changed.workspace.as_mut().unwrap().folders;
+            match mutate {
+                "id" => folders[1].id = "new-folder-identity".to_string(),
+                "alias" => folders[1].alias = "renamed".to_string(),
+                "remove" => {
+                    folders.pop();
+                }
+                _ => unreachable!(),
+            }
+            assert!(!file_change_run_grant_authorizes(&grant, None, &proposal, &changed).unwrap());
+        }
+        // A replacement of the target root is not an authorized new directory.
+        fs::rename(&auxiliary, root.path().join("old-docs")).unwrap();
+        fs::create_dir(&auxiliary).unwrap();
+        assert!(
+            !file_change_run_grant_authorizes(&grant, None, &child_proposal, &context)
+                .unwrap_or(false)
+        );
+        // An offline unrelated auxiliary does not prevent using the original primary grant.
+        assert!(file_change_run_grant_authorizes(&grant, None, &proposal, &context).unwrap());
+        // The directory which originally granted the authority must also retain its identity.
+        fs::rename(&main, root.path().join("old-main")).unwrap();
+        fs::create_dir(&main).unwrap();
+        assert!(
+            !file_change_run_grant_authorizes(&grant, None, &proposal, &context).unwrap_or(false)
         );
     }
 

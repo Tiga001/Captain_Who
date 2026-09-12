@@ -25,6 +25,7 @@ fn queued_apply_patch_observation_restore_rejects_extra_duplicate_and_tampered_s
         conversation_id: Some(conversation_id.to_string()),
         project_id: None,
         workspace: Some(crate::protocol::AgentWorkspaceContext {
+            folders: Vec::new(),
             project_id: None,
             display_name: None,
             root_path: Some(workspace.display().to_string()),
@@ -385,6 +386,7 @@ fn approval_restore_preserves_frozen_run_authority_and_capabilities() {
         conversation_id: Some("conversation-frozen".to_string()),
         project_id: Some("project-frozen".to_string()),
         workspace: Some(crate::protocol::AgentWorkspaceContext {
+            folders: Vec::new(),
             project_id: Some("project-frozen".to_string()),
             display_name: Some("Frozen workspace".to_string()),
             root_path: Some("/frozen/workspace".to_string()),

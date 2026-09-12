@@ -1427,6 +1427,9 @@ pub(crate) trait ToolInputStreamObserver: Send {
 }
 
 #[cfg(test)]
+mod multi_workspace_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::protocol::{
@@ -2312,6 +2315,7 @@ mod tests {
             conversation_id: Some("absolute-read-conversation".to_string()),
             project_id: None,
             workspace: Some(AgentWorkspaceContext {
+                folders: Vec::new(),
                 project_id: None,
                 display_name: Some("test".to_string()),
                 root_path: Some(fixture.root.to_string_lossy().to_string()),
@@ -2595,6 +2599,7 @@ mod tests {
                 conversation_id: None,
                 project_id: None,
                 workspace: Some(AgentWorkspaceContext {
+                    folders: Vec::new(),
                     project_id: None,
                     display_name: Some("test".to_string()),
                     root_path: Some(self.root.to_string_lossy().to_string()),

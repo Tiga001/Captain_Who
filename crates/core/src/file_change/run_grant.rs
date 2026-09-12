@@ -102,6 +102,9 @@ pub struct DerivedFileChangeRunGrantScope {
     pub canonical_scope_path: String,
     pub scope_directory_identity: FileChangeDirectoryIdentity,
     pub base_write_permission: AgentWritePermission,
+    /// Frozen workspace members; each target root is checked when deriving its scope, while
+    /// the originally granting root is checked when reusing an active grant across roots.
+    workspace_roots: Vec<(String, FileChangeDirectoryIdentity)>,
 }
 
 impl DerivedFileChangeRunGrantScope {
@@ -111,6 +114,29 @@ impl DerivedFileChangeRunGrantScope {
             && self.canonical_scope_path == record.canonical_scope_path
             && self.scope_directory_identity == record.scope_directory_identity
             && self.base_write_permission == record.base_write_permission
+    }
+
+    pub fn is_authorized_by(&self, record: &FileChangeRunGrantRecord) -> bool {
+        if self.scope_kind != record.scope_kind
+            || self.workspace_identity != record.workspace_identity
+            || self.base_write_permission != record.base_write_permission
+        {
+            return false;
+        }
+        match self.scope_kind {
+            FileChangeRunGrantScopeKind::Workspace => {
+                self.workspace_roots.iter().any(|(root, identity)| {
+                    root == &record.canonical_scope_path
+                        && identity == &record.scope_directory_identity
+                        && FileChangeDirectoryIdentity::read(Path::new(root)).as_ref()
+                            == Ok(identity)
+                })
+            }
+            FileChangeRunGrantScopeKind::ExternalParent => {
+                self.canonical_scope_path == record.canonical_scope_path
+                    && self.scope_directory_identity == record.scope_directory_identity
+            }
+        }
     }
 }
 
@@ -155,27 +181,45 @@ pub fn derive_file_change_run_grant_scope(
         .ok_or("FileChange Run grant target has no parent")?
         .canonicalize()
         .map_err(|_| "FileChange Run grant target parent is unavailable")?;
-    let workspace = run_context
-        .workspace
-        .as_ref()
-        .and_then(|workspace| workspace.root_path.as_deref())
-        .map(PathBuf::from)
-        .map(|root| {
-            root.canonicalize()
-                .map_err(|_| "FileChange Run grant workspace is unavailable")
+    let resolver =
+        crate::workspace::WorkspaceResolver::from_context(run_context.workspace.as_ref());
+    let workspace = resolver
+        .containing_root(&canonical_target)
+        .map_err(|_| "FileChange Run grant workspace is unavailable")?;
+    let mut workspace_roots = resolver
+        .folders()
+        .iter()
+        .filter_map(|folder| {
+            Some((
+                folder.canonical_path.clone()?,
+                folder.directory_identity.clone()?,
+            ))
         })
-        .transpose()?;
+        .collect::<Vec<_>>();
     let (scope_kind, workspace_identity, canonical_scope_path) = match workspace {
         Some(workspace_root) if canonical_target.starts_with(&workspace_root) => {
-            let identity = file_change_workspace_identity(
-                run_context.project_id.as_deref(),
-                run_context
-                    .workspace
-                    .as_ref()
-                    .and_then(|workspace| workspace.project_id.as_deref()),
-                &workspace_root,
-            )
+            let identity = if resolver.folders().is_empty() {
+                file_change_workspace_identity(
+                    run_context.project_id.as_deref(),
+                    run_context
+                        .workspace
+                        .as_ref()
+                        .and_then(|workspace| workspace.project_id.as_deref()),
+                    &workspace_root,
+                )
+            } else {
+                super::proposal_digest(&serde_json::json!({
+                    "projectId": run_context.project_id,
+                    "workspace": run_context.workspace,
+                }))
+            }
             .map_err(|_| "FileChange Run grant workspace identity is invalid")?;
+            if resolver.folders().is_empty() {
+                workspace_roots.push((
+                    workspace_root.to_string_lossy().into_owned(),
+                    FileChangeDirectoryIdentity::read(&workspace_root)?,
+                ));
+            }
             (
                 FileChangeRunGrantScopeKind::Workspace,
                 Some(identity),
@@ -191,12 +235,20 @@ pub fn derive_file_change_run_grant_scope(
     };
     let scope_directory_identity =
         FileChangeDirectoryIdentity::read(Path::new(&canonical_scope_path))?;
+    if scope_kind == FileChangeRunGrantScopeKind::Workspace
+        && !workspace_roots.iter().any(|(root, identity)| {
+            root == &canonical_scope_path && identity == &scope_directory_identity
+        })
+    {
+        return Err("FileChange Run grant workspace identity changed");
+    }
     Ok(DerivedFileChangeRunGrantScope {
         scope_kind,
         workspace_identity,
         canonical_scope_path,
         scope_directory_identity,
         base_write_permission,
+        workspace_roots,
     })
 }
 

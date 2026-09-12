@@ -26,9 +26,7 @@ use trace::*;
 use world_state::*;
 
 use crate::cancellation::AgentCancellationToken;
-use crate::command::{
-    evaluate_command_policy_with_context, CommandAuthorizationSource, CommandPolicyDecision,
-};
+use crate::command::{CommandAuthorizationSource, CommandPolicyDecision};
 use crate::context::{
     AgentContextBaseline, AgentContextWindowToolProjection, AgentConversationContextState,
     ContextAssembler, ContextAssemblyInput, ContextAttachments, ContextBudgetReport,

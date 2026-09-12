@@ -164,6 +164,7 @@ fn matches_ignore_ascii_case(value: &str, candidates: &[&str]) -> bool {
 pub struct SkillMaterializationRequest {
     source: SkillResourceUri,
     workspace_root: PathBuf,
+    workspace_identity: Option<crate::file_change::FileChangeDirectoryIdentity>,
     destination: SkillMaterializationDestination,
 }
 
@@ -182,6 +183,7 @@ impl SkillMaterializationRequest {
         Ok(Self {
             source,
             workspace_root,
+            workspace_identity: None,
             destination,
         })
     }
@@ -196,6 +198,20 @@ impl SkillMaterializationRequest {
 
     pub(super) fn workspace_root(&self) -> &Path {
         &self.workspace_root
+    }
+
+    pub fn with_workspace_identity(
+        mut self,
+        identity: crate::file_change::FileChangeDirectoryIdentity,
+    ) -> Self {
+        self.workspace_identity = Some(identity);
+        self
+    }
+
+    pub(super) fn workspace_identity(
+        &self,
+    ) -> Option<&crate::file_change::FileChangeDirectoryIdentity> {
+        self.workspace_identity.as_ref()
     }
 }
 
@@ -215,6 +231,7 @@ pub struct SkillTemplateTreeMaterializationRequest {
     source: SkillPackageUri,
     source_prefix: SkillResourcePath,
     workspace_root: PathBuf,
+    workspace_identity: Option<crate::file_change::FileChangeDirectoryIdentity>,
     destination: SkillMaterializationDestination,
 }
 
@@ -242,6 +259,7 @@ impl SkillTemplateTreeMaterializationRequest {
             source,
             source_prefix,
             workspace_root,
+            workspace_identity: None,
             destination,
         })
     }
@@ -260,6 +278,20 @@ impl SkillTemplateTreeMaterializationRequest {
 
     pub(super) fn workspace_root(&self) -> &Path {
         &self.workspace_root
+    }
+
+    pub fn with_workspace_identity(
+        mut self,
+        identity: crate::file_change::FileChangeDirectoryIdentity,
+    ) -> Self {
+        self.workspace_identity = Some(identity);
+        self
+    }
+
+    pub(super) fn workspace_identity(
+        &self,
+    ) -> Option<&crate::file_change::FileChangeDirectoryIdentity> {
+        self.workspace_identity.as_ref()
     }
 }
 

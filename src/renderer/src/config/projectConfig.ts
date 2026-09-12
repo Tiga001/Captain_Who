@@ -65,3 +65,12 @@ export function formatProjectFolderPath(path: string): string {
   }
   return trimmed
 }
+
+/** Invalidates root-bound previews when membership or the primary-folder role changes. */
+export function projectWorkspaceRevision(
+  project: Pick<AppProject, 'folders'> | null | undefined
+): string {
+  return JSON.stringify(
+    project?.folders.map(({ id, alias, role, path }) => ({ id, alias, role, path })) ?? []
+  )
+}

@@ -924,6 +924,7 @@ fn current_checkpoint_schema_round_trips_and_rejects_missing_or_extra_fields() {
         conversation_id: None,
         project_id: None,
         workspace: Some(crate::protocol::AgentWorkspaceContext {
+            folders: Vec::new(),
             project_id: None,
             display_name: Some("Current workspace".to_string()),
             root_path: Some("/current/workspace".to_string()),

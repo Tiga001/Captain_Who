@@ -21,6 +21,7 @@ import { useDismissOnOutsidePointer } from '../../hooks/useDismissOnOutsidePoint
 import { copyWorkspaceFilePath, revealWorkspaceFile } from './filesClient'
 import { useWorkspaceFileTree } from './useWorkspaceFileTree'
 import { WorkspaceFilePreview } from './WorkspaceFilePreview'
+import { useWorkspaceFileRevision } from './WorkspaceFileTreeSessions'
 import { isWorkspaceMarkdownFile } from './workspaceFilePreviewTypes'
 import type { WorkspaceMarkdownView } from './workspaceFilePreviewTypes'
 import './FilesPanel.css'
@@ -73,6 +74,7 @@ export function FilesPanel({
   wrapLines
 }: FilesPanelProps): ReactNode {
   const { t } = useFrontendConfig()
+  const workspaceRevision = useWorkspaceFileRevision(projectId)
   const [isOptionsMenuOpen, setIsOptionsMenuOpen] = useState(false)
   const optionsControlRef = useRef<HTMLDivElement>(null)
   const optionsTriggerRef = useRef<HTMLButtonElement>(null)
@@ -353,6 +355,7 @@ export function FilesPanel({
       >
         <main className="files-panel__preview">
           <WorkspaceFilePreview
+            key={workspaceRevision}
             isActive={isActive}
             markdownAnchor={markdownAnchor}
             markdownView={markdownView}

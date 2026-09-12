@@ -1,6 +1,109 @@
 use super::*;
 
 #[test]
+fn host_wake_creation_freezes_workspace_and_replays_without_rebinding() {
+    use crate::storage::agent_workspace_repository;
+    use crate::storage::models::ProjectRecord;
+    use crate::storage::project_repository;
+
+    for entry in ["followup", "enqueue", "acknowledge"] {
+        let mut connection = setup_tree();
+        let directory = tempfile::tempdir().unwrap();
+        let first_root = directory.path().join("first");
+        let next_root = directory.path().join("next");
+        std::fs::create_dir(&first_root).unwrap();
+        std::fs::create_dir(&next_root).unwrap();
+        let mut project = ProjectRecord::with_primary_folder(
+            "project-a",
+            "Project",
+            first_root.to_string_lossy(),
+            1,
+        );
+        project_repository::save_project(&connection, project.clone()).unwrap();
+        let followup = SendAgentMessageRequest {
+            sender_agent_id: "agent-root".into(),
+            recipient_agent_id: "agent-child".into(),
+            request_id: "host-workspace-followup".into(),
+            content: "work in the assigned folder".into(),
+        };
+        let mut wake = wake_input("host-workspace");
+        let source = message_input(
+            "host-workspace",
+            "agent-root",
+            "agent-child",
+            AgentMailboxKind::Task,
+        );
+        if entry == "acknowledge" {
+            enqueue_agent_message(&mut connection, &source, 20).unwrap();
+            claim_next_agent_message(&mut connection, "agent-child", "claim-host-workspace", 21)
+                .unwrap();
+            wake.source_agent_message_id = Some(source.message_id.clone());
+        }
+        let create = |connection: &mut Connection| match entry {
+            "followup" => {
+                follow_up_agent(connection, &followup, 22)
+                    .unwrap()
+                    .deferred_wake
+                    .unwrap()
+                    .wake_id
+            }
+            "enqueue" => enqueue_agent_wake(connection, &wake, 22)
+                .unwrap()
+                .record()
+                .wake_id
+                .clone(),
+            _ => {
+                acknowledge_agent_task_with_projection_and_wake(
+                    connection,
+                    &AcknowledgeAgentTaskAndWakeInput {
+                        message_id: source.message_id.clone(),
+                        message_claim_token: "claim-host-workspace".into(),
+                        wake: wake.clone(),
+                    },
+                    22,
+                )
+                .unwrap()
+                .1
+                .wake_id
+            }
+        };
+        let wake_id = create(&mut connection);
+        let original = agent_workspace_repository::load_wake(&connection, &wake_id)
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            original.root_path.as_deref(),
+            first_root.to_str(),
+            "{entry}"
+        );
+
+        project.folders[0].path = next_root.to_string_lossy().into_owned();
+        project_repository::save_project(&connection, project).unwrap();
+        assert_eq!(create(&mut connection), wake_id);
+        assert_eq!(
+            agent_workspace_repository::load_wake(&connection, &wake_id).unwrap(),
+            Some(Some(original)),
+            "{entry}"
+        );
+
+        // Replaying an old task with a missing binding must not invent a current-root snapshot.
+        connection
+            .execute(
+                "DELETE FROM agent_workspace_wake_bindings WHERE wake_id=?1",
+                [&wake_id],
+            )
+            .unwrap();
+        assert_eq!(create(&mut connection), wake_id);
+        assert_eq!(
+            agent_workspace_repository::load_wake(&connection, &wake_id).unwrap(),
+            None,
+            "{entry}"
+        );
+    }
+}
+
+#[test]
 fn application_send_and_followup_are_durable_idempotent_and_tree_authorized() {
     let mut connection = setup_tree();
     add_grandchild(&mut connection);

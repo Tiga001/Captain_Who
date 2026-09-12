@@ -293,6 +293,7 @@ pub(super) fn prepare_office_cli(
     engine.verify_engine_revision()?;
     let _ = compile_office_arguments(request)?;
     let context = ResolvedExecutionContext::resolve(context)?;
+    engine.validate_user_workspace(&context.workspace_folders)?;
     let prepared = prepare_request(&context, request)?;
     let input_bindings = prepare_agent_file_input_bindings(
         context.workspace.as_deref(),
@@ -337,6 +338,7 @@ pub(super) fn run_prepared_office_cli(
         engine.render_runtime()?.verify_integrity()?;
     }
     let context = ResolvedExecutionContext::resolve(context)?;
+    engine.validate_user_workspace(&context.workspace_folders)?;
     if prepared.workspace_revision.is_some()
         && context.workspace_revision != prepared.workspace_revision
     {
@@ -444,6 +446,7 @@ pub(super) fn run_office_presentation_edit(
         ));
     }
     let resolved_context = ResolvedExecutionContext::resolve(context)?;
+    engine.validate_user_workspace(&resolved_context.workspace_folders)?;
     let source_spec = crate::AgentFileInputSpec {
         mount_path: request.source_binding.mount_path.clone(),
         source: request.source_binding.source.clone(),
@@ -874,6 +877,13 @@ pub(super) fn run_managed_script_output_commit(
     action_cancel_flag: Option<Arc<AtomicBool>>,
 ) -> Result<OfficeManagedScriptOutputResult, OfficeEngineError> {
     validate_platform()?;
+    if let Some(engine) = engine {
+        engine.validate_user_workspace(
+            &context
+                .file_inputs()
+                .workspace_resolver(context.workspace_root()),
+        )?;
+    }
     let started = Instant::now();
     if cancellation_requested(&cancellation, action_cancel_flag.as_ref()) {
         return Ok(OfficeManagedScriptOutputResult {
@@ -1422,6 +1432,7 @@ fn validate_prepared_identity(
 #[derive(Debug, Clone)]
 struct ResolvedExecutionContext {
     workspace: Option<PathBuf>,
+    workspace_folders: crate::workspace::WorkspaceResolver,
     workspace_revision: Option<String>,
     permissions: AgentPermissions,
     attachment_library: Option<AgentAttachmentLibraryContext>,
@@ -1436,6 +1447,9 @@ impl ResolvedExecutionContext {
             .transpose()?;
         let workspace_revision = workspace.as_deref().map(workspace_revision).transpose()?;
         Ok(Self {
+            workspace_folders: context
+                .file_inputs()
+                .workspace_resolver(workspace.as_deref()),
             workspace,
             workspace_revision,
             permissions: context.permissions(),
@@ -2020,15 +2034,17 @@ fn prepare_published_render_output(
     let final_path = Path::new(&output.normalized_path);
     let read_path = match output.scope {
         OfficePathScope::Workspace => {
-            let workspace = context.workspace.as_deref().ok_or_else(|| {
-                precondition_error("Workspace-scoped Office output has no workspace identity.")
-            })?;
-            let relative = final_path.strip_prefix(workspace).map_err(|_| {
-                precondition_error(
+            if context
+                .workspace_folders
+                .containing_root(final_path)
+                .map_err(precondition_error)?
+                .is_none()
+            {
+                return Err(precondition_error(
                     "Workspace-scoped Office output escaped the current workspace identity.",
-                )
-            })?;
-            portable_relative_path(relative)?
+                ));
+            }
+            context.workspace_folders.display_path(final_path)
         }
         OfficePathScope::External => final_path.to_string_lossy().into_owned(),
         OfficePathScope::Attachment => {
@@ -2147,25 +2163,6 @@ fn prepare_published_render_output(
         page_selection: requested_page_selection(&prepared.request),
         layout_coverage,
     })
-}
-
-fn portable_relative_path(path: &Path) -> Result<String, OfficeEngineError> {
-    let components = path
-        .components()
-        .filter_map(|component| match component {
-            Component::Normal(value) => Some(Ok(value.to_string_lossy().into_owned())),
-            Component::CurDir => None,
-            Component::ParentDir | Component::RootDir | Component::Prefix(_) => Some(Err(
-                precondition_error("Office output has a non-portable workspace-relative path."),
-            )),
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    if components.is_empty() {
-        return Err(precondition_error(
-            "Office output path cannot resolve to the workspace root.",
-        ));
-    }
-    Ok(components.join("/"))
 }
 
 fn requested_page_selection(request: &OfficeExecutionRequest) -> OfficeRenderPageSelection {

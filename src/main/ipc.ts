@@ -7,13 +7,13 @@ import type {
   SaveDialogReturnValue,
   WebContents
 } from 'electron'
-import { homedir } from 'os'
-import { basename, extname, isAbsolute, join, relative, resolve } from 'path'
+import { basename, extname, resolve } from 'path'
 import { readFile } from 'fs/promises'
 import type { StorageImageFileRecord, StorageProjectFolderPick } from '@mycopilot/protocol'
 import { HOST_CHANNELS, type AppWindowState } from '@mycopilot/host-api'
 import { CoreServer } from './core/coreServer'
 import { primaryProjectFolderPath } from './projects/projectFolders'
+import { resolveProjectFileReference, type ProjectFileReference } from './projects/projectFilePaths'
 import { TerminalBridge } from './terminal/TerminalBridge'
 import { AttachmentDialogBridge } from './attachments/AttachmentDialogBridge'
 import { FaviconResourceCache } from './resources/FaviconResourceCache'
@@ -189,33 +189,14 @@ async function showProjectInFolder(coreServer: CoreServer, projectId: string): P
 
 async function revealProjectFile(
   coreServer: CoreServer,
-  input: { projectId?: string | null; filePath: string }
+  input: ProjectFileReference
 ): Promise<void> {
-  const rawFilePath = input.filePath.trim()
-  if (!rawFilePath) {
-    throw new Error('File path is required')
-  }
-
-  if (isAbsolute(rawFilePath)) {
-    shell.showItemInFolder(rawFilePath)
-    return
-  }
-
-  if (!input.projectId) {
-    throw new Error('Project id is required for relative file paths')
-  }
-
-  const projectPath = await getProjectPath(coreServer, input.projectId)
-  if (!projectPath) {
-    throw new Error('Project path is not available')
-  }
-
-  shell.showItemInFolder(join(projectPath, rawFilePath))
+  shell.showItemInFolder(await resolveProjectFileReference(coreServer, input))
 }
 
 async function loadImageFile(
   coreServer: CoreServer,
-  input: { projectId?: string | null; filePath?: string }
+  input: { projectId?: string | null; filePath?: string; assistantMessageId?: string }
 ): Promise<StorageImageFileRecord | null> {
   const rawFilePath = input.filePath?.trim()
   if (!rawFilePath) return null
@@ -233,8 +214,10 @@ async function loadImageFile(
       : null
   }
 
-  const filePath = await resolveReadableImageFilePath(coreServer, input.projectId, rawFilePath)
-  if (!filePath) return null
+  const filePath = await resolveProjectFileReference(coreServer, {
+    ...input,
+    filePath: rawFilePath
+  })
 
   const mimeType = IMAGE_MIME_BY_EXTENSION[extname(filePath).toLowerCase()]
   if (!mimeType?.startsWith('image/')) return null
@@ -258,43 +241,6 @@ async function loadImageFile(
 function attachmentIdFromReadPath(filePath: string): string | null {
   const match = /^@attachments\/([^/\\]+)/.exec(filePath.trim())
   return match ? decodeURIComponent(match[1]) : null
-}
-
-async function resolveReadableImageFilePath(
-  coreServer: CoreServer,
-  projectId: string | null | undefined,
-  rawFilePath: string
-): Promise<string | null> {
-  if (isAbsolute(rawFilePath)) return rawFilePath
-
-  const aliasPath = expandSystemPathAlias(rawFilePath)
-  if (aliasPath) return aliasPath
-
-  if (!projectId) return null
-  const projectPath = await getProjectPath(coreServer, projectId)
-  if (!projectPath) return null
-
-  const root = resolve(projectPath)
-  const candidate = resolve(root, rawFilePath)
-  const candidateRelative = relative(root, candidate)
-  if (candidateRelative.startsWith('..') || isAbsolute(candidateRelative)) {
-    return null
-  }
-  return candidate
-}
-
-function expandSystemPathAlias(rawFilePath: string): string | null {
-  const aliases: Record<string, string> = {
-    '@desktop': join(homedir(), 'Desktop'),
-    '@documents': join(homedir(), 'Documents'),
-    '@downloads': join(homedir(), 'Downloads'),
-    '@home': homedir()
-  }
-  const normalized = rawFilePath.trim()
-  const [alias, ...rest] = normalized.split(/[\\/]+/)
-  const root = aliases[alias.toLowerCase()]
-  if (!root) return null
-  return rest.length > 0 ? join(root, ...rest) : root
 }
 
 export interface HostIpcRegistration {

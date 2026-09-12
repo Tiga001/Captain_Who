@@ -722,7 +722,46 @@ describe('Skill and Office chat timeline', () => {
     expect(screen.container.textContent).not.toContain('normalizedPath')
 
     await screen.getByRole('button', { name: '在文件夹中打开' }).click()
-    expect(revealStoredProjectFile).toHaveBeenCalledWith('project-1', 'reports/budget.xlsx')
+    expect(revealStoredProjectFile).toHaveBeenCalledWith(
+      'project-1',
+      'reports/budget.xlsx',
+      'assistant-message'
+    )
+  })
+
+  it('reveals auxiliary Office artifacts with the originating assistant identity', async () => {
+    const message = assistantMessage({
+      toolCalls: [
+        {
+          id: 'office-aux',
+          reason: 'Edit budget',
+          tool: 'office_spreadsheet',
+          approvalStatus: 'approved',
+          args: {
+            request: { operation: 'add', filePath: '@workspace/docs/budget.xlsx' },
+            reason: 'Edit budget'
+          }
+        }
+      ],
+      toolResults: [
+        {
+          callId: 'office-aux',
+          tool: 'office_spreadsheet',
+          ok: true,
+          result: { exitCode: 0, timedOut: false, cancelled: false }
+        }
+      ],
+      timeline: [{ id: 'office-aux', type: 'tool_call', callId: 'office-aux' }]
+    })
+    const screen = await render(
+      <ChatMessageItem message={message} projectId="project-1" showTokenUsageDetails={false} />
+    )
+    await screen.getByRole('button', { name: '在文件夹中打开' }).click()
+    expect(revealStoredProjectFile).toHaveBeenCalledWith(
+      'project-1',
+      '@workspace/docs/budget.xlsx',
+      'assistant-message'
+    )
   })
 
   it('aggregates adjacent Office calls by document kind, file identity and operation mode', async () => {

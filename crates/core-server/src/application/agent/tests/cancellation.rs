@@ -995,6 +995,7 @@ async fn cancelling_immediately_after_approval_prevents_command_side_effects() {
         conversation_id: Some("conversation-cancel-before-spawn".to_string()),
         project_id: None,
         workspace: Some(AgentWorkspaceContext {
+            folders: Vec::new(),
             project_id: None,
             display_name: Some("test".to_string()),
             root_path: Some(fixture.path().to_string_lossy().into_owned()),
@@ -1153,6 +1154,7 @@ async fn message_deletion_cancels_a_rejected_actions_pre_spawn_continuation() {
         conversation_id: Some(conversation_id.to_string()),
         project_id: None,
         workspace: Some(AgentWorkspaceContext {
+            folders: Vec::new(),
             project_id: None,
             display_name: Some("test".to_string()),
             root_path: Some(fixture.path().to_string_lossy().into_owned()),
@@ -1363,6 +1365,7 @@ async fn cancelling_run_during_approved_command_finishes_cancelled_without_resum
         conversation_id: Some("conversation-command-cancel".to_string()),
         project_id: None,
         workspace: Some(AgentWorkspaceContext {
+            folders: Vec::new(),
             project_id: None,
             display_name: Some("test".to_string()),
             root_path: Some(fixture.path().to_string_lossy().into_owned()),

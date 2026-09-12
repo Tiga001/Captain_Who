@@ -592,7 +592,16 @@ impl OfficeExecutionContext {
     ///
     /// This authority is execution-only. It is never serialized into a proposed action.
     pub fn with_file_inputs(mut self, file_inputs: AgentFileInputExecutionContext) -> Self {
-        self.file_inputs = file_inputs;
+        self.file_inputs = if file_inputs.workspace_context().is_none() {
+            file_inputs.with_workspace(self.file_inputs.workspace_context())
+        } else {
+            file_inputs
+        };
+        self
+    }
+
+    pub fn with_workspace(mut self, workspace: Option<&crate::AgentWorkspaceContext>) -> Self {
+        self.file_inputs = self.file_inputs.with_workspace(workspace);
         self
     }
 
@@ -606,6 +615,7 @@ impl OfficeExecutionContext {
             .unwrap_or_default();
         let attachment_library = context.and_then(|context| context.attachment_library.clone());
         Self::new(workspace_root, permissions, attachment_library)
+            .with_workspace(context.and_then(|context| context.workspace.as_ref()))
     }
 
     pub fn workspace_root(&self) -> Option<&Path> {

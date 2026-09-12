@@ -374,6 +374,7 @@ mod tests {
                 conversation_id: None,
                 project_id: None,
                 workspace: Some(AgentWorkspaceContext {
+                    folders: Vec::new(),
                     project_id: None,
                     display_name: Some("test".to_string()),
                     root_path: Some(self.root.to_string_lossy().to_string()),

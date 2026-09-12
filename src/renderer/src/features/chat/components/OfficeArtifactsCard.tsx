@@ -1,5 +1,6 @@
 // Renderer summary cards for successfully created or modified Office artifacts in one agent run.
 
+import { useState } from 'react'
 import { useFrontendConfig } from '../../../config/FrontendConfigProvider'
 import { OfficeFileIcon } from '../../../components/files/OfficeFileIcon'
 import type { ChatAgentRunView } from '../chatTypes'
@@ -63,17 +64,20 @@ function ArtifactIcon({ kind }: { kind: OfficeArtifactEntry['artifactKind'] }) {
 }
 
 function OfficeArtifactCard({
+  assistantMessageId,
   entry,
   projectId,
   conversationId,
   observerRootConversationId
 }: {
+  assistantMessageId?: string
   entry: OfficeArtifactEntry
   projectId?: string | null
   conversationId?: string
   observerRootConversationId?: string
 }) {
   const { t } = useFrontendConfig()
+  const [revealFailed, setRevealFailed] = useState(false)
   const isManagedArtifact = Boolean(entry.managedReadPath)
   const canReveal =
     !isManagedArtifact &&
@@ -116,10 +120,9 @@ function OfficeArtifactCard({
             return
           }
           if (!canReveal) return
-          void revealStoredProjectFile(
-            entry.scope === 'workspace' ? projectId : undefined,
-            entry.path
-          ).catch((error) => {
+          setRevealFailed(false)
+          void revealStoredProjectFile(projectId, entry.path, assistantMessageId).catch((error) => {
+            setRevealFailed(true)
             console.error('Failed to reveal Office artifact', error)
           })
         }}
@@ -134,16 +137,19 @@ function OfficeArtifactCard({
       >
         {isManagedArtifact ? t('imagePreview.download') : t('agent.office.reveal')}
       </button>
+      {revealFailed ? <span role="status">{t('agent.office.revealUnavailable')}</span> : null}
     </article>
   )
 }
 
 export function OfficeArtifactsCard({
+  assistantMessageId,
   conversationId,
   observerRootConversationId,
   projectId,
   run
 }: {
+  assistantMessageId?: string
   conversationId?: string
   observerRootConversationId?: string
   projectId?: string | null
@@ -157,6 +163,7 @@ export function OfficeArtifactsCard({
     <section className="office-artifact-list" aria-label={t('agent.office.files')}>
       {entries.map((entry) => (
         <OfficeArtifactCard
+          assistantMessageId={assistantMessageId}
           conversationId={conversationId}
           observerRootConversationId={observerRootConversationId}
           entry={entry}

@@ -406,6 +406,41 @@ fn workspace_root_rebind_is_detected_before_publication() {
 
 #[cfg(unix)]
 #[test]
+fn multi_workspace_materialization_rejects_root_replaced_after_authorization_before_open() {
+    let container = tempdir().unwrap();
+    let workspace = container.path().join("auxiliary");
+    fs::create_dir(&workspace).unwrap();
+    let identity = crate::file_change::FileChangeDirectoryIdentity::read(&workspace).unwrap();
+    let bytes = b"verified bytes";
+    let (session, uri) = test_session("assets/report.txt", SkillResourceKind::Asset, bytes, bytes);
+    let request =
+        test_request(uri, &workspace, "report.txt").with_workspace_identity(identity.clone());
+    let (tree_session, package) =
+        test_tree_session(&[("templates/main.txt", SkillResourceKind::Other, bytes, bytes)]);
+    let tree_request = test_tree_request(package, "templates", &workspace, "tree")
+        .with_workspace_identity(identity);
+    fs::rename(&workspace, container.path().join("old-auxiliary")).unwrap();
+    fs::create_dir(&workspace).unwrap();
+    let materializer = SkillResourceMaterializer::new();
+    assert_eq!(
+        materializer
+            .materialize(&session, &request)
+            .unwrap_err()
+            .code(),
+        SkillMaterializationErrorCode::InvalidWorkspace
+    );
+    assert_eq!(
+        materializer
+            .materialize_template_tree(&tree_session, &tree_request)
+            .unwrap_err()
+            .code(),
+        SkillMaterializationErrorCode::InvalidWorkspace
+    );
+    assert_eq!(fs::read_dir(&workspace).unwrap().count(), 0);
+}
+
+#[cfg(unix)]
+#[test]
 fn replaced_tree_staging_inode_is_rejected_and_never_published_or_deleted() {
     use super::unix::{install_materialization_test_hook, MaterializationTestHookPoint};
 

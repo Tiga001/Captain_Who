@@ -155,13 +155,8 @@ fn queued_apply_patch_observation_request<'a>(
         .ok_or_else(|| {
             AgentError::new("运行检查点中的 queued apply_patch 缺少 conversationId。")
         })?;
-    let workspace_root = run_context
-        .workspace
-        .as_ref()
-        .and_then(|workspace| workspace.root_path.as_deref())
-        .map(PathBuf::from);
-    let target = FileChangePathPolicy::new(
-        workspace_root.as_deref(),
+    let target = FileChangePathPolicy::from_workspace(
+        run_context.workspace.as_ref(),
         run_context.permissions.write == AgentWritePermission::All,
     )
     .resolve(file_path)
@@ -651,15 +646,83 @@ fn resolve_checkpoint_file_target(
     run_context: &AgentRunContext,
     file_path: &str,
 ) -> Result<PathBuf, crate::file_change::FileChangeError> {
-    let workspace_root = run_context
-        .workspace
-        .as_ref()
-        .and_then(|workspace| workspace.root_path.as_deref())
-        .map(PathBuf::from);
-    FileChangePathPolicy::new(
-        workspace_root.as_deref(),
+    FileChangePathPolicy::from_workspace(
+        run_context.workspace.as_ref(),
         run_context.permissions.write == AgentWritePermission::All,
     )
     .resolve(file_path)
     .map(|target| target.absolute_path().to_path_buf())
+}
+
+#[cfg(test)]
+mod multi_workspace_observation_tests {
+    use super::*;
+    use crate::file_change::FileChangeDirectoryIdentity;
+    use crate::storage::models::ProjectFolderRole;
+    use crate::workspace::WorkspaceFolder;
+    use crate::{AgentPermissions, AgentWorkspaceContext};
+
+    #[test]
+    fn multi_workspace_queued_observation_restore_uses_frozen_roots_and_rejects_replacement() {
+        let temp = tempfile::tempdir().unwrap();
+        let main = temp.path().join("main");
+        let docs = temp.path().join("docs");
+        std::fs::create_dir(&main).unwrap();
+        std::fs::create_dir(&docs).unwrap();
+        let main = main.canonicalize().unwrap();
+        let docs = docs.canonicalize().unwrap();
+        let context = AgentRunContext {
+            conversation_id: Some("conversation-multi".into()),
+            project_id: Some("project-multi".into()),
+            workspace: Some(AgentWorkspaceContext {
+                project_id: Some("project-multi".into()),
+                display_name: None,
+                root_path: Some(main.to_string_lossy().into_owned()),
+                folders: [
+                    (&main, "main", ProjectFolderRole::Primary),
+                    (&docs, "docs", ProjectFolderRole::Auxiliary),
+                ]
+                .into_iter()
+                .map(|(path, alias, role)| WorkspaceFolder {
+                    id: format!("folder-{alias}"),
+                    alias: alias.into(),
+                    role,
+                    path: path.to_string_lossy().into_owned(),
+                    canonical_path: Some(path.to_string_lossy().into_owned()),
+                    directory_identity: Some(FileChangeDirectoryIdentity::read(path).unwrap()),
+                })
+                .collect(),
+            }),
+            permissions: AgentPermissions::default(),
+            attachment_library: None,
+            collaboration_identity: None,
+        };
+        let frozen: AgentRunContext =
+            serde_json::from_str(&serde_json::to_string(&context).unwrap()).unwrap();
+        let call = AgentContextCheckpointToolCall {
+            id: "update-aux".into(),
+            name: "apply_patch".into(),
+            args: serde_json::json!({"request": {"action":"apply", "operation":"update", "filePath":"@workspace/docs/README.md", "observationId":"fobs_checkpoint", "content":"new\n"}}),
+            provider_identity: AgentProviderToolCallIdentity {
+                provider_tool_index: 0,
+                provider_call_id: "update-aux".into(),
+                runtime_call_id: "update-aux".into(),
+            },
+        };
+        let (observation, target, conversation) =
+            queued_apply_patch_observation_request(&call, Some(&frozen))
+                .unwrap()
+                .unwrap();
+        assert_eq!(observation, "fobs_checkpoint");
+        assert_eq!(target, docs.join("README.md"));
+        assert_eq!(conversation, "conversation-multi");
+        assert_eq!(
+            resolve_checkpoint_file_target(&frozen, "README.md").unwrap(),
+            main.join("README.md")
+        );
+        std::fs::rename(&docs, temp.path().join("old-docs")).unwrap();
+        std::fs::create_dir(&docs).unwrap();
+        assert!(queued_apply_patch_observation_request(&call, Some(&frozen)).is_err());
+        assert!(resolve_checkpoint_file_target(&frozen, "README.md").is_ok());
+    }
 }

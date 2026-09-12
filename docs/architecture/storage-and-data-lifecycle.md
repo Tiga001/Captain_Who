@@ -24,21 +24,22 @@ last_verified: 2026-09-11
 
 ## Schema 发布策略
 
-截至本次核验，当前唯一受支持的 canonical schema 是 **v45**（SQLite `PRAGMA user_version = 45`）：
+截至本次核验，当前唯一受支持的 canonical schema 是 **v46**（SQLite `PRAGMA user_version = 46`）：
 
-- `STORAGE_SCHEMA_VERSION = 45`；
+- `STORAGE_SCHEMA_VERSION = 46`；
 - canonical schema fingerprint 由 `migrations.rs` 中的编译期常量和测试固定；
 - 空数据库在一个原子流程中建立完整当前 schema；
+- v46 新增 `agent_workspace_run_bindings` 和 `agent_workspace_wake_bindings`，以不可变 JSON 保存文件夹 ID、别名、角色、配置路径、canonical 路径和目录实体身份；Run admission 与轨迹同事务提交，spawn/followup/结果 Wake 继承源 Run 或源 Wake。历史 fork 复制已保留回复的 Run 工作区绑定，但不复制 Wake 执行权；
 - v45 把项目改为多文件夹模型：`projects` 不再保存 `path`，文件夹存放在 `project_folders`（每个项目恰好一个 `primary`，其余为 `auxiliary`，`path` 与 `alias` 在项目内唯一，随项目级联删除）。主文件夹仍是 Agent 的工作目录；
-- 没有任何原地升级路径：exact v44 及更早版本（包括 v34/v35/v42/v43）一律返回 reset-required，拒绝检查不改写旧库；开发期不为单路径项目、聊天或运行历史写迁移；
-- Run/Wake 模式冻结表和 `agent_prompt_preferences.context_profile` 与 v44 相同；字段和旧 checkpoint 中缺失的模式均默认 Full；
+- 没有任何原地升级路径：exact v45 及更早版本（包括 v34/v35/v42/v43/v44）一律返回 reset-required，拒绝检查不改写旧库；开发期不为单路径项目、聊天或运行历史写迁移；
+- Run/Wake 模式冻结表和 `agent_prompt_preferences.context_profile` 与 v44 相同；新偏好默认 Full，旧 checkpoint 由版本校验直接拒绝；
 - 其他旧版、未知版、非空未版本化或结构被篡改的数据库返回 `development_storage_schema_reset_required`，不自动重置。
 
 版本号和 fingerprint 可能变化，维护时必须读取 `crates/core/src/storage/migrations.rs`，不得从本文复制常量到运行逻辑。发布说明可以记录版本，但架构文档应强调策略而非长期维护一张迁移历史表。
 
 开发库重置前应先关闭应用并备份数据根；优先使用受管 `storage:reset-dev` 流程。不要只删除 `storage.sqlite` 而遗留 attachments、artifacts、spool 或 lock 文件。
 
-`storage:reset-dev` 是显式丢弃历史的重建操作，始终新建 v45，不恢复 Conversation、Project（含旧的单路径项目）或 Agent/runtime 历史。它从 exact current v45 及 exact v35–v44 保留 allowlisted 配置与凭据引用；v36–v45 还保留人机交互设置及 revision，v43–v45 保留全局协作开关及 revision，v44–v45 保留轻量/完整模式，旧版本该项默认 Full。Run/Wake 冻结策略属于运行事实，重置时清空。既有受限恢复选项也可从绑定 exact v33 fingerprint 的私有备份读取 allowlisted 设置，并把凭据转换为 reference。无法安全识别且含配置的旧库拒绝重置，不能用默认值默默替换模型配置。
+`storage:reset-dev` 是显式丢弃历史的重建操作，始终新建 v46，不恢复 Conversation、Project（含旧的单路径项目）或 Agent/runtime 历史。它从 exact current v46 及 exact v35–v45 保留 allowlisted 配置与凭据引用；v36–v46 还保留人机交互设置及 revision，v43–v46 保留全局协作开关及 revision，v44–v46 保留轻量/完整模式，旧版本该项默认 Full。Run/Wake 冻结策略属于运行事实，重置时清空。既有受限恢复选项也可从绑定 exact v33 fingerprint 的私有备份读取 allowlisted 设置，并把凭据转换为 reference。无法安全识别且含配置的旧库拒绝重置，不能用默认值默默替换模型配置。
 
 `agent_context_profile_run_policies` 以 `conversation_turn_traces.run_id` 为外键，`agent_context_profile_wake_policies` 以 `agent_wake_requests.wake_id` 为外键；两表只接受 `full | minimal`，禁止更新，随父记录删除。Run admission 与模式冻结同事务，Wake 入队继承来源 Run/Wake 的模式。它们不属于偏好表，也不能在设置保存时批量改写。
 
@@ -60,7 +61,7 @@ last_verified: 2026-09-11
 
 模型日志只持久化图片的 attachment ID、MIME 与 SHA-256，不写入重复 base64。Host 在普通启动、上下文预览、压缩重建与恢复时，按同一会话可见消息归属读取附件并验证 MIME、长度和原始字节摘要；缺失、替换、跨会话或已被编辑替代的附件一律失败，不静默改用预览图。分支重绑定附件 ID 并复制原始文件，保留摘要；子快照不复制问答待办、Run 授权或用量。
 
-已压缩前缀只额外保留有不可变图片引用的材料，避免文字摘要替代原始视觉输入；不会由此复活旧助手正文或纯文字 Run 状态。checkpoint v17 和恢复信封 v13 只支持本版本恢复；Host 临时 `context_image_attachments` 字段不进入恢复信封 allowlist，图片 bytes 由 Host 重新加载并校验；既有检查点图片字段沿用原有保存策略，新增不可变引用跨重启保留。
+已压缩前缀只额外保留有不可变图片引用的材料，避免文字摘要替代原始视觉输入；不会由此复活旧助手正文或纯文字 Run 状态。checkpoint v18 和恢复信封 v14 只支持本版本恢复；Host 临时 `context_image_attachments` 字段不进入恢复信封 allowlist，图片 bytes 由 Host 重新加载并校验；既有检查点图片字段沿用原有保存策略，新增不可变引用跨重启保留。
 
 ## Conversation World State 请求日志
 
@@ -91,7 +92,7 @@ DDL 按领域大致分为：
 
 ## Scheduled Automation 表组
 
-Automation 在 canonical schema v45 中使用当前通用通知表和自动化领域表，完整列、CHECK、索引和 trigger 仍以 DDL 为准：
+Automation 在 canonical schema v46 中使用当前通用通知表和自动化领域表，完整列、CHECK、索引和 trigger 仍以 DDL 为准：
 
 | 表                  | 权威内容                                                                | 关键不变量                                                                                                        |
 | ------------------- | ----------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
@@ -137,7 +138,7 @@ Automation 还要求两个专用原子边界：
 
 ## 启动与崩溃恢复
 
-Bootstrap 大致执行：解析数据根与锁、打开/校验 canonical schema v45、构造 repositories/services、加载凭据 backend、MCP Server/Provider/Skills/Artifact Runtime、随后运行领域 reconciliation。持久凭据 backend 不可用或 credential reference 无法解析时必须保留公开配置并报告 `unavailable`/配置错误，不能把缺失凭据当作空值覆盖；只有实际需要该连接的运行应被阻断。
+Bootstrap 大致执行：解析数据根与锁、打开/校验 canonical schema v46、构造 repositories/services、加载凭据 backend、MCP Server/Provider/Skills/Artifact Runtime、随后运行领域 reconciliation。持久凭据 backend 不可用或 credential reference 无法解析时必须保留公开配置并报告 `unavailable`/配置错误，不能把缺失凭据当作空值覆盖；只有实际需要该连接的运行应被阻断。
 
 恢复必须按“数据库已提交状态”判断，不按 Renderer 缓存判断。当前需要关注：
 
@@ -173,7 +174,7 @@ Automation 启动恢复区分 admission 前后：旧进程遗留的全部 `admit
 
 当前开发策略以整套数据根备份/重置为主。复制在线 SQLite 文件并不等价于一致备份；应在应用关闭、锁释放后复制数据库及其配套文件目录，或使用受支持的 SQLite snapshot/backup 流程。
 
-当前 v45 SQLite snapshot 只含模型/搜索 credential reference 与非秘密元数据，不含这些连接的当前 secret 字节；旧 schema 生成的历史备份仍可能含明文 Token/Key，必须继续按秘密材料保护。只恢复 `storage.sqlite` 不会恢复操作系统凭据，跨设备、跨系统账户、签名身份变化或凭据 backend 丢失后，界面可能显示凭据不可用，此时只能由用户替换或清除。未签名 macOS 开发构建的私有凭据文件位于数据根，因此“整根复制”仍会复制 secret，不能当作普通诊断包。
+当前 v46 SQLite snapshot 只含模型/搜索 credential reference 与非秘密元数据，不含这些连接的当前 secret 字节；旧 schema 生成的历史备份仍可能含明文 Token/Key，必须继续按秘密材料保护。只恢复 `storage.sqlite` 不会恢复操作系统凭据，跨设备、跨系统账户、签名身份变化或凭据 backend 丢失后，界面可能显示凭据不可用，此时只能由用户替换或清除。未签名 macOS 开发构建的私有凭据文件位于数据根，因此“整根复制”仍会复制 secret，不能当作普通诊断包。
 
 删除 SQLite reference、清除凭据或移除私有文件只表达应用层删除意图；文件系统、SSD、系统备份和操作系统凭据后端可能保留副本，产品不承诺安全擦除。怀疑泄露时应在 Provider 侧撤销或轮换凭据。
 
@@ -181,8 +182,8 @@ Automation 启动恢复区分 admission 前后：旧进程遗留的全部 `admit
 
 ## 不变量
 
-1. `canonical_schema.sql`、canonical schema v45 的 version 与 fingerprint 必须一致。
-2. 仅 exact canonical v42 执行已审计的单向升级；其他非空非当前 schema fail closed。
+1. `canonical_schema.sql`、canonical schema v46 的 version 与 fingerprint 必须一致。
+2. 所有非空非当前 schema 均 fail closed，只能通过显式开发库重置进入当前版本。
 3. 所有领域对象在 service SQL 边界校验 conversation/project/Run 归属。
 4. 外部副作用与数据库提交之间的崩溃窗口必须有明确恢复状态。
 5. FTS、Renderer JSON 和缓存均不是权威数据。
@@ -225,7 +226,7 @@ Automation 启动恢复区分 admission 前后：旧进程遗留的全部 `admit
 
 ## 变更检查表
 
-- [ ] 修改 `canonical_schema.sql` 后同步 canonical version、fingerprint 和 fresh-schema 测试；若版本不再是 v45，同时更新本文当前快照。
+- [ ] 修改 `canonical_schema.sql` 后同步 canonical version、fingerprint 和 fresh-schema 测试；若版本不再是 v46，同时更新本文当前快照。
 - [ ] 明确旧数据库行为；没有经批准的迁移链时保持 reset-required。
 - [ ] 新表/列定义 owner、FK、唯一键、索引、删除/保留和敏感分类。
 - [ ] 跨表操作在一个 service 事务中完成，并有冲突/幂等测试。
@@ -248,3 +249,13 @@ Automation 启动恢复区分 admission 前后：旧进程遗留的全部 `admit
 - Agent task tree 的 durable 资源共享当前以不可变 root identity 为边界；没有跨树转授权或细粒度成员级撤销协议。
 - 物理文件和 SQLite 无法共享单个 ACID 事务，依赖 staging、原子改名和 reconciliation 收敛。
 - SQLite FTS/索引损坏时需要重建；索引不可替代原始消息或 Archive。
+
+## 多文件夹执行边界（第二轮）
+
+`AgentWorkspaceContext.folders` 是必填的 Host 字段。新根轮次从项目捕获当前集合；已开始的任务树、检查点、审批恢复和运行中的上下文预览沿用同一快照。准备期间配置若发生竞态变化，任务失败并要求重发，不能把旧 Skill 主目录与新运行工作区混用。根会话闲置/完成后的预览读取下一轮配置；子 Agent 终态预览继续沿用原任务树快照，与后续 Wake 一致。预览和实际请求、圆环及自动压缩共用 World State 投影。
+
+默认相对路径、命令 cwd、搜索、`workspace_map` 和 Skill 发现仅针对主文件夹。`@workspace/<alias>/...` 在结构化路径参数中明确选择根；`./@workspace/...` 是主目录下的真实同名文件夹。不会改写 shell 命令正文。`workspace_only` 覆盖冻结并集，同时保留每个工具已有的越界、符号链接、硬链接及审批校验。选中根实体变化立即拒绝，无关辅助根离线不妨碍主目录。
+
+历史文件/图片/Office 卡片向 Host 提交原始路径和 `assistantMessageId`。Host 用 `storage.resolveRunWorkspacePath` 按原 Run 的目录实体解析；不能从当前项目重猜旧别名。显式绝对/系统路径沿用原有 Host 读取和 reveal 语义。`workspace.binding` 只向模型显示别名、角色、可用性和寻址规则；真实路径与目录实体保留在 Host 状态。
+
+第二轮仍保留主目录 Files 树与主仓库 Git。主目录切换会失效文件树缓存；LastTurn Git 明确过滤辅助根命名空间，不能把辅助文件误当成主仓库同名路径。多根 Files 树、Git 仓库选择器与终端根选择器属于后续第三轮。

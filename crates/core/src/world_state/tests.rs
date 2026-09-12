@@ -60,6 +60,7 @@ fn canonical_domain_sections_keep_authority_projection_and_lifetime_separate() {
     );
 
     let workspace = crate::protocol::AgentWorkspaceContext {
+        folders: Vec::new(),
         project_id: Some("project-secret".to_string()),
         display_name: Some("Visible workspace".to_string()),
         root_path: Some("/private/authoritative/root".to_string()),

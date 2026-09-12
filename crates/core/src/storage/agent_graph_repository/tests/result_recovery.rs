@@ -433,6 +433,13 @@ fn child_result_is_frozen_direct_parent_outbox_and_root_is_not_auto_woken() {
         33,
     )
     .unwrap();
+    crate::storage::agent_workspace_repository::freeze_run(
+        &connection,
+        "run-grand",
+        Some(&wake_id),
+        None,
+    )
+    .unwrap();
     connection
         .execute(
             "UPDATE agent_wake_requests
@@ -715,6 +722,13 @@ fn terminal_result_faults_rollback_and_recover_exactly_once_after_restart() {
             ),
             22,
             23,
+        )
+        .unwrap();
+        crate::storage::agent_workspace_repository::freeze_run(
+            &connection,
+            &run_id,
+            Some(&wake_id),
+            None,
         )
         .unwrap();
         connection

@@ -55,7 +55,20 @@ export interface AgentConversationMessageAttachment {
   createdAt?: number
 }
 
+export interface AgentWorkspaceFolder {
+  id: string
+  alias: string
+  role: 'primary' | 'auxiliary'
+  path: string
+  canonicalPath: string | null
+  directoryIdentity:
+    | { kind: 'unix'; schema_version: number; device: number; inode: number }
+    | { kind: 'windows'; schema_version: number; volume_serial_number: number; file_id: string }
+    | null
+}
+
 export interface AgentWorkspaceContext {
+  folders: AgentWorkspaceFolder[]
   projectId: string | null
   displayName: string | null
   rootPath: string | null

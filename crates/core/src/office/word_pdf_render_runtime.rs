@@ -22,7 +22,7 @@ const MAX_COMPONENT_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 pub struct WordPdfRenderRuntimeDiscoveryOptions {
     configured_component_dir: Option<PathBuf>,
     application_resources_dir: Option<PathBuf>,
-    workspace_root: Option<PathBuf>,
+    workspace_roots: Vec<PathBuf>,
 }
 
 impl WordPdfRenderRuntimeDiscoveryOptions {
@@ -41,7 +41,12 @@ impl WordPdfRenderRuntimeDiscoveryOptions {
     }
 
     pub fn with_workspace_root(mut self, workspace_root: impl Into<PathBuf>) -> Self {
-        self.workspace_root = Some(workspace_root.into());
+        self.workspace_roots = vec![workspace_root.into()];
+        self
+    }
+
+    pub fn with_workspace_roots(mut self, roots: impl IntoIterator<Item = PathBuf>) -> Self {
+        self.workspace_roots = roots.into_iter().collect();
         self
     }
 }
@@ -110,15 +115,15 @@ impl WordPdfRenderRuntime {
             return Err(unavailable_error());
         }
 
-        let workspace = options
-            .workspace_root
-            .as_deref()
-            .map(canonical_directory)
-            .transpose()?;
+        let workspaces = options
+            .workspace_roots
+            .iter()
+            .map(|root| root.canonicalize().unwrap_or_else(|_| root.clone()))
+            .collect::<Vec<_>>();
         let root = resolve_component_root(options)?;
-        if workspace
-            .as_ref()
-            .is_some_and(|workspace| root.starts_with(workspace))
+        if workspaces
+            .iter()
+            .any(|workspace| root.starts_with(workspace) || workspace.starts_with(&root))
         {
             return Err(invalid_component(
                 "The Word PDF render runtime must not be loaded from the agent-writable workspace.",

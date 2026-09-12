@@ -120,8 +120,9 @@ pub(super) fn diff_captures(
     changes
 }
 
+#[cfg(test)]
 pub(super) fn limit_reported_changes(
-    mut changes: Vec<AgentCommandArtifactChange>,
+    changes: Vec<AgentCommandArtifactChange>,
     expected_outputs: &[ExpectedOutput],
     workspace_root: Option<&Path>,
 ) -> (Vec<AgentCommandArtifactChange>, u64) {
@@ -130,10 +131,16 @@ pub(super) fn limit_reported_changes(
         .filter_map(|expected| expected.resolved_path.as_deref())
         .map(|path| display_observed_path(path, workspace_root))
         .collect::<Vec<_>>();
+    limit_projected_changes(changes, &expected_paths)
+}
 
+pub(super) fn limit_projected_changes(
+    mut changes: Vec<AgentCommandArtifactChange>,
+    expected_paths: &[(String, AgentCommandArtifactScope)],
+) -> (Vec<AgentCommandArtifactChange>, u64) {
     // Stable sorting keeps the existing deterministic path order within both groups while
     // attempting explicit expected-output changes before incidental workspace changes.
-    changes.sort_by_key(|change| !change_matches_expected_output(change, &expected_paths));
+    changes.sort_by_key(|change| !change_matches_expected_output(change, expected_paths));
 
     let mut reported = Vec::with_capacity(changes.len().min(MAX_REPORTED_CHANGES));
     let mut serialized_bytes = 2_usize; // JSON array brackets.

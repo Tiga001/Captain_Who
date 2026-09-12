@@ -3850,8 +3850,31 @@ fn direct_file_change_execution_is_private_to_renderer_but_durable_for_restart()
     );
 }
 
+fn frozen_file_change_recovery_workspace(
+    root: &std::path::Path,
+) -> mycopilot_core::AgentWorkspaceContext {
+    let root = root.canonicalize().unwrap();
+    let path = root.to_string_lossy().into_owned();
+    mycopilot_core::AgentWorkspaceContext {
+        project_id: None,
+        display_name: Some("FileChange recovery fixture".to_string()),
+        root_path: Some(path.clone()),
+        folders: vec![mycopilot_core::workspace::WorkspaceFolder {
+            id: "file-change-recovery-primary".to_string(),
+            alias: "main".to_string(),
+            role: mycopilot_core::storage::models::ProjectFolderRole::Primary,
+            path: path.clone(),
+            canonical_path: Some(path),
+            directory_identity: Some(
+                mycopilot_core::file_change::FileChangeDirectoryIdentity::read(&root).unwrap(),
+            ),
+        }],
+    }
+}
+
 fn seed_interrupted_manual_file_change(
     storage: &Arc<StorageService>,
+    workspace: &std::path::Path,
     run_id: &str,
     conversation_id: &str,
     assistant_message_id: &str,
@@ -3870,7 +3893,7 @@ fn seed_interrupted_manual_file_change(
     let run_context = AgentRunContext {
         conversation_id: Some(conversation_id.to_string()),
         project_id: None,
-        workspace: None,
+        workspace: Some(frozen_file_change_recovery_workspace(workspace)),
         attachment_library: None,
         permissions: AgentPermissions::default(),
         collaboration_identity: None,
@@ -3965,7 +3988,7 @@ fn startup_reconciles_published_manual_direct_file_change_without_replaying_it()
         collaboration_identity: None,
         conversation_id: Some(conversation_id.to_string()),
         project_id: None,
-        workspace: None,
+        workspace: Some(frozen_file_change_recovery_workspace(fixture.path())),
         attachment_library: None,
         permissions: AgentPermissions::default(),
     });
@@ -4143,6 +4166,7 @@ fn startup_file_change_reconciliation_types_base_divergence_and_unreadable_targe
         );
         let record = seed_interrupted_manual_file_change(
             &storage,
+            &canonical_fixture,
             &run_id,
             &conversation_id,
             &assistant_message_id,
@@ -4284,7 +4308,7 @@ fn startup_reconciles_published_manual_staged_file_changes_without_replaying_the
     let run_context = AgentRunContext {
         conversation_id: Some(conversation_id.to_string()),
         project_id: None,
-        workspace: None,
+        workspace: Some(frozen_file_change_recovery_workspace(fixture.path())),
         attachment_library: None,
         permissions: AgentPermissions::default(),
         collaboration_identity: None,
@@ -4433,7 +4457,7 @@ fn startup_reconciles_published_automatic_direct_file_change_without_replaying_i
     let run_context = AgentRunContext {
         conversation_id: Some(conversation_id.to_string()),
         project_id: None,
-        workspace: None,
+        workspace: Some(frozen_file_change_recovery_workspace(fixture.path())),
         attachment_library: None,
         permissions: AgentPermissions::default(),
         collaboration_identity: None,
@@ -4591,7 +4615,7 @@ fn startup_reconciles_published_automatic_staged_file_changes_without_replaying_
     let run_context = AgentRunContext {
         conversation_id: Some(conversation_id.to_string()),
         project_id: None,
-        workspace: None,
+        workspace: Some(frozen_file_change_recovery_workspace(fixture.path())),
         attachment_library: None,
         permissions: AgentPermissions::default(),
         collaboration_identity: None,
@@ -4710,7 +4734,7 @@ fn startup_finalizes_a_committed_automatic_direct_delete_before_terminal_audit()
     let run_context = AgentRunContext {
         conversation_id: Some(conversation_id.to_string()),
         project_id: None,
-        workspace: None,
+        workspace: Some(frozen_file_change_recovery_workspace(fixture.path())),
         attachment_library: None,
         permissions: AgentPermissions::default(),
         collaboration_identity: None,

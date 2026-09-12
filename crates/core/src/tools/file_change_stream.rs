@@ -365,6 +365,7 @@ mod tests {
             conversation_id: Some("conversation-1".to_string()),
             project_id: None,
             workspace: Some(AgentWorkspaceContext {
+                folders: Vec::new(),
                 project_id: None,
                 display_name: Some("workspace".to_string()),
                 root_path: Some(workspace.to_string_lossy().to_string()),
@@ -439,6 +440,7 @@ mod tests {
                 conversation_id: Some("conversation-1".to_string()),
                 project_id: None,
                 workspace: Some(AgentWorkspaceContext {
+                    folders: Vec::new(),
                     project_id: None,
                     display_name: Some("workspace".to_string()),
                     root_path: Some(workspace.to_string_lossy().to_string()),
@@ -484,6 +486,7 @@ mod tests {
                 conversation_id: Some("conversation-1".to_string()),
                 project_id: None,
                 workspace: Some(AgentWorkspaceContext {
+                    folders: Vec::new(),
                     project_id: None,
                     display_name: Some("workspace".to_string()),
                     root_path: Some(workspace.to_string_lossy().to_string()),

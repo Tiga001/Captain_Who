@@ -212,9 +212,14 @@ export async function showStoredProjectInFolder(projectId: string): Promise<void
 
 export async function revealStoredProjectFile(
   projectId: string | null | undefined,
-  filePath: string
+  filePath: string,
+  assistantMessageId?: string
 ): Promise<void> {
-  await hostClient.storage.revealProjectFile({ projectId, filePath })
+  await hostClient.storage.revealProjectFile({
+    projectId,
+    filePath,
+    ...(assistantMessageId ? { assistantMessageId } : {})
+  })
 }
 
 export async function loadConversationMetas(): Promise<ChatConversation[]> {
@@ -336,12 +341,17 @@ export async function loadInputAttachments(
 }
 
 export async function loadImageFile(input: {
+  assistantMessageId?: string
   projectId?: string | null
   filePath: string
 }): Promise<StorageImageFileRecord | null> {
   const filePath = input.filePath.trim()
   if (!filePath) return null
-  return hostClient.storage.loadImageFile({ projectId: input.projectId, filePath })
+  return hostClient.storage.loadImageFile({
+    projectId: input.projectId,
+    filePath,
+    ...(input.assistantMessageId ? { assistantMessageId: input.assistantMessageId } : {})
+  })
 }
 
 export function defaultAgentPromptPreferences(): AgentPromptPreferencesSnapshot {

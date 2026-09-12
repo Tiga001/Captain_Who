@@ -1,6 +1,54 @@
 use super::*;
 
 #[test]
+fn host_child_spawn_freezes_workspace_before_dispatch_and_preserves_replay() {
+    let fixture = Fixture::new(Some("model-a"));
+    let first_root = fixture._directory.path().join("first");
+    let next_root = fixture._directory.path().join("next");
+    std::fs::create_dir(&first_root).unwrap();
+    std::fs::create_dir(&next_root).unwrap();
+    let mut project = ProjectRecord::with_primary_folder(
+        "project-a",
+        "Project A",
+        first_root.to_string_lossy(),
+        1,
+    );
+    fixture.service.save_project(project.clone()).unwrap();
+    let input = spawn_input("host-workspace-spawn", "workspace-child");
+    let first = fixture.service.create_child_agent(&input).unwrap();
+    let frozen = fixture
+        .service
+        .load_agent_workspace_for_wake(&first.initial_wake.wake_id)
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(frozen.root_path.as_deref(), first_root.to_str());
+
+    project.folders[0].path = next_root.to_string_lossy().into_owned();
+    fixture.service.save_project(project).unwrap();
+    let replay = fixture.service.create_child_agent(&input).unwrap();
+    assert_eq!(replay.initial_wake.wake_id, first.initial_wake.wake_id);
+    assert_eq!(
+        fixture
+            .service
+            .load_agent_workspace_for_wake(&replay.initial_wake.wake_id)
+            .unwrap(),
+        Some(Some(frozen))
+    );
+    let next = fixture
+        .service
+        .create_child_agent(&spawn_input("next-host-spawn", "next-child"))
+        .unwrap();
+    let next_workspace = fixture
+        .service
+        .load_agent_workspace_for_wake(&next.initial_wake.wake_id)
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(next_workspace.root_path.as_deref(), next_root.to_str());
+}
+
+#[test]
 fn all_snapshot_copies_attachment_to_independent_path_and_retry_is_idempotent() {
     let fixture = Fixture::new(Some("model-a"));
     save_settled_history(&fixture, 1, false);

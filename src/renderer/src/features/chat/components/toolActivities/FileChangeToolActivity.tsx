@@ -375,6 +375,7 @@ function FileChangeRow({
   const [expanded, setExpanded] = useState(false)
   const [persistedPreview, setPersistedPreview] = useState('')
   const [previewError, setPreviewError] = useState('')
+  const [revealFailed, setRevealFailed] = useState(false)
   const [loading, setLoading] = useState(false)
   const [nextOffset, setNextOffset] = useState<number | null>(null)
   const view = getFileChangeItemView(item)
@@ -566,6 +567,11 @@ function FileChangeRow({
 
   return (
     <div className="file-change-activity__item">
+      {revealFailed ? (
+        <p role="status" className="file-change-activity__error">
+          {t('agent.office.revealUnavailable')}
+        </p>
+      ) : null}
       <div className="file-change-activity__item-line" title={view.filePath}>
         <span className={isPending(view.status) ? 'agent-running-text' : undefined}>
           {t(ROW_LABELS[view.operation][view.status])}
@@ -577,7 +583,10 @@ function FileChangeRow({
             })}
             className="file-change-activity__path"
             onClick={() => {
-              void revealStoredProjectFile(projectId, view.filePath).catch(() => undefined)
+              setRevealFailed(false)
+              void revealStoredProjectFile(projectId, view.filePath, assistantMessageId).catch(() =>
+                setRevealFailed(true)
+              )
             }}
             title={formatTranslation(t, 'agent.fileChange.revealFile', {
               filePath: view.filePath

@@ -421,6 +421,7 @@ fn office_execution_context(context: &ToolExecutionContext) -> AgentResult<Offic
         context.attachment_library().cloned(),
         context.skill_resources_optional(),
     )
+    .with_workspace(context.workspace_context())
     .with_storage(context.storage_optional())
     .with_conversation_id(context.conversation_id_optional())
     .with_permissions(context.permissions());
@@ -1537,6 +1538,7 @@ fn parse_args_with_context(
         context.attachment_library().cloned(),
         context.skill_resources_optional(),
     )
+    .with_workspace(context.workspace_context())
     .with_storage(context.storage_optional())
     .with_conversation_id(context.conversation_id_optional())
     .with_permissions(context.permissions());

@@ -407,7 +407,11 @@ export interface StorageHostApi {
   saveProject(project: StorageProjectRecord): Promise<StorageProjectRecord>
   deleteProject(projectId: string): Promise<void>
   showProjectInFolder(projectId: string): Promise<void>
-  revealProjectFile(input: { projectId?: string | null; filePath: string }): Promise<void>
+  revealProjectFile(input: {
+    projectId?: string | null
+    filePath: string
+    assistantMessageId?: string
+  }): Promise<void>
   loadConversationMetas(): Promise<StorageChatConversationMetaRecord[]>
   loadConversation(conversationId: string): Promise<StorageChatConversationRecord | null>
   loadConversations(): Promise<StorageChatConversationRecord[]>
@@ -442,6 +446,7 @@ export interface StorageHostApi {
   loadAttachmentImage(input: { attachmentId: string }): Promise<StorageAttachmentImageRecord | null>
   loadInputAttachments(input: StorageLoadInputAttachmentsRequest): Promise<StorageInputAttachment[]>
   loadImageFile(input: {
+    assistantMessageId?: string
     projectId?: string | null
     filePath: string
   }): Promise<StorageImageFileRecord | null>

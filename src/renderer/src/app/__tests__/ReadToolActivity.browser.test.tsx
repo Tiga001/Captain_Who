@@ -99,6 +99,7 @@ describe('ReadToolActivity image presentation', () => {
   it('loads the original from its source path instead of using event Base64', async () => {
     const screen = await render(
       <ReadToolActivity
+        assistantMessageId="assistant-1"
         activity={activity({
           thumbnailDataUrl: THUMBNAIL_DATA_URL,
           fullDataUrl: 'data:image/png;base64,bGVnYWN5'
@@ -114,7 +115,8 @@ describe('ReadToolActivity image presentation', () => {
     await vi.waitFor(() => {
       expect(mocks.loadImageFile).toHaveBeenCalledWith({
         projectId: 'project-1',
-        filePath: 'preview.png'
+        filePath: 'preview.png',
+        assistantMessageId: 'assistant-1'
       })
       expect(mocks.openImagePreview).toHaveBeenCalledWith({
         alt: 'preview.png',
@@ -122,6 +124,33 @@ describe('ReadToolActivity image presentation', () => {
         src: 'data:image/png;base64,ZnJlc2g='
       })
     })
+  })
+
+  it('shows an unavailable-file notice when the frozen workspace cannot be resolved', async () => {
+    mocks.loadImageFile.mockRejectedValueOnce(new Error('Frozen workspace unavailable'))
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    try {
+      const screen = await render(
+        <ReadToolActivity
+          assistantMessageId="assistant-old"
+          activity={activity({ thumbnailDataUrl: THUMBNAIL_DATA_URL })}
+          call={call}
+          projectId="project-1"
+        />
+      )
+      screen.container.querySelector<HTMLButtonElement>('.read-activity__image')?.click()
+      await expect
+        .poll(() => mocks.showImagePreviewNotice.mock.calls)
+        .toContainEqual(['files.preview.error'])
+      expect(mocks.openImagePreview).not.toHaveBeenCalled()
+      expect(mocks.loadImageFile).toHaveBeenCalledWith({
+        assistantMessageId: 'assistant-old',
+        projectId: 'project-1',
+        filePath: 'preview.png'
+      })
+    } finally {
+      consoleError.mockRestore()
+    }
   })
 
   it('resolves a generated Artifact through the Host Artifact boundary', async () => {

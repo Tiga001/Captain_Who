@@ -159,6 +159,7 @@ fn bundled_pdf_freezes_a_word_qa_read_path_for_info_and_render_without_model_inp
             conversation_id: Some("conversation-aspen".to_string()),
             project_id: None,
             workspace: Some(AgentWorkspaceContext {
+                folders: Vec::new(),
                 project_id: None,
                 display_name: Some("Aspen manual".to_string()),
                 root_path: Some(workspace.path().to_string_lossy().into_owned()),
@@ -234,6 +235,7 @@ fn bundled_pdf_merges_explicit_attachment_and_workspace_inputs_deterministically
             conversation_id: Some("conversation-mixed-pdf-inputs".to_string()),
             project_id: None,
             workspace: Some(AgentWorkspaceContext {
+                folders: Vec::new(),
                 project_id: None,
                 display_name: Some("mixed PDF inputs".to_string()),
                 root_path: Some(workspace.path().to_string_lossy().into_owned()),
@@ -324,6 +326,7 @@ fn bundled_pdf_missing_workspace_path_returns_an_inputs_recovery() {
             conversation_id: Some("conversation-missing-pdf".to_string()),
             project_id: None,
             workspace: Some(AgentWorkspaceContext {
+                folders: Vec::new(),
                 project_id: None,
                 display_name: Some("missing PDF".to_string()),
                 root_path: Some(workspace.path().to_string_lossy().into_owned()),
@@ -376,6 +379,7 @@ fn bundled_pdf_outputs_path_never_binds_a_same_named_workspace_file() {
             conversation_id: Some("conversation-private-pdf-output".to_string()),
             project_id: None,
             workspace: Some(AgentWorkspaceContext {
+                folders: Vec::new(),
                 project_id: None,
                 display_name: Some("PDF output isolation".to_string()),
                 root_path: Some(workspace.path().to_string_lossy().into_owned()),
@@ -442,6 +446,7 @@ fn bundled_pdf_explicit_external_input_requires_and_accepts_full_read() {
                 conversation_id: Some("conversation-external-pdf".to_string()),
                 project_id: None,
                 workspace: Some(AgentWorkspaceContext {
+                    folders: Vec::new(),
                     project_id: None,
                     display_name: Some("external PDF".to_string()),
                     root_path: Some(workspace.to_string_lossy().into_owned()),

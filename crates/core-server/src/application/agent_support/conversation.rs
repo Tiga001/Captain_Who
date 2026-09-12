@@ -409,14 +409,28 @@ fn prepare_conversation_turn_from_source(
         normalized_optional(input.project_id.as_deref()),
     )?;
     let project = resolve_project(storage, resolved_project_id.as_deref())?;
-    let workspace_root = project
+    let inherited_workspace = match &source {
+        ConversationTurnInputSource::ExistingAgentProjection { wake_admission, .. } => Some(
+            storage
+                .load_agent_workspace_for_wake(&wake_admission.wake_id)?
+                .ok_or_else(|| "可信 Wake 缺少冻结工作区。".to_string())?,
+        ),
+        _ => None,
+    };
+    let prepared_workspace = match inherited_workspace {
+        Some(workspace) => workspace,
+        None => project
+            .as_ref()
+            .map(mycopilot_core::workspace::capture_project_workspace)
+            .transpose()?,
+    };
+    // Skills always use only the primary of the same snapshot as this task tree.
+    let skill_root =
+        mycopilot_core::workspace::WorkspaceResolver::from_context(prepared_workspace.as_ref())
+            .available_primary()?;
+    let workspace = prepared_workspace
         .as_ref()
-        .and_then(|project| project.primary_path())
-        .map(PathBuf::from);
-    let workspace = project
-        .as_ref()
-        .zip(workspace_root.as_deref())
-        .map(|(project, root)| (project.id.as_str(), root));
+        .and_then(|workspace| workspace.project_id.as_deref().zip(skill_root.as_deref()));
     let prepared_skills =
         activate_selected_skills(storage, skills_service, workspace, &input.skills)?;
     let skill_discovery =
@@ -739,6 +753,14 @@ fn prepare_conversation_turn_from_source(
             prompt_preferences.context_profile = storage
                 .load_agent_context_profile_for_run(run_id)?
                 .ok_or_else(|| "已接受的 Run 缺少冻结的上下文模式。".to_string())?;
+            let admitted_workspace = storage
+                .load_agent_workspace_for_run(run_id)?
+                .ok_or_else(|| "已接受的 Run 缺少冻结工作区。".to_string())?;
+            if admitted_workspace != prepared_workspace {
+                return Err("准备任务期间工作区发生变化，请重新发送消息。"
+                    .to_string()
+                    .into());
+            }
             #[cfg(test)]
             if automation_admission.is_some_and(|admission| {
                 crate::application::agent::take_automation_post_admission_preparation_failure(
@@ -774,11 +796,7 @@ fn prepare_conversation_turn_from_source(
     let run_context = AgentRunContext {
         conversation_id: Some(conversation_id.clone()),
         project_id: resolved_project_id.clone(),
-        workspace: project.as_ref().map(|project| AgentWorkspaceContext {
-            project_id: Some(project.id.clone()),
-            display_name: Some(project.name.clone()),
-            root_path: project.primary_path().map(str::to_string),
-        }),
+        workspace: prepared_workspace,
         attachment_library: Some(attachment_library),
         permissions: input.permissions,
         collaboration_identity: match &source {

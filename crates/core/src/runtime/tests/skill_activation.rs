@@ -787,6 +787,7 @@ async fn run_skill_activation_approval_resume_case(case: SkillApprovalResumeProv
         conversation_id: Some(conversation_id.clone()),
         project_id: None,
         workspace: Some(AgentWorkspaceContext {
+            folders: Vec::new(),
             project_id: None,
             display_name: Some("workspace".to_string()),
             root_path: Some(workspace.to_string_lossy().into_owned()),

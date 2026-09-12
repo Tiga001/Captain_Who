@@ -143,9 +143,9 @@ fn follow_up_agent_internal(
         ),
         source_agent_message_id: Some(message.message_id.clone()),
     };
-    let deferred_wake = enqueue_wake_in_transaction(&transaction, &wake_input, created_at)?
-        .record()
-        .clone();
+    let wake_outcome = enqueue_wake_in_transaction(&transaction, &wake_input, created_at)?;
+    let newly_created = matches!(&wake_outcome, IdempotentCreate::Created(_));
+    let deferred_wake = wake_outcome.record().clone();
     if let Some(origin_run_id) = origin_run_id {
         crate::storage::agent_collaboration_run_policy_repository::inherit_run_for_wake(
             &transaction,
@@ -157,6 +157,19 @@ fn follow_up_agent_internal(
             &transaction,
             origin_run_id,
             &deferred_wake.wake_id,
+        )
+        .map_err(write_error)?;
+        crate::storage::agent_workspace_repository::inherit_run_for_wake(
+            &transaction,
+            origin_run_id,
+            &deferred_wake.wake_id,
+        )
+        .map_err(write_error)?;
+    } else if newly_created {
+        crate::storage::agent_workspace_repository::capture_host_wake(
+            &transaction,
+            &deferred_wake.wake_id,
+            target.project_id.as_deref(),
         )
         .map_err(write_error)?;
     }
@@ -399,6 +412,15 @@ pub fn acknowledge_agent_task_with_projection_and_wake(
         acknowledged_at,
     )?;
     let wake = enqueue_wake_in_transaction(&transaction, &input.wake, acknowledged_at)?;
+    if matches!(&wake, IdempotentCreate::Created(_)) {
+        let target = ensure_active_agent(&transaction, &input.wake.agent_id)?;
+        crate::storage::agent_workspace_repository::capture_host_wake(
+            &transaction,
+            &wake.record().wake_id,
+            target.project_id.as_deref(),
+        )
+        .map_err(write_error)?;
+    }
     transaction.commit().map_err(write_error)?;
     Ok((acknowledged, wake.record().clone()))
 }

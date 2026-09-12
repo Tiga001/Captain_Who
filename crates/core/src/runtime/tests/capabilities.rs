@@ -133,6 +133,7 @@ fn run_context_changes_only_world_state_while_prompt_preferences_change_configur
         conversation_id: Some("conversation-private".to_string()),
         project_id: Some("project-private".to_string()),
         workspace: Some(AgentWorkspaceContext {
+            folders: Vec::new(),
             project_id: Some("project-private".to_string()),
             display_name: Some("Runtime Workspace".to_string()),
             root_path: Some("/Users/example/runtime-workspace".to_string()),
@@ -288,6 +289,7 @@ fn durable_conversation_sections_are_not_duplicated_in_run_world_state() {
         conversation_id: Some("conversation-1".to_string()),
         project_id: Some("project-1".to_string()),
         workspace: Some(AgentWorkspaceContext {
+            folders: Vec::new(),
             project_id: Some("project-1".to_string()),
             display_name: Some("Workspace".to_string()),
             root_path: Some("/private/workspace".to_string()),
@@ -432,6 +434,7 @@ fn composer_permissions_do_not_change_stable_tools_but_denied_writes_still_fail(
             conversation_id: None,
             project_id: None,
             workspace: Some(AgentWorkspaceContext {
+                folders: Vec::new(),
                 project_id: None,
                 display_name: Some("workspace".to_string()),
                 root_path: Some("/tmp/workspace".to_string()),
@@ -605,6 +608,7 @@ fn runtime_structured_writers_share_the_file_edit_approval_policy() {
             conversation_id: None,
             project_id: None,
             workspace: Some(AgentWorkspaceContext {
+                folders: Vec::new(),
                 project_id: None,
                 display_name: Some("workspace".to_string()),
                 root_path: Some("/tmp/workspace".to_string()),
@@ -695,6 +699,7 @@ fn write_denied_keeps_stable_writers_but_filters_dynamic_write_only_tools() {
         conversation_id: None,
         project_id: None,
         workspace: Some(AgentWorkspaceContext {
+            folders: Vec::new(),
             project_id: None,
             display_name: Some("workspace".to_string()),
             root_path: Some("/tmp/workspace".to_string()),
@@ -1231,6 +1236,7 @@ async fn image_capable_read_image_round_trip_is_legal_for_openai_and_anthropic()
             conversation_id: Some("conversation-image".to_string()),
             project_id: Some("project-image".to_string()),
             workspace: Some(AgentWorkspaceContext {
+                folders: Vec::new(),
                 project_id: Some("project-image".to_string()),
                 display_name: Some("Image workspace".to_string()),
                 root_path: Some(fixture.path().to_string_lossy().to_string()),
@@ -1386,6 +1392,7 @@ fn runtime_skill_script_definition_respects_the_host_permission_matrix() {
             conversation_id: None,
             project_id: None,
             workspace: Some(AgentWorkspaceContext {
+                folders: Vec::new(),
                 project_id: None,
                 display_name: Some("workspace".to_string()),
                 root_path: Some("/tmp/workspace".to_string()),

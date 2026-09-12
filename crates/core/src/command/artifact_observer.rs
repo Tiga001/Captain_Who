@@ -36,11 +36,14 @@ use ooxml::validate_office_artifact;
 use ooxml::{find_eocd_at_physical_end, preflight_ooxml_zip, read_u16_le, read_u32_le};
 #[cfg(test)]
 use report::display_path;
-use report::{diff_captures, display_observed_path, limit_reported_changes};
+#[cfg(test)]
+use report::limit_reported_changes;
+use report::{diff_captures, display_observed_path, limit_projected_changes};
 
 #[derive(Debug, Clone)]
 pub(super) struct CommandArtifactObserver {
     workspace_root: Option<PathBuf>,
+    workspace: crate::workspace::WorkspaceResolver,
     workspace_included: bool,
     expected_outputs: Vec<ExpectedOutput>,
     additional_root_count: u64,
@@ -140,11 +143,28 @@ struct CaptureState {
 }
 
 impl CommandArtifactObserver {
+    #[cfg(test)]
     pub(super) fn prepare(
         workspace_root: Option<&Path>,
         cwd: &Path,
         request: Option<&AgentCommandArtifactObservationRequest>,
         permissions: AgentPermissions,
+    ) -> Option<Self> {
+        Self::prepare_with_workspace(
+            workspace_root,
+            cwd,
+            request,
+            permissions,
+            &crate::workspace::WorkspaceResolver::from_primary(workspace_root),
+        )
+    }
+
+    pub(super) fn prepare_with_workspace(
+        workspace_root: Option<&Path>,
+        cwd: &Path,
+        request: Option<&AgentCommandArtifactObservationRequest>,
+        permissions: AgentPermissions,
+        workspace: &crate::workspace::WorkspaceResolver,
     ) -> Option<Self> {
         let request = request?;
         if !request
@@ -163,7 +183,7 @@ impl CommandArtifactObserver {
             let resolved_path = resolve_observation_path(
                 requested_path,
                 cwd,
-                workspace_root.as_deref(),
+                workspace,
                 permissions,
                 ObservationPathPurpose::ExpectedOutput,
             )
@@ -220,7 +240,7 @@ impl CommandArtifactObserver {
                 match resolve_observation_path(
                     requested_path,
                     cwd,
-                    workspace_root.as_deref(),
+                    workspace,
                     permissions,
                     ObservationPathPurpose::AdditionalRoot,
                 ) {
@@ -266,6 +286,7 @@ impl CommandArtifactObserver {
         Some(Self {
             workspace_included: workspace_root.is_some(),
             workspace_root,
+            workspace: workspace.clone(),
             expected_outputs,
             additional_root_count,
             roots,
@@ -317,7 +338,7 @@ impl CommandArtifactObserver {
         before: CommandArtifactCapture,
         after: CommandArtifactCapture,
     ) -> AgentCommandArtifactObservation {
-        let all_changes = diff_captures(&before, &after, self.workspace_root.as_deref());
+        let mut all_changes = diff_captures(&before, &after, self.workspace_root.as_deref());
         let mut warnings = self.setup_warnings.clone();
         for warning in before.warnings.iter().chain(after.warnings.iter()) {
             push_warning(&mut warnings, warning.clone());
@@ -325,11 +346,27 @@ impl CommandArtifactObserver {
         // Compute explicit expected-output outcomes from the full in-memory diff before bounding
         // the model/audit-facing list. A noisy command must not hide its declared output contract.
         let expected_outputs = self.expected_outcomes(&before, &after, &all_changes, &mut warnings);
-        let (changes, changes_omitted) = limit_reported_changes(
-            all_changes,
-            &self.expected_outputs,
-            self.workspace_root.as_deref(),
-        );
+        for change in &mut all_changes {
+            self.project_observed_path(&mut change.path, &mut change.scope);
+            if let (Some(path), Some(scope)) =
+                (&mut change.previous_path, &mut change.previous_scope)
+            {
+                self.project_observed_path(path, scope);
+            }
+        }
+        let expected_paths = self
+            .expected_outputs
+            .iter()
+            .filter_map(|expected| expected.resolved_path.as_deref())
+            .map(|physical| {
+                let (mut path, mut scope) =
+                    display_observed_path(physical, self.workspace_root.as_deref());
+                self.project_observed_path(&mut path, &mut scope);
+                (path, scope)
+            })
+            .collect::<Vec<_>>();
+        // Bound the final namespace representation, including aliases and escaped literal paths.
+        let (changes, changes_omitted) = limit_projected_changes(all_changes, &expected_paths);
         let changes_truncated = changes_omitted > 0;
         if changes_truncated {
             push_warning(
@@ -379,7 +416,7 @@ impl CommandArtifactObserver {
             .saturating_add(coverage.after.office_files_seen);
         let returned = u64::try_from(changes.len()).unwrap_or(u64::MAX);
 
-        AgentCommandArtifactObservation {
+        let mut observation = AgentCommandArtifactObservation {
             schema_version: AGENT_COMMAND_ARTIFACT_OBSERVATION_SCHEMA_VERSION,
             status,
             partial,
@@ -393,6 +430,40 @@ impl CommandArtifactObserver {
             changes_omitted,
             expected_outputs,
             warnings,
+        };
+        for expected in &mut observation.expected_outputs {
+            if let (Some(path), Some(scope)) = (&mut expected.path, &mut expected.scope) {
+                self.project_observed_path(path, scope);
+            }
+        }
+        for warning in &mut observation.warnings {
+            if let Some(path) = &mut warning.path {
+                if Path::new(path).is_absolute() {
+                    *path = self.workspace.display_path(Path::new(path));
+                }
+            }
+        }
+        observation
+    }
+
+    fn project_observed_path(&self, path: &mut String, scope: &mut AgentCommandArtifactScope) {
+        let physical = if *scope == AgentCommandArtifactScope::Workspace {
+            self.workspace_root
+                .as_deref()
+                .map(|root| root.join(&*path))
+                .unwrap_or_else(|| PathBuf::from(&*path))
+        } else {
+            PathBuf::from(&*path)
+        };
+        *path = self.workspace.display_path(&physical);
+        if self
+            .workspace
+            .containing_root(&physical)
+            .ok()
+            .flatten()
+            .is_some()
+        {
+            *scope = AgentCommandArtifactScope::Workspace;
         }
     }
 
@@ -525,7 +596,7 @@ impl CommandArtifactObserver {
 fn resolve_observation_path(
     raw: &str,
     cwd: &Path,
-    workspace_root: Option<&Path>,
+    workspace: &crate::workspace::WorkspaceResolver,
     permissions: AgentPermissions,
     purpose: ObservationPathPurpose,
 ) -> Result<PathBuf, (&'static str, String)> {
@@ -548,10 +619,21 @@ fn resolve_observation_path(
             format!("观察路径无法解析：{error}"),
         )
     })?;
-    let candidate = match expanded {
-        Some(path) => path,
-        None if Path::new(raw).is_absolute() => PathBuf::from(raw),
-        None => cwd.join(raw),
+    crate::resource_locator::ResourceLocator::parse(raw)
+        .map_err(|error| ("command.artifact.path.invalid", error.to_string()))?;
+    let candidate = if crate::workspace::parse_workspace_path(raw)
+        .map_err(|error| ("command.artifact.path.invalid", error))?
+        .is_some()
+    {
+        workspace
+            .resolve_input(raw)
+            .map_err(|error| ("command.artifact.path.invalid", error))?
+    } else {
+        match expanded {
+            Some(path) => path,
+            None if Path::new(raw).is_absolute() => PathBuf::from(raw),
+            None => cwd.join(raw),
+        }
     };
     let normalized = normalize_absolute_path(&candidate).map_err(|message| {
         (
@@ -559,7 +641,10 @@ fn resolve_observation_path(
             format!("观察路径无法规范化：{message}"),
         )
     })?;
-    let inside_workspace = workspace_root.is_some_and(|root| normalized.starts_with(root));
+    let inside_workspace = workspace
+        .containing_root(&normalized)
+        .map_err(|error| ("command.artifact.path.invalid", error))?
+        .is_some();
     if !inside_workspace {
         match purpose {
             ObservationPathPurpose::ExpectedOutput

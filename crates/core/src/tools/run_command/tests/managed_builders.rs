@@ -1,6 +1,72 @@
 use super::*;
 
 #[test]
+fn multi_workspace_trusted_builder_matches_auxiliary_materialization_receipt() {
+    use crate::storage::models::{ProjectFolderRecord, ProjectFolderRole, ProjectRecord};
+    let primary = tempfile::tempdir().unwrap();
+    let auxiliary = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(auxiliary.path().join("scripts")).unwrap();
+    std::fs::write(
+        auxiliary.path().join("scripts/build.py"),
+        "# materialized builder",
+    )
+    .unwrap();
+    let mut project = ProjectRecord::with_primary_folder(
+        "project",
+        "Project",
+        primary.path().to_string_lossy(),
+        0,
+    );
+    project.folders[0].alias = "app".into();
+    project.folders.push(ProjectFolderRecord {
+        id: "folder-docs".into(),
+        alias: "docs".into(),
+        path: auxiliary.path().to_string_lossy().into_owned(),
+        role: ProjectFolderRole::Auxiliary,
+        sort_order: 1,
+        created_at: 0,
+    });
+    let storage = Arc::new(StorageService::open(&primary.path().join("storage.sqlite")).unwrap());
+    record_materialized_builder(
+        &storage,
+        "run-auxiliary-builder",
+        AgentCommandRuntimeProfile::Documents,
+        "@workspace/docs/scripts/build.py",
+    );
+    let context = ToolExecutionContext::from_run_context(Some(&AgentRunContext {
+        collaboration_identity: None,
+        conversation_id: None,
+        project_id: None,
+        workspace: Some(crate::workspace::freeze_project_workspace(&project).unwrap()),
+        attachment_library: None,
+        permissions: AgentPermissions {
+            write: AgentWritePermission::WorkspaceOnly,
+            ..Default::default()
+        },
+    }))
+    .with_runtime_services("run-auxiliary-builder".to_string(), Some(storage));
+    let builder = trusted_materialized_builder_profile(
+        &context,
+        "python scripts/build.py --output report.docx",
+        Some("@workspace/docs"),
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(builder.profile, AgentCommandRuntimeProfile::Documents);
+    assert_eq!(
+        builder.workspace_script_path,
+        "@workspace/docs/scripts/build.py"
+    );
+    assert!(trusted_materialized_builder_profile(
+        &context,
+        "python scripts/build.py --output report.docx",
+        None
+    )
+    .unwrap()
+    .is_none());
+}
+
+#[test]
 fn model_path_input_derives_a_private_mount_name_without_source_routing() {
     let resolved = resolve_run_command_inputs(
         &AgentFileInputExecutionContext::default(),
@@ -40,6 +106,7 @@ fn builds_command_request_for_approval() {
         conversation_id: None,
         project_id: None,
         workspace: Some(AgentWorkspaceContext {
+            folders: Vec::new(),
             project_id: None,
             display_name: Some("temp".to_string()),
             root_path: Some(std::env::temp_dir().to_string_lossy().to_string()),
@@ -80,6 +147,7 @@ fn omitted_timeout_means_no_hard_process_deadline() {
         conversation_id: None,
         project_id: None,
         workspace: Some(AgentWorkspaceContext {
+            folders: Vec::new(),
             project_id: None,
             display_name: Some("temp".to_string()),
             root_path: Some(std::env::temp_dir().to_string_lossy().to_string()),
@@ -111,6 +179,7 @@ fn live_model_arguments_reject_removed_timeout_field() {
         conversation_id: None,
         project_id: None,
         workspace: Some(AgentWorkspaceContext {
+            folders: Vec::new(),
             project_id: None,
             display_name: Some("temp".to_string()),
             root_path: Some(std::env::temp_dir().to_string_lossy().to_string()),
@@ -142,6 +211,7 @@ fn resolves_and_freezes_a_model_friendly_runtime_profile() {
             conversation_id: None,
             project_id: None,
             workspace: Some(AgentWorkspaceContext {
+                folders: Vec::new(),
                 project_id: None,
                 display_name: Some("temp".to_string()),
                 root_path: Some(std::env::temp_dir().to_string_lossy().to_string()),
@@ -240,6 +310,7 @@ fn backend_binds_managed_builder_profile_and_observation_from_office_output() {
                 conversation_id: None,
                 project_id: None,
                 workspace: Some(AgentWorkspaceContext {
+                    folders: Vec::new(),
                     project_id: None,
                     display_name: Some("managed-builder".to_string()),
                     root_path: Some(workspace.path().to_string_lossy().to_string()),
@@ -294,6 +365,7 @@ fn exact_bundled_builders_reject_source_and_python_editors_require_exactly_one_s
             conversation_id: None,
             project_id: None,
             workspace: Some(AgentWorkspaceContext {
+                folders: Vec::new(),
                 project_id: None,
                 display_name: Some("builder source contract".to_string()),
                 root_path: Some(workspace.path().to_string_lossy().into_owned()),
@@ -360,6 +432,7 @@ fn exact_bundled_builders_reject_source_and_python_editors_require_exactly_one_s
                 conversation_id: None,
                 project_id: None,
                 workspace: Some(AgentWorkspaceContext {
+                    folders: Vec::new(),
                     project_id: None,
                     display_name: Some("editor source contract".to_string()),
                     root_path: Some(workspace.path().to_string_lossy().into_owned()),
@@ -506,6 +579,7 @@ fn exact_bundled_editor_receipt_freezes_the_script_as_a_host_reserved_input() {
             conversation_id: Some("conversation-presentation-editor".to_string()),
             project_id: None,
             workspace: Some(AgentWorkspaceContext {
+                folders: Vec::new(),
                 project_id: None,
                 display_name: Some("presentation editor".to_string()),
                 root_path: Some(workspace.path().to_string_lossy().into_owned()),
@@ -759,6 +833,7 @@ fn third_party_editor_receipt_cannot_unlock_the_host_editor_identity() {
             conversation_id: Some("conversation-third-party-editor".to_string()),
             project_id: None,
             workspace: Some(AgentWorkspaceContext {
+                folders: Vec::new(),
                 project_id: None,
                 display_name: Some("third-party editor".to_string()),
                 root_path: Some(workspace.path().to_string_lossy().into_owned()),
@@ -896,6 +971,7 @@ fn current_run_presentation_builder_syntax_check_uses_frozen_runtime_without_obs
             conversation_id: Some("conversation-presentation-syntax-check".to_string()),
             project_id: None,
             workspace: Some(AgentWorkspaceContext {
+                folders: Vec::new(),
                 project_id: None,
                 display_name: Some("presentation syntax check".to_string()),
                 root_path: Some(workspace.path().to_string_lossy().into_owned()),
@@ -952,6 +1028,7 @@ fn ordinary_node_syntax_check_is_not_rebound_without_a_matching_current_run_rece
         conversation_id: None,
         project_id: None,
         workspace: Some(AgentWorkspaceContext {
+            folders: Vec::new(),
             project_id: None,
             display_name: Some("untrusted syntax check".to_string()),
             root_path: Some(workspace.path().to_string_lossy().into_owned()),
@@ -1039,6 +1116,7 @@ fn activated_pdf_skill_does_not_intercept_a_provenance_bound_office_builder() {
             conversation_id: Some("conversation-pdf-and-documents".to_string()),
             project_id: None,
             workspace: Some(AgentWorkspaceContext {
+                folders: Vec::new(),
                 project_id: None,
                 display_name: Some("PDF and Documents".to_string()),
                 root_path: Some(workspace.path().to_string_lossy().into_owned()),
@@ -1086,6 +1164,7 @@ fn ordinary_saved_scripts_are_not_silently_rebound_without_backend_provenance() 
             conversation_id: None,
             project_id: None,
             workspace: Some(AgentWorkspaceContext {
+                folders: Vec::new(),
                 project_id: None,
                 display_name: Some("ordinary-script".to_string()),
                 root_path: Some(workspace.path().to_string_lossy().to_string()),
@@ -1135,6 +1214,7 @@ fn backend_rejects_conflicting_builder_profile_and_workspace_escape() {
             conversation_id: None,
             project_id: None,
             workspace: Some(AgentWorkspaceContext {
+                folders: Vec::new(),
                 project_id: None,
                 display_name: Some("managed-builder".to_string()),
                 root_path: Some(workspace.path().to_string_lossy().to_string()),
@@ -1183,6 +1263,7 @@ fn backend_rejects_conflicting_builder_profile_and_workspace_escape() {
             conversation_id: None,
             project_id: None,
             workspace: Some(AgentWorkspaceContext {
+                folders: Vec::new(),
                 project_id: None,
                 display_name: Some("managed-builder".to_string()),
                 root_path: Some(workspace.path().to_string_lossy().to_string()),

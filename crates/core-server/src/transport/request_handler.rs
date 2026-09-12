@@ -403,6 +403,31 @@ pub(crate) fn handle_request(
             storage_response(request.id, result)
         }
         STORAGE_LOAD_PROJECTS_METHOD => storage_response(request.id, storage.load_projects()),
+        "storage.loadRunWorkspace" => {
+            let input = match parse_params::<RunWorkspaceRequest>(request.params) {
+                Ok(input) => input,
+                Err(message) => return response_error(Some(request.id), -32602, message),
+            };
+            storage_response(
+                request.id,
+                storage
+                    .load_run_workspace(&input.assistant_message_id, input.project_id.as_deref()),
+            )
+        }
+        "storage.resolveRunWorkspacePath" => {
+            let input = match parse_params::<RunWorkspacePathRequest>(request.params) {
+                Ok(input) => input,
+                Err(message) => return response_error(Some(request.id), -32602, message),
+            };
+            storage_response(
+                request.id,
+                storage.resolve_run_workspace_path(
+                    &input.assistant_message_id,
+                    input.project_id.as_deref(),
+                    &input.file_path,
+                ),
+            )
+        }
         STORAGE_SAVE_PROJECT_METHOD => {
             let project = match parse_params::<ProjectRecord>(request.params) {
                 Ok(project) => project,
@@ -772,4 +797,18 @@ pub(crate) struct SaveComposerDraftMessageRequest {
     pub(crate) scope_id: String,
     pub(crate) message: String,
     pub(crate) updated_at: i64,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RunWorkspaceRequest {
+    assistant_message_id: String,
+    project_id: Option<String>,
+}
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RunWorkspacePathRequest {
+    assistant_message_id: String,
+    project_id: Option<String>,
+    file_path: String,
 }

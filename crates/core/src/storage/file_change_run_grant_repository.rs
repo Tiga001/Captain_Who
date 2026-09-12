@@ -10,7 +10,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 ///
 /// This is not a compatibility decoder. A schema bump must update this strict authority check in
 /// the same change as `PersistedAgentResumeInput`; an unknown envelope makes the grant inert.
-const CURRENT_PERSISTED_AGENT_RESUME_INPUT_SCHEMA_VERSION: u64 = 13;
+const CURRENT_PERSISTED_AGENT_RESUME_INPUT_SCHEMA_VERSION: u64 = 14;
 
 pub fn insert_pending_run_grant(
     connection: &Connection,

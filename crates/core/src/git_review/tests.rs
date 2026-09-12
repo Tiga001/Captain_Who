@@ -166,6 +166,41 @@ fn diff_patch_budget_rejects_each_dimension_independently() {
 }
 
 #[test]
+fn primary_turn_review_excludes_auxiliary_files_from_counts_and_limits() {
+    let workspace = tempfile::tempdir().unwrap();
+    let mut files = (0..=MAX_REVIEW_FILES)
+        .map(|index| crate::AgentTurnFileChange {
+            path: format!("@workspace/docs/{index}.md"),
+            before: crate::AgentTurnFileContent::Missing,
+            after: crate::AgentTurnFileContent::Text("auxiliary\n".to_string()),
+        })
+        .collect::<Vec<_>>();
+    files.push(crate::AgentTurnFileChange {
+        path: "./@workspace/literal.md".to_string(),
+        before: crate::AgentTurnFileContent::Missing,
+        after: crate::AgentTurnFileContent::Text("primary\n".to_string()),
+    });
+    let record = crate::AgentTurnDiffRecord {
+        identity: crate::AgentTurnDiffIdentity {
+            run_id: "run-multi".to_string(),
+            conversation_id: "conversation-multi".to_string(),
+            assistant_message_id: "assistant-multi".to_string(),
+            project_id: "project-multi".to_string(),
+            workspace_root: workspace.path().to_string_lossy().into_owned(),
+        },
+        files,
+        truncated: false,
+    };
+    let summary = turn::build_turn_diff_summary(workspace.path(), &record);
+    assert_eq!(summary.files.len(), 1);
+    assert_eq!(summary.files[0].path, "./@workspace/literal.md");
+    assert_eq!(summary.stats.file_count, 1);
+    assert_eq!(summary.stats.additions, 1);
+    assert_eq!(summary.stats.deletions, 0);
+    assert!(!summary.truncated);
+}
+
+#[test]
 fn generated_untracked_patch_is_rechecked_after_prefix_expansion() {
     let Some(repo) = test_repository() else {
         return;

@@ -694,3 +694,113 @@ fn system_alias_targets_are_supported_only_with_write_all() {
         OfficePathScope::External
     );
 }
+
+fn multi_workspace_office_context(primary: &Path, auxiliary: &Path) -> OfficeExecutionContext {
+    use crate::storage::models::{ProjectFolderRecord, ProjectFolderRole, ProjectRecord};
+    let mut project =
+        ProjectRecord::with_primary_folder("project", "Project", primary.to_string_lossy(), 0);
+    project.folders[0].alias = "app".into();
+    project.folders.push(ProjectFolderRecord {
+        id: "folder-docs".into(),
+        alias: "docs".into(),
+        path: auxiliary.to_string_lossy().into_owned(),
+        role: ProjectFolderRole::Auxiliary,
+        sort_order: 1,
+        created_at: 0,
+    });
+    let frozen = crate::workspace::freeze_project_workspace(&project).unwrap();
+    OfficeExecutionContext::new(
+        Some(primary.to_path_buf()),
+        AgentPermissions {
+            write: AgentWritePermission::WorkspaceOnly,
+            ..AgentPermissions::default()
+        },
+        None,
+    )
+    .with_workspace(Some(&frozen))
+}
+
+#[test]
+fn multi_workspace_office_reads_and_commits_auxiliary_destinations_with_workspace_permissions() {
+    let replacement = tempfile::NamedTempFile::new().unwrap();
+    write_docx(replacement.path(), "replacement");
+    let fixture = Fixture::new(&format!(
+        "#!/bin/sh\n/bin/cp '{}' \"$2\"\n",
+        replacement.path().display()
+    ));
+    let auxiliary = tempfile::tempdir().unwrap();
+    write_docx(&fixture.workspace.path().join("sample.docx"), "primary");
+    write_docx(&auxiliary.path().join("sample.docx"), "auxiliary");
+    let context = multi_workspace_office_context(fixture.workspace.path(), auxiliary.path());
+    let mut request = fixture.request(OfficeOperation::Set);
+    request.document_path = Some("@workspace/docs/sample.docx".into());
+    request.destination_path = Some("@workspace/docs/copy.docx".into());
+    let prepared = fixture.engine.prepare(&context, &request).unwrap();
+    assert_eq!(
+        prepared_path(&prepared, &OfficePathSlot::Document).scope,
+        OfficePathScope::Workspace
+    );
+    assert_eq!(
+        prepared_path(&prepared, &OfficePathSlot::Destination).scope,
+        OfficePathScope::Workspace
+    );
+    let result = fixture
+        .engine
+        .execute_prepared(&context, &prepared, AgentCancellationToken::new(), None)
+        .unwrap();
+    assert!(result.error_code.is_none(), "{:?}", result.error);
+    assert_eq!(
+        fs::read(auxiliary.path().join("copy.docx")).unwrap(),
+        fs::read(replacement.path()).unwrap()
+    );
+    assert!(!fixture.workspace.path().join("copy.docx").exists());
+    request.destination_path = Some("@workspace/unknown/copy.docx".into());
+    assert!(fixture.engine.prepare(&context, &request).is_err());
+}
+
+#[test]
+fn multi_workspace_office_approval_rejects_replaced_auxiliary_directory() {
+    let fixture = Fixture::new("#!/bin/sh\nexit 0\n");
+    let auxiliary = tempfile::tempdir().unwrap();
+    write_docx(&auxiliary.path().join("sample.docx"), "source");
+    let context = multi_workspace_office_context(fixture.workspace.path(), auxiliary.path());
+    let mut request = fixture.request(OfficeOperation::Set);
+    request.document_path = Some("@workspace/docs/sample.docx".into());
+    let prepared = fixture.engine.prepare(&context, &request).unwrap();
+    let old = auxiliary.path().with_extension("old");
+    fs::rename(auxiliary.path(), &old).unwrap();
+    fs::create_dir(auxiliary.path()).unwrap();
+    fs::copy(
+        old.join("sample.docx"),
+        auxiliary.path().join("sample.docx"),
+    )
+    .unwrap();
+    assert!(fixture
+        .engine
+        .execute_prepared(&context, &prepared, AgentCancellationToken::new(), None)
+        .is_err());
+    fs::remove_dir_all(old).unwrap();
+}
+
+#[test]
+fn multi_workspace_office_trusted_engine_cannot_be_loaded_from_auxiliary_folder() {
+    let fixture = Fixture::new("#!/bin/sh\nexit 0\n");
+    write_docx(&fixture.workspace.path().join("sample.docx"), "source");
+    let context =
+        multi_workspace_office_context(fixture.workspace.path(), fixture.engine_dir.path());
+    let error = fixture
+        .engine
+        .prepare(&context, &fixture.request(OfficeOperation::Set))
+        .unwrap_err();
+    assert!(error
+        .message()
+        .contains("every agent-writable workspace folder"));
+
+    let runtime = fixture.engine.render_runtime().unwrap();
+    let component_child = runtime.executable_path().parent().unwrap();
+    let nested_context = multi_workspace_office_context(fixture.workspace.path(), component_child);
+    assert!(fixture
+        .engine
+        .prepare(&nested_context, &fixture.request(OfficeOperation::Set))
+        .is_err());
+}

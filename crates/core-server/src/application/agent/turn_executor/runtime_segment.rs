@@ -501,16 +501,7 @@ impl AgentService {
         if let Some(skill_installation) = self.skill_installation.clone() {
             host_services = host_services.with_skill_installation_commit(skill_installation);
         }
-        let skill_workspace = agent_input
-            .context
-            .as_ref()
-            .and_then(|context| context.workspace.as_ref())
-            .and_then(|workspace| {
-                workspace
-                    .project_id
-                    .clone()
-                    .zip(workspace.root_path.as_deref().map(std::path::PathBuf::from))
-            });
+        let skill_workspace = agent_input.context.as_ref().and_then(|context|context.workspace.clone());
         host_services =
             host_services.with_skill_activation_resolver(model_skill_activation_resolver(
                 self.storage.clone(),

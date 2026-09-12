@@ -25,9 +25,9 @@ use mycopilot_core::{
     AgentPromptDetailLevel, AgentPromptPreferences, AgentPromptTone, AgentPromptWorkMode,
     AgentProposedAction, AgentRunContext, AgentRunStatus, AgentSearchConfig, AgentSearchMode,
     AgentToolCall, AgentToolResult, AgentTurnDiffIdentity, AgentTurnFileChange,
-    AgentTurnFileContent, AgentUsage, AgentWorkspaceContext, ContextJournalCursor,
-    ConversationTurnTrace, ConversationTurnTraceTerminalStatus, ModelCapabilities,
-    ProviderProtocolDialect, ProviderProtocolKey, ProviderUsageSemantics,
+    AgentTurnFileContent, AgentUsage, ContextJournalCursor, ConversationTurnTrace,
+    ConversationTurnTraceTerminalStatus, ModelCapabilities, ProviderProtocolDialect,
+    ProviderProtocolKey, ProviderUsageSemantics,
 };
 use mycopilot_protocol_rs::{
     ActivatedSkillSummaryDto, SkillActivationErrorData, SkillSelectionDto,

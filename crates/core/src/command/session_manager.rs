@@ -9,12 +9,13 @@ use super::session::{
     CommandSessionLifecycleObserver, ManagedCommandSession, ProcessControl,
 };
 use super::{
-    canonicalize_workspace_root, enforce_command_policy, force_terminate_command_process_group,
-    normalize_command_text, resolve_command_cwd, AgentCommandArtifactObservationPhase,
-    AgentCommandRequest, AgentPermissions, CommandArtifactObserver, CommandAuthorizationSource,
-    CommandExecutionError, CommandSessionError, CommandSessionId, CommandSessionPoll,
-    CommandSessionProjection, CommandSessionScopeId, CommandSessionSnapshot, CommandSpawnPlan,
-    CommandStartOutcome, CommandTerminalResult, ManagedCommandChild, ManagedCommandWorkspaceLease,
+    canonicalize_workspace_root, enforce_command_policy_in_workspace,
+    force_terminate_command_process_group, normalize_command_text,
+    resolve_command_cwd_in_workspace, AgentCommandArtifactObservationPhase, AgentCommandRequest,
+    AgentPermissions, CommandArtifactObserver, CommandAuthorizationSource, CommandExecutionError,
+    CommandSessionError, CommandSessionId, CommandSessionPoll, CommandSessionProjection,
+    CommandSessionScopeId, CommandSessionSnapshot, CommandSpawnPlan, CommandStartOutcome,
+    CommandTerminalResult, ManagedCommandChild, ManagedCommandWorkspaceLease,
     ProcessOutputCaptureBudget, ProcessOutputCaptureHandle, ProcessOutputCapturePolicy,
     ProcessOutputObserver, MAX_TIMEOUT_MS,
 };
@@ -363,19 +364,25 @@ impl CommandSessionManager {
         let root = workspace_root
             .map(canonicalize_workspace_root)
             .transpose()?;
-        let cwd = resolve_command_cwd(root.as_deref(), request.cwd.as_deref(), permissions.write)?;
-        enforce_command_policy(
+        let empty_input_context = AgentFileInputExecutionContext::default();
+        let file_inputs = file_inputs.unwrap_or(&empty_input_context);
+        let workspace = file_inputs.workspace_resolver(root.as_deref());
+        let cwd = resolve_command_cwd_in_workspace(
+            &workspace,
+            request.cwd.as_deref(),
+            permissions.write,
+        )?;
+        enforce_command_policy_in_workspace(
             &request.command,
             permissions,
             authorization_source,
-            root.as_deref(),
+            &workspace,
             Some(&cwd),
         )?;
-        let empty_input_context = AgentFileInputExecutionContext::default();
         let prepared_inputs = materialize_agent_file_inputs(
             root.as_deref(),
             permissions,
-            file_inputs.unwrap_or(&empty_input_context),
+            file_inputs,
             &request.inputs,
             Some(&cancellation_token),
         )
@@ -390,11 +397,12 @@ impl CommandSessionManager {
         // Artifact observation is a terminal-session concern, not an Agent Run concern. Capture
         // the before image before spawn and move the lease into the process watcher so a handed-
         // off command can still produce its bounded after image after the originating run ends.
-        let artifact_observer = CommandArtifactObserver::prepare(
+        let artifact_observer = CommandArtifactObserver::prepare_with_workspace(
             root.as_deref(),
             &cwd,
             request.observe.as_ref(),
             permissions,
+            &workspace,
         );
         let artifact_before = artifact_observer
             .as_ref()
@@ -411,7 +419,8 @@ impl CommandSessionManager {
             .timeout_ms
             .map(|timeout| Duration::from_millis(timeout.clamp(1, MAX_TIMEOUT_MS)));
         let mut plan =
-            CommandSpawnPlan::shell(canonical_command, cwd, root.as_deref(), hard_timeout);
+            CommandSpawnPlan::shell(canonical_command, cwd, root.as_deref(), hard_timeout)
+                .with_workspace_projection(&workspace);
         if let Some(inputs) = prepared_inputs.as_ref() {
             plan = plan
                 .with_environment(vec![(

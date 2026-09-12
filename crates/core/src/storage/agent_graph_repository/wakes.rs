@@ -23,6 +23,15 @@ pub fn enqueue_agent_wake(
     validate_wake_input(input, created_at)?;
     let transaction = immediate(connection)?;
     let outcome = enqueue_wake_in_transaction(&transaction, input, created_at)?;
+    if matches!(&outcome, IdempotentCreate::Created(_)) {
+        let target = ensure_active_agent(&transaction, &input.agent_id)?;
+        crate::storage::agent_workspace_repository::capture_host_wake(
+            &transaction,
+            &outcome.record().wake_id,
+            target.project_id.as_deref(),
+        )
+        .map_err(write_error)?;
+    }
     transaction.commit().map_err(write_error)?;
     Ok(outcome)
 }

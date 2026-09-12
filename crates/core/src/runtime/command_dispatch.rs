@@ -12,11 +12,28 @@ pub(super) enum CommandDispatch {
 ///
 /// Keeping policy evaluation and dispatch selection in one place prevents the runtime from
 /// validating one command string and later recreating a different action for execution.
+#[cfg(test)]
 pub(super) fn prepare_command_dispatch(
     call: &AgentToolCall,
     action: AgentProposedAction,
     permissions: AgentPermissions,
     workspace_root: Option<&Path>,
+    auto_approve: bool,
+) -> CommandDispatch {
+    prepare_command_dispatch_in_workspace(
+        call,
+        action,
+        permissions,
+        &crate::workspace::WorkspaceResolver::from_primary(workspace_root),
+        auto_approve,
+    )
+}
+
+pub(super) fn prepare_command_dispatch_in_workspace(
+    call: &AgentToolCall,
+    action: AgentProposedAction,
+    permissions: AgentPermissions,
+    workspace: &crate::workspace::WorkspaceResolver,
     auto_approve: bool,
 ) -> CommandDispatch {
     let AgentProposedAction::Command { command } = &action else {
@@ -25,12 +42,29 @@ pub(super) fn prepare_command_dispatch(
             AgentError::new("run_command 未生成结构化命令操作，已拒绝执行。"),
         ));
     };
-    let policy_cwd = command_policy_cwd(workspace_root, command.cwd.as_deref());
-    let evaluation = evaluate_command_policy_with_context(
+    let requested_cwd = command.cwd.as_deref();
+    let policy_cwd = if requested_cwd.is_some_and(|cwd| cwd.starts_with("@workspace")) {
+        match crate::command::resolve_command_cwd_in_workspace(
+            workspace,
+            requested_cwd,
+            permissions.write,
+        ) {
+            Ok(cwd) => Some(cwd),
+            Err(error) => {
+                return CommandDispatch::Reject(failed_tool_call_result(
+                    call,
+                    AgentError::new(error),
+                ))
+            }
+        }
+    } else {
+        command_policy_cwd(workspace.primary_root(), requested_cwd)
+    };
+    let evaluation = crate::command::evaluate_command_policy_in_workspace(
         &command.command,
         permissions,
         CommandAuthorizationSource::Automatic,
-        workspace_root,
+        workspace,
         policy_cwd.as_deref(),
     );
     match evaluation.decision {

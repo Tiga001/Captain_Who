@@ -216,7 +216,7 @@ const smokeSteps = [
     ]
   },
   {
-    label: 'storage: canonical v45, exact v44 reset refusal, and atomic fresh creation',
+    label: 'storage: canonical v46, exact v45 reset refusal, and atomic fresh creation',
     command: [
       'cargo',
       'test',

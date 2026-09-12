@@ -1090,8 +1090,8 @@ fn resolve_target(
     context: &ToolExecutionContext,
     file_path: &str,
 ) -> AgentResult<crate::file_change::ResolvedFileChangeTarget> {
-    FileChangePathPolicy::new(
-        context.workspace_root_optional()?.as_deref(),
+    FileChangePathPolicy::from_workspace(
+        context.workspace_context(),
         context.permissions().write == AgentWritePermission::All,
     )
     .resolve(file_path)

@@ -1059,25 +1059,29 @@ async fn user_root_run_cancellation_stops_running_and_queued_descendants() {
     );
     let root_run_id = "run-collaboration-root-stop";
     let root_assistant_message_id = "assistant-collaboration-root-stop";
-    storage
-        .upsert_chat_messages(
-            root_conversation_id,
-            vec![ChatMessageRecord {
-                human_interaction_response: None,
-                id: root_assistant_message_id.to_string(),
-                role: "assistant".to_string(),
-                content: String::new(),
-                created_at: 2,
-                status: Some("streaming".to_string()),
-                attachments: Vec::new(),
-                agent_run_json: None,
-                ui_state_json: None,
-            }],
-            0,
-        )
+    let (root_conversation, revision) = storage
+        .load_conversation_for_turn(root_conversation_id)
         .unwrap();
-    assert!(storage
-        .append_in_progress_conversation_turn_trace(
+    let mut root_conversation = root_conversation.unwrap();
+    root_conversation.messages.push(ChatMessageRecord {
+        human_interaction_response: None,
+        id: root_assistant_message_id.to_string(),
+        role: "assistant".to_string(),
+        content: String::new(),
+        created_at: 2,
+        status: Some("streaming".to_string()),
+        attachments: Vec::new(),
+        agent_run_json: None,
+        ui_state_json: None,
+    });
+    storage
+        .save_conversation_and_begin_turn(
+            root_conversation,
+            revision,
+            None,
+            mycopilot_core::AgentTurnPermissionSource::HostAuthenticatedRoot(
+                AgentPermissions::default(),
+            ),
             &mycopilot_core::ConversationTurnTrace {
                 schema_version: CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
                 run_id: root_run_id.to_string(),
@@ -1091,7 +1095,7 @@ async fn user_root_run_cancellation_stops_running_and_queued_descendants() {
             2,
             2,
         )
-        .unwrap());
+        .unwrap();
     let factory =
         crate::application::agent_collaboration::ChildAgentFactory::new(Arc::clone(&storage));
     let running_child = factory

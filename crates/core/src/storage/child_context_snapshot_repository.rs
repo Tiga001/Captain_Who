@@ -18,6 +18,7 @@ const SNAPSHOT_SCHEMA_VERSION: u32 = 1;
 
 #[derive(Debug)]
 struct SnapshotTrace {
+    source_run_id: String,
     trace: ConversationTurnTrace,
     model_context_items: Vec<ConversationModelContextItem>,
     created_at: i64,
@@ -193,6 +194,7 @@ pub(crate) fn build_child_context_snapshot_plan(
                 ))
             })?;
         traces.push(SnapshotTrace {
+            source_run_id: source_trace.run_id.clone(),
             trace: ConversationTurnTrace {
                 schema_version: source_trace.schema_version,
                 run_id: target_run_id,
@@ -466,6 +468,15 @@ pub(crate) fn apply_child_context_snapshot_in_transaction(
             trace.committed_at,
         )
         .map_err(database_error)?;
+        // History addresses retain the source Run's frozen folder identities. A missing legacy
+        // binding remains unavailable; it must never be replaced by current project folders.
+        connection
+            .execute(
+                "INSERT INTO agent_workspace_run_bindings(run_id,workspace_json)
+                 SELECT ?1,workspace_json FROM agent_workspace_run_bindings WHERE run_id=?2",
+                params![&trace.trace.run_id, &trace.source_run_id],
+            )
+            .map_err(database_error)?;
         conversation_model_context_repository::commit_items_in_connection(
             connection,
             &trace.trace.conversation_id,
@@ -917,6 +928,105 @@ mod tests {
         )
         .unwrap();
         connection
+    }
+
+    #[test]
+    fn child_snapshot_preserves_frozen_auxiliary_paths_after_project_reconfiguration() {
+        use crate::storage::agent_workspace_repository;
+        use crate::storage::models::{ProjectFolderRecord, ProjectFolderRole, ProjectRecord};
+        use crate::storage::project_repository;
+        use crate::workspace::WorkspaceResolver;
+
+        let connection = fixture();
+        let directory = tempfile::tempdir().unwrap();
+        let primary = directory.path().join("app");
+        let original_docs = directory.path().join("original-docs");
+        let replacement_docs = directory.path().join("replacement-docs");
+        for root in [&primary, &original_docs, &replacement_docs] {
+            std::fs::create_dir(root).unwrap();
+        }
+        std::fs::write(original_docs.join("report.txt"), "original result").unwrap();
+        std::fs::write(replacement_docs.join("report.txt"), "unrelated result").unwrap();
+        let mut project =
+            ProjectRecord::with_primary_folder("project", "Project", primary.to_string_lossy(), 1);
+        project.folders.push(ProjectFolderRecord {
+            id: "docs-folder".into(),
+            alias: "docs".into(),
+            role: ProjectFolderRole::Auxiliary,
+            path: original_docs.to_string_lossy().into_owned(),
+            sort_order: 1,
+            created_at: 1,
+        });
+        project_repository::save_project(&connection, project.clone()).unwrap();
+        let frozen = agent_workspace_repository::freeze_run(
+            &connection,
+            "source-run",
+            None,
+            Some("project"),
+        )
+        .unwrap();
+        project.folders[1].path = replacement_docs.to_string_lossy().into_owned();
+        project_repository::save_project(&connection, project).unwrap();
+
+        let plan = build_child_context_snapshot_plan(
+            &connection,
+            "source",
+            "target",
+            &AgentForkTurns::All,
+            20,
+        )
+        .unwrap();
+        apply_child_context_snapshot_in_transaction(&connection, &plan).unwrap();
+        let target_trace = conversation_trace_repository::get_trace_for_message(
+            &connection,
+            &plan.message_id_map["source-assistant"],
+        )
+        .unwrap()
+        .unwrap();
+        assert_ne!(target_trace.run_id, "source-run");
+        let inherited = agent_workspace_repository::load_run(&connection, &target_trace.run_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(inherited, frozen);
+        let resolver = WorkspaceResolver::from_context(inherited.as_ref());
+        let historical_file = resolver
+            .resolve_input("@workspace/docs/report.txt")
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(historical_file).unwrap(),
+            "original result"
+        );
+        std::fs::rename(&original_docs, directory.path().join("moved-docs")).unwrap();
+        std::fs::create_dir(&original_docs).unwrap();
+        assert!(resolver
+            .resolve_input("@workspace/docs/report.txt")
+            .is_err());
+    }
+
+    #[test]
+    fn child_snapshot_does_not_invent_a_missing_historical_workspace_binding() {
+        use crate::storage::agent_workspace_repository;
+
+        for frozen_projectless in [false, true] {
+            let connection = fixture();
+            if frozen_projectless {
+                agent_workspace_repository::freeze_run(&connection, "source-run", None, None)
+                    .unwrap();
+            }
+            let plan = build_child_context_snapshot_plan(
+                &connection,
+                "source",
+                "target",
+                &AgentForkTurns::All,
+                20,
+            )
+            .unwrap();
+            apply_child_context_snapshot_in_transaction(&connection, &plan).unwrap();
+            let binding =
+                agent_workspace_repository::load_run(&connection, &plan.traces[0].trace.run_id)
+                    .unwrap();
+            assert_eq!(binding, frozen_projectless.then_some(None));
+        }
     }
 
     #[test]

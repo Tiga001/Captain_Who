@@ -558,6 +558,8 @@ pub struct AgentWorkspaceContext {
     pub display_name: Option<String>,
     #[serde(deserialize_with = "deserialize_required_nullable")]
     pub root_path: Option<String>,
+    /// Host-owned frozen membership. Required in persisted contexts; never inferred on resume.
+    pub folders: Vec<crate::workspace::WorkspaceFolder>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]

@@ -259,8 +259,8 @@ fn issue_successor_observation(
     terminal: &AgentFileChangeResult,
     predecessor_observation_id: Option<&str>,
 ) -> AgentResult<(String, &'static str)> {
-    let target = FileChangePathPolicy::new(
-        context.workspace_root_optional()?.as_deref(),
+    let target = FileChangePathPolicy::from_workspace(
+        context.workspace_context(),
         context.permissions().write == AgentWritePermission::All,
     )
     .resolve(&terminal.file_path)

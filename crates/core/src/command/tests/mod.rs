@@ -2,6 +2,7 @@ use super::*;
 use crate::{AgentApprovalStatus, AgentCommandPermission, AgentReadPermission};
 use tempfile::TempDir;
 
+mod multi_workspace;
 mod policy_basics;
 mod policy_complex;
 mod session_manager;

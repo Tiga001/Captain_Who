@@ -86,7 +86,7 @@ pub(crate) fn activate_selected_skills(
 pub(crate) fn model_skill_activation_resolver(
     storage: std::sync::Arc<StorageService>,
     service: std::sync::Arc<SkillsService>,
-    workspace: Option<(String, std::path::PathBuf)>,
+    workspace: Option<mycopilot_core::AgentWorkspaceContext>,
 ) -> AgentSkillActivationResolver {
     std::sync::Arc::new(move |selection: &SkillSelection| {
         let source_kind = selection
@@ -139,18 +139,27 @@ pub(crate) fn model_skill_activation_resolver(
 
         let activated = match source_kind {
             Some("workspace") => {
-                let (workspace_id, workspace_root) = workspace.as_ref().ok_or_else(|| {
-                    AgentError::structured(
-                        "skill.workspaceUnavailable",
-                        "This run has no workspace for the selected Workspace Skill.",
-                        serde_json::json!({
-                            "type": "skillActivation",
-                            "code": "skill.workspaceUnavailable",
-                            "recovery": "restartRun",
-                            "skillId": skill_id,
-                        }),
-                    )
-                })?;
+                let skill_root =
+                    mycopilot_core::workspace::WorkspaceResolver::from_context(workspace.as_ref())
+                        .available_primary()
+                        .map_err(AgentError::new)?;
+                let (workspace_id, workspace_root) = workspace
+                    .as_ref()
+                    .and_then(|workspace| {
+                        workspace.project_id.as_deref().zip(skill_root.as_deref())
+                    })
+                    .ok_or_else(|| {
+                        AgentError::structured(
+                            "skill.workspaceUnavailable",
+                            "This run has no workspace for the selected Workspace Skill.",
+                            serde_json::json!({
+                                "type": "skillActivation",
+                                "code": "skill.workspaceUnavailable",
+                                "recovery": "restartRun",
+                                "skillId": skill_id,
+                            }),
+                        )
+                    })?;
                 service.activate_workspace(
                     workspace_id,
                     workspace_root,
@@ -161,12 +170,16 @@ pub(crate) fn model_skill_activation_resolver(
         }
         .map_err(activation_failure)
         .map_err(agent_activation_error)?;
+        let skill_root =
+            mycopilot_core::workspace::WorkspaceResolver::from_context(workspace.as_ref())
+                .available_primary()
+                .map_err(AgentError::new)?;
         let prepared = prepare_activated_skills(
             &service,
             activated,
             workspace
                 .as_ref()
-                .map(|(workspace_id, root)| (workspace_id.as_str(), root.as_path())),
+                .and_then(|workspace| workspace.project_id.as_deref().zip(skill_root.as_deref())),
         )
         .map_err(agent_activation_error)?;
         let mut runtime = prepared.runtime.ok_or_else(|| {

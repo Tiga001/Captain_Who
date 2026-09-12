@@ -23,7 +23,7 @@ use runtime_support::*;
 pub(crate) use runtime_support::{
     infer_managed_artifact_builder_command, infer_managed_artifact_command_kind,
     infer_managed_pdf_command_kind, infer_managed_pdf_workspace_inputs,
-    validate_managed_artifact_builder_output_scope, ManagedArtifactBuilderCommand,
+    validate_managed_artifact_builder_output_scope_in_workspace, ManagedArtifactBuilderCommand,
 };
 
 const PRESENTATION_EDITOR_PLAN_TIMEOUT_MS: u64 = 30_000;
@@ -142,19 +142,35 @@ pub(crate) fn prepare_managed_command_session(
     } else {
         input_workspace_root.clone()
     };
-    let cwd = resolve_command_cwd(root.as_deref(), request.cwd.as_deref(), permissions.write)?;
-    enforce_command_policy(
+    let user_workspace = file_inputs
+        .map(|inputs| inputs.workspace_resolver(input_workspace_root.as_deref()))
+        .unwrap_or_else(|| {
+            crate::workspace::WorkspaceResolver::from_primary(input_workspace_root.as_deref())
+        });
+    // A managed PDF process stays in its Host-owned execution root; only its declared inputs
+    // resolve against the user workspace. Other runtimes execute in the selected user folder.
+    let execution_workspace = if managed_workspace.is_some() {
+        crate::workspace::WorkspaceResolver::from_primary(root.as_deref())
+    } else {
+        user_workspace.clone()
+    };
+    let cwd = resolve_command_cwd_in_workspace(
+        &execution_workspace,
+        request.cwd.as_deref(),
+        permissions.write,
+    )?;
+    enforce_command_policy_in_workspace(
         &request.command,
         permissions,
         authorization_source,
-        root.as_deref(),
+        &execution_workspace,
         Some(&cwd),
     )?;
     let managed_builder = infer_managed_artifact_builder_command(&request.command)
         .map_err(CommandExecutionError::from)?;
     if let Some(builder) = managed_builder.as_ref() {
-        validate_managed_artifact_builder_output_scope(
-            root.as_deref(),
+        validate_managed_artifact_builder_output_scope_in_workspace(
+            &execution_workspace,
             &cwd,
             &builder.output_paths,
             permissions.write,
@@ -162,11 +178,12 @@ pub(crate) fn prepare_managed_command_session(
         .map_err(CommandExecutionError::from)?;
     }
 
-    let observer = CommandArtifactObserver::prepare(
+    let observer = CommandArtifactObserver::prepare_with_workspace(
         root.as_deref(),
         &cwd,
         request.observe.as_ref(),
         permissions,
+        &execution_workspace,
     );
     let before = observer.as_ref().map(|observer| {
         observer.capture(
@@ -175,6 +192,12 @@ pub(crate) fn prepare_managed_command_session(
         )
     });
     let immediate = |mut result: AgentCommandExecutionResult| {
+        let projected = execution_workspace.display_path(&cwd);
+        result.cwd = if projected.is_empty() {
+            ".".to_string()
+        } else {
+            projected
+        };
         if let Some((observer, before)) = observer.as_ref().zip(before.as_ref()) {
             let after = observer.capture(AgentCommandArtifactObservationPhase::After, None);
             result.artifact_observation = Some(observer.finish(before.clone(), after));
@@ -223,7 +246,8 @@ pub(crate) fn prepare_managed_command_session(
         }
     };
     if let Some(script) = parsed.script.as_deref() {
-        if let Err(message) = validate_saved_script(&cwd, root.as_deref(), permissions.read, script)
+        if let Err(message) =
+            validate_saved_script_in_workspace(&cwd, &execution_workspace, permissions.read, script)
         {
             return Ok(immediate(runtime_failure_result(
                 root.as_deref(),
@@ -253,6 +277,15 @@ pub(crate) fn prepare_managed_command_session(
             0,
         )));
     };
+    if user_workspace
+        .overlaps_root(provider.component_root())
+        .map_err(CommandExecutionError::from)?
+    {
+        return Err(CommandExecutionError::from(
+            "Managed Artifact Runtime must remain outside every agent-writable workspace folder."
+                .to_string(),
+        ));
+    }
     let prepared_runtime = match super::prepare_command_runtime_profile(
         provider.as_ref(),
         binding.profile,
@@ -286,7 +319,7 @@ pub(crate) fn prepare_managed_command_session(
 
     let resolution = ready_binding_resolution(binding, &prepared_runtime.invocation);
     let editor_contract = match presentation_editor_contract(
-        input_workspace_root.as_deref(),
+        &user_workspace,
         &cwd,
         request,
         binding,
@@ -652,6 +685,7 @@ pub(crate) fn prepare_managed_command_session(
         hard_timeout,
         launch,
     )
+    .with_workspace_projection(&execution_workspace)
     .with_output_redactions(output_redactions);
     let editor_cancellation = cancellation_token.clone();
     let has_managed_office_transaction = request.managed_office_script.is_some();

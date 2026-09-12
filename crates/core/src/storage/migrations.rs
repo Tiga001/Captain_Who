@@ -1,13 +1,13 @@
 use rusqlite::{ffi, Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
 
-pub const STORAGE_SCHEMA_VERSION: i32 = 45;
+pub const STORAGE_SCHEMA_VERSION: i32 = 46;
 pub const DEVELOPMENT_STORAGE_SCHEMA_RESET_REQUIRED: &str =
     "development_storage_schema_reset_required";
 
 const CANONICAL_SCHEMA: &str = include_str!("canonical_schema.sql");
 const CANONICAL_SCHEMA_FINGERPRINT: &str =
-    "sha256:f8d106839487dda40070acc471675c9c4299bad1afb6aaf2a56d75807ce3b2f7";
+    "sha256:6af5e743b2fd8ab799ff3fc702137b4dd8289b45420d5338a83b81c88b301179";
 
 /// Initializes fresh storage or validates the exact current canonical schema.
 ///
@@ -153,6 +153,28 @@ mod tests {
             .unwrap();
         assert!(before_multi_folder.contains(PROJECTS_TABLE_V45));
         before_multi_folder.replacen(PROJECTS_TABLE_V45, PROJECTS_TABLE_V44, 1)
+    }
+
+    #[test]
+    fn v45_workspace_schema_requires_explicit_reset_without_mutation() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                CANONICAL_SCHEMA
+                    .split_once("-- Frozen workspace membership, schema v46.")
+                    .unwrap()
+                    .0,
+            )
+            .unwrap();
+        connection.pragma_update(None, "user_version", 45).unwrap();
+        let before = schema_fingerprint(&connection).unwrap();
+        assert_eq!(
+            before,
+            "sha256:f8d106839487dda40070acc471675c9c4299bad1afb6aaf2a56d75807ce3b2f7"
+        );
+        let error = run_migrations(&connection).unwrap_err().to_string();
+        assert!(error.contains("found 45"));
+        assert_eq!(schema_fingerprint(&connection).unwrap(), before);
     }
 
     #[test]

@@ -1246,6 +1246,7 @@ async fn context_capacity_guard_accepts_budgeted_tool_results_for_the_next_reque
             conversation_id: Some("conversation-capacity".to_string()),
             project_id: None,
             workspace: Some(AgentWorkspaceContext {
+                folders: Vec::new(),
                 project_id: None,
                 display_name: Some("workspace".to_string()),
                 root_path: Some(workspace.to_string_lossy().to_string()),
@@ -1633,6 +1634,7 @@ async fn streams_apply_patch_previews_end_to_end_without_persisting_them() {
             conversation_id: Some("conversation-preview".to_string()),
             project_id: None,
             workspace: Some(AgentWorkspaceContext {
+                folders: Vec::new(),
                 project_id: None,
                 display_name: Some("workspace".to_string()),
                 root_path: Some(workspace.to_string_lossy().to_string()),

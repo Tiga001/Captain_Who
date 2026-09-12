@@ -75,6 +75,7 @@ impl SkillResourceMaterializer {
 
         let status = materialize_file(
             request.workspace_root(),
+            request.workspace_identity(),
             request.destination(),
             &descriptor,
             &snapshot.bytes,
@@ -105,7 +106,12 @@ impl SkillResourceMaterializer {
         // filesystem activity. A tampered or unavailable package can never
         // leave a partial destination or staging tree.
         let prepared = prepare_template_tree(session, request)?;
-        let status = materialize_tree(request.workspace_root(), request.destination(), &prepared)?;
+        let status = materialize_tree(
+            request.workspace_root(),
+            request.workspace_identity(),
+            request.destination(),
+            &prepared,
+        )?;
         let bytes_written = if status == SkillMaterializationStatus::Created {
             prepared.byte_length
         } else {
@@ -135,16 +141,24 @@ impl SkillResourceMaterializer {
 #[cfg(any(target_vendor = "apple", target_os = "linux", target_os = "android"))]
 fn materialize_file(
     workspace_root: &Path,
+    workspace_identity: Option<&crate::file_change::FileChangeDirectoryIdentity>,
     destination: &SkillMaterializationDestination,
     descriptor: &SkillResourceDescriptor,
     bytes: &[u8],
 ) -> Result<SkillMaterializationStatus, SkillMaterializationError> {
-    unix::materialize_file(workspace_root, destination, descriptor, bytes)
+    unix::materialize_file(
+        workspace_root,
+        workspace_identity,
+        destination,
+        descriptor,
+        bytes,
+    )
 }
 
 #[cfg(not(any(target_vendor = "apple", target_os = "linux", target_os = "android")))]
 fn materialize_file(
     _workspace_root: &Path,
+    _workspace_identity: Option<&crate::file_change::FileChangeDirectoryIdentity>,
     _destination: &SkillMaterializationDestination,
     _descriptor: &SkillResourceDescriptor,
     _bytes: &[u8],
@@ -155,15 +169,17 @@ fn materialize_file(
 #[cfg(any(target_vendor = "apple", target_os = "linux", target_os = "android"))]
 fn materialize_tree(
     workspace_root: &Path,
+    workspace_identity: Option<&crate::file_change::FileChangeDirectoryIdentity>,
     destination: &SkillMaterializationDestination,
     prepared: &PreparedTemplateTree,
 ) -> Result<SkillMaterializationStatus, SkillMaterializationError> {
-    unix::materialize_tree(workspace_root, destination, prepared)
+    unix::materialize_tree(workspace_root, workspace_identity, destination, prepared)
 }
 
 #[cfg(not(any(target_vendor = "apple", target_os = "linux", target_os = "android")))]
 fn materialize_tree(
     _workspace_root: &Path,
+    _workspace_identity: Option<&crate::file_change::FileChangeDirectoryIdentity>,
     _destination: &SkillMaterializationDestination,
     _prepared: &PreparedTemplateTree,
 ) -> Result<SkillMaterializationStatus, SkillMaterializationError> {

@@ -207,14 +207,27 @@ impl AgentService {
             normalized_optional(input.project_id.as_deref()),
         )?;
         let project = resolve_project(&self.storage, project_id.as_deref())?;
-        let workspace_root = project
+        let active_run = conversation_id
+            .as_deref()
+            .map(|id| self.storage.load_active_conversation_turn_identity(id))
+            .transpose()?
+            .flatten();
+        let workspace_context = match active_run.as_ref() {
+            Some((run_id, _)) => self
+                .storage
+                .load_agent_workspace_for_run(run_id)?
+                .ok_or_else(|| "运行中的任务缺少冻结工作区。".to_string())?,
+            None => project
+                .as_ref()
+                .map(mycopilot_core::workspace::capture_project_workspace)
+                .transpose()?,
+        };
+        let skill_root =
+            mycopilot_core::workspace::WorkspaceResolver::from_context(workspace_context.as_ref())
+                .available_primary()?;
+        let workspace = workspace_context
             .as_ref()
-            .and_then(|project| project.primary_path())
-            .map(std::path::PathBuf::from);
-        let workspace = project
-            .as_ref()
-            .zip(workspace_root.as_deref())
-            .map(|(project, root)| (project.id.as_str(), root));
+            .and_then(|workspace| workspace.project_id.as_deref().zip(skill_root.as_deref()));
         let prepared_skills =
             activate_selected_skills(&self.storage, &self.skills, workspace, &input.skills)?;
         let skill_discovery = prepare_enabled_skill_discovery(
@@ -305,13 +318,7 @@ impl AgentService {
                 collaboration_identity: None,
                 conversation_id: conversation_id.clone(),
                 project_id: project_id.clone(),
-                workspace: project
-                    .as_ref()
-                    .map(|project| mycopilot_core::AgentWorkspaceContext {
-                        project_id: Some(project.id.clone()),
-                        display_name: Some(project.name.clone()),
-                        root_path: project.primary_path().map(str::to_string),
-                    }),
+                workspace: workspace_context,
                 attachment_library,
                 permissions: input.permissions,
             }),
@@ -768,6 +775,35 @@ impl AgentService {
             .preview_input;
         preview_input.assistant_message_id = None;
         preview_input.skill_activation = None;
+        // A future HumanRoot Turn adopts current project settings. Child continuation Wakes
+        // still belong to their originating task tree and retain its frozen workspace.
+        if let Some(context) = preview_input
+            .context
+            .as_mut()
+            .filter(|context| context.collaboration_identity.is_none())
+        {
+            let project = resolve_project(&self.storage, context.project_id.as_deref())?;
+            let next_workspace = project
+                .as_ref()
+                .map(mycopilot_core::workspace::capture_project_workspace)
+                .transpose()?;
+            if context.workspace != next_workspace {
+                context.workspace = next_workspace;
+                let skill_root = mycopilot_core::workspace::WorkspaceResolver::from_context(
+                    context.workspace.as_ref(),
+                )
+                .available_primary()?;
+                let workspace = context.workspace.as_ref().and_then(|workspace| {
+                    workspace.project_id.as_deref().zip(skill_root.as_deref())
+                });
+                preview_input.skill_discovery = prepare_enabled_skill_discovery(
+                    &self.storage,
+                    &self.skills,
+                    workspace,
+                    preview_input.context_window_tokens.unwrap_or_default(),
+                )?;
+            }
+        }
         let next_preferences =
             agent_prompt_preferences_from_record(self.storage.load_agent_prompt_preferences()?);
         let preferences = preview_input

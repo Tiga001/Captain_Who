@@ -44,6 +44,20 @@ fn insert_active_trace(
         connection, &trace, timestamp, timestamp,
     )
     .unwrap();
+    let project_id: Option<String> = connection
+        .query_row(
+            "SELECT project_id FROM conversations WHERE id=?1",
+            [conversation_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    crate::storage::agent_workspace_repository::freeze_run(
+        connection,
+        run_id,
+        None,
+        project_id.as_deref(),
+    )
+    .unwrap();
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -95,6 +109,8 @@ fn admit_wake(
         timestamp + 1,
     )
     .unwrap();
+    crate::storage::agent_workspace_repository::freeze_run(connection, run_id, Some(wake_id), None)
+        .unwrap();
     connection
         .execute(
             "UPDATE agent_wake_requests

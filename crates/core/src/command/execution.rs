@@ -1,24 +1,22 @@
 use super::*;
 
-pub(super) fn enforce_command_policy(
+pub(super) fn enforce_command_policy_in_workspace(
     command: &str,
     permissions: AgentPermissions,
     authorization_source: CommandAuthorizationSource,
-    workspace_root: Option<&Path>,
+    workspace: &crate::workspace::WorkspaceResolver,
     cwd: Option<&Path>,
 ) -> Result<(), CommandExecutionError> {
-    let evaluation = evaluate_command_policy_at(
+    let evaluation = evaluate_command_policy_in_workspace(
         command,
         permissions,
         authorization_source,
-        workspace_root,
+        workspace,
         cwd,
     );
     match evaluation.decision {
         CommandPolicyDecision::Allow => Ok(()),
-        CommandPolicyDecision::RequireExplicitApproval | CommandPolicyDecision::Deny => {
-            Err(CommandExecutionError::from_policy(evaluation))
-        }
+        _ => Err(CommandExecutionError::from_policy(evaluation)),
     }
 }
 
@@ -34,73 +32,54 @@ pub(super) fn canonicalize_workspace_root(path: &Path) -> Result<PathBuf, String
         })
 }
 
+#[cfg(test)]
 pub(super) fn resolve_command_cwd(
     root: Option<&Path>,
     cwd: Option<&str>,
     write_permission: AgentWritePermission,
 ) -> Result<PathBuf, String> {
-    let Some(raw_cwd) = cwd
+    resolve_command_cwd_in_workspace(
+        &crate::workspace::WorkspaceResolver::from_primary(root),
+        cwd,
+        write_permission,
+    )
+}
+
+pub(crate) fn resolve_command_cwd_in_workspace(
+    workspace: &crate::workspace::WorkspaceResolver,
+    cwd: Option<&str>,
+    write_permission: AgentWritePermission,
+) -> Result<PathBuf, String> {
+    let raw = cwd
         .map(str::trim)
-        .filter(|value| !value.is_empty() && *value != ".")
-    else {
-        return root.map(Path::to_path_buf).ok_or_else(|| {
-            "当前没有 workspace；命令必须提供绝对 cwd 或系统路径别名。".to_string()
-        });
+        .filter(|value| !value.is_empty() && *value != ".");
+    if raw.is_some_and(|raw| {
+        !Path::new(raw).is_absolute()
+            && Path::new(raw)
+                .components()
+                .any(|part| part == Component::ParentDir)
+    }) {
+        return Err("命令 cwd 不能包含 `..`。".to_string());
+    }
+    let resolved = match raw {
+        Some(raw) => workspace.resolve_input(raw)?,
+        None => workspace.canonical_primary()?,
     };
-
-    let expanded = expand_system_path(raw_cwd)?;
-    let cwd_path = expanded.as_deref().unwrap_or_else(|| Path::new(raw_cwd));
-    let resolved = if cwd_path.is_absolute() {
-        cwd_path.to_path_buf()
-    } else {
-        let Some(root) = root else {
-            return Err("没有 workspace 时，命令 cwd 必须是绝对路径或系统路径别名。".to_string());
-        };
-        root.join(clean_relative_path(raw_cwd)?)
-    };
-
     let canonical = resolved
         .canonicalize()
         .map_err(|error| format!("命令工作目录不可访问：{error}"))?;
     if !canonical.is_dir() {
         return Err("命令工作目录不是目录。".to_string());
     }
-
-    if let Some(root) = root {
-        if !canonical.starts_with(root) && write_permission != AgentWritePermission::All {
-            return Err(
-                "命令工作目录必须位于已选择的 workspace 内；workspace 外 cwd 需要 write=all 权限。"
-                    .to_string(),
-            );
-        }
-    } else if write_permission != AgentWritePermission::All {
-        return Err("没有 workspace 时，命令 cwd 需要 write=all 权限。".to_string());
+    if workspace.containing_root(&canonical)?.is_none()
+        && write_permission != AgentWritePermission::All
+    {
+        return Err(
+            "命令工作目录必须位于已选择的 workspace 内；workspace 外 cwd 需要 write=all 权限。"
+                .to_string(),
+        );
     }
-
     Ok(canonical)
-}
-
-pub(super) fn clean_relative_path(path: &str) -> Result<PathBuf, String> {
-    let path = Path::new(path);
-    if path.is_absolute() {
-        return Err("相对 cwd 不能是绝对路径。".to_string());
-    }
-
-    let mut cleaned = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::Normal(part) => cleaned.push(part),
-            Component::CurDir => {}
-            Component::ParentDir => return Err("命令 cwd 不能包含 `..`。".to_string()),
-            _ => return Err("命令 cwd 包含不支持的路径片段。".to_string()),
-        }
-    }
-
-    if cleaned.as_os_str().is_empty() {
-        Err("命令 cwd 不能为空。".to_string())
-    } else {
-        Ok(cleaned)
-    }
 }
 
 pub(crate) fn spawn_bounded_output_reader<R>(

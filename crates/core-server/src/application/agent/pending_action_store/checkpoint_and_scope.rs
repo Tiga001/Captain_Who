@@ -130,25 +130,21 @@ pub(super) fn command_cwd_scope_for_action(
 }
 
 pub(super) fn scope_for_path(input: &AgentChatInput, path: &str) -> String {
-    let Some(root) = workspace_root_optional(input) else {
-        return "no_workspace".to_string();
-    };
+    let workspace = input.context.as_ref().and_then(|context|context.workspace.as_ref());
+    let resolver = mycopilot_core::workspace::WorkspaceResolver::from_context(workspace);
+    if resolver.primary_root().is_none() { return "no_workspace".to_string(); }
     let trimmed = path.trim();
-    if trimmed.is_empty() || trimmed == "." {
-        return "workspace".to_string();
+    if trimmed.starts_with("@workspace/") {
+        return if resolver.resolve_input(trimmed).is_ok() { "workspace" } else { "unavailable_workspace" }.to_string();
     }
-    let path = Path::new(trimmed);
-    if path.is_absolute() {
-        if path.starts_with(root) {
-            "workspace".to_string()
-        } else {
-            "outside_workspace".to_string()
-        }
-    } else if trimmed.starts_with('@') {
-        "system_alias".to_string()
-    } else {
-        "workspace".to_string()
+    if trimmed.starts_with('@') { return "system_alias".to_string(); }
+    if Path::new(trimmed).is_absolute() {
+        let inside = resolver.resolve_input(trimmed).ok().and_then(|path| {
+            resolver.containing_root(&path).ok().flatten()
+        }).is_some();
+        return if inside { "workspace" } else { "outside_workspace" }.to_string();
     }
+    "workspace".to_string()
 }
 
 pub(super) fn agent_input_project_id(input: &AgentChatInput) -> Option<&str> {

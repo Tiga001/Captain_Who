@@ -1018,6 +1018,12 @@ impl AgentCommandSessionRegistry {
         let mut last_error = None;
         let mut terminal = None;
         for _ in 0..3 {
+            // Settlement can remove the Core process entry after we release its terminal fence.
+            // The Host-owned terminal remains authoritative and must survive that cleanup race.
+            if let Some(result) = session.terminal() {
+                terminal = Some(result);
+                break;
+            }
             if let Err(error) = self
                 .inner
                 .manager
@@ -1036,6 +1042,10 @@ impl AgentCommandSessionRegistry {
                 }
                 Ok(None) => {}
                 Err(error) => last_error = Some(error.to_string()),
+            }
+            if let Some(result) = session.terminal() {
+                terminal = Some(result);
+                break;
             }
         }
         let terminal = terminal.ok_or_else(|| {
@@ -1557,6 +1567,15 @@ impl AgentCommandSessionRegistry {
     #[cfg(test)]
     pub(super) fn retained_core_session_count(&self) -> usize {
         self.inner.manager.list(None).len()
+    }
+
+    /// Models Core cleanup overtaking the abort caller after Host has received a terminal.
+    #[cfg(test)]
+    pub(super) fn remove_terminal_core_session_for_test(&self, session_id: &str) -> bool {
+        self.inner
+            .manager
+            .remove_terminal(&CommandSessionId::parse(session_id).unwrap())
+            .unwrap()
     }
 }
 

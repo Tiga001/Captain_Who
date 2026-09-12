@@ -241,6 +241,7 @@ fn input(url: String, workspace: &std::path::Path) -> AgentChatInput {
         "context":crate::AgentRunContext {
             conversation_id: Some("conversation-human".into()), project_id: None,
             workspace: Some(crate::AgentWorkspaceContext {
+            folders: Vec::new(),
                 project_id: None, display_name: None, root_path: Some(workspace.to_string_lossy().into_owned()),
             }),
             attachment_library: None, permissions: crate::AgentPermissions::default(), collaboration_identity: None,

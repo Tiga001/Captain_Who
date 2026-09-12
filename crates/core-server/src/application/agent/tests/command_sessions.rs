@@ -732,6 +732,26 @@ fn wait_for_retained_admission_count(
     }
 }
 
+fn wait_for_terminal_cleanup(registry: &AgentCommandSessionRegistry) {
+    let deadline = Instant::now() + TEST_WAIT;
+    loop {
+        let retained = (
+            registry.retained_admission_count(),
+            registry.retained_live_session_count(),
+            registry.retained_core_session_count(),
+            registry.settlement_scheduler_stats().1,
+        );
+        if retained == (0, 0, 0, 0) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "terminal cleanup retained Host/Core ownership: {retained:?}"
+        );
+        thread::sleep(Duration::from_millis(5));
+    }
+}
+
 #[test]
 fn short_command_exits_through_the_same_managed_session_entry() {
     let fixture =
@@ -1471,6 +1491,9 @@ fn synchronous_archive_failure_returns_recoverable_session_until_unique_archive_
         .unwrap()
         .expect("recovered Exact Archive descriptor");
     assert!(descriptor.total_bytes > 200_000);
+    // The SQLite terminal commit precedes release of in-memory process ownership. Wait for that
+    // separate cleanup boundary before checking for retained leases and worker entries.
+    wait_for_terminal_cleanup(&fixture.registry);
     assert_eq!(fixture.registry.retained_admission_count(), 0);
     assert_eq!(fixture.registry.retained_live_session_count(), 0);
     assert_eq!(fixture.registry.retained_core_session_count(), 0);
@@ -3159,6 +3182,48 @@ fn pre_handoff_cancellation_terminates_the_process() {
         record.snapshot.status,
         AgentCommandSessionStatus::Interrupted
     );
+}
+
+#[test]
+fn pre_handoff_abort_uses_host_terminal_after_core_cleanup() {
+    let fixture = RunningFixture::new("pending-cancel-core-cleanup");
+    let (snapshot, _) = fixture.start("sleep 5", None);
+    assert_eq!(
+        fixture.registry.cancel_pre_handoff_for_run(&fixture.run_id),
+        1
+    );
+    assert!(fixture
+        .registry
+        .wait_for_live_terminal(&snapshot.session_id, TEST_WAIT));
+    let deadline = Instant::now() + TEST_WAIT;
+    while !fixture
+        .registry
+        .remove_terminal_core_session_for_test(&snapshot.session_id)
+    {
+        assert!(
+            Instant::now() < deadline,
+            "Core did not release its active process lease"
+        );
+        thread::yield_now();
+    }
+    assert_eq!(fixture.registry.retained_core_session_count(), 0);
+    let terminal = fixture.abort(&snapshot.session_id);
+    assert_eq!(
+        terminal.snapshot.state,
+        mycopilot_core::command::CommandSessionState::Interrupted
+    );
+    let record = wait_for_terminal_record(
+        &fixture.storage,
+        &fixture.conversation_id,
+        &snapshot.session_id,
+    );
+    assert_eq!(
+        record.snapshot.status,
+        AgentCommandSessionStatus::Interrupted
+    );
+    assert!(record.snapshot.archive_ref.is_some());
+    wait_for_retained_admission_count(&fixture.registry, 0);
+    assert_eq!(fixture.registry.retained_live_session_count(), 0);
 }
 
 #[test]

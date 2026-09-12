@@ -32,7 +32,7 @@ pub struct OfficeCliDiscoveryOptions {
     configured_render_runtime_dir: Option<PathBuf>,
     configured_word_pdf_render_runtime_dir: Option<PathBuf>,
     browser_proxy_executable: Option<PathBuf>,
-    workspace_root: Option<PathBuf>,
+    workspace_roots: Vec<PathBuf>,
     allow_path_fallback: bool,
 }
 
@@ -73,7 +73,12 @@ impl OfficeCliDiscoveryOptions {
     }
 
     pub fn with_workspace_root(mut self, workspace_root: impl Into<PathBuf>) -> Self {
-        self.workspace_root = Some(workspace_root.into());
+        self.workspace_roots = vec![workspace_root.into()];
+        self
+    }
+
+    pub fn with_workspace_roots(mut self, roots: impl IntoIterator<Item = PathBuf>) -> Self {
+        self.workspace_roots = roots.into_iter().collect();
         self
     }
 
@@ -123,6 +128,36 @@ impl OfficeCliEngine {
 
     pub fn executable_path(&self) -> &Path {
         &self.executable
+    }
+
+    pub(crate) fn validate_user_workspace(
+        &self,
+        workspace: &crate::workspace::WorkspaceResolver,
+    ) -> Result<(), OfficeEngineError> {
+        let mut paths = vec![self.executable_path()];
+        paths.extend(self.browser_proxy_executable());
+        let mut component_roots = Vec::new();
+        if let Ok(runtime) = &self.render_runtime {
+            component_roots.push(runtime.component_root());
+        }
+        if let Ok(runtime) = &self.word_pdf_render_runtime {
+            component_roots.push(runtime.component_root());
+        }
+        for root in component_roots {
+            if workspace.overlaps_root(root).map_err(configuration_error)? {
+                return Err(configuration_error("Trusted Office render runtime components must not overlap any agent-writable workspace folder."));
+            }
+        }
+        for path in paths {
+            if workspace
+                .containing_root(path)
+                .map_err(configuration_error)?
+                .is_some()
+            {
+                return Err(configuration_error("Trusted Office executables and render runtimes must remain outside every agent-writable workspace folder."));
+            }
+        }
+        Ok(())
     }
 
     pub fn source(&self) -> OfficeEngineSource {
@@ -346,11 +381,11 @@ fn discover_with_path(
     options: &OfficeCliDiscoveryOptions,
     search_path: Option<OsString>,
 ) -> Result<OfficeCliEngine, OfficeEngineError> {
-    let workspace_root = options
-        .workspace_root
-        .as_deref()
-        .map(canonical_directory)
-        .transpose()?;
+    let workspace_roots = options
+        .workspace_roots
+        .iter()
+        .map(|root| root.canonicalize().unwrap_or_else(|_| root.clone()))
+        .collect::<Vec<_>>();
 
     if let Some(configured) = options.configured_executable.as_deref() {
         if !configured.is_absolute() {
@@ -358,18 +393,17 @@ fn discover_with_path(
                 "The configured OfficeCLI executable must be an absolute path.",
             ));
         }
-        let executable =
-            validate_executable(configured, workspace_root.as_deref()).map_err(|error| {
-                configuration_error(format!(
-                    "The configured OfficeCLI executable is invalid: {}",
-                    error.message()
-                ))
-            })?;
+        let executable = validate_executable(configured, &workspace_roots).map_err(|error| {
+            configuration_error(format!(
+                "The configured OfficeCLI executable is invalid: {}",
+                error.message()
+            ))
+        })?;
         return build_engine(
             executable,
             OfficeEngineSource::Configured,
             options,
-            workspace_root.as_deref(),
+            &workspace_roots,
         );
     }
 
@@ -388,7 +422,7 @@ fn discover_with_path(
                 continue;
             }
             let resources = canonical_directory(resources)?;
-            let executable = validate_executable(&candidate, workspace_root.as_deref())?;
+            let executable = validate_executable(&candidate, &workspace_roots)?;
             if !executable.starts_with(&resources) {
                 return Err(configuration_error(
                     "The packaged OfficeCLI component resolves outside application resources.",
@@ -398,7 +432,7 @@ fn discover_with_path(
                 executable,
                 OfficeEngineSource::PackagedComponent,
                 options,
-                workspace_root.as_deref(),
+                &workspace_roots,
             );
         }
     }
@@ -412,15 +446,14 @@ fn discover_with_path(
                     continue;
                 }
                 let candidate = directory.join(executable_basename());
-                let Ok(executable) = validate_executable(&candidate, workspace_root.as_deref())
-                else {
+                let Ok(executable) = validate_executable(&candidate, &workspace_roots) else {
                     continue;
                 };
                 return build_engine(
                     executable,
                     OfficeEngineSource::DevelopmentPath,
                     options,
-                    workspace_root.as_deref(),
+                    &workspace_roots,
                 );
             }
         }
@@ -437,7 +470,7 @@ fn build_engine(
     executable: PathBuf,
     source: OfficeEngineSource,
     options: &OfficeCliDiscoveryOptions,
-    workspace_root: Option<&Path>,
+    workspace_roots: &[PathBuf],
 ) -> Result<OfficeCliEngine, OfficeEngineError> {
     let officecli_revision = executable_revision(&executable)?;
     let render_runtime = discover_render_runtime(options);
@@ -445,7 +478,7 @@ fn build_engine(
     let browser_proxy_executable = options
         .browser_proxy_executable
         .as_deref()
-        .map(|path| validate_executable(path, workspace_root))
+        .map(|path| validate_executable(path, workspace_roots))
         .transpose()?;
     let proxy_revision = browser_proxy_executable
         .as_deref()
@@ -472,9 +505,7 @@ fn discover_word_pdf_render_runtime(
     options: &OfficeCliDiscoveryOptions,
 ) -> Result<WordPdfRenderRuntime, OfficeEngineError> {
     let mut runtime_options = WordPdfRenderRuntimeDiscoveryOptions::new();
-    if let Some(workspace) = options.workspace_root.as_deref() {
-        runtime_options = runtime_options.with_workspace_root(workspace);
-    }
+    runtime_options = runtime_options.with_workspace_roots(options.workspace_roots.clone());
     if let Some(directory) = options.configured_word_pdf_render_runtime_dir.as_deref() {
         runtime_options = runtime_options.with_configured_component_dir(directory);
     } else if let Some(resources) = options.application_resources_dir.as_deref() {
@@ -487,9 +518,7 @@ fn discover_render_runtime(
     options: &OfficeCliDiscoveryOptions,
 ) -> Result<OfficeRenderRuntime, OfficeEngineError> {
     let mut render_options = OfficeRenderRuntimeDiscoveryOptions::new();
-    if let Some(workspace) = options.workspace_root.as_deref() {
-        render_options = render_options.with_workspace_root(workspace);
-    }
+    render_options = render_options.with_workspace_roots(options.workspace_roots.clone());
     if let Some(directory) = options.configured_render_runtime_dir.as_deref() {
         render_options = render_options.with_configured_component_dir(directory);
     } else if let Some(resources) = options.application_resources_dir.as_deref() {
@@ -550,7 +579,7 @@ fn canonical_directory(path: &Path) -> Result<PathBuf, OfficeEngineError> {
 
 fn validate_executable(
     path: &Path,
-    workspace_root: Option<&Path>,
+    workspace_roots: &[PathBuf],
 ) -> Result<PathBuf, OfficeEngineError> {
     let canonical = path.canonicalize().map_err(|error| {
         OfficeEngineError::new(
@@ -582,7 +611,10 @@ fn validate_executable(
             ),
         ));
     }
-    if workspace_root.is_some_and(|root| canonical.starts_with(root)) {
+    if workspace_roots
+        .iter()
+        .any(|root| canonical.starts_with(root))
+    {
         return Err(configuration_error(
             "OfficeCLI must not be loaded from the agent-writable workspace.",
         ));

@@ -300,6 +300,7 @@ fn build_single_conversation_fork_plan_at_point(
                     .any(|event| event.sequence() == item.sequence)
             });
             traces.push(ForkTrace {
+                source_run_id: trace.run_id.clone(),
                 trace: ConversationTurnTrace {
                     schema_version: trace.schema_version,
                     run_id: new_run_id,

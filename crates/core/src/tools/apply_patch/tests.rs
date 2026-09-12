@@ -1394,6 +1394,7 @@ impl TestWorkspace {
             conversation_id: Some("direct-test-conversation".to_string()),
             project_id: None,
             workspace: root.map(|root| AgentWorkspaceContext {
+                folders: Vec::new(),
                 project_id: None,
                 display_name: Some("test".to_string()),
                 root_path: Some(root.to_string_lossy().to_string()),

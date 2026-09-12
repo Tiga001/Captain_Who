@@ -29,7 +29,7 @@ function readStoredFrontendConfig(rawStoredConfig: string | null): Record<string
   try {
     const storedConfig: unknown = JSON.parse(rawStoredConfig)
     return storedConfig && typeof storedConfig === 'object' && !Array.isArray(storedConfig)
-      ? storedConfig
+      ? (storedConfig as Record<string, unknown>)
       : null
   } catch {
     return null

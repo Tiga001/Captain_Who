@@ -117,7 +117,17 @@ fn workspace_skill_is_auto_discovered_with_full_resources_and_exact_activation()
     let resolver = model_skill_activation_resolver(
         Arc::clone(&storage),
         Arc::clone(&service),
-        Some(("project-1".to_string(), workspace.clone())),
+        Some(
+            mycopilot_core::workspace::freeze_project_workspace(
+                &mycopilot_core::storage::models::ProjectRecord::with_primary_folder(
+                    "project-1",
+                    "Project",
+                    workspace.to_string_lossy(),
+                    1,
+                ),
+            )
+            .unwrap(),
+        ),
     );
     let selection = SkillSelection::parse(entry.id.clone(), entry.revision.clone()).unwrap();
     let resolved = resolver(&selection).unwrap();

@@ -219,6 +219,7 @@ async fn approval_resume_restores_prior_context_and_continues_queued_tools() {
             conversation_id: Some("conversation-checkpoint".to_string()),
             project_id: None,
             workspace: Some(AgentWorkspaceContext {
+                folders: Vec::new(),
                 project_id: None,
                 display_name: Some("workspace".to_string()),
                 root_path: Some(workspace.to_string_lossy().to_string()),
@@ -747,6 +748,7 @@ async fn assert_skill_resource_approval_round_trip(
             conversation_id: Some("conversation-skill-resource-checkpoint".to_string()),
             project_id: None,
             workspace: Some(AgentWorkspaceContext {
+                folders: Vec::new(),
                 project_id: None,
                 display_name: Some("workspace".to_string()),
                 root_path: Some(workspace.to_string_lossy().into_owned()),

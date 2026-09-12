@@ -75,6 +75,12 @@ impl ResourceLocator {
         if is_system_alias(value) {
             return Ok(Self::SystemAlias(value.to_string()));
         }
+        if crate::workspace::parse_workspace_path(value)
+            .map_err(ResourceLocatorError::new)?
+            .is_some()
+        {
+            return Ok(Self::Filesystem(value.to_string()));
+        }
         if has_unrecognized_scheme_prefix(value) || has_unrecognized_at_namespace(value) {
             return Err(ResourceLocatorError::new(
                 "资源位置使用了不受支持的虚拟资源前缀。",
@@ -278,8 +284,25 @@ mod tests {
 
         let allowed = [
             CurrentConsumer {
+                file: "tools/run_command.rs", expected_calls: 2,
+                reason: "classifies structured command paths without rewriting shell text",
+            },
+            CurrentConsumer {
+                file: "office/execution/filesystem.rs", expected_calls: 1,
+                reason: "preserves Office locator routing before frozen workspace resolution",
+            },
+            CurrentConsumer {
+                file: "command/artifact_observer.rs", expected_calls: 1,
+                reason: "separates explicit virtual output addresses from cwd-relative files",
+            },
+            CurrentConsumer {
+                file: "workspace.rs",
+                expected_calls: 2,
+                reason: "resolves filesystem addressing and escapes literal paths through the canonical classifier",
+            },
+            CurrentConsumer {
                 file: "file_input.rs",
-                expected_calls: 1,
+                expected_calls: 2,
                 reason: "builds the typed private file-input authority reference",
             },
             CurrentConsumer {

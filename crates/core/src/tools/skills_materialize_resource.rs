@@ -73,10 +73,20 @@ impl AgentTool for SkillsMaterializeResourceTool {
         })?;
         let source_uri = required(args.source_uri.as_deref(), "sourceUri")?;
         let destination = required(args.destination.as_deref(), "destination")?;
-        let destination = clean_relative_path(destination)?
-            .to_string_lossy()
-            .replace('\\', "/");
-        validate_destination(&destination)?;
+        let destination = normalize_destination(destination)?;
+        let resolver = context.workspace_resolver();
+        let target = resolver
+            .resolve_input(&destination)
+            .map_err(AgentError::new)?;
+        if resolver
+            .containing_root(&target)
+            .map_err(AgentError::new)?
+            .is_none()
+        {
+            return Err(AgentError::new(
+                "Skill resource materialization requires a workspace destination.",
+            ));
+        }
 
         let source_prefix = non_empty(args.source_prefix.as_deref()).map(ToString::to_string);
         match source_prefix.as_deref() {
@@ -139,11 +149,7 @@ pub(crate) fn validate_frozen_materialization_trace_args(
         .map_err(|_| "materialization sourceUri is invalid".to_string())?;
     let destination = required(args.destination.as_deref(), "destination")
         .map_err(|_| "materialization destination is invalid".to_string())?;
-    let destination = clean_relative_path(destination)
-        .map_err(|_| "materialization destination is invalid".to_string())?
-        .to_string_lossy()
-        .replace('\\', "/");
-    validate_destination(&destination)
+    let destination = normalize_destination(destination)
         .map_err(|_| "materialization destination is denied".to_string())?;
     let source_prefix = non_empty(args.source_prefix.as_deref()).map(ToString::to_string);
     let reason_was_present = args.reason.is_some();
@@ -263,6 +269,25 @@ fn validate_template_tree(
     Ok(())
 }
 
+fn normalize_destination(destination: &str) -> AgentResult<String> {
+    if let Some((alias, relative)) =
+        crate::workspace::parse_workspace_path(destination).map_err(AgentError::new)?
+    {
+        let relative = relative.to_string_lossy().replace('\\', "/");
+        validate_destination(&relative)?;
+        if relative.is_empty() {
+            return Err(AgentError::new("Skill destination must name a file or directory inside the selected workspace folder."));
+        }
+        Ok(format!("@workspace/{alias}/{relative}"))
+    } else {
+        let relative = clean_relative_path(destination)?
+            .to_string_lossy()
+            .replace('\\', "/");
+        validate_destination(&relative)?;
+        Ok(crate::workspace::escape_relative(&relative))
+    }
+}
+
 fn validate_destination(destination: &str) -> AgentResult<()> {
     const RESERVED: &[&str] = &[".git", ".hg", ".svn", ".agents"];
     if destination
@@ -311,6 +336,26 @@ fn materialization_error(code: &str, recovery: &str, message: &str) -> AgentErro
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn multi_workspace_materialization_preserves_namespaces_and_literal_escape() {
+        assert_eq!(
+            normalize_destination("@workspace/docs/report.md").unwrap(),
+            "@workspace/docs/report.md"
+        );
+        assert_eq!(
+            normalize_destination("./@workspace/docs/report.md").unwrap(),
+            "./@workspace/docs/report.md"
+        );
+        for denied in [
+            "@workspace/docs/../report.md",
+            "@workspace/docs/.agents/SKILL.md",
+            "@workspace/docs/.git/config",
+            "@workspace/docs",
+        ] {
+            assert!(normalize_destination(denied).is_err(), "accepted {denied}");
+        }
+    }
 
     #[test]
     fn rejects_reserved_destination_components() {

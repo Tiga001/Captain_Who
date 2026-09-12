@@ -127,6 +127,7 @@ fn approval_restore_issues_a_verified_successor_observation_before_resuming_the_
         conversation_id: Some(conversation_id.to_string()),
         project_id: None,
         workspace: Some(crate::protocol::AgentWorkspaceContext {
+            folders: Vec::new(),
             project_id: None,
             display_name: None,
             root_path: Some(workspace.display().to_string()),
@@ -306,6 +307,7 @@ fn direct_update_approval_restore_renews_the_exact_pending_observation_id() {
         conversation_id: Some(conversation_id.to_string()),
         project_id: None,
         workspace: Some(crate::protocol::AgentWorkspaceContext {
+            folders: Vec::new(),
             project_id: None,
             display_name: None,
             root_path: Some(workspace.display().to_string()),
@@ -406,6 +408,7 @@ fn queued_apply_patch_checkpoint_restores_only_its_exact_unconsumed_read_observa
         conversation_id: Some(conversation_id.to_string()),
         project_id: None,
         workspace: Some(crate::protocol::AgentWorkspaceContext {
+            folders: Vec::new(),
             project_id: None,
             display_name: Some("Observation workspace".to_string()),
             root_path: Some(workspace.display().to_string()),
@@ -555,6 +558,7 @@ fn queued_apply_patch_checkpoint_accepts_only_an_exact_successful_apply_patch_su
         conversation_id: Some(conversation_id.to_string()),
         project_id: None,
         workspace: Some(crate::protocol::AgentWorkspaceContext {
+            folders: Vec::new(),
             project_id: None,
             display_name: None,
             root_path: Some(workspace.display().to_string()),
@@ -728,6 +732,7 @@ fn queued_apply_patch_checkpoint_accepts_only_an_exact_staged_commit_successor_s
         conversation_id: Some(conversation_id.to_string()),
         project_id: None,
         workspace: Some(crate::protocol::AgentWorkspaceContext {
+            folders: Vec::new(),
             project_id: None,
             display_name: None,
             root_path: Some(workspace.display().to_string()),

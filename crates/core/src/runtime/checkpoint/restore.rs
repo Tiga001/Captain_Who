@@ -250,6 +250,9 @@ pub(super) fn restore_run_checkpoint_with_model_projection(
             ));
         }
     }
+    crate::workspace::WorkspaceResolver::from_context(
+        checkpoint.run_context.as_ref().and_then(|context|context.workspace.as_ref())
+    ).validate_shape().map_err(AgentError::new)?;
     validate_tool_set_checkpoint_shape(&checkpoint.tool_set)?;
     validate_collaboration_run_snapshot(
         checkpoint

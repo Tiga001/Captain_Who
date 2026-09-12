@@ -41,6 +41,7 @@ fn context_with_write(
         conversation_id: Some(conversation_id.to_string()),
         project_id: project_id.map(ToString::to_string),
         workspace: Some(AgentWorkspaceContext {
+            folders: Vec::new(),
             project_id: project_id.map(ToString::to_string),
             display_name: Some("workspace".to_string()),
             root_path: Some(root.to_string_lossy().into_owned()),

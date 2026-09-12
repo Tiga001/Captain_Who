@@ -6502,3 +6502,23 @@ CREATE UNIQUE INDEX project_folders_primary_per_project
     WHERE role = 'primary';
 CREATE INDEX project_folders_project_order
     ON project_folders (project_id, sort_order, created_at);
+
+-- Frozen workspace membership, schema v46.
+CREATE TABLE agent_workspace_run_bindings (
+    run_id TEXT PRIMARY KEY REFERENCES conversation_turn_traces(run_id) ON DELETE CASCADE,
+    workspace_json TEXT NOT NULL CHECK (json_valid(workspace_json))
+) STRICT;
+CREATE TRIGGER agent_workspace_run_bindings_immutable
+BEFORE UPDATE ON agent_workspace_run_bindings
+BEGIN
+    SELECT RAISE(ABORT, 'run workspace is immutable');
+END;
+CREATE TABLE agent_workspace_wake_bindings (
+    wake_id TEXT PRIMARY KEY REFERENCES agent_wake_requests(wake_id) ON DELETE CASCADE,
+    workspace_json TEXT NOT NULL CHECK (json_valid(workspace_json))
+) STRICT;
+CREATE TRIGGER agent_workspace_wake_bindings_immutable
+BEFORE UPDATE ON agent_workspace_wake_bindings
+BEGIN
+    SELECT RAISE(ABORT, 'wake workspace is immutable');
+END;

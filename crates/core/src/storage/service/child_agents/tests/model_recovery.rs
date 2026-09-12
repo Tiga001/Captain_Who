@@ -306,6 +306,17 @@ fn insert_context_profile_result_trace(
         30,
     )
     .unwrap();
+    use rusqlite::OptionalExtension;
+    let wake_id: Option<String> = connection.query_row(
+        "SELECT w.wake_id FROM agent_wake_requests w JOIN agent_nodes a ON a.agent_id=w.agent_id WHERE a.conversation_id=?1 ORDER BY w.created_at DESC LIMIT 1",
+        [conversation_id], |r|r.get(0)).optional().unwrap();
+    crate::storage::agent_workspace_repository::freeze_run(
+        connection,
+        run_id,
+        wake_id.as_deref(),
+        Some("project-a"),
+    )
+    .unwrap();
 }
 
 #[test]
@@ -1465,4 +1476,112 @@ fn release_profile_tree_mailbox_event_contention_and_restart_recovery() {
             maximum_enqueue_micros.load(Ordering::Relaxed),
             profile_started.elapsed().as_millis(),
         );
+}
+
+#[test]
+fn multi_workspace_snapshot_follows_spawn_followup_and_reopened_wake() {
+    use crate::storage::agent_workspace_repository as binding;
+    use crate::storage::models::{ProjectFolderRecord, ProjectFolderRole};
+    let fixture = Fixture::new(Some("model-a"));
+    let primary = fixture._directory.path().join("app");
+    let docs = fixture._directory.path().join("docs");
+    let replacement = fixture._directory.path().join("replacement");
+    for root in [&primary, &docs, &replacement] {
+        std::fs::create_dir(root).unwrap();
+    }
+    std::fs::write(docs.join("note.txt"), "original").unwrap();
+    let mut project =
+        ProjectRecord::with_primary_folder("project-a", "Project A", primary.to_string_lossy(), 1);
+    project.folders.push(ProjectFolderRecord {
+        id: "folder-docs".into(),
+        path: docs.to_string_lossy().into_owned(),
+        alias: "docs".into(),
+        role: ProjectFolderRole::Auxiliary,
+        sort_order: 1,
+        created_at: 1,
+    });
+    fixture.service.save_project(project.clone()).unwrap();
+    insert_active_root_trace(&fixture, "run-workspace-root", "assistant-workspace-root");
+    let frozen = {
+        let connection = fixture.service.state.connection().unwrap();
+        binding::freeze_run(&connection, "run-workspace-root", None, Some("project-a")).unwrap()
+    };
+    let child = fixture
+        .service
+        .create_child_agent_with_limits_and_expected_selector_from_run(
+            &spawn_input("workspace-spawn", "workspace-child"),
+            AgentTreeResourceLimits::default(),
+            None,
+            None,
+            "run-workspace-root",
+        )
+        .unwrap();
+    project.folders[0].role = ProjectFolderRole::Auxiliary;
+    project.folders[1].role = ProjectFolderRole::Primary;
+    project.folders[1].path = replacement.to_string_lossy().into_owned();
+    fixture.service.save_project(project).unwrap();
+    let followup = fixture
+        .service
+        .follow_up_agent_from_run(
+            &SendAgentMessageRequest {
+                sender_agent_id: "agent-root".into(),
+                recipient_agent_id: child.agent.agent_id.clone(),
+                request_id: "workspace-followup".into(),
+                content: "Continue".into(),
+            },
+            "run-workspace-root",
+        )
+        .unwrap()
+        .deferred_wake
+        .unwrap();
+    let reopened = StorageService::open(&fixture._directory.path().join("storage.sqlite")).unwrap();
+    for wake in [&child.initial_wake, &followup] {
+        assert_eq!(
+            reopened
+                .load_agent_workspace_for_wake(&wake.wake_id)
+                .unwrap(),
+            Some(frozen.clone())
+        );
+    }
+    assert_eq!(
+        reopened
+            .resolve_run_workspace_path(
+                "assistant-workspace-root",
+                Some("project-a"),
+                "@workspace/docs/note.txt"
+            )
+            .unwrap(),
+        docs.join("note.txt")
+            .canonicalize()
+            .unwrap()
+            .to_string_lossy()
+    );
+    assert!(reopened
+        .resolve_run_workspace_path(
+            "assistant-workspace-root",
+            Some("wrong-project"),
+            "@workspace/docs/note.txt"
+        )
+        .is_err());
+    let connection = reopened.state.connection().unwrap();
+    insert_context_profile_result_trace(
+        &connection,
+        &child.agent.conversation_id,
+        "run-workspace-child",
+        "assistant-workspace-child",
+    );
+    assert_eq!(
+        binding::freeze_run(
+            &connection,
+            "run-workspace-child",
+            Some(&child.initial_wake.wake_id),
+            Some("project-a")
+        )
+        .unwrap(),
+        frozen
+    );
+    assert!(connection.execute("UPDATE agent_workspace_run_bindings SET workspace_json='null' WHERE run_id='run-workspace-root'",[]).is_err());
+    binding::inherit_run_for_wake(&connection, "run-workspace-child", &followup.wake_id).unwrap();
+    binding::inherit_wake_for_wake(&connection, &child.initial_wake.wake_id, &followup.wake_id)
+        .unwrap();
 }

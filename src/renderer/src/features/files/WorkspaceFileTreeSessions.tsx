@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useLayoutEffect, useState } from 'react'
+import { createContext, useContext, useEffect, useLayoutEffect, useMemo, useState } from 'react'
 import type { ReactNode } from 'react'
 
 interface WorkspaceFileTreeSessionResource {
@@ -11,18 +11,22 @@ class WorkspaceFileTreeSessionRegistry {
 
   getSession<TSession extends WorkspaceFileTreeSessionResource>(
     projectId: string,
+    revision: string,
     createSession: () => TSession
   ): TSession {
-    const existingSession = this.sessions.get(projectId)
+    const key = JSON.stringify([projectId, revision])
+    const existingSession = this.sessions.get(key)
     if (existingSession) return existingSession as TSession
 
     const session = createSession()
-    this.sessions.set(projectId, session)
+    this.sessions.set(key, session)
     return session
   }
 
-  reconcile(projectIds: readonly string[]): void {
-    const retainedProjectIds = new Set(projectIds)
+  reconcile(projectIds: readonly string[], revisions: Readonly<Record<string, string>>): void {
+    const retainedProjectIds = new Set(
+      projectIds.map((id) => JSON.stringify([id, revisions[id] ?? '']))
+    )
     for (const [projectId, session] of this.sessions) {
       if (retainedProjectIds.has(projectId)) continue
       session.destroy()
@@ -46,32 +50,40 @@ class WorkspaceFileTreeSessionRegistry {
   }
 }
 
-const WorkspaceFileTreeSessionsContext = createContext<WorkspaceFileTreeSessionRegistry | null>(
-  null
-)
+const WorkspaceFileTreeSessionsContext = createContext<{
+  registry: WorkspaceFileTreeSessionRegistry
+  revisions: Readonly<Record<string, string>>
+} | null>(null)
+const EMPTY_REVISIONS: Readonly<Record<string, string>> = {}
 
 interface WorkspaceFileTreeSessionsProviderProps {
   children: ReactNode
   projectIds: readonly string[]
+  projectRevisions?: Readonly<Record<string, string>>
 }
 
 export function WorkspaceFileTreeSessionsProvider({
   children,
-  projectIds
+  projectIds,
+  projectRevisions = EMPTY_REVISIONS
 }: WorkspaceFileTreeSessionsProviderProps): ReactNode {
   const [registry] = useState(() => new WorkspaceFileTreeSessionRegistry())
 
   useLayoutEffect(() => {
-    registry.reconcile(projectIds)
-  }, [projectIds, registry])
+    registry.reconcile(projectIds, projectRevisions)
+  }, [projectIds, projectRevisions, registry])
 
   useEffect(() => {
     registry.cancelScheduledDestroy()
     return () => registry.scheduleDestroy()
   }, [registry])
 
+  const value = useMemo(
+    () => ({ registry, revisions: projectRevisions }),
+    [registry, projectRevisions]
+  )
   return (
-    <WorkspaceFileTreeSessionsContext.Provider value={registry}>
+    <WorkspaceFileTreeSessionsContext.Provider value={value}>
       {children}
     </WorkspaceFileTreeSessionsContext.Provider>
   )
@@ -80,9 +92,13 @@ export function WorkspaceFileTreeSessionsProvider({
 export function useWorkspaceFileTreeSessionResource<
   TSession extends WorkspaceFileTreeSessionResource
 >(projectId: string, createSession: () => TSession): TSession {
-  const registry = useContext(WorkspaceFileTreeSessionsContext)
-  if (!registry) {
+  const context = useContext(WorkspaceFileTreeSessionsContext)
+  if (!context) {
     throw new Error('FilesPanel must be rendered inside WorkspaceFileTreeSessionsProvider')
   }
-  return registry.getSession(projectId, createSession)
+  return context.registry.getSession(projectId, context.revisions[projectId] ?? '', createSession)
+}
+
+export function useWorkspaceFileRevision(projectId: string): string {
+  return useContext(WorkspaceFileTreeSessionsContext)?.revisions[projectId] ?? ''
 }

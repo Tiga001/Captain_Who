@@ -40,6 +40,7 @@ fn test_input(permissions: AgentPermissions) -> AgentChatInput {
         conversation_id: Some("conversation-file-policy".to_string()),
         project_id: None,
         workspace: Some(AgentWorkspaceContext {
+            folders: Vec::new(),
             project_id: None,
             display_name: Some("file-policy-test".to_string()),
             root_path: Some("/tmp/file-policy-test".to_string()),
@@ -95,6 +96,7 @@ fn direct_execution_input_with_workspace(
         conversation_id: Some(conversation_id.to_string()),
         project_id: None,
         workspace: workspace.map(|workspace| AgentWorkspaceContext {
+            folders: Vec::new(),
             project_id: None,
             display_name: Some("direct-file-change-test".to_string()),
             root_path: Some(workspace.to_string_lossy().into_owned()),
@@ -1591,7 +1593,7 @@ async fn remaining_scope_response_lost_retry_preserves_the_exact_grant_and_recei
     );
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[tokio::test]
 async fn concurrent_identical_remaining_approvals_execute_once_and_replay_once() {
     let fixture = tempdir().unwrap();
     let workspace = fixture.path().join("workspace");
@@ -1628,32 +1630,36 @@ async fn concurrent_identical_remaining_approvals_execute_once_and_replay_once()
             })
         },
     );
-    let first = {
-        let service = service.clone();
-        tokio::spawn(async move {
+    // Exercise simultaneous RPC decisions on independent threads while the current-thread
+    // runtime keeps the unrelated model continuation queued. Otherwise its normal terminal
+    // grant revocation can race the Active assertion even though both approvals are correct.
+    let runtime = tokio::runtime::Handle::current();
+    let (first, second) = std::thread::scope(|scope| {
+        let first = scope.spawn(|| {
+            let _entered_runtime = runtime.enter();
             service.approve_action_with_scope(
                 run_id,
                 action_id,
                 AgentApprovalScopeDto::RemainingApplyPatchInRun,
                 tokio::sync::mpsc::unbounded_channel().0,
             )
-        })
-    };
-    entered.wait();
-    let second = {
-        let service = service.clone();
-        tokio::spawn(async move {
+        });
+        entered.wait();
+        let second = scope.spawn(|| {
+            let _entered_runtime = runtime.enter();
             service.approve_action_with_scope(
                 run_id,
                 action_id,
                 AgentApprovalScopeDto::RemainingApplyPatchInRun,
                 tokio::sync::mpsc::unbounded_channel().0,
             )
-        })
-    };
-    release.wait();
-    let first = first.await.unwrap().unwrap();
-    let second = second.await.unwrap().unwrap();
+        });
+        release.wait();
+        (
+            first.join().unwrap().unwrap(),
+            second.join().unwrap().unwrap(),
+        )
+    });
 
     assert_eq!(first.status, "applied");
     assert_eq!(second.status, "applied");

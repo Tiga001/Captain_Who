@@ -53,6 +53,7 @@ mod agent_context_profiles;
 mod agent_delivery;
 mod agent_graph;
 mod agent_templates;
+mod agent_workspaces;
 mod attachments;
 mod automations;
 mod browser_data;

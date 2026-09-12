@@ -78,7 +78,15 @@ impl AgentTool for WorkspaceMapTool {
             .clamp(1, MAX_MAP_ENTRIES);
         let include_files = args.include_files.unwrap_or(true);
 
-        let workspace_root = context.workspace_root_optional()?;
+        let workspace_root = if args
+            .focus_path
+            .as_deref()
+            .is_some_and(|path| !path.trim().is_empty())
+        {
+            None
+        } else {
+            context.workspace_root_optional()?
+        };
         let focus_root = resolve_focus_root(
             context,
             workspace_root.as_deref(),
@@ -92,19 +100,20 @@ impl AgentTool for WorkspaceMapTool {
         } else {
             focus_path
         };
-        let display_root = workspace_root
-            .as_deref()
-            .filter(|workspace_root| focus_root.starts_with(workspace_root))
-            .unwrap_or(focus_root.as_path());
+        let resolver = context.workspace_resolver();
+        let containing_root = resolver
+            .containing_root(&focus_root)
+            .map_err(AgentError::new)?;
+        let display_root = containing_root.as_deref().unwrap_or(focus_root.as_path());
 
         let walk = walk_workspace_with_cancellation(&focus_root, &cancellation_token)?;
-        let summary = build_summary(
+        let mut summary = build_summary(
             display_root,
             &focus_root,
             &walk.entries,
             &cancellation_token,
         )?;
-        let tree = build_tree(
+        let mut tree = build_tree(
             display_root,
             &focus_root,
             &walk.entries,
@@ -113,6 +122,12 @@ impl AgentTool for WorkspaceMapTool {
             include_files,
             &cancellation_token,
         )?;
+        if containing_root.is_some() {
+            qualify_workspace_map_paths(&mut summary, &resolver, display_root);
+            for entry in &mut tree.entries {
+                qualify_workspace_map_paths(entry, &resolver, display_root);
+            }
+        }
 
         let walk_partial = walk.truncated;
         let tree_partial = tree.omitted > 0;
@@ -161,6 +176,32 @@ impl AgentTool for WorkspaceMapTool {
             )
         });
         super::model_projection::compact_model_result(result, projected)
+    }
+}
+
+fn qualify_workspace_map_paths(
+    value: &mut Value,
+    resolver: &crate::workspace::WorkspaceResolver,
+    root: &Path,
+) {
+    match value {
+        Value::Object(object) => {
+            for (key, value) in object {
+                if key == "path" {
+                    if let Some(path) = value.as_str() {
+                        *value = json!(resolver.display_path(&root.join(path)));
+                    }
+                } else {
+                    qualify_workspace_map_paths(value, resolver, root);
+                }
+            }
+        }
+        Value::Array(values) => {
+            for value in values {
+                qualify_workspace_map_paths(value, resolver, root);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -1025,6 +1066,7 @@ mod tests {
                 conversation_id: None,
                 project_id: None,
                 workspace: Some(AgentWorkspaceContext {
+                    folders: Vec::new(),
                     project_id: None,
                     display_name: Some("test".to_string()),
                     root_path: Some(self.root.to_string_lossy().to_string()),

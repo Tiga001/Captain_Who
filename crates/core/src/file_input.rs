@@ -109,6 +109,7 @@ pub(crate) struct VerifiedAgentFileInput {
 /// never serialized into a proposed action, checkpoint, trace, or Tool Result.
 #[derive(Clone, Default)]
 pub struct AgentFileInputExecutionContext {
+    workspace: Option<crate::AgentWorkspaceContext>,
     attachment_library: Option<AgentAttachmentLibraryContext>,
     skill_resources: Option<Arc<SkillResourceSession>>,
     storage: Option<Arc<StorageService>>,
@@ -122,6 +123,7 @@ impl AgentFileInputExecutionContext {
         skill_resources: Option<Arc<SkillResourceSession>>,
     ) -> Self {
         Self {
+            workspace: None,
             attachment_library,
             skill_resources,
             storage: None,
@@ -132,6 +134,28 @@ impl AgentFileInputExecutionContext {
 
     pub(crate) fn attachment_library(&self) -> Option<&AgentAttachmentLibraryContext> {
         self.attachment_library.as_ref()
+    }
+
+    /// Carries the Host-frozen user workspace through command and Office execution. Managed
+    /// execution directories remain separate from these user-writable project folders.
+    pub fn with_workspace(mut self, workspace: Option<&crate::AgentWorkspaceContext>) -> Self {
+        self.workspace = workspace.cloned();
+        self
+    }
+
+    pub(crate) fn workspace_context(&self) -> Option<&crate::AgentWorkspaceContext> {
+        self.workspace.as_ref()
+    }
+
+    pub(crate) fn workspace_resolver(
+        &self,
+        primary: Option<&Path>,
+    ) -> crate::workspace::WorkspaceResolver {
+        if self.workspace.is_some() {
+            crate::workspace::WorkspaceResolver::from_context(self.workspace.as_ref())
+        } else {
+            crate::workspace::WorkspaceResolver::from_primary(primary)
+        }
     }
 
     pub fn from_attachment_library(
@@ -620,7 +644,10 @@ pub(crate) fn read_verified_agent_file_input(
     }
 
     let root = canonical_workspace_root(workspace_root)?;
-    let source = normalize_read_source_scope(root.as_deref(), normalize_source_ref(source)?)?;
+    let source = normalize_read_source_scope(
+        &context.workspace_resolver(root.as_deref()),
+        normalize_source_ref(source)?,
+    )?;
     let bytes = read_authorized_source(
         root.as_deref(),
         permissions,
@@ -653,28 +680,16 @@ pub(crate) fn resolve_verified_agent_file_input_path(
     source: &AgentFileInputRef,
 ) -> Result<Option<PathBuf>, AgentFileInputError> {
     let root = canonical_workspace_root(workspace_root)?;
-    let source = normalize_read_source_scope(root.as_deref(), normalize_source_ref(source)?)?;
+    let source = normalize_read_source_scope(
+        &context.workspace_resolver(root.as_deref()),
+        normalize_source_ref(source)?,
+    )?;
     match source {
         AgentFileInputRef::Attachment { read_path } => {
             resolve_attachment(context, &read_path).map(|(path, _)| Some(path))
         }
         AgentFileInputRef::Workspace { path } => {
-            let root = root.as_deref().ok_or_else(|| {
-                AgentFileInputError::new(
-                    ERROR_AUTHORIZATION_DENIED,
-                    "selectWorkspace",
-                    "workspace 输入需要先选择 workspace。",
-                )
-            })?;
-            let canonical = canonical_regular_path(&root.join(clean_relative_source_path(&path)?))?;
-            if !canonical.starts_with(root) {
-                return Err(AgentFileInputError::new(
-                    ERROR_AUTHORIZATION_DENIED,
-                    "changeRequest",
-                    "workspace 输入必须位于当前 workspace 内。",
-                ));
-            }
-            Ok(Some(canonical))
+            resolve_workspace_source(context, root.as_deref(), &path).map(Some)
         }
         AgentFileInputRef::External { path } => {
             if permissions.read != AgentReadPermission::All {
@@ -842,56 +857,72 @@ fn normalize_source_ref(
 }
 
 fn normalize_read_source_scope(
-    workspace_root: Option<&Path>,
+    workspace: &crate::workspace::WorkspaceResolver,
     source: AgentFileInputRef,
 ) -> Result<AgentFileInputRef, AgentFileInputError> {
     let AgentFileInputRef::External { path } = source else {
         return Ok(source);
     };
-    let Some(workspace_root) = workspace_root else {
-        return Ok(AgentFileInputRef::External { path });
-    };
-
     let canonical = resolve_external_path(&path)?;
-    let Ok(relative) = canonical.strip_prefix(workspace_root) else {
+    if workspace
+        .containing_root(&canonical)
+        .map_err(|error| {
+            AgentFileInputError::new(ERROR_AUTHORIZATION_DENIED, "changeRequest", error)
+        })?
+        .is_none()
+    {
         return Ok(AgentFileInputRef::External { path });
-    };
-    let relative = portable_relative_path(relative)?;
+    }
+    let relative = workspace.display_path(&canonical);
     Ok(AgentFileInputRef::Workspace { path: relative })
 }
 
-fn portable_relative_path(path: &Path) -> Result<String, AgentFileInputError> {
-    let mut parts = Vec::new();
-    for component in path.components() {
-        match component {
-            Component::Normal(part) => {
-                let part = part.to_str().ok_or_else(|| {
-                    AgentFileInputError::new(
-                        ERROR_INVALID_REQUEST,
-                        "changeRequest",
-                        "workspace 文件输入路径必须是有效 UTF-8。",
-                    )
-                })?;
-                parts.push(part);
-            }
-            Component::CurDir => {}
-            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
-                return Err(AgentFileInputError::new(
-                    ERROR_AUTHORIZATION_DENIED,
-                    "changeRequest",
-                    "规范化后的 workspace 文件输入路径无效。",
-                ));
-            }
-        }
-    }
-    if parts.is_empty() {
+fn resolve_workspace_source(
+    context: &AgentFileInputExecutionContext,
+    primary: Option<&Path>,
+    path: &str,
+) -> Result<PathBuf, AgentFileInputError> {
+    let locator = ResourceLocator::parse(path).map_err(|error| {
+        AgentFileInputError::new(ERROR_INVALID_REQUEST, "changeRequest", error.to_string())
+    })?;
+    if !matches!(locator, ResourceLocator::Filesystem(_))
+        || Path::new(path).is_absolute()
+        || Path::new(path)
+            .components()
+            .any(|part| part == Component::ParentDir)
+    {
         return Err(AgentFileInputError::new(
             ERROR_INVALID_REQUEST,
             "changeRequest",
-            "workspace 文件输入必须指向普通文件。",
+            "workspace 输入必须使用相对路径或 @workspace/<alias>/...。",
         ));
     }
-    Ok(parts.join("/"))
+    let workspace = context.workspace_resolver(primary);
+    if workspace.primary_root().is_none() {
+        return Err(AgentFileInputError::new(
+            ERROR_AUTHORIZATION_DENIED,
+            "selectWorkspace",
+            "workspace 输入需要先选择工作区。",
+        ));
+    }
+    let lexical = workspace.resolve_input(path).map_err(|error| {
+        AgentFileInputError::new(ERROR_AUTHORIZATION_DENIED, "changeRequest", error)
+    })?;
+    let canonical = canonical_regular_path(&lexical)?;
+    if workspace
+        .containing_root(&canonical)
+        .map_err(|error| {
+            AgentFileInputError::new(ERROR_AUTHORIZATION_DENIED, "changeRequest", error)
+        })?
+        .is_none()
+    {
+        return Err(AgentFileInputError::new(
+            ERROR_AUTHORIZATION_DENIED,
+            "changeRequest",
+            "workspace 输入必须位于当前 workspace 内。",
+        ));
+    }
+    Ok(canonical)
 }
 
 fn validate_input_specs(specs: &[AgentFileInputSpec]) -> Result<(), AgentFileInputError> {
@@ -1098,23 +1129,7 @@ fn read_authorized_source(
             Ok(bytes)
         }
         AgentFileInputRef::Workspace { path } => {
-            let root = workspace_root.ok_or_else(|| {
-                AgentFileInputError::new(
-                    ERROR_AUTHORIZATION_DENIED,
-                    "selectWorkspace",
-                    "workspace 输入需要先选择 workspace。",
-                )
-            })?;
-            let relative = clean_relative_source_path(path)?;
-            let lexical = root.join(relative);
-            let canonical = canonical_regular_path(&lexical)?;
-            if !canonical.starts_with(root) {
-                return Err(AgentFileInputError::new(
-                    ERROR_AUTHORIZATION_DENIED,
-                    "changeRequest",
-                    "workspace 输入必须位于当前 workspace 内。",
-                ));
-            }
+            let canonical = resolve_workspace_source(context, workspace_root, path)?;
             read_regular_file(&canonical, cancellation, max_bytes)
         }
         AgentFileInputRef::External { path } => {

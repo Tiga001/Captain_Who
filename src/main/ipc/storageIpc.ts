@@ -32,12 +32,12 @@ import type { TrustedIpcMain } from './trustedIpc'
 interface StorageIpcPlatformActions {
   loadImageFile(
     coreServer: CoreServer,
-    input: { projectId?: string | null; filePath?: string }
+    input: { projectId?: string | null; filePath?: string; assistantMessageId?: string }
   ): Promise<StorageImageFileRecord | null>
   pickProjectFolder(event: IpcMainInvokeEvent): Promise<StorageProjectFolderPick | null>
   revealProjectFile(
     coreServer: CoreServer,
-    input: { projectId?: string | null; filePath: string }
+    input: { projectId?: string | null; filePath: string; assistantMessageId?: string }
   ): Promise<void>
   selectProfileAvatar(event: IpcMainInvokeEvent): Promise<string | null>
   showProjectInFolder(coreServer: CoreServer, projectId: string): Promise<void>
