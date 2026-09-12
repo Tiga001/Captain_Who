@@ -255,7 +255,8 @@ describe('New conversation with a half-height bottom panel', () => {
       expect(document.scrollingElement?.scrollTop).toBe(0)
 
       await page.getByRole('button', { name: 'toggle bottom' }).click()
-      await expect.poll(() => scroller.clientHeight).toBe(size.height - 52)
+      const toolbarHeight = element('.main-panel__toolbar').getBoundingClientRect().height
+      await expect.poll(() => scroller.clientHeight).toBe(size.height - toolbarHeight)
       expect(
         element('.chat-composer__project-row').getBoundingClientRect().bottom
       ).toBeLessThanOrEqual(scroller.getBoundingClientRect().bottom)

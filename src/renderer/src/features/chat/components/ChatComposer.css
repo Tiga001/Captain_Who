@@ -86,10 +86,10 @@
   min-width: 0;
   min-height: 40px;
   padding: 4px 10px;
-  margin: 6px -12px -4px -16px;
+  margin: 6px -12px 0 -16px;
   background: var(--mc-color-surface-muted);
-  border-radius: var(--mc-radius-none) var(--mc-radius-none) var(--mc-radius-composer)
-    var(--mc-radius-composer);
+  border-radius: var(--mc-radius-none) var(--mc-radius-none)
+    calc(var(--mc-radius-composer) - 1px) calc(var(--mc-radius-composer) - 1px);
 }
 
 .chat-composer__toolbar svg,

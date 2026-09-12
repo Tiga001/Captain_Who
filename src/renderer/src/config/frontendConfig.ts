@@ -3,6 +3,7 @@ import { DEFAULT_APP_LANGUAGE } from './languageRegistry'
 import type { ColorSchemePreference, FrontendTheme } from './frontendTheme'
 import type { AppLanguage } from './frontendTranslations'
 import { getGitReviewCssVariables } from './themes/gitReviewTheme'
+import { getUiContrastMixPercents, mixTowardInk } from './uiContrast'
 
 export const FRONTEND_CONFIG_STORAGE_KEY = 'mycopilot.frontend-config'
 
@@ -145,8 +146,15 @@ export type FrontendConfig = typeof frontendConfig
 
 export function getFrontendCssVariables(
   config: FrontendConfig = frontendConfig,
-  theme: FrontendTheme = lightTheme
+  theme: FrontendTheme = lightTheme,
+  contrast: number = 0
 ): Record<string, string> {
+  const mix = getUiContrastMixPercents(contrast)
+  const ink = theme.colors.text.primary
+  const contrastText = (color: string) => mixTowardInk(color, ink, mix.text)
+  const contrastIcon = (color: string) => mixTowardInk(color, theme.colors.icon.default, mix.text)
+  const contrastBorder = (color: string) => mixTowardInk(color, ink, mix.border)
+
   return {
     '--mc-font-family': config.typography.fontFamily,
     '--mc-mono-font-family': config.typography.monoFontFamily,
@@ -210,15 +218,15 @@ export function getFrontendCssVariables(
 
     '--mc-color-text-primary': theme.colors.text.primary,
     '--mc-color-text-strong': theme.colors.text.strong,
-    '--mc-color-text-secondary': theme.colors.text.secondary,
-    '--mc-color-text-muted': theme.colors.text.muted,
-    '--mc-color-text-subtle': theme.colors.text.subtle,
+    '--mc-color-text-secondary': contrastText(theme.colors.text.secondary),
+    '--mc-color-text-muted': contrastText(theme.colors.text.muted),
+    '--mc-color-text-subtle': contrastText(theme.colors.text.subtle),
     '--mc-color-text-inverse': theme.colors.text.inverse,
     '--mc-color-text-danger': theme.colors.text.danger,
     '--mc-color-text-accent': theme.colors.text.accent,
     '--mc-color-icon-default': theme.colors.icon.default,
-    '--mc-color-icon-muted': theme.colors.icon.muted,
-    '--mc-color-icon-subtle': theme.colors.icon.subtle,
+    '--mc-color-icon-muted': contrastIcon(theme.colors.icon.muted),
+    '--mc-color-icon-subtle': contrastIcon(theme.colors.icon.subtle),
     '--mc-color-icon-accent': theme.colors.icon.accent,
     '--mc-color-icon-danger': theme.colors.icon.danger,
     '--mc-color-icon-success': theme.colors.icon.success,
@@ -242,10 +250,10 @@ export function getFrontendCssVariables(
     '--mc-color-surface-glass': theme.colors.surface.glass,
     '--mc-color-surface-glass-strong': theme.colors.surface.glassStrong,
     '--mc-color-surface-glass-input': theme.colors.surface.glassInput,
-    '--mc-color-border-hairline': theme.colors.border.hairline,
-    '--mc-color-border-subtle': theme.colors.border.subtle,
-    '--mc-color-border-default': theme.colors.border.default,
-    '--mc-color-border-strong': theme.colors.border.strong,
+    '--mc-color-border-hairline': contrastBorder(theme.colors.border.hairline),
+    '--mc-color-border-subtle': contrastBorder(theme.colors.border.subtle),
+    '--mc-color-border-default': contrastBorder(theme.colors.border.default),
+    '--mc-color-border-strong': contrastBorder(theme.colors.border.strong),
     '--mc-color-border-error': theme.colors.border.error,
     '--mc-color-border-right-toolbar-divider': theme.colors.border.rightToolbarDivider,
     '--mc-color-button-primary-bg': theme.colors.button.primaryBg,
@@ -267,7 +275,7 @@ export function getFrontendCssVariables(
     '--mc-color-sidebar-translucent-tint': theme.colors.sidebar.translucentTint,
     '--mc-color-settings-content-title': theme.colors.settings.contentTitle,
     '--mc-color-settings-content-text': theme.colors.settings.contentText,
-    '--mc-color-settings-content-muted': theme.colors.settings.contentMuted,
+    '--mc-color-settings-content-muted': contrastText(theme.colors.settings.contentMuted),
     '--mc-color-state-hover': theme.colors.state.hover,
     '--mc-color-state-active': theme.colors.state.active,
     '--mc-color-focus-ring': theme.colors.state.focusRing,

@@ -995,6 +995,9 @@ export const ruRUTranslations = {
   'appearance.translucentSidebarDescription':
     'Используйте полупрозрачный размытый фон для левой боковой панели.',
   'appearance.translucentSidebarTransparency': 'Прозрачность боковой панели',
+  'appearance.uiContrast': 'Контраст',
+  'appearance.uiContrastDescription':
+    'Усиливает только контраст границ, приглушённого текста и второстепенных значков.',
   'environment.selectProject': 'Выберите проект',
   'environment.addProject': 'Добавить проект',
   'environment.editProject': 'Редактировать проект',

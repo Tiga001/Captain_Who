@@ -28,11 +28,13 @@ import type {
 } from './frontendTheme'
 import type { FrontendThemePreferences } from './frontendThemePreferences'
 import type { AppLanguage, TranslationKey } from './frontendTranslations'
+import { DEFAULT_UI_CONTRAST, normalizeUiContrast } from './uiContrast'
 import { hostClient } from '../host/hostClient'
 
 interface NormalizedFrontendConfig extends FrontendThemePreferences {
   language: AppLanguage
   showCacheHitRate: boolean
+  uiContrast: number
 }
 
 interface FrontendConfigContextValue {
@@ -45,8 +47,10 @@ interface FrontendConfigContextValue {
   showCacheHitRate: boolean
   setShowCacheHitRate: (showCacheHitRate: boolean) => void
   setThemeForColorScheme: (colorScheme: ColorScheme, themeId: FrontendThemeId) => void
+  setUiContrast: (contrast: number) => void
   t: (key: TranslationKey) => string
   themeIdsByColorScheme: ThemeIdsByColorScheme
+  uiContrast: number
 }
 
 const FrontendConfigContext = createContext<FrontendConfigContextValue | null>(null)
@@ -65,7 +69,8 @@ function getDefaultFrontendConfig(): NormalizedFrontendConfig {
     colorSchemePreference: frontendConfig.colorSchemePreference,
     language: frontendConfig.language,
     showCacheHitRate: false,
-    themeIdsByColorScheme: frontendConfig.themeIdsByColorScheme
+    themeIdsByColorScheme: frontendConfig.themeIdsByColorScheme,
+    uiContrast: DEFAULT_UI_CONTRAST
   }
 }
 
@@ -78,7 +83,8 @@ function normalizeStoredFrontendConfig(value: unknown): NormalizedFrontendConfig
   return {
     ...themePreferences,
     language: isAppLanguage(storedLanguage) ? storedLanguage : defaults.language,
-    showCacheHitRate: stored.showCacheHitRate === true
+    showCacheHitRate: stored.showCacheHitRate === true,
+    uiContrast: normalizeUiContrast(stored.uiContrast)
   }
 }
 
@@ -96,6 +102,10 @@ export function FrontendConfigProvider({ children }: { children: ReactNode }) {
   const [language, setLanguage] = useState<AppLanguage>(initialConfig.language)
   const t = useCallback((key: TranslationKey) => getTranslation(language, key), [language])
   const [showCacheHitRate, setShowCacheHitRate] = useState(initialConfig.showCacheHitRate)
+  const [uiContrast, setUiContrastState] = useState(initialConfig.uiContrast)
+  const setUiContrast = useCallback((contrast: number) => {
+    setUiContrastState(normalizeUiContrast(contrast))
+  }, [])
   const [systemColorScheme, setSystemColorScheme] = useState<ColorScheme>(() =>
     getSystemColorScheme()
   )
@@ -129,7 +139,11 @@ export function FrontendConfigProvider({ children }: { children: ReactNode }) {
   )
 
   useLayoutEffect(() => {
-    const variables = getFrontendCssVariables(frontendConfig, resolvedTheme.theme.tokens)
+    const variables = getFrontendCssVariables(
+      frontendConfig,
+      resolvedTheme.theme.tokens,
+      uiContrast
+    )
     Object.entries(variables).forEach(([name, value]) => {
       document.documentElement.style.setProperty(name, value)
     })
@@ -138,7 +152,7 @@ export function FrontendConfigProvider({ children }: { children: ReactNode }) {
     document.documentElement.dataset.colorScheme = resolvedTheme.colorScheme
     document.documentElement.dataset.colorSchemePreference = colorSchemePreference
     document.documentElement.style.colorScheme = resolvedTheme.colorScheme
-  }, [colorSchemePreference, resolvedTheme])
+  }, [colorSchemePreference, resolvedTheme, uiContrast])
 
   useLayoutEffect(() => {
     const definition = getLanguageDefinition(language)
@@ -176,11 +190,12 @@ export function FrontendConfigProvider({ children }: { children: ReactNode }) {
         version: FRONTEND_THEME_PREFERENCES_VERSION,
         language,
         showCacheHitRate,
+        uiContrast,
         colorSchemePreference,
         themeIdsByColorScheme
       })
     )
-  }, [colorSchemePreference, language, showCacheHitRate, themeIdsByColorScheme])
+  }, [colorSchemePreference, language, showCacheHitRate, themeIdsByColorScheme, uiContrast])
 
   const value = useMemo<FrontendConfigContextValue>(
     () => ({
@@ -193,8 +208,10 @@ export function FrontendConfigProvider({ children }: { children: ReactNode }) {
       showCacheHitRate,
       setShowCacheHitRate,
       setThemeForColorScheme,
+      setUiContrast,
       t,
-      themeIdsByColorScheme
+      themeIdsByColorScheme,
+      uiContrast
     }),
     [
       colorSchemePreference,
@@ -203,8 +220,10 @@ export function FrontendConfigProvider({ children }: { children: ReactNode }) {
       resolvedTheme.colorScheme,
       resolvedTheme.themeId,
       setThemeForColorScheme,
+      setUiContrast,
       t,
-      themeIdsByColorScheme
+      themeIdsByColorScheme,
+      uiContrast
     ]
   )
 

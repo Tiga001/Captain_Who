@@ -1003,6 +1003,9 @@ export const itITTranslations = {
   'appearance.translucentSidebarDescription':
     'Utilizza uno sfondo sfocato traslucido per la barra laterale sinistra.',
   'appearance.translucentSidebarTransparency': 'Trasparenza della barra laterale',
+  'appearance.uiContrast': 'Contrasto',
+  'appearance.uiContrastDescription':
+    'Aumenta solo il contrasto di bordi, testo attenuato e icone secondarie.',
   'environment.selectProject': 'Seleziona progetto',
   'environment.addProject': 'Aggiungi progetto',
   'environment.editProject': 'Modifica progetto',

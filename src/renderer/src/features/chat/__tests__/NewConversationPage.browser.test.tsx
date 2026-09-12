@@ -156,6 +156,16 @@ describe('NewConversationPage prompt pairing', () => {
 })
 
 describe('NewConversationPage project-name containment', () => {
+  it('keeps the project row inside the composer rounded border', async () => {
+    const screen = await renderPage(null)
+    const composer = screen.container.querySelector<HTMLElement>('.chat-composer')!
+    const projectRow = screen.container.querySelector<HTMLElement>('.chat-composer__project-row')!
+
+    expectContained(projectRow, composer)
+    expect(getComputedStyle(composer).overflow).toBe('visible')
+    expect(getComputedStyle(projectRow).marginBottom).toBe('0px')
+  })
+
   it('ellipsizes a long project name in the centered title and composer at the minimum middle width', async () => {
     await page.viewport(1440, 900)
     const screen = await renderPage('project-long')

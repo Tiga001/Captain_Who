@@ -1010,6 +1010,9 @@ export const frFRTranslations = {
   'appearance.translucentSidebarDescription':
     'Utilisez un arrière-plan flou translucide pour la barre latérale gauche.',
   'appearance.translucentSidebarTransparency': 'Transparence de la barre latérale',
+  'appearance.uiContrast': 'Contraste',
+  'appearance.uiContrastDescription':
+    'Augmente uniquement le contraste des bordures, du texte atténué et des icônes secondaires.',
   'environment.selectProject': 'Sélectionnez un projet',
   'environment.addProject': 'Ajouter un projet',
   'environment.editProject': 'Modifier le projet',

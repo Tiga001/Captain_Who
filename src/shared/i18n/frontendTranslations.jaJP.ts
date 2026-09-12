@@ -994,6 +994,9 @@ export const jaJPTranslations = {
   'appearance.translucentSidebarDescription':
     '左側のサイドバーには、半透明のぼかした背景を使用します。',
   'appearance.translucentSidebarTransparency': 'サイドバーの透明性',
+  'appearance.uiContrast': 'コントラスト',
+  'appearance.uiContrastDescription':
+    '枠線、弱い文字、副次アイコンのコントラストだけを上げます。',
   'environment.selectProject': 'プロジェクトの選択',
   'environment.addProject': 'プロジェクトの追加',
   'environment.editProject': 'プロジェクトの編集',

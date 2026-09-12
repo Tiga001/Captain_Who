@@ -983,6 +983,9 @@ export const enUSTranslations = {
   'appearance.translucentSidebarDescription':
     'Use a translucent blurred background for the left sidebar.',
   'appearance.translucentSidebarTransparency': 'Sidebar transparency',
+  'appearance.uiContrast': 'Contrast',
+  'appearance.uiContrastDescription':
+    'Increase contrast for borders, muted text, and secondary icons only.',
   'environment.selectProject': 'Select project',
   'environment.addProject': 'Add project',
   'environment.editProject': 'Edit project',

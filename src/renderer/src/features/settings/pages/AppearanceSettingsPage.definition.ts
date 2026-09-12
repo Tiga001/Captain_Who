@@ -45,6 +45,11 @@ export const appearanceSettingsNodes = defineSettingsNodes([
         id: 'appearance.translucentSidebarTransparency',
         title: 'appearance.translucentSidebarTransparency',
         prerequisiteId: 'appearance.translucentSidebar'
+      },
+      {
+        id: 'appearance.uiContrast',
+        title: 'appearance.uiContrast',
+        description: 'appearance.uiContrastDescription'
       }
     ]
   }

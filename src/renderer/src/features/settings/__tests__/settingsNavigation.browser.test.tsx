@@ -24,7 +24,9 @@ vi.mock('../../../config/FrontendConfigProvider', async () => {
     resolvedThemeId: defaultThemeIdsByColorScheme.light,
     themeIdsByColorScheme: defaultThemeIdsByColorScheme,
     setColorSchemePreference: vi.fn(),
-    setThemeForColorScheme: vi.fn()
+    setThemeForColorScheme: vi.fn(),
+    uiContrast: 0,
+    setUiContrast: vi.fn()
   }
   return { useFrontendConfig: () => config }
 })

@@ -3,6 +3,11 @@ import { appearanceSettingsNodes, COLOR_SCHEME_OPTIONS } from './AppearanceSetti
 import type { CSSProperties } from 'react'
 import { useFrontendConfig } from '../../../config/FrontendConfigProvider'
 import { getFrontendTheme } from '../../../config/frontendTheme'
+import {
+  MAX_UI_CONTRAST,
+  MIN_UI_CONTRAST,
+  normalizeUiContrast
+} from '../../../config/uiContrast'
 import type {
   ColorScheme,
   ColorSchemePreference,
@@ -82,8 +87,10 @@ export function AppearanceSettingsPage({
     resolvedThemeId,
     setColorSchemePreference,
     setThemeForColorScheme,
+    setUiContrast,
     t,
-    themeIdsByColorScheme
+    themeIdsByColorScheme,
+    uiContrast
   } = useFrontendConfig()
   const sidebarTransparency = normalizeTranslucentSidebarTransparency(
     uiPreferences.translucentSidebarTransparency
@@ -254,6 +261,42 @@ export function AppearanceSettingsPage({
                             >
                               <span className="settings-switch__thumb" />
                             </button>
+                          </div>
+                        )
+                      case 'appearance.uiContrast':
+                        return (
+                          <div className="settings-list-row appearance-contrast-row">
+                            <div className="settings-list-row__text">
+                              <h2
+                                className="settings-list-row__title"
+                                id="appearance-ui-contrast-heading"
+                              >
+                                {settingLabel(node, t)}
+                              </h2>
+                              <p className="settings-list-row__description">
+                                {settingDescription(node, t)}
+                              </p>
+                            </div>
+
+                            <label className="appearance-contrast-control">
+                              <input
+                                type="range"
+                                min={MIN_UI_CONTRAST}
+                                max={MAX_UI_CONTRAST}
+                                step={1}
+                                value={uiContrast}
+                                aria-labelledby="appearance-ui-contrast-heading"
+                                aria-valuetext={`${uiContrast}`}
+                                onChange={(event) =>
+                                  setUiContrast(
+                                    normalizeUiContrast(Number(event.currentTarget.value))
+                                  )
+                                }
+                              />
+                              <span className="appearance-contrast-control__value" aria-hidden="true">
+                                {uiContrast}
+                              </span>
+                            </label>
                           </div>
                         )
                       case 'appearance.translucentSidebarTransparency':
