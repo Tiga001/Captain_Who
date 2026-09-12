@@ -66,8 +66,8 @@
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
-  min-height: 56px;
-  padding: 0 16px 0 22px;
+  min-height: 44px;
+  padding: 0 14px 0 16px;
   gap: 14px;
   background: transparent;
   border-bottom: 1px solid var(--mc-color-border-subtle);

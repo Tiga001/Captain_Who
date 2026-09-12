@@ -635,7 +635,6 @@
 
 .model-form-page .settings-list-row {
   grid-template-columns: minmax(0, 0.78fr) minmax(220px, 1.22fr);
-  min-height: 54px;
 }
 
 .model-form-page .settings-switch {
@@ -647,7 +646,7 @@
   align-items: center;
   justify-content: flex-end;
   min-height: 42px;
-  padding: 6px 22px;
+  padding: 6px 16px;
   transition: border-color 180ms ease;
 }
 

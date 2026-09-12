@@ -451,7 +451,7 @@
 }
 
 .appearance-translucency-row {
-  min-height: 72px;
+  min-height: 56px;
   border-bottom: 0;
   background: color-mix(in srgb, var(--mc-color-surface-muted) 58%, transparent);
 }

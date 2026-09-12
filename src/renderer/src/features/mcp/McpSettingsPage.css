@@ -181,8 +181,8 @@
   display: grid;
   grid-template-columns: 24px minmax(0, 1fr) auto;
   align-items: center;
-  min-height: 58px;
-  padding: 11px 16px 11px 22px;
+  min-height: 44px;
+  padding: 8px 14px 8px 16px;
   gap: 14px;
   border-bottom: 1px solid var(--mc-color-border-subtle);
 }
@@ -691,8 +691,8 @@
 }
 
 .browser-download-preference-row--compact {
-  min-height: 58px;
-  padding-block: 10px;
+  min-height: 44px;
+  padding-block: 8px;
 }
 
 .browser-download-preference-row__copy,
@@ -859,8 +859,8 @@
 .browser-download-history-row {
   display: grid;
   grid-template-columns: 20px minmax(0, 1fr) 34px;
-  min-height: 58px;
-  padding: 9px 12px 9px 18px;
+  min-height: 44px;
+  padding: 8px 12px 8px 16px;
   align-items: center;
   gap: 12px;
   border-bottom: 1px solid var(--mc-color-border-subtle);
