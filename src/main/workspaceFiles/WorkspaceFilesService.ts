@@ -2,6 +2,8 @@ import { isUtf8 } from 'node:buffer'
 import { lstat, open, readdir, realpath } from 'node:fs/promises'
 import { extname, isAbsolute, relative, resolve, win32 } from 'node:path'
 import type {
+  AgentWorkspaceContext,
+  StorageProjectRecord,
   WorkspaceDirectoryEntry,
   WorkspaceDirectoryEntryKind,
   WorkspaceDirectoryListing,
@@ -29,7 +31,21 @@ const IMAGE_MIME_BY_EXTENSION: Readonly<Record<string, string>> = {
   '.webp': 'image/webp'
 }
 
-export type ProjectPathResolver = (projectId: string) => Promise<string | null>
+export type WorkspaceProjectResolver = (
+  projectId: string
+) => Promise<Pick<StorageProjectRecord, 'id' | 'folders'> | null | undefined>
+
+interface WorkspaceRunFileSource {
+  loadRunWorkspace(input: {
+    assistantMessageId: string
+    projectId: string
+  }): Promise<AgentWorkspaceContext | null>
+  resolveRunWorkspacePath(input: {
+    assistantMessageId: string
+    projectId: string
+    filePath: string
+  }): Promise<string>
+}
 
 interface ResolvedWorkspaceEntry {
   kind: WorkspaceDirectoryEntryKind
@@ -40,12 +56,19 @@ interface ResolvedWorkspaceEntry {
 }
 
 export class WorkspaceFilesService {
-  constructor(private readonly resolveProjectPath: ProjectPathResolver) {}
+  constructor(
+    private readonly resolveProject: WorkspaceProjectResolver,
+    private readonly runFiles?: WorkspaceRunFileSource
+  ) {}
 
   async listDirectory(input: WorkspaceListDirectoryInput): Promise<WorkspaceDirectoryListing> {
     const projectId = requireProjectId(input?.projectId)
     const directoryPath = normalizeWorkspacePath(input?.directoryPath ?? '', true)
-    const directory = await this.resolveEntry(projectId, directoryPath)
+    const directory = await this.resolveEntry(
+      projectId,
+      directoryPath,
+      normalizeFolderId(input?.folderId)
+    )
     if (directory.kind === 'symlink' || !directory.realPath) {
       throw new Error('Symbolic-link directories are not available in the file browser')
     }
@@ -84,7 +107,7 @@ export class WorkspaceFilesService {
 
   async readPreview(input: WorkspaceFileRequest): Promise<WorkspaceFilePreviewResult> {
     const request = normalizeFileRequest(input)
-    const entry = await this.resolveEntry(request.projectId, request.path)
+    const entry = await this.resolveFileRequest(request)
 
     if (entry.kind === 'symlink' || !entry.realPath) {
       return { metadata: metadataFromEntry(entry, request.path, 'unsupported', null) }
@@ -183,18 +206,56 @@ export class WorkspaceFilesService {
 
   async resolvePathForReveal(input: WorkspaceFileRequest): Promise<string> {
     const request = normalizeFileRequest(input)
-    const entry = await this.resolveEntry(request.projectId, request.path)
+    const entry = await this.resolveFileRequest(request)
     if (!entry.realPath) {
       throw new Error('Symbolic links cannot be revealed from the file browser')
     }
     return entry.realPath
   }
 
+  private async resolveFileRequest(request: WorkspaceFileRequest): Promise<ResolvedWorkspaceEntry> {
+    if (request.assistantMessageId === undefined) {
+      return this.resolveEntry(request.projectId, request.path, request.folderId)
+    }
+    if (!this.runFiles) throw new Error('Historical workspace is not available')
+    const identity = {
+      assistantMessageId: request.assistantMessageId,
+      projectId: request.projectId
+    }
+    const workspace = await this.runFiles.loadRunWorkspace(identity)
+    if (!workspace || workspace.projectId !== request.projectId) {
+      throw new Error('Historical workspace is not available')
+    }
+    const folders = workspace.folders.filter((folder) =>
+      request.folderId === undefined ? folder.role === 'primary' : folder.id === request.folderId
+    )
+    if (folders.length !== 1) throw new Error('Historical workspace folder is not available')
+    const resolvedPath = await this.runFiles.resolveRunWorkspacePath({
+      ...identity,
+      filePath: `@workspace/${folders[0].alias}/${request.path}`
+    })
+    const info = await lstat(resolvedPath)
+    return {
+      kind: info.isSymbolicLink() ? 'symlink' : info.isDirectory() ? 'directory' : 'file',
+      modifiedAtMs: info.mtimeMs,
+      path: request.path,
+      realPath: info.isSymbolicLink() ? null : resolvedPath,
+      sizeBytes: info.size
+    }
+  }
+
   private async resolveEntry(
     projectId: string,
-    relativePath: string
+    relativePath: string,
+    folderId: string | undefined
   ): Promise<ResolvedWorkspaceEntry> {
-    const configuredRoot = await this.resolveProjectPath(projectId)
+    const project = await this.resolveProject(projectId)
+    if (!project || project.id !== projectId) throw new Error('Project is not available')
+    const folders = project.folders.filter((folder) =>
+      folderId === undefined ? folder.role === 'primary' : folder.id === folderId
+    )
+    if (folders.length !== 1) throw new Error('Workspace folder is not available')
+    const configuredRoot = folders[0].path
     if (!configuredRoot?.trim()) throw new Error('Project path is not available')
 
     const root = await realpath(resolve(configuredRoot))
@@ -243,9 +304,24 @@ export function normalizeWorkspacePath(value: unknown, allowRoot = false): strin
 
 function normalizeFileRequest(input: WorkspaceFileRequest): WorkspaceFileRequest {
   return {
+    assistantMessageId: normalizeOptionalIdentity(
+      input?.assistantMessageId,
+      'Assistant message id'
+    ),
+    folderId: normalizeFolderId(input?.folderId),
     path: normalizeWorkspacePath(input?.path),
     projectId: requireProjectId(input?.projectId)
   }
+}
+
+function normalizeFolderId(value: unknown): string | undefined {
+  return normalizeOptionalIdentity(value, 'Workspace folder id')
+}
+
+function normalizeOptionalIdentity(value: unknown, label: string): string | undefined {
+  if (value === undefined) return undefined
+  if (typeof value !== 'string' || !value.trim()) throw new Error(`${label} is invalid`)
+  return value.trim()
 }
 
 function requireProjectId(value: unknown): string {

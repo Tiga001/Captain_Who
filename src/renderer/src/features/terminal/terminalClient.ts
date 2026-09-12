@@ -3,12 +3,12 @@ import type {
   TerminalCreateSessionRequest,
   TerminalExitEvent,
   TerminalOutputEvent,
-  TerminalSessionSnapshot
+  TerminalCreateSessionResult
 } from './terminalTypes'
 
 export function createTerminalSession(
   request: TerminalCreateSessionRequest
-): Promise<TerminalSessionSnapshot> {
+): Promise<TerminalCreateSessionResult> {
   return hostClient.terminal.createSession(request)
 }
 
@@ -16,8 +16,8 @@ export function acknowledgeTerminalOutput(sessionId: string, sequence: number): 
   hostClient.terminal.acknowledgeOutput(sessionId, sequence)
 }
 
-export function writeTerminalInput(sessionId: string, data: string): void {
-  hostClient.terminal.writeInput(sessionId, data)
+export function writeTerminalInput(sessionId: string, data: string, userInitiated = true): void {
+  hostClient.terminal.writeInput(sessionId, data, userInitiated)
 }
 
 export function resizeTerminalSession(
@@ -40,4 +40,12 @@ export function subscribeTerminalSession(
   }
 ): () => void {
   return hostClient.terminal.subscribeSession(sessionId, handlers)
+}
+
+export function markTerminalUserInput(sessionId: string): void {
+  hostClient.terminal.markUserInput(sessionId)
+}
+
+export function selectTerminalSourceDirectory(sessionId: string, folderId: string): Promise<void> {
+  return hostClient.terminal.selectSourceDirectory(sessionId, folderId)
 }

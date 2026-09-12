@@ -9,6 +9,7 @@ const INACTIVE_CONSUMER = {
 }
 
 interface UseWorkspaceFileTreeOptions {
+  folderId?: string
   isActive: boolean
   onFileSelect: (path: string) => void
   projectId: string
@@ -16,6 +17,7 @@ interface UseWorkspaceFileTreeOptions {
 }
 
 export function useWorkspaceFileTree({
+  folderId,
   isActive,
   onFileSelect,
   projectId,
@@ -23,7 +25,8 @@ export function useWorkspaceFileTree({
 }: UseWorkspaceFileTreeOptions) {
   const session = useWorkspaceFileTreeSessionResource(
     projectId,
-    () => new WorkspaceFileTreeSession(projectId)
+    folderId,
+    () => new WorkspaceFileTreeSession(projectId, folderId)
   )
   const [consumerToken] = useState(() => Symbol(`workspace-file-tree:${projectId}`))
   const snapshot = useSyncExternalStore(session.subscribe, session.getSnapshot, session.getSnapshot)

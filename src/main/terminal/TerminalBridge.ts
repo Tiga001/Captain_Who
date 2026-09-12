@@ -9,11 +9,14 @@ import type {
 } from 'electron'
 
 import type {
+  StorageProjectRecord,
   TerminalCreateSessionRequest,
+  TerminalCreateSessionResult,
   TerminalExitEvent,
   TerminalOutputEvent,
   TerminalSessionSnapshot
 } from '@mycopilot/protocol'
+import { freezeTerminalProjectSources } from './terminalSourceDirectories'
 import { HOST_CHANNELS } from '@mycopilot/host-api'
 import type {
   TerminalServiceCommand,
@@ -36,10 +39,23 @@ interface OwnerRecord {
 }
 
 interface OwnedSession {
+  /** Each create owns a distinct PTY identity, even if the public id is reused. */
+  serviceSessionId: string
   childGeneration: number
   lastOutputSequence: number
   ownerId: number
   startRequestId?: number
+  creationSent: boolean
+  disposalSent: boolean
+  interrupted?: Error
+  interruption: Promise<never>
+  interrupt: (error: Error) => void
+}
+
+class TerminalCreationCancelled extends Error {
+  constructor() {
+    super('Terminal creation cancelled')
+  }
 }
 
 interface PendingRequest {
@@ -65,12 +81,18 @@ export class TerminalBridge {
   private readonly owners = new Map<number, OwnerRecord>()
   private readonly pendingRequests = new Map<number, PendingRequest>()
   private readonly sessions = new Map<string, OwnedSession>()
+  private readonly serviceSessions = new Map<string, { sessionId: string; session: OwnedSession }>()
   private readonly forkUtility: () => UtilityProcess
   private readonly requestTimeoutMs: number
+  private loadProjects?: () => Promise<StorageProjectRecord[]>
 
   constructor(options: TerminalBridgeOptions = {}) {
     this.forkUtility = options.forkUtility ?? forkTerminalUtility
     this.requestTimeoutMs = options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS
+  }
+
+  setProjectLoader(loadProjects: () => Promise<StorageProjectRecord[]>): void {
+    this.loadProjects = loadProjects
   }
 
   acknowledgeOutput(owner: WebContents, sessionId: string, sequence: number): void {
@@ -80,7 +102,7 @@ export class TerminalBridge {
 
     this.sendCommand(child, {
       method: 'terminal.acknowledgeOutput',
-      params: { sequence, sessionId },
+      params: { sequence, sessionId: session!.serviceSessionId },
       type: 'command'
     })
   }
@@ -88,50 +110,101 @@ export class TerminalBridge {
   async createSession(
     owner: WebContents,
     request: TerminalCreateSessionRequest
-  ): Promise<TerminalSessionSnapshot> {
+  ): Promise<TerminalCreateSessionResult> {
     const sessionId = normalizeSessionId(request.sessionId)
     if (this.sessions.has(sessionId)) {
       throw new Error(`Terminal session already exists: ${sessionId}`)
     }
-    if (owner.isDestroyed()) throw new Error('Terminal owner is already destroyed')
+    if (owner.isDestroyed()) return { status: 'cancelled' }
 
     const child = this.ensureStarted()
     const ownerRecord = this.ensureOwner(owner)
     const startRequestId = this.createRequestId()
-    this.sessions.set(sessionId, {
+    let rejectInterruption!: (error: Error) => void
+    const interruption = new Promise<never>((_, reject) => {
+      rejectInterruption = reject
+    })
+    const startingSession: OwnedSession = {
+      serviceSessionId: `terminal-instance-${startRequestId}`,
       childGeneration: child.generation,
       lastOutputSequence: 0,
       ownerId: owner.id,
-      startRequestId
+      startRequestId,
+      creationSent: false,
+      disposalSent: false,
+      interruption,
+      interrupt: (error) => {
+        if (startingSession.interrupted) return
+        startingSession.interrupted = error
+        rejectInterruption(error)
+      }
+    }
+    this.sessions.set(sessionId, startingSession)
+    this.serviceSessions.set(startingSession.serviceSessionId, {
+      sessionId,
+      session: startingSession
     })
     ownerRecord.sessionIds.add(sessionId)
 
     try {
-      const snapshot = await this.sendRequest<TerminalSessionSnapshot>(
-        child,
-        {
-          id: startRequestId,
-          method: 'terminal.createSession',
-          params: { ...request, sessionId },
-          type: 'request'
-        },
-        this.requestTimeoutMs
-      )
-      const currentSession = this.sessions.get(sessionId)
-      if (
-        !currentSession ||
-        currentSession.ownerId !== owner.id ||
-        currentSession.childGeneration !== child.generation
-      ) {
-        throw new Error('Terminal owner disappeared while the session was starting')
+      let projectSources: ReturnType<typeof freezeTerminalProjectSources>
+      if (request.projectId !== undefined) {
+        if (!this.loadProjects) throw new Error('Terminal project loader is unavailable')
+        const projects = await Promise.race([this.loadProjects(), interruption])
+        this.assertCurrentCreation(owner, sessionId, startingSession, child)
+        const project = projects.find((entry) => entry.id === request.projectId)
+        if (!project) throw new Error('Terminal project no longer exists')
+        projectSources = freezeTerminalProjectSources(project)
       }
-      delete currentSession.startRequestId
-      return snapshot
+      const cwd =
+        request.projectId !== undefined
+          ? projectSources?.folders.find((folder) => folder.id === projectSources.primaryFolderId)
+              ?.path
+          : request.cwd
+      this.assertCurrentCreation(owner, sessionId, startingSession, child)
+      startingSession.creationSent = true
+      const snapshot = await Promise.race([
+        this.sendRequest<TerminalSessionSnapshot>(
+          child,
+          {
+            id: startRequestId,
+            method: 'terminal.createSession',
+            params: {
+              cols: request.cols,
+              rows: request.rows,
+              cwd,
+              sessionId: startingSession.serviceSessionId,
+              projectSources
+            },
+            type: 'request'
+          },
+          this.requestTimeoutMs
+        ),
+        interruption
+      ])
+      this.assertCurrentCreation(owner, sessionId, startingSession, child)
+      if (snapshot.sessionId !== startingSession.serviceSessionId) {
+        throw new Error('Terminal service returned a different session identity')
+      }
+      delete startingSession.startRequestId
+      return {
+        status: 'created',
+        session: {
+          ...snapshot,
+          sessionId,
+          sourceFolders:
+            projectSources?.folders.map(({ id, alias, path, role }) => ({
+              id,
+              alias,
+              path,
+              role
+            })) ?? []
+        }
+      }
     } catch (error) {
-      const removedSession = this.removeSessionOwnership(sessionId)
-      if (removedSession && this.getChildForSession(removedSession)) {
-        this.sendDisposeCommand(child, sessionId)
-      }
+      this.removeSessionOwnership(sessionId, startingSession)
+      this.disposeSession(child, startingSession)
+      if (error instanceof TerminalCreationCancelled) return { status: 'cancelled' }
       throw error
     }
   }
@@ -140,25 +213,22 @@ export class TerminalBridge {
     const session = this.getOwnedSession(owner, sessionId)
     const child = session ? this.getChildForSession(session) : null
     if (!session) return false
-    if (!child) {
-      this.removeSessionOwnership(sessionId)
-      return false
-    }
-
-    try {
-      return await this.sendRequest<boolean>(
-        child,
-        {
-          id: this.createRequestId(),
-          method: 'terminal.killSession',
-          params: { sessionId },
-          type: 'request'
-        },
-        this.requestTimeoutMs
-      )
-    } finally {
-      this.removeSessionOwnership(sessionId)
-    }
+    // Revoke before the first await: a pending project lookup can no longer create a PTY.
+    this.cancelCreation(session)
+    this.removeSessionOwnership(sessionId, session)
+    if (!child) return false
+    if (!session.creationSent) return true
+    session.disposalSent = true
+    return this.sendRequest<boolean>(
+      child,
+      {
+        id: this.createRequestId(),
+        method: 'terminal.killSession',
+        params: { sessionId: session.serviceSessionId },
+        type: 'request'
+      },
+      this.requestTimeoutMs
+    )
   }
 
   resizeSession(owner: WebContents, sessionId: string, cols: number, rows: number): Promise<void> {
@@ -169,21 +239,47 @@ export class TerminalBridge {
       {
         id: this.createRequestId(),
         method: 'terminal.resizeSession',
-        params: { cols, rows, sessionId },
+        params: { cols, rows, sessionId: session.serviceSessionId },
         type: 'request'
       },
       this.requestTimeoutMs
     )
   }
 
-  writeInput(owner: WebContents, sessionId: string, data: string): void {
+  selectSourceDirectory(owner: WebContents, sessionId: string, folderId: string): Promise<void> {
+    const session = this.requireOwnedSession(owner, sessionId)
+    const child = this.requireChildForSession(session)
+    return this.sendRequest<void>(
+      child,
+      {
+        id: this.createRequestId(),
+        method: 'terminal.selectSourceDirectory',
+        params: { sessionId: session.serviceSessionId, folderId },
+        type: 'request'
+      },
+      this.requestTimeoutMs
+    )
+  }
+
+  markUserInput(owner: WebContents, sessionId: string): void {
+    const session = this.getOwnedSession(owner, sessionId)
+    const child = session ? this.getChildForSession(session) : null
+    if (child)
+      this.sendCommand(child, {
+        method: 'terminal.markUserInput',
+        params: { sessionId: session!.serviceSessionId },
+        type: 'command'
+      })
+  }
+
+  writeInput(owner: WebContents, sessionId: string, data: string, userInitiated = true): void {
     const session = this.getOwnedSession(owner, sessionId)
     const child = session ? this.getChildForSession(session) : null
     if (!child || typeof data !== 'string' || data.length === 0) return
 
     this.sendCommand(child, {
       method: 'terminal.writeInput',
-      params: { data, sessionId },
+      params: { data, sessionId: session!.serviceSessionId, userInitiated },
       type: 'command'
     })
   }
@@ -308,13 +404,14 @@ export class TerminalBridge {
 
     for (const [sessionId, session] of [...this.sessions]) {
       if (session.childGeneration !== child.generation) continue
+      if (session.startRequestId !== undefined) session.interrupt(error)
       this.sendSessionEvent(session, HOST_CHANNELS.terminal.exit, {
         exitCode: null,
         finalOutputSequence: session.lastOutputSequence,
         sessionId,
         signal: 'terminal-service-exit'
       })
-      this.removeSessionOwnership(sessionId)
+      this.removeSessionOwnership(sessionId, session)
     }
 
     if (kill) {
@@ -343,14 +440,16 @@ export class TerminalBridge {
       return
     }
 
-    const session = this.sessions.get(message.event.sessionId)
-    if (!session || session.childGeneration !== child.generation) return
+    const entry = this.serviceSessions.get(message.event.sessionId)
+    if (!entry || entry.session.childGeneration !== child.generation) return
+    const { sessionId, session } = entry
+    if (this.sessions.get(sessionId) !== session) return
 
     if (message.method === 'terminal.output') {
       if (message.event.sequence > session.lastOutputSequence) {
         session.lastOutputSequence = message.event.sequence
       }
-      this.sendSessionEvent(session, HOST_CHANNELS.terminal.output, message.event)
+      this.sendSessionEvent(session, HOST_CHANNELS.terminal.output, { ...message.event, sessionId })
       return
     }
 
@@ -358,8 +457,13 @@ export class TerminalBridge {
       session.lastOutputSequence,
       message.event.finalOutputSequence
     )
-    this.sendSessionEvent(session, HOST_CHANNELS.terminal.exit, message.event)
-    this.removeSessionOwnership(message.event.sessionId)
+    if (session.startRequestId !== undefined) {
+      const error = new Error('Terminal process exited before startup completed')
+      session.interrupt(error)
+      this.rejectPendingRequest(session.startRequestId, error)
+    }
+    this.sendSessionEvent(session, HOST_CHANNELS.terminal.exit, { ...message.event, sessionId })
+    this.removeSessionOwnership(sessionId, session)
   }
 
   private releaseOwner(ownerId: number): void {
@@ -370,27 +474,50 @@ export class TerminalBridge {
     this.detachOwner(ownerId)
     for (const sessionId of sessionIds) {
       const session = this.sessions.get(sessionId)
-      const child = session ? this.getChildForSession(session) : null
-      this.sessions.delete(sessionId)
-      if (session?.startRequestId) {
-        this.rejectPendingRequest(
-          session.startRequestId,
-          new Error('Terminal owner disappeared while the session was starting')
-        )
-      }
-      if (child) this.sendDisposeCommand(child, sessionId)
+      if (!session || session.ownerId !== ownerId) continue
+      const child = this.getChildForSession(session)
+      this.cancelCreation(session)
+      this.removeSessionOwnership(sessionId, session)
+      if (child) this.disposeSession(child, session)
     }
   }
 
-  private removeSessionOwnership(sessionId: string): OwnedSession | null {
+  private removeSessionOwnership(sessionId: string, expected: OwnedSession): OwnedSession | null {
     const session = this.sessions.get(sessionId)
-    if (!session) return null
+    if (session !== expected) return null
     this.sessions.delete(sessionId)
+    this.serviceSessions.delete(session.serviceSessionId)
 
     const owner = this.owners.get(session.ownerId)
     owner?.sessionIds.delete(sessionId)
     if (owner?.sessionIds.size === 0) this.detachOwner(owner.contents.id)
     return session
+  }
+
+  private assertCurrentCreation(
+    owner: WebContents,
+    sessionId: string,
+    session: OwnedSession,
+    child: ChildState
+  ): void {
+    if (session.interrupted) throw session.interrupted
+    if (this.getOwnedSession(owner, sessionId) !== session) {
+      throw new Error('Terminal creation ownership changed unexpectedly')
+    }
+    if (this.child !== child) throw new Error('Terminal service changed during startup')
+  }
+
+  private cancelCreation(session: OwnedSession): void {
+    if (session.startRequestId === undefined) return
+    const error = new TerminalCreationCancelled()
+    session.interrupt(error)
+    this.rejectPendingRequest(session.startRequestId, error)
+  }
+
+  private disposeSession(child: ChildState, session: OwnedSession): void {
+    if (!session.creationSent || session.disposalSent || this.child !== child) return
+    session.disposalSent = true
+    this.sendDisposeCommand(child, session.serviceSessionId)
   }
 
   private rejectPendingRequest(requestId: number, error: Error): boolean {

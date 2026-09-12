@@ -68,7 +68,10 @@ export class WorkspaceFileTreeSession {
   private suppressSelection = false
   private readonly unsubscribeModel: () => void
 
-  constructor(readonly projectId: string) {
+  constructor(
+    readonly projectId: string,
+    readonly folderId?: string
+  ) {
     this.model = new FileTree({
       fileTreeSearchMode: 'hide-non-matches',
       flattenEmptyDirectories: false,
@@ -226,6 +229,7 @@ export class WorkspaceFileTreeSession {
     try {
       const listing = await listWorkspaceDirectory({
         directoryPath,
+        ...(this.folderId === undefined ? {} : { folderId: this.folderId }),
         includeHidden: true,
         projectId: this.projectId
       })

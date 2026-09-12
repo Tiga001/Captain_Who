@@ -4,11 +4,23 @@ import type {
   TerminalOutputEvent
 } from '@mycopilot/protocol'
 
+import type { TerminalProjectSources } from './terminalSourceDirectories'
+
+export type TerminalTrustedCreateSessionRequest = TerminalCreateSessionRequest & {
+  projectSources?: TerminalProjectSources
+}
+
 export type TerminalServiceRequest =
   | {
       id: number
+      method: 'terminal.selectSourceDirectory'
+      params: { sessionId: string; folderId: string }
+      type: 'request'
+    }
+  | {
+      id: number
       method: 'terminal.createSession'
-      params: TerminalCreateSessionRequest
+      params: TerminalTrustedCreateSessionRequest
       type: 'request'
     }
   | {
@@ -36,10 +48,12 @@ export type TerminalServiceRequest =
     }
 
 export type TerminalServiceCommand =
+  | { method: 'terminal.markUserInput'; params: { sessionId: string }; type: 'command' }
   | {
       method: 'terminal.writeInput'
       params: {
         data: string
+        userInitiated?: boolean
         sessionId: string
       }
       type: 'command'

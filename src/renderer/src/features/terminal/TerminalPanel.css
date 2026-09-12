@@ -8,6 +8,7 @@
 }
 
 .terminal-panel__surface {
+  position: relative;
   min-width: 0;
   min-height: 0;
   padding: 8px 0 0;
@@ -31,4 +32,65 @@
 
 .terminal-panel__xterm .xterm-screen {
   min-height: 100%;
+}
+
+.terminal-panel__sources {
+  position: absolute;
+  left: 12px;
+  right: 10px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  overflow: auto;
+  padding: 4px 0;
+  color: var(--mc-color-text-secondary);
+  background: var(--mc-color-terminal-background);
+  font-size: 12px;
+}
+
+.terminal-panel__sources-label {
+  margin-right: 2px;
+}
+.terminal-panel__source {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 6px 3px 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+.terminal-panel__source:hover,
+.terminal-panel__source:focus-visible {
+  background: var(--mc-color-state-hover);
+}
+.terminal-panel__source-number {
+  width: 14px;
+  opacity: 0.6;
+  text-align: center;
+}
+.terminal-panel__source-primary {
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.terminal-panel__source-shortcut {
+  margin-top: 4px;
+  opacity: 0.6;
+  font-size: 11px;
+}
+.terminal-panel__source:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.terminal-panel__source-error {
+  position: absolute;
+  right: 10px;
+  bottom: 8px;
+  padding: 4px 8px;
+  background: var(--mc-color-terminal-background);
+  color: var(--mc-color-text-secondary);
+  font-size: 12px;
 }

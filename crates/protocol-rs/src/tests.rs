@@ -1841,3 +1841,27 @@ fn model_settings_validation_error_data_has_a_closed_stable_shape() {
         .is_err()
     );
 }
+
+#[test]
+fn git_source_contract_uses_explicit_folder_or_all_and_rejects_mixed_selectors() {
+    let folder = serde_json::from_value::<GitReviewSummaryRequest>(serde_json::json!({
+        "projectId":"project", "source":{"kind":"folder","folderId":"folder-a"}, "target":{"kind":"unstaged"}
+    })).unwrap();
+    assert!(
+        matches!(folder.source,Some(GitReviewSourceRequest::Folder { folder_id }) if folder_id=="folder-a")
+    );
+    let all = serde_json::from_value::<GitReviewSummaryRequest>(serde_json::json!({
+        "projectId":"project", "source":{"kind":"all"}, "target":{"kind":"lastTurn","conversationId":"conversation"}
+    })).unwrap();
+    assert!(matches!(all.source, Some(GitReviewSourceRequest::All {})));
+    for source in [
+        serde_json::json!({"kind":"folder"}),
+        serde_json::json!({"kind":"all","folderId":"folder-a"}),
+        serde_json::json!({"kind":"folder","folderId":"a","path":"/tmp"}),
+    ] {
+        assert!(serde_json::from_value::<GitReviewSummaryRequest>(
+            serde_json::json!({"projectId":"project","source":source,"target":{"kind":"unstaged"}})
+        )
+        .is_err());
+    }
+}

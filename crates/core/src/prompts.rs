@@ -170,7 +170,11 @@ fn minimal_permissions_section() -> String {
 }
 
 fn minimal_workspace_section() -> String {
-    "## 路径\nworkspace.binding 是工作区绑定的唯一依据。有工作区时相对路径及默认 cwd/搜索/Skill 发现只指主文件夹；辅助文件夹用 @workspace/<alias>/... 明确寻址，别名以 workspace.binding.folders 为准；./@workspace/... 表示主文件夹内同名真实目录。该命名空间只用于路径参数，不改写 shell 脚本。无工作区时相对路径无效，只能按权限使用明确绝对路径或 @home/@desktop/@documents/@downloads。外部路径权限不建立工作区。不得猜测或询问用户名、主目录，也不运行 pwd、echo $HOME 来发现路径。命令 cwd 按其参数说明在首次调用前确定。".to_string()
+    format!("## 路径\nworkspace.binding 是工作区绑定的唯一依据。有工作区时相对路径及默认 cwd/搜索/Skill 发现只指主文件夹；辅助文件夹用 @workspace/<alias>/... 明确寻址，别名以 workspace.binding.folders 为准；./@workspace/... 表示主文件夹内同名真实目录。该命名空间只用于路径参数，不改写 shell 脚本。无工作区时相对路径无效，只能按权限使用明确绝对路径或 @home/@desktop/@documents/@downloads。外部路径权限不建立工作区。不得猜测或询问用户名、主目录，也不运行 pwd、echo $HOME 来发现路径。命令 cwd 按其参数说明在首次调用前确定。\n{}", workspace_state_update_rule())
+}
+
+fn workspace_state_update_rule() -> &'static str {
+    "workspace.binding: full/replace reset the binding. For patch, apply set fields and changes by alias (added/removed/updated); folder is complete, unlisted entries stay. Recheck files after source_replaced or availability recovery; relative paths follow the new primary."
 }
 
 fn minimal_tool_routing_section(tool_definitions: &[AgentToolDefinition]) -> String {
@@ -285,12 +289,12 @@ fn permission_policy_section() -> String {
 }
 
 fn workspace_policy_section() -> String {
-    "## 工作区路径规则\n\
+    format!("## 工作区路径规则\n\
     - 相对路径及默认 cwd、搜索、目录概览和 Skill 发现仅针对主文件夹。辅助文件夹使用 @workspace/<alias>/...，别名与角色以 workspace.binding.folders 为准；./@workspace/... 表示主文件夹内同名真实目录。工作区权限覆盖本轮冻结的全部文件夹。命名空间只在结构化路径参数中解析，不改写 shell 脚本。\n\
     - 当前 workspace 是否存在由可信后端 World State 的 `workspace.binding` 提供；不要从历史消息或用户措辞猜测。\n\
     - 有 workspace 时优先使用相对路径。没有 workspace 时，相对路径必须失败；只有当前权限允许时，才使用明确绝对路径或 @home/@desktop/@documents/@downloads 等系统别名。\n\
-    - 不要询问或猜测用户名和主目录，不要为了发现路径而运行 pwd、echo $HOME 等命令。外部路径权限不会为当前会话建立 workspace 绑定。"
-        .to_string()
+    - 不要询问或猜测用户名和主目录，不要为了发现路径而运行 pwd、echo $HOME 等命令。外部路径权限不会为当前会话建立 workspace 绑定。\n\
+    - {}", workspace_state_update_rule())
 }
 
 fn attachment_policy_section() -> String {
@@ -506,6 +510,27 @@ mod tests {
             custom_instructions: Some("保留用户写作偏好。".into()),
             updated_at: None,
             automation_execution_context: None,
+        }
+    }
+
+    #[test]
+    fn workspace_patches_are_explained_in_both_profiles_and_agent_roles() {
+        for profile in [AgentContextProfile::Full, AgentContextProfile::Minimal] {
+            for identity in [None, Some(collaboration_identity())] {
+                let prompt = build_system_prompt_with_collaboration(
+                    Some(&preferences_for_profile(profile)),
+                    &[],
+                    identity.as_ref(),
+                );
+                assert!(prompt.contains("full/replace reset the binding"));
+                assert!(prompt.contains("apply set fields and changes by alias"));
+                assert!(prompt.contains("unlisted entries stay"));
+                assert!(
+                    prompt.contains("Recheck files after source_replaced or availability recovery")
+                );
+                assert!(prompt.contains("relative paths follow the new primary"));
+                assert_eq!(prompt.matches(workspace_state_update_rule()).count(), 1);
+            }
         }
     }
 

@@ -160,3 +160,4 @@ include!("tests/continuity.rs");
 include!("tests/manual_boundary.rs");
 include!("tests/recovery.rs");
 include!("tests/human_interaction.rs");
+include!("tests/workspace_binding.rs");

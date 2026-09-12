@@ -14,6 +14,8 @@ pub(super) struct Snapshot {
     pub(super) id: String,
     pub(super) created_at: Instant,
     pub(super) repository: RepositoryContext,
+    pub(super) project_binding: Option<project::ProjectSourceBinding>,
+    pub(super) head_oid: String,
     pub(super) target: GitReviewTarget,
     pub(super) comparison: SnapshotComparison,
     pub(super) has_head: bool,
@@ -79,6 +81,11 @@ impl TurnSnapshotCache {
 }
 
 impl SnapshotCache {
+    pub(super) fn remove(&mut self, id: &str) {
+        self.entries.remove(id);
+        self.order.retain(|candidate| candidate != id);
+    }
+
     pub(super) fn insert(&mut self, snapshot: Snapshot) {
         self.prune();
         while self.order.len() >= MAX_SNAPSHOTS {
@@ -131,6 +138,13 @@ pub(super) fn snapshot_file_is_current(
     snapshot: &Snapshot,
     file: &SnapshotFile,
 ) -> Result<bool, String> {
+    if !repository_is_current(&snapshot.repository) {
+        return Ok(false);
+    }
+    // Unstage uses live HEAD; it may not reinterpret a snapshot after a checkout/reset.
+    if snapshot.target.is_mutable() && read_head_oid(&snapshot.repository)? != snapshot.head_oid {
+        return Ok(false);
+    }
     let previous_path_is_current = match (&file.previous_path, &file.previous_stamp) {
         (Some(path), Some(stamp)) => file_stamp(&snapshot.repository.root.join(path)) == *stamp,
         (None, None) => true,

@@ -243,6 +243,28 @@
   transition-delay: 0s;
 }
 
+.files-panel__tree-pane:has(.files-panel__root-row) {
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
+}
+
+.files-panel__root-row {
+  min-width: 0;
+  padding: 12px 12px 0;
+}
+
+.files-panel__root-select {
+  --settings-content-text-color: var(--mc-color-text-primary);
+}
+
+.files-panel__root-select .settings-select__button,
+.files-panel__root-select .settings-select__option {
+  font-size: 13px;
+}
+
+.files-panel__root-row + .files-panel__tree-search {
+  margin-top: 9px;
+}
+
 .files-panel__tree-search {
   display: flex;
   height: 38px;

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useLayoutEffect, useRef, useState } from 'react'
 import type { GitReviewRepositoryContext } from '@mycopilot/protocol'
 import { getGitReviewRepositoryContext } from './gitReviewClient'
 
@@ -12,28 +12,29 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
-export function useGitReviewRepositoryContext(projectId: string) {
+export function useGitReviewRepositoryContext(projectId: string, folderId?: string, revision = '') {
   const [state, setState] = useState<GitReviewRepositoryContextState>({ status: 'idle' })
   const stateRef = useRef(state)
   const requestRef = useRef(0)
-  const projectRef = useRef(projectId)
+  const identity = JSON.stringify([projectId, folderId, revision])
+  const projectRef = useRef(identity)
 
-  useEffect(() => {
-    projectRef.current = projectId
+  useLayoutEffect(() => {
+    projectRef.current = identity
     requestRef.current += 1
     const next = { status: 'idle' } as const
     stateRef.current = next
     setState(next)
-  }, [projectId])
+  }, [identity])
 
-  useEffect(
+  useLayoutEffect(
     () => () => {
       requestRef.current += 1
     },
     []
   )
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     stateRef.current = state
   }, [state])
 
@@ -52,19 +53,22 @@ export function useGitReviewRepositoryContext(projectId: string) {
       stateRef.current = loading
       setState(loading)
       try {
-        const value = await getGitReviewRepositoryContext({ projectId })
-        if (requestRef.current !== requestId || projectRef.current !== projectId) return
+        const value = await getGitReviewRepositoryContext({
+          projectId,
+          ...(folderId ? { folderId } : {})
+        })
+        if (requestRef.current !== requestId || projectRef.current !== identity) return
         const ready = { status: 'ready', value } as const
         stateRef.current = ready
         setState(ready)
       } catch (error) {
-        if (requestRef.current !== requestId || projectRef.current !== projectId) return
+        if (requestRef.current !== requestId || projectRef.current !== identity) return
         const failed = { error: errorMessage(error), status: 'error' } as const
         stateRef.current = failed
         setState(failed)
       }
     },
-    [projectId]
+    [projectId, folderId, identity]
   )
 
   return { load, state }

@@ -4,11 +4,24 @@ export interface GitRepositoryInspectInput {
   projectId: string
 }
 
+export interface GitRepositorySourceInspection {
+  folderId: string
+  alias: string
+  role: 'primary' | 'auxiliary'
+  state: GitRepositoryInspectionState
+  repositoryId?: string
+  message?: string
+}
+
+export type GitReviewSource = { kind: 'folder'; folderId: string } | { kind: 'all' }
+
 export interface GitRepositoryInspection {
   projectId: string
   state: GitRepositoryInspectionState
   repositoryId?: string
   message?: string
+  folders: GitRepositorySourceInspection[]
+  defaultFolderId?: string
 }
 
 export type GitReviewTarget =
@@ -29,6 +42,7 @@ export interface GitReviewBranch {
 }
 
 export interface GitReviewRepositoryContextInput {
+  folderId?: string
   projectId: string
 }
 
@@ -51,6 +65,7 @@ export interface GitReviewCommit {
 }
 
 export interface GitReviewCommitListInput {
+  folderId?: string
   projectId: string
 }
 
@@ -64,6 +79,7 @@ export type GitReviewFileStatus =
   'modified' | 'added' | 'deleted' | 'renamed' | 'copied' | 'untracked' | 'conflicted'
 
 export interface GitReviewSummaryInput {
+  source?: GitReviewSource
   projectId: string
   target: GitReviewTarget
 }
@@ -78,6 +94,10 @@ export interface GitReviewContext {
 }
 
 export interface GitReviewFile {
+  sourceFolderId?: string
+  sourceAlias?: string
+  /** Host-qualified path for workspace opening/copying, frozen when assistantMessageId is set. */
+  workspacePath?: string
   id: string
   /** Slash-separated path relative to the selected project root. */
   path: string
@@ -100,6 +120,9 @@ export interface GitReviewStats {
 }
 
 export interface GitReviewSummary {
+  source?: GitReviewSource
+  assistantMessageId?: string
+  message?: string
   repositoryId: string
   snapshotId: string
   target: GitReviewTarget

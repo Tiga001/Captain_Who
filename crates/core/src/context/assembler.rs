@@ -798,6 +798,7 @@ fn normalize_messages(messages: Vec<AgentChatMessage>) -> AgentResult<Vec<AgentC
 
 #[cfg(test)]
 mod tests {
+    mod workspace_binding;
     use super::*;
     use crate::conversation_trace::{
         ConversationTraceRecorder, ConversationTurnTrace, ConversationTurnTraceTerminalStatus,

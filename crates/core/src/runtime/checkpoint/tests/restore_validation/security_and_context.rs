@@ -343,6 +343,26 @@ fn checkpoint_v8_skill_barrier_shape_is_rejected_instead_of_reinterpreted() {
 }
 
 #[test]
+fn checkpoint_v18_workspace_projection_is_rejected_before_replay() {
+    let (mut checkpoint, continuation) = restorable_checkpoint_fixture();
+    checkpoint.version = 18;
+    // An old projection must fail at the version boundary, before any provider or tool identity
+    // is considered. Reinterpreting it would misreport a valid old checkpoint as corrupt.
+    checkpoint.pending_tool_call_id.clear();
+
+    let error = restore_error(restore_run_checkpoint(
+        checkpoint,
+        "checkpoint-validation-run",
+        &continuation,
+    ));
+
+    assert!(error.to_string().contains("不支持版本 18"));
+    assert!(error
+        .to_string()
+        .contains(&format!("当前版本为 {AGENT_RUN_CHECKPOINT_SCHEMA_VERSION}")));
+}
+
+#[test]
 fn checkpoint_restore_rejects_unknown_frozen_provider_registration() {
     let (mut checkpoint, continuation) = restorable_checkpoint_fixture();
     match &mut checkpoint.provider_profile_config {

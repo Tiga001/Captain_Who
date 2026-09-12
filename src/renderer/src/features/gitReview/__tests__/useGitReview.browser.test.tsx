@@ -15,6 +15,7 @@ const { contentSpy, diffSpy, mutateSpy, summarySpy } = vi.hoisted(() => ({
 }))
 
 vi.mock('../gitReviewClient', () => ({
+  inspectGitRepository: vi.fn(),
   getGitReviewFileContent: contentSpy,
   getGitReviewFileDiff: diffSpy,
   getGitReviewSummary: summarySpy,

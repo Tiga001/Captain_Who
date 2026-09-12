@@ -250,7 +250,7 @@ notification 只是失效信号。Renderer 通过 tree snapshot 与 `agent.colla
 pub const STORAGE_SCHEMA_VERSION: i32 = 46;
 ```
 
-当前 Runtime checkpoint 为 **v18**，拒绝旧版本 checkpoint；本次模型协作身份变更不提供含旧 Agent ID 的聊天、上下文或 checkpoint 兼容转换。
+当前 Runtime checkpoint 为 **v19**，拒绝旧版本 checkpoint；v19 使用源文件夹的 World State 模型 patch 投影，旧检查点中的整体替换文本不做兼容转换。此前模型协作身份变更也不转换含旧 Agent ID 的聊天、上下文或 checkpoint。
 
 v46 为 Run/Wake 持久化冻结工作区并集，v45 已引入多文件夹项目（`project_folders`）。没有原地升级：任何旧版本（含 v34–v45）、catalog fingerprint 不匹配、非空未版本化库或外键违规都返回 `development_storage_schema_reset_required`，由显式 `storage:reset-dev` 保留配置后重建。历史文档中的 v7/v8/v10/v11/v17/v19/v20/v22/v23/v24/v25/v26 只是 rollout 阶段标签，不是当前兼容声明；release runner 的 storage step 标为 canonical v46。
 

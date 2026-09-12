@@ -48,6 +48,8 @@ const LANGUAGE_ALIASES: Readonly<Record<string, GitReviewSyntaxLanguageId>> = {
 }
 
 interface WorkspaceMarkdownPreviewProps {
+  assistantMessageId?: string
+  folderId?: string
   anchor?: string
   content: WorkspaceTextFileContent
   onOpenFile: (path: string, anchor?: string) => void
@@ -57,6 +59,8 @@ interface WorkspaceMarkdownPreviewProps {
 }
 
 export function WorkspaceMarkdownPreview({
+  assistantMessageId,
+  folderId,
   anchor,
   content,
   onOpenFile,
@@ -76,14 +80,20 @@ export function WorkspaceMarkdownPreview({
         />
       ),
       img: (props) => (
-        <WorkspaceMarkdownImage {...props} currentPath={path} projectId={projectId} />
+        <WorkspaceMarkdownImage
+          {...props}
+          currentPath={path}
+          projectId={projectId}
+          folderId={folderId}
+          assistantMessageId={assistantMessageId}
+        />
       ),
       input: ({ type, ...props }) => (
         <input {...props} disabled={type === 'checkbox'} type={type} />
       ),
       pre: WorkspaceMarkdownPre
     }),
-    [onOpenFile, path, projectId, scrollRef]
+    [assistantMessageId, folderId, onOpenFile, path, projectId, scrollRef]
   )
 
   useEffect(() => {
@@ -242,12 +252,16 @@ function WorkspaceMarkdownAnchor({
 }
 
 interface WorkspaceMarkdownImageProps extends Omit<ComponentProps<'img'>, 'src'> {
+  assistantMessageId?: string
+  folderId?: string
   currentPath: string
   projectId: string
   src?: string
 }
 
 function WorkspaceMarkdownImage({
+  assistantMessageId,
+  folderId,
   alt,
   currentPath,
   projectId,
@@ -269,7 +283,12 @@ function WorkspaceMarkdownImage({
     let cancelled = false
     setLocalImageUrl(null)
     setLocalImageFailed(false)
-    void readWorkspaceFilePreview({ path: target.path, projectId })
+    void readWorkspaceFilePreview({
+      path: target.path,
+      projectId,
+      ...(folderId === undefined ? {} : { folderId }),
+      ...(assistantMessageId === undefined ? {} : { assistantMessageId })
+    })
       .then((preview) => {
         if (cancelled) return
         if (!preview.image) {
@@ -284,7 +303,7 @@ function WorkspaceMarkdownImage({
     return () => {
       cancelled = true
     }
-  }, [projectId, target])
+  }, [assistantMessageId, folderId, projectId, target])
 
   if (target.kind === 'external') {
     return <img {...props} alt={alt ?? ''} src={target.url} />

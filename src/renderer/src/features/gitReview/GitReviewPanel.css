@@ -1612,3 +1612,34 @@
     animation-duration: 1800ms;
   }
 }
+
+.git-review__repository-control {
+  position: relative;
+  min-width: 0;
+  max-width: 180px;
+}
+.git-review__repository-control .git-review__scope-button {
+  max-width: 100%;
+}
+.git-review__repository-control .git-review__scope-button svg {
+  flex-shrink: 0;
+}
+.git-review__repository-menu {
+  min-width: 180px;
+  max-width: 320px;
+}
+.git-review__repository-menu .git-review__source-menu-item {
+  width: 100%;
+}
+.git-review__repository-menu .git-review__source-menu-item span {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.git-review__repository-heading {
+  color: var(--mc-color-text-secondary);
+  font-size: 12px;
+  font-weight: 600;
+  padding: 12px 16px 8px;
+  overflow-wrap: anywhere;
+}

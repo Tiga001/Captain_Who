@@ -61,7 +61,7 @@ last_verified: 2026-09-11
 
 模型日志只持久化图片的 attachment ID、MIME 与 SHA-256，不写入重复 base64。Host 在普通启动、上下文预览、压缩重建与恢复时，按同一会话可见消息归属读取附件并验证 MIME、长度和原始字节摘要；缺失、替换、跨会话或已被编辑替代的附件一律失败，不静默改用预览图。分支重绑定附件 ID 并复制原始文件，保留摘要；子快照不复制问答待办、Run 授权或用量。
 
-已压缩前缀只额外保留有不可变图片引用的材料，避免文字摘要替代原始视觉输入；不会由此复活旧助手正文或纯文字 Run 状态。checkpoint v18 和恢复信封 v14 只支持本版本恢复；Host 临时 `context_image_attachments` 字段不进入恢复信封 allowlist，图片 bytes 由 Host 重新加载并校验；既有检查点图片字段沿用原有保存策略，新增不可变引用跨重启保留。
+已压缩前缀只额外保留有不可变图片引用的材料，避免文字摘要替代原始视觉输入；不会由此复活旧助手正文或纯文字 Run 状态。checkpoint v19 和恢复信封 v14 只支持本版本恢复；v19 的 `workspace.binding` 模型投影使用逐源 patch，旧检查点在版本入口拒绝，持久化 World State 完整 section 日志结构不变。Host 临时 `context_image_attachments` 字段不进入恢复信封 allowlist，图片 bytes 由 Host 重新加载并校验；既有检查点图片字段沿用原有保存策略，新增不可变引用跨重启保留。
 
 ## Conversation World State 请求日志
 
@@ -250,7 +250,7 @@ Automation 启动恢复区分 admission 前后：旧进程遗留的全部 `admit
 - 物理文件和 SQLite 无法共享单个 ACID 事务，依赖 staging、原子改名和 reconciliation 收敛。
 - SQLite FTS/索引损坏时需要重建；索引不可替代原始消息或 Archive。
 
-## 多文件夹执行边界（第二轮）
+## 多文件夹执行与浏览边界
 
 `AgentWorkspaceContext.folders` 是必填的 Host 字段。新根轮次从项目捕获当前集合；已开始的任务树、检查点、审批恢复和运行中的上下文预览沿用同一快照。准备期间配置若发生竞态变化，任务失败并要求重发，不能把旧 Skill 主目录与新运行工作区混用。根会话闲置/完成后的预览读取下一轮配置；子 Agent 终态预览继续沿用原任务树快照，与后续 Wake 一致。预览和实际请求、圆环及自动压缩共用 World State 投影。
 
@@ -258,4 +258,4 @@ Automation 启动恢复区分 admission 前后：旧进程遗留的全部 `admit
 
 历史文件/图片/Office 卡片向 Host 提交原始路径和 `assistantMessageId`。Host 用 `storage.resolveRunWorkspacePath` 按原 Run 的目录实体解析；不能从当前项目重猜旧别名。显式绝对/系统路径沿用原有 Host 读取和 reveal 语义。`workspace.binding` 只向模型显示别名、角色、可用性和寻址规则；真实路径与目录实体保留在 Host 状态。
 
-第二轮仍保留主目录 Files 树与主仓库 Git。主目录切换会失效文件树缓存；LastTurn Git 明确过滤辅助根命名空间，不能把辅助文件误当成主仓库同名路径。多根 Files 树、Git 仓库选择器与终端根选择器属于后续第三轮。
+Files 当前读取按 project + folder id 定位；历史读取再携带 assistant-message id，使用原 Run 解析目录。Git Review 单源快照冻结项目成员、目录实体和 Git 身份；读取及 mutation 均复验快照，目录移除、改绑或仓库变化使旧操作失效。LastTurn 可按所有 Git 源聚合，但仍只读取同一次 Run 的冻结文件记录；来源无法匹配时明确显示不可用信息，不能按新别名重新解释历史。Terminal 源选择使用创建时捕获的目录实体，验证后向原 PTY 发送 cd。以上页面选择属于 Renderer 内存状态，不新增数据库 schema。

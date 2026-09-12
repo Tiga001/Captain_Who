@@ -4,6 +4,7 @@ import type {
   GitReviewFileDiff,
   GitReviewFileMutationAction,
   GitReviewTarget,
+  GitReviewSource,
   GitReviewSummary
 } from '@mycopilot/protocol'
 import {
@@ -62,6 +63,7 @@ interface DiffRequestRecord extends GitReviewDiffQueueItem {
 interface RequestableSnapshot {
   projectId: string
   targetKey: string
+  sourceKey: string
   summary: GitReviewSummary
 }
 
@@ -85,10 +87,18 @@ function errorMessage(error: unknown): string {
 export function useGitReview(
   projectId: string,
   isActive: boolean,
-  initialTarget: GitReviewTarget = { kind: 'uncommitted' }
+  initialTarget: GitReviewTarget = { kind: 'uncommitted' },
+  selection: { folderId?: string; allLastTurn?: boolean; revision?: string } = {}
 ) {
   const [target, setTargetState] = useState<GitReviewTarget>(initialTarget)
   const targetKey = gitReviewTargetKey(target)
+  const { folderId, allLastTurn, revision } = selection
+  const sourceKind = target.kind === 'lastTurn' && allLastTurn ? 'all' : 'folder'
+  const sourceKey = JSON.stringify([
+    sourceKind,
+    sourceKind === 'folder' ? (folderId ?? null) : null,
+    revision ?? ''
+  ])
   const [summaryState, setSummaryState] = useState<GitReviewSummaryState>({ status: 'idle' })
   const [diffStates, setDiffStates] = useState<Record<string, GitReviewDiffState>>({})
   const [fileContentStates, setFileContentStates] = useState<
@@ -126,7 +136,7 @@ export function useGitReview(
   const drainFullContentQueueRef = useRef<() => void>(() => undefined)
   const mutationRequestRef = useRef<string | null>(null)
   const isActiveRef = useRef(isActive)
-  const reviewIdentityRef = useRef(`${projectId}:${targetKey}`)
+  const reviewIdentityRef = useRef(`${projectId}:${targetKey}:${sourceKey}`)
 
   // Commit activity/context before the panel's passive demand reconciliation without mutating
   // transport ownership from a React render that may later be interrupted.
@@ -194,18 +204,23 @@ export function useGitReview(
   )
 
   useLayoutEffect(() => {
-    invalidateReviewIdentity(`${projectId}:${targetKey}`)
-  }, [invalidateReviewIdentity, projectId, targetKey])
+    invalidateReviewIdentity(`${projectId}:${targetKey}:${sourceKey}`)
+  }, [invalidateReviewIdentity, projectId, targetKey, sourceKey])
 
   const setTarget = useCallback(
     (nextTarget: GitReviewTarget): void => {
       const nextTargetKey = gitReviewTargetKey(nextTarget)
-      invalidateReviewIdentity(`${projectId}:${nextTargetKey}`)
+      const nextSourceKey = JSON.stringify([
+        nextTarget.kind === 'lastTurn' && allLastTurn ? 'all' : 'folder',
+        nextTarget.kind === 'lastTurn' && allLastTurn ? null : (folderId ?? null),
+        revision ?? ''
+      ])
+      invalidateReviewIdentity(`${projectId}:${nextTargetKey}:${nextSourceKey}`)
       setTargetState((current) =>
         gitReviewTargetKey(current) === nextTargetKey ? current : nextTarget
       )
     },
-    [invalidateReviewIdentity, projectId]
+    [invalidateReviewIdentity, projectId, allLastTurn, folderId, revision]
   )
 
   const discardOrphanedDiffLoadingState = useCallback((fileId: string) => {
@@ -227,7 +242,7 @@ export function useGitReview(
   const refresh = useCallback(async () => {
     if (!projectId) return
     const requestId = summaryRequestRef.current + 1
-    const queryKey = `${projectId}:${targetKey}`
+    const queryKey = `${projectId}:${targetKey}:${sourceKey}`
     const sameQuery = summaryQueryRef.current === queryKey
     const fallbackSnapshot = sameQuery
       ? (requestableSnapshotRef.current ?? refreshFallbackRef.current)
@@ -244,9 +259,12 @@ export function useGitReview(
     if (!preserveCurrentReview) resetReviewData()
 
     try {
+      const source: GitReviewSource | undefined =
+        sourceKind === 'all' ? { kind: 'all' } : folderId ? { kind: 'folder', folderId } : undefined
       const summary = await getGitReviewSummary({
         projectId,
-        target
+        target,
+        ...(source ? { source } : {})
       })
       if (summaryRequestRef.current !== requestId) return
       if (preserveCurrentReview) resetReviewData()
@@ -254,6 +272,7 @@ export function useGitReview(
       requestableSnapshotRef.current = {
         projectId,
         targetKey,
+        sourceKey,
         summary
       }
       setSummaryState({ status: 'ready', value: summary })
@@ -271,7 +290,7 @@ export function useGitReview(
         drainFullContentQueueRef.current()
       }
     }
-  }, [projectId, resetReviewData, target, targetKey])
+  }, [projectId, resetReviewData, target, targetKey, sourceKey, sourceKind, folderId])
 
   const drainFullContentQueue = useCallback(() => {
     while (
@@ -363,6 +382,7 @@ export function useGitReview(
       if (
         !requestable ||
         requestable.projectId !== projectId ||
+        requestable.sourceKey !== sourceKey ||
         requestable.targetKey !== targetKey
       ) {
         return
@@ -393,7 +413,7 @@ export function useGitReview(
       fullContentQueueRef.current.push(item)
       drainFullContentQueueRef.current()
     },
-    [projectId, targetKey]
+    [projectId, targetKey, sourceKey]
   )
 
   const cancelQueuedFileContentsExcept = useCallback((keepFileIds: ReadonlySet<string>) => {
@@ -532,6 +552,7 @@ export function useGitReview(
       if (
         !requestable ||
         requestable.projectId !== projectId ||
+        requestable.sourceKey !== sourceKey ||
         requestable.targetKey !== targetKey
       ) {
         return
@@ -578,7 +599,7 @@ export function useGitReview(
       setDiffStates(nextStates)
       drainDiffQueueRef.current()
     },
-    [projectId, targetKey]
+    [projectId, targetKey, sourceKey]
   )
 
   const loadFileDiff = useCallback(
@@ -637,6 +658,7 @@ export function useGitReview(
       if (
         !requestable ||
         requestable.projectId !== projectId ||
+        requestable.sourceKey !== sourceKey ||
         requestable.targetKey !== targetKey ||
         (target.kind !== 'unstaged' && target.kind !== 'staged') ||
         mutationRequestRef.current
@@ -668,7 +690,7 @@ export function useGitReview(
         }
       }
     },
-    [projectId, refresh, target.kind, targetKey]
+    [projectId, refresh, target.kind, targetKey, sourceKey]
   )
 
   useEffect(() => {
@@ -690,6 +712,7 @@ export function useGitReview(
   ])
 
   return {
+    sourceKey,
     cancelQueuedFileContentsExcept,
     cancelQueuedFileDiffsExcept,
     dismissMutationError: () => setMutationError(null),

@@ -1,15 +1,19 @@
 import type {
   TerminalCreateSessionRequest,
+  TerminalCreateSessionResult,
   TerminalExitEvent,
   TerminalOutputEvent,
-  TerminalSessionSnapshot
+  TerminalSessionSnapshot,
+  TerminalSourceFolder
 } from '@mycopilot/protocol'
 
 export type {
   TerminalCreateSessionRequest,
+  TerminalCreateSessionResult,
   TerminalExitEvent,
   TerminalOutputEvent,
-  TerminalSessionSnapshot
+  TerminalSessionSnapshot,
+  TerminalSourceFolder
 }
 
 export type TerminalSessionStatus = 'starting' | 'running' | 'exited' | 'error'

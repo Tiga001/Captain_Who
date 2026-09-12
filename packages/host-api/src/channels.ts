@@ -234,6 +234,8 @@ export const HOST_CHANNELS = {
     upsertChatMessages: 'host:storage.upsertChatMessages'
   },
   terminal: {
+    markUserInput: 'host:terminal.markUserInput',
+    selectSourceDirectory: 'host:terminal.selectSourceDirectory',
     acknowledgeOutput: 'host:terminal.acknowledgeOutput',
     createSession: 'host:terminal.createSession',
     exit: 'host:terminal.exit',

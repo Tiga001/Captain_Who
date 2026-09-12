@@ -5,7 +5,8 @@ import { inspectGitRepository } from './gitReviewClient'
 
 export function useGitRepositoryCapability(
   projectId: string | null | undefined,
-  workspacePath: string | undefined
+  workspacePath: string | undefined,
+  projectRevision = ''
 ): RightSidebarCapabilityState {
   const contextKey = createRightSidebarWorkspaceSessionKey(projectId, workspacePath)
   const hasWorkspace = Boolean(projectId && workspacePath)
@@ -48,7 +49,7 @@ export function useGitRepositoryCapability(
     return () => {
       cancelled = true
     }
-  }, [contextKey, projectId, workspacePath])
+  }, [contextKey, projectId, workspacePath, projectRevision])
 
   if (resolvedState?.contextKey === contextKey) return resolvedState
   return {

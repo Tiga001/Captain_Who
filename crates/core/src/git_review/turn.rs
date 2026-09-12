@@ -31,6 +31,9 @@ pub(super) fn build_last_turn_review(
     }
 
     let summary = GitReviewSummary {
+        source: None,
+        assistant_message_id: record.map(|v| v.identity.assistant_message_id.clone()),
+        message: None,
         repository_id: repository.repository_id.clone(),
         snapshot_id: snapshot_id.clone(),
         target: GitReviewTarget::LastTurn {
@@ -108,6 +111,9 @@ fn project_turn_review<'a>(
         files.push((
             *change,
             GitReviewFile {
+                source_folder_id: None,
+                source_alias: None,
+                workspace_path: None,
                 id,
                 path: change.path.clone(),
                 previous_path: None,
@@ -299,4 +305,245 @@ fn turn_content_response(
         before_text,
         after_text,
     }
+}
+
+impl GitReviewService {
+    /// Project review interprets persisted paths against the exact workspace frozen for that
+    /// turn. Current aliases and primary-role changes never redefine a historical file.
+    pub fn review_project_last_turn_summary(
+        &self,
+        project: &ProjectRecord,
+        requested: Option<&GitReviewSource>,
+        conversation_id: &str,
+        record: Option<&crate::AgentTurnDiffRecord>,
+        frozen_workspace: Option<&crate::AgentWorkspaceContext>,
+    ) -> Result<GitReviewSummary, String> {
+        let inspection = self.inspect_project(project);
+        let source = match requested {
+            Some(source) => source.clone(),
+            None => GitReviewSource::Folder {
+                folder_id: inspection
+                    .default_folder_id
+                    .clone()
+                    .ok_or("No available source folder has a reviewable Git worktree.")?,
+            },
+        };
+        let mut messages = Vec::new();
+        let selected = match &source {
+            GitReviewSource::Folder { folder_id } => {
+                let folder = self.project_source(project, Some(folder_id))?;
+                let inspected = inspection
+                    .folders
+                    .iter()
+                    .find(|f| f.folder_id == *folder_id)
+                    .ok_or("The selected Git source is unavailable.")?;
+                if inspected.state != GitRepositoryInspectionState::Ready {
+                    return Err(inspected.message.clone().unwrap_or_else(|| {
+                        "The selected source has no reviewable Git worktree.".into()
+                    }));
+                }
+                vec![folder]
+            }
+            GitReviewSource::All => {
+                for folder in &inspection.folders {
+                    if matches!(
+                        folder.state,
+                        GitRepositoryInspectionState::Unavailable
+                            | GitRepositoryInspectionState::Unsupported
+                    ) {
+                        messages.push(format!(
+                            "{}: {}",
+                            folder.alias,
+                            folder.message.as_deref().unwrap_or("Source unavailable.")
+                        ));
+                    }
+                }
+                project
+                    .folders
+                    .iter()
+                    .filter(|f| {
+                        inspection.folders.iter().any(|i| {
+                            i.folder_id == f.id && i.state == GitRepositoryInspectionState::Ready
+                        })
+                    })
+                    .collect()
+            }
+        };
+        if selected.is_empty() {
+            return Err("No available source folder has a reviewable Git worktree.".into());
+        }
+        let repository_id = match &source {
+            GitReviewSource::Folder { folder_id } => inspection
+                .folders
+                .iter()
+                .find(|f| f.folder_id == *folder_id)
+                .and_then(|f| f.repository_id.clone())
+                .ok_or("The selected Git source is unavailable.")?,
+            GitReviewSource::All => inspection
+                .repository_id
+                .clone()
+                .ok_or("The project has no reviewable Git sources.")?,
+        };
+        if let Some(record) = record {
+            if record.identity.project_id != project.id
+                || record.identity.conversation_id != conversation_id
+            {
+                return Err(
+                    "The last-turn record does not belong to this project and conversation.".into(),
+                );
+            }
+            let workspace =
+                frozen_workspace.ok_or("The last turn's frozen workspace is unavailable.")?;
+            if workspace.project_id.as_deref() != Some(project.id.as_str()) {
+                return Err("The last turn's workspace has a different project identity.".into());
+            }
+            crate::workspace::WorkspaceResolver::from_context(Some(workspace)).validate_shape()?;
+            if record.files.iter().any(|change| {
+                change.path.starts_with("@workspace/")
+                    && historical_source_path(workspace, &change.path).is_none()
+            }) {
+                return Err("The last-turn file paths do not match its frozen workspace.".into());
+            }
+        } else {
+            messages.push("There is no recorded file-change turn for this conversation.".into());
+        }
+
+        let mut files = Vec::new();
+        let mut snapshot_files = HashMap::new();
+        let mut stats = GitReviewStats {
+            file_count: 0,
+            additions: 0,
+            deletions: 0,
+            line_counts_complete: true,
+        };
+        if let (Some(record), Some(workspace)) = (record, frozen_workspace) {
+            for folder in selected {
+                let Some(frozen) = workspace.folders.iter().find(|f| f.id == folder.id) else {
+                    messages.push(format!(
+                        "{} was not part of the last turn's workspace.",
+                        folder.alias
+                    ));
+                    continue;
+                };
+                let current_path = Path::new(&folder.path)
+                    .canonicalize()
+                    .map_err(|_| "The selected Git source became unavailable.")?;
+                if frozen.canonical_path.as_deref() != current_path.to_str()
+                    || frozen.directory_identity.as_ref()
+                        != FileChangeDirectoryIdentity::read(&current_path)
+                            .ok()
+                            .as_ref()
+                {
+                    messages.push(format!(
+                        "{} no longer identifies the directory used by the last turn.",
+                        folder.alias
+                    ));
+                    continue;
+                }
+                // Frozen roots cannot overlap. The frozen path owner selects exactly one source,
+                // even after current aliases or the primary folder have changed.
+                let mut source_files = record
+                    .files
+                    .iter()
+                    .filter_map(|change| {
+                        if change.is_exact_noop() {
+                            return None;
+                        }
+                        let (owner, path) = historical_source_path(workspace, &change.path)?;
+                        (owner.id == frozen.id).then_some((change, path))
+                    })
+                    .collect::<Vec<_>>();
+                source_files.sort_by(|left, right| left.1.cmp(&right.1));
+                for (change, path) in source_files {
+                    let file_stats = turn_file_stats(&change.before, &change.after);
+                    stats.file_count += 1;
+                    if let Some(counts) = &file_stats {
+                        stats.additions = stats.additions.saturating_add(counts.additions);
+                        stats.deletions = stats.deletions.saturating_add(counts.deletions);
+                    } else {
+                        stats.line_counts_complete = false;
+                    }
+                    if files.len() >= MAX_REVIEW_FILES {
+                        continue;
+                    }
+                    let id =
+                        content_revision(format!("lastTurn\0{}\0{}", folder.id, path).as_bytes());
+                    snapshot_files.insert(
+                        id.clone(),
+                        TurnSnapshotFile {
+                            path: path.clone(),
+                            before: change.before.clone(),
+                            after: change.after.clone(),
+                        },
+                    );
+                    files.push(GitReviewFile {
+                        source_folder_id: Some(folder.id.clone()),
+                        source_alias: Some(folder.alias.clone()),
+                        workspace_path: Some(change.path.clone()),
+                        id,
+                        path,
+                        previous_path: None,
+                        status: turn_file_status(change),
+                        stats: file_stats,
+                    });
+                }
+            }
+        }
+        let truncated = record.is_some_and(|r| r.truncated) || stats.file_count > MAX_REVIEW_FILES;
+        let snapshot_id = format!("{LAST_TURN_SNAPSHOT_PREFIX}{}", Uuid::new_v4());
+        self.turn_snapshots
+            .lock()
+            .map_err(|_| "Last-turn review snapshot cache is unavailable.")?
+            .insert(TurnSnapshot {
+                id: snapshot_id.clone(),
+                created_at: Instant::now(),
+                files: snapshot_files,
+            });
+        Ok(GitReviewSummary {
+            source: Some(source),
+            assistant_message_id: record.map(|r| r.identity.assistant_message_id.clone()),
+            message: (!messages.is_empty()).then(|| messages.join("\n")),
+            repository_id,
+            snapshot_id,
+            target: GitReviewTarget::LastTurn {
+                conversation_id: conversation_id.into(),
+            },
+            context: GitReviewContext::default(),
+            stats,
+            files,
+            truncated,
+        })
+    }
+}
+
+fn historical_source_path<'a>(
+    workspace: &'a crate::AgentWorkspaceContext,
+    path: &str,
+) -> Option<(&'a crate::workspace::WorkspaceFolder, String)> {
+    let (folder, relative) = if let Some(namespace) = path.strip_prefix("@workspace/") {
+        let (alias, relative) = namespace.split_once('/')?;
+        (
+            workspace.folders.iter().find(|f| f.alias == alias)?,
+            relative,
+        )
+    } else {
+        if Path::new(path).is_absolute() {
+            return None;
+        }
+        (
+            workspace
+                .folders
+                .iter()
+                .find(|f| f.role == ProjectFolderRole::Primary)?,
+            path,
+        )
+    };
+    if !is_safe_repository_path(relative) {
+        return None;
+    }
+    let path = path_to_git_string(Path::new(relative))?;
+    if path.is_empty() {
+        return None;
+    }
+    Some((folder, path))
 }

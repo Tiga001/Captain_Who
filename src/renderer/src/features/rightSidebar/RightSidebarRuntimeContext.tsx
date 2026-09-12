@@ -2,8 +2,10 @@ import { createContext, useContext } from 'react'
 import type { ReactNode } from 'react'
 import type { CollaborationStoreSnapshot } from '../agentCollaboration/collaborationStore'
 import type { AgentObserverRenderContext } from './rightSidebarTypes'
+import type { AppProject } from '../../config/projectConfig'
 
 interface RightSidebarRuntimeContextValue {
+  projects?: readonly AppProject[]
   onBrowserAutomationTargetChange?: (
     surfaceId: string,
     surfaceInstanceId: string,

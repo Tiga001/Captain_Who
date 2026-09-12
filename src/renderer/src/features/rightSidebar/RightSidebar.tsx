@@ -1,5 +1,6 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
+import type { AppProject } from '../../config/projectConfig'
 import { Maximize } from 'lucide-react'
 import type {
   BrowserSurfaceCommand,
@@ -55,6 +56,7 @@ interface RightSidebarProps {
   workspaceKey?: string | null
   workspaceKeys?: readonly string[]
   projectWorkspaceRevisions?: Readonly<Record<string, string>>
+  projects?: readonly AppProject[]
   workspaceName?: string | null
   workspacePath?: string
 }
@@ -113,6 +115,7 @@ export const RightSidebar = memo(function RightSidebar({
   workspaceKey,
   workspaceKeys,
   projectWorkspaceRevisions,
+  projects,
   workspaceName,
   workspacePath
 }: RightSidebarProps): ReactNode {
@@ -398,6 +401,7 @@ export const RightSidebar = memo(function RightSidebar({
   const maximizeLabel = isMaximized ? t('rightSidebar.restore') : t('rightSidebar.maximize')
   const runtimeContext = useMemo(
     () => ({
+      projects,
       activeConversationId: activeConversationId ?? null,
       activeWorkspaceKey: workspaceKey ?? null,
       collaborationSnapshot,
@@ -410,6 +414,7 @@ export const RightSidebar = memo(function RightSidebar({
       renderAgentObserver
     }),
     [
+      projects,
       activeConversationId,
       browserSurfaceRequest,
       collaborationSnapshot,
@@ -603,6 +608,7 @@ export const RightSidebar = memo(function RightSidebar({
       </header>
 
       <WorkspaceFileTreeSessionsProvider
+        projects={projects}
         projectIds={fileTreeProjectIds}
         projectRevisions={projectWorkspaceRevisions}
       >

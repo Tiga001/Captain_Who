@@ -26,6 +26,7 @@ vi.mock('../../../components/clipboard', () => ({
 }))
 
 vi.mock('../gitReviewClient', () => ({
+  inspectGitRepository: vi.fn(),
   listGitReviewCommits: listCommitsSpy
 }))
 

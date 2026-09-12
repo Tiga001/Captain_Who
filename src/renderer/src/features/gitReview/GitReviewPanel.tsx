@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode, Ref } from 'react'
 import type {
   GitReviewBranch,
@@ -21,6 +21,9 @@ import {
   WrapText,
   X
 } from 'lucide-react'
+import { projectWorkspaceRevision, type AppProject } from '../../config/projectConfig'
+import { GitReviewRepositorySelector } from './GitReviewRepositorySelector'
+import { useGitRepositorySources } from './useGitRepositorySources'
 import { useFrontendConfig } from '../../config/FrontendConfigProvider'
 import { formatTranslation } from '../../config/translationFormat'
 import { ConfirmationDialog } from '../../components/dialog/ConfirmationDialog'
@@ -47,7 +50,8 @@ import './GitReviewPanel.css'
 interface GitReviewPanelProps {
   conversationId?: string | null
   isActive: boolean
-  onOpenFile: (path: string) => void
+  onOpenFile: (path: string, folderId?: string, assistantMessageId?: string) => void
+  project?: AppProject
   projectId: string
   targetNavigation?: {
     filePath?: string
@@ -56,7 +60,7 @@ interface GitReviewPanelProps {
   }
 }
 
-type OpenMenu = 'source' | 'options' | null
+type OpenMenu = 'source' | 'repository' | 'options' | null
 
 interface PendingFileAlignment {
   fileId: string
@@ -79,10 +83,8 @@ function emptyFileVisibility(): GitReviewFileVisibility {
 }
 
 function normalizeReviewFilePath(path: string): string {
-  return path
-    .trim()
-    .replace(/\\/g, '/')
-    .replace(/^\.\/+/, '')
+  const normalized = path.trim().replace(/\\/g, '/')
+  return normalized.startsWith('./@workspace/') ? normalized : normalized.replace(/^\.\/+/, '')
 }
 
 function findReviewFileByPath(
@@ -94,7 +96,7 @@ function findReviewFileByPath(
 
   return files.find(
     (file) =>
-      normalizeReviewFilePath(file.path) === normalizedRequestedPath ||
+      normalizeReviewFilePath(file.workspacePath ?? file.path) === normalizedRequestedPath ||
       (file.previousPath !== undefined &&
         normalizeReviewFilePath(file.previousPath) === normalizedRequestedPath)
   )
@@ -104,11 +106,30 @@ export function GitReviewPanel({
   conversationId,
   isActive,
   onOpenFile,
+  project,
   projectId,
   targetNavigation
 }: GitReviewPanelProps): ReactNode {
   const { language, t } = useFrontendConfig()
   const [reviewPreferences, setReviewPreferences] = useState(loadGitReviewPreferences)
+  const projectRevision = project ? projectWorkspaceRevision(project) : ''
+  const multiFolder = (project?.folders.length ?? 0) > 1
+  const sourceInspection = useGitRepositorySources(projectId, projectRevision, multiFolder)
+  const sourceFolders = useMemo(
+    () => sourceInspection?.inspection?.folders?.filter((folder) => folder.state === 'ready') ?? [],
+    [sourceInspection]
+  )
+  const [rememberedFolder, setRememberedFolder] = useState<{
+    projectId: string
+    folderId: string
+  } | null>(null)
+  const [allLastTurn, setAllLastTurn] = useState(true)
+  const selectedFolderId = multiFolder
+    ? (sourceFolders.find(
+        (folder) =>
+          rememberedFolder?.projectId === projectId && folder.folderId === rememberedFolder.folderId
+      )?.folderId ?? sourceInspection?.inspection?.defaultFolderId)
+    : undefined
   const {
     cancelQueuedFileContentsExcept,
     cancelQueuedFileDiffsExcept,
@@ -126,11 +147,33 @@ export function GitReviewPanel({
     setHotDiffFileIds,
     setHotFullContentFileIds,
     setTarget,
-    summaryState: sourceSummaryState
-  } = useGitReview(projectId, isActive, targetNavigation?.target)
-  const { load: loadRepositoryContext, state: repositoryState } =
-    useGitReviewRepositoryContext(projectId)
+    summaryState: sourceSummaryState,
+    sourceKey
+  } = useGitReview(
+    projectId,
+    isActive && (!multiFolder || Boolean(sourceInspection?.inspection)),
+    targetNavigation?.target,
+    {
+      folderId: selectedFolderId,
+      allLastTurn: multiFolder && allLastTurn,
+      revision: projectRevision
+    }
+  )
+  const { load: loadRepositoryContext, state: repositoryState } = useGitReviewRepositoryContext(
+    projectId,
+    selectedFolderId,
+    projectRevision
+  )
   const targetKey = gitReviewTargetKey(target)
+  const repositoryBinding = JSON.stringify([projectId, selectedFolderId, projectRevision])
+  const previousRepositoryBinding = useRef(repositoryBinding)
+  useLayoutEffect(() => {
+    const changed = previousRepositoryBinding.current !== repositoryBinding
+    previousRepositoryBinding.current = repositoryBinding
+    if (changed && (target.kind === 'commit' || target.kind === 'branch')) {
+      setTarget({ kind: 'uncommitted' })
+    }
+  }, [repositoryBinding, setTarget, target.kind])
   const targetKind = target.kind
   const capabilities = getGitReviewTargetCapabilities(targetKind)
   const projectedSummary = useMemo(() => {
@@ -252,12 +295,12 @@ export function GitReviewPanel({
     setSearchQuery('')
     setFileVisibility(emptyFileVisibility())
     cancelPendingFileAlignment()
-  }, [cancelPendingFileAlignment, projectId, targetKey])
+  }, [cancelPendingFileAlignment, projectId, targetKey, sourceKey])
 
   useEffect(() => {
     setCommitPreview(undefined)
     setRememberedBranchBaseRef(undefined)
-  }, [projectId])
+  }, [projectId, selectedFolderId, projectRevision])
 
   useEffect(() => {
     if (target.kind === 'branch') void loadRepositoryContext()
@@ -271,6 +314,7 @@ export function GitReviewPanel({
       if (
         target.closest('.git-review__menu') ||
         target.closest('.git-review__source-control') ||
+        target.closest('.git-review__repository-control') ||
         target.closest('.git-review__options-control')
       ) {
         return
@@ -588,9 +632,40 @@ export function GitReviewPanel({
     [mutateFile]
   )
 
+  const historicalAssistantMessageId = matchingSummary?.assistantMessageId
   const handleCopyFile = useCallback(
-    (path: string) => copyGitReviewFilePath({ projectId, path }),
-    [projectId]
+    (path: string, file: GitReviewFile) =>
+      copyGitReviewFilePath({
+        projectId,
+        path,
+        ...(file.sourceFolderId ? { folderId: file.sourceFolderId } : {}),
+        ...(historicalAssistantMessageId
+          ? { assistantMessageId: historicalAssistantMessageId }
+          : {})
+      }),
+    [projectId, historicalAssistantMessageId]
+  )
+  const handleOpenFile = useCallback(
+    (path: string, file: GitReviewFile) => {
+      if (file.sourceFolderId || historicalAssistantMessageId) {
+        onOpenFile(path, file.sourceFolderId, historicalAssistantMessageId)
+      } else onOpenFile(path)
+    },
+    [onOpenFile, historicalAssistantMessageId]
+  )
+  const handleRepositorySelect = useCallback(
+    (folderId: string | null) => {
+      if (folderId === null) {
+        setAllLastTurn(true)
+        return
+      }
+      setRememberedFolder({ projectId, folderId })
+      if (target.kind === 'lastTurn') setAllLastTurn(false)
+      // A commit SHA or branch from another repository must never be replayed against this one.
+      if (target.kind === 'commit' || target.kind === 'branch') setTarget({ kind: 'uncommitted' })
+      setPendingReviewFileNavigation(null)
+    },
+    [projectId, setTarget, target.kind]
   )
 
   useEffect(() => {
@@ -672,6 +747,18 @@ export function GitReviewPanel({
     <div className="git-review">
       <header className="git-review__toolbar" data-has-context={hasContextRow ? 'true' : undefined}>
         <div className="git-review__toolbar-summary">
+          {multiFolder && (
+            <GitReviewRepositorySelector
+              folders={sourceFolders}
+              selectedFolderId={selectedFolderId}
+              allSelected={targetKind === 'lastTurn' && allLastTurn}
+              allowAll={targetKind === 'lastTurn'}
+              isOpen={openMenu === 'repository'}
+              onOpenChange={(open) => setOpenMenu(open ? 'repository' : null)}
+              onSelect={handleRepositorySelect}
+              t={t}
+            />
+          )}
           <GitReviewSourceSelector
             branchBaseRef={branchBaseRef}
             conversationId={conversationId}
@@ -684,6 +771,8 @@ export function GitReviewPanel({
             onSelectCommit={handleCommitSelect}
             onSelectTarget={handleTargetChange}
             projectId={projectId}
+            folderId={selectedFolderId}
+            revision={projectRevision}
             repositoryState={repositoryState}
             t={t}
             target={target}
@@ -866,6 +955,16 @@ export function GitReviewPanel({
         </div>
       )}
 
+      {sourceInspection?.error && (
+        <div className="git-review__inline-error" role="alert">
+          {sourceInspection.error}
+        </div>
+      )}
+      {summaryState.value?.message && (
+        <div className="git-review__truncated" role="status">
+          {summaryState.value.message}
+        </div>
+      )}
       {mutationError && (
         <div className="git-review__inline-error" role="alert">
           <AlertCircle aria-hidden="true" />
@@ -890,6 +989,7 @@ export function GitReviewPanel({
         {showFileList && summaryState.value && files.length > 0 && (
           <FileList
             files={filteredFiles}
+            groupSources={matchingSummary?.source?.kind === 'all'}
             onSelect={selectFile}
             selectedFileId={selectedFileId}
             t={t}
@@ -920,7 +1020,7 @@ export function GitReviewPanel({
             mutateFile={handleMutateFile}
             pendingFileId={pendingFileId}
             onCopyFile={handleCopyFile}
-            onOpenFile={onOpenFile}
+            onOpenFile={handleOpenFile}
             onRestore={setRestoreCandidate}
             nearFileIds={fileVisibility.near}
             targetKind={targetKind}
@@ -1020,13 +1120,14 @@ function DiffLayoutIcon({ targetMode }: { targetMode: GitReviewViewMode }): Reac
 }
 
 interface FileListProps {
+  groupSources?: boolean
   files: GitReviewFile[]
   onSelect: (fileId: string) => void
   selectedFileId: string | null
   t: ReturnType<typeof useFrontendConfig>['t']
 }
 
-function FileList({ files, onSelect, selectedFileId, t }: FileListProps): ReactNode {
+function FileList({ files, groupSources, onSelect, selectedFileId, t }: FileListProps): ReactNode {
   return (
     <aside className="git-review__file-list" aria-label={t('gitReview.fileList')}>
       <div className="git-review__file-list-heading">
@@ -1034,25 +1135,31 @@ function FileList({ files, onSelect, selectedFileId, t }: FileListProps): ReactN
         <span>{files.length}</span>
       </div>
       <div className="git-review__file-list-scroll">
-        {files.map((file) => {
+        {files.map((file, index) => {
           const pathParts = file.path.split('/')
           const name = pathParts.pop() || file.path
           const directory = pathParts.join('/')
           return (
-            <button
-              className="git-review__file-list-item"
-              type="button"
-              data-selected={selectedFileId === file.id ? 'true' : undefined}
-              key={file.id}
-              title={file.path}
-              onClick={() => onSelect(file.id)}
-            >
-              <GitReviewFileIcon path={file.path} />
-              <span className="git-review__file-list-name">
-                <span>{name}</span>
-                {directory && <small>{directory}</small>}
-              </span>
-            </button>
+            <Fragment key={file.id}>
+              {groupSources &&
+                (index === 0 || files[index - 1].sourceFolderId !== file.sourceFolderId) && (
+                  <div className="git-review__repository-heading">{file.sourceAlias}</div>
+                )}
+              <button
+                className="git-review__file-list-item"
+                type="button"
+                data-selected={selectedFileId === file.id ? 'true' : undefined}
+                key={file.id}
+                title={file.path}
+                onClick={() => onSelect(file.id)}
+              >
+                <GitReviewFileIcon path={file.path} />
+                <span className="git-review__file-list-name">
+                  <span>{name}</span>
+                  {directory && <small>{directory}</small>}
+                </span>
+              </button>
+            </Fragment>
           )
         })}
       </div>
@@ -1075,8 +1182,8 @@ interface GitReviewContentProps {
   loadFullFiles: boolean
   mutateFile: (fileId: string, action: Parameters<ReviewHook['mutateFile']>[1]) => void
   nearFileIds: Set<string>
-  onCopyFile: (path: string) => Promise<void>
-  onOpenFile: (path: string) => void
+  onCopyFile: (path: string, file: GitReviewFile) => Promise<void>
+  onOpenFile: (path: string, file: GitReviewFile) => void
   onRestore: (file: GitReviewFile) => void
   onRefresh: ReviewHook['refresh']
   pendingFileId: string | null
@@ -1170,7 +1277,7 @@ function GitReviewContent({
 
   return (
     <div className="git-review__diff-list">
-      {filteredFiles.map((file) => (
+      {filteredFiles.map((file, index) => (
         <div
           data-review-file-id={file.id}
           key={file.id}
@@ -1179,6 +1286,10 @@ function GitReviewContent({
             else fileElementsRef.current.delete(file.id)
           }}
         >
+          {summaryState.value?.source?.kind === 'all' &&
+            (index === 0 || filteredFiles[index - 1].sourceFolderId !== file.sourceFolderId) && (
+              <div className="git-review__repository-heading">{file.sourceAlias}</div>
+            )}
           <GitReviewDiffCard
             capabilities={capabilities}
             diffState={diffStates[file.id]}
@@ -1193,9 +1304,9 @@ function GitReviewContent({
             loadFullFiles={loadFullFiles}
             mutationLocked={pendingFileId !== null}
             mutationPending={pendingFileId === file.id}
-            onCopyFile={onCopyFile}
+            onCopyFile={(path) => onCopyFile(path, file)}
             onMutate={mutateFile}
-            onOpenFile={onOpenFile}
+            onOpenFile={(path) => onOpenFile(path, file)}
             onRequestDiff={retryFileDiff}
             onRestore={onRestore}
             onToggle={toggleFile}

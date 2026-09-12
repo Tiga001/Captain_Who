@@ -28,6 +28,8 @@ type PreviewState =
     }
 
 interface WorkspaceFilePreviewProps {
+  assistantMessageId?: string
+  folderId?: string
   isActive: boolean
   markdownAnchor?: string
   markdownView: WorkspaceMarkdownView
@@ -40,6 +42,8 @@ interface WorkspaceFilePreviewProps {
 }
 
 export function WorkspaceFilePreview({
+  assistantMessageId,
+  folderId,
   isActive,
   markdownAnchor,
   markdownView,
@@ -73,7 +77,12 @@ export function WorkspaceFilePreview({
 
     void (async () => {
       try {
-        const request = { path, projectId }
+        const request = {
+          path,
+          projectId,
+          ...(folderId === undefined ? {} : { folderId }),
+          ...(assistantMessageId === undefined ? {} : { assistantMessageId })
+        }
         const preview = await readWorkspaceFilePreview(request)
         if (requestSequenceRef.current !== requestId) return
         setState({ preview, status: 'ready' })
@@ -85,7 +94,7 @@ export function WorkspaceFilePreview({
     return () => {
       if (requestSequenceRef.current === requestId) requestSequenceRef.current += 1
     }
-  }, [isActive, officeDocumentType, path, projectId, retryToken])
+  }, [assistantMessageId, folderId, isActive, officeDocumentType, path, projectId, retryToken])
 
   if (!path) {
     return (
@@ -144,6 +153,8 @@ export function WorkspaceFilePreview({
     if (isMarkdown && markdownView === 'preview') {
       return (
         <WorkspaceMarkdownPreview
+          assistantMessageId={assistantMessageId}
+          folderId={folderId}
           anchor={markdownAnchor}
           content={state.preview.text}
           onOpenFile={onOpenFile}
@@ -155,9 +166,9 @@ export function WorkspaceFilePreview({
     }
     return (
       <TextFilePreview
+        sourceKey={JSON.stringify([projectId, folderId, assistantMessageId])}
         content={state.preview.text}
         path={path}
-        projectId={projectId}
         scrollRef={scrollRef}
         wrapLines={wrapLines}
       />
@@ -204,17 +215,17 @@ export function WorkspaceFilePreview({
 }
 
 interface TextFilePreviewProps {
+  sourceKey: string
   content: WorkspaceTextFileContent
   path: string
-  projectId: string
   scrollRef: RefObject<HTMLDivElement | null>
   wrapLines: boolean
 }
 
 function TextFilePreview({
+  sourceKey,
   content,
   path,
-  projectId,
   scrollRef,
   wrapLines
 }: TextFilePreviewProps): ReactNode {
@@ -225,7 +236,7 @@ function TextFilePreview({
     [path]
   )
   const highlightState = useGitReviewSyntaxHighlight({
-    cacheKey: `workspace-file:${projectId}:${path}:${content.modifiedAtMs}:${content.sizeBytes}`,
+    cacheKey: `workspace-file:${sourceKey}:${path}:${content.modifiedAtMs}:${content.sizeBytes}`,
     code: content.content,
     enabled: lines.length <= MAX_RENDERED_LINES && language !== 'text',
     language

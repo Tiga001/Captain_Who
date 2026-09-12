@@ -1471,6 +1471,7 @@ fn write_canonical_json(
 
 #[cfg(test)]
 mod tests {
+    mod workspace_binding;
     use super::*;
     use crate::storage::{chat_repository, migrations};
     use crate::{

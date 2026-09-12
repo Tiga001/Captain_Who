@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import type { ComponentProps } from 'react'
+import type { AppProject } from '../../../config/projectConfig'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { render } from 'vitest-browser-react'
 import '../../../styles/global.css'
@@ -17,7 +18,8 @@ const {
   pdfPageChangeSpy,
   pdfPageCleanupSpy,
   pdfRenderCancelSpy,
-  readPreviewSpy
+  readPreviewSpy,
+  revealSpy
 } = vi.hoisted(() => ({
   copyPathSpy: vi.fn(),
   createPdfLoadingTaskSpy: vi.fn(),
@@ -30,7 +32,8 @@ const {
   pdfPageChangeSpy: vi.fn(),
   pdfPageCleanupSpy: vi.fn(),
   pdfRenderCancelSpy: vi.fn(),
-  readPreviewSpy: vi.fn()
+  readPreviewSpy: vi.fn(),
+  revealSpy: vi.fn()
 }))
 
 vi.mock('../../../config/FrontendConfigProvider', () => ({
@@ -42,7 +45,7 @@ vi.mock('../filesClient', () => ({
   listWorkspaceDirectory: listDirectorySpy,
   openWorkspaceExternalLink: openExternalSpy,
   readWorkspaceFilePreview: readPreviewSpy,
-  revealWorkspaceFile: vi.fn()
+  revealWorkspaceFile: revealSpy
 }))
 
 vi.mock('../workspacePdfRuntime', () => ({
@@ -93,6 +96,67 @@ function TestFilesPanel({ initialMarkdownView = 'preview', ...props }: TestFiles
   )
 }
 
+const MULTI_ROOT_PROJECT: AppProject = {
+  id: 'project-1',
+  name: 'Workspace',
+  createdAt: 1,
+  folders: [
+    {
+      id: 'root-app',
+      alias: 'app',
+      path: '/project/app',
+      role: 'primary',
+      sortOrder: 0,
+      createdAt: 1
+    },
+    {
+      id: 'root-docs',
+      alias: 'docs',
+      path: '/project/docs',
+      role: 'auxiliary',
+      sortOrder: 1,
+      createdAt: 1
+    }
+  ]
+}
+
+function RootFilesHarness({
+  project = MULTI_ROOT_PROJECT,
+  filePath = 'README.md',
+  folderId = 'root-app',
+  assistantMessageId,
+  markdownView = 'source'
+}: {
+  project?: AppProject
+  filePath?: string | null
+  folderId?: string
+  assistantMessageId?: string
+  markdownView?: 'preview' | 'source'
+}) {
+  return (
+    <WorkspaceFileTreeSessionsProvider projectIds={[project.id]} projects={[project]}>
+      <div style={{ height: 620, width: 760 }}>
+        <FilesPanel
+          assistantMessageId={assistantMessageId}
+          folderId={folderId}
+          filePath={filePath}
+          isActive
+          markdownView={markdownView}
+          onMarkdownViewChange={() => undefined}
+          onOpenFile={openFileSpy}
+          onPdfPageChange={pdfPageChangeSpy}
+          onSurfaceFocus={() => undefined}
+          onWrapLinesChange={() => undefined}
+          pdfPage={1}
+          projectId={project.id}
+          projectName={project.name}
+          wrapLines={false}
+        />
+      </div>
+    </WorkspaceFileTreeSessionsProvider>
+  )
+}
+
 beforeEach(() => {
   copyPathSpy.mockReset()
   copyPathSpy.mockResolvedValue(undefined)
@@ -110,6 +174,8 @@ beforeEach(() => {
   pdfPageCleanupSpy.mockReset()
   pdfRenderCancelSpy.mockReset()
   readPreviewSpy.mockReset()
+  revealSpy.mockReset()
+  revealSpy.mockResolvedValue(undefined)
 
   getPdfPageSpy.mockImplementation(async (pageNumber: number) => ({
     cleanup: pdfPageCleanupSpy,
@@ -169,6 +235,251 @@ beforeEach(() => {
 })
 
 describe('FilesPanel', () => {
+  it('shows the root selector only for multiple folders and keeps each root tree separate from the open preview', async () => {
+    listDirectorySpy.mockImplementation(async ({ folderId, directoryPath = '' }) => ({
+      directoryPath,
+      entries:
+        directoryPath === 'src'
+          ? [{ kind: 'file', name: 'index.ts', path: 'src/index.ts' }]
+          : folderId === 'root-docs'
+            ? [{ kind: 'file', name: 'README.md', path: 'README.md' }]
+            : [
+                { kind: 'directory', name: 'src', path: 'src/' },
+                { kind: 'file', name: 'README.md', path: 'README.md' }
+              ],
+      truncated: false
+    }))
+    const screen = await render(<RootFilesHarness />)
+    const tree = () =>
+      screen.container.querySelector<HTMLElement>('file-tree-container')?.shadowRoot
+    await expect.poll(() => tree()?.querySelector('[data-item-path="src/"]')).not.toBeNull()
+    expect(
+      screen.container.querySelector('.files-panel__root-row')?.nextElementSibling?.className
+    ).toBe('files-panel__tree-search')
+    await screen.getByRole('button', { name: 'files.selectRoot: app' }).click()
+    await expect
+      .poll(() => document.querySelector('[role="option"][aria-selected="true"]')?.textContent)
+      .toBe('app')
+    await screen.getByRole('option', { name: 'app' }).click()
+    tree()?.querySelector<HTMLElement>('[data-item-path="src/"]')?.click()
+    await expect.poll(() => tree()?.querySelector('[data-item-path="src/index.ts"]')).not.toBeNull()
+    await screen.getByRole('textbox', { name: 'files.filter' }).fill('index')
+    const preview = screen.container.querySelector('.files-panel__code')
+    expect(readPreviewSpy).toHaveBeenCalledWith({
+      projectId: 'project-1',
+      folderId: 'root-app',
+      path: 'README.md'
+    })
+
+    await screen.getByRole('button', { name: 'files.selectRoot: app' }).click()
+    await screen.getByRole('option', { name: 'docs' }).click()
+    await expect.poll(() => tree()?.querySelector('[data-item-path="README.md"]')).not.toBeNull()
+    expect(tree()?.querySelector('[data-item-selected]')).toBeNull()
+    expect(tree()?.querySelector('[data-item-path="src/"]')).toBeNull()
+    expect(
+      screen.container.querySelector<HTMLInputElement>('.files-panel__tree-search input')?.value
+    ).toBe('')
+    expect(screen.container.querySelector('.files-panel__code')).toBe(preview)
+    expect(readPreviewSpy).toHaveBeenCalledTimes(1)
+    expect(openFileSpy).not.toHaveBeenCalled()
+    tree()?.querySelector<HTMLElement>('[data-item-path="README.md"]')?.click()
+    await expect.poll(() => openFileSpy).toHaveBeenCalledWith('README.md', undefined, 'root-docs')
+    await screen.getByRole('textbox', { name: 'files.filter' }).fill('README')
+
+    await screen.getByRole('button', { name: 'files.selectRoot: docs' }).click()
+    await screen.getByRole('option', { name: 'app' }).click()
+    await expect.poll(() => tree()?.querySelector('[data-item-path="src/index.ts"]')).not.toBeNull()
+    expect(
+      screen.container.querySelector<HTMLInputElement>('.files-panel__tree-search input')?.value
+    ).toBe('index')
+    expect(
+      listDirectorySpy.mock.calls.filter(
+        ([input]) => input.folderId === 'root-app' && input.directoryPath === ''
+      )
+    ).toHaveLength(1)
+    expect(
+      listDirectorySpy.mock.calls.filter(
+        ([input]) => input.folderId === 'root-app' && input.directoryPath === 'src'
+      )
+    ).toHaveLength(1)
+    await screen.getByRole('button', { name: 'files.selectRoot: app' }).click()
+    await screen.getByRole('option', { name: 'docs' }).click()
+    expect(
+      screen.container.querySelector<HTMLInputElement>('.files-panel__tree-search input')?.value
+    ).toBe('README')
+    expect(readPreviewSpy).toHaveBeenCalledTimes(1)
+
+    await screen.rerender(
+      <RootFilesHarness
+        project={{ ...MULTI_ROOT_PROJECT, folders: [MULTI_ROOT_PROJECT.folders[0]] }}
+      />
+    )
+    expect(screen.container.querySelector('.files-panel__root-row')).toBeNull()
+    expect(
+      screen.container.querySelector('.files-panel__tree-pane')?.firstElementChild?.className
+    ).toBe('files-panel__tree-search')
+  })
+
+  it('ignores a delayed directory response from another selected root and isolates same-path previews', async () => {
+    let resolvePrimary: ((value: unknown) => void) | undefined
+    listDirectorySpy.mockImplementation(({ folderId, directoryPath = '' }) =>
+      folderId === 'root-app'
+        ? new Promise((resolve) => {
+            resolvePrimary = resolve
+          })
+        : Promise.resolve({
+            directoryPath,
+            entries: [{ kind: 'file', name: 'docs-only.txt', path: 'docs-only.txt' }],
+            truncated: false
+          })
+    )
+    readPreviewSpy.mockImplementation(async ({ folderId, path }) => ({
+      metadata: {
+        kind: 'file',
+        mimeType: 'text/plain',
+        modifiedAtMs: 1,
+        path,
+        previewKind: 'text',
+        sizeBytes: 10
+      },
+      text: { content: `${folderId} document`, modifiedAtMs: 1, path, sizeBytes: 10 }
+    }))
+    const screen = await render(<RootFilesHarness />)
+    await expect.poll(() => resolvePrimary).toBeDefined()
+    await screen.getByRole('button', { name: 'files.selectRoot: app' }).click()
+    await screen.getByRole('option', { name: 'docs' }).click()
+    resolvePrimary?.({
+      directoryPath: '',
+      entries: [{ kind: 'file', name: 'app-only.txt', path: 'app-only.txt' }],
+      truncated: false
+    })
+    const tree = () =>
+      screen.container.querySelector<HTMLElement>('file-tree-container')?.shadowRoot
+    await expect
+      .poll(() => tree()?.querySelector('[data-item-path="docs-only.txt"]'))
+      .not.toBeNull()
+    expect(tree()?.querySelector('[data-item-path="app-only.txt"]')).toBeNull()
+    await expect
+      .poll(() => screen.container.querySelector('.files-panel__code')?.textContent)
+      .toContain('root-app document')
+    await screen.rerender(<RootFilesHarness folderId="root-docs" />)
+    await expect
+      .poll(() => screen.container.querySelector('.files-panel__code')?.textContent)
+      .toContain('root-docs document')
+    expect(readPreviewSpy).toHaveBeenCalledTimes(2)
+    expect(readPreviewSpy).toHaveBeenLastCalledWith({
+      projectId: 'project-1',
+      folderId: 'root-docs',
+      path: 'README.md'
+    })
+  })
+
+  it('does not reinterpret an open file against the remaining root when its folder is removed', async () => {
+    let project = MULTI_ROOT_PROJECT
+    readPreviewSpy.mockImplementation(async ({ folderId, path }) => {
+      if (!project.folders.some((folder) => folder.id === folderId))
+        throw new Error('Folder is not available')
+      return {
+        metadata: {
+          kind: 'file',
+          mimeType: 'text/plain',
+          modifiedAtMs: 1,
+          path,
+          previewKind: 'text',
+          sizeBytes: 10
+        },
+        text: { content: `${folderId} document`, modifiedAtMs: 1, path, sizeBytes: 10 }
+      }
+    })
+    const screen = await render(<RootFilesHarness folderId="root-docs" project={project} />)
+    await expect
+      .poll(() => screen.container.querySelector('.files-panel__code')?.textContent)
+      .toContain('root-docs document')
+    project = { ...MULTI_ROOT_PROJECT, folders: [MULTI_ROOT_PROJECT.folders[0]] }
+    await screen.rerender(<RootFilesHarness folderId="root-docs" project={project} />)
+    await expect
+      .poll(() => screen.container.querySelector('.files-panel__preview')?.textContent)
+      .toContain('files.preview.errorTitle')
+    expect(readPreviewSpy).toHaveBeenLastCalledWith({
+      projectId: 'project-1',
+      folderId: 'root-docs',
+      path: 'README.md'
+    })
+    expect(readPreviewSpy.mock.calls.every(([input]) => input.folderId === 'root-docs')).toBe(true)
+    expect(screen.container.querySelector('.files-panel__root-row')).toBeNull()
+  })
+
+  it('keeps historical Markdown links, images, copy, and reveal on the original file source while the tree switches', async () => {
+    readPreviewSpy.mockImplementation(async ({ path }) =>
+      path.endsWith('.png')
+        ? {
+            metadata: {
+              kind: 'file',
+              mimeType: 'image/png',
+              modifiedAtMs: 1,
+              path,
+              previewKind: 'image',
+              sizeBytes: 4
+            },
+            image: { data: 'iVBORw==', mimeType: 'image/png', modifiedAtMs: 1, path, sizeBytes: 4 }
+          }
+        : {
+            metadata: {
+              kind: 'file',
+              mimeType: 'text/plain',
+              modifiedAtMs: 1,
+              path,
+              previewKind: 'text',
+              sizeBytes: 100
+            },
+            text: {
+              content: '# Original\n[Next](./next.md#details)\n![Original image](./image.png)',
+              modifiedAtMs: 1,
+              path,
+              sizeBytes: 100
+            }
+          }
+    )
+    const screen = await render(
+      <RootFilesHarness
+        assistantMessageId="old-assistant"
+        folderId="removed-root"
+        filePath="guides/README.md"
+        markdownView="preview"
+      />
+    )
+    await expect
+      .poll(() => screen.container.querySelector('img[alt="Original image"]'))
+      .not.toBeNull()
+    expect(readPreviewSpy).toHaveBeenCalledWith({
+      projectId: 'project-1',
+      folderId: 'removed-root',
+      assistantMessageId: 'old-assistant',
+      path: 'guides/image.png'
+    })
+    await screen.getByRole('button', { name: 'files.selectRoot: app' }).click()
+    await screen.getByRole('option', { name: 'docs' }).click()
+    await screen.getByRole('link', { name: 'Next' }).click()
+    expect(openFileSpy).toHaveBeenCalledWith(
+      'guides/next.md',
+      'details',
+      'removed-root',
+      'old-assistant'
+    )
+    await screen.getByRole('button', { name: 'files.options' }).click()
+    await screen.getByRole('menuitem', { name: 'files.copyPath' }).click()
+    const expected = {
+      projectId: 'project-1',
+      folderId: 'removed-root',
+      assistantMessageId: 'old-assistant',
+      path: 'guides/README.md'
+    }
+    expect(copyPathSpy).toHaveBeenCalledWith(expected)
+    await screen.getByRole('button', { name: 'files.reveal' }).click()
+    expect(revealSpy).toHaveBeenCalledWith(expected)
+    expect(readPreviewSpy).toHaveBeenCalledTimes(2)
+  })
+
   it('renders Office files as a dedicated unsupported preview without reading file contents', async () => {
     const screen = await render(
       <div style={{ height: 620, width: 620 }}>

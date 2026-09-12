@@ -15,10 +15,13 @@ mod diff;
 mod git_command;
 mod metadata;
 mod mutation;
+mod project;
 mod repository;
 mod snapshot;
 mod turn;
 
+use crate::file_change::FileChangeDirectoryIdentity;
+use crate::storage::models::{ProjectFolderRecord, ProjectFolderRole, ProjectRecord};
 use content::*;
 use diff::*;
 use git_command::*;
@@ -65,6 +68,32 @@ pub struct GitRepositoryInspection {
     pub repository_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+    pub folders: Vec<GitRepositorySourceInspection>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_folder_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitRepositorySourceInspection {
+    pub folder_id: String,
+    pub alias: String,
+    pub role: ProjectFolderRole,
+    pub state: GitRepositoryInspectionState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repository_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum GitReviewSource {
+    Folder {
+        #[serde(rename = "folderId")]
+        folder_id: String,
+    },
+    All,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -146,6 +175,12 @@ pub enum GitReviewFileStatus {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GitReviewFile {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_folder_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_alias: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspace_path: Option<String>,
     pub id: String,
     pub path: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -241,6 +276,12 @@ pub struct GitReviewContext {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GitReviewSummary {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<GitReviewSource>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub assistant_message_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
     pub repository_id: String,
     pub snapshot_id: String,
     pub target: GitReviewTarget,
@@ -377,24 +418,32 @@ impl GitReviewService {
     ) -> GitRepositoryInspection {
         match resolve_repository(project_path) {
             Ok(repository) => GitRepositoryInspection {
+                folders: Vec::new(),
+                default_folder_id: None,
                 project_id: project_id.to_string(),
                 state: GitRepositoryInspectionState::Ready,
                 repository_id: Some(repository.repository_id),
                 message: None,
             },
             Err(RepositoryResolutionError::NotRepository) => GitRepositoryInspection {
+                folders: Vec::new(),
+                default_folder_id: None,
                 project_id: project_id.to_string(),
                 state: GitRepositoryInspectionState::NotRepository,
                 repository_id: None,
                 message: None,
             },
             Err(RepositoryResolutionError::Unsupported(message)) => GitRepositoryInspection {
+                folders: Vec::new(),
+                default_folder_id: None,
                 project_id: project_id.to_string(),
                 state: GitRepositoryInspectionState::Unsupported,
                 repository_id: None,
                 message: Some(message),
             },
             Err(RepositoryResolutionError::Unavailable(message)) => GitRepositoryInspection {
+                folders: Vec::new(),
+                default_folder_id: None,
                 project_id: project_id.to_string(),
                 state: GitRepositoryInspectionState::Unavailable,
                 repository_id: None,
@@ -408,8 +457,19 @@ impl GitReviewService {
         project_path: &Path,
         target: GitReviewTarget,
     ) -> Result<GitReviewSummary, String> {
+        self.review_bound_summary(project_path, target, None)
+    }
+
+    fn review_bound_summary(
+        &self,
+        project_path: &Path,
+        target: GitReviewTarget,
+        project_binding: Option<project::ProjectSourceBinding>,
+    ) -> Result<GitReviewSummary, String> {
         let repository = resolve_repository(project_path).map_err(|error| error.message())?;
+        let index_stamp = file_stamp(&repository.git_dir.join("index"));
         let resolved = resolve_review_target(&repository, target)?;
+        let head_oid = resolved.context.head_sha.clone().unwrap_or_default();
         let collected = collect_review_files(&repository, &resolved.target, &resolved.comparison)?;
         let parsed_files = collected.files;
         let stats = collected.stats;
@@ -419,7 +479,6 @@ impl GitReviewService {
             .into_iter()
             .take(MAX_REVIEW_FILES)
             .collect::<Vec<_>>();
-        let index_stamp = file_stamp(&repository.git_dir.join("index"));
         let snapshot_id = Uuid::new_v4().to_string();
         let target_identity = resolved.target.identity();
         let mut snapshot_files = HashMap::with_capacity(files.len());
@@ -457,6 +516,11 @@ impl GitReviewService {
                     .as_deref()
                     .and_then(|path| repository.project_relative_path(path));
                 Ok(GitReviewFile {
+                    source_folder_id: project_binding.as_ref().map(|v| v.folder.id.clone()),
+                    source_alias: project_binding.as_ref().map(|v| v.folder.alias.clone()),
+                    workspace_path: project_binding
+                        .as_ref()
+                        .map(|v| project::folder_workspace_path(&v.folder, &path)),
                     id,
                     stats: file_stats.get(&file.path).cloned(),
                     path,
@@ -466,6 +530,12 @@ impl GitReviewService {
             })
             .collect::<Result<Vec<_>, _>>()?;
 
+        if !repository_is_current(&repository)
+            || file_stamp(&repository.git_dir.join("index")) != index_stamp
+            || (resolved.target.is_mutable() && read_head_oid(&repository)? != head_oid)
+        {
+            return Err("The Git source changed while its review snapshot was being captured. Refresh the review.".into());
+        }
         self.snapshots
             .lock()
             .map_err(|_| "Git review snapshot cache is unavailable.".to_string())?
@@ -473,6 +543,8 @@ impl GitReviewService {
                 id: snapshot_id.clone(),
                 created_at: Instant::now(),
                 repository: repository.clone(),
+                project_binding: project_binding.clone(),
+                head_oid,
                 target: resolved.target.clone(),
                 comparison: resolved.comparison,
                 has_head: resolved.context.head_sha.is_some(),
@@ -486,6 +558,11 @@ impl GitReviewService {
         }
 
         Ok(GitReviewSummary {
+            source: project_binding.as_ref().map(|v| GitReviewSource::Folder {
+                folder_id: v.folder.id.clone(),
+            }),
+            assistant_message_id: None,
+            message: None,
             repository_id: repository.repository_id,
             snapshot_id,
             target: resolved.target,
@@ -699,6 +776,19 @@ impl GitReviewService {
         if !snapshot.target.is_mutable() {
             return Err("This Git review target is read-only.".to_string());
         }
+        // Renames can carry an old path outside a selected source subtree. Never mutate that
+        // sibling path implicitly; the full repository source can handle that operation.
+        if snapshot
+            .repository
+            .project_relative_path(&file.path)
+            .is_none()
+            || file
+                .previous_path
+                .as_deref()
+                .is_some_and(|path| snapshot.repository.project_relative_path(path).is_none())
+        {
+            return Err("This rename crosses the selected source folder boundary and cannot be changed from this review.".into());
+        }
 
         if !snapshot_file_is_current(&snapshot, &file)? {
             return Ok(expired_mutation(snapshot_id, file_id, action));
@@ -758,3 +848,6 @@ impl GitReviewService {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod project_tests;

@@ -3,15 +3,13 @@ import { homedir } from 'node:os'
 import * as pty from 'node-pty'
 import type { IDisposable, IPty } from 'node-pty'
 
-import type {
-  TerminalCreateSessionRequest,
-  TerminalExitEvent,
-  TerminalSessionSnapshot
-} from '@mycopilot/protocol'
+import type { TerminalExitEvent, TerminalSessionSnapshot } from '@mycopilot/protocol'
 import { TerminalExitDrainController } from './TerminalExitDrainController'
 import { TerminalOutputFlowController } from './TerminalOutputFlowController'
+import { TerminalSessionInput, validateTerminalSourceDirectory } from './terminalSourceDirectories'
 import { getTerminalShellLaunch } from './terminalShell'
 import type {
+  TerminalTrustedCreateSessionRequest,
   TerminalServiceCommand,
   TerminalServiceInboundMessage,
   TerminalServiceNotification,
@@ -20,6 +18,7 @@ import type {
 } from './terminalTransportProtocol'
 
 type TerminalSessionRecord = {
+  input: TerminalSessionInput
   closeSubscription: IDisposable | null
   exitDrain: TerminalExitDrainController<Pick<TerminalExitEvent, 'exitCode' | 'signal'>>
   exitSubscription: IDisposable
@@ -68,7 +67,10 @@ function handleCommand(command: TerminalServiceCommand): void {
   try {
     switch (command.method) {
       case 'terminal.writeInput':
-        writeInput(command.params.sessionId, command.params.data)
+        writeInput(command.params.sessionId, command.params.data, command.params.userInitiated)
+        return
+      case 'terminal.markUserInput':
+        getSession(command.params.sessionId).input.markUserInput()
         return
       case 'terminal.acknowledgeOutput':
         acknowledgeOutput(command.params.sessionId, command.params.sequence)
@@ -95,6 +97,10 @@ function handleRequest(request: TerminalServiceRequest): void {
           success: true,
           type: 'response'
         })
+        return
+      case 'terminal.selectSourceDirectory':
+        getSession(request.params.sessionId).input.selectSourceDirectory(request.params.folderId)
+        sendResponse({ id: request.id, success: true, type: 'response' })
         return
       case 'terminal.resizeSession':
         resizeSession(request.params.sessionId, request.params.cols, request.params.rows)
@@ -124,13 +130,19 @@ function handleRequest(request: TerminalServiceRequest): void {
   }
 }
 
-function createSession(request: TerminalCreateSessionRequest): TerminalSessionSnapshot {
+function createSession(request: TerminalTrustedCreateSessionRequest): TerminalSessionSnapshot {
   const sessionId = normalizeSessionId(request.sessionId)
   if (sessions.has(sessionId)) {
     throw new Error(`Terminal session already exists: ${sessionId}`)
   }
 
-  const cwd = request.cwd?.trim() || process.env.HOME || homedir()
+  const primary = request.projectSources?.folders.find(
+    (folder) => folder.id === request.projectSources?.primaryFolderId
+  )
+  if (request.projectSources && !primary) throw new Error('Terminal primary source is missing')
+  const cwd = primary
+    ? validateTerminalSourceDirectory(primary)
+    : request.cwd?.trim() || process.env.HOME || homedir()
   const { shell, args } = getTerminalShellLaunch(process.platform, process.env.SHELL)
   const cols = normalizeTerminalSize(request.cols, 80)
   const rows = normalizeTerminalSize(request.rows, 24)
@@ -194,6 +206,11 @@ function createSession(request: TerminalCreateSessionRequest): TerminalSessionSn
   exitDrainState.controller = exitDrain
 
   sessions.set(sessionId, {
+    input: new TerminalSessionInput(
+      (data) => ptyProcess.write(data),
+      shell,
+      request.projectSources
+    ),
     closeSubscription,
     exitDrain,
     exitSubscription,
@@ -206,10 +223,10 @@ function createSession(request: TerminalCreateSessionRequest): TerminalSessionSn
   return snapshot
 }
 
-function writeInput(sessionId: string, data: string): void {
+function writeInput(sessionId: string, data: string, userInitiated = true): void {
   assertValidSessionId(sessionId)
   if (typeof data !== 'string' || data.length === 0) return
-  sessions.get(sessionId)?.ptyProcess.write(data)
+  sessions.get(sessionId)?.input.writeInput(data, userInitiated)
 }
 
 function acknowledgeOutput(sessionId: string, sequence: number): void {

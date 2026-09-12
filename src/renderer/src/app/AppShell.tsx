@@ -458,7 +458,8 @@ export function AppShell() {
   )
   const gitRepositoryCapability = useGitRepositoryCapability(
     rightSidebarWorkspaceProject?.id,
-    rightSidebarWorkspacePath
+    rightSidebarWorkspacePath,
+    rightSidebarWorkspaceProject ? projectWorkspaceRevisions[rightSidebarWorkspaceProject.id] : ''
   )
 
   const rightSidebarCapabilities = useMemo<RightSidebarCapabilities>(
@@ -1533,6 +1534,7 @@ export function AppShell() {
         covered={primaryView === 'scheduled'}
       >
         <RightSidebar
+          projects={projects}
           activeConversationId={activeConversation?.id}
           agentNavigationRequest={rightSidebarAgentNavigationRequest}
           capabilities={rightSidebarCapabilities}

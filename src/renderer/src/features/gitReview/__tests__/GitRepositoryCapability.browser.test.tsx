@@ -40,12 +40,13 @@ describe('useGitRepositoryCapability', () => {
     inspectionB.resolve({
       projectId: 'project-b',
       repositoryId: 'repository-b',
+      folders: [],
       state: 'ready'
     })
     await expect.poll(() => readProbe(screen.container).status).toBe('available')
     expect(readProbe(screen.container).identity).toBe('repository-b')
 
-    inspectionA.resolve({ projectId: 'project-a', state: 'notRepository' })
+    inspectionA.resolve({ projectId: 'project-a', state: 'notRepository', folders: [] })
     await Promise.resolve()
     await Promise.resolve()
 
@@ -64,6 +65,7 @@ describe('useGitRepositoryCapability', () => {
     inspection.resolve({
       projectId: 'project-a',
       repositoryId: 'repository-a',
+      folders: [],
       state: 'ready'
     })
     await expect.poll(() => readProbe(screen.container).status).toBe('available')
@@ -80,16 +82,53 @@ describe('useGitRepositoryCapability', () => {
     expect(readProbe(screen.container).status).toBe('unavailable')
     expect(inspectGitRepositorySpy).not.toHaveBeenCalled()
   })
+
+  it('enables review when a Git auxiliary folder is added without changing the primary folder', async () => {
+    inspectGitRepositorySpy
+      .mockResolvedValueOnce({
+        projectId: 'project-a',
+        state: 'notRepository',
+        folders: []
+      })
+      .mockResolvedValueOnce({
+        projectId: 'project-a',
+        state: 'ready',
+        repositoryId: 'aux-repository',
+        defaultFolderId: 'aux',
+        folders: [
+          { folderId: 'main', alias: 'main', role: 'primary', state: 'notRepository' },
+          {
+            folderId: 'aux',
+            alias: 'aux',
+            role: 'auxiliary',
+            state: 'ready',
+            repositoryId: 'aux-repository'
+          }
+        ]
+      })
+    const screen = await render(
+      <CapabilityProbe projectId="project-a" workspacePath="/plain" revision="one" />
+    )
+    await expect.poll(() => readProbe(screen.container).status).toBe('unavailable')
+    await screen.rerender(
+      <CapabilityProbe projectId="project-a" workspacePath="/plain" revision="two" />
+    )
+    await expect.poll(() => readProbe(screen.container).status).toBe('available')
+    expect(readProbe(screen.container).identity).toBe('aux-repository')
+    expect(inspectGitRepositorySpy).toHaveBeenCalledTimes(2)
+  })
 })
 
 function CapabilityProbe({
   projectId,
-  workspacePath
+  workspacePath,
+  revision
 }: {
   projectId: string | null
   workspacePath: string | undefined
+  revision?: string
 }) {
-  const capability = useGitRepositoryCapability(projectId, workspacePath)
+  const capability = useGitRepositoryCapability(projectId, workspacePath, revision)
   return (
     <output
       data-testid="capability"

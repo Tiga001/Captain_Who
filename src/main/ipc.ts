@@ -264,8 +264,10 @@ export function registerHostIpc(
   appearanceThemeMirror: AppearanceThemeMirror = createVolatileAppearanceThemeMirror()
 ): HostIpcRegistration {
   const attachmentDialogBridge = new AttachmentDialogBridge()
-  const workspaceFilesService = new WorkspaceFilesService((projectId) =>
-    getProjectPath(coreServer, projectId)
+  const workspaceFilesService = new WorkspaceFilesService(
+    async (projectId) =>
+      (await coreServer.loadProjects()).find((project) => project.id === projectId),
+    coreServer
   )
   const ipcMain = createTrustedIpcMain(isTrustedRenderer)
   const rendererQuitFlush = new RendererQuitFlushCoordinator(ipcMain)
@@ -290,7 +292,7 @@ export function registerHostIpc(
     showProjectInFolder
   })
   registerWorkspaceFilesIpc(ipcMain, workspaceFilesService)
-  registerTerminalIpc(ipcMain, terminalBridge)
+  registerTerminalIpc(ipcMain, terminalBridge, { loadProjects: () => coreServer.loadProjects() })
 
   ipcMain.handle(HOST_CHANNELS.app.getWindowState, (event) =>
     getAppWindowState(getInvokeWindow(event))

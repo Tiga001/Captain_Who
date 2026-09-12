@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
 import type { GitReviewCommit, GitReviewTarget } from '@mycopilot/protocol'
 import { AlertCircle, Check, ChevronDown, ChevronRight, LoaderCircle } from 'lucide-react'
 import type { Translate } from '../../config/translationFormat'
@@ -20,6 +20,8 @@ interface GitReviewSourceSelectorProps {
   onSelectCommit: (commit: GitReviewCommit) => void
   onSelectTarget: (target: GitReviewTarget) => void
   projectId: string
+  folderId?: string
+  revision?: string
   repositoryState: GitReviewRepositoryContextState
   t: Translate
   target: GitReviewTarget
@@ -37,6 +39,8 @@ export function GitReviewSourceSelector({
   onSelectCommit,
   onSelectTarget,
   projectId,
+  folderId,
+  revision,
   repositoryState,
   t,
   target
@@ -51,14 +55,14 @@ export function GitReviewSourceSelector({
   const [pendingBranchSelection, setPendingBranchSelection] = useState(false)
   const label = sourceLabel(target.kind, t)
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     commitRequestRef.current += 1
     const idle = { status: 'idle' } as const
     commitStateRef.current = idle
     setCommitState(idle)
     setIsCommitMenuOpen(false)
     setPendingBranchSelection(false)
-  }, [projectId])
+  }, [projectId, folderId, revision])
 
   useEffect(
     () => () => {
@@ -89,7 +93,7 @@ export function GitReviewSourceSelector({
       commitStateRef.current = loading
       setCommitState(loading)
       try {
-        const result = await listGitReviewCommits({ projectId })
+        const result = await listGitReviewCommits({ projectId, ...(folderId ? { folderId } : {}) })
         if (commitRequestRef.current !== requestId) return
         const ready = {
           commits: result.commits,
@@ -108,7 +112,7 @@ export function GitReviewSourceSelector({
         setCommitState(failed)
       }
     },
-    [projectId]
+    [projectId, folderId]
   )
 
   const focusTrigger = useCallback(() => {

@@ -17,6 +17,7 @@ vi.mock('../../../config/FrontendConfigProvider', () => ({
 }))
 
 vi.mock('../gitReviewClient', () => ({
+  inspectGitRepository: vi.fn(),
   copyGitReviewFilePath: vi.fn(),
   getGitReviewRepositoryContext: vi.fn(),
   listGitReviewCommits: vi.fn()

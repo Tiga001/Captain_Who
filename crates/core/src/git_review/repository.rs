@@ -2,6 +2,12 @@ use super::*;
 
 #[derive(Debug, Clone)]
 pub(super) struct RepositoryContext {
+    pub(super) source_path: PathBuf,
+    pub(super) source_root: PathBuf,
+    pub(super) source_identity: FileChangeDirectoryIdentity,
+    pub(super) root_identity: FileChangeDirectoryIdentity,
+    pub(super) git_dir_identity: FileChangeDirectoryIdentity,
+    pub(super) git_entry_identity: String,
     pub(super) root: PathBuf,
     pub(super) git_dir: PathBuf,
     pub(super) project_prefix: String,
@@ -113,16 +119,105 @@ pub(super) fn resolve_repository(
             "The Git metadata path is not valid UTF-8.".to_string(),
         )
     })?;
-    let git_dir = PathBuf::from(git_dir_text);
-    let identity = format!("{}\0{}", root.display(), git_dir.display());
+    let git_dir = PathBuf::from(git_dir_text).canonicalize().map_err(|_| {
+        RepositoryResolutionError::Unavailable("The Git metadata directory is unavailable.".into())
+    })?;
+    let identity_at = |path: &Path| {
+        FileChangeDirectoryIdentity::read(path).map_err(|_| {
+            RepositoryResolutionError::Unavailable(
+                "The Git directory identity is unavailable.".into(),
+            )
+        })
+    };
+    let source_identity = identity_at(&project_root)?;
+    let root_identity = identity_at(&root)?;
+    let git_dir_identity = identity_at(&git_dir)?;
+    let git_entry_identity = worktree_binding_identity(&project_root, &root)
+        .map_err(RepositoryResolutionError::Unavailable)?;
+    let identity = format!(
+        "{}\0{}\0{root_identity:?}\0{git_dir_identity:?}",
+        root.display(),
+        git_dir.display()
+    );
 
     Ok(RepositoryContext {
+        source_path: project_path.to_path_buf(),
+        source_root: project_root,
+        source_identity,
+        root_identity,
+        git_dir_identity,
+        git_entry_identity,
         root,
         git_dir,
         project_prefix: relative_path,
         pathspec,
         repository_id: content_revision(identity.as_bytes()),
     })
+}
+
+fn git_entry_identity(root: &Path) -> Result<String, String> {
+    let path = root.join(".git");
+    let metadata =
+        fs::symlink_metadata(&path).map_err(|_| "The Git worktree binding is unavailable.")?;
+    if metadata.file_type().is_symlink() {
+        return fs::read_link(&path)
+            .map(|p| format!("link:{}", p.display()))
+            .map_err(|_| "The Git metadata link is unavailable.".into());
+    }
+    if metadata.is_dir() {
+        return FileChangeDirectoryIdentity::read(&path)
+            .map(|id| format!("directory:{id:?}"))
+            .map_err(|_| "The Git metadata identity is unavailable.".into());
+    }
+    if !metadata.is_file() || metadata.len() > 32768 {
+        return Err("The Git worktree binding is invalid.".into());
+    }
+    fs::read(path)
+        .map(|bytes| content_revision(&bytes))
+        .map_err(|_| "The Git worktree binding is unavailable.".into())
+}
+
+// A new nested .git entry changes which repository owns a selected source even when the
+// original parent worktree and index still exist. Capture every discovery boundary.
+fn worktree_binding_identity(source: &Path, root: &Path) -> Result<String, String> {
+    let mut material = String::new();
+    for directory in source.ancestors() {
+        match fs::symlink_metadata(directory.join(".git")) {
+            Ok(_) => material.push_str(&format!(
+                "{}\0{}\0",
+                directory.display(),
+                git_entry_identity(directory)?
+            )),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                material.push_str(&format!("{}\0absent\0", directory.display()))
+            }
+            Err(_) => return Err("The Git source discovery boundary is unavailable.".into()),
+        }
+        if directory == root {
+            return Ok(content_revision(material.as_bytes()));
+        }
+    }
+    Err("The Git source is outside its recorded worktree.".into())
+}
+
+pub(super) fn repository_is_current(repository: &RepositoryContext) -> bool {
+    repository.source_path.canonicalize().ok().as_ref() == Some(&repository.source_root)
+        && FileChangeDirectoryIdentity::read(&repository.source_root)
+            .ok()
+            .as_ref()
+            == Some(&repository.source_identity)
+        && FileChangeDirectoryIdentity::read(&repository.root)
+            .ok()
+            .as_ref()
+            == Some(&repository.root_identity)
+        && FileChangeDirectoryIdentity::read(&repository.git_dir)
+            .ok()
+            .as_ref()
+            == Some(&repository.git_dir_identity)
+        && worktree_binding_identity(&repository.source_root, &repository.root)
+            .ok()
+            .as_ref()
+            == Some(&repository.git_entry_identity)
 }
 
 pub(super) struct ParsedStatusFile {

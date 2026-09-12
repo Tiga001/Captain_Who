@@ -1,7 +1,8 @@
-import { mkdtemp, mkdir, rm, symlink, truncate, writeFile } from 'node:fs/promises'
+import { mkdtemp, mkdir, realpath, rm, symlink, truncate, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import type { AgentWorkspaceContext, StorageProjectFolderRecord } from '@mycopilot/protocol'
 import {
   normalizeWorkspacePath,
   PDF_PREVIEW_LIMIT_BYTES,
@@ -15,12 +16,203 @@ describe('WorkspaceFilesService', () => {
   beforeEach(async () => {
     root = await mkdtemp(join(tmpdir(), 'mycopilot-workspace-files-'))
     service = new WorkspaceFilesService(async (projectId) =>
-      projectId === 'project-1' ? root : null
+      projectId === 'project-1'
+        ? {
+            id: projectId,
+            folders: [
+              {
+                id: 'primary',
+                alias: 'app',
+                path: root,
+                role: 'primary',
+                sortOrder: 0,
+                createdAt: 1
+              }
+            ]
+          }
+        : null
     )
   })
 
   afterEach(async () => {
     await rm(root, { force: true, recursive: true })
+  })
+
+  it('keeps listing, preview, and reveal bound to the requested folder after a primary switch', async () => {
+    const auxiliary = join(root, 'auxiliary')
+    await mkdir(auxiliary)
+    await writeFile(join(root, 'README.md'), 'primary document')
+    await writeFile(join(auxiliary, 'README.md'), 'auxiliary document')
+    await writeFile(join(auxiliary, 'only-auxiliary.txt'), 'auxiliary')
+    const folders: StorageProjectFolderRecord[] = [
+      { id: 'primary', alias: 'app', path: root, role: 'primary', sortOrder: 0, createdAt: 1 },
+      {
+        id: 'auxiliary',
+        alias: 'docs',
+        path: auxiliary,
+        role: 'auxiliary',
+        sortOrder: 1,
+        createdAt: 1
+      }
+    ]
+    service = new WorkspaceFilesService(async () => ({ id: 'project-1', folders }))
+    const target = { projectId: 'project-1', folderId: 'auxiliary', path: 'README.md' }
+    expect((await service.listDirectory(target)).entries.map((entry) => entry.name)).toEqual([
+      'only-auxiliary.txt',
+      'README.md'
+    ])
+    expect((await service.readPreview(target)).text?.content).toBe('auxiliary document')
+    expect(await service.resolvePathForReveal(target)).toBe(
+      await realpath(join(auxiliary, 'README.md'))
+    )
+    folders[0].role = 'auxiliary'
+    folders[1].role = 'primary'
+    expect((await service.readPreview({ ...target, folderId: 'primary' })).text?.content).toBe(
+      'primary document'
+    )
+    expect(
+      (await service.readPreview({ projectId: 'project-1', path: 'README.md' })).text?.content
+    ).toBe('auxiliary document')
+
+    folders.pop()
+    await expect(service.readPreview(target)).rejects.toThrow('Workspace folder is not available')
+    await expect(service.resolvePathForReveal(target)).rejects.toThrow(
+      'Workspace folder is not available'
+    )
+    await expect(service.listDirectory({ ...target, projectId: 'other-project' })).rejects.toThrow(
+      'Project is not available'
+    )
+    await expect(service.readPreview({ ...target, folderId: '  ' })).rejects.toThrow(
+      'folder id is invalid'
+    )
+  })
+
+  it('does not escape a selected auxiliary root through parent paths or symlinks', async () => {
+    const auxiliary = join(root, 'auxiliary')
+    await mkdir(auxiliary)
+    await writeFile(join(root, 'secret.txt'), 'outside selected root')
+    await symlink(root, join(auxiliary, 'outside'), 'dir')
+    service = new WorkspaceFilesService(async () => ({
+      id: 'project-1',
+      folders: [
+        {
+          id: 'auxiliary',
+          alias: 'docs',
+          path: auxiliary,
+          role: 'primary',
+          sortOrder: 0,
+          createdAt: 1
+        }
+      ]
+    }))
+    await expect(
+      service.readPreview({ projectId: 'project-1', folderId: 'auxiliary', path: '../secret.txt' })
+    ).rejects.toThrow('invalid segment')
+    await expect(
+      service.readPreview({
+        projectId: 'project-1',
+        folderId: 'auxiliary',
+        path: 'outside/secret.txt'
+      })
+    ).rejects.toThrow('outside the project')
+    await expect(
+      service.listDirectory({
+        projectId: 'project-1',
+        folderId: 'auxiliary',
+        directoryPath: 'outside'
+      })
+    ).rejects.toThrow('Symbolic-link directories')
+  })
+
+  it('resolves historical preview and reveal from the original folder alias without consulting current projects', async () => {
+    await writeFile(join(root, 'README.md'), 'frozen document')
+    const workspace: AgentWorkspaceContext = {
+      projectId: 'project-1',
+      displayName: 'Original project',
+      rootPath: root,
+      folders: [
+        {
+          id: 'original-folder',
+          alias: 'old-alias',
+          role: 'primary',
+          path: root,
+          canonicalPath: root,
+          directoryIdentity: null
+        }
+      ]
+    }
+    const loadProject = vi.fn(async () => {
+      throw new Error('Current configuration must not be consulted')
+    })
+    const runFiles = {
+      loadRunWorkspace: vi.fn(async () => workspace),
+      resolveRunWorkspacePath: vi.fn(async () => join(root, 'README.md'))
+    }
+    service = new WorkspaceFilesService(loadProject, runFiles)
+    const request = {
+      projectId: 'project-1',
+      folderId: 'original-folder',
+      assistantMessageId: 'original-turn',
+      path: 'README.md'
+    }
+    expect((await service.readPreview(request)).text?.content).toBe('frozen document')
+    expect(await service.resolvePathForReveal(request)).toBe(join(root, 'README.md'))
+    expect(runFiles.loadRunWorkspace).toHaveBeenCalledWith({
+      projectId: 'project-1',
+      assistantMessageId: 'original-turn'
+    })
+    expect(runFiles.resolveRunWorkspacePath).toHaveBeenCalledWith({
+      projectId: 'project-1',
+      assistantMessageId: 'original-turn',
+      filePath: '@workspace/old-alias/README.md'
+    })
+    await expect(service.readPreview({ ...request, folderId: 'new-folder' })).rejects.toThrow(
+      'Historical workspace folder is not available'
+    )
+    expect(loadProject).not.toHaveBeenCalled()
+  })
+
+  it('never falls back to current files when the historical workspace or root is unavailable', async () => {
+    const loadProject = vi.fn(async () => {
+      throw new Error('Current configuration must not be consulted')
+    })
+    const runFiles = {
+      loadRunWorkspace: vi.fn<() => Promise<AgentWorkspaceContext | null>>(async () => null),
+      resolveRunWorkspacePath: vi.fn(async () => {
+        throw new Error('Original folder identity changed')
+      })
+    }
+    service = new WorkspaceFilesService(loadProject, runFiles)
+    const request = {
+      projectId: 'project-1',
+      folderId: 'original-folder',
+      assistantMessageId: 'original-turn',
+      path: 'README.md'
+    }
+    await expect(service.readPreview(request)).rejects.toThrow(
+      'Historical workspace is not available'
+    )
+    expect(runFiles.resolveRunWorkspacePath).not.toHaveBeenCalled()
+    runFiles.loadRunWorkspace.mockResolvedValue({
+      projectId: 'project-1',
+      displayName: 'Old',
+      rootPath: root,
+      folders: [
+        {
+          id: 'original-folder',
+          alias: 'old',
+          role: 'primary',
+          path: root,
+          canonicalPath: root,
+          directoryIdentity: null
+        }
+      ]
+    })
+    await expect(service.readPreview(request)).rejects.toThrow('Original folder identity changed')
+    await expect(service.resolvePathForReveal(request)).rejects.toThrow(
+      'Original folder identity changed'
+    )
+    expect(loadProject).not.toHaveBeenCalled()
   })
 
   it('lists directories first, preserves hidden files, and excludes Git internals', async () => {

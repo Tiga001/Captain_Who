@@ -236,9 +236,9 @@ import type {
   StorageProjectUpdateInput,
   StorageUiPreferencesRecord,
   TerminalCreateSessionRequest,
+  TerminalCreateSessionResult,
   TerminalExitEvent,
   TerminalOutputEvent,
-  TerminalSessionSnapshot,
   WorkspaceDirectoryListing,
   WorkspaceFilePreviewResult,
   WorkspaceFileRequest,
@@ -567,11 +567,15 @@ export interface ResourcesHostApi {
 
 export interface TerminalHostApi {
   acknowledgeOutput(sessionId: string, sequence: number): void
-  createSession(request: TerminalCreateSessionRequest): Promise<TerminalSessionSnapshot>
+  createSession(request: TerminalCreateSessionRequest): Promise<TerminalCreateSessionResult>
   killSession(sessionId: string): Promise<boolean>
   resizeSession(sessionId: string, cols: number, rows: number): Promise<void>
   subscribeSession(sessionId: string, handlers: TerminalSessionEventHandlers): () => void
-  writeInput(sessionId: string, data: string): void
+  /** Only terminal-generated protocol replies may set userInitiated to false. */
+  writeInput(sessionId: string, data: string, userInitiated?: boolean): void
+  markUserInput(sessionId: string): void
+  /** Validates the frozen folder identity and submits cd to the existing PTY. */
+  selectSourceDirectory(sessionId: string, folderId: string): Promise<void>
 }
 
 export interface TerminalSessionEventHandlers {

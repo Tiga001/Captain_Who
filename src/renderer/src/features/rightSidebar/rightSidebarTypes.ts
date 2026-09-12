@@ -72,6 +72,8 @@ export type RightSidebarModulePageState =
   | {
       kind: 'workspace-file'
       path: string
+      folderId?: string
+      assistantMessageId?: string
       tabState?: 'stable' | 'transient'
       preview?: {
         markdownAnchor?: string

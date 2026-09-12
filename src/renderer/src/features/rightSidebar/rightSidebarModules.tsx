@@ -128,7 +128,11 @@ function renderTerminalModule({ activity, page, t }: RightSidebarModuleRenderPro
     <Suspense
       fallback={<div className="right-sidebar__panel-loading">{t('terminal.status.starting')}</div>}
     >
-      <TerminalPanel initialCwd={page.workspacePath} isActive={activity === 'foreground'} />
+      <TerminalPanel
+        initialCwd={page.workspacePath}
+        isActive={activity === 'foreground'}
+        projectId={page.workspaceKey ?? undefined}
+      />
     </Suspense>
   )
 }
@@ -251,8 +255,8 @@ function renderGitReviewModule({
     >
       <GitReviewModuleSurface
         isActive={activity === 'foreground'}
-        onOpenFile={(path) => {
-          onOpenPage(createWorkspaceFileOpenRequest(path))
+        onOpenFile={(path, folderId, assistantMessageId) => {
+          onOpenPage(createWorkspaceFileOpenRequest(path, undefined, folderId, assistantMessageId))
         }}
         pageState={page.moduleState}
         projectId={page.workspaceKey ?? ''}
@@ -268,11 +272,11 @@ function GitReviewModuleSurface({
   projectId
 }: {
   isActive: boolean
-  onOpenFile: (path: string) => void
+  onOpenFile: (path: string, folderId?: string, assistantMessageId?: string) => void
   pageState: RightSidebarPage['moduleState']
   projectId: string
 }) {
-  const { activeConversationId, activeWorkspaceKey } = useRightSidebarRuntimeContext()
+  const { activeConversationId, activeWorkspaceKey, projects } = useRightSidebarRuntimeContext()
   const targetNavigation =
     pageState?.kind === 'git-review' && pageState.projectId === projectId
       ? {
@@ -287,6 +291,7 @@ function GitReviewModuleSurface({
       isActive={isActive}
       onOpenFile={onOpenFile}
       projectId={projectId}
+      project={projects?.find((candidate) => candidate.id === projectId)}
       targetNavigation={targetNavigation}
     />
   )
@@ -313,6 +318,8 @@ function renderFilesModule({
     <Suspense fallback={<div className="right-sidebar__panel-loading">{t('files.loading')}</div>}>
       <FilesPanel
         filePath={filePath}
+        folderId={fileState?.folderId}
+        assistantMessageId={fileState?.assistantMessageId}
         isActive={activity === 'foreground'}
         markdownAnchor={markdownAnchor}
         markdownView={markdownView}
@@ -325,8 +332,8 @@ function renderFilesModule({
             }
           })
         }}
-        onOpenFile={(path, anchor) => {
-          onOpenPage(createWorkspaceFileOpenRequest(path, anchor))
+        onOpenFile={(path, anchor, folderId, assistantMessageId) => {
+          onOpenPage(createWorkspaceFileOpenRequest(path, anchor, folderId, assistantMessageId))
         }}
         onPdfPageChange={(nextPdfPage) => {
           if (!fileState) return
@@ -372,7 +379,9 @@ function renderAgentCenterModule({ onPageUpdate, page, t }: RightSidebarModuleRe
 
 function createWorkspaceFileOpenRequest(
   path: string,
-  markdownAnchor?: string
+  markdownAnchor?: string,
+  folderId?: string,
+  assistantMessageId?: string
 ): RightSidebarPageOpenRequest {
   const preview = isWorkspaceMarkdownFile(path)
     ? { markdownAnchor, markdownView: 'preview' as const }
@@ -380,8 +389,18 @@ function createWorkspaceFileOpenRequest(
   return {
     disposition: 'preview',
     iconUrl: getFileTypeIconSource(path),
-    moduleState: { kind: 'workspace-file', path, preview, tabState: 'transient' },
-    resourceKey: `workspace-file:${path}`,
+    moduleState: {
+      kind: 'workspace-file',
+      path,
+      folderId,
+      assistantMessageId,
+      preview,
+      tabState: 'transient'
+    },
+    resourceKey:
+      folderId || assistantMessageId
+        ? `workspace-file:${JSON.stringify([folderId ?? null, assistantMessageId ?? null, path])}`
+        : `workspace-file:${path}`,
     targetModuleId: 'files',
     title: path.split('/').at(-1) ?? path
   }

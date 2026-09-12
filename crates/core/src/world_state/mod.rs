@@ -16,6 +16,11 @@ use std::{
     str::FromStr,
 };
 
+mod workspace_projection;
+pub use workspace_projection::{
+    WorkspaceFolderModelChange, WorkspaceFolderModelProjection, WorkspaceFolderUpdateReason,
+};
+
 pub const WORLD_STATE_SCHEMA_VERSION: u32 = 1;
 pub const WORLD_STATE_REVISION_PREFIX: &str = "world-state-sha256-v1:";
 
@@ -337,16 +342,23 @@ pub fn workspace_binding_section(
         "rootPath": workspace.and_then(|workspace| workspace.root_path.as_deref()),
         "folders": workspace.map(|workspace| &workspace.folders),
     });
+    let mut folders = workspace
+        .map(|workspace| {
+            workspace
+                .folders
+                .iter()
+                .map(WorkspaceFolderModelProjection::from)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    // UI ordering is not a workspace capability change. A canonical alias order also keeps
+    // equivalent full baselines stable across project edits and context rebases.
+    folders.sort_by(|left, right| left.alias.cmp(&right.alias));
     let projection = serde_json::json!({
         "available": available,
         "displayName": workspace.and_then(|workspace| workspace.display_name.as_deref()),
         "pathConvention": if available { "workspace_relative" } else { "no_workspace" },
-        "folders": workspace.map(|workspace| workspace.folders.iter().map(|folder| serde_json::json!({
-            "alias": folder.alias,
-            "role": folder.role,
-            "available": folder.canonical_path.is_some(),
-            "path": format!("@workspace/{}",folder.alias),
-        })).collect::<Vec<_>>()).unwrap_or_default(),
+        "folders": folders,
         "defaultScope": if available { "primary_only" } else { "no_workspace" },
     });
     WorldStateSectionEnvelope::model_visible(
@@ -839,6 +851,18 @@ impl WorldStateDiff {
             .collect::<BTreeSet<_>>();
         let mut changes = Vec::new();
         for section_id in section_ids {
+            if section_id == WorldStateSectionId::WorkspaceBinding {
+                if let Some(workspace_change) = workspace_projection::model_patch(
+                    base.section(&section_id),
+                    result.section(&section_id),
+                ) {
+                    // This also checks authoritative source identity when the projected alias
+                    // table itself is unchanged. Some(None) means a valid workspace had no
+                    // semantic change; None leaves generic/custom sections on replace semantics.
+                    changes.extend(workspace_change);
+                    continue;
+                }
+            }
             match (before.get(&section_id), after.get(&section_id)) {
                 (None, Some(value)) => changes.push(WorldStateModelChange::Add {
                     section_id,
@@ -1113,6 +1137,14 @@ pub enum WorldStateModelChange {
     },
     Remove {
         section_id: WorldStateSectionId,
+    },
+    /// Model-only, alias-addressed workspace update. The durable journal still carries a complete
+    /// replacement section, so reconstruction and compaction never depend on applying this patch.
+    Patch {
+        section_id: WorldStateSectionId,
+        #[serde(default, skip_serializing_if = "Map::is_empty")]
+        set: Map<String, Value>,
+        changes: Vec<WorkspaceFolderModelChange>,
     },
 }
 

@@ -28,12 +28,20 @@ export function createTerminalIpcBridge(ipcRenderer: TerminalIpcRenderer): Termi
     resizeSession: (sessionId, cols, rows) =>
       ipcRenderer.invoke(HOST_CHANNELS.terminal.resizeSession, sessionId, cols, rows),
     subscribeSession: (sessionId, handlers) => eventRouter.subscribe(sessionId, handlers),
-    writeInput: (sessionId, data) => {
+    markUserInput: (sessionId) => ipcRenderer.send(HOST_CHANNELS.terminal.markUserInput, sessionId),
+    selectSourceDirectory: (sessionId, folderId) =>
+      ipcRenderer.invoke(HOST_CHANNELS.terminal.selectSourceDirectory, sessionId, folderId),
+    writeInput: (sessionId, data, userInitiated = true) => {
       for (let offset = 0; offset < data.length;) {
         let end = Math.min(data.length, offset + TERMINAL_INPUT_CHUNK_LENGTH)
         const lastCodeUnit = data.charCodeAt(end - 1)
         if (end < data.length && lastCodeUnit >= 0xd800 && lastCodeUnit <= 0xdbff) end -= 1
-        ipcRenderer.send(HOST_CHANNELS.terminal.writeInput, sessionId, data.slice(offset, end))
+        ipcRenderer.send(
+          HOST_CHANNELS.terminal.writeInput,
+          sessionId,
+          data.slice(offset, end),
+          userInitiated
+        )
         offset = end
       }
     }

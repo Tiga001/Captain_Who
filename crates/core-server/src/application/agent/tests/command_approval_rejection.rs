@@ -140,6 +140,16 @@ async fn assert_child_command_rejection(feedback: Option<&str>) {
     .await
     .expect("child command did not reach root approval projection");
     assert_eq!(approval.source_agent_id, child.agent.agent_id);
+    let replacement = fixture.path().join("replacement-child-source");
+    fs::create_dir(&replacement).unwrap();
+    storage
+        .save_project(ProjectRecord::with_primary_folder(
+            project_id,
+            "Child rejection",
+            replacement.to_string_lossy(),
+            2,
+        ))
+        .unwrap();
     let decision = service
         .decide_root_projected_approval(
             root_conversation_id,
@@ -157,6 +167,11 @@ async fn assert_child_command_rejection(feedback: Option<&str>) {
         .unwrap();
     assert!(request.to_string().contains("## 子 Agent 协作身份"));
     let resumed_model_input = request.to_string();
+    assert!(resumed_model_input.contains("@workspace/workspace"));
+    assert!(
+        !resumed_model_input.contains("@workspace/replacement-child-source"),
+        "a child approval continuation must retain its inherited tree workspace"
+    );
     assert!(resumed_model_input.contains("审批恢复后若要汇报子 Agent 状态，必须重新查询"));
     assert!(resumed_model_input.contains("command_rejection_child"));
     for private_identity in [

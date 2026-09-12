@@ -8,6 +8,7 @@ export interface WorkspaceDirectoryEntry {
 
 export interface WorkspaceListDirectoryInput {
   directoryPath?: string
+  folderId?: string
   includeHidden?: boolean
   projectId: string
 }
@@ -22,6 +23,9 @@ export type WorkspaceFilePreviewKind =
   'binary' | 'image' | 'pdf' | 'text' | 'too-large' | 'unsupported'
 
 export interface WorkspaceFileRequest {
+  /** Historical files use the originating Turn's frozen folder binding. */
+  assistantMessageId?: string
+  folderId?: string
   path: string
   projectId: string
 }

@@ -4,7 +4,18 @@ use serde::Deserialize;
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct GitReviewSummaryRequest {
     pub project_id: String,
+    pub source: Option<GitReviewSourceRequest>,
     pub target: GitReviewTargetRequest,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields, tag = "kind", rename_all = "camelCase")]
+pub enum GitReviewSourceRequest {
+    Folder {
+        #[serde(rename = "folderId")]
+        folder_id: String,
+    },
+    All {},
 }
 
 #[derive(Debug, Deserialize)]
@@ -37,12 +48,14 @@ pub enum GitReviewTargetRequest {
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct GitReviewRepositoryContextRequest {
     pub project_id: String,
+    pub folder_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct GitReviewCommitListRequest {
     pub project_id: String,
+    pub folder_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

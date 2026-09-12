@@ -2,7 +2,7 @@
 status: current
 audience: developers
 owner: engineering
-last_verified: 2026-09-08
+last_verified: 2026-09-12
 ---
 
 # 右侧栏平台
@@ -78,7 +78,7 @@ Composer 的 `/` 菜单通过 AppShell 的显式打开操作导航，不能复�
 
 ### 关联页面
 
-模块可以通过 `onOpenPage` 打开同模块或跨模块页面。`resourceKey` 与目标 module、`workspaceSessionKey` 一起去重。例如文件使用 `workspace-file:<relative-path>`，同一工作区重复打开会激活已有页。
+模块可以通过 `onOpenPage` 打开同模块或跨模块页面。`resourceKey` 与目标 module、`workspaceSessionKey` 一起去重。文件去重键包含来源 folder id、历史 assistant-message id（如有）和源内相对路径；同一来源重复打开会激活已有页，不同根的同名文件分别保留。
 
 关联页 disposition 当前支持：
 
@@ -90,7 +90,13 @@ Files 第一次打开文件时复用同一 workspace session 的空 Files 页（
 
 `FilesPanel` 对已选中文件的再次主键点击也会重新提交打开请求，因此用户可以显式固定当前预览。达到 `maxRelatedPagesPerWorkspace` 时，平台优先淘汰非活动、非受保护的最早关联页，然后再考虑其他页；替换现有 transient 页不消耗新名额。Files 的当前上限为 20。
 
-多文件夹项目在本阶段仍以主文件夹作为 Files 树、Git 与新终端的默认目录。Files 树 session 的缓存键包含 project id 和文件夹配置 revision；同一项目更换主根或调整文件夹成员时，旧目录树和文件预览一起失效，不能继续展示旧根的缓存。终端仍绑定创建时的 cwd，不因配置改变而自动 cd 或重启。多根树、Git 仓库选择和终端选根属于后续阶段。
+### 多文件夹选择
+
+三个选择入口仅在项目配置了多个文件夹时显示，彼此独立，不改变项目主文件夹或 Agent 的冻结工作区。
+
+- Terminal 默认在主文件夹启动。首次真实输入之前，提示符下面显示源目录 alias、绝对路径提示及 Option/Alt + 数字快捷键。选择后 Host 根据创建时冻结的 folder id 和目录实体校验路径，向同一 PTY 发送 shell 正确引用的 cd 命令；不重建会话，不修改标签或假定 cd 成功。点击选择或键盘、粘贴、IME 输入永久收起该层；自动终端协议回复不会收起。配置变化不自动切换或重启已有终端。
+- Files 在搜索栏上方显示文件夹下拉，默认为主文件夹，显示 alias 与选中标记。选择只改变目录树；每个源保留独立搜索和展开状态，已有预览和标签继续绑定原 folder id。树缓存按 project、folder id 和该源 revision 区分；源移除或改绑后不能回退到另一个根的同名文件。历史页额外携带 assistant-message id，沿用原 Run 的目录快照。
+- Git Review 在范围选择器左侧显示仓库下拉。项目任一源为 Git 仓库即可打开审阅；多文件夹项目即使只有一个 Git 源，也显示下拉。只有 LastTurn 支持“所有仓库”，按同一次 Run 聚合、按来源分组并合计统计，保持只读。其他范围一次选择一个源，离开“所有仓库”时恢复记住的单源，否则选择主 Git 源或第一个可用 Git 源。单源路径范围保留 Git 子目录限制；更换源会失效旧 diff、内容、分支和提交查询。
 
 ### 关闭与上下文同步
 
@@ -119,6 +125,8 @@ Files 第一次打开文件时复用同一 workspace session 的空 Files 页（
 - `unmount-when-inactive` 页面只在选中时渲染模块。Files 重新激活后按 page state 重新加载预览。
 
 活动信号用于降低后台工作，不是授权信号。模块必须在真正关闭/卸载时释放订阅、计时器和外部资源；仅变成 `background` 或 `dormant` 不等于销毁。
+
+Terminal 创建区分 `created` 与正常 `cancelled`，项目加载、PTY 启动和 utility 进程的真实错误仍通过拒绝返回。关闭、导航或 Renderer 销毁会立即撤销正在创建的会话；项目目录尚未加载完成时不再创建 PTY，已发送的创建则清理该次实例。Main 为每次创建分配独立的内部 PTY id，并将事件回译为 Renderer 会话 id，避免旧响应、输出或退出事件影响复用同一外部 id 的新实例。Renderer 的异步回调和清理同样绑定各自的 effect 实例，开发模式下的 effect 重放不能清空新终端的输入、尺寸或来源目录引用。
 
 ## Browser surface 交接
 

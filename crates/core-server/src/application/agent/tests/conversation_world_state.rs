@@ -121,6 +121,266 @@ fn message_text(message: &Value) -> String {
         .unwrap_or_else(|| message["content"].to_string())
 }
 
+fn conversation_records(request: &Value) -> Vec<Value> {
+    request["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|message| {
+            let content = message["content"].as_str()?;
+            // The Provider adapter wraps timeline state in <backend_observed_state>.
+            let (_, content) = content.split_once("<backend_world_state_record>")?;
+            let (content, _) = content.split_once("</backend_world_state_record>")?;
+            content.lines().find_map(|line| {
+                let value: Value = serde_json::from_str(line).ok()?;
+                (value["lifetime"] == "conversation").then_some(value)
+            })
+        })
+        .collect()
+}
+
+fn workspace_changes(records: &[Value]) -> Vec<Value> {
+    records
+        .iter()
+        .filter_map(|record| record["changes"].as_array())
+        .flatten()
+        .filter(|change| change["sectionId"] == "workspace.binding")
+        .cloned()
+        .collect()
+}
+
+#[tokio::test]
+async fn workspace_source_patches_adopt_only_new_root_runs_and_preview_never_writes() {
+    use super::managed_command_loop::{write_text_stream, write_tool_call_stream};
+    use mycopilot_core::storage::models::{ProjectFolderRecord, ProjectFolderRole};
+    use mycopilot_core::{AgentCommandPermission, AgentCommandSafetyPolicy};
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (captured, mut requests) = unbounded_channel();
+    let provider = tokio::spawn(async move {
+        for index in 0..4 {
+            let (mut stream, _) = tokio::time::timeout(Duration::from_secs(20), listener.accept())
+                .await
+                .unwrap()
+                .unwrap();
+            captured
+                .send(read_provider_request(&mut stream).await)
+                .unwrap();
+            if index == 0 {
+                write_tool_call_stream(
+                    &mut stream,
+                    "workspace-approval-command",
+                    "run_command",
+                    json!({"command":"printf workspace-frozen", "reason":"Verify the frozen workspace after approval."}),
+                    "Waiting for approval.",
+                )
+                .await;
+            } else {
+                write_text_stream(&mut stream, &format!("WORKSPACE_ANSWER_{index}")).await;
+            }
+        }
+    });
+    let fixture = tempdir().unwrap();
+    let database = fixture.path().join("storage.sqlite");
+    let storage = Arc::new(
+        StorageService::open_with_model_credentials(
+            &database,
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+        )
+        .unwrap(),
+    );
+    let mut settings = test_model_settings();
+    settings.api_url = format!("http://{address}/v1/chat/completions");
+    storage.save_model_settings(settings).unwrap();
+    let app = fixture.path().join("app");
+    let docs = fixture.path().join("docs");
+    let replacement = fixture.path().join("replacement");
+    for root in [&app, &docs, &replacement] {
+        fs::create_dir(root).unwrap();
+    }
+    let mut project = ProjectRecord::with_primary_folder(
+        "workspace-private-project-id",
+        "Workspace delta",
+        app.to_string_lossy(),
+        1,
+    );
+    project.folders[0].id = "workspace-private-original-id".into();
+    project.folders[0].alias = "app".into();
+    storage.save_project(project.clone()).unwrap();
+    let service = AgentService::new(storage.clone());
+    let (notifications, mut events) = unbounded_channel();
+    let permissions = AgentPermissions {
+        command: AgentCommandPermission::RequireApproval,
+        command_safety: AgentCommandSafetyPolicy::FullAccess,
+        ..AgentPermissions::default()
+    };
+    let project_id = project.id.clone();
+    let input = |index| {
+        let mut input = turn_input(index);
+        input.project_id = Some(project_id.clone());
+        input.permissions = permissions;
+        input
+    };
+    let preview = || {
+        service
+            .get_context_window_snapshot(AgentContextWindowSnapshotInput {
+                conversation_id: Some(CONVERSATION.into()),
+                project_id: Some(project_id.clone()),
+                model_id: "model-1".into(),
+                max_tokens: None,
+                prompt_preferences: None,
+                permissions,
+                skills: vec![],
+            })
+            .unwrap()
+            .snapshot
+            .unwrap()
+    };
+    let first = service
+        .start_conversation_turn(input(0), notifications.clone())
+        .unwrap();
+    wait_for_done(&mut events, &first.run_id, "waiting_for_approval").await;
+    wait_for_worker_release(&service, &first.run_id).await;
+    let initial_request = requests.recv().await.unwrap();
+    let initial_records = conversation_records(&initial_request);
+    assert_eq!(initial_records.len(), 1);
+    assert_eq!(initial_records[0]["recordType"], "full");
+    assert!(workspace_changes(&initial_records).is_empty());
+    let frozen = storage.load_agent_workspace_for_run(&first.run_id).unwrap();
+    assert_eq!(
+        frozen
+            .as_ref()
+            .and_then(Option::as_ref)
+            .and_then(|workspace| workspace.root_path.as_deref()),
+        app.to_str()
+    );
+    let active_preview = preview();
+
+    // Both edits happen while the root is blocked. Only their net result belongs to the next Run.
+    project.folders.push(ProjectFolderRecord {
+        id: "workspace-private-docs-id".into(),
+        alias: "docs".into(),
+        path: docs.to_string_lossy().into_owned(),
+        role: ProjectFolderRole::Auxiliary,
+        sort_order: 1,
+        created_at: 2,
+    });
+    storage.save_project(project.clone()).unwrap();
+    project.folders[0].role = ProjectFolderRole::Auxiliary;
+    project.folders[1].role = ProjectFolderRole::Primary;
+    storage.save_project(project.clone()).unwrap();
+    assert_eq!(
+        preview(),
+        active_preview,
+        "an approval preview keeps the frozen sources"
+    );
+    let pending = service.list_pending_actions();
+    assert_eq!(pending.len(), 1);
+    service
+        .approve_action(&first.run_id, &pending[0].action_id, notifications.clone())
+        .unwrap();
+    wait_for_done(&mut events, &first.run_id, "completed").await;
+    wait_for_worker_release(&service, &first.run_id).await;
+    let resumed_request = requests.recv().await.unwrap();
+    assert_eq!(
+        conversation_records(&resumed_request),
+        initial_records,
+        "approval resume must not adopt the edited project or publish its patch"
+    );
+    assert_eq!(
+        storage.load_agent_workspace_for_run(&first.run_id).unwrap(),
+        frozen,
+        "approval must retain the original authoritative workspace"
+    );
+
+    for index in 1..=2 {
+        let before_replacement = (index == 2).then(&preview);
+        if index == 2 {
+            // The public alias and logical path stay identical, but old file observations are stale.
+            project.folders[0].id = "workspace-private-replacement-id".into();
+            project.folders[0].path = replacement.to_string_lossy().into_owned();
+            storage.save_project(project.clone()).unwrap();
+        }
+        let records_before = load_conversation_world_state(&storage, CONVERSATION).unwrap();
+        let receipts_before = receipts(&database);
+        let current_preview = preview();
+        assert_eq!(current_preview, preview(), "an idle preview must be stable");
+        if let Some(before) = before_replacement {
+            assert!(
+                current_preview.input_tokens > before.input_tokens,
+                "the hot preview cache must account for a same-alias source replacement patch"
+            );
+        }
+        assert_eq!(
+            load_conversation_world_state(&storage, CONVERSATION).unwrap(),
+            records_before,
+            "preview must not publish workspace edits as observed"
+        );
+        assert_eq!(receipts(&database), receipts_before);
+        let turn = service
+            .start_conversation_turn(input(index), notifications.clone())
+            .unwrap();
+        wait_for_done(&mut events, &turn.run_id, "completed").await;
+        wait_for_worker_release(&service, &turn.run_id).await;
+        let request = requests.recv().await.unwrap();
+        let records = conversation_records(&request);
+        assert_eq!(records[0], initial_records[0]);
+        let changes = workspace_changes(&records);
+        assert_eq!(changes.len(), index, "each new source state is sent once");
+        let patch = changes.last().unwrap();
+        assert_eq!(patch["op"], "patch");
+        assert!(
+            patch.get("value").is_none(),
+            "do not resend the complete binding"
+        );
+        let folder_changes = patch["changes"].as_array().unwrap();
+        if index == 1 {
+            assert_eq!(
+                folder_changes.len(),
+                2,
+                "publish the final net source change"
+            );
+            assert!(folder_changes.iter().any(|change| {
+                change["kind"] == "added"
+                    && change["folder"]["alias"] == "docs"
+                    && change["folder"]["role"] == "primary"
+            }));
+            assert!(folder_changes.iter().any(|change| {
+                change["kind"] == "updated"
+                    && change["folder"]["alias"] == "app"
+                    && change["folder"]["role"] == "auxiliary"
+            }));
+        } else {
+            assert_eq!(folder_changes.len(), 1);
+            assert_eq!(folder_changes[0]["kind"], "updated");
+            assert_eq!(folder_changes[0]["folder"]["alias"], "app");
+            assert_eq!(folder_changes[0]["reason"], "source_replaced");
+        }
+        let serialized = serde_json::to_string(&records).unwrap();
+        for private_value in [
+            fixture.path().to_str().unwrap(),
+            "workspace-private-project-id",
+            "workspace-private-original-id",
+            "workspace-private-docs-id",
+            "workspace-private-replacement-id",
+        ] {
+            assert!(
+                !serialized.contains(private_value),
+                "source patch leaked {private_value}"
+            );
+        }
+        let stored = load_conversation_world_state(&storage, CONVERSATION).unwrap();
+        let boundary = stored.last().unwrap().request_boundary.as_ref().unwrap();
+        assert_eq!(boundary.run_id, turn.run_id);
+        assert_eq!(
+            boundary.request_index, 1,
+            "publish before the first sampling request"
+        );
+    }
+    provider.await.unwrap();
+}
+
 #[tokio::test]
 async fn cross_run_web_policy_commits_at_request_boundaries_and_preview_never_writes() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

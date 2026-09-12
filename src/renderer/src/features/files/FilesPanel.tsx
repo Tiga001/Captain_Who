@@ -21,18 +21,26 @@ import { useDismissOnOutsidePointer } from '../../hooks/useDismissOnOutsidePoint
 import { copyWorkspaceFilePath, revealWorkspaceFile } from './filesClient'
 import { useWorkspaceFileTree } from './useWorkspaceFileTree'
 import { WorkspaceFilePreview } from './WorkspaceFilePreview'
-import { useWorkspaceFileRevision } from './WorkspaceFileTreeSessions'
+import { useWorkspaceFileRevision, useWorkspaceFileRoot } from './WorkspaceFileTreeSessions'
+import { SettingsSelect } from '../settings/components/SettingsSelect'
 import { isWorkspaceMarkdownFile } from './workspaceFilePreviewTypes'
 import type { WorkspaceMarkdownView } from './workspaceFilePreviewTypes'
 import './FilesPanel.css'
 
 interface FilesPanelProps {
+  assistantMessageId?: string
   filePath: string | null
+  folderId?: string
   isActive: boolean
   markdownAnchor?: string
   markdownView: WorkspaceMarkdownView
   onMarkdownViewChange: (view: WorkspaceMarkdownView) => void
-  onOpenFile: (path: string, anchor?: string) => void
+  onOpenFile: (
+    path: string,
+    anchor?: string,
+    folderId?: string,
+    assistantMessageId?: string
+  ) => void
   onPdfPageChange: (page: number) => void
   onWrapLinesChange: (wrapLines: boolean) => void
   onSurfaceFocus: () => void
@@ -59,7 +67,9 @@ const TREE_STYLE = {
 } as CSSProperties
 
 export function FilesPanel({
+  assistantMessageId,
   filePath,
+  folderId,
   isActive,
   markdownAnchor,
   markdownView,
@@ -74,7 +84,9 @@ export function FilesPanel({
   wrapLines
 }: FilesPanelProps): ReactNode {
   const { t } = useFrontendConfig()
-  const workspaceRevision = useWorkspaceFileRevision(projectId)
+  const treeRoot = useWorkspaceFileRoot(projectId)
+  const fileFolderId = folderId ?? (assistantMessageId ? undefined : treeRoot.primaryFolderId)
+  const workspaceRevision = useWorkspaceFileRevision(projectId, fileFolderId)
   const [isOptionsMenuOpen, setIsOptionsMenuOpen] = useState(false)
   const optionsControlRef = useRef<HTMLDivElement>(null)
   const optionsTriggerRef = useRef<HTMLButtonElement>(null)
@@ -87,9 +99,17 @@ export function FilesPanel({
 
   const handleFileSelect = useCallback(
     (path: string) => {
-      onOpenFile(path)
+      if (treeRoot.folderId === undefined) onOpenFile(path)
+      else onOpenFile(path, undefined, treeRoot.folderId)
     },
-    [onOpenFile]
+    [onOpenFile, treeRoot.folderId]
+  )
+  const handlePreviewOpenFile = useCallback(
+    (path: string, anchor?: string) => {
+      if (fileFolderId === undefined && assistantMessageId === undefined) onOpenFile(path, anchor)
+      else onOpenFile(path, anchor, fileFolderId, assistantMessageId)
+    },
+    [assistantMessageId, fileFolderId, onOpenFile]
   )
   const handleSelectedFilePointerDown = useCallback(
     (event: PointerEvent<HTMLDivElement>) => {
@@ -104,9 +124,9 @@ export function FilesPanel({
             target.dataset.itemSelected !== undefined
         )
       const path = selectedFileRow?.dataset.itemPath
-      if (path) onOpenFile(path)
+      if (path) handleFileSelect(path)
     },
-    [onOpenFile]
+    [handleFileSelect]
   )
   const {
     failedDirectoryCount,
@@ -119,10 +139,11 @@ export function FilesPanel({
     setSearchQuery,
     setTreeVisible
   } = useWorkspaceFileTree({
+    folderId: treeRoot.folderId,
     isActive,
     onFileSelect: handleFileSelect,
     projectId,
-    selectedPath: filePath
+    selectedPath: !assistantMessageId && fileFolderId === treeRoot.folderId ? filePath : null
   })
 
   useEffect(() => {
@@ -131,8 +152,13 @@ export function FilesPanel({
 
   const revealSelectedFile = useCallback(() => {
     if (!filePath) return
-    void revealWorkspaceFile({ path: filePath, projectId }).catch(() => undefined)
-  }, [filePath, projectId])
+    void revealWorkspaceFile({
+      path: filePath,
+      projectId,
+      ...(fileFolderId === undefined ? {} : { folderId: fileFolderId }),
+      ...(assistantMessageId === undefined ? {} : { assistantMessageId })
+    }).catch(() => undefined)
+  }, [assistantMessageId, fileFolderId, filePath, projectId])
 
   const segments = filePath?.split('/') ?? []
   const fileName = segments.at(-1) ?? null
@@ -197,7 +223,12 @@ export function FilesPanel({
   const copySelectedFilePath = (): void => {
     if (!filePath) return
     closeOptionsMenuAndRestoreFocus()
-    void copyWorkspaceFilePath({ path: filePath, projectId }).catch(() => undefined)
+    void copyWorkspaceFilePath({
+      path: filePath,
+      projectId,
+      ...(fileFolderId === undefined ? {} : { folderId: fileFolderId }),
+      ...(assistantMessageId === undefined ? {} : { assistantMessageId })
+    }).catch(() => undefined)
   }
 
   const wrapLinesOptionIndex = isMarkdown ? 2 : 0
@@ -355,11 +386,18 @@ export function FilesPanel({
       >
         <main className="files-panel__preview">
           <WorkspaceFilePreview
-            key={workspaceRevision}
+            key={JSON.stringify([
+              projectId,
+              fileFolderId,
+              assistantMessageId,
+              assistantMessageId ? null : workspaceRevision
+            ])}
+            assistantMessageId={assistantMessageId}
+            folderId={fileFolderId}
             isActive={isActive}
             markdownAnchor={markdownAnchor}
             markdownView={markdownView}
-            onOpenFile={onOpenFile}
+            onOpenFile={handlePreviewOpenFile}
             onPdfPageChange={onPdfPageChange}
             path={filePath}
             pdfPage={pdfPage}
@@ -375,6 +413,21 @@ export function FilesPanel({
           data-visible={isTreeVisible ? 'true' : undefined}
           inert={isTreeVisible ? undefined : true}
         >
+          {treeRoot.folders.length > 1 && (
+            <div className="files-panel__root-row">
+              <SettingsSelect
+                ariaLabel={t('files.selectRoot')}
+                className="files-panel__root-select"
+                disabled={!isActive || !isTreeVisible}
+                onChange={treeRoot.selectFolder}
+                options={treeRoot.folders.map((folder) => ({
+                  value: folder.id,
+                  label: folder.alias
+                }))}
+                value={treeRoot.folderId ?? ''}
+              />
+            </div>
+          )}
           <div className="files-panel__tree-search">
             <Search aria-hidden="true" />
             <input
