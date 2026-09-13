@@ -3,19 +3,19 @@ import { defineSettingsNodes } from '../settingsDefinition'
 export const profileSettingsNodes = defineSettingsNodes([
   {
     id: 'profile.account',
-    title: 'profile.account',
+    title: 'auth.cloudProfile',
     children: [
       {
         id: 'profile.avatar',
         title: 'profile.avatar',
-        terms: ['profile.uploadAvatar', 'profile.removeAvatar']
+        terms: ['auth.editProfile']
       },
       {
         id: 'profile.displayName',
         title: 'profile.displayName',
-        description: 'profile.displayNameDescription'
+        description: 'auth.cloudProfile'
       },
-      { id: 'profile.handle', title: 'profile.handle', description: 'profile.handleDescription' }
+      { id: 'profile.email', title: 'auth.email', description: 'auth.cloudProfile' }
     ]
   }
 ])

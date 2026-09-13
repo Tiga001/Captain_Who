@@ -305,7 +305,12 @@ impl LlmStreamAccumulator {
             ProviderProfileId::GenericOpenAiChat | ProviderProfileId::GenericAnthropicMessages => {
                 ProviderProfileConfig::generic_for_dialect(provider_protocol.dialect)
             }
-            ProviderProfileId::DeepSeekV4Chat => ProviderProfileConfig::deepseek_v4_default(),
+            ProviderProfileId::DeepSeekV41FlashChat => {
+                ProviderProfileConfig::deepseek_flash_default()
+            }
+            ProviderProfileId::DeepSeekV4Pro0813Chat => {
+                ProviderProfileConfig::deepseek_pro_default()
+            }
             _ => {
                 return Err(AgentError::new(
                     "Provider profile 未注册，无法创建流式解析器。",

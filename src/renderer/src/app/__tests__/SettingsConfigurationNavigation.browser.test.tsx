@@ -103,9 +103,13 @@ describe('configuration setting search navigation', () => {
     const configuredModel: ModelConfig = {
       ...model,
       providerProfileConfig: {
-        schemaVersion: 1,
-        profile: { id: 'deepseek_v4_chat', version: 1 },
-        reasoning: { mode: 'enabled', effort: 'high' }
+        schemaVersion: 2,
+        vendorId: 'deepseek',
+        profile: { id: 'deepseek_v4_1_flash_chat', version: 1 },
+        settings: {
+          kind: 'deepseek_flash_chat',
+          reasoning: { mode: 'enabled', effort: 'high' }
+        }
       }
     }
     const form = (target: SettingsNavigationTarget | null) => (
@@ -115,12 +119,12 @@ describe('configuration setting search navigation', () => {
           globalApiUrl="https://provider.example/v1/chat/completions"
           providerProfileDescriptors={[
             {
-              profileId: 'deepseek_v4_chat',
+              profileId: 'deepseek_v4_1_flash_chat',
               profileVersion: 1,
               displayName: 'DeepSeek',
               compatibleDialects: ['openai_chat_completions'],
-              settingsKind: 'deepseek_v4_chat',
-              selectable: true
+              settingsKind: 'none',
+              selectable: false
             }
           ]}
           providerVendorDescriptors={[
@@ -145,15 +149,15 @@ describe('configuration setting search navigation', () => {
     resolvePolicy({
       status: 'supported',
       vendorId: 'deepseek',
-      modelFamily: 'deepseek_v4_chat',
+      modelFamily: 'deepseek_flash_chat',
       settingsKind: 'deepseek',
-      imageInput: 'unsupported',
+      imageInput: 'supported',
       settings: {
-        kind: 'deepseek_v4_chat',
+        kind: 'deepseek_flash_chat',
         reasoningModes: ['provider_default', 'enabled', 'disabled'],
         reasoningEfforts: ['provider_default', 'low', 'high', 'max'],
         defaultSettings: {
-          kind: 'deepseek_v4_chat',
+          kind: 'deepseek_flash_chat',
           reasoning: { mode: 'provider_default', effort: 'provider_default' }
         }
       }

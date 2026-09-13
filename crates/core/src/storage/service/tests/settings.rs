@@ -451,48 +451,13 @@ fn editing_display_name_preserves_config_identity_and_conversation_reference() {
 }
 
 #[test]
-fn registered_profile_selection_is_host_versioned_normalized_and_authoritative() {
-    let fixture = StorageFixture::new();
-    let service = fixture.service();
-    let settings = revision_test_settings();
-    let saved = service
-        .save_model_settings_request(renderer_save_request(
-            &settings,
-            serde_json::json!({
-                "kind": "select_registered_profile",
-                "profileId": "deepseek_v4_chat",
-                "settings": {
-                    "kind": "deepseek_v4_chat",
-                    "reasoning": {"mode": "disabled", "effort": "max"}
-                }
-            }),
-            None,
-        ))
-        .unwrap();
-
-    let config = &saved.models[0].provider_profile_config;
-    assert_eq!(
-        config.profile(),
-        crate::ProviderProfileRef::deepseek_v4_chat()
-    );
-    let reasoning = config
-        .legacy_reasoning()
-        .expect("legacy registered selection must remain schema v1");
-    assert_eq!(reasoning.mode, crate::ReasoningMode::Disabled);
-    assert_eq!(reasoning.effort, crate::ReasoningEffort::ProviderDefault);
-    assert_eq!(
-        service.load_model_settings().unwrap().unwrap().models[0].provider_profile_config,
-        saved.models[0].provider_profile_config
-    );
-}
-
-#[test]
 fn vendor_selection_resolves_moonshot_family_and_persists_v2_settings() {
     let fixture = StorageFixture::new();
     let service = fixture.service();
     let mut settings = revision_test_settings();
     settings.models[0].provider_model_id = "kimi-k3".to_string();
     settings.models[0].display_name = "Kimi K3".to_string();
+    settings.models[0].supports_image = true;
 
     let saved = service
         .save_model_settings_request(renderer_save_request(
@@ -597,96 +562,6 @@ fn generic_vendor_selection_keeps_custom_aliases_on_generic_compatibility() {
 }
 
 #[test]
-fn save_boundary_corrects_exact_official_deepseek_flash_and_moonshot_k3_profiles() {
-    let fixture = StorageFixture::new();
-    let service = fixture.service();
-    let mut deepseek = official_profile_test_model("deepseek-v4-flash", None, None);
-    deepseek.display_name = "DeepSeek Flash metadata".to_string();
-    deepseek.context_window_tokens = Some(96_000);
-    let mut moonshot = official_profile_test_model(
-        "kimi-k3",
-        Some("https://api.moonshot.cn/v1/chat/completions"),
-        Some("moonshot-model-token"),
-    );
-    moonshot.display_name = "Kimi K3 metadata".to_string();
-    moonshot.supports_image = true;
-    moonshot.context_window_tokens = Some(64_000);
-    moonshot.input_price = "3.75".to_string();
-    let settings = ModelSettingsRecord {
-        api_url: "https://api.deepseek.com/v1/chat/completions".to_string(),
-        api_token: "deepseek-global-token".to_string(),
-        search_mode: "tavily".to_string(),
-        tavily_api_key: "search-token".to_string(),
-        models: vec![deepseek, moonshot],
-    };
-    let mut expected = settings.clone();
-    expected.models[0].provider_profile_config = crate::ProviderProfileConfig::from_family_settings(
-        crate::ProviderProfileRef::deepseek_v4_chat(),
-        crate::ProviderVendorId::DeepSeek,
-        crate::ProviderFamilySettings::DeepseekV4Chat {
-            reasoning: crate::ProviderFamilyReasoningPolicy::provider_default(),
-        },
-    );
-    expected.models[1].provider_profile_config = crate::ProviderProfileConfig::from_family_settings(
-        crate::ProviderProfileRef::moonshot_k3_chat(),
-        crate::ProviderVendorId::Moonshot,
-        crate::ProviderFamilySettings::MoonshotK3Chat {
-            reasoning_effort: crate::ProviderReasoningEffort::Max,
-        },
-    );
-
-    service.save_model_settings(settings).unwrap();
-    let stored = service.load_model_settings().unwrap().unwrap();
-
-    assert_eq!(
-        serde_json::to_value(stored).unwrap(),
-        serde_json::to_value(expected).unwrap(),
-        "profile-only correction must retain credentials, search settings and every model field"
-    );
-}
-
-#[test]
-fn save_boundary_does_not_infer_official_profiles_from_proxies_aliases_or_custom_models() {
-    let fixture = StorageFixture::new();
-    let service = fixture.service();
-    let settings = ModelSettingsRecord {
-        api_url: "https://deepseek-proxy.example/v1/chat/completions".to_string(),
-        api_token: "proxy-global-token".to_string(),
-        search_mode: "disabled".to_string(),
-        tavily_api_key: "preserved-unused-search-token".to_string(),
-        models: vec![
-            official_profile_test_model("deepseek-v4-flash", None, None),
-            official_profile_test_model(
-                "deepseek-v4-flash-latest",
-                Some("https://api.deepseek.com/v1/chat/completions"),
-                Some("deepseek-alias-token"),
-            ),
-            official_profile_test_model(
-                "kimi-k3",
-                Some("https://moonshot-proxy.example/v1/chat/completions"),
-                Some("moonshot-proxy-token"),
-            ),
-            official_profile_test_model(
-                "kimi-k3-latest",
-                Some("https://api.moonshot.ai/v1/chat/completions"),
-                Some("moonshot-alias-token"),
-            ),
-            official_profile_test_model(
-                "company-private-model",
-                Some("https://api.moonshot.cn/v1/chat/completions"),
-                Some("custom-model-token"),
-            ),
-        ],
-    };
-    let expected = serde_json::to_value(&settings).unwrap();
-
-    service.save_model_settings(settings).unwrap();
-    let stored = service.load_model_settings().unwrap().unwrap();
-
-    assert_eq!(serde_json::to_value(stored).unwrap(), expected);
-}
-
-#[test]
 fn save_boundary_preserves_an_incomplete_global_connection_but_execution_fails_closed() {
     let fixture = StorageFixture::new();
     let service = fixture.service();
@@ -695,7 +570,7 @@ fn save_boundary_preserves_an_incomplete_global_connection_but_execution_fails_c
         api_token: "   ".to_string(),
         search_mode: "disabled".to_string(),
         tavily_api_key: "preserved-search-token".to_string(),
-        models: vec![official_profile_test_model("deepseek-v4-flash", None, None)],
+        models: vec![official_profile_test_model("deepseek-flash", None, None)],
     };
     service.save_model_settings(settings).unwrap();
     let stored = service.load_model_settings().unwrap().unwrap();
@@ -834,58 +709,6 @@ fn global_url_and_credential_can_be_edited_in_either_order_and_clear_keeps_url()
 }
 
 #[test]
-fn startup_never_rewrites_historical_official_provider_profiles() {
-    let fixture = StorageFixture::new();
-    let service = fixture.service();
-    let model = official_profile_test_model(
-        "kimi-k3",
-        Some("https://moonshot-proxy.example/v1/chat/completions"),
-        Some("moonshot-model-token"),
-    );
-    service
-        .save_model_settings(ModelSettingsRecord {
-            api_url: "https://global-proxy.example/v1/chat/completions".to_string(),
-            api_token: "global-provider-token".to_string(),
-            search_mode: "tavily".to_string(),
-            tavily_api_key: "search-provider-token".to_string(),
-            models: vec![model],
-        })
-        .unwrap();
-
-    {
-        let connection = service.state.connection().unwrap();
-        connection
-            .execute(
-                "UPDATE models SET api_url_override = ?1 WHERE id = 'kimi-k3'",
-                ["https://api.moonshot.ai/v1/chat/completions"],
-            )
-            .unwrap();
-    }
-    let before = service.load_model_settings_snapshot().unwrap().unwrap();
-    drop(service);
-
-    let reopened = fixture.service();
-    let after = reopened.load_model_settings_snapshot().unwrap().unwrap();
-    assert_eq!(
-        serde_json::to_value(after.settings).unwrap(),
-        serde_json::to_value(before.settings).unwrap()
-    );
-    assert_eq!(after.configuration_revision, before.configuration_revision);
-    assert_eq!(
-        after.provider_connection_revisions,
-        before.provider_connection_revisions
-    );
-    assert_eq!(
-        after.provider_protocol_revisions,
-        before.provider_protocol_revisions
-    );
-    assert_eq!(
-        after.search_connection_revision,
-        before.search_connection_revision
-    );
-}
-
-#[test]
 fn startup_and_unrelated_save_keep_a_future_profile_opaque() {
     let fixture = StorageFixture::new();
     let service = fixture.service();
@@ -895,16 +718,16 @@ fn startup_and_unrelated_save_keep_a_future_profile_opaque() {
             api_token: "deepseek-global-token".to_string(),
             search_mode: "tavily".to_string(),
             tavily_api_key: "search-token".to_string(),
-            models: vec![official_profile_test_model("deepseek-v4-flash", None, None)],
+            models: vec![official_profile_test_model("deepseek-flash", None, None)],
         })
         .unwrap();
 
     let future_profile = serde_json::json!({
         "schemaVersion": 2,
-        "profile": {"id": "deepseek_v4_chat", "version": 99},
+        "profile": {"id": "deepseek_v4_1_flash_chat", "version": 99},
         "vendorId": "deepseek",
         "settings": {
-            "kind": "deepseek_v4_chat",
+            "kind": "deepseek_flash_chat",
             "reasoning": {"mode": "enabled", "effort": "low"}
         }
     });
@@ -912,7 +735,7 @@ fn startup_and_unrelated_save_keep_a_future_profile_opaque() {
         let connection = service.state.connection().unwrap();
         connection
             .execute(
-                "UPDATE models SET provider_profile_config_json = ?1 WHERE id = 'deepseek-v4-flash'",
+                "UPDATE models SET provider_profile_config_json = ?1 WHERE id = 'deepseek-flash'",
                 [future_profile.to_string()],
             )
             .unwrap();
@@ -979,15 +802,17 @@ fn startup_and_unrelated_save_keep_a_future_profile_opaque() {
 fn authoritative_profile_updates_rotate_only_effective_wire_changes() {
     let fixture = StorageFixture::new();
     let service = fixture.service();
-    let settings = revision_test_settings();
+    let mut settings = revision_test_settings();
+    settings.models[0].provider_model_id = "deepseek-flash".to_string();
+    settings.models[0].supports_image = true;
     let initial = service
         .save_model_settings_request(renderer_save_request(
             &settings,
             serde_json::json!({
-                "kind": "select_registered_profile",
-                "profileId": "deepseek_v4_chat",
+                "kind": "select_vendor",
+                "vendorId": "deepseek",
                 "settings": {
-                    "kind": "deepseek_v4_chat",
+                    "kind": "deepseek_flash_chat",
                     "reasoning": {"mode": "enabled", "effort": "high"}
                 }
             }),
@@ -1026,10 +851,10 @@ fn authoritative_profile_updates_rotate_only_effective_wire_changes() {
         .save_model_settings_request(renderer_save_request_preserving_credentials(
             &metadata,
             serde_json::json!({
-                "kind": "select_registered_profile",
-                "profileId": "deepseek_v4_chat",
+                "kind": "select_vendor",
+                "vendorId": "deepseek",
                 "settings": {
-                    "kind": "deepseek_v4_chat",
+                    "kind": "deepseek_flash_chat",
                     "reasoning": {"mode": "enabled", "effort": "max"}
                 }
             }),
@@ -1041,14 +866,15 @@ fn authoritative_profile_updates_rotate_only_effective_wire_changes() {
         changed_snapshot.provider_protocol_revisions[&initial_id],
         initial_revision
     );
-    assert_eq!(
-        changed.models[0]
-            .provider_profile_config
-            .legacy_reasoning()
-            .expect("registered legacy selection must write schema v1")
-            .effort,
-        crate::ReasoningEffort::Max
-    );
+    assert!(matches!(
+        changed.models[0].provider_profile_config.family_settings(),
+        Some(crate::ProviderFamilySettings::DeepseekFlashChat {
+            reasoning: crate::ProviderFamilyReasoningPolicy {
+                effort: crate::ProviderReasoningEffort::Max,
+                ..
+            }
+        })
+    ));
 }
 
 #[test]
@@ -1303,8 +1129,9 @@ fn provider_protocol_revision_tracks_only_the_selected_models_effective_wire_con
     settings.models[1].api_url_override =
         Some("https://other-changed.example/v1/chat/completions".to_string());
     settings.models[1].api_token_override = Some("other-changed-token".to_string());
+    settings.models[1].provider_model_id = "deepseek-flash".to_string();
     settings.models[1].provider_profile_config =
-        crate::ProviderProfileConfig::deepseek_v4_default();
+        crate::ProviderProfileConfig::deepseek_flash_default();
     service.save_model_settings(settings.clone()).unwrap();
     let metadata_and_other_model = service.load_model_settings_snapshot().unwrap().unwrap();
     assert_eq!(
@@ -1316,8 +1143,9 @@ fn provider_protocol_revision_tracks_only_the_selected_models_effective_wire_con
         initial.provider_protocol_revisions["other-model"]
     );
 
+    settings.models[0].provider_model_id = "deepseek-flash".to_string();
     settings.models[0].provider_profile_config =
-        crate::ProviderProfileConfig::deepseek_v4_default();
+        crate::ProviderProfileConfig::deepseek_flash_default();
     service.save_model_settings(settings.clone()).unwrap();
     let deepseek_default = service.load_model_settings_snapshot().unwrap().unwrap();
     assert_ne!(
@@ -1325,12 +1153,16 @@ fn provider_protocol_revision_tracks_only_the_selected_models_effective_wire_con
         "changing the selected Profile must rotate its protocol identity"
     );
 
-    let mut thinking = crate::ProviderProfileConfig::deepseek_v4_default();
-    let crate::ProviderProfileConfig::V1(config) = &mut thinking else {
-        unreachable!("legacy DeepSeek constructor must produce schema v1")
+    let mut thinking = crate::ProviderProfileConfig::deepseek_flash_default();
+    let crate::ProviderProfileConfig::V2(config) = &mut thinking else {
+        unreachable!("DeepSeek family constructor must produce schema v2")
     };
-    config.reasoning.mode = crate::ReasoningMode::Enabled;
-    config.reasoning.effort = crate::ReasoningEffort::High;
+    let crate::ProviderFamilySettings::DeepseekFlashChat { reasoning } = &mut config.settings
+    else {
+        unreachable!("Flash profile must carry Flash family settings")
+    };
+    reasoning.mode = crate::ReasoningMode::Enabled;
+    reasoning.effort = crate::ProviderReasoningEffort::High;
     settings.models[0].provider_profile_config = thinking;
     service.save_model_settings(settings.clone()).unwrap();
     let deepseek_thinking = service.load_model_settings_snapshot().unwrap().unwrap();
@@ -1377,24 +1209,26 @@ fn provider_profile_config_round_trips_through_model_storage() {
     let service = fixture.service();
     let mut settings = revision_test_settings();
     settings.models[0].provider_profile_config =
-        crate::ProviderProfileConfig::deepseek_v4_default();
+        crate::ProviderProfileConfig::deepseek_flash_default();
 
     service.save_model_settings(settings).unwrap();
     let stored = service.load_model_settings().unwrap().unwrap();
 
     assert_eq!(
         stored.models[0].provider_profile_config,
-        crate::ProviderProfileConfig::deepseek_v4_default()
+        crate::ProviderProfileConfig::deepseek_flash_default()
     );
 }
 
 #[test]
-fn unchanged_save_preserves_the_legacy_v1_profile_shape() {
+fn unchanged_save_preserves_the_current_deepseek_profile_shape() {
     let fixture = StorageFixture::new();
     let service = fixture.service();
     let mut settings = revision_test_settings();
+    settings.models[0].provider_model_id = "deepseek-flash".to_string();
+    settings.models[0].supports_image = true;
     settings.models[0].provider_profile_config =
-        crate::ProviderProfileConfig::deepseek_v4_default();
+        crate::ProviderProfileConfig::deepseek_flash_default();
     service.save_model_settings(settings.clone()).unwrap();
 
     settings.models[0].display_name = "Metadata edit".to_string();
@@ -1412,9 +1246,13 @@ fn unchanged_save_preserves_the_legacy_v1_profile_shape() {
     assert_eq!(
         serde_json::to_value(&saved.models[0].provider_profile_config).unwrap(),
         serde_json::json!({
-            "schemaVersion": 1,
-            "profile": {"id": "deepseek_v4_chat", "version": 1},
-            "reasoning": {"mode": "provider_default", "effort": "provider_default"}
+            "schemaVersion": 2,
+            "profile": {"id": "deepseek_v4_1_flash_chat", "version": 1},
+            "vendorId": "deepseek",
+            "settings": {
+                "kind": "deepseek_flash_chat",
+                "reasoning": {"mode": "provider_default", "effort": "provider_default"}
+            }
         })
     );
 }
@@ -1508,7 +1346,7 @@ fn explicit_generic_profile_can_replace_a_provider_specific_profile() {
     let service = fixture.service();
     let mut settings = revision_test_settings();
     settings.models[0].provider_profile_config =
-        crate::ProviderProfileConfig::deepseek_v4_default();
+        crate::ProviderProfileConfig::deepseek_flash_default();
     service.save_model_settings(settings.clone()).unwrap();
 
     settings.models[0].provider_profile_config = crate::ProviderProfileConfig::generic_for_dialect(
@@ -1940,10 +1778,10 @@ fn legacy_raw_secret_fields_are_rejected_by_the_save_wire() {
 #[test]
 fn save_request_rejects_renderer_capabilities_versions_and_unknown_settings() {
     let valid_update = serde_json::json!({
-        "kind": "select_registered_profile",
-        "profileId": "deepseek_v4_chat",
+        "kind": "select_vendor",
+        "vendorId": "deepseek",
         "settings": {
-            "kind": "deepseek_v4_chat",
+            "kind": "deepseek_flash_chat",
             "reasoning": {"mode": "enabled", "effort": "high"}
         }
     });
@@ -1973,43 +1811,6 @@ fn save_request_rejects_renderer_capabilities_versions_and_unknown_settings() {
     update["settings"]["reasoning"]["effort"] = serde_json::json!("xhigh");
     settings["models"][0]["providerProfileUpdate"] = update;
     assert!(serde_json::from_value::<ModelSettingsSaveRequest>(settings).is_err());
-}
-
-#[test]
-fn registered_selection_rejects_unknown_profiles_and_incompatible_dialects() {
-    let fixture = StorageFixture::new();
-    let service = fixture.service();
-    let settings = revision_test_settings();
-    let unknown = renderer_save_request(
-        &settings,
-        serde_json::json!({
-            "kind": "select_registered_profile",
-            "profileId": "future_profile",
-            "settings": {
-                "kind": "deepseek_v4_chat",
-                "reasoning": {"mode": "provider_default", "effort": "provider_default"}
-            }
-        }),
-        None,
-    );
-    assert!(service.save_model_settings_request(unknown).is_err());
-
-    let mut anthropic = settings;
-    anthropic.api_url = "https://api.anthropic.com/v1/messages".to_string();
-    let incompatible = renderer_save_request(
-        &anthropic,
-        serde_json::json!({
-            "kind": "select_registered_profile",
-            "profileId": "deepseek_v4_chat",
-            "settings": {
-                "kind": "deepseek_v4_chat",
-                "reasoning": {"mode": "provider_default", "effort": "provider_default"}
-            }
-        }),
-        None,
-    );
-    assert!(service.save_model_settings_request(incompatible).is_err());
-    assert!(service.load_model_settings().unwrap().is_none());
 }
 
 #[test]

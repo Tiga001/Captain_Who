@@ -8,6 +8,8 @@ import { useFrontendConfig } from '../../config/FrontendConfigProvider'
 import { isMacOS } from '../../lib/platform'
 import { useAppStartupStatus } from './AppStartupContext'
 import { StartupAmbientText } from './StartupAmbientText'
+import { useAccountAuth } from '../auth/AccountAuthContext'
+import { AccountLoginForm } from '../auth/AccountLoginForm'
 import './AppStartupScreen.css'
 
 const MINIMUM_STARTUP_SCREEN_MS = 280
@@ -16,12 +18,24 @@ const STARTUP_EXIT_MS = 180
 
 export function AppStartupGate({ children }: { children: ReactNode }) {
   const startup = useAppStartupStatus()
+  const auth = useAccountAuth()
+  const [hasEnteredWorkspace, setHasEnteredWorkspace] = useState(false)
+  const authBlocking = Boolean(
+    auth && ((!hasEnteredWorkspace && auth.state.status !== 'signedIn') || auth.loginRequested)
+  )
   const { resolvedColorScheme, t } = useFrontendConfig()
   const supportsNativeTranslucency = isMacOS()
   const [interactive, setInteractive] = useState(false)
   const [overlayMounted, setOverlayMounted] = useState(true)
   const [timedOut, setTimedOut] = useState(false)
   const startupAttempt = startup?.attempt
+
+  useEffect(() => {
+    if (authBlocking) {
+      setInteractive(false)
+      setOverlayMounted(true)
+    }
+  }, [authBlocking])
 
   useEffect(() => {
     if (startupAttempt === undefined) return
@@ -38,36 +52,46 @@ export function AppStartupGate({ children }: { children: ReactNode }) {
   }, [startup])
 
   useEffect(() => {
-    if (!startup?.ready) return
+    if (!startup?.ready || authBlocking) return
     const remaining = Math.max(0, MINIMUM_STARTUP_SCREEN_MS - (Date.now() - startup.startedAt))
     let exitTimeoutId: number | undefined
     const readyTimeoutId = window.setTimeout(() => {
       setInteractive(true)
+      setHasEnteredWorkspace(true)
       exitTimeoutId = window.setTimeout(() => setOverlayMounted(false), STARTUP_EXIT_MS)
     }, remaining)
     return () => {
       window.clearTimeout(readyTimeoutId)
       if (exitTimeoutId !== undefined) window.clearTimeout(exitTimeoutId)
     }
-  }, [startup?.ready, startup?.startedAt])
+  }, [startup?.ready, startup?.startedAt, authBlocking])
 
   if (!startup) return children
 
   const showFailure = startup.hasFailed || timedOut
 
   return (
-    <div className="app-startup-root" data-interactive={interactive ? 'true' : 'false'}>
-      <div className="app-startup-workspace" aria-hidden={!interactive} inert={!interactive}>
+    <div
+      className="app-startup-root"
+      data-interactive={interactive && !authBlocking ? 'true' : 'false'}
+    >
+      <div
+        className="app-startup-workspace"
+        aria-hidden={!interactive || authBlocking}
+        inert={!interactive || authBlocking}
+      >
         {children}
       </div>
 
-      {overlayMounted ? (
+      {overlayMounted || authBlocking ? (
         <div
           className="app-startup-screen"
-          data-exiting={interactive ? 'true' : 'false'}
+          data-exiting={interactive && !authBlocking ? 'true' : 'false'}
           data-native-translucency={supportsNativeTranslucency ? 'true' : undefined}
-          role={showFailure ? 'alert' : 'status'}
-          aria-live={showFailure ? 'assertive' : 'polite'}
+          role={authBlocking ? 'dialog' : showFailure ? 'alert' : 'status'}
+          aria-modal={authBlocking || undefined}
+          aria-label={authBlocking ? t('auth.title') : undefined}
+          aria-live={authBlocking ? undefined : showFailure ? 'assertive' : 'polite'}
         >
           <div className="app-startup-screen__drag-region" aria-hidden="true" />
           <div className="app-startup-screen__content">
@@ -77,7 +101,9 @@ export function AppStartupGate({ children }: { children: ReactNode }) {
               alt=""
               aria-hidden="true"
             />
-            {showFailure ? (
+            {authBlocking ? (
+              <AccountLoginForm canDismiss={hasEnteredWorkspace} />
+            ) : showFailure ? (
               <div className="app-startup-screen__failure">
                 <strong>{t('startup.failedTitle')}</strong>
                 <span>{t('startup.failedDescription')}</span>

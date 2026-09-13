@@ -12,16 +12,31 @@ vi.mock('../../config/FrontendConfigProvider', () => ({
 const { DeepSeekProviderSettingsEditor, MoonshotProviderSettingsEditor } =
   await import('../../features/settings/pages/configuration/providerSettingsEditors')
 
-const deepSeekDescriptor: Extract<ProviderFamilySettingsDescriptor, { kind: 'deepseek_v4_chat' }> =
-  {
-    kind: 'deepseek_v4_chat',
-    reasoningModes: ['provider_default', 'enabled', 'disabled'],
-    reasoningEfforts: ['provider_default', 'low', 'high', 'max'],
-    defaultSettings: {
-      kind: 'deepseek_v4_chat',
-      reasoning: { mode: 'provider_default', effort: 'provider_default' }
-    }
+const deepSeekDescriptor: Extract<
+  ProviderFamilySettingsDescriptor,
+  { kind: 'deepseek_flash_chat' }
+> = {
+  kind: 'deepseek_flash_chat',
+  reasoningModes: ['provider_default', 'enabled', 'disabled'],
+  reasoningEfforts: ['provider_default', 'low', 'high', 'max'],
+  defaultSettings: {
+    kind: 'deepseek_flash_chat',
+    reasoning: { mode: 'provider_default', effort: 'provider_default' }
   }
+}
+
+const deepSeekProDescriptor: Extract<
+  ProviderFamilySettingsDescriptor,
+  { kind: 'deepseek_pro_chat' }
+> = {
+  kind: 'deepseek_pro_chat',
+  reasoningModes: ['provider_default', 'enabled', 'disabled'],
+  reasoningEfforts: ['provider_default', 'low', 'high', 'max'],
+  defaultSettings: {
+    kind: 'deepseek_pro_chat',
+    reasoning: { mode: 'provider_default', effort: 'provider_default' }
+  }
+}
 
 const moonshotK3Descriptor: Extract<
   ProviderFamilySettingsDescriptor,
@@ -60,7 +75,7 @@ function DeepSeekDialogHarness({ onCancel }: { onCancel: () => void }) {
         <DeepSeekProviderSettingsEditor
           descriptor={deepSeekDescriptor}
           initialSettings={{
-            kind: 'deepseek_v4_chat',
+            kind: 'deepseek_flash_chat',
             reasoning: { mode: 'enabled', effort: 'high' }
           }}
           onCancel={() => {
@@ -75,83 +90,97 @@ function DeepSeekDialogHarness({ onCancel }: { onCancel: () => void }) {
 }
 
 describe('DeepSeekProviderSettingsEditor', () => {
-  it('keeps edits local until confirm and normalizes disabled Thinking', async () => {
-    const onCancel = vi.fn()
-    const onConfirm = vi.fn()
-    const screen = await render(
-      <DeepSeekProviderSettingsEditor
-        descriptor={deepSeekDescriptor}
-        initialSettings={{
-          kind: 'deepseek_v4_chat',
-          reasoning: { mode: 'enabled', effort: 'max' }
-        }}
-        onCancel={onCancel}
-        onConfirm={onConfirm}
-      />
-    )
+  it.each([
+    {
+      family: 'Flash',
+      descriptor: deepSeekDescriptor,
+      kind: 'deepseek_flash_chat'
+    },
+    {
+      family: 'Pro',
+      descriptor: deepSeekProDescriptor,
+      kind: 'deepseek_pro_chat'
+    }
+  ] as const)(
+    'uses the full reasoning matrix for $family and normalizes disabled Thinking',
+    async ({ descriptor, kind }) => {
+      const onCancel = vi.fn()
+      const onConfirm = vi.fn()
+      const screen = await render(
+        <DeepSeekProviderSettingsEditor
+          descriptor={descriptor}
+          initialSettings={{
+            kind,
+            reasoning: { mode: 'enabled', effort: 'max' }
+          }}
+          onCancel={onCancel}
+          onConfirm={onConfirm}
+        />
+      )
 
-    const effort = screen.getByRole('button', {
-      name: 'configuration.deepSeekSettings.reasoningEffort: configuration.deepSeekSettings.effortMax'
-    })
-
-    await effort.click()
-    const effortMenu = document.querySelector('.settings-select__menu')
-    expect(effortMenu).not.toBeNull()
-    expect(document.querySelector('.provider-settings-dialog__card')?.contains(effortMenu)).toBe(
-      false
-    )
-    expect(
-      Array.from(
-        document.querySelectorAll<HTMLElement>(
-          '.settings-select__menu .settings-select__option-label'
-        )
-      ).map((option) => option.textContent)
-    ).toEqual([
-      'configuration.deepSeekSettings.effortProviderDefault',
-      'configuration.deepSeekSettings.effortLow',
-      'configuration.deepSeekSettings.effortHigh',
-      'configuration.deepSeekSettings.effortMax'
-    ])
-    await screen.getByRole('option', { name: 'configuration.deepSeekSettings.effortMax' }).click()
-
-    await screen
-      .getByRole('button', {
-        name: 'configuration.deepSeekSettings.thinkingMode: configuration.deepSeekSettings.thinkingEnabled'
+      const effort = screen.getByRole('button', {
+        name: 'configuration.deepSeekSettings.reasoningEffort: configuration.deepSeekSettings.effortMax'
       })
-      .click()
-    expect(
-      Array.from(
-        document.querySelectorAll<HTMLElement>(
-          '.settings-select__menu .settings-select__option-label'
-        )
-      ).map((option) => option.textContent)
-    ).toEqual([
-      'configuration.deepSeekSettings.thinkingProviderDefault',
-      'configuration.deepSeekSettings.thinkingEnabled',
-      'configuration.deepSeekSettings.thinkingDisabled'
-    ])
-    expect(document.body.textContent).toContain(
-      'configuration.deepSeekSettings.defaultThinkingDescription'
-    )
-    expect(document.querySelector('.provider-settings-dialog__notes')).toBeNull()
-    expect(document.querySelectorAll('.provider-settings-dialog__card li')).toHaveLength(0)
-    await screen
-      .getByRole('option', { name: 'configuration.deepSeekSettings.thinkingDisabled' })
-      .click()
 
-    const disabledEffort = document.querySelector<HTMLButtonElement>(
-      'button[aria-label="configuration.deepSeekSettings.reasoningEffort: configuration.deepSeekSettings.effortProviderDefault"]'
-    )
-    await expect.poll(() => disabledEffort?.disabled).toBe(true)
-    expect(onConfirm).not.toHaveBeenCalled()
+      await effort.click()
+      const effortMenu = document.querySelector('.settings-select__menu')
+      expect(effortMenu).not.toBeNull()
+      expect(document.querySelector('.provider-settings-dialog__card')?.contains(effortMenu)).toBe(
+        false
+      )
+      expect(
+        Array.from(
+          document.querySelectorAll<HTMLElement>(
+            '.settings-select__menu .settings-select__option-label'
+          )
+        ).map((option) => option.textContent)
+      ).toEqual([
+        'configuration.deepSeekSettings.effortProviderDefault',
+        'configuration.deepSeekSettings.effortLow',
+        'configuration.deepSeekSettings.effortHigh',
+        'configuration.deepSeekSettings.effortMax'
+      ])
+      await screen.getByRole('option', { name: 'configuration.deepSeekSettings.effortMax' }).click()
 
-    await screen.getByRole('button', { name: 'configuration.providerSettings.confirm' }).click()
-    expect(onConfirm).toHaveBeenCalledWith({
-      kind: 'deepseek_v4_chat',
-      reasoning: { mode: 'disabled', effort: 'provider_default' }
-    })
-    expect(onCancel).not.toHaveBeenCalled()
-  })
+      await screen
+        .getByRole('button', {
+          name: 'configuration.deepSeekSettings.thinkingMode: configuration.deepSeekSettings.thinkingEnabled'
+        })
+        .click()
+      expect(
+        Array.from(
+          document.querySelectorAll<HTMLElement>(
+            '.settings-select__menu .settings-select__option-label'
+          )
+        ).map((option) => option.textContent)
+      ).toEqual([
+        'configuration.deepSeekSettings.thinkingProviderDefault',
+        'configuration.deepSeekSettings.thinkingEnabled',
+        'configuration.deepSeekSettings.thinkingDisabled'
+      ])
+      expect(document.body.textContent).toContain(
+        'configuration.deepSeekSettings.defaultThinkingDescription'
+      )
+      expect(document.querySelector('.provider-settings-dialog__notes')).toBeNull()
+      expect(document.querySelectorAll('.provider-settings-dialog__card li')).toHaveLength(0)
+      await screen
+        .getByRole('option', { name: 'configuration.deepSeekSettings.thinkingDisabled' })
+        .click()
+
+      const disabledEffort = document.querySelector<HTMLButtonElement>(
+        'button[aria-label="configuration.deepSeekSettings.reasoningEffort: configuration.deepSeekSettings.effortProviderDefault"]'
+      )
+      await expect.poll(() => disabledEffort?.disabled).toBe(true)
+      expect(onConfirm).not.toHaveBeenCalled()
+
+      await screen.getByRole('button', { name: 'configuration.providerSettings.confirm' }).click()
+      expect(onConfirm).toHaveBeenCalledWith({
+        kind,
+        reasoning: { mode: 'disabled', effort: 'provider_default' }
+      })
+      expect(onCancel).not.toHaveBeenCalled()
+    }
+  )
 
   it('does not publish a changed draft when cancelled', async () => {
     const onCancel = vi.fn()
@@ -160,7 +189,7 @@ describe('DeepSeekProviderSettingsEditor', () => {
       <DeepSeekProviderSettingsEditor
         descriptor={deepSeekDescriptor}
         initialSettings={{
-          kind: 'deepseek_v4_chat',
+          kind: 'deepseek_flash_chat',
           reasoning: { mode: 'provider_default', effort: 'provider_default' }
         }}
         onCancel={onCancel}
@@ -188,7 +217,7 @@ describe('DeepSeekProviderSettingsEditor', () => {
       <DeepSeekProviderSettingsEditor
         descriptor={deepSeekDescriptor}
         initialSettings={{
-          kind: 'deepseek_v4_chat',
+          kind: 'deepseek_flash_chat',
           reasoning: { mode: 'enabled', effort: 'high' }
         }}
         onCancel={onCancel}

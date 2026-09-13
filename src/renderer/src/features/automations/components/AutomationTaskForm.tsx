@@ -46,8 +46,8 @@ function legacyReasoningProjection(model: ModelConfig | null) {
   if (!config) return undefined
   if (config.schemaVersion === 1) return config.reasoning
   if (
-    config.settings.kind === 'deepseek_v4_chat' ||
-    config.settings.kind === 'deepseek_v4_vision'
+    config.settings.kind === 'deepseek_flash_chat' ||
+    config.settings.kind === 'deepseek_pro_chat'
   ) {
     return config.settings.reasoning
   }

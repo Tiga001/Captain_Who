@@ -2255,7 +2255,7 @@ export const frFRTranslations = {
   'configuration.cancel': 'Annuler',
   'configuration.done': 'Terminé',
   'configuration.providerModelId': 'ID du modèle fournisseur',
-  'configuration.providerModelIdPlaceholder': 'Exemple : deepseek-chat',
+  'configuration.providerModelIdPlaceholder': 'Exemple : deepseek-flash',
   'configuration.displayName': "Nom d'affichage",
   'configuration.displayNamePlaceholder': 'Exemple : Kimi K3 High',
   'configuration.invalidDisplayName': "Utilisez un nom d'affichage de 512 octets UTF-8 maximum",

@@ -7,11 +7,11 @@ import type {
 } from './storage'
 
 describe('Provider vendor protocol', () => {
-  it('represents legacy and family-owned Profile configurations without changing v1', () => {
-    const legacy = {
+  it('represents generic and family-owned Profile configurations', () => {
+    const generic = {
       schemaVersion: 1,
-      profile: { id: 'deepseek_v4_chat', version: 1 },
-      reasoning: { mode: 'enabled', effort: 'high' }
+      profile: { id: 'generic_openai_chat', version: 1 },
+      reasoning: { mode: 'provider_default', effort: 'provider_default' }
     } as const satisfies ProviderProfileConfig
     const moonshot = {
       schemaVersion: 2,
@@ -20,15 +20,39 @@ describe('Provider vendor protocol', () => {
       settings: { kind: 'moonshot_k3_chat', reasoningEffort: 'max' }
     } as const satisfies ProviderProfileConfig
 
-    expect(legacy).toEqual({
+    expect(generic).toEqual({
       schemaVersion: 1,
-      profile: { id: 'deepseek_v4_chat', version: 1 },
-      reasoning: { mode: 'enabled', effort: 'high' }
+      profile: { id: 'generic_openai_chat', version: 1 },
+      reasoning: { mode: 'provider_default', effort: 'provider_default' }
     })
     expect(moonshot.settings).toEqual({
       kind: 'moonshot_k3_chat',
       reasoningEffort: 'max'
     })
+  })
+
+  it('keeps DeepSeek public family settings independent from its internal Profile identity', () => {
+    const flash = {
+      schemaVersion: 2,
+      profile: { id: 'deepseek_v4_1_flash_chat', version: 1 },
+      vendorId: 'deepseek',
+      settings: {
+        kind: 'deepseek_flash_chat',
+        reasoning: { mode: 'enabled', effort: 'low' }
+      }
+    } as const satisfies ProviderProfileConfig
+    const pro = {
+      schemaVersion: 2,
+      profile: { id: 'deepseek_v4_pro_0813_chat', version: 1 },
+      vendorId: 'deepseek',
+      settings: {
+        kind: 'deepseek_pro_chat',
+        reasoning: { mode: 'enabled', effort: 'max' }
+      }
+    } as const satisfies ProviderProfileConfig
+
+    expect(flash.profile.id).not.toBe(flash.settings.kind)
+    expect(pro.profile.id).not.toBe(pro.settings.kind)
   })
 
   it('keeps vendor selection free of internal Profile identity and versions', () => {

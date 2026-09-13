@@ -2206,7 +2206,7 @@ export const jaJPTranslations = {
   'configuration.cancel': 'キャンセル',
   'configuration.done': '完了',
   'configuration.providerModelId': 'プロバイダーモデル ID',
-  'configuration.providerModelIdPlaceholder': '例: deepseek-chat',
+  'configuration.providerModelIdPlaceholder': '例: deepseek-flash',
   'configuration.displayName': '表示名',
   'configuration.displayNamePlaceholder': '例: Kimi K3 High',
   'configuration.invalidDisplayName': '表示名は 512 UTF-8 バイト以内にしてください',

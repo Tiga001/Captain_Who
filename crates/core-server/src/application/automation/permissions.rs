@@ -257,8 +257,7 @@ mod tests {
     use super::*;
     use mycopilot_core::provider_profile::{
         ProviderFamilyReasoningPolicy, ProviderFamilySettings, ProviderProfileConfig,
-        ProviderProfileConfigV1, ProviderProfileRef, ProviderVendorId, ReasoningEffort,
-        ReasoningPolicy, PROVIDER_PROFILE_CONFIG_SCHEMA_VERSION,
+        ProviderProfileRef, ProviderVendorId,
     };
 
     fn preferences() -> UiPreferencesRecord {
@@ -490,23 +489,24 @@ mod tests {
 
     #[test]
     fn reasoning_is_a_read_only_model_config_projection() {
-        let reasoning = ReasoningPolicy {
-            mode: ReasoningMode::Enabled,
-            effort: ReasoningEffort::Max,
-        };
         let mut model = ModelConfigRecord {
-            id: "deepseek-v4".to_string(),
-            provider_model_id: "deepseek-v4".to_string(),
-            display_name: "DeepSeek V4".to_string(),
+            id: "deepseek-flash".to_string(),
+            provider_model_id: "deepseek-flash".to_string(),
+            display_name: "DeepSeek Flash".to_string(),
             api_url_override: None,
             api_token_override: None,
-            supports_image: false,
+            supports_image: true,
             context_window_tokens: None,
-            provider_profile_config: ProviderProfileConfig::V1(ProviderProfileConfigV1 {
-                schema_version: PROVIDER_PROFILE_CONFIG_SCHEMA_VERSION,
-                profile: ProviderProfileRef::deepseek_v4_chat(),
-                reasoning,
-            }),
+            provider_profile_config: ProviderProfileConfig::from_family_settings(
+                ProviderProfileRef::deepseek_v4_1_flash_chat(),
+                ProviderVendorId::DeepSeek,
+                ProviderFamilySettings::DeepseekFlashChat {
+                    reasoning: ProviderFamilyReasoningPolicy {
+                        mode: ReasoningMode::Enabled,
+                        effort: ProviderReasoningEffort::Max,
+                    },
+                },
+            ),
             input_price: String::new(),
             cached_input_price: String::new(),
             output_price: String::new(),
@@ -523,9 +523,9 @@ mod tests {
         );
 
         model.provider_profile_config = ProviderProfileConfig::from_family_settings(
-            ProviderProfileRef::deepseek_v4_chat(),
+            ProviderProfileRef::deepseek_v4_1_flash_chat(),
             ProviderVendorId::DeepSeek,
-            ProviderFamilySettings::DeepseekV4Chat {
+            ProviderFamilySettings::DeepseekFlashChat {
                 reasoning: ProviderFamilyReasoningPolicy {
                     mode: ReasoningMode::Enabled,
                     effort: ProviderReasoningEffort::High,
@@ -538,9 +538,9 @@ mod tests {
         );
 
         model.provider_profile_config = ProviderProfileConfig::from_family_settings(
-            ProviderProfileRef::deepseek_v4_chat(),
+            ProviderProfileRef::deepseek_v4_1_flash_chat(),
             ProviderVendorId::DeepSeek,
-            ProviderFamilySettings::DeepseekV4Chat {
+            ProviderFamilySettings::DeepseekFlashChat {
                 reasoning: ProviderFamilyReasoningPolicy {
                     mode: ReasoningMode::Enabled,
                     effort: ProviderReasoningEffort::Low,

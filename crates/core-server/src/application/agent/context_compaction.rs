@@ -1622,7 +1622,7 @@ mod provider_capability_tests {
         input.provider_protocol_key = Some(ProviderProtocolKey {
             dialect: ProviderProtocolDialect::OpenAiChatCompletions,
             profile: mycopilot_core::ProviderProfileRef {
-                id: mycopilot_core::ProviderProfileId::DeepSeekV4Chat,
+                id: mycopilot_core::ProviderProfileId::DeepSeekV41FlashChat,
                 version: u32::MAX,
             },
             model_id: input.model.clone(),

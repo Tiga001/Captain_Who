@@ -65,6 +65,7 @@ vi.mock('../../features/chat/chatAttachments', () => ({
 import { ChatComposer } from '../../features/chat/components/ChatComposer'
 import { createComposerDraft } from '../chatMessageFactory'
 import { ConfirmationDialog } from '../../components/dialog/ConfirmationDialog'
+import { AccountAuthContext } from '../../features/auth/AccountAuthContext'
 
 const WORKSPACE_COMMANDS = [
   { id: 'terminal', label: '打开终端', query: '终端', description: '在底部栏新建终端' },
@@ -107,9 +108,9 @@ const MODEL_OPTIONS = [
     providerProfileConfig: {
       schemaVersion: 2,
       vendorId: 'deepseek',
-      profile: { id: 'deepseek_v4_chat', version: 1 },
+      profile: { id: 'deepseek_v4_1_flash_chat', version: 1 },
       settings: {
-        kind: 'deepseek_v4_chat',
+        kind: 'deepseek_flash_chat',
         reasoning: { mode: 'provider_default', effort: 'provider_default' }
       }
     }
@@ -266,6 +267,44 @@ afterEach(async () => {
   if (previousRootStyle === null) document.documentElement.removeAttribute('style')
   else document.documentElement.setAttribute('style', previousRootStyle)
   await page.viewport(previousViewport.width, previousViewport.height)
+})
+
+it('omits the signed-out login prompt while still requiring login to send a new turn', async () => {
+  const requestLogin = vi.fn()
+  const view = await render(
+    <AccountAuthContext.Provider
+      value={{
+        state: {
+          revision: 0,
+          status: 'signedOut',
+          profile: null,
+          error: null,
+          remembered: false
+        },
+        loginRequested: false,
+        requestLogin,
+        dismissLogin: vi.fn(),
+        canStartTurn: () => false,
+        logout: async () => ({ ok: true })
+      }}
+    >
+      <TestComposer message="Keep this unsent message" />
+    </AccountAuthContext.Provider>
+  )
+  const input = view.getByRole('textbox', { name: 'chat.inputAria' })
+  expect(document.querySelector('.account-login-prompt')).toBeNull()
+  expect(document.body.textContent).not.toContain('登录后才能启动新回合，正在运行的任务不受影响。')
+  await view.getByRole('button', { name: 'chat.send', exact: true }).click()
+  expect(requestLogin).toHaveBeenCalledTimes(1)
+  expect(submit).not.toHaveBeenCalled()
+  await expect.element(input).toHaveValue('Keep this unsent message')
+
+  await input.click()
+  await userEvent.keyboard('{Enter}')
+  expect(requestLogin).toHaveBeenCalledTimes(2)
+  expect(submit).not.toHaveBeenCalled()
+  expect(stop).not.toHaveBeenCalled()
+  await expect.element(input).toHaveValue('Keep this unsent message')
 })
 
 it.each([false, true])(

@@ -71,7 +71,7 @@ describe('model settings storage client', () => {
             contextWindowTokens: 128_000,
             providerProfileConfig: {
               schemaVersion: 999,
-              profile: { id: 'deepseek_v4_chat', version: 999 },
+              profile: { id: 'future_profile', version: 999 },
               reasoning: { mode: 'enabled', effort: 'max' }
             } as unknown as ProviderProfileConfig,
             providerProfileUpdate: { kind: 'select_generic' },
@@ -117,12 +117,12 @@ describe('model settings storage client', () => {
   it('passes the safe profile descriptor projection through unchanged', async () => {
     const descriptors = [
       {
-        profileId: 'deepseek_v4_chat',
+        profileId: 'deepseek_v4_1_flash_chat',
         profileVersion: 1,
-        displayName: '深度求索 / DeepSeek（V4 Chat）',
+        displayName: 'DeepSeek Flash',
         compatibleDialects: ['openai_chat_completions'],
-        settingsKind: 'deepseek_v4_chat',
-        selectable: true
+        settingsKind: 'none',
+        selectable: false
       }
     ] as const
     storage.loadProviderProfileUiDescriptors.mockResolvedValue(descriptors)

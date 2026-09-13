@@ -32,17 +32,17 @@ const profileDescriptors: ProviderProfileUiDescriptor[] = [
     selectable: true
   },
   {
-    profileId: 'deepseek_v4_chat',
+    profileId: 'deepseek_v4_1_flash_chat',
     profileVersion: 1,
-    displayName: 'DeepSeek V4 Chat',
+    displayName: 'DeepSeek V4.1 Flash Chat',
     compatibleDialects: ['openai_chat_completions'],
-    settingsKind: 'deepseek_v4_chat',
-    selectable: true
+    settingsKind: 'none',
+    selectable: false
   },
   {
-    profileId: 'deepseek_v4_vision',
+    profileId: 'deepseek_v4_pro_0813_chat',
     profileVersion: 1,
-    displayName: 'DeepSeek Vision',
+    displayName: 'DeepSeek V4 Pro 0813 Chat',
     compatibleDialects: ['openai_chat_completions'],
     settingsKind: 'none',
     selectable: false
@@ -103,19 +103,37 @@ function resolvePolicy(
       reason: 'unsupported_dialect'
     })
   }
-  if (input.vendorId === 'deepseek' && input.modelId === 'deepseek-v4-flash') {
+  if (input.vendorId === 'deepseek' && input.modelId === 'deepseek-flash') {
     return Promise.resolve({
       status: 'supported',
       vendorId: 'deepseek',
-      modelFamily: 'deepseek_v4_chat',
+      modelFamily: 'deepseek_flash_chat',
       settingsKind: 'deepseek',
-      imageInput: 'unsupported',
+      imageInput: 'supported',
       settings: {
-        kind: 'deepseek_v4_chat',
+        kind: 'deepseek_flash_chat',
         reasoningModes: ['provider_default', 'enabled', 'disabled'],
         reasoningEfforts: ['provider_default', 'low', 'high', 'max'],
         defaultSettings: {
-          kind: 'deepseek_v4_chat',
+          kind: 'deepseek_flash_chat',
+          reasoning: { mode: 'provider_default', effort: 'provider_default' }
+        }
+      }
+    })
+  }
+  if (input.vendorId === 'deepseek' && input.modelId === 'deepseek-v4-pro') {
+    return Promise.resolve({
+      status: 'supported',
+      vendorId: 'deepseek',
+      modelFamily: 'deepseek_pro_chat',
+      settingsKind: 'deepseek',
+      imageInput: 'unsupported',
+      settings: {
+        kind: 'deepseek_pro_chat',
+        reasoningModes: ['provider_default', 'enabled', 'disabled'],
+        reasoningEfforts: ['provider_default', 'low', 'high', 'max'],
+        defaultSettings: {
+          kind: 'deepseek_pro_chat',
           reasoning: { mode: 'provider_default', effort: 'provider_default' }
         }
       }
@@ -184,7 +202,7 @@ function deferred<Value>() {
 
 const model: ModelConfig = {
   id: 'model-config-deepseek',
-  providerModelId: 'deepseek-v4-flash',
+  providerModelId: 'deepseek-flash',
   displayName: 'Provider Model',
   apiTokenOverrideStatus: 'missing',
   apiTokenOverrideMutation: { type: 'keep' },
@@ -271,9 +289,13 @@ describe('ModelForm vendor controls', () => {
     const configuredModel: ModelConfig = {
       ...model,
       providerProfileConfig: {
-        schemaVersion: 1,
-        profile: { id: 'deepseek_v4_chat', version: 1 },
-        reasoning: { mode: 'enabled', effort: 'high' }
+        schemaVersion: 2,
+        vendorId: 'deepseek',
+        profile: { id: 'deepseek_v4_1_flash_chat', version: 1 },
+        settings: {
+          kind: 'deepseek_flash_chat',
+          reasoning: { mode: 'enabled', effort: 'high' }
+        }
       }
     }
     const screen = await render(
@@ -330,7 +352,7 @@ describe('ModelForm vendor controls', () => {
     )
 
     await expect.poll(() => resolver.mock.calls.length).toBe(1)
-    expect(resolver.mock.calls[0]![0]).toMatchObject({ modelId: 'deepseek-v4-flash' })
+    expect(resolver.mock.calls[0]![0]).toMatchObject({ modelId: 'deepseek-flash' })
 
     await screen.getByPlaceholder('configuration.displayNamePlaceholder').fill('Friendly alias')
     await new Promise((resolve) => window.setTimeout(resolve, 0))
@@ -553,6 +575,9 @@ describe('ModelForm vendor controls', () => {
           ).disabled
       )
       .toBe(false)
+    const imageInput = screen.getByRole('switch', { name: 'configuration.supportsImage' })
+    await expect.element(imageInput).toHaveAttribute('aria-checked', 'true')
+    await expect.element(imageInput).toBeDisabled()
     expect(document.querySelector('.model-form-capability-note')).toBeNull()
     await screen.getByRole('button', { name: 'configuration.providerSettings.open' }).click()
     await screen
@@ -568,29 +593,38 @@ describe('ModelForm vendor controls', () => {
       kind: 'select_vendor',
       vendorId: 'deepseek',
       settings: {
-        kind: 'deepseek_v4_chat',
+        kind: 'deepseek_flash_chat',
         reasoning: { mode: 'provider_default', effort: 'low' }
       }
     })
   })
 
-  it('restores legacy DeepSeek settings after cancelling and reopening the dialog', async () => {
+  it('uses the Pro descriptor, disables image input, and restores settings after cancel', async () => {
     const onSave = vi.fn().mockResolvedValue(undefined)
     const screen = await render(
       <ModelForm
         {...commonProps}
         model={{
           ...model,
+          providerModelId: 'deepseek-v4-pro',
+          supportsImage: true,
           providerProfileConfig: {
-            schemaVersion: 1,
-            profile: { id: 'deepseek_v4_chat', version: 1 },
-            reasoning: { mode: 'enabled', effort: 'high' }
+            schemaVersion: 2,
+            vendorId: 'deepseek',
+            profile: { id: 'deepseek_v4_pro_0813_chat', version: 1 },
+            settings: {
+              kind: 'deepseek_pro_chat',
+              reasoning: { mode: 'enabled', effort: 'high' }
+            }
           }
         }}
         onSave={onSave}
       />
     )
 
+    const imageInput = screen.getByRole('switch', { name: 'configuration.supportsImage' })
+    await expect.element(imageInput).toHaveAttribute('aria-checked', 'false')
+    await expect.element(imageInput).toBeDisabled()
     await expect
       .poll(
         () =>
@@ -800,9 +834,13 @@ describe('ModelForm vendor controls', () => {
           ...model,
           providerModelId: 'kimi-k3',
           providerProfileConfig: {
-            schemaVersion: 1,
-            profile: { id: 'deepseek_v4_chat', version: 1 },
-            reasoning: { mode: 'enabled', effort: 'high' }
+            schemaVersion: 2,
+            vendorId: 'deepseek',
+            profile: { id: 'deepseek_v4_1_flash_chat', version: 1 },
+            settings: {
+              kind: 'deepseek_flash_chat',
+              reasoning: { mode: 'enabled', effort: 'high' }
+            }
           }
         }}
         onSave={onSave}
@@ -932,7 +970,7 @@ describe('ModelForm vendor controls', () => {
       kind: 'select_vendor',
       vendorId: 'deepseek',
       settings: {
-        kind: 'deepseek_v4_chat',
+        kind: 'deepseek_flash_chat',
         reasoning: { mode: 'provider_default', effort: 'low' }
       }
     })
@@ -942,7 +980,7 @@ describe('ModelForm vendor controls', () => {
     await expect.poll(() => onSave.mock.calls.length).toBe(2)
     expect(onSave.mock.calls[1]![0]).toMatchObject({
       displayName: 'Available display',
-      providerModelId: 'deepseek-v4-flash'
+      providerModelId: 'deepseek-flash'
     })
   })
 })

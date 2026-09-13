@@ -1,12 +1,9 @@
 // Account footer menu and profile display for the left sidebar.
-import { Settings } from 'lucide-react'
+import { Settings, LogIn, LogOut } from 'lucide-react'
 import { useRef, useState } from 'react'
 import type { TranslationKey } from '../../../config/frontendTranslations'
-import {
-  getProfileDisplayName,
-  getProfileHandle,
-  getProfileInitials
-} from '../../../features/profile/profileUtils'
+import { useAccountAuth } from '../../../features/auth/AccountAuthContext'
+import { AccountAvatar } from '../../../features/auth/AccountAvatar'
 import type { UiPreferencesSnapshot } from '../../../features/storage/storageClient'
 import { useDismissOnOutsidePointer } from '../../../hooks/useDismissOnOutsidePointer'
 
@@ -16,16 +13,14 @@ interface LeftSidebarAccountFooterProps {
   uiPreferences: UiPreferencesSnapshot
 }
 
-export function LeftSidebarAccountFooter({
-  onOpenSettings,
-  t,
-  uiPreferences
-}: LeftSidebarAccountFooterProps) {
+export function LeftSidebarAccountFooter({ onOpenSettings, t }: LeftSidebarAccountFooterProps) {
   const [isAccountMenuOpen, setAccountMenuOpen] = useState(false)
   const accountMenuRef = useRef<HTMLDivElement>(null)
-  const profileDisplayName = getProfileDisplayName(uiPreferences, t('profile.defaultDisplayName'))
-  const profileHandle = getProfileHandle(uiPreferences)
-  const profileInitials = getProfileInitials(profileDisplayName)
+  const auth = useAccountAuth()
+  const [logoutError, setLogoutError] = useState(false)
+  const profile = auth?.state.profile
+  const profileDisplayName = profile?.displayName || t('auth.signedOut')
+  const profileEmail = profile?.email || t('auth.login')
 
   useDismissOnOutsidePointer(accountMenuRef, isAccountMenuOpen, () => setAccountMenuOpen(false))
 
@@ -43,15 +38,11 @@ export function LeftSidebarAccountFooter({
         >
           <div className="left-sidebar__account-menu-profile" aria-hidden="true">
             <span className="left-sidebar__account-avatar left-sidebar__account-avatar--small">
-              {uiPreferences.profileAvatarDataUrl ? (
-                <img src={uiPreferences.profileAvatarDataUrl} alt="" />
-              ) : (
-                <span>{profileInitials}</span>
-              )}
+              <AccountAvatar src={profile?.avatarDataUrl} />
             </span>
             <span className="left-sidebar__account-menu-profile-text">
               <span>{profileDisplayName}</span>
-              <span>@{profileHandle}</span>
+              <span>{profileEmail}</span>
             </span>
           </div>
 
@@ -69,8 +60,28 @@ export function LeftSidebarAccountFooter({
             <Settings aria-hidden="true" />
             <span>{t('profile.openSettings')}</span>
           </button>
+          <button
+            className="left-sidebar__account-menu-item"
+            type="button"
+            role="menuitem"
+            onClick={() => {
+              setAccountMenuOpen(false)
+              setLogoutError(false)
+              if (auth?.state.status === 'signedIn') {
+                void auth.logout().then((result) => setLogoutError(!result.ok))
+              } else auth?.requestLogin()
+            }}
+          >
+            {auth?.state.status === 'signedIn' ? (
+              <LogOut aria-hidden="true" />
+            ) : (
+              <LogIn aria-hidden="true" />
+            )}
+            <span>{t(auth?.state.status === 'signedIn' ? 'auth.logout' : 'auth.login')}</span>
+          </button>
         </div>
       )}
+      {logoutError ? <p role="alert">{t('auth.error.storage')}</p> : null}
 
       <button
         className="left-sidebar__account-button"
@@ -80,15 +91,11 @@ export function LeftSidebarAccountFooter({
         onClick={() => setAccountMenuOpen((isOpen) => !isOpen)}
       >
         <span className="left-sidebar__account-avatar">
-          {uiPreferences.profileAvatarDataUrl ? (
-            <img src={uiPreferences.profileAvatarDataUrl} alt="" />
-          ) : (
-            <span>{profileInitials}</span>
-          )}
+          <AccountAvatar src={profile?.avatarDataUrl} />
         </span>
         <span className="left-sidebar__account-text">
           <span>{profileDisplayName}</span>
-          <span>@{profileHandle}</span>
+          <span>{profileEmail}</span>
         </span>
       </button>
     </div>

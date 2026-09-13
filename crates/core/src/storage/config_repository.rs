@@ -240,7 +240,6 @@ pub(crate) fn save_model_settings_with_credential_journal(
         model.provider_model_id = model.provider_model_id.trim().to_string();
         model.display_name = model.display_name.trim().to_string();
     }
-    let (settings, _) = canonicalize_official_provider_profiles(settings);
     let previous = load_model_settings_snapshot(connection)?;
     let incoming_model_ids = settings
         .models
@@ -468,40 +467,6 @@ pub(crate) fn save_model_settings_with_credential_journal(
         provider_protocol_revisions,
         search_connection_revision,
     })
-}
-
-fn canonicalize_official_provider_profiles(
-    mut settings: StoredModelSettingsRecord,
-) -> (StoredModelSettingsRecord, bool) {
-    let global_api_url = settings.api_url.clone();
-    let global_api_token_ref = settings.api_token_ref.clone();
-    let mut changed = false;
-    for model in &mut settings.models {
-        let override_url = model
-            .api_url_override
-            .as_deref()
-            .filter(|value| !value.trim().is_empty());
-        let override_token_ref = model
-            .api_token_override_ref
-            .as_deref()
-            .filter(|value| !value.trim().is_empty());
-        let effective_api_url = match (override_url, override_token_ref) {
-            (Some(url), Some(_)) => url,
-            (None, None) if !global_api_url.trim().is_empty() && global_api_token_ref.is_some() => {
-                global_api_url.as_str()
-            }
-            _ => continue,
-        };
-        if let Some(profile) = crate::provider_registration::normalize_official_provider_profile(
-            effective_api_url,
-            &model.provider_model_id,
-            &model.provider_profile_config,
-        ) {
-            model.provider_profile_config = profile;
-            changed = true;
-        }
-    }
-    (settings, changed)
 }
 
 struct LoadedModels {

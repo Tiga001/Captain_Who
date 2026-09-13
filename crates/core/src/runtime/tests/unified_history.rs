@@ -32,7 +32,7 @@ async fn assert_unified_history_wire(style: crate::AgentApiStyle, native_deepsee
     const NARRATION: &str = "先读取文件，然后继续。";
     const PRIVATE_REASONING: &str = "private-history-reasoning";
     let model = if native_deepseek {
-        "deepseek-v4-flash"
+        "deepseek-flash"
     } else {
         "test-model"
     };
@@ -79,7 +79,7 @@ async fn assert_unified_history_wire(style: crate::AgentApiStyle, native_deepsee
     );
     let dialect = ProviderProtocolDialect::from(style);
     let profile = if native_deepseek {
-        ProviderProfileConfig::deepseek_v4_default()
+        ProviderProfileConfig::deepseek_flash_default()
     } else {
         ProviderProfileConfig::generic_for_dialect(dialect)
     };

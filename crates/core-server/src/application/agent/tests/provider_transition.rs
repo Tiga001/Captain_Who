@@ -295,13 +295,20 @@ pub(super) fn two_model_settings(
     let mut settings = test_model_settings();
     let mut target = settings.models[0].clone();
     target.id = "model-2".to_string();
-    target.provider_model_id = "model-2".to_string();
     target.display_name = "Model 2".to_string();
     target.provider_profile_config = target_profile.unwrap_or_else(|| {
         mycopilot_core::ProviderProfileConfig::generic_for_dialect(
             mycopilot_core::ProviderProtocolDialect::OpenAiChatCompletions,
         )
     });
+    if target.provider_profile_config.profile().id
+        == mycopilot_core::ProviderProfileId::DeepSeekV41FlashChat
+    {
+        target.provider_model_id = "deepseek-flash".to_string();
+        target.supports_image = true;
+    } else {
+        target.provider_model_id = "model-2".to_string();
+    }
     settings.models.push(target);
     settings
 }
@@ -460,7 +467,7 @@ fn incompatible_send_guard_rejects_before_persisting_the_new_turn() {
     let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
     storage
         .save_model_settings(two_model_settings(Some(
-            mycopilot_core::ProviderProfileConfig::deepseek_v4_default(),
+            mycopilot_core::ProviderProfileConfig::deepseek_flash_default(),
         )))
         .unwrap();
     let conversation_id = "conversation-provider-transition-guard";
@@ -534,7 +541,7 @@ async fn confirmed_incompatible_transition_compacts_and_opens_a_sendable_target_
     let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
     storage
         .save_model_settings(two_model_settings(Some(
-            mycopilot_core::ProviderProfileConfig::deepseek_v4_default(),
+            mycopilot_core::ProviderProfileConfig::deepseek_flash_default(),
         )))
         .unwrap();
     let conversation_id = "conversation-provider-transition-commit";
@@ -552,7 +559,7 @@ async fn confirmed_incompatible_transition_compacts_and_opens_a_sendable_target_
     .unwrap();
 
     let service = AgentService::new(storage.clone())
-        .with_context_compaction_summary_generator(provider_transition_generator("model-2"));
+        .with_context_compaction_summary_generator(provider_transition_generator("deepseek-flash"));
     let preflight = service
         .preflight_provider_transition(AgentProviderTransitionPreflightInput {
             conversation_id: conversation_id.to_string(),
@@ -656,15 +663,19 @@ async fn fork_adaptation_marker_forces_compaction_in_both_profile_directions_and
         let database_path = fixture.path().join("storage.sqlite");
         let storage = Arc::new(StorageService::open(&database_path).unwrap());
         let mut settings = two_model_settings(
-            target_is_deepseek.then(mycopilot_core::ProviderProfileConfig::deepseek_v4_default),
+            target_is_deepseek.then(mycopilot_core::ProviderProfileConfig::deepseek_flash_default),
         );
         settings.models[0].provider_profile_config = if source_is_deepseek {
-            mycopilot_core::ProviderProfileConfig::deepseek_v4_default()
+            mycopilot_core::ProviderProfileConfig::deepseek_flash_default()
         } else {
             mycopilot_core::ProviderProfileConfig::generic_for_dialect(
                 mycopilot_core::ProviderProtocolDialect::OpenAiChatCompletions,
             )
         };
+        if source_is_deepseek {
+            settings.models[0].provider_model_id = "deepseek-flash".to_string();
+            settings.models[0].supports_image = true;
+        }
         storage.save_model_settings(settings).unwrap();
         let conversation_id = format!("conversation-fork-adaptation-{suffix}");
         let conversation = conversation_with_completed_history(&conversation_id, Some("model-1"));
@@ -684,8 +695,14 @@ async fn fork_adaptation_marker_forces_compaction_in_both_profile_directions_and
             .unwrap();
         drop(connection);
 
-        let service = AgentService::new(storage.clone())
-            .with_context_compaction_summary_generator(provider_transition_generator("model-2"));
+        let observation_model = if target_is_deepseek {
+            "deepseek-flash"
+        } else {
+            "model-2"
+        };
+        let service = AgentService::new(storage.clone()).with_context_compaction_summary_generator(
+            provider_transition_generator(observation_model),
+        );
         let preflight = service
             .preflight_provider_transition(AgentProviderTransitionPreflightInput {
                 conversation_id: conversation_id.clone(),
@@ -738,7 +755,9 @@ async fn deepseek_to_generic_transition_releases_private_state_and_opens_a_gener
     let storage = Arc::new(StorageService::open(&database_path).unwrap());
     let mut settings = two_model_settings(None);
     settings.models[0].provider_profile_config =
-        mycopilot_core::ProviderProfileConfig::deepseek_v4_default();
+        mycopilot_core::ProviderProfileConfig::deepseek_flash_default();
+    settings.models[0].provider_model_id = "deepseek-flash".to_string();
+    settings.models[0].supports_image = true;
     storage.save_model_settings(settings).unwrap();
     let conversation_id = "conversation-deepseek-to-generic-transition";
     let conversation = conversation_with_completed_history(conversation_id, Some("model-1"));
@@ -838,7 +857,9 @@ async fn same_model_protocol_revision_change_compacts_before_reusing_the_model_i
         .clone();
     let mut changed_settings = initial_settings;
     changed_settings.models[0].provider_profile_config =
-        mycopilot_core::ProviderProfileConfig::deepseek_v4_default();
+        mycopilot_core::ProviderProfileConfig::deepseek_flash_default();
+    changed_settings.models[0].provider_model_id = "deepseek-flash".to_string();
+    changed_settings.models[0].supports_image = true;
     storage.save_model_settings(changed_settings).unwrap();
     let after_revision = storage
         .load_model_settings_snapshot()
@@ -849,7 +870,7 @@ async fn same_model_protocol_revision_change_compacts_before_reusing_the_model_i
     assert_ne!(after_revision, before_revision);
 
     let service = AgentService::new(storage.clone())
-        .with_context_compaction_summary_generator(provider_transition_generator("model-1"));
+        .with_context_compaction_summary_generator(provider_transition_generator("deepseek-flash"));
     let preflight = service
         .preflight_provider_transition(AgentProviderTransitionPreflightInput {
             conversation_id: conversation_id.to_string(),
@@ -896,7 +917,7 @@ async fn failed_transition_gets_a_new_retry_token_and_can_succeed() {
     let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
     storage
         .save_model_settings(two_model_settings(Some(
-            mycopilot_core::ProviderProfileConfig::deepseek_v4_default(),
+            mycopilot_core::ProviderProfileConfig::deepseek_flash_default(),
         )))
         .unwrap();
     let conversation_id = "conversation-provider-transition-retry";
@@ -981,7 +1002,7 @@ async fn failed_transition_gets_a_new_retry_token_and_can_succeed() {
     drop(failing);
 
     let retrying = AgentService::new(storage.clone())
-        .with_context_compaction_summary_generator(provider_transition_generator("model-2"));
+        .with_context_compaction_summary_generator(provider_transition_generator("deepseek-flash"));
     let retry_preflight = retrying
         .preflight_provider_transition(AgentProviderTransitionPreflightInput {
             conversation_id: conversation_id.to_string(),

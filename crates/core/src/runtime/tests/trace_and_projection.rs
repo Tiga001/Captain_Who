@@ -473,11 +473,11 @@ fn provider_profile_context_boundaries_fail_closed_without_translating_private_s
     let vault =
         ProviderContinuationVaultFactory::open_or_provision(Arc::clone(&storage), credentials)
             .unwrap();
-    let deepseek_profile = ProviderProfileConfig::deepseek_v4_default();
+    let deepseek_profile = ProviderProfileConfig::deepseek_flash_default();
     let deepseek_protocol = ProviderProtocolKey::new(
         ProviderProtocolDialect::OpenAiChatCompletions,
         &deepseek_profile,
-        "deepseek-boundary-a",
+        "deepseek-flash",
         Some("configuration-a".to_string()),
     )
     .unwrap();
@@ -582,7 +582,7 @@ fn provider_profile_context_boundaries_fail_closed_without_translating_private_s
     let mismatched_protocol = ProviderProtocolKey::new(
         ProviderProtocolDialect::OpenAiChatCompletions,
         &deepseek_profile,
-        "deepseek-boundary-b",
+        "deepseek-flash",
         Some("configuration-b".to_string()),
     )
     .unwrap();

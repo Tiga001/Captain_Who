@@ -627,6 +627,19 @@ fn test_model_settings() -> ModelSettingsRecord {
     }
 }
 
+fn deepseek_flash_profile(
+    mode: mycopilot_core::ReasoningMode,
+    effort: mycopilot_core::ProviderReasoningEffort,
+) -> mycopilot_core::ProviderProfileConfig {
+    mycopilot_core::ProviderProfileConfig::from_family_settings(
+        mycopilot_core::ProviderProfileRef::deepseek_v4_1_flash_chat(),
+        mycopilot_core::ProviderVendorId::DeepSeek,
+        mycopilot_core::ProviderFamilySettings::DeepseekFlashChat {
+            reasoning: mycopilot_core::ProviderFamilyReasoningPolicy { mode, effort },
+        },
+    )
+}
+
 fn renderer_model_settings_update(
     storage: &StorageService,
     settings: ModelSettingsRecord,

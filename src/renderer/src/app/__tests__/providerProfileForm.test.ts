@@ -33,17 +33,17 @@ const descriptors: ProviderProfileUiDescriptor[] = [
     selectable: true
   },
   {
-    profileId: 'deepseek_v4_chat',
+    profileId: 'deepseek_v4_1_flash_chat',
     profileVersion: 1,
-    displayName: 'DeepSeek V4 Chat',
+    displayName: 'DeepSeek V4.1 Flash Chat',
     compatibleDialects: ['openai_chat_completions'],
-    settingsKind: 'deepseek_v4_chat',
-    selectable: true
+    settingsKind: 'none',
+    selectable: false
   },
   {
-    profileId: 'deepseek_v4_vision',
+    profileId: 'deepseek_v4_pro_0813_chat',
     profileVersion: 1,
-    displayName: 'DeepSeek Vision',
+    displayName: 'DeepSeek V4 Pro 0813 Chat',
     compatibleDialects: ['openai_chat_completions'],
     settingsKind: 'none',
     selectable: false
@@ -77,15 +77,32 @@ const descriptors: ProviderProfileUiDescriptor[] = [
 const deepSeekPolicy: ProviderVendorModelPolicyDescriptor = {
   status: 'supported',
   vendorId: 'deepseek',
-  modelFamily: 'deepseek_v4_chat',
+  modelFamily: 'deepseek_flash_chat',
   settingsKind: 'deepseek',
-  imageInput: 'unsupported',
+  imageInput: 'supported',
   settings: {
-    kind: 'deepseek_v4_chat',
+    kind: 'deepseek_flash_chat',
     reasoningModes: ['provider_default', 'enabled', 'disabled'],
     reasoningEfforts: ['provider_default', 'low', 'high', 'max'],
     defaultSettings: {
-      kind: 'deepseek_v4_chat',
+      kind: 'deepseek_flash_chat',
+      reasoning: { mode: 'provider_default', effort: 'provider_default' }
+    }
+  }
+}
+
+const deepSeekProPolicy: ProviderVendorModelPolicyDescriptor = {
+  status: 'supported',
+  vendorId: 'deepseek',
+  modelFamily: 'deepseek_pro_chat',
+  settingsKind: 'deepseek',
+  imageInput: 'unsupported',
+  settings: {
+    kind: 'deepseek_pro_chat',
+    reasoningModes: ['provider_default', 'enabled', 'disabled'],
+    reasoningEfforts: ['provider_default', 'low', 'high', 'max'],
+    defaultSettings: {
+      kind: 'deepseek_pro_chat',
       reasoning: { mode: 'provider_default', effort: 'provider_default' }
     }
   }
@@ -137,25 +154,48 @@ describe('vendor-aware Provider form state', () => {
     })
   })
 
-  it('loads legacy DeepSeek unchanged and accepts V2 Low without downgrading it', () => {
-    const legacy = initialProviderProfileFormState(legacyProfile('deepseek_v4_chat'), descriptors)
-    const v2 = initialProviderProfileFormState(
+  it('derives each DeepSeek public family from V2 settings', () => {
+    const flash = initialProviderProfileFormState(
       {
         schemaVersion: 2,
         vendorId: 'deepseek',
-        profile: { id: 'deepseek_v4_chat', version: 1 },
+        profile: { id: 'deepseek_v4_1_flash_chat', version: 1 },
         settings: {
-          kind: 'deepseek_v4_chat',
+          kind: 'deepseek_flash_chat',
           reasoning: { mode: 'enabled', effort: 'low' }
         }
       },
       descriptors
     )
+    const pro = initialProviderProfileFormState(
+      {
+        schemaVersion: 2,
+        vendorId: 'deepseek',
+        profile: { id: 'deepseek_v4_pro_0813_chat', version: 1 },
+        settings: {
+          kind: 'deepseek_pro_chat',
+          reasoning: { mode: 'enabled', effort: 'max' }
+        }
+      },
+      descriptors
+    )
 
-    expect(legacy).toMatchObject({ selection: 'deepseek', update: { kind: 'unchanged' } })
-    expect(v2).toMatchObject({
+    expect(flash).toMatchObject({
       selection: 'deepseek',
-      settings: { reasoning: { mode: 'enabled', effort: 'low' } },
+      modelFamily: 'deepseek_flash_chat',
+      settings: {
+        kind: 'deepseek_flash_chat',
+        reasoning: { mode: 'enabled', effort: 'low' }
+      },
+      update: { kind: 'unchanged' }
+    })
+    expect(pro).toMatchObject({
+      selection: 'deepseek',
+      modelFamily: 'deepseek_pro_chat',
+      settings: {
+        kind: 'deepseek_pro_chat',
+        reasoning: { mode: 'enabled', effort: 'max' }
+      },
       update: { kind: 'unchanged' }
     })
   })
@@ -250,20 +290,62 @@ describe('vendor-aware Provider form state', () => {
     })
   })
 
+  it('resets Flash settings when the Host resolves the Pro family', () => {
+    const flash = applyResolvedProviderPolicy(
+      initialProviderProfileFormState(
+        {
+          schemaVersion: 2,
+          vendorId: 'deepseek',
+          profile: { id: 'deepseek_v4_1_flash_chat', version: 1 },
+          settings: {
+            kind: 'deepseek_flash_chat',
+            reasoning: { mode: 'enabled', effort: 'low' }
+          }
+        },
+        descriptors
+      ),
+      deepSeekPolicy
+    )
+    expect(flash).toMatchObject({
+      settings: {
+        kind: 'deepseek_flash_chat',
+        reasoning: { mode: 'enabled', effort: 'low' }
+      },
+      update: { kind: 'unchanged' }
+    })
+
+    const pro = applyResolvedProviderPolicy(flash, deepSeekProPolicy)
+    expect(pro).toMatchObject({
+      settings: {
+        kind: 'deepseek_pro_chat',
+        reasoning: { mode: 'provider_default', effort: 'provider_default' }
+      },
+      familyChanged: true,
+      update: {
+        kind: 'select_vendor',
+        vendorId: 'deepseek',
+        settings: {
+          kind: 'deepseek_pro_chat',
+          reasoning: { mode: 'provider_default', effort: 'provider_default' }
+        }
+      }
+    })
+  })
+
   it('writes only family-owned public settings after explicit confirmation', () => {
     const selected = applyResolvedProviderPolicy(
       selectProviderVendor(initialNewProviderProfileFormState(), 'deepseek'),
       deepSeekPolicy
     )
     const deepSeek = updateDeepSeekProviderSettings(selected, {
-      kind: 'deepseek_v4_chat',
+      kind: 'deepseek_flash_chat',
       reasoning: { mode: 'enabled', effort: 'max' }
     })
     expect(deepSeek.update).toEqual({
       kind: 'select_vendor',
       vendorId: 'deepseek',
       settings: {
-        kind: 'deepseek_v4_chat',
+        kind: 'deepseek_flash_chat',
         reasoning: { mode: 'enabled', effort: 'max' }
       }
     })
@@ -322,7 +404,15 @@ describe('global API URL Generic rematch', () => {
       {
         ...baseModel,
         id: 'deepseek',
-        providerProfileConfig: legacyProfile('deepseek_v4_chat')
+        providerProfileConfig: {
+          schemaVersion: 2,
+          vendorId: 'deepseek',
+          profile: { id: 'deepseek_v4_1_flash_chat', version: 1 },
+          settings: {
+            kind: 'deepseek_flash_chat',
+            reasoning: { mode: 'enabled', effort: 'high' }
+          }
+        }
       }
     ]
     const updated = prepareModelsForGlobalApiUrlChange(models, descriptors)

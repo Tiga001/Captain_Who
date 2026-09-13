@@ -261,7 +261,10 @@ export function registerHostIpc(
   notificationLocaleMirror: NotificationLocaleMirror = createVolatileNotificationLocaleMirror(),
   browserDownloadBroker?: BrowserDownloadBroker,
   browserDataIpc?: BrowserDataIpcDependencies,
-  appearanceThemeMirror: AppearanceThemeMirror = createVolatileAppearanceThemeMirror()
+  appearanceThemeMirror: AppearanceThemeMirror = createVolatileAppearanceThemeMirror(),
+  assertCanStartTurn: () => void = () => {
+    throw new Error('ACCOUNT_LOGIN_REQUIRED')
+  }
 ): HostIpcRegistration {
   const attachmentDialogBridge = new AttachmentDialogBridge()
   const workspaceFilesService = new WorkspaceFilesService(
@@ -274,7 +277,7 @@ export function registerHostIpc(
 
   registerCoreServiceIpc(ipcMain, coreServer)
   const disposeConfigurationNotifications = registerConfigurationNotifications(coreServer)
-  registerAgentIpc(ipcMain, coreServer)
+  registerAgentIpc(ipcMain, coreServer, assertCanStartTurn)
   const disposeHumanInteractionIpc = registerHumanInteractionIpc(ipcMain, coreServer)
   const disposeAutomationIpc = registerAutomationIpc(ipcMain, coreServer)
   const disposeNotificationIpc = registerNotificationIpc(ipcMain, coreServer, {

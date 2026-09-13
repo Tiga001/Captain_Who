@@ -65,7 +65,7 @@
     },
     "nodePackageEvidence": {
       "path": "resources/artifact-runtime-node-package-evidence.json",
-      "sha256": "708e59d444e9813969e9a3c6fa69cde39e29dbad9d7f4f5691eb4c064ed18f5a"
+      "sha256": "1c3c728aa5df23ddd3f6f12dd07d1559744dd873b1b69580cfaba38c59792002"
     },
     "pptxgenjsPatch": {
       "path": "patches/pptxgenjs@4.0.1.patch",
@@ -73,7 +73,7 @@
     },
     "pnpmLockfile": {
       "path": "pnpm-lock.yaml",
-      "sha256": "94c56e3b3f2bcab641b797d74d329de9ef7455ef3ec306aa22080f881697a9ed"
+      "sha256": "f6829459a0d4d83f54094e39e58f3d70a3429361199ff53a63621a20bb27e793"
     },
     "pythonRequirements": {
       "path": "resources/artifact-runtime-python-requirements.txt",

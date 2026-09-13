@@ -23,6 +23,7 @@ import {
   X
 } from 'lucide-react'
 import { useFrontendConfig } from '../../../config/FrontendConfigProvider'
+import { useAccountAuth } from '../../auth/AccountAuthContext'
 import { useModelSettings } from '../../../config/ModelSettingsProvider'
 import { useProjectSettings } from '../../../config/ProjectSettingsProvider'
 import { getUserFacingErrorMessage } from '../../../errors/userFacingError'
@@ -142,6 +143,7 @@ export function ChatComposer({
   showProjectSelector = false
 }: ChatComposerProps) {
   const { t } = useFrontendConfig()
+  const accountAuth = useAccountAuth()
   const { enabledModels } = useModelSettings()
   const { projects, openCreateProjectDialog } = useProjectSettings()
   const openImagePreview = useImagePreview()
@@ -578,6 +580,10 @@ export function ChatComposer({
       return
     }
     if (!canSend) return
+    if (!isGenerating && accountAuth && !accountAuth.canStartTurn()) {
+      accountAuth.requestLogin()
+      return
+    }
 
     setIsCommandMenuOpen(false)
     setIsCommandSession(false)

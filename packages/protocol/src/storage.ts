@@ -4,8 +4,8 @@ import type { HumanInteractionResponseDisplay } from './humanInteraction'
 export type KnownProviderProfileId =
   | 'generic_openai_chat'
   | 'generic_anthropic_messages'
-  | 'deepseek_v4_chat'
-  | 'deepseek_v4_vision'
+  | 'deepseek_v4_1_flash_chat'
+  | 'deepseek_v4_pro_0813_chat'
   | 'moonshot_k3_chat'
   | 'moonshot_k2_7_code_chat'
   | 'moonshot_k2_6_chat'
@@ -28,10 +28,16 @@ export type ProviderReasoningEffort = 'provider_default' | 'low' | 'high' | 'max
 export type MoonshotK26ThinkingMode =
   'provider_default' | 'enabled' | 'disabled' | 'enabled_keep_all'
 
-export interface ProviderFamilyReasoningPolicy {
-  mode: ProviderReasoningMode
-  effort: ProviderReasoningEffort
-}
+/** Disabling reasoning cannot be combined with a wire-level reasoning effort. */
+export type ProviderFamilyReasoningPolicy =
+  | {
+      mode: Exclude<ProviderReasoningMode, 'disabled'>
+      effort: ProviderReasoningEffort
+    }
+  | {
+      mode: 'disabled'
+      effort: 'provider_default'
+    }
 
 export interface ProviderProfileConfigV1 {
   schemaVersion: 1
@@ -49,13 +55,13 @@ export interface GenericProviderSettingsV1 {
   kind: 'generic'
 }
 
-export interface DeepSeekV4ChatProviderSettingsV1 {
-  kind: 'deepseek_v4_chat'
+export interface DeepSeekFlashChatProviderSettingsV1 {
+  kind: 'deepseek_flash_chat'
   reasoning: ProviderFamilyReasoningPolicy
 }
 
-export interface DeepSeekV4VisionProviderSettingsV1 {
-  kind: 'deepseek_v4_vision'
+export interface DeepSeekProChatProviderSettingsV1 {
+  kind: 'deepseek_pro_chat'
   reasoning: ProviderFamilyReasoningPolicy
 }
 
@@ -76,8 +82,8 @@ export interface MoonshotK26ChatProviderSettingsV1 {
 /** Versioned, model-family-owned settings used by Provider Profile config schema v2. */
 export type ProviderFamilySettings =
   | GenericProviderSettingsV1
-  | DeepSeekV4ChatProviderSettingsV1
-  | DeepSeekV4VisionProviderSettingsV1
+  | DeepSeekFlashChatProviderSettingsV1
+  | DeepSeekProChatProviderSettingsV1
   | MoonshotK3ChatProviderSettingsV1
   | MoonshotK27CodeChatProviderSettingsV1
   | MoonshotK26ChatProviderSettingsV1
@@ -95,9 +101,8 @@ export interface ProviderProfileConfigV2 {
 }
 
 /**
- * Persisted Profile config. V1 remains losslessly readable and is retained by ordinary
- * `unchanged` saves. An explicit family-aware Provider selection writes V2; the Host may also
- * reconcile an exact Provider-owned official endpoint/model pair to its canonical V2 family.
+ * Persisted Profile config. Generic profiles continue to use V1; vendor-owned profiles use the
+ * family-aware V2 shape and are resolved authoritatively by the Host.
  */
 export type ProviderProfileConfig = ProviderProfileConfigV1 | ProviderProfileConfigV2
 
@@ -110,8 +115,8 @@ export interface ProviderVendorDescriptor {
 export type ProviderModelFamilyId =
   | 'generic_openai_chat'
   | 'generic_anthropic_messages'
-  | 'deepseek_v4_chat'
-  | 'deepseek_v4_vision'
+  | 'deepseek_flash_chat'
+  | 'deepseek_pro_chat'
   | 'moonshot_k3_chat'
   | 'moonshot_k2_7_code_chat'
   | 'moonshot_k2_6_chat'
@@ -127,16 +132,16 @@ export type ProviderFamilySettingsDescriptor =
       defaultSettings: GenericProviderSettingsV1
     }
   | {
-      kind: 'deepseek_v4_chat'
+      kind: 'deepseek_flash_chat'
       reasoningModes: ProviderReasoningMode[]
       reasoningEfforts: ProviderReasoningEffort[]
-      defaultSettings: DeepSeekV4ChatProviderSettingsV1
+      defaultSettings: DeepSeekFlashChatProviderSettingsV1
     }
   | {
-      kind: 'deepseek_v4_vision'
+      kind: 'deepseek_pro_chat'
       reasoningModes: ProviderReasoningMode[]
       reasoningEfforts: ProviderReasoningEffort[]
-      defaultSettings: DeepSeekV4VisionProviderSettingsV1
+      defaultSettings: DeepSeekProChatProviderSettingsV1
     }
   | {
       kind: 'moonshot_k3_chat'
@@ -190,18 +195,7 @@ export interface ProviderProfileUiDescriptor {
   selectable: boolean
 }
 
-export type ProviderProfileSettingsKind = 'none' | 'deepseek_v4_chat'
-
-export interface DeepSeekV4ChatProviderSettings {
-  kind: 'deepseek_v4_chat'
-  reasoning: {
-    mode: ProviderReasoningMode
-    effort: LegacyProviderReasoningEffort
-  }
-}
-
-/** Public settings accepted by a registered Provider Profile. */
-export type ProviderProfileSettings = DeepSeekV4ChatProviderSettings
+export type ProviderProfileSettingsKind = 'none'
 
 /** Presentation-safe state for a secret held by the Host credential store. */
 export type CredentialStatus = 'missing' | 'configured' | 'unavailable'
@@ -217,11 +211,6 @@ export type CredentialMutation =
 export type StorageProviderProfileUpdate =
   | { kind: 'unchanged' }
   | { kind: 'select_generic' }
-  | {
-      kind: 'select_registered_profile'
-      profileId: ProviderProfileId
-      settings: ProviderProfileSettings
-    }
   | {
       /** Host resolves the exact family/Profile/version from vendor, model id and dialect. */
       kind: 'select_vendor'

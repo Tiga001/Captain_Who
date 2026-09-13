@@ -161,13 +161,31 @@ export function FrontendConfigProvider({ children }: { children: ReactNode }) {
   }, [language])
 
   useEffect(() => {
-    void hostClient.app.setNativeThemeSource(colorSchemePreference)
+    let cancelled = false
+    void (hostClient.app?.whenReady?.() ?? Promise.resolve())
+      .then(() => {
+        if (!cancelled) return hostClient.app.setNativeThemeSource(colorSchemePreference)
+        return undefined
+      })
+      .catch(() => undefined)
+    return () => {
+      cancelled = true
+    }
   }, [colorSchemePreference])
 
   useEffect(() => {
     // Renderer owns the application language. Main keeps only a validated, durable mirror so
     // native notifications can use the same catalog before a Renderer exists on the next launch.
-    void hostClient.notifications?.setLocale?.(language).catch(() => undefined)
+    let cancelled = false
+    void (hostClient.app?.whenReady?.() ?? Promise.resolve())
+      .then(() => {
+        if (!cancelled) return hostClient.notifications?.setLocale?.(language)
+        return undefined
+      })
+      .catch(() => undefined)
+    return () => {
+      cancelled = true
+    }
   }, [language])
 
   useEffect(() => {

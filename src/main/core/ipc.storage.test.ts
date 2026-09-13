@@ -305,12 +305,12 @@ describe('model settings IPC', () => {
     }
     const descriptors = [
       {
-        profileId: 'deepseek_v4_chat',
+        profileId: 'deepseek_v4_1_flash_chat',
         profileVersion: 1,
         displayName: 'DeepSeek',
         compatibleDialects: ['openai_chat_completions'],
-        settingsKind: 'deepseek_v4_chat',
-        selectable: true
+        settingsKind: 'none',
+        selectable: false
       }
     ]
     const settings = {
@@ -393,12 +393,12 @@ describe('model settings IPC', () => {
     const coreServer = {
       loadProviderProfileUiDescriptors: vi.fn().mockResolvedValue([
         {
-          profileId: 'deepseek_v4_chat',
+          profileId: 'deepseek_v4_1_flash_chat',
           profileVersion: 1,
           displayName: 'DeepSeek',
           compatibleDialects: ['openai_chat_completions'],
-          settingsKind: 'deepseek_v4_chat',
-          selectable: true,
+          settingsKind: 'none',
+          selectable: false,
           credentialRef: 'private-reference'
         }
       ]),
@@ -452,7 +452,7 @@ describe('model settings IPC', () => {
     }
     const coreServer = {
       saveModelSettings: vi.fn().mockRejectedValue(
-        Object.assign(new Error('模型 ID 重复：deepseek-v4-flash'), {
+        Object.assign(new Error('模型 ID 重复：deepseek-flash'), {
           code: -32000,
           data
         })

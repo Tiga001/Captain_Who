@@ -1415,7 +1415,7 @@ mod tests {
             .save_conversation(ChatConversationRecord {
                 id: CONVERSATION_ID.to_string(),
                 project_id: None,
-                model_id: Some("deepseek-v4-flash".to_string()),
+                model_id: Some("deepseek-flash".to_string()),
                 title: "Provider vault fixture".to_string(),
                 messages: vec![ChatMessageRecord {
                     human_interaction_response: None,
@@ -1443,11 +1443,11 @@ mod tests {
             credentials.clone(),
         )
         .unwrap();
-        let profile = ProviderProfileConfig::deepseek_v4_default();
+        let profile = ProviderProfileConfig::deepseek_flash_default();
         let protocol = ProviderProtocolKey::new(
             ProviderProtocolDialect::OpenAiChatCompletions,
             &profile,
-            "deepseek-v4-flash",
+            "deepseek-flash",
             Some("provider-configuration-revision-1".to_string()),
         )
         .unwrap();
@@ -1775,19 +1775,18 @@ mod tests {
             Err(ProviderContinuationStoreError::CheckpointStateMissing)
         );
 
-        let profile = ProviderProfileConfig::deepseek_v4_default();
         for mismatched_protocol in [
             ProviderProtocolKey::new(
                 ProviderProtocolDialect::OpenAiChatCompletions,
-                &profile,
+                &ProviderProfileConfig::deepseek_pro_default(),
                 "deepseek-v4-pro",
                 Some("provider-configuration-revision-1".to_string()),
             )
             .unwrap(),
             ProviderProtocolKey::new(
                 ProviderProtocolDialect::OpenAiChatCompletions,
-                &profile,
-                "deepseek-v4-flash",
+                &ProviderProfileConfig::deepseek_flash_default(),
+                "deepseek-flash",
                 Some("provider-configuration-revision-2".to_string()),
             )
             .unwrap(),

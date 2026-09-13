@@ -2046,7 +2046,7 @@ export const zhCNTranslations = {
   'configuration.cancel': '取消',
   'configuration.done': '完成',
   'configuration.providerModelId': '厂商模型 ID',
-  'configuration.providerModelIdPlaceholder': '例：deepseek-chat',
+  'configuration.providerModelIdPlaceholder': '例：deepseek-flash',
   'configuration.displayName': '显示名称',
   'configuration.displayNamePlaceholder': '例：Kimi K3 High',
   'configuration.invalidDisplayName': '显示名称不得超过 512 个 UTF-8 字节',

@@ -260,7 +260,7 @@ fn provider_responses_without_usage_keep_token_counts_unknown() {
     }
 
     let deepseek_profile = deepseek_provider_profile(ReasoningMode::Enabled, ReasoningEffort::High);
-    let deepseek_protocol = deepseek_provider_protocol(&deepseek_profile, "deepseek-v4-pro");
+    let deepseek_protocol = deepseek_provider_protocol(&deepseek_profile, "deepseek-flash");
     let deepseek = parse_non_stream_response_with_profile(
         &json!({
             "choices": [{

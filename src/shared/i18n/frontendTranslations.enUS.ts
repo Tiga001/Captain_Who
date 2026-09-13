@@ -2159,7 +2159,7 @@ export const enUSTranslations = {
   'configuration.cancel': 'Cancel',
   'configuration.done': 'Done',
   'configuration.providerModelId': 'Provider model ID',
-  'configuration.providerModelIdPlaceholder': 'Example: deepseek-chat',
+  'configuration.providerModelIdPlaceholder': 'Example: deepseek-flash',
   'configuration.displayName': 'Display name',
   'configuration.displayNamePlaceholder': 'Example: Kimi K3 High',
   'configuration.invalidDisplayName': 'Use a display name no longer than 512 UTF-8 bytes',

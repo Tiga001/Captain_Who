@@ -16,11 +16,11 @@ import {
 describe('Provider Profile UI descriptor parser', () => {
   const descriptors = [
     {
-      profileId: 'deepseek_v4_chat',
+      profileId: 'deepseek_v4_1_flash_chat',
       profileVersion: 1,
       displayName: 'DeepSeek',
       compatibleDialects: ['openai_chat_completions'],
-      settingsKind: 'deepseek_v4_chat',
+      settingsKind: 'none',
       selectable: true
     }
   ] as const
@@ -63,6 +63,43 @@ describe('Provider vendor descriptor parsers', () => {
         defaultSettings: { kind: 'moonshot_k3_chat', reasoningEffort: 'max' }
       }
     } as const
+    expect(parseProviderVendorModelPolicyDescriptor(policy)).toEqual(policy)
+  })
+
+  it.each([
+    {
+      status: 'supported',
+      vendorId: 'deepseek',
+      modelFamily: 'deepseek_flash_chat',
+      settingsKind: 'deepseek',
+      imageInput: 'supported',
+      settings: {
+        kind: 'deepseek_flash_chat',
+        reasoningModes: ['provider_default', 'enabled', 'disabled'],
+        reasoningEfforts: ['provider_default', 'low', 'high', 'max'],
+        defaultSettings: {
+          kind: 'deepseek_flash_chat',
+          reasoning: { mode: 'provider_default', effort: 'provider_default' }
+        }
+      }
+    },
+    {
+      status: 'supported',
+      vendorId: 'deepseek',
+      modelFamily: 'deepseek_pro_chat',
+      settingsKind: 'deepseek',
+      imageInput: 'unsupported',
+      settings: {
+        kind: 'deepseek_pro_chat',
+        reasoningModes: ['provider_default', 'enabled', 'disabled'],
+        reasoningEfforts: ['provider_default', 'low', 'high', 'max'],
+        defaultSettings: {
+          kind: 'deepseek_pro_chat',
+          reasoning: { mode: 'enabled', effort: 'high' }
+        }
+      }
+    }
+  ] as const)('accepts the independent DeepSeek Flash and Pro family policy %#', (policy) => {
     expect(parseProviderVendorModelPolicyDescriptor(policy)).toEqual(policy)
   })
 
@@ -110,15 +147,15 @@ describe('Provider vendor descriptor parsers', () => {
     {
       status: 'supported',
       vendorId: 'moonshot',
-      modelFamily: 'deepseek_v4_chat',
+      modelFamily: 'deepseek_flash_chat',
       settingsKind: 'deepseek',
       imageInput: 'supported',
       settings: {
-        kind: 'deepseek_v4_chat',
+        kind: 'deepseek_flash_chat',
         reasoningModes: ['provider_default', 'enabled', 'disabled'],
         reasoningEfforts: ['provider_default', 'low', 'high', 'max'],
         defaultSettings: {
-          kind: 'deepseek_v4_chat',
+          kind: 'deepseek_flash_chat',
           reasoning: { mode: 'provider_default', effort: 'provider_default' }
         }
       }
@@ -133,6 +170,54 @@ describe('Provider vendor descriptor parsers', () => {
         kind: 'moonshot_k3_chat',
         reasoningEfforts: ['provider_default', 'high', 'max'],
         defaultSettings: { kind: 'moonshot_k3_chat', reasoningEffort: 'low' }
+      }
+    },
+    {
+      status: 'supported',
+      vendorId: 'deepseek',
+      modelFamily: 'deepseek_flash_chat',
+      settingsKind: 'deepseek',
+      imageInput: 'supported',
+      settings: {
+        kind: 'deepseek_flash_chat',
+        reasoningModes: ['provider_default', 'enabled', 'disabled'],
+        reasoningEfforts: ['provider_default', 'low', 'high', 'max'],
+        defaultSettings: {
+          kind: 'deepseek_flash_chat',
+          reasoning: { mode: 'disabled', effort: 'high' }
+        }
+      }
+    },
+    {
+      status: 'supported',
+      vendorId: 'deepseek',
+      modelFamily: 'deepseek_flash_chat',
+      settingsKind: 'deepseek',
+      imageInput: 'supported',
+      settings: {
+        kind: 'deepseek_pro_chat',
+        reasoningModes: ['provider_default', 'enabled', 'disabled'],
+        reasoningEfforts: ['provider_default', 'low', 'high', 'max'],
+        defaultSettings: {
+          kind: 'deepseek_pro_chat',
+          reasoning: { mode: 'provider_default', effort: 'provider_default' }
+        }
+      }
+    },
+    {
+      status: 'supported',
+      vendorId: 'deepseek',
+      modelFamily: 'deepseek_v4_chat',
+      settingsKind: 'deepseek',
+      imageInput: 'supported',
+      settings: {
+        kind: 'deepseek_v4_chat',
+        reasoningModes: ['provider_default', 'enabled', 'disabled'],
+        reasoningEfforts: ['provider_default', 'low', 'high', 'max'],
+        defaultSettings: {
+          kind: 'deepseek_v4_chat',
+          reasoning: { mode: 'provider_default', effort: 'provider_default' }
+        }
       }
     }
   ])('rejects private, cross-family, or internally inconsistent policy fields %#', (value) => {
@@ -440,6 +525,78 @@ describe('secret-free model settings parsers', () => {
       ...update,
       expectedRevision: null
     })
+  })
+
+  it('parses new DeepSeek family settings independently from the internal Profile id', () => {
+    const deepSeekSnapshot = {
+      ...snapshot,
+      models: [
+        {
+          ...model,
+          providerModelId: 'deepseek-flash',
+          providerProfileConfig: {
+            schemaVersion: 2,
+            vendorId: 'deepseek',
+            profile: { id: 'deepseek_v4_1_flash_chat', version: 1 },
+            settings: {
+              kind: 'deepseek_flash_chat',
+              reasoning: { mode: 'enabled', effort: 'low' }
+            }
+          }
+        }
+      ]
+    } as const
+    const deepSeekUpdate = {
+      ...update,
+      models: [
+        {
+          ...update.models[0],
+          providerModelId: 'deepseek-v4-pro',
+          providerProfileUpdate: {
+            kind: 'select_vendor',
+            vendorId: 'deepseek',
+            settings: {
+              kind: 'deepseek_pro_chat',
+              reasoning: { mode: 'disabled', effort: 'provider_default' }
+            }
+          }
+        }
+      ]
+    } as const
+
+    expect(parseStorageModelSettingsRecord(deepSeekSnapshot)).toEqual(deepSeekSnapshot)
+    expect(parseStorageModelSettingsUpdateRecord(deepSeekUpdate)).toEqual(deepSeekUpdate)
+  })
+
+  it('rejects retired DeepSeek v2 family tags and expanded family settings', () => {
+    for (const providerProfileConfig of [
+      {
+        schemaVersion: 2,
+        vendorId: 'deepseek',
+        profile: { id: 'deepseek_v4_chat', version: 1 },
+        settings: {
+          kind: 'deepseek_v4_chat',
+          reasoning: { mode: 'enabled', effort: 'high' }
+        }
+      },
+      {
+        schemaVersion: 2,
+        vendorId: 'deepseek',
+        profile: { id: 'deepseek_v4_1_flash_chat', version: 1 },
+        settings: {
+          kind: 'deepseek_flash_chat',
+          reasoning: { mode: 'enabled', effort: 'high' },
+          privateCapability: true
+        }
+      }
+    ]) {
+      expect(() =>
+        parseStorageModelSettingsRecord({
+          ...snapshot,
+          models: [{ ...model, providerProfileConfig }]
+        })
+      ).toThrow(/providerProfileConfig/)
+    }
   })
 
   it('requires expectedRevision while accepting an explicit null for the initial save', () => {

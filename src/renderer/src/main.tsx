@@ -1,13 +1,11 @@
 import './styles/global.css'
 
-import { hostClient } from './host/hostClient'
 import {
   completeBootstrapStartup,
   failBootstrapStartup
 } from './features/startup/bootstrapStartupEntry'
 
-void hostClient.app
-  .whenReady()
+void Promise.resolve()
   .then(async () => {
     const [{ createElement, StrictMode }, { createRoot }, { default: App }] = await Promise.all([
       import('react'),

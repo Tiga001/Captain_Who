@@ -74,6 +74,18 @@ test('packaged privacy gate rejects host paths, sensitive state, credentialed UR
     )
   })
 
+  await t.test('encrypted account session', async () => {
+    const { directory, app } = await fixture()
+    await writeFile(join(app, 'Contents', 'account-session.enc'), Buffer.from([1, 2, 3]))
+    await assert.rejects(
+      verifyPackagedPrivacy(context(directory), {
+        privatePathPrefixes: ['/private/build-user/project'],
+        asarApi: emptyAsarApi()
+      }),
+      /sensitive state file/
+    )
+  })
+
   await t.test('absolute private symlink', async () => {
     const { directory, app } = await fixture()
     await symlink(

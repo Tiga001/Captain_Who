@@ -1,0 +1,22 @@
+// Production public client configuration, aligned with https://captainwhoagent.com.
+// This is not server credentials or a user's authenticated session.
+export const ACCOUNT_CONFIG = {
+  env: 'captainwho-prod-d7f1jv0p4d37c981',
+  region: 'ap-shanghai',
+  api: 'https://captainwho-prod-d7f1jv0p4d37c981-1479807831.ap-shanghai.app.tcloudbase.com/account-api',
+  publishableKey:
+    'eyJhbGciOiJSUzI1NiIsImtpZCI6IjkzOGIwMTM4LWQ2NWUtNDZhZS04ZWYzLWMyOWY0NGQ1NDAzNyJ9.eyJpc3MiOiJodHRwczovL2NhcHRhaW53aG8tcHJvZC1kN2YxanYwcDRkMzdjOTgxLmFwLXNoYW5naGFpLnRjYi1hcGkudGVuY2VudGNsb3VkYXBpLmNvbSIsInN1YiI6ImFub24iLCJhdWQiOiJjYXB0YWlud2hvLXByb2QtZDdmMWp2MHA0ZDM3Yzk4MSIsImV4cCI6NDA5MjE3NTcxNCwiaWF0IjoxNzg4NDkyNTE0LCJub25jZSI6IkVMWVcyZGtoVFNlcEV4LXdxVk84d3ciLCJhdF9oYXNoIjoiRUxZVzJka2hUU2VwRXgtd3FWTzh3dyIsIm5hbWUiOiJBbm9ueW1vdXMiLCJzY29wZSI6ImFub255bW91cyIsInByb2plY3RfaWQiOiJjYXB0YWlud2hvLXByb2QtZDdmMWp2MHA0ZDM3Yzk4MSIsIm1ldGEiOnsicGxhdGZvcm0iOiJQdWJsaXNoYWJsZUtleSJ9LCJyb2xlIjoiYW5vbiIsImlzX2Fub255bW91cyI6dHJ1ZSwiYXBwX21ldGFkYXRhIjp7InByb3ZpZGVyIjoiYW5vbnltb3VzIiwicHJvdmlkZXJzIjpbImFub255bW91cyJdfSwidXNlcl9tZXRhZGF0YSI6eyJuYW1lIjoiQW5vbnltb3VzIn0sInVzZXJfdHlwZSI6IiIsImNsaWVudF90eXBlIjoiY2xpZW50X3VzZXIiLCJpc19zeXN0ZW1fYWRtaW4iOmZhbHNlfQ.iMKKqxfIrERqo8bNyXaCiLmTMLO8hAk0-hRVqWrKn4x8oLgnZk7ptOyMccFVyxSF1z3I_l7kLDSGiQQoZi1sUZRCM11NaRH5CLQFNXgE59xqQzeUvvr3MQktT8YZ44peZaL0VOSQtpSrZQASNUKokZaU9_JHltcPsmxpX-3gs19CdBIJ4e0LacLEXa2dUgCOPgx8Ls0cRQgCpvMp93Z2KerXPtyhwkLF93U9sQCqgbRDsnB-6ICSXfBhpby_HrfDV1ZNznPQvUwqk8n7ipAASmIkWumSZc_nWyZznDPoTXBV-RVXXREldsUCJRisDAz95i0wH_mTU2McSCCWXt70VA'
+} as const
+
+export const ACCOUNT_PAGES = {
+  register: 'https://captainwhoagent.com/login',
+  reset: 'https://captainwhoagent.com/login?mode=reset',
+  profile: 'https://captainwhoagent.com/account'
+} as const
+
+// Never restore tokens against an environment or account service they were not saved for.
+export const ACCOUNT_SESSION_SCOPE = JSON.stringify([
+  ACCOUNT_CONFIG.env,
+  ACCOUNT_CONFIG.region,
+  ACCOUNT_CONFIG.api
+])

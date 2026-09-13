@@ -4,21 +4,25 @@ import type { ModelConfig, ModelFormValues } from '../../config/modelConfig'
 import { modelConfigFromForm } from '../../features/settings/pages/configuration/modelPersistence'
 
 const deepSeekProfile: ProviderProfileConfig = {
-  schemaVersion: 1,
+  schemaVersion: 2,
+  vendorId: 'deepseek',
   profile: {
-    id: 'deepseek_v4_chat',
+    id: 'deepseek_v4_1_flash_chat',
     version: 1
   },
-  reasoning: {
-    mode: 'enabled',
-    effort: 'high'
+  settings: {
+    kind: 'deepseek_flash_chat',
+    reasoning: {
+      mode: 'enabled',
+      effort: 'high'
+    }
   }
 }
 
 const existingModel: ModelConfig = {
   id: 'model-config-1',
-  providerModelId: 'deepseek-chat',
-  displayName: 'DeepSeek V4',
+  providerModelId: 'deepseek-flash',
+  displayName: 'DeepSeek Flash',
   apiTokenOverrideStatus: 'missing',
   apiTokenOverrideMutation: { type: 'keep' },
   supportsImage: false,
@@ -32,8 +36,8 @@ const existingModel: ModelConfig = {
 }
 
 const editedValues: ModelFormValues = {
-  providerModelId: 'deepseek-v4-flash',
-  displayName: 'DeepSeek V4 edited',
+  providerModelId: 'deepseek-flash',
+  displayName: 'DeepSeek Flash edited',
   apiUrlOverride: '',
   apiTokenOverrideStatus: 'missing',
   apiTokenOverrideMutation: { type: 'keep' },
@@ -51,8 +55,8 @@ describe('modelConfigFromForm', () => {
 
     expect(saved.providerProfileConfig).toEqual(deepSeekProfile)
     expect(saved.id).toBe('model-config-1')
-    expect(saved.displayName).toBe('DeepSeek V4 edited')
-    expect(saved.providerModelId).toBe('deepseek-v4-flash')
+    expect(saved.displayName).toBe('DeepSeek Flash edited')
+    expect(saved.providerModelId).toBe('deepseek-flash')
     expect(saved.enabled).toBe(false)
     expect(saved.contextWindowTokens).toBe(256_000)
     expect(saved.cachedInputPrice).toBe('0.005')
@@ -69,10 +73,10 @@ describe('modelConfigFromForm', () => {
       {
         ...editedValues,
         providerProfileUpdate: {
-          kind: 'select_registered_profile',
-          profileId: 'deepseek_v4_chat',
+          kind: 'select_vendor',
+          vendorId: 'deepseek',
           settings: {
-            kind: 'deepseek_v4_chat',
+            kind: 'deepseek_flash_chat',
             reasoning: { mode: 'enabled', effort: 'max' }
           }
         }
@@ -82,10 +86,10 @@ describe('modelConfigFromForm', () => {
 
     expect(saved.providerProfileConfig).toEqual(deepSeekProfile)
     expect(saved.providerProfileUpdate).toEqual({
-      kind: 'select_registered_profile',
-      profileId: 'deepseek_v4_chat',
+      kind: 'select_vendor',
+      vendorId: 'deepseek',
       settings: {
-        kind: 'deepseek_v4_chat',
+        kind: 'deepseek_flash_chat',
         reasoning: { mode: 'enabled', effort: 'max' }
       }
     })

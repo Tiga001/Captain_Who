@@ -3,12 +3,11 @@
 //! This module owns Generic compatibility defaults. Vendor-specific modules must not import it.
 
 use super::{
-    no_official_profile_normalization, ProviderAdapterKind,
-    ProviderCheckpointPrivateArgumentsSemantics, ProviderContextProjectionSemantics,
-    ProviderFamilySettings, ProviderFamilySettingsDescriptor, ProviderImageInputPolicy,
-    ProviderModelFamilyId, ProviderModelIdPolicy, ProviderPartialTraceSemantics,
-    ProviderPrivateReplaySemantics, ProviderProfileId, ProviderProfileRef,
-    ProviderProfileSettingsKind, ProviderProtocolDialect, ProviderRegistration,
+    ProviderAdapterKind, ProviderCheckpointPrivateArgumentsSemantics,
+    ProviderContextProjectionSemantics, ProviderFamilySettings, ProviderFamilySettingsDescriptor,
+    ProviderImageInputPolicy, ProviderModelFamilyId, ProviderModelIdPolicy,
+    ProviderPartialTraceSemantics, ProviderPrivateReplaySemantics, ProviderProfileId,
+    ProviderProfileRef, ProviderProfileSettingsKind, ProviderProtocolDialect, ProviderRegistration,
     ProviderRuntimeCapabilities, ProviderTerminalBatchSemantics, ProviderToolCallSourceSemantics,
     ProviderToolExchangeSemantics, ProviderUsageSemantics, ProviderVendorDescriptor,
     ProviderVendorId, ProviderVendorSettingsKind,
@@ -64,7 +63,6 @@ pub(crate) static GENERIC_OPENAI_CHAT_REGISTRATION: ProviderRegistration =
         ProviderProfileSettingsKind::None,
         ProviderVendorSettingsKind::None,
         ProviderImageInputPolicy::UserConfigurable,
-        no_official_profile_normalization,
         settings_descriptor,
         accepts_settings,
         true,
@@ -87,7 +85,6 @@ pub(crate) static GENERIC_ANTHROPIC_MESSAGES_REGISTRATION: ProviderRegistration 
         ProviderProfileSettingsKind::None,
         ProviderVendorSettingsKind::None,
         ProviderImageInputPolicy::UserConfigurable,
-        no_official_profile_normalization,
         settings_descriptor,
         accepts_settings,
         true,

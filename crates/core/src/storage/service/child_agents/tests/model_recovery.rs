@@ -730,7 +730,7 @@ fn v2_deepseek_reasoning_is_frozen_for_exact_legacy_agent_efforts() {
         fixture
             .service
             .save_model_settings(model_settings(vec![deepseek_v2_model(
-                "deepseek-v4-flash",
+                "deepseek-flash",
                 true,
                 crate::ReasoningMode::Enabled,
                 configured,
@@ -740,7 +740,7 @@ fn v2_deepseek_reasoning_is_frozen_for_exact_legacy_agent_efforts() {
             &format!("spawn-v2-deepseek-reasoning-{index}"),
             &format!("v2_deepseek_reasoning_{index}"),
         );
-        input.explicit_model_id = Some("deepseek-v4-flash".to_string());
+        input.explicit_model_id = Some("deepseek-flash".to_string());
         input.reasoning_effort = Some(requested);
 
         let spawn = fixture.service.create_child_agent(&input).unwrap();
@@ -754,7 +754,7 @@ fn v2_low_reasoning_never_enters_the_legacy_agent_effort_snapshot() {
     fixture
         .service
         .save_model_settings(model_settings(vec![deepseek_v2_model(
-            "deepseek-v4-flash",
+            "deepseek-flash",
             true,
             crate::ReasoningMode::Enabled,
             ProviderReasoningEffort::Low,
@@ -769,7 +769,7 @@ fn v2_low_reasoning_never_enters_the_legacy_agent_effort_snapshot() {
             &format!("spawn-v2-low-rejected-{index}"),
             &format!("v2_low_rejected_{index}"),
         );
-        input.explicit_model_id = Some("deepseek-v4-flash".to_string());
+        input.explicit_model_id = Some("deepseek-flash".to_string());
         input.reasoning_effort = Some(requested);
         assert_eq!(
             fixture.service.create_child_agent(&input).unwrap_err(),

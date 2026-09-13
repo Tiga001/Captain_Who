@@ -540,7 +540,7 @@ async fn run_skill_activation_approval_resume_case(case: SkillApprovalResumeProv
     use crate::storage::service::StorageService;
     use crate::{
         ProviderContinuationVaultFactory, ProviderProfileConfig, ProviderProtocolDialect,
-        ProviderProtocolKey, ReasoningEffort, ReasoningMode, ReasoningPolicy,
+        ProviderProtocolKey, ReasoningEffort, ReasoningMode,
     };
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tempfile::tempdir;
@@ -555,7 +555,10 @@ async fn run_skill_activation_approval_resume_case(case: SkillApprovalResumeProv
     let run_id = format!("run-skill-approval-{label}");
     let conversation_id = format!("conversation-skill-approval-{label}");
     let assistant_message_id = format!("assistant-skill-approval-{label}");
-    let model_id = format!("model-skill-approval-{label}");
+    let model_id = match case {
+        SkillApprovalResumeProviderCase::Generic => format!("model-skill-approval-{label}"),
+        SkillApprovalResumeProviderCase::DeepSeekExactGrouped => "deepseek-flash".to_string(),
+    };
     let fixture = tempdir().unwrap();
     let workspace = fixture.path().join("workspace");
     std::fs::create_dir(&workspace).unwrap();
@@ -590,23 +593,14 @@ async fn run_skill_activation_approval_resume_case(case: SkillApprovalResumeProv
             .unwrap(),
     );
 
-    let mut provider_profile = match case {
+    let provider_profile = match case {
         SkillApprovalResumeProviderCase::Generic => ProviderProfileConfig::generic_for_dialect(
             ProviderProtocolDialect::OpenAiChatCompletions,
         ),
         SkillApprovalResumeProviderCase::DeepSeekExactGrouped => {
-            ProviderProfileConfig::deepseek_v4_default()
+            deepseek_test_profile(ReasoningMode::Enabled, ReasoningEffort::Max)
         }
     };
-    if matches!(case, SkillApprovalResumeProviderCase::DeepSeekExactGrouped) {
-        let ProviderProfileConfig::V1(config) = &mut provider_profile else {
-            unreachable!("legacy DeepSeek constructor must produce schema v1")
-        };
-        config.reasoning = ReasoningPolicy {
-            mode: ReasoningMode::Enabled,
-            effort: ReasoningEffort::Max,
-        };
-    }
     let provider_configuration_revision = format!("provider-protocol-v1:skill-approval-{label}");
     let provider_protocol = ProviderProtocolKey::new(
         ProviderProtocolDialect::OpenAiChatCompletions,
@@ -985,8 +979,8 @@ async fn deepseek_grouped_activation_failure_settles_exposed_sibling_without_bou
     use crate::storage::models::{ChatConversationRecord, ChatMessageRecord};
     use crate::storage::service::StorageService;
     use crate::{
-        ProviderContinuationVaultFactory, ProviderProfileConfig, ProviderProtocolDialect,
-        ProviderProtocolKey, ReasoningEffort, ReasoningMode, ReasoningPolicy,
+        ProviderContinuationVaultFactory, ProviderProtocolDialect, ProviderProtocolKey,
+        ReasoningEffort, ReasoningMode,
     };
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tempfile::tempdir;
@@ -995,7 +989,7 @@ async fn deepseek_grouped_activation_failure_settles_exposed_sibling_without_bou
     const CONVERSATION_ID: &str = "conversation-deepseek-skill-cocall";
     const ASSISTANT_MESSAGE_ID: &str = "assistant-deepseek-skill-cocall";
     const RUN_ID: &str = "run-deepseek-skill-cocall";
-    const MODEL_ID: &str = "deepseek-skill-cocall";
+    const MODEL_ID: &str = "deepseek-flash";
     const REASONING: &str = "Activate the selected Skill and update the existing todo contract.";
 
     let fixture = tempdir().unwrap();
@@ -1029,14 +1023,7 @@ async fn deepseek_grouped_activation_failure_settles_exposed_sibling_without_bou
         ProviderContinuationVaultFactory::open_or_provision(Arc::clone(&storage), credentials)
             .unwrap(),
     );
-    let mut provider_profile = ProviderProfileConfig::deepseek_v4_default();
-    let ProviderProfileConfig::V1(config) = &mut provider_profile else {
-        unreachable!("legacy DeepSeek constructor must produce schema v1")
-    };
-    config.reasoning = ReasoningPolicy {
-        mode: ReasoningMode::Enabled,
-        effort: ReasoningEffort::Max,
-    };
+    let provider_profile = deepseek_test_profile(ReasoningMode::Enabled, ReasoningEffort::Max);
     let provider_protocol = ProviderProtocolKey::new(
         ProviderProtocolDialect::OpenAiChatCompletions,
         &provider_profile,

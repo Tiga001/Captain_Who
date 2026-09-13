@@ -24,16 +24,6 @@ function providerLabel(config: ProviderProfileConfig | undefined, t: Translate):
   if (config?.schemaVersion === 2) {
     if (config.vendorId === 'deepseek') return t('chat.models.providerDeepseek')
     if (config.vendorId === 'moonshot') return t('chat.models.providerMoonshot')
-  } else if (config?.schemaVersion === 1) {
-    switch (config.profile.id) {
-      case 'deepseek_v4_chat':
-      case 'deepseek_v4_vision':
-        return t('chat.models.providerDeepseek')
-      case 'moonshot_k3_chat':
-      case 'moonshot_k2_7_code_chat':
-      case 'moonshot_k2_6_chat':
-        return t('chat.models.providerMoonshot')
-    }
   }
   return t('chat.models.providerGeneric')
 }

@@ -3,6 +3,17 @@
  * Keep these names out of main/preload implementations so a channel rename cannot drift.
  */
 export const HOST_CHANNELS = {
+  auth: {
+    getState: 'host:auth.getState',
+    restoreSession: 'host:auth.restoreSession',
+    login: 'host:auth.login',
+    sendEmailCode: 'host:auth.sendEmailCode',
+    verifyEmailCode: 'host:auth.verifyEmailCode',
+    logout: 'host:auth.logout',
+    refreshProfile: 'host:auth.refreshProfile',
+    openWebsite: 'host:auth.openWebsite',
+    stateChanged: 'host:auth.stateChanged'
+  },
   core: {
     ping: 'host:core.ping'
   },

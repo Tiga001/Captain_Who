@@ -507,6 +507,53 @@ describe('AutomationTaskForm', () => {
     await expect.element(screen.getByText('automation.reasoningFromModel')).not.toBeInTheDocument()
   })
 
+  it.each([
+    {
+      family: 'Flash',
+      profileId: 'deepseek_v4_1_flash_chat',
+      settings: {
+        kind: 'deepseek_flash_chat',
+        reasoning: { mode: 'enabled', effort: 'low' }
+      },
+      expectedLabel: 'automation.reasoningLow'
+    },
+    {
+      family: 'Pro',
+      profileId: 'deepseek_v4_pro_0813_chat',
+      settings: {
+        kind: 'deepseek_pro_chat',
+        reasoning: { mode: 'enabled', effort: 'max' }
+      },
+      expectedLabel: 'automation.reasoningMax'
+    }
+  ] as const)(
+    'projects $family reasoning from public settings instead of the internal Profile id',
+    async ({ profileId, settings, expectedLabel }) => {
+      const deepSeekModel = {
+        ...testModel,
+        providerProfileConfig: {
+          schemaVersion: 2 as const,
+          profile: { id: profileId, version: 1 },
+          vendorId: 'deepseek' as const,
+          settings
+        }
+      }
+      const screen = await render(
+        <AutomationTaskForm
+          {...commonProps}
+          initialDraft={makeAutomationDraft()}
+          mode="edit"
+          models={[deepSeekModel]}
+        />
+      )
+
+      await expect.element(screen.getByText(expectedLabel)).toBeVisible()
+      await expect
+        .element(screen.getByText('automation.reasoningFromModel'))
+        .not.toBeInTheDocument()
+    }
+  )
+
   it('keeps missing project and model snapshots visible until the user chooses replacements', async () => {
     const missingDestination = {
       kind: 'new_chat' as const,

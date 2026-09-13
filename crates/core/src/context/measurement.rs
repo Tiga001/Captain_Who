@@ -503,11 +503,11 @@ mod tests {
 
     #[test]
     fn grouped_provider_profile_does_not_pay_generic_split_overhead() {
-        let profile = ProviderProfileConfig::deepseek_v4_default();
+        let profile = ProviderProfileConfig::deepseek_flash_default();
         let key = ProviderProtocolKey::new(
             ProviderProtocolDialect::OpenAiChatCompletions,
             &profile,
-            "deepseek-v4",
+            "deepseek-flash",
             None,
         )
         .unwrap();
@@ -551,7 +551,7 @@ mod tests {
         let unsupported = ProviderProtocolKey {
             dialect: ProviderProtocolDialect::OpenAiChatCompletions,
             profile: ProviderProfileRef {
-                id: ProviderProfileId::DeepSeekV4Chat,
+                id: ProviderProfileId::DeepSeekV41FlashChat,
                 version: u32::MAX,
             },
             model_id: "unsupported-provider-version".to_string(),
@@ -566,11 +566,11 @@ mod tests {
 
     #[test]
     fn deepseek_estimate_uses_original_provider_calls_and_result_ids() {
-        let profile = ProviderProfileConfig::deepseek_v4_default();
+        let profile = ProviderProfileConfig::deepseek_flash_default();
         let key = ProviderProtocolKey::new(
             ProviderProtocolDialect::OpenAiChatCompletions,
             &profile,
-            "deepseek-v4",
+            "deepseek-flash",
             None,
         )
         .unwrap();

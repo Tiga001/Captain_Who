@@ -2145,7 +2145,7 @@ export const koKRTranslations = {
   'configuration.cancel': '취소',
   'configuration.done': '완료',
   'configuration.providerModelId': '제공자 모델 ID',
-  'configuration.providerModelIdPlaceholder': '예: deepseek-chat',
+  'configuration.providerModelIdPlaceholder': '예: deepseek-flash',
   'configuration.displayName': '표시 이름',
   'configuration.displayNamePlaceholder': '예: Kimi K3 High',
   'configuration.invalidDisplayName': '표시 이름은 UTF-8 기준 512바이트 이하여야 합니다.',

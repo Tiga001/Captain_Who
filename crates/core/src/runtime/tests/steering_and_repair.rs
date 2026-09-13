@@ -9,7 +9,7 @@ async fn runtime_rejects_unknown_frozen_provider_registration_before_transport_o
     use tokio::net::TcpListener;
     use tokio::time::{timeout, Duration};
 
-    const MODEL_ID: &str = "unknown-provider-registration-model";
+    const MODEL_ID: &str = "deepseek-flash";
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
@@ -33,7 +33,7 @@ async fn runtime_rejects_unknown_frozen_provider_registration_before_transport_o
         }
     });
 
-    let mut profile = ProviderProfileConfig::deepseek_v4_default();
+    let mut profile = ProviderProfileConfig::deepseek_flash_default();
     let mut protocol = ProviderProtocolKey::new(
         ProviderProtocolDialect::OpenAiChatCompletions,
         &profile,
@@ -80,7 +80,7 @@ async fn runtime_rejects_unknown_frozen_provider_registration_before_transport_o
 
     assert_eq!(
         error.to_string(),
-        "Provider profile configuration is invalid: unsupported provider profile deepseek_v4_chat version 99"
+        "Provider profile configuration is invalid: unsupported provider profile deepseek_v4_1_flash_chat version 99"
     );
     assert_eq!(model_requests.load(Ordering::SeqCst), 0);
     assert_eq!(tool_executions.load(Ordering::SeqCst), 0);

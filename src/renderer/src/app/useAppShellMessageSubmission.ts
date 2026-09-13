@@ -23,6 +23,7 @@ import type {
   ChatSubmitOptions
 } from '../features/chat/chatTypes'
 import { loadInputAttachments } from '../features/storage/storageClient'
+import { useAccountAuth } from '../features/auth/AccountAuthContext'
 import { useProviderTransition } from '../features/agentRun/useProviderTransition'
 import { isAssistantReplySettled } from '../features/chat/assistantGeneration'
 import type { AutoSubmitQueuedMessage } from './appTypes'
@@ -166,6 +167,9 @@ export function useAppShellMessageSubmission({
   waitForMessageStateSaves,
   waitForRunSettlement
 }: UseAppShellMessageSubmissionOptions) {
+  const accountAuth = useAccountAuth()
+  const accountAuthRef = useRef(accountAuth)
+  accountAuthRef.current = accountAuth
   // Queue execution is opt-in for each conversation during this app session.
   // A fresh token on every enable invalidates work that was awaiting a previous enable.
   const queueAutoSendTokensRef = useRef(new Map<string, symbol>())
@@ -202,6 +206,7 @@ export function useAppShellMessageSubmission({
         draftSnapshot?: ChatComposerDraft
       }
     ): boolean => {
+      if (accountAuthRef.current && !accountAuthRef.current.canStartTurn()) return false
       const targetConversation = targetConversationId
         ? (conversationsRef.current.find(
             (conversation) => conversation.id === targetConversationId
@@ -715,6 +720,10 @@ export function useAppShellMessageSubmission({
 
   const submitEditedLastUserMessage = useCallback(
     async (messageId: string, content: string) => {
+      if (accountAuthRef.current && !accountAuthRef.current.canStartTurn()) {
+        accountAuthRef.current.requestLogin()
+        throw new Error(t('auth.loginToSend'))
+      }
       const conversationId = activeConversationIdRef.current
       if (!conversationId) {
         throw new Error(t('chat.editNoConversation'))

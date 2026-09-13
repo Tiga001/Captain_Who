@@ -469,9 +469,13 @@ describe('ModelSettingsProvider hydration', () => {
           ...storedSettings.models[0]!,
           id: 'deepseek-inherited',
           providerProfileConfig: {
-            schemaVersion: 1,
-            profile: { id: 'deepseek_v4_chat', version: 1 },
-            reasoning: { mode: 'enabled', effort: 'high' }
+            schemaVersion: 2,
+            vendorId: 'deepseek',
+            profile: { id: 'deepseek_v4_1_flash_chat', version: 1 },
+            settings: {
+              kind: 'deepseek_flash_chat',
+              reasoning: { mode: 'enabled', effort: 'high' }
+            }
           }
         },
         {
@@ -496,12 +500,12 @@ describe('ModelSettingsProvider hydration', () => {
         selectable: true
       },
       {
-        profileId: 'deepseek_v4_chat',
+        profileId: 'deepseek_v4_1_flash_chat',
         profileVersion: 1,
         displayName: 'DeepSeek V4 Chat',
         compatibleDialects: ['openai_chat_completions'],
-        settingsKind: 'deepseek_v4_chat',
-        selectable: true
+        settingsKind: 'none',
+        selectable: false
       }
     ])
 
@@ -562,12 +566,12 @@ describe('ModelSettingsProvider hydration', () => {
     service.loadModelSettings.mockResolvedValue(storedSettings)
     service.loadProviderProfileUiDescriptors.mockResolvedValue([
       {
-        profileId: 'deepseek_v4_chat',
+        profileId: 'deepseek_v4_1_flash_chat',
         profileVersion: 1,
-        displayName: '深度求索 / DeepSeek（V4 Chat）',
+        displayName: 'DeepSeek Flash',
         compatibleDialects: ['openai_chat_completions'],
-        settingsKind: 'deepseek_v4_chat',
-        selectable: true
+        settingsKind: 'none',
+        selectable: false
       }
     ])
 
@@ -579,7 +583,7 @@ describe('ModelSettingsProvider hydration', () => {
 
     await expect
       .element(screen.getByTestId('provider-profiles'))
-      .toHaveTextContent('deepseek_v4_chat')
+      .toHaveTextContent('deepseek_v4_1_flash_chat')
     expect(service.loadProviderProfileUiDescriptors).toHaveBeenCalledTimes(1)
   })
 

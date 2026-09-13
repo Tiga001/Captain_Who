@@ -153,11 +153,11 @@ async fn capture_read_then_thanks(save: RendererSave) -> Vec<Value> {
         "searchMode":"tavily",
         "tavilyApiKeyMutation":{"type":"replace","value":"FAKE_SEARCH_TOKEN"},
         "models":[{
-            "id":null,"providerModelId":"deepseek-v4-flash","displayName":"Wire fixture",
+            "id":null,"providerModelId":"deepseek-flash","displayName":"Wire fixture",
             "apiUrlOverride":null,"apiTokenOverrideMutation":{"type":"clear"},
-            "supportsImage":false,"contextWindowTokens":128000,
-            "providerProfileUpdate":{"kind":"select_registered_profile","profileId":"deepseek_v4_chat",
-                "settings":{"kind":"deepseek_v4_chat","reasoning":{"mode":"enabled","effort":"high"}}},
+            "supportsImage":true,"contextWindowTokens":128000,
+            "providerProfileUpdate":{"kind":"select_vendor","vendorId":"deepseek",
+                "settings":{"kind":"deepseek_flash_chat","reasoning":{"mode":"enabled","effort":"high"}}},
             "inputPrice":"0","cachedInputPrice":"","outputPrice":"0","enabled":true
         }]
     })).unwrap()).unwrap();
@@ -433,7 +433,7 @@ fn diagnose(save: RendererSave, wires: &[Value]) -> Option<usize> {
         "real read_file must reach the model, not just a mocked tool success"
     );
     for (index, summary) in summaries.iter().enumerate() {
-        assert_eq!(wires[index]["model"], "deepseek-v4-flash");
+        assert_eq!(wires[index]["model"], "deepseek-flash");
         assert_eq!(wires[index]["thinking"], json!({"type": "enabled"}));
         assert_eq!(wires[index]["reasoning_effort"], "high");
         eprintln!(

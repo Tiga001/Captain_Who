@@ -2268,7 +2268,7 @@ export const itITTranslations = {
   'configuration.cancel': 'Annulla',
   'configuration.done': 'Fatto',
   'configuration.providerModelId': 'ID modello del fornitore',
-  'configuration.providerModelIdPlaceholder': 'Esempio: deepseek-chat',
+  'configuration.providerModelIdPlaceholder': 'Esempio: deepseek-flash',
   'configuration.displayName': 'Nome visualizzato',
   'configuration.displayNamePlaceholder': 'Esempio: Kimi K3 High',
   'configuration.invalidDisplayName': 'Usa un nome visualizzato di massimo 512 byte UTF-8',

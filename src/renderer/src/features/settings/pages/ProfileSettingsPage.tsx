@@ -1,174 +1,97 @@
-import { renderSettingsNodes, settingLabel, settingDescription } from '../settingsDefinition'
-import { profileSettingsNodes } from './ProfileSettingsPage.definition'
-import { useState } from 'react'
-import { UserCircle } from 'lucide-react'
-import { ConfirmationDialog } from '../../../components/dialog/ConfirmationDialog'
+import { useEffect, useState } from 'react'
+import type { AuthErrorCode } from '@mycopilot/host-api'
 import { useFrontendConfig } from '../../../config/FrontendConfigProvider'
-import { getUserFacingErrorMessage } from '../../../errors/userFacingError'
-import {
-  getProfileDisplayName,
-  getProfileHandle,
-  getProfileInitials,
-  normalizeProfileDisplayName
-} from '../../profile/profileUtils'
-import { selectProfileAvatar } from '../../storage/storageClient'
-import type { UiPreferencesSnapshot } from '../../storage/storageClient'
+import { hostClient } from '../../../host/hostClient'
+import { useAccountAuth } from '../../auth/AccountAuthContext'
+import { AccountAvatar } from '../../auth/AccountAvatar'
 import './ProfileSettingsPage.css'
 
-interface ProfileSettingsPageProps {
-  onUiPreferencesChange: (patch: Partial<UiPreferencesSnapshot>) => void
-  uiPreferences: UiPreferencesSnapshot
-}
-
-export function ProfileSettingsPage({
-  onUiPreferencesChange,
-  uiPreferences
-}: ProfileSettingsPageProps) {
+export function ProfileSettingsPage() {
   const { t } = useFrontendConfig()
-  const [avatarError, setAvatarError] = useState('')
-  const [isRemoveAvatarConfirmationOpen, setIsRemoveAvatarConfirmationOpen] = useState(false)
-  const defaultDisplayName = t('profile.defaultDisplayName')
-  const displayName = getProfileDisplayName(uiPreferences, defaultDisplayName)
-  const handle = getProfileHandle(uiPreferences)
-  const initials = getProfileInitials(displayName)
-  const explicitDisplayName = normalizeProfileDisplayName(uiPreferences.profileDisplayName)
-  const profileAvatarDataUrl = uiPreferences.profileAvatarDataUrl?.trim()
-    ? uiPreferences.profileAvatarDataUrl
-    : null
-  const hasCustomAvatar = Boolean(profileAvatarDataUrl)
-
-  const uploadAvatar = async () => {
-    setAvatarError('')
-    try {
-      const avatarDataUrl = await selectProfileAvatar()
-      if (!avatarDataUrl) return
-      onUiPreferencesChange({ profileAvatarDataUrl: avatarDataUrl })
-    } catch (error) {
-      setAvatarError(getUserFacingErrorMessage(error, t, 'profile.avatarUploadFailed'))
+  const auth = useAccountAuth()
+  const profile = auth?.state.profile
+  const userId = profile?.userId
+  const [error, setError] = useState<AuthErrorCode | null>(null)
+  const [busy, setBusy] = useState(false)
+  useEffect(() => {
+    if (!userId) return
+    let cancelled = false
+    void hostClient.auth
+      .refreshProfile()
+      .then((result) => {
+        if (!cancelled && !result.ok) setError(result.error)
+      })
+      .catch(() => {
+        if (!cancelled) setError('unknown')
+      })
+    return () => {
+      cancelled = true
     }
-  }
-
-  const removeAvatar = () => {
-    if (!hasCustomAvatar) return
-    setAvatarError('')
-    onUiPreferencesChange({ profileAvatarDataUrl: null })
-    setIsRemoveAvatarConfirmationOpen(false)
-  }
-
+  }, [userId])
   return (
-    <article className="settings-list-page profile-settings-page">
+    <article className="settings-list-page profile-settings-page" data-setting-id="profile.account">
       <h1>{t('settings.page.profile')}</h1>
-
-      <section className="profile-settings-hero" aria-label={t('profile.account')}>
-        <div className="profile-settings-avatar" aria-label={t('profile.avatar')}>
-          {profileAvatarDataUrl ? (
-            <img src={profileAvatarDataUrl} alt="" />
-          ) : (
-            <span>{initials}</span>
-          )}
+      <section className="profile-settings-hero" aria-label={t('auth.cloudProfile')}>
+        <div
+          className="profile-settings-avatar"
+          aria-label={t('profile.avatar')}
+          data-setting-id="profile.avatar"
+        >
+          <AccountAvatar src={profile?.avatarDataUrl} />
+          <span className="app-startup-screen__sr-only">{t('profile.avatar')}</span>
         </div>
         <div className="profile-settings-hero__text">
-          <h2>{displayName}</h2>
-          <p>@{handle}</p>
+          <h2>{profile?.displayName || t('auth.signedOut')}</h2>
+          {profile?.email ? <p>{profile.email}</p> : null}
         </div>
       </section>
-
-      {renderSettingsNodes(profileSettingsNodes, (section) => (
-        <section className="settings-list-section" aria-labelledby="profile-account-heading">
-          <h2 id="profile-account-heading">{settingLabel(section, t)}</h2>
-          <div className="settings-list">
-            {renderSettingsNodes(section.children, (node) => {
-              switch (node.id) {
-                case 'profile.avatar':
-                  return (
-                    <div className="settings-list-row profile-settings-avatar-row">
-                      <div className="settings-list-row__text">
-                        <h3 className="settings-list-row__title">{settingLabel(node, t)}</h3>
-                        {avatarError && <p className="profile-settings-error">{avatarError}</p>}
-                      </div>
-
-                      <div className="settings-list-row__control profile-settings-avatar-actions">
-                        <button
-                          className="profile-settings-button"
-                          type="button"
-                          onClick={uploadAvatar}
-                        >
-                          <UserCircle aria-hidden="true" />
-                          <span>{t(node.terms[0])}</span>
-                        </button>
-                        {hasCustomAvatar && (
-                          <button
-                            className="profile-settings-button profile-settings-button--danger"
-                            type="button"
-                            onClick={() => setIsRemoveAvatarConfirmationOpen(true)}
-                          >
-                            {t(node.terms[1])}
-                          </button>
-                        )}
-                      </div>
-                    </div>
-                  )
-                case 'profile.displayName':
-                  return (
-                    <label className="settings-list-row">
-                      <span className="settings-list-row__text">
-                        <span className="settings-list-row__title">{settingLabel(node, t)}</span>
-                        <span className="settings-list-row__description">
-                          {settingDescription(node, t)}
-                        </span>
-                      </span>
-
-                      <span className="settings-list-row__control">
-                        <input
-                          className="settings-list-control"
-                          value={explicitDisplayName}
-                          placeholder={defaultDisplayName}
-                          onChange={(event) =>
-                            onUiPreferencesChange({ profileDisplayName: event.target.value })
-                          }
-                        />
-                      </span>
-                    </label>
-                  )
-                case 'profile.handle':
-                  return (
-                    <label className="settings-list-row">
-                      <span className="settings-list-row__text">
-                        <span className="settings-list-row__title">{settingLabel(node, t)}</span>
-                        <span className="settings-list-row__description">
-                          {settingDescription(node, t)}
-                        </span>
-                      </span>
-
-                      <span className="settings-list-row__control">
-                        <input
-                          className="settings-list-control"
-                          value={handle}
-                          placeholder={t('profile.handlePlaceholder')}
-                          onChange={(event) =>
-                            onUiPreferencesChange({ profileHandle: event.target.value })
-                          }
-                        />
-                      </span>
-                    </label>
-                  )
-                default:
-                  return null
-              }
-            })}
+      <section className="settings-list-section" aria-labelledby="profile-account-heading">
+        <h2 id="profile-account-heading">{t('auth.cloudProfile')}</h2>
+        <div className="settings-list">
+          <div className="settings-list-row" data-setting-id="profile.displayName">
+            <span>{t('profile.displayName')}</span>
+            <span>{profile?.displayName || '—'}</span>
           </div>
-        </section>
-      ))}
-
-      {isRemoveAvatarConfirmationOpen && hasCustomAvatar && (
-        <ConfirmationDialog
-          title={t('profile.removeAvatarTitle')}
-          cancelLabel={t('profile.cancelRemoveAvatar')}
-          confirmLabel={t('profile.confirmRemoveAvatar')}
-          onCancel={() => setIsRemoveAvatarConfirmationOpen(false)}
-          onConfirm={removeAvatar}
-        />
-      )}
+          <div className="settings-list-row" data-setting-id="profile.email">
+            <span>{t('auth.email')}</span>
+            <span>{profile?.email || '—'}</span>
+          </div>
+          {profile ? (
+            <div className="settings-list-row profile-settings-avatar-actions">
+              <button
+                className="profile-settings-button"
+                type="button"
+                onClick={() => {
+                  void hostClient.auth.openWebsite('profile').catch(() => setError('unknown'))
+                }}
+              >
+                {t('auth.editProfile')}
+              </button>
+              <button
+                className="profile-settings-button"
+                type="button"
+                disabled={busy}
+                onClick={async () => {
+                  setBusy(true)
+                  setError(null)
+                  try {
+                    const result = await hostClient.auth.refreshProfile()
+                    if (!result.ok) setError(result.error)
+                  } catch {
+                    setError('unknown')
+                  } finally {
+                    setBusy(false)
+                  }
+                }}
+              >
+                {t(busy ? 'auth.working' : 'auth.refresh')}
+              </button>
+            </div>
+          ) : null}
+        </div>
+      </section>
+      {error ? <p role="alert">{t(`auth.error.${error}`)}</p> : null}
+      {profile && !auth?.state.remembered ? <p role="status">{t('auth.memoryOnly')}</p> : null}
     </article>
   )
 }

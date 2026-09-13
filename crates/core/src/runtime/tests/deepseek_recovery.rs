@@ -10,8 +10,8 @@ async fn deepseek_cancellation_during_result_publication_closes_grouped_suffix()
     use crate::storage::models::{ChatConversationRecord, ChatMessageRecord};
     use crate::storage::service::StorageService;
     use crate::{
-        ProviderContinuationVaultFactory, ProviderProfileConfig, ProviderProtocolDialect,
-        ProviderProtocolKey, ReasoningEffort, ReasoningMode, ReasoningPolicy,
+        ProviderContinuationVaultFactory, ProviderProtocolDialect, ProviderProtocolKey,
+        ReasoningEffort, ReasoningMode,
     };
     use tempfile::tempdir;
     use tokio::net::TcpListener;
@@ -20,7 +20,7 @@ async fn deepseek_cancellation_during_result_publication_closes_grouped_suffix()
     const CONVERSATION_ID: &str = "conversation-deepseek-result-publish-cancel";
     const ASSISTANT_ID: &str = "assistant-deepseek-result-publish-cancel";
     const RUN_ID: &str = "run-deepseek-result-publish-cancel";
-    const MODEL_ID: &str = "deepseek-result-publish-cancel-model";
+    const MODEL_ID: &str = "deepseek-flash";
 
     fn provider_read_call(id: &str, path: &str) -> Value {
         json!({
@@ -68,14 +68,7 @@ async fn deepseek_cancellation_during_result_publication_closes_grouped_suffix()
         ProviderContinuationVaultFactory::open_or_provision(Arc::clone(&storage), credentials)
             .unwrap(),
     );
-    let mut profile = ProviderProfileConfig::deepseek_v4_default();
-    let ProviderProfileConfig::V1(config) = &mut profile else {
-        unreachable!("legacy DeepSeek constructor must produce schema v1")
-    };
-    config.reasoning = ReasoningPolicy {
-        mode: ReasoningMode::Enabled,
-        effort: ReasoningEffort::High,
-    };
+    let profile = deepseek_test_profile(ReasoningMode::Enabled, ReasoningEffort::High);
     let protocol = ProviderProtocolKey::new(
         ProviderProtocolDialect::OpenAiChatCompletions,
         &profile,
@@ -243,9 +236,8 @@ async fn deepseek_commit_unknown_trace_publish_recovers_staged_turn_without_tool
     use crate::storage::models::{ChatConversationRecord, ChatMessageRecord};
     use crate::storage::service::StorageService;
     use crate::{
-        ProviderContinuationVaultFactory, ProviderProfileConfig, ProviderProtocolDialect,
-        ProviderProtocolKey, ReasoningEffort, ReasoningMode, ReasoningPolicy,
-        CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
+        ProviderContinuationVaultFactory, ProviderProtocolDialect, ProviderProtocolKey,
+        ReasoningEffort, ReasoningMode, CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
     };
     use tempfile::tempdir;
     use tokio::net::TcpListener;
@@ -254,7 +246,7 @@ async fn deepseek_commit_unknown_trace_publish_recovers_staged_turn_without_tool
     const CONVERSATION_ID: &str = "conversation-deepseek-commit-unknown";
     const ASSISTANT_ID: &str = "assistant-deepseek-commit-unknown";
     const RUN_ID: &str = "run-deepseek-commit-unknown";
-    const MODEL_ID: &str = "deepseek-commit-unknown-model";
+    const MODEL_ID: &str = "deepseek-flash";
     const OBSERVER_ERROR: &str = "trace observer committed before returning an unknown outcome";
 
     let fixture = tempdir().unwrap();
@@ -291,14 +283,7 @@ async fn deepseek_commit_unknown_trace_publish_recovers_staged_turn_without_tool
         ProviderContinuationVaultFactory::open_or_provision(Arc::clone(&storage), credentials)
             .unwrap(),
     );
-    let mut profile = ProviderProfileConfig::deepseek_v4_default();
-    let ProviderProfileConfig::V1(config) = &mut profile else {
-        unreachable!("legacy DeepSeek constructor must produce schema v1")
-    };
-    config.reasoning = ReasoningPolicy {
-        mode: ReasoningMode::Enabled,
-        effort: ReasoningEffort::High,
-    };
+    let profile = deepseek_test_profile(ReasoningMode::Enabled, ReasoningEffort::High);
     let protocol = ProviderProtocolKey::new(
         ProviderProtocolDialect::OpenAiChatCompletions,
         &profile,
@@ -452,8 +437,8 @@ async fn deepseek_checkpoint_abort_closes_unknown_suffix_and_replays_next_run() 
     use crate::storage::models::{ChatConversationRecord, ChatMessageRecord};
     use crate::storage::service::StorageService;
     use crate::{
-        ProviderContinuationVaultFactory, ProviderProfileConfig, ProviderProtocolDialect,
-        ProviderProtocolKey, ReasoningEffort, ReasoningMode, ReasoningPolicy,
+        ProviderContinuationVaultFactory, ProviderProtocolDialect, ProviderProtocolKey,
+        ReasoningEffort, ReasoningMode,
     };
     use tempfile::tempdir;
     use tokio::net::TcpListener;
@@ -463,7 +448,7 @@ async fn deepseek_checkpoint_abort_closes_unknown_suffix_and_replays_next_run() 
     const SECOND_ASSISTANT_ID: &str = "assistant-deepseek-checkpoint-recovery";
     const FIRST_RUN_ID: &str = "run-deepseek-checkpoint-abort";
     const SECOND_RUN_ID: &str = "run-deepseek-checkpoint-recovery";
-    const MODEL_ID: &str = "deepseek-checkpoint-abort-model";
+    const MODEL_ID: &str = "deepseek-flash";
     const PROVIDER_REVISION: &str = "provider-protocol-v1:deepseek-checkpoint-abort";
     const REASONING: &str = "Preserve this reasoning across the aborted grouped turn.";
 
@@ -524,14 +509,7 @@ async fn deepseek_checkpoint_abort_closes_unknown_suffix_and_replays_next_run() 
         ProviderContinuationVaultFactory::open_or_provision(Arc::clone(&storage), credentials)
             .unwrap(),
     );
-    let mut profile = ProviderProfileConfig::deepseek_v4_default();
-    let ProviderProfileConfig::V1(config) = &mut profile else {
-        unreachable!("legacy DeepSeek constructor must produce schema v1")
-    };
-    config.reasoning = ReasoningPolicy {
-        mode: ReasoningMode::Enabled,
-        effort: ReasoningEffort::High,
-    };
+    let profile = deepseek_test_profile(ReasoningMode::Enabled, ReasoningEffort::High);
     let protocol = ProviderProtocolKey::new(
         ProviderProtocolDialect::OpenAiChatCompletions,
         &profile,
@@ -796,8 +774,8 @@ async fn deepseek_runtime_persists_grouped_turns_before_tool_side_effects() {
     use crate::storage::models::{ChatConversationRecord, ChatMessageRecord};
     use crate::storage::service::StorageService;
     use crate::{
-        ProviderContinuationVaultFactory, ProviderProfileConfig, ProviderProtocolDialect,
-        ProviderProtocolKey, ReasoningEffort, ReasoningMode, ReasoningPolicy,
+        ProviderContinuationVaultFactory, ProviderProtocolDialect, ProviderProtocolKey,
+        ReasoningEffort, ReasoningMode,
     };
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tempfile::tempdir;
@@ -808,7 +786,7 @@ async fn deepseek_runtime_persists_grouped_turns_before_tool_side_effects() {
     const CONVERSATION_ID: &str = "conversation-deepseek-runtime-e2e";
     const ASSISTANT_MESSAGE_ID: &str = "assistant-deepseek-runtime-e2e";
     const RUN_ID: &str = "run-deepseek-runtime-e2e";
-    const MODEL_ID: &str = "deepseek-v4-runtime-e2e";
+    const MODEL_ID: &str = "deepseek-flash";
     const FIRST_REASONING: &str = "第一轮 reasoning：\n逐字保留  alpha  ";
     const SECOND_REASONING: &str = "第二轮 reasoning：工具 1/2 都已完成。\n";
 
@@ -948,14 +926,7 @@ async fn deepseek_runtime_persists_grouped_turns_before_tool_side_effects() {
         ProviderContinuationVaultFactory::open_or_provision(Arc::clone(&storage), credentials)
             .unwrap(),
     );
-    let mut provider_profile = ProviderProfileConfig::deepseek_v4_default();
-    let ProviderProfileConfig::V1(config) = &mut provider_profile else {
-        unreachable!("legacy DeepSeek constructor must produce schema v1")
-    };
-    config.reasoning = ReasoningPolicy {
-        mode: ReasoningMode::Enabled,
-        effort: ReasoningEffort::Max,
-    };
+    let provider_profile = deepseek_test_profile(ReasoningMode::Enabled, ReasoningEffort::Max);
     let provider_protocol = ProviderProtocolKey::new(
         ProviderProtocolDialect::OpenAiChatCompletions,
         &provider_profile,
@@ -1328,7 +1299,7 @@ async fn deepseek_ordinary_reasoning_survives_restart_for_a_future_tools_request
     use tokio::net::TcpListener;
     use tokio::sync::oneshot;
 
-    const MODEL_ID: &str = "deepseek-v4-flash";
+    const MODEL_ID: &str = "deepseek-flash";
     const CONVERSATION_ID: &str = "conversation-deepseek-ordinary-restart";
     const FIRST_ASSISTANT_ID: &str = "assistant-deepseek-ordinary-first";
     const NEXT_ASSISTANT_ID: &str = "assistant-deepseek-ordinary-next";
@@ -1469,9 +1440,9 @@ async fn deepseek_ordinary_reasoning_survives_restart_for_a_future_tools_request
         .unwrap(),
     );
     let profile = ProviderProfileConfig::from_family_settings(
-        ProviderProfileRef::deepseek_v4_chat(),
+        ProviderProfileRef::deepseek_v4_1_flash_chat(),
         ProviderVendorId::DeepSeek,
-        ProviderFamilySettings::DeepseekV4Chat {
+        ProviderFamilySettings::DeepseekFlashChat {
             reasoning: ProviderFamilyReasoningPolicy {
                 mode: ReasoningMode::Enabled,
                 effort: ProviderReasoningEffort::Low,

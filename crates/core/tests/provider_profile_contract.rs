@@ -65,7 +65,7 @@ fn unknown_or_incompatible_profiles_fail_closed() {
         Err(ProviderProfileValidationError::UnsupportedProfileVersion { .. })
     ));
 
-    let deepseek = ProviderProfileConfig::deepseek_v4_default();
+    let deepseek = ProviderProfileConfig::deepseek_flash_default();
     assert!(matches!(
         deepseek.validate_for_dialect(ProviderProtocolDialect::AnthropicMessages),
         Err(ProviderProfileValidationError::IncompatibleDialect { .. })
@@ -76,7 +76,7 @@ fn unknown_or_incompatible_profiles_fail_closed() {
 fn model_storage_round_trips_explicit_profiles() {
     let fixture = tempdir().unwrap();
     let storage = StorageService::open(&fixture.path().join("storage.sqlite")).unwrap();
-    let deepseek = ProviderProfileConfig::deepseek_v4_default();
+    let deepseek = ProviderProfileConfig::deepseek_flash_default();
 
     storage
         .save_model_settings(settings(deepseek.clone()))

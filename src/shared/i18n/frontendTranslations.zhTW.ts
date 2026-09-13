@@ -2033,7 +2033,7 @@ export const zhTWTranslations = {
   'configuration.cancel': '取消',
   'configuration.done': '完成',
   'configuration.providerModelId': '廠商模型 ID',
-  'configuration.providerModelIdPlaceholder': '例：deepseek-chat',
+  'configuration.providerModelIdPlaceholder': '例：deepseek-flash',
   'configuration.displayName': '顯示名稱',
   'configuration.displayNamePlaceholder': '例：Kimi K3 High',
   'configuration.invalidDisplayName': '顯示名稱不得超過 512 個 UTF-8 位元組',

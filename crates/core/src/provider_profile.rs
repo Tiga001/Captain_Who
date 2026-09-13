@@ -8,8 +8,8 @@ pub const PROVIDER_PROFILE_CONFIG_SCHEMA_VERSION: u32 = 1;
 pub const PROVIDER_PROFILE_CONFIG_V2_SCHEMA_VERSION: u32 = 2;
 pub const GENERIC_OPENAI_CHAT_PROFILE_VERSION: u32 = 1;
 pub const GENERIC_ANTHROPIC_MESSAGES_PROFILE_VERSION: u32 = 1;
-pub const DEEPSEEK_V4_CHAT_PROFILE_VERSION: u32 = 1;
-pub const DEEPSEEK_V4_VISION_PROFILE_VERSION: u32 = 1;
+pub const DEEPSEEK_V4_1_FLASH_CHAT_PROFILE_VERSION: u32 = 1;
+pub const DEEPSEEK_V4_PRO_0813_CHAT_PROFILE_VERSION: u32 = 1;
 pub const MOONSHOT_K3_CHAT_PROFILE_VERSION: u32 = 1;
 pub const MOONSHOT_K2_7_CODE_CHAT_PROFILE_VERSION: u32 = 1;
 pub const MOONSHOT_K2_6_CHAT_PROFILE_VERSION: u32 = 1;
@@ -179,8 +179,8 @@ bounded_provider_identity!(
     constants = {
         GenericOpenAiChat => "generic_openai_chat",
         GenericAnthropicMessages => "generic_anthropic_messages",
-        DeepSeekV4Chat => "deepseek_v4_chat",
-        DeepSeekV4Vision => "deepseek_v4_vision",
+        DeepSeekFlashChat => "deepseek_flash_chat",
+        DeepSeekProChat => "deepseek_pro_chat",
         MoonshotK3Chat => "moonshot_k3_chat",
         MoonshotK27CodeChat => "moonshot_k2_7_code_chat",
         MoonshotK26Chat => "moonshot_k2_6_chat",
@@ -207,9 +207,9 @@ impl ProviderProfileId {
     #[allow(non_upper_case_globals)]
     pub const GenericAnthropicMessages: Self = Self::from_static("generic_anthropic_messages");
     #[allow(non_upper_case_globals)]
-    pub const DeepSeekV4Chat: Self = Self::from_static("deepseek_v4_chat");
+    pub const DeepSeekV41FlashChat: Self = Self::from_static("deepseek_v4_1_flash_chat");
     #[allow(non_upper_case_globals)]
-    pub const DeepSeekV4Vision: Self = Self::from_static("deepseek_v4_vision");
+    pub const DeepSeekV4Pro0813Chat: Self = Self::from_static("deepseek_v4_pro_0813_chat");
     #[allow(non_upper_case_globals)]
     pub const MoonshotK3Chat: Self = Self::from_static("moonshot_k3_chat");
     #[allow(non_upper_case_globals)]
@@ -310,17 +310,17 @@ impl ProviderProfileRef {
         }
     }
 
-    pub const fn deepseek_v4_chat() -> Self {
+    pub const fn deepseek_v4_1_flash_chat() -> Self {
         Self {
-            id: ProviderProfileId::DeepSeekV4Chat,
-            version: DEEPSEEK_V4_CHAT_PROFILE_VERSION,
+            id: ProviderProfileId::DeepSeekV41FlashChat,
+            version: DEEPSEEK_V4_1_FLASH_CHAT_PROFILE_VERSION,
         }
     }
 
-    pub const fn deepseek_v4_vision() -> Self {
+    pub const fn deepseek_v4_pro_0813_chat() -> Self {
         Self {
-            id: ProviderProfileId::DeepSeekV4Vision,
-            version: DEEPSEEK_V4_VISION_PROFILE_VERSION,
+            id: ProviderProfileId::DeepSeekV4Pro0813Chat,
+            version: DEEPSEEK_V4_PRO_0813_CHAT_PROFILE_VERSION,
         }
     }
 
@@ -441,10 +441,10 @@ pub enum MoonshotK26ThinkingMode {
 )]
 pub enum ProviderFamilySettings {
     Generic,
-    DeepseekV4Chat {
+    DeepseekFlashChat {
         reasoning: ProviderFamilyReasoningPolicy,
     },
-    DeepseekV4Vision {
+    DeepseekProChat {
         reasoning: ProviderFamilyReasoningPolicy,
     },
     MoonshotK3Chat {
@@ -462,28 +462,10 @@ pub enum ProviderFamilySettings {
 pub type ProviderVendorPublicSettings = ProviderFamilySettings;
 
 impl ProviderFamilySettings {
-    pub const fn normalized(self) -> Self {
-        match self {
-            Self::DeepseekV4Chat { mut reasoning } => {
-                if matches!(reasoning.mode, ReasoningMode::Disabled) {
-                    reasoning.effort = ProviderReasoningEffort::ProviderDefault;
-                }
-                Self::DeepseekV4Chat { reasoning }
-            }
-            Self::DeepseekV4Vision { mut reasoning } => {
-                if matches!(reasoning.mode, ReasoningMode::Disabled) {
-                    reasoning.effort = ProviderReasoningEffort::ProviderDefault;
-                }
-                Self::DeepseekV4Vision { reasoning }
-            }
-            settings => settings,
-        }
-    }
-
     pub const fn reasoning_mode(self) -> ReasoningMode {
         match self {
             Self::Generic => ReasoningMode::ProviderDefault,
-            Self::DeepseekV4Chat { reasoning } | Self::DeepseekV4Vision { reasoning } => {
+            Self::DeepseekFlashChat { reasoning } | Self::DeepseekProChat { reasoning } => {
                 reasoning.mode
             }
             Self::MoonshotK3Chat { .. } | Self::MoonshotK27CodeChat => ReasoningMode::Enabled,
@@ -499,7 +481,7 @@ impl ProviderFamilySettings {
 
     pub const fn reasoning_effort(self) -> ProviderReasoningEffort {
         match self {
-            Self::DeepseekV4Chat { reasoning } | Self::DeepseekV4Vision { reasoning } => {
+            Self::DeepseekFlashChat { reasoning } | Self::DeepseekProChat { reasoning } => {
                 reasoning.effort
             }
             Self::MoonshotK3Chat { reasoning_effort } => reasoning_effort,
@@ -512,47 +494,17 @@ impl ProviderFamilySettings {
     fn validate(self) -> Result<(), ProviderProfileValidationError> {
         match self {
             Self::Generic => Ok(()),
-            Self::DeepseekV4Chat { reasoning } | Self::DeepseekV4Vision { reasoning }
+            Self::DeepseekFlashChat { reasoning } | Self::DeepseekProChat { reasoning }
                 if reasoning.mode == ReasoningMode::Disabled
                     && reasoning.effort != ProviderReasoningEffort::ProviderDefault =>
             {
                 Err(ProviderProfileValidationError::EffortWhileReasoningDisabled)
             }
-            Self::DeepseekV4Chat { .. }
-            | Self::DeepseekV4Vision { .. }
+            Self::DeepseekFlashChat { .. }
+            | Self::DeepseekProChat { .. }
             | Self::MoonshotK3Chat { .. }
             | Self::MoonshotK27CodeChat
             | Self::MoonshotK26Chat { .. } => Ok(()),
-        }
-    }
-}
-
-/// Strict, user-editable settings accepted by the Host Profile-selection boundary.
-///
-/// This union is intentionally separate from persisted [`ProviderProfileConfig`]. Clients choose
-/// a registered profile id and its public settings; the Host supplies the current registered
-/// version and every private runtime policy.
-#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq, Hash)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum ProviderProfilePublicSettings {
-    DeepseekV4Chat { reasoning: ReasoningPolicy },
-}
-
-impl ProviderProfilePublicSettings {
-    pub const fn normalized(self) -> Self {
-        match self {
-            Self::DeepseekV4Chat { mut reasoning } => {
-                if matches!(reasoning.mode, ReasoningMode::Disabled) {
-                    reasoning.effort = ReasoningEffort::ProviderDefault;
-                }
-                Self::DeepseekV4Chat { reasoning }
-            }
-        }
-    }
-
-    pub const fn reasoning(self) -> ReasoningPolicy {
-        match self {
-            Self::DeepseekV4Chat { reasoning } => reasoning,
         }
     }
 }
@@ -566,8 +518,7 @@ impl ReasoningPolicy {
     }
 }
 
-/// Exact legacy wire shape. It remains losslessly readable; only an exact, Provider-owned
-/// official endpoint/model reconciliation or an explicit vendor update may replace it with v2.
+/// Exact Generic compatibility wire shape. An explicit vendor selection may replace it with v2.
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq, Hash)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ProviderProfileConfigV1 {
@@ -588,9 +539,8 @@ pub struct ProviderProfileConfigV2 {
 
 /// Persisted, user-selectable configuration for a provider profile.
 ///
-/// Untagged decoding preserves the exact v1 JSON contract while allowing new vendor selections to
-/// use a strong, family-tagged v2 settings union. Ordinary loads do not rewrite v1 values. Storage
-/// startup separately reconciles only explicitly registered official endpoint/model pairs.
+/// Untagged decoding preserves the exact Generic v1 JSON contract while current vendor selections
+/// use a strong, family-tagged v2 settings union. Loads and saves never infer or rewrite profiles.
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq, Hash)]
 #[serde(untagged)]
 pub enum ProviderProfileConfig {
@@ -607,12 +557,24 @@ impl ProviderProfileConfig {
         })
     }
 
-    pub const fn deepseek_v4_default() -> Self {
-        Self::V1(ProviderProfileConfigV1 {
-            schema_version: PROVIDER_PROFILE_CONFIG_SCHEMA_VERSION,
-            profile: ProviderProfileRef::deepseek_v4_chat(),
-            reasoning: ReasoningPolicy::provider_default(),
-        })
+    pub const fn deepseek_flash_default() -> Self {
+        Self::from_family_settings(
+            ProviderProfileRef::deepseek_v4_1_flash_chat(),
+            ProviderVendorId::DeepSeek,
+            ProviderFamilySettings::DeepseekFlashChat {
+                reasoning: ProviderFamilyReasoningPolicy::provider_default(),
+            },
+        )
+    }
+
+    pub const fn deepseek_pro_default() -> Self {
+        Self::from_family_settings(
+            ProviderProfileRef::deepseek_v4_pro_0813_chat(),
+            ProviderVendorId::DeepSeek,
+            ProviderFamilySettings::DeepseekProChat {
+                reasoning: ProviderFamilyReasoningPolicy::provider_default(),
+            },
+        )
     }
 
     pub const fn from_family_settings(
@@ -624,7 +586,7 @@ impl ProviderProfileConfig {
             schema_version: PROVIDER_PROFILE_CONFIG_V2_SCHEMA_VERSION,
             profile,
             vendor_id,
-            settings: settings.normalized(),
+            settings,
         })
     }
 
@@ -742,9 +704,7 @@ impl ProviderProfileConfig {
         let registration =
             crate::provider_registration::resolve_provider_registration(self.profile(), dialect)?;
         registration.validate_profile_config(self)?;
-        if matches!(self, Self::V2(_)) {
-            registration.validate_model_id(model_id)?;
-        }
+        registration.validate_model_id(model_id)?;
         Ok(())
     }
 }
@@ -948,13 +908,16 @@ mod tests {
 
     #[test]
     fn explicit_profile_with_unknown_version_fails_closed() {
-        let config = ProviderProfileConfig::V1(ProviderProfileConfigV1 {
-            schema_version: PROVIDER_PROFILE_CONFIG_SCHEMA_VERSION,
+        let config = ProviderProfileConfig::V2(ProviderProfileConfigV2 {
+            schema_version: PROVIDER_PROFILE_CONFIG_V2_SCHEMA_VERSION,
             profile: ProviderProfileRef {
-                id: ProviderProfileId::DeepSeekV4Chat,
+                id: ProviderProfileId::DeepSeekV41FlashChat,
                 version: 99,
             },
-            reasoning: ReasoningPolicy::provider_default(),
+            vendor_id: ProviderVendorId::DeepSeek,
+            settings: ProviderFamilySettings::DeepseekFlashChat {
+                reasoning: ProviderFamilyReasoningPolicy::provider_default(),
+            },
         });
         assert!(matches!(
             config.validate(),
@@ -964,7 +927,9 @@ mod tests {
 
     #[test]
     fn explicit_configuration_with_unknown_schema_fails_closed() {
-        let mut config = ProviderProfileConfig::deepseek_v4_default();
+        let mut config = ProviderProfileConfig::generic_for_dialect(
+            ProviderProtocolDialect::OpenAiChatCompletions,
+        );
         let ProviderProfileConfig::V1(v1) = &mut config else {
             panic!("legacy constructor must produce v1");
         };
@@ -1018,13 +983,15 @@ mod tests {
     }
 
     #[test]
-    fn v1_round_trip_remains_byte_shape_compatible_and_v2_is_family_tagged() {
-        let v1 = ProviderProfileConfig::deepseek_v4_default();
+    fn generic_v1_round_trip_remains_byte_shape_compatible_and_v2_is_family_tagged() {
+        let v1 = ProviderProfileConfig::generic_for_dialect(
+            ProviderProtocolDialect::OpenAiChatCompletions,
+        );
         assert_eq!(
             serde_json::to_value(&v1).unwrap(),
             json!({
                 "schemaVersion": 1,
-                "profile": {"id": "deepseek_v4_chat", "version": 1},
+                "profile": {"id": "generic_openai_chat", "version": 1},
                 "reasoning": {"mode": "provider_default", "effort": "provider_default"}
             })
         );
@@ -1056,9 +1023,9 @@ mod tests {
     fn v2_family_settings_reject_illegal_deepseek_disabled_effort() {
         let config = ProviderProfileConfig::V2(ProviderProfileConfigV2 {
             schema_version: PROVIDER_PROFILE_CONFIG_V2_SCHEMA_VERSION,
-            profile: ProviderProfileRef::deepseek_v4_chat(),
+            profile: ProviderProfileRef::deepseek_v4_1_flash_chat(),
             vendor_id: ProviderVendorId::DeepSeek,
-            settings: ProviderFamilySettings::DeepseekV4Chat {
+            settings: ProviderFamilySettings::DeepseekFlashChat {
                 reasoning: ProviderFamilyReasoningPolicy {
                     mode: ReasoningMode::Disabled,
                     effort: ProviderReasoningEffort::Low,
@@ -1109,7 +1076,7 @@ mod tests {
 
     #[test]
     fn incompatible_profile_and_dialect_fail_closed() {
-        let config = ProviderProfileConfig::deepseek_v4_default();
+        let config = ProviderProfileConfig::deepseek_flash_default();
         assert!(matches!(
             config.validate_for_dialect(ProviderProtocolDialect::AnthropicMessages),
             Err(ProviderProfileValidationError::IncompatibleDialect { .. })
@@ -1133,23 +1100,23 @@ mod tests {
 
     #[test]
     fn protocol_key_binds_profile_dialect_model_and_revision() {
-        let config = ProviderProfileConfig::deepseek_v4_default();
+        let config = ProviderProfileConfig::deepseek_flash_default();
         let key = ProviderProtocolKey::new(
             ProviderProtocolDialect::OpenAiChatCompletions,
             &config,
-            "deepseek-v4-pro",
+            "deepseek-flash",
             Some("provider-protocol-v1:test".to_string()),
         )
         .unwrap();
         assert_eq!(key.profile, config.profile());
-        assert_eq!(key.model_id, "deepseek-v4-pro");
+        assert_eq!(key.model_id, "deepseek-flash");
         assert!(key.validate_against_config(&config).is_ok());
     }
 
     #[test]
     fn protocol_key_debug_redacts_model_and_configuration_revision() {
-        let config = ProviderProfileConfig::deepseek_v4_default();
-        let model_canary = "debug-model-canary";
+        let config = ProviderProfileConfig::deepseek_flash_default();
+        let model_canary = "deepseek-flash";
         let revision_canary = "provider-protocol-v1:debug-revision-canary";
         let key = ProviderProtocolKey::new(
             ProviderProtocolDialect::OpenAiChatCompletions,

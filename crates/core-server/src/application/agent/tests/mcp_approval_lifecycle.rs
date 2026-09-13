@@ -251,11 +251,10 @@ fn save_deepseek_approval_provider(
     api_url: &str,
     reasoning_mode: mycopilot_core::ReasoningMode,
 ) {
-    let mut profile = mycopilot_core::ProviderProfileConfig::deepseek_v4_default();
-    let mycopilot_core::ProviderProfileConfig::V1(config) = &mut profile else {
-        unreachable!("legacy DeepSeek constructor must produce schema v1")
-    };
-    config.reasoning.mode = reasoning_mode;
+    let profile = deepseek_flash_profile(
+        reasoning_mode,
+        mycopilot_core::ProviderReasoningEffort::ProviderDefault,
+    );
     storage
         .save_model_settings(ModelSettingsRecord {
             api_url: api_url.to_string(),
@@ -264,11 +263,11 @@ fn save_deepseek_approval_provider(
             tavily_api_key: String::new(),
             models: vec![ModelConfigRecord {
                 id: model_id.to_string(),
-                provider_model_id: model_id.to_string(),
+                provider_model_id: "deepseek-flash".to_string(),
                 display_name: "DeepSeek approval continuation fixture".to_string(),
                 api_url_override: None,
                 api_token_override: None,
-                supports_image: false,
+                supports_image: true,
                 context_window_tokens: Some(128_000),
                 provider_profile_config: profile,
                 input_price: "0".to_string(),
@@ -431,7 +430,7 @@ async fn run_deepseek_restart(
     .await
     .expect("waiting-for-approval usage must become durable");
     assert_eq!(first_segment_usage.input_tokens, Some(100));
-    assert_eq!(first_segment_usage.output_tokens, Some(10));
+    assert_eq!(first_segment_usage.output_tokens, Some(30));
     assert_eq!(first_segment_usage.output_thinking_tokens, Some(20));
     assert_eq!(first_segment_usage.total_tokens, Some(130));
     assert_eq!(first_segment_usage.billable_request_count, 1);
@@ -583,7 +582,7 @@ async fn run_deepseek_restart(
     assert_eq!(cumulative_usage.input_tokens, Some(300));
     assert_eq!(cumulative_usage.total_tokens, Some(380));
     assert_eq!(cumulative_usage.billable_request_count, 2);
-    assert_eq!(cumulative_usage.output_tokens, None);
+    assert_eq!(cumulative_usage.output_tokens, Some(80));
     assert_eq!(cumulative_usage.output_thinking_tokens, None);
     assert_eq!(cumulative_usage.input_price.as_deref(), Some("0"));
     assert_eq!(cumulative_usage.output_price.as_deref(), Some("0"));
@@ -860,12 +859,14 @@ async fn pending_generic_run_stays_frozen_when_next_run_switches_to_deepseek() {
     .await;
     assert_eq!(service.list_pending_actions().len(), 1);
 
-    let current = storage.load_model_settings().unwrap().unwrap();
+    let mut current = storage.load_model_settings().unwrap().unwrap();
+    current.models[0].provider_model_id = "deepseek-flash".to_string();
+    current.models[0].supports_image = true;
     let profile_update = serde_json::from_value(json!({
-        "kind": "select_registered_profile",
-        "profileId": "deepseek_v4_chat",
+        "kind": "select_vendor",
+        "vendorId": "deepseek",
         "settings": {
-            "kind": "deepseek_v4_chat",
+            "kind": "deepseek_flash_chat",
             "reasoning": {"mode": "enabled", "effort": "provider_default"}
         }
     }))

@@ -24,12 +24,12 @@ describe('CoreServer model settings client', () => {
   it('loads the safe Provider Profile UI projection from its dedicated method', async () => {
     const descriptors: ProviderProfileUiDescriptor[] = [
       {
-        profileId: 'deepseek_v4_chat',
+        profileId: 'deepseek_v4_1_flash_chat',
         profileVersion: 1,
-        displayName: '深度求索 / DeepSeek（V4 Chat）',
+        displayName: 'DeepSeek Flash',
         compatibleDialects: ['openai_chat_completions'],
-        settingsKind: 'deepseek_v4_chat',
-        selectable: true
+        settingsKind: 'none',
+        selectable: false
       }
     ]
     rpcRequest.mockResolvedValue(descriptors)
@@ -80,11 +80,11 @@ describe('CoreServer model settings client', () => {
   it('rejects private or unknown Provider descriptor fields returned by Core', async () => {
     rpcRequest.mockResolvedValueOnce([
       {
-        profileId: 'deepseek_v4_chat',
+        profileId: 'deepseek_v4_1_flash_chat',
         profileVersion: 1,
         displayName: 'DeepSeek',
         compatibleDialects: ['openai_chat_completions'],
-        settingsKind: 'deepseek_v4_chat',
+        settingsKind: 'none',
         selectable: true,
         runtimeCapabilities: ['private']
       }
@@ -140,17 +140,17 @@ describe('CoreServer model settings client', () => {
       models: [
         {
           id: null,
-          providerModelId: 'deepseek-chat',
-          displayName: 'DeepSeek Chat',
+          providerModelId: 'deepseek-flash',
+          displayName: 'DeepSeek Flash',
           apiUrlOverride: null,
           apiTokenOverrideMutation: { type: 'keep' },
           supportsImage: false,
           contextWindowTokens: null,
           providerProfileUpdate: {
-            kind: 'select_registered_profile',
-            profileId: 'deepseek_v4_chat',
+            kind: 'select_vendor',
+            vendorId: 'deepseek',
             settings: {
-              kind: 'deepseek_v4_chat',
+              kind: 'deepseek_flash_chat',
               reasoning: { mode: 'disabled', effort: 'provider_default' }
             }
           },
@@ -169,17 +169,21 @@ describe('CoreServer model settings client', () => {
       tavilyApiKeyStatus: 'missing',
       models: [
         {
-          id: 'model-config-deepseek-chat',
-          providerModelId: 'deepseek-chat',
-          displayName: 'DeepSeek Chat',
+          id: 'model-config-deepseek-flash',
+          providerModelId: 'deepseek-flash',
+          displayName: 'DeepSeek Flash',
           apiUrlOverride: null,
           apiTokenOverrideStatus: 'missing',
           supportsImage: false,
           contextWindowTokens: null,
           providerProfileConfig: {
-            schemaVersion: 1,
-            profile: { id: 'deepseek_v4_chat', version: 1 },
-            reasoning: { mode: 'disabled', effort: 'provider_default' }
+            schemaVersion: 2,
+            vendorId: 'deepseek',
+            profile: { id: 'deepseek_v4_1_flash_chat', version: 1 },
+            settings: {
+              kind: 'deepseek_flash_chat',
+              reasoning: { mode: 'disabled', effort: 'provider_default' }
+            }
           },
           inputPrice: '0',
           cachedInputPrice: '',

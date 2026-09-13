@@ -319,8 +319,8 @@ describe('settings sidebar search navigation', () => {
 
   it('preserves an MCP draft on cancel and resumes the exact setting target after discard', async () => {
     await setup('mcp')
-    await search().fill(t('profile.handle'))
-    await click(result(t('profile.handle'), t('settings.page.profile')))
+    await search().fill(t('auth.email'))
+    await click(result(t('auth.email'), t('settings.page.profile')))
     expect(document.querySelector('[role="dialog"]')).not.toBeNull()
     expect(rightPage()).toBe('MCP 草稿')
     await click(document.querySelector<HTMLElement>('.app-confirm-dialog__button--cancel')!)
@@ -328,12 +328,12 @@ describe('settings sidebar search navigation', () => {
     expect(document.querySelector<HTMLTextAreaElement>('[aria-label="草稿内容"]')!.value).toBe(
       '尚未保存'
     )
-    await click(result(t('profile.handle'), t('settings.page.profile')))
+    await click(result(t('auth.email'), t('settings.page.profile')))
     await click(document.querySelector<HTMLElement>('.app-confirm-dialog__button--danger')!)
     expect(rightPage()).toBe(t('settings.page.profile'))
-    expect(
-      result(t('profile.handle'), t('settings.page.profile')).getAttribute('aria-current')
-    ).toBe('location')
+    expect(result(t('auth.email'), t('settings.page.profile')).getAttribute('aria-current')).toBe(
+      'location'
+    )
     expect(document.querySelector('[role="dialog"]')).toBeNull()
   })
 })

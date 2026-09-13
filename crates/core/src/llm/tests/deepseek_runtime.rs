@@ -84,7 +84,7 @@ async fn fake_deepseek_provider_round_trips_staged_history_reasoning_and_raw_too
     });
 
     let provider_profile = deepseek_provider_profile(ReasoningMode::Enabled, ReasoningEffort::Max);
-    let provider_protocol = deepseek_provider_protocol(&provider_profile, "deepseek-v4-pro");
+    let provider_protocol = deepseek_provider_protocol(&provider_profile, "deepseek-flash");
     let registry = crate::tools::ToolRegistry::defaults_with_search(None);
     assert!(registry.definition_for("write_file").is_none());
     let tools = ["read_file", "apply_patch"]
@@ -346,7 +346,7 @@ async fn deepseek_stream_retry_discards_failed_attempt_reasoning() {
     });
 
     let provider_profile = deepseek_provider_profile(ReasoningMode::Enabled, ReasoningEffort::High);
-    let provider_protocol = deepseek_provider_protocol(&provider_profile, "deepseek-v4-flash");
+    let provider_protocol = deepseek_provider_protocol(&provider_profile, "deepseek-flash");
     let request = LlmChatRequest {
         api_url: format!("http://{address}/chat/completions"),
         api_token: "deepseek-stream-retry-token".to_string(),
@@ -370,7 +370,7 @@ async fn deepseek_stream_retry_discards_failed_attempt_reasoning() {
     let usage = response.usage.as_ref().expect("retry usage");
     assert_eq!(usage.input_tokens, Some(5));
     assert_eq!(usage.total_tokens, Some(10));
-    assert_eq!(usage.output_tokens, None);
+    assert_eq!(usage.output_tokens, Some(5));
     assert_eq!(usage.output_thinking_tokens, None);
     assert_eq!(usage.billable_request_count, Some(2));
     assert_eq!(

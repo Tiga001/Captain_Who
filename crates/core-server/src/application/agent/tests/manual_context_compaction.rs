@@ -433,12 +433,12 @@ async fn exercise_manual_fork_after_later_turn(explicit_boundary: bool) {
     };
     let (directory, storage) = fixture(id);
     let mut settings = two_model_settings(Some(
-        mycopilot_core::ProviderProfileConfig::deepseek_v4_default(),
+        mycopilot_core::ProviderProfileConfig::deepseek_flash_default(),
     ));
     settings.api_url = format!("http://{address}/v1/chat/completions");
     storage.save_model_settings(settings).unwrap();
     let manual_generator = provider_transition_generator("model-1");
-    let transition_generator = provider_transition_generator("model-2");
+    let transition_generator = provider_transition_generator("deepseek-flash");
     let generator: ContextCompactionSummaryGenerator = Arc::new(move |request, cancellation| {
         let transition = request.operation_id.starts_with("provider-transition-");
         let later_manual = !transition && request.prefix.previous_summary.is_some();

@@ -72,10 +72,10 @@ pub(crate) fn merge_total_usage(total: &mut Option<AgentUsage>, next: Option<Age
     merge_total_usage_with_output_breakdown(total, next, false);
 }
 
-/// Merges request usage for a profile whose visible output and private reasoning output are
-/// disjoint fields. Once either component is unknown for one billable request, the aggregate
-/// component remains unknown; keeping a partial subtotal would present it as complete.
-pub(crate) fn merge_total_usage_with_disjoint_reasoning(
+/// Merges request usage for a profile whose completion count is the complete output and whose
+/// private reasoning count is an optional subset. Each aggregate remains independently fail
+/// closed once that particular field is absent for one billable request.
+pub(crate) fn merge_total_usage_with_reasoning_subset(
     total: &mut Option<AgentUsage>,
     next: Option<AgentUsage>,
 ) {
@@ -88,31 +88,14 @@ impl ProviderUsageSemantics {
         match self {
             Self::StandardAdditive => merge_total_usage(total, next),
             Self::CompletionIncludesReasoning => {
-                merge_total_usage_with_disjoint_reasoning(total, next);
+                merge_total_usage_with_reasoning_subset(total, next);
             }
         }
     }
 
     /// Returns the output token count used for billing without double-counting private reasoning.
     pub fn billable_output_tokens(self, usage: &AgentUsage) -> Option<u64> {
-        let visible_output = usage.output_tokens;
-        if self == Self::StandardAdditive {
-            return visible_output;
-        }
-        match (usage.total_tokens, usage.input_tokens) {
-            (Some(total), Some(input)) => total
-                .checked_sub(input)
-                .or_else(|| {
-                    visible_output
-                        .zip(usage.output_thinking_tokens)
-                        .and_then(|(visible, thinking)| visible.checked_add(thinking))
-                })
-                .or(visible_output),
-            _ => visible_output
-                .zip(usage.output_thinking_tokens)
-                .and_then(|(visible, thinking)| visible.checked_add(thinking))
-                .or(visible_output),
-        }
+        usage.output_tokens
     }
 }
 
@@ -380,13 +363,13 @@ mod tests {
     }
 
     #[test]
-    fn disjoint_reasoning_breakdown_stays_unknown_when_any_request_cannot_split_output() {
+    fn reasoning_subset_fields_stay_independently_unknown_when_any_request_omits_them() {
         let mut total = None;
-        merge_total_usage_with_disjoint_reasoning(
+        merge_total_usage_with_reasoning_subset(
             &mut total,
             Some(AgentUsage {
                 input_tokens: Some(100),
-                output_tokens: Some(20),
+                output_tokens: Some(100),
                 output_thinking_tokens: Some(80),
                 total_tokens: Some(200),
                 cached_input_tokens: None,
@@ -394,7 +377,7 @@ mod tests {
                 billable_request_count: Some(1),
             }),
         );
-        merge_total_usage_with_disjoint_reasoning(
+        merge_total_usage_with_reasoning_subset(
             &mut total,
             Some(AgentUsage {
                 input_tokens: Some(120),
@@ -406,11 +389,11 @@ mod tests {
                 billable_request_count: Some(1),
             }),
         );
-        merge_total_usage_with_disjoint_reasoning(
+        merge_total_usage_with_reasoning_subset(
             &mut total,
             Some(AgentUsage {
                 input_tokens: Some(140),
-                output_tokens: Some(10),
+                output_tokens: Some(40),
                 output_thinking_tokens: Some(30),
                 total_tokens: Some(180),
                 cached_input_tokens: None,
@@ -440,7 +423,7 @@ mod tests {
     fn registered_usage_semantics_preserve_standard_and_reasoning_inclusive_billing() {
         let usage = AgentUsage {
             input_tokens: Some(100),
-            output_tokens: Some(20),
+            output_tokens: Some(100),
             output_thinking_tokens: Some(80),
             total_tokens: Some(200),
             cached_input_tokens: None,
@@ -449,7 +432,7 @@ mod tests {
         };
         assert_eq!(
             ProviderUsageSemantics::StandardAdditive.billable_output_tokens(&usage),
-            Some(20)
+            Some(100)
         );
         assert_eq!(
             ProviderUsageSemantics::CompletionIncludesReasoning.billable_output_tokens(&usage),
@@ -474,7 +457,7 @@ mod tests {
         assert_eq!(total.output_thinking_tokens, None);
         assert_eq!(
             ProviderUsageSemantics::CompletionIncludesReasoning.billable_output_tokens(&total),
-            Some(150)
+            None
         );
     }
 }

@@ -1146,8 +1146,11 @@ fn test_mcp_resume_checkpoint(
     action_id: &str,
 ) -> AgentRunCheckpoint {
     let pending_tool_call_id = test_mcp_call_id(action_id);
+    let provider_model_id = storage.load_model_settings().unwrap().unwrap().models[0]
+        .provider_model_id
+        .clone();
     let (_, provider_profile_config, provider_protocol_key) =
-        test_frozen_provider_protocol(storage, "test-model", None);
+        test_frozen_provider_protocol(storage, &provider_model_id, None);
     serde_json::from_value(json!({
         "version": AGENT_RUN_CHECKPOINT_SCHEMA_VERSION,
         "pauseReason": "approval",
@@ -1958,14 +1961,12 @@ fn freeze_deepseek_tool_checkpoint(
     input: &mut AgentChatInput,
     provider_continuation_refs: Vec<mycopilot_core::ProviderContinuationRef>,
 ) {
-    let mut profile = mycopilot_core::ProviderProfileConfig::deepseek_v4_default();
-    let mycopilot_core::ProviderProfileConfig::V1(config) = &mut profile else {
-        unreachable!("legacy DeepSeek constructor must produce schema v1")
-    };
-    config.reasoning = mycopilot_core::ReasoningPolicy {
-        mode: mycopilot_core::ReasoningMode::Disabled,
-        effort: mycopilot_core::ReasoningEffort::ProviderDefault,
-    };
+    let profile = deepseek_flash_profile(
+        mycopilot_core::ReasoningMode::Disabled,
+        mycopilot_core::ProviderReasoningEffort::ProviderDefault,
+    );
+    input.model = "deepseek-flash".to_string();
+    input.model_capabilities.image_input = true;
     let key = mycopilot_core::ProviderProtocolKey::new(
         mycopilot_core::ProviderProtocolDialect::OpenAiChatCompletions,
         &profile,
@@ -1976,6 +1977,7 @@ fn freeze_deepseek_tool_checkpoint(
     input.provider_profile_config = Some(profile.clone());
     input.provider_protocol_key = Some(key.clone());
     let checkpoint = input.resume_checkpoint.as_mut().unwrap();
+    checkpoint.model_capabilities = input.model_capabilities;
     checkpoint.provider_profile_config = profile;
     checkpoint.provider_protocol_key = key;
     checkpoint.provider_continuation_refs = provider_continuation_refs;
@@ -2073,15 +2075,12 @@ async fn provider_continuation_preflight_accepts_decision_but_blocks_mcp_dispatc
             "",
         );
         let mut provider_settings = storage.load_model_settings().unwrap().unwrap();
-        let mut deepseek_profile = mycopilot_core::ProviderProfileConfig::deepseek_v4_default();
-        let mycopilot_core::ProviderProfileConfig::V1(config) = &mut deepseek_profile else {
-            unreachable!("legacy DeepSeek constructor must produce schema v1")
-        };
-        config.reasoning = mycopilot_core::ReasoningPolicy {
-            mode: mycopilot_core::ReasoningMode::Disabled,
-            effort: mycopilot_core::ReasoningEffort::ProviderDefault,
-        };
-        provider_settings.models[0].provider_profile_config = deepseek_profile;
+        provider_settings.models[0].provider_model_id = "deepseek-flash".to_string();
+        provider_settings.models[0].supports_image = true;
+        provider_settings.models[0].provider_profile_config = deepseek_flash_profile(
+            mycopilot_core::ReasoningMode::Disabled,
+            mycopilot_core::ProviderReasoningEffort::ProviderDefault,
+        );
         storage.save_model_settings(provider_settings).unwrap();
         let vault = Arc::new(
             mycopilot_core::ProviderContinuationVaultFactory::open_or_provision(
@@ -2114,8 +2113,8 @@ async fn provider_continuation_preflight_accepts_decision_but_blocks_mcp_dispatc
         let mut input = serde_json::from_value::<AgentChatInput>(json!({
             "apiUrl": "https://example.test/v1/chat/completions",
             "apiToken": "test-token",
-            "model": "test-model",
-            "modelCapabilities": { "imageInput": false },
+            "model": "deepseek-flash",
+            "modelCapabilities": { "imageInput": true },
             "messages": []
         }))
         .unwrap();
@@ -7822,11 +7821,19 @@ fn frozen_provider_resume_input_with_profile(
 ) -> DecodedPersistedAgentResumeInput {
     let snapshot = storage.load_model_settings_snapshot().unwrap().unwrap();
     let protocol_revision = snapshot.provider_protocol_revisions["test-model"].clone();
+    let model = snapshot
+        .settings
+        .models
+        .iter()
+        .find(|model| model.id == "test-model")
+        .unwrap();
+    let provider_model_id = model.provider_model_id.clone();
+    let supports_image = model.supports_image;
     let mut input = serde_json::from_value::<AgentChatInput>(json!({
         "apiUrl": api_url,
         "apiToken": api_token,
-        "model": "test-model",
-        "modelCapabilities": { "imageInput": false },
+        "model": provider_model_id,
+        "modelCapabilities": { "imageInput": supports_image },
         "contextWindowTokens": 128000,
         "searchConfig": {
             "mode": search_mode,
@@ -7836,6 +7843,7 @@ fn frozen_provider_resume_input_with_profile(
     }))
     .unwrap();
     freeze_provider_protocol(&mut input, protocol_revision, profile);
+    input.model_config_id = Some(model.id.clone());
     input.provider_connection_revision =
         Some(snapshot.provider_connection_revisions["test-model"].clone());
     input.search_connection_revision = Some(snapshot.search_connection_revision);
@@ -7857,6 +7865,7 @@ fn frozen_provider_resume_input_with_profile(
     );
     checkpoint.provider_profile_config = input.provider_profile_config.clone().unwrap();
     checkpoint.provider_protocol_key = input.provider_protocol_key.clone().unwrap();
+    checkpoint.model_capabilities = input.model_capabilities;
     input.resume_checkpoint = Some(checkpoint);
     PersistedAgentResumeInput::decode(
         &PersistedAgentResumeInput::from_agent_input(&input)
@@ -8172,7 +8181,9 @@ fn pending_resume_preserves_frozen_generic_profile_when_current_model_selects_de
 
     let mut settings = storage.load_model_settings().unwrap().unwrap();
     settings.models[0].provider_profile_config =
-        mycopilot_core::ProviderProfileConfig::deepseek_v4_default();
+        mycopilot_core::ProviderProfileConfig::deepseek_flash_default();
+    settings.models[0].provider_model_id = "deepseek-flash".to_string();
+    settings.models[0].supports_image = true;
     storage.save_model_settings(settings).unwrap();
 
     let frozen_profile = frozen.agent_input.provider_profile_config.clone().unwrap();
@@ -8192,9 +8203,11 @@ fn pending_resume_preserves_frozen_deepseek_profile_after_host_selects_generic()
 
     let mut settings = storage.load_model_settings().unwrap().unwrap();
     settings.models[0].provider_profile_config =
-        mycopilot_core::ProviderProfileConfig::deepseek_v4_default();
+        mycopilot_core::ProviderProfileConfig::deepseek_flash_default();
+    settings.models[0].provider_model_id = "deepseek-flash".to_string();
+    settings.models[0].supports_image = true;
     storage.save_model_settings(settings).unwrap();
-    let deepseek = mycopilot_core::ProviderProfileConfig::deepseek_v4_default();
+    let deepseek = mycopilot_core::ProviderProfileConfig::deepseek_flash_default();
     let frozen = frozen_provider_resume_input_with_profile(
         &storage,
         endpoint,

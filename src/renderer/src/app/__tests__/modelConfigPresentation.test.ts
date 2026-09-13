@@ -60,8 +60,11 @@ describe('composer model metadata', () => {
       profile: {
         schemaVersion: 2,
         vendorId: 'deepseek',
-        profile: { id: 'deepseek_v4_chat', version: 1 },
-        settings: { kind: 'deepseek_v4_chat', reasoning: { mode: 'enabled', effort: 'high' } }
+        profile: { id: 'deepseek_v4_1_flash_chat', version: 1 },
+        settings: {
+          kind: 'deepseek_flash_chat',
+          reasoning: { mode: 'enabled', effort: 'high' }
+        }
       },
       label: '深度求索'
     },

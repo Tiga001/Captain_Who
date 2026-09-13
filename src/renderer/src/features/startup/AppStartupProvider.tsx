@@ -54,8 +54,8 @@ export function AppStartupProvider({ children }: { children: ReactNode }) {
     const attempt = state.attempt
     let cancelled = false
     reportStage(attempt, 'core', 'pending')
-    void hostClient.core
-      .ping()
+    void (hostClient.app?.whenReady?.() ?? Promise.resolve())
+      .then(() => hostClient.core.ping())
       .then(() => {
         if (!cancelled) reportStage(attempt, 'core', 'ready')
       })

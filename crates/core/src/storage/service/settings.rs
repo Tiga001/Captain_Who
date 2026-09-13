@@ -633,27 +633,6 @@ impl StorageService {
                 ProviderProfileUpdate::SelectGeneric => {
                     crate::ProviderProfileConfig::generic_for_dialect(dialect)
                 }
-                ProviderProfileUpdate::SelectRegisteredProfile {
-                    profile_id,
-                    settings: public_settings,
-                } => {
-                    let registration =
-                        crate::resolve_ui_selectable_provider_registration(*profile_id, dialect)
-                            .map_err(|error| {
-                                format!(
-                                    "模型 {} 的 Provider Profile 选择无效：{error}",
-                                    requested.display_name
-                                )
-                            })?;
-                    registration
-                        .config_from_public_settings(*public_settings)
-                        .map_err(|error| {
-                            format!(
-                                "模型 {} 的 Provider 设置无效：{error}",
-                                requested.display_name
-                            )
-                        })?
-                }
                 ProviderProfileUpdate::SelectVendor {
                     vendor_id,
                     settings: public_settings,
@@ -669,6 +648,11 @@ impl StorageService {
                             requested.display_name
                         )
                     })?;
+                    validate_provider_image_input(
+                        registration,
+                        requested.supports_image,
+                        &requested.display_name,
+                    )?;
                     registration
                         .config_from_vendor_settings(*public_settings)
                         .map_err(|error| {
@@ -1449,18 +1433,42 @@ fn validate_unchanged_profile(
     let exactly_preserved = existing_config == Some(config);
 
     match config.validate() {
-        Ok(()) => config
-            .validate_for_model(&model.provider_model_id, dialect)
-            .map_err(|error| {
-                format!(
-                    "模型 {} 的 Provider Profile 与当前接口协议不兼容：{error}",
-                    model.display_name
-                )
-            }),
+        Ok(()) => {
+            config
+                .validate_for_model(&model.provider_model_id, dialect)
+                .map_err(|error| {
+                    format!(
+                        "模型 {} 的 Provider Profile 与当前接口协议不兼容：{error}",
+                        model.display_name
+                    )
+                })?;
+            let registration = crate::resolve_provider_registration(config.profile(), dialect)
+                .map_err(|error| {
+                    format!(
+                        "模型 {} 的 Provider Profile 与当前接口协议不兼容：{error}",
+                        model.display_name
+                    )
+                })?;
+            validate_provider_image_input(registration, model.supports_image, &model.display_name)
+        }
         Err(_) if exactly_preserved => Ok(()),
         Err(error) => Err(format!(
             "模型 {} 的 Provider Profile 无效：{error}",
             model.display_name
         )),
+    }
+}
+
+fn validate_provider_image_input(
+    registration: &crate::ProviderRegistration,
+    supports_image: bool,
+    display_name: &str,
+) -> Result<(), String> {
+    match (registration.image_input_policy(), supports_image) {
+        (crate::ProviderImageInputPolicy::Supported, false)
+        | (crate::ProviderImageInputPolicy::Unsupported, true) => Err(format!(
+            "模型 {display_name} 的图片能力与 Provider 模型族不一致。"
+        )),
+        _ => Ok(()),
     }
 }

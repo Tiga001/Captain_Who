@@ -1,11 +1,10 @@
-//! DeepSeek Profile registrations and model-family policy.
+//! DeepSeek Profile registrations and current official model-family policy.
 //!
-//! Keep every DeepSeek model id, setting default and runtime capability decision here.
+//! Model ids are exact and current-only. Retired aliases deliberately do not resolve.
 
 use super::{
-    matches_official_https_endpoint, no_official_profile_normalization, ProviderAdapterKind,
-    ProviderCheckpointPrivateArgumentsSemantics, ProviderContextProjectionSemantics,
-    ProviderFamilySettings, ProviderFamilySettingsDescriptor, ProviderImageInputPolicy,
+    ProviderAdapterKind, ProviderCheckpointPrivateArgumentsSemantics,
+    ProviderContextProjectionSemantics, ProviderFamilySettingsDescriptor, ProviderImageInputPolicy,
     ProviderModelFamilyId, ProviderModelIdPolicy, ProviderPartialTraceSemantics,
     ProviderPrivateReplaySemantics, ProviderProfileId, ProviderProfileRef,
     ProviderProfileSettingsKind, ProviderProtocolDialect, ProviderRegistration,
@@ -14,54 +13,13 @@ use super::{
     ProviderVendorId, ProviderVendorSettingsKind,
 };
 use crate::provider_profile::{
-    ProviderFamilyReasoningPolicy, ProviderProfileConfig, ProviderReasoningEffort, ReasoningEffort,
-    ReasoningMode, DEEPSEEK_V4_CHAT_PROFILE_VERSION, DEEPSEEK_V4_VISION_PROFILE_VERSION,
+    ProviderFamilyReasoningPolicy, ProviderFamilySettings, ProviderReasoningEffort, ReasoningMode,
+    DEEPSEEK_V4_1_FLASH_CHAT_PROFILE_VERSION, DEEPSEEK_V4_PRO_0813_CHAT_PROFILE_VERSION,
 };
 
-const V4_CHAT_MODEL_IDS: &[&str] = &["deepseek-v4-flash", "deepseek-v4-pro"];
-const V4_VISION_MODEL_IDS: &[&str] = &["deepseek-v4-flash-vision-exp"];
-const OFFICIAL_HOSTS: &[&str] = &["api.deepseek.com"];
-const OFFICIAL_CHAT_PATHS: &[&str] = &["/chat/completions", "/v1/chat/completions"];
+const FLASH_MODEL_IDS: &[&str] = &["deepseek-flash"];
+const PRO_MODEL_IDS: &[&str] = &["deepseek-v4-pro"];
 
-fn normalize_official_v4_flash(
-    api_url: &str,
-    model_id: &str,
-    current: &ProviderProfileConfig,
-) -> Option<ProviderProfileConfig> {
-    if model_id != "deepseek-v4-flash"
-        || !matches_official_https_endpoint(api_url, OFFICIAL_HOSTS, OFFICIAL_CHAT_PATHS)
-    {
-        return None;
-    }
-    let reasoning = match current {
-        ProviderProfileConfig::V1(config)
-            if config.profile.id == ProviderProfileId::DeepSeekV4Chat =>
-        {
-            ProviderFamilyReasoningPolicy {
-                mode: config.reasoning.mode,
-                effort: match config.reasoning.effort {
-                    ReasoningEffort::ProviderDefault => ProviderReasoningEffort::ProviderDefault,
-                    ReasoningEffort::High => ProviderReasoningEffort::High,
-                    ReasoningEffort::Max => ProviderReasoningEffort::Max,
-                },
-            }
-        }
-        ProviderProfileConfig::V2(config) if config.vendor_id == ProviderVendorId::DeepSeek => {
-            match config.settings {
-                ProviderFamilySettings::DeepseekV4Chat { reasoning } => reasoning,
-                _ => ProviderFamilyReasoningPolicy::provider_default(),
-            }
-        }
-        _ => ProviderFamilyReasoningPolicy::provider_default(),
-    };
-    Some(ProviderProfileConfig::from_family_settings(
-        ProviderProfileRef::deepseek_v4_chat(),
-        ProviderVendorId::DeepSeek,
-        ProviderFamilySettings::DeepseekV4Chat { reasoning },
-    ))
-}
-
-// This is DeepSeek's own versioned runtime contract, not a shared cross-vendor Profile helper.
 const fn runtime_capabilities() -> ProviderRuntimeCapabilities {
     ProviderRuntimeCapabilities {
         tool_exchange: ProviderToolExchangeSemantics::ExactProviderGrouped,
@@ -73,26 +31,6 @@ const fn runtime_capabilities() -> ProviderRuntimeCapabilities {
         terminal_batch: ProviderTerminalBatchSemantics::CloseWholeProviderTurn,
         checkpoint_private_arguments:
             ProviderCheckpointPrivateArgumentsSemantics::RehydrateFromAuthenticatedTurn,
-    }
-}
-
-fn chat_settings_descriptor() -> ProviderFamilySettingsDescriptor {
-    ProviderFamilySettingsDescriptor::DeepseekV4Chat {
-        reasoning_modes: reasoning_modes(),
-        reasoning_efforts: reasoning_efforts(),
-        default_settings: ProviderFamilySettings::DeepseekV4Chat {
-            reasoning: ProviderFamilyReasoningPolicy::provider_default(),
-        },
-    }
-}
-
-fn vision_settings_descriptor() -> ProviderFamilySettingsDescriptor {
-    ProviderFamilySettingsDescriptor::DeepseekV4Vision {
-        reasoning_modes: reasoning_modes(),
-        reasoning_efforts: reasoning_efforts(),
-        default_settings: ProviderFamilySettings::DeepseekV4Vision {
-            reasoning: ProviderFamilyReasoningPolicy::provider_default(),
-        },
     }
 }
 
@@ -113,12 +51,32 @@ fn reasoning_efforts() -> Vec<ProviderReasoningEffort> {
     ]
 }
 
-fn accepts_chat_settings(settings: ProviderFamilySettings) -> bool {
-    matches!(settings, ProviderFamilySettings::DeepseekV4Chat { .. })
+fn flash_settings_descriptor() -> ProviderFamilySettingsDescriptor {
+    ProviderFamilySettingsDescriptor::DeepseekFlashChat {
+        reasoning_modes: reasoning_modes(),
+        reasoning_efforts: reasoning_efforts(),
+        default_settings: ProviderFamilySettings::DeepseekFlashChat {
+            reasoning: ProviderFamilyReasoningPolicy::provider_default(),
+        },
+    }
 }
 
-fn accepts_vision_settings(settings: ProviderFamilySettings) -> bool {
-    matches!(settings, ProviderFamilySettings::DeepseekV4Vision { .. })
+fn pro_settings_descriptor() -> ProviderFamilySettingsDescriptor {
+    ProviderFamilySettingsDescriptor::DeepseekProChat {
+        reasoning_modes: reasoning_modes(),
+        reasoning_efforts: reasoning_efforts(),
+        default_settings: ProviderFamilySettings::DeepseekProChat {
+            reasoning: ProviderFamilyReasoningPolicy::provider_default(),
+        },
+    }
+}
+
+fn accepts_flash_settings(settings: ProviderFamilySettings) -> bool {
+    matches!(settings, ProviderFamilySettings::DeepseekFlashChat { .. })
+}
+
+fn accepts_pro_settings(settings: ProviderFamilySettings) -> bool {
+    matches!(settings, ProviderFamilySettings::DeepseekProChat { .. })
 }
 
 pub(super) const fn vendor_descriptor() -> ProviderVendorDescriptor {
@@ -129,46 +87,46 @@ pub(super) const fn vendor_descriptor() -> ProviderVendorDescriptor {
     }
 }
 
-pub(crate) static DEEPSEEK_V4_CHAT_REGISTRATION: ProviderRegistration = ProviderRegistration::new(
-    ProviderProfileRef {
-        id: ProviderProfileId::DeepSeekV4Chat,
-        version: DEEPSEEK_V4_CHAT_PROFILE_VERSION,
-    },
-    ProviderVendorId::DeepSeek,
-    ProviderModelFamilyId::DeepSeekV4Chat,
-    ProviderProtocolDialect::OpenAiChatCompletions,
-    ProviderModelIdPolicy::Exact(V4_CHAT_MODEL_IDS),
-    runtime_capabilities(),
-    ProviderAdapterKind::DeepSeekV4Chat,
-    "深度求索 / DeepSeek（V4 Chat）",
-    ProviderProfileSettingsKind::DeepseekV4Chat,
-    ProviderVendorSettingsKind::Deepseek,
-    ProviderImageInputPolicy::Unsupported,
-    normalize_official_v4_flash,
-    chat_settings_descriptor,
-    accepts_chat_settings,
-    true,
-    true,
-);
+pub(crate) static DEEPSEEK_V4_1_FLASH_CHAT_REGISTRATION: ProviderRegistration =
+    ProviderRegistration::new(
+        ProviderProfileRef {
+            id: ProviderProfileId::DeepSeekV41FlashChat,
+            version: DEEPSEEK_V4_1_FLASH_CHAT_PROFILE_VERSION,
+        },
+        ProviderVendorId::DeepSeek,
+        ProviderModelFamilyId::DeepSeekFlashChat,
+        ProviderProtocolDialect::OpenAiChatCompletions,
+        ProviderModelIdPolicy::Exact(FLASH_MODEL_IDS),
+        runtime_capabilities(),
+        ProviderAdapterKind::DeepSeekV41FlashChat,
+        "DeepSeek Flash",
+        ProviderProfileSettingsKind::None,
+        ProviderVendorSettingsKind::Deepseek,
+        ProviderImageInputPolicy::Supported,
+        flash_settings_descriptor,
+        accepts_flash_settings,
+        false,
+        false,
+    );
 
-pub(crate) static DEEPSEEK_V4_VISION_REGISTRATION: ProviderRegistration = ProviderRegistration::new(
-    ProviderProfileRef {
-        id: ProviderProfileId::DeepSeekV4Vision,
-        version: DEEPSEEK_V4_VISION_PROFILE_VERSION,
-    },
-    ProviderVendorId::DeepSeek,
-    ProviderModelFamilyId::DeepSeekV4Vision,
-    ProviderProtocolDialect::OpenAiChatCompletions,
-    ProviderModelIdPolicy::Exact(V4_VISION_MODEL_IDS),
-    runtime_capabilities(),
-    ProviderAdapterKind::DeepSeekV4Vision,
-    "DeepSeek Vision",
-    ProviderProfileSettingsKind::None,
-    ProviderVendorSettingsKind::Deepseek,
-    ProviderImageInputPolicy::Supported,
-    no_official_profile_normalization,
-    vision_settings_descriptor,
-    accepts_vision_settings,
-    false,
-    false,
-);
+pub(crate) static DEEPSEEK_V4_PRO_0813_CHAT_REGISTRATION: ProviderRegistration =
+    ProviderRegistration::new(
+        ProviderProfileRef {
+            id: ProviderProfileId::DeepSeekV4Pro0813Chat,
+            version: DEEPSEEK_V4_PRO_0813_CHAT_PROFILE_VERSION,
+        },
+        ProviderVendorId::DeepSeek,
+        ProviderModelFamilyId::DeepSeekProChat,
+        ProviderProtocolDialect::OpenAiChatCompletions,
+        ProviderModelIdPolicy::Exact(PRO_MODEL_IDS),
+        runtime_capabilities(),
+        ProviderAdapterKind::DeepSeekV4Pro0813Chat,
+        "DeepSeek Pro",
+        ProviderProfileSettingsKind::None,
+        ProviderVendorSettingsKind::Deepseek,
+        ProviderImageInputPolicy::Unsupported,
+        pro_settings_descriptor,
+        accepts_pro_settings,
+        false,
+        false,
+    );

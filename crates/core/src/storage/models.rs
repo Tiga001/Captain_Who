@@ -2,9 +2,8 @@ use crate::protocol::{
     AgentGuidanceStatus, AgentInputAttachmentEncoding, AgentInputAttachmentKind, AgentPermissions,
 };
 use crate::provider_profile::{
-    ProviderProfileConfig, ProviderProfileId, ProviderProfilePublicSettings,
-    ProviderProfileValidationError, ProviderProtocolDialect, ProviderVendorId,
-    ProviderVendorPublicSettings,
+    ProviderProfileConfig, ProviderProfileValidationError, ProviderProtocolDialect,
+    ProviderVendorId, ProviderVendorPublicSettings,
 };
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
@@ -225,10 +224,6 @@ impl std::fmt::Debug for ModelSettingsRecord {
 pub enum ProviderProfileUpdate {
     Unchanged,
     SelectGeneric,
-    SelectRegisteredProfile {
-        profile_id: ProviderProfileId,
-        settings: ProviderProfilePublicSettings,
-    },
     /// Family-aware selection. Host resolves the exact Profile/version from vendor, model and
     /// dialect; clients cannot submit either internal identity.
     SelectVendor {

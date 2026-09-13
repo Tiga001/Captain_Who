@@ -161,11 +161,23 @@ pub(super) fn save_provider_profile_fixture(
     let mut settings = test_model_settings();
     settings.api_url = api_url.to_string();
     settings.api_token = "provider-profile-token".to_string();
-    settings.models[0].provider_profile_config = profile.unwrap_or_else(|| {
+    let profile = profile.unwrap_or_else(|| {
         mycopilot_core::ProviderProfileConfig::generic_for_dialect(
             mycopilot_core::ProviderProtocolDialect::OpenAiChatCompletions,
         )
     });
+    match profile.profile().id {
+        mycopilot_core::ProviderProfileId::DeepSeekV41FlashChat => {
+            settings.models[0].provider_model_id = "deepseek-flash".to_string();
+            settings.models[0].supports_image = true;
+        }
+        mycopilot_core::ProviderProfileId::DeepSeekV4Pro0813Chat => {
+            settings.models[0].provider_model_id = "deepseek-v4-pro".to_string();
+            settings.models[0].supports_image = false;
+        }
+        _ => {}
+    }
+    settings.models[0].provider_profile_config = profile;
     storage.save_model_settings(settings).unwrap();
 }
 
@@ -182,7 +194,7 @@ fn fork_transition_summary_generator() -> ContextCompactionSummaryGenerator {
                 operation_id: Some(request.operation_id.clone()),
                 request_index: request.request_index,
                 purpose: mycopilot_core::ModelRequestPurpose::ContextCompaction,
-                model: "model-2".to_string(),
+                model: "deepseek-flash".to_string(),
                 api_style: mycopilot_core::AgentApiStyle::OpenAiCompatible,
                 status: mycopilot_core::ModelRequestObservationStatus::Completed,
                 estimate: None,
@@ -328,17 +340,17 @@ fn renderer_profile_selection_round_trips_into_the_frozen_registration() {
                 "tavilyApiKeyMutation": {"type": "clear"},
                 "models": [{
                     "id": null,
-                    "providerModelId": "model-1",
-                    "displayName": "DeepSeek V4 Chat",
+                    "providerModelId": "deepseek-flash",
+                    "displayName": "DeepSeek Flash",
                     "apiUrlOverride": null,
                     "apiTokenOverrideMutation": {"type": "clear"},
-                    "supportsImage": false,
+                    "supportsImage": true,
                     "contextWindowTokens": 128000,
                     "providerProfileUpdate": {
-                        "kind": "select_registered_profile",
-                        "profileId": "deepseek_v4_chat",
+                        "kind": "select_vendor",
+                        "vendorId": "deepseek",
                         "settings": {
-                            "kind": "deepseek_v4_chat",
+                            "kind": "deepseek_flash_chat",
                             "reasoning": {"mode": "enabled", "effort": "high"}
                         }
                     },
@@ -354,7 +366,7 @@ fn renderer_profile_selection_round_trips_into_the_frozen_registration() {
     let stored = &authoritative.models[0].provider_profile_config;
     assert_eq!(
         stored.profile(),
-        mycopilot_core::ProviderProfileRef::deepseek_v4_chat()
+        mycopilot_core::ProviderProfileRef::deepseek_v4_1_flash_chat()
     );
     assert_eq!(
         stored.reasoning_mode(),
@@ -510,8 +522,10 @@ fn prepared_runs_bind_to_only_the_selected_models_effective_protocol_revision() 
     );
 
     let mut wire_change = storage.load_model_settings().unwrap().unwrap();
+    wire_change.models[0].provider_model_id = "deepseek-flash".to_string();
+    wire_change.models[0].supports_image = true;
     wire_change.models[0].provider_profile_config =
-        mycopilot_core::ProviderProfileConfig::deepseek_v4_default();
+        mycopilot_core::ProviderProfileConfig::deepseek_flash_default();
     storage.save_model_settings(wire_change).unwrap();
     let after_wire_change = prepare("wire-change");
     assert_ne!(
@@ -532,7 +546,7 @@ fn explicit_profile_incompatible_with_the_endpoint_dialect_fails_closed() {
     let mut settings = test_model_settings();
     settings.api_url = "https://api.anthropic.com/v1/messages".to_string();
     settings.models[0].provider_profile_config =
-        mycopilot_core::ProviderProfileConfig::deepseek_v4_default();
+        mycopilot_core::ProviderProfileConfig::deepseek_flash_default();
     storage.save_model_settings(settings).unwrap();
 
     let error = match prepare_conversation_turn(
@@ -1144,10 +1158,11 @@ async fn reopened_assistant_and_provider_transition_forks_complete_human_turns()
         settings.api_token = "fork-transition-token".to_string();
         let mut target_model = settings.models[0].clone();
         target_model.id = "model-2".to_string();
-        target_model.provider_model_id = "model-2".to_string();
+        target_model.provider_model_id = "deepseek-flash".to_string();
         target_model.display_name = "Model 2".to_string();
+        target_model.supports_image = true;
         target_model.provider_profile_config =
-            mycopilot_core::ProviderProfileConfig::deepseek_v4_default();
+            mycopilot_core::ProviderProfileConfig::deepseek_flash_default();
         settings.models.push(target_model);
         storage.save_model_settings(settings).unwrap();
         storage
@@ -1328,7 +1343,7 @@ async fn reopened_assistant_and_provider_transition_forks_complete_human_turns()
             preflight.decision,
             AgentProviderTransitionDecision::RequiresCompaction
         );
-        let (transition_notifications, mut transition_receiver) =
+        let (transition_notifications, _transition_receiver) =
             tokio::sync::mpsc::unbounded_channel();
         let transition = transition_service
             .start_provider_transition(
@@ -1340,19 +1355,41 @@ async fn reopened_assistant_and_provider_transition_forks_complete_human_turns()
                 transition_notifications,
             )
             .unwrap();
-        tokio::time::timeout(Duration::from_secs(5), async {
+        let finished = tokio::time::timeout(Duration::from_secs(5), async {
             loop {
-                let event = transition_receiver
-                    .recv()
-                    .await
-                    .expect("provider transition event channel closed");
-                if event["params"]["status"] == "completed" {
-                    break;
+                let status = transition_service
+                    .get_provider_transition_status(AgentProviderTransitionGetStatusInput {
+                        conversation_id: source_conversation_id.to_string(),
+                        operation_id: Some(transition.operation_id.clone()),
+                    })
+                    .unwrap()
+                    .operations
+                    .pop()
+                    .unwrap();
+                if status.status != AgentProviderTransitionOperationStatus::Running {
+                    break status;
                 }
+                tokio::time::sleep(Duration::from_millis(10)).await;
             }
         })
         .await
         .expect("provider transition must complete deterministically");
+        assert_eq!(
+            finished.status,
+            AgentProviderTransitionOperationStatus::Completed,
+            "provider transition failed: {:?}; receipt: {:?}",
+            finished.error,
+            storage
+                .list_provider_transition_receipts(
+                    source_conversation_id,
+                    Some(&transition.operation_id),
+                    1,
+                )
+                .unwrap()
+                .into_iter()
+                .next()
+                .and_then(|receipt| receipt.error)
+        );
         assert_eq!(
             storage
                 .load_conversation(source_conversation_id)
@@ -1482,15 +1519,9 @@ async fn trusted_child_wake_uses_the_root_loop_without_duplicating_the_parent_ta
     save_provider_profile_fixture(
         &storage,
         &format!("http://{address}/v1/chat/completions"),
-        Some(mycopilot_core::ProviderProfileConfig::V1(
-            mycopilot_core::ProviderProfileConfigV1 {
-                schema_version: mycopilot_core::PROVIDER_PROFILE_CONFIG_SCHEMA_VERSION,
-                profile: mycopilot_core::ProviderProfileRef::deepseek_v4_chat(),
-                reasoning: mycopilot_core::ReasoningPolicy {
-                    mode: mycopilot_core::ReasoningMode::Enabled,
-                    effort: mycopilot_core::ReasoningEffort::High,
-                },
-            },
+        Some(deepseek_flash_profile(
+            mycopilot_core::ReasoningMode::Enabled,
+            mycopilot_core::ProviderReasoningEffort::High,
         )),
     );
     storage
@@ -2701,14 +2732,10 @@ async fn unavailable_provider_vault_keeps_generic_and_deepseek_text_only_runs_av
         ("generic", None),
         (
             "deepseek",
-            Some({
-                let mut profile = mycopilot_core::ProviderProfileConfig::deepseek_v4_default();
-                let mycopilot_core::ProviderProfileConfig::V1(config) = &mut profile else {
-                    unreachable!("legacy DeepSeek constructor must produce schema v1")
-                };
-                config.reasoning.mode = mycopilot_core::ReasoningMode::Disabled;
-                profile
-            }),
+            Some(deepseek_flash_profile(
+                mycopilot_core::ReasoningMode::Disabled,
+                mycopilot_core::ProviderReasoningEffort::ProviderDefault,
+            )),
         ),
     ] {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -2747,7 +2774,14 @@ async fn unavailable_provider_vault_keeps_generic_and_deepseek_text_only_runs_av
             .iter()
             .all(|event| event["params"]["type"] != "error"));
         assert!(service.list_pending_actions().is_empty());
-        assert_eq!(model_server.await.unwrap()["model"], "model-1");
+        assert_eq!(
+            model_server.await.unwrap()["model"],
+            if scenario == "deepseek" {
+                "deepseek-flash"
+            } else {
+                "model-1"
+            }
+        );
     }
 }
 
@@ -2788,11 +2822,10 @@ async fn unavailable_provider_vault_blocks_deepseek_tool_turn_before_tool_or_app
     let fixture = tempdir().unwrap();
     let database_path = fixture.path().join("deepseek-no-provider-vault.sqlite");
     let storage = Arc::new(StorageService::open(&database_path).unwrap());
-    let mut profile = mycopilot_core::ProviderProfileConfig::deepseek_v4_default();
-    let mycopilot_core::ProviderProfileConfig::V1(config) = &mut profile else {
-        unreachable!("legacy DeepSeek constructor must produce schema v1")
-    };
-    config.reasoning.mode = mycopilot_core::ReasoningMode::Disabled;
+    let profile = deepseek_flash_profile(
+        mycopilot_core::ReasoningMode::Disabled,
+        mycopilot_core::ProviderReasoningEffort::ProviderDefault,
+    );
     save_provider_profile_fixture(
         &storage,
         &format!("http://{address}/v1/chat/completions"),
@@ -2826,5 +2859,5 @@ async fn unavailable_provider_vault_blocks_deepseek_tool_turn_before_tool_or_app
         })
         .unwrap();
     assert_eq!(provider_rows, 0);
-    assert_eq!(model_server.await.unwrap()["model"], "model-1");
+    assert_eq!(model_server.await.unwrap()["model"], "deepseek-flash");
 }

@@ -1184,7 +1184,7 @@ mod capability_tests {
         let unsupported = ProviderProtocolKey {
             dialect: ProviderProtocolDialect::OpenAiChatCompletions,
             profile: mycopilot_core::ProviderProfileRef {
-                id: mycopilot_core::ProviderProfileId::DeepSeekV4Chat,
+                id: mycopilot_core::ProviderProfileId::DeepSeekV41FlashChat,
                 version: u32::MAX,
             },
             model_id: "unsupported-preview-provider".to_string(),

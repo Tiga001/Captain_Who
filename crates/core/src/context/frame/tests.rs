@@ -83,11 +83,11 @@ fn checkpoint_round_trip_preserves_messages_images_and_metadata() {
 
 #[test]
 fn encrypted_provider_turn_replaces_split_durable_projection_without_leaking_payload() {
-    let profile = ProviderProfileConfig::deepseek_v4_default();
+    let profile = ProviderProfileConfig::deepseek_flash_default();
     let protocol = ProviderProtocolKey::new(
         ProviderProtocolDialect::OpenAiChatCompletions,
         &profile,
-        "deepseek-v4-flash",
+        "deepseek-flash",
         Some("provider-revision-1".to_string()),
     )
     .unwrap();
@@ -201,11 +201,11 @@ fn encrypted_provider_turn_replaces_split_durable_projection_without_leaking_pay
 
 #[test]
 fn encrypted_ordinary_provider_turn_replaces_visible_history_projection() {
-    let profile = ProviderProfileConfig::deepseek_v4_default();
+    let profile = ProviderProfileConfig::deepseek_flash_default();
     let protocol = ProviderProtocolKey::new(
         ProviderProtocolDialect::OpenAiChatCompletions,
         &profile,
-        "deepseek-v4-flash",
+        "deepseek-flash",
         Some("provider-revision-ordinary".to_string()),
     )
     .unwrap();
@@ -258,11 +258,11 @@ fn encrypted_ordinary_provider_turn_replaces_visible_history_projection() {
 
 #[test]
 fn encrypted_ordinary_provider_turn_binds_to_terminal_message_not_trace_text() {
-    let profile = ProviderProfileConfig::deepseek_v4_default();
+    let profile = ProviderProfileConfig::deepseek_flash_default();
     let protocol = ProviderProtocolKey::new(
         ProviderProtocolDialect::OpenAiChatCompletions,
         &profile,
-        "deepseek-v4-flash",
+        "deepseek-flash",
         Some("provider-revision-terminal-owner".to_string()),
     )
     .unwrap();
@@ -348,11 +348,11 @@ fn encrypted_ordinary_provider_turn_binds_to_terminal_message_not_trace_text() {
 
 #[test]
 fn encrypted_empty_final_provider_turn_is_inserted_before_terminal_audit() {
-    let profile = ProviderProfileConfig::deepseek_v4_default();
+    let profile = ProviderProfileConfig::deepseek_flash_default();
     let protocol = ProviderProtocolKey::new(
         ProviderProtocolDialect::OpenAiChatCompletions,
         &profile,
-        "deepseek-v4-flash",
+        "deepseek-flash",
         Some("provider-revision-empty-terminal".to_string()),
     )
     .unwrap();
@@ -410,11 +410,11 @@ fn encrypted_empty_final_provider_turn_is_inserted_before_terminal_audit() {
 
 #[test]
 fn encrypted_ordinary_provider_turn_restores_exact_steer_narration_sequence() {
-    let profile = ProviderProfileConfig::deepseek_v4_default();
+    let profile = ProviderProfileConfig::deepseek_flash_default();
     let protocol = ProviderProtocolKey::new(
         ProviderProtocolDialect::OpenAiChatCompletions,
         &profile,
-        "deepseek-v4-flash",
+        "deepseek-flash",
         Some("provider-revision-steer-owner".to_string()),
     )
     .unwrap();
@@ -501,11 +501,11 @@ fn encrypted_ordinary_provider_turn_restores_exact_steer_narration_sequence() {
 
 #[test]
 fn encrypted_empty_provider_turn_restores_immediately_before_exact_steer_boundary() {
-    let profile = ProviderProfileConfig::deepseek_v4_default();
+    let profile = ProviderProfileConfig::deepseek_flash_default();
     let protocol = ProviderProtocolKey::new(
         ProviderProtocolDialect::OpenAiChatCompletions,
         &profile,
-        "deepseek-v4-flash",
+        "deepseek-flash",
         Some("provider-revision-empty-steer".to_string()),
     )
     .unwrap();
@@ -575,11 +575,11 @@ fn encrypted_empty_provider_turn_restores_immediately_before_exact_steer_boundar
 
 #[test]
 fn encrypted_empty_provider_turn_rejects_duplicate_steer_boundaries() {
-    let profile = ProviderProfileConfig::deepseek_v4_default();
+    let profile = ProviderProfileConfig::deepseek_flash_default();
     let protocol = ProviderProtocolKey::new(
         ProviderProtocolDialect::OpenAiChatCompletions,
         &profile,
-        "deepseek-v4-flash",
+        "deepseek-flash",
         Some("provider-revision-duplicate-steer".to_string()),
     )
     .unwrap();
@@ -1095,11 +1095,11 @@ fn cache_layout_rejects_a_durable_item_after_the_run_timeline() {
 #[test]
 fn provider_turn_hydration_removes_only_owned_narration_with_identical_text() {
     const TEXT: &str = "The same sentence can belong to different responses.";
-    let profile = ProviderProfileConfig::deepseek_v4_default();
+    let profile = ProviderProfileConfig::deepseek_flash_default();
     let protocol = ProviderProtocolKey::new(
         ProviderProtocolDialect::OpenAiChatCompletions,
         &profile,
-        "deepseek-v4-flash",
+        "deepseek-flash",
         None,
     )
     .unwrap();

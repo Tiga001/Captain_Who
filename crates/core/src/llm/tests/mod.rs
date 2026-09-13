@@ -70,8 +70,8 @@ use crate::protocol::{
     AgentToolIdentity, AgentToolResult, AgentToolSafety,
 };
 use crate::provider_profile::{
-    ProviderProfileConfigV1, ProviderProfileRef, ReasoningEffort, ReasoningMode, ReasoningPolicy,
-    PROVIDER_PROFILE_CONFIG_SCHEMA_VERSION,
+    ProviderFamilyReasoningPolicy, ProviderFamilySettings, ProviderProfileRef,
+    ProviderReasoningEffort, ProviderVendorId, ReasoningEffort, ReasoningMode,
 };
 use crate::usage::extract_usage;
 use crate::world_state::{
@@ -99,11 +99,20 @@ fn deepseek_provider_profile(
     mode: ReasoningMode,
     effort: ReasoningEffort,
 ) -> ProviderProfileConfig {
-    ProviderProfileConfig::V1(ProviderProfileConfigV1 {
-        schema_version: PROVIDER_PROFILE_CONFIG_SCHEMA_VERSION,
-        profile: ProviderProfileRef::deepseek_v4_chat(),
-        reasoning: ReasoningPolicy { mode, effort },
-    })
+    ProviderProfileConfig::from_family_settings(
+        ProviderProfileRef::deepseek_v4_1_flash_chat(),
+        ProviderVendorId::DeepSeek,
+        ProviderFamilySettings::DeepseekFlashChat {
+            reasoning: ProviderFamilyReasoningPolicy {
+                mode,
+                effort: match effort {
+                    ReasoningEffort::ProviderDefault => ProviderReasoningEffort::ProviderDefault,
+                    ReasoningEffort::High => ProviderReasoningEffort::High,
+                    ReasoningEffort::Max => ProviderReasoningEffort::Max,
+                },
+            },
+        },
+    )
 }
 
 fn deepseek_provider_protocol(profile: &ProviderProfileConfig, model: &str) -> ProviderProtocolKey {

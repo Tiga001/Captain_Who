@@ -339,21 +339,19 @@ pub(super) fn parse_non_stream_response(
     validation: LlmResponseValidation,
 ) -> AgentResult<LlmChatResponse> {
     use crate::provider_profile::{
-        MoonshotK26ThinkingMode, ProviderFamilyReasoningPolicy, ProviderFamilySettings,
-        ProviderProfileId, ProviderReasoningEffort, ProviderVendorId,
+        MoonshotK26ThinkingMode, ProviderFamilySettings, ProviderProfileId,
+        ProviderReasoningEffort, ProviderVendorId,
     };
     let provider_profile = match provider_protocol.profile.id {
         ProviderProfileId::GenericOpenAiChat | ProviderProfileId::GenericAnthropicMessages => {
             crate::ProviderProfileConfig::generic_for_dialect(provider_protocol.dialect)
         }
-        ProviderProfileId::DeepSeekV4Chat => crate::ProviderProfileConfig::deepseek_v4_default(),
-        ProviderProfileId::DeepSeekV4Vision => crate::ProviderProfileConfig::from_family_settings(
-            provider_protocol.profile,
-            ProviderVendorId::DeepSeek,
-            ProviderFamilySettings::DeepseekV4Vision {
-                reasoning: ProviderFamilyReasoningPolicy::provider_default(),
-            },
-        ),
+        ProviderProfileId::DeepSeekV41FlashChat => {
+            crate::ProviderProfileConfig::deepseek_flash_default()
+        }
+        ProviderProfileId::DeepSeekV4Pro0813Chat => {
+            crate::ProviderProfileConfig::deepseek_pro_default()
+        }
         ProviderProfileId::MoonshotK3Chat => crate::ProviderProfileConfig::from_family_settings(
             provider_protocol.profile,
             ProviderVendorId::Moonshot,

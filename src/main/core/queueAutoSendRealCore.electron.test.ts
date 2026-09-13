@@ -177,7 +177,7 @@ describe('Queue auto-send Chromium → production submission/lifecycle/IPC → r
       handle: (channel: string, handler: (...args: unknown[]) => unknown) =>
         handlers.set(channel, handler)
     } as unknown as TrustedIpcMain
-    registerAgentIpc(ipc, core)
+    registerAgentIpc(ipc, core, () => undefined)
     const unavailable = async (): Promise<never> => {
       throw new Error('Native platform action is outside this fixture')
     }

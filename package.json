@@ -71,6 +71,7 @@
     "build:linux": "node scripts/assert-package-platform.mjs linux && pnpm prepare:officecli && pnpm prepare:office-renderer && pnpm prepare:word-pdf-renderer && pnpm prepare:artifact-runtime && pnpm build && pnpm build:core && electron-builder --linux"
   },
   "dependencies": {
+    "@cloudbase/js-sdk": "3.9.2",
     "@electron-toolkit/utils": "^4.0.0",
     "@modelcontextprotocol/sdk": "1.29.0",
     "@playwright/mcp": "0.0.79",

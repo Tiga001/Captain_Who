@@ -7,7 +7,9 @@ use super::payload::{
     build_anthropic_headers, build_anthropic_payload, build_openai_headers, build_openai_payload,
 };
 use super::provider_error::ProviderErrorClassification;
-use super::providers::deepseek::{DEEPSEEK_V4_CHAT_ADAPTER, DEEPSEEK_V4_VISION_ADAPTER};
+use super::providers::deepseek::{
+    DEEPSEEK_V4_1_FLASH_CHAT_ADAPTER, DEEPSEEK_V4_PRO_0813_CHAT_ADAPTER,
+};
 use super::providers::moonshot::{
     MOONSHOT_K2_6_CHAT_ADAPTER, MOONSHOT_K2_7_CODE_CHAT_ADAPTER, MOONSHOT_K3_CHAT_ADAPTER,
 };
@@ -144,8 +146,8 @@ impl ProviderAdapterRegistry {
         let adapter: &'static dyn ProviderAdapter = match registration.adapter_kind() {
             ProviderAdapterKind::GenericOpenAi => &GENERIC_OPENAI_ADAPTER,
             ProviderAdapterKind::GenericAnthropic => &GENERIC_ANTHROPIC_ADAPTER,
-            ProviderAdapterKind::DeepSeekV4Chat => &DEEPSEEK_V4_CHAT_ADAPTER,
-            ProviderAdapterKind::DeepSeekV4Vision => &DEEPSEEK_V4_VISION_ADAPTER,
+            ProviderAdapterKind::DeepSeekV41FlashChat => &DEEPSEEK_V4_1_FLASH_CHAT_ADAPTER,
+            ProviderAdapterKind::DeepSeekV4Pro0813Chat => &DEEPSEEK_V4_PRO_0813_CHAT_ADAPTER,
             ProviderAdapterKind::MoonshotK3Chat => &MOONSHOT_K3_CHAT_ADAPTER,
             ProviderAdapterKind::MoonshotK27CodeChat => &MOONSHOT_K2_7_CODE_CHAT_ADAPTER,
             ProviderAdapterKind::MoonshotK26Chat => &MOONSHOT_K2_6_CHAT_ADAPTER,

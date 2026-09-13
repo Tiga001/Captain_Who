@@ -1246,7 +1246,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn deepseek_compaction_keeps_the_frozen_profile_and_disjoint_usage() {
+    async fn deepseek_compaction_keeps_the_frozen_profile_and_reasoning_subset_usage() {
         let (address, request_receiver, server) = mock_json_server(json!({
             "choices": [{
                 "message": {
@@ -1269,14 +1269,17 @@ mod tests {
             AgentApiStyle::OpenAiCompatible,
         );
         input.stream = Some(false);
-        let profile = ProviderProfileConfig::V1(crate::ProviderProfileConfigV1 {
-            schema_version: crate::provider_profile::PROVIDER_PROFILE_CONFIG_SCHEMA_VERSION,
-            profile: crate::provider_profile::ProviderProfileRef::deepseek_v4_chat(),
-            reasoning: crate::provider_profile::ReasoningPolicy {
-                mode: crate::provider_profile::ReasoningMode::Enabled,
-                effort: crate::provider_profile::ReasoningEffort::High,
+        input.model = "deepseek-flash".to_string();
+        let profile = ProviderProfileConfig::from_family_settings(
+            crate::provider_profile::ProviderProfileRef::deepseek_v4_1_flash_chat(),
+            crate::provider_profile::ProviderVendorId::DeepSeek,
+            crate::provider_profile::ProviderFamilySettings::DeepseekFlashChat {
+                reasoning: crate::provider_profile::ProviderFamilyReasoningPolicy {
+                    mode: crate::provider_profile::ReasoningMode::Enabled,
+                    effort: crate::provider_profile::ProviderReasoningEffort::High,
+                },
             },
-        });
+        );
         input.provider_configuration_revision =
             Some(format!("provider-protocol-v1:{}", uuid::Uuid::new_v4()));
         input.provider_protocol_key = Some(
@@ -1307,7 +1310,7 @@ mod tests {
         );
         let usage = output.observation.actual_usage.unwrap().raw;
         assert_eq!(usage.input_tokens, Some(900));
-        assert_eq!(usage.output_tokens, Some(20));
+        assert_eq!(usage.output_tokens, Some(80));
         assert_eq!(usage.output_thinking_tokens, Some(60));
         assert_eq!(usage.total_tokens, Some(980));
     }

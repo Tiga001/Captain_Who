@@ -3,6 +3,7 @@ import type {
   CredentialStatus,
   ProviderFamilySettings,
   ProviderFamilySettingsDescriptor,
+  ProviderFamilyReasoningPolicy,
   ProviderProfileConfig,
   ProviderModelFamilyId,
   ProviderProfileUiDescriptor,
@@ -50,8 +51,8 @@ const CREDENTIAL_STATUSES = ['missing', 'configured', 'unavailable'] as const
 const PROVIDER_PROFILE_IDS = [
   'generic_openai_chat',
   'generic_anthropic_messages',
-  'deepseek_v4_chat',
-  'deepseek_v4_vision',
+  'deepseek_v4_1_flash_chat',
+  'deepseek_v4_pro_0813_chat',
   'moonshot_k3_chat',
   'moonshot_k2_7_code_chat',
   'moonshot_k2_6_chat'
@@ -177,53 +178,25 @@ function parseStorageProviderProfileUpdate(
   const record = expectRecord(value, context)
   const kind = expectEnum(
     record.kind,
-    ['unchanged', 'select_generic', 'select_registered_profile', 'select_vendor'] as const,
+    ['unchanged', 'select_generic', 'select_vendor'] as const,
     `${context}.kind`
   )
   if (kind === 'unchanged' || kind === 'select_generic') {
     expectOnlyKeys(record, ['kind'] as const, context)
     return { kind }
   }
-  if (kind === 'select_vendor') {
-    expectOnlyKeys(record, ['kind', 'vendorId', 'settings'] as const, context)
-    const settings =
-      record.settings &&
-      typeof record.settings === 'object' &&
-      !Array.isArray(record.settings) &&
-      (record.settings as Record<string, unknown>).kind === 'generic'
-        ? parseGenericSettings(record.settings, `${context}.settings`)
-        : parseProviderFamilySettings(record.settings, `${context}.settings`)
-    return {
-      kind,
-      vendorId: parseProviderVendorId(record.vendorId, `${context}.vendorId`),
-      settings
-    }
-  }
-
-  expectOnlyKeys(record, ['kind', 'profileId', 'settings'] as const, context)
-  const settingsContext = `${context}.settings`
-  const settings = expectRecord(record.settings, settingsContext)
-  expectOnlyKeys(settings, ['kind', 'reasoning'] as const, settingsContext)
-  if (settings.kind !== 'deepseek_v4_chat') {
-    throw invalidProtocolValue(`${settingsContext}.kind`, 'must be deepseek_v4_chat')
-  }
-  const reasoningContext = `${settingsContext}.reasoning`
-  const reasoning = expectRecord(settings.reasoning, reasoningContext)
-  expectOnlyKeys(reasoning, ['mode', 'effort'] as const, reasoningContext)
+  expectOnlyKeys(record, ['kind', 'vendorId', 'settings'] as const, context)
+  const settings =
+    record.settings &&
+    typeof record.settings === 'object' &&
+    !Array.isArray(record.settings) &&
+    (record.settings as Record<string, unknown>).kind === 'generic'
+      ? parseGenericSettings(record.settings, `${context}.settings`)
+      : parseProviderFamilySettings(record.settings, `${context}.settings`)
   return {
     kind,
-    profileId: expectNonEmptyString(record.profileId, `${context}.profileId`),
-    settings: {
-      kind: 'deepseek_v4_chat',
-      reasoning: {
-        mode: expectEnum(reasoning.mode, REASONING_MODES, `${reasoningContext}.mode`),
-        effort: expectEnum(
-          reasoning.effort,
-          ['provider_default', 'high', 'max'] as const,
-          `${reasoningContext}.effort`
-        )
-      }
-    }
+    vendorId: parseProviderVendorId(record.vendorId, `${context}.vendorId`),
+    settings
   }
 }
 
@@ -394,8 +367,8 @@ export function parseStorageModelSettingsUpdateRecord(
 const PROVIDER_MODEL_FAMILIES = [
   'generic_openai_chat',
   'generic_anthropic_messages',
-  'deepseek_v4_chat',
-  'deepseek_v4_vision',
+  'deepseek_flash_chat',
+  'deepseek_pro_chat',
   'moonshot_k3_chat',
   'moonshot_k2_7_code_chat',
   'moonshot_k2_6_chat'
@@ -435,23 +408,34 @@ function expectUniqueEnumArray<const Values extends readonly string[]>(
   return result
 }
 
+function parseProviderFamilyReasoningPolicy(
+  value: unknown,
+  context: string
+): ProviderFamilyReasoningPolicy {
+  const reasoning = expectRecord(value, context)
+  expectOnlyKeys(reasoning, ['mode', 'effort'] as const, context)
+  const mode = expectEnum(reasoning.mode, REASONING_MODES, `${context}.mode`)
+  const effort = expectEnum(reasoning.effort, REASONING_EFFORTS, `${context}.effort`)
+  if (mode === 'disabled') {
+    if (effort !== 'provider_default') {
+      throw invalidProtocolValue(context, 'disabled reasoning must use provider_default effort')
+    }
+    return { mode, effort }
+  }
+  return { mode, effort }
+}
+
 function parseProviderFamilySettings(value: unknown, context: string): ProviderFamilySettings {
   const record = expectRecord(value, context)
   const kind = expectEnum(record.kind, PROVIDER_MODEL_FAMILIES, `${context}.kind`)
   if (kind === 'generic_openai_chat' || kind === 'generic_anthropic_messages') {
     throw invalidProtocolValue(`${context}.kind`, 'generic settings must use kind generic')
   }
-  if (kind === 'deepseek_v4_chat' || kind === 'deepseek_v4_vision') {
+  if (kind === 'deepseek_flash_chat' || kind === 'deepseek_pro_chat') {
     expectOnlyKeys(record, ['kind', 'reasoning'] as const, context)
-    const reasoningContext = `${context}.reasoning`
-    const reasoning = expectRecord(record.reasoning, reasoningContext)
-    expectOnlyKeys(reasoning, ['mode', 'effort'] as const, reasoningContext)
     return {
       kind,
-      reasoning: {
-        mode: expectEnum(reasoning.mode, REASONING_MODES, `${reasoningContext}.mode`),
-        effort: expectEnum(reasoning.effort, REASONING_EFFORTS, `${reasoningContext}.effort`)
-      }
+      reasoning: parseProviderFamilyReasoningPolicy(record.reasoning, `${context}.reasoning`)
     }
   }
   if (kind === 'moonshot_k3_chat') {
@@ -514,7 +498,7 @@ function parseProviderFamilySettingsDescriptor(
       defaultSettings: parseGenericSettings(record.defaultSettings, `${context}.defaultSettings`)
     }
   }
-  if (kind === 'deepseek_v4_chat' || kind === 'deepseek_v4_vision') {
+  if (kind === 'deepseek_flash_chat' || kind === 'deepseek_pro_chat') {
     expectOnlyKeys(
       record,
       ['kind', 'reasoningModes', 'reasoningEfforts', 'defaultSettings'] as const,
@@ -541,10 +525,10 @@ function parseProviderFamilySettingsDescriptor(
     ) {
       throw invalidProtocolValue(context, 'default DeepSeek settings are outside legal options')
     }
-    if (kind === 'deepseek_v4_chat' && defaultSettings.kind === 'deepseek_v4_chat') {
+    if (kind === 'deepseek_flash_chat' && defaultSettings.kind === 'deepseek_flash_chat') {
       return { kind, reasoningModes, reasoningEfforts, defaultSettings }
     }
-    if (kind === 'deepseek_v4_vision' && defaultSettings.kind === 'deepseek_v4_vision') {
+    if (kind === 'deepseek_pro_chat' && defaultSettings.kind === 'deepseek_pro_chat') {
       return { kind, reasoningModes, reasoningEfforts, defaultSettings }
     }
     throw invalidProtocolValue(context, 'default DeepSeek settings use the wrong family')
@@ -662,7 +646,7 @@ export function parseProviderProfileUiDescriptors(value: unknown): ProviderProfi
       ),
       settingsKind: expectEnum(
         record.settingsKind,
-        ['none', 'deepseek_v4_chat'] as const,
+        ['none'] as const,
         `${itemContext}.settingsKind`
       ),
       selectable: expectBoolean(record.selectable, `${itemContext}.selectable`)
@@ -721,7 +705,7 @@ export function parseProviderVendorModelPolicyDescriptor(
   const settings = parseProviderFamilySettingsDescriptor(record.settings, `${context}.settings`)
   const isGeneric =
     modelFamily === 'generic_openai_chat' || modelFamily === 'generic_anthropic_messages'
-  const isDeepSeek = modelFamily === 'deepseek_v4_chat' || modelFamily === 'deepseek_v4_vision'
+  const isDeepSeek = modelFamily === 'deepseek_flash_chat' || modelFamily === 'deepseek_pro_chat'
   const valid = isGeneric
     ? vendorId === 'generic' && settingsKind === 'none' && settings.kind === 'generic'
     : isDeepSeek

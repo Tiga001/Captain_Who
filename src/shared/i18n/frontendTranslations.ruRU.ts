@@ -2205,7 +2205,7 @@ export const ruRUTranslations = {
   'configuration.cancel': 'Отмена',
   'configuration.done': 'Готово',
   'configuration.providerModelId': 'ID модели провайдера',
-  'configuration.providerModelIdPlaceholder': 'Пример: deepseek-chat',
+  'configuration.providerModelIdPlaceholder': 'Пример: deepseek-flash',
   'configuration.displayName': 'Отображаемое имя',
   'configuration.displayNamePlaceholder': 'Пример: Kimi K3 High',
   'configuration.invalidDisplayName': 'Имя должно быть не длиннее 512 байт UTF-8',

@@ -465,7 +465,7 @@ mod thinking_usage_tests {
         assert_eq!(
             ProviderUsageSemantics::CompletionIncludesReasoning
                 .billable_output_tokens(&usage(20, 80, 200)),
-            Some(100)
+            Some(20)
         );
         assert_eq!(
             ProviderUsageSemantics::StandardAdditive.billable_output_tokens(&usage(100, 80, 200)),
@@ -474,7 +474,7 @@ mod thinking_usage_tests {
         assert_eq!(
             ProviderUsageSemantics::CompletionIncludesReasoning
                 .billable_output_tokens(&usage(20, 80, 110)),
-            Some(10)
+            Some(20)
         );
         let missing_breakdown = AgentUsage {
             input_tokens: Some(100),
@@ -488,7 +488,7 @@ mod thinking_usage_tests {
         assert_eq!(
             ProviderUsageSemantics::CompletionIncludesReasoning
                 .billable_output_tokens(&missing_breakdown),
-            Some(75)
+            None
         );
     }
 
@@ -514,7 +514,7 @@ mod thinking_usage_tests {
         assert_eq!(total.output_thinking_tokens, None);
         assert_eq!(
             ProviderUsageSemantics::CompletionIncludesReasoning.billable_output_tokens(&total),
-            Some(150)
+            None
         );
     }
 }

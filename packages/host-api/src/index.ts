@@ -699,7 +699,16 @@ export interface AppWindowState {
   isMaximized: boolean
 }
 
+export type {
+  AccountProfile,
+  AuthState,
+  AuthErrorCode,
+  AuthActionResult,
+  AuthHostApi
+} from './auth'
+
 export interface HostApi {
+  auth: import('./auth').AuthHostApi
   core: {
     ping(input?: CorePingRequest): Promise<CorePingResponse>
   }

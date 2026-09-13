@@ -5,6 +5,7 @@ import {
   ipcMain,
   Menu,
   nativeTheme,
+  safeStorage,
   session,
   type IpcMainInvokeEvent,
   type OpenDialogOptions
@@ -48,6 +49,12 @@ import {
   resolveAppearanceColorScheme
 } from './appearance/appearanceThemeStore'
 import { registerStartupReadiness, type StartupReadinessController } from './startupReadiness'
+import { AuthService } from './auth/AuthService'
+import { CloudBaseAuthDriver } from './auth/CloudBaseAuthDriver'
+import { SessionStore } from './auth/SessionStore'
+import { ACCOUNT_SESSION_SCOPE } from './auth/accountConfig'
+import { fetchAccountProfile } from './auth/AccountApiClient'
+import { registerAuthIpc } from './auth/authIpc'
 
 // Electron is the sole authority for the application data location. Freeze it before
 // app.setName() can affect path resolution so the entire process uses one root.
@@ -70,6 +77,7 @@ let disposeHostIpc: HostIpcRegistration | null = null
 let mainWindow: BrowserWindow | null = null
 let startupReadiness: StartupReadinessController | null = null
 let hostInitializationReady = false
+let accountAuth: AuthService | null = null
 let startupInitializationFailed = false
 let browserSurfaceManager: BrowserSurfaceManager | null = null
 let browserNetworkGuard: BrowserNetworkGuard | null = null
@@ -289,6 +297,15 @@ function activateMainWindow(): void {
 }
 
 async function initializeApplication(): Promise<void> {
+  accountAuth = new AuthService(
+    new CloudBaseAuthDriver(),
+    new SessionStore(appDataRoot, safeStorage, ACCOUNT_SESSION_SCOPE),
+    fetchAccountProfile
+  )
+  const disposeAuthIpc = registerAuthIpc(accountAuth, isTrustedRendererEvent)
+  app.once('will-quit', disposeAuthIpc)
+  // Account validation runs alongside existing service initialization, never owns its lifecycle.
+  void accountAuth.restoreSession()
   app.setName('Captain Who')
   electronApp.setAppUserModelId('io.github.tiga001.captainwho')
   nativeTheme.themeSource = appearanceThemeStore.getPreference()
@@ -450,7 +467,11 @@ async function initializeApplication(): Promise<void> {
       linkRouter: browserLinkRouter,
       session: managedBrowserSession
     },
-    appearanceThemeStore
+    appearanceThemeStore,
+    () => {
+      if (!accountAuth) throw new Error('ACCOUNT_LOGIN_REQUIRED')
+      accountAuth.assertCanStartTurn()
+    }
   )
   if (mainWindow?.isVisible()) disposeHostIpc.beginNotificationDelivery()
   hostInitializationReady = true

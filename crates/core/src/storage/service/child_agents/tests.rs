@@ -9,9 +9,9 @@ use crate::{
     ConversationMessageOrigin, ConversationTurnTrace, ConversationTurnTraceTerminalStatus,
     CreateAgentTemplateInput, EnqueueAgentMessageInput, EnsureRootAgentInput,
     FinishAgentWakeWithResultInput, ProviderFamilyReasoningPolicy, ProviderFamilySettings,
-    ProviderProfileConfig, ProviderProfileConfigV1, ProviderProtocolDialect,
-    ProviderReasoningEffort, ProviderVendorId, ReasoningEffort, SendAgentMessageRequest,
-    UpdateAgentTemplateInput, CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
+    ProviderProfileConfig, ProviderProtocolDialect, ProviderReasoningEffort, ProviderVendorId,
+    ReasoningEffort, SendAgentMessageRequest, UpdateAgentTemplateInput,
+    CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
 };
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -109,11 +109,21 @@ fn deepseek_model(
     effort: ReasoningEffort,
 ) -> ModelConfigRecord {
     let mut model = model(id, enabled);
-    model.provider_profile_config = ProviderProfileConfig::V1(ProviderProfileConfigV1 {
-        schema_version: crate::PROVIDER_PROFILE_CONFIG_SCHEMA_VERSION,
-        profile: crate::ProviderProfileRef::deepseek_v4_chat(),
-        reasoning: crate::ReasoningPolicy { mode, effort },
-    });
+    model.provider_model_id = "deepseek-flash".to_string();
+    model.provider_profile_config = ProviderProfileConfig::from_family_settings(
+        crate::ProviderProfileRef::deepseek_v4_1_flash_chat(),
+        ProviderVendorId::DeepSeek,
+        ProviderFamilySettings::DeepseekFlashChat {
+            reasoning: ProviderFamilyReasoningPolicy {
+                mode,
+                effort: match effort {
+                    ReasoningEffort::ProviderDefault => ProviderReasoningEffort::ProviderDefault,
+                    ReasoningEffort::High => ProviderReasoningEffort::High,
+                    ReasoningEffort::Max => ProviderReasoningEffort::Max,
+                },
+            },
+        },
+    );
     model
 }
 
@@ -124,10 +134,11 @@ fn deepseek_v2_model(
     effort: ProviderReasoningEffort,
 ) -> ModelConfigRecord {
     let mut model = model(id, enabled);
+    model.provider_model_id = "deepseek-flash".to_string();
     model.provider_profile_config = ProviderProfileConfig::from_family_settings(
-        crate::ProviderProfileRef::deepseek_v4_chat(),
+        crate::ProviderProfileRef::deepseek_v4_1_flash_chat(),
         ProviderVendorId::DeepSeek,
-        ProviderFamilySettings::DeepseekV4Chat {
+        ProviderFamilySettings::DeepseekFlashChat {
             reasoning: ProviderFamilyReasoningPolicy { mode, effort },
         },
     );

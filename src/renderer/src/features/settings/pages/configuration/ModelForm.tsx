@@ -309,8 +309,8 @@ export function ModelForm({
   ]
   const deepSeekSettingsDescriptor =
     supportedPolicy &&
-    (supportedPolicy.settings.kind === 'deepseek_v4_chat' ||
-      supportedPolicy.settings.kind === 'deepseek_v4_vision')
+    (supportedPolicy.settings.kind === 'deepseek_flash_chat' ||
+      supportedPolicy.settings.kind === 'deepseek_pro_chat')
       ? supportedPolicy.settings
       : null
   const moonshotSettingsDescriptor =

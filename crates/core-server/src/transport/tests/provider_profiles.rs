@@ -86,8 +86,8 @@ fn duplicate_display_name_is_returned_as_safe_stable_validation_data() {
         request(
             STORAGE_SAVE_MODEL_SETTINGS_METHOD,
             Some(generic_model_save_payload(serde_json::json!([
-                generic_model("  deepseek-v4-flash  ", "0"),
-                generic_model("  deepseek-v4-flash  ", "0"),
+                generic_model("  deepseek-flash  ", "0"),
+                generic_model("  deepseek-flash  ", "0"),
             ]))),
         ),
     );
@@ -102,7 +102,7 @@ fn duplicate_display_name_is_returned_as_safe_stable_validation_data() {
         serde_json::json!({
             "kind": "model_settings_validation",
             "code": "duplicate_display_name",
-            "displayName": "deepseek-v4-flash",
+            "displayName": "deepseek-flash",
         })
     );
     let encoded = response.to_string();
@@ -169,11 +169,11 @@ fn provider_profile_descriptor_projection_and_authoritative_save_are_strict() {
         .as_array()
         .unwrap()
         .iter()
-        .find(|descriptor| descriptor["profileId"] == "deepseek_v4_chat")
+        .find(|descriptor| descriptor["profileId"] == "deepseek_v4_1_flash_chat")
         .unwrap();
     assert_eq!(deepseek["profileVersion"], 1);
-    assert_eq!(deepseek["settingsKind"], "deepseek_v4_chat");
-    assert!(deepseek["selectable"].as_bool().unwrap());
+    assert_eq!(deepseek["settingsKind"], "none");
+    assert!(!deepseek["selectable"].as_bool().unwrap());
     assert!(deepseek.get("runtimeCapabilities").is_none());
     assert!(deepseek.get("continuationRequirement").is_none());
 
@@ -191,17 +191,17 @@ fn provider_profile_descriptor_projection_and_authoritative_save_are_strict() {
                 "tavilyApiKeyMutation": {"type": "clear"},
                 "models": [{
                     "id": null,
-                    "providerModelId": "deepseek-chat",
-                    "displayName": "DeepSeek Chat",
+                    "providerModelId": "deepseek-flash",
+                    "displayName": "DeepSeek Flash",
                     "apiUrlOverride": null,
                     "apiTokenOverrideMutation": {"type": "clear"},
-                    "supportsImage": false,
+                    "supportsImage": true,
                     "contextWindowTokens": 128000,
                     "providerProfileUpdate": {
-                        "kind": "select_registered_profile",
-                        "profileId": "deepseek_v4_chat",
+                        "kind": "select_vendor",
+                        "vendorId": "deepseek",
                         "settings": {
-                            "kind": "deepseek_v4_chat",
+                            "kind": "deepseek_flash_chat",
                             "reasoning": {"mode": "enabled", "effort": "high"}
                         }
                     },
@@ -217,9 +217,13 @@ fn provider_profile_descriptor_projection_and_authoritative_save_are_strict() {
     assert_eq!(
         response["result"]["models"][0]["providerProfileConfig"],
         serde_json::json!({
-            "schemaVersion": 1,
-            "profile": {"id": "deepseek_v4_chat", "version": 1},
-            "reasoning": {"mode": "enabled", "effort": "high"}
+            "schemaVersion": 2,
+            "profile": {"id": "deepseek_v4_1_flash_chat", "version": 1},
+            "vendorId": "deepseek",
+            "settings": {
+                "kind": "deepseek_flash_chat",
+                "reasoning": {"mode": "enabled", "effort": "high"}
+            }
         })
     );
     assert!(response["result"]["models"][0]

@@ -12,7 +12,7 @@ export type ProviderProfileSelection = 'generic' | 'deepseek' | 'moonshot' | 'un
 export type SelectableProviderVendor = Exclude<ProviderProfileSelection, 'unsupported'>
 export type DeepSeekFamilySettings = Extract<
   ProviderFamilySettings,
-  { kind: 'deepseek_v4_chat' | 'deepseek_v4_vision' }
+  { kind: 'deepseek_flash_chat' | 'deepseek_pro_chat' }
 >
 export type MoonshotFamilySettings = Extract<
   ProviderFamilySettings,
@@ -77,31 +77,30 @@ function initialV2State(
   if (!matchingRegisteredProfileDescriptor(config, descriptors)) {
     return { ...unchangedBase(null), selection: 'unsupported', settings: null }
   }
-  const base = unchangedBase(config.profile.id as ProviderModelFamilyId)
-  if (
-    config.vendorId === 'generic' &&
-    config.settings.kind === 'generic' &&
-    (config.profile.id === 'generic_openai_chat' ||
-      config.profile.id === 'generic_anthropic_messages')
-  ) {
-    return { ...base, selection: 'generic', settings: { kind: 'generic' } }
+  if (config.vendorId === 'generic' && config.settings.kind === 'generic') {
+    return { ...unchangedBase(null), selection: 'generic', settings: { kind: 'generic' } }
   }
   if (
     config.vendorId === 'deepseek' &&
-    (config.settings.kind === 'deepseek_v4_chat' ||
-      config.settings.kind === 'deepseek_v4_vision') &&
-    config.profile.id === config.settings.kind
+    (config.settings.kind === 'deepseek_flash_chat' || config.settings.kind === 'deepseek_pro_chat')
   ) {
-    return { ...base, selection: 'deepseek', settings: cloneSettings(config.settings) }
+    return {
+      ...unchangedBase(config.settings.kind),
+      selection: 'deepseek',
+      settings: cloneSettings(config.settings)
+    }
   }
   if (
     config.vendorId === 'moonshot' &&
     (config.settings.kind === 'moonshot_k3_chat' ||
       config.settings.kind === 'moonshot_k2_7_code_chat' ||
-      config.settings.kind === 'moonshot_k2_6_chat') &&
-    config.profile.id === config.settings.kind
+      config.settings.kind === 'moonshot_k2_6_chat')
   ) {
-    return { ...base, selection: 'moonshot', settings: cloneSettings(config.settings) }
+    return {
+      ...unchangedBase(config.settings.kind),
+      selection: 'moonshot',
+      settings: cloneSettings(config.settings)
+    }
   }
   return { ...unchangedBase(null), selection: 'unsupported', settings: null }
 }
@@ -134,16 +133,6 @@ export function initialProviderProfileFormState(
       ...unchangedBase(config.profile.id as 'generic_openai_chat' | 'generic_anthropic_messages'),
       selection: 'generic',
       settings: { kind: 'generic' }
-    }
-  }
-  if (config.profile.id === 'deepseek_v4_chat') {
-    return {
-      ...unchangedBase('deepseek_v4_chat'),
-      selection: 'deepseek',
-      settings: {
-        kind: 'deepseek_v4_chat',
-        reasoning: { ...config.reasoning }
-      }
     }
   }
   return { ...unchangedBase(null), selection: 'unsupported', settings: null }
@@ -187,7 +176,7 @@ function normalizeDeepSeekSettings(
   settings: DeepSeekFamilySettings,
   descriptor: Extract<
     ProviderFamilySettingsDescriptor,
-    { kind: 'deepseek_v4_chat' | 'deepseek_v4_vision' }
+    { kind: 'deepseek_flash_chat' | 'deepseek_pro_chat' }
   >
 ): DeepSeekFamilySettings {
   if (settings.kind !== descriptor.kind) return cloneSettings(descriptor.defaultSettings)
@@ -257,7 +246,7 @@ export function applyResolvedProviderPolicy(
   }
   if (
     current.selection === 'deepseek' &&
-    (policy.settings.kind === 'deepseek_v4_chat' || policy.settings.kind === 'deepseek_v4_vision')
+    (policy.settings.kind === 'deepseek_flash_chat' || policy.settings.kind === 'deepseek_pro_chat')
   ) {
     const settings =
       current.settings && current.modelFamily === policy.modelFamily

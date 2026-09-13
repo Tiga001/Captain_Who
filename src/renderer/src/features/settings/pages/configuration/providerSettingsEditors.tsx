@@ -20,7 +20,7 @@ import { ProviderSettingsDialogShell } from './ProviderSettingsDialogShell'
 
 type DeepSeekDescriptor = Extract<
   ProviderFamilySettingsDescriptor,
-  { kind: 'deepseek_v4_chat' | 'deepseek_v4_vision' }
+  { kind: 'deepseek_flash_chat' | 'deepseek_pro_chat' }
 >
 type MoonshotDescriptor = Extract<
   ProviderFamilySettingsDescriptor,
@@ -35,6 +35,17 @@ interface DeepSeekProviderSettingsEditorProps {
   onConfirm: (settings: DeepSeekFamilySettings) => void
 }
 
+function withDeepSeekReasoning(
+  kind: DeepSeekFamilySettings['kind'],
+  mode: ProviderReasoningMode,
+  effort: ProviderReasoningEffort
+): DeepSeekFamilySettings {
+  return {
+    kind,
+    reasoning: mode === 'disabled' ? { mode, effort: 'provider_default' } : { mode, effort }
+  } as DeepSeekFamilySettings
+}
+
 function normalizeDeepSeekDraft(
   settings: DeepSeekFamilySettings,
   descriptor: DeepSeekDescriptor
@@ -46,13 +57,7 @@ function normalizeDeepSeekDraft(
   const selectedEffort = descriptor.reasoningEfforts.includes(settings.reasoning.effort)
     ? settings.reasoning.effort
     : descriptor.defaultSettings.reasoning.effort
-  return {
-    kind: descriptor.kind,
-    reasoning: {
-      mode,
-      effort: mode === 'disabled' ? 'provider_default' : selectedEffort
-    }
-  } as DeepSeekFamilySettings
+  return withDeepSeekReasoning(descriptor.kind, mode, selectedEffort)
 }
 
 export function DeepSeekProviderSettingsEditor({
@@ -106,10 +111,7 @@ export function DeepSeekProviderSettingsEditor({
                   value={settings.reasoning.mode}
                   onChange={(mode) =>
                     setSettings((current) =>
-                      normalizeDeepSeekDraft(
-                        { ...current, reasoning: { ...current.reasoning, mode } },
-                        descriptor
-                      )
+                      withDeepSeekReasoning(current.kind, mode, current.reasoning.effort)
                     )
                   }
                 />
@@ -126,10 +128,9 @@ export function DeepSeekProviderSettingsEditor({
                   value={settings.reasoning.effort}
                   disabled={settings.reasoning.mode === 'disabled'}
                   onChange={(effort) =>
-                    setSettings((current) => ({
-                      ...current,
-                      reasoning: { ...current.reasoning, effort }
-                    }))
+                    setSettings((current) =>
+                      withDeepSeekReasoning(current.kind, current.reasoning.mode, effort)
+                    )
                   }
                 />
               </div>

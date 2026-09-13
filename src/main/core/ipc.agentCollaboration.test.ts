@@ -167,7 +167,7 @@ describe('Main Agent IPC collaboration routing', () => {
       rewriteConversationTurn: vi.fn().mockResolvedValue(output)
     }
     const ipcMain = { handle: vi.fn(), on: vi.fn() }
-    registerAgentIpc(ipcMain as never, coreServer as never)
+    registerAgentIpc(ipcMain as never, coreServer as never, () => undefined)
     const registration = ipcMain.handle.mock.calls.find(
       ([channel]) => channel === HOST_CHANNELS.agent.rewriteConversationTurn
     )

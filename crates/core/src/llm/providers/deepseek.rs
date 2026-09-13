@@ -20,10 +20,11 @@ use crate::protocol::{AgentError, AgentResult, AgentUsage};
 use crate::provider_profile::{
     ProviderFamilyReasoningPolicy, ProviderFamilySettings, ProviderProfileConfig,
     ProviderProfileConfigV2, ProviderProfileId, ProviderProtocolDialect, ProviderProtocolKey,
-    ProviderReasoningEffort, ReasoningEffort, ReasoningMode,
+    ProviderReasoningEffort, ReasoningMode,
 };
 use crate::provider_registration::{
-    ProviderRegistration, DEEPSEEK_V4_CHAT_REGISTRATION, DEEPSEEK_V4_VISION_REGISTRATION,
+    ProviderImageInputPolicy, ProviderRegistration, DEEPSEEK_V4_1_FLASH_CHAT_REGISTRATION,
+    DEEPSEEK_V4_PRO_0813_CHAT_REGISTRATION,
 };
 use crate::usage::{extract_usage, merge_stream_usage};
 use reqwest::header::HeaderMap;
@@ -36,11 +37,11 @@ pub(in crate::llm) struct DeepSeekAdapter {
     registration: &'static ProviderRegistration,
 }
 
-pub(in crate::llm) static DEEPSEEK_V4_CHAT_ADAPTER: DeepSeekAdapter = DeepSeekAdapter {
-    registration: &DEEPSEEK_V4_CHAT_REGISTRATION,
+pub(in crate::llm) static DEEPSEEK_V4_1_FLASH_CHAT_ADAPTER: DeepSeekAdapter = DeepSeekAdapter {
+    registration: &DEEPSEEK_V4_1_FLASH_CHAT_REGISTRATION,
 };
-pub(in crate::llm) static DEEPSEEK_V4_VISION_ADAPTER: DeepSeekAdapter = DeepSeekAdapter {
-    registration: &DEEPSEEK_V4_VISION_REGISTRATION,
+pub(in crate::llm) static DEEPSEEK_V4_PRO_0813_CHAT_ADAPTER: DeepSeekAdapter = DeepSeekAdapter {
+    registration: &DEEPSEEK_V4_PRO_0813_CHAT_REGISTRATION,
 };
 
 impl ProviderAdapter for DeepSeekAdapter {
@@ -77,8 +78,7 @@ impl ProviderAdapter for DeepSeekAdapter {
                 "DeepSeek profile 缺少对应 family reasoning policy。",
             ));
         }
-        if request.provider_profile.vendor_id().is_some()
-            && self.profile().id == ProviderProfileId::DeepSeekV4Chat
+        if self.registration.image_input_policy() == ProviderImageInputPolicy::Unsupported
             && request
                 .messages
                 .iter()
@@ -86,7 +86,7 @@ impl ProviderAdapter for DeepSeekAdapter {
         {
             return Err(AgentError::structured(
                 "provider_image_unsupported",
-                "当前 DeepSeek Chat family 不支持图片输入。",
+                "当前 DeepSeek model family 不支持图片输入。",
                 json!({
                     "type": "providerCapabilityBoundary",
                     "capability": "imageInput",
@@ -243,24 +243,12 @@ pub(super) fn build_payload(request: &LlmChatRequest) -> AgentResult<Value> {
 
 fn reasoning_policy(profile: &ProviderProfileConfig) -> Option<ProviderFamilyReasoningPolicy> {
     match profile {
-        ProviderProfileConfig::V1(config)
-            if config.profile.id == ProviderProfileId::DeepSeekV4Chat =>
-        {
-            Some(ProviderFamilyReasoningPolicy {
-                mode: config.reasoning.mode,
-                effort: match config.reasoning.effort {
-                    ReasoningEffort::ProviderDefault => ProviderReasoningEffort::ProviderDefault,
-                    ReasoningEffort::High => ProviderReasoningEffort::High,
-                    ReasoningEffort::Max => ProviderReasoningEffort::Max,
-                },
-            })
-        }
         ProviderProfileConfig::V2(ProviderProfileConfigV2 {
-            settings: ProviderFamilySettings::DeepseekV4Chat { reasoning },
+            settings: ProviderFamilySettings::DeepseekFlashChat { reasoning },
             ..
         })
         | ProviderProfileConfig::V2(ProviderProfileConfigV2 {
-            settings: ProviderFamilySettings::DeepseekV4Vision { reasoning },
+            settings: ProviderFamilySettings::DeepseekProChat { reasoning },
             ..
         }) => Some(*reasoning),
         _ => None,
@@ -458,7 +446,7 @@ pub(in crate::llm) fn reasoning_content<'a>(
 fn reasoning_fragment(continuation: &ProviderContinuation) -> AgentResult<&str> {
     if !matches!(
         continuation.provenance().profile.id,
-        ProviderProfileId::DeepSeekV4Chat | ProviderProfileId::DeepSeekV4Vision
+        ProviderProfileId::DeepSeekV41FlashChat | ProviderProfileId::DeepSeekV4Pro0813Chat
     ) || continuation.provenance().dialect != ProviderProtocolDialect::OpenAiChatCompletions
     {
         return Err(AgentError::new(
@@ -712,15 +700,19 @@ fn provider_context_boundary_required(reason: &'static str, message_index: usize
     )
 }
 
-/// DeepSeek reports completion tokens as visible output plus private reasoning. Keep the two
-/// runtime axes disjoint and fail closed when a provider does not return the breakdown.
+/// DeepSeek reports `completion_tokens` as the complete billable output. Reasoning tokens, when
+/// present, are a diagnostic subset rather than another amount to subtract or add. A prompt cache
+/// miss is ordinary uncached input, not cache creation.
 pub(super) fn project_usage(mut usage: AgentUsage) -> AgentUsage {
-    usage.output_tokens = match (usage.output_tokens, usage.output_thinking_tokens) {
-        (Some(completion_tokens), Some(reasoning_tokens)) => {
-            completion_tokens.checked_sub(reasoning_tokens)
-        }
-        _ => None,
+    let invalid_reasoning_breakdown = match (usage.output_tokens, usage.output_thinking_tokens) {
+        (None, Some(_)) => true,
+        (Some(completion), Some(reasoning)) => reasoning > completion,
+        _ => false,
     };
+    if invalid_reasoning_breakdown {
+        usage.output_thinking_tokens = None;
+    }
+    usage.cache_creation_input_tokens = None;
     usage
 }
 

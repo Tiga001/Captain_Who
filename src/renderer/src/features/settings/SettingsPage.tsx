@@ -93,12 +93,7 @@ function SettingsContent({
   }
 
   if (activePage === 'profile') {
-    return (
-      <ProfileSettingsPage
-        uiPreferences={uiPreferences}
-        onUiPreferencesChange={onUiPreferencesChange}
-      />
-    )
+    return <ProfileSettingsPage />
   }
 
   if (activePage === 'configuration') {

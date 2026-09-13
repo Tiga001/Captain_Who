@@ -1,0 +1,101 @@
+.account-login {
+  width: min(340px, calc(100vw - 64px));
+  display: grid;
+  gap: 14px;
+  color: var(--mc-color-text-primary);
+  font-size: 13px;
+  text-align: left;
+  -webkit-app-region: no-drag;
+}
+.account-login h1 {
+  margin: 0;
+  font-size: 22px;
+  font-weight: 600;
+  text-align: center;
+}
+.account-login p {
+  margin: 0;
+  color: var(--mc-color-text-secondary);
+  line-height: 1.6;
+  text-align: center;
+}
+.account-login form,
+.account-login label {
+  display: grid;
+  gap: 8px;
+}
+.account-login form {
+  gap: 16px;
+}
+.account-login input {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  height: 38px;
+  padding: 0 12px;
+  border: 1px solid color-mix(in srgb, currentColor 20%, transparent);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--mc-color-surface-main-panel) 72%, transparent);
+  color: var(--mc-color-text-primary);
+  font: inherit;
+}
+.account-login button {
+  min-height: 34px;
+  padding: 7px 12px;
+  border: 1px solid color-mix(in srgb, currentColor 15%, transparent);
+  border-radius: 8px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+.account-login button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.account-login button:focus-visible,
+.account-login input:focus-visible {
+  outline: 2px solid var(--mc-color-focus-ring);
+  outline-offset: 2px;
+}
+.account-login__modes,
+.account-login__links {
+  display: flex;
+  gap: 8px;
+}
+.account-login__modes button {
+  flex: 1;
+}
+.account-login__modes button[aria-pressed='true'] {
+  background: color-mix(in srgb, currentColor 10%, transparent);
+}
+.account-login .account-login__submit {
+  color: var(--mc-color-button-primary-text);
+  background: var(--mc-color-button-primary-bg);
+  border-color: transparent;
+}
+.account-login__code-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: end;
+  gap: 8px;
+}
+.account-login__links {
+  justify-content: space-between;
+}
+.account-login__links button {
+  border: 0;
+  padding: 0;
+}
+.account-login .account-login__error {
+  color: var(--mc-color-text-primary);
+  text-align: left;
+}
+.app-startup-screen:has(.account-login) {
+  overflow-y: auto;
+  padding: 52px 0 24px;
+  box-sizing: border-box;
+}
+.app-startup-screen:has(.account-login) .app-startup-screen__icon {
+  animation: none;
+}

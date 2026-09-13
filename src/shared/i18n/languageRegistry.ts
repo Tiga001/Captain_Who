@@ -1,4 +1,5 @@
 import { workspaceCommandTranslations } from './workspaceCommandTranslations'
+import { authEnglish, authChinese } from './authTranslations'
 import { capabilityCenterTranslations } from './capabilityCenterTranslations'
 import { settingsSearchTranslations } from './settingsSearchTranslations'
 import { enGBTranslations } from './frontendTranslations.enGB'
@@ -16,6 +17,7 @@ import { humanInteractionPanelTranslations } from './humanInteractionPanelTransl
 import { humanInteractionSettingsTranslations } from './humanInteractionSettingsTranslations'
 
 export type TranslationKey =
+  | keyof typeof authEnglish
   | keyof (typeof workspaceCommandTranslations)['zh-CN']
   | keyof (typeof capabilityCenterTranslations)['zh-CN']
   | keyof (typeof settingsSearchTranslations)['zh-CN']
@@ -40,6 +42,7 @@ export const languageRegistry = {
     displayName: '简体中文（中国）',
     translations: {
       ...zhCNTranslations,
+      ...authChinese,
       ...humanInteractionSettingsTranslations['zh-CN'],
       ...settingsSearchTranslations['zh-CN'],
       ...humanInteractionHistoryTranslations['zh-CN'],
@@ -54,6 +57,7 @@ export const languageRegistry = {
     displayName: '繁體中文（中國）',
     translations: {
       ...zhTWTranslations,
+      ...authChinese,
       ...humanInteractionSettingsTranslations['zh-TW'],
       ...settingsSearchTranslations['zh-TW'],
       ...humanInteractionHistoryTranslations['zh-TW'],
@@ -68,6 +72,7 @@ export const languageRegistry = {
     displayName: 'English (United States)',
     translations: {
       ...enUSTranslations,
+      ...authEnglish,
       ...humanInteractionSettingsTranslations['en-US'],
       ...settingsSearchTranslations['en-US'],
       ...humanInteractionHistoryTranslations['en-US'],
@@ -82,6 +87,7 @@ export const languageRegistry = {
     displayName: 'English (United Kingdom)',
     translations: {
       ...enGBTranslations,
+      ...authEnglish,
       ...humanInteractionSettingsTranslations['en-GB'],
       ...settingsSearchTranslations['en-GB'],
       ...humanInteractionHistoryTranslations['en-GB'],
@@ -96,6 +102,7 @@ export const languageRegistry = {
     displayName: '한국어',
     translations: {
       ...koKRTranslations,
+      ...authEnglish,
       ...humanInteractionSettingsTranslations['ko-KR'],
       ...settingsSearchTranslations['ko-KR'],
       ...humanInteractionHistoryTranslations['ko-KR'],
@@ -110,6 +117,7 @@ export const languageRegistry = {
     displayName: '日本語',
     translations: {
       ...jaJPTranslations,
+      ...authEnglish,
       ...humanInteractionSettingsTranslations['ja-JP'],
       ...settingsSearchTranslations['ja-JP'],
       ...humanInteractionHistoryTranslations['ja-JP'],
@@ -124,6 +132,7 @@ export const languageRegistry = {
     displayName: 'Français',
     translations: {
       ...frFRTranslations,
+      ...authEnglish,
       ...humanInteractionSettingsTranslations['fr-FR'],
       ...settingsSearchTranslations['fr-FR'],
       ...humanInteractionHistoryTranslations['fr-FR'],
@@ -138,6 +147,7 @@ export const languageRegistry = {
     displayName: 'Italiano',
     translations: {
       ...itITTranslations,
+      ...authEnglish,
       ...humanInteractionSettingsTranslations['it-IT'],
       ...settingsSearchTranslations['it-IT'],
       ...humanInteractionHistoryTranslations['it-IT'],
@@ -152,6 +162,7 @@ export const languageRegistry = {
     displayName: 'Русский',
     translations: {
       ...ruRUTranslations,
+      ...authEnglish,
       ...humanInteractionSettingsTranslations['ru-RU'],
       ...settingsSearchTranslations['ru-RU'],
       ...humanInteractionHistoryTranslations['ru-RU'],

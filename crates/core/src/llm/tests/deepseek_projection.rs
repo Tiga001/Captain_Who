@@ -6,11 +6,11 @@ use crate::provider_profile::{
 
 #[test]
 fn adapter_registry_selects_deepseek_only_for_the_explicit_profile() {
-    let provider_profile = ProviderProfileConfig::deepseek_v4_default();
+    let provider_profile = ProviderProfileConfig::deepseek_flash_default();
     let provider_protocol = ProviderProtocolKey::new(
         AgentApiStyle::OpenAiCompatible.into(),
         &provider_profile,
-        "deepseek-v4",
+        "deepseek-flash",
         None,
     )
     .unwrap();
@@ -27,7 +27,10 @@ fn adapter_registry_selects_deepseek_only_for_the_explicit_profile() {
     };
 
     let adapter = ProviderAdapterRegistry::resolve(&request).unwrap();
-    assert_eq!(adapter.profile(), ProviderProfileRef::deepseek_v4_chat());
+    assert_eq!(
+        adapter.profile(),
+        ProviderProfileRef::deepseek_v4_1_flash_chat()
+    );
 
     let mut mismatched = request;
     mismatched.provider_profile = generic_provider_profile(AgentApiStyle::OpenAiCompatible);
@@ -38,7 +41,7 @@ fn adapter_registry_selects_deepseek_only_for_the_explicit_profile() {
 fn deepseek_disabled_reasoning_maps_without_generic_tool_choice() {
     let provider_profile =
         deepseek_provider_profile(ReasoningMode::Disabled, ReasoningEffort::ProviderDefault);
-    let provider_protocol = deepseek_provider_protocol(&provider_profile, "deepseek-v4-flash");
+    let provider_protocol = deepseek_provider_protocol(&provider_profile, "deepseek-flash");
     let request = LlmChatRequest {
         api_url: "https://api.deepseek.test/chat/completions".to_string(),
         api_token: "token".to_string(),
@@ -96,7 +99,7 @@ fn deepseek_reasoning_settings_map_to_the_exact_request_fields() {
 
     for (mode, effort, expected_thinking, expected_effort) in cases {
         let provider_profile = deepseek_provider_profile(mode, effort);
-        let provider_protocol = deepseek_provider_protocol(&provider_profile, "deepseek-v4-flash");
+        let provider_protocol = deepseek_provider_protocol(&provider_profile, "deepseek-flash");
         let request = LlmChatRequest {
             api_url: "https://api.deepseek.test/chat/completions".to_string(),
             api_token: "token".to_string(),
@@ -132,7 +135,7 @@ fn deepseek_reasoning_settings_map_to_the_exact_request_fields() {
 #[test]
 fn deepseek_nonstream_preserves_a_present_empty_reasoning_field() {
     let provider_profile = deepseek_provider_profile(ReasoningMode::Enabled, ReasoningEffort::High);
-    let provider_protocol = deepseek_provider_protocol(&provider_profile, "deepseek-v4-flash");
+    let provider_protocol = deepseek_provider_protocol(&provider_profile, "deepseek-flash");
     let response = parse_non_stream_response(
         &json!({
             "choices": [{
@@ -170,7 +173,7 @@ fn deepseek_nonstream_preserves_a_present_empty_reasoning_field() {
 fn deepseek_disabled_tool_response_without_reasoning_preserves_absence() {
     let provider_profile =
         deepseek_provider_profile(ReasoningMode::Disabled, ReasoningEffort::ProviderDefault);
-    let provider_protocol = deepseek_provider_protocol(&provider_profile, "deepseek-v4-flash");
+    let provider_protocol = deepseek_provider_protocol(&provider_profile, "deepseek-flash");
     let response = parse_non_stream_response_with_profile(
         &json!({
             "choices": [{
@@ -208,7 +211,7 @@ fn deepseek_disabled_tool_response_without_reasoning_preserves_absence() {
 fn deepseek_disabled_rejects_nonempty_reasoning_content() {
     let provider_profile =
         deepseek_provider_profile(ReasoningMode::Disabled, ReasoningEffort::ProviderDefault);
-    let provider_protocol = deepseek_provider_protocol(&provider_profile, "deepseek-v4-flash");
+    let provider_protocol = deepseek_provider_protocol(&provider_profile, "deepseek-flash");
     let error = parse_non_stream_response_with_profile(
         &json!({
             "choices": [{
@@ -232,7 +235,7 @@ fn deepseek_disabled_rejects_nonempty_reasoning_content() {
 #[test]
 fn deepseek_enabled_tool_response_missing_reasoning_fails_nonstream_and_stream() {
     let provider_profile = deepseek_provider_profile(ReasoningMode::Enabled, ReasoningEffort::High);
-    let provider_protocol = deepseek_provider_protocol(&provider_profile, "deepseek-v4-pro");
+    let provider_protocol = deepseek_provider_protocol(&provider_profile, "deepseek-flash");
     let missing_reasoning_response = json!({
         "choices": [{
             "message": {
@@ -289,8 +292,8 @@ fn deepseek_enabled_tool_response_missing_reasoning_fails_nonstream_and_stream()
 
 #[test]
 fn deepseek_provider_default_requires_tool_reasoning_and_preserves_explicit_empty() {
-    let provider_profile = ProviderProfileConfig::deepseek_v4_default();
-    let provider_protocol = deepseek_provider_protocol(&provider_profile, "deepseek-v4-default");
+    let provider_profile = ProviderProfileConfig::deepseek_flash_default();
+    let provider_protocol = deepseek_provider_protocol(&provider_profile, "deepseek-flash");
     let response = |reasoning_content: Option<&str>| {
         let mut message = json!({
             "role": "assistant",
@@ -338,16 +341,16 @@ fn deepseek_provider_default_requires_tool_reasoning_and_preserves_explicit_empt
 #[test]
 fn deepseek_v2_provider_default_requires_tool_reasoning() {
     let provider_profile = ProviderProfileConfig::from_family_settings(
-        ProviderProfileRef::deepseek_v4_chat(),
+        ProviderProfileRef::deepseek_v4_1_flash_chat(),
         ProviderVendorId::DeepSeek,
-        ProviderFamilySettings::DeepseekV4Chat {
+        ProviderFamilySettings::DeepseekFlashChat {
             reasoning: ProviderFamilyReasoningPolicy {
                 mode: ReasoningMode::ProviderDefault,
                 effort: ProviderReasoningEffort::ProviderDefault,
             },
         },
     );
-    let provider_protocol = deepseek_provider_protocol(&provider_profile, "deepseek-v4-flash");
+    let provider_protocol = deepseek_provider_protocol(&provider_profile, "deepseek-flash");
     let error = parse_non_stream_response_with_profile(
         &json!({
             "choices": [{
@@ -379,7 +382,7 @@ fn deepseek_v2_provider_default_requires_tool_reasoning() {
 fn deepseek_disabled_reasoning_supports_multiple_tool_rounds_without_continuations() {
     let provider_profile =
         deepseek_provider_profile(ReasoningMode::Disabled, ReasoningEffort::ProviderDefault);
-    let provider_protocol = deepseek_provider_protocol(&provider_profile, "deepseek-v4-disabled");
+    let provider_protocol = deepseek_provider_protocol(&provider_profile, "deepseek-flash");
     let parse_turn = |provider_call_id: &str| {
         parse_non_stream_response_with_profile(
             &json!({
@@ -469,7 +472,7 @@ fn deepseek_disabled_reasoning_supports_multiple_tool_rounds_without_continuatio
 #[test]
 fn deepseek_stream_captures_reasoning_without_emitting_it_as_visible_text() {
     let provider_profile = deepseek_provider_profile(ReasoningMode::Enabled, ReasoningEffort::High);
-    let provider_protocol = deepseek_provider_protocol(&provider_profile, "deepseek-v4-pro");
+    let provider_protocol = deepseek_provider_protocol(&provider_profile, "deepseek-flash");
     let mut accumulator = LlmStreamAccumulator::for_protocol(&provider_protocol).unwrap();
     let mut events = Vec::new();
 
@@ -539,17 +542,17 @@ fn deepseek_stream_captures_reasoning_without_emitting_it_as_visible_text() {
     );
     let usage = response.usage.unwrap();
     assert_eq!(usage.input_tokens, Some(11));
-    assert_eq!(usage.output_tokens, Some(2));
+    assert_eq!(usage.output_tokens, Some(7));
     assert_eq!(usage.output_thinking_tokens, Some(5));
     assert_eq!(usage.total_tokens, Some(18));
     assert_eq!(usage.cached_input_tokens, Some(3));
-    assert_eq!(usage.cache_creation_input_tokens, Some(8));
+    assert_eq!(usage.cache_creation_input_tokens, None);
 }
 
 #[test]
-fn deepseek_usage_fails_closed_when_visible_output_cannot_be_split() {
+fn deepseek_usage_keeps_completion_and_fails_closed_only_for_invalid_reasoning_subset() {
     let profile = deepseek_provider_profile(ReasoningMode::Enabled, ReasoningEffort::High);
-    let protocol = deepseek_provider_protocol(&profile, "deepseek-v4-pro");
+    let protocol = deepseek_provider_protocol(&profile, "deepseek-flash");
 
     let missing_details = parse_non_stream_response(
         &json!({
@@ -570,7 +573,7 @@ fn deepseek_usage_fails_closed_when_visible_output_cannot_be_split() {
     .unwrap()
     .usage
     .unwrap();
-    assert_eq!(missing_details.output_tokens, None);
+    assert_eq!(missing_details.output_tokens, Some(7));
     assert_eq!(missing_details.output_thinking_tokens, None);
     assert_eq!(missing_details.total_tokens, Some(17));
 
@@ -598,8 +601,8 @@ fn deepseek_usage_fails_closed_when_visible_output_cannot_be_split() {
     .unwrap()
     .usage
     .unwrap();
-    assert_eq!(inconsistent_details.output_tokens, None);
-    assert_eq!(inconsistent_details.output_thinking_tokens, Some(5));
+    assert_eq!(inconsistent_details.output_tokens, Some(3));
+    assert_eq!(inconsistent_details.output_thinking_tokens, None);
     assert_eq!(inconsistent_details.total_tokens, Some(13));
 
     let generic_protocol =
@@ -632,7 +635,7 @@ fn deepseek_usage_fails_closed_when_visible_output_cannot_be_split() {
 #[test]
 fn deepseek_continuation_estimate_measures_replayed_json_and_blocks_local_overflow() {
     let profile = deepseek_provider_profile(ReasoningMode::Enabled, ReasoningEffort::Max);
-    let protocol = deepseek_provider_protocol(&profile, "deepseek-v4-pro");
+    let protocol = deepseek_provider_protocol(&profile, "deepseek-flash");
     let reasoning = "大段中文 reasoning：\n\"quoted\" \\\\ slash\t".repeat(1_500);
     let response = parse_non_stream_response(
         &json!({
@@ -710,7 +713,7 @@ fn deepseek_continuation_estimate_measures_replayed_json_and_blocks_local_overfl
 #[test]
 fn deepseek_groups_tool_history_and_moves_interstitial_context_after_results() {
     let provider_profile = deepseek_provider_profile(ReasoningMode::Enabled, ReasoningEffort::High);
-    let provider_protocol = deepseek_provider_protocol(&provider_profile, "deepseek-v4-pro");
+    let provider_protocol = deepseek_provider_protocol(&provider_profile, "deepseek-flash");
     let response = parse_non_stream_response(
         &json!({
             "choices": [{
@@ -815,7 +818,7 @@ fn deepseek_groups_tool_history_and_moves_interstitial_context_after_results() {
 #[test]
 fn deepseek_tool_history_without_a_compatible_continuation_requires_a_boundary() {
     let provider_profile = deepseek_provider_profile(ReasoningMode::Enabled, ReasoningEffort::High);
-    let provider_protocol = deepseek_provider_protocol(&provider_profile, "deepseek-v4-pro");
+    let provider_protocol = deepseek_provider_protocol(&provider_profile, "deepseek-flash");
     let provider_call = LlmToolCall {
         id: "legacy-provider-call".to_string(),
         name: "read_file".to_string(),
@@ -861,8 +864,14 @@ fn deepseek_tool_history_without_a_compatible_continuation_requires_a_boundary()
 #[test]
 fn deepseek_tool_history_from_another_frozen_key_requires_a_boundary() {
     let provider_profile = deepseek_provider_profile(ReasoningMode::Enabled, ReasoningEffort::High);
-    let prior_protocol = deepseek_provider_protocol(&provider_profile, "deepseek-v4-flash");
-    let current_protocol = deepseek_provider_protocol(&provider_profile, "deepseek-v4-pro");
+    let prior_protocol = deepseek_provider_protocol(&provider_profile, "deepseek-flash");
+    let current_protocol = ProviderProtocolKey::new(
+        AgentApiStyle::OpenAiCompatible.into(),
+        &provider_profile,
+        "deepseek-flash",
+        Some("provider-protocol-v1:other-deepseek-configuration".to_string()),
+    )
+    .unwrap();
     let prior_response = parse_non_stream_response(
         &json!({
             "choices": [{
@@ -930,8 +939,8 @@ fn deepseek_tool_history_from_another_frozen_key_requires_a_boundary() {
 fn deepseek_does_not_replay_reasoning_from_an_ordinary_prior_model_turn() {
     const PRIOR_REASONING: &str = "PRIOR_NO_TOOL_REASONING_MUST_NOT_REPLAY";
     let provider_profile = deepseek_provider_profile(ReasoningMode::Enabled, ReasoningEffort::High);
-    let prior_protocol = deepseek_provider_protocol(&provider_profile, "deepseek-v4-flash");
-    let current_protocol = deepseek_provider_protocol(&provider_profile, "deepseek-v4-pro");
+    let prior_protocol = deepseek_provider_protocol(&provider_profile, "deepseek-flash");
+    let current_protocol = deepseek_provider_protocol(&provider_profile, "deepseek-flash");
     let prior_response = parse_non_stream_response(
         &json!({
             "choices": [{
@@ -972,7 +981,7 @@ fn deepseek_does_not_replay_reasoning_from_an_ordinary_prior_model_turn() {
 #[test]
 fn deepseek_disabled_request_never_replays_a_prior_reasoning_continuation() {
     let enabled_profile = deepseek_provider_profile(ReasoningMode::Enabled, ReasoningEffort::High);
-    let enabled_protocol = deepseek_provider_protocol(&enabled_profile, "deepseek-v4-flash");
+    let enabled_protocol = deepseek_provider_protocol(&enabled_profile, "deepseek-flash");
     let response = parse_non_stream_response_with_profile(
         &json!({
             "choices": [{
@@ -993,7 +1002,7 @@ fn deepseek_disabled_request_never_replays_a_prior_reasoning_continuation() {
 
     let disabled_profile =
         deepseek_provider_profile(ReasoningMode::Disabled, ReasoningEffort::ProviderDefault);
-    let disabled_protocol = deepseek_provider_protocol(&disabled_profile, "deepseek-v4-flash");
+    let disabled_protocol = deepseek_provider_protocol(&disabled_profile, "deepseek-flash");
     let request = LlmChatRequest {
         api_url: "https://api.deepseek.test/chat/completions".to_string(),
         api_token: "token".to_string(),
@@ -1018,7 +1027,7 @@ fn deepseek_disabled_request_never_replays_a_prior_reasoning_continuation() {
 #[test]
 fn deepseek_tool_turn_replays_reasoning_even_when_the_follow_up_declares_no_tools() {
     let provider_profile = deepseek_provider_profile(ReasoningMode::Enabled, ReasoningEffort::High);
-    let provider_protocol = deepseek_provider_protocol(&provider_profile, "deepseek-v4-flash");
+    let provider_protocol = deepseek_provider_protocol(&provider_profile, "deepseek-flash");
     let response = parse_non_stream_response_with_profile(
         &json!({
             "choices": [{
@@ -1090,16 +1099,16 @@ fn deepseek_tool_turn_replays_reasoning_even_when_the_follow_up_declares_no_tool
 fn deepseek_tools_request_replays_reasoning_from_all_ordinary_prior_turns() {
     const PRIOR_REASONING: &str = "PRIOR_ORDINARY_REASONING_REQUIRED_BY_FUTURE_TOOLS";
     let provider_profile = ProviderProfileConfig::from_family_settings(
-        ProviderProfileRef::deepseek_v4_chat(),
+        ProviderProfileRef::deepseek_v4_1_flash_chat(),
         ProviderVendorId::DeepSeek,
-        ProviderFamilySettings::DeepseekV4Chat {
+        ProviderFamilySettings::DeepseekFlashChat {
             reasoning: ProviderFamilyReasoningPolicy {
                 mode: ReasoningMode::Enabled,
                 effort: ProviderReasoningEffort::Low,
             },
         },
     );
-    let provider_protocol = deepseek_provider_protocol(&provider_profile, "deepseek-v4-flash");
+    let provider_protocol = deepseek_provider_protocol(&provider_profile, "deepseek-flash");
     let prior_response = parse_non_stream_response_with_profile(
         &json!({
             "choices": [{
@@ -1139,21 +1148,21 @@ fn deepseek_tools_request_replays_reasoning_from_all_ordinary_prior_turns() {
 }
 
 #[test]
-fn deepseek_v2_chat_rejects_images_while_exact_vision_profile_projects_image_url() {
-    let chat_profile = ProviderProfileConfig::from_family_settings(
-        ProviderProfileRef::deepseek_v4_chat(),
+fn deepseek_flash_projects_images_while_exact_pro_profile_rejects_them() {
+    let flash_profile = ProviderProfileConfig::from_family_settings(
+        ProviderProfileRef::deepseek_v4_1_flash_chat(),
         ProviderVendorId::DeepSeek,
-        ProviderFamilySettings::DeepseekV4Chat {
+        ProviderFamilySettings::DeepseekFlashChat {
             reasoning: ProviderFamilyReasoningPolicy {
                 mode: ReasoningMode::Disabled,
                 effort: ProviderReasoningEffort::ProviderDefault,
             },
         },
     );
-    let vision_profile = ProviderProfileConfig::from_family_settings(
-        ProviderProfileRef::deepseek_v4_vision(),
+    let pro_profile = ProviderProfileConfig::from_family_settings(
+        ProviderProfileRef::deepseek_v4_pro_0813_chat(),
         ProviderVendorId::DeepSeek,
-        ProviderFamilySettings::DeepseekV4Vision {
+        ProviderFamilySettings::DeepseekProChat {
             reasoning: ProviderFamilyReasoningPolicy {
                 mode: ReasoningMode::Disabled,
                 effort: ProviderReasoningEffort::ProviderDefault,
@@ -1169,40 +1178,43 @@ fn deepseek_v2_chat_rejects_images_while_exact_vision_profile_projects_image_url
         message
     };
 
-    let chat_request = LlmChatRequest {
+    let flash_request = LlmChatRequest {
         api_url: "https://api.deepseek.test/chat/completions".to_string(),
         api_token: "token".to_string(),
-        provider_protocol: deepseek_provider_protocol(&chat_profile, "deepseek-v4-flash"),
-        provider_profile: chat_profile,
+        provider_protocol: deepseek_provider_protocol(&flash_profile, "deepseek-flash"),
+        provider_profile: flash_profile,
         max_tokens: 64,
         temperature: 0.0,
         stream: false,
         messages: vec![image_message()],
         tools: Vec::new(),
     };
-    let error = validate_request(&chat_request).unwrap_err();
-    assert_eq!(error.code(), Some("provider_image_unsupported"));
-
-    let vision_request = LlmChatRequest {
-        api_url: "https://api.deepseek.test/chat/completions".to_string(),
-        api_token: "token".to_string(),
-        provider_protocol: deepseek_provider_protocol(
-            &vision_profile,
-            "deepseek-v4-flash-vision-exp",
-        ),
-        provider_profile: vision_profile,
-        max_tokens: 64,
-        temperature: 0.0,
-        stream: false,
-        messages: vec![image_message()],
-        tools: Vec::new(),
-    };
-    validate_request(&vision_request).unwrap();
-    let payload = build_payload(&vision_request);
+    validate_request(&flash_request).unwrap();
+    let payload = build_payload(&flash_request);
     assert_eq!(payload["messages"][0]["content"][0]["type"], "text");
     assert_eq!(payload["messages"][0]["content"][1]["type"], "image_url");
     assert_eq!(
         payload["messages"][0]["content"][1]["image_url"]["url"],
         "data:image/png;base64,AA=="
     );
+
+    let pro_request = LlmChatRequest {
+        api_url: "https://api.deepseek.test/chat/completions".to_string(),
+        api_token: "token".to_string(),
+        provider_protocol: ProviderProtocolKey::new(
+            AgentApiStyle::OpenAiCompatible.into(),
+            &pro_profile,
+            "deepseek-v4-pro",
+            None,
+        )
+        .unwrap(),
+        provider_profile: pro_profile,
+        max_tokens: 64,
+        temperature: 0.0,
+        stream: false,
+        messages: vec![image_message()],
+        tools: Vec::new(),
+    };
+    let error = validate_request(&pro_request).unwrap_err();
+    assert_eq!(error.code(), Some("provider_image_unsupported"));
 }

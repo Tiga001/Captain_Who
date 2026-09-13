@@ -8,7 +8,13 @@ import { parseAgentApproveActionRequest } from '@mycopilot/protocol'
 import type { CoreServer } from '../core/coreServer'
 import type { TrustedIpcMain } from './trustedIpc'
 
-export function registerAgentIpc(ipcMain: TrustedIpcMain, coreServer: CoreServer): void {
+export function registerAgentIpc(
+  ipcMain: TrustedIpcMain,
+  coreServer: CoreServer,
+  assertCanStartTurn: () => void = () => {
+    throw new Error('ACCOUNT_LOGIN_REQUIRED')
+  }
+): void {
   coreServer.onAgentEvent((event) => {
     for (const window of BrowserWindow.getAllWindows()) {
       if (!window.isDestroyed() && !window.webContents.isDestroyed()) {
@@ -156,10 +162,16 @@ export function registerAgentIpc(ipcMain: TrustedIpcMain, coreServer: CoreServer
     )
   )
   ipcMain.handle(HOST_CHANNELS.agent.startConversationTurn, (_event, input) =>
-    captureHostInvocation(() => coreServer.startConversationTurn(input))
+    captureHostInvocation(async () => {
+      assertCanStartTurn()
+      return coreServer.startConversationTurn(input)
+    })
   )
   ipcMain.handle(HOST_CHANNELS.agent.rewriteConversationTurn, (_event, input) =>
-    captureHostInvocation(() => coreServer.rewriteConversationTurn(input))
+    captureHostInvocation(async () => {
+      assertCanStartTurn()
+      return coreServer.rewriteConversationTurn(input)
+    })
   )
   ipcMain.handle(HOST_CHANNELS.agent.getContextWindowSnapshot, (_event, input) =>
     captureHostInvocation(() => coreServer.getContextWindowSnapshot(input))

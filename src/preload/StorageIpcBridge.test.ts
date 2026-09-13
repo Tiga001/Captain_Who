@@ -8,12 +8,12 @@ describe('Storage IPC bridge', () => {
   it('routes Provider Profile descriptors and authoritative model saves over dedicated channels', async () => {
     const descriptors = [
       {
-        profileId: 'deepseek_v4_chat',
+        profileId: 'deepseek_v4_1_flash_chat',
         profileVersion: 1,
-        displayName: '深度求索 / DeepSeek（V4 Chat）',
+        displayName: 'DeepSeek Flash',
         compatibleDialects: ['openai_chat_completions'],
-        settingsKind: 'deepseek_v4_chat',
-        selectable: true
+        settingsKind: 'none',
+        selectable: false
       }
     ]
     const authoritativeSettings = {
@@ -94,12 +94,12 @@ describe('Storage IPC bridge', () => {
       .fn()
       .mockResolvedValueOnce([
         {
-          profileId: 'deepseek_v4_chat',
+          profileId: 'deepseek_v4_1_flash_chat',
           profileVersion: 1,
           displayName: 'DeepSeek',
           compatibleDialects: ['openai_chat_completions'],
-          settingsKind: 'deepseek_v4_chat',
-          selectable: true,
+          settingsKind: 'none',
+          selectable: false,
           credentialRef: 'private-reference'
         }
       ])

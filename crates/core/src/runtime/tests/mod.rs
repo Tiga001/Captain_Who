@@ -47,6 +47,28 @@ fn assert_runtime_owned_tool_call_id(id: &str) {
     );
 }
 
+fn deepseek_test_profile(
+    mode: crate::ReasoningMode,
+    effort: crate::ReasoningEffort,
+) -> crate::ProviderProfileConfig {
+    crate::ProviderProfileConfig::from_family_settings(
+        crate::ProviderProfileRef::deepseek_v4_1_flash_chat(),
+        crate::ProviderVendorId::DeepSeek,
+        crate::ProviderFamilySettings::DeepseekFlashChat {
+            reasoning: crate::ProviderFamilyReasoningPolicy {
+                mode,
+                effort: match effort {
+                    crate::ReasoningEffort::ProviderDefault => {
+                        crate::ProviderReasoningEffort::ProviderDefault
+                    }
+                    crate::ReasoningEffort::High => crate::ProviderReasoningEffort::High,
+                    crate::ReasoningEffort::Max => crate::ProviderReasoningEffort::Max,
+                },
+            },
+        },
+    )
+}
+
 fn activated_skill(instructions: &str) -> AgentSkillActivation {
     AgentSkillActivation {
         activation_revision: "activation-sha256-v1:test".to_string(),

@@ -169,7 +169,7 @@ const URL_MARKERS = Object.freeze([
 ])
 const SCAN_OVERLAP_BYTES = 16 * 1024
 const SENSITIVE_FILE_NAME_PATTERN =
-  /^(?:\.DS_Store|\.env(?:\..+)?|\.netrc|\.npmrc|\.pypirc|.*\.(?:p12|key|sqlite|sqlite3|db|log|history))$/i
+  /^(?:\.DS_Store|\.env(?:\..+)?|\.netrc|\.npmrc|\.pypirc|account-session\.enc(?:\.tmp)?|.*\.(?:p12|key|sqlite|sqlite3|db|log|history))$/i
 
 function containsUnauthorizedSecret(text, allowedFixtureSha256 = new Set()) {
   for (const pattern of HIGH_CONFIDENCE_SECRET_PATTERNS) {

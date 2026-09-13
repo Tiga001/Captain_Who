@@ -899,7 +899,7 @@ mod tests {
 
         let mut mismatched_profile = serde_json::from_str::<Value>(&encoded).unwrap();
         mismatched_profile["providerProfileConfig"]["profile"] = json!({
-            "id": "deepseek_v4_chat",
+            "id": "deepseek_v4_1_flash_chat",
             "version": 1
         });
         assert_eq!(
