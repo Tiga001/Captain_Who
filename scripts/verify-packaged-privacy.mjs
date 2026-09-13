@@ -101,7 +101,10 @@ const PACKAGED_CREDENTIALED_URL_FIXTURES = new Map([
   ],
   [
     'Contents/Resources/components/artifact-runtime/dependencies/python/lib/python3.12/site-packages/pip/_internal/req/constructors.py',
-    new Set(['http://blahblah@rev#egg=Foobar', 'http://blahblah@rev#subdirectory=subdir'])
+    new Set([
+      'http://blahblah@rev#egg=Foobar[baz]&subdirectory=version_subdir',
+      'http://blahblah@rev#subdirectory=subdir'
+    ])
   ],
   [
     'Contents/Resources/components/artifact-runtime/dependencies/python/lib/python3.12/site-packages/pip/_vendor/urllib3/util/url.py',
@@ -113,7 +116,7 @@ const PACKAGED_CREDENTIALED_URL_FIXTURES = new Map([
   ],
   [
     'Contents/Resources/components/word-pdf-renderer/libreoffice/LibreOffice.app/Contents/Frameworks/LibreOfficePython.framework/Versions/3.12/lib/python3.12/site-packages/pip/_internal/req/constructors.py',
-    new Set(['http://blahblah@rev#egg=Foobar'])
+    new Set(['http://blahblah@rev#egg=Foobar[baz]&subdirectory=version_subdir'])
   ],
   [
     'Contents/Resources/components/word-pdf-renderer/libreoffice/LibreOffice.app/Contents/Frameworks/LibreOfficePython.framework/Versions/3.12/lib/python3.12/site-packages/pip/_vendor/urllib3/util/url.py',

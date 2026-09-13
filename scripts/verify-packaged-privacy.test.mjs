@@ -311,6 +311,27 @@ test('the zod exception permits only its exact fake credential URL', async () =>
   )
 })
 
+test('pip examples include the entire extras and subdirectory literal without allowing suffixes', async () => {
+  for (const path of [
+    'components/artifact-runtime/dependencies/python/lib/python3.12/site-packages/pip/_internal/req/constructors.py',
+    'components/word-pdf-renderer/libreoffice/LibreOffice.app/Contents/Frameworks/LibreOfficePython.framework/Versions/3.12/lib/python3.12/site-packages/pip/_internal/req/constructors.py'
+  ]) {
+    const { directory, app } = await fixture()
+    const file = join(app, 'Contents', 'Resources', path)
+    const literal = 'http://blahblah@rev#egg=Foobar[baz]&subdirectory=version_subdir'
+    await mkdir(dirname(file), { recursive: true })
+    const verify = () =>
+      verifyPackagedPrivacy(context(directory), {
+        privatePathPrefixes: ['/private/build-user/project'],
+        asarApi: emptyAsarApi()
+      })
+    await writeFile(file, `svn+${literal}\n`)
+    await verify()
+    await writeFile(file, `svn+${literal}&token=private-value\n`)
+    await assert.rejects(verify(), /credentialed URL/)
+  }
+})
+
 test('ordinary-file exceptions bind both the full fake URL and its exact packaged path', async () => {
   const { directory, app } = await fixture()
   const electronFramework = join(
