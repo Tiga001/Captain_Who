@@ -272,6 +272,22 @@ impl AutomationSchedulerState {
             .await?;
         }
 
+        // Denied queued/admitting work is terminalized before checking capacity, including
+        // busy targets and future retry_at. It must not be replayed after login recovers.
+        let agent = self.agent_service.clone();
+        let denied = tokio::task::spawn_blocking(move || {
+            agent.fail_disallowed_automation_runs(None, AUTOMATION_SCHEDULER_BATCH_LIMIT)
+        })
+        .await
+        .map_err(|error| error.to_string())??;
+        if self
+            .agent_service
+            .check_automation_execution_access()
+            .is_err()
+        {
+            return Ok(due_was_full || denied == AUTOMATION_SCHEDULER_BATCH_LIMIT);
+        }
+
         let available = self
             .automation_capacity
             .available_permits()
@@ -381,6 +397,17 @@ impl AutomationSchedulerState {
             .admission_token
             .clone()
             .ok_or_else(|| "claimed automation run is missing its admission token".to_string())?;
+        if let Err(denial) = self.agent_service.check_automation_execution_access() {
+            self.terminate_unadmitted(
+                &run,
+                &admission_token,
+                StoredAutomationRunStatus::Failed,
+                denial.code,
+                denial.message,
+            )
+            .await?;
+            return Ok(());
+        }
         let snapshot = match AutomationConfigSnapshot::parse(&run.config_snapshot_json) {
             Ok(snapshot) => snapshot,
             Err(error) => {
@@ -513,7 +540,28 @@ impl AutomationSchedulerState {
             }
             Err(AutomationHumanRootStartError::RetryableCapacity)
             | Err(AutomationHumanRootStartError::RetryableConversationBusy) => {
-                self.defer_claim(&run).await?;
+                if let Err(denial) = self.agent_service.check_automation_execution_access() {
+                    self.terminate_unadmitted(
+                        &run,
+                        &admission_token,
+                        StoredAutomationRunStatus::Failed,
+                        denial.code,
+                        denial.message,
+                    )
+                    .await?;
+                } else {
+                    self.defer_claim(&run).await?;
+                }
+            }
+            Err(AutomationHumanRootStartError::ExecutionAccessDenied(denial)) => {
+                self.terminate_unadmitted(
+                    &run,
+                    &admission_token,
+                    StoredAutomationRunStatus::Failed,
+                    denial.code,
+                    denial.message,
+                )
+                .await?;
             }
             Err(AutomationHumanRootStartError::TargetInvalid { code, message }) => {
                 self.block_or_terminate(&run, &admission_token, code, &message)

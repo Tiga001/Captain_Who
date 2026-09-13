@@ -69,7 +69,12 @@ describe('Image generation configuration IPC registration', () => {
       getImageGenerationStatus: vi.fn().mockResolvedValue(output),
       readImageGenerationArtifact: vi.fn().mockResolvedValue(output)
     }
-    registerHostIpc(coreServer as never, {} as never, {} as never, () => true)
+    registerHostIpc(
+      coreServer as never,
+      { setProjectLoader: vi.fn() } as never,
+      {} as never,
+      () => true
+    )
 
     await expect(findHandler('host:imageGeneration.getConfiguration')(event)).resolves.toEqual({
       ok: true,
@@ -123,7 +128,12 @@ describe('Image generation configuration IPC registration', () => {
       onMcpChanged: vi.fn(() => vi.fn()),
       updateImageGenerationConfiguration
     }
-    registerHostIpc(coreServer as never, {} as never, {} as never, () => true)
+    registerHostIpc(
+      coreServer as never,
+      { setProjectLoader: vi.fn() } as never,
+      {} as never,
+      () => true
+    )
 
     await expect(
       findHandler('host:imageGeneration.updateConfiguration')(event, input)
@@ -144,7 +154,12 @@ describe('Image generation configuration IPC registration', () => {
       onMcpChanged: vi.fn(() => vi.fn()),
       readImageGenerationArtifact
     }
-    registerHostIpc(coreServer as never, {} as never, {} as never, () => false)
+    registerHostIpc(
+      coreServer as never,
+      { setProjectLoader: vi.fn() } as never,
+      {} as never,
+      () => false
+    )
 
     expect(() =>
       findHandler('host:imageGeneration.readArtifact')(event, {

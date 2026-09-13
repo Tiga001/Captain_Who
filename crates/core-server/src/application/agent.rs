@@ -128,6 +128,8 @@ mod command_sessions;
 mod completion;
 mod context_compaction;
 mod context_window;
+mod execution_access;
+pub(crate) use execution_access::ExecutionAccessDenied;
 mod conversation_world_state;
 mod human_root_notifications;
 mod manual_context_compaction;
@@ -615,6 +617,7 @@ pub struct AgentService {
     conversation_context_state_clock: Arc<AtomicU64>,
     context_compaction_summary_generator: Option<ContextCompactionSummaryGenerator>,
     conversation_admission: Arc<Mutex<()>>,
+    execution_access: Arc<Mutex<execution_access::ExecutionAccessState>>,
     human_input_delivery_dispatch: Arc<Mutex<()>>,
     provider_transitions: Arc<Mutex<HashMap<String, String>>>,
     provider_transition_operations: Arc<Mutex<HashMap<String, AgentProviderTransitionOperation>>>,
@@ -817,6 +820,9 @@ impl AgentService {
             conversation_context_state_clock: Arc::new(AtomicU64::new(1)),
             context_compaction_summary_generator: None,
             conversation_admission: Arc::new(Mutex::new(())),
+            execution_access: Arc::new(Mutex::new(
+                execution_access::ExecutionAccessState::default(),
+            )),
             human_input_delivery_dispatch: Arc::new(Mutex::new(())),
             provider_transitions: Arc::new(Mutex::new(HashMap::new())),
             provider_transition_operations: Arc::new(Mutex::new(HashMap::new())),

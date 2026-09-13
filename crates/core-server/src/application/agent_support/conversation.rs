@@ -1,5 +1,10 @@
 use super::*;
 
+type AutomationAdmissionWithExecutionAccess<'a> = (
+    &'a mycopilot_core::storage::automation_repository::AutomationRunAdmissionInput,
+    &'a dyn Fn() -> Result<(), AgentServiceError>,
+);
+
 pub(crate) fn active_rewrite_turn_output(
     storage: &StorageService,
     rewrite: &mycopilot_core::storage::conversation_turn_rewrite_repository::ConversationTurnRewriteRecord,
@@ -144,9 +149,7 @@ pub(crate) fn prepare_reserved_human_turn(
     run_id: &str,
     existing: Option<ChatConversationRecord>,
     expected_revision: Option<i64>,
-    automation_admission: Option<
-        &mycopilot_core::storage::automation_repository::AutomationRunAdmissionInput,
-    >,
+    automation_admission: Option<AutomationAdmissionWithExecutionAccess<'_>>,
     automation_execution_context: Option<AgentAutomationExecutionContext>,
 ) -> Result<PreparedConversationTurn, AgentServiceError> {
     match prepare_conversation_turn_from_source(
@@ -270,9 +273,7 @@ fn prepare_conversation_turn_from_source(
     existing: Option<ChatConversationRecord>,
     expected_revision: Option<i64>,
     rewrite: Option<HumanConversationTurnRewrite>,
-    automation_admission: Option<
-        &mycopilot_core::storage::automation_repository::AutomationRunAdmissionInput,
-    >,
+    automation_admission: Option<AutomationAdmissionWithExecutionAccess<'_>>,
     automation_execution_context: Option<AgentAutomationExecutionContext>,
 ) -> Result<PreparedConversationTurnOutcome, AgentServiceError> {
     if rewrite.is_some() && automation_admission.is_some() {
@@ -706,7 +707,12 @@ fn prepare_conversation_turn_from_source(
                         response,
                     )?
                     .1
-            } else if let Some(automation_admission) = automation_admission {
+            } else if let Some((automation_admission, check_execution_access)) =
+                automation_admission
+            {
+                // The AgentService access mutex is still held; recheck expiry after expensive
+                // preparation, immediately before the transaction creates any messages/Trace.
+                check_execution_access()?;
                 match storage
                     .save_automation_conversation_and_begin_turn_with_preloaded_agent_messages(
                         conversation,
@@ -717,6 +723,11 @@ fn prepare_conversation_turn_from_source(
                         assistant_created_at,
                         now_ms().max(assistant_created_at),
                         automation_admission,
+                        &|| check_execution_access().map_err(|error| {
+                            error.data().and_then(|data| data.get("code"))
+                                .and_then(serde_json::Value::as_str)
+                                .unwrap_or("ACCOUNT_LICENSE_UNAVAILABLE").to_string()
+                        }),
                     )
                 {
                     Ok((_, permissions, _)) => permissions,
@@ -727,6 +738,11 @@ fn prepare_conversation_turn_from_source(
                         return Err(AgentServiceError::structured(
                             mycopilot_core::storage::automation_repository::AUTOMATION_PERMISSION_DISABLED_MESSAGE,
                             serde_json::json!({ "code": "permission_disabled" }),
+                        ));
+                    }
+                    Err(error) if matches!(error.as_str(), "ACCOUNT_LOGIN_REQUIRED" | "ACCOUNT_LICENSE_REQUIRED" | "ACCOUNT_LICENSE_UNAVAILABLE") => {
+                        return Err(AgentServiceError::structured(
+                            "自动化启动时账号或使用许可不可用。", serde_json::json!({ "code": error }),
                         ));
                     }
                     Err(error) => return Err(error.into()),
@@ -762,7 +778,7 @@ fn prepare_conversation_turn_from_source(
                     .into());
             }
             #[cfg(test)]
-            if automation_admission.is_some_and(|admission| {
+            if automation_admission.is_some_and(|(admission, _)| {
                 crate::application::agent::take_automation_post_admission_preparation_failure(
                     &admission.automation_run_id,
                 )

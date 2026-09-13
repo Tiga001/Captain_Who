@@ -22,6 +22,18 @@ const { execute, fork, submit, stop, changed, translate, workspaceActions } = vi
   }
 }))
 const modelState = vi.hoisted(() => ({ enabledModels: [] as ModelConfig[] }))
+vi.mock('../../host/hostClient', () => ({ hostClient: {} }))
+const attachmentMocks = vi.hoisted(() => ({ build: vi.fn() }))
+vi.mock('../../features/agentRun/useProviderTransition', () => ({
+  useProviderTransition: () => ({
+    cancelConfirmation: vi.fn(),
+    confirm: vi.fn(),
+    loadStatus: vi.fn(),
+    retry: vi.fn(),
+    store: {},
+    request: async () => ({ status: 'completed', operation: { modelId: 'model-1' } })
+  })
+}))
 vi.mock('../../config/FrontendConfigProvider', () => ({
   useFrontendConfig: () => ({ t: translate })
 }))
@@ -55,7 +67,7 @@ vi.mock('../../features/capabilities/CapabilityCenterMenu', () => ({
   CapabilityCenterMenu: CapabilityMenuFixture
 }))
 vi.mock('../../features/chat/chatAttachments', () => ({
-  buildAgentInputAttachments: (attachments: unknown[]) => attachments,
+  buildAgentInputAttachments: attachmentMocks.build,
   composerAttachmentFromAgentAttachment: (attachment: unknown) => attachment,
   createComposerAttachmentsFromFiles: async () => [],
   createAttachmentSummary: () => '',
@@ -66,6 +78,8 @@ import { ChatComposer } from '../../features/chat/components/ChatComposer'
 import { createComposerDraft } from '../chatMessageFactory'
 import { ConfirmationDialog } from '../../components/dialog/ConfirmationDialog'
 import { AccountAuthContext } from '../../features/auth/AccountAuthContext'
+import { LicenseContext } from '../../features/license/LicenseContext'
+import { useAppShellMessageSubmission } from '../useAppShellMessageSubmission'
 
 const WORKSPACE_COMMANDS = [
   { id: 'terminal', label: '打开终端', query: '终端', description: '在底部栏新建终端' },
@@ -186,7 +200,8 @@ function TestComposer({
   portalMenus = false,
   showWorkspaceCommands = false,
   workspaceChecking = false,
-  initialDraft
+  initialDraft,
+  onSubmitMessage = submit
 }: {
   message?: string
   disabled?: boolean
@@ -197,6 +212,7 @@ function TestComposer({
   showWorkspaceCommands?: boolean
   workspaceChecking?: boolean
   initialDraft?: ComponentProps<typeof ChatComposer>['draft']
+  onSubmitMessage?: ComponentProps<typeof ChatComposer>['onSubmitMessage']
 }) {
   const [draft, setDraft] = useState(
     initialDraft ?? createComposerDraft({ modelId: 'model-1', message })
@@ -239,7 +255,7 @@ function TestComposer({
         draft={draft}
         onDraftChange={update}
         onDraftMessageChange={update}
-        onSubmitMessage={submit}
+        onSubmitMessage={onSubmitMessage}
         onStopGenerating={stop}
         portalMenus={portalMenus}
         isGenerating={running}
@@ -253,6 +269,7 @@ let previousRootStyle: string | null
 let previousViewport: { width: number; height: number }
 beforeEach(async () => {
   vi.clearAllMocks()
+  attachmentMocks.build.mockReset().mockImplementation((attachments: unknown[]) => attachments)
   translate.mockImplementation((key: string) => key)
   modelState.enabledModels = [modelFixture()]
   previousRootStyle = document.documentElement.getAttribute('style')
@@ -306,6 +323,175 @@ it('omits the signed-out login prompt while still requiring login to send a new 
   expect(stop).not.toHaveBeenCalled()
   await expect.element(input).toHaveValue('Keep this unsent message')
 })
+
+it.each([
+  { target: 'new', change: 'logout' },
+  { target: 'new', change: 'license' },
+  { target: 'existing', change: 'logout' },
+  { target: 'existing', change: 'license' }
+])(
+  'preserves the $target chat draft when $change occurs during attachment preparation',
+  async ({ target, change }) => {
+    let signedIn = true
+    let licensed = true
+    let finishAttachments: (attachments: never[]) => void = () => undefined
+    attachmentMocks.build.mockImplementation(
+      () =>
+        new Promise<never[]>((resolve) => {
+          finishAttachments = resolve
+        })
+    )
+    const draft = createComposerDraft({ modelId: 'model-1', message: 'Do not lose this message' })
+    type SubmissionOptions = Parameters<typeof useAppShellMessageSubmission>[0]
+    const conversations: SubmissionOptions['conversations'] =
+      target === 'existing'
+        ? [
+            {
+              id: 'existing-chat',
+              title: 'Existing chat',
+              modelId: 'model-1',
+              projectId: null,
+              messages: [],
+              messagesLoaded: true,
+              createdAt: 1,
+              updatedAt: 1,
+              pinnedAt: null,
+              archivedAt: null,
+              unreadAt: null
+            }
+          ]
+        : []
+    const options: SubmissionOptions = {
+      activeConversationIdRef: { current: target === 'existing' ? 'existing-chat' : null },
+      activeDraft: draft,
+      activeDraftSelectedModel: modelFixture(),
+      autoSubmitQueuedMessageRef: { current: vi.fn() },
+      conversations,
+      conversationsRef: { current: conversations },
+      drafts: {},
+      draftsRef: { current: { 'existing-chat': draft } },
+      editRewriteAttemptsRef: { current: new Map() },
+      editRewriteInFlightRef: { current: new Set() },
+      editSubmissionSeqRef: { current: 0 },
+      enabledModels: [modelFixture()],
+      enqueueChatMessagesUpsert: vi.fn(),
+      enqueueConversationMetaSave: vi.fn(),
+      mutateDraft: (_scope, updater) => updater(draft),
+      pendingProviderTransitionSubmissionsRef: { current: new Map() },
+      requestAssistantResponse: vi.fn(async () => true),
+      restoreSubmittedSkills: vi.fn(),
+      setActiveConversationId: vi.fn(),
+      setActiveConversationInitialScrollTop: vi.fn(),
+      setConversationScrollToBottomSignal: vi.fn(),
+      setConversationsWithRef: vi.fn(),
+      setScrollTargetMessageId: vi.fn(),
+      showToast: vi.fn(),
+      t: translate,
+      updateDraft: vi.fn(),
+      waitForConversationSaves: vi.fn(async () => undefined),
+      waitForMessageUpserts: vi.fn(async () => undefined),
+      waitForMessageStateSaves: vi.fn(async () => undefined),
+      waitForRunSettlement: vi.fn(async () => undefined)
+    }
+    const accepted = vi.fn()
+    function SubmissionComposer() {
+      const submission = useAppShellMessageSubmission(options)
+      return (
+        <TestComposer
+          initialDraft={draft}
+          onSubmitMessage={async (message, submitOptions) => {
+            const result = await submission.submitMessage(message, submitOptions)
+            accepted(result)
+            return result
+          }}
+        />
+      )
+    }
+    const screen = await render(
+      <AccountAuthContext.Provider
+        value={{
+          state: { revision: 1, status: 'signedIn', profile: null, remembered: true, error: null },
+          loginRequested: false,
+          requestLogin: vi.fn(),
+          dismissLogin: vi.fn(),
+          canStartTurn: () => signedIn,
+          logout: vi.fn()
+        }}
+      >
+        <LicenseContext.Provider
+          value={{
+            state: {
+              revision: 1,
+              status: 'allowed',
+              reason: 'active',
+              expiresAt: null,
+              verifiedAt: null,
+              cacheValidUntil: null,
+              error: null
+            },
+            canStartTurn: () => licensed,
+            requestAccess: vi.fn(),
+            refresh: vi.fn()
+          }}
+        >
+          <SubmissionComposer />
+        </LicenseContext.Provider>
+      </AccountAuthContext.Provider>
+    )
+    const input = screen.getByRole('textbox', { name: 'chat.inputAria' })
+    await screen.getByRole('button', { name: 'chat.send', exact: true }).click()
+    expect(attachmentMocks.build).toHaveBeenCalledTimes(1)
+    if (change === 'logout') signedIn = false
+    else licensed = false
+    finishAttachments([])
+    await expect.poll(() => accepted.mock.calls.length).toBe(1)
+    expect(accepted).toHaveBeenCalledWith(false)
+    await expect.element(input).toHaveValue('Do not lose this message')
+    expect(options.requestAssistantResponse).not.toHaveBeenCalled()
+    expect(options.setConversationsWithRef).not.toHaveBeenCalled()
+    expect(options.updateDraft).not.toHaveBeenCalled()
+    expect(stop).not.toHaveBeenCalled()
+  }
+)
+
+it.each([false, true])(
+  'requires a license for new turns but leaves running-turn input alone (running=%s)',
+  async (running) => {
+    const requestAccess = vi.fn()
+    const view = await render(
+      <LicenseContext.Provider
+        value={{
+          state: {
+            revision: 1,
+            status: 'denied',
+            reason: 'expired',
+            expiresAt: null,
+            verifiedAt: null,
+            cacheValidUntil: null,
+            error: null
+          },
+          canStartTurn: () => false,
+          requestAccess,
+          refresh: vi.fn()
+        }}
+      >
+        <TestComposer message="Keep this message" running={running} />
+      </LicenseContext.Provider>
+    )
+    const input = view.getByRole('textbox', { name: 'chat.inputAria' })
+    await input.click()
+    await userEvent.keyboard('{Enter}')
+    expect(submit).not.toHaveBeenCalled()
+    expect(stop).not.toHaveBeenCalled()
+    if (running) {
+      expect(requestAccess).not.toHaveBeenCalled()
+      expect(changed.mock.lastCall?.[0].queuedMessages).toHaveLength(1)
+    } else {
+      expect(requestAccess).toHaveBeenCalledTimes(1)
+      await expect.element(input).toHaveValue('Keep this message')
+    }
+  }
+)
 
 it.each([false, true])(
   'opens models as the first command, lists API metadata without search, and shares draft selection with the footer (portal=%s)',

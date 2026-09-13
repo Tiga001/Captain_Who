@@ -1396,6 +1396,15 @@ impl StorageService {
         usage_repository::usage_summary(&connection, input, now_ms).map_err(storage_error)
     }
 
+    pub fn get_local_token_usage(
+        &self,
+        input: &crate::LocalTokenUsageSummaryInput,
+        now_ms: i64,
+    ) -> Result<crate::LocalTokenUsageSummaryOutput, String> {
+        let connection = self.state.connection()?;
+        crate::storage::local_token_usage_repository::summary(&connection, input, now_ms)
+    }
+
     pub fn clear_usage_records(
         &self,
         input: &AgentUsageClearInput,

@@ -20,6 +20,7 @@ import {
 import { mergeActivatedSkillSummaries } from '../features/skills/activatedSkillInventory'
 import { planSkillActivationRecovery } from '../features/skills/skillActivationRecovery'
 import { getAgentInterruptionReason } from '../errors/userFacingError'
+import { getTurnAccessErrorCode } from '../features/license/turnAccessError'
 import type { ActiveRunBinding } from './appTypes'
 import { mergeConversationMessageFromBackend } from './chatMessageFactory'
 import {
@@ -348,6 +349,9 @@ export function useRequestAssistantResponse({
         }
         return true
       } catch (error) {
+        // A trusted admission refusal proves no turn was accepted. Let the caller preserve
+        // its draft/queue and guide the explicit action without creating a failed chat turn.
+        if (getTurnAccessErrorCode(error)) throw error
         if (rewrite) {
           const recovery = planSkillActivationRecovery(error, skills)
           reconcileFailedSkillActivation(conversationId, recovery, {

@@ -6,6 +6,11 @@ type ConversationTurnAdmissionResult = (
     Option<crate::storage::human_interaction_repository::HumanInteractionAsyncBinding>,
 );
 
+type AutomationAdmissionWithExecutionAccess<'a> = (
+    &'a automation_repository::AutomationRunAdmissionInput,
+    &'a dyn Fn() -> Result<(), String>,
+);
+
 impl StorageService {
     pub fn save_conversation(
         &self,
@@ -107,6 +112,7 @@ impl StorageService {
         trace_created_at: i64,
         trace_updated_at: i64,
         automation_admission: &automation_repository::AutomationRunAdmissionInput,
+        check_execution_access: &dyn Fn() -> Result<(), String>,
     ) -> Result<
         (
             ChatConversationRecord,
@@ -127,7 +133,7 @@ impl StorageService {
                 trace_updated_at,
                 None,
                 None,
-                Some(automation_admission),
+                Some((automation_admission, check_execution_access)),
                 None,
             )?;
         if !matches!(
@@ -202,7 +208,7 @@ impl StorageService {
         trace_updated_at: i64,
         rewrite: Option<&conversation_turn_rewrite_repository::ConversationTurnRewriteAdmission>,
         prepared_attachments: Option<&super::PreparedConversationTurnRewriteAttachments>,
-        automation_admission: Option<&automation_repository::AutomationRunAdmissionInput>,
+        automation_admission: Option<AutomationAdmissionWithExecutionAccess<'_>>,
         human_interaction_admission: Option<
             &crate::storage::human_interaction_repository::HumanInteractionAsyncTurnAdmission,
         >,
@@ -212,6 +218,9 @@ impl StorageService {
         let transaction = connection
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(storage_error)?;
+        if let Some((_, check_execution_access)) = automation_admission {
+            check_execution_access()?;
+        }
         let bound_agent = transaction
             .query_row(
                 "SELECT agent_id, parent_agent_id, lifecycle
@@ -423,7 +432,7 @@ impl StorageService {
                 "conversation already has an active durable Turn ({active_run})"
             ));
         }
-        if let Some(admission) = automation_admission {
+        if let Some((admission, _)) = automation_admission {
             match automation_repository::revalidate_automation_permission_for_admission_in_transaction(
                 &transaction,
                 admission,
@@ -492,7 +501,8 @@ impl StorageService {
             &trace.run_id,
             trusted_wake.map(|wake| wake.wake_id.as_str()),
             conversation.project_id.as_deref(),
-        ).map_err(storage_error)?;
+        )
+        .map_err(storage_error)?;
         if let Some((agent_id, _, _)) = bound_agent.as_ref() {
             agent_graph_repository::record_agent_effective_permissions_in_transaction(
                 &transaction,
@@ -555,7 +565,7 @@ impl StorageService {
             )
             .map_err(storage_error)?;
         }
-        let automation_outcome = if let Some(admission) = automation_admission {
+        let automation_outcome = if let Some((admission, _)) = automation_admission {
             if trusted_wake.is_some() || rewrite.is_some() {
                 return Err(
                     "automation admission cannot be combined with a Wake or rewrite".to_string(),
@@ -621,6 +631,11 @@ impl StorageService {
             &mut conversation.messages,
         )
         .map_err(storage_error)?;
+        // Check under the same transaction immediately before admission commits. The caller
+        // holds its access-state lock, while this check also catches time-based lease expiry.
+        if let Some((_, check_execution_access)) = automation_admission {
+            check_execution_access()?;
+        }
         transaction.commit().map_err(storage_error)?;
         Ok((
             conversation,

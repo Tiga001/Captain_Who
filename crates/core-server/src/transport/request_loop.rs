@@ -144,6 +144,7 @@ fn is_blocking_read_method(method: &str) -> bool {
             | AGENT_COMMAND_SESSIONS_GET_METHOD
             | AGENT_LIST_PENDING_ACTIONS_METHOD
             | AGENT_GET_USAGE_SUMMARY_METHOD
+            | AGENT_GET_LOCAL_TOKEN_USAGE_METHOD
             | AGENT_READ_FILE_CHANGE_METHOD
             | AGENT_GET_FILE_CHANGE_DIFF_METHOD
             | AGENT_GET_FILE_CHANGE_HISTORY_DIFF_METHOD
@@ -532,12 +533,14 @@ where
             if is_automation_request_method(&request.method) {
                 let request_id = request.id.clone();
                 let request_storage = Arc::clone(&storage);
+                let request_agent_service = agent_service.clone();
                 let request_scheduler_wake = automation_scheduler_wake.clone();
                 let request_outbound = outbound.clone();
                 tokio::spawn(async move {
                     let response = match tokio::task::spawn_blocking(move || {
-                        handle_automation_request_with_wake(
+                        handle_automation_request_with_access(
                             &request_storage,
+                            Some(&request_agent_service),
                             Some(&request_scheduler_wake),
                             request,
                         )
@@ -593,7 +596,9 @@ where
                 });
                 continue;
             }
-            if is_blocking_read_method(&request.method) {
+            if is_blocking_read_method(&request.method)
+                || request.method == mycopilot_protocol_rs::CORE_SET_EXECUTION_ACCESS_METHOD
+            {
                 let request_id = request.id.clone();
                 let request_storage = Arc::clone(&storage);
                 let request_service = agent_service.clone();

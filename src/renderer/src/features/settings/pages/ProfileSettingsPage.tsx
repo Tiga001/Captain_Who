@@ -4,6 +4,8 @@ import { useFrontendConfig } from '../../../config/FrontendConfigProvider'
 import { hostClient } from '../../../host/hostClient'
 import { useAccountAuth } from '../../auth/AccountAuthContext'
 import { AccountAvatar } from '../../auth/AccountAvatar'
+import { LicenseStatus } from '../../license/LicenseStatus'
+import { LocalTokenActivity } from './LocalTokenActivity'
 import './ProfileSettingsPage.css'
 
 export function ProfileSettingsPage() {
@@ -92,6 +94,8 @@ export function ProfileSettingsPage() {
       </section>
       {error ? <p role="alert">{t(`auth.error.${error}`)}</p> : null}
       {profile && !auth?.state.remembered ? <p role="status">{t('auth.memoryOnly')}</p> : null}
+      <LicenseStatus />
+      <LocalTokenActivity />
     </article>
   )
 }

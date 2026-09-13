@@ -42,6 +42,14 @@ export class AuthService {
     if (this.state.status !== 'signedIn') throw new Error('ACCOUNT_LOGIN_REQUIRED')
   }
 
+  /** Main-only access for authenticated account services. Never expose this through IPC. */
+  getAccessToken(userId: string): string {
+    this.assertCanStartTurn()
+    if (!this.session || this.state.profile?.userId !== userId)
+      throw new Error('ACCOUNT_LOGIN_REQUIRED')
+    return this.session.access_token
+  }
+
   private run(operation: (epoch: number) => Promise<void>): Promise<AuthActionResult> {
     const epoch = this.epoch
     const execute = async (): Promise<AuthActionResult> => {

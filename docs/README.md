@@ -43,6 +43,8 @@ fixture 和测试为准。
 
 [账号登录与云端资料](subsystems/account-login.md) 说明启动蒙版、会话存储、退出登录不影响任务的边界，以及真实账号验收步骤。
 
+[本机 Token 活动与账号许可](subsystems/local-token-usage-and-license.md) 说明纯本机统计、24 小时许可缓存、无损升级及云端先行部署的边界。
+
 [手动上下文压缩与快捷命令](subsystems/manual-context-compaction.md) 说明七项 Slash 命令、独立用量、取消恢复、压缩边界分支与 latest fork。
 
 | 文档                                                              | 内容                                                     |

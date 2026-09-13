@@ -43,7 +43,8 @@ export function parseAccountProfile(body: unknown, email: string): AccountProfil
 export async function fetchAccountProfile(session: CloudSession): Promise<AccountProfile> {
   let response: Response
   try {
-    response = await fetch(`${ACCOUNT_CONFIG.api}/v1/me`, {
+    // Profile refresh must not perform the separate daily license query.
+    response = await fetch(`${ACCOUNT_CONFIG.api}/v1/me?includeEntitlements=false`, {
       headers: { Authorization: `Bearer ${session.access_token}`, Accept: 'application/json' },
       signal: AbortSignal.timeout(15_000),
       redirect: 'error',

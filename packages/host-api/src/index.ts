@@ -1,3 +1,7 @@
+import type { LicenseHostApi } from './license'
+import type { LocalTokenUsageSummaryInput, LocalTokenUsageSummaryOutput } from '@mycopilot/protocol'
+export * from './license'
+
 import type {
   AgentPromptPreferencesChanged,
   AgentCollaborationSettings,
@@ -682,6 +686,7 @@ export interface AgentHostApi {
   rejectAction(input: AgentRejectActionRequest): Promise<AgentActionExecutionOutput>
   cancelAction(input: AgentActionIdRequest): Promise<boolean>
   getUsageSummary(input: AgentUsageSummaryInput): Promise<AgentUsageSummaryOutput>
+  getLocalTokenUsage(input: LocalTokenUsageSummaryInput): Promise<LocalTokenUsageSummaryOutput>
   clearUsageRecords(input: AgentUsageClearInput): Promise<AgentUsageClearOutput>
   readFileChange(input: AgentFileChangeReadInput): Promise<AgentFileChangeContentPage>
   getFileChangeDiff(input: AgentFileChangeDiffInput): Promise<AgentFileChangeDiffPage>
@@ -708,6 +713,7 @@ export type {
 } from './auth'
 
 export interface HostApi {
+  license: LicenseHostApi
   auth: import('./auth').AuthHostApi
   core: {
     ping(input?: CorePingRequest): Promise<CorePingResponse>

@@ -1,0 +1,8 @@
+.license-status:not(.account-login) {
+  margin-top: 28px;
+}
+
+.license-status:not(.account-login) p {
+  margin: 12px 16px;
+  color: var(--settings-content-muted-color);
+}

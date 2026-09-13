@@ -163,6 +163,18 @@ impl AgentService {
             .conversation_admission
             .lock()
             .unwrap_or_else(|error| error.into_inner());
+        // Only newly admitted automations use this Host lease. Ordinary starts are authorized
+        // in Main; child/wake execution, steer and approval recovery never enter this gate.
+        let execution_access_guard = if automation.is_some() {
+            let guard = self
+                .execution_access
+                .lock()
+                .map_err(|_| "Execution access state unavailable".to_string())?;
+            guard.check().map_err(ExecutionAccessDenied::agent_error)?;
+            Some(guard)
+        } else {
+            None
+        };
         if let Some(rewrite) = &rewrite {
             if let Some(existing) = self
                 .storage
@@ -290,6 +302,13 @@ impl AgentService {
                 admitted_at: now_ms(),
             }
         });
+        let execution_access_check = || {
+            execution_access_guard
+                .as_ref()
+                .ok_or_else(|| ExecutionAccessDenied::signed_out().agent_error())?
+                .check()
+                .map_err(ExecutionAccessDenied::agent_error)
+        };
         let prepared_outcome = if let Some(response) = response.clone() {
             prepare_reserved_human_response_turn(
                 &self.storage,
@@ -319,12 +338,18 @@ impl AgentService {
                     &run_id,
                     previous_conversation.clone(),
                     expected_revision,
-                    automation_admission.as_ref(),
+                    automation_admission.as_ref().map(|admission| {
+                        (
+                            admission,
+                            &execution_access_check as &dyn Fn() -> Result<(), AgentServiceError>,
+                        )
+                    }),
                     automation_execution_context,
                 )
                 .map(|prepared| PreparedConversationTurnOutcome::Prepared(Box::new(prepared))),
             }
         };
+        drop(execution_access_guard);
         let prepared = match prepared_outcome {
             Ok(PreparedConversationTurnOutcome::Prepared(prepared)) => *prepared,
             Ok(PreparedConversationTurnOutcome::Replayed(output)) => {

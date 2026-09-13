@@ -1,7 +1,7 @@
 /* Base layout, account, and shared controls for the left sidebar. */
 .left-sidebar {
   --left-sidebar-brand-row-height: 44px;
-  --left-sidebar-footer-height: 64px;
+  --left-sidebar-footer-height: 48px;
   --left-sidebar-header-height: calc(
     var(--left-sidebar-brand-row-height) + var(--mc-layout-sidebar-action-height) +
       var(--mc-layout-sidebar-action-height) + var(--mc-layout-sidebar-action-height) + 18px
@@ -153,14 +153,14 @@
 
 .left-sidebar__account-button {
   display: grid;
-  grid-template-columns: 34px minmax(0, 1fr);
+  grid-template-columns: 28px minmax(0, 1fr);
   align-items: center;
   width: 100%;
   min-width: 0;
   height: 100%;
-  padding: 0 24px;
+  padding: 0 18px;
   margin: 0;
-  gap: 12px;
+  gap: 10px;
   color: var(--mc-color-sidebar-text-secondary);
   text-align: left;
   border-radius: 0;
@@ -168,8 +168,8 @@
 
 .left-sidebar__account-avatar {
   display: grid;
-  width: 34px;
-  height: 34px;
+  width: 28px;
+  height: 28px;
   place-items: center;
   overflow: hidden;
   color: var(--mc-color-text-inverse);
@@ -216,8 +216,7 @@
   line-height: 17px;
 }
 
-.left-sidebar__account-text span:last-child,
-.left-sidebar__account-menu-profile-text span:last-child {
+.left-sidebar__account-menu-profile-text span:nth-child(2) {
   color: var(--mc-color-text-muted);
   font-size: 12px;
   font-weight: var(--mc-font-weight-control);
@@ -272,7 +271,8 @@
   background: var(--mc-color-border-hairline);
 }
 
-.left-sidebar__account-menu-item {
+.left-sidebar__account-menu-item,
+.left-sidebar__account-menu-license {
   display: flex;
   align-items: center;
   width: 100%;
@@ -286,6 +286,25 @@
   font-size: var(--left-sidebar-menu-font-size);
   font-weight: var(--mc-font-weight-control);
   line-height: var(--left-sidebar-menu-line-height);
+}
+
+.left-sidebar__account-menu-license {
+  cursor: default;
+}
+
+.left-sidebar__account-menu-license-label {
+  flex: 0 0 auto;
+}
+
+.left-sidebar__account-menu-license-value {
+  min-width: 0;
+  margin-left: auto;
+  overflow: hidden;
+  color: var(--mc-color-text-muted);
+  font-size: 12px;
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .left-sidebar__account-menu-item:hover {
@@ -328,6 +347,7 @@
 }
 
 .left-sidebar__account-menu-item svg,
+.left-sidebar__account-menu-license svg,
 .left-sidebar__project-menu-item svg {
   width: var(--left-sidebar-menu-icon-size);
   height: var(--left-sidebar-menu-icon-size);

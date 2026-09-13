@@ -118,7 +118,17 @@ describe('Automation Renderer Host API to real core-server', () => {
     const modelConfigId = savedModelSettings.models[0].id
     const trustedIpc = {} as TrustedIpcMain
     const ipcRenderer = rendererTransport(trustedIpc)
-    disposeAutomationIpc = registerAutomationIpc(trustedIpc, coreServer)
+    let executionRevision = 0
+    disposeAutomationIpc = registerAutomationIpc(trustedIpc, coreServer, async () => {
+      const issuedAt = Date.now()
+      await coreServer!.setExecutionAccess({
+        revision: ++executionRevision,
+        identityEpoch: 1,
+        reason: 'allowed',
+        issuedAt,
+        validUntil: issuedAt + 60_000
+      })
+    })
     const automations = createAutomationIpcBridge(ipcRenderer)
 
     await expect(automations.list({ schemaVersion: 1, limit: 20 })).resolves.toEqual({

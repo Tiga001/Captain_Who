@@ -259,6 +259,7 @@ async fn automation_human_root_uses_atomic_admission_and_new_chat_per_run() {
         .automation_report_sink_for_agent_run_id("ordinary-human-root-run")
         .unwrap()
         .is_none());
+    service.grant_execution_access_for_test();
     let task = seed_automation(&storage, "automation-humanroot-new-chat");
 
     let run_one = enqueue_and_claim(&database_path, &storage, &task, "manual-one");
@@ -311,6 +312,24 @@ async fn automation_human_root_uses_atomic_admission_and_new_chat_per_run() {
         reported.result_preview.as_deref(),
         Some("A durable important update.")
     );
+    let denied_at = now_ms();
+    service
+        .set_execution_access(mycopilot_protocol_rs::SetExecutionAccessInput {
+            revision: 2,
+            identity_epoch: 1,
+            reason: mycopilot_protocol_rs::ExecutionAccessReason::AccountSignedOut,
+            issued_at: denied_at,
+            valid_until: denied_at,
+        })
+        .unwrap();
+    assert_eq!(
+        storage
+            .get_automation_run(&run_one.id)
+            .unwrap()
+            .unwrap()
+            .status,
+        StoredAutomationRunStatus::Running
+    );
     wait_for_done(&mut receiver).await;
     assert!(matches!(
         service
@@ -322,6 +341,8 @@ async fn automation_human_root_uses_atomic_admission_and_new_chat_per_run() {
         }
     ));
     settle_completed_run(&database_path, &run_one.id, &turn_one.run_id);
+
+    service.grant_execution_access_for_test();
 
     let task = storage.get_automation(&task.id).unwrap().unwrap();
     let run_two = enqueue_and_claim(&database_path, &storage, &task, "manual-two");
@@ -444,6 +465,7 @@ async fn stale_automation_admission_rolls_back_conversation_messages_and_trace()
     storage.save_model_settings(test_model_settings()).unwrap();
     let service = AgentService::try_new(Arc::clone(&storage)).unwrap();
     let task = seed_automation(&storage, "automation-humanroot-stale");
+    service.grant_execution_access_for_test();
     let run = enqueue_and_claim(&database_path, &storage, &task, "manual-stale");
     let before = storage
         .load_conversation_metas()
@@ -485,6 +507,102 @@ async fn stale_automation_admission_rolls_back_conversation_messages_and_trace()
     assert!(current.conversation_id.is_none());
     assert!(current.user_message_id.is_none());
     assert!(current.assistant_message_id.is_none());
+}
+
+#[test]
+fn execution_access_expiring_at_storage_commit_rolls_back_messages_trace_and_binding() {
+    let fixture = tempdir().unwrap();
+    let database_path = fixture.path().join("storage.sqlite");
+    let storage = Arc::new(StorageService::open(&database_path).unwrap());
+    storage.save_model_settings(test_model_settings()).unwrap();
+    let task = seed_automation(&storage, "execution-access-commit");
+    let run = enqueue_and_claim(&database_path, &storage, &task, "commit-expiry");
+    let timestamp = now_ms();
+    let conversation = ChatConversationRecord {
+        id: "execution-access-conversation".into(),
+        project_id: None,
+        model_id: Some("model-1".into()),
+        title: "Transaction expiry".into(),
+        messages: [
+            ("execution-access-user", "user"),
+            ("execution-access-assistant", "assistant"),
+        ]
+        .into_iter()
+        .map(|(id, role)| ChatMessageRecord {
+            id: id.into(),
+            role: role.into(),
+            content: "test".into(),
+            created_at: timestamp,
+            status: Some(if role == "user" { "sent" } else { "pending" }.into()),
+            attachments: Vec::new(),
+            agent_run_json: None,
+            ui_state_json: None,
+            human_interaction_response: None,
+        })
+        .collect(),
+        created_at: timestamp,
+        updated_at: timestamp,
+        pinned_at: None,
+        archived_at: None,
+        unread_at: None,
+    };
+    let trace = mycopilot_core::ConversationTraceSnapshot::default().in_progress_trace(
+        "execution-access-agent-run",
+        &conversation.id,
+        "execution-access-assistant",
+    );
+    let checks = std::cell::Cell::new(0);
+    let error = storage
+        .save_automation_conversation_and_begin_turn_with_preloaded_agent_messages(
+            conversation,
+            None,
+            mycopilot_core::AgentTurnPermissionSource::HostAuthenticatedRoot(
+                AgentPermissions::default(),
+            ),
+            &[],
+            &trace,
+            timestamp,
+            timestamp,
+            &automation_repository::AutomationRunAdmissionInput {
+                automation_run_id: run.id.clone(),
+                admission_token: run.admission_token.clone().unwrap(),
+                config_revision: task.revision,
+                permission_mode: "default".into(),
+                agent_run_id: trace.run_id.clone(),
+                conversation_id: trace.conversation_id.clone(),
+                user_message_id: "execution-access-user".into(),
+                assistant_message_id: trace.assistant_message_id.clone(),
+                admitted_at: timestamp,
+            },
+            &|| {
+                checks.set(checks.get() + 1);
+                if checks.get() == 1 {
+                    Ok(())
+                } else {
+                    Err("ACCOUNT_LICENSE_UNAVAILABLE".into())
+                }
+            },
+        )
+        .unwrap_err();
+    assert_eq!(error, "ACCOUNT_LICENSE_UNAVAILABLE");
+    assert_eq!(
+        checks.get(),
+        2,
+        "Both initial transaction and final commit boundaries must check the lease"
+    );
+    assert!(storage.load_conversation_metas().unwrap().is_empty());
+    assert!(storage
+        .get_conversation_turn_trace("execution-access-assistant")
+        .unwrap()
+        .is_none());
+    let current = storage.get_automation_run(&run.id).unwrap().unwrap();
+    assert_eq!(current.status, StoredAutomationRunStatus::Admitting);
+    assert!(current.agent_run_id.is_none());
+    let count: i64 = rusqlite::Connection::open(&database_path)
+        .unwrap()
+        .query_row("SELECT COUNT(*) FROM messages", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(count, 0);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -542,6 +660,7 @@ async fn permission_revoked_after_precheck_is_blocked_atomically_before_humanroo
     let service =
         AgentService::try_new_deferred_startup_reconciliation(Arc::clone(&storage)).unwrap();
     let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    service.grant_execution_access_for_test();
     let error = service
         .start_automation_human_root_turn(
             automation_start(
@@ -668,6 +787,7 @@ async fn archived_existing_chat_is_a_repairable_target_error_without_admission()
         .unwrap();
     let service = AgentService::try_new(Arc::clone(&storage)).unwrap();
     let task = seed_automation(&storage, "automation-humanroot-archived-existing");
+    service.grant_execution_access_for_test();
     let run = enqueue_and_claim(&database_path, &storage, &task, "manual-archived-existing");
     let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
     let error = service
@@ -706,6 +826,7 @@ async fn exhausted_shared_agent_gate_is_retryable_without_admission() {
     storage.save_model_settings(test_model_settings()).unwrap();
     let service = AgentService::try_new(Arc::clone(&storage)).unwrap();
     let gate = service.turn_concurrency_gate();
+    service.grant_execution_access_for_test();
     let _manual_turn_permits = (0..gate.limit())
         .map(|_| gate.try_acquire().unwrap())
         .collect::<Vec<_>>();
@@ -798,6 +919,7 @@ async fn existing_chat_with_active_human_root_turn_is_retryable_without_admissio
     let service =
         AgentService::try_new_deferred_startup_reconciliation(Arc::clone(&storage)).unwrap();
     let task = seed_automation(&storage, "automation-humanroot-busy-existing");
+    service.grant_execution_access_for_test();
     let run = enqueue_and_claim(&database_path, &storage, &task, "manual-busy-existing");
     let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
     let error = service
@@ -865,6 +987,7 @@ async fn destructive_resource_mutations_terminalize_live_automation_runs_before_
     let service =
         AgentService::try_new_deferred_startup_reconciliation(Arc::clone(&storage)).unwrap();
 
+    service.grant_execution_access_for_test();
     storage
         .save_conversation(ChatConversationRecord {
             id: "automation-delete-conversation".to_string(),

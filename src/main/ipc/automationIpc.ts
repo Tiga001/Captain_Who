@@ -45,7 +45,10 @@ function broadcast(channel: string, payload: unknown): void {
 
 export function registerAutomationIpc(
   ipcMain: TrustedIpcMain,
-  coreServer: CoreServer
+  coreServer: CoreServer,
+  assertCanStartTurn: () => void | Promise<void> = () => {
+    throw new Error('ACCOUNT_LOGIN_REQUIRED')
+  }
 ): AutomationIpcRegistration {
   let latestResync: AutomationResync | null = null
   let pendingOpenRequest: AutomationOpenRequest | null = null
@@ -129,9 +132,11 @@ export function registerAutomationIpc(
     )
   )
   ipcMain.handle(HOST_CHANNELS.automations.runNow, (_event, input) =>
-    captureHostInvocation(async () =>
-      parseAutomationRun(await coreServer.runAutomationNow(parseAutomationRunNowInput(input)))
-    )
+    captureHostInvocation(async () => {
+      const parsed = parseAutomationRunNowInput(input)
+      await assertCanStartTurn()
+      return parseAutomationRun(await coreServer.runAutomationNow(parsed))
+    })
   )
   ipcMain.handle(HOST_CHANNELS.automations.delete, (_event, input) =>
     captureHostInvocation(async () =>

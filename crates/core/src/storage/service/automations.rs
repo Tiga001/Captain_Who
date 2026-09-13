@@ -212,6 +212,26 @@ impl StorageService {
             .map_err(storage_error)
     }
 
+    pub fn fail_unadmitted_automation_runs_for_execution_access(
+        &self,
+        run_id: Option<&str>,
+        code: &str,
+        message: &str,
+        settled_at: i64,
+        limit: usize,
+    ) -> Result<usize, String> {
+        let mut connection = self.state.connection()?;
+        automation_repository::fail_unadmitted_automation_runs_for_execution_access(
+            &mut connection,
+            run_id,
+            code,
+            message,
+            settled_at,
+            limit,
+        )
+        .map_err(storage_error)
+    }
+
     pub fn get_automation_run_by_agent_run_id(
         &self,
         agent_run_id: &str,

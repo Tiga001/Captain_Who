@@ -25,15 +25,17 @@ pub(crate) fn is_automation_request_method(method: &str) -> bool {
     )
 }
 
+#[cfg(test)]
 pub(crate) fn handle_automation_request(
     storage: &StorageService,
     request: JsonRpcRequest,
 ) -> Value {
-    handle_automation_request_with_wake(storage, None, request)
+    handle_automation_request_with_access(storage, None, None, request)
 }
 
-pub(crate) fn handle_automation_request_with_wake(
+pub(crate) fn handle_automation_request_with_access(
     storage: &StorageService,
+    agent_service: Option<&AgentService>,
     scheduler_wake: Option<&AutomationSchedulerWake>,
     request: JsonRpcRequest,
 ) -> Value {
@@ -59,7 +61,22 @@ pub(crate) fn handle_automation_request_with_wake(
             parse_and_run(id, request.params, |input| service.set_enabled(input))
         }
         mycopilot_protocol_rs::AUTOMATION_RUN_NOW_METHOD => {
-            parse_and_run(id, request.params, |input| service.run_now(input))
+            parse_and_run(id, request.params, |input| {
+                let run = service.run_now(input)?;
+                if let Some(agent) = agent_service {
+                    agent
+                        .fail_disallowed_automation_runs(Some(&run.run_id), 1)
+                        .map_err(AutomationServiceError::internal)?;
+                    let current = storage
+                        .get_automation_run(&run.run_id)
+                        .map_err(AutomationServiceError::internal)?
+                        .ok_or_else(|| {
+                            AutomationServiceError::internal("Automation run disappeared")
+                        })?;
+                    return crate::application::automation::run_dto(&current);
+                }
+                Ok(run)
+            })
         }
         mycopilot_protocol_rs::AUTOMATION_DELETE_METHOD => {
             parse_and_run(id, request.params, |input| service.delete(input))
@@ -262,6 +279,74 @@ mod tests {
             },
         );
         assert_eq!(response["error"]["code"], -32602);
+    }
+
+    #[test]
+    fn execution_access_run_now_records_failed_attempt_without_blocking_task_or_replaying() {
+        let temporary = tempfile::tempdir().unwrap();
+        let storage = std::sync::Arc::new(
+            StorageService::open(&temporary.path().join("storage.sqlite")).unwrap(),
+        );
+        storage.save_model_settings(model_settings()).unwrap();
+        storage
+            .save_project(ProjectRecord::with_primary_folder(
+                "project-automation",
+                "Automation project",
+                temporary.path().to_string_lossy().into_owned(),
+                1,
+            ))
+            .unwrap();
+        let agent =
+            AgentService::try_new_deferred_startup_reconciliation(std::sync::Arc::clone(&storage))
+                .unwrap();
+        let task: AutomationTaskDto = serde_json::from_value(
+            request(
+                &storage,
+                mycopilot_protocol_rs::AUTOMATION_CREATE_METHOD,
+                &create_input("project-automation", "create-denied"),
+            )["result"]
+                .clone(),
+        )
+        .unwrap();
+        let run_now = || JsonRpcRequest {
+            jsonrpc: "2.0".into(),
+            id: JsonRpcId::Number(1),
+            method: mycopilot_protocol_rs::AUTOMATION_RUN_NOW_METHOD.into(),
+            params: Some(
+                serde_json::to_value(AutomationRunNowInputDto {
+                    schema_version: AUTOMATION_SCHEMA_VERSION,
+                    automation_id: task.automation_id.clone(),
+                    request_id: "run-denied".into(),
+                })
+                .unwrap(),
+            ),
+        };
+        let response =
+            handle_automation_request_with_access(&storage, Some(&agent), None, run_now());
+        assert_eq!(response["result"]["status"], "failed", "{response}");
+        assert_eq!(
+            response["result"]["errorCode"], "ACCOUNT_LOGIN_REQUIRED",
+            "{response}"
+        );
+        let current = storage
+            .get_automation(&task.automation_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(current.config.health_state, "ok");
+        assert_eq!(current.status.as_str(), "active");
+        assert!(storage.load_conversation_metas().unwrap().is_empty());
+        agent.grant_execution_access_for_test();
+        let retry = handle_automation_request_with_access(&storage, Some(&agent), None, run_now());
+        assert_eq!(retry["result"]["runId"], response["result"]["runId"]);
+        assert_eq!(retry["result"]["status"], "failed");
+        assert_eq!(
+            storage
+                .list_automation_runs(&task.automation_id, None, 10)
+                .unwrap()
+                .items
+                .len(),
+            1
+        );
     }
 
     #[test]

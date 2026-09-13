@@ -441,6 +441,13 @@ impl AgentService {
     ) -> Result<AgentUsageClearOutput, String> {
         self.storage.clear_usage_records(input)
     }
+
+    pub fn get_local_token_usage(
+        &self,
+        input: &mycopilot_core::LocalTokenUsageSummaryInput,
+    ) -> Result<mycopilot_core::LocalTokenUsageSummaryOutput, String> {
+        self.storage.get_local_token_usage(input, now_ms())
+    }
 }
 
 #[cfg(test)]

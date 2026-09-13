@@ -7,6 +7,7 @@ import {
   nativeTheme,
   safeStorage,
   session,
+  shell,
   type IpcMainInvokeEvent,
   type OpenDialogOptions
 } from 'electron'
@@ -53,6 +54,12 @@ import { AuthService } from './auth/AuthService'
 import { CloudBaseAuthDriver } from './auth/CloudBaseAuthDriver'
 import { SessionStore } from './auth/SessionStore'
 import { ACCOUNT_SESSION_SCOPE } from './auth/accountConfig'
+import { LicenseService } from './auth/LicenseService'
+import { LicenseCacheStore } from './auth/LicenseCacheStore'
+import { fetchAccountLicense } from './auth/LicenseApiClient'
+import { registerLicenseIpc } from './auth/licenseIpc'
+import { LicenseManagementService } from './auth/LicenseManagementService'
+import { ExecutionAccessBridge } from './auth/ExecutionAccessBridge'
 import { fetchAccountProfile } from './auth/AccountApiClient'
 import { registerAuthIpc } from './auth/authIpc'
 
@@ -304,6 +311,21 @@ async function initializeApplication(): Promise<void> {
   )
   const disposeAuthIpc = registerAuthIpc(accountAuth, isTrustedRendererEvent)
   app.once('will-quit', disposeAuthIpc)
+  const accountLicense = new LicenseService(
+    accountAuth,
+    new LicenseCacheStore(appDataRoot, safeStorage, ACCOUNT_SESSION_SCOPE),
+    fetchAccountLicense
+  )
+  app.once(
+    'will-quit',
+    registerLicenseIpc(
+      accountLicense,
+      isTrustedRendererEvent,
+      new LicenseManagementService(accountAuth, accountLicense, (url) => shell.openExternal(url))
+    )
+  )
+  const executionAccess = new ExecutionAccessBridge(accountAuth, accountLicense, coreServer)
+  app.once('will-quit', () => executionAccess.dispose())
   // Account validation runs alongside existing service initialization, never owns its lifecycle.
   void accountAuth.restoreSession()
   app.setName('Captain Who')
@@ -471,7 +493,9 @@ async function initializeApplication(): Promise<void> {
     () => {
       if (!accountAuth) throw new Error('ACCOUNT_LOGIN_REQUIRED')
       accountAuth.assertCanStartTurn()
-    }
+      accountLicense.assertCanStartTurn()
+    },
+    () => executionAccess.sync()
   )
   if (mainWindow?.isVisible()) disposeHostIpc.beginNotificationDelivery()
   hostInitializationReady = true

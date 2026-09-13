@@ -370,6 +370,84 @@ pub fn terminate_unadmitted_automation_run(
     error_message: &str,
     settled_at: i64,
 ) -> rusqlite::Result<AutomationRunMutationOutcome> {
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let result = terminate_unadmitted_in_transaction(
+        &transaction,
+        automation_run_id,
+        admission_token,
+        terminal_status,
+        error_code,
+        error_message,
+        settled_at,
+        false,
+    )?;
+    transaction.commit()?;
+    Ok(result)
+}
+
+/// Host-only denial settlement. Does not change schedule/configuration or touch bound runs.
+/// The caller holds the same process access mutex as atomic HumanRoot admission.
+pub fn fail_unadmitted_automation_runs_for_execution_access(
+    connection: &mut Connection,
+    run_id: Option<&str>,
+    error_code: &str,
+    error_message: &str,
+    settled_at: i64,
+    limit: usize,
+) -> rusqlite::Result<usize> {
+    if !matches!(
+        error_code,
+        "ACCOUNT_LOGIN_REQUIRED" | "ACCOUNT_LICENSE_REQUIRED" | "ACCOUNT_LICENSE_UNAVAILABLE"
+    ) {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let rows = {
+        let mut statement = transaction.prepare(
+            "SELECT id, COALESCE(admission_token, '') FROM automation_runs
+             WHERE status IN ('queued', 'admitting') AND agent_run_id IS NULL
+             AND (?1 IS NULL OR id = ?1) ORDER BY scheduled_for, id LIMIT ?2",
+        )?;
+        let rows = statement
+            .query_map(params![run_id, limit.clamp(1, 100) as i64], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows
+    };
+    let mut count = 0;
+    for (id, token) in rows {
+        if matches!(
+            terminate_unadmitted_in_transaction(
+                &transaction,
+                &id,
+                &token,
+                StoredAutomationRunStatus::Failed,
+                error_code,
+                error_message,
+                settled_at,
+                true
+            )?,
+            AutomationRunMutationOutcome::Updated(_)
+        ) {
+            count += 1;
+        }
+    }
+    transaction.commit()?;
+    Ok(count)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn terminate_unadmitted_in_transaction(
+    transaction: &Transaction<'_>,
+    automation_run_id: &str,
+    admission_token: &str,
+    terminal_status: StoredAutomationRunStatus,
+    error_code: &str,
+    error_message: &str,
+    settled_at: i64,
+    allow_queued: bool,
+) -> rusqlite::Result<AutomationRunMutationOutcome> {
     if !matches!(
         terminal_status,
         StoredAutomationRunStatus::Failed | StoredAutomationRunStatus::Cancelled
@@ -380,7 +458,6 @@ pub fn terminate_unadmitted_automation_run(
     {
         return Err(rusqlite::Error::InvalidQuery);
     }
-    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let attention_required = terminal_status == StoredAutomationRunStatus::Failed;
     let changed = transaction.execute(
         "UPDATE automation_runs
@@ -393,7 +470,8 @@ pub fn terminate_unadmitted_automation_run(
                  ELSE attention_required_at
              END,
              completed_at = MAX(created_at, ?4), updated_at = MAX(updated_at, ?4)
-         WHERE id = ?6 AND status = 'admitting' AND admission_token = ?7
+         WHERE id = ?6 AND ((status = 'admitting' AND admission_token = ?7)
+             OR (?8 AND status = 'queued'))
            AND agent_run_id IS NULL",
         params![
             terminal_status.as_str(),
@@ -403,11 +481,11 @@ pub fn terminate_unadmitted_automation_run(
             attention_required,
             automation_run_id,
             admission_token,
+            allow_queued,
         ],
     )?;
-    let current = query_run(&transaction, automation_run_id)?;
+    let current = query_run(transaction, automation_run_id)?;
     if changed != 1 {
-        transaction.rollback()?;
         return Ok(AutomationRunMutationOutcome::Stale(current));
     }
     let run = current.expect("terminated unadmitted automation run");
@@ -418,7 +496,7 @@ pub fn terminate_unadmitted_automation_run(
     )?;
     let payload = serde_json::json!({ "status": run.status.as_str() });
     insert_event(
-        &transaction,
+        transaction,
         "run_updated",
         &run.automation_id,
         Some(&run.id),
@@ -428,7 +506,7 @@ pub fn terminate_unadmitted_automation_run(
     )?;
     if attention_required {
         insert_event(
-            &transaction,
+            transaction,
             "attention_changed",
             &run.automation_id,
             Some(&run.id),
@@ -449,7 +527,7 @@ pub fn terminate_unadmitted_automation_run(
         let (title, policy) = run_notification_config(&run);
         if terminal_notification_requested(&policy, run.status, "unknown") {
             enqueue_automation_notification_in_transaction(
-                &transaction,
+                transaction,
                 &NewAutomationNotificationRecord {
                     automation_id: run.automation_id.clone(),
                     automation_run_id: Some(run.id.clone()),
@@ -462,7 +540,6 @@ pub fn terminate_unadmitted_automation_run(
             )?;
         }
     }
-    transaction.commit()?;
     Ok(AutomationRunMutationOutcome::Updated(run))
 }
 
@@ -724,4 +801,3 @@ pub fn admit_automation_run_in_transaction(
     )?;
     Ok(AutomationRunAdmissionOutcome::Admitted(run))
 }
-

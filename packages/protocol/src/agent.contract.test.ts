@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
+import { AGENT_GET_LOCAL_TOKEN_USAGE_METHOD } from './localTokenUsage'
 import {
   AGENT_APPROVE_ACTION_METHOD,
   AGENT_CANCEL_ACTION_METHOD,
@@ -204,6 +205,7 @@ describe('Agent cross-language golden contract', () => {
       rejectAction: AGENT_REJECT_ACTION_METHOD,
       cancelAction: AGENT_CANCEL_ACTION_METHOD,
       getUsageSummary: AGENT_GET_USAGE_SUMMARY_METHOD,
+      getLocalTokenUsage: AGENT_GET_LOCAL_TOKEN_USAGE_METHOD,
       clearUsageRecords: AGENT_CLEAR_USAGE_RECORDS_METHOD,
       readFileChange: AGENT_READ_FILE_CHANGE_METHOD,
       getFileChangeDiff: AGENT_GET_FILE_CHANGE_DIFF_METHOD,

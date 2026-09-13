@@ -39,6 +39,7 @@ pub mod guidance_repository;
 pub mod human_interaction_repository;
 pub mod image_generation_execution_repository;
 pub mod image_generation_repository;
+pub mod local_token_usage_repository;
 pub mod managed_artifact_repository;
 pub mod manual_context_compaction_repository;
 pub mod mcp_approval_envelope_repository;

@@ -7,6 +7,7 @@ import { ToastProvider } from './components/toast/ToastProvider'
 import { AppStartupGate } from './features/startup/AppStartupGate'
 import { AppStartupProvider } from './features/startup/AppStartupProvider'
 import { AccountAuthProvider } from './features/auth/AccountAuthProvider'
+import { LicenseProvider } from './features/license/LicenseProvider'
 import { useEffect, useState } from 'react'
 import { hostClient } from './host/hostClient'
 
@@ -40,11 +41,13 @@ function App(): React.JSX.Element {
       <ToastProvider>
         <ImagePreviewProvider>
           <AccountAuthProvider>
-            <AppStartupProvider>
-              <AppStartupGate>
-                <HostWorkspace />
-              </AppStartupGate>
-            </AppStartupProvider>
+            <LicenseProvider>
+              <AppStartupProvider>
+                <AppStartupGate>
+                  <HostWorkspace />
+                </AppStartupGate>
+              </AppStartupProvider>
+            </LicenseProvider>
           </AccountAuthProvider>
         </ImagePreviewProvider>
       </ToastProvider>

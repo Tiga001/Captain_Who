@@ -32,6 +32,35 @@ pub fn insert_observation(
     connection: &Connection,
     observation: &ModelRequestObservation,
 ) -> Result<(), ModelRequestObservationRepositoryError> {
+    // SAVEPOINT works both standalone and inside the caller's compaction transaction.
+    // Existing observation triggers and the independent token ledger commit atomically.
+    connection.execute_batch("SAVEPOINT local_token_observation")?;
+    let result = insert_observation_in_savepoint(connection, observation);
+    match result {
+        Ok(()) => {
+            if let Err(error) = connection.execute_batch("RELEASE local_token_observation") {
+                // A failed standalone commit must not leave an open savepoint on the shared
+                // connection. SQLite may already have rolled it back after an I/O failure.
+                let _ = connection.execute_batch(
+                    "ROLLBACK TO local_token_observation; RELEASE local_token_observation",
+                );
+                return Err(error.into());
+            }
+            Ok(())
+        }
+        Err(error) => {
+            connection.execute_batch(
+                "ROLLBACK TO local_token_observation; RELEASE local_token_observation",
+            )?;
+            Err(error)
+        }
+    }
+}
+
+fn insert_observation_in_savepoint(
+    connection: &Connection,
+    observation: &ModelRequestObservation,
+) -> Result<(), ModelRequestObservationRepositoryError> {
     observation
         .validate()
         .map_err(|error| ModelRequestObservationRepositoryError::Invalid(error.to_string()))?;
@@ -86,7 +115,8 @@ pub fn insert_observation(
             observation.completed_at,
         ],
     )?;
-    Ok(())
+    super::local_token_usage_repository::record_observation(connection, observation)
+        .map_err(ModelRequestObservationRepositoryError::Invalid)
 }
 
 pub fn get_observation(

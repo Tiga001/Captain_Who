@@ -24,6 +24,8 @@ import {
 } from 'lucide-react'
 import { useFrontendConfig } from '../../../config/FrontendConfigProvider'
 import { useAccountAuth } from '../../auth/AccountAuthContext'
+import { useLicense } from '../../license/LicenseContext'
+import { useTurnAccessIdentity } from '../../license/useTurnAccessIdentity'
 import { useModelSettings } from '../../../config/ModelSettingsProvider'
 import { useProjectSettings } from '../../../config/ProjectSettingsProvider'
 import { getUserFacingErrorMessage } from '../../../errors/userFacingError'
@@ -144,6 +146,9 @@ export function ChatComposer({
 }: ChatComposerProps) {
   const { t } = useFrontendConfig()
   const accountAuth = useAccountAuth()
+  const license = useLicense()
+  const accessIdentity = useTurnAccessIdentity()
+  const submitInFlightRef = useRef(false)
   const { enabledModels } = useModelSettings()
   const { projects, openCreateProjectDialog } = useProjectSettings()
   const openImagePreview = useImagePreview()
@@ -568,6 +573,7 @@ export function ChatComposer({
   }
 
   const submitMessage = async () => {
+    if (submitInFlightRef.current) return
     if (
       isComposingRef.current ||
       Date.now() - lastCompositionEndAtRef.current < 120 ||
@@ -580,8 +586,13 @@ export function ChatComposer({
       return
     }
     if (!canSend) return
+    const submissionIdentity = accessIdentity.current
     if (!isGenerating && accountAuth && !accountAuth.canStartTurn()) {
       accountAuth.requestLogin()
+      return
+    }
+    if (!isGenerating && license && !license.canStartTurn()) {
+      license.requestAccess()
       return
     }
 
@@ -602,6 +613,7 @@ export function ChatComposer({
     }
 
     if (previousResetKeyRef.current !== resetKey) return
+    if (!isGenerating && submissionIdentity !== accessIdentity.current) return
 
     const submitOptions: ChatSubmitOptions = {
       attachments: inputAttachments,
@@ -639,7 +651,14 @@ export function ChatComposer({
       return
     }
 
-    const accepted = await onSubmitMessage?.(messageContent, submitOptions)
+    if (submitInFlightRef.current) return
+    submitInFlightRef.current = true
+    let accepted: boolean | void
+    try {
+      accepted = await onSubmitMessage?.(messageContent, submitOptions)
+    } finally {
+      submitInFlightRef.current = false
+    }
     if (accepted === false || previousResetKeyRef.current !== resetKey) return
     // Submission may await Provider work while the composer already holds the next turn's draft.
     const currentDraft = draftRef.current

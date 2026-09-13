@@ -59,6 +59,7 @@ pub(crate) enum AutomationTurnObservation {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum AutomationHumanRootStartError {
+    ExecutionAccessDenied(ExecutionAccessDenied),
     RetryableCapacity,
     RetryableConversationBusy,
     TargetInvalid { code: &'static str, message: String },
@@ -68,6 +69,7 @@ pub(crate) enum AutomationHumanRootStartError {
 impl std::fmt::Display for AutomationHumanRootStartError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::ExecutionAccessDenied(denial) => formatter.write_str(denial.message),
             Self::RetryableCapacity => {
                 formatter.write_str("Agent execution capacity is currently busy")
             }
@@ -151,6 +153,9 @@ impl AgentService {
         start: AutomationHumanRootTurnStart,
         notifications: CoreServerNotificationSender,
     ) -> Result<AgentConversationTurnOutput, AutomationHumanRootStartError> {
+        // Access denial takes precedence over busy/capacity and must not become a retry queue.
+        self.check_automation_execution_access()
+            .map_err(AutomationHumanRootStartError::ExecutionAccessDenied)?;
         validate_automation_start(&start)
             .map_err(|error| AutomationHumanRootStartError::Fatal(error.to_string()))?;
         let destination_snapshot = start.destination.clone();
@@ -195,6 +200,17 @@ impl AgentService {
         };
         match self.start_human_root_turn_internal(input, None, Some(admission), notifications) {
             Ok(output) => Ok(output),
+            Err(error) if error.data().and_then(|data| data["code"].as_str()).is_some_and(|code|
+                matches!(code, "ACCOUNT_LOGIN_REQUIRED" | "ACCOUNT_LICENSE_REQUIRED" | "ACCOUNT_LICENSE_UNAVAILABLE")) => {
+                let code = match error.data().and_then(|data| data["code"].as_str()) {
+                    Some("ACCOUNT_LOGIN_REQUIRED") => "ACCOUNT_LOGIN_REQUIRED",
+                    Some("ACCOUNT_LICENSE_REQUIRED") => "ACCOUNT_LICENSE_REQUIRED",
+                    _ => "ACCOUNT_LICENSE_UNAVAILABLE",
+                };
+                Err(AutomationHumanRootStartError::ExecutionAccessDenied(ExecutionAccessDenied {
+                    code, message: "账号登录或使用许可不可用，本次自动化未启动。",
+                }))
+            }
             Err(error)
                 if error.data().and_then(|data| data["code"].as_str())
                     == Some("conversation_busy") =>

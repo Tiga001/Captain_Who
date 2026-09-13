@@ -539,6 +539,7 @@ fn agent_method_names_match_the_cross_language_golden_contract() {
         ("rejectAction", AGENT_REJECT_ACTION_METHOD),
         ("cancelAction", AGENT_CANCEL_ACTION_METHOD),
         ("getUsageSummary", AGENT_GET_USAGE_SUMMARY_METHOD),
+        ("getLocalTokenUsage", AGENT_GET_LOCAL_TOKEN_USAGE_METHOD),
         ("clearUsageRecords", AGENT_CLEAR_USAGE_RECORDS_METHOD),
         ("readFileChange", AGENT_READ_FILE_CHANGE_METHOD),
         ("getFileChangeDiff", AGENT_GET_FILE_CHANGE_DIFF_METHOD),

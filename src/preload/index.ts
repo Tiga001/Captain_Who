@@ -2,6 +2,7 @@ import { contextBridge, ipcRenderer } from 'electron'
 import { HOST_CHANNELS, type HostApi } from '@mycopilot/host-api'
 import { createAgentIpcBridge } from './AgentIpcBridge'
 import { createAuthIpcBridge } from './AuthIpcBridge'
+import { createLicenseIpcBridge } from './LicenseIpcBridge'
 import { createAutomationIpcBridge } from './AutomationIpcBridge'
 import { createAppIpcBridge } from './AppIpcBridge'
 import { createBrowserIpcBridge } from './BrowserIpcBridge'
@@ -17,6 +18,7 @@ import { createTerminalIpcBridge } from './TerminalIpcBridge'
 import { createWorkspaceFilesIpcBridge } from './WorkspaceFilesIpcBridge'
 
 const host: HostApi = {
+  license: createLicenseIpcBridge(ipcRenderer),
   auth: createAuthIpcBridge(ipcRenderer),
   core: {
     ping: (input) => ipcRenderer.invoke(HOST_CHANNELS.core.ping, input)

@@ -74,6 +74,35 @@ function createCore(overrides: Record<string, unknown> = {}) {
 }
 
 describe('Main Automation IPC', () => {
+  it.each(['ACCOUNT_LOGIN_REQUIRED', 'ACCOUNT_LICENSE_REQUIRED', 'ACCOUNT_LICENSE_UNAVAILABLE'])(
+    'rejects runNow with %s while keeping stored history readable',
+    async (message) => {
+      const trusted = createTrustedIpc()
+      const core = createCore()
+      registerAutomationIpc(trusted.ipc, core as never, () => {
+        throw new Error(message)
+      })
+      const input = { schemaVersion: 1, automationId: 'automation-1', requestId: 'manual-1' }
+      await expect(
+        trusted.handlers.get(HOST_CHANNELS.automations.runNow)?.(event, input)
+      ).resolves.toMatchObject({ ok: false, error: { message } })
+      expect(core.runAutomationNow).not.toHaveBeenCalled()
+      expect(trusted.handlers.has(HOST_CHANNELS.automations.listRuns)).toBe(true)
+    }
+  )
+  it('fails closed if the host forgot its runNow guard', async () => {
+    const trusted = createTrustedIpc()
+    const core = createCore()
+    registerAutomationIpc(trusted.ipc, core as never)
+    await expect(
+      trusted.handlers.get(HOST_CHANNELS.automations.runNow)?.(event, {
+        schemaVersion: 1,
+        automationId: 'automation-1',
+        requestId: 'manual-1'
+      })
+    ).resolves.toMatchObject({ ok: false, error: { message: 'ACCOUNT_LOGIN_REQUIRED' } })
+    expect(core.runAutomationNow).not.toHaveBeenCalled()
+  })
   beforeEach(() => {
     getAllWindows.mockReset().mockReturnValue([])
     fromWebContents.mockReset().mockReturnValue(null)
@@ -82,7 +111,7 @@ describe('Main Automation IPC', () => {
   it('registers the exact invocation allowlist and parses both sides strictly', async () => {
     const trusted = createTrustedIpc()
     const core = createCore()
-    registerAutomationIpc(trusted.ipc, core as never)
+    registerAutomationIpc(trusted.ipc, core as never, () => undefined)
 
     expect([...trusted.handlers.keys()].sort()).toEqual(
       [

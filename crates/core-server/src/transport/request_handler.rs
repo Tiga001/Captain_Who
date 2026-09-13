@@ -11,7 +11,7 @@ pub(crate) fn handle_request(
     }
 
     if is_automation_request_method(&request.method) {
-        return handle_automation_request(storage, request);
+        return handle_automation_request_with_access(storage, Some(agent_service), None, request);
     }
     if is_notification_request_method(&request.method) {
         return handle_notification_request(storage, request);
@@ -22,6 +22,21 @@ pub(crate) fn handle_request(
 
     match request.method.as_str() {
         CORE_PING_METHOD => handle_core_ping(request.id, request.params),
+        mycopilot_protocol_rs::CORE_SET_EXECUTION_ACCESS_METHOD => {
+            let input = match parse_params::<mycopilot_protocol_rs::SetExecutionAccessInput>(
+                request.params,
+            ) {
+                Ok(input) => input,
+                Err(message) => return response_error(Some(request.id), -32602, message),
+            };
+            if let Err(message) = input.validate() {
+                return response_error(Some(request.id), -32602, message);
+            }
+            match agent_service.set_execution_access(input) {
+                Ok(output) => response_success(request.id, output),
+                Err(message) => response_error(Some(request.id), -32000, message),
+            }
+        }
         OFFICE_GET_STATUS_METHOD => handle_office_status_request(agent_service, request),
         AGENT_START_CONVERSATION_TURN_METHOD => handle_agent_start_conversation_turn(
             agent_service,
@@ -288,6 +303,9 @@ pub(crate) fn handle_request(
         }
         AGENT_GET_USAGE_SUMMARY_METHOD => {
             handle_agent_usage_summary(agent_service, request.id, request.params)
+        }
+        AGENT_GET_LOCAL_TOKEN_USAGE_METHOD => {
+            handle_agent_local_token_usage(agent_service, request.id, request.params)
         }
         AGENT_CLEAR_USAGE_RECORDS_METHOD => {
             handle_agent_clear_usage_records(agent_service, request.id, request.params)

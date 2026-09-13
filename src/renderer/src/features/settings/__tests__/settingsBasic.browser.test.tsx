@@ -36,7 +36,26 @@ vi.mock('../../../config/FrontendConfigProvider', async () => {
   return { useFrontendConfig: () => config }
 })
 vi.mock('../../../host/hostClient', () => ({
-  hostClient: { agent: { onPromptPreferencesChanged: vi.fn(() => () => undefined) } }
+  hostClient: {
+    agent: {
+      onPromptPreferencesChanged: vi.fn(() => () => undefined),
+      getLocalTokenUsage: async () => ({
+        timezone: 'Asia/Shanghai',
+        startedAt: Date.now(),
+        days: [],
+        totalTokens: '0',
+        todayTokens: '0',
+        peakDailyTokens: '0',
+        unreportedRequestCount: 0
+      })
+    }
+  }
+}))
+vi.mock('../../license/LicenseContext', () => ({
+  useLicense: () => ({
+    state: { status: 'signedOut', reason: null, expiresAt: null, error: null },
+    refresh: vi.fn()
+  })
 }))
 vi.mock('../../../lib/platform', () => ({ isMacOS: () => mocks.mac }))
 vi.mock('../../notifications/notificationClient', () => ({

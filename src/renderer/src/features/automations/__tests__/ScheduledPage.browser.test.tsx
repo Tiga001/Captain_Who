@@ -5,6 +5,8 @@ import { render } from 'vitest-browser-react'
 import { frontendConfig, getFrontendCssVariables } from '../../../config/frontendConfig'
 import { classicDarkTheme, classicLightTheme } from '../../../config/themes/classic'
 import { ScheduledPage } from '../ScheduledPage'
+import { AccountAuthContext } from '../../auth/AccountAuthContext'
+import { LicenseContext } from '../../license/LicenseContext'
 import {
   makeAutomationRun,
   makeAutomationTask,
@@ -154,6 +156,67 @@ describe('ScheduledPage', () => {
     service.pendingById = {}
     service.refresh.mockResolvedValue(undefined)
   })
+
+  it.each(['signedOut', 'denied', 'allowed'] as const)(
+    'guides explicit run-now access and handles a late Main refusal (%s)',
+    async (status) => {
+      const login = vi.fn()
+      const access = vi.fn()
+      const handleDenied = vi.fn(() => true)
+      service.tasks = [makeAutomationTask()]
+      const refusal = new Error('ACCOUNT_LICENSE_REQUIRED')
+      service.runNow.mockRejectedValueOnce(refusal)
+      const screen = await render(
+        <AccountAuthContext.Provider
+          value={{
+            state: {
+              revision: 1,
+              status: status === 'signedOut' ? 'signedOut' : 'signedIn',
+              profile: null,
+              error: null,
+              remembered: true
+            },
+            loginRequested: false,
+            canStartTurn: () => status !== 'signedOut',
+            requestLogin: login,
+            dismissLogin: vi.fn(),
+            logout: vi.fn()
+          }}
+        >
+          <LicenseContext.Provider
+            value={{
+              state: {
+                revision: 1,
+                status,
+                reason: null,
+                expiresAt: null,
+                verifiedAt: null,
+                cacheValidUntil: null,
+                error: null
+              },
+              canStartTurn: () => status === 'allowed',
+              requestAccess: access,
+              handleDenied,
+              refresh: vi.fn()
+            }}
+          >
+            <ScheduledPage {...props} />
+          </LicenseContext.Provider>
+        </AccountAuthContext.Provider>
+      )
+      await screen.getByRole('button', { name: 'automation.moreActions: Daily brief' }).click()
+      await screen.getByRole('menuitem', { name: 'automation.runNow', exact: true }).click()
+      if (status === 'allowed') {
+        await expect.poll(() => handleDenied.mock.calls.length).toBe(1)
+        expect(handleDenied).toHaveBeenCalledWith(refusal)
+        expect(service.runNow).toHaveBeenCalledOnce()
+      } else {
+        expect(service.runNow).not.toHaveBeenCalled()
+        expect(status === 'signedOut' ? login : access).toHaveBeenCalledOnce()
+      }
+      expect(service.showToast).not.toHaveBeenCalled()
+    }
+  )
 
   it('filters real task rows and keeps the list interactive beside the drawer', async () => {
     service.tasks = [

@@ -1,9 +1,12 @@
 // Account footer menu and profile display for the left sidebar.
 import { Settings, LogIn, LogOut } from 'lucide-react'
 import { useRef, useState } from 'react'
+import type { LicenseState } from '@mycopilot/host-api'
 import type { TranslationKey } from '../../../config/frontendTranslations'
 import { useAccountAuth } from '../../../features/auth/AccountAuthContext'
 import { AccountAvatar } from '../../../features/auth/AccountAvatar'
+import { CaptainWhoLineIcon } from '../../../components/icons/CaptainWhoLineIcon'
+import { useLicense } from '../../../features/license/LicenseContext'
 import type { UiPreferencesSnapshot } from '../../../features/storage/storageClient'
 import { useDismissOnOutsidePointer } from '../../../hooks/useDismissOnOutsidePointer'
 
@@ -13,14 +16,44 @@ interface LeftSidebarAccountFooterProps {
   uiPreferences: UiPreferencesSnapshot
 }
 
+const licenseDateFormatter = new Intl.DateTimeFormat('en-CA', {
+  timeZone: 'Asia/Shanghai',
+  year: 'numeric',
+  month: '2-digit',
+  day: '2-digit'
+})
+
+function licenseSubtitle(
+  state: LicenseState | undefined,
+  t: LeftSidebarAccountFooterProps['t']
+): string {
+  if (!state) return t('license.state.checking')
+  if (state.status === 'signedOut') return t('license.state.signedOut')
+  if (state.expiresAt === null) {
+    return t(state.status === 'allowed' ? 'license.noExpiry' : `license.state.${state.status}`)
+  }
+
+  const expires = new Date(state.expiresAt)
+  if (!Number.isFinite(expires.getTime())) return t('license.state.unavailable')
+  const parts = licenseDateFormatter.formatToParts(expires)
+  const date = ['year', 'month', 'day']
+    .map((type) => parts.find((part) => part.type === type)?.value)
+    .join('-')
+  return `${t('license.until')} ${date}`
+}
+
 export function LeftSidebarAccountFooter({ onOpenSettings, t }: LeftSidebarAccountFooterProps) {
   const [isAccountMenuOpen, setAccountMenuOpen] = useState(false)
   const accountMenuRef = useRef<HTMLDivElement>(null)
   const auth = useAccountAuth()
+  const license = useLicense()
   const [logoutError, setLogoutError] = useState(false)
-  const profile = auth?.state.profile
+  const profile = auth?.state.status === 'signedIn' ? auth.state.profile : null
   const profileDisplayName = profile?.displayName || t('auth.signedOut')
-  const profileEmail = profile?.email || t('auth.login')
+  const licenseValue =
+    auth?.state.status === 'signedIn'
+      ? licenseSubtitle(license?.state, t)
+      : t('license.state.signedOut')
 
   useDismissOnOutsidePointer(accountMenuRef, isAccountMenuOpen, () => setAccountMenuOpen(false))
 
@@ -42,11 +75,21 @@ export function LeftSidebarAccountFooter({ onOpenSettings, t }: LeftSidebarAccou
             </span>
             <span className="left-sidebar__account-menu-profile-text">
               <span>{profileDisplayName}</span>
-              <span>{profileEmail}</span>
+              {profile?.email ? <span>{profile.email}</span> : null}
             </span>
           </div>
 
           <div className="left-sidebar__account-menu-divider" />
+
+          <div className="left-sidebar__account-menu-license">
+            <CaptainWhoLineIcon />
+            <span className="left-sidebar__account-menu-license-label">
+              {t('license.menuLabel')}
+            </span>
+            <span className="left-sidebar__account-menu-license-value" title={licenseValue}>
+              {licenseValue}
+            </span>
+          </div>
 
           <button
             className="left-sidebar__account-menu-item"
@@ -95,7 +138,6 @@ export function LeftSidebarAccountFooter({ onOpenSettings, t }: LeftSidebarAccou
         </span>
         <span className="left-sidebar__account-text">
           <span>{profileDisplayName}</span>
-          <span>{profileEmail}</span>
         </span>
       </button>
     </div>

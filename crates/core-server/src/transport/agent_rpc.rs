@@ -255,3 +255,23 @@ pub(crate) fn handle_agent_clear_usage_records(
         Err(message) => response_error(Some(id), -32000, message),
     }
 }
+
+pub(crate) fn handle_agent_local_token_usage(
+    agent_service: &AgentService,
+    id: JsonRpcId,
+    params: Option<Value>,
+) -> Value {
+    let input = match parse_params::<mycopilot_core::LocalTokenUsageSummaryInput>(params) {
+        Ok(input) => input,
+        Err(message) => return response_error(Some(id), -32602, message),
+    };
+    if let Err(message) =
+        mycopilot_core::storage::local_token_usage_repository::validate_range(&input)
+    {
+        return response_error(Some(id), -32602, message);
+    }
+    match agent_service.get_local_token_usage(&input) {
+        Ok(output) => response_success(id, output),
+        Err(message) => response_error(Some(id), -32000, message),
+    }
+}

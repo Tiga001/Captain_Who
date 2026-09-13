@@ -2,6 +2,7 @@
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useRef,
   useState,
   type Dispatch,
@@ -24,6 +25,9 @@ import type {
 } from '../features/chat/chatTypes'
 import { loadInputAttachments } from '../features/storage/storageClient'
 import { useAccountAuth } from '../features/auth/AccountAuthContext'
+import { useLicense } from '../features/license/LicenseContext'
+import { getTurnAccessErrorCode } from '../features/license/turnAccessError'
+import { useTurnAccessIdentity } from '../features/license/useTurnAccessIdentity'
 import { useProviderTransition } from '../features/agentRun/useProviderTransition'
 import { isAssistantReplySettled } from '../features/chat/assistantGeneration'
 import type { AutoSubmitQueuedMessage } from './appTypes'
@@ -56,6 +60,7 @@ type PendingProviderTransitionSubmission =
       message: string
       options: ChatSubmitOptions
       draftSnapshot?: ChatComposerDraft
+      accessIdentity?: ReturnType<typeof useTurnAccessIdentity>['current']
     }
   | { kind: 'queued_message' }
 
@@ -169,7 +174,15 @@ export function useAppShellMessageSubmission({
 }: UseAppShellMessageSubmissionOptions) {
   const accountAuth = useAccountAuth()
   const accountAuthRef = useRef(accountAuth)
-  accountAuthRef.current = accountAuth
+  const license = useLicense()
+  const licenseRef = useRef(license)
+  const accessIdentity = useTurnAccessIdentity()
+  const queueIdentity = `${accountAuth?.state.status ?? 'absent'}:${accountAuth?.state.profile?.userId ?? ''}`
+  const queueIdentityRef = useRef(queueIdentity)
+  useLayoutEffect(() => {
+    accountAuthRef.current = accountAuth
+    licenseRef.current = license
+  }, [accountAuth, license])
   // Queue execution is opt-in for each conversation during this app session.
   // A fresh token on every enable invalidates work that was awaiting a previous enable.
   const queueAutoSendTokensRef = useRef(new Map<string, symbol>())
@@ -196,7 +209,7 @@ export function useAppShellMessageSubmission({
   }, [])
 
   const submitMessageToConversation = useCallback(
-    (
+    async (
       targetConversationId: string | null,
       message: string,
       options: ChatSubmitOptions,
@@ -204,9 +217,21 @@ export function useAppShellMessageSubmission({
         activate: boolean
         preserveComposerContent: boolean
         draftSnapshot?: ChatComposerDraft
+        accessIdentity?: ReturnType<typeof useTurnAccessIdentity>['current']
       }
-    ): boolean => {
-      if (accountAuthRef.current && !accountAuthRef.current.canStartTurn()) return false
+    ): Promise<boolean> => {
+      if (behavior.accessIdentity && behavior.accessIdentity !== accessIdentity.current)
+        return false
+      if (accountAuthRef.current && !accountAuthRef.current.canStartTurn()) {
+        if (!behavior.preserveComposerContent) accountAuthRef.current.requestLogin()
+        if (targetConversationId) pauseQueueAutoSend(targetConversationId)
+        return false
+      }
+      if (licenseRef.current && !licenseRef.current.canStartTurn()) {
+        if (!behavior.preserveComposerContent) licenseRef.current.requestAccess()
+        if (targetConversationId) pauseQueueAutoSend(targetConversationId)
+        return false
+      }
       const targetConversation = targetConversationId
         ? (conversationsRef.current.find(
             (conversation) => conversation.id === targetConversationId
@@ -269,34 +294,62 @@ export function useAppShellMessageSubmission({
         setConversationScrollToBottomSignal((signal) => signal + 1)
         setActiveConversationId(conversationId)
       }
-      const currentDraft = draftsRef.current[conversationId] ?? createComposerDraft()
+      const currentDraft =
+        draftsRef.current[conversationId] ?? behavior.draftSnapshot ?? createComposerDraft()
+      if (!targetConversation && behavior.draftSnapshot) {
+        // Opening the optimistic conversation changes composer scope. Carry the untouched
+        // draft into that scope until Main accepts the turn, including on admission refusal.
+        updateDraft(conversationId, behavior.draftSnapshot)
+      }
       // A queued item owns its frozen settings, not the composer's next-turn choices.
       // For composer sends, asynchronous Provider work must not clear newer input or
       // overwrite choices made after the user submitted this particular turn.
-      if (!behavior.preserveComposerContent) {
-        updateDraft(
+      let committed: boolean
+      try {
+        committed = await requestAssistantResponse(
           conversationId,
-          clearSubmittedComposerDraft(
-            currentDraft,
-            behavior.draftSnapshot ?? currentDraft,
-            options,
-            now
-          )
+          userMessage.id,
+          assistantMessage.id,
+          message,
+          options.modelId,
+          targetConversation?.projectId ?? options.projectId,
+          options.permissionMode,
+          options.attachments,
+          options.skills,
+          targetConversation ? undefined : title
         )
+      } catch (error) {
+        pauseQueueAutoSend(conversationId)
+        if (getTurnAccessErrorCode(error)) {
+          // Only this explicit refusal is safe to roll back: transport failure can conceal
+          // an accepted turn. Preserve newer input and all other conversation messages.
+          setConversationsWithRef((current) =>
+            current.map((item) =>
+              item.id === conversationId
+                ? {
+                    ...item,
+                    messages: item.messages.filter(
+                      (entry) => entry.id !== userMessage.id && entry.id !== assistantMessage.id
+                    )
+                  }
+                : item
+            )
+          )
+          if (
+            !behavior.preserveComposerContent &&
+            (!behavior.accessIdentity ||
+              behavior.accessIdentity.accountGeneration ===
+                accessIdentity.current.accountGeneration)
+          ) {
+            licenseRef.current?.handleDenied?.(error)
+            if (!licenseRef.current && getTurnAccessErrorCode(error) === 'ACCOUNT_LOGIN_REQUIRED')
+              accountAuthRef.current?.requestLogin()
+          }
+          return false
+        }
+        throw error
       }
-      void requestAssistantResponse(
-        conversationId,
-        userMessage.id,
-        assistantMessage.id,
-        message,
-        options.modelId,
-        targetConversation?.projectId ?? options.projectId,
-        options.permissionMode,
-        options.attachments,
-        options.skills,
-        targetConversation ? undefined : title
-      ).then((committed) => {
-        if (committed) return
+      if (!committed) {
         pauseQueueAutoSend(conversationId)
 
         // Host owns accepted turns. Persist only a failed local start so its input,
@@ -308,21 +361,38 @@ export function useAppShellMessageSubmission({
         const userIndex = currentConversation?.messages.findIndex(
           (message) => message.id === userMessage.id
         )
-        if (!currentConversation || userIndex === undefined || userIndex < 0) return
-        const failedAssistant = currentConversation.messages[userIndex + 1]
+        const failedAssistant =
+          userIndex === undefined || userIndex < 0
+            ? undefined
+            : currentConversation?.messages[userIndex + 1]
         if (
-          failedAssistant?.id !== assistantMessage.id ||
-          failedAssistant.agentRun?.runId ||
-          !['failed', 'cancelled'].includes(failedAssistant.agentRun?.status ?? '')
+          currentConversation &&
+          userIndex !== undefined &&
+          userIndex >= 0 &&
+          failedAssistant?.id === assistantMessage.id &&
+          !failedAssistant.agentRun?.runId &&
+          ['failed', 'cancelled'].includes(failedAssistant.agentRun?.status ?? '')
         ) {
-          return
+          enqueueChatMessagesUpsert(
+            conversationId,
+            [currentConversation.messages[userIndex], failedAssistant],
+            userIndex
+          )
         }
-        enqueueChatMessagesUpsert(
+      }
+      if (!behavior.preserveComposerContent) {
+        updateDraft(
           conversationId,
-          [currentConversation.messages[userIndex], failedAssistant],
-          userIndex
+          clearSubmittedComposerDraft(
+            draftsRef.current[conversationId] ?? currentDraft,
+            behavior.draftSnapshot ?? currentDraft,
+            options,
+            now
+          )
         )
-      })
+      }
+      // Preserve the existing uncertain-start policy: non-admission failures keep their
+      // visible attempt and are not put back into the queue as a fresh automatic retry.
       return true
     },
     [
@@ -400,14 +470,15 @@ export function useAppShellMessageSubmission({
         return
       }
       if (pendingSubmission.options.modelId !== operation.targetModelId) return
-      submitMessageToConversation(
+      void submitMessageToConversation(
         operation.conversationId,
         pendingSubmission.message,
         { ...pendingSubmission.options, modelId: operation.modelId },
         {
           activate: activeConversationIdRef.current === operation.conversationId,
           preserveComposerContent: false,
-          draftSnapshot: pendingSubmission.draftSnapshot
+          draftSnapshot: pendingSubmission.draftSnapshot,
+          accessIdentity: pendingSubmission.accessIdentity
         }
       )
     },
@@ -448,14 +519,16 @@ export function useAppShellMessageSubmission({
 
   const submitMessage = useCallback(
     async (message: string, options: ChatSubmitOptions): Promise<boolean> => {
+      const submissionIdentity = accessIdentity.current
       const conversationId = activeConversationIdRef.current
       const draftSnapshot = conversationId ? draftsRef.current[conversationId] : undefined
       if (!conversationId) {
-        submitMessageToConversation(null, message, options, {
+        return submitMessageToConversation(null, message, options, {
           activate: true,
-          preserveComposerContent: false
+          preserveComposerContent: false,
+          draftSnapshot: activeDraft,
+          accessIdentity: submissionIdentity
         })
-        return true
       }
       const activeConversation = conversationsRef.current.find(
         (conversation) => conversation.id === conversationId
@@ -471,6 +544,7 @@ export function useAppShellMessageSubmission({
       }
 
       await waitForConversationSaves(conversationId)
+      if (submissionIdentity !== accessIdentity.current) return false
       const outcome = await requestProviderTransition(conversationId, options.modelId)
       if (outcome.status === 'completed') {
         return submitMessageToConversation(
@@ -480,7 +554,8 @@ export function useAppShellMessageSubmission({
           {
             activate: true,
             preserveComposerContent: false,
-            draftSnapshot
+            draftSnapshot,
+            accessIdentity: submissionIdentity
           }
         )
       }
@@ -489,12 +564,13 @@ export function useAppShellMessageSubmission({
           kind: 'composer',
           message,
           options,
-          draftSnapshot
+          draftSnapshot,
+          accessIdentity: submissionIdentity
         })
       }
       return false
     },
-    [requestProviderTransition, submitMessageToConversation, waitForConversationSaves]
+    [activeDraft, requestProviderTransition, submitMessageToConversation, waitForConversationSaves]
   )
 
   const readQueueWakeSnapshot = useCallback((conversationId: string) => {
@@ -537,6 +613,13 @@ export function useAppShellMessageSubmission({
           queueAutoSendTokensRef.current.get(conversationId) !== token
         )
           return
+        if (
+          (accountAuthRef.current && !accountAuthRef.current.canStartTurn()) ||
+          (licenseRef.current && !licenseRef.current.canStartTurn())
+        ) {
+          pauseQueueAutoSend(conversationId)
+          return
+        }
         return readQueueWakeSnapshot(conversationId).head
       }
       let queuedMessage = getEligibleHead()
@@ -604,7 +687,7 @@ export function useAppShellMessageSubmission({
         }
         pendingProviderTransitionSubmissionsRef.current.delete(conversationId)
 
-        const submitted = submitMessageToConversation(
+        const submitted = await submitMessageToConversation(
           conversationId,
           currentHead.content,
           {
@@ -661,11 +744,26 @@ export function useAppShellMessageSubmission({
     ]
   )
   useEffect(() => {
+    // Switching between two signed-in accounts also invalidates all enabled queue intents.
+    if (queueIdentityRef.current === queueIdentity) return
+    queueIdentityRef.current = queueIdentity
+    for (const conversationId of queueAutoSendTokensRef.current.keys())
+      pauseQueueAutoSend(conversationId)
+  }, [queueIdentity, pauseQueueAutoSend])
+
+  useEffect(() => {
     autoSubmitQueuedMessageRef.current = (conversationId, action) => {
       if (action === 'pause') pauseQueueAutoSend(conversationId)
       else void submitNextQueuedMessage(conversationId)
     }
   }, [pauseQueueAutoSend, submitNextQueuedMessage])
+
+  useEffect(() => {
+    if ((accountAuth && !accountAuth.canStartTurn()) || (license && !license.canStartTurn())) {
+      for (const conversationId of queueAutoSendTokensRef.current.keys())
+        pauseQueueAutoSend(conversationId)
+    }
+  }, [accountAuth, license, pauseQueueAutoSend])
 
   useEffect(() => {
     queueMountedRef.current = true
@@ -709,6 +807,14 @@ export function useAppShellMessageSubmission({
       if (queueAutoSendTokensRef.current.has(conversationId)) {
         pauseQueueAutoSend(conversationId)
       } else {
+        if (accountAuthRef.current && !accountAuthRef.current.canStartTurn()) {
+          accountAuthRef.current.requestLogin()
+          return
+        }
+        if (licenseRef.current && !licenseRef.current.canStartTurn()) {
+          licenseRef.current.requestAccess()
+          return
+        }
         queueAutoSendTokensRef.current.set(conversationId, Symbol())
         queueWakeSnapshotsRef.current.set(conversationId, readQueueWakeSnapshot(conversationId))
         setQueueAutoSendConversationIds(new Set(queueAutoSendTokensRef.current.keys()))
@@ -720,9 +826,14 @@ export function useAppShellMessageSubmission({
 
   const submitEditedLastUserMessage = useCallback(
     async (messageId: string, content: string) => {
+      const submissionIdentity = accessIdentity.current
       if (accountAuthRef.current && !accountAuthRef.current.canStartTurn()) {
         accountAuthRef.current.requestLogin()
         throw new Error(t('auth.loginToSend'))
+      }
+      if (licenseRef.current && !licenseRef.current.canStartTurn()) {
+        licenseRef.current.requestAccess()
+        throw new Error(t('license.newTurnBlocked'))
       }
       const conversationId = activeConversationIdRef.current
       if (!conversationId) {
@@ -748,6 +859,7 @@ export function useAppShellMessageSubmission({
 
       await waitForConversationSaves(conversationId)
       await waitForMessageUpserts(conversationId)
+      if (submissionIdentity !== accessIdentity.current) throw new Error(t('auth.loginToSend'))
 
       const latestConversation = conversationsRef.current.find(
         (candidate) => candidate.id === conversationId
@@ -885,6 +997,11 @@ export function useAppShellMessageSubmission({
           setConversationScrollToBottomSignal((signal) => signal + 1)
         }
       } catch (error) {
+        if (submissionIdentity.accountGeneration === accessIdentity.current.accountGeneration) {
+          licenseRef.current?.handleDenied?.(error)
+          if (!licenseRef.current && getTurnAccessErrorCode(error) === 'ACCOUNT_LOGIN_REQUIRED')
+            accountAuthRef.current?.requestLogin()
+        }
         if (editSubmissionSeqRef.current === submissionSeq) {
           restoreSubmittedSkills(conversationId, rewriteAttempt.skills, {
             modelId: rewriteAttempt.modelId,

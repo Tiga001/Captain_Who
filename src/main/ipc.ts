@@ -264,7 +264,8 @@ export function registerHostIpc(
   appearanceThemeMirror: AppearanceThemeMirror = createVolatileAppearanceThemeMirror(),
   assertCanStartTurn: () => void = () => {
     throw new Error('ACCOUNT_LOGIN_REQUIRED')
-  }
+  },
+  syncExecutionAccess?: () => Promise<void>
 ): HostIpcRegistration {
   const attachmentDialogBridge = new AttachmentDialogBridge()
   const workspaceFilesService = new WorkspaceFilesService(
@@ -279,7 +280,11 @@ export function registerHostIpc(
   const disposeConfigurationNotifications = registerConfigurationNotifications(coreServer)
   registerAgentIpc(ipcMain, coreServer, assertCanStartTurn)
   const disposeHumanInteractionIpc = registerHumanInteractionIpc(ipcMain, coreServer)
-  const disposeAutomationIpc = registerAutomationIpc(ipcMain, coreServer)
+  const disposeAutomationIpc = registerAutomationIpc(ipcMain, coreServer, async () => {
+    assertCanStartTurn()
+    await syncExecutionAccess?.()
+    assertCanStartTurn()
+  })
   const disposeNotificationIpc = registerNotificationIpc(ipcMain, coreServer, {
     localeMirror: notificationLocaleMirror,
     startPaused: true

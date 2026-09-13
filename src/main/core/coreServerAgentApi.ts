@@ -1,3 +1,10 @@
+import {
+  AGENT_GET_LOCAL_TOKEN_USAGE_METHOD,
+  parseLocalTokenUsageSummaryInput,
+  parseLocalTokenUsageSummaryOutput,
+  type LocalTokenUsageSummaryInput,
+  type LocalTokenUsageSummaryOutput
+} from '@mycopilot/protocol'
 import type {
   AgentActionExecutionOutput,
   AgentActionIdRequest,
@@ -545,6 +552,15 @@ export class CoreServerAgentApi extends CoreServerStorageApi {
       AGENT_CLEAR_USAGE_RECORDS_METHOD,
       input
     )
+  }
+
+  getLocalTokenUsage(input: LocalTokenUsageSummaryInput): Promise<LocalTokenUsageSummaryOutput> {
+    return this.rpc
+      .request<unknown, LocalTokenUsageSummaryInput>(
+        AGENT_GET_LOCAL_TOKEN_USAGE_METHOD,
+        parseLocalTokenUsageSummaryInput(input)
+      )
+      .then(parseLocalTokenUsageSummaryOutput)
   }
 
   readFileChange(input: AgentFileChangeReadInput): Promise<AgentFileChangeContentPage> {

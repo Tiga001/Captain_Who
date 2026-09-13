@@ -23,6 +23,7 @@ export function AppStartupGate({ children }: { children: ReactNode }) {
   const authBlocking = Boolean(
     auth && ((!hasEnteredWorkspace && auth.state.status !== 'signedIn') || auth.loginRequested)
   )
+  const accessBlocking = authBlocking
   const { resolvedColorScheme, t } = useFrontendConfig()
   const supportsNativeTranslucency = isMacOS()
   const [interactive, setInteractive] = useState(false)
@@ -31,11 +32,11 @@ export function AppStartupGate({ children }: { children: ReactNode }) {
   const startupAttempt = startup?.attempt
 
   useEffect(() => {
-    if (authBlocking) {
+    if (accessBlocking) {
       setInteractive(false)
       setOverlayMounted(true)
     }
-  }, [authBlocking])
+  }, [accessBlocking])
 
   useEffect(() => {
     if (startupAttempt === undefined) return
@@ -52,7 +53,7 @@ export function AppStartupGate({ children }: { children: ReactNode }) {
   }, [startup])
 
   useEffect(() => {
-    if (!startup?.ready || authBlocking) return
+    if (!startup?.ready || accessBlocking) return
     const remaining = Math.max(0, MINIMUM_STARTUP_SCREEN_MS - (Date.now() - startup.startedAt))
     let exitTimeoutId: number | undefined
     const readyTimeoutId = window.setTimeout(() => {
@@ -64,7 +65,7 @@ export function AppStartupGate({ children }: { children: ReactNode }) {
       window.clearTimeout(readyTimeoutId)
       if (exitTimeoutId !== undefined) window.clearTimeout(exitTimeoutId)
     }
-  }, [startup?.ready, startup?.startedAt, authBlocking])
+  }, [startup?.ready, startup?.startedAt, accessBlocking])
 
   if (!startup) return children
 
@@ -73,25 +74,25 @@ export function AppStartupGate({ children }: { children: ReactNode }) {
   return (
     <div
       className="app-startup-root"
-      data-interactive={interactive && !authBlocking ? 'true' : 'false'}
+      data-interactive={interactive && !accessBlocking ? 'true' : 'false'}
     >
       <div
         className="app-startup-workspace"
-        aria-hidden={!interactive || authBlocking}
-        inert={!interactive || authBlocking}
+        aria-hidden={!interactive || accessBlocking}
+        inert={!interactive || accessBlocking}
       >
         {children}
       </div>
 
-      {overlayMounted || authBlocking ? (
+      {overlayMounted || accessBlocking ? (
         <div
           className="app-startup-screen"
-          data-exiting={interactive && !authBlocking ? 'true' : 'false'}
+          data-exiting={interactive && !accessBlocking ? 'true' : 'false'}
           data-native-translucency={supportsNativeTranslucency ? 'true' : undefined}
-          role={authBlocking ? 'dialog' : showFailure ? 'alert' : 'status'}
-          aria-modal={authBlocking || undefined}
+          role={accessBlocking ? 'dialog' : showFailure ? 'alert' : 'status'}
+          aria-modal={accessBlocking || undefined}
           aria-label={authBlocking ? t('auth.title') : undefined}
-          aria-live={authBlocking ? undefined : showFailure ? 'assertive' : 'polite'}
+          aria-live={accessBlocking ? undefined : showFailure ? 'assertive' : 'polite'}
         >
           <div className="app-startup-screen__drag-region" aria-hidden="true" />
           <div className="app-startup-screen__content">

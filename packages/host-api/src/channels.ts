@@ -3,6 +3,12 @@
  * Keep these names out of main/preload implementations so a channel rename cannot drift.
  */
 export const HOST_CHANNELS = {
+  license: {
+    getState: 'host:license.getState',
+    refresh: 'host:license.refresh',
+    openManagement: 'host:license.openManagement',
+    stateChanged: 'host:license.stateChanged'
+  },
   auth: {
     getState: 'host:auth.getState',
     restoreSession: 'host:auth.restoreSession',
@@ -59,6 +65,7 @@ export const HOST_CHANNELS = {
     getFileChangeHistoryDiff: 'host:agent.getFileChangeHistoryDiff',
     getProviderTransitionStatus: 'host:agent.getProviderTransitionStatus',
     getUsageSummary: 'host:agent.getUsageSummary',
+    getLocalTokenUsage: 'host:agent.getLocalTokenUsage',
     listCommandSessions: 'host:agent.listCommandSessions',
     listPendingActions: 'host:agent.listPendingActions',
     readFileChange: 'host:agent.readFileChange',

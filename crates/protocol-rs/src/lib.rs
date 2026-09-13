@@ -1,5 +1,6 @@
 mod agent_collaboration;
 mod automations;
+mod execution_access;
 mod git;
 mod image_generation;
 mod managed_playwright_bridge;
@@ -16,6 +17,7 @@ mod storage;
 
 pub use agent_collaboration::*;
 pub use automations::*;
+pub use execution_access::*;
 pub use git::*;
 pub use image_generation::*;
 pub use managed_playwright_bridge::*;

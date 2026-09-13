@@ -12,10 +12,10 @@ The desktop client uses `@cloudbase/js-sdk@3.9.2` in Electron Main. Public envir
 ## Startup and account lifetime
 
 - React and the account form render before full Host initialization. CloudBase restoration and backend startup run concurrently.
-- The startup overlay exits only when Electron Host/Core Server and local data hydration are ready **and** `/account-api/v1/me` returns HTTP 200 with a non-null, active profile.
+- The startup overlay exits when Electron Host/Core Server and local data hydration are ready and `/account-api/v1/me?includeEntitlements=false` returns HTTP 200 with a non-null, active profile. License verification is independent and never blocks entry. See [local usage and licensing](local-token-usage-and-license.md) for new-turn admission and the 24-hour license cache.
 - Password and email OTP login share this gate. OTP uses the SDK's verification callback with `shouldCreateUser: false`; registration stays on the website.
 - Logout invalidates pending authentication requests, clears the saved session, and attempts to revoke the current cloud session. It does not stop Core Server, terminals, agents, automation schedules, or tools.
-- After first entry, logout does not cover the workspace. It blocks new user-initiated turns (including rewrites and queued user messages starting another turn), but allows existing runs, steering, approvals and tools to continue. Clicking Sign in reuses the overlay without remounting the workspace.
+- After first entry, logout does not cover the workspace. It blocks new user-initiated turns (including rewrites and queued user messages starting another turn) and new automation turns, but allows existing runs, steering, approvals and tools to continue. Clicking Sign in reuses the overlay without remounting the workspace. Background schedule denial records that occurrence as not executed without opening a login page; the schedule remains enabled for its next normal time.
 - All accounts share the existing local database and model credentials. Login does not upload or migrate local conversations or settings.
 
 ## Session and profile data
@@ -23,6 +23,8 @@ The desktop client uses `@cloudbase/js-sdk@3.9.2` in Electron Main. Public envir
 `account-session.enc` under the existing Electron userData directory stores access/refresh tokens and their environment/region/account-API scope, encrypted through Electron safeStorage. Before restoring a session, the store rejects and removes unscoped or mismatched sessions, including its temporary companion. No token from another environment is submitted to the current authentication service. This only invalidates account credentials, not local chats or model settings. The SDK itself uses memory-only persistence. No password is persisted. Encryption failure never falls back to plaintext; a successful login can be memory-only, with a notice on the profile page. Logout storage failures are reported rather than hidden. Packaging privacy checks reject this file and its temporary companion.
 
 Profile mapping: display name and avatar come from `data.profile.displayName` and `data.profile.avatarDataUrl`; email comes from the authenticated CloudBase user object. Accept inline PNG/JPEG/WebP avatars of at most 20,000 characters, otherwise use the built-in boat. The profile is read-only in the app; edits open the website.
+
+The bottom-left account button displays only the avatar and a single-line username. The expanded menu header displays the avatar, username and email; a separate read-only “软件许可” row above Settings displays license validity. This row is not clickable or keyboard-focusable and never opens a website. A concrete expiry uses its Shanghai calendar date, and a verified allowed license with no expiry displays “长期有效”. Unknown/unavailable or signed-out states never imply an unlimited license. Email also remains available on the profile page.
 
 An initial network outage retains saved credentials but does not bypass login. Transient runtime outages retain the last validated session; definite expiry or account deactivation blocks new turns without stopping existing work. Account revalidation runs every five minutes and on foreground/profile refresh (foreground requests are throttled). This is not an always-online licensing/anti-tamper system.
 

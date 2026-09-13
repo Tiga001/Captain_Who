@@ -17,5 +17,7 @@ export const profileSettingsNodes = defineSettingsNodes([
       },
       { id: 'profile.email', title: 'auth.email', description: 'auth.cloudProfile' }
     ]
-  }
+  },
+  { id: 'profile.license', title: 'license.title' },
+  { id: 'profile.localTokenUsage', title: 'localUsage.title' }
 ])

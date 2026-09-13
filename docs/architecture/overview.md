@@ -91,9 +91,9 @@ transport/application → adapters → core/protocol
 - `storage.sqlite` 是 Conversation、Agent、模板与项目分配、Mailbox、Wake、Approval、FileChange
   audit/run grant、Automation task/Run/event、Notification fact/batch、Browser history/preferences/download
   等持久事实来源。
-- 当前 canonical schema 为 **v46**；版本与 catalog fingerprint 的唯一真源是 `crates/core/src/storage/migrations.rs`。v45 把项目改为“一个主文件夹 + 若干副文件夹”的多文件夹模型（`project_folders` 表），主文件夹仍是 Agent 的工作目录。
+- 当前 canonical schema 为 **v47**；版本与 catalog fingerprint 的唯一真源是 `crates/core/src/storage/migrations.rs`。v47 新增纯本机 Token 账本；v45 把项目改为“一个主文件夹 + 若干副文件夹”的多文件夹模型（`project_folders` 表），主文件夹仍是 Agent 的工作目录。
 - 内存 channel、`Notify`、Renderer store 和 notification 只用于降延迟或失效通知。间隙、重启和丢通知必须从 SQLite snapshot/event log 恢复。
-- 当前没有原地升级路径：exact v44 及更早版本、fingerprint 或外键不匹配时一律 fail closed，返回 `development_storage_schema_reset_required`，再由显式开发重建流程处理；重建保留 allowlisted 配置与凭据引用，丢弃聊天、运行和旧的单路径项目。
+- 仅 exact v46 支持到 v47 的原子无损升级，只新增本机 Token 统计。exact v45 及更早版本、fingerprint 或外键不匹配时仍 fail closed，返回 `development_storage_schema_reset_required`，再由显式开发重建流程处理；重建保留 allowlisted 配置与凭据引用，丢弃聊天、运行和旧的单路径项目。
 
 ## 5. 启动与关停概览
 
@@ -183,7 +183,7 @@ pnpm test:web
 - 打包、真实签名、专项 Multi-Agent gate 和 Managed Playwright release gate 不在 `pnpm check` 内；内部文档、公开文档和 Agent 头像检查已纳入 `pnpm check`。
 - Automation 真实 Core Server E2E 也不在 `pnpm check`，且尚无定时触发到操作系统通知点击的
   packaged E2E。
-- 当前不支持任何开发库原地升级（v44 及更早一律要求 reset），没有通用生产数据库迁移、notarization 或自动更新通道。
+- 当前只支持 exact v46 → v47 的本机 Token 表 additive 升级（v45 及更早仍要求显式 reset），没有通用数据库迁移或自动更新通道。
 
 ## 11. 变更检查表
 

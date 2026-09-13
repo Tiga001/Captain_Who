@@ -6522,3 +6522,19 @@ BEFORE UPDATE ON agent_workspace_wake_bindings
 BEGIN
     SELECT RAISE(ABORT, 'wake workspace is immutable');
 END;
+
+-- Independent local token ledger, schema v47.
+CREATE TABLE local_token_usage_metadata (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    started_at INTEGER NOT NULL CHECK (started_at >= 0)
+) STRICT;
+CREATE TABLE local_token_usage_requests (
+    request_id TEXT PRIMARY KEY,
+    usage_date TEXT NOT NULL,
+    token_count TEXT
+) STRICT;
+CREATE TABLE local_token_usage_days (
+    usage_date TEXT PRIMARY KEY,
+    token_count TEXT NOT NULL,
+    unreported_request_count INTEGER NOT NULL CHECK (unreported_request_count >= 0)
+) STRICT;

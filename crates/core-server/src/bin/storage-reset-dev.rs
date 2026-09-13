@@ -48,7 +48,7 @@ const APP_DATA_ROOT_FLAG: &str = "--app-data-root";
 const CONFIGURATION_SOURCE_FLAG: &str = "--configuration-source";
 const SQLITE_TRANSIENT_SUFFIXES: [&str; 3] = ["-journal", "-wal", "-shm"];
 const RECOVERABLE_CONFIGURATION_SOURCE_SCHEMA_VERSION: i32 = 33;
-const RECOVERABLE_CONFIGURATION_TARGET_SCHEMA_VERSION: i32 = 46;
+const RECOVERABLE_CONFIGURATION_TARGET_SCHEMA_VERSION: i32 = 47;
 const RECOVERABLE_CONFIGURATION_SOURCE_FINGERPRINT: &str =
     "sha256:5e1e404d74af5ed899d88dc8b5051e673ecd5beb967579af8f328b07b640c948";
 const PREVIOUS_CONFIGURATION_SOURCE_SCHEMA_VERSION: i32 = 35;
@@ -84,6 +84,9 @@ const CONTEXT_PROFILE_CONFIGURATION_SOURCE_FINGERPRINT: &str =
 const CONTEXT_PROFILE_SCHEMA_MARKER: &str =
     "-- Context profiles and immutable run admission policy, schema v44.";
 const WORKSPACE_CONFIGURATION_SOURCE_SCHEMA_VERSION: i32 = 45;
+const FROZEN_WORKSPACE_CONFIGURATION_SOURCE_SCHEMA_VERSION: i32 = 46;
+const FROZEN_WORKSPACE_CONFIGURATION_SOURCE_FINGERPRINT: &str =
+    "sha256:6af5e743b2fd8ab799ff3fc702137b4dd8289b45420d5338a83b81c88b301179";
 const WORKSPACE_CONFIGURATION_SOURCE_FINGERPRINT: &str =
     "sha256:f8d106839487dda40070acc471675c9c4299bad1afb6aaf2a56d75807ce3b2f7";
 const MULTI_FOLDER_PROJECT_SCHEMA_MARKER: &str = "-- Multi-folder project roots, schema v45.";
@@ -535,7 +538,8 @@ fn inspect_source(
                 && schema_version != TRACE_PREFIX_CONFIGURATION_SOURCE_SCHEMA_VERSION
                 && schema_version != COLLABORATION_CONFIGURATION_SOURCE_SCHEMA_VERSION
                 && schema_version != CONTEXT_PROFILE_CONFIGURATION_SOURCE_SCHEMA_VERSION
-                && schema_version != WORKSPACE_CONFIGURATION_SOURCE_SCHEMA_VERSION =>
+                && schema_version != WORKSPACE_CONFIGURATION_SOURCE_SCHEMA_VERSION
+                && schema_version != FROZEN_WORKSPACE_CONFIGURATION_SOURCE_SCHEMA_VERSION =>
         {
             // Unknown schemas must never silently discard configuration. Even an empty table
             // may have an incompatible layout; do not interpret it as a missing preference.
@@ -576,6 +580,7 @@ fn inspect_source(
                     | COLLABORATION_CONFIGURATION_SOURCE_SCHEMA_VERSION
                     | CONTEXT_PROFILE_CONFIGURATION_SOURCE_SCHEMA_VERSION
                     | WORKSPACE_CONFIGURATION_SOURCE_SCHEMA_VERSION
+                    | FROZEN_WORKSPACE_CONFIGURATION_SOURCE_SCHEMA_VERSION
             ) =>
         {
             if !is_supported_explicit_configuration_source(
@@ -653,6 +658,7 @@ fn inspect_source(
         || schema_version == TRACE_PREFIX_CONFIGURATION_SOURCE_SCHEMA_VERSION
         || schema_version == COLLABORATION_CONFIGURATION_SOURCE_SCHEMA_VERSION
         || schema_version == WORKSPACE_CONFIGURATION_SOURCE_SCHEMA_VERSION
+        || schema_version == FROZEN_WORKSPACE_CONFIGURATION_SOURCE_SCHEMA_VERSION
         || schema_version == CONTEXT_PROFILE_CONFIGURATION_SOURCE_SCHEMA_VERSION
     {
         Some(load_human_interaction_settings_for_reset(&connection)?)
@@ -663,6 +669,7 @@ fn inspect_source(
         == mycopilot_core::storage::migrations::STORAGE_SCHEMA_VERSION
         || schema_version == COLLABORATION_CONFIGURATION_SOURCE_SCHEMA_VERSION
         || schema_version == WORKSPACE_CONFIGURATION_SOURCE_SCHEMA_VERSION
+        || schema_version == FROZEN_WORKSPACE_CONFIGURATION_SOURCE_SCHEMA_VERSION
         || schema_version == CONTEXT_PROFILE_CONFIGURATION_SOURCE_SCHEMA_VERSION
     {
         Some(load_agent_collaboration_settings_for_reset(&connection)?)
@@ -787,7 +794,9 @@ fn is_supported_explicit_configuration_source(schema_version: i32, fingerprint: 
             || (schema_version == CONTEXT_PROFILE_CONFIGURATION_SOURCE_SCHEMA_VERSION
                 && fingerprint == CONTEXT_PROFILE_CONFIGURATION_SOURCE_FINGERPRINT)
             || (schema_version == WORKSPACE_CONFIGURATION_SOURCE_SCHEMA_VERSION
-                && fingerprint == WORKSPACE_CONFIGURATION_SOURCE_FINGERPRINT))
+                && fingerprint == WORKSPACE_CONFIGURATION_SOURCE_FINGERPRINT)
+            || (schema_version == FROZEN_WORKSPACE_CONFIGURATION_SOURCE_SCHEMA_VERSION
+                && fingerprint == FROZEN_WORKSPACE_CONFIGURATION_SOURCE_FINGERPRINT))
 }
 
 /// Called only after the exact source catalog has been verified. Catalogs before v44 have no
@@ -798,6 +807,7 @@ fn load_agent_prompt_preferences_for_reset(
 ) -> io::Result<AgentPromptPreferencesRecord> {
     if schema_version == mycopilot_core::storage::migrations::STORAGE_SCHEMA_VERSION
         || schema_version == WORKSPACE_CONFIGURATION_SOURCE_SCHEMA_VERSION
+        || schema_version == FROZEN_WORKSPACE_CONFIGURATION_SOURCE_SCHEMA_VERSION
         || schema_version == CONTEXT_PROFILE_CONFIGURATION_SOURCE_SCHEMA_VERSION
     {
         return agent_prompt_preferences_repository::load_agent_prompt_preferences(connection)
@@ -924,6 +934,7 @@ fn validate_preserved_configuration_table_schemas(source: &Connection) -> io::Re
         == mycopilot_core::storage::migrations::STORAGE_SCHEMA_VERSION
         || schema_version == COLLABORATION_CONFIGURATION_SOURCE_SCHEMA_VERSION
         || schema_version == WORKSPACE_CONFIGURATION_SOURCE_SCHEMA_VERSION
+        || schema_version == FROZEN_WORKSPACE_CONFIGURATION_SOURCE_SCHEMA_VERSION
         || schema_version == CONTEXT_PROFILE_CONFIGURATION_SOURCE_SCHEMA_VERSION;
     let has_human_settings = matches!(
         schema_version,
@@ -943,7 +954,9 @@ fn validate_preserved_configuration_table_schemas(source: &Connection) -> io::Re
         .collect::<Vec<_>>();
     let source_snapshots = snapshot_exact_configuration_tables_named(source, &tables)?;
     let canonical = Connection::open_in_memory().map_err(redacted_storage_error)?;
-    if schema_version == mycopilot_core::storage::migrations::STORAGE_SCHEMA_VERSION {
+    if schema_version == mycopilot_core::storage::migrations::STORAGE_SCHEMA_VERSION
+        || schema_version == FROZEN_WORKSPACE_CONFIGURATION_SOURCE_SCHEMA_VERSION
+    {
         mycopilot_core::storage::migrations::run_migrations(&canonical)
             .map_err(redacted_storage_error)?;
     } else if schema_version == WORKSPACE_CONFIGURATION_SOURCE_SCHEMA_VERSION {
@@ -1811,6 +1824,22 @@ fn ensure_only_configuration_tables_have_rows(connection: &Connection) -> io::Re
         if PRESERVED_CONFIGURATION_TABLES.contains(&table.as_str()) {
             continue;
         }
+        // This one freshly generated initialization row is not restored user history.
+        // The request ledger and daily aggregate tables must still be completely empty.
+        if table == "local_token_usage_metadata" {
+            let valid: bool = connection
+                .query_row(
+                    "SELECT COUNT(*) = 1 AND COALESCE(MIN(singleton = 1 AND started_at > 0), 0)
+                 FROM local_token_usage_metadata",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(redacted_storage_error)?;
+            if !valid {
+                return Err(invalid_data("fresh local token metadata is invalid"));
+            }
+            continue;
+        }
         if count_rows_if_table_exists(connection, &table)? != 0 {
             return Err(invalid_data(format!(
                 "fresh database contains rows in non-configuration table `{table}`"
@@ -2394,7 +2423,11 @@ mod tests {
     }
 
     #[test]
-    fn explicit_configuration_sources_are_pinned_to_known_catalogs_for_schema_46() {
+    fn explicit_configuration_sources_are_pinned_to_known_catalogs_for_schema_47() {
+        assert!(is_supported_explicit_configuration_source(
+            FROZEN_WORKSPACE_CONFIGURATION_SOURCE_SCHEMA_VERSION,
+            FROZEN_WORKSPACE_CONFIGURATION_SOURCE_FINGERPRINT,
+        ));
         assert!(is_supported_explicit_configuration_source(
             RECOVERABLE_CONFIGURATION_SOURCE_SCHEMA_VERSION,
             RECOVERABLE_CONFIGURATION_SOURCE_FINGERPRINT,
@@ -3036,7 +3069,60 @@ mod tests {
     }
 
     fn drop_frozen_workspace_fixture_schema(connection: &Connection) {
+        drop_local_token_fixture_schema(connection);
         connection.execute_batch("DROP TABLE agent_workspace_run_bindings; DROP TABLE agent_workspace_wake_bindings;").unwrap();
+    }
+
+    fn drop_local_token_fixture_schema(connection: &Connection) {
+        connection.execute_batch("DROP TABLE local_token_usage_days; DROP TABLE local_token_usage_requests; DROP TABLE local_token_usage_metadata;").unwrap();
+    }
+
+    #[test]
+    fn exact_v46_preview_is_read_only_and_normal_upgrade_keeps_configuration_and_chats() {
+        let fixture = tempfile::tempdir().unwrap();
+        let secret = "v46-upgrade-test-secret";
+        populated_storage(fixture.path(), secret);
+        let database = fixture.path().join(DATABASE_FILE_NAME);
+        let connection = Connection::open(&database).unwrap();
+        drop_local_token_fixture_schema(&connection);
+        connection.pragma_update(None, "user_version", 46).unwrap();
+        assert_eq!(
+            storage_catalog_fingerprint(&connection).unwrap(),
+            FROZEN_WORKSPACE_CONFIGURATION_SOURCE_FINGERPRINT
+        );
+        let settings_before = snapshot_exact_configuration_tables(&connection).unwrap();
+        let conversations_before =
+            count_rows_if_table_exists(&connection, "conversations").unwrap();
+        assert!(conversations_before > 0);
+        drop(connection);
+        let before = fs::read(&database).unwrap();
+        let preview = execute(options(fixture.path(), false)).unwrap();
+        assert!(preview.preserved_configuration);
+        assert_eq!(fs::read(&database).unwrap(), before);
+        // Normal startup uses the non-destructive migration, not the reset executor.
+        let storage = open_test_storage(&database);
+        assert_eq!(
+            storage
+                .load_model_settings_snapshot()
+                .unwrap()
+                .unwrap()
+                .settings
+                .api_token,
+            secret
+        );
+        assert_eq!(
+            storage.load_conversations().unwrap().len() as u64,
+            conversations_before
+        );
+        drop(storage);
+        // The production reset entry canonicalizes the root before its NOFOLLOW open; macOS
+        // tempfile paths use the /var -> /private/var alias and need the same normalization.
+        let upgraded = open_read_only(&fs::canonicalize(&database).unwrap()).unwrap();
+        assert_eq!(storage_schema_version(&upgraded).unwrap(), 47);
+        assert_eq!(
+            snapshot_exact_configuration_tables(&upgraded).unwrap(),
+            settings_before
+        );
     }
 
     fn downgrade_fixture_to_exact_v45(database: &Path) {

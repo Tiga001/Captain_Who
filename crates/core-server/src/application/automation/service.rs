@@ -1041,7 +1041,9 @@ fn automation_task_dto(
     })
 }
 
-fn run_dto(record: &AutomationRunRecord) -> Result<AutomationRunDto, AutomationServiceError> {
+pub(crate) fn run_dto(
+    record: &AutomationRunRecord,
+) -> Result<AutomationRunDto, AutomationServiceError> {
     Ok(AutomationRunDto {
         schema_version: AUTOMATION_SCHEMA_VERSION,
         run_id: record.id.clone(),

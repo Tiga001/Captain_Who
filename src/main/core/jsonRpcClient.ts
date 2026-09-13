@@ -60,6 +60,7 @@ export class CoreJsonRpcClient {
   private nextId = 1
   private readonly notificationHandlers = new Map<string, Set<NotificationHandler>>()
   private readonly pendingRequests = new Map<JsonRpcId, PendingRequest>()
+  private readonly startedHandlers = new Set<() => void>()
 
   constructor(options: CoreJsonRpcClientOptions = {}) {
     const appDataRoot = normalize(options.appDataRoot ?? app.getPath('userData'))
@@ -98,6 +99,15 @@ export class CoreJsonRpcClient {
         new Error(`core-server exited with code ${code ?? 'null'} and signal ${signal ?? 'null'}`)
       )
     })
+    for (const handler of this.startedHandlers) handler()
+  }
+
+  /** Host-only lifecycle hook, including lazy restarts. */
+  onStarted(handler: () => void): () => void {
+    this.startedHandlers.add(handler)
+    return () => {
+      this.startedHandlers.delete(handler)
+    }
   }
 
   isRunning(): boolean {

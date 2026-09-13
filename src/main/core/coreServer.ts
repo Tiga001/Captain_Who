@@ -116,6 +116,12 @@ import {
 
 import { CoreServerHumanInteractionApi } from './coreServerHumanInteractionApi'
 import { CoreJsonRpcClient } from './jsonRpcClient'
+import {
+  CORE_SET_EXECUTION_ACCESS_METHOD,
+  parseExecutionAccessSnapshot,
+  parseExecutionAccessReceipt,
+  type ExecutionAccessSnapshot
+} from '@mycopilot/protocol'
 
 const CORE_PING_METHOD = 'core.ping'
 const CORE_SHUTDOWN_METHOD = 'core.shutdown'
@@ -169,6 +175,20 @@ export class CoreServer extends CoreServerHumanInteractionApi {
     this.ensureAutomationResyncSubscription()
     this.ensureNotificationResyncSubscription()
     this.rpc.start()
+  }
+
+  onStarted(handler: () => void): () => void {
+    return this.rpc.onStarted(handler)
+  }
+
+  isRunning(): boolean {
+    return this.rpc.isRunning()
+  }
+
+  async setExecutionAccess(input: ExecutionAccessSnapshot): Promise<{ revision: number }> {
+    return parseExecutionAccessReceipt(
+      await this.rpc.request(CORE_SET_EXECUTION_ACCESS_METHOD, parseExecutionAccessSnapshot(input))
+    )
   }
 
   stop(): void {

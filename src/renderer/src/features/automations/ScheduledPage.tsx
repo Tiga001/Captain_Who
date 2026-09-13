@@ -8,6 +8,9 @@ import { formatTranslation, type Translate } from '../../config/translationForma
 import type { ModelConfig } from '../../config/modelConfig'
 import type { AppProject } from '../../config/projectConfig'
 import type { ChatConversation, ChatPermissionMode } from '../chat/chatTypes'
+import { useAccountAuth } from '../auth/AccountAuthContext'
+import { useLicense } from '../license/LicenseContext'
+import { useTurnAccessIdentity } from '../license/useTurnAccessIdentity'
 import { createDefaultAutomationSchedule, withSystemTimeZone } from './automationSchedule'
 import {
   AUTOMATION_PERMISSION_VERSION,
@@ -155,6 +158,9 @@ export function ScheduledPage({
 }: ScheduledPageProps) {
   const { showToast } = useToast()
   const { t } = useFrontendConfig()
+  const accountAuth = useAccountAuth()
+  const license = useLicense()
+  const accessIdentity = useTurnAccessIdentity()
   const [filter, setFilter] = useState<AutomationFilter>('all')
   const [query, setQuery] = useState('')
   const [drawer, setDrawer] = useState<DrawerState>({ mode: 'closed' })
@@ -304,11 +310,22 @@ export function ScheduledPage({
     requestNavigation(() => onOpenConversation(conversationId, messageId))
 
   const runNow = async (task: AutomationTask) => {
+    const submissionIdentity = accessIdentity.current
+    if (accountAuth && !accountAuth.canStartTurn()) {
+      accountAuth.requestLogin()
+      return
+    }
+    if (license && !license.canStartTurn()) {
+      license.requestAccess()
+      return
+    }
     try {
       await automations.runNow(task)
       showToast(t('automation.runQueued'))
       if (drawer.mode === 'task' && drawer.taskId === task.automationId) void history.refresh()
     } catch (error) {
+      if (submissionIdentity.accountGeneration !== accessIdentity.current.accountGeneration) return
+      if (license?.handleDenied?.(error)) return
       showToast(mutationErrorMessage(error, t('automation.runNowFailed'), t), { durationMs: 5000 })
     }
   }

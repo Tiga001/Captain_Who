@@ -2,6 +2,8 @@ import { describe, expect, it, vi } from 'vitest'
 import { render } from 'vitest-browser-react'
 import { AutomationRunHistory } from '../components/AutomationRunHistory'
 import { makeAutomationRun } from './automationUiFixtures'
+import { AccountAuthContext } from '../../auth/AccountAuthContext'
+import { LicenseContext } from '../../license/LicenseContext'
 import '../ScheduledPage.css'
 
 vi.mock('../../../config/FrontendConfigProvider', () => ({
@@ -9,6 +11,92 @@ vi.mock('../../../config/FrontendConfigProvider', () => ({
 }))
 
 describe('AutomationRunHistory', () => {
+  it.each([
+    {
+      code: 'ACCOUNT_LOGIN_REQUIRED',
+      signedIn: false,
+      action: 'auth.login',
+      text: 'license.runLoginRequired'
+    },
+    {
+      code: 'ACCOUNT_LICENSE_REQUIRED',
+      signedIn: true,
+      action: 'license.manage',
+      text: 'license.runLicenseRequired'
+    },
+    {
+      code: 'ACCOUNT_LICENSE_UNAVAILABLE',
+      signedIn: true,
+      action: 'license.retry',
+      text: 'license.runVerificationRequired'
+    }
+  ])(
+    'shows an explicit recovery action without opening anything for $code history events',
+    async ({ code, signedIn, action, text }) => {
+      const login = vi.fn()
+      const access = vi.fn()
+      const refresh = vi.fn()
+      const screen = await render(
+        <AccountAuthContext.Provider
+          value={{
+            state: {
+              revision: 1,
+              status: signedIn ? 'signedIn' : 'signedOut',
+              profile: null,
+              error: null,
+              remembered: true
+            },
+            loginRequested: false,
+            canStartTurn: () => signedIn,
+            requestLogin: login,
+            dismissLogin: vi.fn(),
+            logout: vi.fn()
+          }}
+        >
+          <LicenseContext.Provider
+            value={{
+              state: {
+                revision: 1,
+                status: 'denied',
+                reason: 'expired',
+                expiresAt: null,
+                verifiedAt: null,
+                cacheValidUntil: null,
+                error: null
+              },
+              canStartTurn: () => false,
+              requestAccess: access,
+              refresh
+            }}
+          >
+            <AutomationRunHistory
+              onAcknowledge={vi.fn()}
+              onLoadMore={vi.fn()}
+              onOpenConversation={vi.fn()}
+              onRetry={vi.fn()}
+              runs={[
+                makeAutomationRun({
+                  status: 'failed',
+                  conversationId: null,
+                  errorCode: code,
+                  errorMessage: 'Internal details'
+                })
+              ]}
+            />
+          </LicenseContext.Provider>
+        </AccountAuthContext.Provider>
+      )
+      await expect.element(screen.getByText('license.runNotExecuted')).toBeVisible()
+      await expect.element(screen.getByText(text)).toBeVisible()
+      expect(login).not.toHaveBeenCalled()
+      expect(access).not.toHaveBeenCalled()
+      expect(refresh).not.toHaveBeenCalled()
+      await screen.getByRole('button', { name: action }).click()
+      expect(
+        signedIn ? (code === 'ACCOUNT_LICENSE_UNAVAILABLE' ? refresh : access) : login
+      ).toHaveBeenCalledOnce()
+    }
+  )
   it('shows durable attention, opens the exact message, and acknowledges it', async () => {
     const onAcknowledge = vi.fn()
     const onOpenConversation = vi.fn()

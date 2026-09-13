@@ -2,7 +2,7 @@
 status: current
 audience: developers
 owner: engineering
-last_verified: 2026-09-11
+last_verified: 2026-09-13
 ---
 
 # SQLite 存储与数据生命周期
@@ -24,14 +24,15 @@ last_verified: 2026-09-11
 
 ## Schema 发布策略
 
-截至本次核验，当前唯一受支持的 canonical schema 是 **v46**（SQLite `PRAGMA user_version = 46`）：
+截至本次核验，当前唯一受支持的 canonical schema 是 **v47**（SQLite `PRAGMA user_version = 47`）：
 
-- `STORAGE_SCHEMA_VERSION = 46`；
+- `STORAGE_SCHEMA_VERSION = 47`；
 - canonical schema fingerprint 由 `migrations.rs` 中的编译期常量和测试固定；
 - 空数据库在一个原子流程中建立完整当前 schema；
+- v47 新增独立的本机 Token 元数据、请求去重账本和每日汇总表。精确匹配 v46 fingerprint 且外键有效的库可在单个事务内无损升级，只新增三表和统计起始时间，不回填观测、不改聊天/配置。失败整笔回滚；这不是重置，也不要求用户丢弃旧数据；
 - v46 新增 `agent_workspace_run_bindings` 和 `agent_workspace_wake_bindings`，以不可变 JSON 保存文件夹 ID、别名、角色、配置路径、canonical 路径和目录实体身份；Run admission 与轨迹同事务提交，spawn/followup/结果 Wake 继承源 Run 或源 Wake。历史 fork 复制已保留回复的 Run 工作区绑定，但不复制 Wake 执行权；
 - v45 把项目改为多文件夹模型：`projects` 不再保存 `path`，文件夹存放在 `project_folders`（每个项目恰好一个 `primary`，其余为 `auxiliary`，`path` 与 `alias` 在项目内唯一，随项目级联删除）。主文件夹仍是 Agent 的工作目录；
-- 没有任何原地升级路径：exact v45 及更早版本（包括 v34/v35/v42/v43/v44）一律返回 reset-required，拒绝检查不改写旧库；开发期不为单路径项目、聊天或运行历史写迁移；
+- 唯一原地升级路径为 exact v46 → v47：exact v45 及更早版本（包括 v34/v35/v42/v43/v44）仍一律返回 reset-required，不改写旧库；开发期不为单路径项目、聊天或运行历史写迁移；
 - Run/Wake 模式冻结表和 `agent_prompt_preferences.context_profile` 与 v44 相同；新偏好默认 Full，旧 checkpoint 由版本校验直接拒绝；
 - 其他旧版、未知版、非空未版本化或结构被篡改的数据库返回 `development_storage_schema_reset_required`，不自动重置。
 
@@ -39,7 +40,15 @@ last_verified: 2026-09-11
 
 开发库重置前应先关闭应用并备份数据根；优先使用受管 `storage:reset-dev` 流程。不要只删除 `storage.sqlite` 而遗留 attachments、artifacts、spool 或 lock 文件。
 
-`storage:reset-dev` 是显式丢弃历史的重建操作，始终新建 v46，不恢复 Conversation、Project（含旧的单路径项目）或 Agent/runtime 历史。它从 exact current v46 及 exact v35–v45 保留 allowlisted 配置与凭据引用；v36–v46 还保留人机交互设置及 revision，v43–v46 保留全局协作开关及 revision，v44–v46 保留轻量/完整模式，旧版本该项默认 Full。Run/Wake 冻结策略属于运行事实，重置时清空。既有受限恢复选项也可从绑定 exact v33 fingerprint 的私有备份读取 allowlisted 设置，并把凭据转换为 reference。无法安全识别且含配置的旧库拒绝重置，不能用默认值默默替换模型配置。
+`storage:reset-dev` 是显式丢弃历史的重建操作，始终新建 v47，不恢复 Conversation、Project（含旧的单路径项目）、本机 Token 统计或 Agent/runtime 历史。它从 exact current v47 及 exact v35–v46 保留 allowlisted 配置与凭据引用；v36–v47 还保留人机交互设置及 revision，v43–v47 保留全局协作开关及 revision，v44–v47 保留轻量/完整模式，旧版本该项默认 Full。Run/Wake 冻结策略属于运行事实，重置时清空。既有受限恢复选项也可从绑定 exact v33 fingerprint 的私有备份读取 allowlisted 设置，并把凭据转换为 reference。无法安全识别且含配置的旧库拒绝重置，不能用默认值默默替换模型配置。正常 v46 → v47 升级不使用此工具。
+
+## 本机 Token 统计
+
+`model_request_observation_repository::insert_observation` 在可嵌套 SAVEPOINT 内保存最终请求观测和独立统计。主 Agent、子 Agent 和压缩共用此边界；不累加 Run 的累计事件。`local_token_usage_requests` 只保留不透明请求 ID、北京时间日期和可选整数计数，不关联账号、会话、模型或内容，也没有 conversation 外键。`local_token_usage_days` 保留每日整数累计和缺失实际用量的请求数。删除聊天或清空计费记录不会删除它们；分支历史不会制造新的用量。
+
+统计起始时间在 schema 创建/升级时固定。此前完成的观测即使迟到重放也不计入，不回填历史。OpenAI 缓存属于输入子集，Anthropic 输入按既有观测规则加上 cache read/write；output 已包含支持协议中的 reasoning，不再次累加思考字段。缺失完整实际用量记为未报告请求，不用估算值冒充准确零。每日和全历史计数使用 Rust u128 和十进制 TEXT/JSON 字符串，避免 SQLite/JavaScript 浮点精度损失。
+
+`agent.getLocalTokenUsage` 只返回固定 `Asia/Shanghai` 时区、统计起始时间、请求日期范围内的每日总数、全历史总数/单日峰值/未报告请求数和今天用量。日期范围最多 3660 天。该接口无账号参数，不上传、不跨设备合并；账号退出或切换不改变统计。真源为 `local_token_usage_repository.rs`、`protocol/local_token_usage.rs` 和 TypeScript `localTokenUsage.ts`。
 
 `agent_context_profile_run_policies` 以 `conversation_turn_traces.run_id` 为外键，`agent_context_profile_wake_policies` 以 `agent_wake_requests.wake_id` 为外键；两表只接受 `full | minimal`，禁止更新，随父记录删除。Run admission 与模式冻结同事务，Wake 入队继承来源 Run/Wake 的模式。它们不属于偏好表，也不能在设置保存时批量改写。
 

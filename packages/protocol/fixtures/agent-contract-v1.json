@@ -17,6 +17,7 @@
     "rejectAction": "agent.rejectAction",
     "cancelAction": "agent.cancelAction",
     "getUsageSummary": "agent.getUsageSummary",
+    "getLocalTokenUsage": "agent.getLocalTokenUsage",
     "clearUsageRecords": "agent.clearUsageRecords",
     "readFileChange": "agent.readFileChange",
     "getFileChangeDiff": "agent.getFileChangeDiff",

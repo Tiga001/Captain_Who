@@ -39,16 +39,28 @@ describe('pickNextStartupPhraseIndex', () => {
     expect(rendererShell).toContain('@media (prefers-reduced-transparency: reduce)')
   })
 
-  it('keeps the full application behind the Host readiness gate', () => {
+  it('mounts login promptly while keeping Host-dependent workspace behind readiness', () => {
     const rendererEntry = readFileSync(resolve('src/renderer/src/main.tsx'), 'utf8')
-    expect(rendererEntry).toContain('void hostClient.app')
-    expect(rendererEntry).toContain('.whenReady()')
+    const app = readFileSync(resolve('src/renderer/src/App.tsx'), 'utf8')
+    const startupProvider = readFileSync(
+      resolve('src/renderer/src/features/startup/AppStartupProvider.tsx'),
+      'utf8'
+    )
+    expect(rendererEntry).not.toContain('.whenReady()')
     expect(rendererEntry).toContain("import('./App')")
     expect(rendererEntry).not.toContain("import App from './App'")
     expect(rendererEntry).toContain('.catch(() => failBootstrapStartup())')
-    expect(rendererEntry.indexOf('.whenReady()')).toBeLessThan(
-      rendererEntry.indexOf("import('./App')")
+    expect(app).toContain('function HostWorkspace()')
+    expect(app).toContain('void hostClient.app')
+    expect(app).toContain('.whenReady()')
+    expect(app).toContain('if (!ready) return null')
+    expect(app.indexOf('if (!ready) return null')).toBeLessThan(
+      app.indexOf('<ModelSettingsProvider>')
     )
+    expect(app).toContain('<AccountAuthProvider>')
+    expect(app).toContain('<HostWorkspace />')
+    expect(startupProvider).toContain('hostClient.app?.whenReady?.()')
+    expect(startupProvider).toContain('.then(() => hostClient.core.ping())')
   })
 
   it('resolves the existing brand artwork through the Renderer asset pipeline', () => {

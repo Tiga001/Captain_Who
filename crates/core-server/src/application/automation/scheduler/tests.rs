@@ -62,6 +62,17 @@ fn scheduler_state(
     Arc<AutomationSchedulerState>,
     tokio::sync::mpsc::UnboundedReceiver<Value>,
 ) {
+    agent_service.grant_execution_access_for_test();
+    scheduler_state_without_execution_access(storage, agent_service)
+}
+
+fn scheduler_state_without_execution_access(
+    storage: Arc<StorageService>,
+    agent_service: AgentService,
+) -> (
+    Arc<AutomationSchedulerState>,
+    tokio::sync::mpsc::UnboundedReceiver<Value>,
+) {
     let (notifications, receiver) = tokio::sync::mpsc::unbounded_channel();
     (
         Arc::new(AutomationSchedulerState {
@@ -308,6 +319,83 @@ fn safe_errors_are_bounded_and_do_not_expose_control_bytes() {
     assert_eq!(safe_error_code("!!!"), "automation_failed");
     assert_eq!(safe_error_message("a\0b"), "a b");
     assert!(safe_error_message(&"界".repeat(2_000)).len() <= 4_096);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn execution_access_denied_due_attempt_fails_without_capacity_or_schedule_block_and_never_replays(
+) {
+    for reason in [
+        None,
+        Some(mycopilot_protocol_rs::ExecutionAccessReason::LicenseRequired),
+        Some(mycopilot_protocol_rs::ExecutionAccessReason::LicenseUnavailable),
+    ] {
+        let fixture = tempdir().unwrap();
+        let storage =
+            Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+        storage.save_model_settings(model_settings()).unwrap();
+        let agent =
+            AgentService::try_new_deferred_startup_reconciliation(Arc::clone(&storage)).unwrap();
+        if let Some(reason) = reason {
+            let now = now_ms();
+            agent
+                .set_execution_access(mycopilot_protocol_rs::SetExecutionAccessInput {
+                    revision: 1,
+                    identity_epoch: 0,
+                    reason,
+                    issued_at: now,
+                    valid_until: now,
+                })
+                .unwrap();
+        }
+        let (state, _) = scheduler_state_without_execution_access(Arc::clone(&storage), agent);
+        let task = create_task(
+            &storage,
+            "denied-due",
+            StoredAutomationStatus::Active,
+            Some(now_ms().saturating_sub(1)),
+            AutomationPermissionModeDto::Default,
+            None,
+        );
+        let permit = Arc::clone(&state.automation_capacity)
+            .acquire_many_owned(AUTOMATION_CONCURRENCY_LIMIT as u32)
+            .await
+            .unwrap();
+        state.run_cycle().await.unwrap();
+        let run = storage
+            .get_latest_automation_run(&task.id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(run.status, StoredAutomationRunStatus::Failed);
+        assert_eq!(
+            run.error_code.as_deref(),
+            Some(match reason {
+                None => "ACCOUNT_LOGIN_REQUIRED",
+                Some(mycopilot_protocol_rs::ExecutionAccessReason::LicenseRequired) =>
+                    "ACCOUNT_LICENSE_REQUIRED",
+                _ => "ACCOUNT_LICENSE_UNAVAILABLE",
+            })
+        );
+        assert!(run.retry_at.is_none());
+        assert!(run.agent_run_id.is_none());
+        assert!(run.user_message_id.is_none());
+        assert!(run.assistant_message_id.is_none());
+        assert!(storage.load_conversation_metas().unwrap().is_empty());
+        let current = storage.get_automation(&task.id).unwrap().unwrap();
+        assert_eq!(current.status, StoredAutomationStatus::Active);
+        assert_eq!(current.config.health_state, "ok");
+        assert_eq!(current.config.blocked_code, None);
+        assert!(current.config.next_run_at.unwrap() > now_ms());
+        state.agent_service.grant_execution_access_for_test();
+        drop(permit);
+        state.run_cycle().await.unwrap();
+        let runs = storage
+            .list_automation_runs(&task.id, None, 10)
+            .unwrap()
+            .items;
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].id, run.id);
+        assert_eq!(runs[0].status, StoredAutomationRunStatus::Failed);
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -636,6 +724,48 @@ async fn busy_existing_chat_is_retryable_and_preserves_exact_message_history() {
     assert_eq!(conversation.messages.len(), 2);
     assert_eq!(conversation.messages[0].id, "scheduler-active-user");
     assert_eq!(conversation.messages[1].id, ACTIVE_ASSISTANT_ID);
+
+    let denied_at = now_ms();
+    state
+        .agent_service
+        .set_execution_access(mycopilot_protocol_rs::SetExecutionAccessInput {
+            revision: 2,
+            identity_epoch: 1,
+            reason: mycopilot_protocol_rs::ExecutionAccessReason::AccountSignedOut,
+            issued_at: denied_at,
+            valid_until: denied_at,
+        })
+        .unwrap();
+    let denied = storage.get_automation_run(&original.id).unwrap().unwrap();
+    assert_eq!(denied.status, StoredAutomationRunStatus::Failed);
+    assert_eq!(denied.error_code.as_deref(), Some("ACCOUNT_LOGIN_REQUIRED"));
+    assert!(denied.retry_at.is_none());
+    assert_eq!(
+        storage
+            .load_conversation(CONVERSATION_ID)
+            .unwrap()
+            .unwrap()
+            .messages
+            .len(),
+        2
+    );
+    assert!(matches!(
+        state
+            .agent_service
+            .automation_turn_state(ACTIVE_RUN_ID, ACTIVE_ASSISTANT_ID)
+            .unwrap(),
+        AutomationTurnObservation::Running
+    ));
+    state.agent_service.grant_execution_access_for_test();
+    state.run_cycle().await.unwrap();
+    assert_eq!(
+        storage
+            .get_automation_run(&original.id)
+            .unwrap()
+            .unwrap()
+            .status,
+        StoredAutomationRunStatus::Failed
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1088,6 +1218,7 @@ async fn run_waiting_approval_restart_scenario(decision: RestartApprovalDecision
         )
         .unwrap();
     let (first_notifications, mut first_events) = tokio::sync::mpsc::unbounded_channel();
+    first_agent.grant_execution_access_for_test();
     let turn = first_agent
         .start_automation_human_root_turn(
             AutomationHumanRootTurnStart {
@@ -1208,8 +1339,17 @@ async fn run_waiting_approval_restart_scenario(decision: RestartApprovalDecision
     assert_eq!(restarted_pending[0].run_id, turn.run_id);
     assert_eq!(restarted_pending[0].action_id, action_id);
 
-    let (restarted_state, _scheduler_notifications) =
-        scheduler_state(Arc::clone(&restarted_storage), restarted_agent.clone());
+    let (restarted_state, _scheduler_notifications) = scheduler_state_without_execution_access(
+        Arc::clone(&restarted_storage),
+        restarted_agent.clone(),
+    );
+    assert_eq!(
+        restarted_agent
+            .check_automation_execution_access()
+            .unwrap_err()
+            .code,
+        "ACCOUNT_LOGIN_REQUIRED"
+    );
     restarted_state.restore_bound_run_observers().await.unwrap();
     let waiting = wait_for_run(&restarted_storage, &task.id, |run| {
         run.status == StoredAutomationRunStatus::WaitingForApproval
@@ -1217,6 +1357,24 @@ async fn run_waiting_approval_restart_scenario(decision: RestartApprovalDecision
     .await;
     assert_eq!(waiting.id, queued.id);
     assert_eq!(waiting.agent_run_id.as_deref(), Some(turn.run_id.as_str()));
+    let denied_at = now_ms();
+    restarted_agent
+        .set_execution_access(mycopilot_protocol_rs::SetExecutionAccessInput {
+            revision: 1,
+            identity_epoch: 1,
+            reason: mycopilot_protocol_rs::ExecutionAccessReason::LicenseRequired,
+            issued_at: denied_at,
+            valid_until: denied_at,
+        })
+        .unwrap();
+    assert_eq!(
+        restarted_storage
+            .get_automation_run(&queued.id)
+            .unwrap()
+            .unwrap()
+            .status,
+        StoredAutomationRunStatus::WaitingForApproval
+    );
 
     let attention = restarted_storage
         .list_automation_attentions(None, 10)

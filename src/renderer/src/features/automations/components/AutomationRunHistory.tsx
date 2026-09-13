@@ -2,6 +2,9 @@ import { AlertCircle, ArrowUpRight, CheckCircle2, Clock3, LoaderCircle, Play } f
 import { useEffect, useRef } from 'react'
 import type { AutomationRun } from '@mycopilot/protocol'
 import { useFrontendConfig } from '../../../config/FrontendConfigProvider'
+import { useLicense } from '../../license/LicenseContext'
+import { useAccountAuth } from '../../auth/AccountAuthContext'
+import { getTurnAccessErrorCode } from '../../license/turnAccessError'
 import {
   formatAbsoluteDateTime,
   runErrorMessage,
@@ -35,6 +38,8 @@ export function AutomationRunHistory({
   runs
 }: AutomationRunHistoryProps) {
   const { language, t } = useFrontendConfig()
+  const license = useLicense()
+  const auth = useAccountAuth()
   const focusedRunRef = useRef<HTMLLIElement>(null)
 
   useEffect(() => {
@@ -77,6 +82,7 @@ export function AutomationRunHistory({
                       : Play
             const messageId = run.assistantMessageId ?? run.userMessageId
             const errorMessage = runErrorMessage(t, run)
+            const accessError = getTurnAccessErrorCode({ code: run.errorCode })
             return (
               <li
                 key={run.runId}
@@ -93,7 +99,9 @@ export function AutomationRunHistory({
                 />
                 <div className="automation-run-history__content">
                   <div className="automation-run-history__title">
-                    <strong>{runStatusLabel(t, run.status)}</strong>
+                    <strong>
+                      {accessError ? t('license.runNotExecuted') : runStatusLabel(t, run.status)}
+                    </strong>
                     <span>{triggerLabel(t, run.triggerKind)}</span>
                     <time dateTime={new Date(run.createdAt).toISOString()}>
                       {formatAbsoluteDateTime(run.createdAt, language)}
@@ -102,6 +110,27 @@ export function AutomationRunHistory({
                   {run.resultPreview && <p>{run.resultPreview}</p>}
                   {errorMessage && <p className="automation-run-history__error">{errorMessage}</p>}
                   <div className="automation-run-history__actions">
+                    {accessError ? (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          // Only the explicit action may show login or leave the app. A new
+                          // history record and restored access never replay this occurrence.
+                          if (auth?.state.status !== 'signedIn') auth?.requestLogin()
+                          else if (accessError === 'ACCOUNT_LICENSE_UNAVAILABLE')
+                            void license?.refresh()
+                          else license?.requestAccess()
+                        }}
+                      >
+                        {t(
+                          auth?.state.status !== 'signedIn'
+                            ? 'auth.login'
+                            : accessError === 'ACCOUNT_LICENSE_UNAVAILABLE'
+                              ? 'license.retry'
+                              : 'license.manage'
+                        )}
+                      </button>
+                    ) : null}
                     {run.conversationId && (
                       <button
                         type="button"

@@ -1498,6 +1498,134 @@ fn failed_unadmitted_work_emits_a_run_notification_for_important_updates() {
 }
 
 #[test]
+fn execution_access_failure_drains_only_unbound_attempts_and_is_idempotent() {
+    let mut connection = connection();
+    let timestamp = now_ms() + 1_000;
+    let mut runs = Vec::new();
+    for index in 0..3 {
+        let task = create(
+            &mut connection,
+            &format!("access-task-{index}"),
+            &format!("access-create-{index}"),
+        );
+        let run = enqueue_and_claim_manual_run(
+            &mut connection,
+            &task,
+            &format!("access-run-{index}"),
+            &format!("access-manual-{index}"),
+            timestamp,
+        );
+        runs.push((task, run));
+    }
+    let deferred = &runs[0].1;
+    defer_automation_run(
+        &mut connection,
+        &deferred.id,
+        deferred.admission_token.as_deref().unwrap(),
+        timestamp + 86_400_000,
+        timestamp,
+    )
+    .unwrap();
+    // A damaged/recovering admitting row can already own a durable Turn. Denial must not
+    // destroy or settle those receipts simply because its projection is still admitting.
+    {
+        let transaction = connection.transaction().unwrap();
+        insert_admitted_turn_projection(
+            &transaction,
+            "access-bound-chat",
+            "access-bound-user",
+            "access-bound-assistant",
+            "access-bound-agent-run",
+            timestamp,
+        );
+        transaction
+            .execute(
+                "UPDATE automation_runs SET agent_run_id = 'access-bound-agent-run',
+            conversation_id = 'access-bound-chat', user_message_id = 'access-bound-user',
+            assistant_message_id = 'access-bound-assistant' WHERE id = ?1",
+                [&runs[2].1.id],
+            )
+            .unwrap();
+        transaction.commit().unwrap();
+    }
+    assert!(fail_unadmitted_automation_runs_for_execution_access(
+        &mut connection,
+        None,
+        "arbitrary_error",
+        "Denied",
+        timestamp,
+        100
+    )
+    .is_err());
+    assert_eq!(
+        fail_unadmitted_automation_runs_for_execution_access(
+            &mut connection,
+            None,
+            "ACCOUNT_LICENSE_REQUIRED",
+            "License required",
+            timestamp,
+            1
+        )
+        .unwrap(),
+        1
+    );
+    assert_eq!(
+        fail_unadmitted_automation_runs_for_execution_access(
+            &mut connection,
+            None,
+            "ACCOUNT_LICENSE_REQUIRED",
+            "License required",
+            timestamp,
+            100
+        )
+        .unwrap(),
+        1
+    );
+    assert_eq!(
+        fail_unadmitted_automation_runs_for_execution_access(
+            &mut connection,
+            None,
+            "ACCOUNT_LICENSE_REQUIRED",
+            "License required",
+            timestamp,
+            100
+        )
+        .unwrap(),
+        0
+    );
+    for (task, run) in &runs[..2] {
+        let current = get_automation_run(&connection, &run.id).unwrap().unwrap();
+        assert_eq!(current.status, StoredAutomationRunStatus::Failed);
+        assert_eq!(
+            current.error_code.as_deref(),
+            Some("ACCOUNT_LICENSE_REQUIRED")
+        );
+        assert!(current.retry_at.is_none());
+        assert!(current.agent_run_id.is_none());
+        let current_task = get_automation(&connection, &task.id).unwrap().unwrap();
+        assert_eq!(current_task.status, StoredAutomationStatus::Active);
+        assert_eq!(current_task.config, task.config);
+    }
+    let bound = get_automation_run(&connection, &runs[2].1.id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(bound.status, StoredAutomationRunStatus::Admitting);
+    assert_eq!(
+        bound.agent_run_id.as_deref(),
+        Some("access-bound-agent-run")
+    );
+    assert!(bound.error_code.is_none());
+    assert_eq!(application_notifications(&connection).len(), 2);
+    assert_eq!(
+        connection
+            .query_row("SELECT COUNT(*) FROM messages", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        2
+    );
+}
+
+#[test]
 fn structured_report_is_bounded_and_notification_policy_is_not_keyword_based() {
     let mut connection = connection();
     let task = create(&mut connection, "automation-a", "request-a");

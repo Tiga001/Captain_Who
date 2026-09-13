@@ -24,6 +24,17 @@ const mocks = vi.hoisted(() => ({
 vi.mock('../../host/hostClient', () => ({
   hostClient: {
     core: { ping: mocks.ping },
+    agent: {
+      getLocalTokenUsage: async () => ({
+        timezone: 'Asia/Shanghai',
+        startedAt: Date.now(),
+        days: [],
+        totalTokens: '0',
+        todayTokens: '0',
+        peakDailyTokens: '0',
+        unreportedRequestCount: 0
+      })
+    },
     auth: {
       getState: async () => mocks.state,
       onStateChanged: (listener: (state: AuthState) => void) => {
@@ -149,7 +160,9 @@ describe('startup account login and reusable overlay', () => {
       </AccountAuthProvider>
     )
     await expect.element(screen.getByRole('heading', { name: 'auth.signedOut' })).toBeVisible()
-    expect(screen.container.querySelector('button')).toBeNull()
+    expect(
+      screen.container.querySelector('[aria-labelledby="profile-account-heading"] button')
+    ).toBeNull()
     expect(screen.container.querySelector('.profile-settings-avatar-actions')).toBeNull()
     expect(screen.container.textContent).not.toContain('auth.loginToSend')
     expect(screen.container.textContent).not.toContain('auth.localData')
@@ -169,7 +182,9 @@ describe('startup account login and reusable overlay', () => {
     await expect.element(screen.getByText(cloudProfile.email).first()).toBeVisible()
     expect(screen.container.textContent).not.toContain('auth.loginToSend')
     expect(screen.container.textContent).not.toContain('auth.localData')
-    expect(screen.container.querySelectorAll('button')).toHaveLength(2)
+    expect(
+      screen.container.querySelectorAll('[aria-labelledby="profile-account-heading"] button')
+    ).toHaveLength(2)
     await screen.getByRole('button', { name: 'auth.editProfile' }).click()
     expect(mocks.open).toHaveBeenCalledWith('profile')
     mocks.refresh.mockClear()

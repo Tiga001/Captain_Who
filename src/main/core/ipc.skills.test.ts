@@ -113,7 +113,12 @@ describe('Skill management IPC registration', () => {
       onMcpChanged: vi.fn(() => vi.fn()),
       resolveSkillInstallationSource
     }
-    registerHostIpc(coreServer as never, {} as never, {} as never, () => true)
+    registerHostIpc(
+      coreServer as never,
+      { setProjectLoader: vi.fn() } as never,
+      {} as never,
+      () => true
+    )
     const registration = ipcMainHandle.mock.calls.find(
       ([channel]) => channel === 'host:skills.resolveInstallationSource'
     )
@@ -144,7 +149,12 @@ describe('Skill management IPC registration', () => {
       onMcpChanged: vi.fn(() => vi.fn()),
       cancelSkillSourceResolution
     }
-    registerHostIpc(coreServer as never, {} as never, {} as never, () => true)
+    registerHostIpc(
+      coreServer as never,
+      { setProjectLoader: vi.fn() } as never,
+      {} as never,
+      () => true
+    )
     const registration = ipcMainHandle.mock.calls.find(
       ([channel]) => channel === 'host:skills.cancelSourceResolution'
     )
@@ -187,7 +197,12 @@ describe('Skill management IPC registration', () => {
       onMcpChanged: vi.fn(() => vi.fn()),
       uninstallSkill
     }
-    registerHostIpc(coreServer as never, {} as never, {} as never, () => true)
+    registerHostIpc(
+      coreServer as never,
+      { setProjectLoader: vi.fn() } as never,
+      {} as never,
+      () => true
+    )
     const registration = ipcMainHandle.mock.calls.find(
       ([channel]) => channel === 'host:skills.uninstall'
     )
@@ -223,7 +238,12 @@ describe('Office status IPC registration', () => {
       onMcpChanged: vi.fn(() => vi.fn()),
       getOfficeStatus
     }
-    registerHostIpc(coreServer as never, {} as never, {} as never, () => true)
+    registerHostIpc(
+      coreServer as never,
+      { setProjectLoader: vi.fn() } as never,
+      {} as never,
+      () => true
+    )
     const registration = ipcMainHandle.mock.calls.find(
       ([channel]) => channel === 'host:office.getStatus'
     )

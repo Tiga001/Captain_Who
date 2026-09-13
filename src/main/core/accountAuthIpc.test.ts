@@ -50,6 +50,48 @@ describe('account gate only protects new conversation turns', () => {
       ok: true
     })
   })
+  it('blocks unlicensed new turns while keeping local Token reads and running work available', async () => {
+    const handlers = new Map<string, (...args: unknown[]) => unknown>()
+    const core = {
+      onAgentEvent: vi.fn(),
+      onProviderTransition: vi.fn(),
+      startConversationTurn: vi.fn(),
+      rewriteConversationTurn: vi.fn(),
+      getLocalTokenUsage: vi.fn().mockResolvedValue({ totalTokens: '42' }),
+      steerRun: vi.fn().mockResolvedValue({ accepted: true }),
+      cancelRun: vi.fn(),
+      shutdown: vi.fn()
+    }
+    registerAgentIpc(
+      {
+        handle: (channel: string, handler: (...args: unknown[]) => unknown) =>
+          handlers.set(channel, handler),
+        on: vi.fn()
+      } as never,
+      core as never,
+      () => {
+        throw new Error('ACCOUNT_LICENSE_REQUIRED')
+      }
+    )
+    const invoke = (channel: string) => handlers.get(channel)!({}, { runId: 'running' })
+    for (const channel of [
+      HOST_CHANNELS.agent.startConversationTurn,
+      HOST_CHANNELS.agent.rewriteConversationTurn
+    ]) {
+      await expect(invoke(channel)).resolves.toMatchObject({
+        ok: false,
+        error: { message: 'ACCOUNT_LICENSE_REQUIRED' }
+      })
+    }
+    await expect(invoke(HOST_CHANNELS.agent.getLocalTokenUsage)).resolves.toEqual({
+      totalTokens: '42'
+    })
+    await expect(invoke(HOST_CHANNELS.agent.steerRun)).resolves.toEqual({ accepted: true })
+    expect(core.startConversationTurn).not.toHaveBeenCalled()
+    expect(core.rewriteConversationTurn).not.toHaveBeenCalled()
+    expect(core.cancelRun).not.toHaveBeenCalled()
+    expect(core.shutdown).not.toHaveBeenCalled()
+  })
   it('fails closed when a caller forgets to supply the account guard', async () => {
     const handlers = new Map<string, (...args: unknown[]) => unknown>()
     registerAgentIpc(

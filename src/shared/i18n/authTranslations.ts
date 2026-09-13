@@ -1,4 +1,7 @@
+import { accountExtrasEnglish, accountExtrasChinese } from './accountExtrasTranslations'
+
 export const authEnglish = {
+  ...accountExtrasEnglish,
   'auth.title': 'Sign in to Captain Who',
   'auth.passwordMode': 'Password',
   'auth.codeMode': 'Email code',
@@ -17,7 +20,7 @@ export const authEnglish = {
   'auth.reset': 'Forgot password?',
   'auth.editProfile': 'Edit on website',
   'auth.refresh': 'Refresh profile',
-  'auth.cancel': 'Back to workspace',
+  'auth.cancel': 'Back to app',
   'auth.loginToSend': 'Sign in to start a new turn. Running tasks are unaffected.',
   'auth.memoryOnly': 'This session could not be saved securely. Sign in again after restarting.',
   'auth.cloudProfile': 'Cloud account',
@@ -37,6 +40,7 @@ export const authEnglish = {
 } as const
 
 export const authChinese: Record<keyof typeof authEnglish, string> = {
+  ...accountExtrasChinese,
   'auth.title': '登录 Captain Who',
   'auth.passwordMode': '邮箱密码',
   'auth.codeMode': '邮箱验证码',
@@ -55,7 +59,7 @@ export const authChinese: Record<keyof typeof authEnglish, string> = {
   'auth.reset': '忘记密码？',
   'auth.editProfile': '前往官网编辑资料',
   'auth.refresh': '刷新资料',
-  'auth.cancel': '返回工作台',
+  'auth.cancel': '返回应用',
   'auth.loginToSend': '登录后才能启动新回合，正在运行的任务不受影响。',
   'auth.memoryOnly': '未能安全保存本次登录，重启软件后需要重新登录。',
   'auth.cloudProfile': '云端账号',

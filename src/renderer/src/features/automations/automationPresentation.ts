@@ -131,6 +131,9 @@ export function localizedScheduleSummary(
 
 export function runErrorMessage(t: Translate, run: AutomationRun): string | null {
   if (!run.errorCode && !run.errorMessage) return null
+  if (run.errorCode === 'ACCOUNT_LOGIN_REQUIRED') return t('license.runLoginRequired')
+  if (run.errorCode === 'ACCOUNT_LICENSE_REQUIRED') return t('license.runLicenseRequired')
+  if (run.errorCode === 'ACCOUNT_LICENSE_UNAVAILABLE') return t('license.runVerificationRequired')
   if (run.errorCode === 'permission_disabled') return t('automation.runErrorPermission')
   if (
     run.errorCode === 'target_invalid' ||

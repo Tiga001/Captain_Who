@@ -21,13 +21,24 @@ try {
   const state = await page.evaluate(() => window.mycopilot.host.auth.getState())
   if (state.status !== 'signedOut' || state.profile !== null)
     throw new Error('Fresh installation must require login')
+  const license = await page.evaluate(() => window.mycopilot.host.license.getState())
+  if (license.status !== 'signedOut')
+    throw new Error('Signed-out installation must not hold a license grant')
   await page.screenshot({ path: join(data, 'login-password.png') })
   await page.locator('.account-login__modes button').nth(1).click()
   await page.screenshot({ path: join(data, 'login-code.png') })
+  const usage = await page.evaluate(async () => {
+    await window.mycopilot.host.app.whenReady()
+    return window.mycopilot.host.agent.getLocalTokenUsage({ from: '2026-01-01', to: '2026-12-31' })
+  })
+  if (usage.totalTokens !== '0' || usage.days.length !== 0 || usage.timezone !== 'Asia/Shanghai')
+    throw new Error('Fresh local statistics must be empty and use the agreed timezone')
   console.log(
     JSON.stringify(
       {
         status: state.status,
+        license: license.status,
+        localTokens: usage.totalTokens,
         screenshots: [join(data, 'login-password.png'), join(data, 'login-code.png')]
       },
       null,

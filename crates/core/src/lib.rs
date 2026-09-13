@@ -328,6 +328,7 @@ pub use protocol::{
     AgentUsageSummaryRange, AgentWorkspaceContext, AgentWritePermission,
     BrowserDestinationIdentity, BrowserResolvedAddressClass, BrowserRiskKind, BrowserRiskTrigger,
     BuiltinMcpToolApprovalIdentity, BuiltinMcpToolResourceSummary, BuiltinMcpToolRiskKind,
+    LocalTokenUsageDay, LocalTokenUsageSummaryInput, LocalTokenUsageSummaryOutput,
     ModelCapabilities, ProviderContinuationRef, AGENT_COMMAND_ARTIFACT_OBSERVATION_SCHEMA_VERSION,
     AGENT_COMMAND_RUNTIME_BINDING_SCHEMA_VERSION, AGENT_COMMAND_RUNTIME_RESOLUTION_SCHEMA_VERSION,
     AGENT_COMMAND_SESSION_MAX_TRANSCRIPT_CHUNKS, AGENT_FILE_CHANGE_PROTOCOL_SCHEMA_VERSION,
