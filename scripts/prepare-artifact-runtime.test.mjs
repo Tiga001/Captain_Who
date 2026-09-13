@@ -234,6 +234,15 @@ test('manifest pins runtime assets, PDF tools, and dependency versions for every
   }
 })
 
+test('managed Node evidence stays synchronized with the workspace lockfile and package graph', async () => {
+  const manifest = await loadArtifactRuntimeManifest(manifestPath)
+  const pinned = JSON.parse(
+    await readFile(join(repositoryRoot, manifest.buildInputs.nodePackageEvidence.path), 'utf8')
+  )
+  assert.equal(pinned.lockfile.sha256, manifest.buildInputs.pnpmLockfile.sha256)
+  assert.deepEqual(await createManagedNodeDependencyEvidence(), pinned)
+})
+
 test('managed Python requirements freeze the reviewed dependency closure and binary-only install policy', async () => {
   const requirements = await readFile(requirementsPath, 'utf8')
   const records = requirements
@@ -346,6 +355,15 @@ test('manifest and download policy fail closed on mutable or foreign supply-chai
   await assert.rejects(
     () => loadArtifactRuntimeManifest(stalePptxGenPatchManifestPath),
     /build input pptxgenjsPatch SHA-256 does not match/
+  )
+
+  const staleLockfile = await rawManifest()
+  staleLockfile.buildInputs.pnpmLockfile.sha256 = '0'.repeat(64)
+  const staleLockfileManifestPath = join(directory, 'stale-lockfile-manifest.json')
+  await writeFile(staleLockfileManifestPath, `${JSON.stringify(staleLockfile)}\n`)
+  await assert.rejects(
+    () => loadArtifactRuntimeManifest(staleLockfileManifestPath),
+    /build input pnpmLockfile SHA-256 does not match/
   )
 })
 

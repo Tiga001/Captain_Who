@@ -61,6 +61,8 @@
   right: 0;
   bottom: 0;
   left: 0;
+  display: flex;
+  align-items: center;
   height: var(--left-sidebar-footer-height);
   padding: 0;
   border-top: 1px solid var(--mc-color-border-hairline);
@@ -155,7 +157,7 @@
   display: grid;
   grid-template-columns: 28px minmax(0, 1fr);
   align-items: center;
-  width: 100%;
+  flex: 1 1 0;
   min-width: 0;
   height: 100%;
   padding: 0 18px;
@@ -164,6 +166,62 @@
   color: var(--mc-color-sidebar-text-secondary);
   text-align: left;
   border-radius: 0;
+}
+
+.left-sidebar__footer:has(.left-sidebar__update) .left-sidebar__account-button {
+  padding-right: 6px;
+}
+
+.left-sidebar__update {
+  display: grid;
+  flex: 0 0 auto;
+  justify-items: end;
+  margin-right: 12px;
+}
+
+.left-sidebar .left-sidebar__update-button {
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
+  padding: 3px 6px;
+  gap: 4px;
+  color: var(--mc-color-text-accent);
+  border-radius: var(--mc-radius-control);
+  font-size: 12px;
+  font-weight: var(--mc-font-weight-control);
+  line-height: 18px;
+  white-space: nowrap;
+}
+
+.left-sidebar__update-button svg {
+  width: 13px;
+  height: 13px;
+}
+
+.left-sidebar__update-button:hover:not(:disabled) {
+  background: var(--mc-color-state-hover);
+}
+
+.left-sidebar .left-sidebar__update-button:disabled {
+  color: var(--mc-color-sidebar-text-secondary);
+  cursor: default;
+}
+
+.left-sidebar__update-error {
+  padding: 0 6px;
+  color: var(--mc-color-text-danger);
+  font-size: 10px;
+  line-height: 13px;
+  white-space: nowrap;
+}
+
+.left-sidebar__update-announcement {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
 }
 
 .left-sidebar__account-avatar {
@@ -315,6 +373,7 @@
 .left-sidebar__search-action:focus-visible,
 .left-sidebar__scheduled-action:focus-visible,
 .left-sidebar__account-button:focus-visible,
+.left-sidebar__update-button:focus-visible,
 .left-sidebar__account-menu-item:focus-visible,
 .left-sidebar__conversation-title-button:focus-visible,
 .left-sidebar__section-title-button:focus-visible,

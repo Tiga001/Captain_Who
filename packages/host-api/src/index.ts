@@ -1,4 +1,6 @@
 import type { LicenseHostApi } from './license'
+import type { UpdateHostApi } from './updates'
+export * from './updates'
 import type { LocalTokenUsageSummaryInput, LocalTokenUsageSummaryOutput } from '@mycopilot/protocol'
 export * from './license'
 
@@ -713,6 +715,7 @@ export type {
 } from './auth'
 
 export interface HostApi {
+  updates: UpdateHostApi
   license: LicenseHostApi
   auth: import('./auth').AuthHostApi
   core: {

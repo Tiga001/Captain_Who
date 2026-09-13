@@ -3,6 +3,7 @@ import { HOST_CHANNELS, type HostApi } from '@mycopilot/host-api'
 import { createAgentIpcBridge } from './AgentIpcBridge'
 import { createAuthIpcBridge } from './AuthIpcBridge'
 import { createLicenseIpcBridge } from './LicenseIpcBridge'
+import { createUpdateIpcBridge } from './UpdateIpcBridge'
 import { createAutomationIpcBridge } from './AutomationIpcBridge'
 import { createAppIpcBridge } from './AppIpcBridge'
 import { createBrowserIpcBridge } from './BrowserIpcBridge'
@@ -18,6 +19,7 @@ import { createTerminalIpcBridge } from './TerminalIpcBridge'
 import { createWorkspaceFilesIpcBridge } from './WorkspaceFilesIpcBridge'
 
 const host: HostApi = {
+  updates: createUpdateIpcBridge(ipcRenderer),
   license: createLicenseIpcBridge(ipcRenderer),
   auth: createAuthIpcBridge(ipcRenderer),
   core: {

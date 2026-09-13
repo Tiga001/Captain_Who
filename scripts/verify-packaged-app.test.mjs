@@ -6,12 +6,15 @@ import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import test from 'node:test'
+import { Arch } from 'electron-builder'
+import { stringify as stringifyYaml } from 'yaml'
+import { createUpdateBuildConfiguration } from './update-config.mjs'
 
 import {
   isMacCodeSigningExplicitlyDisabled,
   packagedApplicationAsarPath,
   packagedMacIconPath,
-  verifyPackagedAutoUpdateMetadataDisabled,
+  verifyPackagedAutoUpdateMetadata,
   verifyPackagedMacIcon,
   verifyPackagedManagedPlaywrightMcp
 } from './verify-packaged-app.mjs'
@@ -23,6 +26,7 @@ const { load: parseYaml } = requireFromBuilder('js-yaml')
 function createPackContext(appOutDir) {
   return {
     electronPlatformName: 'darwin',
+    arch: Arch.arm64,
     appOutDir,
     packager: {
       config: {
@@ -67,10 +71,10 @@ test('packaged application refuses inferred or embedded auto-update metadata', a
   const directory = await mkdtemp(join(tmpdir(), 'captain-who-packaged-update-metadata-'))
   const context = createPackContext(directory)
   try {
-    await verifyPackagedAutoUpdateMetadataDisabled(context)
+    await verifyPackagedAutoUpdateMetadata(context)
     await assert.rejects(
       () =>
-        verifyPackagedAutoUpdateMetadataDisabled({
+        verifyPackagedAutoUpdateMetadata({
           ...context,
           packager: { ...context.packager, config: { publish: [] } }
         }),
@@ -78,18 +82,18 @@ test('packaged application refuses inferred or embedded auto-update metadata', a
     )
     await assert.rejects(
       () =>
-        verifyPackagedAutoUpdateMetadataDisabled({
+        verifyPackagedAutoUpdateMetadata({
           ...context,
           packager: {
             ...context.packager,
             config: { ...context.packager.config, mac: { publish: [] } }
           }
         }),
-      /mac\.publish must remain unset/
+      /mac\.publish must be one credential-free generic latest provider/
     )
     await assert.rejects(
       () =>
-        verifyPackagedAutoUpdateMetadataDisabled({
+        verifyPackagedAutoUpdateMetadata({
           ...context,
           packager: {
             ...context.packager,
@@ -103,7 +107,7 @@ test('packaged application refuses inferred or embedded auto-update metadata', a
     )
     await assert.rejects(
       () =>
-        verifyPackagedAutoUpdateMetadataDisabled({
+        verifyPackagedAutoUpdateMetadata({
           ...context,
           packager: {
             ...context.packager,
@@ -117,7 +121,7 @@ test('packaged application refuses inferred or embedded auto-update metadata', a
     )
     await assert.rejects(
       () =>
-        verifyPackagedAutoUpdateMetadataDisabled({
+        verifyPackagedAutoUpdateMetadata({
           ...context,
           packager: {
             ...context.packager,
@@ -140,9 +144,92 @@ test('packaged application refuses inferred or embedded auto-update metadata', a
     await mkdir(dirname(updateConfiguration), { recursive: true })
     await writeFile(updateConfiguration, 'provider: github\n')
     await assert.rejects(
-      () => verifyPackagedAutoUpdateMetadataDisabled(context),
+      () => verifyPackagedAutoUpdateMetadata(context),
       /unexpectedly contains app-update\.yml/
     )
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
+})
+
+test('packaged arm64 release requires exactly the generated credential-free update source', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'captain-who-enabled-update-metadata-'))
+  const context = createPackContext(directory)
+  context.targets = [{ name: 'dmg' }, { name: 'zip' }]
+  context.packager.config = createUpdateBuildConfiguration({
+    environment: { CAPTAIN_WHO_UPDATE_URL: 'https://updates.example.test/releases/macos/arm64/' }
+  })
+  const updateConfiguration = join(
+    directory,
+    'Captain Who.app',
+    'Contents',
+    'Resources',
+    'app-update.yml'
+  )
+  const source = {
+    ...context.packager.config.mac.publish,
+    updaterCacheDirName: 'captain-who-updater'
+  }
+  try {
+    await assert.rejects(() => verifyPackagedAutoUpdateMetadata(context), /missing app-update\.yml/)
+    await mkdir(dirname(updateConfiguration), { recursive: true })
+    await writeFile(updateConfiguration, stringifyYaml(source))
+    await verifyPackagedAutoUpdateMetadata(context)
+
+    for (const modified of [
+      { ...source, provider: 'github' },
+      { ...source, url: 'https://updates.example.test/another-directory/' },
+      { ...source, url: 'https://updates.example.test/?signature=private' },
+      { ...source, token: 'unexpected-credential' },
+      { ...source, updaterCacheDirName: '../elsewhere' }
+    ]) {
+      await writeFile(updateConfiguration, stringifyYaml(modified))
+      await assert.rejects(() => verifyPackagedAutoUpdateMetadata(context), /does not match/)
+    }
+
+    await writeFile(updateConfiguration, 'provider: generic\nprovider: github\n')
+    await assert.rejects(() => verifyPackagedAutoUpdateMetadata(context), /valid YAML/)
+    await writeFile(updateConfiguration, stringifyYaml(source))
+    await assert.rejects(
+      () => verifyPackagedAutoUpdateMetadata({ ...context, arch: Arch.x64 }),
+      /macOS arm64 only/
+    )
+    await assert.rejects(
+      () => verifyPackagedAutoUpdateMetadata({ ...context, targets: [{ name: 'dmg' }] }),
+      /both DMG and ZIP/
+    )
+    await assert.rejects(
+      () =>
+        verifyPackagedAutoUpdateMetadata({
+          ...context,
+          packager: { ...context.packager, platformSpecificBuildOptions: { identity: null } }
+        }),
+      /cannot disable code signing/
+    )
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
+})
+
+test('Windows and Linux packages cannot inherit macOS update metadata', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'captain-who-unsupported-update-metadata-'))
+  try {
+    const configuration = createUpdateBuildConfiguration({
+      environment: { CAPTAIN_WHO_UPDATE_URL: 'https://updates.example.test/macos/arm64/' }
+    })
+    for (const electronPlatformName of ['win32', 'linux']) {
+      const context = createPackContext(join(directory, electronPlatformName))
+      context.electronPlatformName = electronPlatformName
+      context.packager.config = configuration
+      await verifyPackagedAutoUpdateMetadata(context)
+      const updateConfiguration = join(context.appOutDir, 'resources', 'app-update.yml')
+      await mkdir(dirname(updateConfiguration), { recursive: true })
+      await writeFile(updateConfiguration, stringifyYaml(configuration.mac.publish))
+      await assert.rejects(
+        () => verifyPackagedAutoUpdateMetadata(context),
+        /unexpectedly contains app-update\.yml/
+      )
+    }
   } finally {
     await rm(directory, { recursive: true, force: true })
   }

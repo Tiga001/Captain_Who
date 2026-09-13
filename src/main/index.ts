@@ -62,6 +62,9 @@ import { LicenseManagementService } from './auth/LicenseManagementService'
 import { ExecutionAccessBridge } from './auth/ExecutionAccessBridge'
 import { fetchAccountProfile } from './auth/AccountApiClient'
 import { registerAuthIpc } from './auth/authIpc'
+import { AppShutdownCoordinator } from './lifecycle/AppShutdownCoordinator'
+import { createDesktopUpdateService } from './updates/createDesktopUpdateService'
+import { registerUpdateIpc } from './updates/updateIpc'
 
 // Electron is the sole authority for the application data location. Freeze it before
 // app.setName() can affect path resolution so the entire process uses one root.
@@ -77,10 +80,10 @@ const notificationLocaleStore = new NotificationLocaleStore(appDataRoot)
 const appearanceThemeStore = new AppearanceThemeStore(appDataRoot)
 nativeTheme.themeSource = appearanceThemeStore.getPreference()
 const terminalBridge = new TerminalBridge()
-let isQuittingAfterServiceShutdown = false
-let isServiceShutdownInProgress = false
 let disposeAdaptiveAppIcon: (() => void) | null = null
 let disposeHostIpc: HostIpcRegistration | null = null
+let disposeUpdateIpc: (() => void) | null = null
+let desktopUpdateService: ReturnType<typeof createDesktopUpdateService> | null = null
 let mainWindow: BrowserWindow | null = null
 let startupReadiness: StartupReadinessController | null = null
 let hostInitializationReady = false
@@ -96,6 +99,12 @@ let browserFileBroker: BrowserFileBroker | null = null
 let managedPlaywrightBridgeHost: ManagedPlaywrightBridgeHost | null = null
 const mainWindowLifecycle = new MainWindowLifecycleController(process.platform)
 const trustedRendererEntries = new Map<number, string>()
+const shutdownCoordinator = new AppShutdownCoordinator({
+  shutdownServices: shutdownApplicationServices,
+  quit: () => app.quit(),
+  relaunch: () => app.relaunch(),
+  onError: (message, error) => console.error(message, error)
+})
 
 const macWindowChromeOptions =
   process.platform === 'darwin'
@@ -221,19 +230,21 @@ function createWindow(): void {
     trustedRendererEntries.delete(rendererWebContentsId)
   })
   window.on('close', (event) => {
-    if (startupInitializationFailed && !isQuittingAfterServiceShutdown) {
+    if (startupInitializationFailed && !shutdownCoordinator.isQuittingAfterServiceShutdown) {
       event.preventDefault()
       app.quit()
       return
     }
     // Keep the live Renderer available long enough for before-quit to drain debounced state on
     // platforms where closing the last window would otherwise destroy it before app.quit().
-    if (process.platform !== 'darwin' && !isQuittingAfterServiceShutdown) {
+    if (process.platform !== 'darwin' && !shutdownCoordinator.isQuittingAfterServiceShutdown) {
       event.preventDefault()
       app.quit()
       return
     }
-    if (mainWindowLifecycle.requestClose(window, isQuittingAfterServiceShutdown)) {
+    if (
+      mainWindowLifecycle.requestClose(window, shutdownCoordinator.isQuittingAfterServiceShutdown)
+    ) {
       event.preventDefault()
     }
   })
@@ -243,7 +254,12 @@ function createWindow(): void {
   })
 
   window.on('ready-to-show', () => {
-    if (isServiceShutdownInProgress || isQuittingAfterServiceShutdown) return
+    if (
+      shutdownCoordinator.isServiceShutdownInProgress ||
+      shutdownCoordinator.isQuittingAfterServiceShutdown
+    ) {
+      return
+    }
     window.show()
     sendAppWindowState(window)
     // A cold-start backlog must not race the window that the user just opened. Native delivery
@@ -258,7 +274,10 @@ function createWindow(): void {
   window.on('enter-full-screen', handleWindowStateChange)
   window.on('leave-full-screen', () => {
     handleWindowStateChange()
-    mainWindowLifecycle.handleLeaveFullScreen(window, isQuittingAfterServiceShutdown)
+    mainWindowLifecycle.handleLeaveFullScreen(
+      window,
+      shutdownCoordinator.isQuittingAfterServiceShutdown
+    )
   })
   window.on('restore', handleWindowStateChange)
 
@@ -292,7 +311,12 @@ function createWindow(): void {
 }
 
 function activateMainWindow(): void {
-  if (isServiceShutdownInProgress || isQuittingAfterServiceShutdown) return
+  if (
+    shutdownCoordinator.isServiceShutdownInProgress ||
+    shutdownCoordinator.isQuittingAfterServiceShutdown
+  ) {
+    return
+  }
   const window = mainWindowLifecycle.showExisting(mainWindow)
   if (!window) {
     createWindow()
@@ -336,6 +360,17 @@ async function initializeApplication(): Promise<void> {
     optimizer.watchWindowShortcuts(window)
   })
   startupReadiness = registerStartupReadiness(ipcMain, isTrustedRendererEvent)
+  desktopUpdateService = createDesktopUpdateService({
+    requestInstall: (install) =>
+      hostInitializationReady && shutdownCoordinator.requestUpdateInstall(install),
+    onInstallFailure: (error) => {
+      shutdownCoordinator.recoverFromUpdateInstallFailure(error)
+    },
+    isShuttingDown: () =>
+      shutdownCoordinator.isServiceShutdownInProgress ||
+      shutdownCoordinator.isQuittingAfterServiceShutdown
+  })
+  disposeUpdateIpc = registerUpdateIpc(desktopUpdateService, isTrustedRendererEvent)
   createWindow()
   app.on('activate', activateMainWindow)
   coreServer.start()
@@ -500,6 +535,12 @@ async function initializeApplication(): Promise<void> {
   if (mainWindow?.isVisible()) disposeHostIpc.beginNotificationDelivery()
   hostInitializationReady = true
   startupReadiness.markReady()
+  if (
+    !shutdownCoordinator.isServiceShutdownInProgress &&
+    !shutdownCoordinator.isQuittingAfterServiceShutdown
+  ) {
+    desktopUpdateService.startOnce()
+  }
 }
 
 void app
@@ -519,61 +560,59 @@ app.on('window-all-closed', () => {
 })
 
 app.on('before-quit', (event) => {
-  if (isQuittingAfterServiceShutdown) {
+  if (shutdownCoordinator.isQuittingAfterServiceShutdown) {
     terminalBridge.killNow()
     coreServer.stop()
     return
   }
-  if (isServiceShutdownInProgress) {
-    event.preventDefault()
-    return
-  }
-
   event.preventDefault()
-  isServiceShutdownInProgress = true
+  shutdownCoordinator.requestQuit()
+})
+
+async function shutdownApplicationServices(): Promise<void> {
   // Stop the native system-notification producer before any await in the shutdown path. Keep
   // the remaining IPC and MCP reverse bridge registered until Core has completed its own bounded
   // shutdown; only this producer could otherwise issue a lazy request that respawns Core.
   const notificationShutdown = disposeHostIpc?.beginNotificationShutdown()
+  desktopUpdateService?.beginShutdown()
   mainWindowLifecycle.prepareForQuit()
   // Once quit has been accepted, remove the remaining input surface while retaining its live
   // webContents for the bounded Renderer flush below.
   mainWindow?.hide()
-  void (async () => {
-    // Renderer owns debounced Composer state. Finish that bounded write while Core still accepts
-    // requests; unloading the window after Core shutdown would otherwise lose the final keystrokes.
-    await disposeHostIpc?.flushRendererBeforeQuit(mainWindow?.webContents)
-    // Keep the exact Main reverse bridge and BrowserSurface alive until Core has stopped the
-    // managed MCP Manager. Core shutdown sends a reviewed close command and awaits its bounded
-    // completion; tearing down Main in parallel would turn a graceful close into an unknown
-    // outcome and could strand an attachment.
-    await Promise.allSettled([
-      notificationShutdown ?? Promise.resolve(),
-      appearanceThemeStore.beginShutdown(),
-      terminalBridge.stop(),
-      coreServer.shutdown()
-    ])
-    await managedPlaywrightBridgeHost?.close()
-    managedPlaywrightBridgeHost = null
-    await browserSurfaceManager?.shutdown().catch(() => undefined)
-    browserSurfaceManager = null
-    browserNetworkGuard = null
-    browserDownloadBroker = null
-    browserHistoryService = null
-    browserLinkRouter = null
-    await browserFileBroker?.shutdown().catch(() => undefined)
-    browserFileBroker = null
-    await browserArtifactBroker?.shutdown().catch(() => undefined)
-    browserArtifactBroker = null
-  })().finally(() => {
-    isQuittingAfterServiceShutdown = true
-    app.quit()
-  })
-})
+  // Renderer owns debounced Composer state. Finish that bounded write while Core still accepts
+  // requests; unloading the window after Core shutdown would otherwise lose the final keystrokes.
+  await disposeHostIpc?.flushRendererBeforeQuit(mainWindow?.webContents)
+  // Keep the exact Main reverse bridge and BrowserSurface alive until Core has stopped the
+  // managed MCP Manager. Core shutdown sends a reviewed close command and awaits its bounded
+  // completion; tearing down Main in parallel would turn a graceful close into an unknown
+  // outcome and could strand an attachment.
+  await Promise.allSettled([
+    notificationShutdown ?? Promise.resolve(),
+    appearanceThemeStore.beginShutdown(),
+    terminalBridge.stop(),
+    coreServer.shutdown()
+  ])
+  await managedPlaywrightBridgeHost?.close()
+  managedPlaywrightBridgeHost = null
+  await browserSurfaceManager?.shutdown().catch(() => undefined)
+  browserSurfaceManager = null
+  browserNetworkGuard = null
+  browserDownloadBroker = null
+  browserHistoryService = null
+  browserLinkRouter = null
+  await browserFileBroker?.shutdown().catch(() => undefined)
+  browserFileBroker = null
+  await browserArtifactBroker?.shutdown().catch(() => undefined)
+  browserArtifactBroker = null
+}
 
 app.on('will-quit', () => {
   startupReadiness?.dispose()
   startupReadiness = null
+  disposeUpdateIpc?.()
+  disposeUpdateIpc = null
+  desktopUpdateService?.dispose()
+  desktopUpdateService = null
   disposeHostIpc?.()
   disposeHostIpc = null
   disposeAdaptiveAppIcon?.()

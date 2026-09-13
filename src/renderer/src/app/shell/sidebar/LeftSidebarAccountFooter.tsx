@@ -9,6 +9,7 @@ import { CaptainWhoLineIcon } from '../../../components/icons/CaptainWhoLineIcon
 import { useLicense } from '../../../features/license/LicenseContext'
 import type { UiPreferencesSnapshot } from '../../../features/storage/storageClient'
 import { useDismissOnOutsidePointer } from '../../../hooks/useDismissOnOutsidePointer'
+import { LeftSidebarUpdateButton } from './LeftSidebarUpdateButton'
 
 interface LeftSidebarAccountFooterProps {
   onOpenSettings: () => void
@@ -140,6 +141,7 @@ export function LeftSidebarAccountFooter({ onOpenSettings, t }: LeftSidebarAccou
           <span>{profileDisplayName}</span>
         </span>
       </button>
+      <LeftSidebarUpdateButton t={t} />
     </div>
   )
 }

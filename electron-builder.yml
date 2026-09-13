@@ -1,6 +1,8 @@
 appId: io.github.tiga001.captainwho
 productName: Captain Who
 copyright: Copyright © 2026 ShenhuaJiao
+# Development and non-macOS builds have no update provider. scripts/update-config.mjs validates
+# CAPTAIN_WHO_UPDATE_URL and enables a macOS arm64 provider for update-enabled releases only.
 publish: null
 afterPack: ./scripts/verify-packaged-app.mjs
 afterSign: ./scripts/verify-packaged-app.mjs
@@ -57,7 +59,9 @@ nsis:
   createDesktopShortcut: always
 mac:
   icon: build/icon.icns
-  # Auto-update is disabled, so avoid the default ZIP target and its mandatory blockmap.
+  artifactName: Captain-Who-${version}-${arch}.${ext}
+  # The base configuration is for builds without an update source. The dynamic release config
+  # adds arm64 ZIP + update metadata when CAPTAIN_WHO_UPDATE_URL is configured.
   target:
     - dmg
   # build:mac additionally enables forceCodeSigning. This custom signer gives the Rust helper a
@@ -88,7 +92,7 @@ mac:
   notarize: false
 dmg:
   # Sign the distributable container itself. The application inside already carries the complete
-  # hardened Developer ID signature chain; update metadata stays disabled independently.
+  # hardened Developer ID signature chain. The dynamic release config enables update metadata.
   sign: true
   writeUpdateInfo: false
   artifactName: Captain-Who-${version}-${arch}.${ext}

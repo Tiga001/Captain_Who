@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "lockfile": {
     "path": "pnpm-lock.yaml",
-    "sha256": "f6829459a0d4d83f54094e39e58f3d70a3429361199ff53a63621a20bb27e793"
+    "sha256": "6f82dc57e58ce9708f6c33f3facb1c913707f8fe0eda5bdfef8b044a33384bc5"
   },
   "importer": {
     "path": "packages/artifact-runtime-node/package.json",

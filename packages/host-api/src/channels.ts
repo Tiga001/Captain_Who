@@ -3,6 +3,11 @@
  * Keep these names out of main/preload implementations so a channel rename cannot drift.
  */
 export const HOST_CHANNELS = {
+  updates: {
+    getState: 'host:updates.getState',
+    download: 'host:updates.download',
+    stateChanged: 'host:updates.stateChanged'
+  },
   license: {
     getState: 'host:license.getState',
     refresh: 'host:license.refresh',

@@ -2,7 +2,7 @@
 status: current
 audience: developers/maintainers
 owner: engineering
-last_verified: 2026-09-02
+last_verified: 2026-09-13
 ---
 
 # 构建与发布
@@ -18,6 +18,7 @@ last_verified: 2026-09-02
 - 组件准备阶段需要访问各锁定 manifest 指定的下载源；已完整缓存且 receipt 有效时可复用
 - 目标平台 package 必须在目标 OS 原生构建；脚本会拒绝在其他 OS 执行 `build:win/mac/linux`
 - macOS distribution 需要钥匙串中可用的真实 `Developer ID Application` identity
+- macOS arm64 可更新发行构建需要通过外部环境提供 `CAPTAIN_WHO_UPDATE_URL`；仅允许无凭据、无 query/fragment 的 HTTPS 目录 URL
 
 构建前建议先执行：
 
@@ -29,18 +30,24 @@ pnpm check
 
 ## 2. 构建命令
 
-| 命令                | 产出/用途                                                                          | 签名语义                                                    |
-| ------------------- | ---------------------------------------------------------------------------------- | ----------------------------------------------------------- |
-| `pnpm build`        | TypeScript typecheck + Electron Vite `out/`                                        | 不打包、不签名                                              |
-| `pnpm build:core`   | Cargo locked release `core-server`，去除机器私有路径后做 binary magic/execute 校验 | 未签名 sidecar                                              |
-| `pnpm build:unpack` | 准备组件、构建 TS/Core Server、`electron-builder --dir`                            | macOS 显式 `identity=null`，仅本地目录诊断                  |
-| `pnpm build:mac`    | macOS `.app`/DMG                                                                   | 强制真实签名；未 notarize                                   |
-| `pnpm build:win`    | Windows NSIS installer                                                             | 使用 Electron Builder 平台签名配置/环境；仓库未冻结证书流程 |
-| `pnpm build:linux`  | AppImage、snap、deb                                                                | 无 macOS 式 code-sign gate                                  |
+| 命令                        | 产出/用途                                                                          | 签名语义                                                    |
+| --------------------------- | ---------------------------------------------------------------------------------- | ----------------------------------------------------------- |
+| `pnpm build`                | TypeScript typecheck + Electron Vite `out/`                                        | 不打包、不签名                                              |
+| `pnpm build:core`           | Cargo locked release `core-server`，去除机器私有路径后做 binary magic/execute 校验 | 未签名 sidecar                                              |
+| `pnpm build:unpack`         | 准备组件、构建 TS/Core Server、`electron-builder --dir`                            | macOS 显式 `identity=null`，仅本地目录诊断                  |
+| `pnpm build:mac`            | macOS arm64 `.app`、DMG、ZIP 与 `latest-mac.yml`；要求配置更新源                   | 强制真实签名；未 notarize                                   |
+| `pnpm verify:update-config` | 只验证正式更新源与构建配置，不打包或访问服务器                                     | 不签名、不公证、不上传                                      |
+| `pnpm build:win`            | Windows NSIS installer                                                             | 使用 Electron Builder 平台签名配置/环境；仓库未冻结证书流程 |
+| `pnpm build:linux`          | AppImage、snap、deb                                                                | 无 macOS 式 code-sign gate                                  |
 
 `build:win/mac/linux` 都按以下顺序执行：准备 OfficeCLI、Office renderer、Word/PDF renderer、Artifact Runtime → TypeScript build → Cargo `--locked --release` Core Server → Electron Builder。
 
 `build:unpack` 中 Word/PDF renderer 使用 `--if-supported`；正式平台命令要求对应 target 可准备。
+
+`build:mac` 在组件准备之前验证更新源，随后以 `scripts/update-config.mjs` 读取基础 YAML、限定
+`--mac --arm64` 并显式 `--publish never`。缺少更新地址会提前失败；普通 `build`、`dev` 和使用基础
+YAML 的 `build:unpack` 不需要该环境变量，更新保持禁用。更新源只进入最终 app 的
+`app-update.yml`，不通过 Vite/renderer 注入第二份 URL。详见[桌面应用更新](../subsystems/desktop-updates.md)。
 
 ## 3. 构建流水线
 
@@ -83,7 +90,7 @@ Electron Builder 将 `out/**`、`resources/**` 和所需 Node modules 放入应�
 
 平台产物：
 
-- macOS：`Captain Who.app` 与 `Captain-Who-${version}-${arch}.dmg`
+- macOS arm64 可更新发行：`Captain Who.app`、`Captain-Who-${version}-arm64.dmg`、`Captain-Who-${version}-arm64.zip`、`latest-mac.yml` 与对应 blockmap
 - Windows：`Captain-Who-${version}-${arch}-Setup.exe`（NSIS）
 - Linux：`Captain-Who-${version}-${arch}.AppImage`、snap、deb
 
@@ -105,12 +112,14 @@ Electron Builder 将 `out/**`、`resources/**` 和所需 Node modules 放入应�
   - `playwright-core@1.63.0-alpha-2026-08-05`
 - macOS `icon.icns` 与源文件字节一致。
 - macOS app 全树 privacy gate：拒绝敏感状态文件、绝对 symlink、当前 builder 的私有路径/用户名、高置信 secret 与未精确 allowlist 的 credentialed URL；`app.asar` 会逐 entry 检查 URL fixture。
+- 按最终 builder 配置验证更新源：无源/不支持平台不得包含 `app-update.yml`；有源 macOS arm64 必须包含与 generic HTTPS 配置一致且没有附加凭据字段的唯一 `app-update.yml`。
 
 ### afterSign 当前验证
 
 - 再验证 OfficeCLI、Artifact Runtime 与 Office renderer 的签名后 receipt；
 - 非 macOS，以及正式签名 macOS，再验证 Word/PDF renderer；macOS `identity=null` 路径不重复该项；
 - 正式 macOS 对 app、Core Server、Office renderer、OfficeCLI 和 Artifact Runtime 的精确 native target 执行 strict codesign 与 metadata/entitlement 验证。
+- 重新验证上述更新源、架构、DMG+ZIP 和强制签名配置边界。
 
 Core Server 在打包前经过 native magic/execute 校验，正式 macOS afterSign 还会单独 strict verify 该 sidecar；当前 hook 仍没有对非 macOS packaged Core Server 做内容 digest/receipt 绑定。privacy gate 当前也只在 macOS afterPack 执行，Windows/Linux 不能继承该证据。
 
@@ -142,10 +151,14 @@ notarize: false
 ```
 
 因此 macOS 发行包可以是 Developer ID 已签名，但**尚未经过 Apple notary service**。仓库没有自动
-stapling；notary credential 仍由发布者在本机钥匙串管理。构建配置显式使用 `publish: null`，应用也没有
-集成 `electron-updater`；macOS 目标仅生成 DMG，且 DMG update info 与 NSIS differential package
-均被关闭，所以普通构建不得生成或发布 `app-update.yml`、`latest*.yml`、`*.blockmap` 或 updater
-channel。任何发行说明必须如实区分签名、公证和发布状态。
+stapling；notary credential 仍由发布者在本机钥匙串管理。基础 YAML 的 `publish: null` 继续禁止默认
+provider 推断；动态配置仅为有源 macOS arm64 开启 generic provider、ZIP 与更新 metadata。
+NSIS differential package 保持关闭。应用侧 `electron-updater` 集成不意味着公证或更新发布已经完成。
+任何发行说明必须如实区分签名、公证和发布状态。
+
+公证/stapling 如果改变了 app 或归档字节，最终 ZIP/DMG、blockmap 与 `latest-mac.yml` 必须根据最终
+分发字节重新生成并校验。先上传归档与辅助文件、验证远端摘要，最后发布 manifest；COS 对具体对象
+的公开读不要求桶列目录权限。当前尚未配置正式 COS 更新目录或上传、公证与真实 A → B 验收。
 
 ## 7. 发布前门禁
 
@@ -161,11 +174,12 @@ channel。任何发行说明必须如实区分签名、公证和发布状态。
    - MCP stdio stress/其他明确发布测试
 5. 在目标 OS/arch 执行 `pnpm build:<platform>`；不得跨 OS 伪装 native package。
 6. 检查 afterPack/afterSign 完整成功；macOS 保存 signer/Team ID 验证记录。
-7. macOS 对最终 app 与 DMG 分别验签，并明确记录 notarization 仍为 false。
+7. macOS 对最终 app 与 DMG 分别验签；公开更新发布前另行完成并记录公证/stapling。当前自动构建仍为 `notarize: false`，不能仅凭构建成功进入公开更新发布。
 8. 对实际产物计算并记录 cryptographic hash、大小、平台、架构和版本。
 9. 在隔离临时 appData 做启动 smoke；若声明内置浏览器，明确 packaged Agent E2E 仍 pending。
 10. 审核第三方 notices、当前限制、schema/reset 和 rollback 说明。
-11. 只有所有必需证据来自同一最终树时才进入发布；任何失败都应修复后完整重跑。
+11. 更新发布先上传版本化归档和 blockmap，核对远端最终字节与 manifest 摘要，最后上传 `latest-mac.yml`，并在隔离环境完成真实 A → B 验收。
+12. 只有所有必需证据来自同一最终树时才进入发布；任何失败都应修复后完整重跑。
 
 不要把 `build:unpack` 的 unsigned directory、脚本 unit test、旧 bundle startup 或不同 commit 的 gate 拼接成签名发布证据。
 
@@ -204,12 +218,13 @@ pnpm build:<platform>
 - `pnpm check` 和专项 gate 日志；
 - 已知 pending/unsupported 项。
 
-回滚当前只能发布前一已验证产物或停止分发；仓库没有自动更新/回滚服务。数据库当前使用 canonical v36，不提供旧库保历史升级或降级，不能假设新库可被旧应用打开。涉及 schema 的 release 必须在发布前明确数据兼容和回滚策略。
+回退需要停止有问题版本的分发，并按验证过的数据兼容策略恢复或发布更高版本修复；应用侧更新不提供自动降级或数据库回滚。数据库当前使用 canonical v36，不能假设新库可被旧应用打开。涉及 schema 的 release 必须在发布前明确数据兼容和回滚策略；更新安装不能调用开发用 storage reset。
 
 ## 9. 代码真源
 
 - npm build/test scripts：`package.json`
-- package 配置：`electron-builder.yml`
+- package 配置：`electron-builder.yml`、`scripts/update-config.mjs`
+- 更新源与发布顺序：[桌面应用更新](../subsystems/desktop-updates.md)
 - Core Server build/verifier：`scripts/build-core.mjs`、`scripts/verify-core-binary.mjs`
 - target OS guard：`scripts/assert-package-platform.mjs`
 - package hooks：`scripts/verify-packaged-app.mjs`
@@ -223,6 +238,7 @@ pnpm build:<platform>
 
 ```bash
 pnpm test:mac-signing
+pnpm test:update-config
 pnpm test:officecli
 pnpm test:office-renderer
 pnpm test:artifact-runtime
@@ -244,7 +260,7 @@ pnpm verify:playwright-packaged-startup
 ## 11. 当前限制
 
 - 已有 Linux/macOS 源码测试 CI，但没有统一 release orchestration、目标平台 package 矩阵、artifact attestation 或自动发布证据归档。
-- 没有 notarization、stapling、自动发布、更新或回滚通道。
+- 已有 macOS arm64 应用侧更新与 generic 源配置，但正式 COS 更新目录、上传、公证/stapling 和真实 A → B 发布验收尚未完成；没有自动降级或数据库回滚通道。
 - Windows/Linux 没有仓库内目标平台 release acceptance 记录；目标定义不等于已验证。
 - 非 macOS afterPack 没有等价的全树 privacy scan；全部平台仍缺 packaged Core Server content digest/receipt 绑定。
 - Electron Builder 已请求签名 DMG，但仓库没有独立 DMG signature verifier，也没有 notarization/stapling。

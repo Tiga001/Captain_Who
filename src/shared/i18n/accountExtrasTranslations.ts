@@ -1,4 +1,10 @@
 export const accountExtrasEnglish = {
+  'update.download': 'Download update',
+  'update.downloading': 'Downloading {percent}%',
+  'update.installing': 'Restarting…',
+  'update.error.checkFailed': 'Check failed. Retry.',
+  'update.error.downloadFailed': 'Download failed. Retry.',
+  'update.error.installFailed': 'Restart failed. Retry.',
   'license.title': 'Software license',
   'license.menuLabel': 'Software license',
   'license.status': 'Status',
@@ -50,6 +56,12 @@ export const accountExtrasEnglish = {
 } as const
 
 export const accountExtrasChinese: Record<keyof typeof accountExtrasEnglish, string> = {
+  'update.download': '下载更新',
+  'update.downloading': '下载中 {percent}%',
+  'update.installing': '正在重启…',
+  'update.error.checkFailed': '检查失败，请重试',
+  'update.error.downloadFailed': '下载失败，请重试',
+  'update.error.installFailed': '重启失败，请重试',
   'license.title': '软件许可证',
   'license.menuLabel': '软件许可',
   'license.status': '状态',
