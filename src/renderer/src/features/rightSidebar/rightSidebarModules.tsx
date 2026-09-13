@@ -131,7 +131,7 @@ function renderTerminalModule({ activity, page, t }: RightSidebarModuleRenderPro
       <TerminalPanel
         initialCwd={page.workspacePath}
         isActive={activity === 'foreground'}
-        projectId={page.workspaceKey ?? undefined}
+        projectId={page.projectId ?? undefined}
       />
     </Suspense>
   )

@@ -46,6 +46,8 @@ export interface RightSidebarWorkspaceContext {
   key: string
   name: string | null
   path?: string
+  /** The persisted project identity, unlike `key` which can be a UI-only fallback. */
+  projectId: string | null
   sessionKey: string
 }
 
@@ -165,6 +167,8 @@ export interface RightSidebarPage {
   id: string
   moduleState?: RightSidebarModulePageState
   moduleId: RightSidebarModuleId
+  /** The real persisted project identity captured when the page was created. */
+  projectId?: string | null
   resourceKey?: string
   title: string
   workspaceKey?: string | null

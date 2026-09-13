@@ -467,6 +467,7 @@ describe('RightSidebar workspace lifecycle', () => {
       .poll(() => getSurface(screen.container, 'files').dataset.workspaceKey)
       .toBe('project-a')
     expect(getSurface(screen.container, 'terminal').dataset.workspaceKey).toBe('project-a')
+    expect(getSurface(screen.container, 'terminal').dataset.projectId).toBe('project-a')
     expect(getSurface(screen.container, 'git-review').dataset.workspaceKey).toBe('project-b')
     expect(lifecycleCount('mount', 'files')).toBe(1)
     expect(lifecycleCount('unmount', 'files')).toBe(0)
@@ -775,6 +776,7 @@ function renderTestModule(id: RightSidebarModuleId, props: RightSidebarModuleRen
       pageId={props.page.id}
       onOpenPage={props.onOpenPage}
       onPageUpdate={props.onPageUpdate}
+      projectId={props.page.projectId}
       workspaceKey={props.page.workspaceKey}
     />
   )
@@ -788,6 +790,7 @@ function TrackedSurface({
   pageId,
   onOpenPage,
   onPageUpdate,
+  projectId,
   workspaceKey
 }: {
   activity: RightSidebarActivity
@@ -797,6 +800,7 @@ function TrackedSurface({
   pageId: string
   onOpenPage: RightSidebarModuleRenderProps['onOpenPage']
   onPageUpdate: RightSidebarModuleRenderProps['onPageUpdate']
+  projectId?: string | null
   workspaceKey?: string | null
 }) {
   const [localState, setLocalState] = useState(0)
@@ -817,6 +821,7 @@ function TrackedSurface({
       data-review-scope={moduleState?.kind === 'git-review' ? moduleState.target.kind : undefined}
       data-selected={isSelected ? 'true' : 'false'}
       data-testid={`${moduleId}-surface`}
+      data-project-id={projectId ?? 'none'}
       data-workspace-key={workspaceKey ?? 'global'}
     >
       <button

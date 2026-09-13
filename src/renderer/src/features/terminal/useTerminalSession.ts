@@ -342,12 +342,13 @@ export function useTerminalSession({
         if (canFitTerminal(container)) {
           fitAddon.fit()
         }
+        const projectId = projectIdRef.current?.trim()
         const result = await createTerminalSession({
           cols: terminal.cols,
           cwd: initialCwdRef.current,
-          projectId: projectIdRef.current,
           rows: terminal.rows,
-          sessionId: requestedSessionId
+          sessionId: requestedSessionId,
+          ...(projectId ? { projectId } : {})
         })
 
         if (result.status === 'cancelled') {

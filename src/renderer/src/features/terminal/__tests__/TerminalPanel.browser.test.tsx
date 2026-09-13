@@ -180,6 +180,7 @@ describe('TerminalPanel session lifetime', () => {
     const screen = await render(<CompactBottomTerminal height={165} />)
     await expect.poll(() => createSession.mock.calls.length).toBe(1)
     const initial = requestForCwd('/repo/a')
+    expect(initial).not.toHaveProperty('projectId')
     expect(initial.rows).toBeGreaterThanOrEqual(2)
     expect(initial.rows).toBeLessThan(8)
     const container = screen.container.querySelector<HTMLElement>('.terminal-panel__xterm')!

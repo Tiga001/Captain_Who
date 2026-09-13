@@ -275,7 +275,7 @@ function createCrossModulePageBase(
   t: Translate
 ): RightSidebarPage | null {
   const workspace = createRightSidebarWorkspaceContext(
-    sourcePage.workspaceKey,
+    sourcePage.projectId,
     sourcePage.workspaceName,
     sourcePage.workspacePath
   )
@@ -378,9 +378,14 @@ function bindNewPageToWorkspace(
     return page.workspaceSessionKey === null ? page : { ...page, workspaceSessionKey: null }
   }
   if (module.contextBinding === 'pinned-to-creation-workspace') {
-    return page.workspaceSessionKey === workspace.sessionKey
+    return page.workspaceSessionKey === workspace.sessionKey &&
+      page.projectId === workspace.projectId
       ? page
-      : { ...page, workspaceSessionKey: workspace.sessionKey }
+      : {
+          ...page,
+          projectId: workspace.projectId,
+          workspaceSessionKey: workspace.sessionKey
+        }
   }
   return rebindPageToWorkspace(page, workspace)
 }
@@ -393,6 +398,7 @@ function rebindPageToWorkspace(
     page.workspaceKey === workspace.key &&
     page.workspaceName === workspace.name &&
     page.workspacePath === workspace.path &&
+    page.projectId === workspace.projectId &&
     page.workspaceSessionKey === workspace.sessionKey
   ) {
     return page
@@ -402,6 +408,7 @@ function rebindPageToWorkspace(
     workspaceKey: workspace.key,
     workspaceName: workspace.name,
     workspacePath: workspace.path,
+    projectId: workspace.projectId,
     workspaceSessionKey: workspace.sessionKey
   }
 }
