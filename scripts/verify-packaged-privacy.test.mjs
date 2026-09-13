@@ -83,7 +83,24 @@ test('ASAR URL-parser fixtures require exact paths and values and do not mask ot
       }
       await verify(path, content)
       await assert.rejects(verify('out/main/index.js', content), /credentialed URL/)
+      await assert.rejects(verify(`${path}.other`, content), /credentialed URL/)
       await assert.rejects(verify(path, content.replaceAll('a@b', 'private@b')), /credentialed URL/)
+      for (const url of [
+        'https://a@b@private.invalid/',
+        'https://a@b:example-secret@private.invalid/',
+        'https://a@b:123456@private.invalid/',
+        'https://a@b_private@private.invalid/',
+        'https://a@b.invalid/',
+        'https://a@b/path',
+        'https://a@b?token=example-secret',
+        'http://a@b@private.invalid/',
+        'http://a@b:example-secret@private.invalid/',
+        'http://a@b@c/private',
+        'http://a@b?@c&token=example-secret',
+        'http://a@b/c@d/private'
+      ]) {
+        await assert.rejects(verify(path, `${content}\n"${url}"`), /credentialed URL/)
+      }
       await assert.rejects(
         verify(path, `${content}\nhttps://private-user:private-password@private.invalid/`),
         /credentialed URL/
@@ -311,6 +328,23 @@ test('ordinary-file exceptions bind both the full fake URL and its exact package
     privatePathPrefixes: ['/private/build-user/project'],
     asarApi: emptyAsarApi()
   })
+
+  await writeFile(electronFramework, 'http://a@b@c/ http://a@b?@c https://user:pass@host/')
+  await verifyPackagedPrivacy(context(directory), {
+    privatePathPrefixes: ['/private/build-user/project'],
+    asarApi: emptyAsarApi()
+  })
+
+  for (const url of ['http://a@b@private.invalid/', 'http://a@b:example-secret@private.invalid/']) {
+    await writeFile(electronFramework, url)
+    await assert.rejects(
+      verifyPackagedPrivacy(context(directory), {
+        privatePathPrefixes: ['/private/build-user/project'],
+        asarApi: emptyAsarApi()
+      }),
+      /credentialed URL.*Electron Framework/
+    )
+  }
 
   await writeFile(electronFramework, 'https://user:pass@host/ https://user:pass@private.invalid/')
   await assert.rejects(

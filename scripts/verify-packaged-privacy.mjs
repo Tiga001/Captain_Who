@@ -27,8 +27,8 @@ const ASAR_CREDENTIALED_URL_FIXTURES = new Map([
   ].map((path) => [path, new Set(['https://a@b'])]),
   [
     'node_modules/url/url.js',
-    // Legacy URL-parser examples in upstream comments (the first match ends before @c).
-    new Set(['http://a@b', 'http://a@b?@c', 'http://a@b/c@d'])
+    // Complete legacy URL-parser examples in upstream comments, including multiple @ signs.
+    new Set(['http://a@b@c/', 'http://a@b?@c', 'http://a@b/c@d'])
   ],
   [
     'node_modules/zod/src/v4/classic/tests/string.test.ts',
@@ -40,7 +40,7 @@ const ASAR_CREDENTIALED_URL_FIXTURES = new Map([
 const PACKAGED_CREDENTIALED_URL_FIXTURES = new Map([
   [
     'Contents/Frameworks/Electron Framework.framework/Versions/A/Electron Framework',
-    new Set(['http://a@b', 'http://a@b?@c', 'https://user:pass@host/'])
+    new Set(['http://a@b@c/', 'http://a@b?@c', 'https://user:pass@host/'])
   ],
   [
     'Contents/Resources/components/office-renderer/browser/chrome-headless-shell-mac-arm64/chrome-headless-shell',
@@ -52,7 +52,7 @@ const PACKAGED_CREDENTIALED_URL_FIXTURES = new Map([
   ],
   [
     'Contents/Resources/components/artifact-runtime/dependencies/node/bin/node',
-    new Set(['http://a@b', 'http://a@b?@c'])
+    new Set(['http://a@b@c/', 'http://a@b?@c'])
   ],
   [
     'Contents/Resources/components/artifact-runtime/dependencies/node/node_modules/docx/node_modules/@types/node/http.d.ts',
@@ -202,7 +202,18 @@ function containsUnauthorizedSecret(text, allowedFixtureSha256 = new Set()) {
 function containsUnauthorizedCredentialedUrl(text, allowedFixtures = new Set()) {
   CREDENTIALED_URL_PATTERN.lastIndex = 0
   for (const match of text.matchAll(CREDENTIALED_URL_PATTERN)) {
-    if (!allowedFixtures.has(match[0])) return true
+    // Detection may end at the first host-like segment of a URL containing another @ or an
+    // invalid port. An exception must match the complete source literal, never that prefix.
+    let end = match.index + match[0].length
+    while (
+      end < text.length &&
+      text.charCodeAt(end) > 0x20 &&
+      text.charCodeAt(end) !== 0x7f &&
+      !/[\s"'`<>]/u.test(text[end])
+    ) {
+      end += 1
+    }
+    if (!allowedFixtures.has(text.slice(match.index, end))) return true
   }
   return false
 }
