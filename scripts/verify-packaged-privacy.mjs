@@ -14,6 +14,22 @@ const repositoryRoot = resolve(fileURLToPath(new URL('..', import.meta.url)))
 const requireFromBuilder = createRequire(import.meta.resolve('electron-builder/package.json'))
 const APP_ASAR_RELATIVE_PATH = 'Contents/Resources/app.asar'
 const ASAR_CREDENTIALED_URL_FIXTURES = new Map([
+  // core-js URL-constructor feature probes, including the copies bundled by CloudBase.
+  // Match the exact packaged file and literal, never exempt an entire dependency.
+  ...[
+    'node_modules/@cloudbase/js-sdk/miniprogram_dist/index.js',
+    'node_modules/@cloudbase/js-sdk/miniprogram_dist/model/index.js',
+    'node_modules/@cloudbase/js-sdk/miniprogram_dist/mysql/index.js',
+    'node_modules/@cloudbase/wx-cloud-client-sdk/lib/wxCloudClientSDK.cjs.js',
+    'node_modules/@cloudbase/wx-cloud-client-sdk/lib/wxCloudClientSDK.esm.js',
+    'node_modules/@cloudbase/wx-cloud-client-sdk/lib/wxCloudClientSDK.umd.js',
+    'node_modules/core-js-pure/internals/url-constructor-detection.js'
+  ].map((path) => [path, new Set(['https://a@b'])]),
+  [
+    'node_modules/url/url.js',
+    // Legacy URL-parser examples in upstream comments (the first match ends before @c).
+    new Set(['http://a@b', 'http://a@b?@c', 'http://a@b/c@d'])
+  ],
   [
     'node_modules/zod/src/v4/classic/tests/string.test.ts',
     new Set(['https://anonymous:flabada@developer.mozilla.org/en-US/docs/Web/API/URL/password'])
@@ -334,8 +350,8 @@ export async function verifyPackagedPrivacy(
     await verifyPackagedFileBytes(path, {
       relativePath,
       privatePathPrefixes: prefixBytes,
-      // Packed ASAR files are scanned entry-by-entry below so the one exact upstream fixture can
-      // be attributed narrowly. The raw ASAR stream is still scanned here for paths and secrets.
+      // Packed ASAR files are scanned entry-by-entry below so exact upstream fixtures can be
+      // attributed narrowly. The raw ASAR stream is still scanned here for paths and secrets.
       scanCredentialedUrls: relativePath !== APP_ASAR_RELATIVE_PATH,
       allowedSecretFixtureSha256: PACKAGED_SECRET_FIXTURE_SHA256.get(relativePath) ?? new Set(),
       allowedCredentialedUrls: PACKAGED_CREDENTIALED_URL_FIXTURES.get(relativePath) ?? new Set()

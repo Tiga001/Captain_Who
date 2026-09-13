@@ -35,7 +35,7 @@ function emptyAsarApi(overrides = {}) {
   }
 }
 
-test('packaged privacy gate accepts clean bytes and the one frozen dependency URL fixture', async () => {
+test('packaged privacy gate accepts clean bytes and the frozen zod URL fixture', async () => {
   const { directory } = await fixture()
   const asarApi = {
     listPackage: () => ['/node_modules/zod/src/v4/classic/tests/string.test.ts'],
@@ -47,6 +47,53 @@ test('packaged privacy gate accepts clean bytes and the one frozen dependency UR
     privatePathPrefixes: ['/private/build-user/project'],
     asarApi
   })
+})
+
+test('ASAR URL-parser fixtures require exact paths and values and do not mask other credentials', async (t) => {
+  const entries = [
+    ...[
+      'node_modules/@cloudbase/js-sdk/miniprogram_dist/index.js',
+      'node_modules/@cloudbase/js-sdk/miniprogram_dist/model/index.js',
+      'node_modules/@cloudbase/js-sdk/miniprogram_dist/mysql/index.js',
+      'node_modules/@cloudbase/wx-cloud-client-sdk/lib/wxCloudClientSDK.cjs.js',
+      'node_modules/@cloudbase/wx-cloud-client-sdk/lib/wxCloudClientSDK.esm.js',
+      'node_modules/@cloudbase/wx-cloud-client-sdk/lib/wxCloudClientSDK.umd.js',
+      'node_modules/core-js-pure/internals/url-constructor-detection.js'
+    ].map((path) => [path, '"a" !== new URL("https://a@b").username']),
+    [
+      'node_modules/url/url.js',
+      '// http://a@b@c/ => user:a@b host:c\n' +
+        '// http://a@b?@c => user:a host:c path:/?@c\n' +
+        '// http://a@b/c@d => host:b auth:a path:/c@d'
+    ]
+  ]
+  for (const [path, content] of entries) {
+    await t.test(path, async () => {
+      const { directory, asarPath } = await fixture()
+      const verify = async (entry, text) => {
+        await writeFile(asarPath, text)
+        return verifyPackagedPrivacy(context(directory), {
+          privatePathPrefixes: ['/private/build-user/project'],
+          asarApi: emptyAsarApi({
+            listPackage: () => [`/${entry}`],
+            statFile: () => ({ size: Buffer.byteLength(text) }),
+            extractFile: () => Buffer.from(text)
+          })
+        })
+      }
+      await verify(path, content)
+      await assert.rejects(verify('out/main/index.js', content), /credentialed URL/)
+      await assert.rejects(verify(path, content.replaceAll('a@b', 'private@b')), /credentialed URL/)
+      await assert.rejects(
+        verify(path, `${content}\nhttps://private-user:private-password@private.invalid/`),
+        /credentialed URL/
+      )
+      await assert.rejects(
+        verify(path, `${content}\nsk-${'A'.repeat(48)}`),
+        /high-confidence secret/
+      )
+    })
+  }
 })
 
 test('packaged privacy gate rejects host paths, sensitive state, credentialed URLs, and tokens', async (t) => {
