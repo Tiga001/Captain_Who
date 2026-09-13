@@ -881,7 +881,7 @@ export const zhCNTranslations = {
   'profile.cancelRemoveAvatar': '取消',
   'profile.confirmRemoveAvatar': '移除',
   'profile.defaultDisplayName': '用户',
-  'profile.displayName': '显示名称',
+  'profile.displayName': '用户名',
   'profile.displayNameDescription': '没有头像时，会取显示名称前两个字符作为头像。',
   'profile.handle': 'ID',
   'profile.handleDescription': '用于在个人资料中显示。',

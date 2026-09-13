@@ -57,7 +57,7 @@ export const authChinese: Record<keyof typeof authEnglish, string> = {
   'auth.retry': '重新验证',
   'auth.register': '免费注册',
   'auth.reset': '忘记密码？',
-  'auth.editProfile': '前往官网编辑资料',
+  'auth.editProfile': '编辑资料',
   'auth.refresh': '刷新资料',
   'auth.cancel': '返回应用',
   'auth.loginToSend': '登录后才能启动新回合，正在运行的任务不受影响。',
