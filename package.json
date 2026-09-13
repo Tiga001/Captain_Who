@@ -1,6 +1,6 @@
 {
   "name": "captain-who",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "A local-first AI desktop assistant powered by Electron, React, and Rust",
   "private": true,
   "license": "UNLICENSED",
