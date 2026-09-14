@@ -348,6 +348,9 @@ async function initializeApplication(): Promise<void> {
   // Account validation runs alongside existing service initialization, never owns its lifecycle.
   void accountAuth.restoreSession()
   app.setName('Captain Who')
+  app.setAboutPanelOptions({
+    credits: '开发者邮箱：sh_jiao@zju.edu.cn\nQQ 交流群：1125049092'
+  })
   electronApp.setAppUserModelId('io.github.tiga001.captainwho')
   nativeTheme.themeSource = appearanceThemeStore.getPreference()
   disposeAdaptiveAppIcon = installAdaptiveAppIcon(() => appearanceThemeStore.getPreference())

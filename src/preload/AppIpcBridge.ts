@@ -9,6 +9,7 @@ export function createAppIpcBridge(ipcRenderer: AppIpcRenderer): HostApi['app'] 
 
   return {
     getWindowState: () => ipcRenderer.invoke(HOST_CHANNELS.app.getWindowState),
+    openDocumentation: () => ipcRenderer.invoke(HOST_CHANNELS.app.openDocumentation),
     openExternal: (url) => ipcRenderer.invoke(HOST_CHANNELS.app.openExternal, url),
     onFlushBeforeQuit: (handler) => {
       quitFlushHandlers.add(handler)
@@ -42,6 +43,7 @@ export function createAppIpcBridge(ipcRenderer: AppIpcRenderer): HostApi['app'] 
     },
     setNativeThemeSource: (themeSource) =>
       ipcRenderer.invoke(HOST_CHANNELS.app.setNativeThemeSource, themeSource),
+    showAbout: () => ipcRenderer.invoke(HOST_CHANNELS.app.showAbout),
     whenReady: () => ipcRenderer.invoke(HOST_CHANNELS.app.whenReady)
   }
 }

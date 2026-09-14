@@ -1,4 +1,8 @@
 export const accountExtrasEnglish = {
+  'help.menu': 'Help',
+  'help.about': 'About Captain Who',
+  'help.documentation': 'View documentation',
+  'help.openFailed': 'Unable to open. Please retry.',
   'update.download': 'Download',
   'update.downloading': 'Downloading {percent}%',
   'update.preparing': 'Verifying',
@@ -57,6 +61,10 @@ export const accountExtrasEnglish = {
 } as const
 
 export const accountExtrasChinese: Record<keyof typeof accountExtrasEnglish, string> = {
+  'help.menu': '帮助',
+  'help.about': '关于 Captain Who',
+  'help.documentation': '查看文档',
+  'help.openFailed': '打开失败，请重试。',
   'update.download': '下载更新',
   'update.downloading': '正在下载 {percent}%',
   'update.preparing': '校验更新',

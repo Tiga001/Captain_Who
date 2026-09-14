@@ -1,4 +1,4 @@
-import { BrowserWindow, dialog, nativeTheme, shell } from 'electron'
+import { app, BrowserWindow, dialog, nativeTheme, shell } from 'electron'
 import type {
   IpcMainInvokeEvent,
   OpenDialogOptions,
@@ -310,6 +310,9 @@ export function registerHostIpc(
   ipcMain.handle(HOST_CHANNELS.app.getWindowState, (event) =>
     getAppWindowState(getInvokeWindow(event))
   )
+  ipcMain.handle(HOST_CHANNELS.app.openDocumentation, () =>
+    shell.openExternal('https://captainwhoagent.com/docs')
+  )
   ipcMain.handle(HOST_CHANNELS.app.openExternal, (_event, url) =>
     browserDataIpc ? browserDataIpc.linkRouter.openAppUrl(url) : openExternalUrl(url)
   )
@@ -321,6 +324,7 @@ export function registerHostIpc(
     await appearanceThemeMirror.setPreference(themeSource)
     applyAdaptiveAppIcon(themeSource)
   })
+  ipcMain.handle(HOST_CHANNELS.app.showAbout, () => app.showAboutPanel())
   ipcMain.handle(HOST_CHANNELS.attachments.selectInputAttachments, (event, request) =>
     attachmentDialogBridge.selectInputAttachments(event, request)
   )

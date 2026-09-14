@@ -4,6 +4,24 @@ import { HOST_CHANNELS } from '@mycopilot/host-api'
 import { createAppIpcBridge } from './AppIpcBridge'
 
 describe('AppIpcBridge', () => {
+  it.each(['showAbout', 'openDocumentation'] as const)(
+    'invokes %s without forwarding renderer arguments',
+    async (method) => {
+      const invoke = vi.fn(async () => undefined)
+      const bridge = createAppIpcBridge({
+        invoke,
+        on: vi.fn(),
+        removeListener: vi.fn(),
+        send: vi.fn()
+      } as unknown as IpcRenderer)
+
+      await bridge[method]()
+      await Reflect.apply(bridge[method], undefined, ['https://example.com', { activate: false }])
+
+      expect(invoke.mock.calls).toEqual([[HOST_CHANNELS.app[method]], [HOST_CHANNELS.app[method]]])
+    }
+  )
+
   it('waits on the dedicated startup readiness channel without arguments', async () => {
     const invoke = vi.fn(async () => undefined)
     const bridge = createAppIpcBridge({

@@ -1,15 +1,16 @@
 // The host owns update availability and download progress, independently of account access.
 import { Download } from 'lucide-react'
-import { useCallback, useEffect, useId, useRef, useState } from 'react'
+import { useCallback, useEffect, useId, useRef, useState, type ReactNode } from 'react'
 import type { UpdateState } from '@mycopilot/host-api'
 import type { TranslationKey } from '../../../config/frontendTranslations'
 import { hostClient } from '../../../host/hostClient'
 
 interface LeftSidebarUpdateButtonProps {
   t: (key: TranslationKey) => string
+  fallback?: ReactNode
 }
 
-export function LeftSidebarUpdateButton({ t }: LeftSidebarUpdateButtonProps) {
+export function LeftSidebarUpdateButton({ t, fallback = null }: LeftSidebarUpdateButtonProps) {
   const [state, setState] = useState<UpdateState | null>(null)
   const stateRef = useRef<UpdateState | null>(null)
   const mountedRef = useRef(false)
@@ -68,7 +69,7 @@ export function LeftSidebarUpdateButton({ t }: LeftSidebarUpdateButtonProps) {
     !state?.version ||
     !['available', 'downloading', 'preparing', 'installing', 'error'].includes(state.status)
   )
-    return null
+    return fallback
 
   const busy = ['downloading', 'preparing', 'installing'].includes(state.status)
   // Display only host-reported progress; never advance it with a renderer timer.

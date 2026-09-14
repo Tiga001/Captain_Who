@@ -10,6 +10,7 @@ import { useLicense } from '../../../features/license/LicenseContext'
 import type { UiPreferencesSnapshot } from '../../../features/storage/storageClient'
 import { useDismissOnOutsidePointer } from '../../../hooks/useDismissOnOutsidePointer'
 import { LeftSidebarUpdateButton } from './LeftSidebarUpdateButton'
+import { LeftSidebarHelpMenu } from './LeftSidebarHelpMenu'
 
 interface LeftSidebarAccountFooterProps {
   onOpenSettings: () => void
@@ -141,7 +142,10 @@ export function LeftSidebarAccountFooter({ onOpenSettings, t }: LeftSidebarAccou
           <span>{profileDisplayName}</span>
         </span>
       </button>
-      <LeftSidebarUpdateButton t={t} />
+      <LeftSidebarUpdateButton
+        t={t}
+        fallback={<LeftSidebarHelpMenu t={t} onOpen={() => setAccountMenuOpen(false)} />}
+      />
     </div>
   )
 }

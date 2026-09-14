@@ -32,8 +32,10 @@ export const HOST_CHANNELS = {
     flushBeforeQuit: 'host:app.flushBeforeQuit',
     flushBeforeQuitAck: 'host:app.flushBeforeQuitAck',
     getWindowState: 'host:app.getWindowState',
+    openDocumentation: 'host:app.openDocumentation',
     openExternal: 'host:app.openExternal',
     setNativeThemeSource: 'host:app.setNativeThemeSource',
+    showAbout: 'host:app.showAbout',
     whenReady: 'host:app.whenReady',
     windowStateChange: 'host:app.windowStateChange'
   },

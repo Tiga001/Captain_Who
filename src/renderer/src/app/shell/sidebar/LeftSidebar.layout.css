@@ -168,7 +168,8 @@
   border-radius: 0;
 }
 
-.left-sidebar__footer:has(.left-sidebar__update) .left-sidebar__account-button {
+.left-sidebar__footer:has(.left-sidebar__update, .left-sidebar__help)
+  .left-sidebar__account-button {
   padding-right: 6px;
 }
 
@@ -234,6 +235,58 @@
   overflow: hidden;
   clip-path: inset(50%);
   white-space: nowrap;
+}
+
+.left-sidebar__help {
+  display: grid;
+  flex: 0 0 auto;
+  margin-right: 12px;
+}
+
+.left-sidebar .left-sidebar__help-button {
+  display: grid;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  place-items: center;
+  color: var(--mc-color-icon-muted);
+  border-radius: 8px;
+  transition:
+    color 120ms ease,
+    background-color 120ms ease,
+    box-shadow 120ms ease;
+}
+
+.left-sidebar__help-icon {
+  width: 18px;
+  height: 18px;
+  pointer-events: none;
+}
+
+.left-sidebar .left-sidebar__help-button:hover,
+.left-sidebar .left-sidebar__help-button[aria-expanded='true'] {
+  color: var(--mc-color-sidebar-text-active);
+  background: var(--mc-color-state-hover);
+  box-shadow: inset 0 0 0 1px var(--mc-color-border-hairline);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .left-sidebar .left-sidebar__help-button {
+    transition: none;
+  }
+}
+
+.left-sidebar__help-error {
+  position: absolute;
+  right: 12px;
+  bottom: calc(100% + 4px);
+  max-width: calc(100% - 24px);
+  padding: 6px 8px;
+  color: var(--mc-color-text-danger);
+  background: var(--mc-color-surface-glass-strong);
+  border: 1px solid var(--mc-color-border-hairline);
+  border-radius: var(--mc-radius-control);
+  font-size: 12px;
 }
 
 .left-sidebar__account-avatar {
@@ -325,6 +378,11 @@
   -webkit-backdrop-filter: var(--mc-effect-blur-popover);
 }
 
+.left-sidebar__help-menu {
+  left: auto;
+  width: min(248px, calc(100% - 24px));
+}
+
 .left-sidebar__account-menu-profile {
   display: grid;
   grid-template-columns: 30px minmax(0, 1fr);
@@ -386,6 +444,7 @@
 .left-sidebar__scheduled-action:focus-visible,
 .left-sidebar__account-button:focus-visible,
 .left-sidebar__update-button:focus-visible,
+.left-sidebar__help-button:focus-visible,
 .left-sidebar__account-menu-item:focus-visible,
 .left-sidebar__conversation-title-button:focus-visible,
 .left-sidebar__section-title-button:focus-visible,

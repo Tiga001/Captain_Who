@@ -18,12 +18,18 @@ const mocks = vi.hoisted(() => ({
   onStateChanged: vi.fn(),
   unsubscribe: vi.fn(),
   openSettings: vi.fn(),
+  showAbout: vi.fn(),
+  openDocumentation: vi.fn(),
   requestLogin: vi.fn(),
   logout: vi.fn()
 }))
 
 vi.mock('../../host/hostClient', () => ({
   hostClient: {
+    app: {
+      showAbout: mocks.showAbout,
+      openDocumentation: mocks.openDocumentation
+    },
     updates: {
       getState: mocks.getState,
       download: mocks.download,
@@ -99,6 +105,8 @@ function emit(state: UpdateState) {
 beforeEach(() => {
   vi.resetAllMocks()
   mocks.getState.mockResolvedValue(available)
+  mocks.showAbout.mockResolvedValue(undefined)
+  mocks.openDocumentation.mockResolvedValue(undefined)
   mocks.download.mockResolvedValue({ ...available, revision: 2, status: 'downloading' })
   mocks.onStateChanged.mockImplementation((next) => {
     listener = next
@@ -207,6 +215,7 @@ it.each(['disabled', 'checking', 'idle', 'error'] as const)(
     const screen = await renderFooter()
     await expect.poll(() => mocks.getState.mock.calls.length).toBe(1)
     expect(screen.container.querySelector('.left-sidebar__update')).toBeNull()
+    await expect.element(screen.getByRole('button', { name: '帮助' })).toBeVisible()
     await expect.element(screen.getByRole('button', { name: '账户菜单' })).toBeVisible()
     expect(mocks.download).not.toHaveBeenCalled()
   }
@@ -216,10 +225,155 @@ it('keeps a failed startup read hidden and accepts a later availability event', 
   mocks.getState.mockRejectedValue(new Error('offline'))
   const screen = await renderFooter()
   expect(screen.container.querySelector('.left-sidebar__update')).toBeNull()
+  await expect.element(screen.getByRole('button', { name: '帮助' })).toBeVisible()
   await emit(available)
   await expect.element(screen.getByRole('button', { name: '下载更新' })).toBeEnabled()
+  await expect.element(screen.getByRole('button', { name: '帮助' })).not.toBeInTheDocument()
   expect(mocks.download).not.toHaveBeenCalled()
 })
+
+it.each(['zh-CN', 'en-US'] as const)(
+  'shows exactly two independent help actions while signed out in %s',
+  async (language) => {
+    mocks.getState.mockResolvedValue({ ...available, status: 'idle', version: null })
+    const screen = await renderFooter({ signedIn: false, language })
+    const help = screen.getByRole('button', { name: getTranslation(language, 'help.menu') })
+    const account = screen.getByRole('button', {
+      name: getTranslation(language, 'sidebar.accountMenu')
+    })
+    expect(account.element().contains(help.element())).toBe(false)
+    await account.click()
+    await expect
+      .element(screen.getByRole('menu'))
+      .toHaveAccessibleName(getTranslation(language, 'sidebar.accountMenu'))
+    await help.click()
+    await expect
+      .element(screen.getByRole('menu'))
+      .toHaveAccessibleName(getTranslation(language, 'help.menu'))
+    expect(screen.container.querySelectorAll('[role="menuitem"]')).toHaveLength(2)
+    await screen.getByRole('menuitem', { name: getTranslation(language, 'help.about') }).click()
+    expect(mocks.showAbout).toHaveBeenCalledExactlyOnceWith()
+    await expect.element(screen.getByRole('menu')).not.toBeInTheDocument()
+    await help.click()
+    await screen
+      .getByRole('menuitem', { name: getTranslation(language, 'help.documentation') })
+      .click()
+    expect(mocks.openDocumentation).toHaveBeenCalledExactlyOnceWith()
+    await expect.element(help).toHaveFocus()
+    await expect.element(screen.getByRole('menu')).not.toBeInTheDocument()
+    expect(mocks.requestLogin).not.toHaveBeenCalled()
+    expect(mocks.logout).not.toHaveBeenCalled()
+    expect(mocks.openSettings).not.toHaveBeenCalled()
+    expect(mocks.download).not.toHaveBeenCalled()
+  }
+)
+
+it('dismisses help with Escape or outside clicks and supports keyboard navigation', async () => {
+  mocks.getState.mockResolvedValue({ ...available, status: 'disabled', version: null })
+  const screen = await renderFooter()
+  const help = screen.getByRole('button', { name: '帮助' })
+  const account = screen.getByRole('button', { name: '账户菜单' })
+  ;(account.element() as HTMLButtonElement).focus()
+  await userEvent.keyboard('{Tab}{Enter}')
+  await expect.element(screen.getByRole('menuitem', { name: '关于 Captain Who' })).toHaveFocus()
+  await userEvent.keyboard('{ArrowDown}')
+  await expect.element(screen.getByRole('menuitem', { name: '查看文档' })).toHaveFocus()
+  await userEvent.keyboard('{Home}')
+  await expect.element(screen.getByRole('menuitem', { name: '关于 Captain Who' })).toHaveFocus()
+  await userEvent.keyboard('{End}{Escape}')
+  await expect.element(help).toHaveFocus()
+  await expect.element(screen.getByRole('menu')).not.toBeInTheDocument()
+  await userEvent.keyboard('{ArrowUp}')
+  await expect.element(screen.getByRole('menuitem', { name: '查看文档' })).toHaveFocus()
+  await userEvent.keyboard('{Enter}')
+  expect(mocks.openDocumentation).toHaveBeenCalledOnce()
+  await help.click()
+  await account.click()
+  await expect.element(screen.getByRole('menu', { name: '帮助' })).not.toBeInTheDocument()
+  await expect.element(screen.getByRole('menu', { name: '账户菜单' })).toBeVisible()
+})
+
+it('closes an open help menu when an update arrives and keeps all update states exclusive', async () => {
+  mocks.getState.mockResolvedValue({ ...available, status: 'idle', version: null })
+  const screen = await renderFooter()
+  await screen.getByRole('button', { name: '帮助' }).click()
+  await expect.element(screen.getByRole('menu', { name: '帮助' })).toBeVisible()
+  let revision = 2
+  for (const status of ['available', 'downloading', 'preparing', 'installing', 'error'] as const) {
+    emit({ ...available, revision: revision++, status })
+    await expect.element(screen.getByRole('button', { name: '帮助' })).not.toBeInTheDocument()
+    await expect.element(screen.getByRole('menu', { name: '帮助' })).not.toBeInTheDocument()
+    expect(screen.container.querySelector('.left-sidebar__update')).not.toBeNull()
+  }
+  emit({ ...available, revision: revision++, status: 'idle', version: null })
+  await expect
+    .element(screen.getByRole('button', { name: '帮助' }))
+    .toHaveAttribute('aria-expanded', 'false')
+})
+
+it('reports a failed help action safely and supports retry without changing account state', async () => {
+  mocks.getState.mockResolvedValue({ ...available, status: 'idle', version: null })
+  mocks.showAbout.mockRejectedValueOnce(new Error('private internal error detail'))
+  const screen = await renderFooter()
+  await screen.getByRole('button', { name: '帮助' }).click()
+  await screen.getByRole('menuitem', { name: '关于 Captain Who' }).click()
+  await expect.element(screen.getByRole('alert')).toHaveTextContent('打开失败，请重试。')
+  expect(screen.container.textContent).not.toContain('private internal error')
+  await screen.getByRole('button', { name: '帮助' }).click()
+  await expect.element(screen.getByRole('alert')).not.toBeInTheDocument()
+  await screen.getByRole('menuitem', { name: '关于 Captain Who' }).click()
+  expect(mocks.showAbout).toHaveBeenCalledTimes(2)
+})
+
+it.each(['classic-light', 'classic-dark'] as const)(
+  'fits the compact footer and opens help above its trigger in %s',
+  async (themeId) => {
+    const theme = getFrontendTheme(themeId)
+    for (const [key, value] of Object.entries(getFrontendCssVariables(undefined, theme.tokens)))
+      document.documentElement.style.setProperty(key, value)
+    mocks.getState.mockResolvedValue({ ...available, status: 'idle', version: null })
+    const screen = await renderFooter({ language: 'en-US' })
+    const help = screen.getByRole('button', { name: 'Help' })
+    const icon = help.element().querySelector('svg')!
+    expect(icon.getBoundingClientRect().width).toBe(18)
+    expect(icon.getBoundingClientRect().height).toBe(18)
+    expect(icon.getAttribute('aria-hidden')).toBe('true')
+    expect(getComputedStyle(help.element()).borderRadius).toBe('8px')
+    const screenshotDir = import.meta.env.VITE_CAPTAIN_WHO_HELP_SCREENSHOT_DIR
+    if (screenshotDir) {
+      await document.fonts.ready
+      await page.screenshot({
+        element: screen.container.querySelector('aside')!,
+        path: `${screenshotDir}/help-idle-${themeId}.png`
+      })
+    }
+    await help.click()
+    await document.fonts.ready
+    const footer = screen.container.querySelector('.left-sidebar__footer')!
+    const account = screen.container.querySelector('.left-sidebar__account-button')!
+    const menu = screen.getByRole('menu', { name: 'Help' }).element()
+    const bounds = footer.getBoundingClientRect()
+    const trigger = help.element().getBoundingClientRect()
+    const popup = menu.getBoundingClientRect()
+    expect(bounds.height).toBe(48)
+    expect(trigger.width).toBe(28)
+    expect(trigger.height).toBe(28)
+    expect(account.getBoundingClientRect().right).toBeLessThanOrEqual(trigger.left)
+    expect(trigger.right).toBeLessThanOrEqual(bounds.right)
+    expect(popup.bottom).toBeLessThanOrEqual(trigger.top)
+    expect(popup.left).toBeGreaterThanOrEqual(bounds.left)
+    expect(popup.right).toBeLessThanOrEqual(bounds.right)
+    expect(menu.scrollWidth).toBeLessThanOrEqual(menu.clientWidth)
+    expect(
+      screen.container.querySelector('.left-sidebar__account-text > span')!.clientWidth
+    ).toBeGreaterThan(0)
+    if (screenshotDir)
+      await page.screenshot({
+        element: screen.container.querySelector('aside')!,
+        path: `${screenshotDir}/help-${themeId}.png`
+      })
+  }
+)
 
 it('has independent account and update buttons, including when signed out and without a license provider', async () => {
   const screen = await renderFooter({ signedIn: false })
