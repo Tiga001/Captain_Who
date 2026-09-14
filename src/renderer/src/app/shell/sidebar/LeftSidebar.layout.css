@@ -182,28 +182,40 @@
 .left-sidebar .left-sidebar__update-button {
   display: inline-flex;
   align-items: center;
-  min-height: 28px;
-  padding: 3px 6px;
-  gap: 4px;
-  color: var(--mc-color-text-accent);
-  border-radius: var(--mc-radius-control);
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  color: var(--mc-color-icon-default);
+  background: transparent;
+  border: 2px solid var(--mc-color-control-selected-background);
+  border-radius: 50%;
   font-size: 12px;
   font-weight: var(--mc-font-weight-control);
+  font-variant-numeric: tabular-nums;
   line-height: 18px;
   white-space: nowrap;
+  transition: background-color 120ms ease;
 }
 
 .left-sidebar__update-button svg {
-  width: 13px;
-  height: 13px;
+  width: 16px;
+  height: 16px;
 }
 
-.left-sidebar__update-button:hover:not(:disabled) {
+.left-sidebar .left-sidebar__update-button:hover:not(:disabled) {
   background: var(--mc-color-state-hover);
 }
 
+.left-sidebar .left-sidebar__update-button[data-variant='progress'] {
+  width: auto;
+  padding: 0 10px;
+  color: var(--mc-color-control-selected-text);
+  background: var(--mc-color-control-selected-background);
+  border-radius: var(--mc-radius-control);
+}
+
 .left-sidebar .left-sidebar__update-button:disabled {
-  color: var(--mc-color-sidebar-text-secondary);
   cursor: default;
 }
 

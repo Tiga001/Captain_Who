@@ -115,6 +115,58 @@ afterEach(() => {
   else document.documentElement.setAttribute('style', previousStyle)
 })
 
+it.each(['classic-light', 'classic-dark'] as const)(
+  'shows an icon-only accent ring and keeps disabled progress accented in %s',
+  async (themeId) => {
+    const theme = getFrontendTheme(themeId)
+    for (const [key, value] of Object.entries(getFrontendCssVariables(undefined, theme.tokens)))
+      document.documentElement.style.setProperty(key, value)
+    const screen = await renderFooter()
+    const update = screen.getByRole('button', { name: '下载更新' })
+    await expect.element(update).toBeEnabled()
+    await expect.element(update).toHaveAttribute('title', '下载更新')
+    expect(update.element().textContent).toBe('')
+    const button = update.element()
+    const icon = button.querySelector('svg')!
+    const expected = document.createElement('span')
+    expected.style.cssText =
+      'color: var(--mc-color-icon-default); background: var(--mc-color-control-selected-background); border-color: var(--mc-color-control-selected-text); border-radius: var(--mc-radius-control)'
+    screen.container.append(expected)
+    const colors = getComputedStyle(expected)
+    expect(getComputedStyle(button).borderColor).toBe(colors.backgroundColor)
+    expect(getComputedStyle(button).borderStyle).toBe('solid')
+    expect(getComputedStyle(button).borderRadius).toBe('50%')
+    expect(button.getBoundingClientRect().width).toBe(28)
+    expect(button.getBoundingClientRect().height).toBe(28)
+    expect(getComputedStyle(icon).color).toBe(colors.color)
+    const screenshotDir = import.meta.env.VITE_CAPTAIN_WHO_UPDATE_SCREENSHOT_DIR
+    const bar = screen.container.querySelector('.left-sidebar__footer')!
+    await document.fonts.ready
+    if (screenshotDir)
+      await page.screenshot({
+        element: bar,
+        path: `${screenshotDir}/update-available-${themeId}.png`
+      })
+    await emit({ ...available, revision: 2, status: 'downloading', percent: 27 })
+    const progress = screen.getByRole('button', { name: '下载中 27%' })
+    await expect.element(progress).toBeDisabled()
+    await expect.element(progress).toHaveTextContent('下载中 27%')
+    expect(progress.element().querySelector('svg')).toBeNull()
+    await expect
+      .poll(() => getComputedStyle(progress.element()).backgroundColor)
+      .toBe(colors.backgroundColor)
+    expect(getComputedStyle(progress.element()).color).toBe(colors.borderColor)
+    expect(getComputedStyle(progress.element()).borderRadius).toBe(colors.borderRadius)
+    expect(getComputedStyle(progress.element()).opacity).toBe('1')
+    if (screenshotDir)
+      await page.screenshot({
+        element: bar,
+        path: `${screenshotDir}/update-downloading-${themeId}.png`
+      })
+    expected.remove()
+  }
+)
+
 it.each(['disabled', 'checking', 'idle', 'error'] as const)(
   'hides the update action when there is no known version and status is %s',
   async (status) => {

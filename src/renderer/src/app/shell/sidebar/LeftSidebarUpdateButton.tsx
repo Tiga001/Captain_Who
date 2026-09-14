@@ -90,16 +90,17 @@ export function LeftSidebarUpdateButton({ t }: LeftSidebarUpdateButtonProps) {
     <div className="left-sidebar__update" data-status={state.status}>
       <button
         className="left-sidebar__update-button"
+        data-variant={busy ? 'progress' : 'icon'}
         type="button"
         disabled={busy || requestPending}
         aria-label={label}
         aria-describedby={error ? errorId : undefined}
+        title={busy ? undefined : label}
         onClick={() => {
           void download()
         }}
       >
-        {!busy && <Download aria-hidden="true" />}
-        <span>{label}</span>
+        {busy ? <span>{label}</span> : <Download aria-hidden="true" />}
       </button>
       <span
         className="left-sidebar__update-announcement"
