@@ -442,6 +442,10 @@ pub(crate) fn save_model_settings_with_credential_journal(
     }
 
     for model_id in removed_model_ids {
+        crate::storage::automation_repository::prepare_tombstoned_automations_for_model_delete(
+            &transaction,
+            &model_id,
+        )?;
         transaction.execute("DELETE FROM models WHERE id = ?1", params![model_id])?;
     }
 

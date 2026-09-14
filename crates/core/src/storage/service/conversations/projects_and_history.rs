@@ -19,6 +19,12 @@ impl StorageService {
         let conversation_ids = project_conversation_ids(&connection, project_id)?;
         if tree_scopes.is_empty() {
             let transaction = connection.transaction().map_err(storage_error)?;
+            automation_repository::prepare_tombstoned_automations_for_project_delete(
+                &transaction,
+                project_id,
+                &conversation_ids,
+            )
+            .map_err(storage_error)?;
             let deleted_at = now_ms();
             for conversation_id in &conversation_ids {
                 notification_repository::resolve_notification_events_by_conversation_id_in_transaction(
@@ -50,6 +56,12 @@ impl StorageService {
             transaction.commit().map_err(storage_error)?;
         } else {
             with_agent_deletion_transaction(&mut connection, |transaction| {
+                automation_repository::prepare_tombstoned_automations_for_project_delete(
+                    transaction,
+                    project_id,
+                    &conversation_ids,
+                )
+                .map_err(storage_error)?;
                 automation_repository::terminalize_automation_runs_before_project_delete(
                     transaction,
                     project_id,

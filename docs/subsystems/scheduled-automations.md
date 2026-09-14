@@ -78,6 +78,11 @@ fall-back 的重复本地时间只采用较早的绝对时刻，避免同一 occ
 - 每个任务最多有一个非终态 Run；计划 occurrence 和手动 request 分别有 SQLite 唯一约束。
 - 删除是 tombstone：停止未来调度、取消尚未 admission 的 Run、请求取消已运行/待审批 Run，并抑制
   尚未投递的通知。当前 UI 不提供恢复已删除任务的入口。
+- 删除项目、Conversation 或模型时，先在同一事务内处理仍引用该资源的 tombstone：将健康状态改为
+  `blocked`（保留已有阻塞原因），补齐缺失的历史名称/ID 快照，再由外键清空实际引用。此维护不改变
+  删除标记、任务 revision、时间戳、调度、attention 或 Run 历史，不生成新的事件或通知；普通删除、
+  关闭 trigger 的 Agent 树删除和新 Conversation 准备失败回滚使用相同处理。父资源删除失败时全部回滚，
+  已有已删除任务也适用，无需清理历史或修改数据库 schema。
 
 Automation 领域错误使用 JSON-RPC code `-32045` 和 closed typed data；客户端按 `not_found`、
 `revision_conflict`、`validation`、`run_already_active`、`target_invalid`、`permission_disabled`、

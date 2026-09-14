@@ -7,6 +7,8 @@ use crate::storage::notification_repository::{
 };
 use crate::{ProviderProfileConfig, ProviderProtocolDialect};
 
+mod tombstoned_parent_deletion;
+
 fn connection() -> Connection {
     let connection = Connection::open_in_memory().unwrap();
     migrations::run_migrations(&connection).unwrap();

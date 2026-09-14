@@ -1,6 +1,8 @@
 use super::*;
 use std::cell::RefCell;
 
+mod automation_parent_deletion;
+
 std::thread_local! {
     static TRACED_STORAGE_SQL: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
 }

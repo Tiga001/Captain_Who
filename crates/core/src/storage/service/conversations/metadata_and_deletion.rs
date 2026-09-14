@@ -236,6 +236,11 @@ impl StorageService {
         } else if exact_new_projection {
             agent_graph_repository::ensure_conversation_unbound(&transaction, conversation_id)
                 .map_err(|error| error.to_string())?;
+            automation_repository::prepare_tombstoned_automations_for_conversation_delete(
+                &transaction,
+                &[conversation_id.to_string()],
+            )
+            .map_err(storage_error)?;
             chat_repository::delete_conversation(&transaction, conversation_id)
                 .map_err(storage_error)?;
         }
@@ -262,6 +267,11 @@ impl StorageService {
         };
         if let Some(scope) = tree_scope {
             with_agent_deletion_transaction(&mut connection, |transaction| {
+                automation_repository::prepare_tombstoned_automations_for_conversation_delete(
+                    transaction,
+                    &scope.conversation_ids,
+                )
+                .map_err(storage_error)?;
                 automation_repository::terminalize_automation_runs_before_conversation_delete(
                     transaction,
                     &scope.conversation_ids,
@@ -283,6 +293,11 @@ impl StorageService {
             })?;
         } else {
             let transaction = connection.transaction().map_err(storage_error)?;
+            automation_repository::prepare_tombstoned_automations_for_conversation_delete(
+                &transaction,
+                &[conversation_id.to_string()],
+            )
+            .map_err(storage_error)?;
             notification_repository::resolve_notification_events_by_conversation_id_in_transaction(
                 &transaction,
                 conversation_id,

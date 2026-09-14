@@ -382,6 +382,7 @@ pub struct AutomationEventRecord {
 // transaction coordinators in one namespace preserves the exact transaction/CAS ordering while
 // making each lifecycle area independently reviewable.
 include!("automation_repository/configuration.rs");
+include!("automation_repository/parent_deletion.rs");
 include!("automation_repository/run_admission.rs");
 include!("automation_repository/run_settlement.rs");
 include!("automation_repository/queries.rs");
