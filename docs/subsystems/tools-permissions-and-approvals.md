@@ -2,7 +2,7 @@
 status: current
 audience: developers
 owner: engineering
-last_verified: 2026-09-07
+last_verified: 2026-09-14
 ---
 
 # Tool 体系、权限与审批
@@ -38,6 +38,7 @@ last_verified: 2026-09-07
 - Office 与图像：三个 Office Tool、`image_generation`；
 - Skills：resource list/read/materialize、script preflight/run、install prepare/commit，以及运行扩展 `skills_activate`；
 - 历史与协作：`conversation_history`、spawn/send/followup/wait/list/interrupt；
+- 人机交互：仅活动的用户根 Agent 可按当前动态能力快照使用 `request_user_input` 或 `request_user_input_async`；阻塞与非阻塞的暂停、投递和恢复契约见[人机交互 Tool](human-interaction.md)；
 - Scheduled Automation：仅在已原子 admission 的 Automation HumanRoot Run 中追加 `automation_report`；
 - 内置能力：`activate_capability` 和激活后的 Managed Playwright Browser Tool；
 - 外部扩展：MCP Server Tool 与其他 Runtime Extension。

@@ -4,7 +4,7 @@ description: 汇总当前版本面向用户的重要支持范围、上限和不�
 status: current
 audience: user
 owner: product-docs
-last_verified: 2026-08-31
+last_verified: 2026-09-14
 ---
 
 # 能力限制
@@ -13,7 +13,7 @@ last_verified: 2026-08-31
 
 ## 模型与网络
 
-- 模型接入支持通用 OpenAI-compatible、通用 Anthropic-compatible 和 DeepSeek V4 Chat 配置；兼容端点仍需满足对应协议行为。
+- 模型接入支持通用 OpenAI-compatible、通用 Anthropic-compatible、DeepSeek V4 Chat 和 Moonshot 配置；兼容端点仍需满足对应协议行为。
 - 联网搜索依赖用户配置的 Tavily API Key；没有 Key 时不能使用搜索 Tool。
 - 模型与搜索不是离线能力，数据会发往相应配置服务。
 - Token 和费用是本地统计或估算，不代表服务商最终账单。
@@ -58,9 +58,15 @@ last_verified: 2026-08-31
 
 - 协作结构是父子树，不是通用 DAG、图形工作流或自动规划器。
 - 用户只与根 Agent 交互；子 Agent 对话只能只读观察。
-- 默认树深度上限 8、每棵树最多 64 个节点；全局同时执行的 Agent Turn 默认最多 4 个。
+- 默认树深度上限 8、每棵树最多 64 个节点；全局同时执行的 Agent Turn 默认最多 50 个。
 - 同一 Agent 同时最多一个活跃 Turn。模板存于工作区库并显式分配项目，修改只影响未来节点。
 - 更多节点不会线性提升速度，也会增加模型调用和上下文成本。
+
+## 账户与软件许可
+
+- 启动新的 Agent 回合需要已登录 Captain Who 账户，并通过当前的软件许可校验。
+- 账户登录和软件许可不提供模型 API、模型额度或第三方服务凭据；仍需由用户自行配置模型服务。
+- 账户资料可由账户服务管理，但项目、对话、文件、执行记录、模型密钥和 Token 活动不会因此获得跨设备同步。
 
 ## 向用户提问
 

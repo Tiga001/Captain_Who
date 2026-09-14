@@ -4,12 +4,12 @@ description: 了解 Captain Who 当前实现的安全边界、数据流和安全
 status: current
 audience: user
 owner: security
-last_verified: 2026-08-31
+last_verified: 2026-09-14
 ---
 
 # 安全中心
 
-Captain Who 可以读取文件、运行命令、调用外部服务和操作受管浏览器。安全使用依赖应用边界，也依赖用户选择最小权限、审查扩展和保护本机账户。
+Captain Who 可以读取文件、运行命令、调用外部服务和操作受管浏览器。安全使用依赖应用边界，也依赖用户选择最小权限、审查扩展，并保护本机与 Captain Who 账户。
 
 ## 文档
 
@@ -17,4 +17,4 @@ Captain Who 可以读取文件、运行命令、调用外部服务和操作受�
 - [数据与权限](data-and-permissions.md)
 - [安全使用](safe-use.md)
 
-这些页面只说明当前产品中可以核实、且用户能够据此采取行动的安全边界；它们不是安全认证、操作系统沙箱证明或漏洞响应政策。
+这些页面只说明当前产品中可以核实、且用户能够据此采取行动的安全边界。完整的账号与网站数据规则以[隐私政策](https://captainwhoagent.com/legal/privacy)为准；它们不是安全认证、操作系统沙箱证明或漏洞响应政策。

@@ -4,23 +4,24 @@ description: 从第一次启动到使用 Agent、Skill、MCP、多智能体和�
 status: current
 audience: user
 owner: product-docs
-last_verified: 2026-08-31
+last_verified: 2026-09-14
 ---
 
 # 用户指南
 
 这套文档面向第一次接触 Captain Who 的用户。你不需要先理解大模型或编程术语；可以先完成一个任务，再按需了解 Agent 为什么能够读取文件、调用工具和继续多步工作。
 
-Captain Who 是一款**本地优先的桌面 AI 工作助手**：应用、项目授权、对话记录和大部分运行状态在本机管理；模型请求、联网搜索和你主动连接的第三方服务仍可能把必要数据发送到对应服务商。“本地优先”不等于“完全离线”。
+Captain Who 是一款**本地优先的桌面 AI 工作助手**：项目授权、对话记录、文件操作记录、模型密钥和 Token 活动在本机管理；模型请求、联网搜索和你主动连接的第三方服务仍可能把必要数据发送到对应服务商。账户资料和软件许可则由账户服务管理。“本地优先”不等于“完全离线”。
 
 ## 推荐学习路线
 
 ### 10 分钟快速上手
 
 1. 阅读[产品概览](getting-started/product-overview.md)，确认它是否适合你的工作。
-2. 按[安装与首次启动](getting-started/installation.md)取得当前可用版本。
-3. 跟随[完成第一个任务](getting-started/first-task.md)配置模型并发起对话。
-4. 如果要处理一个文件夹或代码仓库，继续[使用第一个项目](getting-started/first-project.md)。
+2. 按[安装与首次启动](getting-started/installation.md)从官网取得当前正式版本。
+3. 完成[账户与软件许可](getting-started/account-and-license.md)，再准备发起第一个 Agent 回合。
+4. 跟随[完成第一个任务](getting-started/first-task.md)配置模型并发起对话。
+5. 如果要处理一个文件夹或代码仓库，继续[使用第一个项目](getting-started/first-project.md)。
 
 ### 按功能查找
 

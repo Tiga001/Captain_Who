@@ -6,6 +6,9 @@ import { fileURLToPath } from 'node:url'
 const repositoryRoot = path.resolve(fileURLToPath(new URL('..', import.meta.url)))
 const publicDocsRoot = path.join(repositoryRoot, 'public-docs')
 const internalDocsRoot = path.join(repositoryRoot, 'docs')
+const packageJson = JSON.parse(readFileSync(path.join(repositoryRoot, 'package.json'), 'utf8'))
+const currentVersion = String(packageJson.version)
+const currentReleaseNote = `releases/release-notes/${currentVersion.replace(/\./g, '-')}.md`
 const failures = []
 
 const requiredDocuments = [
@@ -14,6 +17,7 @@ const requiredDocuments = [
   'user/getting-started/README.md',
   'user/getting-started/product-overview.md',
   'user/getting-started/installation.md',
+  'user/getting-started/account-and-license.md',
   'user/getting-started/interface-tour.md',
   'user/getting-started/first-task.md',
   'user/getting-started/first-project.md',
@@ -24,11 +28,13 @@ const requiredDocuments = [
   'user/everyday-use/models-and-providers.md',
   'user/everyday-use/permissions-and-approvals.md',
   'user/everyday-use/context-and-history.md',
+  'user/everyday-use/answering-questions.md',
   'user/capabilities/README.md',
   'user/capabilities/tools.md',
   'user/capabilities/skills.md',
   'user/capabilities/mcp.md',
   'user/capabilities/multi-agent.md',
+  'user/capabilities/human-interaction.md',
   'user/capabilities/automations.md',
   'user/capabilities/notifications.md',
   'user/capabilities/browser-automation.md',
@@ -70,6 +76,9 @@ const requiredDocuments = [
   'releases/README.md',
   'releases/supported-platforms.md',
   'releases/upgrade-guide.md',
+  'releases/download-and-verification.md',
+  'releases/release-notes/README.md',
+  currentReleaseNote,
   'support/README.md',
   'support/faq.md',
   'support/common-problems.md',
@@ -87,7 +96,6 @@ const forbiddenPlaceholderDocuments = [
   'legal/privacy-policy.md',
   'legal/terms-of-use.md',
   'legal/trademarks.md',
-  'releases/release-notes/README.md',
   'releases/version-lifecycle.md',
   'security/security-updates.md',
   'security/vulnerability-reporting.md',
@@ -244,6 +252,62 @@ if (existsSync(thirdPartyPage)) {
   const markdown = readFileSync(thirdPartyPage, 'utf8')
   for (const notice of ['THIRD_PARTY_NOTICES.txt', 'THIRD_PARTY_GRAMMAR_NOTICES.txt']) {
     if (!markdown.includes(notice)) fail(thirdPartyPage, `missing link to ${notice}`)
+  }
+}
+
+const releaseDocuments = [
+  'releases/README.md',
+  'releases/supported-platforms.md',
+  'releases/upgrade-guide.md',
+  'releases/download-and-verification.md',
+  'releases/release-notes/README.md',
+  currentReleaseNote
+]
+for (const documentPath of releaseDocuments) {
+  const file = path.join(publicDocsRoot, documentPath)
+  if (!existsSync(file)) continue
+  const markdown = readFileSync(file, 'utf8')
+  if (!markdown.includes(currentVersion)) {
+    fail(file, `must name the current package version ${currentVersion}`)
+  }
+}
+
+const releaseIndex = path.join(publicDocsRoot, 'releases/README.md')
+if (existsSync(releaseIndex)) {
+  const markdown = readFileSync(releaseIndex, 'utf8')
+  if (!markdown.includes('https://captainwhoagent.com/')) {
+    fail(releaseIndex, 'missing canonical official download site')
+  }
+}
+
+const stalePublishedClaims = [
+  [/私有开发项目/u, 'obsolete private-development claim'],
+  [/尚未提供公开下载/u, 'obsolete no-public-download claim'],
+  [/尚无公开下载渠道/u, 'obsolete no-public-download claim'],
+  [/没有可验证的公开下载渠道/u, 'obsolete no-public-download claim'],
+  [/尚未配置 Apple notarization/u, 'obsolete macOS notarization claim'],
+  [/尚未配置 Apple 公证/u, 'obsolete macOS notarization claim'],
+  [/当前没有应用内自动更新/u, 'obsolete in-app-update claim'],
+  [/当前没有自动更新器/u, 'obsolete in-app-update claim']
+]
+for (const file of documentationFiles) {
+  const prose = stripFencedCode(readFileSync(file, 'utf8')).replace(/`[^`\n]+`/g, '')
+  for (const [pattern, message] of stalePublishedClaims) {
+    if (pattern.test(prose)) fail(file, message)
+  }
+}
+
+for (const documentPath of [
+  'user/capabilities/multi-agent.md',
+  'user/reference/capability-limits.md'
+]) {
+  const file = path.join(publicDocsRoot, documentPath)
+  if (!existsSync(file)) continue
+  const markdown = readFileSync(file, 'utf8')
+  if (!markdown.includes('50'))
+    fail(file, 'must state the current default Agent Turn concurrency (50)')
+  if (/默认[^\n]*最多\s*4\s*个\s*Agent Turn/u.test(markdown)) {
+    fail(file, 'contains obsolete default Agent Turn concurrency (4)')
   }
 }
 

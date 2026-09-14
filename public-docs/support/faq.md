@@ -4,7 +4,7 @@ description: 关于 Captain Who 数据、模型、权限、扩展和自动化的
 status: current
 audience: user
 owner: support
-last_verified: 2026-09-03
+last_verified: 2026-09-14
 ---
 
 # 常见问答
@@ -15,7 +15,7 @@ last_verified: 2026-09-03
 
 ## 必须使用某一家模型服务吗？
 
-不必。当前支持 OpenAI-compatible、Anthropic-compatible 和 DeepSeek V4 Chat 对应的适配方式，但具体端点必须满足协议要求。兼容网关需要自行验证。
+不必。当前支持 OpenAI-compatible、Anthropic-compatible、DeepSeek V4 Chat 和 Moonshot 对应的适配方式，但具体端点必须满足协议要求。兼容网关需要自行验证。
 
 ## Captain Who 会自动收费吗？
 
@@ -23,7 +23,11 @@ last_verified: 2026-09-03
 
 ## 数据都只保存在本机吗？
 
-项目、对话和设置主要保存在本机，但你发起模型、搜索、图片或网页任务时，完成请求所需的数据会发送给对应第三方。用户配置的 MCP Server 也可能自行访问网络。参见[数据与权限](../security/data-and-permissions.md)。
+项目、对话、文件、Agent 轨迹、密钥和本机 Token 活动主要保存在本机，不会同步到 Captain Who 的账户与许可服务。你使用网站账户、登录桌面应用或启动新的 Agent 回合时，账户服务会处理账户、个人资料、认证/会话、许可及必要的服务安全记录；模型、搜索、图片、网页和 MCP 请求则直接发送给你选择的第三方。参见[数据与权限](../security/data-and-permissions.md)。
+
+## 为什么需要登录和软件许可？
+
+登录用于识别账户，软件许可校验用于决定能否启动新的 Agent 回合。它们不上传或同步本机项目、对话、文件、模型设置或本机 Token 活动。无法完成许可校验时，先在应用中重新验证；需要管理许可时使用应用打开的官方账户页面。
 
 ## Token 保存在哪里？
 
@@ -51,7 +55,7 @@ Skill 主要告诉 Agent“怎样做”；MCP Server 主要提供“可以调用
 
 ## 是否支持自动更新？
 
-当前没有自动更新器、公开更新通道或自动回滚服务。替换安装构建前请阅读[升级指南](../releases/upgrade-guide.md)。
+正式签名 macOS 发行版内置应用内自动更新机制。完整初始化后，只有在可访问的官方更新源提供新版本时，应用才会显示下载入口；由你选择开始下载，下载、完整性校验和原生准备完成后，应用会退出并重新启动以安装。它不会在你没有开始下载时自动下载、静默替换版本，也不提供自动回滚。其他平台和开发构建不应据此推断具备相同更新能力。更新源不可用、替换安装包或更新失败时，请阅读[升级指南](../releases/upgrade-guide.md)。
 
 ## 浏览器自动化会使用我的系统浏览器吗？
 

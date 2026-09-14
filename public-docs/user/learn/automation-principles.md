@@ -4,12 +4,12 @@ description: 理解定时任务、Run、权限快照、离线恢复和通知之�
 status: current
 audience: user
 owner: product-docs
-last_verified: 2026-08-31
+last_verified: 2026-09-14
 ---
 
 # Scheduled Automation 原理
 
-Scheduled Automation 的作用是“按计划启动一次普通的根 Agent Run”。它复用同一套模型、上下文、Tool、Skill、MCP、审批和用量链路，而不是另一套能力更大的后台 Agent。
+Scheduled Automation 的作用是“按计划启动一次普通的根 Agent Run”。它复用同一套模型、上下文、Tool、Skill、MCP、审批和用量链路，而不是另一套能力更大的后台 Agent。每次 Run 也要通过当前账户登录与软件许可准入；它不因此获得模型 API、模型额度或绕过审批的权限。
 
 ## Task 和 Run
 
@@ -29,7 +29,7 @@ Core Server 在应用运行时周期性检查到期任务，把符合条件的�
 - 新聊天：每次 Run 创建一个新的根对话；
 - 现有聊天：在选定的活跃根对话中追加回合。
 
-项目、模型或聊天失效时，任务会进入“需要修复”，而不是偷偷换到另一个目标。Scheduled Automation 不能直接绑定子 Agent 对话，但根 Agent 可以在 Run 内使用 Multi-Agent。
+项目、模型、聊天、账户登录或软件许可失效时，任务会进入“需要修复”或本次 Run 无法启动，而不是偷偷换到另一个目标。账户或许可恢复后，系统不会自动补跑被阻止的 Run；需由你核对历史并按需重新触发。Scheduled Automation 不能直接绑定子 Agent 对话，但根 Agent 可以在 Run 内使用 Multi-Agent。
 
 ## 为什么要冻结权限
 

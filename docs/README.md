@@ -2,7 +2,7 @@
 status: current
 audience: developers
 owner: engineering
-last_verified: 2026-08-31
+last_verified: 2026-09-14
 ---
 
 # Captain Who 开发文档
@@ -52,7 +52,7 @@ fixture 和测试为准。
 | 文档                                                              | 内容                                                     |
 | ----------------------------------------------------------------- | -------------------------------------------------------- |
 | [工具、权限与审批](subsystems/tools-permissions-and-approvals.md) | 工具注册、权限、审批、取消和恢复                         |
-| [向用户提问](subsystems/human-interaction.md)                     | 双工具契约、独立设置、问题与回应存储、五轮进度           |
+| [向用户提问](subsystems/human-interaction.md)                     | 阻塞/非阻塞 Tool、设置、状态、投递、恢复与跨进程边界     |
 | [FileChange](subsystems/file-change.md)                           | `apply_patch`、Observation、审批、提交、审计和历史 Diff  |
 | [Scheduled Automation](subsystems/scheduled-automations.md)       | 定时任务、调度、Run、恢复、attention 与通知事实          |
 | [通用通知](subsystems/notifications.md)                           | 普通任务与 Automation 的事实、批次、原生投递和点击导航   |
@@ -91,6 +91,7 @@ fixture 和测试为准。
 - [ADR 索引与模板](adr/README.md)：记录仍会影响实现的架构决策。
 - [历史文档](archive/README.md)：只保留历史背景，不作为当前实现依据。
 - [多智能体分轮落地记录](archive/multi-agent-rollout-history.md)：原六轮实施路线的历史归档。
+- [人机交互分轮交付历史](archive/human-interaction-rollout-history.md)：已完成的五轮实施路线与后续修订背景。
 
 ## 文档状态
 

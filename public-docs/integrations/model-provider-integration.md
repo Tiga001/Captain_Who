@@ -4,7 +4,7 @@ description: 配置兼容模型端点、模型资料和凭据，并验证 Tool �
 status: current
 audience: user
 owner: product
-last_verified: 2026-09-03
+last_verified: 2026-09-14
 ---
 
 # 连接模型 Provider
@@ -13,11 +13,12 @@ Captain Who 不附带可直接使用的模型账户，新安装的模型目录�
 
 ## 当前适配类型
 
-| 类型                       | 用途                                              |
-| -------------------------- | ------------------------------------------------- |
-| Generic OpenAI Chat        | OpenAI-compatible 的消息与 Tool 调用接口          |
-| Generic Anthropic Messages | Anthropic-compatible 的 Messages 与 Tool Use 接口 |
-| DeepSeek V4 Chat           | 需要保留特定推理续接语义的 DeepSeek V4 Chat       |
+| 类型                       | 用途                                               |
+| -------------------------- | -------------------------------------------------- |
+| Generic OpenAI Chat        | OpenAI-compatible 的消息与 Tool 调用接口           |
+| Generic Anthropic Messages | Anthropic-compatible 的 Messages 与 Tool Use 接口  |
+| DeepSeek V4 Chat           | 需要保留特定推理续接语义的 DeepSeek V4 Chat        |
+| Moonshot                   | 按模型族应用专用思考或推理强度设置的 Moonshot 配置 |
 
 “兼容”指协议形状满足相应适配器要求，不代表 Captain Who 对所有网关、代理或服务商版本作认证。
 
@@ -43,7 +44,7 @@ Captain Who 不附带可直接使用的模型账户，新安装的模型目录�
 
 价格仅用于本地估算，不代表服务商账单，也不会自动识别币种。上下文窗口和图片支持同样由用户配置，填写错误可能导致请求失败或容量判断不准确。
 
-选择 DeepSeek V4 Chat 时，还可以设置推理模式和推理强度。Provider 原生的私有推理续接不会被当作普通聊天文本公开展示，也不能无损迁移到所有其他 Provider。
+选择 DeepSeek V4 Chat 时，还可以设置推理模式和推理强度。选择 Moonshot 时，界面会按当前模型资料显示对应的思考或推理强度设置；不要把一个模型族的设置复制到另一个模型族。Provider 原生的私有推理续接不会被当作普通聊天文本公开展示，也不能无损迁移到所有其他 Provider。
 
 ## 验证配置
 

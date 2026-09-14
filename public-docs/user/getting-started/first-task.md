@@ -4,12 +4,16 @@ description: 配置模型并用默认权限完成一次安全、可验证的 Age
 status: current
 audience: user
 owner: product-docs
-last_verified: 2026-08-31
+last_verified: 2026-09-14
 ---
 
 # 完成第一个任务
 
 这个练习不要求选择项目，也不会修改文件。它用来确认模型连接、消息发送和任务停止都能正常工作。
+
+## 先确认账户与许可
+
+启动新的 Agent 回合前，必须已登录 Captain Who 账户且软件许可处于可用状态。若输入框提示未登录、许可不可用或暂时无法验证，先按[账户与软件许可](account-and-license.md)完成登录或重新验证；你的未发送输入不会因为该检查而变成一次模型请求。
 
 ## 1. 确认模型可用
 

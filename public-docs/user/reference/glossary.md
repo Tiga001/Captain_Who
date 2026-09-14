@@ -4,7 +4,7 @@ description: 用简明语言解释 Captain Who 用户文档中的核心概念。
 status: current
 audience: user
 owner: product-docs
-last_verified: 2026-08-31
+last_verified: 2026-09-14
 ---
 
 # 术语表
@@ -20,6 +20,10 @@ last_verified: 2026-08-31
 ## Approval（审批）
 
 用户对一个冻结的具体动作作出批准或拒绝。审批理由和模型文字不授予额外权限。
+
+## Captain Who 账户
+
+用于登录、管理账户资料和校验软件许可的账户。它与调用模型 API 的 Provider 账户及其 Token 相互独立。
 
 ## Artifact（产物）
 
@@ -103,7 +107,7 @@ Model 是具体模型标识；Provider/Profile 描述与模型服务通信的协
 
 ## Project（项目）
 
-用户授权给 Captain Who 的本地工作区及其应用内元数据。移除项目不会删除源目录，但会删除关联的本地应用数据。
+用户授权给 Captain Who 的一个或多个本地文件夹及其应用内元数据。每个项目有一个主要文件夹；移除项目不会删除源目录，但会删除关联的本地应用数据。
 
 ## 根 Agent（Root Agent）
 
@@ -116,6 +120,10 @@ Model 是具体模型标识；Provider/Profile 描述与模型服务通信的协
 ## Skill
 
 带来源和版本的指令包，可包含参考、模板、资源和可选脚本。Skill 教 Agent 怎样工作，但不授予权限。
+
+## 软件许可
+
+Captain Who 在启动新的 Agent 回合前校验的访问状态。它不提供模型 API、模型额度或第三方服务凭据。
 
 ## stdio
 

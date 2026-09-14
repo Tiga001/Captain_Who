@@ -4,7 +4,7 @@ description: 配置模型 API、管理模型能力与费用估算，并在对话
 status: current
 audience: user
 owner: product-docs
-last_verified: 2026-09-03
+last_verified: 2026-09-14
 ---
 
 # 模型与服务商
@@ -15,11 +15,12 @@ Captain Who 不附带可直接使用的模型账户。你需要提供一个兼�
 
 ## 当前兼容方式
 
-当前运行时支持三类模型接入：
+当前运行时支持以下模型接入：
 
 - OpenAI Chat Completions 兼容接口。
 - Anthropic Messages 兼容接口。
 - DeepSeek V4 Chat 专用配置。
+- Moonshot 专用配置。
 
 “兼容”表示接口需要满足 Captain Who 使用的消息、流式输出和工具调用约定，不保证所有第三方代理或自建网关都能工作。第一次真实任务才会验证服务端响应。
 
@@ -46,7 +47,7 @@ Captain Who 不附带可直接使用的模型账户。你需要提供一个兼�
 
 在“更多”中可以为单个模型填写独立 URL 和 Token。两项必须同时填写，Captain Who 不会把单个模型的 URL 与全局 Token 混用，也不会反向混用。
 
-“API 厂商”默认使用通用兼容配置；当前还可以选择 DeepSeek V4 Chat，并设置 Thinking 模式与推理强度。服务商专用选项只在对应配置下生效。
+“API 厂商”默认使用通用兼容配置；当前还可以选择 DeepSeek V4 Chat 或 Moonshot 专用配置。不同 Moonshot 模型族可显示不同的思考或推理强度选项；只使用界面为当前模型资料显示的选项，不要把某个模型族的参数套用到其他模型。服务商专用选项只在对应配置下生效。
 
 ## 在任务中选择模型
 

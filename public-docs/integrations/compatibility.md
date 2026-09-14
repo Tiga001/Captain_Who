@@ -4,7 +4,7 @@ description: 查看 Captain Who 当前对 Provider、Skill、MCP 和文件能力
 status: current
 audience: user
 owner: product
-last_verified: 2026-08-31
+last_verified: 2026-09-14
 ---
 
 # 集成兼容性
@@ -18,6 +18,7 @@ last_verified: 2026-08-31
 | OpenAI-compatible Chat 与 Tool Calls      | 支持对应通用适配器         |
 | Anthropic-compatible Messages 与 Tool Use | 支持对应通用适配器         |
 | DeepSeek V4 Chat 推理续接                 | 支持专用配置               |
+| Moonshot 模型族专用配置                   | 支持按模型资料显示的设置   |
 | 任意 OpenAI/Anthropic 网关                | 不保证；需逐端点验证       |
 | 自动发现模型与价格                        | 不支持，模型资料由用户配置 |
 
@@ -57,4 +58,4 @@ Skill Script 当前仅支持 Python 3 脚本，并要求高权限前置条件。
 
 ## 平台差异
 
-macOS、Windows 和 Linux 都有原生打包入口，受管组件清单也登记了这些平台的 x64/arm64 资源；当前打包命令并不单独证明每种组合都已构建和验收。主要实测平台仍是 macOS。具体证据边界见[平台与构建状态](../releases/supported-platforms.md)；构建目标不等于公开发行支持。
+当前正式公开发行支持 macOS 12 及更高版本的 Apple Silicon 设备。Windows、macOS Intel 和 Linux 即使在仓库中存在构建目标或受管组件声明，也不等于已有可下载、已验收的公开发行版本。具体边界见[平台与构建状态](../releases/supported-platforms.md)。

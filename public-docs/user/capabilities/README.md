@@ -4,7 +4,7 @@ description: 了解 Tool、Skill、MCP、Multi-Agent、Scheduled Automation、�
 status: current
 audience: user
 owner: product-docs
-last_verified: 2026-08-31
+last_verified: 2026-09-14
 ---
 
 # 能力指南
@@ -14,6 +14,7 @@ Captain Who 的能力由几层组成。先区分它们，能避免把“有说�
 | 能力                                          | 直观理解                         | 你主要做什么                     |
 | --------------------------------------------- | -------------------------------- | -------------------------------- |
 | [Tool](tools.md)                              | Agent 的手和眼睛                 | 给出目标，核对工具活动和审批     |
+| [人机交互](human-interaction.md)              | Agent 向你请求信息、判断或协作   | 回答、跳过或忽略非阻塞问题       |
 | [Skill](skills.md)                            | 一套任务教材和配套资源           | 选择、安装、启用或更新 Skill     |
 | [MCP](mcp.md)                                 | 连接外部工具的通用插座           | 配置本地 Server，授权启动和调用  |
 | [Multi-Agent](multi-agent.md)                 | 由根 Agent 管理的协作小组        | 定义分工，观察子 Agent，处理审批 |
@@ -32,11 +33,12 @@ Captain Who 的能力由几层组成。先区分它们，能避免把“有说�
 4. 必要时把研究工作分给多个子 Agent。
 5. 文件写入仍受 Scheduled Automation 冻结权限和审批规则约束。
 
-这些层不会互相自动授权。安装 Skill 不会开启 MCP；允许 MCP Server 自动调用不会扩大文件权限；Scheduled Automation 也不会绕过普通 Agent 的审批和安全检查。
+这些层不会互相自动授权。安装 Skill 不会开启 MCP；允许 MCP Server 自动调用不会扩大文件权限；Scheduled Automation 也不会绕过普通 Agent 的审批、安全检查、账户登录或软件许可准入。
 
 ## 不确定该选什么
 
 - 固定内置动作：先看 [Tool](tools.md)。
+- Agent 缺少你的信息、判断或协作：用[人机交互](human-interaction.md)。
 - 需要特定方法、模板或 Office 工作流：用 [Skill](skills.md)。
 - 需要连接第三方本地工具：用 [MCP](mcp.md)。
 - 子任务可以独立并行：用 [Multi-Agent](multi-agent.md)。

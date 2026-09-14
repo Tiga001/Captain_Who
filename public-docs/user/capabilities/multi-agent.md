@@ -4,7 +4,7 @@ description: 让根 Agent 把独立子任务分给多个子 Agent，并在界面
 status: current
 audience: user
 owner: product-docs
-last_verified: 2026-09-07
+last_verified: 2026-09-14
 ---
 
 # Multi-Agent
@@ -83,7 +83,7 @@ Multi-Agent 让一个根 Agent 组织多个子 Agent。每个子 Agent 有自己
 
 当前结构是一棵树：每个子 Agent 只有一个直接父 Agent。发送消息只负责传递信息；真正安排下一次执行需要父 Agent 发出后续任务。子 Agent 完成一次运行后不会自动消失，后续仍可被再次唤醒。
 
-每个 Agent 同时最多运行一个 Turn，交互式根 Agent、子 Agent 和 Scheduled Automation 共享并发容量。当前默认全局同时最多执行 4 个 Agent Turn，单棵树最多 64 个节点、深度最多 8；达到限制时任务会排队或被拒绝，而不是无限扩张。
+每个 Agent 同时最多运行一个 Turn，交互式根 Agent、子 Agent 和 Scheduled Automation 共享并发容量。当前默认全局同时最多执行 50 个 Agent Turn，单棵树最多 64 个节点、深度最多 8；达到限制时任务会排队或被拒绝，而不是无限扩张。
 
 ## 实用提示
 
