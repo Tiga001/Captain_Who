@@ -9,6 +9,12 @@ export function createAppIpcBridge(ipcRenderer: AppIpcRenderer): HostApi['app'] 
 
   return {
     getWindowState: () => ipcRenderer.invoke(HOST_CHANNELS.app.getWindowState),
+    onDockOpenConversationPending: (handler) => {
+      const listener = (): void => handler()
+      ipcRenderer.on(HOST_CHANNELS.app.dockOpenConversationPending, listener)
+      return () =>
+        ipcRenderer.removeListener(HOST_CHANNELS.app.dockOpenConversationPending, listener)
+    },
     openDocumentation: () => ipcRenderer.invoke(HOST_CHANNELS.app.openDocumentation),
     openExternal: (url) => ipcRenderer.invoke(HOST_CHANNELS.app.openExternal, url),
     onFlushBeforeQuit: (handler) => {
@@ -44,6 +50,7 @@ export function createAppIpcBridge(ipcRenderer: AppIpcRenderer): HostApi['app'] 
     setNativeThemeSource: (themeSource) =>
       ipcRenderer.invoke(HOST_CHANNELS.app.setNativeThemeSource, themeSource),
     showAbout: () => ipcRenderer.invoke(HOST_CHANNELS.app.showAbout),
+    takeDockOpenConversation: () => ipcRenderer.invoke(HOST_CHANNELS.app.takeDockOpenConversation),
     whenReady: () => ipcRenderer.invoke(HOST_CHANNELS.app.whenReady)
   }
 }

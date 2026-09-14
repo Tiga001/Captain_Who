@@ -723,12 +723,14 @@ export interface HostApi {
   }
   app: {
     getWindowState(): Promise<AppWindowState>
+    onDockOpenConversationPending(handler: () => void): () => void
     openDocumentation(): Promise<void>
     openExternal(url: string): Promise<void>
     onFlushBeforeQuit(handler: () => void | Promise<void>): () => void
     onWindowStateChange(handler: (state: AppWindowState) => void): () => void
     setNativeThemeSource(themeSource: NativeThemeSource): Promise<void>
     showAbout(): Promise<void>
+    takeDockOpenConversation(): Promise<string | null>
     whenReady(): Promise<void>
   }
   agent: AgentHostApi

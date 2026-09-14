@@ -829,6 +829,31 @@ export function AppShell() {
   )
 
   useEffect(() => {
+    if (
+      !hostClient.app?.onDockOpenConversationPending ||
+      !hostClient.app?.takeDockOpenConversation
+    ) {
+      return
+    }
+    const openPendingDockConversation = (): void => {
+      void hostClient.app
+        .takeDockOpenConversation()
+        .then((conversationId) => {
+          if (!conversationId) return
+          closeSettings()
+          requestOpenConversationFromScheduled(conversationId)
+        })
+        .catch(() => undefined)
+    }
+
+    const unsubscribe = hostClient.app.onDockOpenConversationPending(openPendingDockConversation)
+    // The native menu can be used while this Renderer is still mounting. Claiming once after
+    // subscription makes that initial selection deterministic rather than relying on IPC timing.
+    openPendingDockConversation()
+    return unsubscribe
+  }, [closeSettings, requestOpenConversationFromScheduled])
+
+  useEffect(() => {
     // Older isolated Renderer test hosts do not expose the additive Automation surface.
     if (!hostClient.automations?.onOpenRequested) return
     return hostClient.automations.onOpenRequested((request) => {

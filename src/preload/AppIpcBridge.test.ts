@@ -35,6 +35,36 @@ describe('AppIpcBridge', () => {
     expect(invoke).toHaveBeenCalledWith(HOST_CHANNELS.app.whenReady)
   })
 
+  it('subscribes to pending Dock conversation navigation and can claim its target', async () => {
+    let listener: (() => void) | undefined
+    const invoke = vi.fn(async () => 'conversation-1')
+    const removeListener = vi.fn()
+    const bridge = createAppIpcBridge({
+      invoke,
+      on: vi.fn((channel, nextListener) => {
+        if (channel === HOST_CHANNELS.app.dockOpenConversationPending) {
+          listener = nextListener as typeof listener
+        }
+        return {} as IpcRenderer
+      }),
+      removeListener,
+      send: vi.fn()
+    } as unknown as IpcRenderer)
+    const handler = vi.fn()
+    const unsubscribe = bridge.onDockOpenConversationPending(handler)
+
+    listener?.()
+    expect(handler).toHaveBeenCalledExactlyOnceWith()
+    await expect(bridge.takeDockOpenConversation()).resolves.toBe('conversation-1')
+    expect(invoke).toHaveBeenCalledWith(HOST_CHANNELS.app.takeDockOpenConversation)
+
+    unsubscribe()
+    expect(removeListener).toHaveBeenCalledWith(
+      HOST_CHANNELS.app.dockOpenConversationPending,
+      listener
+    )
+  })
+
   it('acknowledges a quit flush only after the Renderer handler settles', async () => {
     let listener: ((event: unknown, requestId: string) => void) | undefined
     let finishFlush: (() => void) | undefined

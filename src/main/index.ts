@@ -64,6 +64,10 @@ import { registerAuthIpc } from './auth/authIpc'
 import { AppShutdownCoordinator } from './lifecycle/AppShutdownCoordinator'
 import { createDesktopUpdateService } from './updates/createDesktopUpdateService'
 import { registerUpdateIpc } from './updates/updateIpc'
+import {
+  DockRecentConversationsController,
+  type DockRecentConversationLabels
+} from './dockRecentConversations'
 
 // Electron is the sole authority for the application data location. Freeze it before
 // app.setName() can affect path resolution so the entire process uses one root.
@@ -84,6 +88,8 @@ let disposeHostIpc: HostIpcRegistration | null = null
 let disposeUpdateIpc: (() => void) | null = null
 let desktopUpdateService: ReturnType<typeof createDesktopUpdateService> | null = null
 let mainWindow: BrowserWindow | null = null
+let dockRecentConversations: DockRecentConversationsController | null = null
+let pendingDockConversationId: string | null = null
 let startupReadiness: StartupReadinessController | null = null
 let hostInitializationReady = false
 let accountAuth: AuthService | null = null
@@ -182,6 +188,44 @@ function configureMainWindowWebviews(window: BrowserWindow): void {
     targetRegistry: browserSurfaceManager,
     ...(browserNetworkGuard ? { networkGuard: browserNetworkGuard } : {})
   })
+}
+
+function dockRecentConversationLabels(): DockRecentConversationLabels {
+  if (app.getLocale().toLowerCase().startsWith('zh')) {
+    return {
+      empty: '暂无最近聊天',
+      header: '最近聊天',
+      more: '更多',
+      untitled: '未命名聊天'
+    }
+  }
+  return {
+    empty: 'No recent chats',
+    header: 'Recent Chats',
+    more: 'More',
+    untitled: 'Untitled chat'
+  }
+}
+
+function openDockConversation(conversationId: string): void {
+  pendingDockConversationId = conversationId
+  activateMainWindow()
+  const window = mainWindow
+  if (!window || window.isDestroyed()) return
+  window.webContents.send(HOST_CHANNELS.app.dockOpenConversationPending)
+}
+
+function installDockRecentConversations(): void {
+  const dock = process.platform === 'darwin' ? app.dock : undefined
+  if (!dock) return
+  dockRecentConversations?.dispose()
+  dockRecentConversations = new DockRecentConversationsController({
+    applyMenu: (template) => dock.setMenu(Menu.buildFromTemplate(template)),
+    labels: dockRecentConversationLabels(),
+    loadConversationMetas: () => coreServer.loadConversationMetas(),
+    openConversation: openDockConversation
+  })
+  dockRecentConversations.start()
 }
 
 function createWindow(): void {
@@ -372,6 +416,11 @@ async function initializeApplication(): Promise<void> {
   createWindow()
   app.on('activate', activateMainWindow)
   coreServer.start()
+  installDockRecentConversations()
+  app.once('will-quit', () => {
+    dockRecentConversations?.dispose()
+    dockRecentConversations = null
+  })
   const managedBrowserSession = session.fromPartition(BROWSER_WEBVIEW_PARTITION)
   const faviconResourceCache = new FaviconResourceCache({
     networkSession: managedBrowserSession
@@ -533,6 +582,15 @@ async function initializeApplication(): Promise<void> {
       return executionAccess.sync()
     }
   )
+  ipcMain.handle(HOST_CHANNELS.app.takeDockOpenConversation, (event) => {
+    if (!isTrustedRendererEvent(event)) return null
+    const sourceWindow = BrowserWindow.fromWebContents(event.sender)
+    if (!sourceWindow || sourceWindow !== mainWindow) return null
+    const conversationId = pendingDockConversationId
+    pendingDockConversationId = null
+    return conversationId
+  })
+  app.once('will-quit', () => ipcMain.removeHandler(HOST_CHANNELS.app.takeDockOpenConversation))
   if (mainWindow?.isVisible()) disposeHostIpc.beginNotificationDelivery()
   hostInitializationReady = true
   startupReadiness.markReady()

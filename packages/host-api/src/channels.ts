@@ -29,6 +29,7 @@ export const HOST_CHANNELS = {
     ping: 'host:core.ping'
   },
   app: {
+    dockOpenConversationPending: 'host:app.dockOpenConversationPending',
     flushBeforeQuit: 'host:app.flushBeforeQuit',
     flushBeforeQuitAck: 'host:app.flushBeforeQuitAck',
     getWindowState: 'host:app.getWindowState',
@@ -36,6 +37,7 @@ export const HOST_CHANNELS = {
     openExternal: 'host:app.openExternal',
     setNativeThemeSource: 'host:app.setNativeThemeSource',
     showAbout: 'host:app.showAbout',
+    takeDockOpenConversation: 'host:app.takeDockOpenConversation',
     whenReady: 'host:app.whenReady',
     windowStateChange: 'host:app.windowStateChange'
   },
