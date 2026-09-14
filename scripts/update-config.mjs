@@ -9,6 +9,38 @@ import { parse as parseYaml } from 'yaml'
 const BASE_CONFIGURATION_URL = new URL('../electron-builder.yml', import.meta.url)
 const PUBLISH_FIELDS = new Set(['provider', 'url', 'channel', 'useMultipleRangeRequest'])
 
+// electron-builder applies these immediately before signing. Keep this macOS-build-only: the
+// Windows node-pty backend currently uses child_process.fork(), which needs RunAsNode enabled.
+export const MACOS_RELEASE_ELECTRON_FUSES = Object.freeze({
+  runAsNode: false,
+  enableNodeOptionsEnvironmentVariable: false,
+  enableNodeCliInspectArguments: false,
+  enableEmbeddedAsarIntegrityValidation: true,
+  onlyLoadAppFromAsar: true
+})
+
+export function validateMacReleaseElectronFuses(configuration) {
+  if (configuration?.asar !== true) {
+    throw new Error('Formal macOS packages require asar=true')
+  }
+  if (configuration?.disableAsarIntegrity !== false) {
+    throw new Error('Formal macOS packages cannot disable ASAR integrity metadata')
+  }
+
+  const fuses = configuration?.electronFuses
+  if (!fuses || typeof fuses !== 'object' || Array.isArray(fuses)) {
+    throw new Error('Formal macOS packages require the hardened Electron fuse policy')
+  }
+  const expectedEntries = Object.entries(MACOS_RELEASE_ELECTRON_FUSES)
+  if (
+    Object.keys(fuses).length !== expectedEntries.length ||
+    expectedEntries.some(([key, value]) => fuses[key] !== value)
+  ) {
+    throw new Error('Formal macOS packages have an unexpected Electron fuse policy')
+  }
+  return fuses
+}
+
 export function validateUpdateUrl(value, { required = false } = {}) {
   if (value === undefined || value === '') {
     if (required) {
@@ -117,6 +149,7 @@ export function getMacUpdatePublishConfiguration(configuration) {
       'Update-enabled macOS releases require update metadata and forceCodeSigning=true'
     )
   }
+  validateMacReleaseElectronFuses(configuration)
   return publish
 }
 
@@ -142,6 +175,9 @@ export function createUpdateBuildConfiguration({
 } = {}) {
   const url = validateUpdateUrl(environment.CAPTAIN_WHO_UPDATE_URL, { required })
   const configuration = parseYaml(readFileSync(BASE_CONFIGURATION_URL, 'utf8'))
+  // scripts/update-config.mjs is the sole configuration entrypoint used by pnpm build:mac. Set
+  // fuses regardless of whether this signed macOS build also has an update provider.
+  configuration.electronFuses = { ...MACOS_RELEASE_ELECTRON_FUSES }
   if (url) {
     configuration.forceCodeSigning = true
     configuration.mac.target = ['dmg', 'zip'].map((target) => ({ target, arch: ['arm64'] }))

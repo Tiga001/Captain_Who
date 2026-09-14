@@ -8,6 +8,8 @@ import { parse as parseYaml } from 'yaml'
 import {
   createUpdateBuildConfiguration,
   getMacUpdatePublishConfiguration,
+  MACOS_RELEASE_ELECTRON_FUSES,
+  validateMacReleaseElectronFuses,
   validateUpdateBuildTarget,
   validateUpdateUrl
 } from './update-config.mjs'
@@ -21,6 +23,7 @@ test('development configuration needs no source and never infers a publisher', (
   assert.equal(getMacUpdatePublishConfiguration(configuration), null)
   assert.deepEqual(configuration.mac.target, ['dmg'])
   assert.equal(configuration.dmg.writeUpdateInfo, false)
+  assert.deepEqual(configuration.electronFuses, MACOS_RELEASE_ELECTRON_FUSES)
 })
 
 test('update-enabled releases require an HTTPS source with no credential-bearing URL components', () => {
@@ -73,13 +76,18 @@ test('release configuration preserves signing and frozen component contracts and
     useMultipleRangeRequest: false
   })
   assert.equal(configuration.forceCodeSigning, true)
+  assert.equal(configuration.asar, true)
+  assert.equal(configuration.disableAsarIntegrity, false)
+  assert.deepEqual(configuration.electronFuses, MACOS_RELEASE_ELECTRON_FUSES)
   assert.equal(configuration.dmg.writeUpdateInfo, true)
   assert.equal(configuration.mac.notarize, false)
   assert.equal(configuration.dmg.sign, true)
   for (const key of [
     'appId',
+    'asar',
     'afterPack',
     'afterSign',
+    'disableAsarIntegrity',
     'extraResources',
     'files',
     'win',
@@ -120,7 +128,13 @@ test('final configuration rejects alternate providers, injected credentials and 
     },
     { ...configuration, mac: { ...configuration.mac, target: ['dmg', 'zip'] } },
     { ...configuration, forceCodeSigning: false },
-    { ...configuration, dmg: { ...configuration.dmg, writeUpdateInfo: false } }
+    { ...configuration, dmg: { ...configuration.dmg, writeUpdateInfo: false } },
+    { ...configuration, asar: false },
+    { ...configuration, disableAsarIntegrity: true },
+    {
+      ...configuration,
+      electronFuses: { ...configuration.electronFuses, runAsNode: true }
+    }
   ]) {
     assert.throws(() => getMacUpdatePublishConfiguration(modified))
   }
@@ -145,6 +159,21 @@ test('final configuration rejects alternate providers, injected credentials and 
   for (const electronPlatformName of ['win32', 'linux']) {
     assert.equal(validateUpdateBuildTarget({ ...context, electronPlatformName }), null)
   }
+})
+
+test('macOS release fuse policy is exact and does not silently inherit an extra fuse', () => {
+  const configuration = createUpdateBuildConfiguration({
+    environment: { CAPTAIN_WHO_UPDATE_URL: fixtureUrl }
+  })
+  assert.deepEqual(validateMacReleaseElectronFuses(configuration), MACOS_RELEASE_ELECTRON_FUSES)
+  assert.throws(
+    () =>
+      validateMacReleaseElectronFuses({
+        ...configuration,
+        electronFuses: { ...configuration.electronFuses, enableCookieEncryption: true }
+      }),
+    /unexpected Electron fuse policy/
+  )
 })
 
 test('verification CLI fails before any packaging when release source is absent and does not echo credentials', () => {
@@ -193,11 +222,41 @@ test('installed electron-builder loads and schema-validates the dynamic configur
     await validateConfiguration(configuration, { add() {} });
     if (configuration.mac.publish.url !== process.env.CAPTAIN_WHO_UPDATE_URL) throw new Error('Update source drift');
     if (configuration.afterSign !== './scripts/verify-packaged-app.mjs') throw new Error('Signature hook drift');
+    if (configuration.electronFuses.runAsNode !== false) throw new Error('Release fuse drift');
   `
     ],
     {
       cwd: repositoryRoot,
       env: { ...process.env, CAPTAIN_WHO_UPDATE_URL: fixtureUrl, CAPTAIN_WHO_REQUIRE_UPDATES: '1' },
+      encoding: 'utf8'
+    }
+  )
+  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`)
+})
+
+test('installed electron-builder retains the macOS fuse policy without an update provider', () => {
+  const result = spawnSync(
+    process.execPath,
+    [
+      '--input-type=module',
+      '-e',
+      `
+    import { createRequire } from 'node:module';
+    const require = createRequire(import.meta.resolve('electron-builder/package.json'));
+    const { getConfig, validateConfiguration } = require('app-builder-lib/out/util/config/config');
+    const configuration = await getConfig(process.cwd(), 'scripts/update-config.mjs', {});
+    await validateConfiguration(configuration, { add() {} });
+    if (configuration.mac.publish !== undefined) throw new Error('Unexpected update source');
+    if (configuration.electronFuses.onlyLoadAppFromAsar !== true) throw new Error('Mac fuse drift');
+  `
+    ],
+    {
+      cwd: repositoryRoot,
+      env: {
+        ...process.env,
+        CAPTAIN_WHO_UPDATE_URL: '',
+        CAPTAIN_WHO_REQUIRE_UPDATES: ''
+      },
       encoding: 'utf8'
     }
   )

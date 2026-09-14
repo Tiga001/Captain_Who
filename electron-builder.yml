@@ -8,6 +8,11 @@ afterPack: ./scripts/verify-packaged-app.mjs
 afterSign: ./scripts/verify-packaged-app.mjs
 directories:
   buildResources: build
+# Keep the archive boundary explicit for every package. The macOS build configuration adds the
+# matching Electron fuses in scripts/update-config.mjs; it deliberately does not add
+# RunAsNode=false to future Windows packages because node-pty's Windows backend uses fork().
+asar: true
+disableAsarIntegrity: false
 files:
   - out/**/*
   - resources/**/*

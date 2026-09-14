@@ -15,8 +15,10 @@ import {
   packagedApplicationAsarPath,
   packagedMacIconPath,
   verifyPackagedAutoUpdateMetadata,
+  verifyPackagedMacReleaseElectronFuses,
   verifyPackagedMacIcon,
-  verifyPackagedManagedPlaywrightMcp
+  verifyPackagedManagedPlaywrightMcp,
+  verifyMacReleaseElectronFuseBuildConfiguration
 } from './verify-packaged-app.mjs'
 
 const requireFromBuilder = createRequire(import.meta.resolve('electron-builder/package.json'))
@@ -51,6 +53,9 @@ test('electron-builder freezes the Captain Who release identity and disables upd
   assert.equal(configuration.productName, 'Captain Who')
   assert.equal(configuration.copyright, 'Copyright © 2026 ShenhuaJiao')
   assert.equal(configuration.publish, null)
+  assert.equal(configuration.asar, true)
+  assert.equal(configuration.disableAsarIntegrity, false)
+  assert.equal(configuration.electronFuses, undefined)
   assert.equal(configuration.win.executableName, 'CaptainWho')
   assert.equal(configuration.win.artifactName, 'Captain-Who-${version}-${arch}.${ext}')
   assert.equal(configuration.nsis.artifactName, 'Captain-Who-${version}-${arch}-Setup.${ext}')
@@ -209,6 +214,95 @@ test('packaged arm64 release requires exactly the generated credential-free upda
   } finally {
     await rm(directory, { recursive: true, force: true })
   }
+})
+
+test('signed macOS release verifies the hardened Electron fuse wire after signing', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'captain-who-packaged-release-fuses-'))
+  const context = createPackContext(directory)
+  context.targets = [{ name: 'dmg' }, { name: 'zip' }]
+  context.packager.config = createUpdateBuildConfiguration({
+    environment: { CAPTAIN_WHO_UPDATE_URL: 'https://updates.example.test/releases/macos/arm64/' }
+  })
+  const optionNames = [
+    'RunAsNode',
+    'EnableNodeOptionsEnvironmentVariable',
+    'EnableNodeCliInspectArguments',
+    'EnableEmbeddedAsarIntegrityValidation',
+    'OnlyLoadAppFromAsar'
+  ]
+  const FuseV1Options = Object.fromEntries(optionNames.map((name, index) => [name, index]))
+  const expectedWire = {
+    version: '1',
+    [FuseV1Options.RunAsNode]: '0'.charCodeAt(0),
+    [FuseV1Options.EnableNodeOptionsEnvironmentVariable]: '0'.charCodeAt(0),
+    [FuseV1Options.EnableNodeCliInspectArguments]: '0'.charCodeAt(0),
+    [FuseV1Options.EnableEmbeddedAsarIntegrityValidation]: '1'.charCodeAt(0),
+    [FuseV1Options.OnlyLoadAppFromAsar]: '1'.charCodeAt(0)
+  }
+  const calls = []
+  const fusesApi = {
+    FuseV1Options,
+    getCurrentFuseWire: async (path) => {
+      calls.push(path)
+      return expectedWire
+    }
+  }
+  try {
+    await verifyPackagedMacReleaseElectronFuses(context, fusesApi)
+    assert.deepEqual(calls, [join(directory, 'Captain Who.app')])
+
+    await assert.rejects(
+      () =>
+        verifyPackagedMacReleaseElectronFuses(context, {
+          ...fusesApi,
+          getCurrentFuseWire: async () => ({
+            ...expectedWire,
+            [FuseV1Options.RunAsNode]: '1'.charCodeAt(0)
+          })
+        }),
+      /runAsNode must be disabled/
+    )
+    await assert.rejects(
+      () =>
+        verifyPackagedMacReleaseElectronFuses(context, {
+          ...fusesApi,
+          getCurrentFuseWire: async () => ({ ...expectedWire, version: '2' })
+        }),
+      /fuse wire must be V1/
+    )
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
+})
+
+test('formal macOS packages require the fuse policy before signing while unsigned diagnostics do not', () => {
+  const context = createPackContext('/tmp/captain-who-fuse-configuration')
+  assert.throws(() => verifyMacReleaseElectronFuseBuildConfiguration(context), /require asar=true/)
+  context.packager.config = { ...context.packager.config, asar: true, disableAsarIntegrity: false }
+  assert.throws(
+    () => verifyMacReleaseElectronFuseBuildConfiguration(context),
+    /require the hardened Electron fuse policy/
+  )
+
+  context.packager.config = createUpdateBuildConfiguration({ environment: {} })
+  assert.doesNotThrow(() => verifyMacReleaseElectronFuseBuildConfiguration(context))
+  assert.doesNotThrow(() =>
+    verifyMacReleaseElectronFuseBuildConfiguration({
+      ...context,
+      packager: {
+        ...context.packager,
+        platformSpecificBuildOptions: { identity: null },
+        config: { publish: null }
+      }
+    })
+  )
+  assert.doesNotThrow(() =>
+    verifyMacReleaseElectronFuseBuildConfiguration({
+      ...context,
+      electronPlatformName: 'win32',
+      packager: { config: { publish: null } }
+    })
+  )
 })
 
 test('Windows and Linux packages cannot inherit macOS update metadata', async () => {

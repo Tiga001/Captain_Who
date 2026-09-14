@@ -2,7 +2,7 @@
 status: current
 audience: developers/maintainers
 owner: engineering
-last_verified: 2026-09-13
+last_verified: 2026-09-14
 ---
 
 # 构建与发布
@@ -60,6 +60,7 @@ YAML 的 `build:unpack` 不需要该环境变量，更新保持禁用。更新�
   → verify native binary magic/executable bit
   → electron-builder files + extraResources
   → afterPack 内容检查
+  → Electron fuse 翻转（紧邻 macOS 签名）
   → 平台签名（macOS 有强制策略）
   → afterSign 内容/签名检查
   → installer/image 产物
@@ -87,6 +88,8 @@ Electron Builder 将 `out/**`、`resources/**` 和所需 Node modules 放入应�
 | third-party/Electron notices       | `Resources/` 相应 notices/licenses       |
 
 `resources/**` 被 `asarUnpack`；Managed Playwright 的 Node packages 则由 `app.asar` 内容校验确认版本与入口存在。
+基础配置显式固定 `asar: true` 与 `disableAsarIntegrity: false`。这不会把 `extraResources` 塞进 archive；它们仍由
+receipt、签名和 package gate 约束。
 
 平台产物：
 
@@ -113,6 +116,9 @@ Electron Builder 将 `out/**`、`resources/**` 和所需 Node modules 放入应�
 - macOS `icon.icns` 与源文件字节一致。
 - macOS app 全树 privacy gate：拒绝敏感状态文件、绝对 symlink、当前 builder 的私有路径/用户名、高置信 secret 与未精确 allowlist 的 credentialed URL；`app.asar` 会逐 entry 检查 URL fixture。
 - 按最终 builder 配置验证更新源：无源/不支持平台不得包含 `app-update.yml`；有源 macOS arm64 必须包含与 generic HTTPS 配置一致且没有附加凭据字段的唯一 `app-update.yml`。
+- 所有正式 macOS build 必须使用精确的 Electron fuse 配置、`asar: true` 和 ASAR integrity metadata；该配置由
+  `scripts/update-config.mjs` 生成，而非基础 YAML 直接施加到其他平台。即使某次正式 macOS build 不启用更新源，
+  签名前 gate 也会拒绝缺少该策略的包。
 
 ### afterSign 当前验证
 
@@ -120,6 +126,7 @@ Electron Builder 将 `out/**`、`resources/**` 和所需 Node modules 放入应�
 - 非 macOS，以及正式签名 macOS，再验证 Word/PDF renderer；macOS `identity=null` 路径不重复该项；
 - 正式 macOS 对 app、Core Server、Office renderer、OfficeCLI 和 Artifact Runtime 的精确 native target 执行 strict codesign 与 metadata/entitlement 验证。
 - 重新验证上述更新源、架构、DMG+ZIP 和强制签名配置边界。
+- 正式 macOS arm64 release 直接读取已签名应用的 Electron fuse wire，要求关闭 `RunAsNode`、`NODE_OPTIONS`/`NODE_EXTRA_CA_CERTS` 和 Node inspector 参数，并启用 embedded ASAR integrity validation 与 only-load-app-from-ASAR。
 
 Core Server 在打包前经过 native magic/execute 校验，正式 macOS afterSign 还会单独 strict verify 该 sidecar；当前 hook 仍没有对非 macOS packaged Core Server 做内容 digest/receipt 绑定。privacy gate 当前也只在 macOS afterPack 执行，Windows/Linux 不能继承该证据。
 
@@ -137,8 +144,15 @@ Core Server 在打包前经过 native magic/execute 校验，正式 macOS afterS
 - Core Server 使用空 entitlements；应用/继承进程使用 `build/entitlements.mac.plist`
 - Office renderer、OfficeCLI 与 Artifact Runtime 只签冻结 receipt 枚举出的完整 Mach-O 集；需要 JIT 的 Chromium、OfficeCLI 和 managed Node 只取得 `build/entitlements.jit-runtime.mac.plist` 中的 `allow-jit`，其他该类目标不带额外 entitlement
 - `codesign --verify --deep --strict` 对 app 通过，Core Server sidecar 单独 strict verify 通过
+- 对正式 macOS build，`electron-builder` 26.15.3 在签名前紧邻步骤翻转 Electron fuse：关闭
+  `ELECTRON_RUN_AS_NODE`、`NODE_OPTIONS`/`NODE_EXTRA_CA_CERTS` 和 Node inspector 参数；开启 embedded
+  ASAR integrity validation 与 only-load-app-from-ASAR。afterSign 会读取最终 wire 作为独立证据。
 
 Artifact Runtime、OfficeCLI、Office renderer 和 Word/PDF renderer 目录都被排除出 osx-sign 的第二次递归 pass。自定义 signer 先验证原 receipt，只修改精确 Mach-O allowlist，刷新且只刷新这些 hash，再由顶层 app 签名封装 Resources；LibreOffice 保留其有效上游 Developer ID 签名。任何额外 Mach-O、缺失目标、架构不一致、receipt 外文件变化或 signer identity 分裂都会 fail closed。Windows 同样避免对冻结的 `chrome-headless-shell.exe` 做第二次 Authenticode mutation。
+
+当前 macOS 终端采用 Electron `utilityProcess.fork()`，Core Server/MCP/Artifact Runtime 都不会把 Electron 当作 Node
+子进程，因此可以关闭 `RunAsNode`。这项 fuse **只**由 macOS build 动态配置启用：Windows 的 `node-pty`
+backend 目前仍使用 Node `child_process.fork()`，在迁移或完成专项回归前不得把 `RunAsNode=false` 扩展到 Windows。
 
 `electron-builder.yml` 还设置 `dmg.sign: true`，因此正式 `build:mac` 会请求 Electron Builder 在生成 block map 前签名 DMG 容器。仓库当前没有独立脚本重新验 DMG 签名；发布证据必须对最终 `.dmg` 另行执行系统级验签，不能只引用 app 的 afterSign 日志。
 
@@ -173,7 +187,7 @@ NSIS differential package 保持关闭。应用侧 `electron-updater` 集成不�
    - `pnpm verify:playwright-round3-release`
    - MCP stdio stress/其他明确发布测试
 5. 在目标 OS/arch 执行 `pnpm build:<platform>`；不得跨 OS 伪装 native package。
-6. 检查 afterPack/afterSign 完整成功；macOS 保存 signer/Team ID 验证记录。
+6. 检查 afterPack/afterSign 完整成功；macOS 保存 signer/Team ID 验证记录和最终 Electron fuse wire 验证记录。
 7. macOS 对最终 app 与 DMG 分别验签；公开更新发布前另行完成并记录公证/stapling。当前自动构建仍为 `notarize: false`，不能仅凭构建成功进入公开更新发布。
 8. 对实际产物计算并记录 cryptographic hash、大小、平台、架构和版本。
 9. 在隔离临时 appData 做启动 smoke；若声明内置浏览器，明确 packaged Agent E2E 仍 pending。

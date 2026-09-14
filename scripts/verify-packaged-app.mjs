@@ -15,10 +15,13 @@ import {
   verifyPackagedFrozenComponentsAfterSign
 } from './verify-packaged-frozen-components.mjs'
 import { verifyPackagedWordPdfRenderer } from './verify-packaged-word-pdf-renderer.mjs'
-import { verifyPackagedMacSignatures } from './verify-packaged-macos-signatures.mjs'
+import {
+  packagedMacApplicationPaths,
+  verifyPackagedMacSignatures
+} from './verify-packaged-macos-signatures.mjs'
 import { sanitizePackagedMacNativeCode } from './sanitize-packaged-mac-native-code.mjs'
 import { verifyPackagedPrivacy } from './verify-packaged-privacy.mjs'
-import { validateUpdateBuildTarget } from './update-config.mjs'
+import { validateMacReleaseElectronFuses, validateUpdateBuildTarget } from './update-config.mjs'
 
 const repositoryRoot = resolve(fileURLToPath(new URL('..', import.meta.url)))
 const requireFromBuilder = createRequire(import.meta.resolve('electron-builder/package.json'))
@@ -28,6 +31,13 @@ const packagedRuntimeRequirements = new Map([
   ['node_modules/playwright/package.json', ['playwright', '1.63.0-alpha-2026-08-05']],
   ['node_modules/playwright-core/package.json', ['playwright-core', '1.63.0-alpha-2026-08-05']]
 ])
+const releaseElectronFuseRequirements = [
+  ['runAsNode', 'RunAsNode', false],
+  ['enableNodeOptionsEnvironmentVariable', 'EnableNodeOptionsEnvironmentVariable', false],
+  ['enableNodeCliInspectArguments', 'EnableNodeCliInspectArguments', false],
+  ['enableEmbeddedAsarIntegrityValidation', 'EnableEmbeddedAsarIntegrityValidation', true],
+  ['onlyLoadAppFromAsar', 'OnlyLoadAppFromAsar', true]
+]
 
 function packagedResourcesDirectory(context) {
   if (!context || typeof context !== 'object') {
@@ -100,6 +110,58 @@ function loadAsarApi() {
   // electron-builder owns this exact packaging dependency. Resolve from its dependency graph so
   // the application does not acquire a second ASAR implementation merely for an afterPack check.
   return requireFromBuilder('@electron/asar')
+}
+
+function loadElectronFusesApi() {
+  // electron-builder owns the pinned @electron/fuses version that flips the wire. Resolve from
+  // its graph so verification cannot drift by adding a separate application dependency.
+  return requireFromBuilder('@electron/fuses')
+}
+
+export function verifyMacReleaseElectronFuseBuildConfiguration(context) {
+  // Unpacked diagnostics explicitly disable signing. Every formal darwin package must have the
+  // policy before electron-builder reaches its built-in pre-sign fuse flip.
+  if (context?.electronPlatformName !== 'darwin' || isMacCodeSigningExplicitlyDisabled(context)) {
+    return
+  }
+  validateMacReleaseElectronFuses(context.packager?.config)
+}
+
+export async function verifyPackagedMacReleaseElectronFuses(
+  context,
+  fusesApi = loadElectronFusesApi()
+) {
+  // This is read-only post-sign proof. The matching configuration gate runs in afterPack before
+  // electron-builder flips the fuses and invokes the macOS signer.
+  if (context?.electronPlatformName !== 'darwin' || isMacCodeSigningExplicitlyDisabled(context)) {
+    return
+  }
+  verifyMacReleaseElectronFuseBuildConfiguration(context)
+
+  if (typeof fusesApi?.getCurrentFuseWire !== 'function' || !fusesApi.FuseV1Options) {
+    throw new Error('electron-builder pinned @electron/fuses API is unavailable for verification')
+  }
+  const fuseWire = await fusesApi.getCurrentFuseWire(packagedMacApplicationPaths(context).app)
+  if (fuseWire?.version !== '1') {
+    throw new Error(
+      `Packaged Electron fuse wire must be V1, got ${String(fuseWire?.version ?? 'missing')}`
+    )
+  }
+
+  for (const [configurationName, optionName, expectedEnabled] of releaseElectronFuseRequirements) {
+    const option = fusesApi.FuseV1Options[optionName]
+    if (!Number.isInteger(option)) {
+      throw new Error(`Pinned @electron/fuses is missing ${optionName}`)
+    }
+    const expectedState = expectedEnabled ? '1'.charCodeAt(0) : '0'.charCodeAt(0)
+    if (fuseWire[option] !== expectedState) {
+      throw new Error(
+        `Packaged Electron fuse ${configurationName} must be ${
+          expectedEnabled ? 'enabled' : 'disabled'
+        }`
+      )
+    }
+  }
 }
 
 export async function verifyPackagedManagedPlaywrightMcp(context, asarApi = loadAsarApi()) {
@@ -185,6 +247,7 @@ export function isMacCodeSigningExplicitlyDisabled(context) {
 export async function afterPack(context) {
   await verifyPackagedAutoUpdateMetadata(context)
   if (context.electronPlatformName === 'darwin') {
+    verifyMacReleaseElectronFuseBuildConfiguration(context)
     await sanitizePackagedMacNativeCode(context)
     await verifyPackagedPrivacy(context)
   }
@@ -202,6 +265,7 @@ export async function afterSign(context) {
   const frozenComponents = await verifyPackagedFrozenComponentsAfterSign(context)
   const officeRenderer = await verifyOfficeRendererAfterSign(context)
   if (context.electronPlatformName === 'darwin' && !isMacCodeSigningExplicitlyDisabled(context)) {
+    await verifyPackagedMacReleaseElectronFuses(context)
     await verifyPackagedWordPdfRenderer(context)
     await verifyPackagedMacSignatures(context, undefined, {
       officeRendererReceipt: officeRenderer.receipt,
