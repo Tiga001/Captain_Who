@@ -67,7 +67,7 @@ async fn compaction_host_prepares_generates_commits_and_rebuilds_running_state()
     // Construct the service before publishing the current run's trace. Any in-progress trace
     // already present when AgentService starts is, by definition, owned by the previous process
     // and is retired by startup reconciliation.
-    let service = AgentService::new(storage.clone())
+    let service = AgentService::new_authorized_for_test(storage.clone())
         .with_context_compaction_summary_generator(test_context_compaction_generator());
     storage
         .append_in_progress_conversation_turn_trace(
@@ -366,7 +366,7 @@ fn running_trace_commits_drive_monotonic_context_window_events() {
             unread_at: None,
         })
         .unwrap();
-    let service = AgentService::new(storage.clone());
+    let service = AgentService::new_authorized_for_test(storage.clone());
     let mut agent_input = serde_json::from_value::<AgentChatInput>(json!({
         "apiUrl": "https://example.test/v1/chat/completions",
         "apiToken": "secret",
@@ -650,7 +650,7 @@ fn durable_trace_append_is_distinguished_from_a_failed_derived_context_refresh()
             unread_at: None,
         })
         .unwrap();
-    let service = AgentService::new(storage.clone());
+    let service = AgentService::new_authorized_for_test(storage.clone());
     let mut agent_input = serde_json::from_value::<AgentChatInput>(json!({
         "apiUrl": "https://example.test/v1/chat/completions",
         "apiToken": "secret",
@@ -839,7 +839,7 @@ fn trace_observer_still_fails_closed_when_the_authoritative_append_does_not_comm
             unread_at: None,
         })
         .unwrap();
-    let service = AgentService::new(storage.clone());
+    let service = AgentService::new_authorized_for_test(storage.clone());
     let mut agent_input = serde_json::from_value::<AgentChatInput>(json!({
         "apiUrl": "https://example.test/v1/chat/completions",
         "apiToken": "secret",
@@ -968,7 +968,7 @@ fn terminal_cache_rebuild_drops_the_completed_run_skill_overlay() {
         )
         .unwrap();
 
-    let service = AgentService::new(storage.clone());
+    let service = AgentService::new_authorized_for_test(storage.clone());
     let mut agent_input = serde_json::from_value::<AgentChatInput>(json!({
         "apiUrl": "https://example.test/v1/chat/completions",
         "apiToken": "secret",
@@ -1062,7 +1062,7 @@ fn disabled_indicator_still_builds_runtime_context_baseline() {
             unread_at: None,
         })
         .unwrap();
-    let service = AgentService::new(storage.clone());
+    let service = AgentService::new_authorized_for_test(storage.clone());
     let mut agent_input = serde_json::from_value::<AgentChatInput>(json!({
         "apiUrl": "https://example.test/v1/chat/completions",
         "apiToken": "secret",
@@ -1166,7 +1166,7 @@ fn deleting_messages_invalidates_the_conversation_context_state() {
             unread_at: None,
         })
         .unwrap();
-    let service = AgentService::new(storage.clone());
+    let service = AgentService::new_authorized_for_test(storage.clone());
     let mut input = serde_json::from_value::<AgentChatInput>(json!({
         "apiUrl": "https://example.test/v1/chat/completions",
         "apiToken": "secret",

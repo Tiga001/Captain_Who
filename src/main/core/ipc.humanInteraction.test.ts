@@ -37,6 +37,32 @@ beforeEach(() => {
 })
 
 describe('Trusted human interaction IPC', () => {
+  it('awaits the current Core lease before submitting and preserves a structured access denial', async () => {
+    const server = core()
+    let synchronized = false
+    const sync = vi.fn(async () => {
+      synchronized = true
+    })
+    server.submitHumanInteractionRequest.mockImplementation(async () => {
+      expect(synchronized).toBe(true)
+      throw Object.assign(new Error('Sign in to start a new turn'), {
+        code: -32047,
+        data: { type: 'human_interaction_error', code: 'ACCOUNT_LOGIN_REQUIRED' }
+      })
+    })
+    registerHumanInteractionIpc(
+      createTrustedIpcMain(() => true),
+      server as never,
+      sync
+    )
+    await expect(
+      handler(HOST_CHANNELS.humanInteraction.submit)({} as never, fixture.submit)
+    ).resolves.toMatchObject({
+      ok: false,
+      error: { data: { type: 'human_interaction_error', code: 'ACCOUNT_LOGIN_REQUIRED' } }
+    })
+    expect(sync).toHaveBeenCalledOnce()
+  })
   it('registers five authenticated calls and wraps real Core results and errors', async () => {
     const server = core()
     registerHumanInteractionIpc(

@@ -87,7 +87,7 @@ fn commit_prepared_world_state(
 fn conversation_world_state_persists_exact_full_and_anchored_diff_across_turns() {
     let fixture = tempdir().unwrap();
     let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
-    let service = AgentService::new(storage.clone());
+    let service = AgentService::new_authorized_for_test(storage.clone());
     let mut settings = test_model_settings();
     settings.models[0].provider_model_id = "provider-model-1".to_string();
     storage.save_model_settings(settings).unwrap();
@@ -218,7 +218,7 @@ fn conversation_world_state_persists_exact_full_and_anchored_diff_across_turns()
 fn model_switch_appends_visible_selection_diffs_even_when_modalities_match() {
     let fixture = tempdir().unwrap();
     let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
-    let service = AgentService::new(storage.clone());
+    let service = AgentService::new_authorized_for_test(storage.clone());
     let mut settings = test_model_settings();
     settings.models[0].provider_model_id = "provider-model-1".to_string();
     let mut alternate = settings.models[0].clone();
@@ -416,7 +416,7 @@ fn compaction_accepts_newly_closed_exchange_but_rejects_unsafe_trace_boundaries(
 fn production_compaction_services_install_the_current_model_generator() {
     let fixture = tempdir().unwrap();
     let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
-    let service = AgentService::new(storage);
+    let service = AgentService::new_authorized_for_test(storage);
     let agent_input = serde_json::from_value::<AgentChatInput>(json!({
         "apiUrl": "https://example.test/v1/chat/completions",
         "apiToken": "secret",
@@ -1349,7 +1349,7 @@ fn context_window_snapshot_is_zero_until_first_user_message_then_counts_complete
             }],
         })
         .unwrap();
-    let service = AgentService::new(storage.clone());
+    let service = AgentService::new_authorized_for_test(storage.clone());
     let enabled = service
         .get_context_window_snapshot(AgentContextWindowSnapshotInput {
             conversation_id: None,
@@ -1470,7 +1470,8 @@ fn cached_context_preview_measures_skill_without_polluting_durable_revision() {
         .list_workspace("project-preview-skill", &workspace)
         .unwrap();
     let descriptor = catalog.skills().first().unwrap();
-    let service = AgentService::new(Arc::clone(&storage)).with_skills_service(Arc::clone(&skills));
+    let service = AgentService::new_authorized_for_test(Arc::clone(&storage))
+        .with_skills_service(Arc::clone(&skills));
     let base_input = AgentContextWindowSnapshotInput {
         conversation_id: Some("conversation-preview-skill".to_string()),
         project_id: Some("project-preview-skill".to_string()),
@@ -1553,7 +1554,7 @@ fn committed_test_summary_rebuilds_the_shared_durable_snapshot() {
             2,
         )
         .unwrap();
-    let service = AgentService::new(storage.clone());
+    let service = AgentService::new_authorized_for_test(storage.clone());
     let snapshot_input = AgentContextWindowSnapshotInput {
         conversation_id: Some("conversation-capacity-summary".to_string()),
         project_id: None,
@@ -1678,7 +1679,7 @@ fn five_hundred_turn_context_compaction_release_profile() {
     }
     let seed_elapsed = seed_started.elapsed();
 
-    let service = AgentService::new(storage.clone());
+    let service = AgentService::new_authorized_for_test(storage.clone());
     let snapshot_input = AgentContextWindowSnapshotInput {
         conversation_id: Some("conversation-500-profile".to_string()),
         project_id: None,

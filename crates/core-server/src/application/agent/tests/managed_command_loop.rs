@@ -218,7 +218,7 @@ async fn assert_approved_running_command_handoff(case: ApprovedRunningHandoffCas
     settings.api_url = format!("http://{address}/v1/chat/completions");
     storage.save_model_settings(settings).unwrap();
 
-    let mut service = AgentService::new(Arc::clone(&storage));
+    let mut service = AgentService::new_authorized_for_test(Arc::clone(&storage));
     service.command_sessions = AgentCommandSessionRegistry::with_manager(
         Arc::clone(&storage),
         CommandSessionManager::default(),
@@ -441,7 +441,7 @@ async fn guidance_releases_a_running_command_wait_and_background_exit_never_wake
     settings.api_url = format!("http://{address}/v1/chat/completions");
     storage.save_model_settings(settings).unwrap();
 
-    let mut service = AgentService::new(Arc::clone(&storage));
+    let mut service = AgentService::new_authorized_for_test(Arc::clone(&storage));
     service.command_sessions = AgentCommandSessionRegistry::with_manager(
         Arc::clone(&storage),
         CommandSessionManager::default(),
@@ -662,7 +662,7 @@ async fn model_poll_observes_nonzero_terminal_result_without_background_continua
     settings.api_url = format!("http://{address}/v1/chat/completions");
     storage.save_model_settings(settings).unwrap();
 
-    let mut service = AgentService::new(Arc::clone(&storage));
+    let mut service = AgentService::new_authorized_for_test(Arc::clone(&storage));
     service.command_sessions = AgentCommandSessionRegistry::with_manager(
         Arc::clone(&storage),
         CommandSessionManager::default(),
@@ -854,7 +854,7 @@ async fn approved_command_reuses_one_session_archive_across_restart_and_runtime_
     settings.api_url = format!("http://{address}/v1/chat/completions");
     storage.save_model_settings(settings).unwrap();
 
-    let service = AgentService::new(Arc::clone(&storage));
+    let service = AgentService::new_authorized_for_test(Arc::clone(&storage));
     let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
     let turn = service
         .start_conversation_turn(
@@ -1287,7 +1287,7 @@ async fn assert_rejected_command_after_restart(
     settings.api_url = format!("http://{address}/v1/chat/completions");
     storage.save_model_settings(settings).unwrap();
 
-    let service = AgentService::new(Arc::clone(&storage));
+    let service = AgentService::new_authorized_for_test(Arc::clone(&storage));
     let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
     let turn = service
         .start_conversation_turn(

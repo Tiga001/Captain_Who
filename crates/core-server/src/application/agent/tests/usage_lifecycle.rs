@@ -59,7 +59,7 @@ fn persists_usage_for_failed_runs() {
             unread_at: None,
         })
         .unwrap();
-    let service = AgentService::new(storage);
+    let service = AgentService::new_authorized_for_test(storage);
     service.register_usage_context(
         "run-1",
         AgentRunUsageContext {
@@ -111,7 +111,7 @@ fn persists_usage_for_failed_runs() {
 fn non_error_usage_transition_clears_a_stale_error() {
     let fixture = tempdir().unwrap();
     let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
-    let service = AgentService::new(storage);
+    let service = AgentService::new_authorized_for_test(storage);
     service.register_usage_context(
         "run-clear-stale-error",
         AgentRunUsageContext {
@@ -196,7 +196,7 @@ fn moonshot_completion_usage_is_priced_persisted_and_summarized_as_output() {
         ProviderUsageSemantics::StandardAdditive
     );
 
-    let service = AgentService::new(Arc::clone(&storage));
+    let service = AgentService::new_authorized_for_test(Arc::clone(&storage));
     service.register_usage_context(
         RUN_ID,
         AgentRunUsageContext {
@@ -306,7 +306,7 @@ fn model_request_interruption_settles_visible_message_without_losing_failed_audi
         )
         .unwrap();
 
-    let service = AgentService::new(Arc::clone(&storage));
+    let service = AgentService::new_authorized_for_test(Arc::clone(&storage));
     service.register_usage_context(
         RUN_ID,
         AgentRunUsageContext {
@@ -447,7 +447,7 @@ fn failed_terminal_settlement_closes_a_durable_open_tool_call_with_paired_contex
         next_sequence: 1,
         truncated: false,
     };
-    let service = AgentService::new(Arc::clone(&storage));
+    let service = AgentService::new_authorized_for_test(Arc::clone(&storage));
     storage
         .append_in_progress_conversation_turn_trace_and_apply_guidances(
             &snapshot.in_progress_audit_trace(RUN_ID, CONVERSATION_ID, ASSISTANT_MESSAGE_ID),
@@ -561,7 +561,7 @@ async fn terminal_transaction_retry_reloads_sqlite_and_counts_usage_once() {
             unread_at: None,
         })
         .unwrap();
-    let service = AgentService::new(Arc::clone(&storage));
+    let service = AgentService::new_authorized_for_test(Arc::clone(&storage));
     let pending_action_id = seed_terminal_retry_pending_action(
         &storage,
         RUN_ID,
@@ -799,7 +799,7 @@ async fn terminal_error_transaction_retry_reloads_sqlite_and_counts_usage_once()
             unread_at: None,
         })
         .unwrap();
-    let service = AgentService::new(Arc::clone(&storage));
+    let service = AgentService::new_authorized_for_test(Arc::clone(&storage));
     let pending_action_id = seed_terminal_retry_pending_action(
         &storage,
         RUN_ID,
@@ -1030,7 +1030,7 @@ fn sibling_conversation_usage_owners_remain_independent() {
             })
             .unwrap();
     }
-    let service = AgentService::new(Arc::clone(&storage));
+    let service = AgentService::new_authorized_for_test(Arc::clone(&storage));
     for (run_id, conversation_id, assistant_message_id, model_id, model_name, total_tokens) in [
         (
             "run-child-a",
@@ -1167,7 +1167,7 @@ fn approval_segments_project_one_cumulative_usage_snapshot_to_chat_history() {
             unread_at: None,
         })
         .unwrap();
-    let service = AgentService::new(storage.clone());
+    let service = AgentService::new_authorized_for_test(storage.clone());
     let in_progress_trace = ConversationTraceSnapshot::default().in_progress_trace(
         "run-cumulative",
         "conversation-cumulative",
@@ -1363,7 +1363,7 @@ fn usage_output(status: AgentRunStatus, usage: AgentUsage) -> AgentChatOutput {
 fn deleting_project_cancels_runs_and_discards_usage_contexts() {
     let fixture = tempdir().unwrap();
     let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
-    let service = AgentService::new(storage);
+    let service = AgentService::new_authorized_for_test(storage);
     let cancellation = AgentCancellationToken::new();
     service.register_cancellation("run-1", cancellation.clone());
     service.register_usage_context(
@@ -1398,7 +1398,7 @@ fn deleting_project_cancels_runs_and_discards_usage_contexts() {
 fn failed_project_deletion_releases_the_command_finalization_barrier() {
     let fixture = tempdir().unwrap();
     let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
-    let service = AgentService::new(storage);
+    let service = AgentService::new_authorized_for_test(storage);
     inject_project_deletion_failure("project-delete-failure");
 
     let error = service
@@ -1421,7 +1421,7 @@ fn pending_approval_persists_full_run_checkpoint() {
         "disabled",
         "",
     );
-    let service = AgentService::new(storage.clone());
+    let service = AgentService::new_authorized_for_test(storage.clone());
     let mut base_input = serde_json::from_value::<AgentChatInput>(json!({
         "apiUrl": "https://example.test/v1/chat/completions",
         "apiToken": "secret",
@@ -1552,7 +1552,7 @@ fn pending_approval_persists_full_run_checkpoint() {
         .unwrap();
     assert!(base_input.resume_checkpoint.is_none());
 
-    let reloaded = AgentService::new(storage);
+    let reloaded = AgentService::new_authorized_for_test(storage);
     {
         let usage_contexts = reloaded
             .usage_contexts

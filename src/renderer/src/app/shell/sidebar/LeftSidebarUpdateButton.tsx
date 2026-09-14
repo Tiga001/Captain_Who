@@ -66,19 +66,21 @@ export function LeftSidebarUpdateButton({ t }: LeftSidebarUpdateButtonProps) {
 
   if (
     !state?.version ||
-    !['available', 'downloading', 'installing', 'error'].includes(state.status)
+    !['available', 'downloading', 'preparing', 'installing', 'error'].includes(state.status)
   )
     return null
 
-  const busy = state.status === 'downloading' || state.status === 'installing'
+  const busy = ['downloading', 'preparing', 'installing'].includes(state.status)
   // Display only host-reported progress; never advance it with a renderer timer.
   const percent = Math.floor(Math.min(100, Math.max(0, state.percent)))
   const label =
     state.status === 'installing'
       ? t('update.installing')
-      : state.status === 'downloading'
-        ? t('update.downloading').replace('{percent}', String(percent))
-        : t('update.download')
+      : state.status === 'preparing'
+        ? t('update.preparing')
+        : state.status === 'downloading'
+          ? t('update.downloading').replace('{percent}', String(percent))
+          : t('update.download')
   const error =
     state.status === 'error'
       ? (state.error ?? 'downloadFailed')

@@ -250,10 +250,51 @@ impl AgentService {
         HumanInteractionRequestSnapshot,
         mycopilot_core::human_interaction::HumanInteractionError,
     > {
+        // A new answer to an idle asynchronous question can create a new root Turn. Refuse it
+        // before saving the immutable response so the user can retry after restoring access.
+        // Existing response replays, synchronous recovery and answers to an occupied Turn remain
+        // available. The central root admission checks again if that Turn ends before dispatch.
+        let _admission = self
+            .conversation_admission
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let request = self
+            .storage
+            .get_human_interaction_request(&input.conversation_id, &input.request_id)?;
+        let access = if request.mode
+            == mycopilot_core::human_interaction::HumanInteractionMode::Async
+            && request.status
+                == mycopilot_core::human_interaction::HumanInteractionRequestStatus::Open
+            && !self
+                .has_conversation_turn_occupancy(&input.conversation_id)
+                .map_err(|_| {
+                    mycopilot_core::human_interaction::HumanInteractionError::new(
+                        "unavailable",
+                        "Unable to check the current conversation Turn.",
+                    )
+                })? {
+            let guard = self.execution_access.lock().map_err(|_| {
+                let denial = ExecutionAccessDenied::unavailable();
+                mycopilot_core::human_interaction::HumanInteractionError::new(
+                    denial.code,
+                    denial.message,
+                )
+            })?;
+            guard.check().map_err(|denial| {
+                mycopilot_core::human_interaction::HumanInteractionError::new(
+                    denial.code,
+                    denial.message,
+                )
+            })?;
+            Some(guard)
+        } else {
+            None
+        };
         // Shared with native admission and waiting-state publication: a fast submission cannot
         // publish revision N+1 and then receive the retiring segment's revision N notification.
         let _publication = self.cancellations.lock().unwrap_or_else(|e| e.into_inner());
         let snapshot = self.storage.submit_human_interaction(input)?;
+        drop(access);
         let _ = notifications.send(serde_json::json!({"jsonrpc":"2.0",
             "method":mycopilot_protocol_rs::HUMAN_INTERACTION_REQUEST_CHANGED_METHOD,"params":snapshot}));
         Ok(snapshot)

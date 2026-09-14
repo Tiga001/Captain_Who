@@ -603,6 +603,7 @@ async fn ordinary_root_turn_is_durable_before_its_terminal_event() {
     let service =
         AgentService::try_new_with_startup_reconciliation(Arc::clone(&storage), false, None)
             .unwrap();
+    service.grant_execution_access_for_test();
     let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
     let mut input = turn_input("model-1");
     input.conversation_id = Some("conversation-root-characterization".to_string());
@@ -703,6 +704,7 @@ async fn rewrite_turn_is_atomic_replayable_and_runs_with_only_the_active_context
     let service =
         AgentService::try_new_with_startup_reconciliation(Arc::clone(&storage), false, None)
             .unwrap();
+    service.grant_execution_access_for_test();
     let source_attachment = mycopilot_core::AgentInputAttachment {
         id: "rewrite-source-attachment".to_string(),
         kind: mycopilot_core::AgentInputAttachmentKind::File,
@@ -1331,7 +1333,7 @@ async fn reopened_assistant_and_provider_transition_forks_complete_human_turns()
         assert_eq!(assistant_fork_run["timeline"][1]["type"], "tool_call");
         let assistant_fork_id = assistant_fork.conversation.id;
 
-        let transition_service = AgentService::new(Arc::clone(&storage))
+        let transition_service = AgentService::new_authorized_for_test(Arc::clone(&storage))
             .with_context_compaction_summary_generator(fork_transition_summary_generator());
         let preflight = transition_service
             .preflight_provider_transition(AgentProviderTransitionPreflightInput {
@@ -1443,6 +1445,7 @@ async fn reopened_assistant_and_provider_transition_forks_complete_human_turns()
     let service =
         AgentService::try_new_with_startup_reconciliation(Arc::clone(&storage), false, None)
             .unwrap();
+    service.grant_execution_access_for_test();
     for (suffix, conversation_id, model_id) in [
         ("assistant", &assistant_fork_id, "model-1"),
         ("divider", &divider_fork_id, "model-2"),
@@ -2453,7 +2456,7 @@ fn trusted_child_wake_fails_closed_when_its_selected_model_is_disabled() {
         .claim_next_agent_wake(&spawn.agent.agent_id, claim_token)
         .unwrap()
         .unwrap();
-    let service = AgentService::new(Arc::clone(&storage));
+    let service = AgentService::new_authorized_for_test(Arc::clone(&storage));
     let trusted = TrustedAgentWakeTurnStart::new(
         spawn.initial_wake.wake_id.clone(),
         spawn.agent.agent_id.clone(),
@@ -2522,8 +2525,8 @@ async fn independent_hosts_admit_only_one_turn_without_loser_message_side_effect
         })
         .unwrap();
     let storage_b = Arc::new(StorageService::open(&database_path).unwrap());
-    let service_a = AgentService::new(Arc::clone(&storage_a));
-    let service_b = AgentService::new(Arc::clone(&storage_b));
+    let service_a = AgentService::new_authorized_for_test(Arc::clone(&storage_a));
+    let service_b = AgentService::new_authorized_for_test(Arc::clone(&storage_b));
     let barrier = Arc::new(std::sync::Barrier::new(2));
     let (notifications_a, mut receiver_a) = tokio::sync::mpsc::unbounded_channel();
     let (notifications_b, mut receiver_b) = tokio::sync::mpsc::unbounded_channel();
@@ -2626,7 +2629,7 @@ fn public_human_turn_rejects_a_child_conversation_before_any_turn_write() {
         .load_conversation(&spawn.agent.conversation_id)
         .unwrap()
         .unwrap();
-    let service = AgentService::new(Arc::clone(&storage));
+    let service = AgentService::new_authorized_for_test(Arc::clone(&storage));
     let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
     let mut input = turn_input("model-1");
     input.conversation_id = Some(spawn.agent.conversation_id.clone());
@@ -2700,7 +2703,7 @@ fn public_human_turn_rejects_an_inactive_root_before_any_turn_write() {
         .load_conversation("conversation-inactive-root")
         .unwrap()
         .unwrap();
-    let service = AgentService::new(Arc::clone(&storage));
+    let service = AgentService::new_authorized_for_test(Arc::clone(&storage));
     let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
     let mut input = turn_input("model-1");
     input.conversation_id = Some("conversation-inactive-root".to_string());
@@ -2763,6 +2766,7 @@ async fn unavailable_provider_vault_keeps_generic_and_deepseek_text_only_runs_av
         let service =
             AgentService::try_new_with_startup_reconciliation(Arc::clone(&storage), false, None)
                 .unwrap();
+        service.grant_execution_access_for_test();
         let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
         service
             .start_conversation_turn(turn_input("model-1"), notifications)
@@ -2834,6 +2838,7 @@ async fn unavailable_provider_vault_blocks_deepseek_tool_turn_before_tool_or_app
     let service =
         AgentService::try_new_with_startup_reconciliation(Arc::clone(&storage), false, None)
             .unwrap();
+    service.grant_execution_access_for_test();
     let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
     let turn = service
         .start_conversation_turn(turn_input("model-1"), notifications)

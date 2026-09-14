@@ -28,13 +28,13 @@ impl ExecutionAccessDenied {
     pub(crate) fn signed_out() -> Self {
         Self {
             code: "ACCOUNT_LOGIN_REQUIRED",
-            message: "请登录账号后再启动新的自动化回合。",
+            message: "请登录账号后再启动新的回合。",
         }
     }
-    fn unavailable() -> Self {
+    pub(crate) fn unavailable() -> Self {
         Self {
             code: "ACCOUNT_LICENSE_UNAVAILABLE",
-            message: "使用许可尚未验证或本地授权已过期，本次自动化未启动。",
+            message: "使用许可尚未验证或本地授权已过期，本次回合未启动。",
         }
     }
     pub(crate) fn agent_error(self) -> AgentServiceError {
@@ -81,7 +81,7 @@ impl ExecutionAccessState {
             ExecutionAccessReason::LicenseRequired => {
                 return Err(ExecutionAccessDenied {
                     code: "ACCOUNT_LICENSE_REQUIRED",
-                    message: "账号使用许可无效或已到期，本次自动化未启动。",
+                    message: "账号使用许可无效或已到期，本次回合未启动。",
                 })
             }
             ExecutionAccessReason::LicenseUnavailable => {
@@ -172,6 +172,13 @@ impl AgentService {
                 now_ms(),
                 limit,
             )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_authorized_for_test(storage: Arc<StorageService>) -> Self {
+        let service = Self::new(storage);
+        service.grant_execution_access_for_test();
+        service
     }
 
     #[cfg(test)]

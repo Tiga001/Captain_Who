@@ -67,6 +67,32 @@ impl StorageService {
         trace_created_at: i64,
         trace_updated_at: i64,
     ) -> Result<(ChatConversationRecord, crate::AgentPermissions), String> {
+        self.save_conversation_and_begin_turn_with_execution_access(
+            conversation,
+            expected_revision,
+            trusted_wake,
+            permission_source,
+            preloaded_agent_message_ids,
+            trace,
+            trace_created_at,
+            trace_updated_at,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn save_conversation_and_begin_turn_with_execution_access(
+        &self,
+        conversation: ChatConversationRecord,
+        expected_revision: Option<i64>,
+        trusted_wake: Option<&crate::TrustedAgentWakeTurnAdmission>,
+        permission_source: crate::AgentTurnPermissionSource,
+        preloaded_agent_message_ids: &[String],
+        trace: &ConversationTurnTrace,
+        trace_created_at: i64,
+        trace_updated_at: i64,
+        check_execution_access: Option<&dyn Fn() -> Result<(), String>>,
+    ) -> Result<(ChatConversationRecord, crate::AgentPermissions), String> {
         let (conversation, permissions, outcome, automation_outcome, _) = self
             .save_conversation_and_begin_turn_internal(
                 conversation,
@@ -81,6 +107,7 @@ impl StorageService {
                 None,
                 None,
                 None,
+                check_execution_access,
             )?;
         if !matches!(outcome, super::ConversationTurnRewriteBeginOutcome::Started) {
             return Err(
@@ -135,6 +162,7 @@ impl StorageService {
                 None,
                 Some((automation_admission, check_execution_access)),
                 None,
+                Some(check_execution_access),
             )?;
         if !matches!(
             rewrite_outcome,
@@ -174,6 +202,41 @@ impl StorageService {
         ),
         String,
     > {
+        self.rewrite_conversation_turn_and_begin_turn_with_execution_access(
+            conversation,
+            expected_revision,
+            permission_source,
+            preloaded_agent_message_ids,
+            trace,
+            trace_created_at,
+            trace_updated_at,
+            rewrite,
+            prepared_attachments,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn rewrite_conversation_turn_and_begin_turn_with_execution_access(
+        &self,
+        conversation: ChatConversationRecord,
+        expected_revision: Option<i64>,
+        permission_source: crate::AgentTurnPermissionSource,
+        preloaded_agent_message_ids: &[String],
+        trace: &ConversationTurnTrace,
+        trace_created_at: i64,
+        trace_updated_at: i64,
+        rewrite: &conversation_turn_rewrite_repository::ConversationTurnRewriteAdmission,
+        prepared_attachments: &super::PreparedConversationTurnRewriteAttachments,
+        check_execution_access: Option<&dyn Fn() -> Result<(), String>>,
+    ) -> Result<
+        (
+            ChatConversationRecord,
+            crate::AgentPermissions,
+            super::ConversationTurnRewriteBeginOutcome,
+        ),
+        String,
+    > {
         let (conversation, permissions, outcome, automation_outcome, _) = self
             .save_conversation_and_begin_turn_internal(
                 conversation,
@@ -188,6 +251,7 @@ impl StorageService {
                 Some(prepared_attachments),
                 None,
                 None,
+                check_execution_access,
             )?;
         if automation_outcome.is_some() {
             return Err("rewrite admission unexpectedly consumed an automation claim".to_string());
@@ -212,13 +276,14 @@ impl StorageService {
         human_interaction_admission: Option<
             &crate::storage::human_interaction_repository::HumanInteractionAsyncTurnAdmission,
         >,
+        check_execution_access: Option<&dyn Fn() -> Result<(), String>>,
     ) -> Result<ConversationTurnAdmissionResult, String> {
         let mut connection = self.state.connection()?;
         ensure_project_reference_exists(&connection, conversation.project_id.as_deref())?;
         let transaction = connection
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(storage_error)?;
-        if let Some((_, check_execution_access)) = automation_admission {
+        if let Some(check_execution_access) = check_execution_access {
             check_execution_access()?;
         }
         let bound_agent = transaction
@@ -633,7 +698,7 @@ impl StorageService {
         .map_err(storage_error)?;
         // Check under the same transaction immediately before admission commits. The caller
         // holds its access-state lock, while this check also catches time-based lease expiry.
-        if let Some((_, check_execution_access)) = automation_admission {
+        if let Some(check_execution_access) = check_execution_access {
             check_execution_access()?;
         }
         transaction.commit().map_err(storage_error)?;
@@ -668,6 +733,39 @@ impl StorageService {
         ),
         String,
     > {
+        self.save_human_interaction_conversation_and_begin_turn_with_execution_access(
+            conversation,
+            expected_revision,
+            permission_source,
+            preloaded_agent_message_ids,
+            trace,
+            trace_created_at,
+            trace_updated_at,
+            admission,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn save_human_interaction_conversation_and_begin_turn_with_execution_access(
+        &self,
+        conversation: ChatConversationRecord,
+        expected_revision: Option<i64>,
+        permission_source: crate::AgentTurnPermissionSource,
+        preloaded_agent_message_ids: &[String],
+        trace: &ConversationTurnTrace,
+        trace_created_at: i64,
+        trace_updated_at: i64,
+        admission: &crate::storage::human_interaction_repository::HumanInteractionAsyncTurnAdmission,
+        check_execution_access: Option<&dyn Fn() -> Result<(), String>>,
+    ) -> Result<
+        (
+            ChatConversationRecord,
+            crate::AgentPermissions,
+            crate::storage::human_interaction_repository::HumanInteractionAsyncBinding,
+        ),
+        String,
+    > {
         let (conversation, permissions, _, _, binding) = self
             .save_conversation_and_begin_turn_internal(
                 conversation,
@@ -682,6 +780,7 @@ impl StorageService {
                 None,
                 None,
                 Some(admission),
+                check_execution_access,
             )?;
         Ok((
             conversation,

@@ -16,6 +16,35 @@ function fill(controller: HumanInteractionController, request: HumanInteractionR
     controller.setAnswer(request.requestId, { kind: 'skipped', questionId: q.id })
 }
 describe('independent human interaction controller', () => {
+  it.each(['ACCOUNT_LOGIN_REQUIRED', 'ACCOUNT_LICENSE_REQUIRED', 'ACCOUNT_LICENSE_UNAVAILABLE'])(
+    'preserves an editable answer draft and permits retry after %s',
+    async (code) => {
+      const request = question(),
+        host = fakeHost([request]),
+        controller = new HumanInteractionController(host.api)
+      controller.merge(request)
+      fill(controller, request)
+      const draft = controller.getSnapshot().drafts.question
+      host.api.submit.mockResolvedValueOnce({
+        ok: false,
+        error: {
+          message: 'New Turn requires execution access',
+          data: { type: 'human_interaction_error', code }
+        }
+      })
+      await controller.submit(request.requestId)
+      expect(controller.getSnapshot().requests.question.status).toBe('open')
+      expect(controller.getSnapshot().drafts.question).toEqual(draft)
+      expect(controller.getSnapshot().operations.question).toMatchObject({
+        isSubmitting: false,
+        isDraftLocked: false,
+        pendingAction: null,
+        error: code
+      })
+      await controller.submit(request.requestId)
+      expect(controller.getSnapshot().requests.question.status).toBe('submitted')
+    }
+  )
   it('retains terminal tombstones and independently advances delivery without reviving cards', () => {
     const request = question(),
       answer = submitted(request)

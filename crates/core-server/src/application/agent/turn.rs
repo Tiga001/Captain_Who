@@ -163,18 +163,6 @@ impl AgentService {
             .conversation_admission
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        // Only newly admitted automations use this Host lease. Ordinary starts are authorized
-        // in Main; child/wake execution, steer and approval recovery never enter this gate.
-        let execution_access_guard = if automation.is_some() {
-            let guard = self
-                .execution_access
-                .lock()
-                .map_err(|_| "Execution access state unavailable".to_string())?;
-            guard.check().map_err(ExecutionAccessDenied::agent_error)?;
-            Some(guard)
-        } else {
-            None
-        };
         if let Some(rewrite) = &rewrite {
             if let Some(existing) = self
                 .storage
@@ -197,6 +185,17 @@ impl AgentService {
                     .map_err(AgentServiceError::from);
             }
         }
+        // Every genuinely new root Turn needs a current Host lease, including answers to old
+        // asynchronous questions and edit/regenerate. Replay above, child/wake execution,
+        // steering, and recovery of an existing Turn do not create new human work.
+        // Hold this lock until durable admission; revocation cannot race the message/Trace commit.
+        let execution_access_guard = self
+            .execution_access
+            .lock()
+            .map_err(|_| ExecutionAccessDenied::unavailable().agent_error())?;
+        execution_access_guard
+            .check()
+            .map_err(ExecutionAccessDenied::agent_error)?;
         if self.is_project_deleting(input.project_id.as_deref())
             || self.is_conversation_deleting(Some(&conversation_id))
         {
@@ -304,8 +303,6 @@ impl AgentService {
         });
         let execution_access_check = || {
             execution_access_guard
-                .as_ref()
-                .ok_or_else(|| ExecutionAccessDenied::signed_out().agent_error())?
                 .check()
                 .map_err(ExecutionAccessDenied::agent_error)
         };
@@ -318,6 +315,7 @@ impl AgentService {
                 previous_conversation.clone(),
                 expected_revision,
                 response,
+                &execution_access_check,
             )
             .map(|prepared| PreparedConversationTurnOutcome::Prepared(Box::new(prepared)))
         } else {
@@ -330,6 +328,7 @@ impl AgentService {
                     previous_conversation.clone(),
                     expected_revision,
                     rewrite,
+                    &execution_access_check,
                 ),
                 None => prepare_reserved_human_turn(
                     &self.storage,
@@ -345,6 +344,7 @@ impl AgentService {
                         )
                     }),
                     automation_execution_context,
+                    &execution_access_check,
                 )
                 .map(|prepared| PreparedConversationTurnOutcome::Prepared(Box::new(prepared))),
             }
@@ -384,7 +384,7 @@ impl AgentService {
                             self.release_turn_concurrency_permit(&run_id);
                             self.release_conversation_turn_if_current(&conversation_id, &run_id);
                             self.unregister_cancellation_if_current(&run_id, &cancellation_token);
-                            output.ok_or_else(|| AgentServiceError::from(cause))
+                            output.ok_or(error)
                         }
                         Err(settlement_error) => Err(format!(
                             "{cause}；同时无法终态化已接受的编辑重发 Turn：{settlement_error}"

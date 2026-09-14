@@ -278,13 +278,18 @@ export function registerHostIpc(
 
   registerCoreServiceIpc(ipcMain, coreServer)
   const disposeConfigurationNotifications = registerConfigurationNotifications(coreServer)
-  registerAgentIpc(ipcMain, coreServer, assertCanStartTurn)
-  const disposeHumanInteractionIpc = registerHumanInteractionIpc(ipcMain, coreServer)
-  const disposeAutomationIpc = registerAutomationIpc(ipcMain, coreServer, async () => {
+  const prepareNewTurn = async (): Promise<void> => {
     assertCanStartTurn()
     await syncExecutionAccess?.()
     assertCanStartTurn()
-  })
+  }
+  registerAgentIpc(ipcMain, coreServer, prepareNewTurn)
+  const disposeHumanInteractionIpc = registerHumanInteractionIpc(
+    ipcMain,
+    coreServer,
+    syncExecutionAccess
+  )
+  const disposeAutomationIpc = registerAutomationIpc(ipcMain, coreServer, prepareNewTurn)
   const disposeNotificationIpc = registerNotificationIpc(ipcMain, coreServer, {
     localeMirror: notificationLocaleMirror,
     startPaused: true

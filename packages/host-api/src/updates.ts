@@ -1,7 +1,15 @@
 /** Public projection only: never contains a feed URL, local path, credentials or release notes. */
 export interface UpdateState {
   revision: number
-  status: 'disabled' | 'checking' | 'idle' | 'available' | 'downloading' | 'installing' | 'error'
+  status:
+    | 'disabled'
+    | 'checking'
+    | 'idle'
+    | 'available'
+    | 'downloading'
+    | 'preparing'
+    | 'installing'
+    | 'error'
   version: string | null
   percent: number
   error: 'checkFailed' | 'downloadFailed' | 'installFailed' | null

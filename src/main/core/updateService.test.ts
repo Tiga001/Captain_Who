@@ -95,13 +95,19 @@ describe('desktop update state machine', () => {
     for (const n of [-1, 22.9, 20, NaN, Infinity]) t.progress(n)
     expect(t.service.getState().percent).toBe(22)
     t.progress(102)
-    expect(t.service.getState().percent).toBe(100)
+    expect(t.service.getState()).toMatchObject({ status: 'preparing', percent: 100 })
+    const preparing = t.service.getState()
+    for (const n of [50, 100, 101]) t.progress(n)
+    t.service.download()
+    expect(t.service.getState()).toEqual(preparing)
+    expect(t.driver.download).toHaveBeenCalledTimes(1)
     expect(t.lifecycle.requestInstall).not.toHaveBeenCalled()
   })
   it('only requests safe shutdown after native preparation resolves', async () => {
     const t = await available()
     t.service.download()
     t.progress(100)
+    expect(t.service.getState()).toMatchObject({ status: 'preparing', percent: 100 })
     expect(t.lifecycle.requestInstall).not.toHaveBeenCalled()
     t.download.resolve()
     await flush()
@@ -111,24 +117,28 @@ describe('desktop update state machine', () => {
     t.lifecycle.requestInstall.mock.calls[0][0]()
     expect(t.driver.install).toHaveBeenCalledTimes(1)
   })
-  it('restores a retryable button on download/preparation failure without shutting down', async () => {
-    const t = await available()
-    t.service.download()
-    t.download.reject(new Error('secret signed URL'))
-    await flush()
-    expect(t.service.getState()).toMatchObject({
-      status: 'error',
-      version: '1.0.1',
-      error: 'downloadFailed'
-    })
-    expect(t.lifecycle.requestInstall).not.toHaveBeenCalled()
-    const retry = deferred<void>()
-    t.driver.download.mockImplementationOnce(() => retry.promise)
-    expect(t.service.download()).toMatchObject({ status: 'downloading', percent: 0, error: null })
-    expect(t.driver.download).toHaveBeenCalledTimes(2)
-    t.service.dispose()
-    retry.resolve()
-  })
+  it.each(['downloading', 'preparing'] as const)(
+    'restores a retryable button on %s failure without shutting down',
+    async (phase) => {
+      const t = await available()
+      t.service.download()
+      if (phase === 'preparing') t.progress(100)
+      t.download.reject(new Error('secret signed URL'))
+      await flush()
+      expect(t.service.getState()).toMatchObject({
+        status: 'error',
+        version: '1.0.1',
+        error: 'downloadFailed'
+      })
+      expect(t.lifecycle.requestInstall).not.toHaveBeenCalled()
+      const retry = deferred<void>()
+      t.driver.download.mockImplementationOnce(() => retry.promise)
+      expect(t.service.download()).toMatchObject({ status: 'downloading', percent: 0, error: null })
+      expect(t.driver.download).toHaveBeenCalledTimes(2)
+      t.service.dispose()
+      retry.resolve()
+    }
+  )
   it('ignores late checks after shutdown', async () => {
     const t = setup()
     t.service.startOnce()
@@ -139,17 +149,21 @@ describe('desktop update state machine', () => {
     expect(t.service.getState().revision).toBe(revision)
     expect(t.driver.cancel).toHaveBeenCalledTimes(1)
   })
-  it('cancels ordinary quit during download and ignores late progress/completion', async () => {
-    const t = await available()
-    t.service.download()
-    t.service.beginShutdown()
-    const state = t.service.getState()
-    t.progress(90)
-    t.download.resolve()
-    await flush()
-    expect(t.service.getState()).toEqual(state)
-    expect(t.lifecycle.requestInstall).not.toHaveBeenCalled()
-  })
+  it.each(['downloading', 'preparing'] as const)(
+    'cancels ordinary quit during %s and ignores late progress/completion',
+    async (phase) => {
+      const t = await available()
+      t.service.download()
+      if (phase === 'preparing') t.progress(100)
+      t.service.beginShutdown()
+      const state = t.service.getState()
+      t.progress(90)
+      t.download.resolve()
+      await flush()
+      expect(t.service.getState()).toEqual(state)
+      expect(t.lifecycle.requestInstall).not.toHaveBeenCalled()
+    }
+  )
   it('does not cancel a prepared installation when the coordinator starts cleanup', async () => {
     const t = await available()
     t.lifecycle.requestInstall.mockImplementation(() => {

@@ -29,24 +29,24 @@ last_verified: 2026-09-13
 - `STORAGE_SCHEMA_VERSION = 47`；
 - canonical schema fingerprint 由 `migrations.rs` 中的编译期常量和测试固定；
 - 空数据库在一个原子流程中建立完整当前 schema；
-- v47 新增独立的本机 Token 元数据、请求去重账本和每日汇总表。精确匹配 v46 fingerprint 且外键有效的库可在单个事务内无损升级，只新增三表和统计起始时间，不回填观测、不改聊天/配置。失败整笔回滚；这不是重置，也不要求用户丢弃旧数据；
+- v47 新增独立的本机 Token 元数据、请求去重账本和每日汇总表，统计起始时间在创建 schema 时固定，不回填此前的观测；
 - v46 新增 `agent_workspace_run_bindings` 和 `agent_workspace_wake_bindings`，以不可变 JSON 保存文件夹 ID、别名、角色、配置路径、canonical 路径和目录实体身份；Run admission 与轨迹同事务提交，spawn/followup/结果 Wake 继承源 Run 或源 Wake。历史 fork 复制已保留回复的 Run 工作区绑定，但不复制 Wake 执行权；
 - v45 把项目改为多文件夹模型：`projects` 不再保存 `path`，文件夹存放在 `project_folders`（每个项目恰好一个 `primary`，其余为 `auxiliary`，`path` 与 `alias` 在项目内唯一，随项目级联删除）。主文件夹仍是 Agent 的工作目录；
-- 唯一原地升级路径为 exact v46 → v47：exact v45 及更早版本（包括 v34/v35/v42/v43/v44）仍一律返回 reset-required，不改写旧库；开发期不为单路径项目、聊天或运行历史写迁移；
+- 已有库只接受通过 exact fingerprint 和外键校验的当前 v47；所有旧版本（包括 exact v46 及 v34/v35/v42/v43/v44/v45）一律返回 reset-required，不改写旧库；开发期不维护自动数据库迁移；
 - Run/Wake 模式冻结表和 `agent_prompt_preferences.context_profile` 与 v44 相同；新偏好默认 Full，旧 checkpoint 由版本校验直接拒绝；
-- 其他旧版、未知版、非空未版本化或结构被篡改的数据库返回 `development_storage_schema_reset_required`，不自动重置。
+- 未知版、非空未版本化或结构被篡改的数据库也返回 `development_storage_schema_reset_required`，不修改源库或自动重置。
 
 版本号和 fingerprint 可能变化，维护时必须读取 `crates/core/src/storage/migrations.rs`，不得从本文复制常量到运行逻辑。发布说明可以记录版本，但架构文档应强调策略而非长期维护一张迁移历史表。
 
 开发库重置前应先关闭应用并备份数据根；优先使用受管 `storage:reset-dev` 流程。不要只删除 `storage.sqlite` 而遗留 attachments、artifacts、spool 或 lock 文件。
 
-`storage:reset-dev` 是显式丢弃历史的重建操作，始终新建 v47，不恢复 Conversation、Project（含旧的单路径项目）、本机 Token 统计或 Agent/runtime 历史。它从 exact current v47 及 exact v35–v46 保留 allowlisted 配置与凭据引用；v36–v47 还保留人机交互设置及 revision，v43–v47 保留全局协作开关及 revision，v44–v47 保留轻量/完整模式，旧版本该项默认 Full。Run/Wake 冻结策略属于运行事实，重置时清空。既有受限恢复选项也可从绑定 exact v33 fingerprint 的私有备份读取 allowlisted 设置，并把凭据转换为 reference。无法安全识别且含配置的旧库拒绝重置，不能用默认值默默替换模型配置。正常 v46 → v47 升级不使用此工具。
+`storage:reset-dev` 是显式丢弃历史的重建操作，始终新建 v47，不恢复 Conversation、Project（含旧的单路径项目）、本机 Token 统计或 Agent/runtime 历史。它从 exact current v47 及 exact v35–v46 保留 allowlisted 配置与凭据引用；v36–v47 还保留人机交互设置及 revision，v43–v47 保留全局协作开关及 revision，v44–v47 保留轻量/完整模式，旧版本该项默认 Full。Run/Wake 冻结策略属于运行事实，重置时清空。既有受限恢复选项也可从绑定 exact v33 fingerprint 的私有备份读取 allowlisted 设置，并把凭据转换为 reference。无法安全识别且含配置的旧库拒绝重置，不能用默认值默默替换模型配置。启动时不会自动执行该工具。
 
 ## 本机 Token 统计
 
 `model_request_observation_repository::insert_observation` 在可嵌套 SAVEPOINT 内保存最终请求观测和独立统计。主 Agent、子 Agent 和压缩共用此边界；不累加 Run 的累计事件。`local_token_usage_requests` 只保留不透明请求 ID、北京时间日期和可选整数计数，不关联账号、会话、模型或内容，也没有 conversation 外键。`local_token_usage_days` 保留每日整数累计和缺失实际用量的请求数。删除聊天或清空计费记录不会删除它们；分支历史不会制造新的用量。
 
-统计起始时间在 schema 创建/升级时固定。此前完成的观测即使迟到重放也不计入，不回填历史。OpenAI 缓存属于输入子集，Anthropic 输入按既有观测规则加上 cache read/write；output 已包含支持协议中的 reasoning，不再次累加思考字段。缺失完整实际用量记为未报告请求，不用估算值冒充准确零。每日和全历史计数使用 Rust u128 和十进制 TEXT/JSON 字符串，避免 SQLite/JavaScript 浮点精度损失。
+统计起始时间在 schema 创建时固定。此前完成的观测即使迟到重放也不计入，不回填历史。OpenAI 缓存属于输入子集，Anthropic 输入按既有观测规则加上 cache read/write；output 已包含支持协议中的 reasoning，不再次累加思考字段。缺失完整实际用量记为未报告请求，不用估算值冒充准确零。每日和全历史计数使用 Rust u128 和十进制 TEXT/JSON 字符串，避免 SQLite/JavaScript 浮点精度损失。
 
 `agent.getLocalTokenUsage` 只返回固定 `Asia/Shanghai` 时区、统计起始时间、请求日期范围内的每日总数、全历史总数/单日峰值/未报告请求数和今天用量。日期范围最多 3660 天。该接口无账号参数，不上传、不跨设备合并；账号退出或切换不改变统计。真源为 `local_token_usage_repository.rs`、`protocol/local_token_usage.rs` 和 TypeScript `localTokenUsage.ts`。
 
@@ -101,7 +101,7 @@ DDL 按领域大致分为：
 
 ## Scheduled Automation 表组
 
-Automation 在 canonical schema v46 中使用当前通用通知表和自动化领域表，完整列、CHECK、索引和 trigger 仍以 DDL 为准：
+Automation 在 canonical schema v47 中使用当前通用通知表和自动化领域表，完整列、CHECK、索引和 trigger 仍以 DDL 为准：
 
 | 表                  | 权威内容                                                                | 关键不变量                                                                                                        |
 | ------------------- | ----------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
@@ -147,7 +147,7 @@ Automation 还要求两个专用原子边界：
 
 ## 启动与崩溃恢复
 
-Bootstrap 大致执行：解析数据根与锁、打开/校验 canonical schema v46、构造 repositories/services、加载凭据 backend、MCP Server/Provider/Skills/Artifact Runtime、随后运行领域 reconciliation。持久凭据 backend 不可用或 credential reference 无法解析时必须保留公开配置并报告 `unavailable`/配置错误，不能把缺失凭据当作空值覆盖；只有实际需要该连接的运行应被阻断。
+Bootstrap 大致执行：解析数据根与锁、打开/校验 canonical schema v47、构造 repositories/services、加载凭据 backend、MCP Server/Provider/Skills/Artifact Runtime、随后运行领域 reconciliation。持久凭据 backend 不可用或 credential reference 无法解析时必须保留公开配置并报告 `unavailable`/配置错误，不能把缺失凭据当作空值覆盖；只有实际需要该连接的运行应被阻断。
 
 恢复必须按“数据库已提交状态”判断，不按 Renderer 缓存判断。当前需要关注：
 
@@ -183,7 +183,7 @@ Automation 启动恢复区分 admission 前后：旧进程遗留的全部 `admit
 
 当前开发策略以整套数据根备份/重置为主。复制在线 SQLite 文件并不等价于一致备份；应在应用关闭、锁释放后复制数据库及其配套文件目录，或使用受支持的 SQLite snapshot/backup 流程。
 
-当前 v46 SQLite snapshot 只含模型/搜索 credential reference 与非秘密元数据，不含这些连接的当前 secret 字节；旧 schema 生成的历史备份仍可能含明文 Token/Key，必须继续按秘密材料保护。只恢复 `storage.sqlite` 不会恢复操作系统凭据，跨设备、跨系统账户、签名身份变化或凭据 backend 丢失后，界面可能显示凭据不可用，此时只能由用户替换或清除。未签名 macOS 开发构建的私有凭据文件位于数据根，因此“整根复制”仍会复制 secret，不能当作普通诊断包。
+当前 v47 SQLite snapshot 只含模型/搜索 credential reference 与非秘密元数据，不含这些连接的当前 secret 字节；旧 schema 生成的历史备份仍可能含明文 Token/Key，必须继续按秘密材料保护。只恢复 `storage.sqlite` 不会恢复操作系统凭据，跨设备、跨系统账户、签名身份变化或凭据 backend 丢失后，界面可能显示凭据不可用，此时只能由用户替换或清除。未签名 macOS 开发构建的私有凭据文件位于数据根，因此“整根复制”仍会复制 secret，不能当作普通诊断包。
 
 删除 SQLite reference、清除凭据或移除私有文件只表达应用层删除意图；文件系统、SSD、系统备份和操作系统凭据后端可能保留副本，产品不承诺安全擦除。怀疑泄露时应在 Provider 侧撤销或轮换凭据。
 
@@ -191,7 +191,7 @@ Automation 启动恢复区分 admission 前后：旧进程遗留的全部 `admit
 
 ## 不变量
 
-1. `canonical_schema.sql`、canonical schema v46 的 version 与 fingerprint 必须一致。
+1. `canonical_schema.sql`、canonical schema v47 的 version 与 fingerprint 必须一致。
 2. 所有非空非当前 schema 均 fail closed，只能通过显式开发库重置进入当前版本。
 3. 所有领域对象在 service SQL 边界校验 conversation/project/Run 归属。
 4. 外部副作用与数据库提交之间的崩溃窗口必须有明确恢复状态。
@@ -235,8 +235,8 @@ Automation 启动恢复区分 admission 前后：旧进程遗留的全部 `admit
 
 ## 变更检查表
 
-- [ ] 修改 `canonical_schema.sql` 后同步 canonical version、fingerprint 和 fresh-schema 测试；若版本不再是 v46，同时更新本文当前快照。
-- [ ] 明确旧数据库行为；没有经批准的迁移链时保持 reset-required。
+- [ ] 修改 `canonical_schema.sql` 后同步 canonical version、fingerprint 和 fresh-schema 测试；若版本不再是 v47，同时更新本文当前快照。
+- [ ] 所有旧版本均保持 reset-required，并验证拒绝打开时不修改源库。
 - [ ] 新表/列定义 owner、FK、唯一键、索引、删除/保留和敏感分类。
 - [ ] 跨表操作在一个 service 事务中完成，并有冲突/幂等测试。
 - [ ] 外部工作在事务外执行，提交时重新校验 revision/CAS。
@@ -250,7 +250,7 @@ Automation 启动恢复区分 admission 前后：旧进程遗留的全部 `admit
 
 ## 当前限制
 
-- 开发期只支持上述 exact canonical v42 单向升级，没有通用旧库迁移链或自动降级；其他旧库必须显式走受管 reset 流程。
+- 开发期没有自动数据库升级或降级；所有旧库（包括 exact v46）必须显式走受管 reset 流程。
 - 单连接 Mutex 设计偏向桌面本地一致性，不适合多进程或高并发服务端部署。
 - 自动保留期限、跨设备同步、在线增量备份和用户级导出策略尚未形成统一公共契约。
 - Automation 当前没有 history/Event/outbox retention 或物理 GC 公共流程；tombstone 与事件日志会随使用增长。

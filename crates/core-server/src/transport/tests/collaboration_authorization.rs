@@ -192,7 +192,7 @@ fn ordinary_user_rpc_cannot_read_or_mutate_a_child_conversation() {
             )
             .unwrap();
     }
-    let service = AgentService::new(Arc::clone(&storage));
+    let service = AgentService::new_authorized_for_test(Arc::clone(&storage));
 
     let history = request(
         &storage,

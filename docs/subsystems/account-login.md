@@ -2,7 +2,7 @@
 status: current
 audience: developers
 owner: engineering
-last_verified: 2026-09-13
+last_verified: 2026-09-14
 ---
 
 # Captain Who desktop account login
@@ -26,7 +26,7 @@ Profile mapping: display name and avatar come from `data.profile.displayName` an
 
 The bottom-left account button displays only the avatar and a single-line username. The expanded menu header displays the avatar, username and email; a separate read-only “软件许可” row above Settings displays license validity. This row is not clickable or keyboard-focusable and never opens a website. A concrete expiry uses its Shanghai calendar date, and a verified allowed license with no expiry displays “长期有效”. Unknown/unavailable or signed-out states never imply an unlimited license. Email also remains available on the profile page.
 
-An initial network outage retains saved credentials but does not bypass login. Transient runtime outages retain the last validated session; definite expiry or account deactivation blocks new turns without stopping existing work. Account revalidation runs every five minutes and on foreground/profile refresh (foreground requests are throttled). This is not an always-online licensing/anti-tamper system.
+An initial network outage retains saved credentials but does not bypass login. Transient runtime outages retain the last validated session; definite expiry or account deactivation blocks new turns without stopping existing work. The SDK adapter recognizes terminal symbolic errors (`unauthenticated`, `invalid_grant`, `user_blocked`) independently of numeric metadata, including rejected SDK promises, so definitive invalidation is not mistaken for a network outage. Account revalidation runs every five minutes and on foreground/profile refresh (foreground requests are throttled). License permission is process-local for at most 24 hours and must be freshly checked online after a cold restart or account change; saved login credentials still support automatic session restoration. This is not an always-online licensing/anti-tamper system.
 
 ## Verification
 

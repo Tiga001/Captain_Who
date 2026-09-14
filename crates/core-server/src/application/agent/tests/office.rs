@@ -927,7 +927,7 @@ fn approved_office_action_is_not_replayed_across_engine_rediscovery() {
             Arc::new(replacement.clone())
         })
     };
-    let service = AgentService::new(storage).with_office_engine(Arc::new(
+    let service = AgentService::new_authorized_for_test(storage).with_office_engine(Arc::new(
         RefreshableOfficeEngine::with_current(Arc::new(stale), resolver),
     ));
     let operation = match prepared_office_action("office-stale-approved-action") {
@@ -963,7 +963,8 @@ fn approved_office_failure_preserves_exit_stdout_and_stderr() {
     let workspace = fixture.path().join("workspace");
     fs::create_dir_all(&workspace).unwrap();
     let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
-    let service = AgentService::new(storage).with_office_engine(Arc::new(FailedOfficeEngine));
+    let service = AgentService::new_authorized_for_test(storage)
+        .with_office_engine(Arc::new(FailedOfficeEngine));
     let input = command_test_input(&workspace);
     let operation = mycopilot_core::AgentOfficeOperationRequest {
         schema_version: mycopilot_core::AGENT_OFFICE_OPERATION_SCHEMA_VERSION,
@@ -1001,8 +1002,8 @@ fn approved_office_failure_preserves_exit_stdout_and_stderr() {
 fn approved_render_tool_result_preserves_authoritative_published_output() {
     let fixture = tempdir().unwrap();
     let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
-    let service =
-        AgentService::new(storage).with_office_engine(Arc::new(PublishedRenderOfficeEngine));
+    let service = AgentService::new_authorized_for_test(storage)
+        .with_office_engine(Arc::new(PublishedRenderOfficeEngine));
     let operation = match prepared_render_action("office-render-output") {
         AgentProposedAction::OfficeOperation { office_operation } => office_operation,
         _ => unreachable!(),
@@ -1059,8 +1060,8 @@ fn approved_render_tool_result_preserves_authoritative_published_output() {
 fn office_revalidation_failure_preserves_frozen_execution_context() {
     let fixture = tempdir().unwrap();
     let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
-    let service =
-        AgentService::new(storage).with_office_engine(Arc::new(RevalidationFailureOfficeEngine));
+    let service = AgentService::new_authorized_for_test(storage)
+        .with_office_engine(Arc::new(RevalidationFailureOfficeEngine));
     let input = command_test_input(fixture.path());
     let operation = match prepared_office_action("office-revalidation-failure") {
         AgentProposedAction::OfficeOperation { office_operation } => office_operation,
@@ -1100,10 +1101,11 @@ fn host_rejects_noncanonical_or_overlong_frozen_office_reasons_before_execution(
     let fixture = tempdir().unwrap();
     let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
     let executions = Arc::new(AtomicUsize::new(0));
-    let service =
-        AgentService::new(storage).with_office_engine(Arc::new(SuccessfulTrackingOfficeEngine {
+    let service = AgentService::new_authorized_for_test(storage).with_office_engine(Arc::new(
+        SuccessfulTrackingOfficeEngine {
             executions: Arc::clone(&executions),
-        }));
+        },
+    ));
     let input = command_test_input(fixture.path());
 
     for (index, reason) in [
@@ -1175,7 +1177,7 @@ fn office_action_helpers_expose_stable_identity_without_executable_path() {
 fn automatic_office_authorization_failure_returns_paired_structured_tool_result() {
     let fixture = tempdir().unwrap();
     let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
-    let service = AgentService::new(storage);
+    let service = AgentService::new_authorized_for_test(storage);
     let input = command_test_input(fixture.path());
 
     let result = service
@@ -1210,10 +1212,11 @@ fn automatic_dynamic_and_manual_restored_skill_sessions_share_office_execution_c
     let fixture = tempdir().unwrap();
     let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
     let observed = Arc::new(AtomicUsize::new(0));
-    let service =
-        AgentService::new(storage).with_office_engine(Arc::new(SkillSessionTrackingOfficeEngine {
+    let service = AgentService::new_authorized_for_test(storage).with_office_engine(Arc::new(
+        SkillSessionTrackingOfficeEngine {
             executions_with_runtime_session: Arc::clone(&observed),
-        }));
+        },
+    ));
     let input = automatic_office_input(fixture.path());
 
     let auto_result = service
@@ -1256,10 +1259,11 @@ fn automatic_office_execution_stops_before_side_effect_when_executing_audit_fail
     let fixture = tempdir().unwrap();
     let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
     let executions = Arc::new(AtomicUsize::new(0));
-    let service =
-        AgentService::new(storage).with_office_engine(Arc::new(SuccessfulTrackingOfficeEngine {
+    let service = AgentService::new_authorized_for_test(storage).with_office_engine(Arc::new(
+        SuccessfulTrackingOfficeEngine {
             executions: executions.clone(),
-        }));
+        },
+    ));
     let run_id = "run-office-executing-audit-failure";
     let call_id = "office-executing-audit-failure";
     inject_auto_action_audit_failure(run_id, call_id, "executing");
@@ -1294,10 +1298,11 @@ fn automatic_office_final_audit_failure_never_reports_success_and_preserves_exec
     let fixture = tempdir().unwrap();
     let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
     let executions = Arc::new(AtomicUsize::new(0));
-    let service =
-        AgentService::new(storage).with_office_engine(Arc::new(SuccessfulTrackingOfficeEngine {
+    let service = AgentService::new_authorized_for_test(storage).with_office_engine(Arc::new(
+        SuccessfulTrackingOfficeEngine {
             executions: executions.clone(),
-        }));
+        },
+    ));
     let run_id = "run-office-final-audit-failure";
     let call_id = "office-final-audit-failure";
     inject_auto_action_audit_failure(run_id, call_id, "completed");
@@ -1338,11 +1343,11 @@ fn automatic_office_reconciles_a_terminal_receipt_after_post_commit_error() {
     let fixture = tempdir().unwrap();
     let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
     let executions = Arc::new(AtomicUsize::new(0));
-    let service = AgentService::new(Arc::clone(&storage)).with_office_engine(Arc::new(
-        SuccessfulTrackingOfficeEngine {
+    let service = AgentService::new_authorized_for_test(Arc::clone(&storage)).with_office_engine(
+        Arc::new(SuccessfulTrackingOfficeEngine {
             executions: executions.clone(),
-        },
-    ));
+        }),
+    );
     let run_id = "run-office-post-commit-reconciliation";
     let call_id = "office-post-commit-reconciliation";
     inject_auto_action_audit_post_commit_failure(run_id, call_id, "completed");
@@ -1379,11 +1384,11 @@ fn automatic_office_success_persists_one_final_tool_result_audit() {
     let fixture = tempdir().unwrap();
     let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
     let executions = Arc::new(AtomicUsize::new(0));
-    let service = AgentService::new(Arc::clone(&storage)).with_office_engine(Arc::new(
-        SuccessfulTrackingOfficeEngine {
+    let service = AgentService::new_authorized_for_test(Arc::clone(&storage)).with_office_engine(
+        Arc::new(SuccessfulTrackingOfficeEngine {
             executions: executions.clone(),
-        },
-    ));
+        }),
+    );
     let run_id = "run-office-success-audit";
     let call_id = "office-success-audit";
 
@@ -1437,11 +1442,11 @@ fn concurrent_automatic_office_replay_is_at_most_once_and_never_conflicts() {
     let fixture = tempdir().unwrap();
     let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
     let executions = Arc::new(AtomicUsize::new(0));
-    let service = AgentService::new(Arc::clone(&storage)).with_office_engine(Arc::new(
-        SuccessfulTrackingOfficeEngine {
+    let service = AgentService::new_authorized_for_test(Arc::clone(&storage)).with_office_engine(
+        Arc::new(SuccessfulTrackingOfficeEngine {
             executions: executions.clone(),
-        },
-    ));
+        }),
+    );
     let run_id = "run-office-concurrent-claim";
     let call_id = "office-concurrent-claim";
     let barrier = Arc::new(Barrier::new(3));
@@ -1510,11 +1515,11 @@ fn later_authority_change_cannot_overwrite_or_contradict_completed_office_receip
     let fixture = tempdir().unwrap();
     let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
     let executions = Arc::new(AtomicUsize::new(0));
-    let service = AgentService::new(Arc::clone(&storage)).with_office_engine(Arc::new(
-        SuccessfulTrackingOfficeEngine {
+    let service = AgentService::new_authorized_for_test(Arc::clone(&storage)).with_office_engine(
+        Arc::new(SuccessfulTrackingOfficeEngine {
             executions: executions.clone(),
-        },
-    ));
+        }),
+    );
     let run_id = "run-office-rejection-after-completion";
     let call_id = "office-rejection-after-completion";
 

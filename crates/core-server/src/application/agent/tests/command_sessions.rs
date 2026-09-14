@@ -2532,7 +2532,7 @@ fn cancelling_model_observation_does_not_terminate_handed_off_process() {
 #[test]
 fn explicit_run_cancel_releases_model_wait_and_interrupts_its_handed_off_process() {
     let fixture = RunningFixture::new("explicit-cancel-during-model-wait");
-    let mut service = AgentService::new(Arc::clone(&fixture.storage));
+    let mut service = AgentService::new_authorized_for_test(Arc::clone(&fixture.storage));
     service.command_sessions = fixture.registry.clone();
     let command = "sleep 5";
     let tracker = Arc::new(FileEffectTracker::default());
@@ -2642,7 +2642,7 @@ fn explicit_run_cancel_releases_model_wait_and_interrupts_its_handed_off_process
 #[test]
 fn trusted_child_interrupt_terminates_its_handed_off_command_session() {
     let fixture = RunningFixture::new("child-interrupt-adopted-session");
-    let mut service = AgentService::new(Arc::clone(&fixture.storage));
+    let mut service = AgentService::new_authorized_for_test(Arc::clone(&fixture.storage));
     service.command_sessions = fixture.registry.clone();
     let command = "sleep 5";
     let (snapshot, _) = fixture.start(command, None);
@@ -4533,7 +4533,7 @@ fn every_restart_restores_outcome_unknown_conversation_and_project_fences() {
         .mark_agent_command_session_running(conversation_id, session_id, 11)
         .unwrap();
 
-    let service = AgentService::new(Arc::clone(&storage));
+    let service = AgentService::new_authorized_for_test(Arc::clone(&storage));
     let reconciled = storage
         .load_agent_command_session(conversation_id, session_id)
         .unwrap()
@@ -4563,7 +4563,7 @@ fn every_restart_restores_outcome_unknown_conversation_and_project_fences() {
         .is_some());
     drop(service);
 
-    let restarted_again = AgentService::new(Arc::clone(&storage));
+    let restarted_again = AgentService::new_authorized_for_test(Arc::clone(&storage));
     assert_eq!(
         restarted_again.unsettled_file_effect_ids_for_conversation(conversation_id),
         vec![restored_effect.clone()],

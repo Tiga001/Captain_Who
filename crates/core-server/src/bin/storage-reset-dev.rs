@@ -3078,9 +3078,9 @@ mod tests {
     }
 
     #[test]
-    fn exact_v46_preview_is_read_only_and_normal_upgrade_keeps_configuration_and_chats() {
+    fn exact_v46_preview_and_refused_normal_startup_leave_configuration_and_chats_unchanged() {
         let fixture = tempfile::tempdir().unwrap();
-        let secret = "v46-upgrade-test-secret";
+        let secret = "v46-reset-refusal-test-secret";
         populated_storage(fixture.path(), secret);
         let database = fixture.path().join(DATABASE_FILE_NAME);
         let connection = Connection::open(&database).unwrap();
@@ -3099,29 +3099,25 @@ mod tests {
         let preview = execute(options(fixture.path(), false)).unwrap();
         assert!(preview.preserved_configuration);
         assert_eq!(fs::read(&database).unwrap(), before);
-        // Normal startup uses the non-destructive migration, not the reset executor.
-        let storage = open_test_storage(&database);
-        assert_eq!(
-            storage
-                .load_model_settings_snapshot()
-                .unwrap()
-                .unwrap()
-                .settings
-                .api_token,
-            secret
-        );
-        assert_eq!(
-            storage.load_conversations().unwrap().len() as u64,
-            conversations_before
-        );
-        drop(storage);
+        // Normal startup must not upgrade or reset a development-era database.
+        let error = mycopilot_core::storage::StorageState::open(&database)
+            .err()
+            .expect("v46 normal startup must require an explicit development reset");
+        assert!(error.to_string().contains(
+            mycopilot_core::storage::migrations::DEVELOPMENT_STORAGE_SCHEMA_RESET_REQUIRED
+        ));
+        assert_eq!(fs::read(&database).unwrap(), before);
         // The production reset entry canonicalizes the root before its NOFOLLOW open; macOS
         // tempfile paths use the /var -> /private/var alias and need the same normalization.
-        let upgraded = open_read_only(&fs::canonicalize(&database).unwrap()).unwrap();
-        assert_eq!(storage_schema_version(&upgraded).unwrap(), 47);
+        let unchanged = open_read_only(&fs::canonicalize(&database).unwrap()).unwrap();
+        assert_eq!(storage_schema_version(&unchanged).unwrap(), 46);
         assert_eq!(
-            snapshot_exact_configuration_tables(&upgraded).unwrap(),
+            snapshot_exact_configuration_tables(&unchanged).unwrap(),
             settings_before
+        );
+        assert_eq!(
+            count_rows_if_table_exists(&unchanged, "conversations").unwrap(),
+            conversations_before
         );
     }
 
@@ -3400,6 +3396,12 @@ mod tests {
                 downgrade_fixture_to_exact_v45(&database);
                 WORKSPACE_CONFIGURATION_SOURCE_FINGERPRINT
             }
+            46 => {
+                let connection = Connection::open(&database).unwrap();
+                drop_local_token_fixture_schema(&connection);
+                connection.pragma_update(None, "user_version", 46).unwrap();
+                FROZEN_WORKSPACE_CONFIGURATION_SOURCE_FINGERPRINT
+            }
             _ => panic!("unsupported reset fixture"),
         };
         let connection = Connection::open(&database).unwrap();
@@ -3518,6 +3520,11 @@ mod tests {
             load_human_interaction_settings_for_reset(&backup).unwrap(),
             expected_human
         );
+    }
+
+    #[test]
+    fn exact_v46_explicit_reset_preserves_configuration_and_backs_up_discarded_history() {
+        assert_previous_reset_preserves_configuration(46);
     }
 
     #[test]

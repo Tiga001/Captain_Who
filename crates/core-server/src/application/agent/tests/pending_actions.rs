@@ -262,7 +262,7 @@ async fn auto_mcp_invokes_only_after_hidden_durable_executing_journal_and_scrubs
         "",
     );
     let invoker = AutoJournalObservingInvoker::new(Arc::clone(&storage));
-    let service = AgentService::new(Arc::clone(&storage))
+    let service = AgentService::new_authorized_for_test(Arc::clone(&storage))
         .with_mcp_tool_invoker(Arc::clone(&invoker) as Arc<dyn McpToolInvoker>);
     let run_id = "auto-mcp-journal-run";
     let action_id = uuid::Uuid::new_v4().to_string();
@@ -449,7 +449,7 @@ async fn live_auto_mcp_outcome_unknown_is_durable_and_never_collapses_to_plain_f
         "",
     );
     let invoker = AutoJournalObservingInvoker::with_outcome_unknown(Arc::clone(&storage), true);
-    let service = AgentService::new(Arc::clone(&storage))
+    let service = AgentService::new_authorized_for_test(Arc::clone(&storage))
         .with_mcp_tool_invoker(Arc::clone(&invoker) as Arc<dyn McpToolInvoker>);
     let run_id = "auto-mcp-outcome-unknown-run";
     let action_id = uuid::Uuid::new_v4().to_string();
@@ -530,7 +530,7 @@ fn startup_adopts_a_terminal_auto_mcp_result_when_its_dispatch_journal_lagged() 
         "disabled",
         "",
     );
-    let service = AgentService::new(Arc::clone(&storage));
+    let service = AgentService::new_authorized_for_test(Arc::clone(&storage));
     let now = mycopilot_core::storage::now_ms();
     let run_id = "auto-mcp-terminal-adoption-run";
     let conversation_id = "auto-mcp-terminal-adoption-conversation";
@@ -633,7 +633,7 @@ fn startup_rejects_malformed_terminal_auto_mcp_result_instead_of_adopting_it() {
         "disabled",
         "",
     );
-    let service = AgentService::new(Arc::clone(&storage));
+    let service = AgentService::new_authorized_for_test(Arc::clone(&storage));
     let now = mycopilot_core::storage::now_ms();
     let run_id = "auto-mcp-malformed-terminal-run";
     let conversation_id = "auto-mcp-malformed-terminal-conversation";
@@ -704,7 +704,7 @@ fn startup_auto_mcp_journals_never_replay_and_only_executing_becomes_outcome_unk
         "disabled",
         "",
     );
-    let service = AgentService::new(Arc::clone(&storage));
+    let service = AgentService::new_authorized_for_test(Arc::clone(&storage));
     let now = mycopilot_core::storage::now_ms();
     let mut identities = Vec::new();
     for should_claim in [false, true] {
@@ -796,7 +796,7 @@ fn pending_command_round_trip_keeps_the_host_frozen_runtime_binding() {
         "disabled",
         "",
     );
-    let service = AgentService::new(Arc::clone(&storage));
+    let service = AgentService::new_authorized_for_test(Arc::clone(&storage));
     let mut agent_input = serde_json::from_value::<AgentChatInput>(json!({
         "apiUrl": "https://example.test/v1/chat/completions",
         "apiToken": "secret",
@@ -891,7 +891,7 @@ fn pending_command_round_trip_keeps_the_host_frozen_runtime_binding() {
         .unwrap());
     drop(service);
 
-    let reloaded = AgentService::new(Arc::clone(&storage));
+    let reloaded = AgentService::new_authorized_for_test(Arc::clone(&storage));
     let pending = reloaded
         .pending_actions
         .lock()
@@ -916,7 +916,7 @@ fn pending_command_round_trip_keeps_the_host_frozen_runtime_binding() {
 fn provider_action_id_is_scoped_by_run_and_same_run_reuse_is_strict() {
     let fixture = tempdir().unwrap();
     let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
-    let service = AgentService::new(Arc::clone(&storage));
+    let service = AgentService::new_authorized_for_test(Arc::clone(&storage));
     let mut agent_input = serde_json::from_value::<AgentChatInput>(json!({
         "apiUrl": "https://example.test/v1/chat/completions",
         "apiToken": "secret",
@@ -1771,7 +1771,7 @@ fn successor_approval_is_blocked_until_its_durable_predecessor_settles() {
     let storage = Arc::new(StorageService::open(&database_path).unwrap());
     // Construct the service before seeding the synthetic crash window so startup reconciliation
     // cannot repair it for this live-process gate test.
-    let service = AgentService::new(Arc::clone(&storage));
+    let service = AgentService::new_authorized_for_test(Arc::clone(&storage));
     let (predecessor, successor) = predecessor_gate_records(
         &storage,
         "run-predecessor-gate",
@@ -1846,7 +1846,7 @@ fn restart_loaded_pending_map_still_blocks_a_proven_successor() {
         .store_pending_agent_action(pending_storage_record(&successor, 3).unwrap())
         .unwrap();
 
-    let reloaded = AgentService::new(Arc::clone(&storage));
+    let reloaded = AgentService::new_authorized_for_test(Arc::clone(&storage));
     let loaded = reloaded
         .pending_actions
         .lock()
@@ -2247,7 +2247,7 @@ fn assert_recovered_approved_cancellation() {
         "disabled",
         "",
     );
-    let service = AgentService::new(Arc::clone(&storage));
+    let service = AgentService::new_authorized_for_test(Arc::clone(&storage));
     let now = mycopilot_core::storage::now_ms();
     let run_id = "recovered-approved-cancel-run";
     let action_id = uuid::Uuid::new_v4().to_string();
@@ -2382,7 +2382,7 @@ async fn recovered_approved_mcp_approve_reject_cancel_race_has_one_durable_winne
         "disabled",
         "",
     );
-    let initial = AgentService::new(Arc::clone(&storage));
+    let initial = AgentService::new_authorized_for_test(Arc::clone(&storage));
     let now = mycopilot_core::storage::now_ms();
     let run_id = "recovered-approved-decision-race";
     let action_id = uuid::Uuid::new_v4().to_string();
@@ -2692,7 +2692,7 @@ fn startup_preserves_pending_mcp_tickets_while_pruning_expired_and_orphaned_payl
         "disabled",
         "",
     );
-    let service = AgentService::new(Arc::clone(&storage));
+    let service = AgentService::new_authorized_for_test(Arc::clone(&storage));
     let mut agent_input = serde_json::from_value::<AgentChatInput>(json!({
         "apiUrl": "https://example.test/v1/chat/completions",
         "apiToken": "test-token",
@@ -2848,7 +2848,7 @@ fn mcp_startup_terminalization_uses_durable_identity_when_private_action_is_corr
         "disabled",
         "",
     );
-    let service = AgentService::new(Arc::clone(&storage));
+    let service = AgentService::new_authorized_for_test(Arc::clone(&storage));
     let now = mycopilot_core::storage::now_ms();
     let run_id = "corrupt-mcp-run";
     let action_id = uuid::Uuid::new_v4().to_string();
@@ -2968,7 +2968,7 @@ fn typed_startup_keeps_durable_waiting_and_approved_but_never_replays_executing(
         "disabled",
         "",
     );
-    let service = AgentService::new(Arc::clone(&storage));
+    let service = AgentService::new_authorized_for_test(Arc::clone(&storage));
     let now = mycopilot_core::storage::now_ms();
     let mut identities = Vec::new();
     for status in [
@@ -3163,7 +3163,7 @@ async fn expired_mcp_approval_accepts_one_decision_and_settles_execution_normall
     let invoker = Arc::new(InvalidatingMcpInvoker::default());
     let invoker_for_service: Arc<dyn McpToolInvoker> = invoker.clone();
     let now = mycopilot_core::storage::now_ms();
-    let service = AgentService::new(Arc::clone(&storage))
+    let service = AgentService::new_authorized_for_test(Arc::clone(&storage))
         .with_mcp_tool_invoker(invoker_for_service)
         .with_mcp_approval_clock(move || now + 60_000);
     let run_id = "mcp-expired-approval-run";
@@ -3260,7 +3260,7 @@ fn server_source_invalidation_atomically_scrubs_predispatch_and_marks_executing_
         storage: Some(Arc::clone(&storage)),
         ..InvalidatingMcpInvoker::default()
     });
-    let service = AgentService::new(Arc::clone(&storage))
+    let service = AgentService::new_authorized_for_test(Arc::clone(&storage))
         .with_mcp_tool_invoker(invoker.clone() as Arc<dyn McpToolInvoker>);
     let server_uuid = uuid::Uuid::new_v4();
     let server_id = server_uuid.to_string();
@@ -3558,7 +3558,7 @@ fn catalog_generation_invalidation_targets_only_prior_generation_of_same_config_
         storage: Some(Arc::clone(&storage)),
         ..InvalidatingMcpInvoker::default()
     });
-    let service = AgentService::new(Arc::clone(&storage))
+    let service = AgentService::new_authorized_for_test(Arc::clone(&storage))
         .with_mcp_tool_invoker(invoker.clone() as Arc<dyn McpToolInvoker>);
     let server_uuid = uuid::Uuid::new_v4();
     let server_id = server_uuid.to_string();
@@ -4426,7 +4426,7 @@ fn startup_reconciles_published_automatic_direct_file_change_without_replaying_i
     );
     // Construct the Host before seeding the synthetic interrupted turn so startup recovery does
     // not terminalize the fixture trace before its hidden Pending journal exists.
-    let service = AgentService::new(Arc::clone(&storage));
+    let service = AgentService::new_authorized_for_test(Arc::clone(&storage));
     let run_id = "run-automatic-direct-crash";
     let conversation_id = "conversation-automatic-direct-crash";
     let assistant_message_id = "assistant-automatic-direct-crash";
@@ -4577,7 +4577,7 @@ fn startup_reconciles_published_automatic_staged_file_changes_without_replaying_
     let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
     // Construct the Host before seeding the synthetic interrupted turn so startup recovery does
     // not terminalize the fixture trace before its hidden Pending journal exists.
-    let service = AgentService::new(Arc::clone(&storage));
+    let service = AgentService::new_authorized_for_test(Arc::clone(&storage));
     let run_id = "run-automatic-staged-crash";
     let conversation_id = "conversation-automatic-staged-crash";
     let assistant_message_id = "assistant-automatic-staged-crash";
@@ -4700,7 +4700,7 @@ fn startup_finalizes_a_committed_automatic_direct_delete_before_terminal_audit()
     let storage = Arc::new(StorageService::open(&database_path).unwrap());
     // Construct the Host before seeding the synthetic interrupted turn so startup recovery does
     // not terminalize the fixture trace before its hidden Pending journal exists.
-    let service = AgentService::new(Arc::clone(&storage));
+    let service = AgentService::new_authorized_for_test(Arc::clone(&storage));
     let run_id = "run-automatic-delete-finalize-crash";
     let conversation_id = "conversation-automatic-delete-finalize-crash";
     let assistant_message_id = "assistant-automatic-delete-finalize-crash";
@@ -4843,7 +4843,7 @@ fn startup_finalizes_a_committed_automatic_direct_delete_before_terminal_audit()
 fn file_change_pending_checkpoint_requires_exact_canonical_pending_action_id() {
     let fixture = tempdir().unwrap();
     let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
-    let service = AgentService::new(Arc::clone(&storage));
+    let service = AgentService::new_authorized_for_test(Arc::clone(&storage));
     let run_id = "run-file-change-checkpoint-id";
     let conversation_id = "conversation-file-change-checkpoint-id";
     let assistant_message_id = "assistant-file-change-checkpoint-id";
@@ -4959,7 +4959,7 @@ fn pending_store_rejects_missing_checkpoint_or_exact_context_before_persistence(
         "disabled",
         "",
     );
-    let service = AgentService::new(Arc::clone(&storage));
+    let service = AgentService::new_authorized_for_test(Arc::clone(&storage));
     let mut base_input = serde_json::from_value::<AgentChatInput>(json!({
         "apiUrl": "https://example.test/v1/chat/completions",
         "apiToken": "test-token",
@@ -5037,7 +5037,7 @@ fn mcp_pending_identity_mismatch_is_rejected_on_store_and_malformed_resume_is_re
         "disabled",
         "",
     );
-    let service = AgentService::new(Arc::clone(&storage));
+    let service = AgentService::new_authorized_for_test(Arc::clone(&storage));
     let mut base_input = serde_json::from_value::<AgentChatInput>(json!({
         "apiUrl": "https://example.test/v1/chat/completions",
         "apiToken": "test-token",
@@ -5850,7 +5850,8 @@ fn auto_activation_has_durable_non_replayable_receipt_and_cancellation_revokes_g
         let provider = auto_activation_test_provider();
         let runtime =
             mycopilot_core::BuiltinCapabilityRuntime::new(Arc::new(provider.clone())).unwrap();
-        let service = AgentService::new(Arc::clone(&storage)).with_builtin_capabilities(runtime);
+        let service = AgentService::new_authorized_for_test(Arc::clone(&storage))
+            .with_builtin_capabilities(runtime);
         let run_id = if cancel_during_approval {
             "auto-activation-cancel-run"
         } else {
@@ -6075,7 +6076,7 @@ fn builtin_capability_pending_binding_requires_exact_action_and_call_ids() {
             decision_source: Some("manual_pending".to_string()),
         })
         .unwrap();
-    let service = AgentService::new(Arc::clone(&storage));
+    let service = AgentService::new_authorized_for_test(Arc::clone(&storage));
     let failed = service.store_pending_action(
         run_id,
         "builtin-capability-binding-conversation",
@@ -6113,7 +6114,7 @@ fn builtin_capability_pending_binding_requires_exact_action_and_call_ids() {
         .unwrap());
     drop(service);
 
-    let restarted = AgentService::new(Arc::clone(&storage));
+    let restarted = AgentService::new_authorized_for_test(Arc::clone(&storage));
     let pending = restarted.list_pending_actions();
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0].action_id, action_id);
@@ -6210,7 +6211,7 @@ async fn builtin_capability_approval_waits_past_its_proposal_window_and_can_stil
     };
     input.context = Some(run_context.clone());
     input.resume_checkpoint.as_mut().unwrap().run_context = Some(run_context);
-    let service = AgentService::new(Arc::clone(&storage))
+    let service = AgentService::new_authorized_for_test(Arc::clone(&storage))
         .with_builtin_capabilities(runtime)
         .with_mcp_approval_clock(move || expiry_now_ms);
     seed_durable_pending_owner(
@@ -6440,7 +6441,7 @@ fn automatic_builtin_sensitive_journal_is_durable_cancelable_and_non_replayable(
         "disabled",
         "",
     );
-    let service = AgentService::new(Arc::clone(&storage));
+    let service = AgentService::new_authorized_for_test(Arc::clone(&storage));
     let run_id = "auto-builtin-sensitive-journal-run";
     let (manual_action_id, _) = store_builtin_sensitive_test_pending(
         &service,
@@ -6549,7 +6550,8 @@ async fn automatic_builtin_sensitive_execution_claims_before_invoke_and_never_re
         };
         let (runtime, provider, approval, input) =
             auto_sensitive_test_fixture(Arc::clone(&storage), run_id, "auto-sensitive-call");
-        let service = AgentService::new(Arc::clone(&storage)).with_builtin_capabilities(runtime);
+        let service = AgentService::new_authorized_for_test(Arc::clone(&storage))
+            .with_builtin_capabilities(runtime);
         let context =
             AutoApprovedActionContext::new(input.clone(), run_id.to_string(), None, None, None);
         let cancellation = AgentCancellationToken::new();
@@ -6621,7 +6623,7 @@ fn builtin_sensitive_result_commit_failure_terminalizes_and_notifies_once() {
         "disabled",
         "",
     );
-    let service = AgentService::new(Arc::clone(&storage));
+    let service = AgentService::new_authorized_for_test(Arc::clone(&storage));
     let run_id = "builtin-sensitive-commit-failure-run";
     let conversation_id = "builtin-sensitive-commit-failure-conversation";
     let assistant_message_id = "builtin-sensitive-commit-failure-assistant";
@@ -6745,7 +6747,7 @@ fn builtin_sensitive_post_commit_error_adopts_receipt_and_emits_safe_result() {
         "disabled",
         "",
     );
-    let service = AgentService::new(Arc::clone(&storage));
+    let service = AgentService::new_authorized_for_test(Arc::clone(&storage));
     let run_id = "builtin-sensitive-post-commit-run";
     let conversation_id = "builtin-sensitive-post-commit-conversation";
     let assistant_message_id = "builtin-sensitive-post-commit-assistant";
@@ -6863,8 +6865,8 @@ fn builtin_sensitive_approval_tick_preserves_ticket_and_turn_ownership() {
         "",
     );
     let expiry_clock_ms = mycopilot_core::storage::now_ms().saturating_add(901_000);
-    let service =
-        AgentService::new(Arc::clone(&storage)).with_mcp_approval_clock(move || expiry_clock_ms);
+    let service = AgentService::new_authorized_for_test(Arc::clone(&storage))
+        .with_mcp_approval_clock(move || expiry_clock_ms);
     let run_id = "builtin-sensitive-expiry-tick-run";
     let conversation_id = "builtin-sensitive-expiry-tick-conversation";
     let assistant_message_id = "builtin-sensitive-expiry-tick-assistant";
@@ -6951,8 +6953,8 @@ async fn approving_an_expired_builtin_sensitive_action_accepts_a_normal_failed_r
         "",
     );
     let expiry_clock_ms = mycopilot_core::storage::now_ms().saturating_add(901_000);
-    let service =
-        AgentService::new(Arc::clone(&storage)).with_mcp_approval_clock(move || expiry_clock_ms);
+    let service = AgentService::new_authorized_for_test(Arc::clone(&storage))
+        .with_mcp_approval_clock(move || expiry_clock_ms);
     let run_id = "builtin-sensitive-expiry-decision-run";
     let conversation_id = "builtin-sensitive-expiry-decision-conversation";
     let assistant_message_id = "builtin-sensitive-expiry-decision-assistant";
@@ -7035,7 +7037,7 @@ fn builtin_sensitive_startup_terminalization_is_typed_atomic_and_secret_free() {
         "disabled",
         "",
     );
-    let service = AgentService::new(Arc::clone(&storage));
+    let service = AgentService::new_authorized_for_test(Arc::clone(&storage));
     let now_ms = mycopilot_core::storage::now_ms();
     let now_seconds = u64::try_from(now_ms).unwrap() / 1_000;
     let secret = "BUILTIN_STARTUP_RAW_ARGS_MUST_NEVER_PERSIST";
@@ -7262,7 +7264,7 @@ fn builtin_sensitive_rejection_crash_window_recovers_the_exact_rejected_receipt(
         "disabled",
         "",
     );
-    let service = AgentService::new(Arc::clone(&storage));
+    let service = AgentService::new_authorized_for_test(Arc::clone(&storage));
     let run_id = "builtin-sensitive-reject-crash-run";
     let conversation_id = "builtin-sensitive-reject-crash-conversation";
     let assistant_message_id = "builtin-sensitive-reject-crash-assistant";
@@ -7337,7 +7339,7 @@ fn builtin_sensitive_rejection_crash_window_recovers_the_exact_rejected_receipt(
     // Simulate a process crash after the atomic receipt but before the in-memory continuation
     // claim. Startup must adopt that exact receipt, never reinterpret refusal as dispatch.
     drop(service);
-    let restarted = AgentService::new(Arc::clone(&storage));
+    let restarted = AgentService::new_authorized_for_test(Arc::clone(&storage));
     assert!(!restarted
         .pending_actions
         .lock()
@@ -7394,7 +7396,7 @@ fn builtin_sensitive_cancel_reaches_pre_spawn_and_dispatching_process_guards() {
             "disabled",
             "",
         );
-        let service = AgentService::new(Arc::clone(&storage));
+        let service = AgentService::new_authorized_for_test(Arc::clone(&storage));
         let run_id = format!("builtin-sensitive-cancel-run-{index}");
         let conversation_id = format!("builtin-sensitive-cancel-conversation-{index}");
         let assistant_message_id = format!("builtin-sensitive-cancel-assistant-{index}");
@@ -7460,7 +7462,7 @@ async fn builtin_sensitive_reject_wins_approve_cancel_and_double_reject_races_on
         "disabled",
         "",
     );
-    let service = AgentService::new(Arc::clone(&storage));
+    let service = AgentService::new_authorized_for_test(Arc::clone(&storage));
     let run_id = "builtin-sensitive-reject-race-run";
     let conversation_id = "builtin-sensitive-reject-race-conversation";
     let assistant_message_id = "builtin-sensitive-reject-race-assistant";
@@ -7560,7 +7562,7 @@ async fn builtin_sensitive_approve_claim_blocks_late_reject_and_settles_once() {
         "disabled",
         "",
     );
-    let service = AgentService::new(Arc::clone(&storage));
+    let service = AgentService::new_authorized_for_test(Arc::clone(&storage));
     let run_id = "builtin-sensitive-approve-race-run";
     let conversation_id = "builtin-sensitive-approve-race-conversation";
     let assistant_message_id = "builtin-sensitive-approve-race-assistant";
@@ -7646,7 +7648,7 @@ async fn builtin_sensitive_approve_claim_blocks_late_reject_and_settles_once() {
     );
 
     drop(service);
-    let restarted = AgentService::new(Arc::clone(&storage));
+    let restarted = AgentService::new_authorized_for_test(Arc::clone(&storage));
     assert!(!restarted
         .pending_actions
         .lock()
@@ -7689,7 +7691,7 @@ fn pending_resume_sqlite_row_contains_only_versioned_secret_free_projection() {
         "tavily",
         SEARCH_CANARY,
     );
-    let service = AgentService::new(Arc::clone(&storage));
+    let service = AgentService::new_authorized_for_test(Arc::clone(&storage));
     let mut agent_input = serde_json::from_value::<AgentChatInput>(json!({
         "apiUrl": sensitive_api_url.clone(),
         "apiToken": API_TOKEN_CANARY,
@@ -7769,7 +7771,7 @@ fn pending_resume_sqlite_row_contains_only_versioned_secret_free_projection() {
     });
     storage.save_model_settings(edited).unwrap();
 
-    let reloaded = AgentService::new(storage);
+    let reloaded = AgentService::new_authorized_for_test(storage);
     let pending = reloaded
         .pending_actions
         .lock()
@@ -8503,7 +8505,7 @@ fn agent_service_startup_retires_an_orphaned_cancelled_conversation_trace() {
         )
         .unwrap();
 
-    let _service = AgentService::new(storage.clone());
+    let _service = AgentService::new_authorized_for_test(storage.clone());
 
     let repaired = storage
         .get_conversation_turn_trace("assistant-orphaned-trace")
@@ -8851,7 +8853,7 @@ async fn skill_script_worker_setup_failure_persists_receipt_and_runs_continuatio
     agent_input.context = Some(run_context.clone());
     agent_input.resume_checkpoint.as_mut().unwrap().run_context = Some(run_context);
 
-    let service = AgentService::new(Arc::clone(&storage));
+    let service = AgentService::new_authorized_for_test(Arc::clone(&storage));
     seed_durable_pending_owner(
         &storage,
         conversation_id,
@@ -9054,7 +9056,7 @@ async fn assert_queued_skill_script_worker_panic_is_supervised(
     agent_input.context = Some(run_context.clone());
     agent_input.resume_checkpoint.as_mut().unwrap().run_context = Some(run_context);
 
-    let service = AgentService::new(Arc::clone(&storage));
+    let service = AgentService::new_authorized_for_test(Arc::clone(&storage));
     seed_durable_pending_owner(
         &storage,
         conversation_id,
@@ -9639,7 +9641,7 @@ async fn pre_runtime_continuation_failure_terminalizes_turn_and_releases_occupan
     agent_input.context = Some(run_context.clone());
     agent_input.resume_checkpoint.as_mut().unwrap().run_context = Some(run_context);
 
-    let service = AgentService::new(Arc::clone(&storage));
+    let service = AgentService::new_authorized_for_test(Arc::clone(&storage));
     seed_durable_pending_owner(
         &storage,
         conversation_id,
@@ -10257,7 +10259,7 @@ async fn pre_runtime_continuation_failure_cas_conflict_preserves_turn_for_recove
     let fixture = tempdir().unwrap();
     let database_path = fixture.path().join("storage.sqlite");
     let storage = Arc::new(StorageService::open(&database_path).unwrap());
-    let service = AgentService::new(Arc::clone(&storage));
+    let service = AgentService::new_authorized_for_test(Arc::clone(&storage));
     let run_id = "pre-runtime-continuation-conflict-run";
     let conversation_id = "pre-runtime-continuation-conflict-conversation";
     let assistant_message_id = "pre-runtime-continuation-conflict-assistant";
@@ -10408,7 +10410,7 @@ async fn pre_spawn_cancelled_continuation_retries_real_pending_target_and_releas
     let fixture = tempdir().unwrap();
     let database_path = fixture.path().join("storage.sqlite");
     let storage = Arc::new(StorageService::open(&database_path).unwrap());
-    let service = AgentService::new(Arc::clone(&storage));
+    let service = AgentService::new_authorized_for_test(Arc::clone(&storage));
     service
         .reserve_conversation_turn(CONVERSATION_ID, RUN_ID, ASSISTANT_MESSAGE_ID)
         .unwrap();
@@ -10638,7 +10640,7 @@ fn missing_pending_transition_row_fails_closed_without_terminal_success() {
     const MARKER: &str = "MISSING_TRANSITION_SKILL_BODY";
     let fixture = tempdir().unwrap();
     let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
-    let service = AgentService::new(Arc::clone(&storage));
+    let service = AgentService::new_authorized_for_test(Arc::clone(&storage));
     let mut agent_input = serde_json::from_value::<AgentChatInput>(json!({
         "apiUrl": "https://example.test/v1/chat/completions",
         "apiToken": "secret",
@@ -10711,7 +10713,7 @@ fn missing_pending_transition_row_fails_closed_without_terminal_success() {
         PendingActionStatus::Pending
     );
 
-    let reloaded = AgentService::new(storage);
+    let reloaded = AgentService::new_authorized_for_test(storage);
     assert!(reloaded.list_pending_actions().is_empty());
 }
 
@@ -10719,7 +10721,7 @@ fn missing_pending_transition_row_fails_closed_without_terminal_success() {
 fn invalid_checkpoint_tool_call_is_rejected_before_pending_publication() {
     let fixture = tempdir().unwrap();
     let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
-    let service = AgentService::new(Arc::clone(&storage));
+    let service = AgentService::new_authorized_for_test(Arc::clone(&storage));
     let call = AgentToolCall {
         id: "call-invalid-checkpoint".to_string(),
         tool: "approval_tool".to_string(),
@@ -10810,7 +10812,7 @@ fn cancel_finalize_failure_atomically_restores_pending_payload() {
     const MARKER: &str = "CANCEL_ROLLBACK_SKILL_BODY";
     let fixture = tempdir().unwrap();
     let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
-    let service = AgentService::new(Arc::clone(&storage));
+    let service = AgentService::new_authorized_for_test(Arc::clone(&storage));
     let call = AgentToolCall {
         id: "action-cancel-rollback".to_string(),
         tool: "approval_tool".to_string(),
@@ -10913,7 +10915,7 @@ fn cancel_usage_failure_rolls_back_message_trace_and_action_together() {
             unread_at: None,
         })
         .unwrap();
-    let service = AgentService::new(Arc::clone(&storage));
+    let service = AgentService::new_authorized_for_test(Arc::clone(&storage));
     // The invalid usage owner is a deterministic fault injection: the usage insert violates
     // its foreign key only after message and trace writes have run inside the transaction.
     service.register_usage_context(
@@ -11018,7 +11020,7 @@ fn cancelled_file_change_with_durable_abort_never_rolls_back_to_pending() {
             unread_at: None,
         })
         .unwrap();
-    let service = AgentService::new(Arc::clone(&storage));
+    let service = AgentService::new_authorized_for_test(Arc::clone(&storage));
     service.register_usage_context(
         "run-file-change-cancel-failure",
         AgentRunUsageContext {

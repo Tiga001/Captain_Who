@@ -11,7 +11,7 @@ import type { TrustedIpcMain } from './trustedIpc'
 export function registerAgentIpc(
   ipcMain: TrustedIpcMain,
   coreServer: CoreServer,
-  assertCanStartTurn: () => void = () => {
+  assertCanStartTurn: () => void | Promise<void> = () => {
     throw new Error('ACCOUNT_LOGIN_REQUIRED')
   }
 ): void {
@@ -163,13 +163,13 @@ export function registerAgentIpc(
   )
   ipcMain.handle(HOST_CHANNELS.agent.startConversationTurn, (_event, input) =>
     captureHostInvocation(async () => {
-      assertCanStartTurn()
+      await assertCanStartTurn()
       return coreServer.startConversationTurn(input)
     })
   )
   ipcMain.handle(HOST_CHANNELS.agent.rewriteConversationTurn, (_event, input) =>
     captureHostInvocation(async () => {
-      assertCanStartTurn()
+      await assertCanStartTurn()
       return coreServer.rewriteConversationTurn(input)
     })
   )

@@ -282,7 +282,7 @@ fn test_image_bytes(format: image::ImageFormat) -> Vec<u8> {
 fn external_steering_cannot_forge_host_answer_identity_or_publish_a_fake_projection() {
     let fixture = tempdir().unwrap();
     let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
-    let service = AgentService::new(storage);
+    let service = AgentService::new_authorized_for_test(storage);
     let queue = install_active_run(
         &service,
         "run-answer-forgery",
@@ -334,7 +334,7 @@ fn external_steering_cannot_forge_host_answer_identity_or_publish_a_fake_project
 fn steer_run_durably_queues_once_and_reports_applied_on_retry() {
     let fixture = tempdir().unwrap();
     let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
-    let service = AgentService::new(storage);
+    let service = AgentService::new_authorized_for_test(storage);
     let queue = install_active_run(
         &service,
         "run-steer",
@@ -376,7 +376,7 @@ fn steer_run_durably_queues_once_and_reports_applied_on_retry() {
 fn terminal_close_rejects_every_accepted_guidance_and_fences_new_requests() {
     let fixture = tempdir().unwrap();
     let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
-    let service = AgentService::new(storage);
+    let service = AgentService::new_authorized_for_test(storage);
     let queue = install_active_run(
         &service,
         "run-approval-steer",
@@ -452,7 +452,7 @@ fn terminal_close_rejects_every_accepted_guidance_and_fences_new_requests() {
 fn stale_finalizer_cannot_remove_a_new_approval_continuation_queue() {
     let fixture = tempdir().unwrap();
     let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
-    let service = AgentService::new(storage);
+    let service = AgentService::new_authorized_for_test(storage);
     let stale_queue = install_active_run(
         &service,
         "run-approval-resume",
@@ -501,7 +501,7 @@ fn failed_host_cleanup_settles_only_the_inbox_it_still_owns() {
         let fixture = tempdir().unwrap();
         let storage =
             Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
-        let service = AgentService::new(storage.clone());
+        let service = AgentService::new_authorized_for_test(storage.clone());
         let original = install_active_run(
             &service,
             "run-cleanup",
@@ -567,7 +567,7 @@ fn failed_host_cleanup_settles_only_the_inbox_it_still_owns() {
 fn repeated_approval_handoffs_preserve_guidance_identity_attachments_and_admission() {
     let fixture = tempdir().unwrap();
     let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
-    let service = AgentService::new(storage.clone());
+    let service = AgentService::new_authorized_for_test(storage.clone());
     let first_queue = install_active_run(
         &service,
         "run-handoff",
@@ -671,7 +671,7 @@ fn repeated_approval_handoffs_preserve_guidance_identity_attachments_and_admissi
 fn steer_run_rejects_wrong_conversation_and_unsupported_model_images() {
     let fixture = tempdir().unwrap();
     let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
-    let service = AgentService::new(storage);
+    let service = AgentService::new_authorized_for_test(storage);
     install_active_run(
         &service,
         "run-validation",
@@ -714,7 +714,7 @@ fn steer_run_rejects_wrong_conversation_and_unsupported_model_images() {
 fn steer_run_accepts_the_round_four_attachment_matrix_and_mixed_guidance() {
     let fixture = tempdir().unwrap();
     let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
-    let service = AgentService::new(storage.clone());
+    let service = AgentService::new_authorized_for_test(storage.clone());
     install_active_run(
         &service,
         "run-attachment-matrix",
@@ -852,7 +852,7 @@ fn steer_run_accepts_the_round_four_attachment_matrix_and_mixed_guidance() {
 fn steer_run_rejects_invalid_attachment_payloads_limits_and_identity_reuse() {
     let fixture = tempdir().unwrap();
     let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
-    let service = AgentService::new(storage);
+    let service = AgentService::new_authorized_for_test(storage);
     install_active_run(
         &service,
         "run-attachment-validation",
@@ -984,7 +984,7 @@ fn steer_run_rejects_invalid_attachment_payloads_limits_and_identity_reuse() {
 fn attachment_persistence_failure_never_enters_the_runtime_queue() {
     let fixture = tempdir().unwrap();
     let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
-    let service = AgentService::new(storage.clone());
+    let service = AgentService::new_authorized_for_test(storage.clone());
     let queue = install_active_run(
         &service,
         "run-attachment-persistence",
@@ -1083,7 +1083,7 @@ fn service_startup_abandons_guidance_left_queued_by_the_previous_process() {
         })
         .unwrap();
 
-    let _service = AgentService::new(storage.clone());
+    let _service = AgentService::new_authorized_for_test(storage.clone());
     let record = storage
         .load_agent_run_guidance("guidance-startup")
         .unwrap()
@@ -1154,7 +1154,7 @@ async fn conversation_turn_steering_runs_through_rpc_control_trace_and_events() 
     let mut settings = test_model_settings();
     settings.api_url = format!("http://{address}/v1/chat/completions");
     storage.save_model_settings(settings).unwrap();
-    let service = AgentService::new(storage.clone());
+    let service = AgentService::new_authorized_for_test(storage.clone());
     let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
     let turn = service
         .start_conversation_turn(
@@ -1300,7 +1300,7 @@ async fn acknowledged_guidance_is_explicitly_rejected_when_network_retries_are_e
     let mut settings = test_model_settings();
     settings.api_url = format!("http://{address}/v1/chat/completions");
     storage.save_model_settings(settings).unwrap();
-    let service = AgentService::new(storage.clone());
+    let service = AgentService::new_authorized_for_test(storage.clone());
     let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
     let turn = service
         .start_conversation_turn(
@@ -1394,7 +1394,7 @@ async fn guidance_attachments_reach_model_context_and_refresh_runtime_tools_afte
     settings.api_url = format!("http://{address}/v1/chat/completions");
     settings.models[0].supports_image = true;
     storage.save_model_settings(settings).unwrap();
-    let service = AgentService::new(storage.clone());
+    let service = AgentService::new_authorized_for_test(storage.clone());
     let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
     let turn = service
         .start_conversation_turn(
@@ -1563,7 +1563,7 @@ async fn approval_retains_accepted_guidance_until_explicit_stop() {
             1,
         ))
         .unwrap();
-    let service = AgentService::new(storage.clone());
+    let service = AgentService::new_authorized_for_test(storage.clone());
     let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
     let turn = service
         .start_conversation_turn(
@@ -1715,7 +1715,7 @@ async fn approved_run_reopens_steering_and_applies_guidance_to_the_same_turn() {
             1,
         ))
         .unwrap();
-    let service = AgentService::new(storage.clone());
+    let service = AgentService::new_authorized_for_test(storage.clone());
     let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
     let turn = service
         .start_conversation_turn(
@@ -1922,7 +1922,7 @@ async fn guidance_is_accepted_during_approved_command_and_survives_a_second_reje
             1,
         ))
         .unwrap();
-    let service = AgentService::new(storage.clone());
+    let service = AgentService::new_authorized_for_test(storage.clone());
     let (notifications, mut events) = tokio::sync::mpsc::unbounded_channel();
     let turn = service
         .start_conversation_turn(

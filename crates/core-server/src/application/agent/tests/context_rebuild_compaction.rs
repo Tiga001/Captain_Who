@@ -61,7 +61,7 @@ impl CompactedRebuildFixture {
             })
             .unwrap();
         // Startup reconciliation must run before this process creates its active trace.
-        let service = AgentService::new(storage.clone());
+        let service = AgentService::new_authorized_for_test(storage.clone());
         let mut input: AgentChatInput = serde_json::from_value(json!({
             "apiUrl": "https://example.test/v1/chat/completions", "apiToken": "token",
             "model": "model-1", "modelCapabilities": {"imageInput": false},

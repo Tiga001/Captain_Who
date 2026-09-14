@@ -43,7 +43,7 @@ fixture 和测试为准。
 
 [账号登录与云端资料](subsystems/account-login.md) 说明启动蒙版、会话存储、退出登录不影响任务的边界，以及真实账号验收步骤。
 
-[本机 Token 活动与账号许可](subsystems/local-token-usage-and-license.md) 说明纯本机统计、24 小时许可缓存、无损升级及云端先行部署的边界。
+[本机 Token 活动与账号许可](subsystems/local-token-usage-and-license.md) 说明纯本机统计、24 小时许可缓存、开发库显式重置及云端先行部署的边界。
 
 [macOS Arm64 桌面自动更新](subsystems/desktop-updates.md) 说明受限 IPC、手动下载、安全退出安装与 COS 发布验收边界。
 

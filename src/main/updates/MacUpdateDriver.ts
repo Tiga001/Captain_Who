@@ -79,6 +79,10 @@ export class MacUpdateDriver implements DesktopUpdateDriver {
     try {
       await this.updater.downloadUpdate(token)
       if (this.cancelled) throw new Error('Update cancelled')
+      // A verified cached ZIP may not emit download-progress. It still needs native staging.
+      progress(100)
+      // Publishing completion can synchronously trigger shutdown through a state subscriber.
+      if (this.cancelled) throw new Error('Update cancelled')
       // Stage natively without closing windows. Squirrel cannot cancel this phase and may
       // apply a prepared update on next launch even without quitAndInstall. Do not invent a
       // timeout that reports failure/retry while native preparation is still running.

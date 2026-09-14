@@ -4,7 +4,7 @@ use super::*;
 fn manual_context_compaction_rpc_rejects_client_selected_context_and_dispatches_status() {
     let directory = tempfile::tempdir().unwrap();
     let storage = Arc::new(StorageService::open(&directory.path().join("storage.sqlite")).unwrap());
-    let service = AgentService::new(storage.clone());
+    let service = AgentService::new_authorized_for_test(storage.clone());
     let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
     for field in [
         "coveredThroughMessageId",

@@ -247,12 +247,12 @@ notification 只是失效信号。Renderer 通过 tree snapshot 与 `agent.colla
 当前 canonical storage 是 **v47**。唯一真源：
 
 ```rust
-pub const STORAGE_SCHEMA_VERSION: i32 = 46;
+pub const STORAGE_SCHEMA_VERSION: i32 = 47;
 ```
 
 当前 Runtime checkpoint 为 **v19**，拒绝旧版本 checkpoint；v19 使用源文件夹的 World State 模型 patch 投影，旧检查点中的整体替换文本不做兼容转换。此前模型协作身份变更也不转换含旧 Agent ID 的聊天、上下文或 checkpoint。
 
-v47 新增本机 Token 统计，唯一无损原地升级为 exact v46 → v47。v46 为 Run/Wake 持久化冻结工作区并集，v45 已引入多文件夹项目（`project_folders`）。其他旧版本（含 v34–v45）、catalog fingerprint 不匹配、非空未版本化库或外键违规仍返回 `development_storage_schema_reset_required`，由显式 `storage:reset-dev` 保留配置后重建。历史文档中的 v7/v8/v10/v11/v17/v19/v20/v22/v23/v24/v25/v26 只是 rollout 阶段标签，不是当前兼容声明；release runner 的 storage step 标为 canonical v47。
+v47 新增本机 Token 统计；空库原子创建 v47，已有库只接受通过 exact catalog fingerprint 和外键校验的当前 v47，不提供自动升级。v46 为 Run/Wake 持久化冻结工作区并集，v45 已引入多文件夹项目（`project_folders`）。所有旧版本（包括 exact v46 及 v34–v45）、catalog fingerprint 不匹配、非空未版本化库或外键违规均返回 `development_storage_schema_reset_required`，不修改源库，再由显式 `storage:reset-dev` 保留配置后重建。历史文档中的 v7/v8/v10/v11/v17/v19/v20/v22/v23/v24/v25/v26 只是 rollout 阶段标签，不是当前兼容声明；release runner 的 storage step 标为 canonical v47。
 
 ## 9. 代码真源
 

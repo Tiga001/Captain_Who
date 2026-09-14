@@ -4,7 +4,7 @@ use super::*;
 fn settings_rpc_persists_and_notifies_only_successful_revision_changes() {
     let directory = tempfile::tempdir().unwrap();
     let storage = Arc::new(StorageService::open(&directory.path().join("storage.sqlite")).unwrap());
-    let service = AgentService::new(storage.clone());
+    let service = AgentService::new_authorized_for_test(storage.clone());
     let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
     let call = |method: &str, params: Value| {
         handle_request(

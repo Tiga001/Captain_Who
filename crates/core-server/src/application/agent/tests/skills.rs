@@ -122,7 +122,8 @@ fn bundled_skill_crosses_the_production_turn_boundary_without_public_instruction
         .unwrap()
         .contains(BUNDLED_INSTRUCTION_MARKER));
 
-    let service = AgentService::new(Arc::clone(&storage)).with_skills_service(Arc::new(skills));
+    let service = AgentService::new_authorized_for_test(Arc::clone(&storage))
+        .with_skills_service(Arc::new(skills));
     let tool_projection = service
         .context_window_tool_projection(
             &prepared.agent_input,
@@ -209,7 +210,8 @@ fn bundled_skill_activates_without_a_project_in_turn_and_preview_paths() {
         descriptor.id().as_str()
     );
 
-    let service = AgentService::new(Arc::clone(&storage)).with_skills_service(skills);
+    let service =
+        AgentService::new_authorized_for_test(Arc::clone(&storage)).with_skills_service(skills);
     let preview = service
         .get_context_window_snapshot(AgentContextWindowSnapshotInput {
             conversation_id: None,
@@ -389,7 +391,8 @@ fn omitted_model_context_window_uses_the_same_backend_default_for_turn_and_previ
         Some(mycopilot_core::storage::models::DEFAULT_MODEL_CONTEXT_WINDOW_TOKENS)
     );
 
-    let service = AgentService::new(Arc::clone(&storage)).with_skills_service(skills);
+    let service =
+        AgentService::new_authorized_for_test(Arc::clone(&storage)).with_skills_service(skills);
     let preview = service
         .get_context_window_snapshot(AgentContextWindowSnapshotInput {
             conversation_id: None,
@@ -451,7 +454,8 @@ fn disabled_global_skill_is_rejected_by_turn_and_preview_paths() {
         .unwrap()
         .is_none());
 
-    let service = AgentService::new(Arc::clone(&storage)).with_skills_service(skills);
+    let service =
+        AgentService::new_authorized_for_test(Arc::clone(&storage)).with_skills_service(skills);
     let preview_error = service
         .get_context_window_snapshot(AgentContextWindowSnapshotInput {
             conversation_id: None,
@@ -503,7 +507,8 @@ fn workspace_skill_without_a_project_is_rejected_explicitly() {
     );
     assert!(turn_data.message.contains("requires a project"));
 
-    let service = AgentService::new(Arc::clone(&storage)).with_skills_service(skills);
+    let service =
+        AgentService::new_authorized_for_test(Arc::clone(&storage)).with_skills_service(skills);
     let preview_error = service
         .get_context_window_snapshot(AgentContextWindowSnapshotInput {
             conversation_id: None,
@@ -667,7 +672,8 @@ fn installed_skill_crosses_the_production_turn_boundary_without_instruction_leak
         .unwrap()
         .permissions
         .write = AgentWritePermission::WorkspaceOnly;
-    let service = AgentService::new(Arc::clone(&storage)).with_skills_service(Arc::clone(&skills));
+    let service = AgentService::new_authorized_for_test(Arc::clone(&storage))
+        .with_skills_service(Arc::clone(&skills));
     let mut dynamically_activated_input = prepared.agent_input.clone();
     dynamically_activated_input.skill_activation = None;
     let frozen_discovery = dynamically_activated_input
@@ -1085,7 +1091,7 @@ fn installed_skill_crosses_the_production_turn_boundary_without_instruction_leak
                 .with_installed_source(&store_root)
                 .unwrap(),
         );
-        let restarted = AgentService::new(Arc::clone(&storage))
+        let restarted = AgentService::new_authorized_for_test(Arc::clone(&storage))
             .with_skills_service(Arc::clone(&restarted_skills));
         let restored = restarted
             .restore_skill_resource_session(&prepared.agent_input)
@@ -1279,7 +1285,8 @@ fn existing_conversation_rejects_cross_project_skill_turn_and_preview() {
     assert_eq!(unchanged.project_id.as_deref(), Some("project-a"));
     assert_eq!(unchanged.messages.len(), 1);
 
-    let service = AgentService::new(Arc::clone(&storage)).with_skills_service(skills);
+    let service =
+        AgentService::new_authorized_for_test(Arc::clone(&storage)).with_skills_service(skills);
     let preview_error = service
         .get_context_window_snapshot(AgentContextWindowSnapshotInput {
             conversation_id: Some("conversation-project-boundary".to_string()),

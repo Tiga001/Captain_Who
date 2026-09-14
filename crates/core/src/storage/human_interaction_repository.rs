@@ -204,7 +204,7 @@ fn create_request_in_transaction(
     load_request(tx, &owner.conversation_id, &request_id)
 }
 
-fn load_request(
+pub(crate) fn load_request(
     connection: &Connection,
     conversation_id: &str,
     request_id: &str,

@@ -50,7 +50,7 @@ fn agent_service_project_deletion_reaches_tree_aware_storage() {
         "conversation-agent-tree",
         "agent-tree-root",
     );
-    let service = AgentService::new(Arc::clone(&storage));
+    let service = AgentService::new_authorized_for_test(Arc::clone(&storage));
 
     service.delete_project("project-agent-tree").unwrap();
 
@@ -76,7 +76,7 @@ fn agent_service_root_conversation_deletion_reaches_tree_aware_storage() {
         "conversation-agent-root",
         "agent-conversation-root",
     );
-    let service = AgentService::new(Arc::clone(&storage));
+    let service = AgentService::new_authorized_for_test(Arc::clone(&storage));
 
     service
         .delete_conversation("conversation-agent-root")

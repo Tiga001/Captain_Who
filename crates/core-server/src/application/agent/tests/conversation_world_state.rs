@@ -208,7 +208,7 @@ async fn workspace_source_patches_adopt_only_new_root_runs_and_preview_never_wri
     project.folders[0].id = "workspace-private-original-id".into();
     project.folders[0].alias = "app".into();
     storage.save_project(project.clone()).unwrap();
-    let service = AgentService::new(storage.clone());
+    let service = AgentService::new_authorized_for_test(storage.clone());
     let (notifications, mut events) = unbounded_channel();
     let permissions = AgentPermissions {
         command: AgentCommandPermission::RequireApproval,
@@ -412,7 +412,7 @@ async fn cross_run_web_policy_commits_at_request_boundaries_and_preview_never_wr
     let mut settings = test_model_settings();
     settings.api_url = format!("http://{address}/v1/chat/completions");
     storage.save_model_settings(settings).unwrap();
-    let service = AgentService::new(storage.clone());
+    let service = AgentService::new_authorized_for_test(storage.clone());
     let (notifications, mut events) = unbounded_channel();
     let mut turns = Vec::new();
     let mut wires = Vec::new();

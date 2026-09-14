@@ -86,7 +86,12 @@ async fn lazy_root_has_a_stable_parent_name_for_child_messages_during_approval()
     let database_path = fixture.path().join("parent-name-approval.sqlite");
     let storage = Arc::new(StorageService::open(&database_path).unwrap());
     storage
-        .save_project(ProjectRecord::with_primary_folder(PROJECT.to_string(), "Parent name approval".to_string(), fixture.path().to_string_lossy().into_owned(), 1))
+        .save_project(ProjectRecord::with_primary_folder(
+            PROJECT.to_string(),
+            "Parent name approval".to_string(),
+            fixture.path().to_string_lossy().into_owned(),
+            1,
+        ))
         .unwrap();
     let mut settings = test_model_settings();
     settings.api_url = format!("http://{address}/v1/chat/completions");
@@ -102,6 +107,7 @@ async fn lazy_root_has_a_stable_parent_name_for_child_messages_during_approval()
         2,
     )
     .unwrap();
+    service.grant_execution_access_for_test();
     let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
     let turn = service
         .start_conversation_turn(

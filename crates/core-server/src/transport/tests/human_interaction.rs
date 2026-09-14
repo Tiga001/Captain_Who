@@ -59,7 +59,7 @@ fn human_interaction_settlement_rpc_reports_persisted_pending_facts_and_keeps_ig
     use mycopilot_core::storage::human_interaction_repository::HostHumanInteractionOwner;
     let directory = tempfile::tempdir().unwrap();
     let storage = Arc::new(StorageService::open(&directory.path().join("storage.sqlite")).unwrap());
-    let service = AgentService::new(storage.clone());
+    let service = AgentService::new_authorized_for_test(storage.clone());
     // Seed after startup reconciliation: this is a currently active Host-owned turn.
     seed_human_question_root(&storage);
     let owner = HostHumanInteractionOwner {
@@ -166,7 +166,7 @@ fn human_interaction_settlement_rpc_reports_persisted_pending_facts_and_keeps_ig
 fn human_interaction_settings_rpc_commits_cas_before_notification_and_rejects_unknown_authority() {
     let directory = tempfile::tempdir().unwrap();
     let storage = Arc::new(StorageService::open(&directory.path().join("storage.sqlite")).unwrap());
-    let service = AgentService::new(storage.clone());
+    let service = AgentService::new_authorized_for_test(storage.clone());
     let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
     let call = |method: &str, params: Value| {
         handle_request(

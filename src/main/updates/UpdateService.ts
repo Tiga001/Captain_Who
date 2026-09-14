@@ -3,6 +3,7 @@ import type { UpdateState } from '@mycopilot/host-api'
 export interface DesktopUpdateDriver {
   check(): Promise<{ version: string } | null>
   /** Resolves only after both ZIP verification and native macOS staging have completed. */
+  // Progress 100 means transfer complete (including a cached ZIP), not ready to install.
   download(progress: (percent: number) => void): Promise<void>
   install(): void
   /** Cancel ZIP transfer / stop observing during shutdown; native staging is not cancellable. */
@@ -93,7 +94,10 @@ export class UpdateService {
         )
           return
         const next = Math.max(this.state.percent, Math.min(100, Math.max(0, Math.floor(percent))))
-        if (next !== this.state.percent) this.publish({ percent: next })
+        // Transfer completion still leaves integrity checks and native preparation pending.
+        // Keep this phase until the driver resolves; never advance it on a renderer timer.
+        if (next === 100) this.publish({ status: 'preparing', percent: 100 })
+        else if (next !== this.state.percent) this.publish({ percent: next })
       })
       .then(() => {
         if (this.stopped || generation !== this.generation || this.lifecycle.isShuttingDown())

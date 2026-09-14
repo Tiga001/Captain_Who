@@ -389,7 +389,7 @@ fn expiry_tick_preserves_human_approval_tickets_and_does_not_touch_payloads() {
     let cutoff = now_ms().saturating_add(120_000);
     let now = Arc::new(AtomicI64::new(cutoff));
     let invoker = Arc::new(ExpiryInvoker::default());
-    let service = AgentService::new(Arc::clone(&storage))
+    let service = AgentService::new_authorized_for_test(Arc::clone(&storage))
         .with_mcp_tool_invoker(Arc::clone(&invoker) as Arc<dyn McpToolInvoker>)
         .with_mcp_approval_clock({
             let now = Arc::clone(&now);
@@ -472,7 +472,7 @@ fn expiry_tick_does_not_arbitrate_or_rewrite_durable_action_status() {
     let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
     let now = 2_000_000;
     let invoker = Arc::new(ExpiryInvoker::default());
-    let service = AgentService::new(Arc::clone(&storage))
+    let service = AgentService::new_authorized_for_test(Arc::clone(&storage))
         .with_mcp_tool_invoker(Arc::clone(&invoker) as Arc<dyn McpToolInvoker>)
         .with_mcp_approval_clock(move || now);
     let (storage_id, _) = store_action(

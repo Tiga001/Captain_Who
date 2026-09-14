@@ -505,6 +505,7 @@ async fn fake_provider_drives_all_six_tools_through_runtime_host_and_server_serv
         4,
     )
     .unwrap();
+    service.grant_execution_access_for_test();
     let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
     let input = AgentConversationTurnInput {
         conversation_id: Some(ROOT_CONVERSATION_ID.to_string()),
@@ -1388,6 +1389,7 @@ async fn interrupt_agent_stops_a_child_waiting_on_a_handed_off_command_session()
         2,
     )
     .unwrap();
+    service.grant_execution_access_for_test();
     service.command_sessions = AgentCommandSessionRegistry::with_manager(
         Arc::clone(&storage),
         CommandSessionManager::default(),

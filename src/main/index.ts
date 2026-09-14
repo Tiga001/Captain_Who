@@ -55,7 +55,6 @@ import { CloudBaseAuthDriver } from './auth/CloudBaseAuthDriver'
 import { SessionStore } from './auth/SessionStore'
 import { ACCOUNT_SESSION_SCOPE } from './auth/accountConfig'
 import { LicenseService } from './auth/LicenseService'
-import { LicenseCacheStore } from './auth/LicenseCacheStore'
 import { fetchAccountLicense } from './auth/LicenseApiClient'
 import { registerLicenseIpc } from './auth/licenseIpc'
 import { LicenseManagementService } from './auth/LicenseManagementService'
@@ -335,11 +334,7 @@ async function initializeApplication(): Promise<void> {
   )
   const disposeAuthIpc = registerAuthIpc(accountAuth, isTrustedRendererEvent)
   app.once('will-quit', disposeAuthIpc)
-  const accountLicense = new LicenseService(
-    accountAuth,
-    new LicenseCacheStore(appDataRoot, safeStorage, ACCOUNT_SESSION_SCOPE),
-    fetchAccountLicense
-  )
+  const accountLicense = new LicenseService(accountAuth, fetchAccountLicense)
   app.once(
     'will-quit',
     registerLicenseIpc(
@@ -530,7 +525,10 @@ async function initializeApplication(): Promise<void> {
       accountAuth.assertCanStartTurn()
       accountLicense.assertCanStartTurn()
     },
-    () => executionAccess.sync()
+    () => {
+      coreServer.start()
+      return executionAccess.sync()
+    }
   )
   if (mainWindow?.isVisible()) disposeHostIpc.beginNotificationDelivery()
   hostInitializationReady = true

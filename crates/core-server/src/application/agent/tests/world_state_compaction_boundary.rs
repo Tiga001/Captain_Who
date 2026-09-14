@@ -75,7 +75,7 @@ async fn prepared_request_survives_exact_trace_compaction_and_real_host_rebuild(
             unread_at: None,
         })
         .unwrap();
-    let service = AgentService::new(storage.clone());
+    let service = AgentService::new_authorized_for_test(storage.clone());
     let mut input: AgentChatInput = serde_json::from_value(json!({
         "apiUrl": format!("http://{address}/v1/chat/completions"), "apiToken": "test-token", "model": "model-1", "modelCapabilities": {"imageInput":false}, "contextWindowTokens":128000, "messages":[],
     })).unwrap();

@@ -80,6 +80,7 @@ describe('MacUpdateDriver staging and installation', () => {
 
     zip.resolve(['/fixture/cache/CaptainWho-1.2.3-arm64.zip'])
     await zip.promise
+    expect(progress).toHaveBeenLastCalledWith(100)
     expect(native.checkForUpdates).toHaveBeenCalledTimes(1)
     expect(prepared).not.toHaveBeenCalled()
     expect(updater.quitAndInstall).not.toHaveBeenCalled()
@@ -109,11 +110,15 @@ describe('MacUpdateDriver staging and installation', () => {
     const download = driver.download(progress)
     zip.resolve([])
     await zip.promise
+    // Cache hits have no SDK transfer events; report completion before native staging finishes.
+    expect(progress).toHaveBeenCalledExactlyOnceWith(100)
+    expect(native.checkForUpdates).toHaveBeenCalledTimes(1)
+    expect(() => driver.install()).toThrow('not ready')
     native.emit('update-downloaded')
     await download
 
     updater.emit('download-progress', { percent: 100 })
-    expect(progress).not.toHaveBeenCalled()
+    expect(progress).toHaveBeenCalledExactlyOnceWith(100)
     expect(outsideProgress).toHaveBeenCalledTimes(1)
     expect(native.listeners('update-downloaded')).toEqual([outsidePrepared])
     expect(native.listeners('update-not-available')).toEqual([outsideUnavailable])
@@ -255,6 +260,20 @@ describe('MacUpdateDriver staging and installation', () => {
     expect(updater.quitAndInstall).not.toHaveBeenCalled()
     expect(updater.listenerCount('download-progress')).toBe(0)
     expect(() => driver.install()).toThrow('not ready')
+  })
+
+  it('does not start native staging when completion publication triggers shutdown', async () => {
+    const { driver, native, updater, zip } = harness()
+    const failed = expect(driver.download(() => driver.cancel())).rejects.toThrow(
+      'Update cancelled'
+    )
+    zip.resolve([])
+    await failed
+
+    expect(native.checkForUpdates).not.toHaveBeenCalled()
+    expect(updater.quitAndInstall).not.toHaveBeenCalled()
+    expect(native.listenerCount('update-downloaded')).toBe(0)
+    expect(updater.listenerCount('download-progress')).toBe(0)
   })
 
   it('stops the JS preparation wait and further install dispatch when cancelled during native staging', async () => {

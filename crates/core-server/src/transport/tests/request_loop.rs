@@ -69,7 +69,7 @@ impl mycopilot_core::office::OfficeEngine for SlowOfficeStatusEngine {
 async fn office_status_probe_runs_off_the_request_loop_and_returns_a_strict_result() {
     let temp = tempfile::tempdir().unwrap();
     let storage = Arc::new(StorageService::open(&temp.path().join("storage.sqlite")).unwrap());
-    let agent_service = AgentService::new(Arc::clone(&storage))
+    let agent_service = AgentService::new_authorized_for_test(Arc::clone(&storage))
         .with_office_engine(Arc::new(SlowOfficeStatusEngine));
     let installations =
         Arc::new(SkillInstallationService::new(temp.path().join("skills")).unwrap());
@@ -142,8 +142,8 @@ async fn office_status_probe_runs_off_the_request_loop_and_returns_a_strict_resu
 fn office_status_rejects_even_empty_parameter_objects() {
     let temp = tempfile::tempdir().unwrap();
     let storage = Arc::new(StorageService::open(&temp.path().join("storage.sqlite")).unwrap());
-    let agent_service =
-        AgentService::new(storage).with_office_engine(Arc::new(SlowOfficeStatusEngine));
+    let agent_service = AgentService::new_authorized_for_test(storage)
+        .with_office_engine(Arc::new(SlowOfficeStatusEngine));
     let request = serde_json::from_value::<JsonRpcRequest>(json!({
         "jsonrpc": "2.0",
         "id": 7,
@@ -177,7 +177,7 @@ async fn request_loop_routes_skills_list_through_the_bounded_dispatcher() {
             1,
         ))
         .unwrap();
-    let agent_service = AgentService::new(Arc::clone(&storage));
+    let agent_service = AgentService::new_authorized_for_test(Arc::clone(&storage));
     let skill_installation_service =
         Arc::new(SkillInstallationService::new(temp.path().join("skills")).unwrap());
     let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel();
@@ -265,7 +265,7 @@ async fn changed_enablement_emits_one_invalidation_notification() {
         }
     });
     let input = format!("{request_value}\n");
-    let agent_service = AgentService::new(Arc::clone(&storage));
+    let agent_service = AgentService::new_authorized_for_test(Arc::clone(&storage));
     let installations =
         Arc::new(SkillInstallationService::new(temp.path().join("skills")).unwrap());
     let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel();
@@ -575,7 +575,7 @@ async fn image_artifact_permit_is_held_until_the_large_response_is_flushed() {
 async fn request_loop_remains_responsive_while_filesystem_workers_are_blocked() {
     let temp = tempfile::tempdir().unwrap();
     let storage = Arc::new(StorageService::open(&temp.path().join("storage.sqlite")).unwrap());
-    let agent_service = AgentService::new(Arc::clone(&storage));
+    let agent_service = AgentService::new_authorized_for_test(Arc::clone(&storage));
     let skills_service = Arc::new(SkillsService::new());
     let skill_installation_service =
         Arc::new(SkillInstallationService::new(temp.path().join("skills")).unwrap());
@@ -673,7 +673,7 @@ async fn request_loop_remains_responsive_while_filesystem_workers_are_blocked() 
 async fn artifact_read_admission_is_bounded_and_does_not_block_core_requests() {
     let temp = tempfile::tempdir().unwrap();
     let storage = Arc::new(StorageService::open(&temp.path().join("storage.sqlite")).unwrap());
-    let agent_service = AgentService::new(Arc::clone(&storage));
+    let agent_service = AgentService::new_authorized_for_test(Arc::clone(&storage));
     let installations =
         Arc::new(SkillInstallationService::new(temp.path().join("skills")).unwrap());
     let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel();
@@ -760,7 +760,7 @@ async fn core_shutdown_settles_the_managed_playwright_runtime_before_outbound_cl
 
     let temp = tempfile::tempdir().unwrap();
     let storage = Arc::new(StorageService::open(&temp.path().join("storage.sqlite")).unwrap());
-    let agent_service = AgentService::new(Arc::clone(&storage));
+    let agent_service = AgentService::new_authorized_for_test(Arc::clone(&storage));
     let installations =
         Arc::new(SkillInstallationService::new(temp.path().join("skills")).unwrap());
     let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel();

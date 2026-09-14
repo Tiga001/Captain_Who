@@ -18,6 +18,7 @@ import {
   submitted
 } from '../../humanInteraction/__tests__/humanInteractionFixtures'
 import { humanInteractionResponseDisplay } from '../../humanInteraction/humanInteractionState'
+import { LicenseContext } from '../../license/LicenseContext'
 import type { CollaborationApprovalsController } from '../../agentCollaboration/useCollaborationApprovals'
 import { ConversationSurface } from '../ConversationSurface'
 import type { ChatComposerDraft, ChatConversation, ChatMessage } from '../chatTypes'
@@ -251,6 +252,55 @@ afterEach(async () => {
 })
 
 describe('Human interaction in the real conversation surface', () => {
+  it.each(['ACCOUNT_LOGIN_REQUIRED', 'ACCOUNT_LICENSE_REQUIRED', 'ACCOUNT_LICENSE_UNAVAILABLE'])(
+    'routes an idle-answer %s denial to account access and keeps the draft editable',
+    async (code) => {
+      const request = batch('access'),
+        host = fakeHost([request])
+      boundary.api = host.api
+      host.api.submit.mockResolvedValueOnce({
+        ok: false,
+        error: {
+          message: 'New Turn access denied',
+          data: { type: 'human_interaction_error', code }
+        }
+      })
+      const handleDenied = vi.fn(() => true)
+      const screen = await render(
+        <LicenseContext.Provider
+          value={{
+            state: {
+              revision: 1,
+              status: 'allowed',
+              reason: null,
+              expiresAt: null,
+              verifiedAt: null,
+              cacheValidUntil: null,
+              error: null
+            },
+            canStartTurn: () => true,
+            requestAccess: vi.fn(),
+            handleDenied,
+            refresh: vi.fn()
+          }}
+        >
+          <Workspace value={conversation([request])} />
+        </LicenseContext.Provider>
+      )
+      const panel = screen.getByRole('dialog', { name: '交互', exact: true })
+      await panel.getByRole('button', { name: 'access 明亮外观' }).click()
+      await panel.getByRole('navigation').getByRole('button', { name: '下一题' }).click()
+      await panel.getByRole('textbox').fill('保留许可恢复后可重试的回答')
+      await panel.getByRole('button', { name: '提交', exact: true }).click()
+      await expect.poll(() => handleDenied.mock.calls.length).toBe(1)
+      expect(handleDenied).toHaveBeenCalledWith({ code })
+      await expect.element(panel.getByRole('textbox')).toHaveValue('保留许可恢复后可重试的回答')
+      await expect.element(panel.getByRole('textbox')).toBeEnabled()
+      await expect.element(panel.getByRole('button', { name: '提交', exact: true })).toBeEnabled()
+      expect(screen.container.querySelectorAll('.human-interaction-answer')).toHaveLength(0)
+      expect(boundary.stop).not.toHaveBeenCalled()
+    }
+  )
   it('shows newest async batches and reopens earlier drafts after minimization and conversation switches', async () => {
     const old = batch('old'),
       host = fakeHost([old])

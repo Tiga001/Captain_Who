@@ -231,7 +231,7 @@ fn provider_transition_rejects_inactive_roots_and_child_observer_conversations_w
         })
         .unwrap();
 
-    let service = AgentService::new(Arc::clone(&storage));
+    let service = AgentService::new_authorized_for_test(Arc::clone(&storage));
     let inactive_conversation_id = "conversation-transition-inactive-root";
     let inactive_before = storage
         .load_conversation(inactive_conversation_id)
@@ -435,7 +435,7 @@ fn conversation_history_without_a_frozen_source_model_fails_closed() {
             None,
         ))
         .unwrap();
-    let service = AgentService::new(storage.clone());
+    let service = AgentService::new_authorized_for_test(storage.clone());
 
     let preflight = service
         .preflight_provider_transition(AgentProviderTransitionPreflightInput {
@@ -475,7 +475,7 @@ fn incompatible_send_guard_rejects_before_persisting_the_new_turn() {
     let assistant_message_id = conversation.messages[1].id.clone();
     storage.save_conversation(conversation).unwrap();
     persist_completed_history(&storage, conversation_id, &assistant_message_id);
-    let service = AgentService::new(storage.clone());
+    let service = AgentService::new_authorized_for_test(storage.clone());
     let preflight = service
         .preflight_provider_transition(AgentProviderTransitionPreflightInput {
             conversation_id: conversation_id.to_string(),
@@ -558,7 +558,7 @@ async fn confirmed_incompatible_transition_compacts_and_opens_a_sendable_target_
     )
     .unwrap();
 
-    let service = AgentService::new(storage.clone())
+    let service = AgentService::new_authorized_for_test(storage.clone())
         .with_context_compaction_summary_generator(provider_transition_generator("deepseek-flash"));
     let preflight = service
         .preflight_provider_transition(AgentProviderTransitionPreflightInput {
@@ -634,7 +634,7 @@ async fn confirmed_incompatible_transition_compacts_and_opens_a_sendable_target_
     assert_eq!(after.decision, AgentProviderTransitionDecision::Compatible);
 
     drop(service);
-    let restarted = AgentService::new(storage.clone());
+    let restarted = AgentService::new_authorized_for_test(storage.clone());
     let recovered = restarted
         .get_provider_transition_status(AgentProviderTransitionGetStatusInput {
             conversation_id: conversation_id.to_string(),
@@ -700,9 +700,10 @@ async fn fork_adaptation_marker_forces_compaction_in_both_profile_directions_and
         } else {
             "model-2"
         };
-        let service = AgentService::new(storage.clone()).with_context_compaction_summary_generator(
-            provider_transition_generator(observation_model),
-        );
+        let service = AgentService::new_authorized_for_test(storage.clone())
+            .with_context_compaction_summary_generator(provider_transition_generator(
+                observation_model,
+            ));
         let preflight = service
             .preflight_provider_transition(AgentProviderTransitionPreflightInput {
                 conversation_id: conversation_id.clone(),
@@ -771,7 +772,7 @@ async fn deepseek_to_generic_transition_releases_private_state_and_opens_a_gener
         &history_call_id(),
     );
 
-    let service = AgentService::new(storage.clone())
+    let service = AgentService::new_authorized_for_test(storage.clone())
         .with_context_compaction_summary_generator(provider_transition_generator("model-2"));
     let preflight = service
         .preflight_provider_transition(AgentProviderTransitionPreflightInput {
@@ -869,7 +870,7 @@ async fn same_model_protocol_revision_change_compacts_before_reusing_the_model_i
         .clone();
     assert_ne!(after_revision, before_revision);
 
-    let service = AgentService::new(storage.clone())
+    let service = AgentService::new_authorized_for_test(storage.clone())
         .with_context_compaction_summary_generator(provider_transition_generator("deepseek-flash"));
     let preflight = service
         .preflight_provider_transition(AgentProviderTransitionPreflightInput {
@@ -929,7 +930,7 @@ async fn failed_transition_gets_a_new_retry_token_and_can_succeed() {
     let failing_generator: ContextCompactionSummaryGenerator = Arc::new(|_, _| {
         Box::pin(async { Err(AgentError::new("expected transition generation failure")) })
     });
-    let failing = AgentService::new(storage.clone())
+    let failing = AgentService::new_authorized_for_test(storage.clone())
         .with_context_compaction_summary_generator(failing_generator);
     let first_preflight = failing
         .preflight_provider_transition(AgentProviderTransitionPreflightInput {
@@ -1001,7 +1002,7 @@ async fn failed_transition_gets_a_new_retry_token_and_can_succeed() {
     .expect("second failed transition becomes terminal");
     drop(failing);
 
-    let retrying = AgentService::new(storage.clone())
+    let retrying = AgentService::new_authorized_for_test(storage.clone())
         .with_context_compaction_summary_generator(provider_transition_generator("deepseek-flash"));
     let retry_preflight = retrying
         .preflight_provider_transition(AgentProviderTransitionPreflightInput {

@@ -4,6 +4,15 @@ use crate::storage::{human_interaction_repository as repository, now_ms};
 use repository::HostHumanInteractionOwner;
 
 impl StorageService {
+    pub fn get_human_interaction_request(
+        &self,
+        conversation_id: &str,
+        request_id: &str,
+    ) -> Result<HumanInteractionRequestSnapshot, HumanInteractionError> {
+        let connection = self.state.connection().map_err(repository::unavailable)?;
+        repository::load_request(&connection, conversation_id, request_id)
+    }
+
     pub fn bind_human_interaction_ignored_at_sampling(
         &self,
         request: &crate::AgentSamplingBoundaryRequest,

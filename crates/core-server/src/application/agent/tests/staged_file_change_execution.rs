@@ -263,7 +263,7 @@ async fn staged_approval_response_lost_retry_replays_receipt_without_recommittin
     fs::create_dir(&workspace).unwrap();
     let workspace = fs::canonicalize(workspace).unwrap();
     let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
-    let service = AgentService::new(Arc::clone(&storage));
+    let service = AgentService::new_authorized_for_test(Arc::clone(&storage));
     let target = workspace.join("staged-retry.txt");
     let run_id = "run-staged-response-lost";
     let conversation_id = "conversation-staged-response-lost";
@@ -376,7 +376,7 @@ async fn remaining_run_approval_from_staged_commit_authorizes_later_direct_chang
     fs::create_dir(&workspace).unwrap();
     let workspace = fs::canonicalize(workspace).unwrap();
     let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
-    let service = AgentService::new(Arc::clone(&storage));
+    let service = AgentService::new_authorized_for_test(Arc::clone(&storage));
     let run_id = "run-staged-remaining-approval";
     let conversation_id = "conversation-staged-remaining-approval";
     let assistant_message_id = "assistant-staged-remaining-approval";
@@ -546,7 +546,7 @@ async fn staged_audit_failure_projects_the_same_outcome_unknown_receipt_and_stat
     fs::create_dir(&workspace).unwrap();
     let workspace = fs::canonicalize(workspace).unwrap();
     let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
-    let service = AgentService::new(Arc::clone(&storage));
+    let service = AgentService::new_authorized_for_test(Arc::clone(&storage));
     let target = workspace.join("staged-audit-failure.txt");
     let run_id = "run-staged-audit-failure";
     let conversation_id = "conversation-staged-audit-failure";
@@ -870,7 +870,7 @@ fn automatic_staged_apply_patch_commit_persists_the_same_committer_receipt() {
     fs::create_dir(&workspace).unwrap();
     let workspace = fs::canonicalize(workspace).unwrap();
     let storage = Arc::new(StorageService::open(&database_path).unwrap());
-    let service = AgentService::new(Arc::clone(&storage));
+    let service = AgentService::new_authorized_for_test(Arc::clone(&storage));
     let target = workspace.join("automatic-staged.txt");
     let run_id = "run-automatic-staged-commit";
     let conversation_id = "conversation-automatic-staged-commit";

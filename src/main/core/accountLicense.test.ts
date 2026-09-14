@@ -1,7 +1,4 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
-import { join } from 'node:path'
-import { tmpdir } from 'node:os'
 import type { AuthState } from '@mycopilot/host-api'
 import { LicenseService } from '../auth/LicenseService'
 import {
@@ -10,7 +7,6 @@ import {
   parseVerifiedLicense,
   type VerifiedLicense
 } from '../auth/LicenseApiClient'
-import { LicenseCacheStore, type CachedLicense } from '../auth/LicenseCacheStore'
 
 const services: LicenseService[] = []
 const base = Date.parse('2026-09-13T06:00:00.000Z')
@@ -21,7 +17,7 @@ const grant = (ttl = LICENSE_CACHE_MS): VerifiedLicense => ({
   verifiedAt: new Date(Date.now()).toISOString(),
   cacheValidUntil: new Date(Date.now() + ttl).toISOString()
 })
-function setup(initial = new Map<string, CachedLicense>()) {
+function setup(clock?: { wall: number; mono: number }) {
   let authState = { status: 'signedOut', profile: null } as AuthState
   let listener: ((state: AuthState) => void) | undefined
   const auth = {
@@ -36,14 +32,12 @@ function setup(initial = new Map<string, CachedLicense>()) {
     refreshProfile: vi.fn().mockResolvedValue({ ok: true })
   }
   const fetch = vi.fn().mockImplementation(async () => grant())
-  const store = {
-    read: vi.fn((id: string) => initial.get(id) ?? null),
-    write: vi.fn((entry: CachedLicense) => {
-      initial.set(entry.userId, structuredClone(entry))
-      return true
-    })
-  }
-  const service = new LicenseService(auth, store, fetch)
+  const service = new LicenseService(
+    auth,
+    fetch,
+    clock ? () => clock.wall : undefined,
+    clock ? () => clock.mono : undefined
+  )
   services.push(service)
   const account = (userId: string | null): void => {
     authState = {
@@ -52,7 +46,7 @@ function setup(initial = new Map<string, CachedLicense>()) {
     } as AuthState
     listener?.(authState)
   }
-  return { service, fetch, store, auth, account, initial }
+  return { service, fetch, auth, account }
 }
 beforeEach(() => {
   vi.useFakeTimers()
@@ -79,25 +73,30 @@ describe('24-hour account license admission', () => {
     await vi.advanceTimersByTimeAsync(60 * 60_000)
     expect(s.fetch).toHaveBeenCalledTimes(2)
   })
-  it('restores an account-bound cache across restart without renewing its deadline', async () => {
+  it('requires fresh online permission after restart, even within the prior 24-hour window', async () => {
     const s = setup()
     s.account('a')
     await s.service.refresh()
     s.service.dispose()
     vi.setSystemTime(base + 12 * 60 * 60_000)
-    const next = setup(s.initial)
+    const next = setup()
     next.account('a')
+    expect(next.service.getExecutionLease().reason).not.toBe('allowed')
+    expect(next.fetch).toHaveBeenCalledTimes(1)
+    await next.service.refresh()
     expect(next.service.getState().cacheValidUntil).toBe(
-      new Date(base + LICENSE_CACHE_MS).toISOString()
+      new Date(base + 12 * 60 * 60_000 + LICENSE_CACHE_MS).toISOString()
     )
-    expect(next.fetch).not.toHaveBeenCalled()
+    expect(next.service.getExecutionLease().reason).toBe('allowed')
     next.account('b')
     await next.service.refresh()
     expect(next.fetch).toHaveBeenCalledWith('token-for-b', expect.any(AbortSignal))
     next.account('a')
-    expect(next.fetch).toHaveBeenCalledTimes(1)
+    expect(next.service.getExecutionLease().reason).not.toBe('allowed')
+    await next.service.refresh()
+    expect(next.fetch).toHaveBeenCalledTimes(3)
   })
-  it('never grants another account a late response or writes it after logout', async () => {
+  it('never grants another account a late response after logout', async () => {
     const s = setup()
     let complete!: (value: VerifiedLicense) => void
     s.fetch.mockImplementationOnce(
@@ -111,7 +110,6 @@ describe('24-hour account license admission', () => {
     s.account(null)
     complete(grant())
     await pending
-    expect(s.store.write).not.toHaveBeenCalled()
     expect(s.service.getState().status).toBe('signedOut')
     expect(() => s.service.assertCanStartTurn()).toThrow('ACCOUNT_LOGIN_REQUIRED')
   })
@@ -147,7 +145,24 @@ describe('24-hour account license admission', () => {
     expect(s.service.getState()).toMatchObject({ status: 'unavailable', error: 'notProvisioned' })
     expect(() => s.service.assertCanStartTurn()).toThrow()
   })
-  it('rejects a revoked grant and overwrites its former cached permission', async () => {
+  it('invalidates an earlier grant when the server explicitly reports it is no longer provisioned', async () => {
+    const s = setup()
+    s.account('a')
+    await s.service.refresh()
+    expect(s.service.getExecutionLease().reason).toBe('allowed')
+    const states: Array<{ reason: string | null }> = []
+    s.service.subscribe((state) => states.push(state))
+    s.fetch.mockRejectedValue(new LicenseFailure('notProvisioned'))
+    await s.service.refresh()
+    expect(s.service.getState()).toMatchObject({
+      status: 'unavailable',
+      error: 'notProvisioned',
+      reason: null
+    })
+    expect(states.some((state) => state.reason === 'expired')).toBe(false)
+    expect(s.service.getExecutionLease().reason).toBe('license_required')
+  })
+  it('rejects a revoked grant and cannot restore former permission offline', async () => {
     const s = setup()
     s.account('a')
     await s.service.refresh()
@@ -159,16 +174,30 @@ describe('24-hour account license admission', () => {
     })
     await s.service.refresh()
     expect(s.service.getState()).toMatchObject({ status: 'denied', reason: 'revoked' })
-    expect(s.initial.get('a')?.license.allowed).toBe(false)
     expect(() => s.service.assertCanStartTurn()).toThrow()
+    s.service.dispose()
+    const restarted = setup()
+    restarted.fetch.mockRejectedValue(new LicenseFailure('network'))
+    restarted.account('a')
+    await restarted.service.refresh()
+    expect(restarted.service.getExecutionLease().reason).not.toBe('allowed')
   })
-  it('rejects a saved cache from a future local clock', async () => {
-    const initial = new Map([['a', { userId: 'a', receivedAt: base + 60_000, license: grant() }]])
-    const s = setup(initial)
-    s.fetch.mockRejectedValue(new LicenseFailure('network'))
+  it('cannot extend an old permission by repeatedly restarting with a rolled-back clock', async () => {
+    const s = setup()
     s.account('a')
     await s.service.refresh()
-    expect(s.service.getState().status).toBe('unavailable')
+    expect(s.service.getExecutionLease().reason).toBe('allowed')
+    s.service.dispose()
+    for (let restart = 0; restart < 30; restart++) {
+      vi.setSystemTime(base + 1000)
+      const next = setup()
+      next.fetch.mockRejectedValue(new LicenseFailure('network'))
+      next.account('a')
+      await next.service.refresh()
+      expect(next.fetch).toHaveBeenCalledTimes(1)
+      expect(next.service.getExecutionLease().reason).not.toBe('allowed')
+      next.service.dispose()
+    }
   })
   it('refreshes authentication once on an unauthorized response', async () => {
     const s = setup()
@@ -181,16 +210,54 @@ describe('24-hour account license admission', () => {
     expect(s.fetch).toHaveBeenCalledTimes(2)
     expect(s.service.getState().status).toBe('allowed')
   })
-  it('permits a verified memory-only lease when secure cache writing fails', async () => {
-    const s = setup()
-    s.store.write.mockReturnValue(false)
+  it('uses a monotonic deadline if the local wall clock stops moving', async () => {
+    const clock = { wall: base, mono: 0 }
+    const s = setup(clock)
     s.account('a')
     await s.service.refresh()
-    expect(s.service.getState()).toMatchObject({ status: 'allowed', error: 'storage' })
+    s.fetch.mockRejectedValue(new LicenseFailure('network'))
+    clock.mono += LICENSE_CACHE_MS
+    expect(s.service.getExecutionLease().reason).not.toBe('allowed')
+    await s.service.refresh()
+    expect(s.service.getState().status).toBe('unavailable')
+  })
+  it('never revives a grant after observing a clock rollback then correcting it offline', async () => {
+    const clock = { wall: base, mono: 0 }
+    const s = setup(clock)
+    s.account('a')
+    await s.service.refresh()
+    s.fetch.mockRejectedValue(new LicenseFailure('network'))
+    clock.wall = base - 1
+    expect(s.service.getExecutionLease().reason).not.toBe('allowed')
+    clock.wall = base + 1000
+    await s.service.refresh()
+    expect(s.service.getExecutionLease().reason).not.toBe('allowed')
+  })
+  it('subtracts in-flight request latency from the process-local grant', async () => {
+    const clock = { wall: base, mono: 0 }
+    const s = setup(clock)
+    const result = grant()
+    let complete!: (value: VerifiedLicense) => void
+    s.fetch.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          complete = resolve
+        })
+    )
+    s.account('a')
+    const pending = s.service.refresh()
+    clock.wall += 60_000
+    clock.mono += 60_000
+    complete(result)
+    await pending
+    expect(s.service.getExecutionLease()).toEqual({
+      reason: 'allowed',
+      remainingMs: LICENSE_CACHE_MS - 60_000
+    })
   })
 })
 
-describe('license API contract and encrypted cache', () => {
+describe('license API contract', () => {
   it.each([
     { cacheValidUntil: new Date(base + LICENSE_CACHE_MS + 1).toISOString() },
     { expiresAt: new Date(base + 60_000).toISOString() },
@@ -200,27 +267,5 @@ describe('license API contract and encrypted cache', () => {
     { verifiedAt: 'invalid' }
   ])('rejects malformed or overlong grants', (value) => {
     expect(() => parseVerifiedLicense({ ...grant(), ...value })).toThrow('invalidResponse')
-  })
-  it('stores only encrypted per-account results, isolated by environment', () => {
-    const directory = mkdtempSync(join(tmpdir(), 'captain-license-test-'))
-    const xor = (b: Buffer) => Buffer.from(b.map((v) => v ^ 0xaa))
-    const encryption = {
-      isEncryptionAvailable: () => true,
-      encryptString: (v: string) => xor(Buffer.from(v)),
-      decryptString: (v: Buffer) => xor(v).toString()
-    }
-    try {
-      const cache = new LicenseCacheStore(directory, encryption, 'prod')
-      const entry = { userId: 'test-user-a', receivedAt: Date.now(), license: grant() }
-      expect(cache.write(entry)).toBe(true)
-      expect(cache.read('test-user-a')).toEqual(entry)
-      expect(cache.read('test-user-b')).toBeNull()
-      expect(new LicenseCacheStore(directory, encryption, 'staging').read('test-user-a')).toBeNull()
-      expect(
-        readFileSync(join(directory, 'account-license.enc')).includes(Buffer.from('test-user-a'))
-      ).toBe(false)
-    } finally {
-      rmSync(directory, { recursive: true })
-    }
   })
 })

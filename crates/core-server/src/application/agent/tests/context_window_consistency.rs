@@ -79,7 +79,7 @@ impl WindowFixture {
                 3,
             )
             .unwrap();
-        let service = AgentService::new(storage.clone());
+        let service = AgentService::new_authorized_for_test(storage.clone());
         let mut input: AgentChatInput = serde_json::from_value(json!({
             "apiUrl": "https://example.test/v1/chat/completions",
             "apiToken": "token", "model": "model-1",
@@ -507,6 +507,12 @@ fn context_profile_active_run_stays_frozen_and_terminal_previews_next_mode() {
         revision,
         None,
         None,
+        &|| {
+            fixture
+                .service
+                .check_automation_execution_access()
+                .map_err(ExecutionAccessDenied::agent_error)
+        },
     )
     .unwrap();
     assert_eq!(
@@ -611,7 +617,7 @@ fn multi_workspace_active_preview_and_next_turn_share_the_correct_frozen_binding
     let prepared = crate::application::agent_support::prepare_reserved_human_turn(
         &fixture.storage,&fixture.service.skills,
         serde_json::from_value(json!({"conversationId":CONVERSATION,"modelId":"model-1","content":"Keep this workspace.","userMessageId":"workspace-window-user","assistantMessageId":"workspace-window-assistant","maxTokens":30000})).unwrap(),
-        run_id,existing,revision,None,None).unwrap();
+        run_id,existing,revision,None,None,&|| fixture.service.check_automation_execution_access().map_err(ExecutionAccessDenied::agent_error)).unwrap();
     let frozen = prepared
         .agent_input
         .context
@@ -674,7 +680,7 @@ fn multi_workspace_active_preview_and_next_turn_share_the_correct_frozen_binding
     let next = crate::application::agent_support::prepare_reserved_human_turn(
         &fixture.storage,&fixture.service.skills,
         serde_json::from_value(json!({"conversationId":CONVERSATION,"modelId":"model-1","content":"Next turn.","userMessageId":"workspace-next-user","assistantMessageId":"workspace-next-assistant"})).unwrap(),
-        "run-workspace-next",existing,revision,None,None).unwrap();
+        "run-workspace-next",existing,revision,None,None,&|| fixture.service.check_automation_execution_access().map_err(ExecutionAccessDenied::agent_error)).unwrap();
     assert_eq!(
         next.agent_input
             .context
@@ -772,6 +778,12 @@ fn child_terminal_preview_retains_tree_workspace_and_skill_catalog_after_primary
         revision,
         None,
         None,
+        &|| {
+            fixture
+                .service
+                .check_automation_execution_access()
+                .map_err(ExecutionAccessDenied::agent_error)
+        },
     )
     .unwrap();
     let spawn = fixture

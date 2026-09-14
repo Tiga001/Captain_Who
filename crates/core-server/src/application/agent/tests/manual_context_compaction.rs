@@ -76,8 +76,8 @@ async fn manual_compaction_is_idempotent_preserves_history_and_owns_usage() {
             Ok(output)
         })
     });
-    let service =
-        AgentService::new(storage.clone()).with_context_compaction_summary_generator(generator);
+    let service = AgentService::new_authorized_for_test(storage.clone())
+        .with_context_compaction_summary_generator(generator);
     let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
     let start = || AgentManualContextCompactionStartInput {
         conversation_id: id.into(),
@@ -112,7 +112,7 @@ async fn manual_compaction_is_idempotent_preserves_history_and_owns_usage() {
         serde_json::to_value(storage.load_conversation(id).unwrap().unwrap()).unwrap(),
         before
     );
-    let reopened = AgentService::new(storage.clone());
+    let reopened = AgentService::new_authorized_for_test(storage.clone());
     assert_eq!(
         reopened
             .start_manual_context_compaction(start(), notifications.clone())
@@ -164,8 +164,8 @@ async fn manual_cancel_before_response_prevents_commit_and_keeps_paid_usage() {
             generated(request, AgentCancellationToken::new()).await
         })
     });
-    let service =
-        AgentService::new(storage.clone()).with_context_compaction_summary_generator(generator);
+    let service = AgentService::new_authorized_for_test(storage.clone())
+        .with_context_compaction_summary_generator(generator);
     let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
     let running = service
         .start_manual_context_compaction(
@@ -245,8 +245,8 @@ async fn manual_failure_keeps_old_context_and_allows_retry_with_new_request() {
     let (_directory, storage) = fixture(id);
     let generator: ContextCompactionSummaryGenerator =
         Arc::new(|_, _| Box::pin(async { Err(AgentError::new("provider failed")) }));
-    let service =
-        AgentService::new(storage.clone()).with_context_compaction_summary_generator(generator);
+    let service = AgentService::new_authorized_for_test(storage.clone())
+        .with_context_compaction_summary_generator(generator);
     let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
     let running = service
         .start_manual_context_compaction(
@@ -261,7 +261,7 @@ async fn manual_failure_keeps_old_context_and_allows_retry_with_new_request() {
         settled(&service, id, &running.operation_id).await.status,
         "failed"
     );
-    let recovered = AgentService::new(storage.clone())
+    let recovered = AgentService::new_authorized_for_test(storage.clone())
         .with_context_compaction_summary_generator(provider_transition_generator("model-1"));
     let retry = recovered
         .start_manual_context_compaction(
@@ -305,7 +305,7 @@ async fn manual_compaction_latest_fork_sends_next_turn_with_summary_without_copy
         &format!("http://{address}/v1/chat/completions"),
         None,
     );
-    let service = AgentService::new(storage.clone())
+    let service = AgentService::new_authorized_for_test(storage.clone())
         .with_context_compaction_summary_generator(provider_transition_generator("model-1"));
     let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
     let operation = service
@@ -457,8 +457,8 @@ async fn exercise_manual_fork_after_later_turn(explicit_boundary: bool) {
             Ok(generated)
         })
     });
-    let service =
-        AgentService::new(storage.clone()).with_context_compaction_summary_generator(generator);
+    let service = AgentService::new_authorized_for_test(storage.clone())
+        .with_context_compaction_summary_generator(generator);
     let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
     let operation = service
         .start_manual_context_compaction(
@@ -689,8 +689,8 @@ async fn model_configuration_change_rejects_manual_commit_but_retains_response_u
             generated(request, cancellation).await
         })
     });
-    let service =
-        AgentService::new(storage.clone()).with_context_compaction_summary_generator(generator);
+    let service = AgentService::new_authorized_for_test(storage.clone())
+        .with_context_compaction_summary_generator(generator);
     let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
     let operation = service
         .start_manual_context_compaction(
@@ -724,7 +724,7 @@ fn manual_status_bounds_public_history_without_losing_old_operation_lookup() {
     let mut conversation = conversation_with_completed_history("many-noops", None);
     conversation.messages.clear();
     storage.save_conversation(conversation).unwrap();
-    let service = AgentService::new(storage.clone());
+    let service = AgentService::new_authorized_for_test(storage.clone());
     let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
     for index in 0..52 {
         assert_eq!(

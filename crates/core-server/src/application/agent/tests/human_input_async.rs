@@ -120,6 +120,23 @@ impl Drop for Fixture {
 }
 
 impl Fixture {
+    fn deny_execution(&self, reason: mycopilot_protocol_rs::ExecutionAccessReason) {
+        let now = now_ms();
+        self.agent
+            .set_execution_access(mycopilot_protocol_rs::SetExecutionAccessInput {
+                revision: 100,
+                identity_epoch: 1,
+                reason,
+                issued_at: now - 10,
+                valid_until: if reason == mycopilot_protocol_rs::ExecutionAccessReason::Allowed {
+                    now - 1
+                } else {
+                    now - 10
+                },
+            })
+            .unwrap();
+    }
+
     async fn new() -> Self {
         let directory = tempdir().unwrap();
         let database = directory.path().join("storage.sqlite");
@@ -155,7 +172,7 @@ impl Fixture {
         let mut settings = test_model_settings();
         settings.api_url = format!("http://{address}/v1/chat/completions");
         storage.save_model_settings(settings).unwrap();
-        let agent = AgentService::new(Arc::clone(&storage));
+        let agent = AgentService::new_authorized_for_test(Arc::clone(&storage));
         let (notifications, events) = unbounded_channel();
         Self {
             _directory: directory,
@@ -395,6 +412,7 @@ impl Fixture {
         );
         let agent =
             AgentService::try_new_deferred_startup_reconciliation(Arc::clone(&storage)).unwrap();
+        agent.grant_execution_access_for_test();
         agent
             .reconcile_startup_orphaned_conversation_traces()
             .unwrap();
@@ -695,6 +713,346 @@ async fn assert_idle_answer(skip_all: bool, restart: Option<bool>) {
 #[tokio::test]
 async fn async_answer_after_natural_completion_starts_one_human_root_turn() {
     assert_idle_answer(false, None).await;
+}
+
+#[tokio::test]
+async fn new_root_and_rewrite_require_execution_access_even_without_main() {
+    use mycopilot_protocol_rs::ExecutionAccessReason;
+    for reason in [
+        None,
+        Some(ExecutionAccessReason::AccountSignedOut),
+        Some(ExecutionAccessReason::LicenseRequired),
+        Some(ExecutionAccessReason::LicenseUnavailable),
+        Some(ExecutionAccessReason::Allowed),
+    ] {
+        let mut fixture = Fixture::new().await;
+        // Reconstruct exactly the production default: no grant. No provider request is needed
+        // to refuse either entry point, and no provisional conversation/messages may be written.
+        fixture.agent = AgentService::new(Arc::clone(&fixture.storage));
+        if let Some(reason) = reason {
+            fixture.deny_execution(reason);
+        }
+        let expected = match reason {
+            None | Some(ExecutionAccessReason::AccountSignedOut) => "ACCOUNT_LOGIN_REQUIRED",
+            Some(ExecutionAccessReason::LicenseRequired) => "ACCOUNT_LICENSE_REQUIRED",
+            _ => "ACCOUNT_LICENSE_UNAVAILABLE",
+        };
+        let input: AgentConversationTurnInput = serde_json::from_value(json!({
+            "conversationId": CONVERSATION, "modelId": "model-1", "content": ORIGINAL,
+            "userMessageId": "new-human-user", "assistantMessageId": "new-human-assistant"
+        }))
+        .unwrap();
+        let error = fixture
+            .agent
+            .start_conversation_turn(input.clone(), fixture.notifications.clone())
+            .unwrap_err();
+        assert_eq!(error.data().unwrap()["code"], expected);
+        let error = fixture
+            .agent
+            .rewrite_conversation_turn(
+                AgentConversationTurnRewriteInput {
+                    request_id: "new-rewrite-request".into(),
+                    source_user_message_id: "source-human-user".into(),
+                    source_assistant_message_id: "source-human-assistant".into(),
+                    turn: input,
+                },
+                fixture.notifications.clone(),
+            )
+            .unwrap_err();
+        assert_eq!(error.data().unwrap()["code"], expected);
+        assert!(fixture
+            .storage
+            .load_conversation(CONVERSATION)
+            .unwrap()
+            .is_none());
+        assert!(fixture.agent.cancellations.lock().unwrap().is_empty());
+        fixture.no_request().await;
+    }
+}
+
+#[tokio::test]
+async fn idle_async_answers_after_completion_or_stop_reject_denial_before_saving_and_can_retry() {
+    use mycopilot_protocol_rs::ExecutionAccessReason;
+    for stopped in [false, true] {
+        for reason in [
+            ExecutionAccessReason::AccountSignedOut,
+            ExecutionAccessReason::LicenseRequired,
+            ExecutionAccessReason::LicenseUnavailable,
+            ExecutionAccessReason::Allowed,
+        ] {
+            let mut fixture = Fixture::new().await;
+            let turn = fixture.start();
+            fixture.request().await;
+            fixture.reply(Reply::Async(1));
+            fixture.request().await;
+            fixture.reply(if stopped {
+                Reply::Sync
+            } else {
+                Reply::Complete
+            });
+            fixture
+                .done(if stopped {
+                    "waiting_for_user_input"
+                } else {
+                    "completed"
+                })
+                .await;
+            fixture.released(&turn.run_id).await;
+            if stopped {
+                assert!(fixture.agent.cancel_run_checked(&turn.run_id).unwrap());
+            }
+            let question = fixture
+                .batches()
+                .into_iter()
+                .find(|r| r.mode == HumanInteractionMode::Async)
+                .unwrap();
+            fixture.deny_execution(reason);
+            let error = HumanInteractionService::new(&fixture.storage, &fixture.agent)
+                .submit(
+                    Fixture::submission(&question, false),
+                    &fixture.notifications,
+                )
+                .unwrap_err();
+            let expected = match reason {
+                ExecutionAccessReason::AccountSignedOut => "ACCOUNT_LOGIN_REQUIRED",
+                ExecutionAccessReason::LicenseRequired => "ACCOUNT_LICENSE_REQUIRED",
+                _ => "ACCOUNT_LICENSE_UNAVAILABLE",
+            };
+            assert_eq!(error.code, expected);
+            let unchanged = fixture
+                .storage
+                .get_human_interaction_request(CONVERSATION, &question.request_id)
+                .unwrap();
+            assert_eq!(unchanged, question);
+            assert_eq!(fixture.messages().len(), 2);
+            fixture.no_request().await;
+            fixture.agent.grant_execution_access_for_test();
+            fixture.submit(&question, false);
+            fixture.request().await;
+            fixture.reply(Reply::Complete);
+            let done = fixture.done("completed").await;
+            assert_ne!(done["runId"], turn.run_id);
+            fixture.applied(1).await;
+            assert_eq!(fixture.messages().len(), 4);
+        }
+    }
+}
+
+#[tokio::test]
+async fn answer_accepted_while_active_cannot_start_new_root_after_logout_and_terminal_race() {
+    let mut fixture = Fixture::new().await;
+    let turn = fixture.start();
+    fixture.request().await;
+    fixture.reply(Reply::Async(1));
+    fixture.request().await;
+    let question = fixture.batches().pop().unwrap();
+    fixture
+        .storage
+        .submit_human_interaction(&Fixture::submission(&question, false))
+        .unwrap();
+    fixture.deny_execution(mycopilot_protocol_rs::ExecutionAccessReason::AccountSignedOut);
+    fixture.reply(Reply::Complete);
+    fixture.done("completed").await;
+    fixture.released(&turn.run_id).await;
+    fixture
+        .agent
+        .schedule_human_input_deliveries(fixture.notifications.clone());
+    fixture.no_request().await;
+    assert_eq!(fixture.messages().len(), 2);
+    let pending = fixture.batches().pop().unwrap();
+    assert_eq!(
+        pending.delivery.unwrap().status,
+        HumanInteractionDeliveryStatus::Pending
+    );
+    assert_eq!(
+        fixture
+            .storage
+            .list_conversation_turn_traces(CONVERSATION)
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn logout_preserves_active_async_steering_and_sync_or_approval_resume() {
+    for pause in [None, Some(true), Some(false)] {
+        let mut fixture = Fixture::new().await;
+        let turn = fixture.start();
+        fixture.request().await;
+        fixture.reply(Reply::Async(1));
+        fixture.request().await;
+        let asynchronous = fixture.batches().pop().unwrap();
+        if let Some(sync) = pause {
+            fixture.reply(if sync { Reply::Sync } else { Reply::Approval });
+            fixture
+                .done(if sync {
+                    "waiting_for_user_input"
+                } else {
+                    "waiting_for_approval"
+                })
+                .await;
+            fixture.released(&turn.run_id).await;
+        }
+        fixture.deny_execution(mycopilot_protocol_rs::ExecutionAccessReason::AccountSignedOut);
+        let submitted = fixture.submit(&asynchronous, false);
+        match pause {
+            None => fixture.reply(Reply::Async(1)),
+            Some(true) => {
+                let blocking = fixture
+                    .batches()
+                    .into_iter()
+                    .find(|r| r.mode == HumanInteractionMode::Sync)
+                    .unwrap();
+                fixture.submit(&blocking, false);
+            }
+            Some(false) => {
+                let pending = fixture.agent.list_pending_actions();
+                fixture
+                    .agent
+                    .approve_action(
+                        &turn.run_id,
+                        &pending[0].action_id,
+                        fixture.notifications.clone(),
+                    )
+                    .unwrap();
+            }
+        }
+        let continuation = fixture.request().await;
+        assert_projection(&continuation, std::slice::from_ref(&submitted));
+        fixture.reply(Reply::Complete);
+        let done = fixture.done("completed").await;
+        assert_eq!(done["runId"], turn.run_id);
+        fixture.no_request().await;
+    }
+}
+
+#[tokio::test]
+async fn human_root_rewrite_and_async_answer_expiry_at_commit_roll_back_all_turn_facts() {
+    use crate::application::agent_support::{
+        prepare_reserved_human_response_turn, prepare_reserved_human_rewrite_turn,
+        prepare_reserved_human_turn, HumanConversationTurnRewrite,
+    };
+    for kind in ["ordinary", "rewrite", "answer"] {
+        let mut fixture = Fixture::new().await;
+        let turn = fixture.start();
+        fixture.request().await;
+        fixture.reply(Reply::Async(1));
+        fixture.request().await;
+        fixture.reply(Reply::Complete);
+        fixture.done("completed").await;
+        fixture.released(&turn.run_id).await;
+        let question = fixture.batches().pop().unwrap();
+        let response = if kind == "answer" {
+            Some(
+                fixture
+                    .storage
+                    .submit_human_interaction(&Fixture::submission(&question, false))
+                    .unwrap(),
+            )
+        } else {
+            None
+        };
+        let (existing, revision) = fixture
+            .storage
+            .load_conversation_for_turn(CONVERSATION)
+            .unwrap();
+        let before = fixture
+            .storage
+            .load_conversation(CONVERSATION)
+            .unwrap()
+            .unwrap();
+        let input: AgentConversationTurnInput = serde_json::from_value(json!({
+            "conversationId": CONVERSATION, "modelId": "model-1",
+            "content": response.as_ref().map(|r| mycopilot_core::storage::human_interaction_repository::async_human_interaction_answer_content(r).unwrap()).unwrap_or_else(|| ORIGINAL.into()),
+            "userMessageId": "commit-check-user", "assistantMessageId": "commit-check-assistant"
+        })).unwrap();
+        let checks = std::cell::Cell::new(0);
+        let check = || {
+            checks.set(checks.get() + 1);
+            if checks.get() == 1 {
+                Ok(())
+            } else {
+                Err(ExecutionAccessDenied::unavailable().agent_error())
+            }
+        };
+        let error = match kind {
+            "ordinary" => prepare_reserved_human_turn(
+                &fixture.storage,
+                &fixture.agent.skills,
+                input,
+                "commit-check-run",
+                existing,
+                revision,
+                None,
+                None,
+                &check,
+            )
+            .err()
+            .unwrap(),
+            "rewrite" => prepare_reserved_human_rewrite_turn(
+                &fixture.storage,
+                &fixture.agent.skills,
+                input,
+                "commit-check-run",
+                existing,
+                revision,
+                HumanConversationTurnRewrite {
+                    request_id: "commit-check-rewrite".into(),
+                    request_fingerprint: format!("sha256:{}", "a".repeat(64)),
+                    source_user_message_id: turn.user_message_id.clone(),
+                    source_assistant_message_id: turn.assistant_message_id.clone(),
+                },
+                &check,
+            )
+            .err()
+            .unwrap(),
+            "answer" => {
+                let response = response.unwrap();
+                prepare_reserved_human_response_turn(&fixture.storage, &fixture.agent.skills, input, "commit-check-run", existing, revision, mycopilot_core::storage::human_interaction_repository::HumanInteractionAsyncTurnAdmission {
+                    response_id: response.response.unwrap().response_id, expected_delivery_revision: response.delivery.unwrap().revision, user_message_id: "commit-check-user".into(),
+                }, &check).err().unwrap()
+            }
+            _ => unreachable!(),
+        };
+        assert_eq!(
+            error.data().unwrap()["code"],
+            "ACCOUNT_LICENSE_UNAVAILABLE",
+            "{kind}: {error}"
+        );
+        assert_eq!(
+            checks.get(),
+            2,
+            "{kind} must check both transaction admission and final commit"
+        );
+        assert_eq!(
+            serde_json::to_value(
+                fixture
+                    .storage
+                    .load_conversation(CONVERSATION)
+                    .unwrap()
+                    .unwrap()
+            )
+            .unwrap(),
+            serde_json::to_value(before).unwrap()
+        );
+        assert!(fixture
+            .storage
+            .get_conversation_turn_trace("commit-check-assistant")
+            .unwrap()
+            .is_none());
+        assert!(fixture
+            .storage
+            .get_conversation_turn_rewrite("commit-check-rewrite")
+            .unwrap()
+            .is_none());
+        if kind == "answer" {
+            let pending = fixture.batches().pop().unwrap().delivery.unwrap();
+            assert_eq!(pending.status, HumanInteractionDeliveryStatus::Pending);
+            assert!(pending.target_run_id.is_none());
+        }
+        fixture.no_request().await;
+    }
 }
 
 #[tokio::test]

@@ -26,7 +26,7 @@ async fn image_configuration_mutation_invalidates_skill_management() {
         })
         .unwrap()
         .configuration;
-    let agent = AgentService::new(Arc::clone(&storage));
+    let agent = AgentService::new_authorized_for_test(Arc::clone(&storage));
     let (outbound, mut received) = mpsc::unbounded_channel();
     let (artifacts, _artifact_rx) = mpsc::channel(DEFAULT_MAX_CONCURRENT_IMAGE_ARTIFACT_READS);
     let git_dispatcher = GitDispatcher::new(outbound.clone());

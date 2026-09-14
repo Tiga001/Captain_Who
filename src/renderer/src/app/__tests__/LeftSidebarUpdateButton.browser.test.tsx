@@ -115,6 +115,22 @@ afterEach(() => {
   else document.documentElement.setAttribute('style', previousStyle)
 })
 
+it('keeps Chinese update labels to four characters and English labels concise', () => {
+  for (const key of [
+    'update.download',
+    'update.downloading',
+    'update.preparing',
+    'update.installing',
+    'update.error.checkFailed',
+    'update.error.downloadFailed',
+    'update.error.installFailed'
+  ] as const) {
+    const chinese = getTranslation('zh-CN', key).replace(' {percent}%', '')
+    expect(chinese).toMatch(/^\p{Script=Han}{4}$/u)
+    expect(getTranslation('en-US', key).split(' ').length).toBeLessThanOrEqual(2)
+  }
+})
+
 it.each(['classic-light', 'classic-dark'] as const)(
   'shows an icon-only accent ring and keeps disabled progress accented in %s',
   async (themeId) => {
@@ -148,9 +164,9 @@ it.each(['classic-light', 'classic-dark'] as const)(
         path: `${screenshotDir}/update-available-${themeId}.png`
       })
     await emit({ ...available, revision: 2, status: 'downloading', percent: 27 })
-    const progress = screen.getByRole('button', { name: '下载中 27%' })
+    const progress = screen.getByRole('button', { name: '正在下载 27%' })
     await expect.element(progress).toBeDisabled()
-    await expect.element(progress).toHaveTextContent('下载中 27%')
+    await expect.element(progress).toHaveTextContent('正在下载 27%')
     expect(progress.element().querySelector('svg')).toBeNull()
     await expect
       .poll(() => getComputedStyle(progress.element()).backgroundColor)
@@ -162,6 +178,18 @@ it.each(['classic-light', 'classic-dark'] as const)(
       await page.screenshot({
         element: bar,
         path: `${screenshotDir}/update-downloading-${themeId}.png`
+      })
+    await emit({ ...available, revision: 3, status: 'preparing', percent: 100 })
+    const preparing = screen.getByRole('button', { name: '校验更新' })
+    await expect.element(preparing).toBeDisabled()
+    expect(preparing.element()).toBe(button)
+    expect(getComputedStyle(preparing.element()).backgroundColor).toBe(colors.backgroundColor)
+    expect(getComputedStyle(preparing.element()).color).toBe(colors.borderColor)
+    expect(getComputedStyle(preparing.element()).borderRadius).toBe(colors.borderRadius)
+    if (screenshotDir)
+      await page.screenshot({
+        element: bar,
+        path: `${screenshotDir}/update-preparing-${themeId}.png`
       })
     expected.remove()
   }
@@ -245,15 +273,16 @@ it('blocks rapid clicks while awaiting the host and displays only reported progr
   expect(mocks.download).toHaveBeenCalledOnce()
   await expect.element(update).toBeDisabled()
   resolveDownload({ ...available, revision: 2, status: 'downloading', percent: 0 })
-  await expect.element(screen.getByRole('button', { name: '下载中 0%' })).toBeDisabled()
+  await expect.element(screen.getByRole('button', { name: '正在下载 0%' })).toBeDisabled()
   await emit({ ...available, revision: 3, status: 'downloading', percent: 42.9 })
-  const progress = screen.getByRole('button', { name: '下载中 42%' })
+  const progress = screen.getByRole('button', { name: '正在下载 42%' })
   await expect.element(progress).toBeDisabled()
-  await expect.element(screen.getByRole('status')).toHaveTextContent('下载中 42%')
-  await emit({ ...available, revision: 4, status: 'downloading', percent: 100 })
-  await expect.element(screen.getByRole('button', { name: '下载中 100%' })).toBeDisabled()
+  await expect.element(screen.getByRole('status')).toHaveTextContent('正在下载 42%')
+  await emit({ ...available, revision: 4, status: 'preparing', percent: 100 })
+  await expect.element(screen.getByRole('button', { name: '校验更新' })).toBeDisabled()
+  await expect.element(screen.getByRole('status')).toHaveTextContent('校验更新')
   await emit({ ...available, revision: 5, status: 'installing', percent: 100 })
-  await expect.element(screen.getByRole('button', { name: '正在重启…' })).toBeDisabled()
+  await expect.element(screen.getByRole('button', { name: '正在重启' })).toBeDisabled()
   expect(mocks.download).toHaveBeenCalledOnce()
 })
 
@@ -281,41 +310,42 @@ it('ignores late snapshots and earlier download replies after newer events', asy
   await emit({ ...available, revision: 4, status: 'downloading', percent: 61 })
   resolveSnapshot({ ...available, status: 'idle', version: null })
   resolveDownload({ ...available, revision: 3, status: 'downloading', percent: 0 })
-  await expect.element(screen.getByRole('button', { name: '下载中 61%' })).toBeDisabled()
+  await expect.element(screen.getByRole('button', { name: '正在下载 61%' })).toBeDisabled()
   await screen.unmount()
   expect(mocks.unsubscribe).toHaveBeenCalledOnce()
 })
 
 it.each([
-  ['downloadFailed', '下载失败，请重试'],
-  ['installFailed', '重启失败，请重试']
+  ['downloadFailed', '下载失败'],
+  ['installFailed', '重启失败']
 ] as const)('restores an accessible retry action after %s', async (error, message) => {
   const screen = await renderFooter()
   await screen.getByRole('button', { name: '下载更新' }).click()
-  await emit({ ...available, revision: 3, status: 'error', error })
+  await emit({ ...available, revision: 3, status: 'preparing', percent: 100 })
+  await emit({ ...available, revision: 4, status: 'error', error })
   const retry = screen.getByRole('button', { name: '下载更新' })
   await expect.element(retry).toBeEnabled()
   await expect.element(screen.getByRole('alert')).toHaveTextContent(message)
   expect(retry.element().getAttribute('aria-describedby')).toBe(
     screen.getByRole('alert').element().id
   )
-  mocks.download.mockResolvedValue({ ...available, revision: 4, status: 'downloading', percent: 0 })
+  mocks.download.mockResolvedValue({ ...available, revision: 5, status: 'downloading', percent: 0 })
   await retry.click()
   expect(mocks.download).toHaveBeenCalledTimes(2)
   await expect.element(screen.getByRole('alert')).not.toBeInTheDocument()
-  await expect.element(screen.getByRole('button', { name: '下载中 0%' })).toBeDisabled()
+  await expect.element(screen.getByRole('button', { name: '正在下载 0%' })).toBeDisabled()
 })
 
 it('recovers from a rejected download request without inventing a new host revision', async () => {
   mocks.download.mockRejectedValueOnce(new Error('IPC unavailable'))
   const screen = await renderFooter()
   await screen.getByRole('button', { name: '下载更新' }).click()
-  await expect.element(screen.getByRole('alert')).toHaveTextContent('下载失败，请重试')
+  await expect.element(screen.getByRole('alert')).toHaveTextContent('下载失败')
   await expect.element(screen.getByRole('button', { name: '下载更新' })).toBeEnabled()
   await emit(available)
-  await expect.element(screen.getByRole('alert')).toHaveTextContent('下载失败，请重试')
+  await expect.element(screen.getByRole('alert')).toHaveTextContent('下载失败')
   await screen.getByRole('button', { name: '下载更新' }).click()
-  await expect.element(screen.getByRole('button', { name: '下载中 0%' })).toBeDisabled()
+  await expect.element(screen.getByRole('button', { name: '正在下载 0%' })).toBeDisabled()
   expect(mocks.download).toHaveBeenCalledTimes(2)
 })
 
@@ -363,7 +393,12 @@ it.each(['zh-CN', 'en-US'] as const)(
         element: bar,
         path: `${screenshotDir}/update-downloading-${language}.png`
       })
-    await emit({ ...available, revision: 3, status: 'error', error: 'downloadFailed' })
+    await emit({ ...available, revision: 3, status: 'preparing', percent: 100 })
+    await expect
+      .element(screen.getByRole('button', { name: getTranslation(language, 'update.preparing') }))
+      .toBeDisabled()
+    checkLayout()
+    await emit({ ...available, revision: 4, status: 'error', error: 'downloadFailed' })
     checkLayout()
     if (screenshotDir)
       await page.screenshot({ element: bar, path: `${screenshotDir}/update-error-${language}.png` })

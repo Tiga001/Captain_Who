@@ -4,7 +4,7 @@ use super::*;
 fn profile_save_notifies_only_persisted_metadata_and_preserves_preferences() {
     let directory = tempfile::tempdir().unwrap();
     let storage = Arc::new(StorageService::open(&directory.path().join("storage.sqlite")).unwrap());
-    let service = AgentService::new(storage.clone());
+    let service = AgentService::new_authorized_for_test(storage.clone());
     let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
     let save = |profile: &str| {
         handle_request(

@@ -25,21 +25,33 @@ export interface AuthDriver {
 }
 
 export function sdkFailure(error: unknown, fallback: AuthErrorCode): AuthFailure {
-  const value = error as { code?: string | number; errorCode?: number; message?: string }
-  const code = value?.errorCode ?? value?.code
-  if (value?.message?.includes('CAPTAIN_WHO_INTERACTIVE_VERIFICATION_REQUIRED')) {
+  const value = error as { code?: unknown; errorCode?: unknown; message?: unknown }
+  const codes = [value?.code, value?.errorCode]
+    .filter((code): code is string | number => typeof code === 'string' || typeof code === 'number')
+    .map((code) => String(code).trim().toLowerCase())
+  const numericCodes = codes.map(Number)
+  const message = typeof value?.message === 'string' ? value.message : ''
+  // SDK refresh can turn invalid_grant into unauthenticated without a numeric errorCode.
+  // Inspect both fields: a generic numeric code must not hide a terminal account error.
+  if (codes.includes('user_blocked')) return new AuthFailure('inactive')
+  if (
+    codes.some((code) => code === 'unauthenticated' || code === 'invalid_grant') ||
+    numericCodes.some((code) => code === 16 || code === 401)
+  ) {
+    return new AuthFailure('expired')
+  }
+  if (message.includes('CAPTAIN_WHO_INTERACTIVE_VERIFICATION_REQUIRED')) {
     return new AuthFailure('verificationUnavailable')
   }
-  if (code === 8 || code === 429) return new AuthFailure('rateLimit')
-  if ([4001, 4002, 4042, 4045, 4022, 12].includes(Number(code))) {
+  if (numericCodes.some((code) => code === 8 || code === 429)) return new AuthFailure('rateLimit')
+  if (numericCodes.some((code) => [4001, 4002, 4042, 4045, 4022, 12].includes(code))) {
     return new AuthFailure('verificationUnavailable')
   }
-  if (code === 16 || code === 401 || code === 'invalid_grant') return new AuthFailure('expired')
-  if ([3, 5, 7].includes(Number(code))) return new AuthFailure(fallback)
+  if (numericCodes.some((code) => [3, 5, 7].includes(code))) return new AuthFailure(fallback)
   // Inspect internally, but never forward raw SDK errors (which can include request details).
   if (
-    /network|fetch|timeout|timed out|ECONN|ENOTFOUND|socket/i.test(value?.message ?? '') ||
-    code === 14
+    /network|fetch|timeout|timed out|ECONN|ENOTFOUND|socket/i.test(message) ||
+    numericCodes.includes(14)
   ) {
     return new AuthFailure('network')
   }
@@ -78,13 +90,25 @@ export class CloudBaseAuthDriver implements AuthDriver {
     verify: (input: { token: string }) => Promise<SignInRes>
   } | null = null
 
-  private async session(result: SignInRes, fallback: AuthErrorCode): Promise<CloudSession> {
+  private async request<T>(operation: () => Promise<T>, fallback: AuthErrorCode): Promise<T> {
+    try {
+      return await operation()
+    } catch (error) {
+      throw sdkFailure(error, fallback)
+    }
+  }
+
+  private async session(
+    operation: () => Promise<SignInRes>,
+    fallback: AuthErrorCode
+  ): Promise<CloudSession> {
+    const result = await this.request(operation, fallback)
     if (result.error) throw sdkFailure(result.error, fallback)
     const session = result.data?.session
     if (!session?.access_token || !session.refresh_token) throw new AuthFailure('expired')
     // Fetch the authenticated identity after restoration; the publishable anonymous identity is
     // never a user session, and email must come from CloudBase rather than the account profile.
-    const userResult = await this.auth.getUser()
+    const userResult = await this.request(() => this.auth.getUser(), 'network')
     if (userResult.error) throw sdkFailure(userResult.error, 'network')
     const user = userResult.data?.user
     if (!user || user.is_anonymous || typeof user.email !== 'string' || !user.email) {
@@ -99,20 +123,23 @@ export class CloudBaseAuthDriver implements AuthDriver {
 
   async login(email: string, password: string): Promise<CloudSession> {
     this.challenge = null
-    return this.session(await this.auth.signInWithPassword({ email, password }), 'credentials')
+    return this.session(() => this.auth.signInWithPassword({ email, password }), 'credentials')
   }
 
   async restore(tokens: SessionTokens): Promise<CloudSession> {
-    return this.session(await this.auth.setSession(tokens), 'network')
+    return this.session(() => this.auth.setSession(tokens), 'network')
   }
 
   async refresh(tokens: SessionTokens): Promise<CloudSession> {
-    return this.session(await this.auth.refreshSession(tokens.refresh_token), 'network')
+    return this.session(() => this.auth.refreshSession(tokens.refresh_token), 'network')
   }
 
   async sendCode(email: string): Promise<void> {
     this.challenge = null
-    const result = await this.auth.signInWithOtp({ email, options: { shouldCreateUser: false } })
+    const result = await this.request(
+      () => this.auth.signInWithOtp({ email, options: { shouldCreateUser: false } }),
+      'verificationUnavailable'
+    )
     if (result.error) throw sdkFailure(result.error, 'verificationUnavailable')
     if (!result.data?.verifyOtp) throw new AuthFailure('verificationUnavailable')
     this.challenge = { email, expiresAt: Date.now() + 10 * 60_000, verify: result.data.verifyOtp }
@@ -123,7 +150,7 @@ export class CloudBaseAuthDriver implements AuthDriver {
     if (!challenge || challenge.email !== email || challenge.expiresAt < Date.now()) {
       throw new AuthFailure('code')
     }
-    const result = await this.session(await challenge.verify({ token: code }), 'code')
+    const result = await this.session(() => challenge.verify({ token: code }), 'code')
     this.challenge = null
     return result
   }

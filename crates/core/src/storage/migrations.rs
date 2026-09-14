@@ -8,14 +8,11 @@ pub const DEVELOPMENT_STORAGE_SCHEMA_RESET_REQUIRED: &str =
 const CANONICAL_SCHEMA: &str = include_str!("canonical_schema.sql");
 const CANONICAL_SCHEMA_FINGERPRINT: &str =
     "sha256:44c989bbfd6fb7212013c2f27ce721aa967157a85202187d88f0dea0e5c65827";
-const V46_SCHEMA_FINGERPRINT: &str =
-    "sha256:6af5e743b2fd8ab799ff3fc702137b4dd8289b45420d5338a83b81c88b301179";
-const LOCAL_TOKEN_LEDGER_SCHEMA_MARKER: &str = "-- Independent local token ledger, schema v47.";
 
 /// Initializes fresh storage or validates the exact current canonical schema.
 ///
-/// The exact v46 catalog has one additive, atomic upgrade for the independent token ledger.
-/// Other earlier development schemas still require an explicit reset; data is never auto-reset.
+/// All earlier development schemas require an explicit reset; data is never auto-migrated
+/// or auto-reset.
 pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
     connection.execute_batch("PRAGMA foreign_keys = ON;")?;
 
@@ -24,10 +21,6 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
 
     if schema_version == 0 && object_count == 0 {
         return create_canonical_schema(connection);
-    }
-
-    if schema_version == 46 {
-        return upgrade_v46_token_ledger(connection);
     }
 
     if schema_version != STORAGE_SCHEMA_VERSION {
@@ -57,20 +50,6 @@ fn initialize_local_token_ledger(connection: &Connection) -> rusqlite::Result<()
         [super::now_ms()],
     )?;
     Ok(())
-}
-
-fn upgrade_v46_token_ledger(connection: &Connection) -> rusqlite::Result<()> {
-    let transaction = connection.unchecked_transaction()?;
-    validate_schema_fingerprint(&transaction, V46_SCHEMA_FINGERPRINT)?;
-    ensure_foreign_keys_are_valid(&transaction)?;
-    let (_, additions) = CANONICAL_SCHEMA
-        .split_once(LOCAL_TOKEN_LEDGER_SCHEMA_MARKER)
-        .expect("canonical schema contains local token ledger marker");
-    transaction.execute_batch(additions)?;
-    initialize_local_token_ledger(&transaction)?;
-    transaction.pragma_update(None, "user_version", STORAGE_SCHEMA_VERSION)?;
-    validate_canonical_schema(&transaction)?;
-    transaction.commit()
 }
 
 fn validate_canonical_schema(connection: &Connection) -> rusqlite::Result<()> {
@@ -157,8 +136,12 @@ fn reset_required_error(detail: impl std::fmt::Display) -> rusqlite::Error {
 mod tests {
     use super::*;
 
+    const V46_SCHEMA_FINGERPRINT: &str =
+        "sha256:6af5e743b2fd8ab799ff3fc702137b4dd8289b45420d5338a83b81c88b301179";
+    const LOCAL_TOKEN_LEDGER_SCHEMA_MARKER: &str = "-- Independent local token ledger, schema v47.";
+
     #[test]
-    fn exact_v46_is_upgraded_without_changing_user_data_or_backfilling_usage() {
+    fn exact_v46_requires_reset_without_changing_user_data_or_creating_token_tables() {
         let connection = Connection::open_in_memory().unwrap();
         connection
             .execute_batch(
@@ -174,8 +157,18 @@ mod tests {
             schema_fingerprint(&connection).unwrap(),
             V46_SCHEMA_FINGERPRINT
         );
-        run_migrations(&connection).unwrap();
-        assert_eq!(read_schema_version(&connection).unwrap(), 47);
+        let before_changes = connection.total_changes();
+        let error = run_migrations(&connection).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains(DEVELOPMENT_STORAGE_SCHEMA_RESET_REQUIRED));
+        assert!(error.to_string().contains("found 46"));
+        assert_eq!(read_schema_version(&connection).unwrap(), 46);
+        assert_eq!(connection.total_changes(), before_changes);
+        assert_eq!(
+            schema_fingerprint(&connection).unwrap(),
+            V46_SCHEMA_FINGERPRINT
+        );
         assert_eq!(
             connection
                 .query_row(
@@ -189,13 +182,19 @@ mod tests {
         assert_eq!(
             connection
                 .query_row(
-                    "SELECT COUNT(*) FROM local_token_usage_requests",
+                    "SELECT COUNT(*) FROM sqlite_schema WHERE name LIKE 'local_token_usage_%'",
                     [],
                     |row| row.get::<_, i64>(0)
                 )
                 .unwrap(),
             0
         );
+    }
+
+    #[test]
+    fn fresh_token_ledger_is_initialized_once_and_reopening_preserves_its_start_time() {
+        let connection = Connection::open_in_memory().unwrap();
+        run_migrations(&connection).unwrap();
         let start: i64 = connection
             .query_row(
                 "SELECT started_at FROM local_token_usage_metadata",
@@ -218,7 +217,7 @@ mod tests {
     }
 
     #[test]
-    fn modified_v46_catalog_is_rejected_without_partial_token_tables() {
+    fn modified_v46_catalog_requires_reset_without_mutation() {
         let connection = Connection::open_in_memory().unwrap();
         connection
             .execute_batch(
@@ -233,34 +232,12 @@ mod tests {
             .execute_batch("CREATE TABLE unexpected(value TEXT);")
             .unwrap();
         let before = schema_fingerprint(&connection).unwrap();
-        assert!(run_migrations(&connection).is_err());
-        assert_eq!(read_schema_version(&connection).unwrap(), 46);
-        assert_eq!(schema_fingerprint(&connection).unwrap(), before);
-    }
-
-    #[test]
-    fn v46_upgrade_ddl_failure_rolls_back_every_addition_and_version() {
-        use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
-        let connection = Connection::open_in_memory().unwrap();
-        connection
-            .execute_batch(
-                CANONICAL_SCHEMA
-                    .split_once(LOCAL_TOKEN_LEDGER_SCHEMA_MARKER)
-                    .unwrap()
-                    .0,
-            )
-            .unwrap();
-        connection.pragma_update(None, "user_version", 46).unwrap();
-        let before = schema_fingerprint(&connection).unwrap();
-        // Fail on the third new table, after two DDL statements have already succeeded.
-        connection.authorizer(Some(|context: AuthContext<'_>| match context.action {
-            AuthAction::CreateTable {
-                table_name: "local_token_usage_days",
-            } => Authorization::Deny,
-            _ => Authorization::Allow,
-        }));
-        assert!(run_migrations(&connection).is_err());
-        assert!(connection.is_autocommit());
+        let before_changes = connection.total_changes();
+        let error = run_migrations(&connection).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains(DEVELOPMENT_STORAGE_SCHEMA_RESET_REQUIRED));
+        assert_eq!(connection.total_changes(), before_changes);
         assert_eq!(read_schema_version(&connection).unwrap(), 46);
         assert_eq!(schema_fingerprint(&connection).unwrap(), before);
     }

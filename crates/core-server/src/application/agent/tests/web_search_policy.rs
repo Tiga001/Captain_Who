@@ -18,7 +18,7 @@ fn live_web_search_policy_tracks_committed_settings_and_rejects_stale_cas() {
     let fixture = tempdir().unwrap();
     let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
     storage.save_model_settings(test_model_settings()).unwrap();
-    let service = AgentService::new(Arc::clone(&storage));
+    let service = AgentService::new_authorized_for_test(Arc::clone(&storage));
     let policy = service.web_search_policy_source();
     let initial = policy.snapshot().unwrap();
     assert!(!initial.enabled);

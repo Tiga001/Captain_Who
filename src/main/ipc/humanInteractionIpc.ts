@@ -26,7 +26,8 @@ function broadcast(channel: string, value: unknown): void {
 
 export function registerHumanInteractionIpc(
   ipcMain: TrustedIpcMain,
-  coreServer: CoreServer
+  coreServer: CoreServer,
+  syncExecutionAccess?: () => Promise<void>
 ): () => void {
   ipcMain.handle(HOST_CHANNELS.humanInteraction.getSettings, (_event, input) =>
     captureHostInvocation(async () =>
@@ -50,11 +51,14 @@ export function registerHumanInteractionIpc(
     )
   )
   ipcMain.handle(HOST_CHANNELS.humanInteraction.submit, (_event, input) =>
-    captureHostInvocation(async () =>
-      parseHumanInteractionRequestSnapshot(
-        await coreServer.submitHumanInteractionRequest(parseHumanInteractionSubmitInput(input))
+    captureHostInvocation(async () => {
+      const submission = parseHumanInteractionSubmitInput(input)
+      // Core decides whether this answer steers/resumes existing work or starts a new root Turn.
+      await syncExecutionAccess?.()
+      return parseHumanInteractionRequestSnapshot(
+        await coreServer.submitHumanInteractionRequest(submission)
       )
-    )
+    })
   )
   ipcMain.handle(HOST_CHANNELS.humanInteraction.ignore, (_event, input) =>
     captureHostInvocation(async () =>

@@ -93,7 +93,7 @@ impl FileTransactionHost {
         preferences.context_profile = context_profile;
         storage.save_agent_prompt_preferences(preferences).unwrap();
         set_collaboration_enabled(&storage, collaboration_enabled);
-        let agent = AgentService::new(Arc::clone(&storage));
+        let agent = AgentService::new_authorized_for_test(Arc::clone(&storage));
         let (notifications, events) = unbounded_channel();
         let turn = agent
             .start_conversation_turn(

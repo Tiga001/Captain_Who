@@ -89,7 +89,7 @@ fn cancel_run_rpc_reports_tree_stop_persistence_failure_but_interrupts_root_loca
         .unwrap();
     // Construct startup recovery before creating the live fixture Turn; otherwise the service
     // correctly treats the synthetic in-progress trace as an orphan from an earlier Host.
-    let service = AgentService::new(Arc::clone(&storage));
+    let service = AgentService::new_authorized_for_test(Arc::clone(&storage));
     assert!(storage
         .append_in_progress_conversation_turn_trace(
             &mycopilot_core::ConversationTurnTrace {
@@ -185,7 +185,7 @@ fn interrupting_pending_approval_ignores_retiring_runtime_token_and_commits_pair
             unread_at: None,
         })
         .unwrap();
-    let service = AgentService::new(storage.clone());
+    let service = AgentService::new_authorized_for_test(storage.clone());
     service.register_usage_context(
         "run-cancel",
         AgentRunUsageContext {
@@ -371,7 +371,7 @@ fn forced_cancellation_uses_backend_runtime_snapshot_instead_of_empty_trace() {
             unread_at: None,
         })
         .unwrap();
-    let service = AgentService::new(storage.clone());
+    let service = AgentService::new_authorized_for_test(storage.clone());
     service.register_usage_context(
         "run-forced",
         AgentRunUsageContext {
@@ -548,7 +548,7 @@ fn cancelled_tool_call_finish_reason_is_not_projected_as_a_terminal_error() {
         })
         .unwrap();
 
-    let service = AgentService::new(Arc::clone(&storage));
+    let service = AgentService::new_authorized_for_test(Arc::clone(&storage));
     service.register_usage_context(
         RUN_ID,
         AgentRunUsageContext {
@@ -752,7 +752,7 @@ fn failed_forced_cancellation_projection_is_retired_by_current_startup_reconcili
         )
         .unwrap();
 
-    let service = AgentService::new(storage.clone());
+    let service = AgentService::new_authorized_for_test(storage.clone());
     service.register_usage_context(
         "run-forced-recovery",
         AgentRunUsageContext {
@@ -928,7 +928,7 @@ async fn cancelling_immediately_after_approval_prevents_command_side_effects() {
             unread_at: None,
         })
         .unwrap();
-    let service = AgentService::new(Arc::clone(&storage));
+    let service = AgentService::new_authorized_for_test(Arc::clone(&storage));
     let command = AgentCommandRequest {
         id: "command-cancel-before-spawn".to_string(),
         command: "mkdir cancelled-before-spawn".to_string(),
@@ -1166,7 +1166,7 @@ async fn message_deletion_cancels_a_rejected_actions_pre_spawn_continuation() {
     agent_input.resume_checkpoint = Some(checkpoint);
 
     save_test_pending_provider_for_input(&storage, &mut agent_input);
-    let service = AgentService::new(Arc::clone(&storage));
+    let service = AgentService::new_authorized_for_test(Arc::clone(&storage));
     admit_test_pending_checkpoint(&storage, &agent_input, assistant_message_id);
     service
         .store_pending_action(
@@ -1282,7 +1282,7 @@ async fn cancelling_run_during_approved_command_finishes_cancelled_without_resum
             unread_at: None,
         })
         .unwrap();
-    let service = AgentService::new(storage.clone());
+    let service = AgentService::new_authorized_for_test(storage.clone());
     service.register_usage_context(
         "run-command-cancel",
         AgentRunUsageContext {

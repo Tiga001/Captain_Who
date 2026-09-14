@@ -50,7 +50,7 @@ fn manual_compaction_boundary_request_accepts_only_the_durable_operation_identit
     }
     let temp = tempfile::tempdir().unwrap();
     let storage = Arc::new(StorageService::open(&temp.path().join("storage.sqlite")).unwrap());
-    let agent_service = AgentService::new(Arc::clone(&storage));
+    let agent_service = AgentService::new_authorized_for_test(Arc::clone(&storage));
     let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
     let response = handle_request(
         &storage,
@@ -74,7 +74,7 @@ fn manual_compaction_boundary_request_accepts_only_the_durable_operation_identit
 fn fork_request_accepts_camel_case_assistant_reply_point() {
     let temp = tempfile::tempdir().unwrap();
     let storage = Arc::new(StorageService::open(&temp.path().join("storage.sqlite")).unwrap());
-    let agent_service = AgentService::new(Arc::clone(&storage));
+    let agent_service = AgentService::new_authorized_for_test(Arc::clone(&storage));
     let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
 
     let response = handle_request(
@@ -104,7 +104,7 @@ fn fork_request_accepts_camel_case_assistant_reply_point() {
 fn fork_request_accepts_camel_case_provider_transition_boundary_point() {
     let temp = tempfile::tempdir().unwrap();
     let storage = Arc::new(StorageService::open(&temp.path().join("storage.sqlite")).unwrap());
-    let agent_service = AgentService::new(Arc::clone(&storage));
+    let agent_service = AgentService::new_authorized_for_test(Arc::clone(&storage));
     let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
 
     let response = handle_request(
@@ -134,7 +134,7 @@ fn fork_request_accepts_camel_case_provider_transition_boundary_point() {
 fn fork_request_reports_active_command_as_structured_domain_error() {
     let temp = tempfile::tempdir().unwrap();
     let storage = Arc::new(StorageService::open(&temp.path().join("storage.sqlite")).unwrap());
-    let agent_service = AgentService::new(Arc::clone(&storage));
+    let agent_service = AgentService::new_authorized_for_test(Arc::clone(&storage));
     storage
         .save_conversation(ChatConversationRecord {
             id: "conversation-fork-rpc".to_string(),
@@ -252,7 +252,7 @@ fn fork_request_reports_active_command_as_structured_domain_error() {
 fn fork_request_rejects_retired_or_extra_fields() {
     let temp = tempfile::tempdir().unwrap();
     let storage = Arc::new(StorageService::open(&temp.path().join("storage.sqlite")).unwrap());
-    let agent_service = AgentService::new(Arc::clone(&storage));
+    let agent_service = AgentService::new_authorized_for_test(Arc::clone(&storage));
 
     for (id, params) in [
         (

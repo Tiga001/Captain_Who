@@ -373,6 +373,7 @@ async fn run_deepseek_restart(
         )
         .unwrap()
         .with_mcp_tool_invoker(Arc::clone(&invoker) as Arc<dyn McpToolInvoker>);
+    service.grant_execution_access_for_test();
     let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
     let turn = service
         .start_conversation_turn(
@@ -588,6 +589,7 @@ async fn run_deepseek_restart(
     assert_eq!(cumulative_usage.output_price.as_deref(), Some("0"));
 
     if switch_to_generic_while_pending {
+        restarted.grant_execution_access_for_test();
         let (generic_notifications, mut generic_receiver) = tokio::sync::mpsc::unbounded_channel();
         restarted
             .start_conversation_turn(
@@ -824,7 +826,7 @@ async fn pending_generic_run_stays_frozen_when_next_run_switches_to_deepseek() {
         "",
     );
     let invoker = ApprovalLifecycleInvoker::with_descriptor(lifecycle_descriptor());
-    let service = AgentService::new(Arc::clone(&storage))
+    let service = AgentService::new_authorized_for_test(Arc::clone(&storage))
         .with_mcp_tool_invoker(Arc::clone(&invoker) as Arc<dyn McpToolInvoker>);
     let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
     let turn = service
@@ -902,6 +904,7 @@ async fn pending_generic_run_stays_frozen_when_next_run_switches_to_deepseek() {
         .await;
     assert_eq!(resumed_done["params"]["status"], "completed");
 
+    restarted.grant_execution_access_for_test();
     let (next_notifications, mut next_receiver) = tokio::sync::mpsc::unbounded_channel();
     restarted
         .start_conversation_turn(
@@ -990,6 +993,7 @@ async fn restarted_approval_rejects_swapped_valid_provider_refs_before_dispatch(
         .unwrap()
         .with_mcp_tool_invoker(Arc::clone(&invoker) as Arc<dyn McpToolInvoker>);
 
+    service.grant_execution_access_for_test();
     let mut run_ids = Vec::new();
     for suffix in ["a", "b"] {
         let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
@@ -1262,6 +1266,7 @@ async fn deepseek_grouped_two_approval_turn_survives_restart_and_pairs_both_prov
         )
         .unwrap()
         .with_mcp_tool_invoker(Arc::clone(&invoker) as Arc<dyn McpToolInvoker>);
+    service.grant_execution_access_for_test();
     let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
     let turn = service
         .start_conversation_turn(
@@ -1501,7 +1506,7 @@ async fn agent_service_approval_cas_runs_once_and_keeps_mcp_values_out_of_durabl
         "",
     );
     let invoker = ApprovalLifecycleInvoker::with_descriptor(lifecycle_descriptor());
-    let service = AgentService::new(Arc::clone(&storage))
+    let service = AgentService::new_authorized_for_test(Arc::clone(&storage))
         .with_mcp_tool_invoker(Arc::clone(&invoker) as Arc<dyn McpToolInvoker>);
     let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
     let _notification_guard = notifications.clone();
@@ -1690,7 +1695,7 @@ async fn automatic_mcp_tool_error_keeps_model_arguments_live_but_not_durable() {
         descriptor,
         ApprovalInvocationBehavior::ServerToolError,
     );
-    let service = AgentService::new(Arc::clone(&storage))
+    let service = AgentService::new_authorized_for_test(Arc::clone(&storage))
         .with_mcp_tool_invoker(Arc::clone(&invoker) as Arc<dyn McpToolInvoker>);
     let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
     let _turn = service
@@ -1794,7 +1799,7 @@ async fn run_approved_behavior(behavior: ApprovalInvocationBehavior) -> (Value, 
         "",
     );
     let invoker = ApprovalLifecycleInvoker::with_behavior(lifecycle_descriptor(), behavior);
-    let service = AgentService::new(Arc::clone(&storage))
+    let service = AgentService::new_authorized_for_test(Arc::clone(&storage))
         .with_mcp_tool_invoker(Arc::clone(&invoker) as Arc<dyn McpToolInvoker>);
     let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
     let turn = service
@@ -1885,7 +1890,7 @@ async fn run_rejected_approval(message: Option<&str>) -> RejectedApprovalScenari
         "",
     );
     let invoker = ApprovalLifecycleInvoker::with_descriptor(lifecycle_descriptor());
-    let service = AgentService::new(Arc::clone(&storage))
+    let service = AgentService::new_authorized_for_test(Arc::clone(&storage))
         .with_mcp_tool_invoker(Arc::clone(&invoker) as Arc<dyn McpToolInvoker>);
     let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
     let _notification_guard = notifications.clone();
@@ -2178,7 +2183,7 @@ async fn concurrent_double_reject_has_one_durable_winner_and_one_model_continuat
         "",
     );
     let invoker = ApprovalLifecycleInvoker::with_descriptor(lifecycle_descriptor());
-    let service = AgentService::new(Arc::clone(&storage))
+    let service = AgentService::new_authorized_for_test(Arc::clone(&storage))
         .with_mcp_tool_invoker(Arc::clone(&invoker) as Arc<dyn McpToolInvoker>);
     let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
     let _notification_guard = notifications.clone();
@@ -2366,7 +2371,7 @@ async fn recovered_approved_mcp_rejection_keeps_feedback_and_resumes_with_normal
         "",
     );
     let invoker = ApprovalLifecycleInvoker::with_descriptor(lifecycle_descriptor());
-    let initial = AgentService::new(Arc::clone(&storage))
+    let initial = AgentService::new_authorized_for_test(Arc::clone(&storage))
         .with_mcp_tool_invoker(Arc::clone(&invoker) as Arc<dyn McpToolInvoker>);
     let (initial_notifications, mut initial_receiver) = tokio::sync::mpsc::unbounded_channel();
     let _initial_notification_guard = initial_notifications.clone();
@@ -2520,7 +2525,7 @@ async fn rejecting_a_second_mcp_call_after_success_preserves_the_exact_trace_pre
         "",
     );
     let invoker = ApprovalLifecycleInvoker::with_descriptor(lifecycle_descriptor());
-    let service = AgentService::new(Arc::clone(&storage))
+    let service = AgentService::new_authorized_for_test(Arc::clone(&storage))
         .with_mcp_tool_invoker(Arc::clone(&invoker) as Arc<dyn McpToolInvoker>);
     let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
     let _notification_guard = notifications.clone();
@@ -2727,7 +2732,7 @@ async fn predecessor_cas_failure_rolls_back_successor_before_visibility_or_dispa
         "",
     );
     let invoker = ApprovalLifecycleInvoker::with_descriptor(lifecycle_descriptor());
-    let service = AgentService::new(Arc::clone(&storage))
+    let service = AgentService::new_authorized_for_test(Arc::clone(&storage))
         .with_mcp_tool_invoker(Arc::clone(&invoker) as Arc<dyn McpToolInvoker>);
     let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
     let _notification_guard = notifications.clone();
@@ -2840,7 +2845,7 @@ async fn predecessor_cas_failure_rolls_back_successor_before_visibility_or_dispa
     drop(service);
     drop(storage);
     let recovered_storage = Arc::new(StorageService::open(&database_path).unwrap());
-    let recovered = AgentService::new(Arc::clone(&recovered_storage));
+    let recovered = AgentService::new_authorized_for_test(Arc::clone(&recovered_storage));
     assert!(recovered.list_pending_actions().is_empty());
     let predecessor = recovered_storage
         .get_pending_agent_action(&predecessor_storage_id)
@@ -2955,7 +2960,7 @@ async fn cancelling_a_dispatched_mcp_call_finishes_the_agent_run_without_model_r
         lifecycle_descriptor(),
         ApprovalInvocationBehavior::WaitForCancellation,
     );
-    let service = AgentService::new(Arc::clone(&storage))
+    let service = AgentService::new_authorized_for_test(Arc::clone(&storage))
         .with_mcp_tool_invoker(Arc::clone(&invoker) as Arc<dyn McpToolInvoker>);
     let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
     let turn = service
@@ -3078,7 +3083,7 @@ async fn mcp_result_persistence_failure_ends_the_live_ui_and_reconciles_without_
         "",
     );
     let invoker = ApprovalLifecycleInvoker::with_descriptor(lifecycle_descriptor());
-    let service = AgentService::new(Arc::clone(&storage))
+    let service = AgentService::new_authorized_for_test(Arc::clone(&storage))
         .with_mcp_tool_invoker(Arc::clone(&invoker) as Arc<dyn McpToolInvoker>);
     let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
     let turn = service

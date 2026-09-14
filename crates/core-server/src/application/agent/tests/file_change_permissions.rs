@@ -912,7 +912,7 @@ async fn remaining_run_approval_survives_redacted_content_trace_and_drives_the_n
     fs::create_dir(&workspace).unwrap();
     let workspace = fs::canonicalize(workspace).unwrap();
     let storage = Arc::new(StorageService::open(&database_path).unwrap());
-    let service = AgentService::new(Arc::clone(&storage));
+    let service = AgentService::new_authorized_for_test(Arc::clone(&storage));
     let run_id = "run-remember-file-change";
     let conversation_id = "conversation-remember-file-change";
     let first_call_id = "call-remember-first";
@@ -1354,7 +1354,7 @@ async fn single_action_response_lost_retry_replays_the_exact_receipt_without_a_s
     fs::create_dir(&workspace).unwrap();
     let workspace = fs::canonicalize(workspace).unwrap();
     let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
-    let service = AgentService::new(Arc::clone(&storage));
+    let service = AgentService::new_authorized_for_test(Arc::clone(&storage));
     let run_id = "run-single-action-response-lost";
     let conversation_id = "conversation-single-action-response-lost";
     let action_id = "call-single-action-response-lost";
@@ -1454,7 +1454,7 @@ async fn run_grant_storage_failure_returns_only_typed_safe_approval_rpc_data() {
     let workspace = fs::canonicalize(workspace).unwrap();
     let database_path = fixture.path().join("storage.sqlite");
     let storage = Arc::new(StorageService::open(&database_path).unwrap());
-    let service = AgentService::new(Arc::clone(&storage));
+    let service = AgentService::new_authorized_for_test(Arc::clone(&storage));
     let run_id = "run-grant-storage-safe-rpc";
     let conversation_id = "conversation-grant-storage-safe-rpc";
     let action_id = "call-grant-storage-safe-rpc";
@@ -1518,7 +1518,7 @@ async fn remaining_scope_response_lost_retry_preserves_the_exact_grant_and_recei
     fs::create_dir(&workspace).unwrap();
     let workspace = fs::canonicalize(workspace).unwrap();
     let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
-    let service = AgentService::new(Arc::clone(&storage));
+    let service = AgentService::new_authorized_for_test(Arc::clone(&storage));
     let run_id = "run-remaining-response-lost";
     let conversation_id = "conversation-remaining-response-lost";
     let action_id = "call-remaining-response-lost";
@@ -1600,7 +1600,7 @@ async fn concurrent_identical_remaining_approvals_execute_once_and_replay_once()
     fs::create_dir(&workspace).unwrap();
     let workspace = fs::canonicalize(workspace).unwrap();
     let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
-    let service = AgentService::new(Arc::clone(&storage));
+    let service = AgentService::new_authorized_for_test(Arc::clone(&storage));
     let run_id = "run-concurrent-remaining-retry";
     let conversation_id = "conversation-concurrent-remaining-retry";
     let action_id = "call-concurrent-remaining-retry";
@@ -1689,7 +1689,7 @@ async fn restart_retry_of_a_durable_in_flight_approval_is_outcome_unknown_and_ne
     fs::create_dir(&workspace).unwrap();
     let workspace = fs::canonicalize(workspace).unwrap();
     let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
-    let service = AgentService::new(Arc::clone(&storage));
+    let service = AgentService::new_authorized_for_test(Arc::clone(&storage));
     let run_id = "run-in-flight-approval-retry";
     let conversation_id = "conversation-in-flight-approval-retry";
     let action_id = "call-in-flight-approval-retry";
@@ -1792,7 +1792,7 @@ fn automatic_direct_outcome_unknown_keeps_the_claim_executing_without_a_tool_res
     fs::create_dir(&workspace).unwrap();
     let workspace = fs::canonicalize(workspace).unwrap();
     let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
-    let service = AgentService::new(Arc::clone(&storage));
+    let service = AgentService::new_authorized_for_test(Arc::clone(&storage));
     let target = workspace.join("uncertain.txt");
     let run_id = "run-direct-outcome-unknown";
     let conversation_id = "conversation-direct-outcome-unknown";
@@ -1894,7 +1894,7 @@ fn automatic_direct_post_commit_binding_failure_recovers_without_replaying() {
     fs::create_dir(&workspace).unwrap();
     let workspace = fs::canonicalize(workspace).unwrap();
     let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
-    let service = AgentService::new(Arc::clone(&storage));
+    let service = AgentService::new_authorized_for_test(Arc::clone(&storage));
     let target = workspace.join("post-commit-binding.txt");
     let run_id = "run-direct-post-commit-binding";
     let conversation_id = "conversation-direct-post-commit-binding";
@@ -1987,7 +1987,7 @@ fn automatic_direct_reconciles_a_terminal_receipt_after_post_commit_error() {
     fs::create_dir(&workspace).unwrap();
     let workspace = fs::canonicalize(workspace).unwrap();
     let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
-    let service = AgentService::new(Arc::clone(&storage));
+    let service = AgentService::new_authorized_for_test(Arc::clone(&storage));
     let target = workspace.join("post-commit.txt");
     let run_id = "run-direct-post-commit-reconciliation";
     let conversation_id = "conversation-direct-post-commit-reconciliation";
@@ -2137,7 +2137,7 @@ fn manual_direct_durable_dispatch_before_publication_recovers_as_not_executed() 
     fs::create_dir(&workspace).unwrap();
     let workspace = fs::canonicalize(workspace).unwrap();
     let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
-    let service = AgentService::new(Arc::clone(&storage));
+    let service = AgentService::new_authorized_for_test(Arc::clone(&storage));
     let run_id = "run-manual-direct-pre-effect";
     let conversation_id = "conversation-manual-direct-pre-effect";
     let assistant_message_id = "assistant-manual-direct-pre-effect";
@@ -2204,7 +2204,7 @@ fn manual_direct_publication_before_binding_receipt_recovers_without_replay() {
     fs::create_dir(&workspace).unwrap();
     let workspace = fs::canonicalize(workspace).unwrap();
     let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
-    let service = AgentService::new(Arc::clone(&storage));
+    let service = AgentService::new_authorized_for_test(Arc::clone(&storage));
     let run_id = "run-manual-direct-post-effect";
     let conversation_id = "conversation-manual-direct-post-effect";
     let assistant_message_id = "assistant-manual-direct-post-effect";
@@ -2295,7 +2295,7 @@ async fn manual_direct_post_receipt_error_adopts_exact_timeline_once() {
     fs::create_dir(&workspace).unwrap();
     let workspace = fs::canonicalize(workspace).unwrap();
     let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
-    let service = AgentService::new(Arc::clone(&storage));
+    let service = AgentService::new_authorized_for_test(Arc::clone(&storage));
     let run_id = "run-manual-direct-post-receipt";
     let conversation_id = "conversation-manual-direct-post-receipt";
     let assistant_message_id = "assistant-manual-direct-post-receipt";
@@ -2365,7 +2365,7 @@ async fn manual_file_change_approve_rpc_has_only_the_strict_typed_result() {
     fs::create_dir(&workspace).unwrap();
     let workspace = fs::canonicalize(workspace).unwrap();
     let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
-    let service = AgentService::new(Arc::clone(&storage));
+    let service = AgentService::new_authorized_for_test(Arc::clone(&storage));
     let run_id = "run-manual-file-change-approve-json";
     let conversation_id = "conversation-manual-file-change-approve-json";
     let assistant_message_id = "assistant-manual-file-change-approve-json";
@@ -2412,7 +2412,7 @@ async fn manual_file_change_reject_rpc_has_only_the_strict_typed_result() {
         let workspace = fs::canonicalize(workspace).unwrap();
         let storage =
             Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
-        let service = AgentService::new(Arc::clone(&storage));
+        let service = AgentService::new_authorized_for_test(Arc::clone(&storage));
         let run_id = "run-manual-file-change-reject-json";
         let conversation_id = "conversation-manual-file-change-reject-json";
         let assistant_message_id = "assistant-manual-file-change-reject-json";
@@ -2554,7 +2554,7 @@ async fn manual_file_change_audit_failure_publishes_one_typed_outcome_unknown_re
     fs::create_dir(&workspace).unwrap();
     let workspace = fs::canonicalize(workspace).unwrap();
     let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
-    let service = AgentService::new(Arc::clone(&storage));
+    let service = AgentService::new_authorized_for_test(Arc::clone(&storage));
     let run_id = "run-manual-file-change-audit-failure-json";
     let conversation_id = "conversation-manual-file-change-audit-failure-json";
     let assistant_message_id = "assistant-manual-file-change-audit-failure-json";
@@ -2747,7 +2747,7 @@ fn active_run_grant_continuation_fixture(
     fs::create_dir(&workspace).unwrap();
     let workspace = fs::canonicalize(workspace).unwrap();
     let storage = Arc::new(StorageService::open(&database_path).unwrap());
-    let service = AgentService::new(Arc::clone(&storage));
+    let service = AgentService::new_authorized_for_test(Arc::clone(&storage));
     let call_id = format!("call-{run_id}");
     store_manual_direct_create(
         &service,
@@ -3116,7 +3116,7 @@ fn completed_direct_file_change_history_returns_only_the_saved_inline_diff() {
     fs::create_dir(&workspace).unwrap();
     let target = workspace.join("history-direct.txt");
     let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
-    let service = AgentService::new(Arc::clone(&storage));
+    let service = AgentService::new_authorized_for_test(Arc::clone(&storage));
     let run_id = "run-history-direct";
     let conversation_id = "conversation-history-direct";
     let assistant_message_id = "assistant-history-direct";
@@ -3187,7 +3187,7 @@ fn completed_staged_file_change_history_rebuilds_diff_from_the_saved_binding() {
     fs::create_dir(&workspace).unwrap();
     let target = workspace.join("history-staged.txt");
     let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
-    let service = AgentService::new(Arc::clone(&storage));
+    let service = AgentService::new_authorized_for_test(Arc::clone(&storage));
     let run_id = "run-history-staged";
     let conversation_id = "conversation-history-staged";
     let assistant_message_id = "assistant-history-staged";

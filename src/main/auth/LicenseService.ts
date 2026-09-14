@@ -2,10 +2,14 @@ import type { AuthState, LicenseState } from '@mycopilot/host-api'
 import type { AuthService } from './AuthService'
 import type { ExecutionAccessReason } from '@mycopilot/protocol'
 import { LicenseFailure, parseVerifiedLicense, type VerifiedLicense } from './LicenseApiClient'
-import type { CachedLicense, LicenseStorage } from './LicenseCacheStore'
 
 type Auth = Pick<AuthService, 'getState' | 'subscribe' | 'getAccessToken' | 'refreshProfile'>
 type FetchLicense = (accessToken: string, signal: AbortSignal) => Promise<VerifiedLicense>
+interface MemoryLicense {
+  userId: string
+  receivedAt: number
+  license: VerifiedLicense
+}
 const EMPTY: Omit<LicenseState, 'revision'> = {
   status: 'signedOut',
   reason: null,
@@ -15,12 +19,16 @@ const EMPTY: Omit<LicenseState, 'revision'> = {
   error: null
 }
 
-/** Account-specific admission only. Never owns a run, Core Server, or shutdown lifecycle. */
+/**
+ * Account-specific, process-local admission. Only a fresh authenticated HTTPS response can
+ * create a grant; on-disk data is never an authorization source, even after a restart.
+ * Never owns a run, Core Server, or shutdown lifecycle.
+ */
 export class LicenseService {
   private state: LicenseState = { revision: 0, ...EMPTY }
   private userId: string | null = null
   private epoch = 0
-  private lease: CachedLicense | null = null
+  private lease: MemoryLicense | null = null
   private monotonicDeadline = 0
   private timer: ReturnType<typeof setTimeout> | undefined
   private controller: AbortController | null = null
@@ -32,7 +40,6 @@ export class LicenseService {
 
   constructor(
     private readonly auth: Auth,
-    private readonly store: LicenseStorage,
     private readonly fetchLicense: FetchLicense,
     private readonly now: () => number = Date.now,
     private readonly monotonic: () => number = () => performance.now()
@@ -64,15 +71,7 @@ export class LicenseService {
     this.retryAt = 0
     this.failures = 0
     this.publish({ ...EMPTY, status: next ? 'checking' : 'signedOut' })
-    if (next) {
-      try {
-        const saved = this.store.read(next)
-        if (saved && this.useCached(saved)) return
-      } catch {
-        /* A cache failure never creates a grant; validate online. */
-      }
-      void this.refresh()
-    }
+    if (next) void this.refresh()
   }
   private clearTimer(): void {
     if (this.timer) clearTimeout(this.timer)
@@ -90,7 +89,7 @@ export class LicenseService {
     )
     this.timer.unref?.()
   }
-  private deadline(entry: CachedLicense): number {
+  private deadline(entry: MemoryLicense): number {
     return (
       entry.receivedAt +
       Date.parse(entry.license.cacheValidUntil) -
@@ -107,7 +106,7 @@ export class LicenseService {
       this.monotonic() < this.monotonicDeadline
     )
   }
-  private useCached(entry: CachedLicense): boolean {
+  private acceptVerified(entry: MemoryLicense): boolean {
     if (entry.userId !== this.userId || !Number.isFinite(entry.receivedAt)) return false
     let license: VerifiedLicense
     try {
@@ -133,7 +132,11 @@ export class LicenseService {
   }
   private expire(): void {
     if (this.state.status !== 'allowed' || this.valid()) return
-    const knownExpiry = this.lease?.license.expiresAt === this.lease?.license.cacheValidUntil
+    const knownExpiry =
+      !!this.lease && this.lease.license.expiresAt === this.lease.license.cacheValidUntil
+    // Once expiry/clock rollback is observed, correcting the clock cannot revive this grant.
+    this.lease = null
+    this.monotonicDeadline = 0
     this.publish({
       status: knownExpiry ? 'denied' : 'unavailable',
       reason: knownExpiry ? 'expired' : null
@@ -226,7 +229,8 @@ export class LicenseService {
         this.failures = 0
         this.retryAt = 0
         this.lease = null
-        if (result.allowed && !this.useCached(entry)) throw new LicenseFailure('invalidResponse')
+        if (result.allowed && !this.acceptVerified(entry))
+          throw new LicenseFailure('invalidResponse')
         if (!result.allowed) {
           this.publish({
             status: 'denied',
@@ -240,14 +244,14 @@ export class LicenseService {
           this.retryAt = this.now() + 60_000
           this.schedule(60 * 60_000)
         }
-        try {
-          if (!this.store.write(entry)) this.publish({ error: 'storage' })
-        } catch {
-          this.publish({ error: 'storage' })
-        }
       } catch (error) {
         if (epoch !== this.epoch) return structuredClone(this.state)
         const code = error instanceof LicenseFailure ? error.code : 'network'
+        // A definitive missing grant is not a transient outage and must revoke an earlier lease.
+        if (code === 'notProvisioned') {
+          this.lease = null
+          this.monotonicDeadline = 0
+        }
         this.expire()
         this.publish({ status: this.valid() ? 'allowed' : 'unavailable', error: code })
         const delay = Math.min(60 * 60_000, 60_000 * 2 ** Math.min(this.failures++, 6))

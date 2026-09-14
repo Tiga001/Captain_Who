@@ -301,9 +301,17 @@ export class HumanInteractionController {
           error instanceof HostInvocationError
             ? (error.data as { type?: string; code?: string } | null)
             : null
-        const definitive =
+        const accessDenial =
           data?.type === 'human_interaction_error' &&
-          ['invalid_input', 'conflict', 'not_found'].includes(data.code ?? '')
+          [
+            'ACCOUNT_LOGIN_REQUIRED',
+            'ACCOUNT_LICENSE_REQUIRED',
+            'ACCOUNT_LICENSE_UNAVAILABLE'
+          ].includes(data.code ?? '')
+        const definitive =
+          accessDenial ||
+          (data?.type === 'human_interaction_error' &&
+            ['invalid_input', 'conflict', 'not_found'].includes(data.code ?? ''))
         frozen.uncertain = !definitive
         if (definitive) this.attempts.delete(requestId)
         this.publish({
@@ -313,7 +321,7 @@ export class HumanInteractionController {
               pendingAction: definitive ? null : kind,
               isSubmitting: false,
               isDraftLocked: !definitive,
-              error: definitive ? 'state_changed' : 'outcome_unknown'
+              error: accessDenial ? data!.code! : definitive ? 'state_changed' : 'outcome_unknown'
             }
           }
         })

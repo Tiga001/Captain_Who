@@ -191,6 +191,7 @@ async fn capture_read_then_thanks(save: RendererSave) -> Vec<Value> {
     let mut service =
         AgentService::try_new_with_startup_reconciliation(storage.clone(), true, Some(vault))
             .unwrap();
+    service.grant_execution_access_for_test();
     // Same-ms optimistic user/assistant, generated before the Host prepares its
     // own authoritative pair. Deliberately distinct, not relying on clock speed.
     let optimistic_timestamp = 1_788_713_110_306;
@@ -301,6 +302,7 @@ async fn capture_read_then_thanks(save: RendererSave) -> Vec<Value> {
         service =
             AgentService::try_new_with_startup_reconciliation(storage.clone(), true, Some(vault))
                 .unwrap();
+        service.grant_execution_access_for_test();
     }
     if matches!(save, RendererSave::LostStartResponse) {
         // A lost start response leaves the Renderer optimistic assistant unbound

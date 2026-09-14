@@ -11,6 +11,9 @@ import type { HumanInteractionHostApi } from '@mycopilot/host-api'
 import type { HumanInteractionAnswer } from '@mycopilot/protocol'
 import { hostClient } from '../../host/hostClient'
 import { useFrontendConfig } from '../../config/FrontendConfigProvider'
+import { useAccountAuth } from '../auth/AccountAuthContext'
+import { useLicense } from '../license/LicenseContext'
+import { getTurnAccessErrorCode } from '../license/turnAccessError'
 import {
   HumanInteractionController,
   type HumanInteractionControllerSnapshot
@@ -48,6 +51,8 @@ export function useHumanInteraction({
   api = hostClient.humanInteraction
 }: UseHumanInteractionOptions) {
   const { t } = useFrontendConfig()
+  const auth = useAccountAuth()
+  const license = useLicense()
   const controller = useMemo(() => {
     if (!api) return null
     let existing = controllers.get(api)
@@ -184,9 +189,17 @@ export function useHumanInteraction({
   )
   const submit = useCallback(
     async (requestId: string) => {
-      if (canAccess(requestId)) await controller?.submit(requestId)
+      if (!canAccess(requestId)) return
+      await controller?.submit(requestId)
+      if (!canAccess(requestId)) return
+      const error = { code: controller?.getSnapshot().operations[requestId]?.error }
+      if (getTurnAccessErrorCode(error)) {
+        if (!license?.handleDenied?.(error) && error.code === 'ACCOUNT_LOGIN_REQUIRED') {
+          auth?.requestLogin()
+        }
+      }
     },
-    [canAccess, controller]
+    [auth, canAccess, controller, license]
   )
   const ignore = useCallback(
     async (requestId: string) => {
@@ -216,13 +229,19 @@ export function useHumanInteraction({
   )
   const errorCode = operation?.error ?? (conversationId ? state.loads[conversationId]?.error : null)
   const error =
-    errorCode === 'outcome_unknown'
-      ? t('humanInteraction.error.outcomeUnknown')
-      : errorCode === 'state_changed'
-        ? t('humanInteraction.error.stateChanged')
-        : errorCode
-          ? t('humanInteraction.error.loadFailed')
-          : null
+    errorCode === 'ACCOUNT_LOGIN_REQUIRED'
+      ? t('auth.loginToSend')
+      : errorCode === 'ACCOUNT_LICENSE_REQUIRED'
+        ? t('license.newTurnBlocked')
+        : errorCode === 'ACCOUNT_LICENSE_UNAVAILABLE'
+          ? t('license.verificationNeeded')
+          : errorCode === 'outcome_unknown'
+            ? t('humanInteraction.error.outcomeUnknown')
+            : errorCode === 'state_changed'
+              ? t('humanInteraction.error.stateChanged')
+              : errorCode
+                ? t('humanInteraction.error.loadFailed')
+                : null
   return {
     requests,
     openRequests,

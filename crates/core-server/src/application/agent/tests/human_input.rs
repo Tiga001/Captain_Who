@@ -338,7 +338,7 @@ async fn assert_sync_scenario(question_batches: usize, skip_all: bool, approval_
     let fixture = tempdir().unwrap();
     let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
     configure_storage(&storage, fixture.path(), &address);
-    let agent = AgentService::new(Arc::clone(&storage));
+    let agent = AgentService::new_authorized_for_test(Arc::clone(&storage));
     let human = HumanInteractionService::new(&storage, &agent);
     let (notifications, mut events) = unbounded_channel();
     let turn = agent
@@ -592,7 +592,7 @@ async fn disabled_collaboration_first_turn_keeps_root_owned_sync_and_async_human
             .unwrap()
             .is_none());
 
-        let agent = AgentService::new(Arc::clone(&storage));
+        let agent = AgentService::new_authorized_for_test(Arc::clone(&storage));
         let (notifications, mut events) = unbounded_channel();
         let turn = agent
             .start_conversation_turn(turn_input(), notifications.clone())
@@ -779,7 +779,7 @@ async fn assert_sync_restart(answer_committed_before_restart: bool) {
         StorageService::open_with_model_credentials(&database_path, credentials.clone()).unwrap(),
     );
     configure_storage(&storage, fixture.path(), &address);
-    let agent = AgentService::new(Arc::clone(&storage));
+    let agent = AgentService::new_authorized_for_test(Arc::clone(&storage));
     let (notifications, mut events) = unbounded_channel();
     let turn = agent
         .start_conversation_turn(turn_input(), notifications.clone())
@@ -1034,7 +1034,7 @@ async fn assert_stopped_sync_wait(restart_before_stop: bool) {
         StorageService::open_with_model_credentials(&database_path, credentials.clone()).unwrap(),
     );
     configure_storage(&storage, fixture.path(), &address);
-    let agent = AgentService::new(Arc::clone(&storage));
+    let agent = AgentService::new_authorized_for_test(Arc::clone(&storage));
     let (notifications, mut events) = unbounded_channel();
     let turn = agent
         .start_conversation_turn(turn_input(), notifications.clone())
@@ -1126,7 +1126,7 @@ async fn assert_sync_submission_handoff(before_open_publication: bool) {
     let fixture = tempdir().unwrap();
     let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
     configure_storage(&storage, fixture.path(), &address);
-    let agent = AgentService::new(Arc::clone(&storage));
+    let agent = AgentService::new_authorized_for_test(Arc::clone(&storage));
     let (notifications, mut events) = unbounded_channel();
     let turn = agent
         .start_conversation_turn(turn_input(), notifications.clone())
@@ -1379,7 +1379,7 @@ async fn web_search_toggle_across_sync_and_approval_pauses_preserves_same_run() 
     let fixture = tempdir().unwrap();
     let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
     configure_storage(&storage, fixture.path(), &address);
-    let mut agent = AgentService::new(Arc::clone(&storage));
+    let mut agent = AgentService::new_authorized_for_test(Arc::clone(&storage));
     let (notifications, mut events) = unbounded_channel();
     let turn = agent
         .start_conversation_turn(turn_input(), notifications.clone())
@@ -1426,7 +1426,7 @@ async fn web_search_toggle_across_sync_and_approval_pauses_preserves_same_run() 
             save_search_policy(&storage, "disabled", CredentialMutation::Clear);
             wait_for_worker_release(&agent, &turn.run_id).await;
             drop(agent);
-            agent = AgentService::new(Arc::clone(&storage));
+            agent = AgentService::new_authorized_for_test(Arc::clone(&storage));
             assert_eq!(
                 agent.list_pending_actions().len(),
                 1,
@@ -1467,7 +1467,7 @@ async fn web_search_late_model_calls_are_denied_after_committed_off_setting() {
             value: "HOST_SEARCH_CREDENTIAL_CANARY".to_string(),
         },
     );
-    let agent = AgentService::new(Arc::clone(&storage));
+    let agent = AgentService::new_authorized_for_test(Arc::clone(&storage));
     let (notifications, mut events) = unbounded_channel();
     let turn = agent
         .start_conversation_turn(turn_input(), notifications)
@@ -1511,7 +1511,7 @@ async fn web_search_missing_credential_after_sync_restart_keeps_same_run() {
             value: "HOST_SEARCH_CREDENTIAL_CANARY".to_string(),
         },
     );
-    let agent = AgentService::new(Arc::clone(&storage));
+    let agent = AgentService::new_authorized_for_test(Arc::clone(&storage));
     let (notifications, mut events) = unbounded_channel();
     let turn = agent
         .start_conversation_turn(turn_input(), notifications)
@@ -1525,7 +1525,7 @@ async fn web_search_missing_credential_after_sync_restart_keeps_same_run() {
     drop(storage);
     let storage =
         Arc::new(StorageService::open_with_model_credentials(&database_path, credentials).unwrap());
-    let agent = AgentService::new(Arc::clone(&storage));
+    let agent = AgentService::new_authorized_for_test(Arc::clone(&storage));
     let (notifications, mut events) = unbounded_channel();
     HumanInteractionService::new(&storage, &agent)
         .submit(

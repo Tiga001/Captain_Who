@@ -84,7 +84,7 @@ fn source_resolution_cancellation_is_routed_and_idempotent() {
 async fn queued_source_cancellation_cannot_overtake_the_resolution_it_fences() {
     let temp = tempfile::tempdir().unwrap();
     let storage = Arc::new(StorageService::open(&temp.path().join("storage.sqlite")).unwrap());
-    let agent_service = AgentService::new(Arc::clone(&storage));
+    let agent_service = AgentService::new_authorized_for_test(Arc::clone(&storage));
     let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel();
     let (image_artifact_outbound_tx, _image_artifact_outbound_rx) =
         mpsc::channel(DEFAULT_MAX_CONCURRENT_IMAGE_ARTIFACT_READS);
@@ -184,7 +184,7 @@ async fn queued_source_cancellation_cannot_overtake_the_resolution_it_fences() {
 async fn request_loop_resolves_and_hands_off_a_candidate_on_one_acquisition_lane() {
     let temp = tempfile::tempdir().unwrap();
     let storage = Arc::new(StorageService::open(&temp.path().join("storage.sqlite")).unwrap());
-    let agent_service = AgentService::new(Arc::clone(&storage));
+    let agent_service = AgentService::new_authorized_for_test(Arc::clone(&storage));
     let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel();
     let (image_artifact_outbound_tx, _image_artifact_outbound_rx) =
         mpsc::channel(DEFAULT_MAX_CONCURRENT_IMAGE_ARTIFACT_READS);

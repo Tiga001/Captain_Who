@@ -4,6 +4,36 @@ vi.mock('electron', () => ({ BrowserWindow: { getAllWindows: () => [] } }))
 import { registerAgentIpc } from '../ipc/agentIpc'
 
 describe('account gate only protects new conversation turns', () => {
+  it('awaits a refreshed Core grant before starting or rewriting', async () => {
+    const handlers = new Map<string, (...args: unknown[]) => unknown>()
+    const core = {
+      onAgentEvent: vi.fn(),
+      onProviderTransition: vi.fn(),
+      startConversationTurn: vi.fn().mockResolvedValue({ runId: 'new' }),
+      rewriteConversationTurn: vi.fn().mockResolvedValue({ runId: 'rewrite' })
+    }
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    registerAgentIpc(
+      {
+        handle: (channel: string, handler: (...args: unknown[]) => unknown) =>
+          handlers.set(channel, handler),
+        on: vi.fn()
+      } as never,
+      core as never,
+      () => gate
+    )
+    const start = handlers.get(HOST_CHANNELS.agent.startConversationTurn)!({}, {})
+    const rewrite = handlers.get(HOST_CHANNELS.agent.rewriteConversationTurn)!({}, {})
+    expect(core.startConversationTurn).not.toHaveBeenCalled()
+    expect(core.rewriteConversationTurn).not.toHaveBeenCalled()
+    release()
+    await Promise.all([start, rewrite])
+    expect(core.startConversationTurn).toHaveBeenCalledOnce()
+    expect(core.rewriteConversationTurn).toHaveBeenCalledOnce()
+  })
   it('blocks new/rewrite turns after logout but leaves steering, approval, cancellation and events intact', async () => {
     const handlers = new Map<string, (...args: unknown[]) => unknown>()
     const ipc = {

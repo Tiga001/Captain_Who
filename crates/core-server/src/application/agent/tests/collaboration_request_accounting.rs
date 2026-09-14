@@ -90,7 +90,7 @@ impl Fixture {
             })
             .unwrap();
         set_enabled(&storage, enabled);
-        let service = AgentService::new(storage.clone());
+        let service = AgentService::new_authorized_for_test(storage.clone());
         Self {
             directory,
             storage,
