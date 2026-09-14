@@ -4,10 +4,12 @@ import {
   dialog,
   ipcMain,
   Menu,
+  nativeImage,
   nativeTheme,
   safeStorage,
   session,
   shell,
+  Tray,
   type IpcMainInvokeEvent,
   type OpenDialogOptions
 } from 'electron'
@@ -68,6 +70,11 @@ import {
   DockRecentConversationsController,
   type DockRecentConversationLabels
 } from './dockRecentConversations'
+import {
+  MenuBarRunningConversationsController,
+  type MenuBarRunningConversationLabels
+} from './menuBarRunningConversations'
+import boatMarkPath from '../../resources/brand-mark-light.png?asset'
 
 // Electron is the sole authority for the application data location. Freeze it before
 // app.setName() can affect path resolution so the entire process uses one root.
@@ -89,6 +96,7 @@ let disposeUpdateIpc: (() => void) | null = null
 let desktopUpdateService: ReturnType<typeof createDesktopUpdateService> | null = null
 let mainWindow: BrowserWindow | null = null
 let dockRecentConversations: DockRecentConversationsController | null = null
+let menuBarTray: Tray | null = null
 let pendingDockConversationId: string | null = null
 let startupReadiness: StartupReadinessController | null = null
 let hostInitializationReady = false
@@ -207,6 +215,25 @@ function dockRecentConversationLabels(): DockRecentConversationLabels {
   }
 }
 
+function menuBarRunningConversationLabels(): MenuBarRunningConversationLabels {
+  if (app.getLocale().toLowerCase().startsWith('zh')) {
+    return {
+      appName: 'Captain Who',
+      empty: '没有正在运行的聊天',
+      quit: '退出 Captain Who',
+      running: '正在运行',
+      untitled: '未命名聊天'
+    }
+  }
+  return {
+    appName: 'Captain Who',
+    empty: 'No chats are running',
+    quit: 'Quit Captain Who',
+    running: 'Running',
+    untitled: 'Untitled chat'
+  }
+}
+
 function openDockConversation(conversationId: string): void {
   pendingDockConversationId = conversationId
   activateMainWindow()
@@ -226,6 +253,42 @@ function installDockRecentConversations(): void {
     openConversation: openDockConversation
   })
   dockRecentConversations.start()
+}
+
+function installMenuBarRunningConversations(): void {
+  if (process.platform !== 'darwin') return
+
+  const sourceIcon = nativeImage.createFromPath(boatMarkPath)
+  if (sourceIcon.isEmpty()) {
+    console.error('Failed to load the Captain Who menu-bar icon')
+    return
+  }
+  // The brand mark is designed for large surfaces and contains generous transparent padding.
+  // Crop that padding before the status-bar resize so its boat reads at the same visual weight as
+  // neighbouring menu-bar icons.
+  const icon = sourceIcon
+    .crop({ height: 392, width: 416, x: 48, y: 62 })
+    .resize({ height: 20, width: 20 })
+  icon.setTemplateImage(false)
+  menuBarTray = new Tray(icon)
+  menuBarTray.setToolTip('Captain Who')
+  const controller = new MenuBarRunningConversationsController({
+    applyMenu: (template) => menuBarTray?.setContextMenu(Menu.buildFromTemplate(template)),
+    labels: menuBarRunningConversationLabels(),
+    loadConversations: () => coreServer.loadConversations(),
+    openConversation: openDockConversation,
+    quit: () => app.quit()
+  })
+  controller.start()
+
+  // The controller coalesces bursts from the root Agent's streaming events before reading storage.
+  const stopAgentEvents = coreServer.onAgentEvent(() => controller.refresh())
+  app.once('will-quit', () => {
+    stopAgentEvents()
+    controller.dispose()
+    menuBarTray?.destroy()
+    menuBarTray = null
+  })
 }
 
 function createWindow(): void {
@@ -417,6 +480,7 @@ async function initializeApplication(): Promise<void> {
   app.on('activate', activateMainWindow)
   coreServer.start()
   installDockRecentConversations()
+  installMenuBarRunningConversations()
   app.once('will-quit', () => {
     dockRecentConversations?.dispose()
     dockRecentConversations = null
