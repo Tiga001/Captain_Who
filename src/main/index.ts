@@ -74,7 +74,7 @@ import {
   MenuBarRunningConversationsController,
   type MenuBarRunningConversationLabels
 } from './menuBarRunningConversations'
-import boatMarkPath from '../../resources/brand-mark-light.png?asset'
+import boatMarkPath from '../../resources/brand-mark-dark.png?asset'
 
 // Electron is the sole authority for the application data location. Freeze it before
 // app.setName() can affect path resolution so the entire process uses one root.
@@ -268,7 +268,7 @@ function installMenuBarRunningConversations(): void {
   // neighbouring menu-bar icons.
   const icon = sourceIcon
     .crop({ height: 392, width: 416, x: 48, y: 62 })
-    .resize({ height: 20, width: 20 })
+    .resize({ height: 15, width: 15 })
   icon.setTemplateImage(false)
   menuBarTray = new Tray(icon)
   menuBarTray.setToolTip('Captain Who')
