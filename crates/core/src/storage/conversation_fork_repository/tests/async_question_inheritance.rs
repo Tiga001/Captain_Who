@@ -449,3 +449,463 @@ fn re_fork_inherits_open_questions_again_but_not_answered_ones() {
     commit_fork_plan(&mut connection, &third).unwrap();
     assert_eq!(copied_question_rows(&connection, &third.target.id).len(), 0);
 }
+
+fn async_accepted_receipt(request_id: &str) -> Value {
+    json!({"type":"human_interaction_accepted","schemaVersion":1,"requestId":request_id,"status":"accepted"})
+}
+
+#[test]
+fn inherited_question_receipts_follow_the_branch_identity_in_trace_and_model_context() {
+    let mut connection = Connection::open_in_memory().unwrap();
+    migrations::run_migrations(&connection).unwrap();
+    let source = fork_source_with_root(&mut connection);
+    begin_source_questioning(&connection, "assistant-b", "run-source-1", 40);
+    let source_request = admit_async_question(
+        &mut connection,
+        "assistant-b",
+        "run-source-1",
+        "call-async-question",
+        41,
+    );
+    let receipt = async_accepted_receipt(&source_request.request_id);
+
+    let mut items = staged_tool_exchange(
+        0,
+        "call-async-question",
+        "request_user_input_async",
+        question_call_operation(),
+    );
+    if let ConversationTurnTraceItem::ToolResult { observation, .. } = &mut items[1] {
+        *observation = receipt.clone();
+    }
+    conversation_trace_repository::commit_trace_in_connection(
+        &connection,
+        &ConversationTurnTrace {
+            schema_version: CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
+            run_id: "run-source-1".into(),
+            conversation_id: "conversation-source".into(),
+            assistant_message_id: "assistant-b".into(),
+            terminal_status: ConversationTurnTraceTerminalStatus::Completed,
+            terminal_error: None,
+            truncated: false,
+            items,
+        },
+        40,
+        42,
+    )
+    .unwrap();
+
+    let context = vec![
+        ConversationModelContextItem {
+            images: Vec::new(),
+            sequence: 0,
+            ordinal: 0,
+            role: "assistant".into(),
+            content: String::new(),
+            tool_call_id: None,
+            is_error: false,
+            tool_calls: vec![crate::AgentContextCheckpointToolCall {
+                id: "call-async-question".into(),
+                name: "request_user_input_async".into(),
+                args: question_call_operation(),
+                provider_identity: crate::AgentProviderToolCallIdentity {
+                    provider_tool_index: 0,
+                    provider_call_id: "call-async-question".into(),
+                    runtime_call_id: "call-async-question".into(),
+                },
+            }],
+        },
+        ConversationModelContextItem {
+            images: Vec::new(),
+            sequence: 1,
+            ordinal: 0,
+            role: "tool".into(),
+            content: receipt.to_string(),
+            tool_call_id: Some("call-async-question".into()),
+            tool_calls: vec![],
+            is_error: false,
+        },
+    ];
+    conversation_model_context_repository::commit_items_in_connection(
+        &connection,
+        "conversation-source",
+        "assistant-b",
+        &context,
+    )
+    .unwrap();
+
+    let plan = build_assistant_reply_fork_plan(
+        &connection,
+        "fork-async-receipt",
+        &source.id,
+        "assistant-b",
+        100,
+    )
+    .unwrap();
+    commit_fork_plan(&mut connection, &plan).unwrap();
+    let target_rows = copied_question_rows(&connection, &plan.target.id);
+    assert_eq!(target_rows.len(), 1);
+    let copied_request_id = target_rows[0].request_id.clone();
+    assert_ne!(copied_request_id, source_request.request_id);
+
+    let target_assistant = &plan.message_id_map["assistant-b"];
+    let copied_trace = conversation_trace_repository::get_trace_for_message(
+        &connection,
+        target_assistant,
+    )
+    .unwrap()
+    .unwrap();
+    let ConversationTurnTraceItem::ToolResult { observation, .. } = &copied_trace.items[1] else {
+        panic!("missing copied question receipt")
+    };
+    assert_eq!(observation["requestId"], json!(copied_request_id));
+
+    let copied_context = conversation_model_context_repository::get_log_for_message(
+        &connection,
+        target_assistant,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        copied_context.items[0].tool_calls[0].args,
+        question_call_operation()
+    );
+    let tool_item = copied_context
+        .items
+        .iter()
+        .find(|item| item.role == "tool")
+        .unwrap();
+    let copied_receipt: Value = serde_json::from_str(&tool_item.content).unwrap();
+    assert_eq!(copied_receipt["status"], json!("accepted"));
+    assert_eq!(copied_receipt["requestId"], json!(copied_request_id));
+}
+
+#[test]
+fn file_change_digest_lineage_survives_repeated_forks_when_operations_reference_question_ids() {
+    use crate::file_change::{
+        FileChangeBase, FileChangeDirectBinding, FileChangeMutation, FileChangeOperation,
+        FileChangeOutcome, FileChangePlanRequest, FileChangePlanner, FileChangeProposal,
+        FileChangeStatus, FileChangeTransaction, FileObservationCheckpoint,
+        FILE_CHANGE_DIRECT_BINDING_SCHEMA_VERSION, FILE_CHANGE_SCHEMA_VERSION,
+    };
+
+    const READ_CALL_ID: &str = "call-lineage-read";
+    const APPLY_CALL_ID: &str = "call-lineage-apply";
+    const SOURCE_TRANSACTION_ID: &str = "file-change-lineage-source";
+
+    let fixture = tempfile::tempdir().unwrap();
+    let canonical_target = fixture.path().join("direct.md");
+    std::fs::write(&canonical_target, "before\n").unwrap();
+    let base_revision = crate::content_revision(b"before\n");
+
+    let mut connection = Connection::open_in_memory().unwrap();
+    migrations::run_migrations(&connection).unwrap();
+    let source = fork_source_with_root(&mut connection);
+    begin_source_questioning(&connection, "assistant-b", "run-source-1", 40);
+    let question = admit_async_question(
+        &mut connection,
+        "assistant-b",
+        "run-source-1",
+        "call-lineage-question",
+        41,
+    );
+    finish_source_trace(
+        &connection,
+        "assistant-b",
+        "run-source-1",
+        40,
+        &["call-lineage-question"],
+    );
+
+    let (observation_id, observation_json) = apply_patch_observation(
+        &source.id,
+        "run-source-0",
+        READ_CALL_ID,
+        &canonical_target,
+        &base_revision,
+    );
+    let observation: FileObservationCheckpoint = serde_json::from_str(&observation_json).unwrap();
+    let read_args = json!({ "path": "direct.md" });
+    let apply_args = apply_patch_args(json!({
+        "action": "apply",
+        "operation": "update",
+        "filePath": "direct.md",
+        "observationId": observation_id,
+        "content": "after\n",
+    }));
+    let mut trace_operation =
+        crate::file_change_support::apply_patch_trace_operation(&apply_args).unwrap();
+    trace_operation
+        .as_object_mut()
+        .unwrap()
+        .insert("inheritedQuestionRequestId".into(), json!(question.request_id.clone()));
+
+    let mut items = staged_tool_exchange(0, READ_CALL_ID, "read_file", read_args);
+    if let ConversationTurnTraceItem::ToolResult {
+        observation: result,
+        ..
+    } = &mut items[1]
+    {
+        *result = json!({
+            "filePath": "direct.md",
+            "revision": base_revision,
+            "observationId": observation_id,
+        });
+    }
+    let mut apply = staged_tool_exchange(2, APPLY_CALL_ID, "apply_patch", trace_operation.clone());
+    if let ConversationTurnTraceItem::ToolCall {
+        approval_status, ..
+    } = &mut apply[0]
+    {
+        *approval_status = AgentApprovalStatus::Required;
+    }
+    if let ConversationTurnTraceItem::ToolResult {
+        approval_status,
+        observation: result,
+        ..
+    } = &mut apply[1]
+    {
+        *approval_status = AgentApprovalStatus::Approved;
+        *result = json!({
+            "schemaVersion": 1,
+            "status": "applied",
+            "outcome": "applied",
+            "transactionId": SOURCE_TRANSACTION_ID,
+            "operation": "update",
+            "updateStrategy": null,
+            "filePath": "direct.md",
+            "additions": 1,
+            "deletions": 1,
+            "lineCount": 1,
+            "byteCount": 6,
+            "revision": crate::content_revision(b"after\n"),
+            "errorCode": null,
+            "error": null,
+            "message": null,
+        });
+    }
+    items.extend(apply);
+    conversation_trace_repository::replace_trace(
+        &mut connection,
+        &ConversationTurnTrace {
+            schema_version: CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
+            run_id: "run-source-0".into(),
+            conversation_id: source.id.clone(),
+            assistant_message_id: "assistant-a".into(),
+            terminal_status: ConversationTurnTraceTerminalStatus::Completed,
+            terminal_error: None,
+            truncated: true,
+            items,
+        },
+        20,
+        21,
+    )
+    .unwrap();
+
+    let frozen_plan = FileChangePlanner
+        .plan(FileChangePlanRequest {
+            operation: FileChangeOperation::Update,
+            file_path: "direct.md",
+            base: FileChangeBase::Existing {
+                content: "before\n",
+                revision: &base_revision,
+            },
+            mutation: FileChangeMutation::Complete("after\n".to_string()),
+        })
+        .unwrap();
+    let execution = FileChangeDirectBinding {
+        schema_version: FILE_CHANGE_DIRECT_BINDING_SCHEMA_VERSION,
+        transaction: FileChangeTransaction {
+            schema_version: FILE_CHANGE_SCHEMA_VERSION,
+            id: SOURCE_TRANSACTION_ID.to_string(),
+            operation: FileChangeOperation::Update,
+            file_path: "direct.md".to_string(),
+            status: FileChangeStatus::WaitingApproval,
+            outcome: FileChangeOutcome::DefinitelyNotExecuted,
+            base: frozen_plan.base.clone(),
+            target: frozen_plan.target.clone(),
+            proposal_digest: frozen_plan.proposal_digest.clone(),
+            created_at: 20,
+            updated_at: 20,
+        },
+        proposal: FileChangeProposal {
+            schema_version: FILE_CHANGE_SCHEMA_VERSION,
+            id: APPLY_CALL_ID.to_string(),
+            transaction_id: SOURCE_TRANSACTION_ID.to_string(),
+            operation: FileChangeOperation::Update,
+            file_path: "direct.md".to_string(),
+            base: frozen_plan.base.clone(),
+            target: frozen_plan.target.clone(),
+            diff_digest: frozen_plan.diff_digest.clone(),
+            proposal_digest: frozen_plan.proposal_digest.clone(),
+            additions: frozen_plan.additions,
+            deletions: frozen_plan.deletions,
+        },
+        observation_id: observation_id.clone(),
+        observation,
+        source_tool_name: "apply_patch".to_string(),
+        source_call_id: APPLY_CALL_ID.to_string(),
+        source_args_digest: crate::file_change::proposal_digest(&apply_args).unwrap(),
+        trace_args_digest: crate::file_change::proposal_digest(&trace_operation).unwrap(),
+        staged_transaction_id: None,
+        conversation_id: source.id.clone(),
+        project_id: None,
+        run_id: "run-source-0".to_string(),
+        staged_transaction_revision: None,
+        canonical_target: canonical_target.to_string_lossy().into_owned(),
+        base_content: Some("before\n".to_string()),
+        target_content: Some("after\n".to_string()),
+        delete_journal: None,
+        receipt: None,
+        permission_revision: "permission-1".to_string(),
+        tool_set_revision: "tool-set-1".to_string(),
+        provider_wire_revision: "provider-protocol-v1".to_string(),
+    };
+    execution.validate().unwrap();
+    let inline_patch = frozen_plan.diff.clone();
+    let terminal_result = crate::AgentFileChangeResult {
+        schema_version: crate::AGENT_FILE_CHANGE_PROTOCOL_SCHEMA_VERSION,
+        status: crate::AgentFileChangeResultStatus::Applied,
+        outcome: crate::AgentFileChangeOutcome::Applied,
+        transaction_id: SOURCE_TRANSACTION_ID.to_string(),
+        operation: crate::AgentFileChangeOperation::Update,
+        update_strategy: None,
+        file_path: "direct.md".to_string(),
+        additions: frozen_plan.additions,
+        deletions: frozen_plan.deletions,
+        line_count: 1,
+        byte_count: 6,
+        revision: Some(crate::content_revision(b"after\n")),
+        error_code: None,
+        error: None,
+        message: None,
+    };
+    terminal_result.validate().unwrap();
+    let terminal_tool_result = AgentToolResult {
+        call_id: APPLY_CALL_ID.to_string(),
+        tool: "apply_patch".to_string(),
+        ok: true,
+        result: Some(serde_json::to_value(&terminal_result).unwrap()),
+        error: None,
+        exact_archive_file: None,
+    };
+    let action = AgentProposedAction::FileChange {
+        file_change: crate::AgentFileChangeProposal {
+            schema_version: crate::AGENT_FILE_CHANGE_PROTOCOL_SCHEMA_VERSION,
+            id: APPLY_CALL_ID.to_string(),
+            transaction_id: SOURCE_TRANSACTION_ID.to_string(),
+            operation: crate::AgentFileChangeOperation::Update,
+            update_strategy: None,
+            file_path: "direct.md".to_string(),
+            inline_diff: Some(crate::AgentGitDiffSnapshot {
+                patch: inline_patch,
+                truncated: false,
+            }),
+            base_revision: Some(base_revision),
+            summary: None,
+            additions: frozen_plan.additions,
+            deletions: frozen_plan.deletions,
+            line_count: 1,
+            byte_count: 6,
+            approval_status: AgentApprovalStatus::Approved,
+            execution: Box::new(execution),
+        },
+    };
+    assert!(
+        agent_action_audit_repository::insert_action_audit_record_if_absent(
+            &connection,
+            &AgentActionAuditRecord {
+                action_id: crate::canonical_pending_action_id("run-source-0", APPLY_CALL_ID),
+                run_id: "run-source-0".to_string(),
+                conversation_id: Some(source.id.clone()),
+                assistant_message_id: Some("assistant-a".to_string()),
+                action_type: "file_change".to_string(),
+                tool_name: "apply_patch".to_string(),
+                decision: Some("approved".to_string()),
+                status: "completed".to_string(),
+                action_json: serde_json::to_string(&action).unwrap(),
+                file_change_result_json: Some(serde_json::to_string(&terminal_result).unwrap()),
+                command_result_json: None,
+                tool_result_json: Some(serde_json::to_string(&terminal_tool_result).unwrap()),
+                error: None,
+                created_at: 20,
+                decided_at: Some(20),
+                completed_at: Some(21),
+                effective_permissions_json: Some("{}".to_string()),
+                path_scope: Some(canonical_target.to_string_lossy().into_owned()),
+                command_cwd_scope: None,
+                blocked_reason: None,
+                decision_source: Some("manual".to_string()),
+            },
+        )
+        .unwrap()
+    );
+
+    // The first fork stores audit digests that the durable trace can reproduce, even though the
+    // apply_patch operation references the inherited question id.
+    let first = build_assistant_reply_fork_plan(
+        &connection,
+        "fork-lineage-first",
+        &source.id,
+        "assistant-b",
+        100,
+    )
+    .unwrap();
+    commit_fork_plan(&mut connection, &first).unwrap();
+    assert!(first.file_changes.is_empty());
+    assert_eq!(first.action_audits.len(), 1);
+    let branch_rows = copied_question_rows(&connection, &first.target.id);
+    assert_eq!(branch_rows.len(), 1);
+    let branch_request_id = branch_rows[0].request_id.clone();
+    let first_audits =
+        agent_action_audit_repository::list_terminal_file_change_action_audits_for_conversation(
+            &connection,
+            &first.target.id,
+        )
+        .unwrap();
+    assert_eq!(first_audits.len(), 1);
+    let first_action: AgentProposedAction =
+        serde_json::from_str(&first_audits[0].action_json).unwrap();
+    let AgentProposedAction::FileChange {
+        file_change: first_change,
+    } = first_action
+    else {
+        unreachable!()
+    };
+    let branch_trace = conversation_trace_repository::get_trace_for_message(
+        &connection,
+        &first.message_id_map["assistant-a"],
+    )
+    .unwrap()
+    .unwrap();
+    let branch_operation = branch_trace
+        .items
+        .iter()
+        .find_map(|item| match item {
+            ConversationTurnTraceItem::ToolCall {
+                tool, operation, ..
+            } if tool == "apply_patch" => Some(operation),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(
+        branch_operation["inheritedQuestionRequestId"],
+        json!(branch_request_id)
+    );
+    assert_eq!(
+        first_change.execution.trace_args_digest,
+        crate::file_change::proposal_digest(branch_operation).unwrap()
+    );
+
+    // A second fork must be able to recompute that lineage from the durable trace.
+    let second = build_assistant_reply_fork_plan(
+        &connection,
+        "fork-lineage-second",
+        &first.target.id,
+        &first.message_id_map["assistant-b"],
+        120,
+    )
+    .unwrap();
+    commit_fork_plan(&mut connection, &second).unwrap();
+    assert_eq!(second.action_audits.len(), 1);
+}

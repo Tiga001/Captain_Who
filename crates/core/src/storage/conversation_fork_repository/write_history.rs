@@ -132,6 +132,8 @@ pub(crate) fn rewrite_exact_ids(value: &mut Value, replacements: &HashMap<String
         Value::String(current) => {
             if let Some(replacement) = replacements.get(current) {
                 *current = replacement.clone();
+            } else {
+                rewrite_embedded_human_receipt_request_id(current, replacements);
             }
         }
         Value::Array(values) => {
@@ -156,6 +158,45 @@ pub(crate) fn rewrite_exact_ids(value: &mut Value, replacements: &HashMap<String
         }
         Value::Null | Value::Bool(_) | Value::Number(_) => {}
     }
+}
+
+/// Machine-authored human-interaction receipts are copied as JSON text (model context tool
+/// messages, trace backend state, World State records). Their `requestId` is fork-local, like
+/// the enclosing ToolResult identity, so it must follow the branch, while frozen question and
+/// answer text stays untouched.
+fn rewrite_embedded_human_receipt_request_id(
+    value: &mut String,
+    replacements: &HashMap<String, String>,
+) {
+    let Ok(parsed) = serde_json::from_str::<Value>(value) else {
+        return;
+    };
+    let is_receipt = parsed.get("type").and_then(Value::as_str).is_some_and(
+        |kind| matches!(kind, "human_interaction_accepted" | "human_interaction_status"),
+    );
+    if !is_receipt {
+        return;
+    }
+    let Some(request_id) = parsed.get("requestId").and_then(Value::as_str) else {
+        return;
+    };
+    let Some(target) = replacements.get(request_id) else {
+        return;
+    };
+    let (Ok(encoded_source), Ok(encoded_target)) = (
+        serde_json::to_string(request_id),
+        serde_json::to_string(target),
+    ) else {
+        return;
+    };
+    let needle = format!("\"requestId\":{encoded_source}");
+    let Some(position) = value.find(needle.as_str()) else {
+        return;
+    };
+    value.replace_range(
+        position..position + needle.len(),
+        &format!("\"requestId\":{encoded_target}"),
+    );
 }
 
 fn is_frozen_human_answer(value: &Value) -> bool {

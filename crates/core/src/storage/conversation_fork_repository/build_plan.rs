@@ -442,6 +442,23 @@ fn build_single_conversation_fork_plan_at_point(
         )?;
     }
 
+    // Open non-blocking questions inherit branch-local request identities. Collect them with the
+    // other identity maps, before any file-change digest is computed, so every copy of the
+    // identity - digests, traces, model context and World State - rewrites consistently.
+    let human_interaction_requests = if source_root.is_some() {
+        collect_inherited_open_async_questions(
+            connection,
+            &source.id,
+            &target_conversation_id,
+            &message_id_map,
+            &run_id_map,
+            &tool_call_id_map,
+            global_id_replacements,
+        )?
+    } else {
+        Vec::new()
+    };
+
     let mut file_changes = Vec::new();
     let mut file_change_id_map = HashMap::new();
     let mut file_observation_id_map = HashMap::new();
@@ -514,6 +531,13 @@ fn build_single_conversation_fork_plan_at_point(
             let mut change_replacements = global_id_replacements.clone();
             change_replacements.extend(run_id_map.clone());
             change_replacements.extend(tool_call_id_map.clone());
+            for request in &human_interaction_requests {
+                insert_global_replacement(
+                    &mut change_replacements,
+                    &request.source_request_id,
+                    &request.target_request_id,
+                )?;
+            }
             change_replacements.insert(source.id.clone(), target_conversation_id.clone());
             change_replacements.insert(source_change.id.clone(), target_transaction_id.clone());
             change_replacements.insert(
@@ -756,6 +780,15 @@ fn build_single_conversation_fork_plan_at_point(
             &copy.target_observation_id,
         )?;
     }
+    // Inherited question identities are branch-local: register them before the terminal audit
+    // remap computes trace digests, so stored digest lineage and the durable trace stay equal.
+    for request in &human_interaction_requests {
+        insert_global_replacement(
+            &mut replacements,
+            &request.source_request_id,
+            &request.target_request_id,
+        )?;
+    }
     let action_audits = remap_terminal_file_change_action_audits(
         connection,
         &source.id,
@@ -767,26 +800,6 @@ fn build_single_conversation_fork_plan_at_point(
         &traces,
         &mut replacements,
     )?;
-    let human_interaction_requests = if source_root.is_some() {
-        collect_inherited_open_async_questions(
-            connection,
-            &source.id,
-            &target_conversation_id,
-            &message_id_map,
-            &run_id_map,
-            &tool_call_id_map,
-            global_id_replacements,
-        )?
-    } else {
-        Vec::new()
-    };
-    for request in &human_interaction_requests {
-        insert_global_replacement(
-            &mut replacements,
-            &request.source_request_id,
-            &request.target_request_id,
-        )?;
-    }
     for fork_trace in &mut traces {
         rewrite_trace_items(&mut fork_trace.trace, &replacements)?;
         rewrite_model_context_items(&mut fork_trace.model_context_items, &replacements)?;
