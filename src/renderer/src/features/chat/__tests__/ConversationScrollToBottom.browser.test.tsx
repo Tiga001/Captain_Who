@@ -42,6 +42,11 @@ const [{ ConversationSurface }, { createComposerDraft }] = await Promise.all([
 
 const scrollToBottomLabel = getTranslation('zh-CN', 'chat.scrollToBottom')
 const bodyRepeat = '这是用于撑高滚动区域的正文内容。'
+// A real image whose decode completes after the current task, so its layout growth is
+// asynchronous and mutation-free — the same shape as a Markdown image finishing its load.
+const asyncImageSrc = `data:image/svg+xml;base64,${btoa(
+  '<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512"><rect width="512" height="512" fill="#8ab4f8"/></svg>'
+)}`
 
 function scrollConversation(
   options: { turns?: number; pending?: boolean; tail?: string } = {}
@@ -275,6 +280,40 @@ describe('conversation scroll-to-bottom control', () => {
     )
     await frames(2)
     expect(Math.abs(node.scrollTop - 250)).toBeLessThanOrEqual(2)
+    expect(control()).not.toBeNull()
+  })
+
+  it('stays pinned when an inline image finishes loading without a DOM mutation', async () => {
+    await render(<Workspace chat={scrollConversation()} />)
+    const node = scroller()
+    await expect.poll(() => distanceFromBottom(node)).toBeLessThanOrEqual(1)
+
+    // The image enters with no source first, so the append's own follow pass settles before its
+    // load: the height growth below is async and mutation-free, like a Markdown image receiving
+    // its decoded bitmap.
+    const image = document.createElement('img')
+    element('[data-message-id="assistant-5"] .chat-markdown').append(image)
+    await frames(2)
+    image.src = asyncImageSrc
+
+    await expect.poll(() => image.complete && image.naturalWidth > 0).toBe(true)
+    expect(image.getBoundingClientRect().height).toBeGreaterThan(200)
+    await expect.poll(() => distanceFromBottom(node)).toBeLessThanOrEqual(1)
+    expect(control()).toBeNull()
+
+    // While the reader is away, the same async growth must not pull the viewport back.
+    node.scrollTop = Math.max(0, node.scrollTop - 500)
+    await expect.poll(() => control()).not.toBeNull()
+    const away = distanceFromBottom(node)
+    const scrollTopBefore = node.scrollTop
+    const secondImage = document.createElement('img')
+    element('[data-message-id="assistant-5"] .chat-markdown').append(secondImage)
+    await frames(2)
+    secondImage.src = asyncImageSrc
+    await expect.poll(() => secondImage.complete && secondImage.naturalWidth > 0).toBe(true)
+    await frames(2)
+    expect(node.scrollTop).toBeLessThanOrEqual(scrollTopBefore + 2)
+    await expect.poll(() => distanceFromBottom(node)).toBeGreaterThan(away)
     expect(control()).not.toBeNull()
   })
 })

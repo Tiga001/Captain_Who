@@ -55,6 +55,15 @@ export function useConversationBottomFollow(
     lastScrollTopRef.current = element.scrollTop
   }, [scrollContainerRef, syncBottomState])
 
+  const handleLayoutChange = useCallback(() => {
+    // While following, changed content height keeps the newest messages at the bottom.
+    if (followsBottomRef.current) {
+      pinToBottom()
+      return
+    }
+    syncBottomState()
+  }, [pinToBottom, syncBottomState])
+
   const scrollToBottom = useCallback(() => {
     const element = scrollContainerRef.current
     if (!element) return
@@ -86,23 +95,15 @@ export function useConversationBottomFollow(
     const element = scrollContainerRef.current
     if (!element) return undefined
     const handleScroll = () => syncBottomState()
-    const handleResize = () => {
-      // While following, a resized viewport keeps the newest content at the bottom.
-      if (followsBottomRef.current) {
-        pinToBottom()
-        return
-      }
-      syncBottomState()
-    }
     element.addEventListener('scroll', handleScroll, { passive: true })
     const resizeObserver =
-      typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(handleResize)
+      typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(handleLayoutChange)
     resizeObserver?.observe(element)
     return () => {
       element.removeEventListener('scroll', handleScroll)
       resizeObserver?.disconnect()
     }
-  }, [conversationId, enabled, pinToBottom, scrollContainerRef, syncBottomState])
+  }, [conversationId, enabled, handleLayoutChange, scrollContainerRef, syncBottomState])
 
   useEffect(() => {
     if (!enabled) return undefined
@@ -116,15 +117,38 @@ export function useConversationBottomFollow(
         pinToBottom()
       })
     }
+    // Markdown images and other async layout settle the height of a message block without any
+    // DOM mutation, so every message block is watched for size changes as well.
+    const contentResizeObserver =
+      typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(handleLayoutChange)
+    const observedContent = new Set<Element>()
+    const reconcileObservedContent = () => {
+      if (!contentResizeObserver) return
+      for (const child of element.children) {
+        if (observedContent.has(child)) continue
+        observedContent.add(child)
+        contentResizeObserver.observe(child)
+      }
+      for (const child of observedContent) {
+        if (element.contains(child)) continue
+        observedContent.delete(child)
+        contentResizeObserver.unobserve(child)
+      }
+    }
+    reconcileObservedContent()
     // Streaming text and appended timeline entries mutate the subtree; the bottom stays glued
     // only while the reader has not scrolled away.
-    const observer = new MutationObserver(followNewContent)
+    const observer = new MutationObserver((records) => {
+      if (records.some((record) => record.type === 'childList')) reconcileObservedContent()
+      followNewContent()
+    })
     observer.observe(element, { characterData: true, childList: true, subtree: true })
     return () => {
       observer.disconnect()
+      contentResizeObserver?.disconnect()
       if (animationFrameId !== null) window.cancelAnimationFrame(animationFrameId)
     }
-  }, [conversationId, enabled, pinToBottom, scrollContainerRef])
+  }, [conversationId, enabled, handleLayoutChange, pinToBottom, scrollContainerRef])
 
   return { isAtBottom, scrollToBottom }
 }
