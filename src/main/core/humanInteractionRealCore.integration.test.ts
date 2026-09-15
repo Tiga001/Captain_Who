@@ -113,6 +113,20 @@ async function start(id: string): Promise<string> {
   return result.runId
 }
 
+// Mirrors the production ExecutionAccessBridge lease so new root turns are admitted.
+let executionRevision = 0
+
+async function syncExecutionAccess(): Promise<void> {
+  const issuedAt = Date.now()
+  await core.setExecutionAccess({
+    revision: ++executionRevision,
+    identityEpoch: 1,
+    reason: 'allowed',
+    issuedAt,
+    validUntil: issuedAt + 60_000
+  })
+}
+
 async function status(id: string): Promise<unknown> {
   const stored = await core.loadConversation(id)
   const latest = stored?.messages.filter((message) => message.role === 'assistant').at(-1)
@@ -180,7 +194,8 @@ describe('Human interaction Chromium → production Preload/Main → real Core/H
         handle: (channel: string, handler: (...args: unknown[]) => unknown) =>
           handlers.set(channel, handler)
       } as unknown as TrustedIpcMain,
-      core
+      core,
+      syncExecutionAccess
     )
     vite = await createServer({
       configFile: false,
@@ -218,6 +233,7 @@ describe('Human interaction Chromium → production Preload/Main → real Core/H
 
   it('suspends, submits via UI once, resumes the same Run and applies the live setting snapshot', async () => {
     const page = await pageFor('sync-browser')
+    await syncExecutionAccess()
     const runId = await start('sync-browser')
     await expect.poll(() => requests.length).toBe(1)
     expect(JSON.stringify(requests[0].body.tools)).toContain('request_user_input_async')
@@ -266,6 +282,7 @@ describe('Human interaction Chromium → production Preload/Main → real Core/H
 
   it('keeps multiple async batches across Core restart; ignore never wakes; a later answer starts one continuation and settles every window', async () => {
     const page = await pageFor('async-browser')
+    await syncExecutionAccess()
     await start('async-browser')
     await expect.poll(() => requests.length).toBe(3)
     reply(2, 'async', 2)
@@ -285,7 +302,8 @@ describe('Human interaction Chromium → production Preload/Main → real Core/H
         handle: (channel: string, handler: (...args: unknown[]) => unknown) =>
           handlers.set(channel, handler)
       } as unknown as TrustedIpcMain,
-      core
+      core,
+      syncExecutionAccess
     )
     await core.getHumanInteractionSettings({})
     await page.reload()

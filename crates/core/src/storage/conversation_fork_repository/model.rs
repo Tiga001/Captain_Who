@@ -104,6 +104,20 @@ struct ForkSnapshotOrigin {
 }
 
 #[derive(Debug)]
+struct ForkHumanInteractionRequest {
+    source_request_id: String,
+    target_request_id: String,
+    target_agent_id: String,
+    target_run_id: String,
+    target_assistant_message_id: String,
+    target_tool_call_id: String,
+    policy_revision: u64,
+    questions_json: String,
+    created_at: i64,
+    updated_at: i64,
+}
+
+#[derive(Debug)]
 struct ConversationHistoryForkPlan {
     source_conversation_id: String,
     source_message_id: Option<String>,
@@ -123,6 +137,7 @@ struct ConversationHistoryForkPlan {
     adaptation_source_summary_id: Option<String>,
     message_id_map: HashMap<String, String>,
     snapshot_origins: Vec<ForkSnapshotOrigin>,
+    human_interaction_requests: Vec<ForkHumanInteractionRequest>,
     id_replacements: HashMap<String, String>,
 }
 
@@ -153,6 +168,7 @@ struct ConversationHistoryForkPlanRef<'a> {
     adaptation_source_summary_id: Option<&'a str>,
     message_id_map: &'a HashMap<String, String>,
     snapshot_origins: &'a [ForkSnapshotOrigin],
+    human_interaction_requests: &'a [ForkHumanInteractionRequest],
     id_replacements: &'a HashMap<String, String>,
 }
 
@@ -177,6 +193,7 @@ impl ConversationHistoryForkPlan {
             adaptation_source_summary_id: self.adaptation_source_summary_id.as_deref(),
             message_id_map: &self.message_id_map,
             snapshot_origins: &self.snapshot_origins,
+            human_interaction_requests: &self.human_interaction_requests,
             id_replacements: &self.id_replacements,
         }
     }
@@ -205,6 +222,7 @@ pub(crate) struct ConversationForkPlan {
     message_id_map: HashMap<String, String>,
     collaboration_root: Option<CollaborationRootFork>,
     snapshot_origins: Vec<ForkSnapshotOrigin>,
+    human_interaction_requests: Vec<ForkHumanInteractionRequest>,
     #[cfg(test)]
     run_id_map: HashMap<String, String>,
     id_replacements: HashMap<String, String>,
@@ -233,6 +251,7 @@ impl ConversationForkPlan {
             adaptation_source_summary_id: self.adaptation_source_summary_id.as_deref(),
             message_id_map: &self.message_id_map,
             snapshot_origins: &self.snapshot_origins,
+            human_interaction_requests: &self.human_interaction_requests,
             id_replacements: &self.id_replacements,
         }
     }

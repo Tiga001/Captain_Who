@@ -5,6 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ForkDataPolicy {
     CopyVisibleHistory,
+    CopyOpenAsyncQuestions,
     Reinitialize,
     DoNotCopy,
     RuntimeOnly,
@@ -35,6 +36,10 @@ const COPY_VISIBLE_HISTORY_TABLES: &[&str] = &[
     "messages",
     "human_interaction_message_projections",
 ];
+
+// A fork inherits only the still-open non-blocking questions: exact frozen text and options with
+// branch-local owner identities. Answers, deliveries and resume material stay with their source.
+const COPY_OPEN_ASYNC_QUESTIONS_TABLES: &[&str] = &["human_interaction_requests"];
 
 const REINITIALIZE_TABLES: &[&str] = &[
     "agent_collaboration_event_sequences",
@@ -83,7 +88,6 @@ const RUNTIME_ONLY_TABLES: &[&str] = &[
     "agent_model_batch_receipts",
     "agent_pending_actions",
     "agent_wake_requests",
-    "human_interaction_requests",
     "human_interaction_responses",
     "human_interaction_deliveries",
     "human_interaction_suspensions",
@@ -114,6 +118,10 @@ fn declared_policies() -> BTreeMap<&'static str, ForkDataPolicy> {
         (
             ForkDataPolicy::CopyVisibleHistory,
             COPY_VISIBLE_HISTORY_TABLES,
+        ),
+        (
+            ForkDataPolicy::CopyOpenAsyncQuestions,
+            COPY_OPEN_ASYNC_QUESTIONS_TABLES,
         ),
         (ForkDataPolicy::Reinitialize, REINITIALIZE_TABLES),
         (ForkDataPolicy::DoNotCopy, DO_NOT_COPY_TABLES),
@@ -205,6 +213,10 @@ fn high_risk_fork_policies_stay_explicit() {
         Some(&ForkDataPolicy::DedicatedForkLogic)
     );
     assert_eq!(
+        policies.get("human_interaction_requests"),
+        Some(&ForkDataPolicy::CopyOpenAsyncQuestions)
+    );
+    assert_eq!(
         policies.get("agent_command_sessions"),
         Some(&ForkDataPolicy::RuntimeOnly)
     );
@@ -215,7 +227,6 @@ fn high_risk_fork_policies_stay_explicit() {
     for table in [
         "agent_context_profile_run_policies",
         "agent_context_profile_wake_policies",
-        "human_interaction_requests",
         "human_interaction_responses",
         "human_interaction_deliveries",
         "human_interaction_suspensions",

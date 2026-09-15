@@ -393,6 +393,28 @@ fn apply_history_facts(
             .map_err(|error| ConversationForkError::Other(error.to_string()))?;
         }
     }
+    // Inherited open questions keep the frozen question text and option identities; only the
+    // branch-local owner identity is new. Answers, deliveries and resume material stay with the
+    // source conversation, so the copied row carries no response history.
+    for request in history.human_interaction_requests {
+        connection
+            .execute(
+                "INSERT INTO human_interaction_requests(request_id,conversation_id,agent_id,run_id,assistant_message_id,tool_call_id,mode,status,revision,policy_revision,questions_json,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,?6,'async','open',0,?7,?8,?9,?10)",
+                params![
+                    &request.target_request_id,
+                    &history.target.id,
+                    &request.target_agent_id,
+                    &request.target_run_id,
+                    &request.target_assistant_message_id,
+                    &request.target_tool_call_id,
+                    request.policy_revision,
+                    &request.questions_json,
+                    request.created_at,
+                    request.updated_at,
+                ],
+            )
+            .map_err(database_error)?;
+    }
     for archive in history.archives {
         conversation_history_archive_repository::clone_archive_in_connection(connection, archive)
             .map_err(database_error)?;

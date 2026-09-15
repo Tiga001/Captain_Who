@@ -112,6 +112,8 @@ Agent 发现需要用户参与
 
 异步批次可选择“忽略全部”。忽略不会发送草稿、普通用户消息、UserGuidance 或 Wake，也不额外调用模型；系统将最小的 ignored 事实写入普通后端历史，供下一次自然采样或启动对账观察。逐题选择“跳过”再提交则仍是正式回答，不等于忽略。
 
+创建分支时，仍为 `open` 的非阻塞批次会随分支继承：题干与选项保持冻结，owner 身份、Run、ToolCall 和请求 ID 改为分支自身，不携带任何答案或投递历史；源会话中的对应批次不受影响。已在源会话中提交或忽略的批次不会被带入分支。
+
 提交、Stop、压缩、审批、空闲续接和启动恢复由事件驱动调度，不轮询用户。Stop 不会删除仍 `open` 的异步问题，但可以取消已接纳且尚未投递、属于被停止范围的 Delivery；已应用、失败或取消的 Delivery 不会因重启重新投递。异步接纳与投递协调在[human_input_async.rs](../../crates/core-server/src/application/agent/turn_executor/human_input_async.rs)。
 
 ## 界面、可见性与通知
@@ -130,7 +132,7 @@ Renderer 使用 Host API 的完整快照作为权威状态，`requestChanged` �
 
 Host 在本机 SQLite 中分别保存设置、问题批次、不可变回应、投递回执、阻塞恢复材料和异步绑定。公开快照只含渲染与提交所需的题目、回答和状态；恢复 checkpoint、可信 owner、Run 领取身份和敏感恢复输入保持在 Host 私有存储，不能由模型或 Renderer 提供。
 
-问题和答案属于 Conversation 的本地运行历史，会随相应的 Trace、历史归档、压缩和分支边界按既有规则处理。未结束的问题、suspension 和可执行 delivery 不会被分支复制为新的活动权限。恢复信封采用字段白名单；API Token、带秘密的 endpoint 和不可持久化 MCP 原始参数不写入人机交互表。
+问题和答案属于 Conversation 的本地运行历史，会随相应的 Trace、历史归档、压缩和分支边界按既有规则处理。未回答的非阻塞提问会随分支继承为分支自己的新请求（题干与选项冻结、身份与 ID 换为分支自身，不含答案与投递历史）；阻塞 suspension 和可执行 delivery 不会被分支复制为新的活动权限。恢复信封采用字段白名单；API Token、带秘密的 endpoint 和不可持久化 MCP 原始参数不写入人机交互表。
 
 人机交互内容仍可能进入用户选定模型 Provider 的上下文，或在用户指示的外部 Tool 中使用；本子系统不应被表述为独立的网络隔离机制。公开的数据边界见[数据与权限](../../public-docs/security/data-and-permissions.md)。
 
@@ -141,7 +143,7 @@ Host 在本机 SQLite 中分别保存设置、问题批次、不可变回应、�
 1. Rust 与 TypeScript 协议、fixture 和严格解析是否一致；不得让 Renderer 输入 owner、问题 ID、Run 或恢复权。
 2. 同一模型请求的 Tool、Capability、专项提示和 World State 是否来自同一策略快照；根 Agent、子 Agent 和 Automation 的边界是否仍成立。
 3. 阻塞路径是否只形成原 ToolCall 的一个结果，且停止、重启、连续同步提问和审批交接不会重跑未知副作用。
-4. 异步路径是否在接纳后继续当前 Run、回答只投递一次、空闲续接仍走当前账户/许可和权限入口，并且 ignore 不会 Wake 或创建普通 User 输入。
+4. 异步路径是否在接纳后继续当前 Run、回答只投递一次、空闲续接仍走当前账户/许可和权限入口，ignore 不会 Wake 或创建普通 User 输入，并且分支只继承仍为 `open` 的批次、不复制回答与投递。
 5. UI 是否处理通知乱序、刷新、审批抢占、最小化、草稿内存性、IME/Enter/Escape、提交不确定性和账户/许可拒绝。
 6. 当前文档、[公开能力说明](../../public-docs/user/capabilities/human-interaction.md)和[用户操作说明](../../public-docs/user/everyday-use/answering-questions.md)是否仍与实现相符。
 
@@ -149,6 +151,7 @@ Host 在本机 SQLite 中分别保存设置、问题批次、不可变回应、�
 
 ```bash
 cargo test --locked -p mycopilot-core human_interaction --lib
+cargo test --locked -p mycopilot-core conversation_fork_repository --lib
 cargo test --locked -p mycopilot-core-server application::agent::tests::human_input --bin core-server
 cargo test --locked -p mycopilot-core-server application::agent::tests::human_input_async --bin core-server
 pnpm exec vitest run --project unit packages/protocol/src/humanInteraction.test.ts src/main/core/ipc.humanInteraction.test.ts src/renderer/src/features/humanInteraction/__tests__/humanInteractionController.test.ts

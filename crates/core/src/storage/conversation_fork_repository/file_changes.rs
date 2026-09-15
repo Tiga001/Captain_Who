@@ -407,6 +407,7 @@ fn history_from_single_plan(
             adaptation_source_summary_id: plan.adaptation_source_summary_id,
             message_id_map: plan.message_id_map,
             snapshot_origins: plan.snapshot_origins,
+            human_interaction_requests: plan.human_interaction_requests,
             id_replacements: plan.id_replacements,
         },
         plan.provider_continuation_mappings,
@@ -525,6 +526,9 @@ fn build_message_only_history_plan(
         adaptation_source_summary_id: None,
         message_id_map,
         snapshot_origins,
+        // A message-only member history cannot carry an open question: questions are only ever
+        // admitted for root conversations.
+        human_interaction_requests: Vec::new(),
         id_replacements: replacements,
     })
 }

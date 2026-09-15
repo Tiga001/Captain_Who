@@ -328,12 +328,18 @@ impl AgentService {
             .map_err(|e| e.to_string())?
             .filter(|n| n.parent_agent_id.is_none())
             .ok_or("human answer root missing")?;
-        let permissions = self
+        let permissions = match self
             .storage
             .get_agent_effective_permission_snapshot(&root.agent_id)
             .map_err(|e| e.to_string())?
-            .ok_or("human answer permission snapshot missing")?
-            .permissions;
+        {
+            Some(snapshot) => snapshot.permissions,
+            // The fork engine cannot certify a branch-local snapshot: the schema requires the
+            // exact active Turn to record one, and a forked Conversation starts idle. Answering
+            // an inherited question therefore resumes with the least-authority baseline; the
+            // answer Turn records the branch's own snapshot at admission.
+            None => mycopilot_core::AgentPermissions::default(),
+        };
         let user_message_id = candidate
             .user_message_id
             .clone()

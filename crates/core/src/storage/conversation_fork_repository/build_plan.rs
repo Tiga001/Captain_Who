@@ -1,3 +1,85 @@
+/// Open non-blocking questions are the only human-interaction state a fork inherits: the exact
+/// frozen question/option text with branch-local owner identities. Answers, deliveries and
+/// resume material stay with their source conversation.
+fn collect_inherited_open_async_questions(
+    connection: &Connection,
+    source_conversation_id: &str,
+    target_conversation_id: &str,
+    message_id_map: &HashMap<String, String>,
+    run_id_map: &HashMap<String, String>,
+    tool_call_id_map: &HashMap<String, String>,
+    global_id_replacements: &HashMap<String, String>,
+) -> Result<Vec<ForkHumanInteractionRequest>, ConversationForkError> {
+    let mut statement = connection
+        .prepare(
+            "SELECT request_id,run_id,assistant_message_id,tool_call_id,policy_revision,questions_json,created_at,updated_at\n             FROM human_interaction_requests\n             WHERE conversation_id=?1 AND mode='async' AND status='open'\n             ORDER BY sequence",
+        )
+        .map_err(database_error)?;
+    let rows = statement
+        .query_map([source_conversation_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, u64>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, i64>(6)?,
+                row.get::<_, i64>(7)?,
+            ))
+        })
+        .map_err(database_error)?;
+    let mut copied = Vec::new();
+    for row in rows {
+        let (
+            source_request_id,
+            source_run_id,
+            source_assistant_message_id,
+            source_tool_call_id,
+            policy_revision,
+            questions_json,
+            created_at,
+            updated_at,
+        ) = row.map_err(database_error)?;
+        let Some(target_assistant_message_id) = message_id_map
+            .get(&source_assistant_message_id)
+            .cloned()
+        else {
+            // The question was opened beyond the copied boundary; nothing of it is inherited.
+            continue;
+        };
+        // A question that cannot be certified against this snapshot is skipped rather than
+        // dragging the whole fork down: the branch simply does not inherit it.
+        let Some(target_run_id) = run_id_map
+            .get(&source_run_id)
+            .cloned()
+            .or_else(|| global_id_replacements.get(&source_run_id).cloned())
+        else {
+            continue;
+        };
+        let Some(target_tool_call_id) = tool_call_id_map
+            .get(&source_tool_call_id)
+            .cloned()
+            .or_else(|| global_id_replacements.get(&source_tool_call_id).cloned())
+        else {
+            continue;
+        };
+        copied.push(ForkHumanInteractionRequest {
+            source_request_id,
+            target_request_id: Uuid::new_v4().to_string(),
+            target_agent_id: root_agent_id_for_conversation(target_conversation_id),
+            target_run_id,
+            target_assistant_message_id,
+            target_tool_call_id,
+            policy_revision,
+            questions_json,
+            created_at,
+            updated_at,
+        });
+    }
+    Ok(copied)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn build_single_conversation_fork_plan_at_point(
     connection: &Connection,
@@ -685,6 +767,26 @@ fn build_single_conversation_fork_plan_at_point(
         &traces,
         &mut replacements,
     )?;
+    let human_interaction_requests = if source_root.is_some() {
+        collect_inherited_open_async_questions(
+            connection,
+            &source.id,
+            &target_conversation_id,
+            &message_id_map,
+            &run_id_map,
+            &tool_call_id_map,
+            global_id_replacements,
+        )?
+    } else {
+        Vec::new()
+    };
+    for request in &human_interaction_requests {
+        insert_global_replacement(
+            &mut replacements,
+            &request.source_request_id,
+            &request.target_request_id,
+        )?;
+    }
     for fork_trace in &mut traces {
         rewrite_trace_items(&mut fork_trace.trace, &replacements)?;
         rewrite_model_context_items(&mut fork_trace.model_context_items, &replacements)?;
@@ -821,6 +923,7 @@ fn build_single_conversation_fork_plan_at_point(
         message_id_map,
         collaboration_root,
         snapshot_origins,
+        human_interaction_requests,
         #[cfg(test)]
         run_id_map,
         id_replacements: replacements,
