@@ -20,6 +20,16 @@
   visibility: visible;
 }
 
+/*
+ * `visibility` is inherited but resettable by descendants (keep-alive right-sidebar /
+ * bottom-panel pages, webview surfaces). While the gate blocks access, nothing inside
+ * the workspace may resurface.
+ */
+.app-startup-root:not([data-interactive='true']) .app-startup-workspace,
+.app-startup-root:not([data-interactive='true']) .app-startup-workspace * {
+  visibility: hidden !important;
+}
+
 .app-startup-screen {
   position: fixed;
   z-index: 10000;

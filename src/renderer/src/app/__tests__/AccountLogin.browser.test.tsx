@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { page } from 'vitest/browser'
 import { render } from 'vitest-browser-react'
 import type { AuthState } from '@mycopilot/host-api'
 
@@ -70,6 +71,8 @@ import type { AppStartupStageId } from '../../features/startup/appStartupStages'
 import { ProfileSettingsPage } from '../../features/settings/pages/ProfileSettingsPage'
 import { AccountAvatar } from '../../features/auth/AccountAvatar'
 import '../../styles/global.css'
+import '../../features/rightSidebar/RightSidebar.css'
+import '../../features/rightSidebar/surfaces/WebviewSurface.css'
 
 const cloudProfile = {
   userId: 'user-1',
@@ -90,7 +93,28 @@ function ReadyStage({ id }: { id: AppStartupStageId }) {
   }, [stage])
   return null
 }
-function Workspace() {
+function WorkspacePanels() {
+  return (
+    <div style={{ position: 'relative', width: 320, height: 200 }}>
+      <aside className="side-panel side-panel--right">
+        <section
+          className="right-sidebar__page"
+          data-active="true"
+          data-testid="right-sidebar-page"
+        >
+          <p>right sidebar surface</p>
+        </section>
+      </aside>
+      <aside className="side-panel side-panel--bottom">
+        <section className="right-sidebar__page" data-active="true" data-testid="bottom-panel-page">
+          <p>bottom panel surface</p>
+        </section>
+      </aside>
+      <div className="webview-surface" data-visible="true" data-testid="webview-surface" />
+    </div>
+  )
+}
+function Workspace({ panels = false }: { panels?: boolean }) {
   const auth = useAccountAuth()!
   const [ticks, setTicks] = useState(0)
   useEffect(() => {
@@ -99,6 +123,7 @@ function Workspace() {
   }, [])
   return (
     <div data-testid="workspace">
+      {panels ? <WorkspacePanels /> : null}
       <output data-testid="ticks">{ticks}</output>
       <output data-testid="can-send">{String(auth.canStartTurn())}</output>
       <button onClick={() => void auth.logout()}>sign-out</button>
@@ -107,12 +132,12 @@ function Workspace() {
     </div>
   )
 }
-function Harness() {
+function Harness({ panels = false }: { panels?: boolean }) {
   return (
     <AccountAuthProvider>
       <AppStartupProvider>
         <AppStartupGate>
-          <Workspace />
+          <Workspace panels={panels} />
           {(
             [
               'modelSettings',
@@ -235,6 +260,41 @@ describe('startup account login and reusable overlay', () => {
     await expect.poll(interactive).toBe('true')
     expect(mocks.ping).toHaveBeenCalledTimes(1)
   })
+  it('keeps keep-alive pages and webview surfaces hidden behind the blocking overlay', async () => {
+    const screen = await render(<Harness panels />)
+    const interactive = () =>
+      screen.container.querySelector('.app-startup-root')?.getAttribute('data-interactive')
+    const visibilityOf = (testId: string) => {
+      const element = screen.container.querySelector(`[data-testid="${testId}"]`)
+      return element ? getComputedStyle(element).visibility : null
+    }
+
+    emit({ status: 'signedIn', profile: cloudProfile, error: null, remembered: true })
+    await expect.poll(interactive).toBe('true')
+    emit({ status: 'signedOut', profile: null, error: null })
+    expect(visibilityOf('right-sidebar-page')).toBe('visible')
+    expect(visibilityOf('bottom-panel-page')).toBe('visible')
+    expect(visibilityOf('webview-surface')).toBe('visible')
+
+    await screen.getByRole('button', { name: 'open-login' }).click()
+    await expect.element(screen.getByRole('dialog')).toBeVisible()
+
+    const screenshotDir = import.meta.env.VITE_CAPTAIN_WHO_BLOCK_SCREENSHOT_DIR
+    if (screenshotDir) {
+      await page.screenshot({ path: `${screenshotDir}/login-blocked.png` })
+    }
+
+    await expect.poll(() => visibilityOf('right-sidebar-page')).toBe('hidden')
+    await expect.poll(() => visibilityOf('bottom-panel-page')).toBe('hidden')
+    await expect.poll(() => visibilityOf('webview-surface')).toBe('hidden')
+
+    await screen.getByRole('button', { name: 'auth.cancel' }).click()
+    await expect.poll(interactive).toBe('true')
+    await expect.poll(() => visibilityOf('right-sidebar-page')).toBe('visible')
+    await expect.poll(() => visibilityOf('bottom-panel-page')).toBe('visible')
+    await expect.poll(() => visibilityOf('webview-surface')).toBe('visible')
+  })
+
   it('sends and verifies email login codes without exposing the SDK challenge to the page', async () => {
     const screen = await render(<Harness />)
     await screen.getByRole('button', { name: 'auth.codeMode' }).click()
