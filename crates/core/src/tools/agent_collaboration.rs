@@ -133,7 +133,7 @@ impl AgentTool for AgentCollaborationTool {
         let (name, description, input_schema) = match self.kind {
             AgentCollaborationToolKind::Spawn => (
                 "spawn_agent",
-                "Create one direct persistent child Agent and queue its initial task. Exact agent_type and model selectors must come from the collaboration directory. For visual work, select only a directory entry whose authoritative imageInput capability is true; never infer capability from a name.",
+                "Create one direct persistent child Agent and queue its initial task. Prefer spawning when work splits into independent, well-bounded subtasks — parallel investigation, independent verification, or isolated read-only review — where a child can proceed without waiting on others; keep tightly coupled or trivial steps in a single Agent. Exact agent_type and model selectors must come from the collaboration directory. For visual work, select only a directory entry whose authoritative imageInput capability is true; never infer capability from a name.",
                 json!({
                     "type": "object",
                     "properties": {
@@ -632,6 +632,20 @@ mod tests {
         assert!(followup
             .description
             .contains("Use send_message only for child-to-parent mailbox reports"));
+    }
+
+    #[test]
+    fn spawn_description_states_when_to_delegate() {
+        let spawn = AgentCollaborationTool::new(AgentCollaborationToolKind::Spawn).definition();
+        assert!(spawn
+            .description
+            .contains("Prefer spawning when work splits into independent"));
+        assert!(spawn
+            .description
+            .contains("keep tightly coupled or trivial steps in a single Agent"));
+        assert!(spawn
+            .description
+            .contains("Create one direct persistent child Agent and queue its initial task."));
     }
 
     #[test]
