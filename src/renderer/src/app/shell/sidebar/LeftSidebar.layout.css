@@ -184,33 +184,33 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 28px;
-  height: 28px;
+  width: 24px;
+  height: 24px;
   padding: 0;
-  color: var(--mc-color-icon-default);
-  background: transparent;
-  border: 2px solid var(--mc-color-control-selected-background);
+  color: var(--mc-color-control-selected-text);
+  background: var(--mc-color-control-selected-background);
+  border: 0;
   border-radius: 50%;
-  font-size: 12px;
+  font-size: 11px;
   font-weight: var(--mc-font-weight-control);
   font-variant-numeric: tabular-nums;
   line-height: 18px;
   white-space: nowrap;
-  transition: background-color 120ms ease;
+  transition: filter 120ms ease;
 }
 
 .left-sidebar__update-button svg {
-  width: 16px;
-  height: 16px;
+  width: 14px;
+  height: 14px;
 }
 
 .left-sidebar .left-sidebar__update-button:hover:not(:disabled) {
-  background: var(--mc-color-state-hover);
+  filter: brightness(1.08);
 }
 
 .left-sidebar .left-sidebar__update-button[data-variant='progress'] {
   width: auto;
-  padding: 0 10px;
+  padding: 0 8px;
   color: var(--mc-color-control-selected-text);
   background: var(--mc-color-control-selected-background);
   border-radius: var(--mc-radius-control);

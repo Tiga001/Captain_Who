@@ -140,7 +140,7 @@ it('keeps Chinese update labels to four characters and English labels concise', 
 })
 
 it.each(['classic-light', 'classic-dark'] as const)(
-  'shows an icon-only accent ring and keeps disabled progress accented in %s',
+  'shows a solid accent download button and keeps disabled progress accented in %s',
   async (themeId) => {
     const theme = getFrontendTheme(themeId)
     for (const [key, value] of Object.entries(getFrontendCssVariables(undefined, theme.tokens)))
@@ -154,14 +154,14 @@ it.each(['classic-light', 'classic-dark'] as const)(
     const icon = button.querySelector('svg')!
     const expected = document.createElement('span')
     expected.style.cssText =
-      'color: var(--mc-color-icon-default); background: var(--mc-color-control-selected-background); border-color: var(--mc-color-control-selected-text); border-radius: var(--mc-radius-control)'
+      'color: var(--mc-color-control-selected-text); background: var(--mc-color-control-selected-background); border-radius: var(--mc-radius-control)'
     screen.container.append(expected)
     const colors = getComputedStyle(expected)
-    expect(getComputedStyle(button).borderColor).toBe(colors.backgroundColor)
-    expect(getComputedStyle(button).borderStyle).toBe('solid')
+    expect(getComputedStyle(button).backgroundColor).toBe(colors.backgroundColor)
+    expect(getComputedStyle(button).borderStyle).toBe('none')
     expect(getComputedStyle(button).borderRadius).toBe('50%')
-    expect(button.getBoundingClientRect().width).toBe(28)
-    expect(button.getBoundingClientRect().height).toBe(28)
+    expect(button.getBoundingClientRect().width).toBe(24)
+    expect(button.getBoundingClientRect().height).toBe(24)
     expect(getComputedStyle(icon).color).toBe(colors.color)
     const screenshotDir = import.meta.env.VITE_CAPTAIN_WHO_UPDATE_SCREENSHOT_DIR
     const bar = screen.container.querySelector('.left-sidebar__footer')!
@@ -179,7 +179,7 @@ it.each(['classic-light', 'classic-dark'] as const)(
     await expect
       .poll(() => getComputedStyle(progress.element()).backgroundColor)
       .toBe(colors.backgroundColor)
-    expect(getComputedStyle(progress.element()).color).toBe(colors.borderColor)
+    expect(getComputedStyle(progress.element()).color).toBe(colors.color)
     expect(getComputedStyle(progress.element()).borderRadius).toBe(colors.borderRadius)
     expect(getComputedStyle(progress.element()).opacity).toBe('1')
     if (screenshotDir)
@@ -192,7 +192,7 @@ it.each(['classic-light', 'classic-dark'] as const)(
     await expect.element(preparing).toBeDisabled()
     expect(preparing.element()).toBe(button)
     expect(getComputedStyle(preparing.element()).backgroundColor).toBe(colors.backgroundColor)
-    expect(getComputedStyle(preparing.element()).color).toBe(colors.borderColor)
+    expect(getComputedStyle(preparing.element()).color).toBe(colors.color)
     expect(getComputedStyle(preparing.element()).borderRadius).toBe(colors.borderRadius)
     if (screenshotDir)
       await page.screenshot({
