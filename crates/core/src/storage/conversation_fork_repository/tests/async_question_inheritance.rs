@@ -478,6 +478,15 @@ fn inherited_question_receipts_follow_the_branch_identity_in_trace_and_model_con
     if let ConversationTurnTraceItem::ToolResult { observation, .. } = &mut items[1] {
         *observation = receipt.clone();
     }
+    // Text that merely looks like a receipt outside certified machine positions must survive the
+    // fork byte-identically.
+    items.push(ConversationTurnTraceItem::AssistantNarration {
+        sequence: 2,
+        content: receipt.to_string(),
+        provider_turn_id: None,
+        first_tool_call_id: None,
+        truncated: false,
+    });
     conversation_trace_repository::commit_trace_in_connection(
         &connection,
         &ConversationTurnTrace {
@@ -520,7 +529,7 @@ fn inherited_question_receipts_follow_the_branch_identity_in_trace_and_model_con
             sequence: 1,
             ordinal: 0,
             role: "tool".into(),
-            content: receipt.to_string(),
+            content: serde_json::to_string_pretty(&receipt).unwrap(),
             tool_call_id: Some("call-async-question".into()),
             tool_calls: vec![],
             is_error: false,
@@ -559,6 +568,13 @@ fn inherited_question_receipts_follow_the_branch_identity_in_trace_and_model_con
         panic!("missing copied question receipt")
     };
     assert_eq!(observation["requestId"], json!(copied_request_id));
+
+    let narration = &copied_trace.items[2];
+    let ConversationTurnTraceItem::AssistantNarration { content, .. } = narration else {
+        panic!("missing copied narration")
+    };
+    assert_eq!(content, &receipt.to_string());
+    assert!(content.contains(&source_request.request_id));
 
     let copied_context = conversation_model_context_repository::get_log_for_message(
         &connection,

@@ -545,6 +545,7 @@ fn rewrite_model_context_items(
     items: &mut Vec<ConversationModelContextItem>,
     replacements: &HashMap<String, String>,
 ) -> Result<(), String> {
+    rewrite_certified_question_receipt_contents(items, replacements)?;
     let mut value = serde_json::to_value(&*items)
         .map_err(|error| format!("无法序列化历史模型上下文：{error}"))?;
     rewrite_exact_ids(&mut value, replacements);
@@ -554,6 +555,59 @@ fn rewrite_model_context_items(
     for item in items {
         item.validate()
             .map_err(|error| format!("复制后的历史模型上下文无效：{error}"))?;
+    }
+    Ok(())
+}
+
+/// Only the machine-authored ToolResult of a certified `request_user_input_async` call may
+/// carry a branch-local question receipt: parse its JSON so the model context, durable trace
+/// and database agree on one branch identity. Text that merely looks like a receipt is never
+/// inspected, and legal JSON with whitespace is handled like the compact form.
+fn rewrite_certified_question_receipt_contents(
+    items: &mut [ConversationModelContextItem],
+    replacements: &HashMap<String, String>,
+) -> Result<(), String> {
+    let question_call_ids = items
+        .iter()
+        .flat_map(|item| item.tool_calls.iter())
+        .filter(|call| call.name == "request_user_input_async")
+        .map(|call| call.id.clone())
+        .collect::<Vec<_>>();
+    if question_call_ids.is_empty() {
+        return Ok(());
+    }
+    for item in items.iter_mut() {
+        if item.role != "tool" {
+            continue;
+        }
+        let Some(tool_call_id) = item.tool_call_id.as_deref() else {
+            continue;
+        };
+        if !question_call_ids
+            .iter()
+            .any(|call_id| call_id.as_str() == tool_call_id)
+        {
+            continue;
+        }
+        let Ok(mut receipt) = serde_json::from_str::<Value>(&item.content) else {
+            continue;
+        };
+        let Some(object) = receipt.as_object_mut() else {
+            continue;
+        };
+        let Some(request_id) = object
+            .get("requestId")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+        else {
+            continue;
+        };
+        let Some(target) = replacements.get(&request_id) else {
+            continue;
+        };
+        object.insert("requestId".into(), Value::String(target.clone()));
+        item.content = serde_json::to_string(&receipt)
+            .map_err(|error| format!("无法重写复制后的问题回执：{error}"))?;
     }
     Ok(())
 }
