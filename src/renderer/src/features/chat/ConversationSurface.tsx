@@ -31,6 +31,7 @@ import type { CollaborationApprovalsController } from '../agentCollaboration/use
 import type { ApprovalSubmissionResult } from './components/approvalSubmission'
 import { AgentTodoProgress } from './components/AgentTodoProgress'
 import { ChatMessageItem } from './components/ChatMessageItem'
+import { ConversationScrollToBottomButton } from './components/ConversationScrollToBottomButton'
 import { ConversationTurnNavigationRail } from './components/ConversationTurnNavigationRail'
 import {
   ConversationModelTransitionDivider,
@@ -49,6 +50,7 @@ import type { ModelTransitionConfirmation } from './modelTransitionUiState'
 import { getConversationTurnNavigationItems } from './conversationTurnNavigation'
 import { isAssistantMessageGenerating, isAssistantReplyComplete } from './assistantGeneration'
 import { getLatestAgentTodo } from './todoLifetime'
+import { useConversationBottomFollow } from './useConversationBottomFollow'
 import { useTurnDiffSummaries } from './useTurnDiffSummaries'
 import { getAgentActionApprovalStatus, getAgentActionId } from '../agentRun/agentActionUtils'
 import {
@@ -775,6 +777,12 @@ export function ConversationSurface(props: ConversationSurfaceProps) {
     return () => window.cancelAnimationFrame(animationFrameId)
   }, [conversation.id, conversation.messages, scrollTargetMessageId])
 
+  const { isAtBottom, scrollToBottom } = useConversationBottomFollow(
+    messagesRef,
+    conversation.id,
+    interactive !== null
+  )
+
   useEffect(() => rememberCurrentScrollPosition, [rememberCurrentScrollPosition])
 
   return (
@@ -844,6 +852,13 @@ export function ConversationSurface(props: ConversationSurfaceProps) {
           items={turnNavigationItems}
           scrollContainerRef={messagesRef}
         />
+        {interactive && (
+          <ConversationScrollToBottomButton
+            generating={isGenerating}
+            onClick={scrollToBottom}
+            visible={!isAtBottom}
+          />
+        )}
       </div>
 
       {interactive && (

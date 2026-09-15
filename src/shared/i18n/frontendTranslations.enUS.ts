@@ -1227,6 +1227,7 @@ export const enUSTranslations = {
   'chat.turnNavigationLabel': 'Conversation turn navigation',
   'chat.turnNavigationJumpToTurn': 'Jump to conversation turn',
   'chat.turnNavigationAttachmentOnlyMessage': 'Attachment-only message',
+  'chat.scrollToBottom': 'Scroll to bottom',
   'chat.cancel': 'Cancel',
   'chat.usage': 'Token usage',
   'chat.usageTitle': 'Token usage',

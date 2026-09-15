@@ -1,0 +1,96 @@
+/* Floating return-to-bottom control anchored above the composer and aligned with its right edge. */
+.conversation-scroll-to-bottom {
+  position: absolute;
+  z-index: 16;
+  right: max(28px, calc(50% - 352px));
+  bottom: 12px;
+  display: flex;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  align-items: center;
+  justify-content: center;
+  color: var(--mc-color-text-primary);
+  background: var(--mc-color-surface-popover);
+  border: 1px solid var(--mc-color-border-subtle);
+  border-radius: var(--mc-radius-pill);
+  box-shadow: var(--mc-shadow-popover);
+  cursor: pointer;
+  transition:
+    background-color 120ms ease,
+    border-color 120ms ease;
+}
+
+.conversation-scroll-to-bottom:hover {
+  background: color-mix(
+    in srgb,
+    var(--mc-color-surface-popover) 92%,
+    var(--mc-color-text-primary) 8%
+  );
+  border-color: var(--mc-color-border-default);
+}
+
+.conversation-scroll-to-bottom:active {
+  background: color-mix(
+    in srgb,
+    var(--mc-color-surface-popover) 86%,
+    var(--mc-color-text-primary) 14%
+  );
+}
+
+.conversation-scroll-to-bottom:focus-visible {
+  outline: 2px solid var(--mc-color-focus-ring);
+  outline-offset: 2px;
+}
+
+.conversation-scroll-to-bottom__icon {
+  width: var(--mc-icon-size-base);
+  height: var(--mc-icon-size-base);
+  stroke-width: var(--mc-icon-stroke-regular);
+}
+
+.conversation-scroll-to-bottom__typing {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.conversation-scroll-to-bottom__typing > span {
+  width: 4px;
+  height: 4px;
+  background: currentColor;
+  border-radius: 50%;
+  opacity: 0.35;
+  animation: conversation-scroll-to-bottom-typing 1.2s ease-in-out infinite;
+}
+
+.conversation-scroll-to-bottom__typing > span:nth-child(2) {
+  animation-delay: 0.2s;
+}
+
+.conversation-scroll-to-bottom__typing > span:nth-child(3) {
+  animation-delay: 0.4s;
+}
+
+@keyframes conversation-scroll-to-bottom-typing {
+  0%,
+  55%,
+  100% {
+    opacity: 0.3;
+  }
+
+  25% {
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .conversation-scroll-to-bottom {
+    transition-duration: 0s;
+  }
+
+  .conversation-scroll-to-bottom__typing > span {
+    animation: none;
+    opacity: 0.7;
+  }
+}

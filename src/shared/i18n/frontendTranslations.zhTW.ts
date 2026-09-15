@@ -1150,6 +1150,7 @@ export const zhTWTranslations = {
   'chat.turnNavigationLabel': '對話輪次導航',
   'chat.turnNavigationJumpToTurn': '跳到對話輪次',
   'chat.turnNavigationAttachmentOnlyMessage': '僅包含附件的訊息',
+  'chat.scrollToBottom': '回到底部',
   'chat.cancel': '取消',
   'chat.usage': 'Token 用量',
   'chat.usageTitle': 'Token 消耗',

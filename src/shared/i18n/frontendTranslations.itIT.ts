@@ -1255,6 +1255,7 @@ export const itITTranslations = {
   'chat.turnNavigationLabel': 'La conversazione gira la navigazione',
   'chat.turnNavigationJumpToTurn': 'Vai al turno di conversazione',
   'chat.turnNavigationAttachmentOnlyMessage': 'Messaggio solo allegato',
+  'chat.scrollToBottom': 'Vai in fondo',
   'chat.cancel': 'Annulla',
   'chat.usage': 'Token utilizzo',
   'chat.usageTitle': 'Token utilizzo',

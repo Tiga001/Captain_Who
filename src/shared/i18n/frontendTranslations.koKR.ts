@@ -1211,6 +1211,7 @@ export const koKRTranslations = {
   'chat.turnNavigationLabel': '대화 차례 탐색',
   'chat.turnNavigationJumpToTurn': '대화 차례로 이동',
   'chat.turnNavigationAttachmentOnlyMessage': '첨부파일 전용 메시지',
+  'chat.scrollToBottom': '맨 아래로 이동',
   'chat.cancel': '취소',
   'chat.usage': 'Token 사용법',
   'chat.usageTitle': 'Token 사용법',

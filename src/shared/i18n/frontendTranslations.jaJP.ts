@@ -1240,6 +1240,7 @@ export const jaJPTranslations = {
   'chat.turnNavigationLabel': '会話ターンナビゲーション',
   'chat.turnNavigationJumpToTurn': '会話ターンにジャンプ',
   'chat.turnNavigationAttachmentOnlyMessage': '添付ファイルのみのメッセージ',
+  'chat.scrollToBottom': '下までスクロール',
   'chat.cancel': 'キャンセル',
   'chat.usage': 'Tokenの使用量',
   'chat.usageTitle': 'Tokenの使用量',

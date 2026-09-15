@@ -1262,6 +1262,7 @@ export const frFRTranslations = {
   'chat.turnNavigationLabel': 'Conversation et navigation',
   'chat.turnNavigationJumpToTurn': 'Passer au tour de conversation',
   'chat.turnNavigationAttachmentOnlyMessage': 'Message en pièce jointe uniquement',
+  'chat.scrollToBottom': 'Revenir en bas',
   'chat.cancel': 'Annuler',
   'chat.usage': 'Token utilisation',
   'chat.usageTitle': 'Token utilisation',

@@ -1246,6 +1246,7 @@ export const ruRUTranslations = {
   'chat.turnNavigationLabel': 'Навигация по повороту разговора',
   'chat.turnNavigationJumpToTurn': 'Перейти к повороту разговора',
   'chat.turnNavigationAttachmentOnlyMessage': 'Сообщение только в виде вложения',
+  'chat.scrollToBottom': 'Прокрутить вниз',
   'chat.cancel': 'Отмена',
   'chat.usage': 'Token использование',
   'chat.usageTitle': 'Token использование',

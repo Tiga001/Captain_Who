@@ -1162,6 +1162,7 @@ export const zhCNTranslations = {
   'chat.turnNavigationLabel': '对话轮次导航',
   'chat.turnNavigationJumpToTurn': '跳转到对话轮次',
   'chat.turnNavigationAttachmentOnlyMessage': '仅包含附件的消息',
+  'chat.scrollToBottom': '回到底部',
   'chat.cancel': '取消',
   'chat.usage': 'Token 用量',
   'chat.usageTitle': 'Token 消耗',
