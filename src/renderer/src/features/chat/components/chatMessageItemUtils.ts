@@ -889,7 +889,23 @@ export function formatElapsedDuration(milliseconds: number) {
     return seconds > 0 ? `${totalMinutes}m ${seconds}s` : `${totalMinutes}m`
   }
 
-  const hours = Math.floor(totalMinutes / 60)
+  const totalHours = Math.floor(totalMinutes / 60)
   const minutes = totalMinutes % 60
-  return minutes > 0 ? `${hours}h ${minutes}m` : `${hours}h`
+  const days = Math.floor(totalHours / 24)
+  const hours = totalHours % 24
+
+  const parts: string[] = []
+  if (days > 0) {
+    parts.push(`${days}d`)
+  }
+  if (hours > 0) {
+    parts.push(`${hours}h`)
+  }
+  if (minutes > 0) {
+    parts.push(`${minutes}m`)
+  }
+  if (seconds > 0) {
+    parts.push(`${seconds}s`)
+  }
+  return parts.join(' ')
 }
