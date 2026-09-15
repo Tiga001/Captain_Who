@@ -2,7 +2,7 @@
 status: current
 audience: developers
 owner: engineering
-last_verified: 2026-09-12
+last_verified: 2026-09-16
 ---
 
 # 右侧栏平台
@@ -38,7 +38,7 @@ last_verified: 2026-09-12
 - capability 不可用或 workspace 被删除时关闭还是保留页面。
 - 关联页面在每个工作区的数量上限。
 
-`RightSidebarPage` 保存平台身份和轻量展示状态：page/module id、title、icon、resourceKey、workspace key/path/session key，以及模块特定的 tagged `moduleState`。页面状态当前支持 browser `surfaceId`/逻辑 URL/viewport、workspace file preview、最近一次 Turn 的 Git 导航和 Agent Center list/detail。Browser 的 `surfaceInstanceId`、state revision、真实 guest URL 和下载路径不属于 Renderer page state。
+`RightSidebarPage` 保存平台身份和轻量展示状态：page/module id、title、icon、resourceKey、workspace key/path/session key、创建时捕获的真实 `projectId`（无持久项目时为 null），以及模块特定的 tagged `moduleState`。`workspaceKey` 可能回退为路径、名称或 `home` 等 UI 标识，只有 `projectId` 代表持久项目身份；模块的后端 project 参数只从 `projectId` 派生，不得从 UI key 推断。页面状态当前支持 browser `surfaceId`/逻辑 URL/viewport、workspace file preview、最近一次 Turn 的 Git 导航和 Agent Center list/detail。Browser 的 `surfaceInstanceId`、state revision、真实 guest URL 和下载路径不属于 Renderer page state。
 
 ## 当前模块矩阵
 
@@ -184,6 +184,7 @@ Agent Center 的设置入口打开通用 Agent template 设置页。模板定义
 5. 未选中页面必须 `aria-hidden`；覆盖/隐藏整个侧栏时活动变为 dormant。
 6. Browser guest 必须通过 Electron Main 身份校验，Agent observer 必须通过 Core Server/Rust Core 会话树校验；UI 页存在不代表拥有访问权。
 7. Browser logical state 必须匹配 exact instance/revision；download center capability 不等于路径已经暴露给 Renderer。
+8. `workspaceKey` 可能包含 `home` 等 UI 回退，只有 `projectId` 是持久项目身份；无项目终端等场景不得从 UI key 推断或凭空生成项目。
 
 ## 代码真源
 

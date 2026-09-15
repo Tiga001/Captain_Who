@@ -2,7 +2,7 @@
 status: current
 audience: developers
 owner: engineering
-last_verified: 2026-09-09
+last_verified: 2026-09-16
 ---
 
 # Agent Runtime 与模型 Provider
@@ -141,7 +141,7 @@ Checkpoint 至少绑定以下事实：
 - 已闭合的 Provider-neutral 历史以及尚待处理的调用批次；
 - 冻结 Tool 定义、Tool 身份、能力与权限相关投影；
 - World State epoch、扩展快照及可恢复的 Provider continuation 引用；
-- canonical Conversation World State 日志及已观察标记（checkpoint v15、私有恢复信封 v12），恢复时校验与冻结模型投影一致；
+- canonical Conversation World State 日志及已观察标记（checkpoint v19、私有恢复信封 v14），恢复时校验与冻结模型投影一致；
 - 上下文布局标签与可选 `request_order`，用于恢复压缩后 journal 项和 Run overlay 的相对请求次序；
 - 审批动作所需的安全投影，而不是任意原始 secret 或不可信参数。
 

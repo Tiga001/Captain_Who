@@ -2,7 +2,7 @@
 status: current
 audience: developers
 owner: engineering
-last_verified: 2026-09-14
+last_verified: 2026-09-16
 ---
 
 # 人机交互 Tool：阻塞与非阻塞问答
@@ -112,7 +112,7 @@ Agent 发现需要用户参与
 
 异步批次可选择“忽略全部”。忽略不会发送草稿、普通用户消息、UserGuidance 或 Wake，也不额外调用模型；系统将最小的 ignored 事实写入普通后端历史，供下一次自然采样或启动对账观察。逐题选择“跳过”再提交则仍是正式回答，不等于忽略。
 
-创建分支时，仍为 `open` 的非阻塞批次会随分支继承：题干与选项保持冻结，owner 身份、Run、ToolCall 和请求 ID 改为分支自身，复制出的模型上下文与回执引用同步指向分支 ID，不携带任何答案或投递历史；源会话中的对应批次不受影响。已在源会话中提交或忽略的批次不会被带入分支。
+创建分支时，仍为 `open` 的非阻塞批次会随分支继承：题干与选项保持冻结，owner 身份、Run、ToolCall 和请求 ID 改为分支自身，复制出的模型上下文与回执引用同步指向分支 ID，不携带任何答案或投递历史；源会话中的对应批次不受影响。已在源会话中提交或忽略的批次不会被带入分支。请求 ID 的改写只发生在可认证位置：可由同一持久记录验证、与 `request_user_input_async` ToolCall 配对的 ToolResult、Trace 观察与模型上下文回执（顶层 `requestId`）；仅形似回执或恰好等于请求 ID 的普通文本（叙述、用户引导、Mailbox、其他 Tool 观察）保持字节不变。
 
 提交、Stop、压缩、审批、空闲续接和启动恢复由事件驱动调度，不轮询用户。Stop 不会删除仍 `open` 的异步问题，但可以取消已接纳且尚未投递、属于被停止范围的 Delivery；已应用、失败或取消的 Delivery 不会因重启重新投递。异步接纳与投递协调在[human_input_async.rs](../../crates/core-server/src/application/agent/turn_executor/human_input_async.rs)。
 

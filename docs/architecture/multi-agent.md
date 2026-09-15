@@ -2,7 +2,7 @@
 status: current
 audience: developers/maintainers
 owner: engineering
-last_verified: 2026-09-07
+last_verified: 2026-09-16
 ---
 
 # Multi-Agent 当前架构
@@ -123,6 +123,8 @@ Wake 表示“需要一次执行机会”，不是线程或可无条件重试的
 | `interrupt_agent` | 中断严格后代当前任务            | 不删除节点、Conversation 或历史；回执与实际终态分离且可幂等恢复             |
 
 不存在 `wait_any` 或第七个协作工具。六个实现由 Runtime extension 注册，以 `agent.collaboration` 动态 capability 整组暴露；它们不属于配置稳定的 Tool 前缀。
+
+Harness 与 `spawn_agent` 描述包含委派时机指引：任务能自然拆成相互独立、边界清晰、交付物明确的子任务时（并行调查、独立复核、只读审查），优先创建子 Agent 并行推进；强依赖或必须串行的步骤不硬拆，单步或很小的工作也不为形式而拆。拆分后由父 Agent 负责分派、跟进与交叉核对，最终结果不能只是简单拼接。
 
 设置的子 Agent 页面提供全局能力开关，默认开启。每个根 Turn 在原子 admission 中冻结设置，Spawn、Followup 和子任务结果所产生的 Wake 在同一事务内继承来源 Run 的策略。已启动的任务树完成本轮协作；后续新根 Turn 使用更新后的设置。`agent_collaboration_run_policies` 和 `agent_collaboration_wake_policies` 是不可改写的 Host 记录，随所属历史删除，Fork 不复制其执行授权。
 

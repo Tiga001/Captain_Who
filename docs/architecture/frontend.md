@@ -2,7 +2,7 @@
 status: current
 audience: developers
 owner: engineering
-last_verified: 2026-09-12
+last_verified: 2026-09-16
 ---
 
 # 前端架构
@@ -71,13 +71,15 @@ React 挂载前，`bootstrapStartupEntry.ts` 会容错读取同一份 frontend c
 
 `app/AppShell.tsx` 是应用级 orchestration layer，而不是可复用 feature。它当前组合：
 
-- 会话元数据、按需详情加载、活动会话和滚动位置。
+- 会话元数据、按需详情加载、活动会话、滚动位置和会话底部跟随。
 - Composer 草稿、附件、模型与 Skill 选择。
 - Agent Run 绑定、事件缓冲、流式文本刷新、停止与权威终态对账。
 - 待审批动作、命令会话恢复、steer/排队消息、编辑重写和 Provider transition。
 - Multi-Agent collaboration store、审批和 observer surface。
 - 通用通知 settings/event/resync、原生点击导航和 Main locale mirror；不在前端实现第二份投递 outbox。
 - 左侧栏、中央会话页、Automation 的 Scheduled 主视图、右侧栏 workspace/capability 和全屏设置页。
+
+会话滚动的当前契约：`useConversationBottomFollow` 把距底部 20 px 以内视为贴底并持续跟随；流式增量与容器/消息块高度变化（含异步 Markdown 图片等无 DOM 变更的块级增长）都保持最新内容在底部。只有读者主动上移才暂停跟随，底部侧增长与程序化滚动的竞态不会误停。离开底部时，interactive surface 在输入框上方显示浮动“回到底部”控件：普通状态为向下箭头，流式生成期间替换为打字省略号；点击平滑回到底部并恢复跟随（`prefers-reduced-motion` 时立即跳转），不中断生成。observer surface 不显示该控件。
 
 复杂流程应提取为 `app/use*.ts` 或相应 feature hook；AppShell 只保留跨领域组合与顶层回调。Feature 不得反向导入 AppShell。
 
@@ -165,7 +167,7 @@ ScheduledPage
 
 Scheduled drawer 的展开、最大化、dirty guard、焦点恢复和宽度都是 Renderer 交互状态。布局以 Scheduled 容器自身宽度而非 viewport 为准；当前默认宽度 440 px、可调整范围 380–640 px、列表至少保留 360 px，容器小于 760 px 时 drawer 覆盖列表。宽度偏好只保存在当前 AppShell 会话，应用重启后恢复默认值。
 
-Automation 共享 DTO 使用 `AUTOMATION_SCHEMA_VERSION = 1`，permission mode 使用独立的 v2；它们不是 SQLite canonical schema。当前 SQLite schema 是 v36，Renderer 不读取或协商该数据库版本。
+Automation 共享 DTO 使用 `AUTOMATION_SCHEMA_VERSION = 1`，permission mode 使用独立的 v2；它们不是 SQLite canonical schema。当前 SQLite schema 是 v47，Renderer 不读取或协商该数据库版本。
 
 ## 设置架构
 
@@ -190,7 +192,7 @@ MCP 编辑器有未保存变更保护；离开 MCP 页面或返回工作区前�
 7. 大文本、diff、PDF、图片和流式事件均需先经过领域预算，再进入 DOM/解码器。
 8. Automation event/resync 只用于失效通知和排序，不能替代 task、Automation Run、attention 的权威快照。
 9. Scheduled 页面中的权限、health、Run 终态和通知状态都不得由 Renderer 文案或本地时钟推断。
-10. Automation DTO schema v1、permission mode v2 与 SQLite schema v36 必须分开命名和演进。
+10. Automation DTO schema v1、permission mode v2 与 SQLite schema v47 必须分开命名和演进。
 11. FileChange diff 卡片、Browser 下载中心和原生通知点击只消费安全投影；UI 中可见的路径、卡片或按钮不授予文件/Browser/通知权限。
 12. 凭据查询只允许返回状态；credential reference 和已有 secret 都不得进入 Renderer DTO、store、错误或测试 snapshot。
 
@@ -208,6 +210,7 @@ MCP 编辑器有未保存变更保护；离开 MCP 页面或返回工作区前�
 - Host API 客户端：`src/renderer/src/host/hostClient.ts`
 - Storage 投影：`src/renderer/src/features/storage/storageClient.ts`
 - 会话能力面：`src/renderer/src/features/chat/ConversationSurface.tsx`
+- 会话滚动跟随与回到底部：`src/renderer/src/features/chat/useConversationBottomFollow.ts`、`src/renderer/src/features/chat/components/ConversationScrollToBottomButton.tsx`
 - FileChange 展示：`src/renderer/src/features/chat/components/toolActivities/FileChangeToolActivity.tsx`、`FileChangeDiffCard.tsx`
 - 通知：`src/renderer/src/features/notifications/`
 - Browser：`src/renderer/src/features/browser/`

@@ -2,7 +2,7 @@
 status: current
 audience: developers
 owner: engineering
-last_verified: 2026-08-31
+last_verified: 2026-09-16
 ---
 
 # Electron Host 与进程架构
@@ -58,7 +58,7 @@ Core Server 在开发环境由 `cargo run -p mycopilot-core-server --bin core-se
 
 1. 设置应用名、AppUserModelId 和应用图标。
 2. 注册 startup readiness 并创建隐藏主窗口；此时 Renderer 可以开始加载，但 blocking startup gate 在 Host 初始化完成前不会放行交互。
-3. 启动 Core Server 子进程，取得 `persist:mycopilot-browser` Session 并注册使用同一 Session 的 favicon 协议。
+3. 启动 Core Server 子进程；macOS 上随即安装 Dock 最近聊天菜单与菜单栏托盘控制器。取得 `persist:mycopilot-browser` Session 并注册使用同一 Session 的 favicon 协议。
 4. 创建浏览器 Artifact/文件 Broker 并完成其私有目录初始化，再从 Rust Core 加载浏览偏好和下载设置。
 5. 创建下载 Broker、网络策略/风险协调器/网络 Guard，并在任何真实 surface 导航前安装 managed Session 安全策略与内部错误/崩溃页 store。
 6. 创建 `BrowserHistoryService`、`BrowserSurfaceManager`、`BrowserLinkRouter`、敏感 Target 绑定 Broker 和 Managed Playwright 反向桥；逻辑 URL、加载错误和 guest crash 恢复从这里开始由 Main 持有。
@@ -106,7 +106,18 @@ SQLite notification facts / batches
 
 通知点击不会直接操作 React state。Main 把经过共享 parser 校验的 `NotificationOpenRequest` 交给最近一个已通过 `openRequestedReady` 握手、尚未销毁的受信 Renderer；必要时恢复、显示并聚焦主窗口。Renderer 尚未 ready 时，Main 以 FIFO 暂存最多 32 个请求，溢出时丢弃最早请求。单项点击打开 application、精确 Conversation/message/approval 或 Automation/run；Main 只把用户实际看到且仍有效的 event ids 标为 seen。请求不包含原生 Notification 对象、绝对路径或任意导航 URL。
 
-Notification DTO 使用 schema v1，Automation DTO 使用独立 schema v1/permission mode v2；它们与 SQLite canonical schema v36 是三条独立版本线。Main 不解析 SQLite schema，也不把数据库版本暴露给 Renderer。
+Notification DTO 使用 schema v1，Automation DTO 使用独立 schema v1/permission mode v2；它们与 SQLite canonical schema v47 是三条独立版本线。Main 不解析 SQLite schema，也不把数据库版本暴露给 Renderer。
+
+## macOS 系统集成：Dock 菜单与菜单栏托盘
+
+macOS 上 Main 还拥有两个系统级入口，只投影用户可见的根 Conversation 摘要，不向原生菜单暴露 Agent 内部身份：
+
+- **Dock 菜单**（`DockRecentConversationsController`）：最多展示 3 项最近聊天，并提供“更多”子菜单列出其余项；每 5 秒按 Conversation 元数据签名刷新。
+- **菜单栏托盘**（`MenuBarRunningConversationsController`）：列出仍有活动 Run（`queued`、`running`、`waiting_for_approval` 或 `waiting_for_user_input`，或存在 pending assistant 回复）的根聊天，并提供“退出 Captain Who”；除 5 秒定时刷新外，还由根 Agent 事件合并触发刷新。托盘图标是深色品牌标记的裁剪版本，按 15 px 状态栏尺寸渲染。
+
+两个控制器都在 Core Server 启动后安装、在 `will-quit` 中停止（清理定时器、解除事件订阅、销毁托盘）；单次刷新失败保留上一个菜单并在下一周期重试，不向用户暴露内部错误。
+
+点击菜单项不直接修改业务状态：Main 把目标 Conversation id 记为一次性 `pendingDockConversationId`，激活主窗口并只向主窗口 WebContents 发送 `host:app.dockOpenConversationPending`。Renderer 用 `host:app.takeDockOpenConversation` 单次领取目标；该 handler 只接受受信发送方且必须来自主窗口，领取后立即清空。AppShell 订阅该事件后立即尝试领取一次，使 Renderer 尚未挂载时的菜单点击也能确定送达；随后关闭设置页，经由既有外部打开路径切换会话。
 
 ## 应用数据与环境权威
 
@@ -128,7 +139,7 @@ Electron Main 是应用数据根目录的唯一权威：
 2. 并行请求通知 locale 写入、终端服务停止和 Core Server graceful shutdown；其余 Host IPC（包括 Automation/Notification registrar）暂时保留，使已接受请求可以收口。
 3. Core Server 停止其 Automation Scheduler admission、完成已接纳 Automation Run 的有界关闭，并停止 Managed MCP Manager 后，关闭 Main 的 Managed Playwright 反向桥。
 4. 关闭浏览器 surfaces，再释放文件 Broker 和 Artifact Broker。
-5. 再次调用 `app.quit()`；`will-quit` 注销 Automation/MCP IPC、图标并执行兜底强制清理。
+5. 再次调用 `app.quit()`；`will-quit` 注销 Automation/MCP IPC、图标，停止 Dock/托盘控制器（定时器与托盘），并执行兜底强制清理。
 
 关键约束是：Core Server shutdown 完成前必须保留同一个 Managed Playwright bridge 和 Browser surface。Rust Core 会发送有界的 close 命令并等待结果；提前拆除 Main 端会把可判定的关闭变成 `outcome_unknown`，并可能遗留附件。
 
@@ -145,7 +156,8 @@ Core Server 的 Main 包装层为 graceful shutdown 设置硬超时，终端 ser
 7. 开发与打包可以使用不同的可执行文件位置，但不能改变上述权限边界。
 8. Renderer 无权 claim、validate、acknowledge、release、suppress、list 或 summary 原生通知；这些方法仅属于 Main ↔ Core Server 的 Host-only JSON-RPC。
 9. Notification/Automation event、resync 和本机定时器只能触发重新读取 notification batch 或业务快照，不能被当作通知已显示或业务 Run 已终结的证据。
-10. Notification schema v1、Automation schema v1/permission mode v2 与 SQLite schema v36 不得由 Main 合并为单一版本。
+10. Notification schema v1、Automation schema v1/permission mode v2 与 SQLite schema v47 不得由 Main 合并为单一版本。
+11. Dock 菜单与菜单栏托盘只展示用户可见的根 Conversation 摘要；点击导航经 Main 的一次性 pending id 与受信渲染进程单次领取传递，原生菜单回调不得直接写入业务状态。
 
 ## 代码真源
 
@@ -154,6 +166,7 @@ Core Server 的 Main 包装层为 graceful shutdown 设置硬超时，终端 ser
 - Core Server 进程与 JSON-RPC：`src/main/core/jsonRpcClient.ts`
 - Core Server 类型化门面：`src/main/core/coreServer.ts`
 - Preload 入口：`src/preload/index.ts`
+- Dock 最近聊天、菜单栏托盘与 Dock 导航桥：`src/main/dockRecentConversations.ts`、`src/main/menuBarRunningConversations.ts`、`src/preload/AppIpcBridge.ts`
 - Automation Main IPC：`src/main/ipc/automationIpc.ts`
 - 通用原生通知：`src/main/notifications/systemNotificationCoordinator.ts`
 - 通知 IPC：`src/main/ipc/notificationIpc.ts`
@@ -177,9 +190,12 @@ Core Server 的 Main 包装层为 graceful shutdown 设置硬超时，终端 ser
 - `src/main/terminal/TerminalBridge.test.ts`
 - `src/main/core/managedWebviewSecurity.test.ts`
 - `src/main/core/systemNotificationCoordinator.test.ts`
+- `src/main/core/dockRecentConversations.test.ts`
+- `src/main/core/menuBarRunningConversations.test.ts`
 - `src/main/core/ipc.notifications.test.ts`
 - `src/main/core/ipc.automation.test.ts`
 - `src/preload/AutomationIpcBridge.test.ts`
+- `src/preload/AppIpcBridge.test.ts`
 - `src/main/core/automationHostRealCore.integration.test.ts`
 - `src/renderer/src/app/__tests__/AppStartupGate.browser.test.tsx`
 - 浏览器相关测试见 [浏览器与自动化](../subsystems/browser-automation.md)
@@ -217,3 +233,4 @@ pnpm test:automation-core-e2e
 - 通用原生通知依赖 Electron/操作系统支持；不支持时只保留所属业务状态，不会显示系统通知。
 - “系统已显示、Core Server ACK 未提交”的崩溃窗口可能导致一次重复通知，当前没有 OS 级 exactly-once receipt。
 - Main 最多保留 32 个 pending notification navigation，溢出时丢弃最早请求；多窗口交付策略仍按最近 listener-ready 的受信 Renderer 处理。
+- Dock 菜单与菜单栏托盘当前仅 macOS 提供；只覆盖根 Conversation 的最近与运行摘要，没有子 Agent 或跨窗口维度。

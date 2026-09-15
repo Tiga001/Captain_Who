@@ -2,7 +2,7 @@
 status: current
 audience: developers
 owner: engineering
-last_verified: 2026-09-14
+last_verified: 2026-09-16
 ---
 
 # Captain Who desktop account login
@@ -16,6 +16,7 @@ The desktop client uses `@cloudbase/js-sdk@3.9.2` in Electron Main. Public envir
 - Password and email OTP login share this gate. OTP uses the SDK's verification callback with `shouldCreateUser: false`; registration stays on the website.
 - Logout invalidates pending authentication requests, clears the saved session, and attempts to revoke the current cloud session. It does not stop Core Server, terminals, agents, automation schedules, or tools.
 - After first entry, logout does not cover the workspace. It blocks new user-initiated turns (including rewrites and queued user messages starting another turn) and new automation turns, but allows existing runs, steering, approvals and tools to continue. Clicking Sign in reuses the overlay without remounting the workspace. Background schedule denial records that occurrence as not executed without opening a login page; the schedule remains enabled for its next normal time.
+- While a blocking login overlay is up (the startup gate or the re-login overlay), the whole workspace is force-hidden — keep-alive right-sidebar/bottom-panel pages and webview surfaces included — so nothing shows through it; descendant `visibility` resets are overridden, and the workspace returns to visible when the overlay closes.
 - All accounts share the existing local database and model credentials. Login does not upload or migrate local conversations or settings.
 
 ## Session and profile data

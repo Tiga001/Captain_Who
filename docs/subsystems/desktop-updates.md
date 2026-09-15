@@ -2,7 +2,7 @@
 status: current
 audience: developers/maintainers
 owner: engineering
-last_verified: 2026-09-13
+last_verified: 2026-09-16
 ---
 
 # 桌面应用更新
@@ -13,11 +13,11 @@ last_verified: 2026-09-13
 
 依赖固定为 `electron-updater@6.8.9`，使用现有 Electron 39 与 Builder 26。主进程在 Host 初始化完成后每次启动检查一次，不自动下载、不轮询。开发模式、缺更新配置、非 macOS arm64、从 DMG 或 App Translocation 路径启动时禁用自动更新。
 
-左下角账号栏右侧是独立更新按钮：无新版本时隐藏；发现版本时显示“下载更新”；点击后只显示主进程报告的整数进度“下载中 XX%”。下载或安装准备失败时保留可重试按钮，显示简短错误，不影响正在运行的应用。没有新增设置页、确认弹窗、发布说明页。
+左下角账号栏右端是紧凑的更新插槽：没有可显示的更新动作时（检查中、已是最新或更新被禁用）显示主进程拥有的帮助菜单（“关于 Captain Who”与“查看文档”；不接收渲染进程传入的 URL 或原生面板参数，出现更新控件时让位）。发现新版本时插槽为环形图标按钮（文字只作为无障碍名称与提示）；进入下载、校验或重启阶段后改为胶囊文字，只显示主进程报告的阶段与整数进度：“正在下载 XX%”→“校验更新”→“正在重启”。下载或安装准备失败时保留可重试按钮，显示简短错误，不影响正在运行的应用。没有新增设置页、确认弹窗、发布说明页。
 
-`UpdateService` 管理 `disabled/checking/idle/available/downloading/installing/error` 状态；preload 只暴露无参数的 `getState()`、`download()` 与 `onStateChanged()`。状态只有 revision、版本、百分比、状态及固定错误码，不包含账号、地址或原始错误。渲染进程不能指定 URL、安装路径、命令或直接要求退出安装；重复下载请求合并，过期状态不能覆盖新状态。
+`UpdateService` 管理 `disabled/checking/idle/available/downloading/preparing/installing/error` 状态；preload 只暴露无参数的 `getState()`、`download()` 与 `onStateChanged()`。状态只有 revision、版本、百分比、状态及固定错误码，不包含账号、地址或原始错误。渲染进程不能指定 URL、安装路径、命令或直接要求退出安装；重复下载请求合并，过期状态不能覆盖新状态。
 
-第一版使用完整 ZIP 下载，并且只接受包含唯一 arm64 ZIP 的清单。electron-updater 的 ZIP-ready 事件早于 Squirrel.Mac 验证完成；因此关闭 SDK 的 `autoInstallOnAppQuit`，显式进行原生安装准备，等原生 `update-downloaded` 成功后才进入自动安全退出。原生明确报错才恢复重试；没有人为超时后假定原生操作已经取消的逻辑。原生准备期间百分比可以暂留 100%，应用仍可继续使用。
+第一版使用完整 ZIP 下载，并且只接受包含唯一 arm64 ZIP 的清单。electron-updater 的 ZIP-ready 事件早于 Squirrel.Mac 验证完成；因此关闭 SDK 的 `autoInstallOnAppQuit`，显式进行原生安装准备。ZIP 传输到 100%（包括已验证的缓存 ZIP）只表示传输完成，状态进入 `preparing`（“校验更新”）；只有原生 `update-downloaded` 成功后才进入 `installing`（“正在重启”）并请求自动安全退出，不能把“下载完成”当作“可安装”。原生明确报错才恢复重试；没有人为超时后假定原生操作已经取消的逻辑。原生准备期间百分比可以暂留 100%，应用仍可继续使用。
 
 安装复用 `AppShutdownCoordinator` 的唯一退出事务：通知和新输入停止 → renderer 有界持久化 flush → Core Server、终端等既有有界停机 → 受管浏览器/桥接清理 → 放行退出 → 调用 installer。普通退出已开始时拒绝额外的安装派发；清理和安装各执行一次，不循环触发退出。运行中任务遵循现有停机策略，不承诺自动恢复全部任务。
 

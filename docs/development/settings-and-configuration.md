@@ -2,7 +2,7 @@
 status: current
 audience: developers
 owner: engineering
-last_verified: 2026-09-09
+last_verified: 2026-09-16
 ---
 
 # 设置与配置
@@ -149,7 +149,7 @@ MCP、Browser、Subagents、Environment 和 Archived Conversations。Browser 页
 - 配置 DTO 与 parser 是否拒绝未知/无效字段；
 - 默认值是在 Renderer、Main、Core Server 还是 Rust Core 定义，是否只有一个权威来源；
 - revision/CAS、重复提交和重启后的行为是否有测试；
-- reset/backup 是否应保留该配置；当前 reset 保留 allowlisted 配置与 credential reference（含 v44–v45 的上下文模式），受支持旧版来源与默认值见[存储生命周期](../architecture/storage-and-data-lifecycle.md#schema-发布策略)，不复制或恢复操作系统 secret。通知事件、Browser history/download records 或 Agent template library 不保留；
+- reset/backup 是否应保留该配置；当前 reset 保留 allowlisted 配置与 credential reference（含 v44–v47 的上下文模式），受支持旧版来源与默认值见[存储生命周期](../architecture/storage-and-data-lifecycle.md#schema-发布策略)，不复制或恢复操作系统 secret。通知事件、Browser history/download records 或 Agent template library 不保留；
 - 删除项目是否应删除该配置或仅移除 Agent template assignment；
 - Automation 是否需要重建冻结 snapshot、阻断后续 Run 或使现有任务进入 blocked；
 - 敏感字段是否避开日志、Trace、IPC event 和 model projection；

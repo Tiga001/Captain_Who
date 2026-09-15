@@ -2,7 +2,7 @@
 status: current
 audience: developers
 owner: engineering
-last_verified: 2026-09-03
+last_verified: 2026-09-16
 ---
 
 # 威胁模型
@@ -142,8 +142,8 @@ Renderer 尚未 ready，Main 只以 FIFO 保留最多 32 个 pending open reques
 
 SQLite 是大部分领域的恢复真源。关键副作用使用 receipt、CAS、lease、checkpoint、FileChange delete journal
 或 `outcome_unknown` 防止崩溃后盲目重放。通知只是失效信号，不能替代持久状态。schema/catalog 不匹配时
-fail closed 并要求显式开发重置，不在启动时偷偷改写旧库。正式开发 reset 只从 exact current v33 提取
-明确 allowlist；旧 schema 不保留永久兼容读取路径。notification facts、Browser history/download records、
+fail closed 并要求显式开发重置，不在启动时偷偷改写旧库。正式开发 reset 只从 exact current v47 及 exact v35–v46 提取
+明确 allowlist；旧 schema 不保留永久兼容读取路径，绑定 exact v33 fingerprint 的私有备份恢复是受控例外。notification facts、Browser history/download records、
 Agent templates 和 FileChange 运行/审计状态不会迁移。
 
 删除项目、Conversation 或 Agent 树时必须遵守领域所有权和外键规则；文件数据根中的孤儿对象只由受管

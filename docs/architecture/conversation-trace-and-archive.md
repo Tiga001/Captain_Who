@@ -2,7 +2,7 @@
 status: current
 audience: developers
 owner: engineering
-last_verified: 2026-09-07
+last_verified: 2026-09-16
 ---
 
 # Conversation Trace 与 Exact Archive
@@ -110,7 +110,7 @@ Index 不复制正文、普通 narration 或每个成功 Tool 的 operation/outc
 
 - 覆盖范围内编辑/删除改变 source revision，使依赖它的 compaction 派生状态失效。
 - Turn rewrite 保留明确的 rewrite record，并在事务内更新消息、Trace/model context、Archive 引用及派生状态；不能就地伪造旧 sequence。
-- 分叉复制选中边界内的终态消息、Trace、model-context、摘要链、附件和相关 Artifact grant。Archive chunk 可复用内容，但目标必须获得新归属/ref，并重写目标 Trace 引用。已结算 FileChange action audit 与 collaboration timeline 冻结快照也按目标 conversation/message/Run identity 重映射，仅用于历史展示，不成为重放或写入授权。
+- 分叉复制选中边界内的终态消息、Trace、model-context、摘要链、附件和相关 Artifact grant。Archive chunk 可复用内容，但目标必须获得新归属/ref，并重写目标 Trace 引用。已结算 FileChange action audit 与 collaboration timeline 冻结快照也按目标 conversation/message/Run identity 重映射，仅用于历史展示，不成为重放或写入授权。继承的非阻塞问题请求 ID 只在可认证位置改写（与 `request_user_input_async` ToolCall 配对的 ToolResult/Trace 观察与模型上下文回执顶层 `requestId`），其余文本保持字节不变。
 - Usage、普通请求 Observation、运行中 Checkpoint、Command Session 活动状态和 mutable world state 不作为历史内容复制。
 - 会话删除通过外键/服务事务清理内容和授权；审计表是否保留由其数据生命周期定义，不能仅依赖级联猜测。
 - 删除 Automation 绑定的 Conversation/message/project 前，服务事务先 terminalize 相关活动 Run 并请求
