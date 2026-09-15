@@ -487,6 +487,44 @@ fn inherited_question_receipts_follow_the_branch_identity_in_trace_and_model_con
         first_tool_call_id: None,
         truncated: false,
     });
+    items.push(ConversationTurnTraceItem::AssistantNarration {
+        sequence: 3,
+        content: source_request.request_id.clone(),
+        provider_turn_id: None,
+        first_tool_call_id: None,
+        truncated: false,
+    });
+    items.push(ConversationTurnTraceItem::UserGuidance {
+        sequence: 4,
+        guidance_id: "guidance-opaque-question-id".into(),
+        client_message_id: "client-opaque-question-id".into(),
+        content: source_request.request_id.clone(),
+        attachments: Vec::new(),
+        created_at: 41,
+        truncated: false,
+    });
+    items.push(ConversationTurnTraceItem::AgentMailboxDelivery {
+        sequence: 5,
+        receipt_id: "receipt-opaque-question-id".into(),
+        message_id: "message-opaque-question-id".into(),
+        sender_agent_id: "agent-opaque-question-id".into(),
+        sender_task_name: "opaque".into(),
+        sender_task_path: "/root/opaque".into(),
+        kind: crate::AgentMailboxKind::Message,
+        content: source_request.request_id.clone(),
+        created_at: 41,
+        truncated: false,
+    });
+    let mut unrelated = staged_tool_exchange(
+        6,
+        "call-unrelated-question-id",
+        "read_file",
+        json!({"requestId": source_request.request_id.clone()}),
+    );
+    if let ConversationTurnTraceItem::ToolResult { observation, .. } = &mut unrelated[1] {
+        *observation = json!({"requestId": source_request.request_id.clone()});
+    }
+    items.extend(unrelated);
     conversation_trace_repository::commit_trace_in_connection(
         &connection,
         &ConversationTurnTrace {
@@ -534,6 +572,75 @@ fn inherited_question_receipts_follow_the_branch_identity_in_trace_and_model_con
             tool_calls: vec![],
             is_error: false,
         },
+        ConversationModelContextItem {
+            images: Vec::new(),
+            sequence: 2,
+            ordinal: 0,
+            role: "assistant".into(),
+            content: receipt.to_string(),
+            tool_call_id: None,
+            tool_calls: vec![],
+            is_error: false,
+        },
+        ConversationModelContextItem {
+            images: Vec::new(),
+            sequence: 3,
+            ordinal: 0,
+            role: "assistant".into(),
+            content: source_request.request_id.clone(),
+            tool_call_id: None,
+            tool_calls: vec![],
+            is_error: false,
+        },
+        ConversationModelContextItem {
+            images: Vec::new(),
+            sequence: 4,
+            ordinal: 0,
+            role: "user".into(),
+            content: source_request.request_id.clone(),
+            tool_call_id: None,
+            tool_calls: vec![],
+            is_error: false,
+        },
+        ConversationModelContextItem {
+            images: Vec::new(),
+            sequence: 5,
+            ordinal: 0,
+            role: "user".into(),
+            content: source_request.request_id.clone(),
+            tool_call_id: None,
+            tool_calls: vec![],
+            is_error: false,
+        },
+        ConversationModelContextItem {
+            images: Vec::new(),
+            sequence: 6,
+            ordinal: 0,
+            role: "assistant".into(),
+            content: String::new(),
+            tool_call_id: None,
+            tool_calls: vec![crate::AgentContextCheckpointToolCall {
+                id: "call-unrelated-question-id".into(),
+                name: "read_file".into(),
+                args: json!({"requestId": source_request.request_id.clone()}),
+                provider_identity: crate::AgentProviderToolCallIdentity {
+                    provider_tool_index: 1,
+                    provider_call_id: "call-unrelated-question-id".into(),
+                    runtime_call_id: "call-unrelated-question-id".into(),
+                },
+            }],
+            is_error: false,
+        },
+        ConversationModelContextItem {
+            images: Vec::new(),
+            sequence: 7,
+            ordinal: 0,
+            role: "tool".into(),
+            content: source_request.request_id.clone(),
+            tool_call_id: Some("call-unrelated-question-id".into()),
+            tool_calls: vec![],
+            is_error: false,
+        },
     ];
     conversation_model_context_repository::commit_items_in_connection(
         &connection,
@@ -542,6 +649,56 @@ fn inherited_question_receipts_follow_the_branch_identity_in_trace_and_model_con
         &context,
     )
     .unwrap();
+
+    let mut source_agent_run = source
+        .messages
+        .iter()
+        .find(|message| message.id == "assistant-b")
+        .and_then(|message| message.agent_run_json.as_deref())
+        .map(|raw| serde_json::from_str::<Value>(raw).unwrap())
+        .unwrap();
+    source_agent_run["toolCalls"] = serde_json::to_value(vec![
+        crate::AgentToolCall {
+            id: "call-async-question".into(),
+            tool: "request_user_input_async".into(),
+            args: question_call_operation(),
+            approval_status: AgentApprovalStatus::NotRequired,
+            reason: None,
+        },
+        crate::AgentToolCall {
+            id: "call-unrelated-question-id".into(),
+            tool: "read_file".into(),
+            args: json!({"requestId": source_request.request_id.clone()}),
+            approval_status: AgentApprovalStatus::NotRequired,
+            reason: None,
+        },
+    ])
+    .unwrap();
+    source_agent_run["toolResults"] = serde_json::to_value(vec![
+        AgentToolResult {
+            call_id: "call-async-question".into(),
+            tool: "request_user_input_async".into(),
+            ok: true,
+            result: Some(receipt.clone()),
+            error: None,
+            exact_archive_file: None,
+        },
+        AgentToolResult {
+            call_id: "call-unrelated-question-id".into(),
+            tool: "read_file".into(),
+            ok: true,
+            result: Some(json!({"requestId": source_request.request_id.clone()})),
+            error: None,
+            exact_archive_file: None,
+        },
+    ])
+    .unwrap();
+    connection
+        .execute(
+            "UPDATE messages SET agent_run_json=?1 WHERE id='assistant-b'",
+            [serde_json::to_string(&source_agent_run).unwrap()],
+        )
+        .unwrap();
 
     let plan = build_assistant_reply_fork_plan(
         &connection,
@@ -576,6 +733,24 @@ fn inherited_question_receipts_follow_the_branch_identity_in_trace_and_model_con
     assert_eq!(content, &receipt.to_string());
     assert!(content.contains(&source_request.request_id));
 
+    for index in [3, 4, 5] {
+        let content = match &copied_trace.items[index] {
+            ConversationTurnTraceItem::AssistantNarration { content, .. }
+            | ConversationTurnTraceItem::UserGuidance { content, .. }
+            | ConversationTurnTraceItem::AgentMailboxDelivery { content, .. } => content,
+            _ => panic!("missing copied opaque text at trace index {index}"),
+        };
+        assert_eq!(content, &source_request.request_id);
+    }
+    let ConversationTurnTraceItem::ToolCall { operation, .. } = &copied_trace.items[6] else {
+        panic!("missing copied unrelated ToolCall")
+    };
+    assert_eq!(operation["requestId"], json!(source_request.request_id));
+    let ConversationTurnTraceItem::ToolResult { observation, .. } = &copied_trace.items[7] else {
+        panic!("missing copied unrelated ToolResult")
+    };
+    assert_eq!(observation["requestId"], json!(source_request.request_id));
+
     let copied_context = conversation_model_context_repository::get_log_for_message(
         &connection,
         target_assistant,
@@ -586,14 +761,52 @@ fn inherited_question_receipts_follow_the_branch_identity_in_trace_and_model_con
         copied_context.items[0].tool_calls[0].args,
         question_call_operation()
     );
-    let tool_item = copied_context
-        .items
-        .iter()
-        .find(|item| item.role == "tool")
-        .unwrap();
+    let tool_item = &copied_context.items[1];
     let copied_receipt: Value = serde_json::from_str(&tool_item.content).unwrap();
     assert_eq!(copied_receipt["status"], json!("accepted"));
     assert_eq!(copied_receipt["requestId"], json!(copied_request_id));
+    for index in [2, 3, 4, 5] {
+        let expected = if index == 2 {
+            receipt.to_string()
+        } else {
+            source_request.request_id.clone()
+        };
+        assert_eq!(copied_context.items[index].content, expected);
+    }
+    assert_eq!(
+        copied_context.items[6].tool_calls[0].args["requestId"],
+        json!(source_request.request_id)
+    );
+    assert_eq!(
+        copied_context.items[7].content,
+        source_request.request_id
+    );
+
+    let copied_agent_run = plan
+        .target
+        .messages
+        .iter()
+        .find(|message| message.id == *target_assistant)
+        .and_then(|message| message.agent_run_json.as_deref())
+        .map(|raw| serde_json::from_str::<Value>(raw).unwrap())
+        .unwrap();
+    let copied_run_results = copied_agent_run["toolResults"].as_array().unwrap();
+    let copied_question_result = copied_run_results
+        .iter()
+        .find(|result| result["tool"] == "request_user_input_async")
+        .unwrap();
+    assert_eq!(
+        copied_question_result["result"]["requestId"],
+        json!(copied_request_id)
+    );
+    let copied_unrelated_result = copied_run_results
+        .iter()
+        .find(|result| result["tool"] == "read_file")
+        .unwrap();
+    assert_eq!(
+        copied_unrelated_result["result"]["requestId"],
+        json!(source_request.request_id)
+    );
 }
 
 #[test]
@@ -873,6 +1086,7 @@ fn file_change_digest_lineage_survives_repeated_forks_when_operations_reference_
     let branch_rows = copied_question_rows(&connection, &first.target.id);
     assert_eq!(branch_rows.len(), 1);
     let branch_request_id = branch_rows[0].request_id.clone();
+    assert_ne!(branch_request_id, question.request_id);
     let first_audits =
         agent_action_audit_repository::list_terminal_file_change_action_audits_for_conversation(
             &connection,
@@ -906,7 +1120,7 @@ fn file_change_digest_lineage_survives_repeated_forks_when_operations_reference_
         .unwrap();
     assert_eq!(
         branch_operation["inheritedQuestionRequestId"],
-        json!(branch_request_id)
+        json!(question.request_id)
     );
     assert_eq!(
         first_change.execution.trace_args_digest,
@@ -924,4 +1138,45 @@ fn file_change_digest_lineage_survives_repeated_forks_when_operations_reference_
     .unwrap();
     commit_fork_plan(&mut connection, &second).unwrap();
     assert_eq!(second.action_audits.len(), 1);
+    let second_rows = copied_question_rows(&connection, &second.target.id);
+    assert_eq!(second_rows.len(), 1);
+    assert_ne!(second_rows[0].request_id, branch_request_id);
+    let second_audits =
+        agent_action_audit_repository::list_terminal_file_change_action_audits_for_conversation(
+            &connection,
+            &second.target.id,
+        )
+        .unwrap();
+    let second_action: AgentProposedAction =
+        serde_json::from_str(&second_audits[0].action_json).unwrap();
+    let AgentProposedAction::FileChange {
+        file_change: second_change,
+    } = second_action
+    else {
+        unreachable!()
+    };
+    let second_trace = conversation_trace_repository::get_trace_for_message(
+        &connection,
+        &second.message_id_map[&first.message_id_map["assistant-a"]],
+    )
+    .unwrap()
+    .unwrap();
+    let second_operation = second_trace
+        .items
+        .iter()
+        .find_map(|item| match item {
+            ConversationTurnTraceItem::ToolCall {
+                tool, operation, ..
+            } if tool == "apply_patch" => Some(operation),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(
+        second_operation["inheritedQuestionRequestId"],
+        json!(question.request_id)
+    );
+    assert_eq!(
+        second_change.execution.trace_args_digest,
+        crate::file_change::proposal_digest(second_operation).unwrap()
+    );
 }

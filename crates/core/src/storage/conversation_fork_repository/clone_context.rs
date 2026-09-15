@@ -531,7 +531,9 @@ fn remap_history_ref(
 fn rewrite_trace_items(
     trace: &mut ConversationTurnTrace,
     replacements: &HashMap<String, String>,
+    human_request_id_replacements: &HashMap<String, String>,
 ) -> Result<(), String> {
+    rewrite_certified_question_trace_receipts(trace, human_request_id_replacements);
     let mut value = serde_json::to_value(&trace.items)
         .map_err(|error| format!("无法序列化历史工具轨迹：{error}"))?;
     rewrite_exact_ids(&mut value, replacements);
@@ -544,8 +546,9 @@ fn rewrite_trace_items(
 fn rewrite_model_context_items(
     items: &mut Vec<ConversationModelContextItem>,
     replacements: &HashMap<String, String>,
+    human_request_id_replacements: &HashMap<String, String>,
 ) -> Result<(), String> {
-    rewrite_certified_question_receipt_contents(items, replacements)?;
+    rewrite_certified_question_receipt_contents(items, human_request_id_replacements)?;
     let mut value = serde_json::to_value(&*items)
         .map_err(|error| format!("无法序列化历史模型上下文：{error}"))?;
     rewrite_exact_ids(&mut value, replacements);
@@ -559,13 +562,72 @@ fn rewrite_model_context_items(
     Ok(())
 }
 
+/// A trace observation may carry a branch-local question identity only when the same trace
+/// certifies that its call id belongs to `request_user_input_async`. Generic Tool operations and
+/// every human-authored string remain opaque even when they equal a request id byte-for-byte.
+fn rewrite_certified_question_trace_receipts(
+    trace: &mut ConversationTurnTrace,
+    human_request_id_replacements: &HashMap<String, String>,
+) {
+    let question_call_ids = trace
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            crate::ConversationTurnTraceItem::ToolCall { call_id, tool, .. }
+                if tool == "request_user_input_async" =>
+            {
+                Some(call_id.clone())
+            }
+            _ => None,
+        })
+        .collect::<HashSet<_>>();
+    if question_call_ids.is_empty() {
+        return;
+    }
+    for item in &mut trace.items {
+        let crate::ConversationTurnTraceItem::ToolResult {
+            call_id,
+            tool,
+            observation,
+            ..
+        } = item
+        else {
+            continue;
+        };
+        if tool != "request_user_input_async" || !question_call_ids.contains(call_id) {
+            continue;
+        }
+        rewrite_top_level_request_id(observation, human_request_id_replacements);
+    }
+}
+
+fn rewrite_top_level_request_id(
+    value: &mut Value,
+    human_request_id_replacements: &HashMap<String, String>,
+) -> bool {
+    let Some(object) = value.as_object_mut() else {
+        return false;
+    };
+    let Some(source_request_id) = object.get("requestId").and_then(Value::as_str) else {
+        return false;
+    };
+    let Some(target_request_id) = human_request_id_replacements.get(source_request_id) else {
+        return false;
+    };
+    object.insert(
+        "requestId".into(),
+        Value::String(target_request_id.clone()),
+    );
+    true
+}
+
 /// Only the machine-authored ToolResult of a certified `request_user_input_async` call may
 /// carry a branch-local question receipt: parse its JSON so the model context, durable trace
 /// and database agree on one branch identity. Text that merely looks like a receipt is never
 /// inspected, and legal JSON with whitespace is handled like the compact form.
 fn rewrite_certified_question_receipt_contents(
     items: &mut [ConversationModelContextItem],
-    replacements: &HashMap<String, String>,
+    human_request_id_replacements: &HashMap<String, String>,
 ) -> Result<(), String> {
     let question_call_ids = items
         .iter()
@@ -592,20 +654,9 @@ fn rewrite_certified_question_receipt_contents(
         let Ok(mut receipt) = serde_json::from_str::<Value>(&item.content) else {
             continue;
         };
-        let Some(object) = receipt.as_object_mut() else {
+        if !rewrite_top_level_request_id(&mut receipt, human_request_id_replacements) {
             continue;
-        };
-        let Some(request_id) = object
-            .get("requestId")
-            .and_then(Value::as_str)
-            .map(str::to_string)
-        else {
-            continue;
-        };
-        let Some(target) = replacements.get(&request_id) else {
-            continue;
-        };
-        object.insert("requestId".into(), Value::String(target.clone()));
+        }
         item.content = serde_json::to_string(&receipt)
             .map_err(|error| format!("无法重写复制后的问题回执：{error}"))?;
     }

@@ -2,11 +2,14 @@ fn clone_message(
     source: &ChatMessageRecord,
     message_id_map: &HashMap<String, String>,
     replacements: &HashMap<String, String>,
+    human_request_id_replacements: &HashMap<String, String>,
 ) -> Result<ChatMessageRecord, String> {
     let agent_run_json = source
         .agent_run_json
         .as_deref()
-        .map(|raw| clone_agent_run_json(raw, replacements))
+        .map(|raw| {
+            clone_agent_run_json(raw, replacements, human_request_id_replacements)
+        })
         .transpose()?;
     Ok(ChatMessageRecord {
         human_interaction_response: source.human_interaction_response.clone(),
@@ -95,9 +98,11 @@ fn flattened_snapshot_origin(
 fn clone_agent_run_json(
     raw: &str,
     replacements: &HashMap<String, String>,
+    human_request_id_replacements: &HashMap<String, String>,
 ) -> Result<String, String> {
     let mut value = serde_json::from_str::<Value>(raw)
         .map_err(|error| format!("历史 agent 状态不是有效 JSON：{error}"))?;
+    rewrite_certified_question_agent_run_receipts(&mut value, human_request_id_replacements);
     rewrite_exact_ids(&mut value, replacements);
     rewrite_history_open_tokens(&mut value, replacements)?;
     let object = value
@@ -120,6 +125,43 @@ fn clone_agent_run_json(
         state.insert("activeRunId".to_string(), Value::Null);
     }
     serde_json::to_string(&value).map_err(|error| format!("无法序列化复制后的 agent 状态：{error}"))
+}
+
+/// The Renderer snapshot may already contain the question ToolResult that its durable trace also
+/// carries. Authenticate it against the snapshot's ToolCall before changing the branch-local
+/// request id; ordinary presentation fields and results from every other tool stay opaque.
+fn rewrite_certified_question_agent_run_receipts(
+    value: &mut Value,
+    human_request_id_replacements: &HashMap<String, String>,
+) {
+    let question_call_ids = value
+        .get("toolCalls")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|call| call.get("tool").and_then(Value::as_str) == Some("request_user_input_async"))
+        .filter_map(|call| call.get("id").and_then(Value::as_str).map(str::to_string))
+        .collect::<HashSet<_>>();
+    if question_call_ids.is_empty() {
+        return;
+    }
+    let Some(tool_results) = value.get_mut("toolResults").and_then(Value::as_array_mut) else {
+        return;
+    };
+    for tool_result in tool_results {
+        let certified = tool_result.get("tool").and_then(Value::as_str)
+            == Some("request_user_input_async")
+            && tool_result
+                .get("callId")
+                .and_then(Value::as_str)
+                .is_some_and(|call_id| question_call_ids.contains(call_id));
+        if !certified {
+            continue;
+        }
+        if let Some(result) = tool_result.get_mut("result") {
+            rewrite_top_level_request_id(result, human_request_id_replacements);
+        }
+    }
 }
 
 pub(crate) fn rewrite_exact_ids(value: &mut Value, replacements: &HashMap<String, String>) {

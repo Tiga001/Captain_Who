@@ -28,6 +28,7 @@ fn cloned_agent_usage_is_zero_and_ids_are_rewritten() {
         })
         .to_string(),
         &replacements,
+        &HashMap::new(),
     )
     .unwrap();
     let value: Value = serde_json::from_str(&cloned).unwrap();
@@ -52,6 +53,7 @@ fn cloned_agent_usage_is_zero_and_ids_are_rewritten() {
             ("agent-new".to_string(), "agent-recursive".to_string()),
             ("turn-new".to_string(), "turn-recursive".to_string()),
         ]),
+        &HashMap::new(),
     )
     .unwrap();
     let recursive: Value = serde_json::from_str(&recursive).unwrap();

@@ -465,9 +465,17 @@ fn build_message_only_history_plan(
     replacements.insert(source.id.clone(), target_conversation_id.to_string());
     let snapshot_origins =
         fork_snapshot_origins(connection, source, &source_messages, &message_id_map)?;
+    let human_request_id_replacements = HashMap::new();
     let mut target_messages = source_messages
         .iter()
-        .map(|message| clone_message(message, &message_id_map, &replacements))
+        .map(|message| {
+            clone_message(
+                message,
+                &message_id_map,
+                &replacements,
+                &human_request_id_replacements,
+            )
+        })
         .collect::<Result<Vec<_>, _>>()?;
     for message in &mut target_messages {
         message.ui_state_json = None;
