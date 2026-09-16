@@ -9,6 +9,7 @@ const PROJECT: &str = "project-workspace-instructions";
 
 struct InstructionsFixture {
     service: AgentService,
+    storage: Arc<StorageService>,
     agent_input: AgentChatInput,
     project_dir: tempfile::TempDir,
     _storage_dir: tempfile::TempDir,
@@ -30,7 +31,11 @@ impl InstructionsFixture {
                 1,
             ))
             .unwrap();
-        let prepared = prepare_conversation_turn(
+        let (existing, expected_revision) =
+            storage.load_conversation_for_turn(CONVERSATION).unwrap();
+        // The durable reservation is the production entry that also freezes the run workspace,
+        // so both Host commits and context-window previews run against the same frozen root.
+        let prepared = crate::application::agent_support::prepare_reserved_human_turn(
             &storage,
             &SkillsService::new(),
             AgentConversationTurnInput {
@@ -50,18 +55,16 @@ impl InstructionsFixture {
                 permissions: AgentPermissions::default(),
             },
             RUN,
+            existing,
+            expected_revision,
+            None,
+            None,
+            &|| Ok(()),
         )
         .unwrap();
-        let trace = mycopilot_core::ConversationTraceSnapshot::default().in_progress_trace(
-            RUN,
-            CONVERSATION,
-            ASSISTANT,
-        );
-        storage
-            .append_in_progress_conversation_turn_trace(&trace, 1, 1)
-            .unwrap();
         Self {
             service,
+            storage,
             agent_input: prepared.agent_input,
             project_dir,
             _storage_dir: storage_dir,
@@ -93,6 +96,58 @@ impl InstructionsFixture {
         host.mark_request_observed(&boundary).unwrap();
         records
     }
+
+    /// Reads the real public context-window preview (the same API the context ring uses).
+    fn preview(&self) -> mycopilot_core::AgentContextWindowSnapshot {
+        self.service
+            .get_context_window_snapshot(AgentContextWindowSnapshotInput {
+                conversation_id: Some(CONVERSATION.to_string()),
+                project_id: Some(PROJECT.to_string()),
+                model_id: "model-1".to_string(),
+                max_tokens: None,
+                prompt_preferences: None,
+                permissions: AgentPermissions::default(),
+                skills: Vec::new(),
+            })
+            .unwrap()
+            .snapshot
+            .unwrap()
+    }
+}
+
+fn fold_records(
+    records: &[mycopilot_core::AnchoredWorldStateRecord],
+) -> mycopilot_core::WorldStateSnapshot {
+    let mut iter = records.iter();
+    let first = iter.next().expect("world state records");
+    let mycopilot_core::WorldStateRecord::Full(full) = &first.record else {
+        panic!("the first world state record must be full");
+    };
+    let diffs = iter
+        .map(|entry| match &entry.record {
+            mycopilot_core::WorldStateRecord::Diff(diff) => diff.clone(),
+            mycopilot_core::WorldStateRecord::Full(_) => {
+                panic!("later world state records must be diffs")
+            }
+        })
+        .collect::<Vec<_>>();
+    mycopilot_core::WorldStateReducer::fold(full.clone(), &diffs).unwrap()
+}
+
+fn section_text(snapshot: &mycopilot_core::WorldStateSnapshot) -> String {
+    snapshot
+        .sections
+        .iter()
+        .flat_map(|section| {
+            std::iter::once(section.state.to_string()).chain(
+                section
+                    .model_projection
+                    .iter()
+                    .map(|projection| projection.to_string()),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 #[test]
@@ -228,4 +283,131 @@ fn workspace_instructions_override_wins_and_removal_is_explicit() {
     assert!(removed_snapshot
         .section(&mycopilot_core::WorldStateSectionId::WorkspaceInstructions)
         .is_none());
+}
+
+#[test]
+fn context_window_preview_rediscovers_agents_md_changes_like_the_next_request() {
+    let fixture = InstructionsFixture::new();
+    let baseline = fixture.preview();
+
+    // A large new file must move the preview before any request commits it. The preview used to
+    // keep counting the old state because it never re-read the file.
+    let long_v1 = format!("# 约定\n\n{}", "第一版约定说明。\n".repeat(800));
+    let long_v2 = format!("{long_v1}{}", "第二版约定说明。\n".repeat(800));
+    fs::write(fixture.project_dir.path().join("AGENTS.md"), &long_v1).unwrap();
+    let added = fixture.preview();
+    assert!(
+        added.input_tokens > baseline.input_tokens,
+        "adding AGENTS.md must change the context preview"
+    );
+
+    // The next real request commits exactly the content the preview already showed.
+    let records = fixture.commit(1);
+    let committed = fold_records(&records);
+    let instructions = committed
+        .section(&mycopilot_core::WorldStateSectionId::WorkspaceInstructions)
+        .expect("the request must publish workspace.instructions");
+    assert_eq!(
+        instructions.model_projection.as_ref().unwrap()["sources"][0]["content"],
+        json!(long_v1)
+    );
+    let durable_after_commit =
+        load_conversation_world_state(&fixture.storage, CONVERSATION).unwrap();
+    let steady_v1 = fixture.preview();
+
+    // An edit on disk must move the preview even while the old content stays persisted.
+    fs::write(fixture.project_dir.path().join("AGENTS.md"), &long_v2).unwrap();
+    let modified = fixture.preview();
+    assert!(
+        modified.input_tokens > steady_v1.input_tokens,
+        "editing AGENTS.md must change the context preview"
+    );
+
+    // Deleting the file must move the preview too, and committing the deletion removes the
+    // persisted section instead of leaving stale conventions behind.
+    fs::remove_file(fixture.project_dir.path().join("AGENTS.md")).unwrap();
+    let removed = fixture.preview();
+    assert!(
+        removed.input_tokens > steady_v1.input_tokens,
+        "removing AGENTS.md must change the context preview"
+    );
+    assert_eq!(
+        load_conversation_world_state(&fixture.storage, CONVERSATION).unwrap(),
+        durable_after_commit,
+        "previews must not publish file changes as durable state"
+    );
+    let records = fixture.commit(2);
+    let committed = fold_records(&records);
+    assert!(
+        committed
+            .section(&mycopilot_core::WorldStateSectionId::WorkspaceInstructions)
+            .is_none(),
+        "the next request must remove the deleted conventions"
+    );
+    let steady_after = fixture.preview();
+    assert_eq!(
+        steady_after,
+        fixture.preview(),
+        "an idle preview must be stable"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn symlinked_agents_md_and_replaced_root_never_redirect_discovery() {
+    let fixture = InstructionsFixture::new();
+    let outside = tempdir().unwrap();
+    fs::write(outside.path().join("AGENTS.md"), "outside secret").unwrap();
+    let clean = fixture.preview();
+
+    // A workspace AGENTS.md symlinked to a file outside the workspace contributes nothing: the
+    // preview does not move and the committed section stays absent.
+    std::os::unix::fs::symlink(
+        outside.path().join("AGENTS.md"),
+        fixture.project_dir.path().join("AGENTS.md"),
+    )
+    .unwrap();
+    assert_eq!(
+        fixture.preview(),
+        clean,
+        "a symlinked AGENTS.md must not leak outside content into the preview"
+    );
+    let first = fold_records(&fixture.commit(1));
+    assert!(first
+        .section(&mycopilot_core::WorldStateSectionId::WorkspaceInstructions)
+        .is_none());
+    assert!(!section_text(&first).contains("outside secret"));
+
+    // A real file is still discovered after the symlink is removed.
+    fs::remove_file(fixture.project_dir.path().join("AGENTS.md")).unwrap();
+    let long = format!("# 约定\n\n{}", "项目约定行。\n".repeat(400));
+    fs::write(fixture.project_dir.path().join("AGENTS.md"), &long).unwrap();
+    let populated = fixture.preview();
+    assert!(
+        populated.input_tokens > clean.input_tokens,
+        "the preview must discover a real AGENTS.md"
+    );
+    let second = fold_records(&fixture.commit(2));
+    assert_eq!(
+        second
+            .section(&mycopilot_core::WorldStateSectionId::WorkspaceInstructions)
+            .unwrap()
+            .model_projection
+            .as_ref()
+            .unwrap()["sources"][0]["content"],
+        json!(long)
+    );
+
+    // Replacing the frozen root with a symlink to an outside directory must not redirect the
+    // read: the section is removed and the outside content never reaches the model context.
+    fs::remove_file(fixture.project_dir.path().join("AGENTS.md")).unwrap();
+    fs::remove_dir(fixture.project_dir.path()).unwrap();
+    std::os::unix::fs::symlink(outside.path(), fixture.project_dir.path()).unwrap();
+    let third = fold_records(&fixture.commit(3));
+    assert!(third
+        .section(&mycopilot_core::WorldStateSectionId::WorkspaceInstructions)
+        .is_none());
+    assert!(!section_text(&third).contains("outside secret"));
+    // Clean up the replacement so the fixture directory drops cleanly.
+    fs::remove_file(fixture.project_dir.path()).unwrap();
 }

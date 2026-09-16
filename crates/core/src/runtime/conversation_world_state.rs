@@ -9,6 +9,7 @@ use std::collections::BTreeMap;
 pub(super) struct MemoryConversationWorldState {
     records: Vec<crate::AnchoredWorldStateRecord>,
     base_sections: Vec<WorldStateSectionEnvelope>,
+    context: Option<crate::AgentRunContext>,
 }
 
 impl MemoryConversationWorldState {
@@ -16,6 +17,7 @@ impl MemoryConversationWorldState {
         Ok(Self {
             records: input.world_state_records.clone(),
             base_sections: conversation_base_sections(input)?,
+            context: input.context.clone(),
         })
     }
 
@@ -80,6 +82,26 @@ impl MemoryConversationWorldState {
             .unwrap_or_else(BTreeMap::new);
         for id in conversation_capability_section_ids()? {
             desired.remove(&id);
+        }
+        // Workspace instructions are re-discovered read-only on every preview with the same
+        // discovery and merge semantics as actual requests: the committed section is replaced by
+        // the current file content, and a deleted file removes it instead of leaving stale
+        // conventions in the projected context.
+        desired.remove(&WorldStateSectionId::WorkspaceInstructions);
+        if let Some(loaded) =
+            crate::workspace_instructions::load_workspace_instructions(self.context.as_ref())
+        {
+            desired.insert(
+                WorldStateSectionId::WorkspaceInstructions,
+                crate::world_state::workspace_instructions_section(
+                    &loaded.sources,
+                    loaded.truncated,
+                    WorldStateLifetime::Conversation,
+                )
+                .map_err(|error| {
+                    AgentError::new(format!("无法构造工作区指令 World State：{error}"))
+                })?,
+            );
         }
         for section in self.base_sections.iter().cloned().chain(sections) {
             if section.lifetime != WorldStateLifetime::Conversation {

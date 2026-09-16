@@ -41,6 +41,7 @@ mod turn_diff;
 mod usage;
 pub mod web_search;
 pub mod workspace;
+pub mod workspace_instructions;
 pub mod world_state;
 
 pub use web_search::{

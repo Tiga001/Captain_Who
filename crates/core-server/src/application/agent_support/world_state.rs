@@ -72,7 +72,9 @@ pub(crate) fn conversation_world_state_sections(
     ];
     // Workspace `AGENTS.md` instructions are rebuilt at every sampling boundary: an unchanged
     // file keeps the section revision, a change lands as Replace, a deletion as Remove.
-    if let Some(instructions) = super::load_workspace_instructions(context) {
+    if let Some(instructions) =
+        mycopilot_core::workspace_instructions::load_workspace_instructions(context)
+    {
         sections.push(
             workspace_instructions_section(
                 &instructions.sources,

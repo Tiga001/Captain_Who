@@ -47,9 +47,10 @@ fn concise_base_contract_keeps_all_tools_and_preview_accounts_for_the_same_prefi
         preview.cost_breakdown.tool_schema_tokens,
         costs.tool_schema_tokens
     );
-    // September 2026's thirteen-tool, no-custom-instructions baseline. This is the local
-    // estimator, not provider billing: preserve the reduction without freezing exact wording.
-    assert!(costs.system_tokens < 15_990, "{costs:?}");
+    // September 2026's thirteen-tool, no-custom-instructions baseline, raised by the
+    // workspace.instructions convention semantics (2026-09-16). This is the local estimator, not
+    // provider billing: preserve the bound without freezing exact wording.
+    assert!(costs.system_tokens < 16_100, "{costs:?}");
     assert!(costs.tool_schema_tokens < 11_641, "{costs:?}");
     eprintln!(
         "base contract local estimate: system={}, tools={}, fixed={}",

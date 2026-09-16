@@ -209,3 +209,97 @@ async fn conversation_world_state_ack_failure_keeps_usage_and_never_executes_or_
     assert!(!messages.contains("stableTools"));
     assert!(!messages.contains("dynamicTools"));
 }
+
+#[test]
+fn conversation_preview_rediscovers_workspace_instructions_on_every_read() {
+    use crate::file_change::FileChangeDirectoryIdentity;
+    use crate::storage::models::ProjectFolderRole;
+    use crate::workspace::WorkspaceFolder;
+    use std::fs;
+    use std::path::Path;
+    use tempfile::tempdir;
+
+    let fixture = tempdir().unwrap();
+    let root = fixture.path().join("workspace");
+    fs::create_dir(&root).unwrap();
+    let canonical = fs::canonicalize(&root).unwrap();
+    let canonical = canonical.to_string_lossy().into_owned();
+    let folder = WorkspaceFolder {
+        id: "instructions-folder".into(),
+        alias: "app".into(),
+        role: ProjectFolderRole::Primary,
+        path: root.to_string_lossy().into_owned(),
+        canonical_path: Some(canonical.clone()),
+        directory_identity: Some(FileChangeDirectoryIdentity::read(Path::new(&canonical)).unwrap()),
+    };
+    let mut input = input("http://127.0.0.1:1/v1/chat/completions".to_string());
+    input.context = Some(AgentRunContext {
+        conversation_id: Some("preview-instructions".into()),
+        project_id: None,
+        workspace: Some(crate::AgentWorkspaceContext {
+            project_id: None,
+            display_name: Some("Preview".into()),
+            root_path: Some(root.to_string_lossy().into_owned()),
+            folders: vec![folder],
+        }),
+        attachment_library: None,
+        permissions: AgentPermissions::default(),
+        collaboration_identity: None,
+    });
+    let read_content = |sections: &[crate::WorldStateSectionEnvelope]| {
+        sections
+            .iter()
+            .find(|section| section.id == crate::WorldStateSectionId::WorkspaceInstructions)
+            .and_then(|section| section.model_projection.as_ref())
+            .and_then(|projection| projection["sources"][0]["content"].as_str())
+            .map(str::to_string)
+    };
+
+    fs::write(root.join("AGENTS.md"), "# 约定 v1\n- 使用 pnpm。\n").unwrap();
+    let mut state = MemoryConversationWorldState::new(&input).unwrap();
+    let sections = state.preview_sections(Vec::new()).unwrap();
+    assert_eq!(
+        read_content(&sections),
+        Some("# 约定 v1\n- 使用 pnpm。\n".to_string())
+    );
+
+    // A change on disk is picked up by the very next read-only preview.
+    fs::write(
+        root.join("AGENTS.md"),
+        "# 约定 v2\n- 使用 cargo test --locked。\n",
+    )
+    .unwrap();
+    let sections = state.preview_sections(Vec::new()).unwrap();
+    assert_eq!(
+        read_content(&sections),
+        Some("# 约定 v2\n- 使用 cargo test --locked。\n".to_string())
+    );
+
+    // Commit through the embedded request boundary: the committed section carries the current
+    // file content...
+    let boundary = crate::WorldStateRequestBoundary {
+        run_id: "preview-run".into(),
+        assistant_message_id: "preview-assistant".into(),
+        request_index: 1,
+        after_trace_sequence: None,
+    };
+    let records = state.prepare(&boundary, Vec::new()).unwrap();
+    let crate::WorldStateRecord::Full(committed) = &records[0].record else {
+        panic!("the first prepared record must be full");
+    };
+    assert_eq!(
+        committed
+            .section(&crate::WorldStateSectionId::WorkspaceInstructions)
+            .unwrap()
+            .model_projection
+            .as_ref()
+            .unwrap()["sources"][0]["content"],
+        json!("# 约定 v2\n- 使用 cargo test --locked。\n")
+    );
+
+    // ...and once the file disappears, later previews drop the persisted convention instead of
+    // leaving stale instructions in the projected context.
+    fs::remove_file(root.join("AGENTS.md")).unwrap();
+    let sections = state.preview_sections(Vec::new()).unwrap();
+    assert_eq!(read_content(&sections), None);
+}
