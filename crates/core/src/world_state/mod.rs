@@ -50,6 +50,7 @@ pub enum WorldStateVisibility {
 pub enum WorldStateSectionId {
     EffectivePermissions,
     WorkspaceBinding,
+    WorkspaceInstructions,
     InteractionProfile,
     EffectiveTools,
     SkillActivation,
@@ -63,6 +64,7 @@ pub enum WorldStateSectionId {
 impl WorldStateSectionId {
     pub const EFFECTIVE_PERMISSIONS: &'static str = "permissions.effective";
     pub const WORKSPACE_BINDING: &'static str = "workspace.binding";
+    pub const WORKSPACE_INSTRUCTIONS: &'static str = "workspace.instructions";
     pub const INTERACTION_PROFILE: &'static str = "interaction.profile";
     pub const EFFECTIVE_TOOLS: &'static str = "tools.effective";
     pub const SKILL_ACTIVATION: &'static str = "skills.activation";
@@ -75,6 +77,7 @@ impl WorldStateSectionId {
         match self {
             Self::EffectivePermissions => Self::EFFECTIVE_PERMISSIONS,
             Self::WorkspaceBinding => Self::WORKSPACE_BINDING,
+            Self::WorkspaceInstructions => Self::WORKSPACE_INSTRUCTIONS,
             Self::InteractionProfile => Self::INTERACTION_PROFILE,
             Self::EffectiveTools => Self::EFFECTIVE_TOOLS,
             Self::SkillActivation => Self::SKILL_ACTIVATION,
@@ -96,6 +99,7 @@ impl WorldStateSectionId {
         match value.as_str() {
             Self::EFFECTIVE_PERMISSIONS => Self::EffectivePermissions,
             Self::WORKSPACE_BINDING => Self::WorkspaceBinding,
+            Self::WORKSPACE_INSTRUCTIONS => Self::WorkspaceInstructions,
             Self::INTERACTION_PROFILE => Self::InteractionProfile,
             Self::EFFECTIVE_TOOLS => Self::EffectiveTools,
             Self::SKILL_ACTIVATION => Self::SkillActivation,
@@ -363,6 +367,66 @@ pub fn workspace_binding_section(
     });
     WorldStateSectionEnvelope::model_visible(
         WorldStateSectionId::WorkspaceBinding,
+        lifetime,
+        state,
+        projection,
+    )
+}
+
+/// One workspace-root instruction file (`AGENTS.md`) that the Host already read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceInstructionSource {
+    /// Folder alias from the frozen workspace binding (`@workspace/<alias>` addressing).
+    pub folder_alias: String,
+    /// File name relative to the folder root: `AGENTS.md` or `AGENTS.override.md`.
+    pub relative_path: String,
+    /// Instruction text; invalid UTF-8 sequences are replaced and the size is capped by the Host.
+    pub content: String,
+}
+
+/// Builds the workspace instruction section from the files the Host already captured.
+///
+/// The Host keeps per-source provenance (size and content hash); the model projection carries only
+/// the scoped alias, the relative file name and the text. An absent section means no folder has an
+/// instruction file; a removed file yields an explicit `Remove` through ordinary section diffing,
+/// so no stale instructions can survive on the model side.
+pub fn workspace_instructions_section(
+    sources: &[WorkspaceInstructionSource],
+    truncated: bool,
+    lifetime: WorldStateLifetime,
+) -> Result<WorldStateSectionEnvelope, WorldStateError> {
+    let state_sources = sources
+        .iter()
+        .map(|source| {
+            serde_json::json!({
+                "folderAlias": source.folder_alias,
+                "relativePath": source.relative_path,
+                "sizeBytes": source.content.len(),
+                "sha256": format!("sha256:{:x}", Sha256::digest(source.content.as_bytes())),
+                "content": source.content,
+            })
+        })
+        .collect::<Vec<_>>();
+    let projection_sources = sources
+        .iter()
+        .map(|source| {
+            serde_json::json!({
+                "scope": format!("@workspace/{}", source.folder_alias),
+                "path": source.relative_path,
+                "content": source.content,
+            })
+        })
+        .collect::<Vec<_>>();
+    let state = serde_json::json!({
+        "truncated": truncated,
+        "sources": state_sources,
+    });
+    let projection = serde_json::json!({
+        "truncated": truncated,
+        "sources": projection_sources,
+    });
+    WorldStateSectionEnvelope::model_visible(
+        WorldStateSectionId::WorkspaceInstructions,
         lifetime,
         state,
         projection,

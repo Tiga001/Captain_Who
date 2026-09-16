@@ -49,6 +49,8 @@ fixture 和测试为准。
 
 [手动上下文压缩与快捷命令](subsystems/manual-context-compaction.md) 说明七项 Slash 命令、独立用量、取消恢复、压缩边界分支与 latest fork。
 
+[工作区指令（AGENTS.md）](subsystems/workspace-instructions.md) 说明每个冻结文件夹根部的 AGENTS.md 如何聚合为模型可见的 `workspace.instructions` section、32 KiB 上限与截断标记，以及修改和删除在采样边界的 replace/remove 语义。
+
 | 文档                                                              | 内容                                                     |
 | ----------------------------------------------------------------- | -------------------------------------------------------- |
 | [工具、权限与审批](subsystems/tools-permissions-and-approvals.md) | 工具注册、权限、审批、取消和恢复                         |

@@ -24,6 +24,7 @@ const requiredDocuments = [
   'user/everyday-use/README.md',
   'user/everyday-use/tasks-and-conversations.md',
   'user/everyday-use/files-and-git.md',
+  'user/everyday-use/agents-md.md',
   'user/everyday-use/search-and-browser.md',
   'user/everyday-use/models-and-providers.md',
   'user/everyday-use/permissions-and-approvals.md',

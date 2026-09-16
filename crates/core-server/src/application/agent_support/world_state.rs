@@ -3,6 +3,7 @@ use mycopilot_core::{
     world_state::{
         effective_permissions_section, environment_section, interaction_profile_section,
         model_capabilities_section, model_selection_section, workspace_binding_section,
+        workspace_instructions_section,
     },
     AnchoredWorldStateRecord, WorldStateLifetime, WorldStateSectionEnvelope,
 };
@@ -61,12 +62,25 @@ pub(crate) fn conversation_world_state_sections(
     )
     .map_err(|error| format!("无法构造模型选择 World State：{error}"))?;
 
-    Ok(vec![
+    let mut sections = vec![
         permission_section,
         workspace_section,
         interaction_section,
         environment_section,
         selection_section,
         capability_section,
-    ])
+    ];
+    // Workspace `AGENTS.md` instructions are rebuilt at every sampling boundary: an unchanged
+    // file keeps the section revision, a change lands as Replace, a deletion as Remove.
+    if let Some(instructions) = super::load_workspace_instructions(context) {
+        sections.push(
+            workspace_instructions_section(
+                &instructions.sources,
+                instructions.truncated,
+                WorldStateLifetime::Conversation,
+            )
+            .map_err(|error| format!("无法构造工作区指令 World State：{error}"))?,
+        );
+    }
+    Ok(sections)
 }

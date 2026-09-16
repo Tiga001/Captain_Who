@@ -235,6 +235,8 @@ Conversation World State 在同一会话的多个 Run 之间延续。第一个�
 
 项目源文件夹由 `workspace.binding` 提供。Host 的 section 始终保留完整冻结绑定，包括真实路径、folder ID 与目录实体身份；模型只看 `alias/role/available/path`（`@workspace/<alias>`）及工作区总览。首次 full 和压缩 rebase 基线给出完整目录表；后续模型 diff 对该 section 使用 `op: patch`，可选 `set` 仅更新变化的顶层字段，`changes` 按 alias 表达 `added/removed/updated`。added/updated 的 `folder` 是该来源完整的安全投影，未列来源不变。`updated.reason=source_replaced` 说明同名目录来源被替换，模型应重新核实其文件事实；仅离线/恢复不视作换源，但恢复后仍须重新核实文件内容。模型投影按 alias 稳定排序，纯显示顺序变化不进入模型上下文。持久化日志仍使用原有完整 section add/replace/remove 和 revision 校验，patch 不参与文件系统授权。
 
+工作区约定由 `workspace.instructions` 提供：Host 在每个采样边界读取各冻结文件夹根部的 `AGENTS.md`（同目录存在 `AGENTS.override.md` 时以它为准），按主要文件夹在先、其余按 alias 的稳定顺序聚合，合计上限 32 KiB，超出时在 section 内标注截断。Host 状态保留来源 alias、相对文件名、大小与内容哈希；模型投影只含 `@workspace/<alias>`、相对文件名、正文与截断标记，不含真实路径或身份。内容不变不追加记录；变化在请求因果位置追加 replace；全部约定消失则追加显式 remove。中途修改文件不需要重启对话或应用：下一次模型请求即携带新内容。
+
 配置编辑的净变化在下一次新 HumanRoot 捕获工作区、首次采样时发布，不从前端保存事件直接注入。已启动的 Run、审批续接及子树 Wake 继续使用原冻结绑定。空闲预览用相同投影预演差异且不写日志；运行中圆环使用本轮实际请求状态。压缩只折叠已覆盖前缀，截止边界后的目录 patch 保持原因果位置；fork 和编辑重发同样沿用日志的精确截止边界。Runtime checkpoint v19 显式拒绝使用旧模型投影的检查点，不改写已有挂起任务的权限或历史文本。
 
 被压缩覆盖的换源 patch 已折入 full，不再作为独立通知保留。摘要生成规则和摘要固定说明将文件内容、目录结构标为历史观察，提醒模型不能仅凭 alias 相同假定来源未变，依赖当前内容前重新读取；这同样适用于递归压缩后的摘要。

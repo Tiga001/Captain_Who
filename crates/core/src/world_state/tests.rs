@@ -764,3 +764,118 @@ fn request_boundaries_are_exclusive_and_separate_preparation_from_observation() 
     unknown["requestBoundary"]["unexpected"] = json!(true);
     assert!(serde_json::from_value::<AnchoredWorldStateRecord>(unknown).is_err());
 }
+
+#[test]
+fn workspace_instructions_keep_host_provenance_out_of_the_model_projection() {
+    let sources = vec![
+        WorkspaceInstructionSource {
+            folder_alias: "alpha".into(),
+            relative_path: "AGENTS.override.md".into(),
+            content: "# 约定\n使用 pnpm。".into(),
+        },
+        WorkspaceInstructionSource {
+            folder_alias: "beta".into(),
+            relative_path: "AGENTS.md".into(),
+            content: "验证入口见 docs。".into(),
+        },
+    ];
+    let section =
+        workspace_instructions_section(&sources, true, WorldStateLifetime::Conversation).unwrap();
+    assert_eq!(section.id, WorldStateSectionId::WorkspaceInstructions);
+    assert_eq!(section.id.as_str(), "workspace.instructions");
+    assert_eq!(section.state["truncated"], json!(true));
+    assert_eq!(section.state["sources"][0]["folderAlias"], json!("alpha"));
+    assert_eq!(
+        section.state["sources"][0]["relativePath"],
+        json!("AGENTS.override.md")
+    );
+    assert_eq!(
+        section.state["sources"][0]["sizeBytes"],
+        json!("# 约定\n使用 pnpm。".len())
+    );
+    let digest = section.state["sources"][0]["sha256"]
+        .as_str()
+        .expect("host state keeps a content hash");
+    assert!(digest.starts_with("sha256:"));
+    assert_eq!(section.state["sources"][1]["folderAlias"], json!("beta"));
+
+    let projection = section.model_projection.as_ref().unwrap();
+    assert_eq!(projection["truncated"], json!(true));
+    assert_eq!(projection["sources"][0]["scope"], json!("@workspace/alpha"));
+    assert_eq!(
+        projection["sources"][0]["path"],
+        json!("AGENTS.override.md")
+    );
+    assert_eq!(
+        projection["sources"][0]["content"],
+        json!("# 约定\n使用 pnpm。")
+    );
+    assert_eq!(projection["sources"][1]["scope"], json!("@workspace/beta"));
+    let projection_text = projection.to_string();
+    assert!(!projection_text.contains("sha256:"));
+    assert!(!projection_text.contains("sizeBytes"));
+    assert!(!projection_text.contains("folderAlias"));
+}
+
+#[test]
+fn workspace_instructions_changes_render_as_section_replace_and_remove() {
+    let base_section = workspace_instructions_section(
+        &[WorkspaceInstructionSource {
+            folder_alias: "alpha".into(),
+            relative_path: "AGENTS.md".into(),
+            content: "old rules".into(),
+        }],
+        false,
+        WorldStateLifetime::Conversation,
+    )
+    .unwrap();
+    let base = WorldStateSnapshot::new("epoch-instructions", 1, vec![base_section]).unwrap();
+
+    let updated = workspace_instructions_section(
+        &[WorkspaceInstructionSource {
+            folder_alias: "alpha".into(),
+            relative_path: "AGENTS.md".into(),
+            content: "new rules".into(),
+        }],
+        false,
+        WorldStateLifetime::Conversation,
+    )
+    .unwrap();
+    let updated_snapshot = WorldStateSnapshot::new("epoch-instructions", 2, vec![updated]).unwrap();
+    let diff = WorldStateDiff::between(&base, &updated_snapshot).unwrap();
+    let rendered = diff
+        .model_projection_against(&base, WorldStateLifetime::Conversation)
+        .unwrap()
+        .unwrap();
+    match &rendered {
+        WorldStateModelRecord::Diff { changes, .. } => {
+            assert_eq!(changes.len(), 1);
+            match &changes[0] {
+                WorldStateModelChange::Replace { section_id, value } => {
+                    assert_eq!(section_id, &WorldStateSectionId::WorkspaceInstructions);
+                    assert_eq!(value["sources"][0]["content"], json!("new rules"));
+                }
+                other => panic!("expected a replace, got {other:?}"),
+            }
+        }
+        other => panic!("expected a diff, got {other:?}"),
+    }
+
+    let removed_snapshot = WorldStateSnapshot::new("epoch-instructions", 3, Vec::new()).unwrap();
+    let removal = WorldStateDiff::between(&updated_snapshot, &removed_snapshot).unwrap();
+    let rendered = removal
+        .model_projection_against(&updated_snapshot, WorldStateLifetime::Conversation)
+        .unwrap()
+        .unwrap();
+    match &rendered {
+        WorldStateModelRecord::Diff { changes, .. } => {
+            assert_eq!(changes.len(), 1);
+            assert!(matches!(
+                &changes[0],
+                WorldStateModelChange::Remove { section_id }
+                    if section_id == &WorldStateSectionId::WorkspaceInstructions
+            ));
+        }
+        other => panic!("expected a diff, got {other:?}"),
+    }
+}

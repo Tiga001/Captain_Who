@@ -24,6 +24,8 @@ Captain Who 中有三种容易混淆的文件操作：右侧栏“文件”用�
 - 右侧栏“终端”默认从主要文件夹启动。
 - 项目内 `.agents/skills/` 中的合法 Skill 可以被发现。
 
+项目文件夹根部的 `AGENTS.md`（或 `AGENTS.override.md`）会被自动提供给 Agent，作为该工作区的约定；见 [AGENTS.md 项目约定](agents-md.md)。
+
 ## 用“文件”查看内容
 
 1. 打开右侧栏，选择“新建面板 → 文件”。

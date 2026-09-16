@@ -84,7 +84,16 @@ impl AgentConversationWorldStateHost for StoredConversationWorldState {
             self.input.model_capabilities,
         )
         .map_err(AgentError::new)?;
-        owned_section_ids.extend(sections.iter().map(|section| section.id.clone()));
+        // The Host keeps `workspace.instructions` owned on every sampling boundary even when no
+        // AGENTS.md exists: ownership without a replacement is what turns a removed file into an
+        // explicit Remove instead of leaving stale instructions in the committed state.
+        owned_section_ids.push(WorldStateSectionId::WorkspaceInstructions);
+        owned_section_ids.extend(
+            sections
+                .iter()
+                .map(|section| section.id.clone())
+                .filter(|section_id| section_id != &WorldStateSectionId::WorkspaceInstructions),
+        );
         sections.extend(request.sections);
         let expected = self
             .service

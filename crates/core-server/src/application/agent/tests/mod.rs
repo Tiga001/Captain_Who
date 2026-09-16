@@ -62,6 +62,7 @@ mod steering;
 mod terminal_events;
 mod usage_lifecycle;
 mod web_search_policy;
+mod workspace_instructions;
 mod world_state_compaction_boundary;
 
 fn completed_output_for_terminal_gate() -> AgentChatOutput {
