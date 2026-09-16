@@ -133,7 +133,7 @@ impl AgentTool for AgentCollaborationTool {
         let (name, description, input_schema) = match self.kind {
             AgentCollaborationToolKind::Spawn => (
                 "spawn_agent",
-                "Create one direct persistent child Agent and queue its initial task. Prefer spawning when work splits into independent, well-bounded subtasks — parallel investigation, independent verification, or isolated read-only review — where a child can proceed without waiting on others; keep tightly coupled or trivial steps in a single Agent. Exact agent_type and model selectors must come from the collaboration directory. For visual work, select only a directory entry whose authoritative imageInput capability is true; never infer capability from a name.",
+                "Create one direct persistent child Agent and queue its initial task. Collaboration is enabled: delegation is pre-authorized and parallel-by-default is the expected operating style. Before acting, scan the task once: keep the immediate critical-path step local, and delegate well-bounded sidecar work by default — reuse an existing suitable child via followup_task instead of spawning a duplicate. Spawn when a subtask can proceed independently without blocking you: parallel investigation of different modules, independent verification or review, read-only audits, multi-module changes with disjoint write scopes, long-running commands (builds, tests, monitoring), multi-source retrieval or comparison, and alternative solution proposals. Keep single-step or tightly coupled work local, but do not skip parallelizable parts merely because the task feels small; for splittable medium-or-larger tasks keep at least two children running in parallel. Design each subtask as concrete and self-contained with the expected deliverable and evidence; for edits, assign disjoint files or modules and tell the child it is not alone in the shared workspace and must not revert other agents' edits. After spawning, continue meaningful non-overlapping work instead of waiting; use wait_agent only when the critical path is actually blocked. Review, verify and integrate child results — never concatenate them blindly. Exact agent_type and model selectors must come from the collaboration directory. For visual work, select only a directory entry whose authoritative imageInput capability is true; never infer capability from a name.",
                 json!({
                     "type": "object",
                     "properties": {
@@ -156,17 +156,17 @@ impl AgentTool for AgentCollaborationTool {
             ),
             AgentCollaborationToolKind::SendMessage => (
                 "send_message",
-                "Use this mailbox-only tool for a child Agent to report progress, request help, or send supplemental information to its parent. It only enqueues a message: it never creates a Wake or Turn, never starts or resumes execution, and never wakes a completed, failed, interrupted, or idle Agent. Do not use it to assign, revise, or repeat work. A queued message is not evidence that the target is working; parent-to-descendant work must use followup_task.",
+                "Use this mailbox-only tool for a child Agent to report progress, request help, or send supplemental information to its parent. It only enqueues a message: it never creates a Wake or Turn, never starts or resumes execution, and never wakes a completed, failed, interrupted, or idle Agent. Do not use it to assign, revise, or repeat work. A queued message is not evidence that the target is working; parent-to-descendant work must use followup_task. When reporting, be concise: conclusions, evidence, and what you need from the parent.",
                 message_schema(),
             ),
             AgentCollaborationToolKind::FollowupTask => (
                 "followup_task",
-                "Parent/ancestor-to-descendant task assignment. Use this to start, continue, revise, or repeat work on an existing descendant, including one whose latest task is completed, failed, interrupted, or idle. It reliably enqueues the follow-up and guarantees a future execution opportunity without starting a concurrent Turn. Use send_message only for child-to-parent mailbox reports, not task assignment.",
+                "Parent/ancestor-to-descendant task assignment. Use this to start, continue, revise, or repeat work on an existing descendant, including one whose latest task is completed, failed, interrupted, or idle. It reliably enqueues the follow-up and guarantees a future execution opportunity without starting a concurrent Turn. Use send_message only for child-to-parent mailbox reports, not task assignment. Prefer reusing an existing child that already holds the relevant context instead of spawning a new one.",
                 message_schema(),
             ),
             AgentCollaborationToolKind::Wait => (
                 "wait_agent",
-                "Wait for the first ready result, message, update, or status change from one or more descendant Agents. This is independent from command_session waits.",
+                "Wait for the first ready result, message, update, or status change from one or more descendant Agents. This is independent from command_session waits. Use it sparingly: only when your next critical-path step is blocked; prefer longer timeouts (up to minutes) over busy polling, and keep working while children run.",
                 json!({
                     "type": "object",
                     "properties": {
@@ -194,7 +194,7 @@ impl AgentTool for AgentCollaborationTool {
             ),
             AgentCollaborationToolKind::Interrupt => (
                 "interrupt_agent",
-                "Request interruption of a descendant Agent's current Turn without deleting its identity, conversation, or history.",
+                "Request interruption of a descendant Agent's current Turn without deleting its identity, conversation, or history. Use it to steer an off-track child instead of abandoning it or duplicating its work.",
                 json!({
                     "type": "object",
                     "properties": {
@@ -639,13 +639,20 @@ mod tests {
         let spawn = AgentCollaborationTool::new(AgentCollaborationToolKind::Spawn).definition();
         assert!(spawn
             .description
-            .contains("Prefer spawning when work splits into independent"));
-        assert!(spawn
-            .description
-            .contains("keep tightly coupled or trivial steps in a single Agent"));
-        assert!(spawn
-            .description
             .contains("Create one direct persistent child Agent and queue its initial task."));
+        assert!(spawn.description.contains(
+            "delegation is pre-authorized and parallel-by-default is the expected operating style"
+        ));
+        assert!(spawn
+            .description
+            .contains("keep at least two children running in parallel"));
+        assert!(spawn
+            .description
+            .contains("Keep single-step or tightly coupled work local"));
+        assert!(spawn
+            .description
+            .contains("use wait_agent only when the critical path is actually blocked"));
+        assert!(spawn.description.contains("never concatenate them blindly"));
     }
 
     #[test]

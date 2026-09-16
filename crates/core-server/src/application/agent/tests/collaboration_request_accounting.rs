@@ -290,6 +290,11 @@ fn assert_collaboration_wire(request: &Value, enabled: bool) {
         "collaboration rules must occur exactly once when enabled"
     );
     assert_eq!(
+        text.matches("委派是常设授权").count(),
+        usize::from(enabled),
+        "eager delegation authorization must occur exactly once when enabled"
+    );
+    assert_eq!(
         text.matches("<agent_collaboration_directory>").count(),
         usize::from(enabled),
         "collaboration directory must follow the same policy as schemas"
