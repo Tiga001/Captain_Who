@@ -2606,6 +2606,7 @@ export const itITTranslations = {
     'Il percorso del progetto di destinazione non è disponibile.',
   'automation.healthModelMissing': 'Il modello target non esiste più.',
   'automation.healthModelDisabled': 'Il modello di destinazione è disabilitato.',
+  'automation.healthModelUnavailable': 'Il modello di destinazione non è disponibile.',
   'automation.healthPermissionDisabled':
     "L'autorizzazione utilizzata da questa attività è disabilitata.",
   'automation.healthConfigurationInvalid': "La configurazione dell'attività non è valida.",

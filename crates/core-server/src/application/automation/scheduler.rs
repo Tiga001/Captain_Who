@@ -1025,6 +1025,7 @@ fn canonical_blocked_code(value: &str) -> &'static str {
         "project_path_missing" => "project_path_missing",
         "model_missing" => "model_missing",
         "model_disabled" => "model_disabled",
+        "model_unavailable" => "model_unavailable",
         "permission_disabled" => "permission_disabled",
         "schedule_invalid" => "schedule_invalid",
         "configuration_invalid" | "permission_invalid" => "configuration_invalid",

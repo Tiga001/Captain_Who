@@ -855,6 +855,66 @@ async fn child_chat_target_is_blocked_with_a_publicly_projectable_health_code() 
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unresolvable_model_credential_blocks_task_as_model_unavailable() {
+    let fixture = tempdir().unwrap();
+    let database_path = fixture.path().join("storage.sqlite");
+    let storage = Arc::new(StorageService::open(&database_path).unwrap());
+    storage.save_model_settings(model_settings()).unwrap();
+    // The credential reference belongs to a backend this Host does not use, so the identity
+    // checks still pass while the single projection fails the model closed.
+    rusqlite::Connection::open(&database_path)
+        .unwrap()
+        .execute(
+            "UPDATE model_provider_settings SET api_token_ref = ?1 WHERE id = 'default'",
+            ["application-credential/v1/mac-keychain-v2/00000000000000000000000000000000"],
+        )
+        .unwrap();
+    let task = create_task(
+        &storage,
+        "scheduler-model-unavailable",
+        StoredAutomationStatus::Paused,
+        None,
+        AutomationPermissionModeDto::Default,
+        None,
+    );
+    enqueue_manual(&storage, &task, "model-unavailable");
+    let agent_service =
+        AgentService::try_new_deferred_startup_reconciliation(Arc::clone(&storage)).unwrap();
+    let (state, _notifications) = scheduler_state(Arc::clone(&storage), agent_service);
+
+    state.run_cycle().await.unwrap();
+    let failed = wait_for_run(&storage, &task.id, |run| run.status.is_terminal()).await;
+    assert_eq!(failed.status, StoredAutomationRunStatus::Failed);
+    assert_eq!(failed.error_code.as_deref(), Some("model_unavailable"));
+    let blocked = storage.get_automation(&task.id).unwrap().unwrap();
+    assert_eq!(blocked.status, StoredAutomationStatus::Paused);
+    assert_eq!(blocked.config.health_state, "blocked");
+    assert_eq!(
+        blocked.config.blocked_code.as_deref(),
+        Some("model_unavailable")
+    );
+    assert_eq!(
+        blocked.config.blocked_message.as_deref(),
+        Some("The selected model is not available.")
+    );
+
+    // The strict cross-language projection must accept the new code end to end.
+    let projected = AutomationService::new(&storage)
+        .get(AutomationGetInputDto {
+            schema_version: AUTOMATION_SCHEMA_VERSION,
+            automation_id: task.id,
+        })
+        .unwrap();
+    assert!(matches!(
+        projected.health,
+        AutomationHealthDto::Blocked {
+            code: AutomationBlockedCodeDto::ModelUnavailable,
+            ..
+        }
+    ));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn revoked_full_permission_blocks_task_and_terminalizes_claim() {
     let fixture = tempdir().unwrap();
     let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());

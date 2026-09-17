@@ -2332,6 +2332,7 @@ export const zhTWTranslations = {
   'automation.healthProjectPathMissing': '目標專案路徑不可用。',
   'automation.healthModelMissing': '目標模型已不存在。',
   'automation.healthModelDisabled': '目標模型已停用。',
+  'automation.healthModelUnavailable': '目標模型目前無法使用。',
   'automation.healthPermissionDisabled': '任務使用的權限已停用。',
   'automation.healthConfigurationInvalid': '任務配置無效，請重新檢查。',
   'automation.healthScheduleInvalid': '任務頻率無效，請重新設定。',

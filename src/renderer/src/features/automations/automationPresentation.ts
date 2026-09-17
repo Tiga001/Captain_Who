@@ -36,6 +36,7 @@ const HEALTH_KEYS: Record<Extract<AutomationHealth, { state: 'blocked' }>['code'
     project_path_missing: 'automation.healthProjectPathMissing',
     model_missing: 'automation.healthModelMissing',
     model_disabled: 'automation.healthModelDisabled',
+    model_unavailable: 'automation.healthModelUnavailable',
     permission_disabled: 'automation.healthPermissionDisabled',
     configuration_invalid: 'automation.healthConfigurationInvalid',
     schedule_invalid: 'automation.healthScheduleInvalid'
@@ -140,7 +141,8 @@ export function runErrorMessage(t: Translate, run: AutomationRun): string | null
     run.errorCode === 'target_missing' ||
     run.errorCode === 'target_archived' ||
     run.errorCode === 'project_missing' ||
-    run.errorCode === 'model_missing'
+    run.errorCode === 'model_missing' ||
+    run.errorCode === 'model_unavailable'
   ) {
     return t('automation.runErrorTarget')
   }

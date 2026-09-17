@@ -2528,6 +2528,7 @@ export const jaJPTranslations = {
   'automation.healthProjectPathMissing': 'ターゲット プロジェクト パスが使用できません。',
   'automation.healthModelMissing': '対象のモデルは存在しません。',
   'automation.healthModelDisabled': '対象機種は無効です。',
+  'automation.healthModelUnavailable': '対象モデルは現在利用できません。',
   'automation.healthPermissionDisabled': 'このタスクで使用される権限は無効になっています。',
   'automation.healthConfigurationInvalid': 'タスクの構成が無効です。',
   'automation.healthScheduleInvalid': 'タスクの頻度が無効です。',

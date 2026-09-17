@@ -2346,6 +2346,7 @@ export const zhCNTranslations = {
   'automation.healthProjectPathMissing': '目标项目路径不可用。',
   'automation.healthModelMissing': '目标模型已不存在。',
   'automation.healthModelDisabled': '目标模型已停用。',
+  'automation.healthModelUnavailable': '目标模型当前不可用。',
   'automation.healthPermissionDisabled': '任务使用的权限已被禁用。',
   'automation.healthConfigurationInvalid': '任务配置无效，请重新检查。',
   'automation.healthScheduleInvalid': '任务频率无效，请重新设置。',

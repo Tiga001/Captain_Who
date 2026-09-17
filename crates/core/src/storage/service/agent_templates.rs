@@ -99,7 +99,8 @@ impl StorageService {
         )
     }
 
-    /// Resolves an exact, enabled template and freezes its credential-free spawn identity.
+    /// Resolves an exact, enabled template whose model the shared availability projection reports
+    /// as executable, and freezes its credential-free spawn identity.
     ///
     /// This is the only template-to-model resolution boundary. It never chooses another model and
     /// never exposes connection details, credentials, prices, or Provider-specific configuration.
@@ -108,28 +109,52 @@ impl StorageService {
         project_id: &str,
         machine_key: &str,
     ) -> Result<ResolvedAgentTemplateForSpawn, AgentTemplateError> {
-        // Keep both reads under the single StorageState mutex. Model settings already use their own
-        // SQLite read transaction, and no in-process settings/template mutation can interleave.
-        let connection = self.template_connection()?;
-        let template = agent_template_repository::get_project_template_by_machine_key(
-            &connection,
-            project_id,
-            machine_key,
-        )?;
+        // Keep the settings lock order: the model credential coordinator lock is taken first, the
+        // template and the stored settings are read under the single StorageState mutex, and the
+        // shared availability projection runs after the mutex is released so credential I/O never
+        // executes under the state lock.
+        let _credential_guard = self
+            .model_credential_lock
+            .lock()
+            .map_err(|_| template_storage_unavailable())?;
+        let (template, stored) = {
+            let connection = self.template_connection()?;
+            let template = agent_template_repository::get_project_template_by_machine_key(
+                &connection,
+                project_id,
+                machine_key,
+            )?;
+            let stored = config_repository::load_model_settings_snapshot_in_connection(&connection)
+                .map_err(|_| template_storage_unavailable())?;
+            (template, stored)
+        };
         if !template.enabled {
             return Err(AgentTemplateError::TemplateDisabled(
                 template.machine_key.clone(),
             ));
         }
-        let settings = self
-            .model_settings_catalog_snapshot_in_connection(&connection)
-            .map_err(|_| template_storage_unavailable())?
-            .ok_or_else(|| {
-                model_unavailable(
-                    &template,
-                    AgentTemplateModelUnavailableReason::SettingsMissing,
-                )
-            })?;
+        let Some(stored) = stored else {
+            return Err(model_unavailable(
+                &template,
+                AgentTemplateModelUnavailableReason::SettingsMissing,
+            ));
+        };
+        // Spawns accept only a model the single projection reports as executable right now; a
+        // model whose credential cannot be read fails closed instead of trying another model.
+        let projection = self.model_projection_from_stored(&stored);
+        let Some(entry) = projection.entry(&template.model_config_id) else {
+            return Err(model_unavailable(
+                &template,
+                AgentTemplateModelUnavailableReason::NotFound,
+            ));
+        };
+        if let Some(reason) = entry.execution.unavailable_reason() {
+            return Err(model_unavailable(
+                &template,
+                AgentTemplateModelUnavailableReason::clone(reason),
+            ));
+        }
+        let settings = super::settings::model_settings_catalog_snapshot(&stored);
         let model = resolve_model_selection(&template, &settings)?;
         Ok(ResolvedAgentTemplateForSpawn {
             template: AgentTemplateSnapshot {
@@ -793,6 +818,69 @@ mod tests {
             "model-a",
             AgentTemplateModelUnavailableReason::InvalidProfile,
         );
+    }
+
+    #[test]
+    fn spawn_resolution_gates_on_the_availability_projection() {
+        let fixture = Fixture::new();
+        let service = &fixture.service;
+        service
+            .save_model_settings(settings(vec![model("model-a", true)]))
+            .unwrap();
+        service
+            .create_agent_template(&create_input(
+                "template-1",
+                "project-a",
+                "reviewer",
+                "Reviewer",
+                "model-a",
+            ))
+            .unwrap();
+        assign(service, "project-a", "template-1");
+
+        // A reference owned by a credential backend this Host does not use is excluded by the
+        // single projection, so template resolution closes instead of spawning a broken model.
+        let original_ref: String = service
+            .state
+            .connection()
+            .unwrap()
+            .query_row(
+                "SELECT api_token_ref FROM model_provider_settings WHERE id = 'default'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        service
+            .state
+            .connection()
+            .unwrap()
+            .execute(
+                "UPDATE model_provider_settings SET api_token_ref = ?1 WHERE id = 'default'",
+                ["application-credential/v1/mac-keychain-v2/00000000000000000000000000000000"],
+            )
+            .unwrap();
+        assert_unavailable(
+            service
+                .resolve_template_for_spawn("project-a", "reviewer")
+                .unwrap_err(),
+            "model-a",
+            AgentTemplateModelUnavailableReason::CredentialUnavailable,
+        );
+
+        // Restoring the original reference restores resolution for the same template.
+        service
+            .state
+            .connection()
+            .unwrap()
+            .execute(
+                "UPDATE model_provider_settings SET api_token_ref = ?1 WHERE id = 'default'",
+                [&original_ref],
+            )
+            .unwrap();
+        let resolved = service
+            .resolve_template_for_spawn("project-a", "reviewer")
+            .unwrap();
+        assert_eq!(resolved.model.model_config_id, "model-a");
     }
 
     #[test]

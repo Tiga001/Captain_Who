@@ -120,6 +120,14 @@ impl ModelExecutionStatus {
     pub fn is_available(&self) -> bool {
         matches!(self, Self::Available)
     }
+
+    /// The reason this model cannot execute, when it is unavailable.
+    pub fn unavailable_reason(&self) -> Option<&AgentModelUnavailableReason> {
+        match self {
+            Self::Available => None,
+            Self::Unavailable { reason } => Some(reason),
+        }
+    }
 }
 
 /// Credential-free model configuration returned to the Renderer settings editor.

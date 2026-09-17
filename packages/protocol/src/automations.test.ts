@@ -76,6 +76,29 @@ describe('Automation cross-language protocol', () => {
     expect(parseAutomationResync(fixture.resync)).toEqual(fixture.resync)
   })
 
+  it('accepts the model-unavailable blocked code and rejects unknown blocked codes', () => {
+    const blocked = {
+      ...fixture.task,
+      nextRunAt: null,
+      health: {
+        state: 'blocked' as const,
+        code: 'model_unavailable' as const,
+        message: 'The selected model is not available.'
+      }
+    }
+    expect(parseAutomationTask(blocked).health).toEqual({
+      state: 'blocked',
+      code: 'model_unavailable',
+      message: 'The selected model is not available.'
+    })
+    expect(() =>
+      parseAutomationTask({
+        ...fixture.task,
+        health: { state: 'blocked', code: 'model_unknown', message: 'Unknown' }
+      })
+    ).toThrow(/code/)
+  })
+
   it('accepts the versioned provider low reasoning effort in model-owned snapshots', () => {
     if (fixture.task.destination.kind !== 'new_chat') {
       throw new Error('automation fixture must target a new chat')

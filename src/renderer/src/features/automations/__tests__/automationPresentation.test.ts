@@ -6,6 +6,7 @@ import { makeAutomationRun, makeAutomationTask } from './automationUiFixtures'
 
 const translations: Partial<Record<TranslationKey, string>> = {
   'automation.healthPermissionDisabled': '权限已经关闭',
+  'automation.healthModelUnavailable': '目标模型当前不可用',
   'automation.summaryDaily': '每天 {time}',
   'automation.runErrorPermission': '运行权限已经关闭'
 }
@@ -25,6 +26,13 @@ describe('automation presentation', () => {
         message: 'Permission disabled'
       })
     ).toBe('权限已经关闭')
+    expect(
+      healthMessage(t, {
+        state: 'blocked',
+        code: 'model_unavailable',
+        message: 'Model unavailable'
+      })
+    ).toBe('目标模型当前不可用')
     expect(
       runErrorMessage(
         t,

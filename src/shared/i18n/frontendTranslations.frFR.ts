@@ -2590,6 +2590,7 @@ export const frFRTranslations = {
   'automation.healthProjectPathMissing': "Le chemin du projet cible n'est pas disponible.",
   'automation.healthModelMissing': "Le modèle cible n'existe plus.",
   'automation.healthModelDisabled': 'Le modèle cible est désactivé.',
+  'automation.healthModelUnavailable': 'Le modèle cible est indisponible.',
   'automation.healthPermissionDisabled': "L'autorisation utilisée par cette tâche est désactivée.",
   'automation.healthConfigurationInvalid': "La configuration de la tâche n'est pas valide.",
   'automation.healthScheduleInvalid': "La fréquence de la tâche n'est pas valide.",

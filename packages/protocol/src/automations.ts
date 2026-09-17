@@ -155,6 +155,7 @@ export type AutomationHealth =
         | 'project_path_missing'
         | 'model_missing'
         | 'model_disabled'
+        | 'model_unavailable'
         | 'permission_disabled'
         | 'configuration_invalid'
         | 'schedule_invalid'
@@ -708,6 +709,7 @@ function parseHealth(value: unknown): AutomationHealth {
         'project_path_missing',
         'model_missing',
         'model_disabled',
+        'model_unavailable',
         'permission_disabled',
         'configuration_invalid',
         'schedule_invalid'

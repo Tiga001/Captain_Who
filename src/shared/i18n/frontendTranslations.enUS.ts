@@ -2482,6 +2482,7 @@ export const enUSTranslations = {
   'automation.healthProjectPathMissing': 'The target project path is unavailable.',
   'automation.healthModelMissing': 'The target model no longer exists.',
   'automation.healthModelDisabled': 'The target model is disabled.',
+  'automation.healthModelUnavailable': 'The target model is unavailable.',
   'automation.healthPermissionDisabled': 'The permission used by this task is disabled.',
   'automation.healthConfigurationInvalid': 'The task configuration is invalid.',
   'automation.healthScheduleInvalid': 'The task frequency is invalid.',

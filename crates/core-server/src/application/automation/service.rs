@@ -12,9 +12,10 @@ use mycopilot_core::storage::automation_repository::{
     AutomationRunRecord, NewAutomationRecord, NewManualAutomationRunRecord,
     StoredAutomationRunStatus, StoredAutomationStatus,
 };
-use mycopilot_core::storage::models::{ModelConfigRecord, ProjectRecord};
+use mycopilot_core::storage::models::ProjectRecord;
 use mycopilot_core::storage::now_ms;
-use mycopilot_core::storage::service::StorageService;
+use mycopilot_core::storage::service::{ModelProjection, StorageService};
+use mycopilot_core::AgentModelUnavailableReason;
 use mycopilot_protocol_rs::{
     AutomationAttentionAcknowledgeInputDto, AutomationAttentionAcknowledgeOutputDto,
     AutomationAttentionDto, AutomationAttentionKindDto, AutomationAttentionSummaryInputDto,
@@ -573,13 +574,11 @@ impl<'a> AutomationService<'a> {
             .storage
             .load_projects()
             .map_err(AutomationServiceError::internal)?;
-        let models = self
+        let projection = self
             .storage
-            .load_model_settings_catalog()
-            .map_err(AutomationServiceError::internal)?
-            .map(|settings| settings.models)
-            .unwrap_or_default();
-        let target = resolve_target(destination, &projects, &models, self.storage)?;
+            .load_model_projection()
+            .map_err(AutomationServiceError::internal)?;
+        let target = resolve_target(destination, &projects, projection.as_ref(), self.storage)?;
         let schedule_json = serde_json::to_string(&normalized.schedule)
             .map_err(|_| AutomationServiceError::internal("Schedule serialization failed"))?;
         let permissions_json = serde_json::to_string(&permissions.projection)
@@ -637,12 +636,10 @@ impl<'a> AutomationService<'a> {
             .storage
             .load_projects()
             .map_err(AutomationServiceError::internal)?;
-        let models = self
+        let projection = self
             .storage
-            .load_model_settings_catalog()
-            .map_err(AutomationServiceError::internal)?
-            .map(|settings| settings.models)
-            .unwrap_or_default();
+            .load_model_projection()
+            .map_err(AutomationServiceError::internal)?;
 
         if task.config.destination_kind == "new_chat" {
             if task.config.project_binding_kind == "project" {
@@ -668,12 +665,18 @@ impl<'a> AutomationService<'a> {
                 .model_id
                 .as_ref()
                 .or(task.config.target_model_id_snapshot.as_ref());
-            let Some(model) =
-                model_id.and_then(|id| models.iter().find(|model| model.id == id.as_str()))
-            else {
+            let Some(entry) = model_id.and_then(|id| {
+                projection
+                    .as_ref()
+                    .and_then(|projection| projection.entry(id))
+            }) else {
                 return Ok(Some(TargetBlock::MODEL_MISSING));
             };
-            return Ok((!model.enabled).then_some(TargetBlock::MODEL_DISABLED));
+            return Ok(match entry.execution.unavailable_reason() {
+                None => None,
+                Some(AgentModelUnavailableReason::Disabled) => Some(TargetBlock::MODEL_DISABLED),
+                Some(_) => Some(TargetBlock::MODEL_UNAVAILABLE),
+            });
         }
 
         if task.config.destination_kind != "existing_chat" {
@@ -712,11 +715,18 @@ impl<'a> AutomationService<'a> {
             }
         }
         if let Some(model_id) = conversation.model_id.as_deref() {
-            let Some(model) = models.iter().find(|model| model.id == model_id) else {
+            let Some(entry) = projection
+                .as_ref()
+                .and_then(|projection| projection.entry(model_id))
+            else {
                 return Ok(Some(TargetBlock::MODEL_MISSING));
             };
-            if !model.enabled {
-                return Ok(Some(TargetBlock::MODEL_DISABLED));
+            match entry.execution.unavailable_reason() {
+                None => {}
+                Some(AgentModelUnavailableReason::Disabled) => {
+                    return Ok(Some(TargetBlock::MODEL_DISABLED));
+                }
+                Some(_) => return Ok(Some(TargetBlock::MODEL_UNAVAILABLE)),
             }
         }
         Ok(None)
@@ -754,6 +764,10 @@ impl TargetBlock {
         code: "model_disabled",
         message: "The selected model is disabled.",
     };
+    const MODEL_UNAVAILABLE: Self = Self {
+        code: "model_unavailable",
+        message: "The selected model is not available.",
+    };
 }
 
 struct ResolvedTarget {
@@ -774,7 +788,7 @@ struct ResolvedTarget {
 fn resolve_target(
     destination: AutomationDestinationInputDto,
     projects: &[ProjectRecord],
-    models: &[ModelConfigRecord],
+    projection: Option<&ModelProjection>,
     storage: &StorageService,
 ) -> Result<ResolvedTarget, AutomationServiceError> {
     match destination {
@@ -821,22 +835,30 @@ fn resolve_target(
                     Some(project)
                 }
             };
-            let model = models
-                .iter()
-                .find(|model| model.id == model_id)
+            let entry = projection
+                .and_then(|projection| projection.entry(&model_id))
                 .ok_or_else(|| {
                     AutomationServiceError::target_invalid(
                         None,
                         "The selected model does not exist.",
                     )
                 })?;
-            if !model.enabled {
-                return Err(AutomationServiceError::target_invalid(
-                    None,
-                    "The selected model is disabled.",
-                ));
+            match entry.execution.unavailable_reason() {
+                None => {}
+                Some(AgentModelUnavailableReason::Disabled) => {
+                    return Err(AutomationServiceError::target_invalid(
+                        None,
+                        "The selected model is disabled.",
+                    ));
+                }
+                Some(_) => {
+                    return Err(AutomationServiceError::target_invalid(
+                        None,
+                        "The selected model is not available.",
+                    ));
+                }
             }
-            let reasoning = reasoning_projection(model);
+            let reasoning = reasoning_projection(&entry.model);
             Ok(ResolvedTarget {
                 destination_kind: "new_chat".to_string(),
                 target_conversation_id: None,
@@ -846,16 +868,16 @@ fn resolve_target(
                 }
                 .to_string(),
                 project_id: project.map(|project| project.id.clone()),
-                model_id: Some(model.id.clone()),
+                model_id: Some(entry.model.id.clone()),
                 reasoning_json: Some(serde_json::to_string(&reasoning).map_err(|_| {
                     AutomationServiceError::internal("Reasoning serialization failed")
                 })?),
                 target_project_snapshot: project.map(|project| project.name.clone()),
                 target_conversation_snapshot: None,
-                target_model_snapshot: Some(model.display_label()),
+                target_model_snapshot: Some(entry.model.display_label()),
                 target_project_id_snapshot: project.map(|project| project.id.clone()),
                 target_conversation_id_snapshot: None,
-                target_model_id_snapshot: Some(model.id.clone()),
+                target_model_id_snapshot: Some(entry.model.id.clone()),
             })
         }
         AutomationDestinationInputDto::ExistingChat { conversation_id } => {
@@ -915,19 +937,30 @@ fn resolve_target(
             };
             let model = match conversation.model_id.as_deref() {
                 Some(id) => {
-                    let model = models.iter().find(|model| model.id == id).ok_or_else(|| {
-                        AutomationServiceError::target_invalid(
-                            None,
-                            "The conversation model does not exist.",
-                        )
-                    })?;
-                    if !model.enabled {
-                        return Err(AutomationServiceError::target_invalid(
-                            None,
-                            "The conversation model is disabled.",
-                        ));
+                    let entry = projection
+                        .and_then(|projection| projection.entry(id))
+                        .ok_or_else(|| {
+                            AutomationServiceError::target_invalid(
+                                None,
+                                "The conversation model does not exist.",
+                            )
+                        })?;
+                    match entry.execution.unavailable_reason() {
+                        None => {}
+                        Some(AgentModelUnavailableReason::Disabled) => {
+                            return Err(AutomationServiceError::target_invalid(
+                                None,
+                                "The conversation model is disabled.",
+                            ));
+                        }
+                        Some(_) => {
+                            return Err(AutomationServiceError::target_invalid(
+                                None,
+                                "The selected model is not available.",
+                            ));
+                        }
                     }
-                    Some(model)
+                    Some(entry)
                 }
                 None => None,
             };
@@ -940,7 +973,7 @@ fn resolve_target(
                 reasoning_json: None,
                 target_project_snapshot: project.map(|value| value.name.clone()),
                 target_conversation_snapshot: Some(conversation.title.clone()),
-                target_model_snapshot: model.map(|value| value.display_label()),
+                target_model_snapshot: model.map(|entry| entry.model.display_label()),
                 target_project_id_snapshot: conversation.project_id.clone(),
                 target_conversation_id_snapshot: Some(conversation.id),
                 target_model_id_snapshot: conversation.model_id,
@@ -1197,6 +1230,7 @@ fn health_dto(record: &AutomationRecord) -> Result<AutomationHealthDto, Automati
                 Some("project_path_missing") => AutomationBlockedCodeDto::ProjectPathMissing,
                 Some("model_missing") => AutomationBlockedCodeDto::ModelMissing,
                 Some("model_disabled") => AutomationBlockedCodeDto::ModelDisabled,
+                Some("model_unavailable") => AutomationBlockedCodeDto::ModelUnavailable,
                 Some("permission_disabled") => AutomationBlockedCodeDto::PermissionDisabled,
                 Some("configuration_invalid") => AutomationBlockedCodeDto::ConfigurationInvalid,
                 Some("schedule_invalid") => AutomationBlockedCodeDto::ScheduleInvalid,

@@ -207,6 +207,7 @@ pub enum AutomationBlockedCodeDto {
     ProjectPathMissing,
     ModelMissing,
     ModelDisabled,
+    ModelUnavailable,
     PermissionDisabled,
     ConfigurationInvalid,
     ScheduleInvalid,

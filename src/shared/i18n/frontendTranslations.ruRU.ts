@@ -2533,6 +2533,7 @@ export const ruRUTranslations = {
   'automation.healthProjectPathMissing': 'Целевой путь проекта недоступен.',
   'automation.healthModelMissing': 'Целевая модель больше не существует.',
   'automation.healthModelDisabled': 'Целевая модель отключена.',
+  'automation.healthModelUnavailable': 'Целевая модель недоступна.',
   'automation.healthPermissionDisabled': 'Разрешение, используемое этой задачей, отключено.',
   'automation.healthConfigurationInvalid': 'Конфигурация задачи недействительна.',
   'automation.healthScheduleInvalid': 'Недопустимая частота выполнения задач.',

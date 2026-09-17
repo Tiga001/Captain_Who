@@ -819,6 +819,120 @@ async fn archived_existing_chat_is_a_repairable_target_error_without_admission()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn new_chat_with_unresolvable_model_credential_is_blocked_as_model_unavailable() {
+    let fixture = tempdir().unwrap();
+    let database_path = fixture.path().join("storage.sqlite");
+    let storage = Arc::new(StorageService::open(&database_path).unwrap());
+    storage.save_model_settings(test_model_settings()).unwrap();
+    // Point the inherited global credential at a backend this Host does not use: the identity
+    // checks still pass while the single projection cannot resolve an effective credential.
+    rusqlite::Connection::open(&database_path)
+        .unwrap()
+        .execute(
+            "UPDATE model_provider_settings SET api_token_ref = ?1 WHERE id = 'default'",
+            ["application-credential/v1/mac-keychain-v2/00000000000000000000000000000000"],
+        )
+        .unwrap();
+    let task = seed_automation(&storage, "automation-humanroot-model-unavailable");
+    let service = AgentService::try_new(Arc::clone(&storage)).unwrap();
+    service.grant_execution_access_for_test();
+    let run = enqueue_and_claim(&database_path, &storage, &task, "manual-model-unavailable");
+    let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let error = service
+        .start_automation_human_root_turn(
+            automation_start(
+                &task,
+                &run,
+                AutomationHumanRootDestination::NewChat {
+                    project_id: None,
+                    model_id: "model-1".to_string(),
+                },
+            ),
+            notifications,
+        )
+        .unwrap_err();
+    assert_eq!(
+        error,
+        crate::application::agent::AutomationHumanRootStartError::TargetInvalid {
+            code: "model_unavailable",
+            message: "The selected model is not available.".to_string(),
+        }
+    );
+    let current = storage.get_automation_run(&run.id).unwrap().unwrap();
+    assert_eq!(current.status, StoredAutomationRunStatus::Admitting);
+    assert!(current.agent_run_id.is_none());
+    assert!(storage.load_conversation_metas().unwrap().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn automation_model_validation_keeps_missing_and_disabled_codes() {
+    let fixture = tempdir().unwrap();
+    let database_path = fixture.path().join("storage.sqlite");
+    let storage = Arc::new(StorageService::open(&database_path).unwrap());
+    storage.save_model_settings(test_model_settings()).unwrap();
+    let task = seed_automation(&storage, "automation-humanroot-model-codes");
+    let service = AgentService::try_new(Arc::clone(&storage)).unwrap();
+    service.grant_execution_access_for_test();
+
+    let missing_run = enqueue_and_claim(&database_path, &storage, &task, "manual-model-missing");
+    let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let missing = service
+        .start_automation_human_root_turn(
+            automation_start(
+                &task,
+                &missing_run,
+                AutomationHumanRootDestination::NewChat {
+                    project_id: None,
+                    model_id: "model-gone".to_string(),
+                },
+            ),
+            notifications,
+        )
+        .unwrap_err();
+    assert_eq!(
+        missing,
+        crate::application::agent::AutomationHumanRootStartError::TargetInvalid {
+            code: "model_missing",
+            message: "The selected model no longer exists.".to_string(),
+        }
+    );
+
+    let mut disabled_settings = test_model_settings();
+    disabled_settings.models[0].enabled = false;
+    storage.save_model_settings(disabled_settings).unwrap();
+    // The missing-model run above stays pre-admission on its own task, and manual enqueues are
+    // per automation, so the disabled scenario runs under a second task.
+    let disabled_task = seed_automation(&storage, "automation-humanroot-model-disabled");
+    let disabled_run = enqueue_and_claim(
+        &database_path,
+        &storage,
+        &disabled_task,
+        "manual-model-disabled",
+    );
+    let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let disabled = service
+        .start_automation_human_root_turn(
+            automation_start(
+                &disabled_task,
+                &disabled_run,
+                AutomationHumanRootDestination::NewChat {
+                    project_id: None,
+                    model_id: "model-1".to_string(),
+                },
+            ),
+            notifications,
+        )
+        .unwrap_err();
+    assert_eq!(
+        disabled,
+        crate::application::agent::AutomationHumanRootStartError::TargetInvalid {
+            code: "model_disabled",
+            message: "The selected model is disabled.".to_string(),
+        }
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn exhausted_shared_agent_gate_is_retryable_without_admission() {
     let fixture = tempdir().unwrap();
     let database_path = fixture.path().join("storage.sqlite");

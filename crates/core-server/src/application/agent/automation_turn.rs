@@ -1,4 +1,6 @@
 use super::*;
+use mycopilot_core::storage::service::ModelProjection;
+use mycopilot_core::AgentModelUnavailableReason;
 
 const AUTOMATION_RESULT_PREVIEW_MAX_BYTES: usize = 8_192;
 const AUTOMATION_ERROR_MESSAGE_MAX_BYTES: usize = 4_096;
@@ -252,12 +254,10 @@ impl AgentService {
             .storage
             .load_projects()
             .map_err(AutomationHumanRootStartError::Fatal)?;
-        let models = self
+        let projection = self
             .storage
-            .load_model_settings_catalog()
-            .map_err(AutomationHumanRootStartError::Fatal)?
-            .map(|settings| settings.models)
-            .unwrap_or_default();
+            .load_model_projection()
+            .map_err(AutomationHumanRootStartError::Fatal)?;
         match destination {
             AutomationHumanRootDestination::NewChat {
                 project_id,
@@ -281,7 +281,7 @@ impl AgentService {
                         });
                     }
                 }
-                validate_automation_model(&models, model_id)?;
+                validate_automation_model(projection.as_ref(), model_id)?;
                 Ok(ResolvedAutomationDestination {
                     conversation_id: None,
                     project_id: project_id.clone(),
@@ -350,7 +350,7 @@ impl AgentService {
                         message: "The target conversation has no model.".to_string(),
                     }
                 })?;
-                validate_automation_model(&models, &model_id)?;
+                validate_automation_model(projection.as_ref(), &model_id)?;
                 Ok(ResolvedAutomationDestination {
                     conversation_id: Some(conversation.id),
                     project_id: conversation.project_id,
@@ -531,23 +531,28 @@ fn validate_automation_start(
 }
 
 fn validate_automation_model(
-    models: &[mycopilot_core::storage::models::ModelConfigRecord],
+    projection: Option<&ModelProjection>,
     model_id: &str,
 ) -> Result<(), AutomationHumanRootStartError> {
-    let model = models
-        .iter()
-        .find(|model| model.id == model_id)
-        .ok_or_else(|| AutomationHumanRootStartError::TargetInvalid {
+    let Some(entry) = projection.and_then(|projection| projection.entry(model_id)) else {
+        return Err(AutomationHumanRootStartError::TargetInvalid {
             code: "model_missing",
             message: "The selected model no longer exists.".to_string(),
-        })?;
-    if !model.enabled {
-        return Err(AutomationHumanRootStartError::TargetInvalid {
-            code: "model_disabled",
-            message: "The selected model is disabled.".to_string(),
         });
+    };
+    match entry.execution.unavailable_reason() {
+        None => Ok(()),
+        Some(AgentModelUnavailableReason::Disabled) => {
+            Err(AutomationHumanRootStartError::TargetInvalid {
+                code: "model_disabled",
+                message: "The selected model is disabled.".to_string(),
+            })
+        }
+        Some(_) => Err(AutomationHumanRootStartError::TargetInvalid {
+            code: "model_unavailable",
+            message: "The selected model is not available.".to_string(),
+        }),
     }
-    Ok(())
 }
 
 fn bounded_safe_text(value: &str, max_bytes: usize) -> String {

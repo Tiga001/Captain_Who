@@ -2463,6 +2463,7 @@ export const koKRTranslations = {
   'automation.healthProjectPathMissing': '대상 프로젝트 경로를 사용할 수 없습니다.',
   'automation.healthModelMissing': '대상 모델이 더 이상 존재하지 않습니다.',
   'automation.healthModelDisabled': '대상 모델이 비활성화되었습니다.',
+  'automation.healthModelUnavailable': '대상 모델을 현재 사용할 수 없습니다.',
   'automation.healthPermissionDisabled': '이 작업에 사용되는 권한이 비활성화되었습니다.',
   'automation.healthConfigurationInvalid': '작업 구성이 잘못되었습니다.',
   'automation.healthScheduleInvalid': '작업 빈도가 잘못되었습니다.',
