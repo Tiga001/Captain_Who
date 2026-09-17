@@ -2176,6 +2176,69 @@ fn executable_model_catalog_fails_closed_for_dangling_and_foreign_credentials() 
 }
 
 #[test]
+fn cached_projection_reuses_the_revision_and_refreshes_on_the_next_settings_write() {
+    let fixture = StorageFixture::new();
+    let service = fixture.service();
+    service
+        .save_model_settings(ModelSettingsRecord {
+            api_url: "https://provider.example/v1/chat/completions".to_string(),
+            api_token: "cache-secret".to_string(),
+            search_mode: "disabled".to_string(),
+            tavily_api_key: String::new(),
+            models: vec![official_profile_test_model("model-cached", None, None)],
+        })
+        .unwrap();
+
+    let cached_execution = |service: &StorageService| {
+        service
+            .load_model_projection_cached()
+            .unwrap()
+            .unwrap()
+            .entry("model-cached")
+            .expect("projection entry")
+            .execution
+            .clone()
+    };
+    assert_eq!(cached_execution(&service), ModelExecutionStatus::Available);
+
+    // An external credential change without a settings write keeps the last judgement until the
+    // next settings write mints a new revision; execution and spawn still fail closed because
+    // they resolve the exact model again at their own boundaries.
+    let global_ref: String = service
+        .state
+        .connection()
+        .unwrap()
+        .query_row(
+            "SELECT api_token_ref FROM model_provider_settings WHERE id = 'default'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    fixture
+        .model_credentials
+        .delete(&CredentialReference::parse(&global_ref).unwrap())
+        .unwrap();
+    assert_eq!(cached_execution(&service), ModelExecutionStatus::Available);
+
+    // The next settings write bumps the revision; the refreshed projection fails closed.
+    service
+        .state
+        .connection()
+        .unwrap()
+        .execute(
+            "UPDATE model_provider_settings SET configuration_revision = 'model-settings-v1:00000000-0000-4000-8000-000000000002' WHERE id = 'default'",
+            [],
+        )
+        .unwrap();
+    assert_eq!(
+        cached_execution(&service),
+        ModelExecutionStatus::Unavailable {
+            reason: AgentModelUnavailableReason::CredentialUnavailable,
+        }
+    );
+}
+
+#[test]
 fn executable_model_catalog_excludes_partial_pairs_and_disabled_models() {
     let fixture = StorageFixture::new();
     let service = fixture.service();

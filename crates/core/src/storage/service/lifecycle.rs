@@ -9,6 +9,11 @@ pub struct StorageService {
     pub(super) model_credentials:
         Arc<dyn crate::image_generation::credential_store::CredentialStore>,
     pub(super) model_credential_lock: Mutex<()>,
+    /// The last availability projection and the settings revision it was computed from.
+    ///
+    /// Turn-start selector directories reuse it instead of re-reading every credential backend; a
+    /// new revision (minted by every settings save) invalidates it.
+    pub(super) model_projection_cache: Mutex<Option<(String, ModelProjection)>>,
 }
 
 impl StorageService {
@@ -93,6 +98,7 @@ impl StorageService {
             ),
             model_credentials,
             model_credential_lock: Mutex::new(()),
+            model_projection_cache: Mutex::new(None),
         };
 
         if run_startup_maintenance {

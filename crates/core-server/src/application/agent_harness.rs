@@ -241,30 +241,32 @@ impl AgentCollaborationHarnessAdapter {
         // resolves in the active backend, and a spawn-viable provider identity. Never go back
         // to the presence-only catalog here; a model whose key cannot be read must not be
         // advertised to the model.
-        let settings = self
+        //
+        // The single availability projection is computed once per directory build and reused for
+        // every template, and it is cached by settings revision: Turn starts reuse the last
+        // judgement instead of re-reading every credential backend, while any settings write
+        // mints a new revision and refreshes the directory on its next build.
+        let projection = self
             .storage
-            .load_executable_model_catalog()
+            .load_model_projection_cached()
             .map_err(storage_error)?;
-        let models = settings
+        let models = projection
             .as_ref()
-            .map(|settings| {
-                settings
+            .map(|projection| {
+                projection
                     .models
                     .iter()
-                    .map(|model| AgentCollaborationModelSelector {
-                        model_config_id: model.id.clone(),
-                        display_name: model.display_label(),
+                    .filter(|entry| entry.execution.is_available())
+                    .map(|entry| AgentCollaborationModelSelector {
+                        model_config_id: entry.model.id.clone(),
+                        display_name: entry.model.display_label(),
                         capabilities: mycopilot_core::ModelCapabilities {
-                            image_input: model.supports_image,
+                            image_input: entry.model.supports_image,
                         },
                     })
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
-        let executable_model_ids = models
-            .iter()
-            .map(|model| model.model_config_id.clone())
-            .collect::<std::collections::HashSet<_>>();
         let templates = match project_id {
             Some(project_id) => self
                 .storage
@@ -272,24 +274,21 @@ impl AgentCollaborationHarnessAdapter {
                 .map_err(template_error)?
                 .into_iter()
                 .filter_map(|template| {
-                    let resolved = self
-                        .storage
-                        .resolve_template_for_spawn(project_id, &template.machine_key)
-                        .ok()?;
-                    // A template whose model cannot execute must not be advertised; spawning
-                    // it would fail closed once execution resolves the credential.
-                    if !executable_model_ids.contains(resolved.template.model_config_id.as_str()) {
+                    let entry = projection
+                        .as_ref()
+                        .and_then(|projection| projection.entry(&template.model_config_id))?;
+                    if !entry.execution.is_available() {
                         return None;
                     }
                     Some(AgentCollaborationTemplateSelector {
                         agent_type: template.machine_key,
-                        template_id: resolved.template.template_id,
-                        template_revision: resolved.template.template_revision,
+                        template_id: template.template_id,
+                        template_revision: template.revision,
                         name: template.name,
                         description: template.description,
-                        model_display_name: resolved.model.display_name,
+                        model_display_name: entry.model.display_label(),
                         default_model_capabilities: mycopilot_core::ModelCapabilities {
-                            image_input: resolved.model.supports_image,
+                            image_input: entry.model.supports_image,
                         },
                     })
                 })
@@ -1781,6 +1780,17 @@ mod tests {
             .unwrap();
         credentials
             .delete(&CredentialReference::parse(&broken_ref).unwrap())
+            .unwrap();
+
+        // The directory reuses the cached projection while the settings revision is unchanged;
+        // the next settings write mints a new revision. Force that refresh boundary here so the
+        // test keeps exercising "only resolvable credentials are advertised".
+        rusqlite::Connection::open(&database_path)
+            .unwrap()
+            .execute(
+                "UPDATE model_provider_settings SET configuration_revision = 'model-settings-v1:00000000-0000-4000-8000-000000000001' WHERE id = 'default'",
+                [],
+            )
             .unwrap();
 
         let after = adapter

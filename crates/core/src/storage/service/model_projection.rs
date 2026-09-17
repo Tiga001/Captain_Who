@@ -61,6 +61,46 @@ impl StorageService {
             .map(|snapshot| self.model_projection_from_stored(snapshot)))
     }
 
+    /// Loads the projection used by Turn-start selector directories, reusing the last projection
+    /// while the settings snapshot revision is unchanged.
+    ///
+    /// Every settings save mints a new revision, so any in-app settings or credential write
+    /// refreshes the directory on its next build. A credential mutated outside settings storage
+    /// keeps the previous judgement until then; execution and spawn still fail closed because
+    /// they resolve the exact model again at their own boundaries.
+    pub fn load_model_projection_cached(&self) -> Result<Option<ModelProjection>, String> {
+        let _guard = self
+            .model_credential_lock
+            .lock()
+            .map_err(|_| "model credential coordinator is unavailable".to_string())?;
+        let stored = {
+            let mut connection = self.state.connection()?;
+            config_repository::load_model_settings_snapshot(&mut connection)
+                .map_err(storage_error)?
+        };
+        let Some(stored) = stored else {
+            return Ok(None);
+        };
+        {
+            let cache = self
+                .model_projection_cache
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if let Some((revision, projection)) = cache.as_ref() {
+                if *revision == stored.configuration_revision {
+                    return Ok(Some(projection.clone()));
+                }
+            }
+        }
+        let projection = self.model_projection_from_stored(&stored);
+        *self
+            .model_projection_cache
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) =
+            Some((stored.configuration_revision.clone(), projection.clone()));
+        Ok(Some(projection))
+    }
+
     /// Computes the projection from an already-read stored snapshot.
     ///
     /// Callers must hold the model credential coordinator lock so the settings snapshot and the
@@ -75,6 +115,9 @@ impl StorageService {
             stored.settings.models.len(),
             "the catalog snapshot maps stored models one-to-one"
         );
+        // One cache per projection build: models that share the same credential reference share
+        // a single credential-backend read, and the map cannot outlive this snapshot.
+        let mut credential_status_cache = std::collections::HashMap::new();
         let models = stored
             .settings
             .models
@@ -82,7 +125,12 @@ impl StorageService {
             .enumerate()
             .map(|(index, stored_model)| ModelProjectionEntry {
                 model: catalog.settings.models[index].clone(),
-                execution: self.model_execution_status(stored, stored_model, &catalog),
+                execution: self.model_execution_status(
+                    stored,
+                    stored_model,
+                    &catalog,
+                    &mut credential_status_cache,
+                ),
             })
             .collect();
         ModelProjection {
@@ -96,11 +144,16 @@ impl StorageService {
         stored: &StoredModelSettingsSnapshot,
         stored_model: &StoredModelConfigRecord,
         catalog: &ModelSettingsSnapshot,
+        credential_status_cache: &mut std::collections::HashMap<Option<String>, CredentialStatus>,
     ) -> ModelExecutionStatus {
         if let Err(reason) = resolve_exact_agent_model(catalog, &stored_model.id) {
             return ModelExecutionStatus::Unavailable { reason };
         }
-        match self.effective_connection_credential_status(&stored.settings, stored_model) {
+        match self.effective_connection_credential_status(
+            &stored.settings,
+            stored_model,
+            credential_status_cache,
+        ) {
             CredentialStatus::Configured => ModelExecutionStatus::Available,
             // A structurally valid model normally carries a reference for its effective
             // connection, so this arm is the typed mapping for any classifier state that reports

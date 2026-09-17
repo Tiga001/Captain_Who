@@ -943,20 +943,31 @@ impl StorageService {
     /// never borrows its missing half and stays unresolved. The status itself comes from the
     /// active credential backend, so a reference owned by another backend fails closed as
     /// `Unavailable`.
+    ///
+    /// The status is memoized by the exact credential reference for one projection build, so a
+    /// directory of models that inherit the same global credential reads the backend once. The
+    /// cache never outlives the projection computed under the credential coordinator lock.
     pub(super) fn effective_connection_credential_status(
         &self,
         settings: &StoredModelSettingsRecord,
         model: &StoredModelConfigRecord,
+        credential_status_cache: &mut std::collections::HashMap<Option<String>, CredentialStatus>,
     ) -> CredentialStatus {
         let url_override = model.api_url_override.as_deref().unwrap_or_default().trim();
-        match (
+        let credential_ref = match (
             url_override.is_empty(),
             model.api_token_override_ref.is_some(),
         ) {
-            (false, true) => self.credential_status(model.api_token_override_ref.as_deref()),
-            (true, false) => self.credential_status(settings.api_token_ref.as_deref()),
-            _ => CredentialStatus::Missing,
+            (false, true) => model.api_token_override_ref.clone(),
+            (true, false) => settings.api_token_ref.clone(),
+            _ => None,
+        };
+        if let Some(status) = credential_status_cache.get(&credential_ref) {
+            return *status;
         }
+        let status = self.credential_status(credential_ref.as_deref());
+        credential_status_cache.insert(credential_ref, status);
+        status
     }
 
     fn model_settings_editor_record(
