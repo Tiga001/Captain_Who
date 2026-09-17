@@ -111,6 +111,13 @@ impl StorageService {
                 "frozen template identity does not match the requested selector".to_string(),
             ));
         }
+        // Availability is judged once from the shared projection before the write transaction
+        // opens, so no credential I/O can run inside SQLite. A projection load failure fails the
+        // spawn closed — including an idempotent replay of an already committed spawn — instead
+        // of retrying with the presence-only catalog.
+        let model_projection = self
+            .load_model_projection()
+            .map_err(ChildAgentSpawnError::StorageUnavailable)?;
         let created_at = now_ms();
         let mut connection = self
             .state
@@ -163,8 +170,13 @@ impl StorageService {
         enforce_task_resource_limit(input, limits)?;
         enforce_tree_resource_limits(&transaction, &parent, limits)?;
 
-        let (template_snapshot, selected_model_id, model_selection_source) =
-            select_model_identity(&transaction, &parent, input, expected_template_identity)?;
+        let (template_snapshot, selected_model_id, model_selection_source) = select_model_identity(
+            &transaction,
+            &parent,
+            input,
+            expected_template_identity,
+            model_projection.as_ref(),
+        )?;
         let settings = self
             .model_settings_catalog_snapshot_in_connection(&transaction)
             .map_err(ChildAgentSpawnError::StorageUnavailable)?
@@ -566,6 +578,7 @@ fn select_model_identity(
     parent: &crate::AgentNodeRecord,
     input: &CreateChildAgentInput,
     expected_template_identity: Option<(&str, u64)>,
+    projection: Option<&ModelProjection>,
 ) -> Result<
     (
         Option<AgentTemplateSnapshot>,
@@ -617,6 +630,7 @@ fn select_model_identity(
     };
 
     if let Some(model_id) = input.explicit_model_id.as_ref() {
+        ensure_model_available(projection, model_id)?;
         return Ok((
             template,
             model_id.clone(),
@@ -625,6 +639,7 @@ fn select_model_identity(
     }
     if let Some(template) = template {
         let model_id = template.model_config_id.clone();
+        ensure_model_available(projection, &model_id)?;
         return Ok((
             Some(template),
             model_id,
@@ -639,25 +654,59 @@ fn select_model_identity(
         )
         .map_err(spawn_database_error)?;
     if let Some(model_id) = parent_model_id.filter(|model_id| !model_id.trim().is_empty()) {
+        ensure_model_available(projection, &model_id)?;
         return Ok((None, model_id, AgentModelSelectionSource::Parent));
     }
 
-    let settings = config_repository::load_model_settings_snapshot_in_connection(connection)
-        .map_err(spawn_database_error)?
-        .ok_or(ChildAgentSpawnError::ModelUnavailable {
+    let Some(projection) = projection else {
+        return Err(ChildAgentSpawnError::ModelUnavailable {
             model_config_id: None,
             reason: crate::AgentModelUnavailableReason::SettingsMissing,
-        })?;
-    let default = settings
-        .settings
+        });
+    };
+    let default = projection
         .models
         .iter()
-        .find(|model| model.enabled)
+        .find(|entry| entry.execution.is_available())
         .ok_or(ChildAgentSpawnError::ModelUnavailable {
             model_config_id: None,
             reason: crate::AgentModelUnavailableReason::NotFound,
         })?;
-    Ok((None, default.id.clone(), AgentModelSelectionSource::Default))
+    Ok((
+        None,
+        default.model.id.clone(),
+        AgentModelSelectionSource::Default,
+    ))
+}
+
+/// Gates one exact model selector on the shared availability projection.
+///
+/// An explicit, template, or parent selector is accepted only when the projection reports the
+/// model as executable right now; credential failures surface as `CredentialMissing` /
+/// `CredentialUnavailable` and never fall back to another model.
+fn ensure_model_available(
+    projection: Option<&ModelProjection>,
+    model_config_id: &str,
+) -> Result<(), ChildAgentSpawnError> {
+    let Some(projection) = projection else {
+        return Err(ChildAgentSpawnError::ModelUnavailable {
+            model_config_id: Some(model_config_id.to_string()),
+            reason: crate::AgentModelUnavailableReason::SettingsMissing,
+        });
+    };
+    let Some(entry) = projection.entry(model_config_id) else {
+        return Err(ChildAgentSpawnError::ModelUnavailable {
+            model_config_id: Some(model_config_id.to_string()),
+            reason: crate::AgentModelUnavailableReason::NotFound,
+        });
+    };
+    match entry.execution.unavailable_reason() {
+        None => Ok(()),
+        Some(reason) => Err(ChildAgentSpawnError::ModelUnavailable {
+            model_config_id: Some(model_config_id.to_string()),
+            reason: reason.clone(),
+        }),
+    }
 }
 
 fn validate_reasoning_effort(

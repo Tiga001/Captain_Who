@@ -12,8 +12,8 @@ use mycopilot_core::{
     AgentTemplateRecord, AgentWakeRequestRecord, AgentWakeStatus, BindAgentSafeBoundaryInput,
     ChildAgentSpawnError, ChildAgentSpawnRecord, ConversationMessageOrigin,
     CreateAgentTemplateInput, CreateChildAgentInput, EnqueueAgentMessageInput,
-    EnqueueAgentWakeInput, EnsureRootAgentInput, IdempotentCreate, ResolvedAgentTemplateForSpawn,
-    TrustedActiveChildWakeBundle, UpdateAgentTemplateInput,
+    EnqueueAgentWakeInput, EnsureRootAgentInput, IdempotentCreate, TrustedActiveChildWakeBundle,
+    UpdateAgentTemplateInput,
 };
 use std::sync::Arc;
 
@@ -633,15 +633,6 @@ impl AgentCollaborationService {
     ) -> Result<AgentTemplateRecord, AgentTemplateError> {
         self.storage
             .delete_agent_template(template_id, expected_revision)
-    }
-
-    pub(crate) fn resolve_template_for_spawn(
-        &self,
-        project_id: &str,
-        machine_key: &str,
-    ) -> Result<ResolvedAgentTemplateForSpawn, AgentTemplateError> {
-        self.storage
-            .resolve_template_for_spawn(project_id, machine_key)
     }
 }
 

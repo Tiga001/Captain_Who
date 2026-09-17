@@ -692,6 +692,141 @@ fn exact_unavailable_model_and_unsupported_reasoning_never_fall_back() {
 }
 
 #[test]
+fn default_selection_skips_models_without_a_resolvable_credential() {
+    let fixture = Fixture::new(None);
+    let mut settings = model_settings(vec![
+        model("model-a", true),
+        model("model-b", true),
+        model("model-c", true),
+    ]);
+    settings.models[1].api_url_override =
+        Some("https://model-b.example/v1/chat/completions".to_string());
+    settings.models[1].api_token_override = Some("model-b-own-token".to_string());
+    fixture.service.save_model_settings(settings).unwrap();
+
+    let original_ref: String = fixture
+        .service
+        .state
+        .connection()
+        .unwrap()
+        .query_row(
+            "SELECT api_token_ref FROM model_provider_settings WHERE id = 'default'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let set_global_ref = |value: &str| {
+        fixture
+            .service
+            .state
+            .connection()
+            .unwrap()
+            .execute(
+                "UPDATE model_provider_settings SET api_token_ref = ?1 WHERE id = 'default'",
+                [value],
+            )
+            .unwrap();
+    };
+
+    // model-a stays enabled but its inherited credential now belongs to another backend, so the
+    // ordered default must skip it and freeze the next Available model.
+    set_global_ref("application-credential/v1/mac-keychain-v2/00000000000000000000000000000000");
+    let spawn = fixture
+        .service
+        .create_child_agent(&spawn_input("spawn-default-skips", "default_skips"))
+        .unwrap();
+    assert_eq!(
+        spawn.model_selection_source,
+        AgentModelSelectionSource::Default
+    );
+    assert_eq!(
+        spawn.agent.model_snapshot.unwrap().model_config_id,
+        "model-b"
+    );
+
+    set_global_ref(&original_ref);
+    let restored = fixture
+        .service
+        .create_child_agent(&spawn_input("spawn-default-restored", "default_restored"))
+        .unwrap();
+    assert_eq!(
+        restored.agent.model_snapshot.unwrap().model_config_id,
+        "model-a"
+    );
+}
+
+#[test]
+fn explicit_template_and_parent_models_fail_closed_without_a_resolvable_credential() {
+    let fixture = Fixture::new(Some("model-a"));
+    let original_ref: String = fixture
+        .service
+        .state
+        .connection()
+        .unwrap()
+        .query_row(
+            "SELECT api_token_ref FROM model_provider_settings WHERE id = 'default'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let set_global_ref = |value: &str| {
+        fixture
+            .service
+            .state
+            .connection()
+            .unwrap()
+            .execute(
+                "UPDATE model_provider_settings SET api_token_ref = ?1 WHERE id = 'default'",
+                [value],
+            )
+            .unwrap();
+    };
+    set_global_ref("application-credential/v1/mac-keychain-v2/00000000000000000000000000000000");
+
+    let mut explicit = spawn_input("spawn-credential-explicit", "credential_explicit");
+    explicit.explicit_model_id = Some("model-a".to_string());
+    assert_eq!(
+        fixture.service.create_child_agent(&explicit).unwrap_err(),
+        ChildAgentSpawnError::ModelUnavailable {
+            model_config_id: Some("model-a".to_string()),
+            reason: crate::AgentModelUnavailableReason::CredentialUnavailable,
+        }
+    );
+
+    let mut template = spawn_input("spawn-credential-template", "credential_template");
+    template.template_machine_key = Some("reviewer".to_string());
+    assert_eq!(
+        fixture.service.create_child_agent(&template).unwrap_err(),
+        ChildAgentSpawnError::ModelUnavailable {
+            model_config_id: Some("model-b".to_string()),
+            reason: crate::AgentModelUnavailableReason::CredentialUnavailable,
+        }
+    );
+
+    let parent = spawn_input("spawn-credential-parent", "credential_parent");
+    assert_eq!(
+        fixture.service.create_child_agent(&parent).unwrap_err(),
+        ChildAgentSpawnError::ModelUnavailable {
+            model_config_id: Some("model-a".to_string()),
+            reason: crate::AgentModelUnavailableReason::CredentialUnavailable,
+        }
+    );
+    assert!(fixture
+        .service
+        .list_agent_children("agent-root", "agent-root")
+        .unwrap()
+        .is_empty());
+
+    // Restoring the credential restores the same selectors.
+    set_global_ref(&original_ref);
+    let restored = fixture.service.create_child_agent(&template).unwrap();
+    assert_eq!(
+        restored.agent.model_snapshot.unwrap().model_config_id,
+        "model-b"
+    );
+}
+
+#[test]
 fn exact_enabled_deepseek_reasoning_is_frozen_for_high_and_max() {
     for (index, effort) in [ReasoningEffort::High, ReasoningEffort::Max]
         .into_iter()
