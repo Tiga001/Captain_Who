@@ -2054,3 +2054,180 @@ fn web_search_policy_resolves_only_current_search_credential_and_degrades_missin
     assert!(!error.to_string().contains(SEARCH));
     assert_eq!(error.code(), Some("web_search.configuration_required"));
 }
+
+#[test]
+fn executable_model_catalog_fails_closed_for_dangling_and_foreign_credentials() {
+    const FOREIGN_REF: &str =
+        "application-credential/v1/mac-keychain-v2/00000000000000000000000000000000";
+    let fixture = StorageFixture::new();
+    let service = fixture.service();
+    let mut override_model = official_profile_test_model(
+        "model-override",
+        Some("https://provider-override.example/v1/chat/completions"),
+        Some("override-secret"),
+    );
+    override_model.display_name = "Override Model".to_string();
+    service
+        .save_model_settings(ModelSettingsRecord {
+            api_url: "https://provider.example/v1/chat/completions".to_string(),
+            api_token: "global-secret".to_string(),
+            search_mode: "disabled".to_string(),
+            tavily_api_key: String::new(),
+            models: vec![
+                official_profile_test_model("model-inherited", None, None),
+                override_model,
+            ],
+        })
+        .unwrap();
+
+    let executable_ids = |service: &StorageService| {
+        service
+            .load_executable_model_catalog()
+            .unwrap()
+            .unwrap()
+            .models
+            .iter()
+            .map(|model| model.id.clone())
+            .collect::<Vec<_>>()
+    };
+    let (global_ref, override_ref) = {
+        let connection = service.state.connection().unwrap();
+        let global_ref: String = connection
+            .query_row(
+                "SELECT api_token_ref FROM model_provider_settings WHERE id = 'default'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let override_ref: String = connection
+            .query_row(
+                "SELECT api_token_override_ref FROM models WHERE id = 'model-override'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        (global_ref, override_ref)
+    };
+    let set_global_ref = |value: &str| {
+        service
+            .state
+            .connection()
+            .unwrap()
+            .execute(
+                "UPDATE model_provider_settings SET api_token_ref = ?1 WHERE id = 'default'",
+                [value],
+            )
+            .unwrap();
+    };
+    let set_override_ref = |value: &str| {
+        service
+            .state
+            .connection()
+            .unwrap()
+            .execute(
+                "UPDATE models SET api_token_override_ref = ?1 WHERE id = 'model-override'",
+                [value],
+            )
+            .unwrap();
+    };
+
+    assert_eq!(
+        executable_ids(&service),
+        vec!["model-inherited", "model-override"]
+    );
+
+    // A reference owned by a credential backend this Host does not use fails closed even
+    // though the presence-only catalog still sees it.
+    set_global_ref(FOREIGN_REF);
+    assert_eq!(executable_ids(&service), vec!["model-override"]);
+    set_global_ref(&global_ref);
+    assert_eq!(
+        executable_ids(&service),
+        vec!["model-inherited", "model-override"]
+    );
+
+    set_override_ref(FOREIGN_REF);
+    assert_eq!(executable_ids(&service), vec!["model-inherited"]);
+    set_override_ref(&override_ref);
+    assert_eq!(
+        executable_ids(&service),
+        vec!["model-inherited", "model-override"]
+    );
+
+    // A dangling reference whose secret no longer exists cannot execute either.
+    fixture
+        .model_credentials
+        .delete(&CredentialReference::parse(&override_ref).unwrap())
+        .unwrap();
+    assert_eq!(executable_ids(&service), vec!["model-inherited"]);
+    assert_eq!(
+        service
+            .load_model_settings_catalog()
+            .unwrap()
+            .unwrap()
+            .models
+            .len(),
+        2,
+        "the presence-only catalog stays unfiltered; only the executable projection fails closed"
+    );
+}
+
+#[test]
+fn executable_model_catalog_excludes_partial_pairs_and_disabled_models() {
+    let fixture = StorageFixture::new();
+    let service = fixture.service();
+    let mut partial_model = official_profile_test_model(
+        "model-partial",
+        Some("https://provider-partial.example/v1/chat/completions"),
+        None,
+    );
+    partial_model.display_name = "Partial Model".to_string();
+    let mut token_only_model =
+        official_profile_test_model("model-token-only", None, Some("token-only-secret"));
+    token_only_model.display_name = "Token Only Model".to_string();
+    let mut disabled_model = official_profile_test_model("model-disabled", None, None);
+    disabled_model.display_name = "Disabled Model".to_string();
+    disabled_model.enabled = false;
+    service
+        .save_model_settings(ModelSettingsRecord {
+            api_url: "https://provider.example/v1/chat/completions".to_string(),
+            api_token: "global-secret".to_string(),
+            search_mode: "disabled".to_string(),
+            tavily_api_key: String::new(),
+            models: vec![
+                official_profile_test_model("model-inherited", None, None),
+                partial_model,
+                token_only_model,
+                disabled_model,
+            ],
+        })
+        .unwrap();
+
+    let executable_ids = service
+        .load_executable_model_catalog()
+        .unwrap()
+        .unwrap()
+        .models
+        .iter()
+        .map(|model| model.id.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(executable_ids, vec!["model-inherited"]);
+
+    let mut stored = service.load_model_settings().unwrap().unwrap();
+    stored
+        .models
+        .iter_mut()
+        .find(|model| model.id == "model-disabled")
+        .unwrap()
+        .enabled = true;
+    service.save_model_settings(stored).unwrap();
+    let executable_ids = service
+        .load_executable_model_catalog()
+        .unwrap()
+        .unwrap()
+        .models
+        .iter()
+        .map(|model| model.id.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(executable_ids, vec!["model-inherited", "model-disabled"]);
+}

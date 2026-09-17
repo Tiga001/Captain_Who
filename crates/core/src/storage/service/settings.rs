@@ -1,3 +1,4 @@
+use super::agent_templates::resolve_exact_agent_model;
 use super::*;
 use crate::image_generation::credential_store::{
     CredentialDeleteOutcome, CredentialReference, CredentialSecret,
@@ -466,7 +467,8 @@ impl StorageService {
     }
 
     /// Loads provider metadata and credential presence without opening the native credential
-    /// store. Use this for selectors, usage labels and other non-execution surfaces.
+    /// store. Use this for display-only surfaces (usage labels, template names); any surface
+    /// that may offer a model for execution must use [`Self::load_executable_model_catalog`].
     pub fn load_model_settings_catalog(&self) -> Result<Option<ModelSettingsRecord>, String> {
         let stored = {
             let mut connection = self.state.connection()?;
@@ -477,6 +479,52 @@ impl StorageService {
             .as_ref()
             .map(model_settings_catalog_snapshot)
             .map(|snapshot| snapshot.settings))
+    }
+
+    /// Loads the credential-free catalog restricted to models that can execute in this Host now.
+    ///
+    /// A model qualifies only when it is enabled, its effective connection is complete and
+    /// valid, its effective credential resolves in the active credential backend, and the exact
+    /// spawn-viability identity checks pass. The presence-only catalog can advertise a model
+    /// whose key cannot be read (for example a reference owned by another credential backend);
+    /// execution and the composer both fail such a model closed, so selectors and allow-lists
+    /// must use this projection instead.
+    pub fn load_executable_model_catalog(&self) -> Result<Option<ModelSettingsRecord>, String> {
+        let _guard = self
+            .model_credential_lock
+            .lock()
+            .map_err(|_| "model credential coordinator is unavailable".to_string())?;
+        let stored = {
+            let mut connection = self.state.connection()?;
+            config_repository::load_model_settings_snapshot(&mut connection)
+                .map_err(storage_error)?
+        };
+        let Some(stored) = stored else {
+            return Ok(None);
+        };
+        let catalog = model_settings_catalog_snapshot(&stored);
+        let models = catalog
+            .settings
+            .models
+            .iter()
+            .filter(|model| {
+                stored
+                    .settings
+                    .models
+                    .iter()
+                    .find(|stored_model| stored_model.id == model.id)
+                    .is_some_and(|stored_model| {
+                        self.effective_connection_credential_status(&stored.settings, stored_model)
+                            == CredentialStatus::Configured
+                    })
+                    && resolve_exact_agent_model(&catalog, &model.id).is_ok()
+            })
+            .cloned()
+            .collect();
+        Ok(Some(ModelSettingsRecord {
+            models,
+            ..catalog.settings
+        }))
     }
 
     pub fn save_model_settings(&self, settings: ModelSettingsRecord) -> Result<(), String> {
@@ -888,6 +936,29 @@ impl StorageService {
         match self.model_credentials.get(&reference) {
             Ok(Some(_)) => CredentialStatus::Configured,
             Ok(None) | Err(_) => CredentialStatus::Unavailable,
+        }
+    }
+
+    /// The credential status of the connection a model would actually execute with.
+    ///
+    /// Completeness mirrors [`ModelConfigRecord::connection_override`]: a complete dedicated
+    /// pair owns its own credential, two blanks inherit the global pair, and a partial pair
+    /// never borrows its missing half and stays unresolved. The status itself comes from the
+    /// active credential backend, so a reference owned by another backend fails closed as
+    /// `Unavailable`.
+    fn effective_connection_credential_status(
+        &self,
+        settings: &StoredModelSettingsRecord,
+        model: &StoredModelConfigRecord,
+    ) -> CredentialStatus {
+        let url_override = model.api_url_override.as_deref().unwrap_or_default().trim();
+        match (
+            url_override.is_empty(),
+            model.api_token_override_ref.is_some(),
+        ) {
+            (false, true) => self.credential_status(model.api_token_override_ref.as_deref()),
+            (true, false) => self.credential_status(settings.api_token_ref.as_deref()),
+            _ => CredentialStatus::Missing,
         }
     }
 

@@ -824,6 +824,63 @@ describe('ModelSettingsProvider hydration', () => {
     await expect.element(screen.getByTestId('override-enabled-models')).toHaveTextContent('')
   })
 
+  it('hides inherited models when the global key cannot resolve in the active backend', async () => {
+    const settings: ModelSettingsSnapshot = {
+      ...storedSettings,
+      apiTokenStatus: 'unavailable',
+      models: [
+        { ...storedSettings.models[0]!, id: 'model-inherited' },
+        {
+          ...storedSettings.models[0]!,
+          id: 'model-with-own-key',
+          apiUrlOverride: 'https://override.example/v1/chat/completions',
+          apiTokenOverrideStatus: 'configured'
+        }
+      ]
+    }
+    service.loadModelSettings.mockResolvedValue(settings)
+
+    const screen = await render(
+      <ModelSettingsProvider>
+        <ModelSettingsProbe />
+      </ModelSettingsProvider>
+    )
+    await expect.element(screen.getByTestId('api-url')).toHaveTextContent(settings.apiUrl)
+    await expect
+      .element(screen.getByTestId('enabled-models'))
+      .toHaveTextContent('model-with-own-key')
+    await expect
+      .element(screen.getByTestId('enabled-models'))
+      .not.toHaveTextContent('model-inherited')
+  })
+
+  it('hides models whose dedicated key cannot resolve in the active backend', async () => {
+    const settings: ModelSettingsSnapshot = {
+      ...storedSettings,
+      models: [
+        { ...storedSettings.models[0]!, id: 'model-inherited' },
+        {
+          ...storedSettings.models[0]!,
+          id: 'model-foreign-key',
+          apiUrlOverride: 'https://override.example/v1/chat/completions',
+          apiTokenOverrideStatus: 'unavailable'
+        }
+      ]
+    }
+    service.loadModelSettings.mockResolvedValue(settings)
+
+    const screen = await render(
+      <ModelSettingsProvider>
+        <ModelSettingsProbe />
+      </ModelSettingsProvider>
+    )
+    await expect.element(screen.getByTestId('api-url')).toHaveTextContent(settings.apiUrl)
+    await expect.element(screen.getByTestId('enabled-models')).toHaveTextContent('model-inherited')
+    await expect
+      .element(screen.getByTestId('enabled-models'))
+      .not.toHaveTextContent('model-foreign-key')
+  })
+
   it('does not silently delete a model or toast when a display name edit collides', async () => {
     const settingsWithTwoModels: ModelSettingsSnapshot = {
       ...storedSettings,

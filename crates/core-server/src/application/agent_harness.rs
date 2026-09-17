@@ -236,9 +236,14 @@ impl AgentCollaborationHarnessAdapter {
         &self,
         project_id: Option<&str>,
     ) -> Result<AgentCollaborationSelectorDirectory, AgentError> {
+        // The model list is the exact spawn allow-list. Only models that can execute in this
+        // Host right now are advertised: enabled, complete connection, a credential that
+        // resolves in the active backend, and a spawn-viable provider identity. Never go back
+        // to the presence-only catalog here; a model whose key cannot be read must not be
+        // advertised to the model.
         let settings = self
             .storage
-            .load_model_settings_catalog()
+            .load_executable_model_catalog()
             .map_err(storage_error)?;
         let models = settings
             .as_ref()
@@ -246,11 +251,6 @@ impl AgentCollaborationHarnessAdapter {
                 settings
                     .models
                     .iter()
-                    .filter(|model| {
-                        model.enabled
-                            && settings.effective_connection_for(model).is_ok()
-                            && model.provider_profile_config.validate().is_ok()
-                    })
                     .map(|model| AgentCollaborationModelSelector {
                         model_config_id: model.id.clone(),
                         display_name: model.display_label(),
@@ -261,6 +261,10 @@ impl AgentCollaborationHarnessAdapter {
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
+        let executable_model_ids = models
+            .iter()
+            .map(|model| model.model_config_id.clone())
+            .collect::<std::collections::HashSet<_>>();
         let templates = match project_id {
             Some(project_id) => self
                 .storage
@@ -268,20 +272,26 @@ impl AgentCollaborationHarnessAdapter {
                 .map_err(template_error)?
                 .into_iter()
                 .filter_map(|template| {
-                    self.storage
+                    let resolved = self
+                        .storage
                         .resolve_template_for_spawn(project_id, &template.machine_key)
-                        .ok()
-                        .map(|resolved| AgentCollaborationTemplateSelector {
-                            agent_type: template.machine_key,
-                            template_id: resolved.template.template_id,
-                            template_revision: resolved.template.template_revision,
-                            name: template.name,
-                            description: template.description,
-                            model_display_name: resolved.model.display_name,
-                            default_model_capabilities: mycopilot_core::ModelCapabilities {
-                                image_input: resolved.model.supports_image,
-                            },
-                        })
+                        .ok()?;
+                    // A template whose model cannot execute must not be advertised; spawning
+                    // it would fail closed once execution resolves the credential.
+                    if !executable_model_ids.contains(resolved.template.model_config_id.as_str()) {
+                        return None;
+                    }
+                    Some(AgentCollaborationTemplateSelector {
+                        agent_type: template.machine_key,
+                        template_id: resolved.template.template_id,
+                        template_revision: resolved.template.template_revision,
+                        name: template.name,
+                        description: template.description,
+                        model_display_name: resolved.model.display_name,
+                        default_model_capabilities: mycopilot_core::ModelCapabilities {
+                            image_input: resolved.model.supports_image,
+                        },
+                    })
                 })
                 .collect(),
             None => Vec::new(),
@@ -1632,5 +1642,163 @@ mod tests {
             .unwrap();
         assert!(model_disabled.selector_directory.models.is_empty());
         assert!(model_disabled.selector_directory.templates.is_empty());
+    }
+
+    #[tokio::test]
+    async fn selector_directory_advertises_only_models_whose_credentials_resolve() {
+        use mycopilot_core::image_generation::{
+            CredentialReference, CredentialStore, InMemoryCredentialStore,
+        };
+
+        let fixture = tempfile::tempdir().unwrap();
+        let database_path = fixture.path().join("agent-harness-credentials.sqlite");
+        let credentials = Arc::new(InMemoryCredentialStore::default());
+        let storage = Arc::new(
+            StorageService::open_with_model_credentials(&database_path, credentials.clone())
+                .unwrap(),
+        );
+        storage
+            .save_project(ProjectRecord::with_primary_folder(
+                "project-credentials".to_string(),
+                "Credentials".to_string(),
+                fixture.path().to_string_lossy().into_owned(),
+                1,
+            ))
+            .unwrap();
+        let model_config =
+            |id: &str, url_override: Option<&str>, token: Option<&str>| ModelConfigRecord {
+                id: id.to_string(),
+                provider_model_id: id.to_string(),
+                display_name: id.to_string(),
+                api_url_override: url_override.map(ToString::to_string),
+                api_token_override: token.map(ToString::to_string),
+                supports_image: false,
+                context_window_tokens: Some(64_000),
+                provider_profile_config: ProviderProfileConfig::generic_for_dialect(
+                    ProviderProtocolDialect::OpenAiChatCompletions,
+                ),
+                input_price: "0".to_string(),
+                cached_input_price: String::new(),
+                output_price: "0".to_string(),
+                enabled: true,
+            };
+        storage
+            .save_model_settings(ModelSettingsRecord {
+                api_url: "https://provider.example/v1/chat/completions".to_string(),
+                api_token: "private-ready-token".to_string(),
+                search_mode: "disabled".to_string(),
+                tavily_api_key: String::new(),
+                models: vec![
+                    model_config("model-ready", None, None),
+                    model_config(
+                        "model-broken",
+                        Some("https://provider-broken.example/v1/chat/completions"),
+                        Some("private-broken-token"),
+                    ),
+                    model_config(
+                        "model-partial",
+                        Some("https://provider-partial.example/v1/chat/completions"),
+                        None,
+                    ),
+                ],
+            })
+            .unwrap();
+        let assign_template = |template_id: &str, model_id: &str| {
+            storage
+                .create_agent_template(&CreateAgentTemplateInput {
+                    template_id: template_id.to_string(),
+                    machine_key: template_id.to_string(),
+                    name: template_id.to_string(),
+                    description: "Fixture".to_string(),
+                    instructions: "Fixture instructions".to_string(),
+                    model_config_id: model_id.to_string(),
+                    enabled: true,
+                })
+                .unwrap();
+            storage
+                .set_agent_template_project_assignment("project-credentials", template_id, true)
+                .unwrap();
+        };
+        assign_template("ready-template", "model-ready");
+        assign_template("broken-template", "model-broken");
+        storage
+            .save_conversation(ChatConversationRecord {
+                id: "conversation-credentials".to_string(),
+                project_id: Some("project-credentials".to_string()),
+                model_id: Some("model-ready".to_string()),
+                title: "Credentials root".to_string(),
+                messages: Vec::new(),
+                created_at: 1,
+                updated_at: 1,
+                pinned_at: None,
+                archived_at: None,
+                unread_at: None,
+            })
+            .unwrap();
+        let service = AgentService::try_new_deferred_startup_reconciliation_with_agent_limit(
+            Arc::clone(&storage),
+            None,
+            2,
+        )
+        .unwrap();
+        let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
+        let adapter = AgentCollaborationHarnessAdapter::new(
+            Arc::clone(&storage),
+            service.clone(),
+            service.collaboration_authorizer(),
+            Arc::new(Mutex::new(None)),
+            notifications,
+        );
+
+        let before = adapter
+            .preview_runtime_services_for_conversation("conversation-credentials")
+            .unwrap();
+        let mut models_before = before
+            .selector_directory
+            .models
+            .iter()
+            .map(|model| model.model_config_id.as_str())
+            .collect::<Vec<_>>();
+        models_before.sort_unstable();
+        assert_eq!(models_before, vec!["model-broken", "model-ready"]);
+        let mut templates_before = before
+            .selector_directory
+            .templates
+            .iter()
+            .map(|template| template.agent_type.as_str())
+            .collect::<Vec<_>>();
+        templates_before.sort_unstable();
+        assert_eq!(templates_before, vec!["broken-template", "ready-template"]);
+
+        // Break the dedicated credential: the reference stays in place, but its secret is gone.
+        let broken_ref: String = rusqlite::Connection::open(&database_path)
+            .unwrap()
+            .query_row(
+                "SELECT api_token_override_ref FROM models WHERE id = 'model-broken'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        credentials
+            .delete(&CredentialReference::parse(&broken_ref).unwrap())
+            .unwrap();
+
+        let after = adapter
+            .preview_runtime_services_for_conversation("conversation-credentials")
+            .unwrap();
+        let models_after = after
+            .selector_directory
+            .models
+            .iter()
+            .map(|model| model.model_config_id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(models_after, vec!["model-ready"]);
+        let templates_after = after
+            .selector_directory
+            .templates
+            .iter()
+            .map(|template| template.agent_type.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(templates_after, vec!["ready-template"]);
     }
 }
