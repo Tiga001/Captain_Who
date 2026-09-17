@@ -1,4 +1,3 @@
-use super::agent_templates::resolve_exact_agent_model;
 use super::*;
 use crate::image_generation::credential_store::{
     CredentialDeleteOutcome, CredentialReference, CredentialSecret,
@@ -78,7 +77,9 @@ fn model_credential_refs(settings: &StoredModelSettingsRecord) -> BTreeSet<Strin
         .collect()
 }
 
-fn model_settings_catalog_snapshot(stored: &StoredModelSettingsSnapshot) -> ModelSettingsSnapshot {
+pub(super) fn model_settings_catalog_snapshot(
+    stored: &StoredModelSettingsSnapshot,
+) -> ModelSettingsSnapshot {
     let presence = |configured: bool| configured.then(|| "configured-credential".to_string());
     ModelSettingsSnapshot {
         settings: ModelSettingsRecord {
@@ -483,12 +484,12 @@ impl StorageService {
 
     /// Loads the credential-free catalog restricted to models that can execute in this Host now.
     ///
-    /// A model qualifies only when it is enabled, its effective connection is complete and
-    /// valid, its effective credential resolves in the active credential backend, and the exact
-    /// spawn-viability identity checks pass. The presence-only catalog can advertise a model
-    /// whose key cannot be read (for example a reference owned by another credential backend);
-    /// execution and the composer both fail such a model closed, so selectors and allow-lists
-    /// must use this projection instead.
+    /// This is the `Available` filter of [`Self::load_model_projection`], the single model
+    /// availability projection: enabled, a complete and valid effective connection, a credential
+    /// that resolves in the active credential backend, and the spawn-viability identity checks.
+    /// The presence-only catalog can advertise a model whose key cannot be read (for example a
+    /// reference owned by another credential backend); execution and the composer both fail such
+    /// a model closed, so selectors and allow-lists must use this filtered projection instead.
     pub fn load_executable_model_catalog(&self) -> Result<Option<ModelSettingsRecord>, String> {
         let _guard = self
             .model_credential_lock
@@ -502,23 +503,19 @@ impl StorageService {
         let Some(stored) = stored else {
             return Ok(None);
         };
+        let projection = self.model_projection_from_stored(&stored);
+        let available_ids: std::collections::HashSet<&str> = projection
+            .models
+            .iter()
+            .filter(|entry| entry.execution.is_available())
+            .map(|entry| entry.model.id.as_str())
+            .collect();
         let catalog = model_settings_catalog_snapshot(&stored);
         let models = catalog
             .settings
             .models
             .iter()
-            .filter(|model| {
-                stored
-                    .settings
-                    .models
-                    .iter()
-                    .find(|stored_model| stored_model.id == model.id)
-                    .is_some_and(|stored_model| {
-                        self.effective_connection_credential_status(&stored.settings, stored_model)
-                            == CredentialStatus::Configured
-                    })
-                    && resolve_exact_agent_model(&catalog, &model.id).is_ok()
-            })
+            .filter(|model| available_ids.contains(model.id.as_str()))
             .cloned()
             .collect();
         Ok(Some(ModelSettingsRecord {
@@ -946,7 +943,7 @@ impl StorageService {
     /// never borrows its missing half and stays unresolved. The status itself comes from the
     /// active credential backend, so a reference owned by another backend fails closed as
     /// `Unavailable`.
-    fn effective_connection_credential_status(
+    pub(super) fn effective_connection_credential_status(
         &self,
         settings: &StoredModelSettingsRecord,
         model: &StoredModelConfigRecord,
@@ -966,6 +963,10 @@ impl StorageService {
         &self,
         stored: &StoredModelSettingsSnapshot,
     ) -> Result<ModelSettingsEditorRecord, String> {
+        // The per-model execution status comes from the same projection the executable catalog
+        // and every selector derive from; the Renderer must never re-derive availability.
+        let projection = self.model_projection_from_stored(stored);
+        debug_assert_eq!(projection.models.len(), stored.settings.models.len());
         Ok(ModelSettingsEditorRecord {
             configuration_revision: stored.configuration_revision.clone(),
             api_url: stored.settings.api_url.clone(),
@@ -977,7 +978,8 @@ impl StorageService {
                 .settings
                 .models
                 .iter()
-                .map(|model| ModelConfigEditorRecord {
+                .zip(projection.models)
+                .map(|(model, projection_entry)| ModelConfigEditorRecord {
                     id: model.id.clone(),
                     provider_model_id: model.provider_model_id.clone(),
                     display_name: model.display_name.clone(),
@@ -991,6 +993,7 @@ impl StorageService {
                     cached_input_price: model.cached_input_price.clone(),
                     output_price: model.output_price.clone(),
                     enabled: model.enabled,
+                    execution: projection_entry.execution,
                 })
                 .collect(),
         })

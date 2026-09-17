@@ -217,7 +217,8 @@ const model: ModelConfig = {
   cachedInputPrice: '',
   outputPrice: '0',
   providerProfileUpdate: { kind: 'unchanged' },
-  enabled: true
+  enabled: true,
+  execution: { status: 'available' }
 }
 
 const commonProps = {

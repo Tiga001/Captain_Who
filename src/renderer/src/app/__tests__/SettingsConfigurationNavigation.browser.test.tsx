@@ -35,7 +35,8 @@ const model: ModelConfig = {
     profile: { id: 'generic_openai_chat', version: 1 },
     reasoning: { mode: 'provider_default', effort: 'provider_default' }
   },
-  providerProfileUpdate: { kind: 'select_generic' }
+  providerProfileUpdate: { kind: 'select_generic' },
+  execution: { status: 'available' }
 }
 
 vi.mock('../../config/FrontendConfigProvider', () => ({

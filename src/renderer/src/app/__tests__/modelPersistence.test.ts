@@ -32,7 +32,8 @@ const existingModel: ModelConfig = {
   cachedInputPrice: '',
   outputPrice: '0.02',
   providerProfileUpdate: { kind: 'unchanged' },
-  enabled: false
+  enabled: false,
+  execution: { status: 'unavailable', reason: 'disabled' }
 }
 
 const editedValues: ModelFormValues = {
@@ -58,6 +59,7 @@ describe('modelConfigFromForm', () => {
     expect(saved.displayName).toBe('DeepSeek Flash edited')
     expect(saved.providerModelId).toBe('deepseek-flash')
     expect(saved.enabled).toBe(false)
+    expect(saved.execution).toEqual({ status: 'unavailable', reason: 'disabled' })
     expect(saved.contextWindowTokens).toBe(256_000)
     expect(saved.cachedInputPrice).toBe('0.005')
   })

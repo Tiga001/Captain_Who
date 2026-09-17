@@ -218,6 +218,28 @@ export type StorageProviderProfileUpdate =
       settings: ProviderFamilySettings
     }
 
+/**
+ * Host-authoritative execution projection of one configured model, computed once per settings
+ * snapshot by the Host. Selectors, save validators, and settings editors offer or validate only
+ * `available` models; the Renderer never re-derives availability itself.
+ */
+export type StorageModelExecutionStatus =
+  { status: 'available' } | { status: 'unavailable'; reason: StorageModelUnavailableReason }
+
+/** Why a configured model cannot execute right now; mirrors the Core reason enum. */
+export type StorageModelUnavailableReason =
+  | 'settings_missing'
+  | 'not_found'
+  | 'disabled'
+  | 'invalid_connection'
+  | 'invalid_profile'
+  | 'missing_connection_identity'
+  | 'missing_protocol_identity'
+  | 'unsupported_runtime'
+  | 'capabilities_changed'
+  | 'credential_missing'
+  | 'credential_unavailable'
+
 export interface StorageModelConfigRecord {
   /** Stable opaque identity of this local model configuration. */
   id: string
@@ -237,6 +259,11 @@ export interface StorageModelConfigRecord {
   cachedInputPrice: string
   outputPrice: string
   enabled: boolean
+  /**
+   * Host-authoritative execution projection. Consumers offer or validate only `available`
+   * models; the Renderer never re-derives availability from credential or URL fields.
+   */
+  execution: StorageModelExecutionStatus
 }
 
 export interface StorageModelSettingsRecord {
@@ -252,7 +279,7 @@ export interface StorageModelSettingsRecord {
 /** Model payload accepted by the authoritative Host save boundary. */
 export interface StorageModelConfigUpdateRecord extends Omit<
   StorageModelConfigRecord,
-  'id' | 'providerProfileConfig' | 'apiTokenOverrideStatus'
+  'id' | 'providerProfileConfig' | 'apiTokenOverrideStatus' | 'execution'
 > {
   /** Existing local identity, or null when Host must allocate a new configuration identity. */
   id: string | null

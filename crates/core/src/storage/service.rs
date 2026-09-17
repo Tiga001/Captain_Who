@@ -73,6 +73,7 @@ mod managed_command_workspaces;
 mod manual_compaction;
 mod mcp_approval_envelopes;
 mod messages;
+mod model_projection;
 mod notifications;
 mod pending_actions;
 mod provider_continuations;
@@ -95,6 +96,7 @@ pub use managed_artifacts::{
 pub use messages::{
     AgentWaitingForApprovalPersistenceOutcome, AgentWaitingSegmentUsagePersistenceOutcome,
 };
+pub use model_projection::{ModelProjection, ModelProjectionEntry};
 pub(crate) use pending_actions::manual_file_effect_has_authoritative_settlement;
 pub use pending_actions::{
     AgentPendingActionJsonCommitOutcome, AgentPendingActionResultCommitOutcome,

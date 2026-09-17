@@ -3,6 +3,7 @@ import type {
   CredentialStatus,
   ProviderProfileConfig,
   ProviderProfileUiDescriptor,
+  StorageModelExecutionStatus,
   StorageProviderProfileUpdate
 } from '@mycopilot/protocol'
 
@@ -31,6 +32,11 @@ interface ModelConfigFields {
 export interface ModelConfig extends ModelConfigFields {
   /** Host-authoritative, normalized Provider Profile used for safe presentation only. */
   providerProfileConfig: ProviderProfileConfig
+  /**
+   * Host-authoritative execution projection; the only availability judgement Renderer consumers
+   * may offer or validate against.
+   */
+  execution: StorageModelExecutionStatus
 }
 
 /** A new model that has not yet received its versioned Profile from the Host. */
@@ -56,35 +62,6 @@ export interface ModelFormValues {
   outputPrice: string
   supportsImage: boolean
   providerProfileUpdate: StorageProviderProfileUpdate
-}
-
-function hasCompleteConnectionPair(apiUrl: string | undefined, credentialStatus: CredentialStatus) {
-  const normalizedUrl = apiUrl?.trim() ?? ''
-  if (!normalizedUrl || credentialStatus !== 'configured') return false
-
-  try {
-    const parsed = new URL(normalizedUrl)
-    return parsed.protocol === 'http:' || parsed.protocol === 'https:'
-  } catch {
-    return false
-  }
-}
-
-export function isModelConnectionAvailable(
-  model: ModelConfig,
-  globalApiUrl: string,
-  globalApiTokenStatus: CredentialStatus
-): boolean {
-  const overrideUrl = model.apiUrlOverride?.trim() ?? ''
-
-  // A model either supplies a complete override or inherits the complete global pair.
-  // Never mix one model-level value with one global value, because that can target the
-  // wrong provider with the wrong credential.
-  if (overrideUrl.length > 0 || model.apiTokenOverrideStatus !== 'missing') {
-    return hasCompleteConnectionPair(overrideUrl, model.apiTokenOverrideStatus)
-  }
-
-  return hasCompleteConnectionPair(globalApiUrl, globalApiTokenStatus)
 }
 
 function inheritsGlobalConnection(model: ModelConfig): boolean {

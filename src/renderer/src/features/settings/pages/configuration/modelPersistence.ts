@@ -32,8 +32,10 @@ export function modelConfigFromForm(
   return {
     ...fields,
     id: editingModel.id,
-    // The persisted config is read-only presentation state. Host consumes the explicit update,
-    // resolves its version/dialect, and returns the normalized authoritative config.
-    providerProfileConfig: editingModel.providerProfileConfig
+    // The persisted config and its Host-computed execution projection are read-only
+    // presentation state. Host consumes the explicit update, resolves its version/dialect, and
+    // returns the normalized authoritative model.
+    providerProfileConfig: editingModel.providerProfileConfig,
+    execution: editingModel.execution
   }
 }

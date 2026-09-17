@@ -385,7 +385,8 @@ describe('global API URL Generic rematch', () => {
     outputPrice: '0',
     providerProfileConfig: legacyProfile('generic_openai_chat'),
     providerProfileUpdate: { kind: 'unchanged' },
-    enabled: true
+    enabled: true,
+    execution: { status: 'available' }
   }
 
   it('rematches both V1 and V2 inherited Generic models but leaves vendor configs untouched', () => {

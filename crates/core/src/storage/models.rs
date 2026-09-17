@@ -5,6 +5,7 @@ use crate::provider_profile::{
     ProviderProfileConfig, ProviderProfileValidationError, ProviderProtocolDialect,
     ProviderVendorId, ProviderVendorPublicSettings,
 };
+use crate::AgentModelUnavailableReason;
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -102,6 +103,25 @@ pub struct ModelConfigRecord {
     pub enabled: bool,
 }
 
+/// Host-authoritative execution projection of one configured model.
+///
+/// The model projection module computes this once per settings snapshot; selectors, settings
+/// editors, automation targets, and templates must share it instead of re-deriving availability
+/// from raw credential or connection fields.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum ModelExecutionStatus {
+    Available,
+    Unavailable { reason: AgentModelUnavailableReason },
+}
+
+impl ModelExecutionStatus {
+    /// Whether this model can be offered to and executed by the Host right now.
+    pub fn is_available(&self) -> bool {
+        matches!(self, Self::Available)
+    }
+}
+
 /// Credential-free model configuration returned to the Renderer settings editor.
 #[derive(Debug, Serialize, Clone)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -118,6 +138,7 @@ pub struct ModelConfigEditorRecord {
     pub cached_input_price: String,
     pub output_price: String,
     pub enabled: bool,
+    pub execution: ModelExecutionStatus,
 }
 
 impl std::fmt::Debug for ModelConfigRecord {

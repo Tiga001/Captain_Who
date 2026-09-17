@@ -62,7 +62,8 @@ const storedSettings: ModelSettingsSnapshot = {
         reasoning: { mode: 'provider_default', effort: 'provider_default' }
       },
       providerProfileUpdate: { kind: 'unchanged' },
-      enabled: true
+      enabled: true,
+      execution: { status: 'available' }
     }
   ]
 }
@@ -786,7 +787,8 @@ describe('ModelSettingsProvider hydration', () => {
           ...storedSettings.models[0]!,
           id: 'override-model',
           apiUrlOverride: 'https://override.example/v1/chat/completions',
-          apiTokenOverrideStatus: 'configured'
+          apiTokenOverrideStatus: 'configured',
+          execution: { status: 'available' }
         }
       ]
     }
@@ -799,7 +801,8 @@ describe('ModelSettingsProvider hydration', () => {
         id: savedModel.id ?? 'unexpected-new-model',
         apiTokenOverrideStatus: 'missing' as const,
         apiTokenOverrideMutation: { type: 'keep' as const },
-        providerProfileConfig: overrideSettings.models[0]!.providerProfileConfig
+        providerProfileConfig: overrideSettings.models[0]!.providerProfileConfig,
+        execution: { status: 'unavailable', reason: 'invalid_connection' } as const
       }))
     }))
 
@@ -824,18 +827,16 @@ describe('ModelSettingsProvider hydration', () => {
     await expect.element(screen.getByTestId('override-enabled-models')).toHaveTextContent('')
   })
 
-  it('hides inherited models when the global key cannot resolve in the active backend', async () => {
+  it('hides models the Host execution projection reports unavailable', async () => {
     const settings: ModelSettingsSnapshot = {
       ...storedSettings,
-      apiTokenStatus: 'unavailable',
       models: [
-        { ...storedSettings.models[0]!, id: 'model-inherited' },
         {
           ...storedSettings.models[0]!,
-          id: 'model-with-own-key',
-          apiUrlOverride: 'https://override.example/v1/chat/completions',
-          apiTokenOverrideStatus: 'configured'
-        }
+          id: 'model-projected-unavailable',
+          execution: { status: 'unavailable', reason: 'credential_unavailable' }
+        },
+        { ...storedSettings.models[0]!, id: 'model-with-own-key' }
       ]
     }
     service.loadModelSettings.mockResolvedValue(settings)
@@ -851,19 +852,25 @@ describe('ModelSettingsProvider hydration', () => {
       .toHaveTextContent('model-with-own-key')
     await expect
       .element(screen.getByTestId('enabled-models'))
-      .not.toHaveTextContent('model-inherited')
+      .not.toHaveTextContent('model-projected-unavailable')
   })
 
-  it('hides models whose dedicated key cannot resolve in the active backend', async () => {
+  it('offers exactly the Host projection, without re-deriving availability from raw fields', async () => {
     const settings: ModelSettingsSnapshot = {
       ...storedSettings,
       models: [
         { ...storedSettings.models[0]!, id: 'model-inherited' },
         {
           ...storedSettings.models[0]!,
-          id: 'model-foreign-key',
+          id: 'model-raw-looks-configured',
           apiUrlOverride: 'https://override.example/v1/chat/completions',
-          apiTokenOverrideStatus: 'unavailable'
+          apiTokenOverrideStatus: 'configured',
+          execution: { status: 'unavailable', reason: 'credential_unavailable' }
+        },
+        {
+          ...storedSettings.models[0]!,
+          id: 'model-raw-looks-empty',
+          execution: { status: 'available' }
         }
       ]
     }
@@ -878,7 +885,10 @@ describe('ModelSettingsProvider hydration', () => {
     await expect.element(screen.getByTestId('enabled-models')).toHaveTextContent('model-inherited')
     await expect
       .element(screen.getByTestId('enabled-models'))
-      .not.toHaveTextContent('model-foreign-key')
+      .toHaveTextContent('model-raw-looks-empty')
+    await expect
+      .element(screen.getByTestId('enabled-models'))
+      .not.toHaveTextContent('model-raw-looks-configured')
   })
 
   it('does not silently delete a model or toast when a display name edit collides', async () => {
@@ -938,6 +948,7 @@ describe('ModelSettingsProvider hydration', () => {
               ...model,
               id: 'host-generated-id',
               displayName: 'New Model Normalized',
+              execution: { status: 'available' },
               providerProfileConfig: {
                 schemaVersion: 1,
                 profile: { id: 'generic_openai_chat', version: 1 },
@@ -987,8 +998,19 @@ describe('ModelSettingsProvider hydration', () => {
         ...settings,
         models: [
           ...settings.models.slice(0, -1),
-          { ...draft, id: 'host-generated-a', providerProfileConfig },
-          { ...draft, id: 'host-generated-b', displayName: 'Another Model', providerProfileConfig }
+          {
+            ...draft,
+            id: 'host-generated-a',
+            execution: { status: 'available' },
+            providerProfileConfig
+          },
+          {
+            ...draft,
+            id: 'host-generated-b',
+            displayName: 'Another Model',
+            execution: { status: 'available' },
+            providerProfileConfig
+          }
         ]
       }
     })

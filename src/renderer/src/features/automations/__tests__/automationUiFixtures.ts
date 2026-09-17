@@ -14,6 +14,7 @@ export const testModel: ModelConfig = {
   cachedInputPrice: '',
   outputPrice: '0',
   enabled: true,
+  execution: { status: 'available' },
   providerProfileConfig: {
     schemaVersion: 1,
     profile: { id: 'generic_openai_chat', version: 1 },

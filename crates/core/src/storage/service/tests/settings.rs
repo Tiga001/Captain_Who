@@ -3,7 +3,8 @@ use crate::image_generation::{
     CredentialDeleteOutcome, CredentialReference, CredentialSecret, CredentialStore,
     CredentialStoreBackend, CredentialStoreError, CredentialStoreOperation,
 };
-use crate::storage::models::{CredentialMutation, CredentialStatus};
+use crate::storage::models::{CredentialMutation, CredentialStatus, ModelExecutionStatus};
+use crate::AgentModelUnavailableReason;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 #[derive(Default)]
@@ -126,6 +127,8 @@ fn renderer_save_request_value<T: serde::Serialize>(settings: &T) -> serde_json:
             })
             .unwrap_or_else(|| serde_json::json!({"type": "keep"}));
         model.remove("apiTokenOverrideStatus");
+        // The Host-owned execution projection never travels back in a save request.
+        model.remove("execution");
         model.insert("apiTokenOverrideMutation".to_string(), override_mutation);
     }
     value
@@ -2230,4 +2233,264 @@ fn executable_model_catalog_excludes_partial_pairs_and_disabled_models() {
         .map(|model| model.id.clone())
         .collect::<Vec<_>>();
     assert_eq!(executable_ids, vec!["model-inherited", "model-disabled"]);
+}
+
+#[test]
+fn model_projection_reports_typed_reasons_and_matches_the_executable_catalog() {
+    const FOREIGN_REF: &str =
+        "application-credential/v1/mac-keychain-v2/00000000000000000000000000000000";
+    let fixture = StorageFixture::new();
+    let service = fixture.service();
+    let mut override_model = official_profile_test_model(
+        "model-override",
+        Some("https://provider-override.example/v1/chat/completions"),
+        Some("override-secret"),
+    );
+    override_model.display_name = "Override Model".to_string();
+    let mut partial_model = official_profile_test_model(
+        "model-partial",
+        Some("https://provider-partial.example/v1/chat/completions"),
+        None,
+    );
+    partial_model.display_name = "Partial Model".to_string();
+    let mut token_only_model =
+        official_profile_test_model("model-token-only", None, Some("token-only-secret"));
+    token_only_model.display_name = "Token Only Model".to_string();
+    let mut disabled_model = official_profile_test_model("model-disabled", None, None);
+    disabled_model.display_name = "Disabled Model".to_string();
+    disabled_model.enabled = false;
+    service
+        .save_model_settings(ModelSettingsRecord {
+            api_url: "https://provider.example/v1/chat/completions".to_string(),
+            api_token: "global-secret".to_string(),
+            search_mode: "disabled".to_string(),
+            tavily_api_key: String::new(),
+            models: vec![
+                official_profile_test_model("model-inherited", None, None),
+                override_model,
+                partial_model,
+                token_only_model,
+                disabled_model,
+            ],
+        })
+        .unwrap();
+
+    let executable_ids = |service: &StorageService| {
+        service
+            .load_executable_model_catalog()
+            .unwrap()
+            .unwrap()
+            .models
+            .iter()
+            .map(|model| model.id.clone())
+            .collect::<Vec<_>>()
+    };
+    let editor_execution = |service: &StorageService| {
+        service
+            .load_model_settings_for_edit()
+            .unwrap()
+            .unwrap()
+            .models
+            .into_iter()
+            .map(|model| (model.id, model.execution))
+            .collect::<Vec<_>>()
+    };
+    let projection_execution = |service: &StorageService| {
+        service
+            .load_model_projection()
+            .unwrap()
+            .unwrap()
+            .models
+            .into_iter()
+            .map(|entry| (entry.model.id, entry.execution))
+            .collect::<Vec<_>>()
+    };
+    let available = ModelExecutionStatus::Available;
+    let unavailable = |reason| ModelExecutionStatus::Unavailable { reason };
+
+    let expected = vec![
+        ("model-inherited".to_string(), available.clone()),
+        ("model-override".to_string(), available.clone()),
+        (
+            "model-partial".to_string(),
+            unavailable(AgentModelUnavailableReason::InvalidConnection),
+        ),
+        (
+            "model-token-only".to_string(),
+            unavailable(AgentModelUnavailableReason::InvalidConnection),
+        ),
+        (
+            "model-disabled".to_string(),
+            unavailable(AgentModelUnavailableReason::Disabled),
+        ),
+    ];
+    assert_eq!(projection_execution(&service), expected);
+    assert_eq!(editor_execution(&service), expected);
+    assert_eq!(
+        executable_ids(&service),
+        vec!["model-inherited", "model-override"]
+    );
+
+    let projection = service.load_model_projection().unwrap().unwrap();
+    assert!(projection.entry("model-override").is_some());
+    assert!(projection.entry("model-unknown").is_none());
+
+    // A reference owned by another credential backend keeps the identity checks passing but must
+    // fail the credential gate closed with a typed reason.
+    let override_ref: String = {
+        let connection = service.state.connection().unwrap();
+        connection
+            .query_row(
+                "SELECT api_token_override_ref FROM models WHERE id = 'model-override'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    service
+        .state
+        .connection()
+        .unwrap()
+        .execute(
+            "UPDATE models SET api_token_override_ref = ?1 WHERE id = 'model-override'",
+            [FOREIGN_REF],
+        )
+        .unwrap();
+    assert_eq!(
+        projection_execution(&service)[1],
+        (
+            "model-override".to_string(),
+            unavailable(AgentModelUnavailableReason::CredentialUnavailable)
+        )
+    );
+    assert_eq!(executable_ids(&service), vec!["model-inherited"]);
+
+    // Restoring the reference restores availability everywhere.
+    service
+        .state
+        .connection()
+        .unwrap()
+        .execute(
+            "UPDATE models SET api_token_override_ref = ?1 WHERE id = 'model-override'",
+            [override_ref.as_str()],
+        )
+        .unwrap();
+    assert_eq!(
+        executable_ids(&service),
+        vec!["model-inherited", "model-override"]
+    );
+
+    // A dangling reference (secret deleted from the backend) fails the same way.
+    fixture
+        .model_credentials
+        .delete(&CredentialReference::parse(&override_ref).unwrap())
+        .unwrap();
+    assert_eq!(
+        projection_execution(&service)[1],
+        (
+            "model-override".to_string(),
+            unavailable(AgentModelUnavailableReason::CredentialUnavailable)
+        )
+    );
+
+    // Clearing the inherited global credential leaves the inherit-only model without a complete
+    // effective connection, which the identity checks report as an invalid connection.
+    service
+        .state
+        .connection()
+        .unwrap()
+        .execute(
+            "UPDATE model_provider_settings SET api_token_ref = NULL WHERE id = 'default'",
+            [],
+        )
+        .unwrap();
+    assert_eq!(
+        projection_execution(&service)[0],
+        (
+            "model-inherited".to_string(),
+            unavailable(AgentModelUnavailableReason::InvalidConnection)
+        )
+    );
+
+    // The editor annotation, the projection, and the executable catalog agree on the available
+    // set for the same snapshot.
+    let editor_available_ids = |service: &StorageService| {
+        service
+            .load_model_settings_for_edit()
+            .unwrap()
+            .unwrap()
+            .models
+            .into_iter()
+            .filter(|model| model.execution.is_available())
+            .map(|model| model.id)
+            .collect::<Vec<_>>()
+    };
+    let projection_available_ids = |service: &StorageService| {
+        service
+            .load_model_projection()
+            .unwrap()
+            .unwrap()
+            .models
+            .into_iter()
+            .filter(|entry| entry.execution.is_available())
+            .map(|entry| entry.model.id)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(editor_available_ids(&service), executable_ids(&service));
+    assert_eq!(projection_available_ids(&service), executable_ids(&service));
+}
+
+#[test]
+fn editor_record_execution_refreshes_after_a_renderer_save() {
+    let fixture = StorageFixture::new();
+    let service = fixture.service();
+    let mut settings = revision_test_settings();
+    settings.api_token = String::new();
+    let request = with_current_configuration_revision(
+        &service,
+        renderer_save_request(
+            &settings,
+            serde_json::json!({ "kind": "select_generic" }),
+            None,
+        ),
+    );
+    let saved = service.save_model_settings_request(request).unwrap();
+    assert_eq!(saved.api_token_status, CredentialStatus::Missing);
+    assert_eq!(
+        saved.models[0].execution,
+        ModelExecutionStatus::Unavailable {
+            reason: AgentModelUnavailableReason::InvalidConnection
+        }
+    );
+    assert!(service
+        .load_executable_model_catalog()
+        .unwrap()
+        .unwrap()
+        .models
+        .is_empty());
+
+    settings.api_token = "fresh-global-secret".to_string();
+    let model_id = saved.models[0].id.clone();
+    let request = with_current_configuration_revision(
+        &service,
+        renderer_save_request(
+            &settings,
+            serde_json::json!({ "kind": "select_generic" }),
+            Some(&model_id),
+        ),
+    );
+    let saved = service.save_model_settings_request(request).unwrap();
+    assert_eq!(saved.api_token_status, CredentialStatus::Configured);
+    assert_eq!(saved.models[0].execution, ModelExecutionStatus::Available);
+    assert_eq!(
+        service
+            .load_executable_model_catalog()
+            .unwrap()
+            .unwrap()
+            .models
+            .iter()
+            .map(|model| model.id.clone())
+            .collect::<Vec<_>>(),
+        vec![model_id]
+    );
 }

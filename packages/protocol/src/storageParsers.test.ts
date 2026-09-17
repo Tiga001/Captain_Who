@@ -484,7 +484,8 @@ describe('secret-free model settings parsers', () => {
     inputPrice: '0',
     cachedInputPrice: '',
     outputPrice: '0',
-    enabled: true
+    enabled: true,
+    execution: { status: 'available' }
   } as const
   const snapshot = {
     configurationRevision: 'model-settings-v1:00000000-0000-4000-8000-000000000001',
@@ -638,6 +639,28 @@ describe('secret-free model settings parsers', () => {
     )
   })
 
+  it.each([
+    { ...snapshot, models: [{ ...model, execution: { status: 'unknown' } }] },
+    {
+      ...snapshot,
+      models: [{ ...model, execution: { status: 'unavailable', reason: 'unknown_reason' } }]
+    },
+    {
+      ...snapshot,
+      models: [{ ...model, execution: { status: 'available', reason: 'disabled' } }]
+    }
+  ])('rejects malformed execution projections %#', (value) => {
+    expect(() => parseStorageModelSettingsRecord(value)).toThrow(/execution/)
+  })
+
+  it('requires the execution projection on every model', () => {
+    const modelWithoutExecution: Record<string, unknown> = { ...model }
+    Reflect.deleteProperty(modelWithoutExecution, 'execution')
+    expect(() =>
+      parseStorageModelSettingsRecord({ ...snapshot, models: [modelWithoutExecution] })
+    ).toThrow(/execution/)
+  })
+
   it('rejects a malformed Host model-settings revision', () => {
     expect(() =>
       parseStorageModelSettingsRecord({
@@ -666,6 +689,10 @@ describe('secret-free model settings parsers', () => {
           providerProfileUpdate: { kind: 'unchanged', profileVersion: 1 }
         }
       ]
+    },
+    {
+      ...update,
+      models: [{ ...update.models[0], execution: { status: 'available' } }]
     },
     { ...update, apiToken: 'legacy-secret' }
   ])('rejects malformed mutations and legacy update fields %#', (value) => {

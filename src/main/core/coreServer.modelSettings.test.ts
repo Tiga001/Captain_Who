@@ -188,7 +188,8 @@ describe('CoreServer model settings client', () => {
           inputPrice: '0',
           cachedInputPrice: '',
           outputPrice: '0',
-          enabled: true
+          enabled: true,
+          execution: { status: 'available' }
         }
       ]
     }

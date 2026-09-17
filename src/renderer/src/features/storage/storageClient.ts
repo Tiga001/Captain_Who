@@ -436,7 +436,8 @@ function mapModelFromStorage(model: StorageModelConfigRecord): ModelConfig {
     inputPrice: model.inputPrice,
     cachedInputPrice: model.cachedInputPrice,
     outputPrice: model.outputPrice,
-    enabled: model.enabled
+    enabled: model.enabled,
+    execution: model.execution
   }
 }
 

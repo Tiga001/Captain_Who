@@ -38,7 +38,8 @@ const authoritativeSettings: StorageModelSettingsRecord = {
       inputPrice: '0',
       cachedInputPrice: '',
       outputPrice: '0',
-      enabled: true
+      enabled: true,
+      execution: { status: 'available' }
     }
   ]
 }
@@ -78,7 +79,8 @@ describe('model settings storage client', () => {
             inputPrice: '0',
             cachedInputPrice: '',
             outputPrice: '0',
-            enabled: true
+            enabled: true,
+            execution: { status: 'available' }
           }
         ]
       },
@@ -112,6 +114,7 @@ describe('model settings storage client', () => {
       authoritativeSettings.models[0]?.providerProfileConfig
     )
     expect(saved.models[0]?.providerProfileUpdate).toEqual({ kind: 'unchanged' })
+    expect(saved.models[0]?.execution).toEqual({ status: 'available' })
   })
 
   it('passes the safe profile descriptor projection through unchanged', async () => {

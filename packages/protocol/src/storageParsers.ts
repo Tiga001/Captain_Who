@@ -15,6 +15,7 @@ import type {
   StorageConversationForkPoint,
   StorageForkConversationErrorData,
   StorageForkConversationRequest,
+  StorageModelExecutionStatus,
   StorageModelSettingsRecord,
   StorageModelSettingsUpdateRecord,
   StorageProviderProfileUpdate,
@@ -48,6 +49,20 @@ const MAX_PROVIDER_DESCRIPTOR_DISPLAY_NAME_BYTES = 256
 const MAX_PROVIDER_VENDOR_ID_BYTES = 32
 const MAX_CREDENTIAL_LENGTH = 8_192
 const CREDENTIAL_STATUSES = ['missing', 'configured', 'unavailable'] as const
+const MODEL_EXECUTION_STATUSES = ['available', 'unavailable'] as const
+const MODEL_UNAVAILABLE_REASONS = [
+  'settings_missing',
+  'not_found',
+  'disabled',
+  'invalid_connection',
+  'invalid_profile',
+  'missing_connection_identity',
+  'missing_protocol_identity',
+  'unsupported_runtime',
+  'capabilities_changed',
+  'credential_missing',
+  'credential_unavailable'
+] as const
 const PROVIDER_PROFILE_IDS = [
   'generic_openai_chat',
   'generic_anthropic_messages',
@@ -91,6 +106,20 @@ export function parseCredentialMutation(value: unknown, context: string): Creden
   }
   expectOnlyKeys(record, ['type'] as const, context)
   return { type }
+}
+
+function parseStorageModelExecution(value: unknown, context: string): StorageModelExecutionStatus {
+  const record = expectRecord(value, context)
+  const status = expectEnum(record.status, MODEL_EXECUTION_STATUSES, `${context}.status`)
+  if (status === 'available') {
+    expectOnlyKeys(record, ['status'] as const, context)
+    return { status }
+  }
+  expectOnlyKeys(record, ['status', 'reason'] as const, context)
+  return {
+    status,
+    reason: expectEnum(record.reason, MODEL_UNAVAILABLE_REASONS, `${context}.reason`)
+  }
 }
 
 function assertSecretFreeProjection(value: unknown, context: string): void {
@@ -233,7 +262,8 @@ export function parseStorageModelSettingsRecord(value: unknown): StorageModelSet
         'inputPrice',
         'cachedInputPrice',
         'outputPrice',
-        'enabled'
+        'enabled',
+        'execution'
       ] as const,
       modelContext
     )
@@ -261,7 +291,8 @@ export function parseStorageModelSettingsRecord(value: unknown): StorageModelSet
       inputPrice: expectString(model.inputPrice, `${modelContext}.inputPrice`),
       cachedInputPrice: expectString(model.cachedInputPrice, `${modelContext}.cachedInputPrice`),
       outputPrice: expectString(model.outputPrice, `${modelContext}.outputPrice`),
-      enabled: expectBoolean(model.enabled, `${modelContext}.enabled`)
+      enabled: expectBoolean(model.enabled, `${modelContext}.enabled`),
+      execution: parseStorageModelExecution(model.execution, `${modelContext}.execution`)
     }
   })
   return {

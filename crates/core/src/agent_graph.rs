@@ -577,7 +577,8 @@ pub struct TrustedActiveChildWakeBundle {
     pub claim_token: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum AgentModelUnavailableReason {
     SettingsMissing,
     NotFound,
@@ -589,6 +590,10 @@ pub enum AgentModelUnavailableReason {
     UnsupportedRuntime,
     /// The model's capability metadata changed after the caller sampled a selector directory.
     CapabilitiesChanged,
+    /// The effective credential for this model is absent in the active credential backend.
+    CredentialMissing,
+    /// The effective credential exists but cannot be read in the active credential backend.
+    CredentialUnavailable,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -107,6 +107,7 @@ function modelFixture(overrides: Partial<ModelConfig> = {}): ModelConfig {
     cachedInputPrice: '',
     outputPrice: '0',
     enabled: true,
+    execution: { status: 'available' },
     ...overrides
   }
 }

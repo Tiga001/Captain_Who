@@ -23,7 +23,6 @@ import { useFrontendConfig } from './FrontendConfigProvider'
 import { classifyModelSettingsSaveError } from '../features/settings/pages/configuration/modelSettingsErrors'
 import {
   INITIAL_MODEL_SAVE_DRAFTS,
-  isModelConnectionAvailable,
   modelConfig,
   prepareModelsForGlobalApiUrlChange
 } from './modelConfig'
@@ -398,9 +397,10 @@ export function ModelSettingsProvider({ children }: { children: ReactNode }) {
 
   const value = useMemo<ModelSettingsContextValue>(() => {
     const { apiTokenStatus, apiUrl, models, searchMode, tavilyApiKeyStatus } = settings
-    const enabledModels = settings.models.filter(
-      (model) => model.enabled && isModelConnectionAvailable(model, apiUrl, apiTokenStatus)
-    )
+    // The Host computes the single execution projection; the Renderer never re-derives
+    // availability. An optimistic save keeps the previous status for one round trip until the
+    // authoritative response or the invalidation refresh replaces the snapshot.
+    const enabledModels = settings.models.filter((model) => model.execution.status === 'available')
 
     return {
       apiUrl,
