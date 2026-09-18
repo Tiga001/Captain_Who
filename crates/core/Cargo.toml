@@ -31,6 +31,7 @@ similar = "2"
 tempfile = "3"
 time = { version = "0.3", features = ["formatting", "local-offset", "parsing"] }
 tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "rt", "sync", "time"] }
+tracing = "0.1"
 uuid.workspace = true
 url = "2"
 zip = { version = "2", default-features = false, features = ["deflate"] }

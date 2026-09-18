@@ -329,12 +329,27 @@ impl TavilySearchClient {
             if attempt > 0 {
                 let wait = match web_retry::retry_delay(attempt as u32, retry_after) {
                     Some(wait) => wait,
-                    None => break,
+                    None => {
+                        web_retry::trace_retry_skipped(
+                            "web_search",
+                            attempt + 1,
+                            "retry-after-too-long",
+                            "provider Retry-After exceeds the wait budget",
+                        );
+                        break;
+                    }
                 };
                 let remaining = deadline.saturating_duration_since(Instant::now());
                 if remaining <= wait + web_retry::MIN_RETRY_REMAINING {
+                    web_retry::trace_retry_skipped(
+                        "web_search",
+                        attempt + 1,
+                        "budget-exhausted",
+                        "insufficient remaining call budget",
+                    );
                     break;
                 }
+                web_retry::trace_retry_wait("web_search", attempt + 1, wait);
                 web_retry::wait_before_retry(wait, &cancellation_token).await?;
             }
 
@@ -350,16 +365,30 @@ impl TavilySearchClient {
                 )
                 .await;
             match outcome {
-                Ok(value) => return Ok(value),
+                Ok(value) => {
+                    if attempt > 0 {
+                        web_retry::trace_retry_recovered("web_search", attempt + 1);
+                    }
+                    return Ok(value);
+                }
                 Err(failure) => {
+                    let reason = failure.error.to_string();
                     if !failure.retryable {
+                        web_retry::trace_retry_skipped(
+                            "web_search",
+                            attempt + 1,
+                            "terminal",
+                            &reason,
+                        );
                         return Err(failure.error);
                     }
                     last_error = Some(failure.error);
                     retry_after = failure.retry_after;
                     if attempt + 1 == web_retry::MAX_ATTEMPTS {
+                        web_retry::trace_retries_exhausted("web_search", attempt + 1, &reason);
                         break;
                     }
+                    web_retry::trace_retry_planned("web_search", attempt + 1, &reason);
                 }
             }
         }

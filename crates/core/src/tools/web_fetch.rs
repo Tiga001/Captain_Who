@@ -276,12 +276,27 @@ impl TavilyExtractClient {
             if attempt > 0 {
                 let wait = match web_retry::retry_delay(attempt as u32, retry_after) {
                     Some(wait) => wait,
-                    None => break,
+                    None => {
+                        web_retry::trace_retry_skipped(
+                            "web_fetch",
+                            attempt + 1,
+                            "retry-after-too-long",
+                            "provider Retry-After exceeds the wait budget",
+                        );
+                        break;
+                    }
                 };
                 let remaining = deadline.saturating_duration_since(Instant::now());
                 if remaining <= wait + web_retry::MIN_RETRY_REMAINING {
+                    web_retry::trace_retry_skipped(
+                        "web_fetch",
+                        attempt + 1,
+                        "budget-exhausted",
+                        "insufficient remaining call budget",
+                    );
                     break;
                 }
+                web_retry::trace_retry_wait("web_fetch", attempt + 1, wait);
                 web_retry::wait_before_retry(wait, &cancellation_token).await?;
             }
 
@@ -298,22 +313,54 @@ impl TavilyExtractClient {
                 .await;
             match outcome {
                 Ok(value) => {
-                    if attempt + 1 < web_retry::MAX_ATTEMPTS && extraction_was_rejected(&value) {
+                    if should_retry_rejected_extraction(attempt, &value) {
+                        web_retry::trace_retry_planned(
+                            "web_fetch",
+                            attempt + 1,
+                            &rejected_extraction_reason(&value),
+                        );
                         last_outcome = Some(ExtractOutcome::Rejected(value));
                         retry_after = None;
                         continue;
                     }
+                    if extraction_was_rejected(&value) {
+                        if extraction_rejection_is_deterministic(&value) {
+                            web_retry::trace_retry_skipped(
+                                "web_fetch",
+                                attempt + 1,
+                                "deterministic-not-found",
+                                &rejected_extraction_reason(&value),
+                            );
+                        } else {
+                            web_retry::trace_retries_exhausted(
+                                "web_fetch",
+                                attempt + 1,
+                                &rejected_extraction_reason(&value),
+                            );
+                        }
+                    } else if attempt > 0 {
+                        web_retry::trace_retry_recovered("web_fetch", attempt + 1);
+                    }
                     return Ok(value);
                 }
                 Err(failure) => {
+                    let reason = failure.error.to_string();
                     if !failure.retryable {
+                        web_retry::trace_retry_skipped(
+                            "web_fetch",
+                            attempt + 1,
+                            "terminal",
+                            &reason,
+                        );
                         return Err(failure.error);
                     }
                     last_outcome = Some(ExtractOutcome::Failed(failure.error));
                     retry_after = failure.retry_after;
                     if attempt + 1 == web_retry::MAX_ATTEMPTS {
+                        web_retry::trace_retries_exhausted("web_fetch", attempt + 1, &reason);
                         break;
                     }
+                    web_retry::trace_retry_planned("web_fetch", attempt + 1, &reason);
                 }
             }
         }
@@ -403,6 +450,51 @@ fn extraction_was_rejected(response: &Value) -> bool {
         .and_then(Value::as_array)
         .and_then(|results| results.first());
     content_is_empty(result.and_then(extract_content)) && !raw_failed_results(response).is_empty()
+}
+
+/// Whether a rejected extraction outcome should be retried: only transient rejections with
+/// attempts left. An explicit "not found" answer is deterministic, so repeating the same
+/// request cannot change it.
+fn should_retry_rejected_extraction(attempt: usize, response: &Value) -> bool {
+    attempt + 1 < web_retry::MAX_ATTEMPTS
+        && extraction_was_rejected(response)
+        && !extraction_rejection_is_deterministic(response)
+}
+
+/// Whether every provider-reported failure for this extraction is an explicit "not found"
+/// (HTTP 404) outcome rather than a transient fetch problem.
+fn extraction_rejection_is_deterministic(response: &Value) -> bool {
+    let failures = raw_failed_results(response);
+    !failures.is_empty() && failures.iter().all(is_not_found_failure)
+}
+
+fn is_not_found_failure(failure: &Value) -> bool {
+    failed_result_message(failure)
+        .map(is_not_found_message)
+        .unwrap_or(false)
+}
+
+fn is_not_found_message(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+    message.contains("404") || message.contains("not found")
+}
+
+fn failed_result_message(failure: &Value) -> Option<&str> {
+    failure
+        .get("error")
+        .or_else(|| failure.get("message"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|message| !message.is_empty())
+}
+
+/// First provider failure message, used only for retry diagnostics.
+fn rejected_extraction_reason(response: &Value) -> String {
+    raw_failed_results(response)
+        .iter()
+        .find_map(failed_result_message)
+        .unwrap_or("no failure detail provided")
+        .to_string()
 }
 
 fn normalize_public_url(input: &str) -> AgentResult<String> {
@@ -979,6 +1071,51 @@ mod tests {
             "results": [{"url": "https://example.com/ok"}]
         });
         assert!(!extraction_was_rejected(&empty_and_unmarked));
+    }
+
+    #[test]
+    fn deterministic_not_found_rejections_skip_retries() {
+        let not_found = json!({
+            "results": [],
+            "failed_results": [{
+                "url": "https://example.com/definitely-not-a-real-page-123",
+                "error": "404 page not found"
+            }]
+        });
+        assert!(extraction_was_rejected(&not_found));
+        assert!(extraction_rejection_is_deterministic(&not_found));
+        assert!(!should_retry_rejected_extraction(0, &not_found));
+
+        let transient = json!({
+            "results": [],
+            "failed_results": [{
+                "url": "https://example.com/missing",
+                "error": "Failed to fetch url"
+            }]
+        });
+        assert!(extraction_was_rejected(&transient));
+        assert!(!extraction_rejection_is_deterministic(&transient));
+        assert!(should_retry_rejected_extraction(0, &transient));
+        assert!(!should_retry_rejected_extraction(
+            web_retry::MAX_ATTEMPTS - 1,
+            &transient
+        ));
+
+        let served = json!({
+            "results": [{"url": "https://example.com/ok", "raw_content": "body"}],
+            "failed_results": []
+        });
+        assert!(!should_retry_rejected_extraction(0, &served));
+    }
+
+    #[test]
+    fn detects_not_found_failure_messages() {
+        assert!(is_not_found_message("404 page not found"));
+        assert!(is_not_found_message("404 Not Found"));
+        assert!(is_not_found_message("HTTP 404"));
+        assert!(!is_not_found_message("Failed to fetch url"));
+        assert!(!is_not_found_message("getaddrinfo ENOTFOUND example.com"));
+        assert!(!is_not_found_message("connection reset by peer"));
     }
 
     #[test]
