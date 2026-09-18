@@ -38,6 +38,7 @@ mod skills_read_resource;
 mod skills_script;
 mod tool_set;
 mod web_fetch;
+mod web_retry;
 mod web_search;
 mod workspace_map;
 

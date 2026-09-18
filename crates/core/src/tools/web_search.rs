@@ -1,3 +1,4 @@
+use super::web_retry;
 use super::{block_on_tool_future, truncate_chars, AgentTool, ToolExecutionContext};
 use crate::cancellation::AgentCancellationToken;
 use crate::protocol::{
@@ -8,13 +9,18 @@ use reqwest::Client;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const TAVILY_SEARCH_ENDPOINT: &str = "https://api.tavily.com/search";
 const DEFAULT_MAX_RESULTS: usize = 5;
 const MAX_RESULTS: usize = 8;
 const TAVILY_MAX_CHUNKS_PER_SOURCE: usize = 3;
 const TAVILY_CHUNK_MAX_CHARS: usize = 500;
+
+// Retry budget for one tool call: a single provider attempt keeps the previous timeout,
+// while the call-level budget bounds attempts plus backoff waits so retries cannot hang the tool.
+const SEARCH_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(20);
+const SEARCH_TOTAL_BUDGET: Duration = Duration::from_secs(35);
 
 pub(crate) struct WebSearchTool {
     policy: Arc<dyn crate::WebSearchPolicySource>,
@@ -309,37 +315,119 @@ impl TavilySearchClient {
         );
 
         let client = Client::builder()
-            .timeout(Duration::from_secs(20))
+            .timeout(SEARCH_ATTEMPT_TIMEOUT)
+            .connect_timeout(web_retry::CONNECT_TIMEOUT)
             .build()
             .map_err(|error| AgentError::new(format!("创建 Tavily HTTP 客户端失败：{error}")))?;
+
+        let deadline = Instant::now() + SEARCH_TOTAL_BUDGET;
+        let mut last_error: Option<AgentError> = None;
+        let mut retry_after: Option<Duration> = None;
+
+        for attempt in 0..web_retry::MAX_ATTEMPTS {
+            cancellation_token.check()?;
+            if attempt > 0 {
+                let wait = match web_retry::retry_delay(attempt as u32, retry_after) {
+                    Some(wait) => wait,
+                    None => break,
+                };
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining <= wait + web_retry::MIN_RETRY_REMAINING {
+                    break;
+                }
+                web_retry::wait_before_retry(wait, &cancellation_token).await?;
+            }
+
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            let attempt_timeout = SEARCH_ATTEMPT_TIMEOUT.min(remaining);
+            let outcome = self
+                .search_once(
+                    &client,
+                    &headers,
+                    request,
+                    attempt_timeout,
+                    &cancellation_token,
+                )
+                .await;
+            match outcome {
+                Ok(value) => return Ok(value),
+                Err(failure) => {
+                    if !failure.retryable {
+                        return Err(failure.error);
+                    }
+                    last_error = Some(failure.error);
+                    retry_after = failure.retry_after;
+                    if attempt + 1 == web_retry::MAX_ATTEMPTS {
+                        break;
+                    }
+                }
+            }
+        }
+
+        Err(last_error.unwrap_or_else(|| {
+            AgentError::new("web_search 请求 Tavily 搜索失败：内部重试未产生可返回结果。")
+        }))
+    }
+
+    async fn search_once(
+        &self,
+        client: &Client,
+        headers: &HeaderMap,
+        request: &TavilySearchRequest,
+        attempt_timeout: Duration,
+        cancellation_token: &AgentCancellationToken,
+    ) -> Result<Value, web_retry::AttemptFailure> {
         let response = client
             .post(TAVILY_SEARCH_ENDPOINT)
-            .headers(headers)
+            .headers(headers.clone())
+            .timeout(attempt_timeout)
             .json(&request.to_payload())
             .send();
         let response = tokio::select! {
-            _ = cancellation_token.cancelled() => return Err(AgentError::cancelled()),
-            response = response => response
-                .map_err(|error| AgentError::new(format!("请求 Tavily 搜索失败：{error}")))?,
+            _ = cancellation_token.cancelled() => {
+                return Err(web_retry::AttemptFailure::terminal(AgentError::cancelled()));
+            }
+            response = response => match response {
+                Ok(response) => response,
+                Err(error) => {
+                    return Err(web_retry::AttemptFailure::retryable(AgentError::new(
+                        format!("请求 Tavily 搜索失败：{error}"),
+                    )));
+                }
+            },
         };
         let status = response.status();
+        let retry_after = web_retry::retry_after_delay(response.headers());
         let body = tokio::select! {
-            _ = cancellation_token.cancelled() => return Err(AgentError::cancelled()),
-            body = response.text() => body
-                .map_err(|error| AgentError::new(format!("读取 Tavily 响应失败：{error}")))?,
+            _ = cancellation_token.cancelled() => {
+                return Err(web_retry::AttemptFailure::terminal(AgentError::cancelled()));
+            }
+            body = response.text() => match body {
+                Ok(body) => body,
+                Err(error) => {
+                    return Err(web_retry::AttemptFailure::retryable(AgentError::new(
+                        format!("读取 Tavily 响应失败：{error}"),
+                    )));
+                }
+            },
         };
 
         if !status.is_success() {
             let (body, _) = truncate_chars(&body, 600);
-            return Err(AgentError::new(format!(
-                "Tavily 搜索返回 {}：{}",
-                status.as_u16(),
-                body
-            )));
+            let error = AgentError::new(format!("Tavily 搜索返回 {}：{}", status.as_u16(), body));
+            return Err(if web_retry::is_retryable_status(status) {
+                web_retry::AttemptFailure::retryable(error).with_retry_after(retry_after)
+            } else {
+                web_retry::AttemptFailure::terminal(error)
+            });
         }
 
-        serde_json::from_str(&body)
-            .map_err(|error| AgentError::new(format!("Tavily 响应不是有效 JSON：{error}")))
+        match serde_json::from_str(&body) {
+            Ok(value) => Ok(value),
+            Err(error) => Err(web_retry::AttemptFailure::retryable(AgentError::new(
+                format!("Tavily 响应不是有效 JSON：{error}"),
+            ))),
+        }
     }
 }
 

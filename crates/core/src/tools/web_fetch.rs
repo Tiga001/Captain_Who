@@ -1,3 +1,4 @@
+use super::web_retry;
 use super::{block_on_tool_future, truncate_chars, AgentTool, ToolExecutionContext};
 use crate::cancellation::AgentCancellationToken;
 use crate::protocol::{
@@ -10,7 +11,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const TAVILY_EXTRACT_ENDPOINT: &str = "https://api.tavily.com/extract";
 const DEFAULT_EVENT_CONTENT_CHARS: usize = 40_000;
@@ -21,6 +22,11 @@ const DEFAULT_CHUNKS_PER_SOURCE: usize = 3;
 const MAX_CHUNKS_PER_SOURCE: usize = 5;
 const MAX_IMAGES: usize = 30;
 const MAX_FAILED_RESULTS: usize = 10;
+
+// Retry budget for one tool call: a single provider attempt keeps the previous timeout,
+// while the call-level budget bounds attempts plus backoff waits so retries cannot hang the tool.
+const EXTRACT_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(70);
+const EXTRACT_TOTAL_BUDGET: Duration = Duration::from_secs(90);
 
 pub(crate) struct WebFetchTool {
     policy: Arc<dyn crate::WebSearchPolicySource>,
@@ -256,38 +262,147 @@ impl TavilyExtractClient {
         );
 
         let client = Client::builder()
-            .timeout(Duration::from_secs(70))
+            .timeout(EXTRACT_ATTEMPT_TIMEOUT)
+            .connect_timeout(web_retry::CONNECT_TIMEOUT)
             .build()
             .map_err(|error| AgentError::new(format!("创建 Tavily HTTP 客户端失败：{error}")))?;
+
+        let deadline = Instant::now() + EXTRACT_TOTAL_BUDGET;
+        let mut last_outcome: Option<ExtractOutcome> = None;
+        let mut retry_after: Option<Duration> = None;
+
+        for attempt in 0..web_retry::MAX_ATTEMPTS {
+            cancellation_token.check()?;
+            if attempt > 0 {
+                let wait = match web_retry::retry_delay(attempt as u32, retry_after) {
+                    Some(wait) => wait,
+                    None => break,
+                };
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining <= wait + web_retry::MIN_RETRY_REMAINING {
+                    break;
+                }
+                web_retry::wait_before_retry(wait, &cancellation_token).await?;
+            }
+
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            let attempt_timeout = EXTRACT_ATTEMPT_TIMEOUT.min(remaining);
+            let outcome = self
+                .extract_once(
+                    &client,
+                    &headers,
+                    request,
+                    attempt_timeout,
+                    &cancellation_token,
+                )
+                .await;
+            match outcome {
+                Ok(value) => {
+                    if attempt + 1 < web_retry::MAX_ATTEMPTS && extraction_was_rejected(&value) {
+                        last_outcome = Some(ExtractOutcome::Rejected(value));
+                        retry_after = None;
+                        continue;
+                    }
+                    return Ok(value);
+                }
+                Err(failure) => {
+                    if !failure.retryable {
+                        return Err(failure.error);
+                    }
+                    last_outcome = Some(ExtractOutcome::Failed(failure.error));
+                    retry_after = failure.retry_after;
+                    if attempt + 1 == web_retry::MAX_ATTEMPTS {
+                        break;
+                    }
+                }
+            }
+        }
+
+        match last_outcome {
+            Some(ExtractOutcome::Failed(error)) => Err(error),
+            Some(ExtractOutcome::Rejected(value)) => Ok(value),
+            None => Err(AgentError::new(
+                "web_fetch 请求 Tavily 抽取失败：内部重试未产生可返回结果。",
+            )),
+        }
+    }
+
+    async fn extract_once(
+        &self,
+        client: &Client,
+        headers: &HeaderMap,
+        request: &TavilyExtractRequest,
+        attempt_timeout: Duration,
+        cancellation_token: &AgentCancellationToken,
+    ) -> Result<Value, web_retry::AttemptFailure> {
         let response = client
             .post(TAVILY_EXTRACT_ENDPOINT)
-            .headers(headers)
+            .headers(headers.clone())
+            .timeout(attempt_timeout)
             .json(&request.to_payload())
             .send();
         let response = tokio::select! {
-            _ = cancellation_token.cancelled() => return Err(AgentError::cancelled()),
-            response = response => response
-                .map_err(|error| AgentError::new(format!("请求 Tavily 抽取失败：{error}")))?,
+            _ = cancellation_token.cancelled() => {
+                return Err(web_retry::AttemptFailure::terminal(AgentError::cancelled()));
+            }
+            response = response => match response {
+                Ok(response) => response,
+                Err(error) => {
+                    return Err(web_retry::AttemptFailure::retryable(AgentError::new(
+                        format!("请求 Tavily 抽取失败：{error}"),
+                    )));
+                }
+            },
         };
         let status = response.status();
+        let retry_after = web_retry::retry_after_delay(response.headers());
         let body = tokio::select! {
-            _ = cancellation_token.cancelled() => return Err(AgentError::cancelled()),
-            body = response.text() => body
-                .map_err(|error| AgentError::new(format!("读取 Tavily 响应失败：{error}")))?,
+            _ = cancellation_token.cancelled() => {
+                return Err(web_retry::AttemptFailure::terminal(AgentError::cancelled()));
+            }
+            body = response.text() => match body {
+                Ok(body) => body,
+                Err(error) => {
+                    return Err(web_retry::AttemptFailure::retryable(AgentError::new(
+                        format!("读取 Tavily 响应失败：{error}"),
+                    )));
+                }
+            },
         };
 
         if !status.is_success() {
             let (body, _) = truncate_chars(&body, 600);
-            return Err(AgentError::new(format!(
-                "Tavily 抽取返回 {}：{}",
-                status.as_u16(),
-                body
-            )));
+            let error = AgentError::new(format!("Tavily 抽取返回 {}：{}", status.as_u16(), body));
+            return Err(if web_retry::is_retryable_status(status) {
+                web_retry::AttemptFailure::retryable(error).with_retry_after(retry_after)
+            } else {
+                web_retry::AttemptFailure::terminal(error)
+            });
         }
 
-        serde_json::from_str(&body)
-            .map_err(|error| AgentError::new(format!("Tavily 响应不是有效 JSON：{error}")))
+        match serde_json::from_str(&body) {
+            Ok(value) => Ok(value),
+            Err(error) => Err(web_retry::AttemptFailure::retryable(AgentError::new(
+                format!("Tavily 响应不是有效 JSON：{error}"),
+            ))),
+        }
     }
+}
+
+/// The most recent attempt outcome when the retry loop could not return a success directly.
+enum ExtractOutcome {
+    Failed(AgentError),
+    Rejected(Value),
+}
+
+/// Whether the provider answered without any usable content for the requested URL: the exact
+/// condition that `format_tavily_extract_response` turns into a final extraction error.
+fn extraction_was_rejected(response: &Value) -> bool {
+    let result = response
+        .get("results")
+        .and_then(Value::as_array)
+        .and_then(|results| results.first());
+    content_is_empty(result.and_then(extract_content)) && !raw_failed_results(response).is_empty()
 }
 
 fn normalize_public_url(input: &str) -> AgentResult<String> {
@@ -838,6 +953,32 @@ mod tests {
         assert!(error.to_string().contains("未能抽取可读正文"));
         assert!(error.to_string().contains("https://example.com/missing"));
         assert!(error.to_string().contains("404 Not Found"));
+    }
+
+    #[test]
+    fn detects_rejected_extraction_outcomes() {
+        let rejected = json!({
+            "results": [],
+            "failed_results": [{
+                "url": "https://example.com/missing",
+                "error": "Failed to fetch url"
+            }]
+        });
+        assert!(extraction_was_rejected(&rejected));
+
+        let served = json!({
+            "results": [{
+                "url": "https://example.com/ok",
+                "raw_content": "body"
+            }],
+            "failed_results": []
+        });
+        assert!(!extraction_was_rejected(&served));
+
+        let empty_and_unmarked = json!({
+            "results": [{"url": "https://example.com/ok"}]
+        });
+        assert!(!extraction_was_rejected(&empty_and_unmarked));
     }
 
     #[test]
