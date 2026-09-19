@@ -20,6 +20,25 @@ describe('model settings save errors', () => {
     })
   })
 
+  it('preserves the Host-computed context capacity details without exposing raw errors', () => {
+    const details = {
+      code: 'invalid_context_capacity_configuration',
+      modelId: 'model-1',
+      displayName: 'DeepSeek Max',
+      contextWindowTokens: 128000,
+      reservedOutputTokens: 131072,
+      safetyMarginTokens: 6400,
+      minimumContextWindowTokens: 137972
+    }
+    const error = new HostInvocationError({
+      message: 'private transport diagnostic',
+      code: -32000,
+      data: { kind: 'model_settings_validation', ...details }
+    })
+
+    expect(classifyModelSettingsSaveError(error)).toEqual(details)
+  })
+
   it.each([
     new Error('UNIQUE constraint failed: models.id'),
     new HostInvocationError({
@@ -28,6 +47,20 @@ describe('model settings save errors', () => {
         kind: 'model_settings_validation',
         code: 'duplicate_display_name',
         displayName: 'Model A',
+        apiToken: 'private-token'
+      }
+    }),
+    new HostInvocationError({
+      message: 'Invalid capacity.',
+      data: {
+        kind: 'model_settings_validation',
+        code: 'invalid_context_capacity_configuration',
+        modelId: 'model-1',
+        displayName: 'Model A',
+        contextWindowTokens: 128000,
+        reservedOutputTokens: 131072,
+        safetyMarginTokens: 6400,
+        minimumContextWindowTokens: 137972,
         apiToken: 'private-token'
       }
     })

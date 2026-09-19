@@ -12,7 +12,6 @@ import type {
   ChatPermissionMode,
   ChatSubmitOptions
 } from '../features/chat/chatTypes'
-import { DEFAULT_AGENT_MAX_TOKENS } from '../features/agentRun/constants'
 import {
   ensureAgentRun,
   settleAgentRunToolActivities
@@ -126,7 +125,6 @@ export function useRequestAssistantResponse({
           content,
           contextWindowIndicatorEnabled,
           conversationId,
-          maxTokens: DEFAULT_AGENT_MAX_TOKENS,
           modelId,
           permissions: resolveChatPermissions(permissionMode, uiPreferences.customPermissions),
           projectId,

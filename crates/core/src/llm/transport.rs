@@ -203,12 +203,16 @@ where
             attempt,
             max_attempts: LLM_MAX_ATTEMPTS,
         });
+        let mut partial_response = String::new();
         let result = complete_chat_streaming_once(
             &request,
             cancellation_token.clone(),
             validation,
             inactivity_timeout,
             |event| {
+                if let LlmStreamEvent::Delta(text) = &event {
+                    partial_response.push_str(text);
+                }
                 on_event(event);
             },
         )
@@ -229,6 +233,11 @@ where
                 return Err(merge_error_usage(error, &mut total_usage, usage_semantics));
             }
             Err(error) => {
+                let error = if partial_response.is_empty() {
+                    error
+                } else {
+                    error.with_partial_response(partial_response)
+                };
                 let error = merge_error_usage(error, &mut total_usage, usage_semantics);
                 let reason = safe_retry_reason(&error);
                 on_event(LlmStreamEvent::AttemptReset {
@@ -411,10 +420,28 @@ pub(super) fn parse_non_stream_response_with_profile(
         );
     }
 
+    let finish_reason = extract_finish_reason(&value);
+    if validation == LlmResponseValidation::RequireModelAction
+        && matches!(
+            finish_reason.as_deref(),
+            Some("length" | "max_tokens" | "max_output_tokens")
+        )
+    {
+        // Check before parsing tool arguments: a truncated JSON tool call is not executable,
+        // and must not trigger the malformed-tool retry path instead of reporting the limit.
+        return Err(AgentError::structured(
+            "agent.output_limit_reached",
+            "输出达到上限，回复未完成",
+            json!({"finishReason": finish_reason}),
+        )
+        .with_usage(Some(usage))
+        .with_partial_response(
+            super::response::extract_response_text(&value).unwrap_or_default(),
+        ));
+    }
     let assistant_turn = adapter
         .parse_non_streaming_response(provider_profile, provider_protocol, &value)
         .map_err(|error| error.with_usage(Some(usage.clone())))?;
-    let finish_reason = extract_finish_reason(&value);
     let has_private_model_action = adapter
         .has_private_model_action(provider_protocol, &assistant_turn)
         .map_err(|error| error.with_usage(Some(usage.clone())))?;
@@ -742,6 +769,19 @@ pub(super) fn validate_llm_response(
     validation: LlmResponseValidation,
 ) -> AgentResult<()> {
     if validation == LlmResponseValidation::RequireModelAction
+        && matches!(
+            finish_reason,
+            Some("length" | "max_tokens" | "max_output_tokens")
+        )
+    {
+        return Err(AgentError::structured(
+            "agent.output_limit_reached",
+            "输出达到上限，回复未完成",
+            json!({"finishReason": finish_reason}),
+        )
+        .with_partial_response(content));
+    }
+    if validation == LlmResponseValidation::RequireModelAction
         && content.trim().is_empty()
         && tool_calls.is_empty()
         && !has_private_model_action
@@ -786,15 +826,20 @@ pub(super) fn retry_exhausted_error(error: AgentError, attempts: usize) -> Agent
     }
 
     let usage = error.usage().cloned();
+    let partial_response = error.partial_response().unwrap_or_default().to_string();
     let message = format!(
         "模型请求失败，已重试 {} 次：{}",
         attempts - 1,
         safe_retry_reason(&error)
     );
     if let (Some(code), Some(details)) = (error.code(), error.details()) {
-        AgentError::structured(code, message, details.clone()).with_usage(usage)
+        AgentError::structured(code, message, details.clone())
+            .with_usage(usage)
+            .with_partial_response(partial_response)
     } else {
-        AgentError::new(message).with_usage(usage)
+        AgentError::new(message)
+            .with_usage(usage)
+            .with_partial_response(partial_response)
     }
 }
 

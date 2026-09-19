@@ -413,6 +413,10 @@ async fn automation_human_root_uses_atomic_admission_and_new_chat_per_run() {
 
     let requests = model_server.await.unwrap();
     assert_eq!(requests.len(), 3);
+    assert!(requests
+        .iter()
+        .all(|request| request.get("max_tokens").is_none()
+            && request.get("max_completion_tokens").is_none()));
     assert!(requests.iter().all(
         |request| request["tools"].as_array().is_some_and(|tools| tools
             .iter()

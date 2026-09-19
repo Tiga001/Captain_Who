@@ -257,6 +257,9 @@ pub(super) fn current_interruption_is_safe(value: &serde_json::Value) -> bool {
                     | "context_limit_exceeded"
                     | "request_rejected"
                     | "response_invalid"
+                    | "output_limit_reached"
+                    | "empty_response"
+                    | "stream_interrupted"
                     | "request_failed"
                     | "admission_unconfirmed"
             )

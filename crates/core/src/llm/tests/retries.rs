@@ -1,6 +1,58 @@
 use super::*;
 
 #[tokio::test]
+async fn incomplete_streams_preserve_public_text_without_retry_or_commit() {
+    for (style, body, expected_code) in [
+        (AgentApiStyle::OpenAiCompatible,
+         "data: {\"choices\":[{\"delta\":{\"content\":\"partial reply\"}}]}\n\n",
+         "agent.stream_interrupted"),
+        (AgentApiStyle::OpenAiCompatible,
+         "data: {\"choices\":[{\"delta\":{\"content\":\"partial reply\",\"tool_calls\":[{\"index\":0,\"id\":\"broken-tool\",\"function\":{\"name\":\"run_command\",\"arguments\":\"{\"}}]},\"finish_reason\":\"length\"}]}\n\ndata: [DONE]\n\n",
+         "agent.output_limit_reached"),
+        (AgentApiStyle::AnthropicCompatible,
+         "event: content_block_delta\ndata: {\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"partial reply\"}}\n\n",
+         "agent.stream_interrupted"),
+    ] {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let _ = read_test_http_request_raw(&mut stream).await;
+            stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n").await.unwrap();
+            stream.write_all(body.as_bytes()).await.unwrap();
+        });
+        let mut request = request_with_messages(vec![message(LlmMessageRole::User, "Hello")]);
+        request.api_url = format!("http://{address}/v1/chat/completions");
+        request.provider_profile = generic_provider_profile(style);
+        request.provider_protocol = generic_provider_protocol(style, "test-model");
+        let mut events = Vec::new();
+        let error = complete_chat_streaming(request, AgentCancellationToken::new(), |event| events.push(event)).await.unwrap_err();
+        server.await.unwrap();
+        assert_eq!(error.code(), Some(expected_code));
+        assert_eq!(error.partial_response(), Some("partial reply"));
+        assert!(!events.iter().any(|event| matches!(event, LlmStreamEvent::Retrying { .. } | LlmStreamEvent::Committed)));
+        assert_eq!(error.usage().and_then(|usage| usage.billable_request_count), Some(1));
+    }
+}
+
+#[test]
+fn nonstream_output_limit_precedes_tool_parsing_and_never_exposes_reasoning() {
+    let protocol = generic_provider_protocol(AgentApiStyle::OpenAiCompatible, "test-model");
+    let body = json!({"choices": [{"message": {
+        "content": "partial reply", "reasoning_content": "private thinking",
+        "tool_calls": [{"id":"broken", "type":"function", "function":{"name":"run_command", "arguments":"{"}}]
+    }, "finish_reason":"length"}]}).to_string();
+    let error =
+        parse_non_stream_response(&body, &protocol, LlmResponseValidation::RequireModelAction)
+            .unwrap_err();
+    assert_eq!(error.code(), Some("agent.output_limit_reached"));
+    assert_eq!(error.partial_response(), Some("partial reply"));
+    let exhausted = retry_exhausted_error(error, 2);
+    assert_eq!(exhausted.partial_response(), Some("partial reply"));
+    assert!(!exhausted.to_string().contains("private thinking"));
+}
+
+#[tokio::test]
 async fn provider_http_client_does_not_follow_redirects_or_replay_authorization() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
@@ -169,7 +221,7 @@ async fn streaming_retries_the_known_upstream_content_type_400_and_recovers() {
             AgentApiStyle::OpenAiCompatible,
             "claude-opus-4-7",
         ),
-        max_tokens: 1_024,
+        max_tokens: Some(1_024),
         temperature: 0.2,
         stream: false,
         messages: vec![message(LlmMessageRole::User, "Hello")],
@@ -947,7 +999,7 @@ fn rejects_incompatible_tool_schema_before_building_an_http_request() {
         api_token: "token".to_string(),
         provider_profile: generic_provider_profile(AgentApiStyle::OpenAiCompatible),
         provider_protocol: generic_provider_protocol(AgentApiStyle::OpenAiCompatible, "gpt"),
-        max_tokens: 1024,
+        max_tokens: Some(1024),
         temperature: 0.2,
         stream: true,
         messages: vec![message(LlmMessageRole::User, "Read a file")],
@@ -1155,7 +1207,7 @@ async fn streaming_stop_without_text_or_tools_is_a_repairable_semantic_error() {
         api_token: "token".to_string(),
         provider_profile: generic_provider_profile(AgentApiStyle::OpenAiCompatible),
         provider_protocol: generic_provider_protocol(AgentApiStyle::OpenAiCompatible, "test-model"),
-        max_tokens: 1_024,
+        max_tokens: Some(1_024),
         temperature: 0.2,
         stream: true,
         messages: vec![message(LlmMessageRole::User, "Hello")],
@@ -1300,8 +1352,8 @@ fn internal_callers_can_defer_empty_response_validation() {
         parse_non_stream_response(&body, &protocol, LlmResponseValidation::AllowEmpty).unwrap();
 
     let strict = strict.unwrap_err();
-    assert!(strict.to_string().contains("没有可显示文本"));
-    assert_eq!(strict.code(), Some(EMPTY_MODEL_ACTION_ERROR_CODE));
+    assert!(strict.to_string().contains("输出达到上限"));
+    assert_eq!(strict.code(), Some("agent.output_limit_reached"));
     assert!(!is_repairable_empty_model_action(&strict));
     assert!(deferred.content().is_empty());
     assert_eq!(deferred.finish_reason.as_deref(), Some("length"));

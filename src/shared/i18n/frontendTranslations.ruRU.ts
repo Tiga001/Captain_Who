@@ -1,5 +1,9 @@
 // Russian UI translation strings.
 export const ruRUTranslations = {
+  'configuration.invalidContextCapacityTitle': 'Недостаточное окно контекста',
+  'configuration.invalidContextCapacity':
+    '«{displayName}» не сохранена. Окно в {contextWindowTokens} токенов не вмещает резерв вывода ({reservedOutputTokens}) и запас безопасности ({safetyMarginTokens}), не оставляя места для ввода. Перед сохранением укажите фактически поддерживаемое моделью окно. Если большее окно не поддерживается, выберите другую модель или измените настройки провайдера. Ваши правки сохранены.',
+  'configuration.contextCapacityAcknowledge': 'Понятно',
   'chat.commands.compact': 'Сжать контекст',
   'chat.commands.compactDescription': 'Сжать контекст текущего чата',
   'chat.commands.fork': 'Создать ветку чата',
@@ -1266,6 +1270,9 @@ export const ruRUTranslations = {
   'agent.interruption.contextLimitExceeded': 'Контекст превышает лимит модели',
   'agent.interruption.requestRejected': 'Запрос модели отклонен',
   'agent.interruption.responseInvalid': 'Неверный ответ модели',
+  'agent.interruption.outputLimitReached': 'Достигнут лимит вывода. Ответ не завершён.',
+  'agent.interruption.emptyResponse': 'Модель не вернула пригодного ответа.',
+  'agent.interruption.streamInterrupted': 'Соединение с моделью прервано. Ответ не завершён.',
   'agent.interruption.admissionUnconfirmed':
     'Отправка не подтверждена. Проверка выполнена; автоматической повторной отправки не было.',
   'agent.interruption.requestFailed': 'Запрос модели не выполнен.',

@@ -1,5 +1,9 @@
 // Italian UI translation strings.
 export const itITTranslations = {
+  'configuration.invalidContextCapacityTitle': 'Finestra di contesto insufficiente',
+  'configuration.invalidContextCapacity':
+    '“{displayName}” non è stato salvato. La finestra di {contextWindowTokens} token non contiene la riserva di output ({reservedOutputTokens}) e il margine di sicurezza ({safetyMarginTokens}), senza spazio per l’input. Imposta la finestra in base alla capacità effettiva del modello prima di salvare. Se non supporta una finestra più grande, scegli un altro modello o modifica le impostazioni del provider. Le modifiche sono conservate.',
+  'configuration.contextCapacityAcknowledge': 'Capito',
   'chat.commands.compact': 'Compatta contesto',
   'chat.commands.compactDescription': 'Compatta il contesto di questa chat',
   'chat.commands.fork': 'Crea un ramo della chat',
@@ -1275,6 +1279,9 @@ export const itITTranslations = {
   'agent.interruption.contextLimitExceeded': 'Il contesto supera il limite del modello',
   'agent.interruption.requestRejected': 'Richiesta di modello respinta',
   'agent.interruption.responseInvalid': 'Risposta del modello non valida',
+  'agent.interruption.outputLimitReached': 'Limite di output raggiunto. Risposta incompleta.',
+  'agent.interruption.emptyResponse': 'Il modello non ha restituito una risposta valida.',
+  'agent.interruption.streamInterrupted': 'Connessione al modello interrotta. Risposta incompleta.',
   'agent.interruption.admissionUnconfirmed':
     'Invio non confermato. Verifica tentata; nessun reinvio automatico.',
   'agent.interruption.requestFailed': 'Richiesta del modello non riuscita',

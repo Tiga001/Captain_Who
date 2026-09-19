@@ -70,7 +70,7 @@ export function ConfigurationSettingsPage({
       ? modelConfigFromForm(values, editingModel)
       : modelConfigFromForm(values)
 
-    await upsertModel(savedModel)
+    await upsertModel(savedModel, { validationDialog: true })
     setEditingModel(undefined)
     setView('manager')
   }

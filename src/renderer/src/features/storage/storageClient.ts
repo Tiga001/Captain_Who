@@ -77,6 +77,7 @@ export interface ModelSettingsSnapshot {
 }
 
 export interface ModelSettingsSaveDraft {
+  validateContextCapacityModelId?: string
   apiUrl: string
   apiTokenMutation: CredentialMutation
   searchMode: SearchMode
@@ -413,6 +414,9 @@ function mapModelSettingsToStorage(
 ): StorageModelSettingsUpdateRecord {
   return {
     expectedRevision,
+    ...(settings.validateContextCapacityModelId !== undefined
+      ? { validateContextCapacityModelId: settings.validateContextCapacityModelId }
+      : {}),
     apiUrl: settings.apiUrl,
     apiTokenMutation: settings.apiTokenMutation,
     searchMode: settings.searchMode,

@@ -5,13 +5,14 @@ use crate::image_generation::{
 };
 use crate::storage::models::{CredentialMutation, CredentialStatus, ModelExecutionStatus};
 use crate::AgentModelUnavailableReason;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 #[derive(Default)]
 struct FaultInjectingModelCredentialStore {
     delegate: crate::image_generation::InMemoryCredentialStore,
     fail_replace: AtomicBool,
     fail_delete: AtomicBool,
+    replace_calls: AtomicUsize,
 }
 
 impl CredentialStore for FaultInjectingModelCredentialStore {
@@ -24,6 +25,7 @@ impl CredentialStore for FaultInjectingModelCredentialStore {
         reference: &CredentialReference,
         secret: CredentialSecret,
     ) -> Result<(), CredentialStoreError> {
+        self.replace_calls.fetch_add(1, Ordering::SeqCst);
         if self.fail_replace.load(Ordering::SeqCst) {
             return Err(CredentialStoreError::BackendUnavailable {
                 operation: CredentialStoreOperation::Replace,
@@ -461,6 +463,7 @@ fn vendor_selection_resolves_moonshot_family_and_persists_v2_settings() {
     settings.models[0].provider_model_id = "kimi-k3".to_string();
     settings.models[0].display_name = "Kimi K3".to_string();
     settings.models[0].supports_image = true;
+    settings.models[0].context_window_tokens = Some(256_000);
 
     let saved = service
         .save_model_settings_request(renderer_save_request(
@@ -808,6 +811,7 @@ fn authoritative_profile_updates_rotate_only_effective_wire_changes() {
     let mut settings = revision_test_settings();
     settings.models[0].provider_model_id = "deepseek-flash".to_string();
     settings.models[0].supports_image = true;
+    settings.models[0].context_window_tokens = Some(256_000);
     let initial = service
         .save_model_settings_request(renderer_save_request(
             &settings,
@@ -2556,4 +2560,277 @@ fn editor_record_execution_refreshes_after_a_renderer_save() {
             .collect::<Vec<_>>(),
         vec![model_id]
     );
+}
+
+fn deepseek_max_save_update() -> serde_json::Value {
+    serde_json::json!({
+        "kind": "select_vendor", "vendorId": "deepseek",
+        "settings": { "kind": "deepseek_flash_chat", "reasoning": {
+            "mode": "enabled", "effort": "max"
+        }}
+    })
+}
+
+#[test]
+fn invalid_context_capacity_save_is_atomic_before_credential_or_database_writes() {
+    let fixture = StorageFixture::new();
+    let credentials = Arc::new(FaultInjectingModelCredentialStore::default());
+    let service = StorageService::open_with_model_credentials(
+        &fixture.root.join("storage.sqlite"),
+        credentials.clone(),
+    )
+    .unwrap();
+    let mut settings = revision_test_settings();
+    settings.models[0].provider_model_id = "deepseek-flash".into();
+    settings.models[0].supports_image = true;
+    service.save_model_settings(settings.clone()).unwrap();
+    let original = service.load_model_settings_for_edit().unwrap().unwrap();
+    let replace_calls = credentials.replace_calls.load(Ordering::SeqCst);
+    settings.api_token = "new-global-token-must-not-be-written".into();
+    settings.models[0].api_token_override = Some("new-model-token-must-not-be-written".into());
+    let request = with_current_configuration_revision(
+        &service,
+        renderer_save_request(
+            &settings,
+            deepseek_max_save_update(),
+            Some(&settings.models[0].id),
+        ),
+    );
+    assert_eq!(
+        service.save_model_settings_request(request).unwrap_err(),
+        ModelSettingsSaveError::InvalidContextCapacity {
+            model_id: "revision-model".into(),
+            display_name: "Revision Model".into(),
+            context_window_tokens: 128_000,
+            reserved_output_tokens: 131_072,
+            safety_margin_tokens: 6_400,
+            minimum_context_window_tokens: 137_972,
+        }
+    );
+    assert_eq!(
+        credentials.replace_calls.load(Ordering::SeqCst),
+        replace_calls
+    );
+    let current = service.load_model_settings_for_edit().unwrap().unwrap();
+    assert_eq!(
+        current.configuration_revision,
+        original.configuration_revision
+    );
+    assert_eq!(
+        serde_json::to_value(current).unwrap(),
+        serde_json::to_value(original).unwrap()
+    );
+    assert_eq!(
+        service.load_model_settings().unwrap().unwrap().api_token,
+        "fixed-revision-test-token"
+    );
+    for table in [
+        "model_provider_credential_staging",
+        "model_provider_credential_cleanup",
+    ] {
+        assert_eq!(model_credential_journal_count(&service, table), 0);
+    }
+}
+
+#[test]
+fn context_capacity_validation_targets_edited_models_without_blocking_unrelated_legacy_models() {
+    let fixture = StorageFixture::new();
+    let service = fixture.service();
+    let mut settings = revision_test_settings();
+    settings.models[0].provider_model_id = "deepseek-flash".into();
+    settings.models[0].supports_image = true;
+    settings.models[0].provider_profile_config = crate::ProviderProfileConfig::from_family_settings(
+        crate::ProviderProfileRef::deepseek_v4_1_flash_chat(),
+        crate::ProviderVendorId::DeepSeek,
+        crate::ProviderFamilySettings::DeepseekFlashChat {
+            reasoning: crate::ProviderFamilyReasoningPolicy {
+                mode: crate::ReasoningMode::Enabled,
+                effort: crate::ProviderReasoningEffort::Max,
+            },
+        },
+    );
+    // Simulate a pre-validation catalogue. The migration/import boundary is not a user edit.
+    service.save_model_settings(settings.clone()).unwrap();
+    let original = service.load_model_settings_for_edit().unwrap().unwrap();
+    let mut request = renderer_save_request_preserving_credentials(
+        &original,
+        serde_json::json!({"kind": "unchanged"}),
+        Some(&original.models[0].id),
+    );
+    request.api_token_mutation = CredentialMutation::Replace {
+        value: "global-only-update".into(),
+    };
+    let saved = service.save_model_settings_request(request).unwrap();
+    assert_eq!(saved.models.len(), 1);
+    assert_eq!(saved.models[0].context_window_tokens, Some(128_000));
+
+    let unchanged_request = || {
+        renderer_save_request_preserving_credentials(
+            &saved,
+            serde_json::json!({"kind": "unchanged"}),
+            Some(&saved.models[0].id),
+        )
+    };
+    let mut explicit = unchanged_request();
+    explicit.validate_context_capacity_model_id = Some(saved.models[0].id.clone());
+    assert!(matches!(
+        service.save_model_settings_request(explicit),
+        Err(ModelSettingsSaveError::InvalidContextCapacity { .. })
+    ));
+    let mut changed = unchanged_request();
+    changed.models[0].context_window_tokens = Some(131_072);
+    assert!(matches!(
+        service.save_model_settings_request(changed),
+        Err(ModelSettingsSaveError::InvalidContextCapacity { .. })
+    ));
+    let mut invalid_target = unchanged_request();
+    invalid_target.validate_context_capacity_model_id = Some("nonexistent-model".into());
+    assert!(matches!(
+        service.save_model_settings_request(invalid_target),
+        Err(ModelSettingsSaveError::Other(_))
+    ));
+    assert_eq!(
+        service
+            .load_model_settings_for_edit()
+            .unwrap()
+            .unwrap()
+            .configuration_revision,
+        saved.configuration_revision
+    );
+}
+
+#[test]
+fn new_model_default_window_is_validated_and_fixed_window_survives_reload() {
+    let fixture = StorageFixture::new();
+    let service = fixture.service();
+    let mut settings = revision_test_settings();
+    settings.models[0].provider_model_id = "deepseek-flash".into();
+    settings.models[0].supports_image = true;
+    settings.models[0].context_window_tokens = None;
+    let request = renderer_save_request(&settings, deepseek_max_save_update(), None);
+    assert!(matches!(
+        service.save_model_settings_request(request),
+        Err(ModelSettingsSaveError::InvalidContextCapacity {
+            context_window_tokens: 128_000,
+            ..
+        })
+    ));
+    assert!(service.load_model_settings_for_edit().unwrap().is_none());
+    settings.models[0].context_window_tokens = Some(256_000);
+    let saved = service
+        .save_model_settings_request(renderer_save_request(
+            &settings,
+            deepseek_max_save_update(),
+            None,
+        ))
+        .unwrap();
+    assert_eq!(saved.models[0].context_window_tokens, Some(256_000));
+    let runtime = service.load_model_settings_snapshot().unwrap().unwrap();
+    assert_eq!(
+        runtime.settings.models[0].effective_context_window_tokens(),
+        256_000
+    );
+    drop(service);
+    let reopened = fixture.service();
+    assert_eq!(
+        reopened
+            .load_model_settings_for_edit()
+            .unwrap()
+            .unwrap()
+            .models[0]
+            .context_window_tokens,
+        Some(256_000)
+    );
+}
+
+#[test]
+fn save_capacity_boundary_matches_runtime_for_generic_and_registered_profiles() {
+    let vendor_update = |vendor: &str, settings: serde_json::Value| {
+        serde_json::json!({
+            "kind": "select_vendor", "vendorId": vendor, "settings": settings,
+        })
+    };
+    let cases = [
+        (
+            "custom",
+            "https://example.com/v1",
+            false,
+            serde_json::json!({"kind": "select_generic"}),
+            30_000,
+        ),
+        (
+            "custom",
+            "https://api.anthropic.com/v1/messages",
+            false,
+            serde_json::json!({"kind": "select_generic"}),
+            30_000,
+        ),
+        (
+            "deepseek-flash",
+            "https://api.deepseek.com/v1",
+            true,
+            vendor_update(
+                "deepseek",
+                serde_json::json!({
+                    "kind": "deepseek_flash_chat", "reasoning": {"mode": "disabled", "effort": "provider_default"}
+                }),
+            ),
+            8_192,
+        ),
+        (
+            "deepseek-flash",
+            "https://api.deepseek.com/v1",
+            true,
+            vendor_update(
+                "deepseek",
+                serde_json::json!({
+                    "kind": "deepseek_flash_chat", "reasoning": {"mode": "enabled", "effort": "high"}
+                }),
+            ),
+            65_536,
+        ),
+        (
+            "deepseek-flash",
+            "https://api.deepseek.com/v1",
+            true,
+            deepseek_max_save_update(),
+            131_072,
+        ),
+        (
+            "kimi-k3",
+            "https://api.moonshot.cn/v1",
+            true,
+            vendor_update(
+                "moonshot",
+                serde_json::json!({
+                    "kind": "moonshot_k3_chat", "reasoningEffort": "max"
+                }),
+            ),
+            131_072,
+        ),
+    ];
+    for (model, url, images, update, reserve) in cases {
+        let fixture = StorageFixture::new();
+        let service = fixture.service();
+        let mut settings = revision_test_settings();
+        settings.api_url = url.into();
+        settings.models[0].provider_model_id = model.into();
+        settings.models[0].supports_image = images;
+        let minimum = crate::context::minimum_context_window_tokens(reserve) as u32;
+        settings.models[0].context_window_tokens = Some(minimum - 1);
+        let error = service
+            .save_model_settings_request(renderer_save_request(&settings, update.clone(), None))
+            .unwrap_err();
+        assert!(
+            matches!(error, ModelSettingsSaveError::InvalidContextCapacity {
+            reserved_output_tokens, minimum_context_window_tokens, ..
+        } if reserved_output_tokens == reserve && minimum_context_window_tokens == u64::from(minimum)),
+            "{model}: {error:?}"
+        );
+        settings.models[0].context_window_tokens = Some(minimum);
+        let saved = service
+            .save_model_settings_request(renderer_save_request(&settings, update, None))
+            .unwrap();
+        assert_eq!(saved.models[0].context_window_tokens, Some(minimum));
+    }
 }

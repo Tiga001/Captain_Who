@@ -747,7 +747,7 @@ impl AgentRuntime {
                             let report = detector.inspect_with_dynamic_tools(
                                 &mut request_context,
                                 llm_request.context_window_tokens,
-                                llm_request.max_tokens,
+                                llm_request.reserved_output_tokens,
                                 effective_tool_set.dynamic_definitions(),
                             );
                             let compaction_query = report.compaction_query();
@@ -1144,6 +1144,11 @@ impl AgentRuntime {
                                 empty_model_action_repair_pending = true;
                                 continue 'agent_loop;
                             }
+                            let error = if user_text_blocked {
+                                error.with_partial_response("")
+                            } else {
+                                error
+                            };
                             return Err(error
                                 .with_usage(usage)
                                 .with_model_request_interruption());
@@ -1281,6 +1286,15 @@ impl AgentRuntime {
                                 }
                                 AgentSteerDrainOrClose::Closed => {}
                             }
+                        }
+                        // A private reasoning-only turn may legitimately precede pending steer
+                        // input above, but cannot be the final user-facing answer.
+                        if response_content.trim().is_empty() {
+                            return Err(AgentError::structured(
+                                "agent.empty_response",
+                                "模型未返回有效回复",
+                                serde_json::json!({"finishReason": finish_reason}),
+                            ).with_usage(usage).with_model_request_interruption());
                         }
                         // The encrypted final turn remains staged until the Host commits the
                         // terminal ConversationMessage. That terminal transaction promotes the

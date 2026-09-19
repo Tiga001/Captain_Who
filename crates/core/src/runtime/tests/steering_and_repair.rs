@@ -1,6 +1,181 @@
 use super::*;
 
 #[tokio::test]
+async fn reasoning_only_model_responses_never_complete_the_turn() {
+    use crate::image_generation::{CredentialStore, InMemoryCredentialStore};
+    use crate::provider_profile::{
+        ProviderFamilySettings, ProviderProfileRef, ProviderReasoningEffort, ProviderVendorId,
+    };
+    use crate::storage::service::StorageService;
+    use crate::ProviderContinuationVaultFactory;
+    for (model, profile) in [
+        (
+            "deepseek-flash",
+            crate::ProviderProfileConfig::deepseek_flash_default(),
+        ),
+        (
+            "kimi-k3",
+            crate::ProviderProfileConfig::from_family_settings(
+                ProviderProfileRef::moonshot_k3_chat(),
+                ProviderVendorId::Moonshot,
+                ProviderFamilySettings::MoonshotK3Chat {
+                    reasoning_effort: ProviderReasoningEffort::Max,
+                },
+            ),
+        ),
+    ] {
+        for (finish_reason, expected_reason) in [
+            (
+                "length",
+                crate::AgentModelRequestInterruptionReason::OutputLimitReached,
+            ),
+            (
+                "stop",
+                crate::AgentModelRequestInterruptionReason::EmptyResponse,
+            ),
+        ] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let _ = read_runtime_test_json_request(&mut stream).await;
+                write_runtime_test_json_response(&mut stream, json!({
+                "choices": [{"message": {"role": "assistant", "content": "", "reasoning_content": "private reasoning only"}, "finish_reason": finish_reason}],
+                "usage": {"prompt_tokens": 20, "completion_tokens": 30000, "completion_tokens_details": {"reasoning_tokens": 30000}, "total_tokens": 30020}
+            })).await;
+            });
+            let fixture = tempfile::tempdir().unwrap();
+            let storage =
+                Arc::new(StorageService::open(&fixture.path().join("runtime.sqlite")).unwrap());
+            let credentials =
+                Arc::new(InMemoryCredentialStore::default()) as Arc<dyn CredentialStore>;
+            let vault = Arc::new(
+                ProviderContinuationVaultFactory::open_or_provision(
+                    Arc::clone(&storage),
+                    credentials,
+                )
+                .unwrap(),
+            );
+            let mut input =
+                conversation_context_input(vec![message("user", "Answer the question")]);
+            input.api_url = format!("http://{address}/v1/chat/completions");
+            input.api_token = "test-token".to_string();
+            input.model = model.to_string();
+            input.stream = Some(false);
+            input.provider_protocol_key = Some(
+                crate::ProviderProtocolKey::new(
+                    crate::ProviderProtocolDialect::OpenAiChatCompletions,
+                    &profile,
+                    &input.model,
+                    None,
+                )
+                .unwrap(),
+            );
+            input.provider_profile_config = Some(profile.clone());
+            let error = AgentRuntime::default()
+                .send_chat_with_events_and_cancellation(
+                    input,
+                    Some("run-reasoning-only".to_string()),
+                    None,
+                    AgentCancellationToken::new(),
+                    Some(
+                        AgentRuntimeHostServices::new()
+                            .with_storage(storage)
+                            .with_provider_continuation_vault(vault),
+                    ),
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(
+                error.model_request_interruption(),
+                Some(expected_reason),
+                "unexpected error: {error}"
+            );
+            server.await.unwrap();
+            assert_eq!(error.partial_response(), None);
+            assert_eq!(
+                error.usage().and_then(|usage| usage.output_tokens),
+                Some(30000)
+            );
+            assert!(!error.to_string().contains("private reasoning"));
+        }
+    }
+}
+
+#[tokio::test]
+async fn output_limit_after_tool_work_keeps_the_committed_tool_trace() {
+    let fixture = tempfile::tempdir().unwrap();
+    std::fs::write(
+        fixture.path().join("evidence.txt"),
+        "completed tool evidence",
+    )
+    .unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        for index in 0..2 {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let _ = read_runtime_test_json_request(&mut stream).await;
+            let body = if index == 0 {
+                json!({"choices":[{"message":{"role":"assistant", "content":"Reading evidence", "tool_calls":[{"id":"read-evidence", "type":"function", "function":{"name":"read_file", "arguments":"{\"path\":\"evidence.txt\"}"}}]}, "finish_reason":"tool_calls"}]})
+            } else {
+                json!({"choices":[{"message":{"role":"assistant", "content":"Partial conclusion"}, "finish_reason":"length"}]})
+            };
+            write_runtime_test_json_response(&mut stream, body).await;
+        }
+    });
+    let mut input =
+        conversation_context_input(vec![message("user", "Read evidence.txt and explain")]);
+    input.api_url = format!("http://{address}/v1/chat/completions");
+    input.api_token = "test-token".to_string();
+    input.stream = Some(false);
+    input.assistant_message_id = Some("assistant-output-limit".to_string());
+    input.context = Some(AgentRunContext {
+        conversation_id: Some("conversation-output-limit".to_string()),
+        project_id: None,
+        collaboration_identity: None,
+        attachment_library: None,
+        workspace: Some(AgentWorkspaceContext {
+            folders: vec![],
+            project_id: None,
+            display_name: None,
+            root_path: Some(fixture.path().to_string_lossy().into_owned()),
+        }),
+        permissions: crate::AgentPermissions {
+            read: crate::AgentReadPermission::All,
+            ..Default::default()
+        },
+    });
+    let error = AgentRuntime::default()
+        .send_chat_with_events_and_cancellation(
+            input,
+            Some("run-output-limit".to_string()),
+            None,
+            AgentCancellationToken::new(),
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error.model_request_interruption(),
+        Some(crate::AgentModelRequestInterruptionReason::OutputLimitReached),
+        "unexpected error: {error}"
+    );
+    server.await.unwrap();
+    assert_eq!(error.partial_response(), Some("Partial conclusion"));
+    let trace = error.conversation_turn_trace().unwrap();
+    assert_eq!(
+        trace.terminal_status,
+        ConversationTurnTraceTerminalStatus::Failed
+    );
+    assert!(trace.items.iter().any(|item| matches!(
+        item,
+        ConversationTurnTraceItem::ToolResult { success: true, .. }
+    )));
+    trace.validate().unwrap();
+}
+
+#[tokio::test]
 async fn runtime_rejects_unknown_frozen_provider_registration_before_transport_or_tools() {
     use crate::storage::service::StorageService;
     use crate::{ProviderProfileConfig, ProviderProtocolDialect, ProviderProtocolKey};

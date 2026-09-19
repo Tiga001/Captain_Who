@@ -18,7 +18,7 @@ fn llm_debug_projections_never_expose_provider_or_tool_payloads() {
         api_token: CANARY.to_string(),
         provider_profile: generic_provider_profile(AgentApiStyle::OpenAiCompatible),
         provider_protocol: generic_provider_protocol(AgentApiStyle::OpenAiCompatible, "test-model"),
-        max_tokens: 100,
+        max_tokens: Some(100),
         temperature: 0.0,
         stream: false,
         messages: vec![message.clone()],
@@ -173,7 +173,7 @@ fn request_with_messages(messages: Vec<LlmMessage>) -> LlmChatRequest {
         api_token: "token".to_string(),
         provider_profile: generic_provider_profile(AgentApiStyle::OpenAiCompatible),
         provider_protocol: generic_provider_protocol(AgentApiStyle::OpenAiCompatible, "gpt"),
-        max_tokens: 1024,
+        max_tokens: Some(1024),
         temperature: 0.2,
         stream: true,
         messages,
@@ -388,5 +388,6 @@ mod deepseek_projection;
 mod deepseek_runtime;
 mod generic_payloads;
 mod moonshot_wire;
+mod output_budget;
 mod retries;
 mod streaming_and_usage;

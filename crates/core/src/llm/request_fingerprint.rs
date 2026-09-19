@@ -241,6 +241,25 @@ mod tests {
     }
 
     #[test]
+    fn omitted_and_explicit_output_budgets_have_distinct_wire_fingerprints() {
+        let omitted = json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "same prompt"}]
+        });
+        let baseline = fingerprint_llm_request(&omitted);
+        let mut digests = std::collections::BTreeSet::from([baseline.payload.sha256.clone()]);
+        for field in ["max_tokens", "max_completion_tokens"] {
+            for limit in [Value::Null, json!(30_000), json!(180_000)] {
+                let mut explicit = omitted.clone();
+                explicit[field] = limit;
+                let fingerprint = fingerprint_llm_request(&explicit);
+                assert_eq!(fingerprint.messages, baseline.messages);
+                assert!(digests.insert(fingerprint.payload.sha256));
+            }
+        }
+    }
+
+    #[test]
     fn array_order_and_absent_null_empty_fields_remain_distinguishable() {
         let mut payload = json!({
             "tools": [{"name": "first"}, {"name": "second"}],

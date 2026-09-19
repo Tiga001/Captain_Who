@@ -1035,6 +1035,7 @@ pub fn create_conversation_context_state(
     input: AgentChatInput,
 ) -> AgentResult<AgentConversationContextState> {
     let prepared = prepare_conversation_context(&input)?;
+    let output_budget = resolve_output_budget(&input, prepared.api_style)?;
     let assembled = assemble_context_preview(
         DurableConversationTimeline {
             compaction_summary: input.context_compaction_summary.clone(),
@@ -1056,7 +1057,7 @@ pub fn create_conversation_context_state(
         prepared.configuration_revision,
         input.model,
         input.context_window_tokens,
-        sanitize_max_tokens(input.max_tokens),
+        output_budget.reserved_output_tokens,
         detector,
         assembled.frame,
         assembled.timing,
@@ -1233,8 +1234,9 @@ pub(super) fn conversation_context_configuration_revision_from_parts(
     provider_protocol_key
         .validate_against_config(&provider_profile_config)
         .map_err(|error| AgentError::new(format!("Provider protocol key is invalid: {error}")))?;
+    let output_budget = resolve_output_budget(input, api_style)?;
     let material = serde_json::to_vec(&json!({
-        "schemaVersion": 4,
+        "schemaVersion": 5,
         "contextProfile": input.prompt_preferences.as_ref()
             .map(|preferences| preferences.context_profile).unwrap_or_default(),
         "model": input.model.trim(),
@@ -1242,7 +1244,8 @@ pub(super) fn conversation_context_configuration_revision_from_parts(
         "providerProfileConfig": provider_profile_config,
         "providerProtocolKey": provider_protocol_key,
         "contextWindowTokens": input.context_window_tokens,
-        "reservedOutputTokens": sanitize_max_tokens(input.max_tokens),
+        "requestMaxTokens": output_budget.request_max_tokens,
+        "reservedOutputTokens": output_budget.reserved_output_tokens,
         "systemPrompt": system_prompt,
         "toolDefinitions": tool_definitions,
     }))

@@ -558,6 +558,7 @@ impl StorageService {
 
         let ModelSettingsSaveRequest {
             expected_revision,
+            validate_context_capacity_model_id,
             api_url,
             api_token_mutation,
             search_mode,
@@ -580,6 +581,18 @@ impl StorageService {
         let existing = existing_snapshot
             .as_ref()
             .map(|snapshot| &snapshot.settings);
+        if let Some(target) = validate_context_capacity_model_id.as_deref() {
+            if target.is_empty()
+                || target.trim() != target
+                || !requested_models
+                    .iter()
+                    .any(|model| model.id.as_deref() == Some(target))
+            {
+                return Err("context capacity validation target is invalid"
+                    .to_string()
+                    .into());
+            }
+        }
         let mut replacements = Vec::new();
         let planned_api_token = self.plan_credential_mutation(
             api_token_mutation,
@@ -722,6 +735,53 @@ impl StorageService {
                 profile,
                 planned_override.validation_value.clone(),
             );
+            let explicitly_edited =
+                validate_context_capacity_model_id.as_deref() == Some(model.id.as_str());
+            let capacity_changed = existing_model.is_none_or(|previous| {
+                let previous_url = previous
+                    .api_url_override
+                    .as_deref()
+                    .filter(|value| !value.trim().is_empty())
+                    .unwrap_or_else(|| {
+                        existing
+                            .map(|settings| settings.api_url.as_str())
+                            .unwrap_or_default()
+                    });
+                previous.context_window_tokens != model.context_window_tokens
+                    || previous.provider_profile_config != model.provider_profile_config
+                    || previous.provider_model_id != model.provider_model_id
+                    || crate::ProviderProtocolDialect::detect_from_api_url(previous_url) != dialect
+                    || (!previous.enabled && model.enabled)
+            });
+            if explicitly_edited || capacity_changed {
+                let budget = crate::runtime::resolve_profile_output_budget(
+                    Some(&model.provider_profile_config),
+                    dialect.api_style(),
+                    None,
+                )
+                .map_err(|error| error.to_string())?;
+                let window = model.effective_context_window_tokens();
+                if window == 0 {
+                    return Err("模型上下文窗口必须大于零。".to_string().into());
+                }
+                let (margin, available_input) = crate::context::configured_input_capacity(
+                    u64::from(window),
+                    u64::from(budget.reserved_output_tokens),
+                );
+                if available_input == 0 {
+                    return Err(ModelSettingsSaveError::InvalidContextCapacity {
+                        model_id: model.id,
+                        display_name: model.display_name,
+                        context_window_tokens: window,
+                        reserved_output_tokens: budget.reserved_output_tokens,
+                        safety_margin_tokens: margin,
+                        minimum_context_window_tokens:
+                            crate::context::minimum_context_window_tokens(
+                                budget.reserved_output_tokens,
+                            ),
+                    });
+                }
+            }
             stored_models.push(stored_model_from_resolved(
                 &model,
                 planned_override.credential_ref,

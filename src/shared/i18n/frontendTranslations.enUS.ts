@@ -1,5 +1,9 @@
 // English UI translation strings.
 export const enUSTranslations = {
+  'configuration.invalidContextCapacityTitle': 'Context window is too small',
+  'configuration.invalidContextCapacity':
+    '“{displayName}” was not saved. The {contextWindowTokens}-token window cannot fit the output reserve ({reservedOutputTokens}) and safety margin ({safetyMarginTokens}), leaving no input space. Adjust the window to your model’s actual supported capacity before saving. If a larger window is unsupported, choose another model or adjust the provider settings. Your edits are preserved.',
+  'configuration.contextCapacityAcknowledge': 'Got it',
   'chat.commands.compact': 'Compact context',
   'chat.commands.compactDescription': 'Compact this chat’s context',
   'chat.commands.new': 'New chat',
@@ -1248,6 +1252,9 @@ export const enUSTranslations = {
   'agent.interruption.contextLimitExceeded': 'Context exceeds the model limit',
   'agent.interruption.requestRejected': 'Model request rejected',
   'agent.interruption.responseInvalid': 'Invalid model response',
+  'agent.interruption.outputLimitReached': 'Output limit reached. Reply incomplete.',
+  'agent.interruption.emptyResponse': 'The model returned no usable reply.',
+  'agent.interruption.streamInterrupted': 'Model connection interrupted. Reply incomplete.',
   'agent.interruption.admissionUnconfirmed':
     'Send status is unconfirmed. Verification was attempted; no automatic resend.',
   'agent.interruption.requestFailed': 'Model request failed',

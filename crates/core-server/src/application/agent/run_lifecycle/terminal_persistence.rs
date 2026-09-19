@@ -262,9 +262,11 @@ impl AgentService {
             usage,
             conversation_turn_trace,
             model_context_items,
+            None,
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn persist_assistant_model_request_interruption(
         &self,
         conversation_id: &str,
@@ -272,6 +274,8 @@ impl AgentService {
         diagnostic_message: &str,
         usage: Option<AgentUsage>,
         conversation_turn_trace: &ConversationTurnTrace,
+        reason: AgentModelRequestInterruptionReason,
+        partial_response: &str,
     ) -> Result<Option<AgentUsage>, String> {
         self.persist_assistant_model_request_interruption_with_model_context(
             conversation_id,
@@ -280,9 +284,12 @@ impl AgentService {
             usage,
             conversation_turn_trace,
             None,
+            reason,
+            partial_response,
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn persist_assistant_model_request_interruption_with_model_context(
         &self,
         conversation_id: &str,
@@ -291,18 +298,21 @@ impl AgentService {
         usage: Option<AgentUsage>,
         conversation_turn_trace: &ConversationTurnTrace,
         model_context_items: Option<&[ConversationModelContextItem]>,
+        reason: AgentModelRequestInterruptionReason,
+        partial_response: &str,
     ) -> Result<Option<AgentUsage>, String> {
-        // The failed sampling attempt never committed a model turn. Keep its diagnostic in usage
-        // and trace audit data, while settling the visible assistant message as an empty prefix.
+        // Preserve public partial text, never private continuation or incomplete tool arguments.
+        // The typed diagnostic joins the same terminal transaction as the message and usage.
         self.persist_assistant_failure_projection(
             conversation_id,
             assistant_message_id,
-            "",
+            partial_response,
             Some("sent"),
             diagnostic_message,
             usage,
             conversation_turn_trace,
             model_context_items,
+            Some(reason),
         )
     }
 
@@ -317,6 +327,7 @@ impl AgentService {
         usage: Option<AgentUsage>,
         conversation_turn_trace: &ConversationTurnTrace,
         model_context_items: Option<&[ConversationModelContextItem]>,
+        interruption: Option<AgentModelRequestInterruptionReason>,
     ) -> Result<Option<AgentUsage>, String> {
         let failed_projection = if model_context_items.is_none() {
             self.failed_terminal_projection_from_latest_snapshot(
@@ -332,6 +343,24 @@ impl AgentService {
             .as_ref()
             .map(|terminal| &terminal.trace)
             .unwrap_or(conversation_turn_trace);
+        let mut terminal_trace = conversation_turn_trace.clone();
+        if let Some(reason) = interruption {
+            terminal_trace
+                .items
+                .push(ConversationTurnTraceItem::RuntimeError {
+                    sequence: terminal_trace
+                        .items
+                        .last()
+                        .map(ConversationTurnTraceItem::sequence)
+                        .unwrap_or(0)
+                        + 1,
+                    message: model_request_interruption_public_message(reason).to_string(),
+                    recoverable: false,
+                    code: Some(reason.trace_code()),
+                    truncated: false,
+                });
+        }
+        let conversation_turn_trace = &terminal_trace;
         let model_context_items = model_context_items.or_else(|| {
             failed_projection
                 .as_ref()

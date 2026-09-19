@@ -290,6 +290,7 @@ async fn run_deepseek_restart(
     decision: RestartedApprovalDecision,
     response_reasoning: Option<&'static str>,
     switch_to_generic_while_pending: bool,
+    max_tokens: Option<u32>,
 ) -> (Value, u64) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
@@ -388,7 +389,7 @@ async fn run_deepseek_restart(
                 title: None,
                 user_message_id: Some("user-deepseek-approval-restart".to_string()),
                 assistant_message_id: Some("assistant-deepseek-approval-restart".to_string()),
-                max_tokens: Some(1_024),
+                max_tokens,
                 temperature: None,
                 prompt_preferences: None,
                 permissions: Default::default(),
@@ -499,6 +500,7 @@ async fn run_deepseek_restart(
         assert_files_do_not_contain(&database_path, reasoning.as_bytes());
     }
     let persisted_input: Value = serde_json::from_str(&persisted_input).unwrap();
+    assert_eq!(persisted_input.get("maxTokens"), Some(&json!(max_tokens)));
     assert_eq!(
         persisted_input["resumeCheckpoint"]["providerContinuationRefs"]
             .as_array()
@@ -604,7 +606,7 @@ async fn run_deepseek_restart(
                     title: None,
                     user_message_id: Some("user-after-profile-change".to_string()),
                     assistant_message_id: Some("assistant-after-profile-change".to_string()),
-                    max_tokens: Some(1_024),
+                    max_tokens,
                     temperature: None,
                     prompt_preferences: None,
                     permissions: Default::default(),
@@ -621,6 +623,13 @@ async fn run_deepseek_restart(
     }
 
     let (first_request, second_request, third_request) = model_server.await.unwrap();
+    for request in [&first_request, &second_request] {
+        assert_eq!(
+            request.get("max_tokens"),
+            max_tokens.map(|value| json!(value)).as_ref()
+        );
+        assert!(request.get("max_completion_tokens").is_none());
+    }
     assert!(first_request["messages"]
         .as_array()
         .is_some_and(|messages| messages
@@ -685,7 +694,7 @@ async fn run_deepseek_restart(
             conversation_id: Some("conversation-deepseek-approval-restart".to_string()),
             project_id: None,
             model_id: "deepseek-approval-restart-model".to_string(),
-            max_tokens: Some(1_024),
+            max_tokens,
             prompt_preferences: None,
             permissions: Default::default(),
             skills: Vec::new(),
@@ -725,6 +734,7 @@ async fn deepseek_disabled_tool_turn_without_reasoning_survives_restart_and_appr
         RestartedApprovalDecision::Approve,
         None,
         false,
+        Some(1_024),
     )
     .await;
     assert_eq!(invocation_count, 1);
@@ -740,6 +750,7 @@ async fn deepseek_provider_default_tool_turn_with_reasoning_survives_restart_and
         RestartedApprovalDecision::Reject,
         Some(REASONING_CANARY),
         false,
+        Some(1_024),
     )
     .await;
     assert_eq!(invocation_count, 0);
@@ -755,6 +766,7 @@ async fn deepseek_enabled_reasoning_restarts_privately_and_replays_byte_exact_wi
         RestartedApprovalDecision::Approve,
         Some(REASONING_CANARY),
         false,
+        Some(1_024),
     )
     .await;
     assert_eq!(invocation_count, 1);
@@ -768,6 +780,7 @@ async fn pending_deepseek_run_stays_frozen_when_next_run_switches_to_generic() {
         RestartedApprovalDecision::Approve,
         Some(REASONING_CANARY),
         true,
+        Some(1_024),
     )
     .await;
     assert_eq!(invocation_count, 1);
@@ -783,6 +796,25 @@ async fn pending_deepseek_run_stays_frozen_when_next_run_switches_to_generic() {
             .and_then(|message| message["reasoning_content"].as_str()),
         Some(REASONING_CANARY)
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn approval_restart_preserves_default_and_legacy_output_policy_on_tool_continuation() {
+    for max_tokens in [None, Some(30_000)] {
+        let (second_request, invocation_count) = run_deepseek_restart(
+            mycopilot_core::ReasoningMode::Enabled,
+            RestartedApprovalDecision::Approve,
+            Some(REASONING_CANARY),
+            false,
+            max_tokens,
+        )
+        .await;
+        assert_eq!(invocation_count, 1);
+        assert_eq!(
+            second_request.get("max_tokens"),
+            max_tokens.map(|value| json!(value)).as_ref()
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

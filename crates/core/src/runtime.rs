@@ -9,6 +9,7 @@ mod conversation_world_state;
 mod events;
 mod extensions;
 mod file_transactions;
+mod output_budget;
 mod preparation;
 mod tool_failure_guard;
 mod tool_flow;
@@ -21,6 +22,8 @@ use command_dispatch::*;
 use context_materials::*;
 use conversation_world_state::*;
 use events::*;
+use output_budget::resolve_output_budget;
+pub(crate) use output_budget::resolve_profile_output_budget;
 use preparation::*;
 use trace::*;
 use world_state::*;
@@ -104,13 +107,11 @@ use tool_flow::{
     approve_proposed_action, cancellation_preempts_tool_result, cancelled_output, done_event,
     execute_host_action_on_blocking_thread, execute_registered_tool, extract_reason_from_args,
     failed_tool_call_result, generate_run_id, llm_image_message_from_tool_result,
-    redact_tool_result_for_event, sanitize_max_tokens, sanitize_temperature, state_event,
+    redact_tool_result_for_event, sanitize_temperature, state_event,
     tool_call_bindings_from_response,
 };
 use tool_input_stream::ToolInputStreamObservers;
 
-const DEFAULT_MAX_TOKENS: u32 = 30_000;
-const MAX_MAX_TOKENS: u32 = 128_000;
 const DEFAULT_TEMPERATURE: f32 = 0.6;
 const MAX_TOOL_ITERATIONS: usize = 10_000;
 const MAX_CONTEXT_COMPACTION_ATTEMPTS_PER_REQUEST: usize = 3;
@@ -442,7 +443,8 @@ struct LlmRequestTemplate {
     model: String,
     api_style: crate::protocol::AgentApiStyle,
     context_window_tokens: Option<u32>,
-    max_tokens: u32,
+    max_tokens: Option<u32>,
+    reserved_output_tokens: u32,
     temperature: f32,
     stream: bool,
     stable_tools: Vec<AgentToolDefinition>,

@@ -30,6 +30,17 @@ fn message(role: &str, content: &str) -> AgentChatMessage {
     }
 }
 
+fn reserved_output_tokens(input: &AgentChatInput) -> u32 {
+    resolve_output_budget(
+        input,
+        input
+            .api_style
+            .unwrap_or_else(|| detect_api_style(&input.api_url)),
+    )
+    .unwrap()
+    .reserved_output_tokens
+}
+
 fn empty_attachment_context() -> AttachmentContext {
     AttachmentContext {
         text: String::new(),
@@ -414,6 +425,7 @@ mod file_transaction_context;
 mod human_interaction;
 mod mcp_checkpoint;
 mod moonshot_recovery;
+mod output_budget;
 mod request_layout;
 mod skill_activation;
 mod steering_and_repair;

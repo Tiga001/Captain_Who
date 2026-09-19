@@ -67,7 +67,9 @@ pub(crate) struct LlmChatRequest {
     pub api_token: String,
     pub provider_profile: ProviderProfileConfig,
     pub provider_protocol: ProviderProtocolKey,
-    pub max_tokens: u32,
+    /// Explicit wire output limit; None delegates to the provider's default.
+    /// Context-space reservations are resolved separately and never serialized here.
+    pub max_tokens: Option<u32>,
     pub temperature: f32,
     pub stream: bool,
     pub messages: Vec<LlmMessage>,

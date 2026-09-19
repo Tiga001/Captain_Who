@@ -652,6 +652,7 @@ fn renderer_model_settings_update(
         .map(|settings| settings.configuration_revision);
     ModelSettingsSaveRequest {
         expected_revision,
+        validate_context_capacity_model_id: None,
         api_url: settings.api_url,
         api_token_mutation: CredentialMutation::Keep,
         search_mode: settings.search_mode,

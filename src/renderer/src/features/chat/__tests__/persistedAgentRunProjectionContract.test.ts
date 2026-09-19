@@ -34,6 +34,16 @@ function applyRejectedMutation(mutation: RejectedMutation): Record<string, unkno
 }
 
 describe('persisted Agent run Rust-to-Renderer projection contract', () => {
+  it.each(['output_limit_reached', 'empty_response', 'stream_interrupted'])(
+    'preserves durable interruption %s',
+    (reason) => {
+      const projection = structuredClone(fixture.expectedCanonical)
+      projection.interruption = { reason }
+      expect(parsePersistedAgentRunJson(JSON.stringify(projection))?.interruption).toEqual({
+        reason
+      })
+    }
+  )
   it('preserves the uncertain-admission marker when reloading a saved local attempt', () => {
     const projection = structuredClone(fixture.expectedCanonical)
     projection.interruption = { reason: 'admission_unconfirmed' }

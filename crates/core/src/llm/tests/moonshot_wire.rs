@@ -45,7 +45,7 @@ fn request(
         api_token: "test-token".to_string(),
         provider_profile: profile,
         provider_protocol,
-        max_tokens: 128 * 1024,
+        max_tokens: Some(128 * 1024),
         temperature: 0.37,
         stream: false,
         messages,

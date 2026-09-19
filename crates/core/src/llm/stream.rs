@@ -116,6 +116,14 @@ where
             .map_err(|error| error.with_usage(accumulator.usage().cloned()))?;
     }
 
+    if !accumulator.saw_terminal_signal {
+        return Err(AgentError::structured(
+            "agent.stream_interrupted",
+            "模型连接中断，回复未完成",
+            json!({"type": "missing_stream_terminal_signal"}),
+        )
+        .with_usage(accumulator.usage().cloned()));
+    }
     accumulator.finish()
 }
 
@@ -129,7 +137,15 @@ where
 {
     let frame = parse_sse_frame(frame);
     let data = frame.data.trim();
-    if data.is_empty() || data == "[DONE]" {
+    if data == "[DONE]" {
+        if accumulator.provider_protocol.dialect
+            == crate::provider_profile::ProviderProtocolDialect::OpenAiChatCompletions
+        {
+            accumulator.saw_terminal_signal = true;
+        }
+        return Ok(false);
+    }
+    if data.is_empty() {
         return Ok(false);
     }
 
@@ -296,6 +312,7 @@ pub(super) struct LlmStreamAccumulator {
     provider_profile: ProviderProfileConfig,
     provider_protocol: ProviderProtocolKey,
     state: ProviderStreamState,
+    saw_terminal_signal: bool,
 }
 
 impl LlmStreamAccumulator {
@@ -333,6 +350,7 @@ impl LlmStreamAccumulator {
             provider_profile: provider_profile.clone(),
             provider_protocol: provider_protocol.clone(),
             state: adapter.new_stream_state(provider_profile)?,
+            saw_terminal_signal: false,
         })
     }
 
@@ -358,6 +376,24 @@ impl LlmStreamAccumulator {
     where
         F: FnMut(LlmStreamEvent),
     {
+        // Chat Completions finish_reason and Anthropic message_stop are protocol-specific
+        // terminal receipts. A TCP EOF alone is not a model completion receipt.
+        self.saw_terminal_signal |= match self.provider_protocol.dialect {
+            crate::provider_profile::ProviderProtocolDialect::OpenAiChatCompletions => value
+                .get("choices")
+                .and_then(Value::as_array)
+                .is_some_and(|choices| {
+                    choices.iter().any(|choice| {
+                        choice
+                            .get("finish_reason")
+                            .and_then(Value::as_str)
+                            .is_some_and(|reason| !reason.is_empty())
+                    })
+                }),
+            crate::provider_profile::ProviderProtocolDialect::AnthropicMessages => {
+                event.or_else(|| value.get("type").and_then(Value::as_str)) == Some("message_stop")
+            }
+        };
         self.adapter
             .consume_streaming_event(&mut self.state, event, value, on_delta)
     }
@@ -609,7 +645,12 @@ impl OpenAiStreamAccumulator {
     ) -> AgentResult<LlmChatResponse> {
         let mut tool_calls = Vec::new();
         let error_usage = self.usage.clone();
-        for call in self.tool_calls {
+        for call in self.tool_calls.into_iter().filter(|_| {
+            !matches!(
+                self.finish_reason.as_deref(),
+                Some("length" | "max_tokens" | "max_output_tokens")
+            )
+        }) {
             if call.name.trim().is_empty() {
                 continue;
             }
@@ -806,7 +847,12 @@ impl AnthropicStreamAccumulator {
     ) -> AgentResult<LlmChatResponse> {
         let mut tool_calls = Vec::new();
         let error_usage = self.usage.clone();
-        for block in self.blocks.into_values() {
+        for block in self.blocks.into_values().filter(|_| {
+            !matches!(
+                self.finish_reason.as_deref(),
+                Some("length" | "max_tokens" | "max_output_tokens")
+            )
+        }) {
             if block.kind != "tool_use" {
                 continue;
             }

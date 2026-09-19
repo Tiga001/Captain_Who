@@ -23,8 +23,8 @@ pub(crate) use assembler::{
     ContextAttachments,
 };
 pub(crate) use budget::{
-    ContextBudgetReport, ContextBudgetStatus, ContextCapacityDetector, ContextCompactionQuery,
-    ContextMeasurementMode,
+    configured_input_capacity, minimum_context_window_tokens, ContextBudgetReport,
+    ContextBudgetStatus, ContextCapacityDetector, ContextCompactionQuery, ContextMeasurementMode,
 };
 #[cfg(test)]
 pub(crate) use compaction::{

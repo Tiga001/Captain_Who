@@ -552,6 +552,24 @@ mod tests {
     }
 
     #[test]
+    fn output_limit_round_trips_without_injecting_or_clamping_a_default() {
+        for max_tokens in [None, Some(30_000), Some(256_000)] {
+            let mut input = input();
+            input.max_tokens = max_tokens;
+            let encoded = PersistedAgentResumeInput::from_agent_input(&input)
+                .unwrap()
+                .encode();
+            let value = serde_json::from_str::<Value>(&encoded).unwrap();
+            assert_eq!(value.get("maxTokens"), Some(&json!(max_tokens)));
+
+            // An approval resumed after restart must distinguish a new provider-default run
+            // from an older run that explicitly froze its 30,000-token output limit.
+            let restored = PersistedAgentResumeInput::decode(&encoded).unwrap();
+            assert_eq!(restored.agent_input.max_tokens, max_tokens);
+        }
+    }
+
+    #[test]
     fn allowlisted_projection_contains_no_connection_or_search_secret() {
         let input = input();
         let renderer_wire = serde_json::to_string(&input).unwrap();

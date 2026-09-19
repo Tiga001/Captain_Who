@@ -1,5 +1,9 @@
 // Japanese UI translation strings.
 export const jaJPTranslations = {
+  'configuration.invalidContextCapacityTitle': 'コンテキスト容量が不足しています',
+  'configuration.invalidContextCapacity':
+    '「{displayName}」は保存されていません。総容量 {contextWindowTokens} トークンに対し、出力予約は {reservedOutputTokens}、安全余裕は {safetyMarginTokens} で、入力用の空きがありません。モデルが実際に対応するコンテキスト容量に調整してから保存してください。より大きな容量に対応しない場合は別のモデルを選ぶか、プロバイダー設定を調整してください。編集内容は保持されています。',
+  'configuration.contextCapacityAcknowledge': '了解',
   'chat.commands.compact': 'コンテキストを圧縮',
   'chat.commands.compactDescription': 'このチャットのコンテキストを圧縮します',
   'chat.commands.fork': 'チャットを分岐',
@@ -1260,6 +1264,9 @@ export const jaJPTranslations = {
   'agent.interruption.contextLimitExceeded': 'コンテキストがモデルの制限を超えています',
   'agent.interruption.requestRejected': 'モデルリクエストが拒否されました',
   'agent.interruption.responseInvalid': '無効なモデル応答',
+  'agent.interruption.outputLimitReached': '出力上限に達しました。応答は未完了です。',
+  'agent.interruption.emptyResponse': 'モデルから有効な応答がありませんでした。',
+  'agent.interruption.streamInterrupted': 'モデルとの接続が切れました。応答は未完了です。',
   'agent.interruption.admissionUnconfirmed':
     '送信結果を確認できません。照合を試みました。自動再送はしていません。',
   'agent.interruption.requestFailed': 'モデルリクエストが失敗しました',

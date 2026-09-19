@@ -43,6 +43,7 @@ const MAX_CONVERSATION_ID_BYTES = 512 * 4
 const MAX_FORK_IDENTIFIER_BYTES = 512 * 4
 const MAX_ACTIVE_COMMAND_SESSIONS = 512
 const MAX_MODEL_DISPLAY_NAME_BYTES = 512
+const MAX_MODEL_CONFIG_ID_BYTES = 2_048
 const MAX_MODEL_SETTINGS_REVISION_BYTES = 128
 const MAX_PROVIDER_DESCRIPTORS = 16
 const MAX_PROVIDER_DESCRIPTOR_DISPLAY_NAME_BYTES = 256
@@ -320,6 +321,7 @@ export function parseStorageModelSettingsUpdateRecord(
     record,
     [
       'expectedRevision',
+      'validateContextCapacityModelId',
       'apiUrl',
       'apiTokenMutation',
       'searchMode',
@@ -376,6 +378,23 @@ export function parseStorageModelSettingsUpdateRecord(
       enabled: expectBoolean(model.enabled, `${modelContext}.enabled`)
     }
   })
+  let validateContextCapacityModelId: string | undefined
+  if (record.validateContextCapacityModelId !== undefined) {
+    validateContextCapacityModelId = expectNonEmptyString(
+      record.validateContextCapacityModelId,
+      `${context}.validateContextCapacityModelId`
+    )
+    if (
+      new TextEncoder().encode(validateContextCapacityModelId).byteLength >
+        MAX_MODEL_CONFIG_ID_BYTES ||
+      !models.some((model) => model.id === validateContextCapacityModelId)
+    ) {
+      throw invalidProtocolValue(
+        `${context}.validateContextCapacityModelId`,
+        'must identify an existing model in this save request'
+      )
+    }
+  }
   return {
     expectedRevision:
       record.expectedRevision === null
@@ -391,7 +410,8 @@ export function parseStorageModelSettingsUpdateRecord(
       record.tavilyApiKeyMutation,
       `${context}.tavilyApiKeyMutation`
     ),
-    models
+    models,
+    ...(validateContextCapacityModelId === undefined ? {} : { validateContextCapacityModelId })
   }
 }
 
@@ -862,7 +882,28 @@ export function parseStorageModelSettingsValidationErrorData(
 ): StorageModelSettingsValidationErrorData {
   const context = 'storage model settings validation error data'
   const record = expectRecord(value, context)
-  expectOnlyKeys(record, ['kind', 'code', 'displayName'] as const, context)
+  const kind = expectEnum(record.kind, ['model_settings_validation'] as const, `${context}.kind`)
+  const code = expectEnum(
+    record.code,
+    ['duplicate_display_name', 'invalid_context_capacity_configuration'] as const,
+    `${context}.code`
+  )
+  expectOnlyKeys(
+    record,
+    code === 'duplicate_display_name'
+      ? ['kind', 'code', 'displayName']
+      : [
+          'kind',
+          'code',
+          'displayName',
+          'modelId',
+          'contextWindowTokens',
+          'reservedOutputTokens',
+          'safetyMarginTokens',
+          'minimumContextWindowTokens'
+        ],
+    context
+  )
 
   const displayName = expectNonEmptyString(record.displayName, `${context}.displayName`)
   if (new TextEncoder().encode(displayName).byteLength > MAX_MODEL_DISPLAY_NAME_BYTES) {
@@ -872,10 +913,28 @@ export function parseStorageModelSettingsValidationErrorData(
     )
   }
 
+  if (code === 'duplicate_display_name') return { kind, code, displayName }
+
+  const modelId = expectNonEmptyString(record.modelId, `${context}.modelId`)
+  if (new TextEncoder().encode(modelId).byteLength > MAX_MODEL_CONFIG_ID_BYTES) {
+    throw invalidProtocolValue(`${context}.modelId`, 'model id exceeds maximum size')
+  }
+  const tokenCount = (key: string) => {
+    const count = expectSafeInteger(record[key], `${context}.${key}`, 1)
+    if (count > 4_294_967_295) {
+      throw invalidProtocolValue(`${context}.${key}`, 'must not exceed u32 token range')
+    }
+    return count
+  }
   return {
-    kind: expectEnum(record.kind, ['model_settings_validation'] as const, `${context}.kind`),
-    code: expectEnum(record.code, ['duplicate_display_name'] as const, `${context}.code`),
-    displayName
+    kind,
+    code,
+    modelId,
+    displayName,
+    contextWindowTokens: tokenCount('contextWindowTokens'),
+    reservedOutputTokens: tokenCount('reservedOutputTokens'),
+    safetyMarginTokens: tokenCount('safetyMarginTokens'),
+    minimumContextWindowTokens: tokenCount('minimumContextWindowTokens')
   }
 }
 

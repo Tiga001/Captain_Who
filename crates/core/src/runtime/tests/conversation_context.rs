@@ -38,7 +38,7 @@ fn concise_base_contract_keeps_all_tools_and_preview_accounts_for_the_same_prefi
         .inspect(
             &mut request.context,
             input.context_window_tokens,
-            sanitize_max_tokens(input.max_tokens),
+            reserved_output_tokens(&input),
         )
         .context_cost_breakdown();
     let preview = inspect_context_window(input).unwrap().unwrap();
@@ -349,7 +349,7 @@ fn activated_skill_is_a_measured_dynamic_overlay_not_a_cache_input() {
     let skill_report = detector.inspect(
         &mut full.context,
         input.context_window_tokens,
-        sanitize_max_tokens(input.max_tokens),
+        reserved_output_tokens(&input),
     );
     assert_eq!(
         skill_report
@@ -374,7 +374,7 @@ fn activated_skill_is_a_measured_dynamic_overlay_not_a_cache_input() {
     let plain_report = detector.inspect(
         &mut plain.context,
         without_skill.context_window_tokens,
-        sanitize_max_tokens(without_skill.max_tokens),
+        reserved_output_tokens(&without_skill),
     );
     assert_eq!(
         skill_report.usage.persistent_revision,
@@ -473,7 +473,7 @@ fn activated_skill_is_a_measured_dynamic_overlay_not_a_cache_input() {
     let dynamic_report = dynamic_detector.inspect_with_dynamic_tools(
         &mut dynamic_request.context,
         input.context_window_tokens,
-        sanitize_max_tokens(input.max_tokens),
+        reserved_output_tokens(&input),
         &[dynamic_tool],
     );
     assert_eq!(dynamic_preview, dynamic_report.snapshot(&input.model));
@@ -624,7 +624,7 @@ fn discoverable_skill_catalog_is_a_measured_dynamic_overlay_not_a_cache_input() 
     let catalog_report = detector.inspect(
         &mut with_catalog.context,
         input.context_window_tokens,
-        sanitize_max_tokens(input.max_tokens),
+        reserved_output_tokens(&input),
     );
     let mut without_catalog = input.clone();
     without_catalog.skill_discovery = None;
@@ -639,7 +639,7 @@ fn discoverable_skill_catalog_is_a_measured_dynamic_overlay_not_a_cache_input() 
     let plain_report = detector.inspect(
         &mut plain.context,
         without_catalog.context_window_tokens,
-        sanitize_max_tokens(without_catalog.max_tokens),
+        reserved_output_tokens(&without_catalog),
     );
     assert_eq!(
         catalog_report.usage.persistent_revision,

@@ -346,7 +346,7 @@ fn generic_adapters_project_complete_multi_tool_turn_to_split_wire_order() {
             api_token: "token".to_string(),
             provider_profile: profile,
             provider_protocol: protocol,
-            max_tokens: 1024,
+            max_tokens: Some(1024),
             temperature: 0.2,
             stream: false,
             messages: vec![
@@ -452,7 +452,7 @@ fn generic_adapters_project_interleaved_image_and_runtime_extension_to_legal_wir
             api_token: "token".to_string(),
             provider_profile: profile,
             provider_protocol: protocol,
-            max_tokens: 1024,
+            max_tokens: Some(1024),
             temperature: 0.2,
             stream: false,
             messages: vec![
@@ -530,7 +530,7 @@ fn generic_adapters_preserve_grouped_multi_tool_split_wire_shape() {
             api_token: "token".to_string(),
             provider_profile: generic_provider_profile(api_style),
             provider_protocol: generic_provider_protocol(api_style, model),
-            max_tokens: 1024,
+            max_tokens: Some(1024),
             temperature: 0.2,
             stream: false,
             messages: vec![

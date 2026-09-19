@@ -112,7 +112,7 @@ function ModelSettingsProbe() {
   )
 }
 
-function ModelRenameProbe() {
+function ModelRenameProbe({ validationDialog = true }: { validationDialog?: boolean }) {
   const { models, upsertModel } = useModelSettings()
 
   return (
@@ -123,7 +123,9 @@ function ModelRenameProbe() {
         onClick={() => {
           const source = models.find((model) => model.id === 'model-a')
           if (source) {
-            void upsertModel({ ...source, displayName: 'Model B' }).catch(() => undefined)
+            void upsertModel({ ...source, displayName: 'Model B' }, { validationDialog }).catch(
+              () => undefined
+            )
           }
         }}
       >
@@ -937,6 +939,54 @@ describe('ModelSettingsProvider hydration', () => {
     await expect.element(screen.getByTestId('model-ids')).toHaveTextContent('model-a,model-b')
     expect(service.showToast).not.toHaveBeenCalled()
   })
+
+  it.each([true, false])(
+    'only suppresses capacity-error toast when the caller owns a dialog: %s',
+    async (validationDialog) => {
+      service.loadModelSettings.mockResolvedValue({
+        ...storedSettings,
+        models: [{ ...storedSettings.models[0]!, id: 'model-a' }]
+      })
+      service.saveModelSettings.mockRejectedValue(
+        new HostInvocationError({
+          message: 'Model settings validation failed.',
+          code: -32000,
+          data: {
+            kind: 'model_settings_validation',
+            code: 'invalid_context_capacity_configuration',
+            modelId: 'model-a',
+            displayName: 'Model B',
+            contextWindowTokens: 128000,
+            reservedOutputTokens: 131072,
+            safetyMarginTokens: 6400,
+            minimumContextWindowTokens: 137972
+          }
+        })
+      )
+      const screen = await render(
+        <ModelSettingsProvider>
+          <ModelRenameProbe validationDialog={validationDialog} />
+        </ModelSettingsProvider>
+      )
+      await expect.element(screen.getByTestId('model-ids')).toHaveTextContent('model-a')
+      await screen.getByRole('button', { name: 'rename model' }).click()
+      await expect.poll(() => service.loadModelSettings.mock.calls.length).toBe(2)
+      expect(service.saveModelSettings).toHaveBeenCalledTimes(1)
+      if (validationDialog) {
+        expect(service.saveModelSettings.mock.calls[0]?.[0]).toHaveProperty(
+          'validateContextCapacityModelId',
+          'model-a'
+        )
+        expect(service.showToast).not.toHaveBeenCalled()
+      } else {
+        expect(service.saveModelSettings.mock.calls[0]?.[0]).not.toHaveProperty(
+          'validateContextCapacityModelId'
+        )
+        await expect.poll(() => service.showToast.mock.calls.length).toBe(1)
+      }
+      await expect.element(screen.getByTestId('model-ids')).toHaveTextContent('model-a')
+    }
+  )
 
   it('allows a repeated provider model ID and adopts the immutable ID assigned by Host', async () => {
     service.loadModelSettings.mockResolvedValue(storedSettings)

@@ -268,6 +268,25 @@ fn renderer_turn_input_rejects_host_only_collaboration_fields() {
 }
 
 #[test]
+fn prepared_turn_preserves_provider_default_and_explicit_output_limits() {
+    for max_tokens in [None, Some(30_000), Some(256_000)] {
+        let fixture = tempdir().unwrap();
+        let storage = StorageService::open(&fixture.path().join("storage.sqlite")).unwrap();
+        storage.save_model_settings(test_model_settings()).unwrap();
+        let mut input = turn_input("model-1");
+        input.max_tokens = max_tokens;
+        let prepared = prepare_conversation_turn(
+            &storage,
+            &SkillsService::new(),
+            input,
+            "run-output-limit-preservation",
+        )
+        .unwrap();
+        assert_eq!(prepared.agent_input.max_tokens, max_tokens);
+    }
+}
+
+#[test]
 fn prepared_turn_keeps_local_usage_identity_separate_from_provider_wire_model() {
     let fixture = tempdir().unwrap();
     let storage = StorageService::open(&fixture.path().join("storage.sqlite")).unwrap();
@@ -658,6 +677,8 @@ async fn ordinary_root_turn_is_durable_before_its_terminal_event() {
     );
 
     let provider_request = model_server.await.unwrap();
+    assert!(provider_request.get("max_tokens").is_none());
+    assert!(provider_request.get("max_completion_tokens").is_none());
     let provider_messages = provider_request["messages"].as_array().unwrap();
     assert!(provider_messages.iter().any(|message| {
         message["role"] == "user"
@@ -883,6 +904,10 @@ async fn rewrite_turn_is_atomic_replayable_and_runs_with_only_the_active_context
     assert_eq!(replay.assistant_message.content, "Replacement answer.");
 
     let requests = model_server.await.unwrap();
+    assert!(requests
+        .iter()
+        .all(|request| request.get("max_tokens").is_none()
+            && request.get("max_completion_tokens").is_none()));
     let replacement_request = provider_request_message_text(&requests[1]);
     assert!(replacement_request.contains(replacement_content));
     assert!(!replacement_request.contains("Original prompt must disappear"));
@@ -1488,6 +1513,10 @@ async fn reopened_assistant_and_provider_transition_forks_complete_human_turns()
     }
 
     let requests = model_server.await.unwrap();
+    assert!(requests
+        .iter()
+        .all(|request| request.get("max_tokens").is_none()
+            && request.get("max_completion_tokens").is_none()));
     let request_texts = requests
         .iter()
         .map(provider_request_message_text)
@@ -1678,6 +1707,8 @@ async fn trusted_child_wake_uses_the_root_loop_without_duplicating_the_parent_ta
     );
 
     let provider_request = model_server.await.unwrap();
+    assert!(provider_request.get("max_tokens").is_none());
+    assert!(provider_request.get("max_completion_tokens").is_none());
     assert_eq!(provider_request["reasoning_effort"], "high");
     let provider_messages = provider_request["messages"].as_array().unwrap();
     let run_world_state = provider_messages

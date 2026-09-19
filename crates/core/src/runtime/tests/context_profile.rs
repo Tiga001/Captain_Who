@@ -91,7 +91,7 @@ fn both_profiles_measure_the_same_real_prefix_in_requests_previews_and_compactio
             .inspect(
                 &mut request.context,
                 input.context_window_tokens,
-                sanitize_max_tokens(input.max_tokens),
+                reserved_output_tokens(&input),
             )
             .context_cost_breakdown();
         let preview = inspect_context_window(input.clone()).unwrap().unwrap();

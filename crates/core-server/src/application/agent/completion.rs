@@ -147,6 +147,9 @@ pub(super) fn model_request_interruption_public_message(
         AgentModelRequestInterruptionReason::ContextLimitExceeded => "上下文超过模型限制",
         AgentModelRequestInterruptionReason::RequestRejected => "模型请求被拒绝",
         AgentModelRequestInterruptionReason::ResponseInvalid => "模型响应无效",
+        AgentModelRequestInterruptionReason::OutputLimitReached => "输出达到上限，回复未完成",
+        AgentModelRequestInterruptionReason::EmptyResponse => "模型未返回有效回复",
+        AgentModelRequestInterruptionReason::StreamInterrupted => "模型连接中断，回复未完成",
         AgentModelRequestInterruptionReason::RequestFailed => "模型请求失败",
     }
 }

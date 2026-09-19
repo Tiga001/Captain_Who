@@ -285,6 +285,8 @@ export function getAssistantFinalContent(message: ChatMessage) {
   // Completion commits even an empty final answer. Never promote earlier Trace narration into
   // an answer when the Host deliberately completed without one.
   if (message.agentRun?.status === 'completed') return message.content
+  // A failed request has no implicit final answer: keep only its persisted public partial text.
+  if (message.agentRun?.interruption) return message.content
 
   const timelineContent = getLastMessageTimelineContent(message.agentRun?.timeline ?? [])
   // The durable assistant message is the canonical final answer. Timeline messages are execution

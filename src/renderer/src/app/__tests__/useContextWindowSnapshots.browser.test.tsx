@@ -138,6 +138,16 @@ describe('useContextWindowSnapshots', () => {
     agentClient.getContextWindowSnapshot.mockReset().mockResolvedValue({ modelConfigId: 'model-1' })
   })
 
+  it('lets the Host resolve output reserve without imposing a frontend output limit', async () => {
+    const screen = await render(<Harness skills={[]} />)
+    await expect.poll(() => agentClient.getContextWindowSnapshot.mock.calls.length).toBe(1)
+    expect(agentClient.getContextWindowSnapshot.mock.calls[0]?.[0]).not.toHaveProperty('maxTokens')
+
+    await screen.rerender(<Harness skills={[]} modelId="model-2" />)
+    await expect.poll(() => agentClient.getContextWindowSnapshot.mock.calls.length).toBe(2)
+    expect(agentClient.getContextWindowSnapshot.mock.calls[1]?.[0]).not.toHaveProperty('maxTokens')
+  })
+
   it('refreshes the ring when global collaboration settings change', async () => {
     agentClient.getContextWindowSnapshot
       .mockResolvedValueOnce({ modelConfigId: 'model-1', snapshot: snapshot(21000) })

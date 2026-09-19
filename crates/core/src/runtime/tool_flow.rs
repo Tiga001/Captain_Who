@@ -1,8 +1,5 @@
 // Tool-call parsing, execution wrappers, result redaction, and runtime event helpers.
-use super::{
-    AgentEventStream, AgentHostActionExecutor, DEFAULT_MAX_TOKENS, DEFAULT_TEMPERATURE,
-    MAX_MAX_TOKENS,
-};
+use super::{AgentEventStream, AgentHostActionExecutor, DEFAULT_TEMPERATURE};
 use crate::cancellation::AgentCancellationToken;
 #[cfg(test)]
 use crate::conversation_trace::render_tool_observation;
@@ -437,13 +434,6 @@ pub(super) fn extract_reason_from_args(args: &Value) -> Option<String> {
         .map(str::trim)
         .filter(|reason| !reason.is_empty())
         .map(ToString::to_string)
-}
-
-pub(super) fn sanitize_max_tokens(max_tokens: Option<u32>) -> u32 {
-    max_tokens
-        .filter(|value| *value > 0)
-        .unwrap_or(DEFAULT_MAX_TOKENS)
-        .min(MAX_MAX_TOKENS)
 }
 
 pub(super) fn sanitize_temperature(temperature: Option<f32>) -> f32 {

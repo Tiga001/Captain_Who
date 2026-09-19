@@ -15,8 +15,14 @@ import {
 
 vi.mock('../../config/FrontendConfigProvider', () => ({
   useFrontendConfig: () => ({
-    t: (key: string) =>
-      key === 'configuration.duplicateDisplayName' ? `${key}:{displayName}` : key
+    t: (key: string) => {
+      if (key === 'configuration.duplicateDisplayName') return `${key}:{displayName}`
+      if (key === 'configuration.invalidContextCapacity') {
+        return `${key}:{displayName}:{contextWindowTokens}:{reservedOutputTokens}:{safetyMarginTokens}`
+      }
+      if (key === 'configuration.contextCapacityAcknowledge') return '知道了'
+      return key
+    }
   })
 }))
 
@@ -903,6 +909,62 @@ describe('ModelForm vendor controls', () => {
       .element(screen.getByRole('alert'))
       .toHaveTextContent('configuration.saveFailedSafe')
     expect(document.body.textContent).not.toContain('raw provider payload')
+  })
+
+  it('keeps the complete draft and focuses the context window after acknowledging a capacity rejection', async () => {
+    const onSave = vi.fn().mockRejectedValueOnce(
+      new HostInvocationError({
+        message: 'private capacity diagnostic',
+        code: -32000,
+        data: {
+          kind: 'model_settings_validation',
+          code: 'invalid_context_capacity_configuration',
+          modelId: model.id,
+          displayName: 'Draft Max',
+          contextWindowTokens: 128000,
+          reservedOutputTokens: 131072,
+          safetyMarginTokens: 6400,
+          minimumContextWindowTokens: 137972
+        }
+      })
+    )
+    const onCancel = vi.fn()
+    const screen = await render(
+      <ModelForm {...commonProps} model={model} onSave={onSave} onCancel={onCancel} />
+    )
+    const nameInput = screen.getByPlaceholder('configuration.displayNamePlaceholder')
+    const contextInput = screen.getByPlaceholder('configuration.contextWindowTokensPlaceholder')
+    await nameInput.fill('Draft Max')
+    await contextInput.fill('128000')
+    await screen.getByRole('button', { name: 'configuration.save' }).click()
+
+    await expect
+      .element(screen.getByRole('alertdialog'))
+      .toHaveTextContent('configuration.invalidContextCapacity:Draft Max:128000:131072:6400')
+    const acknowledge = document.querySelector<HTMLButtonElement>(
+      '.app-confirm-dialog__button--primary'
+    )!
+    expect(acknowledge.textContent).toBe('知道了')
+    expect(document.querySelector('.app-confirm-dialog__button--cancel')).toBeNull()
+    await expect.poll(() => document.activeElement).toBe(acknowledge)
+    expect(document.body.textContent).not.toContain('private capacity diagnostic')
+    expect(document.body.textContent).not.toContain('invalid_context_capacity_configuration')
+
+    acknowledge.click()
+    await expect.element(screen.getByRole('alertdialog')).not.toBeInTheDocument()
+    await expect.element(contextInput).toHaveFocus()
+    await expect.element(contextInput).toHaveValue('128000')
+    await expect.element(nameInput).toHaveValue('Draft Max')
+    expect(onCancel).not.toHaveBeenCalled()
+    expect(onSave).toHaveBeenCalledTimes(1)
+
+    await contextInput.fill('256000')
+    await screen.getByRole('button', { name: 'configuration.save' }).click()
+    await expect.poll(() => onSave.mock.calls.length).toBe(2)
+    expect(onSave.mock.calls[1]![0]).toMatchObject({
+      displayName: 'Draft Max',
+      contextWindowTokens: '256000'
+    })
   })
 
   it('keeps the complete draft and focuses display name after the duplicate dialog closes', async () => {

@@ -1844,6 +1844,45 @@ fn model_settings_validation_error_data_has_a_closed_stable_shape() {
 }
 
 #[test]
+fn invalid_context_capacity_error_requires_only_safe_numeric_metadata() {
+    let data = StorageModelSettingsValidationErrorData::invalid_context_capacity(
+        "model-a".into(),
+        "DeepSeek Max".into(),
+        128_000,
+        131_072,
+        6_400,
+        137_972,
+    );
+    let expected = serde_json::json!({
+        "kind": "model_settings_validation", "code": "invalid_context_capacity_configuration",
+        "modelId": "model-a", "displayName": "DeepSeek Max", "contextWindowTokens": 128_000,
+        "reservedOutputTokens": 131_072, "safetyMarginTokens": 6_400, "minimumContextWindowTokens": 137_972
+    });
+    assert_eq!(serde_json::to_value(&data).unwrap(), expected);
+    assert_eq!(
+        serde_json::from_value::<StorageModelSettingsValidationErrorData>(expected.clone())
+            .unwrap(),
+        data
+    );
+    for field in [
+        "modelId",
+        "contextWindowTokens",
+        "reservedOutputTokens",
+        "safetyMarginTokens",
+        "minimumContextWindowTokens",
+    ] {
+        let mut incomplete = expected.clone();
+        incomplete.as_object_mut().unwrap().remove(field);
+        assert!(
+            serde_json::from_value::<StorageModelSettingsValidationErrorData>(incomplete).is_err()
+        );
+    }
+    let mut extra = expected;
+    extra["apiToken"] = serde_json::json!("must-not-cross");
+    assert!(serde_json::from_value::<StorageModelSettingsValidationErrorData>(extra).is_err());
+}
+
+#[test]
 fn git_source_contract_uses_explicit_folder_or_all_and_rejects_mixed_selectors() {
     let folder = serde_json::from_value::<GitReviewSummaryRequest>(serde_json::json!({
         "projectId":"project", "source":{"kind":"folder","folderId":"folder-a"}, "target":{"kind":"unstaged"}

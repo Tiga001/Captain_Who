@@ -29,6 +29,10 @@ import {
 import type { ModelConfig, ModelConfigSaveDraft, SearchMode } from './modelConfig'
 import type { ModelSettingsSaveDraft } from '../features/storage/storageClient'
 
+interface ModelSaveOptions {
+  validationDialog?: boolean
+}
+
 interface ModelSettingsContextValue {
   apiUrl: string
   apiTokenStatus: CredentialStatus
@@ -48,7 +52,10 @@ interface ModelSettingsContextValue {
   saveSearchMode: (value: SearchMode) => Promise<void>
   updateTavilyApiKey: (mutation: CredentialMutation) => Promise<void>
   toggleModel: (modelId: string) => void
-  upsertModel: (model: ModelConfig | ModelConfigSaveDraft) => Promise<ModelConfig>
+  upsertModel: (
+    model: ModelConfig | ModelConfigSaveDraft,
+    options?: ModelSaveOptions
+  ) => Promise<ModelConfig>
 }
 
 const ModelSettingsContext = createContext<ModelSettingsContextValue | null>(null)
@@ -126,7 +133,8 @@ export function ModelSettingsProvider({ children }: { children: ReactNode }) {
       saveDraft:
         ModelSettingsSaveDraft | ((current: ModelSettingsSnapshot) => ModelSettingsSaveDraft),
       optimisticSettings?: ModelSettingsSnapshot,
-      notifyOnError = true
+      notifyOnError = true,
+      validationDialog = false
     ): Promise<ModelSettingsSnapshot> => {
       const revision = latestSaveRevisionRef.current + 1
       latestSaveRevisionRef.current = revision
@@ -176,10 +184,9 @@ export function ModelSettingsProvider({ children }: { children: ReactNode }) {
             }
             const { showToast: presentToast, t: translate } = loadFailurePresentationRef.current
             const classified = classifyModelSettingsSaveError(error)
-            // ModelForm owns the actionable duplicate-name recovery dialog. Emitting a toast
-            // here would show the same rejection twice and steal attention from the retained
-            // draft. Other failures keep the existing global notification behavior.
-            if (notifyOnError && classified.code !== 'duplicate_display_name') {
+            // Only a caller presenting its own validation dialog may suppress this toast.
+            // Other settings saves must still surface a rejection instead of failing silently.
+            if (notifyOnError && !(validationDialog && classified.code !== 'unknown')) {
               presentToast(translate('configuration.saveFailed'), { durationMs: 5000 })
             }
           }
@@ -354,7 +361,10 @@ export function ModelSettingsProvider({ children }: { children: ReactNode }) {
   )
 
   const upsertModel = useCallback(
-    async (savedModel: ModelConfig | ModelConfigSaveDraft): Promise<ModelConfig> => {
+    async (
+      savedModel: ModelConfig | ModelConfigSaveDraft,
+      options?: ModelSaveOptions
+    ): Promise<ModelConfig> => {
       if (hydrationStatus !== 'ready') {
         throw new Error('Model settings are not ready')
       }
@@ -374,10 +384,18 @@ export function ModelSettingsProvider({ children }: { children: ReactNode }) {
         nextModels = [...before, savedModel, ...after]
       }
 
-      const authoritativeSettings = await persistSettings({
-        ...keepSaveDraft(currentSettings),
-        models: nextModels
-      })
+      const authoritativeSettings = await persistSettings(
+        {
+          ...keepSaveDraft(currentSettings),
+          models: nextModels,
+          ...(options?.validationDialog && savedModel.id !== null
+            ? { validateContextCapacityModelId: savedModel.id }
+            : {})
+        },
+        undefined,
+        true,
+        options?.validationDialog
+      )
       const authoritativeModel =
         savedModel.id === null
           ? (() => {

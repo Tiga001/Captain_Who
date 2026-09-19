@@ -9,7 +9,6 @@ import { hostClient } from '../../host/hostClient'
 import { resolveChatPermissions } from '../chat/chatPermissions'
 import type { ChatPermissionMode } from '../chat/chatTypes'
 import type { UiPreferencesSnapshot } from '../storage/storageClient'
-import { DEFAULT_AGENT_MAX_TOKENS } from './constants'
 
 function snapshotKey(scopeId: string, modelId: string): string {
   return `${scopeId}\u0000${modelId}`
@@ -127,7 +126,6 @@ export function useContextWindowSnapshots({
       conversationId: request.conversationId ?? undefined,
       projectId: request.projectId,
       modelId: request.modelId,
-      maxTokens: DEFAULT_AGENT_MAX_TOKENS,
       skills: request.skills.length > 0 ? request.skills : undefined,
       permissions: request.permissions
     })

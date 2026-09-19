@@ -167,6 +167,25 @@ fn project_guidance_timeline(
             .cloned()
             .expect("canonical AgentRun projection is an object")
     };
+    // Recover the terminal reason from the backend-owned trace, not a renderer snapshot.
+    // RuntimeError codes are durable and intentionally excluded from model context.
+    let terminal_interruption = trace
+        .filter(|trace| trace.terminal_status == crate::ConversationTurnTraceTerminalStatus::Failed)
+        .and_then(|trace| {
+            trace.items.iter().rev().find_map(|item| match item {
+                ConversationTurnTraceItem::RuntimeError {
+                    code: Some(code), ..
+                } => crate::AgentModelRequestInterruptionReason::from_trace_code(code),
+                _ => None,
+            })
+        });
+    if let Some(reason) = terminal_interruption {
+        run.insert(
+            "interruption".to_string(),
+            serde_json::json!({"reason": reason.as_str()}),
+        );
+        run.remove("error");
+    }
     project_durable_mcp_invocations(&mut run, trace, mcp_actions)?;
     let mcp_trace_anchors = mcp_trace_anchors(&run)?;
     let existing_timeline = run
@@ -446,8 +465,15 @@ fn project_guidance_timeline(
                     }
                 },
                 ConversationTurnTraceItem::RuntimeError {
-                    sequence, message, ..
+                    sequence, message, code, ..
                 } => {
+                    if terminal_interruption.is_some() && (
+                        trace.terminal_error.as_deref() == Some(message)
+                        || code.as_deref().and_then(crate::AgentModelRequestInterruptionReason::from_trace_code).is_some()
+                    ) {
+                        emitted_terminal_error = true;
+                        continue;
+                    }
                     emitted_terminal_error |= trace.terminal_error.as_deref() == Some(message);
                     timeline.push(serde_json::json!({
                         "id": format!("trace-error-{sequence}"),
@@ -467,7 +493,7 @@ fn project_guidance_timeline(
             .is_terminal()
             .then_some(trace.terminal_error.as_deref())
             .flatten()
-            .filter(|_| !emitted_terminal_error)
+            .filter(|_| !emitted_terminal_error && terminal_interruption.is_none())
         {
             timeline.push(serde_json::json!({
                 "id": "terminal-error",

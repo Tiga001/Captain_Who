@@ -373,13 +373,15 @@ pub(super) fn build_llm_request(
         )
         .map_err(|error| AgentError::new(format!("Provider protocol key is invalid: {error}")))?,
     };
+    let output_budget = resolve_output_budget(&input, api_style)?;
     let template = LlmRequestTemplate {
         api_url: input.api_url.trim().to_string(),
         api_token: input.api_token.trim().to_string(),
         model: input.model.trim().to_string(),
         api_style,
         context_window_tokens: input.context_window_tokens,
-        max_tokens: sanitize_max_tokens(input.max_tokens),
+        max_tokens: output_budget.request_max_tokens,
+        reserved_output_tokens: output_budget.reserved_output_tokens,
         temperature: sanitize_temperature(input.temperature),
         stream: input.stream.unwrap_or(false),
         stable_tools: tool_definitions.to_vec(),

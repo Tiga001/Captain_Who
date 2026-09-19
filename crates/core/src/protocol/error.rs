@@ -12,6 +12,8 @@ pub struct AgentError {
     // Set only at the runtime's final model-request boundary. This proves the failed work was
     // provisional model sampling, so the Host may safely keep the committed trace prefix.
     model_request_interruption: Option<AgentModelRequestInterruptionReason>,
+    // Public response text only. Never include provider-private reasoning or tool arguments.
+    partial_response: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -23,6 +25,9 @@ pub enum AgentModelRequestInterruptionReason {
     ContextLimitExceeded,
     RequestRejected,
     ResponseInvalid,
+    OutputLimitReached,
+    EmptyResponse,
+    StreamInterrupted,
     RequestFailed,
 }
 
@@ -36,8 +41,32 @@ impl AgentModelRequestInterruptionReason {
             Self::ContextLimitExceeded => "context_limit_exceeded",
             Self::RequestRejected => "request_rejected",
             Self::ResponseInvalid => "response_invalid",
+            Self::OutputLimitReached => "output_limit_reached",
+            Self::EmptyResponse => "empty_response",
+            Self::StreamInterrupted => "stream_interrupted",
             Self::RequestFailed => "request_failed",
         }
+    }
+
+    pub fn from_trace_code(code: &str) -> Option<Self> {
+        Some(match code.strip_prefix("agent.model_interruption.")? {
+            "service_connection_failed" => Self::ServiceConnectionFailed,
+            "service_unavailable" => Self::ServiceUnavailable,
+            "authentication_failed" => Self::AuthenticationFailed,
+            "quota_exhausted" => Self::QuotaExhausted,
+            "context_limit_exceeded" => Self::ContextLimitExceeded,
+            "request_rejected" => Self::RequestRejected,
+            "response_invalid" => Self::ResponseInvalid,
+            "output_limit_reached" => Self::OutputLimitReached,
+            "empty_response" => Self::EmptyResponse,
+            "stream_interrupted" => Self::StreamInterrupted,
+            "request_failed" => Self::RequestFailed,
+            _ => return None,
+        })
+    }
+
+    pub fn trace_code(self) -> String {
+        format!("agent.model_interruption.{}", self.as_str())
     }
 }
 
@@ -54,6 +83,7 @@ impl AgentError {
             conversation_turn_trace: None,
             model_request_observation: None,
             model_request_interruption: None,
+            partial_response: None,
         }
     }
 
@@ -67,6 +97,7 @@ impl AgentError {
             conversation_turn_trace: None,
             model_request_observation: None,
             model_request_interruption: None,
+            partial_response: None,
         }
     }
 
@@ -80,6 +111,7 @@ impl AgentError {
             conversation_turn_trace: None,
             model_request_observation: None,
             model_request_interruption: None,
+            partial_response: None,
         }
     }
 
@@ -100,6 +132,7 @@ impl AgentError {
             conversation_turn_trace: None,
             model_request_observation: None,
             model_request_interruption: None,
+            partial_response: None,
         }
     }
 
@@ -153,9 +186,31 @@ impl AgentError {
         self.model_request_interruption = Some(classify_model_request_interruption(&self));
         self
     }
+
+    pub fn partial_response(&self) -> Option<&str> {
+        self.partial_response.as_deref()
+    }
+
+    pub fn with_partial_response(mut self, content: impl Into<String>) -> Self {
+        let content = content.into();
+        self.partial_response = (!content.trim().is_empty()).then_some(content);
+        self
+    }
 }
 
 fn classify_model_request_interruption(error: &AgentError) -> AgentModelRequestInterruptionReason {
+    match error.code() {
+        Some("agent.output_limit_reached") => {
+            return AgentModelRequestInterruptionReason::OutputLimitReached
+        }
+        Some("agent.empty_response" | "agent.empty_model_action") => {
+            return AgentModelRequestInterruptionReason::EmptyResponse
+        }
+        Some("agent.stream_interrupted") => {
+            return AgentModelRequestInterruptionReason::StreamInterrupted
+        }
+        _ => {}
+    }
     if error.code() == Some("agent.llm_provider_failure") {
         return match error
             .details()

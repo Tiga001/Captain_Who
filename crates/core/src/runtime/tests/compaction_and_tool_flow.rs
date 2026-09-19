@@ -64,6 +64,17 @@ fn committed_runtime_compaction_baseline(
 
 #[tokio::test]
 async fn durable_compaction_runs_before_capacity_gate_and_then_sends_rebuilt_context() {
+    run_durable_compaction_with_output_policy(Some(1_000), 50_000).await;
+}
+
+#[tokio::test]
+async fn durable_compaction_preserves_omitted_chat_limits_and_nonzero_reservations() {
+    // Keep the same 46,500 input capacity as the explicit-limit fixture after the 5% margin,
+    // while reserving 30,000 internally and sending no output limit on either chat request.
+    run_durable_compaction_with_output_policy(None, 80_526).await;
+}
+
+async fn run_durable_compaction_with_output_policy(max_tokens: Option<u32>, window: u32) {
     use crate::context::{ContextCompactionGeneration, ContextCompactionSummary};
     use crate::protocol::AgentApiStyle;
     use crate::{
@@ -208,9 +219,9 @@ async fn durable_compaction_runs_before_capacity_gate_and_then_sends_rebuilt_con
         model: "test-model".to_string(),
         model_capabilities: crate::ModelCapabilities::default(),
         api_style: Some(AgentApiStyle::OpenAiCompatible),
-        context_window_tokens: Some(50_000),
+        context_window_tokens: Some(window),
         context_window_indicator_enabled: true,
-        max_tokens: Some(1_000),
+        max_tokens,
         temperature: None,
         stream: Some(false),
         context: Some(AgentRunContext {
@@ -536,6 +547,11 @@ async fn durable_compaction_runs_before_capacity_gate_and_then_sends_rebuilt_con
         assert!(snapshot.input_tokens <= snapshot.input_capacity_tokens.unwrap());
     }
     for request_body in &request_bodies {
+        let payload: Value = serde_json::from_str(request_body).unwrap();
+        assert_eq!(
+            payload.get("max_tokens"),
+            max_tokens.map(|value| json!(value)).as_ref()
+        );
         assert!(request_body.contains("COMPACTED_HISTORY_MARKER"));
         assert!(!request_body.contains("OLD_USER_MARKER"));
         assert!(!request_body.contains("OLD_ASSISTANT_MARKER"));
@@ -817,7 +833,7 @@ async fn recursive_compaction_starts_when_the_assembled_system_summary_is_alread
     let report = detector.inspect(
         &mut assembled_frame,
         input.context_window_tokens,
-        sanitize_max_tokens(input.max_tokens),
+        reserved_output_tokens(&input),
     );
     let assembled_plan = ContextCompactionPlanner::for_tools(&[]).plan(
         &report.compaction_query(),

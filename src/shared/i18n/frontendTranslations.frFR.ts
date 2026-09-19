@@ -1,5 +1,9 @@
 // French UI translation strings.
 export const frFRTranslations = {
+  'configuration.invalidContextCapacityTitle': 'Fenêtre de contexte insuffisante',
+  'configuration.invalidContextCapacity':
+    '« {displayName} » n’a pas été enregistré. La fenêtre de {contextWindowTokens} tokens ne couvre pas la réserve de sortie ({reservedOutputTokens}) et la marge de sécurité ({safetyMarginTokens}) : aucun espace d’entrée ne reste. Réglez la fenêtre selon la capacité réelle du modèle avant d’enregistrer. Si une fenêtre plus grande n’est pas prise en charge, choisissez un autre modèle ou ajustez les paramètres du fournisseur. Vos modifications sont conservées.',
+  'configuration.contextCapacityAcknowledge': 'Compris',
   'chat.commands.compact': 'Compacter le contexte',
   'chat.commands.compactDescription': 'Compacter le contexte de cette discussion',
   'chat.commands.fork': 'Créer une branche de discussion',
@@ -1283,6 +1287,9 @@ export const frFRTranslations = {
   'agent.interruption.contextLimitExceeded': 'Le contexte dépasse la limite du modèle',
   'agent.interruption.requestRejected': 'Demande de modèle rejetée',
   'agent.interruption.responseInvalid': 'Réponse de modèle invalide',
+  'agent.interruption.outputLimitReached': 'Limite de sortie atteinte. Réponse incomplète.',
+  'agent.interruption.emptyResponse': 'Le modèle n’a renvoyé aucune réponse exploitable.',
+  'agent.interruption.streamInterrupted': 'Connexion au modèle interrompue. Réponse incomplète.',
   'agent.interruption.admissionUnconfirmed':
     'Envoi non confirmé. Vérification tentée ; aucun renvoi automatique.',
   'agent.interruption.requestFailed': 'La demande de modèle a échoué',

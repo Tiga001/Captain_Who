@@ -24,8 +24,10 @@ pub(super) fn build_openai_payload(request: &LlmChatRequest) -> AgentResult<Valu
             Value::Array(build_openai_messages(&messages)),
         ),
         ("stream".to_string(), json!(request.stream)),
-        ("max_tokens".to_string(), json!(request.max_tokens)),
     ]);
+    if let Some(max_tokens) = request.max_tokens {
+        payload.insert("max_tokens".to_string(), json!(max_tokens));
+    }
     if should_send_temperature(request.model()) {
         payload.insert("temperature".to_string(), json!(request.temperature));
     }
@@ -48,11 +50,21 @@ pub(super) fn build_openai_payload(request: &LlmChatRequest) -> AgentResult<Valu
 }
 
 pub(super) fn build_anthropic_payload(request: &LlmChatRequest) -> AgentResult<Value> {
+    let max_tokens = request
+        .max_tokens
+        .filter(|value| *value > 0)
+        .ok_or_else(|| {
+            AgentError::structured(
+                "agent.invalid_output_budget",
+                "Anthropic Messages 请求必须包含正数 max_tokens。",
+                json!({ "field": "max_tokens" }),
+            )
+        })?;
     let projected = project_generic_split_exchange(&request.messages)?;
     let (system, messages) = split_anthropic_messages(&projected);
     let mut payload = Map::from_iter([
         ("model".to_string(), json!(request.model())),
-        ("max_tokens".to_string(), json!(request.max_tokens)),
+        ("max_tokens".to_string(), json!(max_tokens)),
         ("messages".to_string(), json!(messages)),
     ]);
     if should_send_temperature(request.model()) {

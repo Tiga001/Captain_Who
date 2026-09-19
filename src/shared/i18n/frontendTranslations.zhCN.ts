@@ -1,5 +1,9 @@
 // Simplified Chinese UI translation strings.
 export const zhCNTranslations = {
+  'configuration.invalidContextCapacityTitle': '上下文窗口不足',
+  'configuration.invalidContextCapacity':
+    '模型「{displayName}」尚未保存：总窗口为 {contextWindowTokens} tokens，输出预留为 {reservedOutputTokens}，安全余量为 {safetyMarginTokens}，没有可用的输入空间。请按模型实际支持的上下文窗口调整后再保存；若不支持更大的窗口，请更换模型或调整厂商设置。编辑内容已保留。',
+  'configuration.contextCapacityAcknowledge': '知道了',
   'chat.commands.compact': '压缩上下文',
   'chat.commands.compactDescription': '主动压缩当前聊天的上下文',
   'chat.commands.new': '新聊天',
@@ -1183,6 +1187,9 @@ export const zhCNTranslations = {
   'agent.interruption.contextLimitExceeded': '上下文超过模型限制',
   'agent.interruption.requestRejected': '模型请求被拒绝',
   'agent.interruption.responseInvalid': '模型响应无效',
+  'agent.interruption.outputLimitReached': '输出达到上限，回复未完成',
+  'agent.interruption.emptyResponse': '模型未返回有效回复',
+  'agent.interruption.streamInterrupted': '模型连接中断，回复未完成',
   'agent.interruption.admissionUnconfirmed': '发送结果尚未确认。已尝试核对，未自动重发。',
   'agent.interruption.requestFailed': '模型请求失败',
   'agent.llmRetry.rateLimited': '服务限流，{seconds}秒后自动重试（{attempt}/{maxAttempts}）',

@@ -342,6 +342,37 @@ describe('storage protocol parsers', () => {
 })
 
 describe('model settings validation error parser', () => {
+  const invalidCapacity = {
+    kind: 'model_settings_validation',
+    code: 'invalid_context_capacity_configuration',
+    modelId: 'model-flash',
+    displayName: 'DeepSeek Max',
+    contextWindowTokens: 128_000,
+    reservedOutputTokens: 131_072,
+    safetyMarginTokens: 6_400,
+    minimumContextWindowTokens: 137_972
+  } as const
+
+  it('accepts the bounded context-capacity save rejection without diagnostic text', () => {
+    expect(parseStorageModelSettingsValidationErrorData(invalidCapacity)).toEqual(invalidCapacity)
+  })
+
+  it.each([
+    { ...invalidCapacity, modelId: '' },
+    { ...invalidCapacity, modelId: 'x'.repeat(2_049) },
+    { ...invalidCapacity, contextWindowTokens: '128000' },
+    { ...invalidCapacity, reservedOutputTokens: null },
+    { ...invalidCapacity, safetyMarginTokens: -1 },
+    { ...invalidCapacity, minimumContextWindowTokens: 0 },
+    { ...invalidCapacity, minimumContextWindowTokens: 4_294_967_296 },
+    { ...invalidCapacity, minimumContextWindowTokens: 131_072.5 },
+    { ...invalidCapacity, apiToken: 'must not cross the boundary' }
+  ])('rejects malformed or expanded context-capacity data %#', (value) => {
+    expect(() => parseStorageModelSettingsValidationErrorData(value)).toThrow(
+      'Invalid storage model settings validation error data'
+    )
+  })
+
   const duplicate = {
     kind: 'model_settings_validation',
     code: 'duplicate_display_name',
@@ -527,6 +558,23 @@ describe('secret-free model settings parsers', () => {
       expectedRevision: null
     })
   })
+
+  it('accepts an explicit editor validation target without adding it to other saves', () => {
+    const targeted = { ...update, validateContextCapacityModelId: model.id }
+    expect(parseStorageModelSettingsUpdateRecord(targeted)).toEqual(targeted)
+    expect(parseStorageModelSettingsUpdateRecord(update)).not.toHaveProperty(
+      'validateContextCapacityModelId'
+    )
+  })
+
+  it.each(['', null, 123, 'unknown-model', 'x'.repeat(2_049)])(
+    'rejects invalid explicit capacity validation targets %#',
+    (target) => {
+      expect(() =>
+        parseStorageModelSettingsUpdateRecord({ ...update, validateContextCapacityModelId: target })
+      ).toThrow(/validateContextCapacityModelId/)
+    }
+  )
 
   it('parses new DeepSeek family settings independently from the internal Profile id', () => {
     const deepSeekSnapshot = {

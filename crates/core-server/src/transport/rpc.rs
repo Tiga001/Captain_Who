@@ -82,6 +82,31 @@ where
         Err(ModelSettingsSaveError::Other(_)) => {
             response_error(Some(id), -32000, "Model settings could not be saved.")
         }
+        Err(ModelSettingsSaveError::InvalidContextCapacity {
+            model_id,
+            display_name,
+            context_window_tokens,
+            reserved_output_tokens,
+            safety_margin_tokens,
+            minimum_context_window_tokens,
+        }) => {
+            let data = StorageModelSettingsValidationErrorData::invalid_context_capacity(
+                model_id,
+                display_name,
+                context_window_tokens,
+                reserved_output_tokens,
+                safety_margin_tokens,
+                minimum_context_window_tokens,
+            );
+            serde_json::to_value(error_with_data(
+                Some(id),
+                -32000,
+                "Model settings validation failed.",
+                serde_json::to_value(data)
+                    .expect("model settings validation error data must serialize"),
+            ))
+            .expect("model settings validation JSON-RPC error response must serialize")
+        }
     }
 }
 
@@ -123,4 +148,39 @@ pub(crate) fn now_ms() -> u128 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn model_context_capacity_save_failure_has_safe_structured_error_data() {
+        let response = model_settings_save_response::<Value>(
+            JsonRpcId::Number(7),
+            Err(
+                mycopilot_core::storage::models::ModelSettingsSaveError::InvalidContextCapacity {
+                    model_id: "model-a".into(),
+                    display_name: "DeepSeek Max".into(),
+                    context_window_tokens: 128_000,
+                    reserved_output_tokens: 131_072,
+                    safety_margin_tokens: 6_400,
+                    minimum_context_window_tokens: 137_972,
+                },
+            ),
+        );
+        assert_eq!(
+            response["error"]["data"],
+            json!({
+                "kind": "model_settings_validation", "code": "invalid_context_capacity_configuration",
+                "modelId": "model-a", "displayName": "DeepSeek Max", "contextWindowTokens": 128_000,
+                "reservedOutputTokens": 131_072, "safetyMarginTokens": 6_400, "minimumContextWindowTokens": 137_972
+            })
+        );
+        assert_eq!(
+            response["error"]["message"],
+            "Model settings validation failed."
+        );
+        assert!(response.get("result").is_none());
+    }
 }

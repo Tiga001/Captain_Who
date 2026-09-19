@@ -434,6 +434,7 @@ impl AgentService {
             Err(error) => {
                 terminal_event_gate.discard();
                 let model_request_interruption = error.model_request_interruption();
+                let partial_response = error.partial_response().unwrap_or_default().to_string();
                 let usage = error.usage().cloned();
                 let code = error.code().map(ToString::to_string);
                 let details = error.details().cloned();
@@ -518,7 +519,7 @@ impl AgentService {
                             };
                             terminal_projection.and_then(
                                 |(conversation_turn_trace, model_context_items)| {
-                                    if model_request_interruption.is_some() {
+                                    if let Some(reason) = model_request_interruption {
                                         self.persist_assistant_model_request_interruption_with_model_context(
                                             conversation_id,
                                             assistant_message_id,
@@ -526,6 +527,8 @@ impl AgentService {
                                             usage.clone(),
                                             &conversation_turn_trace,
                                             model_context_items.as_deref(),
+                                            reason,
+                                            &partial_response,
                                         )
                                     } else {
                                         self.persist_assistant_error_with_model_context(
@@ -613,7 +616,7 @@ impl AgentService {
                             conversation_id,
                             assistant_message_id,
                             if model_request_interruption.is_some() {
-                                ""
+                                &partial_response
                             } else {
                                 &message
                             },

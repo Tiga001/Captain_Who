@@ -199,8 +199,10 @@ pub(super) fn build_payload(request: &LlmChatRequest) -> AgentResult<Value> {
             Value::Array(build_messages(request)?),
         ),
         ("stream".to_string(), json!(request.stream)),
-        ("max_tokens".to_string(), json!(request.max_tokens)),
     ]);
+    if let Some(max_tokens) = request.max_tokens {
+        payload.insert("max_tokens".to_string(), json!(max_tokens));
+    }
 
     match policy.mode {
         ReasoningMode::ProviderDefault => {}

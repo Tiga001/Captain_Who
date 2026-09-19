@@ -157,6 +157,7 @@ export function ModelForm({
   })
   const policyRequestRef = useRef(0)
   const displayNameInputRef = useRef<HTMLInputElement>(null)
+  const contextWindowInputRef = useRef<HTMLInputElement>(null)
   const [isProviderSettingsOpen, setProviderSettingsOpen] = useState(false)
   const [requestedProviderSettings, setRequestedProviderSettings] = useState<string | null>(null)
   const [isSaving, setSaving] = useState(false)
@@ -426,6 +427,7 @@ export function ModelForm({
                   </span>
                   <span className="settings-list-row__control model-form-price-control">
                     <input
+                      ref={contextWindowInputRef}
                       className="settings-list-control"
                       inputMode="numeric"
                       aria-invalid={!isContextWindowValid}
@@ -801,6 +803,26 @@ export function ModelForm({
           restoreFocusRef={displayNameInputRef}
           showCancelButton={false}
           title={t('configuration.duplicateDisplayNameTitle')}
+        />
+      )}
+
+      {saveError?.code === 'invalid_context_capacity_configuration' && (
+        <ConfirmationDialog
+          cancelLabel={t('configuration.contextCapacityAcknowledge')}
+          confirmLabel={t('configuration.contextCapacityAcknowledge')}
+          confirmVariant="primary"
+          description={formatTranslation(t, 'configuration.invalidContextCapacity', {
+            displayName: saveError.displayName,
+            contextWindowTokens: saveError.contextWindowTokens,
+            reservedOutputTokens: saveError.reservedOutputTokens,
+            safetyMarginTokens: saveError.safetyMarginTokens
+          })}
+          dialogRole="alertdialog"
+          onCancel={() => setSaveError(null)}
+          onConfirm={() => setSaveError(null)}
+          restoreFocusRef={contextWindowInputRef}
+          showCancelButton={false}
+          title={t('configuration.invalidContextCapacityTitle')}
         />
       )}
 

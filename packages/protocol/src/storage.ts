@@ -297,17 +297,30 @@ export interface StorageModelSettingsUpdateRecord extends Omit<
 > {
   /** Null is accepted only when creating the first settings record. */
   expectedRevision: string | null
+  /** Explicit model-editor Save must validate this existing model even if its draft is unchanged. */
+  validateContextCapacityModelId?: string
   apiTokenMutation: CredentialMutation
   tavilyApiKeyMutation: CredentialMutation
   models: StorageModelConfigUpdateRecord[]
 }
 
 /** Safe, renderer-visible rejection from the authoritative model-settings save boundary. */
-export interface StorageModelSettingsValidationErrorData {
-  kind: 'model_settings_validation'
-  code: 'duplicate_display_name'
-  displayName: string
-}
+export type StorageModelSettingsValidationErrorData =
+  | {
+      kind: 'model_settings_validation'
+      code: 'duplicate_display_name'
+      displayName: string
+    }
+  | {
+      kind: 'model_settings_validation'
+      code: 'invalid_context_capacity_configuration'
+      modelId: string
+      displayName: string
+      contextWindowTokens: number
+      reservedOutputTokens: number
+      safetyMarginTokens: number
+      minimumContextWindowTokens: number
+    }
 
 /** Exactly one folder of a project is `primary`; it stays the working directory. */
 export type StorageProjectFolderRole = 'primary' | 'auxiliary'

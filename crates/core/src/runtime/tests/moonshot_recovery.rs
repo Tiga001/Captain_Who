@@ -120,7 +120,7 @@ fn assert_request_private_replay(
     );
 }
 
-fn assert_empty_turns_preserve_terminal_audit(request: &Value) {
+fn assert_empty_steer_preserves_terminal_audit(request: &Value) {
     let messages = request
         .get("messages")
         .and_then(Value::as_array)
@@ -136,7 +136,7 @@ fn assert_empty_turns_preserve_terminal_audit(request: &Value) {
         .position(|message| {
             message.get("reasoning_content").and_then(Value::as_str) == Some(FINAL_REASONING)
         })
-        .expect("restart request must restore the empty final turn");
+        .expect("restart request must restore the visible final turn");
     let guidance_index = messages
         .iter()
         .position(|message| {
@@ -158,7 +158,10 @@ fn assert_empty_turns_preserve_terminal_audit(request: &Value) {
         .expect("restart request must retain the synthetic terminal audit owner");
 
     assert_eq!(messages[steer_index].get("content"), Some(&json!("")));
-    assert_eq!(messages[final_index].get("content"), Some(&json!("")));
+    assert_eq!(
+        messages[final_index].get("content"),
+        Some(&json!(FINAL_VISIBLE))
+    );
     assert_eq!(steer_index.checked_add(1), Some(guidance_index));
     assert!(guidance_index < final_index);
     assert!(final_index < terminal_audit_index);
@@ -295,10 +298,8 @@ async fn assert_moonshot_ordinary_recovery(family: MoonshotRecoveryFamily, empty
                     if empty_visible { "" } else { STEER_VISIBLE },
                     STEER_REASONING,
                 ),
-                1 => (
-                    if empty_visible { "" } else { FINAL_VISIBLE },
-                    FINAL_REASONING,
-                ),
+                // Reasoning-only output is legal before pending steer, not as a final answer.
+                1 => (FINAL_VISIBLE, FINAL_REASONING),
                 2 => (
                     "This response is interrupted before Host terminal commit.",
                     INTERRUPTED_REASONING,
@@ -401,10 +402,7 @@ async fn assert_moonshot_ordinary_recovery(family: MoonshotRecoveryFamily, empty
     release_first_response_tx.send(()).unwrap();
     let first_output = first_runtime.await.unwrap();
     assert_eq!(first_output.status, AgentRunStatus::Completed);
-    assert_eq!(
-        first_output.content,
-        if empty_visible { "" } else { FINAL_VISIBLE }
-    );
+    assert_eq!(first_output.content, FINAL_VISIBLE);
 
     let terminal_trace = first_output
         .conversation_turn_trace
@@ -565,8 +563,8 @@ async fn assert_moonshot_ordinary_recovery(family: MoonshotRecoveryFamily, empty
     assert_request_private_replay(&requests[2], 1, 1, 0);
     assert_request_private_replay(&requests[3], 1, 1, 0);
     if empty_visible {
-        assert_empty_turns_preserve_terminal_audit(&requests[2]);
-        assert_empty_turns_preserve_terminal_audit(&requests[3]);
+        assert_empty_steer_preserves_terminal_audit(&requests[2]);
+        assert_empty_steer_preserves_terminal_audit(&requests[3]);
     } else {
         assert!(serde_json::to_string(&requests[2])
             .unwrap()
@@ -591,11 +589,11 @@ async fn moonshot_k2_7_preserved_thinking_survives_restart_and_ignores_interrupt
 }
 
 #[tokio::test]
-async fn moonshot_k3_empty_preserved_thinking_survives_steer_terminal_and_restart() {
+async fn moonshot_k3_empty_steer_preserved_thinking_survives_terminal_and_restart() {
     assert_moonshot_ordinary_recovery(MoonshotRecoveryFamily::K3, true).await;
 }
 
 #[tokio::test]
-async fn moonshot_k2_7_empty_preserved_thinking_survives_steer_terminal_and_restart() {
+async fn moonshot_k2_7_empty_steer_preserved_thinking_survives_terminal_and_restart() {
     assert_moonshot_ordinary_recovery(MoonshotRecoveryFamily::K27Code, true).await;
 }

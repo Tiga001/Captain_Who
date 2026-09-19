@@ -334,6 +334,7 @@ impl AgentService {
             }
             Err(error) => {
                 let model_request_interruption = error.model_request_interruption();
+                let partial_response = error.partial_response().unwrap_or_default().to_string();
                 let usage = error.usage().cloned();
                 let code = error.code().map(ToString::to_string);
                 let details = error.details().cloned();
@@ -364,13 +365,15 @@ impl AgentService {
                                 "项目或会话正在移除，无法持久化 agent 失败终态。".to_string()
                             );
                         }
-                        if model_request_interruption.is_some() {
+                        if let Some(reason) = model_request_interruption {
                             service.persist_assistant_model_request_interruption(
                                 &worker_conversation_id,
                                 &worker_assistant_message_id,
                                 &message,
                                 usage.clone(),
                                 &conversation_turn_trace,
+                                reason,
+                                &partial_response,
                             )
                         } else {
                             service.persist_assistant_error(
@@ -406,7 +409,7 @@ impl AgentService {
                             &worker_conversation_id,
                             &worker_assistant_message_id,
                             if model_request_interruption.is_some() {
-                                ""
+                                &partial_response
                             } else {
                                 &message
                             },

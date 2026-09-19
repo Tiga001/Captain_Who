@@ -177,7 +177,7 @@ fn generic_tool_wording_stays_below_pre_cleanup_budget() {
             .inspect(
                 &mut request.context,
                 input.context_window_tokens,
-                sanitize_max_tokens(input.max_tokens),
+                reserved_output_tokens(&input),
             )
             .context_cost_breakdown();
         assert!(

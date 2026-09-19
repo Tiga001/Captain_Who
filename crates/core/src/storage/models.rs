@@ -333,6 +333,10 @@ pub struct ModelSettingsSaveRequest {
     /// explicitly supplied stale revision is always rejected by the Host.
     #[serde(deserialize_with = "deserialize_required_nullable")]
     pub expected_revision: Option<String>,
+    /// Explicit existing model edited by the user, even when its fields did not change. Other
+    /// untouched legacy models in this full-catalog save do not prevent unrelated edits.
+    #[serde(default)]
+    pub validate_context_capacity_model_id: Option<String>,
     pub api_url: String,
     pub api_token_mutation: CredentialMutation,
     pub search_mode: String,
@@ -352,7 +356,17 @@ impl std::fmt::Debug for ModelSettingsSaveRequest {
 /// retains the internal diagnostic for local callers while Core Server must redact it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ModelSettingsSaveError {
-    DuplicateDisplayName { display_name: String },
+    DuplicateDisplayName {
+        display_name: String,
+    },
+    InvalidContextCapacity {
+        model_id: String,
+        display_name: String,
+        context_window_tokens: u32,
+        reserved_output_tokens: u32,
+        safety_margin_tokens: u64,
+        minimum_context_window_tokens: u64,
+    },
     Other(String),
 }
 
@@ -361,6 +375,9 @@ impl std::fmt::Display for ModelSettingsSaveError {
         match self {
             Self::DuplicateDisplayName { display_name } => {
                 write!(formatter, "模型显示名称重复：{display_name}")
+            }
+            Self::InvalidContextCapacity { display_name, .. } => {
+                write!(formatter, "模型 {display_name} 的上下文容量配置无效。")
             }
             Self::Other(message) => formatter.write_str(message),
         }

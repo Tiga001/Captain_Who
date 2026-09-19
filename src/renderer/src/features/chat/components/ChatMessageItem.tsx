@@ -120,6 +120,12 @@ function interruptionTranslationKey(
       return 'agent.interruption.requestRejected' as const
     case 'response_invalid':
       return 'agent.interruption.responseInvalid' as const
+    case 'output_limit_reached':
+      return 'agent.interruption.outputLimitReached' as const
+    case 'empty_response':
+      return 'agent.interruption.emptyResponse' as const
+    case 'stream_interrupted':
+      return 'agent.interruption.streamInterrupted' as const
     case 'admission_unconfirmed':
       return 'agent.interruption.admissionUnconfirmed' as const
     case 'request_failed':
@@ -908,7 +914,11 @@ function AgentRunView({
       !isStreamingAssistantText &&
       !isStreamingFileChange &&
       (waitingForCommandCompletion || shouldShowThinkingActivity(run, timeline)))
-  const showTokenLimitNotice = isRunSettled(run) && isTokenLimitFinishReason(run.finishReason)
+  const interruptionReason =
+    run.interruption?.reason ??
+    (isRunSettled(run) && isTokenLimitFinishReason(run.finishReason)
+      ? 'output_limit_reached'
+      : undefined)
   const webSearchSources = getUniqueWebSearchSources(run)
 
   return (
@@ -1019,16 +1029,15 @@ function AgentRunView({
       {isRunSettled(run) && (
         <AssistantSources key={`assistant-sources:${run.runId}`} sources={webSearchSources} />
       )}
-      {run.interruption && (
+      {interruptionReason && (
         <div className="agent-run__interruption" role="status">
-          <WifiOff aria-hidden="true" />
-          <span>{t(interruptionTranslationKey(run.interruption.reason))}</span>
-        </div>
-      )}
-      {showTokenLimitNotice && (
-        <div className="agent-run__notice" role="status">
-          <AlertTriangle aria-hidden="true" />
-          <span>{t('agent.tokenLimitNotice')}</span>
+          {interruptionReason === 'service_connection_failed' ||
+          interruptionReason === 'stream_interrupted' ? (
+            <WifiOff aria-hidden="true" />
+          ) : (
+            <AlertTriangle aria-hidden="true" />
+          )}
+          <span>{t(interruptionTranslationKey(interruptionReason))}</span>
         </div>
       )}
       {showThinkingActivity && (
@@ -1039,7 +1048,7 @@ function AgentRunView({
           }
         />
       )}
-      {showTimeline && run.error && !hasTimelineError && (
+      {showTimeline && run.error && !hasTimelineError && !interruptionReason && (
         <div className="agent-run__error">{run.error}</div>
       )}
     </div>

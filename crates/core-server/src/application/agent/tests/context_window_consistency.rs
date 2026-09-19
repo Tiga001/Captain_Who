@@ -281,6 +281,22 @@ impl WindowFixture {
 }
 
 #[test]
+fn omitted_wire_limit_keeps_internal_reserve_consistent_across_context_read_paths() {
+    let mut fixture = WindowFixture::new();
+    fixture.input.max_tokens = None;
+    fixture.start_turn("Keep provider-default output and context protection separate.");
+    let snapshot = fixture.finish_turn("The default output policy is preserved.");
+    assert_eq!(snapshot.reserved_output_tokens, 30_000);
+    assert!(snapshot.safety_margin_tokens > 0);
+    assert_eq!(
+        snapshot.input_capacity_tokens,
+        Some(128_000 - snapshot.reserved_output_tokens - snapshot.safety_margin_tokens)
+    );
+    assert_eq!(fixture.preview_input().max_tokens, None);
+    fixture.assert_all_read_paths(&snapshot, "The default output policy is preserved.");
+}
+
+#[test]
 fn completed_turn_preview_is_identical_across_hot_cold_and_direct_read_paths() {
     let mut fixture = WindowFixture::new();
     fixture.start_turn("Check the current state.");

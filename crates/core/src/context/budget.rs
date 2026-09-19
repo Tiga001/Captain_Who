@@ -336,7 +336,7 @@ impl ContextCapacityError {
                 report.excess_input_tokens.unwrap_or_default(),
             ),
             ContextCapacityErrorCode::InvalidConfiguration => format!(
-                "模型上下文容量配置无效（{}）：总窗口为 {}，但输出预留为 {}，安全余量为 {}，没有可用的输入空间。请求尚未发送。请调整模型上下文窗口或单次最大输出 token。",
+                "模型上下文容量配置无效（{}）：总窗口为 {}，但输出预留为 {}，安全余量为 {}，没有可用的输入空间。请求尚未发送。请核对模型实际支持的上下文窗口，并在模型配置中调整上下文窗口。",
                 self.code.as_str(),
                 context_window,
                 report.reserved_output_tokens,
@@ -607,9 +607,9 @@ fn build_budget_report(
         };
     };
 
-    let safety_margin_tokens = safety_margin(context_window_tokens);
-    let required_reserve = reserved_output_tokens.saturating_add(safety_margin_tokens);
-    if required_reserve >= context_window_tokens {
+    let (safety_margin_tokens, available_input_tokens) =
+        configured_input_capacity(context_window_tokens, reserved_output_tokens);
+    if available_input_tokens == 0 {
         return ContextBudgetReport {
             status: ContextBudgetStatus::InvalidConfiguration,
             context_window_tokens: Some(context_window_tokens),
@@ -622,7 +622,6 @@ fn build_budget_report(
         };
     }
 
-    let available_input_tokens = context_window_tokens - required_reserve;
     let estimated_input_tokens = estimate.request_input_tokens();
     if estimated_input_tokens > available_input_tokens {
         ContextBudgetReport {
@@ -689,6 +688,35 @@ fn safety_margin(context_window_tokens: u64) -> u64 {
         .max(MINIMUM_SAFETY_MARGIN_TOKENS)
 }
 
+/// The single capacity rule shared by configuration validation and the runtime request gate.
+pub(crate) fn configured_input_capacity(
+    context_window_tokens: u64,
+    reserved_output_tokens: u64,
+) -> (u64, u64) {
+    let margin = safety_margin(context_window_tokens);
+    (
+        margin,
+        context_window_tokens.saturating_sub(reserved_output_tokens.saturating_add(margin)),
+    )
+}
+
+/// Returns the first window leaving at least one input token. This is a configuration boundary,
+/// not a claim that the provider supports this window or that it fits a real assembled request.
+pub(crate) fn minimum_context_window_tokens(reserved_output_tokens: u32) -> u64 {
+    let reserve = u64::from(reserved_output_tokens);
+    let mut low = 1;
+    let mut high = (reserve + MINIMUM_SAFETY_MARGIN_TOKENS + 1) * 2;
+    while low < high {
+        let middle = low + (high - low) / 2;
+        if configured_input_capacity(middle, reserve).1 == 0 {
+            low = middle + 1;
+        } else {
+            high = middle;
+        }
+    }
+    low
+}
+
 fn saturating_signed_difference(left: u64, right: u64) -> i64 {
     if left >= right {
         i64::try_from(left - right).unwrap_or(i64::MAX)
@@ -703,6 +731,22 @@ mod tests {
     use crate::context::{
         ContextItem, ContextMetadata, ContextRetention, ContextScope, ContextSource,
     };
+
+    #[test]
+    fn configuration_minimum_is_the_exact_shared_runtime_boundary() {
+        for reserve in [0, 8_192, 30_000, 65_536, 131_072, u32::MAX] {
+            let minimum = minimum_context_window_tokens(reserve);
+            assert_eq!(
+                configured_input_capacity(minimum - 1, u64::from(reserve)).1,
+                0
+            );
+            assert_eq!(configured_input_capacity(minimum, u64::from(reserve)).1, 1);
+            assert_eq!(
+                configured_input_capacity(minimum, u64::from(reserve)).0,
+                safety_margin(minimum)
+            );
+        }
+    }
     use crate::llm::{LlmImage, LlmMessage, LlmMessageRole, LlmToolCall};
     use crate::protocol::{AgentToolApprovalMode, AgentToolSafety};
     use serde_json::json;

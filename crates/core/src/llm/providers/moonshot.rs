@@ -259,11 +259,10 @@ fn build_payload(request: &LlmChatRequest, family: MoonshotFamily) -> AgentResul
         ("model".to_string(), json!(request.model())),
         ("messages".to_string(), Value::Array(messages)),
         ("stream".to_string(), json!(request.stream)),
-        (
-            "max_completion_tokens".to_string(),
-            json!(request.max_tokens),
-        ),
     ]);
+    if let Some(max_tokens) = request.max_tokens {
+        payload.insert("max_completion_tokens".to_string(), json!(max_tokens));
+    }
 
     match (family, request.provider_profile.family_settings()) {
         (MoonshotFamily::K3, Some(ProviderFamilySettings::MoonshotK3Chat { reasoning_effort })) => {

@@ -1,5 +1,9 @@
 // Korean UI translation strings.
 export const koKRTranslations = {
+  'configuration.invalidContextCapacityTitle': '컨텍스트 창이 너무 작습니다',
+  'configuration.invalidContextCapacity':
+    '“{displayName}”을 저장하지 못했습니다. 총 {contextWindowTokens} 토큰에 출력 예약 {reservedOutputTokens} 토큰과 안전 여유 {safetyMarginTokens} 토큰을 확보할 수 없어 입력 공간이 없습니다. 모델의 실제 지원 용량에 맞게 조정한 후 저장하세요. 더 큰 창을 지원하지 않으면 다른 모델을 선택하거나 제공업체 설정을 조정하세요. 편집 내용은 유지됩니다.',
+  'configuration.contextCapacityAcknowledge': '확인',
   'chat.commands.compact': '컨텍스트 압축',
   'chat.commands.compactDescription': '현재 채팅의 컨텍스트를 압축합니다',
   'chat.commands.fork': '채팅 분기 만들기',
@@ -1231,6 +1235,9 @@ export const koKRTranslations = {
   'agent.interruption.contextLimitExceeded': '컨텍스트가 모델 제한을 초과합니다.',
   'agent.interruption.requestRejected': '모델 요청이 거부됨',
   'agent.interruption.responseInvalid': '잘못된 모델 응답',
+  'agent.interruption.outputLimitReached': '출력 한도에 도달해 답변이 미완료되었습니다.',
+  'agent.interruption.emptyResponse': '모델이 유효한 답변을 반환하지 않았습니다.',
+  'agent.interruption.streamInterrupted': '모델 연결이 끊겨 답변이 미완료되었습니다.',
   'agent.interruption.admissionUnconfirmed':
     '전송 결과를 확인할 수 없습니다. 확인을 시도했으며 자동으로 재전송하지 않았습니다.',
   'agent.interruption.requestFailed': '모델 요청 실패',

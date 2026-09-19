@@ -54,9 +54,45 @@ beforeEach(() => {
 })
 
 describe('model settings storage client', () => {
-  it('sends only an explicit profile update and accepts the Host-authoritative profile config', async () => {
-    const saved = await saveModelSettings(
-      {
+  it.each([undefined, 'model-1'])(
+    'sends only an explicit profile update and optional validation target %s',
+    async (validateContextCapacityModelId) => {
+      const saved = await saveModelSettings(
+        {
+          ...(validateContextCapacityModelId ? { validateContextCapacityModelId } : {}),
+          apiUrl: authoritativeSettings.apiUrl,
+          apiTokenMutation: { type: 'keep' },
+          searchMode: 'auto',
+          tavilyApiKeyMutation: { type: 'keep' },
+          models: [
+            {
+              id: 'model-1',
+              providerModelId: 'provider-model-1',
+              displayName: 'Model 1',
+              apiTokenOverrideStatus: 'missing',
+              apiTokenOverrideMutation: { type: 'keep' },
+              supportsImage: false,
+              contextWindowTokens: 128_000,
+              providerProfileConfig: {
+                schemaVersion: 999,
+                profile: { id: 'future_profile', version: 999 },
+                reasoning: { mode: 'enabled', effort: 'max' }
+              } as unknown as ProviderProfileConfig,
+              providerProfileUpdate: { kind: 'select_generic' },
+              inputPrice: '0',
+              cachedInputPrice: '',
+              outputPrice: '0',
+              enabled: true,
+              execution: { status: 'available' }
+            }
+          ]
+        },
+        'model-settings-v1:00000000-0000-4000-8000-000000000001'
+      )
+
+      expect(storage.saveModelSettings).toHaveBeenCalledWith({
+        ...(validateContextCapacityModelId ? { validateContextCapacityModelId } : {}),
+        expectedRevision: 'model-settings-v1:00000000-0000-4000-8000-000000000001',
         apiUrl: authoritativeSettings.apiUrl,
         apiTokenMutation: { type: 'keep' },
         searchMode: 'auto',
@@ -66,56 +102,25 @@ describe('model settings storage client', () => {
             id: 'model-1',
             providerModelId: 'provider-model-1',
             displayName: 'Model 1',
-            apiTokenOverrideStatus: 'missing',
+            apiUrlOverride: null,
             apiTokenOverrideMutation: { type: 'keep' },
             supportsImage: false,
             contextWindowTokens: 128_000,
-            providerProfileConfig: {
-              schemaVersion: 999,
-              profile: { id: 'future_profile', version: 999 },
-              reasoning: { mode: 'enabled', effort: 'max' }
-            } as unknown as ProviderProfileConfig,
             providerProfileUpdate: { kind: 'select_generic' },
             inputPrice: '0',
             cachedInputPrice: '',
             outputPrice: '0',
-            enabled: true,
-            execution: { status: 'available' }
+            enabled: true
           }
         ]
-      },
-      'model-settings-v1:00000000-0000-4000-8000-000000000001'
-    )
-
-    expect(storage.saveModelSettings).toHaveBeenCalledWith({
-      expectedRevision: 'model-settings-v1:00000000-0000-4000-8000-000000000001',
-      apiUrl: authoritativeSettings.apiUrl,
-      apiTokenMutation: { type: 'keep' },
-      searchMode: 'auto',
-      tavilyApiKeyMutation: { type: 'keep' },
-      models: [
-        {
-          id: 'model-1',
-          providerModelId: 'provider-model-1',
-          displayName: 'Model 1',
-          apiUrlOverride: null,
-          apiTokenOverrideMutation: { type: 'keep' },
-          supportsImage: false,
-          contextWindowTokens: 128_000,
-          providerProfileUpdate: { kind: 'select_generic' },
-          inputPrice: '0',
-          cachedInputPrice: '',
-          outputPrice: '0',
-          enabled: true
-        }
-      ]
-    })
-    expect(saved.models[0]?.providerProfileConfig).toEqual(
-      authoritativeSettings.models[0]?.providerProfileConfig
-    )
-    expect(saved.models[0]?.providerProfileUpdate).toEqual({ kind: 'unchanged' })
-    expect(saved.models[0]?.execution).toEqual({ status: 'available' })
-  })
+      })
+      expect(saved.models[0]?.providerProfileConfig).toEqual(
+        authoritativeSettings.models[0]?.providerProfileConfig
+      )
+      expect(saved.models[0]?.providerProfileUpdate).toEqual({ kind: 'unchanged' })
+      expect(saved.models[0]?.execution).toEqual({ status: 'available' })
+    }
+  )
 
   it('passes the safe profile descriptor projection through unchanged', async () => {
     const descriptors = [

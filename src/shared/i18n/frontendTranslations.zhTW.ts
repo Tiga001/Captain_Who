@@ -1,5 +1,9 @@
 // Traditional Chinese UI translation strings.
 export const zhTWTranslations = {
+  'configuration.invalidContextCapacityTitle': '上下文視窗不足',
+  'configuration.invalidContextCapacity':
+    '模型「{displayName}」尚未儲存：總視窗為 {contextWindowTokens} tokens，輸出預留為 {reservedOutputTokens}，安全餘量為 {safetyMarginTokens}，沒有可用的輸入空間。請按模型實際支援的上下文視窗調整後再儲存；若不支援更大的視窗，請更換模型或調整廠商設定。編輯內容已保留。',
+  'configuration.contextCapacityAcknowledge': '知道了',
   'chat.commands.compact': '壓縮上下文',
   'chat.commands.compactDescription': '主動壓縮目前聊天的上下文',
   'chat.commands.fork': '建立聊天分支',
@@ -1170,6 +1174,9 @@ export const zhTWTranslations = {
   'agent.interruption.contextLimitExceeded': '上下文超過模型限制',
   'agent.interruption.requestRejected': '模型請求被拒絕',
   'agent.interruption.responseInvalid': '模型響應無效',
+  'agent.interruption.outputLimitReached': '輸出達到上限，回覆未完成',
+  'agent.interruption.emptyResponse': '模型未傳回有效回覆',
+  'agent.interruption.streamInterrupted': '模型連線中斷，回覆未完成',
   'agent.interruption.admissionUnconfirmed': '傳送結果尚未確認。已嘗試核對，未自動重送。',
   'agent.interruption.requestFailed': '模型請求失敗',
   'agent.llmRetry.rateLimited': '服務限流，{seconds}秒後自動重試（{attempt}/{maxAttempts}）',
