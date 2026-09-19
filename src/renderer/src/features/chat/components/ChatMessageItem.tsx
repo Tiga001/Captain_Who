@@ -321,12 +321,14 @@ function ChatMessageActions({
         </button>
       )}
       {showTokenUsageDetails && <UsageAction usage={usage} />}
-      {onContinueInNewTask && (
+      {/* The parent disables all fork entry points while a request is pending. Keep the
+          clicked button mounted until its own request settles so its spinner stays visible. */}
+      {(onContinueInNewTask || isContinuing) && (
         <button
           aria-label={t('chat.continueInNewTask')}
           disabled={isContinuing}
           onClick={() => {
-            if (isContinuingRef.current) return
+            if (!onContinueInNewTask || isContinuingRef.current) return
             isContinuingRef.current = true
             setIsContinuing(true)
             void Promise.resolve(onContinueInNewTask()).finally(() => {

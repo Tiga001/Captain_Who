@@ -21,6 +21,10 @@ coverage
 .cache/artifact-runtime/
 .cache/sidebar-menu-preview/
 .cache/frontend-locale-generation/
+.cache/update-ui.*/
+.cache/probe-pixels.mjs
+
+**/__tests__/.cache/
 
 __pycache__/
 *.pyc

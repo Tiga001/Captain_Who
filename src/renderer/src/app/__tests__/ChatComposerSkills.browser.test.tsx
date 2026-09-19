@@ -456,7 +456,9 @@ describe('ChatComposer model picker', () => {
     })
   })
 
-  it('clears with the optimistic message and preserves identical new text after late acceptance', async () => {
+  it('clears ref-persisted input with the optimistic message and preserves identical new text after late acceptance', async () => {
+    const { consumeSubmittedDraft } = await import('../composerSubmission')
+    const versions: Array<[number, number]> = []
     let finish!: (accepted: boolean) => void
     const acceptance = new Promise<boolean>((resolve) => {
       finish = resolve
@@ -465,24 +467,32 @@ describe('ChatComposer model picker', () => {
       const [draft, setDraft] = useState(() =>
         createComposerDraft({ modelId: 'model-1', projectId: 'project-a' })
       )
+      const liveDraft = useRef(draft)
       const [posted, setPosted] = useState('')
       return (
         <>
           <output data-testid="optimistic-message">{posted}</output>
           <ChatComposer
             draft={draft}
-            onDraftChange={setDraft}
-            onDraftMessageChange={setDraft}
+            onDraftChange={(next) => {
+              liveDraft.current = next
+              setDraft(next)
+            }}
+            onDraftMessageChange={(next) => {
+              // Production keeps keystrokes in a ref, without rerendering the parent.
+              liveDraft.current = next
+            }}
             messageSyncKey={posted}
             onSubmitMessage={async (content, options) => {
               setPosted(content)
-              setDraft({
-                ...options.draftSnapshot!,
-                message: '',
-                attachments: [],
-                skills: [],
-                updatedAt: Date.now() + 1
-              })
+              versions.push([liveDraft.current.updatedAt, options.draftSnapshot!.updatedAt])
+              const consumed = consumeSubmittedDraft(
+                liveDraft.current,
+                options.draftSnapshot!,
+                options
+              )
+              liveDraft.current = consumed
+              setDraft(consumed)
               return acceptance
             }}
           />
@@ -494,6 +504,7 @@ describe('ChatComposer model picker', () => {
     await input.fill('same message')
     await screen.getByRole('button', { name: 'chat.send' }).click()
     await expect.element(screen.getByTestId('optimistic-message')).toHaveTextContent('same message')
+    expect(versions[0][1]).toBe(versions[0][0])
     await expect.element(input).toHaveValue('')
     await input.fill('same message')
     finish(true)

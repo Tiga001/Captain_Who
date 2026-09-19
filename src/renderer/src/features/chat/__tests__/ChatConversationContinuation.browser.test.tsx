@@ -142,6 +142,43 @@ it('emits distinct fork points before and after a completed provider transition'
   })
 })
 
+it('keeps the clicked reply fork spinning while the parent disables fork entry points', async () => {
+  let resolve!: () => void
+  const onContinueInNewTask = vi.fn(
+    () =>
+      new Promise<void>((done) => {
+        resolve = done
+      })
+  )
+  const props = {
+    conversation: conversation(),
+    editableLastUserMessageId: null,
+    editSelectedModelAvailable: true,
+    editSelectedModelSupportsImage: true,
+    onContinueInNewTask,
+    showTokenUsageDetails: false
+  }
+  const screen = await render(<ChatMessageList {...props} />)
+  const button = screen.getByRole('button', { name: 'chat.continueInNewTask', exact: true })
+  await button.click()
+  await screen.rerender(
+    <ChatMessageList {...props} forkDisabledReason="chat.continueInNewTaskPending" />
+  )
+  await expect.element(button).toBeVisible()
+  await expect.element(button).toBeDisabled()
+  expect(button.element().querySelector('.chat-message__action-spinner')).not.toBeNull()
+  ;(button.element() as HTMLButtonElement).click()
+  expect(onContinueInNewTask).toHaveBeenCalledExactlyOnceWith({
+    kind: 'assistant_reply',
+    assistantMessageId: 'forked-boundary'
+  })
+
+  resolve()
+  await screen.rerender(<ChatMessageList {...props} />)
+  await expect.element(button).toBeEnabled()
+  expect(button.element().querySelector('.chat-message__action-spinner')).toBeNull()
+})
+
 const manualOperation: AgentManualContextCompactionOperation = {
   schemaVersion: 1,
   operationId: 'context-compaction-cloned',

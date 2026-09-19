@@ -5767,7 +5767,7 @@ describe('authoritative run cancellation and conversation forking', () => {
     await expect.element(command).toHaveAttribute('title', 'chat.continueInNewTaskPending')
     await expect
       .element(screen.getByText('chat.continueInNewTaskPending', { exact: true }))
-      .toHaveTextContent('chat.continueInNewTaskPending')
+      .not.toBeInTheDocument()
     await screen.getByRole('button', { name: 'continue-in-new-task' }).click()
     await expect.poll(() => testState.forkConversation.mock.calls.length).toBe(1)
     expect(testState.forkConversation).toHaveBeenCalledWith({

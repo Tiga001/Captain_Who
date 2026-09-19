@@ -356,6 +356,14 @@ export function ChatComposer({
       return
     }
 
+    // Keystrokes update the local snapshot and the owner's ref without refreshing `draft`.
+    // Keep that whole newer version: combining its text with the older prop timestamp makes
+    // submit mistake the already-sent input for a different draft and refuse to consume it.
+    if (draft.updatedAt < draftRef.current.updatedAt) {
+      previousMessageSyncKeyRef.current = messageSyncKey
+      return
+    }
+
     // Message keystrokes are persisted through a ref-only fast path so the whole shell does not
     // rerender on every character. A committed user message is the explicit signal that a later
     // parent draft (including an empty one after a deferred provider transition) is authoritative.

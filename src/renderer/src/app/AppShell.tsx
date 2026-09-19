@@ -5,7 +5,6 @@ import { useManualContextCompaction } from '../features/chat/useManualContextCom
 import type { ComposerCommand } from '../features/chat/components/ComposerCommands'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { LoaderCircle } from 'lucide-react'
 import type {
   AgentEvent,
   AgentProviderTransitionOperation,
@@ -1438,12 +1437,6 @@ export function AppShell() {
         />
 
         <div className="main-panel__surface">
-          {isForkingActiveConversation && (
-            <div className="conversation-fork-status" role="status">
-              <LoaderCircle aria-hidden="true" className="chat-message__action-spinner" />
-              {t('chat.continueInNewTaskPending')}
-            </div>
-          )}
           {activeConversation ? (
             activeConversation.messagesLoaded === false ? (
               <div className="conversation-load-state" role="status">
