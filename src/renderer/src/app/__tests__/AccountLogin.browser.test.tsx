@@ -295,6 +295,70 @@ describe('startup account login and reusable overlay', () => {
     await expect.poll(() => visibilityOf('webview-surface')).toBe('visible')
   })
 
+  it('shows the ambient startup text instead of the login block while the session is verified', async () => {
+    mocks.state = { ...mocks.state, status: 'checking' }
+    const screen = await render(<Harness />)
+    const root = () => screen.container.querySelector('.app-startup-root')
+    const ambient = () => screen.container.querySelector('.app-startup-screen__ambient')
+    const overlay = () => screen.container.querySelector('.app-startup-screen')
+    const srOnly = () => overlay()?.querySelector('.app-startup-screen__sr-only')
+
+    const screenshotDir = import.meta.env.VITE_CAPTAIN_WHO_BLOCK_SCREENSHOT_DIR
+    if (screenshotDir) {
+      await page.screenshot({ path: `${screenshotDir}/startup-verifying.png` })
+    }
+
+    expect(screen.container.querySelector('.account-login')).toBeNull()
+    expect(ambient()).not.toBeNull()
+    expect((ambient()?.textContent ?? '').length).toBeGreaterThan(0)
+    expect(srOnly()?.textContent).toBe('auth.checking')
+    expect(root()?.getAttribute('data-interactive')).toBe('false')
+    const icon = screen.container.querySelector('.app-startup-screen__icon')!
+    expect(getComputedStyle(icon).animationName).toBe('app-startup-icon-pulse')
+
+    emit({ status: 'signedOut', profile: null, error: null })
+    await expect.element(screen.getByRole('button', { name: 'auth.passwordMode' })).toBeVisible()
+    await expect.element(screen.getByRole('heading', { name: 'auth.title' })).toBeVisible()
+    await expect.poll(ambient).toBeNull()
+    await expect.poll(() => getComputedStyle(icon).animationName).toBe('none')
+  })
+
+  it('keeps the ambient surface steady when the session check flows into the startup wait', async () => {
+    mocks.state = { ...mocks.state, status: 'checking' }
+    const screen = await render(
+      <AccountAuthProvider>
+        <AppStartupProvider>
+          <AppStartupGate>
+            <div data-testid="workspace" />
+          </AppStartupGate>
+        </AppStartupProvider>
+      </AccountAuthProvider>
+    )
+    const overlay = () => screen.container.querySelector('.app-startup-screen')
+    const srOnly = () => overlay()?.querySelector('.app-startup-screen__sr-only')
+    const icon = () => screen.container.querySelector<HTMLElement>('.app-startup-screen__icon')
+    const ambient = () =>
+      screen.container.querySelector<HTMLElement>('.app-startup-screen__ambient')
+
+    expect(srOnly()?.textContent).toBe('auth.checking')
+    const iconBefore = icon()!
+    const ambientBefore = ambient()!
+    const iconTopBefore = iconBefore.offsetTop
+    const iconLeftBefore = iconBefore.offsetLeft
+    const ambientTopBefore = ambientBefore.offsetTop
+    const ambientLeftBefore = ambientBefore.offsetLeft
+
+    emit({ status: 'signedIn', profile: cloudProfile, error: null, remembered: true })
+    await expect.poll(() => srOnly()?.textContent).toBe('startup.loading')
+
+    expect(icon()).toBe(iconBefore)
+    expect(ambient()).toBe(ambientBefore)
+    expect(icon()?.offsetTop).toBe(iconTopBefore)
+    expect(icon()?.offsetLeft).toBe(iconLeftBefore)
+    expect(ambient()?.offsetTop).toBe(ambientTopBefore)
+    expect(ambient()?.offsetLeft).toBe(ambientLeftBefore)
+  })
+
   it('sends and verifies email login codes without exposing the SDK challenge to the page', async () => {
     const screen = await render(<Harness />)
     await screen.getByRole('button', { name: 'auth.codeMode' }).click()

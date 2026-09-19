@@ -24,6 +24,9 @@ export function AppStartupGate({ children }: { children: ReactNode }) {
     auth && ((!hasEnteredWorkspace && auth.state.status !== 'signedIn') || auth.loginRequested)
   )
   const accessBlocking = authBlocking
+  // Startup session check: show the ambient waiting surface instead of the login block.
+  const authVerifying = Boolean(auth && !hasEnteredWorkspace && auth.state.status === 'checking')
+  const showLoginDialog = authBlocking && !authVerifying
   const { resolvedColorScheme, t } = useFrontendConfig()
   const supportsNativeTranslucency = isMacOS()
   const [interactive, setInteractive] = useState(false)
@@ -89,10 +92,12 @@ export function AppStartupGate({ children }: { children: ReactNode }) {
           className="app-startup-screen"
           data-exiting={interactive && !accessBlocking ? 'true' : 'false'}
           data-native-translucency={supportsNativeTranslucency ? 'true' : undefined}
-          role={accessBlocking ? 'dialog' : showFailure ? 'alert' : 'status'}
-          aria-modal={accessBlocking || undefined}
-          aria-label={authBlocking ? t('auth.title') : undefined}
-          aria-live={accessBlocking ? undefined : showFailure ? 'assertive' : 'polite'}
+          role={showLoginDialog ? 'dialog' : showFailure && !authBlocking ? 'alert' : 'status'}
+          aria-modal={showLoginDialog || undefined}
+          aria-label={showLoginDialog ? t('auth.title') : undefined}
+          aria-live={
+            showLoginDialog ? undefined : showFailure && !authBlocking ? 'assertive' : 'polite'
+          }
         >
           <div className="app-startup-screen__drag-region" aria-hidden="true" />
           <div className="app-startup-screen__content">
@@ -102,8 +107,13 @@ export function AppStartupGate({ children }: { children: ReactNode }) {
               alt=""
               aria-hidden="true"
             />
-            {authBlocking ? (
+            {showLoginDialog ? (
               <AccountLoginForm canDismiss={hasEnteredWorkspace} />
+            ) : authVerifying ? (
+              <>
+                <StartupAmbientText />
+                <span className="app-startup-screen__sr-only">{t('auth.checking')}</span>
+              </>
             ) : showFailure ? (
               <div className="app-startup-screen__failure">
                 <strong>{t('startup.failedTitle')}</strong>
