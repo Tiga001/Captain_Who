@@ -273,6 +273,31 @@ html[data-theme='zju-light'] .settings-page__drag-region::before {
   background: var(--main-panel);
 }
 
+.conversation-fork-status {
+  position: absolute;
+  z-index: 2;
+  top: calc(var(--titlebar-height) + 8px);
+  left: 50%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: calc(100% - 32px);
+  padding: 8px 12px;
+  border: 1px solid var(--hairline);
+  border-radius: 12px;
+  background: var(--main-panel);
+  color: var(--mc-color-text-secondary);
+  font-size: 13px;
+  transform: translateX(-50%);
+  pointer-events: none;
+}
+
+.conversation-fork-status svg {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+}
+
 .conversation-load-state {
   display: grid;
   min-height: 100%;

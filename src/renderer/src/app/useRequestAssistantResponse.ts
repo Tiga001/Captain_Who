@@ -1,4 +1,4 @@
-import type { AgentEvent, SkillSelection } from '@mycopilot/protocol'
+import type { AgentConversationTurnOutput, AgentEvent, SkillSelection } from '@mycopilot/protocol'
 import { useCallback, type MutableRefObject } from 'react'
 import {
   cancelAgentRun,
@@ -18,8 +18,10 @@ import {
   settleAgentRunToolActivities
 } from '../features/agentRun/agentEventReducer'
 import { mergeActivatedSkillSummaries } from '../features/skills/activatedSkillInventory'
-import { planSkillActivationRecovery } from '../features/skills/skillActivationRecovery'
-import { getAgentInterruptionReason } from '../errors/userFacingError'
+import {
+  isSkillActivationRefusal,
+  planSkillActivationRecovery
+} from '../features/skills/skillActivationRecovery'
 import { getTurnAccessErrorCode } from '../features/license/turnAccessError'
 import type { ActiveRunBinding } from './appTypes'
 import { mergeConversationMessageFromBackend } from './chatMessageFactory'
@@ -108,7 +110,10 @@ export function useRequestAssistantResponse({
           assistantMessageId,
           (message) => ({
             ...message,
-            agentRun: ensureAgentRun(message.agentRun, null, 'starting')
+            agentRun: {
+              ...ensureAgentRun(message.agentRun, null, 'starting'),
+              explicitSkillSelections: [...skills]
+            }
           }),
           { persist: false }
         )
@@ -129,6 +134,7 @@ export function useRequestAssistantResponse({
           title,
           userMessageId
         }
+        let recoveredConversation: ChatConversation | null = null
         const startOutput = rewrite
           ? await rewriteConversationTurn({
               requestId: rewrite.requestId,
@@ -136,9 +142,42 @@ export function useRequestAssistantResponse({
               sourceUserMessageId: rewrite.sourceUserMessageId,
               turn: turnInput
             })
-          : await startConversationTurn(turnInput)
+          : await startConversationTurn(turnInput).catch(async (error: unknown) => {
+              if (getTurnAccessErrorCode(error) || isSkillActivationRefusal(error)) throw error
+              // A rejected transport promise says nothing about admission. Read back the
+              // exact submitted pair; never issue another start request to find out.
+              for (let attempt = 0; attempt < REWRITE_CONVERSATION_LOAD_ATTEMPTS; attempt += 1) {
+                try {
+                  const loaded = await loadConversationForRewrite(conversationId)
+                  const user = loaded?.messages.find(
+                    (message) => message.id === userMessageId && message.role === 'user'
+                  )
+                  const assistant = loaded?.messages.find(
+                    (message) => message.id === assistantMessageId && message.role === 'assistant'
+                  )
+                  const runId = assistant?.agentRun?.runId
+                  if (loaded?.id === conversationId && user && assistant && runId) {
+                    recoveredConversation = loaded
+                    return {
+                      conversationId,
+                      userMessageId,
+                      assistantMessageId,
+                      userMessage: { ...user, role: 'user' },
+                      assistantMessage: { ...assistant, role: 'assistant' },
+                      runId,
+                      eventName: '',
+                      activatedSkills: assistant.agentRun?.activatedSkills ?? [],
+                      skillActivationRevision: assistant.agentRun?.skillActivationRevision
+                    } satisfies AgentConversationTurnOutput
+                  }
+                } catch {
+                  // A failed/missing projection is not proof of rejection either.
+                }
+              }
+              throw error
+            })
 
-        let rewrittenConversation: ChatConversation | null = null
+        let rewrittenConversation: ChatConversation | null = recoveredConversation
         if (rewrite) {
           for (let attempt = 0; attempt < REWRITE_CONVERSATION_LOAD_ATTEMPTS; attempt += 1) {
             try {
@@ -178,12 +217,13 @@ export function useRequestAssistantResponse({
         const resolvedConversationId = startOutput.conversationId
         const resolvedAssistantMessageId = startOutput.assistantMessageId
         let resolvedAssistantMessage: ChatMessage | null = null
-        const authoritativeRewriteAssistant = rewrite
-          ? (rewrittenConversation?.messages.find(
-              (message) =>
-                message.id === startOutput.assistantMessageId && message.role === 'assistant'
-            ) ?? rewriteAssistantFromTurnOutput(startOutput))
-          : undefined
+        const authoritativeRewriteAssistant =
+          rewrite || recoveredConversation
+            ? (rewrittenConversation?.messages.find(
+                (message) =>
+                  message.id === startOutput.assistantMessageId && message.role === 'assistant'
+              ) ?? rewriteAssistantFromTurnOutput(startOutput))
+            : undefined
         const rewriteAlreadySettled = isSettledRewriteAssistant(authoritativeRewriteAssistant)
 
         const currentConversation = conversationsRef.current.find(
@@ -272,7 +312,10 @@ export function useRequestAssistantResponse({
                   }
 
                   if (message.id === assistantMessageId) {
-                    if (rewriteAlreadySettled && authoritativeRewriteAssistant) {
+                    if (
+                      (rewriteAlreadySettled || recoveredConversation) &&
+                      authoritativeRewriteAssistant
+                    ) {
                       resolvedAssistantMessage = authoritativeRewriteAssistant
                       return authoritativeRewriteAssistant
                     }
@@ -303,7 +346,7 @@ export function useRequestAssistantResponse({
             : conversation
         )
         setConversations(nextConversations)
-        if (resolvedAssistantMessage && !rewriteAlreadySettled) {
+        if (resolvedAssistantMessage && !rewriteAlreadySettled && !recoveredConversation) {
           enqueueChatMessageStateSave(resolvedConversationId, resolvedAssistantMessage)
         }
 
@@ -352,6 +395,12 @@ export function useRequestAssistantResponse({
         // A trusted admission refusal proves no turn was accepted. Let the caller preserve
         // its draft/queue and guide the explicit action without creating a failed chat turn.
         if (getTurnAccessErrorCode(error)) throw error
+        if (!rewrite && isSkillActivationRefusal(error)) {
+          if (planSkillActivationRecovery(error, skills).refreshCatalog) {
+            requestSkillCatalogRefresh(conversationId)
+          }
+          throw error
+        }
         if (rewrite) {
           const recovery = planSkillActivationRecovery(error, skills)
           reconcileFailedSkillActivation(conversationId, recovery, {
@@ -394,15 +443,8 @@ export function useRequestAssistantResponse({
           return false
         }
 
-        const recovery = planSkillActivationRecovery(error, skills)
-        reconcileFailedSkillActivation(conversationId, recovery, {
-          modelId,
-          permissionMode,
-          projectId
-        })
-        if (recovery.refreshCatalog) {
-          requestSkillCatalogRefresh(conversationId)
-        }
+        // An uncertain send owns its skills/attachments in the visible attempt. Do not
+        // merge them into the user's next draft while admission remains unknown.
         updateAssistantMessage(
           conversationId,
           assistantMessageId,
@@ -417,7 +459,7 @@ export function useRequestAssistantResponse({
                   status: 'failed',
                   completedAt: failedAt,
                   todo: undefined,
-                  interruption: { reason: getAgentInterruptionReason(error) },
+                  interruption: { reason: 'admission_unconfirmed' },
                   error: undefined,
                   llmRetry: undefined
                 },

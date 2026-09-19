@@ -5,6 +5,7 @@ import { useManualContextCompaction } from '../features/chat/useManualContextCom
 import type { ComposerCommand } from '../features/chat/components/ComposerCommands'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
+import { LoaderCircle } from 'lucide-react'
 import type {
   AgentEvent,
   AgentProviderTransitionOperation,
@@ -748,6 +749,7 @@ export function AppShell() {
     archiveConversation,
     archiveConversations,
     continueInNewTask,
+    forkingConversationIds,
     openContinuationOrigin,
     patchConversation,
     rememberConversationScrollPosition,
@@ -762,6 +764,7 @@ export function AppShell() {
       activeCommandSession: t('chat.continueInNewTaskActiveCommand'),
       archiveFailed: t('conversation.archiveFailed'),
       continueInNewTaskFailed: t('chat.continueInNewTaskFailed'),
+      continueInNewTaskBusy: t('chat.continueInNewTaskBusy'),
       originArchived: t('chat.continuationOriginArchived'),
       originMissing: t('chat.continuationOriginMissing'),
       originOpenFailed: t('chat.continuationOriginOpenFailed')
@@ -957,8 +960,12 @@ export function AppShell() {
       (session) => session.status === 'starting' || session.status === 'running'
     )
   )
+  const isForkingActiveConversation = Boolean(
+    activeConversation && forkingConversationIds.has(activeConversation.id)
+  )
   let forkDisabledReason: string | undefined
   if (!activeConversation) forkDisabledReason = t('chat.commands.savedOnly')
+  else if (isForkingActiveConversation) forkDisabledReason = t('chat.continueInNewTaskPending')
   else if (!manualCompaction.ready || activeConversation.messagesLoaded === false)
     forkDisabledReason = t('chat.commands.restoring')
   else if (forkMaintenanceBusy) forkDisabledReason = t('chat.commands.compacting')
@@ -1431,6 +1438,12 @@ export function AppShell() {
         />
 
         <div className="main-panel__surface">
+          {isForkingActiveConversation && (
+            <div className="conversation-fork-status" role="status">
+              <LoaderCircle aria-hidden="true" className="chat-message__action-spinner" />
+              {t('chat.continueInNewTaskPending')}
+            </div>
+          )}
           {activeConversation ? (
             activeConversation.messagesLoaded === false ? (
               <div className="conversation-load-state" role="status">

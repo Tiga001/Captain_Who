@@ -1,4 +1,4 @@
-import { useCallback, useRef, type Dispatch, type SetStateAction } from 'react'
+import { useCallback, useRef, useState, type Dispatch, type SetStateAction } from 'react'
 import { HostInvocationError } from '@mycopilot/host-api'
 import { parseStorageForkConversationErrorData } from '@mycopilot/protocol'
 import type { StorageConversationForkPoint } from '@mycopilot/protocol'
@@ -31,6 +31,7 @@ interface ConversationNavigationMessages {
   activeCommandSession: string
   archiveFailed: string
   continueInNewTaskFailed: string
+  continueInNewTaskBusy: string
   originArchived: string
   originMissing: string
   originOpenFailed: string
@@ -77,6 +78,10 @@ export function useConversationNavigation({
 }: UseConversationNavigationOptions) {
   const archiveRequestsInFlightRef = useRef(new Set<string>())
   const forkRequestsInFlightRef = useRef(new Set<string>())
+  const [forkingConversationIds, setForkingConversationIds] = useState<ReadonlySet<string>>(
+    () => new Set()
+  )
+  const forkRequestIdentitiesRef = useRef(new Map<string, { point: string; requestId: string }>())
   const selectConversation = useCallback(
     (conversationId: string, messageId?: string | null, loadedConversation?: ChatConversation) => {
       activeConversationIdRef.current = conversationId
@@ -143,13 +148,31 @@ export function useConversationNavigation({
       // Shared by timeline and Composer actions, including clicks during pending persistence.
       if (forkRequestsInFlightRef.current.has(sourceConversationId)) return
       forkRequestsInFlightRef.current.add(sourceConversationId)
+      setForkingConversationIds(new Set(forkRequestsInFlightRef.current))
       try {
         await waitForConversationSaves(sourceConversationId)
+        const source = conversationsRef.current.find(({ id }) => id === sourceConversationId)
+        const point = JSON.stringify({
+          forkPoint,
+          // `latest` is relative to the source revision, not a stable boundary identity.
+          ...(forkPoint.kind === 'latest'
+            ? { updatedAt: source?.updatedAt, head: source?.messages.at(-1)?.id }
+            : {})
+        })
+        const previousRequest = forkRequestIdentitiesRef.current.get(sourceConversationId)
+        const requestId =
+          previousRequest?.point === point
+            ? previousRequest.requestId
+            : createId('conversation-fork-request')
+        // A lost response may still have committed. Retrying the same point reuses its identity
+        // until success, so an uncertain transport failure cannot create a duplicate branch.
+        forkRequestIdentitiesRef.current.set(sourceConversationId, { point, requestId })
         const newConversation = await forkConversation({
-          requestId: createId('conversation-fork-request'),
+          requestId,
           sourceConversationId,
           forkPoint
         })
+        forkRequestIdentitiesRef.current.delete(sourceConversationId)
         const sourceDraft =
           drafts[sourceConversationId] ??
           createComposerDraft({
@@ -180,18 +203,22 @@ export function useConversationNavigation({
           resolveConversationForkErrorMessage(
             error,
             messages.activeCommandSession,
+            messages.continueInNewTaskBusy,
             messages.continueInNewTaskFailed
           )
         )
       } finally {
         forkRequestsInFlightRef.current.delete(sourceConversationId)
+        setForkingConversationIds(new Set(forkRequestsInFlightRef.current))
       }
     },
     [
       activeConversationIdRef,
       conversationScrollPositionsRef,
+      conversationsRef,
       drafts,
       messages.continueInNewTaskFailed,
+      messages.continueInNewTaskBusy,
       messages.activeCommandSession,
       persistDraftNow,
       setActiveConversationId,
@@ -483,6 +510,7 @@ export function useConversationNavigation({
     archiveConversation,
     archiveConversations,
     continueInNewTask,
+    forkingConversationIds,
     openContinuationOrigin,
     patchConversation,
     rememberConversationScrollPosition,
@@ -508,9 +536,11 @@ function mergeConversationArchiveResult(
 function resolveConversationForkErrorMessage(
   error: unknown,
   activeCommandSessionMessage: string,
+  busyMessage: string,
   fallbackMessage: string
 ): string {
   if (!(error instanceof HostInvocationError)) return fallbackMessage
+  if (error.code === -32001) return busyMessage
 
   try {
     const data = parseStorageForkConversationErrorData(error.data)

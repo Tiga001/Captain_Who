@@ -4,7 +4,8 @@ import type { ChatMessage } from '../chatTypes'
 import { ChatMessageItem } from '../components/ChatMessageItem'
 
 const translations: Record<string, string> = {
-  'agent.interruption.serviceConnectionFailed': '模型服务连接失败'
+  'agent.interruption.serviceConnectionFailed': '模型服务连接失败',
+  'agent.interruption.admissionUnconfirmed': '发送结果尚未确认。已尝试核对，未自动重发。'
 }
 
 vi.mock('../../../config/FrontendConfigProvider', () => ({
@@ -46,6 +47,16 @@ function interruptedMessage(): ChatMessage {
 }
 
 describe('safe model interruption status', () => {
+  it('distinguishes unconfirmed admission from a rejected send', async () => {
+    const message = interruptedMessage()
+    message.agentRun!.runId = null
+    message.agentRun!.interruption = { reason: 'admission_unconfirmed' }
+    const screen = await render(<ChatMessageItem message={message} showTokenUsageDetails={false} />)
+    await expect
+      .element(screen.getByText('发送结果尚未确认。已尝试核对，未自动重发。'))
+      .toBeVisible()
+  })
+
   it('shows one compact translated reason without a raw error body', async () => {
     const screen = await render(
       <ChatMessageItem message={interruptedMessage()} showTokenUsageDetails={false} />

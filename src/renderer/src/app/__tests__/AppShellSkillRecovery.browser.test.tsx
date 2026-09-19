@@ -1757,6 +1757,14 @@ describe('provider transition guard', () => {
   })
 
   it('preserves next-turn choices made while a compatible transition reply is pending', async () => {
+    testState.preflightProviderTransition.mockResolvedValueOnce({
+      conversationId: 'conversation-a',
+      targetModelId: 'model-1',
+      decision: 'compatible',
+      reason: 'no_incompatible_history',
+      operationId: 'provider-transition-1',
+      transitionToken: 'token-model-1'
+    })
     mockSuccessfulTurnStarts()
     const transition =
       deferred<Extract<AgentProviderTransitionOperation, { status: 'completed' }>>()
@@ -1776,6 +1784,14 @@ describe('provider transition guard', () => {
   })
 
   it('uses the completed transition model when the submitted composer selection is unchanged', async () => {
+    testState.preflightProviderTransition.mockResolvedValueOnce({
+      conversationId: 'conversation-a',
+      targetModelId: 'model-1',
+      decision: 'compatible',
+      reason: 'no_incompatible_history',
+      operationId: 'provider-transition-1',
+      transitionToken: 'token-model-1'
+    })
     mockSuccessfulTurnStarts()
     testState.startProviderTransition.mockImplementationOnce(async () => ({
       ...completedProviderTransition('model-1'),
@@ -2602,6 +2618,14 @@ describe('conversation archive navigation', () => {
   })
 
   it('does not submit a message when its deferred model transition completes after archive', async () => {
+    testState.preflightProviderTransition.mockResolvedValueOnce({
+      conversationId: 'conversation-a',
+      targetModelId: 'model-1',
+      decision: 'compatible',
+      reason: 'no_incompatible_history',
+      operationId: 'provider-transition-1',
+      transitionToken: 'token-model-1'
+    })
     const transition =
       deferred<Extract<AgentProviderTransitionOperation, { status: 'completed' }>>()
     testState.startProviderTransition.mockReturnValueOnce(transition.promise)
@@ -4077,7 +4101,7 @@ describe('running conversation guidance queue', () => {
     expect(
       JSON.parse(screen.getByTestId('queued-message-payloads').element().textContent ?? '[]')
     ).toEqual([queued])
-    expect(testState.startProviderTransition).toHaveBeenCalledTimes(1)
+    expect(testState.startProviderTransition).not.toHaveBeenCalled()
   })
 
   it('accepts guidance when approval arrives before the queued message is submitted', async () => {
@@ -4613,6 +4637,9 @@ describe('Host-owned turn acceptance', () => {
     await expect
       .element(screen.getByTestId('conversation-message-contents'))
       .toHaveTextContent('read this file')
+    await expect.element(screen.getByTestId('draft-message')).toHaveTextContent('')
+    expect(testState.startProviderTransition).not.toHaveBeenCalled()
+    expect(testState.preflightProviderTransition).toHaveBeenCalledTimes(1)
     expect(testState.upsertChatMessages).not.toHaveBeenCalled()
     expect(testState.saveChatMessageState).not.toHaveBeenCalled()
     const input = testState.startConversationTurn.mock.calls[0]?.[0] as AgentConversationTurnInput
@@ -4668,6 +4695,95 @@ describe('Host-owned turn acceptance', () => {
       .toHaveTextContent('new draft after failure')
   })
 
+  it('restores rejected input and queues newer input with auto-send disabled', async () => {
+    prepareDraft()
+    const start = deferred<AgentConversationTurnOutput>()
+    testState.startConversationTurn.mockReturnValueOnce(start.promise)
+    const screen = await renderSelectedConversation()
+    const previousIds = screen.getByTestId('conversation-message-ids').element().textContent
+    await screen.getByRole('button', { name: 'submit-draft-content' }).click()
+    await expect.poll(() => testState.startConversationTurn.mock.calls.length).toBe(1)
+    await expect.element(screen.getByTestId('draft-message')).toHaveTextContent('')
+    await screen.getByRole('button', { name: 'edit-composer-after-transition-failure' }).click()
+    await screen.getByRole('button', { name: 'select-model-2' }).click()
+    await screen.getByRole('button', { name: 'toggle-queue-auto-send' }).click()
+    start.reject(new HostInvocationError({ message: 'ACCOUNT_LICENSE_UNAVAILABLE' }))
+    await expect.element(screen.getByTestId('draft-message')).toHaveTextContent('read this file')
+    await expect.element(screen.getByTestId('queue-auto-send-enabled')).toHaveTextContent('false')
+    expect(screen.getByTestId('conversation-message-ids').element().textContent).toBe(previousIds)
+    expect(JSON.parse(screen.getByTestId('draft-payload').element().textContent!)).toMatchObject({
+      modelId: 'model-1',
+      attachments: [submittedAttachment]
+    })
+    expect(
+      JSON.parse(screen.getByTestId('queued-message-payloads').element().textContent!)
+    ).toEqual([
+      expect.objectContaining({
+        content: 'new draft after failure',
+        modelId: 'model-2',
+        status: 'pending'
+      })
+    ])
+    expect(testState.startConversationTurn).toHaveBeenCalledTimes(1)
+  })
+
+  it.each(['running', 'completed'] as const)(
+    'recovers a lost acceptance response for a %s turn without resending',
+    async (status) => {
+      prepareDraft()
+      const start = deferred<AgentConversationTurnOutput>()
+      testState.startConversationTurn.mockReturnValueOnce(start.promise)
+      const screen = await renderSelectedConversation()
+      await screen.getByRole('button', { name: 'submit-draft-content' }).click()
+      await expect.poll(() => testState.startConversationTurn.mock.calls.length).toBe(1)
+      const input = testState.startConversationTurn.mock.calls[0][0] as AgentConversationTurnInput
+      const output = successfulTurnOutput(input, 1)
+      const stored = storedConversation()
+      testState.persistedConversations.set(stored.id, {
+        ...stored,
+        messages: [
+          ...stored.messages,
+          { ...output.userMessage, status: 'sent' },
+          {
+            ...output.assistantMessage,
+            content: status === 'completed' ? 'Backend completed the answer' : '',
+            status: status === 'completed' ? 'sent' : 'pending',
+            agentRun: {
+              runId: output.runId,
+              status,
+              toolDefinitions: [],
+              toolCalls: [],
+              toolResults: [],
+              approvals: [],
+              fileChangeProposals: [],
+              timeline: []
+            }
+          }
+        ]
+      })
+      const reads = testState.loadConversation.mock.calls.length
+      start.reject(new Error('Lost IPC response'))
+      await expect.element(screen.getByTestId('agent-run-status')).toHaveTextContent(status)
+      expect(testState.loadConversation.mock.calls.length).toBeGreaterThan(reads)
+      expect(testState.startConversationTurn).toHaveBeenCalledTimes(1)
+      expect(testState.upsertChatMessages).not.toHaveBeenCalled()
+      if (status === 'running') {
+        emitAgentEvent({
+          type: 'done',
+          runId: 'run-1',
+          success: true,
+          status: 'completed',
+          content: 'Recovered stream'
+        })
+        await expect.element(screen.getByTestId('agent-run-status')).toHaveTextContent('completed')
+      } else {
+        await expect
+          .element(screen.getByTestId('conversation-message-contents'))
+          .toHaveTextContent('Backend completed the answer')
+      }
+    }
+  )
+
   it('keeps an unconfirmed stopped start local instead of overwriting Host state', async () => {
     prepareDraft()
     const start = deferred<AgentConversationTurnOutput>()
@@ -4711,7 +4827,7 @@ describe('activation failure recovery', () => {
     await screen.getByRole('button', { name: 'submit-with-skill' }).click()
 
     await expect.element(screen.getByTestId('last-assistant-status')).toHaveTextContent('sent')
-    await expect.element(screen.getByTestId('agent-run-status')).toHaveTextContent('failed')
+    await expect.element(screen.getByTestId('agent-run-status')).toHaveTextContent('completed')
     await expect
       .element(screen.getByTestId('draft-skills'))
       .not.toHaveTextContent(skillSelection.id)
@@ -4741,7 +4857,7 @@ describe('activation failure recovery', () => {
     await screen.getByRole('button', { name: 'submit-with-skill' }).click()
 
     await expect.element(screen.getByTestId('last-assistant-status')).toHaveTextContent('sent')
-    await expect.element(screen.getByTestId('agent-run-status')).toHaveTextContent('failed')
+    await expect.element(screen.getByTestId('agent-run-status')).toHaveTextContent('completed')
     await expect.element(screen.getByTestId('draft-skills')).toHaveTextContent(skillSelection.id)
     await expect.element(screen.getByTestId('skill-catalog-refresh-token')).toHaveTextContent('1')
   })
@@ -4774,10 +4890,13 @@ describe('activation failure recovery', () => {
     )
 
     await expect.element(screen.getByTestId('last-assistant-status')).toHaveTextContent('sent')
-    await expect.element(screen.getByTestId('agent-run-status')).toHaveTextContent('failed')
+    await expect.element(screen.getByTestId('agent-run-status')).toHaveTextContent('completed')
     await expect
       .element(screen.getByTestId('draft-skills'))
-      .toHaveTextContent(latestSkillSelection.revision)
+      .toHaveTextContent(skillSelection.revision)
+    expect(
+      JSON.parse(screen.getByTestId('queued-message-payloads').element().textContent!)
+    ).toEqual([expect.objectContaining({ skills: [latestSkillSelection], status: 'pending' })])
   })
 
   it('removes a rejected Skill that was re-selected while the request was in flight', async () => {
@@ -4804,7 +4923,7 @@ describe('activation failure recovery', () => {
     )
 
     await expect.element(screen.getByTestId('last-assistant-status')).toHaveTextContent('sent')
-    await expect.element(screen.getByTestId('agent-run-status')).toHaveTextContent('failed')
+    await expect.element(screen.getByTestId('agent-run-status')).toHaveTextContent('completed')
     await expect
       .element(screen.getByTestId('draft-skills'))
       .not.toHaveTextContent(skillSelection.id)
@@ -5644,6 +5763,11 @@ describe('authoritative run cancellation and conversation forking', () => {
     const command = screen.getByRole('button', { name: 'command-fork' })
     await expect.element(command).toBeEnabled()
     await command.click()
+    await expect.element(command).toBeDisabled()
+    await expect.element(command).toHaveAttribute('title', 'chat.continueInNewTaskPending')
+    await expect
+      .element(screen.getByText('chat.continueInNewTaskPending', { exact: true }))
+      .toHaveTextContent('chat.continueInNewTaskPending')
     await screen.getByRole('button', { name: 'continue-in-new-task' }).click()
     await expect.poll(() => testState.forkConversation.mock.calls.length).toBe(1)
     expect(testState.forkConversation).toHaveBeenCalledWith({
@@ -5657,6 +5781,9 @@ describe('authoritative run cancellation and conversation forking', () => {
       .element(screen.getByTestId('active-conversation-id'))
       .toHaveTextContent('fork-created')
     await expect.element(screen.getByTestId('draft-message')).toHaveTextContent('')
+    await expect
+      .element(screen.getByText('chat.continueInNewTaskPending', { exact: true }))
+      .not.toBeInTheDocument()
     expect(testState.saveComposerDraft).toHaveBeenCalledWith(
       'fork-created',
       expect.objectContaining({
@@ -5854,6 +5981,70 @@ describe('authoritative run cancellation and conversation forking', () => {
 
     await expect.poll(() => testState.forkConversation.mock.calls.length).toBe(1)
     expect(testState.showToast).toHaveBeenCalledWith('chat.continueInNewTaskActiveCommand')
+  })
+
+  it('keeps the fork request identity when retrying an uncertain response and clears pending state', async () => {
+    const retry = deferred<ChatConversation>()
+    testState.forkConversation
+      .mockRejectedValueOnce(new Error('response connection closed'))
+      .mockReturnValueOnce(retry.promise)
+    const screen = await renderSelectedConversation()
+    const command = screen.getByRole('button', { name: 'command-fork' })
+    await command.click()
+    await expect.poll(() => testState.forkConversation.mock.calls.length).toBe(1)
+    await expect.element(command).toBeEnabled()
+    await expect
+      .element(screen.getByText('chat.continueInNewTaskPending', { exact: true }))
+      .not.toBeInTheDocument()
+    const initialRequest = testState.forkConversation.mock.calls[0][0]
+    await command.click()
+    await expect.poll(() => testState.forkConversation.mock.calls.length).toBe(2)
+    expect(testState.forkConversation.mock.calls[1][0]).toEqual(initialRequest)
+    retry.resolve({ ...storedConversation(), id: 'fork-retried', messagesLoaded: true })
+    await expect
+      .element(screen.getByTestId('active-conversation-id'))
+      .toHaveTextContent('fork-retried')
+  })
+
+  it('uses a new fork identity when latest refers to a newer source history', async () => {
+    mockSuccessfulTurnStarts()
+    testState.forkConversation
+      .mockRejectedValueOnce(new Error('response connection closed'))
+      .mockResolvedValueOnce({ ...storedConversation(), id: 'fork-new-head', messagesLoaded: true })
+    const screen = await renderSelectedConversation()
+    const command = screen.getByRole('button', { name: 'command-fork' })
+    await command.click()
+    await expect.poll(() => testState.forkConversation.mock.calls.length).toBe(1)
+    await expect.element(command).toBeEnabled()
+    const initialRequestId = testState.forkConversation.mock.calls[0][0].requestId
+    await screen.getByRole('button', { name: 'submit-without-skill' }).click()
+    await expect.element(screen.getByTestId('agent-run-status')).toHaveTextContent('running')
+    emitAgentEvent({
+      type: 'done',
+      runId: 'run-1',
+      success: true,
+      status: 'completed',
+      content: 'New reply.'
+    })
+    await expect.element(command).toBeEnabled()
+    await command.click()
+    await expect.poll(() => testState.forkConversation.mock.calls.length).toBe(2)
+    expect(testState.forkConversation.mock.calls[1][0].requestId).not.toBe(initialRequestId)
+    await expect
+      .element(screen.getByTestId('active-conversation-id'))
+      .toHaveTextContent('fork-new-head')
+  })
+
+  it('shows a localized busy explanation when fork admission is full', async () => {
+    testState.forkConversation.mockRejectedValueOnce(
+      new HostInvocationError({ message: 'fork queue is full', code: -32001 })
+    )
+    const screen = await renderSelectedConversation()
+    await screen.getByRole('button', { name: 'command-fork' }).click()
+    await expect
+      .poll(() => testState.showToast.mock.calls.at(-1)?.[0])
+      .toBe('chat.continueInNewTaskBusy')
+    await expect.element(screen.getByRole('button', { name: 'command-fork' })).toBeEnabled()
   })
 
   it('does not expose an unknown Core, IPC, or database failure in the fork toast', async () => {

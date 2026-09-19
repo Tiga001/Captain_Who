@@ -1224,6 +1224,8 @@ export const jaJPTranslations = {
   'chat.continueInNewTask': '新しいタスクで続行する',
   'chat.continueInNewTaskActiveCommand':
     'この会話ではコマンドがまだ実行中です。新しいタスクを続行する前に、タスクを閉じるか、完了するのを待ってください。',
+  'chat.continueInNewTaskPending': '新しいタスクを作成中…',
+  'chat.continueInNewTaskBusy': 'ほかのタスクを作成中です。しばらくしてから再試行してください。',
   'chat.continueInNewTaskFailed': 'この返信から新しいタスクを作成できません。',
   'chat.continuationOrigin': 'タスクの続き',
   'chat.continuationOriginArchived': '元のタスクはアーカイブされます。',
@@ -1258,6 +1260,8 @@ export const jaJPTranslations = {
   'agent.interruption.contextLimitExceeded': 'コンテキストがモデルの制限を超えています',
   'agent.interruption.requestRejected': 'モデルリクエストが拒否されました',
   'agent.interruption.responseInvalid': '無効なモデル応答',
+  'agent.interruption.admissionUnconfirmed':
+    '送信結果を確認できません。照合を試みました。自動再送はしていません。',
   'agent.interruption.requestFailed': 'モデルリクエストが失敗しました',
   'agent.llmRetry.rateLimited':
     'サービスレートは制限されています。 {seconds} 秒以内に自動的に再試行します ({attempt}/{maxAttempts})',

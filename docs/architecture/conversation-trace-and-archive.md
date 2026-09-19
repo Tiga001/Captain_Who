@@ -118,6 +118,14 @@ Index 不复制正文、普通 narration 或每个成功 Tool 的 operation/outc
 
 协作 `fork_turns=all|N|none` 只选择完整 settled Turn。被选择的 settled assistant 缺少必需 Durable Trace 时应失败，而不是创建无法验证的历史快照。
 
+## 分叉性能与响应边界
+
+长程任务的分叉仍完整复制所选历史及可见子树，不截短历史、不省略 Archive，也不跳过身份、父子归属、终态和 Provider continuation 校验。准备阶段在同一数据库连接持锁期间复用一次解析的 Conversation、Trace、摘要链、guidance 和 FileChange；缓存只属于本次分叉，最终构建移动大块内容，避免多轮读取和深拷贝。Trace sequence 使用集合匹配，避免上下文与 Trace 两层逐项扫描。
+
+v48 的 `conversation_history_index_entries` 是派生身份索引，通过 `ref_key` / `archive_ref` 定位 FTS rowid。消息、Trace 和 Archive 的写入、更新、克隆与删除必须同时维护该索引；不能直接按 FTS 的 UNINDEXED 身份列逐条全表扫描。升级保留原始搜索全文，不用有界 Trace 重新生成 Exact Archive 的检索正文。可重建索引不作为分支历史或执行授权复制。
+
+Core Server 将 fork 交给单工作线程的有界队列（运行与排队合计最多 4 项），避免在 stdio 请求循环同步执行整个克隆。关闭时未开始的请求明确失败，已开始的事务等待完成；不能把超时当成回滚。Renderer 显示创建中状态并阻止重复点击；稳定边界的失败重试复用 requestId，latest 的源版本或消息边界变化后使用新 identity。所有历史和 SQL 写入仍在原有一致性锁与原子事务下完成，其他需要该连接的数据库操作可能短暂等待。
+
 ## 不变量
 
 1. Trace 是 Provider-neutral、append-only、无隐藏 reasoning 的活动日志。

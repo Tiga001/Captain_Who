@@ -138,6 +138,188 @@ async fn office_status_probe_runs_off_the_request_loop_and_returns_a_strict_resu
     image_generation_dispatcher.shutdown().await.unwrap();
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fork_queue_does_not_block_ping_and_keeps_the_storage_response_contract() {
+    let temp = tempfile::tempdir().unwrap();
+    let storage = Arc::new(StorageService::open(&temp.path().join("storage.sqlite")).unwrap());
+    let agent_service = AgentService::new_authorized_for_test(Arc::clone(&storage));
+    let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel();
+    let (image_tx, _image_rx) = mpsc::channel(DEFAULT_MAX_CONCURRENT_IMAGE_ARTIFACT_READS);
+    let git = GitDispatcher::new(outbound_tx.clone());
+    let skills = SkillsDispatcher::new(outbound_tx.clone());
+    let images = ImageGenerationConfigurationDispatcher::new(outbound_tx.clone());
+    let dispatchers = RequestDispatchers {
+        git: &git,
+        skills: &skills,
+        skill_acquisition: &skills,
+        image_generation_configuration: &images,
+    };
+    let forks = ForkRequestDispatcher::new(outbound_tx.clone());
+    let (started_tx, started_rx) = oneshot::channel();
+    let (release_tx, release_rx) = std_mpsc::channel();
+    forks
+        .try_submit(JsonRpcId::Number(0), move || {
+            let _ = started_tx.send(());
+            release_rx.recv().unwrap();
+            serde_json::json!({ "id": 0 })
+        })
+        .unwrap();
+    started_rx.await.unwrap();
+    let input = concat!(
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"storage.forkConversation\",",
+        "\"params\":{\"requestId\":\"retry-same-request\",\"sourceConversationId\":\"missing\",",
+        "\"forkPoint\":{\"kind\":\"latest\"}}}\n",
+        "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"core.ping\"}\n"
+    );
+    super::super::request_loop::run_request_loop_inner(
+        BufReader::new(input.as_bytes()),
+        test_core_request_services(storage),
+        &agent_service,
+        SkillServices {
+            catalog: Arc::new(SkillsService::new()),
+            installations: Arc::new(
+                SkillInstallationService::new(temp.path().join("skills")).unwrap(),
+            ),
+            workflow: Arc::new(SkillInstallationWorkflow::new(
+                SkillInstallationService::new(temp.path().join("skills")).unwrap(),
+            )),
+            source_resolution: Arc::new(SkillSourceResolutionService::new()),
+        },
+        Arc::new(GitReviewService::new()),
+        &dispatchers,
+        RequestOutbounds {
+            normal: &outbound_tx,
+            image_artifact: &image_tx,
+        },
+        &forks,
+    )
+    .await
+    .unwrap();
+    // Inspect after releasing the worker too, so a failed assertion cannot strand a blocking job.
+    let first = outbound_rx.try_recv().unwrap();
+    release_tx.send(()).unwrap();
+    assert_eq!(first["id"], 2, "fork must not run inline before the ping");
+    let mut response = None;
+    for _ in 0..2 {
+        let next = tokio::time::timeout(Duration::from_secs(3), outbound_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        if next["id"] == 1 {
+            response = Some(next);
+        }
+    }
+    let response = response.unwrap();
+    assert_eq!(response["error"]["code"], -32000);
+    assert_eq!(response["error"]["message"], "原任务不存在。");
+    forks.shutdown().await.unwrap();
+    git.shutdown().await.unwrap();
+    skills.shutdown().await.unwrap();
+    images.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shutdown_stops_queued_forks_before_waiting_for_other_services() {
+    let temp = tempfile::tempdir().unwrap();
+    let storage = Arc::new(StorageService::open(&temp.path().join("storage.sqlite")).unwrap());
+    let agent_service = AgentService::new_authorized_for_test(Arc::clone(&storage));
+    let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel();
+    let (image_tx, _image_rx) = mpsc::channel(DEFAULT_MAX_CONCURRENT_IMAGE_ARTIFACT_READS);
+    let git = GitDispatcher::new(outbound_tx.clone());
+    let skills = SkillsDispatcher::new(outbound_tx.clone());
+    let images = ImageGenerationConfigurationDispatcher::new(outbound_tx.clone());
+    let dispatchers = RequestDispatchers {
+        git: &git,
+        skills: &skills,
+        skill_acquisition: &skills,
+        image_generation_configuration: &images,
+    };
+    let forks = ForkRequestDispatcher::new(outbound_tx.clone());
+    let (started_tx, started_rx) = oneshot::channel();
+    let (release_tx, release_rx) = std_mpsc::channel();
+    forks
+        .try_submit(JsonRpcId::Number(1), move || {
+            let _ = started_tx.send(());
+            release_rx.recv().unwrap();
+            response_success(JsonRpcId::Number(1), json!({ "committed": true }))
+        })
+        .unwrap();
+    started_rx.await.unwrap();
+    forks
+        .try_submit(JsonRpcId::Number(2), || {
+            response_success(JsonRpcId::Number(2), json!({ "unexpectedlyStarted": true }))
+        })
+        .unwrap();
+
+    // Keep another service in its shutdown handshake after core.shutdown has been recognized.
+    let services = test_core_request_services(storage);
+    let risk_tasks = Arc::clone(&services.browser_risk_tasks);
+    let (risk_release_tx, risk_release_rx) = oneshot::channel();
+    assert!(risk_tasks
+        .try_spawn(async move {
+            let _ = risk_release_rx.await;
+        })
+        .is_ok());
+    let input = "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"core.shutdown\"}\n";
+    let request_loop = super::super::request_loop::run_request_loop_inner(
+        BufReader::new(input.as_bytes()),
+        services,
+        &agent_service,
+        SkillServices {
+            catalog: Arc::new(SkillsService::new()),
+            installations: Arc::new(
+                SkillInstallationService::new(temp.path().join("skills")).unwrap(),
+            ),
+            workflow: Arc::new(SkillInstallationWorkflow::new(
+                SkillInstallationService::new(temp.path().join("skills")).unwrap(),
+            )),
+            source_resolution: Arc::new(SkillSourceResolutionService::new()),
+        },
+        Arc::new(GitReviewService::new()),
+        &dispatchers,
+        RequestOutbounds {
+            normal: &outbound_tx,
+            image_artifact: &image_tx,
+        },
+        &forks,
+    );
+    let driver = async {
+        // Admission closes at the start of the risk shutdown; reaching this barrier proves that
+        // the request loop is awaiting another service, not yet at its final fork drain.
+        while risk_tasks.try_spawn(async {}).is_ok() {
+            tokio::task::yield_now().await;
+        }
+        release_tx.send(()).unwrap();
+        let completed = tokio::time::timeout(Duration::from_secs(1), outbound_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let queued = tokio::time::timeout(Duration::from_secs(1), outbound_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        risk_release_tx.send(()).unwrap();
+        assert_eq!(completed["result"]["committed"], true);
+        assert_eq!(queued["id"], 2);
+        assert_eq!(
+            queued["error"]["code"], -32603,
+            "queued fork started during another service's shutdown handshake: {queued}"
+        );
+        assert_eq!(
+            forks
+                .try_submit(JsonRpcId::Number(4), || unreachable!())
+                .unwrap_err()["error"]["code"],
+            -32603
+        );
+    };
+    let (shutdown_id, ()) = tokio::join!(request_loop, driver);
+    assert!(matches!(shutdown_id.unwrap(), Some(JsonRpcId::Number(3))));
+    forks.shutdown().await.unwrap();
+    git.shutdown().await.unwrap();
+    skills.shutdown().await.unwrap();
+    images.shutdown().await.unwrap();
+}
+
 #[test]
 fn office_status_rejects_even_empty_parameter_objects() {
     let temp = tempfile::tempdir().unwrap();

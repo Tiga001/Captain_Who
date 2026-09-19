@@ -128,6 +128,8 @@ Projects 的新建和编辑统一经过项目表单；目录选择使用 Main �
 `useAgentRunLifecycle.ts` 是普通会话运行的主要协调器。关键规则包括：
 
 - submit/rewrite 请求携带会话、消息、附件、模型、权限和 Skill revision 等精确输入。
+- 普通发送在同一次前端提交中追加乐观消息并消费对应版本的草稿，受理回执不再二次清空输入框。Host 预检为 `compatible/same_protocol` 时跳过无变化的模型切换握手，仍保留预检与实际轮次受理校验。
+- 明确的登录、许可或结构化 Skill 校验拒绝会撤回乐观消息并恢复原草稿；期间新增的草稿连同附件、Skill 和配置移入待发送队列，关闭自动发送。传输失败则先按原消息 ID 回读后端，已受理的轮次恢复绑定；无法确认时保留本次消息和 `admission_unconfirmed` 异常状态，不自动重发或恢复进输入框。
 - `runId` 返回前到达的事件进入有界缓冲；绑定建立后再按顺序归并。
 - command session 事件按其持久 owner 路由，不简单依赖当前活动 Run。
 - 流式 delta 先短暂批处理，再更新 React 状态和持久化投影，避免每 token 重渲染。
@@ -167,7 +169,7 @@ ScheduledPage
 
 Scheduled drawer 的展开、最大化、dirty guard、焦点恢复和宽度都是 Renderer 交互状态。布局以 Scheduled 容器自身宽度而非 viewport 为准；当前默认宽度 440 px、可调整范围 380–640 px、列表至少保留 360 px，容器小于 760 px 时 drawer 覆盖列表。宽度偏好只保存在当前 AppShell 会话，应用重启后恢复默认值。
 
-Automation 共享 DTO 使用 `AUTOMATION_SCHEMA_VERSION = 1`，permission mode 使用独立的 v2；它们不是 SQLite canonical schema。当前 SQLite schema 是 v47，Renderer 不读取或协商该数据库版本。
+Automation 共享 DTO 使用 `AUTOMATION_SCHEMA_VERSION = 1`，permission mode 使用独立的 v2；它们不是 SQLite canonical schema。当前 SQLite schema 是 v48，Renderer 不读取或协商该数据库版本。
 
 ## 设置架构
 
@@ -192,7 +194,7 @@ MCP 编辑器有未保存变更保护；离开 MCP 页面或返回工作区前�
 7. 大文本、diff、PDF、图片和流式事件均需先经过领域预算，再进入 DOM/解码器。
 8. Automation event/resync 只用于失效通知和排序，不能替代 task、Automation Run、attention 的权威快照。
 9. Scheduled 页面中的权限、health、Run 终态和通知状态都不得由 Renderer 文案或本地时钟推断。
-10. Automation DTO schema v1、permission mode v2 与 SQLite schema v47 必须分开命名和演进。
+10. Automation DTO schema v1、permission mode v2 与 SQLite schema v48 必须分开命名和演进。
 11. FileChange diff 卡片、Browser 下载中心和原生通知点击只消费安全投影；UI 中可见的路径、卡片或按钮不授予文件/Browser/通知权限。
 12. 凭据查询只允许返回状态；credential reference 和已有 secret 都不得进入 Renderer DTO、store、错误或测试 snapshot。
 

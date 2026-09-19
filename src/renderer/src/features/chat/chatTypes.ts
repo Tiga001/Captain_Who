@@ -200,6 +200,7 @@ export type ChatAgentInterruptionReason =
   | 'request_rejected'
   | 'response_invalid'
   | 'request_failed'
+  | 'admission_unconfirmed'
 
 export interface ChatAgentInterruptionView {
   reason: ChatAgentInterruptionReason
@@ -329,6 +330,8 @@ export interface ChatComposerDraft {
 }
 
 export interface ChatSubmitOptions {
+  /** Renderer-only snapshot; never forwarded to the Agent transport. */
+  draftSnapshot?: ChatComposerDraft
   modelId: string
   permissionMode: ChatPermissionMode
   projectId: string | null

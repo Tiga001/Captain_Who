@@ -1230,6 +1230,8 @@ export const ruRUTranslations = {
   'chat.continueInNewTask': 'Продолжить новую задачу',
   'chat.continueInNewTaskActiveCommand':
     'В этом диалоге все еще выполняется команда. Закройте его или дождитесь завершения, прежде чем продолжить выполнение новой задачи.',
+  'chat.continueInNewTaskPending': 'Создание новой задачи…',
+  'chat.continueInNewTaskBusy': 'Создаются другие задачи. Повторите попытку чуть позже.',
   'chat.continueInNewTaskFailed': 'Невозможно создать новую задачу на основе этого ответа.',
   'chat.continuationOrigin': 'Продолжение задачи',
   'chat.continuationOriginArchived': 'Исходное задание архивируется.',
@@ -1264,6 +1266,8 @@ export const ruRUTranslations = {
   'agent.interruption.contextLimitExceeded': 'Контекст превышает лимит модели',
   'agent.interruption.requestRejected': 'Запрос модели отклонен',
   'agent.interruption.responseInvalid': 'Неверный ответ модели',
+  'agent.interruption.admissionUnconfirmed':
+    'Отправка не подтверждена. Проверка выполнена; автоматической повторной отправки не было.',
   'agent.interruption.requestFailed': 'Запрос модели не выполнен.',
   'agent.llmRetry.rateLimited':
     'Стоимость услуги ограничена; автоматическая повторная попытка через {seconds} с ({attempt}/{maxAttempts})',

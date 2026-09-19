@@ -91,9 +91,9 @@ transport/application → adapters → core/protocol
 - `storage.sqlite` 是 Conversation、Agent、模板与项目分配、Mailbox、Wake、Approval、FileChange
   audit/run grant、Automation task/Run/event、Notification fact/batch、Browser history/preferences/download
   等持久事实来源。
-- 当前 canonical schema 为 **v47**；版本与 catalog fingerprint 的唯一真源是 `crates/core/src/storage/migrations.rs`。v47 新增纯本机 Token 账本；v45 把项目改为“一个主文件夹 + 若干副文件夹”的多文件夹模型（`project_folders` 表），主文件夹仍是 Agent 的工作目录。
+- 当前 canonical schema 为 **v48**；版本与 catalog fingerprint 的唯一真源是 `crates/core/src/storage/migrations.rs`。v48 为历史搜索增加身份索引，v47 新增纯本机 Token 账本；v45 把项目改为“一个主文件夹 + 若干副文件夹”的多文件夹模型（`project_folders` 表），主文件夹仍是 Agent 的工作目录。
 - 内存 channel、`Notify`、Renderer store 和 notification 只用于降延迟或失效通知。间隙、重启和丢通知必须从 SQLite snapshot/event log 恢复。
-- 空库原子创建 v47，已有库只接受通过 exact fingerprint 和外键校验的当前 v47。所有旧版本（包括 exact v46）、fingerprint 或外键不匹配时均 fail closed，返回 `development_storage_schema_reset_required`，不修改源库；再由显式开发重建流程保留 allowlisted 配置与凭据引用，丢弃聊天、运行、本机 Token 统计和旧的单路径项目。
+- 空库原子创建 v48；exact v47 在事务中补建历史搜索身份索引后升级 v48，保留聊天与搜索内容，失败完整回滚。v46 及更早版本、fingerprint 或外键不匹配时均 fail closed，返回 `development_storage_schema_reset_required`，不修改源库；再由显式开发重建流程保留 allowlisted 配置与凭据引用，丢弃聊天、运行、本机 Token 统计和旧的单路径项目。
 
 ## 5. 启动与关停概览
 
@@ -183,7 +183,7 @@ pnpm test:web
 - 打包、真实签名、专项 Multi-Agent gate 和 Managed Playwright release gate 不在 `pnpm check` 内；内部文档、公开文档和 Agent 头像检查已纳入 `pnpm check`。
 - Automation 真实 Core Server E2E 也不在 `pnpm check`，且尚无定时触发到操作系统通知点击的
   packaged E2E。
-- 开发期不维护自动数据库迁移，所有旧版本（包括 exact v46）均要求显式 reset。
+- 仅 exact v47 支持保留历史的 v48 搜索索引事务升级；v46 及更早版本仍要求显式 reset。
 
 ## 11. 变更检查表
 

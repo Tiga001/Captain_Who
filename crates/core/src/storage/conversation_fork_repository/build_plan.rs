@@ -41,9 +41,8 @@ fn collect_inherited_open_async_questions(
             created_at,
             updated_at,
         ) = row.map_err(database_error)?;
-        let Some(target_assistant_message_id) = message_id_map
-            .get(&source_assistant_message_id)
-            .cloned()
+        let Some(target_assistant_message_id) =
+            message_id_map.get(&source_assistant_message_id).cloned()
         else {
             // The question was opened beyond the copied boundary; nothing of it is inherited.
             continue;
@@ -83,6 +82,7 @@ fn collect_inherited_open_async_questions(
 #[allow(clippy::too_many_arguments)]
 fn build_single_conversation_fork_plan_at_point(
     connection: &Connection,
+    source_snapshot: &mut ForkSourceSnapshot,
     request_id: &str,
     source_conversation_id: &str,
     fork_point: &ConversationForkPoint,
@@ -128,12 +128,8 @@ fn build_single_conversation_fork_plan_at_point(
     if manual_running {
         return Err("上下文仍在压缩，结束后才能创建分支。".to_string().into());
     }
-    let source = chat_repository::get_active_conversation(connection, source_conversation_id)
-        .map_err(database_error)?
-        .ok_or_else(|| "原任务不存在。".to_string())?;
-    let active_chain =
-        context_compaction_repository::list_active_summary_chain(connection, &source.id)
-            .map_err(|error| error.to_string())?;
+    let source = source_snapshot.take_conversation(connection, source_conversation_id)?;
+    let active_chain = source_snapshot.take_summary_chain(connection, &source.id)?;
     let resolved = resolve_fork_point(connection, &source, fork_point, &active_chain)?;
     let cutoff = source
         .messages
@@ -154,7 +150,7 @@ fn build_single_conversation_fork_plan_at_point(
     if message_limit < cutoff || message_limit >= source.messages.len() {
         return Err("成员对话的可见消息边界无效。".to_string().into());
     }
-    let source_messages = source.messages[..=message_limit].to_vec();
+    let source_messages = &source.messages[..=message_limit];
     let target_conversation_id = target_conversation_id
         .map(str::to_string)
         .unwrap_or_else(|| new_id("conversation"));
@@ -171,7 +167,7 @@ fn build_single_conversation_fork_plan_at_point(
         })
         .collect::<HashMap<_, _>>();
     let snapshot_origins = if snapshot_authorized {
-        fork_snapshot_origins(connection, &source, &source_messages, &message_id_map)?
+        fork_snapshot_origins(connection, &source, source_messages, &message_id_map)?
     } else {
         Vec::new()
     };
@@ -310,9 +306,8 @@ fn build_single_conversation_fork_plan_at_point(
     };
     let mut run_id_map = HashMap::new();
     let mut tool_call_id_map = HashMap::new();
-    for message in &source_messages {
-        let trace = conversation_trace_repository::get_trace_for_message(connection, &message.id)
-            .map_err(database_error)?;
+    for message in source_messages {
+        let trace = source_snapshot.take_trace(connection, &message.id)?;
         ensure_settled_assistant(message, trace.as_ref())?;
         if let Some(mut trace) = trace {
             trace.items.retain(|item| match item {
@@ -369,18 +364,21 @@ fn build_single_conversation_fork_plan_at_point(
                     insert_global_replacement(&mut tool_call_id_map, call_id, &target_call_id)?;
                 }
             }
-            let (trace_created_at, committed_at) = trace_times(connection, &message.id)?;
+            let (trace_created_at, committed_at) =
+                source_snapshot.trace_times(connection, &message.id)?;
             let mut model_context_items =
                 conversation_model_context_repository::get_log_for_message(connection, &message.id)
                     .map_err(database_error)?
                     .map(|log| log.items)
                     .unwrap_or_default();
-            model_context_items.retain(|item| {
-                trace
-                    .items
-                    .iter()
-                    .any(|event| event.sequence() == item.sequence)
-            });
+            // Backend postlude filtering can leave sequence gaps. Preserve exactly those
+            // events without scanning the full trace again for every context item.
+            let retained_sequences = trace
+                .items
+                .iter()
+                .map(|item| item.sequence())
+                .collect::<HashSet<_>>();
+            model_context_items.retain(|item| retained_sequences.contains(&item.sequence));
             traces.push(ForkTrace {
                 source_run_id: trace.run_id.clone(),
                 trace: ConversationTurnTrace {
@@ -472,10 +470,7 @@ fn build_single_conversation_fork_plan_at_point(
     let mut file_change_id_map = HashMap::new();
     let mut file_observation_id_map = HashMap::new();
     for (source_run_id, target_run_id) in &run_id_map {
-        for source_change in
-            file_change_repository::list_file_changes_for_run(connection, source_run_id)
-                .map_err(database_error)?
-        {
+        for source_change in source_snapshot.take_file_changes(connection, source_run_id)? {
             if source_change.conversation_id != source.id
                 || source_change.project_id != source.project_id
                 || source_change.run_id != *source_run_id
@@ -646,11 +641,8 @@ fn build_single_conversation_fork_plan_at_point(
 
     let mut guidance_id_map = HashMap::new();
     let mut guidances = Vec::new();
-    for message in &source_messages {
-        for guidance in
-            guidance_repository::list_guidances_for_assistant_message(connection, &message.id)
-                .map_err(database_error)?
-        {
+    for message in source_messages {
+        for guidance in source_snapshot.take_guidances(connection, &message.id)? {
             if guidance.status != AgentGuidanceStatus::Applied {
                 continue;
             }
@@ -912,14 +904,14 @@ fn build_single_conversation_fork_plan_at_point(
 
     Ok(ConversationForkPlan {
         request_id: request_id.to_string(),
-        source_conversation_id: source.id,
+        source_conversation_id: source.id.clone(),
         source_message_id: resolved.assistant_message_id,
         source_fork_point: fork_point.clone(),
         target: ChatConversationRecord {
             id: target_conversation_id,
-            project_id: source.project_id,
-            model_id: resolved.model_id.or(source.model_id),
-            title: source.title,
+            project_id: source.project_id.clone(),
+            model_id: resolved.model_id.or_else(|| source.model_id.clone()),
+            title: source.title.clone(),
             messages: target_messages,
             created_at,
             updated_at: created_at,

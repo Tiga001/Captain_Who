@@ -1355,6 +1355,24 @@ fn startup_recovery_does_not_preserve_unknown_or_malformed_current_projection_fi
         "service_connection_failed"
     );
 
+    let mut unconfirmed = valid_presentation.clone();
+    unconfirmed["interruption"]["reason"] = "admission_unconfirmed".into();
+    let recovered = canonical_agent_run_lifecycle_projection(
+        Some(&unconfirmed.to_string()),
+        "run-1",
+        "failed",
+        2,
+        30,
+        Some(30),
+    )
+    .unwrap();
+    let recovered: serde_json::Value = serde_json::from_str(&recovered).unwrap();
+    assert_eq!(recovered["interruption"]["reason"], "admission_unconfirmed");
+    assert_eq!(
+        recovered["explicitSkillSelections"][0]["revision"],
+        "revision-1"
+    );
+
     let invalid_projections = [
         {
             let mut invalid = valid_presentation.clone();

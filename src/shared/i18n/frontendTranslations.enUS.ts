@@ -1212,6 +1212,8 @@ export const enUSTranslations = {
   'chat.continueInNewTask': 'Continue in new task',
   'chat.continueInNewTaskActiveCommand':
     'A command is still running in this conversation. Close it or wait for it to finish before continuing in a new task.',
+  'chat.continueInNewTaskPending': 'Creating a new task…',
+  'chat.continueInNewTaskBusy': 'Other tasks are being created. Please retry shortly.',
   'chat.continueInNewTaskFailed': 'Unable to create a new task from this reply.',
   'chat.continuationOrigin': 'Continued from task',
   'chat.continuationOriginArchived': 'The original task is archived.',
@@ -1246,6 +1248,8 @@ export const enUSTranslations = {
   'agent.interruption.contextLimitExceeded': 'Context exceeds the model limit',
   'agent.interruption.requestRejected': 'Model request rejected',
   'agent.interruption.responseInvalid': 'Invalid model response',
+  'agent.interruption.admissionUnconfirmed':
+    'Send status is unconfirmed. Verification was attempted; no automatic resend.',
   'agent.interruption.requestFailed': 'Model request failed',
   'agent.llmRetry.rateLimited':
     'Service rate limited; retrying automatically in {seconds}s ({attempt}/{maxAttempts})',

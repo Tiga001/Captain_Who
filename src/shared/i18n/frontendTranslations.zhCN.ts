@@ -1147,6 +1147,8 @@ export const zhCNTranslations = {
   'chat.continueInNewTask': '在新任务中继续',
   'chat.continueInNewTaskActiveCommand':
     '当前对话仍有命令正在运行，请先关闭程序或等待命令结束后再继续新任务。',
+  'chat.continueInNewTaskPending': '正在创建新任务…',
+  'chat.continueInNewTaskBusy': '正在创建其他任务，请稍后重试。',
   'chat.continueInNewTaskFailed': '无法从这条回复创建新任务。',
   'chat.continuationOrigin': '接续自任务',
   'chat.continuationOriginArchived': '原任务已归档',
@@ -1181,6 +1183,7 @@ export const zhCNTranslations = {
   'agent.interruption.contextLimitExceeded': '上下文超过模型限制',
   'agent.interruption.requestRejected': '模型请求被拒绝',
   'agent.interruption.responseInvalid': '模型响应无效',
+  'agent.interruption.admissionUnconfirmed': '发送结果尚未确认。已尝试核对，未自动重发。',
   'agent.interruption.requestFailed': '模型请求失败',
   'agent.llmRetry.rateLimited': '服务限流，{seconds}秒后自动重试（{attempt}/{maxAttempts}）',
   'agent.llmRetry.temporarilyUnavailable':

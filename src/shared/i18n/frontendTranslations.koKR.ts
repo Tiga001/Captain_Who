@@ -1195,6 +1195,8 @@ export const koKRTranslations = {
   'chat.continueInNewTask': '새 작업에서 계속',
   'chat.continueInNewTaskActiveCommand':
     '이 대화에서는 명령이 계속 실행 중입니다. 새 작업을 계속하기 전에 닫거나 완료될 때까지 기다리세요.',
+  'chat.continueInNewTaskPending': '새 작업을 만드는 중…',
+  'chat.continueInNewTaskBusy': '다른 작업을 만드는 중입니다. 잠시 후 다시 시도해 주세요.',
   'chat.continueInNewTaskFailed': '이 응답으로 새 작업을 생성할 수 없습니다.',
   'chat.continuationOrigin': '작업에서 계속',
   'chat.continuationOriginArchived': '원래 작업이 보관됩니다.',
@@ -1229,6 +1231,8 @@ export const koKRTranslations = {
   'agent.interruption.contextLimitExceeded': '컨텍스트가 모델 제한을 초과합니다.',
   'agent.interruption.requestRejected': '모델 요청이 거부됨',
   'agent.interruption.responseInvalid': '잘못된 모델 응답',
+  'agent.interruption.admissionUnconfirmed':
+    '전송 결과를 확인할 수 없습니다. 확인을 시도했으며 자동으로 재전송하지 않았습니다.',
   'agent.interruption.requestFailed': '모델 요청 실패',
   'agent.llmRetry.rateLimited':
     '서비스 요금이 제한되어 있습니다. {seconds}s({attempt}/{maxAttempts})에서 자동으로 재시도 중',

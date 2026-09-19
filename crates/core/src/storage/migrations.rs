@@ -1,18 +1,18 @@
 use rusqlite::{ffi, Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
 
-pub const STORAGE_SCHEMA_VERSION: i32 = 47;
+pub const STORAGE_SCHEMA_VERSION: i32 = 48;
 pub const DEVELOPMENT_STORAGE_SCHEMA_RESET_REQUIRED: &str =
     "development_storage_schema_reset_required";
 
 const CANONICAL_SCHEMA: &str = include_str!("canonical_schema.sql");
 const CANONICAL_SCHEMA_FINGERPRINT: &str =
-    "sha256:44c989bbfd6fb7212013c2f27ce721aa967157a85202187d88f0dea0e5c65827";
+    "sha256:c0d1cc5df5ad3dfa8674b8297f0e39b4ab5602c63500108edc6a1b78839ca455";
 
 /// Initializes fresh storage or validates the exact current canonical schema.
 ///
-/// All earlier development schemas require an explicit reset; data is never auto-migrated
-/// or auto-reset.
+/// The exact v47 catalog upgrades atomically without changing authoritative history.
+/// All other earlier development schemas require an explicit reset; data is never auto-reset.
 pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
     connection.execute_batch("PRAGMA foreign_keys = ON;")?;
 
@@ -23,6 +23,10 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
         return create_canonical_schema(connection);
     }
 
+    if schema_version == 47 {
+        return upgrade_history_search_index_v47(connection);
+    }
+
     if schema_version != STORAGE_SCHEMA_VERSION {
         return Err(reset_required_error(format!(
             "expected schema version {STORAGE_SCHEMA_VERSION}, found {schema_version}"
@@ -30,6 +34,39 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
     }
 
     validate_canonical_schema(connection)
+}
+
+const V47_SCHEMA_FINGERPRINT: &str =
+    "sha256:44c989bbfd6fb7212013c2f27ce721aa967157a85202187d88f0dea0e5c65827";
+const HISTORY_SEARCH_INDEX_V48: &str = include_str!("history_search_index_v48.sql");
+const DROP_HISTORY_SEARCH_TRIGGERS: &str = "
+    DROP TRIGGER conversation_history_fts_message_insert;
+    DROP TRIGGER conversation_history_fts_message_update;
+    DROP TRIGGER conversation_history_fts_message_delete;
+    DROP TRIGGER conversation_history_fts_trace_insert;
+    DROP TRIGGER conversation_history_fts_trace_update;
+    DROP TRIGGER conversation_history_fts_trace_delete;
+    DROP TRIGGER conversation_history_fts_archive_delete;
+";
+
+/// This narrowly scoped upgrade preserves FTS rowids and content, including sanitized exact
+/// archive text. Do not rebuild search content from bounded Trace projections or decoded blobs.
+fn upgrade_history_search_index_v47(connection: &Connection) -> rusqlite::Result<()> {
+    let transaction = connection.unchecked_transaction()?;
+    validate_schema_fingerprint(&transaction, V47_SCHEMA_FINGERPRINT)?;
+    ensure_foreign_keys_are_valid(&transaction)?;
+    transaction.execute_batch(DROP_HISTORY_SEARCH_TRIGGERS)?;
+    transaction.execute_batch(HISTORY_SEARCH_INDEX_V48)?;
+    transaction.execute(
+        "INSERT INTO conversation_history_index_entries
+             (rowid, ref_key, archive_ref, owner_message_id)
+         SELECT rowid, ref_key, archive_ref, COALESCE(message_id, assistant_message_id)
+         FROM conversation_history_fts",
+        [],
+    )?;
+    validate_canonical_schema(&transaction)?;
+    transaction.pragma_update(None, "user_version", STORAGE_SCHEMA_VERSION)?;
+    transaction.commit()
 }
 
 fn create_canonical_schema(connection: &Connection) -> rusqlite::Result<()> {
@@ -140,12 +177,20 @@ mod tests {
         "sha256:6af5e743b2fd8ab799ff3fc702137b4dd8289b45420d5338a83b81c88b301179";
     const LOCAL_TOKEN_LEDGER_SCHEMA_MARKER: &str = "-- Independent local token ledger, schema v47.";
 
+    fn v47_schema() -> String {
+        assert!(CANONICAL_SCHEMA.contains(HISTORY_SEARCH_INDEX_V48));
+        CANONICAL_SCHEMA.replace(
+            HISTORY_SEARCH_INDEX_V48,
+            include_str!("test_fixtures/history_search_v47.sql"),
+        )
+    }
+
     #[test]
     fn exact_v46_requires_reset_without_changing_user_data_or_creating_token_tables() {
         let connection = Connection::open_in_memory().unwrap();
         connection
             .execute_batch(
-                CANONICAL_SCHEMA
+                v47_schema()
                     .split_once(LOCAL_TOKEN_LEDGER_SCHEMA_MARKER)
                     .unwrap()
                     .0,
@@ -263,7 +308,8 @@ mod tests {
 
     /// Rebuilds the exact v44 catalog: single-path projects and no `project_folders` table.
     fn v44_canonical_schema() -> String {
-        let (before_multi_folder, _) = CANONICAL_SCHEMA
+        let old_schema = v47_schema();
+        let (before_multi_folder, _) = old_schema
             .split_once(MULTI_FOLDER_PROJECT_SCHEMA_MARKER)
             .unwrap();
         assert!(before_multi_folder.contains(PROJECTS_TABLE_V45));
@@ -275,7 +321,7 @@ mod tests {
         let connection = Connection::open_in_memory().unwrap();
         connection
             .execute_batch(
-                CANONICAL_SCHEMA
+                v47_schema()
                     .split_once("-- Frozen workspace membership, schema v46.")
                     .unwrap()
                     .0,
@@ -2656,3 +2702,7 @@ CREATE TABLE model_provider_credential_cleanup (
             .contains(DEVELOPMENT_STORAGE_SCHEMA_RESET_REQUIRED));
     }
 }
+
+#[cfg(test)]
+#[path = "migrations_history_search_tests.rs"]
+mod history_search_tests;

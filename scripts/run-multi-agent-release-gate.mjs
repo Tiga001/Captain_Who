@@ -217,16 +217,8 @@ const smokeSteps = [
   },
   {
     label:
-      'storage: canonical v47, all older versions require reset including exact v46, and atomic fresh creation',
-    command: [
-      'cargo',
-      'test',
-      '--locked',
-      '-p',
-      'mycopilot-core',
-      '--lib',
-      'storage::migrations::tests'
-    ]
+      'storage: canonical v48, atomic exact v47 index upgrade, older versions require reset, and atomic fresh creation',
+    command: ['cargo', 'test', '--locked', '-p', 'mycopilot-core', '--lib', 'storage::migrations::']
   },
   {
     label: 'cross-language collaboration protocol fixture',

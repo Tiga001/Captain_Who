@@ -48,7 +48,7 @@ const APP_DATA_ROOT_FLAG: &str = "--app-data-root";
 const CONFIGURATION_SOURCE_FLAG: &str = "--configuration-source";
 const SQLITE_TRANSIENT_SUFFIXES: [&str; 3] = ["-journal", "-wal", "-shm"];
 const RECOVERABLE_CONFIGURATION_SOURCE_SCHEMA_VERSION: i32 = 33;
-const RECOVERABLE_CONFIGURATION_TARGET_SCHEMA_VERSION: i32 = 47;
+const RECOVERABLE_CONFIGURATION_TARGET_SCHEMA_VERSION: i32 = 48;
 const RECOVERABLE_CONFIGURATION_SOURCE_FINGERPRINT: &str =
     "sha256:5e1e404d74af5ed899d88dc8b5051e673ecd5beb967579af8f328b07b640c948";
 const PREVIOUS_CONFIGURATION_SOURCE_SCHEMA_VERSION: i32 = 35;
@@ -85,6 +85,9 @@ const CONTEXT_PROFILE_SCHEMA_MARKER: &str =
     "-- Context profiles and immutable run admission policy, schema v44.";
 const WORKSPACE_CONFIGURATION_SOURCE_SCHEMA_VERSION: i32 = 45;
 const FROZEN_WORKSPACE_CONFIGURATION_SOURCE_SCHEMA_VERSION: i32 = 46;
+const LOCAL_TOKEN_CONFIGURATION_SOURCE_SCHEMA_VERSION: i32 = 47;
+const LOCAL_TOKEN_CONFIGURATION_SOURCE_FINGERPRINT: &str =
+    "sha256:44c989bbfd6fb7212013c2f27ce721aa967157a85202187d88f0dea0e5c65827";
 const FROZEN_WORKSPACE_CONFIGURATION_SOURCE_FINGERPRINT: &str =
     "sha256:6af5e743b2fd8ab799ff3fc702137b4dd8289b45420d5338a83b81c88b301179";
 const WORKSPACE_CONFIGURATION_SOURCE_FINGERPRINT: &str =
@@ -539,7 +542,8 @@ fn inspect_source(
                 && schema_version != COLLABORATION_CONFIGURATION_SOURCE_SCHEMA_VERSION
                 && schema_version != CONTEXT_PROFILE_CONFIGURATION_SOURCE_SCHEMA_VERSION
                 && schema_version != WORKSPACE_CONFIGURATION_SOURCE_SCHEMA_VERSION
-                && schema_version != FROZEN_WORKSPACE_CONFIGURATION_SOURCE_SCHEMA_VERSION =>
+                && schema_version != FROZEN_WORKSPACE_CONFIGURATION_SOURCE_SCHEMA_VERSION
+                && schema_version != LOCAL_TOKEN_CONFIGURATION_SOURCE_SCHEMA_VERSION =>
         {
             // Unknown schemas must never silently discard configuration. Even an empty table
             // may have an incompatible layout; do not interpret it as a missing preference.
@@ -581,6 +585,7 @@ fn inspect_source(
                     | CONTEXT_PROFILE_CONFIGURATION_SOURCE_SCHEMA_VERSION
                     | WORKSPACE_CONFIGURATION_SOURCE_SCHEMA_VERSION
                     | FROZEN_WORKSPACE_CONFIGURATION_SOURCE_SCHEMA_VERSION
+                    | LOCAL_TOKEN_CONFIGURATION_SOURCE_SCHEMA_VERSION
             ) =>
         {
             if !is_supported_explicit_configuration_source(
@@ -659,6 +664,7 @@ fn inspect_source(
         || schema_version == COLLABORATION_CONFIGURATION_SOURCE_SCHEMA_VERSION
         || schema_version == WORKSPACE_CONFIGURATION_SOURCE_SCHEMA_VERSION
         || schema_version == FROZEN_WORKSPACE_CONFIGURATION_SOURCE_SCHEMA_VERSION
+        || schema_version == LOCAL_TOKEN_CONFIGURATION_SOURCE_SCHEMA_VERSION
         || schema_version == CONTEXT_PROFILE_CONFIGURATION_SOURCE_SCHEMA_VERSION
     {
         Some(load_human_interaction_settings_for_reset(&connection)?)
@@ -670,6 +676,7 @@ fn inspect_source(
         || schema_version == COLLABORATION_CONFIGURATION_SOURCE_SCHEMA_VERSION
         || schema_version == WORKSPACE_CONFIGURATION_SOURCE_SCHEMA_VERSION
         || schema_version == FROZEN_WORKSPACE_CONFIGURATION_SOURCE_SCHEMA_VERSION
+        || schema_version == LOCAL_TOKEN_CONFIGURATION_SOURCE_SCHEMA_VERSION
         || schema_version == CONTEXT_PROFILE_CONFIGURATION_SOURCE_SCHEMA_VERSION
     {
         Some(load_agent_collaboration_settings_for_reset(&connection)?)
@@ -796,7 +803,9 @@ fn is_supported_explicit_configuration_source(schema_version: i32, fingerprint: 
             || (schema_version == WORKSPACE_CONFIGURATION_SOURCE_SCHEMA_VERSION
                 && fingerprint == WORKSPACE_CONFIGURATION_SOURCE_FINGERPRINT)
             || (schema_version == FROZEN_WORKSPACE_CONFIGURATION_SOURCE_SCHEMA_VERSION
-                && fingerprint == FROZEN_WORKSPACE_CONFIGURATION_SOURCE_FINGERPRINT))
+                && fingerprint == FROZEN_WORKSPACE_CONFIGURATION_SOURCE_FINGERPRINT)
+            || (schema_version == LOCAL_TOKEN_CONFIGURATION_SOURCE_SCHEMA_VERSION
+                && fingerprint == LOCAL_TOKEN_CONFIGURATION_SOURCE_FINGERPRINT))
 }
 
 /// Called only after the exact source catalog has been verified. Catalogs before v44 have no
@@ -808,6 +817,7 @@ fn load_agent_prompt_preferences_for_reset(
     if schema_version == mycopilot_core::storage::migrations::STORAGE_SCHEMA_VERSION
         || schema_version == WORKSPACE_CONFIGURATION_SOURCE_SCHEMA_VERSION
         || schema_version == FROZEN_WORKSPACE_CONFIGURATION_SOURCE_SCHEMA_VERSION
+        || schema_version == LOCAL_TOKEN_CONFIGURATION_SOURCE_SCHEMA_VERSION
         || schema_version == CONTEXT_PROFILE_CONFIGURATION_SOURCE_SCHEMA_VERSION
     {
         return agent_prompt_preferences_repository::load_agent_prompt_preferences(connection)
@@ -843,10 +853,18 @@ fn load_agent_prompt_preferences_for_reset(
     }
 }
 
+fn canonical_schema_v47() -> String {
+    include_str!("../../../core/src/storage/canonical_schema.sql").replace(
+        include_str!("../../../core/src/storage/history_search_index_v48.sql"),
+        include_str!("../../../core/src/storage/test_fixtures/history_search_v47.sql"),
+    )
+}
+
 /// Exact v44 catalog: the current schema without the multi-folder project section and with the
 /// single-path `projects` table it still carried.
 fn canonical_schema_before_multi_folder_projects() -> String {
-    let before_multi_folder = include_str!("../../../core/src/storage/canonical_schema.sql")
+    let v47 = canonical_schema_v47();
+    let before_multi_folder = v47
         .split_once(MULTI_FOLDER_PROJECT_SCHEMA_MARKER)
         .expect("canonical multi-folder project schema suffix")
         .0;
@@ -935,6 +953,7 @@ fn validate_preserved_configuration_table_schemas(source: &Connection) -> io::Re
         || schema_version == COLLABORATION_CONFIGURATION_SOURCE_SCHEMA_VERSION
         || schema_version == WORKSPACE_CONFIGURATION_SOURCE_SCHEMA_VERSION
         || schema_version == FROZEN_WORKSPACE_CONFIGURATION_SOURCE_SCHEMA_VERSION
+        || schema_version == LOCAL_TOKEN_CONFIGURATION_SOURCE_SCHEMA_VERSION
         || schema_version == CONTEXT_PROFILE_CONFIGURATION_SOURCE_SCHEMA_VERSION;
     let has_human_settings = matches!(
         schema_version,
@@ -956,6 +975,7 @@ fn validate_preserved_configuration_table_schemas(source: &Connection) -> io::Re
     let canonical = Connection::open_in_memory().map_err(redacted_storage_error)?;
     if schema_version == mycopilot_core::storage::migrations::STORAGE_SCHEMA_VERSION
         || schema_version == FROZEN_WORKSPACE_CONFIGURATION_SOURCE_SCHEMA_VERSION
+        || schema_version == LOCAL_TOKEN_CONFIGURATION_SOURCE_SCHEMA_VERSION
     {
         mycopilot_core::storage::migrations::run_migrations(&canonical)
             .map_err(redacted_storage_error)?;
@@ -2423,7 +2443,7 @@ mod tests {
     }
 
     #[test]
-    fn explicit_configuration_sources_are_pinned_to_known_catalogs_for_schema_47() {
+    fn explicit_configuration_sources_are_pinned_to_known_catalogs_for_schema_48() {
         assert!(is_supported_explicit_configuration_source(
             FROZEN_WORKSPACE_CONFIGURATION_SOURCE_SCHEMA_VERSION,
             FROZEN_WORKSPACE_CONFIGURATION_SOURCE_FINGERPRINT,
@@ -3073,7 +3093,29 @@ mod tests {
         connection.execute_batch("DROP TABLE agent_workspace_run_bindings; DROP TABLE agent_workspace_wake_bindings;").unwrap();
     }
 
+    fn restore_v47_search_fixture_schema(connection: &Connection) {
+        connection
+            .execute_batch(
+                "DROP TRIGGER conversation_history_fts_message_insert;
+             DROP TRIGGER conversation_history_fts_message_update;
+             DROP TRIGGER conversation_history_fts_message_delete;
+             DROP TRIGGER conversation_history_fts_trace_insert;
+             DROP TRIGGER conversation_history_fts_trace_update;
+             DROP TRIGGER conversation_history_fts_trace_delete;
+             DROP TRIGGER conversation_history_fts_archive_delete;
+             DROP TRIGGER conversation_history_index_entries_delete;
+             DROP TABLE conversation_history_index_entries;",
+            )
+            .unwrap();
+        connection
+            .execute_batch(include_str!(
+                "../../../core/src/storage/test_fixtures/history_search_v47.sql"
+            ))
+            .unwrap();
+    }
+
     fn drop_local_token_fixture_schema(connection: &Connection) {
+        restore_v47_search_fixture_schema(connection);
         connection.execute_batch("DROP TABLE local_token_usage_days; DROP TABLE local_token_usage_requests; DROP TABLE local_token_usage_metadata;").unwrap();
     }
 
@@ -3368,6 +3410,12 @@ mod tests {
         populated_storage(fixture.path(), secret);
         let database = fs::canonicalize(fixture.path().join(DATABASE_FILE_NAME)).unwrap();
         let expected_fingerprint = match source_version {
+            47 => {
+                let connection = Connection::open(&database).unwrap();
+                restore_v47_search_fixture_schema(&connection);
+                connection.pragma_update(None, "user_version", 47).unwrap();
+                LOCAL_TOKEN_CONFIGURATION_SOURCE_FINGERPRINT
+            }
             39 => {
                 downgrade_fixture_to_exact_v39(&database);
                 REQUEST_WORLD_STATE_CONFIGURATION_SOURCE_FINGERPRINT
@@ -3438,10 +3486,14 @@ mod tests {
         validate_explicit_configuration_source_schema(&connection, source_version).unwrap();
         drop(connection);
         let before = fs::read(&database).unwrap();
-        assert!(mycopilot_core::storage::migrations::run_migrations(
-            &Connection::open(&database).unwrap()
-        )
-        .is_err());
+        if source_version < LOCAL_TOKEN_CONFIGURATION_SOURCE_SCHEMA_VERSION {
+            assert!(mycopilot_core::storage::migrations::run_migrations(
+                &Connection::open(&database).unwrap()
+            )
+            .is_err());
+        }
+        // v47 has a separate, non-destructive startup upgrade. This test exercises an explicit
+        // reset of the untouched v47 source, including its original private backup.
         assert_eq!(fs::read(&database).unwrap(), before);
         let preview = execute(options(fixture.path(), false)).unwrap();
         assert!(preview.preserved_configuration);
@@ -3520,6 +3572,11 @@ mod tests {
             load_human_interaction_settings_for_reset(&backup).unwrap(),
             expected_human
         );
+    }
+
+    #[test]
+    fn exact_v47_explicit_reset_preserves_configuration_and_backs_up_discarded_history() {
+        assert_previous_reset_preserves_configuration(47);
     }
 
     #[test]

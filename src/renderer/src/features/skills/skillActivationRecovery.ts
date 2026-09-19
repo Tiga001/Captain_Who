@@ -66,6 +66,11 @@ function isSkillActivationErrorData(value: unknown): value is SkillActivationErr
   )
 }
 
+/** The Host validates these selections before committing a conversation turn. */
+export function isSkillActivationRefusal(error: unknown): boolean {
+  return error instanceof HostInvocationError && isSkillActivationErrorData(error.data)
+}
+
 /**
  * Converts the host's typed activation failure into draft recovery behavior.
  *

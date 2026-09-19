@@ -382,7 +382,8 @@ describe('ChatComposer model picker', () => {
     await screen.getByRole('button', { name: /chat\.permission/ }).click()
     await screen.getByRole('option', { name: 'chat.customPermission' }).click()
     finishSubmission(true)
-    await expect.element(input).toHaveValue('')
+    // Only the owner commits a draft clear; a late boolean result must not mutate it.
+    await expect.element(input).toHaveValue('start the current turn')
     expect(draftChangeSpy.mock.lastCall?.[0]).toMatchObject({
       modelId: 'model-2',
       permissionMode: 'custom'
@@ -453,6 +454,51 @@ describe('ChatComposer model picker', () => {
       skills: initialDraft.skills,
       attachments: initialDraft.attachments
     })
+  })
+
+  it('clears with the optimistic message and preserves identical new text after late acceptance', async () => {
+    let finish!: (accepted: boolean) => void
+    const acceptance = new Promise<boolean>((resolve) => {
+      finish = resolve
+    })
+    function Owner() {
+      const [draft, setDraft] = useState(() =>
+        createComposerDraft({ modelId: 'model-1', projectId: 'project-a' })
+      )
+      const [posted, setPosted] = useState('')
+      return (
+        <>
+          <output data-testid="optimistic-message">{posted}</output>
+          <ChatComposer
+            draft={draft}
+            onDraftChange={setDraft}
+            onDraftMessageChange={setDraft}
+            messageSyncKey={posted}
+            onSubmitMessage={async (content, options) => {
+              setPosted(content)
+              setDraft({
+                ...options.draftSnapshot!,
+                message: '',
+                attachments: [],
+                skills: [],
+                updatedAt: Date.now() + 1
+              })
+              return acceptance
+            }}
+          />
+        </>
+      )
+    }
+    const screen = await render(<Owner />)
+    const input = screen.getByRole('textbox', { name: 'chat.inputAria' })
+    await input.fill('same message')
+    await screen.getByRole('button', { name: 'chat.send' }).click()
+    await expect.element(screen.getByTestId('optimistic-message')).toHaveTextContent('same message')
+    await expect.element(input).toHaveValue('')
+    await input.fill('same message')
+    finish(true)
+    await new Promise((resolve) => window.requestAnimationFrame(resolve))
+    await expect.element(input).toHaveValue('same message')
   })
 
   it('retains composer input when the submit guard defers message creation', async () => {
@@ -1090,7 +1136,7 @@ describe('ChatComposer Skill picker', () => {
     ])
     await expect
       .poll(() => screen.container.querySelectorAll('.composer-skill-chip').length)
-      .toBe(0)
+      .toBe(2)
   })
 
   it('keeps source and trust metadata accessible without adding it to compact list rows', async () => {

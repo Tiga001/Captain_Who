@@ -4,7 +4,7 @@ use super::provider_profiles::{
 };
 use super::*;
 use mycopilot_core::{AgentCollaborationSettingsUpdate, ModelRequestEstimate, ModelRequestPurpose};
-use tokio::net::TcpListener;
+use tokio::net::TcpStream;
 use tokio::sync::{mpsc, oneshot};
 
 const CONVERSATION: &str = "collaboration-accounting";
@@ -23,6 +23,24 @@ struct PausedRequest {
     release: oneshot::Sender<()>,
 }
 
+fn accept_provider_connection(listener: &std::net::TcpListener) -> std::net::TcpStream {
+    listener.set_nonblocking(true).unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        match listener.accept() {
+            Ok((stream, _)) => return stream,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                if std::time::Instant::now() >= deadline {
+                    panic!("Host must reach the local Provider: Elapsed(())");
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(error) => panic!("Host must reach the local Provider: {error}"),
+        }
+    }
+}
+
 async fn provider(
     responses: Vec<(Value, &'static str)>,
 ) -> (
@@ -30,22 +48,54 @@ async fn provider(
     mpsc::UnboundedReceiver<PausedRequest>,
     tokio::task::JoinHandle<()>,
 ) {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
+    // These tests pin Tokio to two workers. A listener on that pool can miss TCP accepts while
+    // both workers sit in blocking SQLite/preview. Moving a std listener onto another Tokio
+    // reactor via from_std is also not reliable here: the dedicated thread's kqueue may never
+    // watch the fd, which surfaces as "Provider stopped early" after the 20s accept timeout.
+    // Bind and accept on one OS thread with blocking poll; only wrap the accepted stream.
     let (captured, requests) = mpsc::unbounded_channel();
+    let (listening_tx, listening_rx) = std::sync::mpsc::channel();
+    let (done_tx, done_rx) = oneshot::channel();
+    std::thread::Builder::new()
+        .name("collaboration-accounting-provider".to_string())
+        .spawn(move || {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+                let address = listener.local_addr().unwrap();
+                listening_tx
+                    .send(address)
+                    .expect("test must receive listen address");
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("fake Provider runtime");
+                for (delta, finish) in responses {
+                    let stream = accept_provider_connection(&listener);
+                    stream.set_nonblocking(true).unwrap();
+                    runtime.block_on(async {
+                        let mut stream = TcpStream::from_std(stream)
+                            .expect("accepted Provider stream must join the fake runtime");
+                        let body = read_provider_request(&mut stream).await;
+                        let (release, released) = oneshot::channel();
+                        captured.send(PausedRequest { body, release }).unwrap();
+                        released
+                            .await
+                            .expect("test must release the captured request");
+                        write_provider_stream(&mut stream, delta, finish).await;
+                    });
+                }
+            }));
+            let _ = done_tx.send(result);
+        })
+        .expect("fake Provider thread");
+    let address = listening_rx
+        .recv()
+        .expect("fake Provider must start listening");
     let task = tokio::spawn(async move {
-        for (delta, finish) in responses {
-            let (mut stream, _) = tokio::time::timeout(Duration::from_secs(20), listener.accept())
-                .await
-                .expect("Host must reach the local Provider")
-                .unwrap();
-            let body = read_provider_request(&mut stream).await;
-            let (release, released) = oneshot::channel();
-            captured.send(PausedRequest { body, release }).unwrap();
-            released
-                .await
-                .expect("test must release the captured request");
-            write_provider_stream(&mut stream, delta, finish).await;
+        match done_rx.await {
+            Ok(Ok(())) => {}
+            Ok(Err(payload)) => std::panic::resume_unwind(payload),
+            Err(_) => panic!("fake Provider thread vanished"),
         }
     });
     (

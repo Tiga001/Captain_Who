@@ -128,7 +128,9 @@ pub fn store_archive(
                 "history archive identity was reused for different tool-result content",
             ));
         }
-        index_archive_content(connection, &existing, &input.content)?;
+        let transaction = connection.transaction()?;
+        index_archive_content(&transaction, &existing, &input.content)?;
+        transaction.commit()?;
         return Ok(existing);
     }
 
@@ -374,7 +376,9 @@ pub fn store_archive_file(
                 "cannot read file-backed history archive for FTS indexing: {error}"
             ))
         })?;
-        index_archive_content(connection, &existing, &content)?;
+        let transaction = connection.transaction()?;
+        index_archive_content(&transaction, &existing, &content)?;
+        transaction.commit()?;
         return Ok(existing);
     }
 
@@ -734,13 +738,20 @@ pub(crate) fn clone_archive_in_connection(
         params![&copy.target_archive_ref, &copy.source_archive_ref],
     )?;
     connection.execute(
+        "INSERT INTO conversation_history_index_entries (ref_key, archive_ref, owner_message_id)
+         VALUES ('archive:' || ?1, ?1, ?2)",
+        params![&copy.target_archive_ref, &copy.target_assistant_message_id],
+    )?;
+    let indexed_rows = connection.execute(
         "
         INSERT INTO conversation_history_fts (
+            rowid,
             ref_key, conversation_id, record_type, item_kind, message_id,
             assistant_message_id, sequence, archive_ref, call_id, tool,
             status, run_id, created_at, position, within_message_order, content
         )
         SELECT
+            (SELECT rowid FROM conversation_history_index_entries WHERE ref_key = 'archive:' || ?1),
             'archive:' || ?1,
             ?2,
             'archive',
@@ -758,8 +769,10 @@ pub(crate) fn clone_archive_in_connection(
             source.sequence + 1,
             indexed.content
         FROM conversation_history_blobs AS source
+        INNER JOIN conversation_history_index_entries AS identity
+            ON identity.ref_key = 'archive:' || source.archive_ref
         INNER JOIN conversation_history_fts AS indexed
-            ON indexed.ref_key = 'archive:' || source.archive_ref
+            ON indexed.rowid = identity.rowid
         INNER JOIN messages AS target_message
             ON target_message.id = ?3
         LEFT JOIN conversation_turn_traces AS target_trace
@@ -774,6 +787,11 @@ pub(crate) fn clone_archive_in_connection(
             &copy.source_archive_ref,
         ],
     )?;
+    if indexed_rows != 1 {
+        return Err(invalid_data(
+            "fork archive is missing its searchable projection",
+        ));
+    }
     Ok(())
 }
 
@@ -783,16 +801,23 @@ fn index_archive_content(
     content: &str,
 ) -> rusqlite::Result<()> {
     connection.execute(
-        "DELETE FROM conversation_history_fts WHERE ref_key = ?1",
+        "DELETE FROM conversation_history_index_entries WHERE ref_key = ?1",
         [format!("archive:{}", descriptor.archive_ref)],
+    )?;
+    connection.execute(
+        "INSERT INTO conversation_history_index_entries (ref_key, archive_ref, owner_message_id)
+         VALUES ('archive:' || ?1, ?1, ?2)",
+        params![&descriptor.archive_ref, &descriptor.assistant_message_id],
     )?;
     connection.execute(
         "
         INSERT INTO conversation_history_fts (
+            rowid,
             ref_key, conversation_id, record_type, item_kind, message_id,
             assistant_message_id, sequence, archive_ref, call_id, tool,
             status, run_id, created_at, position, within_message_order, content
         ) VALUES (
+            (SELECT rowid FROM conversation_history_index_entries WHERE ref_key = ?1),
             ?1, ?2, 'archive', 'tool_result_archive', NULL,
             ?3, ?4, ?5, ?6, ?7,
             (
@@ -1365,5 +1390,149 @@ mod tests {
         )
         .unwrap()
         .is_none());
+    }
+
+    #[test]
+    fn archive_search_identity_survives_reindex_fork_status_update_and_delete() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        run_migrations(&connection).unwrap();
+        seed_conversation(&connection, "source", "source-assistant");
+        seed_conversation(&connection, "fork", "fork-assistant");
+        let input = ConversationHistoryArchiveInput {
+            conversation_id: "source".to_string(),
+            assistant_message_id: "source-assistant".to_string(),
+            sequence: 0,
+            call_id: "call-source".to_string(),
+            tool: "read_file".to_string(),
+            content_type: "text/plain".to_string(),
+            content: "Full preserved searchable archive 独立分支".repeat(100),
+            truncated_at_source: false,
+            model_projection_truncated: true,
+            archive_projection_truncated: false,
+            created_at: 2,
+        };
+        let source = store_archive(&mut connection, &input).unwrap();
+        assert_eq!(store_archive(&mut connection, &input).unwrap(), source);
+        let copy = load_fork_copy(
+            &connection,
+            "source",
+            &source.archive_ref,
+            "fork",
+            "fork-assistant",
+        )
+        .unwrap();
+        {
+            let transaction = connection.transaction().unwrap();
+            clone_archive_in_connection(&transaction, &copy).unwrap();
+            transaction.commit().unwrap();
+        }
+        let identities: i64 = connection
+            .query_row(
+                "SELECT count(*) FROM conversation_history_index_entries WHERE ref_key=?1",
+                [format!("archive:{}", source.archive_ref)],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(identities, 1);
+        assert_eq!(connection.query_row("SELECT content FROM conversation_history_fts AS f JOIN conversation_history_index_entries AS i ON i.rowid=f.rowid WHERE i.ref_key=?1", [format!("archive:{}",copy.target_archive_ref)], |row|row.get::<_,String>(0)).unwrap(),input.content);
+        connection.execute("INSERT INTO conversation_turn_traces(assistant_message_id,conversation_id,run_id,schema_version,terminal_status,truncated,created_at,updated_at,completed_at) VALUES ('fork-assistant','fork','fork-run',6,'completed',0,1,2,2)", []).unwrap();
+        connection.execute("INSERT INTO conversation_turn_trace_items(assistant_message_id,sequence,item_kind,item_json) VALUES ('fork-assistant',0,'backend_state',?1)", [serde_json::json!({"type":"backend_state","sequence":0,"archiveRef":copy.target_archive_ref,"status":"completed"}).to_string()]).unwrap();
+        let updated:i64=connection.query_row("SELECT count(*) FROM conversation_history_fts AS f JOIN conversation_history_index_entries AS i ON i.rowid=f.rowid WHERE i.archive_ref=?1 AND f.status='completed' AND f.run_id='fork-run'",[&copy.target_archive_ref],|row|row.get(0)).unwrap();
+        assert_eq!(
+            updated, 2,
+            "both archive and referencing Trace inherit final status/run"
+        );
+        connection
+            .execute("DELETE FROM conversations WHERE id='source'", [])
+            .unwrap();
+        let fork_archive = find_archive_by_ref(&connection, "fork", &copy.target_archive_ref)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            read_complete_archive_content(&connection, &fork_archive).unwrap(),
+            input.content
+        );
+        connection
+            .execute(
+                "DELETE FROM conversation_history_blobs WHERE archive_ref=?1",
+                [&copy.target_archive_ref],
+            )
+            .unwrap();
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT count(*) FROM conversation_history_index_entries WHERE ref_key=?1",
+                    [format!("archive:{}", copy.target_archive_ref)],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+            0
+        );
+        connection
+            .execute("DELETE FROM conversations WHERE id='fork'", [])
+            .unwrap();
+        for table in [
+            "conversation_history_fts",
+            "conversation_history_index_entries",
+        ] {
+            assert_eq!(
+                connection
+                    .query_row(&format!("SELECT count(*) FROM {table}"), [], |row| row
+                        .get::<_, i64>(0))
+                    .unwrap(),
+                0
+            );
+        }
+    }
+
+    #[test]
+    fn idempotent_archive_reindex_failure_restores_identity_and_full_text_atomically() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        run_migrations(&connection).unwrap();
+        seed_conversation(&connection, "source", "source-assistant");
+        let input = ConversationHistoryArchiveInput {
+            conversation_id: "source".to_string(),
+            assistant_message_id: "source-assistant".to_string(),
+            sequence: 0,
+            call_id: "call".to_string(),
+            tool: "read_file".to_string(),
+            content_type: "text/plain".to_string(),
+            content: "Original exact searchable archive".to_string(),
+            truncated_at_source: false,
+            model_projection_truncated: false,
+            archive_projection_truncated: false,
+            created_at: 2,
+        };
+        let archive = store_archive(&mut connection, &input).unwrap();
+        fn indexed(connection: &Connection, archive_ref: &str) -> (i64, String) {
+            connection.query_row("SELECT i.rowid,f.content FROM conversation_history_index_entries AS i JOIN conversation_history_fts AS f ON f.rowid=i.rowid WHERE i.ref_key=?1",[format!("archive:{archive_ref}")],|row|Ok((row.get(0)?,row.get(1)?))).unwrap()
+        }
+        let before = indexed(&connection, &archive.archive_ref);
+        connection.execute_batch("CREATE TRIGGER fail_archive_index BEFORE INSERT ON conversation_history_index_entries WHEN NEW.ref_key LIKE 'archive:%' BEGIN SELECT RAISE(ABORT,'injected index failure'); END;").unwrap();
+        assert!(store_archive(&mut connection, &input)
+            .unwrap_err()
+            .to_string()
+            .contains("injected index failure"));
+        assert_eq!(indexed(&connection, &archive.archive_ref), before);
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(input.content.as_bytes()).unwrap();
+        let file_input = ConversationHistoryArchiveFileInput {
+            conversation_id: input.conversation_id,
+            assistant_message_id: input.assistant_message_id,
+            sequence: input.sequence,
+            call_id: input.call_id,
+            tool: input.tool,
+            content_type: input.content_type,
+            content_path: file.path().to_path_buf(),
+            truncated_at_source: false,
+            model_projection_truncated: false,
+            archive_projection_truncated: false,
+            created_at: input.created_at,
+        };
+        assert!(store_archive_file(&mut connection, &file_input)
+            .unwrap_err()
+            .to_string()
+            .contains("injected index failure"));
+        assert_eq!(indexed(&connection, &archive.archive_ref), before);
     }
 }

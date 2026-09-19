@@ -120,6 +120,8 @@ function interruptionTranslationKey(
       return 'agent.interruption.requestRejected' as const
     case 'response_invalid':
       return 'agent.interruption.responseInvalid' as const
+    case 'admission_unconfirmed':
+      return 'agent.interruption.admissionUnconfirmed' as const
     case 'request_failed':
       return 'agent.interruption.requestFailed' as const
   }

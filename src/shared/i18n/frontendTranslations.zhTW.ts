@@ -1135,6 +1135,8 @@ export const zhTWTranslations = {
   'chat.continueInNewTask': '在新任務中繼續',
   'chat.continueInNewTaskActiveCommand':
     '目前對話仍有指令正在執行，請先關閉程式或等待指令結束後再繼續新任務。',
+  'chat.continueInNewTaskPending': '正在建立新任務…',
+  'chat.continueInNewTaskBusy': '正在建立其他任務，請稍後重試。',
   'chat.continueInNewTaskFailed': '無法從這條回覆建立新任務。',
   'chat.continuationOrigin': '接續自任務',
   'chat.continuationOriginArchived': '原任務已歸檔',
@@ -1168,6 +1170,7 @@ export const zhTWTranslations = {
   'agent.interruption.contextLimitExceeded': '上下文超過模型限制',
   'agent.interruption.requestRejected': '模型請求被拒絕',
   'agent.interruption.responseInvalid': '模型響應無效',
+  'agent.interruption.admissionUnconfirmed': '傳送結果尚未確認。已嘗試核對，未自動重送。',
   'agent.interruption.requestFailed': '模型請求失敗',
   'agent.llmRetry.rateLimited': '服務限流，{seconds}秒後自動重試（{attempt}/{maxAttempts}）',
   'agent.llmRetry.temporarilyUnavailable':

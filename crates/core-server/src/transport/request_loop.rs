@@ -180,6 +180,37 @@ pub(crate) async fn run_request_loop<R>(
 where
     R: AsyncBufRead + Unpin,
 {
+    let forks = ForkRequestDispatcher::new(outbounds.normal.clone());
+    let result = run_request_loop_inner(
+        input,
+        services,
+        agent_service,
+        skill_services,
+        git_review_service,
+        dispatchers,
+        outbounds,
+        &forks,
+    )
+    .await;
+    // Also drain on EOF and parse/transport failure; accepted writes never outlive their owner.
+    forks.shutdown().await?;
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn run_request_loop_inner<R>(
+    input: R,
+    services: CoreRequestServices,
+    agent_service: &AgentService,
+    skill_services: SkillServices,
+    git_review_service: Arc<GitReviewService>,
+    dispatchers: &RequestDispatchers<'_>,
+    outbounds: RequestOutbounds<'_>,
+    forks: &ForkRequestDispatcher,
+) -> io::Result<Option<JsonRpcId>>
+where
+    R: AsyncBufRead + Unpin,
+{
     let storage = services.storage;
     let automation_scheduler_wake = services.automation_scheduler_wake;
     let image_generation_configuration = services.image_generation_configuration;
@@ -219,6 +250,7 @@ where
         };
 
         if request.jsonrpc == "2.0" && request.method == CORE_SHUTDOWN_METHOD {
+            forks.begin_shutdown();
             let shutdown_id = request.id;
             if let Some(coordinator) = browser_risk_coordinator.as_ref() {
                 coordinator.cancel_all();
@@ -594,6 +626,22 @@ where
                     };
                     let _ = enqueue_outbound(&request_outbound, response);
                 });
+                continue;
+            }
+            if request.method == STORAGE_FORK_CONVERSATION_METHOD {
+                let request_storage = Arc::clone(&storage);
+                let request_service = agent_service.clone();
+                let request_notifications = outbound.clone();
+                if let Err(response) = forks.try_submit(request.id.clone(), move || {
+                    handle_request(
+                        &request_storage,
+                        &request_service,
+                        request_notifications,
+                        request,
+                    )
+                }) {
+                    enqueue_outbound(outbound, response)?;
+                }
                 continue;
             }
             if is_blocking_read_method(&request.method)

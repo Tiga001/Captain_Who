@@ -11,7 +11,8 @@ const AGENT_INTERRUPTION_REASONS = new Set<NonNullable<ChatAgentRunView['interru
     'context_limit_exceeded',
     'request_rejected',
     'response_invalid',
-    'request_failed'
+    'request_failed',
+    'admission_unconfirmed'
   ]
 )
 

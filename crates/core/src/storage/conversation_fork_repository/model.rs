@@ -282,6 +282,169 @@ struct ResolvedConversationForkPoint {
     model_id: Option<String>,
 }
 
+/// One immutable source snapshot per fork preparation. Identity allocation, member boundary
+/// resolution and history construction inspect the same parsed records while the caller owns
+/// the database connection. The final builder takes large payloads instead of cloning them.
+#[derive(Default)]
+struct ForkSourceSnapshot {
+    conversations: HashMap<String, Arc<ChatConversationRecord>>,
+    summary_chains:
+        HashMap<String, Vec<context_compaction_repository::ContextCompactionSummaryVersion>>,
+    traces: HashMap<String, Option<ConversationTurnTrace>>,
+    trace_times: HashMap<String, (i64, i64)>,
+    guidances: HashMap<String, Vec<AgentRunGuidanceRecord>>,
+    file_changes: HashMap<String, Vec<AgentFileChangeRecord>>,
+}
+
+impl ForkSourceSnapshot {
+    fn conversation(
+        &mut self,
+        connection: &Connection,
+        conversation_id: &str,
+    ) -> Result<Arc<ChatConversationRecord>, ConversationForkError> {
+        if let Some(source) = self.conversations.get(conversation_id) {
+            return Ok(Arc::clone(source));
+        }
+        let source = Arc::new(
+            chat_repository::get_active_conversation(connection, conversation_id)
+                .map_err(database_error)?
+                .ok_or_else(|| ConversationForkError::Other("原任务不存在。".to_string()))?,
+        );
+        self.conversations
+            .insert(conversation_id.to_string(), Arc::clone(&source));
+        Ok(source)
+    }
+
+    fn take_conversation(
+        &mut self,
+        connection: &Connection,
+        conversation_id: &str,
+    ) -> Result<Arc<ChatConversationRecord>, ConversationForkError> {
+        let source = self.conversation(connection, conversation_id)?;
+        self.conversations.remove(conversation_id);
+        Ok(source)
+    }
+
+    fn summary_chain(
+        &mut self,
+        connection: &Connection,
+        conversation_id: &str,
+    ) -> Result<
+        &[context_compaction_repository::ContextCompactionSummaryVersion],
+        ConversationForkError,
+    > {
+        if !self.summary_chains.contains_key(conversation_id) {
+            let chain = context_compaction_repository::list_active_summary_chain(
+                connection,
+                conversation_id,
+            )
+            .map_err(|error| ConversationForkError::Other(error.to_string()))?;
+            self.summary_chains
+                .insert(conversation_id.to_string(), chain);
+        }
+        Ok(&self.summary_chains[conversation_id])
+    }
+
+    fn take_summary_chain(
+        &mut self,
+        connection: &Connection,
+        conversation_id: &str,
+    ) -> Result<
+        Vec<context_compaction_repository::ContextCompactionSummaryVersion>,
+        ConversationForkError,
+    > {
+        self.summary_chain(connection, conversation_id)?;
+        Ok(self
+            .summary_chains
+            .remove(conversation_id)
+            .expect("loaded summary chain"))
+    }
+
+    fn trace(
+        &mut self,
+        connection: &Connection,
+        message_id: &str,
+    ) -> Result<Option<&ConversationTurnTrace>, ConversationForkError> {
+        if !self.traces.contains_key(message_id) {
+            let trace =
+                conversation_trace_repository::get_trace_for_message(connection, message_id)
+                    .map_err(database_error)?;
+            self.traces.insert(message_id.to_string(), trace);
+        }
+        Ok(self.traces[message_id].as_ref())
+    }
+
+    fn take_trace(
+        &mut self,
+        connection: &Connection,
+        message_id: &str,
+    ) -> Result<Option<ConversationTurnTrace>, ConversationForkError> {
+        self.trace(connection, message_id)?;
+        Ok(self.traces.remove(message_id).expect("loaded trace"))
+    }
+
+    fn trace_times(
+        &mut self,
+        connection: &Connection,
+        message_id: &str,
+    ) -> Result<(i64, i64), ConversationForkError> {
+        if let Some(times) = self.trace_times.get(message_id) {
+            return Ok(*times);
+        }
+        let times = trace_times(connection, message_id)?;
+        self.trace_times.insert(message_id.to_string(), times);
+        Ok(times)
+    }
+
+    fn guidances(
+        &mut self,
+        connection: &Connection,
+        message_id: &str,
+    ) -> Result<&[AgentRunGuidanceRecord], ConversationForkError> {
+        if !self.guidances.contains_key(message_id) {
+            let records =
+                guidance_repository::list_guidances_for_assistant_message(connection, message_id)
+                    .map_err(database_error)?;
+            self.guidances.insert(message_id.to_string(), records);
+        }
+        Ok(&self.guidances[message_id])
+    }
+
+    fn take_guidances(
+        &mut self,
+        connection: &Connection,
+        message_id: &str,
+    ) -> Result<Vec<AgentRunGuidanceRecord>, ConversationForkError> {
+        self.guidances(connection, message_id)?;
+        Ok(self.guidances.remove(message_id).expect("loaded guidances"))
+    }
+
+    fn file_changes(
+        &mut self,
+        connection: &Connection,
+        run_id: &str,
+    ) -> Result<&[AgentFileChangeRecord], ConversationForkError> {
+        if !self.file_changes.contains_key(run_id) {
+            let records = file_change_repository::list_file_changes_for_run(connection, run_id)
+                .map_err(database_error)?;
+            self.file_changes.insert(run_id.to_string(), records);
+        }
+        Ok(&self.file_changes[run_id])
+    }
+
+    fn take_file_changes(
+        &mut self,
+        connection: &Connection,
+        run_id: &str,
+    ) -> Result<Vec<AgentFileChangeRecord>, ConversationForkError> {
+        self.file_changes(connection, run_id)?;
+        Ok(self
+            .file_changes
+            .remove(run_id)
+            .expect("loaded file changes"))
+    }
+}
+
 pub(crate) fn build_fork_plan_at_point(
     connection: &Connection,
     request_id: &str,
@@ -301,12 +464,8 @@ pub(crate) fn build_fork_plan_at_point(
             "用户只能从根 Agent Conversation 继续新任务；子 Agent 保持只读。".to_string(),
         ));
     }
-    if chat_repository::get_active_conversation(connection, source_conversation_id)
-        .map_err(database_error)?
-        .is_none()
-    {
-        return Err(ConversationForkError::Other("原任务不存在。".to_string()));
-    }
+    let mut source_snapshot = ForkSourceSnapshot::default();
+    let source = source_snapshot.conversation(connection, source_conversation_id)?;
     let cutoff_at = authoritative_fork_cutoff_at(connection, source_conversation_id, fork_point)?;
 
     let target_root_conversation_id = new_id("conversation");
@@ -319,6 +478,7 @@ pub(crate) fn build_fork_plan_at_point(
 
     let mut visible_members = Vec::new();
     let mut target_member_identities = HashMap::new();
+    let mut member_boundaries = HashMap::new();
     if let Some(root) = &source_root {
         let target_root_agent_id = root_agent_id_for_conversation(&target_root_conversation_id);
         insert_global_replacement(
@@ -347,13 +507,8 @@ pub(crate) fn build_fork_plan_at_point(
                 (target_agent_id, target_conversation_id),
             );
         }
-        let source = chat_repository::get_active_conversation(connection, source_conversation_id)
-            .map_err(database_error)?
-            .ok_or_else(|| ConversationForkError::Other("原任务不存在。".to_string()))?;
-        let active_chain =
-            context_compaction_repository::list_active_summary_chain(connection, &source.id)
-                .map_err(|error| ConversationForkError::Other(error.to_string()))?;
-        let resolved = resolve_fork_point(connection, &source, fork_point, &active_chain)?;
+        let active_chain = source_snapshot.summary_chain(connection, &source.id)?;
+        let resolved = resolve_fork_point(connection, &source, fork_point, active_chain)?;
         let root_message_limit = source
             .messages
             .iter()
@@ -361,32 +516,36 @@ pub(crate) fn build_fork_plan_at_point(
             .ok_or_else(|| ConversationForkError::Other("所选回复不属于原任务。".to_string()))?;
         preallocate_conversation_prefix_identities(
             connection,
+            &mut source_snapshot,
             &source,
             Some(root_message_limit),
             &mut global_id_replacements,
         )?;
         for source_member in &visible_members {
-            let member_conversation = chat_repository::get_active_conversation(
+            let member_conversation =
+                source_snapshot.conversation(connection, &source_member.conversation_id)?;
+            let boundary = visible_member_message_boundary(
                 connection,
-                &source_member.conversation_id,
-            )
-            .map_err(database_error)?
-            .ok_or_else(|| {
-                ConversationForkError::Other("成员 Agent Conversation 不存在。".to_string())
-            })?;
-            let boundary =
-                visible_member_message_boundary(connection, &member_conversation, cutoff_at)?;
+                &mut source_snapshot,
+                &member_conversation,
+                cutoff_at,
+            )?;
             preallocate_conversation_prefix_identities(
                 connection,
+                &mut source_snapshot,
                 &member_conversation,
                 boundary.message_limit,
                 &mut global_id_replacements,
             )?;
+            member_boundaries.insert(source_member.conversation_id.clone(), boundary);
         }
     }
 
+    // All prefix identities have been allocated; the builders now consume cached payloads.
+    drop(source);
     let mut plan = build_single_conversation_fork_plan_at_point(
         connection,
+        &mut source_snapshot,
         request_id,
         source_conversation_id,
         fork_point,
@@ -448,11 +607,7 @@ pub(crate) fn build_fork_plan_at_point(
                 ConversationForkError::Other("成员 Agent 缺少冻结模型快照。".to_string())
             })?;
         let source_conversation =
-            chat_repository::get_active_conversation(connection, &source_member.conversation_id)
-                .map_err(database_error)?
-                .ok_or_else(|| {
-                    ConversationForkError::Other("成员 Agent Conversation 不存在。".to_string())
-                })?;
+            source_snapshot.conversation(connection, &source_member.conversation_id)?;
         if source_conversation.project_id != source_member.project_id
             || source_conversation.model_id.as_deref() != Some(model_id.as_str())
         {
@@ -460,8 +615,13 @@ pub(crate) fn build_fork_plan_at_point(
                 "成员 Agent Conversation 的项目或模型身份无效。".to_string(),
             ));
         }
-        let boundary =
-            visible_member_message_boundary(connection, &source_conversation, cutoff_at)?;
+        let boundary = member_boundaries
+            .remove(&source_member.conversation_id)
+            .ok_or_else(|| {
+                ConversationForkError::Other(
+                    "成员 Agent 的可见消息边界缺失，已安全取消分叉。".to_string(),
+                )
+            })?;
         let (history, member_mappings) = if let Some((assistant_message_id, message_limit)) =
             boundary.last_assistant.as_ref().map(|message_id| {
                 (
@@ -473,6 +633,7 @@ pub(crate) fn build_fork_plan_at_point(
             }) {
             let member_plan = build_single_conversation_fork_plan_at_point(
                 connection,
+                &mut source_snapshot,
                 &new_id("member-fork-plan"),
                 &source_member.conversation_id,
                 &ConversationForkPoint::AssistantReply {
@@ -541,6 +702,7 @@ struct VisibleMemberMessageBoundary {
 
 fn visible_member_message_boundary(
     connection: &Connection,
+    source_snapshot: &mut ForkSourceSnapshot,
     source: &ChatConversationRecord,
     cutoff_at: i64,
 ) -> Result<VisibleMemberMessageBoundary, ConversationForkError> {
@@ -551,11 +713,11 @@ fn visible_member_message_boundary(
             break;
         }
         if message.role == "assistant" {
-            let trace =
-                conversation_trace_repository::get_trace_for_message(connection, &message.id)
-                    .map_err(database_error)?;
-            ensure_settled_assistant(message, trace.as_ref())?;
-            if trace.is_some() && trace_times(connection, &message.id)?.1 > cutoff_at {
+            let trace = source_snapshot.trace(connection, &message.id)?;
+            ensure_settled_assistant(message, trace)?;
+            if trace.is_some()
+                && source_snapshot.trace_times(connection, &message.id)?.1 > cutoff_at
+            {
                 break;
             }
             last_assistant = Some(message.id.clone());
@@ -618,6 +780,7 @@ fn insert_global_replacement(
 
 fn preallocate_conversation_prefix_identities(
     connection: &Connection,
+    source_snapshot: &mut ForkSourceSnapshot,
     source: &ChatConversationRecord,
     message_limit: Option<usize>,
     replacements: &mut HashMap<String, String>,
@@ -632,10 +795,7 @@ fn preallocate_conversation_prefix_identities(
     let mut archive_refs = HashSet::new();
     for message in messages {
         insert_global_replacement(replacements, &message.id, &new_id("message"))?;
-        if let Some(trace) =
-            conversation_trace_repository::get_trace_for_message(connection, &message.id)
-                .map_err(database_error)?
-        {
+        if let Some(trace) = source_snapshot.trace(connection, &message.id)? {
             let target_run_id = replacements
                 .get(&trace.run_id)
                 .cloned()
@@ -682,10 +842,7 @@ fn preallocate_conversation_prefix_identities(
             insert_global_replacement(replacements, &run_id, &target_run_id)?;
             run_ids.insert(run_id);
         }
-        for guidance in
-            guidance_repository::list_guidances_for_assistant_message(connection, &message.id)
-                .map_err(database_error)?
-        {
+        for guidance in source_snapshot.guidances(connection, &message.id)? {
             if guidance.status == AgentGuidanceStatus::Applied {
                 insert_global_replacement(
                     replacements,
@@ -696,9 +853,7 @@ fn preallocate_conversation_prefix_identities(
         }
     }
     for run_id in run_ids {
-        for change in file_change_repository::list_file_changes_for_run(connection, &run_id)
-            .map_err(database_error)?
-        {
+        for change in source_snapshot.file_changes(connection, &run_id)? {
             insert_global_replacement(replacements, &change.id, &new_id("file-change"))?;
             let target_observation_id = format!("fobs_{}", Uuid::new_v4().simple());
             insert_global_replacement(

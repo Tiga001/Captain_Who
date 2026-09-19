@@ -112,7 +112,8 @@ const SAFE_MODEL_REQUEST_INTERRUPTION_REASONS = new Set<ChatAgentInterruptionVie
   'context_limit_exceeded',
   'request_rejected',
   'response_invalid',
-  'request_failed'
+  'request_failed',
+  'admission_unconfirmed'
 ])
 
 function parseSafeModelRequestInterruption(details: unknown): ChatAgentInterruptionView | null {

@@ -1245,6 +1245,9 @@ export const frFRTranslations = {
   'chat.continueInNewTask': 'Continuer dans une nouvelle tâche',
   'chat.continueInNewTaskActiveCommand':
     "Une commande est toujours en cours d'exécution dans cette conversation. Fermez-le ou attendez qu'il se termine avant de poursuivre une nouvelle tâche.",
+  'chat.continueInNewTaskPending': 'Création d’une nouvelle tâche…',
+  'chat.continueInNewTaskBusy':
+    'D’autres tâches sont en cours de création. Réessayez dans un instant.',
   'chat.continueInNewTaskFailed':
     'Impossible de créer une nouvelle tâche à partir de cette réponse.',
   'chat.continuationOrigin': 'Suite de la tâche',
@@ -1280,6 +1283,8 @@ export const frFRTranslations = {
   'agent.interruption.contextLimitExceeded': 'Le contexte dépasse la limite du modèle',
   'agent.interruption.requestRejected': 'Demande de modèle rejetée',
   'agent.interruption.responseInvalid': 'Réponse de modèle invalide',
+  'agent.interruption.admissionUnconfirmed':
+    'Envoi non confirmé. Vérification tentée ; aucun renvoi automatique.',
   'agent.interruption.requestFailed': 'La demande de modèle a échoué',
   'agent.llmRetry.rateLimited':
     'Tarif de service limité ; nouvelle tentative automatique dans {seconds}s ({attempt}/{maxAttempts})',

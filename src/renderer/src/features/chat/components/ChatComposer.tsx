@@ -4,6 +4,7 @@ import {
   useCallback,
   useEffect,
   useId,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -342,7 +343,7 @@ export function ChatComposer({
     (target) => Boolean(projectPopoverRef.current?.contains(target))
   )
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (previousResetKeyRef.current !== resetKey) {
       previousResetKeyRef.current = resetKey
       previousMessageSyncKeyRef.current = messageSyncKey
@@ -616,6 +617,7 @@ export function ChatComposer({
     if (!isGenerating && submissionIdentity !== accessIdentity.current) return
 
     const submitOptions: ChatSubmitOptions = {
+      draftSnapshot: submittedDraft,
       attachments: inputAttachments,
       modelId: selectedModel?.id ?? selectedModelId,
       permissionMode,
@@ -660,18 +662,8 @@ export function ChatComposer({
       submitInFlightRef.current = false
     }
     if (accepted === false || previousResetKeyRef.current !== resetKey) return
-    // Submission may await Provider work while the composer already holds the next turn's draft.
-    const currentDraft = draftRef.current
-    updateDraft({
-      message: currentDraft.message === submittedDraft.message ? '' : currentDraft.message,
-      attachments:
-        currentDraft.attachments === submittedDraft.attachments ? [] : currentDraft.attachments,
-      skills: currentDraft.skills === submittedDraft.skills ? [] : currentDraft.skills,
-      projectId:
-        currentDraft.projectId === submittedDraft.projectId
-          ? (selectedProject?.id ?? null)
-          : currentDraft.projectId
-    })
+    // The submission owner consumes/restores the draft together with the optimistic message.
+    // A late acceptance must never clear the next draft, even if its text is identical.
     setIsAttachmentMenuOpen(false)
     setIsSkillMenuOpen(false)
     setIsPermissionMenuOpen(false)

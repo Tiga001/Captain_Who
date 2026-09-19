@@ -59,7 +59,7 @@ pnpm test:multi-agent-release -- --smoke-only
 | cross-language protocol                | Rust 消费协作 fixture，与 TypeScript 契约对齐                                                        |
 | AppShell browser scenarios             | activity、Approval、observer、live stream、重启和根 Agent switching                                  |
 
-脚本的 storage step 当前明确标为 “canonical v47”。实际版本的唯一真源仍是 `crates/core/src/storage/migrations.rs`；修改 schema 时必须同步 runner label 与本门禁，不能仅凭日志文字判断兼容性。
+脚本的 storage step 当前明确标为 “canonical v48”。实际版本的唯一真源仍是 `crates/core/src/storage/migrations.rs`；修改 schema 时必须同步 runner label 与本门禁，不能仅凭日志文字判断兼容性。
 
 ## 3. 固定压力阈值
 
@@ -117,14 +117,14 @@ Renderer/Core Server 的协作 RPC 精确为 `agent.collaboration.settings.get`�
 
 ## 6. Schema 与 reset 门禁
 
-当前 canonical storage 为 **v47**（新增纯本机 Token 账本），空库须原子创建完整 v47，已有库只接受通过 exact SQLite catalog fingerprint 和外键校验的当前 v47，不提供自动升级。以下输入必须 fail closed 且不修改源库：
+当前 canonical storage 为 **v48**（历史搜索身份索引），空库须原子创建完整 v48，exact v47 必须事务升级并保留历史与 FTS rowid/原文，失败完整回滚；重复打开不重建。当前库须通过 exact SQLite catalog fingerprint 和外键校验。以下输入必须 fail closed 且不修改源库：
 
-- 所有旧版本开发库，包括 exact v46/v45/v44 以及 v34/v35/v42/v43；
+- v46 及更早的开发库；
 - 非空但 `user_version=0` 的库；
 - 当前版本但 schema object 缺失/额外/被篡改；
 - foreign key violation。
 
-稳定错误标识为 `development_storage_schema_reset_required`。开发 reset 必须先 dry-run、取得 exact DB lock、创建并验证私有备份、构造 fresh v47；正式工具从 exact current v47 及 exact v35–v46 恢复 allowlisted 配置与 credential reference，v36–v47 还保留人机交互设置及 revision，v43–v47 保留全局协作开关及 revision，v44–v47 保留上下文模式，旧版本该项默认 Full；受限的 v33 私有备份配置恢复绑定固定 fingerprint。该显式 reset 清空聊天、运行、本机 Token 统计、Run/Wake 冻结策略以及旧的单路径项目；未知配置结构必须拒绝重置，不能静默丢弃模型配置。随后执行 `quick_check`/`foreign_key_check` 并原子发布。启动时不会自动执行 reset，也不转换旧聊天、运行、项目或检查点格式。详见 [恢复 Runbook](recovery-runbook.md)。
+稳定错误标识为 `development_storage_schema_reset_required`。开发 reset 必须先 dry-run、取得 exact DB lock、创建并验证私有备份、构造 fresh v48；正式工具从 exact current v48 及 exact v35–v47 恢复 allowlisted 配置与 credential reference，v36–v48 还保留人机交互设置及 revision，v43–v48 保留全局协作开关及 revision，v44–v48 保留上下文模式，旧版本该项默认 Full；受限的 v33 私有备份配置恢复绑定固定 fingerprint。该显式 reset 清空聊天、运行、本机 Token 统计、Run/Wake 冻结策略以及旧的单路径项目；未知配置结构必须拒绝重置，不能静默丢弃模型配置。随后执行 `quick_check`/`foreign_key_check` 并原子发布。启动时不会自动执行 reset，也不转换旧聊天、运行、项目或检查点格式。详见 [恢复 Runbook](recovery-runbook.md)。
 
 ## 7. 发布所需的组合证据
 

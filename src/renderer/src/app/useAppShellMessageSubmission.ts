@@ -27,11 +27,17 @@ import { loadInputAttachments } from '../features/storage/storageClient'
 import { useAccountAuth } from '../features/auth/AccountAuthContext'
 import { useLicense } from '../features/license/LicenseContext'
 import { getTurnAccessErrorCode } from '../features/license/turnAccessError'
+import {
+  isSkillActivationRefusal,
+  planSkillActivationRecovery
+} from '../features/skills/skillActivationRecovery'
 import { useTurnAccessIdentity } from '../features/license/useTurnAccessIdentity'
 import { useProviderTransition } from '../features/agentRun/useProviderTransition'
 import { isAssistantReplySettled } from '../features/chat/assistantGeneration'
 import type { AutoSubmitQueuedMessage } from './appTypes'
 import { getEditableLastTurn } from './appShellConversationUtils'
+import { NEW_CONVERSATION_DRAFT_ID } from './appConstants'
+import { consumeSubmittedDraft, restoreRejectedDraft } from './composerSubmission'
 import { buildMessageContentWithAttachments } from './appShellConversationUtils'
 import {
   createAssistantMessage,
@@ -285,6 +291,27 @@ export function useAppShellMessageSubmission({
           )
         : [conversationToSave, ...conversationsRef.current]
 
+      const draftScope = targetConversationId ?? NEW_CONVERSATION_DRAFT_ID
+      const currentDraft =
+        draftsRef.current[draftScope] ?? behavior.draftSnapshot ?? createComposerDraft()
+      const submittedDraft = behavior.draftSnapshot ?? currentDraft
+      const consumedDraft = behavior.preserveComposerContent
+        ? currentDraft
+        : consumeSubmittedDraft(currentDraft, submittedDraft, options)
+      if (!behavior.preserveComposerContent) {
+        updateDraft(conversationId, consumedDraft)
+        if (!targetConversation) {
+          // Moving to a new conversation must not leave a second saved copy on the home page.
+          updateDraft(
+            NEW_CONVERSATION_DRAFT_ID,
+            createComposerDraft({
+              modelId: consumedDraft.modelId,
+              permissionMode: consumedDraft.permissionMode,
+              projectId: consumedDraft.projectId
+            })
+          )
+        }
+      }
       setConversationsWithRef(nextConversations)
       enqueueConversationMetaSave(conversationToSave)
       if (behavior.activate) {
@@ -293,13 +320,6 @@ export function useAppShellMessageSubmission({
         setActiveConversationInitialScrollTop(null)
         setConversationScrollToBottomSignal((signal) => signal + 1)
         setActiveConversationId(conversationId)
-      }
-      const currentDraft =
-        draftsRef.current[conversationId] ?? behavior.draftSnapshot ?? createComposerDraft()
-      if (!targetConversation && behavior.draftSnapshot) {
-        // Opening the optimistic conversation changes composer scope. Carry the untouched
-        // draft into that scope until Main accepts the turn, including on admission refusal.
-        updateDraft(conversationId, behavior.draftSnapshot)
       }
       // A queued item owns its frozen settings, not the composer's next-turn choices.
       // For composer sends, asynchronous Provider work must not clear newer input or
@@ -320,7 +340,7 @@ export function useAppShellMessageSubmission({
         )
       } catch (error) {
         pauseQueueAutoSend(conversationId)
-        if (getTurnAccessErrorCode(error)) {
+        if (getTurnAccessErrorCode(error) || isSkillActivationRefusal(error)) {
           // Only this explicit refusal is safe to roll back: transport failure can conceal
           // an accepted turn. Preserve newer input and all other conversation messages.
           setConversationsWithRef((current) =>
@@ -341,6 +361,20 @@ export function useAppShellMessageSubmission({
               behavior.accessIdentity.accountGeneration ===
                 accessIdentity.current.accountGeneration)
           ) {
+            updateDraft(
+              conversationId,
+              restoreRejectedDraft(
+                draftsRef.current[conversationId] ?? consumedDraft,
+                isSkillActivationRefusal(error)
+                  ? {
+                      ...submittedDraft,
+                      skills: planSkillActivationRecovery(error, options.skills).selectionsToRestore
+                    }
+                  : submittedDraft,
+                consumedDraft !== currentDraft,
+                options
+              )
+            )
             licenseRef.current?.handleDenied?.(error)
             if (!licenseRef.current && getTurnAccessErrorCode(error) === 'ACCOUNT_LOGIN_REQUIRED')
               accountAuthRef.current?.requestLogin()
@@ -379,17 +413,6 @@ export function useAppShellMessageSubmission({
             userIndex
           )
         }
-      }
-      if (!behavior.preserveComposerContent) {
-        updateDraft(
-          conversationId,
-          clearSubmittedComposerDraft(
-            draftsRef.current[conversationId] ?? currentDraft,
-            behavior.draftSnapshot ?? currentDraft,
-            options,
-            now
-          )
-        )
       }
       // Preserve the existing uncertain-start policy: non-admission failures keep their
       // visible attempt and are not put back into the queue as a fresh automatic retry.
@@ -441,7 +464,9 @@ export function useAppShellMessageSubmission({
       if (
         currentDraft &&
         pendingSubmission?.kind !== 'queued_message' &&
-        currentDraft.modelId === operation.targetModelId
+        pendingSubmission?.kind !== 'composer' &&
+        currentDraft.modelId === operation.targetModelId &&
+        currentDraft.modelId !== operation.modelId
       ) {
         updateDraft(operation.conversationId, {
           ...currentDraft,
@@ -521,12 +546,15 @@ export function useAppShellMessageSubmission({
     async (message: string, options: ChatSubmitOptions): Promise<boolean> => {
       const submissionIdentity = accessIdentity.current
       const conversationId = activeConversationIdRef.current
-      const draftSnapshot = conversationId ? draftsRef.current[conversationId] : undefined
+      const draftSnapshot =
+        options.draftSnapshot ??
+        draftsRef.current[conversationId ?? NEW_CONVERSATION_DRAFT_ID] ??
+        activeDraft
       if (!conversationId) {
         return submitMessageToConversation(null, message, options, {
           activate: true,
           preserveComposerContent: false,
-          draftSnapshot: activeDraft,
+          draftSnapshot,
           accessIdentity: submissionIdentity
         })
       }
@@ -545,12 +573,17 @@ export function useAppShellMessageSubmission({
 
       await waitForConversationSaves(conversationId)
       if (submissionIdentity !== accessIdentity.current) return false
-      const outcome = await requestProviderTransition(conversationId, options.modelId)
-      if (outcome.status === 'completed') {
+      const outcome = await requestProviderTransition(conversationId, options.modelId, {
+        allowUnchangedModel: true
+      })
+      if (outcome.status === 'completed' || outcome.status === 'ready') {
         return submitMessageToConversation(
           conversationId,
           message,
-          { ...options, modelId: outcome.operation.modelId },
+          {
+            ...options,
+            modelId: outcome.status === 'ready' ? outcome.modelId : outcome.operation.modelId
+          },
           {
             activate: true,
             preserveComposerContent: false,

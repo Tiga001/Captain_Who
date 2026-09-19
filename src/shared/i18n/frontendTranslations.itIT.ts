@@ -1238,6 +1238,8 @@ export const itITTranslations = {
   'chat.continueInNewTask': 'Continua con una nuova attività',
   'chat.continueInNewTaskActiveCommand':
     'Un comando è ancora in esecuzione in questa conversazione. Chiudilo o attendi che finisca prima di continuare con una nuova attività.',
+  'chat.continueInNewTaskPending': 'Creazione di una nuova attività…',
+  'chat.continueInNewTaskBusy': 'Altre attività sono in fase di creazione. Riprova tra poco.',
   'chat.continueInNewTaskFailed': 'Impossibile creare una nuova attività da questa risposta.',
   'chat.continuationOrigin': "Continua dall'attività",
   'chat.continuationOriginArchived': "L'attività originale viene archiviata.",
@@ -1273,6 +1275,8 @@ export const itITTranslations = {
   'agent.interruption.contextLimitExceeded': 'Il contesto supera il limite del modello',
   'agent.interruption.requestRejected': 'Richiesta di modello respinta',
   'agent.interruption.responseInvalid': 'Risposta del modello non valida',
+  'agent.interruption.admissionUnconfirmed':
+    'Invio non confermato. Verifica tentata; nessun reinvio automatico.',
   'agent.interruption.requestFailed': 'Richiesta del modello non riuscita',
   'agent.llmRetry.rateLimited':
     'Tariffa del servizio limitata; riprova automaticamente tra {seconds}s ({attempt}/{maxAttempts})',

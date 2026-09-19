@@ -258,6 +258,7 @@ pub(super) fn current_interruption_is_safe(value: &serde_json::Value) -> bool {
                     | "request_rejected"
                     | "response_invalid"
                     | "request_failed"
+                    | "admission_unconfirmed"
             )
         )
 }
