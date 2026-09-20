@@ -170,6 +170,21 @@ describe('cloud account service', () => {
     })
     expect(driver.sendCode).toHaveBeenCalledTimes(1)
   })
+  it('does not rate-limit a failed code request', async () => {
+    const { service, driver } = setup()
+    driver.sendCode.mockRejectedValueOnce(new AuthFailure('verificationUnavailable'))
+
+    expect(await service.sendEmailCode('test@example.com')).toEqual({
+      ok: false,
+      error: 'verificationUnavailable'
+    })
+    expect(await service.sendEmailCode('test@example.com')).toEqual({ ok: true })
+    expect(await service.sendEmailCode('test@example.com')).toEqual({
+      ok: false,
+      error: 'rateLimit'
+    })
+    expect(driver.sendCode).toHaveBeenCalledTimes(2)
+  })
   it('verifies the code then checks the same account API gate', async () => {
     const { service, driver, fetchProfile } = setup()
     expect(await service.verifyEmailCode({ email: ' TEST@example.com ', code: '123456' })).toEqual({

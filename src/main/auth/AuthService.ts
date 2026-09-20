@@ -153,8 +153,10 @@ export class AuthService {
     return this.run(async () => {
       email = normalizeEmail(email)
       if (Date.now() - this.lastCodeSentAt < 60_000) throw new AuthFailure('rateLimit')
-      this.lastCodeSentAt = Date.now()
       await this.driver.sendCode(email)
+      // Start the server-side retry window only after CloudBase accepted the
+      // request. A failed request must be immediately retryable.
+      this.lastCodeSentAt = Date.now()
     })
   }
 

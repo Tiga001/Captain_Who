@@ -382,6 +382,17 @@ describe('startup account login and reusable overlay', () => {
       .toBe('true')
     expect(mocks.login).not.toHaveBeenCalled()
   })
+  it('keeps email-code retry available when sending fails', async () => {
+    mocks.sendCode.mockResolvedValueOnce({ ok: false, error: 'verificationUnavailable' })
+    const screen = await render(<Harness />)
+    await screen.getByRole('button', { name: 'auth.codeMode' }).click()
+    await screen
+      .getByRole('textbox', { name: 'auth.email', exact: true })
+      .fill('captain@example.com')
+    await screen.getByRole('button', { name: 'auth.sendCode' }).click()
+    await expect.element(screen.getByRole('button', { name: 'auth.sendCode' })).toBeVisible()
+    expect(screen.container.textContent).toContain('auth.error.verificationUnavailable')
+  })
   it('retains the overlay on validation errors and offers a retry', async () => {
     mocks.state = { ...mocks.state, status: 'error', error: 'network' }
     const screen = await render(<Harness />)

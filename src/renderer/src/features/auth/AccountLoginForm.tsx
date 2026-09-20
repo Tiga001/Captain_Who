@@ -157,9 +157,11 @@ export function AccountLoginForm({ canDismiss = false }: { canDismiss?: boolean 
                     }
                     onClick={() =>
                       void run(async () => {
-                        setResendAt(Date.now() + 60_000)
                         const result = await hostClient.auth.sendEmailCode(normalizedEmail)
-                        if (result.ok) setSentEmail(normalizedEmail)
+                        if (result.ok) {
+                          setSentEmail(normalizedEmail)
+                          setResendAt(Date.now() + 60_000)
+                        }
                         return result
                       })
                     }

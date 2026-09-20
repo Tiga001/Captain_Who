@@ -24,6 +24,48 @@ export interface AuthDriver {
   logout(): Promise<void>
 }
 
+type SdkFailureDetails = {
+  code?: string
+  errorCode?: string
+  category?: string
+  status?: string
+  requestId?: string
+}
+
+function safeSdkFailureDetails(error: unknown): SdkFailureDetails {
+  const value = error as {
+    code?: unknown
+    errorCode?: unknown
+    category?: unknown
+    status?: unknown
+    requestId?: unknown
+  }
+  const text = (input: unknown): string | undefined => {
+    if (typeof input !== 'string' && typeof input !== 'number') return undefined
+    const normalized = String(input).trim()
+    return normalized ? normalized.slice(0, 256) : undefined
+  }
+  return {
+    code: text(value?.code),
+    errorCode: text(value?.errorCode),
+    category: text(value?.category),
+    status: text(value?.status),
+    requestId: text(value?.requestId)
+  }
+}
+
+function recordSdkFailure(operation: string, error: unknown): void {
+  // Deliberately omit message, email, password, verification codes and tokens.
+  // CloudBase requestId/error codes are sufficient to investigate a failed
+  // request in the console without exposing credentials in the local log.
+  const details = safeSdkFailureDetails(error)
+  if (Object.values(details).some(Boolean)) {
+    console.error(`[CloudBase Auth] ${operation} failed`, details)
+  } else {
+    console.error(`[CloudBase Auth] ${operation} failed`, { type: typeof error })
+  }
+}
+
 export function sdkFailure(error: unknown, fallback: AuthErrorCode): AuthFailure {
   const value = error as { code?: unknown; errorCode?: unknown; message?: unknown }
   const codes = [value?.code, value?.errorCode]
@@ -105,26 +147,38 @@ export class CloudBaseAuthDriver implements AuthDriver {
     verify: (input: { token: string }) => Promise<SignInRes>
   } | null = null
 
-  private async request<T>(operation: () => Promise<T>, fallback: AuthErrorCode): Promise<T> {
+  private async request<T>(
+    operation: () => Promise<T>,
+    fallback: AuthErrorCode,
+    operationName: string
+  ): Promise<T> {
     try {
       return await operation()
     } catch (error) {
+      recordSdkFailure(operationName, error)
       throw sdkFailure(error, fallback)
     }
   }
 
   private async session(
     operation: () => Promise<SignInRes>,
-    fallback: AuthErrorCode
+    fallback: AuthErrorCode,
+    operationName: string
   ): Promise<CloudSession> {
-    const result = await this.request(operation, fallback)
-    if (result.error) throw sdkFailure(result.error, fallback)
+    const result = await this.request(operation, fallback, operationName)
+    if (result.error) {
+      recordSdkFailure(operationName, result.error)
+      throw sdkFailure(result.error, fallback)
+    }
     const session = result.data?.session
     if (!session?.access_token || !session.refresh_token) throw new AuthFailure('expired')
     // Fetch the authenticated identity after restoration; the publishable anonymous identity is
     // never a user session, and email must come from CloudBase rather than the account profile.
-    const userResult = await this.request(() => this.auth.getUser(), 'network')
-    if (userResult.error) throw sdkFailure(userResult.error, 'network')
+    const userResult = await this.request(() => this.auth.getUser(), 'network', 'auth.getUser')
+    if (userResult.error) {
+      recordSdkFailure('auth.getUser', userResult.error)
+      throw sdkFailure(userResult.error, 'network')
+    }
     const user = userResult.data?.user
     if (!user || user.is_anonymous || typeof user.email !== 'string' || !user.email) {
       throw new AuthFailure('profile')
@@ -138,24 +192,36 @@ export class CloudBaseAuthDriver implements AuthDriver {
 
   async login(email: string, password: string): Promise<CloudSession> {
     this.challenge = null
-    return this.session(() => this.auth.signInWithPassword({ email, password }), 'credentials')
+    return this.session(
+      () => this.auth.signInWithPassword({ email, password }),
+      'credentials',
+      'auth.signInWithPassword'
+    )
   }
 
   async restore(tokens: SessionTokens): Promise<CloudSession> {
-    return this.session(() => this.auth.setSession(tokens), 'network')
+    return this.session(() => this.auth.setSession(tokens), 'network', 'auth.setSession')
   }
 
   async refresh(tokens: SessionTokens): Promise<CloudSession> {
-    return this.session(() => this.auth.refreshSession(tokens.refresh_token), 'network')
+    return this.session(
+      () => this.auth.refreshSession(tokens.refresh_token),
+      'network',
+      'auth.refreshSession'
+    )
   }
 
   async sendCode(email: string): Promise<void> {
     this.challenge = null
     const result = await this.request(
       () => this.auth.signInWithOtp({ email, options: { shouldCreateUser: false } }),
-      'verificationUnavailable'
+      'verificationUnavailable',
+      'auth.signInWithOtp'
     )
-    if (result.error) throw sdkFailure(result.error, 'verificationUnavailable')
+    if (result.error) {
+      recordSdkFailure('auth.signInWithOtp', result.error)
+      throw sdkFailure(result.error, 'verificationUnavailable')
+    }
     if (!result.data?.verifyOtp) throw new AuthFailure('verificationUnavailable')
     this.challenge = { email, expiresAt: Date.now() + 10 * 60_000, verify: result.data.verifyOtp }
   }
@@ -165,7 +231,11 @@ export class CloudBaseAuthDriver implements AuthDriver {
     if (!challenge || challenge.email !== email || challenge.expiresAt < Date.now()) {
       throw new AuthFailure('code')
     }
-    const result = await this.session(() => challenge.verify({ token: code }), 'code')
+    const result = await this.session(
+      () => challenge.verify({ token: code }),
+      'code',
+      'auth.verifyOtp'
+    )
     this.challenge = null
     return result
   }
