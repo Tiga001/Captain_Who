@@ -39,6 +39,29 @@
   color: var(--mc-color-text-primary);
   font: inherit;
 }
+.account-login__password-field {
+  position: relative;
+  display: block;
+}
+.account-login__password-field input {
+  padding-right: 42px;
+}
+.account-login .account-login__password-toggle {
+  position: absolute;
+  top: 50%;
+  right: 4px;
+  min-height: 30px;
+  width: 34px;
+  padding: 5px;
+  border: 0;
+  color: var(--mc-color-text-secondary);
+  transform: translateY(-50%);
+}
+.account-login__password-toggle svg {
+  display: block;
+  width: 17px;
+  height: 17px;
+}
 .account-login button {
   min-height: 34px;
   padding: 7px 12px;

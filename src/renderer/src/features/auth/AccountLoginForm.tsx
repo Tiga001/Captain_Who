@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import type { AuthActionResult, AuthErrorCode } from '@mycopilot/host-api'
+import { Eye, EyeOff } from 'lucide-react'
 import { useFrontendConfig } from '../../config/FrontendConfigProvider'
 import { hostClient } from '../../host/hostClient'
 import { useAccountAuth } from './AccountAuthContext'
@@ -11,6 +12,7 @@ export function AccountLoginForm({ canDismiss = false }: { canDismiss?: boolean 
   const [mode, setMode] = useState<'password' | 'code'>('password')
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
+  const [showPassword, setShowPassword] = useState(false)
   const [code, setCode] = useState('')
   const [sentEmail, setSentEmail] = useState('')
   const [resendAt, setResendAt] = useState(0)
@@ -110,15 +112,27 @@ export function AccountLoginForm({ canDismiss = false }: { canDismiss?: boolean 
             {mode === 'password' ? (
               <label>
                 {t('auth.password')}
-                <input
-                  type="password"
-                  autoComplete="current-password"
-                  required
-                  maxLength={1024}
-                  value={password}
-                  disabled={busy}
-                  onChange={(event) => setPassword(event.target.value)}
-                />
+                <span className="account-login__password-field">
+                  <input
+                    type={showPassword ? 'text' : 'password'}
+                    autoComplete="current-password"
+                    required
+                    maxLength={1024}
+                    value={password}
+                    disabled={busy}
+                    onChange={(event) => setPassword(event.target.value)}
+                  />
+                  <button
+                    className="account-login__password-toggle"
+                    type="button"
+                    aria-label={t(showPassword ? 'auth.hidePassword' : 'auth.showPassword')}
+                    aria-pressed={showPassword}
+                    disabled={busy}
+                    onClick={() => setShowPassword((visible) => !visible)}
+                  >
+                    {showPassword ? <EyeOff aria-hidden="true" /> : <Eye aria-hidden="true" />}
+                  </button>
+                </span>
               </label>
             ) : (
               <>
