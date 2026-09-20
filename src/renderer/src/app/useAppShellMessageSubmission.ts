@@ -907,7 +907,7 @@ export function useAppShellMessageSubmission({
       }
 
       const messageContent = buildMessageContentWithAttachments(content, attachments)
-      if (!messageContent.trim()) {
+      if (!messageContent.trim() && attachments.length === 0) {
         throw new Error(t('chat.emptyMessage'))
       }
       // Editing is one atomic logical replacement inside the current Conversation. Do not run a

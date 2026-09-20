@@ -47,6 +47,7 @@ fn managed_runtime_attachment(
         size_bytes: bytes.len() as u64,
         encoding: AgentInputAttachmentEncoding::Managed,
         data: format!("import-{id}"),
+        content_sha256: None,
         truncated: None,
     };
     let library = AgentAttachmentLibraryContext {

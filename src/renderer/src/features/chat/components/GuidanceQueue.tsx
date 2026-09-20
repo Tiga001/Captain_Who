@@ -1,6 +1,7 @@
 import {
   useEffect,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
   type DragEvent,
@@ -16,8 +17,10 @@ import {
   Trash2
 } from 'lucide-react'
 import { useFrontendConfig } from '../../../config/FrontendConfigProvider'
-import { stripAttachmentSummary } from '../chatAttachments'
+import { composerAttachmentFromAgentAttachment, stripAttachmentSummary } from '../chatAttachments'
 import type { ChatQueuedMessage } from '../chatTypes'
+import { useComposerAttachmentPreviews } from '../useAttachmentImports'
+import { ComposerAttachments } from './ComposerAttachments'
 
 interface GuidanceQueueProps {
   guideEnabled: boolean
@@ -49,6 +52,18 @@ export function GuidanceQueue({
   const previousItemRectsRef = useRef(new Map<string, DOMRect>())
   const itemAnimationsRef = useRef(new Map<string, Animation>())
   const lastDragTargetRef = useRef<string | null>(null)
+  const queuedAttachmentInputs = useMemo(
+    () =>
+      messages.flatMap((message) =>
+        message.attachments.map((attachment) => composerAttachmentFromAgentAttachment(attachment))
+      ),
+    [messages]
+  )
+  const queuedAttachments = useComposerAttachmentPreviews(queuedAttachmentInputs)
+  const queuedAttachmentsById = useMemo(
+    () => new Map(queuedAttachments.map((attachment) => [attachment.id, attachment])),
+    [queuedAttachments]
+  )
 
   useEffect(() => {
     if (!openMenuId) return undefined
@@ -205,9 +220,14 @@ export function GuidanceQueue({
             <div className="guidance-queue__content">
               <span>{visibleContent || t('chat.attachmentOnlyMessage')}</span>
               {message.attachments.length > 0 && (
-                <span className="guidance-queue__attachments">
-                  {message.attachments.map((attachment) => attachment.name).join(' · ')}
-                </span>
+                <ComposerAttachments
+                  attachments={message.attachments.map((attachment) =>
+                    queuedAttachmentsById.get(attachment.id)!
+                  )}
+                  label={t('chat.attachments')}
+                  removeLabel=""
+                  variant="queue"
+                />
               )}
               {message.status === 'error' && message.error && (
                 <span className="guidance-queue__error" role="alert">

@@ -315,7 +315,8 @@ impl StorageService {
             manifest.complete = true;
             Self::write_import_manifest(&directory, &manifest)?;
         }
-        Ok(managed_reference(import_id, manifest.input))
+        let sha256 = manifest.sha256.as_deref().ok_or("附件导入缺少校验值")?;
+        Ok(managed_reference(import_id, manifest.input, sha256))
     }
 
     pub fn cancel_attachment_import(&self, import_id: &str) -> Result<(), String> {
@@ -445,7 +446,7 @@ impl StorageService {
                     && manifest.storage_rel_path.as_ref() == Some(&attachment.storage_rel_path)
                     && manifest.input == input
                 {
-                    return Ok(managed_reference(&import_id, input));
+                    return Ok(managed_reference(&import_id, input, &sha256));
                 }
                 return Err("附件引用索引与内容不一致".into());
             }
@@ -459,14 +460,14 @@ impl StorageService {
                 version: 1,
                 input: input.clone(),
                 complete: true,
-                sha256: Some(sha256),
+                sha256: Some(sha256.clone()),
                 storage_rel_path: Some(attachment.storage_rel_path.clone()),
             },
         )?;
         let temporary_index = index_directory.join(format!("{index_key}-{import_id}.tmp"));
         fs::write(&temporary_index, import_id.as_bytes()).map_err(|error| error.to_string())?;
         fs::rename(&temporary_index, index_path).map_err(|error| error.to_string())?;
-        Ok(managed_reference(&import_id, input))
+        Ok(managed_reference(&import_id, input, &sha256))
     }
 
     pub fn load_input_attachment_preview(
@@ -527,7 +528,11 @@ fn collect_managed_refs(value: &serde_json::Value, referenced: &mut HashSet<Stri
     }
 }
 
-fn managed_reference(import_id: &str, input: AttachmentImportInput) -> AgentInputAttachment {
+fn managed_reference(
+    import_id: &str,
+    input: AttachmentImportInput,
+    content_sha256: &str,
+) -> AgentInputAttachment {
     AgentInputAttachment {
         id: input.id,
         kind: input.kind,
@@ -536,6 +541,7 @@ fn managed_reference(import_id: &str, input: AttachmentImportInput) -> AgentInpu
         size_bytes: input.size_bytes,
         encoding: AgentInputAttachmentEncoding::Managed,
         data: import_id.to_string(),
+        content_sha256: Some(format!("sha256:{content_sha256}")),
         truncated: None,
     }
 }

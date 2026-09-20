@@ -713,6 +713,7 @@ fn steer_run_rejects_wrong_conversation_and_unsupported_model_images() {
         size_bytes: 4,
         encoding: AgentInputAttachmentEncoding::Base64,
         data: "aW1n".to_string(),
+        content_sha256: None,
         truncated: None,
     });
     let rejected_image = service.steer_run(with_image, notifications).unwrap();
@@ -1016,6 +1017,7 @@ fn steer_run_rejects_invalid_attachment_payloads_limits_and_identity_reuse() {
         size_bytes: 4,
         encoding: AgentInputAttachmentEncoding::Base64,
         data: "%%%".to_string(),
+        content_sha256: None,
         truncated: None,
     }];
     assert_eq!(

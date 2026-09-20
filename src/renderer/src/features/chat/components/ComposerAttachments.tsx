@@ -1,6 +1,7 @@
 import { RotateCcw, X } from 'lucide-react'
 import { WorkspaceFileTypeIcon } from '../../../components/files/WorkspaceFileTypeIcon'
 import type { ComposerAttachment } from '../chatAttachments'
+import './AttachmentCards.css'
 
 export type ComposerAttachmentPresentation = Pick<
   ComposerAttachment,
@@ -20,8 +21,11 @@ interface ComposerAttachmentsProps {
   failedLabel?: string
   onRetry?: (id: string) => void
   onPreviewAttachment?: (id: string) => void
-  onRemove: (id: string) => void
-  onPreview: (image: { alt: string; fileName: string; src: string }) => void
+  onRemove?: (id: string) => void
+  onPreview?: (image: { alt: string; fileName: string; src: string }) => void
+  /** Message and queue cards reuse the composer layout but do not expose destructive actions. */
+  variant?: 'composer' | 'message' | 'queue'
+  messageId?: string
 }
 
 function attachmentColumns(
@@ -71,18 +75,41 @@ export function ComposerAttachments({
   onRetry,
   onPreviewAttachment,
   onRemove,
-  onPreview
+  onPreview,
+  variant = 'composer',
+  messageId
 }: ComposerAttachmentsProps) {
+  const listClassName = [
+    variant === 'composer' ? 'chat-composer__attachments' : 'attachment-card-list',
+    variant !== 'composer' ? `attachment-card-list--${variant}` : ''
+  ]
+    .filter(Boolean)
+    .join(' ')
   return (
-    <div className="chat-composer__attachments" aria-label={label}>
+    <div className={listClassName} aria-label={label}>
       {attachmentColumns(attachments).map((column) => (
-        <div className="composer-attachment-column" data-kind={column[0].kind} key={column[0].id}>
+        <div
+          className="composer-attachment-column attachment-card-column"
+          data-kind={column[0].kind}
+          key={column[0].id}
+        >
           {column.map((attachment) => (
             <div
-              className="composer-attachment"
+              className={`composer-attachment attachment-card${variant === 'message' ? ' chat-message-attachment' : ''}`}
+              data-chat-attachment-id={variant === 'message' ? attachment.id : undefined}
+              data-chat-attachment-message-id={variant === 'message' ? messageId : undefined}
               data-kind={attachment.kind}
               data-import-state={attachment.importState}
               key={attachment.id}
+              onClick={(event) => {
+                if (
+                  variant === 'message' &&
+                  attachment.kind === 'image' &&
+                  event.target === event.currentTarget
+                ) {
+                  onPreviewAttachment?.(attachment.id)
+                }
+              }}
               title={`${attachment.name} · ${fileSize(attachment.sizeBytes)}${attachment.error ? ` · ${attachment.error}` : ''}`}
             >
               {attachment.kind === 'image' && attachment.previewUrl ? (
@@ -93,7 +120,7 @@ export function ComposerAttachments({
                       onPreviewAttachment(attachment.id)
                       return
                     }
-                    onPreview({
+                    onPreview?.({
                       alt: attachment.name,
                       fileName: attachment.name,
                       src: attachment.previewUrl ?? ''
@@ -159,14 +186,16 @@ export function ComposerAttachments({
                   </div>
                 </>
               )}
-              <button
-                type="button"
-                className="composer-attachment__remove"
-                aria-label={`${attachment.importState === 'importing' ? cancelLabel : removeLabel} ${attachment.name}`}
-                onClick={() => onRemove(attachment.id)}
-              >
-                <X aria-hidden="true" />
-              </button>
+              {onRemove && (
+                <button
+                  type="button"
+                  className="composer-attachment__remove"
+                  aria-label={`${attachment.importState === 'importing' ? cancelLabel : removeLabel} ${attachment.name}`}
+                  onClick={() => onRemove(attachment.id)}
+                >
+                  <X aria-hidden="true" />
+                </button>
+              )}
             </div>
           ))}
         </div>

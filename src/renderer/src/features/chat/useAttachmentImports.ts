@@ -23,6 +23,7 @@ export interface PendingAttachmentImport {
 interface ImportEntry {
   value: PendingAttachmentImport
   file?: File
+  fileKey?: string
   controller: AbortController
   scope: string
   requestId?: string
@@ -30,6 +31,8 @@ interface ImportEntry {
 
 interface AttachmentImportsOptions {
   scope: string
+  /** Attachments already present in the current composer draft. */
+  existingAttachments: readonly ComposerAttachment[]
   onAttachments: (attachments: ComposerAttachment[]) => void
   onError: (error: unknown) => void
   errorMessage: (error: unknown) => string
@@ -54,9 +57,25 @@ export function useAttachmentImports(options: AttachmentImportsOptions) {
   const entries = useRef(new Map<string, ImportEntry>())
   const cancelledIds = useRef(new Set<string>())
   const nativeRequests = useRef(new Map<string, string>())
+  // File metadata is only used while a browser import is in flight. The durable content hash
+  // remains the source of truth once the importer finishes; this transient key prevents a
+  // multi-file drop containing the same local file from rendering duplicate pending cards.
+  const pendingFileKeys = useRef(new Set<string>())
+  // Managed imports receive their content identity only when the streaming importer finishes.
+  // Keep the identities admitted by this hook until the parent reflects them in
+  // existingAttachments; this closes the small async window between two drops without using
+  // names or sizes as a false identity.
+  const admittedHashes = useRef(new Map<string, string>())
   const mounted = useRef(true)
   const [pending, setPending] = useState<PendingAttachmentImport[]>([])
   const [selecting, setSelecting] = useState(false)
+
+  useLayoutEffect(() => {
+    const activeIds = new Set(options.existingAttachments.map((item) => item.id))
+    for (const [hash, id] of admittedHashes.current) {
+      if (!activeIds.has(id)) admittedHashes.current.delete(hash)
+    }
+  }, [options.existingAttachments])
 
   const publish = useCallback(() => {
     if (!mounted.current) return
@@ -81,6 +100,7 @@ export function useAttachmentImports(options: AttachmentImportsOptions) {
       cancelledIds.current.add(id)
       entry.controller.abort()
       entries.current.delete(id)
+      if (entry.fileKey) pendingFileKeys.current.delete(entry.fileKey)
       if (!entry.file) void hostClient.attachments?.cancelImport({ importId: id }).catch(() => {})
       publish()
     },
@@ -123,6 +143,7 @@ export function useAttachmentImports(options: AttachmentImportsOptions) {
     mounted.current = true
     const currentEntries = entries.current
     const currentRequests = nativeRequests.current
+    const currentPendingFileKeys = pendingFileKeys.current
     return () => {
       mounted.current = false
       for (const entry of currentEntries.values()) {
@@ -135,18 +156,47 @@ export function useAttachmentImports(options: AttachmentImportsOptions) {
         void hostClient.attachments?.cancelImport({ importId: requestId }).catch(() => {})
       }
       currentRequests.clear()
+      currentPendingFileKeys.clear()
     }
   }, [])
 
   const accept = (entry: ImportEntry, attachment: ComposerAttachment) => {
     if (!isCurrent(entry)) return
     entries.current.delete(entry.value.id)
+    if (entry.fileKey) pendingFileKeys.current.delete(entry.fileKey)
+    if (isDuplicate(attachment)) {
+      publish()
+      return
+    }
+    rememberIdentity(attachment)
     optionsRef.current.onAttachments([attachment])
     publish()
   }
 
+  const attachmentHash = (attachment: ComposerAttachment): string | undefined => {
+    const value = attachment.agentAttachment.contentSha256?.trim().toLowerCase()
+    if (!value) return undefined
+    if (/^[0-9a-f]{64}$/.test(value)) return `sha256:${value}`
+    return /^sha256:[0-9a-f]{64}$/.test(value) ? value : undefined
+  }
+
+  const isDuplicate = (attachment: ComposerAttachment): boolean => {
+    const hash = attachmentHash(attachment)
+    if (!hash) return false
+    return (
+      optionsRef.current.existingAttachments.some((item) => attachmentHash(item) === hash) ||
+      admittedHashes.current.has(hash)
+    )
+  }
+
+  const rememberIdentity = (attachment: ComposerAttachment) => {
+    const hash = attachmentHash(attachment)
+    if (hash) admittedHashes.current.set(hash, attachment.id)
+  }
+
   const fail = (entry: ImportEntry, error: unknown) => {
     if (!isCurrent(entry)) return
+    if (entry.fileKey) pendingFileKeys.current.delete(entry.fileKey)
     entry.value = {
       ...entry.value,
       importState: 'failed',
@@ -183,23 +233,30 @@ export function useAttachmentImports(options: AttachmentImportsOptions) {
   }
 
   const addFiles = async (files: FileList | File[]) => {
-    const newEntries = Array.from(files, (file): ImportEntry => ({
-      value: {
-        id: `attachment-${crypto.randomUUID()}`,
-        kind:
-          file.type.startsWith('image/') ||
-          /\.(apng|avif|bmp|gif|heic|heif|ico|jpe?g|png|svg|tiff?|webp)$/i.test(file.name)
-            ? 'image'
-            : 'file',
-        name: file.name || 'attachment',
-        sizeBytes: file.size,
-        importState: 'importing',
-        importedBytes: 0
-      },
-      file,
-      controller: new AbortController(),
-      scope: optionsRef.current.scope
-    }))
+    const newEntries: ImportEntry[] = []
+    for (const file of Array.from(files)) {
+      const fileKey = [file.name, file.size, file.lastModified, file.type].join('\u0000')
+      if (pendingFileKeys.current.has(fileKey)) continue
+      pendingFileKeys.current.add(fileKey)
+      newEntries.push({
+        value: {
+          id: `attachment-${crypto.randomUUID()}`,
+          kind:
+            file.type.startsWith('image/') ||
+            /\.(apng|avif|bmp|gif|heic|heif|ico|jpe?g|png|svg|tiff?|webp)$/i.test(file.name)
+              ? 'image'
+              : 'file',
+          name: file.name || 'attachment',
+          sizeBytes: file.size,
+          importState: 'importing',
+          importedBytes: 0
+        },
+        file,
+        fileKey,
+        controller: new AbortController(),
+        scope: optionsRef.current.scope
+      })
+    }
     for (const entry of newEntries) entries.current.set(entry.value.id, entry)
     publish()
     for (const entry of newEntries) await runFileImport(entry)
@@ -271,8 +328,13 @@ export function useAttachmentImports(options: AttachmentImportsOptions) {
     try {
       const result = await selectComposerAttachments(kind, requestId)
       if (!mounted.current || scope !== optionsRef.current.scope) return
-      const accepted = result.filter((attachment) => !cancelledIds.current.has(attachment.id))
-      for (const attachment of accepted) entries.current.delete(attachment.id)
+      const accepted: ComposerAttachment[] = []
+      for (const attachment of result) {
+        entries.current.delete(attachment.id)
+        if (cancelledIds.current.has(attachment.id) || isDuplicate(attachment)) continue
+        rememberIdentity(attachment)
+        accepted.push(attachment)
+      }
       if (accepted.length) optionsRef.current.onAttachments(accepted)
     } catch (error) {
       if (mounted.current && scope === optionsRef.current.scope) {
@@ -294,6 +356,7 @@ export function useAttachmentImports(options: AttachmentImportsOptions) {
     entry.value = { ...entry.value, importState: 'importing', importedBytes: 0, error: undefined }
     publish()
     if (entry.file) {
+      if (entry.fileKey) pendingFileKeys.current.add(entry.fileKey)
       await runFileImport(entry)
     } else {
       try {

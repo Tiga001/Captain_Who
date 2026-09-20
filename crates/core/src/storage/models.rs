@@ -1075,6 +1075,8 @@ struct StoredComposerAttachment {
     size_bytes: u64,
     encoding: AgentInputAttachmentEncoding,
     data: String,
+    #[serde(default)]
+    content_sha256: Option<String>,
     truncated: Option<bool>,
 }
 
@@ -1185,6 +1187,7 @@ fn validate_stored_composer_attachments(
             attachment.size_bytes,
             &attachment.encoding,
             &attachment.data,
+            &attachment.content_sha256,
             &attachment.truncated,
         );
     }

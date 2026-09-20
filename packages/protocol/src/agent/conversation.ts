@@ -41,6 +41,8 @@ export interface AgentInputAttachment {
   sizeBytes: number
   encoding: AgentInputAttachmentEncoding
   data: string
+  /** Content identity returned by the managed importer; never supplied by the renderer. */
+  contentSha256?: string
   truncated?: boolean
 }
 

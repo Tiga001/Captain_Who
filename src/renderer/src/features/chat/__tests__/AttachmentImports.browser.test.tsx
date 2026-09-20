@@ -42,22 +42,34 @@ vi.mock('../chatAttachments', () => ({
   })
 }))
 
-function attachment(id = 'attachment-1', name = 'large.txt'): ComposerAttachment {
+function attachment(
+  id = 'attachment-1',
+  name = 'large.txt',
+  contentSha256 = 'a'.repeat(64)
+): ComposerAttachment {
   const agentAttachment: AgentInputAttachment = {
     id,
     name,
     kind: 'file',
     sizeBytes: 8,
     encoding: 'managed',
-    data: 'managed-test-dGVzdGRhdGE='
+    data: 'managed-test-dGVzdGRhdGE=',
+    contentSha256
   }
   return { ...agentAttachment, agentAttachment }
 }
 
-function Harness({ scope = 'first' }: { scope?: string }) {
-  const [attachments, setAttachments] = useState<ComposerAttachment[]>([])
+function Harness({
+  scope = 'first',
+  initialAttachments = []
+}: {
+  scope?: string
+  initialAttachments?: ComposerAttachment[]
+}) {
+  const [attachments, setAttachments] = useState<ComposerAttachment[]>(initialAttachments)
   const imports = useAttachmentImports({
     scope,
+    existingAttachments: attachments,
     onAttachments: (values) => {
       mocks.accepted(values)
       setAttachments((previous) => [...previous, ...values])
@@ -70,7 +82,9 @@ function Harness({ scope = 'first' }: { scope?: string }) {
     <div style={{ width: 640 }}>
       <button
         onClick={() =>
-          void imports.addFiles([new File(['testdata'], 'large.txt', { type: 'text/plain' })])
+          void imports.addFiles([
+            new File(['testdata'], 'large.txt', { type: 'text/plain', lastModified: 123 })
+          ])
         }
       >
         Add
@@ -84,6 +98,7 @@ function Harness({ scope = 'first' }: { scope?: string }) {
       >
         Edit queued message
       </button>
+      <button onClick={() => setAttachments([])}>Remove existing</button>
       <button disabled={imports.hasPending}>Send</button>
       <output>{attachments.map((item) => item.id).join(',')}</output>
       <ComposerAttachments
@@ -179,6 +194,65 @@ describe('Attachment imports', () => {
     await expect.element(screen.getByRole('button', { name: 'Send', exact: true })).toBeEnabled()
     expect(mocks.accepted).toHaveBeenCalledExactlyOnceWith([attachment(id)])
     expect(screen.container.querySelector('[role="progressbar"]')).toBeNull()
+  })
+
+  it('silently ignores a completed import whose content identity is already in the draft', async () => {
+    mocks.select.mockResolvedValue([attachment('duplicate')])
+    const existing = attachment('existing', 'other-name.txt')
+    const screen = await render(<Harness initialAttachments={[existing]} />)
+    await screen.getByRole('button', { name: 'Choose', exact: true }).click()
+    await expect.element(screen.getByRole('button', { name: 'Send', exact: true })).toBeEnabled()
+    expect(mocks.accepted).not.toHaveBeenCalled()
+    expect(screen.container.querySelector('output')?.textContent).toBe('existing')
+  })
+
+  it('keeps only the first content identity when a native batch contains duplicates', async () => {
+    mocks.select.mockImplementation(async (_kind, requestId) => {
+      progress({
+        requestId,
+        attachment: attachment('first', 'one.txt').agentAttachment,
+        receivedBytes: 1,
+        status: 'importing'
+      })
+      progress({
+        requestId,
+        attachment: attachment('second', 'two.txt').agentAttachment,
+        receivedBytes: 1,
+        status: 'importing'
+      })
+      return [attachment('first', 'one.txt'), attachment('second', 'two.txt')]
+    })
+    const screen = await render(<Harness />)
+    await screen.getByRole('button', { name: 'Choose', exact: true }).click()
+    await expect.element(screen.getByRole('button', { name: 'Send', exact: true })).toBeEnabled()
+    expect(mocks.accepted).toHaveBeenCalledExactlyOnceWith([
+      expect.objectContaining({ id: 'first' })
+    ])
+    expect(screen.container.querySelector('output')?.textContent).toBe('first')
+  })
+
+  it('allows the same content again after its existing card is removed', async () => {
+    const existing = attachment('existing')
+    mocks.select.mockResolvedValue([attachment('replacement')])
+    const screen = await render(<Harness initialAttachments={[existing]} />)
+    await screen.getByRole('button', { name: 'Remove existing', exact: true }).click()
+    await screen.getByRole('button', { name: 'Choose', exact: true }).click()
+    await expect.element(screen.getByRole('button', { name: 'Send', exact: true })).toBeEnabled()
+    expect(mocks.accepted).toHaveBeenCalledExactlyOnceWith([
+      expect.objectContaining({ id: 'replacement' })
+    ])
+  })
+
+  it('does not render a duplicate browser card while the first file is importing', async () => {
+    const pending = deferred<ComposerAttachment[]>()
+    mocks.create.mockReturnValue(pending.promise)
+    const screen = await render(<Harness />)
+    await screen.getByRole('button', { name: 'Add', exact: true }).click()
+    await screen.getByRole('button', { name: 'Add', exact: true }).click()
+    expect(mocks.create).toHaveBeenCalledTimes(1)
+    expect(screen.container.querySelectorAll('.composer-attachment')).toHaveLength(1)
+    pending.resolve([attachment('first')])
+    await expect.element(screen.getByRole('button', { name: 'Send', exact: true })).toBeEnabled()
   })
 
   it('aborts cancelled browser imports and ignores their late result', async () => {

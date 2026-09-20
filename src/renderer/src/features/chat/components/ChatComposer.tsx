@@ -36,7 +36,6 @@ import { useDismissOnOutsidePointer } from '../../../hooks/useDismissOnOutsidePo
 import {
   buildAgentInputAttachments,
   composerAttachmentFromAgentAttachment,
-  createAttachmentSummary,
   loadComposerAttachmentImage,
   stripAttachmentSummary
 } from '../chatAttachments'
@@ -234,6 +233,7 @@ export function ChatComposer({
   const attachments = useComposerAttachmentPreviews(storedAttachments)
   const attachmentImports = useAttachmentImports({
     scope: JSON.stringify([resetKey, draft.projectId]),
+    existingAttachments: attachments,
     onAttachments: (nextAttachments) => {
       const currentAttachments = draftRef.current.attachments
       const existing = new Set(currentAttachments.map((attachment) => attachment.id))
@@ -624,8 +624,7 @@ export function ChatComposer({
     setIsCommandSession(false)
     const submittedDraft = draftRef.current
     const trimmedMessage = message.trim()
-    const attachmentSummary = createAttachmentSummary(attachments)
-    const messageContent = [trimmedMessage, attachmentSummary].filter(Boolean).join('\n\n')
+    const messageContent = trimmedMessage
     let inputAttachments: ChatSubmitOptions['attachments']
 
     try {

@@ -1,6 +1,5 @@
 import type { AppWindowState } from '@mycopilot/host-api'
 import type { AgentInputAttachment, SkillSelection } from '@mycopilot/protocol'
-import { createAttachmentSummary } from '../features/chat/chatAttachments'
 import type { ChatConversation } from '../features/chat/chatTypes'
 
 export const DEFAULT_APP_WINDOW_STATE: AppWindowState = {
@@ -10,11 +9,13 @@ export const DEFAULT_APP_WINDOW_STATE: AppWindowState = {
 
 export function buildMessageContentWithAttachments(
   content: string,
-  attachments: AgentInputAttachment[]
+  _attachments: AgentInputAttachment[]
 ) {
+  void _attachments
   const trimmedContent = content.trim()
-  const attachmentSummary = createAttachmentSummary(attachments)
-  return [trimmedContent, attachmentSummary].filter(Boolean).join('\n\n')
+  // Attachments are persisted and rendered as structured message data. Keep file names out of
+  // the user-visible message body so the same information is not duplicated in prose.
+  return trimmedContent
 }
 
 export function getEditableLastTurn(conversation: ChatConversation) {

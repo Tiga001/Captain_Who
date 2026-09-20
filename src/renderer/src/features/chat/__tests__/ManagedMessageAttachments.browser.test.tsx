@@ -63,6 +63,25 @@ beforeEach(() => {
 })
 
 describe('Managed message attachments', () => {
+  it('renders committed files as compact shared cards without a duplicate text summary', async () => {
+    const fileAttachment = {
+      ...managedAttachment,
+      id: 'file-1',
+      kind: 'file' as const,
+      name: 'report.pdf',
+      mimeType: 'application/pdf'
+    }
+    const screen = await render(
+      <ChatMessageItem message={message([fileAttachment])} showTokenUsageDetails={false} />
+    )
+    const card = screen.container.querySelector<HTMLElement>('.chat-message-attachment')
+    expect(card).toHaveClass('attachment-card')
+    expect(card?.dataset.kind).toBe('file')
+    expect(card?.querySelector('.composer-attachment__remove')).toBeNull()
+    expect(getComputedStyle(card!).height).toBe('28px')
+    expect(screen.container.textContent).not.toContain('Attachments: report.pdf')
+  })
+
   it('shows an optimistic managed thumbnail, loads its bounded viewer on demand, and retains the thumbnail after persistence', async () => {
     const original = message()
     const screen = await render(

@@ -1,0 +1,175 @@
+/* Shared attachment cards used by the composer, committed messages and queued guidance. */
+.attachment-card-list {
+  display: flex;
+  min-width: 0;
+  max-width: 100%;
+  align-items: flex-start;
+  gap: 10px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: thin;
+}
+
+.attachment-card-list--message {
+  width: min(100%, 720px);
+  max-width: min(78%, 720px);
+  margin: 0 0 10px;
+  justify-content: flex-end;
+}
+
+.attachment-card-list--queue {
+  width: 100%;
+  margin: 4px 0 2px;
+}
+
+.attachment-card-column {
+  display: flex;
+  flex: 0 0 auto;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.attachment-card {
+  position: relative;
+  display: grid;
+  flex: 0 0 auto;
+  align-items: center;
+  min-width: 0;
+  color: var(--mc-color-text-primary);
+  background: var(--mc-color-surface-card);
+  border: 1px solid var(--mc-color-border-subtle);
+  box-shadow: var(--mc-shadow-none);
+}
+
+.attachment-card-list .attachment-card {
+  display: grid;
+  align-items: center;
+}
+
+.chat-composer__attachments .attachment-card[data-kind='file'],
+.attachment-card-list .attachment-card[data-kind='file'] {
+  grid-template-columns: 16px minmax(0, 1fr) 20px;
+  width: 212px;
+  height: 28px;
+  padding: 0 4px 0 7px;
+  gap: 6px;
+  border-radius: var(--mc-radius-lg);
+}
+
+.chat-composer__attachments .attachment-card[data-kind='image'],
+.attachment-card-list .attachment-card[data-kind='image'] {
+  width: 118px;
+  height: 126px;
+  overflow: hidden;
+  place-items: stretch;
+  border-radius: var(--mc-radius-2xl);
+}
+
+.attachment-card__content {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 5px;
+}
+
+.attachment-card__name,
+.attachment-card .composer-attachment__name {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--mc-color-text-primary);
+  font-size: var(--mc-font-size-chat-toolbar);
+  font-weight: var(--mc-font-weight-strong);
+  line-height: var(--mc-line-height-tight);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.attachment-card .composer-attachment__basename {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.attachment-card .composer-attachment__extension {
+  flex: 0 0 auto;
+}
+
+.attachment-card .composer-attachment__icon {
+  display: grid;
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+  place-items: center;
+}
+
+.attachment-card .composer-attachment__icon svg {
+  width: 16px;
+  height: 16px;
+}
+
+.attachment-card__image-button,
+.attachment-card .composer-attachment__image-button {
+  width: 100%;
+  height: 100%;
+  padding: 0;
+  overflow: hidden;
+  background: transparent;
+  border: 0;
+  cursor: zoom-in;
+}
+
+.attachment-card .composer-attachment__thumbnail {
+  width: 100%;
+  height: 100%;
+  display: block;
+  object-fit: cover;
+}
+
+.attachment-card .composer-attachment__remove,
+.attachment-card .composer-attachment__retry {
+  display: grid;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  place-items: center;
+  color: var(--mc-color-text-subtle);
+  background: transparent;
+  border: 0;
+  border-radius: var(--mc-radius-pill);
+  cursor: pointer;
+}
+
+.attachment-card .composer-attachment__remove:hover,
+.attachment-card .composer-attachment__retry:hover {
+  color: var(--mc-color-text-primary);
+  background: var(--mc-color-state-hover);
+}
+
+.attachment-card .composer-attachment__remove svg,
+.attachment-card .composer-attachment__retry svg {
+  width: 14px;
+  height: 14px;
+}
+
+.attachment-card-list--message .attachment-card .composer-attachment__remove,
+.attachment-card-list--queue .attachment-card .composer-attachment__remove {
+  display: none;
+}
+
+.attachment-card-list--message .attachment-card[data-kind='file'],
+.attachment-card-list--queue .attachment-card[data-kind='file'] {
+  grid-template-columns: 16px minmax(0, 1fr);
+  padding-right: 8px;
+}
+
+.attachment-card-list--message .attachment-card[data-kind='image'],
+.attachment-card-list--queue .attachment-card[data-kind='image'] {
+  cursor: zoom-in;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .attachment-card-list,
+  .attachment-card {
+    scroll-behavior: auto;
+  }
+}

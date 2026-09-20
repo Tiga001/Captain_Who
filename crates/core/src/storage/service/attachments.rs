@@ -712,6 +712,7 @@ impl StorageService {
                     size_bytes: bytes.len() as u64,
                     encoding: AgentInputAttachmentEncoding::Base64,
                     data: base64::engine::general_purpose::STANDARD.encode(bytes),
+                    content_sha256: None,
                     truncated: None,
                 })
             })

@@ -75,6 +75,9 @@ pub struct AgentInputAttachment {
     pub size_bytes: u64,
     pub encoding: AgentInputAttachmentEncoding,
     pub data: String,
+    /// Streamed content identity assigned by the managed attachment importer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_sha256: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub truncated: Option<bool>,
 }

@@ -540,6 +540,7 @@ fn attachment_context_does_not_decode_skill_gated_office_payloads() {
         size_bytes: 10,
         encoding: AgentInputAttachmentEncoding::Managed,
         data: "unread-managed-reference".to_string(),
+        content_sha256: None,
         truncated: None,
     };
     let library = runtime_attachment_library(std::slice::from_ref(&attachment));
@@ -562,6 +563,7 @@ fn attachment_context_routes_pdf_without_decoding_its_payload() {
         size_bytes: 10,
         encoding: AgentInputAttachmentEncoding::Managed,
         data: "unread-managed-reference".to_string(),
+        content_sha256: None,
         truncated: None,
     };
     let library = runtime_attachment_library(std::slice::from_ref(&attachment));
@@ -838,6 +840,7 @@ async fn managed_initial_and_steer_images_survive_durable_history_reconstruction
             size_bytes: bytes.len() as u64,
             encoding: AgentInputAttachmentEncoding::Managed,
             data: format!("opaque-import-{index}"),
+            content_sha256: None,
             truncated: None,
         });
     }

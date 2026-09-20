@@ -1217,6 +1217,7 @@ mod attachment_budget_tests {
             size_bytes,
             encoding: mycopilot_core::AgentInputAttachmentEncoding::Base64,
             data: String::new(),
+            content_sha256: None,
             truncated: None,
         }
     }

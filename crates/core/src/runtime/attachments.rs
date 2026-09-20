@@ -251,6 +251,7 @@ pub(super) fn normalize_attachment_context_images(
             size_bytes: prepared.bytes.len() as u64,
             encoding: AgentInputAttachmentEncoding::Base64,
             data: base64::engine::general_purpose::STANDARD.encode(&prepared.bytes),
+            content_sha256: None,
             truncated: None,
         });
     }
@@ -604,6 +605,7 @@ mod tests {
             size_bytes: bytes.len() as u64,
             encoding: AgentInputAttachmentEncoding::Managed,
             data: "opaque-import-id".into(),
+            content_sha256: None,
             truncated: None,
         };
         let library = AgentAttachmentLibraryContext {

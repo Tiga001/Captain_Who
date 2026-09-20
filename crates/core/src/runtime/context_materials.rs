@@ -83,6 +83,7 @@ mod tests {
             size_bytes: 3,
             encoding: crate::AgentInputAttachmentEncoding::Base64,
             data: "YWJj".to_string(),
+            content_sha256: None,
             truncated: None,
         });
         let mut message = LlmMessage::text(LlmMessageRole::User, "two images");

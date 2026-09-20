@@ -27,7 +27,8 @@ beforeEach(() => {
   host.finishImport.mockImplementation(async (): Promise<AgentInputAttachment> => ({
     ...metadata,
     encoding: 'managed',
-    data: 'managed-import'
+    data: 'managed-import',
+    contentSha256: `sha256:${'a'.repeat(64)}`
   }))
   host.cancelImport.mockResolvedValue(undefined)
 })

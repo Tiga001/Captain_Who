@@ -27,14 +27,10 @@ import { getUniqueWebSearchSources } from '../agentWebSearch'
 import { getFinalTimeline } from '../../agentRun/messageTimeline'
 import { loadComposerAttachmentImage, stripAttachmentSummary } from '../chatAttachments'
 import { useComposerAttachmentPreviews } from '../useAttachmentImports'
-import {
-  getAttachmentBadgeLabel,
-  getAttachmentExtension,
-  getAttachmentIcon,
-  getAttachmentPreviewUrl
-} from '../attachmentDisplay'
+import { getAttachmentPreviewUrl } from '../attachmentDisplay'
 import { loadAttachmentImage } from '../../storage/storageClient'
 import { ChatMarkdown } from './ChatMarkdown'
+import { ComposerAttachments, type ComposerAttachmentPresentation } from './ComposerAttachments'
 import { HumanInteractionAnswerContent } from '../../humanInteraction/HumanInteractionAnswerContent'
 import {
   HumanInteractionTimelineEntry,
@@ -1244,9 +1240,6 @@ function MessageAttachments({
   )
   if (!attachments?.length) return null
 
-  const imageAttachments = attachments.filter((attachment) => attachment.kind === 'image')
-  const fileAttachments = attachments.filter((attachment) => attachment.kind !== 'image')
-
   const openOriginalImageAttachment = async (
     attachment: NonNullable<ChatMessage['attachments']>[number]
   ) => {
@@ -1287,64 +1280,26 @@ function MessageAttachments({
     }
   }
 
-  const renderAttachment = (attachment: NonNullable<ChatMessage['attachments']>[number]) => {
-    const extension = getAttachmentExtension(attachment.name)
-    const AttachmentIcon = getAttachmentIcon(attachment.kind, extension)
-    const badgeLabel = getAttachmentBadgeLabel(extension)
-    const previewUrl = getAttachmentPreviewUrl(attachment) ?? previewUrls.get(attachment.id)
-    const isImagePreview = attachment.kind === 'image' && Boolean(previewUrl)
-
-    if (isImagePreview) {
-      return (
-        <button
-          className="chat-message-attachment"
-          data-chat-attachment-id={attachment.id}
-          data-chat-attachment-message-id={messageId}
-          data-kind="image"
-          key={attachment.id}
-          onClick={() => void openOriginalImageAttachment(attachment)}
-          title={attachment.name}
-          type="button"
-        >
-          <img src={previewUrl} alt={attachment.name} />
-        </button>
-      )
-    }
-
-    return (
-      <div
-        className="chat-message-attachment"
-        data-chat-attachment-id={attachment.id}
-        data-chat-attachment-message-id={messageId}
-        data-kind="file"
-        key={attachment.id}
-        title={attachment.name}
-      >
-        <span className="chat-message-attachment__icon" aria-hidden="true">
-          {badgeLabel ? (
-            <span className="chat-message-attachment__badge">{badgeLabel}</span>
-          ) : (
-            <AttachmentIcon />
-          )}
-        </span>
-        <span className="chat-message-attachment__name">{attachment.name}</span>
-      </div>
-    )
-  }
+  const displayAttachments: ComposerAttachmentPresentation[] = attachments.map((attachment) => ({
+    id: attachment.id,
+    kind: attachment.kind,
+    name: attachment.name,
+    sizeBytes: attachment.sizeBytes,
+    previewUrl: getAttachmentPreviewUrl(attachment) ?? previewUrls.get(attachment.id)
+  }))
 
   return (
-    <div className="chat-message__attachments" aria-label={t('chat.attachments')}>
-      {imageAttachments.length > 0 && (
-        <div className="chat-message__attachment-row" data-kind="image">
-          {imageAttachments.map(renderAttachment)}
-        </div>
-      )}
-      {fileAttachments.length > 0 && (
-        <div className="chat-message__attachment-row" data-kind="file">
-          {fileAttachments.map(renderAttachment)}
-        </div>
-      )}
-    </div>
+    <ComposerAttachments
+      attachments={displayAttachments}
+      label={t('chat.attachments')}
+      messageId={messageId}
+      onPreviewAttachment={(id) => {
+        const attachment = attachments.find((candidate) => candidate.id === id)
+        if (attachment) void openOriginalImageAttachment(attachment)
+      }}
+      removeLabel=""
+      variant="message"
+    />
   )
 }
 

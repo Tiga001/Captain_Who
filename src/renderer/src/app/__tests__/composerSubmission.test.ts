@@ -17,8 +17,8 @@ const submitted = createComposerDraft({
       name: 'old.txt',
       mimeType: 'text/plain',
       sizeBytes: 1,
-      encoding: 'base64',
-      data: 'YQ=='
+      encoding: 'managed',
+      data: 'import-old'
     }
   ],
   updatedAt: 1
@@ -64,7 +64,7 @@ describe('composer submission ownership', () => {
     })
     expect(restored.queuedMessages).toEqual([
       expect.objectContaining({
-        content: expect.stringContaining('new message'),
+        content: 'new message',
         modelId: newer.modelId,
         permissionMode: newer.permissionMode,
         projectId: newer.projectId,

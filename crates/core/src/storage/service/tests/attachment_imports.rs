@@ -97,6 +97,11 @@ fn managed_attachment_import_is_chunked_durable_and_saved_without_inline_payload
     }
     let attachment = service.finish_attachment_import(&import_id).unwrap();
     assert_eq!(attachment.encoding, AgentInputAttachmentEncoding::Managed);
+    assert!(attachment.content_sha256.as_deref().is_some_and(|digest| {
+        digest.len() == 71
+            && digest.starts_with("sha256:")
+            && digest[7..].bytes().all(|byte| byte.is_ascii_hexdigit())
+    }));
     assert!(serde_json::to_string(&attachment).unwrap().len() < 512);
     drop(service);
     let service = fixture.service();

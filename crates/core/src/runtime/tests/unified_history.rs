@@ -310,6 +310,7 @@ fn historical_image_references_restore_exact_order_without_persisting_bytes() {
             size_bytes: 3,
             encoding: AgentInputAttachmentEncoding::Base64,
             data: "YWJj".into(),
+            content_sha256: None,
             truncated: None,
         },
         AgentInputAttachment {
@@ -320,6 +321,7 @@ fn historical_image_references_restore_exact_order_without_persisting_bytes() {
             size_bytes: 3,
             encoding: AgentInputAttachmentEncoding::Base64,
             data: "ZGVm".into(),
+            content_sha256: None,
             truncated: None,
         },
     ];

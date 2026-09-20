@@ -204,6 +204,7 @@ fn user_guidance_is_canonical_ordered_and_never_persists_attachment_bytes() {
                 size_bytes: 6,
                 encoding: crate::protocol::AgentInputAttachmentEncoding::Base64,
                 data: "c2VjcmV0".to_string(),
+                content_sha256: None,
                 truncated: None,
             }],
             42,
