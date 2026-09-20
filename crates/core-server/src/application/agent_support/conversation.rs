@@ -420,6 +420,23 @@ fn prepare_conversation_turn_from_source(
     let assistant_message_id = normalized_optional(input.assistant_message_id.as_deref())
         .unwrap_or_else(|| create_id("message"));
 
+    // A rejected queued guidance message can be restored to the composer with the same managed
+    // attachment ids. Give the new message fresh durable attachment identities before building
+    // its persisted projection; otherwise save_input_attachments would move the old row while
+    // its guidance-ownership journal still points at the rejected message.
+    if rewrite.is_none()
+        && matches!(
+            &source,
+            ConversationTurnInputSource::Human | ConversationTurnInputSource::HumanResponse(_)
+        )
+    {
+        storage.rebind_input_attachment_ids(
+            &conversation_id,
+            &user_message_id,
+            &mut input.attachments,
+        )?;
+    }
+
     if matches!(
         &source,
         ConversationTurnInputSource::ExistingAgentProjection { .. }

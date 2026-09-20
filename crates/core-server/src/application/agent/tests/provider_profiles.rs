@@ -689,6 +689,111 @@ async fn ordinary_root_turn_is_durable_before_its_terminal_event() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ordinary_turn_rebinds_an_attachment_reused_by_a_prior_message() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let model_server = tokio::spawn(async move {
+        for answer in ["Original answer.", "Retried answer."] {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let _ = read_provider_request(&mut stream).await;
+            write_provider_stream(
+                &mut stream,
+                json!({ "role": "assistant", "content": answer }),
+                "stop",
+            )
+            .await;
+        }
+    });
+
+    let fixture = tempdir().unwrap();
+    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    save_provider_profile_fixture(
+        &storage,
+        &format!("http://{address}/v1/chat/completions"),
+        None,
+    );
+    let service =
+        AgentService::try_new_with_startup_reconciliation(Arc::clone(&storage), false, None)
+            .unwrap();
+    service.grant_execution_access_for_test();
+
+    let import_id = storage
+        .begin_attachment_import(mycopilot_core::AttachmentImportInput {
+            id: "rebind-source".to_string(),
+            kind: mycopilot_core::AgentInputAttachmentKind::File,
+            name: "queued.txt".to_string(),
+            mime_type: Some("text/plain".to_string()),
+            size_bytes: 14,
+        })
+        .unwrap();
+    storage
+        .append_attachment_import(
+            &import_id,
+            0,
+            &base64::Engine::encode(
+                &base64::engine::general_purpose::STANDARD,
+                b"queued payload",
+            ),
+        )
+        .unwrap();
+    let source_attachment = storage.finish_attachment_import(&import_id).unwrap();
+
+    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let mut original = turn_input("model-1");
+    original.conversation_id = Some("conversation-rebind-integration".to_string());
+    original.user_message_id = Some("rebind-original-user".to_string());
+    original.assistant_message_id = Some("rebind-original-assistant".to_string());
+    original.attachments = vec![source_attachment.clone()];
+    original.content = "Original prompt".to_string();
+    let original_turn = service
+        .start_conversation_turn(original, notifications)
+        .unwrap();
+    assert_eq!(
+        collect_until_done(&mut receiver).await.last().unwrap()["params"]["status"],
+        "completed"
+    );
+
+    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let mut retry = turn_input("model-1");
+    retry.conversation_id = Some(original_turn.conversation_id.clone());
+    retry.user_message_id = Some("rebind-retry-user".to_string());
+    retry.assistant_message_id = Some("rebind-retry-assistant".to_string());
+    retry.attachments = vec![source_attachment.clone()];
+    retry.content = "Retry prompt".to_string();
+    let retry_turn = service
+        .start_conversation_turn(retry, notifications)
+        .unwrap();
+    assert_eq!(
+        collect_until_done(&mut receiver).await.last().unwrap()["params"]["status"],
+        "completed"
+    );
+
+    let conversation = storage
+        .load_conversation(&original_turn.conversation_id)
+        .unwrap()
+        .unwrap();
+    let original_message = conversation
+        .messages
+        .iter()
+        .find(|message| message.id == original_turn.user_message_id)
+        .unwrap();
+    let retry_message = conversation
+        .messages
+        .iter()
+        .find(|message| message.id == retry_turn.user_message_id)
+        .unwrap();
+    assert_eq!(original_message.attachments[0].id, source_attachment.id);
+    assert_ne!(retry_message.attachments[0].id, source_attachment.id);
+    assert_eq!(retry_message.attachments[0].name, source_attachment.name);
+    assert_eq!(
+        retry_message.attachments[0].size_bytes,
+        source_attachment.size_bytes
+    );
+
+    model_server.await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rewrite_turn_is_atomic_replayable_and_runs_with_only_the_active_context() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();

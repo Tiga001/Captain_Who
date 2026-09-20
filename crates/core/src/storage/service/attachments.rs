@@ -482,6 +482,57 @@ impl StorageService {
         database_result
     }
 
+    /// Gives a newly admitted message its own attachment identity when the client is retrying
+    /// an attachment that was already persisted on another message (for example, a rejected
+    /// queued guidance message being sent again). Attachment ids are global database keys and
+    /// their guidance ownership is immutable; reusing one here would move the old row and leave
+    /// the new message without library authorization. The managed import reference in `data` is
+    /// intentionally retained so the file bytes are copied from the already authenticated import.
+    pub fn rebind_input_attachment_ids(
+        &self,
+        conversation_id: &str,
+        message_id: &str,
+        attachments: &mut [AgentInputAttachment],
+    ) -> Result<(), String> {
+        if attachments.is_empty() {
+            return Ok(());
+        }
+
+        let connection = self.state.connection()?;
+        let mut used_ids = attachments
+            .iter()
+            .map(|attachment| attachment.id.clone())
+            .collect::<HashSet<_>>();
+
+        for attachment in attachments {
+            let Some(existing) = attachment_repository::get_attachment(&connection, &attachment.id)
+                .map_err(storage_error)?
+            else {
+                continue;
+            };
+            if existing.conversation_id == conversation_id && existing.message_id == message_id {
+                continue;
+            }
+
+            let replacement_id = loop {
+                let candidate = format!("attachment-{}", Uuid::new_v4());
+                if used_ids.contains(&candidate) {
+                    continue;
+                }
+                if attachment_repository::get_attachment(&connection, &candidate)
+                    .map_err(storage_error)?
+                    .is_none()
+                {
+                    break candidate;
+                }
+            };
+            used_ids.insert(replacement_id.clone());
+            attachment.id = replacement_id;
+        }
+
+        Ok(())
+    }
+
     /// Persists every guidance attachment and its ownership journal before queue admission.
     ///
     /// Files are written first, then attachment rows, guidance identity, and ownership rows commit

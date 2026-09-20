@@ -390,14 +390,18 @@ function GuidanceTimelineItemView({
       data-status={item.status}
       title={item.status === 'rejected' ? item.error : undefined}
     >
-      <div className="chat-guidance__bubble">
+      {item.attachments.length > 0 && (
         <MessageAttachments attachments={item.attachments} messageId={item.id} mode={mode} />
-        {humanAnswer ? (
-          <HumanInteractionAnswerContent display={humanAnswer} />
-        ) : (
-          content && <ChatMarkdown content={content} />
-        )}
-      </div>
+      )}
+      {(humanAnswer || content) && (
+        <div className="chat-guidance__bubble">
+          {humanAnswer ? (
+            <HumanInteractionAnswerContent display={humanAnswer} />
+          ) : (
+            <ChatMarkdown content={content} />
+          )}
+        </div>
+      )}
       {!humanAnswer && statusLabel && <span className="chat-guidance__status">{statusLabel}</span>}
     </div>
   )

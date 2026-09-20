@@ -4015,6 +4015,18 @@ describe('running conversation guidance queue', () => {
       .element(screen.getByTestId('guidance-timeline'))
       .toHaveTextContent('client-queue-second:queued')
 
+    // A synchronous human-input pause must keep the already inserted guidance in the
+    // assistant timeline. The backend handoff intentionally emits no guidance_rejected event.
+    emitAgentEvent({
+      type: 'done',
+      runId: 'run-1',
+      success: true,
+      status: 'waiting_for_user_input'
+    })
+    await expect
+      .element(screen.getByTestId('guidance-timeline'))
+      .toHaveTextContent('client-queue-second:queued')
+
     emitAgentEvent({
       type: 'guidance_applied',
       runId: 'run-1',

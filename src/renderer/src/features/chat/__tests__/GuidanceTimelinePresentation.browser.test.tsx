@@ -144,6 +144,34 @@ describe('mid-turn guidance Timeline presentation', () => {
     expect(firstGuidance).toBeLessThan(secondGuidance)
     expect(secondGuidance).toBeLessThan(finalAnswer)
   })
+
+  it('keeps guidance attachments outside the text bubble like ordinary user messages', async () => {
+    const message = settledGuidanceMessage(false)
+    const guidance = message.agentRun!.timeline.find(
+      (item) => item.type === 'user_guidance' && item.guidanceId === 'guidance-1'
+    )
+    if (!guidance || guidance.type !== 'user_guidance') throw new Error('guidance fixture missing')
+    guidance.attachments = [
+      {
+        id: 'guidance-report',
+        kind: 'file',
+        name: 'report.pdf',
+        mimeType: 'application/pdf',
+        sizeBytes: 1024
+      }
+    ]
+
+    const screen = await renderMessage(message)
+    const guidanceRoot = screen.container.querySelector<HTMLElement>(
+      '.chat-guidance[data-status="applied"]'
+    )
+    expect(guidanceRoot).not.toBeNull()
+    const cards = guidanceRoot!.querySelector('.attachment-card-list--message')
+    const bubble = guidanceRoot!.querySelector('.chat-guidance__bubble')
+    expect(cards?.parentElement).toBe(guidanceRoot)
+    expect(bubble?.querySelector('.attachment-card')).toBeNull()
+    expect(bubble?.textContent).toContain('第一条追加消息')
+  })
 })
 
 describe('pending interaction Timeline chronology', () => {

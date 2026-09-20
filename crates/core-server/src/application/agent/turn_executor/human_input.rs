@@ -9,6 +9,7 @@ struct StoredBlockingHumanInput {
     service: AgentService,
     input: AgentChatInput,
     token: AgentCancellationToken,
+    steer_input: AgentSteerInputQueue,
     notifications: CoreServerNotificationSender,
     predecessor: Option<HumanInteractionSyncBinding>,
     approval_predecessor: Option<(PendingActionRecord, PendingActionStatus)>,
@@ -143,15 +144,28 @@ impl mycopilot_core::AgentHumanInteractionRuntimeHost for StoredBlockingHumanInp
                 current.snapshot.status = *target;
             }
         }
-        // A rejected admission leaves the current segment steerable. Once committed, Runtime
-        // must suspend even if this rebuildable process-control cleanup reports an error.
-        if let Err(error) = self.service.close_active_run_steering(
-            &suspension.run_id,
-            AgentSteerRunRejectionCode::RunNotSteerable,
-            "The agent is waiting for human input and no longer accepts guidance.",
-            &self.notifications,
-        ) {
-            eprintln!("failed to close steering after committed human suspension: {error}");
+        // A synchronous question pauses sampling, but it does not invalidate guidance that was
+        // already accepted by this logical Run. Transfer that FIFO inbox to the answer
+        // continuation before the retiring Runtime segment drops its queue; otherwise the normal
+        // close path would mark each queued guidance rejected and the renderer would restore it
+        // to the composer.
+        if self
+            .service
+            .handoff_active_run_steering(&suspension.run_id, &self.steer_input)
+            .is_none()
+        {
+            // Admission succeeded, but the queue owner changed concurrently (for example Stop).
+            // Keep the existing terminal settlement path for this exceptional case rather than
+            // leaving a durable queued guidance without an owner.
+            if let Err(error) = self.service.close_active_run_steering(
+                &suspension.run_id,
+                AgentSteerRunRejectionCode::RunNotSteerable,
+                "The agent is waiting for human input and no longer accepts guidance.",
+                &self.notifications,
+            ) {
+                eprintln!("failed to settle steering after committed human suspension: {error}");
+            }
+            return Err(fail("question steering owner changed during suspension".into()));
         }
         self.service
             .seed_trace_snapshot_from_checkpoint(&suspension.run_id, Some(&suspension.checkpoint));
@@ -446,7 +460,7 @@ impl AgentService {
         }
         // Publish accepting control only after every fallible preparation step and the durable
         // execution CAS. A refused claim otherwise leaves a queue with no worker to drain it.
-        let steer_input = self.register_active_run_control(
+        let steer_input = self.resume_active_run_control(
             &binding.run_id,
             &binding.conversation_id,
             &binding.assistant_message_id,

@@ -467,6 +467,7 @@ impl AgentService {
                     service: self.clone(),
                     input: agent_input.clone(),
                     token: cancellation_token.clone(),
+                    steer_input: steer_input.clone(),
                     notifications: notifications.clone(),
                     predecessor: human_binding.clone(),
                     approval_predecessor: human_approval_predecessor,

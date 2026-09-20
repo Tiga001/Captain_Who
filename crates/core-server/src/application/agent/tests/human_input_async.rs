@@ -1469,6 +1469,18 @@ async fn assert_suspended_async_delivery(sync: bool, queued_before_pause: bool) 
         })
         .await;
     fixture.released(&turn.run_id).await;
+    if sync && queued_before_pause {
+        let waiting_guidance = fixture
+            .storage
+            .load_agent_run_guidance(&previous_guidance[0].guidance_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            waiting_guidance.status,
+            AgentGuidanceStatus::Queued,
+            "a synchronous question must hand off accepted guidance instead of rejecting it"
+        );
+    }
     let submitted = before_pause.unwrap_or_else(|| fixture.submit(&asynchronous, false));
     fixture.no_request().await;
     assert_eq!(
@@ -1480,12 +1492,12 @@ async fn assert_suspended_async_delivery(sync: bool, queued_before_pause: bool) 
             .delivery
             .unwrap()
             .status,
-        if sync {
-            HumanInteractionDeliveryStatus::Pending
-        } else {
+        if queued_before_pause || !sync {
             HumanInteractionDeliveryStatus::Bound
+        } else {
+            HumanInteractionDeliveryStatus::Pending
         },
-        "approval retains the inbox while a synchronous pause keeps answers pending"
+        "a guidance-bound answer remains bound while the run is paused"
     );
     if sync {
         let blocking = fixture
@@ -1518,14 +1530,7 @@ async fn assert_suspended_async_delivery(sync: bool, queued_before_pause: bool) 
             .load_agent_run_guidance(&previous_guidance[0].guidance_id)
             .unwrap()
             .unwrap();
-        assert_eq!(
-            old.status,
-            if sync {
-                AgentGuidanceStatus::Rejected
-            } else {
-                AgentGuidanceStatus::Applied
-            }
-        );
+        assert_eq!(old.status, AgentGuidanceStatus::Applied);
         let trace = fixture
             .storage
             .get_conversation_turn_trace(ASSISTANT)
@@ -1540,11 +1545,7 @@ async fn assert_suspended_async_delivery(sync: bool, queued_before_pause: bool) 
             })
             .collect::<Vec<_>>();
         assert_eq!(applied_ids.len(), 1);
-        if sync {
-            assert_ne!(applied_ids[0], &previous_guidance[0].guidance_id);
-        } else {
-            assert_eq!(applied_ids[0], &previous_guidance[0].guidance_id);
-        }
+        assert_eq!(applied_ids[0], &previous_guidance[0].guidance_id);
     }
     assert_eq!(fixture.messages().len(), 2);
     fixture.usage(3);

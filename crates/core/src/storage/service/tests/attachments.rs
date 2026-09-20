@@ -98,6 +98,97 @@ fn input_attachments_are_persisted_and_rehydrated() {
 }
 
 #[test]
+fn rebinds_an_attachment_reused_by_a_new_message_without_moving_old_ownership() {
+    let fixture = StorageFixture::new();
+    let service = fixture.service();
+    let mut conversation =
+        conversation("conversation-rebind", Some("project-1"), "message-original");
+    conversation.messages.push(ChatMessageRecord {
+        human_interaction_response: None,
+        id: "assistant-original".to_string(),
+        role: "assistant".to_string(),
+        content: String::new(),
+        created_at: 2,
+        status: Some("pending".to_string()),
+        attachments: Vec::new(),
+        agent_run_json: None,
+        ui_state_json: None,
+    });
+    service.save_conversation(conversation).unwrap();
+
+    let original = input_attachment(
+        &service,
+        "attachment-rebind-source",
+        AgentInputAttachmentKind::File,
+        "notes.txt",
+        Some("text/plain"),
+        b"reused attachment",
+    );
+    service
+        .store_agent_run_guidance_with_attachments(
+            AgentRunGuidanceRecord {
+                guidance_id: "guidance-rebind-source".to_string(),
+                client_message_id: "client-rebind-source".to_string(),
+                run_id: "run-rebind-source".to_string(),
+                conversation_id: "conversation-rebind".to_string(),
+                assistant_message_id: "assistant-original".to_string(),
+                content: "Queued guidance with attachment".to_string(),
+                status: crate::AgentGuidanceStatus::Queued,
+                attachment_ids: vec![original.id.clone()],
+                applied_trace_sequence: None,
+                terminal_reason: None,
+                created_at: 10,
+                updated_at: 10,
+            },
+            Some("project-1"),
+            std::slice::from_ref(&original),
+        )
+        .unwrap();
+    service
+        .mark_agent_run_guidance_terminal(
+            "guidance-rebind-source",
+            crate::AgentGuidanceStatus::Rejected,
+            "run interrupted",
+            11,
+        )
+        .unwrap();
+
+    let mut retry = vec![original.clone()];
+    service
+        .rebind_input_attachment_ids("conversation-rebind", "message-retry", &mut retry)
+        .unwrap();
+    assert_ne!(retry[0].id, original.id);
+    assert_eq!(retry[0].data, original.data);
+    service
+        .save_input_attachments(
+            "conversation-rebind",
+            "message-retry",
+            Some("project-1"),
+            &retry,
+            11,
+        )
+        .unwrap();
+
+    let connection = service.state.connection().unwrap();
+    let source = attachment_repository::get_attachment(&connection, &original.id)
+        .unwrap()
+        .unwrap();
+    let rebound = attachment_repository::get_attachment(&connection, &retry[0].id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(source.message_id, "assistant-original");
+    assert_eq!(rebound.message_id, "message-retry");
+    drop(connection);
+    assert_eq!(resolved_payload(&service, &retry[0]), b"reused attachment");
+
+    let mut same_message = retry.clone();
+    service
+        .rebind_input_attachment_ids("conversation-rebind", "message-retry", &mut same_message)
+        .unwrap();
+    assert_eq!(same_message[0].id, retry[0].id);
+}
+
+#[test]
 fn projectless_agent_tree_shares_attachments_without_leaking_to_other_conversations() {
     let fixture = StorageFixture::new();
     let service = fixture.service();
