@@ -92,10 +92,20 @@ export class CoreJsonRpcClient {
       console.error(`[core-server] ${chunk.toString()}`)
     })
 
-    this.child.on('error', (error) => this.rejectAll(error))
-    this.child.on('exit', (code, signal) => {
+    const child = this.child
+    const handleChildFailure = (error: Error): void => {
+      // The child can close stdin just before Node delivers its `exit` event. Treat both
+      // notifications as the same failure and, importantly, consume stdin's `error` event so an
+      // EPIPE cannot become an uncaught main-process exception while a startup request is in flight.
+      if (this.child !== child) return
       this.child = null
-      this.rejectAll(
+      this.rejectAll(error)
+    }
+
+    child.stdin.on('error', (error) => handleChildFailure(error))
+    child.on('error', (error) => handleChildFailure(error))
+    child.on('exit', (code, signal) => {
+      handleChildFailure(
         new Error(`core-server exited with code ${code ?? 'null'} and signal ${signal ?? 'null'}`)
       )
     })
@@ -165,6 +175,11 @@ export class CoreJsonRpcClient {
       throw new Error('core-server is not running')
     }
 
+    const child = this.child
+    if (!child) {
+      throw new Error('core-server is not running')
+    }
+
     const id = this.nextId++
     const request: JsonRpcRequest<TParams> = {
       jsonrpc: '2.0',
@@ -179,7 +194,7 @@ export class CoreJsonRpcClient {
         reject
       })
 
-      this.child?.stdin.write(`${JSON.stringify(request)}\n`, (error) => {
+      child.stdin.write(`${JSON.stringify(request)}\n`, (error) => {
         if (!error) {
           return
         }

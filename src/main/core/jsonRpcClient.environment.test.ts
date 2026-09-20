@@ -159,6 +159,19 @@ describe('CoreJsonRpcClient application data root', () => {
     client.stop()
   })
 
+  it('rejects pending requests when Core closes stdin without raising an uncaught EPIPE', async () => {
+    const client = new CoreJsonRpcClient({ appDataRoot: resolve('fixtures', 'stdin-failure') })
+    client.start()
+    const child = spawnProcess.mock.results[0]?.value as FakeCoreProcess
+    const response = client.request<{ alive: boolean }>('core.ping', {})
+    const error = new Error('write EPIPE')
+
+    child.stdin.emit('error', error)
+
+    await expect(response).rejects.toBe(error)
+    expect(client.isRunning()).toBe(false)
+  })
+
   it('never lazily restarts Core after explicit shutdown admission closes', async () => {
     const client = new CoreJsonRpcClient({ appDataRoot: resolve('fixtures', 'shutdown-fence') })
     client.start()
