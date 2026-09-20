@@ -3,7 +3,7 @@ use rusqlite::{params, StatementStatus};
 
 fn v47_connection() -> Connection {
     let connection = Connection::open_in_memory().unwrap();
-    let old_schema = CANONICAL_SCHEMA.replace(
+    let old_schema = canonical_schema_v48().replace(
         HISTORY_SEARCH_INDEX_V48,
         include_str!("test_fixtures/history_search_v47.sql"),
     );
@@ -61,13 +61,169 @@ fn assert_index_agrees(connection: &Connection) {
     ensure_foreign_keys_are_valid(connection).unwrap();
 }
 
+fn v48_connection() -> Connection {
+    let connection = Connection::open_in_memory().unwrap();
+    connection.execute_batch(&canonical_schema_v48()).unwrap();
+    connection
+        .pragma_update(None, "foreign_keys", true)
+        .unwrap();
+    connection.pragma_update(None, "user_version", 48).unwrap();
+    assert_eq!(
+        schema_fingerprint(&connection).unwrap(),
+        V48_SCHEMA_FINGERPRINT
+    );
+    connection
+}
+
+fn seed_guidance(connection: &Connection) {
+    connection
+        .execute_batch(
+            "INSERT INTO conversations(id,title,created_at,updated_at)
+             VALUES ('guidance-chat','附件引导',1,2);
+             INSERT INTO messages(id,conversation_id,role,content,status,created_at,position)
+             VALUES ('guidance-assistant','guidance-chat','assistant','等待输入','pending',2,0);
+             INSERT INTO attachments(
+                 id,conversation_id,message_id,project_id,kind,original_name,mime_type,
+                 size_bytes,storage_rel_path,created_at
+             ) VALUES (
+                 'guidance-attachment','guidance-chat','guidance-assistant',NULL,'file',
+                 'notes.txt','text/plain',5,'attachments/guidance-attachment',2
+             );
+             INSERT INTO agent_run_guidances(
+                 guidance_id,client_message_id,run_id,conversation_id,assistant_message_id,
+                 content,status,applied_trace_sequence,terminal_reason,created_at,updated_at
+             ) VALUES (
+                 'guidance-legacy','client-legacy','run-guidance','guidance-chat',
+                 'guidance-assistant','查看这个文件','queued',NULL,NULL,3,3
+             );
+             INSERT INTO agent_run_guidance_attachments(guidance_id,attachment_id,position)
+             VALUES ('guidance-legacy','guidance-attachment',0);",
+        )
+        .unwrap();
+}
+
+#[test]
+fn exact_v48_rebuilds_guidance_table_without_losing_owned_attachments_or_constraints() {
+    let connection = v48_connection();
+    seed_guidance(&connection);
+
+    run_migrations(&connection).unwrap();
+
+    assert_eq!(
+        read_schema_version(&connection).unwrap(),
+        STORAGE_SCHEMA_VERSION
+    );
+    assert_eq!(
+        schema_fingerprint(&connection).unwrap(),
+        CANONICAL_SCHEMA_FINGERPRINT
+    );
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT content FROM agent_run_guidances WHERE guidance_id='guidance-legacy'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+        "查看这个文件"
+    );
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT attachment_id FROM agent_run_guidance_attachments
+                 WHERE guidance_id='guidance-legacy'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+        "guidance-attachment"
+    );
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_foreign_key_list('agent_run_guidance_attachments')
+                 WHERE \"table\"='agent_run_guidances'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_foreign_key_list('human_interaction_async_bindings')
+                 WHERE \"table\"='agent_run_guidances'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        connection
+            .pragma_query_value(None, "foreign_keys", |row| row.get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    for object in [
+        "idx_agent_run_guidances_run_status",
+        "idx_agent_run_guidances_conversation",
+        "human_interaction_async_guidance_proof",
+        "human_interaction_async_guidance_applied",
+        "human_interaction_async_guidance_unconsumed",
+    ] {
+        assert!(
+            connection
+                .query_row(
+                    "SELECT 1 FROM sqlite_schema WHERE name=?1",
+                    [object],
+                    |_| Ok(()),
+                )
+                .is_ok(),
+            "missing migrated schema object {object}"
+        );
+    }
+    ensure_foreign_keys_are_valid(&connection).unwrap();
+
+    // The database now accepts the attachment-only representation. Application-layer validation
+    // still decides whether an empty body without attachments is admissible.
+    connection
+        .execute(
+            "INSERT INTO agent_run_guidances(
+                 guidance_id,client_message_id,run_id,conversation_id,assistant_message_id,
+                 content,status,applied_trace_sequence,terminal_reason,created_at,updated_at
+             ) VALUES ('guidance-empty','client-empty','run-empty','guidance-chat',
+                       'guidance-assistant','','queued',NULL,NULL,4,4)",
+            [],
+        )
+        .unwrap();
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT content FROM agent_run_guidances WHERE guidance_id='guidance-empty'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+        ""
+    );
+
+    let changes = connection.total_changes();
+    run_migrations(&connection).unwrap();
+    assert_eq!(connection.total_changes(), changes);
+}
+
 #[test]
 fn exact_v47_upgrades_without_rewriting_history_or_search_content_and_reopens() {
     let connection = v47_connection();
     seed_history(&connection);
     let before = fts_snapshot(&connection);
     run_migrations(&connection).unwrap();
-    assert_eq!(read_schema_version(&connection).unwrap(), 48);
+    assert_eq!(
+        read_schema_version(&connection).unwrap(),
+        STORAGE_SCHEMA_VERSION
+    );
     assert_eq!(fts_snapshot(&connection), before);
     assert_index_agrees(&connection);
     assert_eq!(

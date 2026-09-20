@@ -217,7 +217,7 @@ const smokeSteps = [
   },
   {
     label:
-      'storage: canonical v48, atomic exact v47 index upgrade, older versions require reset, and atomic fresh creation',
+      'storage: canonical v49, atomic exact v47 to v48 to v49 upgrade, older versions require reset, and atomic fresh creation',
     command: ['cargo', 'test', '--locked', '-p', 'mycopilot-core', '--lib', 'storage::migrations::']
   },
   {

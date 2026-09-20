@@ -468,7 +468,7 @@ fn validate_new_record(record: &AgentRunGuidanceRecord) -> rusqlite::Result<()> 
         || record.run_id.trim().is_empty()
         || record.conversation_id.trim().is_empty()
         || record.assistant_message_id.trim().is_empty()
-        || record.content.trim().is_empty()
+        || (record.content.trim().is_empty() && record.attachment_ids.is_empty())
         || record.status != AgentGuidanceStatus::Queued
         || record.applied_trace_sequence.is_some()
         || record.terminal_reason.is_some()

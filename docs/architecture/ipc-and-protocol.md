@@ -148,7 +148,7 @@ Automation 在 UI 中名为 `Scheduled`，协议、代码和本文均使用 Auto
 - `AUTOMATION_PERMISSION_MODE_VERSION = 2`；
 - Automation JSON-RPC error code `-32045`，结构化 `data.type = automation`。
 
-这些都是 transport/domain envelope 版本，不是 SQLite schema。当前 canonical SQLite schema 是 v48，由 Rust Core storage 独立校验；Renderer、Preload 和 Main 不读取、协商或转发数据库 schema version。
+这些都是 transport/domain envelope 版本，不是 SQLite schema。当前 canonical SQLite schema 是 v49，由 Rust Core storage 独立校验；Renderer、Preload 和 Main 不读取、协商或转发数据库 schema version。
 
 Renderer-facing `AutomationsHostApi` 暴露十个 request：
 
@@ -229,7 +229,7 @@ picker 只授予对应操作所需的最小能力。“用户选择了路径”�
 7. 订阅必须可解除，迟到事件必须通过身份和 generation 拒绝。
 8. 通用 Notification delivery Host-only RPC 永远不进入 Renderer allowlist；`resyncReady` 只声明 listener ready，不授予业务权限。
 9. Automation event/resync 不是状态或系统通知送达 receipt；业务消费者必须回读 SQLite 派生的权威 snapshot。
-10. Automation DTO schema v1、permission mode v2 和 SQLite schema v48 必须分别命名、分别验证。
+10. Automation DTO schema v1、permission mode v2 和 SQLite schema v49 必须分别命名、分别验证。
 11. Notification active click channel 是 `HOST_CHANNELS.notifications.openRequested`；Automation 同名旧 channel 只作兼容，不能接入第二个 native producer。
 12. Browser 和 FileChange 的安全 DTO 必须绑定 exact instance/revision/owner；Renderer 展示引用不能转换为路径或执行 authority。
 

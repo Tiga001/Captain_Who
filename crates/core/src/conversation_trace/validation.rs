@@ -127,7 +127,7 @@ impl ConversationTurnTrace {
                     }
                     if guidance_id.trim().is_empty()
                         || client_message_id.trim().is_empty()
-                        || content.trim().is_empty()
+                        || (content.trim().is_empty() && attachments.is_empty())
                         || *created_at < 0
                     {
                         return Err(

@@ -47,10 +47,10 @@ impl AgentService {
         if conversation_id.is_empty()
             || run_id.is_empty()
             || client_message_id.is_empty()
-            || content.is_empty()
+            || (content.is_empty() && input.attachments.is_empty())
         {
             return Err(
-                "conversationId、expectedRunId、clientMessageId 和 content 均不能为空。"
+                "conversationId、expectedRunId、clientMessageId 以及正文或附件均不能为空。"
                     .to_string()
                     .into(),
             );

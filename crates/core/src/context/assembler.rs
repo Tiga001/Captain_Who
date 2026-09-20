@@ -52,7 +52,10 @@ impl ContextAssembler {
             .compaction_summary
             .as_ref()
             .map(|summary| summary.covered_through.clone());
-        let normalized = normalize_messages(input.messages)?;
+        let has_attachment_text = !input.attachments.text.trim().is_empty();
+        let has_attachment_images = !input.attachments.images.is_empty();
+        let normalized =
+            normalize_messages(input.messages, has_attachment_text || has_attachment_images)?;
         let canonical_world_state = input.world_state_records;
         let world_state = assemble_world_state_timeline(
             canonical_world_state.clone(),
@@ -65,10 +68,12 @@ impl ContextAssembler {
         let current_turn_index = normalized
             .iter()
             .rposition(|message| message.role == "user");
-        let has_attachment_text = !input.attachments.text.trim().is_empty();
-        let has_attachment_images = !input.attachments.images.is_empty();
-
-        if normalized.is_empty() && !has_compaction_summary && world_state.full.is_none() {
+        if normalized.is_empty()
+            && !has_attachment_text
+            && !has_attachment_images
+            && !has_compaction_summary
+            && world_state.full.is_none()
+        {
             return Err(AgentError::new("没有可发送的对话内容。"));
         }
         if !has_compaction_summary
@@ -735,10 +740,14 @@ fn role_from_str(role: &str) -> AgentResult<LlmMessageRole> {
     }
 }
 
-fn normalize_messages(messages: Vec<AgentChatMessage>) -> AgentResult<Vec<AgentChatMessage>> {
+fn normalize_messages(
+    messages: Vec<AgentChatMessage>,
+    preserve_trailing_empty_user: bool,
+) -> AgentResult<Vec<AgentChatMessage>> {
     let mut normalized = Vec::new();
+    let message_count = messages.len();
 
-    for message in messages {
+    for (index, message) in messages.into_iter().enumerate() {
         let role = message.role.trim();
         let content = message.content.trim();
         let trace = message.conversation_turn_trace;
@@ -765,7 +774,10 @@ fn normalize_messages(messages: Vec<AgentChatMessage>) -> AgentResult<Vec<AgentC
                 "Assistant 历史消息缺少当前 ConversationTurnTrace。",
             ));
         }
-        if content.is_empty() && trace.is_none() {
+        if content.is_empty()
+            && trace.is_none()
+            && !(preserve_trailing_empty_user && role == "user" && index + 1 == message_count)
+        {
             continue;
         }
         if trace.is_some() && role != "assistant" {
@@ -1105,6 +1117,30 @@ mod tests {
         let serialized = serde_json::to_string(&manifest).unwrap();
         assert!(!serialized.contains("current question"));
         assert!(!serialized.contains("attachment body"));
+    }
+
+    #[test]
+    fn attachment_only_current_user_message_is_sendable_and_reaches_model_context() {
+        let frame = ContextAssembler::assemble(ContextAssemblyInput {
+            system_prompt: "backend rules".to_string(),
+            compaction_summary: None,
+            world_state_records: Vec::new(),
+            initial_run_world_state: None,
+            messages: vec![message("user", "")],
+            skill_discovery: None,
+            skill_activation: None,
+            attachments: ContextAttachments {
+                text: "attachment body".to_string(),
+                images: Vec::new(),
+            },
+        })
+        .unwrap();
+
+        let messages = frame.to_messages();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].role(), LlmMessageRole::System);
+        assert_eq!(messages[1].role(), LlmMessageRole::User);
+        assert_eq!(messages[1].content(), "attachment body");
     }
 
     #[test]

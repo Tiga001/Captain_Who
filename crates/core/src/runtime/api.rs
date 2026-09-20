@@ -189,16 +189,17 @@ impl AgentSteerInputQueue {
 fn validate_steer_input(input: &crate::AgentSteerInput) -> AgentResult<()> {
     if input.guidance_id.trim().is_empty()
         || input.client_message_id.trim().is_empty()
-        || input.content.trim().is_empty()
+        || (input.content.trim().is_empty() && input.attachments.is_empty())
         || input.created_at < 0
     {
         return Err(AgentError::structured(
             "agent.invalid_steer_input",
-            "用户引导缺少有效的身份、正文或创建时间。",
+            "用户引导缺少有效的身份、正文或附件，或创建时间无效。",
             json!({
                 "guidanceIdPresent": !input.guidance_id.trim().is_empty(),
                 "clientMessageIdPresent": !input.client_message_id.trim().is_empty(),
                 "contentPresent": !input.content.trim().is_empty(),
+                "attachmentsPresent": !input.attachments.is_empty(),
                 "createdAt": input.created_at,
             }),
         ));
@@ -1268,6 +1269,39 @@ mod steer_input_queue_tests {
             attachment_library: None,
             created_at: 10,
         }
+    }
+
+    fn attachment_only_input(guidance_id: &str, client_message_id: &str) -> crate::AgentSteerInput {
+        let mut input = input(guidance_id, client_message_id, "");
+        input.attachments.push(crate::AgentInputAttachment {
+            id: "attachment-1".to_string(),
+            kind: crate::AgentInputAttachmentKind::File,
+            name: "notes.txt".to_string(),
+            mime_type: Some("text/plain".to_string()),
+            size_bytes: 5,
+            encoding: crate::AgentInputAttachmentEncoding::Managed,
+            data: String::new(),
+            content_sha256: Some("hash".to_string()),
+            truncated: None,
+        });
+        input
+    }
+
+    #[test]
+    fn steer_queue_accepts_attachment_only_input_but_rejects_empty_input() {
+        let queue = AgentSteerInputQueue::new();
+        assert_eq!(
+            queue
+                .enqueue(attachment_only_input(
+                    "guidance-attachment",
+                    "client-attachment"
+                ))
+                .unwrap(),
+            AgentSteerEnqueueOutcome::Queued
+        );
+        assert!(queue
+            .enqueue(input("guidance-empty", "client-empty", ""))
+            .is_err());
     }
 
     #[test]

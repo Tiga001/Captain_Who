@@ -36,7 +36,7 @@ last_verified: 2026-09-16
 
 ## 用量、存储和分支
 
-当前 SQLite canonical v48 包含操作表和独立用量表。exact v47 可通过搜索索引事务升级保留历史；其余旧版、未知版本和校验不通过的库返回 reset-required。`/fork` 和成功分割线的分支入口复用现有持久数据，不引入额外 schema 升级。详见[存储生命周期](../architecture/storage-and-data-lifecycle.md)。
+当前 SQLite canonical v49 包含操作表和独立用量表。exact v47 依次通过搜索索引与纯附件引导迁移保留历史；其余旧版、未知版本和校验不通过的库返回 reset-required。`/fork` 和成功分割线的分支入口复用现有持久数据，不引入额外 schema 升级。详见[存储生命周期](../architecture/storage-and-data-lifecycle.md)。
 
 用量以 operation 为 owner，冻结请求模型价格，不覆盖上一条助手回复、不增加聊天消息数。失败或取消后已知的实际用量仍计入；未知 token 数量保持未知。清理用量保留幂等凭证，删除聊天前汇入日汇总。请求已在远端处理但本地尚未收到响应时崩溃，无法从本地准确补出厂商账单。
 

@@ -141,7 +141,7 @@ fn apply_steer_inputs(
                 .ok_or_else(|| {
                     AgentError::structured(
                         "agent.invalid_steer_input",
-                        "用户引导正文不能为空。",
+                        "用户引导必须包含正文或附件。",
                         json!({ "guidanceId": input.guidance_id }),
                     )
                 })?;
@@ -149,6 +149,8 @@ fn apply_steer_inputs(
             let content = input.content.trim();
             let context_content = if attachment_context.text.trim().is_empty() {
                 content.to_string()
+            } else if content.is_empty() {
+                attachment_context.text.clone()
             } else {
                 format!("{content}\n\n{}", attachment_context.text)
             };

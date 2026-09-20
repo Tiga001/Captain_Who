@@ -55,8 +55,8 @@ pnpm storage:reset-dev
 pnpm storage:reset-dev -- --confirm-reset
 ```
 
-第一条是非破坏性预检，第二条才会备份并重建。正式工具从 exact current v48 及 exact v35–v47 保留 allowlisted 配置与
-credential reference；无法安全识别且含配置的旧库拒绝重置。人机交互设置及 revision 在 v36–v48 reset 中保留，问题与回应历史不保留。通知设置、Browser 下载设置和链接偏好属于配置保留项，通知
+第一条是非破坏性预检，第二条才会备份并重建。正式工具从 exact current v49 及 exact v35–v48 保留 allowlisted 配置与
+credential reference；无法安全识别且含配置的旧库拒绝重置。人机交互设置及 revision 在 v36–v49 reset 中保留，问题与回应历史不保留。通知设置、Browser 下载设置和链接偏好属于配置保留项，通知
 事实、浏览/下载记录、Agent 模板与分配、FileChange 事务和会话运行状态不会恢复。应用或 Core Server 仍持锁时
 命令会拒绝执行。不要删除原库或手工修改 `PRAGMA user_version`；详见
 [存储与数据生命周期](../architecture/storage-and-data-lifecycle.md)。

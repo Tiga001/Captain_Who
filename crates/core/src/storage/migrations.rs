@@ -1,18 +1,19 @@
 use rusqlite::{ffi, Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
 
-pub const STORAGE_SCHEMA_VERSION: i32 = 48;
+pub const STORAGE_SCHEMA_VERSION: i32 = 49;
 pub const DEVELOPMENT_STORAGE_SCHEMA_RESET_REQUIRED: &str =
     "development_storage_schema_reset_required";
 
 const CANONICAL_SCHEMA: &str = include_str!("canonical_schema.sql");
 const CANONICAL_SCHEMA_FINGERPRINT: &str =
-    "sha256:c0d1cc5df5ad3dfa8674b8297f0e39b4ab5602c63500108edc6a1b78839ca455";
+    "sha256:fb08ee5b5c7004c58c2f5f7aceb6257a303ec125cc7b41cdf0e48cbc48f55a2e";
 
 /// Initializes fresh storage or validates the exact current canonical schema.
 ///
-/// The exact v47 catalog upgrades atomically without changing authoritative history.
-/// All other earlier development schemas require an explicit reset; data is never auto-reset.
+/// The exact v47 catalog upgrades atomically to v48, then v48 upgrades atomically to v49 without
+/// changing authoritative history. All other earlier development schemas require an explicit
+/// reset; data is never auto-reset.
 pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
     connection.execute_batch("PRAGMA foreign_keys = ON;")?;
 
@@ -24,7 +25,12 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
     }
 
     if schema_version == 47 {
-        return upgrade_history_search_index_v47(connection);
+        upgrade_history_search_index_v47(connection)?;
+    }
+
+    let schema_version = read_schema_version(connection)?;
+    if schema_version == 48 {
+        return upgrade_guidance_content_v48(connection);
     }
 
     if schema_version != STORAGE_SCHEMA_VERSION {
@@ -38,7 +44,10 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
 
 const V47_SCHEMA_FINGERPRINT: &str =
     "sha256:44c989bbfd6fb7212013c2f27ce721aa967157a85202187d88f0dea0e5c65827";
+const V48_SCHEMA_FINGERPRINT: &str =
+    "sha256:c0d1cc5df5ad3dfa8674b8297f0e39b4ab5602c63500108edc6a1b78839ca455";
 const HISTORY_SEARCH_INDEX_V48: &str = include_str!("history_search_index_v48.sql");
+const GUIDANCE_CONTENT_V49: &str = include_str!("guidance_content_v49.sql");
 const DROP_HISTORY_SEARCH_TRIGGERS: &str = "
     DROP TRIGGER conversation_history_fts_message_insert;
     DROP TRIGGER conversation_history_fts_message_update;
@@ -48,6 +57,26 @@ const DROP_HISTORY_SEARCH_TRIGGERS: &str = "
     DROP TRIGGER conversation_history_fts_trace_delete;
     DROP TRIGGER conversation_history_fts_archive_delete;
 ";
+
+#[cfg(test)]
+fn canonical_schema_v48() -> String {
+    let table_marker = "CREATE TABLE agent_run_guidances (";
+    let content_marker = "            content TEXT NOT NULL,\n";
+    let table_start = CANONICAL_SCHEMA
+        .find(table_marker)
+        .expect("canonical guidance table exists");
+    let content_offset = CANONICAL_SCHEMA[table_start..]
+        .find(content_marker)
+        .expect("canonical guidance content column exists");
+    let content_start = table_start + content_offset;
+    let content_end = content_start + content_marker.len();
+    let mut schema = CANONICAL_SCHEMA.to_string();
+    schema.replace_range(
+        content_start..content_end,
+        "            content TEXT NOT NULL CHECK (length(trim(content)) > 0),\n",
+    );
+    schema
+}
 
 /// This narrowly scoped upgrade preserves FTS rowids and content, including sanitized exact
 /// archive text. Do not rebuild search content from bounded Trace projections or decoded blobs.
@@ -64,9 +93,35 @@ fn upgrade_history_search_index_v47(connection: &Connection) -> rusqlite::Result
          FROM conversation_history_fts",
         [],
     )?;
-    validate_canonical_schema(&transaction)?;
-    transaction.pragma_update(None, "user_version", STORAGE_SCHEMA_VERSION)?;
+    validate_schema_fingerprint(&transaction, V48_SCHEMA_FINGERPRINT)?;
+    transaction.pragma_update(None, "user_version", 48)?;
     transaction.commit()
+}
+
+/// Rebuilds the guidance journal table to remove its legacy non-empty-content CHECK. The
+/// attachment ownership table and all dependent objects retain their names and foreign-key SQL;
+/// only the guidance table, its indexes, and its three table-owned triggers are recreated.
+fn upgrade_guidance_content_v48(connection: &Connection) -> rusqlite::Result<()> {
+    validate_schema_fingerprint(connection, V48_SCHEMA_FINGERPRINT)?;
+    ensure_foreign_keys_are_valid(connection)?;
+
+    // SQLite cannot drop a referenced parent while foreign-key enforcement is enabled. The
+    // transaction still validates every relationship before committing, and enforcement is
+    // restored on every exit path below.
+    connection.execute_batch("PRAGMA foreign_keys = OFF;")?;
+    let migration_result = (|| {
+        let transaction = connection.unchecked_transaction()?;
+        transaction.execute_batch(GUIDANCE_CONTENT_V49)?;
+        transaction.pragma_update(None, "user_version", STORAGE_SCHEMA_VERSION)?;
+        validate_canonical_schema(&transaction)?;
+        transaction.commit()
+    })();
+    let restore_result = connection.execute_batch("PRAGMA foreign_keys = ON;");
+
+    match migration_result {
+        Err(error) => Err(error),
+        Ok(()) => restore_result,
+    }
 }
 
 fn create_canonical_schema(connection: &Connection) -> rusqlite::Result<()> {
@@ -178,8 +233,9 @@ mod tests {
     const LOCAL_TOKEN_LEDGER_SCHEMA_MARKER: &str = "-- Independent local token ledger, schema v47.";
 
     fn v47_schema() -> String {
-        assert!(CANONICAL_SCHEMA.contains(HISTORY_SEARCH_INDEX_V48));
-        CANONICAL_SCHEMA.replace(
+        let schema = canonical_schema_v48();
+        assert!(schema.contains(HISTORY_SEARCH_INDEX_V48));
+        schema.replace(
             HISTORY_SEARCH_INDEX_V48,
             include_str!("test_fixtures/history_search_v47.sql"),
         )

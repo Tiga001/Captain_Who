@@ -830,6 +830,34 @@ fn steer_run_accepts_the_round_four_attachment_matrix_and_mixed_guidance() {
         assert_eq!(output.status, AgentSteerRunResultStatus::Queued);
     }
 
+    let mut attachment_only = text_input(
+        "run-attachment-matrix",
+        "conversation-attachment-matrix",
+        "client-attachment-only",
+    );
+    attachment_only.content.clear();
+    attachment_only.attachments = vec![encoded_attachment(
+        &storage,
+        "attachment-only-text",
+        AgentInputAttachmentKind::File,
+        "only.txt",
+        "text/plain",
+        b"attachment only",
+    )];
+    let attachment_only_output = service
+        .steer_run(attachment_only, notifications.clone())
+        .unwrap();
+    assert_eq!(
+        attachment_only_output.status,
+        AgentSteerRunResultStatus::Queued
+    );
+    assert!(storage
+        .load_agent_run_guidance(&attachment_only_output.guidance_id)
+        .unwrap()
+        .unwrap()
+        .content
+        .is_empty());
+
     let mut mixed = text_input(
         "run-attachment-matrix",
         "conversation-attachment-matrix",

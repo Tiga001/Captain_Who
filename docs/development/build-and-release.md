@@ -232,7 +232,7 @@ pnpm build:<platform>
 - `pnpm check` 和专项 gate 日志；
 - 已知 pending/unsupported 项。
 
-回退需要停止有问题版本的分发，并按验证过的数据兼容策略恢复或发布更高版本修复；应用侧更新不提供自动降级或数据库回滚。数据库当前使用 canonical v48，不能假设新库可被旧应用打开。涉及 schema 的 release 必须在发布前明确数据兼容和回滚策略；更新安装不能调用开发用 storage reset。
+回退需要停止有问题版本的分发，并按验证过的数据兼容策略恢复或发布更高版本修复；应用侧更新不提供自动降级或数据库回滚。数据库当前使用 canonical v49，不能假设新库可被旧应用打开。涉及 schema 的 release 必须在发布前明确数据兼容和回滚策略；更新安装不能调用开发用 storage reset。
 
 ## 9. 代码真源
 

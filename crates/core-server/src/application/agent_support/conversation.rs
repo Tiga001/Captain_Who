@@ -306,8 +306,8 @@ fn prepare_conversation_turn_from_source(
             .into());
     }
     let content = input.content.trim().to_string();
-    if content.is_empty() {
-        return Err("消息内容不能为空。".to_string().into());
+    if content.is_empty() && input.attachments.is_empty() {
+        return Err("消息必须包含正文或附件。".to_string().into());
     }
 
     let model_id = input.model_id.trim().to_string();

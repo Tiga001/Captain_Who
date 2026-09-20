@@ -534,7 +534,7 @@ impl ConversationTraceRecorder {
         created_at: i64,
     ) -> Option<u64> {
         let content = content.trim();
-        if content.is_empty()
+        if (content.is_empty() && attachments.is_empty())
             || matches!(
                 self.items.last(),
                 Some(ConversationTurnTraceItem::ToolCall { .. })
@@ -1094,5 +1094,9 @@ pub(crate) fn render_user_guidance_content(
         })
         .collect::<Vec<_>>()
         .join("\n");
-    format!("{content}\n\nAttachments supplied with this user guidance:\n{attachment_list}")
+    if content.trim().is_empty() {
+        format!("Attachments supplied with this user guidance:\n{attachment_list}")
+    } else {
+        format!("{content}\n\nAttachments supplied with this user guidance:\n{attachment_list}")
+    }
 }

@@ -3433,7 +3433,7 @@ CREATE TABLE agent_run_guidances (
             run_id TEXT NOT NULL CHECK (length(trim(run_id)) > 0),
             conversation_id TEXT NOT NULL,
             assistant_message_id TEXT NOT NULL,
-            content TEXT NOT NULL CHECK (length(trim(content)) > 0),
+            content TEXT NOT NULL,
             status TEXT NOT NULL CHECK (status IN ('queued', 'applied', 'rejected', 'abandoned')),
             applied_trace_sequence INTEGER CHECK (
                 applied_trace_sequence IS NULL OR applied_trace_sequence >= 0

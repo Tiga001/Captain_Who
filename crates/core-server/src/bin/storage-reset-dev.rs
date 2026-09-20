@@ -48,7 +48,7 @@ const APP_DATA_ROOT_FLAG: &str = "--app-data-root";
 const CONFIGURATION_SOURCE_FLAG: &str = "--configuration-source";
 const SQLITE_TRANSIENT_SUFFIXES: [&str; 3] = ["-journal", "-wal", "-shm"];
 const RECOVERABLE_CONFIGURATION_SOURCE_SCHEMA_VERSION: i32 = 33;
-const RECOVERABLE_CONFIGURATION_TARGET_SCHEMA_VERSION: i32 = 48;
+const RECOVERABLE_CONFIGURATION_TARGET_SCHEMA_VERSION: i32 = 49;
 const RECOVERABLE_CONFIGURATION_SOURCE_FINGERPRINT: &str =
     "sha256:5e1e404d74af5ed899d88dc8b5051e673ecd5beb967579af8f328b07b640c948";
 const PREVIOUS_CONFIGURATION_SOURCE_SCHEMA_VERSION: i32 = 35;
@@ -86,12 +86,15 @@ const CONTEXT_PROFILE_SCHEMA_MARKER: &str =
 const WORKSPACE_CONFIGURATION_SOURCE_SCHEMA_VERSION: i32 = 45;
 const FROZEN_WORKSPACE_CONFIGURATION_SOURCE_SCHEMA_VERSION: i32 = 46;
 const LOCAL_TOKEN_CONFIGURATION_SOURCE_SCHEMA_VERSION: i32 = 47;
+const GUIDANCE_CONTENT_CONFIGURATION_SOURCE_SCHEMA_VERSION: i32 = 48;
 const LOCAL_TOKEN_CONFIGURATION_SOURCE_FINGERPRINT: &str =
     "sha256:44c989bbfd6fb7212013c2f27ce721aa967157a85202187d88f0dea0e5c65827";
 const FROZEN_WORKSPACE_CONFIGURATION_SOURCE_FINGERPRINT: &str =
     "sha256:6af5e743b2fd8ab799ff3fc702137b4dd8289b45420d5338a83b81c88b301179";
 const WORKSPACE_CONFIGURATION_SOURCE_FINGERPRINT: &str =
     "sha256:f8d106839487dda40070acc471675c9c4299bad1afb6aaf2a56d75807ce3b2f7";
+const GUIDANCE_CONTENT_CONFIGURATION_SOURCE_FINGERPRINT: &str =
+    "sha256:c0d1cc5df5ad3dfa8674b8297f0e39b4ab5602c63500108edc6a1b78839ca455";
 const MULTI_FOLDER_PROJECT_SCHEMA_MARKER: &str = "-- Multi-folder project roots, schema v45.";
 /// `projects` table SQL of the current canonical schema and its exact pre-v45 shape. Older
 /// catalogs are rebuilt byte-for-byte from the current schema by swapping these definitions.
@@ -543,7 +546,8 @@ fn inspect_source(
                 && schema_version != CONTEXT_PROFILE_CONFIGURATION_SOURCE_SCHEMA_VERSION
                 && schema_version != WORKSPACE_CONFIGURATION_SOURCE_SCHEMA_VERSION
                 && schema_version != FROZEN_WORKSPACE_CONFIGURATION_SOURCE_SCHEMA_VERSION
-                && schema_version != LOCAL_TOKEN_CONFIGURATION_SOURCE_SCHEMA_VERSION =>
+                && schema_version != LOCAL_TOKEN_CONFIGURATION_SOURCE_SCHEMA_VERSION
+                && schema_version != GUIDANCE_CONTENT_CONFIGURATION_SOURCE_SCHEMA_VERSION =>
         {
             // Unknown schemas must never silently discard configuration. Even an empty table
             // may have an incompatible layout; do not interpret it as a missing preference.
@@ -586,6 +590,7 @@ fn inspect_source(
                     | WORKSPACE_CONFIGURATION_SOURCE_SCHEMA_VERSION
                     | FROZEN_WORKSPACE_CONFIGURATION_SOURCE_SCHEMA_VERSION
                     | LOCAL_TOKEN_CONFIGURATION_SOURCE_SCHEMA_VERSION
+                    | GUIDANCE_CONTENT_CONFIGURATION_SOURCE_SCHEMA_VERSION
             ) =>
         {
             if !is_supported_explicit_configuration_source(
@@ -665,6 +670,7 @@ fn inspect_source(
         || schema_version == WORKSPACE_CONFIGURATION_SOURCE_SCHEMA_VERSION
         || schema_version == FROZEN_WORKSPACE_CONFIGURATION_SOURCE_SCHEMA_VERSION
         || schema_version == LOCAL_TOKEN_CONFIGURATION_SOURCE_SCHEMA_VERSION
+        || schema_version == GUIDANCE_CONTENT_CONFIGURATION_SOURCE_SCHEMA_VERSION
         || schema_version == CONTEXT_PROFILE_CONFIGURATION_SOURCE_SCHEMA_VERSION
     {
         Some(load_human_interaction_settings_for_reset(&connection)?)
@@ -677,6 +683,7 @@ fn inspect_source(
         || schema_version == WORKSPACE_CONFIGURATION_SOURCE_SCHEMA_VERSION
         || schema_version == FROZEN_WORKSPACE_CONFIGURATION_SOURCE_SCHEMA_VERSION
         || schema_version == LOCAL_TOKEN_CONFIGURATION_SOURCE_SCHEMA_VERSION
+        || schema_version == GUIDANCE_CONTENT_CONFIGURATION_SOURCE_SCHEMA_VERSION
         || schema_version == CONTEXT_PROFILE_CONFIGURATION_SOURCE_SCHEMA_VERSION
     {
         Some(load_agent_collaboration_settings_for_reset(&connection)?)
@@ -805,7 +812,9 @@ fn is_supported_explicit_configuration_source(schema_version: i32, fingerprint: 
             || (schema_version == FROZEN_WORKSPACE_CONFIGURATION_SOURCE_SCHEMA_VERSION
                 && fingerprint == FROZEN_WORKSPACE_CONFIGURATION_SOURCE_FINGERPRINT)
             || (schema_version == LOCAL_TOKEN_CONFIGURATION_SOURCE_SCHEMA_VERSION
-                && fingerprint == LOCAL_TOKEN_CONFIGURATION_SOURCE_FINGERPRINT))
+                && fingerprint == LOCAL_TOKEN_CONFIGURATION_SOURCE_FINGERPRINT)
+            || (schema_version == GUIDANCE_CONTENT_CONFIGURATION_SOURCE_SCHEMA_VERSION
+                && fingerprint == GUIDANCE_CONTENT_CONFIGURATION_SOURCE_FINGERPRINT))
 }
 
 /// Called only after the exact source catalog has been verified. Catalogs before v44 have no
@@ -818,6 +827,7 @@ fn load_agent_prompt_preferences_for_reset(
         || schema_version == WORKSPACE_CONFIGURATION_SOURCE_SCHEMA_VERSION
         || schema_version == FROZEN_WORKSPACE_CONFIGURATION_SOURCE_SCHEMA_VERSION
         || schema_version == LOCAL_TOKEN_CONFIGURATION_SOURCE_SCHEMA_VERSION
+        || schema_version == GUIDANCE_CONTENT_CONFIGURATION_SOURCE_SCHEMA_VERSION
         || schema_version == CONTEXT_PROFILE_CONFIGURATION_SOURCE_SCHEMA_VERSION
     {
         return agent_prompt_preferences_repository::load_agent_prompt_preferences(connection)
@@ -854,7 +864,25 @@ fn load_agent_prompt_preferences_for_reset(
 }
 
 fn canonical_schema_v47() -> String {
-    include_str!("../../../core/src/storage/canonical_schema.sql").replace(
+    // v47 still enforced non-empty guidance content. Keep this historical fixture exact even
+    // though the current canonical schema (v49) permits attachment-only guidance rows.
+    let current = include_str!("../../../core/src/storage/canonical_schema.sql");
+    let table_marker = "CREATE TABLE agent_run_guidances (";
+    let content_marker = "            content TEXT NOT NULL,\n";
+    let table_start = current
+        .find(table_marker)
+        .expect("canonical guidance table exists");
+    let content_offset = current[table_start..]
+        .find(content_marker)
+        .expect("canonical guidance content column exists");
+    let content_start = table_start + content_offset;
+    let content_end = content_start + content_marker.len();
+    let mut legacy = current.to_string();
+    legacy.replace_range(
+        content_start..content_end,
+        "            content TEXT NOT NULL CHECK (length(trim(content)) > 0),\n",
+    );
+    legacy.replace(
         include_str!("../../../core/src/storage/history_search_index_v48.sql"),
         include_str!("../../../core/src/storage/test_fixtures/history_search_v47.sql"),
     )
@@ -954,6 +982,7 @@ fn validate_preserved_configuration_table_schemas(source: &Connection) -> io::Re
         || schema_version == WORKSPACE_CONFIGURATION_SOURCE_SCHEMA_VERSION
         || schema_version == FROZEN_WORKSPACE_CONFIGURATION_SOURCE_SCHEMA_VERSION
         || schema_version == LOCAL_TOKEN_CONFIGURATION_SOURCE_SCHEMA_VERSION
+        || schema_version == GUIDANCE_CONTENT_CONFIGURATION_SOURCE_SCHEMA_VERSION
         || schema_version == CONTEXT_PROFILE_CONFIGURATION_SOURCE_SCHEMA_VERSION;
     let has_human_settings = matches!(
         schema_version,
@@ -976,6 +1005,7 @@ fn validate_preserved_configuration_table_schemas(source: &Connection) -> io::Re
     if schema_version == mycopilot_core::storage::migrations::STORAGE_SCHEMA_VERSION
         || schema_version == FROZEN_WORKSPACE_CONFIGURATION_SOURCE_SCHEMA_VERSION
         || schema_version == LOCAL_TOKEN_CONFIGURATION_SOURCE_SCHEMA_VERSION
+        || schema_version == GUIDANCE_CONTENT_CONFIGURATION_SOURCE_SCHEMA_VERSION
     {
         mycopilot_core::storage::migrations::run_migrations(&canonical)
             .map_err(redacted_storage_error)?;
@@ -2443,7 +2473,7 @@ mod tests {
     }
 
     #[test]
-    fn explicit_configuration_sources_are_pinned_to_known_catalogs_for_schema_48() {
+    fn explicit_configuration_sources_are_pinned_to_known_catalogs_for_schema_49() {
         assert!(is_supported_explicit_configuration_source(
             FROZEN_WORKSPACE_CONFIGURATION_SOURCE_SCHEMA_VERSION,
             FROZEN_WORKSPACE_CONFIGURATION_SOURCE_FINGERPRINT,
@@ -3116,7 +3146,88 @@ mod tests {
 
     fn drop_local_token_fixture_schema(connection: &Connection) {
         restore_v47_search_fixture_schema(connection);
+        restore_legacy_guidance_content_schema(connection);
         connection.execute_batch("DROP TABLE local_token_usage_days; DROP TABLE local_token_usage_requests; DROP TABLE local_token_usage_metadata;").unwrap();
+    }
+
+    /// The reset fixtures below model catalogs through v47. Their source database starts from
+    /// the current v49 schema, so restore the v48 guidance table definition before calculating a
+    /// historical catalog fingerprint. The fixture is test-only and contains no attachment-only
+    /// guidance rows; production migration remains the v48 -> v49 path in core.
+    fn restore_legacy_guidance_content_schema(connection: &Connection) {
+        let legacy = Connection::open_in_memory().unwrap();
+        legacy
+            .execute_batch(&canonical_schema_v47())
+            .expect("legacy guidance fixture schema");
+        let guidance_sql: String = legacy
+            .query_row(
+                "SELECT sql FROM sqlite_schema WHERE type='table' AND name='agent_run_guidances'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let index_sql = [
+            "idx_agent_run_guidances_run_status",
+            "idx_agent_run_guidances_conversation",
+        ]
+        .into_iter()
+        .map(|name| {
+            legacy
+                .query_row(
+                    "SELECT sql FROM sqlite_schema WHERE type='index' AND name=?1",
+                    [name],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap()
+        })
+        .collect::<Vec<_>>();
+        let trigger_sql = legacy
+            .prepare(
+                "SELECT sql FROM sqlite_schema
+                 WHERE type='trigger' AND tbl_name='agent_run_guidances' AND sql IS NOT NULL
+                 ORDER BY name",
+            )
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+
+        connection
+            .execute_batch(
+                "PRAGMA foreign_keys=OFF;
+                 CREATE TABLE reset_legacy_guidance_rows AS
+                   SELECT guidance_id, client_message_id, run_id, conversation_id,
+                          assistant_message_id, content, status, applied_trace_sequence,
+                          terminal_reason, created_at, updated_at
+                   FROM agent_run_guidances;
+                 DROP TRIGGER human_interaction_async_guidance_proof;
+                 DROP TRIGGER human_interaction_async_guidance_applied;
+                 DROP TRIGGER human_interaction_async_guidance_unconsumed;
+                 DROP INDEX idx_agent_run_guidances_run_status;
+                 DROP INDEX idx_agent_run_guidances_conversation;
+                 DROP TABLE agent_run_guidances;",
+            )
+            .unwrap();
+        connection.execute_batch(&guidance_sql).unwrap();
+        connection
+            .execute_batch(
+                "INSERT INTO agent_run_guidances(
+                     guidance_id, client_message_id, run_id, conversation_id,
+                     assistant_message_id, content, status, applied_trace_sequence,
+                     terminal_reason, created_at, updated_at
+                 )
+                 SELECT guidance_id, client_message_id, run_id, conversation_id,
+                        assistant_message_id, content, status, applied_trace_sequence,
+                        terminal_reason, created_at, updated_at
+                 FROM reset_legacy_guidance_rows;
+                 DROP TABLE reset_legacy_guidance_rows;",
+            )
+            .unwrap();
+        for sql in index_sql.into_iter().chain(trigger_sql) {
+            connection.execute_batch(&sql).unwrap();
+        }
+        connection.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
     }
 
     #[test]
@@ -3413,6 +3524,7 @@ mod tests {
             47 => {
                 let connection = Connection::open(&database).unwrap();
                 restore_v47_search_fixture_schema(&connection);
+                restore_legacy_guidance_content_schema(&connection);
                 connection.pragma_update(None, "user_version", 47).unwrap();
                 LOCAL_TOKEN_CONFIGURATION_SOURCE_FINGERPRINT
             }

@@ -227,6 +227,49 @@ fn user_guidance_is_canonical_ordered_and_never_persists_attachment_bytes() {
 }
 
 #[test]
+fn attachment_only_user_guidance_is_recorded_without_fake_user_text() {
+    let mut recorder = ConversationTraceRecorder::default();
+    recorder.record_narration("Initial answer.").unwrap();
+    recorder
+        .record_user_guidance(
+            "guidance-attachment",
+            "client-attachment",
+            "",
+            &[AgentInputAttachment {
+                id: "attachment-1".to_string(),
+                kind: AgentInputAttachmentKind::File,
+                name: "notes.txt".to_string(),
+                mime_type: Some("text/plain".to_string()),
+                size_bytes: 5,
+                encoding: crate::protocol::AgentInputAttachmentEncoding::Managed,
+                data: String::new(),
+                content_sha256: Some("hash".to_string()),
+                truncated: None,
+            }],
+            42,
+        )
+        .unwrap();
+
+    let trace = recorder.finish(
+        "run-1",
+        "conversation-1",
+        "assistant-1",
+        ConversationTurnTraceTerminalStatus::Completed,
+        None,
+    );
+    trace.validate().unwrap();
+    let guidance = trace
+        .items
+        .iter()
+        .find_map(|item| match item {
+            ConversationTurnTraceItem::UserGuidance { content, .. } => Some(content),
+            _ => None,
+        })
+        .expect("attachment-only guidance is retained");
+    assert!(guidance.is_empty());
+}
+
+#[test]
 fn current_trace_attachment_rejects_unknown_fields() {
     assert!(
         serde_json::from_value::<ConversationTraceAttachment>(json!({
