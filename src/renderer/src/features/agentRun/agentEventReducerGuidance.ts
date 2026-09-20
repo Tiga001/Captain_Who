@@ -3,6 +3,7 @@ import type {
   ChatAgentTimelineItem,
   ChatGuidanceTimelineItem,
   ChatMessage,
+  ChatMessageAttachment,
   ChatQueuedMessage
 } from '../chat/chatTypes'
 import { appendTimelineItem, ensureAgentRun } from './agentEventReducerShared'
@@ -18,6 +19,10 @@ export function guidanceAttachments(
     name: string
     mimeType?: string
     sizeBytes: number
+    encoding?: ChatMessageAttachment['encoding']
+    data?: string
+    previewData?: string | null
+    previewMimeType?: string | null
   }>
 ): ChatGuidanceTimelineItem['attachments'] {
   return attachments.map((attachment) => ({
@@ -25,8 +30,37 @@ export function guidanceAttachments(
     kind: attachment.kind,
     name: attachment.name,
     mimeType: attachment.mimeType,
-    sizeBytes: attachment.sizeBytes
+    sizeBytes: attachment.sizeBytes,
+    ...(attachment.kind === 'image' && attachment.encoding
+      ? { encoding: attachment.encoding }
+      : {}),
+    ...(attachment.kind === 'image' && attachment.data ? { data: attachment.data } : {}),
+    ...(attachment.kind === 'image' && attachment.previewData
+      ? { previewData: attachment.previewData }
+      : {}),
+    ...(attachment.kind === 'image' && attachment.previewMimeType
+      ? { previewMimeType: attachment.previewMimeType }
+      : {})
   }))
+}
+
+function mergeGuidanceAttachments(
+  attachments: ChatGuidanceTimelineItem['attachments'],
+  fallback: ChatGuidanceTimelineItem['attachments']
+): ChatGuidanceTimelineItem['attachments'] {
+  const fallbackById = new Map(fallback.map((attachment) => [attachment.id, attachment]))
+  return attachments.map((attachment) => {
+    const previous = fallbackById.get(attachment.id)
+    if (!previous) return attachment
+    return {
+      ...previous,
+      ...attachment,
+      encoding: attachment.encoding ?? previous.encoding,
+      data: attachment.data ?? previous.data,
+      previewData: attachment.previewData ?? previous.previewData,
+      previewMimeType: attachment.previewMimeType ?? previous.previewMimeType
+    }
+  })
 }
 
 export function upsertGuidanceTimelineItem(
@@ -52,11 +86,13 @@ export function upsertGuidanceTimelineItem(
       ? {
           ...item,
           ...existing,
+          attachments: mergeGuidanceAttachments(existing.attachments, item.attachments),
           guidanceId: existing.guidanceId ?? item.guidanceId
         }
       : {
           ...existing,
           ...item,
+          attachments: mergeGuidanceAttachments(item.attachments, existing.attachments),
           id: existing.id,
           guidanceId: item.guidanceId ?? existing.guidanceId
         }

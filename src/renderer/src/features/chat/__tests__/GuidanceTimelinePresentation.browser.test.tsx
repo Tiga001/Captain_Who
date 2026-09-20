@@ -9,6 +9,11 @@ import { projectHumanInteractionConversation } from '../../humanInteraction/huma
 import { humanInteractionResponseDisplay } from '../../humanInteraction/humanInteractionState'
 import { applyAgentEventToChatMessage } from '../../agentRun/agentEventReducer'
 
+const mocks = vi.hoisted(() => ({
+  loadInputAttachments: vi.fn(),
+  thumbnail: vi.fn()
+}))
+
 const translations: Record<string, string> = {
   'agent.processed': '已处理 {duration}',
   'agent.thinking': '正在思考',
@@ -28,8 +33,14 @@ vi.mock('../../../config/FrontendConfigProvider', () => ({
 
 vi.mock('../../storage/storageClient', () => ({
   loadAttachmentImage: vi.fn(),
+  loadInputAttachments: mocks.loadInputAttachments,
   loadImageFile: vi.fn(),
   revealStoredProjectFile: vi.fn()
+}))
+
+vi.mock('../chatAttachments', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../chatAttachments')>()),
+  loadComposerAttachmentPreview: mocks.thumbnail
 }))
 
 vi.mock('../../../host/hostClient', () => ({ hostClient: {} }))
@@ -114,6 +125,38 @@ function renderMessage(message: ChatMessage) {
 }
 
 describe('mid-turn guidance Timeline presentation', () => {
+  it('hydrates metadata-only guidance images before rendering their thumbnail', async () => {
+    const message = settledGuidanceMessage(false)
+    const guidance = message.agentRun!.timeline.find(
+      (item) => item.type === 'user_guidance' && item.guidanceId === 'guidance-1'
+    )
+    if (!guidance || guidance.type !== 'user_guidance') throw new Error('guidance fixture missing')
+    guidance.attachments = [
+      {
+        id: 'guidance-image',
+        kind: 'image',
+        name: 'screenshot.png',
+        mimeType: 'image/png',
+        sizeBytes: 1024
+      }
+    ]
+    const managed = {
+      ...guidance.attachments[0],
+      encoding: 'managed' as const,
+      data: 'managed-token'
+    }
+    mocks.loadInputAttachments.mockResolvedValue([managed])
+    mocks.thumbnail.mockResolvedValue('data:image/png;base64,thumbnail')
+
+    const screen = await renderMessage(message)
+
+    await expect
+      .element(screen.getByRole('img', { name: 'screenshot.png' }))
+      .toHaveAttribute('src', 'data:image/png;base64,thumbnail')
+    expect(mocks.loadInputAttachments).toHaveBeenCalledWith(['guidance-image'])
+    expect(mocks.thumbnail).toHaveBeenCalledWith(managed)
+  })
+
   it('keeps applied guidance interleaved at its durable position while expanded', async () => {
     const screen = await renderMessage(settledGuidanceMessage(false))
 

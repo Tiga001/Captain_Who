@@ -29,6 +29,7 @@ import { loadComposerAttachmentImage, stripAttachmentSummary } from '../chatAtta
 import { useComposerAttachmentPreviews } from '../useAttachmentImports'
 import { getAttachmentPreviewUrl } from '../attachmentDisplay'
 import { loadAttachmentImage } from '../../storage/storageClient'
+import * as storageClient from '../../storage/storageClient'
 import { ChatMarkdown } from './ChatMarkdown'
 import { ComposerAttachments, type ComposerAttachmentPresentation } from './ComposerAttachments'
 import { HumanInteractionAnswerContent } from '../../humanInteraction/HumanInteractionAnswerContent'
@@ -1221,15 +1222,68 @@ function MessageAttachments({
   const { t } = useFrontendConfig()
   const openImagePreview = useImagePreview()
   const showImagePreviewNotice = useImagePreviewNotice()
+  const [hydratedManagedAttachments, setHydratedManagedAttachments] = useState<
+    Map<string, AgentInputAttachment>
+  >(new Map())
+  const hydrationRequests = useRef(new Set<string>())
+  useEffect(() => {
+    const candidates =
+      mode === 'interactive'
+        ? (attachments ?? []).filter(
+            (attachment) =>
+              attachment.kind === 'image' &&
+              !getAttachmentPreviewUrl(attachment) &&
+              !managedImageInput(attachment)
+          )
+        : []
+    const candidateIds = new Set(candidates.map((attachment) => attachment.id))
+    hydrationRequests.current = new Set(
+      [...hydrationRequests.current].filter((id) => candidateIds.has(id))
+    )
+    setHydratedManagedAttachments((previous) => {
+      const next = new Map([...previous].filter(([id]) => candidateIds.has(id)))
+      return next.size === previous.size ? previous : next
+    })
+    if (candidates.length === 0) return
+
+    const pending = candidates.filter((attachment) => !hydrationRequests.current.has(attachment.id))
+    if (pending.length === 0) return
+    if (typeof storageClient.loadInputAttachments !== 'function') return
+    for (const attachment of pending) hydrationRequests.current.add(attachment.id)
+    let active = true
+    void Promise.allSettled(
+      pending.map(async (attachment) => {
+        const [managed] = await storageClient.loadInputAttachments([attachment.id])
+        return managed
+      })
+    ).then((results) => {
+      if (!active) return
+      setHydratedManagedAttachments((previous) => {
+        const next = new Map(previous)
+        for (const result of results) {
+          if (result.status === 'fulfilled' && result.value) {
+            next.set(result.value.id, result.value)
+          }
+        }
+        return next
+      })
+    })
+    return () => {
+      active = false
+    }
+  }, [attachments, mode])
   const previewInputs = useMemo(
     () =>
       (attachments ?? []).map((attachment) => ({
         id: attachment.id,
         kind: attachment.kind,
         previewUrl: getAttachmentPreviewUrl(attachment),
-        agentAttachment: mode === 'interactive' ? managedImageInput(attachment) : undefined
+        agentAttachment:
+          mode === 'interactive'
+            ? (managedImageInput(attachment) ?? hydratedManagedAttachments.get(attachment.id))
+            : undefined
       })),
-    [attachments, mode]
+    [attachments, hydratedManagedAttachments, mode]
   )
   const previewAttachments = useComposerAttachmentPreviews(previewInputs)
   const previewUrls = new Map(
@@ -1256,7 +1310,7 @@ function MessageAttachments({
     }
 
     try {
-      const managed = managedImageInput(attachment)
+      const managed = managedImageInput(attachment) ?? hydratedManagedAttachments.get(attachment.id)
       if (managed) {
         const src = await loadComposerAttachmentImage(managed)
         if (previewRequestRef.current !== previewRequest) return
