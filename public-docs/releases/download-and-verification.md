@@ -4,7 +4,7 @@ description: 从 Captain Who 官网下载 macOS 安装包，并核对发行文�
 status: current
 audience: user
 owner: release-engineering
-last_verified: 2026-09-14
+last_verified: 2026-09-20
 ---
 
 # 下载与验证
@@ -15,22 +15,22 @@ last_verified: 2026-09-14
 
 | 项目           | 值                                                                 |
 | -------------- | ------------------------------------------------------------------ |
-| 版本           | `1.0.2`                                                            |
-| 文件名         | `Captain-Who-1.0.2-arm64.dmg`                                      |
-| 文件大小       | 694,499,090 字节                                                   |
-| SHA-256        | `6aae5af65fe138538f27073f220a325131108869d7322f17eb3be85ac7326404` |
+| 版本           | `1.0.5`                                                            |
+| 文件名         | `Captain-Who-1.0.5-arm64.dmg`                                      |
+| 文件大小       | 694,547,573 字节                                                   |
+| SHA-256        | `5d41e5799a596790e58a18d433fdae03e0cb57285bf7e562cec2155cfbfa7684` |
 | macOS 信任状态 | Developer ID 签名，Apple 公证已通过，DMG 已装订公证凭据            |
 
-这组校验信息只适用于上表的 1.0.2 DMG。新版本发布后，请以其对应发行说明中的文件名与校验值为准。
+这组校验信息只适用于上表的 1.0.5 DMG。新版本发布后，请以其对应发行说明中的文件名与校验值为准。
 
 ## 下载并核对
 
 1. 在“关于本机”确认芯片为 Apple，并确认 macOS 为 12 或更高版本。
-2. 打开官网，下载 `Captain-Who-1.0.2-arm64.dmg`。
+2. 打开官网，下载 `Captain-Who-1.0.5-arm64.dmg`。
 3. 在终端进入下载目录，运行以下命令：
 
 ```sh
-shasum -a 256 Captain-Who-1.0.2-arm64.dmg
+shasum -a 256 Captain-Who-1.0.5-arm64.dmg
 ```
 
 4. 只有当输出与上表的 SHA-256 **完全一致**时，才继续打开 DMG。
@@ -46,6 +46,6 @@ Developer ID 签名用于让 macOS 识别发布者和安装包是否被篡改；
 
 ## 使用应用内更新或手动安装
 
-正式签名的 macOS Apple Silicon 版内置应用内自动更新机制。完整初始化后，只有在可访问的官方更新源提供新版本时，应用才会发现更新；随后由你选择开始下载。下载、完整性校验和原生准备完成后，应用会关闭并重新启动以安装。它不会在你开始下载前自动下载、静默替换或自动降级。更新源暂时不可用时，仍可通过官网 DMG 手动安装，具体步骤见[升级指南](upgrade-guide.md)。
+正式签名的 macOS Apple Silicon 版内置由用户发起的应用内自动更新机制，官方公开更新清单现已可用。完整初始化后，只有在可访问的官方更新源提供新版本时，应用才会发现更新；随后由你选择开始下载。下载、完整性校验和原生准备完成后，应用会关闭并重新启动以安装。它不会在你开始下载前自动下载、静默替换或自动降级。更新源暂时不可用时，仍可通过官网 DMG 手动安装，具体步骤见[升级指南](upgrade-guide.md)。
 
 安装步骤见[安装与首次启动](../user/getting-started/installation.md)，平台边界见[平台与构建状态](supported-platforms.md)。如果安装后遇到问题，请先查看[常见问题排查](../support/common-problems.md)和[诊断信息与日志](../support/diagnostics-and-logs.md)。

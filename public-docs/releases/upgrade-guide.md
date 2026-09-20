@@ -4,12 +4,12 @@ description: 在 macOS Apple Silicon 上使用应用内更新或官方 DMG 升�
 status: current
 audience: user
 owner: release-engineering
-last_verified: 2026-09-14
+last_verified: 2026-09-20
 ---
 
 # 升级指南
 
-本指南适用于当前正式支持的 macOS 12+ Apple Silicon（arm64）发行版。先将 `Captain Who.app` 拖入“应用程序（Applications）”等本机位置并从那里启动；直接从挂载的 DMG 或 macOS App Translocation 路径运行时，应用内更新不会启用。正式签名的 Captain Who 内置应用内自动更新机制：完整初始化后，只有在可访问的官方更新源提供新版本时，应用才会展示下载选项；由你选择开始下载。下载、完整性校验和原生准备完成后，应用会关闭并重新启动以安装更新。更新不会在你开始下载前自动下载、静默替换或强制执行，也不会自动降级。
+本指南适用于当前正式支持的 macOS 12+ Apple Silicon（arm64）发行版。先将 `Captain Who.app` 拖入“应用程序（Applications）”等本机位置并从那里启动；直接从挂载的 DMG 或 macOS App Translocation 路径运行时，应用内更新不会启用。正式签名的 Captain Who 内置由用户发起的应用内自动更新机制，官方公开更新清单现已可用：完整初始化后，只有在可访问的官方更新源提供新版本时，应用才会展示下载选项；由你选择开始下载。下载、完整性校验和原生准备完成后，应用会关闭并重新启动以安装更新。更新不会在你开始下载前自动下载、静默替换或强制执行，也不会自动降级。
 
 如果你希望自行控制安装时机、应用内检查失败，或需要重新获取安装文件，也可以从 [Captain Who 官网](https://captainwhoagent.com/) 下载官方 DMG 并手动替换应用。
 
@@ -34,7 +34,7 @@ last_verified: 2026-09-14
 
 ## 通过官网 DMG 手动升级
 
-1. 从官网下载安装包。当前正式包为 `Captain-Who-1.0.2-arm64.dmg`；后续版本应以对应发行说明中的文件名为准。
+1. 从官网下载安装包。当前正式包为 `Captain-Who-1.0.5-arm64.dmg`；后续版本应以对应发行说明中的文件名为准。
 2. 按[下载与验证](download-and-verification.md)核对 SHA-256，并确认 macOS 没有显示来源或签名警告。
 3. 完全退出 Captain Who，双击打开 DMG，将 `Captain Who.app` 拖入“应用程序（Applications）”文件夹；系统要求替换旧应用时，确认替换。
 4. 从“应用程序”启动 Captain Who，确认项目、对话和设置可以正常加载。

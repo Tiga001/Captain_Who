@@ -4,14 +4,14 @@ description: 从第一次使用到进阶理解，学习如何安全、有效地�
 status: current
 audience: public
 owner: product-docs
-last_verified: 2026-09-14
+last_verified: 2026-09-20
 ---
 
 # Captain Who 文档
 
 Captain Who 是一款本地优先的桌面 AI 工作助手。它可以在你授权的范围内理解项目、处理文件、调用工具，并把复杂任务拆给多个 Agent 协作完成。
 
-当前正式发行版本为 `1.0.2`。请始终从 [Captain Who 官网](https://captainwhoagent.com/) 获取安装包，并在安装前阅读[版本与发布](releases/README.md)中的平台范围、校验与升级说明。
+当前正式发行版本为 `1.0.5`。请始终从 [Captain Who 官网](https://captainwhoagent.com/) 获取安装包，并在安装前阅读[版本与发布](releases/README.md)中的平台范围、校验与升级说明。
 
 ## 选择一条阅读路线
 
