@@ -198,16 +198,14 @@ fn guidance_attachment_ownership_is_atomic_and_hidden_until_application() {
         "conversation-guidance-attachment",
         "child",
     );
-    let attachment = AgentInputAttachment {
-        id: "attachment-guidance-owned".to_string(),
-        kind: AgentInputAttachmentKind::File,
-        name: "notes.txt".to_string(),
-        mime_type: Some("text/plain".to_string()),
-        size_bytes: 5,
-        encoding: AgentInputAttachmentEncoding::Utf8,
-        data: "hello".to_string(),
-        truncated: None,
-    };
+    let attachment = input_attachment(
+        &service,
+        "attachment-guidance-owned",
+        AgentInputAttachmentKind::File,
+        "notes.txt",
+        Some("text/plain"),
+        b"hello",
+    );
     let record = AgentRunGuidanceRecord {
         guidance_id: "guidance-owned".to_string(),
         client_message_id: "client-owned".to_string(),
@@ -316,16 +314,14 @@ fn abandoned_acknowledged_guidance_projects_as_recoverable_without_binary_payloa
             "assistant-guidance-recovery",
         ))
         .unwrap();
-    let attachment = AgentInputAttachment {
-        id: "attachment-guidance-recovery".to_string(),
-        kind: AgentInputAttachmentKind::File,
-        name: "recovery.txt".to_string(),
-        mime_type: Some("text/plain".to_string()),
-        size_bytes: 7,
-        encoding: AgentInputAttachmentEncoding::Utf8,
-        data: "recover".to_string(),
-        truncated: None,
-    };
+    let attachment = input_attachment(
+        &service,
+        "attachment-guidance-recovery",
+        AgentInputAttachmentKind::File,
+        "recovery.txt",
+        Some("text/plain"),
+        b"recover",
+    );
     service
         .store_agent_run_guidance_with_attachments(
             AgentRunGuidanceRecord {
@@ -390,10 +386,13 @@ fn abandoned_acknowledged_guidance_projects_as_recoverable_without_binary_payloa
         .load_input_attachments(&["attachment-guidance-recovery".to_string()])
         .unwrap();
     assert_eq!(restored.len(), 1);
-    assert_eq!(
-        base64::engine::general_purpose::STANDARD
-            .decode(&restored[0].data)
+    let mut bytes = Vec::new();
+    std::io::Read::read_to_end(
+        &mut service
+            .open_validated_managed_input_attachment(&restored[0])
             .unwrap(),
-        b"recover"
-    );
+        &mut bytes,
+    )
+    .unwrap();
+    assert_eq!(bytes, b"recover");
 }

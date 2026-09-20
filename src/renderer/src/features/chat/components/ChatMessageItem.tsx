@@ -13,6 +13,7 @@ import {
 } from 'lucide-react'
 import type {
   AgentApprovalScope,
+  AgentInputAttachment,
   AgentProposedAction,
   AgentUsage,
   GitTurnDiffSummary
@@ -24,7 +25,8 @@ import type { ChatAgentRunView, ChatAgentTimelineItem, ChatMessage } from '../ch
 import type { ChatGuidanceTimelineItem } from '../chatTypes'
 import { getUniqueWebSearchSources } from '../agentWebSearch'
 import { getFinalTimeline } from '../../agentRun/messageTimeline'
-import { stripAttachmentSummary } from '../chatAttachments'
+import { loadComposerAttachmentImage, stripAttachmentSummary } from '../chatAttachments'
+import { useComposerAttachmentPreviews } from '../useAttachmentImports'
 import {
   getAttachmentBadgeLabel,
   getAttachmentExtension,
@@ -367,7 +369,13 @@ function AgentThinkingActivity({ label }: { label: string }) {
   )
 }
 
-function GuidanceTimelineItemView({ item }: { item: ChatGuidanceTimelineItem }) {
+function GuidanceTimelineItemView({
+  item,
+  mode
+}: {
+  item: ChatGuidanceTimelineItem
+  mode: 'interactive' | 'observer'
+}) {
   const { t } = useFrontendConfig()
   const humanAnswer = readHumanInteractionGuidanceDisplay(item)
   const content = stripAttachmentSummary(item.content, item.attachments)
@@ -387,7 +395,7 @@ function GuidanceTimelineItemView({ item }: { item: ChatGuidanceTimelineItem }) 
       title={item.status === 'rejected' ? item.error : undefined}
     >
       <div className="chat-guidance__bubble">
-        <MessageAttachments attachments={item.attachments} messageId={item.id} />
+        <MessageAttachments attachments={item.attachments} messageId={item.id} mode={mode} />
         {humanAnswer ? (
           <HumanInteractionAnswerContent display={humanAnswer} />
         ) : (
@@ -404,6 +412,7 @@ function AgentTimelineItemView({
   conversationId,
   humanInteraction,
   item,
+  mode,
   observerRootConversationId,
   projectId,
   run
@@ -412,6 +421,7 @@ function AgentTimelineItemView({
   conversationId?: string
   humanInteraction?: HumanInteractionTimelineController
   item: RenderableTimelineItem
+  mode: 'interactive' | 'observer'
   observerRootConversationId?: string
   projectId?: string | null
   run: ChatAgentRunView
@@ -501,7 +511,7 @@ function AgentTimelineItemView({
   }
 
   if (item.type === 'user_guidance') {
-    return <GuidanceTimelineItemView item={item} />
+    return <GuidanceTimelineItemView item={item} mode={mode} />
   }
 
   if (item.type === 'mcp_tool_call') {
@@ -941,7 +951,7 @@ function AgentRunView({
       />
       {canToggleTimeline && timelineCollapsed && !hasInteractionEntries
         ? guidanceItems.map((item) => (
-            <GuidanceTimelineItemView item={item} key={`timeline-item:${item.id}`} />
+            <GuidanceTimelineItemView item={item} mode={mode} key={`timeline-item:${item.id}`} />
           ))
         : null}
       {displayTimelineBlocks.flatMap((block) => {
@@ -986,6 +996,7 @@ function AgentRunView({
             humanInteraction={mode === 'interactive' ? humanInteraction : undefined}
             item={item}
             key={`timeline-item:${item.id}`}
+            mode={mode}
             observerRootConversationId={observerRootConversationId}
             projectId={projectId}
             run={run}
@@ -1182,16 +1193,55 @@ function EditableUserMessage({
   )
 }
 
+function managedImageInput(
+  attachment: NonNullable<ChatMessage['attachments']>[number]
+): AgentInputAttachment | undefined {
+  if (attachment.kind !== 'image' || attachment.encoding !== 'managed' || !attachment.data)
+    return undefined
+  return {
+    id: attachment.id,
+    kind: 'image',
+    name: attachment.name,
+    mimeType: attachment.mimeType ?? undefined,
+    sizeBytes: attachment.sizeBytes,
+    encoding: 'managed',
+    data: attachment.data
+  }
+}
+
 function MessageAttachments({
   attachments,
-  messageId
+  messageId,
+  mode
 }: {
   attachments?: ChatMessage['attachments']
   messageId: string
+  mode: 'interactive' | 'observer'
 }) {
   const { t } = useFrontendConfig()
   const openImagePreview = useImagePreview()
   const showImagePreviewNotice = useImagePreviewNotice()
+  const previewInputs = useMemo(
+    () =>
+      (attachments ?? []).map((attachment) => ({
+        id: attachment.id,
+        kind: attachment.kind,
+        previewUrl: getAttachmentPreviewUrl(attachment),
+        agentAttachment: mode === 'interactive' ? managedImageInput(attachment) : undefined
+      })),
+    [attachments, mode]
+  )
+  const previewAttachments = useComposerAttachmentPreviews(previewInputs)
+  const previewUrls = new Map(
+    previewAttachments.map((attachment) => [attachment.id, attachment.previewUrl])
+  )
+  const previewRequestRef = useRef(0)
+  useEffect(
+    () => () => {
+      previewRequestRef.current += 1
+    },
+    [messageId]
+  )
   if (!attachments?.length) return null
 
   const imageAttachments = attachments.filter((attachment) => attachment.kind === 'image')
@@ -1200,21 +1250,26 @@ function MessageAttachments({
   const openOriginalImageAttachment = async (
     attachment: NonNullable<ChatMessage['attachments']>[number]
   ) => {
-    if (
-      attachment.encoding === 'base64' &&
-      attachment.mimeType?.startsWith('image/') &&
-      attachment.data
-    ) {
-      openImagePreview({
-        alt: attachment.name,
-        fileName: attachment.name,
-        src: `data:${attachment.mimeType};base64,${attachment.data}`
-      })
+    const previewRequest = ++previewRequestRef.current
+    if (mode === 'observer') {
+      // Observer DTOs carry only authorized display bytes, never an ordinary attachment input.
+      const src = getAttachmentPreviewUrl(attachment)
+      if (src) openImagePreview({ alt: attachment.name, fileName: attachment.name, src })
       return
     }
 
     try {
+      const managed = managedImageInput(attachment)
+      if (managed) {
+        const src = await loadComposerAttachmentImage(managed)
+        if (previewRequestRef.current !== previewRequest) return
+        if (src) {
+          openImagePreview({ alt: attachment.name, fileName: attachment.name, src })
+          return
+        }
+      }
       const image = await loadAttachmentImage(attachment.id)
+      if (previewRequestRef.current !== previewRequest) return
       if (!image?.mimeType.startsWith('image/') || !image.data) {
         showImagePreviewNotice(t('imagePreview.originalMissing'))
         return
@@ -1226,6 +1281,7 @@ function MessageAttachments({
         src: `data:${image.mimeType};base64,${image.data}`
       })
     } catch (error) {
+      if (previewRequestRef.current !== previewRequest) return
       console.error('Failed to load attachment image', error)
       showImagePreviewNotice(t('imagePreview.originalMissing'))
     }
@@ -1235,7 +1291,7 @@ function MessageAttachments({
     const extension = getAttachmentExtension(attachment.name)
     const AttachmentIcon = getAttachmentIcon(attachment.kind, extension)
     const badgeLabel = getAttachmentBadgeLabel(extension)
-    const previewUrl = getAttachmentPreviewUrl(attachment)
+    const previewUrl = getAttachmentPreviewUrl(attachment) ?? previewUrls.get(attachment.id)
     const isImagePreview = attachment.kind === 'image' && Boolean(previewUrl)
 
     if (isImagePreview) {
@@ -1408,7 +1464,7 @@ export const ChatMessageItem = memo(function ChatMessageItem({
         parentAgentId={parentAgentId}
       />
       {message.role === 'user' && (
-        <MessageAttachments attachments={message.attachments} messageId={message.id} />
+        <MessageAttachments attachments={message.attachments} messageId={message.id} mode={mode} />
       )}
       {isEditing ? (
         <div className="chat-message__body">

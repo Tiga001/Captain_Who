@@ -43,6 +43,25 @@ pub enum AgentInputAttachmentKind {
 pub enum AgentInputAttachmentEncoding {
     Utf8,
     Base64,
+    /// Opaque, Host-issued reference to a completed local attachment import.
+    Managed,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AttachmentImportInput {
+    pub id: String,
+    pub kind: AgentInputAttachmentKind,
+    pub name: String,
+    pub mime_type: Option<String>,
+    pub size_bytes: u64,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AttachmentInputPreview {
+    pub mime_type: String,
+    pub data: String,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]

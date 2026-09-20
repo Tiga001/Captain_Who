@@ -160,6 +160,11 @@ fn is_blocking_read_method(method: &str) -> bool {
             | STORAGE_LOAD_CONVERSATION_METHOD
             | STORAGE_LOAD_ATTACHMENT_IMAGE_METHOD
             | STORAGE_LOAD_INPUT_ATTACHMENTS_METHOD
+            | mycopilot_protocol_rs::STORAGE_BEGIN_ATTACHMENT_IMPORT_METHOD
+            | mycopilot_protocol_rs::STORAGE_APPEND_ATTACHMENT_IMPORT_METHOD
+            | mycopilot_protocol_rs::STORAGE_FINISH_ATTACHMENT_IMPORT_METHOD
+            | mycopilot_protocol_rs::STORAGE_CANCEL_ATTACHMENT_IMPORT_METHOD
+            | mycopilot_protocol_rs::STORAGE_LOAD_INPUT_ATTACHMENT_PREVIEW_METHOD
             | STORAGE_LOAD_BROWSER_DOWNLOAD_SETTINGS_METHOD
             | STORAGE_LIST_BROWSER_DOWNLOADS_METHOD
             | STORAGE_LOAD_BROWSER_DOWNLOAD_METHOD
@@ -1038,6 +1043,16 @@ mod tests {
             STORAGE_LOAD_CONVERSATION_METAS_METHOD
         ));
         assert!(is_blocking_read_method(STORAGE_LOAD_CONVERSATION_METHOD));
+        for method in [
+            mycopilot_protocol_rs::STORAGE_BEGIN_ATTACHMENT_IMPORT_METHOD,
+            mycopilot_protocol_rs::STORAGE_APPEND_ATTACHMENT_IMPORT_METHOD,
+            mycopilot_protocol_rs::STORAGE_FINISH_ATTACHMENT_IMPORT_METHOD,
+            mycopilot_protocol_rs::STORAGE_CANCEL_ATTACHMENT_IMPORT_METHOD,
+            mycopilot_protocol_rs::STORAGE_LOAD_INPUT_ATTACHMENT_PREVIEW_METHOD,
+        ] {
+            assert!(is_blocking_read_method(method));
+        }
+
         assert!(is_blocking_read_method(STORAGE_LOAD_UI_PREFERENCES_METHOD));
         assert!(is_blocking_read_method(STORAGE_LOAD_COMPOSER_DRAFTS_METHOD));
         assert!(is_blocking_read_method(AGENT_COMMAND_SESSIONS_LIST_METHOD));

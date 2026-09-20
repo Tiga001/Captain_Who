@@ -26,8 +26,8 @@ function isTimelineAttachment(record: Record<string, unknown>): boolean {
     (!hasOwn(record, 'mimeType') ||
       record.mimeType === null ||
       isBoundedString(record.mimeType, 1024, true)) &&
-    (!hasOwn(record, 'encoding') || record.encoding === 'utf8' || record.encoding === 'base64') &&
-    isOptionalBoundedString(record, 'data', 32 * 1024 * 1024, true) &&
+    (!hasOwn(record, 'encoding') || record.encoding === 'managed') &&
+    isOptionalBoundedString(record, 'data', 1024, true) &&
     (!hasOwn(record, 'previewData') ||
       record.previewData === null ||
       isBoundedString(record.previewData, 32 * 1024 * 1024, true)) &&

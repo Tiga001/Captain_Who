@@ -1,0 +1,44 @@
+.workspace-file-type-icon {
+  display: block;
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+  color: light-dark(#84848a, #adadb1);
+}
+
+.workspace-file-type-icon[data-icon-color='red'] {
+  color: light-dark(#d52c36, #ff6762);
+}
+.workspace-file-type-icon[data-icon-color='vermilion'] {
+  color: light-dark(#ff8c5b, #d5512f);
+}
+.workspace-file-type-icon[data-icon-color='orange'] {
+  color: light-dark(#d47628, #ffa359);
+}
+.workspace-file-type-icon[data-icon-color='yellow'] {
+  color: light-dark(#d5a910, #ffd452);
+}
+.workspace-file-type-icon[data-icon-color='green'] {
+  color: light-dark(#199f43, #5ecc71);
+}
+.workspace-file-type-icon[data-icon-color='teal'] {
+  color: light-dark(#17a5af, #64d1db);
+}
+.workspace-file-type-icon[data-icon-color='cyan'] {
+  color: light-dark(#1ca1c7, #68cdf2);
+}
+.workspace-file-type-icon[data-icon-color='blue'] {
+  color: light-dark(#1a85d4, #69b1ff);
+}
+.workspace-file-type-icon[data-icon-color='indigo'] {
+  color: light-dark(#693acf, #9d6afb);
+}
+.workspace-file-type-icon[data-icon-color='purple'] {
+  color: light-dark(#a631be, #d568ea);
+}
+.workspace-file-type-icon[data-icon-color='pink'] {
+  color: light-dark(#d32a61, #ff678d);
+}
+.workspace-file-type-icon[data-icon-color='mauve'] {
+  color: light-dark(#594c5b, #79697b);
+}

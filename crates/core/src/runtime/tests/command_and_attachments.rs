@@ -216,20 +216,16 @@ fn runtime_messages_include_text_attachment_content() {
 
 #[test]
 fn attachment_context_reads_text_with_registered_tool() {
-    let context = build_attachment_context(
-        &[AgentInputAttachment {
-            id: "attachment-1".to_string(),
-            kind: AgentInputAttachmentKind::File,
-            name: "notes.txt".to_string(),
-            mime_type: Some("text/plain".to_string()),
-            size_bytes: 16,
-            encoding: AgentInputAttachmentEncoding::Utf8,
-            data: "hello from file".to_string(),
-            truncated: None,
-        }],
-        None,
-    )
-    .unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let (attachment, library) = managed_runtime_attachment(
+        directory.path(),
+        "attachment-1",
+        "notes.txt",
+        "text/plain",
+        AgentInputAttachmentKind::File,
+        b"hello from file",
+    );
+    let context = build_attachment_context(&[attachment], Some(&library)).unwrap();
 
     assert!(context.text.contains("读取工具：read_file"));
     assert!(context.text.contains("hello from file"));
@@ -284,21 +280,21 @@ fn runtime_test_pdf(text: &str) -> Vec<u8> {
 }
 
 fn runtime_binary_attachment(
+    root: &std::path::Path,
     id: &str,
     name: &str,
     mime_type: &str,
     bytes: Vec<u8>,
 ) -> AgentInputAttachment {
-    AgentInputAttachment {
-        id: id.to_string(),
-        kind: AgentInputAttachmentKind::File,
-        name: name.to_string(),
-        mime_type: Some(mime_type.to_string()),
-        size_bytes: bytes.len() as u64,
-        encoding: AgentInputAttachmentEncoding::Base64,
-        data: base64::engine::general_purpose::STANDARD.encode(bytes),
-        truncated: None,
-    }
+    managed_runtime_attachment(
+        root,
+        id,
+        name,
+        mime_type,
+        AgentInputAttachmentKind::File,
+        &bytes,
+    )
+    .0
 }
 
 fn runtime_attachment_library(
@@ -333,8 +329,14 @@ fn runtime_attachment_library(
 
 #[test]
 fn steer_attachment_library_updates_run_world_state_without_granting_conversation_identity() {
-    let attachment =
-        runtime_binary_attachment("steer-image", "steer.png", "image/png", vec![1, 2, 3]);
+    let directory = tempfile::tempdir().unwrap();
+    let attachment = runtime_binary_attachment(
+        directory.path(),
+        "steer-image",
+        "steer.png",
+        "image/png",
+        vec![1, 2, 3],
+    );
     let library = runtime_attachment_library(&[attachment]);
     let mut run_context = None;
     let mut tool_context = ToolExecutionContext::from_run_context(None);
@@ -368,14 +370,17 @@ fn steer_attachment_library_updates_run_world_state_without_granting_conversatio
 
 #[test]
 fn attachment_context_defers_pdf_and_office_files_to_matching_skills() {
+    let directory = tempfile::tempdir().unwrap();
     let attachments = vec![
         runtime_binary_attachment(
+            directory.path(),
             "attachment-pdf",
             "paper.pdf",
             "application/pdf",
             runtime_test_pdf("Guidance PDF"),
         ),
         runtime_binary_attachment(
+            directory.path(),
             "attachment-docx",
             "document.docx",
             "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -385,6 +390,7 @@ fn attachment_context_defers_pdf_and_office_files_to_matching_skills() {
             )]),
         ),
         runtime_binary_attachment(
+            directory.path(),
             "attachment-pptx",
             "slides.pptx",
             "application/vnd.openxmlformats-officedocument.presentationml.presentation",
@@ -394,6 +400,7 @@ fn attachment_context_defers_pdf_and_office_files_to_matching_skills() {
             )]),
         ),
         runtime_binary_attachment(
+            directory.path(),
             "attachment-xlsx",
             "table.xlsx",
             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -409,18 +416,21 @@ fn attachment_context_defers_pdf_and_office_files_to_matching_skills() {
             ]),
         ),
         runtime_binary_attachment(
+            directory.path(),
             "attachment-csv",
             "table.csv",
             "text/csv",
             b"name,value\nGuidance CSV,1\n".to_vec(),
         ),
         runtime_binary_attachment(
+            directory.path(),
             "attachment-tsv",
             "table.tsv",
             "text/tab-separated-values",
             b"name\tvalue\nGuidance TSV\t1\n".to_vec(),
         ),
         runtime_binary_attachment(
+            directory.path(),
             "attachment-csv-mime",
             "renamed-table.txt",
             "text/csv",
@@ -428,7 +438,11 @@ fn attachment_context_defers_pdf_and_office_files_to_matching_skills() {
         ),
     ];
 
-    let library = runtime_attachment_library(&attachments);
+    let mut library = runtime_attachment_library(&attachments);
+    library.root_path = Some(directory.path().to_string_lossy().into());
+    for item in &mut library.conversation_attachments {
+        item.storage_rel_path = item.name.clone();
+    }
     let context = build_attachment_context(&attachments, Some(&library)).unwrap();
 
     for hidden_content in [
@@ -490,17 +504,20 @@ fn attachment_context_defers_pdf_and_office_files_to_matching_skills() {
 
 #[test]
 fn attachment_context_keeps_image_visual_input_and_authoritative_read_path() {
-    let attachment = AgentInputAttachment {
-        id: "attachment-image".to_string(),
-        kind: AgentInputAttachmentKind::Image,
-        name: "pixel.png".to_string(),
-        mime_type: Some("image/png".to_string()),
-        size_bytes: 3,
-        encoding: AgentInputAttachmentEncoding::Base64,
-        data: base64::engine::general_purpose::STANDARD.encode(b"png"),
-        truncated: None,
-    };
-    let library = runtime_attachment_library(std::slice::from_ref(&attachment));
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::new_rgb8(1, 1)
+        .write_to(&mut bytes, image::ImageFormat::Png)
+        .unwrap();
+    let bytes = bytes.into_inner();
+    let directory = tempfile::tempdir().unwrap();
+    let (attachment, library) = managed_runtime_attachment(
+        directory.path(),
+        "attachment-image",
+        "pixel.png",
+        "image/png",
+        AgentInputAttachmentKind::Image,
+        &bytes,
+    );
 
     let context = build_attachment_context(&[attachment], Some(&library)).unwrap();
 
@@ -521,8 +538,8 @@ fn attachment_context_does_not_decode_skill_gated_office_payloads() {
             "application/vnd.openxmlformats-officedocument.wordprocessingml.document".to_string(),
         ),
         size_bytes: 10,
-        encoding: AgentInputAttachmentEncoding::Base64,
-        data: "not-base64".to_string(),
+        encoding: AgentInputAttachmentEncoding::Managed,
+        data: "unread-managed-reference".to_string(),
         truncated: None,
     };
     let library = runtime_attachment_library(std::slice::from_ref(&attachment));
@@ -543,8 +560,8 @@ fn attachment_context_routes_pdf_without_decoding_its_payload() {
         name: "manual.pdf".to_string(),
         mime_type: Some("application/pdf".to_string()),
         size_bytes: 10,
-        encoding: AgentInputAttachmentEncoding::Base64,
-        data: "not-base64".to_string(),
+        encoding: AgentInputAttachmentEncoding::Managed,
+        data: "unread-managed-reference".to_string(),
         truncated: None,
     };
     let library = runtime_attachment_library(std::slice::from_ref(&attachment));
@@ -792,4 +809,211 @@ fn context_window_preview_is_available_independently_of_indicator_events() {
     ));
 
     assert!(inspect_context_window(input).unwrap().is_some());
+}
+
+#[tokio::test]
+async fn managed_initial_and_steer_images_survive_durable_history_reconstruction() {
+    use image::ImageEncoder;
+    use sha2::{Digest, Sha256};
+
+    let directory = tempfile::tempdir().unwrap();
+    let mut attachments = Vec::new();
+    for (index, width) in [2300, 2500].into_iter().enumerate() {
+        let mut bytes = Vec::new();
+        image::codecs::png::PngEncoder::new(&mut bytes)
+            .write_image(
+                &vec![index as u8; width as usize * 8 * 3],
+                width,
+                8,
+                image::ExtendedColorType::Rgb8,
+            )
+            .unwrap();
+        let name = format!("source-{index}.png");
+        std::fs::write(directory.path().join(&name), &bytes).unwrap();
+        attachments.push(AgentInputAttachment {
+            id: format!("managed-image-{index}"),
+            kind: AgentInputAttachmentKind::Image,
+            name,
+            mime_type: Some("image/png".into()),
+            size_bytes: bytes.len() as u64,
+            encoding: AgentInputAttachmentEncoding::Managed,
+            data: format!("opaque-import-{index}"),
+            truncated: None,
+        });
+    }
+    let mut library = runtime_attachment_library(&attachments);
+    library.root_path = Some(directory.path().to_string_lossy().into());
+    for reference in &mut library.conversation_attachments {
+        reference.storage_rel_path = reference.name.clone();
+    }
+    let normalized =
+        attachments::normalize_attachment_context_images(&attachments, Some(&library)).unwrap();
+    assert_eq!(normalized.len(), 2);
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let captured = requests.clone();
+    let server = tokio::spawn(async move {
+        for _ in 0..2 {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let request = read_runtime_test_json_request(&mut stream).await;
+            captured.lock().unwrap().push(request);
+            write_runtime_test_json_response(&mut stream, json!({"choices":[{"message":{"role":"assistant","content":"Images inspected."},"finish_reason":"stop"}]})).await;
+        }
+    });
+    let queue = AgentSteerInputQueue::new();
+    let mut steer = runtime_steer_input(
+        "image-guidance",
+        "image-guidance-client",
+        "Also inspect the second image.",
+    );
+    steer.attachments = vec![attachments[1].clone()];
+    steer.attachment_library = Some(library.clone());
+    queue.enqueue(steer).unwrap();
+    let snapshots = Arc::new(Mutex::new(Vec::new()));
+    let observed = snapshots.clone();
+    let observer: AgentConversationTraceObserver = Arc::new(move |snapshot| {
+        observed.lock().unwrap().push(snapshot);
+        Ok(None)
+    });
+    let mut input = conversation_context_input(vec![message("user", "Inspect the first image.")]);
+    input.api_url = format!("http://{address}/v1/chat/completions");
+    input.api_token = "test-token".into();
+    input.stream = Some(false);
+    input.assistant_message_id = Some("assistant-images".into());
+    input.model_capabilities.image_input = true;
+    input.attachments = vec![attachments[0].clone()];
+    input.context = Some(AgentRunContext {
+        conversation_id: Some("conversation-attachments".into()),
+        project_id: None,
+        collaboration_identity: None,
+        workspace: None,
+        attachment_library: Some(library),
+        permissions: Default::default(),
+    });
+    let output = AgentRuntime::default()
+        .send_chat_with_events_and_cancellation(
+            input.clone(),
+            Some("run-images".into()),
+            None,
+            AgentCancellationToken::new(),
+            Some(
+                AgentRuntimeHostServices::new()
+                    .with_steer_input(queue)
+                    .with_trace_observer(observer),
+            ),
+        )
+        .await
+        .unwrap();
+    let model_items = snapshots
+        .lock()
+        .unwrap()
+        .last()
+        .unwrap()
+        .model_context_items
+        .clone();
+    let refs = model_items
+        .iter()
+        .flat_map(|item| &item.images)
+        .collect::<Vec<_>>();
+    assert_eq!(refs.len(), 2);
+    for (reference, attachment) in refs.iter().zip(&normalized) {
+        assert_eq!(reference.attachment_id, attachment.id);
+        assert_eq!(
+            reference.sha256,
+            format!(
+                "sha256:{:x}",
+                Sha256::digest(
+                    base64::engine::general_purpose::STANDARD
+                        .decode(&attachment.data)
+                        .unwrap()
+                )
+            )
+        );
+    }
+    let serialized = serde_json::to_string(&model_items).unwrap();
+    assert!(!serialized.contains(&normalized[0].data));
+    let mut prior = message("assistant", &output.content);
+    prior.message_id = Some("assistant-images".into());
+    prior.conversation_turn_trace = output.conversation_turn_trace;
+    prior.conversation_model_context_items = serde_json::from_str(&serialized).unwrap();
+    input
+        .messages
+        .extend([prior, message("user", "Compare the images again.")]);
+    // Upload exactly the same pixels again under a fresh identity. Binding must select this
+    // turn's attachment, even though an identical historical payload comes first in hydration.
+    let mut duplicate = attachments[0].clone();
+    duplicate.id = "managed-image-reuploaded".into();
+    duplicate.name = "reuploaded.png".into();
+    std::fs::copy(
+        directory.path().join(&attachments[0].name),
+        directory.path().join(&duplicate.name),
+    )
+    .unwrap();
+    let library = input
+        .context
+        .as_mut()
+        .unwrap()
+        .attachment_library
+        .as_mut()
+        .unwrap();
+    let mut reference = library.conversation_attachments[0].clone();
+    reference.id = duplicate.id.clone();
+    reference.name = duplicate.name.clone();
+    reference.read_path = format!("@attachments/{}/{}", duplicate.id, duplicate.name);
+    reference.storage_rel_path = duplicate.name.clone();
+    library.conversation_attachments.push(reference);
+    input.attachments = vec![duplicate];
+    input.assistant_message_id = Some("assistant-images-restored".into());
+    input.context_image_attachments = normalized.clone();
+    let observed = snapshots.clone();
+    let observer: AgentConversationTraceObserver = Arc::new(move |snapshot| {
+        observed.lock().unwrap().push(snapshot);
+        Ok(None)
+    });
+    AgentRuntime::default()
+        .send_chat_with_events_and_cancellation(
+            input,
+            Some("run-images-restored".into()),
+            None,
+            AgentCancellationToken::new(),
+            Some(AgentRuntimeHostServices::new().with_trace_observer(observer)),
+        )
+        .await
+        .unwrap();
+    server.await.unwrap();
+    let requests = requests.lock().unwrap();
+    assert_eq!(
+        snapshots
+            .lock()
+            .unwrap()
+            .last()
+            .unwrap()
+            .model_context_items
+            .iter()
+            .flat_map(|item| &item.images)
+            .map(|image| image.attachment_id.as_str())
+            .collect::<Vec<_>>(),
+        ["managed-image-reuploaded"]
+    );
+    for (index, request) in requests.iter().enumerate() {
+        let images = request["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|message| message["content"].as_array())
+            .flatten()
+            .filter(|part| part["type"] == "image_url")
+            .map(|part| part["image_url"]["url"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        let mut expected = normalized
+            .iter()
+            .map(|attachment| format!("data:image/png;base64,{}", attachment.data))
+            .collect::<Vec<_>>();
+        if index == 1 {
+            expected.push(expected[0].clone());
+        }
+        assert_eq!(images, expected);
+    }
 }

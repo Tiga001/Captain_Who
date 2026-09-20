@@ -65,11 +65,21 @@ last_verified: 2026-09-13
 
 成功完成的回答正文以 Host 提交的 `messages.content` 为准。终态提交、历史重建和 Renderer 终态显示都会移除 Timeline 中有 `streamId` 但没有 `traceSequence` 的临时回答流，并清空完成 Run 的 `messageStreamCheckpoints`；有 Trace 身份的过程说明完整保留，不按文字相同或前缀关系删除。迟到的 Renderer 快照不能覆盖已经完成的权威正文或复活临时流。取消、失败和等待审批不采用成功回答的流清理规则，以保留原有中断及恢复语义。
 
+## 附件导入与草稿引用
+
+新附件使用 `AgentInputAttachment.encoding = managed`，`data` 保存不透明导入 ID。Electron 原生选择器分块读取已由用户选择的文件；Renderer File/Clipboard 按 512 KiB 分块提交。`storage.beginAttachmentImport / appendAttachmentImport / finishAttachmentImport / cancelAttachmentImport` 在受管目录创建文件及原子持久化清单，校验连续偏移、真实长度与 SHA-256。普通附件不再使用原有 8 MiB 的业务上限。Core Server 导入接口使用后台任务池；正文不穿过整条聊天 JSON 请求。
+
+导入目录为附件目录同级的 `attachment-imports/v1`，不会被普通附件 orphan 扫描误删。草稿、排队消息、编辑重发和失败恢复统一传递 managed 短引用，不提供旧 utf8/base64 原附件的恢复或转换分支。保存消息、引导和编辑重发时，复用现有附件表和事务补偿，64 KiB 流式复制并重新验证摘要。取消仅立即删除未完成导入；完成引用可能已被草稿或恢复记录持有，按引用扫描和保留期清理。无 SQLite DDL 或 schema 版本变更。
+
+Renderer 只在内存中缓存有界缩略图，点击再请求较大派生预览；不会把预览正文写回草稿。模型图片最长边 2048、单图不超过 8 MiB，缩略图最长边 256、data URL 不超过 192 KiB；解码限制为 40M 像素、256 MiB decoder allocation。原文件保留，工具的权限、内容身份与取消校验独立执行。普通文件的命令挂载使用流式 hash/复制，移除原有单文件 64 MiB、总计 128 MiB 限制；数量与授权约束继续生效。
+
+模型派生 PNG 在 `attachment-model-images/v1/<原图摘要>/<视觉载荷摘要>.png` 保存不可变字节，历史恢复仍先验证原始附件的会话归属，再按已记录摘要读取，避免后续编码器升级改变历史输入。启动维护在清理原始附件与导入暂存后回收无来源缓存；来源路径索引支持快速存活检查，仅无存活来源的候选需要对剩余图片做流式摘要核对，以保护 fork 共享的历史载荷。
+
 ## 连续模型历史与不可变图像引用
 
 当前 Trace v6 新增 `context_material`：保存首次发送的附件说明、Skill 完整说明与 Run World State，绑定原 Trace sequence、事件身份及模型日志。跨 Run、fork 与 child snapshot 复制这份已观察历史，不重建旧 Run 的运行授权。消息删除/编辑重发仍通过现有级联与 superseded 可见性规则裁剪历史。
 
-模型日志只持久化图片的 attachment ID、MIME 与 SHA-256，不写入重复 base64。Host 在普通启动、上下文预览、压缩重建与恢复时，按同一会话可见消息归属读取附件并验证 MIME、长度和原始字节摘要；缺失、替换、跨会话或已被编辑替代的附件一律失败，不静默改用预览图。分支重绑定附件 ID 并复制原始文件，保留摘要；子快照不复制问答待办、Run 授权或用量。
+模型日志只持久化图片的 attachment ID、MIME 与 SHA-256，不写入重复 base64。Host 在普通启动、上下文预览、压缩重建与恢复时，按同一会话可见消息归属读取附件并验证 MIME、长度和已记录的视觉载荷摘要；缺失、替换、跨会话或已被编辑替代的附件一律失败，图片引用严格匹配模型派生 PNG 摘要，不把界面缩略图冒充历史输入。分支重绑定附件 ID 并复制原始文件，保留摘要；子快照不复制问答待办、Run 授权或用量。
 
 已压缩前缀只额外保留有不可变图片引用的材料，避免文字摘要替代原始视觉输入；不会由此复活旧助手正文或纯文字 Run 状态。checkpoint v19 和恢复信封 v14 只支持本版本恢复；v19 的 `workspace.binding` 模型投影使用逐源 patch，旧检查点在版本入口拒绝，持久化 World State 完整 section 日志结构不变。Host 临时 `context_image_attachments` 字段不进入恢复信封 allowlist，图片 bytes 由 Host 重新加载并校验；既有检查点图片字段沿用原有保存策略，新增不可变引用跨重启保留。
 

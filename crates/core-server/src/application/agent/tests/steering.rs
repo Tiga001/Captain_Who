@@ -236,22 +236,32 @@ fn text_input(run_id: &str, conversation_id: &str, client_message_id: &str) -> A
 }
 
 fn encoded_attachment(
+    storage: &StorageService,
     id: &str,
     kind: AgentInputAttachmentKind,
     name: &str,
     mime_type: &str,
     bytes: &[u8],
 ) -> AgentInputAttachment {
-    AgentInputAttachment {
-        id: id.to_string(),
-        kind,
-        name: name.to_string(),
-        mime_type: Some(mime_type.to_string()),
-        size_bytes: bytes.len() as u64,
-        encoding: AgentInputAttachmentEncoding::Base64,
-        data: base64::engine::general_purpose::STANDARD.encode(bytes),
-        truncated: None,
+    let import_id = storage
+        .begin_attachment_import(mycopilot_core::AttachmentImportInput {
+            id: id.into(),
+            kind,
+            name: name.into(),
+            mime_type: Some(mime_type.into()),
+            size_bytes: bytes.len() as u64,
+        })
+        .unwrap();
+    for (index, chunk) in bytes.chunks(512 * 1024).enumerate() {
+        storage
+            .append_attachment_import(
+                &import_id,
+                (index * 512 * 1024) as u64,
+                &base64::engine::general_purpose::STANDARD.encode(chunk),
+            )
+            .unwrap();
     }
+    storage.finish_attachment_import(&import_id).unwrap()
 }
 
 fn minimal_ooxml(prefix: &str, text: &str) -> Vec<u8> {
@@ -282,7 +292,7 @@ fn test_image_bytes(format: image::ImageFormat) -> Vec<u8> {
 fn external_steering_cannot_forge_host_answer_identity_or_publish_a_fake_projection() {
     let fixture = tempdir().unwrap();
     let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
-    let service = AgentService::new_authorized_for_test(storage);
+    let service = AgentService::new_authorized_for_test(storage.clone());
     let queue = install_active_run(
         &service,
         "run-answer-forgery",
@@ -334,7 +344,7 @@ fn external_steering_cannot_forge_host_answer_identity_or_publish_a_fake_project
 fn steer_run_durably_queues_once_and_reports_applied_on_retry() {
     let fixture = tempdir().unwrap();
     let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
-    let service = AgentService::new_authorized_for_test(storage);
+    let service = AgentService::new_authorized_for_test(storage.clone());
     let queue = install_active_run(
         &service,
         "run-steer",
@@ -376,7 +386,7 @@ fn steer_run_durably_queues_once_and_reports_applied_on_retry() {
 fn terminal_close_rejects_every_accepted_guidance_and_fences_new_requests() {
     let fixture = tempdir().unwrap();
     let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
-    let service = AgentService::new_authorized_for_test(storage);
+    let service = AgentService::new_authorized_for_test(storage.clone());
     let queue = install_active_run(
         &service,
         "run-approval-steer",
@@ -391,6 +401,7 @@ fn terminal_close_rejects_every_accepted_guidance_and_fences_new_requests() {
         "client-before-approval",
     );
     input.attachments = vec![encoded_attachment(
+        &storage,
         "attachment-before-approval",
         AgentInputAttachmentKind::File,
         "approval.txt",
@@ -452,7 +463,7 @@ fn terminal_close_rejects_every_accepted_guidance_and_fences_new_requests() {
 fn stale_finalizer_cannot_remove_a_new_approval_continuation_queue() {
     let fixture = tempdir().unwrap();
     let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
-    let service = AgentService::new_authorized_for_test(storage);
+    let service = AgentService::new_authorized_for_test(storage.clone());
     let stale_queue = install_active_run(
         &service,
         "run-approval-resume",
@@ -578,6 +589,7 @@ fn repeated_approval_handoffs_preserve_guidance_identity_attachments_and_admissi
     let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
     let mut first = text_input("run-handoff", "conversation-handoff", "client-first");
     first.attachments = vec![encoded_attachment(
+        &storage,
         "attachment-handoff",
         AgentInputAttachmentKind::File,
         "constraint.txt",
@@ -671,7 +683,7 @@ fn repeated_approval_handoffs_preserve_guidance_identity_attachments_and_admissi
 fn steer_run_rejects_wrong_conversation_and_unsupported_model_images() {
     let fixture = tempdir().unwrap();
     let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
-    let service = AgentService::new_authorized_for_test(storage);
+    let service = AgentService::new_authorized_for_test(storage.clone());
     install_active_run(
         &service,
         "run-validation",
@@ -725,6 +737,7 @@ fn steer_run_accepts_the_round_four_attachment_matrix_and_mixed_guidance() {
     let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
     let cases = vec![
         encoded_attachment(
+            &storage,
             "attachment-png",
             AgentInputAttachmentKind::Image,
             "image.png",
@@ -732,6 +745,7 @@ fn steer_run_accepts_the_round_four_attachment_matrix_and_mixed_guidance() {
             &test_image_bytes(image::ImageFormat::Png),
         ),
         encoded_attachment(
+            &storage,
             "attachment-jpeg",
             AgentInputAttachmentKind::Image,
             "image.jpeg",
@@ -739,6 +753,7 @@ fn steer_run_accepts_the_round_four_attachment_matrix_and_mixed_guidance() {
             &test_image_bytes(image::ImageFormat::Jpeg),
         ),
         encoded_attachment(
+            &storage,
             "attachment-webp",
             AgentInputAttachmentKind::Image,
             "image.webp",
@@ -746,6 +761,7 @@ fn steer_run_accepts_the_round_four_attachment_matrix_and_mixed_guidance() {
             &test_image_bytes(image::ImageFormat::WebP),
         ),
         encoded_attachment(
+            &storage,
             "attachment-text",
             AgentInputAttachmentKind::File,
             "notes.md",
@@ -753,6 +769,7 @@ fn steer_run_accepts_the_round_four_attachment_matrix_and_mixed_guidance() {
             b"# Notes",
         ),
         encoded_attachment(
+            &storage,
             "attachment-pdf",
             AgentInputAttachmentKind::File,
             "paper.pdf",
@@ -760,6 +777,7 @@ fn steer_run_accepts_the_round_four_attachment_matrix_and_mixed_guidance() {
             b"%PDF-1.7\n",
         ),
         encoded_attachment(
+            &storage,
             "attachment-docx",
             AgentInputAttachmentKind::File,
             "document.docx",
@@ -767,6 +785,7 @@ fn steer_run_accepts_the_round_four_attachment_matrix_and_mixed_guidance() {
             &minimal_ooxml("word", "document"),
         ),
         encoded_attachment(
+            &storage,
             "attachment-pptx",
             AgentInputAttachmentKind::File,
             "slides.pptx",
@@ -774,6 +793,7 @@ fn steer_run_accepts_the_round_four_attachment_matrix_and_mixed_guidance() {
             &minimal_ooxml("ppt", "slides"),
         ),
         encoded_attachment(
+            &storage,
             "attachment-xlsx",
             AgentInputAttachmentKind::File,
             "table.xlsx",
@@ -781,6 +801,7 @@ fn steer_run_accepts_the_round_four_attachment_matrix_and_mixed_guidance() {
             &minimal_ooxml("xl", "sheet"),
         ),
         encoded_attachment(
+            &storage,
             "attachment-csv",
             AgentInputAttachmentKind::File,
             "table.csv",
@@ -788,6 +809,7 @@ fn steer_run_accepts_the_round_four_attachment_matrix_and_mixed_guidance() {
             b"name,value\nalpha,1\n",
         ),
         encoded_attachment(
+            &storage,
             "attachment-tsv",
             AgentInputAttachmentKind::File,
             "table.tsv",
@@ -814,6 +836,7 @@ fn steer_run_accepts_the_round_four_attachment_matrix_and_mixed_guidance() {
     );
     mixed.attachments = vec![
         encoded_attachment(
+            &storage,
             "attachment-mixed-text",
             AgentInputAttachmentKind::File,
             "mixed.txt",
@@ -821,6 +844,7 @@ fn steer_run_accepts_the_round_four_attachment_matrix_and_mixed_guidance() {
             b"mixed text",
         ),
         encoded_attachment(
+            &storage,
             "attachment-mixed-image",
             AgentInputAttachmentKind::Image,
             "mixed.png",
@@ -828,6 +852,7 @@ fn steer_run_accepts_the_round_four_attachment_matrix_and_mixed_guidance() {
             &test_image_bytes(image::ImageFormat::Png),
         ),
         encoded_attachment(
+            &storage,
             "attachment-mixed-pdf",
             AgentInputAttachmentKind::File,
             "mixed.pdf",
@@ -849,10 +874,126 @@ fn steer_run_accepts_the_round_four_attachment_matrix_and_mixed_guidance() {
 }
 
 #[test]
+fn large_managed_guidance_history_does_not_limit_following_imports() {
+    let fixture = tempdir().unwrap();
+    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let service = AgentService::new_authorized_for_test(storage.clone());
+    let queue = install_active_run(
+        &service,
+        "large-managed-run",
+        "large-managed-conversation",
+        "large-managed-assistant",
+        false,
+    );
+    let chunk = vec![b'x'; 512 * 1024];
+    let encoded = base64::engine::general_purpose::STANDARD.encode(&chunk);
+    let id = storage
+        .begin_attachment_import(mycopilot_core::AttachmentImportInput {
+            id: "large-managed-file".into(),
+            kind: AgentInputAttachmentKind::File,
+            name: "large.txt".into(),
+            mime_type: Some("text/plain".into()),
+            size_bytes: chunk.len() as u64 * 130,
+        })
+        .unwrap();
+    for index in 0..130u64 {
+        storage
+            .append_attachment_import(&id, index * chunk.len() as u64, &encoded)
+            .unwrap();
+    }
+    let mut input = text_input("large-managed-run", "large-managed-conversation", "first");
+    input.attachments = vec![storage.finish_attachment_import(&id).unwrap()];
+    let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    assert_eq!(
+        service
+            .steer_run(input, notifications.clone())
+            .unwrap()
+            .status,
+        AgentSteerRunResultStatus::Queued
+    );
+    let mut next = text_input("large-managed-run", "large-managed-conversation", "next");
+    next.attachments = vec![encoded_attachment(
+        &storage,
+        "later-managed-file",
+        AgentInputAttachmentKind::File,
+        "small.txt",
+        "text/plain",
+        b"x",
+    )];
+    assert_eq!(
+        service.steer_run(next, notifications).unwrap().status,
+        AgentSteerRunResultStatus::Queued
+    );
+    assert_eq!(queue.pending_len(), 2);
+}
+
+#[test]
+fn managed_guidance_retries_reuse_admitted_identity_and_reject_different_bytes() {
+    let fixture = tempdir().unwrap();
+    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let service = AgentService::new_authorized_for_test(storage.clone());
+    let queue = install_active_run(
+        &service,
+        "managed-retry-run",
+        "managed-retry-conversation",
+        "managed-retry-assistant",
+        false,
+    );
+    let import = |bytes: &[u8]| {
+        let id = storage
+            .begin_attachment_import(mycopilot_core::AttachmentImportInput {
+                id: "managed-retry-attachment".into(),
+                kind: AgentInputAttachmentKind::File,
+                name: "identity.txt".into(),
+                mime_type: Some("text/plain".into()),
+                size_bytes: bytes.len() as u64,
+            })
+            .unwrap();
+        storage
+            .append_attachment_import(
+                &id,
+                0,
+                &base64::engine::general_purpose::STANDARD.encode(bytes),
+            )
+            .unwrap();
+        storage.finish_attachment_import(&id).unwrap()
+    };
+    let mut input = text_input(
+        "managed-retry-run",
+        "managed-retry-conversation",
+        "managed-retry-client",
+    );
+    input.attachments = vec![import(b"first")];
+    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let accepted = service
+        .steer_run(input.clone(), notifications.clone())
+        .unwrap();
+    assert_eq!(accepted.status, AgentSteerRunResultStatus::Queued);
+    receiver.try_recv().unwrap();
+    assert_eq!(
+        service
+            .steer_run(input.clone(), notifications.clone())
+            .unwrap(),
+        accepted
+    );
+    assert_eq!(queue.pending_len(), 1);
+    assert!(receiver.try_recv().is_err());
+    input.attachments = vec![import(b"other")];
+    assert_eq!(
+        service
+            .steer_run(input, notifications)
+            .unwrap()
+            .rejection_code,
+        Some(AgentSteerRunRejectionCode::IdentityConflict)
+    );
+    assert_eq!(queue.pending_len(), 1);
+}
+
+#[test]
 fn steer_run_rejects_invalid_attachment_payloads_limits_and_identity_reuse() {
     let fixture = tempdir().unwrap();
     let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
-    let service = AgentService::new_authorized_for_test(storage);
+    let service = AgentService::new_authorized_for_test(storage.clone());
     install_active_run(
         &service,
         "run-attachment-validation",
@@ -891,6 +1032,7 @@ fn steer_run_rejects_invalid_attachment_payloads_limits_and_identity_reuse() {
         "client-size-mismatch",
     );
     let mut mismatched = encoded_attachment(
+        &storage,
         "attachment-size-mismatch",
         AgentInputAttachmentKind::File,
         "notes.txt",
@@ -912,13 +1054,16 @@ fn steer_run_rejects_invalid_attachment_payloads_limits_and_identity_reuse() {
         "conversation-attachment-validation",
         "client-mime-mismatch",
     );
-    mime_mismatch.attachments = vec![encoded_attachment(
+    let mut wrong_mime = encoded_attachment(
+        &storage,
         "attachment-mime-mismatch",
         AgentInputAttachmentKind::Image,
         "image.png",
-        "image/jpeg",
+        "image/png",
         &test_image_bytes(image::ImageFormat::Png),
-    )];
+    );
+    wrong_mime.mime_type = Some("image/jpeg".into());
+    mime_mismatch.attachments = vec![wrong_mime];
     assert_eq!(
         service
             .steer_run(mime_mismatch, notifications.clone())
@@ -935,6 +1080,7 @@ fn steer_run_rejects_invalid_attachment_payloads_limits_and_identity_reuse() {
     too_many.attachments = (0..=8)
         .map(|index| {
             encoded_attachment(
+                &storage,
                 &format!("attachment-limit-{index}"),
                 AgentInputAttachmentKind::File,
                 &format!("file-{index}.txt"),
@@ -957,6 +1103,7 @@ fn steer_run_rejects_invalid_attachment_payloads_limits_and_identity_reuse() {
         "client-attachment-identity",
     );
     original.attachments = vec![encoded_attachment(
+        &storage,
         "attachment-identity",
         AgentInputAttachmentKind::File,
         "identity.txt",
@@ -998,6 +1145,7 @@ fn attachment_persistence_failure_never_enters_the_runtime_queue() {
             "assistant-attachment-persistence",
             None,
             &[encoded_attachment(
+                &storage,
                 "attachment-collision",
                 AgentInputAttachmentKind::File,
                 "existing.txt",
@@ -1014,6 +1162,7 @@ fn attachment_persistence_failure_never_enters_the_runtime_queue() {
         "client-attachment-persistence",
     );
     input.attachments = vec![encoded_attachment(
+        &storage,
         "attachment-collision",
         AgentInputAttachmentKind::File,
         "candidate.txt",
@@ -1362,7 +1511,7 @@ async fn acknowledged_guidance_is_explicitly_rejected_when_network_retries_are_e
 }
 
 #[tokio::test]
-async fn guidance_attachments_reach_model_context_and_refresh_runtime_tools_after_apply() {
+async fn guidance_attachment_metadata_and_images_refresh_context_and_tools_after_apply() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let (first_request_seen_tx, first_request_seen_rx) = oneshot::channel();
@@ -1420,6 +1569,7 @@ async fn guidance_attachments_reach_model_context_and_refresh_runtime_tools_afte
 
     first_request_seen_rx.await.unwrap();
     let text_attachment = encoded_attachment(
+        &storage,
         "attachment-e2e-text",
         AgentInputAttachmentKind::File,
         "guidance.txt",
@@ -1428,6 +1578,7 @@ async fn guidance_attachments_reach_model_context_and_refresh_runtime_tools_afte
     );
     let image_bytes = test_image_bytes(image::ImageFormat::Png);
     let image_attachment = encoded_attachment(
+        &storage,
         "attachment-e2e-image",
         AgentInputAttachmentKind::Image,
         "guidance.png",
@@ -1468,25 +1619,49 @@ async fn guidance_attachments_reach_model_context_and_refresh_runtime_tools_afte
         .iter()
         .find(|message| {
             message["role"] == "user"
-                && message["content"].as_array().is_some_and(|parts| {
-                    parts.iter().any(|part| {
-                        part["type"] == "text"
-                            && part["text"]
-                                .as_str()
-                                .is_some_and(|text| text.contains("attachment text constraint"))
-                    })
-                })
+                && message["content"]
+                    .as_str()
+                    .is_some_and(|text| text.contains("attachment text constraint"))
         })
-        .expect("guidance user message with extracted attachment text");
-    let expected_image = base64::engine::general_purpose::STANDARD.encode(&image_bytes);
-    assert!(guided_message["content"]
-        .as_array()
-        .unwrap()
+        .expect("guidance user message with bounded attachment text and metadata");
+    let serialized_guidance = serde_json::to_string(guided_message).unwrap();
+    assert!(serialized_guidance.contains("@attachments/attachment-e2e-text/guidance.txt"));
+    // Context projection keeps the image payload in its own user message so the text history
+    // can retain immutable image references without duplicating a base64 string in every turn.
+    let delivered_image_url = second_messages
         .iter()
-        .any(|part| {
-            part["type"] == "image_url"
-                && part["image_url"]["url"] == format!("data:image/png;base64,{expected_image}")
-        }));
+        .filter(|message| message["role"] == "user")
+        .filter_map(|message| message["content"].as_array())
+        .flatten()
+        .find(|part| part["type"] == "image_url")
+        .expect("bounded guidance image")["image_url"]["url"]
+        .as_str()
+        .unwrap();
+    let expected_image = delivered_image_url
+        .strip_prefix("data:image/png;base64,")
+        .unwrap()
+        .to_string();
+    let delivered_image = base64::engine::general_purpose::STANDARD
+        .decode(&expected_image)
+        .unwrap();
+    assert_eq!(
+        image::load_from_memory(&delivered_image)
+            .unwrap()
+            .to_rgba8(),
+        image::load_from_memory(&image_bytes).unwrap().to_rgba8(),
+    );
+    let durable_text = storage
+        .load_input_attachments(&["attachment-e2e-text".into()])
+        .unwrap();
+    let mut original = Vec::new();
+    std::io::Read::read_to_end(
+        &mut storage
+            .open_validated_managed_input_attachment(&durable_text[0])
+            .unwrap(),
+        &mut original,
+    )
+    .unwrap();
+    assert_eq!(original, b"attachment text constraint");
 
     let third_messages = requests[2]["messages"].as_array().unwrap();
     let attachment_tool_result = third_messages
@@ -1955,6 +2130,7 @@ async fn guidance_is_accepted_during_approved_command_and_survives_a_second_reje
     let mut first_input = text_input(&turn.run_id, &turn.conversation_id, "client-command-first");
     first_input.content = "First guidance before approval.".to_string();
     first_input.attachments = vec![encoded_attachment(
+        &storage,
         "command-guidance-attachment",
         AgentInputAttachmentKind::File,
         "constraints.txt",

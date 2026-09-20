@@ -31,7 +31,7 @@ export interface AgentChatMessage {
 
 export type AgentInputAttachmentKind = 'file' | 'image'
 
-export type AgentInputAttachmentEncoding = 'utf8' | 'base64'
+export type AgentInputAttachmentEncoding = 'utf8' | 'base64' | 'managed'
 
 export interface AgentInputAttachment {
   id: string

@@ -1,4 +1,9 @@
 import type {
+  AgentInputAttachment,
+  AttachmentImportMetadata,
+  AttachmentImportHandle,
+  AttachmentImportChunk,
+  AttachmentPreview,
   AgentWorkspaceContext,
   BrowserDownloadListInput,
   BrowserDownloadRecord,
@@ -654,6 +659,29 @@ export class CoreServerStorageApi {
       STORAGE_LOAD_INPUT_ATTACHMENTS_METHOD,
       input
     )
+  }
+
+  beginAttachmentImport(input: AttachmentImportMetadata): Promise<AttachmentImportHandle> {
+    return this.rpc.request('storage.beginAttachmentImport', input)
+  }
+
+  appendAttachmentImport(input: AttachmentImportChunk): Promise<{ receivedBytes: number }> {
+    return this.rpc.request('storage.appendAttachmentImport', input)
+  }
+
+  finishAttachmentImport(input: AttachmentImportHandle): Promise<AgentInputAttachment> {
+    return this.rpc.request('storage.finishAttachmentImport', input)
+  }
+
+  cancelAttachmentImport(input: AttachmentImportHandle): Promise<void> {
+    return this.rpc.request('storage.cancelAttachmentImport', input)
+  }
+
+  loadInputAttachmentPreview(input: {
+    attachment: AgentInputAttachment
+    purpose?: 'display'
+  }): Promise<AttachmentPreview | null> {
+    return this.rpc.request('storage.loadInputAttachmentPreview', input)
   }
 
   loadBrowserDownloadSettings(): Promise<BrowserDownloadSettingsRecord> {

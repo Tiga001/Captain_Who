@@ -30,6 +30,64 @@ fn message(role: &str, content: &str) -> AgentChatMessage {
     }
 }
 
+fn managed_runtime_attachment(
+    root: &std::path::Path,
+    id: &str,
+    name: &str,
+    mime_type: &str,
+    kind: AgentInputAttachmentKind,
+    bytes: &[u8],
+) -> (AgentInputAttachment, AgentAttachmentLibraryContext) {
+    std::fs::write(root.join(name), bytes).unwrap();
+    let attachment = AgentInputAttachment {
+        id: id.into(),
+        kind,
+        name: name.into(),
+        mime_type: Some(mime_type.into()),
+        size_bytes: bytes.len() as u64,
+        encoding: AgentInputAttachmentEncoding::Managed,
+        data: format!("import-{id}"),
+        truncated: None,
+    };
+    let library = AgentAttachmentLibraryContext {
+        root_path: Some(root.to_string_lossy().into()),
+        conversation_id: None,
+        project_id: None,
+        conversation_attachments: vec![AgentAttachmentReference {
+            id: id.into(),
+            conversation_id: "conversation-attachments".into(),
+            message_id: "message-attachments".into(),
+            project_id: None,
+            kind,
+            name: name.into(),
+            mime_type: Some(mime_type.into()),
+            size_bytes: bytes.len() as u64,
+            read_path: format!("@attachments/{id}/{name}"),
+            storage_rel_path: name.into(),
+            created_at: 1,
+        }],
+        project_attachments: Vec::new(),
+    };
+    (attachment, library)
+}
+
+fn set_runtime_attachment_library(
+    input: &mut AgentChatInput,
+    library: AgentAttachmentLibraryContext,
+) {
+    input
+        .context
+        .get_or_insert_with(|| AgentRunContext {
+            collaboration_identity: None,
+            conversation_id: None,
+            project_id: None,
+            workspace: None,
+            attachment_library: None,
+            permissions: Default::default(),
+        })
+        .attachment_library = Some(library);
+}
+
 fn reserved_output_tokens(input: &AgentChatInput) -> u32 {
     resolve_output_budget(
         input,

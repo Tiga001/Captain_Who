@@ -92,7 +92,14 @@ export const HOST_CHANNELS = {
     steerRun: 'host:agent.steerRun'
   },
   attachments: {
-    selectInputAttachments: 'host:attachments.selectInputAttachments'
+    selectInputAttachments: 'host:attachments.selectInputAttachments',
+    beginImport: 'host:attachments.beginImport',
+    appendImport: 'host:attachments.appendImport',
+    finishImport: 'host:attachments.finishImport',
+    cancelImport: 'host:attachments.cancelImport',
+    retryInputAttachment: 'host:attachments.retryInputAttachment',
+    loadPreview: 'host:attachments.loadPreview',
+    importProgress: 'host:attachments.importProgress'
   },
   automations: {
     list: 'host:automation.list',

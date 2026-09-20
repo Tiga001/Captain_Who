@@ -1283,16 +1283,17 @@ async fn anthropic_payload_keeps_current_user_skill_and_attachment_compatible() 
     freeze_runtime_test_generic_provider(&mut input, "anthropic-user-skill-attachment");
     input.stream = Some(false);
     input.skill_activation = Some(activated_skill("ANTHROPIC_SKILL_MARKER"));
-    input.attachments = vec![AgentInputAttachment {
-        id: "attachment-anthropic".to_string(),
-        kind: AgentInputAttachmentKind::File,
-        name: "notes.txt".to_string(),
-        mime_type: Some("text/plain".to_string()),
-        size_bytes: 19,
-        encoding: AgentInputAttachmentEncoding::Utf8,
-        data: "ATTACHMENT_MARKER".to_string(),
-        truncated: None,
-    }];
+    let attachment_directory = tempfile::tempdir().unwrap();
+    let (attachment, library) = managed_runtime_attachment(
+        attachment_directory.path(),
+        "attachment-anthropic",
+        "notes.txt",
+        "text/plain",
+        AgentInputAttachmentKind::File,
+        b"ATTACHMENT_MARKER",
+    );
+    input.attachments = vec![attachment];
+    set_runtime_attachment_library(&mut input, library);
 
     let output = AgentRuntime::default()
         .send_chat_with_events_and_cancellation(

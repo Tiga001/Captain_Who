@@ -53,29 +53,16 @@ function mapObserverMessage(message: AgentObserverConversation['messages'][numbe
       message.status === 'pending' || message.status === 'sent' || message.status === 'error'
         ? message.status
         : undefined,
-    attachments: message.attachments.map((attachment) => {
-      const isAuthorizedImageBytes =
-        attachment.kind === 'image' &&
-        Boolean(attachment.previewData) &&
-        Boolean(attachment.previewMimeType?.startsWith('image/'))
-      return {
-        id: attachment.attachmentId,
-        kind: attachment.kind === 'image' ? ('image' as const) : ('file' as const),
-        name: attachment.name,
-        mimeType: attachment.mimeType,
-        sizeBytes: attachment.sizeBytes,
-        previewData: attachment.previewData,
-        previewMimeType: attachment.previewMimeType,
-        createdAt: attachment.createdAt,
-        ...(isAuthorizedImageBytes
-          ? {
-              encoding: 'base64' as const,
-              data: attachment.previewData ?? undefined,
-              mimeType: attachment.previewMimeType
-            }
-          : {})
-      }
-    }),
+    attachments: message.attachments.map((attachment) => ({
+      id: attachment.attachmentId,
+      kind: attachment.kind === 'image' ? ('image' as const) : ('file' as const),
+      name: attachment.name,
+      mimeType: attachment.mimeType,
+      sizeBytes: attachment.sizeBytes,
+      previewData: attachment.previewData,
+      previewMimeType: attachment.previewMimeType,
+      createdAt: attachment.createdAt
+    })),
     agentRun,
     uiState: parseObserverUiState(message.uiStateJson),
     ...(message.inputOrigin ? { inputOrigin: message.inputOrigin } : {})

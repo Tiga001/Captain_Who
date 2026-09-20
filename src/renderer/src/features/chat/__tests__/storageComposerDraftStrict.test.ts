@@ -46,6 +46,25 @@ it('loads only the complete current composer draft shape', async () => {
   })
 })
 
+it('restores managed references without loading file bytes', async () => {
+  const attachments = [
+    {
+      id: 'managed',
+      kind: 'file',
+      name: 'large.csv',
+      sizeBytes: 100_000_000,
+      encoding: 'managed',
+      data: 'opaque-import-id'
+    }
+  ]
+  storage.loadComposerDrafts.mockResolvedValue([
+    currentDraft({ attachmentsJson: JSON.stringify(attachments) })
+  ])
+  await expect(loadComposerDrafts()).resolves.toMatchObject({
+    'conversation-current': { attachments }
+  })
+})
+
 it.each([
   ['invalid JSON', { queuedMessagesJson: '{secret-provider-payload' }],
   ['non-array JSON', { attachmentsJson: '{}' }],
@@ -57,7 +76,7 @@ it.each([
     'extra attachment fields',
     {
       attachmentsJson:
-        '[{"id":"attachment-1","kind":"file","name":"a.txt","sizeBytes":0,"encoding":"utf8","data":"","retiredField":true}]'
+        '[{"id":"attachment-1","kind":"file","name":"a.txt","sizeBytes":0,"encoding":"managed","data":"opaque-id","retiredField":true}]'
     }
   ]
 ])(

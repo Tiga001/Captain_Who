@@ -326,6 +326,8 @@ async fn run_durable_compaction_with_output_policy(max_tokens: Option<u32>, wind
     let durable_prefix_for_prepare = durable_prefix.clone();
     let steer_input = AgentSteerInputQueue::new();
     let steer_input_during_compaction = steer_input.clone();
+    let guidance_directory = tempfile::tempdir().unwrap();
+    let guidance_root = guidance_directory.path().to_path_buf();
     let services = AgentContextCompactionServices::new(
         move |request, _| {
             prepare_counter.fetch_add(1, Ordering::SeqCst);
@@ -341,29 +343,23 @@ async fn run_durable_compaction_with_output_policy(max_tokens: Option<u32>, wind
             generate_counter.fetch_add(1, Ordering::SeqCst);
             let large_attachment_text =
                 format!("LARGE_GUIDANCE_ATTACHMENT_MARKER {}", "z".repeat(20_000));
+            let (attachment, mut library) = managed_runtime_attachment(
+                &guidance_root,
+                "attachment-during-compaction",
+                "large-guidance.txt",
+                "text/plain",
+                AgentInputAttachmentKind::File,
+                large_attachment_text.as_bytes(),
+            );
+            library.conversation_id = Some("conversation-1".to_string());
             assert_eq!(
                 steer_input_during_compaction
                     .enqueue(crate::AgentSteerInput {
                         guidance_id: "guidance-during-compaction".to_string(),
                         client_message_id: "client-during-compaction".to_string(),
                         content: "Preserve this constraint across compaction.".to_string(),
-                        attachments: vec![AgentInputAttachment {
-                            id: "attachment-during-compaction".to_string(),
-                            kind: AgentInputAttachmentKind::File,
-                            name: "large-guidance.txt".to_string(),
-                            mime_type: Some("text/plain".to_string()),
-                            size_bytes: large_attachment_text.len() as u64,
-                            encoding: AgentInputAttachmentEncoding::Utf8,
-                            data: large_attachment_text,
-                            truncated: None,
-                        }],
-                        attachment_library: Some(crate::AgentAttachmentLibraryContext {
-                            root_path: None,
-                            conversation_id: Some("conversation-1".to_string()),
-                            project_id: None,
-                            conversation_attachments: Vec::new(),
-                            project_attachments: Vec::new(),
-                        }),
+                        attachments: vec![attachment],
+                        attachment_library: Some(library),
                         created_at: 42,
                     })
                     .unwrap(),

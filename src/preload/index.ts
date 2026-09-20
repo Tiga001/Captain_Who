@@ -30,7 +30,22 @@ const host: HostApi = {
   automations: createAutomationIpcBridge(ipcRenderer),
   attachments: {
     selectInputAttachments: (request) =>
-      ipcRenderer.invoke(HOST_CHANNELS.attachments.selectInputAttachments, request)
+      ipcRenderer.invoke(HOST_CHANNELS.attachments.selectInputAttachments, request),
+    beginImport: (input) => ipcRenderer.invoke(HOST_CHANNELS.attachments.beginImport, input),
+    appendImport: (input) => ipcRenderer.invoke(HOST_CHANNELS.attachments.appendImport, input),
+    finishImport: (input) => ipcRenderer.invoke(HOST_CHANNELS.attachments.finishImport, input),
+    cancelImport: (input) => ipcRenderer.invoke(HOST_CHANNELS.attachments.cancelImport, input),
+    retryInputAttachment: (input) =>
+      ipcRenderer.invoke(HOST_CHANNELS.attachments.retryInputAttachment, input),
+    loadPreview: (input) => ipcRenderer.invoke(HOST_CHANNELS.attachments.loadPreview, input),
+    onImportProgress: (listener) => {
+      const channel = HOST_CHANNELS.attachments.importProgress
+      const handle: Parameters<typeof ipcRenderer.on>[1] = (_event, progress) => listener(progress)
+      ipcRenderer.on(channel, handle)
+      return () => {
+        ipcRenderer.removeListener(channel, handle)
+      }
+    }
   },
   browser: createBrowserIpcBridge(ipcRenderer),
   git: createGitIpcBridge(ipcRenderer),

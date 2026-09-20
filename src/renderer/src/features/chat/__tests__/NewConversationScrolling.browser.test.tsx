@@ -17,6 +17,8 @@ const { translate, selectAttachments, executeCommand, openCreateProjectDialog } 
   })
 )
 
+vi.mock('../../../host/hostClient', () => ({ hostClient: {} }))
+
 vi.mock('../../../config/FrontendConfigProvider', () => ({
   useFrontendConfig: () => ({ t: translate })
 }))
@@ -72,6 +74,8 @@ vi.mock('../chatAttachments', () => ({
   buildAgentInputAttachments: (attachments: unknown[]) => attachments,
   composerAttachmentFromAgentAttachment: (attachment: unknown) => attachment,
   createComposerAttachmentsFromFiles: async () => [],
+  loadComposerAttachmentImage: async () => undefined,
+  loadComposerAttachmentPreview: async () => undefined,
   createAttachmentSummary: () => '',
   selectComposerAttachments: selectAttachments,
   stripAttachmentSummary: (content: string) => content
@@ -108,8 +112,8 @@ function Workspace({
               name: 'notes.txt',
               mimeType: 'text/plain',
               sizeBytes: 4,
-              encoding: 'base64',
-              data: 'dGVzdA=='
+              encoding: 'managed',
+              data: 'managed-test-dGVzdA=='
             }
           ]
         : [],

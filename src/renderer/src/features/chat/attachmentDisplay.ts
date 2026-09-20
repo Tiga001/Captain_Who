@@ -16,9 +16,6 @@ import type { ComposerAttachmentKind } from './chatAttachments'
 
 interface AttachmentPreviewInput {
   kind: 'file' | 'image'
-  mimeType?: string | null
-  encoding?: AgentInputAttachment['encoding']
-  data?: string
   previewData?: string | null
   previewMimeType?: string | null
 }
@@ -359,7 +356,5 @@ export function getAttachmentPreviewUrl(attachment: AttachmentPreviewInput) {
   if (attachment.previewData && attachment.previewMimeType?.startsWith('image/')) {
     return `data:${attachment.previewMimeType};base64,${attachment.previewData}`
   }
-  if (attachment.encoding !== 'base64') return undefined
-  if (!attachment.mimeType?.startsWith('image/')) return undefined
-  return `data:${attachment.mimeType};base64,${attachment.data ?? ''}`
+  return undefined
 }

@@ -12,6 +12,7 @@ use std::fs;
 use std::sync::{mpsc as std_mpsc, Mutex};
 use tokio::io::AsyncReadExt;
 
+mod attachment_imports;
 mod bootstrap;
 mod collaboration_authorization;
 mod collaboration_settings;

@@ -267,7 +267,7 @@ export function registerHostIpc(
   },
   syncExecutionAccess?: () => Promise<void>
 ): HostIpcRegistration {
-  const attachmentDialogBridge = new AttachmentDialogBridge()
+  const attachmentDialogBridge = new AttachmentDialogBridge(coreServer)
   const workspaceFilesService = new WorkspaceFilesService(
     async (projectId) =>
       (await coreServer.loadProjects()).find((project) => project.id === projectId),
@@ -327,6 +327,24 @@ export function registerHostIpc(
   ipcMain.handle(HOST_CHANNELS.app.showAbout, () => app.showAboutPanel())
   ipcMain.handle(HOST_CHANNELS.attachments.selectInputAttachments, (event, request) =>
     attachmentDialogBridge.selectInputAttachments(event, request)
+  )
+  ipcMain.handle(HOST_CHANNELS.attachments.beginImport, (_event, input) =>
+    coreServer.beginAttachmentImport(input)
+  )
+  ipcMain.handle(HOST_CHANNELS.attachments.appendImport, (_event, input) =>
+    coreServer.appendAttachmentImport(input)
+  )
+  ipcMain.handle(HOST_CHANNELS.attachments.finishImport, (_event, input) =>
+    coreServer.finishAttachmentImport(input)
+  )
+  ipcMain.handle(HOST_CHANNELS.attachments.cancelImport, (event, input) =>
+    attachmentDialogBridge.cancelImport(event, input.importId)
+  )
+  ipcMain.handle(HOST_CHANNELS.attachments.retryInputAttachment, (event, input) =>
+    attachmentDialogBridge.retryInputAttachment(event, input.attachmentId, input.requestId)
+  )
+  ipcMain.handle(HOST_CHANNELS.attachments.loadPreview, (_event, input) =>
+    coreServer.loadInputAttachmentPreview(input)
   )
   const disposeBrowserDataIpc = browserDataIpc
     ? registerBrowserDataIpc(ipcMain, browserDataIpc)

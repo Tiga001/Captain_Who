@@ -22,31 +22,7 @@ pub(super) fn persist_run_context_materials(
     let bindings = update_trace_atomically(recorder, |staged| {
         let mut bindings = Vec::new();
         for (index, kind, message) in pending {
-            let mut refs = Vec::new();
-            let mut used_attachment_ids = std::collections::BTreeSet::new();
-            for image in message.images() {
-                let attachment = attachments
-                    .iter()
-                    .find(|attachment| {
-                        !used_attachment_ids.contains(attachment.id.as_str())
-                            && attachment.kind == crate::AgentInputAttachmentKind::Image
-                            && attachment.encoding == crate::AgentInputAttachmentEncoding::Base64
-                            && attachment.mime_type.as_deref() == Some(image.mime_type.as_str())
-                            && attachment.data == image.data_base64
-                    })
-                    .ok_or_else(|| {
-                        AgentError::new("Context image has no trusted attachment identity.")
-                    })?;
-                used_attachment_ids.insert(attachment.id.as_str());
-                let bytes = base64::engine::general_purpose::STANDARD
-                    .decode(&image.data_base64)
-                    .map_err(|_| AgentError::new("Context image has invalid base64 encoding."))?;
-                refs.push(crate::ConversationContextImageRef {
-                    attachment_id: attachment.id.clone(),
-                    mime_type: image.mime_type.clone(),
-                    sha256: format!("sha256:{:x}", Sha256::digest(bytes)),
-                });
-            }
+            let refs = image_refs_for_message(&message, attachments)?;
             let event_id = format!("{run_id}:context-material:{}", staged.next_sequence());
             let sequence = staged
                 .record_context_material(&event_id, kind, message.content(), &refs, now_ms())
@@ -60,6 +36,37 @@ pub(super) fn persist_run_context_materials(
     }
     publish_trace_snapshot(recorder, observer)?;
     Ok(())
+}
+
+/// Bind the bytes actually sent to the model to verified, immutable attachment identities.
+pub(super) fn image_refs_for_message(
+    message: &LlmMessage,
+    attachments: &[crate::AgentInputAttachment],
+) -> AgentResult<Vec<crate::ConversationContextImageRef>> {
+    let mut refs = Vec::new();
+    let mut used_attachment_ids = std::collections::BTreeSet::new();
+    for image in message.images() {
+        let attachment = attachments
+            .iter()
+            .find(|attachment| {
+                !used_attachment_ids.contains(attachment.id.as_str())
+                    && attachment.kind == crate::AgentInputAttachmentKind::Image
+                    && attachment.encoding == crate::AgentInputAttachmentEncoding::Base64
+                    && attachment.mime_type.as_deref() == Some(image.mime_type.as_str())
+                    && attachment.data == image.data_base64
+            })
+            .ok_or_else(|| AgentError::new("Context image has no trusted attachment identity."))?;
+        used_attachment_ids.insert(attachment.id.as_str());
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(&image.data_base64)
+            .map_err(|_| AgentError::new("Context image has invalid base64 encoding."))?;
+        refs.push(crate::ConversationContextImageRef {
+            attachment_id: attachment.id.clone(),
+            mime_type: image.mime_type.clone(),
+            sha256: format!("sha256:{:x}", Sha256::digest(bytes)),
+        });
+    }
+    Ok(refs)
 }
 
 #[cfg(test)]

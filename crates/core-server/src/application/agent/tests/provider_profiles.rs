@@ -726,16 +726,26 @@ async fn rewrite_turn_is_atomic_replayable_and_runs_with_only_the_active_context
         AgentService::try_new_with_startup_reconciliation(Arc::clone(&storage), false, None)
             .unwrap();
     service.grant_execution_access_for_test();
-    let source_attachment = mycopilot_core::AgentInputAttachment {
-        id: "rewrite-source-attachment".to_string(),
-        kind: mycopilot_core::AgentInputAttachmentKind::File,
-        name: "evidence.txt".to_string(),
-        mime_type: Some("text/plain".to_string()),
-        size_bytes: 16,
-        encoding: mycopilot_core::AgentInputAttachmentEncoding::Utf8,
-        data: "durable evidence".to_string(),
-        truncated: None,
-    };
+    let import_id = storage
+        .begin_attachment_import(mycopilot_core::AttachmentImportInput {
+            id: "rewrite-source-attachment".to_string(),
+            kind: mycopilot_core::AgentInputAttachmentKind::File,
+            name: "evidence.txt".to_string(),
+            mime_type: Some("text/plain".to_string()),
+            size_bytes: 16,
+        })
+        .unwrap();
+    storage
+        .append_attachment_import(
+            &import_id,
+            0,
+            &base64::Engine::encode(
+                &base64::engine::general_purpose::STANDARD,
+                b"durable evidence",
+            ),
+        )
+        .unwrap();
+    let source_attachment = storage.finish_attachment_import(&import_id).unwrap();
     let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
     let mut initial = turn_input("model-1");
     initial.conversation_id = Some("conversation-rewrite-provider".to_string());
@@ -843,9 +853,21 @@ async fn rewrite_turn_is_atomic_replayable_and_runs_with_only_the_active_context
         .load_input_attachments(&[source_attachment.id.clone(), replacement_attachment_id])
         .unwrap();
     assert_eq!(loaded.len(), 2);
-    assert!(loaded
-        .iter()
-        .all(|attachment| attachment.data == "ZHVyYWJsZSBldmlkZW5jZQ=="));
+    assert!(loaded.iter().all(|attachment| attachment.encoding
+        == mycopilot_core::AgentInputAttachmentEncoding::Managed
+        && storage
+            .validate_managed_input_attachment(attachment)
+            .is_ok()));
+    for attachment in &loaded {
+        use std::io::Read;
+        let mut bytes = Vec::new();
+        storage
+            .open_validated_managed_input_attachment(attachment)
+            .unwrap()
+            .read_to_end(&mut bytes)
+            .unwrap();
+        assert_eq!(bytes, b"durable evidence");
+    }
     let active_library = storage
         .build_attachment_library_context(&source.conversation_id, Some("rewrite-project"))
         .unwrap();

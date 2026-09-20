@@ -7,6 +7,8 @@ use crate::EnsureRootAgentInput;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 mod action_json_cas;
+mod attachment_image_cache;
+mod attachment_imports;
 mod attachments;
 mod conversations;
 mod guidance;
@@ -151,22 +153,32 @@ fn assistant_reply_fork_request(
 }
 
 fn input_attachment(
+    service: &StorageService,
     id: &str,
     kind: AgentInputAttachmentKind,
     name: &str,
     mime_type: Option<&str>,
     bytes: &[u8],
 ) -> AgentInputAttachment {
-    AgentInputAttachment {
-        id: id.to_string(),
-        kind,
-        name: name.to_string(),
-        mime_type: mime_type.map(ToString::to_string),
-        size_bytes: bytes.len() as u64,
-        encoding: AgentInputAttachmentEncoding::Base64,
-        data: base64::engine::general_purpose::STANDARD.encode(bytes),
-        truncated: None,
+    let import_id = service
+        .begin_attachment_import(crate::AttachmentImportInput {
+            id: id.into(),
+            kind,
+            name: name.into(),
+            mime_type: mime_type.map(str::to_owned),
+            size_bytes: bytes.len() as u64,
+        })
+        .unwrap();
+    for (index, chunk) in bytes.chunks(512 * 1024).enumerate() {
+        service
+            .append_attachment_import(
+                &import_id,
+                (index * 512 * 1024) as u64,
+                &base64::engine::general_purpose::STANDARD.encode(chunk),
+            )
+            .unwrap();
     }
+    service.finish_attachment_import(&import_id).unwrap()
 }
 
 fn composer_draft(scope_id: &str, project_id: Option<&str>, message: &str) -> ComposerDraftRecord {

@@ -5,6 +5,11 @@ import type { LocalTokenUsageSummaryInput, LocalTokenUsageSummaryOutput } from '
 export * from './license'
 
 import type {
+  AttachmentImportMetadata,
+  AttachmentImportHandle,
+  AttachmentImportChunk,
+  AttachmentImportProgress,
+  AttachmentPreview,
   AgentPromptPreferencesChanged,
   AgentCollaborationSettings,
   AgentCollaborationSettingsGetInput,
@@ -255,6 +260,19 @@ export { HOST_CHANNELS } from './channels'
 
 export interface AttachmentsHostApi {
   selectInputAttachments(request: AttachmentSelectInputRequest): Promise<AttachmentInputPayload[]>
+  beginImport(input: AttachmentImportMetadata): Promise<AttachmentImportHandle>
+  appendImport(input: AttachmentImportChunk): Promise<{ receivedBytes: number }>
+  finishImport(input: AttachmentImportHandle): Promise<AttachmentInputPayload>
+  cancelImport(input: AttachmentImportHandle): Promise<void>
+  retryInputAttachment(input: {
+    attachmentId: string
+    requestId?: string
+  }): Promise<AttachmentInputPayload>
+  loadPreview(input: {
+    attachment: AttachmentInputPayload
+    purpose?: 'display'
+  }): Promise<AttachmentPreview | null>
+  onImportProgress(listener: (progress: AttachmentImportProgress) => void): () => void
 }
 
 export interface AutomationsHostApi {

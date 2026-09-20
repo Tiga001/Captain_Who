@@ -54,6 +54,8 @@ mod agent_delivery;
 mod agent_graph;
 mod agent_templates;
 mod agent_workspaces;
+mod attachment_image_cache;
+mod attachment_imports;
 mod attachments;
 mod automations;
 mod browser_data;

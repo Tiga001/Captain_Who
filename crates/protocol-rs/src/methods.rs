@@ -165,6 +165,11 @@ pub const STORAGE_LOAD_UI_PREFERENCES_METHOD: &str = "storage.loadUiPreferences"
 pub const STORAGE_SAVE_UI_PREFERENCES_METHOD: &str = "storage.saveUiPreferences";
 pub const STORAGE_LOAD_ATTACHMENT_IMAGE_METHOD: &str = "storage.loadAttachmentImage";
 pub const STORAGE_LOAD_INPUT_ATTACHMENTS_METHOD: &str = "storage.loadInputAttachments";
+pub const STORAGE_BEGIN_ATTACHMENT_IMPORT_METHOD: &str = "storage.beginAttachmentImport";
+pub const STORAGE_APPEND_ATTACHMENT_IMPORT_METHOD: &str = "storage.appendAttachmentImport";
+pub const STORAGE_FINISH_ATTACHMENT_IMPORT_METHOD: &str = "storage.finishAttachmentImport";
+pub const STORAGE_CANCEL_ATTACHMENT_IMPORT_METHOD: &str = "storage.cancelAttachmentImport";
+pub const STORAGE_LOAD_INPUT_ATTACHMENT_PREVIEW_METHOD: &str = "storage.loadInputAttachmentPreview";
 pub const STORAGE_LOAD_BROWSER_DOWNLOAD_SETTINGS_METHOD: &str =
     "storage.loadBrowserDownloadSettings";
 pub const STORAGE_SAVE_BROWSER_DOWNLOAD_SETTINGS_METHOD: &str =

@@ -782,7 +782,7 @@ function parseDraftAttachments(value: string): AgentInputAttachment[] {
       (candidate.mimeType !== undefined && typeof candidate.mimeType !== 'string') ||
       !Number.isSafeInteger(candidate.sizeBytes) ||
       (candidate.sizeBytes as number) < 0 ||
-      (candidate.encoding !== 'utf8' && candidate.encoding !== 'base64') ||
+      candidate.encoding !== 'managed' ||
       typeof candidate.data !== 'string' ||
       (candidate.truncated !== undefined && typeof candidate.truncated !== 'boolean')
     ) {

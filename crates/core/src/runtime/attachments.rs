@@ -1,23 +1,25 @@
-// Input attachment staging and extraction helpers for agent runtime.
-use super::RUN_COUNTER;
+// Managed input attachment extraction helpers for agent runtime.
+use crate::file_input::image_delivery::prepare_model_image;
+use crate::file_input::{snapshot_verified_agent_file_input, AgentFileInputExecutionContext};
 use crate::llm::LlmImage;
 use crate::protocol::{
     AgentApprovalStatus, AgentAttachmentLibraryContext, AgentError, AgentInputAttachment,
     AgentInputAttachmentEncoding, AgentInputAttachmentKind, AgentResult, AgentRunContext,
-    AgentToolCall, AgentWorkspaceContext,
+    AgentToolCall,
 };
 use crate::tools::{AgentToolExposure, ToolExecutionContext, ToolRegistry};
 use base64::Engine;
 use serde_json::{json, Value};
-use std::fs;
+use std::io::BufReader;
 use std::path::Path;
-use std::sync::atomic::Ordering;
 
 // Attachment preprocessing is a direct context consumer rather than an ordinary Tool-result
-// exchange, so it cannot rely on the central 10K Model Result Gate. Keep its legacy 40K ceiling
+// exchange, so it cannot rely on the central 10K Model Result Gate. Keep a 40K ceiling
 // here as an explicit Consumer Projection Limit; document Tools themselves must still return the
 // complete extracted text so Exact History can archive it.
 const ATTACHMENT_CONTEXT_TEXT_MAX_CHARS: usize = 40_000;
+const ATTACHMENT_INLINE_TEXT_MAX_BYTES: u64 = 256 * 1024;
+const ATTACHMENT_CONTEXT_IMAGE_MAX_BYTES: usize = 16 * 1024 * 1024;
 const ATTACHMENT_PREPROCESSING_CONVERSATION_ID: &str = "host:attachment-preprocessing";
 const ATTACHMENT_PREPROCESSING_RUN_ID: &str = "host:attachment-preprocessing:run";
 
@@ -37,23 +39,6 @@ pub(super) fn build_attachment_context(
         });
     }
 
-    let temp_root = std::env::temp_dir().join(format!(
-        "my-copilot-agent-attachments-{}",
-        RUN_COUNTER.fetch_add(1, Ordering::Relaxed)
-    ));
-    fs::create_dir_all(&temp_root)
-        .map_err(|error| AgentError::new(format!("创建附件临时目录失败：{error}")))?;
-
-    let result = build_attachment_context_in_workspace(attachments, attachment_library, &temp_root);
-    let _ = fs::remove_dir_all(&temp_root);
-    result
-}
-
-fn build_attachment_context_in_workspace(
-    attachments: &[AgentInputAttachment],
-    attachment_library: Option<&AgentAttachmentLibraryContext>,
-    temp_root: &Path,
-) -> AgentResult<AttachmentContext> {
     let registry = ToolRegistry::defaults_with_search(None);
     let tool_context = ToolExecutionContext::from_run_context(Some(&AgentRunContext {
         collaboration_identity: None,
@@ -62,22 +47,19 @@ fn build_attachment_context_in_workspace(
         // it to an explicit internal owner instead of weakening read_file's totality contract.
         conversation_id: Some(ATTACHMENT_PREPROCESSING_CONVERSATION_ID.to_string()),
         project_id: None,
-        workspace: Some(AgentWorkspaceContext {
-            folders: Vec::new(),
-            project_id: None,
-            display_name: Some("input attachments".to_string()),
-            root_path: Some(temp_root.to_string_lossy().to_string()),
-        }),
-        attachment_library: None,
+        workspace: None,
+        attachment_library: attachment_library.cloned(),
         permissions: Default::default(),
     }))
     .with_runtime_services(ATTACHMENT_PREPROCESSING_RUN_ID.to_string(), None);
     let mut sections = Vec::new();
     let mut images = Vec::new();
+    let mut remaining_text = ATTACHMENT_CONTEXT_TEXT_MAX_CHARS;
+    let mut remaining_images = ATTACHMENT_CONTEXT_IMAGE_MAX_BYTES;
 
     for attachment in attachments {
         let safe_name = sanitize_attachment_file_name(&attachment.name, &attachment.id);
-        let read_path = registered_read_path(attachment_library, attachment);
+        let read_path = require_managed_read_path(attachment_library, attachment)?;
         let mime_type = attachment
             .mime_type
             .as_deref()
@@ -86,20 +68,39 @@ fn build_attachment_context_in_workspace(
             .unwrap_or("application/octet-stream");
 
         if attachment.kind == AgentInputAttachmentKind::Image
-            && attachment.encoding == AgentInputAttachmentEncoding::Base64
             && mime_type.starts_with("image/")
             && mime_type != "image/svg+xml"
         {
-            images.push(LlmImage {
-                mime_type: mime_type.to_string(),
-                data_base64: attachment.data.clone(),
-            });
+            let prepared = prepare_attachment_image(attachment, attachment_library);
+            match prepared {
+                Ok(prepared) if prepared.bytes.len() <= remaining_images => {
+                    remaining_images -= prepared.bytes.len();
+                    images.push(LlmImage {
+                        mime_type: prepared.mime_type.to_string(),
+                        data_base64: base64::engine::general_purpose::STANDARD.encode(&prepared.bytes),
+                    });
+                    sections.push(format!(
+                        "### {}\n类型：图片\nMIME：{}\n大小：{} bytes\n{}\n状态：已作为视觉输入发送给模型（{}×{}；原图已保留）。",
+                        attachment.name, mime_type, attachment.size_bytes, read_path_line(read_path),
+                        prepared.width, prepared.height,
+                    ));
+                }
+                Ok(_) => sections.push(format!(
+                    "### {}\nMIME：{}\n大小：{} bytes\n{}\n状态：本次附件图片预算已用完；原图已保留，请按需使用 read_image。",
+                    attachment.name, mime_type, attachment.size_bytes, read_path_line(read_path),
+                )),
+                Err(error) => sections.push(format!(
+                    "### {}\nMIME：{}\n大小：{} bytes\n{}\n状态：原图已保留，未作为视觉输入发送：{}",
+                    attachment.name, mime_type, attachment.size_bytes, read_path_line(read_path), error,
+                )),
+            }
+            continue;
+        }
+
+        if attachment.size_bytes > ATTACHMENT_INLINE_TEXT_MAX_BYTES || remaining_text == 0 {
             sections.push(format!(
-                "### {}\n类型：图片\nMIME：{}\n大小：{} bytes\n{}\n状态：已作为视觉输入发送给模型。",
-                attachment.name,
-                mime_type,
-                attachment.size_bytes,
-                read_path_line(read_path)
+                "### {}\nMIME：{}\n大小：{} bytes\n{}\n状态：仅提供附件元数据；请按需通过 readPath 分段读取，或作为命令的只读文件输入。",
+                attachment.name, mime_type, attachment.size_bytes, read_path_line(read_path),
             ));
             continue;
         }
@@ -154,16 +155,13 @@ fn build_attachment_context_in_workspace(
             }
         }
 
-        let file_path = temp_root.join(&safe_name);
-        let bytes = attachment_bytes(attachment)?;
-        fs::write(&file_path, bytes)
-            .map_err(|error| AgentError::new(format!("写入附件临时文件失败：{error}")))?;
+        let tool_path = read_path;
 
         let call = AgentToolCall {
             id: format!("attachment-{}", attachment.id),
             tool: tool_name.to_string(),
             args: json!({
-                "path": safe_name,
+                "path": tool_path,
                 "maxLines": 1_200
             }),
             approval_status: AgentApprovalStatus::NotRequired,
@@ -177,7 +175,8 @@ fn build_attachment_context_in_workspace(
                 .as_ref()
                 .and_then(extracted_text_from_tool_result)
                 .unwrap_or_default();
-            let projection = attachment_text_projection(extracted);
+            let projection = attachment_text_projection_with_limit(extracted, remaining_text);
+            remaining_text = remaining_text.saturating_sub(projection.returned_chars);
             let tool_truncated = result
                 .result
                 .as_ref()
@@ -224,6 +223,72 @@ fn build_attachment_context_in_workspace(
     Ok(AttachmentContext { text, images })
 }
 
+/// Host-only image payloads for exact journal binding. New images use the same bounded
+/// derivative as the model request; already-hydrated historical payloads are never rewritten.
+pub(super) fn normalize_attachment_context_images(
+    attachments: &[AgentInputAttachment],
+    attachment_library: Option<&AgentAttachmentLibraryContext>,
+) -> AgentResult<Vec<AgentInputAttachment>> {
+    let mut normalized = Vec::new();
+    let mut remaining = ATTACHMENT_CONTEXT_IMAGE_MAX_BYTES;
+    for attachment in attachments {
+        require_managed_read_path(attachment_library, attachment)?;
+        if attachment.kind != AgentInputAttachmentKind::Image {
+            continue;
+        }
+        let Ok(prepared) = prepare_attachment_image(attachment, attachment_library) else {
+            continue;
+        };
+        if prepared.bytes.len() > remaining {
+            continue;
+        }
+        remaining -= prepared.bytes.len();
+        normalized.push(AgentInputAttachment {
+            id: attachment.id.clone(),
+            kind: AgentInputAttachmentKind::Image,
+            name: attachment.name.clone(),
+            mime_type: Some(prepared.mime_type.to_string()),
+            size_bytes: prepared.bytes.len() as u64,
+            encoding: AgentInputAttachmentEncoding::Base64,
+            data: base64::engine::general_purpose::STANDARD.encode(&prepared.bytes),
+            truncated: None,
+        });
+    }
+    Ok(normalized)
+}
+
+fn prepare_attachment_image(
+    attachment: &AgentInputAttachment,
+    attachment_library: Option<&AgentAttachmentLibraryContext>,
+) -> AgentResult<crate::file_input::image_delivery::PreparedModelImage> {
+    let read_path = require_managed_read_path(attachment_library, attachment)?;
+    let source = crate::AgentFileInputRef::Attachment {
+        read_path: read_path.to_string(),
+    };
+    snapshot_verified_agent_file_input(
+        None,
+        Default::default(),
+        &AgentFileInputExecutionContext::from_attachment_library(attachment_library.cloned()),
+        &source,
+        None,
+    )
+    .map_err(AgentError::from)
+    .and_then(|snapshot| prepare_model_image(BufReader::new(snapshot.file)))
+}
+
+fn require_managed_read_path<'a>(
+    attachment_library: Option<&'a AgentAttachmentLibraryContext>,
+    attachment: &AgentInputAttachment,
+) -> AgentResult<&'a str> {
+    if attachment.encoding != AgentInputAttachmentEncoding::Managed {
+        return Err(AgentError::new(
+            "用户附件必须使用托管引用，请重新添加附件。",
+        ));
+    }
+    registered_read_path(attachment_library, attachment)
+        .ok_or_else(|| AgentError::new("托管附件没有匹配的附件库授权，请重新添加附件。"))
+}
+
 fn registered_read_path<'a>(
     attachment_library: Option<&'a AgentAttachmentLibraryContext>,
     attachment: &AgentInputAttachment,
@@ -243,10 +308,8 @@ fn registered_read_path<'a>(
         .map(|reference| reference.read_path.as_str())
 }
 
-fn read_path_line(read_path: Option<&str>) -> String {
-    read_path
-        .map(|read_path| format!("readPath：`{read_path}`"))
-        .unwrap_or_else(|| "readPath：当前附件尚未登记到附件库。".to_string())
+fn read_path_line(read_path: &str) -> String {
+    format!("readPath：`{read_path}`")
 }
 
 fn candidate_read_tool_for_attachment(
@@ -314,8 +377,7 @@ fn is_text_attachment(attachment: &AgentInputAttachment, safe_name: &str) -> boo
         .map(str::trim)
         .unwrap_or_default();
 
-    attachment.encoding == AgentInputAttachmentEncoding::Utf8
-        || mime_type.starts_with("text/")
+    mime_type.starts_with("text/")
         || matches!(
             mime_type,
             "application/json" | "application/xml" | "image/svg+xml"
@@ -439,15 +501,6 @@ fn is_text_attachment(attachment: &AgentInputAttachment, safe_name: &str) -> boo
         )
 }
 
-fn attachment_bytes(attachment: &AgentInputAttachment) -> AgentResult<Vec<u8>> {
-    match attachment.encoding {
-        AgentInputAttachmentEncoding::Utf8 => Ok(attachment.data.as_bytes().to_vec()),
-        AgentInputAttachmentEncoding::Base64 => base64::engine::general_purpose::STANDARD
-            .decode(attachment.data.as_bytes())
-            .map_err(|error| AgentError::new(format!("附件 base64 数据无效：{error}"))),
-    }
-}
-
 fn extracted_text_from_tool_result(value: &Value) -> Option<String> {
     value
         .get("text")
@@ -464,14 +517,20 @@ struct AttachmentTextProjection {
     truncated: bool,
 }
 
+#[cfg(test)]
 fn attachment_text_projection(text: String) -> AttachmentTextProjection {
+    attachment_text_projection_with_limit(text, ATTACHMENT_CONTEXT_TEXT_MAX_CHARS)
+}
+
+fn attachment_text_projection_with_limit(
+    text: String,
+    max_chars: usize,
+) -> AttachmentTextProjection {
     let total_chars = text.chars().count();
-    let returned_chars = total_chars.min(ATTACHMENT_CONTEXT_TEXT_MAX_CHARS);
+    let returned_chars = total_chars.min(max_chars);
     let truncated = returned_chars < total_chars;
     let text = if truncated {
-        text.chars()
-            .take(ATTACHMENT_CONTEXT_TEXT_MAX_CHARS)
-            .collect()
+        text.chars().take(max_chars).collect()
     } else {
         text
     };
@@ -518,24 +577,174 @@ fn attachment_extension(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::io::Cursor;
+
+    fn managed_attachment_fixture(
+        root: &Path,
+        name: &str,
+        bytes: &[u8],
+        kind: AgentInputAttachmentKind,
+    ) -> (AgentInputAttachment, AgentAttachmentLibraryContext) {
+        let id = "attachment-managed";
+        fs::write(root.join(name), bytes).unwrap();
+        let mime_type = Some(
+            if kind == AgentInputAttachmentKind::Image {
+                "image/png"
+            } else {
+                "text/plain"
+            }
+            .to_string(),
+        );
+        let attachment = AgentInputAttachment {
+            id: id.into(),
+            kind,
+            name: name.into(),
+            mime_type: mime_type.clone(),
+            size_bytes: bytes.len() as u64,
+            encoding: AgentInputAttachmentEncoding::Managed,
+            data: "opaque-import-id".into(),
+            truncated: None,
+        };
+        let library = AgentAttachmentLibraryContext {
+            root_path: Some(root.to_string_lossy().into()),
+            conversation_id: Some("conversation".into()),
+            project_id: None,
+            conversation_attachments: vec![crate::AgentAttachmentReference {
+                id: id.into(),
+                conversation_id: "conversation".into(),
+                message_id: "message".into(),
+                project_id: None,
+                kind,
+                name: name.into(),
+                mime_type,
+                size_bytes: bytes.len() as u64,
+                read_path: format!("@attachments/{id}/{name}"),
+                storage_rel_path: name.into(),
+                created_at: 0,
+            }],
+            project_attachments: Vec::new(),
+        };
+        (attachment, library)
+    }
+
+    #[test]
+    fn user_attachment_boundary_rejects_inline_payloads_even_with_registered_metadata() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut attachment, library) = managed_attachment_fixture(
+            directory.path(),
+            "notes.txt",
+            b"hello",
+            AgentInputAttachmentKind::File,
+        );
+        attachment.encoding = AgentInputAttachmentEncoding::Base64;
+        attachment.data = "aGVsbG8=".into();
+        assert!(
+            build_attachment_context(std::slice::from_ref(&attachment), Some(&library))
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("托管引用")
+        );
+        assert!(normalize_attachment_context_images(&[attachment], Some(&library)).is_err());
+    }
+
+    #[test]
+    fn managed_text_reads_authorized_file_and_never_uses_opaque_id_as_content() {
+        let directory = tempfile::tempdir().unwrap();
+        let (attachment, library) = managed_attachment_fixture(
+            directory.path(),
+            "notes.txt",
+            b"managed file content",
+            AgentInputAttachmentKind::File,
+        );
+        let context =
+            build_attachment_context(std::slice::from_ref(&attachment), Some(&library)).unwrap();
+        assert!(context.text.contains("managed file content"));
+        assert!(!context.text.contains("opaque-import-id"));
+        let mut mismatched = attachment;
+        mismatched.size_bytes += 1;
+        assert!(build_attachment_context(&[mismatched], Some(&library)).is_err());
+    }
+
+    #[test]
+    fn large_managed_text_is_metadata_only_and_total_inline_text_is_bounded() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut attachment, mut library) = managed_attachment_fixture(
+            directory.path(),
+            "large.txt",
+            b"not read",
+            AgentInputAttachmentKind::File,
+        );
+        attachment.size_bytes = 1024 * 1024 * 1024;
+        library.conversation_attachments[0].size_bytes = attachment.size_bytes;
+        // No read is attempted: the fake registered size cannot match this tiny file.
+        let context = build_attachment_context(&[attachment], Some(&library)).unwrap();
+        assert!(context.text.contains("仅提供附件元数据"));
+        assert!(!context.text.contains("not read"));
+        let mut attachments = Vec::new();
+        let mut combined_library = library.clone();
+        combined_library.conversation_attachments.clear();
+        for id in ["a", "b", "c", "d", "e"] {
+            let (mut attachment, mut library) = managed_attachment_fixture(
+                directory.path(),
+                &format!("{id}.txt"),
+                "界".repeat(10_000).as_bytes(),
+                AgentInputAttachmentKind::File,
+            );
+            attachment.id = id.into();
+            library.conversation_attachments[0].id = id.into();
+            library.conversation_attachments[0].read_path = format!("@attachments/{id}/{id}.txt");
+            combined_library
+                .conversation_attachments
+                .extend(library.conversation_attachments);
+            attachments.push(attachment);
+        }
+        let context = build_attachment_context(&attachments, Some(&combined_library)).unwrap();
+        assert_eq!(
+            context.text.matches('界').count(),
+            ATTACHMENT_CONTEXT_TEXT_MAX_CHARS
+        );
+    }
+
+    #[test]
+    fn managed_image_is_resized_without_replacing_original() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut encoded = Cursor::new(Vec::new());
+        image::DynamicImage::new_rgb8(2500, 1000)
+            .write_to(&mut encoded, image::ImageFormat::Png)
+            .unwrap();
+        let original = encoded.into_inner();
+        let (attachment, library) = managed_attachment_fixture(
+            directory.path(),
+            "large.png",
+            &original,
+            AgentInputAttachmentKind::Image,
+        );
+        let context = build_attachment_context(&[attachment], Some(&library)).unwrap();
+        assert_eq!(context.images.len(), 1);
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(&context.images[0].data_base64)
+            .unwrap();
+        let derived = image::load_from_memory(&bytes).unwrap();
+        assert_eq!(derived.width(), 2048);
+        assert_eq!(
+            fs::read(directory.path().join("large.png")).unwrap(),
+            original
+        );
+    }
 
     #[test]
     fn text_attachment_preprocessing_has_an_internal_observation_owner() {
         let directory = tempfile::tempdir().unwrap();
         let marker = "ATTACHMENT_OBSERVATION_OWNER_MARKER";
-        let attachment = AgentInputAttachment {
-            id: "attachment-owner-test".to_string(),
-            kind: AgentInputAttachmentKind::File,
-            name: "notes.txt".to_string(),
-            mime_type: Some("text/plain".to_string()),
-            size_bytes: marker.len() as u64,
-            encoding: AgentInputAttachmentEncoding::Utf8,
-            data: marker.to_string(),
-            truncated: None,
-        };
-
-        let context =
-            build_attachment_context_in_workspace(&[attachment], None, directory.path()).unwrap();
+        let (attachment, library) = managed_attachment_fixture(
+            directory.path(),
+            "notes.txt",
+            marker.as_bytes(),
+            AgentInputAttachmentKind::File,
+        );
+        let context = build_attachment_context(&[attachment], Some(&library)).unwrap();
 
         assert!(context.text.contains(marker));
         assert!(!context.text.contains("缺少 conversationId"));

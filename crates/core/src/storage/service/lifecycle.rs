@@ -120,6 +120,12 @@ impl StorageService {
             if let Err(error) = service.cleanup_orphan_attachment_files() {
                 eprintln!("failed to cleanup orphan attachment files: {error}");
             }
+            if let Err(error) = service.cleanup_attachment_imports(now_ms()) {
+                eprintln!("failed to cleanup stale attachment imports: {error}");
+            }
+            if let Err(error) = service.cleanup_model_image_cache() {
+                eprintln!("failed to cleanup orphan model image cache: {error}");
+            }
             match service.state.connection() {
                 Ok(mut connection) => {
                     if let Err(error) =

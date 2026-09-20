@@ -252,6 +252,7 @@ fn deleting_owner_message_atomically_retires_settled_file_effect_receipts() {
             "assistant-delete",
             Some("project-1"),
             &[input_attachment(
+                &service,
                 "attachment-delete",
                 AgentInputAttachmentKind::File,
                 "artifact.txt",
@@ -382,6 +383,7 @@ fn failed_message_delete_rolls_back_attachments_and_action_receipts() {
             "assistant-rollback",
             Some("project-1"),
             &[input_attachment(
+                &service,
                 "attachment-rollback",
                 AgentInputAttachmentKind::File,
                 "keep.txt",

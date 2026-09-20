@@ -1,6 +1,17 @@
 use super::*;
 use crate::storage::models::ConversationContinuationOriginRecord;
 
+fn resolved_payload(service: &StorageService, attachment: &AgentInputAttachment) -> Vec<u8> {
+    service
+        .validate_managed_input_attachment(attachment)
+        .unwrap();
+    match service.attachment_data(attachment).unwrap() {
+        super::super::attachment_imports::AttachmentData::Managed { path, .. } => {
+            fs::read(path).unwrap()
+        }
+    }
+}
+
 fn png_image(width: u32, height: u32) -> Vec<u8> {
     use image::{DynamicImage, ImageFormat, Rgba, RgbaImage};
     use std::io::Cursor;
@@ -33,6 +44,7 @@ fn input_attachments_are_persisted_and_rehydrated() {
             "message-1",
             Some("project-1"),
             &[input_attachment(
+                &service,
                 "attachment-1",
                 AgentInputAttachmentKind::Image,
                 "pixel.png",
@@ -53,24 +65,24 @@ fn input_attachments_are_persisted_and_rehydrated() {
     assert_eq!(attachment.kind, "image");
     assert_eq!(attachment.name, "pixel.png");
     assert_eq!(attachment.preview_mime_type.as_deref(), Some("image/png"));
-    assert_eq!(
-        base64::engine::general_purpose::STANDARD
-            .decode(attachment.preview_data.as_deref().unwrap())
-            .unwrap(),
-        original_png
-    );
+    let thumbnail = base64::engine::general_purpose::STANDARD
+        .decode(attachment.preview_data.as_deref().unwrap())
+        .unwrap();
+    let thumbnail = image::load_from_memory(&thumbnail).unwrap();
+    assert_eq!((thumbnail.width(), thumbnail.height()), (256, 128));
 
     let original = service
         .load_attachment_image("attachment-1")
         .unwrap()
         .unwrap();
     assert_eq!(original.mime_type, "image/png");
-    assert_eq!(
-        base64::engine::general_purpose::STANDARD
+    let delivered = image::load_from_memory(
+        &base64::engine::general_purpose::STANDARD
             .decode(&original.data)
             .unwrap(),
-        original_png
-    );
+    )
+    .unwrap();
+    assert_eq!(delivered, image::load_from_memory(&original_png).unwrap());
 
     let library = service
         .build_attachment_library_context("conversation-1", Some("project-1"))
@@ -123,6 +135,7 @@ fn projectless_agent_tree_shares_attachments_without_leaking_to_other_conversati
             "message-root",
             None,
             &[input_attachment(
+                &service,
                 "attachment-root",
                 AgentInputAttachmentKind::File,
                 "root.txt",
@@ -138,6 +151,7 @@ fn projectless_agent_tree_shares_attachments_without_leaking_to_other_conversati
             "message-child",
             None,
             &[input_attachment(
+                &service,
                 "attachment-child",
                 AgentInputAttachmentKind::File,
                 "child.txt",
@@ -209,6 +223,7 @@ fn forked_conversation_owns_independent_attachment_files_and_is_idempotent() {
             "message-user",
             Some("project-1"),
             &[input_attachment(
+                &service,
                 "attachment-source",
                 AgentInputAttachmentKind::File,
                 "notes.txt",
@@ -261,9 +276,7 @@ fn forked_conversation_owns_independent_attachment_files_and_is_idempotent() {
         .unwrap();
     assert_eq!(retained_payload.len(), 1);
     assert_eq!(
-        base64::engine::general_purpose::STANDARD
-            .decode(&retained_payload[0].data)
-            .unwrap(),
+        resolved_payload(&service, &retained_payload[0]),
         b"independent fork attachment"
     );
 
@@ -290,9 +303,7 @@ fn forked_conversation_owns_independent_attachment_files_and_is_idempotent() {
         .load_input_attachments(&[recursive_attachment_id])
         .unwrap();
     assert_eq!(
-        base64::engine::general_purpose::STANDARD
-            .decode(&recursive_payload[0].data)
-            .unwrap(),
+        resolved_payload(&service, &recursive_payload[0]),
         b"independent fork attachment"
     );
 }
@@ -321,6 +332,7 @@ fn fork_clones_applied_guidance_attachments_but_not_abandoned_ones() {
     service.save_conversation(source).unwrap();
 
     let applied = input_attachment(
+        &service,
         "attachment-guidance-applied",
         AgentInputAttachmentKind::File,
         "applied.txt",
@@ -328,6 +340,7 @@ fn fork_clones_applied_guidance_attachments_but_not_abandoned_ones() {
         b"applied guidance payload",
     );
     let abandoned = input_attachment(
+        &service,
         "attachment-guidance-abandoned",
         AgentInputAttachmentKind::File,
         "abandoned.txt",
@@ -490,9 +503,7 @@ fn fork_clones_applied_guidance_attachments_but_not_abandoned_ones() {
         .load_input_attachments(&[forked_attachment_id])
         .unwrap();
     assert_eq!(
-        base64::engine::general_purpose::STANDARD
-            .decode(&forked_payload[0].data)
-            .unwrap(),
+        resolved_payload(&service, &forked_payload[0]),
         b"applied guidance payload"
     );
 }
@@ -510,6 +521,7 @@ fn opening_storage_removes_orphan_attachments_and_preserves_referenced_files() {
             "message-1",
             None,
             &[input_attachment(
+                &service,
                 "referenced",
                 AgentInputAttachmentKind::File,
                 "referenced.txt",
@@ -559,6 +571,7 @@ fn project_attachment_library_excludes_current_conversation_and_delete_cleans_fi
             "message-current",
             Some("project-1"),
             &[input_attachment(
+                &service,
                 "current",
                 AgentInputAttachmentKind::File,
                 "current.txt",
@@ -574,6 +587,7 @@ fn project_attachment_library_excludes_current_conversation_and_delete_cleans_fi
             "message-other",
             Some("project-1"),
             &[input_attachment(
+                &service,
                 "other",
                 AgentInputAttachmentKind::File,
                 "other.txt",
@@ -629,6 +643,7 @@ fn conversation_preview_file_read_does_not_hold_the_storage_connection() {
             "message-lock",
             None,
             &[input_attachment(
+                &service,
                 "attachment-lock",
                 AgentInputAttachmentKind::Image,
                 "lock.png",
@@ -678,7 +693,9 @@ fn conversation_preview_file_read_does_not_hold_the_storage_connection() {
     });
     let concurrent_query = query_rx.recv_timeout(Duration::from_millis(500));
 
-    writer.write_all(&original_png).unwrap();
+    if let Err(error) = writer.write_all(&original_png) {
+        assert_eq!(error.kind(), std::io::ErrorKind::BrokenPipe);
+    }
     drop(writer);
     let conversation = load_rx
         .recv_timeout(Duration::from_secs(2))
@@ -692,118 +709,44 @@ fn conversation_preview_file_read_does_not_hold_the_storage_connection() {
         concurrent_query.is_ok(),
         "a blocked attachment read must not retain the global SQLite connection guard"
     );
-    let preview_data = conversation.messages[0].attachments[0]
+    // A FIFO cannot provide the seekable image decoder contract. It is safely omitted after
+    // the blocked read, while the independent SQLite operation still completes.
+    assert!(conversation.messages[0].attachments[0]
         .preview_data
-        .as_deref()
-        .unwrap();
-    assert_eq!(
-        base64::engine::general_purpose::STANDARD
-            .decode(preview_data)
-            .unwrap(),
-        original_png
-    );
+        .is_none());
 }
 
 #[cfg(unix)]
 #[test]
-fn input_attachment_file_write_does_not_hold_the_storage_connection() {
+fn managed_attachment_write_rejects_non_regular_existing_target() {
     use std::ffi::CString;
-    use std::io::Read;
-    use std::os::fd::AsRawFd;
     use std::os::unix::ffi::OsStrExt;
-    use std::os::unix::fs::OpenOptionsExt;
-    use std::sync::{mpsc, Arc};
-    use std::thread;
-    use std::time::{Duration, Instant};
-
     let fixture = StorageFixture::new();
-    let service = Arc::new(fixture.service());
+    let service = fixture.service();
     service
-        .save_conversation(conversation(
-            "conversation-write-lock",
-            None,
-            "message-write-lock",
-        ))
+        .save_conversation(conversation("non-regular", None, "message"))
         .unwrap();
-    let payload = vec![0x5a; 2 * 1024 * 1024];
     let attachment = input_attachment(
-        "attachment-write-lock",
+        &service,
+        "non-regular",
         AgentInputAttachmentKind::File,
-        "slow.bin",
-        Some("application/octet-stream"),
-        &payload,
+        "file.txt",
+        Some("text/plain"),
+        b"source",
     );
-    let storage_path = service.attachment_root.join(attachment_storage_rel_path(
-        "conversation-write-lock",
-        "message-write-lock",
+    let target = service.attachment_root.join(attachment_storage_rel_path(
+        "non-regular",
+        "message",
         &attachment.id,
         &attachment.name,
     ));
-    fs::create_dir_all(storage_path.parent().unwrap()).unwrap();
-    let fifo_path = CString::new(storage_path.as_os_str().as_bytes()).unwrap();
-    assert_eq!(unsafe { libc::mkfifo(fifo_path.as_ptr(), 0o600) }, 0);
-    let mut reader = fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NONBLOCK)
-        .open(&storage_path)
-        .unwrap();
-
-    let (save_tx, save_rx) = mpsc::channel();
-    let save_service = Arc::clone(&service);
-    let saver = thread::spawn(move || {
-        let result = save_service.save_input_attachments(
-            "conversation-write-lock",
-            "message-write-lock",
-            None,
-            &[attachment],
-            10,
-        );
-        save_tx.send(result).unwrap();
-    });
-
-    let deadline = Instant::now() + Duration::from_secs(2);
-    let mut first_byte = [0_u8; 1];
-    loop {
-        match reader.read(&mut first_byte) {
-            Ok(1) => break,
-            Ok(_) if Instant::now() < deadline => thread::sleep(Duration::from_millis(5)),
-            Err(error)
-                if error.kind() == std::io::ErrorKind::WouldBlock && Instant::now() < deadline =>
-            {
-                thread::sleep(Duration::from_millis(5));
-            }
-            Ok(_) => panic!("timed out waiting for the attachment writer"),
-            Err(error) => panic!("failed to rendezvous with attachment writer: {error}"),
-        }
-    }
-
-    let (query_tx, query_rx) = mpsc::channel();
-    let query_service = Arc::clone(&service);
-    let query = thread::spawn(move || {
-        query_tx.send(query_service.load_projects()).unwrap();
-    });
-    let concurrent_query = query_rx.recv_timeout(Duration::from_millis(500));
-
-    let flags = unsafe { libc::fcntl(reader.as_raw_fd(), libc::F_GETFL) };
-    assert!(flags >= 0);
-    assert_eq!(
-        unsafe { libc::fcntl(reader.as_raw_fd(), libc::F_SETFL, flags & !libc::O_NONBLOCK) },
-        0
-    );
-    let mut remaining = Vec::new();
-    reader.read_to_end(&mut remaining).unwrap();
-    assert_eq!(remaining.len() + 1, payload.len());
-    save_rx
-        .recv_timeout(Duration::from_secs(2))
-        .unwrap()
-        .unwrap();
-    saver.join().unwrap();
-    query.join().unwrap();
-
-    assert!(
-        concurrent_query.is_ok(),
-        "a blocked attachment write must not retain the global SQLite connection guard"
-    );
+    fs::create_dir_all(target.parent().unwrap()).unwrap();
+    let path = CString::new(target.as_os_str().as_bytes()).unwrap();
+    assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
+    assert!(service
+        .save_input_attachments("non-regular", "message", None, &[attachment], 1)
+        .is_err());
+    assert!(service.load_projects().is_ok());
 }
 
 #[test]
@@ -818,6 +761,7 @@ fn failed_attachment_database_commit_removes_new_file() {
         ))
         .unwrap();
     let attachment = input_attachment(
+        &service,
         "attachment-commit-failure",
         AgentInputAttachmentKind::File,
         "cleanup.bin",
@@ -866,7 +810,14 @@ fn context_image_ref(id: &str, bytes: &[u8]) -> crate::ConversationContextImageR
     crate::ConversationContextImageRef {
         attachment_id: id.to_string(),
         mime_type: "image/png".to_string(),
-        sha256: format!("sha256:{:x}", Sha256::digest(bytes)),
+        sha256: format!(
+            "sha256:{:x}",
+            Sha256::digest(
+                crate::file_input::image_delivery::prepare_model_image(std::io::Cursor::new(bytes))
+                    .unwrap()
+                    .bytes
+            )
+        ),
     }
 }
 
@@ -884,6 +835,7 @@ fn context_images_require_visible_owner_exact_mime_and_immutable_bytes() {
             "image-user",
             None,
             &[input_attachment(
+                &service,
                 "history-image",
                 AgentInputAttachmentKind::Image,
                 "picture.png",
@@ -969,6 +921,7 @@ fn context_material_and_images_survive_restart_recursive_fork_and_source_deletio
             "material-user",
             None,
             &[input_attachment(
+                &service,
                 "material-image",
                 AgentInputAttachmentKind::Image,
                 "picture.png",

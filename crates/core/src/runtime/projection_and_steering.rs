@@ -16,6 +16,7 @@ fn apply_steer_inputs(
     provider_continuation_persistence: Option<OrdinaryProviderContinuationPersistence<'_>>,
     inputs: Vec<AgentSteerInput>,
     active_context: &mut ContextFrame,
+    context_image_attachments: &mut Vec<crate::AgentInputAttachment>,
     conversation_trace: &Arc<Mutex<ConversationTraceRecorder>>,
     trace_observer: Option<&AgentConversationTraceObserver>,
     event_stream: &mut AgentEventStream,
@@ -33,6 +34,16 @@ fn apply_steer_inputs(
                 ));
             }
             build_attachment_context(&input.attachments, input.attachment_library.as_ref())
+        })
+        .collect::<AgentResult<Vec<_>>>()?;
+
+    let normalized_images = inputs
+        .iter()
+        .map(|input| {
+            attachments::normalize_attachment_context_images(
+                &input.attachments,
+                input.attachment_library.as_ref(),
+            )
         })
         .collect::<AgentResult<Vec<_>>>()?;
 
@@ -114,7 +125,11 @@ fn apply_steer_inputs(
             }
             None => None,
         };
-        for input in &inputs {
+        for ((input, attachment_context), normalized_images) in inputs
+            .iter()
+            .zip(&attachment_contexts)
+            .zip(&normalized_images)
+        {
             let sequence = recorder
                 .record_user_guidance(
                     &input.guidance_id,
@@ -131,37 +146,45 @@ fn apply_steer_inputs(
                     )
                 })?;
             let (attachments, _) = trace_attachments_from_input(&input.attachments);
-            applied.push((input.clone(), attachments, sequence));
-        }
-    }
-    if let Some(expected_sequence) = expected_steer_boundary_sequence {
-        if applied.first().map(|(_, _, sequence)| *sequence) != Some(expected_sequence) {
-            return Err(provider_continuation_runtime_error(
-                crate::ProviderContinuationStoreError::InvalidBinding,
-            ));
-        }
-    }
-    {
-        let mut recorder = conversation_trace
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        for ((input, _, sequence), attachment_context) in
-            applied.iter().zip(attachment_contexts.iter())
-        {
             let content = input.content.trim();
             let context_content = if attachment_context.text.trim().is_empty() {
                 content.to_string()
             } else {
                 format!("{content}\n\n{}", attachment_context.text)
             };
-            let mut message = LlmMessage::text(LlmMessageRole::User, context_content);
-            *message
-                .images_mut()
-                .expect("user attachment messages support images") =
-                attachment_context.images.clone();
+            let message = LlmMessage::text(LlmMessageRole::User, context_content);
             recorder
-                .record_model_message(*sequence, 0, &message)
+                .record_model_message(sequence, 0, &message)
                 .map_err(AgentError::new)?;
+            // UserGuidance preserves the user's input; durable image identities belong to a
+            // separate ContextMaterial immediately after it, like initial-run attachments.
+            let image_material = if attachment_context.images.is_empty() {
+                None
+            } else {
+                let mut image_message = LlmMessage::text(LlmMessageRole::User, "");
+                *image_message.images_mut().unwrap() = attachment_context.images.clone();
+                let refs =
+                    context_materials::image_refs_for_message(&image_message, normalized_images)?;
+                let event_id = format!("{run_id}:guidance-images:{}", input.guidance_id);
+                let image_sequence = recorder
+                    .record_context_material(
+                        &event_id,
+                        crate::ConversationContextMaterialKind::InputAttachment,
+                        "",
+                        &refs,
+                        input.created_at,
+                    )
+                    .map_err(AgentError::new)?;
+                Some((image_sequence, refs))
+            };
+            applied.push((input.clone(), attachments, sequence, image_material));
+        }
+    }
+    if let Some(expected_sequence) = expected_steer_boundary_sequence {
+        if applied.first().map(|(_, _, sequence, _)| *sequence) != Some(expected_sequence) {
+            return Err(provider_continuation_runtime_error(
+                crate::ProviderContinuationStoreError::InvalidBinding,
+            ));
         }
     }
     let baseline = publish_trace_snapshot(conversation_trace, trace_observer)?;
@@ -193,7 +216,7 @@ fn apply_steer_inputs(
             .with_checkpoint_message(LlmMessage::from_assistant_turn(checkpoint_turn)),
         );
     }
-    for ((input, attachments, sequence), attachment_context) in
+    for ((input, attachments, sequence, image_material), attachment_context) in
         applied.into_iter().zip(attachment_contexts)
     {
         if let Some(library) = input.attachment_library {
@@ -205,12 +228,8 @@ fn apply_steer_inputs(
         } else {
             format!("{content}\n\n{}", attachment_context.text)
         };
-        let mut message = LlmMessage::text(LlmMessageRole::User, context_content);
-        *message
-            .images_mut()
-            .expect("user attachment messages support images") = attachment_context.images;
         active_context.push(ContextItem::new(
-            message,
+            LlmMessage::text(LlmMessageRole::User, context_content),
             with_trace_origin(
                 ContextMetadata::new(
                     ContextSource::UserGuidance,
@@ -221,6 +240,25 @@ fn apply_steer_inputs(
                 Some(sequence),
             ),
         ));
+        if let Some((image_sequence, refs)) = image_material {
+            let mut message = LlmMessage::text(LlmMessageRole::User, "");
+            *message.images_mut().unwrap() = attachment_context.images;
+            active_context.push(
+                ContextItem::new(
+                    message,
+                    with_trace_origin(
+                        ContextMetadata::new(
+                            ContextSource::InputAttachment,
+                            ContextScope::Run,
+                            ContextRetention::Retained,
+                        ),
+                        trace_assistant_message_id,
+                        Some(image_sequence),
+                    ),
+                )
+                .with_context_image_refs(refs),
+            );
+        }
         event_stream.emit(AgentEvent::GuidanceApplied {
             run_id: run_id.to_string(),
             guidance_id: input.guidance_id,
@@ -232,6 +270,7 @@ fn apply_steer_inputs(
         });
     }
 
+    context_image_attachments.extend(normalized_images.into_iter().flatten());
     Ok(baseline)
 }
 
@@ -296,15 +335,23 @@ fn apply_human_interaction_ignored_events(
 ) -> AgentResult<()> {
     let mut newly_recorded = Vec::new();
     {
-        let mut recorder = conversation_trace.lock().unwrap_or_else(|error| error.into_inner());
+        let mut recorder = conversation_trace
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         for event in events {
             crate::human_interaction::validate_human_interaction_id(&event.request_id)
                 .map_err(|_| AgentError::new("Invalid ignored question request identity."))?;
             let content = json!({"type":"human_interaction_status", "requestId":event.request_id, "status":"ignored"}).to_string();
-            if let Some(content) = recorder.record_backend_state(
-                event.trace_sequence, &event.event_id, &content, event.created_at,
-                crate::ConversationBackendStatePlacement::Timeline,
-            ).map_err(AgentError::new)? {
+            if let Some(content) = recorder
+                .record_backend_state(
+                    event.trace_sequence,
+                    &event.event_id,
+                    &content,
+                    event.created_at,
+                    crate::ConversationBackendStatePlacement::Timeline,
+                )
+                .map_err(AgentError::new)?
+            {
                 newly_recorded.push((event.trace_sequence, content));
             }
         }
@@ -317,8 +364,13 @@ fn apply_human_interaction_ignored_events(
         active_context.push(ContextItem::new(
             LlmMessage::backend_state(content),
             with_trace_origin(
-                ContextMetadata::new(ContextSource::BackendState, ContextScope::Run, ContextRetention::Retained),
-                Some(assistant_message_id), Some(sequence),
+                ContextMetadata::new(
+                    ContextSource::BackendState,
+                    ContextScope::Run,
+                    ContextRetention::Retained,
+                ),
+                Some(assistant_message_id),
+                Some(sequence),
             ),
         ));
     }
@@ -338,15 +390,19 @@ fn record_suppressed_file_transaction_narration(
     assistant_message_id: Option<&str>,
 ) -> AgentResult<()> {
     let (sequence, content) = {
-        let mut recorder = conversation_trace.lock().unwrap_or_else(|error| error.into_inner());
+        let mut recorder = conversation_trace
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         let sequence = recorder.next_sequence();
-        let content = recorder.record_backend_state(
-            sequence,
-            &format!("file-transaction-hidden:{run_id}:{model_request_index}"),
-            &suppressed_narration_state(model_request_index),
-            crate::storage::now_ms(),
-            crate::ConversationBackendStatePlacement::Timeline,
-        ).map_err(AgentError::new)?;
+        let content = recorder
+            .record_backend_state(
+                sequence,
+                &format!("file-transaction-hidden:{run_id}:{model_request_index}"),
+                &suppressed_narration_state(model_request_index),
+                crate::storage::now_ms(),
+                crate::ConversationBackendStatePlacement::Timeline,
+            )
+            .map_err(AgentError::new)?;
         (sequence, content)
     };
     if let Some(content) = content {
@@ -354,8 +410,13 @@ fn record_suppressed_file_transaction_narration(
         active_context.push(ContextItem::new(
             LlmMessage::backend_state(content),
             with_trace_origin(
-                ContextMetadata::new(ContextSource::BackendState, ContextScope::Run, ContextRetention::Retained),
-                assistant_message_id, Some(sequence),
+                ContextMetadata::new(
+                    ContextSource::BackendState,
+                    ContextScope::Run,
+                    ContextRetention::Retained,
+                ),
+                assistant_message_id,
+                Some(sequence),
             ),
         ));
     }

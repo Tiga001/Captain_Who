@@ -159,16 +159,16 @@ async fn assert_unified_history_wire(style: crate::AgentApiStyle, native_deepsee
             },
         });
         if index == 0 {
-            input.attachments = vec![AgentInputAttachment {
-                id: "history-notes".to_string(),
-                kind: AgentInputAttachmentKind::File,
-                name: "notes.txt".to_string(),
-                mime_type: Some("text/plain".to_string()),
-                size_bytes: 20,
-                encoding: AgentInputAttachmentEncoding::Utf8,
-                data: "KEEP_THIS_ATTACHMENT".to_string(),
-                truncated: None,
-            }];
+            let (attachment, library) = managed_runtime_attachment(
+                &workspace,
+                "history-notes",
+                "notes.txt",
+                "text/plain",
+                AgentInputAttachmentKind::File,
+                b"KEEP_THIS_ATTACHMENT",
+            );
+            input.attachments = vec![attachment];
+            set_runtime_attachment_library(&mut input, library);
         }
         let recorded = Arc::new(Mutex::new(None::<ConversationTraceSnapshot>));
         let recorded_for_observer = Arc::clone(&recorded);

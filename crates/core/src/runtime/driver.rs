@@ -316,7 +316,15 @@ impl AgentRuntime {
                 restored.context.conversation_world_state_records().to_vec();
         }
         let mut context_image_attachments = input.context_image_attachments.clone();
-        context_image_attachments.extend(input.attachments.iter().cloned());
+        let current_image_start = context_image_attachments.len();
+        context_image_attachments.extend(attachments::normalize_attachment_context_images(
+            &input.attachments,
+            input.context.as_ref().and_then(|context| context.attachment_library.as_ref()),
+        )?);
+        let current_image_end = context_image_attachments.len();
+        // Only this turn's uploads may own newly journaled InputAttachment material. Historical
+        // payloads remain available for hydration but identical bytes must not steal a new ID.
+        let current_image_range = current_image_start..current_image_end;
         let mut memory_conversation_world_state = MemoryConversationWorldState::new(&input)?;
         let PreparedLlmRequest {
             template: llm_request,
@@ -411,7 +419,7 @@ impl AgentRuntime {
                 trace_observer.as_ref(),
                 &run_id,
                 trace_assistant_message_id.as_deref(),
-                &context_image_attachments,
+                &context_image_attachments[current_image_range.clone()],
             )?;
         }
         publish_trace_snapshot(&conversation_trace, trace_observer.as_ref())?;
@@ -563,7 +571,7 @@ impl AgentRuntime {
                     active_context.validate_complete_tool_protocol()?;
                     persist_run_context_materials(
                         &mut active_context, &conversation_trace, trace_observer.as_ref(),
-                        &run_id, trace_assistant_message_id.as_deref(), &context_image_attachments,
+                        &run_id, trace_assistant_message_id.as_deref(), &context_image_attachments[current_image_range.clone()],
                     )?;
                     // The initial sample is already a complete protocol boundary. This also
                     // consumes answers queued while a prior segment was paused, after its frozen
@@ -578,6 +586,7 @@ impl AgentRuntime {
                                     None,
                                     pending,
                                     &mut active_context,
+                                    &mut context_image_attachments,
                                     &conversation_trace,
                                     trace_observer.as_ref(),
                                     &mut event_stream,
@@ -689,7 +698,7 @@ impl AgentRuntime {
                     }
                     persist_run_context_materials(
                         &mut active_context, &conversation_trace, trace_observer.as_ref(),
-                        &run_id, trace_assistant_message_id.as_deref(), &context_image_attachments,
+                        &run_id, trace_assistant_message_id.as_deref(), &context_image_attachments[current_image_range.clone()],
                     )?;
                     if effective_tool_set.revision() != emitted_tool_set_revision {
                         event_stream.emit(AgentEvent::ToolSetChanged {
@@ -1276,6 +1285,7 @@ impl AgentRuntime {
                                         }),
                                         pending,
                                         &mut active_context,
+                                        &mut context_image_attachments,
                                         &conversation_trace,
                                         trace_observer.as_ref(),
                                         &mut event_stream,
@@ -3372,7 +3382,7 @@ impl AgentRuntime {
                     }
                     persist_run_context_materials(
                         &mut active_context, &conversation_trace, trace_observer.as_ref(),
-                        &run_id, trace_assistant_message_id.as_deref(), &context_image_attachments,
+                        &run_id, trace_assistant_message_id.as_deref(), &context_image_attachments[current_image_range.clone()],
                     )?;
                     if terminate_after_repeat_guard_result {
                         let error = ToolFailureGuard::terminal_error(&call);

@@ -4,8 +4,8 @@ use mycopilot_core::storage::models::{
     ProjectRecord,
 };
 use mycopilot_core::{
-    AgentForkTurns, AgentInputAttachment, AgentInputAttachmentEncoding, AgentInputAttachmentKind,
-    CreateChildAgentInput, EnsureRootAgentInput, ProviderProfileConfig, ProviderProtocolDialect,
+    AgentForkTurns, AgentInputAttachment, AgentInputAttachmentKind, CreateChildAgentInput,
+    EnsureRootAgentInput, ProviderProfileConfig, ProviderProtocolDialect,
 };
 
 fn model_settings() -> ModelSettingsRecord {
@@ -95,17 +95,29 @@ fn draft(id: &str, conversation_id: &str) -> AgentFileChangeRecord {
     }
 }
 
-fn attachment(id: &str) -> AgentInputAttachment {
-    AgentInputAttachment {
-        id: id.to_string(),
-        kind: AgentInputAttachmentKind::Image,
-        name: format!("{id}.png"),
-        mime_type: Some("image/png".to_string()),
-        size_bytes: 5,
-        encoding: AgentInputAttachmentEncoding::Base64,
-        data: "aGVsbG8=".to_string(),
-        truncated: None,
-    }
+fn attachment(storage: &StorageService, id: &str) -> AgentInputAttachment {
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::new_rgb8(1, 1)
+        .write_to(&mut bytes, image::ImageFormat::Png)
+        .unwrap();
+    let bytes = bytes.into_inner();
+    let token = storage
+        .begin_attachment_import(mycopilot_core::AttachmentImportInput {
+            id: id.to_string(),
+            kind: AgentInputAttachmentKind::Image,
+            name: format!("{id}.png"),
+            mime_type: Some("image/png".to_string()),
+            size_bytes: bytes.len() as u64,
+        })
+        .unwrap();
+    storage
+        .append_attachment_import(
+            &token,
+            0,
+            &base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &bytes),
+        )
+        .unwrap();
+    storage.finish_attachment_import(&token).unwrap()
 }
 
 #[test]
@@ -187,7 +199,7 @@ fn ordinary_user_rpc_cannot_read_or_mutate_a_child_conversation() {
                 conversation_id,
                 &format!("message-{attachment_id}"),
                 Some("project-a"),
-                &[attachment(attachment_id)],
+                &[attachment(&storage, attachment_id)],
                 2,
             )
             .unwrap();

@@ -117,12 +117,13 @@ describe('observer conversation adapter', () => {
           id: 'attachment-1',
           kind: 'image',
           previewData: 'AAAA',
-          encoding: 'base64',
-          data: 'AAAA',
+          previewMimeType: 'image/png',
           mimeType: 'image/png'
         }
       ]
     })
+    expect(conversation.messages[0].attachments?.[0]).not.toHaveProperty('encoding')
+    expect(conversation.messages[0].attachments?.[0]).not.toHaveProperty('data')
   })
 
   it('drops malformed observer UI preferences instead of creating a child write path', () => {

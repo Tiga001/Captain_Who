@@ -10,6 +10,7 @@ const mocks = vi.hoisted(() => ({
   getAgentFileChangeHistoryDiff: vi.fn(),
   getTurnDiffSummaries: vi.fn(),
   loadAttachmentImage: vi.fn(),
+  openImagePreview: vi.fn(),
   showCacheHitRate: false
 }))
 
@@ -53,6 +54,11 @@ vi.mock('../../agent/agentClient', () => ({
 vi.mock('../../../host/hostClient', () => ({ hostClient: {} }))
 vi.mock('../../../components/toast/ToastContext', () => ({
   useToast: () => ({ showToast: vi.fn() })
+}))
+
+vi.mock('../components/ImagePreview', () => ({
+  useImagePreview: () => mocks.openImagePreview,
+  useImagePreviewNotice: () => vi.fn()
 }))
 
 const readCall: AgentToolCall = {
@@ -123,8 +129,6 @@ function observerConversation(id = 'child-conversation'): ChatConversation {
             name: 'observer.png',
             mimeType: 'image/png',
             sizeBytes: 4,
-            encoding: 'base64',
-            data: 'AAAA',
             previewData: 'AAAA',
             previewMimeType: 'image/png'
           }
@@ -318,6 +322,11 @@ it('reuses the chat Timeline in observer mode while exposing no child write cont
     .querySelector<HTMLButtonElement>('[data-chat-attachment-id="observer-image"]')
     ?.click()
   expect(mocks.loadAttachmentImage).not.toHaveBeenCalled()
+  expect(mocks.openImagePreview).toHaveBeenCalledWith({
+    alt: 'observer.png',
+    fileName: 'observer.png',
+    src: 'data:image/png;base64,AAAA'
+  })
 
   const timelineToggle = screen.container.querySelector<HTMLButtonElement>(
     '.agent-run__elapsed-button'

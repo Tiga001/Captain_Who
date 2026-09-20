@@ -1934,8 +1934,8 @@ describe('provider transition guard', () => {
           name: 'retained.txt',
           mimeType: 'text/plain',
           sizeBytes: 8,
-          encoding: 'base64',
-          data: 'cmV0YWluZWQ='
+          encoding: 'managed',
+          data: 'managed-test-cmV0YWluZWQ='
         }
       ],
       message: 'keep this draft',
@@ -2213,8 +2213,8 @@ describe('conversation startup loading', () => {
       name: 'requirements.txt',
       mimeType: 'text/plain',
       sizeBytes: 12,
-      encoding: 'base64' as const,
-      data: 'cmVxdWlyZW1lbnRz'
+      encoding: 'managed' as const,
+      data: 'managed-test-cmVxdWlyZW1lbnRz'
     }
     const bundledSkill: SkillSelection = {
       id: 'bundled:application:documents',
@@ -2273,8 +2273,8 @@ describe('conversation startup loading', () => {
           name: 'reference.png',
           mimeType: 'image/png',
           sizeBytes: 8,
-          encoding: 'base64',
-          data: 'aW1hZ2U='
+          encoding: 'managed',
+          data: 'managed-test-aW1hZ2U='
         }
       ],
       message: 'continue this new task',
@@ -3517,8 +3517,8 @@ describe('running conversation guidance queue', () => {
           name: 'context.txt',
           mimeType: 'text/plain',
           sizeBytes: 6,
-          encoding: 'base64' as const,
-          data: 'cXVldWVk'
+          encoding: 'managed' as const,
+          data: 'managed-test-cXVldWVk'
         }
       ]
     }
@@ -3941,8 +3941,8 @@ describe('running conversation guidance queue', () => {
         name: 'recovery.txt',
         mimeType: 'text/plain',
         sizeBytes: 7,
-        encoding: 'base64',
-        data: 'cmVjb3Zlcg=='
+        encoding: 'managed',
+        data: 'managed-test-cmVjb3Zlcg=='
       }
     ])
 
@@ -4054,8 +4054,8 @@ describe('running conversation guidance queue', () => {
           name: 'queued.txt',
           mimeType: 'text/plain',
           sizeBytes: 6,
-          encoding: 'base64',
-          data: 'cXVldWVk'
+          encoding: 'managed',
+          data: 'managed-test-cXVldWVk'
         }
       ],
       permissionMode: 'custom',
@@ -4176,8 +4176,8 @@ describe('running conversation guidance queue', () => {
           name: 'notes.txt',
           mimeType: 'text/plain',
           sizeBytes: 5,
-          encoding: 'base64' as const,
-          data: 'aGVsbG8='
+          encoding: 'managed' as const,
+          data: 'managed-test-aGVsbG8='
         }
       ],
       status: 'error' as const,
@@ -4629,8 +4629,8 @@ describe('Host-owned turn acceptance', () => {
     name: 'question.txt',
     mimeType: 'text/plain',
     sizeBytes: 8,
-    encoding: 'base64' as const,
-    data: 'cXVlc3Rpb24='
+    encoding: 'managed' as const,
+    data: 'managed-test-cXVlc3Rpb24='
   }
 
   function prepareDraft() {

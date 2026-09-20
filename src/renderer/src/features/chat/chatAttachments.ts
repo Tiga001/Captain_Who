@@ -1,26 +1,11 @@
-import type { AgentInputAttachment } from '@mycopilot/protocol'
+import type { AgentInputAttachment, AttachmentImportProgress } from '@mycopilot/protocol'
 import { hostClient } from '../../host/hostClient'
 
 export type ComposerAttachmentKind = 'file' | 'image'
 
-const MAX_ATTACHMENT_BYTES = 8 * 1024 * 1024
+const IMPORT_CHUNK_BYTES = 512 * 1024
 
-const IMAGE_EXTENSIONS = new Set([
-  'apng',
-  'avif',
-  'bmp',
-  'gif',
-  'heic',
-  'heif',
-  'ico',
-  'jpg',
-  'jpeg',
-  'png',
-  'svg',
-  'tif',
-  'tiff',
-  'webp'
-])
+const IMAGE_EXTENSIONS = new Set(['gif', 'jpg', 'jpeg', 'png', 'webp'])
 
 const READABLE_FILE_EXTENSIONS = new Set([
   'pdf',
@@ -188,20 +173,34 @@ function getAttachmentsHost() {
 }
 
 export async function selectComposerAttachments(
-  kind: ComposerAttachmentKind
+  kind: ComposerAttachmentKind,
+  requestId?: string
 ): Promise<ComposerAttachment[]> {
-  const attachments = await getAttachmentsHost().selectInputAttachments({ kind })
+  const attachments = await getAttachmentsHost().selectInputAttachments({
+    kind,
+    ...(requestId ? { requestId } : {})
+  })
   return attachments.map(composerAttachmentFromAgentAttachment)
 }
 
+export interface AttachmentImportOptions {
+  signal?: AbortSignal
+  onProgress?: (progress: AttachmentImportProgress) => void
+  onImported?: (attachment: ComposerAttachment) => void
+  id?: string
+}
+
 export async function createComposerAttachmentsFromFiles(
-  files: FileList | File[]
+  files: FileList | File[],
+  options: AttachmentImportOptions = {}
 ): Promise<ComposerAttachment[]> {
   const fileList = Array.from(files)
   const attachments: ComposerAttachment[] = []
 
   for (const file of fileList) {
-    attachments.push(await createComposerAttachmentFromFile(file))
+    const attachment = await createComposerAttachmentFromFile(file, options)
+    attachments.push(attachment)
+    options.onImported?.(attachment)
   }
 
   return attachments
@@ -216,7 +215,6 @@ export function composerAttachmentFromAgentAttachment(
     name: attachment.name,
     mimeType: attachment.mimeType,
     sizeBytes: attachment.sizeBytes,
-    previewUrl: previewUrlForAttachment(attachment),
     agentAttachment: attachment
   }
 }
@@ -227,33 +225,104 @@ export function buildAgentInputAttachments(
   return attachments.map((attachment) => attachment.agentAttachment)
 }
 
-function createComposerAttachmentFromFile(file: File): Promise<ComposerAttachment> {
+async function createComposerAttachmentFromFile(
+  file: File,
+  options: AttachmentImportOptions
+): Promise<ComposerAttachment> {
   const kind = inferAttachmentKind(file)
-  if (!kind) {
-    throw new Error(`不支持的附件类型：${file.name || file.type || '未知文件'}`)
+  if (!kind) throw new Error(`不支持的附件类型：${file.name || file.type || '未知文件'}`)
+  const metadata = {
+    id: options.id ?? createAttachmentId(),
+    kind,
+    name: file.name || (kind === 'image' ? 'image' : 'attachment'),
+    mimeType: file.type || inferMimeType(file.name, kind),
+    sizeBytes: file.size
   }
-
-  if (file.size > MAX_ATTACHMENT_BYTES) {
-    throw new Error(`附件「${file.name}」过大，单个附件最大 8 MB。`)
+  const host = getAttachmentsHost()
+  let importId: string | undefined
+  let receivedBytes = 0
+  const checkCancelled = () => {
+    if (options.signal?.aborted) throw new DOMException('附件导入已取消。', 'AbortError')
   }
-
-  return readFileAsBase64(file).then((data) => {
-    const attachment: AgentInputAttachment = {
-      id: createAttachmentId(),
-      kind,
-      name: file.name || (kind === 'image' ? 'image' : 'attachment'),
-      mimeType: file.type || inferMimeType(file.name, kind),
-      sizeBytes: file.size,
-      encoding: 'base64',
-      data
+  try {
+    checkCancelled()
+    options.onProgress?.({ attachment: metadata, receivedBytes, status: 'importing' })
+    importId = (await host.beginImport(metadata)).importId
+    while (receivedBytes < file.size) {
+      checkCancelled()
+      const bytes = new Uint8Array(
+        await file.slice(receivedBytes, receivedBytes + IMPORT_CHUNK_BYTES).arrayBuffer()
+      )
+      const data = encodeBase64(bytes)
+      const result = await host.appendImport({ importId, offset: receivedBytes, data })
+      if (result.receivedBytes !== receivedBytes + bytes.byteLength)
+        throw new Error('附件导入进度不一致，请重试。')
+      receivedBytes = result.receivedBytes
+      options.onProgress?.({ attachment: metadata, receivedBytes, status: 'importing' })
     }
-
+    checkCancelled()
+    const attachment = await host.finishImport({ importId })
+    checkCancelled()
+    options.onProgress?.({ attachment: metadata, receivedBytes, status: 'complete' })
     return composerAttachmentFromAgentAttachment(attachment)
-  })
+  } catch (error) {
+    if (importId) await host.cancelImport({ importId }).catch(() => undefined)
+    options.onProgress?.({
+      attachment: metadata,
+      receivedBytes,
+      status: options.signal?.aborted ? 'cancelled' : 'failed',
+      error: error instanceof Error ? error.message : String(error)
+    })
+    throw error
+  }
+}
+
+function encodeBase64(bytes: Uint8Array): string {
+  let binary = ''
+  for (let offset = 0; offset < bytes.length; offset += 32768) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + 32768))
+  }
+  return btoa(binary)
+}
+
+const previewCache = new Map<string, Promise<string | undefined>>()
+
+export async function loadComposerAttachmentPreview(
+  attachment: AgentInputAttachment
+): Promise<string | undefined> {
+  if (attachment.kind !== 'image' || attachment.encoding !== 'managed') return undefined
+  const key = `${attachment.id}:${attachment.data}`
+  const cached = previewCache.get(key)
+  if (cached) return cached
+  const pending = getAttachmentsHost()
+    .loadPreview({ attachment })
+    .then((preview) =>
+      preview?.mimeType.startsWith('image/')
+        ? `data:${preview.mimeType};base64,${preview.data}`
+        : undefined
+    )
+    .catch(() => {
+      previewCache.delete(key)
+      return undefined
+    })
+  if (previewCache.size >= 128) previewCache.delete(previewCache.keys().next().value as string)
+  previewCache.set(key, pending)
+  return pending
+}
+
+export async function loadComposerAttachmentImage(
+  attachment: AgentInputAttachment
+): Promise<string | undefined> {
+  if (attachment.kind !== 'image' || attachment.encoding !== 'managed') return undefined
+  const preview = await getAttachmentsHost().loadPreview({ attachment, purpose: 'display' })
+  return preview?.mimeType.startsWith('image/')
+    ? `data:${preview.mimeType};base64,${preview.data}`
+    : undefined
 }
 
 function inferAttachmentKind(file: File): ComposerAttachmentKind | null {
-  if (file.type.startsWith('image/')) return 'image'
+  if (file.type.startsWith('image/'))
+    return /^(image\/(png|jpeg|gif|webp))$/.test(file.type) ? 'image' : null
 
   const extension = fileExtension(file.name)
   if (IMAGE_EXTENSIONS.has(extension)) return 'image'
@@ -267,7 +336,6 @@ function inferMimeType(name: string, kind: ComposerAttachmentKind): string {
   const extension = fileExtension(name)
   if (kind === 'image') {
     if (extension === 'jpg') return 'image/jpeg'
-    if (extension === 'svg') return 'image/svg+xml'
     if (extension) return `image/${extension}`
     return 'application/octet-stream'
   }
@@ -285,20 +353,7 @@ function inferMimeType(name: string, kind: ComposerAttachmentKind): string {
   if (extension === 'html' || extension === 'htm') return 'text/html'
   if (extension === 'json' || extension === 'jsonl') return 'application/json'
   if (extension === 'xml') return 'application/xml'
-  if (extension === 'svg') return 'image/svg+xml'
   return 'text/plain'
-}
-
-function readFileAsBase64(file: File): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader()
-    reader.onerror = () => reject(new Error(`读取附件「${file.name}」失败。`))
-    reader.onload = () => {
-      const result = String(reader.result ?? '')
-      resolve(result.includes(',') ? result.split(',')[1] : result)
-    }
-    reader.readAsDataURL(file)
-  })
 }
 
 function fileExtension(name: string): string {
@@ -309,11 +364,4 @@ function fileExtension(name: string): string {
 
 function createAttachmentId(): string {
   return `attachment-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
-}
-
-function previewUrlForAttachment(attachment: AgentInputAttachment): string | undefined {
-  if (attachment.kind !== 'image') return undefined
-  if (attachment.encoding !== 'base64') return undefined
-  if (!attachment.mimeType?.startsWith('image/')) return undefined
-  return `data:${attachment.mimeType};base64,${attachment.data}`
 }

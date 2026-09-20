@@ -74,16 +74,17 @@ async fn provider_payload_orders_current_input_before_run_bootstrap_and_preserve
             mode: AgentSearchMode::Auto,
             tavily_api_key: Some("unused-layout-key".to_string()),
         });
-        input.attachments = vec![AgentInputAttachment {
-            id: "layout-attachment".to_string(),
-            kind: AgentInputAttachmentKind::File,
-            name: "说明.txt".to_string(),
-            mime_type: Some("text/plain".to_string()),
-            size_bytes: 18,
-            encoding: AgentInputAttachmentEncoding::Utf8,
-            data: "中文附件内容".to_string(),
-            truncated: None,
-        }];
+        let attachment_directory = tempfile::tempdir().unwrap();
+        let (attachment, library) = managed_runtime_attachment(
+            attachment_directory.path(),
+            "layout-attachment",
+            "说明.txt",
+            "text/plain",
+            AgentInputAttachmentKind::File,
+            "中文附件内容".as_bytes(),
+        );
+        input.attachments = vec![attachment];
+        set_runtime_attachment_library(&mut input, library);
         let conversation_snapshot = |sequence, marker| {
             let state = json!({"marker": marker});
             WorldStateSnapshot::new(

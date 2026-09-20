@@ -1,20 +1,19 @@
 use super::{AgentTool, ToolExecutionContext};
 use crate::conversation_trace::canonical_tool_result_for_context;
+use crate::file_input::image_delivery::prepare_model_image;
 use crate::file_input::{
     agent_file_input_ref_from_model_path, model_path_for_agent_file_input_ref,
-    read_verified_agent_file_input, AgentFileInputExecutionContext, MAX_AGENT_VISUAL_INPUT_BYTES,
+    snapshot_verified_agent_file_input, AgentFileInputExecutionContext,
 };
 use crate::protocol::{
     AgentError, AgentFileInputRef, AgentResult, AgentToolDefinition, AgentToolResult,
     AgentToolSafety,
 };
 use base64::Engine;
-use image::codecs::png::PngEncoder;
-use image::{DynamicImage, ImageEncoder, ImageFormat};
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::io::BufReader;
 
-const THUMBNAIL_MAX_EDGE: u32 = 160;
 const MAX_THUMBNAIL_DATA_URL_BYTES: usize = 192 * 1024;
 
 pub(super) struct ReadImageTool;
@@ -80,13 +79,12 @@ impl AgentTool for ReadImageTool {
         .with_conversation_id(context.conversation_id_optional())
         .with_permissions(context.permissions());
         let workspace_root = context.workspace_root_optional()?;
-        let snapshot = read_verified_agent_file_input(
+        let snapshot = snapshot_verified_agent_file_input(
             workspace_root.as_deref(),
             context.permissions(),
             &file_inputs,
             &source,
             Some(&context.cancellation_token()),
-            MAX_AGENT_VISUAL_INPUT_BYTES,
         )
         .map_err(AgentError::from)?;
         context.check_cancelled()?;
@@ -94,8 +92,11 @@ impl AgentTool for ReadImageTool {
             return Err(AgentError::new("图片文件为空。"));
         }
 
+        let _preparation_permit = context.acquire_model_image_preparation()?;
+        let prepared = prepare_model_image(BufReader::new(snapshot.file))?;
+        context.check_cancelled()?;
         let reservation = context
-            .try_reserve_model_image_delivery(snapshot.size_bytes)
+            .try_reserve_model_image_delivery(prepared.bytes.len() as u64)
             .ok_or_else(|| {
                 AgentError::structured(
                     "agent.model_image_delivery_budget_exceeded",
@@ -109,22 +110,21 @@ impl AgentTool for ReadImageTool {
                     }),
                 )
             })?;
-        let _preparation_permit = context.acquire_model_image_preparation()?;
-
-        let (decoded, format, mime_type) = decode_supported_image(&snapshot.bytes)?;
+        let format = prepared.source_format;
+        let mime_type = prepared.source_mime_type;
         let artifact = generated_artifact_receipt(
             &snapshot.source,
             format,
             mime_type,
-            decoded.width(),
-            decoded.height(),
+            prepared.original_width,
+            prepared.original_height,
             snapshot.size_bytes,
             &snapshot.sha256,
         )?;
-        let thumbnail_data_url = image_thumbnail_data_url(&decoded);
+        let thumbnail_data_url = prepared.thumbnail_data_url;
         context.check_cancelled()?;
         let data_base64 =
-            base64::engine::general_purpose::STANDARD.encode(snapshot.bytes.as_slice());
+            base64::engine::general_purpose::STANDARD.encode(prepared.bytes.as_slice());
         context.check_cancelled()?;
         let display_path = display_source(&snapshot.source);
         reservation.commit();
@@ -137,8 +137,13 @@ impl AgentTool for ReadImageTool {
             "sizeBytes": snapshot.size_bytes,
             "sha256": snapshot.sha256,
             "thumbnailDataUrl": thumbnail_data_url,
+            "originalWidth": prepared.original_width,
+            "originalHeight": prepared.original_height,
+            "deliveredWidth": prepared.width,
+            "deliveredHeight": prepared.height,
+            "deliveredSizeBytes": prepared.bytes.len(),
             "image": {
-                "mimeType": mime_type,
+                "mimeType": prepared.mime_type,
                 "dataBase64": data_base64
             }
         });
@@ -315,45 +320,6 @@ fn display_source(source: &AgentFileInputRef) -> &str {
     model_path_for_agent_file_input_ref(source)
 }
 
-fn decode_supported_image(bytes: &[u8]) -> AgentResult<(DynamicImage, &'static str, &'static str)> {
-    let detected = image::guess_format(bytes)
-        .map_err(|_| AgentError::new("无法识别图片格式，文件可能已损坏或格式不受支持。"))?;
-    let (format, mime_type) = match detected {
-        ImageFormat::Png => ("png", "image/png"),
-        ImageFormat::Jpeg => ("jpeg", "image/jpeg"),
-        ImageFormat::Gif => ("gif", "image/gif"),
-        ImageFormat::WebP => ("webp", "image/webp"),
-        _ => {
-            return Err(AgentError::new(
-                "不支持的图片类型。支持：PNG、JPEG、GIF、WebP。",
-            ))
-        }
-    };
-    let decoded = image::load_from_memory_with_format(bytes, detected)
-        .map_err(|_| AgentError::new("图片解码失败，文件可能已损坏。"))?;
-    Ok((decoded, format, mime_type))
-}
-
-fn image_thumbnail_data_url(image: &DynamicImage) -> Option<String> {
-    let thumbnail = image
-        .thumbnail(THUMBNAIL_MAX_EDGE, THUMBNAIL_MAX_EDGE)
-        .to_rgba8();
-    let mut thumbnail_bytes = Vec::new();
-    PngEncoder::new(&mut thumbnail_bytes)
-        .write_image(
-            thumbnail.as_raw(),
-            thumbnail.width(),
-            thumbnail.height(),
-            image::ExtendedColorType::Rgba8,
-        )
-        .ok()?;
-
-    Some(format!(
-        "data:image/png;base64,{}",
-        base64::engine::general_purpose::STANDARD.encode(thumbnail_bytes)
-    ))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -376,6 +342,8 @@ mod tests {
         StoredImageGenerationExecutionStatus,
     };
     use crate::storage::service::StorageService;
+    use image::codecs::png::PngEncoder;
+    use image::ImageEncoder;
     use sha2::{Digest, Sha256};
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -619,6 +587,28 @@ mod tests {
         assert_eq!(result["source"]["type"], "workspace");
         assert_eq!(result["sha256"], sha256_hex(&bytes));
         assert!(result.get("artifact").is_none());
+    }
+
+    #[test]
+    fn large_original_is_retained_while_model_receives_a_bounded_derivative() {
+        let workspace = tempfile::tempdir().unwrap();
+        let mut bytes = valid_test_png();
+        // PNG readers stop at IEND. The original's valid trailing payload exceeds the old
+        // source-byte gate without forcing this regression to allocate a huge pixel buffer.
+        bytes.resize(9 * 1024 * 1024, 0);
+        let path = workspace.path().join("large.png");
+        fs::write(&path, &bytes).unwrap();
+        let result = execute(
+            &context(Some(workspace.path()), AgentPermissions::default()),
+            json!({"path":"large.png"}),
+        )
+        .unwrap();
+        assert_eq!(result["sizeBytes"], bytes.len());
+        assert_eq!(result["sha256"], sha256_hex(&bytes));
+        assert_eq!(result["originalWidth"], 1);
+        assert_eq!(result["deliveredWidth"], 1);
+        assert!(result["deliveredSizeBytes"].as_u64().unwrap() < 1024);
+        assert_eq!(fs::read(path).unwrap(), bytes);
     }
 
     #[test]

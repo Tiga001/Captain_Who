@@ -99,7 +99,6 @@ use file_transactions::{
 };
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use std::sync::Mutex;
 use tool_failure_guard::ToolFailureGuard;
@@ -498,8 +497,6 @@ struct PreparedRuntimeCapabilities {
     command_workspace_root: Option<PathBuf>,
     patch_auto_approve: bool,
 }
-
-static RUN_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 struct AgentSteerInputCloseGuard {
     input: Option<AgentSteerInputQueue>,

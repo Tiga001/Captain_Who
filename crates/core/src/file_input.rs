@@ -26,11 +26,11 @@ use tempfile::TempDir;
 
 pub const AGENT_FILE_INPUT_ROOT_ENV: &str = "MYCOPILOT_INPUT_ROOT";
 pub const MAX_AGENT_FILE_INPUTS: usize = 16;
-pub const MAX_AGENT_FILE_INPUT_BYTES: u64 = 64 * 1024 * 1024;
-pub const MAX_AGENT_FILE_INPUT_TOTAL_BYTES: u64 = 128 * 1024 * 1024;
+pub(crate) mod image_delivery;
 pub const MAX_AGENT_FILE_INPUT_MOUNT_PATH_CHARS: usize = 240;
-/// Maximum byte size accepted by the stable `read_image` visual delivery path. Managed command
-/// publication shares this bound so every returned image readPath remains directly readable.
+/// Maximum derived image bytes delivered to the model. Original images are snapshotted on disk
+/// and decoded under independent pixel/memory limits; they need not fit this wire budget.
+/// Managed command image publication also uses this bound.
 pub(crate) const MAX_AGENT_VISUAL_INPUT_BYTES: u64 = 8 * 1024 * 1024;
 
 const ERROR_INVALID_REQUEST: &str = "agent.fileInput.invalidRequest";
@@ -99,9 +99,11 @@ impl From<AgentFileInputError> for AgentError {
 /// no-follow, receipt-aware authority path, and the digest describes exactly the bytes returned to
 /// the caller.
 pub(crate) struct VerifiedAgentFileInput {
+    #[cfg(test)]
     pub source: AgentFileInputRef,
     pub bytes: Vec<u8>,
     pub size_bytes: u64,
+    #[cfg(test)]
     pub sha256: String,
 }
 
@@ -482,42 +484,23 @@ pub(crate) fn prepare_agent_file_input_bindings(
 ) -> Result<Vec<AgentFileInputBinding>, AgentFileInputError> {
     let specs = normalize_agent_file_input_specs(specs)?;
     let root = canonical_workspace_root(workspace_root)?;
-    let mut total = 0_u64;
     let mut bindings = Vec::with_capacity(specs.len());
     for spec in &specs {
-        check_cancelled(cancellation)?;
-        let bytes = read_authorized_source(
+        let (size_bytes, sha256) = stream_authorized_source(
             root.as_deref(),
             permissions,
             context,
             &spec.source,
             cancellation,
-            MAX_AGENT_FILE_INPUT_BYTES,
+            u64::MAX,
+            &mut io::sink(),
         )?;
-        let size_bytes = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
-        total = total.checked_add(size_bytes).ok_or_else(|| {
-            AgentFileInputError::new(
-                ERROR_TOO_LARGE,
-                "changeRequest",
-                "声明式输入的总大小超过安全上限。",
-            )
-        })?;
-        if total > MAX_AGENT_FILE_INPUT_TOTAL_BYTES {
-            return Err(AgentFileInputError::new(
-                ERROR_TOO_LARGE,
-                "changeRequest",
-                format!(
-                    "声明式输入总大小最多允许 {} MiB。",
-                    MAX_AGENT_FILE_INPUT_TOTAL_BYTES / (1024 * 1024)
-                ),
-            ));
-        }
         bindings.push(AgentFileInputBinding {
             schema_version: AGENT_FILE_INPUT_BINDING_SCHEMA_VERSION,
             mount_path: normalize_mount_path(&spec.mount_path)?,
             source: spec.source.clone(),
             size_bytes,
-            sha256: sha256_hex(&bytes),
+            sha256,
         });
     }
     Ok(bindings)
@@ -551,47 +534,6 @@ pub(crate) fn materialize_agent_file_inputs(
     }
     validate_bindings(bindings)?;
     let root = canonical_workspace_root(workspace_root)?;
-    let mut resolved = Vec::with_capacity(bindings.len());
-    let mut total = 0_u64;
-    for binding in bindings {
-        check_cancelled(cancellation)?;
-        let bytes = read_authorized_source(
-            root.as_deref(),
-            permissions,
-            context,
-            &binding.source,
-            cancellation,
-            MAX_AGENT_FILE_INPUT_BYTES,
-        )?;
-        let size_bytes = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
-        let sha256 = sha256_hex(&bytes);
-        if size_bytes != binding.size_bytes || sha256 != binding.sha256 {
-            return Err(AgentFileInputError::new(
-                ERROR_INTEGRITY_MISMATCH,
-                "reprepare",
-                format!(
-                    "输入 `{}` 在准备后发生变化；命令未启动，请重新准备并审批。",
-                    binding.mount_path
-                ),
-            ));
-        }
-        total = total.checked_add(size_bytes).ok_or_else(|| {
-            AgentFileInputError::new(
-                ERROR_TOO_LARGE,
-                "changeRequest",
-                "声明式输入的总大小超过安全上限。",
-            )
-        })?;
-        if total > MAX_AGENT_FILE_INPUT_TOTAL_BYTES {
-            return Err(AgentFileInputError::new(
-                ERROR_TOO_LARGE,
-                "changeRequest",
-                "声明式输入的总大小超过安全上限。",
-            ));
-        }
-        resolved.push((binding, bytes));
-    }
-
     let directory = tempfile::Builder::new()
         .prefix("mycopilot-command-inputs-")
         .tempdir()
@@ -602,22 +544,91 @@ pub(crate) fn materialize_agent_file_inputs(
         AgentFileInputError::new(ERROR_IO, "retry", "无法保护托管命令的私有输入目录。")
     })?;
 
-    let mut evidence = Vec::with_capacity(resolved.len());
-    for (binding, bytes) in resolved {
+    let mut prepared = PreparedAgentFileInputs {
+        directory,
+        evidence: Vec::with_capacity(bindings.len()),
+    };
+    for binding in bindings {
         check_cancelled(cancellation)?;
-        let target = join_mount_path(directory.path(), &binding.mount_path)?;
-        create_private_parent_directories(directory.path(), &target)?;
-        write_private_read_only_file(&target, &bytes)?;
-        evidence.push(evidence_from_binding(binding));
+        let target = join_mount_path(prepared.directory.path(), &binding.mount_path)?;
+        create_private_parent_directories(prepared.directory.path(), &target)?;
+        let mut file = create_private_input_file(&target)?;
+        let (size_bytes, sha256) = stream_authorized_source(
+            root.as_deref(),
+            permissions,
+            context,
+            &binding.source,
+            cancellation,
+            binding.size_bytes,
+            &mut file,
+        )
+        .map_err(|error| {
+            if error.code() == ERROR_TOO_LARGE {
+                input_changed_error(&binding.mount_path)
+            } else {
+                error
+            }
+        })?;
+        if size_bytes != binding.size_bytes || sha256 != binding.sha256 {
+            return Err(input_changed_error(&binding.mount_path));
+        }
+        finish_private_input_file(&target, &file)?;
+        prepared.evidence.push(evidence_from_binding(binding));
     }
-    sync_directory(directory.path()).map_err(|_| {
+    sync_directory(prepared.directory.path()).map_err(|_| {
         AgentFileInputError::new(ERROR_IO, "retry", "无法持久化托管命令的私有输入目录。")
     })?;
+    Ok(Some(prepared))
+}
 
-    Ok(Some(PreparedAgentFileInputs {
-        directory,
-        evidence,
-    }))
+fn input_changed_error(mount_path: &str) -> AgentFileInputError {
+    AgentFileInputError::new(
+        ERROR_INTEGRITY_MISMATCH,
+        "reprepare",
+        format!("输入 `{mount_path}` 在准备后发生变化；命令未启动，请重新准备并审批。"),
+    )
+}
+
+/// A private, verified streaming snapshot. Original file size never becomes a heap allocation.
+pub(crate) struct VerifiedAgentFileSnapshot {
+    pub source: AgentFileInputRef,
+    pub file: File,
+    pub size_bytes: u64,
+    pub sha256: String,
+}
+
+pub(crate) fn snapshot_verified_agent_file_input(
+    workspace_root: Option<&Path>,
+    permissions: AgentPermissions,
+    context: &AgentFileInputExecutionContext,
+    source: &AgentFileInputRef,
+    cancellation: Option<&AgentCancellationToken>,
+) -> Result<VerifiedAgentFileSnapshot, AgentFileInputError> {
+    use std::io::{Seek, SeekFrom};
+    let root = canonical_workspace_root(workspace_root)?;
+    let source = normalize_read_source_scope(
+        &context.workspace_resolver(root.as_deref()),
+        normalize_source_ref(source)?,
+    )?;
+    let mut file = tempfile::tempfile()
+        .map_err(|_| AgentFileInputError::new(ERROR_IO, "retry", "无法创建私有图片快照。"))?;
+    let (size_bytes, sha256) = stream_authorized_source(
+        root.as_deref(),
+        permissions,
+        context,
+        &source,
+        cancellation,
+        u64::MAX,
+        &mut file,
+    )?;
+    file.seek(SeekFrom::Start(0))
+        .map_err(|_| AgentFileInputError::new(ERROR_IO, "retry", "无法读取私有图片快照。"))?;
+    Ok(VerifiedAgentFileSnapshot {
+        source,
+        file,
+        size_bytes,
+        sha256,
+    })
 }
 
 /// Reads one model-visible file reference through the shared authority resolver.
@@ -635,7 +646,7 @@ pub(crate) fn read_verified_agent_file_input(
     cancellation: Option<&AgentCancellationToken>,
     max_bytes: u64,
 ) -> Result<VerifiedAgentFileInput, AgentFileInputError> {
-    if max_bytes == 0 || max_bytes > MAX_AGENT_FILE_INPUT_BYTES {
+    if max_bytes == 0 {
         return Err(AgentFileInputError::new(
             ERROR_INVALID_REQUEST,
             "changeRequest",
@@ -658,12 +669,15 @@ pub(crate) fn read_verified_agent_file_input(
     )?;
     let size_bytes = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
     ensure_size_with_limit(size_bytes, max_bytes)?;
+    #[cfg(test)]
     let sha256 = sha256_hex(&bytes);
 
     Ok(VerifiedAgentFileInput {
+        #[cfg(test)]
         source,
         bytes,
         size_bytes,
+        #[cfg(test)]
         sha256,
     })
 }
@@ -761,11 +775,9 @@ pub(crate) fn resolve_verified_agent_file_input_path(
                 permissions.read == AgentReadPermission::All,
             )?;
             validate_browser_download_identity(&record, size_bytes, &sha256)?;
-            ensure_size_with_limit(size_bytes, MAX_AGENT_FILE_INPUT_BYTES)?;
-            let bytes = read_regular_file(&path, None, MAX_AGENT_FILE_INPUT_BYTES)?;
-            if u64::try_from(bytes.len()).unwrap_or(u64::MAX) != size_bytes
-                || sha256_hex(&bytes) != sha256
-            {
+            let (actual_size, actual_sha256) =
+                stream_regular_file(&path, None, size_bytes, &mut io::sink())?;
+            if actual_size != size_bytes || actual_sha256 != sha256 {
                 return Err(AgentFileInputError::new(
                     ERROR_INTEGRITY_MISMATCH,
                     "redownload",
@@ -949,13 +961,11 @@ fn validate_bindings(bindings: &[AgentFileInputBinding]) -> Result<(), AgentFile
         ));
     }
     let mut mounts = Vec::with_capacity(bindings.len());
-    let mut total = 0_u64;
     for binding in bindings {
         let normalized_mount = normalize_mount_path(&binding.mount_path)?;
         let normalized_source = normalize_source_ref(&binding.source)?;
         if binding.schema_version != AGENT_FILE_INPUT_BINDING_SCHEMA_VERSION
             || !is_lower_hex_sha256(&binding.sha256)
-            || binding.size_bytes > MAX_AGENT_FILE_INPUT_BYTES
             || normalized_mount != binding.mount_path
             || normalized_source != binding.source
         {
@@ -965,21 +975,7 @@ fn validate_bindings(bindings: &[AgentFileInputBinding]) -> Result<(), AgentFile
                 "冻结的声明式输入契约无效；请重新准备命令。",
             ));
         }
-        total = total.checked_add(binding.size_bytes).ok_or_else(|| {
-            AgentFileInputError::new(
-                ERROR_TOO_LARGE,
-                "reprepare",
-                "冻结的声明式输入总大小无效；请重新准备命令。",
-            )
-        })?;
         mounts.push(normalized_mount);
-    }
-    if total > MAX_AGENT_FILE_INPUT_TOTAL_BYTES {
-        return Err(AgentFileInputError::new(
-            ERROR_TOO_LARGE,
-            "reprepare",
-            "冻结的声明式输入总大小超过安全上限；请重新准备命令。",
-        ));
     }
     validate_mount_set(&mounts)
 }
@@ -1115,22 +1111,45 @@ fn read_authorized_source(
     cancellation: Option<&AgentCancellationToken>,
     max_bytes: u64,
 ) -> Result<Vec<u8>, AgentFileInputError> {
+    let mut bytes = Vec::new();
+    stream_authorized_source(
+        workspace_root,
+        permissions,
+        context,
+        source,
+        cancellation,
+        max_bytes,
+        &mut bytes,
+    )?;
+    Ok(bytes)
+}
+
+fn stream_authorized_source(
+    workspace_root: Option<&Path>,
+    permissions: AgentPermissions,
+    context: &AgentFileInputExecutionContext,
+    source: &AgentFileInputRef,
+    cancellation: Option<&AgentCancellationToken>,
+    max_bytes: u64,
+    output: &mut impl Write,
+) -> Result<(u64, String), AgentFileInputError> {
+    check_cancelled(cancellation)?;
     match source {
         AgentFileInputRef::Attachment { read_path } => {
             let (path, expected_size) = resolve_attachment(context, read_path)?;
-            let bytes = read_regular_file(&path, cancellation, max_bytes)?;
-            if u64::try_from(bytes.len()).unwrap_or(u64::MAX) != expected_size {
+            let (size, digest) = stream_regular_file(&path, cancellation, max_bytes, output)?;
+            if size != expected_size {
                 return Err(AgentFileInputError::new(
                     ERROR_INTEGRITY_MISMATCH,
                     "listAttachments",
                     "附件内容大小与权威附件记录不一致。",
                 ));
             }
-            Ok(bytes)
+            Ok((size, digest))
         }
         AgentFileInputRef::Workspace { path } => {
             let canonical = resolve_workspace_source(context, workspace_root, path)?;
-            read_regular_file(&canonical, cancellation, max_bytes)
+            stream_regular_file(&canonical, cancellation, max_bytes, output)
         }
         AgentFileInputRef::External { path } => {
             if permissions.read != AgentReadPermission::All {
@@ -1141,7 +1160,7 @@ fn read_authorized_source(
                 ));
             }
             let path = resolve_external_path(path)?;
-            read_regular_file(&path, cancellation, max_bytes)
+            stream_regular_file(&path, cancellation, max_bytes, output)
         }
         AgentFileInputRef::GeneratedArtifact { uri, path } => {
             let (scheme, expected) = artifact_uri_identity(uri)?;
@@ -1190,17 +1209,16 @@ fn read_authorized_source(
                 ));
             }
             ensure_size_with_limit(registered.size_bytes, max_bytes)?;
-            let bytes = read_regular_file(&registered_path, cancellation, max_bytes)?;
-            if u64::try_from(bytes.len()).unwrap_or(u64::MAX) != registered.size_bytes
-                || sha256_hex(&bytes) != registered.sha256
-            {
+            let (size, digest) =
+                stream_regular_file(&registered_path, cancellation, max_bytes, output)?;
+            if size != registered.size_bytes || digest != registered.sha256 {
                 return Err(AgentFileInputError::new(
                     ERROR_INTEGRITY_MISMATCH,
                     "regenerate",
                     "已发布生成物未通过权威内容身份复验。",
                 ));
             }
-            Ok(bytes)
+            Ok((size, digest))
         }
         AgentFileInputRef::SkillResource { uri } => {
             let resources = context.skill_resources.as_deref().ok_or_else(|| {
@@ -1233,7 +1251,15 @@ fn read_authorized_source(
                 u64::try_from(snapshot.bytes.len()).unwrap_or(u64::MAX),
                 max_bytes,
             )?;
-            Ok(snapshot.bytes)
+            let size = snapshot.bytes.len() as u64;
+            let digest = sha256_hex(&snapshot.bytes);
+            for chunk in snapshot.bytes.chunks(64 * 1024) {
+                check_cancelled(cancellation)?;
+                output.write_all(chunk).map_err(|_| {
+                    AgentFileInputError::new(ERROR_IO, "retry", "写入声明式输入副本失败。")
+                })?;
+            }
+            Ok((size, digest))
         }
         AgentFileInputRef::BrowserDownload {
             reference,
@@ -1248,17 +1274,15 @@ fn read_authorized_source(
             )?;
             validate_browser_download_identity(&record, *size_bytes, sha256)?;
             ensure_size_with_limit(*size_bytes, max_bytes)?;
-            let bytes = read_regular_file(&path, cancellation, max_bytes)?;
-            if u64::try_from(bytes.len()).unwrap_or(u64::MAX) != *size_bytes
-                || sha256_hex(&bytes) != *sha256
-            {
+            let (size, digest) = stream_regular_file(&path, cancellation, max_bytes, output)?;
+            if size != *size_bytes || digest != *sha256 {
                 return Err(AgentFileInputError::new(
                     ERROR_INTEGRITY_MISMATCH,
                     "redownload",
                     "浏览器下载文件与权威下载记录不一致。",
                 ));
             }
-            Ok(bytes)
+            Ok((size, digest))
         }
     }
 }
@@ -1350,7 +1374,6 @@ fn resolve_attachment(
                 "未找到与完整 readPath 匹配的附件。",
             )
         })?;
-    ensure_size(reference.size_bytes)?;
     let root = library
         .root_path
         .as_deref()
@@ -1518,7 +1541,6 @@ fn canonical_regular_path(path: &Path) -> Result<PathBuf, AgentFileInputError> {
             "声明式输入必须是非符号链接的普通文件。",
         ));
     }
-    ensure_size(metadata.len())?;
     Ok(canonical)
 }
 
@@ -1557,11 +1579,12 @@ fn reject_symlink_components(path: &Path) -> Result<(), AgentFileInputError> {
     Ok(())
 }
 
-fn read_regular_file(
+fn stream_regular_file(
     path: &Path,
     cancellation: Option<&AgentCancellationToken>,
     max_bytes: u64,
-) -> Result<Vec<u8>, AgentFileInputError> {
+    output: &mut impl Write,
+) -> Result<(u64, String), AgentFileInputError> {
     let mut options = OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
@@ -1587,8 +1610,8 @@ fn read_regular_file(
         ));
     }
     ensure_size_with_limit(metadata.len(), max_bytes)?;
-    let capacity = usize::try_from(metadata.len()).unwrap_or(0);
-    let mut bytes = Vec::with_capacity(capacity);
+    let mut size = 0_u64;
+    let mut hasher = Sha256::new();
     let mut buffer = [0_u8; 64 * 1024];
     loop {
         check_cancelled(cancellation)?;
@@ -1598,20 +1621,32 @@ fn read_regular_file(
         if read == 0 {
             break;
         }
-        if bytes.len().saturating_add(read) > usize::try_from(max_bytes).unwrap_or(usize::MAX) {
+        if size
+            .checked_add(read as u64)
+            .is_none_or(|next| next > max_bytes)
+        {
             return Err(AgentFileInputError::new(
                 ERROR_TOO_LARGE,
                 "changeRequest",
                 input_size_limit_message(max_bytes),
             ));
         }
-        bytes.extend_from_slice(&buffer[..read]);
+        size += read as u64;
+        hasher.update(&buffer[..read]);
+        output
+            .write_all(&buffer[..read])
+            .map_err(|_| AgentFileInputError::new(ERROR_IO, "retry", "写入声明式输入副本失败。"))?;
     }
-    Ok(bytes)
-}
-
-fn ensure_size(size: u64) -> Result<(), AgentFileInputError> {
-    ensure_size_with_limit(size, MAX_AGENT_FILE_INPUT_BYTES)
+    let after = file
+        .metadata()
+        .map_err(|_| AgentFileInputError::new(ERROR_IO, "retry", "无法复查声明式输入文件。"))?;
+    if after.len() != metadata.len()
+        || after.modified().ok() != metadata.modified().ok()
+        || size != metadata.len()
+    {
+        return Err(input_changed_error("file"));
+    }
+    Ok((size, format!("{:x}", hasher.finalize())))
 }
 
 fn ensure_size_with_limit(size: u64, max_bytes: u64) -> Result<(), AgentFileInputError> {
@@ -1719,7 +1754,7 @@ fn create_private_parent_directories(
     Ok(())
 }
 
-fn write_private_read_only_file(path: &Path, bytes: &[u8]) -> Result<(), AgentFileInputError> {
+fn create_private_input_file(path: &Path) -> Result<File, AgentFileInputError> {
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
@@ -1727,12 +1762,12 @@ fn write_private_read_only_file(path: &Path, bytes: &[u8]) -> Result<(), AgentFi
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o400).custom_flags(libc::O_CLOEXEC);
     }
-    let mut file = options.open(path).map_err(|_| {
+    options.open(path).map_err(|_| {
         AgentFileInputError::new(ERROR_IO, "retry", "无法创建托管命令的只读输入副本。")
-    })?;
-    file.write_all(bytes).map_err(|_| {
-        AgentFileInputError::new(ERROR_IO, "retry", "无法写入托管命令的只读输入副本。")
-    })?;
+    })
+}
+
+fn finish_private_input_file(path: &Path, file: &File) -> Result<(), AgentFileInputError> {
     file.sync_all().map_err(|_| {
         AgentFileInputError::new(ERROR_IO, "retry", "无法持久化托管命令的只读输入副本。")
     })?;
@@ -1747,6 +1782,14 @@ fn write_private_read_only_file(path: &Path, bytes: &[u8]) -> Result<(), AgentFi
         AgentFileInputError::new(ERROR_IO, "retry", "无法保护托管命令的只读输入副本。")
     })?;
     Ok(())
+}
+
+#[cfg(test)]
+fn write_private_read_only_file(path: &Path, bytes: &[u8]) -> Result<(), AgentFileInputError> {
+    let mut file = create_private_input_file(path)?;
+    file.write_all(bytes)
+        .map_err(|_| AgentFileInputError::new(ERROR_IO, "retry", "写入输入文件失败。"))?;
+    finish_private_input_file(path, &file)
 }
 
 fn set_private_directory_permissions(path: &Path) -> io::Result<()> {
@@ -1810,6 +1853,96 @@ mod tests {
             patch: AgentPatchPermission::RequireApproval,
             ..AgentPermissions::default()
         }
+    }
+
+    #[test]
+    fn streams_inputs_above_former_single_and_total_caps_and_revalidates() {
+        use std::io::{Seek, SeekFrom};
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("large.bin");
+        let mut file = File::create(&source).unwrap();
+        let size = 129 * 1024 * 1024;
+        file.set_len(size).unwrap();
+        let specs = [AgentFileInputSpec {
+            mount_path: "large.bin".into(),
+            source: AgentFileInputRef::Workspace {
+                path: "large.bin".into(),
+            },
+        }];
+        let context = AgentFileInputExecutionContext::default();
+        let bindings = prepare_agent_file_input_bindings(
+            Some(directory.path()),
+            permissions(AgentReadPermission::WorkspaceOnly),
+            &context,
+            &specs,
+            None,
+        )
+        .unwrap();
+        assert_eq!(bindings[0].size_bytes, size);
+        let prepared = materialize_agent_file_inputs(
+            Some(directory.path()),
+            permissions(AgentReadPermission::WorkspaceOnly),
+            &context,
+            &bindings,
+            None,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            fs::metadata(prepared.root().join("large.bin"))
+                .unwrap()
+                .len(),
+            size
+        );
+        let (copied_size, copied_hash) = stream_regular_file(
+            &prepared.root().join("large.bin"),
+            None,
+            u64::MAX,
+            &mut io::sink(),
+        )
+        .unwrap();
+        assert_eq!(
+            (copied_size, copied_hash),
+            (size, bindings[0].sha256.clone())
+        );
+        file.seek(SeekFrom::Start(size - 1)).unwrap();
+        file.write_all(b"x").unwrap();
+        let error = materialize_agent_file_inputs(
+            Some(directory.path()),
+            permissions(AgentReadPermission::WorkspaceOnly),
+            &context,
+            &bindings,
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(error.code(), ERROR_INTEGRITY_MISMATCH);
+    }
+
+    #[test]
+    fn streaming_copy_observes_cancellation_between_bounded_chunks() {
+        struct CancelAfterChunk(AgentCancellationToken);
+        impl Write for CancelAfterChunk {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                assert!(bytes.len() <= 64 * 1024);
+                self.0.cancel();
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("cancel.bin");
+        File::create(&path).unwrap().set_len(128 * 1024).unwrap();
+        let cancellation = AgentCancellationToken::new();
+        let error = stream_regular_file(
+            &path,
+            Some(&cancellation),
+            u64::MAX,
+            &mut CancelAfterChunk(cancellation.clone()),
+        )
+        .unwrap_err();
+        assert_eq!(error.code(), "agent.fileInput.cancelled");
     }
 
     #[test]

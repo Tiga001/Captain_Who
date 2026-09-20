@@ -1,14 +1,5 @@
 use super::*;
 
-pub(super) fn input_attachment_bytes(attachment: &AgentInputAttachment) -> Result<Vec<u8>, String> {
-    match attachment.encoding {
-        AgentInputAttachmentEncoding::Utf8 => Ok(attachment.data.as_bytes().to_vec()),
-        AgentInputAttachmentEncoding::Base64 => base64::engine::general_purpose::STANDARD
-            .decode(attachment.data.as_bytes())
-            .map_err(|error| format!("附件 base64 数据无效：{error}")),
-    }
-}
-
 pub(super) fn input_attachment_kind_label(kind: AgentInputAttachmentKind) -> &'static str {
     match kind {
         AgentInputAttachmentKind::File => "file",
@@ -70,7 +61,7 @@ pub(super) fn image_preview_mime_type(attachment: &AttachmentRecord) -> Option<S
         .mime_type
         .as_deref()
         .filter(|mime_type| mime_type.starts_with("image/"))
-        .map(ToString::to_string)
+        .map(|_| "image/png".to_string())
 }
 
 pub(super) fn safe_existing_attachment_storage_path(
@@ -215,7 +206,7 @@ impl StorageService {
         drop(connection);
         let mut staged = Vec::with_capacity(attachments.len());
         for attachment in attachments {
-            let bytes = input_attachment_bytes(attachment)?;
+            let bytes = self.attachment_data(attachment)?;
             let storage_rel_path = attachment_storage_rel_path(
                 conversation_id,
                 message_id,
@@ -232,7 +223,7 @@ impl StorageService {
                     kind: input_attachment_kind_label(attachment.kind).to_string(),
                     original_name: attachment.name.clone(),
                     mime_type: attachment.mime_type.clone(),
-                    size_bytes: bytes.len() as u64,
+                    size_bytes: bytes.len(),
                     storage_rel_path: slash_path(&storage_rel_path),
                     created_at,
                 },
@@ -245,7 +236,7 @@ impl StorageService {
             .map(|(record, _, _)| record.clone())
             .collect::<Vec<_>>();
         let mut created_paths = Vec::with_capacity(staged.len());
-        for (_, bytes, storage_path) in &staged {
+        for (record, bytes, storage_path) in &staged {
             let Some(parent) = storage_path.parent() else {
                 self.discard_prepared_conversation_turn_rewrite_attachments(
                     PreparedConversationTurnRewriteAttachments {
@@ -270,8 +261,7 @@ impl StorageService {
                 .open(storage_path)
             {
                 Ok(mut file) => {
-                    use std::io::Write;
-                    if let Err(error) = file.write_all(bytes).and_then(|_| file.sync_all()) {
+                    if let Err(error) = bytes.write_to(&mut file).and_then(|_| file.sync_all()) {
                         let _ = fs::remove_file(storage_path);
                         self.discard_prepared_conversation_turn_rewrite_attachments(
                             PreparedConversationTurnRewriteAttachments {
@@ -284,19 +274,7 @@ impl StorageService {
                     true
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                    let existing = match fs::read(storage_path) {
-                        Ok(existing) => existing,
-                        Err(read_error) => {
-                            self.discard_prepared_conversation_turn_rewrite_attachments(
-                                PreparedConversationTurnRewriteAttachments {
-                                    records,
-                                    paths_created_by_this_process: created_paths,
-                                },
-                            );
-                            return Err(format!("读取并发编辑重发附件失败：{read_error}"));
-                        }
-                    };
-                    if existing != *bytes {
+                    if !bytes.matches_file(storage_path)? {
                         self.discard_prepared_conversation_turn_rewrite_attachments(
                             PreparedConversationTurnRewriteAttachments {
                                 records,
@@ -319,6 +297,10 @@ impl StorageService {
             };
             if created {
                 created_paths.push(storage_path.clone());
+            }
+            if let Err(error) = self.cache_saved_attachment_image(record, storage_path) {
+                cleanup_new_attachment_files(self, &created_paths);
+                return Err(error);
             }
         }
         Ok(PreparedConversationTurnRewriteAttachments {
@@ -367,7 +349,7 @@ impl StorageService {
         };
         drop(connection);
 
-        let Some(mime_type) = image_preview_mime_type(&attachment) else {
+        let Some(_) = image_preview_mime_type(&attachment) else {
             return Ok(None);
         };
         let Some(storage_path) = safe_existing_attachment_storage_path(
@@ -377,18 +359,20 @@ impl StorageService {
             return Ok(None);
         };
 
-        let bytes = match fs::read(storage_path) {
-            Ok(bytes) => bytes,
+        let file = match fs::File::open(storage_path) {
+            Ok(file) => file,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(format!("读取图片附件失败：{error}")),
         };
-
+        let prepared =
+            crate::file_input::image_delivery::prepare_model_image(std::io::BufReader::new(file))
+                .map_err(|error| error.to_string())?;
         Ok(Some(AttachmentImageRecord {
             id: attachment.id,
             name: attachment.original_name,
-            mime_type,
-            size_bytes: bytes.len() as u64,
-            data: base64::engine::general_purpose::STANDARD.encode(bytes),
+            mime_type: prepared.mime_type.to_string(),
+            size_bytes: prepared.bytes.len() as u64,
+            data: base64::engine::general_purpose::STANDARD.encode(prepared.bytes),
             created_at: attachment.created_at,
         }))
     }
@@ -414,7 +398,7 @@ impl StorageService {
 
         let mut prepared = Vec::with_capacity(attachments.len());
         for attachment in attachments {
-            let bytes = input_attachment_bytes(attachment)?;
+            let bytes = self.attachment_data(attachment)?;
             let attachment_id = safe_path_component(&attachment.id, "attachment");
             let storage_rel_path = attachment_storage_rel_path(
                 conversation_id,
@@ -432,7 +416,7 @@ impl StorageService {
                     kind: input_attachment_kind_label(attachment.kind).to_string(),
                     original_name: attachment.name.clone(),
                     mime_type: attachment.mime_type.clone(),
-                    size_bytes: bytes.len() as u64,
+                    size_bytes: bytes.len(),
                     storage_rel_path: slash_path(&storage_rel_path),
                     created_at,
                 },
@@ -442,7 +426,7 @@ impl StorageService {
         }
 
         let mut newly_created_paths = Vec::new();
-        for (_, storage_path, bytes) in &prepared {
+        for (record, storage_path, bytes) in &prepared {
             let parent = storage_path
                 .parent()
                 .ok_or_else(|| "附件存储路径无效。".to_string())?;
@@ -453,8 +437,7 @@ impl StorageService {
                 .open(storage_path)
             {
                 Ok(mut file) => {
-                    use std::io::Write;
-                    if let Err(error) = file.write_all(bytes) {
+                    if let Err(error) = bytes.write_to(&mut file) {
                         let _ = fs::remove_file(storage_path);
                         cleanup_new_attachment_files(self, &newly_created_paths);
                         return Err(format!("写入附件失败：{error}"));
@@ -462,9 +445,9 @@ impl StorageService {
                     true
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                    if let Err(error) = fs::write(storage_path, bytes) {
+                    if !bytes.matches_file(storage_path)? {
                         cleanup_new_attachment_files(self, &newly_created_paths);
-                        return Err(format!("写入附件失败：{error}"));
+                        return Err("附件的确定性路径发生内容冲突。".into());
                     }
                     false
                 }
@@ -475,6 +458,10 @@ impl StorageService {
             };
             if created {
                 newly_created_paths.push(storage_path.clone());
+            }
+            if let Err(error) = self.cache_saved_attachment_image(record, storage_path) {
+                cleanup_new_attachment_files(self, &newly_created_paths);
+                return Err(error);
             }
         }
 
@@ -538,7 +525,7 @@ impl StorageService {
 
         let mut prepared = Vec::with_capacity(attachments.len());
         for attachment in attachments {
-            let bytes = input_attachment_bytes(attachment)?;
+            let bytes = self.attachment_data(attachment)?;
             let storage_rel_path = attachment_storage_rel_path(
                 &record.conversation_id,
                 &record.assistant_message_id,
@@ -557,7 +544,7 @@ impl StorageService {
                     kind: input_attachment_kind_label(attachment.kind).to_string(),
                     original_name: attachment.name.clone(),
                     mime_type: attachment.mime_type.clone(),
-                    size_bytes: bytes.len() as u64,
+                    size_bytes: bytes.len(),
                     storage_rel_path: slash_path(&storage_rel_path),
                     created_at: record.created_at,
                 },
@@ -567,7 +554,7 @@ impl StorageService {
         }
 
         let mut written_paths = Vec::with_capacity(prepared.len());
-        for (_, storage_path, bytes) in &prepared {
+        for (attachment, storage_path, bytes) in &prepared {
             let parent = storage_path
                 .parent()
                 .ok_or_else(|| "附件存储路径无效。".to_string())?;
@@ -577,8 +564,7 @@ impl StorageService {
                 .create_new(true)
                 .open(storage_path)
                 .and_then(|mut file| {
-                    use std::io::Write;
-                    file.write_all(bytes)?;
+                    bytes.write_to(&mut file)?;
                     file.sync_all()
                 });
             if let Err(error) = write_result {
@@ -586,6 +572,10 @@ impl StorageService {
                 return Err(format!("写入引导附件失败：{error}"));
             }
             written_paths.push(storage_path.clone());
+            if let Err(error) = self.cache_saved_attachment_image(attachment, storage_path) {
+                cleanup_new_attachment_files(self, &written_paths);
+                return Err(error);
+            }
         }
 
         let database_result = (|| -> Result<AgentRunGuidanceStoreOutcome, String> {
@@ -636,29 +626,10 @@ impl StorageService {
             .collect::<Result<Vec<_>, String>>()?;
         drop(connection);
 
-        let mut attachments = Vec::with_capacity(records.len());
-        for attachment in records {
-            let storage_path = safe_existing_attachment_storage_path(
-                &self.attachment_root,
-                &attachment.storage_rel_path,
-            )
-            .ok_or_else(|| format!("附件文件不存在：{}", attachment.original_name))?;
-            let bytes = fs::read(&storage_path)
-                .map_err(|error| format!("读取附件失败 {}: {error}", storage_path.display()))?;
-
-            attachments.push(AgentInputAttachment {
-                id: attachment.id,
-                kind: agent_attachment_kind(&attachment.kind),
-                name: attachment.original_name,
-                mime_type: attachment.mime_type,
-                size_bytes: attachment.size_bytes,
-                encoding: AgentInputAttachmentEncoding::Base64,
-                data: base64::engine::general_purpose::STANDARD.encode(bytes),
-                truncated: None,
-            });
-        }
-
-        Ok(attachments)
+        records
+            .iter()
+            .map(|record| self.reference_for_stored_attachment(record))
+            .collect()
     }
 
     /// Resolves immutable model-history image references within their owning conversation.
@@ -669,7 +640,6 @@ impl StorageService {
         conversation_id: &str,
         refs: &[crate::ConversationContextImageRef],
     ) -> Result<Vec<AgentInputAttachment>, String> {
-        use sha2::{Digest, Sha256};
         if refs.is_empty() {
             return Ok(Vec::new());
         }
@@ -698,7 +668,6 @@ impl StorageService {
             if record.conversation_id != conversation_id
                 || superseded.contains(&record.message_id)
                 || record.kind != "image"
-                || record.mime_type.as_deref() != Some(reference.mime_type.as_str())
             {
                 return Err(
                     "context_image_scope_mismatch: image is outside visible history".into(),
@@ -725,26 +694,43 @@ impl StorageService {
                     &record.storage_rel_path,
                 )
                 .ok_or_else(|| "context_image_unavailable: image bytes are missing".to_string())?;
-                let bytes = fs::read(path).map_err(|_| {
-                    "context_image_unavailable: image bytes cannot be read".to_string()
-                })?;
-                if bytes.len() as u64 != record.size_bytes
-                    || format!("sha256:{:x}", Sha256::digest(&bytes)) != reference.sha256
-                {
+                let (size, source_digest) = super::attachment_imports::file_digest(&path)?;
+                if size != record.size_bytes {
                     return Err("context_image_integrity_mismatch: image bytes changed".into());
                 }
+                let bytes = self
+                    .read_cached_model_image(&source_digest, reference)?
+                    .ok_or_else(|| {
+                        "context_image_integrity_mismatch: recorded image derivative is unavailable"
+                            .to_string()
+                    })?;
                 Ok(AgentInputAttachment {
                     id: record.id,
                     kind: AgentInputAttachmentKind::Image,
                     name: record.original_name,
-                    mime_type: record.mime_type,
-                    size_bytes: record.size_bytes,
+                    mime_type: Some(reference.mime_type.clone()),
+                    size_bytes: bytes.len() as u64,
                     encoding: AgentInputAttachmentEncoding::Base64,
                     data: base64::engine::general_purpose::STANDARD.encode(bytes),
                     truncated: None,
                 })
             })
             .collect()
+    }
+
+    fn cache_saved_attachment_image(
+        &self,
+        record: &AttachmentRecord,
+        path: &Path,
+    ) -> Result<(), String> {
+        if record.kind != "image" {
+            return Ok(());
+        }
+        let file = fs::File::open(path).map_err(|error| error.to_string())?;
+        let prepared =
+            crate::file_input::image_delivery::prepare_model_image(std::io::BufReader::new(file))
+                .map_err(|error| error.to_string())?;
+        self.cache_model_image(path, &prepared.bytes)
     }
 
     pub fn build_attachment_library_context(
@@ -898,8 +884,12 @@ impl StorageService {
             &self.attachment_root,
             &attachment.storage_rel_path,
         )?;
-        let bytes = fs::read(storage_path).ok()?;
-        Some(base64::engine::general_purpose::STANDARD.encode(bytes))
+        let file = fs::File::open(storage_path).ok()?;
+        let url =
+            crate::file_input::image_delivery::thumbnail_data_url(std::io::BufReader::new(file))
+                .ok()?;
+        url.strip_prefix("data:image/png;base64,")
+            .map(ToString::to_string)
     }
 
     pub(super) fn cleanup_attachment_files(

@@ -14,6 +14,8 @@ const { draftChangeSpy, listSkillsSpy, submitSpy, translate } = vi.hoisted(() =>
   translate: (key: string) => key
 }))
 
+vi.mock('../../host/hostClient', () => ({ hostClient: {} }))
+
 vi.mock('../../config/FrontendConfigProvider', () => ({
   useFrontendConfig: () => ({ t: translate })
 }))
@@ -69,6 +71,8 @@ vi.mock('../../features/chat/chatAttachments', () => ({
   buildAgentInputAttachments: (attachments: unknown[]) => attachments,
   composerAttachmentFromAgentAttachment: (attachment: unknown) => attachment,
   createComposerAttachmentsFromFiles: async () => [],
+  loadComposerAttachmentImage: async () => undefined,
+  loadComposerAttachmentPreview: async () => undefined,
   createAttachmentSummary: () => '',
   selectComposerAttachments: async () => [],
   stripAttachmentSummary: (content: string) => content
@@ -416,8 +420,8 @@ describe('ChatComposer model picker', () => {
         name,
         mimeType: 'text/plain',
         sizeBytes: 4,
-        encoding: 'base64' as const,
-        data: 'a2VlcA=='
+        encoding: 'managed' as const,
+        data: 'managed-test-a2VlcA=='
       }))
     })
     const screen = await render(
@@ -522,8 +526,8 @@ describe('ChatComposer model picker', () => {
           name: 'keep.txt',
           mimeType: 'text/plain',
           sizeBytes: 4,
-          encoding: 'base64',
-          data: 'a2VlcA=='
+          encoding: 'managed',
+          data: 'managed-test-a2VlcA=='
         }
       ],
       modelId: 'model-1',

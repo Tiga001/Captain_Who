@@ -36,18 +36,12 @@ import { useDismissOnOutsidePointer } from '../../../hooks/useDismissOnOutsidePo
 import {
   buildAgentInputAttachments,
   composerAttachmentFromAgentAttachment,
-  createComposerAttachmentsFromFiles,
   createAttachmentSummary,
-  selectComposerAttachments,
+  loadComposerAttachmentImage,
   stripAttachmentSummary
 } from '../chatAttachments'
-import type { ComposerAttachment, ComposerAttachmentKind } from '../chatAttachments'
-import {
-  getAttachmentBadgeLabel,
-  getAttachmentExtension,
-  getAttachmentIcon,
-  getAttachmentTypeLabel
-} from '../attachmentDisplay'
+import type { ComposerAttachmentKind } from '../chatAttachments'
+import { useAttachmentImports, useComposerAttachmentPreviews } from '../useAttachmentImports'
 import type {
   ChatComposerDraft,
   ChatPermissionMode,
@@ -64,6 +58,7 @@ import {
 } from '../../skills/skillSelection'
 import { useSkillCatalog } from '../../skills/useSkillCatalog'
 import { ContextWindowIndicator } from './ContextWindowIndicator'
+import { ComposerAttachments } from './ComposerAttachments'
 import { ComposerSelectedSkills, ComposerSkillPicker } from './ComposerSkillPicker'
 import { GuidanceQueue } from './GuidanceQueue'
 import { useImagePreview } from './ImagePreview'
@@ -170,6 +165,7 @@ export function ChatComposer({
   const isComposingRef = useRef(false)
   const lastCompositionEndAtRef = useRef(0)
   const attachmentPickerRef = useRef<HTMLDivElement>(null)
+  const attachmentPreviewRequestRef = useRef(0)
   const attachmentTriggerRef = useRef<HTMLButtonElement>(null)
   const attachmentPopoverRef = useRef<HTMLDivElement>(null)
   const permissionPickerRef = useRef<HTMLDivElement>(null)
@@ -212,10 +208,55 @@ export function ChatComposer({
     : 'default'
   const selectedProjectId = draft.projectId
   const selectedModelId = draft.modelId
-  const attachments = useMemo(
+  const updateDraft = useCallback(
+    (patch: Partial<ChatComposerDraft>) => {
+      const currentDraft = draftRef.current
+      const nextDraft = {
+        ...currentDraft,
+        ...patch,
+        updatedAt: Math.max(Date.now(), currentDraft.updatedAt + 1)
+      }
+      if (patch.message !== undefined) {
+        setMessage(patch.message)
+      }
+      draftRef.current = nextDraft
+      onDraftChange({
+        ...nextDraft
+      })
+    },
+    [onDraftChange]
+  )
+
+  const storedAttachments = useMemo(
     () => draft.attachments.map(composerAttachmentFromAgentAttachment),
     [draft.attachments]
   )
+  const attachments = useComposerAttachmentPreviews(storedAttachments)
+  const attachmentImports = useAttachmentImports({
+    scope: JSON.stringify([resetKey, draft.projectId]),
+    onAttachments: (nextAttachments) => {
+      const currentAttachments = draftRef.current.attachments
+      const existing = new Set(currentAttachments.map((attachment) => attachment.id))
+      updateDraft({
+        attachments: [
+          ...currentAttachments,
+          ...buildAgentInputAttachments(nextAttachments).filter(
+            (attachment) => !existing.has(attachment.id)
+          )
+        ]
+      })
+      setAttachmentError(null)
+    },
+    onError: (error) =>
+      setAttachmentError(getUserFacingErrorMessage(error, t, 'chat.attachmentOperationFailed')),
+    errorMessage: (error) => getUserFacingErrorMessage(error, t, 'chat.attachmentOperationFailed')
+  })
+  useLayoutEffect(() => {
+    attachmentPreviewRequestRef.current += 1
+    return () => {
+      attachmentPreviewRequestRef.current += 1
+    }
+  }, [resetKey, draft.projectId])
   const selectedPermission =
     permissionOptions.find((option) => option.id === permissionMode) ??
     getChatPermissionPresentation('default')
@@ -273,6 +314,7 @@ export function ChatComposer({
     hasSendableContent &&
     !hasUnsupportedImageAttachment &&
     !hasInvalidSkillSelection &&
+    !attachmentImports.hasPending &&
     !isModelTransitionRunning &&
     !isManualCompactionRunning &&
     Boolean(selectedModel)
@@ -440,25 +482,6 @@ export function ChatComposer({
     [onDraftMessageChange]
   )
 
-  const updateDraft = useCallback(
-    (patch: Partial<ChatComposerDraft>) => {
-      const currentDraft = draftRef.current
-      const nextDraft = {
-        ...currentDraft,
-        ...patch,
-        updatedAt: Math.max(Date.now(), currentDraft.updatedAt + 1)
-      }
-      if (patch.message !== undefined) {
-        setMessage(patch.message)
-      }
-      draftRef.current = nextDraft
-      onDraftChange({
-        ...nextDraft
-      })
-    },
-    [onDraftChange]
-  )
-
   const clearSelectedProject = useCallback(() => {
     updateDraft({
       projectId: null,
@@ -511,14 +534,6 @@ export function ChatComposer({
       updateDraft({ skills: retainedSkills })
     }
   }, [draft.projectId, draft.skills, resetKey, updateDraft])
-
-  const appendAttachments = (nextAttachments: ComposerAttachment[]) => {
-    if (nextAttachments.length === 0) return
-
-    updateDraft({
-      attachments: [...draftRef.current.attachments, ...buildAgentInputAttachments(nextAttachments)]
-    })
-  }
 
   useEffect(() => {
     if (showProjectSelector && defaultProjectId !== null && defaultProjectId !== draft.projectId) {
@@ -704,6 +719,7 @@ export function ChatComposer({
     )
     if (!queuedMessage || queuedMessage.status === 'submitting') return
 
+    attachmentImports.cancelAll()
     updateDraft({
       message: stripAttachmentSummary(queuedMessage.content, queuedMessage.attachments),
       attachments: queuedMessage.attachments,
@@ -755,36 +771,15 @@ export function ChatComposer({
   }
 
   const addAttachments = async (kind: ComposerAttachmentKind) => {
-    let nextAttachments: ComposerAttachment[]
-    try {
-      nextAttachments = await selectComposerAttachments(kind)
-      setAttachmentError(null)
-    } catch (error) {
-      setAttachmentError(getUserFacingErrorMessage(error, t, 'chat.attachmentOperationFailed'))
-      setIsAttachmentMenuOpen(false)
-      return
-    }
-
-    if (nextAttachments.length === 0) {
-      setIsAttachmentMenuOpen(false)
-      return
-    }
-
-    appendAttachments(nextAttachments)
     setAttachmentError(null)
     setIsAttachmentMenuOpen(false)
+    await attachmentImports.select(kind)
   }
 
   const addDroppedOrPastedFiles = async (files: FileList | File[]) => {
     if (files.length === 0) return
-
-    try {
-      const nextAttachments = await createComposerAttachmentsFromFiles(files)
-      appendAttachments(nextAttachments)
-      setAttachmentError(null)
-    } catch (error) {
-      setAttachmentError(getUserFacingErrorMessage(error, t, 'chat.attachmentOperationFailed'))
-    }
+    setAttachmentError(null)
+    await attachmentImports.addFiles(files)
   }
 
   const handleSelectProjectDirectory = async () => {
@@ -916,67 +911,59 @@ export function ChatComposer({
           void addDroppedOrPastedFiles(event.clipboardData.files)
         }}
       >
-        {attachments.length > 0 && (
-          <div className="chat-composer__attachments" aria-label={t('chat.attachments')}>
-            {attachments.map((attachment) => {
-              const extension = getAttachmentExtension(attachment.name)
-              const AttachmentIcon = getAttachmentIcon(attachment.kind, extension)
-              const badgeLabel = getAttachmentBadgeLabel(extension)
-              const typeLabel = getAttachmentTypeLabel(attachment)
-              const isImagePreview = attachment.kind === 'image' && Boolean(attachment.previewUrl)
-
-              return (
-                <div
-                  className="composer-attachment"
-                  data-kind={attachment.kind}
-                  key={attachment.id}
-                >
-                  {isImagePreview ? (
-                    <button
-                      className="composer-attachment__image-button"
-                      onClick={() =>
-                        openImagePreview({
-                          alt: attachment.name,
-                          fileName: attachment.name,
-                          src: attachment.previewUrl ?? ''
-                        })
-                      }
-                      title={attachment.name}
-                      type="button"
-                    >
-                      <img
-                        className="composer-attachment__thumbnail"
-                        src={attachment.previewUrl}
-                        alt={attachment.name}
-                      />
-                    </button>
-                  ) : (
-                    <>
-                      <div className="composer-attachment__icon" aria-hidden="true">
-                        {badgeLabel ? (
-                          <span className="composer-attachment__language-badge">{badgeLabel}</span>
-                        ) : (
-                          <AttachmentIcon />
-                        )}
-                      </div>
-                      <div className="composer-attachment__details">
-                        <span className="composer-attachment__name">{attachment.name}</span>
-                        <span className="composer-attachment__type">{typeLabel}</span>
-                      </div>
-                    </>
-                  )}
-                  <button
-                    type="button"
-                    className="composer-attachment__remove"
-                    aria-label={`${t('chat.removeAttachment')} ${attachment.name}`}
-                    onClick={() => removeAttachment(attachment.id)}
-                  >
-                    <X aria-hidden="true" />
-                  </button>
-                </div>
-              )
-            })}
-          </div>
+        {(attachments.length > 0 || attachmentImports.pending.length > 0) && (
+          <ComposerAttachments
+            attachments={[...attachments, ...attachmentImports.pending]}
+            label={t('chat.attachments')}
+            removeLabel={t('chat.removeAttachment')}
+            cancelLabel={t('project.cancel')}
+            retryLabel={t('files.retry')}
+            failedLabel={t('chat.attachmentOperationFailed')}
+            onRetry={(id) => void attachmentImports.retry(id)}
+            onRemove={(id) => {
+              if (attachmentImports.pending.some((attachment) => attachment.id === id))
+                attachmentImports.cancel(id)
+              else removeAttachment(id)
+            }}
+            onPreview={openImagePreview}
+            onPreviewAttachment={(id) => {
+              const attachment = attachments.find((item) => item.id === id)
+              if (!attachment) return
+              const requestId = ++attachmentPreviewRequestRef.current
+              const scope = resetKey
+              const projectId = draft.projectId
+              void loadComposerAttachmentImage(attachment.agentAttachment)
+                .then((src) => {
+                  if (
+                    attachmentPreviewRequestRef.current !== requestId ||
+                    previousResetKeyRef.current !== scope ||
+                    draftRef.current.projectId !== projectId
+                  )
+                    return
+                  const imageSource = src ?? attachment.previewUrl
+                  if (imageSource)
+                    openImagePreview({
+                      alt: attachment.name,
+                      fileName: attachment.name,
+                      src: imageSource
+                    })
+                })
+                .catch(() => {
+                  if (
+                    attachmentPreviewRequestRef.current === requestId &&
+                    previousResetKeyRef.current === scope &&
+                    draftRef.current.projectId === projectId &&
+                    attachment.previewUrl
+                  ) {
+                    openImagePreview({
+                      alt: attachment.name,
+                      fileName: attachment.name,
+                      src: attachment.previewUrl
+                    })
+                  }
+                })
+            }}
+          />
         )}
 
         <ComposerSelectedSkills

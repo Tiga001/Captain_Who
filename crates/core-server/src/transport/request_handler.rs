@@ -491,6 +491,75 @@ pub(crate) fn handle_request(
             };
             conversation_fork_response(request.id, agent_service.fork_conversation_view(input))
         }
+        mycopilot_protocol_rs::STORAGE_BEGIN_ATTACHMENT_IMPORT_METHOD => {
+            let input = match parse_params::<mycopilot_core::AttachmentImportInput>(request.params)
+            {
+                Ok(input) => input,
+                Err(message) => return response_error(Some(request.id), -32602, message),
+            };
+            storage_response(
+                request.id,
+                storage
+                    .begin_attachment_import(input)
+                    .map(|id| json!({ "importId": id })),
+            )
+        }
+        mycopilot_protocol_rs::STORAGE_APPEND_ATTACHMENT_IMPORT_METHOD => {
+            let input = match parse_params::<AppendAttachmentImportRequest>(request.params) {
+                Ok(input) => input,
+                Err(message) => return response_error(Some(request.id), -32602, message),
+            };
+            storage_response(
+                request.id,
+                storage
+                    .append_attachment_import(&input.import_id, input.offset, &input.data)
+                    .map(|size| json!({ "receivedBytes": size })),
+            )
+        }
+        mycopilot_protocol_rs::STORAGE_FINISH_ATTACHMENT_IMPORT_METHOD => {
+            let input = match parse_params::<AttachmentImportIdRequest>(request.params) {
+                Ok(input) => input,
+                Err(message) => return response_error(Some(request.id), -32602, message),
+            };
+            storage_response(
+                request.id,
+                storage.finish_attachment_import(&input.import_id),
+            )
+        }
+        mycopilot_protocol_rs::STORAGE_CANCEL_ATTACHMENT_IMPORT_METHOD => {
+            let input = match parse_params::<AttachmentImportIdRequest>(request.params) {
+                Ok(input) => input,
+                Err(message) => return response_error(Some(request.id), -32602, message),
+            };
+            storage_response(
+                request.id,
+                storage.cancel_attachment_import(&input.import_id),
+            )
+        }
+        mycopilot_protocol_rs::STORAGE_LOAD_INPUT_ATTACHMENT_PREVIEW_METHOD => {
+            let input = match parse_params::<InputAttachmentPreviewRequest>(request.params) {
+                Ok(input) => input,
+                Err(message) => return response_error(Some(request.id), -32602, message),
+            };
+            if input
+                .purpose
+                .as_deref()
+                .is_some_and(|purpose| purpose != "display" && purpose != "thumbnail")
+            {
+                return response_error(
+                    Some(request.id),
+                    -32602,
+                    "Invalid attachment preview purpose",
+                );
+            }
+            storage_response(
+                request.id,
+                storage.load_input_attachment_preview_for_display(
+                    &input.attachment,
+                    input.purpose.as_deref() == Some("display"),
+                ),
+            )
+        }
         STORAGE_LOAD_ATTACHMENT_IMAGE_METHOD => {
             let input = match parse_params::<AttachmentIdRequest>(request.params) {
                 Ok(input) => input,
@@ -765,6 +834,27 @@ pub(crate) struct BrowserDownloadIdRequest {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct LoadInputAttachmentsRequest {
     pub(crate) attachment_ids: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct AttachmentImportIdRequest {
+    pub(crate) import_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct AppendAttachmentImportRequest {
+    pub(crate) import_id: String,
+    pub(crate) offset: u64,
+    pub(crate) data: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct InputAttachmentPreviewRequest {
+    pub(crate) attachment: mycopilot_core::AgentInputAttachment,
+    pub(crate) purpose: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

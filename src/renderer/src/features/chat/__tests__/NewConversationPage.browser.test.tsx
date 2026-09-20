@@ -7,6 +7,8 @@ const LONG_PROJECT_NAME = 'LLMtest'.repeat(24)
 const LONG_MIXED_PROJECT_NAME = '超长项目🚀'.repeat(32)
 const SHORT_PROJECT_NAME = 'LLMtest'
 
+vi.mock('../../../host/hostClient', () => ({ hostClient: {} }))
+
 vi.mock('../../../config/FrontendConfigProvider', () => ({
   useFrontendConfig: () => ({
     t: (key: string) => (key === 'chat.projectTitle' ? '我们应该在{projectName}中做些什么？' : key)
@@ -72,6 +74,8 @@ vi.mock('../chatAttachments', () => ({
   buildAgentInputAttachments: (attachments: unknown[]) => attachments,
   composerAttachmentFromAgentAttachment: (attachment: unknown) => attachment,
   createComposerAttachmentsFromFiles: async () => [],
+  loadComposerAttachmentImage: async () => undefined,
+  loadComposerAttachmentPreview: async () => undefined,
   createAttachmentSummary: () => '',
   selectComposerAttachments: async () => [],
   stripAttachmentSummary: (content: string) => content

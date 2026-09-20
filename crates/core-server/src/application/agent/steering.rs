@@ -1,11 +1,7 @@
 use super::*;
-use base64::Engine;
 
 const RUN_NOT_STEERABLE_MESSAGE: &str = "The agent run has finished or no longer accepts guidance.";
 const MAX_GUIDANCE_ATTACHMENTS: usize = 8;
-const MAX_GUIDANCE_ATTACHMENT_BYTES: u64 = 8 * 1024 * 1024;
-const MAX_GUIDANCE_TOTAL_ATTACHMENT_BYTES: u64 = 32 * 1024 * 1024;
-const MAX_RUN_GUIDANCE_ATTACHMENT_BYTES: u64 = 64 * 1024 * 1024;
 
 /// Owns the inbox only until another execution segment adopts it. Failure paths which retain a
 /// durable recovery record must still stop accepting messages once their worker has exited.
@@ -80,6 +76,7 @@ impl AgentService {
             .unwrap_or_default();
         if let Some(existing) = existing.as_ref() {
             if !same_guidance_request(
+                &self.storage,
                 existing,
                 &existing_attachments,
                 &conversation_id,
@@ -200,15 +197,10 @@ impl AgentService {
                 created_at,
             ));
         }
-        let run_attachment_bytes = self.storage.agent_run_guidance_attachment_bytes(&run_id)?;
-        let existing_attachment_bytes = existing_attachments
-            .iter()
-            .map(|attachment| attachment.size_bytes)
-            .sum::<u64>();
         if let Err((code, message)) = validate_guidance_attachments(
             &input.attachments,
+            &self.storage,
             control.model_capabilities,
-            run_attachment_bytes.saturating_sub(existing_attachment_bytes),
         ) {
             return Ok(reject_without_journal_transition(
                 &notifications,
@@ -749,6 +741,7 @@ impl AgentService {
 }
 
 fn same_guidance_request(
+    storage: &StorageService,
     existing: &AgentRunGuidanceRecord,
     persisted_attachments: &[mycopilot_core::AgentInputAttachment],
     conversation_id: &str,
@@ -763,10 +756,13 @@ fn same_guidance_request(
         && persisted_attachments
             .iter()
             .zip(&input.attachments)
-            .all(|(persisted, candidate)| attachments_have_same_identity(persisted, candidate))
+            .all(|(persisted, candidate)| {
+                attachments_have_same_identity(storage, persisted, candidate)
+            })
 }
 
 fn attachments_have_same_identity(
+    storage: &StorageService,
     persisted: &mycopilot_core::AgentInputAttachment,
     candidate: &mycopilot_core::AgentInputAttachment,
 ) -> bool {
@@ -776,13 +772,19 @@ fn attachments_have_same_identity(
         && normalized_mime(persisted.mime_type.as_deref())
             == normalized_mime(candidate.mime_type.as_deref())
         && persisted.size_bytes == candidate.size_bytes
-        && decoded_attachment_bytes(persisted).ok() == decoded_attachment_bytes(candidate).ok()
+        && matches!(
+            (
+                storage.input_attachment_content_digest(persisted),
+                storage.input_attachment_content_digest(candidate),
+            ),
+            (Ok(persisted), Ok(candidate)) if persisted == candidate
+        )
 }
 
 fn validate_guidance_attachments(
     attachments: &[mycopilot_core::AgentInputAttachment],
+    storage: &mycopilot_core::storage::service::StorageService,
     model_capabilities: ModelCapabilities,
-    prior_run_bytes: u64,
 ) -> Result<(), (AgentSteerRunRejectionCode, String)> {
     if attachments.is_empty() {
         return Ok(());
@@ -797,7 +799,7 @@ fn validate_guidance_attachments(
             "The active model does not support image attachments.".to_string(),
         ));
     }
-    validate_guidance_attachment_limits(attachments, prior_run_bytes)?;
+    validate_guidance_attachment_limits(attachments)?;
 
     let mut seen_ids = HashSet::new();
     for attachment in attachments {
@@ -829,18 +831,12 @@ fn validate_guidance_attachments(
         if attachment.size_bytes == 0 {
             return attachment_validation_error("Empty attachments are not supported.");
         }
-        let bytes = decoded_attachment_bytes(attachment).map_err(|message| {
-            (
-                AgentSteerRunRejectionCode::AttachmentValidationFailed,
-                message,
-            )
-        })?;
-        if bytes.len() as u64 != attachment.size_bytes {
+        if attachment.encoding != mycopilot_core::AgentInputAttachmentEncoding::Managed {
             return attachment_validation_error(
-                "Attachment sizeBytes does not match the decoded payload size.",
+                "Guidance attachments must use managed references.",
             );
         }
-        validate_attachment_type(attachment, &bytes)?;
+        validate_managed_guidance_type(storage, attachment)?;
     }
 
     Ok(())
@@ -848,47 +844,11 @@ fn validate_guidance_attachments(
 
 fn validate_guidance_attachment_limits(
     attachments: &[mycopilot_core::AgentInputAttachment],
-    prior_run_bytes: u64,
 ) -> Result<(), (AgentSteerRunRejectionCode, String)> {
     if attachments.len() > MAX_GUIDANCE_ATTACHMENTS {
         return Err((
             AgentSteerRunRejectionCode::AttachmentLimitExceeded,
             format!("A guidance message supports at most {MAX_GUIDANCE_ATTACHMENTS} attachments."),
-        ));
-    }
-    if attachments
-        .iter()
-        .any(|attachment| attachment.size_bytes > MAX_GUIDANCE_ATTACHMENT_BYTES)
-    {
-        return Err((
-            AgentSteerRunRejectionCode::AttachmentLimitExceeded,
-            "A single guidance attachment cannot exceed 8 MiB.".to_string(),
-        ));
-    }
-    let total_bytes = attachments
-        .iter()
-        .try_fold(0_u64, |total, attachment| {
-            total.checked_add(attachment.size_bytes)
-        })
-        .ok_or_else(|| {
-            (
-                AgentSteerRunRejectionCode::AttachmentLimitExceeded,
-                "Guidance attachment size overflow.".to_string(),
-            )
-        })?;
-    if total_bytes > MAX_GUIDANCE_TOTAL_ATTACHMENT_BYTES {
-        return Err((
-            AgentSteerRunRejectionCode::AttachmentLimitExceeded,
-            "One guidance message cannot contain more than 32 MiB of attachments.".to_string(),
-        ));
-    }
-    if prior_run_bytes
-        .checked_add(total_bytes)
-        .is_none_or(|total| total > MAX_RUN_GUIDANCE_ATTACHMENT_BYTES)
-    {
-        return Err((
-            AgentSteerRunRejectionCode::AttachmentLimitExceeded,
-            "The active run cannot accept more than 64 MiB of guidance attachments.".to_string(),
         ));
     }
     Ok(())
@@ -901,21 +861,6 @@ fn attachment_validation_error(message: &str) -> Result<(), (AgentSteerRunReject
     ))
 }
 
-fn decoded_attachment_bytes(
-    attachment: &mycopilot_core::AgentInputAttachment,
-) -> Result<Vec<u8>, String> {
-    match attachment.encoding {
-        mycopilot_core::AgentInputAttachmentEncoding::Utf8 => {
-            Ok(attachment.data.as_bytes().to_vec())
-        }
-        mycopilot_core::AgentInputAttachmentEncoding::Base64 => {
-            base64::engine::general_purpose::STANDARD
-                .decode(attachment.data.as_bytes())
-                .map_err(|_| "Attachment contains invalid base64 data.".to_string())
-        }
-    }
-}
-
 fn normalized_mime(value: Option<&str>) -> Option<String> {
     value
         .map(str::trim)
@@ -923,28 +868,68 @@ fn normalized_mime(value: Option<&str>) -> Option<String> {
         .map(str::to_ascii_lowercase)
 }
 
-fn validate_attachment_type(
+fn validate_managed_guidance_type(
+    storage: &mycopilot_core::storage::service::StorageService,
     attachment: &mycopilot_core::AgentInputAttachment,
-    bytes: &[u8],
 ) -> Result<(), (AgentSteerRunRejectionCode, String)> {
+    use std::io::{Read, Seek};
+    let error = |message: String| {
+        (
+            AgentSteerRunRejectionCode::AttachmentValidationFailed,
+            message,
+        )
+    };
+    let mut file = storage
+        .open_validated_managed_input_attachment(attachment)
+        .map_err(error)?;
     let extension = Path::new(&attachment.name)
         .extension()
         .and_then(|value| value.to_str())
-        .map(str::to_ascii_lowercase)
-        .unwrap_or_default();
-    let Some(mime_type) = normalized_mime(attachment.mime_type.as_deref()) else {
-        return attachment_validation_error("Attachment MIME type is required.");
-    };
-    if mime_type.len() > 127 || mime_type.chars().any(char::is_control) {
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let mime = normalized_mime(attachment.mime_type.as_deref())
+        .ok_or_else(|| error("Attachment MIME type is required.".into()))?;
+    if mime.len() > 127 || mime.chars().any(char::is_control) {
         return attachment_validation_error("Attachment MIME type is invalid.");
     }
-
-    let valid = match attachment.kind {
-        mycopilot_core::AgentInputAttachmentKind::Image => {
-            validate_image_type(&extension, &mime_type, bytes)
-        }
-        mycopilot_core::AgentInputAttachmentKind::File => {
-            validate_file_type(&extension, &mime_type, bytes)
+    let mut prefix = [0u8; 64];
+    let length = file.read(&mut prefix).map_err(|e| error(e.to_string()))?;
+    file.rewind().map_err(|e| error(e.to_string()))?;
+    let prefix = &prefix[..length];
+    let valid = if attachment.kind == mycopilot_core::AgentInputAttachmentKind::Image {
+        image_type_matches(&extension, &mime, prefix)
+            && storage
+                .load_input_attachment_preview(attachment)
+                .map_err(error)?
+                .is_some()
+    } else {
+        match extension.as_str() {
+            "pdf" => mime == "application/pdf" && prefix.starts_with(b"%PDF-"),
+            "doc" => {
+                mime == "application/msword"
+                    && prefix.starts_with(b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1")
+            }
+            "docx" => {
+                mime == "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                    && is_ooxml_file(&mut file, "word/")
+            }
+            "pptx" => {
+                mime == "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+                    && is_ooxml_file(&mut file, "ppt/")
+            }
+            "xlsx" => {
+                mime == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    && is_ooxml_file(&mut file, "xl/")
+            }
+            "csv" => matches!(mime.as_str(), "text/csv" | "text/plain") && is_utf8_reader(file),
+            "tsv" => {
+                matches!(mime.as_str(), "text/tab-separated-values" | "text/plain")
+                    && is_utf8_reader(file)
+            }
+            extension if is_supported_text_extension(extension) => {
+                is_textual_mime(&mime) && is_utf8_reader(file)
+            }
+            _ => false,
         }
     };
     if valid {
@@ -956,58 +941,56 @@ fn validate_attachment_type(
     }
 }
 
-fn validate_image_type(extension: &str, mime_type: &str, bytes: &[u8]) -> bool {
-    let Ok(format) = image::guess_format(bytes) else {
-        return false;
-    };
-    let identity_matches = match format {
-        image::ImageFormat::Png => extension == "png" && mime_type == "image/png",
-        image::ImageFormat::Jpeg => {
-            matches!(extension, "jpg" | "jpeg") && mime_type == "image/jpeg"
+fn is_utf8_reader(mut input: impl std::io::Read) -> bool {
+    let mut buffer = vec![0u8; 64 * 1024 + 4];
+    let mut carried = 0usize;
+    loop {
+        let Ok(read) = input.read(&mut buffer[carried..64 * 1024]) else {
+            return false;
+        };
+        if read == 0 {
+            return carried == 0;
         }
-        image::ImageFormat::Gif => extension == "gif" && mime_type == "image/gif",
-        image::ImageFormat::WebP => extension == "webp" && mime_type == "image/webp",
-        _ => false,
-    };
-    identity_matches && image::load_from_memory_with_format(bytes, format).is_ok()
-}
-
-fn validate_file_type(extension: &str, mime_type: &str, bytes: &[u8]) -> bool {
-    match extension {
-        "pdf" => mime_type == "application/pdf" && bytes.starts_with(b"%PDF-"),
-        "doc" => {
-            mime_type == "application/msword"
-                && bytes.starts_with(b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1")
+        let length = carried + read;
+        match std::str::from_utf8(&buffer[..length]) {
+            Ok(_) => carried = 0,
+            Err(error) if error.error_len().is_none() => {
+                carried = length - error.valid_up_to();
+                if carried > 3 {
+                    return false;
+                }
+                buffer.copy_within(length - carried..length, 0);
+            }
+            Err(_) => return false,
         }
-        "docx" => {
-            mime_type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-                && is_ooxml_payload(bytes, "word/")
-        }
-        "pptx" => {
-            mime_type == "application/vnd.openxmlformats-officedocument.presentationml.presentation"
-                && is_ooxml_payload(bytes, "ppt/")
-        }
-        "xlsx" => {
-            mime_type == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                && is_ooxml_payload(bytes, "xl/")
-        }
-        "csv" => {
-            matches!(mime_type, "text/csv" | "text/plain") && std::str::from_utf8(bytes).is_ok()
-        }
-        "tsv" => {
-            matches!(mime_type, "text/tab-separated-values" | "text/plain")
-                && std::str::from_utf8(bytes).is_ok()
-        }
-        extension if is_supported_text_extension(extension) => {
-            is_textual_mime(mime_type) && std::str::from_utf8(bytes).is_ok()
-        }
-        _ => false,
     }
 }
 
-fn is_ooxml_payload(bytes: &[u8], required_prefix: &str) -> bool {
-    let reader = std::io::Cursor::new(bytes);
-    let Ok(mut archive) = zip::ZipArchive::new(reader) else {
+fn is_ooxml_file(file: &mut std::fs::File, required_prefix: &str) -> bool {
+    use std::io::{Read, Seek, SeekFrom};
+    let Ok(size) = file.seek(SeekFrom::End(0)) else {
+        return false;
+    };
+    let tail_size = size.min(65_557) as usize;
+    if file.seek(SeekFrom::End(-(tail_size as i64))).is_err() {
+        return false;
+    }
+    let mut tail = vec![0u8; tail_size];
+    if file.read_exact(&mut tail).is_err() {
+        return false;
+    }
+    let Some(offset) = tail.windows(4).rposition(|bytes| bytes == b"PK\x05\x06") else {
+        return false;
+    };
+    if offset + 22 > tail.len() {
+        return false;
+    }
+    let directory_bytes = u32::from_le_bytes(tail[offset + 12..offset + 16].try_into().unwrap());
+    // Bound only ZIP metadata, not the uploaded original or expanded document contents.
+    if directory_bytes > 8 * 1024 * 1024 || file.rewind().is_err() {
+        return false;
+    }
+    let Ok(mut archive) = zip::ZipArchive::new(file) else {
         return false;
     };
     (0..archive.len()).any(|index| {
@@ -1015,6 +998,21 @@ fn is_ooxml_payload(bytes: &[u8], required_prefix: &str) -> bool {
             .by_index(index)
             .is_ok_and(|entry| entry.name().starts_with(required_prefix))
     })
+}
+
+fn image_type_matches(extension: &str, mime_type: &str, bytes: &[u8]) -> bool {
+    let Ok(format) = image::guess_format(bytes) else {
+        return false;
+    };
+    match format {
+        image::ImageFormat::Png => extension == "png" && mime_type == "image/png",
+        image::ImageFormat::Jpeg => {
+            matches!(extension, "jpg" | "jpeg") && mime_type == "image/jpeg"
+        }
+        image::ImageFormat::Gif => extension == "gif" && mime_type == "image/gif",
+        image::ImageFormat::WebP => extension == "webp" && mime_type == "image/webp",
+        _ => false,
+    }
 }
 
 fn is_textual_mime(mime_type: &str) -> bool {
@@ -1208,6 +1206,7 @@ fn reject_without_journal_transition(
 #[cfg(test)]
 mod attachment_budget_tests {
     use super::*;
+    use base64::Engine;
 
     fn attachment(id: usize, size_bytes: u64) -> mycopilot_core::AgentInputAttachment {
         mycopilot_core::AgentInputAttachment {
@@ -1223,28 +1222,73 @@ mod attachment_budget_tests {
     }
 
     #[test]
-    fn guidance_and_run_attachment_byte_budgets_are_independent() {
-        let over_guidance = (0..5)
-            .map(|index| attachment(index, MAX_GUIDANCE_ATTACHMENT_BYTES))
-            .collect::<Vec<_>>();
-        assert_eq!(
-            validate_guidance_attachment_limits(&over_guidance, 0)
-                .unwrap_err()
-                .0,
-            AgentSteerRunRejectionCode::AttachmentLimitExceeded
-        );
+    fn managed_guidance_keeps_count_limit_without_counting_original_file_bytes() {
+        let mut large = attachment(0, 100 * 1024 * 1024);
+        large.encoding = mycopilot_core::AgentInputAttachmentEncoding::Managed;
+        assert!(validate_guidance_attachment_limits(&[large.clone()]).is_ok());
+        assert!(validate_guidance_attachment_limits(&vec![large; 9]).is_err());
+    }
 
-        let one_byte = vec![attachment(0, 1)];
-        assert_eq!(
-            validate_guidance_attachment_limits(&one_byte, MAX_RUN_GUIDANCE_ATTACHMENT_BYTES,)
-                .unwrap_err()
-                .0,
-            AgentSteerRunRejectionCode::AttachmentLimitExceeded
-        );
-        assert!(validate_guidance_attachment_limits(
-            &one_byte,
-            MAX_RUN_GUIDANCE_ATTACHMENT_BYTES - 1,
+    #[test]
+    fn streaming_utf8_validator_handles_codepoints_across_chunks_and_rejects_bad_tail() {
+        let mut bytes = vec![b'a'; 64 * 1024 - 1];
+        bytes.extend_from_slice("你好".as_bytes());
+        assert!(is_utf8_reader(std::io::Cursor::new(&bytes)));
+        bytes.push(0xff);
+        assert!(!is_utf8_reader(std::io::Cursor::new(&bytes)));
+        bytes.pop();
+        bytes.pop();
+        assert!(!is_utf8_reader(std::io::Cursor::new(&bytes)));
+    }
+
+    #[test]
+    fn managed_guidance_validates_content_type_after_reference_authentication() {
+        let temporary = tempfile::tempdir().unwrap();
+        let storage = mycopilot_core::storage::service::StorageService::open(
+            &temporary.path().join("storage.sqlite"),
         )
-        .is_ok());
+        .unwrap();
+        let imported = |id: &str, name: &str, mime: &str, bytes: &[u8]| {
+            let token = storage
+                .begin_attachment_import(mycopilot_core::AttachmentImportInput {
+                    id: id.into(),
+                    kind: mycopilot_core::AgentInputAttachmentKind::File,
+                    name: name.into(),
+                    mime_type: Some(mime.into()),
+                    size_bytes: bytes.len() as u64,
+                })
+                .unwrap();
+            storage
+                .append_attachment_import(
+                    &token,
+                    0,
+                    &base64::engine::general_purpose::STANDARD.encode(bytes),
+                )
+                .unwrap();
+            storage.finish_attachment_import(&token).unwrap()
+        };
+        let valid = imported(
+            "valid",
+            "message.txt",
+            "text/plain",
+            "跨分块的文字".as_bytes(),
+        );
+        assert!(validate_managed_guidance_type(&storage, &valid).is_ok());
+        let bad_utf8 = imported("bad-utf8", "message.txt", "text/plain", &[0xff]);
+        assert!(validate_managed_guidance_type(&storage, &bad_utf8).is_err());
+        let spoofed_pdf = imported(
+            "spoofed",
+            "document.pdf",
+            "application/pdf",
+            b"ordinary text",
+        );
+        assert!(validate_managed_guidance_type(&storage, &spoofed_pdf).is_err());
+        let spoofed_zip = imported(
+            "spoofed-zip",
+            "document.docx",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            b"PK fake archive",
+        );
+        assert!(validate_managed_guidance_type(&storage, &spoofed_zip).is_err());
     }
 }

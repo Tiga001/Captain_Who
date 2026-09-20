@@ -70,6 +70,8 @@ vi.mock('../../features/chat/chatAttachments', () => ({
   buildAgentInputAttachments: attachmentMocks.build,
   composerAttachmentFromAgentAttachment: (attachment: unknown) => attachment,
   createComposerAttachmentsFromFiles: async () => [],
+  loadComposerAttachmentImage: async () => undefined,
+  loadComposerAttachmentPreview: async () => undefined,
   createAttachmentSummary: () => '',
   selectComposerAttachments: async () => [],
   stripAttachmentSummary: (content: string) => content
@@ -509,8 +511,8 @@ it.each([false, true])(
           name: 'keep-model-context.txt',
           mimeType: 'text/plain',
           sizeBytes: 4,
-          encoding: 'base64',
-          data: 'a2VlcA=='
+          encoding: 'managed',
+          data: 'managed-test-a2VlcA=='
         }
       ],
       skills: [{ id: 'bundled:application:documents', revision: 'keep-revision' }]
@@ -877,8 +879,8 @@ it.each(WORKSPACE_COMMANDS)(
           name: 'keep-context.txt',
           mimeType: 'text/plain',
           sizeBytes: 4,
-          encoding: 'base64',
-          data: 'a2VlcA=='
+          encoding: 'managed',
+          data: 'managed-test-a2VlcA=='
         }
       ],
       skills: [{ id: 'bundled:application:documents', revision: 'keep-revision' }]
@@ -1075,8 +1077,8 @@ it('routes the send button to the command while preserving attached files and pe
         name: 'keep.txt',
         mimeType: 'text/plain',
         sizeBytes: 4,
-        encoding: 'base64',
-        data: 'a2VlcA=='
+        encoding: 'managed',
+        data: 'managed-test-a2VlcA=='
       }
     ]
   })
@@ -1140,8 +1142,8 @@ it.each([false, true])(
           name: 'keep.txt',
           mimeType: 'text/plain',
           sizeBytes: 4,
-          encoding: 'base64',
-          data: 'a2VlcA=='
+          encoding: 'managed',
+          data: 'managed-test-a2VlcA=='
         }
       ],
       skills: [{ id: 'bundled:application:documents', revision: 'keep-revision' }],

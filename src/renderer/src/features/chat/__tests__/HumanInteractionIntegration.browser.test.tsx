@@ -180,12 +180,14 @@ function Workspace({
   value,
   observer = false,
   collaborationApprovals,
+  committedDraft,
   initialAttachments = [],
   onApproveAgentAction = async () => false
 }: {
   value: ChatConversation
   observer?: boolean
   collaborationApprovals?: CollaborationApprovalsController
+  committedDraft?: Pick<ChatComposerDraft, 'message' | 'attachments' | 'updatedAt'>
   initialAttachments?: ChatComposerDraft['attachments']
   onApproveAgentAction?: () => Promise<boolean>
 }) {
@@ -214,7 +216,7 @@ function Workspace({
         <ConversationSurface
           mode="interactive"
           conversation={value}
-          composerDraft={draft}
+          composerDraft={committedDraft ? { ...draft, ...committedDraft } : draft}
           editSelectedModelAvailable
           editSelectedModelSupportsImage
           onComposerDraftChange={setDraft}
@@ -655,8 +657,8 @@ describe('Human interaction in the real conversation surface', () => {
               name: 'requirements.txt',
               sizeBytes: 10,
               mimeType: 'text/plain',
-              encoding: 'utf8',
-              data: 'keep draft'
+              encoding: 'managed',
+              data: 'managed-draft-file'
             }
           ]}
         />
@@ -725,8 +727,11 @@ describe('Human interaction in the real conversation surface', () => {
 
       // A normal user can type the same JSON. Without the Host delivery binding it is an ordinary
       // committed message and must still acknowledge/clear the Composer fast-path draft.
+      // The real owner publishes a newer consumed draft with that commit; the original stale
+      // updatedAt=0 prop must not acknowledge a draft typed after it.
       await screen.rerender(
         <Workspace
+          committedDraft={{ message: '', attachments: [], updatedAt: Date.now() + 1 }}
           value={{
             ...initial,
             messages: [
@@ -739,6 +744,7 @@ describe('Human interaction in the real conversation surface', () => {
         />
       )
       await expect.element(composer).toHaveValue('')
+      expect(screen.container.querySelector('.composer-attachment')).toBeNull()
       expect(screen.container.querySelectorAll('.human-interaction-answer')).toHaveLength(1)
     }
   )
