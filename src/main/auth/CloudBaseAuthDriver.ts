@@ -47,6 +47,21 @@ export function sdkFailure(error: unknown, fallback: AuthErrorCode): AuthFailure
   if (numericCodes.some((code) => [4001, 4002, 4042, 4045, 4022, 12].includes(code))) {
     return new AuthFailure('verificationUnavailable')
   }
+  // CloudBase can return UNKNOWN for either invalid credentials or an unavailable
+  // password-login provider. Keep the latter from being presented as a wrong password.
+  if (
+    /invalid[_\s-]?password|invalid credentials|incorrect password|user not found|账号或密码|邮箱或密码/i.test(
+      message
+    )
+  ) {
+    return new AuthFailure('credentials')
+  }
+  if (
+    /用户名密码登录|username.?password|password.?login|signInWithPassword/i.test(message) &&
+    /需确保|ensure|enable|开启|enabled|配置|configuration/i.test(message)
+  ) {
+    return new AuthFailure('unknown')
+  }
   if (numericCodes.some((code) => [3, 5, 7].includes(code))) return new AuthFailure(fallback)
   // Inspect internally, but never forward raw SDK errors (which can include request details).
   if (

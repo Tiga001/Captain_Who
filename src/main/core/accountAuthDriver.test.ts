@@ -257,4 +257,16 @@ describe('safe SDK error normalization', () => {
   ])('preserves actionable non-terminal errors: %j', ({ expected, ...error }) => {
     expect(sdkFailure(error, 'credentials').code).toBe(expected)
   })
+
+  it('does not present a password-provider configuration error as a wrong password', () => {
+    expect(
+      sdkFailure(
+        {
+          code: 'UNKNOWN',
+          message: '当前使用「用户名密码登录」，需确保控制台已开启「用户名密码登录」'
+        },
+        'credentials'
+      ).code
+    ).toBe('unknown')
+  })
 })

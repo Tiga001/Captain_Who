@@ -27,18 +27,16 @@ export const authEnglish = {
   'auth.memoryOnly': 'This session could not be saved securely. Sign in again after restarting.',
   'auth.cloudProfile': 'Cloud account',
   'auth.error.network': 'Cannot reach the account service. Check your connection and retry.',
-  'auth.error.credentials': 'Check your email and password, then try again.',
-  'auth.error.inactive': 'This account is not active. Please contact website support.',
-  'auth.error.profile':
-    'Account details are unavailable. Complete your account on the website and retry.',
-  'auth.error.storage':
-    'Cannot access the saved session. Check Keychain or local file permissions and retry.',
+  'auth.error.credentials': 'Your email or password is incorrect. Check it and try again.',
+  'auth.error.inactive': 'This account cannot sign in right now. Please contact support.',
+  'auth.error.profile': 'Account details are temporarily unavailable. Please try again later.',
+  'auth.error.storage': 'Unable to save your sign-in state. Please try again later.',
   'auth.error.code': 'The code is incorrect or expired. Check the email or request a new code.',
   'auth.error.rateLimit': 'Too many requests. Wait a minute and try again.',
   'auth.error.verificationUnavailable':
     'This login method needs additional verification or configuration. Try another method or contact support.',
   'auth.error.expired': 'Your session has expired. Please sign in again.',
-  'auth.error.unknown': 'Unable to complete the request. Please try again.'
+  'auth.error.unknown': 'Sign-in is temporarily unavailable. Please try again later.'
 } as const
 
 export const authChinese: Record<keyof typeof authEnglish, string> = {
@@ -68,14 +66,14 @@ export const authChinese: Record<keyof typeof authEnglish, string> = {
   'auth.memoryOnly': '未能安全保存本次登录，重启软件后需要重新登录。',
   'auth.cloudProfile': '云端账号',
   'auth.error.network': '无法连接账号服务，请检查网络后重试。',
-  'auth.error.credentials': '请检查邮箱和密码后重试。',
-  'auth.error.inactive': '当前账号不可用，请联系官网支持。',
-  'auth.error.profile': '暂时无法获取账户资料，请前往官网完善账号后重试。',
-  'auth.error.storage': '无法访问登录凭据，请检查钥匙串或本地文件权限后重试。',
+  'auth.error.credentials': '邮箱或密码不正确，请检查后重试。',
+  'auth.error.inactive': '此账号暂时无法登录，请联系支持。',
+  'auth.error.profile': '暂时无法读取账号资料，请稍后重试。',
+  'auth.error.storage': '无法保存登录状态，请稍后重试。',
   'auth.error.code': '验证码错误或已过期，请检查邮件或重新获取。',
   'auth.error.rateLimit': '操作太频繁，请稍等一分钟再试。',
   'auth.error.verificationUnavailable':
     '此登录方式需要额外验证或配置，请尝试另一种方式或联系支持。',
   'auth.error.expired': '登录已失效，请重新登录。',
-  'auth.error.unknown': '操作未能完成，请重试。'
+  'auth.error.unknown': '当前暂时无法完成登录，请稍后重试。'
 }
