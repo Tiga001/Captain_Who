@@ -256,6 +256,7 @@ export function useAppShellRunControls({
                   clientMessageId: submittedMessage.clientMessageId,
                   content: submittedMessage.content,
                   attachments,
+                  folderReferences: submittedMessage.folderReferences ?? [],
                   createdAt: submittedMessage.createdAt,
                   sequence: 0
                 }
@@ -266,6 +267,7 @@ export function useAppShellRunControls({
                   clientMessageId: submittedMessage.clientMessageId,
                   content: submittedMessage.content,
                   attachments,
+                  folderReferences: submittedMessage.folderReferences ?? [],
                   createdAt: submittedMessage.createdAt
                 }
           updateAssistantMessage(

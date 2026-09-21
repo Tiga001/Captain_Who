@@ -44,14 +44,18 @@ const managedAttachment = {
   encoding: 'managed' as const,
   data: 'managed-token'
 }
-function message(attachments: ChatMessage['attachments'] = [managedAttachment]): ChatMessage {
+function message(
+  attachments: ChatMessage['attachments'] = [managedAttachment],
+  folderReferences: ChatMessage['folderReferences'] = []
+): ChatMessage {
   return {
     id: 'user-1',
     role: 'user',
     content: 'Look at the photo',
     createdAt: 1,
     status: 'pending',
-    attachments
+    attachments,
+    folderReferences
   }
 }
 
@@ -63,6 +67,29 @@ beforeEach(() => {
 })
 
 describe('Managed message attachments', () => {
+  it('renders persisted folder references alongside ordinary user messages', async () => {
+    const screen = await render(
+      <ChatMessageItem
+        message={message(
+          [],
+          [
+            {
+              schemaVersion: 1,
+              id: 'folder-1',
+              name: 'Playground',
+              rootPath: '/Users/example/Playground'
+            }
+          ]
+        )}
+        showTokenUsageDetails={false}
+      />
+    )
+
+    expect(screen.container.querySelector('.composer-folder-reference__name')).toHaveTextContent(
+      'Playground'
+    )
+  })
+
   it('renders committed files as compact shared cards without a duplicate text summary', async () => {
     const fileAttachment = {
       ...managedAttachment,

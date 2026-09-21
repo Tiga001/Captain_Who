@@ -331,20 +331,30 @@ fn project_guidance_timeline(
                     client_message_id,
                     content,
                     attachments,
+                    folder_references,
                     created_at,
                     ..
-                } => timeline.push(serde_json::json!({
-                    "id": format!("user-guidance-{client_message_id}"),
-                    "type": "user_guidance",
-                    "guidanceId": guidance_id,
-                    "clientMessageId": client_message_id,
-                    "content": content,
-                    "attachments": attachments,
-                    "status": "applied",
-                    "createdAt": created_at,
-                    "sequence": sequence,
-                    "traceSequence": sequence,
-                })),
+                } => {
+                    let mut projection = serde_json::json!({
+                        "id": format!("user-guidance-{client_message_id}"),
+                        "type": "user_guidance",
+                        "guidanceId": guidance_id,
+                        "clientMessageId": client_message_id,
+                        "content": content,
+                        "attachments": attachments,
+                        "status": "applied",
+                        "createdAt": created_at,
+                        "sequence": sequence,
+                        "traceSequence": sequence,
+                    });
+                    if !folder_references.is_empty() {
+                        projection["folderReferences"] = serde_json::to_value(
+                            crate::model_folder_references(folder_references),
+                        )
+                        .map_err(|error| format!("serialize guidance folder references: {error}"))?;
+                    }
+                    timeline.push(projection);
+                }
                 ConversationTurnTraceItem::ToolCall {
                     sequence,
                     call_id,
@@ -561,9 +571,19 @@ fn project_guidance_timeline(
                 "sizeBytes": attachment.size_bytes,
             }));
         }
+        let folder_references = crate::deserialize_folder_references_from_storage(
+            &guidance.folder_references_json,
+        )
+        .map_err(|error| {
+            format!(
+                "guidance `{}` has invalid folder references: {error}",
+                guidance.guidance_id
+            )
+        })?;
+        let folder_references = crate::model_folder_references(&folder_references);
         run.insert("runId".to_string(), guidance.run_id.clone().into());
-        if guidance.status == crate::AgentGuidanceStatus::Abandoned {
-            timeline.push(serde_json::json!({
+        let mut projection = if guidance.status == crate::AgentGuidanceStatus::Abandoned {
+            serde_json::json!({
                 "id": format!("user-guidance-{}", guidance.client_message_id),
                 "type": "user_guidance",
                 "guidanceId": guidance.guidance_id,
@@ -575,9 +595,9 @@ fn project_guidance_timeline(
                 "error": guidance.terminal_reason,
                 "recoverable": true,
                 "createdAt": guidance.created_at,
-            }));
+            })
         } else {
-            timeline.push(serde_json::json!({
+            serde_json::json!({
                 "id": format!("user-guidance-{}", guidance.client_message_id),
                 "type": "user_guidance",
                 "guidanceId": guidance.guidance_id,
@@ -586,8 +606,13 @@ fn project_guidance_timeline(
                 "attachments": attachments,
                 "status": "queued",
                 "createdAt": guidance.created_at,
-            }));
+            })
+        };
+        if !folder_references.is_empty() {
+            projection["folderReferences"] = serde_json::to_value(folder_references)
+                .map_err(|error| format!("serialize guidance folder references: {error}"))?;
         }
+        timeline.push(projection);
     }
 
     if trace_is_authoritative {

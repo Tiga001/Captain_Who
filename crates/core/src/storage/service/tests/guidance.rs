@@ -55,6 +55,104 @@ fn guidance_trace(
     }
 }
 
+fn folder_reference() -> crate::AgentFolderReference {
+    crate::AgentFolderReference::new("folder-1", "Playground")
+        .unwrap()
+        .with_root_path("/Users/example/Playground")
+}
+
+#[test]
+fn loaded_trace_guidance_preserves_folder_references_for_renderer() {
+    let fixture = StorageFixture::new();
+    let service = fixture.service();
+    let conversation_id = "conversation-guidance-folder-trace";
+    let assistant_message_id = "assistant-guidance-folder-trace";
+    service
+        .save_conversation(guidance_conversation(conversation_id, assistant_message_id))
+        .unwrap();
+
+    let mut trace = guidance_trace(
+        conversation_id,
+        assistant_message_id,
+        "guidance-folder-trace",
+    );
+    if let Some(crate::ConversationTurnTraceItem::UserGuidance {
+        folder_references, ..
+    }) = trace.items.first_mut()
+    {
+        *folder_references = vec![folder_reference()];
+    }
+    service
+        .replace_conversation_turn_trace(&trace, 2, 2)
+        .unwrap();
+
+    let loaded = service.load_conversation(conversation_id).unwrap().unwrap();
+    let run: serde_json::Value = serde_json::from_str(
+        loaded.messages[0]
+            .agent_run_json
+            .as_deref()
+            .expect("trace projection should create an Agent Run"),
+    )
+    .unwrap();
+    assert_eq!(
+        run["timeline"][0]["folderReferences"],
+        serde_json::json!([{
+            "schemaVersion": 1,
+            "id": "folder-1",
+            "name": "Playground",
+            "rootPath": "/Users/example/Playground"
+        }])
+    );
+}
+
+#[test]
+fn loaded_queued_guidance_preserves_folder_references_for_renderer() {
+    let fixture = StorageFixture::new();
+    let service = fixture.service();
+    let conversation_id = "conversation-guidance-folder-queued";
+    let assistant_message_id = "assistant-guidance-folder-queued";
+    service
+        .save_conversation(guidance_conversation(conversation_id, assistant_message_id))
+        .unwrap();
+    let folder_references =
+        crate::serialize_folder_references_for_storage(&[folder_reference()]).unwrap();
+    service
+        .store_agent_run_guidance(AgentRunGuidanceRecord {
+            guidance_id: "guidance-folder-queued".to_string(),
+            client_message_id: "client-folder-queued".to_string(),
+            run_id: "run-folder-queued".to_string(),
+            conversation_id: conversation_id.to_string(),
+            assistant_message_id: assistant_message_id.to_string(),
+            content: "Inspect the folder".to_string(),
+            status: crate::AgentGuidanceStatus::Queued,
+            attachment_ids: Vec::new(),
+            folder_references_json: folder_references,
+            applied_trace_sequence: None,
+            terminal_reason: None,
+            created_at: 2,
+            updated_at: 2,
+        })
+        .unwrap();
+
+    let loaded = service.load_conversation(conversation_id).unwrap().unwrap();
+    let run: serde_json::Value = serde_json::from_str(
+        loaded.messages[0]
+            .agent_run_json
+            .as_deref()
+            .expect("queued guidance should create an Agent Run"),
+    )
+    .unwrap();
+    assert_eq!(
+        run["timeline"][0]["folderReferences"],
+        serde_json::json!([{
+            "schemaVersion": 1,
+            "id": "folder-1",
+            "name": "Playground",
+            "rootPath": "/Users/example/Playground"
+        }])
+    );
+}
+
 #[test]
 fn in_progress_trace_and_guidance_application_commit_atomically() {
     let fixture = StorageFixture::new();

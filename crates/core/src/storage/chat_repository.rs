@@ -1580,6 +1580,7 @@ fn list_messages(
             message.created_at,
             message.status,
             message.agent_run_json,
+            message.folder_references_json,
             ui_state.ui_state_json,
             usage.run_id,
             usage.input_tokens,
@@ -1608,16 +1609,16 @@ fn list_messages(
 
     let mut messages: Vec<ChatMessageRecord> = statement
         .query_map(params![conversation_id], |row| {
-            let authoritative_usage = match row.get::<_, Option<String>>(7)? {
+            let authoritative_usage = match row.get::<_, Option<String>>(8)? {
                 Some(run_id) => Some(AuthoritativeMessageUsage {
                     run_id,
-                    input_tokens: row.get(8)?,
-                    output_tokens: row.get(9)?,
-                    output_thinking_tokens: row.get(10)?,
-                    total_tokens: row.get(11)?,
-                    cached_input_tokens: row.get(12)?,
-                    cache_creation_input_tokens: row.get(13)?,
-                    billable_request_count: row.get::<_, Option<i64>>(14)?.unwrap_or_default(),
+                    input_tokens: row.get(9)?,
+                    output_tokens: row.get(10)?,
+                    output_thinking_tokens: row.get(11)?,
+                    total_tokens: row.get(12)?,
+                    cached_input_tokens: row.get(13)?,
+                    cache_creation_input_tokens: row.get(14)?,
+                    billable_request_count: row.get::<_, Option<i64>>(15)?.unwrap_or_default(),
                 }),
                 None => None,
             };
@@ -1631,9 +1632,9 @@ fn list_messages(
                 status,
                 agent_run_json,
                 created_at,
-                row.get::<_, Option<String>>(17)?,
-                row.get::<_, Option<String>>(15)?,
-                row.get::<_, Option<i64>>(16)?,
+                row.get::<_, Option<String>>(18)?,
+                row.get::<_, Option<String>>(16)?,
+                row.get::<_, Option<i64>>(17)?,
             );
             Ok(ChatMessageRecord {
                 human_interaction_response: None,
@@ -1644,8 +1645,8 @@ fn list_messages(
                 status,
                 attachments: Vec::new(),
                 agent_run_json,
-                ui_state_json: row.get(6)?,
-                folder_references_json: row.get(7)?,
+                ui_state_json: row.get(7)?,
+                folder_references_json: row.get(6)?,
             })
         })?
         .collect::<rusqlite::Result<_>>()?;

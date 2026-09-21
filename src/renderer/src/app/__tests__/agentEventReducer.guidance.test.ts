@@ -43,6 +43,14 @@ function queuedMessage(): ChatQueuedMessage {
         data: 'aGVsbG8='
       }
     ],
+    folderReferences: [
+      {
+        schemaVersion: 1,
+        id: 'folder-1',
+        name: 'Playground',
+        rootPath: '/Users/example/Playground'
+      }
+    ],
     modelId: 'model-1',
     permissionMode: 'default',
     projectId: null,
@@ -67,6 +75,14 @@ function guidanceEvent(
         name: 'notes.txt',
         mimeType: 'text/plain',
         sizeBytes: 5
+      }
+    ],
+    folderReferences: [
+      {
+        schemaVersion: 1,
+        id: 'folder-1',
+        name: 'Playground',
+        rootPath: '/Users/example/Playground'
       }
     ],
     createdAt: 10
@@ -100,6 +116,14 @@ describe('agent guidance timeline projection', () => {
             name: 'notes.txt',
             mimeType: 'text/plain',
             sizeBytes: 5
+          }
+        ],
+        folderReferences: [
+          {
+            schemaVersion: 1,
+            id: 'folder-1',
+            name: 'Playground',
+            rootPath: '/Users/example/Playground'
           }
         ]
       })

@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest'
 import {
   createComposerDraft,
   createForkComposerDraft,
+  mergeConversationMessageFromBackend,
   synchronizeComposerDraftForScope
 } from '../chatMessageFactory'
 
@@ -77,5 +78,36 @@ describe('createComposerDraft', () => {
       permissionMode: 'full',
       projectId: 'fork-project'
     })
+  })
+
+  it('retains optimistic folder references when the backend response omits them', () => {
+    const folderReferences = [
+      {
+        schemaVersion: 1,
+        id: 'folder-1',
+        name: 'Playground',
+        rootPath: '/Users/example/Playground'
+      }
+    ]
+
+    const merged = mergeConversationMessageFromBackend(
+      {
+        id: 'user-1',
+        role: 'user',
+        content: 'Inspect this folder',
+        createdAt: 1,
+        status: 'sent',
+        folderReferences
+      },
+      {
+        id: 'user-1',
+        role: 'user',
+        content: 'Inspect this folder',
+        createdAt: 1,
+        status: 'sent'
+      }
+    )
+
+    expect(merged.folderReferences).toEqual(folderReferences)
   })
 })

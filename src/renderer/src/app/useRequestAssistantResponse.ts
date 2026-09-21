@@ -277,7 +277,8 @@ export function useRequestAssistantResponse({
                     content,
                     createdAt: startOutput.userMessage.createdAt,
                     status: 'sent',
-                    attachments
+                    attachments,
+                    folderReferences
                   },
                   startOutput.userMessage
                 ),

@@ -496,6 +496,31 @@ fn conversation_metadata_listing_does_not_require_message_hydration() {
 }
 
 #[test]
+fn conversation_load_preserves_user_folder_references() {
+    let mut connection = Connection::open_in_memory().unwrap();
+    migrations::run_migrations(&connection).unwrap();
+    let mut conversation = conversation();
+    let folder_references = serde_json::json!([{
+        "schemaVersion": 1,
+        "id": "folder-1",
+        "name": "Playground",
+        "rootPath": "/Users/example/Playground"
+    }])
+    .to_string();
+    conversation.messages[0].folder_references_json = Some(folder_references.clone());
+
+    save_conversation(&mut connection, conversation).unwrap();
+
+    let loaded = get_conversation(&connection, "conversation-1")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        loaded.messages[0].folder_references_json.as_deref(),
+        Some(folder_references.as_str())
+    );
+}
+
+#[test]
 fn full_conversation_save_preserves_retained_trace_and_deletes_missing_trace() {
     let mut connection = Connection::open_in_memory().unwrap();
     migrations::run_migrations(&connection).unwrap();
@@ -1756,7 +1781,7 @@ fn message(
         created_at,
         status: status.map(ToString::to_string),
         attachments: Vec::new(),
-        folder_references_json: None,
+        folder_references_json: Some("[]".to_string()),
         agent_run_json: None,
         ui_state_json: None,
     }

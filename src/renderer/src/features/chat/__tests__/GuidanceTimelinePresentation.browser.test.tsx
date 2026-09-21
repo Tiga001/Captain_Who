@@ -77,6 +77,14 @@ function settledGuidanceMessage(collapsed: boolean): ChatMessage {
           clientMessageId: 'client-1',
           content: '第一条追加消息',
           attachments: [],
+          folderReferences: [
+            {
+              schemaVersion: 1,
+              id: 'folder-1',
+              name: 'Playground',
+              rootPath: '/Users/example/Playground'
+            }
+          ],
           status: 'applied',
           createdAt: 2,
           sequence: 1,
@@ -211,6 +219,9 @@ describe('mid-turn guidance Timeline presentation', () => {
     expect(guidanceRoot).not.toBeNull()
     const cards = guidanceRoot!.querySelector('.attachment-card-list--message')
     const bubble = guidanceRoot!.querySelector('.chat-guidance__bubble')
+    expect(guidanceRoot!.querySelector('.composer-folder-reference__name')).toHaveTextContent(
+      'Playground'
+    )
     expect(cards?.parentElement).toBe(guidanceRoot)
     expect(bubble?.querySelector('.attachment-card')).toBeNull()
     expect(bubble?.textContent).toContain('第一条追加消息')
