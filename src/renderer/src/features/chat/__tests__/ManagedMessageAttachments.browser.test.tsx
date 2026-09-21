@@ -68,10 +68,17 @@ beforeEach(() => {
 
 describe('Managed message attachments', () => {
   it('renders persisted folder references alongside ordinary user messages', async () => {
+    const fileAttachment = {
+      ...managedAttachment,
+      id: 'file-1',
+      kind: 'file' as const,
+      name: 'report.pdf',
+      mimeType: 'application/pdf'
+    }
     const screen = await render(
       <ChatMessageItem
         message={message(
-          [],
+          [fileAttachment],
           [
             {
               schemaVersion: 1,
@@ -85,9 +92,14 @@ describe('Managed message attachments', () => {
       />
     )
 
-    expect(screen.container.querySelector('.composer-folder-reference__name')).toHaveTextContent(
+    const folderCard = screen.container.querySelector<HTMLElement>('.composer-folder-reference')
+    const fileCard = screen.container.querySelector<HTMLElement>('.chat-message-attachment')
+    expect(folderCard).not.toBeNull()
+    expect(fileCard).not.toBeNull()
+    expect(folderCard?.querySelector('.composer-folder-reference__name')).toHaveTextContent(
       'Playground'
     )
+    expect(getComputedStyle(folderCard!).width).toBe(getComputedStyle(fileCard!).width)
   })
 
   it('renders committed files as compact shared cards without a duplicate text summary', async () => {

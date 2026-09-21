@@ -48,7 +48,7 @@
 .composer-folder-reference {
   display: grid;
   grid-template-columns: 16px minmax(0, 1fr) 20px;
-  width: min(260px, 100%);
+  width: 212px;
   height: 28px;
   min-width: 0;
   align-items: center;
