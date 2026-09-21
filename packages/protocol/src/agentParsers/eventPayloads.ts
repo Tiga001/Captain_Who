@@ -147,13 +147,16 @@ export function parseConversationTraceFolderReferences(
   return expectBoundedArray(value, context, 64).map((entry, index) => {
     const itemContext = `${context}[${index}]`
     const item = expectRecord(entry, itemContext)
-    expectOnlyKeys(item, ['schemaVersion', 'id', 'name'] as const, itemContext)
+    expectOnlyKeys(item, ['schemaVersion', 'id', 'name', 'rootPath'] as const, itemContext)
     const schemaVersion = expectSafeInteger(item.schemaVersion, `${itemContext}.schemaVersion`, 0)
     if (schemaVersion !== 1) throw invalidProtocolValue(itemContext, 'unsupported schemaVersion')
     return {
       schemaVersion,
       id: expectOpaqueRunId(item.id, `${itemContext}.id`),
-      name: expectBoundedString(item.name, `${itemContext}.name`, 4096)
+      name: expectBoundedString(item.name, `${itemContext}.name`, 4096),
+      ...(item.rootPath === undefined
+        ? {}
+        : { rootPath: expectBoundedString(item.rootPath, `${itemContext}.rootPath`, 32768) })
     }
   })
 }

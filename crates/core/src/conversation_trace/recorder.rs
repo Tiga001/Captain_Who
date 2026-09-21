@@ -1110,7 +1110,7 @@ pub(crate) fn render_user_guidance_content(
             .map(|reference| format!("- {} ({})", reference.model_path(), reference.name))
             .collect::<Vec<_>>()
             .join("\n");
-        sections.push(format!("Read-only folders supplied with this user guidance:\n{folder_list}"));
+        sections.push(format!("Folders supplied with this user guidance:\n{folder_list}"));
     }
     sections.join("\n\n")
 }

@@ -348,7 +348,12 @@ impl AgentService {
                 }
             };
         if let Some(library) = attachment_library.as_mut() {
-            library.folder_references = input.folder_references.clone();
+            for reference in &input.folder_references {
+                library
+                    .folder_references
+                    .retain(|existing| existing.id != reference.id);
+                library.folder_references.push(reference.clone());
+            }
         }
         let trace_attachments = persisted_attachments
             .iter()

@@ -227,9 +227,8 @@ pub(super) fn build_attachment_context(
     Ok(AttachmentContext { text, images })
 }
 
-/// Turns Host-issued folder grants into a compact model-facing capability note.  The absolute
-/// picker path is intentionally omitted; tools resolve the opaque `@folders/<id>` namespace
-/// through the run-scoped authority and enforce read-only boundaries on every access.
+/// Gives the model selected folder names and absolute paths. Host-owned grants add read access;
+/// exposing a path does not change the run's global write permission.
 fn folder_reference_context(library: Option<&AgentAttachmentLibraryContext>) -> String {
     let Some(library) = library else {
         return String::new();
@@ -238,8 +237,8 @@ fn folder_reference_context(library: Option<&AgentAttachmentLibraryContext>) -> 
         return String::new();
     }
     let mut lines = vec![
-        "已附加以下只读文件夹引用（不会自动上传内容）：".to_string(),
-        "请先使用 workspace_map 或 search_files 浏览，再按需用 read_file 读取文件；不要写入这些文件夹。".to_string(),
+        "已附加以下文件夹引用（不会自动上传内容）：".to_string(),
+        "请先使用 workspace_map 或 search_files 浏览，再按需用 read_file 读取文件；写入仍遵守当前全局权限。".to_string(),
     ];
     for reference in &library.folder_references {
         lines.push(format!("- {} ({})", reference.model_path(), reference.name));
@@ -776,6 +775,28 @@ mod tests {
         assert!(context.text.contains(marker));
         assert!(!context.text.contains("缺少 conversationId"));
         assert!(!context.text.contains("缺少 runId"));
+    }
+
+    #[test]
+    fn folder_context_uses_name_and_absolute_path_without_internal_id() {
+        let reference = crate::AgentFolderReference::new("folder-opaque-123", "科研")
+            .unwrap()
+            .with_root_path("/Users/alice/科研");
+        let library = AgentAttachmentLibraryContext {
+            root_path: None,
+            conversation_id: None,
+            project_id: None,
+            conversation_attachments: Vec::new(),
+            project_attachments: Vec::new(),
+            folder_references: vec![reference],
+        };
+
+        let context = folder_reference_context(Some(&library));
+
+        assert!(context.contains("科研"));
+        assert!(context.contains("/Users/alice/科研"));
+        assert!(!context.contains("folder-opaque-123"));
+        assert!(!context.contains("@folders/"));
     }
 
     #[test]

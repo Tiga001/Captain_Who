@@ -24,7 +24,7 @@ export function ComposerFolderReferences({
           className="composer-folder-reference"
           data-folder-reference-id={folder.id}
           key={folder.id}
-          title={folder.name}
+          title={folder.rootPath ?? folder.name}
         >
           <Folder aria-hidden="true" className="composer-folder-reference__icon" />
           <span className="composer-folder-reference__name">{folder.name}</span>

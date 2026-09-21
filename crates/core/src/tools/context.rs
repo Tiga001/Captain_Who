@@ -803,8 +803,8 @@ impl ToolExecutionContext {
         self.check_cancelled()?;
         let locator = ResourceLocator::parse(input_path)
             .map_err(|error| AgentError::new(error.to_string()))?;
-        if let ResourceLocator::Folder(value) = &locator {
-            return self.resolve_folder_path(value);
+        if self.is_selected_folder_path(input_path) {
+            return self.resolve_folder_path(input_path);
         }
         if locator.is_virtual() {
             if matches!(locator, ResourceLocator::OpaqueBrowserArtifact(_)) {
@@ -887,6 +887,9 @@ impl ToolExecutionContext {
         self.check_cancelled()?;
         let locator = ResourceLocator::parse(input_path)
             .map_err(|error| AgentError::new(error.to_string()))?;
+        if self.is_selected_folder_path(input_path) {
+            return self.resolve_folder_path(input_path);
+        }
         if locator.is_virtual() {
             // Managed logical resources already resolve through their own exact, no-symlink
             // ownership checks. Keep that authority path unchanged.
@@ -951,17 +954,26 @@ impl ToolExecutionContext {
         self.check_cancelled()?;
         let locator = ResourceLocator::parse(input_path)
             .map_err(|error| AgentError::new(error.to_string()))?;
-        if let ResourceLocator::Folder(value) = &locator {
-            let authority = self.folder_authority_for(value)?;
-            let root = authority.canonical_root();
+        if self.is_selected_folder_path(input_path) {
+            let authority = self.folder_authority_for(input_path)?;
+            authority.validate().map_err(AgentError::new)?;
             let relative = file_path
-                .strip_prefix(root)
+                .strip_prefix(authority.canonical_root())
                 .map_err(|_| AgentError::new("路径必须位于已选择的文件夹内。"))?;
-            let suffix = relative.to_string_lossy().replace('\\', "/");
-            return Ok(if suffix.is_empty() {
-                authority.reference().model_path()
+            // Preserve the selected absolute spelling so every returned path can be read again,
+            // including macOS paths whose ancestors have a different canonical spelling.
+            let root = authority
+                .reference()
+                .root_path
+                .as_deref()
+                .ok_or_else(|| AgentError::new("文件夹路径不可用。"))?;
+            return Ok(if relative.as_os_str().is_empty() {
+                root.to_string()
             } else {
-                format!("{}/{}", authority.reference().model_path(), suffix)
+                Path::new(root)
+                    .join(relative)
+                    .to_string_lossy()
+                    .into_owned()
             });
         }
         if locator.is_virtual() {
@@ -1015,42 +1027,64 @@ impl ToolExecutionContext {
         .with_workspace(self.workspace_context())
     }
 
-    fn folder_authority_for(&self, model_path: &str) -> AgentResult<&crate::AgentFolderAuthority> {
-        // All callers have already classified this as a Folder locator.
-        let id = model_path
-            .strip_prefix("@folders/")
-            .and_then(|rest| rest.split('/').next())
-            .ok_or_else(|| AgentError::new("文件夹引用无效。"))?;
-        let authority = self
-            .folder_authorities
-            .iter()
-            .find(|authority| authority.reference().id == id)
-            .ok_or_else(|| AgentError::new("文件夹引用当前不可用，请重新附加文件夹。"))?;
-        if matches!(
-            authority.reference().status,
-            Some(crate::AgentFolderStatus::Unavailable)
-        ) {
-            return Err(AgentError::new("文件夹引用当前不可用，请重新附加文件夹。"));
+    /// Match the lexical selected root before resolving anything, including unavailable roots.
+    /// This prevents a stale selection from falling through to broader filesystem permissions.
+    pub(super) fn selected_folder_reference(
+        &self,
+        path: &str,
+    ) -> Option<&crate::AgentFolderReference> {
+        let path = normalize_absolute_path(Path::new(path.trim()))?;
+        if !path.is_absolute() {
+            return None;
         }
-        Ok(authority)
+        self.attachment_library
+            .as_ref()?
+            .folder_references
+            .iter()
+            .filter(|reference| {
+                reference.root_path.as_deref().is_some_and(|root| {
+                    normalize_absolute_path(Path::new(root))
+                        .is_some_and(|root| path.starts_with(root))
+                })
+            })
+            .max_by_key(|reference| {
+                normalize_absolute_path(Path::new(reference.root_path.as_deref().unwrap()))
+                    .map_or(0, |root| root.components().count())
+            })
     }
 
-    fn resolve_folder_path(&self, model_path: &str) -> AgentResult<PathBuf> {
-        let authority = self.folder_authority_for(model_path)?;
-        let relative = model_path
-            .strip_prefix(&authority.reference().model_path())
-            .unwrap_or_default()
-            .trim_start_matches('/');
+    pub(super) fn is_selected_folder_path(&self, path: &str) -> bool {
+        self.selected_folder_reference(path).is_some()
+    }
+
+    fn folder_authority_for(&self, path: &str) -> AgentResult<&crate::AgentFolderAuthority> {
+        let reference = self
+            .selected_folder_reference(path)
+            .ok_or_else(|| AgentError::new("路径不属于已附加的文件夹。"))?;
+        self.folder_authorities
+            .iter()
+            .find(|authority| authority.reference().id == reference.id)
+            .ok_or_else(|| AgentError::new("文件夹当前不可用。"))
+    }
+
+    fn resolve_folder_path(&self, path: &str) -> AgentResult<PathBuf> {
+        let authority = self.folder_authority_for(path)?;
+        let root = authority
+            .reference()
+            .root_path
+            .as_deref()
+            .ok_or_else(|| AgentError::new("文件夹路径不可用。"))?;
+        let relative = Path::new(path.trim())
+            .strip_prefix(root)
+            .map_err(|_| AgentError::new("路径必须位于已选择的文件夹内。"))?;
         authority
-            .resolve_relative(relative)
+            .resolve_relative(&relative.to_string_lossy())
             .map_err(AgentError::new)
     }
 
-    pub(super) fn validate_folder_path(&self, model_path: &str) -> AgentResult<()> {
-        let locator = ResourceLocator::parse(model_path)
-            .map_err(|error| AgentError::new(error.to_string()))?;
-        if let ResourceLocator::Folder(value) = locator {
-            self.folder_authority_for(&value)?
+    pub(super) fn validate_folder_path(&self, path: &str) -> AgentResult<()> {
+        if self.is_selected_folder_path(path) {
+            self.folder_authority_for(path)?
                 .validate()
                 .map_err(AgentError::new)?;
         }
@@ -1111,6 +1145,27 @@ fn canonicalize_parent_preserving_leaf(candidate: &Path) -> AgentResult<PathBuf>
     std::fs::symlink_metadata(&resolved)
         .map_err(|error| AgentError::new(format!("路径不可访问：{error}")))?;
     Ok(resolved)
+}
+
+fn normalize_absolute_path(path: &Path) -> Option<PathBuf> {
+    if !path.is_absolute() {
+        return None;
+    }
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            std::path::Component::RootDir => normalized.push(component.as_os_str()),
+            std::path::Component::CurDir => {}
+            std::path::Component::Normal(part) => normalized.push(part),
+            std::path::Component::ParentDir => {
+                if !normalized.pop() {
+                    return None;
+                }
+            }
+        }
+    }
+    Some(normalized)
 }
 
 fn attachment_id_from_path(input_path: &str) -> AgentResult<String> {

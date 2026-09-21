@@ -474,6 +474,41 @@ fn rejects_cwd_outside_workspace() {
 }
 
 #[test]
+fn selected_folder_cwd_follows_global_write_permission() {
+    let folder = tempfile::tempdir().unwrap();
+    let root = folder.path().canonicalize().unwrap();
+    let reference = crate::AgentFolderReference::new("picked", "picked")
+        .unwrap()
+        .with_root_path(root.to_string_lossy().into_owned());
+    let context = ToolExecutionContext::from_run_context(Some(&AgentRunContext {
+        collaboration_identity: None,
+        conversation_id: None,
+        project_id: None,
+        workspace: None,
+        attachment_library: Some(AgentAttachmentLibraryContext {
+            root_path: None,
+            conversation_id: None,
+            project_id: None,
+            conversation_attachments: Vec::new(),
+            project_attachments: Vec::new(),
+            folder_references: vec![reference],
+        }),
+        permissions: AgentPermissions {
+            read: AgentReadPermission::All,
+            write: AgentWritePermission::All,
+            ..Default::default()
+        },
+    }));
+
+    assert_eq!(
+        sanitize_cwd(&context, Some(root.to_string_lossy().into_owned()))
+            .unwrap()
+            .as_deref(),
+        Some(root.to_string_lossy().as_ref())
+    );
+}
+
+#[test]
 fn no_workspace_requires_explicit_cwd_and_accepts_alias_with_full_write() {
     let context = ToolExecutionContext::from_run_context(Some(&AgentRunContext {
         collaboration_identity: None,

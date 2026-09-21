@@ -879,7 +879,12 @@ fn prepare_conversation_turn_from_source(
     }
     let mut attachment_library = storage
         .build_attachment_library_context(&conversation_id, resolved_project_id.as_deref())?;
-    attachment_library.folder_references = input.folder_references.clone();
+    for reference in &input.folder_references {
+        attachment_library
+            .folder_references
+            .retain(|existing| existing.id != reference.id);
+        attachment_library.folder_references.push(reference.clone());
+    }
     let model_capabilities = ModelCapabilities {
         image_input: model.supports_image,
     };

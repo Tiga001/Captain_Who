@@ -195,7 +195,8 @@ pub struct AgentConversationTurnInput {
     pub content: String,
     #[serde(default)]
     pub attachments: Vec<AgentInputAttachment>,
-    /// Host-issued read-only folder references.  Contents are resolved lazily by Core tools.
+    /// Host-issued folder references. Selected roots receive read access; writes continue to
+    /// follow the run's global permission. Contents are resolved lazily by Core tools.
     #[serde(default)]
     pub folder_references: Vec<mycopilot_core::AgentFolderReference>,
     #[serde(default)]

@@ -1,8 +1,9 @@
-//! Host-owned, read-only references to folders selected in the composer.
+//! Host-owned references to folders selected in the composer.
 //!
 //! A folder reference is deliberately different from an attachment: selecting a folder does
 //! not recursively upload its contents.  The Host keeps the authority (the canonical root and
-//! its directory identity) and exposes only the opaque id/name pair to model-facing protocol.
+//! its directory identity). The model sees the folder name and absolute path; selected folders
+//! receive read access, while writes continue to follow the run's global permission.
 //! Callers resolve a relative path on demand through [`AgentFolderAuthority`].
 
 use crate::file_change::FileChangeDirectoryIdentity;
@@ -14,14 +15,15 @@ use std::path::{Component, Path, PathBuf};
 pub const AGENT_FOLDER_REFERENCE_SCHEMA_VERSION: u32 = 1;
 pub const MAX_AGENT_FOLDER_REFERENCE_ID_CHARS: usize = 256;
 pub const MAX_AGENT_FOLDER_REFERENCE_NAME_CHARS: usize = 512;
+pub const MAX_AGENT_FOLDER_REFERENCE_PATH_CHARS: usize = 32 * 1024;
 pub const MAX_AGENT_FOLDER_LIST_ENTRIES: usize = 2_048;
 pub const MAX_AGENT_FOLDER_LIST_DEPTH: usize = 16;
 pub const MAX_AGENT_FOLDER_FILE_BYTES: u64 = 64 * 1024 * 1024;
 
 /// Durable identity for one folder selected by the user.
 ///
-/// The optional path is Host/storage metadata. Model projections use only the opaque id/name and
-/// may copy this value when forking a task even when the folder is currently unavailable.
+/// Model projections include the name and absolute path. The internal identity
+/// is preserved when forking a task even when the folder is currently unavailable.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgentFolderReference {
@@ -29,9 +31,8 @@ pub struct AgentFolderReference {
     pub schema_version: u32,
     pub id: String,
     pub name: String,
-    /// Host-only picker path. It is accepted on inbound requests and stored by the Host, but is
-    /// deliberately omitted from model-facing projections.
-    #[serde(default, skip_serializing)]
+    /// User-selected absolute path, visible to the model and used for ordinary tool calls.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub root_path: Option<String>,
     /// Frozen directory identity captured by Host when the reference is granted. This is kept
     /// with durable Host metadata but never included in model-facing projections.
@@ -75,12 +76,22 @@ impl AgentFolderReference {
         if self.id.contains('/') || self.id.contains('\\') || self.id == "." || self.id == ".." {
             return Err("Agent folder reference id must be an opaque single segment".into());
         }
+        if let Some(root_path) = self.root_path.as_deref() {
+            validate_text(
+                root_path,
+                MAX_AGENT_FOLDER_REFERENCE_PATH_CHARS,
+                "root_path",
+            )?;
+            if !Path::new(root_path).is_absolute() {
+                return Err("Agent folder reference root_path must be absolute".into());
+            }
+        }
         Ok(())
     }
 
-    /// Namespace used by model-facing tools.  The real root path is intentionally absent.
+    /// Human-readable location used by model-facing tools; never expose the internal id.
     pub fn model_path(&self) -> String {
-        format!("@folders/{}", self.id)
+        self.root_path.clone().unwrap_or_else(|| self.name.clone())
     }
 
     pub fn with_root_path(mut self, root_path: impl Into<String>) -> Self {
@@ -109,13 +120,15 @@ impl AgentFolderReference {
         }
     }
 
-    /// Returns the opaque form allowed in model context and renderer protocol events.
+    /// Returns the renderer/model-event form: display name plus absolute path, while preserving
+    /// the stable internal id needed to reconcile queued guidance and persisted UI items. Host-only
+    /// directory identity and availability metadata never leave the Host.
     pub fn model_projection(&self) -> Self {
         Self {
             schema_version: self.schema_version,
             id: self.id.clone(),
             name: self.name.clone(),
-            root_path: None,
+            root_path: self.root_path.clone(),
             root_identity: None,
             status: None,
         }
@@ -151,7 +164,7 @@ struct StoredFolderReference {
 }
 
 /// Serializes folder references for local storage. This is intentionally separate from the
-/// normal serde projection, which must not expose Host filesystem paths to model-facing events.
+/// model projection, which excludes Host-only directory identity metadata.
 pub fn serialize_folder_references_for_storage(
     references: &[AgentFolderReference],
 ) -> Result<String, String> {
@@ -452,13 +465,13 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
-    fn reference_is_path_free_and_model_safe() {
+    fn reference_exposes_path_but_keeps_identity_host_owned() {
         let reference = AgentFolderReference::new("folder-1", "Documents")
             .unwrap()
             .with_root_path("/private/Documents");
         let json = serde_json::to_value(&reference).unwrap();
         assert_eq!(json["id"], "folder-1");
-        assert!(json.get("rootPath").is_none());
+        assert_eq!(json["rootPath"], "/private/Documents");
         let storage =
             serialize_folder_references_for_storage(std::slice::from_ref(&reference)).unwrap();
         assert!(storage.contains("/private/Documents"));
@@ -466,7 +479,7 @@ mod tests {
             deserialize_folder_references_from_storage(&storage).unwrap(),
             vec![reference.clone()]
         );
-        assert_eq!(reference.model_path(), "@folders/folder-1");
+        assert_eq!(reference.model_path(), "/private/Documents");
     }
 
     #[test]

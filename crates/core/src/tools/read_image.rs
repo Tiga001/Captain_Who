@@ -30,14 +30,14 @@ impl AgentTool for ReadImageTool {
     fn definition(&self) -> AgentToolDefinition {
         AgentToolDefinition {
             name: "read_image".to_string(),
-            description: "Read one image and return it as visual input for the model. Pass exactly one path copied from a tool result or supplied by the user. Supported values include workspace-relative paths, selected read-only folder paths at @folders/<id>/relative/path, absolute paths, system aliases, @attachments/... paths, browser-download:... references, image-artifact://... URIs, and revision-bound skill://... URIs. Authorization and integrity checks are enforced by the host.".to_string(),
+            description: "Read one image and return it as visual input for the model. Pass exactly one path copied from a tool result or supplied by the user. Supported values include workspace-relative paths, selected folder absolute paths, absolute paths, system aliases, @attachments/... paths, browser-download:... references, image-artifact://... URIs, and revision-bound skill://... URIs. Authorization and integrity checks are enforced by the host.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "path": {
                         "type": "string",
                         "minLength": 1,
-                        "description": "The image location exactly as returned or provided: a workspace-relative path, absolute path, system alias, @attachments/... path, image-artifact://... URI, or revision-bound skill://... URI."
+                        "description": "The image location exactly as returned or provided: a workspace-relative path, selected folder absolute path, absolute path, system alias, @attachments/... path, image-artifact://... URI, or revision-bound skill://... URI."
                     }
                 },
                 "required": ["path"],
@@ -69,7 +69,25 @@ impl AgentTool for ReadImageTool {
         }
         let args: ReadImageArgs = serde_json::from_value(args)
             .map_err(|error| AgentError::new(format!("read_image 参数无效：{error}")))?;
-        let source = args.source(context)?;
+        let mut source = args.source(context)?;
+        let selected_folder = context.is_selected_folder_path(&args.path);
+        let mut snapshot_permissions = context.permissions();
+        let selected_folder_path = if selected_folder {
+            Some(context.resolve_existing_path(&args.path)?)
+        } else {
+            None
+        };
+        if selected_folder {
+            // Authorize this exact path through the frozen folder grant before snapshotting.
+            // This local snapshot permission does not change command or write permissions.
+            let path = selected_folder_path
+                .as_deref()
+                .expect("selected folder path");
+            source = AgentFileInputRef::External {
+                path: path.to_string_lossy().into_owned(),
+            };
+            snapshot_permissions.read = crate::AgentReadPermission::All;
+        }
         let file_inputs = AgentFileInputExecutionContext::new(
             context.attachment_library().cloned(),
             context.skill_resources_optional(),
@@ -81,12 +99,20 @@ impl AgentTool for ReadImageTool {
         let workspace_root = context.workspace_root_optional()?;
         let snapshot = snapshot_verified_agent_file_input(
             workspace_root.as_deref(),
-            context.permissions(),
+            snapshot_permissions,
             &file_inputs,
             &source,
             Some(&context.cancellation_token()),
         )
         .map_err(AgentError::from)?;
+        context.validate_folder_path(&args.path)?;
+        if let Some(expected_path) = selected_folder_path {
+            if context.resolve_existing_path(&args.path)? != expected_path {
+                return Err(AgentError::new(
+                    "读取期间文件夹文件身份已变化，请重新读取。",
+                ));
+            }
+        }
         context.check_cancelled()?;
         if snapshot.size_bytes == 0 {
             return Err(AgentError::new("图片文件为空。"));
@@ -126,7 +152,11 @@ impl AgentTool for ReadImageTool {
         let data_base64 =
             base64::engine::general_purpose::STANDARD.encode(prepared.bytes.as_slice());
         context.check_cancelled()?;
-        let display_path = display_source(&snapshot.source);
+        let display_path = if selected_folder {
+            args.path.trim().to_string()
+        } else {
+            display_source(&snapshot.source).to_string()
+        };
         reservation.commit();
 
         let mut result = json!({

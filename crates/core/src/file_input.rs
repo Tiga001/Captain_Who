@@ -206,11 +206,6 @@ pub(crate) fn agent_file_input_ref_from_model_path(
         AgentFileInputError::new(ERROR_INVALID_REQUEST, "changeRequest", error.to_string())
     })?;
     match locator {
-        ResourceLocator::Folder(_) => Err(AgentFileInputError::new(
-            ERROR_SNAPSHOT_UNAVAILABLE,
-            "retry",
-            "文件夹引用需要由当前工具上下文解析，不能作为命令文件输入直接挂载。",
-        )),
         ResourceLocator::Attachment(read_path) => Ok(AgentFileInputRef::Attachment { read_path }),
         ResourceLocator::BrowserDownload(reference) => {
             let storage = context.storage.as_ref().ok_or_else(|| {

@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { lstat, open } from 'node:fs/promises'
+import { lstat, open, realpath } from 'node:fs/promises'
 import { basename, extname } from 'node:path'
 import { BrowserWindow, dialog } from 'electron'
 import { HOST_CHANNELS } from '@mycopilot/host-api'
@@ -225,16 +225,18 @@ export class AttachmentDialogBridge {
     const seen = new Set<string>()
     const folders: AgentFolderReference[] = []
     for (const input of paths) {
-      if (typeof input !== 'string' || input.length === 0 || seen.has(input)) continue
-      seen.add(input)
+      if (typeof input !== 'string' || input.length === 0) continue
       try {
-        const info = await lstat(input)
+        const canonicalPath = await realpath(input)
+        if (seen.has(canonicalPath)) continue
+        const info = await lstat(canonicalPath)
         if (!info.isDirectory() || info.isSymbolicLink()) continue
+        seen.add(canonicalPath)
         folders.push({
           schemaVersion: 1,
           id: `folder-${randomUUID()}`,
-          name: basename(input),
-          rootPath: input
+          name: basename(canonicalPath),
+          rootPath: canonicalPath
         })
       } catch {
         // A dropped path may disappear before IPC reaches the main process.

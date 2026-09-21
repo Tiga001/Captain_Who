@@ -26,7 +26,7 @@ export interface AgentFolderReference {
   schemaVersion: number
   id: string
   name: string
-  /** Host-private canonical root; model projections must never expose this value. */
+  /** Selected absolute folder path, visible to the model for ordinary tool calls. */
   rootPath?: string
   /** Host-only durable identity; omitted from model-facing projections. */
   rootIdentity?: AgentFolderIdentity

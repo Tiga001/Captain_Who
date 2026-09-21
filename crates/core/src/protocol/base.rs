@@ -126,8 +126,9 @@ pub struct AgentChatInput {
     pub tool_continuation: Option<AgentToolContinuation>,
     #[serde(default)]
     pub attachments: Vec<AgentInputAttachment>,
-    /// Host-issued read-only folder references selected for this turn.  Folder contents are
-    /// resolved lazily by tools; this list never contains recursive file bytes.
+    /// Host-issued folder references selected for this turn. Selected roots receive read access;
+    /// writes continue to follow the run's global permission. Contents are resolved lazily by
+    /// tools; this list never contains recursive file bytes.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub folder_references: Vec<crate::AgentFolderReference>,
     /// Host-hydrated immutable historical image references. These are input bytes only;

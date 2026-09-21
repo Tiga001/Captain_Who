@@ -84,6 +84,13 @@ impl Workspace {
     }
 
     fn folder_context(&self) -> ToolExecutionContext {
+        self.folder_context_with_permissions(AgentPermissions::default())
+    }
+
+    fn folder_context_with_permissions(
+        &self,
+        permissions: AgentPermissions,
+    ) -> ToolExecutionContext {
         let reference = AgentFolderReference::new("picked", "docs")
             .unwrap()
             .with_root_path(self.docs.to_string_lossy().into_owned());
@@ -98,8 +105,8 @@ impl Workspace {
         ToolExecutionContext::from_run_context(Some(&AgentRunContext {
             conversation_id: Some("conversation-multi".to_string()),
             project_id: Some("project-multi".to_string()),
-            workspace: Some(self.workspace.clone()),
-            permissions: AgentPermissions::default(),
+            workspace: None,
+            permissions,
             attachment_library: Some(attachment_library),
             collaboration_identity: None,
         }))
@@ -179,30 +186,87 @@ fn selected_folder_is_readable_and_listed_without_all_path_permission() {
     fs::create_dir(fixture.docs.join("src")).unwrap();
     fs::write(fixture.docs.join("src/main.rs"), "fn main() {}\n").unwrap();
     let context = fixture.folder_context();
+    let root_path = fixture.docs.to_string_lossy().to_string();
+    let file_path = fixture
+        .docs
+        .join("src/main.rs")
+        .to_string_lossy()
+        .to_string();
 
-    let read = fixture.read(&context, "@folders/picked/src/main.rs", "folder-read");
+    let read = fixture.read(&context, file_path.as_str(), "folder-read");
     assert_eq!(read["content"], "fn main() {}\n");
-    assert_eq!(read["path"], "@folders/picked/src/main.rs");
+    assert_eq!(read["path"], file_path.as_str());
 
     let files = super::search_files::SearchFilesTool
-        .execute(&context, json!({"query":"main", "path":"@folders/picked"}))
+        .execute(&context, json!({"query":"main", "path":root_path.as_str()}))
         .unwrap();
-    assert_eq!(files["matches"][0]["path"], "@folders/picked/src/main.rs");
+    assert_eq!(files["matches"][0]["path"], file_path.as_str());
 
     let map = super::workspace_map::WorkspaceMapTool
-        .execute(&context, json!({"focusPath":"@folders/picked"}))
+        .execute(&context, json!({"focusPath":root_path.as_str()}))
         .unwrap();
-    assert_eq!(map["workspace"]["focusPath"], "@folders/picked");
+    assert_eq!(map["workspace"]["focusPath"], root_path.as_str());
     assert!(map["tree"]
         .as_array()
         .unwrap()
         .iter()
-        .any(|entry| entry["path"] == "@folders/picked/src/main.rs"));
+        .any(|entry| entry["path"] == file_path.as_str()));
 
-    // A folder reference grants lazy read authority only; write planning must still reject the
-    // virtual namespace even when the normal composer write permission is enabled.
+    // The default permission fixture denies writes, so a missing path cannot be planned here.
     assert!(context
-        .resolve_missing_file_observation_target("@folders/picked/src/new.rs")
+        .resolve_missing_file_observation_target(fixture.docs.join("src/new.rs").to_str().unwrap())
+        .is_err());
+}
+
+#[test]
+fn selected_folder_absolute_paths_follow_global_write_permission() {
+    let fixture = Workspace::new();
+    fs::write(fixture.docs.join("README.md"), "auxiliary\n").unwrap();
+    let context = fixture.folder_context_with_permissions(AgentPermissions {
+        read: crate::AgentReadPermission::All,
+        write: crate::AgentWritePermission::All,
+        ..AgentPermissions::default()
+    });
+    let path = fixture
+        .docs
+        .join("README.md")
+        .to_string_lossy()
+        .into_owned();
+    let new_path = fixture.docs.join("new.rs").to_string_lossy().into_owned();
+
+    assert!(context.is_selected_folder_path(&path));
+    assert!(context
+        .resolve_missing_file_observation_target(&new_path)
+        .is_ok());
+
+    let call = AgentToolCall {
+        id: "selected-folder-write".to_string(),
+        tool: "apply_patch".to_string(),
+        args: json!({
+            "request": {
+                "action": "apply",
+                "operation": "create",
+                "filePath": new_path,
+                "content": "created\n"
+            }
+        }),
+        approval_status: AgentApprovalStatus::Required,
+        reason: None,
+    };
+    let AgentProposedAction::FileChange { file_change } = ToolRegistry::defaults_with_search(None)
+        .proposed_action(&context, &call)
+        .unwrap()
+    else {
+        panic!("expected FileChange")
+    };
+    assert_eq!(file_change.file_path, new_path);
+
+    let workspace_only = fixture.folder_context_with_permissions(AgentPermissions {
+        write: crate::AgentWritePermission::WorkspaceOnly,
+        ..AgentPermissions::default()
+    });
+    assert!(workspace_only
+        .resolve_missing_file_observation_target(&new_path)
         .is_err());
 }
 

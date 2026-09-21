@@ -1,4 +1,4 @@
-import { mkdtemp, open, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, open, realpath, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { EventEmitter } from 'node:events'
@@ -90,6 +90,23 @@ it('imports a file larger than the former tool ceiling using bounded chunks and 
     requestId: 'pick-1',
     status: 'complete'
   })
+})
+
+it('canonicalizes selected folder references before exposing their model path', async () => {
+  const selected = join(directory, 'selected')
+  const alias = join(directory, 'alias')
+  await mkdir(selected)
+  await symlink(selected, alias)
+  showOpenDialog.mockResolvedValue({ canceled: false, filePaths: [alias] })
+
+  const f = fixture()
+  const result = await f.bridge.selectInputFolders(f.event)
+  expect(result).toEqual([
+    expect.objectContaining({
+      name: 'selected',
+      rootPath: await realpath(selected)
+    })
+  ])
 })
 
 it('cancels the import between chunks without publishing a ready attachment', async () => {
