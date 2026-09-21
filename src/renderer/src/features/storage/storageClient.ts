@@ -803,38 +803,71 @@ function parseDraftAttachments(value: string): AgentInputAttachment[] {
 function parseFolderReferences(value: string | null | undefined): AgentFolderReference[] {
   if (value == null || value === '') return []
   return parseDraftArray(value).map((candidate) => {
-    const rootIdentity = isUnknownRecord(candidate) ? candidate.rootIdentity : undefined
-    const validRootIdentity =
-      rootIdentity === undefined ||
-      (isExactRecord(rootIdentity, ['kind', 'schemaVersion', 'device', 'inode']) &&
-        rootIdentity.kind === 'unix' &&
-        rootIdentity.schemaVersion === 1 &&
-        Number.isSafeInteger(rootIdentity.device) &&
-        Number.isSafeInteger(rootIdentity.inode)) ||
-      (isExactRecord(rootIdentity, ['kind', 'schemaVersion', 'volumeSerialNumber', 'fileId']) &&
-        rootIdentity.kind === 'windows' &&
-        rootIdentity.schemaVersion === 1 &&
-        Number.isSafeInteger(rootIdentity.volumeSerialNumber) &&
-        typeof rootIdentity.fileId === 'string')
+    const rootIdentity = normalizeStoredFolderRootIdentity(
+      isUnknownRecord(candidate) ? candidate.rootIdentity : undefined
+    )
+    const normalizedCandidate = isUnknownRecord(candidate)
+      ? { ...candidate, ...(rootIdentity === undefined ? {} : { rootIdentity }) }
+      : candidate
     if (
       !isExactRecord(
-        candidate,
+        normalizedCandidate,
         ['schemaVersion', 'id', 'name'],
         ['rootPath', 'rootIdentity', 'status']
       ) ||
-      candidate.schemaVersion !== 1 ||
-      typeof candidate.id !== 'string' ||
-      typeof candidate.name !== 'string' ||
-      (candidate.rootPath !== undefined && typeof candidate.rootPath !== 'string') ||
-      !validRootIdentity ||
-      (candidate.status !== undefined &&
-        candidate.status !== 'available' &&
-        candidate.status !== 'unavailable')
+      normalizedCandidate.schemaVersion !== 1 ||
+      typeof normalizedCandidate.id !== 'string' ||
+      typeof normalizedCandidate.name !== 'string' ||
+      (normalizedCandidate.rootPath !== undefined &&
+        typeof normalizedCandidate.rootPath !== 'string') ||
+      !isValidStoredFolderRootIdentity(rootIdentity) ||
+      (normalizedCandidate.status !== undefined &&
+        normalizedCandidate.status !== 'available' &&
+        normalizedCandidate.status !== 'unavailable')
     ) {
       throw new Error(COMPOSER_DRAFT_CORRUPTION_ERROR)
     }
-    return candidate as unknown as AgentFolderReference
+    return normalizedCandidate as unknown as AgentFolderReference
   })
+}
+
+function normalizeStoredFolderRootIdentity(value: unknown): unknown {
+  if (!isUnknownRecord(value)) return value
+  if (value.schemaVersion !== undefined) return value
+  if (typeof value.schema_version !== 'number') return value
+  if (value.kind === 'unix') {
+    return {
+      kind: value.kind,
+      schemaVersion: value.schema_version,
+      device: value.device,
+      inode: value.inode
+    }
+  }
+  if (value.kind === 'windows') {
+    return {
+      kind: value.kind,
+      schemaVersion: value.schema_version,
+      volumeSerialNumber: value.volume_serial_number,
+      fileId: value.file_id
+    }
+  }
+  return value
+}
+
+function isValidStoredFolderRootIdentity(value: unknown): boolean {
+  return (
+    value === undefined ||
+    (isExactRecord(value, ['kind', 'schemaVersion', 'device', 'inode']) &&
+      value.kind === 'unix' &&
+      value.schemaVersion === 1 &&
+      Number.isSafeInteger(value.device) &&
+      Number.isSafeInteger(value.inode)) ||
+    (isExactRecord(value, ['kind', 'schemaVersion', 'volumeSerialNumber', 'fileId']) &&
+      value.kind === 'windows' &&
+      value.schemaVersion === 1 &&
+      Number.isSafeInteger(value.volumeSerialNumber) &&
+      typeof value.fileId === 'string')
+  )
 }
 
 function parseDraftSkills(value: string): ChatComposerDraft['skills'] {

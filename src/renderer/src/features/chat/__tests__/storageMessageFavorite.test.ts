@@ -79,6 +79,58 @@ it('writes a favorite only through the dedicated UI-state API and restores its p
   expect(restored?.messages[0]?.uiState).toEqual({ favorited: true })
 })
 
+it('loads historical folder references with Rust storage identity field names', async () => {
+  storage.loadConversation.mockResolvedValueOnce({
+    id: 'conversation-folder-history',
+    projectId: null,
+    modelId: 'model-1',
+    title: 'Folder history',
+    createdAt: 1,
+    updatedAt: 2,
+    messages: [
+      {
+        id: 'user-folder-history',
+        role: 'user',
+        content: 'Inspect this folder',
+        createdAt: 1,
+        status: 'sent',
+        folderReferencesJson: JSON.stringify([
+          {
+            schemaVersion: 1,
+            id: 'folder-1',
+            name: 'Playground',
+            rootPath: '/Users/example/Playground',
+            rootIdentity: {
+              kind: 'unix',
+              schema_version: 1,
+              device: 1,
+              inode: 2
+            },
+            status: 'available'
+          }
+        ])
+      }
+    ]
+  })
+
+  const restored = await loadConversation('conversation-folder-history')
+  expect(restored?.messages[0]?.folderReferences).toEqual([
+    {
+      schemaVersion: 1,
+      id: 'folder-1',
+      name: 'Playground',
+      rootPath: '/Users/example/Playground',
+      rootIdentity: {
+        kind: 'unix',
+        schemaVersion: 1,
+        device: 1,
+        inode: 2
+      },
+      status: 'available'
+    }
+  ])
+})
+
 it('writes timeline collapse changes only through the dedicated UI-state API', async () => {
   storage.saveChatMessageUiState.mockResolvedValueOnce(undefined)
 

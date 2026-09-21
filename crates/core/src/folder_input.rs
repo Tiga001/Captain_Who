@@ -158,9 +158,83 @@ struct StoredFolderReference {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     root_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    root_identity: Option<FileChangeDirectoryIdentity>,
+    root_identity: Option<StoredFolderDirectoryIdentity>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     status: Option<AgentFolderStatus>,
+}
+
+/// The nested directory identity historically used Rust's `snake_case` field names in stored
+/// JSON. Keep reading that form while writing the renderer-facing `camelCase` form so a loaded
+/// message can safely round-trip through the Host without losing its binding metadata.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(tag = "kind", deny_unknown_fields)]
+enum StoredFolderDirectoryIdentity {
+    #[serde(rename = "unix")]
+    Unix {
+        #[serde(rename = "schemaVersion", alias = "schema_version")]
+        schema_version: u32,
+        device: u64,
+        inode: u64,
+    },
+    #[serde(rename = "windows")]
+    Windows {
+        #[serde(rename = "schemaVersion", alias = "schema_version")]
+        schema_version: u32,
+        #[serde(rename = "volumeSerialNumber", alias = "volume_serial_number")]
+        volume_serial_number: u64,
+        #[serde(rename = "fileId", alias = "file_id")]
+        file_id: String,
+    },
+}
+
+impl From<&FileChangeDirectoryIdentity> for StoredFolderDirectoryIdentity {
+    fn from(identity: &FileChangeDirectoryIdentity) -> Self {
+        match identity {
+            FileChangeDirectoryIdentity::Unix {
+                schema_version,
+                device,
+                inode,
+            } => Self::Unix {
+                schema_version: *schema_version,
+                device: *device,
+                inode: *inode,
+            },
+            FileChangeDirectoryIdentity::Windows {
+                schema_version,
+                volume_serial_number,
+                file_id,
+            } => Self::Windows {
+                schema_version: *schema_version,
+                volume_serial_number: *volume_serial_number,
+                file_id: file_id.clone(),
+            },
+        }
+    }
+}
+
+impl From<StoredFolderDirectoryIdentity> for FileChangeDirectoryIdentity {
+    fn from(identity: StoredFolderDirectoryIdentity) -> Self {
+        match identity {
+            StoredFolderDirectoryIdentity::Unix {
+                schema_version,
+                device,
+                inode,
+            } => Self::Unix {
+                schema_version,
+                device,
+                inode,
+            },
+            StoredFolderDirectoryIdentity::Windows {
+                schema_version,
+                volume_serial_number,
+                file_id,
+            } => Self::Windows {
+                schema_version,
+                volume_serial_number,
+                file_id,
+            },
+        }
+    }
 }
 
 /// Serializes folder references for local storage. This is intentionally separate from the
@@ -177,7 +251,10 @@ pub fn serialize_folder_references_for_storage(
                 id: reference.id.clone(),
                 name: reference.name.clone(),
                 root_path: reference.root_path.clone(),
-                root_identity: reference.root_identity.clone(),
+                root_identity: reference
+                    .root_identity
+                    .as_ref()
+                    .map(StoredFolderDirectoryIdentity::from),
                 status: reference.status,
             })
         })
@@ -199,7 +276,7 @@ pub fn deserialize_folder_references_from_storage(
                 id: stored.id,
                 name: stored.name,
                 root_path: stored.root_path,
-                root_identity: stored.root_identity,
+                root_identity: stored.root_identity.map(FileChangeDirectoryIdentity::from),
                 status: stored.status,
             };
             reference.validate()?;
@@ -480,6 +557,36 @@ mod tests {
             vec![reference.clone()]
         );
         assert_eq!(reference.model_path(), "/private/Documents");
+    }
+
+    #[test]
+    fn folder_storage_identity_round_trips_camel_case_and_reads_legacy_snake_case() {
+        let mut reference = AgentFolderReference::new("folder-1", "Documents")
+            .unwrap()
+            .with_root_path("/private/Documents");
+        reference.root_identity = Some(FileChangeDirectoryIdentity::Unix {
+            schema_version: 1,
+            device: 11,
+            inode: 22,
+        });
+
+        let storage =
+            serialize_folder_references_for_storage(std::slice::from_ref(&reference)).unwrap();
+        assert!(storage.contains("\"schemaVersion\":1"));
+        assert!(!storage.contains("\"schema_version\":1"));
+        assert_eq!(
+            deserialize_folder_references_from_storage(&storage).unwrap(),
+            vec![reference.clone()]
+        );
+
+        let legacy = storage.replace(
+            "\"rootIdentity\":{\"kind\":\"unix\",\"schemaVersion\"",
+            "\"rootIdentity\":{\"kind\":\"unix\",\"schema_version\"",
+        );
+        assert_eq!(
+            deserialize_folder_references_from_storage(&legacy).unwrap(),
+            vec![reference]
+        );
     }
 
     #[test]
