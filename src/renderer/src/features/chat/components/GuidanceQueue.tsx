@@ -21,6 +21,7 @@ import { composerAttachmentFromAgentAttachment, stripAttachmentSummary } from '.
 import type { ChatQueuedMessage } from '../chatTypes'
 import { useComposerAttachmentPreviews } from '../useAttachmentImports'
 import { ComposerAttachments } from './ComposerAttachments'
+import { ComposerFolderReferences } from './ComposerFolderReferences'
 
 interface GuidanceQueueProps {
   guideEnabled: boolean
@@ -219,6 +220,13 @@ export function GuidanceQueue({
             <CornerDownRight className="guidance-queue__leading-icon" aria-hidden="true" />
             <div className="guidance-queue__content">
               <span>{visibleContent || t('chat.attachmentOnlyMessage')}</span>
+              {message.folderReferences && message.folderReferences.length > 0 && (
+                <ComposerFolderReferences
+                  folders={message.folderReferences}
+                  label={t('chat.attachments')}
+                  removeLabel=""
+                />
+              )}
               {message.attachments.length > 0 && (
                 <ComposerAttachments
                   attachments={message.attachments.map((attachment) =>

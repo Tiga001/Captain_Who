@@ -118,6 +118,7 @@ async fn lazy_root_has_a_stable_parent_name_for_child_messages_during_approval()
                 context_window_indicator_enabled: true,
                 content: USER_REQUEST.to_string(),
                 attachments: Vec::new(),
+        folder_references: Vec::new(),
                 skills: Vec::new(),
                 title: None,
                 user_message_id: Some("user-parent-name-approval".to_string()),

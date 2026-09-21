@@ -1158,6 +1158,7 @@ export const jaJPTranslations = {
   'chat.removeAttachment': '添付ファイルを削除する',
   'chat.addMenuTitle': '追加',
   'chat.addFile': 'ファイル',
+  'chat.addFolder': 'フォルダ',
   'chat.addImage': '画像',
   'chat.skills': 'スキル',
   'chat.workspaceSkill': 'ワークスペーススキル',

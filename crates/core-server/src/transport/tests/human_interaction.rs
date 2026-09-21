@@ -17,6 +17,7 @@ fn seed_human_question_root(storage: &StorageService) {
                 created_at: 1,
                 status: Some("streaming".into()),
                 attachments: vec![],
+                folder_references_json: None,
                 agent_run_json: None,
                 ui_state_json: None,
             }],

@@ -19,6 +19,7 @@ fn clone_message(
         created_at: source.created_at,
         status: source.status.clone(),
         attachments: Vec::new(),
+        folder_references_json: source.folder_references_json.clone(),
         agent_run_json,
         // Renderer-owned presentation state is opaque to the fork engine.
         ui_state_json: source.ui_state_json.clone(),
@@ -241,8 +242,8 @@ fn insert_conversation(
             .execute(
                 "INSERT INTO messages (
                     id, conversation_id, role, content, status, agent_run_json,
-                    created_at, position
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                    folder_references_json, created_at, position
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, COALESCE(?7, '[]'), ?8, ?9)",
                 params![
                     &message.id,
                     &target.id,
@@ -250,6 +251,7 @@ fn insert_conversation(
                     &message.content,
                     &message.status,
                     &message.agent_run_json,
+                    &message.folder_references_json,
                     message.created_at,
                     position as i64,
                 ],
@@ -395,10 +397,10 @@ fn insert_snapshot_messages(
                      snapshot_source_conversation_id, snapshot_source_message_id,
                      snapshot_original_origin_kind, snapshot_original_agent_id,
                      snapshot_original_mailbox_message_id,
-                     agent_run_json, created_at, position
+                     agent_run_json, folder_references_json, created_at, position
                  ) VALUES (
                      ?1, ?2, ?3, ?4, ?5, 'snapshot', ?6, ?7, ?8, ?9, ?10,
-                     ?11, ?12, ?13
+                     ?11, COALESCE(?12, '[]'), ?13, ?14
                  )",
                 params![
                     &message.id,
@@ -412,6 +414,7 @@ fn insert_snapshot_messages(
                     &origin.original_agent_id,
                     &origin.original_mailbox_message_id,
                     &message.agent_run_json,
+                    &message.folder_references_json,
                     message.created_at,
                     position as i64,
                 ],

@@ -192,6 +192,7 @@ impl ConversationTraceRenderer {
                     sequence,
                     content,
                     attachments,
+                    folder_references,
                     ..
                 } => {
                     if pending_exchange.is_some() {
@@ -202,7 +203,7 @@ impl ConversationTraceRenderer {
                     activity_items.push(ContextItem::new(
                         crate::llm::LlmMessage::text(
                             LlmMessageRole::User,
-                            render_user_guidance_content(content, attachments),
+                            render_user_guidance_content(content, attachments, folder_references),
                         ),
                         trace_item_metadata(&trace.assistant_message_id, *sequence),
                     ));

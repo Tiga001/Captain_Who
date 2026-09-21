@@ -32,6 +32,7 @@ import { loadAttachmentImage } from '../../storage/storageClient'
 import * as storageClient from '../../storage/storageClient'
 import { ChatMarkdown } from './ChatMarkdown'
 import { ComposerAttachments, type ComposerAttachmentPresentation } from './ComposerAttachments'
+import { ComposerFolderReferences } from './ComposerFolderReferences'
 import { HumanInteractionAnswerContent } from '../../humanInteraction/HumanInteractionAnswerContent'
 import {
   HumanInteractionTimelineEntry,
@@ -391,6 +392,13 @@ function GuidanceTimelineItemView({
       data-status={item.status}
       title={item.status === 'rejected' ? item.error : undefined}
     >
+      {(item.folderReferences?.length ?? 0) > 0 && (
+        <ComposerFolderReferences
+          folders={item.folderReferences ?? []}
+          label={t('chat.attachments')}
+          removeLabel=""
+        />
+      )}
       {item.attachments.length > 0 && (
         <MessageAttachments attachments={item.attachments} messageId={item.id} mode={mode} />
       )}
@@ -1424,6 +1432,7 @@ export const ChatMessageItem = memo(function ChatMessageItem({
   timelineCollapsedOverride,
   turnDiffSummary
 }: ChatMessageItemProps) {
+  const { t } = useFrontendConfig()
   const [isEditing, setIsEditing] = useState(false)
   const isAssistantActionsVisible = shouldShowAssistantActions(message)
   const userVisibleContent = getUserVisibleContent(message)
@@ -1477,7 +1486,18 @@ export const ChatMessageItem = memo(function ChatMessageItem({
         parentAgentId={parentAgentId}
       />
       {message.role === 'user' && (
-        <MessageAttachments attachments={message.attachments} messageId={message.id} mode={mode} />
+        <>
+          <ComposerFolderReferences
+            folders={message.folderReferences ?? []}
+            label={t('chat.attachments')}
+            removeLabel=""
+          />
+          <MessageAttachments
+            attachments={message.attachments}
+            messageId={message.id}
+            mode={mode}
+          />
+        </>
       )}
       {isEditing ? (
         <div className="chat-message__body">

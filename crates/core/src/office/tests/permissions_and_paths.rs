@@ -584,6 +584,7 @@ fn registered_attachments_are_read_only_sources() {
         project_id: None,
         conversation_attachments: vec![reference],
         project_attachments: Vec::new(),
+        folder_references: Vec::new(),
     };
     let permissions = AgentPermissions {
         write: AgentWritePermission::WorkspaceOnly,

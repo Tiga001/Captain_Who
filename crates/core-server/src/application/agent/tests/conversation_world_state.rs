@@ -89,6 +89,7 @@ fn turn_input(index: usize) -> AgentConversationTurnInput {
         context_window_indicator_enabled: true,
         content: format!("WORLD_USER_{index}"),
         attachments: Vec::new(),
+        folder_references: Vec::new(),
         skills: Vec::new(),
         title: None,
         user_message_id: Some(format!("world-user-{index}")),

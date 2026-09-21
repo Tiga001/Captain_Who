@@ -10,6 +10,7 @@ import type {
   AgentUsage,
   ConversationTraceAttachment
 } from '../agent'
+import type { AgentFolderReference } from '../attachments'
 import type { ActivatedSkillSummary } from '../skills'
 import {
   expectBoolean,
@@ -138,6 +139,25 @@ export function parseConversationTraceAttachments(
   })
 }
 
+export function parseConversationTraceFolderReferences(
+  value: unknown,
+  context: string
+): AgentFolderReference[] {
+  if (value === undefined) return []
+  return expectBoundedArray(value, context, 64).map((entry, index) => {
+    const itemContext = `${context}[${index}]`
+    const item = expectRecord(entry, itemContext)
+    expectOnlyKeys(item, ['schemaVersion', 'id', 'name'] as const, itemContext)
+    const schemaVersion = expectSafeInteger(item.schemaVersion, `${itemContext}.schemaVersion`, 0)
+    if (schemaVersion !== 1) throw invalidProtocolValue(itemContext, 'unsupported schemaVersion')
+    return {
+      schemaVersion,
+      id: expectOpaqueRunId(item.id, `${itemContext}.id`),
+      name: expectBoundedString(item.name, `${itemContext}.name`, 4096)
+    }
+  })
+}
+
 export function parseAgentGuidanceEvent(
   type: 'guidance_queued' | 'guidance_applied' | 'guidance_rejected',
   record: Record<string, unknown>
@@ -153,7 +173,7 @@ export function parseAgentGuidanceEvent(
     'createdAt'
   ] as const
   if (type === 'guidance_queued') {
-    expectOnlyKeys(record, commonKeys, context)
+    expectOnlyKeys(record, [...commonKeys, 'folderReferences'] as const, context)
     return {
       type,
       runId: expectOpaqueRunId(record.runId, `${context}.runId`),
@@ -165,11 +185,19 @@ export function parseAgentGuidanceEvent(
         MAX_RENDERER_SAFE_AGENT_CONTENT_BYTES
       ),
       attachments: parseConversationTraceAttachments(record.attachments, `${context}.attachments`),
+      ...(record.folderReferences === undefined
+        ? {}
+        : {
+            folderReferences: parseConversationTraceFolderReferences(
+              record.folderReferences,
+              `${context}.folderReferences`
+            )
+          }),
       createdAt: expectSafeInteger(record.createdAt, `${context}.createdAt`, 0)
     }
   }
   if (type === 'guidance_applied') {
-    expectOnlyKeys(record, [...commonKeys, 'sequence'] as const, context)
+    expectOnlyKeys(record, [...commonKeys, 'folderReferences', 'sequence'] as const, context)
     return {
       type,
       runId: expectOpaqueRunId(record.runId, `${context}.runId`),
@@ -181,6 +209,14 @@ export function parseAgentGuidanceEvent(
         MAX_RENDERER_SAFE_AGENT_CONTENT_BYTES
       ),
       attachments: parseConversationTraceAttachments(record.attachments, `${context}.attachments`),
+      ...(record.folderReferences === undefined
+        ? {}
+        : {
+            folderReferences: parseConversationTraceFolderReferences(
+              record.folderReferences,
+              `${context}.folderReferences`
+            )
+          }),
       createdAt: expectSafeInteger(record.createdAt, `${context}.createdAt`, 0),
       sequence: expectSafeInteger(record.sequence, `${context}.sequence`, 0)
     }

@@ -144,6 +144,7 @@ fn run_context_changes_only_world_state_while_prompt_preferences_change_configur
             project_id: Some("project-private".to_string()),
             conversation_attachments: Vec::new(),
             project_attachments: Vec::new(),
+            folder_references: Vec::new(),
         }),
         permissions: AgentPermissions {
             read: AgentReadPermission::All,

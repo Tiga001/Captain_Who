@@ -67,6 +67,7 @@ fn optimistic_pair(timestamp: i64) -> Vec<ChatMessageRecord> {
             created_at: timestamp,
             status: Some(if role == "user" { "sent" } else { "pending" }.into()),
             attachments: Vec::new(),
+            folder_references_json: None,
             agent_run_json: None,
             ui_state_json: None,
         })

@@ -741,6 +741,7 @@ fn trace_summary_releases_the_exact_steer_boundary_projection() {
         client_message_id: "client-summary-boundary".to_string(),
         content: "continue without visible narration".to_string(),
         attachments: Vec::new(),
+        folder_references: Vec::new(),
         created_at: 4,
         truncated: false,
     });
@@ -2240,6 +2241,7 @@ fn provider_transition_commit_is_atomic_and_preserves_existing_chat_usage() {
             model_id: Some("source-model".to_string()),
             project_id: None,
             attachments_json: "[]".to_string(),
+            folder_references_json: "[]".to_string(),
             skills_json: "[]".to_string(),
             queued_messages_json: "[]".to_string(),
             updated_at: 7,

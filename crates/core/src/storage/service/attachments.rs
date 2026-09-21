@@ -836,7 +836,52 @@ impl StorageService {
             .map(agent_attachment_reference)
             .collect::<Vec<_>>();
 
+        // Folder grants are durable message metadata rather than uploaded attachment rows.
+        // Rehydrate every grant used by this conversation so a resumed task (and a fork) keeps
+        // the same opaque id/path binding. Parsing is deliberately path-preserving and does not
+        // touch the filesystem: an unavailable folder must not make a run or fork fail.
+        let mut folder_references = Vec::<crate::AgentFolderReference>::new();
+        let mut seen_folder_ids = std::collections::HashSet::new();
+        let mut add_folder_json = |raw: Option<String>| {
+            let Some(raw) = raw else { return };
+            let Ok(references) = crate::deserialize_folder_references_from_storage(&raw) else {
+                return;
+            };
+            for reference in references {
+                if seen_folder_ids.insert(reference.id.clone()) {
+                    folder_references.push(reference);
+                }
+            }
+        };
+        let mut message_statement = connection
+            .prepare(
+                "SELECT folder_references_json FROM messages
+                 WHERE conversation_id = ?1 ORDER BY position ASC, created_at ASC",
+            )
+            .map_err(storage_error)?;
+        let message_rows = message_statement
+            .query_map([conversation_id], |row| row.get::<_, String>(0))
+            .map_err(storage_error)?;
+        for row in message_rows {
+            add_folder_json(Some(row.map_err(storage_error)?));
+        }
+        drop(message_statement);
+        let guidance_rows = connection
+            .prepare(
+                "SELECT folder_references_json FROM agent_run_guidances
+                 WHERE conversation_id = ?1 ORDER BY created_at ASC, guidance_id ASC",
+            )
+            .map_err(storage_error)?
+            .query_map([conversation_id], |row| row.get::<_, String>(0))
+            .map_err(storage_error)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(storage_error)?;
+        for row in guidance_rows {
+            add_folder_json(Some(row));
+        }
+
         Ok(AgentAttachmentLibraryContext {
+            folder_references,
             root_path: Some(self.attachment_root.to_string_lossy().to_string()),
             conversation_id: Some(conversation_id.to_string()),
             project_id: project_id.map(ToString::to_string),

@@ -19,6 +19,7 @@ import type {
 } from './core'
 import type { AgentEvent } from './events'
 import type { AgentFileChangeResult } from './fileChange'
+import type { AgentFolderReference } from '../attachments'
 
 export interface AgentChatMessage {
   messageId?: string
@@ -271,6 +272,7 @@ export interface AgentConversationTurnInput {
   contextWindowIndicatorEnabled?: boolean
   content: string
   attachments?: AgentInputAttachment[]
+  folderReferences?: AgentFolderReference[]
   title?: string
   userMessageId?: string
   assistantMessageId?: string
@@ -301,6 +303,7 @@ export interface AgentSteerRunInput {
   clientMessageId: string
   content: string
   attachments?: AgentInputAttachment[]
+  folderReferences?: AgentFolderReference[]
 }
 
 export type AgentSteerRunResultStatus = 'queued' | 'applied' | 'rejected'
@@ -501,6 +504,7 @@ export interface AgentConversationMessage {
   createdAt: number
   status?: 'pending' | 'sent' | 'error' | null
   attachments?: AgentConversationMessageAttachment[]
+  folderReferences?: AgentFolderReference[]
 }
 
 export interface AgentConversationTurnOutput {

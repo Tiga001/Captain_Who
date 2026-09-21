@@ -37,7 +37,7 @@ impl Drop for ActiveRunSteeringCleanup {
 impl AgentService {
     pub fn steer_run(
         &self,
-        input: AgentSteerRunInput,
+        mut input: AgentSteerRunInput,
         notifications: CoreServerNotificationSender,
     ) -> Result<AgentSteerRunOutput, AgentServiceError> {
         let conversation_id = input.conversation_id.trim().to_string();
@@ -47,14 +47,22 @@ impl AgentService {
         if conversation_id.is_empty()
             || run_id.is_empty()
             || client_message_id.is_empty()
-            || (content.is_empty() && input.attachments.is_empty())
+            || (content.is_empty()
+                && input.attachments.is_empty()
+                && input.folder_references.is_empty())
         {
             return Err(
-                "conversationId、expectedRunId、clientMessageId 以及正文或附件均不能为空。"
+                "conversationId、expectedRunId、clientMessageId 以及正文、附件或文件夹均不能为空。"
                     .to_string()
                     .into(),
             );
         }
+        for reference in &input.folder_references {
+            reference
+                .validate()
+                .map_err(|error| format!("invalid folder reference: {error}"))?;
+        }
+        mycopilot_core::bind_folder_references_for_storage(&mut input.folder_references);
         // This namespace authenticates Host-owned answer guidance, including frozen fork history.
         // Reject before journaling or emitting a GuidanceRejected projection: even a rejected
         // external message must never look like a formal human-interaction response in the UI.
@@ -122,6 +130,11 @@ impl AgentService {
             .as_ref()
             .map(|record| record.created_at)
             .unwrap_or_else(now_ms);
+        let folder_references_json =
+            mycopilot_core::serialize_folder_references_for_storage(&input.folder_references)
+                .map_err(|error| {
+                    format!("failed to serialize guidance folder references: {error}")
+                })?;
 
         // Admission, approval handoff and terminal close all serialize through this registry
         // lock. The runtime queue has its own final-response close fence for the smaller race
@@ -230,6 +243,7 @@ impl AgentService {
                 content: content.clone(),
                 status: AgentGuidanceStatus::Queued,
                 attachment_ids,
+                folder_references_json: folder_references_json.clone(),
                 applied_trace_sequence: None,
                 terminal_reason: None,
                 created_at,
@@ -301,37 +315,41 @@ impl AgentService {
             };
         }
 
-        let attachment_library = if persisted_attachments.is_empty() {
-            None
-        } else {
-            match self
-                .storage
-                .build_attachment_library_context_for_active_run(
-                    &conversation_id,
-                    control.project_id.as_deref(),
-                    &run_id,
-                ) {
-                Ok(library) => Some(library),
-                Err(error) => {
-                    eprintln!("failed to build steering attachment library: {error}");
-                    self.reject_queued_guidance(
-                        &notifications,
+        let mut attachment_library =
+            if persisted_attachments.is_empty() && input.folder_references.is_empty() {
+                None
+            } else {
+                match self
+                    .storage
+                    .build_attachment_library_context_for_active_run(
+                        &conversation_id,
+                        control.project_id.as_deref(),
                         &run_id,
-                        &guidance_id,
-                        &client_message_id,
-                        &content,
-                        AgentSteerRunRejectionCode::AttachmentPersistenceFailed,
-                        "The guidance attachment library could not be prepared.",
-                        created_at,
-                    )?;
-                    return Ok(rejected_output(
-                        guidance_id,
-                        AgentSteerRunRejectionCode::AttachmentPersistenceFailed,
-                        "The guidance attachment library could not be prepared.",
-                    ));
+                    ) {
+                    Ok(library) => Some(library),
+                    Err(error) => {
+                        eprintln!("failed to build steering attachment library: {error}");
+                        self.reject_queued_guidance(
+                            &notifications,
+                            &run_id,
+                            &guidance_id,
+                            &client_message_id,
+                            &content,
+                            AgentSteerRunRejectionCode::AttachmentPersistenceFailed,
+                            "The guidance attachment library could not be prepared.",
+                            created_at,
+                        )?;
+                        return Ok(rejected_output(
+                            guidance_id,
+                            AgentSteerRunRejectionCode::AttachmentPersistenceFailed,
+                            "The guidance attachment library could not be prepared.",
+                        ));
+                    }
                 }
-            }
-        };
+            };
+        if let Some(library) = attachment_library.as_mut() {
+            library.folder_references = input.folder_references.clone();
+        }
         let trace_attachments = persisted_attachments
             .iter()
             .map(|attachment| mycopilot_core::ConversationTraceAttachment {
@@ -342,11 +360,13 @@ impl AgentService {
                 size_bytes: attachment.size_bytes,
             })
             .collect::<Vec<_>>();
+        let queued_folder_references = input.folder_references.clone();
         let runtime_input = AgentSteerInput {
             guidance_id: guidance_id.clone(),
             client_message_id: client_message_id.clone(),
             content: content.clone(),
             attachments: persisted_attachments,
+            folder_references: input.folder_references,
             attachment_library,
             created_at,
         };
@@ -366,6 +386,9 @@ impl AgentService {
                         client_message_id: queued_client_message_id,
                         content: queued_content,
                         attachments: queued_attachments,
+                        folder_references: mycopilot_core::model_folder_references(
+                            &queued_folder_references,
+                        ),
                         created_at,
                     },
                 ));
@@ -752,6 +775,9 @@ fn same_guidance_request(
     existing.conversation_id == conversation_id
         && existing.run_id == run_id
         && existing.content == content
+        && existing.folder_references_json
+            == mycopilot_core::serialize_folder_references_for_storage(&input.folder_references)
+                .unwrap_or_default()
         && persisted_attachments.len() == input.attachments.len()
         && persisted_attachments
             .iter()

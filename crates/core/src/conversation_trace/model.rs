@@ -526,6 +526,8 @@ pub enum ConversationTurnTraceItem {
         content: String,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         attachments: Vec<ConversationTraceAttachment>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        folder_references: Vec<crate::AgentFolderReference>,
         created_at: i64,
         truncated: bool,
     },

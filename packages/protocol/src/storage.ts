@@ -428,6 +428,8 @@ export interface StorageChatMessageRecord {
   createdAt: number
   status?: 'pending' | 'sent' | 'error' | null
   attachments?: StorageChatMessageAttachmentRecord[]
+  /** Serialized folder references, including Host-only binding metadata. */
+  folderReferencesJson?: string | null
   agentRunJson?: string | null
   uiStateJson?: string | null
 }
@@ -510,6 +512,7 @@ export interface StorageComposerDraftRecord {
   modelId: string | null
   projectId: string | null
   attachmentsJson: string
+  folderReferencesJson: string
   skillsJson: string
   queuedMessagesJson: string
   updatedAt: number

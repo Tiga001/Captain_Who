@@ -1880,6 +1880,7 @@ mod tests {
                     created_at: 1,
                 }],
                 project_attachments: vec![],
+                folder_references: Vec::new(),
             }),
             permissions: AgentPermissions::default(),
         };

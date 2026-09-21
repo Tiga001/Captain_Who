@@ -93,6 +93,8 @@ export const HOST_CHANNELS = {
   },
   attachments: {
     selectInputAttachments: 'host:attachments.selectInputAttachments',
+    selectInputFolders: 'host:attachments.selectInputFolders',
+    loadInputFoldersFromPaths: 'host:attachments.loadInputFoldersFromPaths',
     beginImport: 'host:attachments.beginImport',
     appendImport: 'host:attachments.appendImport',
     finishImport: 'host:attachments.finishImport',

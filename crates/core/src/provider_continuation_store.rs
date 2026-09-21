@@ -1425,6 +1425,7 @@ mod tests {
                     created_at: 1,
                     status: Some("sent".to_string()),
                     attachments: Vec::new(),
+                    folder_references_json: None,
                     agent_run_json: Some(
                         json!({"runId": RUN_ID, "status": "completed"}).to_string(),
                     ),

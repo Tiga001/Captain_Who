@@ -18,6 +18,7 @@ pub mod exact_capture;
 pub mod file_change;
 pub mod file_change_support;
 pub mod file_input;
+pub mod folder_input;
 pub mod git_review;
 pub mod human_interaction;
 pub mod image_generation;
@@ -44,6 +45,13 @@ pub mod workspace;
 pub mod workspace_instructions;
 pub mod world_state;
 
+pub use folder_input::{
+    bind_folder_references_for_storage, deserialize_folder_references_from_storage,
+    model_folder_references, serialize_folder_references_for_storage, AgentFolderAuthority,
+    AgentFolderEntry, AgentFolderEntryKind, AgentFolderReference, AgentFolderStatus,
+    AGENT_FOLDER_REFERENCE_SCHEMA_VERSION, MAX_AGENT_FOLDER_FILE_BYTES,
+    MAX_AGENT_FOLDER_LIST_DEPTH, MAX_AGENT_FOLDER_LIST_ENTRIES,
+};
 pub use web_search::{
     FrozenWebSearchPolicySource, WebSearchExecutionCredential, WebSearchPolicySnapshot,
     WebSearchPolicySource,

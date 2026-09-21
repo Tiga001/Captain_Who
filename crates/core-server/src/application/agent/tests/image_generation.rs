@@ -34,6 +34,7 @@ async fn restart_pairs_a_durable_image_call_with_its_terminal_journal_receipt() 
                 created_at: 1,
                 status: Some("pending".to_string()),
                 attachments: Vec::new(),
+                folder_references_json: None,
                 agent_run_json: Some(
                     json!({
                         "runId": run_id,

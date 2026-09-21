@@ -721,6 +721,7 @@ fn source_conversation() -> ChatConversationRecord {
         created_at,
         status: Some("sent".to_string()),
         attachments: Vec::new(),
+        folder_references_json: None,
         agent_run_json: (role == "assistant").then(|| {
             json!({
                 "runId": format!("run-source-{}", (created_at / 20) - 1),

@@ -2,6 +2,7 @@ import { beforeEach, expect, it, vi } from 'vitest'
 import type { AgentInputAttachment, AttachmentImportMetadata } from '@mycopilot/protocol'
 
 const host = vi.hoisted(() => ({
+  getPathForFile: vi.fn(),
   beginImport: vi.fn(),
   appendImport: vi.fn(),
   finishImport: vi.fn(),
@@ -11,6 +12,7 @@ const host = vi.hoisted(() => ({
 vi.mock('../../../host/hostClient', () => ({ hostClient: { attachments: host } }))
 import {
   createComposerAttachmentsFromFiles,
+  getComposerDroppedFilePath,
   loadComposerAttachmentPreview
 } from '../chatAttachments'
 
@@ -31,6 +33,13 @@ beforeEach(() => {
     contentSha256: `sha256:${'a'.repeat(64)}`
   }))
   host.cancelImport.mockResolvedValue(undefined)
+  host.getPathForFile.mockImplementation((file: File) => `/native/${file.name}`)
+})
+
+it('resolves dropped native paths through the preload webUtils bridge', () => {
+  const file = new File(['folder'], 'folder', { type: 'application/octet-stream' })
+  expect(getComposerDroppedFilePath(file)).toBe('/native/folder')
+  expect(host.getPathForFile).toHaveBeenCalledWith(file)
 })
 
 it('imports files above 8 MiB in bounded slices and returns only a managed reference', async () => {

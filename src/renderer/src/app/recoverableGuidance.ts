@@ -30,7 +30,8 @@ function messageRecoverySignature(message: ChatMessage): string {
       item.clientMessageId,
       item.content,
       item.createdAt,
-      item.attachments.map((attachment) => attachment.id)
+      item.attachments.map((attachment) => attachment.id),
+      (item.folderReferences ?? []).map((folder) => folder.id)
     ])
   const signature = recoverableItems.length > 0 ? JSON.stringify(recoverableItems) : ''
   recoverableGuidanceSignatureCache.set(message, signature)

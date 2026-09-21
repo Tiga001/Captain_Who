@@ -87,6 +87,7 @@ async fn assert_precommitted_wait_survives_terminal_settlement(outcome: AfterPre
                 context_window_indicator_enabled: true,
                 content: "Delegate one task and wait for its result.".to_string(),
                 attachments: Vec::new(),
+        folder_references: Vec::new(),
                 skills: Vec::new(),
                 title: Some("Wait terminal settlement".to_string()),
                 user_message_id: Some("user-precommitted-wait-terminal".to_string()),

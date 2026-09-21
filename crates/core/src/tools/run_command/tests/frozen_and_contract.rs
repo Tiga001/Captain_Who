@@ -59,6 +59,7 @@ fn freezes_declared_attachment_input_without_persisting_library_paths() {
                     created_at: 1,
                 }],
                 project_attachments: Vec::new(),
+                folder_references: Vec::new(),
             }),
             permissions: AgentPermissions {
                 read: AgentReadPermission::WorkspaceOnly,
@@ -152,6 +153,7 @@ fn pdf_saved_script_and_document_attachments_freeze_without_a_workspace() {
                 project_id: None,
                 conversation_attachments: attachments,
                 project_attachments: Vec::new(),
+                folder_references: Vec::new(),
             }),
             permissions: AgentPermissions::default(),
         }))

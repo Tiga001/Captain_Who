@@ -1170,6 +1170,7 @@ export const itITTranslations = {
   'chat.removeAttachment': "Rimuovi l'allegato",
   'chat.addMenuTitle': 'Aggiungi',
   'chat.addFile': 'File',
+  'chat.addFolder': 'Cartella',
   'chat.addImage': 'Immagini',
   'chat.skills': 'Abilità',
   'chat.workspaceSkill': "Abilità nell'area di lavoro",

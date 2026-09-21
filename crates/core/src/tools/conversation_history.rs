@@ -1627,6 +1627,7 @@ mod tests {
             created_at,
             status: Some("sent".to_string()),
             attachments: Vec::new(),
+            folder_references_json: None,
             agent_run_json: None,
             ui_state_json: None,
         }
@@ -1756,6 +1757,7 @@ mod tests {
                         client_message_id: "client-guidance-1".to_string(),
                         content: "继续检查审批恢复".to_string(),
                         attachments: Vec::new(),
+                        folder_references: Vec::new(),
                         created_at: 1_500,
                         truncated: false,
                     },

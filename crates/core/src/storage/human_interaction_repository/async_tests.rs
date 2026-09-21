@@ -18,6 +18,7 @@ fn record(request: &HumanInteractionRequestSnapshot, id: &str) -> AgentRunGuidan
         content: async_human_interaction_answer_content(request).unwrap(),
         status: crate::AgentGuidanceStatus::Queued,
         attachment_ids: vec![],
+        folder_references_json: "[]".to_string(),
         applied_trace_sequence: None,
         terminal_reason: None,
         created_at: 21,
@@ -85,6 +86,7 @@ fn new_turn(
             created_at: 30,
             status: None,
             attachments: vec![],
+            folder_references_json: None,
             agent_run_json: None,
             ui_state_json: None,
         });
@@ -98,6 +100,7 @@ fn new_turn(
             created_at: 30,
             status: Some("in_progress".into()),
             attachments: vec![],
+            folder_references_json: None,
             agent_run_json: None,
             ui_state_json: None,
         });
@@ -210,6 +213,7 @@ fn async_guidance_requires_exact_trace_and_atomically_marks_applied() {
             client_message_id: record.client_message_id,
             content: record.content.clone(),
             attachments: vec![],
+            folder_references: Vec::new(),
             created_at: 21,
             truncated: false,
         });

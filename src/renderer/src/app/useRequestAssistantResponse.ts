@@ -99,6 +99,7 @@ export function useRequestAssistantResponse({
       projectId: string | null,
       permissionMode: ChatPermissionMode,
       attachments: ChatSubmitOptions['attachments'],
+      folderReferences: ChatSubmitOptions['folderReferences'],
       skills: readonly SkillSelection[],
       title?: string,
       rewrite?: RewriteConversationTurnStart
@@ -125,6 +126,8 @@ export function useRequestAssistantResponse({
           content,
           contextWindowIndicatorEnabled,
           conversationId,
+          folderReferences:
+            folderReferences && folderReferences.length > 0 ? [...folderReferences] : undefined,
           modelId,
           permissions: resolveChatPermissions(permissionMode, uiPreferences.customPermissions),
           projectId,

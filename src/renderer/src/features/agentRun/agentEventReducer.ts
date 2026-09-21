@@ -874,6 +874,7 @@ export function applyAgentEventToChatMessage(
       clientMessageId: agentEvent.clientMessageId,
       content: agentEvent.content,
       attachments: guidanceAttachments(agentEvent.attachments),
+      folderReferences: agentEvent.folderReferences,
       status,
       createdAt: agentEvent.createdAt,
       sequence: agentEvent.type === 'guidance_applied' ? agentEvent.sequence : undefined,

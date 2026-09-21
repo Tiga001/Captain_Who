@@ -1,4 +1,4 @@
-import { contextBridge, ipcRenderer } from 'electron'
+import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import { HOST_CHANNELS, type HostApi } from '@mycopilot/host-api'
 import { createAgentIpcBridge } from './AgentIpcBridge'
 import { createAuthIpcBridge } from './AuthIpcBridge'
@@ -29,8 +29,13 @@ const host: HostApi = {
   agent: createAgentIpcBridge(ipcRenderer),
   automations: createAutomationIpcBridge(ipcRenderer),
   attachments: {
+    getPathForFile: (file) => webUtils.getPathForFile(file),
     selectInputAttachments: (request) =>
       ipcRenderer.invoke(HOST_CHANNELS.attachments.selectInputAttachments, request),
+    selectInputFolders: (request) =>
+      ipcRenderer.invoke(HOST_CHANNELS.attachments.selectInputFolders, request),
+    loadInputFoldersFromPaths: (request) =>
+      ipcRenderer.invoke(HOST_CHANNELS.attachments.loadInputFoldersFromPaths, request),
     beginImport: (input) => ipcRenderer.invoke(HOST_CHANNELS.attachments.beginImport, input),
     appendImport: (input) => ipcRenderer.invoke(HOST_CHANNELS.attachments.appendImport, input),
     finishImport: (input) => ipcRenderer.invoke(HOST_CHANNELS.attachments.finishImport, input),

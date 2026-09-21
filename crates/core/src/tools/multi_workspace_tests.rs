@@ -3,8 +3,8 @@ use crate::file_change::{FileChangeDirectoryIdentity, FileChangePathPolicy};
 use crate::storage::models::ProjectFolderRole;
 use crate::workspace::WorkspaceFolder;
 use crate::{
-    AgentApprovalStatus, AgentPermissions, AgentProposedAction, AgentRunContext, AgentToolCall,
-    AgentWorkspaceContext,
+    AgentApprovalStatus, AgentAttachmentLibraryContext, AgentFolderReference, AgentPermissions,
+    AgentProposedAction, AgentRunContext, AgentToolCall, AgentWorkspaceContext,
 };
 use serde_json::{json, Value};
 use std::fs;
@@ -82,6 +82,30 @@ impl Workspace {
             )
             .unwrap()
     }
+
+    fn folder_context(&self) -> ToolExecutionContext {
+        let reference = AgentFolderReference::new("picked", "docs")
+            .unwrap()
+            .with_root_path(self.docs.to_string_lossy().into_owned());
+        let attachment_library = AgentAttachmentLibraryContext {
+            root_path: None,
+            conversation_id: Some("conversation-multi".to_string()),
+            project_id: Some("project-multi".to_string()),
+            conversation_attachments: Vec::new(),
+            project_attachments: Vec::new(),
+            folder_references: vec![reference],
+        };
+        ToolExecutionContext::from_run_context(Some(&AgentRunContext {
+            conversation_id: Some("conversation-multi".to_string()),
+            project_id: Some("project-multi".to_string()),
+            workspace: Some(self.workspace.clone()),
+            permissions: AgentPermissions::default(),
+            attachment_library: Some(attachment_library),
+            collaboration_identity: None,
+        }))
+        .with_runtime_services("run-multi".to_string(), None)
+        .with_tool_call_id("folder-fixture-call".to_string())
+    }
 }
 
 #[test]
@@ -147,6 +171,39 @@ fn multi_workspace_explicit_search_and_map_preserve_namespace_and_default_to_pri
         .execute(&context, json!({}))
         .unwrap();
     assert_eq!(map["tree"][0]["path"], "README.md");
+}
+
+#[test]
+fn selected_folder_is_readable_and_listed_without_all_path_permission() {
+    let fixture = Workspace::new();
+    fs::create_dir(fixture.docs.join("src")).unwrap();
+    fs::write(fixture.docs.join("src/main.rs"), "fn main() {}\n").unwrap();
+    let context = fixture.folder_context();
+
+    let read = fixture.read(&context, "@folders/picked/src/main.rs", "folder-read");
+    assert_eq!(read["content"], "fn main() {}\n");
+    assert_eq!(read["path"], "@folders/picked/src/main.rs");
+
+    let files = super::search_files::SearchFilesTool
+        .execute(&context, json!({"query":"main", "path":"@folders/picked"}))
+        .unwrap();
+    assert_eq!(files["matches"][0]["path"], "@folders/picked/src/main.rs");
+
+    let map = super::workspace_map::WorkspaceMapTool
+        .execute(&context, json!({"focusPath":"@folders/picked"}))
+        .unwrap();
+    assert_eq!(map["workspace"]["focusPath"], "@folders/picked");
+    assert!(map["tree"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|entry| entry["path"] == "@folders/picked/src/main.rs"));
+
+    // A folder reference grants lazy read authority only; write planning must still reject the
+    // virtual namespace even when the normal composer write permission is enabled.
+    assert!(context
+        .resolve_missing_file_observation_target("@folders/picked/src/new.rs")
+        .is_err());
 }
 
 #[test]

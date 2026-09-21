@@ -29,6 +29,76 @@
   gap: 4px;
 }
 
+.composer-folder-references {
+  display: flex;
+  min-width: 0;
+  max-width: 100%;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 4px 0;
+}
+
+.chat-message .composer-folder-references {
+  width: min(100%, 720px);
+  max-width: min(78%, 720px);
+  margin: 0 0 10px auto;
+  justify-content: flex-end;
+}
+
+.composer-folder-reference {
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr) 20px;
+  width: min(260px, 100%);
+  height: 28px;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+  padding: 0 4px 0 7px;
+  color: var(--mc-color-text-primary);
+  background: var(--mc-color-surface-card);
+  border: 1px solid var(--mc-color-border-subtle);
+  border-radius: var(--mc-radius-lg);
+}
+
+.composer-folder-reference__icon {
+  width: 16px;
+  height: 16px;
+  color: var(--mc-color-text-subtle);
+}
+
+.composer-folder-reference__name {
+  min-width: 0;
+  overflow: hidden;
+  font-size: var(--mc-font-size-chat-toolbar);
+  font-weight: var(--mc-font-weight-strong);
+  line-height: var(--mc-line-height-tight);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.composer-folder-reference__remove {
+  display: grid;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  place-items: center;
+  color: var(--mc-color-text-subtle);
+  background: transparent;
+  border: 0;
+  border-radius: var(--mc-radius-pill);
+  cursor: pointer;
+}
+
+.composer-folder-reference__remove:hover {
+  color: var(--mc-color-text-primary);
+  background: var(--mc-color-state-hover);
+}
+
+.composer-folder-reference__remove svg {
+  width: 14px;
+  height: 14px;
+}
+
 .attachment-card {
   position: relative;
   display: grid;

@@ -9,6 +9,7 @@ fn assistant_message(id: &str, created_at: i64) -> ChatMessageRecord {
         created_at,
         status: Some("sent".to_string()),
         attachments: Vec::new(),
+        folder_references_json: None,
         agent_run_json: None,
         ui_state_json: None,
     }

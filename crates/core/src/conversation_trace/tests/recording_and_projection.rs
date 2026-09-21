@@ -207,6 +207,7 @@ fn user_guidance_is_canonical_ordered_and_never_persists_attachment_bytes() {
                 content_sha256: None,
                 truncated: None,
             }],
+            &[],
             42,
         )
         .unwrap();
@@ -246,6 +247,7 @@ fn attachment_only_user_guidance_is_recorded_without_fake_user_text() {
                 content_sha256: Some("hash".to_string()),
                 truncated: None,
             }],
+            &[],
             42,
         )
         .unwrap();
@@ -288,7 +290,7 @@ fn user_guidance_cannot_split_an_open_tool_exchange() {
     let mut recorder = ConversationTraceRecorder::default();
     recorder.record_tool_call(&call("pending"));
     assert!(recorder
-        .record_user_guidance("guidance-1", "client-1", "change course", &[], 42)
+        .record_user_guidance("guidance-1", "client-1", "change course", &[], &[], 42)
         .is_none());
 }
 

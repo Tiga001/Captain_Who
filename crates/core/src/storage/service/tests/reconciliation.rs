@@ -3990,6 +3990,7 @@ fn pre_runtime_failure_fixture(
             created_at: 0,
             status: Some("sent".to_string()),
             attachments: Vec::new(),
+            folder_references_json: None,
             agent_run_json: None,
             ui_state_json: None,
         },

@@ -511,6 +511,7 @@ mod tests {
                         client_message_id: "client".into(),
                         content: "steer".into(),
                         attachments: Vec::new(),
+                        folder_references: Vec::new(),
                         attachment_library: None,
                         created_at: 1,
                     })
@@ -559,6 +560,7 @@ mod tests {
                 client_message_id: "client-steer-wins".into(),
                 content: "user steer".into(),
                 attachments: Vec::new(),
+                folder_references: Vec::new(),
                 attachment_library: None,
                 created_at: 1,
             })

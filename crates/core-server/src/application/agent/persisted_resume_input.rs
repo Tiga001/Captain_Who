@@ -362,6 +362,7 @@ impl PersistedAgentResumeInput {
             provider_endpoint_digest: self.provider_endpoint_digest,
             provider_credential_required: self.provider_credential_required,
             agent_input: AgentChatInput {
+                folder_references: Vec::new(),
                 context_image_attachments: Vec::new(),
                 api_url: String::new(),
                 api_token: String::new(),

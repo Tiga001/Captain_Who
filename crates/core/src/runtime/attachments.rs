@@ -32,9 +32,10 @@ pub(super) fn build_attachment_context(
     attachments: &[AgentInputAttachment],
     attachment_library: Option<&AgentAttachmentLibraryContext>,
 ) -> AgentResult<AttachmentContext> {
+    let folder_context = folder_reference_context(attachment_library);
     if attachments.is_empty() {
         return Ok(AttachmentContext {
-            text: String::new(),
+            text: folder_context,
             images: Vec::new(),
         });
     }
@@ -53,6 +54,9 @@ pub(super) fn build_attachment_context(
     }))
     .with_runtime_services(ATTACHMENT_PREPROCESSING_RUN_ID.to_string(), None);
     let mut sections = Vec::new();
+    if !folder_context.is_empty() {
+        sections.push(folder_context);
+    }
     let mut images = Vec::new();
     let mut remaining_text = ATTACHMENT_CONTEXT_TEXT_MAX_CHARS;
     let mut remaining_images = ATTACHMENT_CONTEXT_IMAGE_MAX_BYTES;
@@ -221,6 +225,26 @@ pub(super) fn build_attachment_context(
     };
 
     Ok(AttachmentContext { text, images })
+}
+
+/// Turns Host-issued folder grants into a compact model-facing capability note.  The absolute
+/// picker path is intentionally omitted; tools resolve the opaque `@folders/<id>` namespace
+/// through the run-scoped authority and enforce read-only boundaries on every access.
+fn folder_reference_context(library: Option<&AgentAttachmentLibraryContext>) -> String {
+    let Some(library) = library else {
+        return String::new();
+    };
+    if library.folder_references.is_empty() {
+        return String::new();
+    }
+    let mut lines = vec![
+        "已附加以下只读文件夹引用（不会自动上传内容）：".to_string(),
+        "请先使用 workspace_map 或 search_files 浏览，再按需用 read_file 读取文件；不要写入这些文件夹。".to_string(),
+    ];
+    for reference in &library.folder_references {
+        lines.push(format!("- {} ({})", reference.model_path(), reference.name));
+    }
+    lines.join("\n")
 }
 
 /// Host-only image payloads for exact journal binding. New images use the same bounded
@@ -626,6 +650,7 @@ mod tests {
                 created_at: 0,
             }],
             project_attachments: Vec::new(),
+            folder_references: Vec::new(),
         };
         (attachment, library)
     }

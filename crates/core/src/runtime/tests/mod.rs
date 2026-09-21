@@ -68,6 +68,7 @@ fn managed_runtime_attachment(
             created_at: 1,
         }],
         project_attachments: Vec::new(),
+        folder_references: Vec::new(),
     };
     (attachment, library)
 }
@@ -224,6 +225,7 @@ fn conversation_context_input(messages: Vec<AgentChatMessage>) -> AgentChatInput
         approval_decision: None,
         tool_continuation: None,
         attachments: Vec::new(),
+        folder_references: Vec::new(),
         resume_checkpoint: None,
         assistant_message_id: None,
         context_compaction_summary: None,
@@ -315,6 +317,7 @@ fn runtime_steer_input(
         client_message_id: client_message_id.to_string(),
         content: content.to_string(),
         attachments: Vec::new(),
+        folder_references: Vec::new(),
         attachment_library: None,
         created_at: 42,
     }

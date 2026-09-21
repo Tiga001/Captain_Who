@@ -87,12 +87,14 @@ export function upsertGuidanceTimelineItem(
           ...item,
           ...existing,
           attachments: mergeGuidanceAttachments(existing.attachments, item.attachments),
+          folderReferences: existing.folderReferences ?? item.folderReferences,
           guidanceId: existing.guidanceId ?? item.guidanceId
         }
       : {
           ...existing,
           ...item,
           attachments: mergeGuidanceAttachments(item.attachments, existing.attachments),
+          folderReferences: item.folderReferences ?? existing.folderReferences,
           id: existing.id,
           guidanceId: item.guidanceId ?? existing.guidanceId
         }
@@ -142,6 +144,7 @@ export function applyOptimisticGuidanceToChatMessage(
         clientMessageId: queuedMessage.clientMessageId,
         content: queuedMessage.content,
         attachments: guidanceAttachments(queuedMessage.attachments),
+        folderReferences: queuedMessage.folderReferences,
         status: 'submitting',
         createdAt: queuedMessage.createdAt
       })

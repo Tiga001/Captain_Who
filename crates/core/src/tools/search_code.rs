@@ -30,12 +30,12 @@ impl AgentTool for SearchCodeTool {
     fn definition(&self) -> AgentToolDefinition {
         AgentToolDefinition {
             name: "search_code".to_string(),
-            description: "Search UTF-8 text content in an accessible file or directory. With no workspace, provide an absolute path or a system alias such as @desktop.".to_string(),
+            description: "Search UTF-8 text content in an accessible file or directory. Selected read-only folders use @folders/<id>[/relative]. With no workspace, provide an absolute path or a system alias such as @desktop.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "query": { "type": "string", "description": "Text to search for." },
-                    "path": { "type": "string", "description": "Optional workspace-relative or absolute directory/file, or @home/@desktop/@documents/@downloads. Defaults to workspace root when one exists." },
+                    "path": { "type": "string", "description": "Optional workspace-relative or absolute directory/file, @folders/<id>[/relative], or @home/@desktop/@documents/@downloads. Defaults to workspace root when one exists." },
                     "limit": { "type": "integer", "minimum": 1, "maximum": MAX_SEARCH_LIMIT },
                     "caseSensitive": { "type": "boolean" },
                     "cursor": { "type": "string", "description": "Opaque nextCursor from the previous page. Repeat the same query, path, limit, and caseSensitive values." }
@@ -102,6 +102,7 @@ impl AgentTool for SearchCodeTool {
         } else {
             walk_workspace_with_cancellation(&search_root, &cancellation_token)?
         };
+        context.validate_folder_path(args.path.as_deref().unwrap_or("."))?;
 
         let mut skipped_too_large = 0usize;
         let mut read_failures = 0usize;

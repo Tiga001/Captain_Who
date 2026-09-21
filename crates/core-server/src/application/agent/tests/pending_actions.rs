@@ -288,6 +288,7 @@ async fn auto_mcp_invokes_only_after_hidden_durable_executing_journal_and_scrubs
                 created_at: projection_created_at,
                 status: Some("pending".to_string()),
                 attachments: Vec::new(),
+                folder_references_json: None,
                 agent_run_json: None,
                 ui_state_json: None,
             }],
@@ -1322,6 +1323,7 @@ fn seed_durable_pending_owner(
                 created_at,
                 status: Some("pending".to_string()),
                 attachments: Vec::new(),
+                folder_references_json: None,
                 agent_run_json: Some(agent_run_json),
                 ui_state_json: None,
             }],
@@ -1893,6 +1895,7 @@ fn seed_durable_mcp_pending_owner(
                 created_at,
                 status: Some("pending".to_string()),
                 attachments: Vec::new(),
+                folder_references_json: None,
                 agent_run_json: Some(
                     json!({
                         "runId": run_id,
@@ -8333,6 +8336,7 @@ fn startup_reconciliation_failure_prevents_agent_service_startup() {
                 created_at: 1,
                 status: Some("pending".to_string()),
                 attachments: Vec::new(),
+                folder_references_json: None,
                 agent_run_json: Some("{}".to_string()),
                 ui_state_json: None,
             }],
@@ -8449,6 +8453,7 @@ fn agent_service_startup_retires_an_orphaned_cancelled_conversation_trace() {
                 created_at: 1,
                 status: Some("sent".to_string()),
                 attachments: Vec::new(),
+                folder_references_json: None,
                 agent_run_json: Some(
                     json!({
                         "runId": "run-orphaned-trace",
@@ -9394,6 +9399,7 @@ async fn projected_child_skill_approval_atomically_resumes_wake_before_worker_ru
         created_at: admitted_at + 1,
         status: Some("pending".to_string()),
         attachments: Vec::new(),
+        folder_references_json: None,
         agent_run_json: Some(waiting_run.to_string()),
         ui_state_json: None,
     });
@@ -9943,6 +9949,7 @@ async fn child_approval_continuation_persists_waiting_to_running_before_runtime(
         created_at: admitted_at + 1,
         status: Some("pending".to_string()),
         attachments: Vec::new(),
+        folder_references_json: None,
         agent_run_json: None,
         ui_state_json: None,
     });
@@ -10905,6 +10912,7 @@ fn cancel_usage_failure_rolls_back_message_trace_and_action_together() {
                 created_at: 1,
                 status: Some("pending".to_string()),
                 attachments: Vec::new(),
+                folder_references_json: None,
                 agent_run_json: None,
                 ui_state_json: None,
             }],
@@ -11010,6 +11018,7 @@ fn cancelled_file_change_with_durable_abort_never_rolls_back_to_pending() {
                 created_at: 1,
                 status: Some("pending".to_string()),
                 attachments: Vec::new(),
+                folder_references_json: None,
                 agent_run_json: None,
                 ui_state_json: None,
             }],

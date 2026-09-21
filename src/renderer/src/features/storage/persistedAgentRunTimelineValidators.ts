@@ -38,6 +38,16 @@ function isTimelineAttachment(record: Record<string, unknown>): boolean {
   )
 }
 
+function isTimelineFolderReference(record: Record<string, unknown>): boolean {
+  return (
+    hasExactKeys(record, ['schemaVersion', 'id', 'name'], ['rootPath']) &&
+    record.schemaVersion === 1 &&
+    isBoundedString(record.id, 1024) &&
+    isBoundedString(record.name, 4096) &&
+    (!hasOwn(record, 'rootPath') || isBoundedString(record.rootPath, 4096, true))
+  )
+}
+
 export function parseTimelineItem(value: unknown): ChatAgentTimelineItem | undefined {
   if (!isRecord(value) || !isBoundedString(value.id, 1024) || typeof value.type !== 'string') {
     return undefined
@@ -100,11 +110,21 @@ export function parseTimelineItem(value: unknown): ChatAgentTimelineItem | undef
     hasExactKeys(
       value,
       ['id', 'type', 'clientMessageId', 'content', 'attachments', 'status', 'createdAt'],
-      ['guidanceId', 'rejectionCode', 'error', 'recoverable', 'sequence', 'traceSequence']
+      [
+        'guidanceId',
+        'rejectionCode',
+        'error',
+        'recoverable',
+        'sequence',
+        'traceSequence',
+        'folderReferences'
+      ]
     ) &&
     isBoundedString(value.clientMessageId, 1024) &&
     isBoundedString(value.content, 4 * 1024 * 1024, true) &&
     isRecordArray(value.attachments, isTimelineAttachment) &&
+    (!hasOwn(value, 'folderReferences') ||
+      isRecordArray(value.folderReferences, isTimelineFolderReference)) &&
     ['submitting', 'queued', 'applied', 'rejected'].includes(value.status as string) &&
     isSafeInteger(value.createdAt) &&
     isOptionalBoundedString(value, 'guidanceId', 1024) &&

@@ -189,17 +189,20 @@ impl AgentSteerInputQueue {
 fn validate_steer_input(input: &crate::AgentSteerInput) -> AgentResult<()> {
     if input.guidance_id.trim().is_empty()
         || input.client_message_id.trim().is_empty()
-        || (input.content.trim().is_empty() && input.attachments.is_empty())
+        || (input.content.trim().is_empty()
+            && input.attachments.is_empty()
+            && input.folder_references.is_empty())
         || input.created_at < 0
     {
         return Err(AgentError::structured(
             "agent.invalid_steer_input",
-            "用户引导缺少有效的身份、正文或附件，或创建时间无效。",
+            "用户引导缺少有效的身份、正文、附件或文件夹，或创建时间无效。",
             json!({
                 "guidanceIdPresent": !input.guidance_id.trim().is_empty(),
                 "clientMessageIdPresent": !input.client_message_id.trim().is_empty(),
                 "contentPresent": !input.content.trim().is_empty(),
                 "attachmentsPresent": !input.attachments.is_empty(),
+                "folderReferencesPresent": !input.folder_references.is_empty(),
                 "createdAt": input.created_at,
             }),
         ));
@@ -1266,6 +1269,7 @@ mod steer_input_queue_tests {
             client_message_id: client_message_id.to_string(),
             content: content.to_string(),
             attachments: Vec::new(),
+            folder_references: Vec::new(),
             attachment_library: None,
             created_at: 10,
         }

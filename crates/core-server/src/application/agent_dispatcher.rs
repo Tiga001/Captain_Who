@@ -3471,6 +3471,7 @@ mod tests {
                     created_at: claimed_at + 1,
                     status: Some("streaming".to_string()),
                     attachments: Vec::new(),
+                    folder_references_json: None,
                     agent_run_json: None,
                     ui_state_json: None,
                 }],

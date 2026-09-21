@@ -1146,6 +1146,7 @@ export const enUSTranslations = {
   'chat.removeAttachment': 'Remove attachment',
   'chat.addMenuTitle': 'Add',
   'chat.addFile': 'Files',
+  'chat.addFolder': 'Folder',
   'chat.addImage': 'Images',
   'chat.skills': 'Skills',
   'chat.workspaceSkill': 'Workspace skill',

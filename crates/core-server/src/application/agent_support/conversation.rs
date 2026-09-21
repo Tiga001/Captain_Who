@@ -246,6 +246,7 @@ pub(crate) fn prepare_agent_wake_turn(
         context_window_indicator_enabled: true,
         content: spawn.collaboration_identity.entrusted_task.clone(),
         attachments: Vec::new(),
+        folder_references: Vec::new(),
         skills: Vec::new(),
         title: None,
         user_message_id: Some(spawn.task_message.projection_message_id.clone()),
@@ -306,9 +307,15 @@ fn prepare_conversation_turn_from_source(
             .into());
     }
     let content = input.content.trim().to_string();
-    if content.is_empty() && input.attachments.is_empty() {
-        return Err("消息必须包含正文或附件。".to_string().into());
+    if content.is_empty() && input.attachments.is_empty() && input.folder_references.is_empty() {
+        return Err("消息必须包含正文、附件或文件夹。".to_string().into());
     }
+    for reference in &input.folder_references {
+        reference
+            .validate()
+            .map_err(|error| format!("文件夹引用无效：{error}"))?;
+    }
+    mycopilot_core::bind_folder_references_for_storage(&mut input.folder_references);
 
     let model_id = input.model_id.trim().to_string();
     if model_id.is_empty() {
@@ -557,6 +564,9 @@ fn prepare_conversation_turn_from_source(
 
     let user_message = match &source {
         ConversationTurnInputSource::Human | ConversationTurnInputSource::HumanResponse(_) => {
+            let folder_references_json =
+                mycopilot_core::serialize_folder_references_for_storage(&input.folder_references)
+                    .map_err(|error| format!("序列化文件夹引用失败：{error}"))?;
             ChatMessageRecord {
                 human_interaction_response: None,
                 id: user_message_id.clone(),
@@ -565,6 +575,7 @@ fn prepare_conversation_turn_from_source(
                 created_at: timestamp,
                 status: Some("sent".to_string()),
                 attachments: message_attachments_from_input(&input.attachments, timestamp),
+                folder_references_json: Some(folder_references_json),
                 agent_run_json: None,
                 ui_state_json: None,
             }
@@ -620,6 +631,7 @@ fn prepare_conversation_turn_from_source(
         created_at: assistant_created_at,
         status: Some("pending".to_string()),
         attachments: Vec::new(),
+        folder_references_json: None,
         agent_run_json: None,
         ui_state_json: None,
     };
@@ -865,8 +877,9 @@ fn prepare_conversation_turn_from_source(
             timestamp,
         )?;
     }
-    let attachment_library = storage
+    let mut attachment_library = storage
         .build_attachment_library_context(&conversation_id, resolved_project_id.as_deref())?;
+    attachment_library.folder_references = input.folder_references.clone();
     let model_capabilities = ModelCapabilities {
         image_input: model.supports_image,
     };
@@ -932,6 +945,7 @@ fn prepare_conversation_turn_from_source(
         approval_decision: None,
         tool_continuation: None,
         attachments: input.attachments,
+        folder_references: input.folder_references,
         resume_checkpoint: None,
         assistant_message_id: Some(assistant_message_id.clone()),
         context_compaction_summary,

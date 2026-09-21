@@ -57,6 +57,7 @@ async fn assert_unified_history_wire(style: crate::AgentApiStyle, native_deepsee
                     created_at: 10 + index,
                     status: Some("pending".to_string()),
                     attachments: Vec::new(),
+                    folder_references_json: None,
                     agent_run_json: None,
                     ui_state_json: None,
                     human_interaction_response: None,

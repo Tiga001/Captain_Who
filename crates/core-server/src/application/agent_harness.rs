@@ -1486,6 +1486,7 @@ mod tests {
             created_at: 2,
             status: Some("pending".to_string()),
             attachments: Vec::new(),
+            folder_references_json: None,
             agent_run_json: None,
             ui_state_json: None,
         });

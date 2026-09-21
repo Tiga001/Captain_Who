@@ -514,6 +514,7 @@ async fn fake_provider_drives_all_six_tools_through_runtime_host_and_server_serv
         context_window_indicator_enabled: true,
         content: "Use Agent collaboration to review authentication.".to_string(),
         attachments: Vec::new(),
+        folder_references: Vec::new(),
         skills: Vec::new(),
         title: Some("Harness root".to_string()),
         user_message_id: Some("user-collaboration-harness".to_string()),
@@ -1072,6 +1073,7 @@ async fn user_root_run_cancellation_stops_running_and_queued_descendants() {
         created_at: 2,
         status: Some("streaming".to_string()),
         attachments: Vec::new(),
+        folder_references_json: None,
         agent_run_json: None,
         ui_state_json: None,
     });
@@ -1406,6 +1408,7 @@ async fn interrupt_agent_stops_a_child_waiting_on_a_handed_off_command_session()
                 content: "Delegate a command lifecycle check, then interrupt the child."
                     .to_string(),
                 attachments: Vec::new(),
+                folder_references: Vec::new(),
                 skills: Vec::new(),
                 title: Some("Command interruption root".to_string()),
                 user_message_id: Some("user-collaboration-command-interrupt".to_string()),

@@ -30,7 +30,7 @@ impl AgentTool for ReadImageTool {
     fn definition(&self) -> AgentToolDefinition {
         AgentToolDefinition {
             name: "read_image".to_string(),
-            description: "Read one image and return it as visual input for the model. Pass exactly one path copied from a tool result or supplied by the user. Supported values include workspace-relative paths, absolute paths, system aliases, @attachments/... paths, browser-download:... references, image-artifact://... URIs, and revision-bound skill://... URIs. Authorization and integrity checks are enforced by the host.".to_string(),
+            description: "Read one image and return it as visual input for the model. Pass exactly one path copied from a tool result or supplied by the user. Supported values include workspace-relative paths, selected read-only folder paths at @folders/<id>/relative/path, absolute paths, system aliases, @attachments/... paths, browser-download:... references, image-artifact://... URIs, and revision-bound skill://... URIs. Authorization and integrity checks are enforced by the host.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -762,6 +762,7 @@ mod tests {
                 created_at: 1,
             }],
             project_attachments: Vec::new(),
+            folder_references: Vec::new(),
         };
         let run_context = AgentRunContext {
             collaboration_identity: None,

@@ -185,7 +185,8 @@ export function useAppShellRunControls({
           expectedRunId: runId,
           clientMessageId: submittedMessage.clientMessageId,
           content: submittedMessage.content,
-          attachments: submittedMessage.attachments
+          attachments: submittedMessage.attachments,
+          folderReferences: submittedMessage.folderReferences ?? []
         })
       void flushRunMessagePersistence(conversationId, assistantMessage.id, runId)
       projectSubmission()

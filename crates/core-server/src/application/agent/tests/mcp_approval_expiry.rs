@@ -273,6 +273,7 @@ fn store_action(
                 created_at,
                 status: Some("pending".to_string()),
                 attachments: Vec::new(),
+                folder_references_json: None,
                 agent_run_json: Some(
                     json!({
                         "runId": run_id,

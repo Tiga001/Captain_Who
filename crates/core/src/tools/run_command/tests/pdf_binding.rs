@@ -258,6 +258,7 @@ fn bundled_pdf_merges_explicit_attachment_and_workspace_inputs_deterministically
                     created_at: 1,
                 }],
                 project_attachments: Vec::new(),
+                folder_references: Vec::new(),
             }),
             permissions: AgentPermissions {
                 read: AgentReadPermission::WorkspaceOnly,
@@ -519,6 +520,7 @@ fn bundled_pdf_freezes_a_conversation_artifact_without_a_workspace() {
                 created_at: 1,
                 status: Some("pending".to_string()),
                 attachments: Vec::new(),
+                folder_references_json: None,
                 agent_run_json: None,
                 ui_state_json: None,
             }],

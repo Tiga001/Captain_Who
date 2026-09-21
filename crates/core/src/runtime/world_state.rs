@@ -603,6 +603,7 @@ mod tests {
                 project_id: None,
                 conversation_attachments: Vec::new(),
                 project_attachments: Vec::new(),
+                folder_references: Vec::new(),
             }),
             permissions: AgentPermissions::default(),
         };

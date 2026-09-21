@@ -250,6 +250,7 @@ impl AgentService {
                     content: content.clone(),
                     status: AgentGuidanceStatus::Queued,
                     attachment_ids: Vec::new(),
+                    folder_references_json: "[]".to_string(),
                     applied_trace_sequence: None,
                     terminal_reason: None,
                     created_at: response.created_at,
@@ -268,6 +269,7 @@ impl AgentService {
                 };
                 let queued = control.steer_input.enqueue_with(
                     AgentSteerInput {
+                        folder_references: Vec::new(),
                         guidance_id: record.guidance_id.clone(),
                         client_message_id: record.client_message_id.clone(),
                         content: content.clone(),
@@ -283,6 +285,12 @@ impl AgentService {
                                 client_message_id: record.client_message_id.clone(),
                                 content: content.clone(),
                                 attachments: Vec::new(),
+                                folder_references: mycopilot_core::model_folder_references(
+                                    &mycopilot_core::deserialize_folder_references_from_storage(
+                                        &record.folder_references_json,
+                                    )
+                                    .unwrap_or_default(),
+                                ),
                                 created_at: record.created_at,
                             },
                         ));
@@ -351,6 +359,7 @@ impl AgentService {
             context_window_indicator_enabled: true,
             content,
             attachments: Vec::new(),
+        folder_references: Vec::new(),
             skills: Vec::new(),
             title: None,
             user_message_id: Some(user_message_id.clone()),

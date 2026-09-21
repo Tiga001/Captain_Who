@@ -136,12 +136,13 @@ fn apply_steer_inputs(
                     &input.client_message_id,
                     &input.content,
                     &input.attachments,
+                    &input.folder_references,
                     input.created_at,
                 )
                 .ok_or_else(|| {
                     AgentError::structured(
                         "agent.invalid_steer_input",
-                        "用户引导必须包含正文或附件。",
+                        "用户引导必须包含正文、附件或文件夹。",
                         json!({ "guidanceId": input.guidance_id }),
                     )
                 })?;
@@ -267,6 +268,7 @@ fn apply_steer_inputs(
             client_message_id: input.client_message_id,
             content,
             attachments,
+            folder_references: crate::model_folder_references(&input.folder_references),
             created_at: input.created_at,
             sequence,
         });

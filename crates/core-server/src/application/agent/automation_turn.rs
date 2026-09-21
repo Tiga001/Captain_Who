@@ -184,6 +184,7 @@ impl AgentService {
             context_window_indicator_enabled: true,
             content: start.prompt,
             attachments: Vec::new(),
+            folder_references: Vec::new(),
             skills: Vec::new(),
             title: resolved.title,
             user_message_id: None,

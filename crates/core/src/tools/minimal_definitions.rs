@@ -54,9 +54,9 @@ fn minimal_description(name: &str) -> Option<&'static str> {
         ),
         "conversation_history" => "Read this conversation's durable history: {} lists recent completed turns, query searches, open follows a returned location.",
         "read_image" => "Read one authorized image as visual input. Pass only path: copy the exact user/tool location, never invent source, URI or attachment ID. Host checks authorization and integrity.",
-        "workspace_map" => "Inspect an authorized directory: bounded tree, languages, important files and entrypoint/test/documentation candidates; no file contents.",
-        "search_files" => "Find paths by case-insensitive name/path substring. Read UTF-8 kind=file results with read_file; inspect kind=directory with workspace_map.focusPath, never read_file.",
-        "search_code" => "Search UTF-8 contents of an authorized file or directory.",
+        "workspace_map" => "Inspect an authorized directory: bounded tree, languages, important files and entrypoint/test/documentation candidates; no file contents. Selected read-only folders use @folders/<id>[/relative].",
+        "search_files" => "Find paths by case-insensitive name/path substring. Read UTF-8 kind=file results with read_file; inspect kind=directory with workspace_map.focusPath, never read_file. Selected read-only folders use @folders/<id>[/relative].",
+        "search_code" => "Search UTF-8 contents of an authorized file or directory, including selected read-only folders at @folders/<id>[/relative].",
         "skills_activate" => "Load a matching or explicitly requested Skill's full instructions and revision-bound resources from this Run's catalog. Activation grants no file/command/network/approval permission.",
         "attachments_list" => "List this chat's files/images; use returned @attachments readPath unchanged.",
         "attachments_list_project" => concat!(
@@ -82,7 +82,7 @@ fn replace_description(schema: &mut Value, pointer: &str, text: &str) {
 fn schema_descriptions(name: &str) -> &'static [(&'static str, &'static str)] {
     match name {
         "read_file" => &[
-            ("/properties/path", "Authorized regular UTF-8 file: workspace-relative only with a workspace, otherwise absolute or @home/@desktop/@documents/@downloads. Also exact @attachments readPath, browser-download: or published artifact://. Directories: workspace_map.focusPath; read permission/ownership apply."),
+            ("/properties/path", "Authorized regular UTF-8 file: workspace-relative only with a workspace, selected read-only folders use @folders/<id>/relative/path, otherwise absolute or @home/@desktop/@documents/@downloads. Also exact @attachments readPath, browser-download: or published artifact://. Directories: workspace_map.focusPath; read permission/ownership apply."),
             ("/properties/startLine", "First line (1-based); default beginning."),
             ("/properties/startByte", "Copy nextStartByte; pair with expectedRevision, never startLine."),
             ("/properties/expectedRevision", "Only with startByte: copy the preceding page's revision. If changed, restart reading; never splice file versions."),
@@ -109,22 +109,22 @@ fn schema_descriptions(name: &str) -> &'static [(&'static str, &'static str)] {
             ("/properties/open", "Exact opaque hist_v1_ location from a previous result; never modify or invent."),
         ],
         "read_image" => &[
-            ("/properties/path", "Exact workspace-relative/absolute/system-alias path, @attachments, browser-download:, image-artifact:// or revision-bound skill:// reference."),
+            ("/properties/path", "Exact workspace-relative/absolute/system-alias path, @folders/<id>/relative/path, @attachments, browser-download:, image-artifact:// or revision-bound skill:// reference."),
         ],
         "workspace_map" => &[
-            ("/properties/focusPath", "Authorized directory: workspace-relative/absolute or @home/@desktop/@documents/@downloads. Defaults to workspace root; without one, specify absolute path/alias."),
+            ("/properties/focusPath", "Authorized directory: workspace-relative/absolute, @folders/<id>[/relative], or @home/@desktop/@documents/@downloads. Defaults to workspace root; without one, specify absolute path/alias."),
             ("/properties/maxDepth", "Tree depth from focusPath; default 4."),
             ("/properties/maxEntries", "Maximum tree entries; default 200."),
             ("/properties/includeFiles", "Include files (default true); statistics always count them."),
         ],
         "search_files" => &[
             ("/properties/query", "Case-insensitive name/path substring."),
-            ("/properties/path", "Authorized directory: workspace-relative/absolute or @home/@desktop/@documents/@downloads; default workspace root. Without workspace, specify absolute path/alias."),
+            ("/properties/path", "Authorized directory: workspace-relative/absolute, @folders/<id>[/relative], or @home/@desktop/@documents/@downloads; default workspace root. Without workspace, specify absolute path/alias."),
             ("/properties/cursor", "Exact nextCursor; repeat query/path/limit unchanged."),
         ],
         "search_code" => &[
             ("/properties/query", "Text to find."),
-            ("/properties/path", "Authorized file/directory: workspace-relative/absolute or @home/@desktop/@documents/@downloads; default workspace root. Without workspace, specify absolute path/alias."),
+            ("/properties/path", "Authorized file/directory: workspace-relative/absolute, @folders/<id>[/relative], or @home/@desktop/@documents/@downloads; default workspace root. Without workspace, specify absolute path/alias."),
             ("/properties/cursor", "Exact nextCursor; repeat query/path/limit/caseSensitive unchanged."),
         ],
         "skills_activate" => &[

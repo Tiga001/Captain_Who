@@ -1,7 +1,13 @@
-import type { AgentInputAttachment, AttachmentImportProgress } from '@mycopilot/protocol'
+import type {
+  AgentFolderReference,
+  AgentInputAttachment,
+  AttachmentImportProgress
+} from '@mycopilot/protocol'
 import { hostClient } from '../../host/hostClient'
 
 export type ComposerAttachmentKind = 'file' | 'image'
+
+export type ComposerFolderReference = AgentFolderReference
 
 const IMPORT_CHUNK_BYTES = 512 * 1024
 
@@ -170,6 +176,39 @@ function getAttachmentsHost() {
     throw new Error('附件上传能力未加载，请重启应用后再试。')
   }
   return attachmentsHost
+}
+
+/**
+ * Electron 32 removed File.path from renderer File objects. Resolve native paths through the
+ * preload-owned webUtils bridge; retain the property fallback only for non-Electron browser test
+ * hosts that predate that API.
+ */
+export function getComposerDroppedFilePath(file: File): string | undefined {
+  const resolvePath = getAttachmentsHost().getPathForFile
+  if (typeof resolvePath === 'function') {
+    try {
+      const path = resolvePath(file)
+      if (path) return path
+    } catch {
+      // A browser test host or a stale drag payload may not be resolvable by webUtils.
+    }
+  }
+  const legacyPath = (file as File & { path?: unknown }).path
+  return typeof legacyPath === 'string' && legacyPath.length > 0 ? legacyPath : undefined
+}
+
+export async function selectComposerFolders(): Promise<ComposerFolderReference[]> {
+  const attachmentsHost = getAttachmentsHost()
+  if (!attachmentsHost.selectInputFolders) return []
+  return attachmentsHost.selectInputFolders()
+}
+
+export async function loadComposerFoldersFromPaths(
+  paths: readonly string[]
+): Promise<ComposerFolderReference[]> {
+  const attachmentsHost = getAttachmentsHost()
+  if (!attachmentsHost.loadInputFoldersFromPaths || paths.length === 0) return []
+  return attachmentsHost.loadInputFoldersFromPaths({ paths: [...paths] })
 }
 
 export async function selectComposerAttachments(

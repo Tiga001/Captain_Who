@@ -56,7 +56,8 @@ pub(crate) fn store_guidance_in_connection(
         "INSERT INTO agent_run_guidances (
             guidance_id, client_message_id, run_id, conversation_id, assistant_message_id,
             content, status, applied_trace_sequence, terminal_reason, created_at, updated_at
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, NULL, ?8, ?9)
+            , folder_references_json
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, NULL, ?8, ?9, ?10)
          ON CONFLICT DO NOTHING",
         params![
             &record.guidance_id,
@@ -68,6 +69,7 @@ pub(crate) fn store_guidance_in_connection(
             record.status.as_str(),
             record.created_at,
             record.updated_at,
+            &record.folder_references_json,
         ],
     )?;
     if affected == 0 {
@@ -203,7 +205,8 @@ pub(crate) fn list_guidances_for_conversation(
             guidance.applied_trace_sequence,
             guidance.terminal_reason,
             guidance.created_at,
-            guidance.updated_at
+            guidance.updated_at,
+            guidance.folder_references_json
          FROM agent_run_guidances AS guidance
          WHERE guidance.conversation_id = ?1
          ORDER BY guidance.created_at ASC, guidance.guidance_id ASC",
@@ -384,7 +387,8 @@ fn load_guidance_with_predicate(
             guidance.applied_trace_sequence,
             guidance.terminal_reason,
             guidance.created_at,
-            guidance.updated_at
+            guidance.updated_at,
+            guidance.folder_references_json
          FROM agent_run_guidances AS guidance
          WHERE {predicate}"
     );
@@ -430,6 +434,7 @@ fn guidance_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AgentRunGuidan
         terminal_reason: row.get(8)?,
         created_at: row.get(9)?,
         updated_at: row.get(10)?,
+        folder_references_json: row.get(11)?,
     })
 }
 
@@ -460,6 +465,7 @@ fn same_frozen_identity(
         && existing.assistant_message_id == candidate.assistant_message_id
         && existing.content == candidate.content
         && existing.attachment_ids == candidate.attachment_ids
+        && existing.folder_references_json == candidate.folder_references_json
 }
 
 fn validate_new_record(record: &AgentRunGuidanceRecord) -> rusqlite::Result<()> {
@@ -468,7 +474,9 @@ fn validate_new_record(record: &AgentRunGuidanceRecord) -> rusqlite::Result<()> 
         || record.run_id.trim().is_empty()
         || record.conversation_id.trim().is_empty()
         || record.assistant_message_id.trim().is_empty()
-        || (record.content.trim().is_empty() && record.attachment_ids.is_empty())
+        || (record.content.trim().is_empty()
+            && record.attachment_ids.is_empty()
+            && record.folder_references_json == "[]")
         || record.status != AgentGuidanceStatus::Queued
         || record.applied_trace_sequence.is_some()
         || record.terminal_reason.is_some()
@@ -486,6 +494,13 @@ fn validate_new_record(record: &AgentRunGuidanceRecord) -> rusqlite::Result<()> 
         return Err(invalid_input(
             "agent run guidance contains invalid or duplicate attachment ids",
         ));
+    }
+    let folders = crate::deserialize_folder_references_from_storage(&record.folder_references_json)
+        .map_err(|_| invalid_input("agent run guidance folder references are invalid"))?;
+    for folder in folders {
+        folder
+            .validate()
+            .map_err(|_| invalid_input("agent run guidance folder reference is invalid"))?;
     }
     Ok(())
 }
@@ -540,6 +555,7 @@ mod tests {
             content: "Please inspect the notes.".to_string(),
             status: AgentGuidanceStatus::Queued,
             attachment_ids: vec!["attachment-1".to_string()],
+            folder_references_json: "[]".to_string(),
             applied_trace_sequence: None,
             terminal_reason: None,
             created_at: 10,

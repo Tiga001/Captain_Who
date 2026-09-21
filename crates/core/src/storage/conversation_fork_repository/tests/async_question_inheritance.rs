@@ -500,6 +500,7 @@ fn inherited_question_receipts_follow_the_branch_identity_in_trace_and_model_con
         client_message_id: "client-opaque-question-id".into(),
         content: source_request.request_id.clone(),
         attachments: Vec::new(),
+                folder_references: Vec::new(),
         created_at: 41,
         truncated: false,
     });

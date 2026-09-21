@@ -66,6 +66,7 @@ fn pending_assistant(id: &str, created_at: i64) -> ChatMessageRecord {
         created_at,
         status: Some("pending".to_string()),
         attachments: Vec::new(),
+        folder_references_json: None,
         agent_run_json: None,
         ui_state_json: None,
     }
@@ -251,6 +252,7 @@ async fn assert_moonshot_ordinary_recovery(family: MoonshotRecoveryFamily, empty
             content: "Apply the durable steer after this response.".to_string(),
             status: crate::AgentGuidanceStatus::Queued,
             attachment_ids: Vec::new(),
+            folder_references_json: "[]".to_string(),
             applied_trace_sequence: None,
             terminal_reason: None,
             created_at: 4,

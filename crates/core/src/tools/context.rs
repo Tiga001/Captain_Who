@@ -74,6 +74,7 @@ impl Drop for ModelImageDeliveryReservation {
 pub struct ToolExecutionContext {
     workspace_context: Option<crate::AgentWorkspaceContext>,
     attachment_library: Option<AgentAttachmentLibraryContext>,
+    folder_authorities: Vec<crate::AgentFolderAuthority>,
     cancellation_token: AgentCancellationToken,
     model_capabilities: ModelCapabilities,
     model_image_delivery_budget: Arc<AtomicU64>,
@@ -310,6 +311,20 @@ impl ToolExecutionContext {
     pub fn from_run_context(context: Option<&AgentRunContext>) -> Self {
         let workspace_context = context.and_then(|context| context.workspace.clone());
         let attachment_library = context.and_then(|context| context.attachment_library.clone());
+        let folder_authorities = attachment_library
+            .as_ref()
+            .map(|library| {
+                library
+                    .folder_references
+                    .iter()
+                    .filter_map(|reference| {
+                        reference.root_path.as_deref().and_then(|root| {
+                            crate::AgentFolderAuthority::new(reference.clone(), root).ok()
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         let permissions = context
             .map(|context| context.permissions)
             .unwrap_or_default();
@@ -319,6 +334,7 @@ impl ToolExecutionContext {
         Self {
             workspace_context,
             attachment_library,
+            folder_authorities,
             cancellation_token: AgentCancellationToken::new(),
             model_capabilities: ModelCapabilities::default(),
             model_image_delivery_budget: Arc::new(AtomicU64::new(0)),
@@ -457,6 +473,16 @@ impl ToolExecutionContext {
     /// Callers must provide a host-built snapshot. This method deliberately is not exposed to
     /// model-authored tool arguments.
     pub(crate) fn replace_attachment_library(&mut self, library: AgentAttachmentLibraryContext) {
+        self.folder_authorities = library
+            .folder_references
+            .iter()
+            .filter_map(|reference| {
+                reference
+                    .root_path
+                    .as_deref()
+                    .and_then(|root| crate::AgentFolderAuthority::new(reference.clone(), root).ok())
+            })
+            .collect();
         self.attachment_library = Some(library);
     }
 
@@ -777,6 +803,9 @@ impl ToolExecutionContext {
         self.check_cancelled()?;
         let locator = ResourceLocator::parse(input_path)
             .map_err(|error| AgentError::new(error.to_string()))?;
+        if let ResourceLocator::Folder(value) = &locator {
+            return self.resolve_folder_path(value);
+        }
         if locator.is_virtual() {
             if matches!(locator, ResourceLocator::OpaqueBrowserArtifact(_)) {
                 return Err(AgentError::new(
@@ -922,6 +951,19 @@ impl ToolExecutionContext {
         self.check_cancelled()?;
         let locator = ResourceLocator::parse(input_path)
             .map_err(|error| AgentError::new(error.to_string()))?;
+        if let ResourceLocator::Folder(value) = &locator {
+            let authority = self.folder_authority_for(value)?;
+            let root = authority.canonical_root();
+            let relative = file_path
+                .strip_prefix(root)
+                .map_err(|_| AgentError::new("路径必须位于已选择的文件夹内。"))?;
+            let suffix = relative.to_string_lossy().replace('\\', "/");
+            return Ok(if suffix.is_empty() {
+                authority.reference().model_path()
+            } else {
+                format!("{}/{}", authority.reference().model_path(), suffix)
+            });
+        }
         if locator.is_virtual() {
             return Ok(locator.logical_value().to_string());
         }
@@ -971,6 +1013,48 @@ impl ToolExecutionContext {
         .with_conversation_id(self.conversation_id.as_deref())
         .with_permissions(self.permissions)
         .with_workspace(self.workspace_context())
+    }
+
+    fn folder_authority_for(&self, model_path: &str) -> AgentResult<&crate::AgentFolderAuthority> {
+        // All callers have already classified this as a Folder locator.
+        let id = model_path
+            .strip_prefix("@folders/")
+            .and_then(|rest| rest.split('/').next())
+            .ok_or_else(|| AgentError::new("文件夹引用无效。"))?;
+        let authority = self
+            .folder_authorities
+            .iter()
+            .find(|authority| authority.reference().id == id)
+            .ok_or_else(|| AgentError::new("文件夹引用当前不可用，请重新附加文件夹。"))?;
+        if matches!(
+            authority.reference().status,
+            Some(crate::AgentFolderStatus::Unavailable)
+        ) {
+            return Err(AgentError::new("文件夹引用当前不可用，请重新附加文件夹。"));
+        }
+        Ok(authority)
+    }
+
+    fn resolve_folder_path(&self, model_path: &str) -> AgentResult<PathBuf> {
+        let authority = self.folder_authority_for(model_path)?;
+        let relative = model_path
+            .strip_prefix(&authority.reference().model_path())
+            .unwrap_or_default()
+            .trim_start_matches('/');
+        authority
+            .resolve_relative(relative)
+            .map_err(AgentError::new)
+    }
+
+    pub(super) fn validate_folder_path(&self, model_path: &str) -> AgentResult<()> {
+        let locator = ResourceLocator::parse(model_path)
+            .map_err(|error| AgentError::new(error.to_string()))?;
+        if let ResourceLocator::Folder(value) = locator {
+            self.folder_authority_for(&value)?
+                .validate()
+                .map_err(AgentError::new)?;
+        }
+        Ok(())
     }
 
     pub(super) fn conversation_attachments(&self) -> &[AgentAttachmentReference] {

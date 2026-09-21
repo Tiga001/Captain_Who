@@ -2,6 +2,46 @@ import type { AgentInputAttachment } from './agent'
 
 export type AttachmentSelectionKind = 'file' | 'image'
 
+/** Durable Host-only identity used to detect a replaced folder after restart. */
+export type AgentFolderIdentity =
+  | {
+      kind: 'unix'
+      schemaVersion: number
+      device: number
+      inode: number
+    }
+  | {
+      kind: 'windows'
+      schemaVersion: number
+      volumeSerialNumber: number
+      fileId: string
+    }
+
+/**
+ * A user-selected directory reference.  Unlike a file attachment this does not
+ * contain directory bytes; the Host owns the path grant and the agent resolves
+ * files from it on demand.
+ */
+export interface AgentFolderReference {
+  schemaVersion: number
+  id: string
+  name: string
+  /** Host-private canonical root; model projections must never expose this value. */
+  rootPath?: string
+  /** Host-only durable identity; omitted from model-facing projections. */
+  rootIdentity?: AgentFolderIdentity
+  /** Host-only availability marker from persisted metadata. */
+  status?: 'available' | 'unavailable'
+}
+
+export interface FolderSelectInputRequest {
+  requestId?: string
+}
+
+export interface FolderLoadFromPathsRequest {
+  paths: string[]
+}
+
 export interface AttachmentSelectInputRequest {
   kind: AttachmentSelectionKind
   requestId?: string

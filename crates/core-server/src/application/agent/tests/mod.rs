@@ -698,6 +698,7 @@ fn seed_root_effective_permissions(
         created_at,
         status: Some("pending".to_string()),
         attachments: Vec::new(),
+        folder_references_json: None,
         agent_run_json: None,
         ui_state_json: None,
     });
@@ -1041,6 +1042,7 @@ fn skill_turn_input(
         context_window_indicator_enabled: true,
         content: "Review this repository.".to_string(),
         attachments: Vec::new(),
+        folder_references: Vec::new(),
         skills: vec![selection],
         title: None,
         user_message_id: Some(format!("user-{conversation_id}")),

@@ -116,6 +116,7 @@ impl ConversationTurnTrace {
                     client_message_id,
                     content,
                     attachments,
+                    folder_references,
                     created_at,
                     ..
                 } => {
@@ -127,7 +128,9 @@ impl ConversationTurnTrace {
                     }
                     if guidance_id.trim().is_empty()
                         || client_message_id.trim().is_empty()
-                        || (content.trim().is_empty() && attachments.is_empty())
+                        || (content.trim().is_empty()
+                            && attachments.is_empty()
+                            && folder_references.is_empty())
                         || *created_at < 0
                     {
                         return Err(
@@ -148,6 +151,11 @@ impl ConversationTurnTrace {
                         if let Some(mime_type) = &attachment.mime_type {
                             ensure_no_binary_text("user guidance attachment MIME type", mime_type)?;
                         }
+                    }
+                    for reference in folder_references {
+                        reference
+                            .validate()
+                            .map_err(|error| format!("conversation trace folder reference is invalid: {error}"))?;
                     }
                 }
                 ConversationTurnTraceItem::AgentMailboxDelivery {

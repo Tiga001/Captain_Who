@@ -237,6 +237,7 @@ pub(super) fn seed_durable_direct_file_change_owner(
             created_at,
             status: Some("pending".to_string()),
             attachments: Vec::new(),
+            folder_references_json: None,
             agent_run_json: None,
             ui_state_json: None,
         });
@@ -3065,6 +3066,7 @@ fn seed_file_change_history_owner(
                 created_at: 1,
                 status: Some("sent".to_string()),
                 attachments: Vec::new(),
+                folder_references_json: None,
                 agent_run_json: None,
                 ui_state_json: None,
             }],

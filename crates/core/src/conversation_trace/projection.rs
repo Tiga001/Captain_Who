@@ -62,6 +62,7 @@ fn project_durable_trace_items(
                 client_message_id,
                 content,
                 attachments,
+                folder_references,
                 created_at,
                 truncated,
             } => {
@@ -95,6 +96,7 @@ fn project_durable_trace_items(
                     client_message_id: client_message_id.clone(),
                     content,
                     attachments,
+                    folder_references: crate::model_folder_references(folder_references),
                     created_at: *created_at,
                     truncated: item_truncated,
                 }

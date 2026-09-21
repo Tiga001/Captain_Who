@@ -108,6 +108,7 @@ import {
 interface EditRewriteAttempt {
   assistantMessage: ChatMessage
   attachments: NonNullable<ChatSubmitOptions['attachments']>
+  folderReferences: NonNullable<ChatSubmitOptions['folderReferences']>
   content: string
   modelId: string
   permissionMode: ChatSubmitOptions['permissionMode']

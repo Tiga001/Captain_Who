@@ -30,6 +30,7 @@ fn message(id: &str, role: &str, content: &str, created_at: i64) -> ChatMessageR
         ),
         human_interaction_response: None,
         attachments: vec![],
+        folder_references_json: None,
         agent_run_json: None,
         ui_state_json: None,
     }

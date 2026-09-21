@@ -5,7 +5,7 @@ pub fn list_composer_drafts(connection: &Connection) -> rusqlite::Result<Vec<Com
     let mut statement = connection.prepare(
         "
         SELECT scope_id, message, permission_mode, permission_mode_version, model_id, project_id,
-               attachments_json, skills_json, queued_messages_json, updated_at
+               attachments_json, folder_references_json, skills_json, queued_messages_json, updated_at
         FROM composer_drafts
         ORDER BY updated_at DESC
         ",
@@ -21,9 +21,10 @@ pub fn list_composer_drafts(connection: &Connection) -> rusqlite::Result<Vec<Com
                 model_id: row.get(4)?,
                 project_id: row.get(5)?,
                 attachments_json: row.get(6)?,
-                skills_json: row.get(7)?,
-                queued_messages_json: row.get(8)?,
-                updated_at: row.get(9)?,
+                folder_references_json: row.get(7)?,
+                skills_json: row.get(8)?,
+                queued_messages_json: row.get(9)?,
+                updated_at: row.get(10)?,
             })
         })?
         .collect();
@@ -45,11 +46,12 @@ pub fn save_composer_draft(
             model_id,
             project_id,
             attachments_json,
+            folder_references_json,
             skills_json,
             queued_messages_json,
             updated_at
         )
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
         ON CONFLICT(scope_id) DO UPDATE SET
             message = excluded.message,
             permission_mode = excluded.permission_mode,
@@ -57,6 +59,7 @@ pub fn save_composer_draft(
             model_id = excluded.model_id,
             project_id = excluded.project_id,
             attachments_json = excluded.attachments_json,
+            folder_references_json = excluded.folder_references_json,
             skills_json = excluded.skills_json,
             queued_messages_json = excluded.queued_messages_json,
             updated_at = excluded.updated_at
@@ -74,6 +77,7 @@ pub fn save_composer_draft(
             &draft.model_id,
             &draft.project_id,
             &draft.attachments_json,
+            &draft.folder_references_json,
             &draft.skills_json,
             &draft.queued_messages_json,
             draft.updated_at

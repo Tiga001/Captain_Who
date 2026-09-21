@@ -16,6 +16,7 @@ import type {
   AgentToolResult,
   AgentUsage
 } from './conversation'
+import type { AgentFolderReference } from '../attachments'
 import type {
   AgentLlmRetryCategory,
   AgentMcpToolInvocationEvent,
@@ -91,6 +92,7 @@ export type AgentEvent =
       clientMessageId: string
       content: string
       attachments: ConversationTraceAttachment[]
+      folderReferences?: AgentFolderReference[]
       createdAt: number
     }
   | {
@@ -100,6 +102,7 @@ export type AgentEvent =
       clientMessageId: string
       content: string
       attachments: ConversationTraceAttachment[]
+      folderReferences?: AgentFolderReference[]
       createdAt: number
       sequence: number
     }

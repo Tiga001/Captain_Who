@@ -25,13 +25,13 @@ impl AgentTool for SearchFilesTool {
     fn definition(&self) -> AgentToolDefinition {
         AgentToolDefinition {
             name: "search_files".to_string(),
-            description: "Find files or directories by path or file name. Route every match by its kind: kind=file may be passed to read_file when it is UTF-8 text; kind=directory must be inspected with workspace_map.focusPath, never read_file. With no workspace, provide an absolute path or a system alias such as @desktop."
+            description: "Find files or directories by path or file name. Route every match by its kind: kind=file may be passed to read_file when it is UTF-8 text; kind=directory must be inspected with workspace_map.focusPath, never read_file. Selected read-only folders use @folders/<id>[/relative]."
                 .to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "query": { "type": "string", "description": "Case-insensitive path or file-name substring." },
-                    "path": { "type": "string", "description": "Optional workspace-relative or absolute directory, or @home/@desktop/@documents/@downloads. Defaults to workspace root when one exists." },
+                    "path": { "type": "string", "description": "Optional workspace-relative or absolute directory, @folders/<id>[/relative], or @home/@desktop/@documents/@downloads. Defaults to workspace root when one exists." },
                     "limit": { "type": "integer", "minimum": 1, "maximum": MAX_SEARCH_LIMIT },
                     "cursor": { "type": "string", "description": "Opaque nextCursor from the previous page. Repeat the same query, path, and limit values." }
                 },
@@ -81,6 +81,7 @@ impl AgentTool for SearchFilesTool {
         let mut matches = Vec::new();
         let cancellation_token = context.cancellation_token();
         let walk = walk_workspace_with_cancellation(&root, &cancellation_token)?;
+        context.validate_folder_path(args.path.as_deref().unwrap_or("."))?;
         let mut total_matches = 0usize;
         let mut snapshot = SearchFingerprint::new("search-files-snapshot-v1");
         snapshot.bool("walkTruncated", walk.truncated);

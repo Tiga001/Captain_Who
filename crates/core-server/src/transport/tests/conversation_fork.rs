@@ -150,6 +150,7 @@ fn fork_request_reports_active_command_as_structured_domain_error() {
                     created_at: 1,
                     status: Some("sent".to_string()),
                     attachments: Vec::new(),
+                    folder_references_json: None,
                     agent_run_json: None,
                     ui_state_json: None,
                 },
@@ -161,6 +162,7 @@ fn fork_request_reports_active_command_as_structured_domain_error() {
                     created_at: 2,
                     status: Some("sent".to_string()),
                     attachments: Vec::new(),
+                    folder_references_json: None,
                     agent_run_json: Some(
                         serde_json::json!({
                             "runId": "run-fork-rpc",

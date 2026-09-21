@@ -1163,6 +1163,7 @@ export const ruRUTranslations = {
   'chat.removeAttachment': 'Удалить вложение',
   'chat.addMenuTitle': 'Добавить',
   'chat.addFile': 'Файлы',
+  'chat.addFolder': 'Папка',
   'chat.addImage': 'Изображения',
   'chat.skills': 'Навыки',
   'chat.workspaceSkill': 'Навыки рабочего пространства',

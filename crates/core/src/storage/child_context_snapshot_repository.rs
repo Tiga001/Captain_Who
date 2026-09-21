@@ -274,6 +274,7 @@ pub(crate) fn build_child_context_snapshot_plan(
                     created_at: source_message.created_at,
                     status: source_message.status.clone(),
                     attachments: Vec::new(),
+                    folder_references_json: source_message.folder_references_json.clone(),
                     // The terminal trace is the durable execution fact. Mutable run projections
                     // and frontend-owned UI state are deliberately not inherited.
                     agent_run_json: None,
@@ -1431,6 +1432,7 @@ mod tests {
             created_at: 21,
             status: Some("completed".into()),
             attachments: Vec::new(),
+            folder_references_json: None,
             agent_run_json: None,
             ui_state_json: None,
         });

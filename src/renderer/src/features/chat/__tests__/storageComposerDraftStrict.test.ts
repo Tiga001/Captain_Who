@@ -22,6 +22,7 @@ function currentDraft(
     modelId: null,
     projectId: null,
     attachmentsJson: '[]',
+    folderReferencesJson: '[]',
     skillsJson: '[]',
     queuedMessagesJson:
       '[{"id":"queued-1","clientMessageId":"client-1","content":"guide","attachments":[],"modelId":"model-1","permissionMode":"default","projectId":null,"skills":[],"status":"pending","createdAt":1}]',
@@ -54,7 +55,8 @@ it('restores managed references without loading file bytes', async () => {
       name: 'large.csv',
       sizeBytes: 100_000_000,
       encoding: 'managed',
-      data: 'opaque-import-id'
+      data: 'opaque-import-id',
+      contentSha256: `sha256:${'a'.repeat(64)}`
     }
   ]
   storage.loadComposerDrafts.mockResolvedValue([

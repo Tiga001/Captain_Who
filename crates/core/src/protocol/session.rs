@@ -121,6 +121,9 @@ pub struct AgentSteerRunInput {
     pub content: String,
     #[serde(default)]
     pub attachments: Vec<AgentInputAttachment>,
+    /// Host-issued read-only folder references carried with queued guidance.
+    #[serde(default)]
+    pub folder_references: Vec<crate::AgentFolderReference>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
@@ -168,6 +171,9 @@ pub struct AgentSteerInput {
     pub content: String,
     #[serde(default)]
     pub attachments: Vec<AgentInputAttachment>,
+    /// Host-issued read-only folder references carried with queued guidance.
+    #[serde(default)]
+    pub folder_references: Vec<crate::AgentFolderReference>,
     /// Host-authoritative attachment library including this guidance's persisted attachments.
     ///
     /// The runtime installs this snapshot only when the guidance is applied at a safe model
@@ -597,6 +603,10 @@ pub struct AgentAttachmentLibraryContext {
     /// Other-conversation attachments authorized by the current project or the same trusted
     /// Agent task tree. This private Host context never accepts root identity from the model.
     pub project_attachments: Vec<AgentAttachmentReference>,
+    /// Host-issued folder authorities for this run.  The model only receives their opaque
+    /// `@folders/<id>` namespace; selected roots remain in the Host-owned reference value.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub folder_references: Vec<crate::AgentFolderReference>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]

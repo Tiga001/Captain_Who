@@ -324,6 +324,7 @@ fn runtime_attachment_library(
             })
             .collect(),
         project_attachments: Vec::new(),
+        folder_references: Vec::new(),
     }
 }
 
@@ -614,6 +615,7 @@ fn activated_document_reader_can_read_the_same_authoritative_attachment_path() {
             created_at: 1,
         }],
         project_attachments: Vec::new(),
+        folder_references: Vec::new(),
     };
     let registry = ToolRegistry::defaults_with_search(None);
     let active_capabilities = BTreeSet::from([ToolCapabilityId::application_owned(

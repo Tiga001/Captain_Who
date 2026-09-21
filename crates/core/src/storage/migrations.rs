@@ -1,17 +1,17 @@
 use rusqlite::{ffi, Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
 
-pub const STORAGE_SCHEMA_VERSION: i32 = 49;
+pub const STORAGE_SCHEMA_VERSION: i32 = 50;
 pub const DEVELOPMENT_STORAGE_SCHEMA_RESET_REQUIRED: &str =
     "development_storage_schema_reset_required";
 
 const CANONICAL_SCHEMA: &str = include_str!("canonical_schema.sql");
 const CANONICAL_SCHEMA_FINGERPRINT: &str =
-    "sha256:fb08ee5b5c7004c58c2f5f7aceb6257a303ec125cc7b41cdf0e48cbc48f55a2e";
+    "sha256:fe81aefd5a07fe7fe801fe0b31d198cfa0517528c36791b1e2b1b491a932dc3a";
 
 /// Initializes fresh storage or validates the exact current canonical schema.
 ///
-/// The exact v47 catalog upgrades atomically to v48, then v48 upgrades atomically to v49 without
+/// The exact v47 catalog upgrades atomically through the current development schema without
 /// changing authoritative history. All other earlier development schemas require an explicit
 /// reset; data is never auto-reset.
 pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
@@ -33,6 +33,10 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
         return upgrade_guidance_content_v48(connection);
     }
 
+    if schema_version == 49 {
+        return upgrade_folder_references_v49(connection);
+    }
+
     if schema_version != STORAGE_SCHEMA_VERSION {
         return Err(reset_required_error(format!(
             "expected schema version {STORAGE_SCHEMA_VERSION}, found {schema_version}"
@@ -46,6 +50,8 @@ const V47_SCHEMA_FINGERPRINT: &str =
     "sha256:44c989bbfd6fb7212013c2f27ce721aa967157a85202187d88f0dea0e5c65827";
 const V48_SCHEMA_FINGERPRINT: &str =
     "sha256:c0d1cc5df5ad3dfa8674b8297f0e39b4ab5602c63500108edc6a1b78839ca455";
+const V49_SCHEMA_FINGERPRINT: &str =
+    "sha256:fb08ee5b5c7004c58c2f5f7aceb6257a303ec125cc7b41cdf0e48cbc48f55a2e";
 const HISTORY_SEARCH_INDEX_V48: &str = include_str!("history_search_index_v48.sql");
 const GUIDANCE_CONTENT_V49: &str = include_str!("guidance_content_v49.sql");
 const DROP_HISTORY_SEARCH_TRIGGERS: &str = "
@@ -122,6 +128,23 @@ fn upgrade_guidance_content_v48(connection: &Connection) -> rusqlite::Result<()>
         Err(error) => Err(error),
         Ok(()) => restore_result,
     }
+}
+
+/// Adds durable, JSON-validated folder reference payloads to messages, drafts, and guidance.
+/// Existing data gets an empty array and remains byte-for-byte otherwise unchanged.
+fn upgrade_folder_references_v49(connection: &Connection) -> rusqlite::Result<()> {
+    validate_schema_fingerprint(connection, V49_SCHEMA_FINGERPRINT)?;
+    ensure_foreign_keys_are_valid(connection)?;
+    let transaction = connection.unchecked_transaction()?;
+    transaction.execute_batch(
+        "ALTER TABLE messages ADD COLUMN folder_references_json TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(folder_references_json) AND json_type(folder_references_json) = 'array');
+         ALTER TABLE composer_drafts ADD COLUMN folder_references_json TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(folder_references_json) AND json_type(folder_references_json) = 'array');
+         ALTER TABLE agent_run_guidances ADD COLUMN folder_references_json TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(folder_references_json) AND json_type(folder_references_json) = 'array');
+         ALTER TABLE context_compaction_summaries ADD COLUMN folder_references_json TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(folder_references_json) AND json_type(folder_references_json) = 'array');",
+    )?;
+    transaction.pragma_update(None, "user_version", STORAGE_SCHEMA_VERSION)?;
+    validate_canonical_schema(&transaction)?;
+    transaction.commit()
 }
 
 fn create_canonical_schema(connection: &Connection) -> rusqlite::Result<()> {
@@ -232,8 +255,19 @@ mod tests {
         "sha256:6af5e743b2fd8ab799ff3fc702137b4dd8289b45420d5338a83b81c88b301179";
     const LOCAL_TOKEN_LEDGER_SCHEMA_MARKER: &str = "-- Independent local token ledger, schema v47.";
 
+    fn canonical_schema_before_folder_refs() -> String {
+        let mut schema = canonical_schema_v48();
+        let columns = [
+            "            folder_references_json TEXT NOT NULL DEFAULT '[]' CHECK (\n                json_valid(folder_references_json) AND json_type(folder_references_json) = 'array'\n            ),\n",
+        ];
+        for column in columns {
+            schema = schema.replace(column, "");
+        }
+        schema
+    }
+
     fn v47_schema() -> String {
-        let schema = canonical_schema_v48();
+        let schema = canonical_schema_before_folder_refs();
         assert!(schema.contains(HISTORY_SEARCH_INDEX_V48));
         schema.replace(
             HISTORY_SEARCH_INDEX_V48,
@@ -838,7 +872,7 @@ CREATE TABLE model_provider_credential_cleanup (
 
     fn canonical_schema_v29_for_test() -> String {
         let schema = replace_once(
-            CANONICAL_SCHEMA.to_string(),
+            canonical_schema_before_folder_refs(),
             r#"            provider_model_id TEXT NOT NULL,
             display_name TEXT NOT NULL CHECK (
                 typeof(display_name) = 'text'

@@ -935,6 +935,7 @@ fn current_checkpoint_schema_round_trips_and_rejects_missing_or_extra_fields() {
             project_id: None,
             conversation_attachments: Vec::new(),
             project_attachments: Vec::new(),
+            folder_references: Vec::new(),
         }),
         permissions: crate::protocol::AgentPermissions::default(),
     });

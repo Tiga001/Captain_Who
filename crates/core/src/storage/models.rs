@@ -914,6 +914,10 @@ pub struct ChatMessageRecord {
     pub status: Option<String>,
     #[serde(default)]
     pub attachments: Vec<ChatMessageAttachmentRecord>,
+    /// Durable JSON carrying model-safe folder references plus Host-only binding metadata.
+    /// The storage layer copies this value verbatim during fork; model projections sanitize it.
+    #[serde(default)]
+    pub folder_references_json: Option<String>,
     pub agent_run_json: Option<String>,
     pub ui_state_json: Option<String>,
 }
@@ -1132,9 +1136,15 @@ pub struct ComposerDraftRecord {
     #[serde(deserialize_with = "deserialize_required_nullable")]
     pub project_id: Option<String>,
     pub attachments_json: String,
+    #[serde(default = "empty_json_array")]
+    pub folder_references_json: String,
     pub skills_json: String,
     pub queued_messages_json: String,
     pub updated_at: i64,
+}
+
+fn empty_json_array() -> String {
+    "[]".to_string()
 }
 
 impl ComposerDraftRecord {
@@ -1620,6 +1630,9 @@ pub struct AgentRunGuidanceRecord {
     pub content: String,
     pub status: AgentGuidanceStatus,
     pub attachment_ids: Vec<String>,
+    /// JSON array of Host-owned folder references. Kept path-bearing in storage, sanitized when
+    /// projected to model context.
+    pub folder_references_json: String,
     pub applied_trace_sequence: Option<u64>,
     pub terminal_reason: Option<String>,
     pub created_at: i64,

@@ -214,6 +214,7 @@ fn save_settled_history(fixture: &Fixture, turn_count: usize, active_tail: bool)
             created_at: 10 + turn as i64 * 2,
             status: Some("sent".to_string()),
             attachments: Vec::new(),
+            folder_references_json: None,
             agent_run_json: None,
             ui_state_json: None,
         });
@@ -225,6 +226,7 @@ id: format!("root-assistant-{turn}"),
                 created_at: 11 + turn as i64 * 2,
                 status: Some("completed".to_string()),
                 attachments: Vec::new(),
+                folder_references_json: None,
                 agent_run_json: Some(format!(
                     "{{\"runId\":\"root-run-{turn}\",\"status\":\"completed\",\"usage\":{{\"totalTokens\":99}}}}"
                 )),
@@ -240,6 +242,7 @@ id: format!("root-assistant-{turn}"),
             created_at: 100,
             status: Some("sent".to_string()),
             attachments: Vec::new(),
+            folder_references_json: None,
             agent_run_json: None,
             ui_state_json: None,
         });
@@ -251,6 +254,7 @@ id: format!("root-assistant-{turn}"),
             created_at: 101,
             status: Some("pending".to_string()),
             attachments: Vec::new(),
+            folder_references_json: None,
             agent_run_json: Some(
                 "{\"runId\":\"root-run-active\",\"status\":\"running\"}".to_string(),
             ),

@@ -8,6 +8,7 @@ import type {
   AgentContextCompactionEventOutcome,
   AgentFileChangePreview,
   AgentFileChangeSnapshot,
+  AgentFolderReference,
   AgentInputAttachment,
   AgentObserverInputOrigin,
   AgentLlmRetryCategory,
@@ -103,6 +104,7 @@ export interface ChatGuidanceTimelineItem {
   clientMessageId: string
   content: string
   attachments: ChatMessageAttachment[]
+  folderReferences?: AgentFolderReference[]
   status: 'submitting' | 'queued' | 'applied' | 'rejected'
   rejectionCode?: string
   error?: string
@@ -296,6 +298,7 @@ export interface ChatMessage {
   createdAt: number
   status?: 'pending' | 'sent' | 'error'
   attachments?: ChatMessageAttachment[]
+  folderReferences?: AgentFolderReference[]
   agentRun?: ChatAgentRunView
   uiState?: ChatMessageUiState
   /**
@@ -312,6 +315,7 @@ export interface ChatQueuedMessage {
   clientMessageId: string
   content: string
   attachments: AgentInputAttachment[]
+  folderReferences?: AgentFolderReference[]
   modelId: string
   permissionMode: ChatPermissionMode
   projectId: string | null
@@ -327,6 +331,7 @@ export interface ChatComposerDraft {
   modelId: string
   projectId: string | null
   attachments: AgentInputAttachment[]
+  folderReferences?: AgentFolderReference[]
   skills: SkillSelection[]
   queuedMessages: ChatQueuedMessage[]
   updatedAt: number
@@ -339,6 +344,7 @@ export interface ChatSubmitOptions {
   permissionMode: ChatPermissionMode
   projectId: string | null
   attachments?: AgentInputAttachment[]
+  folderReferences?: AgentFolderReference[]
   skills: SkillSelection[]
 }
 

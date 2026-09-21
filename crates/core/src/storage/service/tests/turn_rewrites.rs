@@ -31,6 +31,7 @@ fn completed_source_turn(
         created_at: 2,
         status: Some("pending".to_string()),
         attachments: Vec::new(),
+        folder_references_json: None,
         agent_run_json: None,
         ui_state_json: None,
     });
@@ -129,6 +130,7 @@ fn replacement_candidate(
             created_at: 4,
             status: Some("sent".to_string()),
             attachments: Vec::new(),
+            folder_references_json: None,
             agent_run_json: None,
             ui_state_json: None,
         },
@@ -140,6 +142,7 @@ fn replacement_candidate(
             created_at: 5,
             status: Some("pending".to_string()),
             attachments: Vec::new(),
+            folder_references_json: None,
             agent_run_json: None,
             ui_state_json: None,
         },
@@ -285,6 +288,7 @@ fn rewrite_is_atomic_idempotent_and_keeps_source_receipts_as_raw_facts() {
             created_at: 4,
             status: Some("sent".to_string()),
             attachments: Vec::new(),
+            folder_references_json: None,
             agent_run_json: None,
             ui_state_json: None,
         },
@@ -296,6 +300,7 @@ fn rewrite_is_atomic_idempotent_and_keeps_source_receipts_as_raw_facts() {
             created_at: 5,
             status: Some("pending".to_string()),
             attachments: Vec::new(),
+            folder_references_json: None,
             agent_run_json: None,
             ui_state_json: None,
         },
@@ -516,6 +521,7 @@ fn rewrite_rejects_a_non_latest_or_unsettled_source_without_hiding_history() {
         created_at: 4,
         status: Some("sent".to_string()),
         attachments: Vec::new(),
+        folder_references_json: None,
         agent_run_json: None,
         ui_state_json: None,
     });
@@ -527,6 +533,7 @@ fn rewrite_rejects_a_non_latest_or_unsettled_source_without_hiding_history() {
         created_at: 5,
         status: Some("pending".to_string()),
         attachments: Vec::new(),
+        folder_references_json: None,
         agent_run_json: None,
         ui_state_json: None,
     });
@@ -575,6 +582,7 @@ fn rewrite_rejects_a_non_latest_or_unsettled_source_without_hiding_history() {
         created_at: 7,
         status: Some("sent".to_string()),
         attachments: Vec::new(),
+        folder_references_json: None,
         agent_run_json: None,
         ui_state_json: None,
     });
@@ -586,6 +594,7 @@ fn rewrite_rejects_a_non_latest_or_unsettled_source_without_hiding_history() {
         created_at: 8,
         status: Some("pending".to_string()),
         attachments: Vec::new(),
+        folder_references_json: None,
         agent_run_json: None,
         ui_state_json: None,
     });
@@ -664,6 +673,7 @@ fn rewrite_rejects_a_source_that_owns_the_active_compaction_lineage() {
         created_at: 2,
         status: Some("pending".to_string()),
         attachments: Vec::new(),
+        folder_references_json: None,
         agent_run_json: None,
         ui_state_json: None,
     });
@@ -714,6 +724,7 @@ fn rewrite_rejects_a_source_that_owns_the_active_compaction_lineage() {
             created_at: 4,
             status: Some("sent".to_string()),
             attachments: Vec::new(),
+            folder_references_json: None,
             agent_run_json: None,
             ui_state_json: None,
         },
@@ -725,6 +736,7 @@ fn rewrite_rejects_a_source_that_owns_the_active_compaction_lineage() {
             created_at: 5,
             status: Some("pending".to_string()),
             attachments: Vec::new(),
+            folder_references_json: None,
             agent_run_json: None,
             ui_state_json: None,
         },
@@ -941,6 +953,7 @@ fn complete_fork_evidence_turn(
                 .to_string(),
             ),
             attachments: Vec::new(),
+            folder_references_json: None,
             agent_run_json: None,
             ui_state_json: None,
         });

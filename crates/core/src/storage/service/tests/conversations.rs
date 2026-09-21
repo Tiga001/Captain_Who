@@ -190,6 +190,7 @@ fn save_projection_conversation(
         created_at: 2,
         status: Some("pending".to_string()),
         attachments: Vec::new(),
+        folder_references_json: None,
         agent_run_json: Some(run.to_string()),
         ui_state_json: None,
     });
@@ -228,6 +229,7 @@ fn seed_batched_conversation_projection(
             created_at: i64::try_from(index + 2).unwrap(),
             status: Some("pending".to_string()),
             attachments: Vec::new(),
+            folder_references_json: None,
             agent_run_json: None,
             ui_state_json: None,
         });
@@ -522,6 +524,7 @@ fn conversation_view_rejects_guidance_rows_with_conflicting_run_owners() {
                 content: format!("guidance {index}"),
                 status: crate::AgentGuidanceStatus::Queued,
                 attachment_ids: Vec::new(),
+                folder_references_json: "[]".to_string(),
                 applied_trace_sequence: None,
                 terminal_reason: None,
                 created_at: 3 + index as i64,
@@ -549,6 +552,7 @@ fn loading_a_backend_owned_turn_projects_durable_tool_activity_without_renderer_
         created_at: 2,
         status: Some("pending".to_string()),
         attachments: Vec::new(),
+        folder_references_json: None,
         agent_run_json: None,
         ui_state_json: None,
     });
@@ -802,6 +806,7 @@ fn loading_a_durable_image_generation_result_restores_the_live_renderer_contract
         created_at: 2,
         status: Some("sent".to_string()),
         attachments: Vec::new(),
+        folder_references_json: None,
         agent_run_json: Some(existing_run.to_string()),
         ui_state_json: None,
     });
@@ -892,6 +897,7 @@ fn collaboration_root_fork_reopens_with_raw_snapshot_and_accepts_a_new_turn() {
         attachments: Vec::new(),
         // The renderer Timeline and authoritative Usage are reconstructed around this raw
         // lifecycle projection. Neither derived value belongs in the persisted Fork snapshot.
+        folder_references_json: None,
         agent_run_json: Some(
             crate::storage::chat_repository::canonical_agent_run_lifecycle_projection(
                 None,
@@ -1050,6 +1056,7 @@ fn collaboration_root_fork_reopens_with_raw_snapshot_and_accepts_a_new_turn() {
             created_at: next_created_at,
             status: Some("sent".to_string()),
             attachments: Vec::new(),
+            folder_references_json: None,
             agent_run_json: None,
             ui_state_json: None,
         },
@@ -1061,6 +1068,7 @@ fn collaboration_root_fork_reopens_with_raw_snapshot_and_accepts_a_new_turn() {
             created_at: next_created_at.saturating_add(1),
             status: Some("pending".to_string()),
             attachments: Vec::new(),
+            folder_references_json: None,
             agent_run_json: None,
             ui_state_json: None,
         },
@@ -1195,6 +1203,7 @@ fn loading_a_backend_owned_turn_joins_terminal_command_session_and_artifact_proj
         created_at: 2,
         status: Some("sent".to_string()),
         attachments: Vec::new(),
+        folder_references_json: None,
         agent_run_json: Some(stored_run.to_string()),
         ui_state_json: None,
     });
@@ -1316,6 +1325,7 @@ fn rollback_turn_preparation_removes_only_the_exact_empty_provisional_trace_and_
             created_at: 9,
             status: Some("sent".to_string()),
             attachments: Vec::new(),
+            folder_references_json: None,
             agent_run_json: None,
             ui_state_json: None,
         },
@@ -1327,6 +1337,7 @@ fn rollback_turn_preparation_removes_only_the_exact_empty_provisional_trace_and_
             created_at: 10,
             status: Some("pending".to_string()),
             attachments: Vec::new(),
+            folder_references_json: None,
             agent_run_json: None,
             ui_state_json: None,
         },
@@ -1383,6 +1394,7 @@ fn rollback_turn_preparation_refuses_to_delete_a_nonempty_or_foreign_trace() {
         created_at: 2,
         status: Some("pending".to_string()),
         attachments: Vec::new(),
+        folder_references_json: None,
         agent_run_json: None,
         ui_state_json: None,
     });
@@ -1443,6 +1455,7 @@ fn rollback_removes_only_provisional_facts_and_preserves_concurrent_metadata() {
             created_at: 9,
             status: Some("sent".to_string()),
             attachments: Vec::new(),
+            folder_references_json: None,
             agent_run_json: None,
             ui_state_json: None,
         },
@@ -1454,6 +1467,7 @@ fn rollback_removes_only_provisional_facts_and_preserves_concurrent_metadata() {
             created_at: 10,
             status: Some("pending".to_string()),
             attachments: Vec::new(),
+            folder_references_json: None,
             agent_run_json: None,
             ui_state_json: None,
         },
@@ -1530,6 +1544,7 @@ fn stale_full_conversation_snapshot_cannot_delete_an_active_turn_before_unique_c
             created_at: 2,
             status: Some("sent".to_string()),
             attachments: Vec::new(),
+            folder_references_json: None,
             agent_run_json: None,
             ui_state_json: None,
         },
@@ -1541,6 +1556,7 @@ fn stale_full_conversation_snapshot_cannot_delete_an_active_turn_before_unique_c
             created_at: 3,
             status: Some("pending".to_string()),
             attachments: Vec::new(),
+            folder_references_json: None,
             agent_run_json: None,
             ui_state_json: None,
         },
@@ -1580,6 +1596,7 @@ fn stale_full_conversation_snapshot_cannot_delete_an_active_turn_before_unique_c
             created_at: 2,
             status: Some("sent".to_string()),
             attachments: Vec::new(),
+            folder_references_json: None,
             agent_run_json: None,
             ui_state_json: None,
         },
@@ -1591,6 +1608,7 @@ fn stale_full_conversation_snapshot_cannot_delete_an_active_turn_before_unique_c
             created_at: 3,
             status: Some("pending".to_string()),
             attachments: Vec::new(),
+            folder_references_json: None,
             agent_run_json: None,
             ui_state_json: None,
         },
@@ -1673,6 +1691,7 @@ fn completed_turn_revision_fences_a_cross_host_stale_full_snapshot() {
             created_at: 2,
             status: Some("sent".to_string()),
             attachments: Vec::new(),
+            folder_references_json: None,
             agent_run_json: None,
             ui_state_json: None,
         },
@@ -1684,6 +1703,7 @@ fn completed_turn_revision_fences_a_cross_host_stale_full_snapshot() {
             created_at: 3,
             status: Some("pending".to_string()),
             attachments: Vec::new(),
+            folder_references_json: None,
             agent_run_json: None,
             ui_state_json: None,
         },
@@ -1749,6 +1769,7 @@ fn completed_turn_revision_fences_a_cross_host_stale_full_snapshot() {
             created_at: 2,
             status: Some("sent".to_string()),
             attachments: Vec::new(),
+            folder_references_json: None,
             agent_run_json: None,
             ui_state_json: None,
         },
@@ -1760,6 +1781,7 @@ fn completed_turn_revision_fences_a_cross_host_stale_full_snapshot() {
             created_at: 3,
             status: Some("pending".to_string()),
             attachments: Vec::new(),
+            folder_references_json: None,
             agent_run_json: None,
             ui_state_json: None,
         },
@@ -1828,6 +1850,7 @@ fn turn_commit_rechecks_graph_identity_and_lifecycle_inside_the_write_transactio
         created_at: 2,
         status: Some("pending".to_string()),
         attachments: Vec::new(),
+        folder_references_json: None,
         agent_run_json: None,
         ui_state_json: None,
     });
@@ -1904,6 +1927,7 @@ fn root_permission_snapshot_is_atomic_with_turn_admission_and_survives_reopen() 
         created_at: 2,
         status: Some("pending".to_string()),
         attachments: Vec::new(),
+        folder_references_json: None,
         agent_run_json: None,
         ui_state_json: None,
     });
@@ -2258,6 +2282,7 @@ fn conversation_fork_clones_exact_history_archives_and_rewrites_trace_refs() {
                     created_at: 1,
                     status: Some("sent".to_string()),
                     attachments: Vec::new(),
+                    folder_references_json: None,
                     agent_run_json: None,
                     ui_state_json: None,
                 },
@@ -2269,6 +2294,7 @@ fn conversation_fork_clones_exact_history_archives_and_rewrites_trace_refs() {
                     created_at: 2,
                     status: Some("sent".to_string()),
                     attachments: Vec::new(),
+                    folder_references_json: None,
                     agent_run_json: None,
                     ui_state_json: None,
                 },
@@ -3012,6 +3038,7 @@ fn agent_tree_fork_rejects_an_active_member_command_without_partial_target_state
                     created_at,
                     status: Some("sent".to_string()),
                     attachments: Vec::new(),
+                    folder_references_json: None,
                     agent_run_json: None,
                     ui_state_json: None,
                 },
@@ -3023,6 +3050,7 @@ fn agent_tree_fork_rejects_an_active_member_command_without_partial_target_state
                     created_at: fork_boundary_at,
                     status: Some("sent".to_string()),
                     attachments: Vec::new(),
+                    folder_references_json: None,
                     agent_run_json: Some(
                         serde_json::json!({
                             "runId": "run-active-member-tree-root",
@@ -3404,6 +3432,7 @@ fn save_forkable_command_conversation(service: &StorageService, conversation_id:
                 created_at,
                 status: Some("sent".to_string()),
                 attachments: Vec::new(),
+                folder_references_json: None,
                 agent_run_json: (role == "assistant").then(|| {
                     serde_json::json!({
                         "runId": format!("run-{conversation_id}-{suffix}"),
@@ -3527,6 +3556,7 @@ fn conversation_fork_clones_all_visible_turn_diffs_and_supports_recursive_forks(
         created_at,
         status: Some("sent".to_string()),
         attachments: Vec::new(),
+        folder_references_json: None,
         agent_run_json: run_id.map(|run_id| {
             serde_json::json!({
                 "runId": run_id,
@@ -4024,6 +4054,7 @@ fn deleting_messages_keeps_usage_totals_via_rollup() {
         created_at: 2,
         status: Some("sent".to_string()),
         attachments: Vec::new(),
+        folder_references_json: None,
         agent_run_json: None,
         ui_state_json: None,
     });

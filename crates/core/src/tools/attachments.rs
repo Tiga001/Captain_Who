@@ -504,6 +504,7 @@ mod tests {
                 project_id: None,
                 conversation_attachments: Vec::new(),
                 project_attachments: vec![shared],
+                folder_references: Vec::new(),
             }),
             permissions: AgentPermissions {
                 read: AgentReadPermission::WorkspaceOnly,
@@ -757,6 +758,7 @@ mod tests {
             project_id: Some("project-1".to_string()),
             workspace: None,
             attachment_library: Some(AgentAttachmentLibraryContext {
+                folder_references: Vec::new(),
                 root_path: Some("/attachment-library".to_string()),
                 conversation_id: Some("conversation-1".to_string()),
                 project_id: Some("project-1".to_string()),

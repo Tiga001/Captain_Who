@@ -234,6 +234,7 @@ pub(super) fn turn_input(model_id: &str) -> AgentConversationTurnInput {
         context_window_indicator_enabled: true,
         content: "Verify the frozen provider profile".to_string(),
         attachments: Vec::new(),
+        folder_references: Vec::new(),
         skills: Vec::new(),
         title: None,
         user_message_id: Some("user-provider-profile".to_string()),
@@ -998,6 +999,7 @@ async fn rewrite_turn_is_atomic_replayable_and_runs_with_only_the_active_context
                 created_at: 20,
                 status: Some("sent".to_string()),
                 attachments: Vec::new(),
+                folder_references_json: None,
                 agent_run_json: None,
                 ui_state_json: None,
             }],
@@ -1068,6 +1070,7 @@ fn rewrite_pre_runtime_failure_is_fail_closed_then_replays_the_failed_terminal()
                 created_at: 1,
                 status: Some("sent".to_string()),
                 attachments: Vec::new(),
+                folder_references_json: None,
                 agent_run_json: None,
                 ui_state_json: None,
             }],
@@ -1098,6 +1101,7 @@ fn rewrite_pre_runtime_failure_is_fail_closed_then_replays_the_failed_terminal()
         created_at: 2,
         status: Some("pending".to_string()),
         attachments: Vec::new(),
+        folder_references_json: None,
         agent_run_json: None,
         ui_state_json: None,
     });
@@ -1152,6 +1156,7 @@ fn rewrite_pre_runtime_failure_is_fail_closed_then_replays_the_failed_terminal()
         created_at: 4,
         status: Some("sent".to_string()),
         attachments: Vec::new(),
+        folder_references_json: None,
         agent_run_json: None,
         ui_state_json: None,
     };
@@ -1163,6 +1168,7 @@ fn rewrite_pre_runtime_failure_is_fail_closed_then_replays_the_failed_terminal()
         created_at: 5,
         status: Some("pending".to_string()),
         attachments: Vec::new(),
+        folder_references_json: None,
         agent_run_json: None,
         ui_state_json: None,
     };
@@ -1334,6 +1340,7 @@ async fn reopened_assistant_and_provider_transition_forks_complete_human_turns()
                         created_at: 1,
                         status: Some("sent".to_string()),
                         attachments: Vec::new(),
+                        folder_references_json: None,
                         agent_run_json: None,
                         ui_state_json: None,
                     },
@@ -1347,6 +1354,7 @@ async fn reopened_assistant_and_provider_transition_forks_complete_human_turns()
                         attachments: Vec::new(),
                         // This raw row intentionally has no renderer Timeline. The durable Trace
                         // below makes the Fork view richer than its immutable persisted snapshot.
+                        folder_references_json: None,
                         agent_run_json: None,
                         ui_state_json: None,
                     },
@@ -2453,6 +2461,7 @@ async fn recovered_unknown_child_releases_startup_permit_and_accepts_a_later_fol
         created_at: admitted_at + 1,
         status: Some("pending".to_string()),
         attachments: Vec::new(),
+        folder_references_json: None,
         agent_run_json: None,
         ui_state_json: None,
     });

@@ -54,6 +54,7 @@ fn committed_runtime_compaction_baseline(
     let summary = request.draft.clone().finish(&request.prefix).unwrap();
     assert_eq!(summary.covered_through, request.prefix.covered_through);
     let mut state = create_conversation_context_state(AgentChatInput {
+        folder_references: Vec::new(),
         context_compaction_summary: Some(summary),
         messages: vec![current_user.clone()],
         ..template.clone()
@@ -237,6 +238,7 @@ async fn run_durable_compaction_with_output_policy(max_tokens: Option<u32>, wind
         approval_decision: None,
         tool_continuation: None,
         attachments: Vec::new(),
+        folder_references: Vec::new(),
         resume_checkpoint: None,
         assistant_message_id: Some("assistant-current".to_string()),
         context_compaction_summary: None,
@@ -301,6 +303,7 @@ async fn run_durable_compaction_with_output_policy(max_tokens: Option<u32>, wind
         created_at: 1,
     };
     let mut compacted_state = create_conversation_context_state(AgentChatInput {
+        folder_references: Vec::new(),
         context_compaction_summary: Some(compacted_summary),
         messages: vec![current_user.clone()],
         ..input.clone()
@@ -359,6 +362,7 @@ async fn run_durable_compaction_with_output_policy(max_tokens: Option<u32>, wind
                         client_message_id: "client-during-compaction".to_string(),
                         content: "Preserve this constraint across compaction.".to_string(),
                         attachments: vec![attachment],
+                        folder_references: Vec::new(),
                         attachment_library: Some(library),
                         created_at: 42,
                     })
@@ -808,6 +812,7 @@ async fn recursive_compaction_starts_when_the_assembled_system_summary_is_alread
         approval_decision: None,
         tool_continuation: None,
         attachments: Vec::new(),
+        folder_references: Vec::new(),
         resume_checkpoint: None,
         assistant_message_id: Some("assistant-current".to_string()),
         context_compaction_summary: Some(previous_summary.clone()),
@@ -1090,6 +1095,7 @@ async fn context_capacity_guard_rejects_the_initial_request_before_network_io() 
         approval_decision: None,
         tool_continuation: None,
         attachments: Vec::new(),
+        folder_references: Vec::new(),
         resume_checkpoint: None,
         assistant_message_id: None,
         context_compaction_summary: None,
@@ -1278,6 +1284,7 @@ async fn context_capacity_guard_accepts_budgeted_tool_results_for_the_next_reque
         approval_decision: None,
         tool_continuation: None,
         attachments: Vec::new(),
+        folder_references: Vec::new(),
         resume_checkpoint: None,
         assistant_message_id: None,
         context_compaction_summary: None,
@@ -1666,6 +1673,7 @@ async fn streams_apply_patch_previews_end_to_end_without_persisting_them() {
         approval_decision: None,
         tool_continuation: None,
         attachments: Vec::new(),
+        folder_references: Vec::new(),
         resume_checkpoint: None,
         assistant_message_id: Some("assistant-preview".to_string()),
         context_compaction_summary: None,

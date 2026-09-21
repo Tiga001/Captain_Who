@@ -38,7 +38,7 @@ impl AgentTool for ReadFileTool {
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "path": { "type": "string", "description": "Regular UTF-8 text file: workspace-relative only when a workspace is bound; otherwise use an authorized absolute path or @home/@desktop/@documents/@downloads. Also accepts exact @attachments/... readPath, browser-download:... or published artifact://... references, subject to read permission and ownership. For directories use workspace_map.focusPath." },
+                    "path": { "type": "string", "description": "Regular UTF-8 text file: workspace-relative only when a workspace is bound; selected read-only folders use @folders/<id>/relative/path; otherwise use an authorized absolute path or @home/@desktop/@documents/@downloads. Also accepts exact @attachments/... readPath, browser-download:... or published artifact://... references, subject to read permission and ownership. For directories use workspace_map.focusPath." },
                     "startLine": { "type": "integer", "minimum": 1, "description": "Optional 1-based first line. Omit to start at the beginning." },
                     "startByte": { "type": "integer", "minimum": 0, "description": "Copy nextStartByte from the preceding truncated page; pair with expectedRevision, never startLine." },
                     "expectedRevision": { "type": "string", "description": "Use only with startByte. Copy the preceding page's exact revision to prevent mixing file versions; if changed, reread from the beginning." },

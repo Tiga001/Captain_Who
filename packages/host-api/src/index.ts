@@ -92,6 +92,9 @@ import type {
   AgentUsageSummaryOutput,
   AttachmentInputPayload,
   AttachmentSelectInputRequest,
+  AgentFolderReference,
+  FolderLoadFromPathsRequest,
+  FolderSelectInputRequest,
   AutomationAttentionAcknowledgeInput,
   AutomationAttentionAcknowledgeOutput,
   AutomationAttentionSummaryInput,
@@ -259,7 +262,15 @@ import type {
 export { HOST_CHANNELS } from './channels'
 
 export interface AttachmentsHostApi {
+  /**
+   * Resolve the native path for a dropped File in the Electron preload. Electron 32+
+   * intentionally removes File.path from renderer File objects; the implementation uses
+   * webUtils.getPathForFile and never sends the File bytes over IPC.
+   */
+  getPathForFile(file: File): string
   selectInputAttachments(request: AttachmentSelectInputRequest): Promise<AttachmentInputPayload[]>
+  selectInputFolders(request?: FolderSelectInputRequest): Promise<AgentFolderReference[]>
+  loadInputFoldersFromPaths(request: FolderLoadFromPathsRequest): Promise<AgentFolderReference[]>
   beginImport(input: AttachmentImportMetadata): Promise<AttachmentImportHandle>
   appendImport(input: AttachmentImportChunk): Promise<{ receivedBytes: number }>
   finishImport(input: AttachmentImportHandle): Promise<AttachmentInputPayload>

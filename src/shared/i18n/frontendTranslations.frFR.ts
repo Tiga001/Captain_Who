@@ -1178,6 +1178,7 @@ export const frFRTranslations = {
   'chat.removeAttachment': 'Supprimer la pièce jointe',
   'chat.addMenuTitle': 'Ajouter',
   'chat.addFile': 'Fichiers',
+  'chat.addFolder': 'Dossier',
   'chat.addImage': 'Images',
   'chat.skills': 'Compétences',
   'chat.workspaceSkill': 'Compétence en espace de travail',

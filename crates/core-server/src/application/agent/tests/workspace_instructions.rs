@@ -45,6 +45,7 @@ impl InstructionsFixture {
                 context_window_indicator_enabled: true,
                 content: "遵守项目约定。".to_string(),
                 attachments: Vec::new(),
+                folder_references: Vec::new(),
                 skills: Vec::new(),
                 title: None,
                 user_message_id: Some("user-workspace-instructions".to_string()),

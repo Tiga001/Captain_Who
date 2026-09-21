@@ -13,6 +13,7 @@ export function consumeSubmittedDraft(
     ...current,
     message: '',
     attachments: [],
+    folderReferences: [],
     skills: [],
     modelId: options.modelId,
     permissionMode: options.permissionMode,
@@ -31,6 +32,7 @@ export function restoreRejectedDraft(
     (consumed || current.updatedAt !== submitted.updatedAt) &&
     (current.message.trim().length > 0 ||
       current.attachments.length > 0 ||
+      (current.folderReferences?.length ?? 0) > 0 ||
       current.skills.length > 0)
   const now = Date.now()
   return {
@@ -46,6 +48,7 @@ export function restoreRejectedDraft(
             clientMessageId: createId('guidance'),
             content: buildMessageContentWithAttachments(current.message, current.attachments),
             attachments: current.attachments,
+            folderReferences: current.folderReferences ?? [],
             skills: current.skills,
             modelId: current.modelId,
             permissionMode: current.permissionMode,

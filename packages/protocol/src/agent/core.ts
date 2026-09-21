@@ -6,6 +6,7 @@ import type {
   AgentCommandSessionStatus
 } from './command'
 import type { AgentInputAttachmentKind, AgentToolCall } from './conversation'
+import type { AgentFolderReference } from '../attachments'
 import type { AgentContextCompactionEventOutcome } from './events'
 
 /**
@@ -389,6 +390,7 @@ export type ConversationTurnTraceItem =
       clientMessageId: string
       content: string
       attachments: ConversationTraceAttachment[]
+      folderReferences?: AgentFolderReference[]
       createdAt: number
       truncated: boolean
     }

@@ -1756,6 +1756,7 @@ fn message(
         created_at,
         status: status.map(ToString::to_string),
         attachments: Vec::new(),
+        folder_references_json: None,
         agent_run_json: None,
         ui_state_json: None,
     }

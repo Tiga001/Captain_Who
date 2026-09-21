@@ -1169,6 +1169,7 @@ mod tests {
                 client_message_id: "client".into(),
                 content: "new-guidance".into(),
                 attachments: Vec::new(),
+                folder_references: Vec::new(),
                 created_at: 1,
                 truncated: false,
             },

@@ -1071,6 +1071,7 @@ pub(super) fn resolve_provider_transition_target(
     let prompt_preferences =
         agent_prompt_preferences_from_record(storage.load_agent_prompt_preferences()?);
     let generator_input = AgentChatInput {
+        folder_references: Vec::new(),
         context_image_attachments: Vec::new(),
         api_url: connection.api_url,
         api_token: connection.api_token,

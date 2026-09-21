@@ -3,6 +3,7 @@ use crate::cancellation::AgentCancellationToken;
 use crate::protocol::{
     AgentError, AgentResult, AgentToolDefinition, AgentToolResult, AgentToolSafety,
 };
+use crate::resource_locator::ResourceLocator;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::cmp::Reverse;
@@ -32,13 +33,13 @@ impl AgentTool for WorkspaceMapTool {
     fn definition(&self) -> AgentToolDefinition {
         AgentToolDefinition {
             name: "workspace_map".to_string(),
-            description: "Summarize an authorized directory structure: bounded file tree, language statistics, important files, entrypoint candidates, tests, and documentation candidates without reading file contents. Defaults to the workspace root when one exists; external paths require the corresponding read permission.".to_string(),
+            description: "Summarize an authorized directory structure: bounded file tree, language statistics, important files, entrypoint candidates, tests, and documentation candidates without reading file contents. Defaults to the workspace root when one exists; selected read-only folders use @folders/<id>[/relative].".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "focusPath": {
                         "type": "string",
-                        "description": "Optional workspace-relative or absolute directory, or @home/@desktop/@documents/@downloads. Defaults to the workspace root when one exists. Availability depends on the current read permission."
+                        "description": "Optional workspace-relative or absolute directory, @folders/<id>[/relative], or @home/@desktop/@documents/@downloads. Defaults to the workspace root when one exists. Availability depends on the current read permission."
                     },
                     "maxDepth": {
                         "type": "integer",
@@ -107,6 +108,7 @@ impl AgentTool for WorkspaceMapTool {
         let display_root = containing_root.as_deref().unwrap_or(focus_root.as_path());
 
         let walk = walk_workspace_with_cancellation(&focus_root, &cancellation_token)?;
+        context.validate_folder_path(args.focus_path.as_deref().unwrap_or("."))?;
         let mut summary = build_summary(
             display_root,
             &focus_root,
@@ -122,7 +124,23 @@ impl AgentTool for WorkspaceMapTool {
             include_files,
             &cancellation_token,
         )?;
-        if containing_root.is_some() {
+        // Folder references are external to the workspace resolver. Keep their opaque namespace
+        // on every returned path so the model can feed a directory entry back to read_file.
+        let folder_namespace = args
+            .focus_path
+            .as_deref()
+            .and_then(|path| ResourceLocator::parse(path).ok())
+            .and_then(|locator| match locator {
+                ResourceLocator::Folder(value) => Some(value),
+                _ => None,
+            });
+        if let Some(namespace) = folder_namespace.as_deref() {
+            qualify_folder_map_paths(&mut summary, namespace);
+            for entry in &mut tree.entries {
+                qualify_folder_map_paths(entry, namespace);
+            }
+        }
+        if folder_namespace.is_none() && containing_root.is_some() {
             qualify_workspace_map_paths(&mut summary, &resolver, display_root);
             for entry in &mut tree.entries {
                 qualify_workspace_map_paths(entry, &resolver, display_root);
@@ -176,6 +194,33 @@ impl AgentTool for WorkspaceMapTool {
             )
         });
         super::model_projection::compact_model_result(result, projected)
+    }
+}
+
+fn qualify_folder_map_paths(value: &mut Value, namespace: &str) {
+    match value {
+        Value::Object(object) => {
+            for (key, value) in object {
+                if key == "path" {
+                    if let Some(path) = value.as_str() {
+                        let suffix = path.trim_matches('/');
+                        *value = if suffix.is_empty() || suffix == "." {
+                            json!(namespace)
+                        } else {
+                            json!(format!("{namespace}/{suffix}"))
+                        };
+                    }
+                } else {
+                    qualify_folder_map_paths(value, namespace);
+                }
+            }
+        }
+        Value::Array(values) => {
+            for value in values {
+                qualify_folder_map_paths(value, namespace);
+            }
+        }
+        _ => {}
     }
 }
 

@@ -206,6 +206,7 @@ impl Fixture {
                     context_window_indicator_enabled: false,
                     content,
                     attachments: Vec::new(),
+                    folder_references: Vec::new(),
                     skills: Vec::new(),
                     title: None,
                     user_message_id: Some(format!("user-async-human-input{suffix}")),

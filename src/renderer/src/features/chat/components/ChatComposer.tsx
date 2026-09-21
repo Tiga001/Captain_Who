@@ -36,7 +36,10 @@ import { useDismissOnOutsidePointer } from '../../../hooks/useDismissOnOutsidePo
 import {
   buildAgentInputAttachments,
   composerAttachmentFromAgentAttachment,
+  getComposerDroppedFilePath,
   loadComposerAttachmentImage,
+  loadComposerFoldersFromPaths,
+  selectComposerFolders,
   stripAttachmentSummary
 } from '../chatAttachments'
 import type { ComposerAttachmentKind } from '../chatAttachments'
@@ -58,6 +61,7 @@ import {
 import { useSkillCatalog } from '../../skills/useSkillCatalog'
 import { ContextWindowIndicator } from './ContextWindowIndicator'
 import { ComposerAttachments } from './ComposerAttachments'
+import { ComposerFolderReferences } from './ComposerFolderReferences'
 import { ComposerSelectedSkills, ComposerSkillPicker } from './ComposerSkillPicker'
 import { GuidanceQueue } from './GuidanceQueue'
 import { useImagePreview } from './ImagePreview'
@@ -308,7 +312,9 @@ export function ChatComposer({
   )
   const hasImageAttachment = attachments.some((attachment) => attachment.kind === 'image')
   const hasUnsupportedImageAttachment = hasImageAttachment && !selectedModel?.supportsImage
-  const hasSendableContent = message.trim().length > 0 || attachments.length > 0
+  const folderReferences = draft.folderReferences ?? []
+  const hasSendableContent =
+    message.trim().length > 0 || attachments.length > 0 || folderReferences.length > 0
   const hasInvalidSkillSelection = hasStaleSkillSelection || hasUnavailableSkillSelection
   const canSend =
     hasSendableContent &&
@@ -641,6 +647,7 @@ export function ChatComposer({
     const submitOptions: ChatSubmitOptions = {
       draftSnapshot: submittedDraft,
       attachments: inputAttachments,
+      folderReferences: submittedDraft.folderReferences ?? [],
       modelId: selectedModel?.id ?? selectedModelId,
       permissionMode,
       projectId: selectedProject?.id ?? null,
@@ -654,6 +661,10 @@ export function ChatComposer({
         message: currentDraft.message === submittedDraft.message ? '' : currentDraft.message,
         attachments:
           currentDraft.attachments === submittedDraft.attachments ? [] : currentDraft.attachments,
+        folderReferences:
+          currentDraft.folderReferences === submittedDraft.folderReferences
+            ? []
+            : currentDraft.folderReferences,
         queuedMessages: [
           ...draftRef.current.queuedMessages,
           {
@@ -661,6 +672,7 @@ export function ChatComposer({
             clientMessageId: `guidance-${createdAt}-${Math.random().toString(36).slice(2, 10)}`,
             content: messageContent,
             attachments: inputAttachments ?? [],
+            folderReferences: submittedDraft.folderReferences ?? [],
             modelId: submitOptions.modelId,
             permissionMode: submitOptions.permissionMode,
             projectId: submitOptions.projectId,
@@ -706,6 +718,14 @@ export function ChatComposer({
     })
   }
 
+  const removeFolderReference = (folderId: string) => {
+    updateDraft({
+      folderReferences: (draftRef.current.folderReferences ?? []).filter(
+        (folder) => folder.id !== folderId
+      )
+    })
+  }
+
   const deleteQueuedMessage = (messageId: string) => {
     updateDraft({
       queuedMessages: draftRef.current.queuedMessages.filter((message) => message.id !== messageId)
@@ -722,6 +742,7 @@ export function ChatComposer({
     updateDraft({
       message: stripAttachmentSummary(queuedMessage.content, queuedMessage.attachments),
       attachments: queuedMessage.attachments,
+      folderReferences: queuedMessage.folderReferences ?? [],
       queuedMessages: draftRef.current.queuedMessages.filter((message) => message.id !== messageId)
     })
     window.requestAnimationFrame(() => textareaRef.current?.focus())
@@ -775,10 +796,64 @@ export function ChatComposer({
     await attachmentImports.select(kind)
   }
 
+  const addFolders = async () => {
+    setAttachmentError(null)
+    setIsAttachmentMenuOpen(false)
+    try {
+      const selected = await selectComposerFolders()
+      const existing = new Set(
+        (draftRef.current.folderReferences ?? []).map((folder) => folder.rootPath ?? folder.id)
+      )
+      const additions = selected.filter((folder) => !existing.has(folder.rootPath ?? folder.id))
+      if (additions.length > 0) {
+        updateDraft({
+          folderReferences: [...(draftRef.current.folderReferences ?? []), ...additions]
+        })
+      }
+    } catch (error) {
+      setAttachmentError(getUserFacingErrorMessage(error, t, 'chat.attachmentOperationFailed'))
+    }
+  }
+
   const addDroppedOrPastedFiles = async (files: FileList | File[]) => {
     if (files.length === 0) return
     setAttachmentError(null)
     await attachmentImports.addFiles(files)
+  }
+
+  const addDroppedItems = async (dataTransfer: DataTransfer) => {
+    const folderPaths = Array.from(dataTransfer.items)
+      .filter((item) => item.kind === 'file')
+      .map((item) => {
+        const file = item.getAsFile()
+        const entry = (
+          item as DataTransferItem & { webkitGetAsEntry?: () => FileSystemEntry | null }
+        ).webkitGetAsEntry?.()
+        return entry?.isDirectory && file ? getComposerDroppedFilePath(file) : undefined
+      })
+      .filter((path): path is string => Boolean(path))
+      .filter((path, index, paths) => paths.indexOf(path) === index)
+    if (folderPaths.length > 0) {
+      try {
+        const selected = await loadComposerFoldersFromPaths(folderPaths)
+        const existing = new Set(
+          (draftRef.current.folderReferences ?? []).map((folder) => folder.rootPath ?? folder.id)
+        )
+        const additions = selected.filter((folder) => !existing.has(folder.rootPath ?? folder.id))
+        if (additions.length > 0) {
+          updateDraft({
+            folderReferences: [...(draftRef.current.folderReferences ?? []), ...additions]
+          })
+        }
+      } catch (error) {
+        setAttachmentError(getUserFacingErrorMessage(error, t, 'chat.attachmentOperationFailed'))
+      }
+    }
+    const files = Array.from(dataTransfer.files).filter((file) => {
+      const path = getComposerDroppedFilePath(file)
+      return !path || !folderPaths.includes(path)
+    })
+    if (files.length > 0) await addDroppedOrPastedFiles(files)
   }
 
   const handleSelectProjectDirectory = async () => {
@@ -895,10 +970,10 @@ export function ChatComposer({
         }}
         onDrop={(event) => {
           if (isModelTransitionRunning) return
-          if (event.dataTransfer.files.length === 0) return
+          if (event.dataTransfer.files.length === 0 && event.dataTransfer.items.length === 0) return
           event.preventDefault()
           setIsFileDragActive(false)
-          void addDroppedOrPastedFiles(event.dataTransfer.files)
+          void addDroppedItems(event.dataTransfer)
         }}
         onPaste={(event) => {
           commandTriggerRef.current = false
@@ -910,59 +985,69 @@ export function ChatComposer({
           void addDroppedOrPastedFiles(event.clipboardData.files)
         }}
       >
-        {(attachments.length > 0 || attachmentImports.pending.length > 0) && (
-          <ComposerAttachments
-            attachments={[...attachments, ...attachmentImports.pending]}
-            label={t('chat.attachments')}
-            removeLabel={t('chat.removeAttachment')}
-            cancelLabel={t('project.cancel')}
-            retryLabel={t('files.retry')}
-            failedLabel={t('chat.attachmentOperationFailed')}
-            onRetry={(id) => void attachmentImports.retry(id)}
-            onRemove={(id) => {
-              if (attachmentImports.pending.some((attachment) => attachment.id === id))
-                attachmentImports.cancel(id)
-              else removeAttachment(id)
-            }}
-            onPreview={openImagePreview}
-            onPreviewAttachment={(id) => {
-              const attachment = attachments.find((item) => item.id === id)
-              if (!attachment) return
-              const requestId = ++attachmentPreviewRequestRef.current
-              const scope = resetKey
-              const projectId = draft.projectId
-              void loadComposerAttachmentImage(attachment.agentAttachment)
-                .then((src) => {
-                  if (
-                    attachmentPreviewRequestRef.current !== requestId ||
-                    previousResetKeyRef.current !== scope ||
-                    draftRef.current.projectId !== projectId
-                  )
-                    return
-                  const imageSource = src ?? attachment.previewUrl
-                  if (imageSource)
-                    openImagePreview({
-                      alt: attachment.name,
-                      fileName: attachment.name,
-                      src: imageSource
-                    })
-                })
-                .catch(() => {
-                  if (
-                    attachmentPreviewRequestRef.current === requestId &&
-                    previousResetKeyRef.current === scope &&
-                    draftRef.current.projectId === projectId &&
-                    attachment.previewUrl
-                  ) {
-                    openImagePreview({
-                      alt: attachment.name,
-                      fileName: attachment.name,
-                      src: attachment.previewUrl
-                    })
-                  }
-                })
-            }}
-          />
+        {(folderReferences.length > 0 ||
+          attachments.length > 0 ||
+          attachmentImports.pending.length > 0) && (
+          <>
+            <ComposerFolderReferences
+              folders={folderReferences}
+              label={t('chat.attachments')}
+              removeLabel={t('chat.removeAttachment')}
+              onRemove={removeFolderReference}
+            />
+            <ComposerAttachments
+              attachments={[...attachments, ...attachmentImports.pending]}
+              label={t('chat.attachments')}
+              removeLabel={t('chat.removeAttachment')}
+              cancelLabel={t('project.cancel')}
+              retryLabel={t('files.retry')}
+              failedLabel={t('chat.attachmentOperationFailed')}
+              onRetry={(id) => void attachmentImports.retry(id)}
+              onRemove={(id) => {
+                if (attachmentImports.pending.some((attachment) => attachment.id === id))
+                  attachmentImports.cancel(id)
+                else removeAttachment(id)
+              }}
+              onPreview={openImagePreview}
+              onPreviewAttachment={(id) => {
+                const attachment = attachments.find((item) => item.id === id)
+                if (!attachment) return
+                const requestId = ++attachmentPreviewRequestRef.current
+                const scope = resetKey
+                const projectId = draft.projectId
+                void loadComposerAttachmentImage(attachment.agentAttachment)
+                  .then((src) => {
+                    if (
+                      attachmentPreviewRequestRef.current !== requestId ||
+                      previousResetKeyRef.current !== scope ||
+                      draftRef.current.projectId !== projectId
+                    )
+                      return
+                    const imageSource = src ?? attachment.previewUrl
+                    if (imageSource)
+                      openImagePreview({
+                        alt: attachment.name,
+                        fileName: attachment.name,
+                        src: imageSource
+                      })
+                  })
+                  .catch(() => {
+                    if (
+                      attachmentPreviewRequestRef.current === requestId &&
+                      previousResetKeyRef.current === scope &&
+                      draftRef.current.projectId === projectId &&
+                      attachment.previewUrl
+                    ) {
+                      openImagePreview({
+                        alt: attachment.name,
+                        fileName: attachment.name,
+                        src: attachment.previewUrl
+                      })
+                    }
+                  })
+              }}
+            />
+          </>
         )}
 
         <ComposerSelectedSkills
@@ -1122,6 +1207,10 @@ export function ChatComposer({
                   <button type="button" role="menuitem" onClick={() => void addAttachments('file')}>
                     <Paperclip aria-hidden="true" />
                     <span>{t('chat.addFile')}</span>
+                  </button>
+                  <button type="button" role="menuitem" onClick={() => void addFolders()}>
+                    <Folder aria-hidden="true" />
+                    <span>{t('chat.addFolder')}</span>
                   </button>
                   <button
                     type="button"

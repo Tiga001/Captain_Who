@@ -1,6 +1,7 @@
 import type {
   CredentialMutation,
   CredentialStatus,
+  AgentFolderReference,
   AgentInputAttachment,
   AgentPermissions,
   AgentPromptPreferences
@@ -584,6 +585,7 @@ function mapMessageFromStorage(message: StorageChatMessageRecord): ChatMessage {
     createdAt: message.createdAt,
     status: normalizeMessageStatus(message.status),
     attachments: message.attachments?.map(mapMessageAttachmentFromStorage),
+    folderReferences: parseFolderReferences(message.folderReferencesJson),
     agentRun,
     uiState: parseJson<ChatMessageUiState>(message.uiStateJson)
   }
@@ -597,6 +599,7 @@ function mapMessageToStorage(message: ChatMessage): StorageChatMessageWriteRecor
     createdAt: message.createdAt,
     status: message.status ?? null,
     attachments: [],
+    folderReferencesJson: JSON.stringify(message.folderReferences ?? []),
     agentRunJson: stringifyAgentRun(message.agentRun),
     uiStateJson: stringifyJson(message.uiState)
   }
@@ -642,6 +645,7 @@ function mapDraftFromStorage(draft: StorageComposerDraftRecord): ChatComposerDra
     modelId: draft.modelId ?? '',
     projectId: draft.projectId ?? null,
     attachments: parseDraftAttachments(draft.attachmentsJson),
+    folderReferences: parseFolderReferences(draft.folderReferencesJson),
     skills: parseDraftSkills(draft.skillsJson),
     queuedMessages: parseQueuedMessages(draft.queuedMessagesJson),
     updatedAt: draft.updatedAt
@@ -656,6 +660,7 @@ function mapDraftToStorage(scopeId: string, draft: ChatComposerDraft): StorageCo
     modelId: draft.modelId || null,
     projectId: draft.projectId,
     attachmentsJson: JSON.stringify(draft.attachments),
+    folderReferencesJson: JSON.stringify(draft.folderReferences ?? []),
     skillsJson: JSON.stringify(normalizeSkillSelections(draft.skills)),
     queuedMessagesJson: JSON.stringify(draft.queuedMessages),
     updatedAt: draft.updatedAt
@@ -774,7 +779,7 @@ function parseDraftAttachments(value: string): AgentInputAttachment[] {
       !isExactRecord(
         candidate,
         ['id', 'kind', 'name', 'sizeBytes', 'encoding', 'data'],
-        ['mimeType', 'truncated']
+        ['mimeType', 'contentSha256', 'truncated']
       ) ||
       typeof candidate.id !== 'string' ||
       (candidate.kind !== 'file' && candidate.kind !== 'image') ||
@@ -784,11 +789,51 @@ function parseDraftAttachments(value: string): AgentInputAttachment[] {
       (candidate.sizeBytes as number) < 0 ||
       candidate.encoding !== 'managed' ||
       typeof candidate.data !== 'string' ||
+      (candidate.contentSha256 !== undefined &&
+        (typeof candidate.contentSha256 !== 'string' ||
+          !/^sha256:[0-9a-f]{64}$/u.test(candidate.contentSha256))) ||
       (candidate.truncated !== undefined && typeof candidate.truncated !== 'boolean')
     ) {
       throw new Error(COMPOSER_DRAFT_CORRUPTION_ERROR)
     }
     return candidate as unknown as AgentInputAttachment
+  })
+}
+
+function parseFolderReferences(value: string | null | undefined): AgentFolderReference[] {
+  if (value == null || value === '') return []
+  return parseDraftArray(value).map((candidate) => {
+    const rootIdentity = isUnknownRecord(candidate) ? candidate.rootIdentity : undefined
+    const validRootIdentity =
+      rootIdentity === undefined ||
+      (isExactRecord(rootIdentity, ['kind', 'schemaVersion', 'device', 'inode']) &&
+        rootIdentity.kind === 'unix' &&
+        rootIdentity.schemaVersion === 1 &&
+        Number.isSafeInteger(rootIdentity.device) &&
+        Number.isSafeInteger(rootIdentity.inode)) ||
+      (isExactRecord(rootIdentity, ['kind', 'schemaVersion', 'volumeSerialNumber', 'fileId']) &&
+        rootIdentity.kind === 'windows' &&
+        rootIdentity.schemaVersion === 1 &&
+        Number.isSafeInteger(rootIdentity.volumeSerialNumber) &&
+        typeof rootIdentity.fileId === 'string')
+    if (
+      !isExactRecord(
+        candidate,
+        ['schemaVersion', 'id', 'name'],
+        ['rootPath', 'rootIdentity', 'status']
+      ) ||
+      candidate.schemaVersion !== 1 ||
+      typeof candidate.id !== 'string' ||
+      typeof candidate.name !== 'string' ||
+      (candidate.rootPath !== undefined && typeof candidate.rootPath !== 'string') ||
+      !validRootIdentity ||
+      (candidate.status !== undefined &&
+        candidate.status !== 'available' &&
+        candidate.status !== 'unavailable')
+    ) {
+      throw new Error(COMPOSER_DRAFT_CORRUPTION_ERROR)
+    }
+    return candidate as unknown as AgentFolderReference
   })
 }
 
@@ -826,7 +871,7 @@ function parseQueuedMessages(value: string): ChatQueuedMessage[] {
           'status',
           'createdAt'
         ],
-        ['error']
+        ['error', 'folderReferences']
       ) ||
       typeof candidate.id !== 'string' ||
       typeof candidate.clientMessageId !== 'string' ||
@@ -844,12 +889,14 @@ function parseQueuedMessages(value: string): ChatQueuedMessage[] {
       throw new Error(COMPOSER_DRAFT_CORRUPTION_ERROR)
     }
     const attachments = parseDraftAttachments(JSON.stringify(candidate.attachments))
+    const folderReferences = parseFolderReferences(JSON.stringify(candidate.folderReferences ?? []))
     const skills = parseDraftSkills(JSON.stringify(candidate.skills))
     return {
       id: candidate.id,
       clientMessageId: candidate.clientMessageId,
       content: candidate.content,
       attachments,
+      folderReferences,
       modelId: candidate.modelId,
       permissionMode: candidate.permissionMode as ChatQueuedMessage['permissionMode'],
       projectId: candidate.projectId,

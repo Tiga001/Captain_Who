@@ -531,10 +531,11 @@ impl ConversationTraceRecorder {
         client_message_id: &str,
         content: &str,
         attachments: &[AgentInputAttachment],
+        folder_references: &[crate::AgentFolderReference],
         created_at: i64,
     ) -> Option<u64> {
         let content = content.trim();
-        if (content.is_empty() && attachments.is_empty())
+        if content.is_empty() && attachments.is_empty() && folder_references.is_empty()
             || matches!(
                 self.items.last(),
                 Some(ConversationTurnTraceItem::ToolCall { .. })
@@ -551,6 +552,7 @@ impl ConversationTraceRecorder {
             client_message_id: client_message_id.to_string(),
             content,
             attachments,
+            folder_references: crate::model_folder_references(folder_references),
             created_at,
             truncated: content_redacted || attachment_redacted,
         });
@@ -1074,8 +1076,9 @@ pub(crate) fn trace_attachments_from_input(
 pub(crate) fn render_user_guidance_content(
     content: &str,
     attachments: &[ConversationTraceAttachment],
+    folder_references: &[crate::AgentFolderReference],
 ) -> String {
-    if attachments.is_empty() {
+    if attachments.is_empty() && folder_references.is_empty() {
         return content.to_string();
     }
     let attachment_list = attachments
@@ -1094,9 +1097,20 @@ pub(crate) fn render_user_guidance_content(
         })
         .collect::<Vec<_>>()
         .join("\n");
-    if content.trim().is_empty() {
-        format!("Attachments supplied with this user guidance:\n{attachment_list}")
-    } else {
-        format!("{content}\n\nAttachments supplied with this user guidance:\n{attachment_list}")
+    let mut sections = Vec::new();
+    if !content.trim().is_empty() {
+        sections.push(content.to_string());
     }
+    if !attachments.is_empty() {
+        sections.push(format!("Attachments supplied with this user guidance:\n{attachment_list}"));
+    }
+    if !folder_references.is_empty() {
+        let folder_list = folder_references
+            .iter()
+            .map(|reference| format!("- {} ({})", reference.model_path(), reference.name))
+            .collect::<Vec<_>>()
+            .join("\n");
+        sections.push(format!("Read-only folders supplied with this user guidance:\n{folder_list}"));
+    }
+    sections.join("\n\n")
 }

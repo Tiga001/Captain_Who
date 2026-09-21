@@ -886,6 +886,7 @@ mod tests {
             approval_decision: None,
             tool_continuation: None,
             attachments: Vec::new(),
+            folder_references: Vec::new(),
             resume_checkpoint: None,
             assistant_message_id: None,
             context_compaction_summary: None,

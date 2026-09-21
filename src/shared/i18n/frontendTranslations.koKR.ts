@@ -1130,6 +1130,7 @@ export const koKRTranslations = {
   'chat.removeAttachment': '첨부파일 삭제',
   'chat.addMenuTitle': '추가',
   'chat.addFile': '파일',
+  'chat.addFolder': '폴더',
   'chat.addImage': '이미지',
   'chat.skills': '기술',
   'chat.workspaceSkill': '작업 공간 기술',

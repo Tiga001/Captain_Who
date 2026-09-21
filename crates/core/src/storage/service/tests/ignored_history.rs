@@ -18,6 +18,7 @@ fn committed_binding_with_lost_reply_is_adopted_by_stale_terminal_publication_on
         created_at: 2,
         status: Some("streaming".into()),
         attachments: vec![],
+        folder_references_json: None,
         agent_run_json: None,
         ui_state_json: None,
     });

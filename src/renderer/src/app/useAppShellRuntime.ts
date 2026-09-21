@@ -512,6 +512,7 @@ export function useAppShellRuntime({
               clientMessageId: item.clientMessageId,
               content: item.content,
               attachments,
+              folderReferences: item.folderReferences ?? [],
               modelId: conversation.modelId ?? draft.modelId,
               permissionMode: draft.permissionMode,
               projectId: conversation.projectId,

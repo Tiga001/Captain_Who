@@ -296,6 +296,7 @@ impl AgentService {
         }
         let mut agent_input = AgentChatInput {
             context_image_attachments: Vec::new(),
+            folder_references: Vec::new(),
             api_url: connection.api_url,
             api_token: String::new(),
             provider_configuration_revision: Some(provider_protocol_revision),

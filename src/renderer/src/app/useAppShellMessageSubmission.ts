@@ -50,6 +50,7 @@ import {
 interface EditRewriteAttempt {
   assistantMessage: ChatMessage
   attachments: NonNullable<ChatSubmitOptions['attachments']>
+  folderReferences: NonNullable<ChatSubmitOptions['folderReferences']>
   content: string
   modelId: string
   permissionMode: ChatSubmitOptions['permissionMode']
@@ -85,6 +86,10 @@ function clearSubmittedComposerDraft(
     message: currentDraft.message === submittedDraft.message ? '' : currentDraft.message,
     attachments:
       currentDraft.attachments === submittedDraft.attachments ? [] : currentDraft.attachments,
+    folderReferences:
+      currentDraft.folderReferences === submittedDraft.folderReferences
+        ? []
+        : currentDraft.folderReferences,
     skills: currentDraft.skills === submittedDraft.skills ? [] : currentDraft.skills,
     modelId:
       currentDraft.modelId === submittedDraft.modelId ? options.modelId : currentDraft.modelId,
@@ -258,7 +263,11 @@ export function useAppShellMessageSubmission({
         ? Math.max(Date.now(), targetConversation.updatedAt + 1)
         : Date.now()
       const conversationId = targetConversation?.id ?? createId('conversation')
-      const userMessage = createUserMessage(message, options.attachments ?? [])
+      const userMessage = createUserMessage(
+        message,
+        options.attachments ?? [],
+        options.folderReferences ?? []
+      )
       const assistantMessage = createAssistantMessage('', 'pending')
       const title = createConversationTitle(message, t('chat.newConversation'))
       const conversationToSave: ChatConversation = targetConversation
@@ -335,6 +344,7 @@ export function useAppShellMessageSubmission({
           targetConversation?.projectId ?? options.projectId,
           options.permissionMode,
           options.attachments,
+          options.folderReferences,
           options.skills,
           targetConversation ? undefined : title
         )
@@ -725,6 +735,7 @@ export function useAppShellMessageSubmission({
           currentHead.content,
           {
             attachments: currentHead.attachments,
+            folderReferences: currentHead.folderReferences ?? [],
             modelId:
               transitionOutcome.status === 'ready'
                 ? transitionOutcome.modelId
@@ -907,7 +918,8 @@ export function useAppShellMessageSubmission({
       }
 
       const messageContent = buildMessageContentWithAttachments(content, attachments)
-      if (!messageContent.trim() && attachments.length === 0) {
+      const folderReferences = latestEditableTurn.userMessage.folderReferences ?? []
+      if (!messageContent.trim() && attachments.length === 0 && folderReferences.length === 0) {
         throw new Error(t('chat.emptyMessage'))
       }
       // Editing is one atomic logical replacement inside the current Conversation. Do not run a
@@ -954,6 +966,7 @@ export function useAppShellMessageSubmission({
         modelId,
         permissionMode,
         skills: editedSkillSelections,
+        folderReferences: folderReferences.map((folder) => folder.id),
         sourceAssistantMessageId: latestEditableTurn.assistantMessage.id,
         sourceUserMessageId: latestEditableTurn.userMessage.id,
         title: replacementTitle
@@ -961,10 +974,12 @@ export function useAppShellMessageSubmission({
       let rewriteAttempt = editRewriteAttemptsRef.current.get(rewriteIdentity)
       if (!rewriteAttempt) {
         const frozenAttachments = attachments.map((attachment) => ({ ...attachment }))
+        const frozenFolderReferences = folderReferences.map((folder) => ({ ...folder }))
         const frozenSkills = editedSkillSelections.map((selection) => ({ ...selection }))
         rewriteAttempt = {
           assistantMessage: createAssistantMessage('', 'pending'),
           attachments: frozenAttachments,
+          folderReferences: frozenFolderReferences,
           content,
           modelId,
           permissionMode,
@@ -974,7 +989,8 @@ export function useAppShellMessageSubmission({
           title: replacementTitle,
           userMessage: createUserMessage(
             buildMessageContentWithAttachments(content, frozenAttachments),
-            frozenAttachments
+            frozenAttachments,
+            frozenFolderReferences
           )
         }
         editRewriteAttemptsRef.current.set(rewriteIdentity, rewriteAttempt)
@@ -995,6 +1011,7 @@ export function useAppShellMessageSubmission({
           rewriteAttempt.projectId,
           rewriteAttempt.permissionMode,
           rewriteAttempt.attachments,
+          rewriteAttempt.folderReferences,
           rewriteAttempt.skills,
           rewriteAttempt.title,
           {

@@ -328,6 +328,12 @@ export function registerHostIpc(
   ipcMain.handle(HOST_CHANNELS.attachments.selectInputAttachments, (event, request) =>
     attachmentDialogBridge.selectInputAttachments(event, request)
   )
+  ipcMain.handle(HOST_CHANNELS.attachments.selectInputFolders, (event, request) =>
+    attachmentDialogBridge.selectInputFolders(event, request)
+  )
+  ipcMain.handle(HOST_CHANNELS.attachments.loadInputFoldersFromPaths, (event, request) =>
+    attachmentDialogBridge.loadInputFoldersFromPaths(event, request)
+  )
   ipcMain.handle(HOST_CHANNELS.attachments.beginImport, (_event, input) =>
     coreServer.beginAttachmentImport(input)
   )

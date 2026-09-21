@@ -2146,6 +2146,7 @@ mod tests {
                     created_at: 1,
                 }],
                 project_attachments: Vec::new(),
+                folder_references: Vec::new(),
             }),
             permissions: Default::default(),
         }))
@@ -2264,6 +2265,7 @@ mod tests {
                     created_at: 1,
                 }],
                 project_attachments: Vec::new(),
+                folder_references: Vec::new(),
             }),
             permissions: Default::default(),
         }))

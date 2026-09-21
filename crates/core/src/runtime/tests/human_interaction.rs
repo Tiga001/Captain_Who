@@ -87,6 +87,7 @@ impl AgentHumanInteractionRuntimeHost for HumanHost {
                 content: async_answer(&request_id, &response_id),
                 created_at: 1,
                 attachments: Vec::new(),
+                folder_references: Vec::new(),
                 attachment_library: None,
             })?;
         }

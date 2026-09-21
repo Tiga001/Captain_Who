@@ -111,6 +111,7 @@ fn rebinds_an_attachment_reused_by_a_new_message_without_moving_old_ownership() 
         created_at: 2,
         status: Some("pending".to_string()),
         attachments: Vec::new(),
+        folder_references_json: None,
         agent_run_json: None,
         ui_state_json: None,
     });
@@ -135,6 +136,7 @@ fn rebinds_an_attachment_reused_by_a_new_message_without_moving_old_ownership() 
                 content: "Queued guidance with attachment".to_string(),
                 status: crate::AgentGuidanceStatus::Queued,
                 attachment_ids: vec![original.id.clone()],
+                folder_references_json: "[]".to_string(),
                 applied_trace_sequence: None,
                 terminal_reason: None,
                 created_at: 10,
@@ -295,6 +297,7 @@ fn forked_conversation_owns_independent_attachment_files_and_is_idempotent() {
         created_at: 2,
         status: Some("sent".to_string()),
         attachments: Vec::new(),
+        folder_references_json: None,
         agent_run_json: Some(
             serde_json::json!({
                 "runId": "run-guidance-fork",
@@ -416,6 +419,7 @@ fn fork_clones_applied_guidance_attachments_but_not_abandoned_ones() {
         created_at: 2,
         status: Some("sent".to_string()),
         attachments: Vec::new(),
+        folder_references_json: None,
         agent_run_json: None,
         ui_state_json: None,
     });
@@ -449,6 +453,7 @@ fn fork_clones_applied_guidance_attachments_but_not_abandoned_ones() {
                 content: "Applied guidance.".to_string(),
                 status: crate::AgentGuidanceStatus::Queued,
                 attachment_ids: vec![applied.id.clone()],
+                folder_references_json: "[]".to_string(),
                 applied_trace_sequence: None,
                 terminal_reason: None,
                 created_at: 3,
@@ -466,6 +471,7 @@ fn fork_clones_applied_guidance_attachments_but_not_abandoned_ones() {
                 content: "Abandoned guidance.".to_string(),
                 status: crate::AgentGuidanceStatus::Queued,
                 attachment_ids: vec![abandoned.id.clone()],
+                folder_references_json: "[]".to_string(),
                 applied_trace_sequence: None,
                 terminal_reason: None,
                 created_at: 4,
@@ -511,6 +517,7 @@ fn fork_clones_applied_guidance_attachments_but_not_abandoned_ones() {
                         mime_type: Some("text/plain".to_string()),
                         size_bytes: applied.size_bytes,
                     }],
+                    folder_references: Vec::new(),
                     created_at: 3,
                     truncated: false,
                 }],
@@ -1001,6 +1008,7 @@ fn context_material_and_images_survive_restart_recursive_fork_and_source_deletio
         created_at: 2,
         status: Some("sent".into()),
         attachments: Vec::new(),
+        folder_references_json: None,
         agent_run_json: None,
         ui_state_json: None,
     });

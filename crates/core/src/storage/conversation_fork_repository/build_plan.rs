@@ -675,6 +675,7 @@ fn build_single_conversation_fork_plan_at_point(
                     content: guidance.content,
                     status: AgentGuidanceStatus::Queued,
                     attachment_ids: target_attachment_ids,
+                    folder_references_json: guidance.folder_references_json,
                     applied_trace_sequence: None,
                     terminal_reason: None,
                     created_at: guidance.created_at,

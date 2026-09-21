@@ -1089,6 +1089,7 @@ export const zhCNTranslations = {
   'chat.removeAttachment': '移除附件',
   'chat.addMenuTitle': '添加',
   'chat.addFile': '文件',
+  'chat.addFolder': '文件夹',
   'chat.addImage': '图片',
   'chat.skills': '技能',
   'chat.workspaceSkill': '工作区技能',

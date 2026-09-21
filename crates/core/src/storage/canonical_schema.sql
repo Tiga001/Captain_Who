@@ -578,6 +578,9 @@ CREATE TABLE composer_drafts (
             attachments_json TEXT NOT NULL CHECK (
                 json_valid(attachments_json) AND json_type(attachments_json) = 'array'
             ),
+            folder_references_json TEXT NOT NULL DEFAULT '[]' CHECK (
+                json_valid(folder_references_json) AND json_type(folder_references_json) = 'array'
+            ),
             skills_json TEXT NOT NULL CHECK (
                 json_valid(skills_json) AND json_type(skills_json) = 'array'
             ),
@@ -2425,6 +2428,9 @@ CREATE TABLE messages (
             agent_run_json TEXT CHECK (
                 agent_run_json IS NULL OR json_valid(agent_run_json)
             ),
+            folder_references_json TEXT NOT NULL DEFAULT '[]' CHECK (
+                json_valid(folder_references_json) AND json_type(folder_references_json) = 'array'
+            ),
             created_at INTEGER NOT NULL,
             position INTEGER NOT NULL,
             FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE,
@@ -3434,6 +3440,9 @@ CREATE TABLE agent_run_guidances (
             conversation_id TEXT NOT NULL,
             assistant_message_id TEXT NOT NULL,
             content TEXT NOT NULL,
+            folder_references_json TEXT NOT NULL DEFAULT '[]' CHECK (
+                json_valid(folder_references_json) AND json_type(folder_references_json) = 'array'
+            ),
             status TEXT NOT NULL CHECK (status IN ('queued', 'applied', 'rejected', 'abandoned')),
             applied_trace_sequence INTEGER CHECK (
                 applied_trace_sequence IS NULL OR applied_trace_sequence >= 0
@@ -3516,6 +3525,9 @@ CREATE TABLE context_compaction_summaries (
             covered_through_message_id TEXT NOT NULL,
             covered_through_trace_sequence INTEGER CHECK (covered_through_trace_sequence >= 0),
             content TEXT NOT NULL CHECK (length(trim(content)) > 0),
+            folder_references_json TEXT NOT NULL DEFAULT '[]' CHECK (
+                json_valid(folder_references_json) AND json_type(folder_references_json) = 'array'
+            ),
             continuity_schema_version INTEGER NOT NULL CHECK (continuity_schema_version > 0),
             continuity_json TEXT NOT NULL CHECK (
                 json_valid(continuity_json) AND length(trim(continuity_json)) > 0

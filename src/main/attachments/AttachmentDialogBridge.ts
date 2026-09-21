@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { open } from 'node:fs/promises'
+import { lstat, open } from 'node:fs/promises'
 import { basename, extname } from 'node:path'
 import { BrowserWindow, dialog } from 'electron'
 import { HOST_CHANNELS } from '@mycopilot/host-api'
@@ -10,7 +10,10 @@ import type {
   AttachmentImportMetadata,
   AttachmentImportProgress,
   AttachmentSelectInputRequest,
-  AttachmentSelectionKind
+  AttachmentSelectionKind,
+  AgentFolderReference,
+  FolderLoadFromPathsRequest,
+  FolderSelectInputRequest
 } from '@mycopilot/protocol'
 
 const IMPORT_CHUNK_BYTES = 512 * 1024
@@ -188,6 +191,58 @@ export class AttachmentDialogBridge {
   private readonly requests = new Map<string, { owner: number; cancelled: boolean }>()
 
   constructor(private readonly backend: ImportBackend) {}
+
+  /** Select directory references without importing their contents. */
+  async selectInputFolders(
+    event: IpcMainInvokeEvent,
+    request: FolderSelectInputRequest = {}
+  ): Promise<AgentFolderReference[]> {
+    void request
+    const window = BrowserWindow.fromWebContents(event.sender) ?? undefined
+    const result = window
+      ? await dialog.showOpenDialog(window, folderDialogOptions())
+      : await dialog.showOpenDialog(folderDialogOptions())
+    if (result.canceled || event.sender.isDestroyed()) return []
+    return this.folderReferencesFromPaths(result.filePaths)
+  }
+
+  /**
+   * Chromium exposes a dropped Electron file's native path. Validate every path
+   * again in the main process before turning it into a folder grant.
+   */
+  async loadInputFoldersFromPaths(
+    event: IpcMainInvokeEvent,
+    request: FolderLoadFromPathsRequest
+  ): Promise<AgentFolderReference[]> {
+    if (!Array.isArray(request?.paths)) throw new Error('Invalid folder paths')
+    if (event.sender.isDestroyed()) return []
+    return this.folderReferencesFromPaths(request.paths)
+  }
+
+  private async folderReferencesFromPaths(
+    paths: readonly string[]
+  ): Promise<AgentFolderReference[]> {
+    const seen = new Set<string>()
+    const folders: AgentFolderReference[] = []
+    for (const input of paths) {
+      if (typeof input !== 'string' || input.length === 0 || seen.has(input)) continue
+      seen.add(input)
+      try {
+        const info = await lstat(input)
+        if (!info.isDirectory() || info.isSymbolicLink()) continue
+        folders.push({
+          schemaVersion: 1,
+          id: `folder-${randomUUID()}`,
+          name: basename(input),
+          rootPath: input
+        })
+      } catch {
+        // A dropped path may disappear before IPC reaches the main process.
+        // Ignore it rather than turning a transient drag failure into a chat error.
+      }
+    }
+    return folders
+  }
 
   async selectInputAttachments(
     event: IpcMainInvokeEvent,
@@ -394,6 +449,13 @@ function dialogOptionsForKind(kind: AttachmentSelectionKind): OpenDialogOptions 
       { name: 'Readable files', extensions: [...READABLE_FILE_EXTENSIONS].sort() },
       { name: 'Images', extensions: [...IMAGE_EXTENSIONS].sort() }
     ]
+  }
+}
+
+function folderDialogOptions(): OpenDialogOptions {
+  return {
+    title: 'Select folders',
+    properties: ['openDirectory', 'multiSelections']
   }
 }
 

@@ -1,4 +1,8 @@
-import type { AgentConversationMessage, AgentInputAttachment } from '@mycopilot/protocol'
+import type {
+  AgentConversationMessage,
+  AgentFolderReference,
+  AgentInputAttachment
+} from '@mycopilot/protocol'
 import { modelConfig } from '../config/modelConfig'
 import type { ChatComposerDraft, ChatConversation, ChatMessage } from '../features/chat/chatTypes'
 import { normalizeSkillSelections } from '../features/skills/skillSelection'
@@ -28,7 +32,8 @@ function mapInputAttachmentToMessageAttachment(
 
 export function createUserMessage(
   content: string,
-  attachments: AgentInputAttachment[] = []
+  attachments: AgentInputAttachment[] = [],
+  folderReferences: AgentFolderReference[] = []
 ): ChatMessage {
   return {
     id: createId('message'),
@@ -36,7 +41,8 @@ export function createUserMessage(
     content,
     createdAt: Date.now(),
     status: 'sent',
-    attachments: attachments.map(mapInputAttachmentToMessageAttachment)
+    attachments: attachments.map(mapInputAttachmentToMessageAttachment),
+    folderReferences
   }
 }
 
@@ -60,6 +66,7 @@ export function createComposerDraft(overrides: Partial<ChatComposerDraft> = {}):
     modelId: modelConfig.defaults.selectedModelId,
     projectId: null,
     attachments: [],
+    folderReferences: [],
     skills: [],
     queuedMessages: [],
     updatedAt: Date.now(),
@@ -127,6 +134,9 @@ export function mergeConversationMessageFromBackend(
     status: getChatMessageStatusFromConversationMessage(backendMessage.status),
     attachments: backendMessage.attachments?.length
       ? backendMessage.attachments
-      : currentMessage.attachments
+      : currentMessage.attachments,
+    folderReferences: backendMessage.folderReferences?.length
+      ? backendMessage.folderReferences
+      : currentMessage.folderReferences
   }
 }

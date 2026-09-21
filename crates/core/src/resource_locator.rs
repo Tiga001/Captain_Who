@@ -11,6 +11,9 @@ const BROWSER_ARTIFACT_PREFIX: &str = "browser-artifact:";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResourceLocator {
+    /// Host-issued, read-only folder reference.  The value is an opaque namespace plus an
+    /// optional relative path; authority is resolved by the current ToolExecutionContext.
+    Folder(String),
     Attachment(String),
     GeneratedArtifact(String),
     SkillResource(String),
@@ -55,6 +58,10 @@ impl ResourceLocator {
             ));
         }
 
+        if value.starts_with("@folders/") {
+            validate_folder_reference(value)?;
+            return Ok(Self::Folder(value.to_string()));
+        }
         if value.starts_with("@attachments/") {
             return Ok(Self::Attachment(value.to_string()));
         }
@@ -92,6 +99,7 @@ impl ResourceLocator {
     pub fn logical_value(&self) -> &str {
         match self {
             Self::Attachment(value)
+            | Self::Folder(value)
             | Self::GeneratedArtifact(value)
             | Self::SkillResource(value)
             | Self::BrowserDownload(value)
@@ -105,12 +113,29 @@ impl ResourceLocator {
         matches!(
             self,
             Self::Attachment(_)
+                | Self::Folder(_)
                 | Self::GeneratedArtifact(_)
                 | Self::SkillResource(_)
                 | Self::BrowserDownload(_)
                 | Self::OpaqueBrowserArtifact(_)
         )
     }
+}
+
+fn validate_folder_reference(value: &str) -> Result<(), ResourceLocatorError> {
+    let raw = value
+        .strip_prefix("@folders/")
+        .ok_or_else(|| ResourceLocatorError::new("文件夹引用无效。"))?;
+    let mut components = raw.split('/');
+    let id = components.next().unwrap_or_default();
+    if id.is_empty() || id == "." || id == ".." || id.contains('\\') {
+        return Err(ResourceLocatorError::new("文件夹引用 id 无效。"));
+    }
+    if components.any(|part| part.is_empty() || part == "." || part == ".." || part.contains('\\'))
+    {
+        return Err(ResourceLocatorError::new("文件夹引用相对路径无效。"));
+    }
+    Ok(())
 }
 
 fn validate_browser_download_id(value: &str) -> Result<(), ResourceLocatorError> {
@@ -173,6 +198,10 @@ mod tests {
 
     #[test]
     fn classifies_supported_logical_resources() {
+        assert!(matches!(
+            ResourceLocator::parse("@folders/folder-1/src/main.rs").unwrap(),
+            ResourceLocator::Folder(_)
+        ));
         assert!(matches!(
             ResourceLocator::parse("@attachments/a/file.txt").unwrap(),
             ResourceLocator::Attachment(_)

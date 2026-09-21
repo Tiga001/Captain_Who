@@ -77,6 +77,7 @@ fn unsettled_assistant_state_cannot_enter_a_fork_snapshot() {
         created_at: 1,
         status: Some("sent".to_string()),
         attachments: Vec::new(),
+        folder_references_json: None,
         agent_run_json: Some(json!({ "status": "waiting_for_approval" }).to_string()),
         ui_state_json: None,
     };
@@ -537,6 +538,7 @@ fn fork_clone_preserves_the_exact_steer_boundary_projection() {
             client_message_id: "client-fork-boundary".to_string(),
             content: "continue privately".to_string(),
             attachments: Vec::new(),
+                folder_references: Vec::new(),
             created_at: 15,
             truncated: false,
         }],

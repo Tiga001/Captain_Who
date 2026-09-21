@@ -1077,6 +1077,7 @@ export const zhTWTranslations = {
   'chat.removeAttachment': '移除附件',
   'chat.addMenuTitle': '添加',
   'chat.addFile': '文件',
+  'chat.addFolder': '資料夾',
   'chat.addImage': '圖片',
   'chat.skills': '技能',
   'chat.workspaceSkill': '工作區技能',

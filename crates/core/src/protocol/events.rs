@@ -228,6 +228,8 @@ pub enum AgentEvent {
         client_message_id: String,
         content: String,
         attachments: Vec<ConversationTraceAttachment>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        folder_references: Vec<crate::AgentFolderReference>,
         created_at: i64,
     },
     GuidanceApplied {
@@ -236,6 +238,8 @@ pub enum AgentEvent {
         client_message_id: String,
         content: String,
         attachments: Vec<ConversationTraceAttachment>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        folder_references: Vec<crate::AgentFolderReference>,
         created_at: i64,
         sequence: u64,
     },

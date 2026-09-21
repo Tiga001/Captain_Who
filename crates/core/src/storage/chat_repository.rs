@@ -243,6 +243,7 @@ struct StoredImmutableMessage {
     content: String,
     status: Option<String>,
     agent_run_json: Option<String>,
+    folder_references_json: Option<String>,
     created_at: i64,
 }
 
@@ -253,7 +254,7 @@ fn immutable_graph_message(
 ) -> rusqlite::Result<Option<StoredImmutableMessage>> {
     connection
         .query_row(
-            "SELECT role, content, status, agent_run_json, created_at
+            "SELECT role, content, status, agent_run_json, folder_references_json, created_at
              FROM messages
              WHERE conversation_id = ?1 AND id = ?2
                AND input_origin_kind IN ('agent', 'snapshot')",
@@ -264,7 +265,8 @@ fn immutable_graph_message(
                     content: row.get(1)?,
                     status: row.get(2)?,
                     agent_run_json: row.get(3)?,
-                    created_at: row.get(4)?,
+                    folder_references_json: row.get(4)?,
+                    created_at: row.get(5)?,
                 })
             },
         )
@@ -609,6 +611,8 @@ pub(crate) fn save_conversation_in_connection(
                 || existing.status != message.status
                 || existing.created_at != message.created_at
                 || existing.agent_run_json != message.agent_run_json
+                || existing.folder_references_json.as_deref().unwrap_or("[]")
+                    != message.folder_references_json.as_deref().unwrap_or("[]")
             {
                 return Err(rusqlite::Error::InvalidQuery);
             }
@@ -635,15 +639,17 @@ pub(crate) fn save_conversation_in_connection(
                 content,
                 status,
                 agent_run_json,
+                folder_references_json,
                 created_at,
                 position
             )
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, COALESCE(?7, '[]'), ?8, ?9)
             ON CONFLICT(id) DO UPDATE SET
                 role = excluded.role,
                 content = excluded.content,
                 status = excluded.status,
                 agent_run_json = excluded.agent_run_json,
+                folder_references_json = excluded.folder_references_json,
                 created_at = excluded.created_at,
                 position = excluded.position
             WHERE messages.conversation_id = excluded.conversation_id
@@ -655,6 +661,7 @@ pub(crate) fn save_conversation_in_connection(
                 &message.content,
                 &message.status,
                 &message.agent_run_json,
+                &message.folder_references_json,
                 message.created_at,
                 position
             ],
@@ -825,7 +832,8 @@ pub fn upsert_messages(
         let existing = transaction
             .query_row(
                 "SELECT message.conversation_id, message.id, message.role, message.content,
-                    message.created_at, message.status, message.agent_run_json, ui.ui_state_json
+                    message.created_at, message.status, message.agent_run_json,
+                    message.folder_references_json, ui.ui_state_json
              FROM messages AS message
              LEFT JOIN chat_message_ui_states AS ui ON ui.message_id = message.id
              WHERE message.id = ?1",
@@ -842,7 +850,8 @@ pub fn upsert_messages(
                             status: row.get(5)?,
                             attachments: Vec::new(),
                             agent_run_json: row.get(6)?,
-                            ui_state_json: row.get(7)?,
+                            folder_references_json: row.get(7)?,
+                            ui_state_json: row.get(8)?,
                         },
                     ))
                 },
@@ -859,7 +868,9 @@ pub fn upsert_messages(
                     || existing.content != message.content
                     || existing.status != message.status
                     || existing.created_at != message.created_at
-                    || existing.agent_run_json != message.agent_run_json)
+                    || existing.agent_run_json != message.agent_run_json
+                    || existing.folder_references_json.as_deref().unwrap_or("[]")
+                        != message.folder_references_json.as_deref().unwrap_or("[]"))
             {
                 return Err(rusqlite::Error::InvalidQuery);
             }
@@ -875,8 +886,9 @@ pub fn upsert_messages(
         };
         transaction.execute(
             "INSERT INTO messages (
-                id, conversation_id, role, content, status, agent_run_json, created_at, position
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                id, conversation_id, role, content, status, agent_run_json,
+                folder_references_json, created_at, position
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, COALESCE(?7, '[]'), ?8, ?9)",
             params![
                 &message.id,
                 conversation_id,
@@ -884,6 +896,7 @@ pub fn upsert_messages(
                 &message.content,
                 &message.status,
                 &message.agent_run_json,
+                &message.folder_references_json,
                 message.created_at,
                 position
             ],
@@ -1632,6 +1645,7 @@ fn list_messages(
                 attachments: Vec::new(),
                 agent_run_json,
                 ui_state_json: row.get(6)?,
+                folder_references_json: row.get(7)?,
             })
         })?
         .collect::<rusqlite::Result<_>>()?;
@@ -1656,6 +1670,7 @@ fn list_persisted_messages(
              message.created_at,
              message.status,
              message.agent_run_json,
+             message.folder_references_json,
              ui_state.ui_state_json
          FROM messages AS message
          LEFT JOIN chat_message_ui_states AS ui_state
@@ -1675,7 +1690,8 @@ fn list_persisted_messages(
                 status: row.get(4)?,
                 attachments: Vec::new(),
                 agent_run_json: row.get(5)?,
-                ui_state_json: row.get(6)?,
+                folder_references_json: row.get(6)?,
+                ui_state_json: row.get(7)?,
             })
         })?
         .collect::<rusqlite::Result<_>>()?;
