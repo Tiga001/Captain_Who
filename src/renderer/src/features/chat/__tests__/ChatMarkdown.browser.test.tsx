@@ -69,6 +69,38 @@ beforeEach(() => {
 })
 
 describe('ChatMarkdown URL boundaries', () => {
+  it('renders workspace references with a file icon and routes clicks to the file panel', async () => {
+    const onOpenWorkspaceReference = vi.fn()
+    const screen = await render(
+      <ChatMarkdown
+        content="[adapter.ts](@workspace/app/src/adapter.ts)"
+        onOpenWorkspaceReference={onOpenWorkspaceReference}
+        projectId="project-1"
+      />
+    )
+    const link = screen.container.querySelector('.chat-workspace-reference')
+    expect(link?.querySelector('.workspace-file-type-icon')).not.toBeNull()
+    await screen.getByRole('link', { name: 'adapter.ts' }).click()
+    expect(onOpenWorkspaceReference).toHaveBeenCalledWith({
+      alias: 'app',
+      kind: 'file',
+      path: 'src/adapter.ts',
+      projectId: 'project-1'
+    })
+  })
+
+  it('renders workspace directory references with a folder icon', async () => {
+    const screen = await render(
+      <ChatMarkdown
+        content="[chat](@workspace/app/src/chat/)"
+        onOpenWorkspaceReference={vi.fn()}
+        projectId="project-1"
+      />
+    )
+    expect(screen.container.querySelector('.chat-workspace-reference svg')).not.toBeNull()
+    expect(screen.container.textContent).toContain('chat')
+  })
+
   it('stops a GFM bare URL before adjacent CJK prose', async () => {
     const content =
       '打开 https://example.com，然后尝试查找一个肯定不存在的元素 #mcp-definitely-missing。'

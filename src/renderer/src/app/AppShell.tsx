@@ -36,7 +36,8 @@ import type {
   RightSidebarCapabilities,
   RightSidebarModuleId,
   RightSidebarModuleNavigationRequest,
-  RightSidebarReviewNavigationRequest
+  RightSidebarReviewNavigationRequest,
+  RightSidebarWorkspaceReferenceNavigationRequest
 } from '../features/rightSidebar/rightSidebarTypes'
 import { ChatConversationPage } from '../features/chat/ChatConversationPage'
 import {
@@ -56,6 +57,7 @@ import type {
   ChatQueuedMessage,
   ChatSubmitOptions
 } from '../features/chat/chatTypes'
+import type { WorkspaceReferenceTarget } from '../features/chat/workspaceMentions'
 import { retainGlobalSkillSelections } from '../features/skills/skillSelection'
 import { defaultUiPreferences } from '../features/storage/storageClient'
 import type { UiPreferencesSnapshot } from '../features/storage/storageClient'
@@ -194,6 +196,9 @@ export function AppShell() {
   const [rightSidebarReviewNavigationRequest, setRightSidebarReviewNavigationRequest] =
     useState<RightSidebarReviewNavigationRequest | null>(null)
   const rightSidebarReviewNavigationRequestIdRef = useRef(0)
+  const [workspaceReferenceNavigationRequest, setWorkspaceReferenceNavigationRequest] =
+    useState<RightSidebarWorkspaceReferenceNavigationRequest | null>(null)
+  const workspaceReferenceNavigationRequestIdRef = useRef(0)
   const [rightSidebarAgentNavigationRequest, setRightSidebarAgentNavigationRequest] =
     useState<RightSidebarAgentNavigationRequest | null>(null)
   const rightSidebarAgentNavigationRequestIdRef = useRef(0)
@@ -456,6 +461,17 @@ export function AppShell() {
       rightSidebarWorkspacePath,
       rightSidebarWorkspaceProject?.id
     ]
+  )
+  const openWorkspaceReference = useCallback(
+    (target: WorkspaceReferenceTarget) => {
+      workspaceReferenceNavigationRequestIdRef.current += 1
+      setWorkspaceReferenceNavigationRequest({
+        ...target,
+        requestId: workspaceReferenceNavigationRequestIdRef.current
+      })
+      openRightSidebar()
+    },
+    [openRightSidebar]
   )
   const gitRepositoryCapability = useGitRepositoryCapability(
     rightSidebarWorkspaceProject?.id,
@@ -1505,6 +1521,7 @@ export function AppShell() {
                 onModelTransitionConfirm={confirmActiveProviderTransition}
                 onModelTransitionRetry={retryActiveProviderTransition}
                 onOpenCollaborationAgent={openAgentCenter}
+                onOpenWorkspaceReference={openWorkspaceReference}
                 onEditLastUserMessage={submitEditedLastUserMessage}
                 forkDisabledReason={forkDisabledReason}
                 onContinueInNewTask={continueActiveConversationInNewTask}
@@ -1544,6 +1561,7 @@ export function AppShell() {
               onDraftMessageChange={(draft) =>
                 persistDraftMessageOnly(NEW_CONVERSATION_DRAFT_ID, draft)
               }
+              onOpenWorkspaceReference={openWorkspaceReference}
               onSubmitMessage={submitMessage}
             />
           )}
@@ -1595,6 +1613,7 @@ export function AppShell() {
             )
           }
           reviewNavigationRequest={rightSidebarReviewNavigationRequest}
+          workspaceReferenceNavigationRequest={workspaceReferenceNavigationRequest}
           renderAgentObserver={renderAgentObserver}
           maximizedToolbarControls={rightSidebarMaximizedToolbarControls}
         />

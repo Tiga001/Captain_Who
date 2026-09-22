@@ -47,6 +47,7 @@ interface FilesPanelProps {
   pdfPage: number
   projectId: string
   projectName: string
+  selectedDirectoryPath?: string | null
   wrapLines: boolean
 }
 
@@ -81,6 +82,7 @@ export function FilesPanel({
   pdfPage,
   projectId,
   projectName,
+  selectedDirectoryPath = null,
   wrapLines
 }: FilesPanelProps): ReactNode {
   const { t } = useFrontendConfig()
@@ -143,12 +145,21 @@ export function FilesPanel({
     isActive,
     onFileSelect: handleFileSelect,
     projectId,
-    selectedPath: !assistantMessageId && fileFolderId === treeRoot.folderId ? filePath : null
+    selectedPath:
+      !assistantMessageId && fileFolderId === treeRoot.folderId
+        ? (filePath ?? selectedDirectoryPath)
+        : null
   })
 
   useEffect(() => {
     if (!isActive) closeOptionsMenu()
   }, [closeOptionsMenu, isActive])
+
+  useEffect(() => {
+    if (selectedDirectoryPath && fileFolderId && treeRoot.folderId !== fileFolderId) {
+      treeRoot.selectFolder(fileFolderId)
+    }
+  }, [fileFolderId, selectedDirectoryPath, treeRoot])
 
   const revealSelectedFile = useCallback(() => {
     if (!filePath) return

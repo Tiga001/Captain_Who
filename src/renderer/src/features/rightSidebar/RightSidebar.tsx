@@ -25,7 +25,8 @@ import type {
   RightSidebarModuleDefinition,
   RightSidebarModuleId,
   RightSidebarModuleNavigationRequest,
-  RightSidebarReviewNavigationRequest
+  RightSidebarReviewNavigationRequest,
+  RightSidebarWorkspaceReferenceNavigationRequest
 } from './rightSidebarTypes'
 import { useRightSidebarPlatform } from './useRightSidebarPlatform'
 import {
@@ -52,6 +53,7 @@ interface RightSidebarProps {
   onOpenBrowserSettings?: (destination: 'settings' | 'downloads' | 'history') => void
   onToggleMaximized: () => void
   reviewNavigationRequest?: RightSidebarReviewNavigationRequest | null
+  workspaceReferenceNavigationRequest?: RightSidebarWorkspaceReferenceNavigationRequest | null
   renderAgentObserver?: (context: AgentObserverRenderContext) => ReactNode
   workspaceKey?: string | null
   workspaceKeys?: readonly string[]
@@ -111,6 +113,7 @@ export const RightSidebar = memo(function RightSidebar({
   onOpenBrowserSettings,
   onToggleMaximized,
   reviewNavigationRequest,
+  workspaceReferenceNavigationRequest,
   renderAgentObserver,
   workspaceKey,
   workspaceKeys,
@@ -122,6 +125,7 @@ export const RightSidebar = memo(function RightSidebar({
   const { t } = useFrontendConfig()
   const documentVisible = useRightSidebarDocumentVisibility()
   const handledReviewNavigationRequestIdRef = useRef<number | null>(null)
+  const handledWorkspaceReferenceNavigationRequestIdRef = useRef<number | null>(null)
   const handledAgentNavigationRequestIdRef = useRef<number | null>(null)
   const handledBrowserSurfaceRequestIdRef = useRef<string | null>(null)
   const handledModuleNavigationRequestIdRef = useRef<number | null>(null)
@@ -493,6 +497,47 @@ export const RightSidebar = memo(function RightSidebar({
     openModule,
     workspaceKey,
     workspacePath
+  ])
+
+  useEffect(() => {
+    const request = workspaceReferenceNavigationRequest
+    if (!request || !workspaceKey || request.projectId !== workspaceKey) return
+    if (
+      handledWorkspaceReferenceNavigationRequestIdRef.current !== null &&
+      request.requestId <= handledWorkspaceReferenceNavigationRequestIdRef.current
+    ) {
+      return
+    }
+    if (moduleAvailability.files === 'checking') return
+    if (moduleAvailability.files !== 'available') return
+
+    const folderId = projects
+      ?.find((project) => project.id === request.projectId)
+      ?.folders.find((folder) => folder.alias === request.alias)?.id
+    if (!folderId) return
+    handledWorkspaceReferenceNavigationRequestIdRef.current = request.requestId
+
+    if (request.kind === 'directory') {
+      openModulePage('files', {
+        kind: 'workspace-folder',
+        path: request.path.replace(/\/+$/, '') + '/',
+        folderId
+      })
+      return
+    }
+    openModulePage('files', {
+      kind: 'workspace-file',
+      path: request.path,
+      folderId,
+      preview: { markdownView: 'preview' },
+      tabState: 'transient'
+    })
+  }, [
+    moduleAvailability.files,
+    openModulePage,
+    projects,
+    workspaceKey,
+    workspaceReferenceNavigationRequest
   ])
 
   useEffect(() => {

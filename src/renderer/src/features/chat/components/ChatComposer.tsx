@@ -11,18 +11,7 @@ import {
   type KeyboardEvent
 } from 'react'
 import type { AgentContextWindowSnapshot, SkillDescriptor } from '@mycopilot/protocol'
-import {
-  ArrowUp,
-  Check,
-  ChevronDown,
-  Folder,
-  ImageIcon,
-  Paperclip,
-  Plus,
-  Search,
-  Sparkles,
-  X
-} from 'lucide-react'
+import { ArrowUp, Check, ChevronDown, Folder, Plus, Search, X } from 'lucide-react'
 import { useFrontendConfig } from '../../../config/FrontendConfigProvider'
 import { useAccountAuth } from '../../auth/AccountAuthContext'
 import { useLicense } from '../../license/LicenseContext'
@@ -69,7 +58,11 @@ import { ComposerFolderReferences } from './ComposerFolderReferences'
 import { ComposerSelectedSkills, ComposerSkillPicker } from './ComposerSkillPicker'
 import { GuidanceQueue } from './GuidanceQueue'
 import { useImagePreview } from './ImagePreview'
-import { buildMessageContentWithWorkspaceMentions } from '../workspaceMentions'
+import {
+  buildMessageContentWithWorkspaceMentions,
+  workspaceReferenceTargetFromMention,
+  type WorkspaceReferenceTarget
+} from '../workspaceMentions'
 import { ModelConfigPicker } from '../../modelSelection/ModelConfigPicker'
 import { createComposerModelMenuOption } from '../../modelSelection/composerModelPresentation'
 import { ComposerModelMenu } from './ComposerModelMenu'
@@ -77,7 +70,12 @@ import {
   CHAT_PERMISSION_PRESENTATIONS,
   getChatPermissionPresentation
 } from '../chatPermissionPresentation'
-import { ComposerCommands, filterComposerCommands, type ComposerCommand } from './ComposerCommands'
+import {
+  ComposerAddMenu,
+  ComposerCommands,
+  filterComposerCommands,
+  type ComposerCommand
+} from './ComposerCommands'
 import './ChatComposer.css'
 import './GuidanceQueue.css'
 
@@ -118,6 +116,7 @@ interface ChatComposerProps {
   resetKey?: string
   skillCatalogRefreshToken?: number
   showProjectSelector?: boolean
+  onOpenWorkspaceReference?: (target: WorkspaceReferenceTarget) => void
 }
 
 const EMPTY_COMMANDS: readonly ComposerCommand[] = []
@@ -146,7 +145,8 @@ export function ChatComposer({
   portalMenus = false,
   resetKey,
   skillCatalogRefreshToken = 0,
-  showProjectSelector = false
+  showProjectSelector = false,
+  onOpenWorkspaceReference
 }: ChatComposerProps) {
   const { t } = useFrontendConfig()
   const accountAuth = useAccountAuth()
@@ -391,7 +391,10 @@ export function ChatComposer({
       setIsAttachmentMenuOpen(false)
       setIsSkillMenuOpen(false)
     }, []),
-    (target) => Boolean(attachmentPopoverRef.current?.contains(target))
+    (target) =>
+      Boolean(
+        attachmentPopoverRef.current?.contains(target) || composerRef.current?.contains(target)
+      )
   )
   useDismissOnOutsidePointer(
     permissionPickerRef,
@@ -485,14 +488,14 @@ export function ChatComposer({
 
   // The Host owns filesystem access. Keep the renderer query-only and discard stale responses.
   useEffect(() => {
-    if (!isMentionMenuOpen || !mentionQuery.trim() || !draft.projectId) {
+    if (!isMentionMenuOpen || !mentionQuery.trim() || !selectedProjectId) {
       mentionRequestRef.current += 1
       setMentionEntries([])
       return
     }
     const requestId = ++mentionRequestRef.current
     const timer = window.setTimeout(() => {
-      void searchWorkspaceMentions({ projectId: draft.projectId!, query: mentionQuery, limit: 24 })
+      void searchWorkspaceMentions({ projectId: selectedProjectId, query: mentionQuery, limit: 24 })
         .then((result) => {
           if (mentionRequestRef.current !== requestId) return
           setMentionEntries(result.entries)
@@ -503,7 +506,7 @@ export function ChatComposer({
         })
     }, 80)
     return () => window.clearTimeout(timer)
-  }, [draft.projectId, isMentionMenuOpen, mentionQuery])
+  }, [isMentionMenuOpen, mentionQuery, selectedProjectId])
 
   useEffect(() => {
     setAttachmentError(null)
@@ -532,10 +535,10 @@ export function ChatComposer({
 
   const selectWorkspaceMention = useCallback(
     (entry: WorkspaceMentionSearchEntry) => {
-      if (!draft.projectId) return
+      if (!selectedProjectId) return
       const mention: ChatWorkspaceMention = {
         id: `${entry.folderId}:${entry.path}`,
-        projectId: draft.projectId,
+        projectId: selectedProjectId,
         folderId: entry.folderId,
         alias: entry.alias,
         displayName: entry.displayName,
@@ -555,7 +558,7 @@ export function ChatComposer({
       setIsMentionMenuOpen(false)
       window.requestAnimationFrame(() => textareaRef.current?.focus({ preventScroll: true }))
     },
-    [draft.projectId, updateDraft]
+    [selectedProjectId, updateDraft]
   )
 
   const removeWorkspaceMention = (id: string) => {
@@ -1034,51 +1037,42 @@ export function ChatComposer({
             anchorRef={textareaRef}
             className="chat-composer-menu-popover"
             enabled={portalMenus}
+            matchAnchorWidth
             onClose={() => setIsMentionMenuOpen(false)}
             popoverRef={mentionPopoverRef}
           >
-            <div className="composer-commands" role="listbox" aria-label="Workspace files">
-              <div className="composer-commands__list">
-                {mentionQuery.trim() === '' ? (
-                  <div className="composer-add-menu">
-                    <p>{t('chat.addMenuTitle')}</p>
-                    <button
-                      type="button"
-                      role="menuitem"
-                      onClick={() => void addAttachments('file')}
-                    >
-                      <Paperclip aria-hidden="true" /> <span>{t('chat.addFile')}</span>
-                    </button>
-                    <button type="button" role="menuitem" onClick={() => void addFolders()}>
-                      <Folder aria-hidden="true" /> <span>{t('chat.addFolder')}</span>
-                    </button>
-                    <button
-                      type="button"
-                      role="menuitem"
-                      onClick={() => void addAttachments('image')}
-                    >
-                      <ImageIcon aria-hidden="true" /> <span>{t('chat.addImage')}</span>
-                    </button>
-                    {!isGenerating && (
-                      <button
-                        type="button"
-                        role="menuitem"
-                        onClick={() => {
-                          if (message === '@') updateDraft({ message: '' })
-                          setMentionQuery('')
-                          setIsMentionMenuOpen(false)
-                          setIsSkillMenuOpen(true)
-                          setSkillSearch('')
-                        }}
-                      >
-                        <Sparkles aria-hidden="true" /> <span>{t('chat.skills')}</span>
-                      </button>
-                    )}
-                  </div>
-                ) : mentionEntries.length === 0 ? (
+            {mentionQuery.trim() === '' ? (
+              <ComposerAddMenu
+                addFileLabel={t('chat.addFile')}
+                addFolderLabel={t('chat.addFolder')}
+                addImageLabel={t('chat.addImage')}
+                addMenuTitle={t('chat.addMenuTitle')}
+                onAddFile={() => addAttachments('file')}
+                onAddFolder={addFolders}
+                onAddImage={() => addAttachments('image')}
+                onAddSkill={
+                  isGenerating
+                    ? undefined
+                    : () => {
+                        if (message === '@') updateDraft({ message: '' })
+                        setMentionQuery('')
+                        setIsMentionMenuOpen(false)
+                        setIsSkillMenuOpen(true)
+                        setSkillSearch('')
+                      }
+                }
+                skillLabel={t('chat.skills')}
+              />
+            ) : mentionEntries.length === 0 ? (
+              <div className="composer-commands" role="listbox" aria-label="Workspace files">
+                <div className="composer-commands__list">
                   <p className="composer-commands__empty">未找到匹配项</p>
-                ) : (
-                  mentionEntries.map((entry, index) => (
+                </div>
+              </div>
+            ) : (
+              <div className="composer-commands" role="listbox" aria-label="Workspace files">
+                <div className="composer-commands__list">
+                  {mentionEntries.map((entry, index) => (
                     <button
                       key={`${entry.folderId}:${entry.path}`}
                       type="button"
@@ -1098,10 +1092,10 @@ export function ChatComposer({
                         {entry.displayPath}
                       </span>
                     </button>
-                  ))
-                )}
+                  ))}
+                </div>
               </div>
-            </div>
+            )}
           </AnchoredPopover>
         )}
       </div>
@@ -1228,21 +1222,32 @@ export function ChatComposer({
         {workspaceMentions.length > 0 && (
           <div className="composer-workspace-mentions" aria-label="Workspace references">
             {workspaceMentions.map((mention) => (
-              <button
-                type="button"
-                className="composer-workspace-mention"
-                key={mention.id}
-                title={`${mention.alias}/${mention.path}`}
-                onClick={() => removeWorkspaceMention(mention.id)}
-              >
-                {mention.kind === 'directory' ? (
-                  <Folder aria-hidden="true" />
-                ) : (
-                  <WorkspaceFileTypeIcon path={mention.path} />
-                )}
-                <span>{mention.displayName}</span>
-                <X aria-hidden="true" />
-              </button>
+              <div className="composer-workspace-mention" key={mention.id}>
+                <button
+                  type="button"
+                  className="composer-workspace-mention__link"
+                  title={`${mention.alias}/${mention.path}`}
+                  onClick={() =>
+                    onOpenWorkspaceReference?.(workspaceReferenceTargetFromMention(mention))
+                  }
+                >
+                  {mention.kind === 'directory' ? (
+                    <Folder aria-hidden="true" />
+                  ) : (
+                    <WorkspaceFileTypeIcon path={mention.path} />
+                  )}
+                  <span>{mention.displayName}</span>
+                </button>
+                <button
+                  type="button"
+                  className="composer-workspace-mention__remove"
+                  aria-label={`Remove ${mention.displayName}`}
+                  title={`Remove ${mention.displayName}`}
+                  onClick={() => removeWorkspaceMention(mention.id)}
+                >
+                  <X aria-hidden="true" />
+                </button>
+              </div>
             ))}
           </div>
         )}
@@ -1281,7 +1286,11 @@ export function ChatComposer({
               setIsPermissionMenuOpen(false)
               setIsProjectMenuOpen(false)
               setIsCommandMenuOpen(false)
-            } else if (isMentionMenuOpen && nextMessage.startsWith('@')) {
+            } else if (
+              nextMessage.startsWith('@') &&
+              (isMentionMenuOpen || message.startsWith('@') || onlyMentionsBeforeInput)
+            ) {
+              setIsMentionMenuOpen(true)
               setMentionQuery(nextMessage.slice(1))
             } else if (!nextMessage.startsWith('@')) {
               setIsMentionMenuOpen(false)
@@ -1437,45 +1446,32 @@ export function ChatComposer({
 
             {isAttachmentMenuOpen && (
               <AnchoredPopover
-                anchorRef={attachmentTriggerRef}
+                anchorRef={composerRef}
                 className="chat-composer-menu-popover"
                 enabled={portalMenus}
+                matchAnchorWidth
                 onClose={() => setIsAttachmentMenuOpen(false)}
                 popoverRef={attachmentPopoverRef}
               >
-                <div className="composer-add-menu" role="menu" aria-label={t('chat.addMenuTitle')}>
-                  <p>{t('chat.addMenuTitle')}</p>
-                  <button type="button" role="menuitem" onClick={() => void addAttachments('file')}>
-                    <Paperclip aria-hidden="true" />
-                    <span>{t('chat.addFile')}</span>
-                  </button>
-                  <button type="button" role="menuitem" onClick={() => void addFolders()}>
-                    <Folder aria-hidden="true" />
-                    <span>{t('chat.addFolder')}</span>
-                  </button>
-                  <button
-                    type="button"
-                    role="menuitem"
-                    onClick={() => void addAttachments('image')}
-                  >
-                    <ImageIcon aria-hidden="true" />
-                    <span>{t('chat.addImage')}</span>
-                  </button>
-                  {!isGenerating && (
-                    <button
-                      type="button"
-                      role="menuitem"
-                      onClick={() => {
-                        setIsAttachmentMenuOpen(false)
-                        setIsSkillMenuOpen(true)
-                        setSkillSearch('')
-                      }}
-                    >
-                      <Sparkles aria-hidden="true" />
-                      <span>{t('chat.skills')}</span>
-                    </button>
-                  )}
-                </div>
+                <ComposerAddMenu
+                  addFileLabel={t('chat.addFile')}
+                  addFolderLabel={t('chat.addFolder')}
+                  addImageLabel={t('chat.addImage')}
+                  addMenuTitle={t('chat.addMenuTitle')}
+                  onAddFile={() => addAttachments('file')}
+                  onAddFolder={addFolders}
+                  onAddImage={() => addAttachments('image')}
+                  onAddSkill={
+                    isGenerating
+                      ? undefined
+                      : () => {
+                          setIsAttachmentMenuOpen(false)
+                          setIsSkillMenuOpen(true)
+                          setSkillSearch('')
+                        }
+                  }
+                  skillLabel={t('chat.skills')}
+                />
               </AnchoredPopover>
             )}
 

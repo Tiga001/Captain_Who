@@ -8,9 +8,13 @@ import {
   Gauge,
   Globe2,
   Pencil,
+  Paperclip,
+  Folder,
+  ImageIcon,
   Pin,
   Plus,
   Split,
+  Sparkles,
   SunMoon,
   TerminalSquare,
   type LucideIcon
@@ -46,6 +50,57 @@ export type ComposerCommand = ComposerCommandPresentation &
         execute: () => void | Promise<void>
       }
   )
+
+export interface ComposerAddMenuProps {
+  addFileLabel: string
+  addFolderLabel: string
+  addImageLabel: string
+  addMenuTitle: string
+  onAddFile: () => void | Promise<void>
+  onAddFolder: () => void | Promise<void>
+  onAddImage: () => void | Promise<void>
+  onAddSkill?: () => void | Promise<void>
+  skillLabel: string
+}
+
+/** The plus and @ entry points intentionally share the slash menu's row treatment. */
+export function ComposerAddMenu({
+  addFileLabel,
+  addFolderLabel,
+  addImageLabel,
+  addMenuTitle,
+  onAddFile,
+  onAddFolder,
+  onAddImage,
+  onAddSkill,
+  skillLabel
+}: ComposerAddMenuProps) {
+  return (
+    <div className="composer-commands composer-add-menu" role="menu" aria-label={addMenuTitle}>
+      <div className="composer-commands__list">
+        <p className="composer-add-menu__title">{addMenuTitle}</p>
+        <button type="button" role="menuitem" onClick={() => void onAddFile()}>
+          <Paperclip aria-hidden="true" />
+          <span className="composer-commands__label">{addFileLabel}</span>
+        </button>
+        <button type="button" role="menuitem" onClick={() => void onAddFolder()}>
+          <Folder aria-hidden="true" />
+          <span className="composer-commands__label">{addFolderLabel}</span>
+        </button>
+        <button type="button" role="menuitem" onClick={() => void onAddImage()}>
+          <ImageIcon aria-hidden="true" />
+          <span className="composer-commands__label">{addImageLabel}</span>
+        </button>
+        {onAddSkill && (
+          <button type="button" role="menuitem" onClick={() => void onAddSkill()}>
+            <Sparkles aria-hidden="true" />
+            <span className="composer-commands__label">{skillLabel}</span>
+          </button>
+        )}
+      </div>
+    </div>
+  )
+}
 const icons: Record<ComposerCommandId, LucideIcon> = {
   model: Box,
   theme: SunMoon,

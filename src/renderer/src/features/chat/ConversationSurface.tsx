@@ -46,6 +46,7 @@ import type {
   ChatQueuedMessage,
   ChatSubmitOptions
 } from './chatTypes'
+import type { WorkspaceReferenceTarget } from './workspaceMentions'
 import type { ModelTransitionConfirmation } from './modelTransitionUiState'
 import { getConversationTurnNavigationItems } from './conversationTurnNavigation'
 import { isAssistantMessageGenerating, isAssistantReplyComplete } from './assistantGeneration'
@@ -122,6 +123,7 @@ export interface InteractiveConversationSurfaceProps extends ConversationSurface
   onModelTransitionConfirm?: () => void | Promise<void>
   onModelTransitionRetry?: (operation: AgentProviderTransitionOperation) => void | Promise<void>
   onOpenCollaborationAgent?: (agentId: string) => void
+  onOpenWorkspaceReference?: (target: WorkspaceReferenceTarget) => void
   onOpenContinuationOrigin?: (origin: ChatConversationContinuationOrigin) => void | Promise<void>
   onRejectAgentAction?: (
     messageId: string,
@@ -248,6 +250,7 @@ interface ChatMessageListProps {
   onMessageUiStateChange?: (messageId: string, uiState: ChatMessage['uiState']) => void
   onModelTransitionRetry?: (operation: AgentProviderTransitionOperation) => void | Promise<void>
   onOpenCollaborationAgent?: (agentId: string) => void
+  onOpenWorkspaceReference?: (target: WorkspaceReferenceTarget) => void
   onRejectAgentAction?: (
     messageId: string,
     action: AgentProposedAction,
@@ -281,6 +284,7 @@ export const ChatMessageList = memo(function ChatMessageList({
   onMessageUiStateChange,
   onModelTransitionRetry,
   onOpenCollaborationAgent,
+  onOpenWorkspaceReference,
   onRejectAgentAction,
   onReviewLastTurn,
   parentAgentId,
@@ -408,6 +412,7 @@ export const ChatMessageList = memo(function ChatMessageList({
             onOpenCollaborationAgent={
               collaborationAgentNavigation ? openCollaborationAgent : undefined
             }
+            onOpenWorkspaceReference={onOpenWorkspaceReference}
             onReject={mode === 'interactive' && onRejectAgentAction ? rejectAgentAction : undefined}
             onReviewLastTurn={
               mode === 'interactive' && onReviewLastTurn ? reviewLastTurn : undefined
@@ -838,6 +843,7 @@ export function ConversationSurface(props: ConversationSurfaceProps) {
             onMessageUiStateChange={interactive?.onMessageUiStateChange}
             onModelTransitionRetry={interactive?.onModelTransitionRetry}
             onOpenCollaborationAgent={interactive?.onOpenCollaborationAgent}
+            onOpenWorkspaceReference={interactive?.onOpenWorkspaceReference}
             onRejectAgentAction={interactive?.onRejectAgentAction}
             onReviewLastTurn={interactive?.onReviewLastTurn}
             parentAgentId={props.mode === 'observer' ? props.parentAgentId : undefined}
@@ -957,6 +963,7 @@ export function ConversationSurface(props: ConversationSurfaceProps) {
               onDraftChange={interactive.onComposerDraftChange}
               onDraftMessageChange={interactive.onComposerDraftMessageChange}
               onGuideQueuedMessage={interactive.onGuideQueuedMessage}
+              onOpenWorkspaceReference={interactive.onOpenWorkspaceReference}
               queueAutoSendEnabled={interactive.queueAutoSendEnabled}
               onToggleQueueAutoSend={interactive.onToggleQueueAutoSend}
               onStopGenerating={interactive.onStopGenerating}

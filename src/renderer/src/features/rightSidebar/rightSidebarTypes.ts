@@ -85,6 +85,11 @@ export type RightSidebarModulePageState =
       }
     }
   | {
+      kind: 'workspace-folder'
+      path: string
+      folderId?: string
+    }
+  | {
       kind: 'git-review'
       filePath?: string
       projectId: string
@@ -160,6 +165,14 @@ export interface RightSidebarModuleNavigationRequest {
   requestId: number
   workspaceKey?: string | null
   workspacePath?: string
+}
+
+export interface RightSidebarWorkspaceReferenceNavigationRequest {
+  alias: string
+  kind: 'file' | 'directory'
+  path: string
+  projectId: string
+  requestId: number
 }
 
 export interface RightSidebarPage {

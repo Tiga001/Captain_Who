@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest'
-import { buildMessageContentWithWorkspaceMentions } from '../workspaceMentions'
+import {
+  buildMessageContentWithWorkspaceMentions,
+  parseWorkspaceReferenceTarget
+} from '../workspaceMentions'
 
 describe('workspace mention message content', () => {
   const mention = {
@@ -23,5 +26,17 @@ describe('workspace mention message content', () => {
     expect(buildMessageContentWithWorkspaceMentions('Inspect this', [mention])).toBe(
       'Inspect this\n\n[file.ts](@workspace/app/src/file.ts)'
     )
+  })
+
+  it('round-trips directory references with their kind', () => {
+    const directory = { ...mention, kind: 'directory' as const, path: 'src/features' }
+    const content = buildMessageContentWithWorkspaceMentions('', [directory])
+    expect(content).toBe('[file.ts](@workspace/app/src/features/)')
+    expect(parseWorkspaceReferenceTarget('@workspace/app/src/features/', 'project')).toEqual({
+      alias: 'app',
+      kind: 'directory',
+      path: 'src/features/',
+      projectId: 'project'
+    })
   })
 })

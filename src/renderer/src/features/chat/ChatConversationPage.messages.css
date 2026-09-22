@@ -841,6 +841,19 @@ button.chat-message-attachment:focus-visible {
   text-decoration: underline;
 }
 
+.chat-workspace-reference {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  vertical-align: baseline;
+}
+
+.chat-workspace-reference > svg {
+  width: 1em;
+  height: 1em;
+  flex: 0 0 auto;
+}
+
 .chat-markdown code {
   padding: 0.08em 0.3em;
   color: var(--mc-color-text-secondary);

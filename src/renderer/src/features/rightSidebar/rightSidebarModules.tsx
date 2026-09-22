@@ -308,7 +308,9 @@ function renderFilesModule({
 }: RightSidebarModuleRenderProps) {
   if (availability === 'unavailable' || !page.workspaceKey) return null
   const fileState = page.moduleState?.kind === 'workspace-file' ? page.moduleState : null
+  const folderState = page.moduleState?.kind === 'workspace-folder' ? page.moduleState : null
   const filePath = fileState?.path ?? null
+  const selectedDirectoryPath = folderState?.path ?? null
   const markdownAnchor = fileState?.preview?.markdownAnchor
   const markdownView = fileState?.preview?.markdownView ?? 'preview'
   const pdfPage = fileState?.preview?.pdfPage ?? 1
@@ -318,7 +320,8 @@ function renderFilesModule({
     <Suspense fallback={<div className="right-sidebar__panel-loading">{t('files.loading')}</div>}>
       <FilesPanel
         filePath={filePath}
-        folderId={fileState?.folderId}
+        selectedDirectoryPath={selectedDirectoryPath}
+        folderId={fileState?.folderId ?? folderState?.folderId}
         assistantMessageId={fileState?.assistantMessageId}
         isActive={activity === 'foreground'}
         markdownAnchor={markdownAnchor}

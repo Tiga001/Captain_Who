@@ -4,6 +4,7 @@ import { useFrontendConfig } from '../../config/FrontendConfigProvider'
 import { useProjectSettings } from '../../config/ProjectSettingsProvider'
 import { ChatComposer } from './components/ChatComposer'
 import type { ChatComposerDraft, ChatSubmitOptions } from './chatTypes'
+import type { WorkspaceReferenceTarget } from './workspaceMentions'
 import { getNewConversationPromptKeys } from './newConversationPrompts'
 import './NewConversationPage.css'
 
@@ -15,6 +16,7 @@ interface NewConversationPageProps {
   defaultProjectId?: string | null
   onDraftChange: (draft: ChatComposerDraft) => void
   onDraftMessageChange?: (draft: ChatComposerDraft) => void
+  onOpenWorkspaceReference?: (target: WorkspaceReferenceTarget) => void
   onSubmitMessage: (
     message: string,
     options: ChatSubmitOptions
@@ -35,6 +37,7 @@ export function NewConversationPage({
   draft,
   onDraftChange,
   onDraftMessageChange,
+  onOpenWorkspaceReference,
   onSubmitMessage,
   permissionModeAvailability,
   promptIndex,
@@ -81,6 +84,7 @@ export function NewConversationPage({
           draft={draft}
           onDraftChange={onDraftChange}
           onDraftMessageChange={onDraftMessageChange}
+          onOpenWorkspaceReference={onOpenWorkspaceReference}
           permissionModeAvailability={permissionModeAvailability}
           inputPlaceholder={selectedProject ? undefined : t(promptKeys.placeholderKey)}
           resetKey={`new:${defaultProjectId ?? 'root'}`}

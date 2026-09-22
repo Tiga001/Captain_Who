@@ -1,4 +1,4 @@
-import { Children, isValidElement, type ComponentProps, type ReactNode } from 'react'
+import { Children, isValidElement, useMemo, type ComponentProps, type ReactNode } from 'react'
 import ReactMarkdown, { type Components } from 'react-markdown'
 import rehypeKatex from 'rehype-katex'
 import remarkBreaks from 'remark-breaks'
@@ -9,12 +9,17 @@ import { openExternalUrl } from '../../../lib/externalLinks'
 import { remarkNormalizeCjkAutolinkBoundaries } from './chatMarkdownAutolinks'
 import { ChatCodeBlock } from './ChatCodeBlock'
 import { useImagePreview } from './ImagePreview'
+import { Folder } from 'lucide-react'
+import { WorkspaceFileTypeIcon } from '../../../components/files/WorkspaceFileTypeIcon'
+import { parseWorkspaceReferenceTarget, type WorkspaceReferenceTarget } from '../workspaceMentions'
 
 interface ChatMarkdownProps {
   className?: string
   content: string
   /** When false, skip `$...$` / KaTeX so shell prompts and URL underscores stay literal. */
   enableMath?: boolean
+  projectId?: string | null
+  onOpenWorkspaceReference?: (target: WorkspaceReferenceTarget) => void
 }
 
 interface MarkdownLine {
@@ -436,7 +441,37 @@ function MarkdownPre({ children }: ComponentProps<'pre'>) {
   return <ChatCodeBlock code={readMarkdownCodeText(codeProps.children)} language={language} />
 }
 
-function MarkdownAnchor({ children, href, ...props }: ComponentProps<'a'>) {
+function MarkdownAnchor({
+  children,
+  href,
+  onOpenWorkspaceReference,
+  projectId,
+  ...props
+}: ComponentProps<'a'> & {
+  onOpenWorkspaceReference?: (target: WorkspaceReferenceTarget) => void
+  projectId?: string | null
+}) {
+  const workspaceTarget = parseWorkspaceReferenceTarget(href, projectId)
+  if (workspaceTarget) {
+    return (
+      <a
+        {...props}
+        className={['chat-workspace-reference', props.className].filter(Boolean).join(' ')}
+        href={href}
+        onClick={(event) => {
+          event.preventDefault()
+          onOpenWorkspaceReference?.(workspaceTarget)
+        }}
+      >
+        {workspaceTarget.kind === 'directory' ? (
+          <Folder aria-hidden="true" />
+        ) : (
+          <WorkspaceFileTypeIcon path={workspaceTarget.path} />
+        )}
+        {children}
+      </a>
+    )
+  }
   const normalizedHref = normalizeMarkdownExternalHref(href)
 
   return (
@@ -487,24 +522,38 @@ function MarkdownImage({ alt, src, ...props }: ComponentProps<'img'>) {
   )
 }
 
-// Keep renderer identities stable while streaming Markdown grows. Recreating this map on every
-// delta remounts completed code blocks and makes their syntax highlighting visibly flash.
-const CHAT_MARKDOWN_COMPONENTS: Components = {
-  a: MarkdownAnchor,
-  img: MarkdownImage,
-  pre: MarkdownPre
-}
-
-export function ChatMarkdown({ className, content, enableMath = true }: ChatMarkdownProps) {
+export function ChatMarkdown({
+  className,
+  content,
+  enableMath = true,
+  onOpenWorkspaceReference,
+  projectId
+}: ChatMarkdownProps) {
   const markdownClassName = ['chat-markdown', className].filter(Boolean).join(' ')
   const normalizedContent = enableMath ? normalizeMarkdownMath(content) : content
+  // Keep renderer identities stable while streaming Markdown grows. Recreating this map on every
+  // delta remounts completed code blocks and makes their syntax highlighting visibly flash.
+  const markdownComponents = useMemo<Components>(
+    () => ({
+      a: (props) => (
+        <MarkdownAnchor
+          {...props}
+          onOpenWorkspaceReference={onOpenWorkspaceReference}
+          projectId={projectId}
+        />
+      ),
+      img: MarkdownImage,
+      pre: MarkdownPre
+    }),
+    [onOpenWorkspaceReference, projectId]
+  )
 
   return (
     <div className={markdownClassName}>
       <ReactMarkdown
         remarkPlugins={enableMath ? REMARK_PLUGINS_WITH_MATH : REMARK_PLUGINS}
         rehypePlugins={enableMath ? REHYPE_PLUGINS_WITH_MATH : undefined}
-        components={CHAT_MARKDOWN_COMPONENTS}
+        components={markdownComponents}
       >
         {normalizedContent}
       </ReactMarkdown>

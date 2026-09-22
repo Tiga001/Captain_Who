@@ -98,6 +98,7 @@ import {
   normalizeCollaborationTimelineActivities,
   type CollaborationTimelineActivity
 } from '../../agentCollaboration/CollaborationTimelineActivity'
+import type { WorkspaceReferenceTarget } from '../workspaceMentions'
 
 const ACTIVE_STREAMING_GRACE_MS = 1200
 const COPIED_INDICATOR_MS = 1300
@@ -154,6 +155,7 @@ interface ChatMessageItemProps {
   onEditSubmit?: (messageId: string, content: string) => void | Promise<void>
   onContinueInNewTask?: (messageId: string) => void | Promise<void>
   onOpenCollaborationAgent?: (agentId: string) => void
+  onOpenWorkspaceReference?: (target: WorkspaceReferenceTarget) => void
   onReject?: (
     messageId: string,
     action: AgentProposedAction,
@@ -369,10 +371,14 @@ function AgentThinkingActivity({ label }: { label: string }) {
 
 function GuidanceTimelineItemView({
   item,
-  mode
+  mode,
+  onOpenWorkspaceReference,
+  projectId
 }: {
   item: ChatGuidanceTimelineItem
   mode: 'interactive' | 'observer'
+  onOpenWorkspaceReference?: (target: WorkspaceReferenceTarget) => void
+  projectId?: string | null
 }) {
   const { t } = useFrontendConfig()
   const humanAnswer = readHumanInteractionGuidanceDisplay(item)
@@ -407,7 +413,11 @@ function GuidanceTimelineItemView({
           {humanAnswer ? (
             <HumanInteractionAnswerContent display={humanAnswer} />
           ) : (
-            <ChatMarkdown content={content} />
+            <ChatMarkdown
+              content={content}
+              onOpenWorkspaceReference={onOpenWorkspaceReference}
+              projectId={projectId}
+            />
           )}
         </div>
       )}
@@ -422,6 +432,7 @@ function AgentTimelineItemView({
   humanInteraction,
   item,
   mode,
+  onOpenWorkspaceReference,
   observerRootConversationId,
   projectId,
   run
@@ -431,6 +442,7 @@ function AgentTimelineItemView({
   humanInteraction?: HumanInteractionTimelineController
   item: RenderableTimelineItem
   mode: 'interactive' | 'observer'
+  onOpenWorkspaceReference?: (target: WorkspaceReferenceTarget) => void
   observerRootConversationId?: string
   projectId?: string | null
   run: ChatAgentRunView
@@ -520,7 +532,14 @@ function AgentTimelineItemView({
   }
 
   if (item.type === 'user_guidance') {
-    return <GuidanceTimelineItemView item={item} mode={mode} />
+    return (
+      <GuidanceTimelineItemView
+        item={item}
+        mode={mode}
+        onOpenWorkspaceReference={onOpenWorkspaceReference}
+        projectId={projectId}
+      />
+    )
   }
 
   if (item.type === 'mcp_tool_call') {
@@ -596,6 +615,7 @@ function AgentRunView({
   onTimelineCollapsedChange,
   onUiStateChange,
   onOpenCollaborationAgent,
+  onOpenWorkspaceReference,
   observerRootConversationId,
   projectId,
   timelineCollapsedOverride,
@@ -610,6 +630,7 @@ function AgentRunView({
   onTimelineCollapsedChange?: (messageId: string, collapsed: boolean) => void
   onUiStateChange?: (messageId: string, uiState: ChatMessage['uiState']) => void
   onOpenCollaborationAgent?: (agentId: string) => void
+  onOpenWorkspaceReference?: (target: WorkspaceReferenceTarget) => void
   observerRootConversationId?: string
   projectId?: string | null
   timelineCollapsedOverride?: boolean
@@ -960,7 +981,13 @@ function AgentRunView({
       />
       {canToggleTimeline && timelineCollapsed && !hasInteractionEntries
         ? guidanceItems.map((item) => (
-            <GuidanceTimelineItemView item={item} mode={mode} key={`timeline-item:${item.id}`} />
+            <GuidanceTimelineItemView
+              item={item}
+              mode={mode}
+              onOpenWorkspaceReference={onOpenWorkspaceReference}
+              projectId={projectId}
+              key={`timeline-item:${item.id}`}
+            />
           ))
         : null}
       {displayTimelineBlocks.flatMap((block) => {
@@ -1006,6 +1033,7 @@ function AgentRunView({
             item={item}
             key={`timeline-item:${item.id}`}
             mode={mode}
+            onOpenWorkspaceReference={onOpenWorkspaceReference}
             observerRootConversationId={observerRootConversationId}
             projectId={projectId}
             run={run}
@@ -1085,6 +1113,7 @@ function MessageContent({
   onTimelineCollapsedChange,
   onUiStateChange,
   onOpenCollaborationAgent,
+  onOpenWorkspaceReference,
   observerRootConversationId,
   projectId,
   timelineCollapsedOverride,
@@ -1102,6 +1131,7 @@ function MessageContent({
         onTimelineCollapsedChange={onTimelineCollapsedChange}
         onUiStateChange={onUiStateChange}
         onOpenCollaborationAgent={onOpenCollaborationAgent}
+        onOpenWorkspaceReference={onOpenWorkspaceReference}
         observerRootConversationId={observerRootConversationId}
         projectId={projectId}
         timelineCollapsedOverride={timelineCollapsedOverride}
@@ -1114,7 +1144,12 @@ function MessageContent({
   return humanAnswer ? (
     <HumanInteractionAnswerContent display={humanAnswer} />
   ) : (
-    <ChatMarkdown enableMath={false} content={getUserVisibleContent(message)} />
+    <ChatMarkdown
+      enableMath={false}
+      content={getUserVisibleContent(message)}
+      onOpenWorkspaceReference={onOpenWorkspaceReference}
+      projectId={projectId}
+    />
   )
 }
 
@@ -1421,6 +1456,7 @@ export const ChatMessageItem = memo(function ChatMessageItem({
   onEditSubmit,
   onContinueInNewTask,
   onOpenCollaborationAgent,
+  onOpenWorkspaceReference,
   onReject,
   onReviewLastTurn,
   onTimelineCollapsedChange,
@@ -1528,6 +1564,7 @@ export const ChatMessageItem = memo(function ChatMessageItem({
             onTimelineCollapsedChange={onTimelineCollapsedChange}
             onUiStateChange={onUiStateChange}
             onOpenCollaborationAgent={onOpenCollaborationAgent}
+            onOpenWorkspaceReference={onOpenWorkspaceReference}
             observerRootConversationId={observerRootConversationId}
             projectId={projectId}
             showTokenUsageDetails={showTokenUsageDetails}
