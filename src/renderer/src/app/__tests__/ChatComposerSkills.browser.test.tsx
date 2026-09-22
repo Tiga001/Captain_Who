@@ -442,8 +442,7 @@ describe('ChatComposer model picker', () => {
     await screen.getByRole('button', { name: 'Project A' }).click()
     await screen.getByRole('option', { name: /Project B/ }).click()
     await screen.getByRole('button', { name: 'chat.addContext' }).click()
-    await screen.getByRole('menuitem', { name: 'chat.skills' }).click()
-    await screen.getByRole('button', { name: /^Dependency auditor/ }).click()
+    await screen.getByText('Dependency auditor', { exact: true }).click()
     finishSubmission(true)
     await expect
       .poll(() => draftChangeSpy.mock.lastCall?.[0])
@@ -994,22 +993,21 @@ describe('ChatComposer Skill picker', () => {
     )
 
     await screen.getByRole('button', { name: 'chat.addContext' }).click()
-    await screen.getByRole('menuitem', { name: 'chat.skills' }).click()
     await expect.poll(() => listSkillsSpy.mock.calls.length).toBe(1)
     expect(listSkillsSpy).toHaveBeenCalledWith(null)
     await expect
-      .element(screen.getByRole('button', { name: /^skills\.bundled\.documents\.name/ }))
+      .element(screen.getByRole('menuitem', { name: /^skills\.bundled\.documents\.name/ }))
       .toBeVisible()
     await expect
-      .element(screen.getByRole('button', { name: /^Installed dependency auditor/ }))
+      .element(screen.getByRole('menuitem', { name: /^Installed dependency auditor/ }))
       .toBeVisible()
     await expect
-      .element(screen.getByRole('button', { name: /^skills\.bundled\.imageGeneration\.name/ }))
+      .element(screen.getByRole('menuitem', { name: /^skills\.bundled\.imageGeneration\.name/ }))
       .toBeVisible()
     expect(screen.container.textContent).not.toContain('chat.skillProjectRequired')
 
-    await screen.getByRole('button', { name: /^skills\.bundled\.documents\.name/ }).click()
-    await screen.getByRole('button', { name: /^Installed dependency auditor/ }).click()
+    await screen.getByRole('menuitem', { name: /^skills\.bundled\.documents\.name/ }).click()
+    await screen.getByRole('menuitem', { name: /^Installed dependency auditor/ }).click()
     await screen.getByRole('textbox', { name: 'chat.inputAria' }).fill('Audit without a project')
     await screen.getByRole('button', { name: 'chat.send' }).click()
     await expect.poll(() => submitSpy.mock.calls.length).toBe(1)
@@ -1053,7 +1051,6 @@ describe('ChatComposer Skill picker', () => {
     const screen = await render(<TestComposer />)
 
     await screen.getByRole('button', { name: 'chat.addContext' }).click()
-    await screen.getByRole('menuitem', { name: 'chat.skills' }).click()
     await expect.element(screen.getByRole('status')).toHaveTextContent('chat.loadingSkills')
 
     resolveCatalog?.(
@@ -1090,7 +1087,6 @@ describe('ChatComposer Skill picker', () => {
     const screen = await render(<TestComposer />)
 
     await screen.getByRole('button', { name: 'chat.addContext' }).click()
-    await screen.getByRole('menuitem', { name: 'chat.skills' }).click()
     await expect.element(screen.getByRole('alert')).toHaveTextContent('chat.skillsLoadFailed')
     expect(screen.container.textContent).not.toContain('catalog offline')
     await screen.getByRole('button', { name: /chat.retrySkills/ }).click()
@@ -1119,12 +1115,11 @@ describe('ChatComposer Skill picker', () => {
     const screen = await render(<TestComposer />)
 
     await screen.getByRole('button', { name: 'chat.addContext' }).click()
-    await screen.getByRole('menuitem', { name: 'chat.skills' }).click()
     await expect.poll(() => listSkillsSpy.mock.calls.length).toBe(1)
     expect(listSkillsSpy).toHaveBeenCalledWith('project-a')
 
-    await screen.getByRole('button', { name: /^Repository auditor/ }).click()
-    await screen.getByRole('button', { name: /^Test runner/ }).click()
+    await screen.getByRole('menuitem', { name: /Repository auditor/ }).click()
+    await screen.getByRole('menuitem', { name: /^Test runner/ }).click()
     await expect
       .element(
         screen.getByRole('button', {
@@ -1164,19 +1159,17 @@ describe('ChatComposer Skill picker', () => {
     const screen = await render(<TestComposer />)
 
     await screen.getByRole('button', { name: 'chat.addContext' }).click()
-    await screen.getByRole('menuitem', { name: 'chat.skills' }).click()
 
-    const bundledOption = screen.getByRole('button', {
+    const bundledOption = screen.getByRole('menuitem', {
       name: /^skills\.bundled\.documents\.name.*chat\.bundledSkill.*chat\.skillTrustApplication/
     })
     await expect.element(bundledOption).toBeVisible()
     expect(screen.container.textContent).not.toContain('chat.bundledSkill')
     expect(screen.container.textContent).not.toContain('chat.installedSkill')
     expect(screen.container.textContent).not.toContain('chat.workspaceSkill')
-    ;(bundledOption.element() as HTMLButtonElement).focus()
-    await expect
-      .element(screen.getByRole('tooltip'))
-      .toHaveTextContent('skills.bundled.documents.description')
+    expect((bundledOption.element() as HTMLButtonElement).title).toBe(
+      'skills.bundled.documents.description'
+    )
 
     await bundledOption.click()
     await screen.getByRole('textbox', { name: 'chat.inputAria' }).fill('Audit this claim')
@@ -1193,14 +1186,13 @@ describe('ChatComposer Skill picker', () => {
     const screen = await render(<TestComposer />)
 
     await screen.getByRole('button', { name: 'chat.addContext' }).click()
-    await screen.getByRole('menuitem', { name: 'chat.skills' }).click()
 
     for (const [name, kind] of [
       ['skills.bundled.documents.name', 'document'],
       ['skills.bundled.spreadsheets.name', 'spreadsheet'],
       ['skills.bundled.presentations.name', 'presentation']
     ] as const) {
-      const option = screen.getByRole('button', { name: new RegExp(`^${name}`) })
+      const option = screen.getByRole('menuitem', { name: new RegExp(`^${name}`) })
       await expect.element(option).toBeVisible()
       const icon = option.element().querySelector(`[data-office-kind="${kind}"]`)
       expect(icon?.querySelector('img')).not.toBeNull()
@@ -1300,44 +1292,46 @@ describe('ChatComposer Skill picker', () => {
     ).toBeUndefined()
 
     await screen.getByRole('button', { name: 'chat.addContext' }).click()
-    await screen.getByRole('menuitem', { name: 'chat.skills' }).click()
-    await screen.getByRole('button', { name: 'chat.useLatestSkill' }).click()
+    await screen.getByRole('menuitem', { name: /Repository auditor/ }).click()
 
     await expect.element(screen.getByRole('button', { name: 'chat.send' })).toBeEnabled()
     const updatedDraft = draftChangeSpy.mock.calls.at(-1)?.[0]
     expect(updatedDraft.skills).toEqual([{ id: auditorSkill.id, revision: auditorSkill.revision }])
   })
 
-  it('uses native toggle buttons and restores trigger focus after Escape and close', async () => {
+  it('lists available skills directly in the add menu', async () => {
     const screen = await render(<TestComposer />)
     const addContextButton = screen.getByRole('button', { name: 'chat.addContext' })
 
     await addContextButton.click()
-    await screen.getByRole('menuitem', { name: 'chat.skills' }).click()
+    await expect.element(screen.getByRole('menu', { name: 'chat.addMenuTitle' })).toBeVisible()
+    await expect
+      .element(screen.getByRole('menuitem', { name: /^Repository auditor/ }))
+      .toBeVisible()
+    await expect.element(screen.getByRole('menuitem', { name: /^Test runner/ })).toBeVisible()
+    expect(screen.container.querySelector('[role="menuitem"][name="chat.skills"]')).toBeNull()
+  })
 
-    const searchInput = screen.getByRole('textbox', { name: 'chat.searchSkills' })
-    await expect.element(searchInput).toHaveFocus()
-    await expect.element(screen.getByRole('list', { name: 'chat.skills' })).toBeVisible()
+  it('supports keyboard selection on the @ homepage', async () => {
+    const screen = await render(<TestComposer />)
+    const input = screen.getByRole('textbox', { name: 'chat.inputAria' })
+    await input.fill('@')
+    await expect.poll(() => listSkillsSpy.mock.calls.length).toBe(1)
+    await expect
+      .element(screen.getByRole('menuitem', { name: /^Repository auditor/ }))
+      .toBeVisible()
 
-    const auditorToggle = screen.getByRole('button', { name: /^Repository auditor/ })
-    await expect.element(auditorToggle).toHaveAttribute('aria-pressed', 'false')
-    await userEvent.keyboard('{Tab}')
-    await expect.element(auditorToggle).toHaveFocus()
-    await userEvent.keyboard('{Enter}')
-    await expect.element(auditorToggle).toHaveAttribute('aria-pressed', 'true')
+    await input.click()
+    await userEvent.keyboard('{ArrowDown}{ArrowDown}{ArrowDown}{Enter}')
 
-    await userEvent.keyboard('{Escape}')
-    await expect.poll(() => screen.container.querySelector('[role="dialog"]')).toBeNull()
-    await expect.element(addContextButton).toHaveFocus()
-
-    await addContextButton.click()
-    await screen.getByRole('menuitem', { name: 'chat.skills' }).click()
-    const closeButton = screen.getByRole('button', { name: 'chat.closeSkills' })
-    ;(closeButton.element() as HTMLButtonElement).focus()
-    await expect.element(closeButton).toHaveFocus()
-    await userEvent.keyboard('{Enter}')
-    await expect.poll(() => screen.container.querySelector('[role="dialog"]')).toBeNull()
-    await expect.element(addContextButton).toHaveFocus()
+    await expect
+      .element(
+        screen.getByRole('button', {
+          name: /chat\.removeSkill Repository auditor/
+        })
+      )
+      .toBeVisible()
+    await expect.element(input).toHaveValue('')
   })
 
   it('preserves the target scope Skill draft when conversation and project change together', async () => {

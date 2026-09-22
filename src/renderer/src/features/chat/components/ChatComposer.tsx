@@ -44,6 +44,7 @@ import { searchWorkspaceMentions } from '../../files/filesClient'
 import type { WorkspaceMentionSearchEntry } from '@mycopilot/protocol'
 import {
   filterSkillDescriptors,
+  MAX_SELECTED_SKILLS,
   matchSkillSelection,
   removeSkillSelection,
   retainGlobalSkillSelections,
@@ -51,11 +52,13 @@ import {
   updateSkillSelectionRevision
 } from '../../skills/skillSelection'
 import { useSkillCatalog } from '../../skills/useSkillCatalog'
+import { getSkillPresentation, sortSkillsForDisplay } from '../../skills/skillPresentation'
+import { SkillIcon } from '../../skills/SkillIcon'
 import { ContextWindowIndicator } from './ContextWindowIndicator'
 import { WorkspaceFileTypeIcon } from '../../../components/files/WorkspaceFileTypeIcon'
 import { ComposerAttachments } from './ComposerAttachments'
 import { ComposerFolderReferences } from './ComposerFolderReferences'
-import { ComposerSelectedSkills, ComposerSkillPicker } from './ComposerSkillPicker'
+import { ComposerSelectedSkills } from './ComposerSkillPicker'
 import { GuidanceQueue } from './GuidanceQueue'
 import { useImagePreview } from './ImagePreview'
 import {
@@ -74,6 +77,7 @@ import {
   ComposerAddMenu,
   ComposerCommands,
   filterComposerCommands,
+  type ComposerAddMenuSkill,
   type ComposerCommand
 } from './ComposerCommands'
 import './ChatComposer.css'
@@ -183,7 +187,6 @@ export function ChatComposer({
   const projectTriggerRef = useRef<HTMLButtonElement>(null)
   const projectPopoverRef = useRef<HTMLDivElement>(null)
   const [isAttachmentMenuOpen, setIsAttachmentMenuOpen] = useState(false)
-  const [isSkillMenuOpen, setIsSkillMenuOpen] = useState(false)
   const [isPermissionMenuOpen, setIsPermissionMenuOpen] = useState(false)
   const [isFullPermissionConfirmationOpen, setIsFullPermissionConfirmationOpen] = useState(false)
   const [isProjectMenuOpen, setIsProjectMenuOpen] = useState(false)
@@ -191,12 +194,12 @@ export function ChatComposer({
   const [mentionQuery, setMentionQuery] = useState('')
   const [mentionEntries, setMentionEntries] = useState<WorkspaceMentionSearchEntry[]>([])
   const [mentionIndex, setMentionIndex] = useState(0)
+  const [addMenuIndex, setAddMenuIndex] = useState(0)
   const mentionRequestRef = useRef(0)
   const mentionPopoverRef = useRef<HTMLDivElement>(null)
   const [isFileDragActive, setIsFileDragActive] = useState(false)
   const [attachmentError, setAttachmentError] = useState<string | null>(null)
   const [projectSearch, setProjectSearch] = useState('')
-  const [skillSearch, setSkillSearch] = useState('')
   const [message, setMessage] = useState(draft.message)
   const isCommandSubmenuOpen = isCapabilityCenterOpen || isModelMenuOpen
   const filteredCommands = isCommandSession ? filterComposerCommands(commands, message) : []
@@ -286,10 +289,13 @@ export function ChatComposer({
   const isModelSelectionDisabled = isModelTransitionRunning || isManualCompactionRunning
   const nextTurnConfigurationHint = isGenerating ? t('chat.nextTurnConfigurationHint') : undefined
   const selectedProject = projects.find((project) => project.id === selectedProjectId)
-  const skillCatalogEnabled = isSkillMenuOpen || draft.skills.length > 0
+  const skillCatalogEnabled =
+    isAttachmentMenuOpen ||
+    (isMentionMenuOpen && mentionQuery.trim() === '') ||
+    draft.skills.length > 0
   const skillCatalogRefreshKey = `${skillCatalogRefreshToken}\u0002${
-    isSkillMenuOpen
-      ? 'picker-open'
+    isAttachmentMenuOpen || (isMentionMenuOpen && mentionQuery.trim() === '')
+      ? 'composer-menu-open'
       : draft.skills.map((selection) => `${selection.id}\u0000${selection.revision}`).join('\u0001')
   }`
   const { refresh: refreshSkillCatalog, state: skillCatalogState } = useSkillCatalog(
@@ -304,6 +310,33 @@ export function ChatComposer({
   const skillCatalogDescriptors = skillCatalog
     ? filterSkillDescriptors(skillCatalog.skills, '')
     : []
+  const addMenuSkills = useMemo<ComposerAddMenuSkill[]>(() => {
+    if (!skillCatalog || isGenerating) return []
+    const selectedIds = new Set(draft.skills.map((selection) => selection.id))
+    return sortSkillsForDisplay(skillCatalogDescriptors).map((skill) => {
+      const presentation = getSkillPresentation(skill, t)
+      const selected = selectedIds.has(skill.id)
+      const sourceLabel =
+        skill.source.kind === 'workspace'
+          ? t('chat.workspaceSkill')
+          : skill.source.kind === 'bundled'
+            ? t('chat.bundledSkill')
+            : t('chat.installedSkill')
+      const trustLabel =
+        skill.trust === 'untrusted'
+          ? t('chat.skillTrustUntrusted')
+          : t('chat.skillTrustApplication')
+      return {
+        id: skill.id,
+        label: presentation.name,
+        accessibleLabel: `${presentation.name} · ${sourceLabel} · ${trustLabel}`,
+        description: presentation.description,
+        icon: <SkillIcon skillId={skill.id} source={skill.source} />,
+        selected,
+        disabled: !selected && draft.skills.length >= MAX_SELECTED_SKILLS
+      }
+    })
+  }, [draft.skills, isGenerating, skillCatalog, skillCatalogDescriptors, t])
   const hasStaleSkillSelection = Boolean(
     skillCatalog &&
     draft.skills.some(
@@ -380,16 +413,15 @@ export function ChatComposer({
     }
   }, [isCommandMenuOpen])
   useEffect(() => {
-    if (isAttachmentMenuOpen || isSkillMenuOpen || isPermissionMenuOpen || isProjectMenuOpen)
+    if (isAttachmentMenuOpen || isPermissionMenuOpen || isProjectMenuOpen)
       setIsCommandMenuOpen(false)
-  }, [isAttachmentMenuOpen, isSkillMenuOpen, isPermissionMenuOpen, isProjectMenuOpen])
+  }, [isAttachmentMenuOpen, isPermissionMenuOpen, isProjectMenuOpen])
 
   useDismissOnOutsidePointer(
     attachmentPickerRef,
-    isAttachmentMenuOpen || isSkillMenuOpen,
+    isAttachmentMenuOpen,
     useCallback(() => {
       setIsAttachmentMenuOpen(false)
-      setIsSkillMenuOpen(false)
     }, []),
     (target) =>
       Boolean(
@@ -468,7 +500,6 @@ export function ChatComposer({
   useEffect(() => {
     if (!isModelTransitionRunning) return
     setIsAttachmentMenuOpen(false)
-    setIsSkillMenuOpen(false)
     setIsPermissionMenuOpen(false)
     setIsProjectMenuOpen(false)
     setIsMentionMenuOpen(false)
@@ -479,7 +510,6 @@ export function ChatComposer({
     if (!isSuspended) return
     setIsCommandMenuOpen(false)
     setIsAttachmentMenuOpen(false)
-    setIsSkillMenuOpen(false)
     setIsPermissionMenuOpen(false)
     setIsProjectMenuOpen(false)
     setIsMentionMenuOpen(false)
@@ -511,9 +541,7 @@ export function ChatComposer({
   useEffect(() => {
     setAttachmentError(null)
     setIsAttachmentMenuOpen(false)
-    setIsSkillMenuOpen(false)
     setIsFullPermissionConfirmationOpen(false)
-    setSkillSearch('')
     setIsFileDragActive(false)
     setIsMentionMenuOpen(false)
     setMentionQuery('')
@@ -582,7 +610,6 @@ export function ChatComposer({
   const selectModelConfig = (modelId: string) => {
     if (isModelSelectionDisabled || !enabledModels.some((model) => model.id === modelId)) return
     setIsAttachmentMenuOpen(false)
-    setIsSkillMenuOpen(false)
     setIsPermissionMenuOpen(false)
     if (isModelMenuOpen) {
       setIsCommandMenuOpen(false)
@@ -646,7 +673,7 @@ export function ChatComposer({
     }
   }, [enabledModels, selectedModel, updateDraft])
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const textarea = textareaRef.current
     if (!textarea) return
 
@@ -773,7 +800,6 @@ export function ChatComposer({
         ]
       })
       setIsAttachmentMenuOpen(false)
-      setIsSkillMenuOpen(false)
       return
     }
 
@@ -789,7 +815,6 @@ export function ChatComposer({
     // The submission owner consumes/restores the draft together with the optimistic message.
     // A late acceptance must never clear the next draft, even if its text is identical.
     setIsAttachmentMenuOpen(false)
-    setIsSkillMenuOpen(false)
     setIsPermissionMenuOpen(false)
     setIsProjectMenuOpen(false)
   }
@@ -870,14 +895,15 @@ export function ChatComposer({
   }
 
   const toggleSkill = (skill: SkillDescriptor) => {
+    const selection = draftRef.current.skills.find((candidate) => candidate.id === skill.id)
+    if (selection && selection.revision !== skill.revision) {
+      updateDraft({
+        skills: updateSkillSelectionRevision(draftRef.current.skills, skill)
+      })
+      return
+    }
     updateDraft({
       skills: toggleSkillSelection(draftRef.current.skills, skill)
-    })
-  }
-
-  const useLatestSkill = (skill: SkillDescriptor) => {
-    updateDraft({
-      skills: updateSkillSelectionRevision(draftRef.current.skills, skill)
     })
   }
 
@@ -910,6 +936,67 @@ export function ChatComposer({
     } catch (error) {
       setAttachmentError(getUserFacingErrorMessage(error, t, 'chat.attachmentOperationFailed'))
     }
+  }
+
+  const mentionHomeItemCount = 3 + (!isGenerating ? addMenuSkills.length : 0)
+  const addMenuItemCount = 3 + (!isGenerating ? addMenuSkills.length : 0)
+  const activateAddMenuItem = (index: number) => {
+    if (index === 0) {
+      void addAttachments('file')
+      return
+    }
+    if (index === 1) {
+      void addFolders()
+      return
+    }
+    if (index === 2) {
+      void addAttachments('image')
+      return
+    }
+    const skillId = addMenuSkills[index - 3]?.id
+    const skill = skillId
+      ? skillCatalogDescriptors.find((descriptor) => descriptor.id === skillId)
+      : undefined
+    if (skill && !isGenerating) toggleSkill(skill)
+  }
+
+  const handleAddMenuKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    if (!isAttachmentMenuOpen || event.defaultPrevented) return
+    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      event.preventDefault()
+      setAddMenuIndex((current) => {
+        const count = Math.max(1, addMenuItemCount)
+        return (current + (event.key === 'ArrowDown' ? 1 : count - 1)) % count
+      })
+      return
+    }
+    if ((event.key === 'Enter' || event.key === 'Tab') && addMenuIndex < addMenuItemCount) {
+      event.preventDefault()
+      activateAddMenuItem(addMenuIndex)
+    }
+  }
+  const activateMentionHomeItem = (index: number) => {
+    if (index === 0) {
+      void addAttachments('file')
+      return
+    }
+    if (index === 1) {
+      void addFolders()
+      return
+    }
+    if (index === 2) {
+      void addAttachments('image')
+      return
+    }
+    const skillId = addMenuSkills[index - 3]?.id
+    const skill = skillId
+      ? skillCatalogDescriptors.find((descriptor) => descriptor.id === skillId)
+      : undefined
+    if (!skill || isGenerating) return
+    if (message === '@') updateDraft({ message: '' })
+    toggleSkill(skill)
+    setMentionQuery('')
+    setMentionEntries([])
   }
 
   const addDroppedOrPastedFiles = async (files: FileList | File[]) => {
@@ -992,9 +1079,11 @@ export function ChatComposer({
       >
         {isCommandMenuOpen && (
           <AnchoredPopover
-            anchorRef={textareaRef}
+            anchorRef={composerRef}
             enabled={portalMenus}
             matchAnchorWidth
+            placement="top"
+            returnFocusRef={textareaRef}
             onClose={() => {
               if (!isCapabilityDialogOpen) setIsCommandMenuOpen(false)
             }}
@@ -1034,10 +1123,12 @@ export function ChatComposer({
         )}
         {isMentionMenuOpen && (
           <AnchoredPopover
-            anchorRef={textareaRef}
+            anchorRef={composerRef}
             className="chat-composer-menu-popover"
             enabled={portalMenus}
             matchAnchorWidth
+            placement="top"
+            returnFocusRef={textareaRef}
             onClose={() => setIsMentionMenuOpen(false)}
             popoverRef={mentionPopoverRef}
           >
@@ -1050,18 +1141,28 @@ export function ChatComposer({
                 onAddFile={() => addAttachments('file')}
                 onAddFolder={addFolders}
                 onAddImage={() => addAttachments('image')}
-                onAddSkill={
-                  isGenerating
-                    ? undefined
-                    : () => {
-                        if (message === '@') updateDraft({ message: '' })
-                        setMentionQuery('')
-                        setIsMentionMenuOpen(false)
-                        setIsSkillMenuOpen(true)
-                        setSkillSearch('')
-                      }
-                }
-                skillLabel={t('chat.skills')}
+                selectedIndex={mentionIndex}
+                onSelectIndex={setMentionIndex}
+                skills={!isGenerating ? addMenuSkills : undefined}
+                skillsTitle={t('chat.skills')}
+                skillLoading={skillCatalogState.status === 'loading'}
+                skillLoadingLabel={t('chat.loadingSkills')}
+                skillError={skillCatalogState.status === 'error'}
+                skillErrorLabel={t('chat.skillsLoadFailed')}
+                skillRetryLabel={t('chat.retrySkills')}
+                skillCatalogTruncated={Boolean(skillCatalog?.truncated)}
+                skillTruncatedLabel={t('chat.skillCatalogTruncated')}
+                skillDiagnosticsCount={skillCatalog?.diagnostics.length ?? 0}
+                skillDiagnosticsLabel={t('chat.skillDiagnostics')}
+                skillDiagnosticsAvailableLabel={t('skills.diagnosticsAvailable')}
+                skillEmptyLabel={t('chat.noSkills')}
+                onRetrySkills={refreshSkillCatalog}
+                onToggleSkill={(skill) => {
+                  const descriptor = skillCatalogDescriptors.find((item) => item.id === skill.id)
+                  if (!descriptor) return
+                  if (message === '@') updateDraft({ message: '' })
+                  toggleSkill(descriptor)
+                }}
               />
             ) : mentionEntries.length === 0 ? (
               <div className="composer-commands" role="listbox" aria-label="Workspace files">
@@ -1213,42 +1314,46 @@ export function ChatComposer({
           </>
         )}
 
-        <ComposerSelectedSkills
-          catalog={skillCatalog}
-          onRemove={removeSkill}
-          selections={draft.skills}
-        />
+        {(draft.skills.length > 0 || workspaceMentions.length > 0) && (
+          <div className="chat-composer__context-items">
+            <ComposerSelectedSkills
+              catalog={skillCatalog}
+              onRemove={removeSkill}
+              selections={draft.skills}
+            />
 
-        {workspaceMentions.length > 0 && (
-          <div className="composer-workspace-mentions" aria-label="Workspace references">
-            {workspaceMentions.map((mention) => (
-              <div className="composer-workspace-mention" key={mention.id}>
-                <button
-                  type="button"
-                  className="composer-workspace-mention__link"
-                  title={`${mention.alias}/${mention.path}`}
-                  onClick={() =>
-                    onOpenWorkspaceReference?.(workspaceReferenceTargetFromMention(mention))
-                  }
-                >
-                  {mention.kind === 'directory' ? (
-                    <Folder aria-hidden="true" />
-                  ) : (
-                    <WorkspaceFileTypeIcon path={mention.path} />
-                  )}
-                  <span>{mention.displayName}</span>
-                </button>
-                <button
-                  type="button"
-                  className="composer-workspace-mention__remove"
-                  aria-label={`Remove ${mention.displayName}`}
-                  title={`Remove ${mention.displayName}`}
-                  onClick={() => removeWorkspaceMention(mention.id)}
-                >
-                  <X aria-hidden="true" />
-                </button>
+            {workspaceMentions.length > 0 && (
+              <div className="composer-workspace-mentions" aria-label="Workspace references">
+                {workspaceMentions.map((mention) => (
+                  <div className="composer-workspace-mention" key={mention.id}>
+                    <button
+                      type="button"
+                      className="composer-workspace-mention__link"
+                      title={`${mention.alias}/${mention.path}`}
+                      onClick={() =>
+                        onOpenWorkspaceReference?.(workspaceReferenceTargetFromMention(mention))
+                      }
+                    >
+                      {mention.kind === 'directory' ? (
+                        <Folder aria-hidden="true" />
+                      ) : (
+                        <WorkspaceFileTypeIcon path={mention.path} />
+                      )}
+                      <span>{mention.displayName}</span>
+                    </button>
+                    <button
+                      type="button"
+                      className="composer-workspace-mention__remove"
+                      aria-label={`Remove ${mention.displayName}`}
+                      title={`Remove ${mention.displayName}`}
+                      onClick={() => removeWorkspaceMention(mention.id)}
+                    >
+                      <X aria-hidden="true" />
+                    </button>
+                  </div>
+                ))}
               </div>
-            ))}
+            )}
           </div>
         )}
 
@@ -1282,7 +1387,6 @@ export function ChatComposer({
               setMentionQuery(nextMessage.slice(1))
               setMentionIndex(0)
               setIsAttachmentMenuOpen(false)
-              setIsSkillMenuOpen(false)
               setIsPermissionMenuOpen(false)
               setIsProjectMenuOpen(false)
               setIsCommandMenuOpen(false)
@@ -1310,7 +1414,6 @@ export function ChatComposer({
               setIsCommandSession(true)
               setIsCommandMenuOpen(true)
               setIsAttachmentMenuOpen(false)
-              setIsSkillMenuOpen(false)
               setIsPermissionMenuOpen(false)
               setIsProjectMenuOpen(false)
             } else if (!nextMessage.startsWith('/') || nextMessage.includes('\n')) {
@@ -1340,11 +1443,21 @@ export function ChatComposer({
               }
               if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
                 event.preventDefault()
-                const count = mentionEntries.length
+                const count =
+                  mentionQuery.trim() === '' ? mentionHomeItemCount : mentionEntries.length
                 if (count > 0)
                   setMentionIndex(
                     (mentionIndex + (event.key === 'ArrowDown' ? 1 : count - 1)) % count
                   )
+                return
+              }
+              if (
+                mentionQuery.trim() === '' &&
+                (event.key === 'Enter' || event.key === 'Tab') &&
+                mentionIndex < mentionHomeItemCount
+              ) {
+                event.preventDefault()
+                activateMentionHomeItem(mentionIndex)
                 return
               }
               if ((event.key === 'Enter' || event.key === 'Tab') && mentionEntries[mentionIndex]) {
@@ -1422,21 +1535,27 @@ export function ChatComposer({
         )}
 
         <div className="chat-composer__toolbar">
-          <div className="composer-add-picker" ref={attachmentPickerRef}>
+          <div
+            className="composer-add-picker"
+            ref={attachmentPickerRef}
+            onKeyDown={handleAddMenuKeyDown}
+          >
             <button
               ref={attachmentTriggerRef}
               type="button"
               className="composer-icon-button"
-              aria-haspopup={isSkillMenuOpen ? 'dialog' : 'menu'}
-              aria-expanded={isAttachmentMenuOpen || isSkillMenuOpen}
+              aria-haspopup="menu"
+              aria-expanded={isAttachmentMenuOpen}
               aria-label={t('chat.addContext')}
               disabled={isModelTransitionRunning}
               onClick={() => {
                 setAttachmentError(null)
                 setIsMentionMenuOpen(false)
                 setMentionQuery('')
-                setIsAttachmentMenuOpen((open) => !open)
-                setIsSkillMenuOpen(false)
+                setIsAttachmentMenuOpen((open) => {
+                  if (!open) setAddMenuIndex(0)
+                  return !open
+                })
                 setIsPermissionMenuOpen(false)
                 setIsProjectMenuOpen(false)
               }}
@@ -1450,6 +1569,8 @@ export function ChatComposer({
                 className="chat-composer-menu-popover"
                 enabled={portalMenus}
                 matchAnchorWidth
+                placement="top"
+                returnFocusRef={attachmentTriggerRef}
                 onClose={() => setIsAttachmentMenuOpen(false)}
                 popoverRef={attachmentPopoverRef}
               >
@@ -1461,42 +1582,26 @@ export function ChatComposer({
                   onAddFile={() => addAttachments('file')}
                   onAddFolder={addFolders}
                   onAddImage={() => addAttachments('image')}
-                  onAddSkill={
-                    isGenerating
-                      ? undefined
-                      : () => {
-                          setIsAttachmentMenuOpen(false)
-                          setIsSkillMenuOpen(true)
-                          setSkillSearch('')
-                        }
-                  }
-                  skillLabel={t('chat.skills')}
-                />
-              </AnchoredPopover>
-            )}
-
-            {isSkillMenuOpen && (
-              <AnchoredPopover
-                anchorRef={attachmentTriggerRef}
-                className="chat-composer-menu-popover"
-                enabled={portalMenus}
-                onClose={() => setIsSkillMenuOpen(false)}
-                popoverRef={attachmentPopoverRef}
-              >
-                <ComposerSkillPicker
-                  catalogState={skillCatalogState}
-                  projectId={selectedProjectId}
-                  search={skillSearch}
-                  selections={draft.skills}
-                  onClose={() => {
-                    setIsSkillMenuOpen(false)
-                    setSkillSearch('')
-                    window.requestAnimationFrame(() => attachmentTriggerRef.current?.focus())
+                  selectedIndex={addMenuIndex}
+                  onSelectIndex={setAddMenuIndex}
+                  skills={!isGenerating ? addMenuSkills : undefined}
+                  skillsTitle={t('chat.skills')}
+                  skillLoading={skillCatalogState.status === 'loading'}
+                  skillLoadingLabel={t('chat.loadingSkills')}
+                  skillError={skillCatalogState.status === 'error'}
+                  skillErrorLabel={t('chat.skillsLoadFailed')}
+                  skillRetryLabel={t('chat.retrySkills')}
+                  skillCatalogTruncated={Boolean(skillCatalog?.truncated)}
+                  skillTruncatedLabel={t('chat.skillCatalogTruncated')}
+                  skillDiagnosticsCount={skillCatalog?.diagnostics.length ?? 0}
+                  skillDiagnosticsLabel={t('chat.skillDiagnostics')}
+                  skillDiagnosticsAvailableLabel={t('skills.diagnosticsAvailable')}
+                  skillEmptyLabel={t('chat.noSkills')}
+                  onRetrySkills={refreshSkillCatalog}
+                  onToggleSkill={(skill) => {
+                    const descriptor = skillCatalogDescriptors.find((item) => item.id === skill.id)
+                    if (descriptor) toggleSkill(descriptor)
                   }}
-                  onRefresh={refreshSkillCatalog}
-                  onSearchChange={setSkillSearch}
-                  onToggle={toggleSkill}
-                  onUseLatest={useLatestSkill}
                 />
               </AnchoredPopover>
             )}
@@ -1515,7 +1620,6 @@ export function ChatComposer({
               aria-label={`${t('chat.permission')}：${t(selectedPermission.labelKey)}`}
               onClick={() => {
                 setIsAttachmentMenuOpen(false)
-                setIsSkillMenuOpen(false)
                 setIsPermissionMenuOpen((open) => !open)
               }}
               onKeyDown={(event) => {
@@ -1629,7 +1733,6 @@ export function ChatComposer({
                 aria-expanded={isProjectMenuOpen}
                 onClick={() => {
                   setIsAttachmentMenuOpen(false)
-                  setIsSkillMenuOpen(false)
                   setIsPermissionMenuOpen(false)
                   setIsProjectMenuOpen((open) => !open)
                 }}

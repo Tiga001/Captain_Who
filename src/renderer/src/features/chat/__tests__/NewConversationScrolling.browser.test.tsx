@@ -5,6 +5,7 @@ import { render } from 'vitest-browser-react'
 import { getFrontendCssVariables } from '../../../config/frontendConfig'
 import { getFrontendTheme } from '../../../config/frontendTheme'
 import type { ComposerCommandId } from '../components/ComposerCommands'
+import type { ChatComposerDraft } from '../chatTypes'
 import { singleFolderProject } from '../../projects/__tests__/projectFixtures'
 import '../../../styles/global.css'
 
@@ -74,9 +75,12 @@ vi.mock('../chatAttachments', () => ({
   buildAgentInputAttachments: (attachments: unknown[]) => attachments,
   composerAttachmentFromAgentAttachment: (attachment: unknown) => attachment,
   createComposerAttachmentsFromFiles: async () => [],
+  getComposerDroppedFilePath: () => undefined,
   loadComposerAttachmentImage: async () => undefined,
   loadComposerAttachmentPreview: async () => undefined,
+  loadComposerFoldersFromPaths: async () => [],
   createAttachmentSummary: () => '',
+  selectComposerFolders: async () => [],
   selectComposerAttachments: selectAttachments,
   stripAttachmentSummary: (content: string) => content
 }))
@@ -86,16 +90,37 @@ const [{ NewConversationPage }, { createComposerDraft }] = await Promise.all([
   import('../../../app/chatMessageFactory')
 ])
 
+const CONTEXT_DRAFT: Partial<ChatComposerDraft> = {
+  folderReferences: [
+    { schemaVersion: 1, id: 'folder-1', name: 'Playground', rootPath: '/workspace/Playground' }
+  ],
+  skills: [{ id: 'installed:user:skill-0', revision: 'revision-0' }],
+  workspaceMentions: [
+    {
+      id: 'src',
+      projectId: 'project-0',
+      folderId: 'folder-1',
+      alias: 'Playground',
+      path: 'src',
+      displayPath: 'Playground/src',
+      displayName: 'src',
+      kind: 'directory'
+    }
+  ]
+}
+
 function Workspace({
   width = 1120,
   height = 760,
   longDraft = true,
-  halfHeight = true
+  halfHeight = true,
+  withContext = false
 }: {
   width?: number
   height?: number
   longDraft?: boolean
   halfHeight?: boolean
+  withContext?: boolean
 }) {
   const [bottomOpen, setBottomOpen] = useState(halfHeight)
   const [covered, setCovered] = useState(false)
@@ -117,7 +142,8 @@ function Workspace({
             }
           ]
         : [],
-      skills: longDraft ? [{ id: 'installed:user:skill-0', revision: 'revision-0' }] : []
+      skills: longDraft ? [{ id: 'installed:user:skill-0', revision: 'revision-0' }] : [],
+      ...(withContext ? CONTEXT_DRAFT : {})
     })
   )
   return (
@@ -145,6 +171,20 @@ function Workspace({
           toggle cover
         </button>
         <button type="button">outside</button>
+        <button
+          type="button"
+          onClick={() =>
+            setDraft((current) => ({
+              ...current,
+              ...(current.folderReferences?.length
+                ? { folderReferences: [], skills: [], workspaceMentions: [] }
+                : CONTEXT_DRAFT),
+              updatedAt: Math.max(Date.now(), current.updatedAt + 1)
+            }))
+          }
+        >
+          toggle context
+        </button>
       </aside>
       <main className="main-panel" inert={covered} aria-hidden={covered || undefined}>
         <div className="main-panel__toolbar">New conversation</div>
@@ -163,6 +203,7 @@ function Workspace({
             }))}
             draft={draft}
             onDraftChange={setDraft}
+            onDraftMessageChange={setDraft}
             onSubmitMessage={vi.fn()}
             permissionModeAvailability={{ custom: true, full: true }}
             promptIndex={0}
@@ -192,7 +233,8 @@ async function expectFloatingMenu(selector: string) {
   await expect
     .poll(() => {
       const menu = element(selector)
-      const box = menu.getBoundingClientRect()
+      const surface = menu.closest('.mc-anchored-popover') ?? menu
+      const box = surface.getBoundingClientRect()
       return (
         !menu.closest('.new-conversation-page') &&
         box.width > 0 &&
@@ -370,18 +412,93 @@ describe('New conversation with a half-height bottom panel', () => {
     expect(document.querySelector('.composer-permission-menu')).toBeNull()
   })
 
-  it('supports skill search and selection without treating the portal as an outside click', async () => {
+  it('supports keyboard navigation in the plus menu', async () => {
+    await render(<Workspace longDraft={false} />)
+    const trigger = page.getByRole('button', { name: 'chat.addContext' })
+    await trigger.click()
+    await expectFloatingMenu('.composer-add-menu')
+
+    const firstSkill = page.getByRole('menuitem', { name: /^Skill 0/ })
+    await expect.element(firstSkill).toBeVisible()
+    await expect
+      .element(page.getByRole('menuitem', { name: 'chat.addFile', exact: true }))
+      .toHaveAttribute('aria-selected', 'true')
+    await userEvent.keyboard('{ArrowDown}{ArrowDown}{ArrowDown}')
+    await expect.element(firstSkill).toHaveAttribute('aria-selected', 'true')
+    await userEvent.keyboard('{Enter}')
+
+    await expect
+      .element(page.getByRole('button', { name: /^chat.removeSkill Skill 0/ }))
+      .toBeVisible()
+  })
+
+  it.each(['+', '/', '@'])(
+    'keeps %s above the entire composer as attachments and references change its height',
+    async (trigger) => {
+      await page.viewport(1440, 900)
+      await render(
+        <Workspace width={1440} height={900} halfHeight={false} longDraft={false} withContext />
+      )
+      const input = page.getByRole('textbox', { name: 'chat.inputAria' })
+      if (trigger === '+') await page.getByRole('button', { name: 'chat.addContext' }).click()
+      else {
+        await input.click()
+        await userEvent.keyboard(trigger)
+      }
+
+      const expectAboveComposer = async () => {
+        await expect.poll(() => document.querySelector('.mc-anchored-popover')).not.toBeNull()
+        await expect
+          .poll(() => {
+            const menu = element('.mc-anchored-popover')
+            const box = menu.getBoundingClientRect()
+            const composerBox = element('.chat-composer').getBoundingClientRect()
+            return (
+              menu.dataset.placement === 'top' &&
+              Math.abs(composerBox.top - box.bottom - 8) < 1 &&
+              Math.abs(composerBox.left - box.left) < 1 &&
+              Math.abs(composerBox.width - box.width) < 1 &&
+              box.top >= 7 &&
+              box.height > 0
+            )
+          })
+          .toBe(true)
+      }
+      await expectAboveComposer()
+      const heightWithContext = element('.chat-composer').getBoundingClientRect().height
+
+      // Simulate an owner-side draft update while the menu stays open (e.g. an import completes).
+      const toggleContext = page.getByRole('button', { name: 'toggle context' }).element()
+      ;(toggleContext as HTMLButtonElement).click()
+      await expect
+        .poll(() => element('.chat-composer').getBoundingClientRect().height)
+        .toBeLessThan(heightWithContext)
+      await expectAboveComposer()
+      ;(toggleContext as HTMLButtonElement).click()
+      await expect
+        .poll(() => element('.chat-composer').getBoundingClientRect().height)
+        .toBe(heightWithContext)
+      await expectAboveComposer()
+
+      await userEvent.keyboard('{Escape}')
+      await expect.poll(() => document.querySelector('.mc-anchored-popover')).toBeNull()
+      expect(document.activeElement).toBe(
+        trigger === '+'
+          ? page.getByRole('button', { name: 'chat.addContext' }).element()
+          : input.element()
+      )
+    }
+  )
+
+  it('supports skill selection without treating the portal as an outside click', async () => {
     await render(<Workspace />)
     await scrollToBottom()
     await page.getByRole('button', { name: 'chat.addContext' }).click()
-    await page.getByRole('menuitem', { name: 'chat.skills' }).click()
-    await expectFloatingMenu('.composer-skill-menu')
-    await page.getByRole('textbox', { name: 'chat.searchSkills' }).fill('Skill 19')
-    await page.getByRole('button', { name: /^Skill 19/ }).click()
-    await expectFloatingMenu('.composer-skill-menu')
-    await page.getByRole('textbox', { name: 'chat.searchSkills' }).click()
+    await expectFloatingMenu('.composer-add-menu')
+    await page.getByRole('menuitem', { name: /^Skill 19/ }).click()
+    await expectFloatingMenu('.composer-add-menu')
     await userEvent.keyboard('{Escape}')
-    expect(document.querySelector('.composer-skill-menu')).toBeNull()
+    expect(document.querySelector('.composer-add-menu')).toBeNull()
     await expect
       .element(page.getByRole('button', { name: /^chat.removeSkill Skill 19/ }))
       .toBeVisible()

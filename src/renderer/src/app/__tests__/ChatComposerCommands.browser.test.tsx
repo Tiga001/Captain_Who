@@ -859,7 +859,7 @@ it('captures the compact model command page with readable API metadata', async (
   expect(getComputedStyle(panel).fontFamily).not.toContain('Times')
   expect(panel.scrollWidth).toBeLessThanOrEqual(panel.clientWidth)
   const anchorWidth = view
-    .getByRole('textbox', { name: 'chat.inputAria' })
+    .getByRole('form', { name: 'chat.composer' })
     .element()
     .getBoundingClientRect().width
   expect(Math.abs(panel.getBoundingClientRect().width - anchorWidth)).toBeLessThanOrEqual(2)

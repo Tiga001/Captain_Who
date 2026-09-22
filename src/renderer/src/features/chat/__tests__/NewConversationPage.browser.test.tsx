@@ -74,9 +74,12 @@ vi.mock('../chatAttachments', () => ({
   buildAgentInputAttachments: (attachments: unknown[]) => attachments,
   composerAttachmentFromAgentAttachment: (attachment: unknown) => attachment,
   createComposerAttachmentsFromFiles: async () => [],
+  getComposerDroppedFilePath: () => undefined,
   loadComposerAttachmentImage: async () => undefined,
   loadComposerAttachmentPreview: async () => undefined,
+  loadComposerFoldersFromPaths: async () => [],
   createAttachmentSummary: () => '',
+  selectComposerFolders: async () => [],
   selectComposerAttachments: async () => [],
   stripAttachmentSummary: (content: string) => content
 }))

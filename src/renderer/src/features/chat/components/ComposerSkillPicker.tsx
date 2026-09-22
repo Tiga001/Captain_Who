@@ -100,11 +100,17 @@ export function ComposerSelectedSkills({
           : undefined
         const provenanceLabel =
           sourceLabel && trustLabel ? `${sourceLabel} · ${trustLabel}` : undefined
-        const visibleProvenanceLabel =
+        const accessibleName = provenanceLabel ? `${name} · ${provenanceLabel}` : name
+        const hiddenProvenanceLabel =
           provenance?.sourceKind === 'bundled' && provenance.trust === 'application'
             ? undefined
             : provenanceLabel
-        const accessibleName = provenanceLabel ? `${name} · ${provenanceLabel}` : name
+        const statusLabel =
+          match?.status === 'stale'
+            ? t('chat.skillStaleDescription')
+            : match?.status === 'unavailable'
+              ? t('chat.skillUnavailableDescription')
+              : undefined
 
         return (
           <span
@@ -113,27 +119,22 @@ export function ComposerSelectedSkills({
             data-status={match?.status === 'current' ? undefined : match?.status}
             data-trust={provenance?.trust}
             key={`${selection.id}:${selection.revision}`}
-            title={
-              match?.status === 'stale'
-                ? t('chat.skillStaleDescription')
-                : match?.status === 'unavailable'
-                  ? t('chat.skillUnavailableDescription')
-                  : name
-            }
+            title={[name, provenanceLabel, statusLabel].filter(Boolean).join(' · ')}
           >
-            <SkillIcon
-              className="composer-skill-chip__icon"
-              skillId={selection.id}
-              source={match?.descriptor?.source}
-            />
-            <span className="composer-skill-chip__content">
+            <span className="composer-skill-chip__link">
+              <SkillIcon
+                className="composer-skill-chip__icon"
+                skillId={selection.id}
+                source={match?.descriptor?.source}
+              />
               <span className="composer-skill-chip__name">{name}</span>
-              {visibleProvenanceLabel && (
-                <small className="composer-skill-chip__provenance">{visibleProvenanceLabel}</small>
+              {hiddenProvenanceLabel && (
+                <span className="composer-skill-chip__provenance">{hiddenProvenanceLabel}</span>
               )}
             </span>
             {match?.status !== 'current' && match && <AlertTriangle aria-hidden="true" />}
             <button
+              className="composer-skill-chip__remove"
               aria-label={`${t('chat.removeSkill')} ${accessibleName}`}
               onClick={() => onRemove(selection.id)}
               type="button"

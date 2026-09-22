@@ -3,6 +3,7 @@ import {
   Blocks,
   Bot,
   Box,
+  Check,
   FileDiff,
   FoldVertical,
   Gauge,
@@ -19,7 +20,7 @@ import {
   TerminalSquare,
   type LucideIcon
 } from 'lucide-react'
-import { useEffect, type RefObject } from 'react'
+import { useEffect, useId, type ReactNode, type RefObject } from 'react'
 
 export type ComposerCommandId =
   | 'model'
@@ -59,8 +60,33 @@ export interface ComposerAddMenuProps {
   onAddFile: () => void | Promise<void>
   onAddFolder: () => void | Promise<void>
   onAddImage: () => void | Promise<void>
-  onAddSkill?: () => void | Promise<void>
-  skillLabel: string
+  onSelectIndex?: (index: number) => void
+  selectedIndex?: number
+  skillEmptyLabel?: string
+  skillLoadingLabel?: string
+  skillErrorLabel?: string
+  skillRetryLabel?: string
+  skillTruncatedLabel?: string
+  skillDiagnosticsLabel?: string
+  skillDiagnosticsAvailableLabel?: string
+  skillDiagnosticsCount?: number
+  skillCatalogTruncated?: boolean
+  skillError?: boolean
+  skillLoading?: boolean
+  skills?: readonly ComposerAddMenuSkill[]
+  skillsTitle?: string
+  onRetrySkills?: () => void
+  onToggleSkill?: (skill: ComposerAddMenuSkill) => void
+}
+
+export interface ComposerAddMenuSkill {
+  id: string
+  label: string
+  accessibleLabel?: string
+  description?: string
+  icon: ReactNode
+  selected?: boolean
+  disabled?: boolean
 }
 
 /** The plus and @ entry points intentionally share the slash menu's row treatment. */
@@ -72,30 +98,147 @@ export function ComposerAddMenu({
   onAddFile,
   onAddFolder,
   onAddImage,
-  onAddSkill,
-  skillLabel
+  onSelectIndex,
+  selectedIndex = -1,
+  skillEmptyLabel,
+  skillLoading = false,
+  skillLoadingLabel,
+  skillError = false,
+  skillErrorLabel,
+  skillRetryLabel,
+  skillTruncatedLabel,
+  skillDiagnosticsLabel,
+  skillDiagnosticsAvailableLabel,
+  skillDiagnosticsCount = 0,
+  skillCatalogTruncated = false,
+  skills,
+  skillsTitle,
+  onRetrySkills,
+  onToggleSkill
 }: ComposerAddMenuProps) {
+  const listId = useId()
+  const items = [
+    { id: 'file', label: addFileLabel, icon: <Paperclip aria-hidden="true" />, onClick: onAddFile },
+    {
+      id: 'folder',
+      label: addFolderLabel,
+      icon: <Folder aria-hidden="true" />,
+      onClick: onAddFolder
+    },
+    {
+      id: 'image',
+      label: addImageLabel,
+      icon: <ImageIcon aria-hidden="true" />,
+      onClick: onAddImage
+    },
+    ...(skills ?? []).map((skill) => ({
+      ...skill,
+      id: `skill:${skill.id}`,
+      onClick: () => onToggleSkill?.(skill)
+    }))
+  ]
+
+  useEffect(() => {
+    if (selectedIndex < 0) return
+    const selected = document.getElementById(`${listId}-${selectedIndex}`)
+    selected?.scrollIntoView({ block: 'nearest' })
+  }, [listId, selectedIndex])
+
   return (
     <div className="composer-commands composer-add-menu" role="menu" aria-label={addMenuTitle}>
-      <div className="composer-commands__list">
+      <div className="composer-commands__list" id={listId}>
         <p className="composer-add-menu__title">{addMenuTitle}</p>
-        <button type="button" role="menuitem" onClick={() => void onAddFile()}>
-          <Paperclip aria-hidden="true" />
-          <span className="composer-commands__label">{addFileLabel}</span>
-        </button>
-        <button type="button" role="menuitem" onClick={() => void onAddFolder()}>
-          <Folder aria-hidden="true" />
-          <span className="composer-commands__label">{addFolderLabel}</span>
-        </button>
-        <button type="button" role="menuitem" onClick={() => void onAddImage()}>
-          <ImageIcon aria-hidden="true" />
-          <span className="composer-commands__label">{addImageLabel}</span>
-        </button>
-        {onAddSkill && (
-          <button type="button" role="menuitem" onClick={() => void onAddSkill()}>
-            <Sparkles aria-hidden="true" />
-            <span className="composer-commands__label">{skillLabel}</span>
+        {items.slice(0, 3).map((item, index) => (
+          <button
+            aria-selected={index === selectedIndex}
+            id={`${listId}-${index}`}
+            key={item.id}
+            role="menuitem"
+            type="button"
+            onFocus={() => onSelectIndex?.(index)}
+            onPointerMove={() => onSelectIndex?.(index)}
+            onClick={() => void item.onClick()}
+          >
+            {item.icon}
+            <span className="composer-commands__label">{item.label}</span>
           </button>
+        ))}
+
+        {skills && (
+          <>
+            <p className="composer-add-menu__title composer-add-menu__section-title">
+              {skillsTitle}
+            </p>
+            {skillCatalogTruncated && skillTruncatedLabel && (
+              <p className="composer-commands__notice" role="status">
+                {skillTruncatedLabel}
+              </p>
+            )}
+            {skillDiagnosticsCount > 0 && skillDiagnosticsLabel && (
+              <details className="composer-commands__diagnostics">
+                <summary>
+                  {skillDiagnosticsLabel.replace('{count}', String(skillDiagnosticsCount))}
+                </summary>
+                {skillDiagnosticsAvailableLabel && <p>{skillDiagnosticsAvailableLabel}</p>}
+              </details>
+            )}
+            {skillLoading ? (
+              <p className="composer-commands__state" role="status">
+                <Sparkles aria-hidden="true" />
+                {skillLoadingLabel}
+              </p>
+            ) : skillError ? (
+              <div className="composer-commands__state" role="alert">
+                <Sparkles aria-hidden="true" />
+                <span>{skillErrorLabel}</span>
+                {onRetrySkills && skillRetryLabel && (
+                  <button type="button" onClick={onRetrySkills}>
+                    {skillRetryLabel}
+                  </button>
+                )}
+              </div>
+            ) : skills.length === 0 ? (
+              <p className="composer-commands__empty">{skillEmptyLabel}</p>
+            ) : (
+              skills.map((skill, skillIndex) => {
+                const index = skillIndex + 3
+                return (
+                  <button
+                    aria-label={skill.accessibleLabel}
+                    aria-disabled={skill.disabled || undefined}
+                    aria-selected={index === selectedIndex}
+                    data-disabled={skill.disabled || undefined}
+                    data-selected={skill.selected || undefined}
+                    id={`${listId}-${index}`}
+                    key={skill.id}
+                    role="menuitem"
+                    title={skill.description}
+                    type="button"
+                    onFocus={() => onSelectIndex?.(index)}
+                    onPointerMove={() => onSelectIndex?.(index)}
+                    onClick={() => {
+                      if (!skill.disabled || skill.selected) onToggleSkill?.(skill)
+                    }}
+                  >
+                    <span className="composer-add-menu__skill-icon">{skill.icon}</span>
+                    <span className="composer-commands__label">{skill.label}</span>
+                    {skill.description && (
+                      <span className="composer-commands__description" title={skill.description}>
+                        {skill.description}
+                      </span>
+                    )}
+                    {skill.selected && (
+                      <Check
+                        aria-label="selected"
+                        className="composer-add-menu__selected-icon"
+                        aria-hidden="true"
+                      />
+                    )}
+                  </button>
+                )
+              })
+            )}
+          </>
         )}
       </div>
     </div>

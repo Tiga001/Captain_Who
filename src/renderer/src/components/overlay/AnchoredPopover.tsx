@@ -10,11 +10,15 @@ interface AnchoredPopoverProps {
   enabled: boolean
   matchAnchorWidth?: boolean
   onClose: () => void
+  placement?: 'auto' | 'top'
   popoverRef: RefObject<HTMLDivElement | null>
+  returnFocusRef?: RefObject<HTMLElement | null>
 }
 
 const VIEWPORT_MARGIN = 8
 const ANCHOR_GAP = 8
+/** Prefer `placement="top"` only when the menu would remain usable above the anchor. */
+const MIN_PREFERRED_SPACE = 120
 
 /** Keeps interactive composer menus outside a scrolling or hidden workspace surface. */
 export function AnchoredPopover({
@@ -25,7 +29,9 @@ export function AnchoredPopover({
   enabled,
   matchAnchorWidth = false,
   onClose,
-  popoverRef
+  placement = 'auto',
+  popoverRef,
+  returnFocusRef
 }: AnchoredPopoverProps): ReactNode {
   const closeRef = useRef(onClose)
   useLayoutEffect(() => {
@@ -56,7 +62,11 @@ export function AnchoredPopover({
       const height = popover.scrollHeight
       const above = Math.max(0, rect.top - ANCHOR_GAP - VIEWPORT_MARGIN)
       const below = Math.max(0, window.innerHeight - rect.bottom - ANCHOR_GAP - VIEWPORT_MARGIN)
-      const openAbove = above >= height || above >= below
+      const openAbove =
+        above > 0 &&
+        (placement === 'top' && above >= Math.min(height, MIN_PREFERRED_SPACE)
+          ? true
+          : above >= height || above >= below)
       const maxHeight = openAbove ? above : below
       const left = align === 'end' ? rect.right - width : rect.left
       popover.style.left = `${Math.max(VIEWPORT_MARGIN, Math.min(left, window.innerWidth - width - VIEWPORT_MARGIN))}px`
@@ -67,7 +77,12 @@ export function AnchoredPopover({
     }
     const schedulePosition = () => {
       window.cancelAnimationFrame(frame)
-      frame = window.requestAnimationFrame(updatePosition)
+      // Composer textareas can resize in a layout/effect pass immediately after the anchor
+      // changes. Wait one paint for that resize and one more for the resulting grid reflow
+      // before reading rectangles, otherwise a portal menu can sit against the previous height.
+      frame = window.requestAnimationFrame(() => {
+        frame = window.requestAnimationFrame(updatePosition)
+      })
     }
     const handleScroll = (event: Event) => {
       if (event.target instanceof Node && popover.contains(event.target)) return
@@ -77,7 +92,7 @@ export function AnchoredPopover({
       if (event.key !== 'Escape' || event.defaultPrevented) return
       event.preventDefault()
       closeRef.current()
-      anchor.focus({ preventScroll: true })
+      ;(returnFocusRef?.current ?? anchor).focus({ preventScroll: true })
     }
     const handleVisibilityChange = () => {
       if (document.visibilityState === 'hidden') closeRef.current()
@@ -106,7 +121,7 @@ export function AnchoredPopover({
       document.removeEventListener('visibilitychange', handleVisibilityChange)
       window.removeEventListener('resize', schedulePosition)
     }
-  }, [align, anchorRef, enabled, matchAnchorWidth, popoverRef])
+  }, [align, anchorRef, enabled, matchAnchorWidth, placement, popoverRef, returnFocusRef])
 
   if (!enabled) return children
   return createPortal(
@@ -149,7 +164,9 @@ function getVisibleAnchorRect(anchor: HTMLElement): DOMRect | null {
       bottom = Math.min(bottom, bounds.bottom)
     }
   }
-  return right > left && bottom > top ? rect : null
+  // Position against the visible box. A tall composer can extend above a scrolling
+  // conversation page; using the unclipped rectangle would place the menu off-screen.
+  return right > left && bottom > top ? new DOMRect(left, top, right - left, bottom - top) : null
 }
 
 function clipsOverflow(value: string): boolean {
