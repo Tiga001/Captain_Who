@@ -74,6 +74,9 @@ vi.mock('../../features/chat/chatAttachments', () => ({
   loadComposerAttachmentImage: async () => undefined,
   loadComposerAttachmentPreview: async () => undefined,
   createAttachmentSummary: () => '',
+  getComposerDroppedFilePath: () => undefined,
+  loadComposerFoldersFromPaths: async () => [],
+  selectComposerFolders: async () => [],
   selectComposerAttachments: async () => [],
   stripAttachmentSummary: (content: string) => content
 }))

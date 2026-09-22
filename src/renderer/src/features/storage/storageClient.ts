@@ -53,7 +53,8 @@ import type {
   ChatMessage,
   ChatMessageAttachment,
   ChatMessageUiState,
-  ChatQueuedMessage
+  ChatQueuedMessage,
+  ChatWorkspaceMention
 } from '../chat/chatTypes'
 import { settleAgentRunToolActivities } from '../agentRun/agentEventReducer'
 import {
@@ -904,7 +905,7 @@ function parseQueuedMessages(value: string): ChatQueuedMessage[] {
           'status',
           'createdAt'
         ],
-        ['error', 'folderReferences']
+        ['error', 'folderReferences', 'workspaceMentions']
       ) ||
       typeof candidate.id !== 'string' ||
       typeof candidate.clientMessageId !== 'string' ||
@@ -923,6 +924,7 @@ function parseQueuedMessages(value: string): ChatQueuedMessage[] {
     }
     const attachments = parseDraftAttachments(JSON.stringify(candidate.attachments))
     const folderReferences = parseFolderReferences(JSON.stringify(candidate.folderReferences ?? []))
+    const workspaceMentions = parseWorkspaceMentions(candidate.workspaceMentions)
     const skills = parseDraftSkills(JSON.stringify(candidate.skills))
     return {
       id: candidate.id,
@@ -930,6 +932,7 @@ function parseQueuedMessages(value: string): ChatQueuedMessage[] {
       content: candidate.content,
       attachments,
       folderReferences,
+      workspaceMentions,
       modelId: candidate.modelId,
       permissionMode: candidate.permissionMode as ChatQueuedMessage['permissionMode'],
       projectId: candidate.projectId,
@@ -940,6 +943,36 @@ function parseQueuedMessages(value: string): ChatQueuedMessage[] {
         : {}),
       createdAt: candidate.createdAt as number
     }
+  })
+}
+
+function parseWorkspaceMentions(value: unknown): ChatWorkspaceMention[] {
+  if (value === undefined) return []
+  if (!Array.isArray(value)) throw new Error(COMPOSER_DRAFT_CORRUPTION_ERROR)
+  return value.map((candidate) => {
+    if (
+      !isExactRecord(candidate, [
+        'id',
+        'projectId',
+        'folderId',
+        'alias',
+        'displayName',
+        'path',
+        'displayPath',
+        'kind'
+      ]) ||
+      typeof candidate.id !== 'string' ||
+      typeof candidate.projectId !== 'string' ||
+      typeof candidate.folderId !== 'string' ||
+      typeof candidate.alias !== 'string' ||
+      typeof candidate.displayName !== 'string' ||
+      typeof candidate.path !== 'string' ||
+      typeof candidate.displayPath !== 'string' ||
+      (candidate.kind !== 'file' && candidate.kind !== 'directory')
+    ) {
+      throw new Error(COMPOSER_DRAFT_CORRUPTION_ERROR)
+    }
+    return candidate as unknown as ChatWorkspaceMention
   })
 }
 

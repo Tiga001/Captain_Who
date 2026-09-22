@@ -4,7 +4,12 @@ import type {
   AgentInputAttachment
 } from '@mycopilot/protocol'
 import { modelConfig } from '../config/modelConfig'
-import type { ChatComposerDraft, ChatConversation, ChatMessage } from '../features/chat/chatTypes'
+import type {
+  ChatComposerDraft,
+  ChatConversation,
+  ChatMessage,
+  ChatWorkspaceMention
+} from '../features/chat/chatTypes'
 import { normalizeSkillSelections } from '../features/skills/skillSelection'
 
 export function createId(prefix: string) {
@@ -33,7 +38,8 @@ function mapInputAttachmentToMessageAttachment(
 export function createUserMessage(
   content: string,
   attachments: AgentInputAttachment[] = [],
-  folderReferences: AgentFolderReference[] = []
+  folderReferences: AgentFolderReference[] = [],
+  workspaceMentions: ChatWorkspaceMention[] = []
 ): ChatMessage {
   return {
     id: createId('message'),
@@ -42,7 +48,8 @@ export function createUserMessage(
     createdAt: Date.now(),
     status: 'sent',
     attachments: attachments.map(mapInputAttachmentToMessageAttachment),
-    folderReferences
+    folderReferences,
+    workspaceMentions
   }
 }
 

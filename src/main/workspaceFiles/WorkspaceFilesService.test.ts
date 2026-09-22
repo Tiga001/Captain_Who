@@ -87,6 +87,98 @@ describe('WorkspaceFilesService', () => {
     )
   })
 
+  it('searches files and directories by workspace alias without exposing native paths', async () => {
+    await mkdir(join(root, 'src', 'features'), { recursive: true })
+    await writeFile(join(root, 'src', 'features', 'ChatComposer.tsx'), 'export {}')
+    await writeFile(join(root, 'src', 'README.md'), 'readme')
+    await mkdir(join(root, 'node_modules', 'hidden-package'), { recursive: true })
+    await writeFile(join(root, 'node_modules', 'hidden-package', 'ChatComposer.tsx'), 'ignored')
+
+    const result = await service.searchMentions({ projectId: 'project-1', query: 'chatcomp' })
+
+    expect(result.truncated).toBe(false)
+    expect(result.entries).toEqual([
+      {
+        alias: 'app',
+        displayName: 'ChatComposer.tsx',
+        folderId: 'primary',
+        kind: 'file',
+        path: 'src/features/ChatComposer.tsx',
+        displayPath: 'app/src/features/ChatComposer.tsx'
+      }
+    ])
+    expect(JSON.stringify(result)).not.toContain(root)
+  })
+
+  it('ranks matches across every configured root instead of stopping at the first page', async () => {
+    const auxiliary = join(root, 'auxiliary')
+    await mkdir(join(root, 'unrelated'), { recursive: true })
+    await mkdir(auxiliary, { recursive: true })
+    await writeFile(join(root, 'unrelated', 'target.txt'), 'primary')
+    await writeFile(join(auxiliary, 'target.txt'), 'auxiliary')
+    service = new WorkspaceFilesService(async () => ({
+      id: 'project-1',
+      folders: [
+        {
+          id: 'primary',
+          alias: 'app',
+          path: root,
+          role: 'primary',
+          sortOrder: 0,
+          createdAt: 1
+        },
+        {
+          id: 'auxiliary',
+          alias: 'docs',
+          path: auxiliary,
+          role: 'auxiliary',
+          sortOrder: 1,
+          createdAt: 1
+        }
+      ]
+    }))
+
+    const result = await service.searchMentions({
+      projectId: 'project-1',
+      query: 'target',
+      limit: 1
+    })
+
+    expect(result.entries).toHaveLength(1)
+    expect(result.entries[0].displayPath).toBe('docs/target.txt')
+    expect(JSON.stringify(result)).not.toContain(root)
+  })
+
+  it('skips roots that are unavailable or not directories', async () => {
+    const file = join(root, 'not-a-folder')
+    await writeFile(file, 'file')
+    service = new WorkspaceFilesService(async () => ({
+      id: 'project-1',
+      folders: [
+        {
+          id: 'missing',
+          alias: 'missing',
+          path: join(root, 'missing'),
+          role: 'primary',
+          sortOrder: 0,
+          createdAt: 1
+        },
+        {
+          id: 'file',
+          alias: 'file',
+          path: file,
+          role: 'auxiliary',
+          sortOrder: 1,
+          createdAt: 1
+        }
+      ]
+    }))
+
+    const result = await service.searchMentions({ projectId: 'project-1', query: 'anything' })
+
+    expect(result).toEqual({ entries: [], truncated: false })
+  })
+
   it('does not escape a selected auxiliary root through parent paths or symlinks', async () => {
     const auxiliary = join(root, 'auxiliary')
     await mkdir(auxiliary)

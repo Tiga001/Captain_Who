@@ -67,6 +67,45 @@ it('restores managed references without loading file bytes', async () => {
   })
 })
 
+it('restores workspace mentions in queued messages', async () => {
+  const workspaceMentions = [
+    {
+      id: 'primary:src/file.ts',
+      projectId: 'project-1',
+      folderId: 'primary',
+      alias: 'app',
+      displayName: 'file.ts',
+      path: 'src/file.ts',
+      displayPath: 'app/src/file.ts',
+      kind: 'file'
+    }
+  ]
+  storage.loadComposerDrafts.mockResolvedValue([
+    currentDraft({
+      queuedMessagesJson: JSON.stringify([
+        {
+          id: 'queued-1',
+          clientMessageId: 'client-1',
+          content: '[file.ts](@workspace/app/src/file.ts)',
+          attachments: [],
+          folderReferences: [],
+          workspaceMentions,
+          modelId: 'model-1',
+          permissionMode: 'default',
+          projectId: 'project-1',
+          skills: [],
+          status: 'pending',
+          createdAt: 1
+        }
+      ])
+    })
+  ])
+
+  await expect(loadComposerDrafts()).resolves.toMatchObject({
+    'conversation-current': { queuedMessages: [{ workspaceMentions }] }
+  })
+})
+
 it.each([
   ['invalid JSON', { queuedMessagesJson: '{secret-provider-payload' }],
   ['non-array JSON', { attachmentsJson: '{}' }],

@@ -19,6 +19,30 @@ export interface WorkspaceDirectoryListing {
   truncated: boolean
 }
 
+/** A safe, display-only result for the composer @ workspace search. */
+export type WorkspaceMentionEntryKind = 'directory' | 'file'
+
+export interface WorkspaceMentionSearchInput {
+  projectId: string
+  query: string
+  limit?: number
+}
+
+export interface WorkspaceMentionSearchEntry {
+  alias: string
+  displayName: string
+  folderId: string
+  kind: WorkspaceMentionEntryKind
+  path: string
+  /** Relative path including the folder root, suitable for display only. */
+  displayPath: string
+}
+
+export interface WorkspaceMentionSearchResult {
+  entries: WorkspaceMentionSearchEntry[]
+  truncated: boolean
+}
+
 export type WorkspaceFilePreviewKind =
   'binary' | 'image' | 'pdf' | 'text' | 'too-large' | 'unsupported'
 

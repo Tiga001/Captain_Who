@@ -283,6 +283,7 @@ export const HOST_CHANNELS = {
   workspaceFiles: {
     copyPath: 'host:workspaceFiles.copyPath',
     listDirectory: 'host:workspaceFiles.listDirectory',
+    searchMentions: 'host:workspaceFiles.searchMentions',
     readPreview: 'host:workspaceFiles.readPreview',
     revealInFolder: 'host:workspaceFiles.revealInFolder'
   }

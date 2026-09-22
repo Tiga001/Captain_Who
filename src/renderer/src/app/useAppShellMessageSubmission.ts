@@ -39,6 +39,7 @@ import { getEditableLastTurn } from './appShellConversationUtils'
 import { NEW_CONVERSATION_DRAFT_ID } from './appConstants'
 import { consumeSubmittedDraft, restoreRejectedDraft } from './composerSubmission'
 import { buildMessageContentWithAttachments } from './appShellConversationUtils'
+import { buildMessageContentWithWorkspaceMentions } from '../features/chat/workspaceMentions'
 import {
   createAssistantMessage,
   createComposerDraft,
@@ -90,6 +91,10 @@ function clearSubmittedComposerDraft(
       currentDraft.folderReferences === submittedDraft.folderReferences
         ? []
         : currentDraft.folderReferences,
+    workspaceMentions:
+      currentDraft.workspaceMentions === submittedDraft.workspaceMentions
+        ? []
+        : currentDraft.workspaceMentions,
     skills: currentDraft.skills === submittedDraft.skills ? [] : currentDraft.skills,
     modelId:
       currentDraft.modelId === submittedDraft.modelId ? options.modelId : currentDraft.modelId,
@@ -263,13 +268,18 @@ export function useAppShellMessageSubmission({
         ? Math.max(Date.now(), targetConversation.updatedAt + 1)
         : Date.now()
       const conversationId = targetConversation?.id ?? createId('conversation')
-      const userMessage = createUserMessage(
+      const durableMessage = buildMessageContentWithWorkspaceMentions(
         message,
+        options.workspaceMentions ?? []
+      )
+      const userMessage = createUserMessage(
+        durableMessage,
         options.attachments ?? [],
-        options.folderReferences ?? []
+        options.folderReferences ?? [],
+        options.workspaceMentions ?? []
       )
       const assistantMessage = createAssistantMessage('', 'pending')
-      const title = createConversationTitle(message, t('chat.newConversation'))
+      const title = createConversationTitle(durableMessage, t('chat.newConversation'))
       const conversationToSave: ChatConversation = targetConversation
         ? {
             ...targetConversation,
@@ -339,7 +349,7 @@ export function useAppShellMessageSubmission({
           conversationId,
           userMessage.id,
           assistantMessage.id,
-          message,
+          durableMessage,
           options.modelId,
           targetConversation?.projectId ?? options.projectId,
           options.permissionMode,

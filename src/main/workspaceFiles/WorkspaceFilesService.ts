@@ -1,6 +1,6 @@
 import { isUtf8 } from 'node:buffer'
 import { lstat, open, readdir, realpath } from 'node:fs/promises'
-import { extname, isAbsolute, relative, resolve, win32 } from 'node:path'
+import { extname, isAbsolute, join, relative, resolve, win32 } from 'node:path'
 import type {
   AgentWorkspaceContext,
   StorageProjectRecord,
@@ -10,7 +10,10 @@ import type {
   WorkspaceFileMetadata,
   WorkspaceFilePreviewResult,
   WorkspaceFileRequest,
-  WorkspaceListDirectoryInput
+  WorkspaceListDirectoryInput,
+  WorkspaceMentionSearchInput,
+  WorkspaceMentionSearchResult,
+  WorkspaceMentionSearchEntry
 } from '@mycopilot/protocol'
 
 const DIRECTORY_ENTRY_LIMIT = 20_000
@@ -19,6 +22,23 @@ export const PDF_PREVIEW_LIMIT_BYTES = 32 * 1024 * 1024
 const TEXT_PREVIEW_LIMIT_BYTES = 1024 * 1024
 const PDF_HEADER = Buffer.from('%PDF-')
 const PDF_HEADER_SEARCH_BYTES = 1024
+const MENTION_SEARCH_DEFAULT_LIMIT = 40
+const MENTION_SEARCH_MAX_LIMIT = 100
+const MENTION_SEARCH_MAX_QUERY_LENGTH = 256
+const MENTION_SEARCH_MAX_VISITED = 50_000
+// Keep enough candidates to rank a query across all roots.  Stopping as soon as the
+// requested page is full would make a shallow, unrelated root hide a better match in a
+// later root.
+const MENTION_SEARCH_MAX_MATCHES = 20_000
+const MENTION_SEARCH_IGNORED_DIRECTORIES = new Set([
+  '.git',
+  '.cache',
+  'node_modules',
+  'build',
+  'dist',
+  'out',
+  'target'
+])
 
 const IMAGE_MIME_BY_EXTENSION: Readonly<Record<string, string>> = {
   '.avif': 'image/avif',
@@ -60,6 +80,92 @@ export class WorkspaceFilesService {
     private readonly resolveProject: WorkspaceProjectResolver,
     private readonly runFiles?: WorkspaceRunFileSource
   ) {}
+
+  /**
+   * Searches configured project roots for @ references. The result deliberately contains no
+   * native paths; the Host resolves the selected alias/path again when it is used.
+   */
+  async searchMentions(input: WorkspaceMentionSearchInput): Promise<WorkspaceMentionSearchResult> {
+    const projectId = requireProjectId(input?.projectId)
+    const query = normalizeMentionQuery(input?.query)
+    if (!query) return { entries: [], truncated: false }
+    const project = await this.resolveProject(projectId)
+    if (!project || project.id !== projectId) throw new Error('Project is not available')
+
+    const limit = clampMentionLimit(input?.limit)
+    const candidates: Array<WorkspaceMentionSearchEntry & { score: number }> = []
+    let visited = 0
+    let truncated = false
+    const folders = [...project.folders].sort(
+      (left, right) => left.sortOrder - right.sortOrder || left.alias.localeCompare(right.alias)
+    )
+
+    for (const folder of folders) {
+      if (visited >= MENTION_SEARCH_MAX_VISITED) {
+        truncated = true
+        break
+      }
+      let root: string
+      try {
+        root = await realpath(resolve(folder.path))
+        const rootStat = await lstat(root)
+        if (!rootStat.isDirectory()) continue
+      } catch {
+        continue
+      }
+      const queue: Array<{ absolute: string; path: string }> = [{ absolute: root, path: '' }]
+      for (let queueIndex = 0; queueIndex < queue.length; queueIndex += 1) {
+        const current = queue[queueIndex]
+        let entries
+        try {
+          entries = await readdir(current.absolute, { withFileTypes: true })
+        } catch {
+          continue
+        }
+        for (const entry of entries) {
+          visited += 1
+          if (visited >= MENTION_SEARCH_MAX_VISITED) {
+            truncated = true
+            break
+          }
+          if (entry.isSymbolicLink()) continue
+          const childPath = current.path ? `${current.path}/${entry.name}` : entry.name
+          const isDirectory = entry.isDirectory()
+          if (isDirectory && MENTION_SEARCH_IGNORED_DIRECTORIES.has(entry.name)) continue
+          const score = mentionMatchScore(query, childPath)
+          if (score !== null && candidates.length < MENTION_SEARCH_MAX_MATCHES) {
+            candidates.push({
+              alias: folder.alias,
+              displayName: entry.name,
+              folderId: folder.id,
+              kind: isDirectory ? 'directory' : 'file',
+              path: childPath,
+              displayPath: `${folder.alias}/${childPath}`,
+              score
+            })
+          }
+          if (isDirectory)
+            queue.push({ absolute: join(current.absolute, entry.name), path: childPath })
+        }
+        if (truncated) break
+      }
+      if (truncated) break
+    }
+
+    if (candidates.length >= MENTION_SEARCH_MAX_MATCHES) truncated = true
+    candidates.sort(
+      (left, right) => left.score - right.score || left.displayPath.localeCompare(right.displayPath)
+    )
+    const entries = candidates.slice(0, limit).map((entry) => ({
+      alias: entry.alias,
+      displayName: entry.displayName,
+      folderId: entry.folderId,
+      kind: entry.kind,
+      path: entry.path,
+      displayPath: entry.displayPath
+    }))
+    return { entries, truncated: truncated || candidates.length > limit }
+  }
 
   async listDirectory(input: WorkspaceListDirectoryInput): Promise<WorkspaceDirectoryListing> {
     const projectId = requireProjectId(input?.projectId)
@@ -327,6 +433,43 @@ function normalizeOptionalIdentity(value: unknown, label: string): string | unde
 function requireProjectId(value: unknown): string {
   if (typeof value !== 'string' || !value.trim()) throw new Error('Project id is required')
   return value.trim()
+}
+
+function normalizeMentionQuery(value: unknown): string {
+  if (typeof value !== 'string') throw new Error('Workspace search query must be a string')
+  const query = value.trim()
+  if (query.length > MENTION_SEARCH_MAX_QUERY_LENGTH) {
+    throw new Error('Workspace search query is too long')
+  }
+  return query.toLocaleLowerCase()
+}
+
+function clampMentionLimit(value: unknown): number {
+  if (value === undefined) return MENTION_SEARCH_DEFAULT_LIMIT
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    throw new Error('Workspace search limit is invalid')
+  }
+  return Math.min(MENTION_SEARCH_MAX_LIMIT, Math.max(1, Math.floor(value)))
+}
+
+/** Lower scores are better. Matching is subsequence based, with a small path-depth preference. */
+function mentionMatchScore(query: string, value: string): number | null {
+  const normalized = value.toLocaleLowerCase()
+  let queryIndex = 0
+  let firstMatch = -1
+  let lastMatch = -1
+  for (let index = 0; index < normalized.length && queryIndex < query.length; index += 1) {
+    if (normalized[index] !== query[queryIndex]) continue
+    if (firstMatch === -1) firstMatch = index
+    lastMatch = index
+    queryIndex += 1
+  }
+  if (queryIndex !== query.length) return null
+  const separators = (normalized.match(/[\\/]/g) ?? []).length
+  const basenameBonus = normalized.endsWith(query) ? -20 : 0
+  return (
+    firstMatch + (lastMatch - firstMatch - query.length + 1) * 2 + separators * 3 + basenameBonus
+  )
 }
 
 function joinWorkspacePath(parent: string, name: string): string {

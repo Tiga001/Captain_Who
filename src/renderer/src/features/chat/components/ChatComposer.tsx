@@ -46,10 +46,13 @@ import type { ComposerAttachmentKind } from '../chatAttachments'
 import { useAttachmentImports, useComposerAttachmentPreviews } from '../useAttachmentImports'
 import type {
   ChatComposerDraft,
+  ChatWorkspaceMention,
   ChatPermissionMode,
   ChatQueuedMessage,
   ChatSubmitOptions
 } from '../chatTypes'
+import { searchWorkspaceMentions } from '../../files/filesClient'
+import type { WorkspaceMentionSearchEntry } from '@mycopilot/protocol'
 import {
   filterSkillDescriptors,
   matchSkillSelection,
@@ -60,11 +63,13 @@ import {
 } from '../../skills/skillSelection'
 import { useSkillCatalog } from '../../skills/useSkillCatalog'
 import { ContextWindowIndicator } from './ContextWindowIndicator'
+import { WorkspaceFileTypeIcon } from '../../../components/files/WorkspaceFileTypeIcon'
 import { ComposerAttachments } from './ComposerAttachments'
 import { ComposerFolderReferences } from './ComposerFolderReferences'
 import { ComposerSelectedSkills, ComposerSkillPicker } from './ComposerSkillPicker'
 import { GuidanceQueue } from './GuidanceQueue'
 import { useImagePreview } from './ImagePreview'
+import { buildMessageContentWithWorkspaceMentions } from '../workspaceMentions'
 import { ModelConfigPicker } from '../../modelSelection/ModelConfigPicker'
 import { createComposerModelMenuOption } from '../../modelSelection/composerModelPresentation'
 import { ComposerModelMenu } from './ComposerModelMenu'
@@ -182,6 +187,12 @@ export function ChatComposer({
   const [isPermissionMenuOpen, setIsPermissionMenuOpen] = useState(false)
   const [isFullPermissionConfirmationOpen, setIsFullPermissionConfirmationOpen] = useState(false)
   const [isProjectMenuOpen, setIsProjectMenuOpen] = useState(false)
+  const [isMentionMenuOpen, setIsMentionMenuOpen] = useState(false)
+  const [mentionQuery, setMentionQuery] = useState('')
+  const [mentionEntries, setMentionEntries] = useState<WorkspaceMentionSearchEntry[]>([])
+  const [mentionIndex, setMentionIndex] = useState(0)
+  const mentionRequestRef = useRef(0)
+  const mentionPopoverRef = useRef<HTMLDivElement>(null)
   const [isFileDragActive, setIsFileDragActive] = useState(false)
   const [attachmentError, setAttachmentError] = useState<string | null>(null)
   const [projectSearch, setProjectSearch] = useState('')
@@ -313,8 +324,12 @@ export function ChatComposer({
   const hasImageAttachment = attachments.some((attachment) => attachment.kind === 'image')
   const hasUnsupportedImageAttachment = hasImageAttachment && !selectedModel?.supportsImage
   const folderReferences = draft.folderReferences ?? []
+  const workspaceMentions = draft.workspaceMentions ?? []
   const hasSendableContent =
-    message.trim().length > 0 || attachments.length > 0 || folderReferences.length > 0
+    message.trim().length > 0 ||
+    attachments.length > 0 ||
+    folderReferences.length > 0 ||
+    workspaceMentions.length > 0
   const hasInvalidSkillSelection = hasStaleSkillSelection || hasUnavailableSkillSelection
   const canSend =
     hasSendableContent &&
@@ -453,6 +468,8 @@ export function ChatComposer({
     setIsSkillMenuOpen(false)
     setIsPermissionMenuOpen(false)
     setIsProjectMenuOpen(false)
+    setIsMentionMenuOpen(false)
+    setMentionQuery('')
   }, [isModelTransitionRunning])
 
   useEffect(() => {
@@ -462,8 +479,31 @@ export function ChatComposer({
     setIsSkillMenuOpen(false)
     setIsPermissionMenuOpen(false)
     setIsProjectMenuOpen(false)
+    setIsMentionMenuOpen(false)
     setIsFullPermissionConfirmationOpen(false)
   }, [isSuspended])
+
+  // The Host owns filesystem access. Keep the renderer query-only and discard stale responses.
+  useEffect(() => {
+    if (!isMentionMenuOpen || !mentionQuery.trim() || !draft.projectId) {
+      mentionRequestRef.current += 1
+      setMentionEntries([])
+      return
+    }
+    const requestId = ++mentionRequestRef.current
+    const timer = window.setTimeout(() => {
+      void searchWorkspaceMentions({ projectId: draft.projectId!, query: mentionQuery, limit: 24 })
+        .then((result) => {
+          if (mentionRequestRef.current !== requestId) return
+          setMentionEntries(result.entries)
+          setMentionIndex(0)
+        })
+        .catch(() => {
+          if (mentionRequestRef.current === requestId) setMentionEntries([])
+        })
+    }, 80)
+    return () => window.clearTimeout(timer)
+  }, [draft.projectId, isMentionMenuOpen, mentionQuery])
 
   useEffect(() => {
     setAttachmentError(null)
@@ -472,6 +512,8 @@ export function ChatComposer({
     setIsFullPermissionConfirmationOpen(false)
     setSkillSearch('')
     setIsFileDragActive(false)
+    setIsMentionMenuOpen(false)
+    setMentionQuery('')
   }, [resetKey])
 
   const updateDraftMessage = useCallback(
@@ -487,6 +529,42 @@ export function ChatComposer({
     },
     [onDraftMessageChange]
   )
+
+  const selectWorkspaceMention = useCallback(
+    (entry: WorkspaceMentionSearchEntry) => {
+      if (!draft.projectId) return
+      const mention: ChatWorkspaceMention = {
+        id: `${entry.folderId}:${entry.path}`,
+        projectId: draft.projectId,
+        folderId: entry.folderId,
+        alias: entry.alias,
+        displayName: entry.displayName,
+        path: entry.path,
+        displayPath: entry.displayPath,
+        kind: entry.kind === 'directory' ? 'directory' : 'file'
+      }
+      const existing = draftRef.current.workspaceMentions ?? []
+      if (!existing.some((item) => item.id === mention.id)) {
+        updateDraft({ workspaceMentions: [...existing, mention], message: '' })
+      } else {
+        updateDraft({ message: '' })
+      }
+      setMentionQuery('')
+      setMentionEntries([])
+      setMentionIndex(0)
+      setIsMentionMenuOpen(false)
+      window.requestAnimationFrame(() => textareaRef.current?.focus({ preventScroll: true }))
+    },
+    [draft.projectId, updateDraft]
+  )
+
+  const removeWorkspaceMention = (id: string) => {
+    updateDraft({
+      workspaceMentions: (draftRef.current.workspaceMentions ?? []).filter(
+        (mention) => mention.id !== id
+      )
+    })
+  }
 
   const clearSelectedProject = useCallback(() => {
     updateDraft({
@@ -630,7 +708,10 @@ export function ChatComposer({
     setIsCommandSession(false)
     const submittedDraft = draftRef.current
     const trimmedMessage = message.trim()
-    const messageContent = trimmedMessage
+    const messageContent = buildMessageContentWithWorkspaceMentions(
+      trimmedMessage,
+      submittedDraft.workspaceMentions ?? []
+    )
     let inputAttachments: ChatSubmitOptions['attachments']
 
     try {
@@ -648,6 +729,7 @@ export function ChatComposer({
       draftSnapshot: submittedDraft,
       attachments: inputAttachments,
       folderReferences: submittedDraft.folderReferences ?? [],
+      workspaceMentions: submittedDraft.workspaceMentions ?? [],
       modelId: selectedModel?.id ?? selectedModelId,
       permissionMode,
       projectId: selectedProject?.id ?? null,
@@ -665,6 +747,10 @@ export function ChatComposer({
           currentDraft.folderReferences === submittedDraft.folderReferences
             ? []
             : currentDraft.folderReferences,
+        workspaceMentions:
+          currentDraft.workspaceMentions === submittedDraft.workspaceMentions
+            ? []
+            : currentDraft.workspaceMentions,
         queuedMessages: [
           ...draftRef.current.queuedMessages,
           {
@@ -673,6 +759,7 @@ export function ChatComposer({
             content: messageContent,
             attachments: inputAttachments ?? [],
             folderReferences: submittedDraft.folderReferences ?? [],
+            workspaceMentions: submittedDraft.workspaceMentions ?? [],
             modelId: submitOptions.modelId,
             permissionMode: submitOptions.permissionMode,
             projectId: submitOptions.projectId,
@@ -743,6 +830,7 @@ export function ChatComposer({
       message: stripAttachmentSummary(queuedMessage.content, queuedMessage.attachments),
       attachments: queuedMessage.attachments,
       folderReferences: queuedMessage.folderReferences ?? [],
+      workspaceMentions: queuedMessage.workspaceMentions ?? [],
       queuedMessages: draftRef.current.queuedMessages.filter((message) => message.id !== messageId)
     })
     window.requestAnimationFrame(() => textareaRef.current?.focus())
@@ -792,12 +880,18 @@ export function ChatComposer({
 
   const addAttachments = async (kind: ComposerAttachmentKind) => {
     setAttachmentError(null)
+    if (message === '@') updateDraft({ message: '' })
+    setMentionQuery('')
+    setIsMentionMenuOpen(false)
     setIsAttachmentMenuOpen(false)
     await attachmentImports.select(kind)
   }
 
   const addFolders = async () => {
     setAttachmentError(null)
+    if (message === '@') updateDraft({ message: '' })
+    setMentionQuery('')
+    setIsMentionMenuOpen(false)
     setIsAttachmentMenuOpen(false)
     try {
       const selected = await selectComposerFolders()
@@ -935,6 +1029,81 @@ export function ChatComposer({
             )}
           </AnchoredPopover>
         )}
+        {isMentionMenuOpen && (
+          <AnchoredPopover
+            anchorRef={textareaRef}
+            className="chat-composer-menu-popover"
+            enabled={portalMenus}
+            onClose={() => setIsMentionMenuOpen(false)}
+            popoverRef={mentionPopoverRef}
+          >
+            <div className="composer-commands" role="listbox" aria-label="Workspace files">
+              <div className="composer-commands__list">
+                {mentionQuery.trim() === '' ? (
+                  <div className="composer-add-menu">
+                    <p>{t('chat.addMenuTitle')}</p>
+                    <button
+                      type="button"
+                      role="menuitem"
+                      onClick={() => void addAttachments('file')}
+                    >
+                      <Paperclip aria-hidden="true" /> <span>{t('chat.addFile')}</span>
+                    </button>
+                    <button type="button" role="menuitem" onClick={() => void addFolders()}>
+                      <Folder aria-hidden="true" /> <span>{t('chat.addFolder')}</span>
+                    </button>
+                    <button
+                      type="button"
+                      role="menuitem"
+                      onClick={() => void addAttachments('image')}
+                    >
+                      <ImageIcon aria-hidden="true" /> <span>{t('chat.addImage')}</span>
+                    </button>
+                    {!isGenerating && (
+                      <button
+                        type="button"
+                        role="menuitem"
+                        onClick={() => {
+                          if (message === '@') updateDraft({ message: '' })
+                          setMentionQuery('')
+                          setIsMentionMenuOpen(false)
+                          setIsSkillMenuOpen(true)
+                          setSkillSearch('')
+                        }}
+                      >
+                        <Sparkles aria-hidden="true" /> <span>{t('chat.skills')}</span>
+                      </button>
+                    )}
+                  </div>
+                ) : mentionEntries.length === 0 ? (
+                  <p className="composer-commands__empty">未找到匹配项</p>
+                ) : (
+                  mentionEntries.map((entry, index) => (
+                    <button
+                      key={`${entry.folderId}:${entry.path}`}
+                      type="button"
+                      role="option"
+                      aria-selected={index === mentionIndex}
+                      onMouseDown={(event) => event.preventDefault()}
+                      onPointerMove={() => setMentionIndex(index)}
+                      onClick={() => selectWorkspaceMention(entry)}
+                    >
+                      {entry.kind === 'directory' ? (
+                        <Folder aria-hidden="true" />
+                      ) : (
+                        <WorkspaceFileTypeIcon path={entry.path} />
+                      )}
+                      <span className="composer-commands__label">{entry.displayName}</span>
+                      <span className="composer-commands__description" title={entry.displayPath}>
+                        {entry.displayPath}
+                      </span>
+                    </button>
+                  ))
+                )}
+              </div>
+            </div>
+          </AnchoredPopover>
+        )}
       </div>
       <GuidanceQueue
         guideEnabled={canGuideQueuedMessages}
@@ -1056,6 +1225,28 @@ export function ChatComposer({
           selections={draft.skills}
         />
 
+        {workspaceMentions.length > 0 && (
+          <div className="composer-workspace-mentions" aria-label="Workspace references">
+            {workspaceMentions.map((mention) => (
+              <button
+                type="button"
+                className="composer-workspace-mention"
+                key={mention.id}
+                title={`${mention.alias}/${mention.path}`}
+                onClick={() => removeWorkspaceMention(mention.id)}
+              >
+                {mention.kind === 'directory' ? (
+                  <Folder aria-hidden="true" />
+                ) : (
+                  <WorkspaceFileTypeIcon path={mention.path} />
+                )}
+                <span>{mention.displayName}</span>
+                <X aria-hidden="true" />
+              </button>
+            ))}
+          </div>
+        )}
+
         <textarea
           ref={textareaRef}
           value={message}
@@ -1075,6 +1266,27 @@ export function ChatComposer({
             setIsModelMenuOpen(false)
             const nextMessage = event.target.value
             const native = event.nativeEvent as InputEvent
+            const onlyMentionsBeforeInput =
+              (draftRef.current.workspaceMentions?.length ?? 0) > 0 && message.trim() === ''
+            const typedAt = native.inputType === 'insertText' && native.data === '@'
+            if (
+              (typedAt && (message === '' || onlyMentionsBeforeInput)) ||
+              ((message === '' || onlyMentionsBeforeInput) && nextMessage.startsWith('@'))
+            ) {
+              setIsMentionMenuOpen(true)
+              setMentionQuery(nextMessage.slice(1))
+              setMentionIndex(0)
+              setIsAttachmentMenuOpen(false)
+              setIsSkillMenuOpen(false)
+              setIsPermissionMenuOpen(false)
+              setIsProjectMenuOpen(false)
+              setIsCommandMenuOpen(false)
+            } else if (isMentionMenuOpen && nextMessage.startsWith('@')) {
+              setMentionQuery(nextMessage.slice(1))
+            } else if (!nextMessage.startsWith('@')) {
+              setIsMentionMenuOpen(false)
+              setMentionQuery('')
+            }
             const typedSlash =
               commandTriggerRef.current ||
               (native.inputType === 'insertText' && native.data === '/')
@@ -1109,6 +1321,33 @@ export function ChatComposer({
           }}
           onKeyDown={(event) => {
             if (isConfirmingImeInput(event)) return
+            if (isMentionMenuOpen) {
+              if (event.key === 'Escape') {
+                event.preventDefault()
+                setIsMentionMenuOpen(false)
+                setMentionQuery('')
+                updateDraftMessage('')
+                return
+              }
+              if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+                event.preventDefault()
+                const count = mentionEntries.length
+                if (count > 0)
+                  setMentionIndex(
+                    (mentionIndex + (event.key === 'ArrowDown' ? 1 : count - 1)) % count
+                  )
+                return
+              }
+              if ((event.key === 'Enter' || event.key === 'Tab') && mentionEntries[mentionIndex]) {
+                event.preventDefault()
+                selectWorkspaceMention(mentionEntries[mentionIndex])
+                return
+              }
+              if (event.key === 'Enter' || event.key === 'Tab') {
+                event.preventDefault()
+                return
+              }
+            }
             commandTriggerRef.current =
               event.key === '/' &&
               message === '' &&
@@ -1185,6 +1424,8 @@ export function ChatComposer({
               disabled={isModelTransitionRunning}
               onClick={() => {
                 setAttachmentError(null)
+                setIsMentionMenuOpen(false)
+                setMentionQuery('')
                 setIsAttachmentMenuOpen((open) => !open)
                 setIsSkillMenuOpen(false)
                 setIsPermissionMenuOpen(false)

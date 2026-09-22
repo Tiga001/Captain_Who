@@ -1,5 +1,6 @@
 import type { ChatComposerDraft, ChatSubmitOptions } from '../features/chat/chatTypes'
 import { buildMessageContentWithAttachments } from './appShellConversationUtils'
+import { buildMessageContentWithWorkspaceMentions } from '../features/chat/workspaceMentions'
 import { createId } from './chatMessageFactory'
 
 export function consumeSubmittedDraft(
@@ -14,6 +15,7 @@ export function consumeSubmittedDraft(
     message: '',
     attachments: [],
     folderReferences: [],
+    workspaceMentions: [],
     skills: [],
     modelId: options.modelId,
     permissionMode: options.permissionMode,
@@ -33,6 +35,7 @@ export function restoreRejectedDraft(
     (current.message.trim().length > 0 ||
       current.attachments.length > 0 ||
       (current.folderReferences?.length ?? 0) > 0 ||
+      (current.workspaceMentions?.length ?? 0) > 0 ||
       current.skills.length > 0)
   const now = Date.now()
   return {
@@ -46,9 +49,13 @@ export function restoreRejectedDraft(
           {
             id: createId('queued-message'),
             clientMessageId: createId('guidance'),
-            content: buildMessageContentWithAttachments(current.message, current.attachments),
+            content: buildMessageContentWithWorkspaceMentions(
+              buildMessageContentWithAttachments(current.message, current.attachments),
+              current.workspaceMentions ?? []
+            ),
             attachments: current.attachments,
             folderReferences: current.folderReferences ?? [],
+            workspaceMentions: current.workspaceMentions ?? [],
             skills: current.skills,
             modelId: current.modelId,
             permissionMode: current.permissionMode,

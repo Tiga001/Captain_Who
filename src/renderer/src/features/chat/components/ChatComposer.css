@@ -60,6 +60,47 @@
   color: var(--mc-color-text-subtle);
 }
 
+.composer-workspace-mentions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+  padding: 0 0 6px;
+}
+
+.composer-workspace-mention {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+  max-width: min(100%, 280px);
+  gap: 5px;
+  padding: 2px 4px;
+  border: 0;
+  border-radius: 4px;
+  color: var(--mc-color-text-accent);
+  background: transparent;
+  font: inherit;
+  font-size: var(--mc-font-size-chat-input);
+  cursor: pointer;
+}
+
+.composer-workspace-mention:hover,
+.composer-workspace-mention:focus-visible {
+  background: color-mix(in srgb, var(--mc-color-text-accent) 8%, transparent);
+}
+
+.composer-workspace-mention svg {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 auto;
+}
+
+.composer-workspace-mention span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .chat-composer__toolbar {
   display: flex;
   align-items: center;

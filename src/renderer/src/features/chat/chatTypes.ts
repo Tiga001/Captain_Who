@@ -31,6 +31,18 @@ import type {
 } from '@mycopilot/protocol'
 import type { CollaborationTimelineActivity } from '../agentCollaboration/collaborationTimelineModel'
 
+/** A semantic file or directory selected through the @ workspace picker. */
+export interface ChatWorkspaceMention {
+  id: string
+  projectId: string
+  folderId: string
+  alias: string
+  displayName: string
+  path: string
+  displayPath: string
+  kind: 'file' | 'directory'
+}
+
 export type ChatSkillInstallationStatus =
   | 'waiting_for_approval'
   | 'installing'
@@ -299,6 +311,7 @@ export interface ChatMessage {
   status?: 'pending' | 'sent' | 'error'
   attachments?: ChatMessageAttachment[]
   folderReferences?: AgentFolderReference[]
+  workspaceMentions?: ChatWorkspaceMention[]
   agentRun?: ChatAgentRunView
   uiState?: ChatMessageUiState
   /**
@@ -316,6 +329,7 @@ export interface ChatQueuedMessage {
   content: string
   attachments: AgentInputAttachment[]
   folderReferences?: AgentFolderReference[]
+  workspaceMentions?: ChatWorkspaceMention[]
   modelId: string
   permissionMode: ChatPermissionMode
   projectId: string | null
@@ -332,6 +346,7 @@ export interface ChatComposerDraft {
   projectId: string | null
   attachments: AgentInputAttachment[]
   folderReferences?: AgentFolderReference[]
+  workspaceMentions?: ChatWorkspaceMention[]
   skills: SkillSelection[]
   queuedMessages: ChatQueuedMessage[]
   updatedAt: number
@@ -345,6 +360,7 @@ export interface ChatSubmitOptions {
   projectId: string | null
   attachments?: AgentInputAttachment[]
   folderReferences?: AgentFolderReference[]
+  workspaceMentions?: ChatWorkspaceMention[]
   skills: SkillSelection[]
 }
 

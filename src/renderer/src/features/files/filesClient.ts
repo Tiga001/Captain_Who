@@ -2,7 +2,9 @@ import type {
   WorkspaceDirectoryListing,
   WorkspaceFilePreviewResult,
   WorkspaceFileRequest,
-  WorkspaceListDirectoryInput
+  WorkspaceListDirectoryInput,
+  WorkspaceMentionSearchInput,
+  WorkspaceMentionSearchResult
 } from '@mycopilot/protocol'
 import { hostClient } from '../../host/hostClient'
 
@@ -14,6 +16,12 @@ export function listWorkspaceDirectory(
   input: WorkspaceListDirectoryInput
 ): Promise<WorkspaceDirectoryListing> {
   return hostClient.workspaceFiles.listDirectory(input)
+}
+
+export function searchWorkspaceMentions(
+  input: WorkspaceMentionSearchInput
+): Promise<WorkspaceMentionSearchResult> {
+  return hostClient.workspaceFiles.searchMentions(input)
 }
 
 export function openWorkspaceExternalLink(url: string): Promise<void> {

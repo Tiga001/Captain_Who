@@ -621,6 +621,9 @@ export interface TerminalSessionEventHandlers {
 export interface WorkspaceFilesHostApi {
   copyPath(input: WorkspaceFileRequest): Promise<void>
   listDirectory(input: WorkspaceListDirectoryInput): Promise<WorkspaceDirectoryListing>
+  searchMentions(
+    input: import('@mycopilot/protocol').WorkspaceMentionSearchInput
+  ): Promise<import('@mycopilot/protocol').WorkspaceMentionSearchResult>
   readPreview(input: WorkspaceFileRequest): Promise<WorkspaceFilePreviewResult>
   revealInFolder(input: WorkspaceFileRequest): Promise<void>
 }

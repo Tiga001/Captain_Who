@@ -13,6 +13,9 @@ export function registerWorkspaceFilesIpc(
   ipcMain.handle(HOST_CHANNELS.workspaceFiles.listDirectory, (_event, input) =>
     workspaceFilesService.listDirectory(input)
   )
+  ipcMain.handle(HOST_CHANNELS.workspaceFiles.searchMentions, (_event, input) =>
+    workspaceFilesService.searchMentions(input)
+  )
   ipcMain.handle(HOST_CHANNELS.workspaceFiles.readPreview, (_event, input) =>
     workspaceFilesService.readPreview(input)
   )
