@@ -29,6 +29,8 @@ files:
 asarUnpack:
   - resources/**
 extraResources:
+  - from: LICENSE
+    to: LICENSE
   - from: .cache/officecli/current
     to: components/officecli
   - from: .cache/office-renderer/current

@@ -43,6 +43,13 @@ public-docs/              面向用户、集成开发者和支持场景的公开
 [仓库结构](docs/development/repository-layout.md)和[系统架构总览](docs/architecture/overview.md)。
 产品使用、集成、发布状态和自助排查从[公开文档索引](public-docs/README.md)进入。
 
+## 许可证
+
+Captain Who 的自研代码以 [Apache License 2.0](LICENSE) 发布。仓库与安装包中包含的第三方软件、
+资源与语法文件继续适用其原有许可证；完整归属与声明见
+[第三方软件声明](THIRD_PARTY_NOTICES.txt)和
+[语法文件第三方声明](THIRD_PARTY_GRAMMAR_NOTICES.txt)。
+
 ## 环境要求
 
 - Node.js 22（见 `.node-version`）

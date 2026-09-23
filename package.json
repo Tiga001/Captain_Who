@@ -3,7 +3,7 @@
   "version": "1.0.5",
   "description": "A local-first AI desktop assistant powered by Electron, React, and Rust",
   "private": true,
-  "license": "UNLICENSED",
+  "license": "Apache-2.0",
   "main": "./out/main/index.js",
   "author": "ShenhuaJiao",
   "packageManager": "pnpm@11.10.0",

@@ -4,7 +4,7 @@ description: 查看 Captain Who 的官方法律页面入口和当前可核实的
 status: current
 audience: user
 owner: legal
-last_verified: 2026-09-14
+last_verified: 2026-09-23
 ---
 
 # 法律与第三方声明
@@ -24,4 +24,9 @@ last_verified: 2026-09-14
 
 - [第三方软件](third-party-software.md)
 
-第三方软件页面只收录可以从当前仓库与安装包配置核实的声明。它不替代上述法律页面，也不授予 Captain Who 自有代码或品牌的使用权。
+Captain Who 的自研代码以 [Apache License 2.0](https://github.com/Tiga001/Captain_Who/blob/main/LICENSE) 发布。第三方软件继续适用其原有许可证，
+完整归属与许可证文本见仓库根目录的
+[第三方软件声明](../../THIRD_PARTY_NOTICES.txt)和
+[语法文件第三方声明](../../THIRD_PARTY_GRAMMAR_NOTICES.txt)。
+
+第三方软件页面只收录可以从当前仓库与安装包配置核实的声明。它不替代上述法律页面，也不授予 Captain Who 品牌的使用权。

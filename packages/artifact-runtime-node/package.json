@@ -2,7 +2,7 @@
   "name": "@mycopilot/artifact-runtime-node",
   "version": "2026.7.3",
   "private": true,
-  "license": "UNLICENSED",
+  "license": "Apache-2.0",
   "dependencies": {
     "docx": "9.6.1",
     "exceljs": "4.4.0",
