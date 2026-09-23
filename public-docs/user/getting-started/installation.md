@@ -4,21 +4,21 @@ description: 了解当前发行状态，安全获取、安装并首次启动 Cap
 status: current
 audience: user
 owner: product-docs
-last_verified: 2026-09-14
+last_verified: 2026-09-23
 ---
 
 # 安装与首次启动
 
 ## 当前正式发行
 
-Captain Who 当前正式版本为 **1.0.2**。请只从 [Captain Who 官网](https://captainwhoagent.com/) 下载；不要使用转载链接、网盘镜像或他人转发的安装包。
+Captain Who 当前正式版本为 **1.0.5**。请只从 [Captain Who 官网](https://captainwhoagent.com/) 下载；不要使用转载链接、网盘镜像或他人转发的安装包。公开的[开发仓库](https://github.com/Tiga001/Captain_Who)会持续更新，但不是当前安装包的下载入口。
 
 当前公开下载与支持范围如下：
 
 | 平台                               | 当前状态         | 获取方式                         |
 | ---------------------------------- | ---------------- | -------------------------------- |
 | macOS 12 及更高版本、Apple Silicon | 正式支持         | 官网提供的 arm64 `.dmg`          |
-| Windows                            | 尚未开放公开下载 | 请勿把仓库构建目标当作可用安装包 |
+| Windows                            | 暂无安装包       | 个人开发精力有限，暂无发布时间   |
 | macOS Intel、Linux                 | 暂无正式公开发行 | 请勿把仓库构建目标当作可用安装包 |
 
 打开官网提供的 DMG，按 Finder 显示的安装说明将应用放入“应用程序”目录后再启动。若系统提示签名、来源或版本异常，先停止安装并回到官网核对版本信息；不要为了继续安装而关闭系统安全机制。有关平台与构建边界，见[支持的平台](../../releases/supported-platforms.md)。

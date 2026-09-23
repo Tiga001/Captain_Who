@@ -4,7 +4,7 @@ description: 从第一次使用到进阶理解，学习如何安全、有效地�
 status: current
 audience: public
 owner: product-docs
-last_verified: 2026-09-20
+last_verified: 2026-09-23
 ---
 
 # Captain Who 文档
@@ -12,6 +12,8 @@ last_verified: 2026-09-20
 Captain Who 是一款本地优先的桌面 AI 工作助手。它可以在你授权的范围内理解项目、处理文件、调用工具，并把复杂任务拆给多个 Agent 协作完成。
 
 当前正式发行版本为 `1.0.5`。请始终从 [Captain Who 官网](https://captainwhoagent.com/) 获取安装包，并在安装前阅读[版本与发布](releases/README.md)中的平台范围、校验与升级说明。
+
+Captain Who 已按 Apache License 2.0 开源，[开发仓库](https://github.com/Tiga001/Captain_Who)会持续更新。仓库中的开发版本可能比官网安装包更新；想直接使用软件，请从官网下载安装包。当前仅发布 macOS Apple Silicon 版本，Windows 暂无安装包。许可证与第三方声明见[法律与第三方声明](legal/README.md)。
 
 ## 选择一条阅读路线
 

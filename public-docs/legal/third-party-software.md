@@ -4,7 +4,7 @@ description: 查看 Captain Who 随附开源软件、字体、语法和运行时
 status: current
 audience: user
 owner: legal
-last_verified: 2026-08-23
+last_verified: 2026-09-23
 ---
 
 # 第三方软件
@@ -31,7 +31,7 @@ Captain Who 包含开源库、图标、字体、语法定义以及文档、浏�
 
 ## 重要说明
 
-- 第三方许可证只适用于对应第三方材料，不自动授予 Captain Who 自有代码或品牌的使用权。
+- 第三方材料继续适用各自的许可证；Captain Who 自研代码适用仓库根目录的 [Apache License 2.0](../../LICENSE)，品牌使用权不随源代码许可自动授予。
 - 声明文件中的项目名称和商标属于各自权利人；列出它们不代表认可、赞助或合作关系。
-- 当前项目自身标记为 `UNLICENSED`；第三方声明不是本项目许可证。
+- [开发仓库](https://github.com/Tiga001/Captain_Who)已公开并会持续更新；本页列出的第三方声明不会改变各组件原有的许可证。
 - 对已经安装的特定版本，应优先查阅该安装包随附的完整声明；源码树中的声明可能已经随之后的依赖变更更新。

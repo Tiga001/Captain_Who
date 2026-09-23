@@ -2,6 +2,14 @@
 
 Captain Who 是一个本地优先的桌面 AI 工作助手。界面由 Electron、React 和 TypeScript 构建，Agent、工具执行与本地存储由 Rust Core 负责。
 
+## 下载与源码
+
+想直接使用，请到 [Captain Who 官网](https://captainwhoagent.com/) 下载 macOS 安装包。当前正式版支持 macOS 12 及更高版本的 Apple Silicon Mac；安装包、校验信息和升级说明见[版本与发布](public-docs/releases/README.md)。
+
+目前没有 Windows 安装包。项目由个人开发，现阶段没有足够时间完成 Windows 版本，也没有确定的发布时间。
+
+本 [GitHub 仓库](https://github.com/Tiga001/Captain_Who)是 Captain Who 的实际开发仓库。项目已按 [Apache License 2.0](LICENSE) 开源，仓库会持续更新。开发版本可能领先于官网已发布的安装包；直接使用软件时请以官网和[发行说明](public-docs/releases/release-notes/README.md)为准。
+
 目前已实现：
 
 - 本地项目、对话、草稿、归档与全文搜索
@@ -113,9 +121,10 @@ pnpm build:linux
 `electron-builder.yml` 只把 `out/`、运行时资源、生产依赖和当前平台的 `core-server` 放入应用，不会再把源码或 Cargo `target/` 缓存打进 ASAR。
 
 macOS `build:mac` 已强制 Developer ID 签名、hardened runtime、受管原生组件与隐私门禁验签，DMG
-容器也会签名；Apple notarization 尚未自动化，自动更新暂未启用且没有发布地址。`pnpm check`
-也不包含全部专项发布门禁，对外分发前必须按
-[构建与发布](docs/development/build-and-release.md)执行同一最终代码树上的平台验证。
+容器也会签名。官网提供的 1.0.5 正式 DMG 已通过 Apple 公证并装订公证凭据，公开更新源也已启用；
+应用会在有新版本时提供由用户发起的下载和安装。仓库的构建命令本身不执行 Apple 公证，`pnpm check`
+也不包含全部专项发布门禁。自行构建的产物不能直接视为正式安装包，发布流程见
+[构建与发布](docs/development/build-and-release.md)。
 
 ## 本地数据与隐私
 
@@ -180,8 +189,3 @@ Usage、审批、Continuation、Compaction、Fork 等状态不会恢复。
   和命令工作流提供。
 - Word、表格和演示文稿创建/编辑通过受管 Builder、Editor、Renderer 和 Artifact 发布门禁完成，详见
   [Office 与 Artifact](docs/subsystems/office-and-artifacts.md)。
-
-## 仓库状态
-
-项目当前为私有、`UNLICENSED`。不要在未补充许可证、完整凭据安全方案、notarization、自动更新和
-目标平台发布验证前直接公开发布。

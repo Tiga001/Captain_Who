@@ -7,9 +7,18 @@ const repositoryRoot = path.resolve(fileURLToPath(new URL('..', import.meta.url)
 const publicDocsRoot = path.join(repositoryRoot, 'public-docs')
 const internalDocsRoot = path.join(repositoryRoot, 'docs')
 const packageJson = JSON.parse(readFileSync(path.join(repositoryRoot, 'package.json'), 'utf8'))
-const currentVersion = String(packageJson.version)
+const releaseIndex = path.join(publicDocsRoot, 'releases/README.md')
+const releaseIndexSource = readFileSync(releaseIndex, 'utf8')
+// package.json can advance to a development version before an installer is published.
+const releaseIndexFrontMatter = /^---\n([\s\S]*?)\n---\n/.exec(releaseIndexSource)?.[1] ?? ''
+const releaseVersionMatch = /^release_version:\s*(\d+\.\d+\.\d+)\s*$/m.exec(releaseIndexFrontMatter)
+const currentVersion = releaseVersionMatch?.[1] ?? String(packageJson.version)
 const currentReleaseNote = `releases/release-notes/${currentVersion.replace(/\./g, '-')}.md`
 const failures = []
+
+if (!releaseVersionMatch) {
+  failures.push('public-docs/releases/README.md: missing release_version in front matter')
+}
 
 const requiredDocuments = [
   'README.md',
@@ -105,6 +114,7 @@ const forbiddenPlaceholderDocuments = [
 ]
 
 const allowedExternalFiles = new Set([
+  path.join(repositoryRoot, 'LICENSE'),
   path.join(repositoryRoot, 'THIRD_PARTY_NOTICES.txt'),
   path.join(repositoryRoot, 'THIRD_PARTY_GRAMMAR_NOTICES.txt')
 ])
@@ -269,14 +279,12 @@ for (const documentPath of releaseDocuments) {
   if (!existsSync(file)) continue
   const markdown = readFileSync(file, 'utf8')
   if (!markdown.includes(currentVersion)) {
-    fail(file, `must name the current package version ${currentVersion}`)
+    fail(file, `must name the current published version ${currentVersion}`)
   }
 }
 
-const releaseIndex = path.join(publicDocsRoot, 'releases/README.md')
 if (existsSync(releaseIndex)) {
-  const markdown = readFileSync(releaseIndex, 'utf8')
-  if (!markdown.includes('https://captainwhoagent.com/')) {
+  if (!releaseIndexSource.includes('https://captainwhoagent.com/')) {
     fail(releaseIndex, 'missing canonical official download site')
   }
 }

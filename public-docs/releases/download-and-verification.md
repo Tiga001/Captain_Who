@@ -4,12 +4,14 @@ description: 从 Captain Who 官网下载 macOS 安装包，并核对发行文�
 status: current
 audience: user
 owner: release-engineering
-last_verified: 2026-09-20
+last_verified: 2026-09-23
 ---
 
 # 下载与验证
 
 当前正式发行仅适用于 **macOS 12 或更高版本的 Apple Silicon（arm64）** 设备。请从 [Captain Who 官网](https://captainwhoagent.com/) 开始下载，不要使用搜索结果中的镜像、网盘转存或他人重新打包的文件。
+
+[GitHub 开发仓库](https://github.com/Tiga001/Captain_Who)提供持续更新的源码，不是当前正式安装包的下载入口。仓库中的版本号或源码压缩包不能代替下表中的 DMG。
 
 ## 当前发行文件
 

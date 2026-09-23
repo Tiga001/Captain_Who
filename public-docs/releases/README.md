@@ -4,7 +4,8 @@ description: 获取 Captain Who 正式版本、核验下载文件并了解升级
 status: current
 audience: user
 owner: release-engineering
-last_verified: 2026-09-20
+last_verified: 2026-09-23
+release_version: 1.0.5
 ---
 
 # 版本与发布
@@ -18,6 +19,8 @@ Captain Who `1.0.5` 于 2026-09-17 发布。目前唯一正式支持的安装包
 该 DMG 已使用 Developer ID 签名、通过 Apple 公证，并已装订（stapled）公证凭据。请始终从 [Captain Who 官网](https://captainwhoagent.com/) 获取安装包；不要把聊天群、网盘或第三方重打包文件当作官方发行。
 
 Windows、Intel Mac 和 Linux 目前没有正式安装包，也不在当前公开支持范围内。它们即使出现在源码的构建配置中，也不代表可以下载安装或获得兼容性承诺。
+
+项目由个人开发，目前没有足够时间完成 Windows 版本，也没有确定的发布时间。官网首页提供当前正式 macOS 安装包；[公开的开发仓库](https://github.com/Tiga001/Captain_Who)会持续更新，但源码中的开发版本不一定已经制作成正式安装包。GitHub 仓库不是当前安装包的下载入口。
 
 正式签名的 macOS Apple Silicon 发行版内置由用户发起的应用内自动更新机制，官方公开更新清单现已可用。必须先将应用安装到本机并从已安装位置启动；直接从挂载的 DMG 或 macOS App Translocation 路径运行时不会启用更新。完整初始化后，只有在可访问的官方更新源提供新版本时，应用才会发现更新；随后由你选择开始下载。下载、完整性校验和原生准备完成后，应用会关闭并重新启动以安装更新。它不会在你开始下载前自动下载、静默替换或强制更新，也不会自动降级。官网 DMG 始终是核验与手动升级的备用方式。
 
