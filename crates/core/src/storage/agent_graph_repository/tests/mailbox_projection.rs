@@ -375,6 +375,16 @@ fn projection_preserves_fifo_reorders_before_active_assistant_and_satisfies_defe
     )
     .unwrap();
 
+    // Bind the manually admitted Wake to the same Turn that receives the follow-up below.
+    connection
+        .execute(
+            "UPDATE agent_wake_requests
+             SET run_id = 'run-running', assistant_message_id = 'assistant-running'
+             WHERE wake_id = ?1",
+            [&active_wake.wake_id],
+        )
+        .unwrap();
+
     let send = send_agent_message(
         &mut connection,
         &SendAgentMessageRequest {

@@ -1,5 +1,23 @@
 use super::*;
 
+fn enqueue_explicit_task_wake(connection: &mut Connection, suffix: &str, created_at: i64) {
+    // Lifecycle assertions below represent an assigned task, not an unbound internal Wake.
+    let task = message_input(suffix, "agent-root", "agent-child", AgentMailboxKind::Task);
+    enqueue_agent_message(connection, &task, created_at).unwrap();
+    let mut wake = wake_input(suffix);
+    wake.source_agent_message_id = Some(task.message_id);
+    enqueue_agent_wake(connection, &wake, created_at).unwrap();
+    let transaction = connection.transaction().unwrap();
+    project_agent_wake_source_in_transaction(
+        &transaction,
+        &wake.wake_id,
+        &format!("task-projection-{suffix}"),
+        created_at,
+    )
+    .unwrap();
+    transaction.commit().unwrap();
+}
+
 #[test]
 fn result_wake_input_and_search_history_only_expose_semantic_task_identity() {
     let mut connection = setup_tree();
@@ -613,7 +631,7 @@ fn child_result_is_frozen_direct_parent_outbox_and_root_is_not_auto_woken() {
     )
     .unwrap();
 
-    enqueue_agent_wake(&mut connection, &wake_input("root-result"), 41).unwrap();
+    enqueue_explicit_task_wake(&mut connection, "root-result", 41);
     let root_child_wake =
         claim_next_agent_wake(&mut connection, "agent-child", "root-result-claim", 42)
             .unwrap()
@@ -843,8 +861,8 @@ fn terminal_result_faults_rollback_and_recover_exactly_once_after_restart() {
 #[test]
 fn interrupt_request_is_tree_scoped_and_idempotent_across_multiple_wakes() {
     let mut connection = setup_tree();
-    enqueue_agent_wake(&mut connection, &wake_input("interrupt-one"), 20).unwrap();
-    enqueue_agent_wake(&mut connection, &wake_input("interrupt-two"), 21).unwrap();
+    enqueue_explicit_task_wake(&mut connection, "interrupt-one", 20);
+    enqueue_explicit_task_wake(&mut connection, "interrupt-two", 21);
 
     let before_queued_interrupt =
         agent_collaboration_event_repository::latest_root_sequence(&connection, "agent-root")

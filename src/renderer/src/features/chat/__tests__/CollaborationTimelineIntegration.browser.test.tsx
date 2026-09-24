@@ -1,4 +1,9 @@
 import type { CSSProperties } from 'react'
+import type {
+  AgentSummary,
+  AgentTreeSnapshot,
+  CollaborationEventEnvelope
+} from '@mycopilot/protocol'
 import { expect, it, vi } from 'vitest'
 import { page, userEvent } from 'vitest/browser'
 import { render } from 'vitest-browser-react'
@@ -7,6 +12,8 @@ import { classicLightTheme } from '../../../config/themes/classic'
 import { ChatMessageList, ConversationSurface } from '../ChatConversationPage'
 import type { ChatConversation } from '../chatTypes'
 import type { CollaborationTimelineActivity } from '../../agentCollaboration/CollaborationTimelineActivity'
+import type { CollaborationDataSource } from '../../agentCollaboration/collaborationClient'
+import { CollaborationStore } from '../../agentCollaboration/collaborationStore'
 import '../../../styles/global.css'
 
 const translations: Record<string, string> = {
@@ -275,6 +282,168 @@ it('places post-terminal activity after the reply and before the next message', 
   expect(
     completed.compareDocumentPosition(nextUser) & Node.DOCUMENT_POSITION_FOLLOWING
   ).toBeTruthy()
+})
+
+it('consumes a filtered Result wake without adding a footer card and still displays a later real followup completion', async () => {
+  const started = activity('task-started', 'started', 1, 2_100, 'root-assistant-1')
+  const child: AgentSummary = {
+    agentId: 'agent-reviewer',
+    conversationId: 'reviewer-conversation',
+    displayStatus: 'running',
+    latestActivityAt: 2_100,
+    lifecycle: 'active',
+    model: { displayName: 'Review model', modelConfigId: 'review-model' },
+    parentAgentId: 'root:root-conversation',
+    projectId: 'project-a',
+    rootAgentId: 'root:root-conversation',
+    rootConversationId: 'root-conversation',
+    taskName: 'Reviewer',
+    taskPath: '/root/reviewer'
+  }
+  let authoritative: AgentTreeSnapshot = {
+    schemaVersion: 1,
+    workspaceId: 'project-a',
+    projectId: 'project-a',
+    rootAgentId: 'root:root-conversation',
+    rootConversationId: 'root-conversation',
+    agents: [child],
+    lastSequence: 1
+  }
+  const hostEvent = (
+    sequence: number,
+    projected: CollaborationTimelineActivity | null,
+    runId: string
+  ): CollaborationEventEnvelope => ({
+    schemaVersion: 2,
+    eventId: projected?.activityId ?? 'result-wake-completed',
+    sequence,
+    workspaceId: 'project-a',
+    projectId: 'project-a',
+    rootAgentId: authoritative.rootAgentId,
+    rootConversationId: authoritative.rootConversationId,
+    agentId: child.agentId,
+    conversationId: child.conversationId,
+    turnId: `turn-${runId}`,
+    runId,
+    messageId: `source-${runId}`,
+    kind: projected?.semantic === 'started' ? 'wake_created' : 'wake_updated',
+    resourceRevision: sequence,
+    activity: projected
+      ? {
+          schemaVersion: 3,
+          agentId: projected.agentId,
+          parentAgentId: projected.parentAgentId,
+          parentConversationId: projected.parentConversationId,
+          anchorMessageId: projected.anchorMessageId,
+          traceBoundarySequence: projected.traceBoundarySequence,
+          semantic: projected.semantic,
+          taskNameSnapshot: projected.taskNameSnapshot
+        }
+      : null,
+    occurredAt: projected?.occurredAt ?? 4_200
+  })
+  const durable = [hostEvent(1, started, 'task-run')]
+  let notify: ((event: CollaborationEventEnvelope) => void) | undefined
+  const source: CollaborationDataSource = {
+    getTree: vi.fn(async () => authoritative),
+    listEvents: vi.fn(async ({ afterSequence }) => ({
+      schemaVersion: 1 as const,
+      rootAgentId: authoritative.rootAgentId,
+      rootConversationId: authoritative.rootConversationId,
+      events: durable.filter((event) => event.sequence > afterSequence),
+      lastSequence: authoritative.lastSequence,
+      hasMore: false
+    })),
+    subscribe: (handler) => {
+      notify = handler
+      return () => undefined
+    },
+    subscribeResync: () => () => undefined
+  }
+  const store = new CollaborationStore('root-conversation', source)
+  store.start()
+  try {
+    await expect.poll(() => store.getSnapshot().loading).toBe(false)
+    const settled = freezeTerminalActivities(expandedConversation(), [started])
+    const view = () => (
+      <ChatMessageList
+        collaborationTimelineActivities={store.getSnapshot().activities}
+        conversation={settled}
+        directChildAgentIds={['agent-reviewer']}
+        editableLastUserMessageId={null}
+        editSelectedModelAvailable
+        editSelectedModelSupportsImage
+        onOpenCollaborationAgent={vi.fn()}
+        showTokenUsageDetails={false}
+      />
+    )
+    const screen = await render(view())
+    const footer = screen.container.querySelector('.chat-message__actions')!
+    expect(footer).not.toBeNull()
+    expect(screen.getByText('I finished the root response.').elements()).toHaveLength(1)
+
+    // Host retains the durable event and state change, but suppresses the notification-only
+    // Result wake's presentation activity instead of deleting a sequence from the event stream.
+    const notification = hostEvent(2, null, 'result-notification-run')
+    durable.push(notification)
+    authoritative = {
+      ...authoritative,
+      lastSequence: 2,
+      agents: [{ ...child, displayStatus: 'latest_completed', latestActivityAt: 4_200 }]
+    }
+    notify?.(notification)
+    await expect.poll(() => store.getSnapshot().tree?.lastSequence).toBe(2)
+    expect(store.getSnapshot().tree?.agents[0]?.displayStatus).toBe('latest_completed')
+    expect(store.getSnapshot().agentInvalidationSequences[child.agentId]).toBe(2)
+    expect(store.getSnapshot().activities.map((event) => event.activityId)).toEqual([
+      'task-started'
+    ])
+    await screen.rerender(view())
+    expect(screen.container.querySelector('[data-semantic="completed"]')).toBeNull()
+
+    const followupStarted = {
+      ...activity('followup-started', 'started', 3, 4_500, 'root-assistant-1'),
+      traceBoundarySequence: null
+    }
+    const followupCompleted = {
+      ...activity('followup-completed', 'completed', 4, 4_800, 'root-assistant-1'),
+      traceBoundarySequence: null
+    }
+    durable.push(
+      hostEvent(3, followupStarted, 'followup-run'),
+      hostEvent(4, followupCompleted, 'followup-run')
+    )
+    authoritative = {
+      ...authoritative,
+      lastSequence: 4,
+      agents: [{ ...child, displayStatus: 'latest_completed', latestActivityAt: 4_800 }]
+    }
+    notify?.(durable[3])
+    await expect.poll(() => store.getSnapshot().tree?.lastSequence).toBe(4)
+    expect(source.listEvents).toHaveBeenLastCalledWith({
+      afterSequence: 2,
+      limit: 256,
+      rootConversationId: 'root-conversation'
+    })
+    expect(store.getSnapshot().error).toBe(false)
+    await screen.rerender(view())
+    const completed = screen.container.querySelector('[data-semantic="completed"]')!
+    expect(screen.container.querySelectorAll('[data-semantic="completed"]')).toHaveLength(1)
+    expect(
+      footer.compareDocumentPosition(completed) & Node.DOCUMENT_POSITION_FOLLOWING
+    ).toBeTruthy()
+    const nextUser = screen.container.querySelector('[data-message-id="root-user-2"]')!
+    expect(
+      completed.compareDocumentPosition(nextUser) & Node.DOCUMENT_POSITION_FOLLOWING
+    ).toBeTruthy()
+    expect(store.getSnapshot().activities.map((event) => event.activityId)).toEqual([
+      'task-started',
+      'followup-started',
+      'followup-completed'
+    ])
+  } finally {
+    store.destroy()
+  }
 })
 
 it('places an observer’s direct-child status inline and completion between turns', async () => {

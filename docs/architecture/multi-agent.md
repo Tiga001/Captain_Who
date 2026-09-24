@@ -245,6 +245,8 @@ notification 只是失效信号。Renderer 通过 tree snapshot 与 `agent.colla
 
 各层聊天的 semantic activity 只来自后端持久 mutation：started、updated、waiting_approval、completed、failed、interrupted。每条活动只属于其主体 Agent 的直属父会话；Mailbox 的活动主体为 sender，不能误用外层失效通知的 recipient 身份推导父级。Tool 名、模型文案、时间戳或 Mailbox JSON 不得被 UI 用来反推状态。observer live event 是低延迟 overlay，durable Conversation 与 event log 才是恢复真相。
 
+任务生命周期栏对应明确的 Task／Followup 派发。Host 在事件读取投影中验证 Wake 的不可变 Mailbox 来源；单纯处理自动 Result 通知的轮次不显示额外的 completed、failed、interrupted 栏。如果通知轮实际接收了新的 Task／Followup，则通过绑定到同一 Run 的持久投递回执保留其终态。通知轮的持久事件、连续 sequence、真实树状态、审批提醒及调度均保留。此规则同时用于实时事件、事件回放和新建回复的终态活动快照，不依据模型回复是否写了“待命”判断，也不按发送者是否直属父级排除越级派发。
+
 平铺树图另消费可选 `transmission` 展示摘要：从成功入队的 Mailbox 记录投影真实 sender/recipient 和消息身份（排除自动 Result），从根 Turn 的真实用户输入/完成事实投影用户与根 Agent 之间的方向。该摘要不含正文、不创建消息或 Wake，不改变持久事件与活动 schema；Renderer 仅为新近实时事件播放光波，历史 hydration/resync 不播放，按消息/Run 身份去重。运行中用户引导以现有 `guidance_applied` 事件和根 Run 绑定补充。详见[右侧栏平台](../subsystems/right-sidebar.md)。
 
 `send_message` 在发送方自己的工具时间线使用纸飞机图标与现有工具字号、颜色。单条显示目标与发送状态；相邻多条默认折叠为工具组，箭头展开后逐条显示。分组不跨可见正文、其他工具或独立子 Agent 状态行，不展开原始参数或消息正文。发送中、已发送、失败、取消来自该工具的 call/result 状态；缺少成功回执时不凭整轮完成推断已发送。组内失败或取消不能计作成功。成功只代表已进入目标 Mailbox，不代表目标已读或处理。主聊天与子 Agent observer 共用此展示，按工具真实位置排序；它与父会话中的直属子 Agent 生命周期圆角状态栏分别呈现。系统结束通知不伪造 `send_message` 调用。

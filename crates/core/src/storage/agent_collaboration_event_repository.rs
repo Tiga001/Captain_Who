@@ -6,6 +6,8 @@ use crate::{
 };
 use rusqlite::{params, Connection};
 
+#[cfg(test)]
+mod task_activity_tests;
 mod transmission;
 
 const EVENT_SELECT: &str = "
@@ -233,10 +235,65 @@ fn query_events<P: rusqlite::Params>(
             transmission: None,
             created_at: nonnegative(created_at)?,
         };
+        if !task_terminal_activity_is_visible(connection, &event)? {
+            event.activity = None;
+        }
         event.transmission = transmission::project(connection, &event)?;
         events.push(event);
     }
     Ok(events)
+}
+
+/// Timeline task lifecycles have the same scope at start and finish: explicit tasks/follow-ups.
+/// Automatic Result wakes still execute and invalidate the tree, but their receipt-only Turns
+/// must not look like another completed assignment. Project at read time so immutable events,
+/// replay cursors, approvals, and genuine late task completions keep their original semantics.
+/// An explicit follow-up bound into an already-running Result Turn also qualifies: its deferred
+/// Wake is satisfied by the delivery receipt, so that Turn owns the real assignment's finish.
+fn task_terminal_activity_is_visible(
+    connection: &Connection,
+    event: &AgentCollaborationEventRecord,
+) -> Result<bool, AgentCollaborationEventError> {
+    if event.kind != AgentCollaborationEventKind::WakeUpdated
+        || !event.activity.as_ref().is_some_and(|activity| {
+            matches!(
+                activity.semantic,
+                AgentCollaborationActivitySemantic::Completed
+                    | AgentCollaborationActivitySemantic::Failed
+                    | AgentCollaborationActivitySemantic::Interrupted
+            )
+        })
+    {
+        return Ok(true);
+    }
+    connection
+        .query_row(
+            "SELECT EXISTS (
+                 SELECT 1 FROM agent_mailbox_messages
+                 WHERE message_id = ?1 AND root_agent_id = ?2 AND recipient_agent_id = ?3
+                   AND kind IN ('task', 'followup')
+             ) OR EXISTS (
+                 SELECT 1 FROM agent_model_batch_receipts AS receipt
+                 JOIN agent_model_batch_receipt_items AS item
+                   ON item.receipt_id = receipt.receipt_id
+                 JOIN agent_mailbox_messages AS message ON message.message_id = item.message_id
+                 WHERE receipt.agent_id = ?3 AND receipt.conversation_id = ?4
+                   AND receipt.run_id = ?5 AND receipt.assistant_message_id = ?6
+                   AND message.root_agent_id = ?2 AND message.recipient_agent_id = ?3
+                   AND message.kind IN ('task', 'followup') AND item.bound_at <= ?7
+             )",
+            params![
+                &event.message_id,
+                &event.root_agent_id,
+                &event.agent_id,
+                &event.conversation_id,
+                &event.run_id,
+                &event.turn_id,
+                event.created_at,
+            ],
+            |row| row.get(0),
+        )
+        .map_err(|_| AgentCollaborationEventError::StorageUnavailable)
 }
 
 // Mirrors the nullable activity columns read together from one durable event row.
@@ -452,7 +509,7 @@ mod tests {
         .unwrap();
     }
 
-    fn tree() -> Connection {
+    pub(super) fn tree() -> Connection {
         let mut connection = Connection::open_in_memory().unwrap();
         populate_tree(&mut connection);
         connection
@@ -1350,6 +1407,23 @@ mod tests {
             ("terminal-completed-wake", "terminal-completed-request", 11),
             ("terminal-failed-wake", "terminal-failed-request", 15),
         ] {
+            let task = agent_graph_repository::enqueue_agent_message(
+                &mut connection,
+                &EnqueueAgentMessageInput {
+                    message_id: format!("task:{wake_id}"),
+                    root_agent_id: "agent-root".to_string(),
+                    sender_agent_id: "agent-root".to_string(),
+                    recipient_agent_id: "agent-child".to_string(),
+                    request_id: format!("task:{request_id}"),
+                    kind: AgentMailboxKind::Task,
+                    content: "perform the delegated task".to_string(),
+                    projection_message_id: format!("projection:{wake_id}"),
+                },
+                created_at,
+            )
+            .unwrap()
+            .record()
+            .clone();
             agent_graph_repository::enqueue_agent_wake(
                 &mut connection,
                 &EnqueueAgentWakeInput {
@@ -1358,13 +1432,22 @@ mod tests {
                     agent_id: "agent-child".to_string(),
                     requester_agent_id: "agent-root".to_string(),
                     request_id: request_id.to_string(),
-                    source_agent_message_id: None,
+                    source_agent_message_id: Some(task.message_id),
                 },
                 created_at,
             )
             .unwrap();
         }
 
+        let transaction = connection.transaction().unwrap();
+        agent_graph_repository::project_agent_wake_source_in_transaction(
+            &transaction,
+            "terminal-completed-wake",
+            "terminal-completed-project",
+            12,
+        )
+        .unwrap();
+        transaction.commit().unwrap();
         let completed_claim = agent_graph_repository::claim_next_agent_wake(
             &mut connection,
             "agent-child",
@@ -1420,6 +1503,15 @@ mod tests {
                 "truncated": false,
             }),
         );
+        let transaction = connection.transaction().unwrap();
+        agent_graph_repository::project_agent_wake_source_in_transaction(
+            &transaction,
+            "terminal-failed-wake",
+            "terminal-failed-project",
+            16,
+        )
+        .unwrap();
+        transaction.commit().unwrap();
         let failed_claim = agent_graph_repository::claim_next_agent_wake(
             &mut connection,
             "agent-child",
@@ -1464,6 +1556,7 @@ mod tests {
         let events = list_root_events(&connection, "agent-root", after_root_trace, 64).unwrap();
         let terminal_activities = events
             .iter()
+            .filter(|event| event.kind == AgentCollaborationEventKind::WakeUpdated)
             .filter_map(|event| {
                 event.activity.as_ref().map(|activity| {
                     (
