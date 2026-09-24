@@ -1083,7 +1083,7 @@ pub fn update_message_run_terminal_state(
     message_status: Option<&str>,
     run_status: &str,
     completed_at: i64,
-    collaboration_cutoff: Option<u64>,
+    collaboration_final_response_boundary: Option<u64>,
 ) -> rusqlite::Result<()> {
     let Some((existing_agent_run_json, started_at)) = connection
         .query_row(
@@ -1110,8 +1110,16 @@ pub fn update_message_run_terminal_state(
         .ok_or(rusqlite::Error::InvalidQuery)?;
     next_agent_run.insert(
         "collaborationTimelineActivities".to_string(),
-        terminal_collaboration_timeline_activities(connection, message_id, collaboration_cutoff)?,
+        terminal_collaboration_timeline_activities(connection, message_id)?,
     );
+    if let Some(boundary) = collaboration_final_response_boundary {
+        next_agent_run.insert(
+            "collaborationFinalResponseBoundary".to_string(),
+            boundary.into(),
+        );
+    } else {
+        next_agent_run.remove("collaborationFinalResponseBoundary");
+    }
     if !current_agent_run_projection_is_safe(next_agent_run, run_id) {
         return Err(rusqlite::Error::InvalidQuery);
     }
@@ -1141,14 +1149,10 @@ pub fn update_message_run_terminal_state(
 fn terminal_collaboration_timeline_activities(
     connection: &Connection,
     message_id: &str,
-    collaboration_cutoff: Option<u64>,
 ) -> rusqlite::Result<serde_json::Value> {
-    let events = agent_collaboration_event_repository::list_message_activities(
-        connection,
-        message_id,
-        collaboration_cutoff,
-    )
-    .map_err(|_| rusqlite::Error::InvalidQuery)?;
+    let events =
+        agent_collaboration_event_repository::list_message_activities(connection, message_id)
+            .map_err(|_| rusqlite::Error::InvalidQuery)?;
     let activities = events
         .into_iter()
         .filter_map(|event| {
@@ -1157,8 +1161,10 @@ fn terminal_collaboration_timeline_activities(
                 "activityId": event.event_id,
                 "agentId": activity.agent_id,
                 "occurredAt": event.created_at,
-                "rootAnchorMessageId": activity.root_anchor_message_id?,
-                "rootTraceBoundarySequence": activity.root_trace_boundary_sequence?,
+                "parentAgentId": activity.parent_agent_id,
+                "parentConversationId": activity.parent_conversation_id,
+                "anchorMessageId": activity.anchor_message_id?,
+                "traceBoundarySequence": activity.trace_boundary_sequence?,
                 "runId": event.run_id,
                 "semantic": activity.semantic.as_str(),
                 "sequence": event.root_sequence,
@@ -1203,6 +1209,16 @@ pub(crate) fn reconcile_message_run_terminal_state(
         completed_at,
         Some(completed_at),
     )?;
+    let mut run = serde_json::from_str::<serde_json::Value>(&run_json)
+        .map_err(|_| rusqlite::Error::InvalidQuery)?;
+    let run = run.as_object_mut().ok_or(rusqlite::Error::InvalidQuery)?;
+    // A recovered run becomes settled too. Preserve its durable child activities even when
+    // the process exited before the normal terminal snapshot could be written.
+    run.insert(
+        "collaborationTimelineActivities".to_string(),
+        terminal_collaboration_timeline_activities(connection, message_id)?,
+    );
+    let run_json = serde_json::to_string(run).map_err(|_| rusqlite::Error::InvalidQuery)?;
 
     connection.execute(
         "UPDATE messages
@@ -1982,6 +1998,14 @@ fn overlay_authoritative_collaboration_activities(
         return Some(raw);
     };
     run.insert("collaborationTimelineActivities".to_string(), activities);
+    if let Some(boundary) = durable.get("collaborationFinalResponseBoundary") {
+        run.insert(
+            "collaborationFinalResponseBoundary".to_string(),
+            boundary.clone(),
+        );
+    } else {
+        run.remove("collaborationFinalResponseBoundary");
+    }
     serde_json::to_string(&value).ok().or(Some(raw))
 }
 

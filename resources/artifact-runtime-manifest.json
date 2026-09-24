@@ -61,11 +61,11 @@
     },
     "nodePackageManifest": {
       "path": "packages/artifact-runtime-node/package.json",
-      "sha256": "99305ec3a98d5224c56beb55573ac1674ae7e826cff33cf7a1bc7952a05b56e9"
+      "sha256": "a322cbda8eda381b6be94ea69e2e4ae1ccccaabd81c2a583baa41e7b1f50a78f"
     },
     "nodePackageEvidence": {
       "path": "resources/artifact-runtime-node-package-evidence.json",
-      "sha256": "394cd43ad0b2133d4beddcec67b6e6dce0eb94625091bf4c3383ba0d3adc5694"
+      "sha256": "ff97f8c2261ded35c818c86cbb4b8cde3f0e650236b2a31371501764c1220287"
     },
     "pptxgenjsPatch": {
       "path": "patches/pptxgenjs@4.0.1.patch",

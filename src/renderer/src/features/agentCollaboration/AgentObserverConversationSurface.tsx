@@ -2,11 +2,15 @@ import type { AgentSummary } from '@mycopilot/protocol'
 import { ConversationSurface } from '../chat/ConversationSurface'
 import { useFrontendConfig } from '../../config/FrontendConfigProvider'
 import { useObserverConversation } from './useObserverConversation'
+import type { CollaborationTimelineActivity } from './collaborationTimelineModel'
 
 interface AgentObserverConversationSurfaceProps {
+  directChildAgentIds: readonly string[]
   agent: AgentSummary
   agentLabelsById: Readonly<Record<string, string>>
+  activities?: readonly CollaborationTimelineActivity[]
   invalidationVersion: string
+  onOpenAgent?: (agentId: string) => void
   rootConversationId: string
   showTokenUsageDetails: boolean
 }
@@ -14,7 +18,10 @@ interface AgentObserverConversationSurfaceProps {
 export function AgentObserverConversationSurface({
   agent,
   agentLabelsById,
+  activities,
+  directChildAgentIds,
   invalidationVersion,
+  onOpenAgent,
   rootConversationId,
   showTokenUsageDetails
 }: AgentObserverConversationSurfaceProps) {
@@ -57,8 +64,11 @@ export function AgentObserverConversationSurface({
       ) : null}
       <ConversationSurface
         agentLabelsById={agentLabelsById}
+        collaborationTimelineActivities={activities}
         conversation={conversation}
+        directChildAgentIds={directChildAgentIds}
         mode="observer"
+        onOpenCollaborationAgent={onOpenAgent}
         parentAgentId={agent.parentAgentId}
         rootConversationId={rootConversationId}
         showTokenUsageDetails={showTokenUsageDetails}

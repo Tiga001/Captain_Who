@@ -33,7 +33,6 @@ fn result_wake_input_and_search_history_only_expose_semantic_task_identity() {
             terminal_status: AgentWakeStatus::Failed,
             run_id: None,
             assistant_message_id: None,
-            summary: "Nested result evidence; preserve literal agent-user-example.".to_string(),
             terminal_error: Some("The delegated operation was not started.".to_string()),
         },
         33,
@@ -86,10 +85,11 @@ fn result_wake_input_and_search_history_only_expose_semantic_task_identity() {
         serde_json::from_str(wrapper["payload"].as_str().unwrap()).unwrap();
     assert_eq!(payload["taskName"], "details");
     assert_eq!(payload["status"], "failed");
-    assert!(payload["summary"]
-        .as_str()
-        .unwrap()
-        .contains("agent-user-example"));
+    assert_eq!(payload["summary"], "子智能体本轮失败。");
+    assert_eq!(
+        payload["terminalError"],
+        "The delegated operation was not started."
+    );
     for hidden in [
         "agent-grand",
         "agent-child",
@@ -131,7 +131,7 @@ fn result_wake_input_and_search_history_only_expose_semantic_task_identity() {
     let mut hits = crate::storage::conversation_history_repository::search_records(
         &connection,
         "conversation-child",
-        "Nested result evidence",
+        "子智能体本轮失败",
         &filter,
         8,
     )
@@ -474,7 +474,6 @@ fn child_result_is_frozen_direct_parent_outbox_and_root_is_not_auto_woken() {
         terminal_status: AgentWakeStatus::Completed,
         run_id: Some("run-grand".to_string()),
         assistant_message_id: Some("assistant-grand".to_string()),
-        summary: "nested review complete".to_string(),
         terminal_error: None,
     };
     let before_finish =
@@ -485,6 +484,11 @@ fn child_result_is_frozen_direct_parent_outbox_and_root_is_not_auto_woken() {
     assert_eq!(settled.result_message.recipient_agent_id, "agent-child");
     assert_eq!(settled.envelope.artifact_refs.len(), 1);
     assert!(settled.parent_wake.is_some());
+    assert_eq!(settled.envelope.summary, "子智能体本轮已完成。");
+    assert!(!settled
+        .result_message
+        .content
+        .contains("nested review complete"));
     assert!(!settled.result_message.content.contains("usage"));
     let settlement_events = agent_collaboration_event_repository::list_root_events(
         &connection,
@@ -626,7 +630,6 @@ fn child_result_is_frozen_direct_parent_outbox_and_root_is_not_auto_woken() {
             terminal_status: AgentWakeStatus::Failed,
             run_id: None,
             assistant_message_id: None,
-            summary: "provider unavailable before Turn admission".to_string(),
             terminal_error: Some("model disabled".to_string()),
         },
         43,
@@ -766,7 +769,6 @@ fn terminal_result_faults_rollback_and_recover_exactly_once_after_restart() {
             terminal_status: AgentWakeStatus::Completed,
             run_id: Some(run_id.clone()),
             assistant_message_id: Some(assistant_message_id.clone()),
-            summary: "durable terminal".to_string(),
             terminal_error: None,
         };
         assert!(finish_agent_turn_with_result(&mut connection, &first_finish, 24).is_err());
@@ -1105,7 +1107,6 @@ fn expired_running_wake_becomes_outcome_unknown_and_releases_conversation() {
             terminal_status: AgentWakeStatus::OutcomeUnknown,
             run_id: Some("run-crashed".to_string()),
             assistant_message_id: Some("assistant-crashed".to_string()),
-            summary: "result unknown after Host crash".to_string(),
             terminal_error: Some("possibly dispatched; not replayed".to_string()),
         },
         60_023,
@@ -1328,4 +1329,105 @@ fn manual_root_maintenance_leaves_child_wake_queued_until_terminal() {
             .unwrap();
     assert_eq!(claimed.wake_id, wake_id);
     assert_eq!(claimed.status, AgentWakeStatus::Claimed);
+}
+
+#[test]
+fn long_explicit_report_precedes_the_host_terminal_notification() {
+    let mut connection = setup_tree();
+    let task = follow_up_agent(
+        &mut connection,
+        &SendAgentMessageRequest {
+            sender_agent_id: "agent-root".into(),
+            recipient_agent_id: "agent-child".into(),
+            request_id: "large-result-task".into(),
+            content: "collect evidence".into(),
+        },
+        30,
+    )
+    .unwrap();
+    let wake = task.deferred_wake.unwrap();
+    let transaction = connection.transaction().unwrap();
+    project_agent_wake_source_in_transaction(
+        &transaction,
+        &wake.wake_id,
+        "large-result-projection",
+        31,
+    )
+    .unwrap();
+    transaction.commit().unwrap();
+    claim_next_agent_wake(&mut connection, "agent-child", "large-result-claim", 32)
+        .unwrap()
+        .unwrap();
+    let report = "完整研究结论🙂".repeat(90_000);
+    let sent = send_agent_message(
+        &mut connection,
+        &SendAgentMessageRequest {
+            sender_agent_id: "agent-child".into(),
+            recipient_agent_id: "agent-root".into(),
+            request_id: "explicit-report".into(),
+            content: report.clone(),
+        },
+        33,
+    )
+    .unwrap();
+    assert!(sent.deferred_wake.is_none());
+    let input = FinishAgentTurnResultInput {
+        wake_id: wake.wake_id,
+        expected_status: AgentWakeStatus::Claimed,
+        claim_token: "large-result-claim".into(),
+        terminal_status: AgentWakeStatus::Failed,
+        run_id: None,
+        assistant_message_id: None,
+        terminal_error: Some("fixture failure after collecting evidence".into()),
+    };
+    let settled = finish_agent_turn_with_result(&mut connection, &input, 34).unwrap();
+    assert!(settled.parent_wake.is_none());
+    let stored = get_agent_message(&connection, &settled.result_message.message_id)
+        .unwrap()
+        .unwrap();
+    let envelope: crate::AgentTurnResultEnvelope = serde_json::from_str(&stored.content).unwrap();
+    assert_eq!(envelope.summary, "子智能体本轮失败。");
+    assert!(!stored.content.contains("完整研究结论"));
+    let (projected, truncated) = crate::conversation_trace::project_agent_mailbox_model_envelope(
+        &envelope.child_agent_id,
+        &envelope.task_name,
+        &envelope.task_path,
+        crate::AgentMailboxKind::Result,
+        &stored.content,
+    )
+    .unwrap();
+    assert!(!truncated);
+    let wrapper: serde_json::Value = serde_json::from_str(&projected).unwrap();
+    let body: serde_json::Value =
+        serde_json::from_str(wrapper["payload"].as_str().unwrap()).unwrap();
+    assert_eq!(body["summary"], "子智能体本轮失败。");
+    assert_eq!(
+        body["terminalError"],
+        "fixture failure after collecting evidence"
+    );
+    let transaction = connection.transaction().unwrap();
+    let delivered = project_pending_agent_messages_in_transaction(
+        &transaction,
+        "agent-root",
+        "report-delivery",
+        35,
+        2,
+    )
+    .unwrap();
+    transaction.commit().unwrap();
+    assert_eq!(delivered.len(), 2);
+    assert_eq!(delivered[0].message_id, sent.message.message_id);
+    assert_eq!(delivered[0].content, report);
+    assert_eq!(delivered[1].message_id, settled.result_message.message_id);
+    let (report_for_model, _) = crate::conversation_trace::project_agent_mailbox_model_envelope(
+        "agent-child",
+        "review",
+        "/root/review",
+        AgentMailboxKind::Message,
+        &delivered[0].content,
+    )
+    .unwrap();
+    let wrapper: serde_json::Value = serde_json::from_str(&report_for_model).unwrap();
+    assert_eq!(wrapper["payload"], report);
+    assert_eq!(wrapper["payloadTruncated"], false);
 }

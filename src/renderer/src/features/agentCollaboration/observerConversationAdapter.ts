@@ -3,6 +3,7 @@ import { parseStorageHumanInteractionResponse } from '@mycopilot/protocol'
 import type { ChatConversation, ChatMessage, ChatMessageUiState } from '../chat/chatTypes'
 import { settleAgentRunToolActivities } from '../agentRun/agentEventReducer'
 import { parsePersistedAgentRunJson } from '../storage/persistedAgentRun'
+import { applyObserverStreamSnapshot } from './observerLiveProjection'
 
 function parseObserverUiState(value: string | null): ChatMessageUiState | undefined {
   if (!value) return undefined
@@ -76,18 +77,21 @@ function mapObserverMessage(message: AgentObserverConversation['messages'][numbe
 export function mapObserverConversationToChat(
   observer: AgentObserverConversation
 ): ChatConversation {
-  return {
-    id: observer.conversationId,
-    projectId: observer.projectId,
-    modelId: observer.modelId,
-    title: observer.title,
-    messages: observer.messages.map(mapObserverMessage),
-    messagesLoaded: true,
-    createdAt: observer.createdAt,
-    updatedAt: observer.updatedAt,
-    pinnedAt: null,
-    archivedAt: null,
-    unreadAt: null,
-    continuationOrigin: null
-  }
+  return applyObserverStreamSnapshot(
+    {
+      id: observer.conversationId,
+      projectId: observer.projectId,
+      modelId: observer.modelId,
+      title: observer.title,
+      messages: observer.messages.map(mapObserverMessage),
+      messagesLoaded: true,
+      createdAt: observer.createdAt,
+      updatedAt: observer.updatedAt,
+      pinnedAt: null,
+      archivedAt: null,
+      unreadAt: null,
+      continuationOrigin: null
+    },
+    observer.liveStream
+  )
 }

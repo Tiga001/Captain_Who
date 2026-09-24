@@ -53,11 +53,11 @@ impl AgentService {
         let waiting_pending_action_storage_id = Arc::new(Mutex::new(None::<String>));
         let emitter_waiting_pending_action_storage_id =
             Arc::clone(&waiting_pending_action_storage_id);
-        let collaboration_stream_cutoffs = Arc::new(Mutex::new(HashMap::<String, u64>::new()));
-        let emitter_collaboration_stream_cutoffs = Arc::clone(&collaboration_stream_cutoffs);
-        let final_response_collaboration_cutoff = Arc::new(Mutex::new(None::<u64>));
-        let emitter_final_response_collaboration_cutoff =
-            Arc::clone(&final_response_collaboration_cutoff);
+        let collaboration_stream_boundaries = Arc::new(Mutex::new(HashMap::<String, u64>::new()));
+        let emitter_collaboration_stream_boundaries = Arc::clone(&collaboration_stream_boundaries);
+        let final_response_collaboration_boundary = Arc::new(Mutex::new(None::<u64>));
+        let emitter_final_response_collaboration_boundary =
+            Arc::clone(&final_response_collaboration_boundary);
         let emitter: AgentEventEmitter = Arc::new(move |event| {
             if let AgentEvent::ApprovalRequired {
                 run_id,
@@ -211,6 +211,7 @@ impl AgentService {
                 let event = emitter_service.project_cumulative_usage_onto_event(event);
                 if let Some(event) = emitter_terminal_event_gate.route(event) {
                     emit_agent_event_notifications(
+                        &emitter_service,
                         &emitter_notifications,
                         emitter_collaboration_identity.as_ref(),
                         &emitter_run_id,
@@ -255,6 +256,7 @@ impl AgentService {
                 }
                 if let Some(event) = emitter_terminal_event_gate.route(event) {
                     emit_agent_event_notifications(
+                        &emitter_service,
                         &emitter_notifications,
                         emitter_collaboration_identity.as_ref(),
                         &emitter_run_id,
@@ -329,6 +331,7 @@ impl AgentService {
                 }
                 if let Some(event) = emitter_terminal_event_gate.route(event) {
                     emit_agent_event_notifications(
+                        &emitter_service,
                         &emitter_notifications,
                         emitter_collaboration_identity.as_ref(),
                         &emitter_run_id,
@@ -354,13 +357,13 @@ impl AgentService {
                                 .ok()
                         })
                         .unwrap_or(0);
-                    emitter_collaboration_stream_cutoffs
+                    emitter_collaboration_stream_boundaries
                         .lock()
                         .unwrap_or_else(|error| error.into_inner())
                         .insert(stream_id.clone(), root_sequence);
                 }
                 AgentEvent::MessageStreamReset { stream_id, .. } => {
-                    emitter_collaboration_stream_cutoffs
+                    emitter_collaboration_stream_boundaries
                         .lock()
                         .unwrap_or_else(|error| error.into_inner())
                         .remove(stream_id);
@@ -370,15 +373,15 @@ impl AgentService {
                     trace_sequence,
                     ..
                 } => {
-                    let cutoff = emitter_collaboration_stream_cutoffs
+                    let boundary = emitter_collaboration_stream_boundaries
                         .lock()
                         .unwrap_or_else(|error| error.into_inner())
                         .remove(stream_id)
                         .unwrap_or(0);
                     if trace_sequence.is_none() {
-                        *emitter_final_response_collaboration_cutoff
+                        *emitter_final_response_collaboration_boundary
                             .lock()
-                            .unwrap_or_else(|error| error.into_inner()) = Some(cutoff);
+                            .unwrap_or_else(|error| error.into_inner()) = Some(boundary);
                     }
                 }
                 _ => {}
@@ -386,6 +389,7 @@ impl AgentService {
             let event = emitter_service.project_cumulative_usage_onto_event(event);
             if let Some(event) = emitter_terminal_event_gate.route(event) {
                 emit_agent_event_notifications(
+                    &emitter_service,
                     &emitter_notifications,
                     emitter_collaboration_identity.as_ref(),
                     &emitter_run_id,
@@ -502,7 +506,10 @@ impl AgentService {
         if let Some(skill_installation) = self.skill_installation.clone() {
             host_services = host_services.with_skill_installation_commit(skill_installation);
         }
-        let skill_workspace = agent_input.context.as_ref().and_then(|context|context.workspace.clone());
+        let skill_workspace = agent_input
+            .context
+            .as_ref()
+            .and_then(|context| context.workspace.clone());
         host_services =
             host_services.with_skill_activation_resolver(model_skill_activation_resolver(
                 self.storage.clone(),
@@ -521,20 +528,23 @@ impl AgentService {
                 Arc::clone(&self.collaboration_dispatcher),
                 notifications.clone(),
             );
-        host_services =
-            match collaboration_harness.attach_to_host_services(host_services, &conversation_id, &run_id) {
-                Ok(services) => services,
-                Err(error) => {
-                    let final_response_collaboration_cutoff = *final_response_collaboration_cutoff
-                        .lock()
-                        .unwrap_or_else(|lock_error| lock_error.into_inner());
-                    return RuntimeTurnSegmentOutcome {
-                        result: Err(error),
-                        terminal_event_gate,
-                        final_response_collaboration_cutoff,
-                    };
-                }
-            };
+        host_services = match collaboration_harness.attach_to_host_services(
+            host_services,
+            &conversation_id,
+            &run_id,
+        ) {
+            Ok(services) => services,
+            Err(error) => {
+                let final_response_collaboration_boundary = *final_response_collaboration_boundary
+                    .lock()
+                    .unwrap_or_else(|lock_error| lock_error.into_inner());
+                return RuntimeTurnSegmentOutcome {
+                    result: Err(error),
+                    terminal_event_gate,
+                    final_response_collaboration_boundary,
+                };
+            }
+        };
         if let Some(resources) = skill_resources {
             host_services = host_services.with_skill_resources(resources);
         }
@@ -591,13 +601,13 @@ impl AgentService {
             }
         };
 
-        let final_response_collaboration_cutoff = *final_response_collaboration_cutoff
+        let final_response_collaboration_boundary = *final_response_collaboration_boundary
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         RuntimeTurnSegmentOutcome {
             result,
             terminal_event_gate,
-            final_response_collaboration_cutoff,
+            final_response_collaboration_boundary,
         }
     }
 }

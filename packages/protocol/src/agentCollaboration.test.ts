@@ -83,6 +83,58 @@ const round5Scenario = JSON.parse(
 }
 
 describe('agent collaboration protocol', () => {
+  it('binds a complete provisional stream and its safe cursor to the exact observer message', () => {
+    const observer = structuredClone(fixture.observer) as {
+      messages: Array<{ messageId: string; role: string; agentRunJson: string | null }>
+      liveStream?: unknown
+    }
+    const assistant = {
+      ...observer.messages[0]!,
+      messageId: 'assistant-live',
+      role: 'assistant',
+      inputOrigin: null
+    }
+    assistant.agentRunJson = JSON.stringify({ runId: 'live-run' })
+    observer.messages.push(assistant)
+    const liveStream = {
+      runId: 'live-run',
+      assistantMessageId: assistant.messageId,
+      cursor: { generation: 'live-generation', sequence: 7 },
+      stream: {
+        streamId: 'stream-1',
+        attempt: 1,
+        content: '完整前缀'.repeat(2_000),
+        traceBoundarySequence: 3,
+        committed: false
+      }
+    }
+    observer.liveStream = liveStream
+    expect(parseAgentObserverConversation(observer)?.liveStream).toEqual(liveStream)
+    for (const sequence of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+      observer.liveStream = { ...liveStream, cursor: { ...liveStream.cursor, sequence } }
+      expect(() => parseAgentObserverConversation(observer)).toThrow()
+      expect(() =>
+        parseAgentObserverEventEnvelope({
+          ...(fixture.observerEvent as Record<string, unknown>),
+          streamCursor: { generation: 'live-generation', sequence }
+        })
+      ).toThrow()
+    }
+    observer.liveStream = { ...liveStream, assistantMessageId: 'foreign-message' }
+    expect(() => parseAgentObserverConversation(observer)).toThrow(/message identity/)
+    observer.liveStream = {
+      ...liveStream,
+      stream: { ...liveStream.stream, traceBoundarySequence: -1 }
+    }
+    expect(() => parseAgentObserverConversation(observer)).toThrow()
+    expect(
+      parseAgentObserverEventEnvelope({
+        ...(fixture.observerEvent as Record<string, unknown>),
+        streamCursor: liveStream.cursor
+      }).streamCursor
+    ).toEqual(liveStream.cursor)
+  })
+
   it('preserves the exact browser Tool call identity for projected risk approvals', () => {
     const callId = `tc1_${'a'.repeat(43)}`
     const actionId = '11111111-1111-4111-8111-111111111111'
@@ -182,7 +234,12 @@ describe('agent collaboration protocol', () => {
       agentId: 'agent-review',
       runId: 'run-review',
       sequence: 15,
-      activity: { semantic: 'completed' }
+      activity: {
+        schemaVersion: 3,
+        semantic: 'completed',
+        parentAgentId: 'agent-root',
+        parentConversationId: 'conversation-root'
+      }
     })
     expect(
       eventPage.events.flatMap((event) =>
@@ -203,13 +260,7 @@ describe('agent collaboration protocol', () => {
     expect(
       eventPage.events.flatMap((event) =>
         event.activity
-          ? [
-              [
-                event.sequence,
-                event.activity.rootAnchorMessageId,
-                event.activity.rootTraceBoundarySequence
-              ]
-            ]
+          ? [[event.sequence, event.activity.anchorMessageId, event.activity.traceBoundarySequence]]
           : []
       )
     ).toEqual([
@@ -217,10 +268,10 @@ describe('agent collaboration protocol', () => {
       [7, 'assistant-conversation-root', 1],
       [9, 'assistant-conversation-root', 1],
       [11, 'assistant-conversation-root', 1],
-      [12, null, null],
-      [13, null, null],
-      [14, null, null],
-      [15, null, null]
+      [12, 'assistant-conversation-root', null],
+      [13, 'assistant-conversation-root', null],
+      [14, 'assistant-conversation-root', null],
+      [15, 'assistant-conversation-root', null]
     ])
     expect(eventPage.events.find((event) => event.sequence === 8)).toMatchObject({
       kind: 'mailbox_enqueued',
@@ -247,6 +298,95 @@ describe('agent collaboration protocol', () => {
       parseCollaborationApprovalDecisionResult(round5Scenario.approvalDecisions.reject)
     ).toMatchObject({ approvalId: 'approval-reject', status: 'rejected' })
   })
+
+  it('accepts parent-local trace, after-message, and empty-conversation placements', () => {
+    const event = parseCollaborationEventEnvelope(fixture.event)
+    const activity = event.activity!
+    for (const placement of [
+      { anchorMessageId: 'assistant-parent', traceBoundarySequence: 4 },
+      { anchorMessageId: 'assistant-parent', traceBoundarySequence: null },
+      { anchorMessageId: null, traceBoundarySequence: null }
+    ]) {
+      expect(
+        parseCollaborationEventEnvelope({
+          ...event,
+          agentId: 'agent-grandchild',
+          conversationId: 'conversation-grandchild',
+          activity: {
+            ...activity,
+            agentId: 'agent-grandchild',
+            parentAgentId: 'agent-child',
+            parentConversationId: 'conversation-child',
+            ...placement
+          }
+        }).activity
+      ).toMatchObject({
+        parentAgentId: 'agent-child',
+        parentConversationId: 'conversation-child',
+        ...placement
+      })
+    }
+  })
+
+  it('routes a child update to its recipient parent rather than its outer event subject', () => {
+    const event = parseCollaborationEventEnvelope(fixture.event)
+    const update = {
+      ...event,
+      kind: 'mailbox_enqueued',
+      agentId: 'agent-child',
+      conversationId: 'conversation-child',
+      activity: {
+        ...event.activity!,
+        semantic: 'updated',
+        agentId: 'agent-grandchild',
+        parentAgentId: 'agent-child',
+        parentConversationId: 'conversation-child'
+      }
+    }
+    expect(parseCollaborationEventEnvelope(update).activity?.parentAgentId).toBe('agent-child')
+    expect(() =>
+      parseCollaborationEventEnvelope({
+        ...update,
+        activity: {
+          ...update.activity,
+          parentAgentId: 'agent-root',
+          parentConversationId: 'conversation-root'
+        }
+      })
+    ).toThrow(/parent identity/)
+  })
+
+  it.each([
+    { schemaVersion: 2 },
+    { parentAgentId: null },
+    { parentAgentId: '' },
+    { parentAgentId: ' agent-root' },
+    { parentConversationId: '' },
+    { parentAgentId: 'agent-child' },
+    { parentConversationId: 'conversation-child' },
+    { parentAgentId: 'agent-other' },
+    { anchorMessageId: null, traceBoundarySequence: 2 },
+    { anchorMessageId: 'assistant-parent', traceBoundarySequence: -1 },
+    { rootAnchorMessageId: 'assistant-root' },
+    { rootTraceBoundarySequence: 1 }
+  ])('rejects malformed or legacy parent activity contracts: %j', (invalidActivity) => {
+    const event = parseCollaborationEventEnvelope(fixture.event)
+    expect(() =>
+      parseCollaborationEventEnvelope({
+        ...event,
+        activity: { ...event.activity!, ...invalidActivity }
+      })
+    ).toThrow()
+  })
+
+  it.each(['parentAgentId', 'parentConversationId', 'anchorMessageId', 'traceBoundarySequence'])(
+    'requires the activity placement field %s',
+    (field) => {
+      const event = structuredClone(fixture.event) as { activity: Record<string, unknown> }
+      delete event.activity[field]
+      expect(() => parseCollaborationEventEnvelope(event)).toThrow(new RegExp(`Missing.*${field}`))
+    }
+  )
 
   it('keeps the Rust/TypeScript method and DTO fixture stable', () => {
     expect(fixture.methods).toEqual([
@@ -750,28 +890,26 @@ describe('agent collaboration protocol', () => {
     const missingBoundary = structuredClone(fixture.event) as {
       activity: Record<string, unknown>
     }
-    delete missingBoundary.activity.rootTraceBoundarySequence
-    expect(() => parseCollaborationEventEnvelope(missingBoundary)).toThrow(
-      /rootTraceBoundarySequence/
-    )
+    delete missingBoundary.activity.traceBoundarySequence
+    expect(() => parseCollaborationEventEnvelope(missingBoundary)).toThrow(/traceBoundarySequence/)
     expect(() =>
       parseCollaborationEventEnvelope({
         ...(fixture.event as object),
         activity: {
           ...(fixture.event as { activity: object }).activity,
-          rootAnchorMessageId: 'assistant-root'
+          anchorMessageId: 'assistant-root'
         }
       })
-    ).toThrow(/placement fields/)
+    ).not.toThrow()
     expect(() =>
       parseCollaborationEventEnvelope({
         ...(fixture.event as object),
         activity: {
           ...(fixture.event as { activity: object }).activity,
-          rootTraceBoundarySequence: 3
+          traceBoundarySequence: 3
         }
       })
-    ).toThrow(/placement fields/)
+    ).toThrow(/trace placement requires an anchor message/)
     expect(() =>
       parseCollaborationEventEnvelope({
         ...(fixture.event as object),

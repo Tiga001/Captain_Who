@@ -575,6 +575,205 @@ fn failed_terminal_settlement_closes_a_durable_open_tool_call_with_paired_contex
     assert_eq!(model_context.len(), 2);
 }
 
+#[test]
+fn precommitted_wait_result_survives_stale_or_conflicting_terminal_snapshots() {
+    for cancelled in [false, true] {
+        for conflicting in [false, true] {
+            let fixture = tempdir().unwrap();
+            let storage =
+                Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+            let conversation_id = "conversation-precommitted-cleanup";
+            let assistant_message_id = "assistant-precommitted-cleanup";
+            let run_id = "run-precommitted-cleanup";
+            storage
+                .save_conversation(ChatConversationRecord {
+                    id: conversation_id.into(),
+                    project_id: None,
+                    model_id: Some("model-1".into()),
+                    title: "Precommitted cleanup".into(),
+                    messages: vec![ChatMessageRecord {
+                        human_interaction_response: None,
+                        id: assistant_message_id.into(),
+                        role: "assistant".into(),
+                        content: String::new(),
+                        created_at: 1,
+                        status: Some("streaming".into()),
+                        attachments: Vec::new(),
+                        folder_references_json: None,
+                        agent_run_json: None,
+                        ui_state_json: None,
+                    }],
+                    created_at: 1,
+                    updated_at: 1,
+                    pinned_at: None,
+                    archived_at: None,
+                    unread_at: None,
+                })
+                .unwrap();
+            let service = AgentService::new_authorized_for_test(Arc::clone(&storage));
+            let call = AgentToolCall {
+                id: "wait-call".into(),
+                tool: "wait_agent".into(),
+                args: json!({"targets": ["research-child"]}),
+                approval_status: AgentApprovalStatus::NotRequired,
+                reason: None,
+            };
+            let open = ConversationTraceSnapshot {
+                items: vec![ConversationTurnTraceItem::ToolCall {
+                    sequence: 0,
+                    call_id: call.id.clone(),
+                    tool: call.tool.clone(),
+                    provenance: AgentToolIdentity::Builtin {
+                        tool_name: call.tool.clone(),
+                    },
+                    operation: call.args.clone(),
+                    approval_status: call.approval_status,
+                    truncated: false,
+                }],
+                model_context_items: vec![ConversationModelContextItem {
+                    images: Vec::new(),
+                    sequence: 0,
+                    ordinal: 0,
+                    role: "assistant".into(),
+                    content: String::new(),
+                    tool_call_id: None,
+                    is_error: false,
+                    tool_calls: vec![AgentContextCheckpointToolCall {
+                        id: call.id.clone(),
+                        name: call.tool.clone(),
+                        args: call.args.clone(),
+                        provider_identity: AgentProviderToolCallIdentity {
+                            provider_tool_index: 0,
+                            provider_call_id: call.id.clone(),
+                            runtime_call_id: call.id.clone(),
+                        },
+                    }],
+                }],
+                next_sequence: 1,
+                truncated: false,
+            };
+            let open_trace =
+                open.in_progress_audit_trace(run_id, conversation_id, assistant_message_id);
+            let result = AgentToolResult {
+                exact_archive_file: None,
+                call_id: call.id.clone(),
+                tool: call.tool.clone(),
+                ok: true,
+                error: None,
+                result: Some(
+                    json!({"targets": [{"taskName": "research-child", "messages": [{
+                        "content": "学科建设与科研实力：完整研究证据与参考资料。".repeat(2_000)
+                    }]}]}),
+                ),
+            };
+            let committed = conversation_trace_snapshot_with_recovered_tool_result(
+                &open_trace,
+                open.model_context_items.clone(),
+                &result,
+            )
+            .unwrap();
+            storage
+                .append_in_progress_conversation_turn_trace_and_apply_guidances(
+                    &committed.in_progress_audit_trace(
+                        run_id,
+                        conversation_id,
+                        assistant_message_id,
+                    ),
+                    &committed.model_context_items,
+                    1,
+                    2,
+                )
+                .unwrap();
+
+            // Before the fix a failed postprocessor could leave either the old open-call cache,
+            // or its synthetic failed result, while the Host had already committed success.
+            let mut unpublished = if conflicting { committed.clone() } else { open };
+            if conflicting {
+                if let ConversationTurnTraceItem::ToolResult {
+                    success,
+                    status,
+                    observation,
+                    error,
+                    ..
+                } = &mut unpublished.items[1]
+                {
+                    *success = false;
+                    *status = ConversationTraceToolResultStatus::Failed;
+                    *observation = json!({"failed": true});
+                    *error = Some("postprocessing failed".into());
+                }
+                unpublished.model_context_items[1].content = "postprocessing failed".into();
+                unpublished.model_context_items[1].is_error = true;
+            }
+            service
+                .trace_snapshots
+                .lock()
+                .unwrap()
+                .insert(run_id.into(), unpublished);
+            if cancelled {
+                let mut output = AgentChatOutput {
+                    content: String::new(),
+                    status: AgentRunStatus::Cancelled,
+                    run_id: run_id.into(),
+                    events: Vec::new(),
+                    tool_definitions: Vec::new(),
+                    todo: None,
+                    usage: None,
+                    finish_reason: None,
+                    proposed_actions: Vec::new(),
+                    conversation_turn_trace: None,
+                };
+                service
+                    .persist_final_assistant_output(
+                        conversation_id,
+                        assistant_message_id,
+                        &mut output,
+                        None,
+                    )
+                    .unwrap();
+            } else {
+                service
+                    .persist_assistant_error(
+                        conversation_id,
+                        assistant_message_id,
+                        "postprocessing failed",
+                        None,
+                        &failed_conversation_trace_without_items(
+                            run_id,
+                            conversation_id,
+                            assistant_message_id,
+                            "postprocessing failed",
+                        ),
+                    )
+                    .unwrap();
+            }
+            let settled = storage
+                .get_conversation_turn_trace(assistant_message_id)
+                .unwrap()
+                .unwrap();
+            let context = storage
+                .get_conversation_model_context_log(assistant_message_id)
+                .unwrap()
+                .unwrap()
+                .items;
+            assert_eq!(
+                settled.items, committed.items,
+                "the successful receipt is immutable"
+            );
+            assert_eq!(context, committed.model_context_items);
+            settled.validate_complete_model_context(&context).unwrap();
+            assert_eq!(
+                settled.terminal_status,
+                if cancelled {
+                    ConversationTurnTraceTerminalStatus::Cancelled
+                } else {
+                    ConversationTurnTraceTerminalStatus::Failed
+                }
+            );
+        }
+    }
+}
+
 #[tokio::test]
 async fn terminal_transaction_retry_reloads_sqlite_and_counts_usage_once() {
     const CONVERSATION_ID: &str = "conversation-terminal-retry";

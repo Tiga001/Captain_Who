@@ -113,8 +113,8 @@ fn project_durable_trace_items(
                 created_at,
                 truncated,
             } => {
-                let (content, content_truncated) = project_user_guidance(content);
-                let item_truncated = *truncated || content_truncated;
+                let content = content.clone();
+                let item_truncated = *truncated;
                 trace_truncated |= item_truncated;
                 ConversationTurnTraceItem::AgentMailboxDelivery {
                     sequence: *sequence,
@@ -426,13 +426,8 @@ fn sanitize_optional_text(value: Option<&str>) -> (Option<String>, bool) {
         .unwrap_or((None, false))
 }
 
-/// Maximum size of the canonical model-visible wrapper for a Host-authenticated collaboration
-/// fact. The durable trace stores the same envelope shape at the smaller history budget while the
-/// Mailbox retains the original payload unchanged.
-pub(crate) const AGENT_MAILBOX_MODEL_ENVELOPE_MAX_BYTES: usize = 32 * 1_024;
-
-/// Produces the canonical model-visible representation used by the live Runtime, durable model
-/// log and checkpoint/resume. The durable trace uses the same encoder with its history budget.
+/// Produces a complete, authenticated collaboration input for model context and durable history.
+/// Request-wide context capacity is enforced by the runtime, never by clipping mailbox text.
 pub(crate) fn project_agent_mailbox_model_envelope(
     sender_agent_id: &str,
     sender_task_name: &str,
@@ -440,25 +435,6 @@ pub(crate) fn project_agent_mailbox_model_envelope(
     kind: crate::AgentMailboxKind,
     payload: &str,
 ) -> Result<(String, bool), String> {
-    project_agent_mailbox_envelope_with_budget(
-        sender_agent_id,
-        sender_task_name,
-        sender_task_path,
-        kind,
-        payload,
-        AGENT_MAILBOX_MODEL_ENVELOPE_MAX_BYTES,
-    )
-}
-
-fn project_agent_mailbox_envelope_with_budget(
-    sender_agent_id: &str,
-    sender_task_name: &str,
-    sender_task_path: &str,
-    kind: crate::AgentMailboxKind,
-    payload: &str,
-    maximum_bytes: usize,
-) -> Result<(String, bool), String> {
-    const SUFFIX: &str = "\n...[agent mailbox payload truncated]";
     // Result is a Host-authored typed fact, not ordinary Agent prose. Verify its owner before
     // projecting only semantic task state; never expose private Run/Wake/Turn identities through
     // the nested JSON payload. Other message kinds retain their exact user/Agent-authored text.
@@ -501,35 +477,7 @@ fn project_agent_mailbox_envelope_with_budget(
         }))
         .map_err(|error| format!("cannot encode Agent collaboration envelope: {error}"))
     };
-    let full = encode(payload, false)?;
-    if full.len() <= maximum_bytes {
-        return Ok((full, false));
-    }
-    let boundaries = std::iter::once(0)
-        .chain(payload.char_indices().map(|(index, _)| index).skip(1))
-        .chain(std::iter::once(payload.len()))
-        .collect::<Vec<_>>();
-    let mut low = 0usize;
-    let mut high = boundaries.len().saturating_sub(1);
-    let mut best = String::new();
-    while low <= high {
-        let middle = low + (high - low) / 2;
-        let boundary = boundaries[middle];
-        let projected = format!("{}{}", &payload[..boundary], SUFFIX);
-        let encoded = encode(&projected, true)?;
-        if encoded.len() <= maximum_bytes {
-            best = encoded;
-            low = middle.saturating_add(1);
-        } else if middle == 0 {
-            break;
-        } else {
-            high = middle.saturating_sub(1);
-        }
-    }
-    if best.is_empty() {
-        return Err("Agent collaboration identity exceeds the model envelope budget".to_string());
-    }
-    Ok((best, true))
+    Ok((encode(payload, false)?, false))
 }
 
 fn sanitize_text(value: &str) -> (String, bool) {

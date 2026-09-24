@@ -12,15 +12,17 @@ function activity(
   sequence: number,
   occurredAt: number,
   semantic: CollaborationTimelineActivity['semantic'] = 'started',
-  rootAnchorMessageId: string | null = null,
-  rootTraceBoundarySequence: number | null = rootAnchorMessageId === null ? null : sequence
+  anchorMessageId: string | null = null,
+  traceBoundarySequence: number | null = anchorMessageId === null ? null : sequence
 ): CollaborationTimelineActivity {
   return {
     activityId,
     agentId,
     occurredAt,
-    rootAnchorMessageId,
-    rootTraceBoundarySequence,
+    parentAgentId: 'root:root-conversation',
+    parentConversationId: 'root-conversation',
+    anchorMessageId,
+    traceBoundarySequence,
     runId: null,
     semantic,
     sequence,
@@ -77,38 +79,76 @@ describe('collaboration Timeline model', () => {
     expect(groups).toHaveLength(2)
   })
 
-  it('projects only paired durable anchors that resolve in the current Conversation', () => {
+  it('does not merge activity belonging to different parent conversations', () => {
+    const groups = groupCollaborationTimelineActivities([
+      activity('root-child', 'agent-a', 1, 1_000),
+      {
+        ...activity('grandchild', 'agent-b', 2, 1_100),
+        parentAgentId: 'agent-a',
+        parentConversationId: 'child-conversation'
+      }
+    ])
+    expect(groups).toHaveLength(2)
+  })
+
+  it('projects direct-child events at committed trace, between-message, and before-first boundaries', () => {
     const messages = [{ id: 'message-1' }, { id: 'message-2' }, { id: 'message-3' }]
     const projection = projectCollaborationTimelineActivities(
       [
-        activity('post-terminal-unanchored', 'agent-a', 1, 99_000, 'started'),
+        activity('before-first', 'agent-a', 1, 99_000, 'started'),
         activity('anchored-middle', 'agent-b', 2, 5_100, 'started', 'message-2', 7),
-        activity('unknown-message-anchor', 'agent-c', 3, 100, 'updated', 'other-root-message', 8),
-        activity('anchored-last', 'agent-d', 4, 9_100, 'completed', 'message-3', 9)
+        activity('unknown-message-anchor', 'agent-c', 3, 100, 'updated', 'other-message', 8),
+        activity('after-middle', 'agent-d', 4, 9_100, 'completed', 'message-2', null),
+        {
+          ...activity('grandchild', 'agent-e', 5, 9_200, 'started', 'message-2', 8),
+          parentAgentId: 'agent-b',
+          parentConversationId: 'child-conversation'
+        }
       ],
-      messages
+      messages,
+      'root-conversation'
     )
 
-    expect(projection.anchoredMessage.get('message-2')?.[0]?.activityId).toBe('anchored-middle')
-    expect(projection.anchoredMessage.get('message-3')?.[0]?.activityId).toBe('anchored-last')
-    expect(projection.anchoredMessage.has('other-root-message')).toBe(false)
+    expect(projection.anchoredMessage.get('message-2')?.map((item) => item.activityId)).toEqual([
+      'anchored-middle'
+    ])
+    expect(projection.anchoredMessage.has('other-message')).toBe(false)
+    expect(projection.beforeMessage.get('message-1')?.[0]?.activityId).toBe('before-first')
+    expect(projection.afterMessage.get('message-2')?.[0]?.activityId).toBe('after-middle')
+    expect(projection.tail).toEqual([])
+  })
+
+  it('keeps the inline snapshot frozen and places later completion before the next turn', () => {
+    const projection = projectCollaborationTimelineActivities(
+      [
+        activity('started-before-terminal', 'agent-a', 1, 8_000, 'started', 'message-1', 2),
+        activity('completed-after-terminal', 'agent-a', 2, 100, 'completed', 'message-1', null)
+      ],
+      [{ id: 'message-1' }, { id: 'next-user-message' }],
+      'root-conversation'
+    )
+
+    expect(projection.anchoredMessage.get('message-1')?.[0]?.activityId).toBe(
+      'started-before-terminal'
+    )
+    expect(projection.afterMessage.get('message-1')?.[0]?.activityId).toBe(
+      'completed-after-terminal'
+    )
     expect(projection.beforeMessage.size).toBe(0)
     expect(projection.tail).toEqual([])
   })
 
-  it('keeps the anchored pre-terminal snapshot frozen when a later durable event is unanchored', () => {
-    const projection = projectCollaborationTimelineActivities(
-      [
-        activity('started-before-terminal', 'agent-a', 1, 8_000, 'started', 'message-1', 2),
-        activity('completed-after-terminal', 'agent-a', 2, 100, 'completed')
-      ],
-      [{ id: 'message-1' }]
+  it('retains empty-conversation events before the first message when messages later arrive', () => {
+    const beforeFirst = activity('before-first', 'agent-a', 1, 99_000)
+    const empty = projectCollaborationTimelineActivities([beforeFirst], [], 'root-conversation')
+    const loaded = projectCollaborationTimelineActivities(
+      [beforeFirst],
+      [{ id: 'first-message' }],
+      'root-conversation'
     )
 
-    expect(
-      projection.anchoredMessage.get('message-1')?.map((candidate) => candidate.activityId)
-    ).toEqual(['started-before-terminal'])
-    expect(projection.beforeMessage.size).toBe(0)
-    expect(projection.tail).toEqual([])
+    expect(empty.tail).toEqual([beforeFirst])
+    expect(loaded.beforeMessage.get('first-message')).toEqual([beforeFirst])
+    expect(loaded.tail).toEqual([])
   })
 })

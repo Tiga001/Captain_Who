@@ -324,6 +324,13 @@ export function AppShell() {
     () => collaborationTree?.agents.filter((agent) => agent.parentAgentId !== null) ?? [],
     [collaborationTree]
   )
+  const collaborationDirectChildAgentIds = useMemo(
+    () =>
+      collaborationChildren
+        .filter((agent) => agent.parentAgentId === collaborationTree?.rootAgentId)
+        .map((agent) => agent.agentId),
+    [collaborationChildren, collaborationTree?.rootAgentId]
+  )
   const collaborationApprovals = useCollaborationApprovals({
     enabled: collaborationChildren.length > 0,
     invalidationSequence: collaborationTree?.lastSequence ?? 0,
@@ -526,11 +533,22 @@ export function AppShell() {
     [activeConversation?.id, openRightSidebar]
   )
   const renderAgentObserver = useCallback(
-    ({ agent, agentLabelsById, invalidationVersion, rootConversationId }) => (
+    ({
+      agent,
+      agentLabelsById,
+      activities,
+      directChildAgentIds,
+      invalidationVersion,
+      onOpenAgent,
+      rootConversationId
+    }) => (
       <AgentObserverConversationSurface
         agent={agent}
         agentLabelsById={agentLabelsById}
+        activities={activities}
+        directChildAgentIds={directChildAgentIds}
         invalidationVersion={invalidationVersion}
+        onOpenAgent={onOpenAgent}
         rootConversationId={rootConversationId}
         showTokenUsageDetails={uiPreferences.showTokenUsageDetails}
       />
@@ -1479,6 +1497,7 @@ export function AppShell() {
                 collaborationApprovals={collaborationApprovals}
                 collaborationAgentLabelsById={collaborationAgentLabelsById}
                 collaborationTimelineActivities={collaborationSnapshot?.activities ?? []}
+                directChildAgentIds={collaborationDirectChildAgentIds}
                 composerDraft={activeDraft}
                 conversation={activeConversation}
                 contextWindowIndicatorEnabled={contextWindowIndicatorEnabled}
@@ -1602,6 +1621,11 @@ export function AppShell() {
           onToggleMaximized={toggleRightSidebarMaximized}
           onBrowserSurfaceReady={browserSurfaceBridge.surfaceReady}
           onOpenAgentTemplates={() => openSettings('agentTemplates')}
+          onOpenProfile={() => openSettings('profile')}
+          onOpenAgentRootConversation={(conversationId) => {
+            if (rightMaximized) toggleRightSidebarMaximized()
+            requestOpenConversationFromScheduled(conversationId)
+          }}
           onOpenBrowserSettings={(destination) =>
             openSettings(
               'browser',

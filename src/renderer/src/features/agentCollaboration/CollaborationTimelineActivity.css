@@ -16,10 +16,10 @@
   padding-inline: 0;
 }
 
-/* The shared message column intentionally has generous turn spacing. Inline semantic activity is
-   part of that turn, so collapse only its two surrounding flex gaps without changing chat rows. */
+/* Gap events follow a complete message, whose action toolbar occupies the space below its body.
+   Preserve that clearance above and compact only the gap before the next message. */
 .chat-conversation-page__messages > .collaboration-timeline {
-  margin-block: -34px;
+  margin-block: 0 -24px;
   position: relative;
   z-index: 2;
 }

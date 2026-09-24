@@ -1,8 +1,8 @@
 use super::common::{
-    conflict, corrupt, immediate, invalid, read_error, stable_fact_id, validate_bounded_text,
-    validate_id, validate_request_id, validate_time, validate_trimmed, write_error,
-    MAX_MESSAGE_BYTES, MAX_PROJECT_BATCH, MAX_UNBOUND_MAILBOX_BYTES_PER_RECIPIENT,
-    MAX_UNBOUND_MAILBOX_MESSAGES_PER_RECIPIENT, MAX_UNBOUND_ORDINARY_MAILBOX_BYTES_PER_RECIPIENT,
+    conflict, corrupt, immediate, invalid, read_error, stable_fact_id, validate_id,
+    validate_message_content, validate_request_id, validate_time, write_error, MAX_PROJECT_BATCH,
+    MAX_UNBOUND_MAILBOX_BYTES_PER_RECIPIENT, MAX_UNBOUND_MAILBOX_MESSAGES_PER_RECIPIENT,
+    MAX_UNBOUND_ORDINARY_MAILBOX_BYTES_PER_RECIPIENT,
     MAX_UNBOUND_ORDINARY_MAILBOX_MESSAGES_PER_RECIPIENT, WAKE_LEASE_DURATION_MS,
 };
 use super::message_records::{
@@ -189,7 +189,13 @@ pub(super) fn enqueue_application_message_in_transaction(
     validate_id("sender_agent_id", &input.sender_agent_id)?;
     validate_id("recipient_agent_id", &input.recipient_agent_id)?;
     validate_request_id(&input.request_id)?;
-    validate_trimmed("content", &input.content, MAX_MESSAGE_BYTES)?;
+    validate_message_content("content", &input.content)?;
+    if input.content.trim() != input.content {
+        return Err(invalid(
+            "content",
+            "must not contain leading or trailing whitespace",
+        ));
+    }
     let sender = ensure_active_agent(connection, &input.sender_agent_id)?;
     ensure_active_pair(
         connection,
@@ -1087,7 +1093,7 @@ pub(super) fn validate_message_input(
             "must differ from sender Agent",
         ));
     }
-    validate_bounded_text("content", &input.content, 1, MAX_MESSAGE_BYTES)?;
+    validate_message_content("content", &input.content)?;
     validate_time(created_at)
 }
 

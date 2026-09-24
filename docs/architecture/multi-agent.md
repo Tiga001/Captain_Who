@@ -102,6 +102,7 @@ Wake 表示“需要一次执行机会”，不是线程或可无条件重试的
 - Wake 依 FIFO sequence 领取，持久 claim lease 为 60 秒，半开区间为 `[claimed_at, lease_expires_at)`。
 - `status_revision` 只在语义状态变化时增加；单纯 owner/lease 续期不增加。
 - result outbox、Wake 终态及必要的父 Agent deferred Wake 在一个事务内提交，随后才通知。
+- 自动 Result 是 Host 生成的结束通知：只含任务身份、终态、必要错误和产物引用，不复制子 Agent 的最终回复正文。每一层均只投递给直接父级；非根父级的后续执行机会、根父级不自动启动新轮及停止后的唤醒抑制规则保持一致。详细成果通过先前的 `send_message` 按 FIFO 交付，结束通知不替代主动汇报。
 
 ### Receipt 与事件
 
@@ -113,14 +114,14 @@ Wake 表示“需要一次执行机会”，不是线程或可无条件重试的
 
 工具集合必须精确为六个：
 
-| Tool              | 当前语义                        | 关键约束                                                                    |
-| ----------------- | ------------------------------- | --------------------------------------------------------------------------- |
-| `spawn_agent`     | 创建直接子 Agent 并排队初始任务 | selector 精确匹配；`task_name` 256 bytes；message 64 KiB；`fork_turns` 明确 |
-| `send_message`    | mailbox-only 消息               | 不创建 Wake，不保证目标执行；Tool 描述用于子 Agent 向父 Agent 汇报/求助     |
-| `followup_task`   | 向严格后代分配、继续或返工      | 创建可靠执行机会，但不与目标现有 Turn 并发                                  |
-| `wait_agent`      | first-ready 等待消息/结果/状态  | 1–32 个精确任务名称；默认 30 秒；0 为立即检查 ready 条件；最长 300 秒       |
-| `list_agents`     | 返回授权范围内简洁树投影        | 只读，不泄漏内部 lease/checkpoint                                           |
-| `interrupt_agent` | 中断严格后代当前任务            | 不删除节点、Conversation 或历史；回执与实际终态分离且可幂等恢复             |
+| Tool              | 当前语义                        | 关键约束                                                                          |
+| ----------------- | ------------------------------- | --------------------------------------------------------------------------------- |
+| `spawn_agent`     | 创建直接子 Agent 并排队初始任务 | selector 精确匹配；`task_name` 256 bytes；正文不设独立长度上限；`fork_turns` 明确 |
+| `send_message`    | mailbox-only 消息               | 不创建 Wake，不保证目标执行；Tool 描述用于子 Agent 向父 Agent 汇报/求助           |
+| `followup_task`   | 向严格后代分配、继续或返工      | 创建可靠执行机会，但不与目标现有 Turn 并发                                        |
+| `wait_agent`      | first-ready 等待消息/结果/状态  | 1–32 个精确任务名称；默认 30 秒；0 为立即检查 ready 条件；最长 300 秒             |
+| `list_agents`     | 返回授权范围内简洁树投影        | 只读，不泄漏内部 lease/checkpoint                                                 |
+| `interrupt_agent` | 中断严格后代当前任务            | 不删除节点、Conversation 或历史；回执与实际终态分离且可幂等恢复                   |
 
 不存在 `wait_any` 或第七个协作工具。六个实现由 Runtime extension 注册，以 `agent.collaboration` 动态 capability 整组暴露；它们不属于配置稳定的 Tool 前缀。
 
@@ -140,15 +141,17 @@ Host 服务装配也遵守本轮冻结策略：关闭时不创建协作执行服
 
 主、子 Agent 共用状态汇报规则：向用户或父 Agent 说明子 Agent 的当前状态前，先成功调用一次 `list_agents`，紧接着的汇报以该次快照为准。创建/跟进的入队回执和旧消息不代表当前运行状态；查询失败只能说明尚未确认并标注最后已知情况。等待推进使用 `wait_agent`，不反复 list 轮询。`latest_completed` 表示最近一次运行已结束，任务是否成功还须核对结果与产物。这是模型行为契约，不是阻止 final 的调度门禁。
 
+所有非根 Agent 的交付契约在 full/minimal 提示词与协作工具说明中保持一致：按直接父任务要求，通过 `send_message` 交付结论、证据、产物/文件、验证情况、限制和需父级处理的问题；即使当前指派来自祖先，默认汇报对象仍是直接父级。成功回执仅确认入队，收到后即可结束，不等待已读；已成功发送完整成果且无新增时不重复发送。发送失败或工具不可用时不得声称已汇报。最终回复留在子 Agent 自己的 Conversation，尽量用 1–3 句总结完成、汇报及遗留阻塞，不重复成果全文，也不通过字符截断强制简短。父级只有结束通知但缺少必要成果时，可用 `followup_task` 请求补报；不得因此重启用户已要求停止的任务。
+
 ### Selector 目录
 
 Host 给每个 Turn 冻结当前项目已关联的脱敏模板/模型目录：每类最多 32 项，总编码后 JSON 最多 16 KiB，并包含后端权威 `imageInput` 能力。模板 selector 的 Host 授权还冻结精确 template ID/revision；模型仍只提交 `agent_type`。目录只是精确 allowlist；过期、被禁用、被解绑、被修改或截断的 selector 必须 fail closed，不按名称猜测。Approval continuation 使用原 checkpoint 的目录，不在恢复时扩大权限。
 
 ## 5. 授权与配额
 
-- 默认树深度 8、每树 64 节点、Harness message 64 KiB、全局 Turn 并发 50。
+- 默认树深度 8、每树 64 节点、全局 Turn 并发 50。
 - spawn 配额在同一 `BEGIN IMMEDIATE` 内核验；幂等 request 先返回原事实，不重复占配额。
-- `send_message` 的后端授权当前只校验消息大小、调用者 active、目标存在且同树；Tool 描述约定用于子 Agent → 父 Agent 报告，但 Authorizer 尚未强制方向，甚至同树其他目标也可通过。它不是方向性授权边界；工作指派必须使用 `followup_task`。
+- `send_message` 的后端授权当前只校验消息内容合法性、调用者 active、目标存在且同树；Tool 描述约定用于子 Agent → 父 Agent 报告，但 Authorizer 尚未强制方向，甚至同树其他目标也可通过。它不是方向性授权边界；工作指派必须使用 `followup_task`。
 - follow-up、wait、interrupt 只允许 caller 的严格后代。名称只在 caller 当前树内解析；其他树中的同名节点不参与查找。解析后继续按内部身份校验 active、同树和后代边界，拒绝越权目标。
 - 子 Agent 新 Turn 的权限以直接父 Agent 的最新持久 effective snapshot 为基线，再与完整祖先链取交集；任一 snapshot 缺失或损坏即 fail closed。
 - 已开始 Run 冻结权限；Approval continuation 使用 checkpoint 原权限。下一次 Wake 才读取新的收紧策略。
@@ -222,7 +225,7 @@ caller 的 exact run identity 查询 fence 并 fail closed，避免停止与新�
 - steer 优先终止当前 wait，结果保持 pending。
 - timeout/cancel/shutdown 只结束本次等待，不取消 target 或删除结果。
 - Agent wait 与 Command Session wait 是两个独立等待域，不能互相唤醒或消费。
-- 多 target 按全局 Mailbox sequence 取 first-ready；单批最多 64 条并受有界投影预算约束，超预算内容留待后续 wait。
+- 多 target 按全局 Mailbox sequence 取 first-ready；单批最多 64 条；wait 的 96 KiB 与自动投递的 128 KiB 是批量软目标，首条超出目标时仍完整投递，其余消息留待后续批次。主动通信正文保留完整；自动 Result 只含系统结束通知，子 Agent 的本页最终回复不进入父级邮箱。模型整轮上下文预算与压缩负责容量检查，仍超容量时明确报错并保留原文。
 
 ## 7. Approval 与 Renderer 事件
 
@@ -240,21 +243,25 @@ Renderer 在根对话输入框位置聚合主、子 Agent 待审批，每次展�
 
 notification 只是失效信号。Renderer 通过 tree snapshot 与 `agent.collaboration.listEvents` 验证根 Agent 本地连续 sequence；重复、乱序、缺口、Core Server 重启或窗口 reload 都从数据库 rehydrate/replay。
 
-根聊天的 semantic activity 只来自后端持久 mutation：started、updated、waiting_approval、completed、failed、interrupted。Tool 名、模型文案、时间戳或 Mailbox JSON 不得被 UI 用来反推状态。observer live event 是低延迟 overlay，durable Conversation 与 event log 才是恢复真相。
+各层聊天的 semantic activity 只来自后端持久 mutation：started、updated、waiting_approval、completed、failed、interrupted。每条活动只属于其主体 Agent 的直属父会话；Mailbox 的活动主体为 sender，不能误用外层失效通知的 recipient 身份推导父级。Tool 名、模型文案、时间戳或 Mailbox JSON 不得被 UI 用来反推状态。observer live event 是低延迟 overlay，durable Conversation 与 event log 才是恢复真相。
 
-父 Agent 开始 final-response stream 时，Core Server 记录该 root 的 collaboration event sequence cut；只有不晚于 cut、且带 exact parent assistant message/Trace anchor 的活动会写入终态 message 的 `collaborationTimelineActivities`（内部最多 2,048 条）。stream reset 会丢弃旧 cut；非 final stream 或中断结算不伪造 cut。之后发生的 child activity 仍持久化并出现在 Agent Center/event replay，但不能回填已经提交的父回复，避免终态 Timeline 随后台事件变化。
+`send_message` 在发送方自己的工具时间线使用纸飞机图标与现有工具字号、颜色。单条显示目标与发送状态；相邻多条默认折叠为工具组，箭头展开后逐条显示。分组不跨可见正文、其他工具或独立子 Agent 状态行，不展开原始参数或消息正文。发送中、已发送、失败、取消来自该工具的 call/result 状态；缺少成功回执时不凭整轮完成推断已发送。组内失败或取消不能计作成功。成功只代表已进入目标 Mailbox，不代表目标已读或处理。主聊天与子 Agent observer 共用此展示，按工具真实位置排序；它与父会话中的直属子 Agent 生命周期圆角状态栏分别呈现。系统结束通知不伪造 `send_message` 调用。
+
+Observer 快照在同一临界区读取持久会话和当前流式正文，附带进程内 generation/sequence 游标。刷新时先恢复完整前缀，再重放游标之后的文本；加载期间连续文本片段保留各自游标，避免重复或因片段数量过多丢失正文。该游标仅用于文本事件，不能抑制工具事件。重试重置清除对应正文，已落库旁白和终态回复释放缓存，删除会话、项目或对应消息也同步清理。
+
+Activity schema v3 在事件事务中记录 `parentAgentId`、`parentConversationId`、`anchorMessageId` 和 `traceBoundarySequence`。父会话有运行中的回复时，后两项是该回复与下一条 Trace sequence；父会话空闲时，只记录最后一条消息，表示在该消息之后；没有消息时两项为空，表示在首条消息之前。根会话与 observer 按同一规则显示直属子 Agent 状态，不展示隔代活动，也不使用通知到达时间补位置。Run 结算时将回复内活动写入终态 message 的 `collaborationTimelineActivities`（内部最多 2,048 条）。可选的 `collaborationFinalResponseBoundary` 记录最终回复流开始时的持久事件边界，使其前后活动在实时显示和重载时都处于最终正文的同一侧；该边界只用于定位，不删除后续活动。stream reset 丢弃对应尝试的边界。结算后的新活动显示在消息之间，不回写已冻结回复；消息间活动不受 live 回复内 2,048 条窗口淘汰，通过完整事件重放恢复。旧 Activity schema 不做转换或时序回填。
 
 ## 8. Schema
 
-当前 canonical storage 是 **v49**。唯一真源：
+当前 canonical storage 是 **v52**。唯一真源：
 
 ```rust
-pub const STORAGE_SCHEMA_VERSION: i32 = 49;
+pub const STORAGE_SCHEMA_VERSION: i32 = 52;
 ```
 
 当前 Runtime checkpoint 为 **v19**，拒绝旧版本 checkpoint；v19 使用源文件夹的 World State 模型 patch 投影，旧检查点中的整体替换文本不做兼容转换。此前模型协作身份变更也不转换含旧 Agent ID 的聊天、上下文或 checkpoint。
 
-v49 允许纯附件引导；v48 新增历史搜索身份索引；空库原子创建 v49，exact v47 依次升级到 v48、v49 且保留全部历史，失败完整回滚；当前 v49 仍要求 exact catalog fingerprint 和外键校验。v47 新增本机 Token 统计。v46 为 Run/Wake 持久化冻结工作区并集，v45 已引入多文件夹项目（`project_folders`）。v46 及更早版本、catalog fingerprint 不匹配、非空未版本化库或外键违规均返回 `development_storage_schema_reset_required`，不修改源库，再由显式 `storage:reset-dev` 保留配置后重建。历史文档中的 v7/v8/v10/v11/v17/v19/v20/v22/v23/v24/v25/v26 只是 rollout 阶段标签，不是当前兼容声明；release runner 的 storage step 标为 canonical v49。
+v51 将协作活动改为直属父会话定位，Activity DTO 使用独立 schema v3，外层 event envelope 仍为 v2。v52 移除 Mailbox 正文的固定字节上限。空库原子创建 v52；exact v51 原样保留协作记录、回执和序号后升级。exact v50 须协作事件日志为空，先升级父会话活动定位至 v51，再升级 v52。不转换、补写或删除旧协作活动；旧日志仍存在时返回 `development_storage_schema_reset_required`，用户须先清理旧聊天或显式运行开发 reset。v49 及更早版本、未知 schema、fingerprint 不匹配和外键违规同样拒绝升级；release runner 的 storage step 标为 canonical v52。
 
 ## 9. 代码真源
 
@@ -267,7 +274,7 @@ v49 允许纯附件引导；v48 新增历史搜索身份索引；空库原子创
 - RPC/DTO：`crates/protocol-rs/src/agent_collaboration.rs`、`packages/protocol/src/agentCollaboration.ts`
 - Renderer：`src/renderer/src/features/agentCollaboration` 与 `ConversationSurface`
 - Tree resource scope：`crates/core/src/storage/agent_tree_resource_scope.rs`、`attachment_repository.rs`、`managed_artifact_repository.rs`、`storage/service/browser_downloads.rs`
-- Terminal Timeline cut：`crates/core-server/src/application/agent/turn_executor.rs`、`crates/core/src/storage/agent_collaboration_event_repository.rs`、`chat_repository.rs`
+- Terminal Timeline 冻结与 final-response 定位：`crates/core-server/src/application/agent/turn_executor.rs`、`crates/core/src/storage/agent_collaboration_event_repository.rs`、`chat_repository.rs`
 
 ## 10. 测试
 
@@ -295,7 +302,7 @@ pnpm exec vitest run --project browser src/renderer/src/features/agentCollaborat
 - `outcome_unknown` 需要用户或维护者理解外部系统状态，当前没有通用自动补偿引擎。
 - `send_message` 的子 Agent → 父 Agent 方向目前只写在 Tool 描述中，后端 Authorizer 仅强制同树；需要把方向作为安全不变量时必须先补实现与负向测试。
 - 树内资源共享当前按整棵不可变 root identity 授权，没有成员级 grant、跨树转授权或对单个已发布 Artifact 的即时树内撤销。
-- 已冻结 parent Timeline 不追踪 final-response stream 开始后的 child activity；用户需在 Agent Center 查看后续真实状态。
+- 已结算 parent 回复内 Timeline 保持冻结；后续直属 child activity 以独立状态行出现在父会话的持久消息边界。
 - Main 的 6 秒 shutdown watchdog 短于 Dispatcher 两阶段理论上限；超时退出依赖 SQLite 恢复，尚未形成完全对齐的优雅关停预算。
 
 ## 12. 变更检查表
@@ -309,6 +316,6 @@ pnpm exec vitest run --project browser src/renderer/src/features/agentCollaborat
 - [ ] wait 是否保持 SQLite 权威、first-ready、独立停止域和 precommitted ToolResult？
 - [ ] 新 UI 状态是否来自持久 semantic event，而不是模型文本或时间戳？
 - [ ] 新 tree-shared 资源是否只从 Host-resolved root identity 授权，并覆盖 root/child/sibling 与跨树/普通 Conversation 负向测试？
-- [ ] terminal parent Timeline 是否在 final stream 开始处冻结，且后续事件只留在 event log/Agent Center？
-- [ ] 是否更新 schema v49 后继版本、fingerprint、迁移/reset、双语言 fixture 和 release gate？
+- [ ] 各层 parent Timeline 是否仅展示直属子节点，结算时冻结回复内活动，并按持久消息边界展示后续事件？
+- [ ] 是否更新 schema v52 后继版本、fingerprint、迁移/reset、双语言 fixture 和 release gate？
 - [ ] 是否同步更新当前文档；历史轮次只在 archive 中追加注释？

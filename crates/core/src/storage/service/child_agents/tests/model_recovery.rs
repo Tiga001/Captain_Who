@@ -229,7 +229,6 @@ fn assert_parent_result_wake_context_profile(admitted: bool) {
                 terminal_status,
                 run_id,
                 assistant_message_id,
-                summary: "Worker settlement evidence.".to_string(),
                 terminal_error,
             },
             claimed_at + 2,
@@ -1212,12 +1211,11 @@ fn incomplete_parent_model_context_rejects_spawn_and_rolls_back_every_child_fact
 }
 
 #[test]
-fn atomic_tree_limits_preserve_idempotent_retry_and_reject_depth_nodes_and_task_bytes() {
+fn atomic_tree_limits_preserve_idempotent_retry_and_reject_depth_and_nodes() {
     let fixture = Fixture::new(Some("model-a"));
     let limits = AgentTreeResourceLimits {
         max_depth: 2,
         max_nodes: 2,
-        max_task_bytes: 64,
     };
     let first_input = spawn_input("spawn-limited-first", "first");
     let first = fixture
@@ -1231,7 +1229,6 @@ fn atomic_tree_limits_preserve_idempotent_retry_and_reject_depth_nodes_and_task_
             AgentTreeResourceLimits {
                 max_depth: 1,
                 max_nodes: 2,
-                max_task_bytes: 1,
             },
         )
         .unwrap();
@@ -1257,7 +1254,6 @@ fn atomic_tree_limits_preserve_idempotent_retry_and_reject_depth_nodes_and_task_
             AgentTreeResourceLimits {
                 max_depth: 1,
                 max_nodes: 8,
-                max_task_bytes: 64,
             },
         )
         .unwrap();
@@ -1270,7 +1266,6 @@ fn atomic_tree_limits_preserve_idempotent_retry_and_reject_depth_nodes_and_task_
             AgentTreeResourceLimits {
                 max_depth: 1,
                 max_nodes: 8,
-                max_task_bytes: 64,
             },
         )
         .unwrap_err();
@@ -1283,21 +1278,20 @@ fn atomic_tree_limits_preserve_idempotent_retry_and_reject_depth_nodes_and_task_
     );
 
     let mut oversized = spawn_input("spawn-oversized-task", "oversized");
-    oversized.task = "x".repeat(65);
-    assert!(matches!(
-        depth_fixture.service.create_child_agent_with_limits(
-            &oversized,
-            AgentTreeResourceLimits {
-                max_depth: 2,
-                max_nodes: 8,
-                max_task_bytes: 64,
-            },
-        ),
-        Err(ChildAgentSpawnError::ResourceLimit {
-            resource: "task_bytes",
-            limit: 64,
-        })
-    ));
+    oversized.task = "协作🙂".repeat(160_000);
+    let spawned = depth_fixture
+        .service
+        .create_child_agent(&oversized)
+        .unwrap();
+    let conversation = depth_fixture
+        .service
+        .load_conversation(&spawned.agent.conversation_id)
+        .unwrap()
+        .unwrap();
+    assert!(conversation
+        .messages
+        .iter()
+        .any(|message| message.content == oversized.task));
 }
 
 /// Deterministic release profile for the collaboration persistence boundary.

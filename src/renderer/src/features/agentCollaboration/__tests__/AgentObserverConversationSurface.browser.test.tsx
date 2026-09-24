@@ -4,6 +4,7 @@ import { render } from 'vitest-browser-react'
 
 const mocks = vi.hoisted(() => ({
   reload: vi.fn(),
+  renderConversationSurface: vi.fn(),
   useObserverConversation: vi.fn()
 }))
 
@@ -16,7 +17,10 @@ vi.mock('../useObserverConversation', () => ({
 }))
 
 vi.mock('../../chat/ConversationSurface', () => ({
-  ConversationSurface: () => <div data-testid="observer-surface" />
+  ConversationSurface: (props: unknown) => {
+    mocks.renderConversationSurface(props)
+    return <div data-testid="observer-surface" />
+  }
 }))
 
 const { AgentObserverConversationSurface } = await import('../AgentObserverConversationSurface')
@@ -32,6 +36,7 @@ it('exposes the production retry action when initial observer hydration cannot s
   const screen = await render(
     <AgentObserverConversationSurface
       agent={agent()}
+      directChildAgentIds={['grandchild']}
       agentLabelsById={{}}
       invalidationVersion="1:1"
       rootConversationId="root-conversation"
@@ -63,6 +68,7 @@ it('keeps a previously authorized observer surface visible with a refresh recove
   const screen = await render(
     <AgentObserverConversationSurface
       agent={agent()}
+      directChildAgentIds={['grandchild']}
       agentLabelsById={{}}
       invalidationVersion="1:2"
       rootConversationId="root-conversation"
@@ -74,6 +80,63 @@ it('keeps a previously authorized observer surface visible with a refresh recove
   await expect.element(screen.getByRole('alert')).toBeVisible()
   await screen.getByRole('button', { name: 'agentCenter.retry' }).click()
   expect(mocks.reload).toHaveBeenCalledOnce()
+})
+
+it('passes scoped child status activity and navigation to the shared observer conversation', async () => {
+  mocks.renderConversationSurface.mockClear()
+  mocks.useObserverConversation.mockReturnValue({
+    conversation: {
+      id: 'child-conversation',
+      projectId: 'project',
+      modelId: null,
+      title: 'Child',
+      messages: [],
+      createdAt: 1,
+      updatedAt: 1
+    },
+    error: null,
+    loading: false,
+    reload: mocks.reload
+  })
+  const activities = [
+    {
+      activityId: 'child-started',
+      agentId: 'grandchild',
+      occurredAt: 2,
+      parentAgentId: 'child',
+      parentConversationId: 'child-conversation',
+      anchorMessageId: null,
+      traceBoundarySequence: null,
+      runId: null,
+      semantic: 'started' as const,
+      sequence: 1,
+      taskNameSnapshot: 'grandchild',
+      turnId: null
+    }
+  ]
+  const onOpenAgent = vi.fn()
+  await render(
+    <AgentObserverConversationSurface
+      agent={agent()}
+      directChildAgentIds={['grandchild']}
+      agentLabelsById={{ grandchild: 'grandchild' }}
+      activities={activities}
+      invalidationVersion="1:1"
+      onOpenAgent={onOpenAgent}
+      rootConversationId="root-conversation"
+      showTokenUsageDetails={false}
+    />
+  )
+
+  expect(mocks.renderConversationSurface).toHaveBeenCalledWith(
+    expect.objectContaining({
+      collaborationTimelineActivities: activities,
+      directChildAgentIds: ['grandchild'],
+      mode: 'observer',
+      onOpenCollaborationAgent: onOpenAgent,
+      rootConversationId: 'root-conversation'
+    })
+  )
 })
 
 function agent(): AgentSummary {

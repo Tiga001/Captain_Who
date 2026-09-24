@@ -3108,7 +3108,13 @@ impl AgentRuntime {
                                         call: Some(call.clone()),
                                         announced: true,
                                         dispatch_started: true,
-                                        outcome: TerminalToolCallOutcome::Synthetic,
+                                        // The tool already returned its authoritative result;
+                                        // wait_agent may even have committed it atomically with
+                                        // its delivery receipt. Projection failure must not
+                                        // turn that success into a synthetic tool failure.
+                                        outcome: TerminalToolCallOutcome::Authoritative(
+                                            result.clone(),
+                                        ),
                                     },
                                     settles_entire_provider_tool_batch_on_terminal,
                                     &mut tool_batch,
@@ -3163,7 +3169,7 @@ impl AgentRuntime {
                                     call: Some(call.clone()),
                                     announced: true,
                                     dispatch_started: true,
-                                    outcome: TerminalToolCallOutcome::Synthetic,
+                                    outcome: TerminalToolCallOutcome::Authoritative(result.clone()),
                                 },
                                 settles_entire_provider_tool_batch_on_terminal,
                                 &mut tool_batch,

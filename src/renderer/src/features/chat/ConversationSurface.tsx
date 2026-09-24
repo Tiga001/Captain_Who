@@ -76,6 +76,8 @@ import {
 import './ChatConversationPage.css'
 
 interface ConversationSurfaceCommonProps {
+  /** Authoritative direct children; an empty list hides stale or inherited collaboration rows. */
+  directChildAgentIds?: readonly string[]
   conversation: ChatConversation
   initialScrollTop?: number | null
   onScrollPositionChange?: (conversationId: string, scrollTop: number) => void
@@ -145,6 +147,9 @@ export interface InteractiveConversationSurfaceProps extends ConversationSurface
 
 export interface ObserverConversationSurfaceProps extends ConversationSurfaceCommonProps {
   mode: 'observer'
+  /** Direct descendants' durable semantic events, scoped by the Agent Center tree. */
+  collaborationTimelineActivities?: readonly CollaborationTimelineActivity[]
+  onOpenCollaborationAgent?: (agentId: string) => void
   /** Root authority paired with the exact child conversation for read-only Artifact access. */
   rootConversationId: string
   /** Direct parent identity makes the transport-origin badge precise without changing chat role. */
@@ -226,6 +231,7 @@ function getEditableLastUserMessageId(conversation: ChatConversation) {
 }
 
 interface ChatMessageListProps {
+  directChildAgentIds?: readonly string[]
   humanInteraction?: HumanInteractionControllerView
   forkDisabledReason?: string
   agentLabelsById?: Readonly<Record<string, string>>
@@ -269,6 +275,7 @@ export const ChatMessageList = memo(function ChatMessageList({
   agentLabelsById,
   collaborationTimelineActivities = EMPTY_COLLABORATION_TIMELINE_ACTIVITIES,
   conversation,
+  directChildAgentIds,
   editSelectedModelAvailable,
   editSelectedModelSupportsImage,
   editableLastUserMessageId,
@@ -297,7 +304,7 @@ export const ChatMessageList = memo(function ChatMessageList({
     [conversation, humanInteraction?.requests]
   )
   const continuationOrigin = conversation.continuationOrigin
-  const collaborationAgentNavigation = mode === 'interactive' ? onOpenCollaborationAgent : undefined
+  const collaborationAgentNavigation = onOpenCollaborationAgent
   const messageIdentities = useStableMessageIdentities(conversation.messages)
   const messageIds = useMemo(
     () => new Set(messageIdentities.map((message) => message.id)),
@@ -305,8 +312,13 @@ export const ChatMessageList = memo(function ChatMessageList({
   )
   const collaborationTimeline = useMemo(
     () =>
-      projectCollaborationTimelineActivities(collaborationTimelineActivities, messageIdentities),
-    [collaborationTimelineActivities, messageIdentities]
+      projectCollaborationTimelineActivities(
+        collaborationTimelineActivities,
+        messageIdentities,
+        conversation.id,
+        directChildAgentIds
+      ),
+    [collaborationTimelineActivities, conversation.id, directChildAgentIds, messageIdentities]
   )
   const modelTransitions = useMemo(() => {
     const completedByMessageId = new Map<string, AgentProviderTransitionOperation[]>()
@@ -385,6 +397,7 @@ export const ChatMessageList = memo(function ChatMessageList({
                 : EMPTY_COLLABORATION_TIMELINE_ACTIVITIES
             }
             conversationId={conversation.id}
+            directChildAgentIds={directChildAgentIds}
             isLastAssistantMessage={message.id === lastAssistantMessageId}
             message={message}
             mode={mode}
@@ -432,6 +445,15 @@ export const ChatMessageList = memo(function ChatMessageList({
             }
             turnDiffSummary={turnDiffSummariesByMessageId?.get(message.id)}
           />
+          {collaborationAgentNavigation && (
+            <CollaborationTimelineActivityList
+              activities={
+                collaborationTimeline.afterMessage.get(message.id) ??
+                EMPTY_COLLABORATION_TIMELINE_ACTIVITIES
+              }
+              onOpenAgent={openCollaborationAgent}
+            />
+          )}
           {continuationOrigin?.boundaryMessageId === message.id && (
             <ConversationContinuationDivider
               onOpen={
@@ -808,8 +830,12 @@ export function ConversationSurface(props: ConversationSurfaceProps) {
         >
           <ChatMessageList
             humanInteraction={interactive ? humanInteraction : undefined}
+            directChildAgentIds={props.directChildAgentIds}
             agentLabelsById={props.mode === 'observer' ? props.agentLabelsById : undefined}
-            collaborationTimelineActivities={interactive?.collaborationTimelineActivities}
+            collaborationTimelineActivities={
+              interactive?.collaborationTimelineActivities ??
+              (props.mode === 'observer' ? props.collaborationTimelineActivities : undefined)
+            }
             conversation={conversation}
             editSelectedModelAvailable={interactive?.editSelectedModelAvailable ?? false}
             editSelectedModelSupportsImage={interactive?.editSelectedModelSupportsImage ?? false}
@@ -842,7 +868,10 @@ export function ConversationSurface(props: ConversationSurfaceProps) {
             onOpenContinuationOrigin={interactive?.onOpenContinuationOrigin}
             onMessageUiStateChange={interactive?.onMessageUiStateChange}
             onModelTransitionRetry={interactive?.onModelTransitionRetry}
-            onOpenCollaborationAgent={interactive?.onOpenCollaborationAgent}
+            onOpenCollaborationAgent={
+              interactive?.onOpenCollaborationAgent ??
+              (props.mode === 'observer' ? props.onOpenCollaborationAgent : undefined)
+            }
             onOpenWorkspaceReference={interactive?.onOpenWorkspaceReference}
             onRejectAgentAction={interactive?.onRejectAgentAction}
             onReviewLastTurn={interactive?.onReviewLastTurn}

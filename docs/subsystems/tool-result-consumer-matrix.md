@@ -37,7 +37,7 @@ Raw Tool/Core Server/Main result
       +-> Event projection   -> Renderer
       +-> Checkpoint projection -> durable resume/model context
       +-> Runtime extension projection
-      `-> Model projection -> shared 10K gate
+      `-> Model projection -> shared gate (10K ordinary tools / full collaboration messages)
 ```
 
 调用参数也有 `model_call`、`trace_call`、`event_call` 和 `checkpoint_call` 投影。模型在当前 Run 可看到自己生成的可修正参数；持久化和 UI 版本必须单独去除秘密、私有内容或不能安全恢复的参数。
@@ -72,10 +72,16 @@ Raw Tool/Core Server/Main result
 | `activate_capability`                                            | capability/status/恢复建议                                          | E/R 展示批准并触发 toolset change                                | T/C 绑定 activation/manifest/policy                                     | 激活本身不授予未列出的工具                                              |
 | Managed Playwright/Capability Tool                               | 安全操作结果、截图 readPath、Browser Artifact refs、分类错误        | E 展示 Main/Core Server-owned 活动                               | T/C 使用 value-free 安全投影；**不进普通 A**                            | 敏感 Tool 绑定 surface/origin 与风险审批                                |
 | 外部 MCP Server Tool                                             | 有界 text/structured 结果、binary omitted、outcome                  | E/T/C 只接收安全投影                                             | 原始参数/结果不进普通 A；Checkpoint 使用专用授权边界                    | OutcomeUnknown 不自动 retry                                             |
-| 协作 spawn/send/followup/wait/list/interrupt                     | 节点、delivery/wait/interrupt 的安全结果                            | E/R 更新协作树和 mailbox                                         | T/C 保存持久 receipt；**不进 A**                                        | 除 list 外，多数取消需权威结算                                          |
+| 协作 spawn/send/followup/wait/list/interrupt                     | 节点、完整通信正文及 delivery/wait/interrupt 结果                   | E/R 更新协作树和 mailbox                                         | T/C 保存完整持久 receipt；**不进 A**                                    | 按工具身份豁免单结果 10K，保留整轮预算；取消需权威结算                  |
 | 其他 Runtime Extension（如 Todo）                                | 下一步所需确认、revision 和计数                                     | R/E 接收完整扩展状态                                             | T/C 按扩展契约；A 仅显式 opt-in                                         | 动态定义仍走 10K Gate                                                   |
 
 ## 关键字段边界
+
+### Agent 协作
+
+- 子 Agent 通过 `send_message` 向直接父级交付详细成果；成功 receipt 只证明入队，不证明已读或处理。
+- 自动 `Result` 的 `summary` 固定为 Host 生成的结束通知，另带任务身份、终态、必要错误和产物引用；子 Agent 的最终回复只保存在自身会话，不进入父级 Mailbox 或模型输入。
+- 发送方 Timeline 只展示接收方与发送状态，相邻多条可折叠展开；不展示通信正文，也不把系统结束通知伪装为一次 `send_message`。
 
 ### 文件和 Artifact
 
@@ -125,7 +131,7 @@ FileChange 进一步收紧这些边界：
 ## 不变量
 
 1. Canonical result 只能由执行边界生成；任何 consumer projection 都无执行权。
-2. 所有 M 结果最终经过共享 10K token gate。
+2. 所有 M 结果经过共享 Gate；普通工具限制 10K，可信协作消息保留全文。最终发送校验按真实调用身份识别例外，整轮上下文预算仍有效。
 3. A 在普通 T/M 限长前产生，但不会绕过来源安全限或敏感清洗。
 4. T 与持久 model-context 分开，未来代码变化不能改写“模型当时看到什么”。
 5. 不归档的 Tool 必须显式 `archives_result=false` 并说明替代权威来源。

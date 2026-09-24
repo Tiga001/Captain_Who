@@ -17,6 +17,7 @@ import type { ConversationHistoryActivityItem } from './toolActivities/Conversat
 import type { FileChangeToolActivityGroupItem } from './toolActivities/FileChangeToolActivity'
 import type { ReadToolActivityGroupItem } from './toolActivities/ReadToolActivity'
 import type { RunCommandToolActivityGroupItem } from './toolActivities/RunCommandToolActivity'
+import type { SendMessageToolActivityProps } from './toolActivities/SendMessageToolActivity'
 import type { OfficeToolActivityGroupItem } from './toolActivities/OfficeToolActivity'
 import {
   getSearchKind,
@@ -41,7 +42,6 @@ const FILE_CHANGE_ACTIVITY_GRACE_MS = 2000
 const HIDDEN_TIMELINE_TOOLS = new Set<AgentToolCall['tool']>([
   'command_session',
   'spawn_agent',
-  'send_message',
   'followup_task',
   'wait_agent',
   'list_agents',
@@ -51,8 +51,8 @@ const HIDDEN_TIMELINE_TOOLS = new Set<AgentToolCall['tool']>([
 function isHiddenTimelineTool(tool: AgentToolCall['tool']) {
   // Command Session and Agent collaboration Harness calls are model-facing coordination. Keep
   // their call/result records for durable history and diagnostics, but do not expose raw JSON or
-  // repeated list/wait bookkeeping as user-visible timeline rows. Collaboration has a separate
-  // semantic projection keyed by durable Agent identity.
+  // repeated list/wait bookkeeping as user-visible timeline rows. Child lifecycle activities
+  // have their own semantic projection; send_message has a sender-local delivery status row.
   return HIDDEN_TIMELINE_TOOLS.has(tool) || isHiddenSkillTool(tool)
 }
 
@@ -96,6 +96,11 @@ export type RenderableTimelineItem =
   | {
       id: string
       type: 'run_command_group'
+      callIds: string[]
+    }
+  | {
+      id: string
+      type: 'send_message_group'
       callIds: string[]
     }
   | {
@@ -363,13 +368,13 @@ export function hasCollapsibleTimelineContent(
 export function hasTrustedAnchoredCollaborationActivity(
   activities: readonly Pick<
     CollaborationTimelineActivity,
-    'rootAnchorMessageId' | 'rootTraceBoundarySequence'
+    'anchorMessageId' | 'traceBoundarySequence'
   >[],
   rootMessageId: string
 ) {
   return activities.some(
     (activity) =>
-      activity.rootAnchorMessageId === rootMessageId && activity.rootTraceBoundarySequence !== null
+      activity.anchorMessageId === rootMessageId && activity.traceBoundarySequence !== null
   )
 }
 
@@ -432,6 +437,24 @@ export function groupTimelineItems(
     if (!call) return [...items, item]
 
     if (isHiddenTimelineTool(call.tool)) return items
+
+    if (call.tool === 'send_message') {
+      const previousItem = items.at(-1)
+      if (previousItem?.type === 'send_message_group') {
+        return [
+          ...items.slice(0, -1),
+          { ...previousItem, callIds: [...previousItem.callIds, item.callId] }
+        ]
+      }
+      return [
+        ...items,
+        {
+          id: `send-message-group-${item.callId}`,
+          type: 'send_message_group',
+          callIds: [item.callId]
+        }
+      ]
+    }
 
     if (isOfficeTool(call.tool)) {
       const identity = getOfficeActivityGroupIdentity(call)
@@ -844,6 +867,18 @@ export function getMcpActivityGroupItems(
     )
     return invocation ? [...items, invocation] : items
   }, [])
+}
+
+export function getSendMessageGroupItems(
+  run: ChatAgentRunView,
+  callIds: string[]
+): SendMessageToolActivityProps[] {
+  return callIds.flatMap((callId) => {
+    const call = run.toolCalls.find((candidate) => candidate.id === callId)
+    if (!call || call.tool !== 'send_message') return []
+    const result = getToolResult(run, call.id)
+    return [{ call, result, settledStatus: getSettledToolStatus(run, result) }]
+  })
 }
 
 export function getConversationHistoryGroupItems(

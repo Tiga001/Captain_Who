@@ -12,7 +12,6 @@ use rusqlite::{params, TransactionBehavior};
 
 const MAX_ID_BYTES: usize = 128;
 const MAX_TASK_NAME_BYTES: usize = 256;
-const MAX_TASK_BYTES: usize = 1_048_576;
 const MAX_MODEL_ID_BYTES: usize = 512;
 const MAX_TEMPLATE_KEY_BYTES: usize = 64;
 type ChildAttachmentStage = (Vec<(PathBuf, PathBuf)>, Vec<PathBuf>);
@@ -167,7 +166,6 @@ impl StorageService {
                 parent.agent_id.clone(),
             ));
         }
-        enforce_task_resource_limit(input, limits)?;
         enforce_tree_resource_limits(&transaction, &parent, limits)?;
 
         let (template_snapshot, selected_model_id, model_selection_source) = select_model_identity(
@@ -474,7 +472,13 @@ fn validate_spawn_input(input: &CreateChildAgentInput) -> Result<(), ChildAgentS
             "must be one control-free path segment",
         ));
     }
-    validate_bounded_trimmed("task", &input.task, MAX_TASK_BYTES)?;
+    if input.task.trim().is_empty() || input.task.trim() != input.task || input.task.contains('\0')
+    {
+        return Err(invalid_spawn(
+            "task",
+            "must be non-empty, trimmed, and NUL-free",
+        ));
+    }
     validate_optional_selector(
         "template_machine_key",
         input.template_machine_key.as_deref(),
@@ -486,19 +490,6 @@ fn validate_spawn_input(input: &CreateChildAgentInput) -> Result<(), ChildAgentS
         MAX_MODEL_ID_BYTES,
     )?;
     input.fork_turns.validate()?;
-    Ok(())
-}
-
-fn enforce_task_resource_limit(
-    input: &CreateChildAgentInput,
-    limits: AgentTreeResourceLimits,
-) -> Result<(), ChildAgentSpawnError> {
-    if input.task.len() > limits.max_task_bytes {
-        return Err(ChildAgentSpawnError::ResourceLimit {
-            resource: "task_bytes",
-            limit: limits.max_task_bytes as u64,
-        });
-    }
     Ok(())
 }
 

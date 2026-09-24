@@ -259,6 +259,8 @@ export interface ChatAgentRunView {
   mcpInvocations?: ChatMcpToolInvocationView[]
   /** Host-frozen collaboration rows owned by this terminal Assistant response. */
   collaborationTimelineActivities?: CollaborationTimelineActivity[]
+  /** Durable event sequence at the start of the committed final response stream. */
+  collaborationFinalResponseBoundary?: number
   /** Previous committed answer projection, retained only while the next model stream is provisional. */
   messageStreamCheckpoints?: Record<string, { previousContent: string }>
   /** Ephemeral retry status. Cleared by the next model output or a terminal boundary. */

@@ -9,8 +9,9 @@ import {
 import { mapObserverConversationToChat } from './observerConversationAdapter'
 import {
   applyObserverCommandEvent,
-  applyObserverLiveEnvelope,
-  type ObserverScope
+  applyObserverEnvelopeWithCursor,
+  type ObserverScope,
+  type ObserverStreamPosition
 } from './observerLiveProjection'
 
 export interface UseObserverConversationInput {
@@ -33,6 +34,7 @@ interface ScopedObserverConversationState extends Omit<ObserverConversationState
   conversationId: string
   rootConversationId: string
   scopeKey: string
+  streamPosition: ObserverStreamPosition | null
 }
 
 type ObserverLoadWindow = {
@@ -43,7 +45,12 @@ type ObserverLoadWindow = {
 }
 
 type ObserverJournalItem =
-  | { sequence: number; type: 'observer'; envelope: AgentObserverEventEnvelope }
+  | {
+      sequence: number
+      type: 'observer'
+      envelope: AgentObserverEventEnvelope
+      textDeltas?: Array<{ sequence: number; delta: string }>
+    }
   | { sequence: number; type: 'command'; event: AgentEvent }
 
 const MAX_OBSERVER_LIVE_JOURNAL = 512
@@ -67,7 +74,8 @@ export function useObserverConversation({
     error: null,
     loading: true,
     rootConversationId,
-    scopeKey
+    scopeKey,
+    streamPosition: null
   })
   const reload = useCallback(() => {
     overflowInvalidationRef.current = null
@@ -108,7 +116,19 @@ export function useObserverConversation({
       const sequence = ++arrivalSequenceRef.current
       const journalItem: ObserverJournalItem = { sequence, type: 'observer', envelope }
       appendToActiveLoadWindow(activeLoadWindowRef.current, scopeKey, journalItem)
-      apply((conversation, scope) => applyObserverLiveEnvelope(conversation, scope, envelope))
+      setState((current) => {
+        if (!current.conversation || current.scopeKey !== scopeKey) return current
+        const projected = applyObserverEnvelopeWithCursor(
+          current.conversation,
+          scope,
+          envelope,
+          current.streamPosition
+        )
+        return projected.conversation === current.conversation &&
+          projected.position === current.streamPosition
+          ? current
+          : { ...current, conversation: projected.conversation, streamPosition: projected.position }
+      })
     })
     const unsubscribeCommands = onAgentEvent((event) => {
       if (
@@ -153,7 +173,8 @@ export function useObserverConversation({
         error: null,
         loading: true,
         rootConversationId,
-        scopeKey
+        scopeKey,
+        streamPosition: sameScope ? current.streamPosition : null
       }
     })
 
@@ -185,11 +206,37 @@ export function useObserverConversation({
           return
         }
         let conversation = mapObserverConversationToChat(observer)
+        let streamPosition: ObserverStreamPosition | null = observer.liveStream ?? null
         for (const item of loadWindow.items) {
-          conversation =
-            item.type === 'observer'
-              ? applyObserverLiveEnvelope(conversation, scope, item.envelope)
-              : applyObserverCommandEvent(conversation, scope, item.event)
+          if (item.type === 'observer') {
+            const envelopes =
+              item.textDeltas &&
+              item.envelope.event.type === 'message_delta' &&
+              item.envelope.streamCursor
+                ? item.textDeltas.map((part) => ({
+                    ...item.envelope,
+                    streamCursor: { ...item.envelope.streamCursor!, sequence: part.sequence },
+                    event: {
+                      ...item.envelope.event,
+                      type: 'message_delta' as const,
+                      runId: item.envelope.runId,
+                      delta: part.delta
+                    }
+                  }))
+                : [item.envelope]
+            for (const envelope of envelopes) {
+              const projected = applyObserverEnvelopeWithCursor(
+                conversation,
+                scope,
+                envelope,
+                streamPosition
+              )
+              conversation = projected.conversation
+              streamPosition = projected.position
+            }
+          } else {
+            conversation = applyObserverCommandEvent(conversation, scope, item.event)
+          }
         }
         setState({
           conversation,
@@ -197,7 +244,8 @@ export function useObserverConversation({
           error: null,
           loading: false,
           rootConversationId,
-          scopeKey
+          scopeKey,
+          streamPosition
         })
       })
       .catch((error: unknown) => {
@@ -212,7 +260,8 @@ export function useObserverConversation({
           error: error instanceof Error ? error.message : String(error),
           loading: false,
           rootConversationId,
-          scopeKey
+          scopeKey,
+          streamPosition: current.scopeKey === scopeKey ? current.streamPosition : null
         }))
       })
 
@@ -244,6 +293,31 @@ function appendToActiveLoadWindow(
   item: ObserverJournalItem
 ): void {
   if (!window || window.scopeKey !== scopeKey) return
+  const previous = window.items.at(-1)
+  if (
+    item.type === 'observer' &&
+    previous?.type === 'observer' &&
+    item.envelope.event.type === 'message_delta' &&
+    previous.envelope.event.type === 'message_delta' &&
+    item.envelope.streamCursor &&
+    previous.envelope.streamCursor &&
+    item.envelope.runId === previous.envelope.runId &&
+    item.envelope.assistantMessageId === previous.envelope.assistantMessageId &&
+    item.envelope.streamCursor.generation === previous.envelope.streamCursor.generation &&
+    item.envelope.event.streamId === previous.envelope.event.streamId
+  ) {
+    // Count a contiguous text stream as one journal item, retaining exact delta cursors so a
+    // snapshot cut in the middle can replay only its unseen suffix. Long answers cannot exhaust
+    // the event-count budget merely because the provider emits very small token fragments.
+    previous.textDeltas ??= [
+      { sequence: previous.envelope.streamCursor.sequence, delta: previous.envelope.event.delta }
+    ]
+    previous.textDeltas.push({
+      sequence: item.envelope.streamCursor.sequence,
+      delta: item.envelope.event.delta
+    })
+    return
+  }
   if (window.items.length >= MAX_OBSERVER_LIVE_JOURNAL) {
     window.overflowed = true
     return

@@ -39,15 +39,17 @@ function activity(
   semantic: CollaborationTimelineActivity['semantic'],
   sequence: number,
   occurredAt: number,
-  rootAnchorMessageId: string | null = null,
-  rootTraceBoundarySequence: number | null = rootAnchorMessageId === null ? null : sequence
+  anchorMessageId: string | null = null,
+  traceBoundarySequence: number | null = anchorMessageId === null ? null : sequence
 ): CollaborationTimelineActivity {
   return {
     activityId,
     agentId,
     occurredAt,
-    rootAnchorMessageId,
-    rootTraceBoundarySequence,
+    parentAgentId: 'root:root-conversation',
+    parentConversationId: 'root-conversation',
+    anchorMessageId,
+    traceBoundarySequence,
     runId: null,
     semantic,
     sequence,

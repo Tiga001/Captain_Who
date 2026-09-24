@@ -72,6 +72,7 @@ const STORED_RUN_KEYS = [
   'commandSessions',
   'mcpInvocations',
   'collaborationTimelineActivities',
+  'collaborationFinalResponseBoundary',
   'messageStreamCheckpoints',
   'timeline',
   'state',
@@ -307,8 +308,10 @@ function isCollaborationTimelineActivity(value: unknown): boolean {
       'activityId',
       'agentId',
       'occurredAt',
-      'rootAnchorMessageId',
-      'rootTraceBoundarySequence',
+      'parentAgentId',
+      'parentConversationId',
+      'anchorMessageId',
+      'traceBoundarySequence',
       'runId',
       'semantic',
       'sequence',
@@ -318,8 +321,10 @@ function isCollaborationTimelineActivity(value: unknown): boolean {
     isBoundedString(value.activityId, 2048) &&
     isBoundedString(value.agentId, 256) &&
     isSafeInteger(value.occurredAt) &&
-    isBoundedString(value.rootAnchorMessageId, 2048) &&
-    isSafeInteger(value.rootTraceBoundarySequence) &&
+    isBoundedString(value.parentAgentId, 256) &&
+    isBoundedString(value.parentConversationId, 2048) &&
+    isBoundedString(value.anchorMessageId, 2048) &&
+    isSafeInteger(value.traceBoundarySequence) &&
     (value.runId === null || isBoundedString(value.runId, 2048)) &&
     ['started', 'updated', 'waiting_approval', 'completed', 'failed', 'interrupted'].includes(
       value.semantic as string
@@ -358,6 +363,8 @@ export function parsePersistedAgentRun(value: unknown): ChatAgentRunView | undef
     !isRecordArray(value.fileChanges, isFileChangeSnapshot) ||
     !Array.isArray(value.mcpInvocations) ||
     value.mcpInvocations.length > MAX_STORED_RUN_ITEMS ||
+    (hasOwn(value, 'collaborationFinalResponseBoundary') &&
+      !isSafeInteger(value.collaborationFinalResponseBoundary)) ||
     (hasOwn(value, 'collaborationTimelineActivities') &&
       !isRecordArray(value.collaborationTimelineActivities, isCollaborationTimelineActivity)) ||
     !Array.isArray(value.timeline) ||

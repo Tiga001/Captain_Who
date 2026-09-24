@@ -401,7 +401,7 @@ impl AgentCollaborationHarnessAdapter {
                     });
                 self.authorizer
                     .authorize_spawn(&caller.agent_id)
-                    .and_then(|_| self.authorizer.authorize_message_size(&request.message))
+                    .and_then(|_| self.authorizer.authorize_message_content(&request.message))
                     .map_err(authorizer_error)?;
                 self.check_scheduling_precommit(&invocation.run_id, &cancellation)?;
                 let child = match ChildAgentFactory::new(Arc::clone(&self.storage))

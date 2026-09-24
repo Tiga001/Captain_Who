@@ -417,13 +417,13 @@ fn agent_collaboration_contract_matches_the_typescript_fixture_and_is_strict() {
     missing_boundary["activity"]
         .as_object_mut()
         .unwrap()
-        .remove("rootTraceBoundarySequence");
+        .remove("traceBoundarySequence");
     assert!(serde_json::from_value::<CollaborationEventEnvelopeDto>(missing_boundary).is_err());
     let mut unpaired_anchor = fixture["event"].clone();
-    unpaired_anchor["activity"]["rootAnchorMessageId"] = serde_json::json!("assistant-root");
-    assert!(serde_json::from_value::<CollaborationEventEnvelopeDto>(unpaired_anchor).is_err());
+    unpaired_anchor["activity"]["anchorMessageId"] = serde_json::json!("assistant-root");
+    assert!(serde_json::from_value::<CollaborationEventEnvelopeDto>(unpaired_anchor).is_ok());
     let mut unpaired_boundary = fixture["event"].clone();
-    unpaired_boundary["activity"]["rootTraceBoundarySequence"] = serde_json::json!(3);
+    unpaired_boundary["activity"]["traceBoundarySequence"] = serde_json::json!(3);
     assert!(serde_json::from_value::<CollaborationEventEnvelopeDto>(unpaired_boundary).is_err());
     let mut wrong_semantic_kind = fixture["event"].clone();
     wrong_semantic_kind["activity"]["semantic"] = serde_json::json!("completed");

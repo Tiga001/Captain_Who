@@ -272,7 +272,7 @@ impl AgentService {
         let RuntimeTurnSegmentOutcome {
             result,
             terminal_event_gate,
-            final_response_collaboration_cutoff,
+            final_response_collaboration_boundary,
         } = self
             .run_prepared_turn_segment(
                 PreparedRuntimeTurnSegment {
@@ -346,7 +346,7 @@ impl AgentService {
                                     conversation_id,
                                     assistant_message_id,
                                     &mut agent_output,
-                                    final_response_collaboration_cutoff,
+                                    final_response_collaboration_boundary,
                                 ),
                             _ => Err("审批续跑缺少 assistant 持久化身份。".to_string()),
                         }
@@ -663,12 +663,9 @@ impl AgentService {
         if waiting_for_user_input && settlement_committed {
             self.release_turn_concurrency_permit(&run_id);
         }
-        if durable_turn_terminal
-            || deletion_cleanup
-            || (keep_trace_snapshot && settlement_committed)
-        {
-            self.unregister_cancellation_if_current(&run_id, &cancellation_token);
-        }
+        // A failed durable settlement can retain its fence, but the retiring worker no longer
+        // receives cancellation. Never let an interrupt acknowledge this stale token as live.
+        self.unregister_cancellation_if_current(&run_id, &cancellation_token);
         // Match ordinary Turns: successful Done must not retain the completed
         // approval continuation's occupancy or permit when a receiver sends the next Turn.
         if let (Some(output), Some(assistant_message_id)) = (
@@ -684,6 +681,7 @@ impl AgentService {
                     terminal_event_gate.discard();
                 } else {
                     emit_terminal_events_after_persistence_for_turn(
+                        self,
                         &notifications,
                         &terminal_event_gate,
                         output,

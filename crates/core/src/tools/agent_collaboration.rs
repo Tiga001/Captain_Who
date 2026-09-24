@@ -54,7 +54,7 @@ impl AgentCollaborationTool {
                 }
                 Ok(AgentCollaborationAction::Spawn(AgentSpawnRequest {
                     task_name,
-                    message: nonempty("message", input.message, 64 * 1024)?,
+                    message: message_text(input.message)?,
                     agent_type: optional_selector(
                         "agent_type",
                         input.agent_type,
@@ -138,7 +138,7 @@ impl AgentTool for AgentCollaborationTool {
                     "type": "object",
                     "properties": {
                         "task_name": { "type": "string", "minLength": 1, "maxLength": AGENT_COLLABORATION_MAX_TASK_NAME_BYTES, "description": "Short, meaningful task name unique in the current Agent tree, such as frontend-review. 主智能体 is reserved for the root Agent and cannot name a child. Do not use a conversation title or full instructions as the name. Use this exact name to address the Agent in every later collaboration call." },
-                        "message": { "type": "string", "minLength": 1, "maxLength": 65536 },
+                        "message": { "type": "string", "minLength": 1 },
                         "agent_type": { "type": "string", "minLength": 1, "maxLength": AGENT_COLLABORATION_MAX_AGENT_TYPE_BYTES, "description": "Optional exact template machine key." },
                         "model": { "type": "string", "minLength": 1, "maxLength": AGENT_COLLABORATION_MAX_MODEL_CONFIG_ID_BYTES, "description": "Optional exact model_config_id." },
                         "reasoning_effort": { "type": "string", "enum": ["high", "max"] },
@@ -156,7 +156,7 @@ impl AgentTool for AgentCollaborationTool {
             ),
             AgentCollaborationToolKind::SendMessage => (
                 "send_message",
-                "Use this mailbox-only tool for a child Agent to report progress, request help, or send supplemental information to its parent. It only enqueues a message: it never creates a Wake or Turn, never starts or resumes execution, and never wakes a completed, failed, interrupted, or idle Agent. Do not use it to assign, revise, or repeat work. A queued message is not evidence that the target is working; parent-to-descendant work must use followup_task. When reporting, be concise: conclusions, evidence, and what you need from the parent.",
+                "Use this mailbox-only tool for a child Agent to report progress, request help, or deliver its completed work to its direct parent. Copy the exact direct-parent task name from your collaboration identity into target, even when an ancestor sent the current task. Before ending, deliver the conclusions, evidence, artifacts or changed files, validation and limitations the parent needs; confirm the successful receipt. If the complete report was already sent successfully and nothing changed, do not send it again. Your final reply is local to your conversation and is not automatically forwarded: keep it to a brief completion/reporting/blocker summary, preferably 1–3 sentences. It only enqueues a message: it never creates a Wake or Turn, never starts or resumes execution, and never wakes a completed, failed, interrupted, or idle Agent. Do not use it to assign, revise, or repeat work. A queued message is not evidence that the target is working, has read it, or has processed it; do not wait for a read acknowledgement before ending. Parent-to-descendant work must use followup_task. If sending fails, do not claim the parent received the report.",
                 message_schema(),
             ),
             AgentCollaborationToolKind::FollowupTask => (
@@ -166,7 +166,7 @@ impl AgentTool for AgentCollaborationTool {
             ),
             AgentCollaborationToolKind::Wait => (
                 "wait_agent",
-                "Wait for the first ready result, message, update, or status change from one or more descendant Agents. This is independent from command_session waits. Use it sparingly: only when your next critical-path step is blocked; prefer longer timeouts (up to minutes) over busy polling, and keep working while children run.",
+                "Wait for the first ready result, message, update, or status change from one or more descendant Agents. Automatic completion results are Host status notices with necessary errors and artifact references, not the child's final reply. Detailed findings arrive through send_message reports; completion alone does not prove the requested findings were delivered. This is independent from command_session waits. Use it sparingly: only when your next critical-path step is blocked; prefer longer timeouts (up to minutes) over busy polling, and keep working while children run.",
                 json!({
                     "type": "object",
                     "properties": {
@@ -295,7 +295,7 @@ fn message_schema() -> Value {
         "type": "object",
         "properties": {
             "target": { "type": "string", "minLength": 1, "maxLength": AGENT_COLLABORATION_MAX_TASK_NAME_BYTES, "description": "Exact taskName returned by spawn_agent or list_agents; Agent IDs and task paths are not accepted." },
-            "message": { "type": "string", "minLength": 1, "maxLength": 65536 }
+            "message": { "type": "string", "minLength": 1 }
         },
         "required": ["target", "message"],
         "additionalProperties": false
@@ -310,7 +310,7 @@ fn parse_message_args(tool: &str, args: Value) -> AgentResult<AgentMessageReques
             input.target,
             AGENT_COLLABORATION_MAX_TASK_NAME_BYTES,
         )?,
-        message: nonempty("message", input.message, 64 * 1024)?,
+        message: message_text(input.message)?,
     })
 }
 
@@ -327,6 +327,16 @@ fn parse_args<T: for<'de> Deserialize<'de>>(tool: &str, args: Value) -> AgentRes
             }),
         )
     })
+}
+
+fn message_text(value: String) -> AgentResult<String> {
+    if value.trim().is_empty() || value.trim() != value || value.contains('\0') {
+        return Err(argument_error(
+            "message",
+            "must be non-empty, trimmed, and NUL-free",
+        ));
+    }
+    Ok(value)
 }
 
 fn nonempty(field: &'static str, value: String, maximum: usize) -> AgentResult<String> {
@@ -437,6 +447,38 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+
+    #[test]
+    fn collaboration_tools_accept_complete_long_multibyte_messages() {
+        let message = "证据🙂".repeat(160_000);
+        for kind in [
+            AgentCollaborationToolKind::Spawn,
+            AgentCollaborationToolKind::SendMessage,
+            AgentCollaborationToolKind::FollowupTask,
+        ] {
+            let tool = AgentCollaborationTool::new(kind);
+            assert!(tool.definition().input_schema["properties"]["message"]
+                .get("maxLength")
+                .is_none());
+            let args = match kind {
+                AgentCollaborationToolKind::Spawn => {
+                    json!({"task_name": "review", "message": message})
+                }
+                _ => json!({"target": "review", "message": message}),
+            };
+            let action = tool.action(args).unwrap();
+            let parsed = match action {
+                AgentCollaborationAction::Spawn(input) => input.message,
+                AgentCollaborationAction::SendMessage(input)
+                | AgentCollaborationAction::FollowupTask(input) => input.message,
+                _ => panic!("expected a message action"),
+            };
+            assert_eq!(parsed, message);
+        }
+        for invalid in ["", "   ", "a\0b"] {
+            assert!(message_text(invalid.into()).is_err());
+        }
+    }
 
     #[derive(Default)]
     struct CountingWaitExecutor {
@@ -620,6 +662,21 @@ mod tests {
             .description
             .contains("queued message is not evidence that the target is working"));
         assert!(send.description.contains("must use followup_task"));
+        assert!(send.description.contains("exact direct-parent task name"));
+        assert!(send.description.contains("confirm the successful receipt"));
+        assert!(send.description.contains("do not send it again"));
+        assert!(send.description.contains("is not automatically forwarded"));
+        assert!(send.description.contains("preferably 1–3 sentences"));
+        assert!(send
+            .description
+            .contains("do not wait for a read acknowledgement"));
+        assert!(send.description.contains("If sending fails, do not claim"));
+
+        let wait = AgentCollaborationTool::new(AgentCollaborationToolKind::Wait).definition();
+        assert!(wait.description.contains("not the child's final reply"));
+        assert!(wait
+            .description
+            .contains("Detailed findings arrive through send_message"));
 
         let followup =
             AgentCollaborationTool::new(AgentCollaborationToolKind::FollowupTask).definition();

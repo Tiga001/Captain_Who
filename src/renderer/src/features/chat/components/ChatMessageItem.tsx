@@ -57,6 +57,7 @@ import {
   getReadGroupItems,
   getRunCommandGroupItems,
   getSearchGroupItems,
+  getSendMessageGroupItems,
   getSkillResourceGroupItems,
   getSettledToolStatus,
   getToolResult,
@@ -88,6 +89,7 @@ import { ConversationHistoryToolActivity } from './toolActivities/ConversationHi
 import { FileChangeToolActivityGroup } from './toolActivities/FileChangeToolActivity'
 import { ReadToolActivityGroup } from './toolActivities/ReadToolActivity'
 import { RunCommandToolActivityGroup } from './toolActivities/RunCommandToolActivity'
+import { SendMessageToolActivityGroup } from './toolActivities/SendMessageToolActivity'
 import { OfficeToolActivityGroup } from './toolActivities/OfficeToolActivity'
 import { SearchToolActivityGroup } from './toolActivities/SearchToolActivity'
 import { WebSearchToolActivityGroup } from './toolActivities/WebSearchToolActivity'
@@ -137,6 +139,7 @@ function interruptionTranslationKey(
 interface ChatMessageItemProps {
   agentLabelsById?: Readonly<Record<string, string>>
   collaborationTimelineActivities?: readonly CollaborationTimelineActivity[]
+  directChildAgentIds?: readonly string[]
   conversationId?: string
   humanInteraction?: HumanInteractionTimelineController
   editSelectedModelAvailable?: boolean
@@ -495,6 +498,10 @@ function AgentTimelineItemView({
     return <RunCommandToolActivityGroup items={items} />
   }
 
+  if (item.type === 'send_message_group') {
+    return <SendMessageToolActivityGroup items={getSendMessageGroupItems(run, item.callIds)} />
+  }
+
   if (item.type === 'mcp_activity_group') {
     const items = getMcpActivityGroupItems(run, item.invocationIds)
     if (items.length === 0) return null
@@ -607,6 +614,7 @@ function AgentTimelineItemView({
 
 function AgentRunView({
   collaborationTimelineActivities = [],
+  directChildAgentIds,
   conversationId,
   humanInteraction,
   message,
@@ -622,6 +630,7 @@ function AgentRunView({
   turnDiffSummary
 }: {
   collaborationTimelineActivities?: readonly CollaborationTimelineActivity[]
+  directChildAgentIds?: readonly string[]
   conversationId?: string
   humanInteraction?: HumanInteractionTimelineController
   message: ChatMessage
@@ -667,14 +676,29 @@ function AgentRunView({
         : timeline,
     [finalAnswerTimelineItemIndex, timeline]
   )
+  const finalAnswerBlockIndex =
+    finalAnswerTimelineItemIndex >= 0
+      ? finalAnswerTimelineItemIndex
+      : runIsSettled &&
+          run?.collaborationFinalResponseBoundary !== undefined &&
+          hasDisplayableContent(finalAnswerContent)
+        ? timeline.length
+        : -1
   const effectiveCollaborationActivities = useMemo(
     () =>
       runIsSettled ? (run?.collaborationTimelineActivities ?? []) : collaborationTimelineActivities,
     [collaborationTimelineActivities, run?.collaborationTimelineActivities, runIsSettled]
   )
   const normalizedCollaborationActivities = useMemo(
-    () => normalizeCollaborationTimelineActivities(effectiveCollaborationActivities),
-    [effectiveCollaborationActivities]
+    () =>
+      normalizeCollaborationTimelineActivities(effectiveCollaborationActivities).filter(
+        (activity) =>
+          (directChildAgentIds === undefined || directChildAgentIds.includes(activity.agentId)) &&
+          activity.parentConversationId === conversationId &&
+          activity.anchorMessageId === message.id &&
+          activity.traceBoundarySequence !== null
+      ),
+    [conversationId, directChildAgentIds, effectiveCollaborationActivities, message.id]
   )
   const [liveActivityAnchors, setLiveActivityAnchors] = useState<{
     runId: string | null
@@ -691,7 +715,7 @@ function AgentRunView({
       const currentAnchors = current.runId === nextRunId ? current.byActivityId : {}
       let nextAnchors = currentAnchors
       for (const activity of normalizedCollaborationActivities) {
-        if (activity.rootTraceBoundarySequence === null) continue
+        if (activity.traceBoundarySequence === null) continue
         if (Object.prototype.hasOwnProperty.call(nextAnchors, activity.activityId)) continue
         if (nextAnchors === currentAnchors) nextAnchors = { ...currentAnchors }
         nextAnchors[activity.activityId] = timeline.at(-1)?.id ?? null
@@ -721,7 +745,7 @@ function AgentRunView({
 
     const placements = new Map<number, CollaborationTimelineActivity[]>()
     for (const activity of normalizedCollaborationActivities) {
-      const boundary = activity.rootTraceBoundarySequence
+      const boundary = activity.traceBoundarySequence
       let insertionIndex = timeline.length
       if (boundary !== null) {
         const timelineSequence = (item: ChatAgentTimelineItem) =>
@@ -764,6 +788,12 @@ function AgentRunView({
           insertionIndex = Math.max(durableLowerBound, liveLowerBound)
         }
       }
+      if (finalAnswerBlockIndex >= 0 && run.collaborationFinalResponseBoundary !== undefined) {
+        insertionIndex =
+          activity.sequence > run.collaborationFinalResponseBoundary
+            ? finalAnswerBlockIndex + 1
+            : Math.min(insertionIndex, finalAnswerBlockIndex)
+      }
       const slot = placements.get(insertionIndex) ?? []
       slot.push(activity)
       placements.set(insertionIndex, slot)
@@ -801,7 +831,7 @@ function AgentRunView({
       segmentStart = end
     }
 
-    for (let index = 0; index <= timeline.length; index += 1) {
+    for (let index = 0; index <= Math.max(timeline.length, finalAnswerBlockIndex + 1); index += 1) {
       const activities = placements.get(index)
       if (activities?.length) {
         appendTimelineSegment(index)
@@ -810,7 +840,7 @@ function AgentRunView({
         // list. A visible Tool, narration, or final answer creates a real block and stops merging.
         appendCollaborationBlock(activities)
       }
-      if (index === finalAnswerTimelineItemIndex) {
+      if (index === finalAnswerBlockIndex) {
         appendTimelineSegment(index)
         blocks.push({ kind: 'final-answer' })
         segmentStart = index + 1
@@ -819,7 +849,7 @@ function AgentRunView({
     appendTimelineSegment(timeline.length)
     return blocks
   }, [
-    finalAnswerTimelineItemIndex,
+    finalAnswerBlockIndex,
     liveActivityAnchors.byActivityId,
     normalizedCollaborationActivities,
     run,
@@ -840,16 +870,14 @@ function AgentRunView({
   const waitingForCommandCompletion = Boolean(run && isWaitingForCommandCompletion(run))
   const hasTimeline = displayTimeline.length > 0
   const hasTimelineError = timeline.some((item) => item.type === 'error')
-  // Only the paired durable message/boundary anchor makes collaboration part of this root run.
-  // Observer and timestamp-fallback activity must not manufacture a disclosure for this message.
-  const hasCollapsibleRootCollaborationActivity =
-    mode === 'interactive' &&
+  // Root and observer conversations use the same trusted message/trace ownership.
+  const hasCollapsibleCollaborationActivity =
     Boolean(onOpenCollaborationAgent) &&
     hasTrustedAnchoredCollaborationActivity(normalizedCollaborationActivities, message.id)
   const canToggleTimeline = Boolean(
     run &&
     isRunSettled(run) &&
-    (hasCollapsibleTimelineContent(run, timeline) || hasCollapsibleRootCollaborationActivity)
+    (hasCollapsibleTimelineContent(run, timeline) || hasCollapsibleCollaborationActivity)
   )
   const [now, setNow] = useState(() => Date.now())
 
@@ -1040,7 +1068,7 @@ function AgentRunView({
           />
         ))
       })}
-      {showFinalContent && finalAnswerTimelineItemIndex < 0 && (
+      {showFinalContent && finalAnswerBlockIndex < 0 && (
         <ChatMarkdown
           className="chat-agent-text"
           content={finalAnswerContent}
@@ -1105,6 +1133,7 @@ function AgentRunView({
 
 function MessageContent({
   collaborationTimelineActivities,
+  directChildAgentIds,
   conversationId,
   humanInteraction,
   message,
@@ -1123,6 +1152,7 @@ function MessageContent({
     return (
       <AgentRunView
         collaborationTimelineActivities={collaborationTimelineActivities}
+        directChildAgentIds={directChildAgentIds}
         conversationId={conversationId}
         humanInteraction={humanInteraction}
         message={message}
@@ -1444,6 +1474,7 @@ function MessageInputOrigin({
 export const ChatMessageItem = memo(function ChatMessageItem({
   agentLabelsById,
   collaborationTimelineActivities,
+  directChildAgentIds,
   conversationId,
   humanInteraction,
   editSelectedModelAvailable = true,
@@ -1553,6 +1584,7 @@ export const ChatMessageItem = memo(function ChatMessageItem({
         <div className="chat-message__body">
           <MessageContent
             collaborationTimelineActivities={collaborationTimelineActivities}
+            directChildAgentIds={directChildAgentIds}
             conversationId={conversationId}
             humanInteraction={humanInteraction}
             message={message}

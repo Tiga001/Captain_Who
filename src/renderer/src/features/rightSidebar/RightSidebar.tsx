@@ -50,6 +50,8 @@ interface RightSidebarProps {
   moduleNavigationRequest?: RightSidebarModuleNavigationRequest | null
   onBrowserSurfaceReady?: (input: BrowserSurfaceReadyInput) => Promise<BrowserSurfaceReadyOutput>
   onOpenAgentTemplates?: () => void
+  onOpenProfile?: () => void
+  onOpenAgentRootConversation?: (conversationId: string) => void
   onOpenBrowserSettings?: (destination: 'settings' | 'downloads' | 'history') => void
   onToggleMaximized: () => void
   reviewNavigationRequest?: RightSidebarReviewNavigationRequest | null
@@ -110,6 +112,8 @@ export const RightSidebar = memo(function RightSidebar({
   moduleNavigationRequest,
   onBrowserSurfaceReady,
   onOpenAgentTemplates,
+  onOpenProfile,
+  onOpenAgentRootConversation,
   onOpenBrowserSettings,
   onToggleMaximized,
   reviewNavigationRequest,
@@ -414,6 +418,8 @@ export const RightSidebar = memo(function RightSidebar({
       onBrowserAutomationTargetChange: handleBrowserAutomationTargetChange,
       onBrowserSurfaceReady: handleBrowserSurfaceReady,
       onOpenAgentTemplates,
+      onOpenProfile,
+      onOpenAgentRootConversation,
       onOpenBrowserSettings,
       renderAgentObserver
     }),
@@ -426,6 +432,8 @@ export const RightSidebar = memo(function RightSidebar({
       handleBrowserAutomationTargetChange,
       handleBrowserSurfaceReady,
       onOpenAgentTemplates,
+      onOpenProfile,
+      onOpenAgentRootConversation,
       onOpenBrowserSettings,
       renderAgentObserver,
       workspaceKey

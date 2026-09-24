@@ -103,20 +103,19 @@ fn seed_guidance(connection: &Connection) {
 }
 
 #[test]
-fn exact_v48_rebuilds_guidance_table_without_losing_owned_attachments_or_constraints() {
+fn exact_v48_requires_reset_without_losing_owned_attachments_or_constraints() {
     let connection = v48_connection();
     seed_guidance(&connection);
 
-    run_migrations(&connection).unwrap();
-
-    assert_eq!(
-        read_schema_version(&connection).unwrap(),
-        STORAGE_SCHEMA_VERSION
-    );
-    assert_eq!(
-        schema_fingerprint(&connection).unwrap(),
-        CANONICAL_SCHEMA_FINGERPRINT
-    );
+    let before_fingerprint = schema_fingerprint(&connection).unwrap();
+    let before_changes = connection.total_changes();
+    assert!(run_migrations(&connection)
+        .unwrap_err()
+        .to_string()
+        .contains("found 48"));
+    assert_eq!(read_schema_version(&connection).unwrap(), 48);
+    assert_eq!(schema_fingerprint(&connection).unwrap(), before_fingerprint);
+    assert_eq!(connection.total_changes(), before_changes);
     assert_eq!(
         connection
             .query_row(
@@ -185,47 +184,21 @@ fn exact_v48_rebuilds_guidance_table_without_losing_owned_attachments_or_constra
         );
     }
     ensure_foreign_keys_are_valid(&connection).unwrap();
-
-    // The database now accepts the attachment-only representation. Application-layer validation
-    // still decides whether an empty body without attachments is admissible.
-    connection
-        .execute(
-            "INSERT INTO agent_run_guidances(
-                 guidance_id,client_message_id,run_id,conversation_id,assistant_message_id,
-                 content,status,applied_trace_sequence,terminal_reason,created_at,updated_at
-             ) VALUES ('guidance-empty','client-empty','run-empty','guidance-chat',
-                       'guidance-assistant','','queued',NULL,NULL,4,4)",
-            [],
-        )
-        .unwrap();
-    assert_eq!(
-        connection
-            .query_row(
-                "SELECT content FROM agent_run_guidances WHERE guidance_id='guidance-empty'",
-                [],
-                |row| row.get::<_, String>(0),
-            )
-            .unwrap(),
-        ""
-    );
-
-    let changes = connection.total_changes();
-    run_migrations(&connection).unwrap();
-    assert_eq!(connection.total_changes(), changes);
 }
 
 #[test]
-fn exact_v47_upgrades_without_rewriting_history_or_search_content_and_reopens() {
+fn exact_v47_requires_reset_without_rewriting_history_or_search_content() {
     let connection = v47_connection();
     seed_history(&connection);
     let before = fts_snapshot(&connection);
-    run_migrations(&connection).unwrap();
-    assert_eq!(
-        read_schema_version(&connection).unwrap(),
-        STORAGE_SCHEMA_VERSION
-    );
+    let changes = connection.total_changes();
+    assert!(run_migrations(&connection)
+        .unwrap_err()
+        .to_string()
+        .contains("found 47"));
+    assert_eq!(read_schema_version(&connection).unwrap(), 47);
+    assert_eq!(connection.total_changes(), changes);
     assert_eq!(fts_snapshot(&connection), before);
-    assert_index_agrees(&connection);
     assert_eq!(
         connection
             .query_row("SELECT content FROM messages WHERE id='user'", [], |row| {
@@ -235,17 +208,17 @@ fn exact_v47_upgrades_without_rewriting_history_or_search_content_and_reopens() 
         "原始问题 /路径/中文"
     );
     let changes = connection.total_changes();
-    run_migrations(&connection).unwrap();
+    assert!(run_migrations(&connection).is_err());
     assert_eq!(connection.total_changes(), changes);
     assert_eq!(fts_snapshot(&connection), before);
 }
 
 #[test]
-fn v47_index_backfill_failure_rolls_back_catalog_version_and_content() {
+fn malformed_v47_history_is_rejected_without_catalog_or_content_changes() {
     let connection = v47_connection();
     seed_history(&connection);
     // A malformed derived row is allowed by the old FTS schema. Its duplicate identity must not
-    // silently replace either row, and failing the new uniqueness check must roll back all DDL.
+    // silently replace either row; rejecting the obsolete schema must preserve both.
     connection.execute("INSERT INTO conversation_history_fts(ref_key,message_id,content) VALUES ('message:user','user','duplicate')",[]).unwrap();
     let before = fts_snapshot(&connection);
     assert!(run_migrations(&connection).is_err());

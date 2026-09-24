@@ -143,14 +143,18 @@ Browser page 的 `surfaceId` 稳定地由 page id 派生，`surfaceInstanceId` �
 Agent Center 是当前根 Agent Conversation 的只读子 Agent 索引：
 
 - 首页将当前树分为 active 与 non-active，按最近活动排序，只显示可展示的任务、状态、模型和时间信息。
+- 首页顶部常驻排列视图、平铺树图与目录树三个按钮，直接选择并高亮当前视图，模板入口保留在旁边。两种树图共用用户与 Agent 的折叠状态，分别保留滚动位置，超宽时仅在树图区域横向滚动。
+- 树顶为用户（用户名与 Captain Who）和默认机器人头像的根 Agent，其下按真实父子关系显示子 Agent。用户节点始终呼吸，活跃 Agent 按现有状态呼吸；用户头像进入个人资料，根 Agent 头像回到主对话，子 Agent 头像进入 observer。
 - 选择 Agent 后切换到 detail state，通过 AppShell render contract 复用 `ConversationSurface` 的 observer 模式。
 - 同一项目内切换根 Agent 也会重置 detail 到新根 Agent 的列表；快照不匹配时 fail closed；没有子 Agent 时移除模块。
 - Observer 没有 composer、send、edit、retry、fork、stop/guide 或 approval 控件。Core Server/Rust Core 仍会校验精确根 Agent 与子 Agent Conversation，因此隐藏控件不是授权边界。
 - 共享会话 surface 在 280 px 侧栏最小宽度下使用局部布局覆盖，不维护第二套聊天实现。
 
-AppShell 是活动根 Agent collaboration store 的唯一所有者。该 store 从持久事件序列重放并检查 gap；当前实现发布有界的最近 2,048 条语义活动窗口。只有能解析到持久根 Agent assistant-message/trace-boundary anchor 的事件进入根 Agent chat 时间线；父 Agent 最终回复开始流式输出时，该回复的 collaboration timeline 即冻结。之后的子 Agent 活动仍可更新 Agent Center，但不能追写已结算父消息。Agent Center 当前状态、observer live envelope 和根 Agent chat 历史是三种不同投影，不能互相推导。
+AppShell 是活动根 Agent collaboration store 的唯一所有者。该 store 从持久事件序列重放并检查 gap；live 回复内活动保留最近 2,048 条，消息间活动独立保留，不被该窗口淘汰。每条语义活动记录直属父 Agent、父 Conversation 和该会话内的持久位置；根聊天与子 Agent observer 使用同一投影，只展示属于当前 Conversation 的直属子 Agent 活动。Agent Center 当前树状态、observer live envelope 和会话历史是三种不同投影，不能互相推导。
 
-Observer 更新必须绑定根 Agent、子 Agent、Conversation、Run 和 assistant-message 身份。hydration revision 会在 gap、restart resync 或 reload 后失效全部 observer；子 Agent A 的迟到响应不能显示在子 Agent B 下。live observer envelope 只是有界、进程内的低延迟覆盖，持久 Conversation 和 collaboration event log 在恢复后重新成为权威。
+父 Agent 正在运行时，活动在事件事务中记录其 assistant-message 和 trace boundary，插入对应回复的时间线；该回复结算时保存冻结活动列表，并用可选的 `collaborationFinalResponseBoundary` 保持活动在最终正文前后的顺序；边界之后的活动不会被删除。父 Agent 空闲时，新活动记录在父会话最后一条消息之后；空会话则记录在首条消息之前，后续新轮次不能改变它的位置。渲染按持久事件 sequence 排序，不按通知抵达顺序或墙钟时间猜测位置，也不把深层子 Agent 状态重复展示在根聊天。圆角状态栏仍可进入对应子 Agent 详情，observer 保持只读。
+
+Observer 更新必须绑定根 Agent、子 Agent、Conversation、Run 和 assistant-message 身份。hydration revision 会在 gap、restart resync 或 reload 后失效全部 observer；子 Agent A 的迟到响应不能显示在子 Agent B 下。加载快照同时读取持久 Conversation 与进程内当前回复的完整流式正文，并返回 generation/sequence 游标；Renderer 只追加游标之后的文本，避免中途打开、切回或刷新时丢失前缀。该游标不替代其他事件的持久身份。正文提交或会话删除后释放流式缓存；Core Server 重启后仍以持久 Conversation 和 collaboration event log 为恢复依据。
 
 Agent Center 的设置入口打开通用 Agent template 设置页。模板定义现在是 workspace-wide library，CRUD 不绑定单个 project；每个模板以独立 assignment 关联零到多个 project，只有分配给当前 project 且 enabled 的模板可用于该树。模板保存精确 `model_config_id`；已删除/禁用模型必须明确替换后才能保存或重新启用。表单的 description/instructions 提供 guidance-oriented placeholder，但 placeholder 不会写入空字段。模板编辑或 assignment 变化只影响后续 Agent，现有 Agent 显示创建时快照。
 

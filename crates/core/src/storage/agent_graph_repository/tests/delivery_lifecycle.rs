@@ -650,7 +650,6 @@ fn lease_deadline_is_half_open_and_fences_old_mailbox_and_wake_holders() {
         terminal_status: AgentWakeStatus::Failed,
         run_id: None,
         assistant_message_id: None,
-        summary: "expired before admission".to_string(),
         terminal_error: Some("expired".to_string()),
     };
     assert!(finish_agent_turn_with_result(&mut connection, &typed_finish, wake_deadline,).is_err());

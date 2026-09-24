@@ -337,9 +337,9 @@ pub(super) struct RuntimeTurnSegmentOutcome {
     pub(super) result: AgentResult<AgentChatOutput>,
     pub(super) terminal_event_gate: Arc<AgentTerminalEventGate>,
     /// Root-local collaboration event sequence captured when the committed final response stream
-    /// started. Activity committed after this boundary remains visible in Agent Center but does
-    /// not become part of the frozen parent response Timeline.
-    pub(super) final_response_collaboration_cutoff: Option<u64>,
+    /// started. Later activities remain visible after the final response; this is placement
+    /// metadata, never a filter that drops committed child activities.
+    pub(super) final_response_collaboration_boundary: Option<u64>,
 }
 
 #[allow(clippy::large_enum_variant)]

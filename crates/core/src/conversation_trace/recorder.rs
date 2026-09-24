@@ -591,15 +591,8 @@ impl ConversationTraceRecorder {
             kind,
             content,
         )?;
-        let (trace_content, trace_truncated) = project_agent_mailbox_envelope_with_budget(
-            sender_agent_id,
-            sender_task_name,
-            sender_task_path,
-            kind,
-            content,
-            DurableTraceProjectionLimits::USER_GUIDANCE_CHARS,
-        )?;
-        let truncated = model_truncated || trace_truncated;
+        let trace_content = model_content.clone();
+        let truncated = model_truncated;
         if let Some(existing) = self.items.iter().find(|item| {
             matches!(
                 item,

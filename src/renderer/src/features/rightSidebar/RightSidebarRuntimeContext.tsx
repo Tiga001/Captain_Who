@@ -29,6 +29,8 @@ interface RightSidebarRuntimeContextValue {
     viewport?: { height: number; width: number }
   ) => void
   onOpenAgentTemplates?: () => void
+  onOpenProfile?: () => void
+  onOpenAgentRootConversation?: (conversationId: string) => void
   onOpenBrowserSettings?: (destination: 'settings' | 'downloads' | 'history') => void
   renderAgentObserver?: (context: AgentObserverRenderContext) => ReactNode
 }

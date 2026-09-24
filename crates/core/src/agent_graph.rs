@@ -364,7 +364,6 @@ pub struct CreateChildAgentInput {
 pub struct AgentTreeResourceLimits {
     pub max_depth: u32,
     pub max_nodes: u32,
-    pub max_task_bytes: usize,
 }
 
 impl Default for AgentTreeResourceLimits {
@@ -372,7 +371,6 @@ impl Default for AgentTreeResourceLimits {
         Self {
             max_depth: 8,
             max_nodes: 64,
-            max_task_bytes: 64 * 1024,
         }
     }
 }
@@ -389,12 +387,6 @@ impl AgentTreeResourceLimits {
             return Err(ChildAgentSpawnError::InvalidInput {
                 field: "max_nodes",
                 reason: "must be between 2 and 1024".to_string(),
-            });
-        }
-        if self.max_task_bytes == 0 || self.max_task_bytes > 1_048_576 {
-            return Err(ChildAgentSpawnError::InvalidInput {
-                field: "max_task_bytes",
-                reason: "must be between 1 and 1048576".to_string(),
             });
         }
         Ok(self)
@@ -466,7 +458,6 @@ impl AgentCollaborationIdentity {
         const MAX_ID_BYTES: usize = 256;
         const MAX_NAME_BYTES: usize = 256;
         const MAX_PATH_BYTES: usize = 4_096;
-        const MAX_TASK_BYTES: usize = 1_048_576;
         const MAX_INSTRUCTIONS_BYTES: usize = 65_536;
 
         fn bounded(
@@ -529,7 +520,15 @@ impl AgentCollaborationIdentity {
         bounded("parent_task_path", &self.parent_task_path, MAX_PATH_BYTES)?;
         bounded("source_task_path", &self.source_task_path, MAX_PATH_BYTES)?;
         bounded("task_path", &self.task_path, MAX_PATH_BYTES)?;
-        bounded_multiline("entrusted_task", &self.entrusted_task, MAX_TASK_BYTES)?;
+        if self.entrusted_task.trim().is_empty()
+            || self.entrusted_task.trim() != self.entrusted_task
+            || self.entrusted_task.contains('\0')
+        {
+            return Err(ChildAgentSpawnError::InvalidInput {
+                field: "entrusted_task",
+                reason: "must be non-empty, trimmed, and NUL-free".into(),
+            });
+        }
         if let Some(instructions) = self.template_instructions.as_deref() {
             bounded_multiline(
                 "template_instructions",
@@ -808,7 +807,6 @@ pub struct FinishAgentWakeWithResultInput {
 }
 
 pub const AGENT_RESULT_ENVELOPE_SCHEMA_VERSION: u32 = 1;
-pub const AGENT_RESULT_SUMMARY_MAX_BYTES: usize = 16_384;
 pub const AGENT_RESULT_TERMINAL_ERROR_MAX_BYTES: usize = 4_096;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -826,7 +824,7 @@ pub struct AgentResultArtifactReference {
     pub media_type: String,
 }
 
-/// The bounded, immutable payload placed in the direct parent's Mailbox when a delegated Turn
+/// The immutable payload placed in the direct parent's Mailbox when a delegated Turn
 /// settles. Usage is deliberately absent: accounting remains owned by the child's Conversation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -839,6 +837,7 @@ pub struct AgentTurnResultEnvelope {
     pub turn_id: Option<String>,
     pub run_id: Option<String>,
     pub status: AgentWakeStatus,
+    /// Host-authored terminal notification, never the child's final assistant reply.
     pub summary: String,
     pub artifact_refs: Vec<AgentResultArtifactReference>,
     pub terminal_error: Option<String>,
@@ -853,7 +852,6 @@ pub struct FinishAgentTurnResultInput {
     /// `None`/`None` is valid for a dispatch failure before a Turn was prepared.
     pub run_id: Option<String>,
     pub assistant_message_id: Option<String>,
-    pub summary: String,
     pub terminal_error: Option<String>,
 }
 

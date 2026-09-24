@@ -342,8 +342,8 @@ const frozenRootCollaborationActivities = parseCollaborationEventsPage(
   const activity = event.activity
   if (
     !activity ||
-    activity.rootAnchorMessageId !== 'assistant-conversation-root' ||
-    activity.rootTraceBoundarySequence === null
+    activity.anchorMessageId !== 'assistant-conversation-root' ||
+    activity.traceBoundarySequence === null
   ) {
     return []
   }
@@ -353,8 +353,10 @@ const frozenRootCollaborationActivities = parseCollaborationEventsPage(
       activityId: event.eventId,
       agentId: activity.agentId,
       occurredAt: event.occurredAt,
-      rootAnchorMessageId: activity.rootAnchorMessageId,
-      rootTraceBoundarySequence: activity.rootTraceBoundarySequence,
+      parentAgentId: activity.parentAgentId,
+      parentConversationId: activity.parentConversationId,
+      anchorMessageId: activity.anchorMessageId,
+      traceBoundarySequence: activity.traceBoundarySequence,
       runId: event.runId,
       semantic: activity.semantic,
       sequence: event.sequence,
@@ -492,11 +494,11 @@ describe('AppShell deterministic collaboration scenario', () => {
     const screen = await render(<AppShell />)
     await screen.getByRole('button', { name: 'select-conversation-root' }).click()
 
-    await expect.element(screen.getByTestId('collaboration-timeline')).toBeVisible()
+    await expect.element(screen.getByTestId('collaboration-timeline').first()).toBeVisible()
     await expect
       .poll(() => screen.container.querySelectorAll('.collaboration-timeline__chip').length)
       .toBeGreaterThanOrEqual(2)
-    expect(screen.container.querySelector('[data-semantic="waiting_approval"]')).toBeNull()
+    expect(screen.container.querySelector('article [data-semantic="waiting_approval"]')).toBeNull()
     expect(screen.container.querySelectorAll('[data-approval-id]')).toHaveLength(2)
     expect(
       screen.container.querySelectorAll('.conversation-approval-queue__item:not([hidden])')
@@ -772,7 +774,7 @@ describe('AppShell deterministic collaboration scenario', () => {
   it('converges through the durable sequence, survives remount and drops the old root scope', async () => {
     const first = await render(<AppShell />)
     await first.getByRole('button', { name: 'select-conversation-root' }).click()
-    await expect.element(first.getByTestId('collaboration-timeline')).toBeVisible()
+    await expect.element(first.getByTestId('collaboration-timeline').first()).toBeVisible()
 
     scenarioState.currentTree = parseAgentTreeSnapshot(scenarioFixture.settledTree)
     emitCollaborationEvent(
@@ -786,8 +788,10 @@ describe('AppShell deterministic collaboration scenario', () => {
           ?.getAttribute('data-status')
       )
       .toBe('latest_completed')
-    expect(first.container.querySelector('[data-semantic="completed"]')).toBeNull()
-    expect(first.container.querySelector('[data-semantic="interrupted"]')).toBeNull()
+    expect(first.container.querySelector('[data-semantic="completed"]')).not.toBeNull()
+    expect(first.container.querySelector('article [data-semantic="completed"]')).toBeNull()
+    expect(first.container.querySelector('[data-semantic="interrupted"]')).not.toBeNull()
+    expect(first.container.querySelector('article [data-semantic="interrupted"]')).toBeNull()
     expect(
       first.container.querySelector(
         '.collaboration-timeline__activity[data-semantic="started"] [data-agent-id="agent-review"]'
@@ -797,15 +801,19 @@ describe('AppShell deterministic collaboration scenario', () => {
 
     const reloaded = await render(<AppShell />)
     await reloaded.getByRole('button', { name: 'select-conversation-root' }).click()
-    await expect.element(reloaded.getByTestId('collaboration-timeline')).toBeVisible()
+    await expect.element(reloaded.getByTestId('collaboration-timeline').first()).toBeVisible()
     expect(
       reloaded.container.querySelector(
         '.collaboration-timeline__activity[data-semantic="started"] [data-agent-id="agent-compatibility"]'
       )
     ).not.toBeNull()
-    expect(reloaded.container.querySelector('[data-semantic="completed"]')).toBeNull()
-    expect(reloaded.container.querySelector('[data-semantic="interrupted"]')).toBeNull()
-    expect(reloaded.container.querySelector('[data-semantic="waiting_approval"]')).toBeNull()
+    expect(reloaded.container.querySelector('[data-semantic="completed"]')).not.toBeNull()
+    expect(reloaded.container.querySelector('article [data-semantic="completed"]')).toBeNull()
+    expect(reloaded.container.querySelector('[data-semantic="interrupted"]')).not.toBeNull()
+    expect(reloaded.container.querySelector('article [data-semantic="interrupted"]')).toBeNull()
+    expect(
+      reloaded.container.querySelector('article [data-semantic="waiting_approval"]')
+    ).toBeNull()
     await reloaded.getByRole('button', { name: 'Subagents' }).click()
     expect(
       requiredAgentCenterRow(reloaded.container, 'agent-compatibility').getAttribute('data-status')

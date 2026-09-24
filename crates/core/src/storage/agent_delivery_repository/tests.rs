@@ -469,7 +469,7 @@ fn safe_boundary_enforces_fifo_model_budget_and_leaves_excess_pending() {
         .unwrap();
     assert!(projected.iter().map(String::len).sum::<usize>() <= MAX_SAFE_BOUNDARY_MODEL_BYTES);
     assert!(projected.iter().all(|content| {
-        serde_json::from_str::<serde_json::Value>(content).unwrap()["payloadTruncated"] == true
+        serde_json::from_str::<serde_json::Value>(content).unwrap()["payloadTruncated"] == false
     }));
     let second = bind_safe_boundary(
         &mut connection,
@@ -484,7 +484,36 @@ fn safe_boundary_enforces_fifo_model_budget_and_leaves_excess_pending() {
     )
     .unwrap()
     .unwrap();
-    assert_eq!(first.messages.len() + second.messages.len(), 6);
+    assert_eq!(first.messages.len(), 1);
+    assert_eq!(second.messages.len(), 1);
+    for batch in 3..=6 {
+        let delivered = bind_safe_boundary(
+            &mut connection,
+            &safe_input(
+                "conversation-child",
+                "run-budget",
+                "assistant-budget",
+                batch,
+                batch - 1,
+            ),
+            31 + batch as i64,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(delivered.messages.len(), 1);
+    }
+    let stored =
+        conversation_model_context_repository::get_log_for_message(&connection, "assistant-budget")
+            .unwrap()
+            .unwrap();
+    assert_eq!(stored.items.len(), 6);
+    for (index, item) in stored.items.iter().enumerate() {
+        let envelope: serde_json::Value = serde_json::from_str(&item.content).unwrap();
+        assert_eq!(
+            envelope["payload"],
+            format!("{index}:{}", "a".repeat(100_000))
+        );
+    }
 }
 
 #[test]
@@ -1119,7 +1148,7 @@ fn wait_enforces_global_fifo_message_and_byte_budget_leaving_excess_pending() {
 }
 
 #[test]
-fn wait_truncates_oversized_fifo_head_and_caps_distinct_targets() {
+fn wait_delivers_oversized_fifo_head_whole_and_caps_distinct_targets() {
     let mut connection = setup_tree();
     begin_wait_turn(
         &connection,
@@ -1133,7 +1162,7 @@ fn wait_truncates_oversized_fifo_head_and_caps_distinct_targets() {
         (
             "oversized-first",
             "agent-child",
-            format!("first:{}", "x".repeat(TEST_MAX_MESSAGE_BYTES - 6)),
+            format!("first:{}", "协作🙂".repeat(160_000)),
         ),
         ("small-second", "agent-grand", "second".to_string()),
     ] {
@@ -1173,8 +1202,7 @@ fn wait_truncates_oversized_fifo_head_and_caps_distinct_targets() {
         .unwrap()
         .collect::<rusqlite::Result<Vec<_>>>()
         .unwrap();
-    assert_eq!(sequences.len(), 2);
-    assert!(sequences[0] < sequences[1]);
+    assert_eq!(sequences.len(), 1);
     let first = ready
         .targets
         .iter()
@@ -1184,9 +1212,43 @@ fn wait_truncates_oversized_fifo_head_and_caps_distinct_targets() {
     let envelope: serde_json::Value = serde_json::from_str(&first.content).unwrap();
     assert_eq!(envelope["senderTaskName"], "child");
     assert!(envelope.get("senderAgentId").is_none());
-    assert_eq!(envelope["payloadTruncated"], true);
-    assert!(
-        first.content.len() <= crate::conversation_trace::AGENT_MAILBOX_MODEL_ENVELOPE_MAX_BYTES
+    assert_eq!(envelope["payloadTruncated"], false);
+    assert_eq!(
+        envelope["payload"],
+        format!("first:{}", "协作🙂".repeat(160_000))
+    );
+    assert!(first.content.len() > MAX_SAFE_BOUNDARY_MODEL_BYTES);
+    append_wait_tool_call(
+        &connection,
+        "conversation-root",
+        "run-wait-oversized",
+        "assistant-wait-oversized",
+        "wait-small-next",
+        144,
+    );
+    let next = poll_wait_ready(
+        &mut connection,
+        &wait_input(
+            "agent-root",
+            "conversation-root",
+            "run-wait-oversized",
+            "assistant-wait-oversized",
+            2,
+            &["agent-child", "agent-grand"],
+        ),
+        145,
+    )
+    .unwrap()
+    .unwrap();
+    let messages = next
+        .targets
+        .iter()
+        .flat_map(|target| target.messages.iter())
+        .collect::<Vec<_>>();
+    assert_eq!(messages.len(), 1);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&messages[0].content).unwrap()["payload"],
+        "second"
     );
 
     let too_many = PollAgentWaitInput {
@@ -1842,7 +1904,6 @@ fn mailbox_unbound_count_quota_is_typed_idempotent_and_delete_protected() {
             terminal_status: AgentWakeStatus::Completed,
             run_id: None,
             assistant_message_id: None,
-            summary: "terminal result still persists".into(),
             terminal_error: None,
         },
         106,

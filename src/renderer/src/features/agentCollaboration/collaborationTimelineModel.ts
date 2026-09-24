@@ -7,8 +7,10 @@ export interface CollaborationTimelineActivity {
   activityId: string
   agentId: string
   occurredAt: number
-  rootAnchorMessageId: string | null
-  rootTraceBoundarySequence: number | null
+  parentAgentId: string
+  parentConversationId: string
+  anchorMessageId: string | null
+  traceBoundarySequence: number | null
   runId: string | null
   semantic: CollaborationActivitySemantic
   sequence: number
@@ -17,9 +19,11 @@ export interface CollaborationTimelineActivity {
 }
 
 export interface CollaborationTimelineActivityGroup {
+  parentAgentId: string
+  parentConversationId: string
   activities: readonly CollaborationTimelineActivity[]
-  rootAnchorMessageId: string | null
-  rootTraceBoundarySequence: number | null
+  anchorMessageId: string | null
+  traceBoundarySequence: number | null
   semantic: CollaborationActivitySemantic
 }
 
@@ -30,6 +34,7 @@ export interface CollaborationTimelineMessageReference {
 export interface CollaborationTimelineMessageProjection {
   anchoredMessage: ReadonlyMap<string, readonly CollaborationTimelineActivity[]>
   beforeMessage: ReadonlyMap<string, readonly CollaborationTimelineActivity[]>
+  afterMessage: ReadonlyMap<string, readonly CollaborationTimelineActivity[]>
   tail: readonly CollaborationTimelineActivity[]
 }
 
@@ -49,17 +54,21 @@ function canMerge(
   activity: CollaborationTimelineActivity
 ): boolean {
   const sharesAnchoredAssistantRun =
-    group.rootAnchorMessageId !== null && group.rootAnchorMessageId === activity.rootAnchorMessageId
+    group.anchorMessageId !== null &&
+    group.traceBoundarySequence !== null &&
+    activity.traceBoundarySequence !== null &&
+    group.anchorMessageId === activity.anchorMessageId
   return (
+    group.parentAgentId === activity.parentAgentId &&
+    group.parentConversationId === activity.parentConversationId &&
     group.semantic === activity.semantic &&
-    group.rootAnchorMessageId === activity.rootAnchorMessageId &&
-    (sharesAnchoredAssistantRun ||
-      group.rootTraceBoundarySequence === activity.rootTraceBoundarySequence)
+    group.anchorMessageId === activity.anchorMessageId &&
+    (sharesAnchoredAssistantRun || group.traceBoundarySequence === activity.traceBoundarySequence)
   )
 }
 
 /**
- * Produces the deterministic root Timeline projection from durable typed events.
+ * Produces the deterministic conversation Timeline projection from durable typed events.
  *
  * Terminal-result and generic-update deduplication belongs to the trusted backend semantic
  * projection. The Renderer only deduplicates stable event identities; it never guesses that a
@@ -103,9 +112,11 @@ export function groupCollaborationTimelineActivities(
     }
 
     groups.push({
+      parentAgentId: activity.parentAgentId,
+      parentConversationId: activity.parentConversationId,
       activities: [activity],
-      rootAnchorMessageId: activity.rootAnchorMessageId,
-      rootTraceBoundarySequence: activity.rootTraceBoundarySequence,
+      anchorMessageId: activity.anchorMessageId,
+      traceBoundarySequence: activity.traceBoundarySequence,
       semantic: activity.semantic
     })
   }
@@ -113,34 +124,45 @@ export function groupCollaborationTimelineActivities(
 }
 
 /**
- * Assigns root events to the shared Conversation timeline.
- *
- * The backend captures the root Assistant message and trace boundary in the same transaction as
- * an activity only while that root Turn is still in progress. An activity committed after the
- * parent Turn settles is deliberately durable but unanchored: it continues to invalidate Agent
- * Center/detail state and must not append to or rewrite the frozen root chat Timeline.
- *
- * Consequently there is no timestamp or notification-arrival fallback here. A paired durable
- * anchor that resolves to a message in this exact Conversation is the only inline authority. A
- * notification delivered after settlement still renders when its event was causally committed
- * before settlement and therefore carries that durable anchor.
+ * Routes an event only to its direct parent's conversation using its transactionally committed
+ * message/trace boundary. Missing messages are not guessed from wall clocks or notification order.
+ * A null trace denotes the gap after a committed message; a null anchor denotes before any message.
  */
 export function projectCollaborationTimelineActivities(
   input: readonly CollaborationTimelineActivity[],
-  messages: readonly CollaborationTimelineMessageReference[]
+  messages: readonly CollaborationTimelineMessageReference[],
+  conversationId: string,
+  directChildAgentIds?: readonly string[]
 ): CollaborationTimelineMessageProjection {
   const normalized = normalizeCollaborationTimelineActivities(input)
   const messageIds = new Set(messages.map((message) => message.id))
   const anchoredMessage = new Map<string, CollaborationTimelineActivity[]>()
+  const beforeMessage = new Map<string, CollaborationTimelineActivity[]>()
+  const afterMessage = new Map<string, CollaborationTimelineActivity[]>()
+  const tail: CollaborationTimelineActivity[] = []
   for (const activity of normalized) {
-    const anchor = activity.rootAnchorMessageId
-    if (anchor === null || activity.rootTraceBoundarySequence === null || !messageIds.has(anchor)) {
+    if (
+      activity.parentConversationId !== conversationId ||
+      (directChildAgentIds !== undefined && !directChildAgentIds.includes(activity.agentId))
+    )
+      continue
+    const anchor = activity.anchorMessageId
+    if (anchor === null) {
+      if (activity.traceBoundarySequence !== null) continue
+      const firstMessageId = messages[0]?.id
+      if (firstMessageId) {
+        const slot = beforeMessage.get(firstMessageId) ?? []
+        slot.push(activity)
+        beforeMessage.set(firstMessageId, slot)
+      } else tail.push(activity)
       continue
     }
-    const slot = anchoredMessage.get(anchor) ?? []
+    if (!messageIds.has(anchor)) continue
+    const destination = activity.traceBoundarySequence === null ? afterMessage : anchoredMessage
+    const slot = destination.get(anchor) ?? []
     slot.push(activity)
-    anchoredMessage.set(anchor, slot)
+    destination.set(anchor, slot)
   }
 
-  return { anchoredMessage, beforeMessage: new Map(), tail: [] }
+  return { anchoredMessage, beforeMessage, afterMessage, tail }
 }

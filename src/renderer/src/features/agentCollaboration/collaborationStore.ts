@@ -8,11 +8,7 @@ export const MAX_COLLABORATION_TIMELINE_ACTIVITIES = 2_048
 class CollaborationEventGapError extends Error {}
 
 export interface CollaborationStoreSnapshot {
-  /**
-   * Bounded, paired durable activity anchors rebuilt for root-chat history. Unanchored semantic
-   * facts still advance the log cursor and per-Agent invalidation state, but cannot consume this
-   * window or alter a frozen root Timeline.
-   */
+  /** Durable activity by direct parent; completed inline history also lives in message snapshots. */
   activities: readonly CollaborationTimelineActivity[]
   /** Latest validated durable invalidation sequence for each Agent in this root tree. */
   agentInvalidationSequences: Readonly<Record<string, number>>
@@ -25,8 +21,8 @@ export interface CollaborationStoreSnapshot {
 
 /**
  * Root-scoped Agent index and semantic-activity store. Conversation messages remain owned by the
- * chat store; this class hydrates tree/display state plus the bounded typed activity projection
- * and closes notification gaps from the durable log.
+ * chat store; this class hydrates tree/display state plus a bounded semantic
+ * activity projection and closes notification gaps from the durable log.
  */
 export class CollaborationStore {
   private catchUpRequested = false
@@ -266,23 +262,23 @@ export class CollaborationStore {
         }
         cursor = event.sequence
         invalidationSequences[event.agentId] = event.sequence
-        if (
-          event.activity &&
-          event.activity.rootAnchorMessageId !== null &&
-          event.activity.rootTraceBoundarySequence !== null
-        ) {
-          activities.push({
+        if (event.activity) {
+          invalidationSequences[event.activity.parentAgentId] = event.sequence
+          const activity: CollaborationTimelineActivity = {
             activityId: event.eventId,
             agentId: event.activity.agentId,
             occurredAt: event.occurredAt,
-            rootAnchorMessageId: event.activity.rootAnchorMessageId,
-            rootTraceBoundarySequence: event.activity.rootTraceBoundarySequence,
+            parentAgentId: event.activity.parentAgentId,
+            parentConversationId: event.activity.parentConversationId,
+            anchorMessageId: event.activity.anchorMessageId,
+            traceBoundarySequence: event.activity.traceBoundarySequence,
             runId: event.runId,
             semantic: event.activity.semantic,
             sequence: event.sequence,
             taskNameSnapshot: event.activity.taskNameSnapshot,
             turnId: event.turnId
-          })
+          }
+          activities.push(activity)
         }
       }
       activities = boundActivities(activities)
@@ -315,7 +311,16 @@ function boundActivities(
 ): CollaborationTimelineActivity[] {
   const byEventId = new Map<string, CollaborationTimelineActivity>()
   for (const activity of activities) byEventId.set(activity.activityId, activity)
-  return [...byEventId.values()]
-    .sort((left, right) => left.sequence - right.sequence)
-    .slice(-MAX_COLLABORATION_TIMELINE_ACTIVITIES)
+  const ordered = [...byEventId.values()].sort((left, right) => left.sequence - right.sequence)
+  // Inline history is frozen into settled message snapshots. Between-message events have no run
+  // snapshot, so keep them when trimming the live inline window, including across rehydration.
+  const orderedInlineCount = ordered.filter(
+    (activity) => activity.traceBoundarySequence !== null
+  ).length
+  let inlineCount = 0
+  return ordered.filter((activity) => {
+    if (activity.traceBoundarySequence === null) return true
+    inlineCount += 1
+    return inlineCount > orderedInlineCount - MAX_COLLABORATION_TIMELINE_ACTIVITIES
+  })
 }

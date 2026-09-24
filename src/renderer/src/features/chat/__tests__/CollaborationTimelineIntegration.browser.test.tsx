@@ -150,14 +150,16 @@ function activity(
   semantic: CollaborationTimelineActivity['semantic'],
   sequence: number,
   occurredAt: number,
-  rootAnchorMessageId: string | null
+  anchorMessageId: string | null
 ): CollaborationTimelineActivity {
   return {
     activityId,
     agentId: 'agent-reviewer',
     occurredAt,
-    rootAnchorMessageId,
-    rootTraceBoundarySequence: rootAnchorMessageId === null ? null : sequence,
+    parentAgentId: 'root:root-conversation',
+    parentConversationId: 'root-conversation',
+    anchorMessageId,
+    traceBoundarySequence: anchorMessageId === null ? null : sequence,
     runId: `run-${sequence}`,
     semantic,
     sequence,
@@ -174,8 +176,7 @@ function freezeTerminalActivities(
   if (!run) throw new Error('missing root run fixture')
   run.collaborationTimelineActivities = activities.filter(
     (candidate) =>
-      candidate.rootAnchorMessageId === 'root-assistant-1' &&
-      candidate.rootTraceBoundarySequence !== null
+      candidate.anchorMessageId === 'root-assistant-1' && candidate.traceBoundarySequence !== null
   )
   return target
 }
@@ -186,7 +187,10 @@ it('merges only trusted anchored activity into the message timeline', async () =
   const screen = await render(
     <ChatMessageList
       collaborationTimelineActivities={[
-        activity('event-unanchored', 'updated', 2, 3_000, null),
+        {
+          ...activity('event-grandchild', 'updated', 2, 3_000, null),
+          parentConversationId: 'child-conversation'
+        },
         anchored
       ]}
       conversation={freezeTerminalActivities(expandedConversation(), [anchored])}
@@ -218,7 +222,7 @@ it('merges only trusted anchored activity into the message timeline', async () =
   ).toBeVisible()
 })
 
-it('does not append or rewrite inline state when post-terminal activity arrives unanchored', async () => {
+it('places post-terminal activity after the reply and before the next message', async () => {
   const startedBeforeTerminal = activity(
     'started-before-terminal',
     'started',
@@ -246,7 +250,10 @@ it('does not append or rewrite inline state when post-terminal activity arrives 
     <ChatMessageList
       collaborationTimelineActivities={[
         startedBeforeTerminal,
-        activity('completed-after-terminal', 'completed', 2, 4_500, null)
+        {
+          ...activity('completed-after-terminal', 'completed', 2, 4_500, 'root-assistant-1'),
+          traceBoundarySequence: null
+        }
       ]}
       conversation={settled}
       editableLastUserMessageId={null}
@@ -258,26 +265,115 @@ it('does not append or rewrite inline state when post-terminal activity arrives 
   )
 
   expect(screen.container.querySelectorAll('[data-semantic="started"]')).toHaveLength(1)
-  expect(screen.container.querySelectorAll('[data-semantic="completed"]')).toHaveLength(0)
+  const completed = screen.container.querySelector('[data-semantic="completed"]')!
+  const assistant = screen.container.querySelector('[data-message-id="root-assistant-1"]')!
+  const nextUser = screen.container.querySelector('[data-message-id="root-user-2"]')!
+  expect(assistant.contains(completed)).toBe(false)
+  expect(
+    assistant.compareDocumentPosition(completed) & Node.DOCUMENT_POSITION_FOLLOWING
+  ).toBeTruthy()
+  expect(
+    completed.compareDocumentPosition(nextUser) & Node.DOCUMENT_POSITION_FOLLOWING
+  ).toBeTruthy()
 })
 
-it('keeps root collaboration activity out of the child observer capability mode', async () => {
-  const rootActivity = activity('event-root-only', 'started', 1, 2_500, 'root-assistant-1')
+it('places an observer’s direct-child status inline and completion between turns', async () => {
+  const onOpenAgent = vi.fn()
+  const started = {
+    ...activity('event-child-started', 'started', 2, 2_500, 'root-assistant-1'),
+    parentAgentId: 'parent-agent',
+    parentConversationId: 'child-conversation'
+  }
+  const completed = {
+    ...started,
+    activityId: 'event-child-completed',
+    sequence: 3,
+    semantic: 'completed' as const,
+    traceBoundarySequence: null
+  }
+  const observer = freezeTerminalActivities(expandedConversation(), [started])
+  observer.id = 'child-conversation'
+  const siblingEvent = activity('event-sibling', 'failed', 4, 9_000, 'root-assistant-1')
+  // Both live and terminal projections reject another parent’s events, even with a matching ID.
+  observer.messages[1]!.agentRun!.collaborationTimelineActivities!.push(siblingEvent)
   const screen = await render(
-    <ChatMessageList
-      collaborationTimelineActivities={[rootActivity]}
-      conversation={freezeTerminalActivities(conversation(), [rootActivity])}
-      editableLastUserMessageId={null}
-      editSelectedModelAvailable={false}
-      editSelectedModelSupportsImage={false}
-      mode="observer"
-      onOpenCollaborationAgent={vi.fn()}
-      showTokenUsageDetails={false}
-    />
+    <div className="chat-conversation-page__messages">
+      <ChatMessageList
+        collaborationTimelineActivities={[started, completed, siblingEvent]}
+        conversation={observer}
+        editableLastUserMessageId={null}
+        editSelectedModelAvailable={false}
+        editSelectedModelSupportsImage={false}
+        mode="observer"
+        onOpenCollaborationAgent={onOpenAgent}
+        showTokenUsageDetails={false}
+      />
+    </div>
   )
 
-  expect(screen.container.querySelector('[data-testid="collaboration-timeline"]')).toBeNull()
+  const statuses = screen.container.querySelectorAll('[data-semantic]')
+  expect(Array.from(statuses, (status) => status.getAttribute('data-semantic'))).toEqual([
+    'started',
+    'completed'
+  ])
+  const assistant = screen.container.querySelector('[data-message-id="root-assistant-1"]')!
+  const before = screen.getByText('I will delegate the review.').element()
+  const after = screen.getByText('I continued after delegation.').element()
+  expect(assistant.contains(statuses[0]!)).toBe(true)
+  expect(
+    before.compareDocumentPosition(statuses[0]!) & Node.DOCUMENT_POSITION_FOLLOWING
+  ).toBeTruthy()
+  expect(
+    statuses[0]!.compareDocumentPosition(after) & Node.DOCUMENT_POSITION_FOLLOWING
+  ).toBeTruthy()
+  expect(assistant.contains(statuses[1]!)).toBe(false)
+  await userEvent.click(screen.getByRole('button', { name: 'View sub-agent Reviewer: Completed' }))
+  expect(onOpenAgent).toHaveBeenCalledWith('agent-reviewer')
 })
+
+it.each(['interactive', 'observer'] as const)(
+  'hides inherited fork activities outside the authoritative direct children in %s mode',
+  async (mode) => {
+    const stale = {
+      ...activity('inherited-event', 'failed', 1, 1_000, 'root-assistant-1'),
+      agentId: 'old-tree-child',
+      parentAgentId: 'old-root-agent',
+      parentConversationId: 'fork-conversation',
+      taskNameSnapshot: 'Old child'
+    }
+    const current = {
+      ...activity('current-event', 'started', 2, 2_000, 'root-assistant-1'),
+      agentId: 'current-child',
+      parentAgentId: 'current-root-agent',
+      parentConversationId: 'fork-conversation',
+      taskNameSnapshot: 'Current child'
+    }
+    const fork = freezeTerminalActivities(expandedConversation(), [stale, current])
+    fork.id = 'fork-conversation'
+    const activities = [
+      stale,
+      current,
+      { ...stale, activityId: 'inherited-gap', traceBoundarySequence: null }
+    ]
+    const props = {
+      conversation: fork,
+      collaborationTimelineActivities: activities,
+      editableLastUserMessageId: null,
+      editSelectedModelAvailable: false,
+      editSelectedModelSupportsImage: false,
+      mode,
+      onOpenCollaborationAgent: vi.fn(),
+      showTokenUsageDetails: false
+    }
+    const screen = await render(<ChatMessageList {...props} directChildAgentIds={[]} />)
+    expect(screen.container.querySelectorAll('[data-semantic]')).toHaveLength(0)
+
+    await screen.rerender(<ChatMessageList {...props} directChildAgentIds={['current-child']} />)
+    expect(screen.container.querySelectorAll('[data-semantic]')).toHaveLength(1)
+    expect(screen.container.querySelector('[data-agent-id="current-child"]')).not.toBeNull()
+    expect(screen.container.querySelector('[data-agent-id="old-tree-child"]')).toBeNull()
+  }
+)
 
 it('freezes live activity at its arrival boundary while later root narration keeps streaming', async () => {
   const initial = structuredClone(conversation())
@@ -470,7 +566,49 @@ it('keeps the frozen pre-final activity in place and ignores a late live termina
   expect(screen.getByText('I finished the root response.').elements()).toHaveLength(1)
 })
 
-it('folds anchored activity with the execution timeline and omits unanchored activity', async () => {
+it.each([false, true])(
+  'preserves status on both sides of final streaming after reload (timeline final: %s)',
+  async (hasTimelineFinal) => {
+    const beforeFinal = activity('event-before-final', 'updated', 4, 10_000, 'root-assistant-1')
+    const duringFinal = {
+      ...activity('event-during-final', 'updated', 6, 1_000, 'root-assistant-1'),
+      traceBoundarySequence: beforeFinal.traceBoundarySequence
+    }
+    const settled = freezeTerminalActivities(expandedConversation(), [beforeFinal, duringFinal])
+    const run = settled.messages[1]!.agentRun!
+    run.collaborationFinalResponseBoundary = 5
+    if (hasTimelineFinal) {
+      run.timeline.push({
+        id: 'trace-final-stream',
+        type: 'message',
+        content: 'I finished the root response.'
+      })
+    }
+    const screen = await render(
+      <ChatMessageList
+        conversation={settled}
+        collaborationTimelineActivities={[]}
+        editableLastUserMessageId={null}
+        editSelectedModelAvailable
+        editSelectedModelSupportsImage
+        onOpenCollaborationAgent={vi.fn()}
+        showTokenUsageDetails={false}
+      />
+    )
+    const statuses = screen.container.querySelectorAll('[data-semantic="updated"]')
+    const finalAnswer = screen.getByText('I finished the root response.').element()
+    expect(statuses).toHaveLength(2)
+    expect(
+      statuses[0]!.compareDocumentPosition(finalAnswer) & Node.DOCUMENT_POSITION_FOLLOWING
+    ).toBeTruthy()
+    expect(
+      finalAnswer.compareDocumentPosition(statuses[1]!) & Node.DOCUMENT_POSITION_FOLLOWING
+    ).toBeTruthy()
+    expect(screen.getByText('I finished the root response.').elements()).toHaveLength(1)
+  }
+)
+
+it('folds inline activity with the execution timeline and excludes another parent’s events', async () => {
   const grouped = structuredClone(conversation())
   const run = grouped.messages[1]?.agentRun
   if (!run) throw new Error('missing root run fixture')
@@ -522,7 +660,10 @@ it('folds anchored activity with the execution timeline and omits unanchored act
   const onMessageUiStateChange = vi.fn()
   const activities = [
     activity('event-between-read-tools', 'started', 1, 2_100, 'root-assistant-1'),
-    activity('event-unanchored-followup', 'updated', 2, 4_500, null)
+    {
+      ...activity('event-other-parent', 'updated', 2, 4_500, null),
+      parentConversationId: 'other-parent'
+    }
   ]
   run.collaborationTimelineActivities = [activities[0]!]
   const screen = await render(
@@ -634,7 +775,7 @@ it('coalesces consecutive same-status Harness activity across hidden trace bound
   const activities = ['agent-a', 'agent-b', 'agent-c'].map((agentId, index) => ({
     ...activity(`event-${agentId}`, 'started', index + 1, 2_100 + index, 'root-assistant-1'),
     agentId,
-    rootTraceBoundarySequence: index + 2,
+    traceBoundarySequence: index + 2,
     taskNameSnapshot: `Worker ${index + 1}`
   }))
   run.collaborationTimelineActivities = activities

@@ -681,8 +681,10 @@ it('persists and restores the Host-frozen collaboration Timeline snapshot', () =
       activityId: 'event-reviewer-updated',
       agentId: 'agent-reviewer',
       occurredAt: 8,
-      rootAnchorMessageId: 'assistant-current',
-      rootTraceBoundarySequence: 3,
+      parentAgentId: 'root:root-conversation',
+      parentConversationId: 'root-conversation',
+      anchorMessageId: 'assistant-current',
+      traceBoundarySequence: 3,
       runId: 'run-reviewer',
       semantic: 'updated' as const,
       sequence: 4,
@@ -691,11 +693,15 @@ it('persists and restores the Host-frozen collaboration Timeline snapshot', () =
     }
   ]
   const encoded = stringifyPersistedAgentRun(
-    currentStoredRun({ collaborationTimelineActivities }) as ChatAgentRunView
+    currentStoredRun({
+      collaborationTimelineActivities,
+      collaborationFinalResponseBoundary: 4
+    }) as ChatAgentRunView
   )
   const restored = parsePersistedAgentRun(JSON.parse(encoded ?? ''))
 
   expect(restored?.collaborationTimelineActivities).toEqual(collaborationTimelineActivities)
+  expect(restored?.collaborationFinalResponseBoundary).toBe(4)
   expect(
     parsePersistedAgentRun(
       currentStoredRun({

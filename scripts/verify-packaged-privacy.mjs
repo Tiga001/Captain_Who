@@ -37,11 +37,21 @@ const ASAR_CREDENTIALED_URL_FIXTURES = new Map([
 ])
 // These exact dummy credentials ship in pinned upstream runtime/parser fixtures. An actual value
 // cannot inherit the exception by changing either its full URL or its packaged file.
+const ELECTRON_FRAMEWORK_CREDENTIALED_URL_FIXTURES = new Set([
+  'http://a@b@c/',
+  'http://a@b?@c',
+  'https://user:pass@host/',
+  // A public Chromium proposal URL; its @ is a path segment, not credentials.
+  'https://hackmd.io/@kangz/bindless-proposal'
+])
 const PACKAGED_CREDENTIALED_URL_FIXTURES = new Map([
-  [
+  // The framework binary has three paths in a macOS framework bundle; each points to the same
+  // upstream Electron bytes and must receive the same narrow fixture treatment.
+  ...[
+    'Contents/Frameworks/Electron Framework.framework/Electron Framework',
     'Contents/Frameworks/Electron Framework.framework/Versions/A/Electron Framework',
-    new Set(['http://a@b@c/', 'http://a@b?@c', 'https://user:pass@host/'])
-  ],
+    'Contents/Frameworks/Electron Framework.framework/Versions/Current/Electron Framework'
+  ].map((path) => [path, ELECTRON_FRAMEWORK_CREDENTIALED_URL_FIXTURES]),
   [
     'Contents/Resources/components/office-renderer/browser/chrome-headless-shell-mac-arm64/chrome-headless-shell',
     new Set(['https://user:pass@host/'])

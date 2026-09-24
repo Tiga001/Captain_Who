@@ -86,11 +86,7 @@ impl AgentService {
         terminal_error: Option<&str>,
     ) -> Result<TerminalConversationTraceProjection, String> {
         let snapshot = self
-            .trace_snapshots
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .get(run_id)
-            .cloned()
+            .terminal_source_snapshot(run_id, conversation_id, assistant_message_id)?
             .unwrap_or_default();
         match terminal_error {
             Some(terminal_error) => cancelled_conversation_trace_from_snapshot_with_terminal_error(
@@ -118,12 +114,8 @@ impl AgentService {
         assistant_message_id: &str,
         terminal_error: &str,
     ) -> Result<Option<TerminalConversationTraceProjection>, String> {
-        let snapshot = self
-            .trace_snapshots
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .get(run_id)
-            .cloned();
+        let snapshot =
+            self.terminal_source_snapshot(run_id, conversation_id, assistant_message_id)?;
         snapshot
             .map(|snapshot| {
                 terminal_conversation_trace_from_snapshot(
@@ -136,6 +128,57 @@ impl AgentService {
                 )
             })
             .transpose()
+    }
+
+    /// Preserve Host-precommitted tool results when a later Runtime projection fails. The
+    /// append-only journal remains authoritative; an unpublished conflicting snapshot must not
+    /// replace a successful result with a synthetic failure or cancellation during cleanup.
+    fn terminal_source_snapshot(
+        &self,
+        run_id: &str,
+        conversation_id: &str,
+        assistant_message_id: &str,
+    ) -> Result<Option<ConversationTraceSnapshot>, String> {
+        let snapshot = self
+            .trace_snapshots
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(run_id)
+            .cloned();
+        let Some(trace) = self
+            .storage
+            .get_conversation_turn_trace(assistant_message_id)?
+        else {
+            return Ok(snapshot);
+        };
+        if trace.run_id != run_id || trace.conversation_id != conversation_id {
+            return Err("Terminal trace does not belong to the retiring run.".to_string());
+        }
+        let model_context_items = self
+            .storage
+            .get_conversation_model_context_log(assistant_message_id)?
+            .map(|log| log.items)
+            .unwrap_or_default();
+        if snapshot.as_ref().is_some_and(|snapshot| {
+            snapshot.items.starts_with(&trace.items)
+                && snapshot
+                    .model_context_items
+                    .starts_with(&model_context_items)
+                && (!trace.truncated || snapshot.truncated)
+        }) {
+            return Ok(snapshot);
+        }
+        let next_sequence = trace
+            .items
+            .last()
+            .map(|item| item.sequence().saturating_add(1))
+            .unwrap_or(0);
+        Ok(Some(ConversationTraceSnapshot {
+            items: trace.items,
+            model_context_items,
+            next_sequence,
+            truncated: trace.truncated,
+        }))
     }
 
     pub(super) fn persist_forced_cancelled_runs(&self, run_ids: &[String]) {

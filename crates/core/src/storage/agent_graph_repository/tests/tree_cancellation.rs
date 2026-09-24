@@ -505,7 +505,6 @@ fn interrupted_grandchild_reports_result_without_reawakening_its_active_parent()
             terminal_status: AgentWakeStatus::Interrupted,
             run_id: Some("run-interrupted-grand".to_string()),
             assistant_message_id: Some("assistant-interrupted-grand".to_string()),
-            summary: "interrupted by the root cancellation".to_string(),
             terminal_error: Some("cancelled".to_string()),
         },
         28,
@@ -535,7 +534,6 @@ fn interrupted_grandchild_reports_result_without_reawakening_its_active_parent()
             terminal_status: AgentWakeStatus::Interrupted,
             run_id: Some("run-interrupted-grand".to_string()),
             assistant_message_id: Some("assistant-interrupted-grand".to_string()),
-            summary: "interrupted by the root cancellation".to_string(),
             terminal_error: Some("cancelled".to_string()),
         },
         29,
@@ -910,7 +908,6 @@ fn covered_completed_grandchild_reports_result_without_creating_parent_wake() {
         terminal_status: AgentWakeStatus::Completed,
         run_id: rebound.run_id.clone(),
         assistant_message_id: rebound.assistant_message_id.clone(),
-        summary: "completed while cancellation was being delivered".to_string(),
         terminal_error: None,
     };
     let settled = finish_agent_turn_with_result(&mut connection, &finish, 100_001).unwrap();
@@ -1300,7 +1297,6 @@ fn restart_recovers_a_fenced_waiting_turn_as_interrupted_without_parent_wake() {
             terminal_status: AgentWakeStatus::Interrupted,
             run_id: rebound.run_id.clone(),
             assistant_message_id: rebound.assistant_message_id.clone(),
-            summary: "stopped root tree was not resumed".to_string(),
             terminal_error: Some("root Agent tree was stopped".to_string()),
         },
         100_001,

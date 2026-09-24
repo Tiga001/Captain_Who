@@ -10,7 +10,7 @@ import { parsePendingAgentActionSnapshotsForHost } from './agentParsers/pendingA
 
 export const AGENT_COLLABORATION_SCHEMA_VERSION = 1 as const
 export const AGENT_COLLABORATION_EVENT_SCHEMA_VERSION = 2 as const
-export const AGENT_COLLABORATION_ACTIVITY_SCHEMA_VERSION = 2 as const
+export const AGENT_COLLABORATION_ACTIVITY_SCHEMA_VERSION = 3 as const
 
 export const AGENT_COLLABORATION_GET_SETTINGS_METHOD = 'agent.collaboration.settings.get'
 export const AGENT_COLLABORATION_UPDATE_SETTINGS_METHOD = 'agent.collaboration.settings.update'
@@ -208,6 +208,26 @@ export interface AgentObserverConversation {
   createdAt: number
   updatedAt: number
   messages: AgentObserverMessage[]
+  /** Process-local text at the same read cut as the persisted conversation. */
+  liveStream?: AgentObserverLiveStreamSnapshot
+}
+
+export interface AgentObserverStreamCursor {
+  generation: string
+  sequence: number
+}
+
+export interface AgentObserverLiveStreamSnapshot {
+  runId: string
+  assistantMessageId: string
+  cursor: AgentObserverStreamCursor
+  stream: {
+    streamId: string
+    attempt: number
+    content: string
+    traceBoundarySequence: number
+    committed: boolean
+  } | null
 }
 
 export type CollaborationEventKind =
@@ -231,10 +251,13 @@ export interface CollaborationActivitySnapshot {
   /** Presentation subject; the outer event agent remains the invalidation subject. */
   agentId: string
   taskNameSnapshot: string
-  /** Trusted assistant message in the root Conversation, or null when no such identity exists. */
-  rootAnchorMessageId: string | null
-  /** Insert before the first backend-owned root Timeline item at or after this trace sequence. */
-  rootTraceBoundarySequence: number | null
+  /** Direct parent and the only Conversation that presents this activity. */
+  parentAgentId: string
+  parentConversationId: string
+  /** Parent message containing or preceding the activity; null means before its first message. */
+  anchorMessageId: string | null
+  /** Insert inside the active parent trace at this boundary; null means after the anchor message. */
+  traceBoundarySequence: number | null
 }
 
 export interface CollaborationEventEnvelope {
@@ -272,6 +295,7 @@ export interface AgentObserverEventEnvelope {
   runId: string
   assistantMessageId: string
   event: AgentEvent
+  streamCursor?: AgentObserverStreamCursor
 }
 
 export interface CollaborationEventsRequest extends AgentTreeRequest {
@@ -799,6 +823,54 @@ function parseObserverOrigin(value: unknown, context: string): AgentObserverInpu
   return parsed
 }
 
+function parseObserverStreamCursor(value: unknown): AgentObserverStreamCursor {
+  const item = record(value, 'AgentObserverStreamCursor')
+  exact(item, ['generation', 'sequence'], 'AgentObserverStreamCursor')
+  return {
+    generation: text(item.generation, 'AgentObserverStreamCursor.generation'),
+    sequence: integer(item.sequence, 'AgentObserverStreamCursor.sequence', 1)
+  }
+}
+
+function parseObserverLiveStream(value: unknown): AgentObserverLiveStreamSnapshot {
+  const item = record(value, 'AgentObserverLiveStreamSnapshot')
+  exact(
+    item,
+    ['runId', 'assistantMessageId', 'cursor', 'stream'],
+    'AgentObserverLiveStreamSnapshot'
+  )
+  let stream: AgentObserverLiveStreamSnapshot['stream'] = null
+  if (item.stream !== null) {
+    const value = record(item.stream, 'AgentObserverLiveStream')
+    exact(
+      value,
+      ['streamId', 'attempt', 'content', 'traceBoundarySequence', 'committed'],
+      'AgentObserverLiveStream'
+    )
+    if (typeof value.content !== 'string')
+      throw new Error('Invalid AgentObserverLiveStream.content')
+    stream = {
+      streamId: text(value.streamId, 'AgentObserverLiveStream.streamId', 1_024),
+      attempt: integer(value.attempt, 'AgentObserverLiveStream.attempt', 1),
+      content: value.content,
+      traceBoundarySequence: integer(
+        value.traceBoundarySequence,
+        'AgentObserverLiveStream.traceBoundarySequence'
+      ),
+      committed: bool(value.committed, 'AgentObserverLiveStream.committed')
+    }
+  }
+  return {
+    runId: text(item.runId, 'AgentObserverLiveStreamSnapshot.runId'),
+    assistantMessageId: text(
+      item.assistantMessageId,
+      'AgentObserverLiveStreamSnapshot.assistantMessageId'
+    ),
+    cursor: parseObserverStreamCursor(item.cursor),
+    stream
+  }
+}
+
 export function parseAgentObserverConversation(value: unknown): AgentObserverConversation | null {
   if (value === null) return null
   const item = record(value, 'AgentObserverConversation')
@@ -814,14 +886,18 @@ export function parseAgentObserverConversation(value: unknown): AgentObserverCon
       'title',
       'createdAt',
       'updatedAt',
-      'messages'
+      'messages',
+      ...('liveStream' in item ? ['liveStream'] : [])
     ],
     'AgentObserverConversation'
   )
   if (!Array.isArray(item.messages) || item.messages.length > 100_000) {
     throw new Error('Invalid AgentObserverConversation.messages')
   }
-  return {
+  const parsed: AgentObserverConversation = {
+    ...(item.liveStream === undefined
+      ? {}
+      : { liveStream: parseObserverLiveStream(item.liveStream) }),
     schemaVersion: schema(item.schemaVersion, 'AgentObserverConversation'),
     agentId: text(item.agentId, 'agentId'),
     rootConversationId: text(item.rootConversationId, 'rootConversationId'),
@@ -937,6 +1013,20 @@ export function parseAgentObserverConversation(value: unknown): AgentObserverCon
       }
     })
   }
+  if (
+    parsed.liveStream &&
+    !parsed.messages.some(
+      (message) =>
+        message.messageId === parsed.liveStream!.assistantMessageId &&
+        message.role === 'assistant' &&
+        message.agentRunJson !== null &&
+        (JSON.parse(message.agentRunJson) as { runId?: unknown })?.runId ===
+          parsed.liveStream!.runId
+    )
+  ) {
+    throw new Error('Invalid AgentObserverLiveStreamSnapshot message identity')
+  }
+  return parsed
 }
 
 export function parseCollaborationEventEnvelope(value: unknown): CollaborationEventEnvelope {
@@ -975,8 +1065,10 @@ export function parseCollaborationEventEnvelope(value: unknown): CollaborationEv
               'semantic',
               'agentId',
               'taskNameSnapshot',
-              'rootAnchorMessageId',
-              'rootTraceBoundarySequence'
+              'parentAgentId',
+              'parentConversationId',
+              'anchorMessageId',
+              'traceBoundarySequence'
             ],
             'CollaborationActivitySnapshot'
           )
@@ -1000,26 +1092,35 @@ export function parseCollaborationEventEnvelope(value: unknown): CollaborationEv
               'CollaborationActivitySnapshot.taskNameSnapshot',
               256
             ),
-            rootAnchorMessageId: nullableText(
-              snapshot.rootAnchorMessageId,
-              'CollaborationActivitySnapshot.rootAnchorMessageId'
+            parentAgentId: text(
+              snapshot.parentAgentId,
+              'CollaborationActivitySnapshot.parentAgentId'
             ),
-            rootTraceBoundarySequence:
-              snapshot.rootTraceBoundarySequence === null
+            parentConversationId: text(
+              snapshot.parentConversationId,
+              'CollaborationActivitySnapshot.parentConversationId'
+            ),
+            anchorMessageId: nullableText(
+              snapshot.anchorMessageId,
+              'CollaborationActivitySnapshot.anchorMessageId'
+            ),
+            traceBoundarySequence:
+              snapshot.traceBoundarySequence === null
                 ? null
                 : integer(
-                    snapshot.rootTraceBoundarySequence,
-                    'CollaborationActivitySnapshot.rootTraceBoundarySequence',
+                    snapshot.traceBoundarySequence,
+                    'CollaborationActivitySnapshot.traceBoundarySequence',
                     0
                   )
           } satisfies CollaborationActivitySnapshot
         })()
   if (
     activity !== null &&
-    (activity.rootAnchorMessageId === null) !== (activity.rootTraceBoundarySequence === null)
+    activity.anchorMessageId === null &&
+    activity.traceBoundarySequence !== null
   ) {
     throw new Error(
-      'Invalid CollaborationActivitySnapshot: root placement fields must be both present or both null'
+      'Invalid CollaborationActivitySnapshot: trace placement requires an anchor message'
     )
   }
   const parsed: CollaborationEventEnvelope = {
@@ -1059,6 +1160,19 @@ export function parseCollaborationEventEnvelope(value: unknown): CollaborationEv
     throw new Error('Invalid CollaborationEventEnvelope identity')
   }
   if (parsed.activity) {
+    const activity = parsed.activity
+    const parentIsRoot = activity.parentAgentId === parsed.rootAgentId
+    const parentConversationIsRoot = activity.parentConversationId === parsed.rootConversationId
+    const hasValidParent =
+      activity.parentAgentId !== activity.agentId &&
+      parentIsRoot === parentConversationIsRoot &&
+      (activity.semantic === 'updated'
+        ? activity.parentAgentId === parsed.agentId &&
+          activity.parentConversationId === parsed.conversationId
+        : activity.parentConversationId !== parsed.conversationId)
+    if (!hasValidParent) {
+      throw new Error('Invalid CollaborationEventEnvelope activity parent identity')
+    }
     const expectedKind: Readonly<Record<CollaborationActivitySemantic, CollaborationEventKind>> = {
       started: 'wake_created',
       updated: 'mailbox_enqueued',
@@ -1090,7 +1204,8 @@ export function parseAgentObserverEventEnvelope(value: unknown): AgentObserverEv
       'conversationId',
       'runId',
       'assistantMessageId',
-      'event'
+      'event',
+      ...('streamCursor' in item ? ['streamCursor'] : [])
     ],
     'AgentObserverEventEnvelope'
   )
@@ -1099,6 +1214,9 @@ export function parseAgentObserverEventEnvelope(value: unknown): AgentObserverEv
   const boundEvent: AgentEvent =
     event.type === 'error' && event.runId === undefined ? { ...event, runId } : event
   const parsed: AgentObserverEventEnvelope = {
+    ...(item.streamCursor === undefined
+      ? {}
+      : { streamCursor: parseObserverStreamCursor(item.streamCursor) }),
     schemaVersion: schema(item.schemaVersion, 'AgentObserverEventEnvelope'),
     rootAgentId: text(item.rootAgentId, 'rootAgentId'),
     rootConversationId: text(item.rootConversationId, 'rootConversationId'),

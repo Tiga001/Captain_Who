@@ -173,6 +173,7 @@ pub(super) fn model_request_interruption_event(
 }
 
 pub(super) fn emit_terminal_events_after_persistence_for_turn(
+    service: &AgentService,
     notifications: &CoreServerNotificationSender,
     gate: &AgentTerminalEventGate,
     output: &AgentChatOutput,
@@ -181,6 +182,7 @@ pub(super) fn emit_terminal_events_after_persistence_for_turn(
 ) {
     for event in gate.take_after_persistence(output) {
         emit_agent_event_notifications(
+            service,
             notifications,
             collaboration_identity,
             &output.run_id,

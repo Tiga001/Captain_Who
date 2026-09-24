@@ -1857,6 +1857,20 @@ fn message_deletion_blocks_pending_and_approved_processes_then_retires_terminal_
             .unwrap_or_else(|lock_error| lock_error.into_inner())
             .insert(run_id.to_string(), ConversationTraceSnapshot::default());
     }
+    super::deletion::seed_observer_stream(
+        &service,
+        "conversation-message-pending",
+        "conversation-message-root",
+        "run-message-pending",
+        "assistant-message-pending",
+    );
+    super::deletion::seed_observer_stream(
+        &service,
+        "conversation-observer-retained",
+        "conversation-observer-other-root",
+        "run-observer-retained",
+        "assistant-observer-retained",
+    );
     service
         .delete_chat_messages(
             "conversation-message-pending",
@@ -1888,6 +1902,10 @@ fn message_deletion_blocks_pending_and_approved_processes_then_retires_terminal_
         .unwrap_or_else(|lock_error| lock_error.into_inner());
     assert!(!trace_snapshots.contains_key("run-message-pending"));
     assert!(trace_snapshots.contains_key("run-message-retained"));
+    drop(trace_snapshots);
+    let streams = service.observer_streams.lock().unwrap();
+    assert!(!streams.contains_key("conversation-message-pending"));
+    assert!(streams.contains_key("conversation-observer-retained"));
 }
 
 #[test]

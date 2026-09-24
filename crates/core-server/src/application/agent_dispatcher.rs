@@ -252,7 +252,6 @@ pub(crate) enum AgentWakeExecutionObservation {
     RunningAfterApproval,
     Terminal {
         status: AgentWakeStatus,
-        summary: String,
         artifact_refs: Vec<AgentResultArtifactReference>,
         terminal_error: Option<String>,
     },
@@ -266,7 +265,6 @@ pub(crate) struct AgentWakeSettlement {
     pub(crate) terminal_status: AgentWakeStatus,
     pub(crate) run_id: Option<String>,
     pub(crate) assistant_message_id: Option<String>,
-    pub(crate) summary: String,
     pub(crate) artifact_refs: Vec<AgentResultArtifactReference>,
     pub(crate) terminal_error: Option<String>,
 }
@@ -475,7 +473,6 @@ impl AgentDispatcherStore for SqliteAgentDispatcherStore {
                     terminal_status: settlement.terminal_status,
                     run_id: settlement.run_id.clone(),
                     assistant_message_id: settlement.assistant_message_id.clone(),
-                    summary: settlement.summary.clone(),
                     terminal_error: settlement.terminal_error.clone(),
                 },
                 now_ms,
@@ -672,18 +669,8 @@ impl SharedAgentTurnExecutionPort {
                 Ok(None)
             }
             status => {
-                // Trace terminality is committed in the same transaction as the assistant
-                // message/model-context/Usage boundary. Loading the Conversation afterwards can
-                // therefore safely derive the concise child result without renderer events.
-                let conversation = self
-                    .storage
-                    .load_conversation(&handle.conversation_id)?
-                    .ok_or_else(|| "terminal child Conversation is missing".to_string())?;
-                let assistant = conversation
-                    .messages
-                    .iter()
-                    .find(|message| message.id == handle.assistant_message_id)
-                    .ok_or_else(|| "terminal child assistant message is missing".to_string())?;
+                // The durable trace owns terminal facts. The final assistant reply stays in the
+                // child conversation; only explicit send_message calls deliver its work to a parent.
                 let wake_status = match status {
                     ConversationTurnTraceTerminalStatus::Completed => AgentWakeStatus::Completed,
                     ConversationTurnTraceTerminalStatus::Failed => AgentWakeStatus::Failed,
@@ -693,30 +680,20 @@ impl SharedAgentTurnExecutionPort {
                     ConversationTurnTraceTerminalStatus::Cancelled => AgentWakeStatus::Interrupted,
                     ConversationTurnTraceTerminalStatus::InProgress => unreachable!(),
                 };
-                let raw_summary = if assistant.content.trim().is_empty() {
-                    match wake_status {
-                        AgentWakeStatus::Interrupted => "子 Agent Turn 已中断。".to_string(),
-                        AgentWakeStatus::Failed => "子 Agent Turn 失败。".to_string(),
-                        _ => "子 Agent Turn 已完成。".to_string(),
-                    }
-                } else {
-                    assistant.content.clone()
-                };
-                let summary = bounded_utf8_with_suffix(
-                    &raw_summary,
-                    mycopilot_core::AGENT_RESULT_SUMMARY_MAX_BYTES,
-                    "\n\n[结果过长，已截断]",
-                );
-                let terminal_error = (wake_status == AgentWakeStatus::Failed).then(|| {
-                    bounded_utf8_with_suffix(
-                        &raw_summary,
-                        mycopilot_core::AGENT_RESULT_TERMINAL_ERROR_MAX_BYTES,
-                        " [已截断]",
-                    )
-                });
+                let terminal_error = (wake_status != AgentWakeStatus::Completed)
+                    .then_some(trace.terminal_error.as_deref())
+                    .flatten()
+                    .map(str::trim)
+                    .filter(|error| !error.is_empty())
+                    .map(|error| {
+                        bounded_utf8_with_suffix(
+                            error,
+                            mycopilot_core::AGENT_RESULT_TERMINAL_ERROR_MAX_BYTES,
+                            " [已截断]",
+                        )
+                    });
                 Ok(Some(AgentWakeExecutionObservation::Terminal {
                     status: wake_status,
-                    summary,
                     // Managed Artifact references are delivered by the typed collaboration
                     // settlement service; ordinary chat attachments are not guessed as Artifacts.
                     artifact_refs: Vec::new(),
@@ -1433,7 +1410,6 @@ async fn run_recovered_wake(
             &shared,
             wake,
             AgentWakeStatus::Failed,
-            "子 Agent 在 Runtime 启动前中断。",
             "Host 在原子 Turn admission 后、Runtime 采样前退出。",
         ),
         AgentWakeRecoveryAction::OutcomeUnknown(wake) => {
@@ -1446,7 +1422,6 @@ async fn run_recovered_wake(
                 &shared,
                 wake,
                 AgentWakeStatus::OutcomeUnknown,
-                "子 Agent Turn 的最终结果未知。",
                 "Host 在可能产生外部副作用后退出，系统拒绝盲目重放。",
             );
             if settled.is_ok() {
@@ -1533,7 +1508,6 @@ async fn run_recovered_wake(
                         &shared,
                         wake,
                         AgentWakeStatus::OutcomeUnknown,
-                        "子 Agent Turn 的最终结果未知。",
                         &reason,
                     );
                     if settled.is_ok() {
@@ -1559,7 +1533,6 @@ fn settle_recovery_without_replay(
     shared: &AgentDispatcherShared,
     wake: AgentWakeRequestRecord,
     terminal_status: AgentWakeStatus,
-    summary: &str,
     terminal_error: &str,
 ) -> Result<(), AgentDispatcherError> {
     let claim_token = wake
@@ -1576,7 +1549,6 @@ fn settle_recovery_without_replay(
                 terminal_status,
                 run_id: wake.run_id,
                 assistant_message_id: wake.assistant_message_id,
-                summary: summary.to_string(),
                 artifact_refs: Vec::new(),
                 terminal_error: Some(terminal_error.to_string()),
             },
@@ -1641,7 +1613,6 @@ async fn run_claimed_wake(
                         terminal_status: AgentWakeStatus::Failed,
                         run_id: persisted.run_id,
                         assistant_message_id: persisted.assistant_message_id,
-                        summary: "子 Agent 未能启动受托 Turn。".to_string(),
                         artifact_refs: Vec::new(),
                         terminal_error: Some(error),
                     },
@@ -1781,7 +1752,6 @@ async fn observe_and_settle(
             }
             AgentWakeExecutionObservation::Terminal {
                 status,
-                summary,
                 artifact_refs,
                 terminal_error,
             } => {
@@ -1802,7 +1772,6 @@ async fn observe_and_settle(
                             terminal_status: status,
                             run_id: Some(handle.run_id.clone()),
                             assistant_message_id: Some(handle.assistant_message_id.clone()),
-                            summary,
                             artifact_refs,
                             terminal_error,
                         },
@@ -2085,7 +2054,6 @@ mod tests {
                     terminal_status: AgentWakeStatus::Interrupted,
                     run_id: Some(wake.run_id.clone()),
                     assistant_message_id: Some(wake.assistant_message_id.clone()),
-                    summary: "stopped tree".to_string(),
                     artifact_refs: Vec::new(),
                     terminal_error: Some("stopped tree".to_string()),
                 },
@@ -2282,7 +2250,6 @@ mod tests {
                     .remove(&handle.run_id);
                 Ok(AgentWakeExecutionObservation::Terminal {
                     status: AgentWakeStatus::Completed,
-                    summary: "done".to_string(),
                     artifact_refs: Vec::new(),
                     terminal_error: None,
                 })
@@ -3295,6 +3262,97 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn durable_terminal_observation_uses_trace_diagnostics_not_the_final_reply() {
+        let fixture = tempfile::tempdir().unwrap();
+        let storage = Arc::new(
+            mycopilot_core::storage::service::StorageService::open(
+                &fixture.path().join("terminal-observation.sqlite"),
+            )
+            .unwrap(),
+        );
+        let conversation_id = "terminal-observation-child";
+        storage
+            .save_conversation(empty_conversation(conversation_id))
+            .unwrap();
+        let service = crate::application::agent::AgentService::try_new_deferred_startup_reconciliation_with_agent_limit(
+            Arc::clone(&storage), None, 2,
+        ).unwrap();
+        let (notifications, _) = tokio::sync::mpsc::unbounded_channel();
+        let port = SharedAgentTurnExecutionPort::new(service, Arc::clone(&storage), notifications);
+        for (index, (status, expected_status, error)) in [
+            (
+                ConversationTurnTraceTerminalStatus::Completed,
+                AgentWakeStatus::Completed,
+                None,
+            ),
+            (
+                ConversationTurnTraceTerminalStatus::Failed,
+                AgentWakeStatus::Failed,
+                Some("  Provider request failed.  "),
+            ),
+            (
+                ConversationTurnTraceTerminalStatus::Cancelled,
+                AgentWakeStatus::Interrupted,
+                Some("The user interrupted this run."),
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let run_id = format!("terminal-observation-run-{index}");
+            let assistant_message_id = format!("terminal-observation-message-{index}");
+            storage
+                .upsert_chat_messages(
+                    conversation_id,
+                    vec![ChatMessageRecord {
+                        human_interaction_response: None,
+                        id: assistant_message_id.clone(),
+                        role: "assistant".to_string(),
+                        content: "MODEL_FINAL_MUST_STAY_LOCAL".to_string(),
+                        created_at: 2 + index as i64,
+                        status: Some("sent".to_string()),
+                        attachments: Vec::new(),
+                        folder_references_json: None,
+                        agent_run_json: None,
+                        ui_state_json: None,
+                    }],
+                    index as i64,
+                )
+                .unwrap();
+            let mut trace = mycopilot_core::completed_conversation_trace_without_items(
+                &run_id,
+                conversation_id,
+                &assistant_message_id,
+            );
+            trace.terminal_status = status;
+            trace.terminal_error = error.map(str::to_string);
+            storage
+                .replace_conversation_turn_trace(&trace, 2 + index as i64, 2 + index as i64)
+                .unwrap();
+            let observation = port
+                .inspect_durable(
+                    &AgentWakeExecutionHandle {
+                        wake_id: format!("terminal-observation-wake-{index}"),
+                        run_id,
+                        conversation_id: conversation_id.to_string(),
+                        assistant_message_id,
+                    },
+                    false,
+                )
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                observation,
+                AgentWakeExecutionObservation::Terminal {
+                    status: expected_status,
+                    artifact_refs: Vec::new(),
+                    terminal_error: error.map(|error| error.trim().to_string()),
+                }
+            );
+        }
+    }
+
     #[test]
     fn sqlite_adapter_atomically_projects_claims_and_settles_direct_parent_result() {
         let fixture = tempfile::tempdir().unwrap();
@@ -3381,7 +3439,6 @@ mod tests {
             terminal_status: AgentWakeStatus::Failed,
             run_id: None,
             assistant_message_id: None,
-            summary: "provider unavailable before admission".to_string(),
             artifact_refs: Vec::new(),
             terminal_error: Some("model disabled".to_string()),
         };

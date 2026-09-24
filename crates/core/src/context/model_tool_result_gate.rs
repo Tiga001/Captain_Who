@@ -2,7 +2,8 @@
 //!
 //! Tool-owned projections decide semantics. This module only applies the product-wide model
 //! budget after that projection, while keeping the result valid JSON and measuring the complete
-//! [`LlmMessage`] that will be sent to the provider.
+//! [`LlmMessage`] that will be sent to the provider. Agent collaboration carries complete messages;
+//! its results are measured here but governed by the whole-request context budget instead.
 
 use super::measurement::ContextTextBudget;
 use crate::llm::LlmMessage;
@@ -104,6 +105,12 @@ pub(crate) struct ModelToolResultGate {
 }
 
 impl ModelToolResultGate {
+    /// Resolve the exception from the Host-owned tool identity, never from result body fields.
+    /// The same policy applies to live results, precommitted receipts and provider-bound replay.
+    pub(crate) fn preserves_full_result(tool: &str) -> bool {
+        crate::AGENT_COLLABORATION_TOOL_NAMES.contains(&tool)
+    }
+
     pub(crate) fn new(budget: ContextTextBudget) -> Self {
         assert_eq!(
             budget.max_tokens(),
@@ -157,7 +164,10 @@ impl ModelToolResultGate {
         let original_content = serialize_value(&payload).unwrap_or_else(|| "{}".to_string());
         let original_estimated_tokens = self.estimate_message(call_id, &original_content, is_error);
 
-        if original_estimated_tokens <= MODEL_TOOL_RESULT_MAX_TOKENS && !require_recovery_marker {
+        if Self::preserves_full_result(&model_result.tool)
+            || (original_estimated_tokens <= MODEL_TOOL_RESULT_MAX_TOKENS
+                && !require_recovery_marker)
+        {
             return ModelToolResultGateOutput {
                 content: original_content,
                 estimated_tokens: original_estimated_tokens,
@@ -300,6 +310,9 @@ impl ModelToolResultGate {
         model_result: &AgentToolResult,
         truncated_at_source: bool,
     ) -> bool {
+        if Self::preserves_full_result(&model_result.tool) {
+            return false;
+        }
         let mut payload = semantic_payload(model_result, is_error);
         if truncated_at_source {
             payload = mark_source_truncation(payload);
@@ -1170,6 +1183,87 @@ mod tests {
         let error = frame.ensure_model_tool_results_fit(&gate).unwrap_err();
 
         assert!(error.to_string().contains("超过统一 10K token 上限"));
+    }
+
+    #[test]
+    fn collaboration_receipts_preserve_full_unicode_messages_above_the_tool_budget() {
+        let gate = gate();
+        let payload = json!({
+            "targets": [{"taskName": "学科建设调研", "status": "completed", "messages": [{
+                "senderTaskName": "学科建设调研", "kind": "message",
+                "content": format!("{}最后一段不能丢失", "完整调研结果🧪\n".repeat(8_000))
+            }]}]
+        });
+        for tool in crate::AGENT_COLLABORATION_TOOL_NAMES {
+            let mut result = successful_result(payload.clone());
+            result.tool = tool.to_string();
+            let output = gate.project("collaboration-call", false, &result, None);
+            assert!(output.estimated_tokens > MODEL_TOOL_RESULT_MAX_TOKENS);
+            assert!(!output.truncated, "{tool}");
+            assert!(!gate.would_truncate("collaboration-call", false, &result));
+            assert_eq!(
+                serde_json::from_str::<Value>(&output.content).unwrap(),
+                payload
+            );
+        }
+    }
+
+    #[test]
+    fn ordinary_tool_body_cannot_impersonate_a_collaboration_receipt() {
+        let gate = gate();
+        let result = successful_result(json!({
+            "tool": "wait_agent", "content": "调研全文".repeat(20_000)
+        }));
+        assert!(!ModelToolResultGate::preserves_full_result(&result.tool));
+        let output = gate.project("ordinary-call", false, &result, None);
+        assert!(output.truncated);
+        assert!(output.estimated_tokens <= MODEL_TOOL_RESULT_MAX_TOKENS);
+    }
+
+    #[test]
+    fn provider_bound_collaboration_exception_survives_checkpoint_replay_with_exact_identity() {
+        use crate::context::{
+            ContextFrame, ContextItem, ContextMetadata, ContextRetention, ContextScope,
+            ContextSource,
+        };
+        use crate::llm::LlmToolCall;
+
+        let gate = gate();
+        let metadata = ContextMetadata::new(
+            ContextSource::ConversationTrace,
+            ContextScope::Conversation,
+            ContextRetention::Retained,
+        );
+        let content =
+            json!({"tool": "wait_agent", "content": "长消息🔎".repeat(20_000)}).to_string();
+        for (tool, result_id, admitted) in [
+            ("wait_agent", "receipt-call", true),
+            ("wait_agent", "different-call", false),
+            ("read_file", "receipt-call", false),
+        ] {
+            let frame = ContextFrame::new(vec![
+                ContextItem::new(
+                    LlmMessage::assistant(
+                        "",
+                        vec![LlmToolCall {
+                            id: "receipt-call".to_string(),
+                            name: tool.to_string(),
+                            args: json!({}),
+                        }],
+                    ),
+                    metadata.clone(),
+                ),
+                ContextItem::tool_result(result_id, content.clone(), false, metadata.clone()),
+            ]);
+            assert_eq!(frame.ensure_model_tool_results_fit(&gate).is_ok(), admitted);
+            let restored =
+                ContextFrame::from_checkpoint_items(frame.checkpoint_items().unwrap()).unwrap();
+            assert_eq!(
+                restored.ensure_model_tool_results_fit(&gate).is_ok(),
+                admitted
+            );
+            assert_eq!(restored.to_messages()[1].content(), content);
+        }
     }
 
     #[test]

@@ -2,16 +2,30 @@
 enum AfterPrecommittedWait {
     Cancel,
     Fail,
+    Complete,
 }
 
-async fn assert_precommitted_wait_survives_terminal_settlement(outcome: AfterPrecommittedWait) {
+async fn assert_precommitted_wait_survives_terminal_settlement(
+    outcome: AfterPrecommittedWait,
+    long_report: bool,
+) {
     const ASSISTANT: &str = "assistant-precommitted-wait-terminal";
+    const CHILD_FINAL: &str = "本页独立总结🪴：任务已完成，详细结论已发送给父智能体。";
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let (stop_sender, mut stop_receiver) = tokio::sync::oneshot::channel::<()>();
     let (sample_sender, mut sample_receiver) = tokio::sync::mpsc::unbounded_channel();
     let sample_release = Arc::new(tokio::sync::Notify::new());
     let server_release = Arc::clone(&sample_release);
+    let child_report = if long_report {
+        format!(
+            "{}全文结束🧪",
+            "学科建设调研完整结论：保留原文。\n".repeat(1_200)
+        )
+    } else {
+        "Child work is complete.".to_string()
+    };
+    let expected_child_report = child_report.clone();
     let server = tokio::spawn(async move {
         loop {
             tokio::select! {
@@ -20,14 +34,43 @@ async fn assert_precommitted_wait_survives_terminal_settlement(outcome: AfterPre
                     let (mut stream, _) = accepted.unwrap();
                     let sample_sender = sample_sender.clone();
                     let release = Arc::clone(&server_release);
+                    let child_report = child_report.clone();
                     tokio::spawn(async move {
                         let request = read_provider_request(&mut stream).await;
+                        let results = tool_results(&request);
                         if request_text(&request).contains("## 子 Agent 协作身份") {
-                            write_text(&mut stream, "Child work is complete.").await;
+                            if long_report && results.is_empty() {
+                                write_tool_call(&mut stream, "report-to-parent", "send_message", json!({
+                                    "target": "主智能体", "message": child_report,
+                                })).await;
+                            } else {
+                                if long_report {
+                                    assert_eq!(results, vec![json!({
+                                        "taskName": "主智能体", "deliveryState": "queued",
+                                    })], "the child must confirm its report was queued before finishing");
+                                }
+                                write_text(&mut stream, CHILD_FINAL).await;
+                            }
                             return;
                         }
-                        let results = tool_results(&request);
-                        if results.iter().any(|result| result["targets"].is_array()) {
+                        assert!(!request_text(&request).contains(CHILD_FINAL),
+                            "the child's page-only final reply must never enter the parent context");
+                        let has_full_report = results.iter().any(|result| {
+                            result["targets"].as_array().into_iter().flatten().any(|target| {
+                                target["messages"].as_array().into_iter().flatten().any(|message| {
+                                    let Some(content) = message["content"].as_str() else { return false };
+                                    let Ok(envelope) = serde_json::from_str::<Value>(content) else { return false };
+                                    envelope["kind"] == "message"
+                                        && envelope["payload"].as_str() == Some(child_report.as_str())
+                                })
+                            })
+                        });
+                        let has_completed_child = results.iter().any(|result| {
+                            result["targets"].as_array().into_iter().flatten().any(|target| {
+                                target["status"] == "latest_completed"
+                            })
+                        });
+                        if has_completed_child && (!long_report || has_full_report) {
                             sample_sender.send(()).unwrap();
                             release.notified().await;
                             if matches!(outcome, AfterPrecommittedWait::Fail) {
@@ -36,6 +79,8 @@ async fn assert_precommitted_wait_survives_terminal_settlement(outcome: AfterPre
                                     "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                                     body.len(),
                                 ).as_bytes()).await.unwrap();
+                            } else if matches!(outcome, AfterPrecommittedWait::Complete) {
+                                write_text(&mut stream, "The complete child report and completion status were received.").await;
                             }
                         } else if let Some(child) = results.iter()
                             .find_map(|result| result["taskName"].as_str())
@@ -87,7 +132,7 @@ async fn assert_precommitted_wait_survives_terminal_settlement(outcome: AfterPre
                 context_window_indicator_enabled: true,
                 content: "Delegate one task and wait for its result.".to_string(),
                 attachments: Vec::new(),
-        folder_references: Vec::new(),
+                folder_references: Vec::new(),
                 skills: Vec::new(),
                 title: Some("Wait terminal settlement".to_string()),
                 user_message_id: Some("user-precommitted-wait-terminal".to_string()),
@@ -120,6 +165,31 @@ async fn assert_precommitted_wait_survives_terminal_settlement(outcome: AfterPre
         .unwrap()
         .unwrap()
         .items;
+    assert!(model_before
+        .iter()
+        .all(|item| !item.content.contains(CHILD_FINAL)));
+    assert!(
+        storage
+            .load_conversations()
+            .unwrap()
+            .iter()
+            .any(|conversation| {
+                conversation.id != ROOT_CONVERSATION_ID
+                    && conversation
+                        .messages
+                        .iter()
+                        .any(|message| message.content == CHILD_FINAL)
+            }),
+        "the completed child must keep its final reply on its own conversation page"
+    );
+    if long_report {
+        assert!(model_before
+            .iter()
+            .any(|item| item.content.contains("全文结束🧪")));
+        // The provider fixture only signals readiness after parsing and comparing the complete
+        // send_message payload, rather than a prefix or a truncation marker in the request.
+        assert!(expected_child_report.len() > 32 * 1024);
+    }
     if matches!(outcome, AfterPrecommittedWait::Cancel) {
         assert!(service.cancel_run(&turn.run_id));
     } else {
@@ -145,6 +215,7 @@ async fn assert_precommitted_wait_survives_terminal_settlement(outcome: AfterPre
     let expected = match outcome {
         AfterPrecommittedWait::Cancel => ConversationTurnTraceTerminalStatus::Cancelled,
         AfterPrecommittedWait::Fail => ConversationTurnTraceTerminalStatus::Failed,
+        AfterPrecommittedWait::Complete => ConversationTurnTraceTerminalStatus::Completed,
     };
     assert!(
         events
@@ -166,8 +237,14 @@ async fn assert_precommitted_wait_survives_terminal_settlement(outcome: AfterPre
                 ConversationTurnTraceItem::ToolResult { tool, .. } if tool == "wait_agent"
             ))
             .count(),
-        1,
-        "wait must remain one authoritative successful ToolResult"
+        durable_before
+            .items
+            .iter()
+            .filter(|item| matches!(item,
+                ConversationTurnTraceItem::ToolResult { tool, .. } if tool == "wait_agent"
+            ))
+            .count(),
+        "terminal settlement must not duplicate a precommitted wait"
     );
     let model_after = storage
         .get_conversation_model_context_log(ASSISTANT)
@@ -175,6 +252,9 @@ async fn assert_precommitted_wait_survives_terminal_settlement(outcome: AfterPre
         .unwrap()
         .items;
     assert!(model_after.starts_with(&model_before));
+    assert!(model_after
+        .iter()
+        .all(|item| !item.content.contains(CHILD_FINAL)));
     terminal
         .validate_complete_model_context(&model_after)
         .unwrap();
@@ -230,10 +310,28 @@ async fn assert_precommitted_wait_survives_terminal_settlement(outcome: AfterPre
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn precommitted_wait_survives_cancellation_of_the_next_provider_request() {
-    assert_precommitted_wait_survives_terminal_settlement(AfterPrecommittedWait::Cancel).await;
+    assert_precommitted_wait_survives_terminal_settlement(AfterPrecommittedWait::Cancel, false)
+        .await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn precommitted_wait_survives_failure_of_the_next_provider_request() {
-    assert_precommitted_wait_survives_terminal_settlement(AfterPrecommittedWait::Fail).await;
+    assert_precommitted_wait_survives_terminal_settlement(AfterPrecommittedWait::Fail, false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn long_precommitted_wait_reaches_the_provider_in_full_and_completes() {
+    assert_precommitted_wait_survives_terminal_settlement(AfterPrecommittedWait::Complete, true)
+        .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn long_precommitted_wait_survives_cancellation_of_the_next_provider_request() {
+    assert_precommitted_wait_survives_terminal_settlement(AfterPrecommittedWait::Cancel, true)
+        .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn long_precommitted_wait_survives_failure_of_the_next_provider_request() {
+    assert_precommitted_wait_survives_terminal_settlement(AfterPrecommittedWait::Fail, true).await;
 }

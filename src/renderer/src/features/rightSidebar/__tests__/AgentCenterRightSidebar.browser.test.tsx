@@ -1,18 +1,35 @@
 import type { AgentDisplayStatusView, AgentSummary, AgentTreeSnapshot } from '@mycopilot/protocol'
 import { PanelTop } from 'lucide-react'
 import { page, userEvent } from 'vitest/browser'
-import { afterAll, describe, expect, it, vi } from 'vitest'
+import { afterAll, beforeEach, afterEach, describe, expect, it, vi } from 'vitest'
 import { render } from 'vitest-browser-react'
-import type { CSSProperties } from 'react'
+import type { CSSProperties, ReactNode } from 'react'
 import { frontendConfig, getFrontendCssVariables } from '../../../config/frontendConfig'
 import { classicDarkTheme, classicLightTheme } from '../../../config/themes/classic'
 import type { CollaborationStoreSnapshot } from '../../agentCollaboration/collaborationStore'
+import type { CollaborationTimelineActivity } from '../../agentCollaboration/collaborationTimelineModel'
+import { CollaborationTimelineActivityList } from '../../agentCollaboration/CollaborationTimelineActivity'
 import type {
+  AgentObserverRenderContext,
   RightSidebarModuleDefinition,
   RightSidebarModuleNavigationRequest
 } from '../rightSidebarTypes'
 
 const TRANSLATIONS: Record<string, string> = {
+  'collaboration.activity.copyAgentStatus': '{name}: {status}',
+  'collaboration.activity.openAgentActivity': 'View sub-agent {name}: {status}',
+  'collaboration.activity.status.started': 'Started working',
+  'collaboration.activity.statusListSeparator': '; ',
+  'agentCenter.user': 'User',
+  'agentCenter.openRootAgent': 'Open parent agent {name}, base model {model}, status {status}',
+  'settings.page.profile': 'Profile',
+  'agentCenter.switchToOutline': 'Switch to directory tree',
+  'agentCenter.switchToDiagram': 'Switch to diagram tree',
+  'agentCenter.switchToList': 'Switch to list view',
+  'agentCenter.treeView': 'Agent tree',
+  'agentCenter.expandAgent': 'Expand children of {name}',
+  'agentCenter.collapseAgent': 'Collapse children of {name}',
+  'agentCenter.noAgents': 'No subagents yet.',
   'agentCenter.active': 'In progress',
   'agentCenter.back': 'Back to subagents',
   'agentCenter.ended': 'Finished',
@@ -39,6 +56,9 @@ const TRANSLATIONS: Record<string, string> = {
   'rightSidebar.newPanel': 'New panel',
   'rightSidebar.terminal': 'Terminal'
 }
+beforeEach(() => page.viewport(1000, 820))
+afterEach(() => page.viewport(1280, 720))
+
 const TEST_NOW = 1_700_000_060_000
 
 const dateNowSpy = vi.spyOn(Date, 'now').mockReturnValue(TEST_NOW)
@@ -51,7 +71,17 @@ vi.mock('../../../config/FrontendConfigProvider', () => ({
   })
 }))
 
+vi.mock('../../auth/AccountAuthContext', () => ({
+  useAccountAuth: () => ({
+    state: {
+      profile: { userId: 'test-user-1234567890', displayName: '测试用户名', avatarDataUrl: null }
+    }
+  })
+}))
+
 const { RightSidebar } = await import('../RightSidebar')
+const openProfile = vi.fn()
+const openRootConversation = vi.fn()
 const NOOP = () => undefined
 const KEEP_ALIVE_TEST_MODULE: RightSidebarModuleDefinition = {
   contextBinding: 'global',
@@ -72,6 +102,414 @@ const KEEP_ALIVE_TEST_MODULE: RightSidebarModuleDefinition = {
 }
 
 describe('Agent Center right sidebar', () => {
+  it('keeps all three view buttons visible and selects each view directly', async () => {
+    const screen = await render(
+      <NarrowSidebar
+        activeConversationId="root-a"
+        snapshot={snapshot('root-a', [agent('root-a', 'child-a', 'running')])}
+      />
+    )
+    await screen.getByRole('button', { name: 'Subagents' }).click()
+    const labels = ['Switch to list view', 'Switch to diagram tree', 'Switch to directory tree']
+    const assertSelected = async (selected: string) => {
+      for (const label of labels) {
+        const button = screen.getByRole('button', { name: label, exact: true })
+        await expect.element(button).toBeVisible()
+        await expect.element(button).toHaveAttribute('aria-pressed', String(label === selected))
+      }
+      await expect
+        .element(screen.getByRole('button', { name: 'Manage Agent templates' }))
+        .toBeVisible()
+      const center = requiredElement(screen.container, '.agent-center')
+      expect(center.scrollWidth).toBeLessThanOrEqual(center.clientWidth)
+    }
+    await assertSelected(labels[0])
+    await screen.getByRole('button', { name: labels[2] }).click()
+    await assertSelected(labels[2])
+    const tree = requiredElement(screen.container, '.agent-tree--outline')
+    tree.scrollTop = 20
+    const scrollTop = tree.scrollTop
+    await screen.getByRole('button', { name: labels[2] }).click()
+    expect(tree.scrollTop).toBe(scrollTop)
+    await screen.getByRole('button', { name: labels[0] }).click()
+    await assertSelected(labels[0])
+    await screen.getByRole('button', { name: labels[1] }).click()
+    await assertSelected(labels[1])
+    expect(screen.container.querySelector('.agent-tree--diagram')).not.toBeNull()
+    await screen.getByRole('button', { name: labels[2] }).click()
+    await assertSelected(labels[2])
+    expect(screen.container.querySelector('.agent-tree--outline')).not.toBeNull()
+  })
+
+  it('explains the agent page actions on hover and updates the layout hint after switching', async () => {
+    const screen = await render(
+      <NarrowSidebar
+        activeConversationId="root-a"
+        snapshot={snapshot('root-a', [agent('root-a', 'child-a', 'running')])}
+      />
+    )
+    await screen.getByRole('button', { name: 'Subagents' }).click()
+    const assertHint = async (label: string) => {
+      const button = screen.getByRole('button', { name: label, exact: true })
+      await expect.element(button).toBeVisible()
+      await userEvent.hover(button.element())
+      await expect.element(page.getByRole('tooltip')).toHaveTextContent(label)
+      expect(button.element().hasAttribute('title')).toBe(false)
+      await userEvent.unhover(button.element())
+    }
+    await assertHint('Switch to diagram tree')
+    await assertHint('Manage Agent templates')
+    await screen.getByRole('button', { name: 'Switch to diagram tree' }).click()
+    await assertHint('Switch to directory tree')
+    await assertHint('Switch to list view')
+    await screen.getByRole('button', { name: 'Switch to directory tree' }).click()
+    await assertHint('Switch to diagram tree')
+    await screen
+      .getByRole('button', {
+        name: 'Open subagent child-a, base model model-child-a, status Working'
+      })
+      .click()
+    await assertHint('Back to subagents')
+  })
+
+  it('scopes observer activity to direct children and opens a selected grandchild', async () => {
+    const parent = agent('root-a', 'parent', 'running')
+    const grandchild = { ...agent('root-a', 'grandchild', 'running'), parentAgentId: 'parent' }
+    const sibling = agent('root-a', 'sibling', 'running')
+    const unrelated = {
+      ...agent('root-a', 'great-grandchild', 'running'),
+      parentAgentId: 'grandchild'
+    }
+    const activity = (agentId: string, sequence: number): CollaborationTimelineActivity => ({
+      activityId: `event-${sequence}`,
+      agentId,
+      occurredAt: sequence,
+      parentAgentId:
+        agentId === 'grandchild' ? 'parent' : agentId === 'sibling' ? 'root:root-a' : 'grandchild',
+      parentConversationId:
+        agentId === 'grandchild'
+          ? parent.conversationId
+          : agentId === 'great-grandchild'
+            ? grandchild.conversationId
+            : 'another-conversation',
+      anchorMessageId: null,
+      traceBoundarySequence: null,
+      runId: null,
+      semantic: 'started',
+      sequence,
+      taskNameSnapshot: agentId,
+      turnId: null
+    })
+    const tree = {
+      ...snapshot('root-a', [parent, grandchild, sibling, unrelated]),
+      activities: [
+        activity('grandchild', 1),
+        activity('sibling', 2),
+        activity('great-grandchild', 3)
+      ]
+    }
+    const screen = await render(
+      <NarrowSidebar
+        activeConversationId="root-a"
+        snapshot={tree}
+        observerProbe={({ agent, activities, onOpenAgent }) => (
+          <div data-testid={`agent-observer-${agent.agentId}`}>
+            <CollaborationTimelineActivityList activities={activities} onOpenAgent={onOpenAgent} />
+          </div>
+        )}
+      />
+    )
+
+    await screen.getByRole('button', { name: 'Subagents' }).click()
+    await screen
+      .getByRole('button', {
+        name: 'Open subagent parent, base model model-parent, status Working'
+      })
+      .click()
+    await expect.element(screen.getByTestId('agent-observer-parent')).toBeVisible()
+    expect(
+      screen.getByTestId('agent-observer-parent').element().querySelectorAll('[data-agent-id]')
+    ).toHaveLength(1)
+    await screen.getByRole('button', { name: 'View sub-agent grandchild: Started working' }).click()
+    await expect.element(screen.getByTestId('agent-observer-grandchild')).toBeVisible()
+    expect(
+      screen
+        .getByTestId('agent-observer-grandchild')
+        .element()
+        .querySelector('[data-agent-id]')
+        ?.getAttribute('data-agent-id')
+    ).toBe('great-grandchild')
+  })
+
+  for (const theme of ['light', 'dark'] as const) {
+    it(`switches tree layouts without losing disclosure or navigation in ${theme} mode`, async () => {
+      const parent = agent('root-a', 'parent', 'running', '父级智能体长中文名称')
+      const child = { ...agent('root-a', 'child', 'idle'), parentAgentId: 'parent' }
+      const sibling = agent('root-a', 'sibling', 'waiting_approval')
+      const tree = snapshot('root-a', [parent, child, sibling])
+      const screen = await render(
+        <NarrowSidebar activeConversationId="root-a" snapshot={tree} theme={theme} height={540} />
+      )
+      await screen.getByRole('button', { name: 'Subagents' }).click()
+      await expect
+        .element(screen.getByRole('button', { name: 'Switch to diagram tree' }))
+        .toBeVisible()
+      await expect
+        .element(screen.getByRole('button', { name: 'Switch to directory tree' }))
+        .toBeVisible()
+      await screen.getByRole('button', { name: 'Switch to diagram tree' }).click()
+      await screen
+        .getByRole('button', { name: 'Collapse children of 父级智能体长中文名称' })
+        .click()
+      await screen.getByRole('button', { name: 'Switch to directory tree' }).click()
+      const viewport = requiredElement(screen.container, '.agent-tree--outline')
+      expect(screen.container.querySelector('.agent-tree__node[data-agent-id="child"]')).toBeNull()
+      await screen.getByRole('button', { name: 'Expand children of 父级智能体长中文名称' }).click()
+      const nodes = Array.from(viewport.querySelectorAll<HTMLElement>('.agent-tree__node'))
+      expect(nodes).toHaveLength(5)
+      const rects = nodes.map((node) => node.getBoundingClientRect())
+      for (let index = 1; index < rects.length; index += 1) {
+        expect(rects[index].top).toBeGreaterThanOrEqual(rects[index - 1].bottom)
+      }
+      expect(rects[1].left).toBeGreaterThan(rects[0].left)
+      expect(rects[2].left).toBeGreaterThan(rects[1].left)
+      expect(rects[3].left).toBeGreaterThan(rects[2].left)
+      expect(rects[4].left).toBe(rects[2].left)
+      const disclosure = requiredElement(nodes[2], '.agent-tree__toggle').getBoundingClientRect()
+      const avatar = requiredElement(nodes[2], '.agent-tree__avatar-link').getBoundingClientRect()
+      expect(disclosure.right).toBeLessThanOrEqual(avatar.left)
+      expect(getComputedStyle(nodes[0]).animationName).toBe('agent-tree-breathe')
+      expect(getComputedStyle(nodes[3]).animationName).toBe('none')
+      const center = requiredElement(screen.container, '.agent-center')
+      expect(center.scrollWidth).toBeLessThanOrEqual(center.clientWidth)
+      await page.screenshot({
+        element: center,
+        path: `__screenshots__/AgentCenterRightSidebar.browser.test.tsx/agent-tree-outline-${theme}-280.png`
+      })
+      await screen
+        .getByRole('button', { name: 'Open subagent child, base model model-child, status Ready' })
+        .click()
+      await expect.element(screen.getByTestId('agent-observer-child')).toBeVisible()
+      await screen.getByRole('button', { name: 'Back to subagents' }).click()
+      await expect.poll(() => document.activeElement?.getAttribute('data-agent-id')).toBe('child')
+      expect(screen.container.querySelector('.agent-tree--outline')).not.toBeNull()
+      await screen.getByRole('button', { name: 'Collapse children of 测试用户名' }).click()
+      await screen.getByRole('button', { name: 'Switch to diagram tree' }).click()
+      expect(screen.container.querySelectorAll('.agent-tree__node')).toHaveLength(1)
+      await screen.getByRole('button', { name: 'Expand children of 测试用户名' }).click()
+      expect(screen.container.querySelectorAll('.agent-tree__node')).toHaveLength(5)
+      await screen.getByRole('button', { name: 'Switch to directory tree' }).click()
+      await screen.rerender(
+        <NarrowSidebar
+          activeConversationId="root-a"
+          snapshot={tree}
+          theme={theme}
+          height={540}
+          width={720}
+        />
+      )
+      const wideNodes = Array.from(
+        screen.container.querySelectorAll<HTMLElement>('.agent-tree__node')
+      )
+      expect(
+        wideNodes[0].getBoundingClientRect().left -
+          requiredElement(screen.container, '.agent-tree').getBoundingClientRect().left
+      ).toBeLessThan(16)
+      await page.screenshot({
+        element: requiredElement(screen.container, '.agent-center'),
+        path: `__screenshots__/AgentCenterRightSidebar.browser.test.tsx/agent-tree-outline-${theme}-720.png`
+      })
+      await screen.getByRole('button', { name: 'Switch to list view' }).click()
+      await expect
+        .element(screen.getByRole('button', { name: 'Switch to diagram tree' }))
+        .toBeVisible()
+      await screen.getByRole('button', { name: 'Switch to directory tree' }).click()
+      expect(screen.container.querySelector('.agent-tree--outline')).not.toBeNull()
+    })
+
+    it(`shows a compact nested tree, restores navigation, and preserves the list in ${theme} mode`, async () => {
+      const parent = agent(
+        'root-a',
+        'parent',
+        'running',
+        '父级智能体很长的中文名称用于测试紧凑布局'
+      )
+      const child = { ...agent('root-a', 'child', 'waiting_approval'), parentAgentId: 'parent' }
+      const grandchild = { ...agent('root-a', 'grandchild', 'idle'), parentAgentId: 'child' }
+      const sibling = { ...agent('root-a', 'sibling', 'latest_completed'), parentAgentId: 'parent' }
+      const secondRoot = agent('root-a', 'second-root', 'queued')
+      const tree = snapshot('root-a', [parent, child, grandchild, sibling, secondRoot])
+      const screen = await render(
+        <NarrowSidebar activeConversationId="root-a" snapshot={tree} theme={theme} height={360} />
+      )
+      await screen.getByRole('button', { name: 'Subagents' }).click()
+      await expect
+        .element(screen.getByRole('button', { name: 'Switch to diagram tree' }))
+        .toBeVisible()
+      const listRow = requiredElement(screen.container, '.agent-center__row')
+      const before = {
+        height: listRow.getBoundingClientRect().height,
+        fontSize: getComputedStyle(requiredElement(listRow, 'strong')).fontSize,
+        text: listRow.textContent
+      }
+      const actions = requiredElement(screen.container, '.agent-center__view-actions')
+      expect(actions.querySelectorAll('button')[1].getAttribute('aria-label')).toBe(
+        'Switch to diagram tree'
+      )
+      expect(actions.querySelectorAll('button')[3].getAttribute('aria-label')).toBe(
+        'Manage Agent templates'
+      )
+      await screen.getByRole('button', { name: 'Switch to diagram tree' }).click()
+
+      const treeViewport = requiredElement(screen.container, '.agent-tree')
+      const parentBranch = requiredElement(
+        screen.container,
+        '.agent-tree__node[data-agent-id="parent"]'
+      ).parentElement!
+      expect(
+        parentBranch.querySelectorAll(':scope > .agent-tree__children .agent-tree__node')
+      ).toHaveLength(3)
+      expect(screen.container.querySelectorAll('.agent-tree__roots > li')).toHaveLength(1)
+      const rootNode = requiredElement(
+        screen.container,
+        '.agent-tree__node[data-agent-id="agent-root-a"]'
+      )
+      expect(rootNode.querySelector('.agent-tree__avatar--root svg')).not.toBeNull()
+      expect(
+        rootNode.parentElement?.querySelectorAll(':scope > .agent-tree__children > li')
+      ).toHaveLength(2)
+      expect(requiredElement(screen.container, '.agent-tree__node--user strong').textContent).toBe(
+        '测试用户名'
+      )
+      expect(
+        requiredElement(screen.container, '.agent-tree__node--user .agent-tree__copy > span')
+          .textContent
+      ).toBe('Captain Who')
+      expect(
+        getComputedStyle(requiredElement(screen.container, '.agent-tree__node--user')).animationName
+      ).toBe('agent-tree-breathe')
+      openProfile.mockClear()
+      openRootConversation.mockClear()
+      await screen.getByRole('button', { name: 'Profile', exact: true }).click()
+      expect(openProfile).toHaveBeenCalledTimes(1)
+      await screen
+        .getByRole('button', {
+          name: 'Open parent agent root, base model Root Model, status Ready'
+        })
+        .click()
+      expect(openRootConversation).toHaveBeenCalledWith('root-a')
+      await screen.getByRole('button', { name: 'Collapse children of 测试用户名' }).click()
+      expect(screen.container.querySelector('.agent-tree__node[data-agent-id]')).toBeNull()
+      await screen.getByRole('button', { name: 'Expand children of 测试用户名' }).click()
+      expect(
+        screen.container.querySelectorAll('.agent-tree__node[data-active="true"]')
+      ).toHaveLength(3)
+      const parentNode = requiredElement(
+        screen.container,
+        '.agent-tree__node[data-agent-id="parent"]'
+      )
+      const idleNode = requiredElement(
+        screen.container,
+        '.agent-tree__node[data-agent-id="grandchild"]'
+      )
+      expect(getComputedStyle(parentNode).animationName).toBe('agent-tree-breathe')
+      expect(getComputedStyle(idleNode).animationName).toBe('none')
+      expect(getComputedStyle(idleNode).borderTopWidth).toBe('1px')
+      expect(requiredElement(parentNode, 'strong').title).toBe(parent.taskName)
+      expect(
+        parseFloat(getComputedStyle(requiredElement(parentNode, 'strong')).fontSize)
+      ).toBeLessThan(parseFloat(before.fontSize))
+      expect(treeViewport.scrollWidth).toBeGreaterThan(treeViewport.clientWidth)
+      expect(getComputedStyle(treeViewport).overflowX).toBe('auto')
+      const center = requiredElement(screen.container, '.agent-center')
+      expect(center.scrollWidth).toBeLessThanOrEqual(center.clientWidth)
+      await page.screenshot({
+        element: center,
+        path: `__screenshots__/AgentCenterRightSidebar.browser.test.tsx/agent-tree-${theme}-280.png`
+      })
+
+      const childToggle = screen.getByRole('button', { name: 'Collapse children of child' })
+      await childToggle.click()
+      expect(
+        screen.container.querySelector('.agent-tree__node[data-agent-id="grandchild"]')
+      ).toBeNull()
+      expect(screen.container.querySelector('.agent-center__observer')).toBeNull()
+      await expect
+        .element(screen.getByRole('button', { name: 'Expand children of child' }))
+        .toHaveAttribute('aria-expanded', 'false')
+
+      const avatar = screen.getByRole('button', {
+        name: 'Open subagent sibling, base model model-sibling, status Completed'
+      })
+      treeViewport.scrollLeft = treeViewport.scrollWidth - treeViewport.clientWidth
+      const savedScrollLeft = treeViewport.scrollLeft
+      ;(avatar.element() as HTMLButtonElement).focus({ preventScroll: true })
+      await userEvent.keyboard('{Enter}')
+      await expect.element(screen.getByTestId('agent-observer-sibling')).toBeVisible()
+      await screen.getByRole('button', { name: 'Back to subagents' }).click()
+      await expect.poll(() => document.activeElement?.getAttribute('data-agent-id')).toBe('sibling')
+      expect(requiredElement(screen.container, '.agent-tree').scrollLeft).toBe(savedScrollLeft)
+      expect(
+        screen.container.querySelector('.agent-tree__node[data-agent-id="grandchild"]')
+      ).toBeNull()
+      await screen.getByRole('button', { name: 'Expand children of child' }).click()
+      expect(
+        screen.container.querySelector('.agent-tree__node[data-agent-id="grandchild"]')
+      ).not.toBeNull()
+
+      // Status changes must update the same tree from the existing collaboration snapshot.
+      await screen.rerender(
+        <NarrowSidebar
+          activeConversationId="root-a"
+          snapshot={snapshot('root-a', [
+            { ...parent, displayStatus: 'idle' },
+            child,
+            grandchild,
+            sibling,
+            secondRoot
+          ])}
+          theme={theme}
+          height={360}
+        />
+      )
+      await expect
+        .poll(() =>
+          screen.container
+            .querySelector('.agent-tree__node[data-agent-id="parent"]')
+            ?.getAttribute('data-active')
+        )
+        .toBe('false')
+      await screen.rerender(
+        <NarrowSidebar activeConversationId="root-a" snapshot={tree} theme={theme} height={360} />
+      )
+      await screen.rerender(
+        <NarrowSidebar
+          activeConversationId="root-a"
+          snapshot={tree}
+          theme={theme}
+          height={500}
+          width={720}
+        />
+      )
+      const wideTree = requiredElement(screen.container, '.agent-tree')
+      expect(wideTree.scrollWidth).toBeLessThanOrEqual(wideTree.clientWidth)
+      await page.screenshot({
+        element: requiredElement(screen.container, '.agent-center'),
+        path: `__screenshots__/AgentCenterRightSidebar.browser.test.tsx/agent-tree-${theme}-720.png`
+      })
+      await screen.rerender(
+        <NarrowSidebar activeConversationId="root-a" snapshot={tree} theme={theme} height={360} />
+      )
+      await screen.getByRole('button', { name: 'Switch to list view' }).click()
+      const restoredRow = requiredElement(screen.container, '.agent-center__row')
+      expect({
+        height: restoredRow.getBoundingClientRect().height,
+        fontSize: getComputedStyle(requiredElement(restoredRow, 'strong')).fontSize,
+        text: restoredRow.textContent
+      }).toEqual(before)
+    })
+  }
+
   it('reuses the current agent center and returns from detail to the root list on module navigation', async () => {
     const tree = snapshot('root-a', [agent('root-a', 'child-a', 'running')])
     const renderSidebar = (requestId?: number) => (
@@ -504,15 +942,19 @@ describe('Agent Center right sidebar', () => {
 function NarrowSidebar({
   activeConversationId,
   height = 720,
+  width = 280,
   moduleNavigation,
   navigation,
+  observerProbe,
   snapshot,
   theme = 'light'
 }: {
   activeConversationId: string
   height?: number
+  width?: number
   moduleNavigation?: RightSidebarModuleNavigationRequest
   navigation?: { agentId: string; requestId: number; rootConversationId: string }
+  observerProbe?: (context: AgentObserverRenderContext) => ReactNode
   snapshot: CollaborationStoreSnapshot
   theme?: 'dark' | 'light'
 }) {
@@ -526,7 +968,7 @@ function NarrowSidebar({
     color: 'var(--mc-color-text-primary)',
     fontFamily: 'var(--mc-font-family)',
     height,
-    width: 280
+    width
   } as CSSProperties
   return (
     <div style={sidebarStyle}>
@@ -538,20 +980,26 @@ function NarrowSidebar({
         isOpen
         modules={[KEEP_ALIVE_TEST_MODULE]}
         moduleNavigationRequest={moduleNavigation}
+        onOpenAgentTemplates={NOOP}
+        onOpenProfile={openProfile}
+        onOpenAgentRootConversation={openRootConversation}
         onToggleMaximized={NOOP}
-        renderAgentObserver={({ agent }) => (
-          <div className="chat-conversation-page" data-testid={`agent-observer-${agent.agentId}`}>
-            <div className="chat-conversation-page__messages-region">
-              <div className="chat-conversation-page__messages">
-                <article className="chat-message">
-                  <div className="chat-message__content">
-                    observer-content-that-must-not-force-horizontal-overflow-at-the-sidebar-floor
-                  </div>
-                </article>
+        renderAgentObserver={
+          observerProbe ??
+          (({ agent }) => (
+            <div className="chat-conversation-page" data-testid={`agent-observer-${agent.agentId}`}>
+              <div className="chat-conversation-page__messages-region">
+                <div className="chat-conversation-page__messages">
+                  <article className="chat-message">
+                    <div className="chat-message__content">
+                      observer-content-that-must-not-force-horizontal-overflow-at-the-sidebar-floor
+                    </div>
+                  </article>
+                </div>
               </div>
             </div>
-          </div>
-        )}
+          ))
+        }
         workspaceKey="project-a"
         workspaceKeys={['project-a']}
         workspaceName="Project A"

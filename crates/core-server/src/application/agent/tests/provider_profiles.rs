@@ -1919,7 +1919,6 @@ async fn nested_result_wake_projects_semantic_identity_only_at_the_provider_boun
         storage: &StorageService,
         service: &AgentService,
         claim_token: &str,
-        summary: &str,
     ) -> mycopilot_core::AgentTurnResultSettlement {
         let wake = storage
             .claim_next_dispatchable_agent_wake(claim_token)
@@ -1953,7 +1952,6 @@ async fn nested_result_wake_projects_semantic_identity_only_at_the_provider_boun
                 terminal_status: mycopilot_core::AgentWakeStatus::Completed,
                 run_id: Some(turn.run_id),
                 assistant_message_id: Some(turn.assistant_message_id),
-                summary: summary.to_string(),
                 terminal_error: None,
             })
             .unwrap()
@@ -2036,16 +2034,15 @@ async fn nested_result_wake_projects_semantic_identity_only_at_the_provider_boun
     let service =
         AgentService::try_new_with_startup_reconciliation(Arc::clone(&storage), false, None)
             .unwrap();
-    execute_next_wake(&storage, &service, "nested-parent-claim", summaries[0]).await;
+    execute_next_wake(&storage, &service, "nested-parent-claim").await;
     let grandchild = create_child(&child.agent.agent_id, "details");
-    let nested = execute_next_wake(&storage, &service, "nested-details-claim", summaries[1]).await;
+    let nested = execute_next_wake(&storage, &service, "nested-details-claim").await;
     assert_eq!(
         nested.result_message.recipient_agent_id,
         child.agent.agent_id
     );
     let result_wake = nested.parent_wake.as_ref().unwrap();
-    let completed =
-        execute_next_wake(&storage, &service, "nested-result-claim", summaries[2]).await;
+    let completed = execute_next_wake(&storage, &service, "nested-result-claim").await;
 
     let raw = storage
         .get_agent_message(&nested.result_message.message_id)
@@ -2071,7 +2068,8 @@ async fn nested_result_wake_projects_semantic_identity_only_at_the_provider_boun
     let result_inputs = messages
         .iter()
         .filter(|message| {
-            message["role"] == "user" && provider_message_text(message).contains(summaries[1])
+            message["role"] == "user"
+                && provider_message_text(message).contains("子智能体本轮已完成。")
         })
         .collect::<Vec<_>>();
     assert_eq!(result_inputs.len(), 1, "the Result is delivered once");
@@ -2079,8 +2077,20 @@ async fn nested_result_wake_projects_semantic_identity_only_at_the_provider_boun
     assert_eq!(content.matches("agent_collaboration_input").count(), 1);
     assert!(content.contains("details"));
     assert!(content.contains("completed"));
-    assert!(content.contains("agent-user-example"));
+    assert_eq!(raw_envelope.summary, "子智能体本轮已完成。");
+    let child_history = storage
+        .load_conversation(&grandchild.agent.conversation_id)
+        .unwrap()
+        .unwrap();
+    assert!(child_history
+        .messages
+        .iter()
+        .any(|message| message.content == summaries[1]));
     let model_input = serde_json::to_string(messages).unwrap();
+    assert!(
+        !model_input.contains(summaries[1]),
+        "the child's final reply must remain in its own conversation"
+    );
     for hidden in [
         root_agent_id,
         root_conversation_id,

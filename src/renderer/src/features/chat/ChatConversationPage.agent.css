@@ -496,6 +496,7 @@
 
 .agent-activity summary:hover .agent-activity__chevron,
 .agent-activity summary:focus-visible .agent-activity__chevron,
+.agent-activity--send-message-group > summary .agent-activity__chevron,
 .agent-activity[open] > summary .agent-activity__chevron {
   opacity: 1;
 }

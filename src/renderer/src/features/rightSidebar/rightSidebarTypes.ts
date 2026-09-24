@@ -3,6 +3,7 @@ import type { ReactNode } from 'react'
 import type { TranslationKey } from '../../config/frontendTranslations'
 import type { Translate } from '../../config/translationFormat'
 import type { AgentSummary, GitReviewTarget } from '@mycopilot/protocol'
+import type { CollaborationTimelineActivity } from '../agentCollaboration/collaborationTimelineModel'
 
 export type RightSidebarModuleId = 'terminal' | 'browser' | 'files' | 'git-review' | 'agent-center'
 
@@ -147,9 +148,12 @@ export interface RightSidebarModuleDefinition {
 }
 
 export interface AgentObserverRenderContext {
+  directChildAgentIds: readonly string[]
   agent: AgentSummary
   agentLabelsById: Readonly<Record<string, string>>
+  activities: readonly CollaborationTimelineActivity[]
   invalidationVersion: string
+  onOpenAgent: (agentId: string) => void
   rootConversationId: string
 }
 

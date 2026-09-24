@@ -45,7 +45,10 @@
         "lifecycle": "active",
         "displayStatus": "idle",
         "latestActivityAt": 1720000000000,
-        "model": { "modelConfigId": "model-1", "displayName": "Model One" }
+        "model": {
+          "modelConfigId": "model-1",
+          "displayName": "Model One"
+        }
       },
       {
         "agentId": "agent-review",
@@ -59,7 +62,10 @@
         "lifecycle": "active",
         "displayStatus": "waiting_approval",
         "latestActivityAt": 1720000001000,
-        "model": { "modelConfigId": "model-1", "displayName": "Model One" }
+        "model": {
+          "modelConfigId": "model-1",
+          "displayName": "Model One"
+        }
       },
       {
         "agentId": "agent-compatibility",
@@ -73,7 +79,10 @@
         "lifecycle": "active",
         "displayStatus": "waiting_approval",
         "latestActivityAt": 1720000002000,
-        "model": { "modelConfigId": "model-2", "displayName": "Model Two" }
+        "model": {
+          "modelConfigId": "model-2",
+          "displayName": "Model Two"
+        }
       }
     ],
     "lastSequence": 13
@@ -97,7 +106,10 @@
         "lifecycle": "active",
         "displayStatus": "idle",
         "latestActivityAt": 1720000000000,
-        "model": { "modelConfigId": "model-1", "displayName": "Model One" }
+        "model": {
+          "modelConfigId": "model-1",
+          "displayName": "Model One"
+        }
       },
       {
         "agentId": "agent-review",
@@ -111,7 +123,10 @@
         "lifecycle": "active",
         "displayStatus": "latest_completed",
         "latestActivityAt": 1720000003000,
-        "model": { "modelConfigId": "model-1", "displayName": "Model One" }
+        "model": {
+          "modelConfigId": "model-1",
+          "displayName": "Model One"
+        }
       },
       {
         "agentId": "agent-compatibility",
@@ -125,7 +140,10 @@
         "lifecycle": "active",
         "displayStatus": "latest_interrupted",
         "latestActivityAt": 1720000004000,
-        "model": { "modelConfigId": "model-2", "displayName": "Model Two" }
+        "model": {
+          "modelConfigId": "model-2",
+          "displayName": "Model Two"
+        }
       }
     ],
     "lastSequence": 15
@@ -205,12 +223,14 @@
         "kind": "wake_created",
         "resourceRevision": 1,
         "activity": {
-          "schemaVersion": 2,
+          "schemaVersion": 3,
           "semantic": "started",
           "agentId": "agent-review",
           "taskNameSnapshot": "security_review",
-          "rootAnchorMessageId": "assistant-conversation-root",
-          "rootTraceBoundarySequence": 1
+          "parentAgentId": "agent-root",
+          "parentConversationId": "conversation-root",
+          "anchorMessageId": "assistant-conversation-root",
+          "traceBoundarySequence": 1
         },
         "occurredAt": 1720000001000
       },
@@ -266,12 +286,14 @@
         "kind": "wake_created",
         "resourceRevision": 1,
         "activity": {
-          "schemaVersion": 2,
+          "schemaVersion": 3,
           "semantic": "started",
           "agentId": "agent-compatibility",
           "taskNameSnapshot": "compatibility_review",
-          "rootAnchorMessageId": "assistant-conversation-root",
-          "rootTraceBoundarySequence": 1
+          "parentAgentId": "agent-root",
+          "parentConversationId": "conversation-root",
+          "anchorMessageId": "assistant-conversation-root",
+          "traceBoundarySequence": 1
         },
         "occurredAt": 1720000001000
       },
@@ -309,12 +331,14 @@
         "kind": "mailbox_enqueued",
         "resourceRevision": 3,
         "activity": {
-          "schemaVersion": 2,
+          "schemaVersion": 3,
           "semantic": "updated",
           "agentId": "agent-review",
           "taskNameSnapshot": "security_review",
-          "rootAnchorMessageId": "assistant-conversation-root",
-          "rootTraceBoundarySequence": 1
+          "parentAgentId": "agent-root",
+          "parentConversationId": "conversation-root",
+          "anchorMessageId": "assistant-conversation-root",
+          "traceBoundarySequence": 1
         },
         "occurredAt": 1720000001500
       },
@@ -352,12 +376,14 @@
         "kind": "wake_created",
         "resourceRevision": 1,
         "activity": {
-          "schemaVersion": 2,
+          "schemaVersion": 3,
           "semantic": "started",
           "agentId": "agent-review",
           "taskNameSnapshot": "security_review",
-          "rootAnchorMessageId": "assistant-conversation-root",
-          "rootTraceBoundarySequence": 1
+          "parentAgentId": "agent-root",
+          "parentConversationId": "conversation-root",
+          "anchorMessageId": "assistant-conversation-root",
+          "traceBoundarySequence": 1
         },
         "occurredAt": 1720000001800
       },
@@ -377,12 +403,14 @@
         "kind": "approval_projected",
         "resourceRevision": 1,
         "activity": {
-          "schemaVersion": 2,
+          "schemaVersion": 3,
           "semantic": "waiting_approval",
           "agentId": "agent-compatibility",
           "taskNameSnapshot": "compatibility_review",
-          "rootAnchorMessageId": null,
-          "rootTraceBoundarySequence": null
+          "parentAgentId": "agent-root",
+          "parentConversationId": "conversation-root",
+          "anchorMessageId": "assistant-conversation-root",
+          "traceBoundarySequence": null
         },
         "occurredAt": 1720000002000
       },
@@ -402,12 +430,14 @@
         "kind": "approval_projected",
         "resourceRevision": 1,
         "activity": {
-          "schemaVersion": 2,
+          "schemaVersion": 3,
           "semantic": "waiting_approval",
           "agentId": "agent-review",
           "taskNameSnapshot": "security_review",
-          "rootAnchorMessageId": null,
-          "rootTraceBoundarySequence": null
+          "parentAgentId": "agent-root",
+          "parentConversationId": "conversation-root",
+          "anchorMessageId": "assistant-conversation-root",
+          "traceBoundarySequence": null
         },
         "occurredAt": 1720000002001
       },
@@ -427,12 +457,14 @@
         "kind": "wake_updated",
         "resourceRevision": 3,
         "activity": {
-          "schemaVersion": 2,
+          "schemaVersion": 3,
           "semantic": "interrupted",
           "agentId": "agent-compatibility",
           "taskNameSnapshot": "compatibility_review",
-          "rootAnchorMessageId": null,
-          "rootTraceBoundarySequence": null
+          "parentAgentId": "agent-root",
+          "parentConversationId": "conversation-root",
+          "anchorMessageId": "assistant-conversation-root",
+          "traceBoundarySequence": null
         },
         "occurredAt": 1720000002500
       },
@@ -452,12 +484,14 @@
         "kind": "wake_updated",
         "resourceRevision": 3,
         "activity": {
-          "schemaVersion": 2,
+          "schemaVersion": 3,
           "semantic": "completed",
           "agentId": "agent-review",
           "taskNameSnapshot": "security_review",
-          "rootAnchorMessageId": null,
-          "rootTraceBoundarySequence": null
+          "parentAgentId": "agent-root",
+          "parentConversationId": "conversation-root",
+          "anchorMessageId": "assistant-conversation-root",
+          "traceBoundarySequence": null
         },
         "occurredAt": 1720000003000
       }
@@ -569,7 +603,9 @@
           "call": {
             "id": "call-approve",
             "tool": "read_file",
-            "args": { "path": "README.md" },
+            "args": {
+              "path": "README.md"
+            },
             "approvalStatus": "required",
             "reason": "Inspect a controlled fixture."
           }
@@ -595,7 +631,9 @@
           "call": {
             "id": "call-reject",
             "tool": "web_fetch",
-            "args": { "url": "https://example.invalid" },
+            "args": {
+              "url": "https://example.invalid"
+            },
             "approvalStatus": "required",
             "reason": "This external action is rejected by the fixture user."
           }

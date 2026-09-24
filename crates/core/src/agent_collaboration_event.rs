@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 pub const AGENT_COLLABORATION_EVENT_SCHEMA_VERSION: u32 = 2;
-pub const AGENT_COLLABORATION_ACTIVITY_SCHEMA_VERSION: u32 = 2;
+pub const AGENT_COLLABORATION_ACTIVITY_SCHEMA_VERSION: u32 = 3;
 
 /// Durable root-tree invalidation and routing facts.
 ///
@@ -70,15 +70,13 @@ pub struct AgentCollaborationActivitySnapshot {
     pub semantic: AgentCollaborationActivitySemantic,
     pub agent_id: String,
     pub task_name_snapshot: String,
-    /// A message in the root Conversation, or `None` when the write path has no trusted root
-    /// message identity. Consumers fall back to stable occurred-at/root-sequence ordering.
-    pub root_anchor_message_id: Option<String>,
-    /// The append-only root trace boundary captured with `root_anchor_message_id`.
-    ///
-    /// Presentation inserts the activity before the first backend-owned timeline item whose
-    /// trace sequence is greater than or equal to this value. The two placement fields are always
-    /// both present or both absent.
-    pub root_trace_boundary_sequence: Option<u64>,
+    pub parent_agent_id: String,
+    pub parent_conversation_id: String,
+    /// Direct parent's active assistant message, or its latest committed message when idle.
+    pub anchor_message_id: Option<String>,
+    /// Inserts before this trace sequence in an active reply. With no trace boundary, placement
+    /// is after the anchor message; with no anchor, placement is before the first message.
+    pub trace_boundary_sequence: Option<u64>,
 }
 
 impl AgentCollaborationEventKind {

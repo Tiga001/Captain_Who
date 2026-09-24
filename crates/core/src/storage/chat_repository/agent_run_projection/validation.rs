@@ -38,6 +38,7 @@ const CURRENT_AGENT_RUN_KEYS: &[&str] = &[
     "commandSessions",
     "mcpInvocations",
     "collaborationTimelineActivities",
+    "collaborationFinalResponseBoundary",
     "messageStreamCheckpoints",
     "timeline",
     "state",
@@ -477,6 +478,7 @@ fn current_agent_run_projection_is_safe_with_trace_policy(
             .is_some_and(|activities| {
                 !record_array_is_safe(activities, current_collaboration_timeline_activity_is_safe)
             })
+        || !optional_safe_integer(run, "collaborationFinalResponseBoundary")
         || run
             .get("activatedSkills")
             .is_some_and(|skills| !record_array_is_safe(skills, current_activated_skill_is_safe))

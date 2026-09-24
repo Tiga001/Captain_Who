@@ -3,6 +3,32 @@
 use super::*;
 use std::sync::Arc;
 
+pub(super) fn seed_observer_stream(
+    service: &AgentService,
+    conversation_id: &str,
+    root_conversation_id: &str,
+    run_id: &str,
+    assistant_message_id: &str,
+) {
+    service.observer_streams.lock().unwrap().insert(
+        conversation_id.to_string(),
+        super::super::observer_stream::ObserverStreamState {
+            agent_id: format!("agent-{conversation_id}"),
+            root_agent_id: format!("agent-{root_conversation_id}"),
+            root_conversation_id: root_conversation_id.to_string(),
+            snapshot: mycopilot_protocol_rs::AgentObserverLiveStreamSnapshotDto {
+                run_id: run_id.to_string(),
+                assistant_message_id: assistant_message_id.to_string(),
+                cursor: mycopilot_protocol_rs::AgentObserverStreamCursorDto {
+                    generation: "test-generation".to_string(),
+                    sequence: 1,
+                },
+                stream: None,
+            },
+        },
+    );
+}
+
 fn save_graph_bound_conversation(
     storage: &StorageService,
     project_id: &str,
@@ -51,6 +77,20 @@ fn agent_service_project_deletion_reaches_tree_aware_storage() {
         "agent-tree-root",
     );
     let service = AgentService::new_authorized_for_test(Arc::clone(&storage));
+    seed_observer_stream(
+        &service,
+        "child-conversation",
+        "conversation-agent-tree",
+        "child-run",
+        "child-message",
+    );
+    seed_observer_stream(
+        &service,
+        "other-child",
+        "other-root",
+        "other-run",
+        "other-message",
+    );
 
     service.delete_project("project-agent-tree").unwrap();
 
@@ -64,6 +104,9 @@ fn agent_service_project_deletion_reaches_tree_aware_storage() {
         .unwrap()
         .is_none());
     assert!(storage.get_agent_node("agent-tree-root").unwrap().is_none());
+    let streams = service.observer_streams.lock().unwrap();
+    assert!(!streams.contains_key("child-conversation"));
+    assert!(streams.contains_key("other-child"));
 }
 
 #[test]
@@ -77,6 +120,20 @@ fn agent_service_root_conversation_deletion_reaches_tree_aware_storage() {
         "agent-conversation-root",
     );
     let service = AgentService::new_authorized_for_test(Arc::clone(&storage));
+    seed_observer_stream(
+        &service,
+        "child-conversation",
+        "conversation-agent-root",
+        "child-run",
+        "child-message",
+    );
+    seed_observer_stream(
+        &service,
+        "other-child",
+        "other-root",
+        "other-run",
+        "other-message",
+    );
 
     service
         .delete_conversation("conversation-agent-root")
@@ -95,4 +152,7 @@ fn agent_service_root_conversation_deletion_reaches_tree_aware_storage() {
         .get_agent_node("agent-conversation-root")
         .unwrap()
         .is_none());
+    let streams = service.observer_streams.lock().unwrap();
+    assert!(!streams.contains_key("child-conversation"));
+    assert!(streams.contains_key("other-child"));
 }

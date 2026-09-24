@@ -68,10 +68,12 @@ function activityEvent(
     ...event(rootConversationId, sequence, outerAgentId),
     kind,
     activity: {
-      schemaVersion: 2,
+      schemaVersion: 3,
       agentId,
-      rootAnchorMessageId: anchored ? 'root-assistant-1' : null,
-      rootTraceBoundarySequence: anchored ? sequence : null,
+      parentAgentId: `root:${rootConversationId}`,
+      parentConversationId: rootConversationId,
+      anchorMessageId: anchored ? 'root-assistant-1' : null,
+      traceBoundarySequence: anchored ? sequence : null,
       semantic,
       taskNameSnapshot
     }
@@ -430,6 +432,40 @@ describe('CollaborationStore', () => {
     })
   })
 
+  it('invalidates the direct parent when a child semantic event commits a parent trace boundary', async () => {
+    let handler: ((event: CollaborationEventEnvelope) => void) | undefined
+    let lastSequence = 0
+    const activity = activityEvent('root-conversation', 1, 'grandchild', 'started')
+    activity.activity!.parentAgentId = 'parent'
+    activity.activity!.parentConversationId = 'parent-conversation'
+    const source: CollaborationDataSource = {
+      getTree: vi.fn(async () => ({
+        ...tree('root-conversation', lastSequence),
+        agents: [
+          childSummary('parent', 'parent-conversation'),
+          childSummary('sibling', 'sibling-conversation')
+        ]
+      })),
+      listEvents: vi.fn(async ({ afterSequence }) =>
+        page('root-conversation', lastSequence > afterSequence ? [activity] : [])
+      ),
+      subscribe: (next) => {
+        handler = next
+        return () => undefined
+      },
+      subscribeResync: () => () => undefined
+    }
+    const store = new CollaborationStore('root-conversation', source)
+    store.start()
+    await settle()
+    lastSequence = 1
+    handler?.(activity)
+    await settle()
+    await settle()
+
+    expect(store.getSnapshot().agentInvalidationSequences).toEqual({ parent: 1, sibling: 0 })
+  })
+
   it('invalidates every selected observer after an event-log gap forces full hydration', async () => {
     let handler: ((value: CollaborationEventEnvelope) => void) | undefined
     const childA = 'agent-child-a'
@@ -606,7 +642,47 @@ describe('CollaborationStore', () => {
     expect(store.getSnapshot().activities.at(-1)?.sequence).toBe(total)
   })
 
-  it('does not let post-terminal unanchored events evict the frozen anchored window', async () => {
+  it('restores an older parent gap event after more than 2048 descendant inline events', async () => {
+    const gap = activityEvent('root-conversation', 1, 'agent-a', 'completed', 'agent-a', false)
+    gap.activity!.anchorMessageId = 'root-assistant-1'
+    const descendants = Array.from(
+      { length: MAX_COLLABORATION_TIMELINE_ACTIVITIES + 17 },
+      (_, index) => {
+        const event = activityEvent('root-conversation', index + 2, 'grandchild', 'started')
+        event.activity!.parentAgentId = 'agent-a'
+        event.activity!.parentConversationId = 'child-conversation'
+        event.activity!.anchorMessageId = 'child-assistant'
+        return event
+      }
+    )
+    const durable = [gap, ...descendants]
+    const source: CollaborationDataSource = {
+      getTree: vi.fn(async () => tree('root-conversation', durable.length)),
+      listEvents: vi.fn(async ({ afterSequence, limit }) => {
+        const events = durable.slice(afterSequence, afterSequence + limit)
+        return page('root-conversation', events, afterSequence + events.length < durable.length)
+      }),
+      subscribe: () => () => undefined,
+      subscribeResync: () => () => undefined
+    }
+    const store = new CollaborationStore('root-conversation', source)
+    store.start()
+    await vi.waitFor(() => expect(store.getSnapshot().loading).toBe(false))
+    await store.hydrate()
+
+    const activities = store.getSnapshot().activities
+    expect(activities).toHaveLength(MAX_COLLABORATION_TIMELINE_ACTIVITIES + 1)
+    expect(activities[0]).toMatchObject({
+      activityId: gap.eventId,
+      parentConversationId: 'root-conversation',
+      anchorMessageId: 'root-assistant-1',
+      traceBoundarySequence: null
+    })
+    expect(activities[1]?.sequence).toBe(19)
+    expect(activities.at(-1)?.sequence).toBe(durable.length)
+  })
+
+  it('keeps between-message history outside the bounded inline activity window', async () => {
     const anchored = Array.from({ length: MAX_COLLABORATION_TIMELINE_ACTIVITIES }, (_, index) =>
       activityEvent('root-conversation', index + 1, 'agent-a', 'started')
     )
@@ -640,11 +716,10 @@ describe('CollaborationStore', () => {
 
     expect(store.getSnapshot().tree?.lastSequence).toBe(durable.length)
     expect(store.getSnapshot().agentInvalidationSequences['agent-a']).toBe(durable.length)
-    expect(store.getSnapshot().activities).toHaveLength(MAX_COLLABORATION_TIMELINE_ACTIVITIES)
+    expect(store.getSnapshot().activities).toHaveLength(durable.length)
     expect(store.getSnapshot().activities[0]?.sequence).toBe(1)
-    expect(store.getSnapshot().activities.at(-1)?.sequence).toBe(
-      MAX_COLLABORATION_TIMELINE_ACTIVITIES
-    )
+    expect(store.getSnapshot().activities.at(-1)?.sequence).toBe(durable.length)
+    expect(store.getSnapshot().activities.at(-1)?.semantic).toBe('completed')
   })
 })
 

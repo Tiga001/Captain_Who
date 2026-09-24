@@ -110,27 +110,35 @@ impl AgentService {
         let configuration_revision = conversation_context_configuration_revision(&agent_input)
             .map_err(|error| error.to_string());
         Arc::new(move |snapshot| {
-            snapshots
-                .lock()
-                .unwrap_or_else(|error| error.into_inner())
-                .insert(run_id.clone(), snapshot.clone());
             let configuration_revision = configuration_revision
                 .as_deref()
                 .map_err(|error| AgentError::new(format!("无法准备会话上下文状态：{error}")))?;
             let tool_projection = tool_set_snapshot.projection();
-            service
-                .persist_in_progress_trace_snapshot(
-                    &run_id,
-                    &conversation_id,
-                    &assistant_message_id,
-                    created_at,
-                    &agent_input,
-                    &notifications,
-                    &snapshot,
-                    configuration_revision,
-                    tool_projection.as_ref(),
-                )
-                .map_err(|error| error.into_agent_error(&run_id, &conversation_id))
+            let persisted = service.persist_in_progress_trace_snapshot(
+                &run_id,
+                &conversation_id,
+                &assistant_message_id,
+                created_at,
+                &agent_input,
+                &notifications,
+                &snapshot,
+                configuration_revision,
+                tool_projection.as_ref(),
+            );
+            // A rejected append is not a new authoritative snapshot. In particular a Host tool
+            // may already have committed its result before Runtime's later projection fails.
+            // Keeping that failed projection here would make terminal settlement retry the same
+            // conflicting prefix forever.
+            if !matches!(
+                &persisted,
+                Err(InProgressTraceSnapshotError::NotCommitted(_))
+            ) {
+                snapshots
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .insert(run_id.clone(), snapshot);
+            }
+            persisted.map_err(|error| error.into_agent_error(&run_id, &conversation_id))
         })
     }
 

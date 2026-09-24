@@ -1,7 +1,6 @@
 use super::common::{
     conflict, corrupt, immediate, invalid, read_error, stable_fact_id, validate_id, validate_time,
-    validate_trimmed, write_error, MAX_RESULT_ARTIFACTS, MAX_RESULT_SUMMARY_BYTES,
-    MAX_TERMINAL_ERROR_BYTES,
+    validate_trimmed, write_error, MAX_RESULT_ARTIFACTS, MAX_TERMINAL_ERROR_BYTES,
 };
 use super::mailbox::{
     enqueue_message_in_transaction, message_matches_enqueue, validate_message_input,
@@ -158,7 +157,6 @@ fn validate_finish_agent_turn_result_input(
     validate_time(completed_at)?;
     validate_id("wake_id", &input.wake_id)?;
     validate_id("claim_token", &input.claim_token)?;
-    validate_trimmed("summary", &input.summary, MAX_RESULT_SUMMARY_BYTES)?;
     if let Some(error) = input.terminal_error.as_deref() {
         validate_trimmed("terminal_error", error, MAX_TERMINAL_ERROR_BYTES)?;
     }
@@ -201,6 +199,20 @@ fn finish_agent_turn_with_result_in_transaction(
     completed_at: i64,
     require_live_lease: bool,
 ) -> Result<AgentTurnResultSettlement, AgentGraphError> {
+    // Automatic completion delivery carries only Host-authored terminal facts. Detailed work
+    // belongs in an explicit send_message; the final assistant reply stays in the child chat.
+    let summary = match input.terminal_status {
+        AgentWakeStatus::Completed => "子智能体本轮已完成。",
+        AgentWakeStatus::Failed => "子智能体本轮失败。",
+        AgentWakeStatus::Interrupted => "子智能体本轮已中断。",
+        AgentWakeStatus::OutcomeUnknown => "子智能体本轮结果未知。",
+        _ => {
+            return Err(invalid(
+                "terminal_status",
+                "expected a delegated terminal status",
+            ))
+        }
+    };
     let wake = query_wake(transaction, &input.wake_id)?
         .ok_or_else(|| AgentGraphError::WakeNotFound(input.wake_id.clone()))?;
     let child = query_node(transaction, &wake.agent_id)?
@@ -284,7 +296,7 @@ fn finish_agent_turn_with_result_in_transaction(
             || envelope.turn_id != input.assistant_message_id
             || envelope.run_id != input.run_id
             || envelope.status != input.terminal_status
-            || envelope.summary != input.summary
+            || envelope.summary != summary
             || envelope.terminal_error != input.terminal_error
             || result_message.kind != AgentMailboxKind::Result
             || result_message.sender_agent_id != child.agent_id
@@ -336,7 +348,7 @@ fn finish_agent_turn_with_result_in_transaction(
         turn_id: input.assistant_message_id.clone(),
         run_id: input.run_id.clone(),
         status: input.terminal_status,
-        summary: input.summary.clone(),
+        summary: summary.to_string(),
         artifact_refs,
         terminal_error: input.terminal_error.clone(),
     };
@@ -478,7 +490,6 @@ pub fn settle_tree_stopped_active_wake(
     snapshot: &ActiveAgentTreeWake,
     completed_at: i64,
 ) -> Result<AgentTreeStoppedWakeSettlementOutcome, AgentGraphError> {
-    const SUMMARY: &str = "子 Agent 已随主任务停止。";
     const REASON: &str = "用户已停止根任务；系统不会继续这个子 Agent Turn。";
 
     let input = FinishAgentTurnResultInput {
@@ -488,7 +499,6 @@ pub fn settle_tree_stopped_active_wake(
         terminal_status: AgentWakeStatus::Interrupted,
         run_id: Some(snapshot.run_id.clone()),
         assistant_message_id: Some(snapshot.assistant_message_id.clone()),
-        summary: SUMMARY.to_string(),
         terminal_error: Some(REASON.to_string()),
     };
     validate_finish_agent_turn_result_input(&input, completed_at)?;

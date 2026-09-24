@@ -142,6 +142,10 @@ impl AgentService {
             &input.root_conversation_id,
             &input.conversation_id,
         )?;
+        let observer_streams = self
+            .observer_streams
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         let Some(snapshot) = self
             .storage
             .load_conversation_observer_snapshot(&input.conversation_id)
@@ -150,6 +154,19 @@ impl AgentService {
             return Ok(None);
         };
         let conversation = snapshot.conversation;
+        let live_stream = observer_streams
+            .get(&input.conversation_id)
+            .filter(|state| {
+                state.agent_id == node.agent_id
+                    && state.root_agent_id == node.root_agent_id
+                    && state.root_conversation_id == node.root_conversation_id
+                    && conversation.messages.iter().any(|message| {
+                        message.id == state.snapshot.assistant_message_id
+                            && message.role == "assistant"
+                    })
+            })
+            .map(|state| state.snapshot.clone());
+        drop(observer_streams);
         let input_origins = snapshot.input_origins;
         let messages = conversation
             .messages
@@ -207,6 +224,7 @@ impl AgentService {
             created_at: conversation.created_at,
             updated_at: conversation.updated_at,
             messages,
+            live_stream,
         }))
     }
 
@@ -618,8 +636,10 @@ pub(crate) fn event_dto(record: AgentCollaborationEventRecord) -> CollaborationE
                 },
                 agent_id: activity.agent_id,
                 task_name_snapshot: activity.task_name_snapshot,
-                root_anchor_message_id: activity.root_anchor_message_id,
-                root_trace_boundary_sequence: activity.root_trace_boundary_sequence,
+                parent_agent_id: activity.parent_agent_id,
+                parent_conversation_id: activity.parent_conversation_id,
+                anchor_message_id: activity.anchor_message_id,
+                trace_boundary_sequence: activity.trace_boundary_sequence,
             }),
         occurred_at: record.created_at,
     }

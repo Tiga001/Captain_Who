@@ -1,8 +1,18 @@
 impl AgentService {
     pub fn delete_project(&self, project_id: &str) -> Result<(), String> {
-        let _admission = self.conversation_admission.lock().unwrap_or_else(|error|error.into_inner());
-        for conversation in self.storage.load_conversations()?.iter().filter(|conversation| conversation.project_id.as_deref() == Some(project_id)) {
-            self.ensure_no_manual_context_compaction(&conversation.id)?;
+        let _admission = self
+            .conversation_admission
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let deleted_conversation_ids = self
+            .storage
+            .load_conversations()?
+            .into_iter()
+            .filter(|conversation| conversation.project_id.as_deref() == Some(project_id))
+            .map(|conversation| conversation.id)
+            .collect::<HashSet<_>>();
+        for conversation_id in &deleted_conversation_ids {
+            self.ensure_no_manual_context_compaction(conversation_id)?;
         }
         // Agent-bound projects are deletable: after this layer drains live execution and file
         // effects, StorageService removes every owned Agent tree in the same deletion transaction.
@@ -130,6 +140,14 @@ impl AgentService {
                 .unwrap_or_else(|error| error.into_inner());
             usage_contexts
                 .retain(|_, state| state.context.project_id.as_deref() != Some(project_id));
+            drop(usage_contexts);
+            self.observer_streams
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .retain(|conversation_id, state| {
+                    !deleted_conversation_ids.contains(conversation_id)
+                        && !deleted_conversation_ids.contains(&state.root_conversation_id)
+                });
         }
         if result.is_err() {
             self.deletion_lifecycle
@@ -175,7 +193,10 @@ impl AgentService {
     }
 
     pub fn delete_conversation(&self, conversation_id: &str) -> Result<(), String> {
-        let _admission = self.conversation_admission.lock().unwrap_or_else(|error|error.into_inner());
+        let _admission = self
+            .conversation_admission
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         self.ensure_no_manual_context_compaction(conversation_id)?;
         self.authorize_user_conversation_write(conversation_id)
             .map_err(|error| error.to_string())?;
@@ -265,6 +286,14 @@ impl AgentService {
             for run_id in &run_ids {
                 traces.remove(run_id);
             }
+            drop(traces);
+            self.observer_streams
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .retain(|stream_conversation_id, state| {
+                    stream_conversation_id != conversation_id
+                        && state.root_conversation_id != conversation_id
+                });
             // Conversation identifiers are immutable for this process lifetime. Retaining the
             // tombstone prevents a stale worker from recreating effects after durable deletion;
             // the temporary project marker is still released by the guard.
@@ -278,7 +307,10 @@ impl AgentService {
         conversation_id: &str,
         message_ids: &[String],
     ) -> Result<(), String> {
-        let _admission = self.conversation_admission.lock().unwrap_or_else(|error|error.into_inner());
+        let _admission = self
+            .conversation_admission
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         self.ensure_no_manual_context_compaction(conversation_id)?;
         self.authorize_user_conversation_write(conversation_id)
             .map_err(|error| error.to_string())?;
@@ -449,6 +481,14 @@ impl AgentService {
                 .unwrap_or_else(|error| error.into_inner())
                 .retain(|run_id, _| !retired_run_ids.contains(run_id));
         }
+        self.observer_streams
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .retain(|stream_conversation_id, state| {
+                !retired_run_ids.contains(&state.snapshot.run_id)
+                    && (stream_conversation_id != conversation_id
+                        || !message_id_set.contains(&state.snapshot.assistant_message_id))
+            });
         self.invalidate_conversation_context_state(conversation_id);
         Ok(())
     }

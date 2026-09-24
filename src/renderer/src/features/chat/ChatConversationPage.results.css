@@ -782,6 +782,7 @@
   gap: 10px;
 }
 
+.agent-activity__group-items,
 .web-search-activity__group-items {
   display: grid;
   max-width: min(100%, 820px);
@@ -790,6 +791,7 @@
   gap: 2px;
 }
 
+.agent-activity__group-items > .agent-activity,
 .web-search-activity__group-items > .agent-activity {
   margin: 0;
 }

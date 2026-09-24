@@ -232,8 +232,6 @@ impl AgentService {
                 terminal_status: mycopilot_core::AgentWakeStatus::Failed,
                 run_id: Some(run_id.clone()),
                 assistant_message_id: Some(assistant_message_id.to_string()),
-                summary: "The child Agent stopped after recording the Skill script result."
-                    .to_string(),
                 terminal_error: Some(FAILURE_MESSAGE.to_string()),
             };
             let mut settled = false;

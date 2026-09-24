@@ -177,7 +177,7 @@ impl AgentMessagingService {
         origin_run_id: Option<&str>,
     ) -> Result<mycopilot_core::AgentMessageDispatch, AgentGraphError> {
         self.authorizer
-            .authorize_message_size(&input.content)
+            .authorize_message_content(&input.content)
             .and_then(|()| {
                 self.authorizer
                     .authorize_management(
@@ -303,7 +303,6 @@ impl ChildAgentFactory {
         let limits = mycopilot_core::AgentTreeResourceLimits {
             max_depth: policy.max_tree_depth,
             max_nodes: policy.max_nodes_per_tree,
-            max_task_bytes: policy.max_message_bytes,
         };
         match origin_run_id {
             Some(origin_run_id) => self
@@ -370,9 +369,6 @@ fn map_authorization_error(
 ) -> AgentGraphError {
     use crate::application::collaboration_authorization::CollaborationAuthorizationError;
     match error {
-        CollaborationAuthorizationError::ResourceLimit { resource, limit } => {
-            AgentGraphError::ResourceLimit { resource, limit }
-        }
         CollaborationAuthorizationError::StorageUnavailable(reason) => {
             AgentGraphError::StorageUnavailable(reason)
         }
@@ -393,9 +389,6 @@ fn map_spawn_authorization_error(
 ) -> ChildAgentSpawnError {
     use crate::application::collaboration_authorization::CollaborationAuthorizationError;
     match error {
-        CollaborationAuthorizationError::ResourceLimit { resource, limit } => {
-            ChildAgentSpawnError::ResourceLimit { resource, limit }
-        }
         CollaborationAuthorizationError::StorageUnavailable(reason) => {
             ChildAgentSpawnError::StorageUnavailable(reason)
         }

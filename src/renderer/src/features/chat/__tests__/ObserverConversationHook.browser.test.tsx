@@ -105,6 +105,37 @@ function runningObserver(
   return value
 }
 
+function streamingObserver(content: string, sequence: number): AgentObserverConversation {
+  const value = runningObserver('child-a', 'run-a', 'assistant-a', '')
+  value.liveStream = {
+    runId: 'run-a',
+    assistantMessageId: 'assistant-a',
+    cursor: { generation: 'stream-generation', sequence },
+    stream: {
+      streamId: 'stream-a',
+      attempt: 1,
+      content,
+      traceBoundarySequence: 0,
+      committed: false
+    }
+  }
+  return value
+}
+
+function sequencedDelta(delta: string, sequence: number) {
+  return {
+    schemaVersion: 1,
+    rootAgentId: 'root-agent',
+    rootConversationId: 'root-conversation',
+    agentId: 'agent-child-a',
+    conversationId: 'child-a',
+    runId: 'run-a',
+    assistantMessageId: 'assistant-a',
+    streamCursor: { generation: 'stream-generation', sequence },
+    event: { type: 'message_delta', runId: 'run-a', streamId: 'stream-a', delta }
+  }
+}
+
 function HookProbe({
   conversationId,
   invalidationVersion = 0,
@@ -389,31 +420,65 @@ it('replays a live delta that races a same-scope durable refresh', async () => {
   await expect.element(screen.getByText('durable raced')).toBeVisible()
 })
 
-it('lets a target durable refresh authoritatively replace a pre-cut live delta', async () => {
+it('preserves a pre-refresh streamed prefix when a target durable refresh arrives', async () => {
   const refresh = deferred<AgentObserverConversation | null>()
   mocks.load
     .mockReset()
-    .mockResolvedValueOnce(runningObserver('child-a', 'run-a', 'assistant-a', 'base'))
+    .mockResolvedValueOnce(streamingObserver('base', 1))
     .mockReturnValueOnce(refresh.promise)
   const screen = await render(<HookProbe conversationId="child-a" invalidationVersion={1} />)
   await expect.element(screen.getByText('base')).toBeVisible()
-  mocks.observerEvent?.({
-    schemaVersion: 1,
-    rootAgentId: 'root-agent',
-    rootConversationId: 'root-conversation',
-    agentId: 'agent-child-a',
-    conversationId: 'child-a',
-    runId: 'run-a',
-    assistantMessageId: 'assistant-a',
-    event: { type: 'message_delta', runId: 'run-a', delta: ' before refresh' }
-  })
+  mocks.observerEvent?.(sequencedDelta(' before refresh', 2))
   await expect.element(screen.getByText('base before refresh')).toBeVisible()
   await screen.rerender(<HookProbe conversationId="child-a" invalidationVersion={2} />)
-  refresh.resolve(runningObserver('child-a', 'run-a', 'assistant-a', 'base'))
+  mocks.observerEvent?.(sequencedDelta(' after refresh', 3))
+  refresh.resolve(streamingObserver('base before refresh', 2))
   await expect
     .poll(() => screen.container.querySelector('[data-loading]')?.getAttribute('data-loading'))
     .toBe('false')
-  expect(screen.container.textContent).not.toContain('before refresh')
+  expect(screen.container.textContent).toBe('base before refresh after refresh')
+})
+
+it('opens mid-stream with the entire prefix and does not repeat a delta already in the snapshot', async () => {
+  const initial = deferred<AgentObserverConversation | null>()
+  mocks.load.mockReturnValue(initial.promise)
+  const screen = await render(<HookProbe conversationId="child-a" />)
+  mocks.observerEvent?.(sequencedDelta(' already included', 6))
+  mocks.observerEvent?.(sequencedDelta(' new suffix', 7))
+  initial.resolve(streamingObserver('long unseen prefix already included', 6))
+  await expect
+    .element(screen.getByText('long unseen prefix already included new suffix'))
+    .toBeVisible()
+  mocks.observerEvent?.(sequencedDelta(' new suffix', 7))
+  mocks.observerEvent?.(sequencedDelta(' stale prefix', 5))
+  await new Promise((resolve) => window.setTimeout(resolve, 0))
+  expect(screen.container.textContent).toBe('long unseen prefix already included new suffix')
+})
+
+it('recovers streamed text when returning to a child after observing another conversation', async () => {
+  mocks.load
+    .mockResolvedValueOnce(streamingObserver('first prefix', 2))
+    .mockResolvedValueOnce(observer('child-b', 'other child'))
+    .mockResolvedValueOnce(streamingObserver('first prefix + output while away', 10))
+  const screen = await render(<HookProbe conversationId="child-a" />)
+  await expect.element(screen.getByText('first prefix')).toBeVisible()
+  await screen.rerender(<HookProbe conversationId="child-b" />)
+  await expect.element(screen.getByText('other child')).toBeVisible()
+  await screen.rerender(<HookProbe conversationId="child-a" />)
+  await expect.element(screen.getByText('first prefix + output while away')).toBeVisible()
+})
+
+it('hydrates a long fine-grained stream without overflowing its load journal or repeating the prefix', async () => {
+  const initial = deferred<AgentObserverConversation | null>()
+  mocks.load.mockReturnValue(initial.promise)
+  const screen = await render(<HookProbe conversationId="child-a" />)
+  for (let sequence = 1; sequence <= 600; sequence += 1) {
+    mocks.observerEvent?.(sequencedDelta('字', sequence))
+  }
+  initial.resolve(streamingObserver('字'.repeat(300), 300))
+  await expect.poll(() => screen.container.textContent).toBe('字'.repeat(600))
+  expect(screen.container.querySelector('[data-error]')).toBeNull()
+  expect(mocks.load).toHaveBeenCalledTimes(1)
 })
 
 it('keeps legacy Command output isolated by exact conversation, message and run identity', async () => {

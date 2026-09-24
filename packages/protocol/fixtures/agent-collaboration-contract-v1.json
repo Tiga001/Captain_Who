@@ -210,12 +210,14 @@
     "kind": "wake_created",
     "resourceRevision": 1,
     "activity": {
-      "schemaVersion": 2,
+      "schemaVersion": 3,
       "semantic": "started",
       "agentId": "agent-child",
       "taskNameSnapshot": "Research",
-      "rootAnchorMessageId": null,
-      "rootTraceBoundarySequence": null
+      "parentAgentId": "agent-root",
+      "parentConversationId": "conversation-root",
+      "anchorMessageId": null,
+      "traceBoundarySequence": null
     },
     "occurredAt": 1720000000001
   },

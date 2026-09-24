@@ -9,13 +9,12 @@ use mycopilot_core::{AgentLifecycle, AgentNodeRecord};
 use std::fmt;
 use std::sync::Arc;
 
-/// Small product limits. Tree capacity is enforced atomically by persistence; message size is
-/// rejected before enqueue as well as at the transactional write boundary.
+/// Tree capacity is enforced atomically by persistence. Mailbox backpressure is independent
+/// from message content; collaboration text has no per-message product length limit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct AgentAccessPolicy {
     pub(crate) max_tree_depth: u32,
     pub(crate) max_nodes_per_tree: u32,
-    pub(crate) max_message_bytes: usize,
 }
 
 impl Default for AgentAccessPolicy {
@@ -23,7 +22,6 @@ impl Default for AgentAccessPolicy {
         Self {
             max_tree_depth: 8,
             max_nodes_per_tree: 64,
-            max_message_bytes: 64 * 1024,
         }
     }
 }
@@ -38,11 +36,6 @@ impl AgentAccessPolicy {
         if self.max_nodes_per_tree < 2 || self.max_nodes_per_tree > 1_024 {
             return Err(CollaborationAuthorizationError::InvalidPolicy(
                 "max_nodes_per_tree must be between 2 and 1024".to_string(),
-            ));
-        }
-        if self.max_message_bytes == 0 || self.max_message_bytes > 1024 * 1024 {
-            return Err(CollaborationAuthorizationError::InvalidPolicy(
-                "max_message_bytes must be between 1 and 1048576".to_string(),
             ));
         }
         Ok(self)
@@ -62,7 +55,6 @@ pub(crate) enum CollaborationAuthorizationError {
     ReadOnlyChildConversation,
     CallerUnavailable,
     PermissionDenied,
-    ResourceLimit { resource: &'static str, limit: u64 },
     StorageUnavailable(String),
 }
 
@@ -72,7 +64,6 @@ impl CollaborationAuthorizationError {
             Self::InvalidPolicy(_) => "invalid_argument",
             Self::ReadOnlyChildConversation => "read_only_child",
             Self::CallerUnavailable | Self::PermissionDenied => "permission_denied",
-            Self::ResourceLimit { .. } => "resource_limit",
             Self::StorageUnavailable(_) => "unavailable",
         }
     }
@@ -93,12 +84,6 @@ impl fmt::Display for CollaborationAuthorizationError {
             }
             Self::CallerUnavailable | Self::PermissionDenied => {
                 formatter.write_str("Agent collaboration operation is not authorized.")
-            }
-            Self::ResourceLimit { resource, limit } => {
-                write!(
-                    formatter,
-                    "Agent {resource} resource limit exceeded ({limit})"
-                )
             }
             Self::StorageUnavailable(reason) => {
                 write!(
@@ -201,7 +186,7 @@ impl CollaborationAuthorizer {
         target_agent_id: &str,
         message: &str,
     ) -> Result<(AgentNodeRecord, AgentNodeRecord), CollaborationAuthorizationError> {
-        self.authorize_message_size(message)?;
+        self.authorize_message_content(message)?;
         let caller = self.required_active_caller(caller_agent_id)?;
         let target = self.required_target(target_agent_id)?;
         self.ensure_same_tree(&caller, &target)?;
@@ -267,7 +252,7 @@ impl CollaborationAuthorizer {
         self.tree_for(&caller)
     }
 
-    pub(crate) fn authorize_message_size(
+    pub(crate) fn authorize_message_content(
         &self,
         message: &str,
     ) -> Result<(), CollaborationAuthorizationError> {
@@ -275,12 +260,6 @@ impl CollaborationAuthorizer {
             return Err(CollaborationAuthorizationError::InvalidPolicy(
                 "message must be non-empty".to_string(),
             ));
-        }
-        if message.len() > self.policy.max_message_bytes {
-            return Err(CollaborationAuthorizationError::ResourceLimit {
-                resource: "message_bytes",
-                limit: self.policy.max_message_bytes as u64,
-            });
         }
         Ok(())
     }
@@ -624,7 +603,6 @@ mod tests {
             AgentAccessPolicy {
                 max_tree_depth: 8,
                 max_nodes_per_tree: 2,
-                max_message_bytes: 4,
             },
         )
         .unwrap();
@@ -632,14 +610,9 @@ mod tests {
             constrained.authorize_spawn("root-a").unwrap().agent_id,
             "root-a"
         );
-        assert_eq!(
-            constrained
-                .authorize_send("root-a", &child.agent_id, "12345")
-                .unwrap_err(),
-            CollaborationAuthorizationError::ResourceLimit {
-                resource: "message_bytes",
-                limit: 4,
-            }
-        );
+        assert!(constrained
+            .authorize_message_content(&"协作🙂".repeat(30_000))
+            .is_ok());
+        assert!(constrained.authorize_message_content("   ").is_err());
     }
 }

@@ -20,8 +20,8 @@ const MAX_BATCH_MESSAGES: usize = 1_024;
 const MAX_SAFE_BOUNDARY_MESSAGES: usize = 64;
 const MAX_SAFE_BOUNDARY_MODEL_BYTES: usize = 128 * 1_024;
 const MAX_WAIT_TARGETS: usize = 32;
-// Leave deterministic headroom for 32 bounded status snapshots and the ToolResult envelope. The
-// final serialized result is independently checked against the shared 128 KiB hard ceiling.
+// Soft batching target. A single larger FIFO head is delivered whole; request-wide model
+// capacity, rather than a per-message byte cap, owns admission to the provider.
 const MAX_WAIT_MESSAGE_MODEL_BYTES: usize = 96 * 1_024;
 
 #[derive(Debug, Clone)]
@@ -665,12 +665,12 @@ pub fn poll_wait_ready(
         if new_candidates.len() >= input.maximum_messages {
             break;
         }
-        // Wait returns the same authenticated, deterministic 32 KiB envelope as the automatic
-        // safe boundary. A one-megabyte Mailbox payload therefore cannot starve the FIFO head.
+        // The first FIFO item must make progress even when its complete envelope exceeds the
+        // soft batch target. Later items remain queued for the next batch.
         let projected = wait_delivered(&candidate)?;
         let serialized = serde_json::to_vec(&projected)
             .map_err(|error| corrupt(format!("wait message serialization failed: {error}")))?;
-        if serialized.len() > remaining_model_bytes {
+        if !new_candidates.is_empty() && serialized.len() > remaining_model_bytes {
             break;
         }
         remaining_model_bytes = remaining_model_bytes.saturating_sub(serialized.len());
@@ -963,13 +963,6 @@ fn commit_wait_snapshot_to_model_batch(
         ),
         error: None,
     };
-    let serialized = serde_json::to_vec(result.result.as_ref().unwrap_or(&serde_json::Value::Null))
-        .map_err(|error| corrupt(format!("wait result serialization failed: {error}")))?;
-    if serialized.len() > MAX_SAFE_BOUNDARY_MODEL_BYTES {
-        return Err(conflict(
-            "wait result exceeds the durable model-visible collaboration budget",
-        ));
-    }
     let snapshot =
         crate::conversation_trace::conversation_trace_snapshot_with_recovered_tool_result(
             &trace,

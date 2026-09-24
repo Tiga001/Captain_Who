@@ -305,7 +305,7 @@ impl StorageService {
         trace_created_at: i64,
         completed_at: i64,
         usage: Option<&AgentUsageRecordInsert>,
-        collaboration_cutoff: Option<u64>,
+        collaboration_final_response_boundary: Option<u64>,
     ) -> Result<(), String> {
         self.finalize_chat_message_with_conversation_trace_model_context_usage_and_notification(
             conversation_id,
@@ -319,7 +319,7 @@ impl StorageService {
             completed_at,
             usage,
             None,
-            collaboration_cutoff,
+            collaboration_final_response_boundary,
         )
     }
 
@@ -342,7 +342,7 @@ impl StorageService {
         completed_at: i64,
         usage: Option<&AgentUsageRecordInsert>,
         notification: &notification_repository::NewNotificationEventRecord,
-        collaboration_cutoff: Option<u64>,
+        collaboration_final_response_boundary: Option<u64>,
     ) -> Result<(), String> {
         self.finalize_chat_message_with_conversation_trace_model_context_usage_and_notification(
             conversation_id,
@@ -356,7 +356,7 @@ impl StorageService {
             completed_at,
             usage,
             Some(notification),
-            collaboration_cutoff,
+            collaboration_final_response_boundary,
         )
     }
 
@@ -374,7 +374,7 @@ impl StorageService {
         completed_at: i64,
         usage: Option<&AgentUsageRecordInsert>,
         notification: Option<&notification_repository::NewNotificationEventRecord>,
-        collaboration_cutoff: Option<u64>,
+        collaboration_final_response_boundary: Option<u64>,
     ) -> Result<(), String> {
         let mut connection = self.state.connection()?;
         let transaction = connection
@@ -451,7 +451,7 @@ impl StorageService {
             message_status,
             run_status,
             completed_at,
-            collaboration_cutoff,
+            collaboration_final_response_boundary,
         )
         .map_err(storage_error)?;
         conversation_trace_repository::commit_trace_in_connection(

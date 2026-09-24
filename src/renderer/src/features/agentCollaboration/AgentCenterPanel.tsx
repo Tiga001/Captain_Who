@@ -1,11 +1,14 @@
-import type { AgentDisplayStatusView, AgentSummary } from '@mycopilot/protocol'
-import { ChevronLeft, Settings2 } from 'lucide-react'
+import type { AgentSummary } from '@mycopilot/protocol'
+import { ChevronLeft, List, ListTree, Network, Settings2 } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { Tooltip } from '../../components/overlay/Tooltip'
 import { useFrontendConfig } from '../../config/FrontendConfigProvider'
 import { formatTranslation, type Translate } from '../../config/translationFormat'
 import { useRightSidebarRuntimeContext } from '../rightSidebar/RightSidebarRuntimeContext'
 import type { RightSidebarModulePageState } from '../rightSidebar/rightSidebarTypes'
 import { AgentAvatar } from './AgentAvatar'
+import { AgentTreeView, type AgentTreeLayout } from './AgentTreeView'
+import { ACTIVE_STATUSES, baseModelLabel, statusLabel } from './agentCenterLabels'
 import './AgentCenterPanel.css'
 
 interface AgentCenterPanelProps {
@@ -13,14 +16,25 @@ interface AgentCenterPanelProps {
   pageState: Extract<RightSidebarModulePageState, { kind: 'agent-center' }> | null
 }
 
-const ACTIVE_STATUSES = new Set<AgentDisplayStatusView>(['queued', 'running', 'waiting_approval'])
 const INITIAL_ACTIVE_COUNT = 4
 const INITIAL_ENDED_COUNT = 10
 
+const VIEW_OPTIONS = [
+  { id: 'list', label: 'agentCenter.switchToList', icon: List },
+  { id: 'diagram', label: 'agentCenter.switchToDiagram', icon: Network },
+  { id: 'outline', label: 'agentCenter.switchToOutline', icon: ListTree }
+] as const
+
 export function AgentCenterPanel({ onNavigate, pageState }: AgentCenterPanelProps) {
   const { language, t } = useFrontendConfig()
-  const { activeConversationId, collaborationSnapshot, onOpenAgentTemplates, renderAgentObserver } =
-    useRightSidebarRuntimeContext()
+  const {
+    activeConversationId,
+    collaborationSnapshot,
+    onOpenAgentTemplates,
+    onOpenProfile,
+    onOpenAgentRootConversation,
+    renderAgentObserver
+  } = useRightSidebarRuntimeContext()
   const tree = collaborationSnapshot?.tree
   const rootConversationId = activeConversationId
   const validTree =
@@ -45,6 +59,12 @@ export function AgentCenterPanel({ onNavigate, pageState }: AgentCenterPanelProp
         ? ({ kind: 'agent-center', rootConversationId, view: 'list' } as const)
         : null
   const detailAgentId = state?.view === 'detail' ? state.agentId : undefined
+  const [homeView, setHomeView] = useState<'list' | 'tree'>('list')
+  const [treeLayout, setTreeLayout] = useState<AgentTreeLayout>('diagram')
+  const [userCollapsed, setUserCollapsed] = useState(false)
+  const [collapsedAgentIds, setCollapsedAgentIds] = useState<Set<string>>(() => new Set())
+  const treeElementRef = useRef<HTMLDivElement | null>(null)
+  const treeScrollRef = useRef({ diagram: { top: 0, left: 0 }, outline: { top: 0, left: 0 } })
   const [showAllActive, setShowAllActive] = useState(false)
   const [showAllEnded, setShowAllEnded] = useState(false)
   const [relativeTimeNow, setRelativeTimeNow] = useState(() => Date.now())
@@ -54,6 +74,11 @@ export function AgentCenterPanel({ onNavigate, pageState }: AgentCenterPanelProp
   const restoreAgentIdRef = useRef<string | null>(null)
 
   useEffect(() => {
+    setHomeView('list')
+    setTreeLayout('diagram')
+    setUserCollapsed(false)
+    setCollapsedAgentIds(new Set())
+    treeScrollRef.current = { diagram: { top: 0, left: 0 }, outline: { top: 0, left: 0 } }
     setShowAllActive(false)
     setShowAllEnded(false)
     listScrollTopRef.current = 0
@@ -75,15 +100,21 @@ export function AgentCenterPanel({ onNavigate, pageState }: AgentCenterPanelProp
   }, [children, detailAgentId])
 
   useEffect(() => {
-    if (state?.view !== 'list' || restoreAgentIdRef.current === null) return
+    if (state?.view !== 'list') return
     const restoreAgentId = restoreAgentIdRef.current
     const frame = window.requestAnimationFrame(() => {
-      if (listElementRef.current) listElementRef.current.scrollTop = listScrollTopRef.current
-      rowElementsRef.current.get(restoreAgentId)?.focus()
+      if (homeView === 'tree' && treeElementRef.current) {
+        treeElementRef.current.scrollTop = treeScrollRef.current[treeLayout].top
+        treeElementRef.current.scrollLeft = treeScrollRef.current[treeLayout].left
+      } else if (listElementRef.current) {
+        listElementRef.current.scrollTop = listScrollTopRef.current
+      }
+      if (restoreAgentId)
+        rowElementsRef.current.get(restoreAgentId)?.focus({ preventScroll: homeView === 'tree' })
       restoreAgentIdRef.current = null
     })
     return () => window.cancelAnimationFrame(frame)
-  }, [state?.view])
+  }, [state?.view, homeView, treeLayout])
 
   if (!rootConversationId || !validTree) {
     return <div className="agent-center__state">{t('agentCenter.unavailable')}</div>
@@ -95,20 +126,33 @@ export function AgentCenterPanel({ onNavigate, pageState }: AgentCenterPanelProp
       const agentLabelsById = Object.fromEntries(
         validTree.agents.map((candidate) => [candidate.agentId, candidate.taskName])
       )
+      const directChildIds = new Set(
+        validTree.agents
+          .filter((candidate) => candidate.parentAgentId === agent.agentId)
+          .map((candidate) => candidate.agentId)
+      )
+      const activities = (collaborationSnapshot?.activities ?? []).filter(
+        (activity) =>
+          activity.parentAgentId === agent.agentId &&
+          activity.parentConversationId === agent.conversationId &&
+          directChildIds.has(activity.agentId)
+      )
       return (
         <div className="agent-center agent-center--detail">
           <header className="agent-center__detail-header">
-            <button
-              aria-label={t('agentCenter.back')}
-              className="agent-center__back"
-              onClick={() => {
-                restoreAgentIdRef.current = agent.agentId
-                onNavigate({ kind: 'agent-center', rootConversationId, view: 'list' })
-              }}
-              type="button"
-            >
-              <ChevronLeft aria-hidden="true" />
-            </button>
+            <Tooltip content={t('agentCenter.back')} preferredPlacement="bottom">
+              <button
+                aria-label={t('agentCenter.back')}
+                className="agent-center__back"
+                onClick={() => {
+                  restoreAgentIdRef.current = agent.agentId
+                  onNavigate({ kind: 'agent-center', rootConversationId, view: 'list' })
+                }}
+                type="button"
+              >
+                <ChevronLeft aria-hidden="true" />
+              </button>
+            </Tooltip>
             <AgentAvatar
               agentId={agent.agentId}
               className="agent-center__avatar agent-center__avatar--detail"
@@ -123,9 +167,13 @@ export function AgentCenterPanel({ onNavigate, pageState }: AgentCenterPanelProp
               renderAgentObserver({
                 agent,
                 agentLabelsById,
+                activities,
+                directChildAgentIds: [...directChildIds],
                 invalidationVersion: `${collaborationSnapshot?.hydrationRevision ?? 0}:${
                   collaborationSnapshot?.agentInvalidationSequences[agent.agentId] ?? 0
                 }`,
+                onOpenAgent: (agentId) =>
+                  onNavigate({ agentId, kind: 'agent-center', rootConversationId, view: 'detail' }),
                 rootConversationId
               })
             ) : (
@@ -140,25 +188,105 @@ export function AgentCenterPanel({ onNavigate, pageState }: AgentCenterPanelProp
   const active = children.filter((agent) => ACTIVE_STATUSES.has(agent.displayStatus))
   const completed = children.filter((agent) => !ACTIVE_STATUSES.has(agent.displayStatus))
 
+  const rememberScroll = () => {
+    if (homeView === 'tree') {
+      treeScrollRef.current[treeLayout] = {
+        top: treeElementRef.current?.scrollTop ?? 0,
+        left: treeElementRef.current?.scrollLeft ?? 0
+      }
+    } else {
+      listScrollTopRef.current = listElementRef.current?.scrollTop ?? 0
+    }
+  }
+  const selectedView = homeView === 'list' ? 'list' : treeLayout
+  const headerActions = (
+    <div className="agent-center__view-actions">
+      {VIEW_OPTIONS.map(({ id, label, icon: Icon }) => (
+        <Tooltip content={t(label)} preferredPlacement="bottom" key={id}>
+          <button
+            aria-label={t(label)}
+            aria-pressed={selectedView === id}
+            className="agent-center__templates agent-center__view-button"
+            onClick={() => {
+              if (selectedView === id) return
+              rememberScroll()
+              if (id === 'list') setHomeView('list')
+              else {
+                setTreeLayout(id)
+                setHomeView('tree')
+              }
+            }}
+            type="button"
+          >
+            <Icon aria-hidden="true" />
+          </button>
+        </Tooltip>
+      ))}
+      {onOpenAgentTemplates ? (
+        <Tooltip content={t('agentCenter.manageTemplates')} preferredPlacement="bottom">
+          <button
+            aria-label={t('agentCenter.manageTemplates')}
+            className="agent-center__templates"
+            onClick={onOpenAgentTemplates}
+            type="button"
+          >
+            <Settings2 aria-hidden="true" />
+          </button>
+        </Tooltip>
+      ) : null}
+    </div>
+  )
+
+  if (homeView === 'tree') {
+    return (
+      <div className="agent-center agent-center--tree">
+        <div className="agent-center__group agent-center__tree-heading">
+          <div className="agent-center__group-heading">
+            <h3>{t('agentCenter.treeView')}</h3>
+            {headerActions}
+          </div>
+        </div>
+        <AgentTreeView
+          layout={treeLayout}
+          agents={validTree.agents}
+          rootAgentId={validTree.rootAgentId}
+          userCollapsed={userCollapsed}
+          onToggleUser={() => setUserCollapsed((previous) => !previous)}
+          onOpenProfile={onOpenProfile}
+          collapsedAgentIds={collapsedAgentIds}
+          onToggle={(agentId) =>
+            setCollapsedAgentIds((previous) => {
+              const next = new Set(previous)
+              if (next.has(agentId)) next.delete(agentId)
+              else next.add(agentId)
+              return next
+            })
+          }
+          onOpen={(agentId) => {
+            rememberScroll()
+            if (agentId === validTree.rootAgentId) {
+              onOpenAgentRootConversation?.(rootConversationId)
+              return
+            }
+            onNavigate({ agentId, kind: 'agent-center', rootConversationId, view: 'detail' })
+          }}
+          registerAvatar={(agentId, element) => {
+            if (element) rowElementsRef.current.set(agentId, element)
+            else rowElementsRef.current.delete(agentId)
+          }}
+          scrollRef={treeElementRef}
+        />
+      </div>
+    )
+  }
+
   return (
     <div className="agent-center" ref={listElementRef}>
       <AgentGroup
         agents={active}
         emptyLabel={t('agentCenter.noActive')}
         expanded={showAllActive}
-        headerAction={
-          onOpenAgentTemplates ? (
-            <button
-              aria-label={t('agentCenter.manageTemplates')}
-              className="agent-center__templates"
-              onClick={onOpenAgentTemplates}
-              title={t('agentCenter.manageTemplates')}
-              type="button"
-            >
-              <Settings2 aria-hidden="true" />
-            </button>
-          ) : null
-        }
+        headerAction={headerActions}
         initialCount={INITIAL_ACTIVE_COUNT}
         language={language}
         onExpand={() => setShowAllActive(true)}
@@ -301,36 +429,6 @@ function AgentRows({
       })}
     </div>
   )
-}
-
-function statusLabel(status: AgentDisplayStatusView, t: Translate): string {
-  switch (status) {
-    case 'queued':
-      return t('agentCenter.status.queued')
-    case 'running':
-      return t('agentCenter.status.running')
-    case 'waiting_approval':
-      return t('agentCenter.status.waitingApproval')
-    case 'latest_completed':
-      return t('agentCenter.status.completed')
-    case 'latest_failed':
-      return t('agentCenter.status.failed')
-    case 'latest_interrupted':
-      return t('agentCenter.status.interrupted')
-    case 'latest_outcome_unknown':
-      return t('agentCenter.status.outcomeUnknown')
-    case 'archived':
-      return t('agentCenter.status.archived')
-    case 'disabled':
-      return t('agentCenter.status.disabled')
-    case 'idle':
-      return t('agentCenter.status.idle')
-  }
-}
-
-function baseModelLabel(agent: AgentSummary, t: Translate): string {
-  const displayName = agent.model?.displayName.trim()
-  return displayName || t('agentCenter.modelUnavailable')
 }
 
 function formatRecentActivity(

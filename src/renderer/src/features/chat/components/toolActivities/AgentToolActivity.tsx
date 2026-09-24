@@ -30,6 +30,7 @@ import { SkillInstallationToolActivity } from './SkillInstallationToolActivity'
 import { McpToolActivity } from './McpToolActivity'
 import { BuiltinCapabilityToolActivity } from './BuiltinCapabilityToolActivity'
 import { ActivateCapabilityToolActivity } from './ActivateCapabilityToolActivity'
+import { SendMessageToolActivity } from './SendMessageToolActivity'
 import type { SettledToolStatus } from './toolActivityUtils'
 
 interface AgentToolActivityProps {
@@ -122,6 +123,17 @@ export function AgentToolActivity({
         result={result}
         settledStatus={settledStatus}
         toolName={call.tool}
+      />
+    )
+  }
+
+  if (call.tool === 'send_message') {
+    return (
+      <SendMessageToolActivity
+        call={call}
+        cancelled={cancelled && !result}
+        result={result}
+        settledStatus={settledStatus}
       />
     )
   }

@@ -17,8 +17,10 @@ fn cloned_agent_usage_is_zero_and_ids_are_rewritten() {
                 "activityId": "event-stable",
                 "agentId": "agent-old",
                 "occurredAt": 10,
-                "rootAnchorMessageId": "message-old",
-                "rootTraceBoundarySequence": 2,
+                "parentAgentId": "agent-root",
+                "parentConversationId": "conversation-root",
+                "anchorMessageId": "message-old",
+                "traceBoundarySequence": 2,
                 "runId": "run-old",
                 "semantic": "updated",
                 "sequence": 3,
@@ -41,7 +43,7 @@ fn cloned_agent_usage_is_zero_and_ids_are_rewritten() {
     let activity = &value["collaborationTimelineActivities"][0];
     assert_eq!(activity["activityId"], "event-stable");
     assert_eq!(activity["agentId"], "agent-new");
-    assert_eq!(activity["rootAnchorMessageId"], "message-new");
+    assert_eq!(activity["anchorMessageId"], "message-new");
     assert_eq!(activity["runId"], "run-new");
     assert_eq!(activity["turnId"], "turn-new");
 
@@ -59,10 +61,7 @@ fn cloned_agent_usage_is_zero_and_ids_are_rewritten() {
     let recursive: Value = serde_json::from_str(&recursive).unwrap();
     let recursive_activity = &recursive["collaborationTimelineActivities"][0];
     assert_eq!(recursive_activity["agentId"], "agent-recursive");
-    assert_eq!(
-        recursive_activity["rootAnchorMessageId"],
-        "message-recursive"
-    );
+    assert_eq!(recursive_activity["anchorMessageId"], "message-recursive");
     assert_eq!(recursive_activity["runId"], "run-recursive");
     assert_eq!(recursive_activity["turnId"], "turn-recursive");
 }
@@ -181,7 +180,8 @@ fn fork_does_not_inherit_context_profile_admission_policy_and_next_run_uses_curr
         AgentContextProfile::Minimal
     );
 
-    crate::storage::agent_workspace_repository::freeze_run(&connection, "run-source-0", None, None).unwrap();
+    crate::storage::agent_workspace_repository::freeze_run(&connection, "run-source-0", None, None)
+        .unwrap();
     let plan = build_assistant_reply_fork_plan(
         &connection,
         "fork-context-profile-policy",
@@ -198,8 +198,12 @@ fn fork_does_not_inherit_context_profile_admission_policy_and_next_run_uses_curr
     .unwrap()
     .unwrap();
     assert_ne!(cloned_trace.run_id, "run-source-0");
-    assert_eq!(crate::storage::agent_workspace_repository::load_run(&connection, &cloned_trace.run_id).unwrap(), Some(None),
-        "historical file identity bindings are copied independently of executable mode policy");
+    assert_eq!(
+        crate::storage::agent_workspace_repository::load_run(&connection, &cloned_trace.run_id)
+            .unwrap(),
+        Some(None),
+        "historical file identity bindings are copied independently of executable mode policy"
+    );
 
     assert_eq!(
         agent_context_profile_repository::load_run(&connection, &cloned_trace.run_id).unwrap(),
@@ -538,7 +542,7 @@ fn fork_clone_preserves_the_exact_steer_boundary_projection() {
             client_message_id: "client-fork-boundary".to_string(),
             content: "continue privately".to_string(),
             attachments: Vec::new(),
-                folder_references: Vec::new(),
+            folder_references: Vec::new(),
             created_at: 15,
             truncated: false,
         }],

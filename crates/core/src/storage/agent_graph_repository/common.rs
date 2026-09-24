@@ -6,12 +6,10 @@ pub(super) const MAX_ID_BYTES: usize = 128;
 pub(super) const MAX_REQUEST_ID_BYTES: usize = 256;
 pub(super) const MAX_TASK_NAME_BYTES: usize = 256;
 pub(super) const MAX_TASK_PATH_BYTES: usize = 2_048;
-pub(super) const MAX_MESSAGE_BYTES: usize = 1_048_576;
 pub(super) const MAX_UNBOUND_MAILBOX_MESSAGES_PER_RECIPIENT: u64 = 1_024;
 pub(super) const MAX_UNBOUND_MAILBOX_BYTES_PER_RECIPIENT: u64 = 16 * 1_024 * 1_024;
 pub(super) const MAX_UNBOUND_ORDINARY_MAILBOX_MESSAGES_PER_RECIPIENT: u64 = 960;
 pub(super) const MAX_UNBOUND_ORDINARY_MAILBOX_BYTES_PER_RECIPIENT: u64 = 15 * 1_024 * 1_024;
-pub(super) const MAX_RESULT_SUMMARY_BYTES: usize = crate::AGENT_RESULT_SUMMARY_MAX_BYTES;
 pub(super) const MAX_TERMINAL_ERROR_BYTES: usize = crate::AGENT_RESULT_TERMINAL_ERROR_MAX_BYTES;
 pub(super) const MAX_RESULT_ARTIFACTS: usize = 256;
 pub(super) const MAX_PROJECT_BATCH: usize = 1_024;
@@ -76,6 +74,16 @@ pub(super) fn validate_bounded_text(
             field,
             format!("must contain {minimum}..={maximum} bytes and no NUL"),
         ));
+    }
+    Ok(())
+}
+
+pub(super) fn validate_message_content(
+    field: &'static str,
+    value: &str,
+) -> Result<(), AgentGraphError> {
+    if value.trim().is_empty() || value.contains('\0') {
+        return Err(invalid(field, "must be non-empty and NUL-free"));
     }
     Ok(())
 }

@@ -80,9 +80,8 @@ pub use agent_graph::{
     SendAgentMessageRequest, TrustedActiveChildWakeBundle, TrustedAgentWakeTurnAdmission,
     UndispatchedAgentInterrupt, UpdateAgentTemplateInput,
     AGENT_EFFECTIVE_PERMISSION_SNAPSHOT_SCHEMA_VERSION, AGENT_GRAPH_SCHEMA_VERSION,
-    AGENT_RESULT_ENVELOPE_SCHEMA_VERSION, AGENT_RESULT_SUMMARY_MAX_BYTES,
-    AGENT_RESULT_TERMINAL_ERROR_MAX_BYTES, ROOT_AGENT_TASK_NAME,
-    ROOT_AGENT_TASK_NAME_RESERVED_MESSAGE,
+    AGENT_RESULT_ENVELOPE_SCHEMA_VERSION, AGENT_RESULT_TERMINAL_ERROR_MAX_BYTES,
+    ROOT_AGENT_TASK_NAME, ROOT_AGENT_TASK_NAME_RESERVED_MESSAGE,
 };
 pub use builtin_capabilities::{
     browser_risk_rejected_result, build_browser_risk_approval, build_builtin_mcp_tool_approval,

@@ -41,7 +41,7 @@ Turn created
 
 最终 assistant message、Trace terminal、model-context projection、Usage 和 UI 终态由 Core Server 在同一结算边界提交。进程崩溃后，startup reconciliation 只在已持久证据明确证明 Run 已取消时结算为 `cancelled`；其他孤立的 `in_progress` Trace 结算为 `failed`。Trace 没有 `interrupted` 终态，也不从 Renderer 看似完成的状态推断成功。
 
-根 Agent 的 collaboration timeline 在最终 assistant response 开始流式输出时冻结。冻结快照以 `collaborationTimelineActivities` 写入本次 assistant Run projection，并保留 `rootAnchorMessageId`/`rootTraceBoundarySequence`；之后到达的子 Agent 活动仍进入 Agent Center 和持久 collaboration event log，但不能插回已经提交的父回复。未结算 Run 可使用 live projection，结算后 Renderer 只能使用该 Run 已持久化的冻结列表，不能拿“当前整棵树状态”重算旧时间线。
+每个 Agent 的 collaboration timeline 只记录直属子 Agent 活动。事件事务保存 `parentAgentId`、`parentConversationId`、`anchorMessageId` 和 `traceBoundarySequence`：运行中的父回复使用 assistant-message/trace boundary，空闲父会话使用最后一条消息之后的位置，空会话使用首条消息之前的位置。Run 结算时将回复内活动冻结为 `collaborationTimelineActivities`；可选的 `collaborationFinalResponseBoundary` 保存最终正文流开始时的持久事件边界，稳定区分正文前后的活动位置，不截断后续活动。结算后的新活动独立显示在消息之间，不插回已提交的父回复；这些消息间活动通过持久事件重放恢复，不受 live 回复内活动窗口淘汰。未结算 Run 可使用 live projection，结算后回复内活动只能使用持久冻结列表，不能拿当前树状态重算历史。
 
 Automation Run 在原子 HumanRoot admission 时绑定 `agent_run_id`、Conversation 和 user/assistant message。
 Automation observer 以持久 Trace terminal 和 pending action 判断 `running`、`waiting_for_approval` 与终态，
@@ -135,7 +135,7 @@ Core Server 将 fork 交给单工作线程的有界队列（运行与排队合�
 5. Source truncation、semantic pagination、consumer truncation 和 model truncation 必须分别记录。
 6. Archive/FTS/history ref 不能绕过 conversation、project、attachment 或 Artifact 授权。
 7. 分叉后的历史不依赖源会话继续存在。
-8. 结算后的 collaboration timeline 使用 final-response stream start 时冻结的持久列表；迟到子 Agent 活动不得修改旧父回复。
+8. 结算后的 collaboration timeline 使用结算时冻结的持久列表与可选 `collaborationFinalResponseBoundary` 保持最终正文前后顺序；结算后的直属子 Agent 活动记录在消息之间，不改写旧父回复。
 9. FileChange body 与 model-only successor observation 不进入普通 Durable Trace；历史 diff 必须回到 exact owner 的 durable action audit。
 
 ## 代码真源

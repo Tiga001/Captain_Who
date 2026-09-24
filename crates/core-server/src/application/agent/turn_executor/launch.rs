@@ -219,7 +219,7 @@ impl AgentService {
         let RuntimeTurnSegmentOutcome {
             result,
             terminal_event_gate,
-            final_response_collaboration_cutoff,
+            final_response_collaboration_boundary,
         } = service
             .run_prepared_turn_segment(segment, notifications.clone())
             .await;
@@ -281,7 +281,7 @@ impl AgentService {
                             &worker_conversation_id,
                             &worker_assistant_message_id,
                             &mut agent_output,
-                            final_response_collaboration_cutoff,
+                            final_response_collaboration_boundary,
                         )
                     },
                     || restore_run_usage_state(&service, &worker_run_id, &previous_usage_state),
@@ -449,6 +449,7 @@ impl AgentService {
                                 })
                         };
                         emit_agent_event_notifications(
+                            &service,
                             &notifications,
                             collaboration_identity,
                             &worker_run_id,
@@ -456,6 +457,7 @@ impl AgentService {
                             terminal_error_event,
                         );
                         emit_agent_event_notifications(
+                            &service,
                             &notifications,
                             collaboration_identity,
                             &worker_run_id,
@@ -488,9 +490,10 @@ impl AgentService {
         if waiting_for_user_input && persistence_committed {
             service.release_turn_concurrency_permit(&worker_run_id);
         }
-        if durable_terminal || deletion_cleanup || (keep_trace_snapshot && persistence_committed) {
-            service.unregister_cancellation_if_current(&worker_run_id, &cancellation_token);
-        }
+        // This worker has exited even if SQLite could not commit its terminal state. Retain the
+        // durable fence for recovery, but never advertise an abandoned token as a live executor.
+        // The identity check preserves a newer approval/human-input continuation's token.
+        service.unregister_cancellation_if_current(&worker_run_id, &cancellation_token);
 
         // Successful Done is also the admission boundary for the next user Turn. Publish it
         // only after the old owner and permit have been released and its context cleanup is
@@ -505,6 +508,7 @@ impl AgentService {
                     terminal_event_gate.discard();
                 } else {
                     emit_terminal_events_after_persistence_for_turn(
+                        &service,
                         &notifications,
                         &terminal_event_gate,
                         output,

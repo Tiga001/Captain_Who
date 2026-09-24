@@ -133,6 +133,7 @@ pub(crate) use execution_access::ExecutionAccessDenied;
 mod conversation_world_state;
 mod human_root_notifications;
 mod manual_context_compaction;
+mod observer_stream;
 mod pending_action_store;
 mod persisted_resume_input;
 mod provider_transition;
@@ -608,6 +609,7 @@ pub struct AgentService {
     startup_recoverable_mcp_approvals: Arc<Mutex<HashSet<String>>>,
     usage_contexts: Arc<Mutex<HashMap<String, AgentRunUsageState>>>,
     trace_snapshots: Arc<Mutex<HashMap<String, ConversationTraceSnapshot>>>,
+    observer_streams: Arc<Mutex<HashMap<String, observer_stream::ObserverStreamState>>>,
     running_context_window_snapshots: Arc<Mutex<HashMap<String, AgentContextWindowSnapshot>>>,
     /// The selector directory shown to this run, shared by live execution and read-only previews.
     /// Pending checkpoints persist the same directory across process restarts.
@@ -814,6 +816,7 @@ impl AgentService {
             )),
             usage_contexts: Arc::new(Mutex::new(usage_contexts)),
             trace_snapshots: Arc::new(Mutex::new(HashMap::new())),
+            observer_streams: Arc::new(Mutex::new(HashMap::new())),
             running_context_window_snapshots: Arc::new(Mutex::new(HashMap::new())),
             collaboration_run_directories: Arc::new(Mutex::new(HashMap::new())),
             conversation_context_states: Arc::new(Mutex::new(HashMap::new())),

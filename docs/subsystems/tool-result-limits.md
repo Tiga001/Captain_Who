@@ -2,7 +2,7 @@
 status: current
 audience: developers
 owner: engineering
-last_verified: 2026-08-31
+last_verified: 2026-09-24
 ---
 
 # Tool Result 上限、分页与恢复
@@ -22,11 +22,13 @@ Tool / Provider / OS process
       +-> Exact Archive：安全捕获原文
       +-> Event / Trace / Checkpoint：独立有界投影
       `-> Model Projection
-            -> fixed 10K-token gate
+            -> shared result gate (ordinary tools: 10K; collaboration: full messages)
             -> model context and usage accounting
 ```
 
-静态 Tool、Runtime Extension、审批后由 Core Server 执行的 Tool、外部 MCP Server 和内置 Capability 的文本模型结果都必须经过同一个 `MODEL_TOOL_RESULT_MAX_TOKENS = 10_000` gate。不存在按模型/Tool 绕过该 gate 的旁路。
+静态 Tool、Runtime Extension、审批后由 Core Server 执行的 Tool、外部 MCP Server 和内置 Capability 的文本模型结果使用同一个 Gate。普通工具采用 `MODEL_TOOL_RESULT_MAX_TOKENS = 10_000`。六个 Agent 协作工具承载完整通信消息，按可信工具身份保留全文；实时结果、预提交回执和历史恢复遵守相同政策。协作结果仍计入整轮上下文测量、压缩和发送容量检查。最终发送前的豁免必须匹配实际 Tool Call 的 ID 与名称，不能根据正文中的字段推断。
+
+完整通信正文指显式发送的任务、消息和成果。子 Agent 的最终回复只保留在自身会话；自动 `Result` 是 Host 生成的结束通知，包含身份、终态、必要错误和产物引用，不复制或截取最终回复。详细成果由子 Agent 使用 `send_message` 汇报给直接父级，沿用上述全文交付规则。
 
 ## 四种限制语义
 
@@ -70,13 +72,15 @@ Tool / Provider / OS process
 | 内置 Capability Tool         | 参数 64 KiB、raw result 4 MiB、model projection 64 KiB，并有 JSON 深度/节点限                                | Core Server/Main 安全投影 + 10K          | 按 Tool/Artifact 契约；unknown 禁止自动重放              |
 | `conversation_history`       | Archive chunk/page 限                                                                                        | 预算感知历史页 + 10K                     | `open`/navigation；不再归档                              |
 | `automation_report`          | summary 2 KiB；Run result preview 8 KiB；error message 4 KiB                                                 | 小型确认 receipt + 10K                   | 无分页；首次报告持久化，终态 fallback 按 UTF-8 安全裁剪  |
-| 协作 Tool                    | mailbox/wait/result 各有协议上限                                                                             | 有界 receipt + 10K                       | 后续 wait/read；不进 Exact Archive                       |
+| 协作 Tool                    | 保留 Mailbox 总积压背压与单批条数限制；正文无固定业务字数上限                                                | 完整消息；使用整轮上下文预算             | 超整轮容量明确失败并保留原文；不进 Exact Archive         |
 
 表中数字是当前核验快照。修改任何一项时必须以常量和测试为准，并同步本文；不要从文档生成安全配置。
 
 ## Model Result Gate
 
 Gate 使用当前模型/API style 的 `ContextTextBudget` 估算完整 Tool message，而不是简单按字符截断。处理顺序：
+
+协作消息按原文交付，完整计量；其余工具采用下列规则：
 
 1. 如果结果在 10K 内且不缺恢复标记，原样交付模型投影。
 2. 若 Tool 提供语义分页，优先让 Tool 在预算内重新构造一页，保证 cursor 从模型实际看到的最后一项继续。
@@ -124,7 +128,7 @@ Cursor 绑定 Tool 类型、规范化 query/filter、授权 scope、conversation
 
 ## 不变量
 
-1. 所有 M Tool Result 通过统一 10K gate。
+1. 所有 M Tool Result 使用共享 Gate；普通工具限制 10K，可信协作回执保留全文并受整轮上下文容量约束。
 2. 来源安全限先于 Archive；Archive 不能恢复上游未返回内容。
 3. E/T/C 限长不改变 A，M 限长不改变其他消费者。
 4. 可分页集合不得被通用字符裁剪后跳过条目。
@@ -169,7 +173,7 @@ Cursor 绑定 Tool 类型、规范化 query/filter、授权 scope、conversation
 - [ ] Archive 在普通预览裁剪前接收安全捕获内容。
 - [ ] 分页 cursor 绑定 query/scope/revision，覆盖篡改和跨会话测试。
 - [ ] FileChange 限额分别覆盖 Direct、Staged、Observation 与历史 Diff；禁止用截断或 opaque ID 代替重新授权。
-- [ ] 10K Gate 覆盖成功、错误、Unicode、结构 JSON 和无恢复入口失败。
+- [ ] 10K Gate 覆盖成功、错误、Unicode、结构 JSON 和无恢复入口失败；协作全文例外覆盖预提交、恢复与真实调用身份校验。
 - [ ] 进程/网络取消不会因重试造成重复副作用。
 - [ ] Automation 报告覆盖 2048/8192/4096 的 ASCII、Unicode 和控制字符边界，并验证首次写入不可覆盖。
 - [ ] 同步消费者矩阵、常量测试和 Renderer 兼容字段。

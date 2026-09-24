@@ -11,8 +11,9 @@ const EVENT_SELECT: &str = "
            root_agent_id, root_conversation_id, agent_id, conversation_id,
            turn_id, run_id, message_id, kind, resource_revision,
            activity_schema_version, activity_semantic, activity_agent_id,
-           activity_task_name_snapshot, activity_root_anchor_message_id,
-           activity_root_trace_boundary_sequence, created_at
+           activity_task_name_snapshot, activity_parent_agent_id, activity_parent_conversation_id,
+           activity_anchor_message_id,
+           activity_trace_boundary_sequence, created_at
     FROM agent_collaboration_events";
 
 pub fn list_root_events(
@@ -57,7 +58,7 @@ pub fn list_global_events(
     )
 }
 
-/// Returns the bounded, renderer-safe activity facts owned by one root Assistant message.
+/// Returns the bounded, renderer-safe activity facts owned by one parent Assistant message.
 ///
 /// This is an internal terminal-snapshot query, not a public event-log page. It deliberately
 /// selects only events carrying the exact durable message/trace anchor that the chat Timeline can
@@ -66,44 +67,20 @@ pub fn list_global_events(
 pub(crate) fn list_message_activities(
     connection: &Connection,
     assistant_message_id: &str,
-    through_root_sequence: Option<u64>,
 ) -> Result<Vec<AgentCollaborationEventRecord>, AgentCollaborationEventError> {
     validate_id(assistant_message_id)?;
     const MAX_TERMINAL_MESSAGE_ACTIVITIES: i64 = 2_048;
-
-    match through_root_sequence {
-        Some(through_root_sequence) => {
-            let through = i64::try_from(through_root_sequence)
-                .map_err(|_| AgentCollaborationEventError::InvalidInput)?;
-            query_events(
-                connection,
-                &format!(
-                    "{EVENT_SELECT}
-                     WHERE activity_root_anchor_message_id = ?1
-                       AND activity_root_trace_boundary_sequence IS NOT NULL
-                       AND root_sequence <= ?2
-                     ORDER BY root_sequence
-                     LIMIT ?3"
-                ),
-                params![
-                    assistant_message_id,
-                    through,
-                    MAX_TERMINAL_MESSAGE_ACTIVITIES
-                ],
-            )
-        }
-        None => query_events(
-            connection,
-            &format!(
-                "{EVENT_SELECT}
-                 WHERE activity_root_anchor_message_id = ?1
-                   AND activity_root_trace_boundary_sequence IS NOT NULL
-                 ORDER BY root_sequence
-                 LIMIT ?2"
-            ),
-            params![assistant_message_id, MAX_TERMINAL_MESSAGE_ACTIVITIES],
+    query_events(
+        connection,
+        &format!(
+            "{EVENT_SELECT}
+             WHERE activity_anchor_message_id = ?1
+               AND activity_trace_boundary_sequence IS NOT NULL
+             ORDER BY root_sequence
+             LIMIT ?2"
         ),
-    }
+        params![assistant_message_id, MAX_TERMINAL_MESSAGE_ACTIVITIES],
+    )
 }
 
 pub fn latest_root_sequence(
@@ -185,8 +162,10 @@ fn query_events<P: rusqlite::Params>(
                 row.get::<_, Option<String>>(17)?,
                 row.get::<_, Option<String>>(18)?,
                 row.get::<_, Option<String>>(19)?,
-                row.get::<_, Option<i64>>(20)?,
-                row.get::<_, i64>(21)?,
+                row.get::<_, Option<String>>(20)?,
+                row.get::<_, Option<String>>(21)?,
+                row.get::<_, Option<i64>>(22)?,
+                row.get::<_, i64>(23)?,
             ))
         })
         .map_err(|_| AgentCollaborationEventError::StorageUnavailable)?;
@@ -212,8 +191,10 @@ fn query_events<P: rusqlite::Params>(
             activity_semantic,
             activity_agent_id,
             activity_task_name_snapshot,
-            activity_root_anchor_message_id,
-            activity_root_trace_boundary_sequence,
+            activity_parent_agent_id,
+            activity_parent_conversation_id,
+            activity_anchor_message_id,
+            activity_trace_boundary_sequence,
             created_at,
         ) = row.map_err(|_| AgentCollaborationEventError::StorageUnavailable)?;
         let schema_version = u32::try_from(schema_version)
@@ -242,8 +223,10 @@ fn query_events<P: rusqlite::Params>(
                 activity_semantic,
                 activity_agent_id,
                 activity_task_name_snapshot,
-                activity_root_anchor_message_id,
-                activity_root_trace_boundary_sequence,
+                activity_parent_agent_id,
+                activity_parent_conversation_id,
+                activity_anchor_message_id,
+                activity_trace_boundary_sequence,
             )?,
             created_at: nonnegative(created_at)?,
         });
@@ -251,44 +234,56 @@ fn query_events<P: rusqlite::Params>(
     Ok(events)
 }
 
+// Mirrors the nullable activity columns read together from one durable event row.
+#[allow(clippy::too_many_arguments)]
 fn parse_activity(
     schema_version: Option<i64>,
     semantic: Option<String>,
     agent_id: Option<String>,
     task_name_snapshot: Option<String>,
-    root_anchor_message_id: Option<String>,
-    root_trace_boundary_sequence: Option<i64>,
+    parent_agent_id: Option<String>,
+    parent_conversation_id: Option<String>,
+    anchor_message_id: Option<String>,
+    trace_boundary_sequence: Option<i64>,
 ) -> Result<Option<AgentCollaborationActivitySnapshot>, AgentCollaborationEventError> {
     let (
         schema_version,
         semantic,
         agent_id,
         task_name_snapshot,
-        root_anchor_message_id,
-        root_trace_boundary_sequence,
+        parent_agent_id,
+        parent_conversation_id,
+        anchor_message_id,
+        trace_boundary_sequence,
     ) = match (
         schema_version,
         semantic,
         agent_id,
         task_name_snapshot,
-        root_anchor_message_id,
-        root_trace_boundary_sequence,
+        parent_agent_id,
+        parent_conversation_id,
+        anchor_message_id,
+        trace_boundary_sequence,
     ) {
-        (None, None, None, None, None, None) => return Ok(None),
+        (None, None, None, None, None, None, None, None) => return Ok(None),
         (
             Some(schema_version),
             Some(semantic),
             Some(agent_id),
             Some(task_name_snapshot),
-            root_anchor_message_id,
-            root_trace_boundary_sequence,
+            Some(parent_agent_id),
+            Some(parent_conversation_id),
+            anchor_message_id,
+            trace_boundary_sequence,
         ) => (
             schema_version,
             semantic,
             agent_id,
             task_name_snapshot,
-            root_anchor_message_id,
-            root_trace_boundary_sequence,
+            parent_agent_id,
+            parent_conversation_id,
+            anchor_message_id,
+            trace_boundary_sequence,
         ),
         _ => return Err(AgentCollaborationEventError::CorruptRecord),
     };
@@ -299,13 +294,15 @@ fn parse_activity(
     }
     validate_persisted_text(&agent_id, 256)?;
     validate_persisted_text(&task_name_snapshot, 256)?;
-    if let Some(anchor) = root_anchor_message_id.as_deref() {
+    validate_persisted_text(&parent_agent_id, 256)?;
+    validate_persisted_text(&parent_conversation_id, 256)?;
+    if let Some(anchor) = anchor_message_id.as_deref() {
         validate_persisted_text(anchor, 2_048)?;
     }
-    if root_anchor_message_id.is_some() != root_trace_boundary_sequence.is_some() {
+    if anchor_message_id.is_none() && trace_boundary_sequence.is_some() {
         return Err(AgentCollaborationEventError::CorruptRecord);
     }
-    let root_trace_boundary_sequence = root_trace_boundary_sequence
+    let trace_boundary_sequence = trace_boundary_sequence
         .map(|sequence| {
             u64::try_from(sequence).map_err(|_| AgentCollaborationEventError::CorruptRecord)
         })
@@ -315,8 +312,10 @@ fn parse_activity(
         semantic: AgentCollaborationActivitySemantic::parse(&semantic)?,
         agent_id,
         task_name_snapshot,
-        root_anchor_message_id,
-        root_trace_boundary_sequence,
+        parent_agent_id,
+        parent_conversation_id,
+        anchor_message_id,
+        trace_boundary_sequence,
     }))
 }
 
@@ -505,8 +504,8 @@ mod tests {
         outer_conversation_id: &str,
         activity_agent_id: &str,
         task_name_snapshot: &str,
-        root_anchor_message_id: Option<&str>,
-        root_trace_boundary_sequence: Option<i64>,
+        anchor_message_id: Option<&str>,
+        trace_boundary_sequence: Option<i64>,
     ) -> rusqlite::Result<()> {
         let transaction = connection.transaction()?;
         transaction.execute(
@@ -520,14 +519,15 @@ mod tests {
                  workspace_id, project_id, root_conversation_id,
                  agent_id, conversation_id, kind, resource_revision,
                  activity_schema_version, activity_semantic, activity_agent_id,
-                 activity_task_name_snapshot, activity_root_anchor_message_id,
-                 activity_root_trace_boundary_sequence, created_at
+                 activity_task_name_snapshot, activity_parent_agent_id, activity_parent_conversation_id,
+                 activity_anchor_message_id,
+                 activity_trace_boundary_sequence, created_at
              ) VALUES (
                  ?1, 2, 'agent-root',
                  (SELECT next_sequence - 1 FROM agent_collaboration_event_sequences
                   WHERE root_agent_id = 'agent-root'),
                  'project-a', 'project-a', 'conversation-root', ?2, ?3,
-                 'wake_created', 1, 2, 'started', ?4, ?5, ?6, ?7, 20
+                 'wake_created', 1, 3, 'started', ?4, ?5, 'agent-root', 'conversation-root', ?6, ?7, 20
              )",
             params![
                 event_id,
@@ -535,8 +535,8 @@ mod tests {
                 outer_conversation_id,
                 activity_agent_id,
                 task_name_snapshot,
-                root_anchor_message_id,
-                root_trace_boundary_sequence,
+                anchor_message_id,
+                trace_boundary_sequence,
             ],
         )?;
         transaction.commit()
@@ -747,20 +747,29 @@ mod tests {
             event
                 .activity
                 .as_ref()
-                .and_then(|activity| activity.root_anchor_message_id.as_deref()),
+                .and_then(|activity| activity.anchor_message_id.as_deref()),
             Some("root-assistant")
         );
         assert_eq!(
             event
                 .activity
                 .as_ref()
-                .and_then(|activity| activity.root_trace_boundary_sequence),
+                .and_then(|activity| activity.trace_boundary_sequence),
             Some(1)
         );
     }
 
     #[test]
-    fn terminal_message_snapshot_stops_at_the_final_response_stream_cutoff() {
+    fn terminal_message_snapshot_keeps_activity_until_turn_settlement() {
+        assert_terminal_activity_snapshot(false);
+    }
+
+    #[test]
+    fn interrupted_parent_recovery_preserves_inline_child_activities() {
+        assert_terminal_activity_snapshot(true);
+    }
+
+    fn assert_terminal_activity_snapshot(recover: bool) {
         let mut connection = tree();
         let running_run = serde_json::json!({
             "runId": "run-root",
@@ -827,17 +836,45 @@ mod tests {
         )
         .unwrap();
 
-        crate::storage::chat_repository::update_message_run_terminal_state(
-            &connection,
-            "conversation-root",
-            "root-assistant",
-            "run-root",
-            Some("sent"),
-            "completed",
-            20,
-            Some(cutoff),
-        )
-        .unwrap();
+        if recover {
+            crate::storage::chat_repository::reconcile_message_run_terminal_state(
+                &connection,
+                "conversation-root",
+                "root-assistant",
+                "run-root",
+                "error",
+                "failed",
+                20,
+            )
+            .unwrap();
+        } else {
+            crate::storage::chat_repository::update_message_run_terminal_state(
+                &connection,
+                "conversation-root",
+                "root-assistant",
+                "run-root",
+                Some("sent"),
+                "completed",
+                20,
+                Some(cutoff),
+            )
+            .unwrap();
+            // A late renderer checkpoint omitting backend-owned placement must not erase it.
+            let mut stale_run = running_run.clone();
+            stale_run["status"] = "completed".into();
+            stale_run["completedAt"] = 20.into();
+            crate::storage::chat_repository::update_message_state(
+                &connection,
+                "conversation-root",
+                &crate::storage::models::ChatMessageStateRecord {
+                    id: "root-assistant".to_string(),
+                    content: "final response".to_string(),
+                    status: Some("sent".to_string()),
+                    agent_run_json: Some(stale_run.to_string()),
+                },
+            )
+            .unwrap();
+        }
 
         let raw = connection
             .query_row(
@@ -847,20 +884,140 @@ mod tests {
             )
             .unwrap();
         let run: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        if !recover {
+            assert_eq!(run["collaborationFinalResponseBoundary"], cutoff);
+        }
+        let activities = run["collaborationTimelineActivities"].as_array().unwrap();
+        assert_eq!(activities.len(), 2);
+        for (index, id) in ["activity-before-final", "activity-after-final-started"]
+            .into_iter()
+            .enumerate()
+        {
+            assert_eq!(
+                activities[index],
+                serde_json::json!({
+                    "activityId": id,
+                    "agentId": "agent-child",
+                    "parentAgentId": "agent-root",
+                    "parentConversationId": "conversation-root",
+                    "occurredAt": 20,
+                    "anchorMessageId": "root-assistant",
+                    "traceBoundarySequence": 0,
+                    "runId": null,
+                    "semantic": "started",
+                    "sequence": cutoff + index as u64,
+                    "taskNameSnapshot": "review",
+                    "turnId": null
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn nested_activity_uses_its_direct_parent_and_retains_idle_boundaries() {
+        let mut connection = tree();
+        project_conversation(&connection, "conversation-grandchild", "project-a");
+        agent_graph_repository::create_agent_node(
+            &mut connection,
+            &CreateAgentNodeInput {
+                agent_id: "agent-grandchild".to_string(),
+                root_agent_id: "agent-root".to_string(),
+                parent_agent_id: "agent-child".to_string(),
+                conversation_id: "conversation-grandchild".to_string(),
+                creation_request_id: "spawn-grandchild".to_string(),
+                task_name: "nested".to_string(),
+                task_path: "/root/review/nested".to_string(),
+                template_snapshot: None,
+                model_snapshot: AgentModelSelectionSnapshot {
+                    model_config_id: "model-a".to_string(),
+                    display_name: "Model A".to_string(),
+                    supports_image: false,
+                    effective_context_window_tokens: 64_000,
+                    model_settings_configuration_revision: "model-settings-v1:test".to_string(),
+                    provider_connection_revision: "provider-connection-v1:test".to_string(),
+                    provider_protocol_revision: "provider-protocol-v1:test".to_string(),
+                },
+            },
+            3,
+        )
+        .unwrap();
+        let before = latest_root_sequence(&connection, "agent-root").unwrap();
+        let send_update = |connection: &mut Connection, request_id: &str| {
+            agent_graph_repository::send_agent_message(
+                connection,
+                &SendAgentMessageRequest {
+                    sender_agent_id: "agent-grandchild".to_string(),
+                    recipient_agent_id: "agent-child".to_string(),
+                    request_id: request_id.to_string(),
+                    content: "progress".to_string(),
+                },
+                20,
+            )
+            .unwrap();
+        };
+        send_update(&mut connection, "empty-parent");
+        connection.execute_batch(
+            "INSERT INTO messages (id, conversation_id, role, content, status, created_at, position)
+             VALUES ('root-active', 'conversation-root', 'assistant', '', 'pending', 50, 0),
+                    ('child-active', 'conversation-child', 'assistant', '', 'pending', 10, 0);
+             INSERT INTO conversation_turn_traces (
+                 assistant_message_id, conversation_id, run_id, schema_version,
+                 terminal_status, truncated, created_at, updated_at
+             ) VALUES ('root-active', 'conversation-root', 'root-run', 1, 'in_progress', 0, 50, 50),
+                      ('child-active', 'conversation-child', 'child-run', 1, 'in_progress', 0, 10, 10);"
+        ).unwrap();
+        insert_trace_item(&connection, "root-active", 0);
+        insert_trace_item(&connection, "child-active", 0);
+        insert_trace_item(&connection, "child-active", 1);
+        send_update(&mut connection, "active-parent");
+        // The root remains active. Only the direct parent's completion determines placement.
+        connection
+            .execute_batch(
+                "UPDATE conversation_turn_traces SET terminal_status = 'completed',
+                 updated_at = 21, completed_at = 21 WHERE assistant_message_id = 'child-active';",
+            )
+            .unwrap();
+        send_update(&mut connection, "idle-parent");
+        // Position is authoritative even when a later message's wall clock moves backwards.
+        connection.execute_batch(
+            "INSERT INTO messages (id, conversation_id, role, content, status, created_at, position)
+             VALUES ('child-next-message', 'conversation-child', 'assistant', 'next', 'sent', 1, 1);"
+        ).unwrap();
+        send_update(&mut connection, "next-turn-boundary");
+        let activities = list_root_events(&connection, "agent-root", before, 64)
+            .unwrap()
+            .into_iter()
+            .filter_map(|event| event.activity)
+            .collect::<Vec<_>>();
+        assert_eq!(activities.len(), 4);
+        assert!(activities
+            .iter()
+            .all(|activity| activity.parent_agent_id == "agent-child"
+                && activity.parent_conversation_id == "conversation-child"
+                && activity.agent_id == "agent-grandchild"));
         assert_eq!(
-            run["collaborationTimelineActivities"],
-            serde_json::json!([{
-                "activityId": "activity-before-final",
-                "agentId": "agent-child",
-                "occurredAt": 20,
-                "rootAnchorMessageId": "root-assistant",
-                "rootTraceBoundarySequence": 0,
-                "runId": null,
-                "semantic": "started",
-                "sequence": cutoff,
-                "taskNameSnapshot": "review",
-                "turnId": null
-            }])
+            activities
+                .iter()
+                .map(|activity| (
+                    activity.anchor_message_id.as_deref(),
+                    activity.trace_boundary_sequence
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                (None, None),
+                (Some("child-active"), Some(2)),
+                (Some("child-active"), None),
+                (Some("child-next-message"), None),
+            ]
+        );
+        assert!(list_message_activities(&connection, "root-active")
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            list_message_activities(&connection, "child-active")
+                .unwrap()
+                .len(),
+            1
         );
     }
 
@@ -1047,8 +1204,8 @@ mod tests {
                 event.activity.map(|activity| {
                     (
                         activity.semantic,
-                        activity.root_anchor_message_id,
-                        activity.root_trace_boundary_sequence,
+                        activity.anchor_message_id,
+                        activity.trace_boundary_sequence,
                     )
                 })
             })
@@ -1086,7 +1243,11 @@ mod tests {
                     Some("root-boundary-assistant".to_string()),
                     Some(5),
                 ),
-                (AgentCollaborationActivitySemantic::Started, None, None),
+                (
+                    AgentCollaborationActivitySemantic::Started,
+                    Some("root-boundary-assistant".to_string()),
+                    None
+                ),
             ]
         );
 
@@ -1100,8 +1261,8 @@ mod tests {
                 event.activity.map(|activity| {
                     (
                         activity.semantic,
-                        activity.root_anchor_message_id,
-                        activity.root_trace_boundary_sequence,
+                        activity.anchor_message_id,
+                        activity.trace_boundary_sequence,
                     )
                 })
             })
@@ -1256,8 +1417,8 @@ mod tests {
                     (
                         event.kind,
                         activity.semantic,
-                        activity.root_anchor_message_id.as_deref(),
-                        activity.root_trace_boundary_sequence,
+                        activity.anchor_message_id.as_deref(),
+                        activity.trace_boundary_sequence,
                     )
                 })
             })
@@ -1357,8 +1518,10 @@ mod tests {
                 semantic: AgentCollaborationActivitySemantic::WaitingApproval,
                 agent_id: "agent-child".to_string(),
                 task_name_snapshot: "review".to_string(),
-                root_anchor_message_id: None,
-                root_trace_boundary_sequence: None,
+                parent_agent_id: "agent-root".to_string(),
+                parent_conversation_id: "conversation-root".to_string(),
+                anchor_message_id: None,
+                trace_boundary_sequence: None,
             })
         );
         assert!(events[1].activity.is_none());
@@ -1700,8 +1863,10 @@ mod tests {
                 semantic: AgentCollaborationActivitySemantic::Started,
                 agent_id: "agent-child".to_string(),
                 task_name_snapshot: "review".to_string(),
-                root_anchor_message_id: None,
-                root_trace_boundary_sequence: None,
+                parent_agent_id: "agent-root".to_string(),
+                parent_conversation_id: "conversation-root".to_string(),
+                anchor_message_id: None,
+                trace_boundary_sequence: None,
             })
         );
         assert_eq!(
@@ -1711,8 +1876,10 @@ mod tests {
                 semantic: AgentCollaborationActivitySemantic::Interrupted,
                 agent_id: "agent-child".to_string(),
                 task_name_snapshot: "review".to_string(),
-                root_anchor_message_id: None,
-                root_trace_boundary_sequence: None,
+                parent_agent_id: "agent-root".to_string(),
+                parent_conversation_id: "conversation-root".to_string(),
+                anchor_message_id: None,
+                trace_boundary_sequence: None,
             })
         );
         assert_eq!(
@@ -1729,8 +1896,10 @@ mod tests {
                 semantic: AgentCollaborationActivitySemantic::Updated,
                 agent_id: "agent-child".to_string(),
                 task_name_snapshot: "review".to_string(),
-                root_anchor_message_id: None,
-                root_trace_boundary_sequence: None,
+                parent_agent_id: "agent-root".to_string(),
+                parent_conversation_id: "conversation-root".to_string(),
+                anchor_message_id: None,
+                trace_boundary_sequence: None,
             })
         );
         assert_eq!(
@@ -1740,8 +1909,10 @@ mod tests {
                 semantic: AgentCollaborationActivitySemantic::Started,
                 agent_id: "agent-child".to_string(),
                 task_name_snapshot: "review".to_string(),
-                root_anchor_message_id: None,
-                root_trace_boundary_sequence: None,
+                parent_agent_id: "agent-root".to_string(),
+                parent_conversation_id: "conversation-root".to_string(),
+                anchor_message_id: None,
+                trace_boundary_sequence: None,
             })
         );
         assert!(events

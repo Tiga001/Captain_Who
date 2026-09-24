@@ -757,8 +757,8 @@ fn collaboration_receipt_can_cover_multiple_fifo_messages_with_exact_model_envel
 }
 
 #[test]
-fn collaboration_model_envelope_is_utf8_safe_deterministic_and_bounded() {
-    let payload = "蒙".repeat(400_000);
+fn collaboration_model_envelope_preserves_long_utf8_text() {
+    let payload = "协作🙂".repeat(160_000);
     let first = project_agent_mailbox_model_envelope(
         "agent-parent",
         "Parent",
@@ -776,14 +776,10 @@ fn collaboration_model_envelope_is_utf8_safe_deterministic_and_bounded() {
     )
     .unwrap();
     assert_eq!(first, second);
-    assert!(first.1);
-    assert!(first.0.len() <= AGENT_MAILBOX_MODEL_ENVELOPE_MAX_BYTES);
+    assert!(!first.1);
     let envelope: Value = serde_json::from_str(&first.0).unwrap();
-    assert_eq!(envelope["payloadTruncated"], true);
-    assert!(envelope["payload"]
-        .as_str()
-        .unwrap()
-        .ends_with("...[agent mailbox payload truncated]"));
+    assert_eq!(envelope["payloadTruncated"], false);
+    assert_eq!(envelope["payload"], payload);
 }
 
 #[test]
@@ -895,16 +891,16 @@ fn large_collaboration_delivery_precommit_is_an_exact_terminal_trace_prefix() {
     else {
         panic!("expected Agent mailbox delivery");
     };
-    assert!(model_content.len() > trace_content.len());
-    assert!(*truncated);
+    assert_eq!(&model_content, trace_content);
+    assert!(!*truncated);
     assert_eq!(
         serde_json::from_str::<Value>(trace_content).unwrap()["payloadTruncated"],
-        true
+        false
     );
     assert_eq!(
         recorder.snapshot().model_context_items[0].content,
         model_content
     );
     assert_eq!(precommitted.items, terminal.items);
-    assert!(precommitted.truncated);
+    assert!(!precommitted.truncated);
 }

@@ -19,7 +19,7 @@ pub struct AgentCollaborationSettingsGetInput {}
 
 pub const AGENT_COLLABORATION_SCHEMA_VERSION: u32 = 1;
 pub const AGENT_COLLABORATION_EVENT_SCHEMA_VERSION: u32 = 2;
-pub const AGENT_COLLABORATION_ACTIVITY_SCHEMA_VERSION: u32 = 2;
+pub const AGENT_COLLABORATION_ACTIVITY_SCHEMA_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -245,6 +245,34 @@ pub struct AgentObserverConversationDto {
     pub created_at: i64,
     pub updated_at: i64,
     pub messages: Vec<AgentObserverMessageDto>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub live_stream: Option<AgentObserverLiveStreamSnapshotDto>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AgentObserverStreamCursorDto {
+    pub generation: String,
+    pub sequence: u64,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AgentObserverLiveStreamSnapshotDto {
+    pub run_id: String,
+    pub assistant_message_id: String,
+    pub cursor: AgentObserverStreamCursorDto,
+    pub stream: Option<AgentObserverLiveStreamDto>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AgentObserverLiveStreamDto {
+    pub stream_id: String,
+    pub attempt: usize,
+    pub content: String,
+    pub trace_boundary_sequence: u64,
+    pub committed: bool,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
@@ -287,10 +315,12 @@ pub struct CollaborationActivitySnapshotDto {
     pub semantic: CollaborationActivitySemanticDto,
     pub agent_id: String,
     pub task_name_snapshot: String,
+    pub parent_agent_id: String,
+    pub parent_conversation_id: String,
     #[serde(deserialize_with = "deserialize_required_nullable")]
-    pub root_anchor_message_id: Option<String>,
+    pub anchor_message_id: Option<String>,
     #[serde(deserialize_with = "deserialize_required_nullable")]
-    pub root_trace_boundary_sequence: Option<u64>,
+    pub trace_boundary_sequence: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -367,11 +397,9 @@ impl<'de> Deserialize<'de> for CollaborationEventEnvelopeDto {
                     "unsupported collaboration activity schema",
                 ));
             }
-            if activity.root_anchor_message_id.is_some()
-                != activity.root_trace_boundary_sequence.is_some()
-            {
+            if activity.anchor_message_id.is_none() && activity.trace_boundary_sequence.is_some() {
                 return Err(D::Error::custom(
-                    "collaboration activity root placement fields must be paired",
+                    "collaboration trace boundary requires a parent message anchor",
                 ));
             }
             let valid_kind = matches!(
@@ -392,11 +420,23 @@ impl<'de> Deserialize<'de> for CollaborationEventEnvelopeDto {
                     CollaborationEventKindDto::WakeUpdated
                 )
             );
+            let valid_parent = activity.parent_agent_id != activity.agent_id
+                && !activity.parent_agent_id.trim().is_empty()
+                && !activity.parent_conversation_id.trim().is_empty()
+                && ((activity.parent_agent_id == wire.root_agent_id)
+                    == (activity.parent_conversation_id == wire.root_conversation_id));
             let valid_subject = match activity.semantic {
-                CollaborationActivitySemanticDto::Updated => activity.agent_id != wire.agent_id,
-                _ => activity.agent_id == wire.agent_id,
+                CollaborationActivitySemanticDto::Updated => {
+                    activity.agent_id != wire.agent_id
+                        && activity.parent_agent_id == wire.agent_id
+                        && activity.parent_conversation_id == wire.conversation_id
+                }
+                _ => {
+                    activity.agent_id == wire.agent_id
+                        && activity.parent_conversation_id != wire.conversation_id
+                }
             };
-            if !valid_kind || !valid_subject {
+            if !valid_kind || !valid_subject || !valid_parent {
                 return Err(D::Error::custom(
                     "collaboration activity kind/subject mismatch",
                 ));
@@ -438,6 +478,8 @@ pub struct AgentObserverEventEnvelopeDto {
     pub run_id: String,
     pub assistant_message_id: String,
     pub event: serde_json::Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_cursor: Option<AgentObserverStreamCursorDto>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]

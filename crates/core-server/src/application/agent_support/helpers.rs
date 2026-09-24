@@ -38,6 +38,7 @@ pub(crate) fn child_observer_event_notification(
 
 /// Emits the legacy root event plus the identity-rich observer event for a trusted child Turn.
 pub(crate) fn emit_agent_event_notifications(
+    service: &crate::application::agent::AgentService,
     notifications: &crate::application::agent::CoreServerNotificationSender,
     collaboration_identity: Option<&AgentCollaborationIdentity>,
     run_id: &str,
@@ -46,12 +47,13 @@ pub(crate) fn emit_agent_event_notifications(
 ) {
     let _ = notifications.send(agent_event_notification(event.clone()));
     if let Some(identity) = collaboration_identity {
-        let _ = notifications.send(child_observer_event_notification(
+        service.emit_child_observer_event(
+            notifications,
             identity,
             run_id,
             assistant_message_id,
             event,
-        ));
+        );
     }
 }
 
