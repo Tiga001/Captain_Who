@@ -44,6 +44,7 @@ const COPY_OPEN_ASYNC_QUESTIONS_TABLES: &[&str] = &["human_interaction_requests"
 const REINITIALIZE_TABLES: &[&str] = &[
     "agent_collaboration_event_sequences",
     "agent_collaboration_events",
+    "agent_collaboration_event_activities",
     "composer_drafts",
     "conversation_context_compaction_heads",
     "conversation_history_fts",

@@ -9,8 +9,8 @@ import { parseAgentEventForHost } from './agentParsers/events'
 import { parsePendingAgentActionSnapshotsForHost } from './agentParsers/pendingActions'
 
 export const AGENT_COLLABORATION_SCHEMA_VERSION = 1 as const
-export const AGENT_COLLABORATION_EVENT_SCHEMA_VERSION = 2 as const
-export const AGENT_COLLABORATION_ACTIVITY_SCHEMA_VERSION = 3 as const
+export const AGENT_COLLABORATION_EVENT_SCHEMA_VERSION = 3 as const
+export const AGENT_COLLABORATION_ACTIVITY_SCHEMA_VERSION = 4 as const
 
 export const AGENT_COLLABORATION_GET_SETTINGS_METHOD = 'agent.collaboration.settings.get'
 export const AGENT_COLLABORATION_UPDATE_SETTINGS_METHOD = 'agent.collaboration.settings.update'
@@ -247,16 +247,19 @@ export type CollaborationActivitySemantic =
 
 export interface CollaborationActivitySnapshot {
   schemaVersion: typeof AGENT_COLLABORATION_ACTIVITY_SCHEMA_VERSION
+  activityId: string
   semantic: CollaborationActivitySemantic
   /** Presentation subject; the outer event agent remains the invalidation subject. */
   agentId: string
   taskNameSnapshot: string
-  /** Direct parent and the only Conversation that presents this activity. */
-  parentAgentId: string
-  parentConversationId: string
-  /** Parent message containing or preceding the activity; null means before its first message. */
+  /** The actual task dispatcher, or recipient of an ordinary message, owns this projection. */
+  ownerAgentId: string
+  ownerConversationId: string
+  /** Immutable Task/Followup mailbox identity; ordinary Message updates use null. */
+  taskMessageId: string | null
+  /** Owner message containing or preceding the activity; null means before its first message. */
   anchorMessageId: string | null
-  /** Insert inside the active parent trace at this boundary; null means after the anchor message. */
+  /** Insert inside the active owner trace at this boundary; null means after the anchor message. */
   traceBoundarySequence: number | null
 }
 
@@ -285,7 +288,7 @@ export interface CollaborationEventEnvelope {
   messageId: string | null
   kind: CollaborationEventKind
   resourceRevision: number
-  activity: CollaborationActivitySnapshot | null
+  activities: CollaborationActivitySnapshot[]
   transmission?: CollaborationTransmission
   occurredAt: number
 }
@@ -1081,81 +1084,100 @@ export function parseCollaborationEventEnvelope(value: unknown): CollaborationEv
       'messageId',
       'kind',
       'resourceRevision',
-      'activity',
+      'activities',
       'occurredAt',
       ...('transmission' in item ? ['transmission'] : [])
     ],
     'CollaborationEventEnvelope'
   )
-  const activity =
-    item.activity === null
-      ? null
-      : (() => {
-          const snapshot = record(item.activity, 'CollaborationActivitySnapshot')
-          exact(
-            snapshot,
-            [
-              'schemaVersion',
-              'semantic',
-              'agentId',
-              'taskNameSnapshot',
-              'parentAgentId',
-              'parentConversationId',
-              'anchorMessageId',
-              'traceBoundarySequence'
-            ],
-            'CollaborationActivitySnapshot'
-          )
-          return {
-            schemaVersion: activitySchema(snapshot.schemaVersion, 'CollaborationActivitySnapshot'),
-            semantic: oneOf(
-              snapshot.semantic,
-              [
-                'started',
-                'updated',
-                'waiting_approval',
-                'completed',
-                'failed',
-                'interrupted'
-              ] as const,
-              'CollaborationActivitySnapshot.semantic'
-            ),
-            agentId: text(snapshot.agentId, 'CollaborationActivitySnapshot.agentId'),
-            taskNameSnapshot: text(
-              snapshot.taskNameSnapshot,
-              'CollaborationActivitySnapshot.taskNameSnapshot',
-              256
-            ),
-            parentAgentId: text(
-              snapshot.parentAgentId,
-              'CollaborationActivitySnapshot.parentAgentId'
-            ),
-            parentConversationId: text(
-              snapshot.parentConversationId,
-              'CollaborationActivitySnapshot.parentConversationId'
-            ),
-            anchorMessageId: nullableText(
-              snapshot.anchorMessageId,
-              'CollaborationActivitySnapshot.anchorMessageId'
-            ),
-            traceBoundarySequence:
-              snapshot.traceBoundarySequence === null
-                ? null
-                : integer(
-                    snapshot.traceBoundarySequence,
-                    'CollaborationActivitySnapshot.traceBoundarySequence',
-                    0
-                  )
-          } satisfies CollaborationActivitySnapshot
-        })()
-  if (
-    activity !== null &&
-    activity.anchorMessageId === null &&
-    activity.traceBoundarySequence !== null
-  ) {
-    throw new Error(
-      'Invalid CollaborationActivitySnapshot: trace placement requires an anchor message'
+  if (!Array.isArray(item.activities))
+    throw new Error('Invalid CollaborationEventEnvelope.activities')
+  const activityText = (value: unknown, context: string, maximum = 256): string => {
+    const parsed = text(value, context, maximum)
+    if (parsed.includes('\0')) throw new Error(`Invalid ${context}`)
+    return parsed
+  }
+  const activities = item.activities.map((value) => {
+    const snapshot = record(value, 'CollaborationActivitySnapshot')
+    exact(
+      snapshot,
+      [
+        'schemaVersion',
+        'activityId',
+        'semantic',
+        'agentId',
+        'taskNameSnapshot',
+        'ownerAgentId',
+        'ownerConversationId',
+        'taskMessageId',
+        'anchorMessageId',
+        'traceBoundarySequence'
+      ],
+      'CollaborationActivitySnapshot'
     )
+    const activity: CollaborationActivitySnapshot = {
+      schemaVersion: activitySchema(snapshot.schemaVersion, 'CollaborationActivitySnapshot'),
+      activityId: activityText(
+        snapshot.activityId,
+        'CollaborationActivitySnapshot.activityId',
+        2048
+      ),
+      semantic: oneOf(
+        snapshot.semantic,
+        ['started', 'updated', 'waiting_approval', 'completed', 'failed', 'interrupted'] as const,
+        'CollaborationActivitySnapshot.semantic'
+      ),
+      agentId: activityText(snapshot.agentId, 'CollaborationActivitySnapshot.agentId'),
+      taskNameSnapshot: activityText(
+        snapshot.taskNameSnapshot,
+        'CollaborationActivitySnapshot.taskNameSnapshot',
+        256
+      ),
+      ownerAgentId: activityText(
+        snapshot.ownerAgentId,
+        'CollaborationActivitySnapshot.ownerAgentId'
+      ),
+      ownerConversationId: activityText(
+        snapshot.ownerConversationId,
+        'CollaborationActivitySnapshot.ownerConversationId'
+      ),
+      taskMessageId:
+        snapshot.taskMessageId === null
+          ? null
+          : activityText(
+              snapshot.taskMessageId,
+              'CollaborationActivitySnapshot.taskMessageId',
+              2048
+            ),
+      anchorMessageId:
+        snapshot.anchorMessageId === null
+          ? null
+          : activityText(
+              snapshot.anchorMessageId,
+              'CollaborationActivitySnapshot.anchorMessageId',
+              2048
+            ),
+      traceBoundarySequence:
+        snapshot.traceBoundarySequence === null
+          ? null
+          : integer(
+              snapshot.traceBoundarySequence,
+              'CollaborationActivitySnapshot.traceBoundarySequence',
+              0
+            )
+    }
+    if (activity.anchorMessageId === null && activity.traceBoundarySequence !== null) {
+      throw new Error(
+        'Invalid CollaborationActivitySnapshot: trace placement requires an anchor message'
+      )
+    }
+    if ((activity.semantic === 'updated') !== (activity.taskMessageId === null)) {
+      throw new Error('Invalid CollaborationActivitySnapshot task identity')
+    }
+    return activity
+  })
+  if (new Set(activities.map((activity) => activity.activityId)).size !== activities.length) {
+    throw new Error('Invalid CollaborationEventEnvelope duplicate activity identity')
   }
   const parsed: CollaborationEventEnvelope = {
     ...('transmission' in item
@@ -1190,7 +1212,7 @@ export function parseCollaborationEventEnvelope(value: unknown): CollaborationEv
       'kind'
     ),
     resourceRevision: integer(item.resourceRevision, 'resourceRevision', 1),
-    activity,
+    activities,
     occurredAt: integer(item.occurredAt, 'occurredAt')
   }
   if (parsed.workspaceId !== parsed.projectId) {
@@ -1220,19 +1242,18 @@ export function parseCollaborationEventEnvelope(value: unknown): CollaborationEv
       throw new Error('Invalid CollaborationEventEnvelope transmission identity')
     }
   }
-  if (parsed.activity) {
-    const activity = parsed.activity
-    const parentIsRoot = activity.parentAgentId === parsed.rootAgentId
-    const parentConversationIsRoot = activity.parentConversationId === parsed.rootConversationId
-    const hasValidParent =
-      activity.parentAgentId !== activity.agentId &&
-      parentIsRoot === parentConversationIsRoot &&
+  for (const activity of parsed.activities) {
+    const ownerIsRoot = activity.ownerAgentId === parsed.rootAgentId
+    const ownerConversationIsRoot = activity.ownerConversationId === parsed.rootConversationId
+    const hasValidOwner =
+      activity.ownerAgentId !== activity.agentId &&
+      ownerIsRoot === ownerConversationIsRoot &&
       (activity.semantic === 'updated'
-        ? activity.parentAgentId === parsed.agentId &&
-          activity.parentConversationId === parsed.conversationId
-        : activity.parentConversationId !== parsed.conversationId)
-    if (!hasValidParent) {
-      throw new Error('Invalid CollaborationEventEnvelope activity parent identity')
+        ? activity.ownerAgentId === parsed.agentId &&
+          activity.ownerConversationId === parsed.conversationId
+        : activity.ownerConversationId !== parsed.conversationId)
+    if (!hasValidOwner) {
+      throw new Error('Invalid CollaborationEventEnvelope activity owner identity')
     }
     const expectedKind: Readonly<Record<CollaborationActivitySemantic, CollaborationEventKind>> = {
       started: 'wake_created',
@@ -1243,10 +1264,10 @@ export function parseCollaborationEventEnvelope(value: unknown): CollaborationEv
       interrupted: 'wake_updated'
     }
     const hasValidSubject =
-      parsed.activity.semantic === 'updated'
-        ? parsed.activity.agentId !== parsed.agentId
-        : parsed.activity.agentId === parsed.agentId
-    if (parsed.kind !== expectedKind[parsed.activity.semantic] || !hasValidSubject) {
+      activity.semantic === 'updated'
+        ? activity.agentId !== parsed.agentId
+        : activity.agentId === parsed.agentId
+    if (parsed.kind !== expectedKind[activity.semantic] || !hasValidSubject) {
       throw new Error('Invalid CollaborationEventEnvelope activity')
     }
   }

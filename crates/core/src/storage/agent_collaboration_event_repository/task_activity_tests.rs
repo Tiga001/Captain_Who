@@ -150,7 +150,7 @@ fn finish_wake(
         },
         now,
     )
-    .unwrap()
+    .unwrap_or_else(|error| panic!("finishing {status:?}: {error:?}"))
 }
 
 fn assert_all_event_cursors_unchanged(
@@ -249,25 +249,20 @@ fn result_wake_terminal_processing_never_repeats_the_parent_task_status() {
             .unwrap();
         assert_eq!(terminal.agent_id, "agent-child");
         assert!(
-            terminal.activity.is_none(),
+            terminal.activities.is_empty(),
             "Result wake ended as {status:?}"
         );
         let frozen = list_message_activities(&connection, "root-active").unwrap();
-        assert!(frozen
-            .iter()
-            .find(|event| event.event_id == event_id)
-            .unwrap()
-            .activity
-            .is_none());
+        assert!(frozen.iter().all(|event| event.event_id != event_id));
         let grand_terminal = root_events
             .iter()
-            .filter_map(|event| event.activity.as_ref())
+            .filter_map(|event| event.activities.first())
             .find(|activity| {
                 activity.agent_id == "agent-grand"
                     && activity.semantic == AgentCollaborationActivitySemantic::Completed
             })
             .unwrap();
-        assert_eq!(grand_terminal.parent_agent_id, "agent-child");
+        assert_eq!(grand_terminal.owner_agent_id, "agent-child");
         assert_eq!(
             grand_terminal.anchor_message_id.as_deref(),
             Some("child-active")
@@ -275,7 +270,7 @@ fn result_wake_terminal_processing_never_repeats_the_parent_task_status() {
         assert!(list_message_activities(&connection, "child-active")
             .unwrap()
             .iter()
-            .any(|event| event.activity.as_ref() == Some(grand_terminal)));
+            .any(|event| event.activities.first() == Some(grand_terminal)));
     }
 }
 
@@ -304,21 +299,27 @@ fn direct_tasks_and_ancestor_followups_keep_real_terminal_activities() {
                 .iter()
                 .find(|event| {
                     event
-                        .activity
-                        .as_ref()
+                        .activities
+                        .first()
                         .is_some_and(|activity| activity.semantic == expected)
                 })
                 .unwrap();
             assert_eq!(terminal.message_id.as_deref(), Some("task-source"));
-            let activity = terminal.activity.as_ref().unwrap();
+            let activity = terminal.activities.first().unwrap();
             assert_eq!(activity.agent_id, "agent-grand");
-            assert_eq!(activity.parent_agent_id, "agent-child");
-            assert_eq!(activity.parent_conversation_id, "conversation-child");
+            assert_eq!(activity.owner_agent_id, sender);
+            assert_eq!(activity.task_message_id.as_deref(), Some("task-source"));
+            let (owner_conversation, owner_message, other_message) = if sender == "agent-root" {
+                ("conversation-root", "root-active", "child-active")
+            } else {
+                ("conversation-child", "child-active", "root-active")
+            };
+            assert_eq!(activity.owner_conversation_id, owner_conversation);
             assert_eq!(activity.trace_boundary_sequence, Some(0));
-            assert!(list_message_activities(&connection, "child-active")
+            assert!(list_message_activities(&connection, owner_message)
                 .unwrap()
                 .contains(terminal));
-            assert!(list_message_activities(&connection, "root-active")
+            assert!(list_message_activities(&connection, other_message)
                 .unwrap()
                 .iter()
                 .all(|event| event.event_id != terminal.event_id));
@@ -348,14 +349,14 @@ fn genuine_task_completion_after_the_parent_reply_stays_visible() {
     let terminal = events
         .iter()
         .find(|event| {
-            event.activity.as_ref().is_some_and(|activity| {
+            event.activities.first().is_some_and(|activity| {
                 activity.semantic == AgentCollaborationActivitySemantic::Completed
             })
         })
         .unwrap();
-    let activity = terminal.activity.as_ref().unwrap();
+    let activity = terminal.activities.first().unwrap();
     assert_eq!(activity.agent_id, "agent-child");
-    assert_eq!(activity.parent_agent_id, "agent-root");
+    assert_eq!(activity.owner_agent_id, "agent-root");
     assert_eq!(activity.anchor_message_id.as_deref(), Some("root-active"));
     assert_eq!(activity.trace_boundary_sequence, None);
     assert!(list_message_activities(&connection, "root-active")
@@ -384,18 +385,18 @@ fn wake_without_an_explicit_task_source_does_not_emit_a_terminal_card() {
     .clone();
     start_wake(&mut connection, &wake, 22);
     finish_wake(&mut connection, &wake, AgentWakeStatus::Completed, 30);
-    for events in [
-        assert_all_event_cursors_unchanged(&connection),
-        list_message_activities(&connection, "root-active").unwrap(),
-    ] {
-        let terminal = events
-            .iter()
-            .find(|event| {
-                event.kind == AgentCollaborationEventKind::WakeUpdated && event.created_at == 30
-            })
-            .unwrap();
-        assert!(terminal.activity.is_none());
-    }
+    let events = assert_all_event_cursors_unchanged(&connection);
+    let terminal = events
+        .iter()
+        .find(|event| {
+            event.kind == AgentCollaborationEventKind::WakeUpdated && event.created_at == 30
+        })
+        .unwrap();
+    assert!(terminal.activities.is_empty());
+    assert!(list_message_activities(&connection, "root-active")
+        .unwrap()
+        .iter()
+        .all(|event| event.event_id != terminal.event_id));
 }
 
 #[test]
@@ -532,7 +533,7 @@ fn result_turn_only_becomes_task_activity_after_a_followup_is_actually_bound() {
             })
             .unwrap();
         assert_eq!(
-            terminal.activity.is_some(),
+            !terminal.activities.is_empty(),
             expected_activity,
             "{kind:?}, bound={bind}"
         );
@@ -541,9 +542,280 @@ fn result_turn_only_becomes_task_activity_after_a_followup_is_actually_bound() {
             frozen
                 .iter()
                 .find(|event| event.event_id == terminal.event_id)
-                .unwrap()
-                .activity,
-            terminal.activity
+                .map(|event| event.activities.clone())
+                .unwrap_or_default(),
+            terminal.activities
         );
     }
+}
+
+#[test]
+fn one_run_routes_each_bound_assignment_to_its_actual_dispatcher_and_freezes_each_owner() {
+    for status in [
+        AgentWakeStatus::Completed,
+        AgentWakeStatus::Failed,
+        AgentWakeStatus::Interrupted,
+    ] {
+        let mut connection = tree_with_active_parents();
+        let wake = enqueue_task(
+            &mut connection,
+            AgentMailboxKind::Task,
+            "agent-child",
+            "agent-grand",
+        );
+        start_wake(&mut connection, &wake, 22);
+        connection.execute_batch("INSERT INTO messages(id,conversation_id,role,content,status,created_at,position)
+            VALUES ('grand-assistant','conversation-grand','assistant','','pending',25,
+                (SELECT COALESCE(MAX(position),-1)+1 FROM messages WHERE conversation_id='conversation-grand'));").unwrap();
+        crate::storage::conversation_trace_repository::append_in_progress_trace(
+            &mut connection,
+            &crate::ConversationTraceSnapshot::default().in_progress_trace(
+                "grand-run",
+                "conversation-grand",
+                "grand-assistant",
+            ),
+            25,
+            25,
+        )
+        .unwrap();
+        crate::storage::agent_workspace_repository::freeze_run(
+            &connection,
+            "grand-run",
+            None,
+            None,
+        )
+        .unwrap();
+        connection.execute("UPDATE agent_wake_requests SET run_id='grand-run',assistant_message_id='grand-assistant' WHERE wake_id=?1", [&wake.wake_id]).unwrap();
+        delivery::bind_turn_start_messages(
+            &mut connection,
+            &BindAgentTurnStartInput {
+                conversation_id: "conversation-grand".into(),
+                run_id: "grand-run".into(),
+                assistant_message_id: "grand-assistant".into(),
+                model_batch_index: 1,
+            },
+            &["task-source".into()],
+            25,
+        )
+        .unwrap();
+        let mut assignments = vec![("task-source".to_string(), "agent-child")];
+        for (request_id, sender) in [("root-extra", "agent-root"), ("child-extra", "agent-child")] {
+            let sent = graph::follow_up_agent(
+                &mut connection,
+                &SendAgentMessageRequest {
+                    sender_agent_id: sender.into(),
+                    recipient_agent_id: "agent-grand".into(),
+                    request_id: request_id.into(),
+                    content: "additional explicit task".into(),
+                },
+                26,
+            )
+            .unwrap();
+            assignments.push((sent.message.message_id, sender));
+        }
+        let ordinary = graph::send_agent_message(
+            &mut connection,
+            &SendAgentMessageRequest {
+                sender_agent_id: "agent-root".into(),
+                recipient_agent_id: "agent-grand".into(),
+                request_id: "ordinary-context".into(),
+                content: "context only, no task subscription".into(),
+            },
+            27,
+        )
+        .unwrap();
+        delivery::bind_safe_boundary(
+            &mut connection,
+            &BindAgentSafeBoundaryInput {
+                conversation_id: "conversation-grand".into(),
+                run_id: "grand-run".into(),
+                assistant_message_id: "grand-assistant".into(),
+                model_batch_index: 2,
+                expected_next_trace_sequence: 0,
+                maximum: 64,
+            },
+            128,
+        )
+        .unwrap(); // Simulate a later wall-clock rollback before approval/terminal.
+        let unbound = graph::follow_up_agent(
+            &mut connection,
+            &SendAgentMessageRequest {
+                sender_agent_id: "agent-root".into(),
+                recipient_agent_id: "agent-grand".into(),
+                request_id: "next-round".into(),
+                content: "not delivered to this Run".into(),
+            },
+            29,
+        )
+        .unwrap();
+        connection.execute("INSERT INTO agent_pending_actions(action_id,run_id,conversation_id,assistant_message_id,
+            action_type,tool_name,tool_call_id,status,action_json,agent_input_json,created_at,updated_at)
+            VALUES ('grand-approval','grand-run','conversation-grand','grand-assistant','tool_call','read_file','approval-call','pending','{}','{}',30,30)", []).unwrap();
+        let approval = list_root_events(&connection, "agent-root", 0, 512)
+            .unwrap()
+            .into_iter()
+            .find(|event| event.kind == AgentCollaborationEventKind::ApprovalProjected)
+            .unwrap();
+        assert_eq!(approval.activities.len(), 3);
+        for (task, owner) in &assignments {
+            assert!(approval
+                .activities
+                .iter()
+                .any(|activity| activity.task_message_id.as_ref() == Some(task)
+                    && activity.owner_agent_id == *owner
+                    && activity.semantic == AgentCollaborationActivitySemantic::WaitingApproval));
+        }
+        connection.execute("UPDATE agent_pending_actions SET status='rejected',updated_at=31 WHERE action_id='grand-approval'",[]).unwrap();
+        let trace_status = match status {
+            AgentWakeStatus::Failed => "failed",
+            AgentWakeStatus::Interrupted => "cancelled",
+            _ => "completed",
+        };
+        if status != AgentWakeStatus::Failed {
+            connection.execute("UPDATE conversation_turn_traces SET terminal_status=?1,completed_at=32,updated_at=32 WHERE run_id='grand-run'",[trace_status]).unwrap();
+        }
+        let wake = graph::get_agent_wake(&connection, &wake.wake_id)
+            .unwrap()
+            .unwrap();
+        let settled = finish_wake(&mut connection, &wake, status, 33);
+        assert_eq!(settled.result_message.recipient_agent_id, "agent-child");
+        let events = assert_all_event_cursors_unchanged(&connection);
+        let terminal = events
+            .iter()
+            .find(|event| {
+                event.kind == AgentCollaborationEventKind::WakeUpdated
+                    && event.run_id.as_deref() == Some("grand-run")
+                    && event.created_at == 33
+            })
+            .unwrap();
+        assert_eq!(terminal.activities.len(), 3);
+        for (task, owner) in &assignments {
+            let activity = terminal
+                .activities
+                .iter()
+                .find(|activity| activity.task_message_id.as_ref() == Some(task))
+                .unwrap();
+            assert_eq!(activity.owner_agent_id, *owner);
+            assert_eq!(activity.agent_id, "agent-grand");
+            assert_eq!(
+                activity.anchor_message_id.as_deref(),
+                Some(if *owner == "agent-root" {
+                    "root-active"
+                } else {
+                    "child-active"
+                })
+            );
+        }
+        assert!(terminal
+            .activities
+            .iter()
+            .all(|activity| activity.task_message_id.as_deref()
+                != Some(&unbound.message.message_id)
+                && activity.task_message_id.as_deref() != Some(&ordinary.message.message_id)));
+        assert_eq!(
+            terminal
+                .activities
+                .iter()
+                .map(|activity| &activity.activity_id)
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            3
+        );
+        for (owner, message, expected) in [
+            ("agent-root", "root-active", 1),
+            ("agent-child", "child-active", 2),
+        ] {
+            let frozen = list_message_activities(&connection, message).unwrap();
+            let projected = frozen
+                .iter()
+                .find(|event| event.event_id == terminal.event_id)
+                .unwrap();
+            assert_eq!(projected.activities.len(), expected);
+            assert!(projected
+                .activities
+                .iter()
+                .all(|activity| activity.owner_agent_id == owner));
+            assert!(projected
+                .activities
+                .iter()
+                .all(|activity| terminal.activities.contains(activity)));
+        }
+        assert!(connection.execute("UPDATE agent_collaboration_event_activities SET owner_agent_id='agent-root' WHERE activity_id=?1",[&terminal.activities[0].activity_id]).is_err());
+    }
+}
+
+#[test]
+fn ordinary_cross_level_messages_have_real_sender_recipient_but_no_task_identity() {
+    let mut connection = tree_with_active_parents();
+    for (sender, recipient) in [
+        ("agent-root", "agent-grand"),
+        ("agent-grand", "agent-root"),
+        ("agent-child", "agent-root"),
+    ] {
+        let sent = graph::send_agent_message(
+            &mut connection,
+            &SendAgentMessageRequest {
+                sender_agent_id: sender.into(),
+                recipient_agent_id: recipient.into(),
+                request_id: format!("{sender}-{recipient}"),
+                content: "message only".into(),
+            },
+            20,
+        )
+        .unwrap();
+        let event = list_root_events(&connection, "agent-root", 0, 512)
+            .unwrap()
+            .into_iter()
+            .find(|event| {
+                event.kind == AgentCollaborationEventKind::MailboxEnqueued
+                    && event.message_id.as_deref() == Some(&sent.message.message_id)
+            })
+            .unwrap();
+        assert_eq!(event.activities.len(), 1);
+        let activity = &event.activities[0];
+        assert_eq!(activity.agent_id, sender);
+        assert_eq!(activity.owner_agent_id, recipient);
+        assert_eq!(
+            activity.semantic,
+            AgentCollaborationActivitySemantic::Updated
+        );
+        assert!(activity.task_message_id.is_none());
+    }
+}
+
+#[test]
+fn frozen_activity_window_counts_assignments_inside_one_event() {
+    let mut connection = tree_with_active_parents();
+    enqueue_task(
+        &mut connection,
+        AgentMailboxKind::Task,
+        "agent-root",
+        "agent-child",
+    );
+    let mut event = list_root_events(&connection, "agent-root", 0, 512)
+        .unwrap()
+        .into_iter()
+        .find(|event| !event.activities.is_empty())
+        .unwrap();
+    let first = event.activities[0].clone();
+    event.activities = (0..2050)
+        .map(|index| {
+            let mut activity = first.clone();
+            activity.activity_id = format!("activity-{index:04}");
+            activity.task_message_id = Some(format!("task-{index:04}"));
+            activity
+        })
+        .collect();
+    let mut events = vec![event];
+    retain_latest_activities(&mut events, 2048);
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].activities.len(), 2048);
+    assert_eq!(
+        events[0].activities[0].task_message_id.as_deref(),
+        Some("task-0002")
+    );
+    assert_eq!(
+        events[0].activities[2047].task_message_id.as_deref(),
+        Some("task-2049")
+    );
 }

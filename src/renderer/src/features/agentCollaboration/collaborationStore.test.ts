@@ -28,7 +28,7 @@ function event(
   agentId = `root:${rootConversationId}`
 ): CollaborationEventEnvelope {
   return {
-    schemaVersion: 2,
+    schemaVersion: 3,
     eventId: `${rootConversationId}:${sequence}`,
     sequence,
     workspaceId: 'project-a',
@@ -42,7 +42,7 @@ function event(
     messageId: null,
     kind: 'agent_updated',
     resourceRevision: sequence,
-    activity: null,
+    activities: [],
     occurredAt: sequence
   }
 }
@@ -51,7 +51,7 @@ function activityEvent(
   rootConversationId: string,
   sequence: number,
   agentId: string,
-  semantic: NonNullable<CollaborationEventEnvelope['activity']>['semantic'],
+  semantic: NonNullable<CollaborationEventEnvelope['activities'][number]>['semantic'],
   taskNameSnapshot = agentId,
   anchored = true
 ): CollaborationEventEnvelope {
@@ -67,16 +67,20 @@ function activityEvent(
   return {
     ...event(rootConversationId, sequence, outerAgentId),
     kind,
-    activity: {
-      schemaVersion: 3,
-      agentId,
-      parentAgentId: `root:${rootConversationId}`,
-      parentConversationId: rootConversationId,
-      anchorMessageId: anchored ? 'root-assistant-1' : null,
-      traceBoundarySequence: anchored ? sequence : null,
-      semantic,
-      taskNameSnapshot
-    }
+    activities: [
+      {
+        schemaVersion: 4,
+        activityId: `${rootConversationId}:${sequence}`,
+        agentId,
+        ownerAgentId: `root:${rootConversationId}`,
+        ownerConversationId: rootConversationId,
+        anchorMessageId: anchored ? 'root-assistant-1' : null,
+        traceBoundarySequence: anchored ? sequence : null,
+        semantic,
+        taskNameSnapshot,
+        taskMessageId: semantic === 'updated' ? null : 'task-' + agentId
+      }
+    ]
   }
 }
 
@@ -111,6 +115,85 @@ async function settle(): Promise<void> {
 }
 
 describe('CollaborationStore', () => {
+  it('expands one execution event into stable task projections without skipping a sequence or duplicating its transfer', async () => {
+    const root = 'root-conversation'
+    const completed = activityEvent(root, 1, 'grandchild', 'completed')
+    completed.activities = [
+      { ...completed.activities[0]!, activityId: 'terminal:root-task', taskMessageId: 'root-task' },
+      {
+        ...completed.activities[0]!,
+        activityId: 'terminal:root-followup',
+        taskMessageId: 'root-followup'
+      },
+      {
+        ...completed.activities[0]!,
+        activityId: 'terminal:parent-task',
+        taskMessageId: 'parent-task',
+        ownerAgentId: 'parent',
+        ownerConversationId: 'parent-conversation'
+      }
+    ]
+    const message = activityEvent(root, 2, 'sibling', 'updated')
+    message.activities[0]!.activityId = 'message:root'
+    message.transmission = {
+      id: 'message-transfer',
+      kind: 'message',
+      sourceAgentId: 'sibling',
+      targetAgentId: `root:${root}`
+    }
+    message.occurredAt = Date.now()
+    const filteredResult = { ...event(root, 3, 'sibling'), kind: 'wake_updated' as const }
+    let notify: ((event: CollaborationEventEnvelope) => void) | undefined
+    let available = 0
+    const events = [completed, message, filteredResult]
+    const source: CollaborationDataSource = {
+      getTree: vi.fn(async () => ({
+        ...tree(root, available),
+        agents: [childSummary('sibling', 'sibling-conversation')]
+      })),
+      listEvents: vi.fn(async ({ afterSequence }) =>
+        page(
+          root,
+          events.filter((entry) => entry.sequence > afterSequence && entry.sequence <= available)
+        )
+      ),
+      subscribe: (handler) => {
+        notify = handler
+        return () => undefined
+      },
+      subscribeResync: () => () => undefined
+    }
+    const store = new CollaborationStore(root, source)
+    store.start()
+    await settle()
+    try {
+      available = 3
+      notify?.(filteredResult)
+      await settle()
+      await settle()
+      const expectedIds = [
+        'terminal:root-task',
+        'terminal:root-followup',
+        'terminal:parent-task',
+        'message:root'
+      ]
+      expect(store.getSnapshot()).toMatchObject({ error: false, tree: { lastSequence: 3 } })
+      expect(store.getSnapshot().activities.map((entry) => entry.activityId)).toEqual(expectedIds)
+      expect(store.getSnapshot().activities.map((entry) => entry.sequence)).toEqual([1, 1, 1, 2])
+      expect((store.getSnapshot().transmissions ?? []).map((entry) => entry.id)).toEqual([
+        'message-transfer'
+      ])
+      notify?.(message)
+      await settle()
+      expect(store.getSnapshot().activities.map((entry) => entry.activityId)).toEqual(expectedIds)
+      await store.hydrate()
+      expect(store.getSnapshot().activities.map((entry) => entry.activityId)).toEqual(expectedIds)
+      expect(store.getSnapshot().transmissions).toEqual([])
+    } finally {
+      store.destroy()
+    }
+  })
+
   it('releases 1,000 transient subscribers without duplicate delivery or residue', async () => {
     const source: CollaborationDataSource = {
       getTree: vi.fn(async () => null),
@@ -437,8 +520,8 @@ describe('CollaborationStore', () => {
     let handler: ((event: CollaborationEventEnvelope) => void) | undefined
     let lastSequence = 0
     const activity = activityEvent('root-conversation', 1, 'grandchild', 'started')
-    activity.activity!.parentAgentId = 'parent'
-    activity.activity!.parentConversationId = 'parent-conversation'
+    activity.activities[0]!.ownerAgentId = 'parent'
+    activity.activities[0]!.ownerConversationId = 'parent-conversation'
     const source: CollaborationDataSource = {
       getTree: vi.fn(async () => ({
         ...tree('root-conversation', lastSequence),
@@ -645,14 +728,14 @@ describe('CollaborationStore', () => {
 
   it('restores an older parent gap event after more than 2048 descendant inline events', async () => {
     const gap = activityEvent('root-conversation', 1, 'agent-a', 'completed', 'agent-a', false)
-    gap.activity!.anchorMessageId = 'root-assistant-1'
+    gap.activities[0]!.anchorMessageId = 'root-assistant-1'
     const descendants = Array.from(
       { length: MAX_COLLABORATION_TIMELINE_ACTIVITIES + 17 },
       (_, index) => {
         const event = activityEvent('root-conversation', index + 2, 'grandchild', 'started')
-        event.activity!.parentAgentId = 'agent-a'
-        event.activity!.parentConversationId = 'child-conversation'
-        event.activity!.anchorMessageId = 'child-assistant'
+        event.activities[0]!.ownerAgentId = 'agent-a'
+        event.activities[0]!.ownerConversationId = 'child-conversation'
+        event.activities[0]!.anchorMessageId = 'child-assistant'
         return event
       }
     )
@@ -675,7 +758,7 @@ describe('CollaborationStore', () => {
     expect(activities).toHaveLength(MAX_COLLABORATION_TIMELINE_ACTIVITIES + 1)
     expect(activities[0]).toMatchObject({
       activityId: gap.eventId,
-      parentConversationId: 'root-conversation',
+      ownerConversationId: 'root-conversation',
       anchorMessageId: 'root-assistant-1',
       traceBoundarySequence: null
     })

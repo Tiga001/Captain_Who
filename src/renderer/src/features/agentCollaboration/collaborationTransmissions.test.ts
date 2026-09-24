@@ -81,7 +81,7 @@ function event(
   changes: Partial<CollaborationEventEnvelope> = {}
 ): CollaborationEventEnvelope {
   return {
-    schemaVersion: 2,
+    schemaVersion: 3,
     eventId: `event-${sequence}`,
     sequence,
     workspaceId: null,
@@ -95,7 +95,7 @@ function event(
     messageId: `message-${sequence}`,
     kind: 'mailbox_enqueued',
     resourceRevision: sequence,
-    activity: null,
+    activities: [],
     occurredAt: Date.now(),
     transmission: {
       id: `mailbox:message-${sequence}`,

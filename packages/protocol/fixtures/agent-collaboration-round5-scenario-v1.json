@@ -154,7 +154,7 @@
     "rootConversationId": "conversation-root",
     "events": [
       {
-        "schemaVersion": 2,
+        "schemaVersion": 3,
         "eventId": "event-1",
         "sequence": 1,
         "workspaceId": "project-a",
@@ -168,11 +168,11 @@
         "messageId": null,
         "kind": "agent_created",
         "resourceRevision": 1,
-        "activity": null,
-        "occurredAt": 1720000000000
+        "occurredAt": 1720000000000,
+        "activities": []
       },
       {
-        "schemaVersion": 2,
+        "schemaVersion": 3,
         "eventId": "event-2",
         "sequence": 2,
         "workspaceId": "project-a",
@@ -186,11 +186,11 @@
         "messageId": null,
         "kind": "agent_created",
         "resourceRevision": 1,
-        "activity": null,
-        "occurredAt": 1720000000100
+        "occurredAt": 1720000000100,
+        "activities": []
       },
       {
-        "schemaVersion": 2,
+        "schemaVersion": 3,
         "eventId": "event-3",
         "sequence": 3,
         "workspaceId": "project-a",
@@ -204,11 +204,11 @@
         "messageId": "mailbox-task-review",
         "kind": "mailbox_enqueued",
         "resourceRevision": 1,
-        "activity": null,
-        "occurredAt": 1720000000200
+        "occurredAt": 1720000000200,
+        "activities": []
       },
       {
-        "schemaVersion": 2,
+        "schemaVersion": 3,
         "eventId": "event-4",
         "sequence": 4,
         "workspaceId": "project-a",
@@ -222,20 +222,24 @@
         "messageId": "mailbox-task-review",
         "kind": "wake_created",
         "resourceRevision": 1,
-        "activity": {
-          "schemaVersion": 3,
-          "semantic": "started",
-          "agentId": "agent-review",
-          "taskNameSnapshot": "security_review",
-          "parentAgentId": "agent-root",
-          "parentConversationId": "conversation-root",
-          "anchorMessageId": "assistant-conversation-root",
-          "traceBoundarySequence": 1
-        },
-        "occurredAt": 1720000001000
+        "occurredAt": 1720000001000,
+        "activities": [
+          {
+            "schemaVersion": 4,
+            "activityId": "event-4:activity:mailbox-task-review",
+            "semantic": "started",
+            "agentId": "agent-review",
+            "taskNameSnapshot": "security_review",
+            "ownerAgentId": "agent-root",
+            "ownerConversationId": "conversation-root",
+            "taskMessageId": "mailbox-task-review",
+            "anchorMessageId": "assistant-conversation-root",
+            "traceBoundarySequence": 1
+          }
+        ]
       },
       {
-        "schemaVersion": 2,
+        "schemaVersion": 3,
         "eventId": "event-5",
         "sequence": 5,
         "workspaceId": "project-a",
@@ -249,11 +253,11 @@
         "messageId": null,
         "kind": "agent_created",
         "resourceRevision": 1,
-        "activity": null,
-        "occurredAt": 1720000000300
+        "occurredAt": 1720000000300,
+        "activities": []
       },
       {
-        "schemaVersion": 2,
+        "schemaVersion": 3,
         "eventId": "event-6",
         "sequence": 6,
         "workspaceId": "project-a",
@@ -267,11 +271,11 @@
         "messageId": "mailbox-task-compatibility",
         "kind": "mailbox_enqueued",
         "resourceRevision": 1,
-        "activity": null,
-        "occurredAt": 1720000000400
+        "occurredAt": 1720000000400,
+        "activities": []
       },
       {
-        "schemaVersion": 2,
+        "schemaVersion": 3,
         "eventId": "event-7",
         "sequence": 7,
         "workspaceId": "project-a",
@@ -285,20 +289,24 @@
         "messageId": "mailbox-task-compatibility",
         "kind": "wake_created",
         "resourceRevision": 1,
-        "activity": {
-          "schemaVersion": 3,
-          "semantic": "started",
-          "agentId": "agent-compatibility",
-          "taskNameSnapshot": "compatibility_review",
-          "parentAgentId": "agent-root",
-          "parentConversationId": "conversation-root",
-          "anchorMessageId": "assistant-conversation-root",
-          "traceBoundarySequence": 1
-        },
-        "occurredAt": 1720000001000
+        "occurredAt": 1720000001000,
+        "activities": [
+          {
+            "schemaVersion": 4,
+            "activityId": "event-7:activity:mailbox-task-compatibility",
+            "semantic": "started",
+            "agentId": "agent-compatibility",
+            "taskNameSnapshot": "compatibility_review",
+            "ownerAgentId": "agent-root",
+            "ownerConversationId": "conversation-root",
+            "taskMessageId": "mailbox-task-compatibility",
+            "anchorMessageId": "assistant-conversation-root",
+            "traceBoundarySequence": 1
+          }
+        ]
       },
       {
-        "schemaVersion": 2,
+        "schemaVersion": 3,
         "eventId": "event-8",
         "sequence": 8,
         "workspaceId": "project-a",
@@ -312,11 +320,11 @@
         "messageId": "mailbox-send-review",
         "kind": "mailbox_enqueued",
         "resourceRevision": 2,
-        "activity": null,
-        "occurredAt": 1720000001200
+        "occurredAt": 1720000001200,
+        "activities": []
       },
       {
-        "schemaVersion": 2,
+        "schemaVersion": 3,
         "eventId": "event-9",
         "sequence": 9,
         "workspaceId": "project-a",
@@ -330,20 +338,24 @@
         "messageId": "mailbox-update-review",
         "kind": "mailbox_enqueued",
         "resourceRevision": 3,
-        "activity": {
-          "schemaVersion": 3,
-          "semantic": "updated",
-          "agentId": "agent-review",
-          "taskNameSnapshot": "security_review",
-          "parentAgentId": "agent-root",
-          "parentConversationId": "conversation-root",
-          "anchorMessageId": "assistant-conversation-root",
-          "traceBoundarySequence": 1
-        },
-        "occurredAt": 1720000001500
+        "occurredAt": 1720000001500,
+        "activities": [
+          {
+            "schemaVersion": 4,
+            "activityId": "event-9:activity:mailbox-update-review",
+            "semantic": "updated",
+            "agentId": "agent-review",
+            "taskNameSnapshot": "security_review",
+            "ownerAgentId": "agent-root",
+            "ownerConversationId": "conversation-root",
+            "taskMessageId": null,
+            "anchorMessageId": "assistant-conversation-root",
+            "traceBoundarySequence": 1
+          }
+        ]
       },
       {
-        "schemaVersion": 2,
+        "schemaVersion": 3,
         "eventId": "event-10",
         "sequence": 10,
         "workspaceId": "project-a",
@@ -357,11 +369,11 @@
         "messageId": "mailbox-followup-review",
         "kind": "mailbox_enqueued",
         "resourceRevision": 4,
-        "activity": null,
-        "occurredAt": 1720000001700
+        "occurredAt": 1720000001700,
+        "activities": []
       },
       {
-        "schemaVersion": 2,
+        "schemaVersion": 3,
         "eventId": "event-11",
         "sequence": 11,
         "workspaceId": "project-a",
@@ -375,20 +387,24 @@
         "messageId": "mailbox-followup-review",
         "kind": "wake_created",
         "resourceRevision": 1,
-        "activity": {
-          "schemaVersion": 3,
-          "semantic": "started",
-          "agentId": "agent-review",
-          "taskNameSnapshot": "security_review",
-          "parentAgentId": "agent-root",
-          "parentConversationId": "conversation-root",
-          "anchorMessageId": "assistant-conversation-root",
-          "traceBoundarySequence": 1
-        },
-        "occurredAt": 1720000001800
+        "occurredAt": 1720000001800,
+        "activities": [
+          {
+            "schemaVersion": 4,
+            "activityId": "event-11:activity:mailbox-followup-review",
+            "semantic": "started",
+            "agentId": "agent-review",
+            "taskNameSnapshot": "security_review",
+            "ownerAgentId": "agent-root",
+            "ownerConversationId": "conversation-root",
+            "taskMessageId": "mailbox-followup-review",
+            "anchorMessageId": "assistant-conversation-root",
+            "traceBoundarySequence": 1
+          }
+        ]
       },
       {
-        "schemaVersion": 2,
+        "schemaVersion": 3,
         "eventId": "event-12",
         "sequence": 12,
         "workspaceId": "project-a",
@@ -402,20 +418,24 @@
         "messageId": "assistant-compatibility",
         "kind": "approval_projected",
         "resourceRevision": 1,
-        "activity": {
-          "schemaVersion": 3,
-          "semantic": "waiting_approval",
-          "agentId": "agent-compatibility",
-          "taskNameSnapshot": "compatibility_review",
-          "parentAgentId": "agent-root",
-          "parentConversationId": "conversation-root",
-          "anchorMessageId": "assistant-conversation-root",
-          "traceBoundarySequence": null
-        },
-        "occurredAt": 1720000002000
+        "occurredAt": 1720000002000,
+        "activities": [
+          {
+            "schemaVersion": 4,
+            "activityId": "event-12:activity:mailbox-task-compatibility",
+            "semantic": "waiting_approval",
+            "agentId": "agent-compatibility",
+            "taskNameSnapshot": "compatibility_review",
+            "ownerAgentId": "agent-root",
+            "ownerConversationId": "conversation-root",
+            "taskMessageId": "mailbox-task-compatibility",
+            "anchorMessageId": "assistant-conversation-root",
+            "traceBoundarySequence": null
+          }
+        ]
       },
       {
-        "schemaVersion": 2,
+        "schemaVersion": 3,
         "eventId": "event-13",
         "sequence": 13,
         "workspaceId": "project-a",
@@ -429,20 +449,24 @@
         "messageId": "assistant-review",
         "kind": "approval_projected",
         "resourceRevision": 1,
-        "activity": {
-          "schemaVersion": 3,
-          "semantic": "waiting_approval",
-          "agentId": "agent-review",
-          "taskNameSnapshot": "security_review",
-          "parentAgentId": "agent-root",
-          "parentConversationId": "conversation-root",
-          "anchorMessageId": "assistant-conversation-root",
-          "traceBoundarySequence": null
-        },
-        "occurredAt": 1720000002001
+        "occurredAt": 1720000002001,
+        "activities": [
+          {
+            "schemaVersion": 4,
+            "activityId": "event-13:activity:mailbox-task-review",
+            "semantic": "waiting_approval",
+            "agentId": "agent-review",
+            "taskNameSnapshot": "security_review",
+            "ownerAgentId": "agent-root",
+            "ownerConversationId": "conversation-root",
+            "taskMessageId": "mailbox-task-review",
+            "anchorMessageId": "assistant-conversation-root",
+            "traceBoundarySequence": null
+          }
+        ]
       },
       {
-        "schemaVersion": 2,
+        "schemaVersion": 3,
         "eventId": "event-14",
         "sequence": 14,
         "workspaceId": "project-a",
@@ -456,20 +480,24 @@
         "messageId": "mailbox-result-compatibility",
         "kind": "wake_updated",
         "resourceRevision": 3,
-        "activity": {
-          "schemaVersion": 3,
-          "semantic": "interrupted",
-          "agentId": "agent-compatibility",
-          "taskNameSnapshot": "compatibility_review",
-          "parentAgentId": "agent-root",
-          "parentConversationId": "conversation-root",
-          "anchorMessageId": "assistant-conversation-root",
-          "traceBoundarySequence": null
-        },
-        "occurredAt": 1720000002500
+        "occurredAt": 1720000002500,
+        "activities": [
+          {
+            "schemaVersion": 4,
+            "activityId": "event-14:activity:mailbox-task-compatibility",
+            "semantic": "interrupted",
+            "agentId": "agent-compatibility",
+            "taskNameSnapshot": "compatibility_review",
+            "ownerAgentId": "agent-root",
+            "ownerConversationId": "conversation-root",
+            "taskMessageId": "mailbox-task-compatibility",
+            "anchorMessageId": "assistant-conversation-root",
+            "traceBoundarySequence": null
+          }
+        ]
       },
       {
-        "schemaVersion": 2,
+        "schemaVersion": 3,
         "eventId": "event-15",
         "sequence": 15,
         "workspaceId": "project-a",
@@ -483,17 +511,21 @@
         "messageId": "mailbox-result-review",
         "kind": "wake_updated",
         "resourceRevision": 3,
-        "activity": {
-          "schemaVersion": 3,
-          "semantic": "completed",
-          "agentId": "agent-review",
-          "taskNameSnapshot": "security_review",
-          "parentAgentId": "agent-root",
-          "parentConversationId": "conversation-root",
-          "anchorMessageId": "assistant-conversation-root",
-          "traceBoundarySequence": null
-        },
-        "occurredAt": 1720000003000
+        "occurredAt": 1720000003000,
+        "activities": [
+          {
+            "schemaVersion": 4,
+            "activityId": "event-15:activity:mailbox-task-review",
+            "semantic": "completed",
+            "agentId": "agent-review",
+            "taskNameSnapshot": "security_review",
+            "ownerAgentId": "agent-root",
+            "ownerConversationId": "conversation-root",
+            "taskMessageId": "mailbox-task-review",
+            "anchorMessageId": "assistant-conversation-root",
+            "traceBoundarySequence": null
+          }
+        ]
       }
     ],
     "lastSequence": 15,

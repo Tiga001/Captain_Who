@@ -7,8 +7,9 @@ export interface CollaborationTimelineActivity {
   activityId: string
   agentId: string
   occurredAt: number
-  parentAgentId: string
-  parentConversationId: string
+  ownerAgentId: string
+  ownerConversationId: string
+  taskMessageId: string | null
   anchorMessageId: string | null
   traceBoundarySequence: number | null
   runId: string | null
@@ -19,8 +20,8 @@ export interface CollaborationTimelineActivity {
 }
 
 export interface CollaborationTimelineActivityGroup {
-  parentAgentId: string
-  parentConversationId: string
+  ownerAgentId: string
+  ownerConversationId: string
   activities: readonly CollaborationTimelineActivity[]
   anchorMessageId: string | null
   traceBoundarySequence: number | null
@@ -46,7 +47,8 @@ function compareActivity(
   // different process, so timestamps can only break malformed/equal-sequence ties.
   if (left.sequence !== right.sequence) return left.sequence - right.sequence
   if (left.occurredAt !== right.occurredAt) return left.occurredAt - right.occurredAt
-  return left.activityId.localeCompare(right.activityId)
+  // Multiple projections of one event retain the Host array order, never an ID-derived order.
+  return 0
 }
 
 function canMerge(
@@ -59,8 +61,8 @@ function canMerge(
     activity.traceBoundarySequence !== null &&
     group.anchorMessageId === activity.anchorMessageId
   return (
-    group.parentAgentId === activity.parentAgentId &&
-    group.parentConversationId === activity.parentConversationId &&
+    group.ownerAgentId === activity.ownerAgentId &&
+    group.ownerConversationId === activity.ownerConversationId &&
     group.semantic === activity.semantic &&
     group.anchorMessageId === activity.anchorMessageId &&
     (sharesAnchoredAssistantRun || group.traceBoundarySequence === activity.traceBoundarySequence)
@@ -90,7 +92,7 @@ export function normalizeCollaborationTimelineActivities(
  * cross hidden trace boundaries: the caller has already split the list at every visible Timeline
  * item, so those boundaries must not turn consecutive Harness events into separate full rows.
  * Unanchored events retain the stricter boundary rule. Repeated activity for the same Agent inside
- * one continuous row replaces that Agent's older snapshot while retaining the stable visual order.
+ * one continuous row replaces that task's older snapshot while retaining the stable visual order.
  */
 export function groupCollaborationTimelineActivities(
   input: readonly CollaborationTimelineActivity[]
@@ -102,7 +104,9 @@ export function groupCollaborationTimelineActivities(
     const current = groups.at(-1)
     if (current && canMerge(current, activity)) {
       const existingIndex = current.activities.findIndex(
-        (candidate) => candidate.agentId === activity.agentId
+        (candidate) =>
+          candidate.agentId === activity.agentId &&
+          candidate.taskMessageId === activity.taskMessageId
       )
       const nextActivities = [...current.activities]
       if (existingIndex >= 0) nextActivities[existingIndex] = activity
@@ -112,8 +116,8 @@ export function groupCollaborationTimelineActivities(
     }
 
     groups.push({
-      parentAgentId: activity.parentAgentId,
-      parentConversationId: activity.parentConversationId,
+      ownerAgentId: activity.ownerAgentId,
+      ownerConversationId: activity.ownerConversationId,
       activities: [activity],
       anchorMessageId: activity.anchorMessageId,
       traceBoundarySequence: activity.traceBoundarySequence,
@@ -124,7 +128,7 @@ export function groupCollaborationTimelineActivities(
 }
 
 /**
- * Routes an event only to its direct parent's conversation using its transactionally committed
+ * Routes a projection only to its Host-confirmed owner's conversation using its transactionally committed
  * message/trace boundary. Missing messages are not guessed from wall clocks or notification order.
  * A null trace denotes the gap after a committed message; a null anchor denotes before any message.
  */
@@ -132,7 +136,7 @@ export function projectCollaborationTimelineActivities(
   input: readonly CollaborationTimelineActivity[],
   messages: readonly CollaborationTimelineMessageReference[],
   conversationId: string,
-  directChildAgentIds?: readonly string[]
+  collaborationTreeAgentIds?: readonly string[]
 ): CollaborationTimelineMessageProjection {
   const normalized = normalizeCollaborationTimelineActivities(input)
   const messageIds = new Set(messages.map((message) => message.id))
@@ -142,8 +146,10 @@ export function projectCollaborationTimelineActivities(
   const tail: CollaborationTimelineActivity[] = []
   for (const activity of normalized) {
     if (
-      activity.parentConversationId !== conversationId ||
-      (directChildAgentIds !== undefined && !directChildAgentIds.includes(activity.agentId))
+      activity.ownerConversationId !== conversationId ||
+      (collaborationTreeAgentIds !== undefined &&
+        (!collaborationTreeAgentIds.includes(activity.agentId) ||
+          !collaborationTreeAgentIds.includes(activity.ownerAgentId)))
     )
       continue
     const anchor = activity.anchorMessageId

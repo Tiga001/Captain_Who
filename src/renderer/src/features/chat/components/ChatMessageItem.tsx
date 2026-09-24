@@ -139,7 +139,7 @@ function interruptionTranslationKey(
 interface ChatMessageItemProps {
   agentLabelsById?: Readonly<Record<string, string>>
   collaborationTimelineActivities?: readonly CollaborationTimelineActivity[]
-  directChildAgentIds?: readonly string[]
+  collaborationTreeAgentIds?: readonly string[]
   conversationId?: string
   humanInteraction?: HumanInteractionTimelineController
   editSelectedModelAvailable?: boolean
@@ -614,7 +614,7 @@ function AgentTimelineItemView({
 
 function AgentRunView({
   collaborationTimelineActivities = [],
-  directChildAgentIds,
+  collaborationTreeAgentIds,
   conversationId,
   humanInteraction,
   message,
@@ -630,7 +630,7 @@ function AgentRunView({
   turnDiffSummary
 }: {
   collaborationTimelineActivities?: readonly CollaborationTimelineActivity[]
-  directChildAgentIds?: readonly string[]
+  collaborationTreeAgentIds?: readonly string[]
   conversationId?: string
   humanInteraction?: HumanInteractionTimelineController
   message: ChatMessage
@@ -693,12 +693,14 @@ function AgentRunView({
     () =>
       normalizeCollaborationTimelineActivities(effectiveCollaborationActivities).filter(
         (activity) =>
-          (directChildAgentIds === undefined || directChildAgentIds.includes(activity.agentId)) &&
-          activity.parentConversationId === conversationId &&
+          (collaborationTreeAgentIds === undefined ||
+            (collaborationTreeAgentIds.includes(activity.agentId) &&
+              collaborationTreeAgentIds.includes(activity.ownerAgentId))) &&
+          activity.ownerConversationId === conversationId &&
           activity.anchorMessageId === message.id &&
           activity.traceBoundarySequence !== null
       ),
-    [conversationId, directChildAgentIds, effectiveCollaborationActivities, message.id]
+    [conversationId, collaborationTreeAgentIds, effectiveCollaborationActivities, message.id]
   )
   const [liveActivityAnchors, setLiveActivityAnchors] = useState<{
     runId: string | null
@@ -1133,7 +1135,7 @@ function AgentRunView({
 
 function MessageContent({
   collaborationTimelineActivities,
-  directChildAgentIds,
+  collaborationTreeAgentIds,
   conversationId,
   humanInteraction,
   message,
@@ -1152,7 +1154,7 @@ function MessageContent({
     return (
       <AgentRunView
         collaborationTimelineActivities={collaborationTimelineActivities}
-        directChildAgentIds={directChildAgentIds}
+        collaborationTreeAgentIds={collaborationTreeAgentIds}
         conversationId={conversationId}
         humanInteraction={humanInteraction}
         message={message}
@@ -1474,7 +1476,7 @@ function MessageInputOrigin({
 export const ChatMessageItem = memo(function ChatMessageItem({
   agentLabelsById,
   collaborationTimelineActivities,
-  directChildAgentIds,
+  collaborationTreeAgentIds,
   conversationId,
   humanInteraction,
   editSelectedModelAvailable = true,
@@ -1584,7 +1586,7 @@ export const ChatMessageItem = memo(function ChatMessageItem({
         <div className="chat-message__body">
           <MessageContent
             collaborationTimelineActivities={collaborationTimelineActivities}
-            directChildAgentIds={directChildAgentIds}
+            collaborationTreeAgentIds={collaborationTreeAgentIds}
             conversationId={conversationId}
             humanInteraction={humanInteraction}
             message={message}

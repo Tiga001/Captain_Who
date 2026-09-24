@@ -19,6 +19,7 @@ const TRANSLATIONS: Record<string, string> = {
   'collaboration.activity.copyAgentStatus': '{name}: {status}',
   'collaboration.activity.openAgentActivity': 'View sub-agent {name}: {status}',
   'collaboration.activity.status.started': 'Started working',
+  'collaboration.activity.status.updated': 'Updated',
   'collaboration.activity.statusListSeparator': '; ',
   'agentCenter.user': 'User',
   'agentCenter.openRootAgent': 'Open parent agent {name}, base model {model}, status {status}',
@@ -172,7 +173,7 @@ describe('Agent Center right sidebar', () => {
     await assertHint('Back to subagents')
   })
 
-  it('scopes observer activity to direct children and opens a selected grandchild', async () => {
+  it('scopes observer activity to its owned tasks including cross-level dispatches and opens their agents', async () => {
     const parent = agent('root-a', 'parent', 'running')
     const grandchild = { ...agent('root-a', 'grandchild', 'running'), parentAgentId: 'parent' }
     const sibling = agent('root-a', 'sibling', 'running')
@@ -184,9 +185,9 @@ describe('Agent Center right sidebar', () => {
       activityId: `event-${sequence}`,
       agentId,
       occurredAt: sequence,
-      parentAgentId:
+      ownerAgentId:
         agentId === 'grandchild' ? 'parent' : agentId === 'sibling' ? 'root:root-a' : 'grandchild',
-      parentConversationId:
+      ownerConversationId:
         agentId === 'grandchild'
           ? parent.conversationId
           : agentId === 'great-grandchild'
@@ -198,14 +199,28 @@ describe('Agent Center right sidebar', () => {
       semantic: 'started',
       sequence,
       taskNameSnapshot: agentId,
-      turnId: null
+      turnId: null,
+      taskMessageId: 'task-' + agentId
     })
     const tree = {
       ...snapshot('root-a', [parent, grandchild, sibling, unrelated]),
       activities: [
         activity('grandchild', 1),
         activity('sibling', 2),
-        activity('great-grandchild', 3)
+        activity('great-grandchild', 3),
+        {
+          ...activity('great-grandchild', 4),
+          ownerAgentId: parent.agentId,
+          ownerConversationId: parent.conversationId,
+          taskMessageId: 'cross-level-task'
+        },
+        {
+          ...activity('agent-root-a', 5),
+          ownerAgentId: parent.agentId,
+          ownerConversationId: parent.conversationId,
+          taskMessageId: null,
+          semantic: 'updated' as const
+        }
       ]
     }
     const screen = await render(
@@ -229,7 +244,10 @@ describe('Agent Center right sidebar', () => {
     await expect.element(screen.getByTestId('agent-observer-parent')).toBeVisible()
     expect(
       screen.getByTestId('agent-observer-parent').element().querySelectorAll('[data-agent-id]')
-    ).toHaveLength(1)
+    ).toHaveLength(3)
+    await screen.getByRole('button', { name: 'View sub-agent agent-root-a: Updated' }).click()
+    expect(openRootConversation).toHaveBeenCalledWith('root-a')
+    await expect.element(screen.getByTestId('agent-observer-parent')).toBeVisible()
     await screen.getByRole('button', { name: 'View sub-agent grandchild: Started working' }).click()
     await expect.element(screen.getByTestId('agent-observer-grandchild')).toBeVisible()
     expect(

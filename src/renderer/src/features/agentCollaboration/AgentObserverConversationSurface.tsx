@@ -5,7 +5,7 @@ import { useObserverConversation } from './useObserverConversation'
 import type { CollaborationTimelineActivity } from './collaborationTimelineModel'
 
 interface AgentObserverConversationSurfaceProps {
-  directChildAgentIds: readonly string[]
+  collaborationTreeAgentIds: readonly string[]
   agent: AgentSummary
   agentLabelsById: Readonly<Record<string, string>>
   activities?: readonly CollaborationTimelineActivity[]
@@ -19,7 +19,7 @@ export function AgentObserverConversationSurface({
   agent,
   agentLabelsById,
   activities,
-  directChildAgentIds,
+  collaborationTreeAgentIds,
   invalidationVersion,
   onOpenAgent,
   rootConversationId,
@@ -66,7 +66,7 @@ export function AgentObserverConversationSurface({
         agentLabelsById={agentLabelsById}
         collaborationTimelineActivities={activities}
         conversation={conversation}
-        directChildAgentIds={directChildAgentIds}
+        collaborationTreeAgentIds={collaborationTreeAgentIds}
         mode="observer"
         onOpenCollaborationAgent={onOpenAgent}
         parentAgentId={agent.parentAgentId}

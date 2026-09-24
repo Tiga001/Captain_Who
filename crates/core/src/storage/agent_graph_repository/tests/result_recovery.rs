@@ -517,7 +517,7 @@ fn child_result_is_frozen_direct_parent_outbox_and_root_is_not_auto_woken() {
     .unwrap();
     let settlement_activities = settlement_events
         .iter()
-        .filter_map(|event| event.activity.as_ref())
+        .flat_map(|event| &event.activities)
         .collect::<Vec<_>>();
     assert_eq!(settlement_activities.len(), 1);
     assert_eq!(
@@ -528,10 +528,10 @@ fn child_result_is_frozen_direct_parent_outbox_and_root_is_not_auto_woken() {
     assert!(settlement_events.iter().any(|event| {
         event.kind == crate::AgentCollaborationEventKind::MailboxEnqueued
             && event.message_id.as_deref() == Some(settled.result_message.message_id.as_str())
-            && event.activity.is_none()
+            && event.activities.is_empty()
     }));
     assert!(settlement_events.iter().all(|event| {
-        event.activity.is_none() || event.kind == crate::AgentCollaborationEventKind::WakeUpdated
+        event.activities.is_empty() || event.kind == crate::AgentCollaborationEventKind::WakeUpdated
     }));
 
     let later_artifact_id = format!("sha256:{}", "b".repeat(64));
@@ -673,7 +673,7 @@ fn child_result_is_frozen_direct_parent_outbox_and_root_is_not_auto_woken() {
     .unwrap();
     let failed_activities = failed_events
         .iter()
-        .filter_map(|event| event.activity.as_ref())
+        .flat_map(|event| &event.activities)
         .collect::<Vec<_>>();
     assert_eq!(failed_activities.len(), 1);
     assert_eq!(
@@ -685,7 +685,7 @@ fn child_result_is_frozen_direct_parent_outbox_and_root_is_not_auto_woken() {
         event.kind == crate::AgentCollaborationEventKind::MailboxEnqueued
             && event.message_id.as_deref()
                 == Some(root_settlement.result_message.message_id.as_str())
-            && event.activity.is_none()
+            && event.activities.is_empty()
     }));
 }
 
@@ -898,7 +898,7 @@ fn interrupt_request_is_tree_scoped_and_idempotent_across_multiple_wakes() {
     assert_eq!(
         queued_interrupt_events
             .iter()
-            .filter_map(|event| event.activity.as_ref())
+            .flat_map(|event| &event.activities)
             .map(|activity| activity.semantic)
             .collect::<Vec<_>>(),
         vec![crate::AgentCollaborationActivitySemantic::Interrupted]
@@ -906,7 +906,7 @@ fn interrupt_request_is_tree_scoped_and_idempotent_across_multiple_wakes() {
     assert!(queued_interrupt_events.iter().any(|event| {
         event.kind == crate::AgentCollaborationEventKind::WakeUpdated
             && event.agent_id == "agent-child"
-            && event.activity.as_ref().is_some_and(|activity| {
+            && event.activities.first().is_some_and(|activity| {
                 activity.agent_id == "agent-child" && activity.task_name_snapshot == "review"
             })
     }));
@@ -972,7 +972,7 @@ fn interrupt_request_is_tree_scoped_and_idempotent_across_multiple_wakes() {
     assert_eq!(
         claimed_interrupt_events
             .iter()
-            .filter_map(|event| event.activity.as_ref())
+            .flat_map(|event| &event.activities)
             .map(|activity| activity.semantic)
             .collect::<Vec<_>>(),
         vec![crate::AgentCollaborationActivitySemantic::Interrupted]

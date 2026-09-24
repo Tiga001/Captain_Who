@@ -24,9 +24,9 @@ last_verified: 2026-09-13
 
 ## Schema 发布策略
 
-截至本次核验，当前唯一受支持的 canonical schema 是 **v52**（SQLite `PRAGMA user_version = 52`）：
+截至本次核验，当前唯一受支持的 canonical schema 是 **v53**（SQLite `PRAGMA user_version = 53`）：
 
-- `STORAGE_SCHEMA_VERSION = 49`；
+- `STORAGE_SCHEMA_VERSION = 53`；
 - canonical schema fingerprint 由 `migrations.rs` 中的编译期常量和测试固定；
 - 空数据库在一个原子流程中建立完整当前 schema；
 - v48 新增 `conversation_history_index_entries`，以普通索引把搜索记录身份映射到 FTS rowid，避免分支复制历史时反复全表扫描；
@@ -34,7 +34,7 @@ last_verified: 2026-09-13
 - v47 新增独立的本机 Token 元数据、请求去重账本和每日汇总表，统计起始时间在创建 schema 时固定，不回填此前的观测；
 - v46 新增 `agent_workspace_run_bindings` 和 `agent_workspace_wake_bindings`，以不可变 JSON 保存文件夹 ID、别名、角色、配置路径、canonical 路径和目录实体身份；Run admission 与轨迹同事务提交，spawn/followup/结果 Wake 继承源 Run 或源 Wake。历史 fork 复制已保留回复的 Run 工作区绑定，但不复制 Wake 执行权；
 - v45 把项目改为多文件夹模型：`projects` 不再保存 `path`，文件夹存放在 `project_folders`（每个项目恰好一个 `primary`，其余为 `auxiliary`，`path` 与 `alias` 在项目内唯一，随项目级联删除）。主文件夹仍是 Agent 的工作目录；
-- 当前 v52 库须通过 exact fingerprint 和外键校验。exact v51 → v52 仅重建 Mailbox 正文约束，保留全部消息、事件、回执及自增序号。exact v50 须协作事件日志为空，先升级父会话活动定位至 v51，再执行 v52 升级，保留其他数据。不兼容旧活动位置，仍有旧事件或版本早于 v50 时返回 reset-required，不自动删除历史；
+- 当前 v53 库须通过 exact fingerprint 和外键校验。exact v52 → v53 新增任务归属活动明细，原样保留所有历史，不回填旧事件的展示归属。exact v51 → v52 仅重建 Mailbox 正文约束，保留全部消息、事件、回执及自增序号。exact v50 须协作事件日志为空，先升级父会话活动定位至 v51，再依次升级 v52、v53，保留其他数据。v50 不兼容旧活动位置，v50 仍有旧事件或版本早于 v50 时返回 reset-required，不自动删除历史；
 - Run/Wake 模式冻结表和 `agent_prompt_preferences.context_profile` 与 v44 相同；新偏好默认 Full，旧 checkpoint 由版本校验直接拒绝；
 - 未知版、非空未版本化或结构被篡改的数据库也返回 `development_storage_schema_reset_required`，不修改源库或自动重置。
 
@@ -42,7 +42,7 @@ last_verified: 2026-09-13
 
 开发库重置前应先关闭应用并备份数据根；优先使用受管 `storage:reset-dev` 流程。不要只删除 `storage.sqlite` 而遗留 attachments、artifacts、spool 或 lock 文件。
 
-`storage:reset-dev` 是显式丢弃历史的重建操作，始终新建当前 v52，不恢复 Conversation、Project、本机 Token 统计或 Agent/runtime 历史。它只从受支持的 exact catalog 保留 allowlisted 配置与凭据引用；未知结构且含配置的旧库必须拒绝重置，不能用默认值替换模型配置。支持版本与恢复字段以 `crates/core-server/src/bin/storage-reset-dev.rs` 为准。启动时不会自动执行该工具。
+`storage:reset-dev` 是显式丢弃历史的重建操作，始终新建当前 v53，不恢复 Conversation、Project、本机 Token 统计或 Agent/runtime 历史。它只从受支持的 exact catalog 保留 allowlisted 配置与凭据引用；未知结构且含配置的旧库必须拒绝重置，不能用默认值替换模型配置。支持版本与恢复字段以 `crates/core-server/src/bin/storage-reset-dev.rs` 为准。启动时不会自动执行该工具。
 
 ## 本机 Token 统计
 
@@ -113,7 +113,7 @@ DDL 按领域大致分为：
 
 ## Scheduled Automation 表组
 
-Automation 在 canonical schema v52 中使用当前通用通知表和自动化领域表，完整列、CHECK、索引和 trigger 仍以 DDL 为准：
+Automation 在 canonical schema v53 中使用当前通用通知表和自动化领域表，完整列、CHECK、索引和 trigger 仍以 DDL 为准：
 
 | 表                  | 权威内容                                                                | 关键不变量                                                                                                        |
 | ------------------- | ----------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
@@ -159,7 +159,7 @@ Automation 还要求两个专用原子边界：
 
 ## 启动与崩溃恢复
 
-Bootstrap 大致执行：解析数据根与锁、打开/校验 canonical schema v52、构造 repositories/services、加载凭据 backend、MCP Server/Provider/Skills/Artifact Runtime、随后运行领域 reconciliation。持久凭据 backend 不可用或 credential reference 无法解析时必须保留公开配置并报告 `unavailable`/配置错误，不能把缺失凭据当作空值覆盖；只有实际需要该连接的运行应被阻断。
+Bootstrap 大致执行：解析数据根与锁、打开/校验 canonical schema v53、构造 repositories/services、加载凭据 backend、MCP Server/Provider/Skills/Artifact Runtime、随后运行领域 reconciliation。持久凭据 backend 不可用或 credential reference 无法解析时必须保留公开配置并报告 `unavailable`/配置错误，不能把缺失凭据当作空值覆盖；只有实际需要该连接的运行应被阻断。
 
 恢复必须按“数据库已提交状态”判断，不按 Renderer 缓存判断。当前需要关注：
 
@@ -195,7 +195,7 @@ Automation 启动恢复区分 admission 前后：旧进程遗留的全部 `admit
 
 当前开发策略以整套数据根备份/重置为主。复制在线 SQLite 文件并不等价于一致备份；应在应用关闭、锁释放后复制数据库及其配套文件目录，或使用受支持的 SQLite snapshot/backup 流程。
 
-当前 v52 SQLite snapshot 只含模型/搜索 credential reference 与非秘密元数据，不含这些连接的当前 secret 字节；旧 schema 生成的历史备份仍可能含明文 Token/Key，必须继续按秘密材料保护。只恢复 `storage.sqlite` 不会恢复操作系统凭据，跨设备、跨系统账户、签名身份变化或凭据 backend 丢失后，界面可能显示凭据不可用，此时只能由用户替换或清除。未签名 macOS 开发构建的私有凭据文件位于数据根，因此“整根复制”仍会复制 secret，不能当作普通诊断包。
+当前 v53 SQLite snapshot 只含模型/搜索 credential reference 与非秘密元数据，不含这些连接的当前 secret 字节；旧 schema 生成的历史备份仍可能含明文 Token/Key，必须继续按秘密材料保护。只恢复 `storage.sqlite` 不会恢复操作系统凭据，跨设备、跨系统账户、签名身份变化或凭据 backend 丢失后，界面可能显示凭据不可用，此时只能由用户替换或清除。未签名 macOS 开发构建的私有凭据文件位于数据根，因此“整根复制”仍会复制 secret，不能当作普通诊断包。
 
 删除 SQLite reference、清除凭据或移除私有文件只表达应用层删除意图；文件系统、SSD、系统备份和操作系统凭据后端可能保留副本，产品不承诺安全擦除。怀疑泄露时应在 Provider 侧撤销或轮换凭据。
 
@@ -203,7 +203,7 @@ Automation 启动恢复区分 admission 前后：旧进程遗留的全部 `admit
 
 ## 不变量
 
-1. `canonical_schema.sql`、canonical schema v52 的 version 与 fingerprint 必须一致。
+1. `canonical_schema.sql`、canonical schema v53 的 version 与 fingerprint 必须一致。
 2. 自动结构升级仅接受 exact v50 且协作事件日志为空的库；旧协作历史不转换、不删除。升级事务失败时完整回滚，其他旧版本或未知 catalog 必须 fail closed。
 3. 所有领域对象在 service SQL 边界校验 conversation/project/Run 归属。
 4. 外部副作用与数据库提交之间的崩溃窗口必须有明确恢复状态。
@@ -247,7 +247,7 @@ Automation 启动恢复区分 admission 前后：旧进程遗留的全部 `admit
 
 ## 变更检查表
 
-- [ ] 修改 `canonical_schema.sql` 后同步 canonical version、fingerprint 和 fresh-schema 测试；若版本不再是 v52，同时更新本文当前快照。
+- [ ] 修改 `canonical_schema.sql` 后同步 canonical version、fingerprint 和 fresh-schema 测试；若版本不再是 v53，同时更新本文当前快照。
 - [ ] 验证 exact v47 升级保留全部历史、失败回滚且重复打开不重建；其他旧版本仍 reset-required，拒绝时不修改源库。
 - [ ] 新表/列定义 owner、FK、唯一键、索引、删除/保留和敏感分类。
 - [ ] 跨表操作在一个 service 事务中完成，并有冲突/幂等测试。

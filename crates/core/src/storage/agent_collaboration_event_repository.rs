@@ -14,10 +14,7 @@ const EVENT_SELECT: &str = "
     SELECT global_sequence, schema_version, event_id, root_sequence, workspace_id, project_id,
            root_agent_id, root_conversation_id, agent_id, conversation_id,
            turn_id, run_id, message_id, kind, resource_revision,
-           activity_schema_version, activity_semantic, activity_agent_id,
-           activity_task_name_snapshot, activity_parent_agent_id, activity_parent_conversation_id,
-           activity_anchor_message_id,
-           activity_trace_boundary_sequence, created_at
+           created_at
     FROM agent_collaboration_events";
 
 pub fn list_root_events(
@@ -62,7 +59,7 @@ pub fn list_global_events(
     )
 }
 
-/// Returns the bounded, renderer-safe activity facts owned by one parent Assistant message.
+/// Returns the bounded, renderer-safe activity facts owned by one Assistant message.
 ///
 /// This is an internal terminal-snapshot query, not a public event-log page. It deliberately
 /// selects only events carrying the exact durable message/trace anchor that the chat Timeline can
@@ -74,17 +71,44 @@ pub(crate) fn list_message_activities(
 ) -> Result<Vec<AgentCollaborationEventRecord>, AgentCollaborationEventError> {
     validate_id(assistant_message_id)?;
     const MAX_TERMINAL_MESSAGE_ACTIVITIES: i64 = 2_048;
-    query_events(
+    let mut events = query_events(
         connection,
         &format!(
             "{EVENT_SELECT}
-             WHERE activity_anchor_message_id = ?1
-               AND activity_trace_boundary_sequence IS NOT NULL
-             ORDER BY root_sequence
+             WHERE EXISTS (
+                 SELECT 1 FROM agent_collaboration_event_activities AS activity
+                 WHERE activity.event_id = agent_collaboration_events.event_id
+                   AND activity.anchor_message_id = ?1
+                   AND activity.trace_boundary_sequence IS NOT NULL
+             )
+             ORDER BY root_sequence DESC
              LIMIT ?2"
         ),
         params![assistant_message_id, MAX_TERMINAL_MESSAGE_ACTIVITIES],
-    )
+    )?;
+    events.reverse();
+    for event in &mut events {
+        event.activities.retain(|activity| {
+            activity.anchor_message_id.as_deref() == Some(assistant_message_id)
+                && activity.trace_boundary_sequence.is_some()
+        });
+    }
+    retain_latest_activities(&mut events, MAX_TERMINAL_MESSAGE_ACTIVITIES as usize);
+    Ok(events)
+}
+
+fn retain_latest_activities(events: &mut Vec<AgentCollaborationEventRecord>, maximum: usize) {
+    let mut remove = events
+        .iter()
+        .map(|event| event.activities.len())
+        .sum::<usize>()
+        .saturating_sub(maximum);
+    for event in events.iter_mut() {
+        let count = remove.min(event.activities.len());
+        event.activities.drain(..count);
+        remove -= count;
+    }
+    events.retain(|event| !event.activities.is_empty());
 }
 
 pub fn latest_root_sequence(
@@ -161,15 +185,7 @@ fn query_events<P: rusqlite::Params>(
                 row.get::<_, Option<String>>(12)?,
                 row.get::<_, String>(13)?,
                 row.get::<_, i64>(14)?,
-                row.get::<_, Option<i64>>(15)?,
-                row.get::<_, Option<String>>(16)?,
-                row.get::<_, Option<String>>(17)?,
-                row.get::<_, Option<String>>(18)?,
-                row.get::<_, Option<String>>(19)?,
-                row.get::<_, Option<String>>(20)?,
-                row.get::<_, Option<String>>(21)?,
-                row.get::<_, Option<i64>>(22)?,
-                row.get::<_, i64>(23)?,
+                row.get::<_, i64>(15)?,
             ))
         })
         .map_err(|_| AgentCollaborationEventError::StorageUnavailable)?;
@@ -177,7 +193,7 @@ fn query_events<P: rusqlite::Params>(
     for row in rows {
         let (
             global_sequence,
-            schema_version,
+            stored_schema_version,
             event_id,
             root_sequence,
             workspace_id,
@@ -191,24 +207,17 @@ fn query_events<P: rusqlite::Params>(
             message_id,
             kind,
             resource_revision,
-            activity_schema_version,
-            activity_semantic,
-            activity_agent_id,
-            activity_task_name_snapshot,
-            activity_parent_agent_id,
-            activity_parent_conversation_id,
-            activity_anchor_message_id,
-            activity_trace_boundary_sequence,
             created_at,
         ) = row.map_err(|_| AgentCollaborationEventError::StorageUnavailable)?;
-        let schema_version = u32::try_from(schema_version)
-            .map_err(|_| AgentCollaborationEventError::CorruptRecord)?;
-        if schema_version != AGENT_COLLABORATION_EVENT_SCHEMA_VERSION {
+        // The immutable operational log retains its v2 storage shape. The v3 transport projects
+        // the separate request-owned facts; pre-v53 rows deliberately have an empty collection.
+        if stored_schema_version != 2 {
             return Err(AgentCollaborationEventError::CorruptRecord);
         }
+        let activities = read_activities(connection, &event_id)?;
         let mut event = AgentCollaborationEventRecord {
             global_sequence: positive(global_sequence)?,
-            schema_version,
+            schema_version: AGENT_COLLABORATION_EVENT_SCHEMA_VERSION,
             event_id,
             root_sequence: positive(root_sequence)?,
             workspace_id,
@@ -222,170 +231,109 @@ fn query_events<P: rusqlite::Params>(
             message_id,
             kind: AgentCollaborationEventKind::parse(&kind)?,
             resource_revision: positive(resource_revision)?,
-            activity: parse_activity(
-                activity_schema_version,
-                activity_semantic,
-                activity_agent_id,
-                activity_task_name_snapshot,
-                activity_parent_agent_id,
-                activity_parent_conversation_id,
-                activity_anchor_message_id,
-                activity_trace_boundary_sequence,
-            )?,
+            activities,
             transmission: None,
             created_at: nonnegative(created_at)?,
         };
-        if !task_terminal_activity_is_visible(connection, &event)? {
-            event.activity = None;
-        }
         event.transmission = transmission::project(connection, &event)?;
         events.push(event);
     }
     Ok(events)
 }
 
-/// Timeline task lifecycles have the same scope at start and finish: explicit tasks/follow-ups.
-/// Automatic Result wakes still execute and invalidate the tree, but their receipt-only Turns
-/// must not look like another completed assignment. Project at read time so immutable events,
-/// replay cursors, approvals, and genuine late task completions keep their original semantics.
-/// An explicit follow-up bound into an already-running Result Turn also qualifies: its deferred
-/// Wake is satisfied by the delivery receipt, so that Turn owns the real assignment's finish.
-fn task_terminal_activity_is_visible(
+fn read_activities(
     connection: &Connection,
-    event: &AgentCollaborationEventRecord,
-) -> Result<bool, AgentCollaborationEventError> {
-    if event.kind != AgentCollaborationEventKind::WakeUpdated
-        || !event.activity.as_ref().is_some_and(|activity| {
-            matches!(
-                activity.semantic,
-                AgentCollaborationActivitySemantic::Completed
-                    | AgentCollaborationActivitySemantic::Failed
-                    | AgentCollaborationActivitySemantic::Interrupted
-            )
-        })
-    {
-        return Ok(true);
-    }
-    connection
-        .query_row(
-            "SELECT EXISTS (
-                 SELECT 1 FROM agent_mailbox_messages
-                 WHERE message_id = ?1 AND root_agent_id = ?2 AND recipient_agent_id = ?3
-                   AND kind IN ('task', 'followup')
-             ) OR EXISTS (
-                 SELECT 1 FROM agent_model_batch_receipts AS receipt
-                 JOIN agent_model_batch_receipt_items AS item
-                   ON item.receipt_id = receipt.receipt_id
-                 JOIN agent_mailbox_messages AS message ON message.message_id = item.message_id
-                 WHERE receipt.agent_id = ?3 AND receipt.conversation_id = ?4
-                   AND receipt.run_id = ?5 AND receipt.assistant_message_id = ?6
-                   AND message.root_agent_id = ?2 AND message.recipient_agent_id = ?3
-                   AND message.kind IN ('task', 'followup') AND item.bound_at <= ?7
-             )",
-            params![
-                &event.message_id,
-                &event.root_agent_id,
-                &event.agent_id,
-                &event.conversation_id,
-                &event.run_id,
-                &event.turn_id,
-                event.created_at,
-            ],
-            |row| row.get(0),
+    event_id: &str,
+) -> Result<Vec<AgentCollaborationActivitySnapshot>, AgentCollaborationEventError> {
+    let mut statement = connection
+        .prepare(
+            "SELECT schema_version, activity_id, semantic, agent_id, task_name_snapshot,
+                owner_agent_id, owner_conversation_id, task_message_id, anchor_message_id,
+                trace_boundary_sequence
+         FROM agent_collaboration_event_activities WHERE event_id = ?1 ORDER BY activity_id",
         )
-        .map_err(|_| AgentCollaborationEventError::StorageUnavailable)
-}
-
-// Mirrors the nullable activity columns read together from one durable event row.
-#[allow(clippy::too_many_arguments)]
-fn parse_activity(
-    schema_version: Option<i64>,
-    semantic: Option<String>,
-    agent_id: Option<String>,
-    task_name_snapshot: Option<String>,
-    parent_agent_id: Option<String>,
-    parent_conversation_id: Option<String>,
-    anchor_message_id: Option<String>,
-    trace_boundary_sequence: Option<i64>,
-) -> Result<Option<AgentCollaborationActivitySnapshot>, AgentCollaborationEventError> {
-    let (
-        schema_version,
-        semantic,
-        agent_id,
-        task_name_snapshot,
-        parent_agent_id,
-        parent_conversation_id,
-        anchor_message_id,
-        trace_boundary_sequence,
-    ) = match (
-        schema_version,
-        semantic,
-        agent_id,
-        task_name_snapshot,
-        parent_agent_id,
-        parent_conversation_id,
-        anchor_message_id,
-        trace_boundary_sequence,
-    ) {
-        (None, None, None, None, None, None, None, None) => return Ok(None),
-        (
-            Some(schema_version),
-            Some(semantic),
-            Some(agent_id),
-            Some(task_name_snapshot),
-            Some(parent_agent_id),
-            Some(parent_conversation_id),
-            anchor_message_id,
-            trace_boundary_sequence,
-        ) => (
+        .map_err(|_| AgentCollaborationEventError::StorageUnavailable)?;
+    let rows = statement
+        .query_map([event_id], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, String>(6)?,
+                row.get::<_, Option<String>>(7)?,
+                row.get::<_, Option<String>>(8)?,
+                row.get::<_, Option<i64>>(9)?,
+            ))
+        })
+        .map_err(|_| AgentCollaborationEventError::StorageUnavailable)?;
+    rows.map(|row| {
+        let (
             schema_version,
+            activity_id,
             semantic,
             agent_id,
             task_name_snapshot,
-            parent_agent_id,
-            parent_conversation_id,
+            owner_agent_id,
+            owner_conversation_id,
+            task_message_id,
             anchor_message_id,
             trace_boundary_sequence,
-        ),
-        _ => return Err(AgentCollaborationEventError::CorruptRecord),
-    };
-    let schema_version =
-        u32::try_from(schema_version).map_err(|_| AgentCollaborationEventError::CorruptRecord)?;
-    if schema_version != AGENT_COLLABORATION_ACTIVITY_SCHEMA_VERSION {
-        return Err(AgentCollaborationEventError::CorruptRecord);
-    }
-    validate_persisted_text(&agent_id, 256)?;
-    validate_persisted_text(&task_name_snapshot, 256)?;
-    validate_persisted_text(&parent_agent_id, 256)?;
-    validate_persisted_text(&parent_conversation_id, 256)?;
-    if let Some(anchor) = anchor_message_id.as_deref() {
-        validate_persisted_text(anchor, 2_048)?;
-    }
-    if anchor_message_id.is_none() && trace_boundary_sequence.is_some() {
-        return Err(AgentCollaborationEventError::CorruptRecord);
-    }
-    let trace_boundary_sequence = trace_boundary_sequence
-        .map(|sequence| {
-            u64::try_from(sequence).map_err(|_| AgentCollaborationEventError::CorruptRecord)
+        ) = row.map_err(|_| AgentCollaborationEventError::StorageUnavailable)?;
+        let schema_version = u32::try_from(schema_version)
+            .map_err(|_| AgentCollaborationEventError::CorruptRecord)?;
+        if schema_version != AGENT_COLLABORATION_ACTIVITY_SCHEMA_VERSION {
+            return Err(AgentCollaborationEventError::CorruptRecord);
+        }
+        for value in [
+            &activity_id,
+            &agent_id,
+            &task_name_snapshot,
+            &owner_agent_id,
+            &owner_conversation_id,
+        ] {
+            validate_persisted_text(value, 256)?;
+        }
+        if let Some(task) = task_message_id.as_deref() {
+            validate_persisted_text(task, 2_048)?;
+        }
+        if let Some(anchor) = anchor_message_id.as_deref() {
+            validate_persisted_text(anchor, 2_048)?;
+        }
+        let semantic = AgentCollaborationActivitySemantic::parse(&semantic)?;
+        if (semantic == AgentCollaborationActivitySemantic::Updated) != task_message_id.is_none()
+            || agent_id == owner_agent_id
+            || (anchor_message_id.is_none() && trace_boundary_sequence.is_some())
+        {
+            return Err(AgentCollaborationEventError::CorruptRecord);
+        }
+        Ok(AgentCollaborationActivitySnapshot {
+            schema_version,
+            activity_id,
+            semantic,
+            agent_id,
+            task_name_snapshot,
+            owner_agent_id,
+            owner_conversation_id,
+            task_message_id,
+            anchor_message_id,
+            trace_boundary_sequence: trace_boundary_sequence
+                .map(|value| {
+                    u64::try_from(value).map_err(|_| AgentCollaborationEventError::CorruptRecord)
+                })
+                .transpose()?,
         })
-        .transpose()?;
-    Ok(Some(AgentCollaborationActivitySnapshot {
-        schema_version,
-        semantic: AgentCollaborationActivitySemantic::parse(&semantic)?,
-        agent_id,
-        task_name_snapshot,
-        parent_agent_id,
-        parent_conversation_id,
-        anchor_message_id,
-        trace_boundary_sequence,
-    }))
+    })
+    .collect()
 }
 
 fn validate_persisted_text(
     value: &str,
     maximum: usize,
 ) -> Result<(), AgentCollaborationEventError> {
-    if value.trim() != value || value.is_empty() || value.len() > maximum {
+    if value.trim() != value || value.is_empty() || value.len() > maximum || value.contains('\0') {
         return Err(AgentCollaborationEventError::CorruptRecord);
     }
     Ok(())
@@ -617,6 +565,11 @@ mod tests {
         trace_boundary_sequence: Option<i64>,
     ) -> rusqlite::Result<()> {
         let transaction = connection.transaction()?;
+        transaction.execute("INSERT OR IGNORE INTO agent_mailbox_messages (
+            message_id,schema_version,root_agent_id,sender_agent_id,recipient_agent_id,
+            request_id,kind,content,projection_message_id,delivery_status,created_at
+        ) VALUES ('activity-fixture-source',1,'agent-root','agent-root','agent-child',
+            'activity-fixture-request','task','fixture task','activity-fixture-projection','queued',19)", [])?;
         transaction.execute(
             "UPDATE agent_collaboration_event_sequences
              SET next_sequence = next_sequence + 1 WHERE root_agent_id = 'agent-root'",
@@ -626,7 +579,7 @@ mod tests {
             "INSERT INTO agent_collaboration_events (
                  event_id, schema_version, root_agent_id, root_sequence,
                  workspace_id, project_id, root_conversation_id,
-                 agent_id, conversation_id, kind, resource_revision,
+                 agent_id, conversation_id, message_id, kind, resource_revision,
                  activity_schema_version, activity_semantic, activity_agent_id,
                  activity_task_name_snapshot, activity_parent_agent_id, activity_parent_conversation_id,
                  activity_anchor_message_id,
@@ -635,7 +588,7 @@ mod tests {
                  ?1, 2, 'agent-root',
                  (SELECT next_sequence - 1 FROM agent_collaboration_event_sequences
                   WHERE root_agent_id = 'agent-root'),
-                 'project-a', 'project-a', 'conversation-root', ?2, ?3,
+                 'project-a', 'project-a', 'conversation-root', ?2, ?3, 'activity-fixture-source',
                  'wake_created', 1, 3, 'started', ?4, ?5, 'agent-root', 'conversation-root', ?6, ?7, 20
              )",
             params![
@@ -854,15 +807,15 @@ mod tests {
             .unwrap();
         assert_eq!(
             event
-                .activity
-                .as_ref()
+                .activities
+                .first()
                 .and_then(|activity| activity.anchor_message_id.as_deref()),
             Some("root-assistant")
         );
         assert_eq!(
             event
-                .activity
-                .as_ref()
+                .activities
+                .first()
                 .and_then(|activity| activity.trace_boundary_sequence),
             Some(1)
         );
@@ -1005,10 +958,11 @@ mod tests {
             assert_eq!(
                 activities[index],
                 serde_json::json!({
-                    "activityId": id,
+                    "activityId": list_root_events(&connection, "agent-root", 0, 32).unwrap().into_iter().find(|event| event.event_id == id).unwrap().activities[0].activity_id,
                     "agentId": "agent-child",
-                    "parentAgentId": "agent-root",
-                    "parentConversationId": "conversation-root",
+                    "ownerAgentId": "agent-root",
+                    "ownerConversationId": "conversation-root",
+                    "taskMessageId": "activity-fixture-source",
                     "occurredAt": 20,
                     "anchorMessageId": "root-assistant",
                     "traceBoundarySequence": 0,
@@ -1096,13 +1050,13 @@ mod tests {
         let activities = list_root_events(&connection, "agent-root", before, 64)
             .unwrap()
             .into_iter()
-            .filter_map(|event| event.activity)
+            .flat_map(|event| event.activities)
             .collect::<Vec<_>>();
         assert_eq!(activities.len(), 4);
         assert!(activities
             .iter()
-            .all(|activity| activity.parent_agent_id == "agent-child"
-                && activity.parent_conversation_id == "conversation-child"
+            .all(|activity| activity.owner_agent_id == "agent-child"
+                && activity.owner_conversation_id == "conversation-child"
                 && activity.agent_id == "agent-grandchild"));
         assert_eq!(
             activities
@@ -1202,6 +1156,32 @@ mod tests {
         .unwrap();
 
         insert_trace_item(&connection, "root-boundary-assistant", 2);
+        let transaction = connection.transaction().unwrap();
+        agent_graph_repository::project_agent_wake_source_in_transaction(
+            &transaction,
+            "boundary-wake",
+            "boundary-projection",
+            14,
+        )
+        .unwrap();
+        transaction.commit().unwrap();
+        agent_graph_repository::claim_next_agent_wake(
+            &mut connection,
+            "agent-child",
+            "boundary-claim",
+            14,
+        )
+        .unwrap()
+        .unwrap();
+        agent_graph_repository::transition_agent_wake(
+            &mut connection,
+            "boundary-wake",
+            AgentWakeStatus::Claimed,
+            AgentWakeStatus::Running,
+            Some("boundary-claim"),
+            14,
+        )
+        .unwrap();
         connection
             .execute_batch(
                 "INSERT INTO messages (
@@ -1218,6 +1198,7 @@ mod tests {
                      'boundary-child-assistant', 'conversation-child', 'boundary-child-run', 1,
                      'in_progress', NULL, 0, 14, 14, NULL
                  );
+                 UPDATE agent_wake_requests SET run_id='boundary-child-run', assistant_message_id='boundary-child-assistant' WHERE wake_id='boundary-wake';
                  INSERT INTO agent_pending_actions (
                      action_id, run_id, conversation_id, assistant_message_id, action_type,
                      tool_name, tool_call_id, status, target_status, action_json,
@@ -1246,7 +1227,7 @@ mod tests {
         connection
             .execute(
                 "UPDATE agent_wake_requests
-                 SET status = 'cancelled', status_revision = 2, completed_at = 16
+                 SET status = 'cancelled', status_revision = status_revision + 1, completed_at = 16
                  WHERE wake_id = 'boundary-wake'",
                 [],
             )
@@ -1310,7 +1291,7 @@ mod tests {
             .unwrap()
             .into_iter()
             .filter_map(|event| {
-                event.activity.map(|activity| {
+                event.activities.into_iter().next().map(|activity| {
                     (
                         activity.semantic,
                         activity.anchor_message_id,
@@ -1367,7 +1348,7 @@ mod tests {
             .unwrap()
             .into_iter()
             .filter_map(|event| {
-                event.activity.map(|activity| {
+                event.activities.into_iter().next().map(|activity| {
                     (
                         activity.semantic,
                         activity.anchor_message_id,
@@ -1558,7 +1539,7 @@ mod tests {
             .iter()
             .filter(|event| event.kind == AgentCollaborationEventKind::WakeUpdated)
             .filter_map(|event| {
-                event.activity.as_ref().map(|activity| {
+                event.activities.first().map(|activity| {
                     (
                         event.kind,
                         activity.semantic,
@@ -1596,7 +1577,9 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert_eq!(result_events.len(), 2);
-        assert!(result_events.iter().all(|event| event.activity.is_none()));
+        assert!(result_events
+            .iter()
+            .all(|event| event.activities.is_empty()));
     }
 
     #[test]
@@ -1656,24 +1639,12 @@ mod tests {
                 AgentCollaborationEventKind::ApprovalUpdated,
             ]
         );
-        assert_eq!(
-            events[0].activity,
-            Some(AgentCollaborationActivitySnapshot {
-                schema_version: AGENT_COLLABORATION_ACTIVITY_SCHEMA_VERSION,
-                semantic: AgentCollaborationActivitySemantic::WaitingApproval,
-                agent_id: "agent-child".to_string(),
-                task_name_snapshot: "review".to_string(),
-                parent_agent_id: "agent-root".to_string(),
-                parent_conversation_id: "conversation-root".to_string(),
-                anchor_message_id: None,
-                trace_boundary_sequence: None,
-            })
-        );
-        assert!(events[1].activity.is_none());
+        assert!(events[0].activities.is_empty()); // No assignment is bound to this synthetic approval.
+        assert!(events[1].activities.is_empty());
     }
 
     #[test]
-    fn send_delivery_result_and_read_paths_never_emit_semantic_activity() {
+    fn send_arrival_is_directed_but_delivery_result_and_read_paths_do_not_add_activity() {
         let mut connection = tree();
         let initial = latest_root_sequence(&connection, "agent-root").unwrap();
 
@@ -1741,7 +1712,15 @@ mod tests {
 
         let events = list_root_events(&connection, "agent-root", initial, 32).unwrap();
         assert_eq!(events.len(), 6);
-        assert!(events.iter().all(|event| event.activity.is_none()));
+        assert_eq!(events[0].activities.len(), 1);
+        assert_eq!(
+            events[0].activities[0].semantic,
+            AgentCollaborationActivitySemantic::Updated
+        );
+        assert_eq!(events[0].activities[0].agent_id, "agent-root");
+        assert_eq!(events[0].activities[0].owner_agent_id, "agent-child");
+        assert!(events[0].activities[0].task_message_id.is_none());
+        assert!(events[1..].iter().all(|event| event.activities.is_empty()));
         assert_eq!(
             events.iter().map(|event| event.kind).collect::<Vec<_>>(),
             vec![
@@ -2002,69 +1981,77 @@ mod tests {
         assert_eq!(events[10].agent_id, "agent-child");
         assert_eq!(events[11].agent_id, "agent-root");
         assert_eq!(
-            events[1].activity,
-            Some(AgentCollaborationActivitySnapshot {
+            events[1].activities,
+            vec![AgentCollaborationActivitySnapshot {
+                activity_id: events[1].activities[0].activity_id.clone(),
+                task_message_id: Some(events[1].message_id.clone().unwrap()),
                 schema_version: AGENT_COLLABORATION_ACTIVITY_SCHEMA_VERSION,
                 semantic: AgentCollaborationActivitySemantic::Started,
                 agent_id: "agent-child".to_string(),
                 task_name_snapshot: "review".to_string(),
-                parent_agent_id: "agent-root".to_string(),
-                parent_conversation_id: "conversation-root".to_string(),
+                owner_agent_id: "agent-root".to_string(),
+                owner_conversation_id: "conversation-root".to_string(),
                 anchor_message_id: None,
                 trace_boundary_sequence: None,
-            })
+            }]
         );
         assert_eq!(
-            events[3].activity,
-            Some(AgentCollaborationActivitySnapshot {
+            events[3].activities,
+            vec![AgentCollaborationActivitySnapshot {
+                activity_id: events[3].activities[0].activity_id.clone(),
+                task_message_id: Some(events[3].message_id.clone().unwrap()),
                 schema_version: AGENT_COLLABORATION_ACTIVITY_SCHEMA_VERSION,
                 semantic: AgentCollaborationActivitySemantic::Interrupted,
                 agent_id: "agent-child".to_string(),
                 task_name_snapshot: "review".to_string(),
-                parent_agent_id: "agent-root".to_string(),
-                parent_conversation_id: "conversation-root".to_string(),
+                owner_agent_id: "agent-root".to_string(),
+                owner_conversation_id: "conversation-root".to_string(),
                 anchor_message_id: None,
                 trace_boundary_sequence: None,
-            })
+            }]
         );
         assert_eq!(
             events[6]
-                .activity
-                .as_ref()
+                .activities
+                .first()
                 .map(|activity| activity.semantic),
-            Some(AgentCollaborationActivitySemantic::WaitingApproval)
+            None
         );
         assert_eq!(
-            events[8].activity,
-            Some(AgentCollaborationActivitySnapshot {
+            events[8].activities,
+            vec![AgentCollaborationActivitySnapshot {
+                activity_id: events[8].activities[0].activity_id.clone(),
+                task_message_id: None,
                 schema_version: AGENT_COLLABORATION_ACTIVITY_SCHEMA_VERSION,
                 semantic: AgentCollaborationActivitySemantic::Updated,
                 agent_id: "agent-child".to_string(),
                 task_name_snapshot: "review".to_string(),
-                parent_agent_id: "agent-root".to_string(),
-                parent_conversation_id: "conversation-root".to_string(),
+                owner_agent_id: "agent-root".to_string(),
+                owner_conversation_id: "conversation-root".to_string(),
                 anchor_message_id: None,
                 trace_boundary_sequence: None,
-            })
+            }]
         );
         assert_eq!(
-            events[10].activity,
-            Some(AgentCollaborationActivitySnapshot {
+            events[10].activities,
+            vec![AgentCollaborationActivitySnapshot {
+                activity_id: events[10].activities[0].activity_id.clone(),
+                task_message_id: Some(events[10].message_id.clone().unwrap()),
                 schema_version: AGENT_COLLABORATION_ACTIVITY_SCHEMA_VERSION,
                 semantic: AgentCollaborationActivitySemantic::Started,
                 agent_id: "agent-child".to_string(),
                 task_name_snapshot: "review".to_string(),
-                parent_agent_id: "agent-root".to_string(),
-                parent_conversation_id: "conversation-root".to_string(),
+                owner_agent_id: "agent-root".to_string(),
+                owner_conversation_id: "conversation-root".to_string(),
                 anchor_message_id: None,
                 trace_boundary_sequence: None,
-            })
+            }]
         );
         assert!(events
             .iter()
             .enumerate()
             .filter(|(index, _)| !matches!(index, 1 | 3 | 6 | 8 | 10))
-            .all(|(_, event)| event.activity.is_none()));
+            .all(|(_, event)| event.activities.is_empty()));
 
         let before_rollback = latest_root_sequence(&connection, "agent-root").unwrap();
         let transaction = connection.transaction().unwrap();
@@ -2166,16 +2153,16 @@ mod tests {
         )
         .unwrap();
         assert_eq!(first.len(), 512);
-        assert_eq!(second.len(), 8);
+        assert_eq!(second.len(), 9);
         assert_eq!(first.first().unwrap().root_sequence, initial + 1);
-        assert_eq!(second.last().unwrap().root_sequence, initial + 520);
+        assert_eq!(second.last().unwrap().root_sequence, initial + 521);
         let all = first.iter().chain(&second).collect::<Vec<_>>();
         assert!(all.windows(2).all(|pair| {
             pair[1].root_sequence == pair[0].root_sequence + 1
                 && pair[1].event_id != pair[0].event_id
         }));
-        assert!(all.iter().all(|event| {
-            event.activity.as_ref().is_some_and(|activity| {
+        assert!(all.iter().skip(1).all(|event| {
+            event.activities.first().is_some_and(|activity| {
                 activity.semantic == AgentCollaborationActivitySemantic::Started
             })
         }));
@@ -2193,7 +2180,7 @@ mod tests {
         .is_err());
         assert_eq!(
             latest_root_sequence(&connection, "agent-root").unwrap(),
-            initial + 520
+            initial + 521
         );
     }
 }

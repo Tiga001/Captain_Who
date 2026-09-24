@@ -330,11 +330,11 @@ fn agent_collaboration_contract_matches_the_typescript_fixture_and_is_strict() {
     assert_eq!(event.sequence, 7);
     assert_eq!(event.kind, CollaborationEventKindDto::WakeCreated);
     assert_eq!(
-        event.activity.as_ref().unwrap().semantic,
+        event.activities.first().unwrap().semantic,
         CollaborationActivitySemanticDto::Started
     );
     assert_eq!(
-        event.activity.as_ref().unwrap().schema_version,
+        event.activities.first().unwrap().schema_version,
         AGENT_COLLABORATION_ACTIVITY_SCHEMA_VERSION
     );
     assert_eq!(event.workspace_id, event.project_id);
@@ -408,34 +408,37 @@ fn agent_collaboration_contract_matches_the_typescript_fixture_and_is_strict() {
             .is_err()
     );
     let mut unknown_activity = fixture["event"].clone();
-    unknown_activity["activity"]["forged"] = serde_json::json!(true);
+    unknown_activity["activities"][0]["forged"] = serde_json::json!(true);
     assert!(serde_json::from_value::<CollaborationEventEnvelopeDto>(unknown_activity).is_err());
     let mut missing_activity = fixture["event"].clone();
-    missing_activity.as_object_mut().unwrap().remove("activity");
+    missing_activity
+        .as_object_mut()
+        .unwrap()
+        .remove("activities");
     assert!(serde_json::from_value::<CollaborationEventEnvelopeDto>(missing_activity).is_err());
     let mut missing_boundary = fixture["event"].clone();
-    missing_boundary["activity"]
+    missing_boundary["activities"][0]
         .as_object_mut()
         .unwrap()
         .remove("traceBoundarySequence");
     assert!(serde_json::from_value::<CollaborationEventEnvelopeDto>(missing_boundary).is_err());
     let mut unpaired_anchor = fixture["event"].clone();
-    unpaired_anchor["activity"]["anchorMessageId"] = serde_json::json!("assistant-root");
+    unpaired_anchor["activities"][0]["anchorMessageId"] = serde_json::json!("assistant-root");
     assert!(serde_json::from_value::<CollaborationEventEnvelopeDto>(unpaired_anchor).is_ok());
     let mut unpaired_boundary = fixture["event"].clone();
-    unpaired_boundary["activity"]["traceBoundarySequence"] = serde_json::json!(3);
+    unpaired_boundary["activities"][0]["traceBoundarySequence"] = serde_json::json!(3);
     assert!(serde_json::from_value::<CollaborationEventEnvelopeDto>(unpaired_boundary).is_err());
     let mut wrong_semantic_kind = fixture["event"].clone();
-    wrong_semantic_kind["activity"]["semantic"] = serde_json::json!("completed");
+    wrong_semantic_kind["activities"][0]["semantic"] = serde_json::json!("completed");
     assert!(serde_json::from_value::<CollaborationEventEnvelopeDto>(wrong_semantic_kind).is_err());
     let mut wrong_started_subject = fixture["event"].clone();
-    wrong_started_subject["activity"]["agentId"] = serde_json::json!("agent-other");
+    wrong_started_subject["activities"][0]["agentId"] = serde_json::json!("agent-other");
     assert!(
         serde_json::from_value::<CollaborationEventEnvelopeDto>(wrong_started_subject).is_err()
     );
     let mut forged_update = fixture["event"].clone();
     forged_update["kind"] = serde_json::json!("mailbox_enqueued");
-    forged_update["activity"]["semantic"] = serde_json::json!("updated");
+    forged_update["activities"][0]["semantic"] = serde_json::json!("updated");
     assert!(serde_json::from_value::<CollaborationEventEnvelopeDto>(forged_update).is_err());
 }
 
@@ -445,7 +448,7 @@ fn collaboration_transmission_event(kind: &str) -> Value {
     ))
     .unwrap();
     let mut event = fixture["event"].clone();
-    event["activity"] = Value::Null;
+    event["activities"] = serde_json::json!([]);
     let (event_kind, source, target) = match kind {
         "user_message" => ("turn_started", None, Some("agent-root")),
         "completion" => ("turn_updated", Some("agent-root"), None),
@@ -465,6 +468,165 @@ fn collaboration_transmission_event(kind: &str) -> Value {
     event
 }
 
+fn collaboration_activity_event() -> Value {
+    let fixture: Value = serde_json::from_str(include_str!(
+        "../../../packages/protocol/fixtures/agent-collaboration-contract-v1.json"
+    ))
+    .unwrap();
+    fixture["event"].clone()
+}
+
+#[test]
+fn collaboration_activities_require_the_current_array_contract() {
+    let event = collaboration_activity_event();
+    for invalid in [
+        Value::Null,
+        serde_json::json!({}),
+        serde_json::json!("activity"),
+    ] {
+        let mut wire = event.clone();
+        wire["activities"] = invalid;
+        assert!(serde_json::from_value::<CollaborationEventEnvelopeDto>(wire).is_err());
+    }
+    let mut empty = event.clone();
+    empty["activities"] = serde_json::json!([]);
+    assert!(serde_json::from_value::<CollaborationEventEnvelopeDto>(empty).is_ok());
+    let mut legacy = event.clone();
+    legacy["schemaVersion"] = serde_json::json!(2);
+    assert!(serde_json::from_value::<CollaborationEventEnvelopeDto>(legacy).is_err());
+    let mut legacy = event;
+    legacy["activity"] = legacy["activities"][0].clone();
+    legacy.as_object_mut().unwrap().remove("activities");
+    assert!(serde_json::from_value::<CollaborationEventEnvelopeDto>(legacy).is_err());
+}
+
+#[test]
+fn collaboration_task_activities_preserve_each_request_owner_and_task_identity() {
+    for (semantic, kind) in [
+        ("started", "wake_created"),
+        ("waiting_approval", "approval_projected"),
+        ("completed", "wake_updated"),
+        ("failed", "wake_updated"),
+        ("interrupted", "wake_updated"),
+    ] {
+        let mut wire = collaboration_activity_event();
+        wire["kind"] = serde_json::json!(kind);
+        wire["runId"] = serde_json::json!("one-bound-run");
+        wire["messageId"] = serde_json::json!("outer-original-task");
+        let mut root_activity = wire["activities"][0].clone();
+        root_activity["semantic"] = serde_json::json!(semantic);
+        root_activity["activityId"] = serde_json::json!("activity-root-owner");
+        root_activity["taskMessageId"] = serde_json::json!("task-root-followup");
+        let mut sibling_activity = root_activity.clone();
+        sibling_activity["activityId"] = serde_json::json!("activity-sibling-owner");
+        sibling_activity["ownerAgentId"] = serde_json::json!("agent-sibling");
+        sibling_activity["ownerConversationId"] = serde_json::json!("conversation-sibling");
+        sibling_activity["taskMessageId"] = serde_json::json!("task-sibling-followup");
+        sibling_activity["anchorMessageId"] = serde_json::json!("sibling-assistant");
+        sibling_activity["traceBoundarySequence"] = serde_json::json!(7);
+        wire["activities"] = serde_json::json!([root_activity, sibling_activity]);
+
+        let parsed: CollaborationEventEnvelopeDto = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(parsed.activities.len(), 2);
+        assert_ne!(
+            parsed.activities[0].activity_id,
+            parsed.activities[1].activity_id
+        );
+        assert_ne!(parsed.activities[0].task_message_id, parsed.message_id);
+        assert_ne!(parsed.activities[1].task_message_id, parsed.message_id);
+        assert_eq!(parsed.activities[1].owner_agent_id, "agent-sibling");
+        assert_eq!(serde_json::to_value(parsed).unwrap(), wire);
+    }
+}
+
+#[test]
+fn collaboration_updated_activity_supports_any_same_tree_sender_recipient_route() {
+    for (sender, recipient, recipient_conversation) in [
+        ("agent-root", "agent-child", "conversation-child"),
+        ("agent-sibling", "agent-child", "conversation-child"),
+        ("agent-grandchild", "agent-child", "conversation-child"),
+        ("agent-child", "agent-root", "conversation-root"),
+    ] {
+        let mut wire = collaboration_activity_event();
+        wire["kind"] = serde_json::json!("mailbox_enqueued");
+        wire["agentId"] = serde_json::json!(recipient);
+        wire["conversationId"] = serde_json::json!(recipient_conversation);
+        wire["activities"][0]["agentId"] = serde_json::json!(sender);
+        wire["activities"][0]["semantic"] = serde_json::json!("updated");
+        wire["activities"][0]["ownerAgentId"] = serde_json::json!(recipient);
+        wire["activities"][0]["ownerConversationId"] = serde_json::json!(recipient_conversation);
+        wire["activities"][0]["taskMessageId"] = Value::Null;
+        let parsed: CollaborationEventEnvelopeDto = serde_json::from_value(wire).unwrap();
+        assert_eq!(parsed.activities[0].agent_id, sender);
+        assert_eq!(parsed.activities[0].owner_agent_id, recipient);
+        assert!(parsed.activities[0].task_message_id.is_none());
+    }
+}
+
+#[test]
+fn collaboration_activities_reject_duplicate_and_invalid_identities() {
+    let event = collaboration_activity_event();
+    let mut duplicate = event.clone();
+    let repeated = duplicate["activities"][0].clone();
+    duplicate["activities"]
+        .as_array_mut()
+        .unwrap()
+        .push(repeated);
+    assert!(serde_json::from_value::<CollaborationEventEnvelopeDto>(duplicate).is_err());
+
+    for patch in [
+        serde_json::json!({"schemaVersion": 3}),
+        serde_json::json!({"activityId": ""}),
+        serde_json::json!({"activityId": " activity "}),
+        serde_json::json!({"activityId": "x".repeat(2049)}),
+        serde_json::json!({"activityId": "activity\0id"}),
+        serde_json::json!({"ownerAgentId": ""}),
+        serde_json::json!({"ownerConversationId": ""}),
+        serde_json::json!({"ownerAgentId": "agent-child"}),
+        serde_json::json!({"ownerConversationId": "conversation-child"}),
+        serde_json::json!({"ownerAgentId": "agent-sibling"}),
+        serde_json::json!({"ownerConversationId": "conversation-sibling"}),
+        serde_json::json!({"taskMessageId": null}),
+        serde_json::json!({"taskMessageId": ""}),
+        serde_json::json!({"taskMessageId": " task "}),
+        serde_json::json!({"taskMessageId": "x".repeat(2049)}),
+        serde_json::json!({"parentAgentId": "agent-root"}),
+        serde_json::json!({"parentConversationId": "conversation-root"}),
+    ] {
+        let mut wire = event.clone();
+        wire["activities"][0]
+            .as_object_mut()
+            .unwrap()
+            .extend(patch.as_object().unwrap().clone());
+        assert!(
+            serde_json::from_value::<CollaborationEventEnvelopeDto>(wire).is_err(),
+            "must reject {patch}"
+        );
+    }
+    for required in [
+        "activityId",
+        "ownerAgentId",
+        "ownerConversationId",
+        "taskMessageId",
+    ] {
+        let mut wire = event.clone();
+        wire["activities"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove(required);
+        assert!(
+            serde_json::from_value::<CollaborationEventEnvelopeDto>(wire).is_err(),
+            "must require {required}"
+        );
+    }
+
+    let mut wrong_update_owner = event;
+    wrong_update_owner["kind"] = serde_json::json!("mailbox_enqueued");
+    wrong_update_owner["activities"][0]["semantic"] = serde_json::json!("updated");
+    wrong_update_owner["activities"][0]["taskMessageId"] = Value::Null;
+    assert!(serde_json::from_value::<CollaborationEventEnvelopeDto>(wrong_update_owner).is_err());
+}
+
 #[test]
 fn collaboration_transmission_accepts_all_confirmed_routes_and_stable_identity() {
     for (kind, expected_kind) in [
@@ -479,12 +641,12 @@ fn collaboration_transmission_accepts_all_confirmed_routes_and_stable_identity()
         let wire = collaboration_transmission_event(kind);
         let event: CollaborationEventEnvelopeDto = serde_json::from_value(wire.clone()).unwrap();
         let transfer = event.transmission.as_ref().unwrap();
-        assert_eq!(event.schema_version, 2);
+        assert_eq!(event.schema_version, 3);
         assert_eq!(transfer.kind, expected_kind);
         assert_eq!(transfer.id, "independent-stable-transfer-id");
         assert_ne!(transfer.id, event.event_id);
         assert_ne!(Some(&transfer.id), event.message_id.as_ref());
-        assert!(event.activity.is_none());
+        assert!(event.activities.is_empty());
         assert_eq!(serde_json::to_value(event).unwrap(), wire);
     }
 }
@@ -643,7 +805,7 @@ fn round5_collaboration_scenario_is_strict_across_rust_and_typescript() {
     let terminal_event = page.events.last().unwrap();
     assert_eq!(terminal_event.run_id.as_deref(), Some("run-review"));
     assert_eq!(
-        terminal_event.activity.as_ref().unwrap().semantic,
+        terminal_event.activities.first().unwrap().semantic,
         CollaborationActivitySemanticDto::Completed
     );
     assert_eq!(observers[0].conversation_id, "conversation-review");

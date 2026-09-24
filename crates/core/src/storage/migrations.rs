@@ -1,18 +1,19 @@
 use rusqlite::{ffi, Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
 
-pub const STORAGE_SCHEMA_VERSION: i32 = 52;
+pub const STORAGE_SCHEMA_VERSION: i32 = 53;
 pub const DEVELOPMENT_STORAGE_SCHEMA_RESET_REQUIRED: &str =
     "development_storage_schema_reset_required";
 
 const CANONICAL_SCHEMA: &str = include_str!("canonical_schema.sql");
 const CANONICAL_SCHEMA_FINGERPRINT: &str =
-    "sha256:615c17481af79b297a930607a7ca0d8e45a3825527ac19f74bf4a64b747b4cc7";
+    "sha256:af8820cb0e6f0ba8b433ea5fa51f345a515c1e9fcc466830179f7b53f06f76d8";
 
 /// Initializes fresh storage or validates the exact current canonical schema.
 ///
-/// The exact v50 catalog upgrades only with an empty collaboration event log. Existing history
-/// is never rewritten or deleted; all earlier development catalogs require an explicit reset.
+/// The exact v50 catalog upgrades only with an empty collaboration event log. v51/v52 upgrade
+/// without rewriting or deleting history; v53 adds request-owned activity facts only for future
+/// events. Earlier development catalogs require an explicit reset.
 pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
     connection.execute_batch("PRAGMA foreign_keys = ON;")?;
 
@@ -31,6 +32,10 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
         upgrade_mailbox_text_v51(connection)?;
     }
 
+    if read_schema_version(connection)? == 52 {
+        upgrade_request_owned_activities_v52(connection)?;
+    }
+
     let schema_version = read_schema_version(connection)?;
     if schema_version != STORAGE_SCHEMA_VERSION {
         return Err(reset_required_error(format!(
@@ -47,6 +52,8 @@ const V47_SCHEMA_FINGERPRINT: &str =
 #[cfg(test)]
 const V48_SCHEMA_FINGERPRINT: &str =
     "sha256:c0d1cc5df5ad3dfa8674b8297f0e39b4ab5602c63500108edc6a1b78839ca455";
+const V52_SCHEMA_FINGERPRINT: &str =
+    "sha256:615c17481af79b297a930607a7ca0d8e45a3825527ac19f74bf4a64b747b4cc7";
 const V51_SCHEMA_FINGERPRINT: &str =
     "sha256:532cd03af014f5d16e333c7b0bdff218cb8b996c74c6331ace300b22c6e81cd7";
 const V50_SCHEMA_FINGERPRINT: &str =
@@ -94,7 +101,8 @@ fn upgrade_parent_activity_placement_v50(connection: &Connection) -> rusqlite::R
         ));
     }
     // Drop dependents first, and recreate them from the exact canonical catalog.
-    let schema = collaboration_event_schema(CANONICAL_SCHEMA);
+    let v52 = canonical_schema_v52();
+    let schema = collaboration_event_schema(&v52);
     for kind in ["TRIGGER", "INDEX", "VIEW", "TABLE"] {
         for line in schema.lines() {
             let prefix = format!("CREATE {kind} ");
@@ -124,14 +132,14 @@ fn collaboration_event_schema(schema: &str) -> &str {
 #[cfg(test)]
 fn canonical_schema_v50() -> String {
     canonical_schema_v51().replace(
-        collaboration_event_schema(CANONICAL_SCHEMA),
+        collaboration_event_schema(&canonical_schema_v52()),
         include_str!("test_fixtures/collaboration_events_v50.sql"),
     )
 }
 
 #[cfg(test)]
 fn canonical_schema_v51() -> String {
-    CANONICAL_SCHEMA.replace(
+    canonical_schema_v52().replace(
         "length(CAST(content AS BLOB)) >= 1",
         "length(CAST(content AS BLOB)) BETWEEN 1 AND 1048576",
     )
@@ -181,12 +189,37 @@ fn upgrade_mailbox_text_v51(connection: &Connection) -> rusqlite::Result<()> {
         for sql in dependents {
             transaction.execute_batch(&sql)?;
         }
-        transaction.pragma_update(None, "user_version", STORAGE_SCHEMA_VERSION)?;
-        validate_canonical_schema(&transaction)?;
+        transaction.pragma_update(None, "user_version", 52)?;
+        validate_schema_fingerprint(&transaction, V52_SCHEMA_FINGERPRINT)?;
         transaction.commit()
     })();
     connection.pragma_update(None, "foreign_keys", true)?;
     result
+}
+
+/// The v52 log and frozen chat JSON remain untouched. Only future events acquire explicit
+/// owner/task projections; no structural-parent history is guessed into task subscriptions.
+fn upgrade_request_owned_activities_v52(connection: &Connection) -> rusqlite::Result<()> {
+    let transaction = connection.unchecked_transaction()?;
+    validate_schema_fingerprint(&transaction, V52_SCHEMA_FINGERPRINT)?;
+    transaction.execute_batch(request_owned_activity_schema())?;
+    transaction.pragma_update(None, "user_version", STORAGE_SCHEMA_VERSION)?;
+    validate_canonical_schema(&transaction)?;
+    transaction.commit()
+}
+
+fn request_owned_activity_schema() -> &'static str {
+    let start = CANONICAL_SCHEMA
+        .find("-- Request-owned presentation facts, introduced in v53.")
+        .unwrap();
+    let end = CANONICAL_SCHEMA
+        .find("CREATE TRIGGER prevent_agent_command_session_model_receipt_update")
+        .unwrap();
+    &CANONICAL_SCHEMA[start..end]
+}
+
+fn canonical_schema_v52() -> String {
+    CANONICAL_SCHEMA.replace(request_owned_activity_schema(), "")
 }
 
 fn create_canonical_schema(connection: &Connection) -> rusqlite::Result<()> {
@@ -294,6 +327,137 @@ mod tests {
     use super::*;
 
     #[test]
+    fn v52_history_upgrades_without_rewriting_events_or_inventing_task_owners() {
+        use crate::storage::{
+            agent_collaboration_event_repository as events, agent_graph_repository as graph,
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("owners.sqlite");
+        let mut connection = Connection::open(&path).unwrap();
+        connection.execute_batch(&canonical_schema_v52()).unwrap();
+        connection.pragma_update(None, "user_version", 52).unwrap();
+        connection
+            .execute_batch(
+                "INSERT INTO conversations(id,title,model_id,created_at,updated_at)
+            VALUES ('root-chat','root','model',1,1),('child-chat','child','model',1,1);",
+            )
+            .unwrap();
+        graph::ensure_root_agent(
+            &mut connection,
+            &crate::EnsureRootAgentInput {
+                agent_id: "root".into(),
+                conversation_id: "root-chat".into(),
+                creation_request_id: "create-root".into(),
+                task_name: "Root".into(),
+            },
+            1,
+        )
+        .unwrap();
+        graph::create_agent_node(
+            &mut connection,
+            &crate::CreateAgentNodeInput {
+                agent_id: "child".into(),
+                root_agent_id: "root".into(),
+                parent_agent_id: "root".into(),
+                conversation_id: "child-chat".into(),
+                creation_request_id: "create-child".into(),
+                task_name: "Child".into(),
+                task_path: "/root/Child".into(),
+                template_snapshot: None,
+                model_snapshot: crate::AgentModelSelectionSnapshot {
+                    model_config_id: "model".into(),
+                    display_name: "Model".into(),
+                    supports_image: false,
+                    effective_context_window_tokens: 64_000,
+                    model_settings_configuration_revision: "model-v1".into(),
+                    provider_connection_revision: "connection-v1".into(),
+                    provider_protocol_revision: "protocol-v1".into(),
+                },
+            },
+            2,
+        )
+        .unwrap();
+        let request = crate::SendAgentMessageRequest {
+            sender_agent_id: "root".into(),
+            recipient_agent_id: "child".into(),
+            request_id: "before-upgrade".into(),
+            content: "keep original task text".into(),
+        };
+        graph::follow_up_agent(&mut connection, &request, 3).unwrap();
+        let old_event_ids = connection
+            .prepare("SELECT event_id FROM agent_collaboration_events ORDER BY global_sequence")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        let old_cursor = events::latest_root_sequence(&connection, "root").unwrap();
+        connection.execute("INSERT INTO messages(id,conversation_id,role,content,agent_run_json,created_at,position)
+            VALUES ('old-final','root-chat','assistant','original final',?1,4,0)",
+            [r#"{"runId":"old-run","collaborationTimelineActivities":[{"parentAgentId":"root","parentConversationId":"root-chat"}],"toolResults":[{"result":"unchanged"}]}"#]).unwrap();
+        let old_json: String = connection
+            .query_row(
+                "SELECT agent_run_json FROM messages WHERE id='old-final'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        run_migrations(&connection).unwrap();
+        assert_eq!(read_schema_version(&connection).unwrap(), 53);
+        assert_eq!(
+            events::latest_root_sequence(&connection, "root").unwrap(),
+            old_cursor
+        );
+        let old_events = events::list_root_events(&connection, "root", 0, 512).unwrap();
+        assert_eq!(
+            old_events
+                .iter()
+                .map(|event| event.event_id.clone())
+                .collect::<Vec<_>>(),
+            old_event_ids
+        );
+        assert!(old_events
+            .iter()
+            .all(|event| event.schema_version == 3 && event.activities.is_empty()));
+        let retained: String = connection
+            .query_row(
+                "SELECT agent_run_json FROM messages WHERE id='old-final'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(retained, old_json);
+        drop(connection);
+        let mut connection = Connection::open(&path).unwrap();
+        run_migrations(&connection).unwrap();
+        let sent = graph::follow_up_agent(
+            &mut connection,
+            &crate::SendAgentMessageRequest {
+                request_id: "after-upgrade".into(),
+                ..request
+            },
+            5,
+        )
+        .unwrap();
+        let new_events = events::list_root_events(&connection, "root", old_cursor, 512).unwrap();
+        let activities = new_events
+            .iter()
+            .flat_map(|event| &event.activities)
+            .collect::<Vec<_>>();
+        assert_eq!(activities.len(), 1);
+        assert_eq!(activities[0].owner_agent_id, "root");
+        assert_eq!(
+            activities[0].task_message_id.as_deref(),
+            Some(sent.message.message_id.as_str())
+        );
+        assert_eq!(
+            activities[0].anchor_message_id.as_deref(),
+            Some("old-final")
+        );
+        ensure_foreign_keys_are_valid(&connection).unwrap();
+    }
+
+    #[test]
     fn exact_v51_mailbox_upgrade_preserves_history_sequences_and_accepts_full_text() {
         use crate::storage::agent_graph_repository::{
             create_agent_node, ensure_root_agent, get_agent_message, send_agent_message,
@@ -371,7 +535,10 @@ mod tests {
             )
             .unwrap();
         run_migrations(&connection).unwrap();
-        assert_eq!(read_schema_version(&connection).unwrap(), 52);
+        assert_eq!(
+            read_schema_version(&connection).unwrap(),
+            STORAGE_SCHEMA_VERSION
+        );
         assert_eq!(
             get_agent_message(&connection, &old.message.message_id)
                 .unwrap()

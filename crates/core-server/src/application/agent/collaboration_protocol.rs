@@ -610,10 +610,12 @@ pub(crate) fn event_dto(record: AgentCollaborationEventRecord) -> CollaborationE
             }
         },
         resource_revision: record.resource_revision,
-        activity: record
-            .activity
+        activities: record
+            .activities
+            .into_iter()
             .map(|activity| CollaborationActivitySnapshotDto {
                 schema_version: AGENT_COLLABORATION_ACTIVITY_SCHEMA_VERSION,
+                activity_id: activity.activity_id,
                 semantic: match activity.semantic {
                     AgentCollaborationActivitySemantic::Started => {
                         CollaborationActivitySemanticDto::Started
@@ -636,11 +638,13 @@ pub(crate) fn event_dto(record: AgentCollaborationEventRecord) -> CollaborationE
                 },
                 agent_id: activity.agent_id,
                 task_name_snapshot: activity.task_name_snapshot,
-                parent_agent_id: activity.parent_agent_id,
-                parent_conversation_id: activity.parent_conversation_id,
+                owner_agent_id: activity.owner_agent_id,
+                owner_conversation_id: activity.owner_conversation_id,
+                task_message_id: activity.task_message_id,
                 anchor_message_id: activity.anchor_message_id,
                 trace_boundary_sequence: activity.trace_boundary_sequence,
-            }),
+            })
+            .collect(),
         transmission: record
             .transmission
             .map(|transmission| CollaborationTransmissionDto {
@@ -808,4 +812,101 @@ fn approval_status_dto(value: &str) -> CollaborationApprovalStatusDto {
         "interrupted" => CollaborationApprovalStatusDto::Interrupted,
         _ => CollaborationApprovalStatusDto::Failed,
     }
+}
+
+#[cfg(test)]
+#[test]
+fn collaboration_event_mapping_preserves_independent_activities_and_transmission() {
+    use mycopilot_core::{AgentCollaborationActivitySnapshot, AgentCollaborationTransmission};
+
+    let record = AgentCollaborationEventRecord {
+        global_sequence: 900,
+        schema_version: AGENT_COLLABORATION_EVENT_SCHEMA_VERSION,
+        event_id: "event-followup-completed".to_string(),
+        root_sequence: 25,
+        workspace_id: None,
+        project_id: None,
+        root_agent_id: "agent-root".to_string(),
+        root_conversation_id: "conversation-root".to_string(),
+        agent_id: "agent-worker".to_string(),
+        conversation_id: "conversation-worker".to_string(),
+        turn_id: Some("turn-worker".to_string()),
+        run_id: Some("run-worker".to_string()),
+        message_id: Some("outer-initial-task".to_string()),
+        kind: AgentCollaborationEventKind::WakeUpdated,
+        resource_revision: 3,
+        activities: [
+            ("root", "followup-root", Some("assistant-root"), Some(9)),
+            (
+                "requester",
+                "followup-requester",
+                Some("last-requester-message"),
+                None,
+            ),
+        ]
+        .into_iter()
+        .map(
+            |(owner, task, anchor, boundary)| AgentCollaborationActivitySnapshot {
+                schema_version: AGENT_COLLABORATION_ACTIVITY_SCHEMA_VERSION,
+                activity_id: format!("activity-{task}"),
+                semantic: AgentCollaborationActivitySemantic::Completed,
+                agent_id: "agent-worker".to_string(),
+                task_name_snapshot: "Worker".to_string(),
+                owner_agent_id: format!("agent-{owner}"),
+                owner_conversation_id: format!("conversation-{owner}"),
+                task_message_id: Some(task.to_string()),
+                anchor_message_id: anchor.map(str::to_string),
+                trace_boundary_sequence: boundary,
+            },
+        )
+        .collect(),
+        transmission: None,
+        created_at: 50,
+    };
+    let mapped = event_dto(record.clone());
+    assert_eq!(mapped.sequence, 25);
+    assert_eq!(mapped.run_id.as_deref(), Some("run-worker"));
+    assert_eq!(mapped.occurred_at, 50);
+    assert_eq!(mapped.activities.len(), 2);
+    for (actual, expected) in mapped.activities.iter().zip(&record.activities) {
+        assert_eq!(actual.activity_id, expected.activity_id);
+        assert_eq!(actual.owner_agent_id, expected.owner_agent_id);
+        assert_eq!(actual.owner_conversation_id, expected.owner_conversation_id);
+        assert_eq!(actual.task_message_id, expected.task_message_id);
+        assert_eq!(actual.anchor_message_id, expected.anchor_message_id);
+        assert_eq!(
+            actual.trace_boundary_sequence,
+            expected.trace_boundary_sequence
+        );
+        assert_eq!(actual.semantic, CollaborationActivitySemanticDto::Completed);
+    }
+    let wire = serde_json::to_value(&mapped).unwrap();
+    assert!(wire.get("activity").is_none());
+    assert!(wire.get("globalSequence").is_none());
+    assert_eq!(
+        serde_json::from_value::<CollaborationEventEnvelopeDto>(wire).unwrap(),
+        mapped
+    );
+
+    let mut transfer = record;
+    transfer.kind = AgentCollaborationEventKind::MailboxEnqueued;
+    transfer.activities.clear();
+    transfer.transmission = Some(AgentCollaborationTransmission {
+        id: "transmission-task".to_string(),
+        kind: AgentCollaborationTransmissionKind::Task,
+        source_agent_id: Some("agent-root".to_string()),
+        target_agent_id: Some("agent-worker".to_string()),
+    });
+    let mapped_transfer = event_dto(transfer);
+    let transmission = mapped_transfer.transmission.as_ref().unwrap();
+    assert_eq!(transmission.id, "transmission-task");
+    assert_eq!(transmission.kind, CollaborationTransmissionKindDto::Task);
+    assert!(mapped_transfer.activities.is_empty());
+    assert_eq!(
+        serde_json::from_value::<CollaborationEventEnvelopeDto>(
+            serde_json::to_value(&mapped_transfer).unwrap()
+        )
+        .unwrap(),
+        mapped_transfer
+    );
 }

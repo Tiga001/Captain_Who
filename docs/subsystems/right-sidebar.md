@@ -151,7 +151,7 @@ Agent Center 是当前根 Agent Conversation 的只读子 Agent 索引：
 - Observer 没有 composer、send、edit、retry、fork、stop/guide 或 approval 控件。Core Server/Rust Core 仍会校验精确根 Agent 与子 Agent Conversation，因此隐藏控件不是授权边界。
 - 共享会话 surface 在 280 px 侧栏最小宽度下使用局部布局覆盖，不维护第二套聊天实现。
 
-AppShell 是活动根 Agent collaboration store 的唯一所有者。该 store 从持久事件序列重放并检查 gap；live 回复内活动保留最近 2,048 条，消息间活动独立保留，不被该窗口淘汰。每条语义活动记录直属父 Agent、父 Conversation 和该会话内的持久位置；根聊天与子 Agent observer 使用同一投影，只展示属于当前 Conversation 的直属子 Agent 活动。Agent Center 当前树状态、observer live envelope 和会话历史是三种不同投影，不能互相推导。
+AppShell 是活动根 Agent collaboration store 的唯一所有者。该 store 从持久事件序列重放并检查 gap；live 回复内活动保留最近 2,048 条，消息间活动独立保留，不被该窗口淘汰。每条语义活动记录实际 owner Agent、owner Conversation、任务消息身份和持久位置；根聊天与子 Agent observer 使用同一投影，按 owner 会话及当前树成员展示，支持越级派发。普通 Message 按实际收件人显示 updated，不订阅后续完成状态。Agent Center 当前树状态、observer live envelope 和会话历史是三种不同投影，不能互相推导。
 
 树图光波是独立的短时展示投影：协作事件的可选 `transmission` 只提供稳定 id、类型、真实源/目标身份（用户端为 null），不暴露通信正文。消息以成功入队事实为准，已应用用户引导复用绑定根 Run 的 `guidance_applied`，完成以真实根 Run 终态为准；光波不表示接收方已读。首次加载、重同步、重开视图不重播历史；按传输 id 去重，过期、隐藏端点和不属于当前树的路径丢弃。临时队列有数量与时效上限，关闭时释放订阅和计时器，减少动态效果偏好停用传输动画。
 

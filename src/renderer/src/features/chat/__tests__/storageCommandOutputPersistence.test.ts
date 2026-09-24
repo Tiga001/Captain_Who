@@ -681,15 +681,16 @@ it('persists and restores the Host-frozen collaboration Timeline snapshot', () =
       activityId: 'event-reviewer-updated',
       agentId: 'agent-reviewer',
       occurredAt: 8,
-      parentAgentId: 'root:root-conversation',
-      parentConversationId: 'root-conversation',
+      ownerAgentId: 'root:root-conversation',
+      ownerConversationId: 'root-conversation',
       anchorMessageId: 'assistant-current',
       traceBoundarySequence: 3,
       runId: 'run-reviewer',
       semantic: 'updated' as const,
       sequence: 4,
       taskNameSnapshot: 'Reviewer',
-      turnId: 'turn-reviewer'
+      turnId: 'turn-reviewer',
+      taskMessageId: null
     }
   ]
   const encoded = stringifyPersistedAgentRun(
@@ -710,6 +711,50 @@ it('persists and restores the Host-frozen collaboration Timeline snapshot', () =
         ]
       })
     )
+  ).toBeUndefined()
+})
+
+it('drops only legacy collaboration ownership while retaining the final reply and current task snapshots', () => {
+  const oldActivity = {
+    activityId: 'old-event',
+    agentId: 'agent-reviewer',
+    occurredAt: 8,
+    parentAgentId: 'root:root-conversation',
+    parentConversationId: 'root-conversation',
+    anchorMessageId: 'assistant-current',
+    traceBoundarySequence: 3,
+    runId: 'run-reviewer',
+    semantic: 'completed',
+    sequence: 4,
+    taskNameSnapshot: 'Reviewer',
+    turnId: 'turn-reviewer'
+  }
+  const { parentAgentId, parentConversationId, ...retained } = oldActivity
+  const currentActivity = {
+    ...retained,
+    activityId: 'new-event:task',
+    ownerAgentId: parentAgentId,
+    ownerConversationId: parentConversationId,
+    taskMessageId: 'task'
+  }
+  const stored = currentStoredRun({
+    collaborationTimelineActivities: [oldActivity, currentActivity],
+    timeline: [{ id: 'final-reply', type: 'message', content: 'The full final answer survives.' }]
+  })
+  const parsed = parsePersistedAgentRun(stored)
+  expect(parsed?.timeline).toEqual(stored.timeline)
+  expect(parsed?.collaborationTimelineActivities).toEqual([currentActivity])
+  expect(
+    parsePersistedAgentRun({
+      ...stored,
+      collaborationTimelineActivities: [{ ...currentActivity, taskMessageId: null }]
+    })
+  ).toBeUndefined()
+  expect(
+    parsePersistedAgentRun({
+      ...stored,
+      collaborationTimelineActivities: [{ ...currentActivity, activityId: '' }]
+    })
   ).toBeUndefined()
 })
 

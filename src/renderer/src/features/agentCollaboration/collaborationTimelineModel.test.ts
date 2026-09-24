@@ -19,15 +19,16 @@ function activity(
     activityId,
     agentId,
     occurredAt,
-    parentAgentId: 'root:root-conversation',
-    parentConversationId: 'root-conversation',
+    ownerAgentId: 'root:root-conversation',
+    ownerConversationId: 'root-conversation',
     anchorMessageId,
     traceBoundarySequence,
     runId: null,
     semantic,
     sequence,
     taskNameSnapshot: `${agentId}-${activityId}`,
-    turnId: null
+    turnId: null,
+    taskMessageId: semantic === 'updated' ? null : 'task-' + agentId
   }
 }
 
@@ -84,8 +85,8 @@ describe('collaboration Timeline model', () => {
       activity('root-child', 'agent-a', 1, 1_000),
       {
         ...activity('grandchild', 'agent-b', 2, 1_100),
-        parentAgentId: 'agent-a',
-        parentConversationId: 'child-conversation'
+        ownerAgentId: 'agent-a',
+        ownerConversationId: 'child-conversation'
       }
     ])
     expect(groups).toHaveLength(2)
@@ -101,8 +102,8 @@ describe('collaboration Timeline model', () => {
         activity('after-middle', 'agent-d', 4, 9_100, 'completed', 'message-2', null),
         {
           ...activity('grandchild', 'agent-e', 5, 9_200, 'started', 'message-2', 8),
-          parentAgentId: 'agent-b',
-          parentConversationId: 'child-conversation'
+          ownerAgentId: 'agent-b',
+          ownerConversationId: 'child-conversation'
         }
       ],
       messages,
@@ -150,5 +151,63 @@ describe('collaboration Timeline model', () => {
     expect(empty.tail).toEqual([beforeFirst])
     expect(loaded.beforeMessage.get('first-message')).toEqual([beforeFirst])
     expect(loaded.tail).toEqual([])
+  })
+  it('routes cross-level tasks and ordinary messages by owner within the current tree', () => {
+    const root = 'root:root-conversation'
+    const members = [root, 'parent', 'grandchild', 'sibling']
+    const dispatched = {
+      ...activity('root-task', 'grandchild', 1, 100),
+      taskMessageId: 'task-root'
+    }
+    const parentTask = {
+      ...activity('parent-task', 'grandchild', 2, 101),
+      ownerAgentId: 'parent',
+      ownerConversationId: 'parent-conversation',
+      taskMessageId: 'task-parent'
+    }
+    const ordinary = {
+      ...activity('message-to-root', 'sibling', 3, 102, 'updated'),
+      taskMessageId: null
+    }
+    const unrelatedCompletion = {
+      ...activity('other-completed', 'sibling', 4, 103, 'completed'),
+      ownerAgentId: 'parent',
+      ownerConversationId: 'parent-conversation',
+      taskMessageId: 'other-task'
+    }
+    const staleForkOwner = { ...dispatched, activityId: 'old-owner', ownerAgentId: 'old-root' }
+    const staleForkSubject = { ...dispatched, activityId: 'old-subject', agentId: 'old-child' }
+    const input = [
+      dispatched,
+      parentTask,
+      ordinary,
+      unrelatedCompletion,
+      staleForkOwner,
+      staleForkSubject
+    ]
+    expect(
+      projectCollaborationTimelineActivities(input, [], 'root-conversation', members).tail
+    ).toEqual([dispatched, ordinary])
+    expect(
+      projectCollaborationTimelineActivities(input, [], 'parent-conversation', members).tail
+    ).toEqual([parentTask, unrelatedCompletion])
+    expect(
+      projectCollaborationTimelineActivities(input, [], 'grandchild-conversation', members).tail
+    ).toEqual([])
+  })
+
+  it('keeps the Host projection order when one event presents several tasks at once', () => {
+    const first = activity('z-first-task', 'agent-a', 1, 100)
+    const second = activity('a-second-task', 'agent-b', 1, 100)
+    expect(normalizeCollaborationTimelineActivities([first, second])).toEqual([first, second])
+  })
+
+  it('preserves separate tasks for one agent while coalescing repeats of the same task', () => {
+    const first = { ...activity('task-a-first', 'agent-a', 1, 100), taskMessageId: 'task-a' }
+    const second = { ...activity('task-b', 'agent-a', 2, 101), taskMessageId: 'task-b' }
+    const repeated = { ...first, activityId: 'task-a-repeated', sequence: 3 }
+    const groups = groupCollaborationTimelineActivities([first, second, repeated])
+    expect(groups).toHaveLength(1)
+    expect(groups[0]?.activities).toEqual([repeated, second])
   })
 })

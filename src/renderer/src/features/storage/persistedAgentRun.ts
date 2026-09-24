@@ -308,8 +308,9 @@ function isCollaborationTimelineActivity(value: unknown): boolean {
       'activityId',
       'agentId',
       'occurredAt',
-      'parentAgentId',
-      'parentConversationId',
+      'ownerAgentId',
+      'ownerConversationId',
+      'taskMessageId',
       'anchorMessageId',
       'traceBoundarySequence',
       'runId',
@@ -321,8 +322,11 @@ function isCollaborationTimelineActivity(value: unknown): boolean {
     isBoundedString(value.activityId, 2048) &&
     isBoundedString(value.agentId, 256) &&
     isSafeInteger(value.occurredAt) &&
-    isBoundedString(value.parentAgentId, 256) &&
-    isBoundedString(value.parentConversationId, 2048) &&
+    isBoundedString(value.ownerAgentId, 256) &&
+    isBoundedString(value.ownerConversationId, 2048) &&
+    (value.semantic === 'updated'
+      ? value.taskMessageId === null
+      : isBoundedString(value.taskMessageId, 2048)) &&
     isBoundedString(value.anchorMessageId, 2048) &&
     isSafeInteger(value.traceBoundarySequence) &&
     (value.runId === null || isBoundedString(value.runId, 2048)) &&
@@ -344,6 +348,20 @@ export function parsePersistedAgentRun(value: unknown): ChatAgentRunView | undef
   if (!isRecord(value) || !hasExactKeys(value, REQUIRED_STORED_RUN_KEYS, STORED_RUN_KEYS)) {
     return undefined
   }
+  // Legacy parent-owned projections cannot be attributed to a dispatcher. Drop only those
+  // projections; the surrounding final answer, tools and current activities remain readable.
+  const storedActivities = value.collaborationTimelineActivities
+  const collaborationTimelineActivities = Array.isArray(storedActivities)
+    ? storedActivities.filter(
+        (activity: unknown) =>
+          !(
+            isRecord(activity) &&
+            (hasOwn(activity, 'parentAgentId') || hasOwn(activity, 'parentConversationId')) &&
+            !hasOwn(activity, 'ownerAgentId') &&
+            !hasOwn(activity, 'ownerConversationId')
+          )
+      )
+    : storedActivities
   if (
     !hasOwn(value, 'runId') ||
     (value.runId !== null && !isBoundedString(value.runId, 1024)) ||
@@ -366,7 +384,9 @@ export function parsePersistedAgentRun(value: unknown): ChatAgentRunView | undef
     (hasOwn(value, 'collaborationFinalResponseBoundary') &&
       !isSafeInteger(value.collaborationFinalResponseBoundary)) ||
     (hasOwn(value, 'collaborationTimelineActivities') &&
-      !isRecordArray(value.collaborationTimelineActivities, isCollaborationTimelineActivity)) ||
+      (!Array.isArray(storedActivities) ||
+        storedActivities.length > MAX_STORED_RUN_ITEMS ||
+        !isRecordArray(collaborationTimelineActivities, isCollaborationTimelineActivity))) ||
     !Array.isArray(value.timeline) ||
     value.timeline.length > MAX_STORED_RUN_ITEMS ||
     !isRecord(value.messageStreamCheckpoints) ||
@@ -471,6 +491,12 @@ export function parsePersistedAgentRun(value: unknown): ChatAgentRunView | undef
 
   return {
     ...(value as unknown as ChatAgentRunView),
+    ...(Array.isArray(collaborationTimelineActivities)
+      ? {
+          collaborationTimelineActivities:
+            collaborationTimelineActivities as ChatAgentRunView['collaborationTimelineActivities']
+        }
+      : {}),
     toolCalls,
     toolResults,
     mcpInvocations,

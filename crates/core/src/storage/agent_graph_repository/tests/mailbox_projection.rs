@@ -517,7 +517,7 @@ fn projection_preserves_fifo_reorders_before_active_assistant_and_satisfies_defe
     .unwrap();
     let interrupt_activities = interrupt_events
         .iter()
-        .filter_map(|event| event.activity.as_ref())
+        .flat_map(|event| &event.activities)
         .collect::<Vec<_>>();
     assert_eq!(interrupt_activities.len(), 1);
     assert_eq!(
@@ -527,7 +527,7 @@ fn projection_preserves_fifo_reorders_before_active_assistant_and_satisfies_defe
     assert_eq!(interrupt_activities[0].agent_id, "agent-child");
     assert!(interrupt_events.iter().any(|event| {
         event.kind == crate::AgentCollaborationEventKind::WakeUpdated
-            && event.activity.as_ref().is_some_and(|activity| {
+            && event.activities.first().is_some_and(|activity| {
                 activity.semantic == crate::AgentCollaborationActivitySemantic::Interrupted
             })
     }));

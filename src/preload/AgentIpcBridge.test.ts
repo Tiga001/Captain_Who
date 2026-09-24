@@ -191,7 +191,7 @@ describe('Agent IPC bridge collaboration', () => {
     const unsubscribe = bridge.onCollaborationEvent(handler)
     const listener = on.mock.calls[0]?.[1]
     const notification = {
-      schemaVersion: 2,
+      schemaVersion: 3,
       eventId: 'event-1',
       sequence: 1,
       workspaceId: 'project-1',
@@ -205,7 +205,7 @@ describe('Agent IPC bridge collaboration', () => {
       messageId: null,
       kind: 'agent_created',
       resourceRevision: 1,
-      activity: null,
+      activities: [],
       occurredAt: 100
     }
     listener({}, notification)

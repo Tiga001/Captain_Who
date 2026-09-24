@@ -488,8 +488,9 @@ pub(super) fn current_collaboration_timeline_activity_is_safe(
             "activityId",
             "agentId",
             "occurredAt",
-            "parentAgentId",
-            "parentConversationId",
+            "ownerAgentId",
+            "ownerConversationId",
+            "taskMessageId",
             "anchorMessageId",
             "traceBoundarySequence",
             "runId",
@@ -501,8 +502,14 @@ pub(super) fn current_collaboration_timeline_activity_is_safe(
     ) && bounded_string(&activity["activityId"], 2_048, false)
         && bounded_string(&activity["agentId"], 256, false)
         && safe_integer(&activity["occurredAt"])
-        && bounded_string(&activity["parentAgentId"], 256, false)
-        && bounded_string(&activity["parentConversationId"], 256, false)
+        && bounded_string(&activity["ownerAgentId"], 256, false)
+        && bounded_string(&activity["ownerConversationId"], 256, false)
+        && activity["ownerAgentId"] != activity["agentId"]
+        && if activity["semantic"] == "updated" {
+            activity["taskMessageId"].is_null()
+        } else {
+            bounded_string(&activity["taskMessageId"], 2_048, false)
+        }
         && bounded_string(&activity["anchorMessageId"], 2_048, false)
         && safe_integer(&activity["traceBoundarySequence"])
         && nullable_bounded_string(&activity["runId"], 2_048, false)

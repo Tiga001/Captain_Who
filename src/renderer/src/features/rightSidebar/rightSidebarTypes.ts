@@ -148,7 +148,7 @@ export interface RightSidebarModuleDefinition {
 }
 
 export interface AgentObserverRenderContext {
-  directChildAgentIds: readonly string[]
+  collaborationTreeAgentIds: readonly string[]
   agent: AgentSummary
   agentLabelsById: Readonly<Record<string, string>>
   activities: readonly CollaborationTimelineActivity[]

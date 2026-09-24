@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
-pub const AGENT_COLLABORATION_EVENT_SCHEMA_VERSION: u32 = 2;
-pub const AGENT_COLLABORATION_ACTIVITY_SCHEMA_VERSION: u32 = 3;
+pub const AGENT_COLLABORATION_EVENT_SCHEMA_VERSION: u32 = 3;
+pub const AGENT_COLLABORATION_ACTIVITY_SCHEMA_VERSION: u32 = 4;
 
 /// Durable root-tree invalidation and routing facts.
 ///
@@ -45,8 +45,9 @@ pub struct AgentCollaborationTransmission {
 /// Immutable renderer-safe meaning captured in the same transaction as its collaboration event.
 ///
 /// The outer event's `agent_id` remains the invalidation subject. `agent_id` here is the activity
-/// subject, which differs for a child-to-parent Mailbox message (recipient invalidation, sender
-/// presentation).
+/// subject, which differs for an ordinary Mailbox message (recipient invalidation, sender
+/// presentation). Display ownership follows the actual requester or message recipient, never an
+/// inferred structural parent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentCollaborationActivitySemantic {
@@ -87,12 +88,14 @@ impl AgentCollaborationActivitySemantic {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgentCollaborationActivitySnapshot {
     pub schema_version: u32,
+    pub activity_id: String,
     pub semantic: AgentCollaborationActivitySemantic,
     pub agent_id: String,
     pub task_name_snapshot: String,
-    pub parent_agent_id: String,
-    pub parent_conversation_id: String,
-    /// Direct parent's active assistant message, or its latest committed message when idle.
+    pub owner_agent_id: String,
+    pub owner_conversation_id: String,
+    pub task_message_id: Option<String>,
+    /// Actual owner's active assistant message, or its latest committed message when idle.
     pub anchor_message_id: Option<String>,
     /// Inserts before this trace sequence in an active reply. With no trace boundary, placement
     /// is after the anchor message; with no anchor, placement is before the first message.
@@ -153,7 +156,7 @@ pub struct AgentCollaborationEventRecord {
     pub message_id: Option<String>,
     pub kind: AgentCollaborationEventKind,
     pub resource_revision: u64,
-    pub activity: Option<AgentCollaborationActivitySnapshot>,
+    pub activities: Vec<AgentCollaborationActivitySnapshot>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transmission: Option<AgentCollaborationTransmission>,
     pub created_at: i64,

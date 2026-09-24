@@ -156,12 +156,12 @@ impl AgentTool for AgentCollaborationTool {
             ),
             AgentCollaborationToolKind::SendMessage => (
                 "send_message",
-                "Use this mailbox-only tool for a child Agent to report progress, request help, or deliver its completed work to its direct parent. Copy the exact direct-parent task name from your collaboration identity into target, even when an ancestor sent the current task. Before ending, deliver the conclusions, evidence, artifacts or changed files, validation and limitations the parent needs; confirm the successful receipt. If the complete report was already sent successfully and nothing changed, do not send it again. Your final reply is local to your conversation and is not automatically forwarded: keep it to a brief completion/reporting/blocker summary, preferably 1–3 sentences. It only enqueues a message: it never creates a Wake or Turn, never starts or resumes execution, and never wakes a completed, failed, interrupted, or idle Agent. Do not use it to assign, revise, or repeat work. A queued message is not evidence that the target is working, has read it, or has processed it; do not wait for a read acknowledgement before ending. Parent-to-descendant work must use followup_task. If sending fails, do not claim the parent received the report.",
+                "Use this mailbox-only tool to communicate with any other Agent in the same collaboration tree, including an ancestor, descendant, or sibling. Copy the actual recipient's exact task name into target. Cross-level and sibling messages are supported, not a semantic violation. For a child Agent's default completed-work report, retain the exact direct-parent task name from its collaboration identity as the recipient, even when an ancestor sent the current task. Before ending, deliver the conclusions, evidence, artifacts or changed files, validation and limitations the parent needs; confirm the successful receipt. If the complete report was already sent successfully and nothing changed, do not send it again. Your final reply is local to your conversation and is not automatically forwarded: keep it to a brief completion/reporting/blocker summary, preferably 1–3 sentences. It only enqueues a message: it never creates a Wake or Turn, never starts or resumes execution, and never wakes a completed, failed, interrupted, or idle Agent. Do not use it to assign, revise, or repeat work. A queued message is not evidence that the target is working, has read it, or has processed it; do not wait for a read acknowledgement before ending. Parent-to-descendant work must use followup_task. If sending fails, do not claim the parent received the report.",
                 message_schema(),
             ),
             AgentCollaborationToolKind::FollowupTask => (
                 "followup_task",
-                "Parent/ancestor-to-descendant task assignment. Use this to start, continue, revise, or repeat work on an existing descendant, including one whose latest task is completed, failed, interrupted, or idle. It reliably enqueues the follow-up and guarantees a future execution opportunity without starting a concurrent Turn. Use send_message only for child-to-parent mailbox reports, not task assignment. Prefer reusing an existing child that already holds the relevant context instead of spawning a new one.",
+                "Parent/ancestor-to-descendant task assignment. Use this to start, continue, revise, or repeat work on an existing descendant, including one whose latest task is completed, failed, interrupted, or idle. It reliably enqueues the follow-up and guarantees a future execution opportunity without starting a concurrent Turn. Use send_message for mailbox-only communication anywhere in the same tree; it does not schedule work. Prefer reusing an existing child that already holds the relevant context instead of spawning a new one.",
                 message_schema(),
             ),
             AgentCollaborationToolKind::Wait => (
@@ -651,12 +651,16 @@ mod tests {
     }
 
     #[test]
-    fn message_and_followup_descriptions_separate_reporting_from_task_assignment() {
+    fn message_and_followup_descriptions_separate_same_tree_communication_from_task_assignment() {
         let send =
             AgentCollaborationTool::new(AgentCollaborationToolKind::SendMessage).definition();
         assert!(send
             .description
-            .contains("for a child Agent to report progress"));
+            .contains("communicate with any other Agent in the same collaboration tree"));
+        assert!(send
+            .description
+            .contains("including an ancestor, descendant, or sibling"));
+        assert!(!send.description.contains("only for child-to-parent"));
         assert!(send.description.contains("never creates a Wake or Turn"));
         assert!(send
             .description
@@ -688,7 +692,8 @@ mod tests {
             .contains("guarantees a future execution opportunity"));
         assert!(followup
             .description
-            .contains("Use send_message only for child-to-parent mailbox reports"));
+            .contains("Use send_message for mailbox-only communication anywhere in the same tree"));
+        assert!(followup.description.contains("it does not schedule work"));
     }
 
     #[test]

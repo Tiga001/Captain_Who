@@ -338,33 +338,32 @@ const { AppShell } = await import('../AppShell')
 
 const frozenRootCollaborationActivities = parseCollaborationEventsPage(
   scenarioFixture.settledEventPage
-).events.flatMap((event) => {
-  const activity = event.activity
-  if (
-    !activity ||
-    activity.anchorMessageId !== 'assistant-conversation-root' ||
-    activity.traceBoundarySequence === null
-  ) {
-    return []
-  }
-
-  return [
-    {
-      activityId: event.eventId,
-      agentId: activity.agentId,
-      occurredAt: event.occurredAt,
-      parentAgentId: activity.parentAgentId,
-      parentConversationId: activity.parentConversationId,
-      anchorMessageId: activity.anchorMessageId,
-      traceBoundarySequence: activity.traceBoundarySequence,
-      runId: event.runId,
-      semantic: activity.semantic,
-      sequence: event.sequence,
-      taskNameSnapshot: activity.taskNameSnapshot,
-      turnId: event.turnId
-    }
-  ]
-})
+).events.flatMap((event) =>
+  event.activities.flatMap((activity) => {
+    if (
+      activity.anchorMessageId !== 'assistant-conversation-root' ||
+      activity.traceBoundarySequence === null
+    )
+      return []
+    return [
+      {
+        activityId: activity.activityId,
+        agentId: activity.agentId,
+        occurredAt: event.occurredAt,
+        ownerAgentId: activity.ownerAgentId,
+        ownerConversationId: activity.ownerConversationId,
+        taskMessageId: activity.taskMessageId,
+        anchorMessageId: activity.anchorMessageId,
+        traceBoundarySequence: activity.traceBoundarySequence,
+        runId: event.runId,
+        semantic: activity.semantic,
+        sequence: event.sequence,
+        taskNameSnapshot: activity.taskNameSnapshot,
+        turnId: event.turnId
+      }
+    ]
+  })
+)
 
 function rootConversation(conversationId: string, loaded = true): ChatConversation {
   return {
@@ -522,7 +521,7 @@ describe('AppShell deterministic collaboration scenario', () => {
         runId: null,
         messageId: 'live-sibling-message',
         kind: 'mailbox_enqueued',
-        activity: null,
+        activities: [],
         occurredAt: Date.now(),
         transmission: {
           id: 'mailbox:live-sibling-message',

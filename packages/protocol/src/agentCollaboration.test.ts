@@ -86,7 +86,7 @@ describe('agent collaboration protocol', () => {
   describe('confirmed transmission metadata', () => {
     const baseEvent = {
       ...(fixture.event as object),
-      activity: null,
+      activities: [],
       kind: 'mailbox_enqueued',
       agentId: 'agent-child',
       conversationId: 'conversation-child',
@@ -100,7 +100,7 @@ describe('agent collaboration protocol', () => {
 
     it('keeps transmission optional without changing the event schema', () => {
       const event = parseCollaborationEventEnvelope(fixture.event)
-      expect(event.schemaVersion).toBe(2)
+      expect(event.schemaVersion).toBe(3)
       expect(event).not.toHaveProperty('transmission')
     })
 
@@ -112,7 +112,7 @@ describe('agent collaboration protocol', () => {
         expect(event.transmission).toEqual(transmission)
         expect(event.transmission?.id).not.toBe(event.eventId)
         expect(event.transmission?.id).not.toBe(event.messageId)
-        expect(event.activity).toBeNull()
+        expect(event.activities).toEqual([])
       }
     )
 
@@ -424,18 +424,23 @@ describe('agent collaboration protocol', () => {
       agentId: 'agent-review',
       runId: 'run-review',
       sequence: 15,
-      activity: {
-        schemaVersion: 3,
-        semantic: 'completed',
-        parentAgentId: 'agent-root',
-        parentConversationId: 'conversation-root'
-      }
+      activities: [
+        {
+          schemaVersion: 4,
+          semantic: 'completed',
+          ownerAgentId: 'agent-root',
+          ownerConversationId: 'conversation-root'
+        }
+      ]
     })
     expect(
       eventPage.events.flatMap((event) =>
-        event.activity
-          ? [[event.sequence, event.kind, event.activity.agentId, event.activity.semantic]]
-          : []
+        event.activities.map((activity) => [
+          event.sequence,
+          event.kind,
+          activity.agentId,
+          activity.semantic
+        ])
       )
     ).toEqual([
       [4, 'wake_created', 'agent-review', 'started'],
@@ -449,9 +454,11 @@ describe('agent collaboration protocol', () => {
     ])
     expect(
       eventPage.events.flatMap((event) =>
-        event.activity
-          ? [[event.sequence, event.activity.anchorMessageId, event.activity.traceBoundarySequence]]
-          : []
+        event.activities.map((activity) => [
+          event.sequence,
+          activity.anchorMessageId,
+          activity.traceBoundarySequence
+        ])
       )
     ).toEqual([
       [4, 'assistant-conversation-root', 1],
@@ -466,12 +473,12 @@ describe('agent collaboration protocol', () => {
     expect(eventPage.events.find((event) => event.sequence === 8)).toMatchObject({
       kind: 'mailbox_enqueued',
       messageId: 'mailbox-send-review',
-      activity: null
+      activities: []
     })
     expect(eventPage.events.find((event) => event.sequence === 10)).toMatchObject({
       kind: 'mailbox_enqueued',
       messageId: 'mailbox-followup-review',
-      activity: null
+      activities: []
     })
     expect(observers.map((observer) => observer?.conversationId)).toEqual([
       'conversation-review',
@@ -489,94 +496,143 @@ describe('agent collaboration protocol', () => {
     ).toMatchObject({ approvalId: 'approval-reject', status: 'rejected' })
   })
 
-  it('accepts parent-local trace, after-message, and empty-conversation placements', () => {
+  it('accepts dispatcher-local placement, including a root dispatch to a grandchild', () => {
     const event = parseCollaborationEventEnvelope(fixture.event)
-    const activity = event.activity!
-    for (const placement of [
-      { anchorMessageId: 'assistant-parent', traceBoundarySequence: 4 },
-      { anchorMessageId: 'assistant-parent', traceBoundarySequence: null },
-      { anchorMessageId: null, traceBoundarySequence: null }
+    const activity = event.activities[0]!
+    for (const owner of [
+      { ownerAgentId: 'agent-root', ownerConversationId: 'conversation-root' },
+      { ownerAgentId: 'agent-child', ownerConversationId: 'conversation-child' }
     ]) {
-      expect(
-        parseCollaborationEventEnvelope({
-          ...event,
-          agentId: 'agent-grandchild',
-          conversationId: 'conversation-grandchild',
-          activity: {
-            ...activity,
+      for (const placement of [
+        { anchorMessageId: 'assistant-owner', traceBoundarySequence: 4 },
+        { anchorMessageId: 'assistant-owner', traceBoundarySequence: null },
+        { anchorMessageId: null, traceBoundarySequence: null }
+      ]) {
+        expect(
+          parseCollaborationEventEnvelope({
+            ...event,
             agentId: 'agent-grandchild',
-            parentAgentId: 'agent-child',
-            parentConversationId: 'conversation-child',
-            ...placement
-          }
-        }).activity
-      ).toMatchObject({
-        parentAgentId: 'agent-child',
-        parentConversationId: 'conversation-child',
-        ...placement
-      })
+            conversationId: 'conversation-grandchild',
+            activities: [{ ...activity, agentId: 'agent-grandchild', ...owner, ...placement }]
+          }).activities[0]
+        ).toMatchObject({ ...owner, ...placement })
+      }
     }
   })
 
-  it('routes a child update to its recipient parent rather than its outer event subject', () => {
+  it('routes ordinary Message updates to the actual recipient, independent of tree direction', () => {
     const event = parseCollaborationEventEnvelope(fixture.event)
-    const update = {
-      ...event,
-      kind: 'mailbox_enqueued',
-      agentId: 'agent-child',
-      conversationId: 'conversation-child',
-      activity: {
-        ...event.activity!,
-        semantic: 'updated',
-        agentId: 'agent-grandchild',
-        parentAgentId: 'agent-child',
-        parentConversationId: 'conversation-child'
+    for (const sender of ['agent-root', 'agent-grandchild', 'agent-sibling']) {
+      const update = {
+        ...event,
+        kind: 'mailbox_enqueued',
+        agentId: 'agent-child',
+        conversationId: 'conversation-child',
+        activities: [
+          {
+            ...event.activities[0]!,
+            semantic: 'updated',
+            agentId: sender,
+            ownerAgentId: 'agent-child',
+            ownerConversationId: 'conversation-child',
+            taskMessageId: null
+          }
+        ]
       }
+      expect(parseCollaborationEventEnvelope(update).activities[0]).toMatchObject({
+        agentId: sender,
+        ownerAgentId: 'agent-child',
+        taskMessageId: null
+      })
+      expect(() =>
+        parseCollaborationEventEnvelope({
+          ...update,
+          activities: [
+            {
+              ...update.activities[0],
+              ownerAgentId: 'agent-root',
+              ownerConversationId: 'conversation-root'
+            }
+          ]
+        })
+      ).toThrow(/owner identity/)
     }
-    expect(parseCollaborationEventEnvelope(update).activity?.parentAgentId).toBe('agent-child')
+  })
+
+  it('preserves separate task identities and multiple owners in one execution event', () => {
+    const event = parseCollaborationEventEnvelope(fixture.event)
+    const activity = { ...event.activities[0]!, agentId: 'agent-grandchild', semantic: 'completed' }
+    const activities = [
+      { ...activity, activityId: 'completed:root-task', taskMessageId: 'root-task' },
+      { ...activity, activityId: 'completed:root-followup', taskMessageId: 'root-followup' },
+      {
+        ...activity,
+        activityId: 'completed:child-task',
+        taskMessageId: 'child-task',
+        ownerAgentId: 'agent-child',
+        ownerConversationId: 'conversation-child'
+      }
+    ]
+    const terminal = {
+      ...event,
+      kind: 'wake_updated',
+      agentId: 'agent-grandchild',
+      conversationId: 'conversation-grandchild',
+      activities
+    }
+    expect(parseCollaborationEventEnvelope(terminal).activities).toEqual(activities)
+    expect(() =>
+      parseCollaborationEventEnvelope({ ...terminal, activities: [activities[0], activities[0]] })
+    ).toThrow(/duplicate activity identity/)
     expect(() =>
       parseCollaborationEventEnvelope({
-        ...update,
-        activity: {
-          ...update.activity,
-          parentAgentId: 'agent-root',
-          parentConversationId: 'conversation-root'
-        }
+        ...terminal,
+        activities: [{ ...activities[0], taskMessageId: null }]
       })
-    ).toThrow(/parent identity/)
+    ).toThrow(/task identity/)
   })
 
   it.each([
-    { schemaVersion: 2 },
-    { parentAgentId: null },
-    { parentAgentId: '' },
-    { parentAgentId: ' agent-root' },
-    { parentConversationId: '' },
-    { parentAgentId: 'agent-child' },
-    { parentConversationId: 'conversation-child' },
-    { parentAgentId: 'agent-other' },
+    { schemaVersion: 3 },
+    { activityId: '' },
+    { activityId: 'x'.repeat(2049) },
+    { activityId: 'activity\0id' },
+    { ownerConversationId: 'x'.repeat(257) },
+    { taskMessageId: 'x'.repeat(2049) },
+    { ownerAgentId: null },
+    { ownerAgentId: '' },
+    { ownerAgentId: ' agent-root' },
+    { ownerConversationId: '' },
+    { ownerAgentId: 'agent-child' },
+    { ownerConversationId: 'conversation-child' },
+    { ownerAgentId: 'agent-other' },
+    { taskMessageId: null },
     { anchorMessageId: null, traceBoundarySequence: 2 },
-    { anchorMessageId: 'assistant-parent', traceBoundarySequence: -1 },
-    { rootAnchorMessageId: 'assistant-root' },
-    { rootTraceBoundarySequence: 1 }
-  ])('rejects malformed or legacy parent activity contracts: %j', (invalidActivity) => {
+    { anchorMessageId: 'assistant-owner', traceBoundarySequence: -1 },
+    { parentAgentId: 'agent-root' },
+    { parentConversationId: 'conversation-root' }
+  ])('rejects malformed or legacy owner activity contracts: %j', (invalidActivity) => {
     const event = parseCollaborationEventEnvelope(fixture.event)
     expect(() =>
       parseCollaborationEventEnvelope({
         ...event,
-        activity: { ...event.activity!, ...invalidActivity }
+        activities: [{ ...event.activities[0]!, ...invalidActivity }]
       })
     ).toThrow()
   })
 
-  it.each(['parentAgentId', 'parentConversationId', 'anchorMessageId', 'traceBoundarySequence'])(
-    'requires the activity placement field %s',
-    (field) => {
-      const event = structuredClone(fixture.event) as { activity: Record<string, unknown> }
-      delete event.activity[field]
-      expect(() => parseCollaborationEventEnvelope(event)).toThrow(new RegExp(`Missing.*${field}`))
-    }
-  )
+  it.each([
+    'activityId',
+    'ownerAgentId',
+    'ownerConversationId',
+    'taskMessageId',
+    'anchorMessageId',
+    'traceBoundarySequence'
+  ])('requires the activity identity/placement field %s', (field) => {
+    const event = structuredClone(fixture.event) as { activities: Record<string, unknown>[] }
+    delete event.activities[0]![field]
+    expect(() => parseCollaborationEventEnvelope(event)).toThrow(new RegExp(`Missing.*${field}`))
+  })
 
   it('keeps the Rust/TypeScript method and DTO fixture stable', () => {
     expect(fixture.methods).toEqual([
@@ -616,11 +672,13 @@ describe('agent collaboration protocol', () => {
     expect(parseCollaborationEventEnvelope(fixture.event)).toMatchObject({
       sequence: 7,
       kind: 'wake_created',
-      activity: {
-        semantic: 'started',
-        agentId: 'agent-child',
-        taskNameSnapshot: 'Research'
-      },
+      activities: [
+        {
+          semantic: 'started',
+          agentId: 'agent-child',
+          taskNameSnapshot: 'Research'
+        }
+      ],
       rootConversationId: 'conversation-root'
     })
     expect(
@@ -1071,51 +1129,61 @@ describe('agent collaboration protocol', () => {
       })
     ).toThrow(/identity/)
 
-    expect(() =>
-      parseCollaborationEventEnvelope({ ...(fixture.event as object), schemaVersion: 1 })
-    ).toThrow(/schemaVersion/)
-    const missingActivity = structuredClone(fixture.event) as Record<string, unknown>
-    delete missingActivity.activity
-    expect(() => parseCollaborationEventEnvelope(missingActivity)).toThrow(/Missing.*activity/)
-    const missingBoundary = structuredClone(fixture.event) as {
-      activity: Record<string, unknown>
+    for (const schemaVersion of [1, 2]) {
+      expect(() =>
+        parseCollaborationEventEnvelope({ ...(fixture.event as object), schemaVersion })
+      ).toThrow(/schemaVersion/)
     }
-    delete missingBoundary.activity.traceBoundarySequence
+    const missingActivity = structuredClone(fixture.event) as Record<string, unknown>
+    delete missingActivity.activities
+    expect(() => parseCollaborationEventEnvelope(missingActivity)).toThrow(/Missing.*activities/)
+    const missingBoundary = structuredClone(fixture.event) as {
+      activities: Record<string, unknown>[]
+    }
+    delete missingBoundary.activities[0].traceBoundarySequence
     expect(() => parseCollaborationEventEnvelope(missingBoundary)).toThrow(/traceBoundarySequence/)
     expect(() =>
       parseCollaborationEventEnvelope({
         ...(fixture.event as object),
-        activity: {
-          ...(fixture.event as { activity: object }).activity,
-          anchorMessageId: 'assistant-root'
-        }
+        activities: [
+          {
+            ...(fixture.event as { activities: object[] }).activities[0],
+            anchorMessageId: 'assistant-root'
+          }
+        ]
       })
     ).not.toThrow()
     expect(() =>
       parseCollaborationEventEnvelope({
         ...(fixture.event as object),
-        activity: {
-          ...(fixture.event as { activity: object }).activity,
-          traceBoundarySequence: 3
-        }
+        activities: [
+          {
+            ...(fixture.event as { activities: object[] }).activities[0],
+            traceBoundarySequence: 3
+          }
+        ]
       })
     ).toThrow(/trace placement requires an anchor message/)
     expect(() =>
       parseCollaborationEventEnvelope({
         ...(fixture.event as object),
-        activity: { ...(fixture.event as { activity: object }).activity, semantic: 'completed' }
+        activities: [
+          { ...(fixture.event as { activities: object[] }).activities[0], semantic: 'completed' }
+        ]
       })
     ).toThrow(/activity/)
     expect(() =>
       parseCollaborationEventEnvelope({
         ...(fixture.event as object),
-        activity: { ...(fixture.event as { activity: object }).activity, agentId: 'agent-other' }
+        activities: [
+          { ...(fixture.event as { activities: object[] }).activities[0], agentId: 'agent-other' }
+        ]
       })
     ).toThrow(/activity/)
     expect(() =>
       parseCollaborationEventEnvelope({
         ...(fixture.event as object),
-        activity: { ...(fixture.event as { activity: object }).activity, forged: true }
+        activities: [{ ...(fixture.event as { activities: object[] }).activities[0], forged: true }]
       })
     ).toThrow(/forged/)
   })

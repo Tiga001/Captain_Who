@@ -163,15 +163,16 @@ function activity(
     activityId,
     agentId: 'agent-reviewer',
     occurredAt,
-    parentAgentId: 'root:root-conversation',
-    parentConversationId: 'root-conversation',
+    ownerAgentId: 'root:root-conversation',
+    ownerConversationId: 'root-conversation',
     anchorMessageId,
     traceBoundarySequence: anchorMessageId === null ? null : sequence,
     runId: `run-${sequence}`,
     semantic,
     sequence,
     taskNameSnapshot: 'Reviewer',
-    turnId: `turn-${sequence}`
+    turnId: `turn-${sequence}`,
+    taskMessageId: semantic === 'updated' ? null : 'task-agent-reviewer'
   }
 }
 
@@ -196,7 +197,7 @@ it('merges only trusted anchored activity into the message timeline', async () =
       collaborationTimelineActivities={[
         {
           ...activity('event-grandchild', 'updated', 2, 3_000, null),
-          parentConversationId: 'child-conversation'
+          ownerConversationId: 'child-conversation'
         },
         anchored
       ]}
@@ -314,7 +315,7 @@ it('consumes a filtered Result wake without adding a footer card and still displ
     projected: CollaborationTimelineActivity | null,
     runId: string
   ): CollaborationEventEnvelope => ({
-    schemaVersion: 2,
+    schemaVersion: 3,
     eventId: projected?.activityId ?? 'result-wake-completed',
     sequence,
     workspaceId: 'project-a',
@@ -328,18 +329,22 @@ it('consumes a filtered Result wake without adding a footer card and still displ
     messageId: `source-${runId}`,
     kind: projected?.semantic === 'started' ? 'wake_created' : 'wake_updated',
     resourceRevision: sequence,
-    activity: projected
-      ? {
-          schemaVersion: 3,
-          agentId: projected.agentId,
-          parentAgentId: projected.parentAgentId,
-          parentConversationId: projected.parentConversationId,
-          anchorMessageId: projected.anchorMessageId,
-          traceBoundarySequence: projected.traceBoundarySequence,
-          semantic: projected.semantic,
-          taskNameSnapshot: projected.taskNameSnapshot
-        }
-      : null,
+    activities: projected
+      ? [
+          {
+            schemaVersion: 4,
+            activityId: projected.activityId,
+            agentId: projected.agentId,
+            ownerAgentId: projected.ownerAgentId,
+            ownerConversationId: projected.ownerConversationId,
+            anchorMessageId: projected.anchorMessageId,
+            traceBoundarySequence: projected.traceBoundarySequence,
+            semantic: projected.semantic,
+            taskNameSnapshot: projected.taskNameSnapshot,
+            taskMessageId: projected.taskMessageId
+          }
+        ]
+      : [],
     occurredAt: projected?.occurredAt ?? 4_200
   })
   const durable = [hostEvent(1, started, 'task-run')]
@@ -369,7 +374,7 @@ it('consumes a filtered Result wake without adding a footer card and still displ
       <ChatMessageList
         collaborationTimelineActivities={store.getSnapshot().activities}
         conversation={settled}
-        directChildAgentIds={['agent-reviewer']}
+        collaborationTreeAgentIds={['root:root-conversation', 'agent-reviewer']}
         editableLastUserMessageId={null}
         editSelectedModelAvailable
         editSelectedModelSupportsImage
@@ -450,8 +455,8 @@ it('places an observer’s direct-child status inline and completion between tur
   const onOpenAgent = vi.fn()
   const started = {
     ...activity('event-child-started', 'started', 2, 2_500, 'root-assistant-1'),
-    parentAgentId: 'parent-agent',
-    parentConversationId: 'child-conversation'
+    ownerAgentId: 'parent-agent',
+    ownerConversationId: 'child-conversation'
   }
   const completed = {
     ...started,
@@ -501,20 +506,20 @@ it('places an observer’s direct-child status inline and completion between tur
 })
 
 it.each(['interactive', 'observer'] as const)(
-  'hides inherited fork activities outside the authoritative direct children in %s mode',
+  'hides inherited fork activities outside the authoritative tree membership in %s mode',
   async (mode) => {
     const stale = {
       ...activity('inherited-event', 'failed', 1, 1_000, 'root-assistant-1'),
       agentId: 'old-tree-child',
-      parentAgentId: 'old-root-agent',
-      parentConversationId: 'fork-conversation',
+      ownerAgentId: 'old-root-agent',
+      ownerConversationId: 'fork-conversation',
       taskNameSnapshot: 'Old child'
     }
     const current = {
       ...activity('current-event', 'started', 2, 2_000, 'root-assistant-1'),
       agentId: 'current-child',
-      parentAgentId: 'current-root-agent',
-      parentConversationId: 'fork-conversation',
+      ownerAgentId: 'current-root-agent',
+      ownerConversationId: 'fork-conversation',
       taskNameSnapshot: 'Current child'
     }
     const fork = freezeTerminalActivities(expandedConversation(), [stale, current])
@@ -534,15 +539,103 @@ it.each(['interactive', 'observer'] as const)(
       onOpenCollaborationAgent: vi.fn(),
       showTokenUsageDetails: false
     }
-    const screen = await render(<ChatMessageList {...props} directChildAgentIds={[]} />)
+    const screen = await render(<ChatMessageList {...props} collaborationTreeAgentIds={[]} />)
     expect(screen.container.querySelectorAll('[data-semantic]')).toHaveLength(0)
 
-    await screen.rerender(<ChatMessageList {...props} directChildAgentIds={['current-child']} />)
+    await screen.rerender(
+      <ChatMessageList
+        {...props}
+        collaborationTreeAgentIds={['current-root-agent', 'current-child']}
+      />
+    )
     expect(screen.container.querySelectorAll('[data-semantic]')).toHaveLength(1)
     expect(screen.container.querySelector('[data-agent-id="current-child"]')).not.toBeNull()
     expect(screen.container.querySelector('[data-agent-id="old-tree-child"]')).toBeNull()
   }
 )
+
+it('shows cross-level task ownership consistently in frozen root and observer conversations without subscribing ordinary messages to completion', async () => {
+  const members = ['root:root-conversation', 'parent', 'grandchild']
+  const rootTask = {
+    ...activity('root-task-started', 'started', 1, 2_000, 'root-assistant-1'),
+    agentId: 'grandchild',
+    taskNameSnapshot: 'Grandchild',
+    taskMessageId: 'root-task'
+  }
+  const rootFollowup = {
+    ...rootTask,
+    activityId: 'root-followup-started',
+    taskMessageId: 'root-followup',
+    sequence: 2
+  }
+  const parentTask = {
+    ...activity('parent-task-completed', 'completed', 3, 3_000, 'parent-assistant-1'),
+    agentId: 'grandchild',
+    taskNameSnapshot: 'Grandchild',
+    taskMessageId: 'parent-task',
+    ownerAgentId: 'parent',
+    ownerConversationId: 'parent-conversation'
+  }
+  const message = {
+    ...activity('ordinary-message', 'updated', 4, 3_100, 'root-assistant-1'),
+    agentId: 'parent',
+    taskNameSnapshot: 'Parent',
+    taskMessageId: null
+  }
+  // The sender's later, unrelated work belongs to its own dispatcher, not the message recipient.
+  const unrelatedCompletion = {
+    ...activity('unrelated-completed', 'completed', 5, 4_000, 'parent-assistant-1'),
+    ownerAgentId: 'parent',
+    ownerConversationId: 'parent-conversation',
+    agentId: 'grandchild',
+    taskNameSnapshot: 'Unrelated task',
+    taskMessageId: 'unrelated-task'
+  }
+  const activities = [rootTask, rootFollowup, parentTask, message, unrelatedCompletion]
+  const root = freezeTerminalActivities(expandedConversation(), activities)
+  const props = {
+    collaborationTreeAgentIds: members,
+    collaborationTimelineActivities: activities,
+    editableLastUserMessageId: null,
+    editSelectedModelAvailable: false,
+    editSelectedModelSupportsImage: false,
+    onOpenCollaborationAgent: vi.fn(),
+    showTokenUsageDetails: false
+  }
+  const screen = await render(<ChatMessageList {...props} conversation={root} mode="interactive" />)
+  expect(
+    screen.container.querySelectorAll('[data-semantic="started"] [data-agent-id="grandchild"]')
+  ).toHaveLength(2)
+  expect(
+    screen.container.querySelectorAll('[data-semantic="updated"] [data-agent-id="parent"]')
+  ).toHaveLength(1)
+  expect(screen.container.querySelectorAll('[data-semantic="completed"]')).toHaveLength(0)
+
+  const parent = freezeTerminalActivities(expandedConversation(), activities)
+  parent.id = 'parent-conversation'
+  parent.messages[1]!.id = 'parent-assistant-1'
+  parent.messages[1]!.agentRun!.collaborationTimelineActivities = [parentTask, unrelatedCompletion]
+  await screen.rerender(<ChatMessageList {...props} conversation={parent} mode="observer" />)
+  expect(
+    screen.container.querySelectorAll('[data-semantic="completed"] [data-agent-id="grandchild"]')
+  ).toHaveLength(2)
+  expect(
+    screen.container.querySelectorAll('[data-semantic="started"], [data-semantic="updated"]')
+  ).toHaveLength(0)
+
+  await screen.rerender(
+    <ChatMessageList
+      {...props}
+      conversation={root}
+      mode="interactive"
+      collaborationTimelineActivities={[]}
+    />
+  )
+  expect(
+    screen.container.querySelectorAll('[data-semantic="started"] [data-agent-id="grandchild"]')
+  ).toHaveLength(2)
+  expect(screen.container.querySelectorAll('[data-semantic="completed"]')).toHaveLength(0)
+})
 
 it('freezes live activity at its arrival boundary while later root narration keeps streaming', async () => {
   const initial = structuredClone(conversation())
@@ -831,7 +924,7 @@ it('folds inline activity with the execution timeline and excludes another paren
     activity('event-between-read-tools', 'started', 1, 2_100, 'root-assistant-1'),
     {
       ...activity('event-other-parent', 'updated', 2, 4_500, null),
-      parentConversationId: 'other-parent'
+      ownerConversationId: 'other-parent'
     }
   ]
   run.collaborationTimelineActivities = [activities[0]!]

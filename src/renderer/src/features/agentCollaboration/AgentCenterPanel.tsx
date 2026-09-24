@@ -126,16 +126,12 @@ export function AgentCenterPanel({ onNavigate, pageState }: AgentCenterPanelProp
       const agentLabelsById = Object.fromEntries(
         validTree.agents.map((candidate) => [candidate.agentId, candidate.taskName])
       )
-      const directChildIds = new Set(
-        validTree.agents
-          .filter((candidate) => candidate.parentAgentId === agent.agentId)
-          .map((candidate) => candidate.agentId)
-      )
+      const treeAgentIds = new Set(validTree.agents.map((candidate) => candidate.agentId))
       const activities = (collaborationSnapshot?.activities ?? []).filter(
         (activity) =>
-          activity.parentAgentId === agent.agentId &&
-          activity.parentConversationId === agent.conversationId &&
-          directChildIds.has(activity.agentId)
+          activity.ownerAgentId === agent.agentId &&
+          activity.ownerConversationId === agent.conversationId &&
+          treeAgentIds.has(activity.agentId)
       )
       return (
         <div className="agent-center agent-center--detail">
@@ -168,12 +164,17 @@ export function AgentCenterPanel({ onNavigate, pageState }: AgentCenterPanelProp
                 agent,
                 agentLabelsById,
                 activities,
-                directChildAgentIds: [...directChildIds],
+                collaborationTreeAgentIds: [...treeAgentIds],
                 invalidationVersion: `${collaborationSnapshot?.hydrationRevision ?? 0}:${
                   collaborationSnapshot?.agentInvalidationSequences[agent.agentId] ?? 0
                 }`,
-                onOpenAgent: (agentId) =>
-                  onNavigate({ agentId, kind: 'agent-center', rootConversationId, view: 'detail' }),
+                onOpenAgent: (agentId) => {
+                  if (agentId === validTree.rootAgentId) {
+                    onOpenAgentRootConversation?.(rootConversationId)
+                    return
+                  }
+                  onNavigate({ agentId, kind: 'agent-center', rootConversationId, view: 'detail' })
+                },
                 rootConversationId
               })
             ) : (

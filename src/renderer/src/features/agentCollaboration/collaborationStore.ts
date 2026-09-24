@@ -336,20 +336,21 @@ export class CollaborationStore {
           }
         }
         invalidationSequences[event.agentId] = event.sequence
-        if (event.activity) {
-          invalidationSequences[event.activity.parentAgentId] = event.sequence
+        for (const projection of event.activities) {
+          invalidationSequences[projection.ownerAgentId] = event.sequence
           const activity: CollaborationTimelineActivity = {
-            activityId: event.eventId,
-            agentId: event.activity.agentId,
+            activityId: projection.activityId,
+            agentId: projection.agentId,
             occurredAt: event.occurredAt,
-            parentAgentId: event.activity.parentAgentId,
-            parentConversationId: event.activity.parentConversationId,
-            anchorMessageId: event.activity.anchorMessageId,
-            traceBoundarySequence: event.activity.traceBoundarySequence,
+            ownerAgentId: projection.ownerAgentId,
+            ownerConversationId: projection.ownerConversationId,
+            taskMessageId: projection.taskMessageId,
+            anchorMessageId: projection.anchorMessageId,
+            traceBoundarySequence: projection.traceBoundarySequence,
             runId: event.runId,
-            semantic: event.activity.semantic,
+            semantic: projection.semantic,
             sequence: event.sequence,
-            taskNameSnapshot: event.activity.taskNameSnapshot,
+            taskNameSnapshot: projection.taskNameSnapshot,
             turnId: event.turnId
           }
           activities.push(activity)

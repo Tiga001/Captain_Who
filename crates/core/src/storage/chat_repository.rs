@@ -2,7 +2,8 @@ mod agent_run_projection;
 
 pub(crate) use agent_run_projection::{
     canonical_agent_run_lifecycle_projection, current_agent_run_projection_is_safe,
-    current_agent_run_projection_is_safe_for_trace_rebuild, settle_completed_message_streams,
+    current_agent_run_projection_is_safe_for_trace_rebuild,
+    discard_legacy_collaboration_activities, settle_completed_message_streams,
 };
 #[cfg(test)]
 use agent_run_projection::{
@@ -1155,22 +1156,24 @@ fn terminal_collaboration_timeline_activities(
             .map_err(|_| rusqlite::Error::InvalidQuery)?;
     let activities = events
         .into_iter()
-        .filter_map(|event| {
-            let activity = event.activity?;
-            Some(serde_json::json!({
-                "activityId": event.event_id,
-                "agentId": activity.agent_id,
-                "occurredAt": event.created_at,
-                "parentAgentId": activity.parent_agent_id,
-                "parentConversationId": activity.parent_conversation_id,
-                "anchorMessageId": activity.anchor_message_id?,
-                "traceBoundarySequence": activity.trace_boundary_sequence?,
-                "runId": event.run_id,
-                "semantic": activity.semantic.as_str(),
-                "sequence": event.root_sequence,
-                "taskNameSnapshot": activity.task_name_snapshot,
-                "turnId": event.turn_id,
-            }))
+        .flat_map(|event| {
+            event.activities.into_iter().filter_map(move |activity| {
+                Some(serde_json::json!({
+                    "activityId": activity.activity_id,
+                    "agentId": activity.agent_id,
+                    "occurredAt": event.created_at,
+                    "ownerAgentId": activity.owner_agent_id,
+                    "ownerConversationId": activity.owner_conversation_id,
+                    "taskMessageId": activity.task_message_id,
+                    "anchorMessageId": activity.anchor_message_id?,
+                    "traceBoundarySequence": activity.trace_boundary_sequence?,
+                    "runId": event.run_id,
+                    "semantic": activity.semantic.as_str(),
+                    "sequence": event.root_sequence,
+                    "taskNameSnapshot": activity.task_name_snapshot,
+                    "turnId": event.turn_id,
+                }))
+            })
         })
         .collect::<Vec<_>>();
     Ok(serde_json::Value::Array(activities))
@@ -1641,8 +1644,10 @@ fn list_messages(
             let created_at = row.get::<_, i64>(3)?;
             let content = row.get::<_, String>(2)?;
             let status = row.get::<_, Option<String>>(4)?;
-            let agent_run_json =
-                overlay_authoritative_usage(row.get(5)?, authoritative_usage.as_ref());
+            let agent_run_json = overlay_authoritative_usage(
+                without_legacy_collaboration_activities(row.get(5)?),
+                authoritative_usage.as_ref(),
+            );
             let (content, status, agent_run_json) = overlay_loaded_message_with_terminal_trace(
                 content,
                 status,
@@ -1925,6 +1930,21 @@ fn get_authoritative_message_usage(
             },
         )
         .optional()
+}
+
+fn without_legacy_collaboration_activities(agent_run_json: Option<String>) -> Option<String> {
+    let raw = agent_run_json?;
+    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return Some(raw);
+    };
+    if value
+        .as_object_mut()
+        .is_some_and(discard_legacy_collaboration_activities)
+    {
+        serde_json::to_string(&value).ok().or(Some(raw))
+    } else {
+        Some(raw)
+    }
 }
 
 fn overlay_authoritative_usage(

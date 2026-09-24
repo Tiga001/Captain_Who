@@ -179,7 +179,7 @@ mod tests {
             message_id: Some("mailbox-message".into()),
             kind,
             resource_revision: at as u64,
-            activity: None,
+            activities: vec![],
             transmission: None,
             created_at: at,
         }

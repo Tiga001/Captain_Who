@@ -3,7 +3,8 @@ mod validation;
 
 pub(crate) use validation::{
     canonical_agent_run_lifecycle_projection, current_agent_run_projection_is_safe,
-    current_agent_run_projection_is_safe_for_trace_rebuild, settle_completed_message_streams,
+    current_agent_run_projection_is_safe_for_trace_rebuild,
+    discard_legacy_collaboration_activities, settle_completed_message_streams,
 };
 #[cfg(test)]
 pub(super) use validation::{

@@ -130,10 +130,11 @@ fn project_guidance_timeline(
     let existing_run = if let Some(raw) = existing_run_json {
         let value = serde_json::from_str::<serde_json::Value>(raw)
             .map_err(|error| format!("current AgentRun projection is invalid JSON: {error}"))?;
-        let run = value
+        let mut run = value
             .as_object()
             .cloned()
             .ok_or_else(|| "current AgentRun projection must be an object".to_string())?;
+        chat_repository::discard_legacy_collaboration_activities(&mut run);
         // A malformed or incomplete presentation must never be merged field-by-field. A durable
         // Trace may defer only Tool identity coherence because every Trace-owned Timeline item is
         // discarded and rebuilt below; Guidance without a Trace has no such authority.
@@ -1070,4 +1071,36 @@ fn mcp_trace_anchors(
         }
     }
     Ok(invocation_ids_by_call_id)
+}
+
+#[cfg(test)]
+mod request_owned_projection_tests {
+    use super::*;
+
+    #[test]
+    fn rebuilding_history_ignores_legacy_owner_cards_without_resetting_the_run() {
+        let raw = chat_repository::canonical_agent_run_lifecycle_projection(
+            None, "legacy-run", "running", 2, 4, None,
+        ).unwrap();
+        let mut run: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        run["firstResponseAt"] = 3.into();
+        run["collaborationTimelineActivities"] = serde_json::json!([{
+            "activityId":"old-event", "parentAgentId":"old-parent",
+            "parentConversationId":"old-parent-chat"
+        }]);
+        let trace = conversation_trace_repository::ConversationTurnTraceRecord {
+            trace: crate::ConversationTraceSnapshot::default().in_progress_trace(
+                "legacy-run", "legacy-chat", "legacy-assistant",
+            ),
+            completed_at: None,
+        };
+        let projected = project_guidance_timeline(
+            Some(&run.to_string()), Some(&trace), &[], &[], &HashMap::new(), &[], 99,
+        ).unwrap();
+        let projected: serde_json::Value = serde_json::from_str(&projected).unwrap();
+        assert_eq!(projected["runId"], "legacy-run");
+        assert_eq!(projected["startedAt"], 2);
+        assert_eq!(projected["firstResponseAt"], 3);
+        assert_eq!(projected["collaborationTimelineActivities"], serde_json::json!([]));
+    }
 }

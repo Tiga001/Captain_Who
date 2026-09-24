@@ -114,15 +114,16 @@ function activity(
     activityId: 'activity-reviewer-started',
     agentId: 'agent-reviewer',
     occurredAt: 5,
-    parentAgentId: 'root:root-conversation',
-    parentConversationId: 'root-conversation',
+    ownerAgentId: 'root:root-conversation',
+    ownerConversationId: 'root-conversation',
     anchorMessageId,
     traceBoundarySequence,
     runId: 'run-reviewer',
     semantic: 'started',
     sequence: 1,
     taskNameSnapshot: 'Reviewer',
-    turnId: 'turn-reviewer'
+    turnId: 'turn-reviewer',
+    taskMessageId: 'task-agent-reviewer'
   }
 }
 
@@ -306,7 +307,7 @@ describe('collaboration Harness timeline projection', () => {
       <ChatMessageItem
         conversationId="root-conversation"
         collaborationTimelineActivities={[started]}
-        directChildAgentIds={['agent-reviewer']}
+        collaborationTreeAgentIds={['root:root-conversation', 'agent-reviewer']}
         message={candidate}
         mode="observer"
         onOpenCollaborationAgent={vi.fn()}

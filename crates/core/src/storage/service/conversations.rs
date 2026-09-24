@@ -415,6 +415,12 @@ fn delete_agent_tree_records(
         .map_err(storage_error)?;
     connection
         .execute(
+            "DELETE FROM agent_collaboration_event_activities WHERE root_agent_id = ?1",
+            [root_agent_id],
+        )
+        .map_err(storage_error)?;
+    connection
+        .execute(
             "DELETE FROM agent_collaboration_events WHERE root_agent_id = ?1",
             [root_agent_id],
         )

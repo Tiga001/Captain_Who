@@ -38,14 +38,14 @@ Playwright 故障。优先原则是保护持久事实和外部副作用，不通
 
 ### 判断
 
-当前基线为 **schema v52 + exact catalog fingerprint + valid foreign keys**；exact v51 → v52 保留全部协作数据、回执和自增序号，仅更新 Mailbox 正文约束；exact v50 仍须协作事件日志为空，先升 v51 再升 v52。旧协作活动不做父会话位置兼容或回填；v50 库需先用旧应用清理相关聊天历史，再启动新应用。v49 及更早版本不自动升级；显式开发 reset 的配置恢复仅支持工具列出的 exact catalog，不能据此推断它支持 v50。真源：
+当前基线为 **schema v53 + exact catalog fingerprint + valid foreign keys**；exact v52 → v53 新增任务归属活动明细，保留历史且不回填旧活动；exact v51 → v52 保留全部协作数据、回执和自增序号，仅更新 Mailbox 正文约束；exact v50 仍须协作事件日志为空，先升 v51、v52 再升 v53。旧协作活动不做父会话位置兼容或回填；v50 库需先用旧应用清理相关聊天历史，再启动新应用。v49 及更早版本不自动升级；显式开发 reset 的配置恢复仅支持工具列出的 exact catalog，不能据此推断它支持 v50。真源：
 
 ```text
 crates/core/src/storage/migrations.rs
 crates/core/src/storage/canonical_schema.sql
 ```
 
-不支持的旧版本、非空未版本化库、catalog 漂移、外键违规或仍有旧协作事件的库返回 `development_storage_schema_reset_required`，不自动 reset。v52 不支持直接交给旧应用打开。
+不支持的旧版本、非空未版本化库、catalog 漂移、外键违规或 v50 仍有旧协作事件的库返回 `development_storage_schema_reset_required`，不自动 reset。v53 不支持直接交给旧应用打开。
 
 手动压缩在重启后显示 interrupted 时，可直接继续聊天；旧 active head 保持有效。不得重放原付费请求来“恢复进度”。如果请求已到达厂商但尚未收到响应就崩溃，实际账单可能只有厂商可确认，本地不能编造 token 数量。
 

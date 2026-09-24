@@ -694,6 +694,29 @@ fn current_agent_run_projection_is_safe_with_trace_policy(
     true
 }
 
+/// v52 snapshots carry structural-parent activities. Drop only that obsolete presentation
+/// collection on read; do not discard the containing run, tool history, usage, or final content.
+pub(crate) fn discard_legacy_collaboration_activities(
+    run: &mut serde_json::Map<String, serde_json::Value>,
+) -> bool {
+    let Some(activities) = run
+        .get_mut("collaborationTimelineActivities")
+        .and_then(serde_json::Value::as_array_mut)
+    else {
+        return false;
+    };
+    let before = activities.len();
+    activities.retain(|activity| {
+        !activity.as_object().is_some_and(|activity| {
+            activity.contains_key("parentAgentId")
+                && activity.contains_key("parentConversationId")
+                && !activity.contains_key("ownerAgentId")
+                && !activity.contains_key("taskMessageId")
+        })
+    });
+    before != activities.len()
+}
+
 pub(crate) fn canonical_agent_run_lifecycle_projection(
     existing_agent_run_json: Option<&str>,
     run_id: &str,
@@ -705,6 +728,10 @@ pub(crate) fn canonical_agent_run_lifecycle_projection(
     let mut run = existing_agent_run_json
         .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
         .and_then(|value| value.as_object().cloned())
+        .map(|mut run| {
+            discard_legacy_collaboration_activities(&mut run);
+            run
+        })
         .filter(|run| current_agent_run_projection_is_safe(run, run_id))
         .unwrap_or_default();
 

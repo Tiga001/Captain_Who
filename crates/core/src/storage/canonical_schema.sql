@@ -4987,6 +4987,189 @@ CREATE TRIGGER emit_agent_approval_updated_collaboration_event
               ON sequence_state.root_agent_id = node.root_agent_id
             WHERE node.conversation_id = NEW.conversation_id;
         END;
+-- Request-owned presentation facts, introduced in v53. Earlier event rows deliberately have no
+-- entries here: their structural-parent snapshots must never be reinterpreted as task ownership.
+CREATE TABLE agent_collaboration_event_activities (
+            activity_id TEXT PRIMARY KEY CHECK (length(CAST(activity_id AS BLOB)) BETWEEN 1 AND 128),
+            event_id TEXT NOT NULL,
+            schema_version INTEGER NOT NULL CHECK (schema_version = 4),
+            root_agent_id TEXT NOT NULL,
+            semantic TEXT NOT NULL CHECK (semantic IN (
+                'started', 'updated', 'waiting_approval', 'completed', 'failed', 'interrupted'
+            )),
+            agent_id TEXT NOT NULL,
+            task_name_snapshot TEXT NOT NULL CHECK (
+                length(CAST(task_name_snapshot AS BLOB)) BETWEEN 1 AND 256
+            ),
+            owner_agent_id TEXT NOT NULL,
+            owner_conversation_id TEXT NOT NULL,
+            task_message_id TEXT,
+            anchor_message_id TEXT CHECK (
+                anchor_message_id IS NULL OR length(CAST(anchor_message_id AS BLOB)) BETWEEN 1 AND 2048
+            ),
+            trace_boundary_sequence INTEGER CHECK (
+                trace_boundary_sequence IS NULL OR trace_boundary_sequence >= 0
+            ),
+            CHECK (agent_id != owner_agent_id),
+            CHECK ((semantic = 'updated' AND task_message_id IS NULL)
+                OR (semantic != 'updated' AND task_message_id IS NOT NULL)),
+            CHECK (anchor_message_id IS NOT NULL OR trace_boundary_sequence IS NULL),
+            FOREIGN KEY (event_id) REFERENCES agent_collaboration_events(event_id) ON DELETE CASCADE,
+            FOREIGN KEY (agent_id, root_agent_id)
+                REFERENCES agent_nodes(agent_id, root_agent_id) ON DELETE CASCADE,
+            FOREIGN KEY (owner_agent_id, root_agent_id)
+                REFERENCES agent_nodes(agent_id, root_agent_id) ON DELETE CASCADE,
+            FOREIGN KEY (owner_conversation_id) REFERENCES conversations(id) ON DELETE CASCADE,
+            FOREIGN KEY (task_message_id) REFERENCES agent_mailbox_messages(message_id) ON DELETE CASCADE
+        );
+CREATE UNIQUE INDEX agent_collaboration_event_activities_task
+            ON agent_collaboration_event_activities(event_id, task_message_id)
+            WHERE task_message_id IS NOT NULL;
+CREATE UNIQUE INDEX agent_collaboration_event_activities_message
+            ON agent_collaboration_event_activities(event_id) WHERE task_message_id IS NULL;
+CREATE INDEX agent_collaboration_event_activities_event
+            ON agent_collaboration_event_activities(event_id, activity_id);
+CREATE INDEX agent_collaboration_event_activities_anchor
+            ON agent_collaboration_event_activities(anchor_message_id, event_id);
+CREATE VIEW agent_collaboration_owner_placements AS
+        SELECT owner.agent_id AS owner_agent_id, owner.root_agent_id,
+               owner.conversation_id AS owner_conversation_id,
+               COALESCE(active_trace.assistant_message_id, (
+                   SELECT message.id FROM messages AS message
+                   WHERE message.conversation_id = owner.conversation_id
+                   ORDER BY message.position DESC, message.created_at DESC, message.id DESC LIMIT 1
+               )) AS anchor_message_id,
+               CASE WHEN active_trace.assistant_message_id IS NOT NULL
+                    THEN COALESCE((
+                        SELECT MAX(item.sequence) + 1 FROM conversation_turn_trace_items AS item
+                        WHERE item.assistant_message_id = active_trace.assistant_message_id
+                    ), 0) ELSE NULL END AS trace_boundary_sequence
+        FROM agent_nodes AS owner
+        LEFT JOIN conversation_turn_traces AS active_trace
+          ON active_trace.conversation_id = owner.conversation_id
+         AND active_trace.terminal_status = 'in_progress';
+-- A deferred wake marked satisfied is not finished. Only its immutable delivery receipt assigns
+-- it to a carrying Run. Ordinary messages and automatic Result notices never create ownership.
+CREATE VIEW agent_collaboration_task_activity_sources AS
+        SELECT event.event_id, message.message_id AS task_message_id,
+               message.sender_agent_id AS owner_agent_id
+        FROM agent_collaboration_events AS event
+        JOIN agent_mailbox_messages AS message
+          ON message.message_id = event.message_id
+         AND message.root_agent_id = event.root_agent_id
+         AND message.recipient_agent_id = event.agent_id
+         AND message.kind IN ('task', 'followup')
+        WHERE (event.kind = 'wake_created' AND event.activity_semantic = 'started')
+           OR (event.kind = 'wake_updated'
+               AND event.activity_semantic IN ('completed', 'failed', 'interrupted'))
+        UNION
+        SELECT event.event_id, message.message_id, message.sender_agent_id
+        FROM agent_collaboration_events AS event
+        JOIN agent_wake_requests AS wake
+          ON wake.root_agent_id = event.root_agent_id AND wake.agent_id = event.agent_id
+         AND wake.run_id = event.run_id AND wake.assistant_message_id = event.turn_id
+        JOIN agent_mailbox_messages AS message
+          ON message.message_id = wake.source_agent_message_id
+         AND message.root_agent_id = event.root_agent_id
+         AND message.recipient_agent_id = event.agent_id
+         AND message.kind IN ('task', 'followup')
+        WHERE event.kind = 'approval_projected' AND event.activity_semantic = 'waiting_approval'
+        UNION
+        SELECT event.event_id, message.message_id, message.sender_agent_id
+        FROM agent_collaboration_events AS event
+        JOIN agent_model_batch_receipts AS receipt
+          ON receipt.agent_id = event.agent_id AND receipt.conversation_id = event.conversation_id
+         AND receipt.run_id = event.run_id AND receipt.assistant_message_id = event.turn_id
+        JOIN agent_model_batch_receipt_items AS item ON item.receipt_id = receipt.receipt_id
+        JOIN agent_mailbox_messages AS message
+          ON message.message_id = item.message_id
+         AND message.root_agent_id = event.root_agent_id
+         AND message.recipient_agent_id = event.agent_id
+         AND message.kind IN ('task', 'followup')
+        WHERE ((event.kind = 'wake_updated'
+                AND event.activity_semantic IN ('completed', 'failed', 'interrupted'))
+            OR (event.kind = 'approval_projected' AND event.activity_semantic = 'waiting_approval'));
+CREATE TRIGGER validate_agent_collaboration_event_activity_insert
+        BEFORE INSERT ON agent_collaboration_event_activities
+        WHEN NOT EXISTS (
+            SELECT 1 FROM agent_collaboration_events AS event
+            JOIN agent_nodes AS subject
+              ON subject.agent_id = NEW.agent_id AND subject.root_agent_id = event.root_agent_id
+             AND subject.task_name = NEW.task_name_snapshot
+            JOIN agent_collaboration_owner_placements AS placement
+              ON placement.owner_agent_id = NEW.owner_agent_id
+             AND placement.root_agent_id = event.root_agent_id
+             AND placement.owner_conversation_id = NEW.owner_conversation_id
+             AND placement.anchor_message_id IS NEW.anchor_message_id
+             AND placement.trace_boundary_sequence IS NEW.trace_boundary_sequence
+            WHERE event.event_id = NEW.event_id AND event.root_agent_id = NEW.root_agent_id
+              AND (
+                  (NEW.semantic = 'updated' AND event.kind = 'mailbox_enqueued' AND EXISTS (
+                      SELECT 1 FROM agent_mailbox_messages AS message
+                      WHERE message.message_id = event.message_id
+                        AND message.root_agent_id = event.root_agent_id AND message.kind = 'message'
+                        AND message.sender_agent_id = NEW.agent_id
+                        AND message.recipient_agent_id = NEW.owner_agent_id
+                        AND event.agent_id = NEW.owner_agent_id
+                  )) OR (NEW.semantic != 'updated' AND event.agent_id = NEW.agent_id
+                      AND event.activity_semantic = NEW.semantic AND EXISTS (
+                          SELECT 1 FROM agent_collaboration_task_activity_sources AS source
+                          WHERE source.event_id = NEW.event_id
+                            AND source.task_message_id = NEW.task_message_id
+                            AND source.owner_agent_id = NEW.owner_agent_id
+                      ))
+              )
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'Collaboration activity must match committed routing and owner placement');
+        END;
+CREATE TRIGGER prevent_agent_collaboration_event_activity_update
+        BEFORE UPDATE ON agent_collaboration_event_activities
+        BEGIN
+            SELECT RAISE(ABORT, 'Collaboration activities are immutable');
+        END;
+CREATE TRIGGER prevent_agent_collaboration_event_activity_delete
+        BEFORE DELETE ON agent_collaboration_event_activities
+        WHEN EXISTS (SELECT 1 FROM agent_collaboration_events WHERE event_id = OLD.event_id)
+        BEGIN
+            SELECT RAISE(ABORT, 'Collaboration activities are durable while their event exists');
+        END;
+CREATE TRIGGER project_agent_collaboration_event_activities
+        AFTER INSERT ON agent_collaboration_events
+        BEGIN
+            INSERT INTO agent_collaboration_event_activities (
+                activity_id, event_id, schema_version, root_agent_id, semantic,
+                agent_id, task_name_snapshot, owner_agent_id, owner_conversation_id,
+                task_message_id, anchor_message_id, trace_boundary_sequence
+            ) SELECT
+                'collab-activity:' || lower(hex(randomblob(16))), NEW.event_id, 4, NEW.root_agent_id,
+                NEW.activity_semantic, subject.agent_id, subject.task_name,
+                placement.owner_agent_id, placement.owner_conversation_id, source.task_message_id,
+                placement.anchor_message_id, placement.trace_boundary_sequence
+            FROM agent_collaboration_task_activity_sources AS source
+            JOIN agent_nodes AS subject ON subject.agent_id = NEW.agent_id
+            JOIN agent_collaboration_owner_placements AS placement
+              ON placement.owner_agent_id = source.owner_agent_id
+             AND placement.root_agent_id = NEW.root_agent_id
+            WHERE source.event_id = NEW.event_id;
+            INSERT INTO agent_collaboration_event_activities (
+                activity_id, event_id, schema_version, root_agent_id, semantic,
+                agent_id, task_name_snapshot, owner_agent_id, owner_conversation_id,
+                task_message_id, anchor_message_id, trace_boundary_sequence
+            ) SELECT
+                'collab-activity:' || lower(hex(randomblob(16))), NEW.event_id, 4, NEW.root_agent_id,
+                'updated', sender.agent_id, sender.task_name,
+                placement.owner_agent_id, placement.owner_conversation_id, NULL,
+                placement.anchor_message_id, placement.trace_boundary_sequence
+            FROM agent_mailbox_messages AS message
+            JOIN agent_nodes AS sender ON sender.agent_id = message.sender_agent_id
+            JOIN agent_collaboration_owner_placements AS placement
+              ON placement.owner_agent_id = message.recipient_agent_id
+             AND placement.root_agent_id = NEW.root_agent_id
+            WHERE NEW.kind = 'mailbox_enqueued' AND message.message_id = NEW.message_id
+              AND message.root_agent_id = NEW.root_agent_id AND message.kind = 'message';
+        END;
+-- End v53 request-owned collaboration presentation facts.
 CREATE TRIGGER prevent_agent_command_session_model_receipt_update
          BEFORE UPDATE ON agent_command_session_model_read_receipts
          BEGIN

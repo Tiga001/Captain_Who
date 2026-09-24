@@ -77,7 +77,7 @@ import './ChatConversationPage.css'
 
 interface ConversationSurfaceCommonProps {
   /** Authoritative direct children; an empty list hides stale or inherited collaboration rows. */
-  directChildAgentIds?: readonly string[]
+  collaborationTreeAgentIds?: readonly string[]
   conversation: ChatConversation
   initialScrollTop?: number | null
   onScrollPositionChange?: (conversationId: string, scrollTop: number) => void
@@ -231,7 +231,7 @@ function getEditableLastUserMessageId(conversation: ChatConversation) {
 }
 
 interface ChatMessageListProps {
-  directChildAgentIds?: readonly string[]
+  collaborationTreeAgentIds?: readonly string[]
   humanInteraction?: HumanInteractionControllerView
   forkDisabledReason?: string
   agentLabelsById?: Readonly<Record<string, string>>
@@ -275,7 +275,7 @@ export const ChatMessageList = memo(function ChatMessageList({
   agentLabelsById,
   collaborationTimelineActivities = EMPTY_COLLABORATION_TIMELINE_ACTIVITIES,
   conversation,
-  directChildAgentIds,
+  collaborationTreeAgentIds,
   editSelectedModelAvailable,
   editSelectedModelSupportsImage,
   editableLastUserMessageId,
@@ -316,9 +316,9 @@ export const ChatMessageList = memo(function ChatMessageList({
         collaborationTimelineActivities,
         messageIdentities,
         conversation.id,
-        directChildAgentIds
+        collaborationTreeAgentIds
       ),
-    [collaborationTimelineActivities, conversation.id, directChildAgentIds, messageIdentities]
+    [collaborationTimelineActivities, conversation.id, collaborationTreeAgentIds, messageIdentities]
   )
   const modelTransitions = useMemo(() => {
     const completedByMessageId = new Map<string, AgentProviderTransitionOperation[]>()
@@ -397,7 +397,7 @@ export const ChatMessageList = memo(function ChatMessageList({
                 : EMPTY_COLLABORATION_TIMELINE_ACTIVITIES
             }
             conversationId={conversation.id}
-            directChildAgentIds={directChildAgentIds}
+            collaborationTreeAgentIds={collaborationTreeAgentIds}
             isLastAssistantMessage={message.id === lastAssistantMessageId}
             message={message}
             mode={mode}
@@ -830,7 +830,7 @@ export function ConversationSurface(props: ConversationSurfaceProps) {
         >
           <ChatMessageList
             humanInteraction={interactive ? humanInteraction : undefined}
-            directChildAgentIds={props.directChildAgentIds}
+            collaborationTreeAgentIds={props.collaborationTreeAgentIds}
             agentLabelsById={props.mode === 'observer' ? props.agentLabelsById : undefined}
             collaborationTimelineActivities={
               interactive?.collaborationTimelineActivities ??

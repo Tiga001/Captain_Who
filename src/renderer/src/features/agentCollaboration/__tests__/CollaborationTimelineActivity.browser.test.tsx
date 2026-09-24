@@ -46,15 +46,16 @@ function activity(
     activityId,
     agentId,
     occurredAt,
-    parentAgentId: 'root:root-conversation',
-    parentConversationId: 'root-conversation',
+    ownerAgentId: 'root:root-conversation',
+    ownerConversationId: 'root-conversation',
     anchorMessageId,
     traceBoundarySequence,
     runId: null,
     semantic,
     sequence,
     taskNameSnapshot,
-    turnId: null
+    turnId: null,
+    taskMessageId: semantic === 'updated' ? null : 'task-' + agentId
   }
 }
 

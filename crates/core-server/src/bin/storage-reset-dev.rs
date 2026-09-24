@@ -864,9 +864,25 @@ fn load_agent_prompt_preferences_for_reset(
 }
 
 fn canonical_schema_v47() -> String {
-    // v47 still enforced non-empty guidance content. Keep this historical fixture exact even
-    // though the current canonical schema (v49) permits attachment-only guidance rows.
-    let current = include_str!("../../../core/src/storage/canonical_schema.sql");
+    // Reconstruct the pinned catalog rather than letting later collaboration, mailbox or
+    // folder-reference changes silently alter the old configuration-schema comparison.
+    let canonical = include_str!("../../../core/src/storage/canonical_schema.sql");
+    let collaboration_start = canonical
+        .find("CREATE TABLE agent_collaboration_events (")
+        .unwrap();
+    let collaboration_end = canonical
+        .find("CREATE TRIGGER prevent_agent_command_session_model_receipt_update")
+        .unwrap();
+    let current = canonical.replace(
+        &canonical[collaboration_start..collaboration_end],
+        include_str!("../../../core/src/storage/test_fixtures/collaboration_events_v50.sql"),
+    ).replace(
+        "length(CAST(content AS BLOB)) >= 1",
+        "length(CAST(content AS BLOB)) BETWEEN 1 AND 1048576",
+    ).replace(
+        "            folder_references_json TEXT NOT NULL DEFAULT '[]' CHECK (\n                json_valid(folder_references_json) AND json_type(folder_references_json) = 'array'\n            ),\n",
+        "",
+    );
     let table_marker = "CREATE TABLE agent_run_guidances (";
     let content_marker = "            content TEXT NOT NULL,\n";
     let table_start = current
@@ -877,7 +893,7 @@ fn canonical_schema_v47() -> String {
         .expect("canonical guidance content column exists");
     let content_start = table_start + content_offset;
     let content_end = content_start + content_marker.len();
-    let mut legacy = current.to_string();
+    let mut legacy = current;
     legacy.replace_range(
         content_start..content_end,
         "            content TEXT NOT NULL CHECK (length(trim(content)) > 0),\n",
@@ -2178,6 +2194,59 @@ mod tests {
         .unwrap()
     }
 
+    #[test]
+    fn historical_catalog_derivation_keeps_exact_pre_v50_fingerprints() {
+        for (schema, fingerprint) in [
+            (
+                canonical_schema_before_context_profiles(),
+                COLLABORATION_CONFIGURATION_SOURCE_FINGERPRINT,
+            ),
+            (
+                canonical_schema_before_multi_folder_projects(),
+                CONTEXT_PROFILE_CONFIGURATION_SOURCE_FINGERPRINT,
+            ),
+            (
+                canonical_schema_v47(),
+                LOCAL_TOKEN_CONFIGURATION_SOURCE_FINGERPRINT,
+            ),
+        ] {
+            let connection = Connection::open_in_memory().unwrap();
+            connection.execute_batch(&schema).unwrap();
+            assert_eq!(
+                storage_catalog_fingerprint(&connection).unwrap(),
+                fingerprint
+            );
+            assert_eq!(connection.query_row(
+                "SELECT COUNT(*) FROM sqlite_schema WHERE name = 'agent_collaboration_event_activities'",
+                [], |row| row.get::<_, i64>(0),
+            ).unwrap(), 0);
+        }
+    }
+
+    #[test]
+    fn removing_v53_fixture_objects_retains_exact_v52_catalog_and_seeded_data() {
+        let fixture = tempfile::tempdir().unwrap();
+        populated_storage(fixture.path(), "v53-fixture-only-secret");
+        let connection = Connection::open(fixture.path().join(DATABASE_FILE_NAME)).unwrap();
+        let configuration = snapshot_exact_configuration_tables(&connection).unwrap();
+        remove_v53_fixture_objects(&connection);
+        assert_eq!(
+            storage_catalog_fingerprint(&connection).unwrap(),
+            "sha256:615c17481af79b297a930607a7ca0d8e45a3825527ac19f74bf4a64b747b4cc7"
+        );
+        assert_eq!(
+            snapshot_exact_configuration_tables(&connection).unwrap(),
+            configuration
+        );
+        assert_eq!(
+            count_rows_if_table_exists(&connection, "messages").unwrap(),
+            2
+        );
+        assert!(pragma_rows(&connection, "PRAGMA foreign_key_check")
+            .unwrap()
+            .is_empty());
+    }
+
     fn downgrade_fixture_to_exact_v35(database: &Path) {
         let connection = Connection::open(database).unwrap();
         drop_async_fixture_schema(&connection);
@@ -3152,11 +3221,28 @@ mod tests {
         connection.execute_batch("DROP TABLE local_token_usage_days; DROP TABLE local_token_usage_requests; DROP TABLE local_token_usage_metadata;").unwrap();
     }
 
-    /// The reset fixtures below model catalogs through v47. Their source database starts from
-    /// the current v49 schema, so restore the v48 guidance table definition before calculating a
-    /// historical catalog fingerprint. The fixture is test-only and contains no attachment-only
-    /// guidance rows; production migration remains the v48 -> v49 path in core.
+    fn remove_v53_fixture_objects(connection: &Connection) {
+        assert_eq!(
+            count_rows_if_table_exists(connection, "agent_collaboration_event_activities").unwrap(),
+            0
+        );
+        connection
+            .execute_batch(
+                "DROP TRIGGER project_agent_collaboration_event_activities;
+             DROP TRIGGER validate_agent_collaboration_event_activity_insert;
+             DROP TRIGGER prevent_agent_collaboration_event_activity_update;
+             DROP TRIGGER prevent_agent_collaboration_event_activity_delete;
+             DROP VIEW agent_collaboration_task_activity_sources;
+             DROP VIEW agent_collaboration_owner_placements;
+             DROP TABLE agent_collaboration_event_activities;",
+            )
+            .unwrap();
+    }
+
+    /// Restore only temporary reset fixtures. They have no request-owned activities or
+    /// attachment-only guidance; the reset tool's supported recovery catalogs stay unchanged.
     fn restore_legacy_guidance_content_schema(connection: &Connection) {
+        remove_v53_fixture_objects(connection);
         let legacy = Connection::open_in_memory().unwrap();
         legacy
             .execute_batch(&canonical_schema_v47())

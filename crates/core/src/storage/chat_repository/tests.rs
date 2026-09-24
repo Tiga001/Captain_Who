@@ -1311,8 +1311,9 @@ fn startup_recovery_does_not_preserve_unknown_or_malformed_current_projection_fi
             "activityId": "activity-1",
             "agentId": "agent-child-1",
             "occurredAt": 3,
-            "parentAgentId": "agent-root",
-            "parentConversationId": "conversation-root",
+            "ownerAgentId": "agent-root",
+            "ownerConversationId": "conversation-root",
+            "taskMessageId": "task-fixture",
             "anchorMessageId": "message-assistant-1",
             "traceBoundarySequence": 1,
             "runId": "run-1",
@@ -1958,4 +1959,23 @@ fn renderer_unconfirmed_state_cannot_overwrite_an_admitted_turn() {
             .content,
         "Host-bound checkpoint"
     );
+}
+
+#[test]
+fn legacy_parent_activities_are_ignored_without_discarding_other_run_fields() {
+    let old = serde_json::json!({
+        "runId":"old-run", "status":"completed", "usage":{"inputTokens":321},
+        "toolResults":[{"result":"original result"}], "timeline":[{"content":"original narration"}],
+        "collaborationFinalResponseBoundary":12,
+        "collaborationTimelineActivities":[{
+            "activityId":"old-activity", "parentAgentId":"root", "parentConversationId":"root-chat"
+        }]
+    });
+    let raw = old.to_string();
+    let projected = without_legacy_collaboration_activities(Some(raw.clone())).unwrap();
+    let value: serde_json::Value = serde_json::from_str(&projected).unwrap();
+    let mut expected = old;
+    expected["collaborationTimelineActivities"] = serde_json::json!([]);
+    assert_eq!(value, expected);
+    assert!(raw.contains("parentAgentId"));
 }

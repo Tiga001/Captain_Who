@@ -324,12 +324,9 @@ export function AppShell() {
     () => collaborationTree?.agents.filter((agent) => agent.parentAgentId !== null) ?? [],
     [collaborationTree]
   )
-  const collaborationDirectChildAgentIds = useMemo(
-    () =>
-      collaborationChildren
-        .filter((agent) => agent.parentAgentId === collaborationTree?.rootAgentId)
-        .map((agent) => agent.agentId),
-    [collaborationChildren, collaborationTree?.rootAgentId]
+  const collaborationTreeAgentIds = useMemo(
+    () => collaborationTree?.agents.map((agent) => agent.agentId) ?? [],
+    [collaborationTree]
   )
   const collaborationApprovals = useCollaborationApprovals({
     enabled: collaborationChildren.length > 0,
@@ -537,7 +534,7 @@ export function AppShell() {
       agent,
       agentLabelsById,
       activities,
-      directChildAgentIds,
+      collaborationTreeAgentIds,
       invalidationVersion,
       onOpenAgent,
       rootConversationId
@@ -546,7 +543,7 @@ export function AppShell() {
         agent={agent}
         agentLabelsById={agentLabelsById}
         activities={activities}
-        directChildAgentIds={directChildAgentIds}
+        collaborationTreeAgentIds={collaborationTreeAgentIds}
         invalidationVersion={invalidationVersion}
         onOpenAgent={onOpenAgent}
         rootConversationId={rootConversationId}
@@ -1497,7 +1494,7 @@ export function AppShell() {
                 collaborationApprovals={collaborationApprovals}
                 collaborationAgentLabelsById={collaborationAgentLabelsById}
                 collaborationTimelineActivities={collaborationSnapshot?.activities ?? []}
-                directChildAgentIds={collaborationDirectChildAgentIds}
+                collaborationTreeAgentIds={collaborationTreeAgentIds}
                 composerDraft={activeDraft}
                 conversation={activeConversation}
                 contextWindowIndicatorEnabled={contextWindowIndicatorEnabled}

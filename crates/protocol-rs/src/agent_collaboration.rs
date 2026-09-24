@@ -18,8 +18,8 @@ pub struct AgentCollaborationSettingsUpdate {
 pub struct AgentCollaborationSettingsGetInput {}
 
 pub const AGENT_COLLABORATION_SCHEMA_VERSION: u32 = 1;
-pub const AGENT_COLLABORATION_EVENT_SCHEMA_VERSION: u32 = 2;
-pub const AGENT_COLLABORATION_ACTIVITY_SCHEMA_VERSION: u32 = 3;
+pub const AGENT_COLLABORATION_EVENT_SCHEMA_VERSION: u32 = 3;
+pub const AGENT_COLLABORATION_ACTIVITY_SCHEMA_VERSION: u32 = 4;
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -312,11 +312,14 @@ pub enum CollaborationActivitySemanticDto {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CollaborationActivitySnapshotDto {
     pub schema_version: u32,
+    pub activity_id: String,
     pub semantic: CollaborationActivitySemanticDto,
     pub agent_id: String,
     pub task_name_snapshot: String,
-    pub parent_agent_id: String,
-    pub parent_conversation_id: String,
+    pub owner_agent_id: String,
+    pub owner_conversation_id: String,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub task_message_id: Option<String>,
     #[serde(deserialize_with = "deserialize_required_nullable")]
     pub anchor_message_id: Option<String>,
     #[serde(deserialize_with = "deserialize_required_nullable")]
@@ -361,15 +364,14 @@ pub struct CollaborationEventEnvelopeDto {
     pub message_id: Option<String>,
     pub kind: CollaborationEventKindDto,
     pub resource_revision: u64,
-    pub activity: Option<CollaborationActivitySnapshotDto>,
+    pub activities: Vec<CollaborationActivitySnapshotDto>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub transmission: Option<CollaborationTransmissionDto>,
     pub occurred_at: i64,
 }
 
 /// A bare `Option<T>` silently maps a missing JSON field to `None`. Routing through an explicit
-/// deserializer makes event schema v2 distinguish a present `null` activity (known non-semantic
-/// event) from an older envelope which predates the projection.
+/// deserializer distinguishes an explicitly null routing or placement fact from a missing field.
 fn deserialize_required_nullable<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
 where
     D: Deserializer<'de>,
@@ -404,8 +406,7 @@ struct CollaborationEventEnvelopeWireDto {
     message_id: Option<String>,
     kind: CollaborationEventKindDto,
     resource_revision: u64,
-    #[serde(deserialize_with = "deserialize_required_nullable")]
-    activity: Option<CollaborationActivitySnapshotDto>,
+    activities: Vec<CollaborationActivitySnapshotDto>,
     #[serde(default, deserialize_with = "deserialize_optional_transmission")]
     transmission: Option<CollaborationTransmissionDto>,
     occurred_at: i64,
@@ -461,15 +462,41 @@ impl<'de> Deserialize<'de> for CollaborationEventEnvelopeDto {
                 ));
             }
         }
-        if let Some(activity) = wire.activity.as_ref() {
+        let mut activity_ids = std::collections::HashSet::new();
+        for activity in &wire.activities {
             if activity.schema_version != AGENT_COLLABORATION_ACTIVITY_SCHEMA_VERSION {
                 return Err(D::Error::custom(
                     "unsupported collaboration activity schema",
                 ));
             }
+            let valid_text = |value: &str, maximum: usize| {
+                !value.is_empty()
+                    && value.trim() == value
+                    && value.len() <= maximum
+                    && !value.contains('\0')
+            };
+            if !valid_text(&activity.activity_id, 2_048)
+                || !activity_ids.insert(&activity.activity_id)
+                || !valid_text(&activity.agent_id, 256)
+                || !valid_text(&activity.task_name_snapshot, 256)
+                || !valid_text(&activity.owner_agent_id, 256)
+                || !valid_text(&activity.owner_conversation_id, 256)
+                || !activity
+                    .task_message_id
+                    .as_deref()
+                    .is_none_or(|value| valid_text(value, 2_048))
+                || !activity
+                    .anchor_message_id
+                    .as_deref()
+                    .is_none_or(|value| valid_text(value, 2_048))
+            {
+                return Err(D::Error::custom(
+                    "invalid or duplicate collaboration activity identity",
+                ));
+            }
             if activity.anchor_message_id.is_none() && activity.trace_boundary_sequence.is_some() {
                 return Err(D::Error::custom(
-                    "collaboration trace boundary requires a parent message anchor",
+                    "collaboration trace boundary requires an owner message anchor",
                 ));
             }
             let valid_kind = matches!(
@@ -490,23 +517,23 @@ impl<'de> Deserialize<'de> for CollaborationEventEnvelopeDto {
                     CollaborationEventKindDto::WakeUpdated
                 )
             );
-            let valid_parent = activity.parent_agent_id != activity.agent_id
-                && !activity.parent_agent_id.trim().is_empty()
-                && !activity.parent_conversation_id.trim().is_empty()
-                && ((activity.parent_agent_id == wire.root_agent_id)
-                    == (activity.parent_conversation_id == wire.root_conversation_id));
+            let valid_owner = activity.owner_agent_id != activity.agent_id
+                && ((activity.owner_agent_id == wire.root_agent_id)
+                    == (activity.owner_conversation_id == wire.root_conversation_id));
             let valid_subject = match activity.semantic {
                 CollaborationActivitySemanticDto::Updated => {
-                    activity.agent_id != wire.agent_id
-                        && activity.parent_agent_id == wire.agent_id
-                        && activity.parent_conversation_id == wire.conversation_id
+                    activity.task_message_id.is_none()
+                        && activity.agent_id != wire.agent_id
+                        && activity.owner_agent_id == wire.agent_id
+                        && activity.owner_conversation_id == wire.conversation_id
                 }
                 _ => {
-                    activity.agent_id == wire.agent_id
-                        && activity.parent_conversation_id != wire.conversation_id
+                    activity.task_message_id.is_some()
+                        && activity.agent_id == wire.agent_id
+                        && activity.owner_conversation_id != wire.conversation_id
                 }
             };
-            if !valid_kind || !valid_subject || !valid_parent {
+            if !valid_kind || !valid_subject || !valid_owner {
                 return Err(D::Error::custom(
                     "collaboration activity kind/subject mismatch",
                 ));
@@ -528,7 +555,7 @@ impl<'de> Deserialize<'de> for CollaborationEventEnvelopeDto {
             message_id: wire.message_id,
             kind: wire.kind,
             resource_revision: wire.resource_revision,
-            activity: wire.activity,
+            activities: wire.activities,
             transmission: wire.transmission,
             occurred_at: wire.occurred_at,
         })

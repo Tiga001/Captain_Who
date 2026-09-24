@@ -195,7 +195,7 @@
     "reason": "core_started"
   },
   "event": {
-    "schemaVersion": 2,
+    "schemaVersion": 3,
     "eventId": "event-7",
     "sequence": 7,
     "workspaceId": "project-1",
@@ -209,17 +209,21 @@
     "messageId": "mailbox-task",
     "kind": "wake_created",
     "resourceRevision": 1,
-    "activity": {
-      "schemaVersion": 3,
-      "semantic": "started",
-      "agentId": "agent-child",
-      "taskNameSnapshot": "Research",
-      "parentAgentId": "agent-root",
-      "parentConversationId": "conversation-root",
-      "anchorMessageId": null,
-      "traceBoundarySequence": null
-    },
-    "occurredAt": 1720000000001
+    "occurredAt": 1720000000001,
+    "activities": [
+      {
+        "schemaVersion": 4,
+        "activityId": "event-7:activity:mailbox-task",
+        "semantic": "started",
+        "agentId": "agent-child",
+        "taskNameSnapshot": "Research",
+        "ownerAgentId": "agent-root",
+        "ownerConversationId": "conversation-root",
+        "taskMessageId": "mailbox-task",
+        "anchorMessageId": null,
+        "traceBoundarySequence": null
+      }
+    ]
   },
   "observer": {
     "schemaVersion": 1,

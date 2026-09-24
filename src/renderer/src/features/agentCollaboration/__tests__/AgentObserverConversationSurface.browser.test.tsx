@@ -36,7 +36,7 @@ it('exposes the production retry action when initial observer hydration cannot s
   const screen = await render(
     <AgentObserverConversationSurface
       agent={agent()}
-      directChildAgentIds={['grandchild']}
+      collaborationTreeAgentIds={['agent-root', 'agent-child', 'grandchild']}
       agentLabelsById={{}}
       invalidationVersion="1:1"
       rootConversationId="root-conversation"
@@ -68,7 +68,7 @@ it('keeps a previously authorized observer surface visible with a refresh recove
   const screen = await render(
     <AgentObserverConversationSurface
       agent={agent()}
-      directChildAgentIds={['grandchild']}
+      collaborationTreeAgentIds={['agent-root', 'agent-child', 'grandchild']}
       agentLabelsById={{}}
       invalidationVersion="1:2"
       rootConversationId="root-conversation"
@@ -103,22 +103,23 @@ it('passes scoped child status activity and navigation to the shared observer co
       activityId: 'child-started',
       agentId: 'grandchild',
       occurredAt: 2,
-      parentAgentId: 'child',
-      parentConversationId: 'child-conversation',
+      ownerAgentId: 'child',
+      ownerConversationId: 'child-conversation',
       anchorMessageId: null,
       traceBoundarySequence: null,
       runId: null,
       semantic: 'started' as const,
       sequence: 1,
       taskNameSnapshot: 'grandchild',
-      turnId: null
+      turnId: null,
+      taskMessageId: 'task-grandchild'
     }
   ]
   const onOpenAgent = vi.fn()
   await render(
     <AgentObserverConversationSurface
       agent={agent()}
-      directChildAgentIds={['grandchild']}
+      collaborationTreeAgentIds={['agent-root', 'agent-child', 'grandchild']}
       agentLabelsById={{ grandchild: 'grandchild' }}
       activities={activities}
       invalidationVersion="1:1"
@@ -131,7 +132,7 @@ it('passes scoped child status activity and navigation to the shared observer co
   expect(mocks.renderConversationSurface).toHaveBeenCalledWith(
     expect.objectContaining({
       collaborationTimelineActivities: activities,
-      directChildAgentIds: ['grandchild'],
+      collaborationTreeAgentIds: ['agent-root', 'agent-child', 'grandchild'],
       mode: 'observer',
       onOpenCollaborationAgent: onOpenAgent,
       rootConversationId: 'root-conversation'
