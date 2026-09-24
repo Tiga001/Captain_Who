@@ -439,6 +439,162 @@ fn agent_collaboration_contract_matches_the_typescript_fixture_and_is_strict() {
     assert!(serde_json::from_value::<CollaborationEventEnvelopeDto>(forged_update).is_err());
 }
 
+fn collaboration_transmission_event(kind: &str) -> Value {
+    let fixture: Value = serde_json::from_str(include_str!(
+        "../../../packages/protocol/fixtures/agent-collaboration-contract-v1.json"
+    ))
+    .unwrap();
+    let mut event = fixture["event"].clone();
+    event["activity"] = Value::Null;
+    let (event_kind, source, target) = match kind {
+        "user_message" => ("turn_started", None, Some("agent-root")),
+        "completion" => ("turn_updated", Some("agent-root"), None),
+        _ => ("mailbox_enqueued", Some("agent-root"), Some("agent-child")),
+    };
+    if matches!(kind, "user_message" | "completion") {
+        event["agentId"] = serde_json::json!("agent-root");
+        event["conversationId"] = serde_json::json!("conversation-root");
+    }
+    event["kind"] = serde_json::json!(event_kind);
+    event["transmission"] = serde_json::json!({
+        "id": "independent-stable-transfer-id",
+        "kind": kind,
+        "sourceAgentId": source,
+        "targetAgentId": target,
+    });
+    event
+}
+
+#[test]
+fn collaboration_transmission_accepts_all_confirmed_routes_and_stable_identity() {
+    for (kind, expected_kind) in [
+        ("message", CollaborationTransmissionKindDto::Message),
+        ("task", CollaborationTransmissionKindDto::Task),
+        (
+            "user_message",
+            CollaborationTransmissionKindDto::UserMessage,
+        ),
+        ("completion", CollaborationTransmissionKindDto::Completion),
+    ] {
+        let wire = collaboration_transmission_event(kind);
+        let event: CollaborationEventEnvelopeDto = serde_json::from_value(wire.clone()).unwrap();
+        let transfer = event.transmission.as_ref().unwrap();
+        assert_eq!(event.schema_version, 2);
+        assert_eq!(transfer.kind, expected_kind);
+        assert_eq!(transfer.id, "independent-stable-transfer-id");
+        assert_ne!(transfer.id, event.event_id);
+        assert_ne!(Some(&transfer.id), event.message_id.as_ref());
+        assert!(event.activity.is_none());
+        assert_eq!(serde_json::to_value(event).unwrap(), wire);
+    }
+}
+
+#[test]
+fn collaboration_transmission_is_omitted_when_absent_and_rejects_explicit_null() {
+    let mut wire = collaboration_transmission_event("message");
+    wire.as_object_mut().unwrap().remove("transmission");
+    let event: CollaborationEventEnvelopeDto = serde_json::from_value(wire.clone()).unwrap();
+    assert!(event.transmission.is_none());
+    let serialized = serde_json::to_value(event).unwrap();
+    assert!(serialized.get("transmission").is_none());
+    assert_eq!(serialized, wire);
+
+    for invalid in [
+        Value::Null,
+        serde_json::json!([]),
+        serde_json::json!("transfer"),
+    ] {
+        wire["transmission"] = invalid;
+        assert!(serde_json::from_value::<CollaborationEventEnvelopeDto>(wire.clone()).is_err());
+    }
+}
+
+#[test]
+fn collaboration_transmission_requires_all_fields_and_rejects_unknown_content() {
+    for kind in ["message", "task", "user_message", "completion"] {
+        for field in ["id", "kind", "sourceAgentId", "targetAgentId"] {
+            let mut wire = collaboration_transmission_event(kind);
+            wire["transmission"].as_object_mut().unwrap().remove(field);
+            assert!(
+                serde_json::from_value::<CollaborationEventEnvelopeDto>(wire).is_err(),
+                "{kind} must require {field}"
+            );
+        }
+        let mut wire = collaboration_transmission_event(kind);
+        wire["transmission"]["body"] = serde_json::json!("message content must not cross");
+        assert!(serde_json::from_value::<CollaborationEventEnvelopeDto>(wire).is_err());
+    }
+}
+
+#[test]
+fn collaboration_transmission_rejects_invalid_ids_and_mailbox_routes() {
+    for kind in ["message", "task"] {
+        for patch in [
+            serde_json::json!({"id": ""}),
+            serde_json::json!({"id": " trailing "}),
+            serde_json::json!({"id": "x".repeat(513)}),
+            serde_json::json!({"id": "transfer\0id"}),
+            serde_json::json!({"kind": "mailbox_updated"}),
+            serde_json::json!({"sourceAgentId": ""}),
+            serde_json::json!({"targetAgentId": ""}),
+            serde_json::json!({"sourceAgentId": "agent\0root"}),
+            serde_json::json!({"targetAgentId": "agent\0child"}),
+            serde_json::json!({"sourceAgentId": null}),
+            serde_json::json!({"targetAgentId": null}),
+            serde_json::json!({"sourceAgentId": null, "targetAgentId": null}),
+            serde_json::json!({"sourceAgentId": "agent-child"}),
+            serde_json::json!({"targetAgentId": "agent-other"}),
+        ] {
+            let mut wire = collaboration_transmission_event(kind);
+            wire["transmission"]
+                .as_object_mut()
+                .unwrap()
+                .extend(patch.as_object().unwrap().clone());
+            assert!(
+                serde_json::from_value::<CollaborationEventEnvelopeDto>(wire).is_err(),
+                "{kind} must reject {patch}"
+            );
+        }
+        for wrong_kind in ["mailbox_updated", "turn_started", "turn_updated"] {
+            let mut wire = collaboration_transmission_event(kind);
+            wire["kind"] = serde_json::json!(wrong_kind);
+            assert!(serde_json::from_value::<CollaborationEventEnvelopeDto>(wire).is_err());
+        }
+    }
+}
+
+#[test]
+fn collaboration_transmission_rejects_forged_human_and_root_routes() {
+    for kind in ["user_message", "completion"] {
+        for patch in [
+            serde_json::json!({"conversationId": "conversation-child"}),
+            serde_json::json!({"agentId": "agent-child"}),
+            serde_json::json!({"kind": "mailbox_enqueued"}),
+            serde_json::json!({"kind": if kind == "user_message" { "turn_updated" } else { "turn_started" }}),
+        ] {
+            let mut wire = collaboration_transmission_event(kind);
+            wire.as_object_mut()
+                .unwrap()
+                .extend(patch.as_object().unwrap().clone());
+            assert!(
+                serde_json::from_value::<CollaborationEventEnvelopeDto>(wire).is_err(),
+                "{kind} must reject event {patch}"
+            );
+        }
+        for (source, target) in [
+            (None, None),
+            (Some("agent-root"), Some("agent-root")),
+            (Some("agent-child"), None),
+            (None, Some("agent-child")),
+        ] {
+            let mut wire = collaboration_transmission_event(kind);
+            wire["transmission"]["sourceAgentId"] = serde_json::json!(source);
+            wire["transmission"]["targetAgentId"] = serde_json::json!(target);
+            assert!(serde_json::from_value::<CollaborationEventEnvelopeDto>(wire).is_err());
+        }
+    }
+}
+
 #[test]
 fn round5_collaboration_scenario_is_strict_across_rust_and_typescript() {
     let fixture: Value = serde_json::from_str(include_str!(

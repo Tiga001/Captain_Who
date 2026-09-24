@@ -2,7 +2,7 @@
 status: current
 audience: developers
 owner: engineering
-last_verified: 2026-09-16
+last_verified: 2026-09-24
 ---
 
 # 右侧栏平台
@@ -145,12 +145,15 @@ Agent Center 是当前根 Agent Conversation 的只读子 Agent 索引：
 - 首页将当前树分为 active 与 non-active，按最近活动排序，只显示可展示的任务、状态、模型和时间信息。
 - 首页顶部常驻排列视图、平铺树图与目录树三个按钮，直接选择并高亮当前视图，模板入口保留在旁边。两种树图共用用户与 Agent 的折叠状态，分别保留滚动位置，超宽时仅在树图区域横向滚动。
 - 树顶为用户（用户名与 Captain Who）和默认机器人头像的根 Agent，其下按真实父子关系显示子 Agent。用户节点始终呼吸，活跃 Agent 按现有状态呼吸；用户头像进入个人资料，根 Agent 头像回到主对话，子 Agent 头像进入 observer。
+- 只有平铺树图播放实时通信光波：直系父子沿原连接线，跨级/同级以临时圆弧连接真实发送方与接收方；用户提交消息和根 Agent 完成分别向下、向上传输。路径根据节点实际位置计算，叠加层不占布局或拦截点击，不自动展开隐藏节点。目录树与排列视图不播放。
 - 选择 Agent 后切换到 detail state，通过 AppShell render contract 复用 `ConversationSurface` 的 observer 模式。
 - 同一项目内切换根 Agent 也会重置 detail 到新根 Agent 的列表；快照不匹配时 fail closed；没有子 Agent 时移除模块。
 - Observer 没有 composer、send、edit、retry、fork、stop/guide 或 approval 控件。Core Server/Rust Core 仍会校验精确根 Agent 与子 Agent Conversation，因此隐藏控件不是授权边界。
 - 共享会话 surface 在 280 px 侧栏最小宽度下使用局部布局覆盖，不维护第二套聊天实现。
 
 AppShell 是活动根 Agent collaboration store 的唯一所有者。该 store 从持久事件序列重放并检查 gap；live 回复内活动保留最近 2,048 条，消息间活动独立保留，不被该窗口淘汰。每条语义活动记录直属父 Agent、父 Conversation 和该会话内的持久位置；根聊天与子 Agent observer 使用同一投影，只展示属于当前 Conversation 的直属子 Agent 活动。Agent Center 当前树状态、observer live envelope 和会话历史是三种不同投影，不能互相推导。
+
+树图光波是独立的短时展示投影：协作事件的可选 `transmission` 只提供稳定 id、类型、真实源/目标身份（用户端为 null），不暴露通信正文。消息以成功入队事实为准，已应用用户引导复用绑定根 Run 的 `guidance_applied`，完成以真实根 Run 终态为准；光波不表示接收方已读。首次加载、重同步、重开视图不重播历史；按传输 id 去重，过期、隐藏端点和不属于当前树的路径丢弃。临时队列有数量与时效上限，关闭时释放订阅和计时器，减少动态效果偏好停用传输动画。
 
 父 Agent 正在运行时，活动在事件事务中记录其 assistant-message 和 trace boundary，插入对应回复的时间线；该回复结算时保存冻结活动列表，并用可选的 `collaborationFinalResponseBoundary` 保持活动在最终正文前后的顺序；边界之后的活动不会被删除。父 Agent 空闲时，新活动记录在父会话最后一条消息之后；空会话则记录在首条消息之前，后续新轮次不能改变它的位置。渲染按持久事件 sequence 排序，不按通知抵达顺序或墙钟时间猜测位置，也不把深层子 Agent 状态重复展示在根聊天。圆角状态栏仍可进入对应子 Agent 详情，observer 保持只读。
 

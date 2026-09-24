@@ -24,6 +24,81 @@
   scrollbar-width: thin;
 }
 
+.agent-tree--diagram {
+  position: relative;
+}
+
+.agent-tree__transmissions {
+  position: absolute;
+  z-index: 1;
+  top: 0;
+  left: 0;
+  overflow: hidden;
+  color: var(--mc-color-text-accent);
+  pointer-events: none;
+}
+
+.agent-tree__transmission {
+  animation: agent-tree-transmission-fade 1.2s ease-out both;
+}
+
+.agent-tree__transmission path {
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.agent-tree__transmission-track {
+  opacity: 0.3;
+  stroke-width: 1.1;
+}
+
+.agent-tree__transmission-wave {
+  opacity: 0.5;
+  stroke-width: 2.6;
+  stroke-dasharray: 20 200;
+  filter: drop-shadow(0 0 3px var(--mc-color-text-accent));
+  animation: agent-tree-transmission-wave 1s linear both;
+}
+
+.agent-tree__transmission-head {
+  stroke-width: 1.6;
+  stroke-dasharray: 5 200;
+  animation: agent-tree-transmission-head 1s linear both;
+}
+
+@keyframes agent-tree-transmission-wave {
+  from {
+    stroke-dashoffset: 20;
+  }
+  to {
+    stroke-dashoffset: -100;
+  }
+}
+
+@keyframes agent-tree-transmission-head {
+  from {
+    stroke-dashoffset: 5;
+  }
+  to {
+    stroke-dashoffset: -115;
+  }
+}
+
+@keyframes agent-tree-transmission-fade {
+  0% {
+    opacity: 0;
+  }
+  8%,
+  75% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+  }
+}
+
 .agent-tree__roots,
 .agent-tree__children {
   display: flex;
@@ -193,6 +268,9 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .agent-tree__transmissions {
+    display: none;
+  }
   .agent-tree__node[data-active='true'],
   .agent-tree__node--user {
     animation: none;

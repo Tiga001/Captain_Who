@@ -1,8 +1,8 @@
 use super::*;
 use mycopilot_core::{
     AgentCollaborationActivitySemantic, AgentCollaborationEventKind, AgentCollaborationEventRecord,
-    AgentDisplayStatus, AgentLifecycle, AgentNodeRecord, AgentTemplateRecord,
-    ConversationMessageOrigin,
+    AgentCollaborationTransmissionKind, AgentDisplayStatus, AgentLifecycle, AgentNodeRecord,
+    AgentTemplateRecord, ConversationMessageOrigin,
 };
 use mycopilot_protocol_rs::{
     AgentConversationLocatorDto, AgentConversationLocatorRequest, AgentConversationModeDto,
@@ -18,9 +18,9 @@ use mycopilot_protocol_rs::{
     CollaborationApprovalDecisionResultDto, CollaborationApprovalListDto,
     CollaborationApprovalListRequest, CollaborationApprovalProjectionDto,
     CollaborationApprovalStatusDto, CollaborationEventEnvelopeDto, CollaborationEventKindDto,
-    CollaborationEventsPageDto, CollaborationEventsRequest,
-    AGENT_COLLABORATION_ACTIVITY_SCHEMA_VERSION, AGENT_COLLABORATION_EVENT_SCHEMA_VERSION,
-    AGENT_COLLABORATION_SCHEMA_VERSION,
+    CollaborationEventsPageDto, CollaborationEventsRequest, CollaborationTransmissionDto,
+    CollaborationTransmissionKindDto, AGENT_COLLABORATION_ACTIVITY_SCHEMA_VERSION,
+    AGENT_COLLABORATION_EVENT_SCHEMA_VERSION, AGENT_COLLABORATION_SCHEMA_VERSION,
 };
 
 const TREE_LIMIT: usize = 1_024;
@@ -640,6 +640,27 @@ pub(crate) fn event_dto(record: AgentCollaborationEventRecord) -> CollaborationE
                 parent_conversation_id: activity.parent_conversation_id,
                 anchor_message_id: activity.anchor_message_id,
                 trace_boundary_sequence: activity.trace_boundary_sequence,
+            }),
+        transmission: record
+            .transmission
+            .map(|transmission| CollaborationTransmissionDto {
+                id: transmission.id,
+                kind: match transmission.kind {
+                    AgentCollaborationTransmissionKind::Message => {
+                        CollaborationTransmissionKindDto::Message
+                    }
+                    AgentCollaborationTransmissionKind::Task => {
+                        CollaborationTransmissionKindDto::Task
+                    }
+                    AgentCollaborationTransmissionKind::UserMessage => {
+                        CollaborationTransmissionKindDto::UserMessage
+                    }
+                    AgentCollaborationTransmissionKind::Completion => {
+                        CollaborationTransmissionKindDto::Completion
+                    }
+                },
+                source_agent_id: transmission.source_agent_id,
+                target_agent_id: transmission.target_agent_id,
             }),
         occurred_at: record.created_at,
     }

@@ -490,6 +490,74 @@ async function captureStableScreenshot(element: Element, path: string): Promise<
 beforeEach(resetScenario)
 
 describe('AppShell deterministic collaboration scenario', () => {
+  it('routes a live message receipt through the store to the flat tree without replay on view changes', async () => {
+    const previousViewport = { width: window.innerWidth, height: window.innerHeight }
+    await page.viewport(1280, 900)
+    scenarioState.currentTree = parseAgentTreeSnapshot(scenarioFixture.settledTree)
+    const screen = await render(<AppShell />)
+    try {
+      await screen.getByRole('button', { name: 'select-conversation-root' }).click()
+      await screen.getByRole('button', { name: 'Subagents' }).click()
+      // This shell fixture mocks the global layout provider; give its real sidebar a desktop frame.
+      Object.assign(screen.container.querySelector<HTMLElement>('.right-sidebar')!.style, {
+        position: 'fixed',
+        top: '0',
+        right: '0',
+        width: '600px',
+        height: '800px',
+        zIndex: '100'
+      })
+      await screen.getByRole('button', { name: 'Switch to diagram tree' }).click()
+      await expect.poll(() => screen.container.querySelector('.agent-tree--diagram')).not.toBeNull()
+      expect(screen.container.querySelector('.agent-tree__transmission')).toBeNull()
+
+      const sequence = scenarioState.currentTree!.lastSequence + 1
+      const transfer = parseCollaborationEventEnvelope({
+        ...scenarioState.eventPage!.events.at(-1),
+        eventId: 'live-sibling-message-event',
+        sequence,
+        agentId: 'agent-compatibility',
+        conversationId: 'conversation-compatibility',
+        turnId: null,
+        runId: null,
+        messageId: 'live-sibling-message',
+        kind: 'mailbox_enqueued',
+        activity: null,
+        occurredAt: Date.now(),
+        transmission: {
+          id: 'mailbox:live-sibling-message',
+          kind: 'message',
+          sourceAgentId: 'agent-review',
+          targetAgentId: 'agent-compatibility'
+        }
+      })
+      scenarioState.currentTree = { ...scenarioState.currentTree!, lastSequence: sequence }
+      scenarioState.eventPage = {
+        ...scenarioState.eventPage!,
+        events: [...scenarioState.eventPage!.events, transfer],
+        lastSequence: sequence
+      }
+      emitCollaborationEvent(transfer)
+      await expect
+        .poll(() => screen.container.querySelectorAll('.agent-tree__transmission').length)
+        .toBe(1)
+      expect(
+        screen.container
+          .querySelector('.agent-tree__transmission')
+          ?.getAttribute('data-transmission-id')
+      ).toBe('mailbox:live-sibling-message')
+      emitCollaborationEvent(transfer)
+      expect(screen.container.querySelectorAll('.agent-tree__transmission')).toHaveLength(1)
+      await screen.getByRole('button', { name: 'Switch to directory tree' }).click()
+      expect(screen.container.querySelector('.agent-tree__transmission')).toBeNull()
+      await screen.getByRole('button', { name: 'Switch to diagram tree' }).click()
+      expect(screen.container.querySelector('.agent-tree__transmission')).toBeNull()
+    } finally {
+      await screen.unmount()
+      await page.viewport(previousViewport.width, previousViewport.height)
+    }
+  })
+
   it('hydrates real Host DTOs into root activity, approval routing and read-only Agent Center', async () => {
     const screen = await render(<AppShell />)
     await screen.getByRole('button', { name: 'select-conversation-root' }).click()

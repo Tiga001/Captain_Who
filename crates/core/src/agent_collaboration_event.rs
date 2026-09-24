@@ -22,6 +22,26 @@ pub enum AgentCollaborationEventKind {
     ApprovalUpdated,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentCollaborationTransmissionKind {
+    Message,
+    Task,
+    UserMessage,
+    Completion,
+}
+
+/// Presentation-only routing read from committed message/Turn facts. No message text is exposed.
+/// A missing endpoint represents the user, never an inferred Agent ancestor.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AgentCollaborationTransmission {
+    pub id: String,
+    pub kind: AgentCollaborationTransmissionKind,
+    pub source_agent_id: Option<String>,
+    pub target_agent_id: Option<String>,
+}
+
 /// Immutable renderer-safe meaning captured in the same transaction as its collaboration event.
 ///
 /// The outer event's `agent_id` remains the invalidation subject. `agent_id` here is the activity
@@ -134,6 +154,8 @@ pub struct AgentCollaborationEventRecord {
     pub kind: AgentCollaborationEventKind,
     pub resource_revision: u64,
     pub activity: Option<AgentCollaborationActivitySnapshot>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transmission: Option<AgentCollaborationTransmission>,
     pub created_at: i64,
 }
 

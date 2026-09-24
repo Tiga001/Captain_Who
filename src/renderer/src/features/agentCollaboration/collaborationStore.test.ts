@@ -360,6 +360,7 @@ describe('CollaborationStore', () => {
       hydrationRevision: 1,
       loading: false,
       rootConversationId: 'legacy-conversation',
+      transmissions: [],
       tree: null
     })
   })

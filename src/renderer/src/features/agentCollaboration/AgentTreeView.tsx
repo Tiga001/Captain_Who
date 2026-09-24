@@ -1,17 +1,20 @@
 import type { AgentSummary } from '@mycopilot/protocol'
 import { Bot, ChevronDown, ChevronRight } from 'lucide-react'
-import { useMemo, type ReactNode, type RefObject } from 'react'
+import { useId, useMemo, type ReactNode, type RefObject } from 'react'
 import { useFrontendConfig } from '../../config/FrontendConfigProvider'
 import { formatTranslation } from '../../config/translationFormat'
 import { AccountAvatar } from '../auth/AccountAvatar'
 import { useAccountAuth } from '../auth/AccountAuthContext'
 import { AgentAvatar } from './AgentAvatar'
 import { ACTIVE_STATUSES, baseModelLabel, statusLabel } from './agentCenterLabels'
+import type { AgentTreeTransmission } from './agentTreeTransmission'
+import { useAgentTreeTransmissions } from './useAgentTreeTransmissions'
 import './AgentTreeView.css'
 
 export type AgentTreeLayout = 'diagram' | 'outline'
 
 interface AgentTreeViewProps {
+  transmissions?: readonly AgentTreeTransmission[]
   layout: AgentTreeLayout
   agents: readonly AgentSummary[]
   rootAgentId: string
@@ -25,7 +28,10 @@ interface AgentTreeViewProps {
   scrollRef: RefObject<HTMLDivElement | null>
 }
 
+const NO_TRANSMISSIONS: readonly AgentTreeTransmission[] = []
+
 export function AgentTreeView({
+  transmissions = NO_TRANSMISSIONS,
   layout,
   agents,
   rootAgentId,
@@ -38,6 +44,15 @@ export function AgentTreeView({
   registerAvatar,
   scrollRef
 }: AgentTreeViewProps) {
+  const markerId = `agent-transmission-${useId().replace(/:/g, '')}`
+  const transmissionView = useAgentTreeTransmissions({
+    layout,
+    transmissions,
+    agents,
+    collapsedAgentIds,
+    userCollapsed,
+    scrollRef
+  })
   const { t } = useFrontendConfig()
   const profile = useAccountAuth()?.state.profile
   const userLabel = profile?.displayName?.trim() || profile?.userId || t('auth.signedOut')
@@ -182,6 +197,58 @@ export function AgentTreeView({
       ) : (
         <p className="agent-center__empty">{t('agentCenter.noAgents')}</p>
       )}
+      {layout === 'diagram' && transmissionView.active.length > 0 ? (
+        <svg
+          aria-hidden="true"
+          className="agent-tree__transmissions"
+          width={transmissionView.width}
+          height={transmissionView.height}
+          focusable="false"
+        >
+          <defs>
+            <marker
+              id={markerId}
+              markerWidth="5"
+              markerHeight="5"
+              refX="4"
+              refY="2.5"
+              orient="auto"
+              markerUnits="userSpaceOnUse"
+            >
+              <path d="M 0 0 L 4 2.5 L 0 5" fill="none" stroke="currentColor" strokeWidth="1.2" />
+            </marker>
+          </defs>
+          {transmissionView.active.map((event) => (
+            <g
+              key={event.id}
+              className="agent-tree__transmission"
+              data-transmission-id={event.id}
+              data-source-agent-id={event.sourceAgentId ?? 'user'}
+              data-target-agent-id={event.targetAgentId ?? 'user'}
+              data-route-kind={event.route.kind}
+              onAnimationEnd={(animation) => {
+                if (animation.target === animation.currentTarget) transmissionView.finish(event.id)
+              }}
+            >
+              <path
+                className="agent-tree__transmission-track"
+                d={event.route.path}
+                markerEnd={`url(#${markerId})`}
+              />
+              <path
+                className="agent-tree__transmission-wave"
+                d={event.route.path}
+                pathLength="100"
+              />
+              <path
+                className="agent-tree__transmission-head"
+                d={event.route.path}
+                pathLength="100"
+              />
+            </g>
+          ))}
+        </svg>
+      ) : null}
     </div>
   )
 }

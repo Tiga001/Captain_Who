@@ -248,6 +248,7 @@ export function AgentCenterPanel({ onNavigate, pageState }: AgentCenterPanelProp
         </div>
         <AgentTreeView
           layout={treeLayout}
+          transmissions={collaborationSnapshot?.transmissions}
           agents={validTree.agents}
           rootAgentId={validTree.rootAgentId}
           userCollapsed={userCollapsed}

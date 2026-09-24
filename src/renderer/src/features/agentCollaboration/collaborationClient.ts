@@ -3,6 +3,7 @@ import type {
   AgentCollaborationSettingsGetInput,
   AgentCollaborationSettingsUpdate,
   AgentCollaborationSettings,
+  AgentEvent,
   AgentConversationLocator,
   AgentConversationLocatorRequest,
   AgentDetail,
@@ -29,12 +30,14 @@ import type {
   CollaborationEventsRequest
 } from '@mycopilot/protocol'
 import { hostClient } from '../../host/hostClient'
+import { onAgentEvent } from '../agent/agentClient'
 
 export interface CollaborationDataSource {
   getTree(input: AgentTreeRequest): Promise<AgentTreeSnapshot | null>
   listEvents(input: CollaborationEventsRequest): Promise<CollaborationEventsPage>
   subscribe(handler: (event: CollaborationEventEnvelope) => void): () => void
   subscribeResync(handler: () => void): () => void
+  subscribeAgentEvents?(handler: (event: AgentEvent) => void): () => void
 }
 
 export const hostCollaborationDataSource: CollaborationDataSource = {
@@ -49,6 +52,9 @@ export const hostCollaborationDataSource: CollaborationDataSource = {
   },
   subscribeResync(handler) {
     return hostClient.agent.onCollaborationResync(() => handler())
+  },
+  subscribeAgentEvents(handler) {
+    return onAgentEvent(handler)
   }
 }
 

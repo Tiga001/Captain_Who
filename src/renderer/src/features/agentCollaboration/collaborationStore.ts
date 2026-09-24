@@ -1,9 +1,13 @@
-import type { AgentTreeSnapshot, CollaborationEventEnvelope } from '@mycopilot/protocol'
+import type { AgentEvent, AgentTreeSnapshot, CollaborationEventEnvelope } from '@mycopilot/protocol'
 import { hostCollaborationDataSource, type CollaborationDataSource } from './collaborationClient'
 import type { CollaborationTimelineActivity } from './collaborationTimelineModel'
+import type { AgentTreeTransmission } from './agentTreeTransmission'
 
 const EVENT_PAGE_SIZE = 256
 export const MAX_COLLABORATION_TIMELINE_ACTIVITIES = 2_048
+export const TREE_TRANSMISSION_LIFETIME_MS = 5_000
+const MAX_TREE_TRANSMISSIONS = 24
+const MAX_SEEN_TRANSMISSIONS = 2_048
 
 class CollaborationEventGapError extends Error {}
 
@@ -17,6 +21,8 @@ export interface CollaborationStoreSnapshot {
   loading: boolean
   rootConversationId: string
   tree: AgentTreeSnapshot | null
+  /** Ephemeral presentation only. Hydration/recovery never populates these pulses. */
+  transmissions?: readonly AgentTreeTransmission[]
 }
 
 /**
@@ -35,6 +41,14 @@ export class CollaborationStore {
   private snapshot: CollaborationStoreSnapshot
   private unsubscribe: (() => void) | null = null
   private unsubscribeResync: (() => void) | null = null
+  private unsubscribeAgentEvents: (() => void) | null = null
+  private transmissionExpiryTimer: ReturnType<typeof setTimeout> | null = null
+  private readonly seenTransmissionIds = new Set<string>()
+  private readonly rootRunIds = new Set<string>()
+  private readonly pendingGuidanceTransmissions = new Map<
+    string,
+    { runId: string; receivedAt: number }
+  >()
 
   constructor(
     readonly rootConversationId: string,
@@ -47,7 +61,8 @@ export class CollaborationStore {
       hydrationRevision: 0,
       loading: true,
       rootConversationId,
-      tree: null
+      tree: null,
+      transmissions: []
     }
   }
 
@@ -62,13 +77,16 @@ export class CollaborationStore {
     if (this.destroyed || this.unsubscribe) return
     this.unsubscribe = this.source.subscribe(this.handleEvent)
     this.unsubscribeResync = this.source.subscribeResync(this.handleResync)
+    this.unsubscribeAgentEvents = this.source.subscribeAgentEvents?.(this.handleAgentEvent) ?? null
     void this.hydrate()
   }
 
   async hydrate(): Promise<void> {
     if (this.destroyed) return
     const generation = ++this.generation
-    this.publish({ error: false, loading: true })
+    this.clearTransmissionTimer()
+    this.pendingGuidanceTransmissions.clear()
+    this.publish({ error: false, loading: true, transmissions: [] })
     try {
       const initialTree = await this.source.getTree({ rootConversationId: this.rootConversationId })
       if (!this.isCurrent(generation)) return
@@ -139,11 +157,21 @@ export class CollaborationStore {
     this.unsubscribe = null
     this.unsubscribeResync?.()
     this.unsubscribeResync = null
+    this.unsubscribeAgentEvents?.()
+    this.unsubscribeAgentEvents = null
+    this.clearTransmissionTimer()
+    this.rootRunIds.clear()
+    this.seenTransmissionIds.clear()
+    this.pendingGuidanceTransmissions.clear()
     this.listeners.clear()
   }
 
   private readonly handleEvent = (event: CollaborationEventEnvelope): void => {
     if (this.destroyed || event.rootConversationId !== this.rootConversationId) return
+    if (this.snapshot.loading) {
+      this.catchUpRequested = true
+      return
+    }
     if (!this.snapshot.tree) {
       void this.hydrate()
       return
@@ -155,6 +183,23 @@ export class CollaborationStore {
   private readonly handleResync = (): void => {
     if (this.destroyed) return
     void this.hydrate()
+  }
+
+  private readonly handleAgentEvent = (event: AgentEvent): void => {
+    const tree = this.snapshot.tree
+    if (this.destroyed || this.snapshot.loading || !tree || event.type !== 'guidance_applied')
+      return
+    // Applied guidance has a committed Human message. Queued/rejected drafts are not transfers.
+    const id = `user-message:${event.clientMessageId}`
+    if (this.seenTransmissionIds.has(id)) return
+    this.pendingGuidanceTransmissions.set(id, { runId: event.runId, receivedAt: Date.now() })
+    if (this.pendingGuidanceTransmissions.size > MAX_TREE_TRANSMISSIONS) {
+      this.pendingGuidanceTransmissions.delete(
+        this.pendingGuidanceTransmissions.keys().next().value!
+      )
+    }
+    this.publish({ transmissions: this.acceptTransmissions(this.takeRootGuidance(tree), tree) })
+    this.scheduleTransmissionExpiry()
   }
 
   private requestCatchUp(): void {
@@ -174,6 +219,7 @@ export class CollaborationStore {
       let cursor = this.eventCursor
       let activities = [...this.snapshot.activities]
       let agentInvalidationSequences = { ...this.snapshot.agentInvalidationSequences }
+      let transmissions: AgentTreeTransmission[] = []
 
       try {
         for (;;) {
@@ -181,13 +227,15 @@ export class CollaborationStore {
             generation,
             cursor,
             activities,
-            agentInvalidationSequences
+            agentInvalidationSequences,
+            true
           )
           if (!this.isCurrent(generation) || !this.snapshot.tree) return
           const previousCursor = cursor
           cursor = replay.cursor
           activities = replay.activities
           agentInvalidationSequences = replay.invalidationSequences
+          transmissions = [...transmissions, ...replay.transmissions].slice(-MAX_TREE_TRANSMISSIONS)
           const tree = await this.source.getTree({ rootConversationId: this.rootConversationId })
           if (!this.isCurrent(generation)) return
           if (!tree) {
@@ -198,7 +246,8 @@ export class CollaborationStore {
               error: false,
               hydrationRevision: this.snapshot.hydrationRevision + 1,
               loading: false,
-              tree: null
+              tree: null,
+              transmissions: []
             })
             return
           }
@@ -220,8 +269,13 @@ export class CollaborationStore {
             ),
             error: false,
             loading: false,
-            tree
+            tree,
+            transmissions: this.acceptTransmissions(
+              [...transmissions, ...this.takeRootGuidance(tree)],
+              tree
+            )
           })
+          this.scheduleTransmissionExpiry()
           break
         }
       } catch (error) {
@@ -239,28 +293,48 @@ export class CollaborationStore {
     generation: number,
     startCursor: number,
     initialActivities: readonly CollaborationTimelineActivity[],
-    initialInvalidationSequences: Readonly<Record<string, number>> = {}
+    initialInvalidationSequences: Readonly<Record<string, number>> = {},
+    collectTransmissions = false
   ): Promise<{
     activities: CollaborationTimelineActivity[]
     cursor: number
     invalidationSequences: Record<string, number>
+    transmissions: AgentTreeTransmission[]
   }> {
     let cursor = startCursor
     let activities = [...initialActivities]
     const invalidationSequences = { ...initialInvalidationSequences }
+    let transmissions: AgentTreeTransmission[] = []
     for (;;) {
       const page = await this.source.listEvents({
         afterSequence: cursor,
         limit: EVENT_PAGE_SIZE,
         rootConversationId: this.rootConversationId
       })
-      if (!this.isCurrent(generation)) return { activities, cursor, invalidationSequences }
+      if (!this.isCurrent(generation))
+        return { activities, cursor, invalidationSequences, transmissions }
       if (page.rootConversationId !== this.rootConversationId) throw new Error('Wrong root')
       for (const event of page.events) {
         if (event.rootConversationId !== this.rootConversationId || event.sequence !== cursor + 1) {
           throw new CollaborationEventGapError('Event log gap')
         }
         cursor = event.sequence
+        if (
+          event.agentId === event.rootAgentId &&
+          event.runId &&
+          (event.kind === 'turn_started' || event.kind === 'turn_updated')
+        ) {
+          this.rootRunIds.add(event.runId)
+          if (this.rootRunIds.size > 64)
+            this.rootRunIds.delete(this.rootRunIds.values().next().value!)
+        }
+        if (event.transmission) {
+          const now = Date.now()
+          if (!collectTransmissions) this.rememberTransmission(event.transmission.id)
+          else if (now - event.occurredAt <= TREE_TRANSMISSION_LIFETIME_MS) {
+            transmissions.push({ ...event.transmission, receivedAt: now })
+          }
+        }
         invalidationSequences[event.agentId] = event.sequence
         if (event.activity) {
           invalidationSequences[event.activity.parentAgentId] = event.sequence
@@ -282,13 +356,98 @@ export class CollaborationStore {
         }
       }
       activities = boundActivities(activities)
-      if (!page.hasMore) return { activities, cursor, invalidationSequences }
+      transmissions = transmissions.slice(-MAX_TREE_TRANSMISSIONS)
+      if (!page.hasMore) return { activities, cursor, invalidationSequences, transmissions }
       if (page.events.length === 0) throw new CollaborationEventGapError('Event log gap')
     }
   }
 
   private isCurrent(generation: number): boolean {
     return !this.destroyed && generation === this.generation
+  }
+
+  private rememberTransmission(id: string): void {
+    this.seenTransmissionIds.add(id)
+    if (this.seenTransmissionIds.size > MAX_SEEN_TRANSMISSIONS) {
+      this.seenTransmissionIds.delete(this.seenTransmissionIds.values().next().value!)
+    }
+  }
+
+  private takeRootGuidance(tree: AgentTreeSnapshot): AgentTreeTransmission[] {
+    const now = Date.now()
+    const pulses: AgentTreeTransmission[] = []
+    for (const [id, pending] of this.pendingGuidanceTransmissions) {
+      if (now - pending.receivedAt >= TREE_TRANSMISSION_LIFETIME_MS) {
+        this.pendingGuidanceTransmissions.delete(id)
+      } else if (this.rootRunIds.has(pending.runId)) {
+        this.pendingGuidanceTransmissions.delete(id)
+        pulses.push({
+          id,
+          kind: 'user_message',
+          sourceAgentId: null,
+          targetAgentId: tree.rootAgentId,
+          receivedAt: pending.receivedAt
+        })
+      }
+    }
+    return pulses
+  }
+
+  private acceptTransmissions(
+    candidates: readonly AgentTreeTransmission[],
+    tree: AgentTreeSnapshot
+  ): AgentTreeTransmission[] {
+    const now = Date.now()
+    const ids = new Set(tree.agents.map((agent) => agent.agentId))
+    ids.add(tree.rootAgentId)
+    const pulses = (this.snapshot.transmissions ?? []).filter(
+      (pulse) => now - pulse.receivedAt < TREE_TRANSMISSION_LIFETIME_MS
+    )
+    for (const pulse of candidates) {
+      if (this.seenTransmissionIds.has(pulse.id)) continue
+      this.rememberTransmission(pulse.id)
+      if (now - pulse.receivedAt >= TREE_TRANSMISSION_LIFETIME_MS) continue
+      if (pulse.sourceAgentId === pulse.targetAgentId) continue
+      if (pulse.sourceAgentId !== null && !ids.has(pulse.sourceAgentId)) continue
+      if (pulse.targetAgentId !== null && !ids.has(pulse.targetAgentId)) continue
+      if (
+        pulse.sourceAgentId === null &&
+        (pulse.kind !== 'user_message' || pulse.targetAgentId !== tree.rootAgentId)
+      )
+        continue
+      if (
+        pulse.targetAgentId === null &&
+        (pulse.kind !== 'completion' || pulse.sourceAgentId !== tree.rootAgentId)
+      )
+        continue
+      pulses.push(pulse)
+    }
+    return pulses.slice(-MAX_TREE_TRANSMISSIONS)
+  }
+
+  private clearTransmissionTimer(): void {
+    if (this.transmissionExpiryTimer !== null) clearTimeout(this.transmissionExpiryTimer)
+    this.transmissionExpiryTimer = null
+  }
+
+  private scheduleTransmissionExpiry(): void {
+    this.clearTransmissionTimer()
+    const oldest = this.snapshot.transmissions?.[0]
+    if (!oldest || this.destroyed) return
+    this.transmissionExpiryTimer = setTimeout(
+      () => {
+        this.transmissionExpiryTimer = null
+        if (this.destroyed) return
+        const now = Date.now()
+        this.publish({
+          transmissions: (this.snapshot.transmissions ?? []).filter(
+            (pulse) => now - pulse.receivedAt < TREE_TRANSMISSION_LIFETIME_MS
+          )
+        })
+        this.scheduleTransmissionExpiry()
+      },
+      Math.max(1, oldest.receivedAt + TREE_TRANSMISSION_LIFETIME_MS - Date.now())
+    )
   }
 
   private publish(changes: Partial<CollaborationStoreSnapshot>): void {

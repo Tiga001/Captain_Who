@@ -260,6 +260,16 @@ export interface CollaborationActivitySnapshot {
   traceBoundarySequence: number | null
 }
 
+/** Host-confirmed transfer metadata; message content stays in the existing delivery channel. */
+export interface CollaborationTransmission {
+  /** Stable transfer identity, independent of the enclosing event identity. */
+  id: string
+  kind: 'message' | 'task' | 'user_message' | 'completion'
+  /** Null denotes the human user, only for user_message or completion. */
+  sourceAgentId: string | null
+  targetAgentId: string | null
+}
+
 export interface CollaborationEventEnvelope {
   schemaVersion: typeof AGENT_COLLABORATION_EVENT_SCHEMA_VERSION
   eventId: string
@@ -276,6 +286,7 @@ export interface CollaborationEventEnvelope {
   kind: CollaborationEventKind
   resourceRevision: number
   activity: CollaborationActivitySnapshot | null
+  transmission?: CollaborationTransmission
   occurredAt: number
 }
 
@@ -1029,6 +1040,28 @@ export function parseAgentObserverConversation(value: unknown): AgentObserverCon
   return parsed
 }
 
+function parseCollaborationTransmission(value: unknown): CollaborationTransmission {
+  const context = 'CollaborationTransmission'
+  const item = record(value, context)
+  exact(item, ['id', 'kind', 'sourceAgentId', 'targetAgentId'], context)
+  const parseId = (value: unknown, field: string): string => {
+    const id = text(value, `${context}.${field}`)
+    if (id.includes('\0')) throw new Error(`Invalid ${context}.${field}`)
+    return id
+  }
+  return {
+    id: parseId(item.id, 'id'),
+    kind: oneOf(
+      item.kind,
+      ['message', 'task', 'user_message', 'completion'] as const,
+      `${context}.kind`
+    ),
+    sourceAgentId:
+      item.sourceAgentId === null ? null : parseId(item.sourceAgentId, 'sourceAgentId'),
+    targetAgentId: item.targetAgentId === null ? null : parseId(item.targetAgentId, 'targetAgentId')
+  }
+}
+
 export function parseCollaborationEventEnvelope(value: unknown): CollaborationEventEnvelope {
   const item = record(value, 'CollaborationEventEnvelope')
   exact(
@@ -1049,7 +1082,8 @@ export function parseCollaborationEventEnvelope(value: unknown): CollaborationEv
       'kind',
       'resourceRevision',
       'activity',
-      'occurredAt'
+      'occurredAt',
+      ...('transmission' in item ? ['transmission'] : [])
     ],
     'CollaborationEventEnvelope'
   )
@@ -1124,6 +1158,9 @@ export function parseCollaborationEventEnvelope(value: unknown): CollaborationEv
     )
   }
   const parsed: CollaborationEventEnvelope = {
+    ...('transmission' in item
+      ? { transmission: parseCollaborationTransmission(item.transmission) }
+      : {}),
     schemaVersion: eventSchema(item.schemaVersion, 'CollaborationEventEnvelope'),
     eventId: text(item.eventId, 'eventId'),
     sequence: integer(item.sequence, 'sequence', 1),
@@ -1158,6 +1195,30 @@ export function parseCollaborationEventEnvelope(value: unknown): CollaborationEv
   }
   if (parsed.workspaceId !== parsed.projectId) {
     throw new Error('Invalid CollaborationEventEnvelope identity')
+  }
+  if (parsed.transmission) {
+    const { kind, sourceAgentId, targetAgentId } = parsed.transmission
+    const isRootEvent =
+      parsed.agentId === parsed.rootAgentId && parsed.conversationId === parsed.rootConversationId
+    const validTransfer =
+      kind === 'user_message'
+        ? sourceAgentId === null &&
+          targetAgentId === parsed.rootAgentId &&
+          isRootEvent &&
+          parsed.kind === 'turn_started'
+        : kind === 'completion'
+          ? sourceAgentId === parsed.rootAgentId &&
+            targetAgentId === null &&
+            isRootEvent &&
+            parsed.kind === 'turn_updated'
+          : sourceAgentId !== null &&
+            targetAgentId !== null &&
+            sourceAgentId !== targetAgentId &&
+            targetAgentId === parsed.agentId &&
+            parsed.kind === 'mailbox_enqueued'
+    if (!validTransfer) {
+      throw new Error('Invalid CollaborationEventEnvelope transmission identity')
+    }
   }
   if (parsed.activity) {
     const activity = parsed.activity

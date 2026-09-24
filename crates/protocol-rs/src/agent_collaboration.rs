@@ -323,6 +323,27 @@ pub struct CollaborationActivitySnapshotDto {
     pub trace_boundary_sequence: Option<u64>,
 }
 
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CollaborationTransmissionKindDto {
+    Message,
+    Task,
+    UserMessage,
+    Completion,
+}
+
+/// Display-only routing facts. A null endpoint denotes the user; message bodies are omitted.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CollaborationTransmissionDto {
+    pub id: String,
+    pub kind: CollaborationTransmissionKindDto,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub source_agent_id: Option<String>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub target_agent_id: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CollaborationEventEnvelopeDto {
@@ -341,6 +362,8 @@ pub struct CollaborationEventEnvelopeDto {
     pub kind: CollaborationEventKindDto,
     pub resource_revision: u64,
     pub activity: Option<CollaborationActivitySnapshotDto>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transmission: Option<CollaborationTransmissionDto>,
     pub occurred_at: i64,
 }
 
@@ -353,6 +376,15 @@ where
     T: Deserialize<'de>,
 {
     Option::<T>::deserialize(deserializer)
+}
+
+fn deserialize_optional_transmission<'de, D>(
+    deserializer: D,
+) -> Result<Option<CollaborationTransmissionDto>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    CollaborationTransmissionDto::deserialize(deserializer).map(Some)
 }
 
 #[derive(Deserialize)]
@@ -374,6 +406,8 @@ struct CollaborationEventEnvelopeWireDto {
     resource_revision: u64,
     #[serde(deserialize_with = "deserialize_required_nullable")]
     activity: Option<CollaborationActivitySnapshotDto>,
+    #[serde(default, deserialize_with = "deserialize_optional_transmission")]
+    transmission: Option<CollaborationTransmissionDto>,
     occurred_at: i64,
 }
 
@@ -390,6 +424,42 @@ impl<'de> Deserialize<'de> for CollaborationEventEnvelopeDto {
             return Err(D::Error::custom(
                 "collaboration event workspace/project identity mismatch",
             ));
+        }
+        if let Some(transmission) = wire.transmission.as_ref() {
+            let valid_id = |id: &str| {
+                !id.is_empty() && id.trim() == id && id.len() <= 512 && !id.contains('\0')
+            };
+            let valid_ids = valid_id(&transmission.id)
+                && transmission.source_agent_id.as_deref().is_none_or(valid_id)
+                && transmission.target_agent_id.as_deref().is_none_or(valid_id);
+            let root_event = wire.agent_id == wire.root_agent_id
+                && wire.conversation_id == wire.root_conversation_id;
+            let valid_route = match transmission.kind {
+                CollaborationTransmissionKindDto::Message
+                | CollaborationTransmissionKindDto::Task => {
+                    wire.kind == CollaborationEventKindDto::MailboxEnqueued
+                        && transmission.source_agent_id.is_some()
+                        && transmission.source_agent_id != transmission.target_agent_id
+                        && transmission.target_agent_id.as_ref() == Some(&wire.agent_id)
+                }
+                CollaborationTransmissionKindDto::UserMessage => {
+                    root_event
+                        && wire.kind == CollaborationEventKindDto::TurnStarted
+                        && transmission.source_agent_id.is_none()
+                        && transmission.target_agent_id.as_ref() == Some(&wire.root_agent_id)
+                }
+                CollaborationTransmissionKindDto::Completion => {
+                    root_event
+                        && wire.kind == CollaborationEventKindDto::TurnUpdated
+                        && transmission.source_agent_id.as_ref() == Some(&wire.root_agent_id)
+                        && transmission.target_agent_id.is_none()
+                }
+            };
+            if !valid_ids || !valid_route {
+                return Err(D::Error::custom(
+                    "invalid collaboration transmission identity",
+                ));
+            }
         }
         if let Some(activity) = wire.activity.as_ref() {
             if activity.schema_version != AGENT_COLLABORATION_ACTIVITY_SCHEMA_VERSION {
@@ -459,6 +529,7 @@ impl<'de> Deserialize<'de> for CollaborationEventEnvelopeDto {
             kind: wire.kind,
             resource_revision: wire.resource_revision,
             activity: wire.activity,
+            transmission: wire.transmission,
             occurred_at: wire.occurred_at,
         })
     }

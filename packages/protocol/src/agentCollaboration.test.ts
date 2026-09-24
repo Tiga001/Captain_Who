@@ -83,6 +83,196 @@ const round5Scenario = JSON.parse(
 }
 
 describe('agent collaboration protocol', () => {
+  describe('confirmed transmission metadata', () => {
+    const baseEvent = {
+      ...(fixture.event as object),
+      activity: null,
+      kind: 'mailbox_enqueued',
+      agentId: 'agent-child',
+      conversationId: 'conversation-child',
+      transmission: {
+        id: 'transfer-stable-id',
+        kind: 'message',
+        sourceAgentId: 'agent-root',
+        targetAgentId: 'agent-child'
+      }
+    }
+
+    it('keeps transmission optional without changing the event schema', () => {
+      const event = parseCollaborationEventEnvelope(fixture.event)
+      expect(event.schemaVersion).toBe(2)
+      expect(event).not.toHaveProperty('transmission')
+    })
+
+    it.each(['message', 'task'])(
+      'accepts a %s transfer with its own stable identity, independent of activity',
+      (kind) => {
+        const transmission = { ...baseEvent.transmission, kind }
+        const event = parseCollaborationEventEnvelope({ ...baseEvent, transmission })
+        expect(event.transmission).toEqual(transmission)
+        expect(event.transmission?.id).not.toBe(event.eventId)
+        expect(event.transmission?.id).not.toBe(event.messageId)
+        expect(event.activity).toBeNull()
+      }
+    )
+
+    it('accepts a root input transfer whose identity belongs to the human input message', () => {
+      const transmission = {
+        id: 'user-input-message',
+        kind: 'user_message',
+        sourceAgentId: null,
+        targetAgentId: 'agent-root'
+      }
+      const event = parseCollaborationEventEnvelope({
+        ...baseEvent,
+        kind: 'turn_started',
+        agentId: 'agent-root',
+        conversationId: 'conversation-root',
+        messageId: 'assistant-message',
+        transmission
+      })
+      expect(event.transmission).toEqual(transmission)
+      expect(event.transmission?.id).not.toBe(event.messageId)
+    })
+
+    it('accepts the root completion transfer to the human user', () => {
+      const transmission = {
+        id: 'completed-root-run',
+        kind: 'completion',
+        sourceAgentId: 'agent-root',
+        targetAgentId: null
+      }
+      expect(
+        parseCollaborationEventEnvelope({
+          ...baseEvent,
+          kind: 'turn_updated',
+          agentId: 'agent-root',
+          conversationId: 'conversation-root',
+          transmission
+        }).transmission
+      ).toEqual(transmission)
+    })
+
+    it.each([
+      { id: '' },
+      { id: ' trailing ' },
+      { id: 'x'.repeat(513) },
+      { id: 'transfer\0id' },
+      { kind: 'mailbox_updated' },
+      { sourceAgentId: '' },
+      { targetAgentId: '' },
+      { sourceAgentId: 'agent\0root' },
+      { targetAgentId: 'agent\0child' },
+      { sourceAgentId: null },
+      { targetAgentId: null },
+      { sourceAgentId: null, targetAgentId: null },
+      { sourceAgentId: 'agent-child' },
+      { targetAgentId: 'agent-other' },
+      { body: 'must not transmit message text' }
+    ])('rejects malformed or incorrectly routed message metadata: %j', (patch) => {
+      expect(() =>
+        parseCollaborationEventEnvelope({
+          ...baseEvent,
+          transmission: { ...baseEvent.transmission, ...patch }
+        })
+      ).toThrow(/Collaboration.*[Tt]ransmission/)
+    })
+
+    it.each(['id', 'kind', 'sourceAgentId', 'targetAgentId'])(
+      'requires the transmission field %s when metadata is present',
+      (field) => {
+        const transmission: Record<string, unknown> = { ...baseEvent.transmission }
+        delete transmission[field]
+        expect(() => parseCollaborationEventEnvelope({ ...baseEvent, transmission })).toThrow(
+          new RegExp(`Missing.*${field}`)
+        )
+      }
+    )
+
+    it.each([null, undefined, [], 'transfer'])(
+      'rejects a present transmission that is not an object: %j',
+      (transmission) => {
+        expect(() => parseCollaborationEventEnvelope({ ...baseEvent, transmission })).toThrow(
+          /Invalid CollaborationTransmission/
+        )
+      }
+    )
+
+    it.each([
+      { kind: 'mailbox_updated' },
+      { kind: 'turn_started' },
+      { kind: 'turn_updated' },
+      { agentId: 'agent-root' }
+    ])('rejects a message transfer attached to the wrong event: %j', (patch) => {
+      expect(() => parseCollaborationEventEnvelope({ ...baseEvent, ...patch })).toThrow(
+        /transmission identity/
+      )
+    })
+
+    it.each([
+      { eventKind: 'turn_updated', kind: 'user_message', source: null, target: 'agent-root' },
+      {
+        eventKind: 'turn_started',
+        kind: 'user_message',
+        source: 'agent-child',
+        target: 'agent-root'
+      },
+      { eventKind: 'turn_started', kind: 'user_message', source: null, target: 'agent-child' },
+      { eventKind: 'turn_started', kind: 'completion', source: 'agent-root', target: null },
+      { eventKind: 'turn_updated', kind: 'completion', source: 'agent-child', target: null },
+      { eventKind: 'turn_updated', kind: 'completion', source: 'agent-root', target: 'agent-child' }
+    ])('rejects mismatched human/root transfers: %j', ({ eventKind, kind, source, target }) => {
+      expect(() =>
+        parseCollaborationEventEnvelope({
+          ...baseEvent,
+          agentId: 'agent-root',
+          conversationId: 'conversation-root',
+          kind: eventKind,
+          transmission: {
+            id: 'transfer-id',
+            kind,
+            sourceAgentId: source,
+            targetAgentId: target
+          }
+        })
+      ).toThrow(/transmission identity/)
+    })
+
+    it.each(['user_message', 'completion'])('rejects a %s transfer on a child event', (kind) => {
+      expect(() =>
+        parseCollaborationEventEnvelope({
+          ...baseEvent,
+          kind: kind === 'user_message' ? 'turn_started' : 'turn_updated',
+          transmission: {
+            id: 'transfer-id',
+            kind,
+            sourceAgentId: kind === 'user_message' ? null : 'agent-root',
+            targetAgentId: kind === 'user_message' ? 'agent-root' : null
+          }
+        })
+      ).toThrow(/transmission identity/)
+    })
+
+    it.each(['user_message', 'completion'])(
+      'rejects a %s root transfer attached to a child conversation',
+      (kind) => {
+        expect(() =>
+          parseCollaborationEventEnvelope({
+            ...baseEvent,
+            agentId: 'agent-root',
+            kind: kind === 'user_message' ? 'turn_started' : 'turn_updated',
+            transmission: {
+              id: 'transfer-id',
+              kind,
+              sourceAgentId: kind === 'user_message' ? null : 'agent-root',
+              targetAgentId: kind === 'user_message' ? 'agent-root' : null
+            }
+          })
+        ).toThrow(/transmission identity/)
+      }
+    )
+  })
+
   it('binds a complete provisional stream and its safe cursor to the exact observer message', () => {
     const observer = structuredClone(fixture.observer) as {
       messages: Array<{ messageId: string; role: string; agentRunJson: string | null }>

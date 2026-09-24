@@ -6,6 +6,8 @@ use crate::{
 };
 use rusqlite::{params, Connection};
 
+mod transmission;
+
 const EVENT_SELECT: &str = "
     SELECT global_sequence, schema_version, event_id, root_sequence, workspace_id, project_id,
            root_agent_id, root_conversation_id, agent_id, conversation_id,
@@ -202,7 +204,7 @@ fn query_events<P: rusqlite::Params>(
         if schema_version != AGENT_COLLABORATION_EVENT_SCHEMA_VERSION {
             return Err(AgentCollaborationEventError::CorruptRecord);
         }
-        events.push(AgentCollaborationEventRecord {
+        let mut event = AgentCollaborationEventRecord {
             global_sequence: positive(global_sequence)?,
             schema_version,
             event_id,
@@ -228,8 +230,11 @@ fn query_events<P: rusqlite::Params>(
                 activity_anchor_message_id,
                 activity_trace_boundary_sequence,
             )?,
+            transmission: None,
             created_at: nonnegative(created_at)?,
-        });
+        };
+        event.transmission = transmission::project(connection, &event)?;
+        events.push(event);
     }
     Ok(events)
 }
@@ -451,6 +456,53 @@ mod tests {
         let mut connection = Connection::open_in_memory().unwrap();
         populate_tree(&mut connection);
         connection
+    }
+
+    #[test]
+    fn committed_root_turn_events_expose_only_input_and_final_transmissions() {
+        let connection = tree();
+        connection.execute_batch(
+            "INSERT INTO messages (id, conversation_id, role, content, input_origin_kind, created_at, position)
+             VALUES ('transmission-human', 'conversation-root', 'user', 'private user text', 'human', 9, 0);
+             INSERT INTO messages (id, conversation_id, role, content, created_at, position)
+             VALUES ('transmission-assistant', 'conversation-root', 'assistant', 'private reply', 10, 1);
+             INSERT INTO conversation_turn_traces (
+                 assistant_message_id, conversation_id, run_id, schema_version,
+                 terminal_status, truncated, created_at, updated_at
+             ) VALUES ('transmission-assistant', 'conversation-root', 'transmission-run', 1, 'in_progress', 0, 10, 10);
+             UPDATE conversation_turn_traces SET updated_at = 20 WHERE run_id = 'transmission-run';
+             UPDATE conversation_turn_traces SET terminal_status = 'completed', updated_at = 30, completed_at = 30
+             WHERE run_id = 'transmission-run';"
+        ).unwrap();
+        let events = list_root_events(&connection, "agent-root", 0, 32).unwrap();
+        let transmissions = events
+            .iter()
+            .filter_map(|event| event.transmission.as_ref())
+            .collect::<Vec<_>>();
+        assert_eq!(transmissions.len(), 2);
+        assert_eq!(transmissions[0].id, "user-message:transmission-human");
+        assert_eq!(transmissions[0].source_agent_id, None);
+        assert_eq!(
+            transmissions[0].target_agent_id.as_deref(),
+            Some("agent-root")
+        );
+        assert_eq!(transmissions[1].id, "completion:transmission-run");
+        assert_eq!(
+            transmissions[1].source_agent_id.as_deref(),
+            Some("agent-root")
+        );
+        assert_eq!(transmissions[1].target_agent_id, None);
+        assert!(events
+            .iter()
+            .find(
+                |event| event.kind == AgentCollaborationEventKind::TurnUpdated
+                    && event.created_at == 20
+            )
+            .unwrap()
+            .transmission
+            .is_none());
+        let serialized = serde_json::to_string(&transmissions).unwrap();
+        assert!(!serialized.contains("private"));
     }
 
     fn insert_trace_item(connection: &Connection, assistant_message_id: &str, sequence: u64) {
