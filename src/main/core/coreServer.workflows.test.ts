@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import fixture from '../../../packages/protocol/fixtures/workflow-definition-v1.json'
-import { parseWorkflowDefinition } from '@mycopilot/protocol'
+import { parseWorkflowDefinition, type WorkflowRequest } from '@mycopilot/protocol'
 const rpcRequest = vi.hoisted(() => vi.fn())
 vi.mock('./jsonRpcClient', () => ({
   CoreJsonRpcClient: class {
@@ -11,13 +11,16 @@ vi.mock('./jsonRpcClient', () => ({
 import { CoreServer } from './coreServer'
 
 describe('workflow IPC contract boundary', () => {
-  beforeEach(() => rpcRequest.mockReset())
+  beforeEach(() => {
+    rpcRequest.mockReset()
+  })
   it('forwards a versioned definition and the optimistic revision to Rust', async () => {
     const definition = parseWorkflowDefinition(fixture)
+    if (definition.nodes[0].kind !== 'agent') throw new Error('Expected agent')
     definition.nodes[0].modelConfigId = 'implementation-model'
     definition.boundaryPositions = { input: { x: 100, y: 140 }, output: { x: 1100, y: 420 } }
     const response = {
-      records: [{ definition, revision: 2, updatedAt: 42, issues: [] }],
+      records: [{ definition, enabled: false, revision: 2, updatedAt: 42, issues: [] }],
       issues: []
     }
     rpcRequest.mockResolvedValue(response)
@@ -26,17 +29,65 @@ describe('workflow IPC contract boundary', () => {
     await expect(server.requestWorkflows(request)).resolves.toEqual(response)
     expect(rpcRequest).toHaveBeenCalledExactlyOnceWith('agent.workflows.request', request)
   })
-  it('normalizes an older stored v1 model field after RPC without inventing an execution model', async () => {
-    const legacy = structuredClone(fixture)
-    Reflect.deleteProperty(legacy.nodes[0], 'modelConfigId')
-    Reflect.deleteProperty(legacy, 'boundaryPositions')
+  it('forwards the availability switch with its revision and returns the effective record state', async () => {
+    const server = new CoreServer()
+    for (const enabled of [true, false]) {
+      const request = {
+        operation: 'setEnabled' as const,
+        id: fixture.id,
+        enabled,
+        expectedRevision: 2
+      }
+      const response = {
+        records: [{ definition: fixture, enabled, revision: 3, updatedAt: 42, issues: [] }],
+        issues: []
+      }
+      rpcRequest.mockResolvedValue(response)
+      await expect(server.requestWorkflows(request)).resolves.toEqual(response)
+      expect(rpcRequest).toHaveBeenLastCalledWith('agent.workflows.request', request)
+    }
+  })
+  it('enforces switch types before RPC and rejects invalid enabled records after RPC', async () => {
+    const server = new CoreServer()
+    const request = {
+      operation: 'setEnabled' as const,
+      id: fixture.id,
+      enabled: true,
+      expectedRevision: 1
+    }
+    for (const invalid of [
+      { ...request, expectedRevision: 0 },
+      { ...request, enabled: 'true' },
+      { ...request, extra: true }
+    ]) {
+      expect(() => server.requestWorkflows(invalid as unknown as WorkflowRequest)).toThrow()
+    }
+    expect(rpcRequest).not.toHaveBeenCalled()
+    for (const enabled of [null, 'false']) {
+      rpcRequest.mockResolvedValue({
+        records: [{ definition: fixture, enabled, revision: 1, updatedAt: 42, issues: [] }],
+        issues: []
+      })
+      await expect(server.requestWorkflows({ operation: 'list' })).rejects.toThrow()
+    }
     rpcRequest.mockResolvedValue({
-      records: [{ definition: legacy, revision: 1, updatedAt: 42, issues: [] }],
+      records: [
+        {
+          definition: fixture,
+          enabled: true,
+          revision: 1,
+          updatedAt: 42,
+          issues: [{ code: 'node_task', subject: 'review' }]
+        }
+      ],
       issues: []
     })
-    const output = await new CoreServer().requestWorkflows({ operation: 'list' })
-    expect(output.records[0].definition.nodes[0].modelConfigId).toBeNull()
-    expect(output.records[0].definition.boundaryPositions).toEqual(fixture.boundaryPositions)
+    await expect(server.requestWorkflows({ operation: 'list' })).rejects.toThrow(
+      'cannot have validation issues'
+    )
+    const conflict = Object.assign(new Error('Revision conflict'), { code: -32009 })
+    rpcRequest.mockRejectedValue(conflict)
+    await expect(server.requestWorkflows(request)).rejects.toBe(conflict)
   })
   it('rejects invalid request before RPC and malformed responses after RPC', async () => {
     const server = new CoreServer()
@@ -44,6 +95,7 @@ describe('workflow IPC contract boundary', () => {
       server.requestWorkflows({ operation: 'delete', id: 'x', expectedRevision: -1 })
     ).toThrow()
     const contradictory = parseWorkflowDefinition(fixture)
+    if (contradictory.nodes[0].kind !== 'agent') throw new Error('Expected agent')
     contradictory.nodes[0].templateId = 'template-review'
     contradictory.nodes[0].modelConfigId = 'model-override'
     expect(() =>

@@ -1,5 +1,16 @@
-import type { AgentTemplate, WorkflowDefinition, WorkflowEndpoint } from '@mycopilot/protocol'
-import { Maximize2, Minus, Plus, Settings } from 'lucide-react'
+import { AccountAvatar } from '../auth/AccountAvatar'
+import { useAccountAuth } from '../auth/AccountAuthContext'
+import { optimizeWorkflowLayout } from './workflowAnchorLayout'
+import { anchorAtPoint, anchorPoint, type FlowEnd } from './workflowAnchors'
+import { AgentAvatar } from '../agentCollaboration/AgentAvatar'
+import type {
+  AgentTemplate,
+  WorkflowDefinition,
+  WorkflowEndpoint,
+  WorkflowAnchor,
+  WorkflowFlow
+} from '@mycopilot/protocol'
+import { Maximize2, Minus, Plus, WandSparkles } from 'lucide-react'
 import {
   useEffect,
   useId,
@@ -10,17 +21,21 @@ import {
   type KeyboardEvent as ReactKeyboardEvent,
   type PointerEvent
 } from 'react'
-import { NODE_HEIGHT, NODE_WIDTH, WORKFLOW_DRAG_TYPE } from './workflowAuthoring'
+import { NODE_HEIGHT, NODE_WIDTH, WORKFLOW_DRAG_TYPE, workflowNodeSize } from './workflowAuthoring'
 import {
   fitViewport,
   canvasOrigin,
-  graphFlowGeometries,
+  graphFlowLayout,
   graphBounds,
   zoomViewport,
   type CanvasPoint
 } from './workflowCanvasGeometry'
 import type { WorkflowText } from './workflowText'
-import { workflowNodeModelLabel, type WorkflowModelDisplay } from './workflowModelPresentation'
+import {
+  workflowNodeModelLabel,
+  workflowNodeLabel,
+  type WorkflowModelDisplay
+} from './workflowModelPresentation'
 import './workflowCanvas.css'
 
 type CardSelection = { kind: 'node'; id: string } | { kind: 'boundary'; id: 'input' | 'output' }
@@ -35,6 +50,8 @@ interface Props {
   models: readonly WorkflowModelDisplay[]
   selection: WorkflowSelection
   pending: WorkflowEndpoint | null
+  pendingAnchor?: WorkflowAnchor
+  connectionMode: boolean
   text: WorkflowText
   onChange: (
     update: (graph: WorkflowDefinition) => WorkflowDefinition,
@@ -43,8 +60,8 @@ interface Props {
   onSelect: (selection: WorkflowSelection) => void
   onConfigureNode: (id: string) => void
   onAddNode: (x: number, y: number, templateId?: string) => void
-  onBegin: (endpoint: WorkflowEndpoint) => void
-  onFinish: (endpoint: WorkflowEndpoint) => void
+  onBegin: (endpoint: WorkflowEndpoint, anchor?: WorkflowAnchor) => void
+  onFinish: (endpoint: WorkflowEndpoint, anchor?: WorkflowAnchor) => void
 }
 
 const isEditingText = (target: EventTarget | null) =>
@@ -72,6 +89,8 @@ export function WorkflowCanvas({
   models,
   selection,
   pending,
+  pendingAnchor,
+  connectionMode,
   text,
   onChange,
   onSelect,
@@ -80,6 +99,8 @@ export function WorkflowCanvas({
   onBegin,
   onFinish
 }: Props) {
+  const profile = useAccountAuth()?.state.profile
+  const userName = profile?.displayName || text('currentUser')
   const scrollRef = useRef<HTMLDivElement>(null)
   const stageRef = useRef<HTMLDivElement>(null)
   const drag = useRef<{
@@ -92,7 +113,13 @@ export function WorkflowCanvas({
     zoom: number
     group: string
   } | null>(null)
-  const connectionDrag = useRef<{ pointerId: number; x: number; y: number } | null>(null)
+  const anchorDrag = useRef<{
+    pointerId: number
+    flowId: string
+    endpoint: WorkflowEndpoint
+    end: FlowEnd
+    group: string
+  } | null>(null)
   const pan = useRef<{ pointerId: number; x: number; y: number; left: number; top: number } | null>(
     null
   )
@@ -104,14 +131,27 @@ export function WorkflowCanvas({
   const [size, setSize] = useState({ width: 0, height: 0 })
   const initialFit = useRef<string | null>(null)
   const markerId = useId().replaceAll(':', '')
-  const geometries = useMemo(
+  const { graph: layoutGraph, geometries } = useMemo(
     () =>
-      graphFlowGeometries({
+      graphFlowLayout({
         nodes: graph.nodes,
         flows: graph.flows,
         boundaryPositions: graph.boundaryPositions
       }),
     [graph.nodes, graph.flows, graph.boundaryPositions]
+  )
+  const flowAnchors = layoutGraph.flows.flatMap((flow, index) =>
+    (['source', 'target'] as const).map((end) => ({
+      flow,
+      index,
+      end,
+      position: anchorPoint(
+        layoutGraph,
+        flow[end],
+        end,
+        flow[end === 'source' ? 'sourceAnchor' : 'targetAnchor']
+      )
+    }))
   )
   const bounds = useMemo(
     () =>
@@ -123,6 +163,7 @@ export function WorkflowCanvas({
   )
   const origin = useMemo(() => canvasOrigin(bounds), [bounds])
   const previousOrigin = useRef(origin)
+  const fitAfterLayout = useRef(false)
   const zoom = graph.viewport.zoom
   const width = Math.max(
     size.width / zoom + graph.viewport.x / zoom + 80,
@@ -164,6 +205,17 @@ export function WorkflowCanvas({
   useLayoutEffect(() => {
     const previous = previousOrigin.current
     previousOrigin.current = origin
+    if (fitAfterLayout.current) {
+      fitAfterLayout.current = false
+      onChange(
+        (current) => ({
+          ...current,
+          viewport: fitViewport(bounds, size.width, size.height, origin)
+        }),
+        { transient: true }
+      )
+      return
+    }
     if (previous.x !== origin.x || previous.y !== origin.y) {
       onChange(
         (current) => ({
@@ -183,7 +235,7 @@ export function WorkflowCanvas({
         { transient: true }
       )
     }
-  }, [origin, onChange])
+  }, [origin, onChange, bounds, size.width, size.height])
 
   useLayoutEffect(() => {
     const element = scrollRef.current
@@ -213,6 +265,7 @@ export function WorkflowCanvas({
         ? currentGraph.nodes.find((candidate) => candidate.id === selection.id)
         : currentGraph.boundaryPositions[selection.id]
     if (!node) return
+    const dimensions = workflowNodeSize('kind' in node ? node : undefined)
     const margin = 34
     const currentZoom = currentGraph.viewport.zoom
     const left = (node.x + currentOrigin.x) * currentZoom
@@ -220,11 +273,11 @@ export function WorkflowCanvas({
     let x = currentGraph.viewport.x,
       y = currentGraph.viewport.y
     if (left < x + margin) x = left - margin
-    else if (left + NODE_WIDTH * currentZoom > x + size.width - margin)
-      x = left + NODE_WIDTH * currentZoom - size.width + margin
+    else if (left + dimensions.width * currentZoom > x + size.width - margin)
+      x = left + dimensions.width * currentZoom - size.width + margin
     if (top < y + margin) y = top - margin
-    else if (top + NODE_HEIGHT * currentZoom > y + size.height - margin)
-      y = top + NODE_HEIGHT * currentZoom - size.height + margin
+    else if (top + dimensions.height * currentZoom > y + size.height - margin)
+      y = top + dimensions.height * currentZoom - size.height + margin
     x = boundedPosition(x, 0)
     y = boundedPosition(y, 0)
     if (Math.abs(x - currentGraph.viewport.x) >= 1 || Math.abs(y - currentGraph.viewport.y) >= 1)
@@ -298,7 +351,31 @@ export function WorkflowCanvas({
       scroller.scrollTop = currentPan.top - (event.clientY - currentPan.y)
       return
     }
-    if (pending || connectionDrag.current) setCursor(point(event.clientX, event.clientY))
+    const position = point(event.clientX, event.clientY)
+    if (pending) setCursor(position)
+    const handle = anchorDrag.current
+    if (handle && handle.pointerId === event.pointerId) {
+      onChange(
+        (current) => ({
+          ...current,
+          flows: current.flows.map((flow) =>
+            flow.id === handle.flowId
+              ? {
+                  ...flow,
+                  [handle.end === 'source' ? 'sourceAnchor' : 'targetAnchor']: anchorAtPoint(
+                    current,
+                    handle.endpoint,
+                    handle.end,
+                    position
+                  )
+                }
+              : flow
+          )
+        }),
+        { group: handle.group }
+      )
+      return
+    }
     const active = drag.current
     if (!active || active.pointerId !== event.pointerId) return
     const x = boundedPosition(
@@ -312,35 +389,36 @@ export function WorkflowCanvas({
     onChange((current) => positionCard(current, active.target, { x, y }), { group: active.group })
   }
   const finishPointer = (event: PointerEvent<HTMLDivElement>) => {
-    if (connectionDrag.current?.pointerId === event.pointerId) {
-      const active = connectionDrag.current
-      connectionDrag.current = null
-      const target = document
-        .elementFromPoint(event.clientX, event.clientY)
-        ?.closest<HTMLElement>('[data-workflow-input]')
-      if (Math.hypot(event.clientX - active.x, event.clientY - active.y) > 3) {
-        if (target?.dataset.workflowInput === 'boundary') onFinish({ kind: 'boundary' })
-        else if (target?.dataset.workflowInput === 'node' && target.dataset.workflowNodeId)
-          onFinish({ kind: 'node', nodeId: target.dataset.workflowNodeId })
-      }
-      setCursor(null)
-    }
+    if (anchorDrag.current?.pointerId === event.pointerId) anchorDrag.current = null
     drag.current = null
     pan.current = null
     setPanning(false)
   }
-  const pendingNode =
-    pending?.kind === 'node'
-      ? graph.nodes.find((node) => node.id === pending.nodeId)
-      : pending?.kind === 'boundary'
-        ? graph.boundaryPositions.input
-        : undefined
+  const pendingPoint = pending ? anchorPoint(graph, pending, 'source', pendingAnchor) : null
+  const clickCard = (target: CardSelection, client?: CanvasPoint) => {
+    if (!connectionMode) {
+      onSelect(target)
+      return
+    }
+    const endpoint: WorkflowEndpoint =
+      target.kind === 'boundary' ? { kind: 'boundary' } : { kind: 'node', nodeId: target.id }
+    if (target.kind === 'boundary' && target.id !== (pending ? 'output' : 'input')) return
+    if (pending) onFinish(endpoint)
+    else {
+      onBegin(endpoint)
+      if (client) setCursor(point(client.x, client.y))
+    }
+  }
   const beginCardDrag = (
     event: PointerEvent<HTMLDivElement>,
     target: CardSelection,
     position: CanvasPoint
   ) => {
-    if (event.button !== 0 || (event.target instanceof Element && event.target.closest('button')))
+    if (
+      connectionMode ||
+      event.button !== 0 ||
+      (event.target instanceof Element && event.target.closest('button'))
+    )
       return
     event.preventDefault()
     event.currentTarget.focus({ preventScroll: true })
@@ -358,6 +436,18 @@ export function WorkflowCanvas({
   }
   const moveCardKey = (event: ReactKeyboardEvent<HTMLDivElement>, target: CardSelection) => {
     if (event.target !== event.currentTarget) return
+    if (connectionMode) {
+      if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault()
+        clickCard(target)
+      }
+      return
+    }
+    if (event.key === 'Enter' && target.kind === 'node') {
+      event.preventDefault()
+      onConfigureNode(target.id)
+      return
+    }
     const delta = event.shiftKey ? 40 : 10
     const offsets: Record<string, [number, number]> = {
       ArrowLeft: [-delta, 0],
@@ -381,16 +471,31 @@ export function WorkflowCanvas({
         : current
     })
   }
-  const beginConnectionPointer = (
+  const beginAnchorDrag = (
     event: PointerEvent<HTMLButtonElement>,
-    source: WorkflowEndpoint
+    flow: WorkflowFlow,
+    end: FlowEnd
   ) => {
     if (event.button !== 0) return
-    event.preventDefault()
     event.stopPropagation()
-    connectionDrag.current = { pointerId: event.pointerId, x: event.clientX, y: event.clientY }
-    setCursor(point(event.clientX, event.clientY))
-    onBegin(source)
+    event.preventDefault()
+    if (connectionMode) {
+      clickCard(
+        flow[end].kind === 'boundary'
+          ? { kind: 'boundary', id: end === 'source' ? 'input' : 'output' }
+          : { kind: 'node', id: (flow[end] as { nodeId: string }).nodeId },
+        { x: event.clientX, y: event.clientY }
+      )
+      return
+    }
+    onSelect({ kind: 'flow', id: flow.id })
+    anchorDrag.current = {
+      pointerId: event.pointerId,
+      flowId: flow.id,
+      endpoint: flow[end],
+      end,
+      group: `anchor-${crypto.randomUUID()}`
+    }
     event.currentTarget.setPointerCapture(event.pointerId)
   }
   const changeZoom = (next: number) =>
@@ -414,7 +519,7 @@ export function WorkflowCanvas({
     <div className="workflow-canvas-shell">
       <div
         ref={scrollRef}
-        className={`workflow-canvas${spaceHeld ? ' is-space-held' : ''}${panning ? ' is-panning' : ''}`}
+        className={`workflow-canvas${spaceHeld ? ' is-space-held' : ''}${panning ? ' is-panning' : ''}${connectionMode ? ' is-connecting' : ''}`}
         aria-label={text('graphTitle')}
         tabIndex={0}
         onPointerEnter={() => {
@@ -427,7 +532,7 @@ export function WorkflowCanvas({
         onPointerUp={finishPointer}
         onPointerCancel={() => {
           drag.current = null
-          connectionDrag.current = null
+          anchorDrag.current = null
           pan.current = null
           setPanning(false)
           setCursor(null)
@@ -470,9 +575,12 @@ export function WorkflowCanvas({
           if (!value) return
           event.preventDefault()
           const position = point(event.clientX, event.clientY)
+          const dimensions = workflowNodeSize(
+            value.startsWith('gate:') ? { kind: 'inputGate' } : undefined
+          )
           onAddNode(
-            boundedPosition(position.x - NODE_WIDTH / 2, 24),
-            boundedPosition(position.y - NODE_HEIGHT / 2, 40),
+            boundedPosition(position.x - dimensions.width / 2, 24),
+            boundedPosition(position.y - dimensions.height / 2, 40),
             value === 'blank' ? undefined : value
           )
         }}
@@ -513,18 +621,13 @@ export function WorkflowCanvas({
                   const geometry = geometries.get(flow.id)
                   if (!geometry) return null
                   const selected = selection?.kind === 'flow' && selection.id === flow.id
-                  const label = flow.name.length > 18 ? `${flow.name.slice(0, 17)}…` : flow.name
-                  const labelWidth = Math.min(
-                    208,
-                    [...label].reduce((sum, char) => sum + (char.charCodeAt(0) > 127 ? 11 : 6), 14)
-                  )
                   return (
                     <g
                       key={flow.id}
                       className={`workflow-edge${selected ? ' is-selected' : ''}`}
                       role="button"
                       tabIndex={0}
-                      aria-label={`${text('connection')} ${flow.name || String(index + 1)}`}
+                      aria-label={`${text('connection')} ${index + 1}`}
                       onClick={() => onSelect({ kind: 'flow', id: flow.id })}
                       onKeyDown={(event) => {
                         if (event.key === 'Enter' || event.key === ' ') {
@@ -539,19 +642,16 @@ export function WorkflowCanvas({
                         d={geometry.path}
                         markerEnd={`url(#${markerId})`}
                       />
-                      {label ? (
-                        <g className="workflow-edge__caption">
-                          <rect
-                            x={geometry.label.x - labelWidth / 2}
-                            y={geometry.label.y - 12}
-                            width={labelWidth}
-                            height={20}
-                            rx={5}
-                          />
-                          <text x={geometry.label.x} y={geometry.label.y + 2} textAnchor="middle">
-                            {label}
-                          </text>
-                        </g>
+                      {flow.name ? (
+                        <text
+                          className="workflow-edge__label"
+                          x={geometry.label.x}
+                          y={geometry.label.y - 7}
+                          textAnchor="middle"
+                        >
+                          <title>{flow.name}</title>
+                          {flow.name.length > 24 ? `${flow.name.slice(0, 24)}…` : flow.name}
+                        </text>
                       ) : null}
                     </g>
                   )
@@ -570,10 +670,10 @@ export function WorkflowCanvas({
                     </g>
                   ))
                 )}
-                {pendingNode && cursor ? (
+                {pendingPoint && cursor ? (
                   <path
                     className="workflow-edge__preview"
-                    d={`M ${pendingNode.x + NODE_WIDTH} ${pendingNode.y + NODE_HEIGHT / 2} C ${pendingNode.x + NODE_WIDTH + 60} ${pendingNode.y + NODE_HEIGHT / 2}, ${cursor.x - 60} ${cursor.y}, ${cursor.x} ${cursor.y}`}
+                    d={`M ${pendingPoint.x} ${pendingPoint.y} L ${cursor.x} ${cursor.y}`}
                   />
                 ) : null}
               </g>
@@ -594,158 +694,195 @@ export function WorkflowCanvas({
                   tabIndex={0}
                   role="group"
                   aria-label={label}
-                  title={text('moveHint')}
+                  title={text(
+                    connectionMode ? (pending ? 'connecting' : 'chooseSource') : 'moveHint'
+                  )}
                   onFocus={(event) => {
                     if (event.target === event.currentTarget)
                       onSelect({ kind: 'boundary', id: side })
                   }}
-                  onClick={() => onSelect({ kind: 'boundary', id: side })}
+                  onClick={(event) =>
+                    clickCard(
+                      { kind: 'boundary', id: side },
+                      { x: event.clientX, y: event.clientY }
+                    )
+                  }
                   onPointerDown={(event) =>
                     beginCardDrag(event, { kind: 'boundary', id: side }, position)
                   }
                   onKeyDown={(event) => moveCardKey(event, { kind: 'boundary', id: side })}
                 >
-                  {side === 'output' ? (
-                    <button
-                      type="button"
-                      className="workflow-node__port workflow-node__port--input"
-                      data-workflow-input="boundary"
-                      aria-label={`${label} ${text('inputPort')}`}
-                      title={text('inputPort')}
-                      onClick={(event) => {
-                        event.stopPropagation()
-                        onFinish({ kind: 'boundary' })
-                      }}
-                    />
-                  ) : null}
                   <div className="workflow-node__copy">
                     <strong>{text('rootAgent')}</strong>
                     <span>{text(side === 'input' ? 'inputLabel' : 'outputLabel')}</span>
                   </div>
-                  {side === 'input' ? (
-                    <button
-                      type="button"
-                      className="workflow-node__port workflow-node__port--output"
-                      aria-label={`${label} ${text('outputPort')}`}
-                      title={text('outputPort')}
-                      onPointerDown={(event) => beginConnectionPointer(event, { kind: 'boundary' })}
-                      onClick={(event) => {
-                        event.stopPropagation()
-                        if (event.detail === 0) onBegin({ kind: 'boundary' })
-                      }}
-                    />
-                  ) : null}
                 </div>
               )
             })}
             {graph.nodes.map((node) => (
               <div
                 key={node.id}
-                className={`workflow-node${selection?.kind === 'node' && selection.id === node.id ? ' is-selected' : ''}`}
+                data-workflow-node-id={node.id}
+                className={`workflow-node${node.kind === 'inputGate' || node.kind === 'outputGate' ? ` workflow-node--gate workflow-node--${node.kind}` : ''}${selection?.kind === 'node' && selection.id === node.id ? ' is-selected' : ''}`}
                 style={{
                   left: node.x + origin.x,
                   top: node.y + origin.y,
-                  width: NODE_WIDTH,
-                  height: NODE_HEIGHT
+                  width: workflowNodeSize(node).width,
+                  height: workflowNodeSize(node).height
                 }}
                 tabIndex={0}
                 role="group"
-                aria-label={`${text('node')} ${node.name || text('newNode')}`}
-                title={text('moveHint')}
+                aria-label={`${text('node')} ${workflowNodeLabel(node, text, userName)}`}
+                title={text(
+                  connectionMode ? (pending ? 'connecting' : 'chooseSource') : 'configureHint'
+                )}
                 onFocus={(event) => {
                   if (event.target === event.currentTarget) onSelect({ kind: 'node', id: node.id })
                 }}
-                onClick={() => onSelect({ kind: 'node', id: node.id })}
+                onClick={(event) => {
+                  if (event.detail < 2)
+                    clickCard({ kind: 'node', id: node.id }, { x: event.clientX, y: event.clientY })
+                }}
+                onDoubleClick={(event) => {
+                  event.stopPropagation()
+                  if (!connectionMode) onConfigureNode(node.id)
+                }}
                 onPointerDown={(event) => beginCardDrag(event, { kind: 'node', id: node.id }, node)}
                 onKeyDown={(event) => moveCardKey(event, { kind: 'node', id: node.id })}
               >
-                <button
-                  type="button"
-                  className="workflow-node__port workflow-node__port--input"
-                  data-workflow-input="node"
-                  data-workflow-node-id={node.id}
-                  aria-label={`${node.name} ${text('inputPort')}`}
-                  title={text('inputPort')}
-                  onClick={(event) => {
-                    event.stopPropagation()
-                    onFinish({ kind: 'node', nodeId: node.id })
-                  }}
-                />
-                <div className="workflow-node__copy workflow-node__copy--configurable">
-                  <strong>{node.name || text('newNode')}</strong>
-                  <span title={workflowNodeModelLabel(node, templates, models, text)}>
-                    {workflowNodeModelLabel(node, templates, models, text)}
-                  </span>
-                </div>
-                <button
-                  type="button"
-                  className="workflow-node__configure"
-                  data-configure-node={node.id}
-                  aria-label={`${text('configureNode')} ${node.name || text('newNode')}`}
-                  title={text('configureNode')}
-                  onPointerDown={(event) => event.stopPropagation()}
-                  onClick={(event) => {
-                    event.stopPropagation()
-                    onConfigureNode(node.id)
-                  }}
-                >
-                  <Settings size={14} aria-hidden="true" />
-                </button>
-                <button
-                  type="button"
-                  className="workflow-node__port workflow-node__port--output"
-                  aria-label={`${node.name} ${text('outputPort')}`}
-                  title={text('outputPort')}
-                  onPointerDown={(event) =>
-                    beginConnectionPointer(event, { kind: 'node', nodeId: node.id })
-                  }
-                  onClick={(event) => {
-                    event.stopPropagation()
-                    if (event.detail === 0) onBegin({ kind: 'node', nodeId: node.id })
-                  }}
-                />
+                {node.kind === 'inputGate' || node.kind === 'outputGate' ? (
+                  <svg className="workflow-gate-shape" viewBox="0 0 64 56" aria-hidden="true">
+                    <path
+                      d={
+                        node.kind === 'inputGate'
+                          ? 'M 2 2 L 62 28 L 2 54 Z'
+                          : 'M 62 2 L 2 28 L 62 54 Z'
+                      }
+                    />
+                  </svg>
+                ) : null}
+                {node.kind === 'agent' || node.kind === 'user' ? (
+                  <>
+                    {node.kind === 'user' ? (
+                      <span className="workflow-node__avatar workflow-user-avatar">
+                        <AccountAvatar src={profile?.avatarDataUrl} />
+                      </span>
+                    ) : (
+                      <AgentAvatar agentId={node.id} className="workflow-node__avatar" />
+                    )}
+                    <div className="workflow-node__copy workflow-node__copy--configurable">
+                      <strong>{workflowNodeLabel(node, text, userName)}</strong>
+                      <span title={workflowNodeModelLabel(node, templates, models, text)}>
+                        {workflowNodeModelLabel(node, templates, models, text)}
+                      </span>
+                    </div>
+                  </>
+                ) : null}
               </div>
             ))}
+            {flowAnchors.map(({ flow, index, end, position }) => {
+              if (!position) return null
+              const label = `${text('connection')} ${index + 1} ${text(end === 'source' ? 'source' : 'target')}`
+              return (
+                <button
+                  key={`${flow.id}:${end}`}
+                  type="button"
+                  className={`workflow-anchor-handle${selection?.kind === 'flow' && selection.id === flow.id ? ' is-selected' : ''}`}
+                  style={{ left: position.x + origin.x, top: position.y + origin.y }}
+                  aria-label={label}
+                  title={label}
+                  onClick={(event) => {
+                    event.stopPropagation()
+                    if (!connectionMode) onSelect({ kind: 'flow', id: flow.id })
+                  }}
+                  onPointerDown={(event) => beginAnchorDrag(event, flow, end)}
+                  onKeyDown={(event) => {
+                    const delta = (
+                      {
+                        ArrowLeft: [-10, 0],
+                        ArrowRight: [10, 0],
+                        ArrowUp: [0, -10],
+                        ArrowDown: [0, 10]
+                      } as Record<string, number[]>
+                    )[event.key]
+                    if (!delta || connectionMode) return
+                    event.preventDefault()
+                    event.stopPropagation()
+                    onChange((current) => ({
+                      ...current,
+                      flows: current.flows.map((f) =>
+                        f.id === flow.id
+                          ? {
+                              ...f,
+                              [end === 'source' ? 'sourceAnchor' : 'targetAnchor']: anchorAtPoint(
+                                current,
+                                f[end],
+                                end,
+                                { x: position.x + delta[0], y: position.y + delta[1] }
+                              )
+                            }
+                          : f
+                      )
+                    }))
+                  }}
+                />
+              )
+            })}
           </div>
         </div>
       </div>
-      <div className="workflow-canvas-controls" role="group" aria-label={text('resetView')}>
+      <div className="workflow-canvas-actions">
         <button
           type="button"
-          title={text('zoomOut')}
-          aria-label={text('zoomOut')}
-          disabled={zoom <= 0.25}
-          onClick={() => changeZoom(zoom - 0.1)}
+          className="workflow-canvas-optimize"
+          title={text('optimizeLayout')}
+          aria-label={text('optimizeLayout')}
+          disabled={!graph.nodes.length && !graph.flows.length}
+          onClick={() => {
+            fitAfterLayout.current = true
+            onChange(optimizeWorkflowLayout)
+          }}
         >
-          <Minus size={14} />
+          <WandSparkles size={15} />
         </button>
-        <button
-          type="button"
-          className="workflow-canvas-controls__percentage"
-          title="100%"
-          aria-label="100%"
-          onClick={() => changeZoom(1)}
-        >
-          {Math.round(zoom * 100)}%
-        </button>
-        <button
-          type="button"
-          title={text('zoomIn')}
-          aria-label={text('zoomIn')}
-          disabled={zoom >= 2}
-          onClick={() => changeZoom(zoom + 0.1)}
-        >
-          <Plus size={14} />
-        </button>
-        <span className="workflow-canvas-controls__separator" />
-        <button
-          type="button"
-          title={text('resetView')}
-          aria-label={text('resetView')}
-          onClick={fit}
-        >
-          <Maximize2 size={14} />
-        </button>
+        <div className="workflow-canvas-controls" role="group" aria-label={text('resetView')}>
+          <button
+            type="button"
+            title={text('zoomOut')}
+            aria-label={text('zoomOut')}
+            disabled={zoom <= 0.25}
+            onClick={() => changeZoom(zoom - 0.1)}
+          >
+            <Minus size={14} />
+          </button>
+          <button
+            type="button"
+            className="workflow-canvas-controls__percentage"
+            title="100%"
+            aria-label="100%"
+            onClick={() => changeZoom(1)}
+          >
+            {Math.round(zoom * 100)}%
+          </button>
+          <button
+            type="button"
+            title={text('zoomIn')}
+            aria-label={text('zoomIn')}
+            disabled={zoom >= 2}
+            onClick={() => changeZoom(zoom + 0.1)}
+          >
+            <Plus size={14} />
+          </button>
+          <span className="workflow-canvas-controls__separator" />
+          <button
+            type="button"
+            title={text('resetView')}
+            aria-label={text('resetView')}
+            onClick={fit}
+          >
+            <Maximize2 size={14} />
+          </button>
+        </div>
       </div>
     </div>
   )

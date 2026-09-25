@@ -11,11 +11,12 @@ import { removeWorkflowFlows } from '../../features/workflows/workflowAuthoring'
 describe('workflow editing history', () => {
   it('undoes a deletion with its flows/rule memberships and redoes it without moving the viewport', () => {
     const graph = parseWorkflowDefinition(fixture)
-    graph.nodes[0].inputRule = {
+    if (graph.nodes[3].kind !== 'outputGate') throw new Error('Expected output gate')
+    graph.nodes[3].selection = {
       mode: 'custom',
-      min: 0,
-      max: 0,
-      required: ['entry'],
+      min: 1,
+      max: 1,
+      required: ['deliver'],
       groups: [{ id: 'g', flowIds: ['revise'], min: 1, max: 1 }]
     }
     let state = workflowHistoryReducer(createWorkflowHistory(graph), {
@@ -31,13 +32,17 @@ describe('workflow editing history', () => {
     })
     expect(state.past).toHaveLength(1)
     state = workflowHistoryReducer(state, { type: 'undo' })
-    expect(state.present?.flows).toHaveLength(4)
-    expect(state.present?.nodes[0].inputRule.groups[0].flowIds).toEqual(['revise'])
+    expect(state.present?.flows).toHaveLength(6)
+    expect(state.present?.nodes[3]).toMatchObject({
+      selection: { groups: [{ flowIds: ['revise'] }] }
+    })
     expect(state.present?.viewport).toEqual({ x: 120, y: 50, zoom: 0.75 })
     expect(workflowContentKey(state.present!)).toBe(workflowContentKey(graph))
     state = workflowHistoryReducer(state, { type: 'redo' })
-    expect(state.present?.flows).toHaveLength(3)
-    expect(state.present?.nodes[0].inputRule.groups).toEqual([])
+    expect(state.present?.flows).toHaveLength(5)
+    expect(state.present?.nodes[3]).toMatchObject({
+      selection: { groups: [{ flowIds: [], min: 1 }] }
+    })
   })
   it('coalesces one drag, separates gestures, and clears redo after new edits', () => {
     let state = createWorkflowHistory(parseWorkflowDefinition(fixture))

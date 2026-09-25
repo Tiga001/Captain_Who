@@ -1,4 +1,5 @@
 import type { WorkflowDefinition, WorkflowIssue } from '@mycopilot/protocol'
+import { workflowNodeLabel } from './workflowModelPresentation'
 import type { RefObject } from 'react'
 import { ConfirmationDialog } from '../../components/dialog/ConfirmationDialog'
 import { workflowIssueText, type WorkflowText } from './workflowText'
@@ -21,7 +22,7 @@ export function WorkflowIssues({
   const description = issues
     .map((issue) => {
       const node = graph.nodes.find((candidate) => candidate.id === issue.subject)
-      return `• ${node ? `${node.name || text('newNode')}: ` : ''}${workflowIssueText(issue.code, text)}`
+      return `• ${node ? `${workflowNodeLabel(node, text)}: ` : ''}${workflowIssueText(issue.code, text)}`
     })
     .join('\n')
   return (

@@ -23,8 +23,9 @@
   align-items: center;
   justify-content: space-between;
   flex: 0 0 auto;
-  min-height: 64px;
-  padding: 14px 24px;
+  min-height: 52px;
+  box-sizing: border-box;
+  padding: 8px 16px;
   gap: 16px;
   border-bottom: 1px solid var(--mc-color-border-subtle);
 }
@@ -79,19 +80,21 @@
   display: flex;
   flex-shrink: 0;
   align-items: stretch;
-  height: 44px;
-  padding: 0 24px;
-  gap: 24px;
-  border-bottom: 1px solid var(--mc-color-border-subtle);
+  -webkit-app-region: no-drag;
+  height: 32px;
+  padding: 2px;
+  gap: 2px;
+  border-radius: 7px;
+  background: var(--mc-color-surface-muted);
 }
 .workflow-tab {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-height: 32px;
-  padding: 0;
+  min-height: 28px;
+  padding: 0 12px;
   border: 0;
-  border-bottom: 2px solid transparent;
+  border-radius: 5px;
   background: transparent;
   color: var(--mc-color-text-muted);
   font: inherit;
@@ -99,7 +102,8 @@
   cursor: pointer;
 }
 .workflow-tab[aria-selected='true'] {
-  border-bottom-color: var(--mc-color-text-primary);
+  background: var(--mc-color-surface-card);
+  box-shadow: 0 1px 3px rgb(0 0 0 / 8%);
   color: var(--mc-color-text-primary);
   font-weight: var(--mc-font-weight-strong);
 }
@@ -266,6 +270,10 @@
   border-radius: var(--mc-radius-card);
   background: var(--mc-color-surface-card);
 }
+.workflow-record__enabled {
+  flex-shrink: 0;
+  margin-left: 8px;
+}
 .workflow-record__title {
   display: flex;
   align-items: center;
@@ -414,7 +422,7 @@
 }
 @media (max-width: 700px) {
   .workflow-page-header {
-    padding: 12px;
+    padding: 8px;
     gap: 8px;
   }
   .workflow-page-header__identity {
@@ -424,8 +432,8 @@
   .workflow-page-header__identity > svg {
     display: none;
   }
-  .workflow-page-tabs {
-    padding: 0 16px;
+  .workflow-tab {
+    padding: 0 8px;
   }
   .workflow-details-panel {
     padding: 24px 18px;

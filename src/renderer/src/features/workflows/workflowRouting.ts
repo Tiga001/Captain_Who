@@ -171,8 +171,11 @@ export function routeWorkflowFlow(options: RouteOptions): {
         bottom: card.bottom + clearance + lane * 16
       }
     })
-    const outX = start.x + Math.max(portGap, 1)
-    const inX = end.x - Math.max(portGap, 1)
+    const outX = Math.max(
+      start.x + Math.max(portGap, 1),
+      cards.find((card) => card.key === from)!.right
+    )
+    const inX = Math.min(end.x - Math.max(portGap, 1), cards.find((card) => card.key === to)!.left)
     const candidates: CanvasPoint[][] = []
     const add = (points: CanvasPoint[]) => {
       const route = simplify(points)
@@ -224,6 +227,21 @@ export function routeWorkflowFlow(options: RouteOptions): {
         Math.abs(a - start.y) + Math.abs(a - end.y) - Math.abs(b - start.y) - Math.abs(b - end.y) ||
         a - b
     )
+    if (!forward) {
+      // Return links skirt the whole span of intervening columns, keeping the main flow clear.
+      const span = cards.filter((card) => card.right >= inX && card.left <= outX)
+      const outer = [
+        Math.min(...span.map((card) => card.top)),
+        Math.max(...span.map((card) => card.bottom))
+      ].sort(
+        (a, b) =>
+          Math.abs(a - start.y) +
+            Math.abs(a - end.y) -
+            Math.abs(b - start.y) -
+            Math.abs(b - end.y) || a - b
+      )
+      ys.unshift(...outer)
+    }
     for (const y of ys) {
       if (lane && start.y === end.y && y === start.y) continue
       add([
@@ -258,3 +276,79 @@ export function routeWorkflowFlow(options: RouteOptions): {
     radius: 0
   }
 }
+
+/** Arbitrary card sides: leave/enter along the outward normal, then route around obstacles. */
+export function routeAnchoredFlow(
+  options: RouteOptions & {
+    sourceSide: 'left' | 'right' | 'top' | 'bottom'
+    targetSide: 'left' | 'right' | 'top' | 'bottom'
+  }
+): { points: CanvasPoint[]; radius: number } {
+  if (options.sourceSide === 'right' && options.targetSide === 'left')
+    return routeWorkflowFlow(options)
+  const { start, end, from, to } = options
+  const normals = { left: [-1, 0], right: [1, 0], top: [0, -1], bottom: [0, 1] } as const
+  const stub = (point: CanvasPoint, side: keyof typeof normals, amount: number) => ({
+    x: point.x + normals[side][0] * amount,
+    y: point.y + normals[side][1] * amount
+  })
+  for (const clearance of [20, 8, 0]) {
+    const cards = options.cards.map((card) => ({
+      ...card,
+      left: card.left - clearance,
+      right: card.right + clearance,
+      top: card.top - clearance,
+      bottom: card.bottom + clearance
+    }))
+    const a = stub(start, options.sourceSide, clearance + 3)
+    const b = stub(end, options.targetSide, clearance + 3)
+    if (
+      cards.some((card) => card.key !== from && intersects(start, a, card)) ||
+      cards.some((card) => card.key !== to && intersects(b, end, card))
+    )
+      continue
+    const candidates: CanvasPoint[][] = [
+      [a, { x: b.x, y: a.y }, b],
+      [a, { x: a.x, y: b.y }, b]
+    ]
+    if (same(a, b)) {
+      const c = cards.find((card) => card.key === from)!
+      const ring = [
+        { x: c.left - 3, y: c.top - 3 },
+        { x: c.right + 3, y: c.top - 3 },
+        { x: c.right + 3, y: c.bottom + 3 },
+        { x: c.left - 3, y: c.bottom + 3 }
+      ]
+      const side = options.sourceSide
+      const i = side === 'top' ? 0 : side === 'right' ? 1 : side === 'bottom' ? 2 : 3
+      candidates.splice(0, candidates.length, [
+        a,
+        ...ring.slice(i),
+        ...ring.slice(0, i),
+        ring[i],
+        a
+      ])
+    }
+    for (const route of candidates) {
+      if (
+        route.some(
+          (p, i) =>
+            i > 0 &&
+            ((route[i - 1].x !== p.x && route[i - 1].y !== p.y) ||
+              cards.some((card) => intersects(route[i - 1], p, card)))
+        )
+      )
+        continue
+      if (same(a, b) && route.length < 4) continue
+      return { points: simplify([start, ...route, end]), radius: Math.min(10, clearance / 2) }
+    }
+    const route = same(a, b) ? null : search(a, b, cards)
+    if (route)
+      return { points: simplify([start, ...route, end]), radius: Math.min(10, clearance / 2) }
+  }
+  const a = stub(start, options.sourceSide, 3),
+    b = stub(end, options.targetSide, 3)
+  return { points: simplify([start, a, { x: b.x, y: a.y }, b, end]), radius: 0 }
+}
+
+export { simplify as simplifyRoute, intersects as segmentIntersectsCard }

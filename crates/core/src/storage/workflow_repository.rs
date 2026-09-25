@@ -39,7 +39,9 @@ pub fn request(
     available_models: &HashSet<String>,
 ) -> Result<Response, Error> {
     let behavior = match &request {
-        Request::Save { .. } | Request::Delete { .. } => TransactionBehavior::Immediate,
+        Request::Save { .. } | Request::Delete { .. } | Request::SetEnabled { .. } => {
+            TransactionBehavior::Immediate
+        }
         _ => TransactionBehavior::Deferred,
     };
     let transaction = connection
@@ -62,10 +64,15 @@ pub fn request(
             expected_revision,
         } => {
             // Missing templates, incomplete tasks and invalid semantic rules remain editable drafts.
-            definition
+            let issues = definition
                 .validate(&templates, available_models)
                 .map_err(Error::Invalid)?;
-            save(&transaction, &definition, expected_revision)?;
+            save(
+                &transaction,
+                &definition,
+                expected_revision,
+                issues.is_empty(),
+            )?;
             Response {
                 records: list(&transaction, &templates, available_models)?,
                 issues: vec![],
@@ -91,6 +98,24 @@ pub fn request(
             if changed != 1 {
                 return Err(revision_conflict());
             }
+            Response {
+                records: list(&transaction, &templates, available_models)?,
+                issues: vec![],
+            }
+        }
+        Request::SetEnabled {
+            id,
+            enabled,
+            expected_revision,
+        } => {
+            set_enabled(
+                &transaction,
+                &id,
+                enabled,
+                expected_revision,
+                &templates,
+                available_models,
+            )?;
             Response {
                 records: list(&transaction, &templates, available_models)?,
                 issues: vec![],
@@ -125,7 +150,7 @@ fn list(
     }
     let mut statement = connection
         .prepare(
-            "SELECT workflow_id, definition_json, revision, updated_at FROM workflow_definitions
+            "SELECT workflow_id, definition_json, revision, updated_at, enabled FROM workflow_definitions
          ORDER BY updated_at DESC, workflow_id ASC",
         )
         .map_err(storage_error)?;
@@ -136,11 +161,12 @@ fn list(
                 row.get::<_, String>(1)?,
                 row.get::<_, i64>(2)?,
                 row.get::<_, i64>(3)?,
+                row.get::<_, bool>(4)?,
             ))
         })
         .map_err(storage_error)?;
     rows.map(|row| {
-        let (id, json, revision, updated_at) = row.map_err(storage_error)?;
+        let (id, json, revision, updated_at, enabled) = row.map_err(storage_error)?;
         let definition: Definition = serde_json::from_str(&json).map_err(storage_error)?;
         if definition.id != id || !(1..=MAX_SAFE_REVISION).contains(&revision) || updated_at < 0 {
             return Err(Error::Storage("Invalid persisted workflow record".into()));
@@ -150,6 +176,7 @@ fn list(
             .map_err(|_| Error::Storage("Invalid persisted workflow graph".into()))?;
         Ok(Record {
             definition,
+            enabled: enabled && issues.is_empty(),
             revision: revision as u64,
             updated_at,
             issues,
@@ -162,6 +189,7 @@ fn save(
     connection: &Connection,
     definition: &Definition,
     expected_revision: u64,
+    valid: bool,
 ) -> Result<(), Error> {
     let expected = revision_to_sql(expected_revision)?;
     let current: Option<(i64, i64, i64)> = connection
@@ -176,10 +204,7 @@ fn save(
     if current.as_ref().map(|row| row.0).unwrap_or(0) != expected {
         return Err(revision_conflict());
     }
-    let next = expected
-        .checked_add(1)
-        .filter(|next| *next <= MAX_SAFE_REVISION)
-        .ok_or_else(|| Error::Invalid("Workflow revision exhausted".into()))?;
+    let next = next_revision(expected)?;
     let json = serde_json::to_string(definition).map_err(storage_error)?;
     let (count, bytes) = catalog_size(connection)?;
     let replaced_bytes = current.as_ref().map(|row| row.2).unwrap_or(0);
@@ -196,9 +221,10 @@ fn save(
     );
     if current.is_some() {
         let changed = connection.execute(
-            "UPDATE workflow_definitions SET definition_json = ?1, revision = ?2, updated_at = ?3
+            "UPDATE workflow_definitions SET definition_json = ?1, revision = ?2, updated_at = ?3,
+             enabled = CASE WHEN ?6 THEN enabled ELSE 0 END
              WHERE workflow_id = ?4 AND revision = ?5",
-            params![json, next, timestamp, definition.id, expected],
+            params![json, next, timestamp, definition.id, expected, valid],
         ).map_err(storage_error)?;
         if changed != 1 {
             return Err(revision_conflict());
@@ -217,6 +243,62 @@ fn save(
     Ok(())
 }
 
+fn set_enabled(
+    connection: &Connection,
+    id: &str,
+    enabled: bool,
+    expected_revision: u64,
+    templates: &HashSet<String>,
+    available_models: &HashSet<String>,
+) -> Result<(), Error> {
+    validate_id(id)?;
+    let expected = revision_to_sql(expected_revision)?;
+    if expected == 0 {
+        return Err(Error::Invalid(
+            "Changing workflow availability requires its current revision".into(),
+        ));
+    }
+    let current: Option<(String, i64, i64)> = connection
+        .query_row(
+            "SELECT definition_json, revision, updated_at FROM workflow_definitions WHERE workflow_id = ?1",
+            [id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()
+        .map_err(storage_error)?;
+    let Some((json, revision, updated_at)) = current else {
+        return Err(revision_conflict());
+    };
+    if revision != expected {
+        return Err(revision_conflict());
+    }
+    let definition: Definition = serde_json::from_str(&json).map_err(storage_error)?;
+    if definition.id != id || updated_at < 0 {
+        return Err(Error::Storage("Invalid persisted workflow record".into()));
+    }
+    let issues = definition
+        .validate(templates, available_models)
+        .map_err(|_| Error::Storage("Invalid persisted workflow graph".into()))?;
+    if !issues.is_empty() {
+        return Err(Error::Invalid(
+            "Save a valid workflow before changing its availability".into(),
+        ));
+    }
+    let next = next_revision(expected)?;
+    let timestamp = now_ms().max(updated_at.saturating_add(1));
+    let changed = connection
+        .execute(
+            "UPDATE workflow_definitions SET enabled = ?1, revision = ?2, updated_at = ?3
+             WHERE workflow_id = ?4 AND revision = ?5",
+            params![enabled, next, timestamp, id, expected],
+        )
+        .map_err(storage_error)?;
+    if changed != 1 {
+        return Err(revision_conflict());
+    }
+    Ok(())
+}
+
 fn catalog_size(connection: &Connection) -> Result<(usize, i64), Error> {
     connection
         .query_row(
@@ -229,7 +311,13 @@ fn catalog_size(connection: &Connection) -> Result<(usize, i64), Error> {
 }
 
 fn revision_conflict() -> Error {
-    Error::Conflict("Workflow changed or was deleted; reload before saving or deleting".into())
+    Error::Conflict("Workflow changed or was deleted; reload before changing it".into())
+}
+fn next_revision(revision: i64) -> Result<i64, Error> {
+    revision
+        .checked_add(1)
+        .filter(|next| *next <= MAX_SAFE_REVISION)
+        .ok_or_else(|| Error::Invalid("Workflow revision exhausted".into()))
 }
 fn revision_to_sql(revision: u64) -> Result<i64, Error> {
     i64::try_from(revision)

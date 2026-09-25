@@ -1,3 +1,7 @@
+import { resolveWorkflowAnchors } from '../../features/workflows/workflowAnchorLayout'
+import { routeConflicts } from '../../features/workflows/workflowRouteOptimization'
+import { reviewLoopGraph } from './workflowRoutingFixtures'
+import { anchorAtPoint, anchorPoint } from '../../features/workflows/workflowAnchors'
 import { describe, expect, it } from 'vitest'
 import {
   parseWorkflowDefinition,
@@ -5,7 +9,11 @@ import {
   type WorkflowFlow
 } from '@mycopilot/protocol'
 import fixture from '../../../../../packages/protocol/fixtures/workflow-definition-v1.json'
-import { NODE_HEIGHT, NODE_WIDTH } from '../../features/workflows/workflowAuthoring'
+import {
+  NODE_HEIGHT,
+  NODE_WIDTH,
+  workflowNodeSize
+} from '../../features/workflows/workflowAuthoring'
 import {
   canvasOrigin,
   fitViewport,
@@ -61,17 +69,23 @@ function pathGeometry(points: CanvasPoint[], cornerRadius = 10): FlowGeometry {
 }
 
 /** Ports touch their cards; every other part of an orthogonal route must stay outside cards. */
-function expectClearRoute(graph: WorkflowDefinition, geometry: FlowGeometry) {
+function expectClearRoute(
+  graph: WorkflowDefinition,
+  geometry: FlowGeometry,
+  horizontalPorts = true
+) {
   const cards = [...graph.nodes, graph.boundaryPositions.input, graph.boundaryPositions.output]
   expect(geometry.points[0]).toEqual(geometry.start)
   expect(geometry.points.at(-1)).toEqual(geometry.end)
   expect(
     geometry.points.every((point) => Number.isFinite(point.x) && Number.isFinite(point.y))
   ).toBe(true)
-  expect(geometry.points[1].x).toBeGreaterThan(geometry.start.x)
-  expect(geometry.points[1].y).toBe(geometry.start.y)
-  expect(geometry.points.at(-2)!.x).toBeLessThan(geometry.end.x)
-  expect(geometry.points.at(-2)!.y).toBe(geometry.end.y)
+  if (horizontalPorts) {
+    expect(geometry.points[1].x).toBeGreaterThan(geometry.start.x)
+    expect(geometry.points[1].y).toBe(geometry.start.y)
+    expect(geometry.points.at(-2)!.x).toBeLessThan(geometry.end.x)
+    expect(geometry.points.at(-2)!.y).toBe(geometry.end.y)
+  }
   for (let index = 1; index < geometry.points.length; index++) {
     const a = geometry.points[index - 1],
       b = geometry.points[index]
@@ -79,18 +93,20 @@ function expectClearRoute(graph: WorkflowDefinition, geometry: FlowGeometry) {
       vertical = a.x === b.x
     expect(horizontal || vertical, `segment ${index} should remain orthogonal`).toBe(true)
     for (const card of cards) {
+      const inset = 'kind' in card && card.kind !== 'agent' ? 2 : 0
+      const dimensions = workflowNodeSize('kind' in card ? card : undefined)
       const crossesHorizontal =
         horizontal &&
-        a.y > card.y &&
-        a.y < card.y + NODE_HEIGHT &&
-        Math.max(a.x, b.x) > card.x &&
-        Math.min(a.x, b.x) < card.x + NODE_WIDTH
+        a.y > card.y + inset &&
+        a.y < card.y + dimensions.height - inset &&
+        Math.max(a.x, b.x) > card.x + inset &&
+        Math.min(a.x, b.x) < card.x + dimensions.width - inset
       const crossesVertical =
         vertical &&
-        a.x > card.x &&
-        a.x < card.x + NODE_WIDTH &&
-        Math.max(a.y, b.y) > card.y &&
-        Math.min(a.y, b.y) < card.y + NODE_HEIGHT
+        a.x > card.x + inset &&
+        a.x < card.x + dimensions.width - inset &&
+        Math.max(a.y, b.y) > card.y + inset &&
+        Math.min(a.y, b.y) < card.y + dimensions.height - inset
       expect(
         crossesHorizontal || crossesVertical,
         `segment ${index} crosses card at ${card.x},${card.y}`
@@ -100,6 +116,100 @@ function expectClearRoute(graph: WorkflowDefinition, geometry: FlowGeometry) {
 }
 
 describe('workflow canvas geometry', () => {
+  it('keeps a parallel review workflow with two return loops below two crossings without moving nodes or anchors', () => {
+    const graph = resolveWorkflowAnchors(reviewLoopGraph()),
+      snapshot = structuredClone(graph)
+    const before = new Map(graph.flows.map((f) => [f.id, flowGeometry(graph, f)]))
+    const after = graphFlowGeometries(graph)
+    const conflicts = (routes: Map<string, FlowGeometry | null>) => {
+      const values = [...routes.values()].filter((g): g is FlowGeometry => !!g)
+      let crossings = 0,
+        overlap = 0
+      for (let i = 0; i < values.length; i++)
+        for (let j = i + 1; j < values.length; j++) {
+          const cost = routeConflicts(values[i].points, values[j].points)
+          crossings += cost.crossings
+          overlap += cost.overlap
+        }
+      return { crossings, overlap }
+    }
+    const initial = conflicts(before),
+      optimized = conflicts(after)
+    expect(initial.crossings).toBeGreaterThan(0)
+    expect(optimized.crossings).toBeLessThanOrEqual(initial.crossings)
+    expect(optimized.crossings).toBeLessThanOrEqual(1)
+    expect(optimized.overlap).toBe(0)
+    for (const [id, geometry] of after) {
+      expectClearRoute(graph, geometry!, false)
+      expect(geometry!.start).toEqual(before.get(id)!.start)
+      expect(geometry!.end).toEqual(before.get(id)!.end)
+      expect(routeLength(geometry!)).toBeLessThanOrEqual(routeLength(before.get(id)!) * 1.6 + 120)
+    }
+    expect(graph).toEqual(snapshot)
+    expect(graphFlowGeometries(graph)).toEqual(after)
+    expect(graphFlowGeometries({ ...graph, flows: [...graph.flows].reverse() })).toEqual(after)
+  })
+
+  it('routes every pair of card sides around intervening obstacles without crossing cards', () => {
+    for (const sourceSide of ['left', 'right', 'top', 'bottom'] as const) {
+      for (const targetSide of ['left', 'right', 'top', 'bottom'] as const) {
+        const graph = routingGraph(
+          [
+            { id: 'a', x: 100, y: 100 },
+            { id: 'b', x: 800, y: 300 },
+            { id: 'obstacle', x: 440, y: 180 }
+          ],
+          [connection('ab', 'a', 'b')]
+        )
+        const flow = graph.flows[0]
+        flow.sourceAnchor = { side: sourceSide, offset: 0.3 }
+        flow.targetAnchor = { side: targetSide, offset: 0.7 }
+        const geometry = flowGeometry(graph, flow)!
+        expectClearRoute(graph, geometry, false)
+        const normals = { left: [-1, 0], right: [1, 0], top: [0, -1], bottom: [0, 1] }
+        const direction = (a: CanvasPoint, b: CanvasPoint) => [
+          Math.sign(b.x - a.x),
+          Math.sign(b.y - a.y)
+        ]
+        expect(direction(geometry.start, geometry.points[1])).toEqual(normals[sourceSide])
+        expect(direction(geometry.end, geometry.points.at(-2)!)).toEqual(normals[targetSide])
+      }
+    }
+  })
+  it('routes self loops from each side without cutting through the card', () => {
+    for (const side of ['left', 'right', 'top', 'bottom'] as const) {
+      const graph = routingGraph([{ id: 'a', x: 300, y: 200 }], [connection('loop', 'a', 'a')])
+      graph.flows[0].sourceAnchor = { side, offset: 0.5 }
+      graph.flows[0].targetAnchor = { side, offset: 0.5 }
+      const geometry = flowGeometry(graph, graph.flows[0])!
+      expect(geometry.points.length).toBeGreaterThan(5)
+      expectClearRoute(graph, geometry, false)
+    }
+  })
+  it('snaps regular cards to the clicked border and gates only to the tip or base', () => {
+    const graph = parseWorkflowDefinition(fixture)
+    const agent = { kind: 'node', nodeId: 'implement' } as const
+    expect(anchorAtPoint(graph, agent, 'source', { x: 350, y: 181 })).toMatchObject({ side: 'top' })
+    expect(anchorAtPoint(graph, agent, 'target', { x: 281, y: 205 })).toMatchObject({
+      side: 'left'
+    })
+    const gate = graph.nodes.find((n) => n.kind === 'inputGate')!
+    const ep = { kind: 'node', nodeId: gate.id } as const
+    expect(anchorAtPoint(graph, ep, 'source', { x: gate.x, y: gate.y + 52 })).toEqual({
+      side: 'right',
+      offset: 0.5
+    })
+    expect(anchorAtPoint(graph, ep, 'target', { x: gate.x + 60, y: gate.y + 15 })).toEqual({
+      side: 'left',
+      offset: 0.25
+    })
+    expect(anchorPoint(graph, ep, 'source', { side: 'bottom', offset: 1 })).toEqual({
+      x: gate.x + 62,
+      y: gate.y + 28,
+      side: 'right'
+    })
+  })
+
   it('keeps return paths outside node bodies and separates duplicate connections', () => {
     const graph = parseWorkflowDefinition(fixture)
     const flow = graph.flows.find((item) => item.id === 'revise')!
@@ -266,7 +376,7 @@ describe('workflow canvas geometry', () => {
     }
   )
 
-  it('fits both root cards and loop labels without upscaling small graphs', () => {
+  it('fits both root cards and loop routes without upscaling small graphs', () => {
     const graph = parseWorkflowDefinition(fixture)
     const bounds = graphBounds(graph)
     const entry = flowGeometry(
@@ -288,10 +398,10 @@ describe('workflow canvas geometry', () => {
     expect(bounds.left).toBeLessThanOrEqual(graph.boundaryPositions.input.x)
     expect(bounds.right).toBeGreaterThanOrEqual(graph.boundaryPositions.output.x + NODE_WIDTH)
     const origin = canvasOrigin(bounds)
-    const viewport = fitViewport(bounds, 1600, 800, origin)
+    const viewport = fitViewport(bounds, 1800, 800, origin)
     expect(viewport.zoom).toBe(1)
     expect((bounds.left + origin.x) * viewport.zoom - viewport.x).toBeGreaterThanOrEqual(0)
-    expect((bounds.right + origin.x) * viewport.zoom - viewport.x).toBeLessThanOrEqual(1600)
+    expect((bounds.right + origin.x) * viewport.zoom - viewport.x).toBeLessThanOrEqual(1800)
     const small = fitViewport(bounds, 480, 400, origin)
     expect(small.zoom).toBeGreaterThanOrEqual(0.25)
     expect(small.zoom).toBeLessThan(1)
@@ -367,7 +477,9 @@ describe('workflow canvas geometry', () => {
         ],
         { input: { x: -400, y: 800 }, output: { x: 1300, y: 800 } }
       )
-      const geometries = graphFlowGeometries(graph)
+      const geometries = addFlowCrossingBridges(
+        new Map(graph.flows.map((flow) => [flow.id, flowGeometry(graph, flow)]))
+      )
       const vertical = geometries.get('vertical')!
       const horizontal = geometries.get('horizontal')!
       expect(vertical.bridges).toHaveLength(1)
@@ -390,7 +502,9 @@ describe('workflow canvas geometry', () => {
       expect(vertical.start).toEqual(flowGeometry(graph, graph.flows[0])!.start)
       expect(vertical.end).toEqual(flowGeometry(graph, graph.flows[0])!.end)
 
-      const reordered = graphFlowGeometries({ ...graph, flows: [...graph.flows].reverse() })
+      const reordered = addFlowCrossingBridges(
+        new Map([...graph.flows].reverse().map((flow) => [flow.id, flowGeometry(graph, flow)]))
+      )
       expect(reordered.get('vertical')!.bridges).toEqual(vertical.bridges)
       expect(reordered.get('horizontal')!.bridges).toEqual([])
     }
@@ -439,10 +553,12 @@ describe('workflow canvas geometry', () => {
       ],
       { input: { x: -400, y: 800 }, output: { x: 1300, y: 800 } }
     )
-    const geometries = graphFlowGeometries(graph)
+    const geometries = addFlowCrossingBridges(
+      new Map(graph.flows.map((flow) => [flow.id, flowGeometry(graph, flow)]))
+    )
     const vertical = geometries.get('vertical')!
     expect(vertical.bridges).toHaveLength(1)
-    expect(vertical.bridges[0].point).toEqual({ x: 400, y: 232 })
+    expect(vertical.bridges[0].point).toEqual({ x: 400, y: 200 + NODE_HEIGHT / 2 })
     for (const id of ['upper', 'lower']) {
       const horizontal = geometries.get(id)!
       expect(
@@ -450,8 +566,8 @@ describe('workflow canvas geometry', () => {
           const next = points[index + 1]
           return (
             next &&
-            point.y === 232 &&
-            next.y === 232 &&
+            point.y === 200 + NODE_HEIGHT / 2 &&
+            next.y === 200 + NODE_HEIGHT / 2 &&
             Math.min(point.x, next.x) < 400 &&
             Math.max(point.x, next.x) > 400
           )

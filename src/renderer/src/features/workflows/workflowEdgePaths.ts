@@ -1,5 +1,17 @@
 import type { CanvasBounds, CanvasPoint, FlowBridge, FlowGeometry } from './workflowCanvasGeometry'
 
+/** Label follows the final route, rather than a superseded pre-optimization segment. */
+export function flowLabelPosition(points: CanvasPoint[]): CanvasPoint {
+  const horizontal = points
+    .slice(1)
+    .map((b, i) => ({ a: points[i], b }))
+    .filter(({ a, b }) => a.y === b.y)
+    .sort((a, b) => Math.abs(b.b.x - b.a.x) - Math.abs(a.b.x - a.a.x))[0]
+  return horizontal
+    ? { x: (horizontal.a.x + horizontal.b.x) / 2, y: horizontal.a.y - 12 }
+    : { x: (points[0].x + points.at(-1)!.x) / 2, y: (points[0].y + points.at(-1)!.y) / 2 - 12 }
+}
+
 const length = (a: CanvasPoint, b: CanvasPoint) => Math.hypot(b.x - a.x, b.y - a.y)
 function toward(a: CanvasPoint, b: CanvasPoint, distance: number): CanvasPoint {
   const ratio = distance / (length(a, b) || 1)

@@ -1,10 +1,10 @@
 import { Plus, Trash2 } from 'lucide-react'
 import { useId } from 'react'
 import type { WorkflowFlow, WorkflowRule } from '@mycopilot/protocol'
+import { WorkflowOptionPicker } from './WorkflowOptionPicker'
 import type { WorkflowText } from './workflowText'
 
 interface Props {
-  direction: 'input' | 'output'
   flows: WorkflowFlow[]
   rule: WorkflowRule
   flowLabel: (flow: WorkflowFlow) => string
@@ -12,36 +12,37 @@ interface Props {
   text: WorkflowText
 }
 
-export function WorkflowRuleEditor({ direction, flows, rule, flowLabel, onChange, text }: Props) {
+export function WorkflowRuleEditor({ flows, rule, flowLabel, onChange, text }: Props) {
   const id = useId()
-  const title = text(direction === 'input' ? 'inputRule' : 'outputRule')
+  const title = text('outputRule')
   const grouped = new Set(rule.groups.flatMap((group) => group.flowIds))
   return (
     <fieldset className="workflow-rule">
       <legend>{title}</legend>
-      <p>{text(direction === 'input' ? 'inputHint' : 'outputHint')}</p>
-      <select
-        aria-label={title}
+      <p>{text('outputHint')}</p>
+      <WorkflowOptionPicker
+        ariaLabel={title}
         value={rule.mode}
-        onChange={(event) =>
+        showSelectedDetail={false}
+        options={(['all', 'one', 'exact', 'range', 'custom'] as const).map((mode) => ({
+          id: mode,
+          name: text(mode)
+        }))}
+        onChange={(mode) =>
           onChange({
-            mode: event.currentTarget.value as WorkflowRule['mode'],
-            min: Math.min(1, flows.length),
-            max: flows.length,
+            mode: mode as WorkflowRule['mode'],
+            min: 1,
+            max: Math.max(1, flows.length),
             required: [],
             groups: []
           })
         }
-      >
-        {(['all', 'one', 'any', 'range', 'custom'] as const).map((mode) => (
-          <option key={mode} value={mode}>
-            {text(mode)}
-          </option>
-        ))}
-      </select>
+      />
       {flows.length === 0 ? <p>{text('noFlows')}</p> : null}
-      {rule.mode === 'range' ? (
+      {rule.mode === 'range' || rule.mode === 'exact' ? (
         <QuantityFields
+          minimumOnly={rule.mode === 'exact'}
+          exactCount={rule.mode === 'exact'}
           min={rule.min}
           max={rule.max}
           limit={flows.length}
@@ -162,6 +163,8 @@ export function WorkflowRuleEditor({ direction, flows, rule, flowLabel, onChange
 }
 
 function QuantityFields({
+  minimumOnly = false,
+  exactCount = false,
   min,
   max,
   limit,
@@ -169,6 +172,8 @@ function QuantityFields({
   text,
   onChange
 }: {
+  minimumOnly?: boolean
+  exactCount?: boolean
   min: number
   max: number
   limit: number
@@ -179,9 +184,9 @@ function QuantityFields({
   return (
     <div className="workflow-quantities">
       <label>
-        <span>{text('min')}</span>
+        <span>{text(exactCount ? 'quantity' : 'min')}</span>
         <input
-          aria-label={`${label} ${text('min')}`}
+          aria-label={`${label} ${text(exactCount ? 'quantity' : 'min')}`}
           type="number"
           min={0}
           max={limit}
@@ -192,20 +197,22 @@ function QuantityFields({
           }
         />
       </label>
-      <label>
-        <span>{text('max')}</span>
-        <input
-          aria-label={`${label} ${text('max')}`}
-          type="number"
-          min={0}
-          max={limit}
-          step={1}
-          value={max}
-          onChange={(event) =>
-            onChange({ max: Math.max(0, Math.floor(Number(event.currentTarget.value) || 0)) })
-          }
-        />
-      </label>
+      {!minimumOnly ? (
+        <label>
+          <span>{text('max')}</span>
+          <input
+            aria-label={`${label} ${text('max')}`}
+            type="number"
+            min={0}
+            max={limit}
+            step={1}
+            value={max}
+            onChange={(event) =>
+              onChange({ max: Math.max(0, Math.floor(Number(event.currentTarget.value) || 0)) })
+            }
+          />
+        </label>
+      ) : null}
     </div>
   )
 }

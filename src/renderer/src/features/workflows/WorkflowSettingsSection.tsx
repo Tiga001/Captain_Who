@@ -14,7 +14,11 @@ import type { AgentTemplate, WorkflowRecord } from '@mycopilot/protocol'
 import { useFrontendConfig } from '../../config/FrontendConfigProvider'
 import { ConfirmationDialog } from '../../components/dialog/ConfirmationDialog'
 import { requestWorkflows } from './workflowClient'
-import { createWorkflow } from './workflowAuthoring'
+import {
+  createWorkflow,
+  nameUnnamedWorkflowFlows,
+  nameUnnamedWorkflowGates
+} from './workflowAuthoring'
 import { workflowText } from './workflowText'
 import { WorkflowGraphEditor } from './WorkflowGraphEditor'
 import { WorkflowIssues } from './WorkflowIssues'
@@ -124,7 +128,9 @@ export function WorkflowSettingsSection({
       return
     }
     const perform = () => {
-      const definition = record ? structuredClone(record.definition) : createWorkflow()
+      const definition = record
+        ? nameUnnamedWorkflowGates(nameUnnamedWorkflowFlows(structuredClone(record.definition)))
+        : createWorkflow()
       setBaseline(workflowContentKey(definition))
       reset(definition)
       setRevision(record?.revision ?? 0)
@@ -177,6 +183,49 @@ export function WorkflowSettingsSection({
           typeof saveError === 'object' &&
           'code' in saveError &&
           saveError.code === -32009
+        )
+      )
+      setError(true)
+    } finally {
+      busyRef.current = false
+      onSavingChange?.(false)
+      setBusy(false)
+    }
+  }
+  const setEnabled = async (record: WorkflowRecord) => {
+    if (
+      busyRef.current ||
+      loading ||
+      conflict ||
+      record.issues.length > 0 ||
+      typeof record.enabled !== 'boolean'
+    )
+      return
+    busyRef.current = true
+    onSavingChange?.(true)
+    setBusy(true)
+    setError(false)
+    try {
+      const response = await requestWorkflows({
+        operation: 'setEnabled',
+        id: record.definition.id,
+        enabled: !record.enabled,
+        expectedRevision: record.revision
+      })
+      const updated = response.records.find((item) => item.definition.id === record.definition.id)
+      if (!updated) throw new Error('Updated workflow is missing from response')
+      setRecords(response.records)
+      // Enabling changes only saved metadata. Keep a hidden editing draft intact,
+      // while advancing its revision only when it started from this saved record.
+      if (draft?.id === record.definition.id)
+        setRevision((current) => (current === record.revision ? updated.revision : current))
+    } catch (enableError) {
+      setConflict(
+        Boolean(
+          enableError &&
+          typeof enableError === 'object' &&
+          'code' in enableError &&
+          enableError.code === -32009
         )
       )
       setError(true)
@@ -272,6 +321,30 @@ export function WorkflowSettingsSection({
                 <span className="workflow-unsaved-dot" role="status" aria-label={text('unsaved')} />
               ) : null}
             </div>
+            <div className="workflow-page-tabs" role="tablist" aria-label={text('edit')}>
+              <button
+                id={`${tabId}-details`}
+                aria-controls={`${tabId}-details-panel`}
+                className="workflow-tab"
+                type="button"
+                role="tab"
+                aria-selected={tab === 'details'}
+                onClick={() => setTab('details')}
+              >
+                {text('basicInfo')}
+              </button>
+              <button
+                id={`${tabId}-structure`}
+                aria-controls={`${tabId}-structure-panel`}
+                className="workflow-tab"
+                type="button"
+                role="tab"
+                aria-selected={tab === 'structure'}
+                onClick={() => setTab('structure')}
+              >
+                {text('structureTab')}
+              </button>
+            </div>
             <div className="workflow-page-header__actions">
               <button
                 className="workflow-icon-button"
@@ -306,30 +379,6 @@ export function WorkflowSettingsSection({
             </div>
           </header>
           {errorMessage}
-          <div className="workflow-page-tabs" role="tablist" aria-label={text('edit')}>
-            <button
-              id={`${tabId}-details`}
-              aria-controls={`${tabId}-details-panel`}
-              className="workflow-tab"
-              type="button"
-              role="tab"
-              aria-selected={tab === 'details'}
-              onClick={() => setTab('details')}
-            >
-              {text('basicInfo')}
-            </button>
-            <button
-              id={`${tabId}-structure`}
-              aria-controls={`${tabId}-structure-panel`}
-              className="workflow-tab"
-              type="button"
-              role="tab"
-              aria-selected={tab === 'structure'}
-              onClick={() => setTab('structure')}
-            >
-              {text('structureTab')}
-            </button>
-          </div>
           {renderSettingsNodes(workflowEditorSettings, () => (
             <div className="workflow-editing-content">
               <div
@@ -459,7 +508,7 @@ export function WorkflowSettingsSection({
                   <div>
                     <div className="workflow-record__title">
                       <strong>{record.definition.name || text('create')}</strong>
-                      <span>{text(record.issues.length ? 'draft' : 'valid')}</span>
+                      {record.issues.length > 0 ? <span>{text('draft')}</span> : null}
                     </div>
                     {record.definition.description ? <p>{record.definition.description}</p> : null}
                   </div>
@@ -481,6 +530,31 @@ export function WorkflowSettingsSection({
                       onClick={() => setPendingDelete(record)}
                     >
                       <Trash2 aria-hidden="true" />
+                    </button>
+                    <button
+                      className="settings-switch workflow-record__enabled"
+                      type="button"
+                      role="switch"
+                      aria-label={`${text('enable')} ${record.definition.name || text('create')}`}
+                      aria-checked={record.issues.length === 0 && Boolean(record.enabled)}
+                      data-state={record.issues.length === 0 && record.enabled ? 'on' : 'off'}
+                      title={
+                        typeof record.enabled !== 'boolean'
+                          ? text('enableRequiresRestart')
+                          : record.issues.length > 0
+                            ? text('enableRequiresValid')
+                            : undefined
+                      }
+                      disabled={
+                        loading ||
+                        busy ||
+                        conflict ||
+                        record.issues.length > 0 ||
+                        typeof record.enabled !== 'boolean'
+                      }
+                      onClick={() => void setEnabled(record)}
+                    >
+                      <span className="settings-switch__thumb" aria-hidden="true" />
                     </button>
                   </div>
                 </article>

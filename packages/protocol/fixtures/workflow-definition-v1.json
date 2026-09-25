@@ -13,22 +13,9 @@
       "receives": "Receive the current task and previous result.",
       "task": "Complete the assigned step and report evidence.",
       "delivers": "Deliver the result to the selected outgoing flow.",
-      "inputRule": {
-        "mode": "one",
-        "min": 1,
-        "max": 1,
-        "required": [],
-        "groups": []
-      },
-      "outputRule": {
-        "mode": "all",
-        "min": 1,
-        "max": 1,
-        "required": [],
-        "groups": []
-      },
-      "x": 240,
-      "y": 180
+      "x": 280,
+      "y": 180,
+      "kind": "agent"
     },
     {
       "id": "review",
@@ -38,22 +25,32 @@
       "receives": "Receive the current task and previous result.",
       "task": "Complete the assigned step and report evidence.",
       "delivers": "Deliver the result to the selected outgoing flow.",
-      "inputRule": {
-        "mode": "all",
-        "min": 1,
-        "max": 1,
-        "required": [],
-        "groups": []
-      },
-      "outputRule": {
+      "x": 580,
+      "y": 180,
+      "kind": "agent"
+    },
+    {
+      "id": "implement-input",
+      "kind": "inputGate",
+      "name": "Implementation input",
+      "x": 40,
+      "y": 180,
+      "processingMode": "individual",
+      "busyPolicy": "queue"
+    },
+    {
+      "id": "review-output",
+      "kind": "outputGate",
+      "name": "Review output",
+      "x": 860,
+      "y": 180,
+      "selection": {
         "mode": "one",
         "min": 1,
         "max": 1,
         "required": [],
         "groups": []
-      },
-      "x": 560,
-      "y": 180
+      }
     }
   ],
   "flows": [
@@ -65,7 +62,7 @@
       },
       "target": {
         "kind": "node",
-        "nodeId": "implement"
+        "nodeId": "implement-input"
       }
     },
     {
@@ -85,11 +82,11 @@
       "name": "revise",
       "source": {
         "kind": "node",
-        "nodeId": "review"
+        "nodeId": "review-output"
       },
       "target": {
         "kind": "node",
-        "nodeId": "implement"
+        "nodeId": "implement-input"
       }
     },
     {
@@ -97,10 +94,34 @@
       "name": "deliver",
       "source": {
         "kind": "node",
-        "nodeId": "review"
+        "nodeId": "review-output"
       },
       "target": {
         "kind": "boundary"
+      }
+    },
+    {
+      "id": "input-binding",
+      "name": "",
+      "source": {
+        "kind": "node",
+        "nodeId": "implement-input"
+      },
+      "target": {
+        "kind": "node",
+        "nodeId": "implement"
+      }
+    },
+    {
+      "id": "output-binding",
+      "name": "",
+      "source": {
+        "kind": "node",
+        "nodeId": "review"
+      },
+      "target": {
+        "kind": "node",
+        "nodeId": "review-output"
       }
     }
   ],
@@ -111,11 +132,11 @@
   },
   "boundaryPositions": {
     "input": {
-      "x": -40,
+      "x": -250,
       "y": 180
     },
     "output": {
-      "x": 1024,
+      "x": 1120,
       "y": 180
     }
   }

@@ -1,17 +1,10 @@
 use super::*;
 use crate::storage::{migrations::run_migrations, service::StorageService};
 use crate::workflow::{
-    BoundaryPoint, BoundaryPositions, Endpoint, Flow, Mode, Node, Rule, Viewport,
+    AgentConfig, BoundaryPoint, BoundaryPositions, Endpoint, Flow, Node, NodeConfig, Viewport,
 };
 
 fn graph() -> Definition {
-    let rule = Rule {
-        mode: Mode::All,
-        min: 0,
-        max: 0,
-        required: vec![],
-        groups: vec![],
-    };
     Definition {
         boundary_positions: BoundaryPositions {
             input: BoundaryPoint {
@@ -21,6 +14,7 @@ fn graph() -> Definition {
             output: BoundaryPoint { x: 564.0, y: 200.0 },
         },
         schema_version: 1,
+        next_flow_sequence: None,
         id: "workflow-review".into(),
         name: "Review".into(),
         description: "Review a change".into(),
@@ -33,18 +27,20 @@ fn graph() -> Definition {
         nodes: vec![Node {
             id: "review".into(),
             name: "Review".into(),
-            template_id: None,
-            model_config_id: Some("model-review".into()),
-            receives: "Code change".into(),
-            task: "Review actual defects".into(),
-            delivers: "Findings".into(),
-            input_rule: rule.clone(),
-            output_rule: rule,
+            config: NodeConfig::Agent(AgentConfig {
+                template_id: None,
+                model_config_id: Some("model-review".into()),
+                receives: "Code change".into(),
+                task: "Review actual defects".into(),
+                delivers: "Findings".into(),
+            }),
             x: 100.0,
             y: 200.0,
         }],
         flows: vec![
             Flow {
+                source_anchor: None,
+                target_anchor: None,
                 id: "input".into(),
                 name: "Task".into(),
                 source: Endpoint::Boundary,
@@ -53,6 +49,8 @@ fn graph() -> Definition {
                 },
             },
             Flow {
+                source_anchor: None,
+                target_anchor: None,
                 id: "output".into(),
                 name: "Findings".into(),
                 source: Endpoint::Node {
@@ -82,6 +80,186 @@ fn save(
     )
 }
 
+fn set_enabled(
+    connection: &mut Connection,
+    enabled: bool,
+    expected_revision: u64,
+) -> Result<Response, Error> {
+    request(
+        connection,
+        Request::SetEnabled {
+            id: graph().id,
+            enabled,
+            expected_revision,
+        },
+    )
+}
+
+#[test]
+fn enabled_workflow_reopens_and_valid_edits_preserve_availability() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("enabled-workflow.sqlite");
+    let mut connection = Connection::open(&path).unwrap();
+    run_migrations(&connection).unwrap();
+    let mut positioned = graph();
+    positioned.next_flow_sequence = Some(24);
+    positioned.flows[0].source_anchor = Some(crate::workflow::Anchor {
+        side: crate::workflow::AnchorSide::Top,
+        offset: 0.3,
+    });
+    positioned.flows[0].target_anchor = Some(crate::workflow::Anchor {
+        side: crate::workflow::AnchorSide::Bottom,
+        offset: 0.7,
+    });
+    let saved = save(&mut connection, positioned, 0).unwrap();
+    assert!(saved.records[0].issues.is_empty());
+    assert!(!saved.records[0].enabled);
+    assert_eq!(saved.records[0].definition.next_flow_sequence, Some(24));
+    let enabled = set_enabled(&mut connection, true, 1).unwrap();
+    assert!(enabled.records[0].enabled);
+    assert_eq!(enabled.records[0].revision, 2);
+    assert!(enabled.records[0].updated_at > saved.records[0].updated_at);
+    drop(connection);
+    let mut connection = Connection::open(&path).unwrap();
+    run_migrations(&connection).unwrap();
+    assert_eq!(
+        serde_json::to_value(&enabled).unwrap(),
+        serde_json::to_value(request(&mut connection, Request::List).unwrap()).unwrap()
+    );
+    let edited = save(&mut connection, graph(), 2).unwrap();
+    assert!(edited.records[0].enabled);
+    assert_eq!(edited.records[0].revision, 3);
+    let disabled = set_enabled(&mut connection, false, 3).unwrap();
+    assert!(!disabled.records[0].enabled);
+    assert_eq!(disabled.records[0].revision, 4);
+}
+
+#[test]
+fn saving_incomplete_draft_disables_it_and_valid_repair_does_not_reenable() {
+    let mut connection = Connection::open_in_memory().unwrap();
+    run_migrations(&connection).unwrap();
+    save(&mut connection, graph(), 0).unwrap();
+    set_enabled(&mut connection, true, 1).unwrap();
+    let mut incomplete = graph();
+    incomplete.nodes[0].agent_mut().task.clear();
+    let draft = save(&mut connection, incomplete, 2).unwrap();
+    assert!(!draft.records[0].enabled);
+    assert_eq!(draft.records[0].revision, 3);
+    assert!(draft.records[0]
+        .issues
+        .iter()
+        .any(|issue| issue.code == "task"));
+    for enabled in [true, false] {
+        assert!(matches!(
+            set_enabled(&mut connection, enabled, 3),
+            Err(Error::Invalid(_))
+        ));
+    }
+    let repaired = save(&mut connection, graph(), 3).unwrap();
+    assert!(repaired.records[0].issues.is_empty());
+    assert!(!repaired.records[0].enabled);
+    assert_eq!(repaired.records[0].revision, 4);
+}
+
+#[test]
+fn list_is_fail_closed_without_writing_and_toggle_revalidates_current_dependencies() {
+    let mut connection = Connection::open_in_memory().unwrap();
+    run_migrations(&connection).unwrap();
+    save(&mut connection, graph(), 0).unwrap();
+    set_enabled(&mut connection, true, 1).unwrap();
+    let unavailable = super::request(&mut connection, Request::List, &HashSet::new()).unwrap();
+    assert!(!unavailable.records[0].enabled);
+    assert_eq!(
+        unavailable.records[0].issues[0].code,
+        "node_model_unavailable"
+    );
+    assert_eq!(unavailable.records[0].revision, 2);
+    for enabled in [true, false] {
+        assert!(matches!(
+            super::request(
+                &mut connection,
+                Request::SetEnabled {
+                    id: graph().id,
+                    enabled,
+                    expected_revision: 2,
+                },
+                &HashSet::new()
+            ),
+            Err(Error::Invalid(_))
+        ));
+    }
+    assert!(connection
+        .query_row("SELECT enabled FROM workflow_definitions", [], |row| row
+            .get::<_, bool>(
+            0
+        ))
+        .unwrap());
+    let restored = request(&mut connection, Request::List).unwrap();
+    assert!(restored.records[0].enabled);
+    assert_eq!(restored.records[0].revision, 2);
+    let persisted_invalid = super::request(
+        &mut connection,
+        Request::Save {
+            definition: graph(),
+            expected_revision: 2,
+        },
+        &HashSet::new(),
+    )
+    .unwrap();
+    assert!(!persisted_invalid.records[0].enabled);
+    assert!(!request(&mut connection, Request::List).unwrap().records[0].enabled);
+}
+
+#[test]
+fn availability_changes_require_current_saved_revision_and_preserve_conflicting_state() {
+    let mut connection = Connection::open_in_memory().unwrap();
+    run_migrations(&connection).unwrap();
+    assert!(matches!(
+        set_enabled(&mut connection, true, 0),
+        Err(Error::Invalid(_))
+    ));
+    assert!(matches!(
+        set_enabled(&mut connection, true, 1),
+        Err(Error::Conflict(_))
+    ));
+    save(&mut connection, graph(), 0).unwrap();
+    set_enabled(&mut connection, true, 1).unwrap();
+    assert!(matches!(
+        set_enabled(&mut connection, false, 1),
+        Err(Error::Conflict(_))
+    ));
+    assert!(matches!(
+        save(&mut connection, graph(), 1),
+        Err(Error::Conflict(_))
+    ));
+    assert!(matches!(
+        request(
+            &mut connection,
+            Request::Delete {
+                id: graph().id,
+                expected_revision: 1,
+            }
+        ),
+        Err(Error::Conflict(_))
+    ));
+    assert!(request(&mut connection, Request::List).unwrap().records[0].enabled);
+    connection
+        .execute(
+            "UPDATE workflow_definitions SET revision=?1",
+            [MAX_SAFE_REVISION],
+        )
+        .unwrap();
+    for expected in [MAX_SAFE_REVISION as u64, MAX_SAFE_REVISION as u64 + 1] {
+        assert!(matches!(
+            set_enabled(&mut connection, false, expected),
+            Err(Error::Invalid(_))
+        ));
+    }
+    let current = request(&mut connection, Request::List).unwrap();
+    assert!(current.records[0].enabled);
+    assert_eq!(current.records[0].revision, MAX_SAFE_REVISION as u64);
+}
+
 #[test]
 fn workflow_reopens_with_exact_graph_layout_and_revision() {
     let dir = tempfile::tempdir().unwrap();
@@ -105,57 +283,6 @@ fn workflow_reopens_with_exact_graph_layout_and_revision() {
     );
     assert_eq!(read.records[0].definition.nodes[0].x, 100.0);
     assert_eq!(read.records[0].definition.viewport.zoom, 1.25);
-}
-
-#[test]
-fn legacy_v1_storage_is_read_without_mutation_and_can_be_saved_after_selecting_a_model() {
-    let mut connection = Connection::open_in_memory().unwrap();
-    run_migrations(&connection).unwrap();
-    let mut json = serde_json::to_value(graph()).unwrap();
-    json["nodes"][0]
-        .as_object_mut()
-        .unwrap()
-        .remove("modelConfigId");
-    json.as_object_mut().unwrap().remove("boundaryPositions");
-    let legacy = json.to_string();
-    connection.execute("INSERT INTO workflow_definitions(workflow_id,definition_json,revision,updated_at) VALUES (?1,?2,1,1)", params![graph().id, legacy]).unwrap();
-    let mut record = request(&mut connection, Request::List)
-        .unwrap()
-        .records
-        .remove(0);
-    assert!(record.definition.nodes[0].model_config_id.is_none());
-    assert_eq!(
-        record.definition.boundary_positions,
-        graph().boundary_positions
-    );
-    assert_eq!(record.issues[0].code, "node_model");
-    assert_eq!(
-        connection
-            .query_row(
-                "SELECT definition_json FROM workflow_definitions",
-                [],
-                |row| row.get::<_, String>(0)
-            )
-            .unwrap(),
-        legacy
-    );
-    record.definition.nodes[0].model_config_id = Some("model-review".into());
-    record.definition.boundary_positions.input = BoundaryPoint { x: -60.5, y: 320.0 };
-    let saved = save(&mut connection, record.definition, 1).unwrap();
-    assert!(saved.records[0].issues.is_empty());
-    assert_eq!(saved.records[0].revision, 2);
-    assert_eq!(
-        saved.records[0].definition.boundary_positions.input,
-        BoundaryPoint { x: -60.5, y: 320.0 }
-    );
-    assert_eq!(
-        request(&mut connection, Request::List).unwrap().records[0]
-            .definition
-            .nodes[0]
-            .model_config_id
-            .as_deref(),
-        Some("model-review")
-    );
 }
 
 #[test]
@@ -196,20 +323,31 @@ fn service_uses_execution_projection_for_disabled_and_credential_missing_models(
         })
         .unwrap();
     assert!(saved.records[0].issues.is_empty());
+    let enabled_workflow = service
+        .workflow_request(Request::SetEnabled {
+            id: graph().id,
+            enabled: true,
+            expected_revision: 1,
+        })
+        .unwrap();
+    assert!(enabled_workflow.records[0].enabled);
     service
         .save_model_settings(settings(false, "owned-test-token"))
         .unwrap();
     let disabled = service.workflow_request(Request::List).unwrap();
+    assert!(!disabled.records[0].enabled);
     assert_eq!(disabled.records[0].issues[0].code, "node_model_unavailable");
     service.save_model_settings(settings(true, "")).unwrap();
-    let no_credential = service.workflow_request(Request::List).unwrap();
+    let mut no_credential = service.workflow_request(Request::List).unwrap();
     assert_eq!(
         no_credential.records[0].issues[0].code,
         "node_model_unavailable"
     );
-    assert_eq!(no_credential.records[0].revision, 1);
+    assert!(!no_credential.records[0].enabled);
+    assert_eq!(no_credential.records[0].revision, 2);
     assert_eq!(
         no_credential.records[0].definition.nodes[0]
+            .agent_mut()
             .model_config_id
             .as_deref(),
         Some("model-review")
@@ -217,9 +355,9 @@ fn service_uses_execution_projection_for_disabled_and_credential_missing_models(
     service
         .save_model_settings(settings(true, "owned-test-token"))
         .unwrap();
-    assert!(service.workflow_request(Request::List).unwrap().records[0]
-        .issues
-        .is_empty());
+    let restored = service.workflow_request(Request::List).unwrap();
+    assert!(restored.records[0].issues.is_empty());
+    assert!(restored.records[0].enabled);
 }
 
 #[test]
@@ -228,14 +366,16 @@ fn template_model_overrides_cannot_replace_a_saved_definition() {
     run_migrations(&connection).unwrap();
     save(&mut connection, graph(), 0).unwrap();
     let mut invalid = graph();
-    invalid.nodes[0].template_id = Some("template-review".into());
+    invalid.nodes[0].agent_mut().template_id = Some("template-review".into());
     assert!(matches!(
         save(&mut connection, invalid, 1),
         Err(Error::Invalid(_))
     ));
     let read = request(&mut connection, Request::List).unwrap();
     assert_eq!(read.records[0].revision, 1);
-    assert!(read.records[0].definition.nodes[0].template_id.is_none());
+    assert!(
+        matches!(&read.records[0].definition.nodes[0].config, NodeConfig::Agent(agent) if agent.template_id.is_none())
+    );
 }
 
 #[test]
@@ -310,8 +450,8 @@ fn missing_template_is_a_draft_issue_recomputed_on_list() {
     let mut connection = Connection::open_in_memory().unwrap();
     run_migrations(&connection).unwrap();
     let mut definition = graph();
-    definition.nodes[0].template_id = Some("template-review".into());
-    definition.nodes[0].model_config_id = None;
+    definition.nodes[0].agent_mut().template_id = Some("template-review".into());
+    definition.nodes[0].agent_mut().model_config_id = None;
     let response = save(&mut connection, definition, 0).unwrap();
     assert_eq!(response.records[0].issues[0].code, "template");
     connection.execute_batch("INSERT INTO agent_templates (
@@ -336,7 +476,7 @@ fn semantic_drafts_save_but_structural_corruption_is_rejected_without_mutation()
     let mut connection = Connection::open_in_memory().unwrap();
     run_migrations(&connection).unwrap();
     let mut definition = graph();
-    definition.nodes[0].task.clear();
+    definition.nodes[0].agent_mut().task.clear();
     definition.flows.clear();
     let validation = request(
         &mut connection,
@@ -350,6 +490,12 @@ fn semantic_drafts_save_but_structural_corruption_is_rejected_without_mutation()
     let saved = save(&mut connection, definition.clone(), 0).unwrap();
     assert_eq!(saved.records[0].issues, validation.issues);
     definition.schema_version = 2;
+    assert!(matches!(
+        save(&mut connection, definition, 1),
+        Err(Error::Invalid(_))
+    ));
+    let mut definition = graph();
+    definition.flows[0].source = definition.flows[0].target.clone();
     assert!(matches!(
         save(&mut connection, definition, 1),
         Err(Error::Invalid(_))
@@ -454,7 +600,7 @@ fn catalog_byte_quota_accounts_for_replacements_and_bounds_reads() {
     let mut connection = Connection::open_in_memory().unwrap();
     run_migrations(&connection).unwrap();
     let mut large = graph();
-    large.nodes[0].task = "x".repeat(126_000);
+    large.nodes[0].agent_mut().task = "x".repeat(126_000);
     for index in 1..10 {
         let mut node = large.nodes[0].clone();
         node.id = format!("extra-{index}");
@@ -499,4 +645,103 @@ fn catalog_byte_quota_accounts_for_replacements_and_bounds_reads() {
         request(&mut connection, Request::List),
         Err(Error::Storage(_))
     ));
+}
+
+#[test]
+fn independent_gates_reopen_with_modes_and_disconnected_input_saves_as_disabled_draft() {
+    use crate::workflow::{BusyPolicy, InputProcessingMode};
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("logic-gates.sqlite");
+    let mut definition: Definition = serde_json::from_str(include_str!(
+        "../../../../../packages/protocol/fixtures/workflow-definition-v1.json"
+    ))
+    .unwrap();
+    for node in &mut definition.nodes {
+        match &mut node.config {
+            NodeConfig::User { .. } => {}
+            NodeConfig::Agent(agent) => agent.model_config_id = Some("model-review".into()),
+            NodeConfig::InputGate {
+                processing_mode,
+                busy_policy,
+            } => {
+                *processing_mode = InputProcessingMode::Individual;
+                *busy_policy = BusyPolicy::Inject;
+            }
+            NodeConfig::OutputGate { selection } => {
+                selection.mode = crate::workflow::Mode::Exact;
+                selection.min = 2;
+            }
+        }
+    }
+    let expected = serde_json::to_value(&definition).unwrap();
+    {
+        let mut connection = Connection::open(&path).unwrap();
+        run_migrations(&connection).unwrap();
+        let saved = save(&mut connection, definition.clone(), 0).unwrap();
+        assert!(saved.records[0].issues.is_empty());
+        let enabled = request(
+            &mut connection,
+            Request::SetEnabled {
+                id: definition.id.clone(),
+                enabled: true,
+                expected_revision: 1,
+            },
+        )
+        .unwrap();
+        assert!(enabled.records[0].enabled);
+    }
+    let mut connection = Connection::open(&path).unwrap();
+    run_migrations(&connection).unwrap();
+    let reopened = request(&mut connection, Request::List).unwrap();
+    assert_eq!(
+        serde_json::to_value(&reopened.records[0].definition).unwrap(),
+        expected
+    );
+    assert!(reopened.records[0].enabled);
+    definition
+        .flows
+        .retain(|flow| flow.target.node() != Some("implement-input"));
+    let saved = save(&mut connection, definition.clone(), 2).unwrap();
+    assert!(!saved.records[0].enabled);
+    assert!(saved.records[0]
+        .issues
+        .iter()
+        .any(|i| i.code == "inputRule"));
+    assert!(matches!(
+        request(
+            &mut connection,
+            Request::SetEnabled {
+                id: definition.id.clone(),
+                enabled: true,
+                expected_revision: 3
+            }
+        ),
+        Err(Error::Invalid(_))
+    ));
+    let reopened = request(&mut connection, Request::List).unwrap();
+    assert_eq!(
+        serde_json::to_value(&reopened.records[0].definition).unwrap(),
+        serde_json::to_value(&definition).unwrap()
+    );
+}
+
+#[test]
+fn visual_user_node_round_trips_without_agent_or_gate_configuration() {
+    let mut connection = Connection::open_in_memory().unwrap();
+    run_migrations(&connection).unwrap();
+    let mut definition = graph();
+    definition.nodes[0].config = NodeConfig::User {
+        task: "Review the proposal".into(),
+    };
+    definition.nodes[0].name = "User".into();
+    let expected = serde_json::to_value(&definition).unwrap();
+    save(&mut connection, definition, 0).unwrap();
+    let reopened = request(&mut connection, Request::List).unwrap();
+    assert_eq!(
+        serde_json::to_value(&reopened.records[0].definition).unwrap(),
+        expected
+    );
+    let mut invalid = expected;
+    invalid["nodes"][0]["modelConfigId"] = serde_json::json!("Not an agent");
+    assert!(serde_json::from_value::<Definition>(invalid).is_err());
 }

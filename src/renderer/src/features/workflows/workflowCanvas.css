@@ -45,33 +45,34 @@
   pointer-events: none;
 }
 .workflow-edge {
-  color: var(--mc-color-text-muted);
+  color: var(--mc-color-text-primary);
   cursor: pointer;
   pointer-events: auto;
   outline: none;
 }
 .workflow-edge.is-selected,
 .workflow-edge:focus-visible {
-  color: var(--mc-color-text-accent);
+  color: var(--mc-color-text-primary);
 }
 .workflow-edge__line {
   fill: none;
   stroke: currentColor;
   stroke-width: 1.5;
-  opacity: 0.78;
+  opacity: 1;
 }
 .workflow-edge.is-selected .workflow-edge__line,
 .workflow-edge:focus-visible .workflow-edge__line {
   stroke-width: 2;
   opacity: 1;
+  filter: drop-shadow(0 0 2px var(--mc-color-focus-ring));
 }
 .workflow-crossing {
-  color: var(--mc-color-text-muted);
+  color: var(--mc-color-text-primary);
   cursor: pointer;
   pointer-events: stroke;
 }
 .workflow-crossing.is-selected {
-  color: var(--mc-color-text-accent);
+  color: var(--mc-color-text-primary);
 }
 .workflow-crossing__halo {
   fill: none;
@@ -82,30 +83,30 @@
   fill: none;
   stroke: currentColor;
   stroke-width: 1.5;
-  opacity: 0.78;
+  opacity: 1;
 }
 .workflow-crossing.is-selected .workflow-crossing__line {
   stroke-width: 2;
   opacity: 1;
+  filter: drop-shadow(0 0 2px var(--mc-color-focus-ring));
 }
 .workflow-edge__hit {
   fill: none;
   stroke: transparent;
   stroke-width: 18;
 }
-.workflow-edge__caption rect {
-  fill: var(--mc-color-surface-muted);
-  stroke: none;
-}
-.workflow-edge__caption text {
+.workflow-edge__label {
   fill: currentColor;
+  stroke: var(--mc-color-surface-muted);
+  stroke-width: 4px;
+  stroke-linejoin: round;
+  paint-order: stroke fill;
   font-size: 11px;
-  font-family: inherit;
-  stroke: none;
+  pointer-events: auto;
 }
 .workflow-edge__preview {
   fill: none;
-  stroke: var(--mc-color-text-accent);
+  stroke: var(--mc-color-text-primary);
   stroke-width: 1.5;
   stroke-dasharray: 5 4;
   pointer-events: none;
@@ -115,20 +116,21 @@
   box-sizing: border-box;
   display: flex;
   align-items: center;
-  border: 1px solid var(--mc-color-border-default, var(--mc-color-border-subtle));
-  border-radius: 9px;
-  background: var(--mc-color-surface-card);
+  border: 1px solid var(--mc-color-text-primary);
+  border-radius: 7px;
+  background: var(--mc-color-text-primary);
+  color: var(--mc-color-surface-card);
   box-shadow: 0 1px 3px rgb(0 0 0 / 4%);
   cursor: grab;
   user-select: none;
   touch-action: none;
 }
 .workflow-node:hover {
-  border-color: var(--mc-color-text-muted);
+  border-color: var(--mc-color-text-primary);
 }
 .workflow-node.is-selected,
 .workflow-node:focus-visible {
-  border-color: var(--mc-color-text-accent);
+  border-color: var(--mc-color-text-primary);
   outline: 2px solid var(--mc-color-focus-ring);
   outline-offset: 2px;
 }
@@ -137,41 +139,21 @@
 }
 .workflow-node__copy {
   display: grid;
-  gap: 4px;
+  gap: 1px;
   width: 100%;
   min-width: 0;
-  padding: 10px 15px;
+  padding: 7px 12px;
 }
 .workflow-node__copy--configurable {
-  padding-right: 45px;
+  padding: 7px 12px 7px 8px;
+}
+.workflow-node__avatar {
+  width: 28px;
+  height: 28px;
+  margin-left: 10px;
 }
 .workflow-node--root {
   border-style: dashed;
-}
-.workflow-node__configure {
-  position: absolute;
-  right: 12px;
-  top: 50%;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 26px;
-  height: 26px;
-  padding: 0;
-  transform: translateY(-50%);
-  border: 0;
-  border-radius: 5px;
-  background: transparent;
-  color: var(--mc-color-text-muted);
-  cursor: pointer;
-}
-.workflow-node__configure:hover {
-  background: var(--mc-color-state-hover);
-  color: var(--mc-color-text-primary);
-}
-.workflow-node__configure:focus-visible {
-  outline: 2px solid var(--mc-color-focus-ring);
-  outline-offset: 1px;
 }
 .workflow-node__copy strong,
 .workflow-node__copy span {
@@ -180,60 +162,54 @@
   text-overflow: ellipsis;
 }
 .workflow-node__copy strong {
-  color: var(--mc-color-text-primary);
+  color: inherit;
   font-size: 12px;
   font-weight: var(--mc-font-weight-strong);
   line-height: 17px;
 }
 .workflow-node__copy span {
-  color: var(--mc-color-text-muted);
+  color: inherit;
   font-size: 11px;
   line-height: 15px;
 }
-.workflow-node__port {
-  position: absolute;
-  top: 50%;
-  z-index: 1;
-  width: 12px;
-  height: 12px;
-  margin-top: -6px;
-  padding: 0;
-  border: 1.5px solid var(--mc-color-text-muted);
-  border-radius: 50%;
-  background: var(--mc-color-surface-card);
-  cursor: crosshair;
-  touch-action: none;
-}
-.workflow-node__port::before {
-  position: absolute;
-  inset: -6px;
-  content: '';
-}
-.workflow-node__port--input {
-  left: -6px;
-}
-.workflow-node__port--output {
-  right: -6px;
-  background: var(--mc-color-text-muted);
-}
-.workflow-node.is-selected .workflow-node__port,
-.workflow-node__port:hover,
-.workflow-node__port:focus-visible {
-  border-color: var(--mc-color-text-accent);
-  outline: 4px solid var(--mc-color-surface-info-subtle);
-}
-.workflow-node.is-selected .workflow-node__port--output {
-  background: var(--mc-color-text-accent);
-}
-.workflow-canvas-controls {
+.workflow-canvas-actions {
   position: absolute;
   right: 17px;
   bottom: 15px;
   display: flex;
   align-items: center;
+  gap: 8px;
+}
+.workflow-canvas-optimize {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border: 1px solid var(--mc-color-text-primary);
+  border-radius: 8px;
+  background: var(--mc-color-surface-card);
+  color: var(--mc-color-text-primary);
+  box-shadow: 0 2px 7px rgb(0 0 0 / 6%);
+  cursor: pointer;
+}
+.workflow-canvas-optimize:hover:not(:disabled) {
+  background: var(--mc-color-state-hover);
+}
+.workflow-canvas-optimize:focus-visible {
+  outline: 2px solid var(--mc-color-focus-ring);
+}
+.workflow-canvas-optimize:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+.workflow-canvas-controls {
+  display: flex;
+  align-items: center;
   gap: 1px;
   padding: 3px;
-  border: 1px solid var(--mc-color-border-subtle);
+  border: 1px solid var(--mc-color-text-primary);
   border-radius: 8px;
   background: var(--mc-color-surface-card);
   box-shadow: 0 2px 7px rgb(0 0 0 / 6%);
@@ -248,7 +224,7 @@
   border: 0;
   border-radius: 5px;
   background: transparent;
-  color: var(--mc-color-text-muted);
+  color: var(--mc-color-text-primary);
   cursor: pointer;
   font: inherit;
   font-size: 10px;
@@ -272,5 +248,90 @@
   width: 1px;
   height: 14px;
   margin: 0 3px;
-  background: var(--mc-color-border-subtle);
+  background: var(--mc-color-text-primary);
+}
+
+.workflow-node--gate,
+.workflow-node--gate:hover,
+.workflow-node--gate.is-selected,
+.workflow-node--gate:focus-visible {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  outline: none;
+}
+.workflow-gate-shape {
+  position: absolute;
+  inset: 0 0 auto;
+  width: 64px;
+  height: 56px;
+  overflow: visible;
+}
+.workflow-gate-shape path {
+  fill: var(--mc-color-text-primary);
+  stroke: var(--mc-color-text-primary);
+  stroke-width: 1.4;
+  stroke-linejoin: round;
+}
+.workflow-node--gate:hover .workflow-gate-shape path,
+.workflow-node--gate.is-selected .workflow-gate-shape path,
+.workflow-node--gate:focus-visible .workflow-gate-shape path {
+  stroke: var(--mc-color-text-primary);
+  stroke-width: 2;
+}
+.workflow-node--gate.is-selected .workflow-gate-shape path,
+.workflow-node--gate:focus-visible .workflow-gate-shape path {
+  stroke: var(--mc-color-focus-ring);
+  stroke-width: 2.5;
+  filter: drop-shadow(0 0 2px var(--mc-color-focus-ring));
+}
+.workflow-canvas.is-connecting .workflow-node {
+  cursor: crosshair;
+}
+.workflow-anchor-handle {
+  position: absolute;
+  z-index: 2;
+  width: 10px;
+  height: 10px;
+  padding: 0;
+  transform: translate(-50%, -50%);
+  border: 1.5px solid var(--mc-color-text-primary);
+  border-radius: 50%;
+  background: var(--mc-color-surface-card);
+  cursor: grab;
+  touch-action: none;
+}
+.workflow-anchor-handle::before {
+  position: absolute;
+  inset: -5px;
+  content: '';
+}
+.workflow-anchor-handle:hover,
+.workflow-anchor-handle.is-selected,
+.workflow-anchor-handle:focus-visible {
+  outline: 3px solid var(--mc-color-focus-ring);
+  outline-offset: 1px;
+}
+.workflow-anchor-handle:active {
+  cursor: grabbing;
+}
+.workflow-canvas.is-connecting .workflow-anchor-handle {
+  cursor: crosshair;
+}
+
+.workflow-anchor-handle.is-selected {
+  z-index: 3;
+}
+
+.workflow-user-avatar {
+  display: inline-flex;
+  flex-shrink: 0;
+  overflow: hidden;
+  border-radius: 50%;
+}
+.workflow-user-avatar img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
 }

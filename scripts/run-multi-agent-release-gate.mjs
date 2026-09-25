@@ -217,7 +217,7 @@ const smokeSteps = [
   },
   {
     label:
-      'storage: canonical v54, exact v53 adds workflow authoring definitions without changing history, exact v52 preserves history without activity backfill, exact v51 preserves mailbox history, exact v50 requires empty collaboration history, older versions require reset, and atomic fresh creation',
+      'storage: canonical v55, exact v54 adds disabled workflow availability, exact v53 adds workflow authoring definitions without changing history, exact v52 preserves history without activity backfill, exact v51 preserves mailbox history, exact v50 requires empty collaboration history, older versions require reset, and atomic fresh creation',
     command: ['cargo', 'test', '--locked', '-p', 'mycopilot-core', '--lib', 'storage::migrations::']
   },
   {

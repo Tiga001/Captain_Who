@@ -32,9 +32,20 @@ export function workflowNodeModelLabel(
   models: readonly WorkflowModelDisplay[],
   text: WorkflowText
 ): string {
+  if (node.kind !== 'agent') return text(node.kind)
   if (node.templateId) {
     const template = templates.find((candidate) => candidate.templateId === node.templateId)
     return template ? workflowTemplateModelLabel(template, models, text) : text('missingTemplate')
   }
   return modelLabel(node.modelConfigId ?? null, models, text)
+}
+
+/** User-assigned identities are shared by the toolbar, inspector and endpoint menus. */
+export function workflowNodeLabel(
+  node: WorkflowNode,
+  text: WorkflowText,
+  userName?: string
+): string {
+  if (node.kind === 'user' && userName) return userName
+  return node.name || text(node.kind === 'agent' ? 'newNode' : node.kind)
 }

@@ -1,11 +1,15 @@
+import { AccountAvatar } from '../auth/AccountAvatar'
+import { useAccountAuth } from '../auth/AccountAuthContext'
 import {
-  ArrowDownToLine,
-  ArrowUpFromLine,
   Bot,
+  UserRound,
+  Triangle,
   ChevronDown,
   Link2,
+  Hand,
   Plus,
   Search,
+  Settings,
   Trash2,
   X
 } from 'lucide-react'
@@ -14,28 +18,42 @@ import type {
   AgentTemplate,
   WorkflowDefinition,
   WorkflowEndpoint,
+  WorkflowAnchor,
   WorkflowFlow,
-  WorkflowNode
+  WorkflowNode,
+  WorkflowAgentNode,
+  WorkflowUserNode,
+  WorkflowInputGateNode,
+  WorkflowOutputGateNode
 } from '@mycopilot/protocol'
 import {
   createWorkflowNode,
+  createWorkflowUser,
+  createWorkflowGate,
+  workflowNodeSize,
+  connectWorkflowFlow,
+  workflowConnectionAllowed,
   endpointValue,
   nodeFlows,
   removeWorkflowFlows,
   workflowEndpoint,
-  WORKFLOW_DRAG_TYPE,
-  NODE_WIDTH,
-  NODE_HEIGHT
+  WORKFLOW_DRAG_TYPE
 } from './workflowAuthoring'
 import { WorkflowCanvas, type WorkflowSelection } from './WorkflowCanvas'
-import { WorkflowRuleEditor } from './WorkflowRuleEditor'
+import { AgentAvatar } from '../agentCollaboration/AgentAvatar'
+import { WorkflowGateEditor } from './WorkflowGateEditor'
 import { WorkflowTemplatePicker } from './WorkflowTemplatePicker'
+import { WorkflowOptionPicker } from './WorkflowOptionPicker'
 import { canvasOrigin, graphBounds } from './workflowCanvasGeometry'
 import type { WorkflowText } from './workflowText'
 import { useModelSettings } from '../../config/ModelSettingsProvider'
 import { ModelConfigPicker } from '../modelSelection/ModelConfigPicker'
 import { formatModelConfigLabel } from '../modelSelection/modelConfigPresentation'
-import { workflowNodeModelLabel, workflowTemplateModelLabel } from './workflowModelPresentation'
+import {
+  workflowNodeModelLabel,
+  workflowNodeLabel,
+  workflowTemplateModelLabel
+} from './workflowModelPresentation'
 import './workflowGraphEditor.css'
 
 export interface WorkflowGraphEditorProps {
@@ -55,23 +73,24 @@ export function WorkflowGraphEditor({
   onChange
 }: WorkflowGraphEditorProps) {
   const { models, enabledModels } = useModelSettings()
+  const profile = useAccountAuth()?.state.profile
+  const userName = profile?.displayName || text('currentUser')
   const enabledModelIds = new Set(enabledModels.map((model) => model.id))
   const [selection, setSelection] = useState<WorkflowSelection>(null)
   const [configuredNodeId, setConfiguredNodeId] = useState<string | null>(null)
   const [pending, setPending] = useState<WorkflowEndpoint | null>(null)
   const pendingRef = useRef<WorkflowEndpoint | null>(null)
-  const [panel, setPanel] = useState<'nodes' | 'connect' | null>(null)
+  const [panel, setPanel] = useState<'nodes' | null>(null)
+  const [connectionMode, setConnectionMode] = useState(false)
+  const [pendingAnchor, setPendingAnchor] = useState<WorkflowAnchor | undefined>()
+  const pendingAnchorRef = useRef<WorkflowAnchor | undefined>(undefined)
   const [query, setQuery] = useState('')
-  const [inspectorTab, setInspectorTab] = useState<'task' | 'rules'>('task')
-  const [flowSource, setFlowSource] = useState('')
-  const [flowTarget, setFlowTarget] = useState(graph.nodes[0]?.id ?? '')
   const toolbarRef = useRef<HTMLDivElement>(null)
   const canvasRef = useRef<HTMLDivElement>(null)
   const addButtonRef = useRef<HTMLButtonElement>(null)
   const connectButtonRef = useRef<HTMLButtonElement>(null)
   const searchRef = useRef<HTMLInputElement>(null)
   const panelId = useId()
-  const inspectorId = useId()
   const selectedNode =
     selection?.kind === 'node' ? graph.nodes.find((node) => node.id === selection.id) : undefined
   const selectedFlow =
@@ -85,10 +104,11 @@ export function WorkflowGraphEditor({
       .includes(query.trim().toLocaleLowerCase())
   )
 
-  const selectedTemplate = configuredNode?.templateId
-    ? templates.find((template) => template.templateId === configuredNode.templateId)
+  const selectedAgent = selectedNode?.kind === 'agent' ? selectedNode : undefined
+  const selectedTemplate = selectedAgent?.templateId
+    ? templates.find((template) => template.templateId === selectedAgent.templateId)
     : undefined
-  const selectedModelId = configuredNode?.modelConfigId ?? null
+  const selectedModelId = selectedAgent?.modelConfigId ?? null
   const selectedModelUnavailable = Boolean(selectedModelId && !enabledModelIds.has(selectedModelId))
   const modelOptions = [
     ...(selectedModelUnavailable && selectedModelId
@@ -96,7 +116,7 @@ export function WorkflowGraphEditor({
           {
             id: selectedModelId,
             disabled: true,
-            label: workflowNodeModelLabel(configuredNode!, templates, models, text)
+            label: workflowNodeModelLabel(selectedAgent!, templates, models, text)
           }
         ]
       : []),
@@ -107,12 +127,19 @@ export function WorkflowGraphEditor({
     if (!panel) return
     if (panel === 'nodes') searchRef.current?.focus()
     const outside = (event: PointerEvent) => {
-      if (event.target instanceof Node && !toolbarRef.current?.contains(event.target))
+      if (
+        event.target instanceof Node &&
+        !toolbarRef.current?.contains(event.target) &&
+        !(
+          event.target instanceof Element &&
+          event.target.closest(`[data-workflow-picker-owner="${CSS.escape(panelId)}"]`)
+        )
+      )
         setPanel(null)
     }
     window.addEventListener('pointerdown', outside)
     return () => window.removeEventListener('pointerdown', outside)
-  }, [panel])
+  }, [panel, panelId])
 
   useEffect(() => {
     if (pending?.kind === 'node' && !graph.nodes.some((node) => node.id === pending.nodeId)) {
@@ -133,29 +160,46 @@ export function WorkflowGraphEditor({
 
   const select = (next: WorkflowSelection) => {
     setSelection(next)
-    if (next?.kind !== 'node' || next.id !== configuredNodeId) setConfiguredNodeId(null)
+    // An open inspector follows node selection without collapsing or resizing the canvas.
+    // A closed inspector still requires the explicit configure action.
+    if (next?.kind !== 'node') setConfiguredNodeId(null)
+    else if (!connectionMode) setConfiguredNodeId((current) => (current ? next.id : null))
   }
   const configureNode = (id: string) => {
     if (!graph.nodes.some((node) => node.id === id)) return
     setSelection({ kind: 'node', id })
     setConfiguredNodeId(id)
-    setInspectorTab('task')
     setPanel(null)
   }
-  const updateNode = (id: string, patch: Partial<WorkflowNode>, group?: string) =>
+  const updateNode = (
+    id: string,
+    patch:
+      | Partial<WorkflowAgentNode>
+      | Partial<WorkflowUserNode>
+      | Partial<WorkflowInputGateNode>
+      | Partial<WorkflowOutputGateNode>,
+    group?: string
+  ) =>
     onChange(
       (current) => ({
         ...current,
-        nodes: current.nodes.map((node) => (node.id === id ? { ...node, ...patch } : node))
+        nodes: current.nodes.map((node) =>
+          node.id === id ? ({ ...node, ...patch } as WorkflowNode) : node
+        )
       }),
       group ? { group } : undefined
     )
   const addNode = (x?: number, y?: number, templateId?: string) => {
+    const userNode = templateId === 'node:user'
+    const gateKind =
+      templateId === 'gate:input' ? 'inputGate' : templateId === 'gate:output' ? 'outputGate' : null
     if (graph.nodes.length >= 128) return
-    const template = templateId
-      ? templates.find((candidate) => candidate.templateId === templateId)
-      : undefined
-    if (templateId && !template) return
+    const template =
+      templateId && !gateKind
+        ? templates.find((candidate) => candidate.templateId === templateId)
+        : undefined
+    if (templateId && !gateKind && !userNode && !template) return
+    const dimensions = workflowNodeSize(gateKind ? { kind: gateKind } : undefined)
     const area = canvasRef.current
     const origin = canvasOrigin(graphBounds(graph))
     const desired = {
@@ -166,7 +210,7 @@ export function WorkflowGraphEditor({
           x ??
             (graph.viewport.x + (area?.clientWidth ?? 800) / 2) / graph.viewport.zoom -
               origin.x -
-              NODE_WIDTH / 2
+              dimensions.width / 2
         )
       ),
       y: Math.max(
@@ -176,7 +220,7 @@ export function WorkflowGraphEditor({
           y ??
             (graph.viewport.y + (area?.clientHeight ?? 600) / 2) / graph.viewport.zoom -
               origin.y -
-              NODE_HEIGHT / 2
+              dimensions.height / 2
         )
       )
     }
@@ -184,38 +228,51 @@ export function WorkflowGraphEditor({
       x === undefined && y === undefined
         ? nearestOpenPosition(
             [...graph.nodes, graph.boundaryPositions.input, graph.boundaryPositions.output],
-            desired
+            desired,
+            workflowNodeSize(gateKind ? { kind: gateKind } : undefined)
           )
         : desired
-    const node = createWorkflowNode(
-      text('newNode'),
-      position.x,
-      position.y,
-      template,
-      template ? null : (enabledModels[0]?.id ?? null)
-    )
+    const node = userNode
+      ? createWorkflowUser(userName, position.x, position.y)
+      : gateKind
+        ? createWorkflowGate(gateKind, position.x, position.y, graph.nodes)
+        : createWorkflowNode(
+            text('newNode'),
+            position.x,
+            position.y,
+            template,
+            template ? null : (enabledModels[0]?.id ?? null)
+          )
     onChange((current) =>
       current.nodes.length >= 128 ? current : { ...current, nodes: [...current.nodes, node] }
     )
     select({ kind: 'node', id: node.id })
-    setFlowTarget(node.id)
+    setConfiguredNodeId(null)
     setPanel(null)
   }
-  const addFlow = (source: WorkflowEndpoint, target: WorkflowEndpoint) => {
-    if (graph.flows.length >= 512 || (source.kind === 'boundary' && target.kind === 'boundary'))
-      return
-    const endpointExists = (endpoint: WorkflowEndpoint) =>
-      endpoint.kind === 'boundary' || graph.nodes.some((node) => node.id === endpoint.nodeId)
-    if (!endpointExists(source) || !endpointExists(target)) return
-    const flow: WorkflowFlow = { id: crypto.randomUUID(), name: '', source, target }
-    onChange((current) =>
-      current.flows.length >= 512 ? current : { ...current, flows: [...current.flows, flow] }
-    )
+  const addFlow = (
+    source: WorkflowEndpoint,
+    target: WorkflowEndpoint,
+    sourceAnchor?: WorkflowAnchor,
+    targetAnchor?: WorkflowAnchor
+  ) => {
+    const flow: WorkflowFlow = {
+      id: crypto.randomUUID(),
+      name: '',
+      source,
+      target,
+      ...(sourceAnchor ? { sourceAnchor } : {}),
+      ...(targetAnchor ? { targetAnchor } : {})
+    }
+    if (!workflowConnectionAllowed(graph, source, target)) return
+    onChange((current) => connectWorkflowFlow(current, flow))
     select({ kind: 'flow', id: flow.id })
     setPanel(null)
   }
-  const beginConnection = (source: WorkflowEndpoint) => {
+  const beginConnection = (source: WorkflowEndpoint, anchor?: WorkflowAnchor) => {
     if (graph.flows.length >= 512) return
+    pendingAnchorRef.current = anchor
+    setPendingAnchor(anchor)
     pendingRef.current = source
     setPending(source)
     setPanel(null)
@@ -224,11 +281,11 @@ export function WorkflowGraphEditor({
     pendingRef.current = null
     setPending(null)
   }
-  const finishConnection = (target: WorkflowEndpoint) => {
+  const finishConnection = (target: WorkflowEndpoint, anchor?: WorkflowAnchor) => {
     const source = pendingRef.current
-    if (!source || (source.kind === 'boundary' && target.kind === 'boundary')) return
+    if (!source || !workflowConnectionAllowed(graph, source, target)) return
     cancelConnection()
-    addFlow(source, target)
+    addFlow(source, target, pendingAnchorRef.current, anchor)
   }
   const focusCanvas = () =>
     canvasRef.current?.querySelector<HTMLElement>('.workflow-canvas')?.focus()
@@ -237,10 +294,10 @@ export function WorkflowGraphEditor({
       const id = configuredNodeId
       setConfiguredNodeId(null)
       window.requestAnimationFrame(() => {
-        const gear = canvasRef.current?.querySelector<HTMLButtonElement>(
-          `[data-configure-node="${CSS.escape(id)}"]`
+        const node = canvasRef.current?.querySelector<HTMLElement>(
+          `.workflow-node[data-workflow-node-id="${CSS.escape(id)}"]`
         )
-        if (gear) gear.focus({ preventScroll: true })
+        if (node) node.focus({ preventScroll: true })
         else focusCanvas()
       })
     } else {
@@ -248,26 +305,27 @@ export function WorkflowGraphEditor({
       focusCanvas()
     }
   }
-  const deleteSelected = () => {
-    if (selectedNode) {
-      const id = selectedNode.id
-      onChange((current) => {
-        const ids = new Set(
-          [...nodeFlows(current, id, 'input'), ...nodeFlows(current, id, 'output')].map(
-            (flow) => flow.id
-          )
+  const deleteNode = (id: string) => {
+    onChange((current) => {
+      const ids = new Set(
+        [...nodeFlows(current, id, 'input'), ...nodeFlows(current, id, 'output')].map(
+          (flow) => flow.id
         )
-        const cleaned = removeWorkflowFlows(current, ids)
-        return { ...cleaned, nodes: cleaned.nodes.filter((node) => node.id !== id) }
-      })
-      if (pendingRef.current?.kind === 'node' && pendingRef.current.nodeId === id)
-        cancelConnection()
-      if (flowSource === id) setFlowSource('')
-      if (flowTarget === id) setFlowTarget('')
-    } else if (selectedFlow)
-      onChange((current) => removeWorkflowFlows(current, new Set([selectedFlow.id])))
+      )
+      const cleaned = removeWorkflowFlows(current, ids)
+      return { ...cleaned, nodes: cleaned.nodes.filter((node) => node.id !== id) }
+    })
+    if (pendingRef.current?.kind === 'node' && pendingRef.current.nodeId === id) cancelConnection()
     select(null)
     focusCanvas()
+  }
+  const deleteSelected = () => {
+    if (selectedNode) deleteNode(selectedNode.id)
+    else if (selectedFlow) {
+      onChange((current) => removeWorkflowFlows(current, new Set([selectedFlow.id])))
+      select(null)
+      focusCanvas()
+    }
   }
   const updateFlow = (id: string, patch: Partial<WorkflowFlow>) =>
     onChange(
@@ -275,47 +333,55 @@ export function WorkflowGraphEditor({
         const previous = current.flows.find((flow) => flow.id === id)
         if (!previous) return current
         const changed = { ...previous, ...patch }
-        const flows = current.flows.map((flow) => (flow.id === id ? changed : flow))
-        if (!patch.source && !patch.target) return { ...current, flows }
-        const nodes = current.nodes.map((node) => {
-          const clean = (rule: WorkflowNode['inputRule'], endpoint: WorkflowEndpoint) => {
-            if (endpoint.kind === 'node' && endpoint.nodeId === node.id) return rule
-            return {
-              ...rule,
-              required: rule.required.filter((member) => member !== id),
-              groups: rule.groups
-                .map((group) => ({
-                  ...group,
-                  flowIds: group.flowIds.filter((member) => member !== id)
-                }))
-                .filter((group) => group.flowIds.length > 0)
-            }
-          }
+        if (!patch.source && !patch.target)
           return {
-            ...node,
-            inputRule: clean(node.inputRule, changed.target),
-            outputRule: clean(node.outputRule, changed.source)
+            ...current,
+            flows: current.flows.map((flow) => (flow.id === id ? changed : flow))
           }
-        })
-        return { ...current, flows, nodes }
+        return connectWorkflowFlow(current, changed)
       },
       patch.name !== undefined ? { group: `flow:${id}:name` } : undefined
     )
   const flowLabel = (flow: WorkflowFlow) => {
-    if (flow.name) return flow.name
     const name = (endpoint: WorkflowEndpoint, entry: boolean) =>
       endpoint.kind === 'boundary'
         ? text(entry ? 'parentInput' : 'parentOutput')
-        : graph.nodes.find((node) => node.id === endpoint.nodeId)?.name || text('newNode')
-    return `${name(flow.source, true)} → ${name(flow.target, false)}`
+        : workflowNodeLabel(
+            graph.nodes.find((node) => node.id === endpoint.nodeId)!,
+            text,
+            userName
+          )
+    return `${flow.name ? `${flow.name} · ` : ''}${name(flow.source, true)} → ${name(flow.target, false)}`
   }
-  const nodeOptions = graph.nodes.map((node) => (
-    <option key={node.id} value={node.id}>
-      {node.name || text('newNode')}
-    </option>
-  ))
-  const sourceValue = graph.nodes.some((node) => node.id === flowSource) ? flowSource : ''
-  const targetValue = graph.nodes.some((node) => node.id === flowTarget) ? flowTarget : ''
+  const nodeOptions = graph.nodes.map((node) => ({
+    id: node.id,
+    name: workflowNodeLabel(node, text, userName),
+    detail: workflowNodeModelLabel(node, templates, models, text)
+  }))
+
+  const selectionActions = (
+    <div className="workflow-selection-actions">
+      {selectedNode ? (
+        <button
+          type="button"
+          className="workflow-graph-toolbar__add"
+          onClick={() => configureNode(selectedNode.id)}
+        >
+          <Settings aria-hidden="true" />
+          {text('details')}
+        </button>
+      ) : null}
+      <button
+        type="button"
+        className="workflow-graph-icon-button workflow-selection-delete"
+        aria-label={text(selectedFlow ? 'deleteFlow' : 'deleteNode')}
+        title={text(selectedFlow ? 'deleteFlow' : 'deleteNode')}
+        onClick={deleteSelected}
+      >
+        <Trash2 aria-hidden="true" />
+      </button>
+    </div>
+  )
 
   return (
     <div
@@ -324,10 +390,11 @@ export function WorkflowGraphEditor({
         if (event.defaultPrevented) return
         if (event.key === 'Escape') {
           if (panel) {
-            const trigger = panel === 'nodes' ? addButtonRef.current : connectButtonRef.current
+            const trigger = addButtonRef.current
             setPanel(null)
             trigger?.focus()
           } else if (pendingRef.current) cancelConnection()
+          else if (connectionMode) setConnectionMode(false)
           else if (configuredNodeId || selectedFlow) closeInspector()
           else if (selection) select(null)
           else return
@@ -346,7 +413,7 @@ export function WorkflowGraphEditor({
         deleteSelected()
       }}
     >
-      <div className="workflow-graph-editor__canvas" ref={canvasRef}>
+      <div className="workflow-graph-editor__topbar">
         <div className="workflow-graph-toolbar" ref={toolbarRef}>
           <button
             ref={addButtonRef}
@@ -364,27 +431,38 @@ export function WorkflowGraphEditor({
             {text('addNode')}
             <ChevronDown aria-hidden="true" />
           </button>
+          <span className="workflow-graph-toolbar__divider" aria-hidden="true" />
           <button
             ref={connectButtonRef}
-            className="workflow-graph-icon-button"
+            className="workflow-graph-toolbar__add workflow-graph-toolbar__connect"
             type="button"
             title={text('connectNodes')}
             aria-label={text('connectNodes')}
-            aria-expanded={panel === 'connect'}
-            aria-controls={panel === 'connect' ? panelId : undefined}
+            aria-pressed={connectionMode}
             disabled={graph.nodes.length === 0 || graph.flows.length >= 512}
             onClick={() => {
-              const source = selectedNode?.id ?? sourceValue
-              setFlowSource(source)
-              setFlowTarget(
-                targetValue && targetValue !== source
-                  ? targetValue
-                  : (graph.nodes.find((node) => node.id !== source)?.id ?? '')
-              )
-              setPanel(panel === 'connect' ? null : 'connect')
+              setConnectionMode(true)
+              setPanel(null)
+              select(null)
+              cancelConnection()
             }}
           >
             <Link2 aria-hidden="true" />
+            {text('connection')}
+          </button>
+          <button
+            type="button"
+            className="workflow-graph-icon-button"
+            title={text('operateMode')}
+            aria-label={text('operateMode')}
+            aria-pressed={!connectionMode}
+            onClick={() => {
+              setConnectionMode(false)
+              cancelConnection()
+              setPanel(null)
+            }}
+          >
+            <Hand aria-hidden="true" />
           </button>
           {panel === 'nodes' ? (
             <div
@@ -408,19 +486,78 @@ export function WorkflowGraphEditor({
                 type="button"
                 draggable
                 onDragStart={(event) => {
-                  event.dataTransfer.setData(WORKFLOW_DRAG_TYPE, 'blank')
+                  event.dataTransfer.setData(WORKFLOW_DRAG_TYPE, 'node:user')
                   event.dataTransfer.effectAllowed = 'copy'
                 }}
                 onDragEnd={() => setPanel(null)}
-                onClick={() => addNode()}
+                onClick={() => addNode(undefined, undefined, 'node:user')}
               >
                 <span className="workflow-node-picker__icon">
-                  <Plus aria-hidden="true" />
+                  <UserRound aria-hidden="true" />
                 </span>
-                <strong>{text('blank')}</strong>
+                <strong>{text('user')}</strong>
               </button>
+              <div className="workflow-node-picker__heading">{text('logicGates')}</div>
+              {(['inputGate', 'outputGate'] as const)
+                .filter((kind) =>
+                  text(kind).toLocaleLowerCase().includes(query.trim().toLocaleLowerCase())
+                )
+                .map((kind) => (
+                  <button
+                    key={kind}
+                    className="workflow-node-picker__item"
+                    type="button"
+                    draggable
+                    onDragStart={(event) => {
+                      event.dataTransfer.setData(
+                        WORKFLOW_DRAG_TYPE,
+                        kind === 'inputGate' ? 'gate:input' : 'gate:output'
+                      )
+                      event.dataTransfer.effectAllowed = 'copy'
+                    }}
+                    onDragEnd={() => setPanel(null)}
+                    onClick={() =>
+                      addNode(
+                        undefined,
+                        undefined,
+                        kind === 'inputGate' ? 'gate:input' : 'gate:output'
+                      )
+                    }
+                  >
+                    <span className="workflow-node-picker__icon">
+                      <Triangle
+                        style={{
+                          transform: kind === 'inputGate' ? 'rotate(90deg)' : 'rotate(-90deg)'
+                        }}
+                        aria-hidden="true"
+                      />
+                    </span>
+                    <span>
+                      <strong>{text(kind)}</strong>
+                      <small>
+                        {text(kind === 'inputGate' ? 'inputGateShort' : 'outputGateShort')}
+                      </small>
+                    </span>
+                  </button>
+                ))}
               <div className="workflow-node-picker__heading">{text('templates')}</div>
               <div className="workflow-node-picker__list">
+                <button
+                  className="workflow-node-picker__item"
+                  type="button"
+                  draggable
+                  onDragStart={(event) => {
+                    event.dataTransfer.setData(WORKFLOW_DRAG_TYPE, 'blank')
+                    event.dataTransfer.effectAllowed = 'copy'
+                  }}
+                  onDragEnd={() => setPanel(null)}
+                  onClick={() => addNode()}
+                >
+                  <span className="workflow-node-picker__icon">
+                    <Plus aria-hidden="true" />
+                  </span>
+                  <strong>{text('blank')}</strong>
+                </button>
                 {matchingTemplates.map((template) => (
                   <button
                     key={template.templateId}
@@ -450,248 +587,296 @@ export function WorkflowGraphEditor({
                 ) : null}
               </div>
             </div>
-          ) : panel === 'connect' ? (
-            <div
-              className="workflow-connect-picker"
-              id={panelId}
-              role="dialog"
-              aria-label={text('connectNodes')}
-            >
-              <label>
-                <span>{text('source')}</span>
-                <select
-                  aria-label={`${text('addFlow')} ${text('source')}`}
-                  value={sourceValue}
-                  onChange={(event) => setFlowSource(event.currentTarget.value)}
-                >
-                  <option value="">{text('parentInput')}</option>
-                  {nodeOptions}
-                </select>
-              </label>
-              <label>
-                <span>{text('target')}</span>
-                <select
-                  aria-label={`${text('addFlow')} ${text('target')}`}
-                  value={targetValue}
-                  onChange={(event) => setFlowTarget(event.currentTarget.value)}
-                >
-                  <option value="">{text('parentOutput')}</option>
-                  {nodeOptions}
-                </select>
-              </label>
-              <button
-                className="workflow-button workflow-button--wide"
-                type="button"
-                disabled={!sourceValue && !targetValue}
-                onClick={() =>
-                  addFlow(workflowEndpoint(sourceValue), workflowEndpoint(targetValue))
+          ) : null}
+        </div>
+        {selectedAgent ? (
+          <div
+            className="workflow-selection-controls workflow-agent-controls"
+            role="group"
+            aria-label={text('quickSettings')}
+          >
+            <label className="workflow-selection-field">
+              <AgentAvatar agentId={selectedAgent.id} className="workflow-selection-avatar" />
+              <input
+                aria-label={text('nodeName')}
+                maxLength={128}
+                value={selectedAgent.name}
+                onChange={(event) =>
+                  updateNode(
+                    selectedAgent.id,
+                    { name: event.currentTarget.value },
+                    `node:${selectedAgent.id}:name`
+                  )
                 }
+              />
+            </label>
+            <div className="workflow-selection-field workflow-template-field">
+              <span>{text('templateShort')}</span>
+              <WorkflowTemplatePicker
+                showSelectedDetail={false}
+                value={selectedAgent.templateId}
+                templates={templates}
+                models={models}
+                text={text}
+                onChange={(templateId) => {
+                  if (templateId === selectedAgent.templateId) return
+                  const template = templates.find(
+                    (candidate) => candidate.templateId === templateId
+                  )
+                  updateNode(selectedAgent.id, {
+                    templateId: template?.templateId ?? null,
+                    modelConfigId: template
+                      ? null
+                      : selectedTemplate && enabledModelIds.has(selectedTemplate.modelConfigId)
+                        ? selectedTemplate.modelConfigId
+                        : (enabledModels[0]?.id ?? null),
+                    ...(!selectedAgent.task && template
+                      ? { task: template.instructions.slice(0, 32768) }
+                      : {})
+                  })
+                }}
+              />
+            </div>
+            {selectedAgent.templateId &&
+            !templates.some((template) => template.templateId === selectedAgent.templateId) ? (
+              <p className="workflow-error" role="alert">
+                {text('missingTemplate')}
+              </p>
+            ) : null}
+            <label className="workflow-selection-field workflow-node-model">
+              <span>{text('model')}</span>
+              {selectedAgent.templateId ? (
+                <input
+                  readOnly
+                  value={workflowNodeModelLabel(selectedAgent, templates, models, text)}
+                  data-unavailable={
+                    !selectedTemplate ||
+                    !enabledModelIds.has(selectedTemplate.modelConfigId) ||
+                    undefined
+                  }
+                />
+              ) : (
+                <ModelConfigPicker
+                  ariaLabel={text('selectModel')}
+                  className="workflow-node-model__picker"
+                  emptyLabel={text(enabledModels.length ? 'modelNotSelected' : 'noEnabledModels')}
+                  options={modelOptions}
+                  value={selectedModelId}
+                  onChange={(modelConfigId) => updateNode(selectedAgent.id, { modelConfigId })}
+                  variant="settings"
+                  portalMenu
+                  popoverClassName="workflow-node-model-popover"
+                />
+              )}
+            </label>
+            {selectionActions}
+          </div>
+        ) : null}
+        {selectedNode &&
+        (selectedNode.kind === 'inputGate' || selectedNode.kind === 'outputGate') ? (
+          <div
+            className="workflow-selection-controls workflow-gate-controls"
+            role="group"
+            aria-label={text('gateSettings')}
+          >
+            <label className="workflow-selection-field">
+              <span>{text('gateType')}</span>
+              <input readOnly value={text(selectedNode.kind)} />
+            </label>
+            <label className="workflow-selection-field">
+              <span>{text('nodeName')}</span>
+              <input
+                maxLength={128}
+                value={selectedNode.name}
+                onChange={(event) =>
+                  updateNode(
+                    selectedNode.id,
+                    { name: event.currentTarget.value },
+                    `node:${selectedNode.id}:name`
+                  )
+                }
+              />
+            </label>
+            {selectionActions}
+          </div>
+        ) : null}
+        {selectedNode?.kind === 'user' ? (
+          <div
+            className="workflow-selection-controls workflow-user-controls"
+            role="group"
+            aria-label={text('user')}
+          >
+            <div className="workflow-selection-field">
+              <span className="workflow-selection-avatar workflow-user-avatar">
+                <AccountAvatar src={profile?.avatarDataUrl} />
+              </span>
+              <input aria-label={text('user')} readOnly value={userName} />
+            </div>
+            {selectionActions}
+          </div>
+        ) : null}
+        {selectedFlow ? (
+          <div
+            className="workflow-selection-controls workflow-edge-controls"
+            role="group"
+            aria-label={text('connection')}
+          >
+            <label className="workflow-selection-field workflow-flow-name">
+              <span>{text('flowName')}</span>
+              <input
+                maxLength={128}
+                value={selectedFlow.name}
+                onChange={(event) =>
+                  updateFlow(selectedFlow.id, { name: event.currentTarget.value })
+                }
+              />
+            </label>
+            <div className="workflow-selection-field workflow-endpoint-field">
+              <span>{text('source')}</span>
+              <WorkflowOptionPicker
+                showSelectedDetail={false}
+                ariaLabel={text('source')}
+                value={endpointValue(selectedFlow.source)}
+                onChange={(id) =>
+                  updateFlow(selectedFlow.id, {
+                    source: workflowEndpoint(id ?? ''),
+                    sourceAnchor: undefined
+                  })
+                }
+                options={[
+                  {
+                    id: '',
+                    name: text('parentInput'),
+                    disabled: selectedFlow.target.kind === 'boundary'
+                  },
+                  ...nodeOptions
+                ].map((option) => ({
+                  ...option,
+                  disabled: !workflowConnectionAllowed(
+                    graph,
+                    workflowEndpoint(option.id),
+                    selectedFlow.target,
+                    selectedFlow.id
+                  )
+                }))}
+              />
+            </div>
+            <div className="workflow-selection-field workflow-endpoint-field">
+              <span>{text('target')}</span>
+              <WorkflowOptionPicker
+                showSelectedDetail={false}
+                ariaLabel={text('target')}
+                value={endpointValue(selectedFlow.target)}
+                onChange={(id) =>
+                  updateFlow(selectedFlow.id, {
+                    target: workflowEndpoint(id ?? ''),
+                    targetAnchor: undefined
+                  })
+                }
+                options={[
+                  {
+                    id: '',
+                    name: text('parentOutput'),
+                    disabled: selectedFlow.source.kind === 'boundary'
+                  },
+                  ...nodeOptions
+                ].map((option) => ({
+                  ...option,
+                  disabled: !workflowConnectionAllowed(
+                    graph,
+                    selectedFlow.source,
+                    workflowEndpoint(option.id),
+                    selectedFlow.id
+                  )
+                }))}
+              />
+            </div>
+            {selectionActions}
+          </div>
+        ) : null}
+      </div>
+      <div className="workflow-graph-editor__body">
+        <div className="workflow-graph-editor__canvas" ref={canvasRef}>
+          {pending ? (
+            <div className="workflow-graph-connection-status" role="status">
+              <span>{text(pending.kind === 'boundary' ? 'connectingEntry' : 'connecting')}</span>
+              {pending.kind === 'node' &&
+              workflowConnectionAllowed(graph, pending, { kind: 'boundary' }) ? (
+                <button type="button" onClick={() => finishConnection({ kind: 'boundary' })}>
+                  {text('addExit')}
+                </button>
+              ) : null}
+              <button
+                type="button"
+                className="workflow-graph-icon-button"
+                aria-label={text('cancelConnection')}
+                onClick={cancelConnection}
               >
-                {text('addFlow')}
+                <X aria-hidden="true" />
               </button>
             </div>
           ) : null}
+          <WorkflowCanvas
+            graph={graph}
+            templates={templates}
+            models={models}
+            text={text}
+            selection={selection}
+            pending={pending}
+            pendingAnchor={pendingAnchor}
+            connectionMode={connectionMode}
+            onChange={onChange}
+            onSelect={select}
+            onConfigureNode={configureNode}
+            onAddNode={addNode}
+            onBegin={beginConnection}
+            onFinish={finishConnection}
+          />
         </div>
-        {pending ? (
-          <div className="workflow-graph-connection-status" role="status">
-            <span>{text(pending.kind === 'boundary' ? 'connectingEntry' : 'connecting')}</span>
-            {pending.kind === 'node' ? (
-              <button type="button" onClick={() => finishConnection({ kind: 'boundary' })}>
-                {text('addExit')}
+        {configuredNode ? (
+          <aside className="workflow-graph-inspector" aria-label={text('nodeSettings')}>
+            <div className="workflow-graph-inspector__header">
+              <strong>{workflowNodeLabel(configuredNode, text, userName)}</strong>
+              <button
+                className="workflow-graph-icon-button"
+                type="button"
+                aria-label={text('closeInspector')}
+                onClick={closeInspector}
+              >
+                <X aria-hidden="true" />
               </button>
-            ) : null}
-            <button
-              type="button"
-              className="workflow-graph-icon-button"
-              aria-label={text('cancelConnection')}
-              onClick={cancelConnection}
-            >
-              <X aria-hidden="true" />
-            </button>
-          </div>
-        ) : null}
-        <WorkflowCanvas
-          graph={graph}
-          templates={templates}
-          models={models}
-          text={text}
-          selection={selection}
-          pending={pending}
-          onChange={onChange}
-          onSelect={select}
-          onConfigureNode={configureNode}
-          onAddNode={addNode}
-          onBegin={beginConnection}
-          onFinish={finishConnection}
-        />
-      </div>
-      {configuredNode || selectedFlow ? (
-        <aside className="workflow-graph-inspector" aria-label={text('nodeSettings')}>
-          <div className="workflow-graph-inspector__header">
-            <strong>
-              {configuredNode?.name ||
-                (configuredNode ? text('newNode') : selectedFlow?.name || text('connection'))}
-            </strong>
-            <button
-              className="workflow-graph-icon-button"
-              type="button"
-              aria-label={text('closeInspector')}
-              onClick={closeInspector}
-            >
-              <X aria-hidden="true" />
-            </button>
-          </div>
-          {configuredNode ? (
-            <>
-              <div
-                className="workflow-graph-inspector__tabs"
-                role="tablist"
-                aria-label={text('nodeSettings')}
-              >
-                {(['task', 'rules'] as const).map((tab) => (
-                  <button
-                    key={tab}
-                    type="button"
-                    role="tab"
-                    aria-selected={inspectorTab === tab}
-                    aria-controls={`${inspectorId}-${tab}`}
-                    id={`${inspectorId}-tab-${tab}`}
-                    onClick={() => setInspectorTab(tab)}
-                    onKeyDown={(event) => {
-                      if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return
-                      event.preventDefault()
-                      const next =
-                        event.key === 'Home'
-                          ? 'task'
-                          : event.key === 'End'
-                            ? 'rules'
-                            : tab === 'task'
-                              ? 'rules'
-                              : 'task'
-                      setInspectorTab(next)
-                      document.getElementById(`${inspectorId}-tab-${next}`)?.focus()
-                    }}
-                  >
-                    {text(tab === 'task' ? 'nodeTaskTab' : 'nodeRulesTab')}
-                  </button>
-                ))}
-              </div>
-              <div
-                className="workflow-graph-inspector__body"
-                role="tabpanel"
-                id={`${inspectorId}-${inspectorTab}`}
-                aria-labelledby={`${inspectorId}-tab-${inspectorTab}`}
-                key={`${configuredNode.id}-${inspectorTab}`}
-              >
-                {inspectorTab === 'task' ? (
-                  <>
-                    <label>
-                      <span>{text('nodeName')}</span>
-                      <input
-                        maxLength={128}
-                        value={configuredNode.name}
-                        onChange={(event) =>
-                          updateNode(
-                            configuredNode.id,
-                            { name: event.currentTarget.value },
-                            `node:${configuredNode.id}:name`
-                          )
-                        }
-                      />
-                    </label>
-                    <div className="workflow-template-field">
-                      <span>{text('template')}</span>
-                      <WorkflowTemplatePicker
-                        value={configuredNode.templateId}
-                        templates={templates}
-                        models={models}
-                        text={text}
-                        onChange={(templateId) => {
-                          if (templateId === configuredNode.templateId) return
-                          const template = templates.find(
-                            (candidate) => candidate.templateId === templateId
-                          )
-                          updateNode(configuredNode.id, {
-                            templateId: template?.templateId ?? null,
-                            modelConfigId: template
-                              ? null
-                              : selectedTemplate &&
-                                  enabledModelIds.has(selectedTemplate.modelConfigId)
-                                ? selectedTemplate.modelConfigId
-                                : (enabledModels[0]?.id ?? null),
-                            ...(!configuredNode.task && template
-                              ? { task: template.instructions.slice(0, 32768) }
-                              : {})
-                          })
-                        }}
-                      />
-                    </div>
-                    {configuredNode.templateId &&
-                    !templates.some(
-                      (template) => template.templateId === configuredNode.templateId
-                    ) ? (
-                      <p className="workflow-error" role="alert">
-                        {text('missingTemplate')}
-                      </p>
-                    ) : null}
-                    <label className="workflow-node-model">
-                      <span>{text('model')}</span>
-                      {configuredNode.templateId ? (
-                        <input
-                          readOnly
-                          value={workflowNodeModelLabel(configuredNode, templates, models, text)}
-                          data-unavailable={
-                            !selectedTemplate ||
-                            !enabledModelIds.has(selectedTemplate.modelConfigId) ||
-                            undefined
-                          }
-                        />
-                      ) : (
-                        <ModelConfigPicker
-                          ariaLabel={text('selectModel')}
-                          className="workflow-node-model__picker"
-                          emptyLabel={text(
-                            enabledModels.length ? 'modelNotSelected' : 'noEnabledModels'
-                          )}
-                          options={modelOptions}
-                          value={selectedModelId}
-                          onChange={(modelConfigId) =>
-                            updateNode(configuredNode.id, { modelConfigId })
-                          }
-                          variant="settings"
-                          portalMenu
-                          popoverClassName="workflow-node-model-popover"
-                        />
-                      )}
-                    </label>
-                    {incoming.length ? (
-                      <label>
-                        <span>
-                          {text(
-                            incoming.every((flow) => flow.source.kind === 'boundary')
-                              ? 'initialInput'
-                              : 'receives'
-                          )}
-                        </span>
-                        <textarea
-                          rows={3}
-                          maxLength={32768}
-                          value={configuredNode.receives}
-                          onChange={(event) =>
-                            updateNode(
-                              configuredNode.id,
-                              { receives: event.currentTarget.value },
-                              `node:${configuredNode.id}:receives`
+            </div>
+            {configuredNode ? (
+              <>
+                <div className="workflow-graph-inspector__body" key={configuredNode.id}>
+                  {configuredNode.kind === 'inputGate' || configuredNode.kind === 'outputGate' ? (
+                    <WorkflowGateEditor
+                      node={configuredNode}
+                      flows={configuredNode.kind === 'inputGate' ? incoming : outgoing}
+                      text={text}
+                      flowLabel={flowLabel}
+                      recipient={
+                        outgoing.some(
+                          (flow) =>
+                            flow.target.kind === 'node' &&
+                            graph.nodes.some(
+                              (node) =>
+                                node.id === (flow.target as { nodeId: string }).nodeId &&
+                                node.kind === 'user'
                             )
-                          }
-                        />
-                      </label>
-                    ) : null}
+                        )
+                          ? 'user'
+                          : 'agent'
+                      }
+                      onChange={(node) => updateNode(configuredNode.id, node)}
+                    />
+                  ) : configuredNode.kind === 'user' ? (
                     <label>
-                      <span>{text('task')}</span>
+                      <span>{text('userTask')}</span>
                       <textarea
                         rows={6}
                         maxLength={32768}
+                        placeholder={text('userTaskPlaceholder')}
                         value={configuredNode.task}
                         onChange={(event) =>
                           updateNode(
@@ -702,161 +887,93 @@ export function WorkflowGraphEditor({
                         }
                       />
                     </label>
-                    {outgoing.length ? (
+                  ) : (
+                    <>
+                      {incoming.length ? (
+                        <label>
+                          <span>
+                            {text(
+                              incoming.every((flow) => flow.source.kind === 'boundary')
+                                ? 'initialInput'
+                                : 'receives'
+                            )}
+                          </span>
+                          <textarea
+                            rows={3}
+                            maxLength={32768}
+                            value={configuredNode.receives}
+                            onChange={(event) =>
+                              updateNode(
+                                configuredNode.id,
+                                { receives: event.currentTarget.value },
+                                `node:${configuredNode.id}:receives`
+                              )
+                            }
+                          />
+                        </label>
+                      ) : null}
                       <label>
-                        <span>
-                          {text(
-                            outgoing.every((flow) => flow.target.kind === 'boundary')
-                              ? 'finalOutput'
-                              : 'delivers'
-                          )}
-                        </span>
+                        <span>{text('task')}</span>
                         <textarea
-                          rows={3}
+                          rows={6}
                           maxLength={32768}
-                          value={configuredNode.delivers}
+                          value={configuredNode.task}
                           onChange={(event) =>
                             updateNode(
                               configuredNode.id,
-                              { delivers: event.currentTarget.value },
-                              `node:${configuredNode.id}:delivers`
+                              { task: event.currentTarget.value },
+                              `node:${configuredNode.id}:task`
                             )
                           }
                         />
                       </label>
-                    ) : null}
-                  </>
-                ) : (
-                  <>
-                    <WorkflowRuleEditor
-                      direction="input"
-                      flows={incoming}
-                      rule={configuredNode.inputRule}
-                      text={text}
-                      flowLabel={flowLabel}
-                      onChange={(inputRule) => updateNode(configuredNode.id, { inputRule })}
-                    />
-                    <WorkflowRuleEditor
-                      direction="output"
-                      flows={outgoing}
-                      rule={configuredNode.outputRule}
-                      text={text}
-                      flowLabel={flowLabel}
-                      onChange={(outputRule) => updateNode(configuredNode.id, { outputRule })}
-                    />
-                  </>
-                )}
-              </div>
-              <div className="workflow-graph-inspector__footer">
-                <button
-                  type="button"
-                  className="workflow-graph-icon-button"
-                  title={text('addEntry')}
-                  aria-label={text('addEntry')}
-                  disabled={graph.flows.length >= 512}
-                  onClick={() =>
-                    addFlow({ kind: 'boundary' }, { kind: 'node', nodeId: configuredNode.id })
-                  }
-                >
-                  <ArrowDownToLine aria-hidden="true" />
-                </button>
-                <button
-                  type="button"
-                  className="workflow-graph-icon-button"
-                  title={text('addExit')}
-                  aria-label={text('addExit')}
-                  disabled={graph.flows.length >= 512}
-                  onClick={() =>
-                    addFlow({ kind: 'node', nodeId: configuredNode.id }, { kind: 'boundary' })
-                  }
-                >
-                  <ArrowUpFromLine aria-hidden="true" />
-                </button>
-                <button
-                  type="button"
-                  className="workflow-graph-icon-button workflow-graph-inspector__delete"
-                  aria-label={text('deleteNode')}
-                  onClick={deleteSelected}
-                >
-                  <Trash2 aria-hidden="true" />
-                </button>
-              </div>
-            </>
-          ) : selectedFlow ? (
-            <>
-              <div className="workflow-graph-inspector__body">
-                <label>
-                  <span>{text('flowName')}</span>
-                  <input
-                    maxLength={128}
-                    value={selectedFlow.name}
-                    onChange={(event) =>
-                      updateFlow(selectedFlow.id, { name: event.currentTarget.value })
-                    }
-                  />
-                </label>
-                <label>
-                  <span>{text('source')}</span>
-                  <select
-                    value={endpointValue(selectedFlow.source)}
-                    onChange={(event) =>
-                      updateFlow(selectedFlow.id, {
-                        source: workflowEndpoint(event.currentTarget.value)
-                      })
-                    }
-                  >
-                    <option value="" disabled={selectedFlow.target.kind === 'boundary'}>
-                      {text('parentInput')}
-                    </option>
-                    {nodeOptions}
-                  </select>
-                </label>
-                <label>
-                  <span>{text('target')}</span>
-                  <select
-                    value={endpointValue(selectedFlow.target)}
-                    onChange={(event) =>
-                      updateFlow(selectedFlow.id, {
-                        target: workflowEndpoint(event.currentTarget.value)
-                      })
-                    }
-                  >
-                    <option value="" disabled={selectedFlow.source.kind === 'boundary'}>
-                      {text('parentOutput')}
-                    </option>
-                    {nodeOptions}
-                  </select>
-                </label>
-              </div>
-              <div className="workflow-graph-inspector__footer">
-                <button
-                  type="button"
-                  className="workflow-graph-icon-button workflow-graph-inspector__delete"
-                  aria-label={text('deleteFlow')}
-                  onClick={deleteSelected}
-                >
-                  <Trash2 aria-hidden="true" />
-                </button>
-              </div>
-            </>
-          ) : null}
-        </aside>
-      ) : null}
+                      {outgoing.length ? (
+                        <label>
+                          <span>
+                            {text(
+                              outgoing.every((flow) => flow.target.kind === 'boundary')
+                                ? 'finalOutput'
+                                : 'delivers'
+                            )}
+                          </span>
+                          <textarea
+                            rows={3}
+                            maxLength={32768}
+                            value={configuredNode.delivers}
+                            onChange={(event) =>
+                              updateNode(
+                                configuredNode.id,
+                                { delivers: event.currentTarget.value },
+                                `node:${configuredNode.id}:delivers`
+                              )
+                            }
+                          />
+                        </label>
+                      ) : null}
+                    </>
+                  )}
+                </div>
+              </>
+            ) : null}
+          </aside>
+        ) : null}
+      </div>
     </div>
   )
 }
 
 /** Click insertion searches nearby empty slots; explicit drop coordinates remain authoritative. */
 function nearestOpenPosition(
-  nodes: readonly { x: number; y: number }[],
-  center: { x: number; y: number }
+  nodes: readonly { x: number; y: number; kind?: unknown }[],
+  center: { x: number; y: number },
+  dimensions = workflowNodeSize()
 ) {
   const candidates = new Map<string, { x: number; y: number; distance: number }>()
   const gap = 24
   for (let row = -32; row <= 32; row++) {
     for (let column = -32; column <= 32; column++) {
-      const x = Math.max(24, Math.min(99000, center.x + column * (NODE_WIDTH + gap)))
-      const y = Math.max(70, Math.min(99000, center.y + row * (NODE_HEIGHT + gap)))
+      const x = Math.max(24, Math.min(99000, center.x + column * (dimensions.width + gap)))
+      const y = Math.max(70, Math.min(99000, center.y + row * (dimensions.height + gap)))
       candidates.set(`${x}:${y}`, { x, y, distance: (x - center.x) ** 2 + (y - center.y) ** 2 })
     }
   }
@@ -866,10 +983,12 @@ function nearestOpenPosition(
       (candidate) =>
         !nodes.some(
           (node) =>
-            candidate.x < node.x + NODE_WIDTH + gap &&
-            candidate.x + NODE_WIDTH + gap > node.x &&
-            candidate.y < node.y + NODE_HEIGHT + gap &&
-            candidate.y + NODE_HEIGHT + gap > node.y
+            candidate.x <
+              node.x + workflowNodeSize(node.kind ? { kind: node.kind } : undefined).width + gap &&
+            candidate.x + dimensions.width + gap > node.x &&
+            candidate.y <
+              node.y + workflowNodeSize(node.kind ? { kind: node.kind } : undefined).height + gap &&
+            candidate.y + dimensions.height + gap > node.y
         )
     )
   return position ?? center

@@ -6808,3 +6808,6 @@ CREATE TABLE workflow_definitions (
     revision INTEGER NOT NULL CHECK (revision BETWEEN 1 AND 9007199254740991),
     updated_at INTEGER NOT NULL CHECK (updated_at >= 0)
 ) STRICT;
+
+-- Workflow availability, schema v55. Existing definitions remain disabled until explicitly enabled.
+ALTER TABLE workflow_definitions ADD COLUMN enabled INTEGER NOT NULL DEFAULT 0 CHECK (enabled IN (0, 1));

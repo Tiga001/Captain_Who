@@ -43,13 +43,15 @@ mod tests {
         let storage = StorageService::open(&directory.path().join("workflow.sqlite")).unwrap();
         let definition = json!({
             "schemaVersion": 1, "id": "draft", "name": "Draft", "description": "", "background": "",
-            "nodes": [], "flows": [], "viewport": {"x":0,"y":0,"zoom":1}
+            "nodes": [], "flows": [], "viewport": {"x":0,"y":0,"zoom":1},
+            "boundaryPositions": {"input":{"x":80,"y":220},"output":{"x":760,"y":220}}
         });
         let saved = call(
             &storage,
             json!({"operation":"save", "definition":definition,"expectedRevision":0}),
         );
         assert_eq!(saved["result"]["records"][0]["revision"], 1);
+        assert_eq!(saved["result"]["records"][0]["enabled"], false);
         assert_eq!(
             saved["result"]["records"][0]["definition"]["boundaryPositions"]["input"]["x"].as_f64(),
             Some(80.0)
@@ -68,6 +70,25 @@ mod tests {
             json!({"operation":"save","definition":definition,"expectedRevision":0}),
         );
         assert_eq!(conflict["error"]["code"], -32009);
+        for enabled in [true, false] {
+            let invalid_toggle = call(
+                &storage,
+                json!({
+                    "operation":"setEnabled","id":"draft","enabled":enabled,"expectedRevision":1,
+                }),
+            );
+            assert_eq!(invalid_toggle["error"]["code"], -32602);
+        }
+        let stale_toggle = call(
+            &storage,
+            json!({
+                "operation":"setEnabled","id":"draft","enabled":true,"expectedRevision":2,
+            }),
+        );
+        assert_eq!(stale_toggle["error"]["code"], -32009);
+        let after_toggle = call(&storage, json!({"operation":"list"}));
+        assert_eq!(after_toggle["result"]["records"][0]["revision"], 1);
+        assert_eq!(after_toggle["result"]["records"][0]["enabled"], false);
         let invalid = call(
             &storage,
             json!({"operation":"delete","id":"draft","expectedRevision":-1}),
@@ -87,5 +108,42 @@ mod tests {
             json!({"operation":"delete","id":"draft","expectedRevision":1}),
         );
         assert_eq!(deleted["result"]["records"], json!([]));
+    }
+    #[test]
+    fn workflow_rpc_preserves_logic_gates_and_rejects_agent_fields_on_gates() {
+        let directory = tempfile::tempdir().unwrap();
+        let storage = StorageService::open(&directory.path().join("gates.sqlite")).unwrap();
+        let definition: Value = serde_json::from_str(include_str!(
+            "../../../../packages/protocol/fixtures/workflow-definition-v1.json"
+        ))
+        .unwrap();
+        let saved = call(
+            &storage,
+            json!({
+                "operation":"save", "definition": definition, "expectedRevision":0
+            }),
+        );
+        assert_eq!(saved["result"]["records"][0]["revision"], 1);
+        let record = &saved["result"]["records"][0];
+        assert_eq!(record["definition"]["nodes"][2]["kind"], "inputGate");
+        assert_eq!(record["definition"]["nodes"][2]["busyPolicy"], "queue");
+        assert_eq!(record["definition"]["nodes"][3]["selection"]["mode"], "one");
+        assert_eq!(record["issues"].as_array().unwrap().len(), 2);
+        assert!(record["issues"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|issue| issue["code"] == "node_model"));
+        let mut invalid = definition.clone();
+        invalid["nodes"][2]["task"] = json!("A gate must not execute a task");
+        let rejected = call(
+            &storage,
+            json!({
+                "operation":"save", "definition":invalid, "expectedRevision":1
+            }),
+        );
+        assert_eq!(rejected["error"]["code"], -32602);
+        let listed = call(&storage, json!({"operation":"list"}));
+        assert_eq!(listed["result"]["records"][0]["revision"], 1);
     }
 }

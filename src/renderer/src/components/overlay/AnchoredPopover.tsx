@@ -10,7 +10,7 @@ interface AnchoredPopoverProps {
   enabled: boolean
   matchAnchorWidth?: boolean
   onClose: () => void
-  placement?: 'auto' | 'top'
+  placement?: 'auto' | 'top' | 'bottom'
   popoverRef: RefObject<HTMLDivElement | null>
   returnFocusRef?: RefObject<HTMLElement | null>
 }
@@ -64,6 +64,7 @@ export function AnchoredPopover({
       const below = Math.max(0, window.innerHeight - rect.bottom - ANCHOR_GAP - VIEWPORT_MARGIN)
       const openAbove =
         above > 0 &&
+        !(placement === 'bottom' && below >= Math.min(height, MIN_PREFERRED_SPACE)) &&
         (placement === 'top' && above >= Math.min(height, MIN_PREFERRED_SPACE)
           ? true
           : above >= height || above >= below)

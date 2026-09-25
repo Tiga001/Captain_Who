@@ -1,19 +1,20 @@
 use rusqlite::{ffi, Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
 
-pub const STORAGE_SCHEMA_VERSION: i32 = 54;
+pub const STORAGE_SCHEMA_VERSION: i32 = 55;
 pub const DEVELOPMENT_STORAGE_SCHEMA_RESET_REQUIRED: &str =
     "development_storage_schema_reset_required";
 
 const CANONICAL_SCHEMA: &str = include_str!("canonical_schema.sql");
 const CANONICAL_SCHEMA_FINGERPRINT: &str =
-    "sha256:5a5ce084a58f6a68a3ffa0f0ca071827addff12c3e1c1e13d73c2abd301c3200";
+    "sha256:1befc72d0b8ff219c3de6906c87b61dab6a1002dca69e98179ec0dcee9774fb2";
 
 /// Initializes fresh storage or validates the exact current canonical schema.
 ///
 /// The exact v50 catalog upgrades only with an empty collaboration event log. v51/v52 upgrade
 /// without rewriting or deleting history; v53 adds request-owned activity facts only for future
 /// events. v54 adds authoring-only workflow definitions without changing existing history.
+/// v55 adds explicit workflow availability, disabled by default for every existing definition.
 /// Earlier development catalogs require an explicit reset.
 pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
     connection.execute_batch("PRAGMA foreign_keys = ON;")?;
@@ -41,6 +42,10 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
         upgrade_workflow_definitions_v53(connection)?;
     }
 
+    if read_schema_version(connection)? == 54 {
+        upgrade_workflow_availability_v54(connection)?;
+    }
+
     let schema_version = read_schema_version(connection)?;
     if schema_version != STORAGE_SCHEMA_VERSION {
         return Err(reset_required_error(format!(
@@ -61,6 +66,8 @@ const V52_SCHEMA_FINGERPRINT: &str =
     "sha256:615c17481af79b297a930607a7ca0d8e45a3825527ac19f74bf4a64b747b4cc7";
 const V53_SCHEMA_FINGERPRINT: &str =
     "sha256:af8820cb0e6f0ba8b433ea5fa51f345a515c1e9fcc466830179f7b53f06f76d8";
+const V54_SCHEMA_FINGERPRINT: &str =
+    "sha256:5a5ce084a58f6a68a3ffa0f0ca071827addff12c3e1c1e13d73c2abd301c3200";
 const V51_SCHEMA_FINGERPRINT: &str =
     "sha256:532cd03af014f5d16e333c7b0bdff218cb8b996c74c6331ace300b22c6e81cd7";
 const V50_SCHEMA_FINGERPRINT: &str =
@@ -220,6 +227,15 @@ fn upgrade_workflow_definitions_v53(connection: &Connection) -> rusqlite::Result
     validate_schema_fingerprint(&transaction, V53_SCHEMA_FINGERPRINT)?;
     transaction.execute_batch(workflow_definition_schema())?;
     transaction.pragma_update(None, "user_version", 54)?;
+    validate_schema_fingerprint(&transaction, V54_SCHEMA_FINGERPRINT)?;
+    transaction.commit()
+}
+
+fn upgrade_workflow_availability_v54(connection: &Connection) -> rusqlite::Result<()> {
+    let transaction = connection.unchecked_transaction()?;
+    validate_schema_fingerprint(&transaction, V54_SCHEMA_FINGERPRINT)?;
+    transaction.execute_batch(workflow_availability_schema())?;
+    transaction.pragma_update(None, "user_version", 55)?;
     validate_canonical_schema(&transaction)?;
     transaction.commit()
 }
@@ -228,11 +244,25 @@ fn workflow_definition_schema() -> &'static str {
     let start = CANONICAL_SCHEMA
         .find("-- Workflow authoring definitions, schema v54.")
         .unwrap();
+    let end = CANONICAL_SCHEMA
+        .find("-- Workflow availability, schema v55.")
+        .unwrap();
+    &CANONICAL_SCHEMA[start..end]
+}
+
+fn workflow_availability_schema() -> &'static str {
+    let start = CANONICAL_SCHEMA
+        .find("-- Workflow availability, schema v55.")
+        .unwrap();
     &CANONICAL_SCHEMA[start..]
 }
 
+fn canonical_schema_v54() -> String {
+    CANONICAL_SCHEMA.replace(workflow_availability_schema(), "")
+}
+
 fn canonical_schema_v53() -> String {
-    CANONICAL_SCHEMA.replace(workflow_definition_schema(), "")
+    canonical_schema_v54().replace(workflow_definition_schema(), "")
 }
 
 fn request_owned_activity_schema() -> &'static str {
@@ -352,6 +382,81 @@ fn reset_required_error(detail: impl std::fmt::Display) -> rusqlite::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn v54_workflow_availability_migration_preserves_definitions_and_history() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("v54-workflows.sqlite");
+        let connection = Connection::open(&path).unwrap();
+        connection.execute_batch(&canonical_schema_v54()).unwrap();
+        connection.pragma_update(None, "user_version", 54).unwrap();
+        validate_schema_fingerprint(&connection, V54_SCHEMA_FINGERPRINT).unwrap();
+        let definition =
+            include_str!("../../../../packages/protocol/fixtures/workflow-definition-v1.json");
+        let id = serde_json::from_str::<serde_json::Value>(definition).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        connection.execute(
+            "INSERT INTO workflow_definitions (workflow_id,definition_json,revision,updated_at) VALUES (?1,?2,7,23)",
+            rusqlite::params![id, definition],
+        ).unwrap();
+        connection
+            .execute_batch(
+                "INSERT INTO conversations(id,title,model_id,created_at,updated_at)
+             VALUES ('existing-chat','Existing history','model',1,1);
+             INSERT INTO messages(id,conversation_id,role,content,created_at,position)
+             VALUES ('existing-message','existing-chat','user','Keep this conversation',1,0);",
+            )
+            .unwrap();
+        run_migrations(&connection).unwrap();
+        assert_eq!(read_schema_version(&connection).unwrap(), 55);
+        let record: (String, i64, i64, bool) = connection.query_row(
+            "SELECT definition_json,revision,updated_at,enabled FROM workflow_definitions WHERE workflow_id=?1",
+            [&id], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?)),
+        ).unwrap();
+        assert_eq!(record, (definition.to_owned(), 7, 23, false));
+        assert!(connection
+            .execute("UPDATE workflow_definitions SET enabled=2", [])
+            .is_err());
+        drop(connection);
+        let connection = Connection::open(&path).unwrap();
+        run_migrations(&connection).unwrap();
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT content FROM messages WHERE id='existing-message'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "Keep this conversation"
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT definition_json FROM workflow_definitions WHERE workflow_id=?1",
+                    [&id],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            definition
+        );
+    }
+
+    #[test]
+    fn v54_workflow_availability_rejects_unknown_catalog_without_mutation() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection.execute_batch(&canonical_schema_v54()).unwrap();
+        connection.pragma_update(None, "user_version", 54).unwrap();
+        connection
+            .execute_batch("CREATE TABLE unexpected_table (value TEXT);")
+            .unwrap();
+        let before = schema_fingerprint(&connection).unwrap();
+        assert!(run_migrations(&connection).is_err());
+        assert_eq!(schema_fingerprint(&connection).unwrap(), before);
+        assert_eq!(read_schema_version(&connection).unwrap(), 54);
+    }
 
     #[test]
     fn v53_workflow_migration_preserves_history_and_reopens() {
