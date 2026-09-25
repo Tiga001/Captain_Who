@@ -1,19 +1,20 @@
 use rusqlite::{ffi, Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
 
-pub const STORAGE_SCHEMA_VERSION: i32 = 53;
+pub const STORAGE_SCHEMA_VERSION: i32 = 54;
 pub const DEVELOPMENT_STORAGE_SCHEMA_RESET_REQUIRED: &str =
     "development_storage_schema_reset_required";
 
 const CANONICAL_SCHEMA: &str = include_str!("canonical_schema.sql");
 const CANONICAL_SCHEMA_FINGERPRINT: &str =
-    "sha256:af8820cb0e6f0ba8b433ea5fa51f345a515c1e9fcc466830179f7b53f06f76d8";
+    "sha256:5a5ce084a58f6a68a3ffa0f0ca071827addff12c3e1c1e13d73c2abd301c3200";
 
 /// Initializes fresh storage or validates the exact current canonical schema.
 ///
 /// The exact v50 catalog upgrades only with an empty collaboration event log. v51/v52 upgrade
 /// without rewriting or deleting history; v53 adds request-owned activity facts only for future
-/// events. Earlier development catalogs require an explicit reset.
+/// events. v54 adds authoring-only workflow definitions without changing existing history.
+/// Earlier development catalogs require an explicit reset.
 pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
     connection.execute_batch("PRAGMA foreign_keys = ON;")?;
 
@@ -36,6 +37,10 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
         upgrade_request_owned_activities_v52(connection)?;
     }
 
+    if read_schema_version(connection)? == 53 {
+        upgrade_workflow_definitions_v53(connection)?;
+    }
+
     let schema_version = read_schema_version(connection)?;
     if schema_version != STORAGE_SCHEMA_VERSION {
         return Err(reset_required_error(format!(
@@ -54,6 +59,8 @@ const V48_SCHEMA_FINGERPRINT: &str =
     "sha256:c0d1cc5df5ad3dfa8674b8297f0e39b4ab5602c63500108edc6a1b78839ca455";
 const V52_SCHEMA_FINGERPRINT: &str =
     "sha256:615c17481af79b297a930607a7ca0d8e45a3825527ac19f74bf4a64b747b4cc7";
+const V53_SCHEMA_FINGERPRINT: &str =
+    "sha256:af8820cb0e6f0ba8b433ea5fa51f345a515c1e9fcc466830179f7b53f06f76d8";
 const V51_SCHEMA_FINGERPRINT: &str =
     "sha256:532cd03af014f5d16e333c7b0bdff218cb8b996c74c6331ace300b22c6e81cd7";
 const V50_SCHEMA_FINGERPRINT: &str =
@@ -203,9 +210,29 @@ fn upgrade_request_owned_activities_v52(connection: &Connection) -> rusqlite::Re
     let transaction = connection.unchecked_transaction()?;
     validate_schema_fingerprint(&transaction, V52_SCHEMA_FINGERPRINT)?;
     transaction.execute_batch(request_owned_activity_schema())?;
-    transaction.pragma_update(None, "user_version", STORAGE_SCHEMA_VERSION)?;
+    transaction.pragma_update(None, "user_version", 53)?;
+    validate_schema_fingerprint(&transaction, V53_SCHEMA_FINGERPRINT)?;
+    transaction.commit()
+}
+
+fn upgrade_workflow_definitions_v53(connection: &Connection) -> rusqlite::Result<()> {
+    let transaction = connection.unchecked_transaction()?;
+    validate_schema_fingerprint(&transaction, V53_SCHEMA_FINGERPRINT)?;
+    transaction.execute_batch(workflow_definition_schema())?;
+    transaction.pragma_update(None, "user_version", 54)?;
     validate_canonical_schema(&transaction)?;
     transaction.commit()
+}
+
+fn workflow_definition_schema() -> &'static str {
+    let start = CANONICAL_SCHEMA
+        .find("-- Workflow authoring definitions, schema v54.")
+        .unwrap();
+    &CANONICAL_SCHEMA[start..]
+}
+
+fn canonical_schema_v53() -> String {
+    CANONICAL_SCHEMA.replace(workflow_definition_schema(), "")
 }
 
 fn request_owned_activity_schema() -> &'static str {
@@ -219,7 +246,7 @@ fn request_owned_activity_schema() -> &'static str {
 }
 
 fn canonical_schema_v52() -> String {
-    CANONICAL_SCHEMA.replace(request_owned_activity_schema(), "")
+    canonical_schema_v53().replace(request_owned_activity_schema(), "")
 }
 
 fn create_canonical_schema(connection: &Connection) -> rusqlite::Result<()> {
@@ -327,6 +354,73 @@ mod tests {
     use super::*;
 
     #[test]
+    fn v53_workflow_migration_preserves_history_and_reopens() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("v53-workflows.sqlite");
+        let connection = Connection::open(&path).unwrap();
+        connection.execute_batch(&canonical_schema_v53()).unwrap();
+        connection.pragma_update(None, "user_version", 53).unwrap();
+        validate_schema_fingerprint(&connection, V53_SCHEMA_FINGERPRINT).unwrap();
+        connection
+            .execute_batch(
+                "INSERT INTO conversations(id,title,model_id,created_at,updated_at)
+             VALUES ('existing-chat','Existing history','model',1,1);
+             INSERT INTO messages(id,conversation_id,role,content,created_at,position)
+             VALUES ('existing-message','existing-chat','user','Keep this conversation',1,0);",
+            )
+            .unwrap();
+        run_migrations(&connection).unwrap();
+        assert_eq!(
+            read_schema_version(&connection).unwrap(),
+            STORAGE_SCHEMA_VERSION
+        );
+        let content: String = connection
+            .query_row(
+                "SELECT content FROM messages WHERE id='existing-message'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(content, "Keep this conversation");
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM workflow_definitions", [], |row| row
+                    .get::<_, i64>(
+                    0
+                ))
+                .unwrap(),
+            0
+        );
+        drop(connection);
+        let connection = Connection::open(&path).unwrap();
+        run_migrations(&connection).unwrap();
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT title FROM conversations WHERE id='existing-chat'",
+                    [],
+                    |row| row.get::<_, String>(0)
+                )
+                .unwrap(),
+            "Existing history"
+        );
+    }
+
+    #[test]
+    fn v53_workflow_migration_rejects_unrecognized_schema_without_writes() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection.execute_batch(&canonical_schema_v53()).unwrap();
+        connection.pragma_update(None, "user_version", 53).unwrap();
+        connection
+            .execute_batch("CREATE TABLE unexpected_table (value TEXT);")
+            .unwrap();
+        let before = schema_fingerprint(&connection).unwrap();
+        assert!(run_migrations(&connection).is_err());
+        assert_eq!(schema_fingerprint(&connection).unwrap(), before);
+        assert_eq!(read_schema_version(&connection).unwrap(), 53);
+    }
+
+    #[test]
     fn v52_history_upgrades_without_rewriting_events_or_inventing_task_owners() {
         use crate::storage::{
             agent_collaboration_event_repository as events, agent_graph_repository as graph,
@@ -403,7 +497,10 @@ mod tests {
             )
             .unwrap();
         run_migrations(&connection).unwrap();
-        assert_eq!(read_schema_version(&connection).unwrap(), 53);
+        assert_eq!(
+            read_schema_version(&connection).unwrap(),
+            STORAGE_SCHEMA_VERSION
+        );
         assert_eq!(
             events::latest_root_sequence(&connection, "root").unwrap(),
             old_cursor

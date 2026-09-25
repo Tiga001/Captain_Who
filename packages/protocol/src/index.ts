@@ -39,3 +39,5 @@ export * from './storageParsers'
 export * from './terminal'
 export * from './workspaceFiles'
 export * from './executionAccess'
+
+export * from './workflows'

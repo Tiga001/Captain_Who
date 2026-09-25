@@ -6,6 +6,7 @@ import {
   Cable,
   Clock,
   Gauge,
+  GitBranch,
   Monitor,
   Settings,
   Shield,
@@ -25,7 +26,8 @@ import {
   environmentSettings,
   skillsSettings,
   archivedConversationSettings,
-  agentTemplateSettings
+  agentTemplateSettings,
+  workflowSettings
 } from './pages/managementSettings.definition'
 import { mcpSettings } from '../mcp/McpSettings.definition'
 import { browserSettings } from '../mcp/BrowserAutomationSettings.definition'
@@ -43,6 +45,7 @@ export type SettingsPageId =
   | 'environment'
   | 'archivedConversations'
   | 'agentTemplates'
+  | 'workflows'
 
 export interface SettingsNavItem {
   nodes: readonly SettingsNode[]
@@ -110,6 +113,12 @@ export const SETTINGS_GROUPS: Array<{ titleKey: TranslationKey; items: SettingsN
         nodes: agentTemplateSettings,
         labelKey: 'settings.page.agentTemplates',
         icon: Bot
+      },
+      {
+        id: 'workflows',
+        nodes: workflowSettings,
+        labelKey: 'settings.page.workflows',
+        icon: GitBranch
       }
     ]
   },

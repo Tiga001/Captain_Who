@@ -1,4 +1,11 @@
 import {
+  WORKFLOW_REQUEST_METHOD,
+  parseWorkflowRequest,
+  parseWorkflowResponse,
+  type WorkflowRequest,
+  type WorkflowResponse
+} from '@mycopilot/protocol'
+import {
   AGENT_GET_LOCAL_TOKEN_USAGE_METHOD,
   parseLocalTokenUsageSummaryInput,
   parseLocalTokenUsageSummaryOutput,
@@ -266,6 +273,13 @@ function shouldLogAgentObserverWarning(count: number): boolean {
 
 /** Agent/collaboration request facade; it does not start or stop the JSON-RPC process. */
 export class CoreServerAgentApi extends CoreServerStorageApi {
+  requestWorkflows(input: WorkflowRequest): Promise<WorkflowResponse> {
+    const request = parseWorkflowRequest(input)
+    return this.rpc
+      .request<unknown, WorkflowRequest>(WORKFLOW_REQUEST_METHOD, request)
+      .then(parseWorkflowResponse)
+  }
+
   private readonly agentObserverWarningCounts = new Map<string, number>()
 
   private warnAgentObserverEvent(

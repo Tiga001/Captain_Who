@@ -41,6 +41,8 @@ fixture 和测试为准。
 
 ## 子系统
 
+[工作流定义与画布编辑](subsystems/workflow-authoring.md) 说明工作流第一阶段的节点、连线规则、草稿校验与持久化边界。
+
 [账号登录与云端资料](subsystems/account-login.md) 说明启动蒙版、会话存储、退出登录不影响任务的边界，以及真实账号验收步骤。
 
 [本机 Token 活动与账号许可](subsystems/local-token-usage-and-license.md) 说明纯本机统计、24 小时许可缓存、开发库显式重置及云端先行部署的边界。

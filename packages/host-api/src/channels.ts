@@ -58,6 +58,7 @@ export const HOST_CHANNELS = {
     collaborationLocateConversation: 'host:agent.collaboration.locateConversation',
     collaborationTemplateCreate: 'host:agent.collaboration.templates.create',
     collaborationTemplateDelete: 'host:agent.collaboration.templates.delete',
+    workflows: 'host:agent.workflows.request',
     collaborationTemplateList: 'host:agent.collaboration.templates.list',
     collaborationTemplateSetEnabled: 'host:agent.collaboration.templates.setEnabled',
     collaborationTemplateSetProjectAssignment:

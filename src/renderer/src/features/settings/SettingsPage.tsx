@@ -20,6 +20,8 @@ import { ProfileSettingsPage } from './pages/ProfileSettingsPage'
 import { SkillsSettingsPage } from './pages/SkillsSettingsPage'
 import { UsageBillingSettingsPage } from './pages/UsageBillingSettingsPage'
 import { AgentTemplatesSettingsPage } from './pages/AgentTemplatesSettingsPage'
+import { WorkflowsSettingsPage } from './pages/WorkflowsSettingsPage'
+import { workflowText } from '../workflows/workflowText'
 import { SETTINGS_GROUPS, type SettingsPageId } from './settingsRegistry'
 import {
   buildSettingsSearchIndex,
@@ -56,6 +58,9 @@ function SettingsContent({
   onDeleteArchivedConversations,
   onDeleteConversation,
   onMcpDirtyChange,
+  onWorkflowDirtyChange,
+  onWorkflowEditorModeChange,
+  onWorkflowSavingChange,
   onSelectSettingsPage,
   onRemoveProject,
   onUnarchiveConversation,
@@ -72,6 +77,9 @@ function SettingsContent({
   onDeleteArchivedConversations: (conversationIds: string[]) => void
   onDeleteConversation: (conversationId: string) => void
   onMcpDirtyChange: (dirty: boolean) => void
+  onWorkflowDirtyChange: (dirty: boolean) => void
+  onWorkflowEditorModeChange: (editing: boolean) => void
+  onWorkflowSavingChange: (saving: boolean) => void
   onSelectSettingsPage: (page: SettingsPageId) => void
   onRemoveProject: (projectId: string) => Promise<boolean>
   onUnarchiveConversation: (conversationId: string) => void
@@ -125,6 +133,17 @@ function SettingsContent({
         initialProjectId={initialProjectId}
         onNavigateSettingsRoot={() => onSelectSettingsPage('general')}
         projects={projects}
+      />
+    )
+  }
+
+  if (activePage === 'workflows') {
+    return (
+      <WorkflowsSettingsPage
+        onNavigateSettingsRoot={() => onSelectSettingsPage('general')}
+        onEditorModeChange={onWorkflowEditorModeChange}
+        onDirtyChange={onWorkflowDirtyChange}
+        onSavingChange={onWorkflowSavingChange}
       />
     )
   }
@@ -410,13 +429,18 @@ export function SettingsPage({
   initialPage = 'general',
   uiPreferences
 }: SettingsPageProps) {
-  const { t } = useFrontendConfig()
+  const { t, language } = useFrontendConfig()
+  const workflowLabels = useMemo(() => workflowText(language), [language])
   const [activePage, setActivePage] = useState<SettingsPageId>(initialPage)
   const [browserEntryView, setBrowserEntryView] = useState<BrowserAutomationView | undefined>(
     initialBrowserView
   )
   const [browserPageRevision, setBrowserPageRevision] = useState(0)
   const [mcpDirty, setMcpDirty] = useState(false)
+  const [workflowEditing, setWorkflowEditing] = useState(false)
+  const [workflowDirty, setWorkflowDirty] = useState(false)
+  const [workflowSaving, setWorkflowSaving] = useState(false)
+  const workflowSavingRef = useRef(false)
   const [searchTarget, setSearchTarget] = useState<SettingsNavigationTarget | null>(null)
   const [locationStatus, setLocationStatus] = useState<'waiting' | 'context' | 'located'>('located')
   const searchRevision = useRef(0)
@@ -431,9 +455,25 @@ export function SettingsPage({
   const handleMcpDirtyChange = useCallback((dirty: boolean) => {
     setMcpDirty(dirty)
   }, [])
+  const handleWorkflowDirtyChange = useCallback((dirty: boolean) => {
+    setWorkflowDirty(dirty)
+  }, [])
+  const handleWorkflowEditorModeChange = useCallback((editing: boolean) => {
+    setWorkflowEditing(editing)
+  }, [])
+  const handleWorkflowSavingChange = useCallback((saving: boolean) => {
+    workflowSavingRef.current = saving
+    setWorkflowSaving(saving)
+    if (saving) setPendingNavigation(null)
+  }, [])
+  const workflowEditorVisible = activePage === 'workflows' && workflowEditing
 
   const requestPage = (page: SettingsPageId) => {
-    if (activePage === 'mcp' && mcpDirty && page !== activePage) {
+    if (activePage === 'workflows' && workflowSavingRef.current) return
+    if (
+      page !== activePage &&
+      ((activePage === 'mcp' && mcpDirty) || (activePage === 'workflows' && workflowDirty))
+    ) {
       setPendingNavigation({ type: 'page', page })
       return
     }
@@ -455,6 +495,7 @@ export function SettingsPage({
   }
 
   const requestSetting = (result: SettingsSearchResult) => {
+    if (activePage === 'workflows' && workflowSavingRef.current) return
     const target: SettingsNavigationTarget = {
       page: result.page,
       id: result.id,
@@ -463,7 +504,10 @@ export function SettingsPage({
       ancestorIds: result.ancestorIds,
       revision: ++searchRevision.current
     }
-    if (activePage === 'mcp' && mcpDirty && (target.page !== 'mcp' || target.view !== 'editor')) {
+    if (
+      (activePage === 'mcp' && mcpDirty && (target.page !== 'mcp' || target.view !== 'editor')) ||
+      (activePage === 'workflows' && workflowDirty && target.page !== 'workflows')
+    ) {
       setPendingNavigation({ type: 'setting', target })
       return
     }
@@ -471,7 +515,8 @@ export function SettingsPage({
   }
 
   const requestBack = () => {
-    if (activePage === 'mcp' && mcpDirty) {
+    if (activePage === 'workflows' && workflowSavingRef.current) return
+    if ((activePage === 'mcp' && mcpDirty) || (activePage === 'workflows' && workflowDirty)) {
       setPendingNavigation({ type: 'back' })
       return
     }
@@ -479,9 +524,11 @@ export function SettingsPage({
   }
 
   const confirmPendingNavigation = () => {
+    if (activePage === 'workflows' && workflowSavingRef.current) return
     const navigation = pendingNavigation
     setPendingNavigation(null)
     setMcpDirty(false)
+    setWorkflowDirty(false)
     if (!navigation) return
     if (navigation.type === 'back') {
       onBack()
@@ -509,7 +556,7 @@ export function SettingsPage({
         return rect.height > 0 && rect.width > 0 && style.visibility !== 'hidden'
       })
     const scrollTo = (element: HTMLElement) => {
-      if (!content.contains(element)) {
+      if (!content.contains(element) || workflowEditorVisible) {
         element.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'instant' })
         return
       }
@@ -561,9 +608,19 @@ export function SettingsPage({
       cancelAnimationFrame(frame)
       observer.disconnect()
     }
-  }, [activePage, searchTarget])
+  }, [activePage, searchTarget, workflowEditorVisible])
 
   useEffect(() => {
+    if (activePage !== 'workflows') {
+      setWorkflowEditing(false)
+      setWorkflowDirty(false)
+      workflowSavingRef.current = false
+      setWorkflowSaving(false)
+    }
+  }, [activePage])
+
+  useEffect(() => {
+    if (workflowSavingRef.current) return
     setActivePage(initialPage)
   }, [initialPage])
 
@@ -580,6 +637,7 @@ export function SettingsPage({
       className="settings-page"
       ref={pageRef}
       tabIndex={-1}
+      data-workflow-editor={workflowEditorVisible || undefined}
       data-native-font-smoothing={
         SUPPORTS_NATIVE_FONT_SMOOTHING && uiPreferences.nativeFontSmoothing ? 'true' : undefined
       }
@@ -601,12 +659,19 @@ export function SettingsPage({
         onBack={requestBack}
         onSelectPage={requestPage}
         onSelectSetting={requestSetting}
-        onClearSearch={() => setSearchTarget(null)}
+        onClearSearch={() => {
+          if (activePage !== 'workflows' || !workflowSavingRef.current) setSearchTarget(null)
+        }}
         target={searchTarget}
         locationStatus={locationStatus}
       />
 
-      <main className="settings-content" ref={contentRef} aria-label={t('settings.content')}>
+      <main
+        className={`settings-content${workflowEditorVisible ? ' settings-content--workflow-editor' : ''}`}
+        ref={contentRef}
+        aria-label={t('settings.content')}
+        aria-busy={(activePage === 'workflows' && workflowSaving) || undefined}
+      >
         <div className="settings-content__inner">
           <SettingsSearchNavigationProvider target={searchTarget}>
             <SettingsContent
@@ -616,6 +681,9 @@ export function SettingsPage({
               onDeleteArchivedConversations={onDeleteArchivedConversations}
               onDeleteConversation={onDeleteConversation}
               onMcpDirtyChange={handleMcpDirtyChange}
+              onWorkflowDirtyChange={handleWorkflowDirtyChange}
+              onWorkflowEditorModeChange={handleWorkflowEditorModeChange}
+              onWorkflowSavingChange={handleWorkflowSavingChange}
               onSelectSettingsPage={requestPage}
               onRemoveProject={onRemoveProject}
               onUnarchiveConversation={onUnarchiveConversation}
@@ -631,12 +699,22 @@ export function SettingsPage({
       </main>
       {pendingNavigation && (
         <ConfirmationDialog
-          cancelLabel={t('mcp.actions.cancel')}
-          confirmLabel={t('mcp.unsaved.discard')}
-          description={t('mcp.unsaved.description')}
+          cancelLabel={
+            activePage === 'workflows' ? workflowLabels('keep') : t('mcp.actions.cancel')
+          }
+          confirmLabel={
+            activePage === 'workflows' ? workflowLabels('discard') : t('mcp.unsaved.discard')
+          }
+          description={
+            activePage === 'workflows'
+              ? workflowLabels('discardDescription')
+              : t('mcp.unsaved.description')
+          }
           onCancel={() => setPendingNavigation(null)}
           onConfirm={confirmPendingNavigation}
-          title={t('mcp.unsaved.title')}
+          title={
+            activePage === 'workflows' ? workflowLabels('discardTitle') : t('mcp.unsaved.title')
+          }
         />
       )}
     </div>

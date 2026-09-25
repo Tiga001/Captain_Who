@@ -1,5 +1,15 @@
 // English UI translation strings.
 export const enUSTranslations = {
+  'settings.page.workflows': 'Workflows',
+  'workflows.editorTitle': 'Edit workflow',
+  'workflows.name': 'Name',
+  'workflows.description': 'Short description',
+  'workflows.background': 'Workflow background',
+  'workflows.structure': 'Edit workflow structure',
+  'workflows.templatesLoading': 'Loading subagent templates…',
+  'workflows.templatesLoadFailed': 'Could not load subagent templates. Retry to open workflows.',
+  'workflows.settingsTitle': 'Workflows',
+  'workflows.settingsDescription': 'Create and edit workflow graphs, nodes and flow rules.',
   'configuration.invalidContextCapacityTitle': 'Context window is too small',
   'configuration.invalidContextCapacity':
     '“{displayName}” was not saved. The {contextWindowTokens}-token window cannot fit the output reserve ({reservedOutputTokens}) and safety margin ({safetyMarginTokens}), leaving no input space. Adjust the window to your model’s actual supported capacity before saving. If a larger window is unsupported, choose another model or adjust the provider settings. Your edits are preserved.',

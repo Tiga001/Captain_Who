@@ -1,5 +1,7 @@
 # Captain Who
 
+简体中文 | [English](README.en.md)
+
 Captain Who 是一个本地优先的桌面 AI 工作助手。界面由 Electron、React 和 TypeScript 构建，Agent、工具执行与本地存储由 Rust Core 负责。
 
 ## 下载与源码

@@ -57,6 +57,7 @@ export function createAgentIpcBridge(ipcRenderer: AgentIpcRenderer): AgentHostAp
       ipcRenderer.invoke(HOST_CHANNELS.agent.collaborationLoadObserverConversation, input),
     listCollaborationEvents: (input) =>
       ipcRenderer.invoke(HOST_CHANNELS.agent.collaborationListEvents, input),
+    requestWorkflows: (input) => ipcRenderer.invoke(HOST_CHANNELS.agent.workflows, input),
     listAgentTemplates: (input) =>
       ipcRenderer.invoke(HOST_CHANNELS.agent.collaborationTemplateList, input),
     createAgentTemplate: (input) =>

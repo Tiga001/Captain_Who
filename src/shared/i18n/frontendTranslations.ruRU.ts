@@ -1,5 +1,16 @@
 // Russian UI translation strings.
 export const ruRUTranslations = {
+  'settings.page.workflows': 'Рабочие процессы',
+  'workflows.editorTitle': 'Изменить рабочий процесс',
+  'workflows.name': 'Название',
+  'workflows.description': 'Краткое описание',
+  'workflows.background': 'Контекст рабочего процесса',
+  'workflows.structure': 'Изменить структуру рабочего процесса',
+  'workflows.templatesLoading': 'Загрузка шаблонов субагентов…',
+  'workflows.templatesLoadFailed':
+    'Не удалось загрузить шаблоны субагентов. Повторите попытку, чтобы открыть рабочие процессы.',
+  'workflows.settingsTitle': 'Workflows',
+  'workflows.settingsDescription': 'Create and edit workflow graphs, nodes and flow rules.',
   'configuration.invalidContextCapacityTitle': 'Недостаточное окно контекста',
   'configuration.invalidContextCapacity':
     '«{displayName}» не сохранена. Окно в {contextWindowTokens} токенов не вмещает резерв вывода ({reservedOutputTokens}) и запас безопасности ({safetyMarginTokens}), не оставляя места для ввода. Перед сохранением укажите фактически поддерживаемое моделью окно. Если большее окно не поддерживается, выберите другую модель или измените настройки провайдера. Ваши правки сохранены.',

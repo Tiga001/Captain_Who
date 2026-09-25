@@ -100,6 +100,9 @@ export function registerAgentIpc(
   ipcMain.handle(HOST_CHANNELS.agent.collaborationListEvents, (_event, input) =>
     captureHostInvocation(() => coreServer.listCollaborationEvents(input))
   )
+  ipcMain.handle(HOST_CHANNELS.agent.workflows, (_event, input) =>
+    captureHostInvocation(() => coreServer.requestWorkflows(input))
+  )
   ipcMain.handle(HOST_CHANNELS.agent.collaborationTemplateList, (_event, input) =>
     captureHostInvocation(() => coreServer.listAgentTemplates(input))
   )

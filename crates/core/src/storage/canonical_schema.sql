@@ -6795,3 +6795,16 @@ CREATE TABLE local_token_usage_days (
     token_count TEXT NOT NULL,
     unreported_request_count INTEGER NOT NULL CHECK (unreported_request_count >= 0)
 ) STRICT;
+
+-- Workflow authoring definitions, schema v54. Runtime execution is not stored here.
+CREATE TABLE workflow_definitions (
+    workflow_id TEXT PRIMARY KEY CHECK (length(workflow_id) BETWEEN 1 AND 256),
+    definition_json TEXT NOT NULL CHECK (
+        length(CAST(definition_json AS BLOB)) <= 2000000 AND
+        json_valid(definition_json) AND json_type(definition_json) = 'object' AND
+        json_extract(definition_json, '$.schemaVersion') IS 1 AND
+        json_extract(definition_json, '$.id') IS workflow_id
+    ),
+    revision INTEGER NOT NULL CHECK (revision BETWEEN 1 AND 9007199254740991),
+    updated_at INTEGER NOT NULL CHECK (updated_at >= 0)
+) STRICT;

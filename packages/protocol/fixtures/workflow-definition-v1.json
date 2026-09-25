@@ -1,0 +1,122 @@
+{
+  "schemaVersion": 1,
+  "id": "workflow-review",
+  "name": "Develop and review",
+  "description": "Implement then review; send findings back for revision.",
+  "background": "Deliver a reviewed implementation.",
+  "nodes": [
+    {
+      "id": "implement",
+      "name": "implement",
+      "templateId": null,
+      "modelConfigId": null,
+      "receives": "Receive the current task and previous result.",
+      "task": "Complete the assigned step and report evidence.",
+      "delivers": "Deliver the result to the selected outgoing flow.",
+      "inputRule": {
+        "mode": "one",
+        "min": 1,
+        "max": 1,
+        "required": [],
+        "groups": []
+      },
+      "outputRule": {
+        "mode": "all",
+        "min": 1,
+        "max": 1,
+        "required": [],
+        "groups": []
+      },
+      "x": 240,
+      "y": 180
+    },
+    {
+      "id": "review",
+      "name": "review",
+      "templateId": null,
+      "modelConfigId": null,
+      "receives": "Receive the current task and previous result.",
+      "task": "Complete the assigned step and report evidence.",
+      "delivers": "Deliver the result to the selected outgoing flow.",
+      "inputRule": {
+        "mode": "all",
+        "min": 1,
+        "max": 1,
+        "required": [],
+        "groups": []
+      },
+      "outputRule": {
+        "mode": "one",
+        "min": 1,
+        "max": 1,
+        "required": [],
+        "groups": []
+      },
+      "x": 560,
+      "y": 180
+    }
+  ],
+  "flows": [
+    {
+      "id": "entry",
+      "name": "entry",
+      "source": {
+        "kind": "boundary"
+      },
+      "target": {
+        "kind": "node",
+        "nodeId": "implement"
+      }
+    },
+    {
+      "id": "submit",
+      "name": "submit",
+      "source": {
+        "kind": "node",
+        "nodeId": "implement"
+      },
+      "target": {
+        "kind": "node",
+        "nodeId": "review"
+      }
+    },
+    {
+      "id": "revise",
+      "name": "revise",
+      "source": {
+        "kind": "node",
+        "nodeId": "review"
+      },
+      "target": {
+        "kind": "node",
+        "nodeId": "implement"
+      }
+    },
+    {
+      "id": "deliver",
+      "name": "deliver",
+      "source": {
+        "kind": "node",
+        "nodeId": "review"
+      },
+      "target": {
+        "kind": "boundary"
+      }
+    }
+  ],
+  "viewport": {
+    "x": 0,
+    "y": 0,
+    "zoom": 1
+  },
+  "boundaryPositions": {
+    "input": {
+      "x": -40,
+      "y": 180
+    },
+    "output": {
+      "x": 1024,
+      "y": 180
+    }
+  }
+}

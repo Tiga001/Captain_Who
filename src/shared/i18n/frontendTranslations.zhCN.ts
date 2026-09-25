@@ -1,5 +1,15 @@
 // Simplified Chinese UI translation strings.
 export const zhCNTranslations = {
+  'settings.page.workflows': '工作流',
+  'workflows.editorTitle': '编辑工作流',
+  'workflows.name': '名称',
+  'workflows.description': '简短描述',
+  'workflows.background': '工作流公共背景',
+  'workflows.structure': '编辑工作流结构',
+  'workflows.templatesLoading': '正在加载子智能体模板…',
+  'workflows.templatesLoadFailed': '子智能体模板加载失败，请重试后打开工作流。',
+  'workflows.settingsTitle': '工作流',
+  'workflows.settingsDescription': '创建和编辑工作流图、节点与连线规则。',
   'configuration.invalidContextCapacityTitle': '上下文窗口不足',
   'configuration.invalidContextCapacity':
     '模型「{displayName}」尚未保存：总窗口为 {contextWindowTokens} tokens，输出预留为 {reservedOutputTokens}，安全余量为 {safetyMarginTokens}，没有可用的输入空间。请按模型实际支持的上下文窗口调整后再保存；若不支持更大的窗口，请更换模型或调整厂商设置。编辑内容已保留。',

@@ -1,5 +1,15 @@
 // Traditional Chinese UI translation strings.
 export const zhTWTranslations = {
+  'settings.page.workflows': '工作流程',
+  'workflows.editorTitle': '編輯工作流程',
+  'workflows.name': '名稱',
+  'workflows.description': '簡短描述',
+  'workflows.background': '工作流程公共背景',
+  'workflows.structure': '編輯工作流程結構',
+  'workflows.templatesLoading': '正在載入子智能體範本…',
+  'workflows.templatesLoadFailed': '子智能體範本載入失敗，請重試後開啟工作流程。',
+  'workflows.settingsTitle': '工作流程',
+  'workflows.settingsDescription': '建立與編輯工作流程圖、節點與連線規則。',
   'configuration.invalidContextCapacityTitle': '上下文視窗不足',
   'configuration.invalidContextCapacity':
     '模型「{displayName}」尚未儲存：總視窗為 {contextWindowTokens} tokens，輸出預留為 {reservedOutputTokens}，安全餘量為 {safetyMarginTokens}，沒有可用的輸入空間。請按模型實際支援的上下文視窗調整後再儲存；若不支援更大的視窗，請更換模型或調整廠商設定。編輯內容已保留。',

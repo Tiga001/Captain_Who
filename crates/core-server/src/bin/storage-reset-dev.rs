@@ -867,6 +867,10 @@ fn canonical_schema_v47() -> String {
     // Reconstruct the pinned catalog rather than letting later collaboration, mailbox or
     // folder-reference changes silently alter the old configuration-schema comparison.
     let canonical = include_str!("../../../core/src/storage/canonical_schema.sql");
+    let canonical = canonical
+        .split_once("-- Workflow authoring definitions, schema v54.")
+        .expect("workflow authoring schema suffix")
+        .0;
     let collaboration_start = canonical
         .find("CREATE TABLE agent_collaboration_events (")
         .unwrap();
@@ -3228,7 +3232,8 @@ mod tests {
         );
         connection
             .execute_batch(
-                "DROP TRIGGER project_agent_collaboration_event_activities;
+                "DROP TABLE workflow_definitions;
+             DROP TRIGGER project_agent_collaboration_event_activities;
              DROP TRIGGER validate_agent_collaboration_event_activity_insert;
              DROP TRIGGER prevent_agent_collaboration_event_activity_update;
              DROP TRIGGER prevent_agent_collaboration_event_activity_delete;

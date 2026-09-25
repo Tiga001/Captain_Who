@@ -48,11 +48,11 @@ describe('settings definitions as the shared rendering and search source', () =>
     expect(build([])).toEqual({ markup: '', index: [] })
   })
 
-  it('indexes all 12 page definitions without mounting their components', () => {
+  it('indexes all 13 page definitions without mounting their components', () => {
     const pages = SETTINGS_GROUPS.flatMap((group) => group.items)
-    expect(pages).toHaveLength(12)
+    expect(pages).toHaveLength(13)
     const index = buildSettingsSearchIndex(pages, t)
-    expect(new Set(index.map((entry) => entry.page)).size).toBe(12)
+    expect(new Set(index.map((entry) => entry.page)).size).toBe(13)
     expect(
       searchSettings(index, '审批').some((entry) => entry.id === 'general.autoApproveCommands')
     ).toBe(true)
@@ -62,6 +62,27 @@ describe('settings definitions as the shared rendering and search source', () =>
     expect(searchSettings(index, '提问').some((entry) => entry.page === 'personalization')).toBe(
       true
     )
+  })
+
+  it('places workflows beside subagents and targets its own library and editor', () => {
+    const pages = SETTINGS_GROUPS.flatMap((group) => group.items)
+    const agentIndex = pages.findIndex((page) => page.id === 'agentTemplates')
+    expect(pages[agentIndex + 1].id).toBe('workflows')
+    const index = buildSettingsSearchIndex(pages, t)
+    const workflows = index.filter((entry) => entry.page === 'workflows')
+    expect(workflows.find((entry) => entry.id === 'workflows-list')).toMatchObject({
+      view: 'workflows',
+      path: ['工作流']
+    })
+    expect(workflows.find((entry) => entry.id === 'workflow-background')).toMatchObject({
+      view: 'editor',
+      prerequisiteId: 'workflows-list'
+    })
+    expect(
+      index
+        .filter((entry) => entry.page === 'agentTemplates')
+        .some((entry) => entry.id.startsWith('workflow'))
+    ).toBe(false)
   })
 
   it('uses translated titles, descriptions, options and paths with stable ranked matching', () => {

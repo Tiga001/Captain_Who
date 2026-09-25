@@ -1,3 +1,4 @@
+import type { WorkflowRequest, WorkflowResponse } from '@mycopilot/protocol'
 import type { LicenseHostApi } from './license'
 import type { UpdateHostApi } from './updates'
 export * from './updates'
@@ -629,6 +630,7 @@ export interface WorkspaceFilesHostApi {
 }
 
 export interface AgentHostApi {
+  requestWorkflows(input: WorkflowRequest): Promise<HostInvocationResult<WorkflowResponse>>
   onPromptPreferencesChanged(handler: (event: AgentPromptPreferencesChanged) => void): () => void
   getCollaborationSettings(
     input: AgentCollaborationSettingsGetInput

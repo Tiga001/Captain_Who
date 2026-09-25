@@ -19,6 +19,7 @@ mod skills_rpc;
 mod storage_root;
 #[cfg(test)]
 mod tests;
+mod workflow_rpc;
 
 pub(crate) use agent_rpc::*;
 pub(crate) use automation_rpc::*;
@@ -35,3 +36,4 @@ pub(crate) use request_loop::*;
 pub(crate) use rpc::*;
 pub(crate) use skills_rpc::*;
 pub(crate) use storage_root::*;
+pub(crate) use workflow_rpc::*;

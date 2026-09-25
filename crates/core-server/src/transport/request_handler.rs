@@ -21,6 +21,7 @@ pub(crate) fn handle_request(
     }
 
     match request.method.as_str() {
+        "agent.workflows.request" => handle_workflow_request(storage, request),
         CORE_PING_METHOD => handle_core_ping(request.id, request.params),
         mycopilot_protocol_rs::CORE_SET_EXECUTION_ACCESS_METHOD => {
             let input = match parse_params::<mycopilot_protocol_rs::SetExecutionAccessInput>(

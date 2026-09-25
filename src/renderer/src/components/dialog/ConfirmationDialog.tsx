@@ -10,6 +10,7 @@ interface ConfirmationDialogProps {
   confirmLabel: string
   confirmVariant?: ConfirmationDialogVariant
   description?: string
+  descriptionClassName?: string
   dialogRole?: 'alertdialog' | 'dialog'
   fallbackFocusRef?: RefObject<HTMLElement | null>
   onCancel: () => void
@@ -24,6 +25,7 @@ export function ConfirmationDialog({
   confirmLabel,
   confirmVariant = 'danger',
   description,
+  descriptionClassName,
   dialogRole = 'dialog',
   fallbackFocusRef,
   onCancel,
@@ -138,7 +140,11 @@ export function ConfirmationDialog({
           <X aria-hidden="true" />
         </button>
         <h2 id={titleId}>{title}</h2>
-        {description && <p id={descriptionId}>{description}</p>}
+        {description && (
+          <p id={descriptionId} className={descriptionClassName}>
+            {description}
+          </p>
+        )}
         <div className="app-confirm-dialog__actions">
           {showCancelButton && (
             <button

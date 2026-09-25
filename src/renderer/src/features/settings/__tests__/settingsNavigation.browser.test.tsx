@@ -11,7 +11,10 @@ import '../../../styles/global.css'
 const mocks = vi.hoisted(() => ({
   update: vi.fn(),
   configurationMounts: 0,
-  revealConfiguration: undefined as (() => void) | undefined
+  revealConfiguration: undefined as (() => void) | undefined,
+  workflowMounts: 0,
+  workflowSave: vi.fn(),
+  setWorkflowState: undefined as ((editing: boolean, dirty: boolean) => void) | undefined
 }))
 vi.mock('../../../config/FrontendConfigProvider', async () => {
   const { getTranslation } = await import('../../../config/frontendTranslations')
@@ -181,6 +184,69 @@ vi.mock('../../mcp/BrowserAutomationSettingsPage', () => ({
 vi.mock('../pages/EnvironmentSettingsPage', () => ({ EnvironmentSettingsPage: () => null }))
 vi.mock('../pages/SkillsSettingsPage', () => ({ SkillsSettingsPage: () => null }))
 vi.mock('../pages/AgentTemplatesSettingsPage', () => ({ AgentTemplatesSettingsPage: () => null }))
+vi.mock('../pages/WorkflowsSettingsPage', async () => {
+  const { useEffect, useState } = await import('react')
+  return {
+    WorkflowsSettingsPage: ({
+      onEditorModeChange,
+      onDirtyChange,
+      onSavingChange
+    }: {
+      onEditorModeChange?: (editing: boolean) => void
+      onDirtyChange?: (dirty: boolean) => void
+      onSavingChange?: (saving: boolean) => void
+    }) => {
+      const [saveFailed, setSaveFailed] = useState(false)
+      useEffect(() => {
+        mocks.workflowMounts += 1
+        mocks.setWorkflowState = (editing, dirty) => {
+          onEditorModeChange?.(editing)
+          onDirtyChange?.(dirty)
+        }
+        return () => {
+          mocks.setWorkflowState = undefined
+          onEditorModeChange?.(false)
+          onDirtyChange?.(false)
+          onSavingChange?.(false)
+        }
+      }, [onEditorModeChange, onDirtyChange, onSavingChange])
+      return (
+        <article style={{ height: '100%', minHeight: 0 }}>
+          <header
+            style={{
+              height: 64,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'flex-end'
+            }}
+          >
+            <button
+              type="button"
+              onClick={() => {
+                const pending = mocks.workflowSave() as Promise<void> | undefined
+                if (!pending) return
+                setSaveFailed(false)
+                onSavingChange?.(true)
+                void pending
+                  .then(() => onDirtyChange?.(false))
+                  .catch(() => setSaveFailed(true))
+                  .finally(() => onSavingChange?.(false))
+              }}
+            >
+              保存工作流导航测试
+            </button>
+          </header>
+          <h1>工作流</h1>
+          {saveFailed ? <p role="alert">保存失败，草稿仍在</p> : null}
+          <textarea aria-label="工作流草稿内容" defaultValue="尚未保存的工作流" />
+          <section data-setting-id="workflows-list" />
+          <section data-setting-id="workflow-background">公共背景</section>
+          <section data-setting-id="workflow-structure">结构</section>
+        </article>
+      )
+    }
+  }
+})
 vi.mock('../pages/ArchivedConversationsSettingsPage', () => ({
   ArchivedConversationsSettingsPage: () => null
 }))
@@ -222,13 +288,14 @@ async function key(value: string, isComposing = false) {
 }
 async function setup(initialPage: SettingsPageId = 'general') {
   const changed = vi.fn()
+  const back = vi.fn()
   const screen = await render(
     <div style={getFrontendCssVariables()}>
       <SettingsPage
         initialPage={initialPage}
         conversations={[]}
         projects={[]}
-        onBack={vi.fn()}
+        onBack={back}
         onDeleteArchivedConversations={vi.fn()}
         onDeleteConversation={vi.fn()}
         onRemoveProject={vi.fn(async () => true)}
@@ -239,17 +306,172 @@ async function setup(initialPage: SettingsPageId = 'general') {
     </div>
   )
   await frames()
-  return { screen, changed }
+  return { screen, changed, back }
 }
 
 beforeEach(async () => {
   mocks.configurationMounts = 0
   mocks.revealConfiguration = undefined
+  mocks.workflowMounts = 0
+  mocks.workflowSave.mockReset()
+  mocks.setWorkflowState = undefined
   mocks.update.mockClear()
   await page.viewport(1200, 600)
 })
 
 describe('settings sidebar search navigation', () => {
+  it('keeps a pending workflow save mounted across page, search and back navigation attempts', async () => {
+    let rejectSave!: (reason: Error) => void
+    const pendingSave = new Promise<void>((_resolve, reject) => {
+      rejectSave = reject
+    })
+    mocks.workflowSave.mockReturnValueOnce(pendingSave)
+    const { back } = await setup('workflows')
+    await act(async () => mocks.setWorkflowState?.(true, true))
+    await page.getByRole('textbox', { name: '工作流草稿内容' }).fill('保存中不能丢失')
+    await page.getByRole('button', { name: '保存工作流导航测试', exact: true }).click()
+    expect(content().getAttribute('aria-busy')).toBe('true')
+    await page.getByRole('button', { name: t('settings.page.profile'), exact: true }).click()
+    await page.getByRole('button', { name: t('settings.backToApp'), exact: true }).click()
+    await search().fill(t('auth.email'))
+    await click(result(t('auth.email'), t('settings.page.profile')))
+    expect(rightPage()).toBe('工作流')
+    expect(mocks.workflowMounts).toBe(1)
+    expect(back).not.toHaveBeenCalled()
+    expect(document.querySelector('[role="dialog"]')).toBeNull()
+    await act(async () => rejectSave(new Error('Save rejected')))
+    await expect.element(page.getByRole('alert')).toHaveTextContent('保存失败，草稿仍在')
+    expect(content().hasAttribute('aria-busy')).toBe(false)
+    await expect
+      .element(page.getByRole('textbox', { name: '工作流草稿内容' }))
+      .toHaveValue('保存中不能丢失')
+    await click(result(t('auth.email'), t('settings.page.profile')))
+    await expect.element(page.getByRole('dialog', { name: '放弃未保存的修改？' })).toBeVisible()
+    await page.getByText('继续编辑', { exact: true }).click()
+    await expect.element(page.getByRole('alert')).toHaveTextContent('保存失败，草稿仍在')
+    expect(rightPage()).toBe('工作流')
+  })
+
+  it('keeps native workflow header controls clickable beside the responsive sidebar drag region', async () => {
+    await setup('workflows')
+    // The app installs this alias at its document root; this fixture scopes theme
+    // tokens to a wrapper instead, so model the native titlebar explicitly.
+    document
+      .querySelector<HTMLElement>('.settings-page')!
+      .style.setProperty('--titlebar-height', '38px')
+    await act(async () => mocks.setWorkflowState?.(true, false))
+    for (const width of [1200, 700]) {
+      await page.viewport(width, 600)
+      await frames()
+      const drag = document.querySelector<HTMLElement>('.settings-page__drag-region')!
+      const sidebar = document.querySelector<HTMLElement>('.settings-nav')!
+      expect(
+        Math.abs(drag.getBoundingClientRect().right - sidebar.getBoundingClientRect().right)
+      ).toBeLessThan(1)
+      const save = page.getByRole('button', { name: '保存工作流导航测试', exact: true })
+      const buttonBounds = save.element().getBoundingClientRect()
+      const center = {
+        x: buttonBounds.left + buttonBounds.width / 2,
+        y: buttonBounds.top + buttonBounds.height / 2
+      }
+      expect(center.y).toBeLessThan(drag.getBoundingClientRect().bottom)
+      expect(document.elementFromPoint(center.x, center.y)).toBe(save.element())
+      await save.click()
+    }
+    expect(mocks.workflowSave).toHaveBeenCalledTimes(2)
+    await act(async () => mocks.setWorkflowState?.(false, false))
+    expect(document.querySelector('.settings-page')!.hasAttribute('data-workflow-editor')).toBe(
+      false
+    )
+    expect(
+      document.querySelector<HTMLElement>('.settings-page__drag-region')!.getBoundingClientRect()
+        .width
+    ).toBe(700)
+  })
+
+  it('uses the whole settings content only while the workflow editor is visible', async () => {
+    await setup('workflows')
+    const inner = content().querySelector<HTMLElement>('.settings-content__inner')!
+    expect(getComputedStyle(inner).maxWidth).toBe('1220px')
+    expect(getComputedStyle(inner).paddingTop).not.toBe('0px')
+    await act(async () => mocks.setWorkflowState?.(true, false))
+    expect(content().classList.contains('settings-content--workflow-editor')).toBe(true)
+    expect(getComputedStyle(content()).overflowY).toBe('hidden')
+    expect(getComputedStyle(inner).maxWidth).toBe('none')
+    expect(getComputedStyle(inner).padding).toBe('0px')
+    expect(
+      Math.abs(inner.getBoundingClientRect().height - content().getBoundingClientRect().height)
+    ).toBeLessThan(1)
+    await act(async () => mocks.setWorkflowState?.(false, false))
+    expect(content().classList.contains('settings-content--workflow-editor')).toBe(false)
+    expect(getComputedStyle(inner).maxWidth).toBe('1220px')
+  })
+
+  it('guards leaving a dirty workflow by sidebar page and back-to-app navigation', async () => {
+    const { back } = await setup('workflows')
+    await act(async () => mocks.setWorkflowState?.(true, true))
+    await page.getByRole('textbox', { name: '工作流草稿内容' }).fill('保留我的工作流')
+    await page.getByRole('button', { name: t('settings.page.profile'), exact: true }).click()
+    await expect.element(page.getByRole('dialog', { name: '放弃未保存的修改？' })).toBeVisible()
+    await page.getByText('继续编辑', { exact: true }).click()
+    expect(rightPage()).toBe('工作流')
+    await expect
+      .element(page.getByRole('textbox', { name: '工作流草稿内容' }))
+      .toHaveValue('保留我的工作流')
+    expect(content().classList.contains('settings-content--workflow-editor')).toBe(true)
+    await page.getByRole('button', { name: t('settings.page.profile'), exact: true }).click()
+    await page.getByRole('button', { name: '放弃修改', exact: true }).click()
+    expect(rightPage()).toBe(t('settings.page.profile'))
+    expect(content().classList.contains('settings-content--workflow-editor')).toBe(false)
+    await page.getByRole('button', { name: '工作流', exact: true }).click()
+    await act(async () => mocks.setWorkflowState?.(true, true))
+    await page.getByRole('button', { name: t('settings.backToApp'), exact: true }).click()
+    expect(back).not.toHaveBeenCalled()
+    await page.getByText('继续编辑', { exact: true }).click()
+    await page.getByRole('button', { name: t('settings.backToApp'), exact: true }).click()
+    await page.getByRole('button', { name: '放弃修改', exact: true }).click()
+    expect(back).toHaveBeenCalledOnce()
+  })
+
+  it('preserves a workflow draft for internal search targets and guards an external target', async () => {
+    await setup('workflows')
+    await act(async () => mocks.setWorkflowState?.(true, true))
+    await page.getByRole('textbox', { name: '工作流草稿内容' }).fill('不能丢失')
+    await search().fill(t('workflows.structure'))
+    await click(result(t('workflows.structure'), '工作流'))
+    expect(document.querySelector('[role="dialog"]')).toBeNull()
+    expect(mocks.workflowMounts).toBe(1)
+    await expect
+      .element(page.getByRole('textbox', { name: '工作流草稿内容' }))
+      .toHaveValue('不能丢失')
+    await search().fill(t('workflows.background'))
+    await click(result(t('workflows.background'), '工作流'))
+    expect(document.querySelector('[role="dialog"]')).toBeNull()
+    expect(mocks.workflowMounts).toBe(1)
+    await search().fill(t('auth.email'))
+    await click(result(t('auth.email'), t('settings.page.profile')))
+    await page.getByText('继续编辑', { exact: true }).click()
+    await expect
+      .element(page.getByRole('textbox', { name: '工作流草稿内容' }))
+      .toHaveValue('不能丢失')
+    await click(result(t('auth.email'), t('settings.page.profile')))
+    await page.getByRole('button', { name: '放弃修改', exact: true }).click()
+    expect(rightPage()).toBe(t('settings.page.profile'))
+    expect(result(t('auth.email'), t('settings.page.profile')).getAttribute('aria-current')).toBe(
+      'location'
+    )
+  })
+
+  it('opens workflows as a separate peer page and routes its search result there', async () => {
+    await setup('profile')
+    await page.getByRole('button', { name: '工作流', exact: true }).click()
+    expect(rightPage()).toBe('工作流')
+    await search().fill('工作流')
+    await click(result('工作流', '工作流'))
+    expect(rightPage()).toBe('工作流')
+    expect(result('工作流', '工作流').getAttribute('aria-current')).toBe('location')
+  })
+
   it('finds a setting on an unvisited page without switching or saving while typing', async () => {
     const { changed } = await setup('profile')
     const original = content().innerHTML

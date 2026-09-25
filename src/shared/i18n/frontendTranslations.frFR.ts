@@ -1,5 +1,16 @@
 // French UI translation strings.
 export const frFRTranslations = {
+  'settings.page.workflows': 'Flux de travail',
+  'workflows.editorTitle': 'Modifier le flux de travail',
+  'workflows.name': 'Nom',
+  'workflows.description': 'Description courte',
+  'workflows.background': 'Contexte du flux de travail',
+  'workflows.structure': 'Modifier la structure du flux de travail',
+  'workflows.templatesLoading': 'Chargement des modèles de sous-agents…',
+  'workflows.templatesLoadFailed':
+    'Impossible de charger les modèles de sous-agents. Réessayez pour ouvrir les flux de travail.',
+  'workflows.settingsTitle': 'Workflows',
+  'workflows.settingsDescription': 'Create and edit workflow graphs, nodes and flow rules.',
   'configuration.invalidContextCapacityTitle': 'Fenêtre de contexte insuffisante',
   'configuration.invalidContextCapacity':
     '« {displayName} » n’a pas été enregistré. La fenêtre de {contextWindowTokens} tokens ne couvre pas la réserve de sortie ({reservedOutputTokens}) et la marge de sécurité ({safetyMarginTokens}) : aucun espace d’entrée ne reste. Réglez la fenêtre selon la capacité réelle du modèle avant d’enregistrer. Si une fenêtre plus grande n’est pas prise en charge, choisissez un autre modèle ou ajustez les paramètres du fournisseur. Vos modifications sont conservées.',

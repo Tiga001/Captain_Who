@@ -83,6 +83,7 @@ mod provider_transitions;
 mod settings;
 mod trace_reconciliation;
 mod turn_diffs;
+mod workflows;
 mod world_state;
 
 use attachments::*;

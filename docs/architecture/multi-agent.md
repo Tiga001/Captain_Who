@@ -261,7 +261,7 @@ v53 的 `agent_collaboration_event_activities` 保存新活动明细，旧外层
 
 ## 8. Schema
 
-当前 canonical storage 是 **v53**。唯一真源：
+当前 canonical storage 是 **v54**。唯一真源：
 
 ```rust
 pub const STORAGE_SCHEMA_VERSION: i32 = 53;
@@ -269,7 +269,7 @@ pub const STORAGE_SCHEMA_VERSION: i32 = 53;
 
 当前 Runtime checkpoint 为 **v19**，拒绝旧版本 checkpoint；v19 使用源文件夹的 World State 模型 patch 投影，旧检查点中的整体替换文本不做兼容转换。此前模型协作身份变更也不转换含旧 Agent ID 的聊天、上下文或 checkpoint。
 
-v51 引入父会话位置，v52 移除 Mailbox 正文字节上限，v53 增加按任务派发者归属的活动明细。空库原子创建 v53；exact v52 原样保留消息、事件、回执和序号，仅新增明细结构，不回填历史。exact v51 先保留数据升级 v52，再升 v53；exact v50 须协作事件日志为空，依次升 v51、v52、v53。v50 仍有旧日志时返回 `development_storage_schema_reset_required`，不自动删除历史。v49 及更早版本、未知 schema、fingerprint 不匹配和外键违规同样拒绝升级；release runner 标为 canonical v53。
+v51 引入父会话位置，v52 移除 Mailbox 正文字节上限，v53 增加按任务派发者归属的活动明细，v54 增加工作流定义表。空库原子创建 v54；exact v53 原样保留历史增加工作流定义表；exact v52 原样保留消息、事件、回执和序号，仅新增明细结构，不回填历史。exact v51 先保留数据升级 v52，再升 v53、v54；exact v50 须协作事件日志为空，依次升 v51、v52、v53、v54。v50 仍有旧日志时返回 `development_storage_schema_reset_required`，不自动删除历史。v49 及更早版本、未知 schema、fingerprint 不匹配和外键违规同样拒绝升级；release runner 标为 canonical v54。
 
 ## 9. 代码真源
 
@@ -325,5 +325,5 @@ pnpm exec vitest run --project browser src/renderer/src/features/agentCollaborat
 - [ ] 新 UI 状态是否来自持久 semantic event，而不是模型文本或时间戳？
 - [ ] 新 tree-shared 资源是否只从 Host-resolved root identity 授权，并覆盖 root/child/sibling 与跨树/普通 Conversation 负向测试？
 - [ ] 各层 Timeline 是否按实际 owner 和任务身份展示，排除未消费任务与纯 Result 轮次，并保持冻结位置及当前树隔离？
-- [ ] 是否更新 schema v53 后继版本、fingerprint、迁移/reset、双语言 fixture 和 release gate？
+- [ ] 是否更新 schema v54 后继版本、fingerprint、迁移/reset、双语言 fixture 和 release gate？
 - [ ] 是否同步更新当前文档；历史轮次只在 archive 中追加注释？

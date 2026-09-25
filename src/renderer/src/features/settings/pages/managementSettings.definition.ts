@@ -160,6 +160,33 @@ export const agentCollaborationSettingsNodes = defineSettingsNodes([
     view: 'templates'
   }
 ])
+export const workflowFormSettings = defineSettingsNodes([
+  { id: 'workflow-name', title: 'workflows.name' },
+  { id: 'workflow-description', title: 'workflows.description' },
+  { id: 'workflow-background', title: 'workflows.background' },
+  { id: 'workflow-structure', title: 'workflows.structure' }
+])
+export const workflowEditorSettings = defineSettingsNodes([
+  {
+    id: 'workflows-editor',
+    searchable: true,
+    title: 'workflows.editorTitle',
+    view: 'editor',
+    prerequisiteId: 'workflows-list',
+    children: workflowFormSettings
+  }
+])
+export const workflowLibrarySettings = defineSettingsNodes([
+  {
+    id: 'workflows-list',
+    searchable: true,
+    title: 'workflows.settingsTitle',
+    description: 'workflows.settingsDescription',
+    view: 'workflows',
+    children: workflowEditorSettings
+  }
+])
+export const workflowSettings = defineSettingsNodes([...workflowLibrarySettings])
 export const agentTemplateSettings = defineSettingsNodes([
   ...agentCollaborationSettingsNodes,
   ...agentTemplateCreateSettings,

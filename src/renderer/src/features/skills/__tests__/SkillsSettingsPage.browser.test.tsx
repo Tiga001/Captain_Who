@@ -71,6 +71,9 @@ vi.mock('../../settings/pages/AppearanceSettingsPage', () => ({
 vi.mock('../../settings/pages/AgentTemplatesSettingsPage', () => ({
   AgentTemplatesSettingsPage: () => <div>agent-templates-page</div>
 }))
+vi.mock('../../settings/pages/WorkflowsSettingsPage', () => ({
+  WorkflowsSettingsPage: () => <div>workflows-page</div>
+}))
 vi.mock('../../settings/pages/ArchivedConversationsSettingsPage', () => ({
   ArchivedConversationsSettingsPage: () => <div>archived-page</div>
 }))
@@ -420,7 +423,8 @@ describe('Skills settings navigation and management inventory', () => {
       'settings.page.skills',
       'settings.nav.mcp',
       'settings.nav.browser',
-      'settings.page.agentTemplates'
+      'settings.page.agentTemplates',
+      'settings.page.workflows'
     ])
 
     await screen.getByRole('button', { name: 'settings.nav.browser' }).click()

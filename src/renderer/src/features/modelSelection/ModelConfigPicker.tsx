@@ -21,6 +21,7 @@ interface ModelConfigPickerProps {
   onChange: (modelConfigId: string) => void
   options: readonly ModelConfigPickerOption[]
   portalMenu?: boolean
+  popoverClassName?: string
   showSelectedCapability?: boolean
   title?: string
   value: string | null
@@ -39,6 +40,7 @@ export function ModelConfigPicker({
   onChange,
   options,
   portalMenu = false,
+  popoverClassName,
   showSelectedCapability = false,
   title,
   value,
@@ -191,7 +193,11 @@ export function ModelConfigPicker({
         <AnchoredPopover
           align="end"
           anchorRef={triggerRef}
-          className={variant === 'composer' ? 'chat-composer-menu-popover' : undefined}
+          className={
+            [variant === 'composer' ? 'chat-composer-menu-popover' : undefined, popoverClassName]
+              .filter(Boolean)
+              .join(' ') || undefined
+          }
           enabled={portalMenu}
           matchAnchorWidth={variant === 'settings'}
           onClose={closeMenu}
