@@ -24,7 +24,3 @@ export function toSafeMcpDisplayText(value: string, maximumCodePoints = 4096): s
 
   return output
 }
-
-export function shortMcpFingerprint(value: string): string {
-  return toSafeMcpDisplayText(value.slice(0, 12), 12)
-}

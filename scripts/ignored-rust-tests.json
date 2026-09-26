@@ -93,7 +93,7 @@
       "runner": "pnpm test:multi-agent-release"
     },
     {
-      "file": "crates/core-server/src/application/mcp/managed_playwright_bridge.rs",
+      "file": "crates/core-server/src/application/mcp/managed_playwright_bridge/tests.rs",
       "name": "managed_playwright_official_electron_e2e",
       "owner": "playwright-runtime",
       "reason": "Requires the managed Playwright Electron fixture wrapper.",

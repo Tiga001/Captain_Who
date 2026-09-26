@@ -75,13 +75,13 @@ const FLAT_WIRE_REJECTION_ALLOWANCE: CurrentSemanticAllowance = CurrentSemanticA
 /// occurrence cannot hide behind a directory-level exception.
 const CURRENT_FILE_WRITE_RISK_ALLOWLIST: &[CurrentSemanticAllowance] = &[
     CurrentSemanticAllowance {
-        file: "crates/core/src/office/types.rs",
+        file: "crates/core/src/office/types/operations.rs",
         line_marker: "OfficeOperationAccess::FileWrite",
         expected_occurrences: 1,
         reason: "Office mutations and render outputs retain their current write-risk classification.",
     },
     CurrentSemanticAllowance {
-        file: "crates/core/src/office/types.rs",
+        file: "crates/core/src/office/types/operations.rs",
         line_marker: "    FileWrite,",
         expected_occurrences: 1,
         reason: "OfficeOperationAccess names the current Office write-risk variant.",

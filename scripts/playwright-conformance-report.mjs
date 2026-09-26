@@ -139,7 +139,7 @@ const RELEASE_GATES = Object.freeze([
     scope: 'Approve-success, approve-failure, reject, reject-with-reason, races, and expiry.',
     execution: 'not_recorded_in_source_control',
     evidence: [
-      'crates/core-server/src/application/mcp/builtin_capability_runtime.rs',
+      'crates/core-server/src/application/mcp/builtin_capability_runtime/tests.rs',
       'src/renderer/src/app/__tests__/BuiltinMcpToolApprovalCard.browser.test.tsx'
     ]
   },
@@ -603,13 +603,13 @@ export async function buildPlaywrightConformanceReport(options = {}) {
           scenario: 'activation_idle_reactivation',
           iterations: 100,
           evidence:
-            'crates/core-server/src/application/mcp/managed_playwright_bridge.rs > idle_policy_reuses_one_timer_and_reactivates_for_one_hundred_cycles'
+            'crates/core-server/src/application/mcp/managed_playwright_bridge/tests.rs > idle_policy_reuses_one_timer_and_reactivates_for_one_hundred_cycles'
         },
         {
           scenario: 'approve_reject_race',
           iterations: 1,
           evidence:
-            'crates/core-server/src/application/mcp/builtin_capability_runtime.rs > approve_reject_race_has_exactly_one_terminal_authority'
+            'crates/core-server/src/application/mcp/builtin_capability_runtime/tests.rs > approve_reject_race_has_exactly_one_terminal_authority'
         },
         {
           scenario: 'cdp_child_attachment_storm',

@@ -1,8 +1,4 @@
-import type {
-  McpServerDetailsView,
-  McpServerStateView,
-  McpToolSummaryView
-} from '@mycopilot/protocol'
+import type { McpServerDetailsView, McpServerStateView } from '@mycopilot/protocol'
 import { describe, expect, it, vi } from 'vitest'
 import { render } from 'vitest-browser-react'
 
@@ -14,13 +10,10 @@ vi.mock('../../../config/FrontendConfigProvider', () => ({
   useFrontendConfig: () => ({ language: 'en-US', t: translated.t })
 }))
 
-const [{ McpServerDetail }, { McpServerEditor }, { McpServerList }, { McpToolCatalog }] =
-  await Promise.all([
-    import('../McpServerDetail'),
-    import('../McpServerEditor'),
-    import('../McpServerList'),
-    import('../McpToolCatalog')
-  ])
+const [{ McpServerEditor }, { McpServerList }] = await Promise.all([
+  import('../McpServerEditor'),
+  import('../McpServerList')
+])
 
 const SERVER_ID = '11111111-1111-4111-8111-111111111111'
 
@@ -269,103 +262,49 @@ describe('MCP Server list', () => {
   })
 })
 
-describe('MCP Server details', () => {
-  it('fails closed for an out-of-range safe integer timestamp', async () => {
-    const screen = await render(
-      <McpServerDetail
-        onBack={vi.fn()}
-        onDelete={vi.fn()}
-        onEdit={vi.fn()}
-        onRetry={vi.fn()}
-        onSetEnabled={vi.fn()}
-        server={server({
-          createdAtMs: Number.MAX_SAFE_INTEGER,
-          updatedAtMs: Number.MAX_SAFE_INTEGER
-        })}
-      />
-    )
-    await screen.getByText('mcp.detail.technicalDetails').click()
-    await expect.element(screen.getByText('—').first()).toBeVisible()
-  })
-
-  it('keeps internal identities behind technical details', async () => {
-    const current = server()
-    const screen = await render(
-      <McpServerDetail
-        onBack={vi.fn()}
-        onDelete={vi.fn()}
-        onEdit={vi.fn()}
-        onRetry={vi.fn()}
-        onSetEnabled={vi.fn()}
-        server={current}
-      />
-    )
-    await expect.element(screen.getByText(current.serverId)).not.toBeVisible()
-    expect(screen.getByRole('button', { name: 'mcp.actions.authorizeLaunch' }).query()).toBeNull()
-    await screen.getByText('mcp.detail.technicalDetails').click()
-    await expect.element(screen.getByText(current.serverId)).toBeVisible()
-  })
-})
-
-describe('MCP Catalog safe presentation', () => {
+describe('MCP Server list safe presentation', () => {
   it('renders hostile Server text only as stripped plain text', async () => {
-    const hostile = '<img src=x onerror=fixed-canary>\u202e\u0000safe'
-    const tool: McpToolSummaryView = {
-      serverId: SERVER_ID,
-      rawName: hostile,
-      modelName: 'model-name',
-      routable: false,
-      disabled: true,
-      schemaDigestPrefix: 'abcdefabcdef',
-      description: hostile,
-      descriptionTruncated: false,
-      diagnosticCodes: ['<script>fixed-canary</script>'],
-      catalogGeneration: 1,
-      catalogCompleteness: 'partial'
-    }
+    const hostile = '<img src=x onerror=fixed-canary>\u202e\u0000safe<script>canary</script>'
     const screen = await render(
-      <McpToolCatalog
-        catalog={{
-          catalogCompleteness: 'partial',
-          catalogGeneration: 1,
-          errorMessage: null,
-          isRefreshing: false,
-          status: 'ready',
-          tools: [tool]
-        }}
-        onLoad={vi.fn()}
-        onLoadMore={vi.fn()}
-        onRefresh={vi.fn()}
+      <McpServerList
+        onEdit={vi.fn()}
+        onSetEnabled={vi.fn()}
+        pendingOperations={new Map()}
+        servers={[server({ displayName: hostile })]}
       />
     )
+
     await expect
-      .element(screen.getByText('<img src=x onerror=fixed-canary>safe').first())
+      .element(screen.getByText('<img src=x onerror=fixed-canary>safe<script>canary</script>'))
       .toBeVisible()
     expect(screen.container.querySelector('img')).toBeNull()
     expect(screen.container.querySelector('script')).toBeNull()
-    expect(screen.container.textContent).not.toContain('\u202e')
-    expect(screen.container.textContent).not.toContain('\u0000')
+    expect(screen.container.innerHTML).not.toContain('\u202e')
+    expect(screen.container.innerHTML).not.toContain('\u0000')
   })
 
-  it('never places a Host cursor in the DOM', async () => {
-    const cursor = 'fixed-cursor-canary-must-not-cross'
+  it('keeps internal identities and runtime details out of the DOM', async () => {
+    const current = server({
+      createdAtMs: Number.MAX_SAFE_INTEGER,
+      updatedAtMs: Number.MAX_SAFE_INTEGER
+    })
     const screen = await render(
-      <McpToolCatalog
-        catalog={{
-          catalogCompleteness: 'complete',
-          catalogGeneration: 1,
-          errorMessage: null,
-          isRefreshing: false,
-          nextCursor: cursor,
-          status: 'ready',
-          tools: []
-        }}
-        onLoad={vi.fn()}
-        onLoadMore={vi.fn()}
-        onRefresh={vi.fn()}
+      <McpServerList
+        onEdit={vi.fn()}
+        onSetEnabled={vi.fn()}
+        pendingOperations={new Map()}
+        servers={[current]}
       />
     )
-    expect(screen.container.textContent).not.toContain(cursor)
-    expect(screen.container.innerHTML).not.toContain(cursor)
+
+    for (const value of [
+      current.serverId,
+      current.configDigest,
+      current.configEpoch,
+      String(Number.MAX_SAFE_INTEGER)
+    ]) {
+      expect(screen.container.textContent).not.toContain(value)
+      expect(screen.container.innerHTML).not.toContain(value)
+    }
   })
 })

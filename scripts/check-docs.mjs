@@ -306,7 +306,7 @@ if (
 }
 
 const automationProtocolSource = readFileSync(
-  path.join(repositoryRoot, 'packages/protocol/src/automations.ts'),
+  path.join(repositoryRoot, 'packages/protocol/src/automations/constants.ts'),
   'utf8'
 )
 const automationSchemaVersion = /AUTOMATION_SCHEMA_VERSION\s*=\s*(\d+)/.exec(
@@ -331,7 +331,9 @@ const rustAutomationFacts = {
 }
 const automationDocument = path.join(docsRoot, 'subsystems/scheduled-automations.md')
 if (!automationSchemaVersion || !automationPermissionModeVersion || !automationErrorCode) {
-  failures.push('packages/protocol/src/automations.ts: could not read Automation protocol versions')
+  failures.push(
+    'packages/protocol/src/automations/constants.ts: could not read Automation protocol versions'
+  )
 } else {
   const automationMarkdown = readFileSync(automationDocument, 'utf8')
   for (const expected of [
@@ -404,7 +406,10 @@ const protocolVersionGroups = [
     label: 'Browser data schema',
     sources: [
       ['packages/protocol/src/browserData.ts', /BROWSER_DATA_SCHEMA_VERSION\s*=\s*(\d+)/],
-      ['crates/core/src/storage/models.rs', /BROWSER_DATA_SCHEMA_VERSION:\s*u32\s*=\s*(\d+)/]
+      [
+        'crates/core/src/storage/models/browser.rs',
+        /BROWSER_DATA_SCHEMA_VERSION:\s*u32\s*=\s*(\d+)/
+      ]
     ],
     documents: [
       [
@@ -418,7 +423,10 @@ const protocolVersionGroups = [
     label: 'Browser download schema',
     sources: [
       ['packages/protocol/src/browserDownloads.ts', /BROWSER_DOWNLOAD_SCHEMA_VERSION\s*=\s*(\d+)/],
-      ['crates/core/src/storage/models.rs', /BROWSER_DOWNLOAD_SCHEMA_VERSION:\s*u32\s*=\s*(\d+)/]
+      [
+        'crates/core/src/storage/models/browser.rs',
+        /BROWSER_DOWNLOAD_SCHEMA_VERSION:\s*u32\s*=\s*(\d+)/
+      ]
     ],
     documents: [
       ['docs/subsystems/browser-automation.md', (version) => `协议 v${version} 的 durable 引用`],
