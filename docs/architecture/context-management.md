@@ -53,8 +53,10 @@ assistant public narration
 Tool Call + Tool Result      # 一个不可拆分闭环
 ...
 assistant final message
-trace terminal record
+trace terminal record        # 可选，后端状态通道
 ```
+
+Trace 终态记录（`historical_agent_activity_terminal`）以后端状态通道进入上下文，发送时是包在 `<backend_observed_state>` 中的 user 侧内容，不以 Assistant 身份出现；以 Assistant 身份回放时，模型会把它当作自己的回复格式并在最终回复末尾仿写。正常完成、无错误且 Trace 未截断的轮次省略该记录；失败、取消、截断或最终正文为空时保留，后者用它作为恢复无可见正文 Provider Turn 的排序锚点。
 
 消息位置和 Trace sequence 决定顺序，不能只按墙钟时间拼接。运行中的 narration 与已闭合 Tool Result 可先持久化；活动 Trace 只允许在尾部暂存一个用于审批/恢复的 open Tool Call，该调用不进入已闭合 model-context 前缀或压缩边界。最终助手消息和 Trace 终态在同一持久边界结算。
 

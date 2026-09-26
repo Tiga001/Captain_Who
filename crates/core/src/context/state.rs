@@ -5,9 +5,9 @@
 //! baseline.
 
 use super::{
-    ContextAssembler, ContextCapacityDetector, ContextFrame, ContextItem, ContextMetadata,
-    ContextOrigin, ContextRetention, ContextScope, ContextSource, ConversationTimingTracker,
-    ConversationTraceRenderer, MeasuredContextBaseline,
+    terminal_record_needed, ContextAssembler, ContextCapacityDetector, ContextFrame, ContextItem,
+    ContextMetadata, ContextOrigin, ContextRetention, ContextScope, ContextSource,
+    ConversationTimingTracker, ConversationTraceRenderer, MeasuredContextBaseline,
 };
 use crate::llm::LlmMessageRole;
 use crate::protocol::{
@@ -657,10 +657,12 @@ impl AgentConversationContextState {
             items: Vec::new(),
             ..trace.clone()
         };
-        if let Some(terminal_item) =
-            ConversationTraceRenderer::render(&terminal_only)?.terminal_item
-        {
-            self.frame.push(terminal_item);
+        if terminal_record_needed(trace, assistant_content) {
+            if let Some(terminal_item) =
+                ConversationTraceRenderer::render(&terminal_only)?.terminal_item
+            {
+                self.frame.push(terminal_item);
+            }
         }
         for item in
             ConversationTraceRenderer::render_with_model_context(trace, model_context_items)?

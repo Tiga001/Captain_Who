@@ -256,6 +256,8 @@ fn encrypted_ordinary_provider_turn_replaces_visible_history_projection() {
     assert!(!checkpoint_json.contains("ordinary-private-reasoning-canary"));
 }
 
+const TERMINAL_RECORD: &str = r#"{"recordType":"historical_agent_activity_terminal"}"#;
+
 #[test]
 fn encrypted_ordinary_provider_turn_binds_to_terminal_message_not_trace_text() {
     let profile = ProviderProfileConfig::deepseek_flash_default();
@@ -310,15 +312,13 @@ fn encrypted_ordinary_provider_turn_binds_to_terminal_message_not_trace_text() {
             )),
         ),
         ContextItem::new(
-            LlmMessage::text(
-                LlmMessageRole::Assistant,
-                "Historical agent activity terminal record",
-            ),
+            LlmMessage::backend_state(TERMINAL_RECORD),
             ContextMetadata::new(
                 ContextSource::ConversationTrace,
                 ContextScope::Conversation,
                 ContextRetention::Retained,
             )
+            .with_source(ContextSource::BackendState)
             .with_origin(ContextOrigin::conversation_message(
                 "assistant-terminal-owner",
             )),
@@ -340,10 +340,7 @@ fn encrypted_ordinary_provider_turn_binds_to_terminal_message_not_trace_text() {
         "provider final answer"
     );
     assert!(restored_turn.provider_continuation().is_some());
-    assert_eq!(
-        restored[2].content(),
-        "Historical agent activity terminal record"
-    );
+    assert_eq!(restored[2].content(), TERMINAL_RECORD);
 }
 
 #[test]
@@ -374,15 +371,13 @@ fn encrypted_empty_final_provider_turn_is_inserted_before_terminal_audit() {
         .unwrap();
 
     let mut frame = ContextFrame::new(vec![ContextItem::new(
-        LlmMessage::text(
-            LlmMessageRole::Assistant,
-            "Historical agent activity terminal record",
-        ),
+        LlmMessage::backend_state(TERMINAL_RECORD),
         ContextMetadata::new(
             ContextSource::ConversationTrace,
             ContextScope::Conversation,
             ContextRetention::Retained,
         )
+        .with_source(ContextSource::BackendState)
         .with_origin(ContextOrigin::conversation_message(
             "assistant-empty-terminal",
         )),
@@ -400,10 +395,7 @@ fn encrypted_empty_final_provider_turn_is_inserted_before_terminal_audit() {
     let restored_turn = restored[0].assistant_turn().unwrap();
     assert_eq!(restored_turn.visible_text(), "");
     assert!(restored_turn.provider_continuation().is_some());
-    assert_eq!(
-        restored[1].content(),
-        "Historical agent activity terminal record"
-    );
+    assert_eq!(restored[1].content(), TERMINAL_RECORD);
     let checkpoint_json = serde_json::to_string(&frame.checkpoint_items().unwrap()).unwrap();
     assert!(!checkpoint_json.contains("empty-terminal-private-reasoning-canary"));
 }

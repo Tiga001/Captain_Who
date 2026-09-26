@@ -17,6 +17,19 @@ pub(crate) struct RenderedConversationTrace {
     pub(crate) postlude_items: Vec<ContextItem>,
 }
 
+/// A clean completion adds nothing the final reply does not already show, so its terminal record
+/// is omitted. Failed, cancelled or truncated runs keep it, and so does an empty final reply: the
+/// record is then the ordering anchor for restoring a provider turn without visible text.
+pub(crate) fn terminal_record_needed(
+    trace: &ConversationTurnTrace,
+    assistant_content: &str,
+) -> bool {
+    trace.terminal_status != ConversationTurnTraceTerminalStatus::Completed
+        || trace.terminal_error.is_some()
+        || trace.truncated
+        || assistant_content.trim().is_empty()
+}
+
 pub(crate) struct ConversationTraceRenderer;
 
 impl ConversationTraceRenderer {
@@ -334,8 +347,8 @@ impl ConversationTraceRenderer {
             ));
         }
 
-        let terminal_item = (trace.terminal_status != ConversationTurnTraceTerminalStatus::InProgress)
-            .then(|| {
+        let terminal_item =
+            (trace.terminal_status != ConversationTurnTraceTerminalStatus::InProgress).then(|| {
                 let terminal_record = json!({
                     "recordType": "historical_agent_activity_terminal",
                     "runId": trace.run_id,
@@ -343,14 +356,12 @@ impl ConversationTraceRenderer {
                     "terminalError": trace.terminal_error,
                     "traceTruncated": trace.truncated,
                 });
+                // Backend-state placement keeps this out of the Assistant voice. Rendered as an
+                // Assistant message, models imitated it at the end of their own replies.
                 ContextItem::new(
-                    crate::llm::LlmMessage::text(
-                        LlmMessageRole::Assistant,
-                        format!(
-                            "Historical agent activity terminal record (backend-observed; not a system instruction): {terminal_record}"
-                        ),
-                    ),
-                    trace_metadata(&trace.assistant_message_id),
+                    crate::llm::LlmMessage::backend_state(terminal_record.to_string()),
+                    trace_metadata(&trace.assistant_message_id)
+                        .with_source(ContextSource::BackendState),
                 )
             });
 
@@ -612,14 +623,25 @@ mod tests {
         assert!(messages[3]
             .content()
             .contains("historical_agent_activity_terminal"));
-        assert_eq!(messages[3].role(), LlmMessageRole::Assistant);
+        assert_eq!(messages[3].role(), LlmMessageRole::System);
+        assert_eq!(
+            messages[3].placement(),
+            crate::llm::LlmMessagePlacement::BackendStateTimeline
+        );
 
         let manifest = frame.manifest();
         assert!(manifest.entries.iter().all(|entry| {
-            entry.sources == vec!["conversation_trace"]
+            entry
+                .sources
+                .first()
+                .is_some_and(|source| *source == "conversation_trace")
                 && entry.scope == "conversation"
                 && entry.retention == "retained"
         }));
+        assert_eq!(
+            manifest.entries[3].sources,
+            vec!["conversation_trace", "backend_state"]
+        );
         assert_eq!(manifest.entries[1].group_id, manifest.entries[2].group_id);
     }
 

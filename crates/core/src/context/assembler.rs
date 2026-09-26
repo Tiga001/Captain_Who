@@ -1,7 +1,7 @@
 use super::{
-    ContextCompactionSummary, ContextFrame, ContextGroup, ContextItem, ContextMetadata,
-    ContextOrigin, ContextRetention, ContextScope, ContextSource, ConversationTimingTracker,
-    ConversationTraceRenderer,
+    terminal_record_needed, ContextCompactionSummary, ContextFrame, ContextGroup, ContextItem,
+    ContextMetadata, ContextOrigin, ContextRetention, ContextScope, ContextSource,
+    ConversationTimingTracker, ConversationTraceRenderer,
 };
 use crate::llm::{LlmImage, LlmMessage, LlmMessageRole};
 use crate::protocol::{
@@ -201,7 +201,11 @@ impl ContextAssembler {
                 items.push(ContextItem::new(llm_message, metadata));
             }
             if let Some(trace) = trace {
-                if !terminal_already_covered {
+                let terminal_needed = message
+                    .conversation_turn_trace
+                    .as_ref()
+                    .is_some_and(|source| terminal_record_needed(source, &message.content));
+                if !terminal_already_covered && terminal_needed {
                     items.extend(trace.terminal_item);
                 }
                 items.extend(trace.postlude_items);

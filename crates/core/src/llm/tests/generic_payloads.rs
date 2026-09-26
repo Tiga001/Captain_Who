@@ -870,19 +870,15 @@ fn assembled_context_preserves_order_across_provider_payloads() {
         expected_timestamped_history
     );
     assert_eq!(openai["messages"][2]["content"], "Earlier answer");
-    assert!(openai["messages"][3]["content"]
-        .as_str()
-        .unwrap()
-        .contains("historical_agent_activity_terminal"));
     assert_eq!(
-        openai["messages"][4]["content"],
+        openai["messages"][3]["content"],
         expected_timestamped_current
     );
     assert_eq!(
-        openai["messages"][5]["tool_calls"][0]["id"],
+        openai["messages"][4]["tool_calls"][0]["id"],
         "call-context-1"
     );
-    assert_eq!(openai["messages"][6]["role"], "tool");
+    assert_eq!(openai["messages"][5]["role"], "tool");
 
     let anthropic = build_payload(&request(AgentApiStyle::AnthropicCompatible));
     assert_eq!(anthropic["system"], "System rules");
@@ -894,10 +890,13 @@ fn assembled_context_preserves_order_across_provider_payloads() {
         anthropic["messages"][1]["content"][0]["text"],
         "Earlier answer"
     );
-    assert!(anthropic["messages"][1]["content"][1]["text"]
-        .as_str()
-        .unwrap()
-        .contains("historical_agent_activity_terminal"));
+    assert_eq!(
+        anthropic["messages"][1]["content"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
     assert_eq!(
         anthropic["messages"][2]["content"][0]["text"],
         expected_timestamped_current
@@ -914,6 +913,12 @@ fn assembled_context_preserves_order_across_provider_payloads() {
 
 #[test]
 fn conversation_trace_builds_legal_ordered_tool_history_for_both_providers() {
+    let mut cancelled = traced_chat_message("The file is valid.");
+    cancelled
+        .conversation_turn_trace
+        .as_mut()
+        .unwrap()
+        .terminal_status = ConversationTurnTraceTerminalStatus::Cancelled;
     let context = ContextAssembler::assemble(ContextAssemblyInput {
         system_prompt: "System rules".to_string(),
         compaction_summary: None,
@@ -921,7 +926,7 @@ fn conversation_trace_builds_legal_ordered_tool_history_for_both_providers() {
         initial_run_world_state: None,
         messages: vec![
             chat_message("user", "Inspect the file"),
-            traced_chat_message("The file is valid."),
+            cancelled,
             chat_message("user", "What did you inspect?"),
         ],
         skill_discovery: None,
@@ -963,10 +968,11 @@ fn conversation_trace_builds_legal_ordered_tool_history_for_both_providers() {
         .unwrap()
         .contains("\"ok\""));
     assert_eq!(openai["messages"][5]["content"], "The file is valid.");
-    assert!(openai["messages"][6]["content"]
-        .as_str()
-        .unwrap()
-        .contains("historical_agent_activity_terminal"));
+    // The terminal record travels as backend-observed state, never in the Assistant voice.
+    assert_eq!(openai["messages"][6]["role"], "user");
+    let terminal = openai["messages"][6]["content"].as_str().unwrap();
+    assert!(terminal.starts_with("<backend_observed_state>"));
+    assert!(terminal.contains("\"terminalStatus\":\"cancelled\""));
     assert_eq!(openai["messages"][7]["content"], "What did you inspect?");
 
     let anthropic = build_payload(&request(AgentApiStyle::AnthropicCompatible));
@@ -996,12 +1002,20 @@ fn conversation_trace_builds_legal_ordered_tool_history_for_both_providers() {
         anthropic["messages"][3]["content"][0]["text"],
         "The file is valid."
     );
-    assert!(anthropic["messages"][3]["content"][1]["text"]
+    assert_eq!(
+        anthropic["messages"][3]["content"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(anthropic["messages"][4]["role"], "user");
+    assert!(anthropic["messages"][4]["content"][0]["text"]
         .as_str()
         .unwrap()
         .contains("historical_agent_activity_terminal"));
     assert_eq!(
-        anthropic["messages"][4]["content"][0]["text"],
+        anthropic["messages"][4]["content"][1]["text"],
         "What did you inspect?"
     );
 }

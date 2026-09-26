@@ -121,7 +121,7 @@ fn assert_request_private_replay(
     );
 }
 
-fn assert_empty_steer_preserves_terminal_audit(request: &Value) {
+fn assert_empty_steer_precedes_visible_final(request: &Value) {
     let messages = request
         .get("messages")
         .and_then(Value::as_array)
@@ -146,18 +146,6 @@ fn assert_empty_steer_preserves_terminal_audit(request: &Value) {
                     == Some("Apply the durable steer after this response.")
         })
         .expect("restart request must retain the exact durable guidance boundary");
-    let terminal_audit_index = messages
-        .iter()
-        .position(|message| {
-            message
-                .get("content")
-                .and_then(Value::as_str)
-                .is_some_and(|content| {
-                    content.contains("Historical agent activity terminal record")
-                })
-        })
-        .expect("restart request must retain the synthetic terminal audit owner");
-
     assert_eq!(messages[steer_index].get("content"), Some(&json!("")));
     assert_eq!(
         messages[final_index].get("content"),
@@ -165,10 +153,14 @@ fn assert_empty_steer_preserves_terminal_audit(request: &Value) {
     );
     assert_eq!(steer_index.checked_add(1), Some(guidance_index));
     assert!(guidance_index < final_index);
-    assert!(final_index < terminal_audit_index);
-    assert!(messages[terminal_audit_index]
-        .get("reasoning_content")
-        .is_none());
+    // The visible final reply owns the completed turn; no terminal record is replayed for it, and
+    // none may ever appear in an Assistant message.
+    assert!(!messages.iter().any(|message| {
+        message
+            .get("content")
+            .and_then(Value::as_str)
+            .is_some_and(|content| content.contains("historical_agent_activity_terminal"))
+    }));
 }
 
 fn durable_assistant_history(
@@ -565,8 +557,8 @@ async fn assert_moonshot_ordinary_recovery(family: MoonshotRecoveryFamily, empty
     assert_request_private_replay(&requests[2], 1, 1, 0);
     assert_request_private_replay(&requests[3], 1, 1, 0);
     if empty_visible {
-        assert_empty_steer_preserves_terminal_audit(&requests[2]);
-        assert_empty_steer_preserves_terminal_audit(&requests[3]);
+        assert_empty_steer_precedes_visible_final(&requests[2]);
+        assert_empty_steer_precedes_visible_final(&requests[3]);
     } else {
         assert!(serde_json::to_string(&requests[2])
             .unwrap()

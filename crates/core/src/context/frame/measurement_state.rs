@@ -692,7 +692,7 @@ impl ContextFrame {
         self.materialize_baseline();
         let (target_index, metadata, insert_before_target) = match projection {
             crate::ProviderContinuationProjection::ConversationMessage => {
-                // The trace renderer appends a synthetic terminal Assistant with the same
+                // The trace renderer may append a backend-state terminal record with the same
                 // ConversationMessage origin as the real final message. It is an audit boundary,
                 // never the owner of provider-native state.
                 let mut message_indices =
@@ -730,11 +730,9 @@ impl ContextFrame {
                     }
                     let mut terminal_indices =
                         self.items.iter().enumerate().filter_map(|(index, item)| {
-                            (item.message.role() == LlmMessageRole::Assistant
-                                && item
-                                    .metadata
-                                    .sources()
-                                    .contains(&ContextSource::ConversationTrace)
+                            let sources = item.metadata.sources();
+                            (sources.contains(&ContextSource::ConversationTrace)
+                                && sources.contains(&ContextSource::BackendState)
                                 && item.metadata.origin().is_some_and(|origin| {
                                     origin.kind() == ContextOriginKind::ConversationMessage
                                         && origin.journal_cursor().is_some_and(|cursor| {

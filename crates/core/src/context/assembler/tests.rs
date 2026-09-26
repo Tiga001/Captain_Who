@@ -281,27 +281,28 @@ fn assembles_ordered_context_with_provenance() {
     .unwrap();
 
     let messages = frame.to_messages();
-    assert_eq!(messages.len(), 6);
+    assert_eq!(messages.len(), 5);
     assert_eq!(messages[0].role(), LlmMessageRole::System);
     assert_eq!(messages[1].content(), "old question");
-    assert_eq!(messages[4].role(), LlmMessageRole::User);
-    assert_eq!(messages[4].content(), "current question");
-    assert_eq!(messages[5].content(), "attachment body");
-    assert_eq!(messages[5].images().len(), 1);
+    assert_eq!(messages[2].content(), "old answer");
+    assert_eq!(messages[3].role(), LlmMessageRole::User);
+    assert_eq!(messages[3].content(), "current question");
+    assert_eq!(messages[4].content(), "attachment body");
+    assert_eq!(messages[4].images().len(), 1);
 
     let manifest = frame.manifest();
     assert_eq!(manifest.entries[0].sources, vec!["backend_system_prompt"]);
     assert_eq!(manifest.entries[1].sources, vec!["conversation_history"]);
-    assert_eq!(manifest.entries[4].sources, vec!["current_turn"]);
-    assert_eq!(manifest.entries[4].scope, "conversation");
-    assert_eq!(manifest.entries[4].retention, "retained");
+    assert_eq!(manifest.entries[3].sources, vec!["current_turn"]);
+    assert_eq!(manifest.entries[3].scope, "conversation");
+    assert_eq!(manifest.entries[3].retention, "retained");
     assert_eq!(
-        manifest.entries[5].sources,
+        manifest.entries[4].sources,
         vec!["input_attachment", "run_bootstrap"]
     );
-    assert_eq!(manifest.entries[5].scope, "run");
-    assert_eq!(manifest.entries[5].retention, "retained");
-    assert_eq!(manifest.entries[5].image_base64_bytes, 3);
+    assert_eq!(manifest.entries[4].scope, "run");
+    assert_eq!(manifest.entries[4].retention, "retained");
+    assert_eq!(manifest.entries[4].image_base64_bytes, 3);
     let serialized = serde_json::to_string(&manifest).unwrap();
     assert!(!serialized.contains("current question"));
     assert!(!serialized.contains("attachment body"));
@@ -883,15 +884,15 @@ fn renders_timing_on_user_messages_without_decorating_assistant_history() {
     assert!(!messages[2]
         .content()
         .contains("<backend_conversation_timing>"));
-    assert!(messages[4].content().contains(&format!(
+    assert!(messages[3].content().contains(&format!(
         "previous_assistant_message_created_at: {}",
         crate::context::format_message_created_at(1_000).unwrap()
     )));
-    assert!(messages[4].content().contains(&format!(
+    assert!(messages[3].content().contains(&format!(
         "user_message_created_at: {}",
         crate::context::format_message_created_at(2_000).unwrap()
     )));
-    assert!(messages[4].content().ends_with("follow up"));
+    assert!(messages[3].content().ends_with("follow up"));
 }
 
 #[test]
@@ -969,6 +970,7 @@ fn assembles_conversation_trace_before_final_reply_and_terminal_before_next_user
 
     frame.validate_complete_tool_protocol().unwrap();
     let messages = frame.to_messages();
+    // The file content is redacted from the trace, so the truncated run keeps its terminal record.
     assert_eq!(messages.len(), 8);
     assert_eq!(messages[1].content(), "create a file");
     assert_eq!(messages[2].content(), "I will update the file.");
@@ -982,22 +984,29 @@ fn assembles_conversation_trace_before_final_reply_and_terminal_before_next_user
         Some(file_change_call.id.as_str())
     );
     assert_eq!(messages[5].content(), "Created src/new.rs.");
-    assert!(messages[6]
-        .content()
-        .contains("historical_agent_activity_terminal"));
-    assert!(messages[6]
-        .content()
-        .contains("\"terminalStatus\":\"completed\""));
+    assert_eq!(messages[6].role(), LlmMessageRole::System);
+    assert_eq!(
+        messages[6].placement(),
+        crate::llm::LlmMessagePlacement::BackendStateTimeline
+    );
+    let record: serde_json::Value = serde_json::from_str(messages[6].content()).unwrap();
+    assert_eq!(record["recordType"], "historical_agent_activity_terminal");
+    assert_eq!(record["terminalStatus"], "completed");
+    assert_eq!(record["traceTruncated"], true);
     assert_eq!(messages[7].role(), LlmMessageRole::User);
     assert_eq!(messages[7].content(), "what changed?");
 
     let manifest = frame.manifest();
-    for index in [2, 3, 4, 6] {
+    for index in [2, 3, 4] {
         assert_eq!(manifest.entries[index].sources, vec!["conversation_trace"]);
         assert_eq!(manifest.entries[index].scope, "conversation");
         assert_eq!(manifest.entries[index].retention, "retained");
     }
     assert_eq!(manifest.entries[5].sources, vec!["conversation_history"]);
+    assert_eq!(
+        manifest.entries[6].sources,
+        vec!["conversation_trace", "backend_state"]
+    );
     assert_eq!(manifest.entries[7].sources, vec!["current_turn"]);
 
     let checkpoint = frame.checkpoint_items().unwrap();
@@ -1006,6 +1015,59 @@ fn assembles_conversation_trace_before_final_reply_and_terminal_before_next_user
     assert_eq!(
         serde_json::to_value(frame.manifest()).unwrap(),
         serde_json::to_value(restored.manifest()).unwrap()
+    );
+}
+
+#[test]
+fn failed_run_terminal_record_is_backend_state_not_assistant_voice() {
+    let mut failed = traced_assistant("Partial answer.");
+    let trace = failed.conversation_turn_trace.as_mut().unwrap();
+    trace.terminal_status = ConversationTurnTraceTerminalStatus::Failed;
+    trace.terminal_error = Some("provider timeout".to_string());
+    let frame = ContextAssembler::assemble(ContextAssemblyInput {
+        system_prompt: "rules".to_string(),
+        compaction_summary: None,
+        world_state_records: Vec::new(),
+        initial_run_world_state: None,
+        messages: vec![
+            message("user", "create a file"),
+            failed,
+            message("user", "retry"),
+        ],
+        skill_discovery: None,
+        skill_activation: None,
+        attachments: ContextAttachments::default(),
+    })
+    .unwrap();
+
+    let messages = frame.to_messages();
+    assert_eq!(messages.len(), 8);
+    assert_eq!(messages[5].content(), "Partial answer.");
+    let terminal = &messages[6];
+    assert_eq!(terminal.role(), LlmMessageRole::System);
+    assert_eq!(
+        terminal.placement(),
+        crate::llm::LlmMessagePlacement::BackendStateTimeline
+    );
+    let record: serde_json::Value = serde_json::from_str(terminal.content()).unwrap();
+    assert_eq!(record["recordType"], "historical_agent_activity_terminal");
+    assert_eq!(record["terminalStatus"], "failed");
+    assert_eq!(record["terminalError"], "provider timeout");
+    assert!(!messages
+        .iter()
+        .any(|message| message.role() == LlmMessageRole::Assistant
+            && message
+                .content()
+                .contains("historical_agent_activity_terminal")));
+    assert_eq!(
+        frame.manifest().entries[6].sources,
+        vec!["conversation_trace", "backend_state"]
+    );
+
+    let restored = ContextFrame::from_checkpoint_items(frame.checkpoint_items().unwrap()).unwrap();
+    assert_eq!(
+        restored.to_messages()[6].placement(),
+        crate::llm::LlmMessagePlacement::BackendStateTimeline
     );
 }
 
